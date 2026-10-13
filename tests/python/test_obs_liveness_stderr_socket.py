@@ -19,7 +19,7 @@ WATCHDOG = REPO / "scripts" / "obs-liveness-watchdog.sh"
 
 def _fake_probe(tmp_path):
     p = tmp_path / "fake_probe.py"
-    p.write_text("import sys\nprint('HEALTHY strih-lx: activeFps=Some(30.0) avgRenderMs=Some(16.0) renderSkip=Some(0.0)')\n"
+    p.write_text("import sys\nprint('HEALTHY strih-snv: activeFps=Some(30.0) avgRenderMs=Some(16.0) renderSkip=Some(0.0)')\n"
                  "print('probe note on stderr', file=sys.stderr)\n")
     p.chmod(p.stat().st_mode | stat.S_IXUSR)
     return p
@@ -49,4 +49,4 @@ def test_the_probe_verdict_reaches_the_decision_when_stderr_is_a_socket(tmp_path
     b.close()
     assert "No such device or address" not in text, text
     assert "no verdict lines" not in text, text
-    assert "strih-lx" in text, text
+    assert "strih-snv" in text, text

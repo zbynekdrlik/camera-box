@@ -16,7 +16,7 @@ repository = "https://github.com/zbynekdrlik/camera-box"
 # resolver = "2" pins the SAME feature resolution the root edition-2021 package
 # already used standalone. A dedicated `bkshading` CI job builds/tests the members
 # (see .github/workflows/ci.yml); `cargo fmt --all` already covers them.
-# The strih-lx intercom hub (issue 1345) adds TWO more members: `intercom/vban` (the shared VBAN
+# The strih-snv intercom hub (issue 1345) adds TWO more members: `intercom/vban` (the shared VBAN
 # codec, moved OUT of src/vban.rs which is now a `pub use intercom_vban::*;` re-export — pure, only
 # `anyhow`, so the appliance dep tree is untouched) and `intercom/hub` (the mix-minus N-1 hub, its
 # OWN heavier deps: tokio/axum/toml). Like the bkshading members they have their OWN CI job
@@ -45,7 +45,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Shared VBAN codec (issue 1345 M1): the appliance's `src/vban.rs` re-exports this crate, so the
-# codec + its tests live in ONE place shared with the strih-lx intercom hub. Pure (only `anyhow`,
+# codec + its tests live in ONE place shared with the strih-snv intercom hub. Pure (only `anyhow`,
 # already a root dep), cross-platform — adds NO new transitive deps to the appliance.
 intercom-vban = { path = "intercom/vban" }
 

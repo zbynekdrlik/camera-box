@@ -1,7 +1,7 @@
 //! Guard for #1359 — the OBS CEF (obs-browser) runs on Linux with Chromium's
 //! `--password-store=basic`, so a boot-time auto-login never raises a GNOME keyring unlock dialog.
 //!
-//! Background (measured on strih-lx, 23.9.2026): auto-login does not unlock the login keyring, and
+//! Background (measured on strih-snv, 23.9.2026): auto-login does not unlock the login keyring, and
 //! the only items in it are Chromium's own (`Chrome Safe Storage Control`, `Chromium Safe Storage`).
 //! The browser sources start with OBS at login, Chromium's os_crypt asks libsecret for its storage
 //! key, the keyring is locked, and GNOME shows the unlock dialog on the operator screen. macOS

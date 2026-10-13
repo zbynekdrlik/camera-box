@@ -609,7 +609,7 @@ imag_build_drift_report() {
 # genlock_parity_consumed_paths LABEL [STRIH_LINUX] -> #949: the vendor/** paths whose content SHIPS in
 # LABEL's genlock build, mirrored 1:1 off the REAL CI trigger path filters so this table can never
 # silently drift out of sync with what actually rebuilds each platform:
-#   - "imag", and "strih" when STRIH_LINUX=1 (the strih-lx notebook ships the Linux build, issue 1372
+#   - "imag", and "strih" when STRIH_LINUX=1 (the strih-snv notebook ships the Linux build, issue 1372
 #     review) -> linux-genlock.yml's own `on.push.paths` (vendor/obs-studio/**,
 #                        vendor/distroav/** — deliberately NOT vendor/av-sync-dock, a Windows-only
 #                        OBS dock DLL imag never links against)
@@ -2097,7 +2097,7 @@ compare_observed() {
   local o_gl_build_sha="${26:-}" o_gl_build_rc="${27:-0}" o_gl_build_range="${28:-}"
   local o_gl_build_ahead="${29:-}" o_gl_build_on_dev="${30:-0}"
   # issue 1351 follow-up: strih_linux=1 (arg 31, opt-in — every historic --compare call omits it and
-  # is byte-identical) marks the box as a Linux strih (strih-lx). It ONLY gates the two mandatory
+  # is byte-identical) marks the box as a Linux strih (strih-snv). It ONLY gates the two mandatory
   # facets below that are genuinely Windows-only (ndi_runtime — parsed off a Windows OBS log signature;
   # distroav_dll_paths — a C:\ path scan): both are SKIPPED (loud, counted ok) instead of UNKNOWN when
   # this box reports no value for them. Every other facet in this function (obs_version/
@@ -2199,7 +2199,7 @@ compare_observed() {
       # obs.dll build SHA — the libobs core our genlock patches live in. The manifest must list it;
       # if it does not, the manifest is unusable for this check (UNKNOWN, never a false clean).
       if [ "$o_strih_linux" = "1" ]; then
-        # issue 1351 / 22.9.2026 release run 35767684040: a Linux strih (strih-lx) has no obs.dll --
+        # issue 1351 / 22.9.2026 release run 35767684040: a Linux strih (strih-snv) has no obs.dll --
         # its bundle is graded by the platform-agnostic genlock_build_sha parity + vendor-pin rows, so
         # the Windows obs.dll byte facet reads UNKNOWN there and refused a healthy rig. SKIP it, like
         # the other Windows-only facets, never UNKNOWN (an UNKNOWN box refuses the run).
@@ -2489,7 +2489,7 @@ main() {
   local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" o_plugin="" pair k v
   local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes="" o_burn="" o_src_latency=""
   local o_av_sync_calibrated_ms="" o_genlock_build_sha=""
-  # issue 1351 follow-up: strih_linux=1 marks the box as a Linux strih (strih-lx) -- compare_observed
+  # issue 1351 follow-up: strih_linux=1 marks the box as a Linux strih (strih-snv) -- compare_observed
   # SKIPS its two Windows-only mandatory facets (ndi_runtime, distroav_dll_paths) below. Any other
   # observed key (incl. the manifest-gated obs_dll_sha256/distroav_dll_sha256/genlock_capability
   # byte facets) is unaffected -- this key ONLY gates those two.
@@ -2518,7 +2518,7 @@ main() {
       genlock_source_latency) o_src_latency="$v" ;; # #357: per-source genlock held-latency CSV
       av_sync_calibrated_ms) o_av_sync_calibrated_ms="$v" ;; # #390: #427-persisted applied_latency_ms
       genlock_build_sha)  o_genlock_build_sha="$v" ;; # #548: deployed vendored-genlock commit (BUNDLE_MANIFEST.json .build_sha) — DYNAMIC staleness vs origin/main
-      strih_linux)        o_strih_linux="$v" ;; # issue 1351: strih is the Linux notebook (strih-lx) — skip its Windows-only facets
+      strih_linux)        o_strih_linux="$v" ;; # issue 1351: strih is the Linux notebook (strih-snv) — skip its Windows-only facets
       *)                  echo "WARN: ignoring unknown observed key '$k'" >&2 ;;
     esac
   done

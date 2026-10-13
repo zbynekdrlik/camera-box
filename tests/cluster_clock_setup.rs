@@ -43,7 +43,7 @@ fn read(rel: &str) -> String {
 /// refactor pointing dantesync at any OTHER server cannot satisfy this guard.
 #[test]
 fn setup_scripts_point_dantesync_at_the_cluster_master() {
-    // The venue strih's DNS name: strih-lx in SNV, strih-pp in Poprad.
+    // The venue strih's DNS name: strih-snv in SNV, strih-pp in Poprad.
     const MASTER: &str = "strih.lan";
     let script = "scripts/setup-device.sh";
     let body = read(script);

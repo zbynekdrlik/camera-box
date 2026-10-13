@@ -241,7 +241,7 @@ def test_a_janus_box_removes_a_leftover_credential_reset(tmp_path):
     d = tmp_path / "intercom-hub.service.d"
     d.mkdir()
     (d / CRED_DROPIN).write_text("[Service]\nLoadCredential=\n")
-    r = _bash('strih_box_load strih-lx || exit 9\nstrih_intercom_hub_cred_dropin_apply "$1"', d)
+    r = _bash('strih_box_load strih-snv || exit 9\nstrih_intercom_hub_cred_dropin_apply "$1"', d)
     assert r.returncode == 0, r.stderr
     assert not (d / CRED_DROPIN).exists()
 

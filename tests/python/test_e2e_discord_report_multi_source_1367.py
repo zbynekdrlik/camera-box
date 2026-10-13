@@ -1,4 +1,4 @@
-"""issue 1367 — a cambox window whose captured content is MULTI-SOURCE (cam2 filming the strih-lx
+"""issue 1367 — a cambox window whose captured content is MULTI-SOURCE (cam2 filming the strih-snv
 multiview) is judged by its node burn: recording-verdict.rs tags it
 `segments[].multi_source` and folds its copies/gaps, cadence and frozen_leg REPORT-ONLY. Both
 report renderings must name the window `multi-source (report-only by #1367 decision)` with its

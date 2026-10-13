@@ -291,9 +291,9 @@ def test_rollback_node_threads_the_role_and_the_restored_version_to_both_program
 def test_the_date_state_line_is_relayed_to_the_roll_log(tmp_path):
     out = f"x\r\n{_DATE_LINE}\r\ndantesync 1.14.0\r\n"
     (tmp_path / "out.txt").write_text(out)
-    r = _source(tmp_path, f'dantesync_rollback_date_state_note strih-lx "$(cat "{tmp_path / "out.txt"}")"; echo rc=$?')
-    assert r.stdout == f"[strih-lx] {_DATE_LINE}\nrc=0\n", repr(r.stdout)
-    r = _source(tmp_path, 'set -e; dantesync_rollback_date_state_note strih-lx ""; echo rc=$?')
+    r = _source(tmp_path, f'dantesync_rollback_date_state_note strih-snv "$(cat "{tmp_path / "out.txt"}")"; echo rc=$?')
+    assert r.stdout == f"[strih-snv] {_DATE_LINE}\nrc=0\n", repr(r.stdout)
+    r = _source(tmp_path, 'set -e; dantesync_rollback_date_state_note strih-snv ""; echo rc=$?')
     assert r.stdout == "rc=0\n", repr(r.stdout + r.stderr)
 
 
@@ -344,7 +344,7 @@ def test_roll_of_a_slave_that_fails_verify_rolls_back_without_touching_the_date_
 
 def test_date_role_is_the_ntp_master_the_way_verify_names_it(tmp_path):
     body = ("dantesync_date_role stream stream; echo\n"
-            "dantesync_date_role stream strih-lx; echo\n"
+            "dantesync_date_role stream strih-snv; echo\n"
             "dantesync_date_role stream ''; echo")
     r = _source(tmp_path, body)
     assert r.stdout.splitlines() == ["ntp-master", "slave", "slave"], r.stdout + r.stderr

@@ -1,5 +1,5 @@
 # issue 1386 -- the ONE declared file set of the :8899 bundle-state server tree: every file below
-# comes from scripts/ and is installed side by side, flat (/opt/camera-box on strih-lx and imag,
+# comes from scripts/ and is installed side by side, flat (/opt/camera-box on strih-snv and imag,
 # C:\ProgramData\camera-box on the Windows OBS boxes, which also need run-bundle-state-server.ps1 +
 # the local obs-ws-password.txt). One name per line; `#` lines and blank lines are comments.
 # The bash twin scripts/lib/bundle-state-files.sh carries the same list for setup-strih.sh and

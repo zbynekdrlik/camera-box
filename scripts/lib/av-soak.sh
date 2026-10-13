@@ -9,7 +9,7 @@
 #
 # Everything the soak DOES on the rig is an existing primitive (obs_phase2.py record/switch/
 # program-scene, obs_burn_filter.py, the issue-1271 rig-busy guard, the issue-830 lease, the
-# strih-lx + stream in-place decode wrappers, recording-verdict's merge). This file only holds:
+# strih-snv + stream in-place decode wrappers, recording-verdict's merge). This file only holds:
 #   - the slot/window arithmetic,
 #   - the remote TEXT of two READ-ONLY cam2 reads (the permanent painter's state + a tail of its
 #     QPSK marker log) -- cam2 is never written,
@@ -113,7 +113,7 @@ av_soak_unacked_cams() {
   printf '%s\n' "$out"
 }
 
-# av_soak_strih_decode_kill_cmd STAMP -> REMOTE (strih-lx) text stopping THIS run's recording-verdict
+# av_soak_strih_decode_kill_cmd STAMP -> REMOTE (strih-snv) text stopping THIS run's recording-verdict
 # strih extract only: the pattern also needs the run's own output name (av-soak-<STAMP>-s...), so
 # no other decode on the box is touched. The bracketed pattern never matches the remote shell's own
 # command line (the issue-626 pkill self-match gotcha). Ends with `;`.
@@ -136,7 +136,7 @@ av_soak_stream_decode_kill_ps() {
 # schedules), scoped to the run's stamp.
 av_soak_onbox_cleanup_lines() {
   local host="$1" sdir="$2" wdir="$3" stamp="$4"
-  printf "strih-lx ssh:         ssh <STRIH_USER>@%s \"rm -rf -- %s/av-soak-%s-*\"\n" "$host" "$sdir" "$stamp"
+  printf "strih-snv ssh:         ssh <STRIH_USER>@%s \"rm -rf -- %s/av-soak-%s-*\"\n" "$host" "$sdir" "$stamp"
   printf "win-stream-snv Shell: Remove-Item -Recurse -Force '%s'\n" \
     "$(av_soak_win_join "$wdir" "av-soak-${stamp}-*")"
 }
@@ -147,7 +147,7 @@ av_soak_win_join() {
 }
 
 # av_soak_strih_extract_argv OUTVAR DECODE_SCRIPT VERDICT_BIN REMOTE_OUT_DIR LOCAL_OUT_DIR REC
-#   CAPTURE_FPS PARTIAL_NAME -> fills the array OUTVAR with the strih-lx in-place extract call, the
+#   CAPTURE_FPS PARTIAL_NAME -> fills the array OUTVAR with the strih-snv in-place extract call, the
 # SAME shape recording-e2e.sh's run_strih_extract uses for a Linux strih. The --burn-*-run-id flags
 # are omitted on purpose: the soak deploys no camera capture burn, and the OBS measurement burns it
 # turns on (strih / stream) stamp the verdict's own default run ids -- the single source.

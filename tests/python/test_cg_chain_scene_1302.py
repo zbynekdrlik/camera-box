@@ -28,7 +28,7 @@ def _item(item_id, name, enabled):
     return {"sceneItemId": item_id, "sourceName": name, "sceneItemEnabled": enabled}
 
 
-# The live strih-lx collection shape (read 25.9.2026): CG-obs sits ONLY in "CG bridge", disabled,
+# The live strih-snv collection shape (read 25.9.2026): CG-obs sits ONLY in "CG bridge", disabled,
 # under an enabled CG-presenter browser overlay.
 STRIH_ITEMS = {
     "Cam 1": [_item(1, "Cam 1", True)],

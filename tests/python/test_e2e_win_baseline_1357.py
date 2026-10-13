@@ -88,35 +88,35 @@ def _assert_caller_survived(r):
 # --- the gather helper: every outcome is one line, never fatal ------------------------------------
 
 def test_ok_both_boxes_read_fill_the_array_in_facet_order(tmp_path):
-    seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt",
-                            "resolume": FIX / "ultimate_all_ok.txt"})
-    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt",
+                            "resolume-snv": FIX / "ultimate_all_ok.txt"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv resolume-snv"})
     _assert_caller_survived(r)
     out = tmp_path / "out"
-    assert _args(r) == ["--win-baseline", f"stream={out}/stream.txt",
-                        "--win-baseline", f"resolume={out}/resolume.txt"], r.stdout
+    assert _args(r) == ["--win-baseline", f"stream-snv={out}/stream-snv.txt",
+                        "--win-baseline", f"resolume-snv={out}/resolume-snv.txt"], r.stdout
     assert "ARGC=4" in r.stdout
-    assert (out / "stream.txt").read_bytes() == (FIX / "dup_high_performance_all_ok.txt").read_bytes()
+    assert (out / "stream-snv.txt").read_bytes() == (FIX / "dup_high_performance_all_ok.txt").read_bytes()
     v = _verdict(r)
     assert v.split("Windows OBS-box baseline: ", 1)[1].startswith("OK"), v
     assert "report-only" in v and "does NOT block" in v and "2 box gather(s)" in v, v
-    assert re.search(r"^\s+box=stream win_baseline=OK$", r.stdout, re.M), r.stdout
-    assert re.search(r"^\s+box=resolume win_baseline=OK$", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=stream-snv win_baseline=OK$", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=resolume-snv win_baseline=OK$", r.stdout, re.M), r.stdout
     assert (out / "win-baseline-check.log").is_file()
 
 
 def test_drift_rc20_is_one_line_and_never_fatal(tmp_path):
-    seam = _seam(tmp_path, {"stream": FIX / "stream_live_2026-09-27.txt",
-                            "resolume": FIX / "resolume_balanced_all_drift.txt"})
-    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "stream_live_2026-09-27.txt",
+                            "resolume-snv": FIX / "resolume_balanced_all_drift.txt"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv resolume-snv"})
     _assert_caller_survived(r)
     assert _verdict(r).split("baseline: ", 1)[1].startswith("DRIFT"), r.stdout
-    assert re.search(r"^\s+box=resolume win_baseline=DRIFT drift=power_scheme,", r.stdout, re.M), r.stdout
-    assert re.search(r"^\s+box=stream win_baseline=DRIFT drift=wer_dontshowui$", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=resolume-snv win_baseline=DRIFT drift=power_scheme,", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=stream-snv win_baseline=DRIFT drift=wer_dontshowui$", r.stdout, re.M), r.stdout
     assert "ARGC=4" in r.stdout
     # the live capture's own COMPUTERNAME is named per box (the CR strip is pinned byte-level below:
     # text=True turns \r\n into \n, so this line cannot see a stray CR)
-    assert re.search(r"^\s+box=stream gathered from host=STREAM$", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=stream-snv gathered from host=STREAM$", r.stdout, re.M), r.stdout
 
 
 def _gather_host_bytes(path):
@@ -141,57 +141,57 @@ def test_the_run_log_names_the_machine_that_really_answered(tmp_path):
     other = tmp_path / "other.txt"
     other.write_bytes((FIX / "resolume_gather_program_live_2026-09-27.txt").read_bytes()
                       .replace(b"host=RESOLUME-SNV", b"host=BRIDGE-PC"))
-    seam = _seam(tmp_path, {"stream": FIX / "stream_live_2026-09-27.txt", "resolume": other})
-    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "stream_live_2026-09-27.txt", "resolume-snv": other})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv resolume-snv"})
     _assert_caller_survived(r)
-    assert re.search(r"^\s+box=resolume gathered from host=BRIDGE-PC$", r.stdout, re.M), r.stdout
-    assert re.search(r"^\s+box=stream gathered from host=STREAM$", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=resolume-snv gathered from host=BRIDGE-PC$", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=stream-snv gathered from host=STREAM$", r.stdout, re.M), r.stdout
 
 
 def test_unread_box_rc11_is_unknown_and_its_empty_gather_still_goes_to_the_gate(tmp_path):
-    seam = _seam(tmp_path, {"stream": "fail"})
-    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"})
+    seam = _seam(tmp_path, {"stream-snv": "fail"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"})
     _assert_caller_survived(r)
     assert _verdict(r).split("baseline: ", 1)[1].startswith("UNKNOWN"), r.stdout
     out = tmp_path / "out"
     # the check leaves an empty file for a box it tried to read; the gate grades it UNKNOWN per item
-    assert _args(r) == ["--win-baseline", f"stream={out}/stream.txt"], r.stdout
-    assert (out / "stream.txt").read_bytes() == b""
-    assert re.search(r"^\s+box=stream gathered from host=<none>$", r.stdout, re.M), r.stdout
+    assert _args(r) == ["--win-baseline", f"stream-snv={out}/stream-snv.txt"], r.stdout
+    assert (out / "stream-snv.txt").read_bytes() == b""
+    assert re.search(r"^\s+box=stream-snv gathered from host=<none>$", r.stdout, re.M), r.stdout
 
 
 def test_traveling_box_away_is_skipped_and_gets_no_arg(tmp_path):
-    seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt"})
-    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"})
     _assert_caller_survived(r)
-    assert re.search(r"^\s+box=resolume win_baseline=SKIPPED", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=resolume-snv win_baseline=SKIPPED", r.stdout, re.M), r.stdout
     assert _verdict(r).split("baseline: ", 1)[1].startswith("OK"), r.stdout
-    assert _args(r) == ["--win-baseline", f"stream={tmp_path / 'out'}/stream.txt"], r.stdout
+    assert _args(r) == ["--win-baseline", f"stream-snv={tmp_path / 'out'}/stream-snv.txt"], r.stdout
     assert "1 box gather(s)" in _verdict(r)
 
 
 def test_a_stale_gather_of_an_earlier_run_is_never_graded(tmp_path):
     out = tmp_path / "out"
     out.mkdir()
-    (out / "resolume.txt").write_bytes((FIX / "resolume_balanced_all_drift.txt").read_bytes())
-    seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt"})
-    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"})
+    (out / "resolume-snv.txt").write_bytes((FIX / "resolume_balanced_all_drift.txt").read_bytes())
+    seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"})
     _assert_caller_survived(r)
-    assert not (out / "resolume.txt").exists()
-    assert all("resolume=" not in a for a in _args(r)), r.stdout
+    assert not (out / "resolume-snv.txt").exists()
+    assert all("resolume-snv=" not in a for a in _args(r)), r.stdout
 
 
 def test_a_stale_gather_that_cannot_be_removed_is_never_graded_and_never_fatal(tmp_path):
     # a directory where the old gather file was: rm -f cannot remove it, and under the caller's
     # `set -e` an unguarded rm would abort the whole E2E
     out = tmp_path / "out"
-    (out / "resolume.txt").mkdir(parents=True)
-    (out / "resolume.txt" / "keep").write_text("x")
-    seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt"})
-    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"})
+    (out / "resolume-snv.txt").mkdir(parents=True)
+    (out / "resolume-snv.txt" / "keep").write_text("x")
+    seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"})
     _assert_caller_survived(r)
-    assert "old " + str(out / "resolume.txt") + " cannot be removed -- resolume is not graded" in r.stdout, r.stdout
-    assert _args(r) == ["--win-baseline", f"stream={out}/stream.txt"], r.stdout
+    assert "old " + str(out / "resolume-snv.txt") + " cannot be removed -- resolume-snv is not graded" in r.stdout, r.stdout
+    assert _args(r) == ["--win-baseline", f"stream-snv={out}/stream-snv.txt"], r.stdout
     assert _verdict(r).split("baseline: ", 1)[1].startswith("OK"), r.stdout
 
 
@@ -200,22 +200,22 @@ def test_a_stale_regular_file_in_a_read_only_dir_is_never_graded(tmp_path):
     # rm succeeds instead -- the file is then gone, and the assertions below hold the same way)
     out = tmp_path / "out"
     out.mkdir()
-    (out / "resolume.txt").write_bytes((FIX / "resolume_balanced_all_drift.txt").read_bytes())
+    (out / "resolume-snv.txt").write_bytes((FIX / "resolume_balanced_all_drift.txt").read_bytes())
     out.chmod(0o555)
     try:
-        seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt"})
-        r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"})
+        seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt"})
+        r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"})
     finally:
         out.chmod(0o755)
     _assert_caller_survived(r)
-    assert all("resolume=" not in a for a in _args(r)), r.stdout
+    assert all("resolume-snv=" not in a for a in _args(r)), r.stdout
 
 
 def test_hung_gather_hits_the_bound_is_one_timeout_line_and_leaves_no_process(tmp_path):
-    seam = _seam(tmp_path, {"stream": "hang"})
+    seam = _seam(tmp_path, {"stream-snv": "hang"})
     systmp = tmp_path / "systmp"
     systmp.mkdir()
-    r, elapsed = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream",
+    r, elapsed = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv",
                                     "E2E_WIN_BASELINE_TIMEOUT": "4", "TMPDIR": str(systmp)})
     _assert_caller_survived(r)
     assert elapsed < 20, elapsed
@@ -225,7 +225,7 @@ def test_hung_gather_hits_the_bound_is_one_timeout_line_and_leaves_no_process(tm
     # mktemp work dir is gone from the shared TMPDIR
     assert not list(systmp.glob("win-baseline-check.*")), list(systmp.iterdir())
     # the box it was reading when the bound hit still goes to the gate (empty -> UNKNOWN there)
-    assert _args(r) == ["--win-baseline", f"stream={tmp_path / 'out'}/stream.txt"], r.stdout
+    assert _args(r) == ["--win-baseline", f"stream-snv={tmp_path / 'out'}/stream-snv.txt"], r.stdout
     _assert_gone(int((tmp_path / "hang.pid").read_text().strip()))
 
 
@@ -242,7 +242,7 @@ def _assert_gone(pid):
 def test_crashed_check_is_failed_empty_array_and_never_fatal(tmp_path):
     fake = tmp_path / "fake-check.sh"
     fake.write_text("#!/usr/bin/env bash\necho boom >&2\nexit 3\n")
-    r, _ = _gather(tmp_path, {"E2E_WIN_BASELINE_CHECK": str(fake), "OBS_FLEET_HOME": "stream"})
+    r, _ = _gather(tmp_path, {"E2E_WIN_BASELINE_CHECK": str(fake), "OBS_FLEET_HOME": "stream-snv"})
     _assert_caller_survived(r)
     assert _verdict(r).split("baseline: ", 1)[1].startswith("FAILED (rc 3)"), r.stdout
     assert "ARGC=0" in r.stdout and _args(r) == [], r.stdout
@@ -315,9 +315,9 @@ def test_timeout_is_sized_from_the_checks_own_per_box_bounds():
 
 
 def test_the_helper_feeds_the_gate_and_never_changes_its_exit(tmp_path):
-    seam = _seam(tmp_path, {"stream": FIX / "stream_live_2026-09-27.txt",
-                            "resolume": FIX / "resolume_balanced_all_drift.txt"})
-    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "stream_live_2026-09-27.txt",
+                            "resolume-snv": FIX / "resolume_balanced_all_drift.txt"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv resolume-snv"})
     _assert_caller_survived(r)
     state = tmp_path / "stream-state.json"
     state.write_text('{"obs_version":"32.2.0"}\n')
@@ -326,14 +326,14 @@ def test_the_helper_feeds_the_gate_and_never_changes_its_exit(tmp_path):
         # hermetic: seed the vendor-pin seams so the gate never runs a live `git fetch origin`
         # (the same default tests/version_integrity_gate.rs sets for every gate subprocess)
         return subprocess.run(
-            ["bash", str(SCRIPTS / "version-integrity-gate.sh"), "--win-state", f"stream={state}", *extra],
+            ["bash", str(SCRIPTS / "version-integrity-gate.sh"), "--win-state", f"stream-snv={state}", *extra],
             capture_output=True, text=True, cwd=REPO, timeout=120, env=HERMETIC_GATE_ENV)
 
     base, fed = gate([]), gate(_args(r))
     assert fed.returncode == base.returncode, (base.returncode, fed.returncode)
     assert fed.stderr == base.stderr, (base.stderr, fed.stderr)
-    assert re.search(r"stream\s+win_baseline wer_dontshowui\s+DRIFT", fed.stdout), fed.stdout
-    assert re.search(r"resolume\s+win_baseline power_scheme\s+DRIFT .*Balanced", fed.stdout), fed.stdout
+    assert re.search(r"stream-snv\s+win_baseline wer_dontshowui\s+DRIFT", fed.stdout), fed.stdout
+    assert re.search(r"resolume-snv\s+win_baseline power_scheme\s+DRIFT .*Balanced", fed.stdout), fed.stdout
 
 
 # --- recording-e2e.sh wiring -------------------------------------------------------------------------
@@ -421,12 +421,12 @@ def _run_block(tmp_path, acked, args_decl):
 
 
 def test_real_gate_block_passes_the_array_on_both_branches(tmp_path):
-    decl = 'WIN_BASELINE_GATE_ARGS=(--win-baseline "stream=/o/stream.txt" --win-baseline "resolume=/o/r x.txt")'
+    decl = 'WIN_BASELINE_GATE_ARGS=(--win-baseline "stream-snv=/o/stream-snv.txt" --win-baseline "resolume-snv=/o/r x.txt")'
     for acked in (True, False):
         got = _run_block(tmp_path, acked, decl)
         i = got.index("--win-baseline")
-        assert got[i:i + 4] == ["--win-baseline", "stream=/o/stream.txt",
-                                "--win-baseline", "resolume=/o/r x.txt"], got
+        assert got[i:i + 4] == ["--win-baseline", "stream-snv=/o/stream-snv.txt",
+                                "--win-baseline", "resolume-snv=/o/r x.txt"], got
         assert got[-1] == "--strih-linux", got
         assert got.count("--win-state") == 2, got
 

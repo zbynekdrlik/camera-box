@@ -39,7 +39,7 @@
 #
 # Source-only: pure functions, no side effects at source time (beyond the guarded sibling-lib source
 # below). The runner's default OBS-log tail read goes through the ONE platform-resolved strih-log
-# reader (scripts/lib/strih-log-read.sh, issue 1360), so a Linux strih (strih-lx) is read over plain
+# reader (scripts/lib/strih-log-read.sh, issue 1360), so a Linux strih (strih-snv) is read over plain
 # ssh and a Windows one through the same -EncodedCommand PowerShell path as before.
 command -v strih_log_tail >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/strih-log-read.sh"
 

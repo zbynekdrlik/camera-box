@@ -8,7 +8,7 @@
 # scripts/lib/strih-nic-driver.sh -- issue 1391: the strih rig NIC's out-of-tree kernel driver, and the
 # two link facts that decide whether its 5 GbE link loses packets.
 #
-# The rig NIC of strih-lx since 29.9.2026 is a Ubiquiti UACC-Adapter-RJ45-USBC-5GE = Realtek RTL8157 (USB
+# The rig NIC of strih-snv since 29.9.2026 is a Ubiquiti UACC-Adapter-RJ45-USBC-5GE = Realtek RTL8157 (USB
 # 0bda:8157). The in-tree r8152 of the 7.0 kernels has no 0bda:8157 id, so the Realtek out-of-tree driver
 # is vendored at vendor/realtek-r8152 (the pinned v2.21.4 source + camera-box's dkms.conf + SHA256SUMS)
 # and built through DKMS, which rebuilds it for every kernel installed later. Measured live 29.9.2026:

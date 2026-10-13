@@ -46,7 +46,7 @@ the guard gets it unchanged; the guard was already ~2000 lines), a python twin i
   `phase_slew_check` is gone (no production caller); `phase_slew_enabled_from_pipe_json` stays in the
   guard as the classifier's parser.
 - `date_master_verdict STATUS MARGIN_US` -> `none` (not `date_authority=master`) | `ok` | `out` |
-  `unknown`: the NTP master (strih-lx) owns the fleet DATE (dantesync#88) — it lets the fleet line
+  `unknown`: the NTP master (strih-snv) owns the fleet DATE (dantesync#88) — it lets the fleet line
   sit up to `date_step_bound_ms` (50) off UTC and then makes a COORDINATED fleet step, so a healthy
   master reads `ntp_offset_us≈-25000..-36000`. It is graded on
   `|date_offset_error_ms| <= date_step_bound_ms*1000 + margin` (ms f64 -> us via half-even rounding,
@@ -84,7 +84,7 @@ uses `clock_discipline_check` + `date_master_effective_bound_us` + `date_master_
 **Parity table.** `tests/fixtures/dantesync_clock_discipline_1372.tsv` (case, status, class,
 date_verdict at margin 1000 us, unlocked, journal_grade) — `@` rows are `/status` captured read-only
 from the live 1.9.0 and 1.11.1 fleet
-(`tests/fixtures/dantesync_status_1372/`: strih-lx master, stream slave) plus two legacy nodes
+(`tests/fixtures/dantesync_status_1372/`: strih-snv master, stream slave) plus two legacy nodes
 synthesized from the old field shape. `tests/python/test_clock_discipline_1372.py` runs BOTH the bash
 (through `bash <file>` subprocesses) and the python twin over every row, plus the gate on fresh
 copies of the captured payloads (`updated_ts`/`ntp_updated_ts` moved to now — the gate grades
@@ -179,7 +179,7 @@ Grading 1.11.0 on the step bound would let a master that stopped correcting read
   past 10 ms. The micro bound + margin (6 ms at the defaults) therefore reads a 6-10 ms catch-up
   transient OUT while dantesync itself is quiet, for example right after a pause ends or after a
   master restart. That is the design's intent, not a false red.
-- **Fixtures.** `strih-lx-master-1.11.1.json` / `stream-slave-1.11.1.json` are LIVE read-only
+- **Fixtures.** `strih-snv-master-1.11.1.json` / `stream-slave-1.11.1.json` are LIVE read-only
   captures (`curl -s http://10.77.9.202:8898/status` / `.204`, 26.9.2026, both on 1.11.1). They
   replaced the synthesized 1.11.0 files; every expectation held unchanged. The master reads
   `date_offset_error_ms=0.471`, `last_date_step_kind=micro` and the 1.11.1-only
@@ -287,7 +287,7 @@ The rules:
   2. `gh run rerun` the PR's E2E;
   3. merge;
   4. replace the synthesized fixtures with live captures.
-- **Fixtures:** `strih-lx-master-1.12.0.json` / `stream-slave-1.12.0.json` are SYNTHESIZED from the
+- **Fixtures:** `strih-snv-master-1.12.0.json` / `stream-slave-1.12.0.json` are SYNTHESIZED from the
   1.11.1 captures plus the four fields in `src/status.rs` order (master: error 412.5 ms, next
   2026-09-28T02:00:00Z, last step at 2026-09-27T02:00:00Z, -1523.4 ms). Replace them with live
   captures after the roll, keeping the table's "now" consistent with the captured `updated_ts`.

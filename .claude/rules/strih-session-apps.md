@@ -20,7 +20,7 @@ paths:
   - "tests/python/test_strih_lx_deploy_session_apps_1399.py"
 ---
 
-# strih-lx session apps: the browser-source keeper, the shading panel window, Companion Satellite + its watch (issue 1399)
+# strih-snv session apps: the browser-source keeper, the shading panel window, Companion Satellite + its watch (issue 1399)
 
 Owner, 4.10.2026, at the Sunday production: "tie browser sceny maju byt vzdy nacitane", "toto je
 produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat shading appka",
@@ -31,7 +31,7 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
 
 - obs-browser loads a browser source's page ONCE, when the source is created at OBS start, and never
   retries a failed first load.
-- strih-lx booted at 04:58 UTC on 4.10.2026; the OBS log read `Could not resolve host` at 04:58:17.
+- strih-snv booted at 04:58 UTC on 4.10.2026; the OBS log read `Could not resolve host` at 04:58:17.
   presenter.lan / fohabl.lan did not answer yet.
 - So `Browser camera crew`, `Odpocet`, `CG-presenter` (presenter.lan) and `Browser Ableset`
   (`fohabl.lan`, no scheme) stayed empty until a manual `PressInputPropertiesButton refreshnocache`.
@@ -101,7 +101,7 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
   - A remote OBS (`--host` not loopback) has no process identity; the frame count decides.
     `--obs-process-name` (default `obs`) names the process. `--check-state` (verify item 37) ends with
     `OBS run identified by the obs process start time` or `... by the frame count only (no local obs
-    process seen)`; on strih-lx the second one means the /proc read found no OBS of the keeper's uid.
+    process seen)`; on strih-snv the second one means the /proc read found no OBS of the keeper's uid.
   - Tests: `tests/python/test_strih_browser_keeper_obs_run_1399.py` runs the real loop against the real
     obs-websocket fake (`strih_keeper_fakes_1399.py`: `restart()` = new process + frames from 0 or a
     given start count + dropped socket, `drop()` = socket only), one `k.run` per keeper process over one state file.
@@ -110,7 +110,7 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
   (TCP stayed up). The design chose the TCP probe; an HTTP-status probe is the next step if it bites.
 - **The WS client** is a small inlined obs-websocket 5 client in the obs_phase2 `_conn`/`_rpc` shape:
   Identify with `eventSubscriptions: 0` (the event-flood lesson) and a hard deadline per request.
-  It does not import obs_phase2.py, which reaches the box only with a GH_TOKEN. strih-lx's WS has no
+  It does not import obs_phase2.py, which reaches the box only with a GH_TOKEN. strih-snv's WS has no
   password; `OBS_PASSWORD` is honoured (tested against a fake server that demands auth), so a box with
   a WS password can reuse it.
 - **Logs:** one line per refresh, per reachability transition, and per connection change. A quiet
@@ -246,7 +246,7 @@ watch timer).
 - openbox never reaches graphical-session.target, so the WantedBy only makes `enable` meaningful.
 - A `default.target` unit would also start on a user-manager start with no X session (an ssh login,
   linger), where the panel or the Satellite tray cannot open a window. ONE login start path, the one OBS
-  uses. The strih-lx genlock deploy also starts them after strih-obs, into the running session (below).
+  uses. The strih-snv genlock deploy also starts them after strih-obs, into the running session (below).
 - imag's autostart is a separate renderer and is untouched.
 - Every unit sets `StartLimitIntervalSec=0`: never give up.
 
@@ -302,7 +302,7 @@ watch timer).
   - `(shading-app-window)`: a window with the panel's own WM_CLASS AND the title "Shading" in
     `wmctrl -lx` on :0 (field 3 = `res_name.res_class`, field 5 on = the title; as root through
     `sudo -u` with the operator's Xauthority). An empty list = X not answering, named as such. Read the
-    first live `wmctrl -lx` line on strih-lx when grading this the first time (dev1 has no wmctrl).
+    first live `wmctrl -lx` line on strih-snv when grading this the first time (dev1 has no wmctrl).
 - Test seams: `STRIH_SESSION_APPS_BIN_DIR`, `_RUNTIME_DIR`, `_EUID`, `_PYTHON`, `_WMCTRL`, `_PROC`,
   `_SATELLITE_BIN`; the fakes live in `tests/python/strih_session_apps_fakes_1399.py` (shared by the
   keeper/panel and the Satellite tests). The
@@ -322,13 +322,13 @@ of the same lib grader.
 
 ## The genlock deploy starts them; setup-strih stays enable-only
 
-setup-strih never starts a stopped unit, and items 37-40 grade them ACTIVE. So the strih-lx genlock
-deploy's start step (`strih_lx_remote_start_cmd`, `scripts/lib/strih-lx-deploy.sh`) starts
+setup-strih never starts a stopped unit, and items 37-40 grade them ACTIVE. So the strih-snv genlock
+deploy's start step (`strih_lx_remote_start_cmd`, `scripts/lib/strih-snv-deploy.sh`) starts
 `STRIH_SESSION_APP_UNITS` right after strih-obs.service, the kiosk autostart's order (main ROZHODNUTE
 5978724027). The first deploy that installs them therefore needs no manual start, and its acceptance
 step (verify-strih) sees them active.
 - The remote command's rc stays OBS's (the deploy exits 4 on it). An app that does not start is a
-  named `WARNING: [strih-lx start] the session apps (...) did not start` on stderr; items 37-40 in the
+  named `WARNING: [strih-snv start] the session apps (...) did not start` on stderr; items 37-40 in the
   acceptance step then name why. An OBS start failure still tries the apps.
 - `start` is a no-op on a running unit. A keeper that ran through the deploy reconnects to the new OBS
   by itself: a new OBS process, so one refresh round, which is the point.
@@ -341,10 +341,10 @@ step (verify-strih) sees them active.
 
 ## Live steps (supervisor, after integration)
 
-1. The next strih-lx genlock deploy (`deploy-genlock-fleet.sh --run-id <id> --boxes strih-lx`) runs
+1. The next strih-snv genlock deploy (`deploy-genlock-fleet.sh --run-id <id> --boxes strih-snv`) runs
    setup-strih: step 16d logs the stopgap links + copy removed, every entry enabled, and `try-restart
    ... bkshading-panel-app.service ...`. Its start step then starts strih-obs and every app; no WARNING
-   line from `[strih-lx start]`. No manual start.
+   line from `[strih-snv start]`. No manual start.
 2. `journalctl --user -u strih-browser-keeper -n 30`: `connected to obs-websocket 127.0.0.1:4455: a new
    OBS run (process <boot>:<ticks>, N frames) -> OBS run epoch 1`, the process NOT `None`, then one
    `refreshed browser source ...` line per browser source.
@@ -364,7 +364,7 @@ step (verify-strih) sees them active.
    ~/.config/systemd/user/default.target.wants/companion-satellite.service` (only if the stopgap was
    enabled that way), `installed companion-satellite.service ... unit written`, and a `try-restart` naming
    `companion-satellite.service strih-satellite-watch.timer`. The start step logs no WARNING.
-7. Read back on strih-lx (as newlevel, `XDG_RUNTIME_DIR=/run/user/$(id -u)`):
+7. Read back on strih-snv (as newlevel, `XDG_RUNTIME_DIR=/run/user/$(id -u)`):
    - `diff ~/.config/systemd/user/companion-satellite.service <checkout>/systemd/companion-satellite.service`
      is empty, and `ls ~/.config/systemd/user/default.target.wants/` has no companion-satellite link;
    - `systemctl --user show -p MainPID,ExecMainStartTimestamp,NRestarts companion-satellite.service`:

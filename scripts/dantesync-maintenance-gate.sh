@@ -137,7 +137,7 @@ fi
 
 usage() { sed -n '2,40p' "$0"; }
 
-BOX="resolume"
+BOX="resolume-snv"
 PIN="${DANTESYNC_VERSION_PIN}"
 while [ $# -gt 0 ]; do
   case "$1" in

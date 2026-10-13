@@ -12,7 +12,7 @@ paths:
 All camboxes emit on the same 60 Hz genlock grid, and on the splitter rig they all capture the
 SAME HDMI signal, so their frames reached the NDI SDK within ~1 ms of each other. Each 1080p60
 SpeedHQ frame is ~300–350 KB; the seven trains cross the 10 G trunks together and converge on
-strih-lx's ONE 2.5 GbE uplink (`foh1_video ether2`, a USB RTL8156 adapter). The switch tail-drops
+strih-snv's ONE 2.5 GbE uplink (`foh1_video ether2`, a USB RTL8156 adapter). The switch tail-drops
 whole packet runs (`tx-drop-queue1` in `scripts/netcfg-audit.sh --check`), and a ~2500-packet run
 costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlock FIFO underruns
 (repeats), then converge sheds (gaps). The evidence chain is on issue 1242, and the netcfg side is in
@@ -137,7 +137,7 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
 
 ## issue 1242 — the send stagger is the software half that stays
 
-The owner ruling of 24.9.2026 also cut the burst itself (strih-lx connected a camera's full input
+The owner ruling of 24.9.2026 also cut the burst itself (strih-snv connected a camera's full input
 only while it was shown; the multiview rendered low-bandwidth twins). That half was REMOVED on
-28.9.2026 on owner order: the strih-lx uplink is fixed in hardware (5 GbE, then 10 GbE), so every
+28.9.2026 on owner order: the strih-snv uplink is fixed in hardware (5 GbE, then 10 GbE), so every
 strih camera input is connected at full bandwidth again. The send stagger stays.

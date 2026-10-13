@@ -22,6 +22,10 @@ from typing import Callable
 
 OBS_FLEET_SH = Path(__file__).resolve().parent / "lib" / "obs-fleet.sh"
 
+# issue 1414: the transition aliases, the python twin of obs-fleet.sh OBS_FLEET_ALIASES (pinned equal by
+# tests/python/test_box_names_venue_1414.py): the old name of a renamed SNV row -> the row.
+FLEET_ALIASES = {"strih-lx": "strih-snv", "stream": "stream-snv", "resolume": "resolume-snv"}  # issue 1414
+
 _DEFAULT_RE = re.compile(r'^OBS_FLEET="\$\{OBS_FLEET:-(.*?)\}"', re.MULTILINE | re.DOTALL)
 _IPV4_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$")
 
@@ -51,18 +55,28 @@ def fleet_rows() -> list[tuple[str, str, str, str]]:
     return rows
 
 
-def fleet_host(name: str) -> str | None:
-    for row in fleet_rows():
+def _fleet_row(name: str) -> tuple[str, str, str, str] | None:
+    """The row NAME addresses: an exact row wins, else a transition alias whose renamed row is in the
+    table (issue 1414, the bash `_obs_fleet_entry`)."""
+    rows = fleet_rows()
+    for row in rows:
         if row[0] == name:
-            return row[1]
+            return row
+    target = FLEET_ALIASES.get(name.lower())
+    for row in rows:
+        if target is not None and row[0] == target:
+            return row
     return None
+
+
+def fleet_host(name: str) -> str | None:
+    row = _fleet_row(name)
+    return row[1] if row else None
 
 
 def fleet_class(name: str) -> str | None:
-    for row in fleet_rows():
-        if row[0] == name:
-            return row[2]
-    return None
+    row = _fleet_row(name)
+    return row[2] if row else None
 
 
 def _resolve(host: str) -> str:
@@ -75,9 +89,10 @@ def _resolve(host: str) -> str:
 
 
 def fleet_name_for_host(host: str, resolve: Callable[[str], str] | None = None) -> str | None:
-    """The fleet NAME HOST addresses, or None. Same three steps as the bash lookup: exact name/host
-    (case-folded), a DNS name's first label vs the row name (never for an IPv4 literal), then the
-    resolved address vs the row host fields (an IPv4 literal is never resolved)."""
+    """The fleet NAME HOST addresses, or None. Same steps as the bash lookup: exact name/host
+    (case-folded), an issue-1414 transition alias, a DNS name's first label vs the row name (then vs
+    the aliases; never for an IPv4 literal), then the resolved address vs the row host fields (an
+    IPv4 literal is never resolved)."""
     if not host:
         return None
     rows = fleet_rows()
@@ -86,11 +101,16 @@ def fleet_name_for_host(host: str, resolve: Callable[[str], str] | None = None) 
             return name
     if _IPV4_RE.match(host):
         return None
+    names = {r[0] for r in rows}
+    if FLEET_ALIASES.get(host.lower()) in names:
+        return FLEET_ALIASES[host.lower()]
     if "." in host:
         short = host.split(".", 1)[0].lower()
         for name, _row_host, _cls, _check in rows:
             if name.lower() == short:
                 return name
+        if FLEET_ALIASES.get(short) in names:
+            return FLEET_ALIASES[short]
     ip = (resolve or _resolve)(host)
     if not ip:
         return None

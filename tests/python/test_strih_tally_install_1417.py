@@ -148,16 +148,16 @@ class Box:
         })
         return e
 
-    def run(self, func, *args, box="strih-lx", repo=REPO):
+    def run(self, func, *args, box="strih-snv", repo=REPO):
         script = ('set -euo pipefail\n. "$1"\n. "$2"\nstrih_box_load "$3"\n. "$4"\n'
                   'func="$5"; shift 5\n"$func" "$@"\n')
         return subprocess.run(["bash", "-c", script, "harness", str(SESSION), str(FACTS), box, str(LIB),
                                func, *args], capture_output=True, text=True, env=self.env(), timeout=60)
 
-    def install(self, repo=REPO, box="strih-lx"):
+    def install(self, repo=REPO, box="strih-snv"):
         return self.run("strih_tally_install", str(repo), USER, box=box)
 
-    def rows(self, box="strih-lx"):
+    def rows(self, box="strih-snv"):
         r = self.run("strih_tally_grade_rows", str(REPO), USER, box=box)
         assert r.returncode == 0, r.stderr
         return [ln.split("|", 1) for ln in r.stdout.splitlines() if ln]
@@ -359,7 +359,7 @@ def test_a_program_scene_that_differs_from_obs_fails(box):
 
 def test_the_report_prints_every_row_through_ok_note_bad(box):
     _healthy(box)
-    script = ('set -euo pipefail\n. "$1"\n. "$2"\nstrih_box_load strih-lx\n. "$3"\n'
+    script = ('set -euo pipefail\n. "$1"\n. "$2"\nstrih_box_load strih-snv\n. "$3"\n'
               'ok() { echo "PASS $1"; }\nnote() { echo "NOTE $1"; }\nbad() { echo "FAIL $1"; }\n'
               'strih_tally_grade_report "$4" "$5"\n')
     r = subprocess.run(["bash", "-c", script, "h", str(SESSION), str(FACTS), str(LIB), str(REPO), USER],
@@ -381,7 +381,7 @@ def _applies(box_name, step="16f"):
 
 
 def test_16f_runs_on_the_strih_role_only():
-    assert _applies("strih-lx") == "RUN"
+    assert _applies("strih-snv") == "RUN"
     assert _applies("strih-pp") == "RUN"
     assert _applies("stream-pp") == "SKIP the stream role runs no camera tally (no camera operators on stream-pp)"
 

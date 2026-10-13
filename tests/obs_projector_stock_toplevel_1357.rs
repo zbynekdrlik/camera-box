@@ -3,12 +3,12 @@
 //! keeps that from coming back.
 //!
 //! Background:
-//! - Issue 1352 worked around an XWayland + NVIDIA-PRIME-offload present stall on strih-lx with
+//! - Issue 1352 worked around an XWayland + NVIDIA-PRIME-offload present stall on strih-snv with
 //!   two mechanisms. The vendored one built a plain host toplevel in `OBSBasic::OpenProjector`
 //!   under a Linux-only gate, made the projector its `Qt::Widget` child, and routed every
 //!   toplevel call through a `Toplevel()` accessor. The runtime one was the `strih-mv-host`
 //!   X11 reparenting helper.
-//! - On 23.9.2026 strih-lx moved to openbox on plain Xorg with NVIDIA as the primary provider,
+//! - On 23.9.2026 strih-snv moved to openbox on plain Xorg with NVIDIA as the primary provider,
 //!   so no box runs XWayland or PRIME offload any more.
 //! - The hosted shape itself turned the projector black when "always on top" was toggled at
 //!   runtime. `SetAlwaysOnTop` does `setWindowFlags` + `show` on the host toplevel, Qt

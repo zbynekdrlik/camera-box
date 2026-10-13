@@ -231,16 +231,16 @@ fn camera_active_set_default_is_exactly_all_seven_cameras_1216() {
 }
 
 /// issue 1413: the SNV measurement set and the SNV venue's camera list are ONE fact in two
-/// places -- camera-set.sh's CAMERA_ACTIVE_SET default and scripts/strih-boxes/strih-lx.env's
-/// STRIH_CAMERAS (which strih-lx's NDI inputs and the dantesync fleet's home camera rows read).
+/// places -- camera-set.sh's CAMERA_ACTIVE_SET default and scripts/strih-boxes/strih-snv.env's
+/// STRIH_CAMERAS (which strih-snv's NDI inputs and the dantesync fleet's home camera rows read).
 /// They must never drift apart: a camera moved between venues is an edit of BOTH, in one change.
 #[test]
 fn camera_active_set_default_is_the_snv_venue_cameras_1413() {
-    let env = read("scripts/strih-boxes/strih-lx.env");
+    let env = read("scripts/strih-boxes/strih-snv.env");
     let cams: Vec<String> = env
         .lines()
         .find_map(|l| l.strip_prefix("STRIH_CAMERAS="))
-        .expect("strih-lx.env must carry STRIH_CAMERAS")
+        .expect("strih-snv.env must carry STRIH_CAMERAS")
         .split_whitespace()
         .map(|n| format!("cam{n}"))
         .collect();

@@ -136,7 +136,7 @@ netcfg_drift_verdict() {
 #   port is the drop-RATE probe's ALWAYS-sampled set (#1110): it is live rate-probed on EVERY --check
 #   regardless of cumulative-counter growth, so the audit always carries a fresh drop DELTA from the
 #   suspect uplink for the next starvation episode -- strih's egress port (since the M4 cut-over,
-#   issue 1242: strih-lx's USB 2.5 GbE uplink into foh1_video port ether2) must be sampled every run
+#   issue 1242: strih-snv's USB 2.5 GbE uplink into foh1_video port ether2) must be sampled every run
 #   even while flat. Empty node/port/list -> not designated (exit 1). Pure: no I/O.
 netcfg_port_is_designated() {
   local node="${1:-}" port="${2:-}" list="${3:-}"
@@ -152,7 +152,7 @@ netcfg_port_is_designated() {
 #   DESIGNATED drop-sampler port reads exactly `true` (the port has link), else exit 1 (issue 1242).
 #   A designated port with no link carries no traffic, so its flat drop counter would read as a
 #   "probe clean" strih uplink -- the false-clean the stale foh2_video sfp-sfpplus2 designation printed
-#   for days after strih moved to strih-lx. The orchestrator reports such a port `designated-down`
+#   for days after strih moved to strih-snv. The orchestrator reports such a port `designated-down`
 #   (the designation is stale) and skips the rate probe. An empty/unreadable field is NOT linked.
 #   Pure: no I/O.
 netcfg_designated_port_linked() {

@@ -4,7 +4,7 @@
 # CALLER's shell. Every function checks its own return codes and always returns 0 (report-only).
 #
 # scripts/lib/program-audio-mode.sh -- issue 1404 (ROZHODNUTÉ 6039368611): the stream program-audio
-# sampler on strih-lx (the YouTube channel guard of the CI/test streams) runs in TEST mode only.
+# sampler on strih-snv (the YouTube channel guard of the CI/test streams) runs in TEST mode only.
 #   rig-mode.sh test  -> leave the TEST marker, clear a failed state, `systemctl --user start` the unit
 #   rig-mode.sh event -> remove the TEST marker, `systemctl --user stop` the unit, clear a failed state
 # (`reset-failed`: a crash loop that hit StartLimitBurst refuses the next start for up to 300 s, and
@@ -12,7 +12,7 @@
 # The unit's ExecCondition skips every start without the marker
 # (~/.config/camera-box/program-audio-sampler.test-mode, STRIH_PROGRAM_AUDIO_TEST_MARKER): the sampler is
 # down by default and stays down across a reboot during a production; a reboot in TEST mode brings it
-# back. Both run as the operator over plain ssh (the strih-lx transport: sshpass, `timeout`
+# back. Both run as the operator over plain ssh (the strih-snv transport: sshpass, `timeout`
 # INSIDE it, UserKnownHostsFile=/dev/null). Report-only: a failure is a WARNING line naming the state
 # and never changes rig-mode's exit status (a stopped sampler fails closed for its consumers: UNKNOWN).
 # A Windows strih has no sampler: one SKIP line.
@@ -34,7 +34,7 @@ fi
 
 PROGRAM_AUDIO_MODE_SSH_OPTS=(-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=12)
 
-# program_audio_mode_remote_cmd test|event -> the shell text the operator's login shell runs on strih-lx.
+# program_audio_mode_remote_cmd test|event -> the shell text the operator's login shell runs on strih-snv.
 # It prints `program-audio-sampler: <is-active>` and exits 0 only when the sampler reached the mode's
 # state (test: still active 2 s after the start -- a Type=simple unit reads active the moment it is
 # forked, so a sampler that dies on import would pass an immediate read; event: `inactive` after the

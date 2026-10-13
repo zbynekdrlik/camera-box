@@ -1,5 +1,5 @@
 #!/bin/bash
-# strih-lx One-Shot Setup (issue 1317) -- see the extended header below the strict-mode line.
+# strih-snv One-Shot Setup (issue 1317) -- see the extended header below the strict-mode line.
 # Provisions a Linux notebook as the strih cutter/mix box; runs ON the box as root, idempotent.
 set -euo pipefail
 # Pin a 022 umask: a caller running this under 077 (the 24.9.2026 deploy) made every directory it
@@ -9,7 +9,7 @@ umask 022
 # The box:
 #   * emits its NDI outputs under its own NAMESPACED `<STRIH_NDI_PREFIX> (...)` names (never a
 #     `STRIH-SNV (...)` sender on the wire -- the stream box + receivers must never see two), and
-#   * runs dantesync in the ROLE its fact file declares (strih-lx: `server`, the fleet NTP master since
+#   * runs dantesync in the ROLE its fact file declares (strih-snv: `server`, the fleet NTP master since
 #     the M4 cut-over 20.9.2026; a `client` box syncs from its STRIH_DANTESYNC_UPSTREAM).
 #
 # issue 1357 (owner rulings): the box itself is the SAME OBS-only appliance imag was -- every box-level
@@ -31,7 +31,7 @@ umask 022
 # a copy of this script. A fact file with any TODO_OWNER value (a template) REFUSES, naming each fact.
 #
 # Usage (on the box):
-#   sudo GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh [--box <name>] [--yes]    (default box: strih-lx)
+#   sudo GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh [--box <name>] [--yes]    (default box: strih-snv)
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -80,6 +80,7 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || fail "usage: setup-strih.sh [--box <name>] [--yes]"
 strih_box_load "$STRIH_FACT_BOX" \
   || fail "box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above) -- refusing to provision"
+STRIH_FACT_BOX="$(strih_box_loaded_name)"   # issue 1414: an old box name loaded its renamed box
 obs_box_role_apply || fail "box '${STRIH_FACT_BOX}': its role / venue facts could not be applied (issue 1412, above)"
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive flow ----
@@ -123,7 +124,7 @@ fi
 
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
-# 10.77.9.202; the cam boxes take NTP from it), so strih-lx's dantesync ROLE is `server` (a bare
+# 10.77.9.202; the cam boxes take NTP from it), so strih-snv's dantesync ROLE is `server` (a bare
 # `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dantesync/config.json). issue 1361: the
 # role + its upstream are box FACTS (STRIH_DANTESYNC_ROLE / STRIH_DANTESYNC_UPSTREAM), so a venue whose
 # strih is a CLIENT declares it in its fact file. The live box had a hand
@@ -136,7 +137,7 @@ step 2 "DanteSync ${DS_ROLE} (single timesync authority; post-M4 the notebook is
 for svc in systemd-timesyncd chrony chronyd ntp ntpsec; do
   systemctl disable --now "$svc" 2>/dev/null || true
 done
-# issue 1412 (G5): a FRESH box gets the pinned binary + the role config (strih-lx keeps its own; never rewritten).
+# issue 1412 (G5): a FRESH box gets the pinned binary + the role config (strih-snv keeps its own; never rewritten).
 dantesync_install "$DS_ROLE" "$(strih_lx_dante_gm)" || fail "dantesync binary/config install failed (above)"
 # role -> args: server = bare (NTP master), client = --ntp-server <upstream fact>.
 DS_ARGS="$(strih_lx_dantesync_args)" || fail "dantesync role '${DS_ROLE}' needs STRIH_DANTESYNC_UPSTREAM in the box facts"
@@ -182,7 +183,7 @@ step 4 "Genlock bundle -> ${GENLOCK_DIR} (strih FULL artifact: ${ART})"
 mkdir -p "$GENLOCK_DIR"
 if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # issue 1317: NEVER install a bundle built for a different Ubuntu release than the box runs -- a
-  # 24.04-built bundle (noble ffmpeg/Qt sonames) would crash OBS at load on the 26.04 strih-lx box.
+  # 24.04-built bundle (noble ffmpeg/Qt sonames) would crash OBS at load on the 26.04 strih-snv box.
   # Gate the STAGED bundle's TARGET-RELEASE marker vs the box's /etc/os-release VERSION_ID BEFORE the
   # cp -a (fail-closed on an absent marker -- a pre-marker bundle must be rebuilt, never trusted).
   SETUP_BOX_VERSION_ID="$( . /etc/os-release 2>/dev/null; printf '%s' "${VERSION_ID:-}" )"
@@ -208,7 +209,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # issue 1317 slice: the Qt6 SVG icon-engine + image-format plugins live in the SEPARATE
   # qt6-svg-plugins package -- Ubuntu 26.04 split them out of libqt6svg6 (which carries only the
   # library). OBS 32's default Yami theme is SVG-based, so WITHOUT these plugins half the
-  # toolbar/dock/settings icons render BLANK (live-verified on strih-lx 10.77.9.202, 21.9.). Install
+  # toolbar/dock/settings icons render BLANK (live-verified on strih-snv 10.77.9.202, 21.9.). Install
   # it alongside the recorded OBS-runtime deps. Idempotent (apt-get is a no-op if already present);
   # fail-loud so a re-flash reproduces a working operator UI instead of silently blank icons.
   echo "  installing qt6-svg-plugins (OBS 32 SVG theme icon-engine + image-format plugins)"
@@ -270,7 +271,7 @@ else
 fi
 
 # issue 1317 (owner request 22.9.2026): PRUNE the obs-plugins the genlock bundle ships that are
-# unusable on strih-lx and log errors at every boot -- decklink*.so (no DeckLink hardware),
+# unusable on strih-snv and log errors at every boot -- decklink*.so (no DeckLink hardware),
 # obs-qsv11.so (Intel QSV, the box is NVIDIA -> nvenc), obs-vst.so (unused). KEEP everything else,
 # especially distroav.so (NDI) + obs-browser.so/libcef.so. Runs as a step-4 tail AFTER the /opt +
 # /usr installs, so it removes the freshly-copied dead plugins from BOTH the staged copy AND the
@@ -322,7 +323,7 @@ if DEBIAN_FRONTEND=noninteractive apt-get install -y avahi-utils; then
 else
   warn "  avahi-utils install failed -- avahi-browse (NDI/mDNS discovery) will be absent; fix the box's apt sources and re-run"
 fi
-# issue 1317 item H (ffprobe): the on-box recording-verdict E2E ([8/8a], recording-verdict-on-strih-lx.sh)
+# issue 1317 item H (ffprobe): the on-box recording-verdict E2E ([8/8a], recording-verdict-on-strih-snv.sh)
 # spawns `ffprobe`, which Ubuntu 26.04 ships in the `ffmpeg` package -- a TOOL dependency of the E2E
 # verdict, NOT a bundle soname (never in RUNTIME_PACKAGES.txt). Same idempotent apt family as
 # avahi-utils above; warn not fail (OBS runs without it, only the on-box verdict would be missing it).
@@ -336,11 +337,11 @@ fi
 # traveling resolume hostname resolved now, skipped when away), NEVER a cambox -- issue 1389: a finder's
 # discovery connection into a cambox aborts camera-box when this OBS exits or restarts, so the camboxes
 # are found by mDNS alone. libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
-# list, so strih-lx's own STRIH-LX outputs keep announcing over mDNS -- no gate. THREE receivers on
+# list, so strih-snv's own STRIH-SNV outputs keep announcing over mDNS -- no gate. THREE receivers on
 # this box: OBS (strih-obs.service) and bkshading-service, both User=${DESKTOP_USER}, read the desktop
 # user's ~/.ndi; intercom-hub's ProtectHome hides ~/.ndi, so it reads the system dir /etc/ndi via its
 # NDI_CONFIG_DIR drop-in. Written here, before the OBS/intercom units start (steps 8/13); the next
-# start reads it. Every strih-lx genlock deploy re-runs this script, so a renumber converges there.
+# start reads it. Every strih-snv genlock deploy re-runs this script, so a renumber converges there.
 NDI_IPS="$(ndi_discovery_sender_ips)" \
   || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
 ndi_discovery_write_config "${USER_HOME}/.ndi" "$NDI_IPS" "$DESKTOP_USER" \
@@ -354,9 +355,9 @@ echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (ne
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
 step "4c" "Downstream Keyer OBS plugin $(obs_dsk_version) (pinned upstream .deb, sha256-checked) -> the /usr prefix"
-# issue 1361: the operator collection uses exeldro's Downstream Keyer; on strih-lx it was a hand
+# issue 1361: the operator collection uses exeldro's Downstream Keyer; on strih-snv it was a hand
 # extraction of the upstream .deb. This installs the SAME file from the SAME pinned release asset: the
-# .deb and the extracted plugin are both sha256-checked (the plugin hash == the live strih-lx file),
+# .deb and the extracted plugin are both sha256-checked (the plugin hash == the live strih-snv file),
 # then only the plugin + its locale go into the /usr prefix OBS loads. Extracted, never dpkg-installed:
 # the .deb depends on the distro obs-studio package, which the genlock bundle OBS does not provide.
 # Idempotent: a plugin that already has the pinned hash downloads nothing. verify-strih item 35 grades it.
@@ -368,7 +369,8 @@ step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)
 # issue 1317: create ~/.config/obs-studio owned by the DESKTOP user (this script runs under sudo, so a
 # bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
 strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$OBS_CFG" || fail "cannot create ${OBS_CFG} as ${DESKTOP_USER} (above)"
-strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-lx-profile-facts.txt" | sed 's/^/  /'
+strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-profile-facts.txt" | sed 's/^/  /'
+rm -f "$GENLOCK_DIR/strih-lx-profile-facts.txt"   # issue 1414: the pre-rename name of the role file
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------------------------
@@ -378,8 +380,8 @@ install -d -m 755 /opt/camera-box
 # canonical strih input names as EXPLICIT-name objects {sender,input,scene} + "mode":"update-only"
 # (heal the certified genlock class onto EXISTING inputs, never CreateScene/CreateInput -> no more
 # duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
-obs_box_seed_manifest_json > /opt/camera-box/strih-lx-seed.json   # issue 1412: the stream role's manifest on a stream box
-echo "  wrote /opt/camera-box/strih-lx-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
+obs_box_seed_manifest_json > /opt/camera-box/strih-seed.json   # issue 1412: the stream role's manifest on a stream box
+echo "  wrote /opt/camera-box/strih-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
 # issue 1346: the fixed HDMI output's config ~/.camera-box/drm-output.json (Program / built-in Multiview,
 # the box's backend fact) -- the whole step lives in scripts/lib/strih-drm-output.sh.
 if WHY="$(obs_box_step_applies 6-hdmi)"; then
@@ -397,12 +399,13 @@ fi
 # issue 1317: install the strih_scenes.py seeder (sibling of imag_scenes.py). strih-obs-start.sh
 # preflights `import strih_scenes` then runs `strih_scenes.py --bootstrap` on every launch to seed
 # the 10 inputs (certified genlock: genlock_fifo/ndi_sync=2/floor 3) + per-input scenes + Studio Mode
-# from strih-lx-seed.json. It is in the rsynced tree next to this script (like the launcher pair, step
-# 8), so install it locally -- no GH_TOKEN dependency. The 5 STRIH-LX NDI OUTPUTS are a SEPARATE
+# from strih-seed.json. It is in the rsynced tree next to this script (like the launcher pair, step
+# 8), so install it locally -- no GH_TOKEN dependency. The 5 STRIH-SNV NDI OUTPUTS are a SEPARATE
 # ticket; the seeder never touches outputs.
 [ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py
 install -m 0755 "${HERE}/stream_dev_safe.py" /usr/local/bin/stream_dev_safe.py   # issue 1380: the stream role's safe Development
+rm -f /opt/camera-box/strih-lx-seed.json   # issue 1414: the pre-rename seed, now the new seeder is in
 echo "  installed strih_scenes.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
 if WHY="$(obs_box_step_applies 6-devclip)"; then obs_box_stream_dev_clip_provision "$HERE" || fail "issue 1380: the measurement clip for the safe Development scene could not be provisioned (above)"
 else echo "  SKIP: ${WHY}"; fi
@@ -429,8 +432,8 @@ USER_INI="${OBS_CFG}/user.ini"
 
 # issue 1352: seed DistroAV's [NDIPlugin] program/preview OUTPUT identity -- the BARE names
 # MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + both Enabled=true. DistroAV PREPENDS the box
-# hostname -> announced STRIH-LX (2ME PGM) / (2ME PVW); a name that already carried STRIH-LX here
-# doubles it (the STRIH-LX (STRIH-LX (2ME PGM)) bug). Runs with OBS STOPPED (this is enable-only,
+# hostname -> announced STRIH-SNV (2ME PGM) / (2ME PVW); a name that already carried STRIH-SNV here
+# doubles it (the STRIH-SNV (STRIH-SNV (2ME PGM)) bug). Runs with OBS STOPPED (this is enable-only,
 # before any launch; OBS rewrites user.ini on exit). Idempotent RawConfigParser upsert via the ONE
 # source of truth strih_lx_ndi_output_ini_cmds (scripts/lib/strih-provision.sh).
 if command -v python3 >/dev/null 2>&1; then
@@ -548,9 +551,9 @@ fi
 
 # ---------------------------------------------------------------------------------------------
 step 10 "RemoteOS MCP control-channel agent (venv /opt/remoteos-mcp-venv, shared scripts/lib/remoteos-mcp.sh)"
-# issue 1361: the SAME venv install the live strih-lx box runs, from the ONE shared lib setup-imag.sh and
+# issue 1361: the SAME venv install the live strih-snv box runs, from the ONE shared lib setup-imag.sh and
 # setup-device.sh call too (the upstream install-linux.sh pip-installs into the SYSTEM python with
-# --break-system-packages; strih-lx runs a venv). Keeps the box's existing key (REMOTEOS_MCP_AUTH_KEY overrides), restarts the
+# --break-system-packages; strih-snv runs a venv). Keeps the box's existing key (REMOTEOS_MCP_AUTH_KEY overrides), restarts the
 # agent only when the source / unit / key changed, and fails the run unless :8092 answers /health.
 remoteos_mcp_install "$DESKTOP_USER" desktop restart \
   || fail "remoteos-mcp agent install failed -- see the remoteos-mcp line above (GH_TOKEN for a private fork; REMOTEOS_MCP_AUTH_KEY to pin the key)"
@@ -558,17 +561,17 @@ remoteos_mcp_install "$DESKTOP_USER" desktop restart \
 # ---------------------------------------------------------------------------------------------
 step 11 "OBS-box appliance baseline (issue 1357: the SAME lib as imag -- Xorg openbox kiosk, low-latency kernel, de-jitter, max-performance, power envelope)"
 # issue 1357 (owner rulings on the ticket): imag's provisioning is the reference starting position and
-# strih-lx must be the same OBS-only appliance -- a lightweight openbox kiosk on plain Xorg, NOT a GNOME
+# strih-snv must be the same OBS-only appliance -- a lightweight openbox kiosk on plain Xorg, NOT a GNOME
 # Wayland desktop. Every box-level item is the SHARED scripts/lib/obs-box-baseline.sh (moved verbatim
-# out of setup-imag.sh), run here in imag's order with strih-lx's own FACTS as the arguments. This
+# out of setup-imag.sh), run here in imag's order with strih-snv's own FACTS as the arguments. This
 # supersedes the old strih never-sleep (logind drop-in), the de-jitter-less GNOME session, the step-15
 # governor oneshot and the 11c crash-popup sub-step. Kernel, PRIME and session changes take effect at
-# the next boot (the supervisor reboots strih-lx once after this run).
+# the next boot (the supervisor reboots strih-snv once after this run).
 STRIH_KERNEL_SERIES="$(obs_box_kernel_series)" \
   || fail "cannot derive the Ubuntu release series from /etc/os-release -- refusing to hold/install kernel packages by a guessed name"
 STRIH_NIC="$(strih_lx_rig_nic /sys "$(ip -o -4 addr show 2>/dev/null || true)" "$STATIC_IP")" \
   || fail "cannot resolve the rig NDI NIC for the network tuning -- set STRIH_NIC_IFACE=<iface> and re-run"
-# PL1: never below what the firmware already runs (the review read 80 W live on strih-lx) -- read the
+# PL1: never below what the firmware already runs (the review read 80 W live on strih-snv) -- read the
 # package-0 long_term constraint through the SAME identity-based gather the envelope verify uses.
 # shellcheck source=scripts/lib/imag-power-envelope.sh
 . "${HERE}/lib/imag-power-envelope.sh"
@@ -606,7 +609,7 @@ if [ -e /etc/systemd/logind.conf.d/90-strih-lx.conf ]; then
   rm -f /etc/systemd/logind.conf.d/90-strih-lx.conf || fail "could not remove the retired logind drop-in 90-strih-lx.conf"
   echo "  removed the retired logind drop-in 90-strih-lx.conf (superseded by the baseline never-sleep item)"
 fi
-# rtprio stays OFF (issue 1357): the retired 11c grant pinned the render tick SCHED_FIFO on cores strih-lx
+# rtprio stays OFF (issue 1357): the retired 11c grant pinned the render tick SCHED_FIFO on cores strih-snv
 # never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833). The shared
 # item removes a leftover grant; the grader's `rtprio` row (verify item 32) FAILs while one exists.
 obs_box_rtprio_off   # issue 1357: remove a retired render-tick rtprio grant
@@ -617,7 +620,7 @@ obs_box_rtprio_off   # issue 1357: remove a retired render-tick rtprio grant
 step "11b" "NIC xhci IRQ off the OBS cores (issue 1317 item H: NET_RX softirq must not share an OBS core)"
 # The USB 2.5GbE NIC's xhci interrupt lands on ONE core (irqbalance is not installed, so the kernel
 # parks it) where ~1.1 Gb/s of NDI NET_RX softirq collides with OBS's ndir:video/libobs threads
-# (issue 1354, 22.9.2026: measured on strih-lx -- moving the IRQ to an idle E-core cut the genlock
+# (issue 1354, 22.9.2026: measured on strih-snv -- moving the IRQ to an idle E-core cut the genlock
 # "slow output_video" rate from ~35/min to 5-10/min). This installs a boot oneshot that RESOLVES the
 # placement FROM FACTS (iface -> xhci -> IRQ -> last cpu_atom E-core) and writes smp_affinity_list --
 # never a hard-coded IRQ number, so it survives a different IRQ after a kernel/firmware/USB-port

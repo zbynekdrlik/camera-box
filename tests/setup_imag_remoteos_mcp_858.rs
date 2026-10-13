@@ -6,7 +6,7 @@
 //! `ops` skill, #555). Since issue 1361 the install is ONE shared lib, `scripts/lib/remoteos-mcp.sh`
 //! (setup-strih step 10, this step 23, setup-device STEP 17b): the project's own source + its own
 //! constraints.txt pip-installed into a venv at `/opt/remoteos-mcp-venv` — the shape the production
-//! strih-lx box runs. The upstream `install-linux.sh` pip-installed into the SYSTEM python
+//! strih-snv box runs. The upstream `install-linux.sh` pip-installed into the SYSTEM python
 //! (`--break-system-packages`), which the fleet boxes no longer do. The `--auth-key` is a
 //! full-shell-RCE bearer token: it comes from the REMOTEOS_MCP_AUTH_KEY env var (like this script's
 //! other secrets `CAM_PW`/`GH_TOKEN`), the box's existing config, or is generated on-box — NEVER

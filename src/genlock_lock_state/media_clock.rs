@@ -8,7 +8,7 @@
 // its video thread and every output timestamp. Once issue 1372 part A made the Windows
 // `os_gettime_ns()` run at the dantesync-disciplined system-time rate (Linux's `CLOCK_MONOTONIC` is
 // kernel-disciplined already), the wall-vs-media offset must stay FLAT on every box apart from wall
-// steps: 0 ms over 47 min on stream after the part-A deploy, 0 on strih-lx for hours, while the
+// steps: 0 ms over 47 min on stream after the part-A deploy, 0 on strih-snv for hours, while the
 // undisciplined stream mixer walked 67 ms in 83 min (≈ 8 ms per 10 min) before it — green on the
 // indicator the whole time. So the offset's RATE over a window is a real fault signal again, unlike
 // the #1357-removed rate term: that one compared the rate with an instantaneous dantesync

@@ -204,7 +204,7 @@ def test_date_master_check_is_silent_on_a_non_master(tmp_path):
 
 
 def test_date_master_effective_bound(tmp_path):
-    master = (_STATUS / "strih-lx-master-1.9.0.json").read_text()
+    master = (_STATUS / "strih-snv-master-1.9.0.json").read_text()
     slave = (_STATUS / "stream-slave-1.9.0.json").read_text()
     assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 2000, 1000) == "51000"
     assert _bash_call(tmp_path, "date_master_effective_bound_us", slave, 2000, 1000) == "2000"
@@ -222,7 +222,7 @@ _MICRO = ('{"date_authority":"master","date_offset_error_ms":%s,"date_step_bound
 
 
 def test_date_master_effective_bound_on_a_1_11_0_master_is_the_micro_bound(tmp_path):
-    master = (_STATUS / "strih-lx-master-1.11.1.json").read_text()
+    master = (_STATUS / "strih-snv-master-1.11.1.json").read_text()
     slave = (_STATUS / "stream-slave-1.11.1.json").read_text()
     assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 2000, 1000) == "6000"
     assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 8000, 1000) == "8000"
@@ -308,7 +308,7 @@ def test_the_version_pin_is_the_release_this_date_grading_implements():
 def _journal(*offsets, tail=""):
     lines = []
     for i, off in enumerate(offsets):
-        lines.append(f"2026-09-26T08:00:{i * 10:02d}+02:00 strih-lx dantesync[1]: [NTP] offset:{off}{tail}")
+        lines.append(f"2026-09-26T08:00:{i * 10:02d}+02:00 strih-snv dantesync[1]: [NTP] offset:{off}{tail}")
     return "\n".join(lines) + "\n"
 
 
@@ -359,8 +359,8 @@ def test_verify_imag_grades_the_discipline_and_the_date_master():
 # journal keeps the step bound and every printed line names that
 # ---------------------------------------------------------------------------------------------
 
-_LIVE_MASTER_1_11 = _STATUS / "strih-lx-master-1.11.1.json"
-_LIVE_MASTER_1_9 = _STATUS / "strih-lx-master-1.9.0.json"
+_LIVE_MASTER_1_11 = _STATUS / "strih-snv-master-1.11.1.json"
+_LIVE_MASTER_1_9 = _STATUS / "strih-snv-master-1.9.0.json"
 
 
 @pytest.mark.parametrize("status,journal_grade", _journal_rows())
@@ -538,13 +538,13 @@ def test_verify_strih_check_6_grades_the_master_journal_by_its_own_status():
 def test_gate_journal_fallback_names_the_step_bound_without_a_status(tmp_path):
     """The gate falls back to the journal only when HTTP /status is unreachable, so its date master
     is graded on the step bound and the line says why."""
-    j = tmp_path / "strih-lx.log"
+    j = tmp_path / "strih-snv.log"
     j.write_text(_journal(_date_line(-25217), _date_line(-25230), _date_line(-25240))
-                 + "2026-09-26T08:00:30+02:00 strih-lx dantesync[1]: [PTP] LOCK  Drift: 12ns/s\n")
-    args = ["--linux", "strih-lx=10.77.9.202", "--ntp-master", "", "--samples", "1",
+                 + "2026-09-26T08:00:30+02:00 strih-snv dantesync[1]: [PTP] LOCK  Drift: 12ns/s\n")
+    args = ["--linux", "strih-snv=10.77.9.202", "--ntp-master", "", "--samples", "1",
             "--min-distinct", "1", "--window-s", "0"]
-    code, out, err = _gate(args, DANTESYNC_GATE_LINUX_HTTP_STRIH_LX="/nonexistent-1372",
-                           DANTESYNC_GATE_LINUX_JOURNAL_STRIH_LX=str(j))
+    code, out, err = _gate(args, DANTESYNC_GATE_LINUX_HTTP_STRIH_SNV="/nonexistent-1372",
+                           DANTESYNC_GATE_LINUX_JOURNAL_STRIH_SNV=str(j))
     assert code == 0, out + err
     assert "no readable /status" in out, out
 
@@ -594,7 +594,7 @@ def test_gate_passes_the_live_1_9_0_slave_under_enforce(tmp_path):
 
 
 def test_gate_passes_the_live_1_9_0_master_on_its_date_bound(tmp_path):
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json")
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.9.0.json")
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 0, out + err
     assert "DATE MASTER OK" in out and "CLOCK PTP-PHASE-LOCK" in out
@@ -603,7 +603,7 @@ def test_gate_passes_the_live_1_9_0_master_on_its_date_bound(tmp_path):
 def test_gate_grades_the_date_master_on_date_step_bound_not_the_deadband(tmp_path):
     """Before this fix the master only passed by accident, through the 51 ms deadband widening. A
     master that stops reporting ntp_deadband_us is still graded on its date step bound."""
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json",
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.9.0.json",
                drop_ntp_deadband_us=None, drop_ntp_step_threshold_us=None)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 0, out + err
@@ -611,7 +611,7 @@ def test_gate_grades_the_date_master_on_date_step_bound_not_the_deadband(tmp_pat
 
 
 def test_gate_fails_a_date_master_past_its_step_bound(tmp_path):
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json",
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.9.0.json",
                ntp_offset_us=-60000, date_offset_error_ms=-60.0)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 20, out + err
@@ -621,7 +621,7 @@ def test_gate_fails_a_date_master_past_its_step_bound(tmp_path):
 def test_gate_fails_a_date_master_whose_date_is_out_while_its_median_is_in_bound(tmp_path):
     """Isolates the date rc fold: ntp_offset_us stays in the median bound, only
     date_offset_error_ms is past step bound + margin."""
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json", date_offset_error_ms=-60.0)
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.9.0.json", date_offset_error_ms=-60.0)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 20, out + err
     assert "DATE MASTER OUT" in out
@@ -631,7 +631,7 @@ def test_gate_fails_a_date_master_whose_date_is_out_while_its_median_is_in_bound
 def test_gate_is_incomplete_when_the_date_master_fields_are_unreadable(tmp_path, field):
     """A master with a null date error or step bound is UNKNOWN (11), and its median keeps the
     #1021/#1119 widening instead of failing DRIFT on the bare 2 ms bound (review finding)."""
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json", **{field: None})
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.9.0.json", **{field: None})
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 11, out + err
     assert "DATE MASTER UNKNOWN" in out
@@ -639,7 +639,7 @@ def test_gate_is_incomplete_when_the_date_master_fields_are_unreadable(tmp_path,
 
 
 def test_gate_never_grades_the_date_of_a_stale_master(tmp_path):
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json",
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.9.0.json",
                ntp_failed=True, date_offset_error_ms=-60.0)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 11, out + err
@@ -649,7 +649,7 @@ def test_gate_never_grades_the_date_of_a_stale_master(tmp_path):
 def test_gate_date_margin_is_the_one_shared_knob(tmp_path):
     """DANTESYNC_DATE_MARGIN_US is the ONE date margin every consumer reads (the gate, verify-imag,
     verify-strih); the gate's deadband margin no longer doubles as it."""
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json", date_offset_error_ms=-50.5)
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.9.0.json", date_offset_error_ms=-50.5)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 0, out + err
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p), DANTESYNC_DATE_MARGIN_US="0")
@@ -661,7 +661,7 @@ def test_gate_date_margin_is_the_one_shared_knob(tmp_path):
 
 
 def test_gate_passes_a_1_11_0_master_on_its_micro_bound(tmp_path):
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.1.json")
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.11.1.json")
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 0, out + err
     assert "DATE MASTER OK" in out and "micro bound 5ms" in out
@@ -671,7 +671,7 @@ def test_gate_passes_a_1_11_0_master_on_its_micro_bound(tmp_path):
 def test_gate_fails_a_1_11_0_master_that_sits_inside_the_old_step_bound(tmp_path):
     """The 1.9.0 live master error (-28.776 ms) passed the 50 ms step bound; a 1.11.0 master holds
     the date to ~2-3 ms, so the same error is a master that stopped correcting."""
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.1.json",
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.11.1.json",
                ntp_offset_us=-28776, date_offset_error_ms=-28.776)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 20, out + err
@@ -679,7 +679,7 @@ def test_gate_fails_a_1_11_0_master_that_sits_inside_the_old_step_bound(tmp_path
 
 
 def test_gate_fails_a_1_11_0_master_falling_behind(tmp_path):
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.1.json",
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.11.1.json",
                date_correction_falling_behind=True)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 20, out + err
@@ -689,7 +689,7 @@ def test_gate_fails_a_1_11_0_master_falling_behind(tmp_path):
 def test_gate_refuses_a_1_11_0_master_whose_micro_corrections_are_paused(tmp_path):
     """Paused is WARN-level in the report consumers but fail-closed in the E2E [0/8] gate: the
     master has no UTC reading, so the fleet date is unverified (INCOMPLETE, 11)."""
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.1.json", date_micro_paused=True)
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-snv-master-1.11.1.json", date_micro_paused=True)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 11, out + err
     assert "DATE MASTER PAUSED" in out
@@ -717,13 +717,13 @@ def test_gate_help_documents_the_micro_bound():
 
 def test_gate_journal_fallback_grades_a_date_master_line_on_its_step_bound(tmp_path):
     """The gate's linux journal FALLBACK (HTTP down) goes through the shared journal verdict too."""
-    j = tmp_path / "strih-lx.log"
+    j = tmp_path / "strih-snv.log"
     j.write_text(_journal(_date_line(-25217), _date_line(-25230), _date_line(-25240))
-                 + "2026-09-26T08:00:30+02:00 strih-lx dantesync[1]: [PTP] LOCK  Drift: 12ns/s\n")
-    args = ["--linux", "strih-lx=10.77.9.202", "--ntp-master", "", "--samples", "1",
+                 + "2026-09-26T08:00:30+02:00 strih-snv dantesync[1]: [PTP] LOCK  Drift: 12ns/s\n")
+    args = ["--linux", "strih-snv=10.77.9.202", "--ntp-master", "", "--samples", "1",
             "--min-distinct", "1", "--window-s", "0"]
-    code, out, err = _gate(args, DANTESYNC_GATE_LINUX_HTTP_STRIH_LX="/nonexistent-1372",
-                           DANTESYNC_GATE_LINUX_JOURNAL_STRIH_LX=str(j))
+    code, out, err = _gate(args, DANTESYNC_GATE_LINUX_HTTP_STRIH_SNV="/nonexistent-1372",
+                           DANTESYNC_GATE_LINUX_JOURNAL_STRIH_SNV=str(j))
     assert "NTP OK" in out and "date master step bound 50000us" in out, out + err
     assert code == 0, out + err
 
@@ -770,7 +770,7 @@ def test_gate_discipline_check_stays_report_only_without_enforce(tmp_path):
 # design comment 5850538767, Approach 1). The 1.12.0 fixtures are synthesized until the roll.
 # ---------------------------------------------------------------------------------------------
 
-_LIVE_MASTER_1_12 = _STATUS / "strih-lx-master-1.12.0.json"
+_LIVE_MASTER_1_12 = _STATUS / "strih-snv-master-1.12.0.json"
 _LIVE_SLAVE_1_12 = _STATUS / "stream-slave-1.12.0.json"
 
 
@@ -1073,7 +1073,7 @@ def _with_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-@pytest.mark.parametrize("name,role", [("cam1", "video"), ("stream", "video"), ("strih-lx", "ntp-master")])
+@pytest.mark.parametrize("name,role", [("cam1", "video"), ("stream-snv", "video"), ("strih-snv", "ntp-master")])
 def test_the_live_configs_still_match_with_their_inert_phase_slew_key(name, role, monkeypatch):
     _with_env(monkeypatch)
     assert df.drift((_CFG / f"{name}.json").read_bytes(), role) == (df.OK, [])
@@ -1082,8 +1082,8 @@ def test_the_live_configs_still_match_with_their_inert_phase_slew_key(name, role
 @pytest.mark.parametrize("role", ["video", "audio", "ntp-master"])
 def test_the_template_asserts_clock_discipline_not_phase_slew(role, monkeypatch):
     _with_env(monkeypatch)
-    base = json.loads((_CFG / "strih-lx.json").read_text()) if role == "ntp-master" \
-        else json.loads((_CFG / "stream.json").read_text())
+    base = json.loads((_CFG / "strih-snv.json").read_text()) if role == "ntp-master" \
+        else json.loads((_CFG / "stream-snv.json").read_text())
     if role == "audio":
         base["system"]["gm_allowlist"] = [df.role_gm_host("audio")]
     del base["system"]["phase_slew"]

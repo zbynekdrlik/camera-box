@@ -59,7 +59,7 @@ production-critical watchdog class (umbrella **#1308**).
   cross-check (page if EITHER fires). Absent field → derived check only.
 - **Node roster = the WHOLE dantesync fleet, DERIVED from `scripts/lib/dantesync-fleet.sh`
   (issue 1372, `.claude/rules/dantesync-fleet.md`)**: since issue 1413 the CAM arm is the HOME venue's
-  cameras (strih-lx.env STRIH_CAMERAS) and the Poprad cameras ride the REACH arm (below); before it, every
+  cameras (strih-snv.env STRIH_CAMERAS) and the Poprad cameras ride the REACH arm (below); before it, every
   camera camera_resolve knows (incl. ones
   retired from `CAMERA_ACTIVE_SET`) + the obs-fleet boxes (a `retired` one drops out) + **dev1**
   (the `local` node, #1313) + the audio-VLAN PCs **mbc + fohabl** (the `fixed` arm,

@@ -19,7 +19,7 @@
 #
 # WHICH box (issue 1363): the watched strih is RESOLVED, never a baked box name -- the old literal
 # default (the retired Windows box) left this watchdog blind after the M4 cut-over to the Linux
-# strih-lx. The box is the ONE member of the obs-fleet `ndi-portmap` facet (scripts/lib/obs-fleet.sh);
+# strih-snv. The box is the ONE member of the obs-fleet `ndi-portmap` facet (scripts/lib/obs-fleet.sh);
 # its NDI machine name (the sender-name prefix) is the uppercased box hostname libndi announces under;
 # the anchor is "<prefix> (2ME PGM)"; the IP is read from the anchor's OWN mDNS record (the address
 # every receiver dials). Every piece stays env-overridable (NDI_PORTMAP_BOX / _NAME_PREFIX / _ANCHOR /
@@ -86,7 +86,7 @@ if [ -z "${NDI_PORTMAP_BOX:-}" ]; then
   NDI_PORTMAP_BOX="$(_np_fleet_box)" || NDI_PORTMAP_BOX=""
 fi
 # libndi announces every sender as "<MACHINE> (<output>)" with MACHINE = the uppercased hostname
-# (strih-lx -> STRIH-LX); the fleet name of a Linux OBS box IS its hostname.
+# (strih-snv -> STRIH-SNV); the fleet name of a Linux OBS box IS its hostname.
 NDI_PORTMAP_NAME_PREFIX="${NDI_PORTMAP_NAME_PREFIX:-$(printf '%s' "$NDI_PORTMAP_BOX" | tr '[:lower:]' '[:upper:]')}"
 NDI_PORTMAP_ANCHOR="${NDI_PORTMAP_ANCHOR:-${NDI_PORTMAP_NAME_PREFIX:+$NDI_PORTMAP_NAME_PREFIX ($NDI_PORTMAP_PROGRAM_OUTPUT)}}"
 # Empty = read from the anchor's own mDNS record each pass (_np_gather); set = pinned (tests/ops).

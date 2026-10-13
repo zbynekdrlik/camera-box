@@ -60,7 +60,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ps-encoded.sh
 . "$HERE/lib/ps-encoded.sh"
 # shellcheck source=scripts/lib/strih-log-read.sh
-# issue 1360: a Linux strih (strih-lx) is read through the ONE shared strih OBS-log reader.
+# issue 1360: a Linux strih (strih-snv) is read through the ONE shared strih OBS-log reader.
 . "$HERE/lib/strih-log-read.sh"
 # shellcheck source=scripts/lib/rig-mode-state.sh
 # #1203 (c): the 3-state rig EVENT/TEST/UNKNOWN classifier -- the sender-restart arm is WITHHELD in
@@ -198,7 +198,7 @@ fetch_box_log() {
   # to a pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> UNKNOWN, never an abort.
   local _enc _tail
   _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 800)" # #1259: guard the env count before the payload
-  # issue 1360: a Linux strih (strih-lx, the production strih since the M4 cut-over) is read
+  # issue 1360: a Linux strih (strih-snv, the production strih since the M4 cut-over) is read
   # through the ONE shared reader (newest ~/.config/obs-studio/logs/*.txt over plain ssh, the
   # spaced filename quoted) -- the PowerShell read below would come back EMPTY there (UNKNOWN
   # forever, never a page). Every other box (stream, resolume) keeps the PowerShell read.

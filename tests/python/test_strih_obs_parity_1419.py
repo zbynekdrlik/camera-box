@@ -174,7 +174,7 @@ def test_the_projector_seed_fills_an_empty_saved_list(tmp_path):
 
 def test_the_projector_seed_never_touches_an_existing_list(tmp_path):
     m = _mod("strih_projector_seed")
-    p = tmp_path / "strih-lx.json"
+    p = tmp_path / "strih-snv.json"
     keep = [{"monitor": 1, "type": 0, "geometry": "AdnQ", "alwaysOnTopOverridden": True}]
     p.write_text(json.dumps({"saved_projectors": keep}))
     before = p.read_bytes()

@@ -127,9 +127,9 @@ sender) is the supervisor's rig investigation, not this code.
 ## Live acceptance (supervisor, FULL bundle: libobs + frontend)
 
 At the next fleet date step: one `genlock-regrid:` and one `genlock-wall-step:` line per OBS box
-(the Windows boxes and strih-lx alike — a date step moves `CLOCK_REALTIME`, never `CLOCK_MONOTONIC`);
+(the Windows boxes and strih-snv alike — a date step moves `CLOCK_REALTIME`, never `CLOCK_MONOTONIC`);
 resolume LOCK stays LOCKED; stream `mbc` `recover_ms=` > 0 on the step's `asrc:` line and `level_avg=`
-back within ±2 ms of `target=` inside a minute, `applied=` inside its steady band; strih-lx `CG-obs`
+back within ±2 ms of `target=` inside a minute, `applied=` inside its steady band; strih-snv `CG-obs`
 and stream `2ME PGM` 0 new relocks at the step.
 
 ## Not this path: the resolume `cg-obs` bursts

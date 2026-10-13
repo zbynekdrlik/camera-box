@@ -104,7 +104,7 @@ strih_ci_artifact_cleanup() {
 # from the intercom-hub-linux-amd64 CI artifact of a `main` run (or the dir STRIH_LX_HUB_SRC) when NO
 # binary is there.
 # An installed binary is kept: the hub on a running strih is upgraded by its own deploy, never silently
-# by a re-provisioning run (every strih-lx genlock deploy re-runs setup-strih). rc 0 with a warn line when
+# by a re-provisioning run (every strih-snv genlock deploy re-runs setup-strih). rc 0 with a warn line when
 # no artifact can be fetched (the box then needs the binary placed before go-live); rc 1 on an install
 # failure or an artifact without the binary.
 strih_intercom_hub_binary_install() {

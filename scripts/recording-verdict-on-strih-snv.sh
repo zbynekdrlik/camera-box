@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# recording-verdict-on-strih-lx.sh — run recording-verdict ON the strih-lx box (Linux notebook,
+# recording-verdict-on-strih-snv.sh — run recording-verdict ON the strih-snv box (Linux notebook,
 # 10.77.9.202, M4 cut-over — issue 1351), where the strih recording already lives, to EXTRACT its
 # small per-box PARTIAL JSON. This is the Linux sibling of recording-verdict-on-strih.sh (Windows,
-# unchanged) and mirrors recording-verdict-on-imag.sh's shape: strih-lx is a plain Ubuntu box
+# unchanged) and mirrors recording-verdict-on-imag.sh's shape: strih-snv is a plain Ubuntu box
 # reached over plain ssh/scp (targets.md's "Linux OBS Targets" access class, SAME as imag-nb and
 # cam1/cam2) — never the win-* MCP, never PowerShell.
 #
@@ -13,16 +13,16 @@
 #
 # HOW THE PIECES FIT (per-box decode-in-place, #208):
 #   1. CI builds `recording-verdict` (probe-tools-linux-amd64) — the SAME Linux binary
-#      recording-e2e.sh's PROBE_BIN_DIR already holds for imag-nb (#462). strih-lx is x86_64
+#      recording-e2e.sh's PROBE_BIN_DIR already holds for imag-nb (#462). strih-snv is x86_64
 #      Ubuntu — the identical binary runs there unmodified.
-#   2. scp that binary to strih-lx ONCE (skipped when already present + executable there).
-#   3. ssh runs `recording-verdict --extract-partial strih --strih <local rec>` ON strih-lx
+#   2. scp that binary to strih-snv ONCE (skipped when already present + executable there).
+#   3. ssh runs `recording-verdict --extract-partial strih --strih <local rec>` ON strih-snv
 #      against the recording as it lives there (NEVER copied off-box).
 #   4. scp pulls back ONLY the small partial JSON (+ the sibling `<partial>-pixels` dir, #186 —
 #      absent on a clean run) to dev1.
 #
 # Usage:
-#   recording-verdict-on-strih-lx.sh \
+#   recording-verdict-on-strih-snv.sh \
 #       --strih-rec /home/newlevel/... \
 #       --verdict-bin target/release/recording-verdict \
 #       --out-dir /home/newlevel/verdict-out \
@@ -36,7 +36,7 @@ set -euo pipefail
 
 # onstrihlx_upload_decision <force> <present> <local_sha> <remote_sha> — issue 1351 (review
 # finding). Pure/testable (no network): mirrors recording-verdict-on-imag.sh's issue-1118
-# onimag_upload_decision EXACTLY — a present-but-DIFFERENT-sha binary on strih-lx must be
+# onimag_upload_decision EXACTLY — a present-but-DIFFERENT-sha binary on strih-snv must be
 # re-uploaded (a schema bump left stale, or a corrupt partial-transfer), never silently reused
 # just because the path is executable.
 #   force=1                               -> upload
@@ -45,7 +45,7 @@ set -euo pipefail
 #   present=1 and local_sha != remote_sha -> upload (VERSION GATE)
 #   present=1 and local_sha == remote_sha (non-empty) -> skip
 # Issue 1302: the decision itself is the ONE shared verdict_upload_decision (also used by the imag
-# and RESOLUME-SNV extracts); this name stays as the strih-lx entry point.
+# and RESOLUME-SNV extracts); this name stays as the strih-snv entry point.
 # shellcheck source=scripts/lib/verdict-upload-gate.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/verdict-upload-gate.sh"
 onstrihlx_upload_decision() {
@@ -53,7 +53,7 @@ onstrihlx_upload_decision() {
 }
 
 # Pure-string function so a unit test can source the script and assert the command is well-formed
-# (strih-lx-local paths only, %q-quoted — no dev1 path, no unescaped argument) WITHOUT touching
+# (strih-snv-local paths only, %q-quoted — no dev1 path, no unescaped argument) WITHOUT touching
 # the network. RUST_LOG=info so the decode progress is visible in the ssh output (the agent's
 # liveness signal), mirroring build_onimag_command's shape.
 build_onstrihlx_command() {
@@ -101,11 +101,11 @@ main() {
   local STRIH_USER="${STRIH_USER:-newlevel}"
   local STRIH_PW="${STRIH_PW:-newlevel}"
   local VERDICT_BIN=""                                 # LOCAL (dev1) Linux binary to deploy
-  local REMOTE_BIN="/home/newlevel/recording-verdict"  # where it lands / already lives on strih-lx
-  local OUT_DIR="/home/newlevel/verdict-out"           # box-local (strih-lx) out dir
+  local REMOTE_BIN="/home/newlevel/recording-verdict"  # where it lands / already lives on strih-snv
+  local OUT_DIR="/home/newlevel/verdict-out"           # box-local (strih-snv) out dir
   local LOCAL_OUT_DIR="."                              # dev1-side dir to pull results into
   local STRIH_REC=""
-  # Everything after `--` is passed verbatim to recording-verdict on strih-lx.
+  # Everything after `--` is passed verbatim to recording-verdict on strih-snv.
   local -a PASS_ARGS=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -113,7 +113,7 @@ main() {
       # dev1 (durable state, #281), skip re-decode entirely so a re-dispatched worker is idempotent.
       --skip-if-exists)
         if [ -f "$2" ]; then
-          echo "SKIP: strih-lx partial already exists at $2 — skipping re-decode (#281)"
+          echo "SKIP: strih-snv partial already exists at $2 — skipping re-decode (#281)"
           return 0
         fi
         shift 2 ;;
@@ -128,19 +128,19 @@ main() {
   done
 
   if [ -z "$STRIH_REC" ]; then
-    echo "ERROR: --strih-rec <recording path as it lives on strih-lx> is required" >&2
+    echo "ERROR: --strih-rec <recording path as it lives on strih-snv> is required" >&2
     exit 2
   fi
 
   command -v sshpass >/dev/null 2>&1 || {
-    echo "ERROR: sshpass not found — needed to ssh/scp into strih-lx (issue 1351)." >&2
+    echo "ERROR: sshpass not found — needed to ssh/scp into strih-snv (issue 1351)." >&2
     exit 1
   }
 
   local -a SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
   local TARGET="${STRIH_USER}@${STRIH_LX_BOX}"
 
-  # STEP 1: deploy the Linux verdict binary to strih-lx — ONLY if missing/not-executable there,
+  # STEP 1: deploy the Linux verdict binary to strih-snv — ONLY if missing/not-executable there,
   # its sha256 DIFFERS from the local binary, or --force-upload is given. Mirrors
   # recording-verdict-on-imag.sh's issue-1118 sha256 VERSION GATE exactly — a stale on-box binary
   # after a schema bump (e.g. RecordingPartial vN->vN+1) must never be silently reused just
@@ -156,25 +156,25 @@ main() {
     local decision
     decision="$(onstrihlx_upload_decision 0 "$present" "$local_sha" "$remote_sha")"
     if [ "$decision" = "upload" ]; then
-      echo "[recording-verdict-on-strih-lx] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN} (present=$present local_sha=${local_sha:0:12} remote_sha=${remote_sha:0:12})"
+      echo "[recording-verdict-on-strih-snv] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN} (present=$present local_sha=${local_sha:0:12} remote_sha=${remote_sha:0:12})"
       sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "$VERDICT_BIN" "${TARGET}:${REMOTE_BIN}"
       sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "chmod +x '$REMOTE_BIN'"
     else
-      echo "[recording-verdict-on-strih-lx] $REMOTE_BIN already present+executable AND identical sha256 on strih-lx — skipping upload (issue 1118 version gate)"
+      echo "[recording-verdict-on-strih-snv] $REMOTE_BIN already present+executable AND identical sha256 on strih-snv — skipping upload (issue 1118 version gate)"
     fi
   fi
 
-  # STEP 2: run the verdict ON strih-lx against the LOCAL recording (NEVER copied off-box), at IDLE
+  # STEP 2: run the verdict ON strih-snv against the LOCAL recording (NEVER copied off-box), at IDLE
   # priority pinned to the E-cores (issue 1351). Unpinned at nice 0 the multi-core QR/pixel sweep
   # competes with OBS's ndir:video decode threads on the P-cores and the live receivers relock-storm
   # for minutes after the run (issue 1354). LOWPRIO_SNIPPET is the remote-shell replica of
   # strih_lx_lowprio_prefix (the unit-tested pure contract): SINGLE-QUOTED on the dev1 side so the
-  # $(cat …) is evaluated by the strih-lx shell — a replacement notebook resolves its OWN E-cores —
+  # $(cat …) is evaluated by the strih-snv shell — a replacement notebook resolves its OWN E-cores —
   # then `$LP` prefixes the on-box command. The scp of the binary and the partial pull are unchanged.
   local ONSTRIHLX_CMD LOWPRIO_SNIPPET
   ONSTRIHLX_CMD="$(build_onstrihlx_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
   LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi;'
-  echo "[recording-verdict-on-strih-lx] running on strih-lx (${STRIH_LX_BOX}) at idle priority (E-cores): $ONSTRIHLX_CMD"
+  echo "[recording-verdict-on-strih-snv] running on strih-snv (${STRIH_LX_BOX}) at idle priority (E-cores): $ONSTRIHLX_CMD"
   # The brace group keeps the decode gated on `mkdir -p` (the && short-circuits the WHOLE group, not
   # just the LP assignment the snippet begins with) — same failure semantics as before this change.
   sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD; }"
@@ -204,15 +204,15 @@ main() {
   local partial_base local_partial
   partial_base="$(basename "$OUT_PARTIAL")"
   local_partial="$LOCAL_OUT_DIR/$partial_base"
-  echo "[recording-verdict-on-strih-lx] pulling back $OUT_PARTIAL -> $local_partial"
+  echo "[recording-verdict-on-strih-snv] pulling back $OUT_PARTIAL -> $local_partial"
   sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "${TARGET}:${OUT_PARTIAL}" "$local_partial"
   if sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "[ -d '$PIXELS_DIR' ]" 2>/dev/null; then
-    echo "[recording-verdict-on-strih-lx] pulling back #186 pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
+    echo "[recording-verdict-on-strih-snv] pulling back #186 pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
     sshpass -p "$STRIH_PW" scp -r "${SSH_OPTS[@]}" "${TARGET}:${PIXELS_DIR}" "$LOCAL_OUT_DIR/"
   else
-    echo "[recording-verdict-on-strih-lx] no pixel-proof dir on strih-lx — clean run, nothing flagged"
+    echo "[recording-verdict-on-strih-snv] no pixel-proof dir on strih-snv — clean run, nothing flagged"
   fi
-  echo "[recording-verdict-on-strih-lx] done: partial at $local_partial"
+  echo "[recording-verdict-on-strih-snv] done: partial at $local_partial"
 }
 
 # Run main only when EXECUTED, not when SOURCED (so a test can source + call

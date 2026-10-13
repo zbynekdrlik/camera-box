@@ -152,7 +152,7 @@ fn down_path_holds_one_pass_then_restarts_and_alerts() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// issue 1317: a LINUX genlock box (the production strih-lx since M4) that is confirmed DOWN gets
+// issue 1317: a LINUX genlock box (the production strih-snv since M4) that is confirmed DOWN gets
 // its systemd --user unit restarted — the Windows `schtasks /run` must never be aimed at it. The
 // box's class comes from the ONE fleet list (OBS_FLEET, overridden here for a hermetic fixture).
 // ---------------------------------------------------------------------------------------------

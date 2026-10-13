@@ -46,7 +46,7 @@ fn scratch(name: &str) -> PathBuf {
 
 /// Run a planner script with the given args; return (exit_code, stdout, stderr). issue 1317 part 3:
 /// the Windows strih planner has NO default box any more (its old 10.77.9.202 default is the Linux
-/// strih-lx now), so every run names a hypothetical Windows strih on a TEST-NET address.
+/// strih-snv now), so every run names a hypothetical Windows strih on a TEST-NET address.
 fn run_planner(script: &PathBuf, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(script)
         .args(args)
@@ -210,7 +210,7 @@ fn strih_without_skip_flag_emits_plan_regardless() {
 // ─── issue 1317 part 3: no default Windows strih, never a Windows plan for the Linux strih ─────
 
 /// The Windows strih planner used to default STRIH_BOX to 10.77.9.202 -- the retired STRIH-SNV PC,
-/// whose address is the Linux strih-lx now. It must refuse with no box, and refuse a box
+/// whose address is the Linux strih-snv now. It must refuse with no box, and refuse a box
 /// strih_platform resolves to `linux` (pointing at the -lx sibling), while an explicit Windows
 /// strih (or the STRIH_PLATFORM=windows override) still gets its plan.
 #[test]
@@ -249,10 +249,10 @@ fn strih_planner_has_no_default_box_and_refuses_the_linux_strih_1317() {
     let (code, out, err) = run(&[("STRIH_BOX", "10.77.9.202")]);
     assert_eq!(
         code, 2,
-        "the Linux strih-lx must be refused: out={out} err={err}"
+        "the Linux strih-snv must be refused: out={out} err={err}"
     );
     assert!(
-        err.contains("recording-verdict-on-strih-lx.sh") && !out.contains("win-strih Shell"),
+        err.contains("recording-verdict-on-strih-snv.sh") && !out.contains("win-strih Shell"),
         "the refusal points at the Linux sibling and emits no Windows plan: out={out} err={err}"
     );
     let (code, out, _err) = run(&[("STRIH_BOX", "10.77.9.202"), ("STRIH_PLATFORM", "windows")]);

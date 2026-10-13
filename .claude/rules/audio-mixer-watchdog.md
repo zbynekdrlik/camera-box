@@ -56,7 +56,7 @@ its own rate and an unknown tick length is UNKNOWN).
 ## STALLED = the dump is old AND the log head is live NOW (issue 1385)
 
 A stopped audio thread stops dumping while the rest of OBS keeps logging. On a box without an
-obs-vban output (stream, strih-lx) nothing else in this watchdog sees it, so STALLED pages it
+obs-vban output (stream, strih-snv) nothing else in this watchdog sees it, so STALLED pages it
 through the same arm as BEHIND (2-pass confirm, `watchdog_notify_key "audio-mixer-<box>"`, the
 arm + box throttle signature).
 
@@ -72,7 +72,7 @@ arm + box throttle signature).
   (`AUDIO_MIXER_LOG_LIVE_S`).
 - **Facets that looked like proof but are not** (read live on 28.9, read-only):
   `program_render_lagged_age_s` is the age of the WORST `lagged` window in the tail, not recency —
-  772 s on strih-lx and 1287 s on resolume, both healthy. `ndi_input_latency` (the one OBS-WS fact)
+  772 s on strih-snv and 1287 s on resolume, both healthy. `ndi_input_latency` (the one OBS-WS fact)
   is absent on resolume, `obs_process_count` is Windows-only. Neither says the log advances.
 - **Date-less log, and why STALE RESETS the mixer confirm.** "Now" is read after the log, so a
   head AHEAD of it can only be a wall-clock step back: up to 10 s (`LOG_HEAD_CLOCK_SLACK_S`) it reads
@@ -127,7 +127,7 @@ verdict reads STALE and resets the confirm: the arm is blind, silently.
   `audio-mixer-clock-<box>` (a config fault, not an on-air one, so no time-bucketed re-ping); OK
   clears it with a machine-channel RECOVERY line; UNKNOWN holds.
 - **Hard acceptance before the timer is enabled:** after the supervisor redeploys the gather, read
-  `obs_log_head_age_s` on strih-lx, stream and resolume (`curl -s http://<box>:8899/bundle-state.json`):
+  `obs_log_head_age_s` on strih-snv, stream and resolume (`curl -s http://<box>:8899/bundle-state.json`):
   it must read 0-15 s on each. A reading near a whole number of hours is the zone mismatch -- fix the
   service's environment before enabling the timer, never raise `LOG_LIVE_S` / `LOG_FROZEN_S`.
 - **STALLED is decided FIRST, from the age alone.** A stale dump's counts describe a minute long
@@ -151,7 +151,7 @@ verdict reads STALE and resets the confirm: the arm is blind, silently.
   absent = UNKNOWN. An audio thread that dies before its second dump in a fresh log is therefore
   not paged here (a stated residual: the start dump count is absent at a normal start too, so no
   facet tells the two apart).
-- **The gather must be redeployed** to strih-lx, stream and resolume (the bundle-state server tree,
+- **The gather must be redeployed** to strih-snv, stream and resolume (the bundle-state server tree,
   every file in `scripts/lib/bundle-state-files.txt` since issue 1386, same steps as issue 1381's
   facets). Until then `obs_log_head_age_s` is absent and the
   verdict stays STALE, log-only — never a false page.
@@ -247,13 +247,13 @@ the real bash `--dry-run` fires exactly one `alert_now=1` STALLED in the window.
 OBS dying at 03:45 reads STALE from 03:46 on, and a log with no other advancing line never pages.
 The quiet windows and the real onset (the mixer kept dumping while it fell behind) never read
 STALLED. A stream-shaped variant (the same real dumps, no obs-vban line, a synthetic
-`program-render-audit` line every 5 s keeping the log moving -- the stream / strih-lx case) pages
+`program-render-audit` line every 5 s keeping the log moving -- the stream / strih-snv case) pages
 once through the real bash dry-run for box `stream`. Two frozen logs replayed for 3 days (a stopped
 thread, and the onset frozen at 06:20 on a BEHIND dump) never page.
 
 The other boxes, read-only on 27.9/28.9: the stream box's current log (19:57–00:20, 263 full
 dumps) read ticks=2813 and ticks_over=0 in every dump and has no obs-vban line (VBAN arm UNKNOWN);
-strih-lx's current log (196 dumps, review round 1) read ticks=2813 with ticks_over <= 1.
+strih-snv's current log (196 dumps, review round 1) read ticks=2813 with ticks_over <= 1.
 
 ### Refreshing or extending the replay fixtures (read-only)
 
@@ -273,7 +273,7 @@ strih-lx's current log (196 dumps, review round 1) read ticks=2813 with ticks_ov
 
 ## Watchdog shape
 
-- Roster: obs-fleet facet `audio-mixer` = strih-lx stream resolume (`obs_fleet_boxes audio-mixer`,
+- Roster: obs-fleet facet `audio-mixer` = strih-snv stream resolume (`obs_fleet_boxes audio-mixer`,
   env override `AUDIO_MIXER_BOXES`); resolume is polled only while home (`obs_fleet_poll_now`).
 - PRODUCTION-CRITICAL (issue 1308): both arms time-bucket their key —
   `watchdog_notify_key "audio-mixer-<box>"` / `"vban-loss-<box>"` — and the file is on the

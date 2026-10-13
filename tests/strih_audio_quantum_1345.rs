@@ -1,4 +1,4 @@
-//! issue 1345 (24.9.2026, owner accepted 25.9 "perfektne"): the strih-lx interkom audio fixes that
+//! issue 1345 (24.9.2026, owner accepted 25.9 "perfektne"): the strih-snv interkom audio fixes that
 //! existed ONLY as hand-made files on the box are provisioned from the repo.
 //!
 //! - `51-minifuse-output-period.conf` (WirePlumber): the MiniFuse playback opened at period 256
@@ -8,7 +8,7 @@
 //! - setup-strih step 12 installs both through the shared compare-then-rewrite helper, and
 //!   verify-strih grades both files plus the LIVE graph quantum.
 //!
-//! The rendered text is the live strih-lx file text byte-for-byte (read 25.9.2026), so a verify on
+//! The rendered text is the live strih-snv file text byte-for-byte (read 25.9.2026), so a verify on
 //! the hand-fixed box already passes and a setup re-run logs "unchanged".
 //!
 //! Tier-0: pure bash sourcing + static anchors (no cargo compile locally; CI runs these).
@@ -87,7 +87,7 @@ fn the_graph_quantum_dropin_is_the_live_text() {
     assert_eq!(out, STRIH_QUANTUM);
 }
 
-/// The live `pw-metadata -n settings` dump (strih-lx 25.9.2026, the running session: forced 1024,
+/// The live `pw-metadata -n settings` dump (strih-snv 25.9.2026, the running session: forced 1024,
 /// min-quantum still the pre-restart 32).
 const LIVE_SETTINGS: &str = "Found \"settings\" metadata 34
 update: id:0 key:'log.level' value:'2' type:''

@@ -294,12 +294,12 @@ pub const PHASE_PIN_HYSTERESIS_NS: u64 = 5_000_000; // 5 ms
 /// conveyor `quantum + budget` above its arrival floor, where `budget` is
 /// `max(PHASE_PIN_HYSTERESIS_NS, GENLOCK_N2_JITTER_BUDGET_NS)`. Before #1354 the budget was only the
 /// 5 ms grid hysteresis, so a late-arriving second frame of a 60->30 pair had just 5 ms of headroom
-/// right after a shed pulled the conveyor toward its floor. strih-lx's receive path emits
+/// right after a shed pulled the conveyor toward its floor. strih-snv's receive path emits
 /// `#797 slow output_video` events of 5-17 ms ~30/min on EVERY input even idle, so an input whose
 /// arrival phase sat near the mature deadline took SINGLE-MATURE ticks (a permanent
 /// +one-source-interval phase step each) faster than the shed's 1-per-`DRAIN_MIN_TICK_INTERVAL`
 /// drain -> a 100-250 ms per-camera delivery ladder (issue 1354, cam4 window 15:31-15:37 on
-/// strih-lx, 22.9.2026). 15 ms = one 30 fps canvas half-interval minus the 5 ms slew allowance,
+/// strih-snv, 22.9.2026). 15 ms = one 30 fps canvas half-interval minus the 5 ms slew allowance,
 /// covering every measured slow-output event <=17 ms. The conveyor then sits ~10 ms deeper per
 /// input — uniform across inputs, invisible to the E2E aligner which pins RELATIVE offsets. Taking
 /// the `max` with the grid hysteresis keeps the sub-frame flapping floor honoured even if this
@@ -3245,7 +3245,7 @@ mod tests {
     // #1354 — the N>=2 conveyor's ARRIVAL-JITTER BUDGET. The phase shed parks the N>=2 conveyor
     // `quantum + budget` above its arrival floor; the budget was only PHASE_PIN_HYSTERESIS_NS (5 ms),
     // so a late-arriving second frame of a 60->30 pair had just 5 ms of headroom right after a shed.
-    // strih-lx's receive path emits `#797 slow output_video` events of 5-17 ms ~30/min on every
+    // strih-snv's receive path emits `#797 slow output_video` events of 5-17 ms ~30/min on every
     // input even idle, so an input near the mature deadline took SINGLE-MATURE ticks (a permanent
     // +one-source-interval phase step each) faster than the shed drains -> the 100-250 ms per-camera
     // delivery ladder measured live (cam4, 22.9.2026). Raising the budget to 15 ms covers every

@@ -117,8 +117,8 @@ def test_help_prints_the_whole_header():
 
 
 def test_the_strih_hop_source_is_overridable_for_the_live_cg_obs_input(tmp_path):
-    # issue 1302: since SongPlayer's B4 (songplayer 221) the strih-lx input receiving SP-program is
-    # named `CG-obs`; it is the DEFAULT (strih-lx is the only strih), CG_CHAIN_STRIH_SRC overrides it.
+    # issue 1302: since SongPlayer's B4 (songplayer 221) the strih-snv input receiving SP-program is
+    # named `CG-obs`; it is the DEFAULT (strih-snv is the only strih), CG_CHAIN_STRIH_SRC overrides it.
     logs = {"STRIH": _log(tmp_path, "strih", ["CG-obs"])}
     r = _run(tmp_path, args=("--hops", "strih"), logs=logs)
     assert r.returncode == 0, r.stdout + r.stderr

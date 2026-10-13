@@ -2,7 +2,7 @@
 //!
 //! The vendored OBS (`vendor/obs-studio/libobs/obs-genlock-render-tick-pin.h`) pins the libobs graphics thread (the thread that drives
 //! the genlock render tick through `video_sleep`) onto cores the kernel keeps free for it. Until
-//! issue 1357 it read only `nohz_full` and fell back to a hardcoded `{10,11}` pair, so on strih-lx
+//! issue 1357 it read only `nohz_full` and fell back to a hardcoded `{10,11}` pair, so on strih-snv
 //! (no isolated core at all) it pinned the thread onto two ordinary cores, and every thread the
 //! graphics thread created inherited that mask (40 threads on 10-11 on 27.9.2026).
 //!
@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn strih_lx_with_no_isolated_core_is_never_pinned() {
-        // 27.9.2026 strih-lx: both sysfs lists read as an empty line.
+        // 27.9.2026 strih-snv: both sysfs lists read as an empty line.
         assert!(render_tick_pin_cores("\n", "\n").is_empty());
         assert!(render_tick_pin_cores("", "").is_empty());
     }

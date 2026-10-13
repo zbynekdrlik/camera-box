@@ -607,7 +607,7 @@ def test_uint_knobs_refuse_an_overlong_value(tmp_path):
 def test_rig_mode_event_survives_a_failing_cg_obs_sweep_and_the_contract_carries_it(tmp_path):
     # The traveling box must never abort the owner's pre-broadcast switch: its sweep-off failure is
     # a loud WARNING, and the contract's fail-closed sweep-check sentinel carries the verdict.
-    out, err, log = _rig(tmp_path, 'toggle_burn event; echo "TOGGLE_RC=$?"', "resolume",
+    out, err, log = _rig(tmp_path, 'toggle_burn event; echo "TOGGLE_RC=$?"', "resolume-snv",
                          {"FAKE_PY_FAIL_HOST": "resolume.lan", "FAKE_PY_FAIL_RC": "2"})
     assert "TOGGLE_RC=0" in out, out + err
     assert "sweep-off --host resolume.lan" in log
@@ -617,11 +617,11 @@ def test_rig_mode_event_survives_a_failing_cg_obs_sweep_and_the_contract_carries
 def test_rig_mode_event_still_fails_on_a_strih_sweep_failure(tmp_path):
     out, err, log = _rig(tmp_path, 'toggle_burn event; echo "TOGGLE_RC=$?"', "none",
                          {"FAKE_PY_FAIL_HOST": "10.77.9.202", "FAKE_PY_FAIL_RC": "1"})
-    assert "TOGGLE_RC=0" not in out, "a strih/stream sweep failure still fails the switch"
+    assert "TOGGLE_RC=0" not in out, "a strih/stream-snv sweep failure still fails the switch"
 
 
 def test_rig_mode_passes_its_obs_ws_password_to_the_cg_obs_sweep(tmp_path):
-    out, err, log = _rig(tmp_path, "toggle_burn event", "resolume", {"OBS_WS_PASSWORD": "rigpw"})
+    out, err, log = _rig(tmp_path, "toggle_burn event", "resolume-snv", {"OBS_WS_PASSWORD": "rigpw"})
     assert "sweep-off --host resolume.lan --password rigpw" in log, log
 
 
@@ -629,19 +629,19 @@ def test_rig_mode_passes_its_obs_ws_password_to_the_cg_obs_sweep(tmp_path):
 
 
 def test_backstop_target_is_the_fleet_host_only_while_home(tmp_path):
-    rc, out, err, _ = _run(tmp_path, "OBS_FLEET_HOME=resolume cg_chain_backstop_sweep_targets")
+    rc, out, err, _ = _run(tmp_path, "OBS_FLEET_HOME=resolume-snv cg_chain_backstop_sweep_targets")
     assert rc == 0, err
-    assert out == "resolume.lan|-|resolume\n", "the traveling box by its fleet HOSTNAME, never a pinned IP"
-    rc, out, err, _ = _run(tmp_path, "OBS_FLEET_HOME=strih-lx cg_chain_backstop_sweep_targets")
+    assert out == "resolume.lan|-|resolume-snv\n", "the traveling box by its fleet HOSTNAME, never a pinned IP"
+    rc, out, err, _ = _run(tmp_path, "OBS_FLEET_HOME=strih-snv cg_chain_backstop_sweep_targets")
     assert rc == 0 and out == ""
-    assert "[resolume burn-sweep] SKIP" in err and "away" in err, err
+    assert "[resolume-snv burn-sweep] SKIP" in err and "away" in err, err
 
 
 def test_backstop_sweep_off_sweeps_the_cg_obs_when_home(tmp_path):
-    rc, out, err, calls = _run(tmp_path, 'OBS_FLEET_HOME=resolume cg_chain_backstop_sweep_off "$BF" 7')
+    rc, out, err, calls = _run(tmp_path, 'OBS_FLEET_HOME=resolume-snv cg_chain_backstop_sweep_off "$BF" 7')
     assert rc == 0, err
     assert calls == ["obs_burn_filter.py sweep-off --host resolume.lan"], calls
-    assert "[resolume burn-sweep] [sweep] host=resolume.lan" in out, out
+    assert "[resolume-snv burn-sweep] [sweep] host=resolume.lan" in out, out
     assert (tmp_path / "timeout.log").read_text().split() == ["7"]
     assert "WARNING" not in err
 
@@ -654,7 +654,7 @@ def test_backstop_sweep_off_is_a_skip_when_away(tmp_path):
 
 def test_backstop_enumeration_failure_is_loud_and_unverified_never_fatal(tmp_path):
     rc, out, err, calls = _run(
-        tmp_path, 'OBS_FLEET_HOME=resolume cg_chain_backstop_sweep_off "$BF" 7; echo REACHED',
+        tmp_path, 'OBS_FLEET_HOME=resolume-snv cg_chain_backstop_sweep_off "$BF" 7; echo REACHED',
         env={"FAKE_SWEEP_RC": "2"})
     assert rc == 0 and "REACHED" in out, "the camera-chain E2E never aborts on the cg leg"
     assert "could not enumerate the cg OBS inputs on resolume.lan" in err and "UNVERIFIED" in err, err
@@ -663,7 +663,7 @@ def test_backstop_enumeration_failure_is_loud_and_unverified_never_fatal(tmp_pat
 
 def test_backstop_other_failure_names_the_rc(tmp_path):
     rc, out, err, _ = _run(
-        tmp_path, 'OBS_FLEET_HOME=resolume cg_chain_backstop_sweep_off "$BF" 7',
+        tmp_path, 'OBS_FLEET_HOME=resolume-snv cg_chain_backstop_sweep_off "$BF" 7',
         env={"FAKE_SWEEP_RC": "1"})
     assert rc == 0
     assert "sweep on resolume.lan failed (rc=1)" in err, err
@@ -671,7 +671,7 @@ def test_backstop_other_failure_names_the_rc(tmp_path):
 
 def test_backstop_passes_the_cg_obs_password_only_when_set(tmp_path):
     rc, _, err, calls = _run(
-        tmp_path, 'OBS_FLEET_HOME=resolume CG_CHAIN_OBS_PASSWORD=s3 cg_chain_backstop_sweep_off "$BF" 7')
+        tmp_path, 'OBS_FLEET_HOME=resolume-snv CG_CHAIN_OBS_PASSWORD=s3 cg_chain_backstop_sweep_off "$BF" 7')
     assert rc == 0, err
     assert calls == ["obs_burn_filter.py sweep-off --host resolume.lan --password s3"]
 
@@ -707,20 +707,20 @@ def _rig(tmp_path, body, home, extra_env=None):
 
 
 def test_rig_mode_event_sweeps_the_cg_obs_when_home(tmp_path):
-    out, err, log = _rig(tmp_path, "toggle_burn event", "resolume")
+    out, err, log = _rig(tmp_path, "toggle_burn event", "resolume-snv")
     assert "sweep-off --host resolume.lan" in log, log + err
-    assert "[resolume burn-sweep] ok" in out, out
+    assert "[resolume-snv burn-sweep] ok" in out, out
 
 
 def test_rig_mode_event_skips_the_cg_obs_when_away(tmp_path):
     out, err, log = _rig(tmp_path, "toggle_burn event", "none")
-    assert "resolume" not in log, log
-    assert "[resolume burn-sweep] SKIP" in err, err
+    assert "resolume-snv" not in log, log
+    assert "[resolume-snv burn-sweep] SKIP" in err, err
 
 
 def test_rig_mode_test_never_touches_the_cg_obs(tmp_path):
-    out, err, log = _rig(tmp_path, "toggle_burn test", "resolume")
-    assert "resolume" not in log, "TEST (burn ON) stays pinned-only: the backstop is an OFF sweep"
+    out, err, log = _rig(tmp_path, "toggle_burn test", "resolume-snv")
+    assert "resolume-snv" not in log, "TEST (burn ON) stays pinned-only: the backstop is an OFF sweep"
 
 
 def test_rig_mode_routes_both_event_sweeps_and_only_them_through_the_backstop():
@@ -784,7 +784,7 @@ def _contract_sweep(tmp_path, cg_sweep):
     out = subprocess.run(
         ["/bin/bash", "-c", harness], capture_output=True, text=True, check=False,
         env={"PATH": f"{fbin}:/usr/local/bin:/usr/bin:/bin", "HOME": str(tmp_path),
-             "PYLOG": str(pylog), "OBS_FLEET_HOME": "resolume", "FAKE_CG_SWEEP": cg_sweep})
+             "PYLOG": str(pylog), "OBS_FLEET_HOME": "resolume-snv", "FAKE_CG_SWEEP": cg_sweep})
     assert out.returncode == 0, out.stderr
     line = [ln for ln in out.stdout.splitlines() if ln.startswith("BURN=")][-1]
     return json.loads(line[len("BURN="):]), pylog.read_text()
@@ -795,12 +795,12 @@ def test_contract_sweep_check_is_bounded_on_every_row(tmp_path):
     assert "TIMEOUT 60 " in log and "--host 10.77.9.202" in log, log
     cg = [ln for ln in log.splitlines() if "--host resolume.lan" in ln]
     assert cg and cg[0].startswith("TIMEOUT 60 "), "a hung traveling box must not hang the contract"
-    assert burns == {"strih:NDI cam1": False, "resolume:sp-fast_video": False}, burns
+    assert burns == {"strih:NDI cam1": False, "resolume-snv:sp-fast_video": False}, burns
 
 
 def test_contract_sweep_check_carries_a_cg_obs_burn(tmp_path):
     burns, _ = _contract_sweep(tmp_path, "burn")
-    assert burns["resolume:sp-fast_video"] is True, burns
+    assert burns["resolume-snv:sp-fast_video"] is True, burns
 
 
 def test_contract_sweep_check_fails_closed_when_the_cg_obs_cannot_be_read(tmp_path):
@@ -809,7 +809,7 @@ def test_contract_sweep_check_fails_closed_when_the_cg_obs_cannot_be_read(tmp_pa
         run_dir = tmp_path / rc
         run_dir.mkdir()
         burns, _ = _contract_sweep(run_dir, rc)
-        assert burns.get("resolume:__sweep_unreachable__") is True, (rc, burns)
+        assert burns.get("resolume-snv:__sweep_unreachable__") is True, (rc, burns)
         assert burns["strih:NDI cam1"] is False
 
 

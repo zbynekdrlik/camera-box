@@ -4,7 +4,7 @@
 //! (`fetch_box_log`), plus the opt-in `[4g/8]` pre-record calibration in `recording-e2e.sh`.
 //!
 //! Root cause: each still built ONLY the Windows `gc (gci $env:APPDATA\obs-studio\logs\*.txt …)
-//! -Tail N` PowerShell read, so against the Linux strih-lx notebook (10.77.9.202, production strih
+//! -Tail N` PowerShell read, so against the Linux strih-snv notebook (10.77.9.202, production strih
 //! since the M4 cut-over) every read came back EMPTY and each consumer fell back fail-open — a
 //! watchdog that silently never pages (UNKNOWN forever).
 //!
@@ -129,14 +129,14 @@ fn out_block(o: &CaseOut) -> String {
         .to_string()
 }
 
-/// A Linux strih (strih-lx) read must come back with the newest (spaced-name) log's lines, taken
+/// A Linux strih (strih-snv) read must come back with the newest (spaced-name) log's lines, taken
 /// through the shared reader's transport (no PowerShell, no trusted stale known_hosts key).
 fn assert_linux_strih_read(o: &CaseOut, ctx: &str) {
     assert_done(o, ctx);
     let out = out_block(o);
     assert!(
         out.contains("received=160") && out.contains("newest-line-5"),
-        "{ctx}: a strih-lx read must return the NEWEST log's lines (a spaced filename), got: {out}\nstub log:\n{}",
+        "{ctx}: a strih-snv read must return the NEWEST log's lines (a spaced filename), got: {out}\nstub log:\n{}",
         o.log
     );
     assert!(
@@ -150,7 +150,7 @@ fn assert_linux_strih_read(o: &CaseOut, ctx: &str) {
     );
     assert!(
         o.log.contains("-o UserKnownHostsFile=/dev/null"),
-        "{ctx}: the strih-lx read must go through the shared reader's transport (no stale \
+        "{ctx}: the strih-snv read must go through the shared reader's transport (no stale \
          known_hosts key disabling password auth): {}",
         o.log
     );
@@ -173,7 +173,7 @@ fn assert_windows_read_kept(o: &CaseOut, ctx: &str, want_out: &str) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// (a) each watchdog's strih read on strih-lx
+// (a) each watchdog's strih read on strih-snv
 // ---------------------------------------------------------------------------------------------
 
 #[test]
@@ -194,7 +194,7 @@ fn frozen_input_probe_received_reads_the_linux_strih_log_1360() {
     assert_done(&o, "frozen-input probe_received");
     assert!(
         has_line(&out_block(&o), "160"),
-        "probe_received on strih-lx must return the newest received= of the source (160): {}\nstub log:\n{}",
+        "probe_received on strih-snv must return the newest received= of the source (160): {}\nstub log:\n{}",
         o.stdout,
         o.log
     );
@@ -214,7 +214,7 @@ fn ndi_halving_watchdog_reads_the_linux_strih_log_1360() {
     assert_linux_strih_read(&o, "ndi-halving fetch_box_log");
     assert!(
         out_block(&o).contains("recv-timing #797 'NDI cam1'"),
-        "the halving tap line must be in the strih-lx read: {}",
+        "the halving tap line must be in the strih-snv read: {}",
         o.stdout
     );
 }
@@ -228,7 +228,7 @@ fn asio_starve_watchdog_reads_the_linux_strih_log_1360() {
     assert_linux_strih_read(&o, "asio-starve fetch_box_log");
     assert!(
         out_block(&o).contains("asrc: source 'mbc'"),
-        "the asrc tap line must be in the strih-lx read: {}",
+        "the asrc tap line must be in the strih-snv read: {}",
         o.stdout
     );
 }
@@ -259,7 +259,7 @@ fn a_failed_strih_lx_read_stays_empty_and_never_aborts_1360() {
         assert_done(&o, script);
         assert!(
             has_line(&o.stdout, "EMPTY:[]"),
-            "{script}: a failed strih-lx read must be EMPTY (the watchdog's UNKNOWN path): {}",
+            "{script}: a failed strih-snv read must be EMPTY (the watchdog's UNKNOWN path): {}",
             o.stdout
         );
     }
@@ -394,7 +394,7 @@ fn prerecord_calibration_reads_strih_through_the_shared_reader_1360() {
 #[test]
 fn prerecord_calibration_mark_and_fetch_scope_the_linux_log_1360() {
     // Run the [4g/8] mark + fetch statements EXACTLY as extracted from recording-e2e.sh (the only
-    // two strih-touching statements besides the python calls) against the fixture strih-lx.
+    // two strih-touching statements besides the python calls) against the fixture strih-snv.
     let b = calib_block();
     let mark = b
         .lines()
@@ -427,13 +427,13 @@ fn prerecord_calibration_mark_and_fetch_scope_the_linux_log_1360() {
     assert_done(&o, "[4g/8] mark");
     assert!(
         has_line(&o.stdout, "MARK=5"),
-        "[4g/8] must mark the strih-lx log length: {}\n{}",
+        "[4g/8] must mark the strih-snv log length: {}\n{}",
         o.stdout,
         o.log
     );
     assert!(
         has_line(&o.stdout, "FETCH_OK"),
-        "the extracted [4g/8] fetch statement must succeed on strih-lx: {}\n{}",
+        "the extracted [4g/8] fetch statement must succeed on strih-snv: {}\n{}",
         o.stdout,
         o.log
     );
@@ -487,11 +487,11 @@ fn genlock_audit_snapshot_reads_the_linux_strih_log_through_the_shared_reader_13
          echo \"WANT=$(strih_log_remote_cmd linux tail 3000)\"\n\
          echo 'OUT<<'\ncat \"$T/before.txt\"\necho '>>OUT'",
     );
-    assert_done(&o, "genlock-audit snapshot (strih-lx)");
+    assert_done(&o, "genlock-audit snapshot (strih-snv)");
     let want = want_line(&o);
     assert!(
         !want.is_empty() && has_line(&o.log, &format!("REMOTE:{want}")),
-        "the snapshot must read strih-lx with the shared reader's raw tail (default 3000 lines), \
+        "the snapshot must read strih-snv with the shared reader's raw tail (default 3000 lines), \
          never its own remote grep; want REMOTE:{want}\nstub log:\n{}",
         o.log
     );

@@ -1,10 +1,10 @@
 """issue 1317 part 3 -- the two retention drivers no longer default to the RETIRED Windows strih.
 
 The Windows strih PC (STRIH-SNV) was retired at the M4 cut-over (20.9.2026); its address 10.77.9.202
-is the Linux strih-lx now (the ONE fleet list, scripts/lib/obs-fleet.sh). Both dev1 retention
+is the Linux strih-snv now (the ONE fleet list, scripts/lib/obs-fleet.sh). Both dev1 retention
 drivers used to default HOST=10.77.9.202 and scp a PowerShell .ps1 at it:
 
-  * scripts/strih-recordings-retention.sh -- Windows-only (.ps1 via `powershell -File`). strih-lx
+  * scripts/strih-recordings-retention.sh -- Windows-only (.ps1 via `powershell -File`). strih-snv
     records to /srv/_REC on Linux (its OBS profile RecFilePath) and has no .ps1 executor, so the
     default is DROPPED: --host is required and a linux-genlock fleet address is refused.
   * scripts/obs-backup-retention.sh -- gains `--box <fleet-name>`, which dispatches on the fleet
@@ -68,11 +68,11 @@ def test_recordings_retention_has_no_default_box():
 def test_recordings_retention_refuses_the_linux_strih_lx():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        for host in ("10.77.9.202", "strih-lx"):
+        for host in ("10.77.9.202", "strih-snv"):
             r = _run(REC, ["--host", host], env)
             assert r.returncode == 2, (host, r.stdout + r.stderr)
             assert "linux-genlock" in r.stderr, r.stderr
-        assert _calls(log) == "", "a Windows .ps1 is never scp'd at the Linux strih-lx"
+        assert _calls(log) == "", "a Windows .ps1 is never scp'd at the Linux strih-snv"
 
 
 def test_recordings_retention_still_drives_an_explicit_windows_box():
@@ -103,13 +103,13 @@ def test_backup_retention_host_refuses_the_linux_strih_lx():
         r = _run(BAK, ["--host", "10.77.9.202"], env)
         assert r.returncode == 2, r.stdout + r.stderr
         assert "linux-genlock" in r.stderr and "--box" in r.stderr, r.stderr
-        assert _calls(log) == "", "the .ps1 driver never targets the Linux strih-lx"
+        assert _calls(log) == "", "the .ps1 driver never targets the Linux strih-snv"
 
 
 def test_backup_retention_box_strih_lx_runs_the_bash_local_sweep_over_ssh():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(BAK, ["--box", "strih-lx"], env)
+        r = _run(BAK, ["--box", "strih-snv"], env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
         assert "newlevel@10.77.9.202" in calls, calls
@@ -122,7 +122,7 @@ def test_backup_retention_box_strih_lx_runs_the_bash_local_sweep_over_ssh():
 def test_backup_retention_box_stream_uses_the_windows_driver():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(BAK, ["--box", "stream"], env)
+        r = _run(BAK, ["--box", "stream-snv"], env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
         assert "scp -O" in calls and "newlevel@10.77.9.204:" in calls, calls
@@ -138,7 +138,7 @@ def test_backup_retention_unknown_box_is_a_usage_error():
         # review round 1: the retired name gets the same retirement pointer the other tools give.
         r = _run(BAK, ["--box", "strih"], env)
         assert r.returncode == 2, r.stdout + r.stderr
-        assert "RETIRED" in r.stderr and "--box strih-lx" in r.stderr, r.stderr
+        assert "RETIRED" in r.stderr and "--box strih-snv" in r.stderr, r.stderr
         assert _calls(log) == ""
 
 

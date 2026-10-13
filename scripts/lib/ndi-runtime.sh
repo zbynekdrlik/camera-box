@@ -12,7 +12,7 @@
 # `strih_lx_chrome_sandbox_fix_cmd` pattern) so a caller runs `eval "$(ndi_runtime_install_cmds ...)"`
 # and tests/ndi_runtime_lib.rs can assert the emitted recipe rustc-free (Tier-0).
 #
-# WHY DistroAV needs all of it (live-proven on imag-nb + strih-lx): DistroAV's Linux loader
+# WHY DistroAV needs all of it (live-proven on imag-nb + strih-snv): DistroAV's Linux loader
 # (vendor/distroav src/plugin-main.cpp load_ndilib) scans ONLY /usr/lib, /usr/lib64 and
 # /usr/local/lib (non-recursive -- NOT the multiarch dir, NOT the ld.so cache) for libndi.so.<N>.
 # Without the /usr/local/lib/libndi.so.6 symlink the plugin loads UI-only with ERR-404; without

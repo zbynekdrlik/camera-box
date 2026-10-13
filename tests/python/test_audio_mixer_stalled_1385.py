@@ -1,7 +1,7 @@
 """issue 1385 -- the audio-mixer pager pages a STOPPED OBS audio thread (STALLED).
 
 Issue 1381 shipped the audio-mixer pager with STALE (the newest `audio-stall #1367` dump sits more
-than 180 s behind the log head) as log-only. A box with no obs-vban output (stream, strih-lx) then
+than 180 s behind the log head) as log-only. A box with no obs-vban output (stream, strih-snv) then
 had nothing that paged a dead audio thread -- silence on air. STALLED is the paging verdict for it:
 
   * the newest dump is older than the stale window (in-log age, behind the log head), AND
@@ -493,7 +493,7 @@ def test_a_log_frozen_for_days_on_a_behind_dump_never_pages():
 
 
 def _stream_shaped(lines, cut=CUT):
-    """The stream / strih-lx shape: no obs-vban output. The real audio-stall lines of the control
+    """The stream / strih-snv shape: no obs-vban output. The real audio-stall lines of the control
     window up to `cut`, and a program-render-audit line every 5 s (the render thread keeps logging),
     CRLF as on the box."""
     stalls = [ln for ln in lines if "audio-stall #1367" in ln and _sec(ln) <= cut]

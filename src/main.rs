@@ -164,7 +164,7 @@ fn apply_cpu_affinity() {
 /// delivers "plug in -> shows preview, unplug -> stops, move the monitor to another box -> that
 /// box shows it" for free. This is the interkom/return/talkback monitor cam1/cam2 already
 /// showed before #556 — NOT the cameraman Multiview camera grid (owner correction, 2026-07-08).
-/// #1362: this is only the PREFERRED name (the current strih, `STRIH-LX (interkom)`); when it is
+/// #1362: this is only the PREFERRED name (the SNV strih, `STRIH-SNV (interkom)`); when it is
 /// not on the LAN the display loop falls back to the one discovered `STRIH-<box> (interkom)`
 /// output, so a strih swap never blackens every cameraman monitor again. Single-sourced in the
 /// pure `camera_box::preview_source` module.
@@ -227,7 +227,7 @@ struct Args {
     #[arg(short, long)]
     device: Option<String>,
 
-    /// NDI source to display on HDMI (e.g., "STRIH-LX (interkom)")
+    /// NDI source to display on HDMI (e.g., "STRIH-SNV (interkom)")
     #[arg(long = "display")]
     display_source: Option<String>,
 
@@ -358,7 +358,7 @@ async fn main() -> Result<()> {
 
     // #1345 M1b — env override for the intercom target host (precedence: env > CLI flag >
     // config.toml). The dev cambox root fs is READ-ONLY, so config.toml can't be edited to repoint
-    // the VBAN intercom at the new Linux strih-lx hub; a `/run` systemd drop-in carrying
+    // the VBAN intercom at the new Linux strih-snv hub; a `/run` systemd drop-in carrying
     // CAMERA_BOX_INTERCOM_TARGET (scripts/lib/intercom-target-dropin.sh) is the only appliance-side
     // seam. Applied AFTER the CLI-vs-config resolution above so the env wins. cam2-7 stay on the
     // Windows strih until M4.
@@ -553,7 +553,7 @@ async fn run_capture_loop(
 
     // #1242 — per-camera NDI SEND stagger inside the genlock frame slot. All camboxes emit on
     // the same grid and (on the splitter rig) capture the same HDMI signal, so their ~300 KB
-    // frames used to leave within ~1 ms of each other and overflow the strih-lx 2.5 GbE switch
+    // frames used to leave within ~1 ms of each other and overflow the strih-snv 2.5 GbE switch
     // port. Camera N now hands its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate
     // decision (see `send_stagger`'s module doc for the arithmetic, the clamp to the shorter of
     // the send and capture intervals, and the capture-loop budget guard). The emit grid and the
@@ -2201,8 +2201,11 @@ mod tests {
     #[test]
     fn test_args_parse_with_display() {
         let args =
-            Args::try_parse_from(["camera-box", "--display", "STRIH-LX (interkom)"]).unwrap();
-        assert_eq!(args.display_source, Some("STRIH-LX (interkom)".to_string()));
+            Args::try_parse_from(["camera-box", "--display", "STRIH-SNV (interkom)"]).unwrap();
+        assert_eq!(
+            args.display_source,
+            Some("STRIH-SNV (interkom)".to_string())
+        );
     }
 
     #[test]
@@ -2305,9 +2308,8 @@ mod tests {
              no [display] config section (#528: this was the exact cam1 bug)",
         );
         assert_eq!(cfg.source_name, DEFAULT_DISPLAY_SOURCE);
-        // #1362: the preferred preview source is the CURRENT strih (strih-lx), not the retired
-        // Windows STRIH-SNV box.
-        assert_eq!(cfg.source_name, "STRIH-LX (interkom)");
+        // #1362 / issue 1414: the preferred preview source is the SNV strih's interkom output.
+        assert_eq!(cfg.source_name, "STRIH-SNV (interkom)");
         assert_eq!(cfg.fb_device, "/dev/fb0");
         assert_eq!(cfg.find_timeout_secs, 30);
     }

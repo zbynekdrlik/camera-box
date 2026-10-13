@@ -75,7 +75,7 @@ fn watchdog_state_file_default_differs_from_391s_own() {
 
 #[test]
 fn watchdog_roster_derives_from_the_obs_session_fleet_facet_1317() {
-    // issue 1317 (M4): the production strih is the LINUX strih-lx at .202. The old literal
+    // issue 1317 (M4): the production strih is the LINUX strih-snv at .202. The old literal
     // `process_box strih ... 10.77.9.202 1` probed it with the Windows PowerShell session probe
     // and failed on every pass ("strih: ERROR: no probe output"). The roster now derives from
     // the fleet list's `obs-session` facet (windows-genlock boxes only).
@@ -104,8 +104,8 @@ fn targets(env: &[(&str, &str)]) -> String {
         .arg(". \"$SCRIPT\"\nobs_session_targets")
         .env("SCRIPT", script())
         .env_remove("OBS_SESSION_WATCHDOG_BOXES")
-        .env_remove("STREAM_HOST")
-        .env_remove("RESOLUME_HOST")
+        .env_remove("STREAM_SNV_HOST")
+        .env_remove("RESOLUME_SNV_HOST")
         .env_remove("OBS_FLEET");
     for (k, v) in env {
         cmd.env(k, v);
@@ -125,8 +125,8 @@ fn targets_are_windows_genlock_only_with_per_box_ahk_1317() {
     // but whether it runs is the owner's choice (issue 1372, "ale ahk nespustaj"), so the watchdog
     // grades it in `guard` mode: 0 or 1 in the active session is healthy.
     assert_eq!(
-        targets(&[("OBS_FLEET_HOME", "stream resolume")]),
-        "stream 10.77.9.204 0\nresolume resolume.lan guard"
+        targets(&[("OBS_FLEET_HOME", "stream-snv resolume-snv")]),
+        "stream-snv 10.77.9.204 0\nresolume-snv resolume.lan guard"
     );
 }
 
@@ -134,23 +134,23 @@ fn targets_are_windows_genlock_only_with_per_box_ahk_1317() {
 fn targets_skip_the_traveling_resolume_while_away_1317() {
     // A traveling box that is away is never probed (never a false "invisible" verdict).
     assert_eq!(
-        targets(&[("OBS_FLEET_HOME", "stream")]),
-        "stream 10.77.9.204 0"
+        targets(&[("OBS_FLEET_HOME", "stream-snv")]),
+        "stream-snv 10.77.9.204 0"
     );
 }
 
 #[test]
 fn targets_never_include_a_linux_genlock_box_even_via_override_1317() {
-    // Defense in depth: even an override naming strih-lx never sends the PowerShell probe to it.
+    // Defense in depth: even an override naming strih-snv never sends the PowerShell probe to it.
     assert_eq!(
         targets(&[
             (
                 "OBS_SESSION_WATCHDOG_BOXES",
-                "strih-lx|10.77.9.202 stream|10.77.9.204"
+                "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
             ),
-            ("OBS_FLEET_HOME", "strih-lx stream"),
+            ("OBS_FLEET_HOME", "strih-snv stream-snv"),
         ]),
-        "stream 10.77.9.204 0"
+        "stream-snv 10.77.9.204 0"
     );
 }
 
@@ -158,18 +158,18 @@ fn targets_never_include_a_linux_genlock_box_even_via_override_1317() {
 fn targets_keep_the_per_box_host_env_overrides_1317() {
     assert_eq!(
         targets(&[
-            ("OBS_FLEET_HOME", "stream resolume"),
-            ("STREAM_HOST", "192.0.2.9"),
-            ("RESOLUME_HOST", "192.0.2.7"),
+            ("OBS_FLEET_HOME", "stream-snv resolume-snv"),
+            ("STREAM_SNV_HOST", "192.0.2.9"),
+            ("RESOLUME_SNV_HOST", "192.0.2.7"),
         ]),
-        "stream 192.0.2.9 0\nresolume 192.0.2.7 guard"
+        "stream-snv 192.0.2.9 0\nresolume-snv 192.0.2.7 guard"
     );
 }
 
 #[test]
 fn main_never_ssh_probes_the_linux_strih_1317() {
     // Behavioral: a stub sshpass records every target it is asked to reach. A full pass must reach
-    // stream + the home resolume, and NEVER the Linux strih-lx address.
+    // stream + the home resolume, and NEVER the Linux strih-snv address.
     let tmp = tempfile::tempdir().expect("tempdir");
     let calls = tmp.path().join("sshpass-calls.log");
     let sshpass = tmp.path().join("sshpass");
@@ -194,7 +194,7 @@ fn main_never_ssh_probes_the_linux_strih_1317() {
         .arg(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
         .env("SCRIPT", script())
         .env("OBS_SESSION_WATCHDOG_STATE_FILE", tmp.path().join("state"))
-        .env("OBS_FLEET_HOME", "stream resolume")
+        .env("OBS_FLEET_HOME", "stream-snv resolume-snv")
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
         .env("PATH", path)
         .output()
@@ -202,14 +202,17 @@ fn main_never_ssh_probes_the_linux_strih_1317() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "stderr={err}");
     let log = fs::read_to_string(&calls).unwrap_or_default();
-    assert!(log.contains("10.77.9.204"), "stream must be probed: {log}");
+    assert!(
+        log.contains("10.77.9.204"),
+        "stream-snv must be probed: {log}"
+    );
     assert!(
         log.contains("resolume.lan"),
-        "a home resolume must be probed: {log}"
+        "a home resolume-snv must be probed: {log}"
     );
     assert!(
         !log.contains("10.77.9.202"),
-        "the Linux strih-lx must NEVER get the Windows PowerShell probe: {log}"
+        "the Linux strih-snv must NEVER get the Windows PowerShell probe: {log}"
     );
     assert!(
         !err.contains("strih"),
@@ -285,7 +288,7 @@ impl Harness {
             .env("OBS_SESSION_WATCHDOG_STATE_FILE", &self.state_file)
             // issue 1317: the roster is the fleet `obs-session` facet (stream + resolume when
             // home) -- force both home so the pass never depends on live resolume.lan I/O.
-            .env("OBS_FLEET_HOME", "stream resolume")
+            .env("OBS_FLEET_HOME", "stream-snv resolume-snv")
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
             .env("PATH", path)
             .output()
@@ -406,7 +409,7 @@ fn dry_run_never_calls_notify() {
             .arg(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
             .env("SCRIPT", script())
             .env("OBS_SESSION_WATCHDOG_STATE_FILE", &h.state_file)
-            .env("OBS_FLEET_HOME", "stream resolume")
+            .env("OBS_FLEET_HOME", "stream-snv resolume-snv")
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
             .env("PATH", &path)
             .output()
@@ -475,7 +478,7 @@ fn readme_documents_ships_disabled_and_install_procedure() {
 
 #[test]
 fn targets_accept_a_new_windows_box_from_the_fleet_list_1317() {
-    let fleet = "stream|10.77.9.204|windows-genlock|always\npp|10.9.9.9|windows-genlock|always";
+    let fleet = "stream-snv|10.77.9.204|windows-genlock|always\npp|10.9.9.9|windows-genlock|always";
     assert_eq!(
         targets(&[
             ("OBS_FLEET", fleet),
@@ -522,7 +525,7 @@ fn main_probes_a_new_windows_box_with_default_credentials_1317() {
         .env("OBS_SESSION_WATCHDOG_STATE_FILE", tmp.path().join("state"))
         .env(
             "OBS_FLEET",
-            "stream|10.77.9.204|windows-genlock|always\npp|10.9.9.9|windows-genlock|always",
+            "stream-snv|10.77.9.204|windows-genlock|always\npp|10.9.9.9|windows-genlock|always",
         )
         .env("OBS_SESSION_WATCHDOG_BOXES", "pp|10.9.9.9")
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")

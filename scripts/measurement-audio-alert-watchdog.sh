@@ -75,7 +75,7 @@ esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
 # The mbc chain lives ONLY on the stream box; obs_fleet_host is the single IP source of truth.
-WS_HOST="${MEASUREMENT_AUDIO_WS_HOST:-$(obs_fleet_host stream 2>/dev/null || echo 10.77.9.204)}"
+WS_HOST="${MEASUREMENT_AUDIO_WS_HOST:-$(obs_fleet_host stream-snv 2>/dev/null || echo 10.77.9.204)}"
 WS_PORT="${MEASUREMENT_AUDIO_WS_PORT:-4455}"
 INPUT_NAME="${MEASUREMENT_AUDIO_INPUT:-mbc}"
 

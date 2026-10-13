@@ -1,5 +1,5 @@
 """issue 1406 -- the `obs_handles` bundle-state facet: the OBS process's handle count (Windows) or
-open-fd count (Linux strih-lx), its pid + start time (a restart resets the dev1 baseline) and, on
+open-fd count (Linux strih-snv), its pid + start time (a restart resets the dev1 baseline) and, on
 Linux, its soft open-files limit.
 
 WHY: on 5.10.2026 the stream OBS held 4,066,772 handles after ~22 h, growing one registry key per

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""strih-browser-keeper (issue 1399): keep every OBS browser source on strih-lx loaded.
+"""strih-browser-keeper (issue 1399): keep every OBS browser source on strih-snv loaded.
 
 WHY (owner, 4.10.2026: "tie browser sceny maju byt vzdy nacitane"): obs-browser loads a browser
 source's page ONCE, when the source is created at OBS start, and never retries a failed first load.
-On 4.10.2026 strih-lx booted before presenter.lan / fohabl.lan answered, so `Browser camera crew`,
+On 4.10.2026 strih-snv booted before presenter.lan / fohabl.lan answered, so `Browser camera crew`,
 `Odpocet`, `CG-presenter` and `Browser Ableset` stayed empty until a manual `refreshnocache`.
 
 WHAT (design comment 5977447339, Approach 1): a supervised --user unit (systemd/strih-browser-keeper
 .service, Restart=always, started by the kiosk openbox autostart) that
-  * connects to the local obs-websocket (127.0.0.1:4455, no auth on strih-lx) and reconnects forever;
+  * connects to the local obs-websocket (127.0.0.1:4455, no auth on strih-snv) and reconnects forever;
   * every PASS_INTERVAL_S lists every `browser_source` input with its URL over WS -- no source list
     is hard-coded, a source added later is picked up;
   * TCP-probes each URL's host:port (bounded: one daemon thread per target, one deadline per pass); a

@@ -5,7 +5,7 @@
 # open while the Stream Deck is on USB -- never while Companion itself is down. Installed beside the
 # timer by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh); never enabled itself (the timer
 # starts it); graded by verify-strih.sh item 40.
-Description=strih-lx Companion Satellite liveness watch -- one pass (issue 1399)
+Description=strih-snv Companion Satellite liveness watch -- one pass (issue 1399)
 Documentation=https://github.com/zbynekdrlik/camera-box
 After=companion-satellite.service
 StartLimitIntervalSec=0

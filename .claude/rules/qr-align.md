@@ -262,7 +262,7 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
   regimes) so the floors are TRUE transports and the SLOWEST returns to pin 3 EVERY run (the owner's
   floor-3 doctrine, preserved). The count + since-line fetches go through the shared platform-resolved
   `strih_log_line_count` / `strih_log_since_line` (`scripts/lib/strih-log-read.sh`, issue 1360 — before
-  it, a Linux strih-lx read empty and the audit was skipped every run), `timeout`-bounded inside it. `QR_ALIGN_RESET_SETTLE_S` / `QR_ALIGN_AUDIT_WINDOW_S` tune the waits.
+  it, a Linux strih-snv read empty and the audit was skipped every run), `timeout`-bounded inside it. `QR_ALIGN_RESET_SETTLE_S` / `QR_ALIGN_AUDIT_WINDOW_S` tune the waits.
 - **`floor_aware_pins(arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins)`:** the slowest
   (min-delta) camera → `floor_ms` (inert, stays at its natural floor); every faster camera →
   `max(floor_ms, round(arrival_floor_i + pure_delta_i))` (its floor + the PURE present-age hold it must

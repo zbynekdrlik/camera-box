@@ -672,10 +672,10 @@ A fresh imag box used to come up with no `linux-imag-nb` MCP surface — the age
 (`remoteos-mcp.service` on :8092) survived only as a hand-install on the one original box. Step 23
 provisions it. **Since issue 1361 the step is one call into the shared lib `scripts/lib/remoteos-mcp.sh`**
 (`remoteos_mcp_install "$DESKTOP_USER" desktop restart`), the SAME install setup-strih step 10 and
-setup-device STEP 17b run, so every box gets the shape strih-lx runs:
+setup-device STEP 17b run, so every box gets the shape strih-snv runs:
 
 - the SEPARATE `zbynekdrlik/remoteos-mcp` project's own source (its GitHub API tarball of the
-  pinned commit strih-lx runs, `remoteos_mcp_pinned_ref`; `REMOTEOS_MCP_REF` bumps it) pip-installed
+  pinned commit strih-snv runs, `remoteos_mcp_pinned_ref`; `REMOTEOS_MCP_REF` bumps it) pip-installed
   (pip under an env allowlist, so no `GH_TOKEN` / key / `CAM_PW`) with the project's own `constraints.txt` into a
   venv at `/opt/remoteos-mcp-venv`. The upstream `install-linux.sh` pip-installed into the SYSTEM
   python with `--break-system-packages` and is no longer run anywhere. Nothing is re-pinned in

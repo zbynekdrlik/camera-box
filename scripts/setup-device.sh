@@ -1029,12 +1029,12 @@ camera_box_free_capture_device_dropin_content > /etc/systemd/system/camera-box.s
 echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/video on every start (#772)"
 # issue 1342 -- the camera box publishes ONE NDI output, `CAMn (usb)`. The retired secondary
 # 30fps blend stream had no consumer (the main's read-only OBS-WS read on 24.9.2026 found 0 of the
-# strih-lx + stream NDI inputs bound to a (30p) source, and no mapping/pin/scene table in this repo
+# strih-snv + stream NDI inputs bound to a (30p) source, and no mapping/pin/scene table in this repo
 # names one); its code is gone and a re-provision DELETES the drop-in that used to enable it, so a
 # live box that still carries it converges (the env var is ignored by the new binary either way).
 rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
 # issue 1389 (ROZHODNUTÉ 5879261962) -- a cambox carries NO receiver-side networks.ips at all: the
-# camera-box service receives only `STRIH-LX (interkom)` for the cameraman HDMI preview, which mDNS finds
+# camera-box service receives only `STRIH-SNV (interkom)` for the cameraman HDMI preview, which mDNS finds
 # in milliseconds, and ANY listed host would give it a TCP discovery connection whose teardown (at every
 # strih / stream / resolume restart) can abort camera-box inside libndi 6.3.2. Issue 1342 wrote
 # /etc/ndi/ndi-config.v1.json + a camera-box.service.d NDI_CONFIG_DIR drop-in here; this step now takes
@@ -1621,7 +1621,7 @@ Wants=network.target
 
 [Service]
 Type=simple
-# Sync to the venue's strih by NAME (strih.lan: strih-lx in SNV, strih-pp in Poprad), NOT the
+# Sync to the venue's strih by NAME (strih.lan: strih-snv in SNV, strih-pp in Poprad), NOT the
 # dantesync binary's default public NTP pool -- every node must discipline its clock to the SAME
 # reference or the wall-clock genlock in src/ndi.rs silently diverges across cameras (#8). Issue 1412:
 # the old literal SNV IP left every Poprad cambox with no NTP at all (cam7 ~150 s off strih-pp). The
@@ -1725,7 +1725,7 @@ echo "  Installed: $DSCP_NFT_RULESET_PATH (udp dport 123 -> dscp ${DSCP_NFT_CLAS
 # [egress-pacing]: pace this box's NDI egress at boot (issue 1242, unnumbered sub-step, ENABLE-only)
 # =============================================================================
 # All seven cameras hand their frame to NDI on the same genlock grid instant, so their line-rate
-# bursts reach strih-lx together and its USB NIC answers with PAUSE storms. An fq root qdisc with a
+# bursts reach strih-snv together and its USB NIC answers with PAUSE storms. An fq root qdisc with a
 # per-flow maxrate (the ONE declaration in scripts/lib/cambox-egress-pacing.sh) spreads each frame
 # over ~7 ms while dantesync's PTP/NTP and the intercom stay their own flows. It ran by hand on
 # cam1-cam7 from 30.9.2026 and was lost on every reboot; this makes it permanent. The appliance has

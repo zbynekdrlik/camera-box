@@ -6,7 +6,7 @@ This tool rewrites that JSON ONCE, before the import, while OBS is stopped. It n
 and never writes anything but its output file. The result is imported once and never rewritten by
 this tool afterwards (the CLI refuses an existing output file).
 
-Two uses, as presets (every preset value can be overridden on the command line):
+Three uses, as presets (every preset value can be overridden on the command line):
 
 * `--preset stream-pp`: the Windows stream-pp collection -> the Linux stream box.
   - keeps the scenes PRO / Development / PRE / POST and every scene and source they nest; drops the rest;
@@ -18,9 +18,13 @@ Two uses, as presets (every preset value can be overridden on the command line):
     have; `text_gdiplus` becomes the FreeType2 text source;
   - Windows file paths move under `/srv/obs-media/stream-pp/<folder>/<file>` (the keep-set copy keeps
     those folder names).
-* `--preset strih-pp`: the strih-lx collection -> strih-pp.
-  - keeps every scene; `STRIH-LX (...)` -> `STRIH-PP (...)`, the CG sender `RESOLUME-SNV (SP-program)`
+* `--preset strih-pp`: the strih-snv collection -> strih-pp.
+  - keeps every scene; `STRIH-SNV (...)` -> `STRIH-PP (...)`, the CG sender `RESOLUME-SNV (SP-program)`
     -> `RESOLUME-PP (SP-program)`; drops the shader filter and Windows-path scripts.
+* `--preset strih-snv` (issue 1414): the IN-PLACE rename of the SNV strih's own collection when the
+  box takes its venue name -- the self-loop inputs follow the new NDI prefix, nothing else changes
+  (every scene, input and shader filter kept). Map the two SNV hosts to themselves:
+  `--presenter-host presenter.lan --fohabl-host fohabl.lan`.
 
 Browser URLs that name an SNV-only host (`presenter.lan`, `fohabl.lan`) must be mapped:
 `--presenter-host H`, `--fohabl-host H` or `--url-host OLD=NEW`. An unmapped one refuses (map a host
@@ -115,15 +119,34 @@ PRESETS = {
         "keep_scenes": None,
         "program_audio_input": "ASIO zvuk",
         "source_renames": {},
-        "sender_prefixes": {"STRIH-LX": "STRIH-PP"},
+        "sender_prefixes": {"STRIH-SNV": "STRIH-PP", "STRIH-LX": "STRIH-PP"},  # issue 1414: + the pre-rename prefix
         "sender_renames": {"RESOLUME-SNV (SP-program)": "RESOLUME-PP (SP-program)"},
-        "foreign_senders": [r"-SNV \(", r"^STRIH-LX \("],
+        "foreign_senders": [r"-SNV \(", r"^STRIH-SNV \(", r"^STRIH-LX \("],  # issue 1414: + the pre-rename prefix
         "drop_patterns": [r"^ytfast"],
         "drop_sources": [],
         "media_dir": "/srv/obs-media/strih-pp",
         "path_prefixes": {},
         "url_hosts": {},
         "keep_kinds": [],
+    },
+    # issue 1414: the IN-PLACE rename of the SNV strih's own collection (the pre-1414 strih-lx one ->
+    # strih-snv): the self-loop inputs follow the box's new NDI prefix, nothing else changes -- every
+    # scene and input stays, the program audio is already the Linux binding, and the operator's shader
+    # filters are kept (a rename must drop nothing: read the report for any DROP line before importing).
+    "strih-snv": {
+        "name": "strih-snv",
+        "keep_scenes": None,
+        "program_audio_input": None,
+        "source_renames": {},
+        "sender_prefixes": {"STRIH-LX": "STRIH-SNV"},  # issue 1414: the pre-rename prefix
+        "sender_renames": {},
+        "foreign_senders": [r"^STRIH-LX \("],  # issue 1414: a pre-rename sender left behind
+        "drop_patterns": [],
+        "drop_sources": [],
+        "media_dir": None,
+        "path_prefixes": {},
+        "url_hosts": {},
+        "keep_kinds": ["shader_filter"],
     },
 }
 

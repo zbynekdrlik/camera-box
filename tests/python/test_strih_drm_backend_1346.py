@@ -1,4 +1,4 @@
-"""issue 1346 -- the strih-lx BUILT-IN HDMI is driven by the NVIDIA GPU, so its fixed output uses the
+"""issue 1346 -- the strih-snv BUILT-IN HDMI is driven by the NVIDIA GPU, so its fixed output uses the
 second DRM-output backend, Vulkan direct display ("backend": "vk-direct" in ~/.camera-box/drm-output.json),
 chosen by the per-box fact STRIH_HDMI_OUTPUT_BACKEND (owner rulings 5838578002 + 5838662632, main design
 5838663570).

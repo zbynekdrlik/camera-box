@@ -2,7 +2,7 @@
 through DKMS from a vendored source, and verify-strih item 36 grading the facts that decide whether the
 5 GbE link loses packets.
 
-WHY: on 29.9.2026 strih-lx got a Ubiquiti UACC-Adapter-RJ45-USBC-5GE (Realtek RTL8157, USB 0bda:8157).
+WHY: on 29.9.2026 strih-snv got a Ubiquiti UACC-Adapter-RJ45-USBC-5GE (Realtek RTL8157, USB 0bda:8157).
 The in-tree r8152 of the 7.0 kernels does not bind it, so the Realtek driver v2.21.4 was built on dev1 and
 copied by hand as a plain module to /lib/modules/<kernel>/updates/r8152.ko -- the next kernel boots
 without it. Measured live the same day: the laptop's USB-C port trained the adapter at Gen 1 (5000 Mb/s)
@@ -13,7 +13,7 @@ What this pins:
   * the vendored tree vendor/realtek-r8152: SHA256SUMS verifies, no dev1 build artifact, dkms.conf names
     match the lib's constants, the source is the RTL8157-capable v2.21.4;
   * the facts loader: the three new facts (STRIH_NIC_OOT_DRIVER, STRIH_NIC_MIN_USB_MBPS,
-    STRIH_NIC_MIN_LINK_MBPS) load for strih-lx, are TODO_OWNER in strih-pp, refuse a missing / malformed
+    STRIH_NIC_MIN_LINK_MBPS) load for strih-snv, are TODO_OWNER in strih-pp, refuse a missing / malformed
     value;
   * the PURE planner scripts/lib/strih-nic-driver.sh `strih_nic_driver_plan` (SKIP/NOOP/INSTALL/UPGRADE)
     over `dkms status` fixtures in both DKMS shapes;
@@ -45,7 +45,7 @@ FACTS = SCRIPTS / "lib" / "strih-box-facts.sh"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 SETUP = SCRIPTS / "setup-strih.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
-DEPLOY = SCRIPTS / "lib" / "strih-lx-deploy.sh"
+DEPLOY = SCRIPTS / "lib" / "strih-snv-deploy.sh"
 VENDOR = REPO / "vendor" / "realtek-r8152"
 BOXES = SCRIPTS / "strih-boxes"
 
@@ -157,9 +157,9 @@ def test_loader_lists_the_new_keys_after_the_nic_driver_key():
 
 
 def test_strih_lx_loads_the_new_facts():
-    # issue 1411: strih-lx is a new notebook whose rig NIC is the 10 GbE Thunderbolt Aquantia: in-tree
+    # issue 1411: strih-snv is a new notebook whose rig NIC is the 10 GbE Thunderbolt Aquantia: in-tree
     # `atlantic`, PCIe (no USB device), a 10GBASE-T link.
-    r = _bash("strih_box_load strih-lx || exit 9\n"
+    r = _bash("strih_box_load strih-snv || exit 9\n"
               'printf "%s|%s|%s|%s\\n" "$(strih_lx_nic_driver)" "$(strih_lx_nic_oot_driver)" '
               '"$(strih_lx_nic_min_usb_mbps)" "$(strih_lx_nic_min_link_mbps)"', sources=(FACTS,))
     assert r.returncode == 0, r.stderr
@@ -167,9 +167,9 @@ def test_strih_lx_loads_the_new_facts():
 
 
 def test_a_usb_box_with_the_vendored_driver_still_loads(tmp_path):
-    # the vendored realtek-r8152 path stays: a USB box (the returned strih-lx shape) loads its facts
+    # the vendored realtek-r8152 path stays: a USB box (the returned strih-snv shape) loads its facts
     env = _fixture(tmp_path, [])
-    r = _bash("strih_box_load strih-lx || exit 9\n"
+    r = _bash("strih_box_load strih-snv || exit 9\n"
               'printf "%s|%s|%s|%s\\n" "$(strih_lx_nic_driver)" "$(strih_lx_nic_oot_driver)" '
               '"$(strih_lx_nic_min_usb_mbps)" "$(strih_lx_nic_min_link_mbps)"', env=env, sources=(FACTS,))
     assert r.returncode == 0, r.stderr
@@ -188,14 +188,14 @@ def test_strih_pp_declares_its_pcie_nic_facts():
         assert "%s is TODO_OWNER" % k not in r.stderr, r.stderr
 
 
-# issue 1411: strih-lx's own rig NIC is PCIe now (atlantic, no out-of-tree driver). The USB/DKMS tests run
-# on a USB box: the strih-lx facts with the returned notebook's RTL8157 NIC facts (issue 1391).
+# issue 1411: strih-snv's own rig NIC is PCIe now (atlantic, no out-of-tree driver). The USB/DKMS tests run
+# on a USB box: the strih-snv facts with the returned notebook's RTL8157 NIC facts (issue 1391).
 USB_BOX_NIC_FACTS = {"STRIH_NIC_DRIVER": "r8152", "STRIH_NIC_OOT_DRIVER": SPEC,
                      "STRIH_NIC_MIN_USB_MBPS": "10000", "STRIH_NIC_MIN_LINK_MBPS": "5000"}
 
 
 def _usb_box_body():
-    lines = (BOXES / "strih-lx.env").read_text().splitlines(keepends=True)
+    lines = (BOXES / "strih-snv.env").read_text().splitlines(keepends=True)
     out, seen = [], set()
     for ln in lines:
         key = ln.split("=", 1)[0]
@@ -212,7 +212,7 @@ def _fixture(tmp_path, edits):
     for old, new in edits:
         assert body.count(old) == 1, old
         body = body.replace(old, new)
-    (tmp_path / "strih-lx.env").write_text(body)
+    (tmp_path / "strih-snv.env").write_text(body)
     return {"STRIH_BOXES_DIR": str(tmp_path)}
 
 
@@ -220,7 +220,7 @@ def _fixture(tmp_path, edits):
 def test_a_missing_new_fact_refuses(tmp_path, key):
     line = next(ln for ln in _usb_box_body().splitlines() if ln.startswith(key + "="))
     env = _fixture(tmp_path, [(line + "\n", "")])
-    r = _bash("strih_box_load strih-lx", env=env, sources=(FACTS,))
+    r = _bash("strih_box_load strih-snv", env=env, sources=(FACTS,))
     assert r.returncode != 0
     assert "missing fact %s" % key in r.stderr, r.stderr
 
@@ -239,7 +239,7 @@ def test_a_missing_new_fact_refuses(tmp_path, key):
 def test_a_malformed_new_fact_refuses_by_name(tmp_path, key, value):
     line = next(ln for ln in _usb_box_body().splitlines() if ln.startswith(key + "="))
     env = _fixture(tmp_path, [(line, "%s=%s" % (key, value))])
-    r = _bash("strih_box_load strih-lx", env=env, sources=(FACTS,))
+    r = _bash("strih_box_load strih-snv", env=env, sources=(FACTS,))
     assert r.returncode != 0, value
     assert "%s '%s'" % (key, value) in r.stderr, r.stderr
 
@@ -247,7 +247,7 @@ def test_a_malformed_new_fact_refuses_by_name(tmp_path, key, value):
 def test_none_is_accepted_for_the_driver_and_the_usb_speed(tmp_path):
     env = _fixture(tmp_path, [("STRIH_NIC_OOT_DRIVER=%s" % SPEC, "STRIH_NIC_OOT_DRIVER=none"),
                               ("STRIH_NIC_MIN_USB_MBPS=10000", "STRIH_NIC_MIN_USB_MBPS=none")])
-    r = _bash("strih_box_load strih-lx && strih_lx_nic_oot_driver && echo && strih_lx_nic_min_usb_mbps",
+    r = _bash("strih_box_load strih-snv && strih_lx_nic_oot_driver && echo && strih_lx_nic_min_usb_mbps",
               env=env, sources=(FACTS,))
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["none", "none"]
@@ -864,7 +864,7 @@ class Sysfs:
         (tmp_path / "nm.tsv").write_text(nm)
 
     def grade(self, facts_env=None, drop=()):
-        if facts_env is None:  # issue 1411: this fake sysfs is a USB box, never the PCIe strih-lx
+        if facts_env is None:  # issue 1411: this fake sysfs is a USB box, never the PCIe strih-snv
             boxes = self.tmp / "usb-box"
             boxes.mkdir(exist_ok=True)
             facts_env = _fixture(boxes, [])
@@ -980,7 +980,7 @@ def test_grade_notes_a_box_without_an_out_of_tree_driver_or_usb_nic(tmp_path):
 
 
 class PcieSysfs:
-    """issue 1411: a fake /sys with the new strih-lx rig NIC -- the 10 GbE Thunderbolt Aquantia on PCIe
+    """issue 1411: a fake /sys with the new strih-snv rig NIC -- the 10 GbE Thunderbolt Aquantia on PCIe
     (in-tree atlantic, enp7s0), the onboard RTL8168 (r8169, enp2s0) and lo. No USB device, no r8152."""
 
     def __init__(self, tmp_path, link="10000", nm=None):
@@ -1008,7 +1008,7 @@ class PcieSysfs:
         (tmp_path / "nm.tsv").write_text(nm if nm is not None else "u-1|strih-lan|enp7s0|10.77.9.202/23\n")
 
     def grade(self):
-        # the REAL strih-lx facts (no STRIH_BOXES_DIR); dkms is deliberately absent from PATH's fake bin
+        # the REAL strih-snv facts (no STRIH_BOXES_DIR); dkms is deliberately absent from PATH's fake bin
         env = {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "FAKE_NM": str(self.tmp / "nm.tsv"),
                "SYSROOT": str(self.sys)}
         r = _bash('strih_nic_grade_rows "$SYSROOT" ""', env=env, sources=(PROVISION, LIB))
@@ -1117,7 +1117,7 @@ def test_the_deploy_archive_stages_the_vendored_driver():
 
 
 def test_the_step_and_item_carry_no_box_identity_literal():
-    # the strih-lx identity net (tests/strih_box_facts_1361.rs) scans these two for the fact values on a
+    # the strih-snv identity net (tests/strih_box_facts_1361.rs) scans these two for the fact values on a
     # code line; the module name must come from the facts / the lib, never a literal here.
     for path in (SETUP, VERIFY):
         for line in _code_lines(path):

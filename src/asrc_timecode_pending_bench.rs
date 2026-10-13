@@ -5,7 +5,7 @@
 //!
 //! ## What it reproduces
 //!
-//! - **Sender first.** A cross-box sender (the cg OBS feed into strih-lx) whose box steps its date
+//! - **Sender first.** A cross-box sender (the cg OBS feed into strih-snv) whose box steps its date
 //!   BEFORE the receiver's: the contract's relabel moves its stamps N slots while this box's live
 //!   offset has not moved. On the slice-1 path that packet took the stock OBS path by size (placed
 //!   N slots late with a zero-filled gap from 70 ms to 2 s, the whole buffer dropped over 2 s), and

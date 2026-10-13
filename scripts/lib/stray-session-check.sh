@@ -3,7 +3,7 @@
 # sibling scripts/lib/*.sh convention (rig-test-dropin.sh, camera-box-restart-verify.sh) of
 # deliberately NOT setting `set -euo pipefail` here: sourcing this file executes it in the CALLER's
 # shell, so imposing strict mode here would leak into whichever caller sources it. Every
-# caller (recording-e2e.sh, bkshading-deploy-relay.sh, deploy-genlock-fleet.sh for the strih-lx arm)
+# caller (recording-e2e.sh, bkshading-deploy-relay.sh, deploy-genlock-fleet.sh for the strih-snv arm)
 # sets its own strict mode.
 #
 # scripts/lib/stray-session-check.sh — the READ-ONLY stray recording/streaming guard (issue 758),
@@ -44,7 +44,7 @@
 # Refuses (exit 1) BEFORE returning if a REAL broadcast is live; otherwise returns 0. Call it as a
 # BARE statement (never $()/a pipe/an `if` condition) so its `exit 1` propagates to the harness
 # — the same discipline the adjacent #860 optical preflight uses. The ONE sanctioned alternative is
-# a caller with its OWN exit contract (scripts/lib/strih-lx-deploy.sh): it runs the guard in a
+# a caller with its OWN exit contract (scripts/lib/strih-snv-deploy.sh): it runs the guard in a
 # SUBSHELL, maps a non-zero rc to its own code, and names what is live with
 # stray_session_busy_summary below. Idempotent + read-only, safe to call repeatedly.
 stray_session_check_assert() {
@@ -101,7 +101,7 @@ stray_session_check_assert() {
 # (server=rtmp://... outputDuration=...)` or `strih recording (timecode 00:04:10.000)`. Never a
 # second WebSocket read, never the stream key. Unparseable = a pointer to the guard output. Those
 # two refusal line shapes are therefore an interface: change them together with this parser (the
-# strih-lx deploy test pins the pair). Pure; always returns 0.
+# strih-snv deploy test pins the pair). Pure; always returns 0.
 stray_session_busy_summary() {
   local s
   s="$(printf '%s\n' "${1:-}" | python3 -c '

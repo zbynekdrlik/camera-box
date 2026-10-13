@@ -1,7 +1,7 @@
-"""issue 1404 (ROZHODNUTÉ 6039368611) -- the stream program-audio sampler moves off dev1 to strih-lx.
+"""issue 1404 (ROZHODNUTÉ 6039368611) -- the stream program-audio sampler moves off dev1 to strih-snv.
 
 Pinned here:
-  * the strih-lx unit template: the E-cores through ONE `CPUAffinity=@E_CORES@` line rendered from the
+  * the strih-snv unit template: the E-cores through ONE `CPUAffinity=@E_CORES@` line rendered from the
     box's own /sys/devices/cpu_atom/cpus (the strih_lx_lowprio_prefix contract), normal priority, the
     opt-in TEST marker as an ExecCondition (down by default), the sampler from the installed
     checkout-layout copy;
@@ -40,7 +40,7 @@ _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "scripts"
 LIB = _SCRIPTS / "lib" / "strih-program-audio.sh"
 MODE_LIB = _SCRIPTS / "lib" / "program-audio-mode.sh"
-TEMPLATE = _ROOT / "systemd" / "program-audio-sampler.strih-lx.service"
+TEMPLATE = _ROOT / "systemd" / "program-audio-sampler.strih-snv.service"
 UNIT = "program-audio-sampler.service"
 USER = getpass.getuser()
 
@@ -95,7 +95,7 @@ cat "$FAKE_STATE/curl-body"
 
 
 class Box:
-    """A fake strih-lx: a prefix for the installed files, the operator's home, a sysfs root, and the
+    """A fake strih-snv: a prefix for the installed files, the operator's home, a sysfs root, and the
     fake tools on PATH."""
 
     def __init__(self, tmp_path, ecores="12-15\n"):
@@ -129,7 +129,7 @@ class Box:
             "STRIH_PROGRAM_AUDIO_RETRY_SLEEP": "0",
             "LANG": "C.UTF-8",
             # HOME is the fake operator's: keep the real user site-packages (numpy on dev1 comes from
-            # pip --user; strih-lx gets it from apt)
+            # pip --user; strih-snv gets it from apt)
             "PYTHONUSERBASE": site.getuserbase(),
         }
         e.update(extra)
@@ -207,7 +207,7 @@ def test_the_e_cores_follow_the_lowprio_contract(tmp_path, content, want):
     assert r.returncode == 0 and r.stdout == want
     if want:
         lp = subprocess.run(["bash", "-c", '. "$1"; strih_lx_lowprio_prefix "$2"', "h",
-                             str(_SCRIPTS / "recording-verdict-on-strih-lx.sh"), str(box.sys)],
+                             str(_SCRIPTS / "recording-verdict-on-strih-snv.sh"), str(box.sys)],
                             capture_output=True, text=True, timeout=30)
         assert lp.stdout == f"nice -n 19 taskset -c {want}"
 
@@ -377,7 +377,7 @@ def test_a_running_sampler_must_answer_a_fresh_verdict(tmp_path):
 
 
 @pytest.mark.parametrize("age, want", [
-    (-0.5, "OK"),     # strih-lx is the dantesync date master: its nightly step can put the clock behind
+    (-0.5, "OK"),     # strih-snv is the dantesync date master: its nightly step can put the clock behind
     (-1.0, "OK"),
     (10.0, "OK"),
     (-1.5, "FAIL"),
@@ -566,7 +566,7 @@ def _mode(func, *args, env=None):
 
 
 def _remote(tmp_path, mode, active):
-    """Run the remote text the way the operator's shell on strih-lx would, with a fake systemctl."""
+    """Run the remote text the way the operator's shell on strih-snv would, with a fake systemctl."""
     box = Box(tmp_path)
     (box.state / "active").write_text(active)
     cmd = _mode("program_audio_mode_remote_cmd", mode, env=box.env()).stdout

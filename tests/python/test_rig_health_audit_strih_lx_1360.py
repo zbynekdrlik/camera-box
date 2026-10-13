@@ -1,9 +1,9 @@
 """issue 1360 part 2 -- rig-health-audit.py (the issue-787 status-page feeder) reads the strih box the
 platform-resolved way.
 
-Since the M4 cut-over the strih role is the Linux notebook strih-lx (10.77.9.202): its OBS log is the
+Since the M4 cut-over the strih role is the Linux notebook strih-snv (10.77.9.202): its OBS log is the
 newest `~/.config/obs-studio/logs/*.txt` (a SPACED filename) and its OBS process is `obs`, not
-`obs64`. The audit only knew the Windows `-EncodedCommand` PowerShell reads, so against strih-lx the
+`obs64`. The audit only knew the Windows `-EncodedCommand` PowerShell reads, so against strih-snv the
 process count came back None -> the strih status-page row read `FAIL unreachable over ssh` on a
 healthy box, and the CG-chain row skipped with "strih OBS log unreadable".
 
@@ -85,7 +85,7 @@ def test_linux_log_tail_cmd_is_byte_identical_to_the_bash_reader_1360(monkeypatc
     py = _mod._obs_log_tail_cmd(_mod.STRIH, tail)
     sh = _bash_remote_cmd("linux", "headtail", str(tail))
     assert py == sh and sh, (
-        f"issue 1360: the strih-lx head+tail read must be the shared reader's command verbatim\n"
+        f"issue 1360: the strih-snv head+tail read must be the shared reader's command verbatim\n"
         f"python: {py!r}\nbash:   {sh!r}")
     assert "powershell" not in py and "APPDATA" not in py
 
@@ -188,10 +188,10 @@ def test_check_windows_box_strih_uses_the_linux_reads_on_strih_lx_1360(monkeypat
     _mod.results.clear()
     _mod.check_windows_box("strih", _mod.STRIH, None, program_fps=30.0, expect_latency=False)
     assert calls and all("powershell" not in c for c in calls), (
-        f"issue 1360: the strih-lx row must never be read the PowerShell way: {calls}")
+        f"issue 1360: the strih-snv row must never be read the PowerShell way: {calls}")
     row = capsys.readouterr().out
     assert "unreachable over ssh" not in row and "obs64=1" in row and "arrivals[" in row, (
-        f"issue 1360: a healthy strih-lx must render its real OBS count + log facets: {row!r}")
+        f"issue 1360: a healthy strih-snv must render its real OBS count + log facets: {row!r}")
 
 
 def test_cg_chain_reads_strih_through_the_platform_resolved_tail_1360(monkeypatch):

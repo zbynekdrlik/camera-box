@@ -705,8 +705,8 @@ fn trailing_flag_without_value_is_usage_error_exit_2() {
 }
 
 /// issue 1317 part 3: the Windows strih PC is RETIRED (M4 cut-over; 10.77.9.202 is the Linux
-/// strih-lx). `--box strih` is refused BY NAME (pointing at the strih-obs.service user unit), and the
-/// Linux strih-lx is refused as a non-Windows box -- this planner can never emit a Windows program
+/// strih-snv). `--box strih` is refused BY NAME (pointing at the strih-obs.service user unit), and the
+/// Linux strih-snv is refused as a non-Windows box -- this planner can never emit a Windows program
 /// for the Linux strih. The box facts come from the shared per-box table, not a local case list.
 #[test]
 fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
@@ -717,17 +717,17 @@ fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
     );
     assert!(
         err.contains("RETIRED") && err.contains("strih-obs.service"),
-        "the refusal names the retirement + the strih-lx user unit: {err}"
+        "the refusal names the retirement + the strih-snv user unit: {err}"
     );
     assert!(!out.contains("win-strih"), "no Windows strih plan: {out}");
-    let (code, out, err) = run_script(&["--box", "strih-lx"]);
+    let (code, out, err) = run_script(&["--box", "strih-snv"]);
     assert_eq!(
         code, 2,
-        "--box strih-lx (Linux) must exit 2. stdout={out} stderr={err}"
+        "--box strih-snv (Linux) must exit 2. stdout={out} stderr={err}"
     );
     assert!(
         !out.contains("$ErrorActionPreference"),
-        "no Windows program for the Linux strih-lx: {out}"
+        "no Windows program for the Linux strih-snv: {out}"
     );
     let src = std::fs::read_to_string(script()).unwrap();
     assert!(

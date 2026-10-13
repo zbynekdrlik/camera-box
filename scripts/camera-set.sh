@@ -188,7 +188,7 @@
 # menej camboxov lebo sa ostatne preniesli do pp, cize rig uz bude mat mensi pocet camboxov"):
 # cam1/cam4/cam6/cam7 physically moved to Poprad (scripts/strih-boxes/strih-pp.env STRIH_CAMERAS),
 # so the SNV E2E, the CI auto-deploy and deploy-fleet no longer dial four cameras in another town.
-# This default is the SNV venue's camera list, `scripts/strih-boxes/strih-lx.env` STRIH_CAMERAS, as
+# This default is the SNV venue's camera list, `scripts/strih-boxes/strih-snv.env` STRIH_CAMERAS, as
 # cam names; tests/harness_camera_set.rs pins the two EQUAL, so a camera moved between venues is one
 # fact-file edit + this line. The source box derives to cam3 (the first strih-routable member), the
 # box whose bkshading relay carries the test camera's USB. The PP cameras keep every fact below

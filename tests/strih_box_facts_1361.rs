@@ -1,17 +1,17 @@
 //! Issue 1361 — the strih provisioning takes its box/venue FACTS from ONE per-box fact file
 //! (`scripts/strih-boxes/<box>.env`), loaded + validated by ONE loader
 //! (`scripts/lib/strih-box-facts.sh`), selected by `setup-strih.sh --box <name>` /
-//! `verify-strih.sh --box <name>` (default `strih-lx`).
+//! `verify-strih.sh --box <name>` (default `strih-snv`).
 //!
 //! What this pins:
 //!   * the loader: parses the file WITHOUT executing it, refuses unknown / missing / duplicate keys,
 //!     unsafe values, malformed facts, and every `TODO_OWNER` value (naming each one);
 //!   * the orchestrators: `--box strih-pp` (the template) refuses; an unknown box refuses;
-//!   * byte identity: every fact-dependent file/value `setup-strih.sh --box strih-lx` generates equals
-//!     the PRE-change output (`tests/fixtures/strih_box_1361/strih-lx.golden`, captured from the
-//!     strih-lx-literal scripts);
-//!   * the fleet list's strih-lx row agrees with the fact file;
-//!   * no strih-lx identity literal remains on a code line of the touched scripts.
+//!   * byte identity: every fact-dependent file/value `setup-strih.sh --box strih-snv` generates equals
+//!     the PRE-change output (`tests/fixtures/strih_box_1361/strih-snv.golden`, captured from the
+//!     strih-snv-literal scripts);
+//!   * the fleet list's strih-snv row agrees with the fact file;
+//!   * no strih-snv identity literal remains on a code line of the touched scripts.
 //!
 //! Std-only + shells out to bash (no root, no network, nothing written outside a temp dir).
 
@@ -79,19 +79,19 @@ impl TmpDir {
     }
 }
 
-/// strih-lx.env's facts, as a fixture body we can mutate one line at a time.
+/// strih-snv.env's facts, as a fixture body we can mutate one line at a time.
 fn strih_lx_env() -> String {
-    std::fs::read_to_string(root().join("scripts/strih-boxes/strih-lx.env"))
-        .expect("scripts/strih-boxes/strih-lx.env must exist")
+    std::fs::read_to_string(root().join("scripts/strih-boxes/strih-snv.env"))
+        .expect("scripts/strih-boxes/strih-snv.env must exist")
 }
 
-/// A fixture box named `name` whose facts are strih-lx's with `edit` applied (line-level replace).
+/// A fixture box named `name` whose facts are strih-snv's with `edit` applied (line-level replace).
 fn fixture_box(dir: &TmpDir, name: &str, edits: &[(&str, &str)]) {
     let mut body = strih_lx_env();
     for (from, to) in edits {
         assert!(
             body.contains(from),
-            "fixture edit anchor `{from}` not in strih-lx.env"
+            "fixture edit anchor `{from}` not in strih-snv.env"
         );
         body = body.replacen(from, to, 1);
     }
@@ -140,26 +140,26 @@ fn loader_is_source_only_and_lists_the_fact_keys() {
 fn loader_loads_strih_lx_facts() {
     let (c, out, err) = with_loader(
         &[],
-        "strih_box_load strih-lx || exit 9\n\
+        "strih_box_load strih-snv || exit 9\n\
          for k in $(strih_box_fact_keys); do printf '%s=%s\\n' \"$k\" \"$(strih_box_fact \"$k\")\"; done\n\
          printf 'LOADED=%s\\n' \"$(strih_box_loaded_name)\"",
     );
-    assert_eq!(c, 0, "strih-lx must load cleanly; stderr={err}");
+    assert_eq!(c, 0, "strih-snv must load cleanly; stderr={err}");
     for want in [
-        "STRIH_HOSTNAME=strih-lx",
+        "STRIH_HOSTNAME=strih-snv",
         "STRIH_IP=10.77.9.202",
-        "STRIH_NDI_PREFIX=STRIH-LX",
+        "STRIH_NDI_PREFIX=STRIH-SNV",
         "STRIH_DANTESYNC_ROLE=server",
         "STRIH_DANTESYNC_UPSTREAM=",
-        "STRIH_INTERCOM_CONFIG=intercom/intercom.strih-lx.toml",
+        "STRIH_INTERCOM_CONFIG=intercom/intercom.strih-snv.toml",
         // issue 1411: the new notebook's rig NIC is the 10 GbE Thunderbolt Aquantia (in-tree atlantic,
         // PCIe, no USB device), replacing the returned notebook's USB RTL8157 (r8152).
         "STRIH_NIC_DRIVER=atlantic",
         "STRIH_NIC_OOT_DRIVER=none",
         "STRIH_NIC_MIN_USB_MBPS=none",
         "STRIH_NIC_MIN_LINK_MBPS=10000",
-        "STRIH_OBS_PROFILE=strih-lx",
-        "STRIH_OBS_COLLECTION=strih-lx",
+        "STRIH_OBS_PROFILE=strih-snv",
+        "STRIH_OBS_COLLECTION=strih-snv",
         "STRIH_NDI_RUNTIME_PEER=10.77.9.65",
         "STRIH_COMPANION_HOST=10.77.9.205",
         "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
@@ -171,7 +171,7 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
         "STRIH_CAMERA_DEV1_NET=direct",
-        "LOADED=strih-lx",
+        "LOADED=strih-snv",
     ] {
         assert!(
             out.lines().any(|l| l == want),
@@ -185,7 +185,7 @@ fn accessors_lazily_load_the_default_box_strih_lx() {
     // No explicit load: the first accessor call loads the default box.
     let (c, out, err) = with_loader(&[], "strih_box_fact STRIH_IP; echo; strih_box_loaded_name");
     assert_eq!(c, 0, "stderr={err}");
-    assert_eq!(out, "10.77.9.202\nstrih-lx", "got: {out}");
+    assert_eq!(out, "10.77.9.202\nstrih-snv", "got: {out}");
 }
 
 /// issue 1412: strih-pp carries every fact; the last open one (the NDI runtime peer) is answered
@@ -208,7 +208,7 @@ fn several_todo_owner_values_are_each_named() {
     let d = TmpDir::new("todo3");
     fixture_box(
         &d,
-        "strih-lx",
+        "strih-snv",
         &[
             ("STRIH_NIC_DRIVER=atlantic", "STRIH_NIC_DRIVER=TODO_OWNER"),
             ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=TODO_OWNER"),
@@ -216,7 +216,7 @@ fn several_todo_owner_values_are_each_named() {
         ],
     );
     let dir = d.path().to_string_lossy().into_owned();
-    let (c, _o, err) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-lx");
+    let (c, _o, err) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-snv");
     assert_ne!(c, 0);
     for k in ["STRIH_NIC_DRIVER", "STRIH_CAMERAS", "STRIH_ROLE"] {
         assert!(err.contains(&format!("{k} is TODO_OWNER")), "{k}: {err}");
@@ -228,11 +228,11 @@ fn a_single_todo_owner_value_is_refused_by_name() {
     let d = TmpDir::new("todo1");
     fixture_box(
         &d,
-        "strih-lx",
+        "strih-snv",
         &[("STRIH_NIC_DRIVER=atlantic", "STRIH_NIC_DRIVER=TODO_OWNER")],
     );
     let dir = d.path().to_string_lossy().into_owned();
-    let (c, _o, err) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-lx");
+    let (c, _o, err) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-snv");
     assert_ne!(c, 0);
     assert!(err.contains("STRIH_NIC_DRIVER is TODO_OWNER"), "{err}");
 }
@@ -259,7 +259,7 @@ fn malformed_fact_files_are_refused() {
         ),
         (
             "shell metachar",
-            vec![("STRIH_OBS_PROFILE=strih-lx", "STRIH_OBS_PROFILE=$(reboot)")],
+            vec![("STRIH_OBS_PROFILE=strih-snv", "STRIH_OBS_PROFILE=$(reboot)")],
             "unsafe character",
         ),
         (
@@ -292,18 +292,18 @@ fn malformed_fact_files_are_refused() {
         ),
         (
             "prefix != upper(hostname)",
-            vec![("STRIH_NDI_PREFIX=STRIH-LX", "STRIH_NDI_PREFIX=STRIH-SNV")],
+            vec![("STRIH_NDI_PREFIX=STRIH-SNV", "STRIH_NDI_PREFIX=STRIH-PP")],
             "STRIH_NDI_PREFIX",
         ),
         (
             "hostname != file name",
-            vec![("STRIH_HOSTNAME=strih-lx", "STRIH_HOSTNAME=strih-other")],
+            vec![("STRIH_HOSTNAME=strih-snv", "STRIH_HOSTNAME=strih-other")],
             "STRIH_HOSTNAME",
         ),
         (
             "intercom config not a repo-relative intercom/*.toml",
             vec![(
-                "STRIH_INTERCOM_CONFIG=intercom/intercom.strih-lx.toml",
+                "STRIH_INTERCOM_CONFIG=intercom/intercom.strih-snv.toml",
                 "STRIH_INTERCOM_CONFIG=/etc/intercom-hub/intercom.toml",
             )],
             "STRIH_INTERCOM_CONFIG",
@@ -406,11 +406,11 @@ fn malformed_fact_files_are_refused() {
     ];
     for (label, edits, want) in cases {
         let d = TmpDir::new("bad");
-        fixture_box(&d, "strih-lx", &edits);
+        fixture_box(&d, "strih-snv", &edits);
         let dir = d.path().to_string_lossy().into_owned();
         let (c, out, err) = with_loader(
             &[("STRIH_BOXES_DIR", &dir)],
-            "strih_box_load strih-lx && echo LOADED",
+            "strih_box_load strih-snv && echo LOADED",
         );
         assert_ne!(c, 0, "[{label}] must refuse; out={out}");
         assert!(!out.contains("LOADED"), "[{label}] loaded anyway");
@@ -423,7 +423,7 @@ fn malformed_fact_files_are_refused() {
 
 #[test]
 fn a_box_name_is_a_plain_name_never_a_path() {
-    for bad in ["../strih-lx", "strih lx", "", "Strih-LX", "strih-lx/"] {
+    for bad in ["../strih-snv", "strih lx", "", "Strih-LX", "strih-snv/"] {
         let (c, _o, err) = with_loader(&[], &format!("strih_box_load '{bad}'"));
         assert_ne!(c, 0, "box name `{bad}` must be refused");
         assert!(err.contains("box name"), "`{bad}`: {err}");
@@ -439,9 +439,9 @@ fn a_fact_file_is_parsed_never_executed() {
     let marker = d.path().join("executed");
     // A line that would create the marker if the loader SOURCED the file.
     let edit = format!("touch {}\nSTRIH_CAMERAS=", marker.display());
-    fixture_box(&d, "strih-lx", &[("STRIH_CAMERAS=", &edit)]);
+    fixture_box(&d, "strih-snv", &[("STRIH_CAMERAS=", &edit)]);
     let dir = d.path().to_string_lossy().into_owned();
-    let (c, _o, _e) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-lx");
+    let (c, _o, _e) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-snv");
     assert_ne!(c, 0, "a non KEY=value line refuses");
     assert!(!marker.exists(), "the fact file must never be executed");
 }
@@ -449,13 +449,13 @@ fn a_fact_file_is_parsed_never_executed() {
 #[test]
 fn a_fleet_row_that_disagrees_with_the_fact_ip_is_refused() {
     let fleet =
-        "strih-lx|10.77.9.203|linux-genlock|always\nstream|10.77.9.204|windows-genlock|always";
-    let (c, _o, err) = with_loader(&[("OBS_FLEET", fleet)], "strih_box_load strih-lx");
+        "strih-snv|10.77.9.203|linux-genlock|always\nstream|10.77.9.204|windows-genlock|always";
+    let (c, _o, err) = with_loader(&[("OBS_FLEET", fleet)], "strih_box_load strih-snv");
     assert_ne!(c, 0, "fleet row .203 vs fact .202 must refuse");
     assert!(err.contains("fleet"), "{err}");
     // A box with NO fleet row yet (a new strih before go-live) is fine.
     let fleet2 = "stream|10.77.9.204|windows-genlock|always";
-    let (c2, _o, err2) = with_loader(&[("OBS_FLEET", fleet2)], "strih_box_load strih-lx");
+    let (c2, _o, err2) = with_loader(&[("OBS_FLEET", fleet2)], "strih_box_load strih-snv");
     assert_eq!(
         c2, 0,
         "no fleet row = not yet in the fleet, allowed: {err2}"
@@ -467,7 +467,7 @@ fn the_real_fleet_row_matches_the_fact_file() {
     let (c, out, err) = with_loader(
         &[],
         &format!(
-            ". \"{}\"\nprintf '%s|%s' \"$(obs_fleet_host strih-lx)\" \"$(strih_box_fact STRIH_IP)\"",
+            ". \"{}\"\nprintf '%s|%s' \"$(obs_fleet_host strih-snv)\" \"$(strih_box_fact STRIH_IP)\"",
             root().join("scripts/lib/obs-fleet.sh").display()
         ),
     );
@@ -475,33 +475,39 @@ fn the_real_fleet_row_matches_the_fact_file() {
     let (fleet, fact) = out.split_once('|').expect("two fields");
     assert_eq!(
         fleet, fact,
-        "obs-fleet.sh strih-lx row must equal strih-lx.env STRIH_IP"
+        "obs-fleet.sh strih-snv row must equal strih-snv.env STRIH_IP"
     );
 }
 
 #[test]
 fn a_per_run_env_knob_that_contradicts_a_fact_is_refused() {
-    let (c, _o, err) = with_loader(&[("STRIH_LX_IP", "10.77.9.203")], "strih_box_load strih-lx");
+    let (c, _o, err) = with_loader(
+        &[("STRIH_LX_IP", "10.77.9.203")],
+        "strih_box_load strih-snv",
+    );
     assert_ne!(c, 0);
     assert!(err.contains("STRIH_LX_IP"), "{err}");
     let (c2, _o, err2) = with_loader(
         &[("STRIH_LX_DANTESYNC_ROLE", "client")],
-        "strih_box_load strih-lx",
+        "strih_box_load strih-snv",
     );
     assert_ne!(c2, 0);
     assert!(err2.contains("STRIH_LX_DANTESYNC_ROLE"), "{err2}");
     // An env value EQUAL to the fact is harmless (the old documented invocation still works).
-    let (c3, _o, err3) = with_loader(&[("STRIH_LX_IP", "10.77.9.202")], "strih_box_load strih-lx");
+    let (c3, _o, err3) = with_loader(
+        &[("STRIH_LX_IP", "10.77.9.202")],
+        "strih_box_load strih-snv",
+    );
     assert_eq!(c3, 0, "{err3}");
 }
 
 #[test]
 fn cli_parses_box_flag_default_strih_lx() {
     for (args, want) in [
-        ("", "strih-lx"),
+        ("", "strih-snv"),
         ("--box strih-pp", "strih-pp"),
         ("--box=strih-pp", "strih-pp"),
-        ("--yes --box strih-lx", "strih-lx"),
+        ("--yes --box strih-snv", "strih-snv"),
     ] {
         let (c, out, err) = with_loader(&[], &format!("strih_box_cli_box {args}"));
         assert_eq!(c, 0, "`{args}`: {err}");
@@ -568,20 +574,20 @@ fn setup_and_verify_default_to_strih_lx() {
             root().join(script).display()
         );
         let (_c, out2, _e) = bash(&[], &body);
-        assert_eq!(out2.trim(), "strih-lx", "{script} default box");
+        assert_eq!(out2.trim(), "strih-snv", "{script} default box");
     }
 }
 
-/// The byte-identity net: every fact-dependent output of `setup-strih.sh --box strih-lx` equals the
-/// pre-change (strih-lx-literal) output.
+/// The byte-identity net: every fact-dependent output of `setup-strih.sh --box strih-snv` equals the
+/// pre-change (strih-snv-literal) output.
 #[test]
 fn strih_lx_generated_output_is_byte_identical_to_the_pre_change_golden() {
     let render = root().join("tests/fixtures/strih_box_1361/render.sh");
     let golden =
-        std::fs::read_to_string(root().join("tests/fixtures/strih_box_1361/strih-lx.golden"))
+        std::fs::read_to_string(root().join("tests/fixtures/strih_box_1361/strih-snv.golden"))
             .expect("golden");
     let body = format!(
-        "bash \"{}\" \"{}\" strih-lx",
+        "bash \"{}\" \"{}\" strih-snv",
         render.display(),
         root().display()
     );
@@ -595,7 +601,7 @@ fn strih_lx_generated_output_is_byte_identical_to_the_pre_change_golden() {
             .find(|(_, (a, b))| a != b)
             .map(|(i, (a, b))| format!("line {}: got `{a}` want `{b}`", i + 1))
             .unwrap_or_else(|| format!("length differs: got {} want {}", out.len(), golden.len()));
-        panic!("strih-lx output drifted from the pre-change golden -- {first}");
+        panic!("strih-snv output drifted from the pre-change golden -- {first}");
     }
 }
 
@@ -654,7 +660,7 @@ fn obs_profile_and_collection_facts_reach_the_launcher_via_a_unit_dropin() {
     assert_eq!(c, 0, "{err}");
     assert_eq!(
         out,
-        "[Service]\nEnvironment=\"STRIH_OBS_PROFILE=strih-lx\"\nEnvironment=\"STRIH_OBS_COLLECTION=strih-lx\"\n",
+        "[Service]\nEnvironment=\"STRIH_OBS_PROFILE=strih-snv\"\nEnvironment=\"STRIH_OBS_COLLECTION=strih-snv\"\n",
         "drop-in text"
     );
     // the launcher still reads exactly these two env names.
@@ -668,7 +674,7 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
     let d = TmpDir::new("seed");
     fixture_box(
         &d,
-        "strih-lx",
+        "strih-snv",
         &[
             ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 5"),
             (
@@ -681,7 +687,7 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
     let (c, out, err) = with_loader(
         &[("STRIH_BOXES_DIR", &dir)],
         &format!(
-            ". \"{}\"\nstrih_box_load strih-lx || exit 9\nstrih_lx_seed_manifest_json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(\" \".join(i[\"input\"] for i in d[\"inputs\"]))'",
+            ". \"{}\"\nstrih_box_load strih-snv || exit 9\nstrih_lx_seed_manifest_json | python3 -c 'import json,sys; d=json.load(sys.stdin); print(\" \".join(i[\"input\"] for i in d[\"inputs\"]))'",
             root().join("scripts/lib/strih-provision.sh").display()
         ),
     );
@@ -690,32 +696,32 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// the static net: no strih-lx identity literal outside strih-lx.env
+// the static net: no strih-snv identity literal outside strih-snv.env
 // ---------------------------------------------------------------------------------------------
 
 /// Tokens that legitimately contain an identity string and are NOT a box fact:
 ///   * the on-box ROLE artifact paths (the same name on every strih box, read by strih_scenes.py /
 ///     strih-obs-start.sh -- historical names, not the box identity);
-///   * the retired logind drop-in a self-heal removes (a historical strih-lx-only file name);
+///   * the retired logind drop-in a self-heal removes (a historical file name, issue 1414 keeps it);
 ///   * the committed strih-nic-irq-affinity.service Description (pinned byte-identical to systemd/);
 ///   * the loader's default-box constant (the selector default, the dispatch's `--box` default).
 const ALLOWED_TOKENS: &[&str] = &[
-    "strih-lx-seed.json",
+    "strih-seed.json",
     "strih-lx-projector.json",
-    "strih-lx-profile-facts.txt",
+    "strih-profile-facts.txt",
     "90-strih-lx.conf",
-    "Description=strih-lx:",
-    "STRIH_BOX_DEFAULT=strih-lx",
+    "Description=strih-snv:",
+    "STRIH_BOX_DEFAULT=strih-snv",
 ];
 
 #[test]
 fn no_strih_lx_identity_literal_remains_outside_the_fact_file() {
-    // The identity values = strih-lx.env's facts that name THIS box / venue.
+    // The identity values = strih-snv.env's facts that name THIS box / venue.
     let env = strih_lx_env();
     let fact = |k: &str| -> String {
         env.lines()
             .find_map(|l| l.strip_prefix(&format!("{k}=")))
-            .unwrap_or_else(|| panic!("{k} not in strih-lx.env"))
+            .unwrap_or_else(|| panic!("{k} not in strih-snv.env"))
             .to_string()
     };
     let mut needles: Vec<String> = [
@@ -760,7 +766,7 @@ fn no_strih_lx_identity_literal_remains_outside_the_fact_file() {
     }
     assert!(
         hits.is_empty(),
-        "strih-lx identity literals must live only in scripts/strih-boxes/strih-lx.env:\n{}",
+        "strih-snv identity literals must live only in scripts/strih-boxes/strih-snv.env:\n{}",
         hits.join("\n")
     );
 }
@@ -773,7 +779,7 @@ fn a_client_box_with_a_master_named_upstream_host_renders_its_unit() {
     let d = TmpDir::new("client");
     fixture_box(
         &d,
-        "strih-lx",
+        "strih-snv",
         &[
             ("STRIH_DANTESYNC_ROLE=server", "STRIH_DANTESYNC_ROLE=client"),
             (
@@ -786,7 +792,7 @@ fn a_client_box_with_a_master_named_upstream_host_renders_its_unit() {
     let (c, out, err) = with_loader(
         &[("STRIH_BOXES_DIR", &dir)],
         &format!(
-            ". \"{}\"\nstrih_box_load strih-lx || exit 9\n\
+            ". \"{}\"\nstrih_box_load strih-snv || exit 9\n\
              strih_dantesync_unit_text \"$(strih_lx_dantesync_role)\" \"$(strih_lx_dantesync_args)\"",
             root().join("scripts/lib/strih-provision.sh").display()
         ),
@@ -799,7 +805,7 @@ fn a_client_box_with_a_master_named_upstream_host_renders_its_unit() {
 }
 
 /// The facts reach EVERY fact-dependent output: render a synthetic box whose every fact differs from
-/// strih-lx and prove no strih-lx value (and no unsubstituted placeholder) survives anywhere.
+/// strih-snv and prove no strih-snv value (and no unsubstituted placeholder) survives anywhere.
 #[test]
 fn every_fact_dependent_output_follows_a_different_box() {
     let d = TmpDir::new("zz");
@@ -807,18 +813,21 @@ fn every_fact_dependent_output_follows_a_different_box() {
         &d,
         "strih-zz",
         &[
-            ("STRIH_HOSTNAME=strih-lx", "STRIH_HOSTNAME=strih-zz"),
+            ("STRIH_HOSTNAME=strih-snv", "STRIH_HOSTNAME=strih-zz"),
             ("STRIH_IP=10.77.9.202", "STRIH_IP=10.0.0.5"),
-            ("STRIH_NDI_PREFIX=STRIH-LX", "STRIH_NDI_PREFIX=STRIH-ZZ"),
+            ("STRIH_NDI_PREFIX=STRIH-SNV", "STRIH_NDI_PREFIX=STRIH-ZZ"),
             ("STRIH_DANTESYNC_ROLE=server", "STRIH_DANTESYNC_ROLE=client"),
             (
                 "STRIH_DANTESYNC_UPSTREAM=\n",
                 "STRIH_DANTESYNC_UPSTREAM=venue-ntp.lan\n",
             ),
             ("STRIH_NIC_DRIVER=atlantic", "STRIH_NIC_DRIVER=r8169"),
-            ("STRIH_OBS_PROFILE=strih-lx", "STRIH_OBS_PROFILE=zz-profile"),
             (
-                "STRIH_OBS_COLLECTION=strih-lx",
+                "STRIH_OBS_PROFILE=strih-snv",
+                "STRIH_OBS_PROFILE=zz-profile",
+            ),
+            (
+                "STRIH_OBS_COLLECTION=strih-snv",
                 "STRIH_OBS_COLLECTION=zz-collection",
             ),
             (
@@ -852,14 +861,14 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "10.77.9.65",
         "10.77.9.205",
         "atlantic",
-        "STRIH-LX",
-        "strih-lx",
+        "STRIH-SNV",
+        "strih-snv",
         "RESOLUME-SNV",
         "@STRIH_",
     ] {
         assert!(
             !out.contains(gone),
-            "a strih-lx value / placeholder `{gone}` survived for strih-zz:\n{out}"
+            "a strih-snv value / placeholder `{gone}` survived for strih-zz:\n{out}"
         );
     }
     for want in [
@@ -898,7 +907,7 @@ fn a_non_ascii_value_is_refused_in_every_locale() {
         let d = TmpDir::new("locale");
         fixture_box(
             &d,
-            "strih-lx",
+            "strih-snv",
             &[(
                 "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=RESOLUME-\u{10c} (cg)",
@@ -907,7 +916,7 @@ fn a_non_ascii_value_is_refused_in_every_locale() {
         let dir = d.path().to_string_lossy().into_owned();
         let (c, _o, err) = with_loader(
             &[("STRIH_BOXES_DIR", &dir), ("LC_ALL", locale)],
-            "strih_box_load strih-lx",
+            "strih_box_load strih-snv",
         );
         assert_ne!(c, 0, "[{locale}] a non-ASCII value must refuse");
         assert!(err.contains("unsafe character"), "[{locale}] {err}");
@@ -937,7 +946,7 @@ fn a_failed_load_is_never_papered_over_by_the_default_box() {
     assert!(oute.is_empty(), "{oute}");
     let (c2, out2, err2) = with_loader(
         &[
-            ("STRIH_BOX_LOADED", "strih-lx"),
+            ("STRIH_BOX_LOADED", "strih-snv"),
             ("STRIH_BOX_FACTS", "junk"),
         ],
         "strih_box_fact STRIH_IP",

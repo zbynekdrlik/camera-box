@@ -4960,7 +4960,7 @@ fn build_and_print_verdict_with_stream_diffs(
                 );
                 // #781/#1196 — the per-window tear statistics. Computed BEFORE the continuity fold
                 // since issue 1367: the tear detector's per-window multi-path fraction decides each
-                // window's check scope (a MULTI-SOURCE window -- cam2 filming the strih-lx
+                // window's check scope (a MULTI-SOURCE window -- cam2 filming the strih-snv
                 // multiview -- is judged by its node burn; its copies/gaps, cadence and frozen_leg
                 // fold report-only, `camera_box::multi_source_window`). The tear JSON + LIVE fold
                 // further down read the SAME `tear_stats`.
@@ -11784,7 +11784,7 @@ mod tests {
     }
 
     /// Issue 1367 (ROZHODNUTÉ 5843424054): a cambox window whose captured content is MULTI-SOURCE
-    /// (cam2 filming the strih-lx multiview: several generations of the painted pattern per frame)
+    /// (cam2 filming the strih-snv multiview: several generations of the painted pattern per frame)
     /// is judged by its node burn. Three otherwise-identical fixtures on ONE CAM2 window carrying
     /// copies=10 (a hard-frozen, over-tolerance tick sequence), the cam2 own burn and the strih
     /// anchor burn:

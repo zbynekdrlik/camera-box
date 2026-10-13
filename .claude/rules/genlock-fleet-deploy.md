@@ -4,7 +4,7 @@ paths:
   - "scripts/lib/genlock-markers.sh"
   - "scripts/lib/genlock-stats-abi.sh"
   - "scripts/lib/genlock-fleet-boxes.sh"
-  - "scripts/lib/strih-lx-deploy.sh"
+  - "scripts/lib/strih-snv-deploy.sh"
   - "scripts/lib/genlock-plugin-deploy.sh"
   - "scripts/lib/obs-clean-close-win.sh"
   - "scripts/lib/mv-reverify-escalate.sh"
@@ -38,7 +38,7 @@ SHA marker 14:58) while dev carried v4.
   - It writes the new pair at step (5b) (`genlock_stats_abi_marker_ps`, after the other markers, through
     `Write-MarkerAtomic` with a two-element array: one CRLF line each).
   - The Linux legs write it through `genlock_write_markers`' 5th argument, the pair. The imag program
-    passes it. strih-lx gets it as `bundle/GENLOCK_STATS_ABI.txt` in the marker format, staged by the
+    passes it. strih-snv gets it as `bundle/GENLOCK_STATS_ABI.txt` in the marker format, staged by the
     planner after `strih_lx_prepare` (`genlock_stats_abi_stage`). `setup-strih.sh` reads it back from
     the STAGE with `genlock_stats_abi_pair_from_marker` (it sources `genlock-stats-abi.sh`), never from
     `/opt/obs-genlock`, which still holds the previous deploy's marker.
@@ -129,18 +129,18 @@ Full-path E2E at the `genlock_parity` preflight (the recurring #923/#932 pain).
 - Pure builder functions emit each box's program; unit-tested by sourcing (`tests/deploy_genlock_fleet.rs`).
 - **Windows (strih/stream) is EMIT-ONLY** — a bash script cannot drive the `win-*` MCP
   (`win-ssh-vs-mcp` HARD rule), so it PRINTS the PowerShell program the agent pastes into the box's
-  MCP Shell. **imag and strih-lx are Linux** (file copy + CLI = Context B), so execute mode actually
-  ssh-deploys them (strih-lx: `scripts/lib/strih-lx-deploy.sh`, issue 1317 part 6 — below).
+  MCP Shell. **imag and strih-snv are Linux** (file copy + CLI = Context B), so execute mode actually
+  ssh-deploys them (strih-snv: `scripts/lib/strih-snv-deploy.sh`, issue 1317 part 6 — below).
 - `--plan --run-id <id> --sha <headSha> --stage <dir> [--full|--fast] [--boxes …]` prints the whole
   plan offline (no network) — this is the Tier-0-tested surface. Execute mode (`--run-id …`) resolves
   + downloads + deploys live (supervisor-driven; the download/scp/ssh glue is untestable offline).
 
-## The strih is strih-lx; the Windows `strih` arm is RETIRED (issue 1317 part 3, M4 cut-over 20.9.2026)
+## The strih is strih-snv; the Windows `strih` arm is RETIRED (issue 1317 part 3, M4 cut-over 20.9.2026)
 
-The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-lx. So:
+The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-snv. So:
 
-- **Default fleet = `strih-lx,stream`** (canonical order `strih-lx,stream,imag,resolume`). `--boxes
-  strih` is REFUSED by name ("RETIRED … the strih is strih-lx"), and every per-box Windows function
+- **Default fleet = `strih-snv,stream`** (canonical order `strih-snv,stream,imag,resolume`). `--boxes
+  strih` is REFUSED by name ("RETIRED … the strih is strih-snv"), and every per-box Windows function
   (`fleet_box_mcp` / `fleet_box_ip` / `fleet_box_ahk_script` / `fleet_box_ahk_prefer`) returns 2 for
   it. `build_windows_deploy_program BOX … HAS_AHK=1` for a box with no AHK identity is a loud rc 2 —
   it used to fall back silently to the retired strih's `D:\_APPS` path.
@@ -151,36 +151,36 @@ The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-lx. So:
   row. The move was byte-neutral for stream / resolume / imag (plan output diffed identical, full +
   fast); keep `tests/deploy_genlock_fleet.rs`'s `per_box_table_lives_in_the_shared_lib_1317` green
   (no inline redefinition, no `win-strih` / `.202` in the lib, deploy script < 1000 lines).
-- **The strih-lx plan is `emit_strih_lx_plan`, NOT `emit_imag_plan`.** The old arm printed the imag
-  program under a `box=imag` header — it restarts `imag-obs.service`, a unit strih-lx does not have,
-  so it would have failed AFTER installing bytes. strih-lx installs the strih FULL artifact
+- **The strih-snv plan is `emit_strih_lx_plan`, NOT `emit_imag_plan`.** The old arm printed the imag
+  program under a `box=imag` header — it restarts `imag-obs.service`, a unit strih-snv does not have,
+  so it would have failed AFTER installing bytes. strih-snv installs the strih FULL artifact
   (`obs-genlock-linux-x86_64-strih`, also under `--fast` — fast is Windows-only) into `/usr` through
   `setup-strih.sh` (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is
   supervised by `strih-obs.service`. **Every plan line is a `#` comment** (the issue-1295 saved-.ps1
   parse rule holds for a mixed plan).
 
-## strih-lx EXECUTE arm (issue 1317 part 6) — `scripts/lib/strih-lx-deploy.sh`
+## strih-snv EXECUTE arm (issue 1317 part 6) — `scripts/lib/strih-snv-deploy.sh`
 
-`deploy-genlock-fleet.sh --run-id <id> --boxes strih-lx` deploys the production strih end to end;
+`deploy-genlock-fleet.sh --run-id <id> --boxes strih-snv` deploys the production strih end to end;
 it replaced the supervisor's ad-hoc scratch script, which twice failed half-silently (the box's
 `/tmp` is a 7.5 GB tmpfs, each stage ~2.2 GB, rsync died `Disk quota exceeded` rc 11 and the old
 build kept running with nothing refusing). The arm is a sourced lib (the deploy script has a
 < 1000-line budget pinned by `per_box_table_lives_in_the_shared_lib_1317`), and the `--plan` arm
 prints the SAME remote-command builders (`strih_lx_plan_steps`). Each failure =
-`ERROR: [strih-lx <step>] failed (rc=N): …`; a failed strih-lx writes NO fleet-log line.
+`ERROR: [strih-snv <step>] failed (rc=N): …`; a failed strih-snv writes NO fleet-log line.
 
 **Two phases — every requested box resolves BEFORE any box changes.** `strih_lx_prepare` (exit 3, box
 untouched) runs before the Windows and imag resolution; `strih_lx_apply` (exit 4) runs after them and
-before the imag ssh deploy. A default `strih-lx,stream` run with no Windows build at the SHA can
+before the imag ssh deploy. A default `strih-snv,stream` run with no Windows build at the SHA can
 therefore never leave the production strih on a different commit than stream (genlock_parity).
-The Windows paste-programs are printed only AFTER strih-lx VERIFIED (nobody pastes stream while the
-strih apply can still fail), and the verified strih-lx gets its OWN fleet-log line at once (the rest
+The Windows paste-programs are printed only AFTER strih-snv VERIFIED (nobody pastes stream while the
+strih apply can still fail), and the verified strih-snv gets its OWN fleet-log line at once (the rest
 of the fleet is logged at the end), so a later imag failure never hides the strih deploy.
 
 1. **prepare** — the `linux-genlock.yml` run at the anchor SHA; the artifact is REFUSED unless its
    `GENLOCK_BUILD_SHA.txt` is the canonical SHA and its `BUNDLE_MANIFEST.json` carries the
    `lib/x86_64-linux-gnu/libobs.so.30` sha256 (the read-back needs it). The dial host must be a dotted
-   IPv4 (`strih_lx_is_ipv4`; the fleet row is one, `strih-lx.lan` does not resolve on dev1, a
+   IPv4 (`strih_lx_is_ipv4`; the fleet row is one, a DNS name is refused, a
    flag-shaped / mistyped override is refused). The box's OWN address is not the dial host: since
    issue 1361 setup-strih.sh reads it from the box's fact file, so the runner exports no STRIH_LX_IP.
    The provisioning tree is the COMMITTED `scripts/ systemd/ intercom/` + `vendor/realtek-r8152` (the
@@ -190,16 +190,16 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    edits never ship) + a generated `run-setup.sh`. The ONE list is `strih_lx_tree_paths`: a new
    file setup-strih reads outside `scripts/` goes into it, or the deploy fails mid-install after the
    OBS stop (live 8.10.2026: step 16e, `camera-box-audio.hpp not found`). The tree must carry
-   `scripts/strih-boxes/strih-lx.env` plus the intercom routing file that fact file's
+   `scripts/strih-boxes/strih-snv.env` plus the intercom routing file that fact file's
    `STRIH_INTERCOM_CONFIG` names (read with sed, never sourced on dev1); it is the checkout's tree,
    not the bundle's SHA (a scripts-only fix never triggers a genlock build; setup-strih.sh is box
    config — the same split as imag's `genlock-markers.sh`). Token: `STRIH_LX_GH_TOKEN` (read-only)
    else `gh auth token`.
 2. **preflight** — the box's `hostname` must equal the fact file's `STRIH_HOSTNAME` (a dial override
-   that reaches another box would otherwise be provisioned AS strih-lx: its hostname, IP, janus
+   that reaches another box would otherwise be provisioned AS strih-snv: its hostname, IP, janus
    `local_ip`, NTP-master role), and no previous `setup-strih.sh` may still run (`pgrep -x`): the sweep
    would delete the stage it is reading and a second installer would race it. LAST, immediately
-   before the first mutation: the shared rig-busy guard `stray_session_check_assert` at the strih-lx
+   before the first mutation: the shared rig-busy guard `stray_session_check_assert` at the strih-snv
    dial IP + the obs-fleet stream host — strih or stream streaming/recording = exit 4 naming what is
    live, nothing changed (`.claude/rules/rig-mutation-broadcast-guard.md`, third caller). The SAME
    guard runs again right before step 5's stop (exit 4 in step `stop`, OBS NOT stopped). prepare
@@ -212,7 +212,7 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    from the committed tree, at the deploy's own host. The deploying stage is re-checked; any other
    stage dir still present is a loud WARNING (the rsync is the hard gate).
 4. **stage** — `rsync -a --delete --timeout=120` bundle → `/tmp/genlock-stage-<sha>/bundle/`, tree →
-   `…/repo/` (ONE per-sha dir the next sweep removes whole; the old fixed `/tmp/strih-lx-deploy-repo`
+   `…/repo/` (ONE per-sha dir the next sweep removes whole; the old fixed `/tmp/strih-snv-deploy-repo`
    is gone). **OBS is still running** — an rsync failure exits 4 BEFORE anything is stopped.
 5. **stop** — delegated to `/usr/local/bin/strih-obs-stop.sh` (plain mode = `systemctl --user stop`,
    so the unit `ExecStop` runs and `Restart=on-failure` stays quiet) + a bounded wait for the unit AND
@@ -222,7 +222,7 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    `ghtoken:<token>`. The runner reads the token line (skipping a password line a NOPASSWD sudo left
    unread), writes `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle` (+ `CAM_PW` / `STRIH_NDI_PEER` when
    set) into a 0600 `<stage>/.runner.env`, and re-execs itself as a SYSTEM transient unit
-   (`systemd-run --unit=strih-lx-setup-<epoch> --collect`) to run `setup-strih.sh --box strih-lx`
+   (`systemd-run --unit=strih-snv-setup-<epoch> --collect`) to run `setup-strih.sh --box strih-snv`
    DIRECTLY (the explicit fact-file box, issue 1361) and write `<stage>/setup-strih.rc`; the child
    sources the env file and deletes it at once; dev1 polls the rc
    (default 45 min). An ssh drop cannot kill the install mid-apt; the token is never an argv.
@@ -266,7 +266,7 @@ the step commands' distinguishing substrings: `pgrep -x setup-strih.sh`, `--loca
 `GENLOCK_BUILD_SHA.txt`, `--user start`), plus the generated runner (root check stripped for the test)
 and `--stages-only` on real temp dirs. A test SHA must stay SHORT hex — a 40-hex literal trips the
 secret-staging hook. Remaining supervisor step after a green execute: the WS filter-enum survival
-check (printed as ACCEPTANCE in the plan); after a reboot-pending run, `verify-strih.sh --box strih-lx`
+check (printed as ACCEPTANCE in the plan); after a reboot-pending run, `verify-strih.sh --box strih-snv`
 after the reboot.
 
 ## GOTCHA — setup-strih.sh's own final gate FAILS while the deploy has OBS stopped (issue 1317 part 6)
@@ -278,10 +278,10 @@ there → setup exits 1 after EVERY install step succeeded (the old scratch scri
 ignored the rc). The arm therefore accepts exactly that failure — rc 1 AND the step-17 line `verify-
 strih.sh acceptance gate did not pass` among the log's last lines (`fail()` exits at the first
 failure, so nothing else failed) — starts OBS, passes the read-back, and then runs `sudo
-verify-strih.sh --box strih-lx` from the staged tree ITSELF as the acceptance gate. Its failure is
+verify-strih.sh --box strih-snv` from the staged tree ITSELF as the acceptance gate. Its failure is
 **exit 5**, not 4 — the new build IS installed, running and read back; verify-strih grades the whole
 box, incl. items no deploy changes (e.g. the dantesync offset item on the NTP master) — the error lists
-the verify FAIL lines and the fleet log records `strih-lx:accept-failed`. A read-only root run of
+the verify FAIL lines and the fleet log records `strih-snv:accept-failed`. A read-only root run of
 verify-strih.sh on the healthy box (24.9.2026) was ALL CLEAR in 9 s (inside the 180 s ssh bound). A test pins the gate text in setup-strih.sh. The clean fix is a deploy mode in
 setup-strih.sh that skips step 17 (it belongs to the provisioning lane) — returned as a follow-up
 candidate in the part-6 LANE-RETURN; until then do NOT "fix" the arm by ignoring setup's rc.
@@ -571,7 +571,7 @@ bytes for stream and resolume; design comment 6014590298):
 - **`scripts/lib/mv-reverify-escalate.sh` stays a force-kill.** It restarts strih OBS headless over
   ssh (session 0 cannot post WM_CLOSE to a session-1 window, issue 958) and this OBS build has no
   `ExitOBS` request, so that escalation still loses unsaved runtime writes. Since issue 1317 it acts
-  only on a Windows strih. strih-lx restarts through its systemd unit, and a SIGTERM on Linux runs
+  only on a Windows strih. strih-snv restarts through its systemd unit, and a SIGTERM on Linux runs
   `OBSApp::processSigTerm` -> `saveAll()` before `quit()` (`vendor/obs-studio/frontend/OBSApp.cpp`),
   so the Linux boxes keep their runtime writes on a unit stop or restart.
 - Other obs64 force-kills that still skip the save: `scripts/launch-obs-genlock.sh --force` on a

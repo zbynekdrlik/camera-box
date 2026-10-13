@@ -447,7 +447,7 @@ dantesync_is_ntp_master() {
 dantesync_resolume_win_spec() {
   local ip="${1:-}"
   [ -n "$ip" ] || { printf ''; return 0; }
-  printf 'resolume=%s@%s' "${DANTESYNC_RESOLUME_USER:-newlevel}" "$ip"
+  printf 'resolume-snv=%s@%s' "${DANTESYNC_RESOLUME_USER:-newlevel}" "$ip"
 }
 
 # dantesync_gate_env_for NAME -> the env assignment the per-node verification gate needs (stdout,
@@ -490,7 +490,7 @@ dantesync_skip_away_traveling() {
 }
 
 # dantesync_upgrade_default_master GIVEN -> the master(s) verified master-aware: GIVEN, else every
-# fleet NTP master (strih-lx + the venue masters, issue 1412: strih-pp), else "strih". Issue 1372:
+# fleet NTP master (strih-snv + the venue masters, issue 1412: strih-pp), else "strih". Issue 1372:
 # "strih" without --fleet graded the date master as a SLAVE and rolled a healthy swap back twice.
 dantesync_upgrade_default_master() {
   local given="${1:-}" m

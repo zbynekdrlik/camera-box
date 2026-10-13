@@ -26,9 +26,9 @@ fi
 # the burn they clear was left by an EARLIER run. rig-mode sweeps on every EVENT switch; the E2E
 # sweeps wherever its pre-run normalize sweep runs (the ALL_CAMBOX gate).
 
-# The obs-fleet name of the cg OBS box (env CG_CHAIN_BACKSTOP_BOX, default resolume). Pure.
+# The obs-fleet name of the cg OBS box (env CG_CHAIN_BACKSTOP_BOX, default resolume-snv). Pure.
 cg_chain_backstop_box() {
-  printf '%s' "${CG_CHAIN_BACKSTOP_BOX:-resolume}"
+  printf '%s' "${CG_CHAIN_BACKSTOP_BOX:-resolume-snv}"
 }
 
 # The cg OBS burn-sweep target in the rig-mode obs_burn_targets row shape `ip|source|box` -- the

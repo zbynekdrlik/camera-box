@@ -410,11 +410,11 @@ mod tests {
     #[test]
     fn test_ndi_display_config_custom() {
         let config = NdiDisplayConfig {
-            source_name: "STRIH-LX (interkom)".to_string(),
+            source_name: "STRIH-SNV (interkom)".to_string(),
             fb_device: "/dev/fb1".to_string(),
             find_timeout_secs: 60,
         };
-        assert_eq!(config.source_name, "STRIH-LX (interkom)");
+        assert_eq!(config.source_name, "STRIH-SNV (interkom)");
         assert_eq!(config.fb_device, "/dev/fb1");
         assert_eq!(config.find_timeout_secs, 60);
     }

@@ -1,6 +1,6 @@
 //! issue 1317 — the imag offline-ack STALE-ACK decision must use a SERVICE-level reachability
 //! probe, never a bare ICMP ping. imag-nb is OUT of the rig (~1 year, owner 20.9.2026 — its USB
-//! ethernet dongle now carries strih-lx at .202). On the venue LAN 10.77.9.182 still answers ICMP
+//! ethernet dongle now carries strih-snv at .202). On the venue LAN 10.77.9.182 still answers ICMP
 //! (a router / proxy-ARP / foreign responder — `ip neigh` INCOMPLETE, ssh:22 refused, dantesync
 //! silent), so the old `ping -c1 -W2 "$IMAG_IP"` staleness probe reads the acked-absent box as
 //! REACHABLE and rejects the legitimate ack as STALE, all-UNKNOWN drift-guard, and the issue-789

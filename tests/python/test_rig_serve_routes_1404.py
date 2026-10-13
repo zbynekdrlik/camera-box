@@ -5,7 +5,7 @@ never the lease dir, whose mere existence means held=true):
   GET/HEAD /rig-qpsk-markers.csv  -> cam2's QPSK marker log, text/csv, X-Mirror-Age-S, 404 absent
 while `/rig-lease.json`, `/healthz` and the 404 stay byte-identical to the pre-change server
 (golden bytes captured from it at 9e06ea0b3). The program-audio verdict is served only by the
-sampler's own endpoint on strih-lx (test_program_audio_http_1404.py).
+sampler's own endpoint on strih-snv (test_program_audio_http_1404.py).
 
 A REAL ThreadingHTTPServer on an ephemeral 127.0.0.1 port (never a mock), the harness of
 test_rig_lease_server_1277.py.
@@ -316,7 +316,7 @@ def test_post_to_the_markers_route_is_never_a_write(tmp_path):
 
 # ---------------------------------------------------------------------------------------------
 # /program-audio.json is no dev1 route (issue 1404, 8.10.2026): the consumers read the sampler's
-# own endpoint on strih-lx, so the dev1 server answers its plain 404 even with a valid payload
+# own endpoint on strih-snv, so the dev1 server answers its plain 404 even with a valid payload
 # sitting in its serve dir (a stale file there must never read as a live verdict)
 # ---------------------------------------------------------------------------------------------
 

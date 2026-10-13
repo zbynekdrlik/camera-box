@@ -1,7 +1,7 @@
-"""Issue 1399 -- strih-lx's browser-source keeper (scripts/strih_browser_keeper.py).
+"""Issue 1399 -- strih-snv's browser-source keeper (scripts/strih_browser_keeper.py).
 
 WHY: obs-browser loads a browser source's page ONCE at OBS start and never retries a failed load. On
-4.10.2026 strih-lx booted before presenter.lan / fohabl.lan answered and four production scenes stayed
+4.10.2026 strih-snv booted before presenter.lan / fohabl.lan answered and four production scenes stayed
 empty until a manual `refreshnocache` (owner: "tie browser sceny maju byt vzdy nacitane").
 
 What this pins (design comment 5977447339, Approach 1):

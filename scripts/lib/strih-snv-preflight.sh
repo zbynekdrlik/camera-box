@@ -3,8 +3,8 @@
 # which would propagate into recording-e2e.sh's own carefully-scoped set +e/-e regions when this
 # is sourced there (same convention as scripts/lib/strih-platform.sh / obs-session-visibility.sh).
 #
-# scripts/lib/strih-lx-preflight.sh -- issue 1351: the ONE source of truth for BOUNDING every
-# strih-touching `[0/8]` preflight call on the Linux-strih path (strih-lx = 10.77.9.202 after the
+# scripts/lib/strih-snv-preflight.sh -- issue 1351: the ONE source of truth for BOUNDING every
+# strih-touching `[0/8]` preflight call on the Linux-strih path (strih-snv = 10.77.9.202 after the
 # M4 cut-over) with a `timeout` + a NAMED failure banner, so a strih-touching call can never hang
 # silently and swallow RUN_ID (recording-e2e.sh exports RUN_ID only AFTER the `[0/8]` band; a
 # ~23-min silent hang there aborts before any verdict and the #703 fail-closed guard then reports
@@ -12,7 +12,7 @@
 #
 # Design-by main (issue 1351, comment 5760764625) -- Approach 1: wrap EVERY strih-touching `[0/8]`
 # call on the `strih_platform "$STRIH" == linux` branch in a bounded `timeout` that, on
-# expiry/failure, emits a named `[0/8] strih-lx <call>` banner and aborts fast (fail-closed). The
+# expiry/failure, emits a named `[0/8] strih-snv <call>` banner and aborts fast (fail-closed). The
 # Windows path stays behaviorally byte-identical: on a non-linux strih the prefix is EMPTY (the gate
 # runs exactly as before) and the timeout banner never fires (nothing is `timeout`-wrapped, so a
 # genuine gate failure never carries the 124/137 timeout exit codes this banner keys on).
@@ -33,18 +33,18 @@ strih_lx_gate_prefix() {
   fi
 }
 
-# strih_lx_preflight_timeout_banner RC LABEL SECS -> emit a named `[0/8] strih-lx <LABEL>` banner to
+# strih_lx_preflight_timeout_banner RC LABEL SECS -> emit a named `[0/8] strih-snv <LABEL>` banner to
 # stderr ONLY when RC is a `timeout` KILL code (124 = TERM at expiry, 137 = 128+SIGKILL from a
 # `timeout --kill-after`), otherwise stay SILENT. A genuine gate FAILURE (the gate ran to a non-zero
 # verdict, e.g. clock-not-locked -> 20) is NOT a hang -- the gate already printed its own diagnosis,
-# so re-labelling it "strih-lx timeout" would mislead. Called from a `|| { ...; exit "$RC"; }` tail,
+# so re-labelling it "strih-snv timeout" would mislead. Called from a `|| { ...; exit "$RC"; }` tail,
 # so the caller preserves the gate's real exit code; this only ADDS the attributable banner on the
 # hang path. Always returns 0 (safe as a bare statement under the caller's set -euo pipefail).
 strih_lx_preflight_timeout_banner() {
-  local rc="${1:-0}" label="${2:-a strih-lx [0/8] call}" secs="${3:-?}"
+  local rc="${1:-0}" label="${2:-a strih-snv [0/8] call}" secs="${3:-?}"
   case "$rc" in
     124|137)
-      printf 'ERROR: [0/8] strih-lx %s exceeded its %ss bound (exit %s) -- bounded by issue 1351 so a silent hang can never swallow RUN_ID on the M4 Linux strih; the box or this call is wedged, fix the call, not the timeout.\n' \
+      printf 'ERROR: [0/8] strih-snv %s exceeded its %ss bound (exit %s) -- bounded by issue 1351 so a silent hang can never swallow RUN_ID on the M4 Linux strih; the box or this call is wedged, fix the call, not the timeout.\n' \
         "$label" "$secs" "$rc" >&2
       ;;
   esac

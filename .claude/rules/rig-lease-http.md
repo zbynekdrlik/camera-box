@@ -249,7 +249,7 @@ without a serve dir. A file another user owns is never served.
   means the default, as in `scripts/lib/rig-lease.sh` (`rsf.default_lease_dir()`).
 - **The server stays stdlib-only.** The numpy analysis lives in the sampler, never here.
 - **`/program-audio.json` is no dev1 route any more (retired 8.10.2026, design 6054654255).** The
-  program-audio sampler moved to strih-lx and serves its own `:8891/program-audio.json`
+  program-audio sampler moved to strih-snv and serves its own `:8891/program-audio.json`
   (`.claude/rules/program-audio-guard.md`, "The host"); every consumer reads that. Running this
   code (a restart while `held=false`, `systemd/program-audio-sampler.README.md` post-merge step),
   the dev1 server answers its plain 404 for the path even when an old payload sits in its serve dir

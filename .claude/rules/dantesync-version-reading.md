@@ -124,10 +124,10 @@ The gate itself is uniform, but its two read arms are NOT: `--linux "name=user@i
 `dantesync --version` on the bare command line (works on every Linux node); `--win "name=user@ip …"`
 reads the Windows quoted-exe-path (`"$DANTESYNC_VERSION_GATE_WIN_EXE" --version`), which returns
 **nothing on Linux** → that node reads UNKNOWN → `GATE INCOMPLETE` → exit 11. After the M4 cut-over
-strih is the Linux notebook strih-lx (10.77.9.202), so `scripts/recording-e2e.sh`'s `[0/8]`
+strih is the Linux notebook strih-snv (10.77.9.202), so `scripts/recording-e2e.sh`'s `[0/8]`
 version-parity call must ROUTE strih by `strih_platform "$STRIH"` (the resolver in
 `scripts/lib/strih-platform.sh`): a **linux** strih is appended to the `--linux` list
-(`strih=${WIN_SSH_USER:-newlevel}@$STRIH` — strih-lx ssh user `newlevel`, the gate's default
+(`strih=${WIN_SSH_USER:-newlevel}@$STRIH` — strih-snv ssh user `newlevel`, the gate's default
 `DANTESYNC_VERSION_GATE_SSH_PASS=newlevel` matches) and only stream goes via `--win`; a **windows**
 strih keeps strih+stream both under `--win`, byte-identical. NEVER leave a node in BOTH lists — the
 `--win` UNKNOWN read would still fail the gate even though `--linux` read it OK.

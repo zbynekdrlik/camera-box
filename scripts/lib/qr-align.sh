@@ -25,7 +25,7 @@
 # 3ms floor are never in the align set, so they are never written.
 
 # issue 1360: the strih OBS-log reads (the post-settle line count + the post-reset audit fetch) go
-# through the ONE platform-resolved reader, so a Linux strih (strih-lx) is read over plain ssh.
+# through the ONE platform-resolved reader, so a Linux strih (strih-snv) is read over plain ssh.
 command -v strih_log_line_count >/dev/null 2>&1 \
   || . "${BASH_SOURCE[0]%/*}/strih-log-read.sh"
 
@@ -63,7 +63,7 @@ qr_align_run() {
   # to ONLY the post-settle log lines (the [4g/8] Correction-2 line-count discipline — never a blind
   # -Tail that averages latency_ms across two pin regimes, review 🟡). The log reads go through the
   # shared platform-resolved reader (scripts/lib/strih-log-read.sh, issue 1360 -- Windows STRIH-SNV
-  # or Linux strih-lx), each `timeout`-bounded inside it (review 🔵). Best-effort
+  # or Linux strih-snv), each `timeout`-bounded inside it (review 🔵). Best-effort
   # throughout: any hiccup (standalone call with no reader/PROBE_BIN_DIR/OUTDIR, reset failure,
   # unreachable log, no audit lines) skips --jitter-json and qr_align_pins.py falls back to the
   # inert-prone floor+delta plan with its own loud warning. All on-air strih inputs sit on the

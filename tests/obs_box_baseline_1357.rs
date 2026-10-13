@@ -2,7 +2,7 @@
 //!
 //! The imag notebook's box-level provisioning (the owner's reference starting position) moved
 //! VERBATIM out of `scripts/setup-imag.sh` into `scripts/lib/obs-box-baseline.sh` (+ its kiosk half
-//! `scripts/lib/obs-box-kiosk.sh`), and BOTH `setup-imag.sh` and `setup-strih.sh` call it, so strih-lx
+//! `scripts/lib/obs-box-kiosk.sh`), and BOTH `setup-imag.sh` and `setup-strih.sh` call it, so strih-snv
 //! gets the imag appliance by construction. `scripts/lib/obs-box-baseline-verify.sh` is the ONE grader
 //! `verify-imag.sh` and `verify-strih.sh` both run. These tests pin:
 //!
@@ -300,7 +300,7 @@ fn the_lowlatency_item_is_release_neutral() {
     );
 }
 
-/// The power envelope's thermal step-down wattage is a per-box argument (strih-lx must never fall to
+/// The power envelope's thermal step-down wattage is a per-box argument (strih-snv must never fall to
 /// imag's 25 W iGPU clamp), defaulting to the caller's env / imag's 25 W.
 #[test]
 fn the_power_envelope_takes_a_per_box_stepdown() {
@@ -393,7 +393,7 @@ fn setup_imag_sources_the_baseline_and_delegates_its_helpers() {
 }
 
 /// Every box-named file the baseline writes carries the BOX prefix, so imag keeps its historical
-/// names and strih-lx gets its own -- never an `imag` literal on strih-lx.
+/// names and strih-snv gets its own -- never an `imag` literal on strih-snv.
 #[test]
 fn every_box_named_file_is_derived_from_the_box_argument() {
     let libs = format!("{}\n{}", read(BASELINE), read(KIOSK));
@@ -611,11 +611,11 @@ fn openbox_menu_printer_is_parameterised_and_fails_without_its_args() {
     let (c, out, err) = run(
         KIOSK,
         &[],
-        "obs_box_openbox_menu_xml strih-lx 'systemctl --user start strih-obs.service' /usr/local/bin/strih-obs-stop.sh",
+        "obs_box_openbox_menu_xml strih-snv 'systemctl --user start strih-obs.service' /usr/local/bin/strih-obs-stop.sh",
     );
     assert_eq!(c, 0, "stderr={err}");
     for want in [
-        "<menu id=\"root-menu\" label=\"strih-lx\">",
+        "<menu id=\"root-menu\" label=\"strih-snv\">",
         "<command>systemctl --user start strih-obs.service</command>",
         "<item label=\"Zastav OBS (korektne)\">",
         "<command>/usr/local/bin/strih-obs-stop.sh</command>",
@@ -624,7 +624,7 @@ fn openbox_menu_printer_is_parameterised_and_fails_without_its_args() {
     ] {
         assert!(out.contains(want), "menu must carry `{want}`:\n{out}");
     }
-    for args in ["", "strih-lx", "strih-lx start-cmd", "'' start stop"] {
+    for args in ["", "strih-snv", "strih-snv start-cmd", "'' start stop"] {
         let (c, out, _e) = run(KIOSK, &[], &format!("obs_box_openbox_menu_xml {args}"));
         assert_eq!(c, 1, "`{args}` must be refused");
         assert!(out.is_empty(), "no partial menu: {out}");
@@ -681,7 +681,7 @@ fn the_kiosk_item_installs_xorg_and_switches_the_dm_before_the_gnome_purge() {
 
 /// issue 1361 (G1): `python3-websocket` rides the shared baseline's package install, so EVERY OBS box
 /// has it (strih-obs-start.sh refuses to launch OBS without it; imag_scenes.py imports it too). It was
-/// only a hand install on strih-lx; setup-imag.sh's own step-11b install stays (a no-op then).
+/// only a hand install on strih-snv; setup-imag.sh's own step-11b install stays (a no-op then).
 #[test]
 fn the_kiosk_package_install_carries_python3_websocket_1361() {
     let k = baseline_fn("obs_box_kiosk");
@@ -1155,7 +1155,7 @@ fn setup_strih_consumes_the_same_baseline() {
     );
 }
 
-/// Live 23.9.2026 on strih-lx (26.04): step 6 had just held the kernel at 7.0.0-31, and the unpinned
+/// Live 23.9.2026 on strih-snv (26.04): step 6 had just held the kernel at 7.0.0-31, and the unpinned
 /// `apt-get install linux-lowlatency-hwe-26.04` picked the NEWER meta 7.0.0-34, which depends on
 /// `linux-image-generic-hwe-26.04 (= 7.0.0-34)` — apt refused ("Reached two conflicting assignments")
 /// and the conversion failed. The meta is config-only by design (never a new image): install it at
@@ -1175,7 +1175,7 @@ fn lowlatency_meta_is_pinned_to_the_installed_generic_hwe_version() {
 
 /// power-profiles-daemon (0.30 on 26.04) resets every core's scaling_governor to `powersave` when it
 /// starts, so a box whose governor the baseline pinned to `performance` came back `powersave` after
-/// the strih-lx conversion reboot (23.9.2026). The max-performance item masks the daemon BEFORE it
+/// the strih-snv conversion reboot (23.9.2026). The max-performance item masks the daemon BEFORE it
 /// checks the governor; the maxperf boot script writes platform_profile itself and only asks the
 /// daemon when it actually runs.
 #[test]
@@ -1210,7 +1210,7 @@ fn verdict_accepts_an_absent_power_profiles_daemon() {
     assert_eq!(c, 0, "{rows:?}");
 }
 
-/// The kiosk disables bluetooth on a box with no Bluetooth input (imag). strih-lx is operated with a
+/// The kiosk disables bluetooth on a box with no Bluetooth input (imag). strih-snv is operated with a
 /// Bluetooth mouse (MX Anywhere 2S), so it passes `keep-bluetooth` and the service stays enabled --
 /// a box fact, the same disable list otherwise.
 #[test]
@@ -1237,7 +1237,7 @@ fn kiosk_keeps_bluetooth_only_when_the_box_asks() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// The dpkg lock wait (issue 1357 dpkg-lock slice). 24.9.2026: the canonical strih-lx genlock deploy
+// The dpkg lock wait (issue 1357 dpkg-lock slice). 24.9.2026: the canonical strih-snv genlock deploy
 // failed twice at setup-strih step 4 with `E: Could not get lock /var/lib/dpkg/lock-frontend ...
 // held by process (apt-get)` -- a periodic apt run held the lock and apt-get's default
 // DPkg::Lock::Timeout is 0. The baseline writes ONE apt drop-in so every present and future apt-get
@@ -1401,7 +1401,7 @@ fn apt_lock_timeout_is_written_before_the_first_apt_get() {
 // refresh holds it. `obs_box_apt_update` is the ONE update call on both provisioning paths: it retries
 // ONLY while that lock is HELD (bounded, 600 s total by default, a log line per wait) and fails loud
 // on anything else or on timeout. The held-lock text below was captured live from apt 2.8.3 (dev1)
-// and apt 3.2.0 (strih-lx).
+// and apt 3.2.0 (strih-snv).
 // ------------------------------------------------------------------------------------------------
 
 const LISTS_LOCK_HELD: &str = "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1794555 (apt-get)\nE: Unable to lock directory /var/lib/apt/lists/";

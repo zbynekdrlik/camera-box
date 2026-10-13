@@ -13,7 +13,7 @@ It reads the `obs_handles*` facet `bundle_state_gather` exposes on each box's
 - **`obs_handles`**: the OBS process's handle count. On Windows it comes from ONE
   `NtQuerySystemInformation(SystemProcessInformation)` snapshot, which opens no process and needs
   no pid lookup (an open of the elevated obs64 from the non-elevated BundleStateServer task is not
-  verified live; issue 1067 saw one denied). On Linux (strih-lx) it is the count of
+  verified live; issue 1067 saw one denied). On Linux (strih-snv) it is the count of
   `/proc/<obs pid>/fd`.
 - **`obs_handles_pid` + `obs_handles_start`**: the pid and start epoch.
 - **`obs_handles_run`** (Linux only): `<boot id>:<start ticks>`, the process identity. A wall-clock
@@ -41,7 +41,7 @@ watchdog stored on its previous pass:
 - **SKIP** (`:8899` not fetchable) and **UNKNOWN** (facet absent) never page. The bundle-state and
   network-reach watchdogs own a dark box.
 
-Roster: the obs-fleet **`obs-handles`** facet (`strih-lx stream resolume`). resolume travels, so it
+Roster: the obs-fleet **`obs-handles`** facet (`strih-snv stream resolume`). resolume travels, so it
 is polled only while home (`obs_fleet_poll_now`).
 
 Replay proof (`tests/python/test_obs_handles_watchdog_1406.py`, the 4./5.10 readings in
@@ -52,7 +52,7 @@ Replay proof (`tests/python/test_obs_handles_watchdog_1406.py`, the 4./5.10 read
 - the post-fix readings (5,806 → 5,791) never page;
 - a restart after a page logs a machine-channel RECOVERY;
 - a manual run 60 s after a ceiling pass HOLDs and does not page early;
-- a strih-lx fd leak under a 1024 limit pages through a one-second clock step of its start epoch.
+- a strih-snv fd leak under a 1024 limit pages through a one-second clock step of its start epoch.
 
 ## PRODUCTION-CRITICAL: time-bucketed re-ping (issue 1308)
 
@@ -78,15 +78,15 @@ bundle-state server carrying the facet is deployed to the boxes.
 #    - stream (+ resolume while home): the box fetches each file from GitHub at the merged sha into
 #      C:\ProgramData\camera-box\ (the .claude/skills/genlock runbook), then the python child is
 #      restarted (the run-bundle-state-server.ps1 loop restarts it in 5 s).
-#    - strih-lx: re-run setup-strih.sh step 9's install loop (or the whole setup-strih.sh --box
-#      strih-lx), then `systemctl --user restart strih-bundle-state-server.service` as newlevel.
+#    - strih-snv: re-run setup-strih.sh step 9's install loop (or the whole setup-strih.sh --box
+#      strih-snv), then `systemctl --user restart strih-bundle-state-server.service` as newlevel.
 #    Then confirm the facet is served on each box:
 curl -s http://10.77.9.204:8899/bundle-state.json | python3 -m json.tool | grep obs_handles
 curl -s http://10.77.9.202:8899/bundle-state.json | python3 -m json.tool | grep obs_handles
 curl -s http://resolume.lan:8899/bundle-state.json | python3 -m json.tool | grep obs_handles
 #    HARD ACCEPTANCE before step 2, per box:
 #    - stream: obs_handles ~5,790 (the post-fix count), obs_handles_pid = the obs64 pid.
-#    - strih-lx: obs_handles = `ls /proc/$(pgrep -x obs)/fd | wc -l` read on the box,
+#    - strih-snv: obs_handles = `ls /proc/$(pgrep -x obs)/fd | wc -l` read on the box,
 #      obs_handles_limit = the soft "Max open files" of /proc/<pid>/limits, and obs_handles_run =
 #      `cat /proc/sys/kernel/random/boot_id`:<field 22 of /proc/<pid>/stat>. If the count is above
 #      80% of that limit, raise LimitNOFILE in strih-obs.service first, or the watchdog pages CEILING

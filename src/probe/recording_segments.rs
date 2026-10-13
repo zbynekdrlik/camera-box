@@ -223,7 +223,7 @@ pub struct CamboxSegment {
     pub residual_events: Vec<crate::residual_events::ResidualEvent>,
     /// Issue 1367 (ROZHODNUTÉ 5843424054): `Some` when this window's captured content is
     /// MULTI-SOURCE -- the tear detector's multi-path fraction for the window is over
-    /// `crate::tear_detect::MULTI_PATH_SUSPECT_CEILING` (cam2 filming the strih-lx multiview: several
+    /// `crate::tear_detect::MULTI_PATH_SUSPECT_CEILING` (cam2 filming the strih-snv multiview: several
     /// generations of the painted pattern per frame). Such a window is judged by its node burn: its
     /// `copies`/`gaps` (still computed above, and the strict `pass` still reflects them), cadence and
     /// `frozen_leg` fold REPORT-ONLY. `None` on every single-source window, so its JSON carries no

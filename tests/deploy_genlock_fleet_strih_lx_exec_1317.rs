@@ -1,9 +1,9 @@
-//! issue 1317 part 6 — the strih-lx EXECUTE arm of `scripts/deploy-genlock-fleet.sh`.
+//! issue 1317 part 6 — the strih-snv EXECUTE arm of `scripts/deploy-genlock-fleet.sh`.
 //!
-//! Before it, execute mode dropped strih-lx (the production strih since the M4 cut-over) and the
+//! Before it, execute mode dropped strih-snv (the production strih since the M4 cut-over) and the
 //! supervisor deployed it with an ad-hoc scratch script that twice failed half-silently: the box's
 //! `/tmp` quota was full, rsync died with `Disk quota exceeded` (rc 11), and the old build simply
-//! kept running with nothing refusing. The arm (in `scripts/lib/strih-lx-deploy.sh`) now:
+//! kept running with nothing refusing. The arm (in `scripts/lib/strih-snv-deploy.sh`) now:
 //!
 //! * resolves AND downloads every requested box's same-SHA artifact before any box is changed, and
 //!   refuses a strih artifact whose own `GENLOCK_BUILD_SHA.txt` is another commit;
@@ -45,7 +45,7 @@ fn script() -> PathBuf {
 }
 
 fn lib() -> PathBuf {
-    manifest_dir().join("scripts/lib/strih-lx-deploy.sh")
+    manifest_dir().join("scripts/lib/strih-snv-deploy.sh")
 }
 
 fn write_exec(path: &Path, body: &str) {
@@ -105,7 +105,7 @@ exec "$@"
 printf 'ssh %s\n' "$*" >> "$STUB_DIR/calls.log"
 cmd="${@: -1}"
 case "$cmd" in
-  hostname) echo "${STUB_HOSTNAME:-strih-lx}"; exit 0 ;;
+  hostname) echo "${STUB_HOSTNAME:-strih-snv}"; exit 0 ;;
   *"acceptance gate did not pass"*) echo "${STUB_GATE_ONLY:-0}"; exit 0 ;;
   *"repo/scripts/verify-strih.sh"*) cat > "$STUB_DIR/accept.stdin"; echo "verify-strih output"; [ "${STUB_ACCEPT_RC:-0}" = 0 ] || echo "  FAIL dantesync offset unstable"; exit "${STUB_ACCEPT_RC:-0}" ;;
   *"pgrep -x setup-strih.sh"*)
@@ -275,18 +275,18 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
 }
 
 fn run_exec(extra_env: &[(&str, &str)]) -> Run {
-    run_exec_boxes("strih-lx", extra_env)
+    run_exec_boxes("strih-snv", extra_env)
 }
 
 /// The happy path: every step in order, the stage fully staged BEFORE the graceful stop, the token
 /// only on the setup launch's stdin, a fail-closed read-back that passes on two stable polls, and
-/// the durable fleet log now records strih-lx (it is really deployed).
+/// the durable fleet log now records strih-snv (it is really deployed).
 #[test]
 fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
     let r = run_exec(&[]);
     assert_eq!(
         r.code, 0,
-        "a clean strih-lx execute must succeed.\nout={}\nerr={}\ncalls={}",
+        "a clean strih-snv execute must succeed.\nout={}\nerr={}\ncalls={}",
         r.out, r.err, r.calls
     );
     let stage = format!("/tmp/genlock-stage-{SHA}");
@@ -382,8 +382,8 @@ fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
         }
     }
     assert!(
-        r.fleet_log().contains(SHA) && r.fleet_log().contains("strih-lx"),
-        "the durable fleet log records the deployed strih-lx:\n{}",
+        r.fleet_log().contains(SHA) && r.fleet_log().contains("strih-snv"),
+        "the durable fleet log records the deployed strih-snv:\n{}",
         r.fleet_log()
     );
 }
@@ -395,7 +395,7 @@ fn strih_lx_rsync_failure_is_loud_and_never_stops_obs_1317() {
     let r = run_exec(&[("STUB_RSYNC_FAIL_ON", "/bundle/")]);
     assert_eq!(r.code, 4, "rsync failure = exit 4.\nerr={}", r.err);
     assert!(
-        r.err.contains("[strih-lx stage]") && r.err.contains("rc=11"),
+        r.err.contains("[strih-snv stage]") && r.err.contains("rc=11"),
         "the error names the step and the rsync rc:\n{}",
         r.err
     );
@@ -421,7 +421,7 @@ fn strih_lx_sweep_failures_are_loud_before_staging_1317() {
     ] {
         let r = run_exec(&[env]);
         assert_eq!(r.code, 4, "{env:?}: err={}", r.err);
-        assert!(r.err.contains("[strih-lx sweep]"), "{env:?}: {}", r.err);
+        assert!(r.err.contains("[strih-snv sweep]"), "{env:?}: {}", r.err);
         assert!(
             !r.calls.contains("rsync "),
             "{env:?}: no staging after a failed sweep:\n{}",
@@ -444,7 +444,7 @@ fn strih_lx_refuses_while_a_previous_installer_runs_1317() {
     let r = run_exec(&[("STUB_INSTALLER", "alive")]);
     assert_eq!(r.code, 4, "err={}", r.err);
     assert!(
-        r.err.contains("[strih-lx preflight]") && r.err.contains("setup-strih.sh"),
+        r.err.contains("[strih-snv preflight]") && r.err.contains("setup-strih.sh"),
         "{}",
         r.err
     );
@@ -474,7 +474,7 @@ fn strih_lx_readback_refuses_a_wrong_sha_dead_or_crashlooping_obs_1317() {
         let r = run_exec(&[env]);
         assert_eq!(r.code, 4, "{env:?} must refuse.\nerr={}", r.err);
         assert!(
-            r.err.contains("[strih-lx verify]") && r.err.contains(want),
+            r.err.contains("[strih-snv verify]") && r.err.contains(want),
             "{env:?}: the refusal names `{want}`:\n{}",
             r.err
         );
@@ -491,7 +491,7 @@ fn strih_lx_setup_failure_is_loud_and_never_starts_obs_over_a_running_installer_
     let r = run_exec(&[("STUB_SETUP_RC", "1")]);
     assert_eq!(r.code, 4, "err={}", r.err);
     assert!(
-        r.err.contains("[strih-lx setup]") && r.err.contains("rc=1"),
+        r.err.contains("[strih-snv setup]") && r.err.contains("rc=1"),
         "{}",
         r.err
     );
@@ -514,7 +514,7 @@ fn strih_lx_setup_failure_is_loud_and_never_starts_obs_over_a_running_installer_
     let r = run_exec(&[("STUB_SETUP_NO_RC", "1"), ("STUB_INSTALLER_AFTER", "alive")]);
     assert_eq!(r.code, 4, "err={}", r.err);
     assert!(
-        r.err.contains("[strih-lx setup]") && r.err.contains("no rc"),
+        r.err.contains("[strih-snv setup]") && r.err.contains("no rc"),
         "{}",
         r.err
     );
@@ -556,7 +556,7 @@ fn strih_lx_setup_failure_is_loud_and_never_starts_obs_over_a_running_installer_
 fn strih_lx_stop_or_start_failure_is_loud_1317() {
     let r = run_exec(&[("STUB_STOP_RC", "5")]);
     assert_eq!(r.code, 4, "err={}", r.err);
-    assert!(r.err.contains("[strih-lx stop]"), "{}", r.err);
+    assert!(r.err.contains("[strih-snv stop]"), "{}", r.err);
     assert!(
         !r.calls.contains("run-setup.sh"),
         "no install over a still-running OBS:\n{}",
@@ -570,7 +570,7 @@ fn strih_lx_stop_or_start_failure_is_loud_1317() {
 
     let r = run_exec(&[("STUB_START_RC", "1")]);
     assert_eq!(r.code, 4, "err={}", r.err);
-    assert!(r.err.contains("[strih-lx start]"), "{}", r.err);
+    assert!(r.err.contains("[strih-snv start]"), "{}", r.err);
     assert!(r.fleet_log().is_empty(), "no fleet-log line");
 }
 
@@ -580,26 +580,26 @@ fn strih_lx_stop_or_start_failure_is_loud_1317() {
 #[test]
 fn strih_lx_preparation_failures_never_touch_the_box_1317() {
     for (env, step, want) in [
-        (("STUB_ARTIFACT_SHA", OTHER), "[strih-lx download]", OTHER),
+        (("STUB_ARTIFACT_SHA", OTHER), "[strih-snv download]", OTHER),
         (
             ("STUB_MANIFEST_NO_LIB", "1"),
-            "[strih-lx download]",
+            "[strih-snv download]",
             "libobs.so.30",
         ),
         (
             ("STUB_NO_LINUX_RUN", "1"),
-            "[strih-lx resolve]",
+            "[strih-snv resolve]",
             "linux-genlock",
         ),
-        (("STUB_TOKEN", ""), "[strih-lx tree]", "GH_TOKEN"),
+        (("STUB_TOKEN", ""), "[strih-snv tree]", "GH_TOKEN"),
         (
-            ("STRIH_LX_IP", "strih-lx.lan"),
-            "[strih-lx resolve]",
+            ("STRIH_LX_IP", "strih-snv.lan"),
+            "[strih-snv resolve]",
             "IPv4",
         ),
-        (("STRIH_LX_IP", "999.1.1.1"), "[strih-lx resolve]", "IPv4"),
-        (("STRIH_LX_IP", "10.77.9"), "[strih-lx resolve]", "IPv4"),
-        (("STRIH_LX_IP", "..."), "[strih-lx resolve]", "IPv4"),
+        (("STRIH_LX_IP", "999.1.1.1"), "[strih-snv resolve]", "IPv4"),
+        (("STRIH_LX_IP", "10.77.9"), "[strih-snv resolve]", "IPv4"),
+        (("STRIH_LX_IP", "..."), "[strih-snv resolve]", "IPv4"),
     ] {
         let r = run_exec(&[env]);
         assert_eq!(r.code, 3, "{env:?}: err={}", r.err);
@@ -617,14 +617,14 @@ fn strih_lx_preparation_failures_never_touch_the_box_1317() {
 }
 
 /// Every requested box's artifact is resolved BEFORE the production strih is changed: a default
-/// `strih-lx,stream` run with no Windows build at the SHA fails without touching strih-lx.
+/// `strih-snv,stream` run with no Windows build at the SHA fails without touching strih-snv.
 #[test]
 fn strih_lx_is_not_changed_when_another_box_cannot_be_resolved_1317() {
-    let r = run_exec_boxes("strih-lx,stream", &[("STUB_NO_WIN_RUN", "1")]);
+    let r = run_exec_boxes("strih-snv,stream", &[("STUB_NO_WIN_RUN", "1")]);
     assert_eq!(r.code, 3, "err={}", r.err);
     assert!(
         !r.calls.contains("ssh ") && !r.calls.contains("rsync "),
-        "strih-lx untouched:\n{}",
+        "strih-snv untouched:\n{}",
         r.calls
     );
 }
@@ -637,7 +637,7 @@ fn strih_lx_token_override_and_reboot_note_1317() {
         ("STRIH_LX_GH_TOKEN", "ro-token-xyz"),
         (
             "STUB_REBOOT_LINE",
-            "the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-lx",
+            "the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-snv",
         ),
     ]);
     assert_eq!(r.code, 0, "err={}", r.err);
@@ -648,7 +648,7 @@ fn strih_lx_token_override_and_reboot_note_1317() {
         r.calls
     );
     assert!(
-        r.out.contains("NOTE") && r.out.contains("reboot strih-lx"),
+        r.out.contains("NOTE") && r.out.contains("reboot strih-snv"),
         "{}",
         r.out
     );
@@ -789,7 +789,7 @@ fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
         );
         let gen = Command::new("bash")
             .arg("-c")
-            .arg(". \"$LIB\"; strih_lx_setup_runner \"$S\" strih-lx")
+            .arg(". \"$LIB\"; strih_lx_setup_runner \"$S\" strih-snv")
             .env("LIB", lib())
             .env("S", &s)
             .output()
@@ -833,7 +833,7 @@ fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
         let log = fs::read_to_string(s.join("setup-strih.log")).unwrap();
         assert!(
             log.contains(&format!("B={}/bundle", s.display()))
-                && log.contains("ARGS=--box strih-lx ")
+                && log.contains("ARGS=--box strih-snv ")
                 && log.contains("IP=unset")
                 && log.contains("T=tok42")
                 && log.contains("PW=campw7")
@@ -892,7 +892,7 @@ fn strih_lx_readback_holds_stability_for_the_settle_time_1317() {
         r.err
     );
     assert!(
-        r.err.contains("[strih-lx verify]") && r.err.contains("MainPID"),
+        r.err.contains("[strih-snv verify]") && r.err.contains("MainPID"),
         "{}",
         r.err
     );
@@ -905,14 +905,14 @@ fn strih_lx_readback_holds_stability_for_the_settle_time_1317() {
     assert_eq!(r.code, 0, "err={}", r.err);
 }
 
-/// review round 2: the Windows paste-programs are printed only AFTER strih-lx verified (an operator
-/// must not paste stream while the strih apply can still fail), and strih-lx is logged the moment it
+/// review round 2: the Windows paste-programs are printed only AFTER strih-snv verified (an operator
+/// must not paste stream while the strih apply can still fail), and strih-snv is logged the moment it
 /// verified, so a later imag failure never hides the strih deploy that happened.
 #[test]
 fn windows_programs_follow_the_verified_strih_and_strih_is_logged_at_once_1317() {
-    let r = run_exec_boxes("strih-lx,stream", &[]);
+    let r = run_exec_boxes("strih-snv,stream", &[]);
     assert_eq!(r.code, 0, "err={}\nout={}", r.err, r.out);
-    let verified = r.out.find("VERIFIED").expect("strih-lx VERIFIED line");
+    let verified = r.out.find("VERIFIED").expect("strih-snv VERIFIED line");
     let program = r
         .out
         .find("$ErrorActionPreference = 'Stop'")
@@ -921,21 +921,21 @@ fn windows_programs_follow_the_verified_strih_and_strih_is_logged_at_once_1317()
     let log = r.fleet_log();
     let strih_line = log
         .lines()
-        .find(|l| l.contains("\tstrih-lx\t"))
-        .unwrap_or_else(|| panic!("a strih-lx fleet-log line:\n{log}"));
+        .find(|l| l.contains("\tstrih-snv\t"))
+        .unwrap_or_else(|| panic!("a strih-snv fleet-log line:\n{log}"));
     assert!(strih_line.contains(SHA), "{log}");
     assert!(
-        log.lines().any(|l| l.contains("\tstream\t")),
+        log.lines().any(|l| l.contains("\tstream-snv\t")),
         "the rest of the fleet is logged too:\n{log}"
     );
 
     // an incomplete imag artifact (the stub ships no distroav.so) fails in imag's PREPARATION, which
-    // runs before the strih-lx apply -> the production strih is never touched, nothing is logged.
-    let r = run_exec_boxes("strih-lx,imag", &[]);
+    // runs before the strih-snv apply -> the production strih is never touched, nothing is logged.
+    let r = run_exec_boxes("strih-snv,imag", &[]);
     assert_eq!(r.code, 3, "err={}", r.err);
     assert!(
         !r.calls.contains("ssh ") && r.fleet_log().is_empty(),
-        "imag preparation fails BEFORE strih-lx is applied:\n{}",
+        "imag preparation fails BEFORE strih-snv is applied:\n{}",
         r.calls
     );
 }
@@ -986,7 +986,7 @@ fn strih_lx_unreachable_after_launch_and_settle_budget_1317() {
     ]);
     assert_eq!(r.code, 4, "err={}", r.err);
     assert!(
-        r.err.contains("[strih-lx setup]") && r.err.contains("unreachable"),
+        r.err.contains("[strih-snv setup]") && r.err.contains("unreachable"),
         "{}",
         r.err
     );
@@ -1012,7 +1012,7 @@ fn strih_lx_unreachable_after_launch_and_settle_budget_1317() {
     ]);
     assert_eq!(r.code, 3, "err={}", r.err);
     assert!(
-        r.err.contains("[strih-lx resolve]") && r.err.contains("SETTLE"),
+        r.err.contains("[strih-snv resolve]") && r.err.contains("SETTLE"),
         "{}",
         r.err
     );
@@ -1022,7 +1022,7 @@ fn strih_lx_unreachable_after_launch_and_settle_budget_1317() {
 /// review round 5: setup-strih.sh's own final gate (step 17) runs verify-strih.sh while the deploy
 /// has OBS STOPPED, so with no reboot pending it always fails `OBS running` and exits 1 after every
 /// install step succeeded. The arm accepts exactly that failure (the gate line is the log's last
-/// FAIL), starts OBS, passes the fail-closed read-back, and then runs verify-strih.sh --box strih-lx
+/// FAIL), starts OBS, passes the fail-closed read-back, and then runs verify-strih.sh --box strih-snv
 /// itself as the real acceptance gate -- a failure there is exit 4.
 #[test]
 fn strih_lx_runs_the_acceptance_gate_itself_after_obs_is_up_1317() {
@@ -1039,7 +1039,7 @@ fn strih_lx_runs_the_acceptance_gate_itself_after_obs_is_up_1317() {
             .lines()
             .nth(accept)
             .unwrap()
-            .contains("--box strih-lx"),
+            .contains("--box strih-snv"),
         "{}",
         r.calls
     );
@@ -1047,7 +1047,7 @@ fn strih_lx_runs_the_acceptance_gate_itself_after_obs_is_up_1317() {
         r.file("accept.stdin").starts_with("newlevel\n"),
         "sudo reads the password from stdin"
     );
-    assert!(r.fleet_log().contains("strih-lx"), "{}", r.fleet_log());
+    assert!(r.fleet_log().contains("strih-snv"), "{}", r.fleet_log());
 
     let r = run_exec(&[
         ("STUB_SETUP_RC", "1"),
@@ -1056,17 +1056,17 @@ fn strih_lx_runs_the_acceptance_gate_itself_after_obs_is_up_1317() {
     ]);
     // review round 6: an acceptance failure is NOT a failed install -- the new build is installed,
     // running and read back -- so it has its own exit code (5), names the failing items, and the
-    // fleet log records strih-lx as installed with acceptance failures (never an empty log that
+    // fleet log records strih-snv as installed with acceptance failures (never an empty log that
     // understates what runs).
     assert_eq!(r.code, 5, "err={}", r.err);
     assert!(
-        r.err.contains("[strih-lx accept]") && r.err.contains("dantesync offset unstable"),
+        r.err.contains("[strih-snv accept]") && r.err.contains("dantesync offset unstable"),
         "{}",
         r.err
     );
     assert!(r.out.contains("verify-strih output"), "{}", r.out);
     assert!(
-        r.fleet_log().contains("strih-lx:accept-failed") && r.fleet_log().contains(SHA),
+        r.fleet_log().contains("strih-snv:accept-failed") && r.fleet_log().contains(SHA),
         "{}",
         r.fleet_log()
     );
@@ -1086,18 +1086,55 @@ fn strih_lx_runs_the_acceptance_gate_itself_after_obs_is_up_1317() {
 }
 
 /// review round 5: a STRIH_LX_IP override that reaches ANOTHER box must not provision it as
-/// strih-lx -- the preflight reads the box's hostname and refuses unless it is the fact file's.
+/// strih-snv -- the preflight reads the box's hostname and refuses unless it is the fact file's.
 #[test]
 fn strih_lx_refuses_a_box_that_is_not_strih_lx_1317() {
     let r = run_exec(&[("STUB_HOSTNAME", "strih-pp")]);
     assert_eq!(r.code, 4, "err={}", r.err);
     assert!(
-        r.err.contains("[strih-lx preflight]") && r.err.contains("strih-pp"),
+        r.err.contains("[strih-snv preflight]") && r.err.contains("strih-pp"),
         "{}",
         r.err
     );
     for c in ["--local-sweep", "rsync ", "strih-obs-stop.sh"] {
         assert!(!r.calls.contains(c), "`{c}` must not run:\n{}", r.calls);
+    }
+}
+
+/// issue 1414: the box still running its pre-rename hostname IS this box -- the deploy goes on with
+/// one warning, and setup-strih step 1 renames it from the fact file. Only a NAME the transition
+/// alias maps to the fact hostname is accepted; any other name still refuses (above).
+#[test]
+fn strih_snv_deploys_a_box_that_still_runs_its_pre_rename_hostname_1414() {
+    let r = run_exec(&[("STUB_HOSTNAME", "strih-lx")]); // the issue 1414 pre-rename name
+    assert_eq!(r.code, 0, "err={}", r.err);
+    assert!(
+        r.err.contains("WARNING") && r.err.contains("strih-lx") && r.err.contains("1414"),
+        "{}",
+        r.err
+    );
+    for c in ["rsync ", "strih-obs-stop.sh", "run-setup.sh"] {
+        assert!(r.calls.contains(c), "`{c}` must run:\n{}", r.calls);
+    }
+}
+
+/// issue 1414 review round 2: only THIS box's pre-rename name is accepted -- another fleet name and
+/// an upper-cased hostname still refuse, nothing changed.
+#[test]
+fn strih_snv_accepts_only_its_own_pre_rename_hostname_1414() {
+    for other in ["stream", "STRIH-SNV", "resolume"] {
+        let r = run_exec(&[("STUB_HOSTNAME", other)]);
+        assert_eq!(r.code, 4, "{other}: err={}", r.err);
+        assert!(
+            r.err.contains("refusing to provision"),
+            "{other}: {}",
+            r.err
+        );
+        assert!(
+            !r.calls.contains("rsync "),
+            "{other}: rsync must not run:\n{}",
+            r.calls
+        );
     }
 }
 
@@ -1108,7 +1145,7 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
     let check = |dir: &Path| {
         let o = Command::new("bash")
             .arg("-c")
-            .arg(". \"$LIB\"; strih_lx_tree_check \"$D\" strih-lx; echo \"rc=$?\"")
+            .arg(". \"$LIB\"; strih_lx_tree_check \"$D\" strih-snv; echo \"rc=$?\"")
             .env("LIB", lib())
             .env("D", dir)
             .output()
@@ -1131,13 +1168,13 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
     }
     let (out, err) = check(d);
     assert!(
-        out.contains("rc=1") && err.contains("strih-lx.env"),
+        out.contains("rc=1") && err.contains("strih-snv.env"),
         "{out}{err}"
     );
     fs::create_dir_all(d.join("scripts/strih-boxes")).unwrap();
     fs::write(
-        d.join("scripts/strih-boxes/strih-lx.env"),
-        "STRIH_HOSTNAME=strih-lx\n",
+        d.join("scripts/strih-boxes/strih-snv.env"),
+        "STRIH_HOSTNAME=strih-snv\n",
     )
     .unwrap();
     let (out, err) = check(d);
@@ -1146,8 +1183,8 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
         "{out}{err}"
     );
     fs::write(
-        d.join("scripts/strih-boxes/strih-lx.env"),
-        "STRIH_HOSTNAME=strih-lx\nSTRIH_INTERCOM_CONFIG=intercom/x.toml\n",
+        d.join("scripts/strih-boxes/strih-snv.env"),
+        "STRIH_HOSTNAME=strih-snv\nSTRIH_INTERCOM_CONFIG=intercom/x.toml\n",
     )
     .unwrap();
     let (out, err) = check(d);
@@ -1178,7 +1215,7 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
     }
     let (out, err) = check(d);
     assert!(
-        out.contains("strih-lx\nrc=0"),
+        out.contains("strih-snv\nrc=0"),
         "prints the fact hostname:\n{out}{err}"
     );
 }
@@ -1186,7 +1223,7 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
 /// The broadcast guard (issue 1317, `.claude/rules/rig-mutation-broadcast-guard.md`): the deploy
 /// STOPS the production strih OBS, so while strih or stream is streaming/recording the preflight
 /// must refuse with exit 4 -- through the ONE shared `stray_session_check_assert` rig-busy read,
-/// dialled at the strih-lx IP + the obs-fleet stream host -- naming the step and WHAT is live,
+/// dialled at the strih-snv IP + the obs-fleet stream host -- naming the step and WHAT is live,
 /// before anything on the box changes.
 #[test]
 fn strih_lx_refuses_while_a_broadcast_is_live_1317() {
@@ -1205,13 +1242,13 @@ fn strih_lx_refuses_while_a_broadcast_is_live_1317() {
             r.calls.contains(
                 "obs_phase2 rig-busy-check --strih-host 10.77.9.202 --stream-host 10.77.9.204"
             ),
-            "{mode}: the shared rig-busy read at strih-lx + stream:\n{}",
+            "{mode}: the shared rig-busy read at strih-snv + stream:\n{}",
             r.calls
         );
         let fail = r
             .err
             .lines()
-            .find(|l| l.contains("ERROR: [strih-lx preflight]"))
+            .find(|l| l.contains("ERROR: [strih-snv preflight]"))
             .unwrap_or_else(|| panic!("{mode}: no named preflight failure:\n{}", r.err));
         assert!(
             fail.contains(live) && fail.contains("nothing changed"),
@@ -1238,7 +1275,7 @@ fn strih_lx_refuses_while_a_broadcast_is_live_1317() {
     let fail = r
         .err
         .lines()
-        .find(|l| l.contains("ERROR: [strih-lx preflight]"))
+        .find(|l| l.contains("ERROR: [strih-snv preflight]"))
         .unwrap_or_default();
     assert!(
         fail.contains("rtmp://a.rtmp.youtube.com/live2"),
@@ -1277,7 +1314,7 @@ fn strih_lx_idle_rig_passes_the_broadcast_guard_before_the_first_mutation_1317()
             r.calls
         );
         assert!(
-            r.fleet_log().contains("strih-lx"),
+            r.fleet_log().contains("strih-snv"),
             "{mode}: {}",
             r.fleet_log()
         );
@@ -1311,7 +1348,7 @@ fn strih_lx_refuses_when_a_broadcast_starts_during_staging_1317() {
     let fail = r
         .err
         .lines()
-        .find(|l| l.contains("ERROR: [strih-lx stop]"))
+        .find(|l| l.contains("ERROR: [strih-snv stop]"))
         .unwrap_or_else(|| panic!("no named stop-step refusal:\n{}", r.err));
     assert!(
         fail.contains("stream streaming") && fail.contains("OBS NOT stopped"),

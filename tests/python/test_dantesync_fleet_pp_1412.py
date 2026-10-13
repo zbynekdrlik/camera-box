@@ -45,7 +45,7 @@ sys.modules["dantesync_fleet_pp"] = df
 _spec.loader.exec_module(df)
 
 PP_GM = re.search(r"^STRIH_DANTE_GM=(.+)$", _STRIH_PP_ENV.read_text(), re.MULTILINE).group(1)
-PP_HOME = "strih-lx stream resolume strih-pp stream-pp resolume-pp"
+PP_HOME = "strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp"
 _CLEAN_PREFIXES = ("DANTESYNC_", "OBS_FLEET", "RIG_GRANDMASTER", "CAMBOX_OFFLINE_ACK", "WIN_SSH_USER",
                    "DANTE_CLOCK_")
 
@@ -107,8 +107,8 @@ def test_the_pp_rows_reach_the_python_twin_byte_identically(tmp_path, monkeypatc
 
 def test_strih_pp_and_stream_pp_read_their_address_from_obs_fleet(tmp_path):
     """No second literal: a renamed obs-fleet host moves the dantesync row with it."""
-    obs = ("strih-lx|10.77.9.202|linux-genlock|always\nstream|10.77.9.204|windows-genlock|always\n"
-           "imag|10.77.9.182|linux-genlock|retired\nresolume|resolume.lan|windows-genlock|traveling\n"
+    obs = ("strih-snv|10.77.9.202|linux-genlock|always\nstream-snv|10.77.9.204|windows-genlock|always\n"
+           "imag|10.77.9.182|linux-genlock|retired\nresolume-snv|resolume.lan|windows-genlock|traveling\n"
            "strih-pp|strih-pp.example|linux-genlock|traveling\nstream-pp|10.1.2.3|linux-genlock|traveling")
     r = _bash(tmp_path, 'echo "S=$(dantesync_fleet_field strih-pp addr)"; echo "T=$(dantesync_fleet_field stream-pp addr)"',
               OBS_FLEET=obs)
@@ -236,7 +236,7 @@ def test_present_drops_an_unreachable_pp_node_from_every_arm(tmp_path):
             'echo "W=$(dantesync_fleet_spec win op --present)"\n'
             'echo "AL=$(dantesync_fleet_spec linux op)"\n'
             'echo "AW=$(dantesync_fleet_spec win op)"\n')
-    r = _bash(tmp_path, body, OBS_FLEET_HOME="strih-lx stream resolume stream-pp")
+    r = _bash(tmp_path, body, OBS_FLEET_HOME="strih-snv stream-snv resolume-snv stream-pp")
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
     assert "stream-pp=op@stream-pp.lan" in out["L"].split()
     assert "strih-pp=op@strih-pp.lan" not in out["L"].split()
@@ -250,10 +250,10 @@ def test_the_pp_nodes_are_never_fixed_or_obsfleet_nodes(tmp_path):
                         ' echo "R=$(dantesync_fleet_names homegate=reach)"; echo "M=$(dantesync_fleet_master_names)"')
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
     assert out["F"] == "mbc fohabl"
-    assert out["O"] == "strih-lx stream resolume"
+    assert out["O"] == "strih-snv stream-snv resolume-snv"
     # issue 1413: the Poprad camboxes are `reach` rows too (test_dantesync_fleet_pp_cams_1413.py)
     assert out["R"] == "cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp"
-    assert out["M"] == "strih-lx strih-pp"
+    assert out["M"] == "strih-snv strih-pp"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -315,7 +315,7 @@ def test_version_gate_fleet_a_stale_pp_box_drifts(tmp_path):
 
 
 def test_version_gate_fleet_skips_unreachable_pp_boxes_and_still_passes(tmp_path):
-    r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-lx stream resolume")
+    r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-snv stream-snv resolume-snv")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "GATE PASS — 9 box(es)" in r.stdout
     for name in ("strih-pp", "stream-pp", "resolume-pp"):
@@ -340,17 +340,17 @@ def test_upgrade_verifies_a_pp_node_against_the_pp_grandmaster(tmp_path):
 
 def test_upgrade_verifies_every_venue_master_master_aware(tmp_path):
     r = _source_upgrade(tmp_path, 'm="$(dantesync_upgrade_default_master "")"; echo "D=[$m]";'
-                                  ' for n in strih-lx strih-pp stream-pp; do'
+                                  ' for n in strih-snv strih-pp stream-pp; do'
                                   ' dantesync_is_ntp_master "$n" "$m" && echo "$n=master" || echo "$n=slave"; done;'
                                   ' echo "R=[$(dantesync_date_role strih-pp "$m")]"')
-    assert "D=[strih-lx strih-pp]" in r.stdout, r.stdout + r.stderr
-    assert "strih-lx=master" in r.stdout and "strih-pp=master" in r.stdout and "stream-pp=slave" in r.stdout
+    assert "D=[strih-snv strih-pp]" in r.stdout, r.stdout + r.stderr
+    assert "strih-snv=master" in r.stdout and "strih-pp=master" in r.stdout and "stream-pp=slave" in r.stdout
     assert "R=[ntp-master]" in r.stdout
 
 
 def test_upgrade_skips_an_unreachable_pp_node_and_rolls_a_reachable_one(tmp_path):
     body = ('for n in strih-pp resolume-pp; do dantesync_skip_away_traveling "$n" && echo "$n=skip" || echo "$n=roll"; done')
-    away = _source_upgrade(tmp_path, body, OBS_FLEET_HOME="strih-lx stream resolume")
+    away = _source_upgrade(tmp_path, body, OBS_FLEET_HOME="strih-snv stream-snv resolume-snv")
     assert "strih-pp=skip" in away.stdout and "resolume-pp=skip" in away.stdout, away.stdout + away.stderr
     home = _source_upgrade(tmp_path, body, OBS_FLEET_HOME=PP_HOME)
     assert "strih-pp=roll" in home.stdout and "resolume-pp=roll" in home.stdout, home.stdout + home.stderr

@@ -120,7 +120,7 @@ missing_slot_pixels_stage2_args() {
     "$1" "$2" "$3" "$4"
 }
 
-# The strih-lx idle-priority prefix: byte-identical to recording-verdict-on-strih-lx.sh's
+# The strih-snv idle-priority prefix: byte-identical to recording-verdict-on-strih-snv.sh's
 # LOWPRIO_SNIPPET (nice 19, pinned to the E-cores when the box has them — issue 1354: a bulk decode
 # on the P-cores relock-storms the live NDI receivers). A test pins the two copies equal. Pure.
 missing_slot_pixels_lowprio_snippet() {
@@ -231,7 +231,7 @@ missing_slot_pixels_box_extract() {
 # The whole step. $1 = merged verdict JSON $2 = OUTDIR $3 = RUN_ID $4 = strih host $5 = strih os
 # (strih_platform) $6 = strih recording path on the box $7 = stream host $8 = stream recording path on
 # the box $9 = the Windows boxes' output dir (OUT_DIR_WIN). Credentials: STRIH_USER/STRIH_PW,
-# STREAM_USER/STREAM_PW (default newlevel). The strih-lx remote dir is under
+# STREAM_USER/STREAM_PW (default newlevel). The strih-snv remote dir is under
 # STRIH_LX_REMOTE_OUT_DIR (default /home/newlevel/verdict-out). Writes
 # $OUTDIR/missing-slot-pixels-<RUN_ID>.json and merges it into the verdict JSON as
 # `missing_slot_pixels` (report-only — overall_pass untouched). ALWAYS returns 0.

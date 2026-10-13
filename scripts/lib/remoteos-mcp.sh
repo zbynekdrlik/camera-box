@@ -10,12 +10,12 @@
 #
 # WHY it replaces the upstream install-linux.sh: that installer pip-installs into the SYSTEM python
 # (`--break-system-packages`, the Debian RECORD conflicts of the cam1 re-provision) and writes the
-# bearer key into the world-readable unit's ExecStart. strih-lx runs a hand-made venv instead
+# bearer key into the world-readable unit's ExecStart. strih-snv runs a hand-made venv instead
 # (read 25.9.2026: /opt/remoteos-mcp-venv, `-m remoteos --transport streamable-http --enable-all
 # --host 0.0.0.0 --port 8092`, User=newlevel + DISPLAY=:0 + XDG_RUNTIME_DIR). This lib makes a fresh
 # run produce that box by construction:
 #   * the source is the project's GitHub API tarball of a PINNED commit (`remoteos_mcp_pinned_ref`,
-#     the one strih-lx runs; `REMOTEOS_MCP_REF` overrides for a deliberate bump -- pin-not-latest, so a
+#     the one strih-snv runs; `REMOTEOS_MCP_REF` overrides for a deliberate bump -- pin-not-latest, so a
 #     deploy never silently installs whatever upstream `main` is), fetched with the
 #     `Authorization: token` header read from STDIN when GH_TOKEN is set (never argv), anonymously
 #     otherwise (the repo is public);
@@ -37,7 +37,7 @@
 
 remoteos_mcp_repo() { printf 'zbynekdrlik/remoteos-mcp'; }
 remoteos_mcp_port() { printf '8092'; }
-# The pinned source commit: the remoteos-mcp commit the live strih-lx venv runs (pip direct_url
+# The pinned source commit: the remoteos-mcp commit the live strih-snv venv runs (pip direct_url
 # commit_id, read 25.9.2026). Bump it on purpose, together with a live check of one box.
 remoteos_mcp_pinned_ref() { printf '8b4ce58dbed08c366ecbd50a32ff66213b77a9ba'; }
 remoteos_mcp_ref() { printf '%s' "${REMOTEOS_MCP_REF:-$(remoteos_mcp_pinned_ref)}"; }
@@ -86,7 +86,7 @@ if isinstance(v, str):
 }
 
 # remoteos_mcp_key_from_unit_text TEXT -> the value after `--auth-key` on the unit's ExecStart line
-# (the shape the upstream installer and the hand-made strih-lx unit wrote), or nothing. Always rc 0.
+# (the shape the upstream installer and the hand-made strih-snv unit wrote), or nothing. Always rc 0.
 remoteos_mcp_key_from_unit_text() {
     local line rest
     while IFS= read -r line; do
@@ -182,7 +182,7 @@ remoteos_mcp_env_text() {
 }
 
 # remoteos_mcp_unit_text USER UID MODE -> the remoteos-mcp.service text. MODE `desktop` = the live
-# strih-lx shape (runs as the desktop USER on its X display, ordered after the graphical session);
+# strih-snv shape (runs as the desktop USER on its X display, ordered after the graphical session);
 # `headless` = a cam box (no display). The key is never in this text: EnvironmentFile carries it.
 # rc 2 on a bad USER / UID / MODE.
 remoteos_mcp_unit_text() {
@@ -200,7 +200,7 @@ remoteos_mcp_unit_text() {
     printf '[Unit]\n'
     printf 'Description=RemoteOS MCP control agent (camera-box scripts/lib/remoteos-mcp.sh, venv)\n'
     # graphical-session.target is a USER-manager target, so in this system unit it orders nothing; it
-    # is kept only because the live strih-lx unit carries it (the agent needs no display to start).
+    # is kept only because the live strih-snv unit carries it (the agent needs no display to start).
     if [ "$mode" = desktop ]; then
         printf 'After=network.target graphical-session.target\n'
     else

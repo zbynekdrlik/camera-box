@@ -185,7 +185,7 @@ def test_a_large_linux_limit_keeps_the_absolute_growth_bound():
 
 def test_the_run_token_keys_the_identity_through_a_clock_step():
     # Review round 1: on Linux the start epoch is btime + ticks, and btime moves when the clock is
-    # stepped (strih-lx is the dantesync date master). The served run token (boot id + start
+    # stepped (strih-snv is the dantesync date master). The served run token (boot id + start
     # ticks) does not move, so the identity follows it.
     run = "1b4e28ba-2fa1-11d2-883f-0016d3cca427:360000"
     first = _run(_body(600, pid="4242", start="1791190000", limit="1024", run=run), 1000)

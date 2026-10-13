@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """issue 1404 -- the read-only file serving shared by the dev1 rig-lease server (:8890) and the
-program-audio sampler's own endpoint on strih-lx (:8891), stdlib only.
+program-audio sampler's own endpoint on strih-snv (:8891), stdlib only.
 
 The dev1 rig-lease server (`scripts/rig-lease-server.py`) serves one file from its SERVE dir:
 
@@ -11,7 +11,7 @@ The dev1 rig-lease server (`scripts/rig-lease-server.py`) serves one file from i
                            credentials.
 
 The program-audio verdict (`program-audio.json`, the YouTube channel guard's input) is written and
-served by the sampler itself on strih-lx (`scripts/program_audio_sampler.py` +
+served by the sampler itself on strih-snv (`scripts/program_audio_sampler.py` +
 `scripts/program_audio_http.py`), from the sampler's own serve dir; it uses this module's
 `program_audio_response`, `write_bytes_atomic`, `ensure_serve_dir` and `ReadOnlyHandler`. The dev1
 route `http://dev1:8890/program-audio.json` was retired on 8.10.2026 (issue 1404).

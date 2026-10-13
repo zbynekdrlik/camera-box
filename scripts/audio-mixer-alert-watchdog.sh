@@ -30,7 +30,7 @@
 # while it persists. DETECTION ONLY -- the cure (an OBS restart, a dock or pacer fix) is a
 # supervisor/owner call; recovery is machine-channel log-only, never a phone ping (issue 1206).
 #
-# Roster = the obs-fleet `audio-mixer` facet (strih-lx stream resolume); the traveling resolume is
+# Roster = the obs-fleet `audio-mixer` facet (strih-snv stream resolume); the traveling resolume is
 # polled only while home (obs_fleet_poll_now). A box whose :8899 does not answer is SKIP -- the
 # bundle-state / network-reach watchdogs own that page -- so no dev1-outage guard is needed.
 #

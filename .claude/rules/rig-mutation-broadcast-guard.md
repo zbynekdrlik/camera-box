@@ -5,7 +5,7 @@ paths:
   - "scripts/obs_phase2.py"
   - "tests/harness_stray_session_check_1271.rs"
   - "tests/harness_rig_busy_recheck.rs"
-  - "scripts/lib/strih-lx-deploy.sh"
+  - "scripts/lib/strih-snv-deploy.sh"
   - "tests/deploy_genlock_fleet_strih_lx_exec_1317.rs"
 ---
 
@@ -50,12 +50,12 @@ ONE sanctioned bypass (supervisor-only, logged). So ANY new dev1-orchestrated to
 rig/cambox box (deploy, restart, reconfigure) reuses THIS guard — never a fresh per-box WS loop; when
 editing the guard, remember the deploy tool is a second live caller, not just the E2E harness.
 
-**Third caller — the strih-lx genlock deploy (`scripts/lib/strih-lx-deploy.sh` `strih_lx_apply`,
+**Third caller — the strih-snv genlock deploy (`scripts/lib/strih-snv-deploy.sh` `strih_lx_apply`,
 issue 1317).** The deploy STOPS the production strih OBS, so it runs the guard TWICE through one
 helper `_strih_lx_broadcast_guard`: at preflight (after the identity + installer checks, immediately
 before the first mutation, the stage prep — exit 4, nothing changed) and AGAIN immediately before the
 graceful stop (staging a ~2 GB bundle can take minutes — exit 4 in step `stop`, OBS NOT stopped). Both
-read the strih-lx dial IP + the obs-fleet stream host (`deploy-genlock-fleet.sh` sources the guard
+read the strih-snv dial IP + the obs-fleet stream host (`deploy-genlock-fleet.sh` sources the guard
 lib). A caller that needs its OWN exit code (the deploy's contract is 0/3/4/5, the guard `exit 1`s)
 runs the guard in a SUBSHELL and maps a non-zero rc — never re-implement the busy read to get a
 different code: `{ err="$( ( stray_session_check_assert … ) 2>&1 1>&3 3>&- )"; rc=$?; } 3>&1` keeps
@@ -64,7 +64,7 @@ guard lib, reusable by every caller) parses — the `rig-busy-check:` JSON + the
 detail lines — to name what is live in the exit-4 message. So the guard's refusal TEXT is a parsed
 interface: keep the `    rig-busy-check: <json>` and `    <label> streaming: <detail>` line shapes
 stable, or update the summary + its test together. The fail-open WARNING is caller-neutral (only the
-E2E harness has a job-start gate; the strih-lx deploy records the both-unreadable case as an
+E2E harness has a job-start gate; the strih-snv deploy records the both-unreadable case as an
 accepted risk in its lib header). The test seam is `STRIH_LX_OBS_PHASE2_DIR` (a fake `obs_phase2.py`,
 like `BKSHADING_DEPLOY_OBS_PHASE2_DIR`; its `live-after-stage` mode drives the pre-stop refusal); the
 test harness also drops `OBS_PASSWORD`, because the guard passes it as an argv the fake logs.

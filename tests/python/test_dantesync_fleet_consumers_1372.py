@@ -20,7 +20,7 @@ _GATE = _ROOT / "scripts" / "dantesync-version-gate.sh"
 _UPGRADE = _ROOT / "scripts" / "dantesync-fleet-upgrade.sh"
 # The ONE pin, read from the gate script itself so a fleet roll (a pin bump) never strands this test.
 _PIN = re.search(r'DANTESYNC_VERSION_PIN="\$\{DANTESYNC_VERSION_PIN:-([0-9.]+)\}"', _GATE.read_text()).group(1)
-_WIN = ("stream", "resolume", "mbc", "fohabl")
+_WIN = ("stream-snv", "resolume-snv", "mbc", "fohabl")
 
 
 def _stub_bin(tmp_path, versions):
@@ -44,8 +44,8 @@ def _stub_bin(tmp_path, versions):
 
 
 _IPS = {"cam1": "10.77.9.61", "cam2": "10.77.9.62", "cam3": "10.77.9.63", "cam4": "10.77.9.64",
-        "cam5": "10.77.9.65", "cam6": "10.77.9.66", "cam7": "10.77.9.67", "strih-lx": "10.77.9.202",
-        "stream": "10.77.9.204", "resolume": "resolume.lan", "mbc": "10.77.7.232", "fohabl": "10.77.7.30"}
+        "cam5": "10.77.9.65", "cam6": "10.77.9.66", "cam7": "10.77.9.67", "strih-snv": "10.77.9.202",
+        "stream-snv": "10.77.9.204", "resolume-snv": "resolume.lan", "mbc": "10.77.7.232", "fohabl": "10.77.7.30"}
 
 
 def _env(tmp_path, bindir, **over):
@@ -53,7 +53,7 @@ def _env(tmp_path, bindir, **over):
          if not k.startswith(("DANTESYNC_", "OBS_FLEET", "CAMBOX_OFFLINE_ACK", "WIN_SSH_USER"))}
     e.update({
         "PATH": f"{bindir}:/usr/bin:/bin",
-        "OBS_FLEET_HOME": "strih-lx stream resolume",
+        "OBS_FLEET_HOME": "strih-snv stream-snv resolume-snv",
         "DANTESYNC_FLEET_CRED_FILE": str(tmp_path / "none.env"),
         "DANTESYNC_VERSION_GATE_SSH_PASS": "fleet-default",
         "DANTESYNC_TRAY_EXPECTED_SHA": "a" * 64,
@@ -120,9 +120,9 @@ def test_gate_fleet_a_stale_audio_node_drifts(tmp_path):
 
 
 def test_gate_fleet_skips_an_away_traveling_box(tmp_path):
-    r, log = _gate(tmp_path, _all_on_pin(), "--fleet", OBS_FLEET_HOME="strih-lx stream")
+    r, log = _gate(tmp_path, _all_on_pin(), "--fleet", OBS_FLEET_HOME="strih-snv stream-snv")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "resolume SKIPPED (traveling box away" in r.stdout
+    assert "resolume-snv SKIPPED (traveling box away" in r.stdout
     assert "resolume.lan" not in log
 
 
@@ -198,13 +198,13 @@ def test_upgrade_verify_env_fails_loudly_when_the_audio_grandmaster_does_not_res
 
 def test_upgrade_names_the_fleet_ntp_master_without_the_fleet_flag(tmp_path):
     """29.9.2026: without --fleet the upgrader defaulted NTP_MASTER to the retired Windows strih's
-    name 'strih', so an explicit `--linux "strih-lx=..."` roll verified the fleet DATE master as a
+    name 'strih', so an explicit `--linux "strih-snv=..."` roll verified the fleet DATE master as a
     SLAVE (the ~2 ms single-node bound against its by-design daily date error of 30+ ms) and rolled a
     healthy v1.14.0 back twice. The default master is the declared fleet's ntp-master role in every
     mode; an explicit NTP_MASTER / DANTESYNC_NTP_MASTER_NAME still wins."""
     r = _source_upgrade(tmp_path, 'echo "D=[$(dantesync_upgrade_default_master "")]";'
                                   ' echo "G=[$(dantesync_upgrade_default_master other)]"')
-    assert "D=[strih-lx strih-pp]" in r.stdout, r.stdout + r.stderr  # issue 1412: every venue master
+    assert "D=[strih-snv strih-pp]" in r.stdout, r.stdout + r.stderr  # issue 1412: every venue master
     assert "G=[other]" in r.stdout, r.stdout + r.stderr
     src = _UPGRADE.read_text()
     assert 'NTP_MASTER="$(dantesync_upgrade_default_master "$_NTP_MASTER_GIVEN")"' in src

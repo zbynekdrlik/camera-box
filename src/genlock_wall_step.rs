@@ -15,7 +15,7 @@
 //! continuous. On the first live step (−51 ms, 25.9.2026 23:17:07 UTC) the tick then SLEWED back
 //! to the stepped wall grid at 2 ms per tick — ~9 ticks off phase at 30 fps — and the Windows NDI
 //! sender, which stamps the floor of the wall clock at emit (`genlock_floor_boundary_100ns`,
-//! DistroAV ndi-output.cpp), stamped off-phase frames the whole time (the strih-lx `CG-obs`
+//! DistroAV ndi-output.cpp), stamped off-phase frames the whole time (the strih-snv `CG-obs`
 //! underruns/relocks).
 //!
 //! This module decides the step and the re-grid:

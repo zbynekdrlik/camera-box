@@ -89,7 +89,7 @@ For each copy in a window, join the painted `tick` with the cambox's OWN digital
 `911012` cam7) on consecutive recorded frames. Do it in BOTH `strih-partial-*.json` and
 `stream-partial-*.json`:
 - **tick Δ0 AND burn Δ0** means strih re-presented the SAME NDI frame: a receiver-side FIFO repeat. A
-  run of them (CAM7 11/11, CAM4 10/10 on 23.9.) is the strih-lx 2.5 G uplink tail-drop blackout. See
+  run of them (CAM7 11/11, CAM4 10/10 on 23.9.) is the strih-snv 2.5 G uplink tail-drop blackout. See
   `.claude/rules/netcfg-audit.md` for the finding and the discriminator recipe.
 - **tick Δ0 while burn Δ≥1** means consecutive cambox emits carried identical content: a SOURCE
   capture/emit repeat that strih's 60→30 phase flip (burn Δ1/Δ3) happened to pick. CAM2 6/6 in run

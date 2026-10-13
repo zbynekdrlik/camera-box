@@ -54,8 +54,8 @@ class CamboxFreeList1389(unittest.TestCase):
         self.assertEqual(got, ["10.77.9.202", "10.77.9.204", "10.77.9.201"])
 
     def test_a_fleet_host_on_a_cambox_ip_is_dropped_and_named(self):
-        fleet = ("strih-lx|10.77.9.61|linux-genlock|always\nstream|10.77.9.204|windows-genlock|always\n"
-                 "resolume|resolume.lan|windows-genlock|traveling")
+        fleet = ("strih-snv|10.77.9.61|linux-genlock|always\nstream-snv|10.77.9.204|windows-genlock|always\n"
+                 "resolume-snv|resolume.lan|windows-genlock|traveling")
         r = _lib("ndi_discovery_sender_ips pinned", env={"OBS_FLEET": fleet})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), "10.77.9.204")
@@ -71,8 +71,8 @@ class CamboxFreeList1389(unittest.TestCase):
         self.assertIn("cambox", r.stderr)
 
     def test_an_all_cambox_fleet_is_loud_never_an_empty_list(self):
-        fleet = ("strih-lx|10.77.9.61|linux-genlock|always\nstream|10.77.9.62|windows-genlock|always\n"
-                 "resolume|resolume.lan|windows-genlock|traveling")
+        fleet = ("strih-snv|10.77.9.61|linux-genlock|always\nstream-snv|10.77.9.62|windows-genlock|always\n"
+                 "resolume-snv|resolume.lan|windows-genlock|traveling")
         r = _lib('ndi_discovery_sender_ips pinned; echo "rc=$?"', env={"OBS_FLEET": fleet})
         self.assertIn("rc=1", r.stdout, r.stderr)
         self.assertNotIn("10.77.9.6", r.stdout)
@@ -534,7 +534,7 @@ class CamboxApply1389(unittest.TestCase):
         r = _bash(f'bash "{LIB}" --cambox-apply')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, _lib("ndi_discovery_cambox_apply_remote_snippet").stdout)
-        r = _bash(f'bash "{LIB}" --cambox-apply', env={"OBS_FLEET": "stream|10.77.9.204|windows-genlock|always"})
+        r = _bash(f'bash "{LIB}" --cambox-apply', env={"OBS_FLEET": "stream-snv|10.77.9.204|windows-genlock|always"})
         self.assertEqual(r.returncode, 0, "the cambox program does not depend on the OBS-fleet list")
 
 

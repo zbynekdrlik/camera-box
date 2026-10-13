@@ -29,7 +29,7 @@ contract for restreamer#349: `.claude/rules/rig-lease-http.md`.
                           means held=true. Without a serve dir (the old make_server() call shape)
                           the route is a plain 404.
   any other PATH        -> 404. That includes /program-audio.json: the program-audio verdict is
-                          served only by the sampler's own endpoint on strih-lx
+                          served only by the sampler's own endpoint on strih-snv
                           (scripts/program_audio_http.py, :8891); the dev1 route was retired on
                           8.10.2026 (issue 1404).
   any other METHOD (POST/PUT/DELETE/OPTIONS/...) -> the stdlib default 501 Not Implemented (this

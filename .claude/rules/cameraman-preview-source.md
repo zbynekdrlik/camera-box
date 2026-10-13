@@ -13,7 +13,7 @@ Every cambox shows the strih box's `interkom` NDI output on its HDMI monitor. Th
 fleet-wide unconditional preview from the #528 ruling: no per-box config, no env knob. The source
 is RESOLVED on every (re)connect by the pure `src/preview_source.rs`:
 
-1. The **preferred** name (`DEFAULT_PREVIEW_SOURCE` = `STRIH-LX (interkom)`, or an explicit
+1. The **preferred** name (`DEFAULT_PREVIEW_SOURCE` = `STRIH-SNV (interkom)`, or an explicit
    `--display` / `[display]` source) wins **the moment it is announced**, matched by exact name.
 2. Otherwise the **ONE** discovered `STRIH-<box> (interkom)` output is used. The match is exact
    and case-sensitive: the `STRIH-` host prefix plus the ` (interkom)` output suffix, with a
@@ -24,10 +24,18 @@ is RESOLVED on every (re)connect by the pure `src/preview_source.rs`:
    name and log the candidates once. Never alternate between two strih boxes.
 4. Nothing matching: retry on the existing 5 s cadence, exactly as before.
 
-WHY: the preview used to be the exact name `STRIH-SNV (interkom)`. When the Windows strih was
-replaced by strih-lx (M4 cut-over, 20.9.2026), every cameraman monitor went black until a new
+WHY: the preview used to be one exact name (the Windows strih's). When the Windows strih was
+replaced by the Linux notebook (M4 cut-over, 20.9.2026), every cameraman monitor went black until a new
 binary shipped. The Poprad strih (`STRIH-PP`) will be the next swap, and it now needs no code
 change.
+
+**The issue-1414 rename rides this rule.** The Linux strih took the venue name (`strih-snv`, NDI
+prefix `STRIH-SNV`) and the preferred name followed. During the roll the two sides may run different
+names: a NEW cambox binary on a strih that still runs its pre-1414 hostname finds the ONE old-named
+interkom output after the window, and an OLD binary (preferring the pre-1414 name) finds the renamed
+`STRIH-SNV (interkom)` after the window. No monitor goes dark in either order, only the first connect
+waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_1414`,
+`an_old_binary_finds_the_renamed_strih_after_the_window_1414`).
 
 ## Wiring (where the pieces live)
 
@@ -59,6 +67,6 @@ change.
   capture / borrowck mistakes that CI would otherwise find first.
 - Live acceptance (supervisor, after the fleet deploy): read the journal on a cambox with a
   monitor (`journalctl -u camera-box | grep 'NDI display'`) for `preview source resolved to
-  'STRIH-LX (interkom)'` + `connected to 'STRIH-LX (interkom)'`. The deploy's own service
+  'STRIH-SNV (interkom)'` + `connected to 'STRIH-SNV (interkom)'`. The deploy's own service
   restart is the test. Never remote-reboot a cambox for it, and after a strih rename the next
   reconnect re-resolves on its own.

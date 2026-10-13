@@ -208,14 +208,14 @@ def test_unreachable_exits_2():
 
 
 def test_defaults_point_at_strih_lx():
-    # issue 1404 ROZHODNUTE 6039368611: the sampler moved off dev1 to strih-lx and serves :8891 itself.
+    # issue 1404 ROZHODNUTE 6039368611: the sampler moved off dev1 to strih-snv and serves :8891 itself.
     src = GUARD.read_text(encoding="utf-8")
     assert 'DEFAULT_URL = "http://10.77.9.202:8891/program-audio.json"' in src
     assert "DEFAULT_MAX_AGE_S = 10.0" in src
 
 
 def test_end_to_end_through_the_real_sampler_endpoint(tmp_path):
-    """The guard against the sampler's own endpoint (program_audio_http, strih-lx :8891), the one
+    """The guard against the sampler's own endpoint (program_audio_http, strih-snv :8891), the one
     place the verdict is served since the dev1 lease route was retired (issue 1404, 8.10.2026)."""
     serve = tmp_path / "serve"
     serve.mkdir()

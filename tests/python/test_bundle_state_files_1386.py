@@ -1,6 +1,6 @@
 """Issue 1386 -- the ONE declared :8899 bundle-state server file set.
 
-The server tree is installed flat on every OBS box (/opt/camera-box on strih-lx and imag by
+The server tree is installed flat on every OBS box (/opt/camera-box on strih-snv and imag by
 setup-strih.sh step 9 / setup-imag.sh step 28, C:\\ProgramData\\camera-box on the Windows boxes by
 the runbook). Before issue 1386 each installer typed its own literal three-file list, so a new
 sibling module had to be added in three places or a box got a half set -- and a box missing one

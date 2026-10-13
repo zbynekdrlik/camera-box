@@ -7,7 +7,7 @@ against the slew dantesync reports (`f_ptp + f_phase`) plus a STEP detector.
 
 #1357 scope C: that RATE branch compared a 300 s windowed rate against ONE instantaneous dantesync
 sample, and it meant a different thing per box — on Linux `CLOCK_MONOTONIC` is kernel-disciplined
-together with `CLOCK_REALTIME`, so the measured side is 0 by construction (live strih-lx 24.9.: 0.0 on
+together with `CLOCK_REALTIME`, so the measured side is 0 by construction (live strih-snv 24.9.: 0.0 on
 all 689 samples while `f_ptp + f_phase` swung -160..+171 ppm -> 28 false DEGRADED), on Windows it is
 the free QPC crystal (stream: measured 23.4 vs an instantaneous 109.8 -> 4 false DEGRADED). The term is
 now the wall STEP only — the one clock hazard for genlock, identical on every box — and the windowed
@@ -89,7 +89,7 @@ def test_a_large_rate_alone_no_longer_degrades_1357():
 
 
 def test_live_strih_lx_and_stream_windows_give_the_same_verdict_1357():
-    # strih-lx (Linux, disciplined CLOCK_MONOTONIC): 0 ms over the window. stream (Windows, free QPC)
+    # strih-snv (Linux, disciplined CLOCK_MONOTONIC): 0 ms over the window. stream (Windows, free QPC)
     # 24.9. 05:09:00: 7 ms over 299 s = 23.4 ppm. Both reported qpc_drift DEGRADED under the removed
     # rate branch; under the one step semantics both read LOCKED, and both DEGRADE on a real step.
     lx, lx_ppm = gld.qpc_drift_beyond_bound(

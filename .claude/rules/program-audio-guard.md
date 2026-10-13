@@ -41,7 +41,7 @@ Two read-only endpoints:
   - **0700:** no other dev1 account can plant a file.
   - **Never the lease dir or inside it:** the lease dir's existence means `held=true`.
   - **Only files this user owns are served.**
-- **The program-audio verdict is served by the sampler itself on strih-lx**
+- **The program-audio verdict is served by the sampler itself on strih-snv**
   (`http://10.77.9.202:8891/program-audio.json`, "The host" below). Its serve dir is its own
   `$XDG_RUNTIME_DIR/program-audio-sampler` (override `$PROGRAM_AUDIO_SERVE_DIR`), never the lease
   server's. The dev1 copy was retired on 8.10.2026 (design 6054654255): the dev1 unit file is
@@ -52,7 +52,7 @@ Two read-only endpoints:
 | Route | Writer | Contract |
 |---|---|---|
 | dev1 `:8890/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| strih-lx `:8891/program-audio.json` | the `program-audio-sampler` `--user` service on strih-lx, which serves it itself | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, reason]}`; both ages recomputed by the endpoint per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
+| strih-snv `:8891/program-audio.json` | the `program-audio-sampler` `--user` service on strih-snv, which serves it itself | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, reason]}`; both ages recomputed by the endpoint per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -158,8 +158,8 @@ level. Re-run the full calibration after any decoder or rule change:
 (`--classes` splits the synthetic run; each class takes ~1.5 min on dev1).
 
 **The sampler (`program_audio_sampler.py`):** the rules below were found and measured while the
-sampler ran on dev1 (until 8.10.2026; strih-lx serving since 7.10.2026), so their text says "dev1". Since then it runs only on
-strih-lx, where "dev1's wall step" and "dev1's arrival time" mean strih-lx's own; strih-lx is the
+sampler ran on dev1 (until 8.10.2026; strih-snv serving since 7.10.2026), so their text says "dev1". Since then it runs only on
+strih-snv, where "dev1's wall step" and "dev1's arrival time" mean strih-snv's own; strih-snv is the
 fleet's date master.
 - **Warm-up.** Until 4 s of audio arrived since the start, a span restart or a format change,
   nothing reads MEASUREMENT. A window whose spectrum alone says FOREIGN (`spectral_foreign`: level
@@ -272,7 +272,7 @@ fleet's date master.
   - **A dantesync date step is DATE_STEP, never a hole** (design 6037613222; `frame_continues(...,
     wall_steps=...)`, `WallSteps`, pinned by `tests/python/test_program_audio_datestep_1404.py`).
     - dev1 runs the same fleet dantesync as the stream box (both followers, the same announced
-      `date_offset_seq`), so dev1's own wall clock steps at the same instant. On strih-lx, the
+      `date_offset_seq`), so dev1's own wall clock steps at the same instant. On strih-snv, the
       date MASTER, its own wall step is announced together with the stream box's follower step.
     - The capture path reads dev1's wall-minus-monotonic offset with every block: ONE bracketed read
       (`read_wall_offset_ns`: monotonic, wall, monotonic; the wall placed at the middle; a bracket over
@@ -384,14 +384,14 @@ fleet's date master.
     gone from the unit; that is the measured cure.
     - **No host tuning (coordinator, 7.10.2026): the unit runs the sampler at NORMAL priority** (no
       `Nice=`, no `CPUWeight=`). A `--user` unit cannot lower nice on dev1 anyway (`systemd-run
-      --user -p Nice=-5` runs at nice 0 with no error, RLIMIT_NICE 0), and on strih-lx a CPUWeight
+      --user -p Nice=-5` runs at nice 0 with no error, RLIMIT_NICE 0), and on strih-snv a CPUWeight
       would rank the sampler ahead of OBS in the same slice. The sampler logs one start line,
       `scheduling nice=N cpus=<list> cpu.weight=W` (a WARNING only at a positive nice).
     - A `--user` CPUWeight competes only inside the user's own slice; against other users' load the
       passive run's capture thread at nice 10 had no loss of its own.
     - A system unit with a realtime capture thread was weighed and not taken: the remaining losses
       are box-wide, and the SDK's own receive threads (`ndir:*`) stall with them. The real answer
-      to dev1's load was the move to strih-lx (below).
+      to dev1's load was the move to strih-snv (below).
   - **Most "holes" are not lost audio: a SENDER stall.** 20 of the 22 forward steps over the
     tolerance in the 720 s run were identical in all three receivers (both probes and the live
     unit, to 0.1 ms) and each was followed by two frames at −21.1 ms: the cumulative offset returns
@@ -479,7 +479,7 @@ fleet's date master.
     with its ages kept. That is the one place every reader sees, restreamer's own reader included
     (review round 1).
   - The camera-box guard also refuses it (exit 2), for an endpoint that still runs the old code.
-  - On strih-lx, setup-strih step 16e rebuilds the shim when its sources changed and try-restarts
+  - On strih-snv, setup-strih step 16e rebuilds the shim when its sources changed and try-restarts
     the sampler, so a redeploy picks up the new code.
 - **Install order matters.** The build renames the new library over the old one, never writes it in
   place: a running sampler keeps its mapped copy (writing a mapped `.so` in place can SIGBUS it).
@@ -551,11 +551,11 @@ is at a venue. So the mirror is a long-running service holding one
 - **Restart the lease server only while `held=false`.** `/rig-lease.json`, `/healthz` and the 404
   are pinned to golden bytes captured from the pre-change server.
 
-## The host: strih-lx, its own endpoint :8891 (ROZHODNUTÉ 6039368611)
+## The host: strih-snv, its own endpoint :8891 (ROZHODNUTÉ 6039368611)
 
 The owner rejected dev1 for the sampler (shared, loaded by other projects' CI: "naozaj to musi bezat tu
 na dev1?!"). It needs only NDI reach to `STREAM-SNV (stream)` and an HTTP endpoint, so it moves to
-strih-lx (16 cores, the E-cores 12-15 nearly idle; stream.lan was rejected: a Windows port of the
+strih-snv (16 cores, the E-cores 12-15 nearly idle; stream.lan was rejected: a Windows port of the
 shim + numpy next to restreamer's broadcast encoder).
 - **Its own read-only endpoint** (`scripts/program_audio_http.py`, served from the sampler process):
   `GET/HEAD /program-audio.json` through `rig_serve_files.program_audio_response` (ages per request,
@@ -581,22 +581,22 @@ shim + numpy next to restreamer's broadcast encoder).
   fixes and the docs (the test-retarget commit before it is green either way). It is never a live
   need: the owner ruled the sampler off dev1. Pinned: `test_the_dev1_sampler_unit_is_gone`,
   `test_the_dev1_server_no_longer_serves_program_audio`, `test_the_default_serve_dir_is_the_samplers_own`.
-- **The unit** `systemd/program-audio-sampler.strih-lx.service` (a TEMPLATE) is installed as the
+- **The unit** `systemd/program-audio-sampler.strih-snv.service` (a TEMPLATE) is installed as the
   operator's `--user` `program-audio-sampler.service`:
-  - `CPUAffinity=` = the box's own `/sys/devices/cpu_atom/cpus` (12-15 on strih-lx), read the way
+  - `CPUAffinity=` = the box's own `/sys/devices/cpu_atom/cpus` (12-15 on strih-snv), read the way
     `strih_lx_lowprio_prefix` reads it (whitespace stripped; a value that is not a cpu list = no pin;
     no cpu_atom = no affinity line). Normal priority (no Nice/CPUWeight: never ahead of OBS).
   - `ExecCondition=/usr/bin/test -e %h/.config/camera-box/program-audio-sampler.test-mode`: an OPT-IN
     TEST marker (review round 3). Without it every start is skipped, so the sampler is DOWN by default:
-    a fresh provisioning, and a reboot during a production (strih-lx lingers the user manager,
+    a fresh provisioning, and a reboot during a production (strih-snv lingers the user manager,
     `Linger=yes`), never start it. An opt-out EVENT marker would not exist before the first
-    `rig-mode.sh event` with this code. strih-lx's `/usr/bin/test` is uutils; its exit 1 on a missing
+    `rig-mode.sh event` with this code. strih-snv's `/usr/bin/test` is uutils; its exit 1 on a missing
     file was read live (systemd 259 there).
   - `ExecStart` runs the installed checkout-layout copy `/usr/local/lib/camera-box/scripts/…`;
     `WantedBy=default.target` (no X needed; a reboot in TEST mode brings it back).
   - No `After=network-online.target`: a user manager cannot see system targets (review round 4); the
     receiver waits for the source itself.
-  - libndi: `/usr/local/lib/libndi.so.6` (strih-lx's NDI 6.3.2 runtime) is a lookup candidate.
+  - libndi: `/usr/local/lib/libndi.so.6` (strih-snv's NDI 6.3.2 runtime) is a lookup candidate.
 - **Provisioning = setup-strih step 16e** (`scripts/lib/strih-program-audio.sh`, as root):
   - apt `python3-numpy` only when missing, then an `import numpy` preflight;
   - the sampler's import closure + the shim's C++ source, its two vendored headers and the build
@@ -609,7 +609,7 @@ shim + numpy next to restreamer's broadcast encoder).
     operator too);
   - the rendered unit written only when it differs, `enable`, a daemon-reload when the unit changed, a
     `try-restart` when anything changed. NEVER a start (enable-only).
-  - newlevel has no passwordless sudo on strih-lx: everything root goes through setup-strih itself.
+  - newlevel has no passwordless sudo on strih-snv: everything root goes through setup-strih itself.
     The firewall is off; no ufw rule is added.
 - **verify-strih item 41** (`strih_program_audio_grade_report`, 3 rows): files + unit + enabled; the
   shim current; the unit's state against the TEST marker:
@@ -623,7 +623,7 @@ shim + numpy next to restreamer's broadcast encoder).
     dropped, never sourced; a wildcard bind read on 127.0.0.1), read up to 3 x (a grade right after
     step 16e's try-restart, before the bind). Fresh = the guard's own window, -1 s <= `age_s` <= 10 s
     (`STRIH_PROGRAM_AUDIO_FUTURE_TOLERANCE_S` / `_MAX_AGE_S`, pinned to `program_audio_guard`'s
-    `NEGATIVE_AGE_TOLERANCE_S` / `DEFAULT_MAX_AGE_S`): strih-lx is the dantesync date master, so a grade
+    `NEGATIVE_AGE_TOLERANCE_S` / `DEFAULT_MAX_AGE_S`): strih-snv is the dantesync date master, so a grade
     right after its nightly step can read a verdict slightly in the future. A running sampler with
     port 0 is a FAIL;
   - down WITH the TEST marker = a FAIL; down without it = a NOTE (EVENT mode, or never put in TEST
@@ -635,13 +635,13 @@ shim + numpy next to restreamer's broadcast encoder).
   would pass an immediate read); EVENT removes the marker, stops it and clears a failed state (`stop`
   leaves a failed unit failed, which item 41 would FAIL in EVENT mode). Over plain ssh as the operator
   (`sshpass … timeout … ssh`, `UserKnownHostsFile=/dev/null`; a plain ssh command gets
-  `XDG_RUNTIME_DIR=/run/user/1000` on strih-lx); report-only: a WARNING naming the state, never
+  `XDG_RUNTIME_DIR=/run/user/1000` on strih-snv); report-only: a WARNING naming the state, never
   rig-mode's exit status (a stopped sampler fails closed for its consumers). A Windows strih is one
   SKIP line.
 - **The shared read-only handler drops an idle client after 10 s** (`ReadOnlyHandler.timeout`): the
   endpoint listens on 0.0.0.0 on a production box with no firewall; the lease server gets it too.
-- **strih-lx's stack:** Python 3.14.4 and apt's numpy 2.3.5 (dev1: 3.12 + 2.4.6). The sampler suites
+- **strih-snv's stack:** Python 3.14.4 and apt's numpy 2.3.5 (dev1: 3.12 + 2.4.6). The sampler suites
   and the marker calibration (bar a min chain 6, bar b unchanged) also pass under Python 3.14.2 +
   numpy 2.3.5 on dev1 (`uv run --no-project --python 3.14 --with numpy==2.3.5 --with pytest`).
-- strih-lx's USB 5 GbE NIC still has rx_missed bursts (issue 1242 / 1387): NDI rides TCP/RUDP, so they
+- strih-snv's USB 5 GbE NIC still has rx_missed bursts (issue 1242 / 1387): NDI rides TCP/RUDP, so they
   show as late bursts, which the sender-timeline logic keeps.

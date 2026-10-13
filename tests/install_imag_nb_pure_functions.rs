@@ -282,7 +282,7 @@ fn nm_profile_name_follows_the_hostname_1412() {
     for (host, want) in [
         ("stream-pp", "stream-lan"),
         ("strih-pp", "strih-lan"),
-        ("strih-lx", "strih-lan"),
+        ("strih-snv", "strih-lan"),
         ("imag-nb", "imag-lan"),
         ("imag", "imag-lan"),
     ] {
@@ -331,7 +331,7 @@ fn installed_system_disables_cloud_init_1412() {
     );
 }
 
-/// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-lx notebook runs Ubuntu 26.04, so the chroot
+/// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-snv notebook runs Ubuntu 26.04, so the chroot
 /// kernel meta can no longer be hardcoded to noble's `linux-generic-hwe-24.04` (that package does
 /// not exist on 26.04 — the install would fail or ship no kernel). The chroot step must DERIVE the
 /// kernel meta from the target release via the pure `imag_kernel_meta_package` decision, reading

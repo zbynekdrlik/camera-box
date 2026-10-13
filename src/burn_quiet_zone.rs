@@ -6,7 +6,7 @@
 //! (`qrcode`'s `max_dimensions`): the version-4 burn payload is 41 modules with its quiet zone, so
 //! the burn is 287 px, centred and bottom-anchored at (816, 769) on 1080p. The 336 px camera crop
 //! therefore always holds a 24 px strip left of the burn and a 41 px strip above it. That is
-//! harmless over ordinary camera picture. When cam2 films the strih-lx multiview, those strips
+//! harmless over ordinary camera picture. When cam2 films the strih-snv multiview, those strips
 //! hold multiview QR content, and rqrr's single grid pass over the crop read nothing on 7 frames of
 //! run 324220913, although `zbarimg` reads the crisp burn.
 //!

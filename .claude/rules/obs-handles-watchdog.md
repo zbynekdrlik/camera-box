@@ -44,10 +44,10 @@ facet + watchdog are the generic guard for the NEXT leaker, whatever plugin or d
   (`strih-obs.service` runs `/usr/bin/obs`; `pgrep -x obs`). The count is `/proc/<pid>/fd`; the
   start epoch is `btime` + `/proc/<pid>/stat` field 22 (read after the LAST `)`); `obs_handles_limit`
   is the soft `Max open files` of `/proc/<pid>/limits` (`unlimited` = none). The server runs as the
-  same user as OBS on strih-lx (both `--user` units of the desktop user), so the fd directory is
+  same user as OBS on strih-snv (both `--user` units of the desktop user), so the fd directory is
   listable; another user's process is skipped.
 - **The Linux identity is `obs_handles_run` = `<boot id>:<start ticks>`, never the start epoch**
-  (review round 1). The kernel's `btime` moves on every wall-clock step, and strih-lx steps its
+  (review round 1). The kernel's `btime` moves on every wall-clock step, and strih-snv steps its
   clock as the dantesync date master, so `btime + ticks` can shift by a second on a live process:
   the old identity re-baselined a leak mid-confirm and logged a false RECOVERY. The run token is
   the OBS-run identity `scripts/strih_browser_keeper.py` already uses; `proc_stat_start_ticks` is
@@ -89,7 +89,7 @@ the leak 168,750/h.
 - On Linux the cap is the soft RLIMIT_NOFILE, so 80% of it is the ceiling there. `strih-obs.service`
   sets no `LimitNOFILE` and OBS raises nothing itself (no `RLIMIT_NOFILE` in `vendor/obs-studio`), so
   the soft limit is whatever the user manager hands out (systemd's usual default is 1024; NOT read
-  live yet). **Read strih-lx's live fd count + soft limit BEFORE enabling**: a count already above
+  live yet). **Read strih-snv's live fd count + soft limit BEFORE enabling**: a count already above
   80% pages CEILING from the first passes (a real headroom problem, cure = `LimitNOFILE` in
   `strih-obs.service`).
 - The growth bound is scaled to that limit too (review round 1): at most half the soft limit per
@@ -111,7 +111,7 @@ the leak 168,750/h.
   confirm alone (a REBASE is the same process, never a restart, so it never logs a recovery).
 - PRODUCTION-CRITICAL class: `--dedup-key "$(watchdog_notify_key "obs-handles-<box>" "$now_epoch")"`,
   allowlisted in `tests/python/test_notify_dedup_key_sweep_1206.py`.
-- Roster: obs-fleet facet `obs-handles` = strih-lx stream resolume; resolume via `obs_fleet_poll_now`.
+- Roster: obs-fleet facet `obs-handles` = strih-snv stream resolume; resolume via `obs_fleet_poll_now`.
   Timer on the `watchdog-roster.sh` handover roster (`:core`).
 - Tier-0 seams: `OBS_HANDLES_FETCH_CMD` (the body), `OBS_HANDLES_NOW_EPOCH` (the pass time),
   `OBS_HANDLES_ALERT_STATE_FILE`, `AIRULESET_NOTIFY` (a fake notify for a real-pass test).
@@ -128,6 +128,6 @@ class 51 + NtQueryObject on duplicated handles).
 ## Rollout (supervisor; the lane never touched a box)
 
 `systemd/obs-handles-alert-watchdog.README.md` holds the runbook: redeploy the whole server file
-list to stream, strih-lx (and resolume while home), confirm the facet per box (stream ~5,790; strih-lx
+list to stream, strih-snv (and resolume while home), confirm the facet per box (stream ~5,790; strih-snv
 equal to `ls /proc/$(pgrep -x obs)/fd | wc -l`), two dry-runs >= 4 min apart (BASELINE, then
 HEALTHY), then enable the timer and read its first pass (never `status=203/EXEC`).

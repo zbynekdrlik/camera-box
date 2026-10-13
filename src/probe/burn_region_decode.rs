@@ -25,7 +25,7 @@
 //!   quiet-zone box, located inside the crop by [`crate::burn_quiet_zone`], decoded alone inside a
 //!   white border. The camera slot models the burn at 320 px, the writer renders it 287 px (315 for
 //!   a version-5 payload), so the fixed crop also holds 24-41 px of whatever surrounds the burn;
-//!   when cam2 films the strih-lx multiview that is QR content, and rqrr's one pass reads nothing.
+//!   when cam2 films the strih-snv multiview that is QR content, and rqrr's one pass reads nothing.
 //!   Only when that also read no burn of the slot does it get a [`BURN_REGION_UPSCALE`]x CatmullRom
 //!   look.
 //! - A run_id without a reserved slot (the aux marks, SongPlayer, an operator override) is never

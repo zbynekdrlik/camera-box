@@ -20,8 +20,8 @@ set -euo pipefail
 # the win-* MCP (win-ssh-vs-mcp HARD rule -- dev1 has no strih C$, an ssh-launched GUI lands in
 # session 0), so it PRINTS the exact PowerShell program the agent pastes into the box's win-* MCP
 # Shell. The imag leg is Linux (file copy + CLI = Context B), so in execute mode the script actually
-# scp's + ssh-runs its emitted on-imag program, and the strih-lx leg (Linux too) runs the whole
-# setup-strih.sh deploy over ssh with a fail-closed SHA read-back (scripts/lib/strih-lx-deploy.sh,
+# scp's + ssh-runs its emitted on-imag program, and the strih-snv leg (Linux too) runs the whole
+# setup-strih.sh deploy over ssh with a fail-closed SHA read-back (scripts/lib/strih-snv-deploy.sh,
 # issue 1317 part 6). Marker writes go through the shared
 # scripts/lib/genlock-markers.sh helper (setup-imag.sh carries a parity-locked inline copy).
 #
@@ -30,18 +30,18 @@ set -euo pipefail
 #
 # Usage (planner mode -- print the whole fleet deploy plan, no network, from a pre-staged bundle):
 #   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-#       [--full|--fast] [--boxes strih-lx,stream,imag,resolume]
+#       [--full|--fast] [--boxes strih-snv,stream-snv,imag,resolume-snv]
 #
-# Usage (execute mode -- resolve + download the same-SHA artifacts, ssh-deploy strih-lx + imag, emit
+# Usage (execute mode -- resolve + download the same-SHA artifacts, ssh-deploy strih-snv + imag, emit
 # the Windows plan, append the fleet log; drive Windows via the printed win-* MCP program):
-#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-lx,stream,imag,resolume] [--yes]
+#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,stream-snv,imag,resolume-snv] [--yes]
 #
 #   --run-id   the ANCHOR CI run id (any of the three genlock workflows) -- its headSha is the ONE
 #              canonical version every box converges to.
 #   --full     deploy the full windows-genlock bundle (obs.dll + data + obs-plugins) -- the default;
 #              required for any vendor/<plugin>/** or frontend change (fast has no deploy path for it).
 #   --fast     deploy only the libobs hot-swap dll (obs.dll) -- a libobs-only change (§5b).
-#   --boxes    comma list of strih-lx,stream,imag,resolume (default: strih-lx,stream -- strih-lx is
+#   --boxes    comma list of strih-snv,stream-snv,imag,resolume-snv (default: strih-snv,stream-snv -- strih-snv is
 #              the Linux strih since the M4 cut-over; the Windows `strih` arm is RETIRED, issue 1317;
 #              resolume is a TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly
 #              named; imag was RETIRED, issue 1316 -- dropped from the default, still valid explicitly).
@@ -51,7 +51,7 @@ set -euo pipefail
 #   --yes      (execute mode) auto-confirm the box-backup retention deletions.
 #
 # Exit codes: 0 = ok, 2 = usage error, 3 = resolution/download failure, 4 = a box deploy failed,
-#             5 = strih-lx installed + running but its verify-strih.sh acceptance gate is not clear.
+#             5 = strih-snv installed + running but its verify-strih.sh acceptance gate is not clear.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-markers.sh
@@ -76,9 +76,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-clean-close-win.sh
 # issue 1367: steps (0a)/(2)/(2b) -- refuse a live stream, close OBS CLEANLY so it saves, read back.
 . "$HERE/lib/obs-clean-close-win.sh"
-# shellcheck source=scripts/lib/strih-lx-deploy.sh
-# issue 1317 part 6: the strih-lx EXECUTE arm + the builders its --plan arm prints (plan == execute).
-. "$HERE/lib/strih-lx-deploy.sh"
+# shellcheck source=scripts/lib/strih-snv-deploy.sh
+# issue 1317 part 6: the strih-snv EXECUTE arm + the builders its --plan arm prints (plan == execute).
+. "$HERE/lib/strih-snv-deploy.sh"
 # shellcheck source=scripts/lib/stray-session-check.sh
 # the ONE shared rig-busy guard strih_lx_apply runs before its first mutation (rig-mutation-broadcast-guard.md).
 . "$HERE/lib/stray-session-check.sh"
@@ -91,12 +91,12 @@ RETENTION_KEEP=3
 # PURE functions (no network / MCP / Windows -- unit-tested by sourcing this file).
 # ============================================================================================
 
-# fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih-lx,stream,imag,resolume),
-# deduped and validated. Empty -> the DEFAULT fleet strih-lx,stream ONLY. An unknown box is a
+# fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih-snv,stream-snv,imag,resolume-snv),
+# deduped and validated. Empty -> the DEFAULT fleet strih-snv,stream-snv ONLY. An unknown box is a
 # fail-loud usage error (return 2).
-#   * strih-lx = the production strih since the M4 cut-over (20.9.2026): the Linux notebook at
+#   * strih-snv = the production strih since the M4 cut-over (20.9.2026): the Linux notebook at
 #     10.77.9.202, a linux-genlock box. issue 1317 part 3 made it the default strih and RETIRED the
-#     Windows `strih` arm -- the STRIH-SNV PC is gone and its address is strih-lx's now, so a `strih`
+#     Windows `strih` arm -- the STRIH-SNV PC is gone and its address is strih-snv's now, so a `strih`
 #     request is refused by name (never a Windows robocopy/AHK program for the Linux box).
 #   * resolume = RESOLUME-SNV, the traveling CG box (issue 1295): a windows-genlock box on the
 #     Windows emit-only plan path, deployed ONLY when explicitly named (`--boxes resolume`) -- often
@@ -105,24 +105,24 @@ RETENTION_KEEP=3
 #     a VALID explicit target (`--boxes imag`) so the IMAG role's re-provisioning needs no code change.
 fleet_normalize_boxes() {
   local csv="${1:-}" b out="" has_strihlx=0 has_stream=0 has_imag=0 has_resolume=0
-  [ -n "$csv" ] || csv="strih-lx,stream"
+  [ -n "$csv" ] || csv="strih-snv,stream-snv"
   local IFS=','
   for b in $csv; do
     b="${b//[[:space:]]/}"
     [ -z "$b" ] && continue
-    case "$b" in
-      strih-lx) has_strihlx=1 ;;
-      stream)   has_stream=1 ;;
-      imag)     has_imag=1 ;;
-      resolume) has_resolume=1 ;;
-      strih) echo "fleet_normalize_boxes: box 'strih' is the RETIRED Windows strih PC -- the strih is 'strih-lx' (Linux, 10.77.9.202) since the M4 cut-over (issue 1317)" >&2; return 2 ;;
-      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih-lx, stream, imag, resolume)" >&2; return 2 ;;
+    case "$(obs_fleet_canonical_name "$b")" in   # issue 1414: a pre-1414 name addresses its renamed row
+      strih-snv)    has_strihlx=1 ;;
+      stream-snv)   has_stream=1 ;;
+      imag)         has_imag=1 ;;
+      resolume-snv) has_resolume=1 ;;
+      strih) echo "fleet_normalize_boxes: box 'strih' is the RETIRED Windows strih PC -- the strih is 'strih-snv' (Linux, 10.77.9.202) since the M4 cut-over (issue 1317)" >&2; return 2 ;;
+      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih-snv, stream-snv, imag, resolume-snv)" >&2; return 2 ;;
     esac
   done
-  [ "$has_strihlx" = 1 ]  && out="strih-lx"
-  [ "$has_stream" = 1 ]   && out="${out:+$out,}stream"
+  [ "$has_strihlx" = 1 ]  && out="strih-snv"
+  [ "$has_stream" = 1 ]   && out="${out:+$out,}stream-snv"
   [ "$has_imag" = 1 ]     && out="${out:+$out,}imag"
-  [ "$has_resolume" = 1 ] && out="${out:+$out,}resolume"
+  [ "$has_resolume" = 1 ] && out="${out:+$out,}resolume-snv"
   [ -n "$out" ] || { echo "fleet_normalize_boxes: empty box set" >&2; return 2; }
   printf '%s\n' "$out"
 }
@@ -148,12 +148,12 @@ fleet_windows_workflow() {
 fleet_linux_bundle_artifact()   { echo "obs-genlock-linux-x86_64"; }
 fleet_linux_distroav_artifact() { echo "distroav-linux-fast-so"; }
 # fleet_linux_bundle_artifact_for BOX -> the linux-genlock.yml bundle artifact for a specific Linux
-# box. imag (and any unnamed default) uses the imag-parity full build; strih-lx (issue 1317) uses
+# box. imag (and any unnamed default) uses the imag-parity full build; strih-snv (issue 1317) uses
 # the strih FULL-build variant (obs-genlock-linux-x86_64-strih). Kept SEPARATE from the no-arg
 # fleet_linux_bundle_artifact so the existing byte-exact test of that helper stays unchanged.
 fleet_linux_bundle_artifact_for() {
   case "${1:-}" in
-    strih-lx) echo "obs-genlock-linux-x86_64-strih" ;;
+    strih-snv) echo "obs-genlock-linux-x86_64-strih" ;;
     *)        fleet_linux_bundle_artifact ;;
   esac
 }
@@ -694,25 +694,25 @@ fi
 
 usage() {
   cat <<'EOF'
-deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across strih-lx + stream (+ imag
+deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across strih-snv + stream (+ imag
 and resolume, the traveling CG box, when explicitly named -- issues 1316/1295) from ONE anchor CI run id
 (issue 789 bod 4 + bod 5). Resolves the same-SHA artifacts, emits the Windows deploy program for the
-win-* MCP Shell, ssh-deploys strih-lx (fail-closed SHA read-back) + imag, applies box-backup
+win-* MCP Shell, ssh-deploys strih-snv (fail-closed SHA read-back) + imag, applies box-backup
 retention, and writes one durable fleet-deploy
 log line.
 
 Usage (plan -- print the whole fleet plan, no network, from a pre-staged bundle):
   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-      [--full|--fast] [--boxes strih-lx,stream,imag,resolume]
+      [--full|--fast] [--boxes strih-snv,stream-snv,imag,resolume-snv]
 
-Usage (execute -- resolve + download the same-SHA artifacts, ssh-deploy strih-lx + imag, emit the
+Usage (execute -- resolve + download the same-SHA artifacts, ssh-deploy strih-snv + imag, emit the
 Windows plan):
-  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-lx,stream,imag,resolume] [--yes]
+  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-snv,stream-snv,imag,resolume-snv] [--yes]
 
   --run-id   the ANCHOR CI run id -- its headSha is the ONE canonical version every box converges to.
   --full     full windows-genlock bundle (default; required for any plugin/frontend change).
   --fast     libobs-only obs.dll hot-swap.
-  --boxes    comma list of strih-lx,stream,imag,resolume (default: strih-lx,stream -- the Windows
+  --boxes    comma list of strih-snv,stream-snv,imag,resolume-snv (default: strih-snv,stream-snv -- the Windows
              `strih` PC is RETIRED (issue 1317); imag + resolume (RESOLUME-SNV, the traveling CG
              box) deploy ONLY when explicitly named).
   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha.
@@ -720,7 +720,7 @@ Windows plan):
   --sha      the canonical build SHA to stamp into the markers (plan mode).
   --yes      (execute mode) auto-confirm the box-backup retention deletions.
 
-Exit codes: 0 ok, 2 usage error, 3 resolution/download failure, 4 a box deploy failed, 5 strih-lx
+Exit codes: 0 ok, 2 usage error, 3 resolution/download failure, 4 a box deploy failed, 5 strih-snv
 installed + running but its verify-strih.sh acceptance gate not clear.
 EOF
 }
@@ -747,7 +747,7 @@ emit_forced_table_audit_preflight() {
 #   into the mixer. On dev1, enumerate ${box}'s live NDI inputs over OBS-WS -- reuse latency_pins_verify.py's
 #   _conn + GetInputList + GetInputSettings (host ${host}) -- emitting one TSV row per input:
 #   name<TAB>ndi_audio<TAB>yuv_range<TAB>yuv_colorspace. Pipe that into the classifier and review it:
-#     <ws-enumerate ${host} as TSV> | bash -c '. scripts/lib/genlock-forced-table-audit.sh; genlock_forced_table_audit ${box}'
+#     <ws-enumerate ${host} as TSV> | bash -c '. scripts/lib/genlock-forced-table-audit.sh; genlock_forced_table_audit ${box%%-*}'
 #   Act on every 'MISMATCH-*' row (and any yuv NOTE) over OBS-WS BEFORE running STEP 0 below.
 PREFLIGHT
 }
@@ -763,7 +763,7 @@ emit_windows_plan() {
   echo "# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} ================="
   # resolume (issue 1295): emit the box-IDENTITY confirm preamble (STEP -1) before STEP 0 -- a
   # traveling DHCP box colliding with `bridge` at .201 must be resolved + identity-confirmed live.
-  [ "$box" = "resolume" ] && fleet_resolume_identity_confirm_note
+  [ "$box" = "resolume-snv" ] && fleet_resolume_identity_confirm_note
   # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
   emit_forced_table_audit_preflight "$box" "$ip"
   cat <<PLAN
@@ -800,17 +800,17 @@ ${program}
 PLAN
 }
 
-# emit the strih-lx plan (issue 1317 parts 3 + 6). strih-lx is the production strih (a linux-genlock
+# emit the strih-snv plan (issue 1317 parts 3 + 6). strih-snv is the production strih (a linux-genlock
 # box), but its install is NOT imag's: the strih FULL-build variant goes into /usr through
 # setup-strih.sh and OBS runs under the strih-obs.service user unit (never imag-obs.service). The
-# steps are printed by scripts/lib/strih-lx-deploy.sh from the SAME builders the execute arm runs,
+# steps are printed by scripts/lib/strih-snv-deploy.sh from the SAME builders the execute arm runs,
 # every line a #-comment (the issue-1295 file-mode parse rule).
 emit_strih_lx_plan() {
   local stage="$1" gsha="$2" run="$3" host
-  host="$(fleet_box_ip strih-lx)" || { echo "emit_strih_lx_plan: no strih-lx host (STRIH_LX_IP / obs-fleet row)" >&2; return 2; }
-  echo "# ================= FLEET PLAN: box=strih-lx (ssh newlevel@${host}, linux-genlock) ================="
+  host="$(fleet_box_ip strih-snv)" || { echo "emit_strih_lx_plan: no strih-snv host (STRIH_LX_IP / obs-fleet row)" >&2; return 2; }
+  echo "# ================= FLEET PLAN: box=strih-snv (ssh newlevel@${host}, linux-genlock) ================="
   # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
-  emit_forced_table_audit_preflight strih-lx "$host"
+  emit_forced_table_audit_preflight strih-snv "$host"
   strih_lx_plan_steps "$stage" "$gsha" "$host" "$run"
 }
 
@@ -851,11 +851,11 @@ main() {
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
       case "$b" in
-        stream|resolume) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
+        stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
         imag)            emit_imag_plan "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
-        # issue 1317 part 3: strih-lx gets its OWN plan (setup-strih.sh + strih-obs.service), never
-        # the imag on-box program (which restarts imag-obs.service, a unit strih-lx does not have).
-        strih-lx)        emit_strih_lx_plan "$stage" "$sha" "$run_id" ;;
+        # issue 1317 part 3: strih-snv gets its OWN plan (setup-strih.sh + strih-obs.service), never
+        # the imag on-box program (which restarts imag-obs.service, a unit strih-snv does not have).
+        strih-snv)        emit_strih_lx_plan "$stage" "$sha" "$run_id" ;;
       esac
     done )
     # issue 1295: emit the fleet-deploy log record as a COMMENT and end the printed plan on `exit 0`.
@@ -872,7 +872,7 @@ main() {
   # --- execute mode -------------------------------------------------------------------------------
   # Resolve the anchor headSha, resolve + download the SAME-SHA artifacts across the (separate)
   # windows/linux workflows, emit the Windows plan (agent uploads + pastes into the win-* MCP Shell),
-  # ssh-deploy strih-lx + imag, and append one fleet-deploy log line. The worker never runs this; the supervisor
+  # ssh-deploy strih-snv + imag, and append one fleet-deploy log line. The worker never runs this; the supervisor
   # drives it live (the ticket stays OPEN until then).
   command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI required for execute mode" >&2; exit 3; }
   command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required for execute mode" >&2; exit 3; }
@@ -891,8 +891,8 @@ main() {
   local want_win=0 want_imag=0 want_strihlx=0
   want_win="$(fleet_boxes_swap_obs_dll "$boxes")"
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
-  case ",$boxes," in *,strih-lx,*) want_strihlx=1 ;; esac
-  # --- strih-lx (issue 1317 part 6, scripts/lib/strih-lx-deploy.sh), phase 1: resolve + download +
+  case ",$boxes," in *,strih-snv,*) want_strihlx=1 ;; esac
+  # --- strih-snv (issue 1317 part 6, scripts/lib/strih-snv-deploy.sh), phase 1: resolve + download +
   # the provisioning tree -- no box is touched (exit 3). EVERY requested box resolves before any box
   # changes, so a missing Windows/imag build can never leave the production strih on another SHA.
   if [ "$want_strihlx" = 1 ]; then
@@ -943,28 +943,28 @@ main() {
     build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$sha" "$sha" "$RETENTION_KEEP" "$yes" "$stats_abi" > "$workdir/bundle/deploy.sh"
   fi
 
-  # --- strih-lx phase 2: the box steps (stage before stop, graceful stop, setup, fail-closed
+  # --- strih-snv phase 2: the box steps (stage before stop, graceful stop, setup, fail-closed
   # read-back). A failure exits 4 naming the step and writes NO fleet-log line.
   if [ "$want_strihlx" = 1 ]; then
     local lx_rc=0
     strih_lx_apply "$sha" || lx_rc=$?
     if [ "$lx_rc" = 5 ]; then   # installed + running, acceptance gate not clear: log what runs.
       mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
-      fleet_log_line "$run_id" "$sha" "strih-lx:accept-failed" "$mode" >> "$FLEET_LOG_DEFAULT"
-      [ "$boxes" = strih-lx ] || echo "NOTE: the other boxes (${boxes#strih-lx,}) were WITHHELD -- deploy them at $sha once the acceptance items are understood, or the fleet stays on two builds" >&2
+      fleet_log_line "$run_id" "$sha" "strih-snv:accept-failed" "$mode" >> "$FLEET_LOG_DEFAULT"
+      [ "$boxes" = strih-snv ] || echo "NOTE: the other boxes (${boxes#strih-snv,}) were WITHHELD -- deploy them at $sha once the acceptance items are understood, or the fleet stays on two builds" >&2
     fi
     [ "$lx_rc" = 0 ] || exit "$lx_rc"
     # logged the moment it verified, so a later imag failure never hides the strih deploy.
     mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
-    fleet_log_line "$run_id" "$sha" "strih-lx" "$mode" >> "$FLEET_LOG_DEFAULT"
+    fleet_log_line "$run_id" "$sha" "strih-snv" "$mode" >> "$FLEET_LOG_DEFAULT"
   fi
 
-  # --- Windows: the paste-programs, printed only now (after a verified strih-lx), so no operator
+  # --- Windows: the paste-programs, printed only now (after a verified strih-snv), so no operator
   # pastes stream while the strih apply can still fail.
   if [ "$want_win" = 1 ]; then
     echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
-    ( IFS=','; for b in $boxes; do case "$b" in stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" "$stats_abi" ;; esac; done )
+    ( IFS=','; for b in $boxes; do case "$b" in stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" "$stats_abi" ;; esac; done )
   fi
 
   # --- imag: the ssh deploy of the bundle prepared above --------------------------------------------
@@ -983,7 +983,7 @@ main() {
   fi
 
   # --- durable fleet-deploy log line ---------------------------------------------------------------
-  local rest="${boxes/strih-lx/}"; rest="${rest#,}"
+  local rest="${boxes/strih-snv/}"; rest="${rest#,}"
   if [ -n "$rest" ]; then
     mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
     fleet_log_line "$run_id" "$sha" "$rest" "$mode" >> "$FLEET_LOG_DEFAULT"

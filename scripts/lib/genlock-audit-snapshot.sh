@@ -29,7 +29,7 @@ command -v strih_log_tail >/dev/null 2>&1 || . "$_GENLOCK_AUDIT_SNAPSHOT_DIR/str
 # genlock_audit_snapshot_read HOST -> stdout: the newest strih OBS log's LAST
 # GENLOCK_AUDIT_SNAPSHOT_TAIL (default 400) `genlock-fifo audit '` lines. The raw read is the shared
 # reader's `strih_log_tail` of the last GENLOCK_AUDIT_SNAPSHOT_READ_LINES (default 3000) log lines --
-# on strih-lx ~8 min of log, which carries every input's audit line (one per input per ~5 s, ~26 %
+# on strih-snv ~8 min of log, which carries every input's audit line (one per input per ~5 s, ~26 %
 # of the log, measured live 23.9.2026); genlock_audit_snapshot.py parses only the LAST line per
 # input. The filter is LOCAL: CRs stripped (a Windows strih's PowerShell tail), then LC_ALL=C
 # grep -aF (the audit line carries a non-ASCII glyph, the approx-sign in "(approx F frames @ ...)",
@@ -53,7 +53,7 @@ genlock_audit_snapshot_read() {
 # LABEL (before|after) is for logging only. Fail-open, returns 0 on every path:
 #   * GENLOCK_AUDIT_SNAPSHOT_READER_CMD (a shell command "HOST LABEL" -> raw audit text on stdout) is
 #     the Tier-0 / alternate-tap seam -- a test overrides it so the whole capture runs with no ssh.
-#   * else the shared-reader read above (either strih platform -- strih-lx or a Windows strih).
+#   * else the shared-reader read above (either strih platform -- strih-snv or a Windows strih).
 # A non-empty read is persisted verbatim to OUTFILE; an empty/timed-out read writes nothing.
 genlock_audit_snapshot_capture() {
   local label="${1:-}" outfile="${2:-}"

@@ -3,7 +3,7 @@
 # deliberately NOT `set -euo pipefail`: sourcing runs in the CALLER's shell (setup-strih.sh,
 # verify-strih.sh and the Tier-0 harnesses), and strict mode here would leak into all of them.
 #
-# scripts/lib/strih-drm-output.sh -- issue 1346 (owner 24.9.2026): the strih-lx HDMI output is the
+# scripts/lib/strih-drm-output.sh -- issue 1346 (owner 24.9.2026): the strih-snv HDMI output is the
 # SAME fixed hardware output imag has -- the in-OBS DRM-lease output (issue 1152, the vendored
 # libobs module; .claude/rules/obs-drm-output.md) -- selectable between Program and the BUILT-IN
 # Multiview. It is never an OBS projector window and never the desktop.
@@ -11,7 +11,7 @@
 # The module's activation contract is ONE file, ~/.camera-box/drm-output.json of the OBS user, a
 # single machine-written line: {"enabled":true,"connector":"<X RandR name>","argb":2105376,
 # "view":"multiview"}. The connector is the X RandR OUTPUT name (xrandr prints HDMI-0 on the
-# NVIDIA-primary strih-lx, HDMI-1 under modesetting) -- never the kernel connector name HDMI-A-1.
+# NVIDIA-primary strih-snv, HDMI-1 under modesetting) -- never the kernel connector name HDMI-A-1.
 # The operator switches the view in OBS (Tools menu) and the choice is written back into the file;
 # `strih_scenes.py --projector program|multiview` is the scripted twin.
 #
@@ -129,7 +129,7 @@ strih_drm_legacy_view() {
 #   DEAD             1 iff strih_drm_vk_present_dead on the newest OBS log (the vk present loop died)
 # Prints ONE token; return code 0 = PASS, 2 = NOTE (skip / report), 1 = FAIL:
 #   x-unreadable        (1) HDMI_CONNECTED "?": the X view a vk-direct box needs was not readable
-#   skip-no-hdmi        (2) no HDMI monitor and no armed config -- today's eDP-only strih-lx
+#   skip-no-hdmi        (2) no HDMI monitor and no armed config -- today's eDP-only strih-snv
 #   hdmi-unplugged      (2) the config is armed but no HDMI monitor is plugged in
 #   classify-failed     (1) an HDMI monitor is plugged in but the config could not be classified
 #   config-missing      (1) an HDMI monitor is plugged in but no armed config -> setup-strih step 6

@@ -47,7 +47,7 @@ parity fixture values whose text order differs from their number order.
 
 **The problem it fixes.** A shallow N==1 input is held at a latched depth D by design (issue 1367,
 `.claude/rules/genlock-n1-pin-derived-depth.md`). Its audit line carries `shallow_depth=` D. The
-strih-lx `CG-obs` sits at a 3 ms pin. Its `ts_head_skew_ms` (`wall_now - head stamp`) therefore
+strih-snv `CG-obs` sits at a 3 ms pin. Its `ts_head_skew_ms` (`wall_now - head stamp`) therefore
 reads about D × interval: 100 ms at D=3 on the 30 fps canvas. The absolute 20 ms bar FAILed every
 window of a correctly latched input.
 
@@ -105,10 +105,10 @@ read when the render tick is PROCESSED (`obs-source.c`, the ts-align block), not
 instant. A tick processed late reads the head older by its lateness, so a tick more than 20 ms late
 fails even a correctly latched input. Read a lone excursion next to the window's counters.
 
-Pinned by `tests/python/test_cg_chain_verify_shallow_1302.py`, which includes two real strih-lx
+Pinned by `tests/python/test_cg_chain_verify_shallow_1302.py`, which includes two real strih-snv
 `CG-obs` lines.
 
-**Live replay 8.10.2026:** strih-lx `CG-obs`, 58 samples, D=3. The window FAILs:
+**Live replay 8.10.2026:** strih-snv `CG-obs`, 58 samples, D=3. The window FAILs:
 - `dropped_due` +5 and `underruns` +37 (the counters carry the FAIL);
 - one 133 ms sample = a 33 ms excursion: an extra frame of head age, or a late-processed tick (see
   the known limit above);

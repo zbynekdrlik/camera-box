@@ -1,7 +1,7 @@
 """issue 1302 (design 6050999445, Approach 1) -- cg-chain-verify grades a shallow-latched input's head
 age against its latched depth.
 
-A shallow N==1 input (the strih-lx `CG-obs` at a 3 ms pin) is held at a latched depth D by design
+A shallow N==1 input (the strih-snv `CG-obs` at a 3 ms pin) is held at a latched depth D by design
 (issue 1367: audit `shallow_depth=`), so its head age `ts_head_skew_ms` is about D x interval
 (100 ms at D=3 on a 30 fps canvas). The verdict used to grade that absolute head age against the
 20 ms bar, so every window of a correctly latched shallow input FAILed. Now:
@@ -24,7 +24,7 @@ _TOOL = _ROOT / "scripts" / "cg-chain-verify.sh"
 _LIB = _ROOT / "scripts" / "lib" / "cg-chain-verify.sh"
 _AUDIT = _ROOT / "scripts" / "rig-health-audit.py"
 
-# Two real lines read off strih-lx on 8.10.2026 (the newest OBS log, `CG-obs`), verbatim incl. the
+# Two real lines read off strih-snv on 8.10.2026 (the newest OBS log, `CG-obs`), verbatim incl. the
 # U+2248 glyph the strip removes. Both: shallow_depth=3, ts_head_skew_ms=100, flat counters.
 _LIVE = (
     "02:39:55.900: genlock-fifo audit 'CG-obs': received=4549098 consumed=4543103 underruns=218718 "
@@ -345,7 +345,7 @@ def test_help_prints_the_shallow_paragraph():
 # ---------------------------------------------------------------------------------------------
 def test_the_rig_health_fold_still_reads_the_verdict_as_the_last_token(tmp_path):
     # This pins the FOLD over the tool's table (dLTCH sits before VERDICT, the `shallow:` line ends
-    # in no verdict word). It does not claim the rig-health row itself reads strih-lx `CG-obs`: that
+    # in no verdict word). It does not claim the rig-health row itself reads strih-snv `CG-obs`: that
     # row still runs the strih hop with the default source.
     spec = importlib.util.spec_from_file_location("rig_health_audit_1302", _AUDIT)
     mod = importlib.util.module_from_spec(spec)

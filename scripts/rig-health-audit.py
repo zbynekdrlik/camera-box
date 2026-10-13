@@ -13,7 +13,7 @@ mutates anything (pure ssh/WS reads):
               watchdog service, dantesync, load
   strih       OBS process count, OBS GetStats over LAN WS (auth), per-source arrival rates +
               audio-buffering peak from the newest OBS log (#786) -- read the platform-resolved
-              way (issue 1360: the Linux strih-lx notebook since the M4 cut-over, see strih_platform)
+              way (issue 1360: the Linux strih-snv notebook since the M4 cut-over, see strih_platform)
   stream      same as strih (no WS auth) + genlock latency_ms + guarded-launch log presence
 
 Exit code: 0 = every line PASS, 1 = any WARN, 2 = any FAIL. Output is line-oriented on purpose:
@@ -514,7 +514,7 @@ def _windows_obs_count_cmd() -> str:
         "@(Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }).Count")
 
 
-# issue 1360: the strih role moved to the Linux notebook strih-lx (M4 cut-over). Python cannot
+# issue 1360: the strih role moved to the Linux notebook strih-snv (M4 cut-over). Python cannot
 # source scripts/lib/strih-platform.sh / strih-log-read.sh, so these are TWINS of the two decisions
 # the audit needs, pinned byte-for-byte to the bash originals by
 # tests/python/test_rig_health_audit_strih_lx_1360.py (which runs the bash functions):
@@ -533,7 +533,7 @@ import obs_fleet_table  # noqa: E402
 def strih_platform(host: str) -> str:
     """'linux' | 'windows' for an OBS box address: STRIH_PLATFORM env (windows|linux only; any
     other value is ignored) wins, then an explicit STRIH_LX_HOST match, then an address the
-    obs-fleet list maps (alias-aware: 10.77.9.202, strih-lx(.lan), strih.lan) to a linux-genlock
+    obs-fleet list maps (alias-aware: 10.77.9.202, strih-snv(.lan), strih.lan) to a linux-genlock
     row is linux, else windows -- the stream box and every other address keep the Windows reads.
     Keyed on the row CLASS, never a literal name, so the next Linux strih is one table row."""
     forced = os.environ.get("STRIH_PLATFORM", "")
@@ -604,7 +604,7 @@ def cg_chain_detail_from_output(stdout: str) -> str:
             f"sources_absent={absent} (report-only #1300; #787 resolume-rate exemption unchanged)")
 
 
-# issue 1302: the CG-chain row grades ~5 min of the strih-lx log (about 1500 lines there).
+# issue 1302: the CG-chain row grades ~5 min of the strih-snv log (about 1500 lines there).
 CG_CHAIN_TAIL_LINES = 1500
 CG_CHAIN_HEAD_LINES = 600  # the head block _linux_obs_log_tail_cmd prepends
 

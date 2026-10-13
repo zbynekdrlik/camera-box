@@ -43,7 +43,7 @@ def test_the_config_is_one_bottom_panel_with_taskbar_tray_and_clock_and_no_launc
     assert "launcher_item_app" not in r.stdout
 
 
-@pytest.mark.parametrize("box", ["stream-pp", "strih-pp", "strih-lx"])
+@pytest.mark.parametrize("box", ["stream-pp", "strih-pp", "strih-snv"])
 def test_every_role_gets_the_panel_as_a_trial(box):
     r = _bash('obs_box_step_applies 16h-panel && echo RUN', box=box)
     assert r.stdout.strip() == "RUN", r.stderr

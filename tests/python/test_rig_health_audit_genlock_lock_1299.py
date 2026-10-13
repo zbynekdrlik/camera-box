@@ -52,7 +52,7 @@ def test_rig_status_renders_genlock_lock_chip_generically():
 
 
 def test_state_helper_prefers_the_newer_heartbeat_json_over_a_stale_change_line():
-    # issue 1360: the audit fetches head 600 + tail N of a long strih-lx log. The change-driven
+    # issue 1360: the audit fetches head 600 + tail N of a long strih-snv log. The change-driven
     # `genlock-lock: state=` line can sit between the two windows, so the only one in the text is
     # the startup UNLOCKED from the head. The 30 s `genlock-lock-json:` heartbeat is always in the
     # tail and carries the current decided state -- the LAST line of either kind wins.

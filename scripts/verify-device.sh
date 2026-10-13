@@ -1622,7 +1622,7 @@ fi
 
 # (ap) NDI egress pacing: fq maxrate root qdisc live + boot unit enabled (issue 1242) -- HARD FAIL --
 # All seven cameras hand their frame to NDI on the same grid instant, so their line-rate bursts
-# reach strih-lx together (its USB NIC answers with PAUSE storms). setup-device.sh's
+# reach strih-snv together (its USB NIC answers with PAUSE storms). setup-device.sh's
 # [egress-pacing] sub-step installs cambox-egress-pacing.service, which paces the default-route
 # interface at boot with the ONE declaration in scripts/lib/cambox-egress-pacing.sh. This reads
 # the live root qdisc, the unit state and what setup-device installed (the boot script's
@@ -1992,7 +1992,7 @@ fi
 
 # (an) NDI discovery receiver config (issue 1342) -- HARD FAIL -------------------------------------
 # issue 1389 (ROZHODNUTÉ 5879261962): a cambox carries NO networks.ips at all. The camera-box service
-# receives only `STRIH-LX (interkom)` (the cameraman preview), which mDNS finds; any listed host would
+# receives only `STRIH-SNV (interkom)` (the cameraman preview), which mDNS finds; any listed host would
 # give it a TCP discovery connection whose teardown can abort camera-box inside libndi 6.3.2.
 # setup-device.sh STEP 7 (and, on a live box, `scripts/lib/ndi-discovery.sh --cambox-apply`) removes
 # the issue-1342 /etc/ndi/ndi-config.v1.json and its camera-box.service.d NDI_CONFIG_DIR drop-in. This

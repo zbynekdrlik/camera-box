@@ -83,7 +83,7 @@ const BROKEN: &str = r#"{"mode":"NANO","is_locked":true,"ntp_failed":true,"ntp_a
 // ---------------------------------------------------------------- pure verdict: away -> SKIP
 #[test]
 fn away_traveling_box_is_skip_never_a_false_red() {
-    let (rc, out) = verdict(r#"resolume 0 "" "" 1.8.53 120 2000"#);
+    let (rc, out) = verdict(r#"resolume-snv 0 "" "" 1.8.53 120 2000"#);
     assert_eq!(rc, 0, "away must be rc 0 (never a false red): {out}");
     assert!(out.contains("SKIP"), "expected a SKIP row: {out}");
 }
@@ -92,7 +92,7 @@ fn away_traveling_box_is_skip_never_a_false_red() {
 #[test]
 fn home_and_healthy_is_ok() {
     let (rc, out) = verdict(&format!(
-        r#"resolume 1 "dantesync 1.8.53" '{GOOD}' 1.8.53 120 2000"#
+        r#"resolume-snv 1 "dantesync 1.8.53" '{GOOD}' 1.8.53 120 2000"#
     ));
     assert_eq!(rc, 0, "{out}");
     assert!(out.contains("OK"), "{out}");
@@ -105,7 +105,7 @@ fn home_and_healthy_is_ok() {
 #[test]
 fn home_and_broken_ntp_and_phase_is_alarm() {
     let (rc, out) = verdict(&format!(
-        r#"resolume 1 "dantesync 1.8.53" '{BROKEN}' 1.8.53 120 2000"#
+        r#"resolume-snv 1 "dantesync 1.8.53" '{BROKEN}' 1.8.53 120 2000"#
     ));
     assert_eq!(rc, 30, "a read, wrong field must ALARM (30): {out}");
     assert!(out.contains("ALARM"), "{out}");
@@ -121,7 +121,7 @@ fn home_and_broken_ntp_and_phase_is_alarm() {
 #[test]
 fn version_drift_is_alarm() {
     let (rc, out) = verdict(&format!(
-        r#"resolume 1 "dantesync 1.8.41" '{GOOD}' 1.8.53 120 2000"#
+        r#"resolume-snv 1 "dantesync 1.8.41" '{GOOD}' 1.8.53 120 2000"#
     ));
     assert_eq!(rc, 30, "{out}");
     assert!(out.contains("1.8.41") && out.contains("1.8.53"), "{out}");
@@ -130,7 +130,7 @@ fn version_drift_is_alarm() {
 // ---------------------------------------------------------------- pure verdict: unreadable -> UNKNOWN
 #[test]
 fn unreadable_status_is_unknown_never_a_silent_pass() {
-    let (rc, out) = verdict(r#"resolume 1 "dantesync 1.8.53" "" 1.8.53 120 2000"#);
+    let (rc, out) = verdict(r#"resolume-snv 1 "dantesync 1.8.53" "" 1.8.53 120 2000"#);
     assert_eq!(
         rc, 11,
         "an unread field is UNKNOWN (11), never a silent OK: {out}"
@@ -143,7 +143,7 @@ fn unreadable_status_is_unknown_never_a_silent_pass() {
 fn offset_over_bound_is_alarm() {
     let oob = r#"{"mode":"NANO","is_locked":true,"ntp_failed":false,"ntp_age_s":12,"ntp_offset_us":5000,"phase_slew_enabled":true}"#;
     let (rc, out) = verdict(&format!(
-        r#"resolume 1 "dantesync 1.8.53" '{oob}' 1.8.53 120 2000"#
+        r#"resolume-snv 1 "dantesync 1.8.53" '{oob}' 1.8.53 120 2000"#
     ));
     assert_eq!(rc, 30, "{out}");
     assert!(out.contains("5000us>2000"), "{out}");
@@ -154,8 +154,8 @@ fn offset_over_bound_is_alarm() {
 fn full_script_away_exits_zero() {
     // resolume not in the OBS_FLEET_HOME list -> away -> SKIP -> exit 0 (report-only, never a red).
     let (code, out, _err) = run_script(
-        &[("OBS_FLEET_HOME", "strih stream")],
-        &["--box", "resolume"],
+        &[("OBS_FLEET_HOME", "strih stream-snv")],
+        &["--box", "resolume-snv"],
     );
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("SKIP"), "{out}");
@@ -165,15 +165,15 @@ fn full_script_away_exits_zero() {
 fn full_script_home_broken_exits_30() {
     let (code, _out, err) = run_script(
         &[
-            ("OBS_FLEET_HOME", "resolume"),
-            ("DANTESYNC_MAINT_STATUS_RESOLUME", BROKEN),
-            ("DANTESYNC_MAINT_VERSION_RESOLUME", "dantesync 1.8.53"),
+            ("OBS_FLEET_HOME", "resolume-snv"),
+            ("DANTESYNC_MAINT_STATUS_RESOLUME_SNV", BROKEN),
+            ("DANTESYNC_MAINT_VERSION_RESOLUME_SNV", "dantesync 1.8.53"),
             // pin-agnostic: the fixture version must EQUAL the pin the script grades against,
             // never the moving default DANTESYNC_VERSION_PIN (a fleet roll bumps that and would
             // otherwise turn this "healthy" fixture into a false version mismatch).
             ("DANTESYNC_VERSION_PIN", "1.8.53"),
         ],
-        &["--box", "resolume"],
+        &["--box", "resolume-snv"],
     );
     assert_eq!(
         code, 30,
@@ -186,15 +186,15 @@ fn full_script_home_broken_exits_30() {
 fn full_script_home_healthy_exits_zero() {
     let (code, out, _err) = run_script(
         &[
-            ("OBS_FLEET_HOME", "resolume"),
-            ("DANTESYNC_MAINT_STATUS_RESOLUME", GOOD),
-            ("DANTESYNC_MAINT_VERSION_RESOLUME", "dantesync 1.8.53"),
+            ("OBS_FLEET_HOME", "resolume-snv"),
+            ("DANTESYNC_MAINT_STATUS_RESOLUME_SNV", GOOD),
+            ("DANTESYNC_MAINT_VERSION_RESOLUME_SNV", "dantesync 1.8.53"),
             // pin-agnostic: the fixture version must EQUAL the pin the script grades against,
             // never the moving default DANTESYNC_VERSION_PIN (a fleet roll bumps that and would
             // otherwise turn this "healthy" fixture into a false version mismatch).
             ("DANTESYNC_VERSION_PIN", "1.8.53"),
         ],
-        &["--box", "resolume"],
+        &["--box", "resolume-snv"],
     );
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("OK"), "{out}");

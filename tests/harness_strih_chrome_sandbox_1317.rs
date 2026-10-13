@@ -1,5 +1,5 @@
 //! issue 1317 (follow-up F6) — the CEF `chrome-sandbox` SUID sandbox helper must be owned
-//! root:root mode 4755 (setuid root) on the strih-lx box or the 4 browser sources cannot launch
+//! root:root mode 4755 (setuid root) on the strih-snv box or the 4 browser sources cannot launch
 //! (Chromium aborts the sandbox helper without `--no-sandbox`, which is the rejected approach —
 //! it weakens every browser source's isolation session-wide).
 //!

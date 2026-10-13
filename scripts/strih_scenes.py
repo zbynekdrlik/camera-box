@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""strih_scenes.py -- strih-lx OBS input/scene/Studio-Mode seeder (issue 1317).
+"""strih_scenes.py -- strih-snv OBS input/scene/Studio-Mode seeder (issue 1317).
 
-The strih-lx notebook's OBS boots EMPTY (no scenes, no inputs) -- it cannot receive or switch any
+The strih-snv notebook's OBS boots EMPTY (no scenes, no inputs) -- it cannot receive or switch any
 of the fleet's NDI sources until something seeds it. imag has scripts/imag_scenes.py, seeded on
-every launch by imag-obs-start.sh; this is the focused strih-lx sibling (design comment on issue
+every launch by imag-obs-start.sh; this is the focused strih-snv sibling (design comment on issue
 1317, Prístup 1). It reuses the on-box obs_phase2.py certified-genlock primitives rather than
-importing imag's 70KB DRM-lease/encoder/picom machinery that strih-lx does not need.
+importing imag's 70KB DRM-lease/encoder/picom machinery that strih-snv does not need.
 
-SCOPE: the 10 NDI INPUTS + one per-input scene + Studio Mode, from /opt/camera-box/strih-lx-seed.json
-(setup-strih.sh step 6). The 5 STRIH-LX NDI OUTPUTS are a SEPARATE ticket -- this seeder never
+SCOPE: the 10 NDI INPUTS + one per-input scene + Studio Mode, from /opt/camera-box/strih-seed.json
+(setup-strih.sh step 6). The 5 STRIH-SNV NDI OUTPUTS are a SEPARATE ticket -- this seeder never
 touches outputs.
 
 Idempotent: CreateScene/CreateInput "already exists" errors are ignored, and the certified genlock
@@ -47,15 +47,15 @@ import sys
 
 from websocket import create_connection
 
-SEED_MANIFEST_PATH = "/opt/camera-box/strih-lx-seed.json"
+SEED_MANIFEST_PATH = "/opt/camera-box/strih-seed.json"
 # The genlock latency floor every camera input rides (strih_lx_camera_latency_ms; the rig floor).
-# obs_phase2._PROBE_NDI_SETTINGS uses latency 0 (the probe default); strih-lx rides the manifest's
+# obs_phase2._PROBE_NDI_SETTINGS uses latency 0 (the probe default); strih-snv rides the manifest's
 # floor 3 -- so the certified settings here override ONLY latency, keeping the #63/#149 genlock keys.
 DEFAULT_CAMERA_LATENCY_MS = 3
 # issue 1317: the 2ME PGM/PVW FEEDBACK inputs are NOT genlocked. They are the strih's own post-render
 # 30 fps program/preview outputs received back as monitoring feedback; a post-render output is off the
 # camera boundary grid and every program CUT is a timecode discontinuity, so a genlock FIFO underruns
-# and relocks on every cut (110,222 underruns / 899 relocks measured live on strih-lx 19.9.). The
+# and relocks on every cut (110,222 underruns / 899 relocks measured live on strih-snv 19.9.). The
 # Windows strih receives these NON-genlocked (light.json NDI 2ME PGM/PVW: ndi_sync=1, latency=1, no
 # genlock_fifo); the feedback class mirrors that. `latency` here is the stock DistroAV receive-buffer
 # MODE enum (1 = LOW), NOT milliseconds -- FIXED at 1 (a feedback monitor, not a camera on the
@@ -63,7 +63,7 @@ DEFAULT_CAMERA_LATENCY_MS = 3
 FEEDBACK_LATENCY_MODE = 1
 
 # --- issue 1346: the HDMI output = the in-OBS DRM-lease output, view Program / Multiview ------------
-# Owner ROZHODNUTE (24.9.2026, supersedes the 19.9. OBS fullscreen projector): the strih-lx HDMI
+# Owner ROZHODNUTE (24.9.2026, supersedes the 19.9. OBS fullscreen projector): the strih-snv HDMI
 # output is the SAME fixed hardware output imag has -- the vendored libobs DRM-lease output (issue
 # 1152, .claude/rules/obs-drm-output.md) -- selectable between the Program and the BUILT-IN Multiview.
 # It is never a projector window and never the desktop. The module's activation contract is ONE
@@ -86,7 +86,7 @@ def certified_genlock_settings(latency):
     the key latency_pins_verify.py reads). NOT the stock DistroAV `latency` key: that is a
     receive-buffer MODE enum which the genlock build's certified coercion forces back to 0 (NORMAL) on
     every genlock_fifo input, so a seeded `latency: 3` read back 0 forever and made --bootstrap
-    re-write + name-re-enforce every camera on every launch (live strih-lx finding, 19.9.2026).
+    re-write + name-re-enforce every camera on every launch (live strih-snv finding, 19.9.2026).
     ndi_source_name is NOT included here -- it is a per-input top-level field the seed merges in.
     Returned fresh each call (never a shared mutable default)."""
     return {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "genlock_latency_ms_src": latency}
@@ -197,7 +197,7 @@ def input_class_for(name):
     `2ME PGM` / `2ME PVW` (as a SUBSTRING) is a post-render FEEDBACK monitor -> 'feedback'. This
     matches BOTH the parallel-phase sender form `STRIH-SNV (2ME PGM)` AND the OPERATOR collection's
     explicit input names `NDI 2ME PVW` / `NDI 2ME PGM (mv)` (this lane) -- regardless of the
-    STRIH-SNV/STRIH-LX prefix or the `(mv)` suffix, neither of which ENDS in `(2ME PGM)`. Everything
+    STRIH-<box> prefix or the `(mv)` suffix, neither of which ENDS in `(2ME PGM)`. Everything
     else -- the `CAMn (usb)` / `NDI camN` grabbers AND the `RESOLUME-SNV (cg-obs)` / `cg` / `CG-obs`
     genlocked sources (issue 1300) -- is a genlocked source -> 'camera'."""
     n = name or ""
@@ -248,7 +248,7 @@ def _entry_fields(entry):
 
 
 def parse_seed_manifest(text):
-    """Pure: parse /opt/camera-box/strih-lx-seed.json text -> (inputs, outputs, latency).
+    """Pure: parse /opt/camera-box/strih-seed.json text -> (inputs, outputs, latency).
 
     inputs/outputs are the non-empty string entries in manifest order; latency is camera_latency_ms
     coerced to int (falling back to DEFAULT_CAMERA_LATENCY_MS on a missing/garbage value). Raises
@@ -256,7 +256,7 @@ def parse_seed_manifest(text):
     silently-empty collection)."""
     d = json.loads(text)
     if not isinstance(d, dict):
-        raise ValueError("strih-lx seed manifest must be a JSON object, got %r" % type(d).__name__)
+        raise ValueError("strih-snv seed manifest must be a JSON object, got %r" % type(d).__name__)
     # issue 1317 (this lane): an `inputs` entry may be a bare STRING (parallel/imag shape) OR an
     # explicit-name OBJECT {sender,input,scene} (the OPERATOR collection). Keep every usable entry in
     # its ORIGINAL shape (seed_inputs normalizes via _entry_fields); drop the junk (int/None/empty/a
@@ -321,7 +321,7 @@ def seed_inputs(inputs, latency):
 
 def scene_order(inputs):
     """Pure: the stable, deterministic scene order (the scene names in manifest order, de-duplicated
-    by INPUT name). strih-lx has no operator-tuned order to preserve; the seed creates scenes in this
+    by INPUT name). strih-snv has no operator-tuned order to preserve; the seed creates scenes in this
     fixed order. Handles both bare-string and object entries (issue 1317, this lane) via _entry_fields."""
     order = []
     seen = set()
@@ -583,7 +583,7 @@ def _obs_phase2_module():
 
 
 class Obs:
-    """Minimal OBS-WebSocket 5.x client (sibling of imag_scenes.Obs). no-auth on strih-lx
+    """Minimal OBS-WebSocket 5.x client (sibling of imag_scenes.Obs). no-auth on strih-snv
     (auth_required false, setup-strih.sh step 7); a password is still honoured if the server ever
     demands auth."""
 
@@ -854,7 +854,7 @@ def main():
     ap.add_argument("--port", type=int, default=4455)
     ap.add_argument("--password", default=None)
     ap.add_argument("--manifest", default=SEED_MANIFEST_PATH,
-                    help="path to strih-lx-seed.json (default %s)" % SEED_MANIFEST_PATH)
+                    help="path to strih-seed.json (default %s)" % SEED_MANIFEST_PATH)
     ap.add_argument("--bootstrap", action="store_true",
                     help="seed scenes/inputs with the certified genlock settings + Studio Mode")
     ap.add_argument("--verify-parity", action="store_true",

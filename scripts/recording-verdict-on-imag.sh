@@ -79,7 +79,7 @@ onimag_decode_core_range() {
 #   present=1 and local_sha != remote_sha -> upload  (VERSION GATE: stale emitter after a schema bump)
 #   present=1 and local_sha == remote_sha (non-empty) -> skip (fast idempotent path preserved)
 # Issue 1302: the decision itself is the ONE shared verdict_upload_decision (also used by the
-# strih-lx and RESOLUME-SNV extracts); this name stays as the imag entry point.
+# strih-snv and RESOLUME-SNV extracts); this name stays as the imag entry point.
 # shellcheck source=scripts/lib/verdict-upload-gate.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/verdict-upload-gate.sh"
 onimag_upload_decision() {

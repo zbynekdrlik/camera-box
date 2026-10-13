@@ -2,7 +2,7 @@
 # scripts/av-restart-matrix.sh -- issue 1367: the RESTART MATRIX (full header below).
 set -euo pipefail
 #
-# WHY (issue 1367, owner goal 24.9.2026): after EVERY restart -- stream OBS, strih OBS (strih-lx),
+# WHY (issue 1367, owner goal 24.9.2026): after EVERY restart -- stream OBS, strih OBS (strih-snv),
 # a cambox service, dantesync -- the picture-to-sound latency on the stream output must be right by
 # itself, and the cameras must stay in sync with each other, with no manual step. The acceptance:
 # "for each restart kind, the stream output meets the A/V and spread bounds within the settle time,
@@ -31,7 +31,7 @@ set -euo pipefail
 #     AV_OFFSET_GATE_TOLERANCE_MS, the camera spread within SPREAD_THRESHOLD_MS, the gate's own loss
 #     term, the hop burns -- both bounds read from their Rust sources; each kind PASS only 3/3.
 #   The restart kinds (scripts/lib/av-restart-matrix.sh builds every remote text):
-#     strih-obs  -- strih-lx `systemctl --user restart strih-obs.service` over plain ssh (the ONE
+#     strih-obs  -- strih-snv `systemctl --user restart strih-obs.service` over plain ssh (the ONE
 #                   headless restart, mv_reverify_obs_restart_linux_cmd); healthy = the unit active
 #                   AND its OBS WebSocket answers.
 #     cambox     -- `systemctl restart camera-box` on ONE camera (root ssh), NEVER a reboot (a remote
@@ -56,7 +56,7 @@ set -euo pipefail
 #
 # MODES:
 #   --plan  (DEFAULT) print every step with the exact commands; touches NOTHING.
-#   --run   the matrix. Needs CAM_PW (the cambox root login), STRIH_USER + STRIH_PW (strih-lx),
+#   --run   the matrix. Needs CAM_PW (the cambox root login), STRIH_USER + STRIH_PW (strih-snv),
 #           STREAM_USER + STREAM_PW, PROBE_BIN_DIR + WIN_VERDICT_EXE_LOCAL (the soak's own window
 #           needs all of them; the same values recording-e2e.sh uses).
 #   --report RUN_DIR          re-grade a run (exit = its verdict).
@@ -157,8 +157,8 @@ SOAK="${AV_MATRIX_SOAK:-$HERE/av-soak.sh}"
 OBS_DIR="${AV_SOAK_OBS_DIR:-$HERE}"
 # the stream program the matrix requires and never changes (the soak's own name source, issue 1380)
 STREAM_DEV_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}"
-STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-lx)}"
-STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream)}"
+STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-snv)}"
+STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream-snv)}"
 OBS_TIMEOUT_S="${AV_SOAK_OBS_TIMEOUT_S:-30}"
 SSH_TIMEOUT_S="${AV_MATRIX_SSH_TIMEOUT_S:-60}"
 POLL_S="${AV_MATRIX_POLL_S:-5}"
@@ -328,7 +328,7 @@ LEASE_EXPECTED_AT="$(date -u -d "+${EXPECTED_S} seconds" +%Y-%m-%dT%H:%M:%SZ)"
 
 target_of() {
   case "$1" in
-    strih-obs) printf 'strih-lx %s\n' "$STRIH_HOST" ;;
+    strih-obs) printf 'strih-snv %s\n' "$STRIH_HOST" ;;
     cambox) printf '%s %s\n' "$CAMBOX" "$CAMBOX_IP" ;;
     dantesync) printf '%s %s\n' "$DANTE_NODE" "$DANTE_IP" ;;
     stream-obs) printf 'stream %s\n' "$STREAM_HOST" ;;
@@ -356,7 +356,7 @@ export PROBE_BIN_DIR WIN_VERDICT_EXE_LOCAL
 for _t in sshpass curl timeout setsid python3; do
   command -v "$_t" >/dev/null 2>&1 || die 4 "'$_t' not found on PATH"
 done
-[ "$(strih_platform "$STRIH_HOST")" = linux ] || die 4 "strih ${STRIH_HOST} is not the Linux strih-lx (the windows decode strih in place on strih-lx)"
+[ "$(strih_platform "$STRIH_HOST")" = linux ] || die 4 "strih ${STRIH_HOST} is not the Linux strih-snv (the windows decode strih in place on strih-snv)"
 python3 "$SOAK_DECISION" bounds >/dev/null || die 4 "the gate bounds cannot be read from their Rust sources"
 GM_IP=""
 if has_kind dantesync; then

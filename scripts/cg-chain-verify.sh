@@ -41,7 +41,7 @@ set -euo pipefail
 # not fail the run (cg_chain_hop_absent_ok); a missing strih `cg` still FAILs.
 #
 # SHALLOW-LATCHED INPUTS (issue 1302): an input whose audit line carries `shallow_depth=` D > 0 (the
-# strih-lx `CG-obs` at a 3 ms pin, issue 1367) is held at D frames by design, so its head age reads
+# strih-snv `CG-obs` at a 3 ms pin, issue 1367) is held at D frames by design, so its head age reads
 # D x interval. Its skew term is the head age's EXCURSION from D x 1000 / <canvas fps> (the SKEWms
 # column + the CSV skew column; a `shallow:` line under the row names D and the raw max), and a
 # `shallow_latches=` delta (column dLTCH, CSV d_shallow_latches) FAILs as a lock event. A log without
@@ -53,8 +53,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HOPS="${CG_CHAIN_HOPS:-cg-obs strih}"
 CG_CHAIN_STREAM_SRC="${CG_CHAIN_STREAM_SRC:-NDIA cg stream}"
-# issue 1302: the strih input that receives SongPlayer's SP-program (named `CG-obs` on strih-lx since
-# songplayer 221 B4). Overridable; the default is strih-lx's `CG-obs` (the only strih).
+# issue 1302: the strih input that receives SongPlayer's SP-program (named `CG-obs` on strih-snv since
+# songplayer 221 B4). Overridable; the default is strih-snv's `CG-obs` (the only strih).
 CG_CHAIN_STRIH_SRC="${CG_CHAIN_STRIH_SRC:-CG-obs}"
 SKEW_BOUND_MS=20
 MIN_SAMPLES=2

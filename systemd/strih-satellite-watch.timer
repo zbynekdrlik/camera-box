@@ -1,8 +1,8 @@
 [Unit]
 # issue 1399 -- runs the Companion Satellite liveness watch (strih-satellite-watch.service) every 30 s.
 # Installed + enabled by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh), started at login by
-# the kiosk autostart and after strih-obs by the strih-lx genlock deploy, graded by verify-strih.sh item 40.
-Description=strih-lx Companion Satellite liveness watch every 30 s (issue 1399)
+# the kiosk autostart and after strih-obs by the strih-snv genlock deploy, graded by verify-strih.sh item 40.
+Description=strih-snv Companion Satellite liveness watch every 30 s (issue 1399)
 Documentation=https://github.com/zbynekdrlik/camera-box
 
 [Timer]

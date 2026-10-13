@@ -1,6 +1,6 @@
 #!/bin/bash
 # verify-strih.sh (issue 1317) -- see the extended header below the strict-mode line.
-# strih-lx acceptance gate: RUN ON the box, read-only, fail loud on any missing item.
+# strih-snv acceptance gate: RUN ON the box, read-only, fail loud on any missing item.
 set -euo pipefail
 #
 # The imag verify-imag.sh pattern: pure decision predicates live in scripts/lib/strih-provision.sh
@@ -8,7 +8,7 @@ set -euo pipefail
 # into them and prints one PASS/FAIL line per acceptance item. Exit 0 = all clear, 1 = a gate item
 # failed. Latency pins are REPORT-ONLY (per-source latency is the operator's A/V-align domain).
 #
-# Usage (on the box):  ./verify-strih.sh [--box <name>]   (default box: strih-lx; issue 1361 -- the
+# Usage (on the box):  ./verify-strih.sh [--box <name>]   (default box: strih-snv; issue 1361 -- the
 #                      box's facts come from scripts/strih-boxes/<name>.env; a TODO_OWNER fact refuses)
 #                      [STRIH_LX_HOST / OBS_WS_HOST override the WS target]
 
@@ -52,6 +52,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || { echo "usage: verify-strih.sh [--box <name>]" >&2; exit 1; }
 strih_box_load "$STRIH_FACT_BOX" \
   || { echo -e "${RED}FAIL: box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above)${NC}" >&2; exit 1; }
+STRIH_FACT_BOX="$(strih_box_loaded_name)"   # issue 1414: an old box name loaded its renamed box
 obs_box_role_apply || { echo "verify-strih: the role / venue facts of box ${STRIH_FACT_BOX} could not be applied (issue 1412)" >&2; exit 1; }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live checks ----------
@@ -149,20 +150,19 @@ fi
 # 3) OBS-WebSocket :4455.
 tcp_open "$WS_HOST" 4455 && ok "obs-websocket :4455 answering" || bad "obs-websocket :4455 not answering on ${WS_HOST}"
 
-# 4) NDI outputs namespaced STRIH-LX (...) (never a 2nd STRIH-SNV sender). Live enum via
+# 4) NDI outputs namespaced with the box's own prefix (STRIH-SNV (...) on strih-snv). Live enum via
 #    obs_phase2.py when present; fall back to the seed manifest (what the box will publish).
-if [ -f /opt/camera-box/strih-lx-seed.json ] && command -v python3 >/dev/null 2>&1; then
-  LIVE_OUTS="$(python3 -c 'import json,sys; d=json.load(open("/opt/camera-box/strih-lx-seed.json")); print("\n".join(d.get("outputs",[])))' 2>/dev/null || true)"
+if [ -f /opt/camera-box/strih-seed.json ] && command -v python3 >/dev/null 2>&1; then
+  LIVE_OUTS="$(python3 -c 'import json,sys; d=json.load(open("/opt/camera-box/strih-seed.json")); print("\n".join(d.get("outputs",[])))' 2>/dev/null || true)"
   if [ -n "$LIVE_OUTS" ]; then
     all_ns=1
     while IFS= read -r o; do [ -n "$o" ] || continue; strih_lx_output_name_ok "$o" || all_ns=0; done <<< "$LIVE_OUTS"
     [ "$all_ns" = 1 ] && ok "all declared NDI outputs are ${NDI_PREFIX_V}-namespaced" || bad "a declared NDI output is not ${NDI_PREFIX_V}-namespaced"
-    printf '%s\n' "$LIVE_OUTS" | strih_lx_no_second_strihsnv_sender && ok "no 2nd STRIH-SNV sender in the output set" || bad "a STRIH-SNV sender is present (collision with the Windows PC)"
   else
-    note "no outputs in strih-lx-seed.json to check"
+    note "no outputs in strih-seed.json to check"
   fi
 else
-  note "strih-lx-seed.json / python3 absent -- run setup-strih.sh step 6 first"
+  note "strih-seed.json / python3 absent -- run setup-strih.sh step 6 first"
 fi
 
 # 4b) seeded NDI INPUTS present as genlock_fifo sources (issue 1317) -- REPORT-ONLY. Runs the seeder's
@@ -261,7 +261,7 @@ else
   note "laptop projector persistence: SaveProjectors=true NOT pre-seeded in user.ini (re-run setup-strih.sh step 16g)"
 fi
 
-# 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-lx key) -- REPORT-ONLY.
+# 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-snv key) -- REPORT-ONLY.
 BASELINE="${HERE}/latency-pins-baseline.json"
 if command -v python3 >/dev/null 2>&1 && [ -f "$BASELINE" ]; then
   PIN_BOX_V="$(strih_lx_hostname)"
@@ -278,7 +278,7 @@ fi
 #    offset with the PTP servo LOCKED is disciplined near-zero (the #550 reasoning) -> PASS; not
 #    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 refuses an ambiguous
 #    role+args shape (strih_lx_dantesync_role_ok) at install time; the role itself is graded in 6b.
-#    Issue 1372: strih-lx is the fleet DATE master, whose `(date authority, ..., step bound Nus)`
+#    Issue 1372: strih-snv is the fleet DATE master, whose `(date authority, ..., step bound Nus)`
 #    journal line is graded through the shared dantesync_journal_clock_verdict
 #    (clock-offset-guard.sh) by the capability its OWN :8898/status reports: a micro-capable
 #    dantesync 1.11.x master on the micro bound + margin and its falling_behind/paused flags; a
@@ -665,7 +665,7 @@ command -v avahi-browse >/dev/null 2>&1 \
 
 # 25) DistroAV [NDIPlugin] output identity in user.ini (issue 1352): the BARE names
 #     MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + both Enabled=true (DistroAV prepends the
-#     hostname -> announced STRIH-LX (2ME PGM)/(2ME PVW); a namespaced name here would double it).
+#     hostname -> announced STRIH-SNV (2ME PGM)/(2ME PVW); a namespaced name here would double it).
 #     FAIL loud.
 NDI_USER_INI="${USER_HOME}/.config/obs-studio/user.ini"
 NDI_INI_MISSING=""
@@ -912,7 +912,7 @@ strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "
 
 # 35) Downstream Keyer OBS plugin (issue 1361): setup-strih.sh step 4c installs the pinned upstream
 #     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the
-#     exact file strih-lx ran by hand before) and its locale is present. Placed BEFORE item 34: the
+#     exact file strih-snv ran by hand before) and its locale is present. Placed BEFORE item 34: the
 #     item-34 behaviour test runs the text from "# 34)" up to "# 32)" with only ndi-discovery.sh
 #     sourced; the baseline item 32 (which also grades rtprio-off, the retired item 33) closes the list.
 _dsk_so="$(obs_dsk_so_path "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}")"
@@ -928,7 +928,7 @@ fi
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
 #     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with --
-#     strih-lx/stream; the traveling resolume hostname is best-effort, never required), lists NO cambox
+#     strih-snv/stream; the traveling resolume hostname is best-effort, never required), lists NO cambox
 #     IP (issue 1389: this OBS's discovery connection into a cambox aborts camera-box when OBS exits)
 #     and carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
 #     bkshading-service) and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) --

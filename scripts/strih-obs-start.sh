@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# strih-obs-start.sh -- strih-lx supervised OBS launcher (issue 1317); extended header below.
+# strih-obs-start.sh -- strih-snv supervised OBS launcher (issue 1317); extended header below.
 set -euo pipefail
 #
 # WHY: systemd/strih-obs.service (ExecStart=/usr/local/bin/strih-obs-start.sh) supervises OBS on the
 # Linux strih notebook, Restart=on-failure. This is the sibling of imag-obs-start.sh (issue 882) but
-# for the strih-lx box, whose facts differ (see the Design comment on issue 1317):
+# for the strih-snv box, whose facts differ (see the Design comment on issue 1317):
 #   * the plain Xorg `:0` session of the lightdm-autologin openbox kiosk (issue 1357 -- the SAME
 #     appliance session imag runs; the GNOME Wayland session and its WAYLAND_DISPLAY path are gone):
 #     DISPLAY=:0 when the X0 socket exists, else FAIL LOUD (OBS is started by the openbox autostart, so
@@ -85,8 +85,8 @@ fi
 
 # --profile / --collection ONLY when those OBS dirs exist -- a fresh box has none, so the launcher
 # must fall back to the default (never pass a flag for a profile/collection OBS has not seeded yet).
-STRIH_OBS_PROFILE="${STRIH_OBS_PROFILE:-strih-lx}"
-STRIH_OBS_COLLECTION="${STRIH_OBS_COLLECTION:-strih-lx}"
+STRIH_OBS_PROFILE="${STRIH_OBS_PROFILE:-strih-snv}"
+STRIH_OBS_COLLECTION="${STRIH_OBS_COLLECTION:-strih-snv}"
 OBS_ARGS=(--disable-shutdown-check)
 if [ -d "${OBS_CFG}/basic/profiles/${STRIH_OBS_PROFILE}" ]; then
   OBS_ARGS+=(--profile "$STRIH_OBS_PROFILE")
@@ -167,7 +167,7 @@ echo "OK: OBS bezi (pid $OBS_PID), WS :4455 up."
 # --host defaults to 127.0.0.1 inside strih_scenes.py.
 #
 # BEST-EFFORT (issue 1317 review): OBS is ALREADY launched (pid $OBS_PID). A RUNTIME seed failure --
-# a transient WS hiccup, a corrupt strih-lx-seed.json, or the WS demanding auth after a config regen
+# a transient WS hiccup, a corrupt strih-seed.json, or the WS demanding auth after a config regen
 # (a documented strih incident) -- must NOT abort this wrapper under `set -euo pipefail`, because that
 # would SIGTERM the cgroup (the live OBS) and Restart=on-failure would FLAP a healthy cut. An
 # empty-but-running OBS is strictly better than a flapping one; verify-strih item 4b reports the

@@ -3,7 +3,7 @@
 //! A node burn (a camera capture burn or an OBS render burn) is a crisp overlay at ONE known place
 //! on the recorded frame: its slot in [`crate::burn_regions`]. A camera that films a monitor showing
 //! OBS captures smaller, still decodable copies of those burns. On run 386740541 cam2 filmed the
-//! strih-lx HDMI multiview, and the Preview, Program and camera cells each held node burns, cam2's
+//! strih-snv HDMI multiview, and the Preview, Program and camera cells each held node burns, cam2's
 //! own among them. rqrr reads them like any QR. Two things followed:
 //! - the echoes added stale ids to cam2's contiguity (copies/gaps on both CAM2 windows);
 //! - on frame 1521 an echo of strih's burn and one of cam3's burn satisfied the fast-path gate, so

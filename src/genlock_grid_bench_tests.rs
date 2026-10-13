@@ -115,7 +115,7 @@ fn production_grid_holds_one_state_at_every_pin_phase_1355() {
     }
 }
 
-/// One strih-lx OBS restart at 5 min (8 s silent) with a `k`-slot startup stall, measured over
+/// One strih-snv OBS restart at 5 min (8 s silent) with a `k`-slot startup stall, measured over
 /// the hour that follows a BOUNDED 60 s settle (goal item 1: the latency is right after every
 /// restart by itself, not after the next random sender hiccup).
 fn after_restart(pin: u32, k: u64) -> BenchReport {
@@ -490,7 +490,7 @@ fn shallow_n1_source_is_untouched_1367() {
 /// issue 1367 (design 5833339163, review round 1) — the KNOWN LIMIT of the GAP hold's duplicate
 /// guard, pinned so it cannot grow silently. A send-time-stamping sender labels a slow frame one
 /// slot late; when its duplicate is not queued yet the GAP hold reads the late label as a real skip,
-/// holds (a repeat) and the shallow shed later removes the extra frame. At the live strih-lx jitter
+/// holds (a repeat) and the shallow shed later removes the extra frame. At the live strih-snv jitter
 /// (the test above) that never happens; at a 2.2x wider send jitter (σ 4 ms) it measured 22 + 22
 /// per 2 h (8 ms network) and 12 + 12 (40 ms network). Every such hold is paired with its shed
 /// (the conveyor returns to D), and no drain / relock appears.

@@ -5,15 +5,15 @@
 # this file executes it in the CALLER's shell, so strict mode here would leak into whichever caller
 # sources it. Each caller (setup-strih.sh / verify-strih.sh) sets its own strict mode.
 #
-# scripts/lib/strih-provision.sh -- issue 1317: the ONE place the Linux strih notebook (`strih-lx`)
+# scripts/lib/strih-provision.sh -- issue 1317: the ONE place the Linux strih notebook (`strih-snv`)
 # role FACTS + pure provisioning decisions live, sourced by scripts/setup-strih.sh (provisioning),
 # scripts/verify-strih.sh (acceptance gate) AND tests/strih_provision_pure_functions.rs (rustc-free
 # Tier-0). Same source-of-truth model as camera-set.sh for the camera fleet.
 #
-# NAMESPACE + CLOCK CONTRACT: a strih box's NDI OUTPUTS are namespaced `<STRIH_NDI_PREFIX> (...)`
-# (strih-lx: `STRIH-LX (...)`) and the stream box + receivers must NEVER see a `STRIH-SNV (...)` sender
-# (the retired Windows PC's names). The dantesync ROLE is the box fact STRIH_DANTESYNC_ROLE -- the old
-# parallel-run "CLIENT only" contract ended with the M4 cut-over (strih-lx = the fleet NTP master).
+# NAMESPACE + CLOCK CONTRACT: a strih box's NDI OUTPUTS are namespaced `<STRIH_NDI_PREFIX> (...)`, the
+# box hostname upper-cased (strih-snv: `STRIH-SNV (...)`, strih-pp: `STRIH-PP (...)`; issue 1414 named
+# the boxes `<role>-<venue>`). The dantesync ROLE is the box fact STRIH_DANTESYNC_ROLE -- the old
+# parallel-run "CLIENT only" contract ended with the M4 cut-over (strih-snv = the fleet NTP master).
 
 # --- issue 1361: the box/venue FACTS -------------------------------------------------------------
 # Every box-identity value (hostname, IP, NDI prefix, cameras, CG sender, dantesync role + upstream,
@@ -22,7 +22,7 @@
 # DEFINES the fact accessors this lib calls (strih_lx_hostname / strih_lx_ip / strih_lx_ndi_prefix /
 # strih_lx_cameras / ... -- historical `strih_lx_` names, they serve whichever strih box is loaded).
 # It is a source-only lib (functions + constants, no side effects), sourced here unless the caller
-# already did; with no box loaded, the first fact read loads the default box (strih-lx).
+# already did; with no box loaded, the first fact read loads the default box (strih-snv).
 if ! declare -F strih_box_fact >/dev/null; then
   # shellcheck source=scripts/lib/strih-box-facts.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-box-facts.sh"
@@ -83,24 +83,21 @@ if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
   . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-hub-unit.sh"
 fi
 
-# strih_lx_ndi_inputs -> the 10 NDI input names the strih role receives, one per line (issue 1317
-# spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names). NOTE (issue 1352): the
-# actual box seed (strih_lx_seed_manifest_json) now points the 2ME feedback pair at strih-lx's OWN
-# STRIH-LX (2ME PGM/PVW) outputs (the M4 self-loop, Windows strih retired). This facts list KEEPS the
-# STRIH-SNV names DELIBERATELY -- it is unconsumed by setup-strih.sh (defined + unit-tested only), and
-# the canonical self-feedback INPUT name is confirmed on the live box in the live-tuning follow-up
-# documented in .claude/rules/strih-linux-provisioning.md ("Follow-ups: the 2ME self-feedback INPUT
-# names"); flipping these two here is deferred to that follow-up, not this provisioning lane.
+# strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
+# the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4
+# self-loop, issue 1352; strih_lx_seed_manifest_json seeds the same pair) and the CG sender. A facts
+# list: unconsumed by setup-strih.sh (defined + unit-tested only).
 strih_lx_ndi_inputs() {
-  local n cg
+  local n cg p
   cg="$(strih_lx_cg_sender)" || return 1
+  p="$(strih_lx_ndi_prefix)" || return 1
   for n in $(strih_lx_cameras); do printf 'CAM%s (usb)\n' "$n"; done
-  printf '%s\n' 'STRIH-SNV (2ME PGM)' 'STRIH-SNV (2ME PVW)'
+  printf '%s (2ME PGM)\n%s (2ME PVW)\n' "$p" "$p"
   [ -z "$cg" ] || printf '%s\n' "$cg"
 }
 
-# strih_lx_ndi_outputs -> the box-namespaced 2ME NDI output names `<PREFIX> (2ME PGM|PVW)` (never a
-# STRIH-SNV name), one per line.
+# strih_lx_ndi_outputs -> the box-namespaced 2ME NDI output names `<PREFIX> (2ME PGM|PVW)`, one per
+# line.
 strih_lx_ndi_outputs() {
   local p
   p="$(strih_lx_ndi_prefix)" || return 1
@@ -115,14 +112,14 @@ strih_lx_ndi_republishes() {
 }
 
 # strih_lx_camera_latency_ms -> the genlock latency floor (ms) every camera input rides (3, the
-# rig floor -- latency-pins-baseline.json strih-lx block; the per-run aligner owns any offset).
+# rig floor -- latency-pins-baseline.json strih-snv block; the per-run aligner owns any offset).
 strih_lx_camera_latency_ms() { printf '3'; }
 
 # strih_lx_ndi_output_ini_cmds USER_INI -> print the idempotent bash command that seeds DistroAV's
 # `[NDIPlugin]` program/preview OUTPUT identity into USER_INI (issue 1352): the BARE names
 # `MainOutputName=2ME PGM` / `PreviewOutputName=2ME PVW` + `MainOutputEnabled`/`PreviewOutputEnabled`
-# =true. DistroAV PREPENDS the box hostname -> announced `STRIH-LX (2ME PGM)` / `(2ME PVW)`; a name
-# that ALREADY carried `STRIH-LX ` here would double it (the `STRIH-LX (STRIH-LX (2ME PGM))` bug).
+# =true. DistroAV PREPENDS the box hostname -> announced `STRIH-SNV (2ME PGM)` / `(2ME PVW)`; a name
+# that ALREADY carried `STRIH-SNV ` here would double it (the `STRIH-SNV (STRIH-SNV (2ME PGM))` bug).
 # MUST run with OBS STOPPED (OBS rewrites user.ini on exit) -- setup-strih is enable-only, so step 7
 # runs before any launch. python3 RawConfigParser upsert (optionxform=str, strict=False): idempotent,
 # and NEVER clobbers an unparseable ini (mirrors the step-7 SaveProjectors upsert). Emitted via an
@@ -195,7 +192,7 @@ EOF
 }
 
 # strih_lx_obs_plugin_prune_list -> print (one per line) the ONE source of truth for the obs-plugins
-# the strih genlock bundle ships that must be PRUNED on strih-lx (issue 1317, owner request 22.9.):
+# the strih genlock bundle ships that must be PRUNED on strih-snv (issue 1317, owner request 22.9.):
 # each logs errors at every boot and is unusable on this box. `decklink*.so` = the DeckLink family
 # (no DeckLink hardware); `obs-qsv11.so` = Intel QSV (the box is NVIDIA -> nvenc); `obs-vst.so` =
 # unused. KEEP everything else, especially distroav.so (NDI) + obs-browser.so/libcef.so (browser
@@ -217,7 +214,7 @@ strih_lx_obs_plugin_dirs() {
   printf '%s\n' "${bundle%/}/lib/x86_64-linux-gnu/obs-plugins" "${libdir%/}/obs-plugins"
 }
 
-# strih_lx_seed_manifest_json -> the FULL /opt/camera-box/strih-lx-seed.json for the OPERATOR
+# strih_lx_seed_manifest_json -> the FULL /opt/camera-box/strih-seed.json for the OPERATOR
 # (production) collection (issue 1317, this lane). The notebook now runs the migrated operator
 # collection, whose INPUT names are the canonical strih names the whole E2E tooling addresses
 # (obs_burn_filter / obs_phase2 / recv-timing / genlock-audit all key on `NDI camN`) -- NOT the
@@ -227,15 +224,15 @@ strih_lx_obs_plugin_dirs() {
 # certified genlock class onto inputs that ALREADY exist and NEVER CreateScene/CreateInput; a missing
 # declared input is REPORTED.
 #   * sender = the NDI source the operator's input receives. The 7 cameras receive the fleet
-#     `CAMn (usb)` senders; the 2ME feedback pair receives strih-lx's OWN `STRIH-LX (2ME PGM/PVW)`
-#     outputs -- the M4 self-loop (issue 1352; the dead-parallel-phase `STRIH-SNV (2ME PGM/PVW)`
-#     senders are gone now the Windows strih is retired); the cg pair
+#     `CAMn (usb)` senders; the 2ME feedback pair receives the box's OWN `<prefix> (2ME PGM/PVW)`
+#     outputs -- the M4 self-loop (issue 1352; since issue 1414 the SNV box's prefix is the
+#     `STRIH-SNV` the retired Windows strih once published); the cg pair
 #     receives the `RESOLUME-SNV (cg-obs)` genlocked sender. The 2ME-feedback source + the CG-pair
 #     senders are supervisor-confirmable DATA (the LANE-RETURN followup: re-read the live collection's
 #     input settings) -- a wrong sender is a MANIFEST edit, never a code change, and update-only never
 #     renames the operator's source, so a guessed sender is harmless (it only drives CLASS detection,
 #     which the input NAME already provides).
-#   * The 5 STRIH-LX NDI OUTPUTS stay in `outputs` (issue 1347 owns the rename); the seeder never
+#   * The 5 NDI OUTPUTS stay in `outputs` (named by the box prefix, issue 1414); the seeder never
 #     touches outputs. Latency rides the manifest floor 3 (genlock_latency_ms_src).
 strih_lx_seed_manifest_json() {
   local lat p cg n
@@ -295,7 +292,7 @@ strih_lx_dantesync_is_client_not_master() {
 }
 
 # strih_lx_dantesync_role_ok ROLE ARGS -> the ROLE-AWARE public predicate (issue 1317, this lane):
-# 0 iff ROLE + ARGS name a coherent, non-ambiguous dantesync invocation for the strih-lx box.
+# 0 iff ROLE + ARGS name a coherent, non-ambiguous dantesync invocation for the strih-snv box.
 # REPLACES strih_lx_dantesync_is_client_not_master as the caller-facing gate. Post-M4 the notebook is
 # the fleet's ONE NTP master, so a `server` role is CORRECT (never fail-closed on server mode itself);
 # fail-closed only on an AMBIGUOUS shape:
@@ -318,7 +315,7 @@ strih_lx_dantesync_role_ok() {
 # verify-strih's dantesync-role acceptance item (issue 1317). Prints ONE token and returns 0 only for
 # the fully-`ok` state; every other state prints its own token + returns non-zero. Args (verify-strih
 # feeds live reads):
-#   ROLE       client|server (the box fact STRIH_DANTESYNC_ROLE; strih-lx = server, post-M4)
+#   ROLE       client|server (the box fact STRIH_DANTESYNC_ROLE; strih-snv = server, post-M4)
 #   REACHABLE  1 iff :8898/status answered
 #   MODE       the status `mode` field value (LOCK / NANO / ... / absent)
 #   UDP123     1 iff an ntp UDP :123 listener is present (ss -ulnp) -- REQUIRED for the server role only
@@ -372,7 +369,7 @@ strih_lx_audio_input_name() { printf 'ASIO zvuk'; }
 # `strih-program` null Audio/Sink so OBS can capture `strih-program.monitor` even before the hub runs.
 strih_pipewire_program_sink_conf() {
   cat <<'CONF'
-# strih-lx program-audio null sink (issue 1344) — installed by setup-strih step 12.
+# strih-snv program-audio null sink (issue 1344) — installed by setup-strih step 12.
 # The intercom hub writes the mastered program mix here; OBS captures strih-program.monitor
 # as its `ASIO zvuk` program input. Do NOT edit by hand.
 context.objects = [
@@ -402,7 +399,7 @@ CONF
 # `strih-program.monitor`, so binding it reads digital silence even though the audio is really
 # there (`pw-cat --target strih-program.monitor` captures it fine; only OBS/libpulse can't see it).
 #
-# Fix (proven live on strih-lx, 20.9.2026): a `libpipewire-module-loopback` that captures the
+# Fix (proven live on strih-snv, 20.9.2026): a `libpipewire-module-loopback` that captures the
 # strih-program SINK OUTPUT (never the monitor) and republishes it as its OWN node. The republished
 # node's `media.class` MUST be plain "Audio/Source" -- NOT "Audio/Source/Virtual". With Virtual, OBS
 # enumerates the source in its device list but its capture stream never links (silence); plain
@@ -410,7 +407,7 @@ CONF
 # `strih-program-source` (this node's name), not `strih-program.monitor`.
 strih_pipewire_program_loopback_conf() {
   cat <<'CONF'
-# strih-lx program-audio loopback source (issue 1344 follow-up) — installed by setup-strih step 12.
+# strih-snv program-audio loopback source (issue 1344 follow-up) — installed by setup-strih step 12.
 # strih-program.monitor is NOT pulse-visible to OBS on this box; this loopback republishes the
 # strih-program sink as a real Audio/Source node OBS's pulse_input_capture can enumerate + capture.
 # Do NOT edit by hand.
@@ -438,7 +435,7 @@ CONF
 # profile at 48 kHz (the operator talkback capture the hub reads; OBS never touches it).
 strih_wireplumber_minifuse_rule() {
   cat <<'RULE'
-# strih-lx MiniFuse 4 talkback capture (issue 1344) — installed by setup-strih step 12.
+# strih-snv MiniFuse 4 talkback capture (issue 1344) — installed by setup-strih step 12.
 # Pin the class-compliant MiniFuse 4 to its pro-audio profile at 48 kHz so the intercom hub reads
 # the operator talkback mic on a stable node. Do NOT edit by hand.
 monitor.alsa.rules = [
@@ -456,7 +453,7 @@ RULE
 
 # --- issue 1345 (24.9.2026, owner accepted 25.9): the MiniFuse period + graph quantum ------------
 # The two operator-session drop-ins that made the interkom audio clean existed ONLY as hand-made files
-# on strih-lx; a reprovision (or a second strih box) would ship the buzz / robotic cameraman again.
+# on strih-snv; a reprovision (or a second strih box) would ship the buzz / robotic cameraman again.
 # Both renderers print the LIVE file text byte-for-byte (read 25.9.2026, comment headers included), so
 # the step-12 compare-then-rewrite leaves the hand-fixed box untouched. setup-strih step 12 installs
 # them; verify-strih item 9b grades them + the live graph quantum (strih_lx_graph_quantum_ok).
@@ -579,27 +576,17 @@ strih_lx_program_audio_verdict() {
   printf 'NOTE program audio wired; FOH idle so level unchecked (report-only)\n'; return 0
 }
 
-# strih_lx_output_name_ok NAME -> 0 iff NAME is namespaced with the box's NDI prefix (`<PREFIX> (...)`)
-# and NOT a `STRIH-SNV (...)` one (the never-a-2nd-STRIH-SNV-sender invariant, single output check).
+# strih_lx_output_name_ok NAME -> 0 iff NAME is namespaced with the LOADED box's NDI prefix
+# (`<PREFIX> (...)`); another box's prefix (a stale pre-rename name, another venue's strih) is refused.
+# (The parallel-run guard against a second `STRIH-SNV (...)` sender -- the retired Windows strih's
+# names -- is gone: since issue 1414 STRIH-SNV IS the SNV strih's own prefix.)
 strih_lx_output_name_ok() {
   local p
   p="$(strih_lx_ndi_prefix)" || return 1
   case "${1:-}" in
-    'STRIH-SNV '*) return 1 ;;
     "${p} ("*) return 0 ;;
     *) return 1 ;;
   esac
-}
-
-# strih_lx_no_second_strihsnv_sender  (stdin: live NDI output names, one per line) -> 0 iff NONE of
-# them is a `STRIH-SNV (...)` sender. Drain-safe (reads the whole stream, no early break).
-strih_lx_no_second_strihsnv_sender() {
-  local line collision=0
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    case "$line" in 'STRIH-SNV '*) collision=1 ;; esac
-  done
-  [ "$collision" = 0 ]
 }
 
 # --- verify-strih.sh pure predicates (stdin-driven, so a live reader feeds them; unit-tested) -----
@@ -728,7 +715,7 @@ strih_lx_chrome_sandbox_verdict() {
 }
 
 # --- issue 1317 (owner ROZHODNUTÉ 18.9.): bundle-vs-box release parity --------------------------
-# The strih bundle is built on a SPECIFIC Ubuntu release (26.04 for strih-lx) and links THAT
+# The strih bundle is built on a SPECIFIC Ubuntu release (26.04 for strih-snv) and links THAT
 # release's ffmpeg/Qt sonames; deploying a 24.04-built bundle onto a 26.04 box (or vice versa) would
 # crash OBS at load (libavcodec60 vs libavcodec62, Qt 6.4 vs 6.10). The CI Stage step stamps a
 # `TARGET-RELEASE: ubuntu-<rel>` line into STRIH_BUILD_FLAGS.txt; this predicate gates the box's
@@ -931,7 +918,7 @@ strih_install_bundle_prefix() {
 # asserts the unit is active, a fresh offset, and (server) an NTP :123 listener. These pure helpers are
 # unit-tested in tests/strih_provision_pure_functions.rs.
 
-# strih_dantesync_unit_text ROLE [ARGS] -> print the systemd unit text for the strih-lx dantesync
+# strih_dantesync_unit_text ROLE [ARGS] -> print the systemd unit text for the strih-snv dantesync
 # daemon (the EXACT cambox unit shape: Type=simple, Restart=always, RestartSec=5,
 # WantedBy=multi-user.target). ROLE is `server` (NTP master, the M4 default -- ExecStart is the BARE
 # `/usr/local/bin/dantesync`, folding the live 10-ntp-master.conf drop-in into the unit) or `client`
@@ -976,7 +963,7 @@ EOF
 }
 
 # --- issue 1372: restart the dantesync DATE MASTER only on a real change ----------------------------
-# strih-lx is the fleet's dantesync date master in daily mode: its fleet line drifts ~0.7 s a day
+# strih-snv is the fleet's dantesync date master in daily mode: its fleet line drifts ~0.7 s a day
 # against NTP and is stepped only in the nightly 02:00Z window. A restart re-derives the date AT ONCE
 # and every follower joins, so the whole rig steps mid-day (29.9.2026 00:35Z: a genlock deploy's
 # setup-strih run restarted it, a 0.67 s fleet step, cg OBS program audio broken until a relaunch).
@@ -1013,7 +1000,7 @@ strih_dantesync_restart_decision() {
 # --- issue 1317 (this lane): scene-collection hygiene (REPORT-ONLY) + RustDesk install --------------
 
 # strih_collection_hygiene_verdict SHADER_COUNT LUA_COUNT -> the REPORT-ONLY verdict grading the
-# active OBS scene collection for boot-noise carriers (issue 1317). The migrated strih-lx collection
+# active OBS scene collection for boot-noise carriers (issue 1317). The migrated strih-snv collection
 # carried 10 `shader_filter` ("User-defined shader") filters (obs-shaderfilter, not shipped in the
 # Linux genlock build -> a "Failed to create source" popup at every start) + a dead `scripts-tool`
 # Lua (`D:/_APPS/vban-output.lua`); both were stripped LIVE by the owner, but a RE-IMPORTED collection
@@ -1046,7 +1033,7 @@ strih_collection_hygiene_verdict() {
 # INSIDE the emitted block. The .deb URL + sha256 are PINNED (confirmed live: the release asset's
 # sha256 == the box's installed deb, byte-for-byte).
 
-# strih_rustdesk_version -> the pinned RustDesk version (as live on strih-lx 22.9.2026).
+# strih_rustdesk_version -> the pinned RustDesk version (as live on strih-snv 22.9.2026).
 strih_rustdesk_version() { printf '1.4.9'; }
 
 # strih_rustdesk_deb_url -> the pinned RustDesk .deb download URL (the upstream release asset).
@@ -1163,7 +1150,7 @@ EOF
 # the issue-1345 M3 follow-up (d): Janus HTTP defaulted to *:8088 -- tighten it in the jcfg.
 strih_janus_http_jcfg_text() {
   cat <<'EOF'
-# strih-lx intercom Janus HTTP transport -- GENERATED by setup-strih.sh (issue 1345 M3a).
+# strih-snv intercom Janus HTTP transport -- GENERATED by setup-strih.sh (issue 1345 M3a).
 # HTTP API bound to LOOPBACK 127.0.0.1:8088 only (hub janus_rtp session + local probes); NO https,
 # admin API off. The phone reaches Janus over the WS front, never HTTP.
 general: {
@@ -1196,7 +1183,7 @@ strih_janus_room_jcfg_ok() {
 }
 
 # --- issue 1317 (this lane): Bitfocus Companion Satellite (the Stream Deck surface agent) ----------
-# The strih-lx notebook exposes its locally-attached Stream Deck to the VENUE's Companion CONTROLLER
+# The strih-snv notebook exposes its locally-attached Stream Deck to the VENUE's Companion CONTROLLER
 # (10.77.9.205, the strih-autorecord-coupling box) as a headless SATELLITE -- NOT a second full
 # Bitfocus Companion (a second controller would fork the venue's button/page state and fight the
 # real one). The owner caught the missing step live (no Companion Satellite -> dead Stream Deck).
@@ -1302,7 +1289,7 @@ strih_companion_satellite_install() {
   url="$(strih_companion_satellite_tarball_url)"
   sha="$(strih_companion_satellite_sha256)"
   bin="$(strih_companion_satellite_bin)"
-  # issue 1317 (live 20.9.2026): a fresh strih-lx has NO curl, and this emitter's own download uses
+  # issue 1317 (live 20.9.2026): a fresh strih-snv has NO curl, and this emitter's own download uses
   # `curl -fsSL` -- so step 16 FAILed on the first live run. Install curl in the SAME dep line (the
   # setup-device.sh precedent installs curl before any download).
   deps='curl libusb-1.0-0-dev libudev-dev libfontconfig1'
@@ -1364,7 +1351,7 @@ strih_companion_status_verdict() {
   printf 'not-connected'; return 1
 }
 
-# --- issue 1353: bkshading SERVICE (shading panel backend) provisioning on strih-lx ----------------
+# --- issue 1353: bkshading SERVICE (shading panel backend) provisioning on strih-snv ----------------
 # The shading-control panel backend (bkshading/service) ran only on the Windows strih PC; post-M4 the
 # notebook is the strih, so it is provisioned here as a systemd unit fed the CI-built Linux artifact.
 # The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs include_str!), so the
@@ -1376,7 +1363,7 @@ strih_companion_status_verdict() {
 # `bkshading-windows-amd64` canon in scripts/lib/bkshading-deploy-service-runtime.sh.
 strih_bkshading_artifact_name() { printf '%s\n' bkshading-service-linux-amd64; }
 
-# strih_bkshading_unit_text -> the systemd SYSTEM unit for the bkshading panel service on strih-lx.
+# strih_bkshading_unit_text -> the systemd SYSTEM unit for the bkshading panel service on strih-snv.
 # User=newlevel (the operator session owns libndi/PipeWire parity for the M2 live NDI preview),
 # ExecStart the installed self-contained binary + --config, Restart=on-failure (a genuine crash
 # restarts; a clean operator/deploy stop does not loop), multi-user target. NO drop-ins, NO self-start
@@ -1414,7 +1401,7 @@ EOF
 strih_bkshading_config_text() {
   local bind="${1:-0.0.0.0:8770}"
   cat <<EOF
-# bkshading service config -- strih-lx (issue 1353). Seeded from the canonical
+# bkshading service config -- strih-snv (issue 1353). Seeded from the canonical
 # bkshading/service/bkshading.example.toml (the schema the Windows install used); edit the live
 # camera/relay set on the box. Development = one camera on cam1; the handheld blocks are the
 # params-only placeholders for the issue-808 SBC milestone.
@@ -1470,10 +1457,10 @@ strih_bkshading_listener_owner() {
   grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*\("([^"]+)".*/\1/' || true
 }
 
-# --- issue 1317 item H: strih-lx USB-NIC xhci IRQ placement (NET_RX softirq off the OBS cores) ----
+# --- issue 1317 item H: strih-snv USB-NIC xhci IRQ placement (NET_RX softirq off the OBS cores) ----
 # The RTL8156B USB 2.5GbE NIC's xhci interrupt lands on ONE core (irqbalance is not installed, so
 # the kernel parks it) where ~1.1 Gb/s of NDI NET_RX softirq collides with OBS's ndir:video/libobs
-# threads (issue 1354, 22.9.2026, measured on strih-lx: moving the IRQ to an idle E-core cut the
+# threads (issue 1354, 22.9.2026, measured on strih-snv: moving the IRQ to an idle E-core cut the
 # genlock "slow output_video" rate from ~35/min to 5-10/min and the idle cam6/cam7 HOLD rate from
 # 1-2/min to ~0.15/min). The live smp_affinity write is lost at reboot, so it is baked into
 # provisioning as a boot oneshot resolving the placement FROM FACTS -- never a hard-coded IRQ number,
@@ -1629,7 +1616,7 @@ strih_counter_advanced() {
 }
 
 # strih_nic_iface_by_driver SYSROOT DRIVER -> resolve the NIC iface by its kernel DRIVER (the
-# strih-lx USB NIC is r8152 = the RTL815x USB-ethernet driver; the onboard PCIe NIC is r8169). Scans
+# strih-snv USB NIC is r8152 = the RTL815x USB-ethernet driver; the onboard PCIe NIC is r8169). Scans
 # <SYSROOT>/class/net/*/device/driver (readlink basename) for ifaces whose driver == DRIVER, skipping
 # `lo`. Encodes the result in the OUTPUT string so a set -e caller can branch on it without an rc
 # dance: EXACTLY ONE match -> prints the iface, returns 0; NONE -> prints '' , returns 1 (the caller
@@ -1661,7 +1648,7 @@ strih_nic_iface_by_driver() {
 strih_nic_irq_affinity_unit_text() {
   cat <<'UNIT'
 [Unit]
-Description=strih-lx: pin the USB-NIC xhci IRQ off the OBS cores (issue 1317 item H)
+Description=strih-snv: pin the USB-NIC xhci IRQ off the OBS cores (issue 1317 item H)
 Documentation=https://github.com/zbynekdrlik/camera-box
 After=network-online.target
 Wants=network-online.target
@@ -1792,10 +1779,10 @@ log "done: xhci NIC IRQ(s) [${irqs}] pinned to cpu ${target}"
 SCRIPT
 }
 
-# --- issue 1357: strih-lx as the OBS-box appliance (the shared baseline's per-box facts) ------------
+# --- issue 1357: strih-snv as the OBS-box appliance (the shared baseline's per-box facts) ------------
 # setup-strih.sh now runs the SAME appliance baseline as imag (scripts/lib/obs-box-baseline.sh: plain
 # Xorg openbox kiosk, low-latency kernel, de-jitter, max-performance persistence, power envelope, ...).
-# The baseline takes box FACTS as arguments; these helpers derive strih-lx's -- never an imag value.
+# The baseline takes box FACTS as arguments; these helpers derive strih-snv's -- never an imag value.
 
 # strih_lx_rig_nic SYSROOT IP_ADDR_TEXT STATIC_IP -> print the ONE rig NDI interface the baseline's
 # network tuning (sysctl + EEE/flow-control) is scoped to, rc 0; rc 1 + a stderr reason when it cannot
@@ -1827,10 +1814,10 @@ strih_lx_rig_nic() {
 }
 
 # strih_lx_pl1_watts [FIRMWARE_PL1_UW [BAKED_W]] -> the RAPL PL1 wattage the baseline power envelope pins on
-# strih-lx: max(55, FIRMWARE_PL1_UW / 1e6, BAKED_W). 55 W is the i5-13450HX's Intel-specified Processor Base Power (box fact
+# strih-snv: max(55, FIRMWARE_PL1_UW / 1e6, BAKED_W). 55 W is the i5-13450HX's Intel-specified Processor Base Power (box fact
 # in .claude/rules/strih-linux-provisioning.md), NOT imag's i7-13620H re-baseline -- but the pin must
 # NEVER sit below what the firmware already runs: the issue-1357 review read the package-0 long_term
-# constraint at 80 W live on strih-lx (23.9.2026), and pinning the spec base under it would cut the
+# constraint at 80 W live on strih-snv (23.9.2026), and pinning the spec base under it would cut the
 # NDI-decoding cutter's sustained power by a third (imag's 25 W-clamp starvation class). The firmware value
 # is the package-0 long_term power_limit_uw read at provisioning time (imag_power_zone_select); empty /
 # non-numeric = the 55 W floor. BAKED_W is the PL1 a previous run already baked into the envelope unit
@@ -1873,7 +1860,7 @@ strih_lx_baked_pl1_watts() {
   return 0
 }
 
-# strih_lx_pl1_stepdown_watts -> the power-envelope guard's thermal STEP-DOWN wattage on strih-lx (the
+# strih_lx_pl1_stepdown_watts -> the power-envelope guard's thermal STEP-DOWN wattage on strih-snv (the
 # guard drops PL1 to it after TCPU >= 93 C twice): imag's proven sustainable 45 W -- below the 55 W
 # spec base and the ~80 W firmware PL1, far above imag's 25 W iGPU clamp that would starve the cutter.
 # STRIH_LX_PL1_STEPDOWN_W overrides it.
@@ -1894,7 +1881,7 @@ strih_lx_reboot_pending() {
   return 0
 }
 
-# strih_openbox_autostart_text -> the strih-lx kiosk ~/.config/openbox/autostart (lightdm autologin ->
+# strih_openbox_autostart_text -> the strih-snv kiosk ~/.config/openbox/autostart (lightdm autologin ->
 # openbox on plain Xorg, the imag appliance). The notebook panel is the ONLY desktop screen (1920x1080@60,
 # the operator's OBS UI + Multiview projector); every HDMI output stays OFF in X, because the HDMI output
 # is the in-OBS DRM-lease output (issue 1346, owner 24.9.2026) and the desktop must never appear on it.

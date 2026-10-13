@@ -19,7 +19,7 @@
 # here: setup-strih.sh derives them on the box.
 
 # The box a bare setup-strih.sh / verify-strih.sh (no --box) provisions -- today's production strih.
-STRIH_BOX_DEFAULT=strih-lx
+STRIH_BOX_DEFAULT=strih-snv
 
 # The not-yet-decided marker a template fact carries until the owner answers it.
 STRIH_BOX_TODO=TODO_OWNER
@@ -234,17 +234,37 @@ strih_box_validate() {
   [ "$bad" = 0 ]
 }
 
+# strih_box_alias_of NAME -> print the box NAME is an issue-1414 transition alias of, rc 0; rc 1 (no
+# output) when NAME is no alias. The SNV strih was named strih-lx until issue 1414 (box names carry the
+# venue): a deploy or a hand run that still says the old name loads the renamed box with ONE warning.
+# The ONE alias table is obs-fleet.sh's OBS_FLEET_ALIASES (sourced lazily from this lib's own dir);
+# an alias counts here only when its renamed box has a fact file.
+strih_box_alias_of() {
+  local want="${1-}" canon
+  if ! declare -F _obs_fleet_alias_of >/dev/null; then
+    # shellcheck source=scripts/lib/obs-fleet.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/obs-fleet.sh" || return 1
+  fi
+  canon="$(_obs_fleet_alias_of "$want")" || return 1
+  [ -f "$(strih_box_dir)/${canon}.env" ] || return 1
+  printf '%s' "$canon"
+}
+
 # strih_box_load NAME -> load box NAME's facts into the STRIH_BOX_FACTS map (+ STRIH_BOX_LOADED=NAME),
 # rc 0; rc 1 with the reasons on stderr when the name, the file or a fact is invalid, when the fleet
 # list has a row for NAME whose host is an IP other than STRIH_IP, or when a per-run env knob
 # (STRIH_LX_IP / STRIH_LX_DANTESYNC_ROLE) contradicts the loaded fact. Nothing is loaded on failure.
 strih_box_load() {
-  local name="${1-}" file parsed line fleet_ip
+  local name="${1-}" file parsed line fleet_ip canon
   strih_box_unload
   STRIH_BOX_LOAD_FAILED="${name:-<empty>}"   # cleared only when this load succeeds (see strih_box_ensure_loaded)
   if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     echo "strih-box: box name '${name}' is invalid (lower-case letters, digits, '-'; never a path)" >&2
     return 1
+  fi
+  if canon="$(strih_box_alias_of "$name")"; then
+    echo "strih-box: '${name}' is the old name of box '${canon}' (issue 1414: box names carry the venue) -- loading ${canon}; use --box ${canon}" >&2
+    name="$canon"
   fi
   file="$(strih_box_dir)/${name}.env"
   if [ ! -f "$file" ]; then

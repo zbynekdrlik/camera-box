@@ -15,7 +15,7 @@
 //!   in order. The live figures are FLOORS, i.e. the newest queued frame's AGE on a grid tick
 //!   (`ts_head_skew_ms − (ts_due − 1) × 33`), which is the lag rounded UP to the next frame: resolume
 //!   `NDI test` ~31 ms (lag 22-31 ms → 1 frame), `sp-slow_video` ~64 ms (lag 40-64 ms → 2 frames),
-//!   strih-lx `CG-obs` 33-67 ms (lag 28-40 ms, straddling one frame → 1 or 2 frames). A band that
+//!   strih-snv `CG-obs` 33-67 ms (lag 28-40 ms, straddling one frame → 1 or 2 frames). A band that
 //!   straddles the SECOND frame edge (50-80 ms → 2 or 3 frames) and a band that RISES mid-run (no
 //!   gap: 28-40 → 70-95 ms, every floor climbs to D) or changes at a sender restart cover the review
 //!   cases.
