@@ -533,27 +533,53 @@ KNOWN_ROLES = {"cambox", "program_ref", "cutters", "phones", "speakers", "line34
 
 
 def test_the_pp_matrix_satisfies_the_hub_load_rules():
+    """ROZHODNUTE 13.10.2026 (owner: "prehod to"): the Poprad camera intercom runs on this hub, the SNV
+    shape for the PP cameras cam1/4/6/7, the phones (Janus) and the cutters, plus the unchanged
+    program path lv1 -> program_out."""
     m = tomllib.loads(PP_TOML.read_text())
     assert m["hub"]["sample_rate"] == 48000 and m["hub"]["block_frames"] > 0
-    assert "janus" not in m and "video" not in m
-    # The program mix is summed through the matrix points (source_streams only names the streams):
-    # lv1 ch1/ch2 -> program_out ch1/ch2 at unity, nothing else (11.10.2026: no points = silence).
-    assert sorted((pt["src"], pt["in_ch"], pt["dst"], pt["out_ch"], pt.get("gain_db", 0.0))
-                  for pt in m["point"]) == [("lv1", 1, "program_out", 1, 0.0),
-                                            ("lv1", 2, "program_out", 2, 0.0)]
     parts = m["participant"]
     assert len({p["name"] for p in parts}) == len(parts)
     assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire"} for p in parts)
-    assert not [p for p in parts if p["role"] == "cambox"], "the PP hub sends no VBAN to a cambox"
-    assert not [p for p in parts if p.get("out_stream")], "no VBAN output at all"
-    vban_in = {p["in_stream"] for p in parts if p["adapter"] == "vban" and p.get("in_stream")}
+    # the program path is exactly what it was: lv1 ch1/ch2 -> program_out ch1/ch2 at unity
+    assert sorted((pt["src"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0))
+                  for pt in m["point"] if pt["dst"] == "program_out") == [("lv1", 1, 1, 0.0), ("lv1", 2, 2, 0.0)]
     outs = [p for p in parts if p["role"] == "program_out"]
     assert len(outs) == 1
     o = outs[0]
     assert o["adapter"] == "pipewire" and o["pipewire_target"] == "strih-program" and "pipewire_source" not in o
-    assert o["source_streams"] == ["strih"] and set(o["source_streams"]) <= vban_in
+    assert o["source_streams"] == ["strih"]
     src = next(p for p in parts if p["name"] == "lv1")
-    assert (src["role"], src["host"], src["in_channels"]) == ("program_ref", "lv1.lan", 2)
+    assert (src["role"], src["host"], src["in_channels"], src["in_stream"]) == ("program_ref", "lv1.lan", 2, "strih")
+
+
+PP_CAMS = {"cam1": "10.77.9.61", "cam4": "10.77.9.64", "cam6": "10.77.9.66", "cam7": "10.77.9.67"}
+
+
+def test_the_pp_matrix_carries_the_camera_intercom():
+    m = tomllib.loads(PP_TOML.read_text())
+    parts = {p["name"]: p for p in m["participant"]}
+    cams = {n: p for n, p in parts.items() if p["role"] == "cambox"}
+    assert {n: p["host"] for n, p in cams.items()} == PP_CAMS          # PP DNS has no camN.lan names
+    for n, p in cams.items():
+        assert (p["adapter"], p["in_stream"], p["out_stream"]) == ("vban", n, n)
+    assert parts["phones"]["adapter"] == "janus" and parts["phones"]["role"] == "phones"
+    assert parts["cutters"]["role"] == "cutters"
+    assert m["janus"]["room_secret_file"] == "/etc/intercom-hub/janus-room.secret"
+    assert m["video"]["ndi_source_name"] == "STRIH-PP (interkom)" and m["video"]["enabled"] is True
+    routes = {(pt["src"], pt["dst"]) for pt in m["point"]}
+    talkers = set(cams) | {"phones", "cutters"}
+    for a in talkers:
+        for b in talkers:
+            if a != b:
+                assert (a, b) in routes, (a, b)       # everyone hears everyone else
+    assert not [r for r in routes if r[0] == r[1]], "never a participant to itself (N-1)"
+    assert ("lv1", "cutters") in routes and ("lv1", "phones") not in routes
+    assert not [r for r in routes if r[1] in cams and r[0] == "lv1"], "the cameramen never get the program"
+    # a cutter's mic reaches every camera on both ears, as on SNV
+    for c in cams:
+        assert {(pt["in_ch"], pt["out_ch"]) for pt in m["point"] if pt["src"] == "cutters" and pt["dst"] == c} \
+            == {(1, 1), (1, 2), (2, 1), (2, 2)}
 
 
 # --- the setup / verify wiring ----------------------------------------------------------------------
