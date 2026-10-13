@@ -120,13 +120,18 @@ print(n)
 # drm_output_audio_log_state (stdin = an OBS log) -> open | no-audio | none: the LAST audio-leg
 # outcome of that OBS session (`drm-output audio: pcm hw:` = the first block placed, `drm-output
 # audio: '<conn>' matched hw:` = the resolver opened the PCM -- the only line while the view is the
-# Multiview, which places no block -- `NO AUDIO` = it gave up and named why). Reads all of stdin;
+# Multiview, which places no block -- `NO AUDIO` = it gave up and named why; the watcher's `no longer
+# carries the connector's monitor ... muted` and a `write to hw:... failed` line are no-audio until a
+# later `carries the connector's monitor again`). The LAST outcome line wins. Reads all of stdin;
 # always returns 0.
 drm_output_audio_log_state() {
   LC_ALL=C awk '
     index($0, "drm-output audio: pcm hw:") { s = "open" }
     index($0, "drm-output audio: \047") && index($0, " matched hw:") { s = "open" }
+    index($0, "drm-output audio: \047") && index($0, " carries the connector\047s monitor again") { s = "open" }
     index($0, "drm-output audio: NO AUDIO") { s = "no-audio" }
+    index($0, "drm-output audio: \047") && index($0, " no longer carries the connector\047s monitor") { s = "no-audio" }
+    index($0, "drm-output audio: \047") && index($0, " write to hw:") { s = "no-audio" }
     END { print (s == "" ? "none" : s) }' || true
 }
 
@@ -135,6 +140,8 @@ drm_output_audio_log_line() {
   LC_ALL=C awk '
     index($0, "drm-output audio: pcm hw:") || index($0, "drm-output audio: NO AUDIO") { l = $0 }
     index($0, "drm-output audio: \047") && index($0, " matched hw:") { l = $0 }
+    index($0, "drm-output audio: \047") && index($0, "the connector\047s monitor") { l = $0 }
+    index($0, "drm-output audio: \047") && index($0, " write to hw:") { l = $0 }
     END { print l }' || true
 }
 
