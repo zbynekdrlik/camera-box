@@ -88,6 +88,12 @@ obs_box_step_applies() {
         esac
         return 1
       fi ;;
+    16j-restreamer)
+      v="$(strih_box_role)" || return 0
+      if [ "$v" != stream ]; then
+        printf 'the strih role is a production-only box: no Chrome, no restreamer control room (owner 24.9.2026)'
+        return 1
+      fi ;;
     6-devclip)
       v="$(strih_box_role)" || return 0
       if [ "$v" != stream ]; then
@@ -353,6 +359,80 @@ obs_box_strih_profile_grade() {
     ok "(strih-profile) ${dir}: 1920x1080 @ 30 fps, NVENC HEVC record to /srv/_REC (15-min mkv), the strih-snv output keys"
   else
     bad "(strih-profile) ${dir}: ${drift} -- re-run setup-strih.sh step 3 with OBS stopped (issue 1419)"
+  fi
+  return 0
+}
+
+# --- the restreamer's control-room host (stream role, restreamer issue 388, 13.10.2026) ---------------
+# google-chrome-stable from Google's signed apt repo (it is not in the Ubuntu archive, so no .deb can
+# Depend on it) and xvfb (the restreamer runs its own hidden Xvfb display for that Chrome, nothing on the
+# kiosk screen). The signing key is accepted ONLY by its pinned primary fingerprint (read 13.10.2026).
+OBS_BOX_GOOGLE_KEY_URL=https://dl.google.com/linux/linux_signing_key.pub
+OBS_BOX_GOOGLE_KEY_FPR=EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796
+OBS_BOX_RESTREAMER_HOST_PACKAGES=(google-chrome-stable xvfb)
+
+# obs_box_apt_root -> the filesystem root the apt files live under (OBS_BOX_APT_ROOT is the test seam).
+obs_box_apt_root() { printf '%s' "${OBS_BOX_APT_ROOT:-}"; }
+
+# obs_box_google_chrome_list -> the one apt source line of Google's Chrome repo, signed-by its keyring.
+obs_box_google_chrome_list() {
+  printf 'deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n'
+}
+
+# _obs_box_pkg_installed PKG -> 0 when dpkg reports PKG installed.
+_obs_box_pkg_installed() {
+  [ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" = "install ok installed" ]
+}
+
+# obs_box_stream_restreamer_host_provision -> setup-strih step 16j (stream role). rc 1 + a reason on a
+# refused key or a failed install; an installed host (both packages + the repo files) is left alone.
+obs_box_stream_restreamer_host_provision() {
+  local root key list missing="" p fprs armored
+  root="$(obs_box_apt_root)"
+  key="${root}/etc/apt/keyrings/google-chrome.gpg"
+  list="${root}/etc/apt/sources.list.d/google-chrome.list"
+  for p in "${OBS_BOX_RESTREAMER_HOST_PACKAGES[@]}"; do _obs_box_pkg_installed "$p" || missing="${missing} ${p}"; done
+  if [ -z "$missing" ] && [ -s "$key" ] && [ "$(cat "$list" 2>/dev/null)" = "$(obs_box_google_chrome_list)" ]; then
+    echo "  restreamer host: google-chrome-stable + xvfb installed, the signed Google repo in place -- unchanged"
+    return 0
+  fi
+  armored="$(curl -fsSL "$OBS_BOX_GOOGLE_KEY_URL")" \
+    || { echo "obs-box-role: cannot fetch ${OBS_BOX_GOOGLE_KEY_URL}" >&2; return 1; }
+  fprs="$(printf '%s' "$armored" | gpg --show-keys --with-colons 2>/dev/null | awk -F: '$1 == "fpr" {print $10}')"
+  if ! grep -qx "$OBS_BOX_GOOGLE_KEY_FPR" <<<"$fprs"; then
+    echo "obs-box-role: the Google signing key's fingerprint is not ${OBS_BOX_GOOGLE_KEY_FPR} -- refused, nothing written" >&2
+    return 1
+  fi
+  install -d -m 0755 "$(dirname "$key")" "$(dirname "$list")" \
+    || { echo "obs-box-role: cannot create the apt keyring/source dirs" >&2; return 1; }
+  printf '%s' "$armored" | gpg --dearmor > "${key}.new" && chmod 0644 "${key}.new" && mv -f "${key}.new" "$key" \
+    || { echo "obs-box-role: cannot write ${key}" >&2; return 1; }
+  obs_box_google_chrome_list > "${list}.new" && chmod 0644 "${list}.new" && mv -f "${list}.new" "$list" \
+    || { echo "obs-box-role: cannot write ${list}" >&2; return 1; }
+  echo "  Google Chrome apt repo: keyring ${key} (fingerprint ${OBS_BOX_GOOGLE_KEY_FPR}) + ${list}"
+  DEBIAN_FRONTEND=noninteractive apt-get update -o Dir::Etc::sourcelist=- \
+    -o Dir::Etc::sourceparts="$(dirname "$list")" >/dev/null 2>&1 \
+    || DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null \
+    || { echo "obs-box-role: apt-get update failed" >&2; return 1; }
+  DEBIAN_FRONTEND=noninteractive apt-get install -y "${OBS_BOX_RESTREAMER_HOST_PACKAGES[@]}" \
+    || { echo "obs-box-role: apt-get install ${OBS_BOX_RESTREAMER_HOST_PACKAGES[*]} failed" >&2; return 1; }
+  echo "  restreamer host: ${OBS_BOX_RESTREAMER_HOST_PACKAGES[*]} installed"
+}
+
+# obs_box_stream_restreamer_host_grade -> verify-strih's stream-branch row (restreamer issue 388): both
+# packages installed, the signed repo files in place, google-chrome answers --version. Uses the caller's
+# ok/bad; always rc 0.
+obs_box_stream_restreamer_host_grade() {
+  local root key list missing="" p ver
+  root="$(obs_box_apt_root)"
+  key="${root}/etc/apt/keyrings/google-chrome.gpg"
+  list="${root}/etc/apt/sources.list.d/google-chrome.list"
+  for p in "${OBS_BOX_RESTREAMER_HOST_PACKAGES[@]}"; do _obs_box_pkg_installed "$p" || missing="${missing} ${p}"; done
+  ver="$(timeout 10 google-chrome --version 2>/dev/null || true)"
+  if [ -z "$missing" ] && [ -s "$key" ] && [ "$(cat "$list" 2>/dev/null)" = "$(obs_box_google_chrome_list)" ] && [ -n "$ver" ]; then
+    ok "(restreamer-host) ${ver} + xvfb installed, the signed Google repo in place"
+  else
+    bad "(restreamer-host) missing:${missing:- none}; keyring $([ -s "$key" ] && echo ok || echo missing); repo list $([ "$(cat "$list" 2>/dev/null)" = "$(obs_box_google_chrome_list)" ] && echo ok || echo 'missing/differs'); google-chrome --version '${ver}' -- re-run setup-strih.sh step 16j"
   fi
   return 0
 }

@@ -978,6 +978,10 @@ if WHY="$(obs_box_step_applies 16i)"; then strih_https_install || fail "issue 13
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
+step "16j" "Restreamer control-room host (restreamer issue 388): Google Chrome from its signed repo + xvfb -- stream role"
+if WHY="$(obs_box_step_applies 16j-restreamer)"; then obs_box_stream_restreamer_host_provision || fail "the restreamer host packages could not be provisioned (above)"; else echo "  SKIP: ${WHY}"; fi
+
+# ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
 if [ -x "${HERE}/verify-strih.sh" ]; then
   if strih_lx_reboot_pending "$(cat /proc/cmdline 2>/dev/null || true)"; then
