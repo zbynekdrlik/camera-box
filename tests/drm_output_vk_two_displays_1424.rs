@@ -111,6 +111,10 @@ fn the_acquire_waits_for_every_other_presentation_to_settle() {
         "issue 1424: settled = presents on the CURRENT surface, against the threshold its swapchain needs"
     );
     assert!(
+        w.contains("need[i] = drm_output_vk_settle_need(os_atomic_load_long(&o->settle_images));"),
+        "issue 1424 review: the threshold is fed the other display's CURRENT swapchain image count"
+    );
+    assert!(
         w.contains("os_atomic_load_bool(&o->want_frames)"),
         "issue 1424 review: a display whose present loop died on its own (frame gate down) never blocks"
     );
@@ -203,6 +207,22 @@ fn a_remode_waits_while_another_display_acquires() {
         "drm_output_vk_rebuild_presentation(d, true)",
         "the rebuild",
     );
+    let rearm = recheck
+        + pos(
+            &tail[recheck..],
+            "os_atomic_set_bool(&d->remode, true);",
+            "the deferred re-mode re-arms after the re-check",
+        );
+    assert_eq!(
+        r.matches("os_atomic_set_bool(&d->remode, true)").count(),
+        2,
+        "issue 1424 review: BOTH deferrals re-arm the re-mode (the graphics thread hands a wanted mode \
+         over only when it changes, so a lost re-arm keeps the Program at 60 Hz until an OBS restart)"
+    );
+    assert!(
+        rearm < line,
+        "issue 1424 review: the deferral after the reset re-arms before the re-mode line"
+    );
     assert!(
         reset < recheck && recheck < line && line < rebuild,
         "issue 1424: reset -> re-check the acquire flag -> log the re-mode -> rebuild (a deferred re-mode \
@@ -254,6 +274,10 @@ fn a_surface_rebuild_destroys_the_old_presentation_before_the_new_surface() {
         rb.contains("if (d->queue_wedged) return false;")
             && rb.contains("d->queue_wedged = true; d->submit_outstanding = true;"),
         "issue 1424 review: a timed-out drain wedges the display's rebuilds"
+    );
+    assert!(
+        pos(&rb, "if (d->queue_wedged) return false;", "the wedge guard") < drain,
+        "issue 1424 review: the wedge guard runs BEFORE the drain (never a second submit on a pending fence)"
     );
     let v = squish(&file(VK_C));
     assert!(
