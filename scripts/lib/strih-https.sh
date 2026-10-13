@@ -277,7 +277,7 @@ _strih_https_keep() {
 # call; a missing ini / certificate and a failing certbot are WARNs.
 strih_https_install() {
   local sites ini hook nginx avail enabled tmp site first aliases up janus want have action w text
-  local paths cert key origin dst link f h act en missing mode changed=0 reload=0
+  local paths cert key origin dst link f h act en missing mode sites_changed=0 reload=0
   local -a argv hosts
   sites="$(strih_https_sites)" || return 1
   if [ -z "$sites" ]; then
@@ -365,7 +365,7 @@ strih_https_install() {
       _strih_https_keep "$tmp" "$dst" || { rm -rf "$tmp"; return 1; }
       { install -m 0644 "${tmp}/${site}.new" "${dst}.new.$$" && mv -Tf "${dst}.new.$$" "$dst"; } || {
         rm -f "${dst}.new.$$"; _strih_https_restore "$tmp"; rm -rf "$tmp"; echo "strih-https: cannot write ${dst}" >&2; return 1; }
-      w=written; changed=1
+      w=written; sites_changed=1
     fi
     echo "  ${dst} ${w} (${origin} certificate ${cert})"
     link="${enabled}/${site}"
@@ -374,7 +374,7 @@ strih_https_install() {
       ln -sfn "../sites-available/${site}" "$link" || {
         _strih_https_restore "$tmp"; rm -rf "$tmp"; echo "strih-https: cannot enable ${link}" >&2; return 1; }
       echo "  ${link} -> ../sites-available/${site}"
-      changed=1
+      sites_changed=1
     fi
   done <<<"$sites"
 
@@ -391,7 +391,7 @@ strih_https_install() {
 
   act="$(systemctl is-active nginx 2>/dev/null || true)"
   en="$(systemctl is-enabled nginx 2>/dev/null || true)"
-  if [ "$changed" = 1 ] || [ "$reload" = 1 ] || [ "$act" != active ]; then
+  if [ "$sites_changed" = 1 ] || [ "$reload" = 1 ] || [ "$act" != active ]; then
     if ! nginx -t; then
       _strih_https_restore "$tmp"
       rm -rf "$tmp"
@@ -407,7 +407,7 @@ strih_https_install() {
     if [ "$en" != enabled ]; then
       systemctl enable nginx || { echo "strih-https: systemctl enable nginx failed" >&2; return 1; }
     fi
-    if [ "$changed" = 1 ] || [ "$reload" = 1 ]; then
+    if [ "$sites_changed" = 1 ] || [ "$reload" = 1 ]; then
       systemctl reload nginx || { echo "strih-https: systemctl reload nginx failed" >&2; return 1; }
       echo "  reloaded nginx (nginx -t passed)"
     fi
