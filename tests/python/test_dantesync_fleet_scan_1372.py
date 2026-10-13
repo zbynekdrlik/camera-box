@@ -39,7 +39,7 @@ def test_the_scan_nets_are_declared_once_in_the_fleet_lib():
 
 def _gate(tmp_path, scan_out):
     b = tmp_path / "bin"
-    b.mkdir()
+    b.mkdir(parents=True)
     (b / "sshpass").write_text("#!/usr/bin/env bash\nexit 255\n")
     (b / "dantesync").write_text("#!/usr/bin/env bash\necho dantesync 0.0.0\n")
     fake = tmp_path / "fake-scan"
