@@ -82,6 +82,10 @@ fi
 #   mbc       -- the Master Broadcast Console (Ableton, the measurement-audio chain), audio VLAN.
 #   fohabl    -- the FOH Ableton PC that hosts the AIC128-D card, audio VLAN, ssh user `master` with
 #                its own password (DANTESYNC_FOHABL_SSH_PASS).
+#   iem-snv / companion-snv -- the SNV IEM mixing PC (Windows) and the SNV Bitfocus Companion box
+#                (Linux), both on the video clock (GM 10.77.9.230). Owner 13.10.2026: "ako to ze na iem
+#                pc nei je upgradovany dantesync?!!! udriziavas flotilu pod jednotnou verziou" -- found by
+#                a :8898 scan of every rig subnet at 1.8.28 / 1.8.20; never outside this table again.
 #   strih-pp / stream-pp / resolume-pp -- issue 1412: the Poprad (PP) venue. strih-pp is the PP NTP
 #                master (scripts/strih-boxes/strih-pp.env: STRIH_DANTESYNC_ROLE=server), stream-pp and
 #                resolume-pp (Windows, no obs-fleet row) follow it; all three lock to the PP PTP
@@ -97,6 +101,8 @@ resolume-snv|obs:resolume-snv|windows|video|obsfleet|-|
 imag|obs:imag|linux|video|obsfleet|-|
 mbc|10.77.7.232|windows|audio|always|-|
 fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS
+iem-snv|iem-snv.lan|windows|video|always|-|
+companion-snv|companion-snv.lan|linux|video|always|-|
 strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|
 stream-pp|obs:stream-pp|linux|video-pp|reach|-|
 resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|}"
