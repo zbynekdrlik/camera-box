@@ -1106,7 +1106,7 @@ fn strih_lx_refuses_a_box_that_is_not_strih_lx_1317() {
 /// alias maps to the fact hostname is accepted; any other name still refuses (above).
 #[test]
 fn strih_snv_deploys_a_box_that_still_runs_its_pre_rename_hostname_1414() {
-    let r = run_exec(&[("STUB_HOSTNAME", "strih-lx")]);
+    let r = run_exec(&[("STUB_HOSTNAME", "strih-lx")]); // the issue 1414 pre-rename name
     assert_eq!(r.code, 0, "err={}", r.err);
     assert!(
         r.err.contains("WARNING") && r.err.contains("strih-lx") && r.err.contains("1414"),

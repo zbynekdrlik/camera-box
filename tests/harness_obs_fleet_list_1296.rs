@@ -211,11 +211,11 @@ fn fleet_strih_lx_is_the_always_home_production_strih_at_202_1317() {
         is_home("strih-snv", &[]),
         "strih-snv must be home with no probe"
     );
-    // No facet may still dial the unresolvable hostname.
+    // No facet may dial a DNS name for the fixed strih (issue 1317 M4).
     for facet in ALL_FACETS {
         assert!(
             !boxes(facet).contains("strih-snv.lan"),
-            "facet {facet} still dials the unresolvable strih-snv.lan: {}",
+            "facet {facet} still dials the strih-snv.lan name: {}",
             boxes(facet)
         );
     }

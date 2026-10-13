@@ -1419,8 +1419,8 @@ fn ahk_restart_failure_message_does_not_falsely_claim_no_watcher_1295() {
     }
 }
 
-// issue 1317 (M4): strih-snv.lan has NO DNS entry on dev1, so the strih-snv dial default is the ONE
-// fleet list's host for strih-snv (scripts/lib/obs-fleet.sh), never the unresolvable name.
+// issue 1317 (M4): a fixed box dials its address, so the strih-snv dial default is the ONE
+// fleet list's host for strih-snv (scripts/lib/obs-fleet.sh), never a DNS name.
 // STRIH_LX_IP stays the explicit override.
 #[test]
 fn fleet_box_ip_strih_lx_defaults_to_the_fleet_list_host_1317() {

@@ -210,7 +210,8 @@ fn output_name_ok_accepts_the_box_prefix_and_rejects_another_box() {
     let (c3, _o, _e) = run_sourced(&[], "strih_lx_output_name_ok 'random'");
     assert_ne!(c3, 0);
     // issue 1414: the box's own pre-rename prefix is not a current output name either
-    let (c4, _o, _e) = run_sourced(&[], "strih_lx_output_name_ok 'STRIH-LX (2ME PGM)'");
+    let old = "strih_lx_output_name_ok 'STRIH-LX (2ME PGM)'"; // issue 1414
+    let (c4, _o, _e) = run_sourced(&[], old);
     assert_ne!(c4, 0, "the pre-rename prefix must be rejected");
 }
 

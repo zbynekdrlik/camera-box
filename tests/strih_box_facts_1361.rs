@@ -704,8 +704,7 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
 ///     strih-obs-start.sh -- historical names, not the box identity);
 ///   * the retired logind drop-in a self-heal removes (a historical file name, issue 1414 keeps it);
 ///   * the committed strih-nic-irq-affinity.service Description (pinned byte-identical to systemd/);
-///   * the loader's default-box constant (the selector default, the dispatch's `--box` default);
-///   * the loader's issue-1414 transition alias (`--box strih-lx` loads strih-snv).
+///   * the loader's default-box constant (the selector default, the dispatch's `--box` default).
 const ALLOWED_TOKENS: &[&str] = &[
     "strih-seed.json",
     "strih-lx-projector.json",
@@ -713,7 +712,6 @@ const ALLOWED_TOKENS: &[&str] = &[
     "90-strih-lx.conf",
     "Description=strih-snv:",
     "STRIH_BOX_DEFAULT=strih-snv",
-    "STRIH_BOX_ALIASES=\"strih-lx=strih-snv\"", // the issue 1414 alias
 ];
 
 #[test]

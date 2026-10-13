@@ -371,7 +371,10 @@ def test_the_presets_follow_the_box_fact_files():
     m = _mod()
     lx, spp, stp = _facts("strih-snv"), _facts("strih-pp"), _facts("stream-pp")
     strih = m.preset_options("strih-pp")
-    assert strih["sender_prefixes"] == {lx["STRIH_NDI_PREFIX"]: spp["STRIH_NDI_PREFIX"]}
+    # the SNV strih's prefix, plus its pre-rename prefix (issue 1414: a collection exported before
+    # the live rename still carries it)
+    assert strih["sender_prefixes"] == {lx["STRIH_NDI_PREFIX"]: spp["STRIH_NDI_PREFIX"],
+                                        "STRIH-LX": spp["STRIH_NDI_PREFIX"]}  # issue 1414
     assert strih["sender_renames"] == {lx["STRIH_CG_SENDER"]: spp["STRIH_CG_SENDER"]}
     assert strih["name"] == spp["STRIH_OBS_COLLECTION"]
     stream = m.preset_options("stream-pp")
