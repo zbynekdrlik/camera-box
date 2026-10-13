@@ -1925,6 +1925,9 @@ for PROJ in $(xrandr | awk '$1 ~ /^HDMI/ {print $1}'); do
 done
 AUTOSTART_EOF
   obs_box_openbox_autostart_preamble
+  # restreamer issue 393 (owner 13.10.2026): the X display for every --user unit started below (the
+  # restreamer's GUI window on a stream box, the session apps), never inherited by luck.
+  printf '%s\n' 'systemctl --user import-environment DISPLAY XAUTHORITY || true'
   # one start per unit: a not-yet-installed bundle-state server must never block the OBS start.
   printf '%s\n' 'systemctl --user start strih-obs.service || true' \
     'systemctl --user start strih-bundle-state-server.service || true'
