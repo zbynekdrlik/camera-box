@@ -996,3 +996,19 @@ def test_setup_step_13_has_no_stale_m4_wording():
     s = SETUP.read_text()
     step13 = s[s.index("step 13 "):s.index("step 14 ")]
     assert "M4" not in step13 and "NEVER started" not in step13 and "NOT started here" not in step13
+
+
+def test_the_stream_role_does_not_grade_bluetooth(op):
+    """Owner 13.10.2026: "na stream-pp netreba bluethooth ani na stream snv, iba na strih-snv treba".
+    stream-pp's hci0 reads DOWN (rfkill soft-blocked): a NOTE on the stream role, never a FAIL."""
+    (op.st / "hci").write_text(HCI_DEAD)
+    (op.sys / "class" / "bluetooth" / "hci0").mkdir(parents=True)
+    st, d = op.row("bluetooth", box="stream-pp")
+    assert st == "NOTE" and "stream role" in d, d
+
+
+def test_the_strih_role_still_fails_a_dead_bluetooth(op):
+    (op.st / "hci").write_text(HCI_DEAD)
+    (op.sys / "class" / "bluetooth" / "hci0").mkdir(parents=True)
+    st, d = op.row("bluetooth", box="strih-pp")
+    assert st == "FAIL", d
