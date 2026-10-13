@@ -27,6 +27,14 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c"
   - "tests/drm_output_vk_direct_1346.rs"
   - "tests/c/drm_output_vk_rig_harness.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-audio.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-audio.h"
+  - "vendor/obs-studio/libobs/obs-drm-output-audio-match.h"
+  - "src/drm_output_audio_match.rs"
+  - "tests/drm_output_audio_1424.rs"
+  - "tests/drm_output_vk_program_mode_1424.rs"
+  - "scripts/lib/drm-output-audio.sh"
+  - "tests/python/test_drm_output_audio_1424.py"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -483,3 +491,68 @@ helper wraps) gains a NEW call that consults live host/rig state, grep every OTH
 stub there too** — a shared decision function reused by multiple test files each maintaining
 their OWN mock helper is exactly this trap: adding a call inside the function under test is
 invisible to a mock helper written before that call existed.
+
+## The output's own HDMI audio + the Program-view mode (issue 1424, owner 13.10.2026)
+
+The fixed HDMI output plays the OBS program mix (mix 0) on ITS OWN connector's HDMI audio, written
+straight into that connector's ALSA hw PCM (`hw:<card>,<device>`) -- owner: "Ziadnych milion vrstiev
+po ceste": no PipeWire, no OBS monitoring device, no mixer in between, never a per-box setting.
+
+- **The match** (`obs-drm-output-audio-match.h`, pure C, Rust twin `src/drm_output_audio_match.rs`,
+  parity gate `tests/drm_output_audio_1424.rs` over the strih-pp fixtures in
+  `tests/fixtures/drm_output_audio_1424.tsv`): the connector's EDID (X RandR output property `EDID`,
+  read by output name BEFORE the backend takes the connector; readable while vk-direct holds it)
+  against the ELD of every HDMI/DP PCM. EDID bytes 8..11 ARE ELD bytes 16..19 (the kernel's /proc
+  prints them as little-endian `manufacture_id` / `product_id`), so the raw bytes compare, no swap;
+  the monitor name only breaks a tie. Two identical monitors = AMBIGUOUS = no audio.
+- **The ELD comes from the per-PCM ALSA control** `iface=PCM,name='ELD',device=<pcm>`
+  (`/dev/snd/controlC<card>`, kernel uapi ioctls), NEVER `/proc/asound/card*/eld#C.P`: that index is
+  the codec pin (+dev_id), not a PCM number (strih-snv card0 = ONE pin 0x5, dev_ids 0..3 behind PCMs
+  3/7/8/9, dynamic PCM assignment). The control is the kernel's own pcm->pin map.
+- **GOTCHA -- the NVIDIA HDA driver publishes a connector's ELD only once a mode is driven on it.** The
+  leg opens AFTER the backend start succeeded and re-reads for `DRM_OUTPUT_AUDIO_RESOLVE_WINDOW_MS`
+  (10 s) before the ONE `drm-output audio: NO AUDIO on '<conn>' -- <reason>` line. Never decide from a
+  read taken before the scanout starts.
+- **GOTCHA -- `<alsa/asoundlib.h>` and the kernel `<sound/asound.h>` cannot share a TU** (conflicting
+  `snd_pcm_format_t` / `snd_ctl_elem_iface_t` typedefs). alsa-lib is dlopen'd (`libasound.so.2`, the
+  vk-direct loader pattern) with its few prototypes declared locally; the control ioctls use the kernel
+  header.
+- **The matched PCM's "IEC958 Playback Switch" is turned on**: no sound server unmutes it any more.
+  Its index = the PCM's rank among the card's ELD-carrying PCMs (`drm_output_audio_iec958_index`;
+  strih-snv 3/7/8/9 <-> 0/1/2/3). UNVERIFIED on a card that ALSO has an analog codec with its own
+  S/PDIF switch (an Intel HDA laptop): there the HDMI switches may not start at index 0.
+- **Placement** (`drm_output_audio_plan_block`): each block plays at its OBS timestamp + the output's
+  measured present delay (render tick noted at the ONE publish entry `drm_output_publish_render_buf`,
+  on-screen at the lease flip event / the vk-direct present -- a lower bound by up to one refresh)
+  against `snd_pcm_delay`. Early audio is held, a queue grown past the floor (3 blocks) is trimmed
+  at most a block at a time. **Physics:** the mix leaves the raw callback ~the audio-buffering floor
+  (85 ms+) after its timestamp, the picture ~1-2 frames after it, so the audio normally runs BEHIND
+  the picture; the open line `drm-output audio: pcm hw:C,D card C device D delay <hold> ms (...
+  audio N ms behind the picture ...)` and a 60 s report line name the residual. Closing it would need
+  a video hold on the HDMI picture (an owner decision on picture latency).
+- **The Multiview view mutes it** (the cutter's own monitor never gets the program audio).
+- **Box side** (`scripts/lib/drm-output-audio.sh`): ONE WirePlumber rule disabling every ALSA node on
+  an `hdmi:` path (0.5 SPA-JSON drop-in in `/etc/wireplumber/wireplumber.conf.d/`, 0.4 Lua in
+  `main.lua.d/`, by `wireplumber --version`), so PipeWire leaves the PCM to OBS (EBUSY otherwise).
+  Written by setup-strih step 6 (inside `strih_drm_output_provision`) and setup-imag; never restarts
+  the running audio session -- it applies at the next session start. verify-strih item 4c (when the
+  output is live) grades the rule, `pw-dump`'s HDMI node count and the module's outcome line.
+  `DRM_OUTPUT_AUDIO_WP_ROOT` is the test seam for the rule's root.
+- **The Program view's MODE (vk-direct):** the vestibule SDI chain does not carry 1080p60, so
+  `drm_output_vk_pick_mode` prefers the CANVAS size at the CANVAS rate (within 0.2 %: 30.000 over
+  29.970, 29.970 when 30 is absent, never 25), else the issue-1346 rule; the Multiview keeps the
+  native ~60 Hz. The canvas exists only after the frontend's video reset (after the autostart), so the
+  output opens with the 1346 rule and the frame hook hands the canvas over (`drm_output_vk_want_mode`);
+  the present thread re-modes through the surface rebuild only when the pick changes and keeps the
+  size (a size change is named, kept until an OBS restart). The lease backend (imag) is unchanged.
+  The re-mode line names the pick: `program view: exact canvas rate`, `program view: near-rate, canvas
+  30.000 Hz -- one frame dropped every 33 s` (the live strih-pp HDMI-1 -> Blackmagic HDMI-to-SDI sink
+  offers 1080 @ 60/59.94/50/29.97/25/23.98 and 720 @ 60/59.94/50, NO 1080 @ 30.000, and 1080p60 does
+  not pass its SDI cable), or the native fallback. 720p60 vs 1080p29.97 is the owner's call after a
+  measurement, never code.
+- **Live acceptance (supervisor, strih-pp):** full Linux bundle deploy, setup-strih step 6 (the rule),
+  restart the operator's WirePlumber or re-login, remove the monitoring-device stopgap, restart OBS:
+  the OBS log shows `drm-output audio: pcm hw:0,<d>`, `pw-dump` has no hdmi node, the vestibule hears
+  the program; with the Program view on a 30 fps canvas the HDMI-1 sink reads `vk-direct: re-mode
+  1920x1080@60.000Hz -> @29.970Hz (program view: near-rate ...)`, and the SDI chain reaches cam1.
+
