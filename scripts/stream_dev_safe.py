@@ -30,6 +30,12 @@ PROGRAM_AUDIO_INPUT = "Zvuk z mixu"
 CLIP_INPUT_KIND = "ffmpeg_source"
 
 
+# The spellings a ported collection may carry for a registered sign (U+00AE) in a source name, the
+# same tuple as scripts/obs_collection_port.py (pinned by a pytest): live stream-pp kept the real sign,
+# `NDI\u00ae 2ME PGM`, where the manifest declares `NDI 2ME PGM`.
+REGISTERED_SIGN_SPELLINGS = ("\u00ae", "\u00c2\u00ae", "(R)", "Ar")
+
+
 class DevSafeError(Exception):
     """The safe development scene cannot be planned (a malformed spec, or the video input missing).
     Fail loud; never guess another source."""
@@ -58,6 +64,20 @@ def parse_dev_scene(manifest_text):
     if out["video_input"] == out["audio_input"]:
         raise DevSafeError("the video input and the clip input must differ")
     return out
+
+
+def resolve_spec(spec, input_names):
+    """*spec* with `video_input` resolved against the live input names: the declared name when it
+    exists, else its registered-sign spelling after the leading `NDI` (`NDI 2ME PGM` ->
+    `NDI\u00ae 2ME PGM` ...). Never any other source; the declared name stays when nothing matches."""
+    declared = spec["video_input"]
+    if declared in input_names or not declared.startswith("NDI "):
+        return spec
+    for sign in REGISTERED_SIGN_SPELLINGS:
+        alt = "NDI" + sign + declared[3:]
+        if alt in input_names:
+            return dict(spec, video_input=alt)
+    return spec
 
 
 def clip_input_settings(path):
@@ -157,6 +177,7 @@ def apply_dev_safe(obs, spec):
     scene = spec["scene"]
     scenes = [s.get("sceneName") for s in obs.req("GetSceneList").get("scenes", [])]
     inputs = [i.get("inputName") for i in obs.req("GetInputList").get("inputs", [])]
+    spec = resolve_spec(spec, inputs)
     items = None
     if scene in scenes:
         items = obs.req("GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
@@ -188,6 +209,8 @@ def apply_dev_safe(obs, spec):
 
 def read_verdict(obs, spec):
     """Read the live state over obs-websocket (read-only, ignore_err) and grade it."""
+    inputs = [i.get("inputName") for i in (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])]
+    spec = resolve_spec(spec, inputs)
     scenes = [s.get("sceneName") for s in (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes", [])]
     items = None
     if spec["scene"] in scenes:
