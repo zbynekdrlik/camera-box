@@ -263,11 +263,34 @@ strih_operator_nic_isolate() {
   return 0
 }
 
-# strih_operator_projector_seed COLLECTION DESKTOP_USER -> issue 1419: the fullscreen Multiview projector
-# seeded into an EMPTY saved_projectors list of the box's collection (scripts/strih_projector_seed.py,
-# operator-wins), only while OBS is stopped. WARN-only: a missing collection is named, never fatal.
+# strih_operator_hdmi_shows_multiview DRM_JSON -> rc 0 when the fixed HDMI output
+# (~/.camera-box/drm-output.json, issue 1346) is enabled and shows the built-in Multiview, else 1
+# (missing / unreadable / disabled / the Program view).
+strih_operator_hdmi_shows_multiview() {
+  local f="${1-}"
+  [ -n "$f" ] && [ -f "$f" ] || return 1
+  python3 - "$f" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(d, dict) and d.get("enabled") is True and d.get("view") == "multiview" else 1)
+PY
+}
+
+# strih_operator_projector_seed COLLECTION DESKTOP_USER [DRM_JSON] -> issue 1419: the fullscreen
+# Multiview projector seeded into an EMPTY saved_projectors list of the box's collection
+# (scripts/strih_projector_seed.py, operator-wins), only while OBS is stopped. Skipped when the HDMI
+# output already shows the Multiview (owner 13.10.2026, strih-pp: a window next to it is a duplicate).
+# WARN-only: a missing collection is named, never fatal.
 strih_operator_projector_seed() {
-  local coll="${1:?collection path required}" user="${2:?desktop user required}"
+  local coll="${1:?collection path required}" user="${2:?desktop user required}" drm="${3-}"
+  if strih_operator_hdmi_shows_multiview "$drm"; then
+    echo "  SKIP: the Multiview is on the HDMI output (${drm}: view multiview) -- no projector window seeded"
+    return 0
+  fi
   if strih_operator_obs_running; then
     echo "  WARN: OBS is running -- it rewrites ${coll} on exit, so the Multiview projector was NOT seeded; stop strih-obs.service and re-run setup-strih.sh (issue 1419)"
     return 0
@@ -286,7 +309,9 @@ strih_operator_projector_seed() {
 strih_operator_install() {
   local ini="${1:?user.ini path required}" user="${2:?desktop user required}" coll="${3:-}"
   strih_operator_user_ini_seed "$ini" "$user"
-  if [ -n "$coll" ]; then strih_operator_projector_seed "$coll" "$user"; fi
+  local uhome=""
+  uhome="$(getent passwd "$user" | cut -d: -f6)"
+  if [ -n "$coll" ]; then strih_operator_projector_seed "$coll" "$user" "${uhome}/.camera-box/drm-output.json"; fi
   strih_operator_nic_isolate
 }
 
@@ -839,15 +864,27 @@ strih_operator_grade_rows() {
   sleep "$gap"
   d2="$(strih_operator_grab "$user" "$home")"
   strih_operator_panel_verdict "$d1" "$d2" "$gap"
+  local hdmi_mv=0
+  if strih_operator_hdmi_shows_multiview "${home}/.camera-box/drm-output.json"; then hdmi_mv=1; fi
   strih_operator_projector_verdict "$(_strih_operator_on_x "$user" "$home" 10 \
-    "${STRIH_OPERATOR_WMCTRL:-wmctrl}" -lx 2>/dev/null || true)"
+    "${STRIH_OPERATOR_WMCTRL:-wmctrl}" -lx 2>/dev/null || true)" "$hdmi_mv"
   return 0
 }
 
-# strih_operator_projector_verdict WMCTRL_LX_TEXT -> ONE row (mv-projector, issue 1419): the operator's
-# Multiview projector window is open on :0 while OBS runs (strih-snv's saved fullscreen Multiview).
+# strih_operator_projector_verdict WMCTRL_LX_TEXT [HDMI_MV] -> ONE row (mv-projector, issue 1419): the
+# operator's Multiview projector window is open on :0 while OBS runs (strih-snv's saved fullscreen
+# Multiview). HDMI_MV=1 (the HDMI output shows the Multiview, owner 13.10.2026) needs no window: OK,
+# and a window next to it is a NOTE (a duplicate the operator may close).
 strih_operator_projector_verdict() {
-  local text="${1-}"
+  local text="${1-}" hdmi_mv="${2:-0}"
+  if [ "$hdmi_mv" = 1 ]; then
+    if grep -q 'Projector - Multiview' <<<"$text"; then
+      printf 'NOTE|(mv-projector) the Multiview is on the HDMI output AND a projector window is open -- a duplicate, close the window (owner 13.10.2026)\n'
+    else
+      printf 'OK|(mv-projector) the Multiview is on the HDMI output (drm-output view multiview); no projector window needed\n'
+    fi
+    return 0
+  fi
   if grep -q 'Projector - Multiview' <<<"$text"; then
     printf 'OK|(mv-projector) the Multiview projector window is open on :0\n'
   else
