@@ -124,6 +124,11 @@ fn the_present_thread_remodes_through_the_surface_rebuild_never_a_size_change() 
         r.contains("g_drm_vk.refresh_mhz"),
         "issue 1424: an unchanged pick rebuilds nothing"
     );
+    // the re-mode line names whether the picked rate IS the canvas rate or a near rate (29.97 vs 30)
+    assert!(
+        r.contains("exact canvas rate") && r.contains("near-rate"),
+        "issue 1424: the log names an exact vs a near-rate pick"
+    );
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -214,6 +219,29 @@ fn vectors() -> Vec<ModeVector> {
         // CTA extension block was not captured, so 30 Hz is not proven offered: nothing at 30 -> 60
         (vec![(1920, 1080, 60000)], (1920, 1080), HD30, 0),
         (vec![], (1920, 1080), HD30, -1),
+        // the LIVE strih-pp HDMI-1 -> Blackmagic HDMI-to-SDI mode list (read through cam1's grabber,
+        // 13.10.2026): no 1080 @ 30.000, so a 30 fps Program canvas lands on 1080 @ 29.97 (a frame
+        // drops every ~33 s against the canvas; 720p60 vs 1080p29.97 is the owner's call, not code)
+        (pp_vestibule(), (1920, 1080), HD30, 3),
+        // the same sink in the Multiview view: today's rule, native 60
+        (pp_vestibule(), (1920, 1080), NONE, 0),
+    ]
+}
+
+fn pp_vestibule() -> Vec<(u32, u32, u32)> {
+    vec![
+        (1920, 1080, 60000),
+        (1920, 1080, 59940),
+        (1920, 1080, 50000),
+        (1920, 1080, 29970),
+        (1920, 1080, 25000),
+        (1920, 1080, 23976),
+        (1280, 720, 60000),
+        (1280, 720, 59940),
+        (1280, 720, 50000),
+        (720, 576, 50000),
+        (720, 480, 59940),
+        (640, 480, 59940),
     ]
 }
 
