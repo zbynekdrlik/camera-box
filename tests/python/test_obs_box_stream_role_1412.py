@@ -576,3 +576,59 @@ def test_the_stream_encoder_grade_fails_on_a_changed_bitrate(tmp_path, boxes):
     r = _bash('ok(){ echo "OK $*"; }\nbad(){ echo "BAD $*"; }\nobs_box_stream_encoder_grade "%s"' % d,
               path_prefix=b, sources=(FACTS, PROVISION, ROLE), strict=True)
     assert r.stdout.splitlines()[0].startswith("BAD"), r.stdout
+
+
+# --- the strih role's profile (live strih-pp 13.10.2026: OBS ran the default profile `Untitled`) -----
+
+def test_the_strih_profile_writes_full_hd_output_and_no_encoder(tmp_path):
+    m = _profile_mod()
+    d = tmp_path / "strih-pp"
+    d.mkdir()
+    (d / "basic.ini").write_text("[General]\nName=old\n[Hotkeys]\nX=1\n[AdvOut]\nRecFilePath=/srv/_REC\n")
+    m.apply_strih(str(d), "strih-pp")
+    cp = configparser.RawConfigParser()
+    cp.optionxform = str
+    cp.read(d / "basic.ini")
+    assert {k: cp["Video"][k] for k in ("BaseCX", "BaseCY", "OutputCX", "OutputCY", "FPSCommon")} == \
+        {"BaseCX": "1920", "BaseCY": "1080", "OutputCX": "1920", "OutputCY": "1080", "FPSCommon": "30"}
+    assert cp["Output"]["Mode"] == "Advanced" and cp["General"]["Name"] == "strih-pp"
+    assert cp["Hotkeys"]["X"] == "1" and cp["AdvOut"]["RecFilePath"] == "/srv/_REC"
+    assert "Encoder" not in cp["AdvOut"] and "Rescale" not in cp["AdvOut"]
+    assert not (d / "service.json").exists() and not (d / "streamEncoder.json").exists()
+
+
+def test_the_strih_profile_cli_creates_the_missing_profile_dir(tmp_path):
+    d = tmp_path / "profiles" / "strih-pp"
+    r = subprocess.run(["python3", str(SCRIPTS / "obs_box_stream_profile.py"), "--strih",
+                        "--profile-dir", str(d), "--profile-name", "strih-pp"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert "OutputCX=1920" in (d / "basic.ini").read_text()
+
+
+@pytest.mark.parametrize("text,ok", [
+    ("[Video]\nBaseCX=1920\nBaseCY=1080\nOutputCX=1920\nOutputCY=1080\nFPSCommon=30\n", True),
+    ("[General]\nName=Untitled\n", False),
+    ("[Video]\nBaseCX=1920\nBaseCY=1080\nOutputCX=1280\nOutputCY=720\nFPSCommon=30\n", False),
+])
+def test_the_video_grade_reads_the_profile(tmp_path, text, ok):
+    d = tmp_path / "strih-pp"
+    d.mkdir()
+    (d / "basic.ini").write_text(text)
+    r = subprocess.run(["python3", str(SCRIPTS / "obs_box_stream_profile.py"), "--grade-video", str(d)],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert (r.stdout.strip() == "") is ok, r.stdout
+
+
+def test_the_video_grade_fails_on_a_missing_profile(tmp_path):
+    r = subprocess.run(["python3", str(SCRIPTS / "obs_box_stream_profile.py"), "--grade-video",
+                        str(tmp_path / "nope")], capture_output=True, text=True)
+    assert "missing" in r.stdout
+
+
+def test_setup_step_3_writes_the_strih_profile_and_verify_grades_it():
+    s = (SCRIPTS / "setup-strih.sh").read_text()
+    v = (SCRIPTS / "verify-strih.sh").read_text()
+    assert 'obs_box_strih_profile_provision "$OBS_CFG" "$DESKTOP_USER" "$(strih_lx_obs_profile)"' in s
+    assert "obs_box_profile_video_grade" in v
+    assert len(v.splitlines()) <= 1000 and len(s.splitlines()) <= 1000
