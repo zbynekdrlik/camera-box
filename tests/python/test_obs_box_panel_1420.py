@@ -50,9 +50,11 @@ def test_every_role_gets_the_panel_as_a_trial(box):
 
 
 def _autostart(box):
-    r = _bash("obs_box_role_apply; strih_openbox_autostart_text", box=box)
+    """The box's autostart through the shared renderer the issue-1361 golden uses (every lib sourced)."""
+    r = subprocess.run(["bash", str(REPO / "tests/fixtures/strih_box_1361/render.sh"), str(REPO), box],
+                       capture_output=True, text=True, cwd=str(REPO), timeout=120)
     assert r.returncode == 0, r.stderr
-    return r.stdout.splitlines()
+    return r.stdout.split("=== openbox-autostart ===\n", 1)[1].split("\n=== ", 1)[0].splitlines()
 
 
 @pytest.mark.parametrize("box", ["stream-pp", "strih-pp"])
