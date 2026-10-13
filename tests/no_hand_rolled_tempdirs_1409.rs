@@ -41,6 +41,7 @@ const ALLOWLIST: &[&str] = &[
     "drm_output_view_mv_budget_1346.rs: the test removes its workdir at the end",
     "drm_output_vk_direct_1346.rs: compile_and_run() removes its dir",
     "drm_output_vk_program_mode_1424.rs: std-only, a {tag}-{pid}-{counter} dir the test removes",
+    "drm_output_vk_two_displays_1424.rs: std-only, a {tag}-{pid}-{counter} dir the test removes",
     "genlock_audio_buffering_wiring_1367.rs: the lift removes its scratch dir",
     "genlock_audio_mix_guard_1381.rs: the lift removes its scratch dir",
     "genlock_audio_relabel_ingest_1381.rs: c_trace() removes its scratch dir",
