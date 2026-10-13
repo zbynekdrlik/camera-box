@@ -24,7 +24,14 @@ def _grade(tmp_path, state):
     script = ('set -euo pipefail\n. "$1"\n'
               'ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
               'strih_intercom_hub_hdmi_leg_grade "http://192.0.2.1:8790/api/state"\necho END')
-    env = dict(os.environ, STRIH_HUB_HDMI_STATE_FILE=str(f))
+    # the grade also checks the box carries aplay + amixer; stub both so the result never depends on
+    # whether the test host has alsa-utils (the CI runner does not)
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    for t in ("aplay", "amixer"):
+        (tools / t).write_text("#!/bin/sh\nexit 0\n")
+        (tools / t).chmod(0o755)
+    env = dict(os.environ, STRIH_HUB_HDMI_STATE_FILE=str(f), PATH=str(tools) + os.pathsep + os.environ["PATH"])
     r = subprocess.run(["bash", "-c", script, "harness", str(LIB)], capture_output=True, text=True,
                        env=env, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
