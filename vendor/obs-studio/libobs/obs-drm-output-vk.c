@@ -61,8 +61,10 @@
 #include <unistd.h>
 
 #include "util/base.h"
+#include "util/platform.h"
 #include "util/threading.h"
 #include "obs-drm-output-vk-internal.h"
+#include "obs-drm-output-audio.h" /* camera-box issue 1424: the present-delay note */
 
 /* -------------------------------------------------------------------------------------------------
  * Pure decision helpers (Tier-0, lift-compiled + truth-tabled by tests/drm_output_vk_direct_1346.rs).
@@ -304,6 +306,8 @@ static void *drm_output_vk_present_thread(void *arg)
 		pthread_mutex_lock(&g_drm_vk.lock);
 		drm_output_vk_present_done(src, took_new, &g_drm_vk.front, &g_drm_vk.pending);
 		pthread_mutex_unlock(&g_drm_vk.lock);
+		/* camera-box issue 1424: queued for the next vblank (a lower bound by up to one refresh) */
+		drm_output_present_note_shown(src, os_gettime_ns());
 
 		if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) {
 			if (!drm_output_vk_rebuild_or_give_up(pr, &rebuilds))

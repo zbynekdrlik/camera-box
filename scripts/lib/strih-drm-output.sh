@@ -28,6 +28,12 @@
 #
 # Provisioning ACTION (root, setup-strih.sh step 6; uses the caller's warn/fail):
 #   strih_drm_output_provision USER_HOME DESKTOP_USER SCRIPTS_DIR BACKEND
+#     (issue 1424: also writes the WirePlumber rule that leaves the HDMI/DP PCMs to OBS's audio leg)
+
+# issue 1424: the output's audio leg -- the WirePlumber rule that leaves every HDMI/DP PCM to OBS
+# (written at the end of strih_drm_output_provision) and its verify grading.
+# shellcheck source=scripts/lib/drm-output-audio.sh
+. "$(dirname "${BASH_SOURCE[0]}")/drm-output-audio.sh"
 
 # The M1 dark-grey solid (0x202020): the image before the first rendered frame + the fail-open one.
 STRIH_DRM_OUTPUT_ARGB=2105376
@@ -286,4 +292,7 @@ except ValueError as e:
     fi
   fi
   rm -f "$LEGACY_PROJ"
+  # issue 1424: the output writes the program mix straight into its connector's HDMI PCM, so
+  # PipeWire must leave every HDMI/DP PCM alone (generic, no per-box fact)
+  drm_output_audio_wp_provision
 }

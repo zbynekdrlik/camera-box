@@ -425,6 +425,8 @@ _RG_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_RG_HERE/lib/remoteos-mcp.sh"   # issue 1361: the ONE remoteos-mcp venv install (step 23; with setup-strih.sh + setup-device.sh)
 # shellcheck source=scripts/lib/bundle-state-files.sh
 . "$_RG_HERE/lib/bundle-state-files.sh"   # issue 1386: the ONE declared :8899 server file set (step 28; with setup-strih.sh)
+# shellcheck source=scripts/lib/drm-output-audio.sh
+. "$_RG_HERE/lib/drm-output-audio.sh"   # issue 1424: the WirePlumber rule that leaves the HDMI PCM to the in-OBS output (step 16; with setup-strih.sh)
 RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
   echo "FAIL: setup-imag: cannot resolve the PTP grandmaster host -- refusing to write an empty gm_allowlist (#1307)" >&2
   exit 1
@@ -1291,6 +1293,10 @@ obs_box_openbox_menu_xml "imag-nb" "systemctl --user start imag-obs.service" "/u
     > "$USER_HOME/.config/openbox/menu.xml" \
     || fail "#785: could not generate $USER_HOME/.config/openbox/menu.xml"
 chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/menu.xml"
+
+# issue 1424: the in-OBS HDMI output writes the program mix straight into its connector's HDMI PCM, so
+# PipeWire must leave every HDMI/DP PCM alone -- the same generic rule setup-strih writes.
+drm_output_audio_wp_provision
 
 # =============================================================================
 step 17 "Launch OBS on the desktop session (X11 :0)"
