@@ -92,6 +92,26 @@ fi
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4
 # self-loop, issue 1352; strih_lx_seed_manifest_json seeds the same pair) and the CG sender. A facts
 # list: unconsumed by setup-strih.sh (defined + unit-tested only).
+# issue 1414 (live strih-snv rename 13.10.2026): set the hostname AND its /etc/hosts 127.0.1.1 line,
+# then restart avahi-daemon so the mDNS host name (`<name>.local`, which NDI receivers resolve)
+# follows. Before this, /etc/hosts kept the old name and avahi announced `strih-lx.local` until both
+# were fixed by hand. Nothing happens on a box already named right with the right hosts line.
+strih_hostname_apply() {
+  local want="$1" hosts="${2:-/etc/hosts}" cur="" tmp=""
+  cur="$(hostname 2>/dev/null || true)"
+  if [ "$cur" = "$want" ] && grep -qxF "$(printf '127.0.1.1\t%s' "$want")" "$hosts" 2>/dev/null; then
+    return 0
+  fi
+  if [ "$cur" != "$want" ]; then
+    hostnamectl set-hostname "$want" 2>/dev/null || echo "  WARNING: could not set hostname (non-fatal)" >&2
+  fi
+  tmp="$(mktemp)"
+  awk -v w="$want" 'BEGIN{d=0} $1=="127.0.1.1"{if(!d){print "127.0.1.1\t" w; d=1}; next} {print} END{if(!d) print "127.0.1.1\t" w}' "$hosts" >"$tmp"
+  cat "$tmp" >"$hosts"
+  rm -f "$tmp"
+  systemctl try-restart avahi-daemon 2>/dev/null || true
+}
+
 strih_lx_ndi_inputs() {
   local n cg p
   cg="$(strih_lx_cg_sender)" || return 1

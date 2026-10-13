@@ -104,7 +104,7 @@ echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, 
 step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
 command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
 echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli, pin the profile with connection.interface-name <rig NIC>$(strih_nic_ring_note "$(strih_lx_nic_driver)") -- recorded here as the target; step 16g sets connection.autoconnect no on every other wired profile on the rig subnet and brings it down; verify-strih item 36 grades the pinning)"
-hostnamectl set-hostname "$(strih_lx_hostname)" 2>/dev/null || warn "  could not set hostname (non-fatal)"
+strih_hostname_apply "$(strih_lx_hostname)" /etc/hosts
 obs_box_timezone
 
 # ---------------------------------------------------------------------------------------------
