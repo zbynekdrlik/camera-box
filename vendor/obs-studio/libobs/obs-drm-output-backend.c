@@ -78,6 +78,7 @@ static struct {
 	gs_texture_t *mid;         /* the intermediate render target (graphics context) */
 	bool gl_ready;             /* mid + the GL import exist (graphics context) */
 	char connector[64];
+	uint32_t want_w, want_h, want_mhz; /* issue 1424: the last wanted mode handed over (graphics thread) */
 } g_vkd = {
 	.lock = PTHREAD_MUTEX_INITIALIZER,
 };
@@ -102,6 +103,7 @@ static bool vkd_start(const struct obs_drm_output_config *cfg)
 	}
 	snprintf(g_vkd.connector, sizeof(g_vkd.connector), "%s", cfg->connector_name);
 	g_vkd.gl_ready = false;
+	g_vkd.want_w = g_vkd.want_h = g_vkd.want_mhz = 0; /* issue 1424: the output opened with today's rule */
 	g_vkd.active = true;
 	os_atomic_set_bool(&g_vkd.program, cfg->program);
 	os_atomic_set_bool(&g_vkd.owns, true);
@@ -181,6 +183,27 @@ static bool vkd_gl_bind(void)
 	return true;
 }
 
+/* camera-box issue 1424, graphics thread: the Program view wants the CANVAS size at the CANVAS frame
+ * rate (one render tick = one scanout; 1080p30 is what the vestibule's SDI chain carries); the Multiview
+ * view wants nothing (today's native ~60 Hz rule, the operator's monitor unchanged). Handed over only on
+ * a change, so a steady output re-modes never. */
+static void vkd_want_program_mode(void)
+{
+	uint32_t w = 0, h = 0, mhz = 0;
+	struct obs_video_info ovi;
+	if (obs_drm_output_get_view() == OBS_DRM_OUTPUT_VIEW_PROGRAM && obs_get_video_info(&ovi) && ovi.fps_den != 0) {
+		w = ovi.base_width;
+		h = ovi.base_height;
+		mhz = (uint32_t)((uint64_t)ovi.fps_num * 1000u / ovi.fps_den);
+	}
+	if (w == g_vkd.want_w && h == g_vkd.want_h && mhz == g_vkd.want_mhz)
+		return;
+	g_vkd.want_w = w;
+	g_vkd.want_h = h;
+	g_vkd.want_mhz = mhz;
+	drm_output_vk_want_mode(w, h, mhz);
+}
+
 /* The frame hook. true = the vk-direct backend owns the output (the lease hook must not run). */
 static bool vkd_on_frame(void)
 {
@@ -188,6 +211,7 @@ static bool vkd_on_frame(void)
 		return false;
 	if (!os_atomic_load_bool(&g_vkd.program) || !drm_output_vk_wants_frames())
 		return true;
+	vkd_want_program_mode(); /* issue 1424 */
 
 	obs_enter_graphics();
 	if (!os_atomic_load_bool(&g_vkd.program)) { /* re-check: a stop may have disarmed */

@@ -731,6 +731,11 @@ fn provision_step6_vk_direct_reads_the_x_view_through_the_desktop_user() {
                 "STRIH_LEGACY_PROJ".into(),
                 d.join("legacy-projector.json").to_str().unwrap().into(),
             ),
+            // issue 1424: the WirePlumber HDMI rule step 6 also writes goes under the scratch dir
+            (
+                "DRM_OUTPUT_AUDIO_WP_ROOT".into(),
+                d.join("wp-root").to_str().unwrap().into(),
+            ),
         ]
     };
     let run_with = |fx: &str| {

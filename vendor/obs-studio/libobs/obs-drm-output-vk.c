@@ -61,8 +61,10 @@
 #include <unistd.h>
 
 #include "util/base.h"
+#include "util/platform.h"
 #include "util/threading.h"
 #include "obs-drm-output-vk-internal.h"
+#include "obs-drm-output-audio.h" /* camera-box issue 1424: the present-delay note */
 
 /* -------------------------------------------------------------------------------------------------
  * Pure decision helpers (Tier-0, lift-compiled + truth-tabled by tests/drm_output_vk_direct_1346.rs).
@@ -235,6 +237,10 @@ static void *drm_output_vk_present_thread(void *arg)
 	unsigned overdue = 0;
 	unsigned rebuilds = 0;
 	while (os_atomic_load_bool(&g_drm_vk.running)) {
+		/* issue 1424: a new wanted mode (the Program canvas rate / the Multiview's native rate); a
+		 * re-mode that could rebuild neither the wanted nor today's mode ends the loop by name */
+		if (os_atomic_load_bool(&g_drm_vk.remode) && !drm_output_vk_remode_if_needed())
+			break;
 		uint32_t img = 0;
 		VkResult r = g_drm_vk.vk.vkAcquireNextImageKHR(g_drm_vk.device, g_drm_vk.swapchain, DRM_OUTPUT_VK_WAIT_NS,
 							   g_drm_vk.sem_acquire, VK_NULL_HANDLE, &img);
@@ -304,6 +310,8 @@ static void *drm_output_vk_present_thread(void *arg)
 		pthread_mutex_lock(&g_drm_vk.lock);
 		drm_output_vk_present_done(src, took_new, &g_drm_vk.front, &g_drm_vk.pending);
 		pthread_mutex_unlock(&g_drm_vk.lock);
+		/* camera-box issue 1424: queued for the next vblank (a lower bound by up to one refresh) */
+		drm_output_present_note_shown(src, os_gettime_ns());
 
 		if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_ERROR_SURFACE_LOST_KHR) {
 			if (!drm_output_vk_rebuild_or_give_up(pr, &rebuilds))
@@ -337,6 +345,14 @@ static void *drm_output_vk_present_thread(void *arg)
 	return NULL;
 }
 
+void drm_output_vk_want_mode(uint32_t w, uint32_t h, uint32_t mhz)
+{
+	os_atomic_set_long(&g_drm_vk.want_w, (long)w);
+	os_atomic_set_long(&g_drm_vk.want_h, (long)h);
+	os_atomic_set_long(&g_drm_vk.want_mhz, (long)mhz);
+	os_atomic_set_bool(&g_drm_vk.remode, true);
+}
+
 bool drm_output_vk_open(const char *output_name, uint32_t solid_argb)
 {
 	if (g_drm_vk.open)
@@ -353,6 +369,11 @@ bool drm_output_vk_open(const char *output_name, uint32_t solid_argb)
 	g_drm_vk.gl_skips = 0;
 	g_drm_vk.submit_outstanding = false;
 	g_drm_vk.retire_countdown = 0;
+	/* issue 1424: open with today's rule; the graphics thread hands the Program canvas over */
+	os_atomic_set_long(&g_drm_vk.want_w, 0);
+	os_atomic_set_long(&g_drm_vk.want_h, 0);
+	os_atomic_set_long(&g_drm_vk.want_mhz, 0);
+	os_atomic_set_bool(&g_drm_vk.remode, false);
 
 	if (!drm_output_vk_setup(output_name)) {
 		drm_output_vk_destroy_all();

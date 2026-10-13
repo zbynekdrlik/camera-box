@@ -39,7 +39,9 @@
 #include "obs.h"
 #include "obs-drm-output.h"
 #include "obs-drm-output-internal.h" /* camera-box issue 1346: the view TU seam */
+#include "obs-drm-output-audio.h"    /* camera-box issue 1424: the connector's own HDMI audio */
 #include "graphics/vec4.h"
+#include "util/platform.h"
 #include "util/threading.h"
 
 /* -------------------------------------------------------------------------------------------------
@@ -681,6 +683,7 @@ static void *drm_output_flip_thread(void *arg)
 			}
 		}
 		if (program) {
+			drm_output_present_note_shown(pnext, os_gettime_ns()); /* camera-box issue 1424 */
 			pthread_mutex_lock(&g_drm.program_lock);
 			if (g_drm.p_pending == pnext)
 				g_drm.p_pending = -1;
@@ -751,15 +754,27 @@ static void drm_output_teardown_locked(void)
 	g_drm.connector_id = 0;
 }
 
+/* camera-box issue 1424: the audio leg of the module's one output (start opens it, stop closes it). */
+static struct drm_output_audio *g_drm_audio;
+
 bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 {
 	if (!cfg || !cfg->connector_name) {
 		blog(LOG_WARNING, "drm-output: start called with no connector — ignored");
 		return false;
 	}
+	/* camera-box issue 1424: the connector's EDID, read while X still lists the output. */
+	uint8_t edid[512];
+	const size_t edid_len = drm_output_audio_read_edid(cfg->connector_name, edid, sizeof(edid));
 	/* camera-box issue 1346: the NVIDIA Vulkan direct-display backend owns this start. */
-	if (cfg->backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT)
-		return drm_output_vk_direct_backend.start(cfg);
+	if (cfg->backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT) {
+		if (!drm_output_vk_direct_backend.start(cfg))
+			return false;
+		if (!g_drm_audio) /* issue 1424: opened after the mode is driven (the ELD appears then) */
+			g_drm_audio = drm_output_audio_open(cfg->connector_name, edid, edid_len,
+							    &drm_output_present_clock_main);
+		return true;
+	}
 
 	/* NOTE: the whole start sequence holds g_drm.lock across X round-trips + a full modeset
 	 * (seconds if X is slow). obs_drm_output_active() blocks for that window — fine for M1's
@@ -818,11 +833,16 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 	pthread_mutex_unlock(&g_drm.lock);
 	blog(LOG_INFO, "drm-output: ACTIVE — page-flipping solid 0x%06x on '%s'",
 	     cfg->solid_argb & 0xFFFFFFu, cfg->connector_name);
+	if (!g_drm_audio) /* camera-box issue 1424: the mode is set, so the connector's ELD can appear */
+		g_drm_audio = drm_output_audio_open(cfg->connector_name, edid, edid_len, &drm_output_present_clock_main);
 	return true;
 }
 
 void obs_drm_output_stop(void)
 {
+	/* camera-box issue 1424: the audio leg goes first (its mix callback disconnected, its PCM closed). */
+	drm_output_audio_close(g_drm_audio);
+	g_drm_audio = NULL;
 	/* camera-box issue 1346: the vk-direct backend (a no-op when it never started). */
 	drm_output_vk_direct_backend.stop();
 
@@ -1101,6 +1121,7 @@ int drm_output_claim_render_buf(void)
  * (the mailbox is about to be torn down). */
 void drm_output_publish_render_buf(int idx)
 {
+	drm_output_present_note_published(idx); /* camera-box issue 1424: this frame's render tick */
 	if (drm_output_vk_direct_backend.owns()) { /* camera-box issue 1346 */
 		drm_output_vk_direct_backend.publish(idx);
 		return;

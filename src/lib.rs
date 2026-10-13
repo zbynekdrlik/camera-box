@@ -140,6 +140,12 @@ pub mod colour_verify;
 // so it unit-tests Tier-0; the rig E2E (recording-e2e.sh live OBS WS GetStats) calls it to gate.
 pub mod render_budget;
 
+// issue 1424 — the Rust twin of the vendored libobs header `obs-drm-output-audio-match.h`: which
+// ALSA hw PCM carries the fixed HDMI output's own connector (EDID vs per-PCM ELD), its IEC958 switch, and
+// how one program-mix block is placed against the picture. Pure, so it unit-tests Tier-0;
+// `tests/drm_output_audio_1424.rs` compiles the C header and requires the same answers.
+pub mod drm_output_audio_match;
+
 // #373 — the zero-loss HEADLINE analyzed-span duration gate (pure decision). A collapsed/partial
 // cam2 optical read must not vacuously pass the headline over a handful of frames. No probe deps,
 // so it unit-tests Tier-0; the probe-gated `bin/recording-verdict` feeds each node's optical-span
