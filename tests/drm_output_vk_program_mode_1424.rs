@@ -138,7 +138,7 @@ fn pick_mode_prefers_the_program_canvas_at_its_rate() {
     let mut c = String::from("#include <stdbool.h>\n#include <stdint.h>\n#include <stdio.h>\n");
     c.push_str(&helper);
     c.push_str("\nint main(void){\n");
-    for (i, (modes, (nw, nh), (ww, wh, wr), _)) in vs.iter().enumerate() {
+    for (modes, (nw, nh), (ww, wh, wr), _) in vs.iter() {
         let n = modes.len();
         let cap = n.max(1);
         let list = |f: &dyn Fn(&(u32, u32, u32)) -> u32| {
