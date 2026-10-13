@@ -90,3 +90,24 @@ def test_verify_strih_grades_the_leg_and_stays_in_budget():
     # inside item 9 (program audio), after the program-audio verdict
     i = v.index('strih_intercom_hub_hdmi_leg_grade "http')
     assert v.index('AUDIO_VERDICT="$(strih_lx_program_audio_verdict') < i < v.index("# 9b) MiniFuse")
+
+
+def test_a_box_without_aplay_or_amixer_fails_the_leg(tmp_path):
+    # the leg runs aplay + amixer (alsa-utils, setup-strih step 4b); review finding: a box without them
+    # must FAIL by name, not read as a silent leg
+    import shutil
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ("python3", "cat"):
+        (bindir / tool).symlink_to(shutil.which(tool))
+    f = tmp_path / "state.json"
+    f.write_text(json.dumps(_state(_vestibule())))
+    script = ('set -euo pipefail\n. "$1"\n'
+              'ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
+              'PATH="$2"\nstrih_intercom_hub_hdmi_leg_grade "http://192.0.2.1:8790/api/state"\necho END')
+    env = dict(os.environ, STRIH_HUB_HDMI_STATE_FILE=str(f))
+    r = subprocess.run(["/bin/bash", "-c", script, "harness", str(LIB), str(bindir)], capture_output=True,
+                       text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any(ln.startswith("FAIL") and "alsa-utils" in ln for ln in r.stdout.splitlines()), r.stdout
+    assert r.stdout.strip().splitlines()[-1] == "END"
