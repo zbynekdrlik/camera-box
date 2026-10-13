@@ -1118,6 +1118,26 @@ fn strih_snv_deploys_a_box_that_still_runs_its_pre_rename_hostname_1414() {
     }
 }
 
+/// issue 1414 review round 2: only THIS box's pre-rename name is accepted -- another fleet name and
+/// an upper-cased hostname still refuse, nothing changed.
+#[test]
+fn strih_snv_accepts_only_its_own_pre_rename_hostname_1414() {
+    for other in ["stream", "STRIH-SNV", "resolume"] {
+        let r = run_exec(&[("STUB_HOSTNAME", other)]);
+        assert_eq!(r.code, 4, "{other}: err={}", r.err);
+        assert!(
+            r.err.contains("refusing to provision"),
+            "{other}: {}",
+            r.err
+        );
+        assert!(
+            !r.calls.contains("rsync "),
+            "{other}: rsync must not run:\n{}",
+            r.calls
+        );
+    }
+}
+
 /// review round 5: the staged-tree check (the box fact file, its intercom routing file) is a pure
 /// function with its own failure cases.
 #[test]

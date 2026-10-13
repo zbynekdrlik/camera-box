@@ -464,3 +464,25 @@ def test_the_strih_pp_preset_still_renames_a_pre_rename_self_loop():
     assert by["NDI 2ME PVW"]["settings"]["ndi_source_name"] == "STRIH-PP (2ME PVW)"
     assert by["NDI 2ME PGM (mv)"]["settings"]["ndi_source_name"] == "STRIH-PP (2ME PGM)"
     assert not [ln for ln in rep if ln.startswith("WARN sender") and "STRIH-" in ln], rep
+
+
+
+# --- review round 2: the last name-keyed facts take an old name too ---------------------------------
+
+def test_the_ahk_fact_and_the_home_force_list_take_an_old_name():
+    r = _fleet('obs_fleet_has_ahk resolume; obs_fleet_has_ahk RESOLUME-SNV; obs_fleet_has_ahk stream')
+    assert r.stdout == "110", r.stdout + r.stderr
+    for listed, asked in [("resolume-snv", "resolume"), ("resolume", "resolume-snv")]:
+        q = _bash(f'. "{LIB}/obs-fleet.sh"; obs_fleet_is_home {asked}; echo "rc=$?"',
+                  env={"OBS_FLEET_HOME": listed})
+        assert q.stdout.strip() == "rc=0", (listed, asked, q.stdout + q.stderr)
+    q = _bash(f'. "{LIB}/obs-fleet.sh"; obs_fleet_is_home stream-snv; echo "rc=$?"',
+              env={"OBS_FLEET_HOME": "resolume"})
+    assert q.stdout.strip() == "rc=1"
+
+
+def test_setup_strih_removes_the_old_seed_only_after_the_new_seeder_is_installed():
+    """A run that dies between the two never leaves the box's old seeder without its manifest."""
+    text = (SCRIPTS / "setup-strih.sh").read_text()
+    assert (text.index('install -m 0755 "${HERE}/strih_scenes.py"')
+            < text.index("rm -f /opt/camera-box/strih-lx-seed.json"))
