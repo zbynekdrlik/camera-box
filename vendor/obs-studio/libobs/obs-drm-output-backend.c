@@ -117,7 +117,7 @@ static bool vkd_start(struct drm_output_inst *inst)
 		blog(LOG_INFO, "drm-output: already active — start ignored (vk-direct, '%s')", inst->connector);
 		return true;
 	}
-	k->disp = drm_output_vk_open(inst->connector, inst->solid_argb, vkd_note_shown, inst);
+	k->disp = drm_output_vk_open(inst->index, inst->connector, inst->solid_argb, vkd_note_shown, inst);
 	if (!k->disp) {
 		pthread_mutex_unlock(&k->lock);
 		blog(LOG_WARNING, "drm-output: start FAILED for '%s' (vk-direct)", inst->connector);

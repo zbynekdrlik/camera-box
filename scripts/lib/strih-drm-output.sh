@@ -31,7 +31,9 @@
 #     (issue 1424: also writes the WirePlumber rule that leaves the HDMI/DP PCMs to OBS's audio leg;
 #     part 2: OUTPUTS = the fact STRIH_HDMI_OUTPUTS -- a connector list writes / migrates the "outputs"
 #     array, the operator's per-connector views kept)
-# issue 1424 part 2 (the array form): strih_drm_xrandr_connected, strih_drm_outputs_spec_ok,
+# issue 1424 part 2 (the array form; the fact grammar strih_box_hdmi_outputs_ok and the fact accessor
+# strih_lx_hdmi_outputs come from scripts/lib/strih-box-facts.sh, which strih-provision.sh sources):
+# strih_drm_xrandr_connected,
 #   strih_drm_outputs_config_json, strih_drm_output_log_of, strih_drm_outputs_graded_here and the verify
 #   grader strih_drm_outputs_verify_report (item 4c grades EVERY output by its own log lines)
 
@@ -235,26 +237,13 @@ strih_drm_xrandr_connected() {
   [ -n "$want" ] && [ "$got" = yes ]
 }
 
-# strih_drm_outputs_spec_ok SPEC -> 0 iff SPEC is 1..2 space-separated CONNECTOR:VIEW tokens (the box-fact
-# grammar, scripts/lib/strih-box-facts.sh), no connector twice.
-strih_drm_outputs_spec_ok() {
-  local c='[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]' t n=0 seen=" "
-  for t in ${1-}; do
-    [[ "$t" =~ ^${c}+:(program|multiview)$ ]] || return 1
-    case "$seen" in *" ${t%%:*} "*) return 1 ;; esac
-    seen="${seen}${t%%:*} "
-    n=$((n + 1))
-  done
-  [ "$n" -ge 1 ] && [ "$n" -le 2 ]
-}
-
 # strih_drm_outputs_config_json SPEC [BACKEND] -> the one-line array config for a FRESH box, the entries
 # in the machine-written key order (connector, argb, view, backend; lease = the ABSENT backend key, as
 # in the single-object form) -- byte-identical to what strih_scenes.write_drm_outputs writes. Refuses
 # (prints nothing, returns 1) a malformed SPEC or an unknown backend.
 strih_drm_outputs_config_json() {
   local spec="${1:-}" backend="${2:-lease}" extra="" t out="" sep=""
-  strih_drm_outputs_spec_ok "$spec" || return 1
+  strih_box_hdmi_outputs_ok "$spec" || return 1
   case "$backend" in
     lease) ;;
     vk-direct) extra=',"backend":"vk-direct"' ;;
@@ -309,7 +298,18 @@ sys.exit(0 if isinstance(c, dict) and "outputs" in c else 1)' "${1:-}" 2>/dev/nu
 # single-object grading of item 4c applies (today's one-output boxes, an absent config).
 strih_drm_outputs_graded_here() {
   strih_drm_outputs_is_array "${1:-}" && return 0
-  [ -f "${1:-}" ] && strih_drm_outputs_spec_ok "$(strih_lx_hdmi_outputs 2>/dev/null || true)"
+  [ -f "${1:-}" ] && strih_box_hdmi_outputs_ok "$(strih_lx_hdmi_outputs 2>/dev/null || true)"
+}
+
+# strih_drm_outputs_verify_dispatch VERDICT USER_HOME SCN_BIN CONF LOG BACKEND_FACT XRANDR_TEXT -- verify
+# item 4c's per-output arm: when the single-output VERDICT is not skip-no-output and CONF is graded per
+# output (strih_drm_outputs_graded_here), grade it (strih_drm_outputs_verify_report) and return 0 (the
+# caller then skips its single-output grading); 1 = the single-output grading applies.
+strih_drm_outputs_verify_dispatch() {
+  [ "${1:-}" != skip-no-output ] && strih_drm_outputs_graded_here "${4:-}" || return 1
+  shift
+  strih_drm_outputs_verify_report "$@"
+  return 0
 }
 
 # strih_drm_outputs_verify_report USER_HOME SCN_BIN CONF LOG BACKEND_FACT XRANDR_TEXT -- verify-strih
@@ -336,7 +336,7 @@ strih_drm_outputs_verify_report() {
     bad "HDMI outputs: ${conf} \"outputs\" is malformed (${verdict}) -- OBS starts NO output (all or none); re-run setup-strih.sh step 6"
     return 0
   fi
-  if strih_drm_outputs_spec_ok "$spec"; then
+  if strih_box_hdmi_outputs_ok "$spec"; then
     want="$(strih_drm_outputs_spec_connectors "$spec")"
     got="$(printf '%s\n' "$lines" | sed 1d | awk 'NF { print $1 }' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
     if [ "$want" != "$got" ]; then
@@ -351,6 +351,8 @@ strih_drm_outputs_verify_report() {
     elif [ "$fact" = vk-direct ]; then
       printf '%s\n' "$xr" | strih_drm_xrandr_connected "$conn" && hdmi=1
     elif strih_drm_hdmi_connected /sys/class/drm "$fact" ""; then
+      # lease: ANY kernel HDMI connector (known limit: X RandR sticks at disconnected after a lease and its
+      # names differ from the kernel's, HDMI-1 vs HDMI-A-1 -- no per-connector signal; every strih is vk-direct)
       hdmi=1
     fi
     olog=""
@@ -362,7 +364,7 @@ strih_drm_outputs_verify_report() {
     v="$(strih_drm_output_verdict "$hdmi" "$conn" "$view" "$live" "$mv" "$backend" "$fact" "$dead" || true)"
     case "$v" in
       ok)                 ok   "HDMI output ${conn}: live (backend ${backend}), view ${view} (${conf} + its own lines in the newest OBS log)"
-                          drm_output_audio_verify_report "$user_home" "${user_home##*/}" "$log" "" "$conn" ;;
+                          drm_output_audio_verify_report "$user_home" "${user_home##*/}" "$log" "" "$conn" "$view" ;;
       x-unreadable)       bad  "HDMI output ${conn}: the box fact is vk-direct, but xrandr on :0 answered nothing -- cannot grade it" ;;
       skip-no-hdmi | hdmi-unplugged) note "HDMI output ${conn}: armed in ${conf} but X RandR does not list it connected (report-only)" ;;
       backend-drift)      bad  "HDMI output ${conn}: uses backend ${backend} but the box fact STRIH_HDMI_OUTPUT_BACKEND is ${fact} -- re-run setup-strih.sh step 6" ;;
@@ -446,7 +448,7 @@ strih_drm_output_provision() {
   fi
   if [ -L "$DRM_CONF_DIR" ] || [ -L "$DRM_CONF" ]; then
     warn "  SKIP issue 1346: ${DRM_CONF_DIR} or ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
-  elif [ ! -f "$DRM_CONF" ] && strih_drm_outputs_spec_ok "$outputs"; then
+  elif [ ! -f "$DRM_CONF" ] && strih_box_hdmi_outputs_ok "$outputs"; then
     strih_drm_outputs_provision_fresh "$user_home" "$desktop_user" "$backend" "$outputs" "$DRM_CONF"
   elif [ -f "$DRM_CONF" ]; then
     echo "  ${DRM_CONF} already present -- leaving the operator's HDMI output choice"

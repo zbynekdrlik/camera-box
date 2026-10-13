@@ -127,10 +127,11 @@ _strih_box_https_name() {
   [[ "${1-}" =~ ^${l}(${m}*${l})?(\.${l}(${m}*${l})?)+$ ]]
 }
 
-# _strih_box_hdmi_outputs_ok VALUE -> 0 iff VALUE is 1..2 space-separated CONNECTOR:VIEW tokens (CONNECTOR
+# strih_box_hdmi_outputs_ok VALUE -> 0 iff VALUE is 1..2 space-separated CONNECTOR:VIEW tokens (CONNECTOR
 # = an X RandR output name of letters, digits, `.` `_` `-`; VIEW = program | multiview), no connector
-# twice. The character set is spelled out (a bracket RANGE follows the locale in bash).
-_strih_box_hdmi_outputs_ok() {
+# twice. The character set is spelled out (a bracket RANGE follows the locale in bash). The ONE grammar of
+# the fact: scripts/lib/strih-drm-output.sh (step 6, verify item 4c) calls it too (issue 1424 review).
+strih_box_hdmi_outputs_ok() {
   local c='[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]' t n=0 seen=" "
   for t in ${1-}; do
     [[ "$t" =~ ^${c}+:(program|multiview)$ ]] || return 1
@@ -221,7 +222,7 @@ strih_box_validate() {
     none:none) ;;
     none:* | *:none) echo "strih-box ${name}: STRIH_HDMI_OUTPUTS '${v}' must be none exactly when STRIH_HDMI_OUTPUT_BACKEND is none" >&2; bad=1 ;;
     *:auto) ;;
-    *) _strih_box_hdmi_outputs_ok "$v" \
+    *) strih_box_hdmi_outputs_ok "$v" \
       || { echo "strih-box ${name}: STRIH_HDMI_OUTPUTS '${v}' must be auto, none or 1..2 space-separated CONNECTOR:program|multiview (no connector twice)" >&2; bad=1; } ;;
   esac
   # issue 1412: the box ROLE (strih = the cutter, stream = the stream OBS box), the PTP grandmaster the

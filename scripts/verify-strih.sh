@@ -233,7 +233,8 @@ if [ -n "$DRM_LOG" ] && strih_drm_vk_present_dead < "$DRM_LOG"; then
 fi
 DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" "$DRM_BACKEND_V" "$DRM_BACKEND_FACT" "$DRM_VK_DEAD" || true)"
 [ "$DRM_BACKEND_FACT" != none ] || DRM_VERDICT=skip-no-output   # issue 1412: a stream box has no fixed HDMI output
-if [ "$DRM_VERDICT" != skip-no-output ] && strih_drm_outputs_graded_here "$DRM_CONF_V"; then DRM_VERDICT=per-output; strih_drm_outputs_verify_report "$USER_HOME" "$SCN_BIN" "$DRM_CONF_V" "$DRM_LOG" "$DRM_BACKEND_FACT" "$DRM_XRANDR_V"; fi
+if strih_drm_outputs_verify_dispatch "$DRM_VERDICT" "$USER_HOME" "$SCN_BIN" "$DRM_CONF_V" "$DRM_LOG" \
+     "$DRM_BACKEND_FACT" "$DRM_XRANDR_V"; then DRM_VERDICT=per-output; fi
 case "$DRM_VERDICT" in
   per-output)         ;;  # issue 1424 part 2: graded per output just above
   skip-no-output)     note "HDMI output: not graded -- STRIH_HDMI_OUTPUT_BACKEND=none (this box has no fixed HDMI output)" ;;

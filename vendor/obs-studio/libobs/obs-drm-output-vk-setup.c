@@ -217,7 +217,7 @@ static unsigned long drm_output_vk_find_output(struct drm_output_vk_disp *d, con
 }
 
 /* issue 1424 part 2: true when ANOTHER open display presents on display plane `plane` (one plane per
- * display). Caller holds g_drm_vk_dev.lock, or is the display's own present thread (a rebuild). */
+ * display). Open path only, under g_drm_vk_dev.lock (a rebuild relies on currentDisplay instead). */
 static bool drm_output_vk_plane_taken(const struct drm_output_vk_disp *d, int plane)
 {
 	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {
@@ -379,7 +379,7 @@ static bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebu
 				for (uint32_t p = 0; p < npl && plane < 0; p++) {
 					if (plp[p].currentDisplay != VK_NULL_HANDLE && plp[p].currentDisplay != d->display)
 						continue;
-					if (drm_output_vk_plane_taken(d, (int)p))
+					if (!rebuild && drm_output_vk_plane_taken(d, (int)p))
 						continue; /* issue 1424 part 2: the other display presents on it */
 					uint32_t ns = 0;
 					d->dev->vk.vkGetDisplayPlaneSupportedDisplaysKHR(d->dev->pd, p, &ns, NULL);
@@ -929,13 +929,13 @@ void drm_output_vk_destroy_display(struct drm_output_vk_disp *d)
 		}
 		d->submit_outstanding = false;
 	}
+	if (dev->device && !leak && !drm_output_vk_drain_queue_bounded(d)) {
+		blog(LOG_WARNING, "drm-output: vk-direct: the queue of '%s' never drained -- leaking its Vulkan objects",
+		     d->output_name);
+		leak = true;
+		dev->wedged = true;
+	}
 	if (dev->device && !leak) {
-		if (d->queue && d->queue_lock) {
-			/* this display's queued work + present, never another display's queue (host access lock) */
-			pthread_mutex_lock(d->queue_lock);
-			dev->vk.vkQueueWaitIdle(d->queue);
-			pthread_mutex_unlock(d->queue_lock);
-		}
 		for (int i = 0; i < DRM_OUTPUT_VK_SHARED_IMAGES; i++) {
 			struct drm_output_vk_shared *s = &d->shared[i];
 			if (s->sem)

@@ -30,7 +30,7 @@
 #   drm_output_audio_verdict RULE NODES LOG     the verify verdict token
 # Actions:
 #   drm_output_audio_wp_provision [ROOT]        setup (root): write the rule if it differs
-#   drm_output_audio_verify_report USER_HOME USER LOG [ROOT]  verify: grade it (caller's ok/bad/note)
+#   drm_output_audio_verify_report USER_HOME USER LOG [ROOT [CONNECTOR [VIEW]]]  verify: grade it (caller's ok/bad/note)
 
 DRM_OUTPUT_AUDIO_WP_NAME="51-camera-box-drm-output-hdmi"
 
@@ -221,10 +221,11 @@ drm_output_audio_pw_dump() {
 # drm_output_audio_verify_report USER_HOME USER LOG [ROOT [CONNECTOR]] -- verify (the HDMI output item):
 # the WirePlumber rule file, PipeWire's live node list and the module's line in LOG. issue 1424 part 2:
 # with CONNECTOR, only the audio lines naming 'CONNECTOR' count (each output has its own leg; on a
-# two-output box the other leg's lines must never grade this one). Uses the caller's ok/bad/note.
-# Always returns 0.
+# two-output box the other leg's lines must never grade this one). With VIEW multiview, a leg that gave
+# up (the monitor reports no audio, or a write failed) is a NOTE: that output never plays sound (issue
+# 1424 review), the cutter's monitor may have no speakers. Uses the caller's ok/bad/note. Always returns 0.
 drm_output_audio_verify_report() {
-  local user="$2" log="${3:-}" root="${4:-}" conn="${5:-}" flavour path rule="missing" nodes dump state line verdict
+  local user="$2" log="${3:-}" root="${4:-}" conn="${5:-}" view="${6:-}" flavour path rule="missing" nodes dump state line verdict
   local text label="HDMI audio"
   flavour="$(drm_output_audio_wp_flavour "$(wireplumber --version 2>/dev/null || true)")"
   if ! path="$(drm_output_audio_wp_rule_path "$flavour" "$root")"; then
@@ -256,7 +257,11 @@ drm_output_audio_verify_report() {
     rule-missing)        bad  "${label}: ${path} is missing -- re-run setup (PipeWire would hold the HDMI PCM the output needs)" ;;
     rule-drift)          bad  "${label}: ${path} is not the shipped rule -- re-run setup" ;;
     pipewire-holds-hdmi) bad  "${label}: PipeWire still has ${nodes} HDMI node(s) -- the rule applies at the next session start (as ${user}: systemctl --user restart wireplumber, then restart OBS)" ;;
-    no-audio)            bad  "${label}: the module gave up -- ${line##*drm-output audio: }" ;;
+    no-audio)            if [ "$view" = multiview ]; then
+                           note "${label}: no audio leg (${line##*drm-output audio: }) -- the Multiview output plays no sound, report-only"
+                         else
+                           bad  "${label}: the module gave up -- ${line##*drm-output audio: }"
+                         fi ;;
     *)                   bad  "${label}: the newest OBS log has no 'drm-output audio:' outcome line (an OBS build without the audio leg, or it is still resolving)" ;;
   esac
   return 0

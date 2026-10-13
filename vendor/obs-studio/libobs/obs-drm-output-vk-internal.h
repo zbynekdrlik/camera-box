@@ -61,7 +61,6 @@ typedef VkResult(VKAPI_PTR *drm_output_vk_randr_display_fn)(VkPhysicalDevice pd,
 	X(vkDestroyDevice)                \
 	X(vkGetDeviceQueue)               \
 	X(vkDeviceWaitIdle)               \
-	X(vkQueueWaitIdle)                \
 	X(vkCreateSwapchainKHR)           \
 	X(vkDestroySwapchainKHR)          \
 	X(vkGetSwapchainImagesKHR)        \
@@ -248,6 +247,8 @@ bool drm_output_vk_setup(struct drm_output_vk_disp *d);
  * GPU that never finishes it leaks the display's Vulkan objects (loudly) and marks the device wedged
  * instead of hanging the OBS shutdown. */
 void drm_output_vk_destroy_display(struct drm_output_vk_disp *d);
+/* Drain the display's queue BOUNDED (5 x 1 s) before its teardown; false = it never drained (leak). */
+bool drm_output_vk_drain_queue_bounded(struct drm_output_vk_disp *d);
 
 /* obs-drm-output-vk-setup.c, present thread only: rebuild the swapchain (and the display-plane surface
  * too when `surface_lost`) after VK_ERROR_OUT_OF_DATE_KHR / VK_ERROR_SURFACE_LOST_KHR, e.g. an HDMI

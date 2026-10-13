@@ -51,8 +51,10 @@ typedef void (*drm_output_vk_shown_fn)(void *param, int idx, uint64_t shown_ns);
  * display's present thread, which shows `solid_argb` (0x00RRGGBB) until the first published frame. The
  * output must have NO X CRTC (strih-obs-start.sh runs `xrandr --output <name> --off` for every armed
  * connector before the OBS launch); otherwise the NVIDIA driver refuses the acquire. A second display on
- * another GPU than the first is refused by name. Returns the display, or NULL (nothing held). */
-struct drm_output_vk_disp *drm_output_vk_open(const char *output_name, uint32_t solid_argb,
+ * another GPU than the first is refused by name. `slot` (0..DRM_OUTPUT_VK_MAX_DISPLAYS-1) is the
+ * display slot to use -- the output instance index -- refused while that slot is still open. Returns the
+ * display, or NULL (nothing held). */
+struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name, uint32_t solid_argb,
 					      drm_output_vk_shown_fn shown, void *shown_param);
 
 /* Stop + join the display's present thread (idempotent). Nothing is presented afterwards; the display

@@ -30,9 +30,10 @@
  *     acquire/release (GL_EXT_semaphore only carries layouts on the semaphore ops): this relies on the
  *     NVIDIA driver being lenient about external ownership, proven live on the target GPU.
  *   - the waits a wedged GPU could hang are bounded: the present loop's acquire/fence waits (1 s,
- *     re-checked) and the teardown's quiesce of an outstanding copy (a timeout leaks the Vulkan objects
- *     loudly instead of hanging the OBS shutdown). The teardown's vkDeviceWaitIdle runs only once no
- *     submit is outstanding, and the swapchain rebuild never waits on the device at all.
+ *     re-checked), the teardown's quiesce of an outstanding copy and its drain of the display's queue
+ *     (5 x 1 s each; a timeout leaks the display's Vulkan objects loudly instead of hanging the OBS
+ *     shutdown). Only the LAST display's teardown waits the device idle, and the swapchain rebuild
+ *     never waits on the device at all.
  *
  * The present thread never touches GL; the graphics thread never touches the Vulkan queue. Building
  * the Vulkan/X objects (and tearing them down) is obs-drm-output-vk-setup.c; the shared state type is
@@ -129,7 +130,8 @@ struct drm_output_vk_device g_drm_vk_dev = {
 	}
 struct drm_output_vk_disp g_drm_vk_disp[DRM_OUTPUT_VK_MAX_DISPLAYS] = {DRM_OUTPUT_VK_DISP_INIT(0),
 								       DRM_OUTPUT_VK_DISP_INIT(1)};
-_Static_assert(DRM_OUTPUT_VK_MAX_DISPLAYS == 2, "one DRM_OUTPUT_VK_DISP_INIT + queue lock per display slot");
+_Static_assert(DRM_OUTPUT_VK_MAX_DISPLAYS == 2,
+	       "one DRM_OUTPUT_VK_DISP_INIT + queue lock per display slot (+ the device's prio[] in vk-setup.c)");
 
 static void drm_output_vk_color_barrier(struct drm_output_vk_disp *d, VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags src_access,
 					VkAccessFlags dst_access, uint32_t src_qfi, uint32_t dst_qfi,
@@ -192,6 +194,28 @@ static bool drm_output_vk_record(struct drm_output_vk_disp *d, uint32_t img, int
 				    VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
 				    VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 	return d->dev->vk.vkEndCommandBuffer(d->cmd) == VK_SUCCESS;
+}
+
+/* issue 1424 review: drain display `d`'s queue BOUNDED at its teardown. An empty submit's fence signals
+ * after every earlier batch on the queue (what vkQueueWaitIdle waits for), but this waits 5 x 1 s at
+ * most: a queue the OTHER display shares and wedged must never hang the OBS shutdown. false = timed
+ * out (the caller leaks this display); a lost device reads true (destroyed normally). */
+bool drm_output_vk_drain_queue_bounded(struct drm_output_vk_disp *d)
+{
+	struct drm_output_vk_device *dev = d->dev;
+	if (!d->queue || !d->queue_lock || !d->fence)
+		return true;
+	pthread_mutex_lock(d->queue_lock);
+	VkResult r = dev->vk.vkResetFences(dev->device, 1, &d->fence);
+	if (r == VK_SUCCESS)
+		r = dev->vk.vkQueueSubmit(d->queue, 0, NULL, d->fence);
+	pthread_mutex_unlock(d->queue_lock);
+	if (r != VK_SUCCESS)
+		return true;
+	r = VK_TIMEOUT;
+	for (int i = 0; i < 5 && r == VK_TIMEOUT; i++)
+		r = dev->vk.vkWaitForFences(dev->device, 1, &d->fence, VK_TRUE, DRM_OUTPUT_VK_WAIT_NS);
+	return r != VK_TIMEOUT;
 }
 
 /* Wait the per-vblank fence, bounded so a stop is never blocked by a wedged GPU. true = signalled. */
@@ -370,11 +394,12 @@ void drm_output_vk_want_mode(struct drm_output_vk_disp *d, uint32_t w, uint32_t 
 	os_atomic_set_bool(&d->remode, true);
 }
 
-struct drm_output_vk_disp *drm_output_vk_open(const char *output_name, uint32_t solid_argb,
+struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name, uint32_t solid_argb,
 					      drm_output_vk_shown_fn shown, void *shown_param)
 {
-	if (!output_name || !output_name[0] || strlen(output_name) >= sizeof(g_drm_vk_disp[0].output_name)) {
-		blog(LOG_WARNING, "drm-output: vk-direct: bad output name -- output dormant");
+	if (slot < 0 || slot >= DRM_OUTPUT_VK_MAX_DISPLAYS || !output_name || !output_name[0] ||
+	    strlen(output_name) >= sizeof(g_drm_vk_disp[0].output_name)) {
+		blog(LOG_WARNING, "drm-output: vk-direct: bad display slot or output name -- output dormant");
 		return NULL;
 	}
 	struct drm_output_vk_device *dev = &g_drm_vk_dev;
@@ -387,13 +412,13 @@ struct drm_output_vk_disp *drm_output_vk_open(const char *output_name, uint32_t 
 			return NULL;
 		}
 	}
-	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS && !d; i++)
-		if (!g_drm_vk_disp[i].in_use)
-			d = &g_drm_vk_disp[i];
-	if (!d) {
+	/* issue 1424 review: the CALLER's slot (the output instance index), so an instance's display
+	 * pointer can never name the other instance's display after a stop + restart in another order */
+	d = &g_drm_vk_disp[slot];
+	if (d->in_use) {
 		pthread_mutex_unlock(&dev->lock);
-		blog(LOG_WARNING, "drm-output: vk-direct: no display slot left for '%s' (%d already open)", output_name,
-		     DRM_OUTPUT_VK_MAX_DISPLAYS);
+		blog(LOG_WARNING, "drm-output: vk-direct: display slot %d is still open -- '%s' not opened", slot,
+		     output_name);
 		return NULL;
 	}
 	d->in_use = true;

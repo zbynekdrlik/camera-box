@@ -754,7 +754,7 @@ def drm_output_lease_connector(config_text):
     if not config_text:
         return ""
     try:
-        cfg = json.loads(config_text)
+        cfg = json.loads(config_text[1:] if config_text.startswith("\ufeff") else config_text)
         if cfg.get("enabled") is not True:
             return ""
         if "outputs" in cfg:
@@ -767,7 +767,7 @@ def drm_output_lease_connector(config_text):
         if isinstance(backend, str) and backend not in ("", "lease", "vk-direct"):
             return ""
         connector = cfg.get("connector")
-        return connector if isinstance(connector, str) and connector else ""
+        return connector if isinstance(connector, str) and 0 < len(connector.encode("utf-8")) < 64 else ""
     except (ValueError, AttributeError):
         return ""
 

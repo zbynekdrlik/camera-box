@@ -30,6 +30,9 @@
  * issue 1424 part 2: name two outputs to prove both displays on ONE shared VkDevice at once (each its
  * own swapchain + present thread; strih-pp: the Multiview monitor + the vestibule HDMI-to-SDI):
  *   DISPLAY=:0 ./vk-rig-harness HDMI-0 HDMI-1
+ * With two outputs it then closes the first while the second keeps presenting (the second's present
+ * count must advance, its loop stay alive) and re-opens the first in the same slot beside it: the two
+ * outputs never depend on each other.
  * Exit 0 = the backend acquired the display, bound GL, published every phase and released cleanly.
  */
 
@@ -140,7 +143,7 @@ int main(int argc, char **argv)
 	GLuint tex[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0}, fbo[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0};
 	int n_disp = 0;
 	for (int a = 1; a < argc && n_disp < DRM_OUTPUT_VK_MAX_DISPLAYS; a++) {
-		disp[n_disp] = drm_output_vk_open(argv[a], 0x202020u, NULL, NULL);
+		disp[n_disp] = drm_output_vk_open(n_disp, argv[a], 0x202020u, NULL, NULL);
 		if (!disp[n_disp]) {
 			fprintf(stderr, "FAIL: drm_output_vk_open(%s)\n", argv[a]);
 			goto out;
@@ -150,7 +153,7 @@ int main(int argc, char **argv)
 		n_disp++;
 	}
 	if (n_disp == 0) {
-		disp[0] = drm_output_vk_open(output, 0x202020u, NULL, NULL);
+		disp[0] = drm_output_vk_open(0, output, 0x202020u, NULL, NULL);
 		if (!disp[0]) {
 			fprintf(stderr, "FAIL: drm_output_vk_open(%s)\n", output);
 			goto out;
@@ -248,6 +251,35 @@ int main(int argc, char **argv)
 	       published, skipped, burst, skips);
 	rc = (published > 0 && burst > 0 && skips > 0 && alive) ? 0 : 1;
 	printf("present loop(s) alive after the drain: %s\n", alive ? "yes" : "NO");
+
+	/* 4. issue 1424 review: the two outputs are independent -- close display 0 while display 1 keeps
+	 * presenting, then re-open display 0 in its slot beside the live display 1. */
+	if (rc == 0 && n_disp == 2) {
+		drm_output_vk_halt(disp[0]);
+		drm_output_vk_gl_unbind(disp[0]);
+		drm_output_vk_close(disp[0]);
+		disp[0] = NULL;
+		pthread_mutex_lock(&disp[1]->lock);
+		const unsigned long long before = disp[1]->presents;
+		pthread_mutex_unlock(&disp[1]->lock);
+		double one_end = now_s() + 2.0;
+		while (now_s() < one_end) {
+			int idx = drm_output_vk_claim(disp[1]);
+			if (idx >= 0)
+				drm_output_vk_publish_gl(disp[1], idx, tex[1], w[1], h[1]);
+			usleep(16667);
+		}
+		pthread_mutex_lock(&disp[1]->lock);
+		const unsigned long long after = disp[1]->presents;
+		pthread_mutex_unlock(&disp[1]->lock);
+		const bool one_alive = drm_output_vk_wants_frames(disp[1]) && after > before + 60u;
+		disp[0] = drm_output_vk_open(0, argv[1], 0x202020u, NULL, NULL);
+		const bool reopened = disp[0] && drm_output_vk_gl_bind(disp[0]) && drm_output_vk_wants_frames(disp[0]) &&
+				      drm_output_vk_wants_frames(disp[1]);
+		printf("PHASE independent t=%.3f display1_presents=%llu->%llu alive=%s reopened=%s\n", now_s(), before,
+		       after, one_alive ? "yes" : "NO", reopened ? "yes" : "NO");
+		rc = (one_alive && reopened) ? 0 : 1;
+	}
 
 out:
 	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {

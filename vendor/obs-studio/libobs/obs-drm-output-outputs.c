@@ -241,6 +241,19 @@ static bool drm_output_config_set_view(json_t *root, const char *connector, cons
 }
 /* ---- END pure config grammar ---- */
 
+/* The config as jansson reads it, after OBS's own UTF-8 reader (which drops a byte-order mark, as the
+ * issue-1152/1346 obs_data loader did): a config with a BOM keeps starting. NULL = absent/unparseable. */
+static json_t *drm_output_config_load(const char *path)
+{
+	char *text = os_quick_read_utf8_file(path);
+	if (!text)
+		return NULL;
+	json_error_t err;
+	json_t *root = json_loads(text, 0, &err);
+	bfree(text);
+	return root;
+}
+
 _Static_assert(DRM_OUTPUT_CFG_CONNECTOR_MAX == DRM_OUTPUT_CONNECTOR_MAX, "one connector length bound");
 _Static_assert(OBS_DRM_OUTPUT_VIEW_PROGRAM == 0 && OBS_DRM_OUTPUT_VIEW_MULTIVIEW == 1, "the spec's view values");
 _Static_assert(OBS_DRM_OUTPUT_BACKEND_LEASE == 0 && OBS_DRM_OUTPUT_BACKEND_VK_DIRECT == 1, "the spec's backends");
@@ -409,8 +422,7 @@ void obs_drm_output_maybe_autostart(void)
 	snprintf(g_config_path, sizeof(g_config_path), "%s", path);
 	pthread_mutex_unlock(&g_persist_lock);
 
-	json_error_t err;
-	json_t *root = json_load_file(path, 0, &err);
+	json_t *root = drm_output_config_load(path);
 	struct drm_output_spec specs[DRM_OUTPUT_MAX_OUTPUTS];
 	size_t count = 0, bad = 0;
 	bool program = true;
@@ -602,8 +614,7 @@ const char *drm_output_config_persist_view(const struct drm_output_inst *inst, c
 	if (g_config_path[0] == '\0') {
 		reason = "no drm-output config path (the autostart found no config)";
 	} else {
-		json_error_t err;
-		json_t *root = json_load_file(g_config_path, 0, &err);
+		json_t *root = drm_output_config_load(g_config_path);
 		if (!root || !json_is_object(root)) {
 			reason = "config unreadable (missing or not a JSON object)";
 		} else if (!drm_output_config_set_view(root, inst->connector, view)) {
