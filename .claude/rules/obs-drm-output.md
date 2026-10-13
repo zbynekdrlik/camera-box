@@ -35,6 +35,12 @@ paths:
   - "tests/drm_output_vk_program_mode_1424.rs"
   - "scripts/lib/drm-output-audio.sh"
   - "tests/python/test_drm_output_audio_1424.py"
+  - "vendor/obs-studio/libobs/obs-drm-output-outputs.c"
+  - "tests/drm_output_outputs_1424.rs"
+  - "tests/fixtures/drm_output_outputs_parity.tsv"
+  - "tests/python/test_drm_output_outputs_1424.py"
+  - "scripts/lib/strih-drm-output.sh"
+  - "scripts/drm_output_config.py"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -574,3 +580,78 @@ po ceste": no PipeWire, no OBS monitoring device, no mixer in between, never a p
   the program; with the Program view on a 30 fps canvas the HDMI-1 sink reads `vk-direct: re-mode
   1920x1080@60.000Hz -> @29.970Hz (program view: near-rate ...)`, and the SDI chain reaches cam1.
 
+## Two fixed outputs at once (issue 1424 part 2, owner 13.10.2026)
+
+strih-pp drives HDMI-0 = the cutter's Multiview (BenQ) AND HDMI-1 = the Program + its audio for the
+vestibule (Blackmagic HDMI-to-SDI), both vk-direct on the RTX 3060 (main design 6150029770). No
+picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: zero picture latency).
+
+- **Config grammar** (`obs-drm-output-outputs.c`: OBS's UTF-8 reader, which drops a byte-order mark as
+  the old obs_data loader did, then jansson directly): the single-object form
+  is unchanged (imag + strih-snv byte-identical); `{"enabled":true,"outputs":[{connector, argb, view,
+  backend}, ...]}` drives up to `OBS_DRM_OUTPUT_MAX_OUTPUTS` (2). ALL OR NOTHING: not an array, empty,
+  more than 2, a non-object entry, a bad connector (1..63 bytes), an unknown view / backend or a
+  duplicate connector starts NO output and logs one `"outputs" is malformed (<verdict> at entry N)`
+  line. jansson, not obs_data: obs_data's JSON loader drops a non-object array member silently and
+  would start half a pair. The pure grammar is the marked `BEGIN/END pure config grammar` block, lifted
+  verbatim and compiled against real jansson by `tests/drm_output_outputs_1424.rs` over
+  `tests/fixtures/drm_output_outputs_parity.tsv`, the table the Python twin
+  `scripts/drm_output_config.py` is pinned to. That module (split out of strih_scenes.py, which
+  re-exports every name; setup-strih step 6 installs it beside strih_scenes.py) reads the file the C's
+  way: a BOM dropped, and a NaN / Infinity literal, an integer outside 64 bits or an overflowing real
+  makes the WHOLE file unreadable, as jansson does. imag_scenes' classifier agrees on every row except
+  those strict-JSON ones (imag reads a machine-written single object). CI's test / coverage / mutants
+  jobs install `libjansson-dev` for the lift.
+- **Per-instance state** (`struct drm_output_inst`, `obs-drm-output-internal.h`): connector, backend
+  ops, view, present clock, audio leg. The lease backend keeps `g_lease[inst->index]`, the vk-direct
+  OBS side `g_vkd[inst->index]` and the vk core display slot `inst->index` (`drm_output_vk_open(slot,
+  ...)`, refused while that slot is open), so an instance never points at the other one's display; the registry (count published after the instance is fully written)
+  routes the entry points and the mailbox seam through `inst->ops`. An output that fails to start never
+  stops the other (`output '<c>' did not start — the other output keeps running`). The ONE raw blit +
+  `drm_output_fit_rect` moved to the outputs TU.
+- **The vk core** splits into ONE `struct drm_output_vk_device` (loader, X connection, VkInstance,
+  VkDevice; one queue per display slot when the family offers it, else queue 0 shared, each with a
+  host-access mutex taken around every vkQueueSubmit + vkQueuePresentKHR) and a `struct drm_output_vk_disp` per
+  output (own VkDisplayKHR, display plane -- the open path, under the device lock, skips a plane another
+  open display presents on; a rebuild relies on `currentDisplay` --,
+  surface, swapchain, shared images, present thread). A second output on another GPU is refused by name.
+  Closing one display drains ITS queue BOUNDED (`drm_output_vk_drain_queue_bounded`: an empty submit's
+  fence, 5 x 1 s; never an unbounded vkQueueWaitIdle -- on a one-queue GPU a queue the other display
+  wedged would hang `obs_shutdown`); a timeout leaks that display and marks the device wedged (never
+  destroyed); the device goes with the last display (`dev->refs`). The core
+  reports presents through a callback (`drm_output_vk_shown_fn`), so the rig harness links without the
+  audio TU; `./vk-rig-harness HDMI-0 HDMI-1` proves both displays on one device, then closes display 0 while
+  display 1 keeps presenting (its count must advance) and re-opens display 0 beside it.
+- **Audio + mode per output:** each leg reads its OWN output's view (`const volatile long *view`) and
+  present clock, so the Multiview output's leg is muted while the Program output plays (verify grades
+  a Multiview leg that gave up, e.g. a BenQ with no audio, as a NOTE); the Program
+  view's canvas-rate mode pick (part 1) is per display.
+- **Log lines name the connector** where verify grades them: `program scanout LIVE (... of '<c>')`,
+  `multiview bind LIVE (... of '<c>')`, `vk-direct present loop exited on '<c>'`; the audio lines
+  already did. The prefixes the single-output grading greps are unchanged.
+- **Frontend:** one Multiview + one Tools-menu pair per output (`HDMI výstup <connector>: Program /
+  Multiview` when several; a one-output box keeps `HDMI výstup: Program / Multiview`), persisting
+  into that output's entry (`obs_drm_output_set_view_of`). `obs_drm_output_get_view/set_view/
+  set_view_renderer` stay as output 0.
+- **Box side:** the fact `STRIH_HDMI_OUTPUTS` (`auto` = one output on the first connected HDMI, `none`
+  exactly when the backend is none, or 1..2 `CONNECTOR:VIEW`; strih-pp `HDMI-0:multiview
+  HDMI-1:program`). setup-strih step 6 (`strih_drm_output_provision`, 5th argument or the loaded
+  fact) writes a fresh array config when X RandR names at least one listed connector connected (each
+  unplugged one WARNed), or migrates an existing config with `strih_scenes.write_drm_outputs` --
+  every connector the config already drives KEEPS its view and argb. `strih-obs-start.sh` takes every
+  armed connector out of X (`drm_output_lease_connectors`). The fact grammar is ONE function,
+  `strih_box_hdmi_outputs_ok` in the facts lib. verify-strih item 4c dispatches (through
+  `strih_drm_outputs_verify_dispatch`) an array
+  config (or a single one on a box whose fact is a list) to `strih_drm_outputs_verify_report`: the
+  array valid, its connectors = the fact's, and every output graded on ITS OWN log lines (open line,
+  multiview bind, present loop, audio leg via `drm_output_audio_verify_report ... "" <conn>`).
+  `strih_scenes.py --projector <view> --connector <c>` is the scripted twin. Known limit: on the LEASE
+  backend the per-output "connected" check reads any kernel HDMI connector (X RandR sticks at
+  disconnected after a lease and names connectors differently); every strih box is vk-direct.
+- **Live acceptance (supervisor, strih-pp):** full Linux bundle deploy, re-run setup-strih step 6 (the
+  live single config migrates to the array, HDMI-0 keeps multiview), restart OBS: the log shows
+  `autostart ENABLED ... 2 outputs`, two `vk-direct display acquired`, `program scanout LIVE` for
+  both connectors, `multiview bind LIVE ... of 'HDMI-0'`, `drm-output audio: pcm hw:...` on 'HDMI-1'
+  and the HDMI-0 leg `matched ... (muted while the view is multiview)`; verify-strih item 4c green
+  for both; the BenQ shows the Multiview and the vestibule the Program with sound. Run the rig harness
+  with both connectors first on the new box.
