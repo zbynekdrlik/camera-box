@@ -36,8 +36,10 @@
 #                        tapping is off, as on 12.10.2026; a touchpad without the libinput property
 #                        FAILs; NOTE when the box has no touchpad;
 #       (bluetooth)      hci0 present, UP, non-zero BD address (`hciconfig hci0`; the 12.10.2026
-#                        rtl8852bu read DOWN 00:00:00:00:00:00). Graded on every role: setup-strih
-#                        step 11 passes keep-bluetooth to the kiosk on every role (pinned by a test);
+#                        rtl8852bu read DOWN 00:00:00:00:00:00). Graded on the strih role (setup-strih
+#                        step 11 passes keep-bluetooth to the kiosk, pinned by a test); a NOTE on the
+#                        stream role (owner 13.10.2026: "na stream-pp netreba bluethooth ani na stream
+#                        snv, iba na strih-snv treba");
 #       (stream-deck)    the deck on USB and at least one Satellite surface, read through
 #                        scripts/strih_satellite_watch.py (its USB ids, its sysfs reader, its
 #                        /api/surfaces parser: the 30 s watch and verify read the deck one way); NOTE
@@ -743,7 +745,9 @@ strih_operator_grade_rows() {
     _strih_operator_tap_lines "$user" "$home" "$slaves" | strih_operator_tap_verdict
   fi
   bt="$(strih_operator_bt_read)"
-  if [ "$bt" = '<no-hciconfig>' ]; then
+  if [ "$(strih_box_role 2>/dev/null || echo strih)" = stream ]; then
+    printf 'NOTE|(bluetooth) not graded: the stream role needs no Bluetooth (owner 13.10.2026: only strih-snv)\n'
+  elif [ "$bt" = '<no-hciconfig>' ]; then
     printf 'FAIL|(bluetooth) hciconfig is not installed (package bluez) -- the Bluetooth controller cannot be read\n'
   else
     if compgen -G "$(strih_operator_sysfs)/class/bluetooth/hci*" >/dev/null; then bt_adapter=1; else bt_adapter=0; fi
