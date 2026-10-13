@@ -181,7 +181,7 @@ key = host + "_" + path.replace("/", "_")
 p = os.path.join(st, "http", key)
 code = open(p).read().strip() if os.path.exists(p) else ""
 if "-D" in a and a[a.index("-D") + 1] == "-" and code:
-    sys.stdout.write("HTTP/1.1 %s X\r\nServer: fake\r\n\r\n" % code)
+    sys.stdout.write("HTTP/1.1 %s X\\r\\nServer: fake\\r\\n\\r\\n" % code)
 if "-w" in a:
     sys.stdout.write(code or "000")
 sys.exit(0 if code else 7)
