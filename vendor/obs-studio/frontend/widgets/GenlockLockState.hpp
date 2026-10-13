@@ -86,9 +86,11 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 	} else if (f->output_present && !f->output_stamping) {
 		reason = GENLOCK_LOCK_REASON_OUTPUT;
 		state = GENLOCK_LOCK_UNLOCKED;
-	} else if (f->n_locked <= 0) {
+	} else if (f->n_locked <= 0 && !(f->n_inputs <= 0 && f->output_present && f->output_stamping)) {
+		/* issue 1422: a sender-only box (no inputs, a stamping output) skips this branch and is
+		 * judged by the DEGRADED axes below. */
 		if (f->n_inputs <= 0) {
-			reason = GENLOCK_LOCK_REASON_NO_GENLOCK; /* no genlock configured at all */
+			reason = GENLOCK_LOCK_REASON_NO_GENLOCK; /* no inputs and no stamping output */
 			state = GENLOCK_LOCK_UNLOCKED;
 		} else if (n_connected <= 0) {
 			reason = GENLOCK_LOCK_REASON_NONE; /* #1299: inputs present but all senderless -> HEALTHY-idle */

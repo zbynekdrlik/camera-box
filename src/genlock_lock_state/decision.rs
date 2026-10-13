@@ -168,6 +168,9 @@ pub struct GenlockFacets {
 /// `n_inputs > 0`) is HEALTHY-idle (LOCKED), not UNLOCKED — a dead sender is the #1001/#1052
 /// watchdogs' concern. `n_inputs == 0` (no genlock configured at all) stays UNLOCKED/NoGenlock.
 ///
+/// Issue 1422 — `n_inputs == 0` with the output present AND stamping is a genlocked SENDER-only box
+/// (the clock locked, every frame it sends wall-stamped): judged by the DEGRADED axes, else LOCKED.
+///
 /// Mirror of `genlock_decide_lock_state` in `GenlockLockState.hpp` — keep both in lock-step.
 pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     // #1299 — CONNECTED inputs (a live NDI receiver) are the only ones the lock decision judges;
@@ -187,9 +190,13 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     if f.output_present && !f.output_stamping {
         return (LockState::Unlocked, LockReason::Output);
     }
-    if f.n_locked == 0 {
+    // Issue 1422 — a SENDER-ONLY box (no genlock inputs, its output present AND stamping, the clock
+    // locked above) is genlocked: it skips the no-input branch and is judged by the DEGRADED axes
+    // below (resolume-pp's cg OBS, live 13.10.2026).
+    let sender_only = f.n_inputs == 0 && f.output_present && f.output_stamping;
+    if f.n_locked == 0 && !sender_only {
         if f.n_inputs == 0 {
-            // No genlock inputs configured at all — a real misconfiguration.
+            // No genlock inputs and no stamping output — genlock not configured at all.
             return (LockState::Unlocked, LockReason::NoGenlock);
         }
         if n_connected == 0 {
