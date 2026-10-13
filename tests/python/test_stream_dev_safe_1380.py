@@ -314,3 +314,25 @@ def test_stream_role_dev_scene_name_is_the_shared_development_scene_name():
               'printf "%s|%s" "$STREAM_DEV_SCENE_DEFAULT" "$OBS_BOX_STREAM_DEV_SCENE"')
     shared, role = r.stdout.split("|")
     assert shared == role == SPEC["scene"]
+
+
+def test_clip_provision_installs_every_non_stdlib_import_of_the_generator():
+    """Live 13.10.2026 on stream-pp: the generator died on `import qrcode` because only numpy was
+    installed. The provisioner must install a package for every third-party import it makes."""
+    import ast
+    gen = (_ROOT / "scripts" / "gen_measurement_clip.py").read_text()
+    local = {p.stem for p in (_ROOT / "scripts").glob("*.py")}
+    third = set()
+    for node in ast.walk(ast.parse(gen)):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names = [node.module.split(".")[0]]
+        third |= {n for n in names if n not in sys.stdlib_module_names and n not in local
+                  and n != "__future__"}
+    lib = (_ROOT / "scripts" / "lib" / "obs-box-role.sh").read_text()
+    body = lib.split("obs_box_stream_dev_clip_provision() {", 1)[1].split("\n}\n", 1)[0]
+    assert third == {"numpy", "qrcode"}, third
+    for mod in sorted(third):
+        assert f"python3-{mod}" in body, mod
