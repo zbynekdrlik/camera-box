@@ -115,6 +115,21 @@ def test_provision_without_a_wireplumber_version_writes_nothing_and_says_so(tmp_
     assert not (root / "etc").exists()
 
 
+def test_provision_that_cannot_write_warns_and_never_stops_setup(tmp_path):
+    fake = _fake_wireplumber(tmp_path, WP_05)
+    blocked = tmp_path / "ro"
+    blocked.mkdir()
+    blocked.chmod(0o555)
+    try:
+        r = _bash('drm_output_audio_wp_provision; echo CONTINUES', env={"DRM_OUTPUT_AUDIO_WP_ROOT": str(blocked)},
+                  path_prefix=fake)
+    finally:
+        blocked.chmod(0o755)
+    assert r.returncode == 0 and "CONTINUES" in r.stdout, r.stderr
+    assert "could not write" in r.stderr
+    assert "wrote" not in r.stdout
+
+
 def _node(path, name):
     return {"type": "PipeWire:Interface:Node", "info": {"props": {"api.alsa.path": path, "node.name": name}}}
 

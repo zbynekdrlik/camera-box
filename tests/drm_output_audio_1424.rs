@@ -131,6 +131,31 @@ fn audio_matches_the_connector_edid_against_the_per_pcm_eld_control() {
 }
 
 #[test]
+fn the_matcher_header_is_pure_std_only_c() {
+    // the parity gate compiles it alone, so it must never reach for libobs or a system service
+    let h = file(MATCH_H);
+    assert!(!h.contains("#include \""), "issue 1424: std headers only");
+    for f in [
+        "drm_output_edid_monitor_id(",
+        "drm_output_eld_monitor_id(",
+        "drm_output_audio_pick_pcm(",
+        "drm_output_audio_iec958_index(",
+        "drm_output_audio_plan_block(",
+        "drm_output_present_ewma(",
+    ] {
+        let at = h.find(f).unwrap_or_else(|| panic!("issue 1424: {f} missing"));
+        let line_start = h[..at].rfind('\n').map_or(0, |i| i + 1);
+        let decl = &h[line_start..at];
+        let prev = &h[..line_start];
+        let prev_line = prev.trim_end().rsplit('\n').next().unwrap_or("");
+        assert!(
+            decl.contains("static inline") || prev_line.contains("static inline"),
+            "issue 1424: {f} is a static inline helper"
+        );
+    }
+}
+
+#[test]
 fn audio_leg_is_a_per_output_instance() {
     let h = file(AUDIO_H);
     let s = squish(&h);
@@ -227,6 +252,11 @@ fn blobs() -> Vec<(&'static str, &'static str, Vec<u8>)> {
     let mut eld_long_name = eld_benq.clone();
     eld_long_name[4] = (eld_long_name[4] & 0xE0) | 0x1F;
     let eld_short = eld_benq[..19].to_vec();
+    // a monitor name padded with spaces (as an EDID descriptor pads it): read back trimmed
+    let mut eld_padded = eld_benq.clone();
+    eld_padded[4] = (eld_padded[4] & 0xE0) | 10;
+    eld_padded[28] = b' ';
+    eld_padded[29] = b' ';
     vec![
         ("edid", "benq", benq.clone()),
         ("edid", "bmd", bmd.clone()),
@@ -239,6 +269,7 @@ fn blobs() -> Vec<(&'static str, &'static str, Vec<u8>)> {
         ("eld", "partial", eld_partial),
         ("eld", "longname", eld_long_name),
         ("eld", "short", eld_short),
+        ("eld", "padded", eld_padded),
         ("eld", "empty", Vec::new()),
     ]
 }
