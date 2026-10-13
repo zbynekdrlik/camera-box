@@ -141,7 +141,7 @@ pub mod colour_verify;
 pub mod render_budget;
 
 // issue 1424 — the Rust twin of the vendored libobs header `obs-drm-output-audio-match.h`: which
-// ALSA PCM + PipeWire sink carries the fixed HDMI output's own connector (EDID vs per-PCM ELD), and
+// ALSA hw PCM carries the fixed HDMI output's own connector (EDID vs per-PCM ELD), its IEC958 switch, and
 // how one program-mix block is placed against the picture. Pure, so it unit-tests Tier-0;
 // `tests/drm_output_audio_1424.rs` compiles the C header and requires the same answers.
 pub mod drm_output_audio_match;

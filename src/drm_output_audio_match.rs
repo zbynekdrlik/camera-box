@@ -1,7 +1,8 @@
 //! issue 1424 — the Rust twin of `vendor/obs-studio/libobs/obs-drm-output-audio-match.h`, the PURE
 //! decisions of the fixed HDMI output's audio leg (owner 13.10.2026: the output plays the OBS program
-//! mix on the SAME connector's HDMI audio by itself, never through OBS's global monitoring device and
-//! never from a per-box setting; no match = no audio and one named log line).
+//! mix on the SAME connector's HDMI audio by itself, straight into that connector's ALSA hw PCM, with
+//! no PipeWire, no monitoring device and no per-box setting; no match = no audio and one named log
+//! line).
 //!
 //! Every function mirrors its C twin line for line; `tests/drm_output_audio_1424.rs` compiles the C
 //! header and requires both to print the same answer for every vector (the strih-pp fixtures in
@@ -21,8 +22,6 @@ pub const NO_EDID: i32 = 1;
 pub const NO_MONITOR: i32 = 2;
 pub const NO_MATCH: i32 = 3;
 pub const AMBIGUOUS: i32 = 4;
-pub const NO_SINK: i32 = 5;
-pub const AMBIGUOUS_SINK: i32 = 6;
 
 /// One monitor as an EDID or an ELD describes it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -145,35 +144,29 @@ pub fn pick_pcm(want: &MonitorId, pcms: &[AudioPcm]) -> (i32, Option<usize>) {
     (AMBIGUOUS, None)
 }
 
-/// Which sink plays (card, device): exactly one whose (alsa.card, alsa.device) equals it.
-pub fn pick_sink(card: i32, device: i32, sinks: &[(i32, i32)]) -> (i32, Option<usize>) {
-    let mut hits = 0usize;
-    let mut hit = 0usize;
-    for (i, &(c, d)) in sinks.iter().enumerate() {
-        if c == card && d == device {
-            hits += 1;
-            hit = i;
+/// The card's "IEC958 Playback Switch" index of PCM `device`: its rank among the card's
+/// ELD-carrying PCM devices (the HDA driver creates one switch per HDMI/DP PCM, in PCM order);
+/// `None` when `device` is not one of them. Duplicates never count twice.
+pub fn iec958_index(devices: &[i32], device: i32) -> Option<i32> {
+    let mut seen: Vec<i32> = Vec::with_capacity(devices.len());
+    let mut rank = 0;
+    let mut found = false;
+    for &d in devices {
+        if seen.contains(&d) {
+            continue;
+        }
+        seen.push(d);
+        if d == device {
+            found = true;
+        } else if d < device {
+            rank += 1;
         }
     }
-    match hits {
-        0 => (NO_SINK, None),
-        1 => (MATCH, Some(hit)),
-        _ => (AMBIGUOUS_SINK, None),
-    }
-}
-
-/// A sink property as a card / PCM index: 1 to 4 ASCII digits, nothing else.
-pub fn parse_index(s: &str) -> Option<i32> {
-    let b = s.as_bytes();
-    if b.is_empty() || b.len() > 4 || !b.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    Some(b.iter().fold(0i32, |v, &c| v * 10 + i32::from(c - b'0')))
+    found.then_some(rank)
 }
 
 /// Whether a failed resolve is worth another read inside the bounded window (an ELD the HDA driver
-/// publishes only once a mode is driven, a sink PipeWire creates after it). A missing EDID never
-/// comes back by waiting.
+/// publishes only once a mode is driven). A missing EDID never comes back by waiting.
 pub fn retryable(result: i32) -> bool {
     result != MATCH && result != NO_EDID
 }
@@ -186,8 +179,6 @@ pub fn reason(result: i32) -> &'static str {
         NO_MONITOR => "no HDMI/DP PCM reports a monitor (no ELD)",
         NO_MATCH => "no PCM's ELD matches the connector's EDID",
         AMBIGUOUS => "two PCMs match the connector's EDID (identical monitors)",
-        NO_SINK => "no PipeWire sink plays the matched PCM",
-        AMBIGUOUS_SINK => "two PipeWire sinks play the matched PCM",
         _ => "unknown",
     }
 }
@@ -274,12 +265,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_index_takes_only_short_ascii_digits() {
-        assert_eq!(parse_index("3"), Some(3));
-        assert_eq!(parse_index("9999"), Some(9999));
-        for bad in ["", "10000", "-1", "3 ", "a", "٣"] {
-            assert_eq!(parse_index(bad), None, "{bad:?}");
-        }
+    fn iec958_index_is_the_pcm_rank_on_its_card() {
+        // strih-snv card0: HDMI PCMs 3/7/8/9 <-> switch indexes 0/1/2/3
+        assert_eq!(iec958_index(&[3, 7, 8, 9], 3), Some(0));
+        assert_eq!(iec958_index(&[9, 8, 7, 3], 8), Some(2));
+        assert_eq!(iec958_index(&[3, 7, 7], 7), Some(1));
+        assert_eq!(iec958_index(&[3, 7], 0), None);
     }
 
     #[test]

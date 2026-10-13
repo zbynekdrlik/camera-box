@@ -1,11 +1,12 @@
-//! issue 1424 (owner 13.10.2026, design 6147051141) -- the fixed HDMI output plays the OBS program
-//! mix on the SAME connector's HDMI audio by itself: no per-box setting, never OBS's global
-//! monitoring device; no match / two matches / no sink = no audio + ONE named log line.
+//! issue 1424 (owner 13.10.2026, design 6147051141 + the owner's ROZHODNUTE of the same day) -- the
+//! fixed HDMI output plays the OBS program mix on the SAME connector's HDMI audio by itself, straight
+//! into that connector's ALSA hw PCM (no sound server, no monitoring device, no mixer layer, no
+//! per-box setting); no match / two matches / a PCM that will not open = no audio + ONE named line.
 //!
 //! Facet A pins the wiring with std-only source anchors: the new libobs TU
-//! `obs-drm-output-audio.c` (Linux-only, built by `libobs/cmake/os-linux.cmake`, its PulseAudio half
-//! only where libobs builds its PulseAudio monitoring), the raw callback on mix 0, the per-PCM ALSA
-//! `ELD` control + the RandR EDID property as the two match sources, the bounded re-read window
+//! `obs-drm-output-audio.c` (Linux-only, built by `libobs/cmake/os-linux.cmake`, alsa-lib dlopen'd),
+//! the raw callback on mix 0 written to `hw:<card>,<device>`, the per-PCM ALSA `ELD` control + the
+//! RandR EDID property as the two match sources, the PCM's IEC958 switch, the bounded re-read window
 //! (the NVIDIA HDA driver publishes a connector's ELD only once a mode is driven on it), the
 //! start-after-the-backend + stop wiring, and the present-delay notes of both backends.
 //!
@@ -71,41 +72,38 @@ fn audio_tu_is_linux_only_and_built_by_libobs_linux_cmake() {
     for f in ["obs-drm-output-audio.c", "obs-drm-output-audio.h", "obs-drm-output-audio-match.h"] {
         assert!(cm.contains(f), "issue 1424: os-linux.cmake must build {f}");
     }
-    // the PulseAudio half compiles only where libobs builds its own PulseAudio monitoring
-    let pulse = cm
-        .split("if(ENABLE_PULSEAUDIO)")
-        .nth(1)
-        .and_then(|s| s.split("else()").next())
-        .expect("issue 1424: os-linux.cmake has an if(ENABLE_PULSEAUDIO) block");
-    assert!(
-        pulse.contains("OBS_DRM_OUTPUT_AUDIO_PULSE"),
-        "issue 1424: the ENABLE_PULSEAUDIO block must define OBS_DRM_OUTPUT_AUDIO_PULSE"
-    );
-    assert!(c.contains("#if defined(OBS_DRM_OUTPUT_AUDIO_PULSE)"));
-    assert!(
-        c.contains("built without PulseAudio"),
-        "issue 1424: a libobs without PulseAudio logs that the leg is absent, never silently"
-    );
+    // alsa-lib is dlopen'd at run time: no link dependency (the vk-direct Vulkan loader pattern)
+    assert!(!cm.contains("ALSA::ALSA"), "issue 1424: no link-time alsa-lib");
+    assert!(c.contains("dlopen(\"libasound.so.2\""), "issue 1424: alsa-lib is dlopen'd");
+    assert!(c.contains("dlsym("));
 }
 
 #[test]
-fn audio_plays_mix_0_through_the_pulse_wrapper_never_the_monitoring_device() {
+fn audio_writes_mix_0_straight_to_the_hw_pcm_never_pipewire_or_the_monitoring_device() {
     let c = file(AUDIO_C);
     let s = squish(&c);
     assert!(s.contains("obs_add_raw_audio_callback(0,"), "issue 1424: the program mix = mix 0");
     assert!(s.contains("obs_remove_raw_audio_callback(0,"));
-    assert!(c.contains("pulseaudio_connect_playback("), "issue 1424: libobs's PulseAudio wrapper");
-    assert!(c.contains("pulseaudio_get_sink_info_list("));
-    for banned in ["monitoring_device_id", "get_default_id", "obs_set_audio_monitoring_device", "\"default\""] {
+    // the ALSA hw PCM of the matched (card, device), opened non-blocking, written in place
+    assert!(c.contains("\"hw:%d,%d\""), "issue 1424: the hw PCM, never a plug or a sound server");
+    assert!(c.contains("snd_pcm_writei") && c.contains("snd_pcm_delay"));
+    assert!(c.contains("SND_PCM_NONBLOCK"), "issue 1424: the audio thread never blocks on the PCM");
+    // no layer in between, no fallback
+    for banned in [
+        "pulseaudio",
+        "pa_stream",
+        "pipewire",
+        "monitoring_device_id",
+        "get_default_id",
+        "\"default\"",
+        "plughw",
+        "dmix",
+    ] {
         assert!(
-            !c.contains(banned),
-            "issue 1424: the leg must never fall back to OBS's monitoring device or the default sink ({banned})"
+            !c.to_lowercase().contains(&banned.to_lowercase()),
+            "issue 1424: no sound server, no monitoring device, no plug/mixer layer, no default device ({banned})"
         );
     }
-    // the sink is chosen by its alsa.card / alsa.device properties, never by a stored name
-    assert!(c.contains("\"alsa.card\"") && c.contains("\"alsa.device\""));
-    assert!(c.contains("drm_output_audio_pick_sink("));
-    // no per-box audio key in the output's config
     assert!(!c.contains("drm-output.json"), "issue 1424: no per-box audio setting");
 }
 
@@ -122,11 +120,14 @@ fn audio_matches_the_connector_edid_against_the_per_pcm_eld_control() {
     assert!(c.contains("\"ELD\""));
     assert!(!c.contains("/proc/asound"), "issue 1424: the /proc eld index is not a PCM number");
     assert!(c.contains("drm_output_audio_pick_pcm("));
+    // the matched PCM's IEC958 switch is turned on (no sound server unmutes it any more)
+    assert!(c.contains("\"IEC958 Playback Switch\"") && c.contains("SNDRV_CTL_IOCTL_ELEM_WRITE"));
+    assert!(c.contains("drm_output_audio_iec958_index("));
     // the bounded re-read window, then ONE named line
     assert!(c.contains("DRM_OUTPUT_AUDIO_RESOLVE_WINDOW_MS"));
     assert!(c.contains("drm_output_audio_retryable("));
     assert!(c.contains("drm-output audio: NO AUDIO on '%s'"));
-    assert!(c.contains("drm-output audio: sink %s card %d device %d delay %.1f ms"));
+    assert!(c.contains("drm-output audio: pcm hw:%d,%d card %d device %d delay %.1f ms"));
 }
 
 #[test]
@@ -261,19 +262,16 @@ fn pcm_scenarios() -> Vec<PcmScenario> {
     ]
 }
 
-type SinkScenario = (&'static str, i32, i32, &'static [(i32, i32)]);
+type IecVector = (&'static [i32], i32);
 
-fn sink_scenarios() -> Vec<SinkScenario> {
-    vec![
-        ("strih-pp", 0, 3, &[(1, 0), (0, 3), (2, 0)]),
-        ("hdmi1-no-sink", 0, 7, &[(1, 0), (0, 3)]),
-        ("dup", 0, 3, &[(0, 3), (0, 3)]),
-        ("empty", 0, 3, &[]),
-        ("other-card", 1, 3, &[(0, 3)]),
-    ]
-}
-
-const INDEX_STRINGS: &[&str] = &["0", "3", "07", "9999", "10000", "", "-1", "3 ", "a", "12a"];
+const IEC958_VECTORS: &[IecVector] = &[
+    (&[3, 7, 8, 9], 3),
+    (&[3, 7, 8, 9], 9),
+    (&[9, 8, 7, 3], 8),
+    (&[3, 7, 7], 7),
+    (&[3, 7], 0),
+    (&[], 3),
+];
 
 type PlanVector = (u64, u64, u64, u64, u64, u64, u64);
 
@@ -333,12 +331,8 @@ fn rust_lines() -> Vec<String> {
             m::reason(r)
         ));
     }
-    for (tag, card, device, sinks) in sink_scenarios() {
-        let (r, idx) = m::pick_sink(card, device, sinks);
-        out.push(format!("sink:{tag} r={r} idx={} reason=[{}]", idx.map_or(-1, |i| i as i64), m::reason(r)));
-    }
-    for s in INDEX_STRINGS {
-        out.push(format!("index:[{s}] {}", m::parse_index(s).map_or("none".to_string(), |v| v.to_string())));
+    for (i, &(devices, device)) in IEC958_VECTORS.iter().enumerate() {
+        out.push(format!("iec:{i} {}", m::iec958_index(devices, device).unwrap_or(-1)));
     }
     for (i, &(ts, pd, now, lat, fl, thr, blk)) in plan_vectors().iter().enumerate() {
         let p = m::plan_block(ts, pd, now, lat, fl, thr, blk);
@@ -383,20 +377,12 @@ fn c_harness() -> String {
             pcms.len()
         ));
     }
-    for (tag, card, device, sinks) in sink_scenarios() {
-        src.push_str(&format!(" {{\n struct drm_output_audio_sink_ref s[{}];\n", sinks.len().max(1)));
-        for (j, &(c, d)) in sinks.iter().enumerate() {
-            src.push_str(&format!(" s[{j}].card = {c}; s[{j}].device = {d};\n"));
-        }
+    for (i, &(devices, device)) in IEC958_VECTORS.iter().enumerate() {
+        let list: Vec<String> = devices.iter().map(|d| d.to_string()).collect();
         src.push_str(&format!(
-            " size_t idx = 0; int r = drm_output_audio_pick_sink({card}, {device}, s, {}, &idx);\n\
-             printf(\"sink:{tag} r=%d idx=%lld reason=[%s]\\n\", r, r == DRM_OUTPUT_AUDIO_MATCH ? (long long)idx : -1LL, drm_output_audio_reason(r));\n }}\n",
-            sinks.len()
-        ));
-    }
-    for s in INDEX_STRINGS {
-        src.push_str(&format!(
-            " {{ int v = 0; if (drm_output_audio_parse_index(\"{s}\", &v)) printf(\"index:[{s}] %d\\n\", v); else printf(\"index:[{s}] none\\n\"); }}\n"
+            " {{ static const int d{i}[] = {{{}}}; printf(\"iec:{i} %d\\n\", drm_output_audio_iec958_index(d{i}, {}, {device})); }}\n",
+            if list.is_empty() { "0".to_string() } else { list.join(",") },
+            devices.len()
         ));
     }
     for (i, &(ts, pd, now, lat, fl, thr, blk)) in plan_vectors().iter().enumerate() {
@@ -456,7 +442,7 @@ fn c_header_and_rust_twin_agree_on_every_vector() {
 // ------------------------------------------------------------------------------------------------
 
 #[test]
-fn strih_pp_benq_on_hdmi0_resolves_to_pcm_3_and_its_sink() {
+fn strih_pp_benq_on_hdmi0_resolves_to_hw_0_3() {
     let want = m::edid_monitor_id(&fixture("edid", "benq-hdmi0"));
     assert!(want.valid);
     assert_eq!(want.vendor, [0x09, 0xd1, 0x24, 0x80]);
@@ -468,12 +454,14 @@ fn strih_pp_benq_on_hdmi0_resolves_to_pcm_3_and_its_sink() {
         m::AudioPcm { card: 0, device: 7, id: m::eld_monitor_id(&[]) },
     ];
     assert_eq!(m::pick_pcm(&want, &pcms), (m::MATCH, Some(0)));
-    // alsa_output.pci-0000_0a_00.1.hdmi-stereo: alsa.card 0, alsa.device 3
-    assert_eq!(m::pick_sink(0, 3, &[(1, 0), (0, 3)]), (m::MATCH, Some(1)));
+    // hw:0,3 = the PCM PipeWire called hdmi:0 on strih-pp (alsa.card 0, alsa.device 3); its IEC958
+    // switch is index 0 of the card's HDMI PCMs 3/7/8/9
+    assert_eq!((pcms[0].card, pcms[0].device), (0, 3));
+    assert_eq!(m::iec958_index(&[3, 7, 8, 9], 3), Some(0));
 }
 
 #[test]
-fn strih_pp_blackmagic_on_hdmi1_waits_for_its_eld_then_names_a_missing_sink() {
+fn strih_pp_blackmagic_on_hdmi1_waits_for_its_eld() {
     let want = m::edid_monitor_id(&fixture("edid", "blackmagic-hdmi1"));
     assert_eq!(want.vendor, [0x09, 0xa4, 0x0c, 0xbe]);
     assert_eq!(want.name, "Blackmagic");
@@ -490,10 +478,7 @@ fn strih_pp_blackmagic_on_hdmi1_waits_for_its_eld_then_names_a_missing_sink() {
         m::AudioPcm { card: 0, device: 7, id: m::eld_monitor_id(&fixture("eld", "blackmagic-card0-pcm7")) },
     ];
     assert_eq!(m::pick_pcm(&want, &after), (m::MATCH, Some(1)));
-    // a card profile that exposes only the HDMI-0 PCM: no sink for PCM 7 -> no audio, named
-    let (r, _) = m::pick_sink(0, 7, &[(1, 0), (0, 3)]);
-    assert_eq!(r, m::NO_SINK);
-    assert_eq!(m::reason(r), "no PipeWire sink plays the matched PCM");
+    assert_eq!(m::iec958_index(&[3, 7, 8, 9], 7), Some(1));
 }
 
 #[test]
