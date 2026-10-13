@@ -25,6 +25,7 @@ target_sources(
     obs-drm-output-outputs.c
     obs-drm-output-view.c
     obs-drm-output-vk-internal.h
+    obs-drm-output-vk-remode.c
     obs-drm-output-vk-setup.c
     obs-drm-output-vk.c
     obs-drm-output-vk.h

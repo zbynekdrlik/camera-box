@@ -21,9 +21,10 @@
  * semaphore would wedge the copy fence and force the teardown's leak path).
  *
  * Build ON the box (never on dev1 — Tier-0), with the X11/xcb/EGL/GL/Vulkan headers staged in $INC and
- * the libobs tree in $LIBOBS (only the util headers and the four obs-drm-output-vk files are read):
+ * the libobs tree in $LIBOBS (only the util headers and the five obs-drm-output-vk files are read):
  *   gcc -O2 -std=gnu11 -Wall -Wextra -I$INC -I$LIBOBS tests/c/drm_output_vk_rig_harness.c \
- *       $LIBOBS/obs-drm-output-vk.c $LIBOBS/obs-drm-output-vk-setup.c -o vk-rig-harness \
+ *       $LIBOBS/obs-drm-output-vk.c $LIBOBS/obs-drm-output-vk-setup.c $LIBOBS/obs-drm-output-vk-remode.c \
+ *       -o vk-rig-harness \
  *       -ldl -lpthread -l:libX11.so.6 -l:libX11-xcb.so.1 -l:libxcb.so.1 -l:libxcb-randr.so.0 -l:libEGL.so.1
  * Run (each output must be OFF in X first — `xrandr --output HDMI-0 --off`):
  *   DISPLAY=:0 ./vk-rig-harness HDMI-0

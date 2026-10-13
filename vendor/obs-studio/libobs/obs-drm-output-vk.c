@@ -196,7 +196,8 @@ static bool drm_output_vk_record(struct drm_output_vk_disp *d, uint32_t img, int
 	return d->dev->vk.vkEndCommandBuffer(d->cmd) == VK_SUCCESS;
 }
 
-/* issue 1424 review: drain display `d`'s queue BOUNDED at its teardown. An empty submit's fence signals
+/* issue 1424 review: drain display `d`'s queue BOUNDED, at its teardown and before a surface rebuild
+ * destroys the old presentation (obs-drm-output-vk-remode.c). An empty submit's fence signals
  * after every earlier batch on the queue (what vkQueueWaitIdle waits for), but this waits 5 x 1 s at
  * most: a queue the OTHER display shares and wedged must never hang the OBS shutdown. false = timed
  * out (the caller leaks this display); a lost device reads true (destroyed normally). */
@@ -246,7 +247,7 @@ static bool drm_output_vk_wait_fence(struct drm_output_vk_disp *d)
 #define DRM_OUTPUT_VK_REBUILD_TRIES 10u
 static bool drm_output_vk_rebuild_or_give_up(struct drm_output_vk_disp *d, VkResult why, unsigned *rebuilds)
 {
-	while (os_atomic_load_bool(&d->running) && *rebuilds < DRM_OUTPUT_VK_REBUILD_TRIES) {
+	while (os_atomic_load_bool(&d->running) && !d->queue_wedged && *rebuilds < DRM_OUTPUT_VK_REBUILD_TRIES) {
 		(*rebuilds)++;
 		blog(LOG_WARNING, "drm-output: vk-direct: presentation out of date (VkResult %d) on '%s' -- rebuilding (try %u of %u)",
 		     (int)why, d->output_name, *rebuilds, DRM_OUTPUT_VK_REBUILD_TRIES);
@@ -434,6 +435,8 @@ struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name,
 	d->submit_outstanding = false;
 	d->retire_countdown = 0;
 	os_atomic_set_long(&d->presents_since_surface, 0);
+	os_atomic_set_long(&d->settle_images, 0);
+	d->queue_wedged = false;
 	d->front = d->pending = d->ready = -1;
 	/* issue 1424: open with today's rule; the graphics thread hands the Program canvas over */
 	os_atomic_set_long(&d->want_w, 0);

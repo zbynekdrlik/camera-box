@@ -210,7 +210,6 @@ struct drm_output_vk_disp {
 	pthread_mutex_t *queue_lock; /* that queue's host-access lock (in the device) */
 	VkSwapchainKHR swapchain;
 	VkSwapchainKHR retired_swapchain; /* replaced by a rebuild, freed later (see RETIRE_FRAMES) */
-	VkSurfaceKHR retired_surface;     /* replaced by a surface-lost rebuild, freed with it */
 	unsigned retire_countdown;        /* signalled fences left before the retired objects go */
 	bool present_queued_since_rebuild; /* vkQueuePresentKHR was called on the current swapchain */
 	VkImage swap_images[DRM_OUTPUT_VK_MAX_SWAP];
@@ -244,8 +243,13 @@ struct drm_output_vk_disp {
 	unsigned long long program_presents;
 	bool scanout_live_logged;
 	/* issue 1424: successful presents on the CURRENT surface (os_atomic: the present thread counts, a new
-	 * surface restarts it at 0, another display's open reads it -- see DRM_OUTPUT_VK_SETTLE_PRESENTS). */
+	 * surface restarts it at 0, another display's open reads it -- see DRM_OUTPUT_VK_SETTLE_PRESENTS), and
+	 * the current swapchain's image count the settle threshold follows. */
 	volatile long presents_since_surface;
+	volatile long settle_images;
+	/* issue 1424 review: a rebuild's bounded drain timed out (present thread + teardown): the empty
+	 * submit's fence may still be pending, so no rebuild retries (it would reset/re-submit that fence). */
+	bool queue_wedged;
 };
 
 /* The shared device and the display slots (defined in obs-drm-output-vk.c). */
@@ -266,6 +270,25 @@ bool drm_output_vk_setup(struct drm_output_vk_disp *d);
 void drm_output_vk_destroy_display(struct drm_output_vk_disp *d);
 /* Drain the display's queue BOUNDED (5 x 1 s) before its teardown; false = it never drained (leak). */
 bool drm_output_vk_drain_queue_bounded(struct drm_output_vk_disp *d);
+
+/* issue 1424 (obs-drm-output-vk-setup.c, shared with the remode TU): the display's modes as the picker
+ * reads them, and the pick for the wanted mode the graphics thread handed over (0/0/0 = the issue-1346
+ * rule). One enumeration for the surface setup and the re-mode. */
+struct drm_output_vk_mode_list {
+	VkExtent2D native;
+	uint32_t n;
+	VkDisplayModePropertiesKHR *modes;
+	uint32_t *w, *h, *r;
+	uint32_t want_w, want_h, want_mhz;
+	int best;
+};
+bool drm_output_vk_mode_list_read(struct drm_output_vk_disp *d, struct drm_output_vk_mode_list *ml);
+void drm_output_vk_mode_list_free(struct drm_output_vk_mode_list *ml);
+bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild);
+bool drm_output_vk_create_swapchain_only(struct drm_output_vk_disp *d, VkSwapchainKHR old_swapchain);
+void drm_output_vk_destroy_swapchain(struct drm_output_vk_disp *d);
+/* obs-drm-output-vk-remode.c: the open's bounded settle wait before its acquire (issue 1424 part 2). */
+void drm_output_vk_wait_others_settled(struct drm_output_vk_disp *d);
 
 /* obs-drm-output-vk-setup.c, present thread only: rebuild the swapchain (and the display-plane surface
  * too when `surface_lost`) after VK_ERROR_OUT_OF_DATE_KHR / VK_ERROR_SURFACE_LOST_KHR, e.g. an HDMI
