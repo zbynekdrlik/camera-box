@@ -65,7 +65,8 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     assert r.returncode == 0, r.stderr
     names = [ln.split("|")[0] for ln in r.stdout.split()]
     assert names == ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "dev1", "strih-snv",
-                     "stream-snv", "resolume-snv", "mbc", "fohabl", "strih-pp", "stream-pp", "resolume-pp"]
+                     "stream-snv", "resolume-snv", "mbc", "fohabl", "iem-snv", "companion-snv",
+                     "strih-pp", "stream-pp", "resolume-pp"]
     rows = {ln.split("|")[0]: ln for ln in r.stdout.split()}
     assert rows["mbc"] == "mbc|10.77.7.232|windows|audio|always|-|"
     assert rows["fohabl"] == "fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS"
@@ -73,6 +74,11 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     assert rows["strih-snv"] == "strih-snv|10.77.9.202|linux|ntp-master|obsfleet|-|"
     assert rows["resolume-snv"] == "resolume-snv|resolume.lan|windows|video|obsfleet|-|"
     assert rows["dev1"] == "dev1|local|linux|video|local|-|"
+    # owner 13.10.2026 ("ako to ze na iem pc nei je upgradovany dantesync?!!!"): the SNV IEM mixing PC
+    # (Windows) and the SNV Companion box (Linux) run dantesync on the video clock and were outside the
+    # table, so no roll ever reached them (1.8.28 / 1.8.20 against the 1.17.0 pin).
+    assert rows["iem-snv"] == "iem-snv|iem-snv.lan|windows|video|always|-|"
+    assert rows["companion-snv"] == "companion-snv|companion-snv.lan|linux|video|always|-|"
 
 
 def test_lv1_is_excluded_per_the_owner():
@@ -154,9 +160,11 @@ def test_version_gate_arms(tmp_path):
     # issue 1413: the SNV cameras at their rig address, the Poprad ones at the dev1-side 10.76.9.x
     assert out["L"].split() == [f"cam{n}=root@{'10.77.9' if n in (2, 3, 5) else '10.76.9'}.6{n}"
                                 for n in range(1, 8)] + [
-        "strih-snv=op@10.77.9.202", "strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
+        "strih-snv=op@10.77.9.202", "companion-snv=op@companion-snv.lan", "strih-pp=op@strih-pp.lan",
+        "stream-pp=op@stream-pp.lan"]
     assert out["W"].split() == ["stream-snv=op@10.77.9.204", "resolume-snv=op@resolume.lan",
-                                "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30", "resolume-pp=op@resolume-pp.lan"]
+                                "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30", "iem-snv=op@iem-snv.lan",
+                                "resolume-pp=op@resolume-pp.lan"]
     assert out["D"] == "dev1"
 
 
