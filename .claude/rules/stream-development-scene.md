@@ -189,3 +189,31 @@ the genlock CI builds and a full-bundle deploy, for a comment.
 The Bitfocus Companion `PRODUCTION` trigger keys on program == `PRO` AND streaming
 (`.claude/rules/strih-autorecord-coupling.md`); since no tool programs `PRO`, development never arms
 the production auto-record. Stated from the trigger condition, not verified live.
+
+## The stream ROLE's safe Development (stream-pp, ROZHODNUTÉ 13.10.2026)
+
+stream-pp's `PRO` holds the live venue mixer (`Zvuk z mixu`, pulse capture, continuous program
+audio). A nested scene mixes its children's audio and an OBS mute is per INPUT, so the SNV shape
+(Development = `PRO` nested) would put the mixer on YouTube. On a stream-ROLE box (a fact-file box
+with `STRIH_ROLE=stream`) Development holds exactly two items instead:
+
+- `Merací klip`, a looping `ffmpeg_source` of `/opt/camera-box/measurement-clip-v1.mp4` (the
+  issue-1404 measurement clip: painter QR + QPSK marker over the -30 dBFS bed), at the BOTTOM;
+- `NDI 2ME PGM` on top, covering the clip picture. It must stay MUTED; verify FAILs when it is not.
+
+Where it lives:
+
+- `scripts/stream_dev_safe.py`: the pure plan (create-only, operator-wins, never `PRO`, never the
+  mixer, never mutes or selects a scene), the verdict and the `--seed` / `--verify` CLI. It imports
+  `strih_scenes.Obs` and the manifest path from `strih_scenes.py` beside it.
+- The stream seed manifest (`obs_box_stream_seed_manifest_json`) carries `dev_scene`, and
+  `strih_scenes.py --bootstrap` seeds it on every OBS launch. A strih manifest never has the key.
+- setup-strih step `6-devclip` (stream role only) generates the clip ON the box with
+  `gen_measurement_clip.py` (installs `python3-numpy`, ~4 min at nice 19), keeps a clip with the
+  right frame count (3840) and its marker log. verify-strih's stream branch runs
+  `obs_box_stream_dev_grade` (the clip + `stream_dev_safe.py --verify`) next to the encoder grade,
+  on the same line, so verify-strih stays at its 1000-line budget.
+- The operator owns the stream-pp program. For a restreamer YouTube test the supervisor cuts the
+  program to `Development` through the guarded obs_phase2 switch (which refuses `PRO`); after the
+  test it is left on `Development`, the operator cuts back to `PRO` for a service.
+- Tests: `tests/python/test_stream_dev_safe_1380.py`.
