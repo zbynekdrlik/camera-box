@@ -41,7 +41,7 @@ def test_roster_defaults_come_from_the_dantesync_fleet():
     # cameras are `reach` rows, watched once through the REACH arm (test_dantesync_fleet_pp_cams_1413.py).
     assert _source_var("DANTE_CLOCK_CAM_NODES") == "cam2 cam3 cam5"
     assert _source_var("DANTE_CLOCK_OBS_NODES") == "strih-snv stream-snv resolume-snv"
-    assert _source_var("DANTE_CLOCK_FIXED_NODES") == "mbc fohabl"
+    assert _source_var("DANTE_CLOCK_FIXED_NODES") == "mbc fohabl iem-snv companion-snv"
     assert _source_var("DANTE_CLOCK_LOCAL_NODES") == "dev1"
 
 
@@ -87,7 +87,7 @@ def _run_dry(tmp_path, by_ip, **env):
 
 def test_audio_vlan_nodes_are_watched_and_graded_against_the_audio_grandmaster(tmp_path):
     err = _run_dry(tmp_path, {"10.77.7.232": _status(AUDIO_GM), "10.77.7.30": _status(AUDIO_GM)})
-    assert "fixed='mbc fohabl'" in err
+    assert "fixed='mbc fohabl iem-snv companion-snv'" in err
     assert "mbc (10.77.7.232): reachable=1 verdict=OK" in err, err
     assert "fohabl (10.77.7.30): reachable=1 verdict=OK" in err, err
     assert "WOULD alert" not in err, err

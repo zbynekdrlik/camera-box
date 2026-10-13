@@ -97,7 +97,9 @@ def test_cameras_come_from_the_camera_resolve_walk_not_a_literal_range(tmp_path)
     home = re.search(r"^STRIH_CAMERAS=(.+)$", (_ROOT / "scripts" / "strih-boxes" / "strih-snv.env").read_text(),
                      re.MULTILINE).group(1).split()
     r = _bash(tmp_path, "dantesync_fleet_names homegate=always os=linux")
-    assert r.stdout.split() == [a for a in arms if a[3:] in home]
+    # the always-home Linux rows are the home cameras + the SNV Companion box (13.10.2026)
+    assert [n for n in r.stdout.split() if n.startswith("cam")] == [a for a in arms if a[3:] in home]
+    assert [n for n in r.stdout.split() if not n.startswith("cam")] == ["companion-snv"]
     rows = _bash(tmp_path, "dantesync_fleet_rows").stdout.split()
     assert [ln.split("|")[0] for ln in rows if ln.startswith("cam")] == arms  # every camera has a venue today
     assert "cam1 cam2 cam3" not in _LIB.read_text()  # no literal camera range in the lib

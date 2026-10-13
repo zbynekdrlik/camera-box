@@ -249,7 +249,7 @@ def test_the_pp_nodes_are_never_fixed_or_obsfleet_nodes(tmp_path):
     r = _bash(tmp_path, 'echo "F=$(dantesync_fleet_fixed_names)"; echo "O=$(dantesync_fleet_names homegate=obsfleet)";'
                         ' echo "R=$(dantesync_fleet_names homegate=reach)"; echo "M=$(dantesync_fleet_master_names)"')
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
-    assert out["F"] == "mbc fohabl"
+    assert out["F"] == "mbc fohabl iem-snv companion-snv"
     assert out["O"] == "strih-snv stream-snv resolume-snv"
     # issue 1413: the Poprad camboxes are `reach` rows too (test_dantesync_fleet_pp_cams_1413.py)
     assert out["R"] == "cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp"
@@ -276,7 +276,8 @@ def _stub_bin(tmp_path, versions):
 
 _PIN = re.search(r'DANTESYNC_VERSION_PIN="\$\{DANTESYNC_VERSION_PIN:-([0-9.]+)\}"', _GATE.read_text()).group(1)
 _HOSTS = ["10.77.9.6%d" % n for n in range(1, 8)] + ["10.77.9.202", "10.77.9.204", "resolume.lan", "10.77.7.232",
-                                                   "10.77.7.30", "strih-pp.lan", "stream-pp.lan", "resolume-pp.lan"]
+                                                   "10.77.7.30", "iem-snv.lan", "companion-snv.lan", "strih-pp.lan", "stream-pp.lan",
+                                                   "resolume-pp.lan"]
 
 
 def _gate(tmp_path, versions, home):
@@ -288,7 +289,7 @@ def _gate(tmp_path, versions, home):
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=home, DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env"),
                DANTESYNC_VERSION_GATE_SSH_PASS="pw", DANTESYNC_TRAY_EXPECTED_SHA="a" * 64,
                DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FOHABL_SSH_PASS="foh")
-    for n in ("STREAM", "RESOLUME", "MBC", "FOHABL", "RESOLUME_PP"):
+    for n in ("STREAM", "RESOLUME", "MBC", "FOHABL", "IEM_SNV", "RESOLUME_PP"):
         env[f"DANTESYNC_TRAY_SHA_{n}"] = "a" * 64
     return subprocess.run(["bash", str(_GATE), "--pin", _PIN, "--fleet-file", str(fleet), "--fleet"],
                           capture_output=True, text=True, env=env)
@@ -301,7 +302,7 @@ def test_version_gate_fleet_reads_the_pp_boxes_while_they_are_reachable(tmp_path
         assert f"  {name} " in r.stdout, (name, r.stdout)
     # issue 1413: 3 SNV cameras + dev1 + 5 SNV boxes + the 3 PP boxes; the PP cameras are away here
     # (PP_HOME names only the PP boxes).
-    assert "GATE PASS — 12 box(es)" in r.stdout
+    assert "GATE PASS — 14 box(es)" in r.stdout  # + iem-snv, companion-snv (13.10.2026)
     dials = (tmp_path / "dials.log").read_text().split()
     assert {"newlevel@strih-pp.lan", "newlevel@stream-pp.lan", "newlevel@resolume-pp.lan"} <= set(dials)
 
@@ -317,7 +318,7 @@ def test_version_gate_fleet_a_stale_pp_box_drifts(tmp_path):
 def test_version_gate_fleet_skips_unreachable_pp_boxes_and_still_passes(tmp_path):
     r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-snv stream-snv resolume-snv")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "GATE PASS — 9 box(es)" in r.stdout
+    assert "GATE PASS — 11 box(es)" in r.stdout  # + iem-snv, companion-snv (13.10.2026)
     for name in ("strih-pp", "stream-pp", "resolume-pp"):
         assert f"  {name} SKIPPED (unreachable" in r.stdout, r.stdout
     assert "-pp.lan" not in (tmp_path / "dials.log").read_text()

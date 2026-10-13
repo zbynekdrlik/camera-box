@@ -20,7 +20,7 @@ _GATE = _ROOT / "scripts" / "dantesync-version-gate.sh"
 _UPGRADE = _ROOT / "scripts" / "dantesync-fleet-upgrade.sh"
 # The ONE pin, read from the gate script itself so a fleet roll (a pin bump) never strands this test.
 _PIN = re.search(r'DANTESYNC_VERSION_PIN="\$\{DANTESYNC_VERSION_PIN:-([0-9.]+)\}"', _GATE.read_text()).group(1)
-_WIN = ("stream-snv", "resolume-snv", "mbc", "fohabl")
+_WIN = ("stream-snv", "resolume-snv", "mbc", "fohabl", "iem-snv")
 
 
 def _stub_bin(tmp_path, versions):
@@ -45,7 +45,8 @@ def _stub_bin(tmp_path, versions):
 
 _IPS = {"cam1": "10.77.9.61", "cam2": "10.77.9.62", "cam3": "10.77.9.63", "cam4": "10.77.9.64",
         "cam5": "10.77.9.65", "cam6": "10.77.9.66", "cam7": "10.77.9.67", "strih-snv": "10.77.9.202",
-        "stream-snv": "10.77.9.204", "resolume-snv": "resolume.lan", "mbc": "10.77.7.232", "fohabl": "10.77.7.30"}
+        "stream-snv": "10.77.9.204", "resolume-snv": "resolume.lan", "mbc": "10.77.7.232", "fohabl": "10.77.7.30",
+        "iem-snv": "iem-snv.lan", "companion-snv": "companion-snv.lan"}
 
 
 def _env(tmp_path, bindir, **over):
@@ -94,7 +95,7 @@ def test_gate_fleet_reads_every_node_including_the_audio_vlan(tmp_path):
             continue
         assert f"  {name} " in r.stdout, (name, r.stdout)
     assert "  dev1 " in r.stdout
-    assert "GATE PASS — 9 box(es)" in r.stdout
+    assert "GATE PASS — 11 box(es)" in r.stdout
 
 
 def test_gate_fleet_fohabl_is_dialled_with_its_own_credential(tmp_path):
