@@ -382,7 +382,10 @@ def test_verdict_through_resolve_accepts_the_live_video_input():
         return real_req(t, data, ignore_err)
     obs.req = req
     rows = sds.read_verdict(obs, SPEC)
-    assert "FAIL" not in [lvl for lvl, _ in rows], rows
+    dev = [(lvl, t) for lvl, t in rows if t.startswith("(dev-scene)")]
+    assert "FAIL" not in [lvl for lvl, _ in dev], rows
+    # owner 13.10.2026: the sign itself is a FAIL of its own row (source-names), never of the scene
+    assert [lvl for lvl, t in rows if t.startswith("(source-names)")] == ["FAIL"]
 
 
 # ---- owner 13.10.2026: one spelling of the source names, never the registered sign ---------------
