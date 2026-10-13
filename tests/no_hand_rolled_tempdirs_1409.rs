@@ -36,6 +36,7 @@ const ALLOWLIST: &[&str] = &[
     "deploy_genlock_fleet.rs: the one pid dir is removed by its test",
     "distroav_sender_port_linger_1363.rs: a Drop guard removes the dir",
     "drm_output_audio_1424.rs: std-only, a {tag}-{pid}-{counter} dir compile_and_run() removes",
+    "drm_output_outputs_1424.rs: std-only, a {tag}-{pid}-{counter} dir compile_and_run() removes",
     "drm_output_view_1346.rs: compile_and_run() removes its dir",
     "drm_output_view_mv_budget_1346.rs: the test removes its workdir at the end",
     "drm_output_vk_direct_1346.rs: compile_and_run() removes its dir",

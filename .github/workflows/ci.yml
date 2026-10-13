@@ -79,7 +79,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -145,7 +145,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs)
 
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
@@ -209,7 +209,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs)
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@cargo-mutants

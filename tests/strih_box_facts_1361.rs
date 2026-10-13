@@ -124,6 +124,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_CAMERA_DEV1_NET",
     "STRIH_HTTPS_INTERKOM_HOSTS",
     "STRIH_HTTPS_SHADING_HOST",
+    // issue 1424 part 2: the connectors the fixed HDMI output drives + their default views.
+    "STRIH_HDMI_OUTPUTS",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -176,6 +178,8 @@ fn loader_loads_strih_lx_facts() {
         // issue 1399: the TLS front end the box serves itself (design 6142127441).
         "STRIH_HTTPS_INTERKOM_HOSTS=interkom-lx.newlevel.media interkom.newlevel.media interkom-snv.newlevel.media",
         "STRIH_HTTPS_SHADING_HOST=shading.newlevel.media",
+        // issue 1424 part 2: one output on the first connected HDMI (the issue-1346 behaviour).
+        "STRIH_HDMI_OUTPUTS=auto",
         "LOADED=strih-snv",
     ] {
         assert!(

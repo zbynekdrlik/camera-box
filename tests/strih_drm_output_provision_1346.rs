@@ -444,9 +444,10 @@ fn verify_strih_grades_drm_output_and_skips_without_hdmi() {
 #[test]
 fn strih_obs_start_takes_the_armed_connector_out_of_x_before_the_launch() {
     let w = read("scripts/strih-obs-start.sh");
-    let classify = w
-        .find("strih_scenes.drm_output_lease_connector(")
-        .expect("the wrapper must classify the config with the ONE Python grammar");
+    let classify = w.find("strih_scenes.drm_output_lease_connectors(").expect(
+        "the wrapper must classify the config with the ONE Python grammar (issue 1424 part 2: \
+                 every armed connector)",
+    );
     let off = w
         .find("xrandr --output \"$DRM_CONNECTOR\" --off")
         .expect("the wrapper must take the armed connector out of the X layout");

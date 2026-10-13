@@ -66,16 +66,16 @@ fn the_surface_picks_with_the_wanted_program_mode() {
     // review B4: the surface setup and the re-mode share that enumeration, never a second copy
     let raw = file(VK_SETUP_C);
     for f in [
-        "static bool drm_output_vk_create_surface(bool rebuild)",
-        "bool drm_output_vk_remode_if_needed(void)",
+        "static bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)",
+        "bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)",
     ] {
         assert!(
-            body_of(&raw, f).contains("drm_output_vk_mode_list_read(&ml)"),
+            body_of(&raw, f).contains("drm_output_vk_mode_list_read(d, &ml)"),
             "issue 1424: {f} reads the modes through the shared enumeration"
         );
     }
     assert_eq!(
-        raw.matches("vkGetDisplayModePropertiesKHR(g_drm_vk.pd")
+        raw.matches("vkGetDisplayModePropertiesKHR(d->dev->pd")
             .count(),
         2,
         "one enumeration (count + fill)"
@@ -91,20 +91,31 @@ fn the_surface_picks_with_the_wanted_program_mode() {
     }
     // the hand-over is backend-facing (obs-drm-output-backend.c includes only the vk header)
     let vk_h = squish(&file(VK_H));
-    assert!(vk_h.contains("void drm_output_vk_want_mode(uint32_t w, uint32_t h, uint32_t mhz);"));
-    assert!(h.contains("bool drm_output_vk_remode_if_needed(void);"));
+    assert!(vk_h.contains(
+        "void drm_output_vk_want_mode(struct drm_output_vk_disp *d, uint32_t w, uint32_t h, uint32_t mhz);"
+    ));
+    assert!(h.contains("bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d);"));
 }
 
 #[test]
 fn the_graphics_thread_wants_the_canvas_only_for_the_program_view() {
     let b = file(BACKEND_C);
-    let hook = squish(&body_of(&b, "static bool vkd_on_frame(void)"));
+    let hook = squish(&body_of(
+        &b,
+        "static void vkd_on_frame(struct drm_output_inst *inst)",
+    ));
     assert!(
-        hook.contains("vkd_want_program_mode();"),
+        hook.contains("vkd_want_program_mode(inst);"),
         "issue 1424: every tick hands the wanted mode over"
     );
-    let want = squish(&body_of(&b, "static void vkd_want_program_mode(void)"));
-    assert!(want.contains("obs_drm_output_get_view() == OBS_DRM_OUTPUT_VIEW_PROGRAM"));
+    let want = squish(&body_of(
+        &b,
+        "static void vkd_want_program_mode(struct drm_output_inst *inst)",
+    ));
+    assert!(
+        want.contains("os_atomic_load_long(&inst->view.view) == OBS_DRM_OUTPUT_VIEW_PROGRAM"),
+        "issue 1424 part 2: THIS output's view picks the mode (the Multiview output keeps its native rate)"
+    );
     assert!(
         want.contains("obs_get_video_info(&ovi)"),
         "issue 1424: the canvas from the live video info"
@@ -124,7 +135,7 @@ fn the_present_thread_remodes_through_the_surface_rebuild_never_a_size_change() 
         "static void *drm_output_vk_present_thread(void *arg)",
     ));
     let remode = loop_
-        .find("drm_output_vk_remode_if_needed()")
+        .find("drm_output_vk_remode_if_needed(d)")
         .expect("issue 1424: the loop re-modes");
     let acquire = loop_.find("vkAcquireNextImageKHR").expect("acquire");
     assert!(
@@ -132,17 +143,20 @@ fn the_present_thread_remodes_through_the_surface_rebuild_never_a_size_change() 
         "issue 1424: a re-mode runs at the top of a vblank, before the acquire"
     );
     let s = file(VK_SETUP_C);
-    let r = squish(&body_of(&s, "bool drm_output_vk_remode_if_needed(void)"));
+    let r = squish(&body_of(
+        &s,
+        "bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)",
+    ));
     assert!(
-        r.contains("drm_output_vk_rebuild_presentation(true)"),
+        r.contains("drm_output_vk_rebuild_presentation(d, true)"),
         "issue 1424: the existing surface rebuild"
     );
     assert!(
-        r.contains("g_drm_vk.mode_w") && r.contains("g_drm_vk.mode_h"),
+        r.contains("d->mode_w") && r.contains("d->mode_h"),
         "issue 1424: the size is checked"
     );
     assert!(
-        r.contains("g_drm_vk.refresh_mhz"),
+        r.contains("d->refresh_mhz"),
         "issue 1424: an unchanged pick rebuilds nothing"
     );
     // the re-mode line names whether the picked rate IS the canvas rate or a near rate (29.97 vs 30)

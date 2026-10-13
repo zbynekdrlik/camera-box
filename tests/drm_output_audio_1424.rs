@@ -30,6 +30,10 @@ const AUDIO_H: &str = "vendor/obs-studio/libobs/obs-drm-output-audio.h";
 const MATCH_H: &str = "vendor/obs-studio/libobs/obs-drm-output-audio-match.h";
 const DRM_C: &str = "vendor/obs-studio/libobs/obs-drm-output.c";
 const VK_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.c";
+/// issue 1424 part 2: each output instance starts / stops its own leg in the registry TU, and the
+/// vk-direct OBS side forwards the core's present to the instance's clock.
+const OUTPUTS_C: &str = "vendor/obs-studio/libobs/obs-drm-output-outputs.c";
+const BACKEND_C: &str = "vendor/obs-studio/libobs/obs-drm-output-backend.c";
 const LINUX_CMAKE: &str = "vendor/obs-studio/libobs/cmake/os-linux.cmake";
 const FIXTURES: &str = "tests/fixtures/drm_output_audio_1424.tsv";
 
@@ -235,58 +239,61 @@ fn audio_leg_is_a_per_output_instance() {
 #[test]
 fn audio_is_gated_to_the_program_view() {
     // the Multiview view is the cutter's own monitor: the program audio stays off it
+    // issue 1424 part 2: THIS output's view (its own atomic), never the module-wide one
     let c = file(AUDIO_C);
-    assert!(c.contains("obs_drm_output_get_view() == OBS_DRM_OUTPUT_VIEW_PROGRAM"));
+    assert!(c.contains("os_atomic_load_long(a->view) == OBS_DRM_OUTPUT_VIEW_PROGRAM"));
 }
 
 #[test]
 fn output_start_and_stop_drive_the_audio_leg() {
-    let d = squish(&file(DRM_C));
-    // the EDID is read BEFORE a backend takes the connector off X, the leg opens only AFTER the
-    // backend start succeeded (the mode is driven, so the connector's ELD can appear)
-    let start = d.split("bool obs_drm_output_start(").nth(1).expect("start");
-    let start = start.split("void obs_drm_output_stop(").next().unwrap();
+    // issue 1424 part 2: per output instance. The EDID is read BEFORE the instance's backend takes the
+    // connector off X (the lease acquire / the vk-direct acquire both run inside ops->start), and the
+    // leg opens only AFTER that start succeeded (the mode is driven, so the connector's ELD can appear).
+    let o = squish(&file(OUTPUTS_C));
+    let start = o
+        .split("static bool drm_output_inst_start_locked(struct drm_output_inst *inst)")
+        .nth(1)
+        .expect("start");
+    let start = start
+        .split("static void drm_output_inst_stop_locked(")
+        .next()
+        .unwrap();
     let edid = start
         .find("drm_output_audio_read_edid(")
         .expect("issue 1424: start reads the EDID");
-    let vk = start
-        .find("drm_output_vk_direct_backend.start(cfg)")
-        .expect("vk start");
+    let backend = start
+        .find("inst->ops->start(inst)")
+        .expect("the backend start (lease or vk-direct)");
+    let open = start.find("drm_output_audio_open(").expect("the leg opens");
     assert!(
-        edid < vk,
-        "issue 1424: the EDID is read before the vk-direct backend acquires the display"
+        edid < backend && backend < open,
+        "issue 1424: EDID -> the backend takes the connector -> the leg opens"
     );
-    let lease = start.find("drm_output_acquire_lease(").expect("lease");
+    let d = squish(&file(DRM_C));
     assert!(
-        edid < lease,
-        "issue 1424: the EDID is read before the lease"
+        !d.contains("drm_output_audio_open(") && !d.contains("drm_output_audio_read_edid("),
+        "issue 1424 part 2: the backends never open a leg themselves (one leg per instance)"
     );
-    assert!(
-        start.matches("drm_output_audio_open(").count() >= 2,
-        "issue 1424: both backends open the audio leg after their start succeeded"
-    );
-    let stop = d
-        .split("void obs_drm_output_stop(void)")
+    let stop = o
+        .split("static void drm_output_inst_stop_locked(struct drm_output_inst *inst)")
         .nth(1)
         .expect("stop");
-    let stop = stop.split("bool obs_drm_output_active(").next().unwrap();
+    let stop = stop.split("bool obs_drm_output_start(").next().unwrap();
+    let close = stop
+        .find("drm_output_audio_close(")
+        .expect("issue 1424: stop closes the leg");
+    let backend_stop = stop.find("inst->ops->stop(inst);").unwrap();
     assert!(
-        stop.contains("drm_output_audio_close("),
-        "issue 1424: stop closes the leg"
-    );
-    let close = stop.find("drm_output_audio_close(").unwrap();
-    let vkstop = stop.find("drm_output_vk_direct_backend.stop()").unwrap();
-    assert!(
-        close < vkstop,
+        close < backend_stop,
         "issue 1424: the audio closes before the picture goes"
     );
 }
 
 #[test]
 fn both_backends_measure_the_present_delay() {
-    let d = squish(&file(DRM_C));
-    let publish = d
-        .split("void drm_output_publish_render_buf(int idx)")
+    let o = squish(&file(OUTPUTS_C));
+    let publish = o
+        .split("void drm_output_publish_render_buf(struct drm_output_inst *inst, int idx)")
         .nth(1)
         .expect("publish");
     let publish = publish
@@ -294,15 +301,17 @@ fn both_backends_measure_the_present_delay() {
         .next()
         .unwrap();
     assert!(
-        publish.contains("drm_output_present_note_published(idx)"),
-        "issue 1424: the ONE publish entry both backends use records the frame's render tick"
+        publish.contains("drm_output_present_note_published(&inst->clock, idx)"),
+        "issue 1424: the ONE publish entry both backends use records the frame's render tick on THAT \
+         output's clock"
     );
+    let d = squish(&file(DRM_C));
     let flip = d
         .split("static void *drm_output_flip_thread(")
         .nth(1)
         .expect("flip");
     assert!(
-        flip.contains("drm_output_present_note_shown(pnext"),
+        flip.contains("drm_output_present_note_shown(&d->inst->clock, pnext"),
         "issue 1424: the lease flip event"
     );
     let vk = squish(&file(VK_C));
@@ -311,8 +320,16 @@ fn both_backends_measure_the_present_delay() {
         .nth(1)
         .expect("present");
     assert!(
-        present.contains("drm_output_present_note_shown(src"),
-        "issue 1424: the vk-direct present"
+        present.contains("d->shown(d->shown_param, src"),
+        "issue 1424: the vk-direct present reports to its owning output"
+    );
+    let b = squish(&file(BACKEND_C));
+    assert!(
+        b.contains("drm_output_present_note_shown(&inst->clock, idx, shown_ns)")
+            && b.contains(
+                "drm_output_vk_open(inst->connector, inst->solid_argb, vkd_note_shown, inst)"
+            ),
+        "issue 1424: the vk-direct OBS side wires the core's present note to the instance's clock"
     );
 }
 

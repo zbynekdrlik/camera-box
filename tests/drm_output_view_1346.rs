@@ -39,6 +39,10 @@ const FE_PROJECTOR: &str = "vendor/obs-studio/frontend/widgets/OBSProjector.cpp"
 const FE_BASIC: &str = "vendor/obs-studio/frontend/widgets/OBSBasic.cpp";
 const FE_COLLECTIONS: &str = "vendor/obs-studio/frontend/widgets/OBSBasic_SceneCollections.cpp";
 const PARITY_TSV: &str = "tests/fixtures/drm_output_view_parity.tsv";
+/// issue 1424 part 2: the config grammar + the persisted view, the instance registry, the frame-hook
+/// dispatcher, the mailbox seam routing and the ONE raw blit live here; obs-drm-output.c keeps the
+/// lease backend (its frame hook is `lease_on_frame`, its stop `lease_stop`).
+const OUTPUTS_C: &str = "vendor/obs-studio/libobs/obs-drm-output-outputs.c";
 
 fn repo(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -109,10 +113,10 @@ fn view_tu_is_linux_only_and_built_by_libobs_linux_cmake() {
     );
     let i = squish(&file(INTERNAL_H));
     for token in [
-        "int drm_output_claim_render_buf(void);",
-        "void drm_output_publish_render_buf(int idx);",
-        "int drm_output_view_frame(void);",
-        "void drm_output_view_configure(const char *view, const char *config_path);",
+        "int drm_output_claim_render_buf(struct drm_output_inst *inst);",
+        "void drm_output_publish_render_buf(struct drm_output_inst *inst, int idx);",
+        "int drm_output_view_frame(struct drm_output_inst *inst);",
+        "void drm_output_view_configure(struct drm_output_inst *inst, int view);",
     ] {
         assert!(
             i.contains(token),
@@ -139,17 +143,17 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
              (main design 5840501628: the view's own previous render is not counted twice)",
         ),
         (
-            "drm_output_view_self_last_ns(g_view.last_render_ns, g_view.last_render_frame, obs_get_total_frames())",
+            "drm_output_view_self_last_ns(v->last_render_ns, v->last_render_frame, obs_get_total_frames())",
             "the view excludes its render cost only when that render ran in the immediately previous \
              graphics tick (review round 1: a skipped frame-hook call must never subtract a render \
              from a tick that did not contain it)",
         ),
         (
-            "g_view.last_render_frame = obs_get_total_frames();",
+            "v->last_render_frame = obs_get_total_frames();",
             "a render records the graphics tick it ran in",
         ),
         (
-            "g_view.last_render_ns = dt;",
+            "v->last_render_ns = dt;",
             "a published render records its full cost for the next tick's gate",
         ),
         (
@@ -169,16 +173,17 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
             "the same ~5 s window as the multiview-audit family",
         ),
         (
-            "os_quick_write_utf8_file_safe(",
-            "the persisted choice survives an OBS restart",
+            "drm_output_config_persist_view(inst, name)",
+            "the persisted choice survives an OBS restart (issue 1424 part 2: written by the config TU \
+             into THIS output's entry)",
         ),
         (
-            "obs_data_set_string(data, \"view\"",
-            "persist ONLY the view key, every other key kept",
+            "os_atomic_set_long(&inst->view.view, v)",
+            "the switch is live for this output at once",
         ),
         (
-            "obs_data_get_json(data)",
-            "one-line COMPACT json (the drm-output.json one-line contract)",
+            "(persisted)",
+            "the switch names whether it was persisted",
         ),
         (
             "gs_texrender_create(GS_BGRA, GS_ZS_NONE)",
@@ -186,11 +191,11 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
              scanout target would drop the sRGB encode the built-in Multiview relies on)",
         ),
         (
-            "drm_output_blit_raw(gs_texrender_get_texture(",
+            "drm_output_blit_raw(inst, gs_texrender_get_texture(",
             "then the SAME raw byte-faithful blit the Program path uses fills the scanout buffer",
         ),
         (
-            "drm_output_publish_render_buf(idx);",
+            "drm_output_publish_render_buf(inst, idx);",
             "the shared mailbox publish (no duplicated lock code)",
         ),
     ] {
@@ -199,10 +204,30 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
             "issue 1346: {VIEW_C} must contain `{token}` -- {why}"
         );
     }
+    let o = squish(&file(OUTPUTS_C));
+    for (token, why) in [
+        (
+            "os_quick_write_utf8_file_safe(",
+            "the persisted choice survives an OBS restart",
+        ),
+        (
+            "json_object_set_new(target, \"view\", json_string(view))",
+            "persist ONLY the view key of THIS output's entry, every other key kept",
+        ),
+        (
+            "json_dumps(root, JSON_COMPACT | JSON_PRESERVE_ORDER)",
+            "one-line COMPACT json (the drm-output.json one-line contract)",
+        ),
+    ] {
+        assert!(
+            o.contains(token),
+            "issue 1346 / 1424: {OUTPUTS_C} must contain `{token}` -- {why}"
+        );
+    }
     // The renderer setter must serialise with the graphics-thread hook (the callback runs while
     // the hook holds the graphics context), so a frontend teardown never races a render.
     let setter = v
-        .find("void obs_drm_output_set_view_renderer(")
+        .find("void obs_drm_output_set_view_renderer_of(")
         .expect("issue 1346: setter definition missing");
     let body = &v[setter..];
     let enter = body
@@ -227,14 +252,14 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
     // review round 1: the render cost is recorded as soon as the Multiview is rendered, BEFORE the
     // scanout-buffer claim -- a failed claim/blit still spent it in this tick.
     let render_fn = v
-        .find("static void drm_output_view_render_multiview(void)")
+        .find("static void drm_output_view_render_multiview(struct drm_output_inst *inst)")
         .expect("issue 1346: the Multiview render function");
     let body = &v[render_fn..];
     let recorded = body
-        .find("g_view.last_render_frame = obs_get_total_frames();")
+        .find("v->last_render_frame = obs_get_total_frames();")
         .expect("the render records its tick");
     let claim = body
-        .find("drm_output_claim_render_buf()")
+        .find("drm_output_claim_render_buf(inst)")
         .expect("the render claims a scanout buffer");
     assert!(
         recorded < claim,
@@ -277,18 +302,21 @@ fn multiview_never_binds_the_linear_scanout_buffer_as_its_render_target() {
          texrender and is blitted raw"
     );
     let c = squish(&file(DRM_C));
+    let o = squish(&file(OUTPUTS_C));
     assert!(
-        c.contains("bool drm_output_blit_raw(gs_texture_t *src, int idx)"),
-        "issue 1346: the raw blit must be ONE shared helper in {DRM_C}"
+        o.contains(
+            "bool drm_output_blit_raw(struct drm_output_inst *inst, gs_texture_t *src, int idx)"
+        ),
+        "issue 1346: the raw blit must be ONE shared helper ({OUTPUTS_C} since issue 1424 part 2)"
     );
     assert!(
-        c.contains("drm_output_blit_raw(program, idx)"),
+        c.contains("drm_output_blit_raw(inst, program, idx)"),
         "issue 1346: the Program path must use the same shared raw blit"
     );
     let i = squish(&file(INTERNAL_H));
     for token in [
-        "bool drm_output_blit_raw(gs_texture_t *src, int idx);",
-        "void drm_output_view_gl_teardown(void);",
+        "bool drm_output_blit_raw(struct drm_output_inst *inst, gs_texture_t *src, int idx);",
+        "void drm_output_view_gl_teardown(struct drm_output_inst *inst);",
     ] {
         assert!(
             i.contains(token),
@@ -296,10 +324,10 @@ fn multiview_never_binds_the_linear_scanout_buffer_as_its_render_target() {
         );
     }
     let stop = c
-        .find("void obs_drm_output_stop(void)")
-        .expect("stop() must exist");
+        .find("static void lease_stop(struct drm_output_inst *inst)")
+        .expect("the lease stop must exist");
     assert!(
-        c[stop..].contains("drm_output_view_gl_teardown();"),
+        c[stop..].contains("drm_output_view_gl_teardown(inst);"),
         "issue 1346: stop() must also free the Multiview texrender while graphics is alive"
     );
     for reason in [
@@ -308,13 +336,13 @@ fn multiview_never_binds_the_linear_scanout_buffer_as_its_render_target() {
         "write failed",
     ] {
         assert!(
-            v.contains(reason),
+            o.contains(reason),
             "issue 1346 review: a failed persist must name its real cause (`{reason}`)"
         );
     }
     let fe = file(FE_VIEW_CPP);
     assert!(
-        fe.matches("if (!actionProgram || !actionMultiview)")
+        fe.matches("if (!slot.actionProgram || !slot.actionMultiview)")
             .count()
             >= 2,
         "issue 1346 review: the Tools-menu actions can be null (frontend API not ready) -- \
@@ -327,11 +355,12 @@ fn multiview_never_binds_the_linear_scanout_buffer_as_its_render_target() {
 #[test]
 fn raw_blit_is_byte_faithful_and_gates_the_publish() {
     let c = file(DRM_C);
-    let start = c
-        .find("bool drm_output_blit_raw(gs_texture_t *src, int idx)")
+    let o = file(OUTPUTS_C);
+    let start = o
+        .find("bool drm_output_blit_raw(struct drm_output_inst *inst, gs_texture_t *src, int idx)")
         .expect("issue 1346: drm_output_blit_raw must return bool (rendered or not)");
-    let end = c[start..].find("\n}\n").map(|i| start + i).unwrap();
-    let body = squish(&c[start..end]);
+    let end = o[start..].find("\n}\n").map(|i| start + i).unwrap();
+    let body = squish(&o[start..end]);
     for token in [
         "gs_effect_set_texture(param, src)",
         "gs_enable_framebuffer_srgb(false)",
@@ -350,23 +379,25 @@ fn raw_blit_is_byte_faithful_and_gates_the_publish() {
     );
     let cs = squish(&c);
     assert!(
-        cs.contains("if (drm_output_blit_raw(program, idx)) drm_output_publish_render_buf(idx);"),
+        cs.contains("if (drm_output_blit_raw(inst, program, idx)) drm_output_publish_render_buf(inst, idx);"),
         "issue 1346: the Program path publishes only a buffer the blit rendered"
     );
     let v = squish(&file(VIEW_C));
     assert!(
-        v.contains("if (drm_output_blit_raw(gs_texrender_get_texture(g_view.texrender), idx))"),
+        v.contains("if (drm_output_blit_raw(inst, gs_texrender_get_texture(v->texrender), idx))"),
         "issue 1346: the Multiview path publishes only a buffer the blit rendered"
     );
     assert!(
         v.contains("drm-output: multiview texrender unavailable"),
         "issue 1346 review: a texrender failure must be named once, never a silent frozen HDMI"
     );
-    let stop = c.find("void obs_drm_output_stop(void)").unwrap();
+    let stop = c
+        .find("static void lease_stop(struct drm_output_inst *inst)")
+        .unwrap();
     let s = &c[stop..];
     let join = s.find("pthread_join(th, NULL);").unwrap();
-    let view_td = s.find("drm_output_view_gl_teardown();").unwrap();
-    let drm_td = s.find("drm_output_teardown_locked();").unwrap();
+    let view_td = s.find("drm_output_view_gl_teardown(inst);").unwrap();
+    let drm_td = s.find("drm_output_teardown_locked(d);").unwrap();
     assert!(
         join < view_td && view_td < drm_td,
         "issue 1346: the texrender is freed after the flip thread joined and before the DRM teardown"
@@ -376,11 +407,12 @@ fn raw_blit_is_byte_faithful_and_gates_the_publish() {
 #[test]
 fn frame_hook_delegates_the_view_before_the_program_copy() {
     let c = squish(&file(DRM_C));
+    let o = squish(&file(OUTPUTS_C));
     let hook = c
-        .find("void obs_drm_output_on_frame(void)")
-        .expect("issue 1346: the frame hook must still exist");
+        .find("static void lease_on_frame(struct drm_output_inst *inst)")
+        .expect("issue 1346: the (lease backend's) frame hook must still exist");
     let body = &c[hook..];
-    let view = body.find("drm_output_view_frame()").expect(
+    let view = body.find("drm_output_view_frame(inst)").expect(
         "issue 1346: the frame hook must ask drm_output_view_frame() for this tick's action",
     );
     let program = body
@@ -392,12 +424,14 @@ fn frame_hook_delegates_the_view_before_the_program_copy() {
          also pays the Program copy"
     );
     assert!(
-        c.contains("drm_output_view_configure(view, path)"),
-        "issue 1346: the autostart must hand the config's \"view\" value + path to the view TU"
+        o.contains("drm_output_view_configure(inst, sp->view);"),
+        "issue 1346: the autostart must hand the config's \"view\" value to the view TU (per output)"
     );
     assert!(
-        c.contains("int drm_output_claim_render_buf(void)")
-            && c.contains("void drm_output_publish_render_buf(int idx)"),
+        o.contains("int drm_output_claim_render_buf(struct drm_output_inst *inst)")
+            && o.contains(
+                "void drm_output_publish_render_buf(struct drm_output_inst *inst, int idx)"
+            ),
         "issue 1346: the mailbox claim/publish must be ONE shared pair used by both views"
     );
 }
@@ -423,12 +457,12 @@ fn frontend_component_renders_the_builtin_multiview() {
             "rendered at the leased connector size handed in by libobs",
         ),
         (
-            "obs_drm_output_set_view_renderer(",
-            "registers with the libobs view API",
+            "obs_drm_output_set_view_renderer_of(",
+            "registers with the libobs view API (issue 1424 part 2: per output)",
         ),
         (
-            "obs_drm_output_set_view(",
-            "the operator switch persists through libobs",
+            "obs_drm_output_set_view_of(",
+            "the operator switch persists through libobs (issue 1424 part 2: per output)",
         ),
         (
             "obs_frontend_add_tools_menu_qaction(",

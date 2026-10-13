@@ -308,7 +308,8 @@ def _facts(box):
 
 def test_the_https_keys_close_the_fact_list():
     r = _bash("strih_box_fact_keys", sources=(FACTS,))
-    assert r.stdout.split()[-2:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST"]
+    # issue 1424 part 2 appended the HDMI output list after them.
+    assert r.stdout.split()[-3:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS"]
 
 
 def test_strih_snv_declares_the_three_interkom_names_and_shading():

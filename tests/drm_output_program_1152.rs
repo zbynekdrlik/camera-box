@@ -25,6 +25,9 @@ use std::process::Command;
 
 const OBS_DRM_OUTPUT_C: &str = "vendor/obs-studio/libobs/obs-drm-output.c";
 const OBS_DRM_OUTPUT_H: &str = "vendor/obs-studio/libobs/obs-drm-output.h";
+/// issue 1424 part 2: the config grammar, the instance registry and the ONE raw blit (with its pure
+/// aspect-fit helper) moved here from obs-drm-output.c, which keeps the lease backend.
+const OBS_DRM_OUTPUT_OUTPUTS_C: &str = "vendor/obs-studio/libobs/obs-drm-output-outputs.c";
 const OBS_VIDEO_C: &str = "vendor/obs-studio/libobs/obs-video.c";
 const OS_LINUX_CMAKE: &str = "vendor/obs-studio/libobs/cmake/os-linux.cmake";
 const LINUX_GENLOCK_YML: &str = ".github/workflows/linux-genlock.yml";
@@ -90,8 +93,8 @@ fn drm_output_binds_the_program_via_upstream_dmabuf_import() {
          the Program canvas texture, copied raw (SDR byte-faithful) into the scanout buffer."
     );
     assert!(
-        src.contains("gs_flush("),
-        "#1152 M2: {OBS_DRM_OUTPUT_C} must gs_flush() after rendering into the scanout \
+        squish(&vendor_file(OBS_DRM_OUTPUT_OUTPUTS_C)).contains("gs_flush("),
+        "#1152 M2: the shared raw blit ({OBS_DRM_OUTPUT_OUTPUTS_C} since issue 1424 part 2) must gs_flush() after rendering into the scanout \
          buffer — the submit that hands the BO's implicit fence to the kernel page-flip."
     );
     assert!(
@@ -99,10 +102,12 @@ fn drm_output_binds_the_program_via_upstream_dmabuf_import() {
         "#1152 M2: {OBS_DRM_OUTPUT_C} must KEEP the M1 solid fill — the initial image before \
          the first Program frame and the fail-open fallback when the GL bind fails."
     );
+    let outputs = squish(&vendor_file(OBS_DRM_OUTPUT_OUTPUTS_C));
     assert!(
-        src.contains("obs_data_get_bool(data, \"program\")"),
-        "#1152 M2: {OBS_DRM_OUTPUT_C} autostart must honour an optional \"program\" config \
-         key (default true; false = the M1 solid diagnostic pattern)."
+        outputs.contains("const json_t *prog = json_object_get(root, \"program\");")
+            && outputs.contains("*program = json_is_true(prog);"),
+        "#1152 M2: the autostart ({OBS_DRM_OUTPUT_OUTPUTS_C} since issue 1424 part 2) must honour an \
+         optional \"program\" config key (default true; false = the M1 solid diagnostic pattern)."
     );
     assert!(
         src.contains("static int drm_output_pick_render_buf("),
@@ -110,9 +115,9 @@ fn drm_output_binds_the_program_via_upstream_dmabuf_import() {
          `static int drm_output_pick_render_buf(` (Tier-0 truth-tabled below)."
     );
     assert!(
-        src.contains("static void drm_output_fit_rect("),
-        "#1152 M2: {OBS_DRM_OUTPUT_C} must define the pure aspect-fit helper \
-         `static void drm_output_fit_rect(` (Tier-0 truth-tabled below)."
+        outputs.contains("static void drm_output_fit_rect("),
+        "#1152 M2: {OBS_DRM_OUTPUT_OUTPUTS_C} (the shared blit's home since issue 1424 part 2) must \
+         define the pure aspect-fit helper `static void drm_output_fit_rect(` (Tier-0 truth-tabled below)."
     );
 }
 
@@ -199,10 +204,14 @@ fn build_system_carries_the_gbm_dependency() {
 /// Lift a `static` helper VERBATIM from the vendored C by its definition signature (never
 /// retype it — a retyped copy verifies your typing, not the shipped bytes).
 fn lift_helper(sig: &str) -> String {
-    let src = vendor_file(OBS_DRM_OUTPUT_C);
-    let start = src.find(sig).unwrap_or_else(|| {
-        panic!("#1152 M2: {OBS_DRM_OUTPUT_C} no longer defines `{sig}` — nothing to lift.")
-    });
+    lift_helper_from(OBS_DRM_OUTPUT_C, sig)
+}
+
+fn lift_helper_from(path: &str, sig: &str) -> String {
+    let src = vendor_file(path);
+    let start = src
+        .find(sig)
+        .unwrap_or_else(|| panic!("#1152 M2: {path} no longer defines `{sig}` — nothing to lift."));
     let end = src[start..]
         .find("\n}\n")
         .map(|i| start + i + 3)
@@ -346,7 +355,7 @@ fn fit_vectors() -> Vec<(FitQuad, FitQuad)> {
 
 #[test]
 fn fit_rect_computes_the_aspect_fit_truth_table() {
-    let helper = lift_helper("static void drm_output_fit_rect(");
+    let helper = lift_helper_from(OBS_DRM_OUTPUT_OUTPUTS_C, "static void drm_output_fit_rect(");
     let vs = fit_vectors();
 
     let mut c = String::from("#include <stdint.h>\n#include <stdio.h>\n");
