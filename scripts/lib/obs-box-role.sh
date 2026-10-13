@@ -321,3 +321,33 @@ obs_box_stream_dev_grade() {
   done <<<"$out"
   return 0
 }
+
+# obs_box_strih_profile_provision OBS_CFG DESKTOP_USER PROFILE -> setup-strih step 3 on the strih role
+# (issue 1361): the profile's Output mode, Video (1920x1080 base + output, 30 fps, NV12/709/Partial)
+# and Audio keys, written only while OBS is stopped (OBS rewrites its profile on exit). The launcher
+# passes --profile once the directory exists; live strih-pp ran the default `Untitled` (720p output).
+obs_box_strih_profile_provision() {
+  local cfg="${1:?obs config dir required}" user="${2:?desktop user required}" profile="${3:?profile required}"
+  if pgrep -x obs >/dev/null 2>&1; then
+    echo "  WARNING: OBS is running -- the strih profile '${profile}' is NOT written (stop OBS and re-run this step)" >&2
+    return 0
+  fi
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../obs_box_stream_profile.py" --strih \
+    --profile-dir "${cfg%/}/basic/profiles/${profile}" --profile-name "$profile" \
+    || { echo "obs-box-role: the strih profile write failed (above)" >&2; return 1; }
+  chown -R "$user:$user" "${cfg%/}/basic" 2>/dev/null || echo "  WARNING: could not chown ${cfg%/}/basic to ${user}" >&2
+  return 0
+}
+
+# obs_box_profile_video_grade PROFILE_DIR -> verify-strih item 10's strih row (issue 1361): the box's
+# own profile exists with 1920x1080 base + output at 30 fps. Uses the caller's ok/bad; always rc 0.
+obs_box_profile_video_grade() {
+  local dir="${1:?profile dir required}" drift
+  drift="$(python3 "$(dirname "${BASH_SOURCE[0]}")/../obs_box_stream_profile.py" --grade-video "$dir" 2>&1 || true)"
+  if [ -z "$drift" ]; then
+    ok "(profile-video) ${dir}: 1920x1080 base + output @ 30 fps"
+  else
+    bad "(profile-video) ${dir}: ${drift} -- re-run setup-strih.sh step 3 with OBS stopped (the NDI program follows the output size)"
+  fi
+  return 0
+}

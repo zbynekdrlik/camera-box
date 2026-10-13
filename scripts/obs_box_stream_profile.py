@@ -84,6 +84,57 @@ def basic_ini_text(existing_text, encoder, profile_name):
     return buf.getvalue()
 
 
+def strih_basic_ini_text(existing_text, profile_name):
+    """The strih ROLE's profile keys (issue 1361, live strih-pp 13.10.2026: OBS ran the default profile
+    `Untitled` with output 1280x720, so the NDI program was 720p): BASIC_INI's Output mode, Video and
+    Audio + [General] Name, upserted; no encoder, no rescale, every other key kept (a box's recording
+    path, panels, hotkeys). Raises ValueError on an unreadable file (never clobber it)."""
+    cp = configparser.RawConfigParser(strict=False)
+    cp.optionxform = str
+    if existing_text:
+        try:
+            cp.read_string(existing_text)
+        except configparser.Error as e:
+            raise ValueError("basic.ini unreadable (%s) -- left untouched" % e)
+    sections = dict(BASIC_INI)
+    sections["General"] = {"Name": profile_name}
+    for sec, kv in sections.items():
+        if not cp.has_section(sec):
+            cp.add_section(sec)
+        for k, v in kv.items():
+            cp.set(sec, k, v)
+    buf = io.StringIO()
+    cp.write(buf, space_around_delimiters=False)
+    return buf.getvalue()
+
+
+def apply_strih(profile_dir, profile_name):
+    """Write the strih role's basic.ini into PROFILE_DIR (created when missing). Returns log lines."""
+    os.makedirs(profile_dir, exist_ok=True)
+    path = os.path.join(profile_dir, "basic.ini")
+    _write(path, strih_basic_ini_text(_read(path), profile_name), 0o644)
+    v = BASIC_INI["Video"]
+    return ["basic.ini: %s, Advanced output, %sx%s base + output @ %s fps %s"
+            % (profile_name, v["OutputCX"], v["OutputCY"], v["FPSCommon"], v["ColorFormat"])]
+
+
+def grade_video(profile_dir):
+    """The profile's [Video] drift from BASIC_INI's size + fps keys, one text per key; empty = none."""
+    path = os.path.join(profile_dir, "basic.ini")
+    if not os.path.isfile(path):
+        return ["profile %s missing (OBS runs another profile)" % profile_dir]
+    cp = configparser.RawConfigParser(strict=False)
+    cp.optionxform = str
+    try:
+        cp.read(path)
+    except configparser.Error as e:
+        return ["basic.ini unreadable (%s)" % e]
+    vid = cp["Video"] if cp.has_section("Video") else {}
+    keys = ("BaseCX", "BaseCY", "OutputCX", "OutputCY", "FPSCommon")
+    return ["[Video] %s=%s (want %s)" % (k, vid.get(k), BASIC_INI["Video"][k])
+            for k in keys if vid.get(k) != BASIC_INI["Video"][k]]
+
+
 def service_json(existing, server):
     """The service.json dict: `rtmp_custom` to SERVER. Only the server is written; an existing key and
     every other setting are kept, and no key is ever added."""
@@ -171,6 +222,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--grade", metavar="PROFILE_DIR", default=None,
                     help="read-only: print the profile's drift (nothing printed = no drift)")
+    ap.add_argument("--grade-video", metavar="PROFILE_DIR", default=None,
+                    help="read-only: print the profile's [Video] drift (nothing printed = no drift)")
+    ap.add_argument("--strih", action="store_true",
+                    help="the strih role: write only the Output mode, Video and Audio keys (issue 1361)")
     ap.add_argument("--profile-dir")
     ap.add_argument("--profile-name")
     ap.add_argument("--has-nvidia", choices=("0", "1"))
@@ -180,6 +235,21 @@ def main(argv=None):
         drift = grade_drift(a.grade)
         if drift:
             print(", ".join(drift))
+        return
+    if a.grade_video is not None:
+        drift = grade_video(a.grade_video)
+        if drift:
+            print(", ".join(drift))
+        return
+    if a.strih:
+        if not (a.profile_dir and a.profile_name):
+            ap.error("--strih needs --profile-dir and --profile-name")
+        try:
+            lines = apply_strih(a.profile_dir, a.profile_name)
+        except (ValueError, OSError) as e:
+            sys.exit("FAIL issue 1361: %s" % e)
+        for ln in lines:
+            print("  " + ln)
         return
     if not (a.profile_dir and a.profile_name and a.has_nvidia):
         ap.error("--profile-dir, --profile-name and --has-nvidia are required (or --grade DIR)")

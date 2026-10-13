@@ -170,6 +170,7 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
 else
   warn "  nvidia-smi missing/failing -- step 11 (baseline) installs nvidia-driver-595-open + PRIME; NVENC for ${REC_ENC} after the next boot (verify-strih item 10 gates it)"
 fi
+obs_box_strih_profile_provision "$OBS_CFG" "$DESKTOP_USER" "$(strih_lx_obs_profile)" || fail "issue 1361: the strih OBS profile could not be written (above)"
 
 else
   echo "  ${WHY}"; obs_box_stream_encoder_provision "$OBS_CFG" "$DESKTOP_USER" "$(strih_lx_obs_profile)" || fail "issue 1412: the stream encoder/profile could not be provisioned (above)"
