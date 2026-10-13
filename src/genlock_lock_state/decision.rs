@@ -311,9 +311,13 @@ mod tests {
 
     #[test]
     fn no_inputs_at_all_is_unlocked_no_genlock() {
+        // issue 1422: no inputs AND no output = genlock not configured at all (a sender-only box
+        // with a stamping output is a different case, below)
         let mut f = healthy();
         f.n_inputs = 0;
         f.n_locked = 0;
+        f.output_present = false;
+        f.output_stamping = false;
         assert_eq!(decide(&f), (LockState::Unlocked, LockReason::NoGenlock));
     }
 
@@ -425,6 +429,8 @@ mod tests {
         f.n_inputs = 0;
         f.n_locked = 0;
         f.n_absent = 0;
+        f.output_present = false; // issue 1422: no stamping output either
+        f.output_stamping = false;
         assert_eq!(decide(&f), (LockState::Unlocked, LockReason::NoGenlock));
     }
 
