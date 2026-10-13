@@ -504,12 +504,16 @@ fn the_rig_harness_drives_two_outputs_on_one_device() {
     assert!(
         h.contains("DISPLAY=:0 ./vk-rig-harness HDMI-0 HDMI-1")
             && h.contains(
-                "disp[n_disp] = drm_output_vk_open(n_disp, argv[a], 0x202020u, NULL, NULL);"
+                "disp[n_disp] = drm_output_vk_open(n_disp, names[n_disp], 0x202020u, NULL, NULL);"
             ),
         "issue 1424: the on-box harness proves both displays on ONE shared VkDevice"
     );
     // issue 1424 review: the two outputs are independent -- display 0 closes while display 1 keeps
-    // presenting (its present count advances), then display 0 re-opens in its slot beside it.
+    // presenting (its present count advances at ITS OWN refresh, 29.97 Hz after a Program re-mode),
+    // then display 1 closes too and BOTH re-open on a fresh shared device. Live strih-pp 13.10.2026:
+    // NVIDIA refuses (-13) re-acquiring a display this process released while the shared VkInstance
+    // lives on for the other display, so an in-place re-open beside a live display is a known limit
+    // (OBS never does it: the outputs start once and stop together at obs_shutdown).
     let phase = h
         .find("if (rc == 0 && n_disp == 2) {")
         .expect("the independence phase");
@@ -520,8 +524,10 @@ fn the_rig_harness_drives_two_outputs_on_one_device() {
         "const unsigned long long before = disp[1]->presents;",
         "drm_output_vk_publish_gl(disp[1], idx, tex[1], w[1], h[1]);",
         "const unsigned long long after = disp[1]->presents;",
-        "drm_output_vk_wants_frames(disp[1]) && after > before + 60u;",
-        "disp[0] = drm_output_vk_open(0, argv[1], 0x202020u, NULL, NULL);",
+        "(unsigned long long)disp[1]->refresh_mhz * 2ULL / 1000ULL * 8ULL / 10ULL;",
+        "drm_output_vk_wants_frames(disp[1]) && after >= before + expect;",
+        "drm_output_vk_close(disp[1]);",
+        "disp[i] = drm_output_vk_open(i, names[i], 0x202020u, NULL, NULL);",
         "rc = (one_alive && reopened) ? 0 : 1;",
     ] {
         let q = p[at..].find(step).unwrap_or_else(|| {

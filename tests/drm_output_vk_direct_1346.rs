@@ -941,13 +941,20 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
     );
     assert!(
         rebuild.contains("d->retired_swapchain = d->swapchain;")
-            && rebuild.contains("d->retired_surface = d->surface;")
             && setup.contains(".oldSwapchain = old_swapchain"),
-        "issue 1346 review round 3: a rebuild RETIRES the replaced swapchain (+ surface) -- its last \
+        "issue 1346 review round 3: a swapchain-only rebuild RETIRES the replaced swapchain -- its last \
          present may still be queued -- instead of destroying it"
     );
+    // issue 1424 (live strih-pp): a SURFACE is never retired -- destroying a retired display-plane
+    // surface after its replacement presents ends the new presentation (-13). A surface rebuild drains
+    // the display's queue (bounded) and destroys the old presentation first
+    // (tests/drm_output_vk_two_displays_1424.rs pins the order).
     assert!(
-        rebuild.contains("const bool fresh = pending_retiree && !d->present_queued_since_rebuild;")
+        !rebuild.contains("d->retired_surface = d->surface;"),
+        "issue 1424: a display-plane surface is never retired"
+    );
+    assert!(
+        rebuild.contains("const bool fresh = d->retired_swapchain && !d->present_queued_since_rebuild;")
             && thread.contains("d->present_queued_since_rebuild = true;"),
         "issue 1346 review round 4: a back-to-back rebuild destroys the never-presented presentation \
          and KEEPS the older retiree (its present may still be queued)"
