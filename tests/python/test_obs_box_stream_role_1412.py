@@ -641,7 +641,7 @@ def test_the_autostart_imports_the_display_before_any_user_unit_start(boxes):
     apps open windows too)."""
     for box in ("stream-pp", "strih-pp"):
         lines = _autostart(boxes, box).splitlines()
-        imp = "systemctl --user import-environment DISPLAY XAUTHORITY"
+        imp = "systemctl --user import-environment DISPLAY XAUTHORITY || true"
         assert imp in lines, box
         first_start = next(i for i, ln in enumerate(lines) if ln.startswith("systemctl --user start"))
         assert lines.index(imp) < first_start, box
