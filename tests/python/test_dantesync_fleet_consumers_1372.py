@@ -59,6 +59,7 @@ def _env(tmp_path, bindir, **over):
         "DANTESYNC_VERSION_GATE_SSH_PASS": "fleet-default",
         "DANTESYNC_TRAY_EXPECTED_SHA": "a" * 64,
         "DANTESYNC_NEWEST_RELEASE": _PIN,
+        "DANTESYNC_FLEET_SCAN_CMD": "/bin/true",  # issue 1372: the outside-fleet scan stays off the network
         "DANTESYNC_FOHABL_SSH_PASS": "foh-secret",
     })
     for n in _WIN:

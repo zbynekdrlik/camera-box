@@ -288,7 +288,8 @@ def _gate(tmp_path, versions, home):
     fleet.write_text("")
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=home, DANTESYNC_FLEET_CRED_FILE=str(tmp_path / "none.env"),
                DANTESYNC_VERSION_GATE_SSH_PASS="pw", DANTESYNC_TRAY_EXPECTED_SHA="a" * 64,
-               DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FOHABL_SSH_PASS="foh")
+               DANTESYNC_NEWEST_RELEASE=_PIN, DANTESYNC_FOHABL_SSH_PASS="foh",
+               DANTESYNC_FLEET_SCAN_CMD="/bin/true")
     for n in ("STREAM", "RESOLUME", "MBC", "FOHABL", "IEM_SNV", "RESOLUME_PP"):
         env[f"DANTESYNC_TRAY_SHA_{n}"] = "a" * 64
     return subprocess.run(["bash", str(_GATE), "--pin", _PIN, "--fleet-file", str(fleet), "--fleet"],
