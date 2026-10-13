@@ -288,7 +288,9 @@ fn the_lease_module_routes_to_vk_direct_and_keeps_the_lease_default() {
         route < lease,
         "issue 1346: the backend is chosen BEFORE any lease work"
     );
-    assert!(start.contains("return drm_output_vk_direct_backend.start(cfg);"));
+    // issue 1424: a successful vk-direct start also opens the audio leg, so the routed call is no
+    // longer a bare `return`; what this pins is that start() hands vk-direct to its backend
+    assert!(start.contains("drm_output_vk_direct_backend.start(cfg)"));
 
     let stop = body_of(&c, "void obs_drm_output_stop(void)", DRM_C);
     let vk_stop = stop
