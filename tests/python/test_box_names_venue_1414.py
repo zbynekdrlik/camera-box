@@ -258,6 +258,9 @@ def test_the_hub_default_receiver_name_is_strih_snv():
 # --- the sweep ------------------------------------------------------------------------------------
 
 OLD = re.compile(r"strih-lx|STRIH-LX")
+# The two RETIRED on-box files setup-strih still REMOVES keep the name they have on the box (a rename
+# here would stop the cleanup finding them): the issue-1346 projector seed and the old logind drop-in.
+RETIRED_ONBOX_NAMES = ("strih-lx-projector.json", "90-strih-lx.conf")
 # History or vendored text that keeps the old name as it was written: the dated logs + plans, the
 # vendored OBS/DistroAV sources (measurement-history comments), and this test.
 HISTORY_PATHS = (
@@ -292,6 +295,8 @@ def test_no_strih_lx_literal_outside_the_alias_and_history_sites():
             continue
         text = data.decode("utf-8", errors="replace")
         for n, line in enumerate(text.splitlines(), 1):
+            for retired in RETIRED_ONBOX_NAMES:
+                line = line.replace(retired, "")
             if OLD.search(line) and "1414" not in line:
                 bad.append(f"{path}:{n}: {line.strip()[:140]}")
     assert bad == [], f"{len(bad)} strih-lx literal(s) left:\n" + "\n".join(bad[:80])
