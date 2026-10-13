@@ -447,6 +447,7 @@ void obs_drm_output_maybe_autostart(void)
 	bool program = true;
 	const int verdict = drm_output_config_classify(root, specs, DRM_OUTPUT_MAX_OUTPUTS, &count, &bad, &program);
 	const bool array_form = json_is_object(root) && json_object_get(root, "outputs") != NULL;
+	const bool single_audio_key = !array_form && json_is_object(root) && json_object_get(root, "audio") != NULL;
 	json_decref(root);
 
 	switch (verdict) {
@@ -481,6 +482,10 @@ void obs_drm_output_maybe_autostart(void)
 
 	if (array_form)
 		blog(LOG_INFO, "drm-output: autostart ENABLED from %s — %zu outputs", path, count);
+	if (single_audio_key) /* issue 1424 review: a hand edit there must not look like it worked */
+		blog(LOG_WARNING,
+		     "drm-output: \"audio\" in %s is ignored -- the single-object form always has its audio leg; use the \"outputs\" form",
+		     path);
 	pthread_mutex_lock(&g_outs_lock);
 	struct drm_output_inst *insts[DRM_OUTPUT_MAX_OUTPUTS] = {NULL};
 	for (size_t i = 0; i < count; i++) {

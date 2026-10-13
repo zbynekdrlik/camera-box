@@ -635,7 +635,15 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   it `CONNECTOR:VIEW:noaudio` (strih-pp `HDMI-0:multiview HDMI-1:program:noaudio`); step 6 writes
   `"audio":false` from the FACT (never kept from an old config: it is box ownership, not an operator
   choice); verify item 4c grades that line instead of the open line, FAILs an opened PCM or a missing
-  line on such an output, and FAILs a config whose flag differs from the fact.
+  line on such an output, and FAILs a config whose flag differs from the fact. The single-object form
+  logs one WARNING when it carries an `"audio"` key (ignored there).
+  **The PCM owner's contract (the hub lane, not this module):** with the module's leg off, three duties
+  move to whoever writes that PCM: (1) find WHICH `hw:C,D` is the connector by its monitor's ELD (the
+  NVIDIA PCM-to-pin map is dynamic; never a fixed device number); (2) turn on that PCM's `IEC958
+  Playback Switch` (no sound server unmutes it, and the step-6 WirePlumber rule keeps PipeWire off every
+  HDMI PCM, so the writer opens hw directly); (3) survive the re-mode shortly after OBS starts (the
+  Program view moves HDMI-1 from 60 to 29.97 Hz, and a re-mode can move the NVIDIA PCM map: re-resolve
+  when the device disappears or no longer carries the monitor).
 - **Log lines name the connector** where verify grades them: `program scanout LIVE (... of '<c>')`,
   `multiview bind LIVE (... of '<c>')`, `vk-direct present loop exited on '<c>'`; the audio lines
   already did. The prefixes the single-output grading greps are unchanged.
