@@ -299,7 +299,7 @@ def test_setup_and_verify_call_the_stream_dev_libs():
     assert "obs_box_step_applies 6-devclip" in setup
     assert "obs_box_stream_dev_clip_provision" in setup
     assert "stream_dev_safe.py" in setup
-    assert "obs_box_stream_role_grade" in verify
+    assert "obs_box_stream_dev_grade" in verify
     assert len(verify.splitlines()) <= 1000
 
 
