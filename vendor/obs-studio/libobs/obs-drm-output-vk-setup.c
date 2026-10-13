@@ -632,9 +632,30 @@ bool drm_output_vk_remode_if_needed(void)
 	free(mr);
 	if (!rebuild)
 		return true;
-	blog(LOG_INFO, "drm-output: vk-direct: re-mode %ux%u@%u.%03uHz -> @%u.%03uHz (%s view)", g_drm_vk.mode_w,
-	     g_drm_vk.mode_h, g_drm_vk.refresh_mhz / 1000u, g_drm_vk.refresh_mhz % 1000u, sel_hz / 1000u,
-	     sel_hz % 1000u, want_mhz ? "program: the canvas rate" : "multiview: native ~60 Hz");
+	if (want_mhz == 0) {
+		blog(LOG_INFO, "drm-output: vk-direct: re-mode %ux%u@%u.%03uHz -> @%u.%03uHz (multiview view: native ~60 Hz)",
+		     g_drm_vk.mode_w, g_drm_vk.mode_h, g_drm_vk.refresh_mhz / 1000u, g_drm_vk.refresh_mhz % 1000u,
+		     sel_hz / 1000u, sel_hz % 1000u);
+	} else if (sel_w == want_w && sel_h == want_h && sel_hz == want_mhz) {
+		blog(LOG_INFO, "drm-output: vk-direct: re-mode %ux%u@%u.%03uHz -> @%u.%03uHz (program view: exact canvas rate)",
+		     g_drm_vk.mode_w, g_drm_vk.mode_h, g_drm_vk.refresh_mhz / 1000u, g_drm_vk.refresh_mhz % 1000u,
+		     sel_hz / 1000u, sel_hz % 1000u);
+	} else if (sel_w == want_w && sel_h == want_h) {
+		/* e.g. 29.970 for a 30.000 canvas: one frame is dropped (or repeated) every 1000 / |diff mHz| s */
+		const uint32_t diff = sel_hz > want_mhz ? sel_hz - want_mhz : want_mhz - sel_hz;
+		blog(LOG_INFO,
+		     "drm-output: vk-direct: re-mode %ux%u@%u.%03uHz -> @%u.%03uHz (program view: near-rate, canvas "
+		     "%u.%03u Hz -- one frame %s every %.0f s)",
+		     g_drm_vk.mode_w, g_drm_vk.mode_h, g_drm_vk.refresh_mhz / 1000u, g_drm_vk.refresh_mhz % 1000u,
+		     sel_hz / 1000u, sel_hz % 1000u, want_mhz / 1000u, want_mhz % 1000u,
+		     sel_hz < want_mhz ? "dropped" : "repeated", 1000.0 / (double)diff);
+	} else {
+		blog(LOG_INFO,
+		     "drm-output: vk-direct: re-mode %ux%u@%u.%03uHz -> @%u.%03uHz (program view: no %ux%u mode at the "
+		     "canvas rate %u.%03u Hz -- native ~60 Hz)",
+		     g_drm_vk.mode_w, g_drm_vk.mode_h, g_drm_vk.refresh_mhz / 1000u, g_drm_vk.refresh_mhz % 1000u,
+		     sel_hz / 1000u, sel_hz % 1000u, want_w, want_h, want_mhz / 1000u, want_mhz % 1000u);
+	}
 	if (drm_output_vk_rebuild_presentation(true))
 		return true;
 	/* the wanted mode would not come up: forget it and rebuild today's mode once */
