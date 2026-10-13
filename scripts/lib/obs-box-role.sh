@@ -271,7 +271,8 @@ obs_box_stream_dev_clip_ok() {
 
 # obs_box_stream_dev_clip_provision SCRIPTS_DIR -> setup-strih step 6-devclip (stream role, issue 1380):
 # the measurement clip the safe Development scene plays, generated ON the box by
-# scripts/gen_measurement_clip.py (never copied from dev1). Installs python3-numpy when missing; an
+# scripts/gen_measurement_clip.py (never copied from dev1). Installs python3-numpy + python3-qrcode (the
+# generator's two non-stdlib imports) when missing; an
 # existing clip with the right frame count and its marker log is kept. rc 1 + a reason on failure.
 obs_box_stream_dev_clip_provision() {
   local here="${1:?scripts dir required}" clip="$OBS_BOX_STREAM_DEV_CLIP"
@@ -279,9 +280,9 @@ obs_box_stream_dev_clip_provision() {
     echo "  measurement clip ${clip}: present (${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + marker log), kept"
     return 0
   fi
-  if ! python3 -c 'import numpy' 2>/dev/null; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-numpy >/dev/null \
-      || { echo "obs-box-role: apt-get install python3-numpy failed" >&2; return 1; }
+  if ! python3 -c 'import numpy, qrcode' 2>/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-numpy python3-qrcode >/dev/null \
+      || { echo "obs-box-role: apt-get install python3-numpy python3-qrcode failed" >&2; return 1; }
   fi
   mkdir -p "$(dirname "$clip")"
   echo "  generating the measurement clip ${clip} (gen_measurement_clip.py, a few minutes at nice 19)"
