@@ -12,13 +12,13 @@ set -euo pipefail
 # verifying a `scripts/launch-obs-genlock.sh --box {strih|stream} --force` relaunch succeeded (see
 # that script's own printed plan, which references this as its final step).
 #
-# Usage: mark-imag-restart.sh --box strih|stream [--reason <text>]
+# Usage: mark-imag-restart.sh --box strih|stream|resolume [--reason <text>]
 
 BOX=""
 REASON="manual relaunch"
 
 usage() {
-  echo "Usage: $0 --box strih|stream [--reason <text>]"
+  echo "Usage: $0 --box strih|stream|resolume [--reason <text>]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -44,9 +44,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$BOX" in
-  strih | stream) ;;
+  strih | stream | resolume) ;;   # issue 1414: every role token launch-obs-genlock.sh's plan prints
   *)
-    echo "ERROR: --box must be 'strih' or 'stream' (got '${BOX}')" >&2
+    echo "ERROR: --box must be 'strih', 'stream' or 'resolume' (got '${BOX}')" >&2
     usage >&2
     exit 2
     ;;
