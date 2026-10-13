@@ -640,7 +640,7 @@ fn pick_mode_computes_the_mode_truth_table() {
             v.join(", ")
         };
         c.push_str(&format!(
-            "    {{ const uint32_t w{i}[{cap}] = {{{}}}; const uint32_t h{i}[{cap}] = {{{}}}; const uint32_t r{i}[{cap}] = {{{}}};\n      printf(\"%d\\n\", drm_output_vk_pick_mode(w{i}, h{i}, r{i}, {n}, {nw}u, {nh}u)); }}\n",
+            "    {{ const uint32_t w{i}[{cap}] = {{{}}}; const uint32_t h{i}[{cap}] = {{{}}}; const uint32_t r{i}[{cap}] = {{{}}};\n      printf(\"%d\\n\", drm_output_vk_pick_mode(w{i}, h{i}, r{i}, {n}, {nw}u, {nh}u, 0u, 0u, 0u)); }}\n",
             list(&|m| m.0),
             list(&|m| m.1),
             list(&|m| m.2),
