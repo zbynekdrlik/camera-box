@@ -33,6 +33,7 @@ _VERIFY = _SCRIPTS / "verify-strih.sh"
 _SETUP = _SCRIPTS / "setup-strih.sh"
 _START = _SCRIPTS / "strih-obs-start.sh"
 _SCN = _SCRIPTS / "strih_scenes.py"
+_CFG = _SCRIPTS / "drm_output_config.py"
 
 PP_LIVE = '{"enabled":true,"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"}'
 PP_ARRAY = ('{"enabled":true,"outputs":[{"connector":"HDMI-0","argb":2105376,"view":"multiview",'
@@ -84,10 +85,53 @@ def test_lease_connectors_arm_every_output_of_a_valid_array_and_none_of_a_malfor
     assert _scn.drm_output_lease_connector(bad) == ""
 
 
+# imag_scenes reads with Python's lenient json (no NaN / 64-bit / overflow check); imag's config is a
+# machine-written single object, so only these jansson-refusal rows are left out of the imag comparison.
+_STRICT_JSON_ROWS = ("strict_",)
+
+
 def test_imag_classifier_agrees_with_strih_on_every_table_row():
     imag = _load("imag_scenes")
     for name, config, _verdict, _outputs in _rows():
+        if name.startswith(_STRICT_JSON_ROWS):
+            continue
         assert _scn.drm_output_lease_connector(config) == imag.drm_output_lease_connector(config), name
+
+
+def test_the_lease_connector_is_the_first_output_the_c_grammar_starts_on_every_row():
+    # issue 1424 review: the single-object connector obeys the C's 1..63-byte bound too
+    for name, config, _verdict, _outputs in _rows():
+        armed = _scn.drm_output_lease_connectors(config)
+        assert _scn.drm_output_lease_connector(config) == (armed[0] if armed else ""), name
+
+
+def test_a_byte_order_mark_reads_like_the_c_reader():
+    # the C reads the file through OBS's UTF-8 reader, which drops a BOM (the issue-1152/1346 loader did)
+    for name, config, verdict, outputs in _rows():
+        if config:
+            got_verdict, got = _scn.drm_output_instances("\ufeff" + config)
+            assert (got_verdict, _fmt(got)) == (verdict, outputs), name
+    imag = _load("imag_scenes")
+    assert imag.drm_output_lease_connector("\ufeff" + PP_LIVE) == "HDMI-0"
+
+
+def test_the_grammar_lives_in_its_own_module_and_strih_scenes_re_exports_it():
+    # issue 1424 review: strih_scenes.py stays under its line budget; ONE module carries the grammar
+    assert len(_SCN.read_text().splitlines()) <= 1000
+    assert len(_CFG.read_text().splitlines()) <= 1000
+    cfg = _load("drm_output_config")
+    for name in ("drm_output_instances", "drm_output_lease_connector", "drm_output_lease_connectors",
+                 "write_drm_view", "write_drm_backend", "write_drm_outputs", "drm_json_loads"):
+        assert getattr(_scn, name).__code__.co_code == getattr(cfg, name).__code__.co_code, name
+    assert "def drm_output_instances(" not in _SCN.read_text()
+    assert "from websocket" not in _CFG.read_text(), "the grammar module carries no OBS/WS dependency"
+
+
+def test_setup_installs_the_grammar_module_beside_strih_scenes():
+    s = _SETUP.read_text()
+    line = [ln for ln in s.splitlines() if 'install -m 0755 "${HERE}/strih_scenes.py"' in ln]
+    assert len(line) == 1
+    assert 'install -m 0644 "${HERE}/drm_output_config.py" /usr/local/bin/drm_output_config.py' in line[0]
 
 
 def test_the_launcher_takes_every_armed_connector_out_of_x():
@@ -188,7 +232,7 @@ def test_projector_cli_names_the_connector(tmp_path):
 
 # --- bash: the fact, the fresh config, the verify grading ---------------------------------------------
 
-def _bash(body, *args, env=None, path_prefix=None, libs=(_DRM_LIB,)):
+def _bash(body, *args, env=None, path_prefix=None, libs=(_FACTS, _DRM_LIB)):
     script = "set -euo pipefail\n"
     for i in range(len(libs)):
         script += '. "${%d}"\n' % (i + 1)
@@ -373,7 +417,7 @@ def _verify_real(tmp_path, log_text, conf_text, spec=PP_SPEC, xrandr=None):
             'export SPEC_FACT="$6"; strih_lx_hdmi_outputs() { printf "%s" "$SPEC_FACT"; }\n'
             'drm_output_audio_wp_provision "$7" >/dev/null\n'
             'eval "$(declare -f drm_output_audio_verify_report | sed "1s/drm_output_audio_verify_report/_real_audio_report/")"\n'
-            'drm_output_audio_verify_report() { _real_audio_report "$1" "$2" "$3" "$AUDIO_ROOT" "$5"; }\n'
+            'drm_output_audio_verify_report() { _real_audio_report "$1" "$2" "$3" "$AUDIO_ROOT" "$5" "${6:-}"; }\n'
             'export AUDIO_ROOT="$7"\n'
             'if strih_drm_outputs_graded_here "$3"; then echo GRADED-HERE; fi\n'
             'strih_drm_outputs_verify_report "$1" "$2" "$3" "$4" vk-direct "$5"\n')
@@ -420,6 +464,15 @@ def test_verify_names_an_audio_leg_that_gave_up_on_its_own_output(tmp_path):
     assert "FAIL HDMI audio HDMI-1: the module gave up" in r.stdout
 
 
+def test_a_multiview_output_whose_monitor_has_no_audio_is_report_only(tmp_path):
+    # issue 1424 review: the Multiview output never plays sound, so its leg giving up is a NOTE
+    log = LOG_TWO + "warning: drm-output audio: NO AUDIO on 'HDMI-0' -- no PCM carries the monitor; never another device\n"
+    r = _verify_real(tmp_path, log, PP_ARRAY + "\n")
+    assert "NOTE HDMI audio HDMI-0: no audio leg" in r.stdout, r.stdout
+    assert "FAIL HDMI audio HDMI-0" not in r.stdout
+    assert any(ln.startswith("PASS HDMI audio HDMI-1:") for ln in r.stdout.splitlines()), r.stdout
+
+
 def test_verify_fails_a_malformed_array_by_name(tmp_path):
     r = _verify_real(tmp_path, LOG_TWO, PP_ARRAY.replace('"view":"program"', '"view":"Program"') + "\n")
     assert 'FAIL HDMI outputs:' in r.stdout and '"outputs" is malformed (view-unknown)' in r.stdout
@@ -448,6 +501,30 @@ def test_verify_marks_an_output_x_does_not_list_as_report_only(tmp_path):
 def test_verify_strih_dispatches_the_array_form_without_growing_past_its_budget():
     v = _VERIFY.read_text()
     assert len(v.splitlines()) <= 1000 and len(_SETUP.read_text().splitlines()) <= 1000
-    line = [ln for ln in v.splitlines() if "strih_drm_outputs_graded_here" in ln]
-    assert len(line) == 1 and "strih_drm_outputs_verify_report" in line[0]
+    assert "strih_drm_outputs_graded_here" not in v, "the dispatch lives in the lib (issue 1424 review)"
+    line = [ln for ln in v.splitlines() if "strih_drm_outputs_verify_dispatch" in ln]
+    assert len(line) == 1 and len(line[0]) <= 120
     assert "per-output)" in v
+
+
+def test_the_dispatch_grades_only_an_array_box_and_never_a_box_without_an_output(tmp_path):
+    conf = tmp_path / "drm-output.json"
+    conf.write_text(PP_ARRAY + "\n")
+    body = ('strih_drm_outputs_verify_report() { echo "REPORT $*"; }\n'
+            'strih_drm_outputs_verify_dispatch "$1" H S "$2" L F X && echo GRADED || echo SINGLE\n')
+    r = _bash(body, "lease-not-live", str(conf))
+    assert r.stdout == "REPORT H S %s L F X\nGRADED\n" % conf, r.stdout + r.stderr
+    r = _bash(body, "skip-no-output", str(conf))
+    assert r.stdout == "SINGLE\n"
+    conf.write_text(PP_LIVE + "\n")
+    r = _bash('strih_lx_hdmi_outputs() { echo auto; }\n' + body, "ok", str(conf))
+    assert r.stdout == "SINGLE\n"
+
+
+def test_the_drm_lib_has_no_second_copy_of_the_fact_grammar():
+    # issue 1424 review: ONE validator, in the facts lib
+    d = _DRM_LIB.read_text()
+    assert "strih_drm_outputs_spec_ok" not in d
+    assert "^${c}+:(program|multiview)$" not in d
+    assert "strih_box_hdmi_outputs_ok" in d
+    assert "strih_box_hdmi_outputs_ok() {" in _FACTS.read_text()

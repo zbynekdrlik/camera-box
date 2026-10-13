@@ -327,7 +327,7 @@ fn both_backends_measure_the_present_delay() {
     assert!(
         b.contains("drm_output_present_note_shown(&inst->clock, idx, shown_ns)")
             && b.contains(
-                "drm_output_vk_open(inst->connector, inst->solid_argb, vkd_note_shown, inst)"
+                "drm_output_vk_open(inst->index, inst->connector, inst->solid_argb, vkd_note_shown, inst)"
             ),
         "issue 1424: the vk-direct OBS side wires the core's present note to the instance's clock"
     );

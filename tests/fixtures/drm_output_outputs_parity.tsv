@@ -28,6 +28,13 @@ single_empty_connector	{"enabled":true,"connector":""}	connector-invalid	-	-
 single_numeric_connector	{"enabled":true,"connector":7}	connector-invalid	-	-
 single_unknown_backend	{"enabled":true,"connector":"HDMI-0","backend":"vulkan"}	backend-unknown	-	-
 unreadable_garbage	garbage	unreadable	-	-
+strict_nan_argb	{"enabled":true,"connector":"HDMI-1","argb":NaN}	unreadable	-	-
+strict_infinity_argb	{"enabled":true,"connector":"HDMI-1","argb":Infinity}	unreadable	-	-
+strict_minus_infinity_argb	{"enabled":true,"connector":"HDMI-1","argb":-Infinity}	unreadable	-	-
+strict_int_over_64_bits	{"enabled":true,"connector":"HDMI-1","argb":9223372036854775808}	unreadable	-	-
+strict_real_overflow	{"enabled":true,"connector":"HDMI-1","argb":1e400}	unreadable	-	-
+strict_int_64_bit_max_is_read	{"enabled":true,"connector":"HDMI-1","argb":9223372036854775807}	ok	-	HDMI-1|program|lease|4294967295
+strict_nan_in_an_array_entry	{"enabled":true,"outputs":[{"connector":"HDMI-0","view":"multiview"},{"connector":"HDMI-1","argb":NaN}]}	unreadable	-	-
 unreadable_array	[]	unreadable	-	-
 unreadable_empty	<empty>	unreadable	-	-
 strih_pp_two_outputs	{"enabled":true,"outputs":[{"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"},{"connector":"HDMI-1","argb":2105376,"view":"program","backend":"vk-direct"}]}	ok	-	HDMI-0|multiview|vk-direct|2105376;HDMI-1|program|vk-direct|2105376

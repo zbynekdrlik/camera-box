@@ -259,8 +259,8 @@ fn the_vk_core_takes_the_display_off_x_and_presents_fifo() {
         VK_SETUP_C,
     );
     let wait = destroy
-        .find("vkQueueWaitIdle(")
-        .expect("destroy waits the display's queue idle first");
+        .find("drm_output_vk_drain_queue_bounded(d)")
+        .expect("destroy drains the display's queue (bounded) first");
     let release = destroy
         .find("vkReleaseDisplayEXT(")
         .expect("destroy releases the display");
@@ -898,7 +898,9 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         .find("d->submit_outstanding")
         .expect("the teardown quiesces an outstanding copy");
     // issue 1424 part 2: one display waits ITS queue idle (the device belongs to both displays)
-    let idle = destroy.find("vkQueueWaitIdle(").expect("the idle wait");
+    let idle = destroy
+        .find("drm_output_vk_drain_queue_bounded(d)")
+        .expect("the bounded queue drain");
     assert!(
         quiesce < idle && destroy.contains("leaking the Vulkan objects"),
         "issue 1346: an outstanding copy is waited BOUNDED before the idle wait; a wedged GPU leaks \

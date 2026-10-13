@@ -108,8 +108,8 @@ fn outputs_tu_is_linux_only_built_by_libobs_and_reads_the_config_with_jansson() 
         "issue 1424: {LINUX_CMAKE} must add obs-drm-output-outputs.c to libobs"
     );
     assert!(
-        o.contains("#include <jansson.h>") && o.contains("json_load_file(path, 0, &err)"),
-        "issue 1424: the autostart reads the config with jansson directly"
+        o.contains("#include <jansson.h>") && o.contains("json_loads(text, 0, &err)"),
+        "issue 1424: the autostart parses the config with jansson directly"
     );
     assert!(
         !o.contains("obs_data_create_from_json_file"),
@@ -186,7 +186,7 @@ fn vk_core_is_one_shared_device_with_a_display_per_output() {
     let h = squish(&file(VK_H));
     for token in [
         "#define DRM_OUTPUT_VK_MAX_DISPLAYS 2",
-        "struct drm_output_vk_disp *drm_output_vk_open(const char *output_name, uint32_t solid_argb, drm_output_vk_shown_fn shown, void *shown_param);",
+        "struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name, uint32_t solid_argb, drm_output_vk_shown_fn shown, void *shown_param);",
         "void drm_output_vk_close(struct drm_output_vk_disp *d);",
         "int drm_output_vk_claim(struct drm_output_vk_disp *d);",
     ] {
@@ -200,7 +200,7 @@ fn vk_core_is_one_shared_device_with_a_display_per_output() {
         "struct drm_output_vk_disp {",
         "extern struct drm_output_vk_device g_drm_vk_dev;",
         "extern struct drm_output_vk_disp g_drm_vk_disp[DRM_OUTPUT_VK_MAX_DISPLAYS];",
-        "X(vkQueueWaitIdle)",
+        "bool drm_output_vk_drain_queue_bounded(struct drm_output_vk_disp *d);",
     ] {
         assert!(
             i.contains(token),
@@ -242,8 +242,21 @@ fn vk_core_is_one_shared_device_with_a_display_per_output() {
         "issue 1424: a second output on another GPU is refused by name (one shared VkDevice)"
     );
     assert!(
-        s.contains("if (drm_output_vk_plane_taken(d, (int)p))"),
-        "issue 1424: each display presents on a display plane of its own"
+        s.contains("if (!rebuild && drm_output_vk_plane_taken(d, (int)p))"),
+        "issue 1424: each display presents on a display plane of its own (the open path, under the \
+         device lock; a rebuild reads currentDisplay, never the other display's fields unlocked)"
+    );
+    let open = body_of(
+        &c,
+        "struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name, uint32_t solid_argb,",
+        "open",
+    );
+    assert!(
+        open.contains("d = &g_drm_vk_disp[slot];")
+            && open.contains("if (d->in_use) {")
+            && !open.contains("if (!g_drm_vk_disp[i].in_use)"),
+        "issue 1424 review: a display opens in the CALLER's slot (the instance index), never the first \
+         free one -- an instance's display pointer can never name the other instance's display"
     );
     let destroy = body_of(
         &s,
@@ -251,12 +264,73 @@ fn vk_core_is_one_shared_device_with_a_display_per_output() {
         "destroy",
     );
     assert!(
-        destroy.contains("vkQueueWaitIdle(d->queue)") && !destroy.contains("vkDeviceWaitIdle"),
-        "issue 1424: closing ONE display waits its own queue, never the device another display uses"
+        destroy.contains("!drm_output_vk_drain_queue_bounded(d)")
+            && !destroy.contains("vkQueueWaitIdle(")
+            && !destroy.contains("vkDeviceWaitIdle"),
+        "issue 1424 review: closing ONE display drains its own queue BOUNDED (a queue the other display \
+         shares and wedged must never hang the shutdown), never the device another display uses"
+    );
+    let drained = destroy
+        .find("!drm_output_vk_drain_queue_bounded(d)")
+        .expect("the drain");
+    let tail = &destroy[drained..];
+    assert!(
+        tail.find("leak = true;").is_some_and(|l| l < 400)
+            && tail.find("dev->wedged = true;").is_some_and(|w| w < 400),
+        "issue 1424 review: a queue that never drained leaks the display and marks the device wedged"
+    );
+    let drain = body_of(
+        &c,
+        "bool drm_output_vk_drain_queue_bounded(struct drm_output_vk_disp *d)",
+        "drain",
+    );
+    let mut at = 0;
+    for step in [
+        "pthread_mutex_lock(d->queue_lock);",
+        "vkResetFences(dev->device, 1, &d->fence)",
+        "vkQueueSubmit(d->queue, 0, NULL, d->fence)",
+        "pthread_mutex_unlock(d->queue_lock);",
+        "for (int i = 0; i < 5 && r == VK_TIMEOUT; i++)",
+        "vkWaitForFences(dev->device, 1, &d->fence, VK_TRUE, DRM_OUTPUT_VK_WAIT_NS)",
+        "return r != VK_TIMEOUT;",
+    ] {
+        let p = drain[at..].find(step).unwrap_or_else(|| {
+            panic!("issue 1424 review: the bounded drain needs `{step}` in this order")
+        });
+        at += p + step.len();
+    }
+    assert!(
+        !c.contains("vkQueueWaitIdle(") && !i.contains("X(vkQueueWaitIdle)"),
+        "issue 1424 review: no unbounded queue wait is left in the vk core"
     );
     assert!(
         destroy.contains("if (dev->refs == 0)\n\t\tdrm_output_vk_destroy_device(dev);"),
         "issue 1424: the shared device goes with the LAST display"
+    );
+}
+
+#[test]
+fn the_config_is_read_through_obs_s_utf8_reader_so_a_byte_order_mark_keeps_starting() {
+    let o = file(OUTPUTS_C);
+    let load = body_of(
+        &o,
+        "static json_t *drm_output_config_load(const char *path)",
+        "config load",
+    );
+    assert!(
+        load.contains("char *text = os_quick_read_utf8_file(path);")
+            && load.contains("json_t *root = json_loads(text, 0, &err);")
+            && load.contains("bfree(text);"),
+        "issue 1424 review: the config is read by OBS's UTF-8 reader (drops a BOM) then parsed by jansson"
+    );
+    assert!(
+        !o.contains("json_load_file("),
+        "issue 1424 review: no jansson file loader (it refuses a BOM the old obs_data loader accepted)"
+    );
+    assert_eq!(
+        o.matches("drm_output_config_load(").count(),
+        3,
+        "issue 1424 review: the autostart AND the persisted view both read through it (+ its definition)"
     );
 }
 
@@ -369,9 +443,32 @@ fn the_rig_harness_drives_two_outputs_on_one_device() {
     let h = file(RIG_HARNESS);
     assert!(
         h.contains("DISPLAY=:0 ./vk-rig-harness HDMI-0 HDMI-1")
-            && h.contains("disp[n_disp] = drm_output_vk_open(argv[a], 0x202020u, NULL, NULL);"),
+            && h.contains(
+                "disp[n_disp] = drm_output_vk_open(n_disp, argv[a], 0x202020u, NULL, NULL);"
+            ),
         "issue 1424: the on-box harness proves both displays on ONE shared VkDevice"
     );
+    // issue 1424 review: the two outputs are independent -- display 0 closes while display 1 keeps
+    // presenting (its present count advances), then display 0 re-opens in its slot beside it.
+    let phase = h
+        .find("if (rc == 0 && n_disp == 2) {")
+        .expect("the independence phase");
+    let p = &h[phase..];
+    let mut at = 0;
+    for step in [
+        "drm_output_vk_close(disp[0]);",
+        "const unsigned long long before = disp[1]->presents;",
+        "drm_output_vk_publish_gl(disp[1], idx, tex[1], w[1], h[1]);",
+        "const unsigned long long after = disp[1]->presents;",
+        "drm_output_vk_wants_frames(disp[1]) && after > before + 60u;",
+        "disp[0] = drm_output_vk_open(0, argv[1], 0x202020u, NULL, NULL);",
+        "rc = (one_alive && reopened) ? 0 : 1;",
+    ] {
+        let q = p[at..].find(step).unwrap_or_else(|| {
+            panic!("issue 1424 review: the independence phase needs `{step}` in order")
+        });
+        at += q + step.len();
+    }
 }
 
 // ----------------------------------------------------------------------------------------------
