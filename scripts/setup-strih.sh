@@ -402,7 +402,7 @@ fi
 # from strih-seed.json. It is in the rsynced tree next to this script (like the launcher pair, step
 # 8), so install it locally -- no GH_TOKEN dependency. The 5 STRIH-SNV NDI OUTPUTS are a SEPARATE
 # ticket; the seeder never touches outputs.
-[ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
+[ -f "${HERE}/strih_scenes.py" ] && [ -f "${HERE}/drm_output_config.py" ] || fail "scripts/strih_scenes.py or drm_output_config.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py && install -m 0644 "${HERE}/drm_output_config.py" /usr/local/bin/drm_output_config.py   # issue 1424: strih_scenes imports the HDMI-output grammar
 install -m 0755 "${HERE}/stream_dev_safe.py" /usr/local/bin/stream_dev_safe.py   # issue 1380: the stream role's safe Development
 rm -f /opt/camera-box/strih-lx-seed.json   # issue 1414: the pre-rename seed, now the new seeder is in

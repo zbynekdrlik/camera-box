@@ -238,7 +238,7 @@ if strih_drm_outputs_verify_dispatch "$DRM_VERDICT" "$USER_HOME" "$SCN_BIN" "$DR
 case "$DRM_VERDICT" in
   per-output)         ;;  # issue 1424 part 2: graded per output just above
   skip-no-output)     note "HDMI output: not graded -- STRIH_HDMI_OUTPUT_BACKEND=none (this box has no fixed HDMI output)" ;;
-  ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)"; drm_output_audio_verify_report "$USER_HOME" "${USER_HOME##*/}" "$DRM_LOG" ;;  # issue 1424
+  ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)"; drm_output_audio_verify_report "$USER_HOME" "${USER_HOME##*/}" "$DRM_LOG" "" "" "$DRM_VIEW_V" ;;  # issue 1424
   x-unreadable)       bad  "HDMI output: the box fact is vk-direct, which detects the HDMI monitor through X RandR, but xrandr on :0 answered nothing (Xorg down, or ${USER_HOME}/.Xauthority unreadable for $(id -un)) -- cannot grade the HDMI output" ;;
   skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
   hdmi-unplugged)     note "HDMI output: ${DRM_ARMED} is armed in ${DRM_CONF_V} but no HDMI monitor is connected (report-only)" ;;

@@ -218,7 +218,7 @@ drm_output_audio_pw_dump() {
   fi
 }
 
-# drm_output_audio_verify_report USER_HOME USER LOG [ROOT [CONNECTOR]] -- verify (the HDMI output item):
+# drm_output_audio_verify_report USER_HOME USER LOG [ROOT [CONNECTOR [VIEW]]] -- verify (the HDMI output item):
 # the WirePlumber rule file, PipeWire's live node list and the module's line in LOG. issue 1424 part 2:
 # with CONNECTOR, only the audio lines naming 'CONNECTOR' count (each output has its own leg; on a
 # two-output box the other leg's lines must never grade this one). With VIEW multiview, a leg that gave

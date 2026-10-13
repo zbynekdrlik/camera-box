@@ -97,6 +97,7 @@ struct drm_output_inst {
 	struct drm_output_view_state view;
 	struct drm_output_present_clock clock; /* issue 1424: render tick -> on screen of THIS output */
 	struct drm_output_audio *audio;        /* issue 1424: THIS connector's own HDMI audio leg */
+	bool audio_enabled;                    /* issue 1424 part 3: false = its PCM is owned elsewhere */
 	bool started;                          /* the last start succeeded (registry lock) */
 };
 

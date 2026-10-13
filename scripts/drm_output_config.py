@@ -256,6 +256,8 @@ def write_drm_outputs(spec, backend, path=DRM_OUTPUT_CONF):
     connector the config already drives -- single-object or array form -- keeps its "view"; a new one
     gets the fact's default view), as is its "argb"; the single-object form's connector / view / argb /
     backend keys move into their entry; every other top-level key ("enabled", "program", ...) stays.
+    issue 1424 part 3: "audio" follows the FACT (`CONNECTOR:VIEW:noaudio` = its PCM is owned elsewhere),
+    never the old config -- it is a box ownership fact, not an operator choice.
     Raises ValueError on a malformed spec, an unknown backend or an unprovisioned / broken config."""
     wanted = drm_output_spec_of(spec)
     if not wanted:
@@ -274,11 +276,11 @@ def write_drm_outputs(spec, backend, path=DRM_OUTPUT_CONF):
         for k in ("connector", "view", "argb", "backend"):
             cfg.pop(k, None)
         outputs = []
-        for conn, view in wanted:
+        for conn, view, audio in wanted:
             old = known.get(conn, {})
             keep_view = drm_output_view_of(_drm_cfg_str(old.get("view"))) if "view" in old else None
             argb = old["argb"] if "argb" in old else DRM_OUTPUT_DEFAULT_ARGB
-            outputs.append(drm_output_outputs_entry(conn, keep_view or view, backend, argb))
+            outputs.append(drm_output_outputs_entry(conn, keep_view or view, backend, argb, audio))
         cfg["outputs"] = outputs
 
     _rewrite_drm_config(path, mutate)
@@ -315,13 +317,22 @@ def _drm_cfg_argb(obj):
     return 0
 
 
+def _drm_cfg_audio(obj):
+    """issue 1424 part 3: "audio" of one "outputs" entry -- absent -> True (the module's own leg), a JSON
+    boolean -> itself, anything else -> None (the C refuses the whole array: audio-invalid)."""
+    if "audio" not in obj:
+        return True
+    value = obj["audio"]
+    return value if isinstance(value, bool) else None
+
+
 def drm_output_instances(config_text):
     """Pure: the drm-output config -> (verdict, outputs). The vendored C grammar
     (obs-drm-output-outputs.c drm_output_config_classify) row for row -- ONE shared table,
     tests/fixtures/drm_output_outputs_parity.tsv. `outputs` (only on "ok") is a list of dicts
-    {connector, view, backend, argb}, in config order. Verdicts: ok | unreadable | disabled |
+    {connector, view, backend, argb, audio}, in config order. Verdicts: ok | unreadable | disabled |
     outputs-not-array | outputs-empty | outputs-too-many | entry-not-object | connector-invalid |
-    connector-duplicate | view-unknown | backend-unknown.
+    connector-duplicate | view-unknown | backend-unknown | audio-invalid.
 
     The single-object form (no "outputs" key) is the issue-1152/1346 grammar: an unknown view reads as
     the Program there. The "outputs" form is all or nothing: one bad entry and the C starts NO output."""
@@ -341,7 +352,8 @@ def drm_output_instances(config_text):
         if backend is None:
             return "backend-unknown", []
         view = drm_output_view_of(_drm_cfg_str(cfg.get("view"))) or "program"
-        return "ok", [{"connector": conn, "view": view, "backend": backend, "argb": _drm_cfg_argb(cfg)}]
+        return "ok", [{"connector": conn, "view": view, "backend": backend, "argb": _drm_cfg_argb(cfg),
+                       "audio": True}]
     outputs = cfg["outputs"]
     if not isinstance(outputs, list):
         return "outputs-not-array", []
@@ -362,9 +374,13 @@ def drm_output_instances(config_text):
         backend = drm_output_backend_of(_drm_cfg_str(entry.get("backend")))
         if backend is None:
             return "backend-unknown", []
+        audio = _drm_cfg_audio(entry)
+        if audio is None:
+            return "audio-invalid", []
         if any(o["connector"] == conn for o in got):
             return "connector-duplicate", []
-        got.append({"connector": conn, "view": view, "backend": backend, "argb": _drm_cfg_argb(entry)})
+        got.append({"connector": conn, "view": view, "backend": backend, "argb": _drm_cfg_argb(entry),
+                    "audio": audio})
     return "ok", got
 
 
@@ -377,28 +393,33 @@ def drm_output_lease_connectors(config_text):
 
 
 def drm_output_spec_of(spec):
-    """Pure: the box fact STRIH_HDMI_OUTPUTS -> [(connector, view), ...] (`auto` / `none` -> []).
-    Raises ValueError on a malformed value (the fact loader refuses the same)."""
+    """Pure: the box fact STRIH_HDMI_OUTPUTS -> [(connector, view, audio), ...] (`auto` / `none` -> []).
+    A token is CONNECTOR:VIEW, or CONNECTOR:VIEW:noaudio (issue 1424 part 3: the connector's PCM is owned
+    elsewhere, the module opens no audio leg on it). Raises ValueError on a malformed value (the fact
+    loader refuses the same)."""
     if spec in ("auto", "none"):
         return []
     out = []
     for token in spec.split():
-        conn, sep, view = token.partition(":")
-        if not sep or not conn or view not in DRM_OUTPUT_VIEWS or not all(
+        conn, sep, rest = token.partition(":")
+        view, sep2, flag = rest.partition(":")
+        if not sep or not conn or view not in DRM_OUTPUT_VIEWS or (sep2 and flag != "noaudio") or not all(
                 c.isascii() and (c.isalnum() or c in "._-") for c in conn):
-            raise ValueError("bad HDMI output %r in %r (want CONNECTOR:program|multiview)" % (token, spec))
-        if any(c == conn for c, _ in out):
+            raise ValueError("bad HDMI output %r in %r (want CONNECTOR:program|multiview[:noaudio])" % (token, spec))
+        if any(c == conn for c, _, _ in out):
             raise ValueError("connector %r listed twice in %r" % (conn, spec))
-        out.append((conn, view))
+        out.append((conn, view, not sep2))
     if not 1 <= len(out) <= DRM_OUTPUT_MAX_OUTPUTS:
         raise ValueError("%r lists %d outputs (want 1..%d)" % (spec, len(out), DRM_OUTPUT_MAX_OUTPUTS))
     return out
 
 
-def drm_output_outputs_entry(connector, view, backend, argb=DRM_OUTPUT_DEFAULT_ARGB):
-    """One "outputs" element in the machine-written key order (connector, argb, view, backend; `lease` =
-    the absent backend key, the single-object form's rule)."""
+def drm_output_outputs_entry(connector, view, backend, argb=DRM_OUTPUT_DEFAULT_ARGB, audio=True):
+    """One "outputs" element in the machine-written key order (connector, argb, view, backend, audio;
+    `lease` = the absent backend key, the single-object form's rule; audio on = the absent key)."""
     entry = {"connector": connector, "argb": argb, "view": view}
     if backend != "lease":
         entry["backend"] = backend
+    if not audio:
+        entry["audio"] = False
     return entry

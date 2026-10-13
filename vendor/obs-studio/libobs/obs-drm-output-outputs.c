@@ -58,6 +58,7 @@
 #define DRM_OUTPUT_CFG_DUPLICATE 8   /* a connector named twice */
 #define DRM_OUTPUT_CFG_VIEW 9        /* an "outputs" entry with an unknown "view" */
 #define DRM_OUTPUT_CFG_BACKEND 10    /* an unknown "backend" */
+#define DRM_OUTPUT_CFG_AUDIO 11      /* an "outputs" entry whose "audio" is present but not a boolean */
 #define DRM_OUTPUT_CFG_CONNECTOR_MAX 64
 /* The M1 dark-grey solid (0x202020): the image before the first rendered frame + the fail-open one. */
 #define DRM_OUTPUT_CFG_DEFAULT_ARGB 0x00202020u
@@ -71,6 +72,7 @@ struct drm_output_spec {
 	int backend;
 	uint32_t argb;
 	int config_slot; /* -1 = the single-object form, else the "outputs" array position */
+	bool audio;      /* issue 1424 part 3: false = the connector's PCM is owned elsewhere, no audio leg */
 };
 
 static const char *drm_output_cfg_verdict_name(int verdict)
@@ -98,6 +100,8 @@ static const char *drm_output_cfg_verdict_name(int verdict)
 		return "view-unknown";
 	case DRM_OUTPUT_CFG_BACKEND:
 		return "backend-unknown";
+	case DRM_OUTPUT_CFG_AUDIO:
+		return "audio-invalid";
 	default:
 		return "unknown";
 	}
@@ -145,7 +149,9 @@ static bool drm_output_cfg_connector(const json_t *obj, char *out)
  *     then a missing connector, then an unknown backend keep it dormant; an unknown view reads as the
  *     Program (view_fallback, WARNed by the caller);
  *   "outputs" form: all or nothing -- not an array, empty, more than `cap`, then per entry in order a
- *     non-object, an invalid connector, an unknown view, an unknown backend, a duplicate connector. */
+ *     non-object, an invalid connector, an unknown view, an unknown backend, a non-boolean "audio", a
+ *     duplicate connector. "audio" (issue 1424 part 3): absent / true = the output's own HDMI audio leg,
+ *     false = its PCM is owned elsewhere (the intercom hub); the single-object form always has audio. */
 static int drm_output_config_classify(const json_t *root, struct drm_output_spec *specs, size_t cap, size_t *n,
 				      size_t *bad, bool *program)
 {
@@ -176,6 +182,7 @@ static int drm_output_config_classify(const json_t *root, struct drm_output_spec
 			return DRM_OUTPUT_CFG_BACKEND;
 		sp->argb = drm_output_cfg_argb(root);
 		sp->config_slot = -1;
+		sp->audio = true;
 		*n = 1;
 		return DRM_OUTPUT_CFG_OK;
 	}
@@ -204,6 +211,10 @@ static int drm_output_config_classify(const json_t *root, struct drm_output_spec
 		sp->backend = drm_output_backend_from_config(drm_output_cfg_str(json_object_get(e, "backend")));
 		if (sp->backend < 0)
 			return DRM_OUTPUT_CFG_BACKEND;
+		const json_t *audio = json_object_get(e, "audio");
+		if (audio && !json_is_boolean(audio))
+			return DRM_OUTPUT_CFG_AUDIO;
+		sp->audio = !audio || json_is_true(audio);
 		for (size_t j = 0; j < i; j++) {
 			if (strcmp(specs[j].connector, sp->connector) == 0)
 				return DRM_OUTPUT_CFG_DUPLICATE;
@@ -295,6 +306,7 @@ static struct drm_output_inst *drm_output_inst_add_locked(const struct drm_outpu
 									 : OBS_DRM_OUTPUT_BACKEND_LEASE;
 	inst->solid_argb = sp->argb;
 	inst->program = program;
+	inst->audio_enabled = sp->audio;
 	inst->ops = inst->backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT ? &drm_output_vk_direct_backend
 								      : &drm_output_lease_backend;
 	drm_output_view_configure(inst, sp->view);
@@ -311,17 +323,23 @@ static struct drm_output_inst *drm_output_inst_by_connector(const char *connecto
 }
 
 /* Start one instance: its EDID first (read while X still lists the connector), then the backend, then its
- * audio leg (after the mode is driven: the connector's ELD appears only then). Caller holds g_outs_lock. */
+ * audio leg (after the mode is driven: the connector's ELD appears only then). An output whose config turns
+ * "audio" off (issue 1424 part 3: its PCM is owned elsewhere) reads no EDID, resolves and opens nothing.
+ * Caller holds g_outs_lock. */
 static bool drm_output_inst_start_locked(struct drm_output_inst *inst)
 {
 	uint8_t edid[512];
-	const size_t edid_len = drm_output_audio_read_edid(inst->connector, edid, sizeof(edid));
+	size_t edid_len = 0;
+	if (inst->audio_enabled)
+		edid_len = drm_output_audio_read_edid(inst->connector, edid, sizeof(edid));
 	if (!inst->ops->start(inst)) {
 		inst->started = false;
 		return false;
 	}
 	inst->started = true;
-	if (!inst->audio) /* camera-box issue 1424: THIS connector's own HDMI audio leg */
+	if (!inst->audio_enabled)
+		blog(LOG_INFO, "drm-output audio: '%s' off by config (owned elsewhere)", inst->connector);
+	else if (!inst->audio) /* camera-box issue 1424: THIS connector's own HDMI audio leg */
 		inst->audio = drm_output_audio_open(inst->connector, edid, edid_len, &inst->clock, &inst->view.view);
 	return true;
 }
@@ -353,6 +371,7 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 		sp.backend = cfg->backend;
 		sp.argb = cfg->solid_argb;
 		sp.config_slot = -1;
+		sp.audio = true;
 		inst = drm_output_inst_add_locked(&sp, cfg->program);
 	}
 	bool ok = false;

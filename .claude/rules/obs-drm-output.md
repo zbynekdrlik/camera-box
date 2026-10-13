@@ -626,6 +626,16 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   present clock, so the Multiview output's leg is muted while the Program output plays (verify grades
   a Multiview leg that gave up, e.g. a BenQ with no audio, as a NOTE); the Program
   view's canvas-rate mode pick (part 1) is per display.
+- **An output whose PCM is owned elsewhere (part 3, owner ruling, design comment 6151522810):** an
+  "outputs" entry carries an optional boolean `"audio"` (absent / true = the module's own leg; false =
+  the connector's PCM belongs to someone else; a non-boolean = `audio-invalid`, all or nothing; the
+  single-object form always has its leg). strih-pp's HDMI-1 is such an output: the intercom hub writes
+  the vestibule audio into its PCM, so the module reads no EDID, resolves and opens nothing there and
+  logs ONE line `drm-output audio: '<connector>' off by config (owned elsewhere)`. The box fact spells
+  it `CONNECTOR:VIEW:noaudio` (strih-pp `HDMI-0:multiview HDMI-1:program:noaudio`); step 6 writes
+  `"audio":false` from the FACT (never kept from an old config: it is box ownership, not an operator
+  choice); verify item 4c grades that line instead of the open line, FAILs an opened PCM or a missing
+  line on such an output, and FAILs a config whose flag differs from the fact.
 - **Log lines name the connector** where verify grades them: `program scanout LIVE (... of '<c>')`,
   `multiview bind LIVE (... of '<c>')`, `vk-direct present loop exited on '<c>'`; the audio lines
   already did. The prefixes the single-output grading greps are unchanged.

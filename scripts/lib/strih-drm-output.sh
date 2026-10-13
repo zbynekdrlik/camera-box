@@ -249,11 +249,25 @@ strih_drm_outputs_config_json() {
     vk-direct) extra=',"backend":"vk-direct"' ;;
     *) return 1 ;;
   esac
+  local rest audio
   for t in $spec; do
-    out="${out}${sep}$(printf '{"connector":"%s","argb":%s,"view":"%s"%s}' "${t%%:*}" "$STRIH_DRM_OUTPUT_ARGB" "${t#*:}" "$extra")"
+    rest="${t#*:}"
+    audio=""
+    [ "${rest#*:}" = noaudio ] && audio=',"audio":false'   # issue 1424 part 3: its PCM is owned elsewhere
+    out="${out}${sep}$(printf '{"connector":"%s","argb":%s,"view":"%s"%s%s}' "${t%%:*}" "$STRIH_DRM_OUTPUT_ARGB" "${rest%%:*}" "$extra" "$audio")"
     sep=","
   done
   printf '{"enabled":true,"outputs":[%s]}\n' "$out"
+}
+
+# strih_drm_outputs_spec_audio SPEC CONNECTOR -> `off` when SPEC lists CONNECTOR with `:noaudio`, else `on`
+# (issue 1424 part 3: the fact names who owns the connector's PCM).
+strih_drm_outputs_spec_audio() {
+  local t
+  for t in ${1-}; do
+    [ "${t%%:*}" = "${2-}" ] && [ "${t##*:}" = noaudio ] && { printf off; return 0; }
+  done
+  printf on
 }
 
 # strih_drm_outputs_spec_connectors SPEC -> the connectors of SPEC, space-separated, sorted (for the
@@ -270,14 +284,14 @@ strih_drm_output_log_of() {
 }
 
 # strih_drm_outputs_verify_lines SCN_DIR CONF -> the strih_scenes reading of an "outputs" config, for
-# verify: the first line `<verdict>`, then one `<connector> <view> <backend>` line per output (only on
-# ok). Prints `?` when the classifier could not run. Always returns 0.
+# verify: the first line `<verdict>`, then one `<connector> <view> <backend> <on|off>` line per output
+# (only on ok; the last field = its "audio"). Prints `?` when the classifier could not run. Always returns 0.
 strih_drm_outputs_verify_lines() {
   python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s
 v, o = s.drm_output_instances(s.drm_output_config_text(sys.argv[2]))
 print(v)
 for i in o:
-    print(i["connector"], i["view"], i["backend"])' "$1" "$2" 2>/dev/null || echo "?"
+    print(i["connector"], i["view"], i["backend"], "on" if i.get("audio", True) else "off")' "$1" "$2" 2>/dev/null || echo "?"
 }
 
 # strih_drm_outputs_is_array CONF -> 0 iff CONF is a JSON object with an "outputs" key (the issue-1424
@@ -343,7 +357,7 @@ strih_drm_outputs_verify_report() {
       bad "HDMI outputs: ${conf} drives '${got}' but the box fact STRIH_HDMI_OUTPUTS lists '${want}' -- re-run setup-strih.sh step 6"
     fi
   fi
-  while read -r conn view backend; do
+  while read -r conn view backend audio; do
     [ -n "$conn" ] || continue
     hdmi=0
     if [ "$fact" = vk-direct ] && [ -z "$xr" ]; then
@@ -364,7 +378,7 @@ strih_drm_outputs_verify_report() {
     v="$(strih_drm_output_verdict "$hdmi" "$conn" "$view" "$live" "$mv" "$backend" "$fact" "$dead" || true)"
     case "$v" in
       ok)                 ok   "HDMI output ${conn}: live (backend ${backend}), view ${view} (${conf} + its own lines in the newest OBS log)"
-                          drm_output_audio_verify_report "$user_home" "${user_home##*/}" "$log" "" "$conn" "$view" ;;
+                          strih_drm_outputs_audio_grade "$user_home" "$log" "$olog" "$conn" "$view" "${audio:-on}" "$spec" ;;
       x-unreadable)       bad  "HDMI output ${conn}: the box fact is vk-direct, but xrandr on :0 answered nothing -- cannot grade it" ;;
       skip-no-hdmi | hdmi-unplugged) note "HDMI output ${conn}: armed in ${conf} but X RandR does not list it connected (report-only)" ;;
       backend-drift)      bad  "HDMI output ${conn}: uses backend ${backend} but the box fact STRIH_HDMI_OUTPUT_BACKEND is ${fact} -- re-run setup-strih.sh step 6" ;;
@@ -374,6 +388,30 @@ strih_drm_outputs_verify_report() {
       *)                  bad  "HDMI output ${conn}: verdict '${v}'" ;;
     esac
   done < <(printf '%s\n' "$lines" | sed 1d)
+  return 0
+}
+
+# strih_drm_outputs_audio_grade USER_HOME LOG OUTPUT_LOG CONNECTOR VIEW CONFIG_AUDIO SPEC -- one output's
+# audio row (issue 1424 part 3). The config's "audio" must match the box fact (`:noaudio` = the PCM is
+# owned elsewhere, e.g. by the intercom hub); an output whose audio is off must log `drm-output audio:
+# '<conn>' off by config (owned elsewhere)` and nothing else of its leg; an output with audio is graded
+# by drm_output_audio_verify_report on its own lines. Uses the caller's ok/bad/note.
+strih_drm_outputs_audio_grade() {
+  local user_home="$1" log="$2" olog="$3" conn="$4" view="$5" cfg="$6" spec="$7" want
+  want=on
+  strih_box_hdmi_outputs_ok "$spec" && want="$(strih_drm_outputs_spec_audio "$spec" "$conn")"
+  if [ "$cfg" != "$want" ]; then
+    bad "HDMI audio ${conn}: the config has audio ${cfg} but the box fact STRIH_HDMI_OUTPUTS says ${want} -- re-run setup-strih.sh step 6"
+  elif [ "$cfg" = off ]; then
+    if grep -aqF "drm-output audio: '${conn}' off by config (owned elsewhere)" <<<"$olog" \
+      && ! grep -aqE "drm-output audio: (pcm hw:|'${conn}' matched)" <<<"$olog"; then
+      ok "HDMI audio ${conn}: off by config -- its PCM is owned elsewhere, the module opened nothing"
+    else
+      bad "HDMI audio ${conn}: the config turns its audio off, but the newest OBS log has no 'off by config' line naming it (or the module opened its PCM) -- an OBS build without issue 1424 part 3?"
+    fi
+  else
+    drm_output_audio_verify_report "$user_home" "${user_home##*/}" "$log" "" "$conn" "$view"
+  fi
   return 0
 }
 
