@@ -25,6 +25,7 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output-vk.h"
   - "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h"
   - "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-vk-remode.c"
   - "tests/drm_output_vk_direct_1346.rs"
   - "tests/c/drm_output_vk_rig_harness.c"
   - "vendor/obs-studio/libobs/obs-drm-output-audio.c"
@@ -391,7 +392,8 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   (`drm_output_parse_backend`, one TSV with the Python mirror) + the OBS side (a GS_BGRA
   intermediate at the display mode size that the ONE raw blit fills, the lazy bind, the frame hook,
   the ordered stop). `obs-drm-output-vk.c` = present thread + lifecycle + GL side;
-  `obs-drm-output-vk-setup.c` = Vulkan/X setup + teardown. The view TU, the budget gate, the
+  `obs-drm-output-vk-setup.c` = Vulkan/X setup + teardown; `obs-drm-output-vk-remode.c` (issue 1424,
+  split for the 1000-line budget) = the open's settle wait, the re-mode and the presentation rebuild. The view TU, the budget gate, the
   Tools-menu switch and the `drm-output:` log family are shared.
 - **Build:** Vulkan HEADERS only (`find_package(Vulkan REQUIRED)` + `Vulkan::Headers`, `libvulkan-dev`
   in linux-genlock.yml); `libvulkan.so.1` is `dlopen`ed (`VK_NO_PROTOTYPES`), so a box without the
@@ -444,7 +446,9 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   `vkQueuePresentKHR FAILED VkResult -13`): it drains the display's queue BOUNDED
   (`drm_output_vk_drain_queue_bounded`, then resets the per-vblank fence the drain signalled), destroys
   the old swapchain(s) + surface, THEN creates the new surface; a queue that never drains gives up by
-  name. The Program re-mode below goes through this path; the
+  name, and marks the display's queue wedged (`queue_wedged` + `submit_outstanding`): the empty
+  submit's fence may still be pending, so no retry resets or re-submits it and the teardown waits it
+  bounded first. The Program re-mode below goes through this path; the
   committed mode never changes during a rebuild, and a display
   that now offers a different size gives up by name (the shared images no longer fit — restart OBS).
   The teardown waits an outstanding copy bounded (5 x 1 s); a TIMEOUT LEAKS the Vulkan objects (and
@@ -637,10 +641,14 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   two outputs back to back, and NVIDIA refuses an acquire (-13) while another display of the process
   brings its presentation up, so the second display never acquired, whichever connector was second.
   `drm_output_vk_setup` raises `dev->acquiring`, waits (bounded, `DRM_OUTPUT_VK_SETTLE_WAIT_MS` 2 s,
-  5 ms steps) until every other presenting display has presented `DRM_OUTPUT_VK_SETTLE_PRESENTS` (3)
-  times on its CURRENT surface (`presents_since_surface`, reset by every new surface; the pure
+  5 ms steps) until every other presenting display (its frame gate `want_frames` up, so a loop that
+  died on its own never blocks) has presented N+1 times on its CURRENT surface, N = its swapchain's
+  image count (`settle_images`; never below `DRM_OUTPUT_VK_SETTLE_PRESENTS` = 3, a 2-image FIFO;
+  `presents_since_surface` is reset by every new surface; the pure `drm_output_vk_settle_need` +
   `drm_output_vk_first_unsettled`, truth-tabled in `tests/drm_output_vk_two_displays_1424.rs`), then
-  acquires. A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
+  acquires. Rejected alternative (review): acquire EVERY display before any presents (no overlap by
+  construction) -- it needs a two-phase open across the outputs layer and the vk core API; the settle
+  wait is causal (presents, not a sleep) and also covers a re-mode on the other display. A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
   resets its settle count BEFORE re-checking the flag (both seq-cst), so an open and a re-mode can never
   miss each other. Logs: `waited N ms for the other display to settle before acquiring '<c>'`, or the
   WARNING `'<other>' is still bringing its presentation up after N ms -- acquiring '<c>' anyway`.
