@@ -151,6 +151,10 @@ OPEN = ("info: drm-output audio: pcm hw:0,3 card 0 device 3 delay 0.0 ms (on 'HD
         "the picture, present 17.1 ms, pcm delay 64.0 ms)")
 MATCHED = ("info: drm-output audio: 'HDMI-0' matched hw:0,3 (48000 Hz, S32_LE, IEC958 switch on) -- mix 0 "
            "connected (muted while the view is multiview)")
+LOST = ("warning: drm-output audio: 'HDMI-0' hw:0,3 no longer carries the connector's monitor (an HDMI replug "
+        "or a re-mode moved the PCM map) -- muted")
+BACK = "info: drm-output audio: 'HDMI-0' hw:0,3 carries the connector's monitor again"
+WRITEFAIL = "warning: drm-output audio: 'HDMI-0' write to hw:0,3 failed (No such device)"
 NOAUDIO = "warning: drm-output audio: NO AUDIO on 'HDMI-1' -- no PCM's ELD matches the connector's EDID; never a fallback"
 
 
@@ -159,7 +163,9 @@ NOAUDIO = "warning: drm-output audio: NO AUDIO on 'HDMI-1' -- no PCM's ELD match
     [([OPEN], "open"), ([NOAUDIO], "no-audio"), ([OPEN, NOAUDIO], "no-audio"), ([NOAUDIO, OPEN], "open"),
      (["info: drm-output: ACTIVE"], "none"), ([], "none"),
      # the Multiview view places no block, so only the resolver's line is there (review R2)
-     ([MATCHED], "open"), ([MATCHED, NOAUDIO], "no-audio")],
+     ([MATCHED], "open"), ([MATCHED, NOAUDIO], "no-audio"),
+     # review round 2 N1: the watcher's mute and a failed write are no-audio, the last line wins
+     ([OPEN, LOST], "no-audio"), ([OPEN, LOST, BACK], "open"), ([MATCHED, WRITEFAIL], "no-audio")],
 )
 def test_log_state_takes_the_last_outcome(lines, want):
     text = "\n".join(lines) + "\n"
@@ -173,6 +179,9 @@ def test_log_markers_are_the_strings_the_module_writes():
     assert "drm-output audio: pcm hw:%d,%d card %d device %d delay" in c
     assert "drm-output audio: NO AUDIO on '%s'" in c
     assert "drm-output audio: '%s' matched hw:%d,%d" in c
+    assert "hw:%d,%d no longer carries the connector's monitor" in c
+    assert "hw:%d,%d carries the connector's monitor again" in c
+    assert "drm-output audio: '%s' write to hw:%d,%d failed" in c
 
 
 @pytest.mark.parametrize(
