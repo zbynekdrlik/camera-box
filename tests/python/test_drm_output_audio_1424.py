@@ -149,13 +149,17 @@ def test_hdmi_node_count_reads_pw_dump():
 
 OPEN = ("info: drm-output audio: pcm hw:0,3 card 0 device 3 delay 0.0 ms (on 'HDMI-0'; audio 96.2 ms behind "
         "the picture, present 17.1 ms, pcm delay 64.0 ms)")
+MATCHED = ("info: drm-output audio: 'HDMI-0' matched hw:0,3 (48000 Hz, S32_LE, IEC958 switch on) -- mix 0 "
+           "connected (muted while the view is multiview)")
 NOAUDIO = "warning: drm-output audio: NO AUDIO on 'HDMI-1' -- no PCM's ELD matches the connector's EDID; never a fallback"
 
 
 @pytest.mark.parametrize(
     "lines,want",
     [([OPEN], "open"), ([NOAUDIO], "no-audio"), ([OPEN, NOAUDIO], "no-audio"), ([NOAUDIO, OPEN], "open"),
-     (["info: drm-output: ACTIVE"], "none"), ([], "none")],
+     (["info: drm-output: ACTIVE"], "none"), ([], "none"),
+     # the Multiview view places no block, so only the resolver's line is there (review R2)
+     ([MATCHED], "open"), ([MATCHED, NOAUDIO], "no-audio")],
 )
 def test_log_state_takes_the_last_outcome(lines, want):
     text = "\n".join(lines) + "\n"
@@ -168,6 +172,7 @@ def test_log_markers_are_the_strings_the_module_writes():
     c = _AUDIO_C.read_text()
     assert "drm-output audio: pcm hw:%d,%d card %d device %d delay" in c
     assert "drm-output audio: NO AUDIO on '%s'" in c
+    assert "drm-output audio: '%s' matched hw:%d,%d" in c
 
 
 @pytest.mark.parametrize(

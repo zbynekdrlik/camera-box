@@ -20,6 +20,10 @@ use camera_box::drm_output_audio_match as m;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Each compile gets its own `{tag}-{pid}-{counter}` dir (the issue-1409 std-only pattern).
+static SCRATCH: AtomicUsize = AtomicUsize::new(0);
 
 const AUDIO_C: &str = "vendor/obs-studio/libobs/obs-drm-output-audio.c";
 const AUDIO_H: &str = "vendor/obs-studio/libobs/obs-drm-output-audio.h";
@@ -37,6 +41,18 @@ fn file(rel: &str) -> String {
     let p = repo(rel);
     fs::read_to_string(&p)
         .unwrap_or_else(|e| panic!("issue 1424: cannot read {}: {e}", p.display()))
+}
+
+/// The body of the C function whose definition starts with `sig` (up to the first `\n}\n`).
+fn body_of_c(src: &str, sig: &str) -> String {
+    let start = src
+        .find(sig)
+        .unwrap_or_else(|| panic!("issue 1424: `{sig}` not found"));
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|i| start + i + 3)
+        .expect("closing brace");
+    src[start..end].to_string()
 }
 
 fn squish(s: &str) -> String {
@@ -156,6 +172,21 @@ fn audio_matches_the_connector_edid_against_the_per_pcm_eld_control() {
     assert!(c.contains("DRM_OUTPUT_AUDIO_RESOLVE_WINDOW_MS"));
     assert!(c.contains("drm_output_audio_retryable("));
     assert!(c.contains("drm-output audio: NO AUDIO on '%s'"));
+    // the resolver's own open line (written in the Multiview view too, where no block is placed)
+    assert!(c.contains("drm-output audio: '%s' matched hw:%d,%d"));
+    // review Y2: the switch is touched only when the card's switches are exactly its HDMI PCMs
+    assert!(c.contains("IEC958 switch ambiguous"));
+    // review Y5: the open PCM is re-checked against the connector's monitor (an HDMI replug or a
+    // re-mode can move the NVIDIA pin -> PCM map), muted + named while it no longer matches
+    assert!(c.contains("drm_output_audio_pcm_still_matches("));
+    assert!(c.contains("no longer carries the connector's monitor"));
+    // review B2: no allocation on libobs's audio thread, every dropped frame counted
+    assert!(c.contains("dropped_frames"));
+    let mix = squish(&body_of_c(&c, "static void drm_output_audio_on_mix("));
+    assert!(
+        !mix.contains("bzalloc(") && !mix.contains("bfree("),
+        "issue 1424: the audio thread never allocates"
+    );
     assert!(c.contains("drm-output audio: pcm hw:%d,%d card %d device %d delay %.1f ms"));
 }
 
@@ -386,38 +417,61 @@ fn pcm_scenarios() -> Vec<PcmScenario> {
     ]
 }
 
-type IecVector = (&'static [i32], i32);
+type IecVector = (&'static [i32], i32, usize);
 
+/// (the card's ELD-carrying PCM devices, the matched device, the card's IEC958 switch count).
 const IEC958_VECTORS: &[IecVector] = &[
-    (&[3, 7, 8, 9], 3),
-    (&[3, 7, 8, 9], 9),
-    (&[9, 8, 7, 3], 8),
-    (&[3, 7, 7], 7),
-    (&[3, 7], 0),
-    (&[], 3),
+    (&[3, 7, 8, 9], 3, 4),
+    (&[3, 7, 8, 9], 9, 4),
+    (&[9, 8, 7, 3], 8, 4),
+    (&[3, 7, 7], 7, 2),
+    (&[3, 7], 0, 2),
+    (&[], 3, 0),
+    // an analog codec's own S/PDIF switch on the same card: which index is HDMI is unknown -> untouched
+    (&[3, 7, 8], 3, 4),
+    (&[3, 7, 8], 7, 2),
 ];
 
-type PlanVector = (u64, u64, u64, u64, u64, u64, u64);
+type PlanVector = (u64, u64, u64, u64, u64, u64, u64, u64);
 
 fn plan_vectors() -> Vec<PlanVector> {
     const MS: u64 = 1_000_000;
     let now = 86_400_000 * MS;
     let blk = 21_333_333;
+    let band = 5 * MS;
     let mut v = Vec::new();
-    // (block_ts, present_delay, now, stream_latency, floor, threshold, block)
+    // (block_ts, present_delay, now, pcm delay, floor, threshold, block, band)
     for age in [0, 10 * MS, 85 * MS, 120 * MS] {
         for pd in [0, 16 * MS, 33 * MS, 140 * MS] {
             for lat in [0, 40 * MS, 60 * MS, 150 * MS] {
-                v.push((now - age, pd, now, lat, 60 * MS, 42 * MS, blk));
+                v.push((now - age, pd, now, lat, 60 * MS, 42 * MS, blk, band));
             }
         }
     }
     // the early-audio hold, both sides of the threshold (strict)
-    v.push((now, 102 * MS, now, 60 * MS, 60 * MS, 42 * MS, blk));
-    v.push((now, 102 * MS + 1, now, 60 * MS, 60 * MS, 42 * MS, blk));
+    v.push((now, 102 * MS, now, 60 * MS, 60 * MS, 42 * MS, blk, band));
+    v.push((now, 102 * MS + 1, now, 60 * MS, 60 * MS, 42 * MS, blk, band));
     // a grown buffer, trimmed at most one block
-    v.push((now - 85 * MS, 16 * MS, now, 300 * MS, 60 * MS, 42 * MS, blk));
-    v.push((now - 85 * MS, 16 * MS, now, 102 * MS, 60 * MS, 42 * MS, blk));
+    v.push((
+        now - 85 * MS,
+        16 * MS,
+        now,
+        300 * MS,
+        60 * MS,
+        42 * MS,
+        blk,
+        band,
+    ));
+    v.push((
+        now - 85 * MS,
+        16 * MS,
+        now,
+        102 * MS,
+        60 * MS,
+        42 * MS,
+        blk,
+        band,
+    ));
     v.push((
         now - 85 * MS,
         16 * MS,
@@ -426,6 +480,42 @@ fn plan_vectors() -> Vec<PlanVector> {
         60 * MS,
         42 * MS,
         blk,
+        band,
+    ));
+    // clock drift inside the threshold: one frame repeated / dropped outside the band, nothing inside
+    // it (the band edge is strict), never a nudge together with a hold or a trim
+    for d in [0, 4 * MS, 5 * MS, 5 * MS + 1, 20 * MS, 42 * MS] {
+        v.push((
+            now - 85 * MS,
+            16 * MS,
+            now,
+            60 * MS + d,
+            60 * MS,
+            42 * MS,
+            blk,
+            band,
+        ));
+        v.push((
+            now - 85 * MS,
+            16 * MS,
+            now,
+            60 * MS - d.min(60 * MS),
+            60 * MS,
+            42 * MS,
+            blk,
+            band,
+        ));
+    }
+    // no band = no nudge (the pre-review behaviour)
+    v.push((
+        now - 85 * MS,
+        16 * MS,
+        now,
+        80 * MS,
+        60 * MS,
+        42 * MS,
+        blk,
+        0,
     ));
     v
 }
@@ -477,17 +567,17 @@ fn rust_lines() -> Vec<String> {
             m::reason(r)
         ));
     }
-    for (i, &(devices, device)) in IEC958_VECTORS.iter().enumerate() {
+    for (i, &(devices, device, switches)) in IEC958_VECTORS.iter().enumerate() {
         out.push(format!(
             "iec:{i} {}",
-            m::iec958_index(devices, device).unwrap_or(-1)
+            m::iec958_index(devices, device, switches).unwrap_or(-1)
         ));
     }
-    for (i, &(ts, pd, now, lat, fl, thr, blk)) in plan_vectors().iter().enumerate() {
-        let p = m::plan_block(ts, pd, now, lat, fl, thr, blk);
+    for (i, &(ts, pd, now, lat, fl, thr, blk, band)) in plan_vectors().iter().enumerate() {
+        let p = m::plan_block(ts, pd, now, lat, fl, thr, blk, band);
         out.push(format!(
-            "plan:{i} silence={} drop={} offset={}",
-            p.silence_ns, p.drop_ns, p.offset_ns
+            "plan:{i} silence={} drop={} offset={} nudge={}",
+            p.silence_ns, p.drop_ns, p.offset_ns, p.nudge_frames
         ));
     }
     for &(prev, s) in EWMA_VECTORS {
@@ -546,18 +636,18 @@ fn c_harness() -> String {
             pcms.len()
         ));
     }
-    for (i, &(devices, device)) in IEC958_VECTORS.iter().enumerate() {
+    for (i, &(devices, device, switches)) in IEC958_VECTORS.iter().enumerate() {
         let list: Vec<String> = devices.iter().map(|d| d.to_string()).collect();
         src.push_str(&format!(
-            " {{ static const int d{i}[] = {{{}}}; printf(\"iec:{i} %d\\n\", drm_output_audio_iec958_index(d{i}, {}, {device})); }}\n",
+            " {{ static const int d{i}[] = {{{}}}; printf(\"iec:{i} %d\\n\", drm_output_audio_iec958_index(d{i}, {}, {device}, {switches})); }}\n",
             if list.is_empty() { "0".to_string() } else { list.join(",") },
             devices.len()
         ));
     }
-    for (i, &(ts, pd, now, lat, fl, thr, blk)) in plan_vectors().iter().enumerate() {
+    for (i, &(ts, pd, now, lat, fl, thr, blk, band)) in plan_vectors().iter().enumerate() {
         src.push_str(&format!(
-            " {{ struct drm_output_audio_plan p = drm_output_audio_plan_block({ts}ULL, {pd}ULL, {now}ULL, {lat}ULL, {fl}ULL, {thr}ULL, {blk}ULL);\n\
-             printf(\"plan:{i} silence=%\" PRIu64 \" drop=%\" PRIu64 \" offset=%\" PRId64 \"\\n\", p.silence_ns, p.drop_ns, p.offset_ns); }}\n"
+            " {{ struct drm_output_audio_plan p = drm_output_audio_plan_block({ts}ULL, {pd}ULL, {now}ULL, {lat}ULL, {fl}ULL, {thr}ULL, {blk}ULL, {band}ULL);\n\
+             printf(\"plan:{i} silence=%\" PRIu64 \" drop=%\" PRIu64 \" offset=%\" PRId64 \" nudge=%d\\n\", p.silence_ns, p.drop_ns, p.offset_ns, (int)p.nudge_frames); }}\n"
         ));
     }
     for &(prev, s) in EWMA_VECTORS {
@@ -570,7 +660,11 @@ fn c_harness() -> String {
 }
 
 fn compile_and_run(src: &str) -> String {
-    let dir = std::env::temp_dir().join(format!("drm_output_audio_1424_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "drm_output_audio_1424-{}-{}",
+        std::process::id(),
+        SCRATCH.fetch_add(1, Ordering::SeqCst)
+    ));
     fs::create_dir_all(&dir).expect("tmp dir");
     let c = dir.join("harness.c");
     let bin = dir.join("harness");
@@ -594,14 +688,17 @@ fn compile_and_run(src: &str) -> String {
         .unwrap_or_else(|e| {
             panic!("issue 1424: no C compiler ({cc}): {e} -- the parity gate cannot run")
         });
+    if !out.status.success() {
+        let _ = fs::remove_dir_all(&dir);
+    }
     assert!(
         out.status.success(),
         "issue 1424: the pure header must compile cleanly:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let run = Command::new(&bin).output().expect("run harness");
-    assert!(run.status.success(), "issue 1424: harness failed");
     let _ = fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "issue 1424: harness failed");
     String::from_utf8(run.stdout).expect("utf8")
 }
 
@@ -651,7 +748,7 @@ fn strih_pp_benq_on_hdmi0_resolves_to_hw_0_3() {
     // hw:0,3 = the PCM PipeWire called hdmi:0 on strih-pp (alsa.card 0, alsa.device 3); its IEC958
     // switch is index 0 of the card's HDMI PCMs 3/7/8/9
     assert_eq!((pcms[0].card, pcms[0].device), (0, 3));
-    assert_eq!(m::iec958_index(&[3, 7, 8, 9], 3), Some(0));
+    assert_eq!(m::iec958_index(&[3, 7, 8, 9], 3, 4), Some(0));
 }
 
 #[test]
@@ -695,7 +792,7 @@ fn strih_pp_blackmagic_on_hdmi1_waits_for_its_eld() {
         },
     ];
     assert_eq!(m::pick_pcm(&want, &after), (m::MATCH, Some(1)));
-    assert_eq!(m::iec958_index(&[3, 7, 8, 9], 7), Some(1));
+    assert_eq!(m::iec958_index(&[3, 7, 8, 9], 7, 4), Some(1));
 }
 
 #[test]
@@ -711,6 +808,7 @@ fn late_audio_plays_at_the_floor_and_reports_its_offset() {
         60 * MS,
         42 * MS,
         21 * MS,
+        5 * MS,
     );
     assert_eq!((p.silence_ns, p.drop_ns), (0, 0));
     assert_eq!(
@@ -719,7 +817,58 @@ fn late_audio_plays_at_the_floor_and_reports_its_offset() {
         "issue 1424: audio behind the picture"
     );
     // early audio is held for the picture
-    let p = m::plan_block(now, 150 * MS, now, 60 * MS, 60 * MS, 42 * MS, 21 * MS);
+    let p = m::plan_block(
+        now,
+        150 * MS,
+        now,
+        60 * MS,
+        60 * MS,
+        42 * MS,
+        21 * MS,
+        5 * MS,
+    );
     assert_eq!(p.silence_ns, 90 * MS);
     assert_eq!(p.offset_ns, 0);
+}
+
+#[test]
+fn clock_drift_is_walked_back_one_frame_at_a_time_never_a_skip() {
+    // review Y1: the HDMI audio clock and the OBS clock drift apart by tens of ppm; inside the
+    // threshold the queue is walked back to the floor one frame per block (inaudible), never by
+    // inserting silence or cutting a block
+    const MS: u64 = 1_000_000;
+    let now = 1_000_000 * MS;
+    let place = |pcm: u64| {
+        m::plan_block(
+            now - 85 * MS,
+            16 * MS,
+            now,
+            pcm,
+            60 * MS,
+            42 * MS,
+            21 * MS,
+            5 * MS,
+        )
+    };
+    let grown = place(66 * MS);
+    assert_eq!(
+        (grown.silence_ns, grown.drop_ns, grown.nudge_frames),
+        (0, 0, -1)
+    );
+    let shrunk = place(54 * MS);
+    assert_eq!(
+        (shrunk.silence_ns, shrunk.drop_ns, shrunk.nudge_frames),
+        (0, 0, 1)
+    );
+    assert_eq!(
+        place(64 * MS).nudge_frames,
+        0,
+        "inside the band nothing moves"
+    );
+    let far = place(150 * MS);
+    assert_eq!(
+        (far.nudge_frames, far.drop_ns),
+        (0, 21 * MS),
+        "a large offset still trims a block"
+    );
 }

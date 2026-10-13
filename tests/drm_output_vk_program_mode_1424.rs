@@ -19,6 +19,10 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Each compile gets its own `{tag}-{pid}-{counter}` dir (the issue-1409 std-only pattern).
+static SCRATCH: AtomicUsize = AtomicUsize::new(0);
 
 const VK_SETUP_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c";
 const VK_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.c";
@@ -126,7 +130,7 @@ fn the_present_thread_remodes_through_the_surface_rebuild_never_a_size_change() 
     );
     // the re-mode line names whether the picked rate IS the canvas rate or a near rate (29.97 vs 30)
     assert!(
-        r.contains("exact canvas rate") && r.contains("near-rate"),
+        r.contains("exact canvas rate") && r.contains("near-rate") && r.contains("want_mhz / 500u"),
         "issue 1424: the log names an exact vs a near-rate pick"
     );
 }
@@ -271,7 +275,11 @@ fn pick_mode_prefers_the_program_canvas_at_its_rate() {
     }
     c.push_str("  return 0;\n}\n");
 
-    let dir = std::env::temp_dir().join(format!("drm_vk_mode_1424_{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "drm_vk_mode_1424-{}-{}",
+        std::process::id(),
+        SCRATCH.fetch_add(1, Ordering::SeqCst)
+    ));
     fs::create_dir_all(&dir).expect("scratch dir");
     let src = dir.join("h.c");
     let bin = dir.join("h.bin");
@@ -294,6 +302,9 @@ fn pick_mode_prefers_the_program_canvas_at_its_rate() {
         .unwrap_or_else(|e| {
             panic!("issue 1424: cannot run `{cc}` ({e}); this gate must FAIL, never skip")
         });
+    if !out.status.success() {
+        let _ = fs::remove_dir_all(&dir);
+    }
     assert!(
         out.status.success(),
         "issue 1424: the lifted picker does not compile:\n{}\n---\n{c}",
