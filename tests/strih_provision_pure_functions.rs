@@ -4085,7 +4085,7 @@ fn strih_lx_hostname_is_the_fleet_name_not_the_dial_address_1317() {
     assert_eq!(out.trim(), "strih-snv");
     let setup = read_script("scripts/setup-strih.sh");
     assert!(
-        setup.contains("hostnamectl set-hostname \"$(strih_lx_hostname)\""),
+        setup.contains("strih_hostname_apply \"$(strih_lx_hostname)\" /etc/hosts"),
         "setup-strih.sh must set the hostname from strih_lx_hostname"
     );
     assert!(
