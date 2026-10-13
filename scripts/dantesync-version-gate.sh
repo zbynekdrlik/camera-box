@@ -595,7 +595,10 @@ main() {
     echo "-- dantesync nodes outside the fleet table (report-only, ALARM never blocks) --"
     local -a known=() scan_cmd=()
     local kpair khost kip uline uip uname
-    for kpair in "${linux_pairs[@]}" "${win_pairs[@]}"; do
+    # every fleet row's address (also a node skipped this run: an away `reach` box is still a fleet node)
+    # plus every explicitly named target
+    for kpair in "${linux_pairs[@]}" "${win_pairs[@]}" \
+      $({ dantesync_fleet_rows 2>/dev/null || true; } | awk -F'|' '$2 != "local" {print "x=" $2}'); do
       khost="${kpair#*=}"
       khost="${khost#*@}"
       known+=("$khost")
