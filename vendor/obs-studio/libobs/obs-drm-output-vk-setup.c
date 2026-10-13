@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <X11/Xlib-xcb.h>
 #include <xcb/randr.h>
@@ -228,6 +229,52 @@ static bool drm_output_vk_plane_taken(const struct drm_output_vk_disp *d, int pl
 	return false;
 }
 
+/* issue 1424 part 2 (pure, lift-tested by tests/drm_output_vk_two_displays_1424.rs): the first OTHER
+ * display slot that presents and has not yet presented DRM_OUTPUT_VK_SETTLE_PRESENTS times on its current
+ * surface -- its head is still in the mode set NVIDIA refuses an acquire beside (-13) -- or -1. */
+static int drm_output_vk_first_unsettled(const bool *presenting, const unsigned long long *since_surface, int n,
+					 int self)
+{
+	for (int i = 0; i < n; i++)
+		if (i != self && presenting[i] && since_surface[i] < DRM_OUTPUT_VK_SETTLE_PRESENTS)
+			return i;
+	return -1;
+}
+
+/* issue 1424 part 2 (live strih-pp): OBS opens the two outputs back to back, so the second acquire landed
+ * inside the first display's bring-up and failed -13, whichever connector was second. Wait (bounded,
+ * g_drm_vk_dev.lock held -- no present thread takes it) until every other presenting display settled.
+ * A timeout tries the acquire anyway; its own failure line then names it. */
+static void drm_output_vk_wait_others_settled(struct drm_output_vk_disp *d)
+{
+	const int step_ms = 5;
+	int waited_ms = 0;
+	int other = -1;
+	for (;;) {
+		bool presenting[DRM_OUTPUT_VK_MAX_DISPLAYS];
+		unsigned long long since[DRM_OUTPUT_VK_MAX_DISPLAYS];
+		for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {
+			const struct drm_output_vk_disp *o = &g_drm_vk_disp[i];
+			presenting[i] = o->in_use && o->open && os_atomic_load_bool(&o->running);
+			since[i] = (unsigned long long)os_atomic_load_long(&o->presents_since_surface);
+		}
+		other = drm_output_vk_first_unsettled(presenting, since, DRM_OUTPUT_VK_MAX_DISPLAYS, d->slot);
+		if (other < 0 || waited_ms >= DRM_OUTPUT_VK_SETTLE_WAIT_MS)
+			break;
+		const struct timespec pause = {0, (long)step_ms * 1000000L};
+		nanosleep(&pause, NULL);
+		waited_ms += step_ms;
+	}
+	if (other >= 0)
+		blog(LOG_WARNING,
+		     "drm-output: vk-direct: '%s' is still bringing its presentation up after %d ms -- acquiring '%s' "
+		     "anyway",
+		     g_drm_vk_disp[other].output_name, waited_ms, d->output_name);
+	else if (waited_ms > 0)
+		blog(LOG_INFO, "drm-output: vk-direct: waited %d ms for the other display to settle before acquiring '%s'",
+		     waited_ms, d->output_name);
+}
+
 /* Acquire the output's display away from X; a later display must be on the first one's GPU (one VkDevice). */
 static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long output)
 {
@@ -267,8 +314,9 @@ static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long ou
 	VkResult r = d->dev->vk.vkAcquireXlibDisplayEXT(pd, d->dev->dpy, d->display);
 	if (r != VK_SUCCESS) {
 		blog(LOG_WARNING,
-		     "drm-output: vk-direct: vkAcquireXlibDisplayEXT('%s') FAILED VkResult %d on %s (-13 = the output "
-		     "is still in the X layout)",
+		     "drm-output: vk-direct: vkAcquireXlibDisplayEXT('%s') FAILED VkResult %d on %s (-13 = NVIDIA "
+		     "refused: the output is still in the X layout, another display of this process is mid mode set, "
+		     "or this process released it earlier while another display keeps the Vulkan instance)",
 		     d->output_name, (int)r, pr.deviceName);
 		return false;
 	}
@@ -412,6 +460,8 @@ static bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebu
 					d->mode_w = sel_w;
 					d->mode_h = sel_h;
 					d->refresh_mhz = sel_hz;
+					/* issue 1424 part 2: a committed surface is a new mode set -- unsettled again */
+					os_atomic_set_long(&d->presents_since_surface, 0);
 					blog(LOG_INFO,
 					     "drm-output: vk-direct mode %ux%u@%u.%03uHz on display plane %d (native %ux%u, "
 					     "%u modes)",
@@ -648,6 +698,12 @@ bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)
 {
 	if (!os_atomic_set_bool(&d->remode, false))
 		return true;
+	if (os_atomic_load_bool(&d->dev->acquiring)) {
+		/* issue 1424 part 2: another display is being acquired -- a mode set now fails that acquire
+		 * (NVIDIA -13). Keep the re-mode pending for a later vblank. */
+		os_atomic_set_bool(&d->remode, true);
+		return true;
+	}
 	struct drm_output_vk_mode_list ml;
 	if (!drm_output_vk_mode_list_read(d, &ml))
 		return true; /* nothing to pick from right now: keep the committed mode */
@@ -693,6 +749,14 @@ bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)
 		     d->mode_w, d->mode_h, d->refresh_mhz / 1000u, d->refresh_mhz % 1000u,
 		     sel_hz / 1000u, sel_hz % 1000u, want_w, want_h, want_mhz / 1000u, want_mhz % 1000u);
 	}
+	/* issue 1424 part 2: unsettled from here, THEN re-check the acquire flag (both seq-cst atomics): an
+	 * open that raised the flag before this reset waits for us below, one that raises it after sees the
+	 * reset and waits for this presentation to settle -- never a mode set inside an acquire. */
+	os_atomic_set_long(&d->presents_since_surface, 0);
+	if (os_atomic_load_bool(&d->dev->acquiring)) {
+		os_atomic_set_bool(&d->remode, true);
+		return true;
+	}
 	if (drm_output_vk_rebuild_presentation(d, true))
 		return true;
 	/* the wanted mode would not come up: forget it and rebuild today's mode once */
@@ -710,42 +774,50 @@ bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)
 bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost)
 {
 	const uint32_t w = d->mode_w, h = d->mode_h;
-	/* No device wait (it cannot be bounded and halt() joins this thread). The replaced swapchain -- whose
-	 * last present may still be queued, waiting a present semaphore -- is RETIRED, not destroyed: it is
-	 * handed to the new swapchain as oldSwapchain (same surface) and freed after RETIRE_FRAMES later
-	 * signalled fences or at the teardown.
-	 * Back-to-back rebuilds (a rebuilt swapchain whose very first acquire is out of date again): the
-	 * current presentation never queued a present, so nothing waits on it -- destroy it directly and KEEP
-	 * the older retiree, whose present may still be queued. A presentation that queued a present (even a
-	 * rejected one, which still queues its semaphore wait) is retired instead and replaces the older
-	 * retiree: its copy's fence signalled after the older retiree's last present was queued. */
-	const bool pending_retiree = d->retired_swapchain || d->retired_surface;
-	const bool fresh = pending_retiree && !d->present_queued_since_rebuild;
+	/* issue 1424 part 2: a new presentation is unsettled again until it presented (another display's open
+	 * waits for it, see drm_output_vk_wait_others_settled) */
+	os_atomic_set_long(&d->presents_since_surface, 0);
 	VkSwapchainKHR old_for_create = VK_NULL_HANDLE;
-	if (fresh) {
-		drm_output_vk_destroy_swapchain(d);
-		if (surface_lost && d->surface) {
-			if (!d->retired_surface) {
-				/* the retiree was retired on THIS surface: the surface must outlive it, retire it too */
-				d->retired_surface = d->surface;
-			} else {
-				/* the retiree lives on an older surface: this one carried only the never-used swapchain */
-				d->dev->vk.vkDestroySurfaceKHR(d->dev->instance, d->surface, NULL);
-			}
-			d->surface = VK_NULL_HANDLE;
+	if (surface_lost) {
+		/* issue 1424 (live strih-pp, the Program re-mode 60 -> 29.97 Hz): a display-plane surface is NEVER
+		 * retired. NVIDIA ends the NEW presentation (vkQueuePresentKHR -13) when the old surface on the same
+		 * display + plane is destroyed after the new one presents. So quiesce this display's queue (bounded:
+		 * an empty submit's fence, 5 x 1 s), destroy the old swapchain(s) + surface, THEN create the new
+		 * surface. A queue that never drains leaves everything in place and gives up by name. */
+		if (!drm_output_vk_drain_queue_bounded(d)) {
+			blog(LOG_WARNING,
+			     "drm-output: vk-direct: the queue of '%s' never drained -- the presentation cannot be rebuilt",
+			     d->output_name);
+			return false;
 		}
-	} else {
+		/* the drain signalled the per-vblank fence; the next submit needs it unsignalled */
+		d->dev->vk.vkResetFences(d->dev->device, 1, &d->fence);
+		d->submit_outstanding = false;
 		drm_output_vk_free_retired(d);
-		d->retired_swapchain = d->swapchain;
-		d->swapchain = VK_NULL_HANDLE;
-		memset(d->swap_images, 0, sizeof(d->swap_images));
-		d->n_swap = 0;
-		d->retire_countdown = DRM_OUTPUT_VK_RETIRE_FRAMES;
-		if (surface_lost) {
-			/* the retired swapchain belongs to the old surface: retire both, free them together */
-			d->retired_surface = d->surface;
-			d->surface = VK_NULL_HANDLE;
+		drm_output_vk_destroy_swapchain(d);
+		if (d->surface)
+			d->dev->vk.vkDestroySurfaceKHR(d->dev->instance, d->surface, NULL);
+		d->surface = VK_NULL_HANDLE;
+	} else {
+		/* A swapchain-only rebuild (out of date, same surface): no device wait (it cannot be bounded and
+		 * halt() joins this thread). The replaced swapchain -- whose last present may still be queued,
+		 * waiting a present semaphore -- is RETIRED, not destroyed: it is handed to the new swapchain as
+		 * oldSwapchain and freed after RETIRE_FRAMES later signalled fences or at the teardown.
+		 * Back-to-back rebuilds (a rebuilt swapchain whose very first acquire is out of date again): the
+		 * current swapchain never queued a present, so nothing waits on it -- destroy it directly and KEEP
+		 * the older retiree, whose present may still be queued. A swapchain that queued a present (even a
+		 * rejected one, which still queues its semaphore wait) is retired instead and replaces the older
+		 * retiree: its copy's fence signalled after the older retiree's last present was queued. */
+		const bool fresh = d->retired_swapchain && !d->present_queued_since_rebuild;
+		if (fresh) {
+			drm_output_vk_destroy_swapchain(d);
 		} else {
+			drm_output_vk_free_retired(d);
+			d->retired_swapchain = d->swapchain;
+			d->swapchain = VK_NULL_HANDLE;
+			memset(d->swap_images, 0, sizeof(d->swap_images));
+			d->n_swap = 0;
+			d->retire_countdown = DRM_OUTPUT_VK_RETIRE_FRAMES;
 			old_for_create = d->retired_swapchain; /* a swapchain is retired into at most one */
 		}
 	}
@@ -850,7 +922,15 @@ bool drm_output_vk_setup(struct drm_output_vk_disp *d)
 	if (!dev->instance && !(drm_output_vk_load(d) && drm_output_vk_create_instance(d)))
 		return false;
 	const unsigned long output = drm_output_vk_find_output(d, d->output_name);
-	if (output == 0 || !drm_output_vk_acquire(d, output) || !drm_output_vk_create_surface(d, false))
+	if (output == 0)
+		return false;
+	/* issue 1424 part 2: never acquire while another display brings its presentation up (NVIDIA -13), and
+	 * hold the other displays' re-modes (a new mode set) off until this acquire returned. */
+	os_atomic_set_bool(&dev->acquiring, true);
+	drm_output_vk_wait_others_settled(d);
+	const bool acquired = drm_output_vk_acquire(d, output);
+	os_atomic_set_bool(&dev->acquiring, false);
+	if (!acquired || !drm_output_vk_create_surface(d, false))
 		return false;
 	if (!dev->device) {
 		if (!drm_output_vk_create_device(d))

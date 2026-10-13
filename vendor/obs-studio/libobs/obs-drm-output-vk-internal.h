@@ -133,9 +133,20 @@ struct drm_output_vk_gl {
  * ------------------------------------------------------------------------------------------------- */
 #define DRM_OUTPUT_VK_MAX_SWAP 8
 #define DRM_OUTPUT_VK_WAIT_NS 1000000000ull /* 1 s bound on every blocking Vulkan wait */
-/* A rebuilt presentation's old swapchain (+ surface) is freed only after this many later signalled
- * copy fences -- its queued present may still wait on a semaphore -- or at the teardown's idle wait. */
+/* A swapchain-only rebuild's old swapchain is freed only after this many later signalled copy fences --
+ * its queued present may still wait on a semaphore -- or at the teardown's idle wait. A rebuild with a
+ * NEW surface never retires: it drains and destroys the old presentation first (issue 1424, live
+ * strih-pp: a retired display-plane surface destroyed after its replacement presents ends the new
+ * presentation with VkResult -13). */
 #define DRM_OUTPUT_VK_RETIRE_FRAMES 4u
+/* issue 1424 part 2 (live strih-pp): NVIDIA refuses vkAcquireXlibDisplayEXT (-13) while ANOTHER display
+ * of the process brings a new presentation up (its first presents = the mode set on its head). A
+ * presentation is settled after this many presents on its current surface: on a 2-image FIFO swapchain
+ * the third acquire returns only after the first image left the screen. Measured: an acquire 50 ms after
+ * the other display's open succeeds, 0 us after it fails. */
+#define DRM_OUTPUT_VK_SETTLE_PRESENTS 3ULL
+/* The acquire waits at most this long for the other displays to settle, then tries anyway (named). */
+#define DRM_OUTPUT_VK_SETTLE_WAIT_MS 2000
 
 struct drm_output_vk_shared {
 	VkImage image;
@@ -167,6 +178,9 @@ struct drm_output_vk_device {
 	pthread_mutex_t queue_lock[DRM_OUTPUT_VK_MAX_DISPLAYS]; /* host access to queues[i] (submit, present, wait) */
 	struct drm_output_vk_gl gl;
 	bool gl_resolved; /* graphics thread only */
+	/* issue 1424: a display is being acquired (os_atomic, set under `lock`); a re-mode on another display
+	 * waits for the next vblank instead of starting a new mode set inside the acquire. */
+	volatile bool acquiring;
 };
 
 /* One display: its X output, VkDisplayKHR, surface, swapchain, shared images, mailbox roles and present
@@ -229,6 +243,9 @@ struct drm_output_vk_disp {
 	unsigned long long presents;
 	unsigned long long program_presents;
 	bool scanout_live_logged;
+	/* issue 1424: successful presents on the CURRENT surface (os_atomic: the present thread counts, a new
+	 * surface restarts it at 0, another display's open reads it -- see DRM_OUTPUT_VK_SETTLE_PRESENTS). */
+	volatile long presents_since_surface;
 };
 
 /* The shared device and the display slots (defined in obs-drm-output-vk.c). */

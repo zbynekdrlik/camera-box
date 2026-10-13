@@ -360,6 +360,7 @@ static void *drm_output_vk_present_thread(void *arg)
 		}
 		rebuilds = 0;
 		d->presents++;
+		os_atomic_inc_long(&d->presents_since_surface); /* issue 1424 part 2: the settle count */
 		if (src >= 0) {
 			d->program_presents++;
 			if (!d->scanout_live_logged) {
@@ -432,6 +433,7 @@ struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name,
 	d->gl_skips = 0;
 	d->submit_outstanding = false;
 	d->retire_countdown = 0;
+	os_atomic_set_long(&d->presents_since_surface, 0);
 	d->front = d->pending = d->ready = -1;
 	/* issue 1424: open with today's rule; the graphics thread hands the Program canvas over */
 	os_atomic_set_long(&d->want_w, 0);

@@ -31,8 +31,10 @@
  * own swapchain + present thread; strih-pp: the Multiview monitor + the vestibule HDMI-to-SDI):
  *   DISPLAY=:0 ./vk-rig-harness HDMI-0 HDMI-1
  * With two outputs it then closes the first while the second keeps presenting (the second's present
- * count must advance, its loop stay alive) and re-opens the first in the same slot beside it: the two
- * outputs never depend on each other.
+ * count must advance at its own refresh, its loop stay alive), then closes the second and re-opens BOTH
+ * on a fresh shared device. An output argument may carry the Program canvas mode the OBS frame hook hands
+ * over, `HDMI-1=1920x1080@30000` (mHz): it opens at the native ~60 Hz, then re-modes like in OBS, and the
+ * run fails unless that mode is on scanout with the loop presenting (strih-pp: the Blackmagic at 29.97).
  * Exit 0 = the backend acquired the display, bound GL, published every phase and released cleanly.
  */
 
@@ -296,8 +298,12 @@ int main(int argc, char **argv)
 	rc = (published > 0 && burst > 0 && skips > 0 && alive && modes_ok) ? 0 : 1;
 	printf("present loop(s) alive after the drain: %s\n", alive ? "yes" : "NO");
 
-	/* 4. issue 1424 review: the two outputs are independent -- close display 0 while display 1 keeps
-	 * presenting, then re-open display 0 in its slot beside the live display 1. */
+	/* 4. issue 1424: the two outputs are independent -- close display 0 while display 1 keeps presenting
+	 * (its count must advance at ITS OWN refresh, 29.97 Hz on a Program re-mode), then close display 1 too
+	 * and re-open BOTH on a fresh shared device (an in-process stop + start of the pair). NVIDIA refuses
+	 * (-13) re-acquiring a display this process's VkInstance released while the instance lives on for the
+	 * other display (live strih-pp 13.10.2026, any delay), so a re-open BESIDE a live display is a known
+	 * limit; OBS never does it (the outputs start once at autostart and stop together at obs_shutdown). */
 	if (rc == 0 && n_disp == 2) {
 		drm_output_vk_halt(disp[0]);
 		drm_output_vk_gl_unbind(disp[0]);
@@ -316,12 +322,33 @@ int main(int argc, char **argv)
 		pthread_mutex_lock(&disp[1]->lock);
 		const unsigned long long after = disp[1]->presents;
 		pthread_mutex_unlock(&disp[1]->lock);
-		const bool one_alive = drm_output_vk_wants_frames(disp[1]) && after > before + 60u;
-		disp[0] = drm_output_vk_open(0, names[0], 0x202020u, NULL, NULL);
-		const bool reopened = disp[0] && drm_output_vk_gl_bind(disp[0]) && drm_output_vk_wants_frames(disp[0]) &&
-				      drm_output_vk_wants_frames(disp[1]);
-		printf("PHASE independent t=%.3f display1_presents=%llu->%llu alive=%s reopened=%s\n", now_s(), before,
-		       after, one_alive ? "yes" : "NO", reopened ? "yes" : "NO");
+		/* 80 % of the presents 2 s at display 1's own refresh holds */
+		const unsigned long long expect = (unsigned long long)disp[1]->refresh_mhz * 2ULL / 1000ULL * 8ULL / 10ULL;
+		const bool one_alive = drm_output_vk_wants_frames(disp[1]) && after >= before + expect;
+		drm_output_vk_halt(disp[1]);
+		drm_output_vk_gl_unbind(disp[1]);
+		drm_output_vk_close(disp[1]);
+		disp[1] = NULL;
+		bool reopened = true;
+		for (int i = 0; i < 2 && reopened; i++) {
+			disp[i] = drm_output_vk_open(i, names[i], 0x202020u, NULL, NULL);
+			reopened = disp[i] != NULL;
+			if (reopened && want_mhz[i] != 0)
+				drm_output_vk_want_mode(disp[i], want_w[i], want_h[i], want_mhz[i]);
+		}
+		sleep(1);
+		unsigned long long re_presents[2] = {0, 0};
+		for (int i = 0; i < 2 && reopened; i++) {
+			reopened = drm_output_vk_gl_bind(disp[i]) && drm_output_vk_wants_frames(disp[i]);
+			pthread_mutex_lock(&disp[i]->lock);
+			re_presents[i] = disp[i]->presents;
+			pthread_mutex_unlock(&disp[i]->lock);
+			reopened = reopened && re_presents[i] > 0;
+		}
+		printf("PHASE independent t=%.3f display1_presents=%llu->%llu (>= +%llu) alive=%s reopened_both=%s "
+		       "presents=%llu/%llu\n",
+		       now_s(), before, after, expect, one_alive ? "yes" : "NO", reopened ? "yes" : "NO", re_presents[0],
+		       re_presents[1]);
 		rc = (one_alive && reopened) ? 0 : 1;
 	}
 
