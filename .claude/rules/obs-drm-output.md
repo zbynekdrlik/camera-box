@@ -519,18 +519,31 @@ po ceste": no PipeWire, no OBS monitoring device, no mixer in between, never a p
   header.
 - **The matched PCM's "IEC958 Playback Switch" is turned on**: no sound server unmutes it any more.
   Its index = the PCM's rank among the card's ELD-carrying PCMs (`drm_output_audio_iec958_index`;
-  strih-snv 3/7/8/9 <-> 0/1/2/3). UNVERIFIED on a card that ALSO has an analog codec with its own
-  S/PDIF switch (an Intel HDA laptop): there the HDMI switches may not start at index 0.
+  strih-snv 3/7/8/9 <-> 0/1/2/3) -- written ONLY when the card's switch count equals its HDMI PCM
+  count; an extra analog S/PDIF switch on the same card (an Intel HDA laptop) leaves it untouched and
+  the open line says `IEC958 switch ambiguous`.
 - **Placement** (`drm_output_audio_plan_block`): each block plays at its OBS timestamp + the output's
   measured present delay (render tick noted at the ONE publish entry `drm_output_publish_render_buf`,
   on-screen at the lease flip event / the vk-direct present -- a lower bound by up to one refresh)
-  against `snd_pcm_delay`. Early audio is held, a queue grown past the floor (3 blocks) is trimmed
-  at most a block at a time. **Physics:** the mix leaves the raw callback ~the audio-buffering floor
+  against `snd_pcm_delay`. Early audio is held, a queue grown past the floor (3 blocks) by more
+  than the threshold is trimmed at most a block at a time; inside the threshold the clock drift (OBS
+  clock vs the HDMI audio clock, tens of ppm) is walked back ONE frame per block outside a 5 ms band
+  (`nudge_frames`, inaudible) -- never a silence insert or a cut every ~20 min. **Physics:** the mix leaves the raw callback ~the audio-buffering floor
   (85 ms+) after its timestamp, the picture ~1-2 frames after it, so the audio normally runs BEHIND
   the picture; the open line `drm-output audio: pcm hw:C,D card C device D delay <hold> ms (...
   audio N ms behind the picture ...)` and a 60 s report line name the residual. Closing it would need
   a video hold on the HDMI picture (an owner decision on picture latency).
-- **The Multiview view mutes it** (the cutter's own monitor never gets the program audio).
+- **The Multiview view mutes it** (the cutter's own monitor never gets the program audio). It then
+  places no block, so its only open line is the resolver's `drm-output audio: '<conn>' matched
+  hw:C,D` -- verify counts that line as open too.
+- **The resolver stays as the leg's watcher:** every 5 s it re-reads the ELDs (never on libobs's audio
+  thread, which neither allocates nor opens devices: the hold's silence buffer is allocated at open);
+  a PCM that no longer carries the connector's monitor (a replug or a re-mode moved the NVIDIA map)
+  is muted and named until it does again. The 60 s report line counts holds / trims / nudges / xruns
+  / `dropped_frames` (what a full ring refused).
+- **Known limits:** a runtime audio reset (a profile switch) drops the mix callback without a line;
+  the EDID comes only from X RandR (a connector X still lists `disconnected` after an earlier lease
+  has none -> NO AUDIO, named); verify-imag has no audio row yet.
 - **Box side** (`scripts/lib/drm-output-audio.sh`): ONE WirePlumber rule disabling every ALSA node on
   an `hdmi:` path (0.5 SPA-JSON drop-in in `/etc/wireplumber/wireplumber.conf.d/`, 0.4 Lua in
   `main.lua.d/`, by `wireplumber --version`), so PipeWire leaves the PCM to OBS (EBUSY otherwise).
