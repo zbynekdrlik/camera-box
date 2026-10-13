@@ -531,3 +531,48 @@ def test_verify_item_9_reads_the_program_ref_when_there_is_no_fohabl():
     snv = {"participants": [{"name": "fohabl", "role": "program_ref", "rx_packets": 0},
                             {"name": "lv1", "role": "program_ref", "rx_packets": 9}]}
     assert _item9_check(snv) == 1, "strih-lx keeps grading fohabl exactly"
+
+
+# --- the 4K output rescale (owner request through restreamer, 13.10.2026) ----------------------------
+
+RESCALE_4K = {"Rescale": "true", "RescaleRes": "3840x2160", "RescaleFilter": "4", "Track1Bitrate": "320"}
+
+
+def test_the_stream_profile_rescales_the_output_to_4k_lanczos(tmp_path):
+    m = _profile_mod()
+    d = tmp_path / "p"
+    m.apply(str(d), "ffmpeg_vaapi_tex", "rtmp://x", "stream-pp")
+    cp = configparser.RawConfigParser()
+    cp.optionxform = str
+    cp.read(d / "basic.ini")
+    assert {k: cp["AdvOut"].get(k) for k in RESCALE_4K} == RESCALE_4K
+    assert cp["AdvOut"]["Encoder"] == "ffmpeg_vaapi_tex"
+    assert cp["Video"]["OutputCX"] == "1920" and cp["Video"]["FPSCommon"] == "30"
+
+
+@pytest.mark.parametrize("drop", sorted(RESCALE_4K))
+def test_the_stream_encoder_grade_fails_without_the_4k_rescale(tmp_path, boxes, drop):
+    b, _log = _box_bin(tmp_path)
+    m = _profile_mod()
+    d = tmp_path / "p"
+    m.apply(str(d), "ffmpeg_vaapi_tex", "rtmp://x", "stream-pp")
+    ini = d / "basic.ini"
+    ini.write_text("\n".join(ln for ln in ini.read_text().splitlines() if not ln.startswith(drop + "=")) + "\n")
+    r = _bash('ok(){ echo "OK $*"; }\nbad(){ echo "BAD $*"; }\nobs_box_stream_encoder_grade "%s"' % d,
+              path_prefix=b, sources=(FACTS, PROVISION, ROLE), strict=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[0].startswith("BAD"), r.stdout
+    assert drop in r.stdout.splitlines()[0]
+
+
+def test_the_stream_encoder_grade_fails_on_a_changed_bitrate(tmp_path, boxes):
+    b, _log = _box_bin(tmp_path)
+    m = _profile_mod()
+    d = tmp_path / "p"
+    m.apply(str(d), "ffmpeg_vaapi_tex", "rtmp://x", "stream-pp")
+    enc = json.loads((d / "streamEncoder.json").read_text())
+    enc["bitrate"] = 6000
+    (d / "streamEncoder.json").write_text(json.dumps(enc))
+    r = _bash('ok(){ echo "OK $*"; }\nbad(){ echo "BAD $*"; }\nobs_box_stream_encoder_grade "%s"' % d,
+              path_prefix=b, sources=(FACTS, PROVISION, ROLE), strict=True)
+    assert r.stdout.splitlines()[0].startswith("BAD"), r.stdout
