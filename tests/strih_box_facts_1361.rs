@@ -122,6 +122,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_PROGRAM_SENDER",
     "STRIH_VENUE",
     "STRIH_CAMERA_DEV1_NET",
+    "STRIH_HTTPS_INTERKOM_HOSTS",
+    "STRIH_HTTPS_SHADING_HOST",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -171,6 +173,9 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
         "STRIH_CAMERA_DEV1_NET=direct",
+        // issue 1399: the TLS front end the box serves itself (design 6142127441).
+        "STRIH_HTTPS_INTERKOM_HOSTS=interkom-lx.newlevel.media interkom.newlevel.media interkom-snv.newlevel.media",
+        "STRIH_HTTPS_SHADING_HOST=shading.newlevel.media",
         "LOADED=strih-snv",
     ] {
         assert!(
