@@ -632,3 +632,16 @@ def test_setup_step_3_writes_the_strih_profile_and_verify_grades_it():
     assert 'obs_box_strih_profile_provision "$OBS_CFG" "$DESKTOP_USER" "$(strih_lx_obs_profile)"' in s
     assert "obs_box_strih_profile_grade" in v
     assert len(v.splitlines()) <= 1000 and len(s.splitlines()) <= 1000
+
+
+def test_the_autostart_imports_the_display_before_any_user_unit_start(boxes):
+    """restreamer issue 393 (owner 13.10.2026): the restreamer runs as a GUI window on stream-pp, so
+    its --user unit needs DISPLAY + XAUTHORITY in the user manager after every reboot, never by luck.
+    The import is the first systemctl line of the autostart, on every role (a strih box's session
+    apps open windows too)."""
+    for box in ("stream-pp", "strih-pp"):
+        lines = _autostart(boxes, box).splitlines()
+        imp = "systemctl --user import-environment DISPLAY XAUTHORITY"
+        assert imp in lines, box
+        first_start = next(i for i, ln in enumerate(lines) if ln.startswith("systemctl --user start"))
+        assert lines.index(imp) < first_start, box
