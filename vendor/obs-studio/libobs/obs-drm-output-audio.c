@@ -40,23 +40,21 @@
 #include "util/threading.h"
 
 /* -------------------------------------------------------------------------------------------------
- * The present clock (render tick -> on screen) of the module's one output.
+ * The present clock (render tick -> on screen) of one output (issue 1424 part 2: each instance owns
+ * one, struct drm_output_inst::clock).
  * ------------------------------------------------------------------------------------------------- */
 
-struct drm_output_present_clock drm_output_present_clock_main;
-
-void drm_output_present_note_published(int idx)
+void drm_output_present_note_published(struct drm_output_present_clock *c, int idx)
 {
-	if (idx < 0 || idx >= DRM_OUTPUT_PRESENT_SLOTS)
+	if (!c || idx < 0 || idx >= DRM_OUTPUT_PRESENT_SLOTS)
 		return;
-	os_atomic_set_long(&drm_output_present_clock_main.tick_ns[idx], (long)obs_get_video_frame_time());
+	os_atomic_set_long(&c->tick_ns[idx], (long)obs_get_video_frame_time());
 }
 
-void drm_output_present_note_shown(int idx, uint64_t shown_ns)
+void drm_output_present_note_shown(struct drm_output_present_clock *c, int idx, uint64_t shown_ns)
 {
-	if (idx < 0 || idx >= DRM_OUTPUT_PRESENT_SLOTS)
+	if (!c || idx < 0 || idx >= DRM_OUTPUT_PRESENT_SLOTS)
 		return;
-	struct drm_output_present_clock *c = &drm_output_present_clock_main;
 	/* consume the tick: a buffer re-shown with no new publish counts nothing */
 	const long tick = os_atomic_exchange_long(&c->tick_ns[idx], 0);
 	if (tick <= 0 || shown_ns <= (uint64_t)tick)
@@ -349,6 +347,7 @@ struct drm_output_audio {
 	char connector[64];
 	struct drm_output_monitor_id want;
 	struct drm_output_present_clock *clock;
+	const volatile long *view; /* the output's own view (OBS_DRM_OUTPUT_VIEW_*), read atomically */
 	pthread_t thread;
 	bool thread_started;
 	volatile bool stop;
@@ -432,8 +431,9 @@ static void drm_output_audio_on_mix(void *param, size_t mix_idx, struct audio_da
 	if (!data || data->frames == 0 || !data->data[0])
 		return;
 
-	/* the program audio belongs on the screen that shows the Program, never on the Multiview monitor */
-	const bool program = obs_drm_output_get_view() == OBS_DRM_OUTPUT_VIEW_PROGRAM;
+	/* the program audio belongs on the screen that shows the Program, never on the Multiview monitor
+	 * (issue 1424 part 2: THIS output's view -- the other output may show the Multiview) */
+	const bool program = os_atomic_load_long(a->view) == OBS_DRM_OUTPUT_VIEW_PROGRAM;
 	if (program != a->view_program) {
 		a->view_program = program;
 		blog(LOG_INFO, "drm-output audio: '%s' %s", a->connector,
@@ -598,7 +598,7 @@ static void *drm_output_audio_thread(void *param)
 	if (os_atomic_load_bool(&a->stop))
 		goto done;
 	struct audio_convert_info conv = {.samples_per_sec = a->rate, .format = fmt, .speakers = SPEAKERS_STEREO};
-	a->view_program = obs_drm_output_get_view() == OBS_DRM_OUTPUT_VIEW_PROGRAM;
+	a->view_program = os_atomic_load_long(a->view) == OBS_DRM_OUTPUT_VIEW_PROGRAM;
 	obs_add_raw_audio_callback(0, &conv, drm_output_audio_on_mix, a);
 	os_atomic_set_bool(&a->connected, true);
 	blog(LOG_INFO, "drm-output audio: '%s' matched hw:%d,%d (%u Hz, %s, %s) -- mix 0 connected%s", a->connector,
@@ -631,13 +631,14 @@ done:
 }
 
 struct drm_output_audio *drm_output_audio_open(const char *connector, const uint8_t *edid, size_t edid_len,
-					       struct drm_output_present_clock *clock)
+					       struct drm_output_present_clock *clock, const volatile long *view)
 {
-	if (!connector || !clock)
+	if (!connector || !clock || !view)
 		return NULL;
 	struct drm_output_audio *a = bzalloc(sizeof(*a));
 	snprintf(a->connector, sizeof(a->connector), "%s", connector);
 	a->clock = clock;
+	a->view = view;
 	a->card = -1;
 	a->device = -1;
 	snprintf(a->iec958, sizeof(a->iec958), "IEC958 switch untouched");

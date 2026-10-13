@@ -126,13 +126,15 @@ fi
 # import was proven by the preflight above. Armed -> take the connector out of the X layout NOW, so
 # the desktop never extends onto HDMI and the in-OBS lease finds it idle. Best effort + LOUD: a
 # failed xrandr never aborts the unit (the verify-strih drm-output item names a lease that did not
-# go live).
-DRM_CONNECTOR="$(python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_scenes; print(strih_scenes.drm_output_lease_connector(strih_scenes.drm_output_config_text()))" 2>/dev/null || true)"
-if [ -n "$DRM_CONNECTOR" ]; then
-  echo "drm-lease mode ENABLED (${DRM_CONNECTOR} = the in-OBS DRM-lease HDMI output) -- taking it out of the X layout"
+# go live). issue 1424 part 2: the config may arm SEVERAL connectors (an "outputs" array, e.g. strih-pp's
+# HDMI-0 Multiview + HDMI-1 Program) -- every one leaves the X layout (an X CRTC on any of them makes
+# its vk-direct acquire fail).
+DRM_CONNECTORS="$(python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_scenes; print(' '.join(strih_scenes.drm_output_lease_connectors(strih_scenes.drm_output_config_text())))" 2>/dev/null || true)"
+for DRM_CONNECTOR in $DRM_CONNECTORS; do
+  echo "drm-lease mode ENABLED (${DRM_CONNECTOR} = an in-OBS DRM-lease HDMI output) -- taking it out of the X layout"
   xrandr --output "$DRM_CONNECTOR" --off 2>/dev/null \
     || echo "WARN issue 1346: xrandr --output ${DRM_CONNECTOR} --off failed -- if ${DRM_CONNECTOR} is still active in X the in-OBS lease may fail (continuing, never aborting the unit)"
-fi
+done
 
 if [ -n "$ISOLATED_CPUS" ]; then
   echo "launching: taskset -c ${ISOLATED_CPUS} ${OBS_BIN} ${OBS_ARGS[*]}"

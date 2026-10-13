@@ -8,6 +8,8 @@
  * projector uses — labels, PVW/PGM tally, the issue-1242 twin cells) while the output is active
  * AND the view is MULTIVIEW, registers it as that renderer, and adds the operator's in-OBS
  * switch (Tools menu: HDMI výstup Program / Multiview), which switches live and persists.
+ * issue 1424 part 2: one Multiview + one Tools-menu pair PER OUTPUT (up to
+ * OBS_DRM_OUTPUT_MAX_OUTPUTS); a box with several outputs names the connector in each label.
  *
  * Built only on Linux (frontend/cmake/os-linux.cmake); every call site is __linux__-guarded, so
  * Windows stays byte-identical.

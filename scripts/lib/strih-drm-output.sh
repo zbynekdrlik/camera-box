@@ -27,8 +27,13 @@
 #   strih_drm_vk_present_dead               stdin = an OBS log -> 0 iff the vk-direct present loop died
 #
 # Provisioning ACTION (root, setup-strih.sh step 6; uses the caller's warn/fail):
-#   strih_drm_output_provision USER_HOME DESKTOP_USER SCRIPTS_DIR BACKEND
-#     (issue 1424: also writes the WirePlumber rule that leaves the HDMI/DP PCMs to OBS's audio leg)
+#   strih_drm_output_provision USER_HOME DESKTOP_USER SCRIPTS_DIR BACKEND [OUTPUTS]
+#     (issue 1424: also writes the WirePlumber rule that leaves the HDMI/DP PCMs to OBS's audio leg;
+#     part 2: OUTPUTS = the fact STRIH_HDMI_OUTPUTS -- a connector list writes / migrates the "outputs"
+#     array, the operator's per-connector views kept)
+# issue 1424 part 2 (the array form): strih_drm_xrandr_connected, strih_drm_outputs_spec_ok,
+#   strih_drm_outputs_config_json, strih_drm_output_log_of, strih_drm_outputs_graded_here and the verify
+#   grader strih_drm_outputs_verify_report (item 4c grades EVERY output by its own log lines)
 
 # issue 1424: the output's audio leg -- the WirePlumber rule that leaves every HDMI/DP PCM to OBS
 # (written at the end of strih_drm_output_provision) and its verify grading.
@@ -216,7 +221,193 @@ strih_drm_vk_present_dead() {
   [ "$verdict" = dead ]
 }
 
-# strih_drm_output_provision USER_HOME DESKTOP_USER SCRIPTS_DIR BACKEND -- setup-strih.sh step 6 (root):
+# ---- issue 1424 part 2 (owner 13.10.2026): up to two fixed outputs at once ---------------------------
+# strih-pp drives HDMI-0 = the cutter's Multiview AND HDMI-1 = the vestibule Program + its audio. The box
+# fact STRIH_HDMI_OUTPUTS lists them (`HDMI-0:multiview HDMI-1:program`; `auto` = the one-output
+# issue-1346 behaviour above, `none` = no fixed output) and drm-output.json carries them as an
+# "outputs" array (obs-drm-output-outputs.c; all or nothing -- a malformed array starts NO output).
+
+# strih_drm_xrandr_connected CONNECTOR (stdin = `xrandr --query`) -> 0 iff X RandR lists CONNECTOR as
+# connected (with or without a mode: vk-direct holds it with none). Reads all of stdin.
+strih_drm_xrandr_connected() {
+  local want="${1:-}" got
+  got="$(awk -v w="$want" '$1 == w && $2 == "connected" { f = 1 } END { print f ? "yes" : "no" }' || true)"
+  [ -n "$want" ] && [ "$got" = yes ]
+}
+
+# strih_drm_outputs_spec_ok SPEC -> 0 iff SPEC is 1..2 space-separated CONNECTOR:VIEW tokens (the box-fact
+# grammar, scripts/lib/strih-box-facts.sh), no connector twice.
+strih_drm_outputs_spec_ok() {
+  local c='[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]' t n=0 seen=" "
+  for t in ${1-}; do
+    [[ "$t" =~ ^${c}+:(program|multiview)$ ]] || return 1
+    case "$seen" in *" ${t%%:*} "*) return 1 ;; esac
+    seen="${seen}${t%%:*} "
+    n=$((n + 1))
+  done
+  [ "$n" -ge 1 ] && [ "$n" -le 2 ]
+}
+
+# strih_drm_outputs_config_json SPEC [BACKEND] -> the one-line array config for a FRESH box, the entries
+# in the machine-written key order (connector, argb, view, backend; lease = the ABSENT backend key, as
+# in the single-object form) -- byte-identical to what strih_scenes.write_drm_outputs writes. Refuses
+# (prints nothing, returns 1) a malformed SPEC or an unknown backend.
+strih_drm_outputs_config_json() {
+  local spec="${1:-}" backend="${2:-lease}" extra="" t out="" sep=""
+  strih_drm_outputs_spec_ok "$spec" || return 1
+  case "$backend" in
+    lease) ;;
+    vk-direct) extra=',"backend":"vk-direct"' ;;
+    *) return 1 ;;
+  esac
+  for t in $spec; do
+    out="${out}${sep}$(printf '{"connector":"%s","argb":%s,"view":"%s"%s}' "${t%%:*}" "$STRIH_DRM_OUTPUT_ARGB" "${t#*:}" "$extra")"
+    sep=","
+  done
+  printf '{"enabled":true,"outputs":[%s]}\n' "$out"
+}
+
+# strih_drm_outputs_spec_connectors SPEC -> the connectors of SPEC, space-separated, sorted (for the
+# fact-vs-config comparison).
+strih_drm_outputs_spec_connectors() {
+  local t
+  for t in ${1-}; do printf '%s\n' "${t%%:*}"; done | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//'
+}
+
+# strih_drm_output_log_of CONNECTOR (stdin = an OBS log) -> only the `drm-output` lines that name
+# 'CONNECTOR' (quoted, so HDMI-0 never matches HDMI-01): one output's own lines.
+strih_drm_output_log_of() {
+  LC_ALL=C awk -v q="'${1:-}'" 'index($0, "drm-output") && index($0, q)' || true
+}
+
+# strih_drm_outputs_verify_lines SCN_DIR CONF -> the strih_scenes reading of an "outputs" config, for
+# verify: the first line `<verdict>`, then one `<connector> <view> <backend>` line per output (only on
+# ok). Prints `?` when the classifier could not run. Always returns 0.
+strih_drm_outputs_verify_lines() {
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s
+v, o = s.drm_output_instances(s.drm_output_config_text(sys.argv[2]))
+print(v)
+for i in o:
+    print(i["connector"], i["view"], i["backend"])' "$1" "$2" 2>/dev/null || echo "?"
+}
+
+# strih_drm_outputs_is_array CONF -> 0 iff CONF is a JSON object with an "outputs" key (the issue-1424
+# array form). 1 otherwise (absent, unreadable, the single-object form, no python3).
+strih_drm_outputs_is_array() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c 'import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(c, dict) and "outputs" in c else 1)' "${1:-}" 2>/dev/null
+}
+
+# strih_drm_outputs_graded_here CONF -> 0 iff verify item 4c grades CONF per output (the call
+# below): CONF is the "outputs" array form, or it exists while the box fact STRIH_HDMI_OUTPUTS is a
+# connector list (a config setup-strih step 6 has not brought onto the fact yet). 1 = the
+# single-object grading of item 4c applies (today's one-output boxes, an absent config).
+strih_drm_outputs_graded_here() {
+  strih_drm_outputs_is_array "${1:-}" && return 0
+  [ -f "${1:-}" ] && strih_drm_outputs_spec_ok "$(strih_lx_hdmi_outputs 2>/dev/null || true)"
+}
+
+# strih_drm_outputs_verify_report USER_HOME SCN_BIN CONF LOG BACKEND_FACT XRANDR_TEXT -- verify-strih
+# item 4c for the "outputs" array form: the array must be valid, its connectors must be the box fact's
+# STRIH_HDMI_OUTPUTS list (when the fact is a list), and EVERY output is graded on its own -- connected
+# (vk-direct: X RandR names THAT connector connected; lease: a kernel HDMI connector), its own
+# `program scanout LIVE` line, `multiview bind LIVE` for a Multiview, a present loop that did not die,
+# and its own audio leg line. Uses the caller's ok/bad/note. Always returns 0.
+strih_drm_outputs_verify_report() {
+  local user_home="$1" scn_bin="$2" conf="$3" log="$4" fact="$5" xr="${6:-}" lines verdict
+  local conn view backend hdmi live mv dead v want got spec olog
+  spec="$(strih_lx_hdmi_outputs 2>/dev/null || true)"
+  if ! strih_drm_outputs_is_array "$conf"; then
+    bad "HDMI outputs: ${conf} drives a single output but the box fact STRIH_HDMI_OUTPUTS lists '${spec}' -- re-run setup-strih.sh step 6"
+    return 0
+  fi
+  lines="$(strih_drm_outputs_verify_lines "$(dirname "$scn_bin")" "$conf")"
+  verdict="${lines%%$'\n'*}"
+  if [ "$verdict" = "?" ]; then
+    bad "HDMI outputs: could not classify ${conf} (strih_scenes.py / python3 missing or its import failed) -- re-run setup-strih.sh step 6"
+    return 0
+  fi
+  if [ "$verdict" != ok ]; then
+    bad "HDMI outputs: ${conf} \"outputs\" is malformed (${verdict}) -- OBS starts NO output (all or none); re-run setup-strih.sh step 6"
+    return 0
+  fi
+  if strih_drm_outputs_spec_ok "$spec"; then
+    want="$(strih_drm_outputs_spec_connectors "$spec")"
+    got="$(printf '%s\n' "$lines" | sed 1d | awk 'NF { print $1 }' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
+    if [ "$want" != "$got" ]; then
+      bad "HDMI outputs: ${conf} drives '${got}' but the box fact STRIH_HDMI_OUTPUTS lists '${want}' -- re-run setup-strih.sh step 6"
+    fi
+  fi
+  while read -r conn view backend; do
+    [ -n "$conn" ] || continue
+    hdmi=0
+    if [ "$fact" = vk-direct ] && [ -z "$xr" ]; then
+      hdmi="?"
+    elif [ "$fact" = vk-direct ]; then
+      printf '%s\n' "$xr" | strih_drm_xrandr_connected "$conn" && hdmi=1
+    elif strih_drm_hdmi_connected /sys/class/drm "$fact" ""; then
+      hdmi=1
+    fi
+    olog=""
+    [ -n "$log" ] && [ -f "$log" ] && olog="$(strih_drm_output_log_of "$conn" < "$log")"
+    live=0; mv=0; dead=0
+    grep -aqF 'drm-output: program scanout LIVE' <<<"$olog" && live=1
+    grep -aqF 'drm-output: multiview bind LIVE' <<<"$olog" && mv=1
+    strih_drm_vk_present_dead <<<"$olog" && dead=1
+    v="$(strih_drm_output_verdict "$hdmi" "$conn" "$view" "$live" "$mv" "$backend" "$fact" "$dead" || true)"
+    case "$v" in
+      ok)                 ok   "HDMI output ${conn}: live (backend ${backend}), view ${view} (${conf} + its own lines in the newest OBS log)"
+                          drm_output_audio_verify_report "$user_home" "${user_home##*/}" "$log" "" "$conn" ;;
+      x-unreadable)       bad  "HDMI output ${conn}: the box fact is vk-direct, but xrandr on :0 answered nothing -- cannot grade it" ;;
+      skip-no-hdmi | hdmi-unplugged) note "HDMI output ${conn}: armed in ${conf} but X RandR does not list it connected (report-only)" ;;
+      backend-drift)      bad  "HDMI output ${conn}: uses backend ${backend} but the box fact STRIH_HDMI_OUTPUT_BACKEND is ${fact} -- re-run setup-strih.sh step 6" ;;
+      present-dead)       bad  "HDMI output ${conn}: its vk-direct present loop died in the newest OBS log -- read its drm-output: lines, then restart strih-obs.service" ;;
+      lease-not-live)     bad  "HDMI output ${conn}: armed but the newest OBS log has no 'drm-output: program scanout LIVE' line naming it -- read its drm-output: lines" ;;
+      multiview-not-live) bad  "HDMI output ${conn}: the view is multiview but the newest OBS log has no 'drm-output: multiview bind LIVE' line naming it" ;;
+      *)                  bad  "HDMI output ${conn}: verdict '${v}'" ;;
+    esac
+  done < <(printf '%s\n' "$lines" | sed 1d)
+  return 0
+}
+
+# strih_drm_outputs_provision_fresh USER_HOME DESKTOP_USER BACKEND SPEC CONF -- step 6, no config yet, the
+# fact lists the connectors (issue 1424 part 2): write the "outputs" array config when X RandR answers
+# and names at least one listed connector connected; each listed connector X does not list connected is
+# WARNed (its output stays dormant until it is plugged in -- the other one starts anyway). Otherwise a
+# loud SKIP, like the one-output path. Uses the caller's warn.
+strih_drm_outputs_provision_fresh() {
+  local user_home="$1" desktop_user="$2" backend="$3" spec="$4" conf="$5" xr t any=0 line
+  xr="$(strih_drm_xrandr_query "$user_home" "$desktop_user")"
+  if [ -z "$xr" ]; then
+    warn "  SKIP issue 1424: the HDMI outputs are detected through X RandR, but xrandr on :0 answered nothing (Xorg :0 not up yet?) -- ${conf} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
+    return 0
+  fi
+  for t in $spec; do
+    if printf '%s\n' "$xr" | strih_drm_xrandr_connected "${t%%:*}"; then
+      any=1
+    else
+      warn "  issue 1424: ${t%%:*} is not connected in X RandR -- its output stays dormant until it is plugged in (OBS restart)"
+    fi
+  done
+  if [ "$any" != 1 ]; then
+    warn "  SKIP issue 1424: none of ${spec} is connected -- ${conf} NOT provisioned (the fixed HDMI outputs stay dormant); attach them and re-run setup-strih.sh"
+    return 0
+  fi
+  line="$(strih_drm_outputs_config_json "$spec" "$backend")" || {
+    warn "  SKIP issue 1424: STRIH_HDMI_OUTPUTS '${spec}' / backend '${backend}' is not writable -- ${conf} NOT provisioned"
+    return 0
+  }
+  install -d -o "$desktop_user" -g "$desktop_user" "$(dirname "$conf")"
+  printf '%s\n' "$line" | install -m 0644 -o "$desktop_user" -g "$desktop_user" /dev/stdin "$conf"
+  echo "  wrote ${conf} (HDMI outputs ${spec}, backend ${backend}; takes effect at the next OBS start)"
+}
+
+# strih_drm_output_provision USER_HOME DESKTOP_USER SCRIPTS_DIR BACKEND [OUTPUTS] -- setup-strih.sh step 6 (root):
 # the fixed HDMI output's activation contract, ~/.camera-box/drm-output.json of the OBS (desktop) user.
 #   * the retired 19.9. projector config is removed; its "type" seeds the initial view (default multiview);
 #   * BACKEND is the box fact STRIH_HDMI_OUTPUT_BACKEND (issue 1346): lease = the X RandR lease (an
@@ -231,7 +422,11 @@ strih_drm_vk_present_dead() {
 #     user>`, never a root redirect); otherwise a loud SKIP.
 # Uses the caller's warn/fail (setup-strih.sh).
 strih_drm_output_provision() {
-  local user_home="$1" desktop_user="$2" scripts_dir="$3" backend="$4"
+  local user_home="$1" desktop_user="$2" scripts_dir="$3" backend="$4" outputs="${5:-}"
+  # issue 1424 part 2: the box fact STRIH_HDMI_OUTPUTS (auto = today's one output on the first connected
+  # HDMI; a CONNECTOR:VIEW list = an "outputs" array). Read from the loaded box when not passed.
+  [ -n "$outputs" ] || outputs="$(strih_lx_hdmi_outputs 2>/dev/null || true)"
+  [ -n "$outputs" ] || outputs=auto
   # the module's activation contract: <user_home>/.camera-box/drm-output.json of the desktop user
   local DRM_CONF_DIR="${user_home}/.camera-box"
   local DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
@@ -251,6 +446,8 @@ strih_drm_output_provision() {
   fi
   if [ -L "$DRM_CONF_DIR" ] || [ -L "$DRM_CONF" ]; then
     warn "  SKIP issue 1346: ${DRM_CONF_DIR} or ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
+  elif [ ! -f "$DRM_CONF" ] && strih_drm_outputs_spec_ok "$outputs"; then
+    strih_drm_outputs_provision_fresh "$user_home" "$desktop_user" "$backend" "$outputs" "$DRM_CONF"
   elif [ -f "$DRM_CONF" ]; then
     echo "  ${DRM_CONF} already present -- leaving the operator's HDMI output choice"
     if sudo -u "$desktop_user" python3 -c '
@@ -261,11 +458,14 @@ try:
 except ImportError as e:
     sys.exit("cannot import strih_scenes (%s) -- setup-strih.sh installs python3-websocket at step 11; re-run it" % e)
 try:
-    s.write_drm_backend(sys.argv[2], sys.argv[3])
+    if sys.argv[4] in ("auto", "none"):
+        s.write_drm_backend(sys.argv[2], sys.argv[3])
+    else:  # issue 1424 part 2: the fact lists the connectors, the operator views are kept
+        s.write_drm_outputs(sys.argv[4], sys.argv[2], sys.argv[3])
 except ValueError as e:
     sys.exit(str(e))
-' "$scripts_dir" "$backend" "$DRM_CONF"; then
-      echo "  ${DRM_CONF}: backend ${backend} (the box fact STRIH_HDMI_OUTPUT_BACKEND)"
+' "$scripts_dir" "$backend" "$DRM_CONF" "$outputs"; then
+      echo "  ${DRM_CONF}: backend ${backend} (the box fact STRIH_HDMI_OUTPUT_BACKEND), outputs ${outputs} (STRIH_HDMI_OUTPUTS; the operator's views kept)"
     else
       warn "  issue 1346: could not write backend ${backend} into ${DRM_CONF} (the reason is above) -- verify-strih item 4c reports it as backend-drift"
     fi

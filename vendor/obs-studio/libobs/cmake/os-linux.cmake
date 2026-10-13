@@ -22,6 +22,7 @@ target_sources(
     obs-drm-output-audio.h
     obs-drm-output-backend.c
     obs-drm-output-internal.h
+    obs-drm-output-outputs.c
     obs-drm-output-view.c
     obs-drm-output-vk-internal.h
     obs-drm-output-vk-setup.c

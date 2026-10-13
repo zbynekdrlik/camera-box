@@ -218,11 +218,14 @@ drm_output_audio_pw_dump() {
   fi
 }
 
-# drm_output_audio_verify_report USER_HOME USER LOG [ROOT] -- verify (the HDMI output item): the
-# WirePlumber rule file, PipeWire's live node list and the module's line in LOG. Uses the caller's
-# ok/bad/note. Always returns 0.
+# drm_output_audio_verify_report USER_HOME USER LOG [ROOT [CONNECTOR]] -- verify (the HDMI output item):
+# the WirePlumber rule file, PipeWire's live node list and the module's line in LOG. issue 1424 part 2:
+# with CONNECTOR, only the audio lines naming 'CONNECTOR' count (each output has its own leg; on a
+# two-output box the other leg's lines must never grade this one). Uses the caller's ok/bad/note.
+# Always returns 0.
 drm_output_audio_verify_report() {
-  local user="$2" log="${3:-}" root="${4:-}" flavour path rule="missing" nodes dump state line verdict
+  local user="$2" log="${3:-}" root="${4:-}" conn="${5:-}" flavour path rule="missing" nodes dump state line verdict
+  local text label="HDMI audio"
   flavour="$(drm_output_audio_wp_flavour "$(wireplumber --version 2>/dev/null || true)")"
   if ! path="$(drm_output_audio_wp_rule_path "$flavour" "$root")"; then
     rule=unknown
@@ -236,19 +239,25 @@ drm_output_audio_verify_report() {
   state=none
   line=""
   if [ -n "$log" ] && [ -f "$log" ]; then
-    state="$(drm_output_audio_log_state < "$log")"
-    line="$(drm_output_audio_log_line < "$log")"
+    if [ -n "$conn" ]; then
+      label="HDMI audio ${conn}"
+      text="$(LC_ALL=C awk -v q="'${conn}'" 'index($0, "drm-output audio:") && index($0, q)' < "$log" || true)"
+    else
+      text="$(cat "$log" 2>/dev/null || true)"
+    fi
+    state="$(drm_output_audio_log_state <<<"$text")"
+    line="$(drm_output_audio_log_line <<<"$text")"
   fi
   verdict="$(drm_output_audio_verdict "$rule" "$nodes" "$state" || true)"
   case "$verdict" in
-    ok)                  ok   "HDMI audio: the module writes the program mix to its connector's PCM (${line##*drm-output audio: }); PipeWire holds no HDMI node (${path})" ;;
-    pipewire-unread)     note "HDMI audio: the module opened its PCM (${line##*drm-output audio: }), but PipeWire's node list was not readable as ${user}" ;;
-    wp-unknown)          bad  "HDMI audio: no WirePlumber version could be read -- cannot check that PipeWire leaves the HDMI PCM to OBS" ;;
-    rule-missing)        bad  "HDMI audio: ${path} is missing -- re-run setup (PipeWire would hold the HDMI PCM the output needs)" ;;
-    rule-drift)          bad  "HDMI audio: ${path} is not the shipped rule -- re-run setup" ;;
-    pipewire-holds-hdmi) bad  "HDMI audio: PipeWire still has ${nodes} HDMI node(s) -- the rule applies at the next session start (as ${user}: systemctl --user restart wireplumber, then restart OBS)" ;;
-    no-audio)            bad  "HDMI audio: the module gave up -- ${line##*drm-output audio: }" ;;
-    *)                   bad  "HDMI audio: the newest OBS log has no 'drm-output audio:' outcome line (an OBS build without the audio leg, or it is still resolving)" ;;
+    ok)                  ok   "${label}: the module writes the program mix to its connector's PCM (${line##*drm-output audio: }); PipeWire holds no HDMI node (${path})" ;;
+    pipewire-unread)     note "${label}: the module opened its PCM (${line##*drm-output audio: }), but PipeWire's node list was not readable as ${user}" ;;
+    wp-unknown)          bad  "${label}: no WirePlumber version could be read -- cannot check that PipeWire leaves the HDMI PCM to OBS" ;;
+    rule-missing)        bad  "${label}: ${path} is missing -- re-run setup (PipeWire would hold the HDMI PCM the output needs)" ;;
+    rule-drift)          bad  "${label}: ${path} is not the shipped rule -- re-run setup" ;;
+    pipewire-holds-hdmi) bad  "${label}: PipeWire still has ${nodes} HDMI node(s) -- the rule applies at the next session start (as ${user}: systemctl --user restart wireplumber, then restart OBS)" ;;
+    no-audio)            bad  "${label}: the module gave up -- ${line##*drm-output audio: }" ;;
+    *)                   bad  "${label}: the newest OBS log has no 'drm-output audio:' outcome line (an OBS build without the audio leg, or it is still resolving)" ;;
   esac
   return 0
 }

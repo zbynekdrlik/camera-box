@@ -187,15 +187,11 @@ else
   note "strih_scenes.py / python3 absent -- run setup-strih.sh step 6 first (seed-input parity report skipped)"
 fi
 
-# 4c) issue 1346 (owner 24.9.2026): the fixed HDMI output = the in-OBS DRM-lease output (issue 1152),
-#     selectable Program / built-in Multiview -- never a projector window, never the desktop. SKIP
-#     when no HDMI monitor is connected (the kernel connector status for a lease box; the X RandR
-#     view for a vk-direct box, whose NVIDIA connector reads `disconnected` in sysfs -- main design
-#     5840508308).
-#     With one plugged in: ~/.camera-box/drm-output.json must arm the lease (classified by the ONE
-#     Python grammar in strih_scenes.py, the C module's own contract) and the newest OBS log must
-#     reach `drm-output: program scanout LIVE` -- plus `drm-output: multiview bind LIVE` for the
-#     multiview view. The pure verdict is strih_drm_output_verdict (scripts/lib/strih-drm-output.sh).
+# 4c) issue 1346: the fixed HDMI output = the in-OBS DRM output, Program / built-in Multiview. SKIP with
+#     no HDMI monitor (kernel status for lease, X RandR for vk-direct, design 5840508308). Armed: the
+#     config (the ONE strih_scenes grammar) + `program scanout LIVE` (+ `multiview bind LIVE`) in the
+#     newest OBS log. issue 1424 part 2: an "outputs" array is graded per output by the lib (all helpers:
+#     scripts/lib/strih-drm-output.sh).
 DRM_CONF_V="${USER_HOME}/.camera-box/drm-output.json"
 DRM_BACKEND_FACT="$(strih_lx_hdmi_output_backend 2>/dev/null || echo "?")"
 DRM_XRANDR_V=""
@@ -237,7 +233,9 @@ if [ -n "$DRM_LOG" ] && strih_drm_vk_present_dead < "$DRM_LOG"; then
 fi
 DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" "$DRM_BACKEND_V" "$DRM_BACKEND_FACT" "$DRM_VK_DEAD" || true)"
 [ "$DRM_BACKEND_FACT" != none ] || DRM_VERDICT=skip-no-output   # issue 1412: a stream box has no fixed HDMI output
+if [ "$DRM_VERDICT" != skip-no-output ] && strih_drm_outputs_graded_here "$DRM_CONF_V"; then DRM_VERDICT=per-output; strih_drm_outputs_verify_report "$USER_HOME" "$SCN_BIN" "$DRM_CONF_V" "$DRM_LOG" "$DRM_BACKEND_FACT" "$DRM_XRANDR_V"; fi
 case "$DRM_VERDICT" in
+  per-output)         ;;  # issue 1424 part 2: graded per output just above
   skip-no-output)     note "HDMI output: not graded -- STRIH_HDMI_OUTPUT_BACKEND=none (this box has no fixed HDMI output)" ;;
   ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)"; drm_output_audio_verify_report "$USER_HOME" "${USER_HOME##*/}" "$DRM_LOG" ;;  # issue 1424
   x-unreadable)       bad  "HDMI output: the box fact is vk-direct, which detects the HDMI monitor through X RandR, but xrandr on :0 answered nothing (Xorg down, or ${USER_HOME}/.Xauthority unreadable for $(id -un)) -- cannot grade the HDMI output" ;;

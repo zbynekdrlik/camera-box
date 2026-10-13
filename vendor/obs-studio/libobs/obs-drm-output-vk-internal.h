@@ -6,6 +6,8 @@
  *                              swapchain and the shared images; tear all of it down again
  *   obs-drm-output-vk.c        the present thread, the lifecycle API (obs-drm-output-vk.h) and the
  *                              GL side of the GL<->Vulkan interop
+ * issue 1424 part 2: the state is split into ONE shared device (struct drm_output_vk_device) and one
+ * struct drm_output_vk_disp per display, so two connectors scan out at once on one VkDevice.
  * Not exported; Linux-only, like both TUs.
  */
 
@@ -59,6 +61,7 @@ typedef VkResult(VKAPI_PTR *drm_output_vk_randr_display_fn)(VkPhysicalDevice pd,
 	X(vkDestroyDevice)                \
 	X(vkGetDeviceQueue)               \
 	X(vkDeviceWaitIdle)               \
+	X(vkQueueWaitIdle)                \
 	X(vkCreateSwapchainKHR)           \
 	X(vkDestroySwapchainKHR)          \
 	X(vkGetSwapchainImagesKHR)        \
@@ -127,7 +130,7 @@ struct drm_output_vk_gl {
 };
 
 /* -------------------------------------------------------------------------------------------------
- * Module state (single instance).
+ * The core's state (issue 1424 part 2): ONE shared device + one display struct per output.
  * ------------------------------------------------------------------------------------------------- */
 #define DRM_OUTPUT_VK_MAX_SWAP 8
 #define DRM_OUTPUT_VK_WAIT_NS 1000000000ull /* 1 s bound on every blocking Vulkan wait */
@@ -145,7 +148,35 @@ struct drm_output_vk_shared {
 	GLuint gl_sem;
 };
 
-struct drm_output_vk_state {
+/* The shared part: the loader, the X connection, the VkInstance + VkPhysicalDevice + VkDevice every
+ * display uses, one queue per display slot (the family's queueCount permitting; a display whose slot has
+ * no queue of its own shares queue 0, serialised by queue_lock), and the GL interop entry points of the
+ * OBS context. Opened with the first display, freed with the last (`refs`), all under `lock`. */
+struct drm_output_vk_device {
+	pthread_mutex_t lock;
+	int refs;     /* open displays */
+	bool wedged;  /* a display's teardown leaked its objects on a wedged GPU: never destroy the device */
+	void *lib;
+	struct drm_output_vk_fns vk;
+	Display *dpy;
+	VkInstance instance;
+	VkPhysicalDevice pd; /* the GPU of the first display; a display on another GPU is refused */
+	VkDevice device;
+	uint32_t qfi;
+	uint32_t n_queues;
+	VkQueue queues[DRM_OUTPUT_VK_MAX_DISPLAYS];
+	pthread_mutex_t queue_lock[DRM_OUTPUT_VK_MAX_DISPLAYS]; /* host access to queues[i] (submit, present, wait) */
+	struct drm_output_vk_gl gl;
+	bool gl_resolved; /* graphics thread only */
+};
+
+/* One display: its X output, VkDisplayKHR, surface, swapchain, shared images, mailbox roles and present
+ * thread. The slot array is static; a slot is taken at open and given back at close. */
+struct drm_output_vk_disp {
+	struct drm_output_vk_device *dev;
+	int slot;
+	bool in_use; /* the slot is taken (g_drm_vk_dev.lock) */
+
 	pthread_mutex_t lock; /* the mailbox roles */
 	bool open;
 	volatile bool running;     /* present-thread run flag (os_atomic) */
@@ -153,20 +184,17 @@ struct drm_output_vk_state {
 	bool thread_started;
 	pthread_t thread;
 
-	void *lib;
-	struct drm_output_vk_fns vk;
-	Display *dpy;
 	char output_name[64];
 	uint32_t solid_argb;
+	drm_output_vk_shown_fn shown; /* issue 1424: the present-delay note of the owning output */
+	void *shown_param;
 
-	VkInstance instance;
-	VkPhysicalDevice pd;
 	VkDisplayKHR display;
 	bool acquired;
 	VkSurfaceKHR surface;
-	VkDevice device;
-	VkQueue queue;
-	uint32_t qfi;
+	int plane;                  /* the display plane it presents on (-1 none; one plane per display) */
+	VkQueue queue;              /* the device queue this display submits + presents on */
+	pthread_mutex_t *queue_lock; /* that queue's host-access lock (in the device) */
 	VkSwapchainKHR swapchain;
 	VkSwapchainKHR retired_swapchain; /* replaced by a rebuild, freed later (see RETIRE_FRAMES) */
 	VkSurfaceKHR retired_surface;     /* replaced by a surface-lost rebuild, freed with it */
@@ -195,9 +223,8 @@ struct drm_output_vk_state {
 	int ready;   /* newest published image not yet taken */
 	/* A submit whose fence was never seen signalled (present thread; read by the teardown quiesce). */
 	bool submit_outstanding;
-	unsigned long long gl_skips; /* GL claims refused while a READY image was waiting (g_drm_vk.lock) */
+	unsigned long long gl_skips; /* GL claims refused while a READY image was waiting (d->lock) */
 
-	struct drm_output_vk_gl gl;
 	bool gl_bound; /* graphics thread only */
 
 	unsigned long long presents;
@@ -205,29 +232,33 @@ struct drm_output_vk_state {
 	bool scanout_live_logged;
 };
 
-/* The single instance (defined in obs-drm-output-vk.c). */
-extern struct drm_output_vk_state g_drm_vk;
+/* The shared device and the display slots (defined in obs-drm-output-vk.c). */
+extern struct drm_output_vk_device g_drm_vk_dev;
+extern struct drm_output_vk_disp g_drm_vk_disp[DRM_OUTPUT_VK_MAX_DISPLAYS];
 
-/* obs-drm-output-vk-setup.c: open the X display, load Vulkan, acquire output `output_name` and build
- * the surface, device, swapchain and shared images into g_drm_vk. false = nothing usable (the caller
- * runs drm_output_vk_destroy_all). */
-bool drm_output_vk_setup(const char *output_name);
+/* obs-drm-output-vk-setup.c, caller holds g_drm_vk_dev.lock: open the X display, load Vulkan (the first
+ * display only), acquire output `d->output_name` and build its surface (and the device with the first
+ * display), its swapchain and its shared images. false = nothing usable (the caller runs
+ * drm_output_vk_destroy_display). */
+bool drm_output_vk_setup(struct drm_output_vk_disp *d);
 
-/* obs-drm-output-vk-setup.c: free everything setup built (idempotent, safe on partial init) and release
- * the display. The present thread must be halted. An outstanding submit is waited BOUNDED first; a GPU
- * that never finishes it leaks the Vulkan objects (loudly) instead of hanging the OBS shutdown. */
-void drm_output_vk_destroy_all(void);
+/* obs-drm-output-vk-setup.c, caller holds g_drm_vk_dev.lock: free everything setup built for display `d`
+ * (idempotent, safe on partial init) and release it; the shared device goes when no display holds it
+ * (dev->refs == 0). The present thread must be halted. An outstanding submit is waited BOUNDED first; a
+ * GPU that never finishes it leaks the display's Vulkan objects (loudly) and marks the device wedged
+ * instead of hanging the OBS shutdown. */
+void drm_output_vk_destroy_display(struct drm_output_vk_disp *d);
 
 /* obs-drm-output-vk-setup.c, present thread only: rebuild the swapchain (and the display-plane surface
  * too when `surface_lost`) after VK_ERROR_OUT_OF_DATE_KHR / VK_ERROR_SURFACE_LOST_KHR, e.g. an HDMI
  * replug. false = the display now offers a different mode size (the shared images no longer fit) or a
  * Vulkan call failed; the caller retries a bounded number of times, then gives up. */
-bool drm_output_vk_rebuild_presentation(bool surface_lost);
+bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost);
 
 /* camera-box issue 1424, obs-drm-output-vk-setup.c, present thread: re-mode onto the wanted mode when
  * flagged and the pick changed (same size only). false = the surface rebuild failed. */
-bool drm_output_vk_remode_if_needed(void);
+bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d);
 
 /* obs-drm-output-vk-setup.c, present thread (after a signalled fence) or teardown: free a retired
  * swapchain + surface (safe when none). */
-void drm_output_vk_free_retired(void);
+void drm_output_vk_free_retired(struct drm_output_vk_disp *d);

@@ -23,8 +23,12 @@
  * the Program render audit line's `lagged` counter.
  *
  * The view comes from ~/.camera-box/drm-output.json ("view": program | multiview; absent =
- * program, so imag is unchanged). obs_drm_output_set_view() switches live and persists the key
- * back into that file on one compact line (every other key kept).
+ * program, so imag is unchanged). obs_drm_output_set_view_of() switches live and persists the key
+ * back into that output's entry of the file on one compact line (every other key kept).
+ *
+ * issue 1424 part 2: everything here is PER OUTPUT INSTANCE (struct drm_output_view_state inside
+ * struct drm_output_inst): two outputs each carry their own view, renderer, texrender and budget
+ * fields, so HDMI-0 can show the Multiview while HDMI-1 shows the Program.
  *
  * Linux-only, built only via libobs/cmake/os-linux.cmake. The pure helpers drm_output_parse_view
  * and drm_output_view_tick_action are lift-compiled + truth-tabled by
@@ -44,7 +48,6 @@
 #include "obs-drm-output.h"
 #include "obs-drm-output-internal.h"
 #include "graphics/vec4.h"
-#include "util/dstr.h"
 #include "util/platform.h"
 #include "util/threading.h"
 
@@ -101,180 +104,141 @@ _Static_assert(DRM_OUTPUT_TICK_NOTHING == 0 && DRM_OUTPUT_TICK_PROGRAM == 1 && D
  * (30 fps canvas -> every tick, budget-gated only; 60 fps canvas -> every other tick). */
 #define DRM_OUTPUT_MV_RENDER_DIVISOR 2u
 
-/* -------------------------------------------------------------------------------------------------
- * State. `view` is atomic (UI thread writes, graphics thread reads). The renderer + the budget and
- * audit fields are guarded by the GRAPHICS CONTEXT: the frame hook holds it for the whole tick and
- * obs_drm_output_set_view_renderer takes it around the swap. config_path is guarded by persist_lock.
- * ------------------------------------------------------------------------------------------------- */
-static struct {
-	volatile long view;
-	pthread_mutex_t persist_lock;
-	char config_path[1024];
-
-	obs_drm_output_view_render_t render;
-	void *render_param;
-	gs_texrender_t *texrender; /* the Multiview's sRGB render target, created on first render */
-	bool warned_no_renderer;
-	bool warned_no_texrender;
-	bool bind_live_logged;
-	uint32_t frame_counter;
-	uint32_t consecutive_skips;
-	uint64_t ewma_ns;
-	/* main design 5840501628: the cost of the last Multiview render and the graphics tick it ran in
-	 * (obs_get_total_frames()), so the budget gate can leave this view's own render out of the
-	 * previous tick's total (drm_output_view_self_last_ns). last_self_ns = the value the gate last
-	 * used (the audit line's self_ns=). */
-	uint64_t last_render_ns;
-	uint32_t last_render_frame;
-	uint64_t last_self_ns;
-
-	uint64_t win_start_ns;
-	uint32_t win_renders;
-	uint32_t win_skips;
-	uint64_t win_sum_ns;
-	uint64_t win_max_ns;
-} g_view = {
-	.view = OBS_DRM_OUTPUT_VIEW_PROGRAM,
-	.persist_lock = PTHREAD_MUTEX_INITIALIZER,
-};
-
 static const char *drm_output_view_name(long view)
 {
 	return view == OBS_DRM_OUTPUT_VIEW_MULTIVIEW ? "multiview" : "program";
 }
 
-static void drm_output_view_reset_window_locked(void)
+/* The "view" grammar for the config TU (obs-drm-output-outputs.c), which cannot see the static parser. */
+int drm_output_view_from_config(const char *value)
 {
-	g_view.win_start_ns = 0;
-	g_view.win_renders = 0;
-	g_view.win_skips = 0;
-	g_view.win_sum_ns = 0;
-	g_view.win_max_ns = 0;
+	return drm_output_parse_view(value);
 }
 
-void drm_output_view_configure(const char *view, const char *config_path)
+static void drm_output_view_reset_window_locked(struct drm_output_view_state *v)
 {
-	int v = drm_output_parse_view(view);
-	if (v < 0) {
-		blog(LOG_WARNING,
-		     "drm-output: unknown \"view\":\"%s\" in %s -- using program (want program or multiview)",
-		     view, config_path ? config_path : "<no config>");
-		v = OBS_DRM_OUTPUT_VIEW_PROGRAM;
-	}
-	os_atomic_set_long(&g_view.view, v);
-	pthread_mutex_lock(&g_view.persist_lock);
-	snprintf(g_view.config_path, sizeof(g_view.config_path), "%s", config_path ? config_path : "");
-	pthread_mutex_unlock(&g_view.persist_lock);
-	blog(LOG_INFO, "drm-output: view=%s (from %s)", drm_output_view_name(v),
-	     config_path ? config_path : "<no config>");
+	v->win_start_ns = 0;
+	v->win_renders = 0;
+	v->win_skips = 0;
+	v->win_sum_ns = 0;
+	v->win_max_ns = 0;
+}
+
+void drm_output_view_configure(struct drm_output_inst *inst, int view)
+{
+	const long v = view == OBS_DRM_OUTPUT_VIEW_MULTIVIEW ? OBS_DRM_OUTPUT_VIEW_MULTIVIEW : OBS_DRM_OUTPUT_VIEW_PROGRAM;
+	os_atomic_set_long(&inst->view.view, v);
+	blog(LOG_INFO, "drm-output: view=%s on '%s'", drm_output_view_name(v), inst->connector);
+}
+
+enum obs_drm_output_view obs_drm_output_get_view_of(int idx)
+{
+	struct drm_output_inst *inst = drm_output_inst_at(idx);
+	if (!inst)
+		return OBS_DRM_OUTPUT_VIEW_PROGRAM;
+	return os_atomic_load_long(&inst->view.view) == OBS_DRM_OUTPUT_VIEW_MULTIVIEW ? OBS_DRM_OUTPUT_VIEW_MULTIVIEW
+										     : OBS_DRM_OUTPUT_VIEW_PROGRAM;
 }
 
 enum obs_drm_output_view obs_drm_output_get_view(void)
 {
-	return os_atomic_load_long(&g_view.view) == OBS_DRM_OUTPUT_VIEW_MULTIVIEW ? OBS_DRM_OUTPUT_VIEW_MULTIVIEW
-										  : OBS_DRM_OUTPUT_VIEW_PROGRAM;
+	return obs_drm_output_get_view_of(0);
 }
 
-void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void *param)
+void obs_drm_output_set_view_renderer_of(int idx, obs_drm_output_view_render_t render, void *param)
 {
+	struct drm_output_inst *inst = drm_output_inst_at(idx);
+	if (!inst) {
+		blog(LOG_WARNING, "drm-output: multiview renderer for output %d ignored -- no such output", idx);
+		return;
+	}
+	struct drm_output_view_state *v = &inst->view;
 	/* The frame hook calls the renderer while it holds the graphics context, so taking the context
 	 * here means no render is in flight across the swap: after this returns, the previous renderer
 	 * is never called again and the frontend may free its Multiview. */
 	obs_enter_graphics();
-	g_view.render = render;
-	g_view.render_param = param;
-	if (!render && g_view.texrender) { /* no Multiview any more: free its render target too */
-		gs_texrender_destroy(g_view.texrender);
-		g_view.texrender = NULL;
+	v->render = render;
+	v->render_param = param;
+	if (!render && v->texrender) { /* no Multiview any more: free its render target too */
+		gs_texrender_destroy(v->texrender);
+		v->texrender = NULL;
 	}
-	g_view.warned_no_renderer = false;
-	g_view.warned_no_texrender = false;
-	g_view.bind_live_logged = false;
-	g_view.frame_counter = 0;
-	g_view.consecutive_skips = 0;
-	g_view.ewma_ns = 0;
-	g_view.last_render_ns = 0;
-	g_view.last_render_frame = 0;
-	g_view.last_self_ns = 0;
-	drm_output_view_reset_window_locked();
+	v->warned_no_renderer = false;
+	v->warned_no_texrender = false;
+	v->bind_live_logged = false;
+	v->frame_counter = 0;
+	v->consecutive_skips = 0;
+	v->ewma_ns = 0;
+	v->last_render_ns = 0;
+	v->last_render_frame = 0;
+	v->last_self_ns = 0;
+	drm_output_view_reset_window_locked(v);
 	obs_leave_graphics();
-	blog(LOG_INFO, "drm-output: multiview renderer %s", render ? "registered" : "cleared");
+	blog(LOG_INFO, "drm-output: multiview renderer %s on '%s'", render ? "registered" : "cleared", inst->connector);
 }
 
-void drm_output_view_gl_teardown(void)
+void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void *param)
+{
+	obs_drm_output_set_view_renderer_of(0, render, param);
+}
+
+void drm_output_view_gl_teardown(struct drm_output_inst *inst)
 {
 	obs_enter_graphics();
-	if (g_view.texrender) {
-		gs_texrender_destroy(g_view.texrender);
-		g_view.texrender = NULL;
+	if (inst->view.texrender) {
+		gs_texrender_destroy(inst->view.texrender);
+		inst->view.texrender = NULL;
 	}
 	obs_leave_graphics();
 }
 
-/* Rewrite the persisted config with the new "view" (every other key kept, one compact line, an
- * atomic temp-file rename). Caller holds persist_lock. Returns NULL on success, else the reason
- * the choice was NOT persisted (named in the log line). */
-static const char *drm_output_view_persist_locked(const char *name)
+bool obs_drm_output_set_view_of(int idx, enum obs_drm_output_view view)
 {
-	if (g_view.config_path[0] == '\0')
-		return "no drm-output config path (the autostart found no config)";
-	obs_data_t *data = obs_data_create_from_json_file(g_view.config_path);
-	if (!data)
-		return "config unreadable (missing or not JSON)";
-	obs_data_set_string(data, "view", name);
-	const char *reason = "config unreadable (JSON serialisation failed)";
-	const char *json = obs_data_get_json(data);
-	if (json) {
-		struct dstr line;
-		dstr_init_copy(&line, json);
-		dstr_cat(&line, "\n");
-		reason = os_quick_write_utf8_file_safe(g_view.config_path, line.array, line.len, false, "tmp", NULL)
-				 ? NULL
-				 : "write failed (temp file or rename)";
-		dstr_free(&line);
+	struct drm_output_inst *inst = drm_output_inst_at(idx);
+	if (!inst) {
+		blog(LOG_WARNING, "drm-output: view switch for output %d ignored -- no such output", idx);
+		return false;
 	}
-	obs_data_release(data);
-	return reason;
+	const long v = view == OBS_DRM_OUTPUT_VIEW_MULTIVIEW ? OBS_DRM_OUTPUT_VIEW_MULTIVIEW
+							     : OBS_DRM_OUTPUT_VIEW_PROGRAM;
+	const long prev = os_atomic_set_long(&inst->view.view, v);
+	const char *name = drm_output_view_name(v);
+	const char *reason = drm_output_config_persist_view(inst, name);
+
+	if (!reason)
+		blog(LOG_INFO, "drm-output: view %s -> %s on '%s' (persisted)", drm_output_view_name(prev), name,
+		     inst->connector);
+	else
+		blog(LOG_WARNING, "drm-output: view %s -> %s on '%s' (NOT persisted -- %s)", drm_output_view_name(prev),
+		     name, inst->connector, reason);
+	return reason == NULL;
 }
 
 bool obs_drm_output_set_view(enum obs_drm_output_view view)
 {
-	const long v = view == OBS_DRM_OUTPUT_VIEW_MULTIVIEW ? OBS_DRM_OUTPUT_VIEW_MULTIVIEW
-							     : OBS_DRM_OUTPUT_VIEW_PROGRAM;
-	const long prev = os_atomic_set_long(&g_view.view, v);
-	const char *name = drm_output_view_name(v);
-
-	pthread_mutex_lock(&g_view.persist_lock);
-	const char *reason = drm_output_view_persist_locked(name);
-	pthread_mutex_unlock(&g_view.persist_lock);
-
-	if (!reason)
-		blog(LOG_INFO, "drm-output: view %s -> %s (persisted)", drm_output_view_name(prev), name);
-	else
-		blog(LOG_WARNING, "drm-output: view %s -> %s (NOT persisted -- %s)", drm_output_view_name(prev), name,
-		     reason);
-	return reason == NULL;
+	return obs_drm_output_set_view_of(0, view);
 }
 
-/* Render the registered Multiview into the sRGB texrender, then blit it raw into a claimed
+/* Render the registered Multiview of `inst` into its sRGB texrender, then blit it raw into a claimed
  * scanout buffer. Graphics thread, context held. */
-static void drm_output_view_render_multiview(void)
+static void drm_output_view_render_multiview(struct drm_output_inst *inst)
 {
+	struct drm_output_view_state *v = &inst->view;
 	uint32_t w, h;
-	drm_output_mode_size(&w, &h);
-	if (!g_view.texrender)
-		g_view.texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+	drm_output_mode_size(inst, &w, &h);
+	if (!v->texrender)
+		v->texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
 
 	const uint64_t t0 = os_gettime_ns();
 
-	if (g_view.texrender)
-		gs_texrender_reset(g_view.texrender);
-	if (!g_view.texrender || !gs_texrender_begin(g_view.texrender, w, h)) {
-		if (!g_view.warned_no_texrender) {
-			g_view.warned_no_texrender = true;
+	if (v->texrender)
+		gs_texrender_reset(v->texrender);
+	if (!v->texrender || !gs_texrender_begin(v->texrender, w, h)) {
+		if (!v->warned_no_texrender) {
+			v->warned_no_texrender = true;
 			blog(LOG_WARNING,
-			     "drm-output: multiview texrender unavailable (%ux%u) -- the HDMI keeps the last frame",
-			     w, h);
+			     "drm-output: multiview texrender unavailable (%ux%u) on '%s' -- the HDMI keeps the last frame",
+			     w, h, inst->connector);
 		}
 		return;
 	}
@@ -291,106 +255,110 @@ static void drm_output_view_render_multiview(void)
 	gs_blend_state_push();
 	gs_reset_blend_state();
 
-	g_view.render(g_view.render_param, w, h);
+	v->render(v->render_param, w, h);
 
 	gs_blend_state_pop();
-	gs_texrender_end(g_view.texrender);
+	gs_texrender_end(v->texrender);
 
 	/* The Multiview cost is spent in this tick even when no scanout buffer is free or the blit fails,
 	 * so record it (and the tick) now; a published render overwrites it with the full cost below. */
 	const uint64_t t_rendered = os_gettime_ns();
-	g_view.last_render_ns = t_rendered > t0 ? t_rendered - t0 : 0;
-	g_view.last_render_frame = obs_get_total_frames();
+	v->last_render_ns = t_rendered > t0 ? t_rendered - t0 : 0;
+	v->last_render_frame = obs_get_total_frames();
 
-	const int idx = drm_output_claim_render_buf();
+	const int idx = drm_output_claim_render_buf(inst);
 	if (idx < 0)
 		return; /* nothing writable this tick — the last frame stays on scanout */
-	if (drm_output_blit_raw(gs_texrender_get_texture(g_view.texrender), idx))
-		drm_output_publish_render_buf(idx);
+	if (drm_output_blit_raw(inst, gs_texrender_get_texture(v->texrender), idx))
+		drm_output_publish_render_buf(inst, idx);
 	else
 		return; /* the claimed buffer stays role-free; nothing new reached the scanout */
 
 	const uint64_t t1 = os_gettime_ns();
 	const uint64_t dt = t1 > t0 ? t1 - t0 : 0;
-	g_view.ewma_ns = g_view.ewma_ns ? (g_view.ewma_ns * 3 + dt) / 4 : dt;
-	g_view.last_render_ns = dt;
-	g_view.consecutive_skips = 0;
-	g_view.win_renders++;
-	g_view.win_sum_ns += dt;
-	if (dt > g_view.win_max_ns)
-		g_view.win_max_ns = dt;
+	v->ewma_ns = v->ewma_ns ? (v->ewma_ns * 3 + dt) / 4 : dt;
+	v->last_render_ns = dt;
+	v->consecutive_skips = 0;
+	v->win_renders++;
+	v->win_sum_ns += dt;
+	if (dt > v->win_max_ns)
+		v->win_max_ns = dt;
 
-	if (!g_view.bind_live_logged) {
-		g_view.bind_live_logged = true;
+	if (!v->bind_live_logged) {
+		v->bind_live_logged = true;
 		blog(LOG_INFO,
 		     "drm-output: multiview bind LIVE (built-in Multiview rendered at %ux%u and blitted into the "
-		     "scanout buffer)",
-		     w, h);
+		     "scanout buffer of '%s')",
+		     w, h, inst->connector);
 	}
 }
 
-/* The ~5 s multiview render-cost line (report-only), read next to the Program render audit `lagged`. */
-static void drm_output_view_audit(uint64_t now)
+/* The ~5 s multiview render-cost line of `inst` (report-only), read next to the Program render audit
+ * `lagged`. */
+static void drm_output_view_audit(struct drm_output_inst *inst, uint64_t now)
 {
-	if (g_view.win_start_ns == 0) {
-		g_view.win_start_ns = now;
+	struct drm_output_view_state *v = &inst->view;
+	if (v->win_start_ns == 0) {
+		v->win_start_ns = now;
 		return;
 	}
-	const uint64_t elapsed = now > g_view.win_start_ns ? now - g_view.win_start_ns : 0;
+	const uint64_t elapsed = now > v->win_start_ns ? now - v->win_start_ns : 0;
 	if (elapsed < MULTIVIEW_AUDIT_WINDOW_NS)
 		return;
 	const double win_s = (double)elapsed / 1000000000.0;
-	const double avg_ms =
-		g_view.win_renders ? ((double)g_view.win_sum_ns / (double)g_view.win_renders) / 1000000.0 : 0.0;
+	const double avg_ms = v->win_renders ? ((double)v->win_sum_ns / (double)v->win_renders) / 1000000.0 : 0.0;
 	uint32_t w, h;
-	drm_output_mode_size(&w, &h);
+	drm_output_mode_size(inst, &w, &h);
 	blog(LOG_INFO,
 	     "drm-output: multiview-render rendered_fps=%.1f skipped=%u avg_ms=%.2f max_ms=%.2f ewma_ms=%.2f "
-	     "cx=%u cy=%u self_ns=%llu",
-	     (double)g_view.win_renders / win_s, g_view.win_skips, avg_ms, (double)g_view.win_max_ns / 1000000.0,
-	     (double)g_view.ewma_ns / 1000000.0, w, h, (unsigned long long)g_view.last_self_ns);
-	g_view.win_start_ns = now;
-	g_view.win_renders = 0;
-	g_view.win_skips = 0;
-	g_view.win_sum_ns = 0;
-	g_view.win_max_ns = 0;
+	     "cx=%u cy=%u self_ns=%llu on '%s'",
+	     (double)v->win_renders / win_s, v->win_skips, avg_ms, (double)v->win_max_ns / 1000000.0,
+	     (double)v->ewma_ns / 1000000.0, w, h, (unsigned long long)v->last_self_ns, inst->connector);
+	v->win_start_ns = now;
+	v->win_renders = 0;
+	v->win_skips = 0;
+	v->win_sum_ns = 0;
+	v->win_max_ns = 0;
 }
 
-int drm_output_view_frame(void)
+int drm_output_view_frame(struct drm_output_inst *inst)
 {
-	const int view = (int)os_atomic_load_long(&g_view.view);
+	struct drm_output_view_state *v = &inst->view;
+	const int view = (int)os_atomic_load_long(&v->view);
 	/* main design 5840501628: leave the view's own render out of the previous tick's total only when
 	 * it ran in that tick (drm_output_view_self_last_ns), never across a skipped call. */
 	const uint64_t self_last_ns =
-		drm_output_view_self_last_ns(g_view.last_render_ns, g_view.last_render_frame, obs_get_total_frames());
+		drm_output_view_self_last_ns(v->last_render_ns, v->last_render_frame, obs_get_total_frames());
 	if (view != OBS_DRM_OUTPUT_VIEW_MULTIVIEW) {
-		if (g_view.win_start_ns != 0)
-			drm_output_view_reset_window_locked();
-		return drm_output_view_tick_action(view, g_view.render != NULL, false);
+		if (v->win_start_ns != 0)
+			drm_output_view_reset_window_locked(v);
+		return drm_output_view_tick_action(view, v->render != NULL, false);
 	}
 
-	const bool have_renderer = g_view.render != NULL;
+	const bool have_renderer = v->render != NULL;
 	bool skip = false;
 	if (have_renderer) {
-		g_view.frame_counter++;
-		g_view.last_self_ns = self_last_ns;
-		skip = obs_aux_sender_should_skip_excluding(DRM_OUTPUT_MV_RENDER_DIVISOR, g_view.frame_counter,
-							    g_view.ewma_ns, g_view.consecutive_skips, self_last_ns);
-	} else if (!g_view.warned_no_renderer) {
-		g_view.warned_no_renderer = true;
-		blog(LOG_INFO, "drm-output: view=multiview but no Multiview renderer registered yet -- keeping "
-			       "the last frame");
+		v->frame_counter++;
+		v->last_self_ns = self_last_ns;
+		skip = obs_aux_sender_should_skip_excluding(DRM_OUTPUT_MV_RENDER_DIVISOR, v->frame_counter, v->ewma_ns,
+							    v->consecutive_skips, self_last_ns);
+	} else if (!v->warned_no_renderer) {
+		v->warned_no_renderer = true;
+		blog(LOG_INFO,
+		     "drm-output: view=multiview on '%s' but no Multiview renderer registered yet -- keeping the last "
+		     "frame",
+		     inst->connector);
 	}
 
 	const int action = drm_output_view_tick_action(view, have_renderer, skip);
 	if (action == DRM_OUTPUT_TICK_MULTIVIEW) {
-		drm_output_view_render_multiview();
+		drm_output_view_render_multiview(inst);
 	} else if (skip) {
-		g_view.consecutive_skips++;
-		g_view.win_skips++;
+		v->consecutive_skips++;
+		v->win_skips++;
 	}
 	if (have_renderer)
-		drm_output_view_audit(os_gettime_ns());
+		drm_output_view_audit(inst, os_gettime_ns());
 	return action;
 }
 

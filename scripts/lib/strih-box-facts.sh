@@ -39,7 +39,8 @@ strih_box_fact_keys() {
     STRIH_HDMI_OUTPUT_BACKEND \
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
-    STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST
+    STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
+    STRIH_HDMI_OUTPUTS
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -126,6 +127,20 @@ _strih_box_https_name() {
   [[ "${1-}" =~ ^${l}(${m}*${l})?(\.${l}(${m}*${l})?)+$ ]]
 }
 
+# _strih_box_hdmi_outputs_ok VALUE -> 0 iff VALUE is 1..2 space-separated CONNECTOR:VIEW tokens (CONNECTOR
+# = an X RandR output name of letters, digits, `.` `_` `-`; VIEW = program | multiview), no connector
+# twice. The character set is spelled out (a bracket RANGE follows the locale in bash).
+_strih_box_hdmi_outputs_ok() {
+  local c='[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]' t n=0 seen=" "
+  for t in ${1-}; do
+    [[ "$t" =~ ^${c}+:(program|multiview)$ ]] || return 1
+    case "$seen" in *" ${t%%:*} "*) return 1 ;; esac
+    seen="${seen}${t%%:*} "
+    n=$((n + 1))
+  done
+  [ "$n" -ge 1 ] && [ "$n" -le 2 ]
+}
+
 # strih_box_validate NAME  (stdin: the parsed KEY=value lines) -> rc 0 iff the facts are complete and
 # coherent for box NAME; else one `strih-box <NAME>: ...` stderr line per problem, rc 1. Order: a
 # missing key, then every TODO_OWNER value (all named, then stop -- a template is not "malformed"),
@@ -196,6 +211,18 @@ strih_box_validate() {
   case "${f[STRIH_HDMI_OUTPUT_BACKEND]}:${f[STRIH_ROLE]}" in
     lease:* | vk-direct:* | none:stream) ;;
     *) echo "strih-box ${name}: STRIH_HDMI_OUTPUT_BACKEND '${f[STRIH_HDMI_OUTPUT_BACKEND]}' must be lease or vk-direct (none only for the stream role)" >&2; bad=1 ;;
+  esac
+  # issue 1424 part 2 (owner 13.10.2026): which connectors the fixed HDMI output drives and their default
+  # views -- `auto` (ONE output on the first connected HDMI, the issue-1346 behaviour), `none` (exactly
+  # when the backend is none), or 1..2 space-separated CONNECTOR:VIEW (an X RandR output name; program |
+  # multiview), no connector twice. setup-strih step 6 writes the list into drm-output.json's "outputs".
+  v="${f[STRIH_HDMI_OUTPUTS]}"
+  case "${f[STRIH_HDMI_OUTPUT_BACKEND]}:${v}" in
+    none:none) ;;
+    none:* | *:none) echo "strih-box ${name}: STRIH_HDMI_OUTPUTS '${v}' must be none exactly when STRIH_HDMI_OUTPUT_BACKEND is none" >&2; bad=1 ;;
+    *:auto) ;;
+    *) _strih_box_hdmi_outputs_ok "$v" \
+      || { echo "strih-box ${name}: STRIH_HDMI_OUTPUTS '${v}' must be auto, none or 1..2 space-separated CONNECTOR:program|multiview (no connector twice)" >&2; bad=1; } ;;
   esac
   # issue 1412: the box ROLE (strih = the cutter, stream = the stream OBS box), the PTP grandmaster the
   # dantesync config allows (setup-strih step 2 writes it into a FRESH box's /etc/dantesync/config.json)
@@ -496,6 +523,10 @@ strih_lx_program_audio_sampler() { strih_box_fact STRIH_PROGRAM_AUDIO_SAMPLER; }
 # strih_lx_hdmi_output_backend -> how the box's fixed HDMI output leaves the X desktop (fact
 # STRIH_HDMI_OUTPUT_BACKEND: lease | vk-direct), written into ~/.camera-box/drm-output.json (issue 1346).
 strih_lx_hdmi_output_backend() { strih_box_fact STRIH_HDMI_OUTPUT_BACKEND; }
+
+# strih_lx_hdmi_outputs -> the connectors the fixed HDMI output drives + their default views (fact
+# STRIH_HDMI_OUTPUTS: auto | none | CONNECTOR:VIEW ..., issue 1424 part 2).
+strih_lx_hdmi_outputs() { strih_box_fact STRIH_HDMI_OUTPUTS; }
 
 # strih_lx_intercom_config -> the repo-relative intercom hub routing file (fact STRIH_INTERCOM_CONFIG),
 # installed as /etc/intercom-hub/intercom.toml.

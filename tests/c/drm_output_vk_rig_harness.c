@@ -25,14 +25,18 @@
  *   gcc -O2 -std=gnu11 -Wall -Wextra -I$INC -I$LIBOBS tests/c/drm_output_vk_rig_harness.c \
  *       $LIBOBS/obs-drm-output-vk.c $LIBOBS/obs-drm-output-vk-setup.c -o vk-rig-harness \
  *       -ldl -lpthread -l:libX11.so.6 -l:libX11-xcb.so.1 -l:libxcb.so.1 -l:libxcb-randr.so.0 -l:libEGL.so.1
- * Run (the output must be OFF in X first — `xrandr --output HDMI-0 --off`):
+ * Run (each output must be OFF in X first — `xrandr --output HDMI-0 --off`):
  *   DISPLAY=:0 ./vk-rig-harness HDMI-0
+ * issue 1424 part 2: name two outputs to prove both displays on ONE shared VkDevice at once (each its
+ * own swapchain + present thread; strih-pp: the Multiview monitor + the vestibule HDMI-to-SDI):
+ *   DISPLAY=:0 ./vk-rig-harness HDMI-0 HDMI-1
  * Exit 0 = the backend acquired the display, bound GL, published every phase and released cleanly.
  */
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -128,36 +132,58 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* 2. The backend: acquire, solid pattern for 2 s, then the lazy GL bind (as on the first OBS tick). */
-	if (!drm_output_vk_open(output, 0x202020u)) {
-		fprintf(stderr, "FAIL: drm_output_vk_open\n");
-		return 1;
+	/* 2. The backend: acquire every named output (issue 1424 part 2: up to DRM_OUTPUT_VK_MAX_DISPLAYS at
+	 * once on ONE shared VkDevice), solid pattern for 2 s, then the lazy GL bind (as on the first OBS
+	 * tick). */
+	struct drm_output_vk_disp *disp[DRM_OUTPUT_VK_MAX_DISPLAYS] = {NULL};
+	uint32_t w[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0}, h[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0};
+	GLuint tex[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0}, fbo[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0};
+	int n_disp = 0;
+	for (int a = 1; a < argc && n_disp < DRM_OUTPUT_VK_MAX_DISPLAYS; a++) {
+		disp[n_disp] = drm_output_vk_open(argv[a], 0x202020u, NULL, NULL);
+		if (!disp[n_disp]) {
+			fprintf(stderr, "FAIL: drm_output_vk_open(%s)\n", argv[a]);
+			goto out;
+		}
+		drm_output_vk_mode_size(disp[n_disp], &w[n_disp], &h[n_disp]);
+		printf("PHASE solid t=%.3f output=%s mode=%ux%u\n", now_s(), argv[a], w[n_disp], h[n_disp]);
+		n_disp++;
 	}
-	uint32_t w = 0, h = 0;
-	drm_output_vk_mode_size(&w, &h);
-	printf("PHASE solid t=%.3f mode=%ux%u\n", now_s(), w, h);
+	if (n_disp == 0) {
+		disp[0] = drm_output_vk_open(output, 0x202020u, NULL, NULL);
+		if (!disp[0]) {
+			fprintf(stderr, "FAIL: drm_output_vk_open(%s)\n", output);
+			goto out;
+		}
+		drm_output_vk_mode_size(disp[0], &w[0], &h[0]);
+		printf("PHASE solid t=%.3f output=%s mode=%ux%u\n", now_s(), output, w[0], h[0]);
+		n_disp = 1;
+	}
 	fflush(stdout);
 	sleep(2);
-	if (!drm_output_vk_gl_bind()) {
-		fprintf(stderr, "FAIL: drm_output_vk_gl_bind\n");
-		goto out;
+	for (int i = 0; i < n_disp; i++) {
+		if (!drm_output_vk_gl_bind(disp[i])) {
+			fprintf(stderr, "FAIL: drm_output_vk_gl_bind (display %d)\n", i);
+			goto out;
+		}
 	}
 
-	/* 3. The source: the storage libobs gives a GS_BGRA render target (GL_SRGB8_ALPHA8), drawn with
-	 * framebuffer sRGB OFF = raw bytes, exactly like drm_output_blit_raw writes the intermediate. */
-	GLuint tex = 0, fbo = 0;
-	glGenTextures(1, &tex);
-	glBindTexture(GL_TEXTURE_2D, tex);
-	glTexStorage2D(GL_TEXTURE_2D, 1, GL_SRGB8_ALPHA8, (GLsizei)w, (GLsizei)h);
-	glGenFramebuffers(1, &fbo);
-	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
-	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-		fprintf(stderr, "FAIL: framebuffer incomplete\n");
-		goto out;
+	/* 3. The source per display: the storage libobs gives a GS_BGRA render target (GL_SRGB8_ALPHA8),
+	 * drawn with framebuffer sRGB OFF = raw bytes, exactly like drm_output_blit_raw writes the
+	 * intermediate. */
+	for (int i = 0; i < n_disp; i++) {
+		glGenTextures(1, &tex[i]);
+		glBindTexture(GL_TEXTURE_2D, tex[i]);
+		glTexStorage2D(GL_TEXTURE_2D, 1, GL_SRGB8_ALPHA8, (GLsizei)w[i], (GLsizei)h[i]);
+		glGenFramebuffers(1, &fbo[i]);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo[i]);
+		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[i], 0);
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+			fprintf(stderr, "FAIL: framebuffer incomplete (display %d)\n", i);
+			goto out;
+		}
 	}
 	glDisable(GL_FRAMEBUFFER_SRGB);
-	glViewport(0, 0, (GLsizei)w, (GLsizei)h);
 
 	static const struct {
 		const char *name;
@@ -169,13 +195,17 @@ int main(int argc, char **argv)
 		fflush(stdout);
 		double end = now_s() + 3.0;
 		while (now_s() < end) {
-			glClearColor(phases[p].r, phases[p].g, phases[p].b, 1.0f);
-			glClear(GL_COLOR_BUFFER_BIT);
-			int idx = drm_output_vk_claim();
-			if (idx >= 0 && drm_output_vk_publish_gl(idx, tex, w, h))
-				published++;
-			else
-				skipped++;
+			for (int i = 0; i < n_disp; i++) {
+				glBindFramebuffer(GL_FRAMEBUFFER, fbo[i]);
+				glViewport(0, 0, (GLsizei)w[i], (GLsizei)h[i]);
+				glClearColor(phases[p].r, phases[p].g, phases[p].b, 1.0f);
+				glClear(GL_COLOR_BUFFER_BIT);
+				int idx = drm_output_vk_claim(disp[i]);
+				if (idx >= 0 && drm_output_vk_publish_gl(disp[i], idx, tex[i], w[i], h[i]))
+					published++;
+				else
+					skipped++;
+			}
 			usleep(16667);
 		}
 	}
@@ -185,33 +215,48 @@ int main(int argc, char **argv)
 	double burst_end = now_s() + 2.0;
 	for (unsigned k = 0; now_s() < burst_end; k++) {
 		/* claim FIRST, like the OBS frame hook: a refused claim renders nothing (no GL backlog) */
-		int idx = drm_output_vk_claim();
-		if (idx < 0) {
-			usleep(200);
-			continue;
+		bool any = false;
+		for (int i = 0; i < n_disp; i++) {
+			int idx = drm_output_vk_claim(disp[i]);
+			if (idx < 0)
+				continue;
+			any = true;
+			const float v = (k & 1u) ? 0.75f : 0.25f;
+			glBindFramebuffer(GL_FRAMEBUFFER, fbo[i]);
+			glViewport(0, 0, (GLsizei)w[i], (GLsizei)h[i]);
+			glClearColor(v, v, v, 1.0f);
+			glClear(GL_COLOR_BUFFER_BIT);
+			if (drm_output_vk_publish_gl(disp[i], idx, tex[i], w[i], h[i]))
+				burst++;
 		}
-		const float v = (k & 1u) ? 0.75f : 0.25f;
-		glClearColor(v, v, v, 1.0f);
-		glClear(GL_COLOR_BUFFER_BIT);
-		if (drm_output_vk_publish_gl(idx, tex, w, h))
-			burst++;
+		if (!any)
+			usleep(200);
 	}
-	/* Drain the GL work of the burst, then let the present loop run on for 2 s -- it must still be alive
-	 * (no fence wedge, no semaphore misuse) and the release below must not need the leak path. */
+	/* Drain the GL work of the burst, then let the present loops run on for 2 s -- they must still be
+	 * alive (no fence wedge, no semaphore misuse) and the release below must not need the leak path. */
 	glFinish();
 	sleep(2);
-	pthread_mutex_lock(&g_drm_vk.lock);
-	unsigned long long skips = g_drm_vk.gl_skips;
-	pthread_mutex_unlock(&g_drm_vk.lock);
-	printf("PHASE end t=%.3f published=%u skipped=%u burst=%u gl_skips=%llu\n", now_s(), published, skipped, burst,
-	       skips);
-	rc = (published > 0 && burst > 0 && skips > 0 && drm_output_vk_wants_frames()) ? 0 : 1;
-	printf("present loop alive after the drain: %s\n", drm_output_vk_wants_frames() ? "yes" : "NO");
+	unsigned long long skips = 0;
+	bool alive = true;
+	for (int i = 0; i < n_disp; i++) {
+		pthread_mutex_lock(&disp[i]->lock);
+		skips += disp[i]->gl_skips;
+		pthread_mutex_unlock(&disp[i]->lock);
+		alive = alive && drm_output_vk_wants_frames(disp[i]);
+	}
+	printf("PHASE end t=%.3f displays=%d published=%u skipped=%u burst=%u gl_skips=%llu\n", now_s(), n_disp,
+	       published, skipped, burst, skips);
+	rc = (published > 0 && burst > 0 && skips > 0 && alive) ? 0 : 1;
+	printf("present loop(s) alive after the drain: %s\n", alive ? "yes" : "NO");
 
 out:
-	drm_output_vk_halt();
-	drm_output_vk_gl_unbind();
-	drm_output_vk_close();
+	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {
+		if (!disp[i])
+			continue;
+		drm_output_vk_halt(disp[i]);
+		drm_output_vk_gl_unbind(disp[i]);
+		drm_output_vk_close(disp[i]);
+	}
 	eglMakeCurrent(edpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 	eglTerminate(edpy);
 	XCloseDisplay(xdpy);

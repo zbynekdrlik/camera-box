@@ -54,21 +54,40 @@ struct obs_drm_output_config {
 	enum obs_drm_output_backend backend;
 };
 
-/* Start the DRM-lease output: lease {connector + a free CRTC} out of X and page-flip a solid
- * colour on a dedicated vblank-locked thread. Returns true on success. A second start while
- * already active is a no-op returning true. */
+/* camera-box issue 1424 part 2 (owner 13.10.2026): the module drives up to this many fixed outputs at
+ * once -- each its own connector, backend state, view, present clock and audio leg (strih-pp: HDMI-0 =
+ * the cutter's Multiview, HDMI-1 = the vestibule Program + its audio). */
+#define OBS_DRM_OUTPUT_MAX_OUTPUTS 2
+
+/* Start the output on cfg->connector_name: the instance already configured for that connector, else a new
+ * instance (view Program) in a free slot. Returns true on success; a start of an instance that is already
+ * active is a no-op returning true; false when it failed or no slot is free. */
 EXPORT bool obs_drm_output_start(const struct obs_drm_output_config *cfg);
 
-/* Stop the flip thread and release the lease; the connector returns to Xorg. Safe when inactive. */
+/* Stop EVERY instance (its audio leg first, then its scanout); each connector returns to Xorg. Safe when
+ * inactive. */
 EXPORT void obs_drm_output_stop(void);
 
-/* True while the lease is held and the flip thread is running. */
+/* True while ANY instance holds its connector and scans out. */
 EXPORT bool obs_drm_output_active(void);
 
 /* One-shot, DEFAULT-OFF autostart: read ~/.camera-box/drm-output.json and, only if it exists and
- * carries "enabled": true, start the output. Absent/disabled => one `drm-output:` log line and no
- * behaviour change. Called once from obs_startup(), under a __linux__ guard at the call site. */
+ * carries "enabled": true, start the output(s) -- the single-object form (one output) or the issue-1424
+ * "outputs" array (up to OBS_DRM_OUTPUT_MAX_OUTPUTS, all or none: a malformed array starts NO output and
+ * names why). Absent/disabled => one `drm-output:` log line and no behaviour change. Called once from
+ * obs_startup(), under a __linux__ guard at the call site. */
 void obs_drm_output_maybe_autostart(void);
+
+/* camera-box issue 1424 part 2 -- the per-output API (index 0 .. obs_drm_output_count()-1). */
+
+/* The number of configured outputs (0 when the config is absent, disabled or malformed). */
+EXPORT int obs_drm_output_count(void);
+
+/* The X RandR connector name of output `idx` ("" outside the range). */
+EXPORT const char *obs_drm_output_connector(int idx);
+
+/* True while output `idx` holds its connector and scans out. */
+EXPORT bool obs_drm_output_active_of(int idx);
 
 /* #1152 M2 — graphics-thread frame hook: called once per tick by obs_graphics_thread_loop()
  * right after the Program is composited (output_frames). When the output is active with the
@@ -102,17 +121,24 @@ enum obs_drm_output_view {
  * graphics context held, viewport/ortho already set to 0..cx / 0..cy, cleared to black). */
 typedef void (*obs_drm_output_view_render_t)(void *param, uint32_t cx, uint32_t cy);
 
-/* Register (render != NULL) or clear (render == NULL) the MULTIVIEW renderer. Serialised with
- * the graphics thread (takes the graphics context), so after it returns the previous renderer
- * is never called again — the caller may free what `param` points to. Linux-only. */
+/* Register (render != NULL) or clear (render == NULL) the MULTIVIEW renderer of output `idx` (issue
+ * 1424 part 2: each output in the Multiview view renders its own). Serialised with the graphics thread
+ * (takes the graphics context), so after it returns the previous renderer is never called again — the
+ * caller may free what `param` points to. A no-op outside the range. Linux-only. */
+EXPORT void obs_drm_output_set_view_renderer_of(int idx, obs_drm_output_view_render_t render, void *param);
+
+/* The current view of output `idx` (thread-safe; Program outside the range). */
+EXPORT enum obs_drm_output_view obs_drm_output_get_view_of(int idx);
+
+/* Switch the view of output `idx` live and persist it into THAT output's entry of the drm-output config
+ * the autostart read (the single-object form's "view", or its "outputs" element). Returns true when the
+ * choice was persisted; false when it was not (outside the range, or the config no longer names the
+ * output) -- the view still switches for this session when the output exists. */
+EXPORT bool obs_drm_output_set_view_of(int idx, enum obs_drm_output_view view);
+
+/* The single-output forms (issue 1346) = output 0. */
 EXPORT void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void *param);
-
-/* The current view (thread-safe). */
 EXPORT enum obs_drm_output_view obs_drm_output_get_view(void);
-
-/* Switch the view live and persist it into the drm-output config the autostart read. Returns
- * true when the choice was persisted; false when there is no config to persist into (the view
- * still switches for this session). */
 EXPORT bool obs_drm_output_set_view(enum obs_drm_output_view view);
 
 #ifdef __cplusplus

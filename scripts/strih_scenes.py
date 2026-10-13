@@ -77,6 +77,12 @@ DRM_OUTPUT_VIEWS = ("program", "multiview")
 # issue 1346: how the output leaves the X desktop -- the X RandR lease (the default = the absent key) or
 # the NVIDIA Vulkan direct display. Mirrors obs-drm-output-backend.c drm_output_parse_backend.
 DRM_OUTPUT_BACKENDS = ("lease", "vk-direct")
+# issue 1424 part 2 (owner 13.10.2026): the module drives up to this many fixed outputs at once, from an
+# "outputs" array in the same config (obs-drm-output-outputs.c); the M1 dark grey is each one's default
+# solid; a connector name is 1..63 bytes (the C's bound).
+DRM_OUTPUT_MAX_OUTPUTS = 2
+DRM_OUTPUT_DEFAULT_ARGB = 2105376
+DRM_OUTPUT_CONNECTOR_MAX = 64
 
 
 def certified_genlock_settings(latency):
@@ -448,13 +454,18 @@ def drm_output_lease_connector(config_text):
     tests/python/test_strih_drm_output_1346.py): a full JSON parse, a boolean "enabled": true, a
     non-empty string "connector" AND (issue 1346) a known "backend" -- the C keeps the output dormant on
     an unknown one, so the wrapper must not take the connector out of X for it (a black HDMI).
-    Empty / malformed / disabled / unknown backend -> "" (dormant), never a raise."""
+    Empty / malformed / disabled / unknown backend -> "" (dormant), never a raise.
+    issue 1424 part 2: an "outputs" array config -> its FIRST connector when the whole array is valid
+    (drm_output_instances), else "" (the C starts no output of a malformed array)."""
     if not config_text:
         return ""
     try:
         cfg = json.loads(config_text)
         if cfg.get("enabled") is not True:
             return ""
+        if "outputs" in cfg:
+            connectors = drm_output_lease_connectors(config_text)
+            return connectors[0] if connectors else ""
         if drm_output_backend_of(cfg.get("backend")) is None:
             return ""
         connector = cfg.get("connector")
@@ -541,12 +552,37 @@ def _rewrite_drm_config(path, mutate):
     os.replace(tmp, real)
 
 
-def write_drm_view(view, path=DRM_OUTPUT_CONF):
+def write_drm_view(view, path=DRM_OUTPUT_CONF, connector=None):
     """Persist `view` into an EXISTING drm-output config (every other key kept -- see
-    _rewrite_drm_config). Raises ValueError on an unknown view or an unprovisioned / broken config."""
+    _rewrite_drm_config). issue 1424 part 2: an "outputs" array config sets the view of the entry whose
+    connector is `connector` (the twin of obs_drm_output_set_view_of); `connector` may be omitted only
+    when the array has ONE entry. The single-object form sets its top-level view (a `connector` given
+    must be its connector). Raises ValueError on an unknown view, an unknown / unnamed connector or an
+    unprovisioned / broken config."""
     if view not in DRM_OUTPUT_VIEWS:
         raise ValueError("unknown HDMI output view %r (want 'program' or 'multiview')" % (view,))
-    _rewrite_drm_config(path, lambda cfg: cfg.__setitem__("view", view))
+
+    def mutate(cfg):
+        if "outputs" not in cfg:
+            if connector is not None and cfg.get("connector") != connector:
+                raise ValueError("%s drives %r, not %r" % (path, cfg.get("connector"), connector))
+            cfg["view"] = view
+            return
+        entries = [e for e in cfg["outputs"] if isinstance(e, dict)] if isinstance(cfg["outputs"], list) else []
+        names = [e.get("connector") for e in entries]
+        if connector is None:
+            if len(entries) != 1:
+                raise ValueError("%s drives %d outputs (%s) -- name one with --connector"
+                                 % (path, len(entries), ", ".join(str(n) for n in names)))
+            entries[0]["view"] = view
+            return
+        for entry in entries:
+            if entry.get("connector") == connector:
+                entry["view"] = view
+                return
+        raise ValueError("%s drives no output %r (it drives %s)" % (path, connector, ", ".join(str(n) for n in names)))
+
+    _rewrite_drm_config(path, mutate)
 
 
 def write_drm_backend(backend, path=DRM_OUTPUT_CONF):
@@ -558,12 +594,172 @@ def write_drm_backend(backend, path=DRM_OUTPUT_CONF):
         raise ValueError("unknown HDMI output backend %r (want 'lease' or 'vk-direct')" % (backend,))
 
     def mutate(cfg):
-        if backend == "lease":
-            cfg.pop("backend", None)
-        else:
-            cfg["backend"] = backend
+        # issue 1424 part 2: the backend is a BOX fact, so every "outputs" entry carries it
+        targets = [cfg]
+        if "outputs" in cfg:
+            targets = [e for e in cfg["outputs"] if isinstance(e, dict)] if isinstance(cfg["outputs"], list) else []
+        for t in targets:
+            if backend == "lease":
+                t.pop("backend", None)
+            else:
+                t["backend"] = backend
 
     _rewrite_drm_config(path, mutate)
+
+
+def write_drm_outputs(spec, backend, path=DRM_OUTPUT_CONF):
+    """issue 1424 part 2: bring an EXISTING drm-output config onto the box fact STRIH_HDMI_OUTPUTS
+    (`spec`, e.g. "HDMI-0:multiview HDMI-1:program") and the backend fact: the "outputs" array lists the
+    fact's connectors in the fact's order. The operator's persisted view of a connector is KEPT (a
+    connector the config already drives -- single-object or array form -- keeps its "view"; a new one
+    gets the fact's default view), as is its "argb"; the single-object form's connector / view / argb /
+    backend keys move into their entry; every other top-level key ("enabled", "program", ...) stays.
+    Raises ValueError on a malformed spec, an unknown backend or an unprovisioned / broken config."""
+    wanted = drm_output_spec_of(spec)
+    if not wanted:
+        raise ValueError("STRIH_HDMI_OUTPUTS %r names no connector list" % (spec,))
+    if backend not in DRM_OUTPUT_BACKENDS:
+        raise ValueError("unknown HDMI output backend %r (want 'lease' or 'vk-direct')" % (backend,))
+
+    def mutate(cfg):
+        known = {}
+        if "outputs" in cfg:
+            for entry in cfg["outputs"] if isinstance(cfg["outputs"], list) else []:
+                if isinstance(entry, dict) and isinstance(entry.get("connector"), str):
+                    known[entry["connector"]] = entry
+        elif isinstance(cfg.get("connector"), str):
+            known[cfg["connector"]] = {k: cfg[k] for k in ("view", "argb") if k in cfg}
+        for k in ("connector", "view", "argb", "backend"):
+            cfg.pop(k, None)
+        outputs = []
+        for conn, view in wanted:
+            old = known.get(conn, {})
+            keep_view = drm_output_view_of(_drm_cfg_str(old.get("view"))) if "view" in old else None
+            argb = old["argb"] if "argb" in old else DRM_OUTPUT_DEFAULT_ARGB
+            outputs.append(drm_output_outputs_entry(conn, keep_view or view, backend, argb))
+        cfg["outputs"] = outputs
+
+    _rewrite_drm_config(path, mutate)
+
+
+# --- issue 1424 part 2: up to DRM_OUTPUT_MAX_OUTPUTS fixed outputs at once ---------------------------
+
+def _drm_cfg_str(value):
+    """A JSON value read the way the C (jansson / obs_data_get_string) reads an item: the string, else ""."""
+    return value if isinstance(value, str) else ""
+
+
+def _drm_cfg_connector(obj):
+    """The "connector" of one config object: a string of 1..63 UTF-8 bytes (the C's bound), else None."""
+    value = obj.get("connector")
+    if not isinstance(value, str):
+        return None
+    n = len(value.encode("utf-8"))
+    return value if 0 < n < DRM_OUTPUT_CONNECTOR_MAX else None
+
+
+def _drm_cfg_argb(obj):
+    """"argb": absent -> the default dark grey; an integer -> its low 32 bits; a real -> truncated to an
+    integer first; any other present value (a bool, a string, null ...) -> 0. The C reading of it."""
+    if "argb" not in obj:
+        return DRM_OUTPUT_DEFAULT_ARGB
+    value = obj["argb"]
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value & 0xFFFFFFFF
+    if isinstance(value, float):
+        return int(value) & 0xFFFFFFFF
+    return 0
+
+
+def drm_output_instances(config_text):
+    """Pure: the drm-output config -> (verdict, outputs). The vendored C grammar
+    (obs-drm-output-outputs.c drm_output_config_classify) row for row -- ONE shared table,
+    tests/fixtures/drm_output_outputs_parity.tsv. `outputs` (only on "ok") is a list of dicts
+    {connector, view, backend, argb}, in config order. Verdicts: ok | unreadable | disabled |
+    outputs-not-array | outputs-empty | outputs-too-many | entry-not-object | connector-invalid |
+    connector-duplicate | view-unknown | backend-unknown.
+
+    The single-object form (no "outputs" key) is the issue-1152/1346 grammar: an unknown view reads as
+    the Program there. The "outputs" form is all or nothing: one bad entry and the C starts NO output."""
+    try:
+        cfg = json.loads(config_text) if config_text else None
+    except ValueError:
+        cfg = None
+    if not isinstance(cfg, dict):
+        return "unreadable", []
+    if cfg.get("enabled") is not True:
+        return "disabled", []
+    if "outputs" not in cfg:
+        conn = _drm_cfg_connector(cfg)
+        if conn is None:
+            return "connector-invalid", []
+        backend = drm_output_backend_of(_drm_cfg_str(cfg.get("backend")))
+        if backend is None:
+            return "backend-unknown", []
+        view = drm_output_view_of(_drm_cfg_str(cfg.get("view"))) or "program"
+        return "ok", [{"connector": conn, "view": view, "backend": backend, "argb": _drm_cfg_argb(cfg)}]
+    outputs = cfg["outputs"]
+    if not isinstance(outputs, list):
+        return "outputs-not-array", []
+    if not outputs:
+        return "outputs-empty", []
+    if len(outputs) > DRM_OUTPUT_MAX_OUTPUTS:
+        return "outputs-too-many", []
+    got = []
+    for entry in outputs:
+        if not isinstance(entry, dict):
+            return "entry-not-object", []
+        conn = _drm_cfg_connector(entry)
+        if conn is None:
+            return "connector-invalid", []
+        view = drm_output_view_of(_drm_cfg_str(entry.get("view")))
+        if view is None:
+            return "view-unknown", []
+        backend = drm_output_backend_of(_drm_cfg_str(entry.get("backend")))
+        if backend is None:
+            return "backend-unknown", []
+        if any(o["connector"] == conn for o in got):
+            return "connector-duplicate", []
+        got.append({"connector": conn, "view": view, "backend": backend, "argb": _drm_cfg_argb(entry)})
+    return "ok", got
+
+
+def drm_output_lease_connectors(config_text):
+    """Pure: every connector the drm-output config arms (config order), [] when it arms none. The
+    launcher takes each of them out of the X layout before OBS starts (the vk-direct acquire and the
+    lease both need an idle connector)."""
+    verdict, outputs = drm_output_instances(config_text)
+    return [o["connector"] for o in outputs] if verdict == "ok" else []
+
+
+def drm_output_spec_of(spec):
+    """Pure: the box fact STRIH_HDMI_OUTPUTS -> [(connector, view), ...] (`auto` / `none` -> []).
+    Raises ValueError on a malformed value (the fact loader refuses the same)."""
+    if spec in ("auto", "none"):
+        return []
+    out = []
+    for token in spec.split():
+        conn, sep, view = token.partition(":")
+        if not sep or not conn or view not in DRM_OUTPUT_VIEWS or not all(
+                c.isascii() and (c.isalnum() or c in "._-") for c in conn):
+            raise ValueError("bad HDMI output %r in %r (want CONNECTOR:program|multiview)" % (token, spec))
+        if any(c == conn for c, _ in out):
+            raise ValueError("connector %r listed twice in %r" % (conn, spec))
+        out.append((conn, view))
+    if not 1 <= len(out) <= DRM_OUTPUT_MAX_OUTPUTS:
+        raise ValueError("%r lists %d outputs (want 1..%d)" % (spec, len(out), DRM_OUTPUT_MAX_OUTPUTS))
+    return out
+
+
+def drm_output_outputs_entry(connector, view, backend, argb=DRM_OUTPUT_DEFAULT_ARGB):
+    """One "outputs" element in the machine-written key order (connector, argb, view, backend; `lease` =
+    the absent backend key, the single-object form's rule)."""
+    entry = {"connector": connector, "argb": argb, "view": view}
+    if backend != "lease":
+        entry["backend"] = backend
+    return entry
 
 
 def _obs_phase2_module():
@@ -866,6 +1062,9 @@ def main():
                     help="issue 1346: set the HDMI output view (program|multiview) in "
                          "~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the "
                          "next OBS start (the live switch is OBS Tools > HDMI vystup)")
+    ap.add_argument("--connector", default=None,
+                    help="issue 1424 part 2: with --projector, the output whose view to set (required when "
+                         "the config drives several outputs, e.g. HDMI-0)")
     args = ap.parse_args()
 
     # An explicit mode is REQUIRED (issue 1317 review): a bare invocation must never silently connect
@@ -893,11 +1092,12 @@ def main():
     # the input seed manifest and never OBS (the running OBS switches live from its own Tools menu).
     if args.projector is not None:
         try:
-            write_drm_view(args.projector, DRM_OUTPUT_CONF)
+            write_drm_view(args.projector, DRM_OUTPUT_CONF, args.connector)
         except ValueError as e:
             sys.exit("FAIL issue 1346: %s" % e)
-        print("HDMI output view set to %s in %s -- takes effect at the next OBS start (switch it live in "
-              "OBS Tools > HDMI vystup)" % (args.projector, DRM_OUTPUT_CONF))
+        print("HDMI output view set to %s%s in %s -- takes effect at the next OBS start (switch it live in "
+              "OBS Tools > HDMI vystup)" % (args.projector, " on %s" % args.connector if args.connector else "",
+                                             DRM_OUTPUT_CONF))
         return
 
     manifest_text = _read_manifest(args.manifest)

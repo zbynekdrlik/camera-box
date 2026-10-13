@@ -20,8 +20,8 @@
  * Setup keeps the box's sound server off every HDMI/DP PCM (scripts/lib/drm-output-audio.sh).
  *
  * One leg per output instance: drm_output_audio_open() returns its own state, the raw callback's
- * param is that state, nothing is file-static except the present clock of the module's one output.
- * Linux-only, like the rest of the module.
+ * param is that state, and the present clock + the view it reads are its output's own (issue 1424
+ * part 2: two outputs, two legs, nothing file-static). Linux-only, like the rest of the module.
  */
 
 #include <stdbool.h>
@@ -33,22 +33,21 @@ extern "C" {
 #endif
 
 /* The present delay of one output: the render tick of each scanout buffer (set at publish) and the
- * smoothed tick -> on-screen delay (updated when a buffer reaches the screen). */
+ * smoothed tick -> on-screen delay (updated when a buffer reaches the screen). One per output instance
+ * (struct drm_output_inst::clock). */
 #define DRM_OUTPUT_PRESENT_SLOTS 8
 struct drm_output_present_clock {
 	volatile long tick_ns[DRM_OUTPUT_PRESENT_SLOTS];
 	volatile long delay_ns;
 };
 
-/* The module's one output (lease or vk-direct, whichever owns it). */
-extern struct drm_output_present_clock drm_output_present_clock_main;
+/* Graphics thread, at publish: buffer `idx` of the output whose clock is `c` carries the render tick
+ * obs_get_video_frame_time(). */
+void drm_output_present_note_published(struct drm_output_present_clock *c, int idx);
 
-/* Graphics thread, at publish: buffer `idx` carries the render tick obs_get_video_frame_time(). */
-void drm_output_present_note_published(int idx);
-
-/* Scanout thread, when buffer `idx` reached the screen at `shown_ns` (os_gettime_ns clock). A buffer
- * re-shown with no new publish counts nothing (its tick was consumed). */
-void drm_output_present_note_shown(int idx, uint64_t shown_ns);
+/* Scanout thread, when buffer `idx` of the output whose clock is `c` reached the screen at `shown_ns`
+ * (os_gettime_ns clock). A buffer re-shown with no new publish counts nothing (its tick was consumed). */
+void drm_output_present_note_shown(struct drm_output_present_clock *c, int idx, uint64_t shown_ns);
 
 /* The connector's EDID: the X RandR output property "EDID" of the output named `output_name` (the
  * name `xrandr` prints, the config's "connector"). Returns the byte count, 0 when unreadable. */
@@ -57,9 +56,11 @@ size_t drm_output_audio_read_edid(const char *output_name, uint8_t *buf, size_t 
 struct drm_output_audio;
 
 /* Open the leg of one output, after its backend start succeeded: resolves + opens the PCM on a worker
- * thread (bounded re-read window), then plays mix 0. Never fails the output; NULL only on bad args. */
+ * thread (bounded re-read window), then plays mix 0 while `*view` (the output's own view,
+ * OBS_DRM_OUTPUT_VIEW_*, read atomically) is the Program -- muted in the Multiview. Never fails the
+ * output; NULL only on bad args. `clock` and `view` must outlive the leg (they are the instance's). */
 struct drm_output_audio *drm_output_audio_open(const char *connector, const uint8_t *edid, size_t edid_len,
-					       struct drm_output_present_clock *clock);
+					       struct drm_output_present_clock *clock, const volatile long *view);
 
 /* Stop the leg: join the resolver, disconnect the mix callback (no callback in flight after it),
  * close the PCM. Safe with NULL. */
