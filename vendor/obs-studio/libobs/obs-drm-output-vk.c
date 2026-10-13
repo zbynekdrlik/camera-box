@@ -32,12 +32,13 @@
  *   - the waits a wedged GPU could hang are bounded: the present loop's acquire/fence waits (1 s,
  *     re-checked), the teardown's quiesce of an outstanding copy and its drain of the display's queue
  *     (5 x 1 s each; a timeout leaks the display's Vulkan objects loudly instead of hanging the OBS
- *     shutdown). Only the LAST display's teardown waits the device idle, and the swapchain rebuild
- *     never waits on the device at all.
+ *     shutdown), a surface rebuild's drain of the display's queue (5 x 1 s; a timeout wedges that
+ *     display's rebuilds) and an open's settle wait (2 s). Only the LAST display's teardown waits the
+ *     device idle, and no rebuild ever waits on the device.
  *
  * The present thread never touches GL; the graphics thread never touches the Vulkan queue. Building
- * the Vulkan/X objects (and tearing them down) is obs-drm-output-vk-setup.c; the shared state type is
- * obs-drm-output-vk-internal.h.
+ * the Vulkan/X objects (and tearing them down) is obs-drm-output-vk-setup.c, the settle wait, re-mode and
+ * rebuild obs-drm-output-vk-remode.c; the shared state type is obs-drm-output-vk-internal.h.
  * Linux-only; built only via libobs/cmake/os-linux.cmake (Vulkan headers only — libvulkan.so.1 is
  * dlopen'd, so a box without the loader just logs and stays dormant). The pure helpers
  * drm_output_vk_present_pick + drm_output_vk_present_done + drm_output_vk_pick_claim are lift-compiled +

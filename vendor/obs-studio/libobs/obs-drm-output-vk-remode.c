@@ -154,6 +154,8 @@ bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)
 	}
 	if (drm_output_vk_rebuild_presentation(d, true))
 		return true;
+	if (d->queue_wedged)
+		return false; /* the rebuild named the undrained queue; a native-mode retry cannot run either */
 	/* the wanted mode would not come up: forget it and rebuild today's mode once */
 	os_atomic_set_long(&d->want_w, 0);
 	os_atomic_set_long(&d->want_h, 0);

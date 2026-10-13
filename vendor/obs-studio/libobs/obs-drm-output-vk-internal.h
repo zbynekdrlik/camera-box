@@ -1,9 +1,11 @@
 #pragma once
 
 /*
- * camera-box issue 1346 — the vk-direct backend's INTERNAL seam between its two TUs:
+ * camera-box issue 1346 — the vk-direct backend's INTERNAL seam between its TUs:
  *   obs-drm-output-vk-setup.c  load Vulkan, find + acquire the X output, build the surface, device,
  *                              swapchain and the shared images; tear all of it down again
+ *   obs-drm-output-vk-remode.c (issue 1424) the open's settle wait before its acquire, the re-mode and
+ *                              the presentation rebuild
  *   obs-drm-output-vk.c        the present thread, the lifecycle API (obs-drm-output-vk.h) and the
  *                              GL side of the GL<->Vulkan interop
  * issue 1424 part 2: the state is split into ONE shared device (struct drm_output_vk_device) and one
@@ -268,7 +270,8 @@ bool drm_output_vk_setup(struct drm_output_vk_disp *d);
  * GPU that never finishes it leaks the display's Vulkan objects (loudly) and marks the device wedged
  * instead of hanging the OBS shutdown. */
 void drm_output_vk_destroy_display(struct drm_output_vk_disp *d);
-/* Drain the display's queue BOUNDED (5 x 1 s) before its teardown; false = it never drained (leak). */
+/* Drain the display's queue BOUNDED (5 x 1 s) before its teardown or a surface rebuild; false = it never
+ * drained (the teardown leaks the display, a rebuild wedges its queue). */
 bool drm_output_vk_drain_queue_bounded(struct drm_output_vk_disp *d);
 
 /* issue 1424 (obs-drm-output-vk-setup.c, shared with the remode TU): the display's modes as the picker
@@ -290,16 +293,16 @@ void drm_output_vk_destroy_swapchain(struct drm_output_vk_disp *d);
 /* obs-drm-output-vk-remode.c: the open's bounded settle wait before its acquire (issue 1424 part 2). */
 void drm_output_vk_wait_others_settled(struct drm_output_vk_disp *d);
 
-/* obs-drm-output-vk-setup.c, present thread only: rebuild the swapchain (and the display-plane surface
- * too when `surface_lost`) after VK_ERROR_OUT_OF_DATE_KHR / VK_ERROR_SURFACE_LOST_KHR, e.g. an HDMI
+/* obs-drm-output-vk-remode.c, present thread only: rebuild the swapchain (and the display-plane surface
+ * too when `surface_lost`, after draining the queue and destroying the old presentation, issue 1424) after VK_ERROR_OUT_OF_DATE_KHR / VK_ERROR_SURFACE_LOST_KHR, e.g. an HDMI
  * replug. false = the display now offers a different mode size (the shared images no longer fit) or a
  * Vulkan call failed; the caller retries a bounded number of times, then gives up. */
 bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost);
 
-/* camera-box issue 1424, obs-drm-output-vk-setup.c, present thread: re-mode onto the wanted mode when
+/* camera-box issue 1424, obs-drm-output-vk-remode.c, present thread: re-mode onto the wanted mode when
  * flagged and the pick changed (same size only). false = the surface rebuild failed. */
 bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d);
 
 /* obs-drm-output-vk-setup.c, present thread (after a signalled fence) or teardown: free a retired
- * swapchain + surface (safe when none). */
+ * swapchain (safe when none; a surface is never retired, issue 1424). */
 void drm_output_vk_free_retired(struct drm_output_vk_disp *d);

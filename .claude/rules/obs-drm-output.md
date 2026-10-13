@@ -648,7 +648,10 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   `drm_output_vk_first_unsettled`, truth-tabled in `tests/drm_output_vk_two_displays_1424.rs`), then
   acquires. Rejected alternative (review): acquire EVERY display before any presents (no overlap by
   construction) -- it needs a two-phase open across the outputs layer and the vk core API; the settle
-  wait is causal (presents, not a sleep) and also covers a re-mode on the other display. A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
+  wait is causal (presents, not a sleep) and also covers a re-mode on the other display. Known limit
+  (review round 2): a REPLUG rebuild of the other display (`drm_output_vk_rebuild_or_give_up`) does not
+  check `dev->acquiring`, so an HDMI replug exactly while an output opens can still fail that open's
+  acquire with -13; opens happen only at OBS startup, so it is left named, not guarded. A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
   resets its settle count BEFORE re-checking the flag (both seq-cst), so an open and a re-mode can never
   miss each other. Logs: `waited N ms for the other display to settle before acquiring '<c>'`, or the
   WARNING `'<other>' is still bringing its presentation up after N ms -- acquiring '<c>' anyway`.
