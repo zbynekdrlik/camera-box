@@ -268,7 +268,7 @@ def _bash(script):
 
 
 def _manifest(box):
-    r = _bash(f'set -euo pipefail; . scripts/lib/strih-box-facts.sh; strih_box_facts_load {box}; '
+    r = _bash(f'set -euo pipefail; . scripts/lib/strih-box-facts.sh; strih_box_load {box}; '
               f'. scripts/lib/strih-provision.sh; . scripts/lib/obs-box-role.sh; '
               f'obs_box_seed_manifest_json')
     assert r.returncode == 0, r.stderr
@@ -287,7 +287,7 @@ def test_strih_manifest_has_no_dev_scene():
 
 def test_step_6_devclip_applies_only_to_the_stream_role():
     for box, applies in (("stream-pp", True), ("strih-pp", False)):
-        r = _bash(f'. scripts/lib/strih-box-facts.sh; strih_box_facts_load {box}; '
+        r = _bash(f'. scripts/lib/strih-box-facts.sh; strih_box_load {box}; '
                   f'. scripts/lib/strih-provision.sh; . scripts/lib/obs-box-role.sh; '
                   f'obs_box_step_applies 6-devclip')
         assert (r.returncode == 0) is applies, (box, r.stdout, r.stderr)
@@ -307,3 +307,10 @@ def test_strih_scenes_bootstrap_seeds_the_dev_scene_only_with_the_key():
     src = (_ROOT / "scripts" / "strih_scenes.py").read_text()
     assert "stream_dev_safe" in src
     assert "parse_dev_scene" in src
+
+
+def test_stream_role_dev_scene_name_is_the_shared_development_scene_name():
+    r = _bash('. scripts/lib/stream-dev-scene.sh; . scripts/lib/obs-box-role.sh; '
+              'printf "%s|%s" "$STREAM_DEV_SCENE_DEFAULT" "$OBS_BOX_STREAM_DEV_SCENE"')
+    shared, role = r.stdout.split("|")
+    assert shared == role == SPEC["scene"]
