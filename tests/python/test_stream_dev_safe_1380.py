@@ -336,3 +336,50 @@ def test_clip_provision_installs_every_non_stdlib_import_of_the_generator():
     assert third == {"numpy", "qrcode"}, third
     for mod in sorted(third):
         assert f"python3-{mod}" in body, mod
+
+
+# ---- the ported collection's registered-sign spelling (live stream-pp 13.10.2026) ---------------
+
+LIVE_VIDEO = "NDI® 2ME PGM"   # the live stream-pp input name: the collection kept the (R) sign
+
+
+def test_resolve_finds_the_registered_sign_spelling_of_the_video_input():
+    spec = sds.resolve_spec(SPEC, [LIVE_VIDEO, MIX])
+    assert spec["video_input"] == LIVE_VIDEO
+    assert sds.resolve_spec(SPEC, [SPEC["video_input"], LIVE_VIDEO])["video_input"] == SPEC["video_input"]
+
+
+def test_resolve_never_maps_the_video_input_to_another_source():
+    assert sds.resolve_spec(SPEC, ["NDI® odpocty", MIX])["video_input"] == SPEC["video_input"]
+
+
+def test_spellings_match_the_collection_port_tool():
+    import importlib.util as iu
+    spec = iu.spec_from_file_location("ocp_1380", _ROOT / "scripts" / "obs_collection_port.py")
+    ocp = iu.module_from_spec(spec)
+    spec.loader.exec_module(ocp)
+    assert sds.REGISTERED_SIGN_SPELLINGS == ocp.REGISTERED_SIGN_SPELLINGS
+
+
+def test_apply_on_the_live_stream_pp_names_uses_the_live_video_input():
+    obs = FakeObs(["PRE", PROD, "POST", "pre-bannery", "pre-videa"], [LIVE_VIDEO, MIX, "NDI® odpocty"])
+    plan = sds.apply_dev_safe(obs, SPEC)
+    assert plan == ["create_scene", "create_clip_input", "add_video_item"]
+    assert [it["sourceName"] for it in obs.items[SPEC["scene"]]] == [SPEC["audio_input"], LIVE_VIDEO]
+
+
+def test_verdict_through_resolve_accepts_the_live_video_input():
+    obs = FakeObs([PROD, SPEC["scene"]], [LIVE_VIDEO, SPEC["audio_input"]],
+                  {SPEC["scene"]: [_item(SPEC["audio_input"], index=0), _item(LIVE_VIDEO, 2, 1)]})
+    real_req = obs.req
+
+    def req(t, data=None, ignore_err=False):
+        if t == "GetInputMute":
+            assert data["inputName"] == LIVE_VIDEO
+            return {"inputMuted": True}
+        if t == "GetInputSettings":
+            return {"inputSettings": {"local_file": SPEC["audio_file"]}}
+        return real_req(t, data, ignore_err)
+    obs.req = req
+    rows = sds.read_verdict(obs, SPEC)
+    assert "FAIL" not in [lvl for lvl, _ in rows], rows
