@@ -8,7 +8,7 @@
 #
 # Owner 14.10.2026: every Linux box carries swap ("To ze tam nieje swap je hrube a opakovane
 # porusenie pravidiel pre linux boxy"). The OBS boxes get a RAM-sized swapfile on their SSD
-# (scripts/lib/obs-box-baseline.sh obs_box_swap). A cambox cannot: its root is READ-ONLY on a USB
+# (obs_box_swap in scripts/lib/obs-box-swap.sh). A cambox cannot: its root is READ-ONLY on a USB
 # stick, and the sticks already die from wear (never an experiment that can kill a cambox disk). So a
 # cambox swaps to compressed RAM: zram, set up at boot by systemd's own zram-generator (Ubuntu
 # package systemd-zram-generator, no maintainer scripts), configured by ONE drop-in:

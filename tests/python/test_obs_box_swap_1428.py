@@ -5,7 +5,7 @@ aby som to neriesil dokolecka ze niekde sa urobil novy linuxovy box a nema swap 
 nedostatku pamete!!!!" -- stream-pp had none, and the OOM killer took the strih OBS browser source
 and restreamer on 14.10.2026.
 
-obs_box_swap (scripts/lib/obs-box-baseline.sh) runs in setup-strih and setup-imag; the shared grader
+obs_box_swap (scripts/lib/obs-box-swap.sh, sourced by scripts/lib/obs-box-baseline.sh) runs in setup-strih and setup-imag; the shared grader
 row `swap` (scripts/lib/obs-box-baseline-verify.sh) FAILS a box without it. The tools are stubs on
 PATH and the file paths are seams, so nothing real is touched.
 """

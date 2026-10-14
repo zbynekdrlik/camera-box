@@ -211,7 +211,7 @@ Owner 14.10.2026 (verbatim): "To ze tam nieje swap je hrube a opakovane poruseni
 boxy". stream-pp, strih-pp and strih-snv ran with NO swap; on stream-pp the OOM killer took the strih
 OBS browser source and the restreamer (14.10.2026 09:37).
 
-- **Install:** `obs_box_swap` (system half) creates `/swapfile` = RAM rounded up to whole GiB
+- **Install:** `obs_box_swap` (`scripts/lib/obs-box-swap.sh`, sourced by the baseline: the system half is at its line budget) creates `/swapfile` = RAM rounded up to whole GiB
   (`fallocate`, chmod 600, `mkswap`), `swapon` when not active, ONE `/swapfile none swap sw 0 0` line
   in `/etc/fstab`. Idempotent. A root that is not ext4 fails loud and writes nothing. Both setups call
   it on the `obs_box_rtprio_off ;` line (setup-strih is at its 1000-line budget; keep the space before
