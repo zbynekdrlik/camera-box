@@ -3,9 +3,15 @@
 The install (setup-strih step 16d) and the grader (verify-strih items 37-40) run for real under the
 callers' `set -euo pipefail`, through their path seams, with fake `dpkg-query` / `apt-get` /
 `systemctl` / `sudo` / `id` / `chown` / `wmctrl` on PATH, a fake /proc and a fake home + runtime dir.
-Used by test_strih_session_apps_1399.py (the keeper + the panel) and test_strih_companion_satellite_1399.py
-(Companion Satellite + its watch).
+Used by test_strih_session_apps_1399.py (the keeper + the panel), test_strih_companion_satellite_1399.py
+(Companion Satellite + its watch) and test_dantesync_tray_1429.py (the dantesync tray, issue 1429).
+
+Issue 1429: the install also fetches the dantesync tray from the pinned release. `bash` keeps every run
+hermetic: unless a test passes its own, DANTESYNC_RELEASE_BASE is a file:// URL that does not exist and
+DANTESYNC_INSTALL_TRAY_BIN a path nobody can write, so no test ever reaches GitHub or /usr/local/bin.
+`tray_env` serves a fake release (a file:// tree read by the real curl) at the pin 1.18.0.
 """
+import hashlib
 import json
 import os
 import shutil
@@ -17,16 +23,22 @@ REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "strih-session-apps.sh"
 UNITS = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-         "strih-satellite-watch.timer")
+         "strih-satellite-watch.timer", "dantesync-tray.service")
 # every unit FILE the install writes (the watch timer's oneshot service rides with the timer)
 UNIT_FILES = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-              "strih-satellite-watch.timer", "strih-satellite-watch.service")
+              "strih-satellite-watch.timer", "strih-satellite-watch.service", "dantesync-tray.service")
 PROGRAMS = ("strih_browser_keeper.py", "bkshading_panel_app.py", "strih_satellite_watch.py")
 LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_SESSION_APPS_EUID",
-         "STRIH_SESSION_APPS_PYTHON", "STRIH_SESSION_APPS_SATELLITE_BIN", "STRIH_LX_IP", "STRIH_BOXES_DIR")
+         "STRIH_SESSION_APPS_PYTHON", "STRIH_SESSION_APPS_SATELLITE_BIN", "STRIH_LX_IP", "STRIH_BOXES_DIR",
+         "DANTESYNC_VERSION_PIN", "DANTESYNC_RELEASE_BASE", "DANTESYNC_INSTALL_TRAY_BIN")
+# issue 1429: the hermetic defaults (see the module doc); a test's own env wins
+HERMETIC = {"DANTESYNC_RELEASE_BASE": "file:///nonexistent-1429/release",
+            "DANTESYNC_INSTALL_TRAY_BIN": "/nonexistent-1429/bin/dantesync-tray"}
+TRAY_PIN = "1.18.0"
+TRAY_ASSET = "dantesync-tray-linux-amd64"
 # the main processes /proc shows (the watch's oneshot service has none between its runs)
 PIDS = {"strih-browser-keeper.service": 4242, "bkshading-panel-app.service": 4343,
-        "companion-satellite.service": 4444, "strih-satellite-watch.service": 0}
+        "companion-satellite.service": 4444, "strih-satellite-watch.service": 0, "dantesync-tray.service": 4545}
 PANEL_CLASS = "bkshading-panel-app.Bkshading-panel-app"
 WIN = "0x01  0 %s  strih-snv Shading\n" % PANEL_CLASS
 
@@ -35,6 +47,7 @@ def bash(body, env=None, sources=(LIB,), path_prepend=None, stdin=""):
     """Source `sources` under the CALLERS' set -euo pipefail (setup-strih / verify-strih), run `body`."""
     harness = "set -euo pipefail\n" + "".join('. "%s"\n' % s for s in sources) + body
     full_env = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    full_env.update(HERMETIC)
     if path_prepend:
         full_env["PATH"] = "%s:%s" % (path_prepend, full_env["PATH"])
     if env:
@@ -105,10 +118,45 @@ def fake_satellite(tmp_path):
     return p
 
 
-def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, panel_cmd=None, satellite_exe=None):
+def fake_tray_release(tmp_path, content=b"#!/bin/sh\n# dantesync tray v1.18.0\n", sha=None, version=TRAY_PIN):
+    """A dantesync release tree served over file:// (the real curl reads it): v<version>/ holds the Linux tray
+    and its `.sha256` line (`sha` replaces the true hash). Returns the release base URL."""
+    rel = tmp_path / "release"
+    d = rel / ("v%s" % version)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / TRAY_ASSET).write_bytes(content)
+    digest = sha or hashlib.sha256(content).hexdigest()
+    (d / (TRAY_ASSET + ".sha256")).write_text("%s  %s\n" % (digest, TRAY_ASSET))
+    return "file://%s" % rel
+
+
+def tray_bin(tmp_path):
+    return tmp_path / "tray" / "dantesync-tray"
+
+
+def tray_env(tmp_path, **release):
+    """The env of an install that fetches the tray: the pin 1.18.0, the fake release, the tray path seam."""
+    return {"DANTESYNC_VERSION_PIN": TRAY_PIN, "DANTESYNC_RELEASE_BASE": fake_tray_release(tmp_path, **release),
+            "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path))}
+
+
+def fake_tray(tmp_path):
+    """The dantesync tray step 16d installed (DANTESYNC_INSTALL_TRAY_BIN)."""
+    p = tray_bin(tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("#!/bin/sh\n")
+    p.chmod(0o755)
+    past = time.time() - 86400
+    os.utime(p, (past, past))
+    return p
+
+
+def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, panel_cmd=None, satellite_exe=None,
+                   tray=True, tray_exe=None):
     """A home + bin dir as step 16d leaves them (every unit + program from the checkout, enabled, started by
     the autostart) and a fake /proc with each unit's main process. `unit_text` replaces the panel unit;
-    `satellite_exe` is where the Satellite main process's /proc/<pid>/exe points (default: the binary)."""
+    `satellite_exe` is where the Satellite main process's /proc/<pid>/exe points (default: the binary);
+    `tray` False leaves no dantesync tray binary, `tray_exe` is where the tray's /proc/<pid>/exe points."""
     home = tmp_path / "home"
     unitdir = home / ".config/systemd/user"
     (unitdir / "graphical-session.target.wants").mkdir(parents=True)
@@ -123,6 +171,7 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
     for prog in PROGRAMS:
         shutil.copy(SCRIPTS / prog, bindir / prog)
     sat = fake_satellite(tmp_path)
+    tray_path = fake_tray(tmp_path) if tray else tray_bin(tmp_path)
     (home / ".config/openbox").mkdir(parents=True)
     lines = ["systemctl --user start strih-obs.service || true"]
     if autostart:
@@ -135,11 +184,13 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         "bkshading-panel-app.service": panel_cmd or ["/usr/bin/python3", str(bindir / "bkshading_panel_app.py")],
         # Chromium rewrites the browser process title, so the Satellite's argv proves nothing: its exe does
         "companion-satellite.service": ["companion-satellite", "--rewritten-title"],
+        "dantesync-tray.service": [str(tray_path)],
     }
     for unit, words in argv.items():
         (proc / str(PIDS[unit])).mkdir(parents=True)
         (proc / str(PIDS[unit]) / "cmdline").write_bytes(b"\0".join(w.encode() for w in words) + b"\0")
     os.symlink(satellite_exe or str(sat), proc / str(PIDS["companion-satellite.service"]) / "exe")
+    os.symlink(tray_exe or str(tray_path), proc / str(PIDS["dantesync-tray.service"]) / "exe")
     return home, bindir
 
 
@@ -169,7 +220,8 @@ def all_states(rundir):
 def grade_env(tmp_path, bindir, rundir, euid="1000"):
     return {"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": euid,
             "STRIH_SESSION_APPS_RUNTIME_DIR": str(rundir), "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc"),
-            "STRIH_SESSION_APPS_SATELLITE_BIN": str(tmp_path / "opt" / "companion-satellite" / "companion-satellite")}
+            "STRIH_SESSION_APPS_SATELLITE_BIN": str(tmp_path / "opt" / "companion-satellite" / "companion-satellite"),
+            "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path)), "DANTESYNC_VERSION_PIN": TRAY_PIN}
 
 
 def grade(tmp_path, home, bindir, rundir, **fakes):

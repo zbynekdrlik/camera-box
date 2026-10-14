@@ -163,25 +163,27 @@ def _applied(boxes, box):
     return dict(ln.split("=", 1) for ln in r.stdout.splitlines())
 
 
-def test_a_stream_box_runs_the_keeper_alone_and_lists_the_pp_boxes(boxes):
+def test_a_stream_box_runs_the_keeper_and_the_dantesync_tray_and_lists_the_pp_boxes(boxes):
     a = _applied(boxes, "stream-pp")
-    assert a["UNITS"] == "strih-browser-keeper.service"
-    assert a["ROWS"] == "2", "one unit row + the keeper's last-pass row"
-    assert a["AUTOSTART"] == "1"
+    # issue 1429: every Linux workstation carries the dantesync tray, the stream box too
+    assert a["UNITS"] == "strih-browser-keeper.service dantesync-tray.service"
+    assert a["ROWS"] == "3", "two unit rows + the keeper's last-pass row"
+    assert a["AUTOSTART"] == "2"
     assert a["PINNED"] == a["RESOLVE"] == "10.77.8.204,10.77.8.202", "fact-file name order (C collation)"
 
 
 def test_strih_pp_keeps_every_session_app_and_lists_the_pp_boxes(boxes):
     a = _applied(boxes, "strih-pp")
     assert a["UNITS"].split() == ["strih-browser-keeper.service", "bkshading-panel-app.service",
-                                  "companion-satellite.service", "strih-satellite-watch.timer"]
-    assert a["ROWS"] == "7"
+                                  "companion-satellite.service", "strih-satellite-watch.timer",
+                                  "dantesync-tray.service"]
+    assert a["ROWS"] == "8"
     assert a["PINNED"] == "10.77.8.204,10.77.8.202"
 
 
 def test_strih_lx_keeps_the_snv_fleet_list(boxes):
     a = _applied(boxes, "strih-snv")
-    assert a["ROWS"] == "7"
+    assert a["ROWS"] == "8"
     assert a["PINNED"] == "10.77.9.202,10.77.9.204"
 
 

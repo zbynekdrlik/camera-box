@@ -58,9 +58,10 @@ ROWS = len(UNITS) + 3
 def _install(tmp_path, home, bindir, **fakes):
     b, log = F.fake_bin(tmp_path, **fakes)
     py = F.fake_python_ok(tmp_path)
-    r = _bash('strih_session_apps_install "%s" "%s" newlevel' % (REPO, home),
-              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
-                   "STRIH_SESSION_APPS_PYTHON": str(py)}, path_prepend=str(b))
+    env = {"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
+           "STRIH_SESSION_APPS_PYTHON": str(py)}
+    env.update(F.tray_env(tmp_path))  # issue 1429: the dantesync tray from a fake pinned release
+    r = _bash('strih_session_apps_install "%s" "%s" newlevel' % (REPO, home), env=env, path_prepend=str(b))
     return r, log.read_text() if log.exists() else ""
 
 
@@ -114,6 +115,7 @@ def test_script_mapping_and_items():
         "bkshading-panel-app.service [bkshading_panel_app.py] shading-app",
         "companion-satellite.service [] companion-satellite",
         "strih-satellite-watch.timer [strih_satellite_watch.py] satellite-watch",
+        "dantesync-tray.service [] dantesync-tray",
         "REFUSED",
     ]
 
@@ -147,7 +149,7 @@ def test_units_run_the_programs_the_install_writes():
         r = _bash('strih_session_app_script %s; echo; strih_session_app_run_unit %s' % (unit, unit))
         script, run_unit = r.stdout.split("\n")[:2]
         if not script:
-            continue  # companion-satellite.service runs the /opt binary step 16 installs
+            continue  # the Satellite (/opt, step 16) and the dantesync tray (step 16d) run installed binaries
         assert ("/usr/local/bin/%s" % script) in _unit(REPO / "systemd" / run_unit)["ExecStart"]
         assert (SCRIPTS / script).is_file()
         assert os.access(SCRIPTS / script, os.X_OK), "commit %s executable (git mode 100755)" % script

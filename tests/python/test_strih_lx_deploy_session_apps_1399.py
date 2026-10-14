@@ -33,7 +33,7 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
 FLEET = SCRIPTS / "deploy-genlock-fleet.sh"
 UNITS = ["strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-         "strih-satellite-watch.timer"]
+         "strih-satellite-watch.timer", "dantesync-tray.service"]
 STAGE = "/tmp/genlock-stage-abc123"
 
 
