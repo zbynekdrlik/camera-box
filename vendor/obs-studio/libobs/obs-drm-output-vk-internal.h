@@ -26,6 +26,8 @@
 #include <GL/glext.h>
 
 #include "obs-drm-output-vk.h"
+#include "util/platform.h"
+#include "util/threading.h"
 
 /* -------------------------------------------------------------------------------------------------
  * Vulkan entry points (the loader is dlopen'd; VK_NO_PROTOTYPES).
@@ -184,6 +186,10 @@ struct drm_output_vk_device {
 	/* issue 1424: a display is being acquired (os_atomic, set under `lock`); a re-mode on another display
 	 * waits for the next vblank instead of starting a new mode set inside the acquire. */
 	volatile bool acquiring;
+	/* issue 1424 (design 6164790116): the last time a display of this device was acquired or rebuilt its
+	 * presentation (os_gettime_ns, os_atomic). A vblank missed within DRM_OUTPUT_VK_PICK_QUIET_NS of it
+	 * is that bring-up, never the deadline pick's fault, so it never grows a pick margin. */
+	volatile long disrupt_ns;
 };
 
 /* One display: its X output, VkDisplayKHR, surface, swapchain, shared images, mailbox roles and present
@@ -299,6 +305,11 @@ bool drm_output_vk_create_swapchain_only(struct drm_output_vk_disp *d, VkSwapcha
 void drm_output_vk_destroy_swapchain(struct drm_output_vk_disp *d);
 /* obs-drm-output-vk-remode.c: the open's bounded settle wait before its acquire (issue 1424 part 2). */
 void drm_output_vk_wait_others_settled(struct drm_output_vk_disp *d);
+/* issue 1424: note a bring-up on the device (an acquire, a presentation rebuild) for the deadline pick. */
+static inline void drm_output_vk_mark_disruption(struct drm_output_vk_device *dev)
+{
+	os_atomic_set_long(&dev->disrupt_ns, (long)os_gettime_ns());
+}
 
 /* obs-drm-output-vk-remode.c, present thread only: rebuild the swapchain (and the display-plane surface
  * too when `surface_lost`, after draining the queue and destroying the old presentation, issue 1424) after VK_ERROR_OUT_OF_DATE_KHR / VK_ERROR_SURFACE_LOST_KHR, e.g. an HDMI

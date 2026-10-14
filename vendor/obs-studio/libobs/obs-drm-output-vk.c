@@ -122,6 +122,10 @@ static int drm_output_vk_pick_claim(int front, int pending, int ready, int n)
  * up to one refresh less on screen. */
 #define DRM_OUTPUT_VK_PICK_MARGIN_START_NS 5000000ULL
 #define DRM_OUTPUT_VK_PICK_MARGIN_STEP_NS 1000000ULL
+/* A missed vblank within this long of a bring-up on the device (an acquire, a presentation rebuild, e.g.
+ * the other display's re-mode at start-up) never grows the margin (live strih-pp 14.10.2026: HDMI-0's
+ * margin ratcheted to its cap from four misses during HDMI-1's acquire + re-mode). */
+#define DRM_OUTPUT_VK_PICK_QUIET_NS 3000000000ULL
 
 /* One refresh of a mode in ns (0 = unknown, no wait). */
 static uint64_t drm_output_vk_period_ns(uint32_t refresh_mhz)
@@ -150,6 +154,13 @@ static bool drm_output_vk_missed_vblank(uint64_t gap_ns, uint64_t period_ns)
 	if (period_ns == 0u)
 		return false;
 	return gap_ns >= period_ns + period_ns / 2u && gap_ns < 3u * period_ns + period_ns / 2u;
+}
+
+/* Whether a missed vblank seen at `now_ns` counts: only outside the quiet window after the device's last
+ * bring-up (`disrupt_ns`, 0 = none yet). */
+static bool drm_output_vk_miss_counts(uint64_t now_ns, uint64_t disrupt_ns)
+{
+	return disrupt_ns == 0u || now_ns >= disrupt_ns + DRM_OUTPUT_VK_PICK_QUIET_NS;
 }
 
 /* The margin after a missed vblank: one step more, at most half a period. It never shrinks: a probe down
@@ -323,7 +334,9 @@ static void drm_output_vk_wait_for_pick(struct drm_output_vk_disp *d)
 {
 	const uint64_t acquired_ns = os_gettime_ns();
 	const uint64_t period_ns = drm_output_vk_period_ns(d->refresh_mhz);
-	if (d->last_acquire_ns && drm_output_vk_missed_vblank(acquired_ns - d->last_acquire_ns, period_ns)) {
+	const uint64_t disrupt_ns = (uint64_t)os_atomic_load_long(&d->dev->disrupt_ns);
+	if (d->last_acquire_ns && drm_output_vk_missed_vblank(acquired_ns - d->last_acquire_ns, period_ns) &&
+	    drm_output_vk_miss_counts(acquired_ns, disrupt_ns)) {
 		d->late_presents++;
 		const uint64_t m = drm_output_vk_margin_after_miss(d->pick_margin_ns, period_ns);
 		if (m != d->pick_margin_ns) {

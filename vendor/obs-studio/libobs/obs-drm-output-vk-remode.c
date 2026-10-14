@@ -173,6 +173,7 @@ bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surfa
 	const uint32_t w = d->mode_w, h = d->mode_h;
 	if (d->queue_wedged)
 		return false; /* a drain that timed out: the empty submit's fence may still be pending (review) */
+	drm_output_vk_mark_disruption(d->dev); /* issue 1424: misses during a rebuild never grow a pick margin */
 	/* issue 1424 part 2: a new presentation is unsettled again until it presented (another display's open
 	 * waits for it, see drm_output_vk_wait_others_settled) */
 	os_atomic_set_long(&d->presents_since_surface, 0);
@@ -240,6 +241,7 @@ bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surfa
 		drm_output_vk_destroy_swapchain(d);
 		return false;
 	}
+	drm_output_vk_mark_disruption(d->dev);
 	blog(LOG_INFO, "drm-output: vk-direct presentation rebuilt on '%s' (%ux%u)", d->output_name, w, h);
 	return true;
 }

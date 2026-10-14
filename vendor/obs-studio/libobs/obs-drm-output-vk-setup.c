@@ -275,6 +275,7 @@ static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long ou
 		return false;
 	}
 	d->acquired = true;
+	drm_output_vk_mark_disruption(d->dev);
 	blog(LOG_INFO, "drm-output: vk-direct display acquired output='%s' gpu='%s' (off the X desktop)",
 	     d->output_name, pr.deviceName);
 	return true;
@@ -727,6 +728,7 @@ bool drm_output_vk_setup(struct drm_output_vk_disp *d)
 	/* issue 1424 part 2: never acquire while another display brings its presentation up (NVIDIA -13), and
 	 * hold the other displays' re-modes (a new mode set) off until this acquire returned. */
 	os_atomic_set_bool(&dev->acquiring, true);
+	drm_output_vk_mark_disruption(d->dev); /* issue 1424: the other displays' misses from here are this bring-up */
 	drm_output_vk_wait_others_settled(d);
 	const bool acquired = drm_output_vk_acquire(d, output);
 	os_atomic_set_bool(&dev->acquiring, false);

@@ -95,10 +95,12 @@ fn lifted_helpers() -> String {
     let mut c = String::from("#include <stdbool.h>\n#include <stdint.h>\n#include <stdio.h>\n");
     c.push_str(&define_line(&src, "DRM_OUTPUT_VK_PICK_MARGIN_START_NS"));
     c.push_str(&define_line(&src, "DRM_OUTPUT_VK_PICK_MARGIN_STEP_NS"));
+    c.push_str(&define_line(&src, "DRM_OUTPUT_VK_PICK_QUIET_NS"));
     for sig in [
         "static uint64_t drm_output_vk_period_ns(uint32_t refresh_mhz)",
         "static uint64_t drm_output_vk_pick_deadline_ns(uint64_t acquire_ns, uint64_t period_ns, uint64_t margin_ns)",
         "static bool drm_output_vk_missed_vblank(uint64_t gap_ns, uint64_t period_ns)",
+        "static bool drm_output_vk_miss_counts(uint64_t now_ns, uint64_t disrupt_ns)",
         "static uint64_t drm_output_vk_margin_after_miss(uint64_t margin_ns, uint64_t period_ns)",
     ] {
         c.push_str(&body_of(&src, sig));
@@ -165,6 +167,17 @@ fn the_helpers_compute_the_truth_table() {
         ));
     }
     c.push_str("  printf(\"S %llu %llu\\n\", (unsigned long long)DRM_OUTPUT_VK_PICK_MARGIN_START_NS, (unsigned long long)DRM_OUTPUT_VK_PICK_MARGIN_STEP_NS);\n");
+    // a miss counts only outside the 3 s quiet window after the device's last bring-up (0 = none)
+    for (now, disrupt) in [
+        (5_000_000_000u64, 0u64),
+        (5_000_000_000, 4_000_000_000),
+        (7_000_000_000, 4_000_000_000),
+        (6_999_999_999, 4_000_000_000),
+    ] {
+        c.push_str(&format!(
+            "  printf(\"Q %d\\n\", drm_output_vk_miss_counts({now}ULL, {disrupt}ULL) ? 1 : 0);\n"
+        ));
+    }
     c.push_str("  return 0;\n}\n");
     let out = compile_and_run(&c);
     let want = vec![
@@ -190,6 +203,10 @@ fn the_helpers_compute_the_truth_table() {
         "G 6000000".to_string(),
         format!("G {}", P60 / 2),
         "S 5000000 1000000".to_string(),
+        "Q 1".to_string(),
+        "Q 0".to_string(),
+        "Q 1".to_string(),
+        "Q 0".to_string(),
     ];
     let got: Vec<String> = out.lines().map(str::to_string).collect();
     assert_eq!(got, want, "issue 1424: the deadline-pick helpers");
@@ -202,7 +219,7 @@ fn the_helpers_compute_the_truth_table() {
 fn the_start_margin_saves_most_of_a_refresh_on_both_modes() {
     let mut c = lifted_helpers();
     c.push_str("int main(void){\n");
-    c.push_str("  (void)drm_output_vk_period_ns; (void)drm_output_vk_missed_vblank; (void)drm_output_vk_margin_after_miss;\n");
+    c.push_str("  (void)drm_output_vk_period_ns; (void)drm_output_vk_missed_vblank; (void)drm_output_vk_margin_after_miss; (void)drm_output_vk_miss_counts;\n");
     for p in [P30, P60] {
         c.push_str(&format!(
             "  printf(\"%llu\\n\", (unsigned long long)(drm_output_vk_pick_deadline_ns(0ULL, {p}ULL, DRM_OUTPUT_VK_PICK_MARGIN_START_NS)));\n"
@@ -304,7 +321,31 @@ fn the_open_resets_the_margin_and_the_minute_line_reports_it() {
             "issue 1424: {VK_INTERNAL_H} must contain `{token}`"
         );
     }
+    assert!(
+        src.contains("drm_output_vk_miss_counts(acquired_ns, disrupt_ns)"),
+        "issue 1424: a miss inside a bring-up's quiet window never grows the margin"
+    );
+    assert!(
+        h.contains("volatile long disrupt_ns;")
+            && h.contains("static inline void drm_output_vk_mark_disruption("),
+        "issue 1424: the device carries its last bring-up time"
+    );
     let setup = file(VK_SETUP_C);
+    assert_eq!(
+        setup
+            .matches("drm_output_vk_mark_disruption(d->dev);")
+            .count(),
+        2,
+        "issue 1424: an open marks a bring-up before its settle wait and after its acquire"
+    );
+    let remode = file("vendor/obs-studio/libobs/obs-drm-output-vk-remode.c");
+    assert_eq!(
+        remode
+            .matches("drm_output_vk_mark_disruption(d->dev);")
+            .count(),
+        2,
+        "issue 1424: a presentation rebuild marks a bring-up at its start and its end"
+    );
     assert!(
         setup.contains("drm-output: vk-direct present modes offered on '%s': %s"),
         "issue 1424: the swapchain setup logs the present modes the surface offers"
