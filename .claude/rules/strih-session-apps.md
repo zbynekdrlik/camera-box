@@ -258,9 +258,14 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
     `DANTESYNC_TRAY_FIRST_VERSION` (1.18.0) prints `WARN: dantesync vX ships no Linux tray ...` and
     returns 0, nothing downloaded;
   - otherwise the release `.sha256` first: an executable tray with that sha256 is KEPT (mtime
-    unchanged), anything else is downloaded, its sha256 verified BEFORE install, then
-    `install -D -m 0755` (a rename: a running tray keeps its inode). Unlike the daemon, the tray
-    FOLLOWS the pin;
+    unchanged), anything else is downloaded, its sha256 verified BEFORE install, then installed 0755 as
+    a `<bin>.new.<pid>` sibling and renamed over the name (a running tray keeps its inode; GNU
+    `install` alone unlinks the name and creates it 0600 first, review round 1). Unlike the daemon, the
+    tray FOLLOWS the pin;
+  - every install (and every kept tray) writes the release record `v<pin> <sha256>` to
+    `DANTESYNC_INSTALL_TRAY_RELEASE_FILE` (`/usr/local/share/dantesync-tray/release`), so verify grades a
+    tray BEHIND the pin with no network read (`dantesync_install_tray_state`: `absent` / `stale:<why>` /
+    `ok`);
   - a download failure, a malformed `.sha256` or a mismatch is rc 1 + a stderr line, nothing installed.
     Step 16d turns that into a WARN and provisions every other app (a GitHub outage must not stop a
     deploy that already stopped OBS); verify FAILs the row.
@@ -270,15 +275,22 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
   `STRIH_SESSION_APP_PACKAGES` (the same install line; the stream role gets them too).
 - **The unit:** `DISPLAY=:0`, `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0`,
   `TimeoutStopSec=10`, journal output, `WantedBy=graphical-session.target`, and
-  `ConditionPathExists=/usr/local/bin/dantesync-tray`: while the pin has no Linux tray the autostart /
+  `ConditionFileIsExecutable=/usr/local/bin/dantesync-tray`: while the pin has no Linux tray the autostart /
   deploy `start` is a clean condition skip (rc 0, no `[strih-snv start]` WARNING), never a 5 s
-  restart loop on a missing ExecStart.
-- **The grader row `(dantesync-tray)`:** the binary branch (unit byte-identical, the binary present
-  and executable, enabled, the autostart line, active, `/proc/<MainPID>/exe` = the binary, started
-  after the newest of unit + binary). A MISSING binary while the pin is below 1.18.0 is a `NOTE|` row
-  (`strih_session_app_absent_note`), routed to verify-strih's `note`; it still counts toward
+  restart loop on a missing (or non-executable) ExecStart.
+- **The grader row `(dantesync-tray)`:** the binary branch (unit byte-identical, the binary = the
+  pinned release by its record (`dantesync_install_tray_state`; `stale:*` FAILs `script-differs`, e.g.
+  `program=stale:installed-v1.18.0-pin-v1.19.0` after a pin bump setup has not followed), enabled, the
+  autostart line, active, `/proc/<MainPID>/exe` = the binary, started after the newest of unit +
+  binary). A MISSING binary while the pin is below 1.18.0 is a `NOTE|` row
+  (`strih_session_app_absent_note`), routed to verify-strih's `note`, but only when the unit, its
+  enablement and its autostart line are in place (else it FAILs on those); it still counts toward
   `strih_session_apps_row_count`. A missing binary at a 1.18.0+ pin FAILs `script-absent` naming
-  step 16d. An installed binary is graded in full whatever the pin says.
+  step 16d. An installed binary is graded in full whatever the pin says (a pin rolled back below
+  1.18.0 with a tray left installed reads `stale` and FAILs: clean it by hand).
+- **Known gap:** `dantesync-fleet-upgrade.sh` does not refresh the Linux tray (its Windows arm does,
+  issue 1372). After a fleet roll, re-run setup-strih step 16d on each Linux workstation; until then the
+  row FAILs `stale`.
 - **Tests:** `tests/python/test_dantesync_tray_1429.py`. The shared fakes keep every run hermetic:
   `F.bash` defaults `DANTESYNC_RELEASE_BASE` to a missing `file://` tree and
   `DANTESYNC_INSTALL_TRAY_BIN` to an unwritable path; `F.tray_env` serves a fake release over

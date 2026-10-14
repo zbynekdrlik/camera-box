@@ -10,7 +10,7 @@ Description=dantesync tray icon -- the clock state in the kiosk systray (issue 1
 Documentation=https://github.com/zbynekdrlik/camera-box
 # While the pin is below 1.18.0 there is no binary: the start is skipped cleanly (the unit reads
 # inactive, condition failed), never a Restart=always loop on a missing ExecStart.
-ConditionPathExists=/usr/local/bin/dantesync-tray
+ConditionFileIsExecutable=/usr/local/bin/dantesync-tray
 # Never give up: the icon must show whenever the operator session runs.
 StartLimitIntervalSec=0
 

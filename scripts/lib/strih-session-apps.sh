@@ -26,8 +26,9 @@
 #     release's `dantesync-tray-linux-amd64`, first in v1.18.0) -- the clock state as an icon in the tint2
 #     systray, like on the Windows boxes (issue 1429, owner 14.10.2026; design comment 6176755827). Every
 #     Linux workstation runs it, the stream role too. Step 16d installs the binary through
-#     dantesync_install_tray (scripts/lib/dantesync-install.sh); the unit carries ConditionPathExists, so
-#     while the pin is below 1.18.0 (no binary) its start is a clean skip, never a restart loop.
+#     dantesync_install_tray (scripts/lib/dantesync-install.sh); the unit carries
+#     ConditionFileIsExecutable, so while the pin is below 1.18.0 (no binary) its start is a clean skip,
+#     never a restart loop.
 #
 # Every entry is WantedBy=graphical-session.target like strih-obs.service, and like it STARTED by the
 # kiosk openbox autostart (strih_openbox_autostart_text calls strih_session_apps_autostart_lines):
@@ -246,7 +247,7 @@ strih_session_apps_runtime_dir() {
 # FAILs it): a GitHub outage must not stop the other session apps, in a deploy that already stopped OBS.
 strih_session_apps_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local bindir unitdir u f script program missing py w1 uw w2 err unit_written link before after
+  local bindir unitdir u f script program missing py w1 uw w2 err unit_written link before after tray_failed
   local -a changed
   bindir="$(strih_session_apps_bin_dir)"
   unitdir="${home}/.config/systemd/user"
@@ -282,13 +283,16 @@ strih_session_apps_install() {
     script="$(strih_session_app_script "$u")" || return 1
     program="$(strih_session_app_program "$u")" || return 1
     w1=unchanged
+    tray_failed=0
     if [ -n "$script" ]; then
       w1="$(strih_session_apps_put "${repo}/scripts/${script}" "$program" 0755)" || return 1
     elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ]; then
       # issue 1429: the tray follows the pin; a replaced binary restarts a running tray (try-restart below)
       before="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
-      dantesync_install_tray \
-        || echo "  WARN: the dantesync tray was not installed (above) -- verify-strih (dantesync-tray) names it; re-run setup-strih.sh step 16d"
+      dantesync_install_tray || {
+        tray_failed=1
+        echo "  WARN: the dantesync tray was not installed (above) -- verify-strih (dantesync-tray) names it; re-run setup-strih.sh step 16d"
+      }
       after="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
       [ "$before" = "$after" ] || w1=written
     fi
@@ -311,7 +315,7 @@ strih_session_apps_install() {
     else
       echo "  ${u} unchanged (runs ${program})"
     fi
-    [ -n "$script" ] || [ -x "$program" ] || strih_session_app_absent_note "$u" >/dev/null \
+    [ -n "$script" ] || [ -x "$program" ] || [ "$tray_failed" = 1 ] || strih_session_app_absent_note "$u" >/dev/null \
       || echo "  WARN: ${program} not installed -- re-run $(strih_session_app_binary_installer "$u"); ${u} cannot run without it"
   done
 
@@ -585,7 +589,7 @@ strih_session_app_pass_row() {
 strih_session_apps_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
   local unitdir u item script program run ustate sstate enabled autostart active process facts newest verdict
-  local wm cmd exe start
+  local wm cmd exe start absent_note
   local -a files
   unitdir="${home}/.config/systemd/user"
   for u in "${STRIH_SESSION_APP_UNITS[@]}"; do
@@ -597,17 +601,25 @@ strih_session_apps_grade_rows() {
     ustate="$(strih_session_app_units_state "$unitdir" "${repo}/systemd" "${files[@]}")"
     if [ -n "$script" ]; then
       sstate="$(strih_session_app_file_state "$program" "${repo}/scripts/${script}")"
+    elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ]; then
+      # issue 1429: the tray binary against the release record of the pin (absent / stale:<why> / ok)
+      sstate="$(dantesync_install_tray_state || true)"
     else
-      sstate=absent; [ -x "$program" ] && sstate=ok  # an installed binary (step 16 / 16d): present, no checkout copy
-    fi
-    # issue 1429: no tray binary while the pin has no Linux tray = a NOTE, never a FAIL (an installed
-    # binary is graded in full whatever the pin says)
-    if [ "$sstate" = absent ] && [ -z "$script" ] && verdict="$(strih_session_app_absent_note "$u")"; then
-      printf 'NOTE|(%s) %s: %s\n' "$item" "$u" "$verdict"
-      continue
+      sstate=absent; [ -x "$program" ] && sstate=ok  # the /opt binary step 16 installs: present, no checkout copy
     fi
     enabled=0; [ -L "${unitdir}/${STRIH_SESSION_APP_WANTS_TARGET}.wants/${u}" ] && enabled=1
     autostart=0; grep -qxF "$(strih_session_app_autostart_line "$u")" "${home}/.config/openbox/autostart" 2>/dev/null && autostart=1
+    # issue 1429: no tray binary while the pin has no Linux tray = a NOTE, never a FAIL, once the unit, its
+    # enablement and its autostart line are in place (an installed binary is graded in full)
+    if [ "$sstate" = absent ] && [ -z "$script" ] && absent_note="$(strih_session_app_absent_note "$u")"; then
+      if verdict="$(strih_session_app_unit_verdict "$ustate" ok "$enabled" "$autostart" active ok)"; then
+        printf 'NOTE|(%s) %s: %s\n' "$item" "$u" "$absent_note"
+      else
+        printf 'FAIL|(%s) %s: %s (unit=%s enabled=%s autostart=%s; the binary: %s) -- %s\n' "$item" "$u" "$verdict" \
+          "$ustate" "$enabled" "$autostart" "$absent_note" "$(strih_session_app_remedy "$verdict" "$u")"
+      fi
+      continue
+    fi
     active="$(strih_session_apps_user_systemctl "$user" is-active "$u" 2>/dev/null || true)"
     active="${active%%$'\n'*}"
     facts="$(strih_session_app_process_facts "$user" "$run")"
@@ -629,7 +641,8 @@ strih_session_apps_grade_rows() {
     fi
   done
 
-  # issue 1412: each extra row only for an entry the box runs (a stream box runs the keeper alone).
+  # issue 1412: each extra row only for an entry the box runs (a stream box runs the keeper + the
+  # dantesync tray, issue 1429; the tray has no extra row).
   if _strih_session_apps_has strih-browser-keeper.service; then
     strih_session_app_pass_row browser-keeper strih_browser_keeper.py "$STRIH_BROWSER_KEEPER_STATE_FILE" \
       strih-browser-keeper.service "$repo" "$user"
@@ -658,7 +671,7 @@ strih_session_apps_grade_rows() {
 }
 
 # _strih_session_apps_has UNIT -> 0 when UNIT is one of STRIH_SESSION_APP_UNITS (issue 1412: the stream
-# role narrows the list to the keeper).
+# role narrows the list to the keeper + the dantesync tray).
 _strih_session_apps_has() {
   local u
   for u in "${STRIH_SESSION_APP_UNITS[@]}"; do

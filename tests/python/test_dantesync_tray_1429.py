@@ -106,6 +106,35 @@ def test_a_good_download_installs_the_tray(tmp_path):
     assert b.read_bytes() == GOOD
     assert stat.S_IMODE(b.stat().st_mode) == 0o755
     assert "installed the dantesync tray v1.18.0 -> %s" % b in r.stdout
+    # the release record verify grades with no network read
+    assert F.tray_record(tmp_path).read_text() == "v1.18.0 %s\n" % hashlib.sha256(GOOD).hexdigest()
+    assert sorted(p.name for p in b.parent.iterdir()) == ["dantesync-tray"], "no .new sibling left behind"
+
+
+def test_an_upper_case_release_sha256_is_accepted(tmp_path):
+    r = _tray(tmp_path, release={"sha": hashlib.sha256(GOOD).hexdigest().upper()})
+    assert _rc(r) == 0, r.stderr
+    assert F.tray_bin(tmp_path).read_bytes() == GOOD
+
+
+def test_a_replace_renames_a_new_inode_over_the_name(tmp_path):
+    # a running tray keeps the inode it runs; the new one arrives by rename, never a write into the old file
+    b = F.fake_tray(tmp_path)
+    old_ino = b.stat().st_ino
+    keep = b.parent / "held"
+    os.link(b, keep)  # stands in for the running process holding the old inode
+    r = _tray(tmp_path)
+    assert _rc(r) == 0, r.stderr
+    assert b.stat().st_ino != old_ino and keep.read_text() == "#!/bin/sh\n"
+    assert not [p for p in b.parent.iterdir() if ".new." in p.name]
+
+
+def test_a_kept_tray_gets_its_missing_release_record_back(tmp_path):
+    assert _rc(_tray(tmp_path)) == 0
+    F.tray_record(tmp_path).unlink()
+    r = _tray(tmp_path)
+    assert _rc(r) == 0 and "-- kept" in r.stdout, r.stderr
+    assert F.tray_record(tmp_path).read_text().startswith("v1.18.0 ")
 
 
 def test_a_sha_mismatch_refuses_and_installs_nothing(tmp_path):
@@ -169,6 +198,41 @@ def test_a_non_executable_tray_with_the_right_bytes_is_reinstalled(tmp_path):
     assert stat.S_IMODE(b.stat().st_mode) == 0o755
 
 
+# --- dantesync_install_tray_state: the release record, no network ---------------------------------------------
+
+def _state(tmp_path, pin="1.18.0"):
+    env = {"DANTESYNC_INSTALL_TRAY_BIN": str(F.tray_bin(tmp_path)),
+           "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(F.tray_record(tmp_path)), "DANTESYNC_VERSION_PIN": pin}
+    r = F.bash('dantesync_install_tray_state && echo " rc=0" || echo " rc=$?"', env=env, sources=(DS_INSTALL,))
+    return r.stdout.strip()
+
+
+def test_state_ok_after_an_install(tmp_path):
+    assert _rc(_tray(tmp_path)) == 0
+    assert _state(tmp_path) == "ok rc=0"
+
+
+def test_state_absent(tmp_path):
+    assert _state(tmp_path) == "absent rc=1"
+
+
+def test_state_stale_when_the_pin_moved_on(tmp_path):
+    assert _rc(_tray(tmp_path)) == 0
+    assert _state(tmp_path, pin="1.19.0") == "stale:installed-v1.18.0-pin-v1.19.0 rc=1"
+
+
+def test_state_stale_when_the_binary_is_not_the_recorded_release(tmp_path):
+    assert _rc(_tray(tmp_path)) == 0
+    F.tray_bin(tmp_path).write_text("#!/bin/sh\n# a hand copy\n")
+    assert _state(tmp_path) == "stale:sha256-is-not-the-v1.18.0-release rc=1"
+
+
+def test_state_stale_without_a_release_record(tmp_path):
+    assert _rc(_tray(tmp_path)) == 0
+    F.tray_record(tmp_path).unlink()
+    assert _state(tmp_path) == "stale:no-release-record rc=1"
+
+
 # --- the session app: unit, autostart, mapping, packages --------------------------------------------------------
 
 def _unit():
@@ -183,8 +247,10 @@ def test_the_unit_text():
     assert u["Type"] == "simple" and u["Environment"] == "DISPLAY=:0"
     assert u["StandardOutput"] == "journal" and u["StandardError"] == "journal"
     assert u["WantedBy"] == "graphical-session.target"  # the strih-obs pattern, never default.target
-    # no binary (a pin below 1.18.0) = a clean condition skip, never a restart loop on a missing ExecStart
-    assert u["ConditionPathExists"] == u["ExecStart"]
+    # no executable binary (a pin below 1.18.0) = a clean condition skip, never a restart loop on a
+    # missing ExecStart; executable, not just present, the way the grader reads it (review round 1)
+    assert u["ConditionFileIsExecutable"] == u["ExecStart"]
+    assert "ConditionPathExists" not in u
 
 
 def test_the_unit_runs_the_binary_the_install_writes():
@@ -292,6 +358,9 @@ def test_install_a_failed_tray_fetch_warns_and_provisions_every_other_app(tmp_pa
     assert r.returncode == 0, r.stdout + r.stderr
     assert "SHA256 MISMATCH" in r.stderr
     assert "WARN: the dantesync tray was not installed" in r.stdout and "step 16d" in r.stdout
+    tray_warns = [ln for ln in r.stdout.splitlines()
+                  if "WARN" in ln and ("dantesync tray" in ln or str(F.tray_bin(tmp_path)) in ln)]
+    assert len(tray_warns) == 1, "one WARN for one failed fetch (review round 1): %s" % tray_warns
     assert not F.tray_bin(tmp_path).exists()
     for unit in F.UNIT_FILES:
         assert (home / ".config/systemd/user" / unit).is_file(), unit
@@ -335,10 +404,46 @@ def test_grade_row_fails_a_missing_tray_once_the_pin_ships_one(tmp_path):
     assert "step 16d" in row and "dantesync" in row.split(" -- ", 1)[1]
 
 
-def test_grade_row_an_installed_tray_is_graded_in_full_even_below_1_18_0(tmp_path):
-    # a binary on the box is graded whatever the pin says: the NOTE is only for "nothing to run yet"
-    rows = _rows(tmp_path, env_extra={"DANTESYNC_VERSION_PIN": "1.17.0"}, active="inactive")
+def test_grade_row_fails_a_tray_behind_the_pin(tmp_path):
+    # the pin moved to 1.19.0 and setup-strih did not follow (or its fetch failed): a FAIL, never a quiet OK
+    rows = _rows(tmp_path, env_extra={"DANTESYNC_VERSION_PIN": "1.19.0"})
+    row = F.row(rows, "dantesync-tray")
+    assert row.startswith("FAIL|(dantesync-tray) %s: script-differs" % TRAY), row
+    assert "program=stale:installed-v1.18.0-pin-v1.19.0" in row and "step 16d" in row
+
+
+def test_grade_row_fails_a_hand_replaced_tray(tmp_path):
+    home_rows = _rows(tmp_path)
+    assert F.row(home_rows, "dantesync-tray").startswith("OK|"), home_rows
+    F.tray_bin(tmp_path).write_text("#!/bin/sh\n# a hand copy\n")
+    rows = _rows(tmp_path / "again", env_extra={
+        "DANTESYNC_INSTALL_TRAY_BIN": str(F.tray_bin(tmp_path)),
+        "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(F.tray_record(tmp_path))},
+        home_kw={"tray_exe": str(F.tray_bin(tmp_path))})
+    assert "program=stale:sha256-is-not-the-v1.18.0-release" in F.row(rows, "dantesync-tray")
+
+
+def test_grade_row_note_still_fails_a_broken_unit_install(tmp_path):
+    # below 1.18.0 a missing binary is a NOTE only when the unit, its enablement and autostart are in place
+    rows = _rows(tmp_path, env_extra={"DANTESYNC_VERSION_PIN": "1.17.0"},
+                 home_kw={"tray": False, "enabled": False})
+    row = F.row(rows, "dantesync-tray")
+    assert row.startswith("FAIL|(dantesync-tray) %s: not-enabled" % TRAY), row
+    assert "ships no Linux tray" in row
+
+
+def test_grade_row_an_installed_tray_is_graded_in_full(tmp_path):
+    rows = _rows(tmp_path, active="inactive")
     assert F.row(rows, "dantesync-tray").startswith("FAIL|(dantesync-tray) %s: not-active:inactive" % TRAY)
+
+
+def test_grade_row_an_installed_tray_below_1_18_0_is_never_a_note(tmp_path):
+    # a binary on the box is graded whatever the pin says: the NOTE is only for "nothing to run yet". A pin
+    # rolled back below 1.18.0 with a tray left installed reads stale (its record names another release).
+    rows = _rows(tmp_path, env_extra={"DANTESYNC_VERSION_PIN": "1.17.0"})
+    row = F.row(rows, "dantesync-tray")
+    assert row.startswith("FAIL|(dantesync-tray) %s: script-differs" % TRAY), row
+    assert "program=stale:installed-v1.18.0-pin-v1.17.0" in row
 
 
 def test_grade_row_a_tray_started_some_other_way_is_the_wrong_program(tmp_path):

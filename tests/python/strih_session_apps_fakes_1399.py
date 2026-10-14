@@ -30,10 +30,12 @@ UNIT_FILES = ("strih-browser-keeper.service", "bkshading-panel-app.service", "co
 PROGRAMS = ("strih_browser_keeper.py", "bkshading_panel_app.py", "strih_satellite_watch.py")
 LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_SESSION_APPS_EUID",
          "STRIH_SESSION_APPS_PYTHON", "STRIH_SESSION_APPS_SATELLITE_BIN", "STRIH_LX_IP", "STRIH_BOXES_DIR",
-         "DANTESYNC_VERSION_PIN", "DANTESYNC_RELEASE_BASE", "DANTESYNC_INSTALL_TRAY_BIN")
+         "DANTESYNC_VERSION_PIN", "DANTESYNC_RELEASE_BASE", "DANTESYNC_INSTALL_TRAY_BIN",
+         "DANTESYNC_INSTALL_TRAY_RELEASE_FILE")
 # issue 1429: the hermetic defaults (see the module doc); a test's own env wins
 HERMETIC = {"DANTESYNC_RELEASE_BASE": "file:///nonexistent-1429/release",
-            "DANTESYNC_INSTALL_TRAY_BIN": "/nonexistent-1429/bin/dantesync-tray"}
+            "DANTESYNC_INSTALL_TRAY_BIN": "/nonexistent-1429/bin/dantesync-tray",
+            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": "/nonexistent-1429/share/release"}
 TRAY_PIN = "1.18.0"
 TRAY_ASSET = "dantesync-tray-linux-amd64"
 # the main processes /proc shows (the watch's oneshot service has none between its runs)
@@ -134,20 +136,29 @@ def tray_bin(tmp_path):
     return tmp_path / "tray" / "dantesync-tray"
 
 
+def tray_record(tmp_path):
+    """The tray's release record (DANTESYNC_INSTALL_TRAY_RELEASE_FILE): `v<version> <sha256>`."""
+    return tmp_path / "tray-share" / "release"
+
+
 def tray_env(tmp_path, **release):
     """The env of an install that fetches the tray: the pin 1.18.0, the fake release, the tray path seam."""
     return {"DANTESYNC_VERSION_PIN": TRAY_PIN, "DANTESYNC_RELEASE_BASE": fake_tray_release(tmp_path, **release),
-            "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path))}
+            "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path)),
+            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(tray_record(tmp_path))}
 
 
-def fake_tray(tmp_path):
-    """The dantesync tray step 16d installed (DANTESYNC_INSTALL_TRAY_BIN)."""
+def fake_tray(tmp_path, version=TRAY_PIN):
+    """The dantesync tray step 16d installed (DANTESYNC_INSTALL_TRAY_BIN) + its release record."""
     p = tray_bin(tmp_path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("#!/bin/sh\n")
     p.chmod(0o755)
     past = time.time() - 86400
     os.utime(p, (past, past))
+    rec = tray_record(tmp_path)
+    rec.parent.mkdir(parents=True, exist_ok=True)
+    rec.write_text("v%s %s\n" % (version, hashlib.sha256(p.read_bytes()).hexdigest()))
     return p
 
 
@@ -221,7 +232,8 @@ def grade_env(tmp_path, bindir, rundir, euid="1000"):
     return {"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": euid,
             "STRIH_SESSION_APPS_RUNTIME_DIR": str(rundir), "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc"),
             "STRIH_SESSION_APPS_SATELLITE_BIN": str(tmp_path / "opt" / "companion-satellite" / "companion-satellite"),
-            "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path)), "DANTESYNC_VERSION_PIN": TRAY_PIN}
+            "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path)), "DANTESYNC_VERSION_PIN": TRAY_PIN,
+            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(tray_record(tmp_path))}
 
 
 def grade(tmp_path, home, bindir, rundir, **fakes):
