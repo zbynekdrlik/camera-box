@@ -91,14 +91,16 @@ _drm_restore() {
   systemctl restart camera-box 2>/dev/null || true
 $(camera_box_verify_active_cmds "cam2 (drm-latency $label)")
 } >&2
-trap _drm_restore EXIT
+_drm_cap=/dev/shm/drm-lat-$label.nut
+trap '_drm_restore; rm -f "\$_drm_cap"' EXIT
 echo "[drm-latency] stop camera-box to free $node (label=$label)" >&2
 systemctl stop camera-box 2>/dev/null || true
 sleep 1
-echo "[drm-latency] grab $frames frames from $node ($fmt $size@$fps) with wallclock ts, NUT to stdout" >&2
-timeout -k 5 $((seconds + 30)) ffmpeg -hide_banner -loglevel warning -nostdin -use_wallclock_as_timestamps 1 -f v4l2 -input_format $fmt -video_size $size -framerate $fps -i $node -frames:v $frames -copyts -avoid_negative_ts disabled -c:v copy -f nut -
+echo "[drm-latency] grab $frames frames from $node ($fmt $size@$fps) with wallclock ts into RAM (\$_drm_cap)" >&2
+timeout -k 5 $((seconds + 30)) ffmpeg -hide_banner -loglevel warning -nostdin -use_wallclock_as_timestamps 1 -f v4l2 -input_format $fmt -video_size $size -framerate $fps -i $node -frames:v $frames -copyts -avoid_negative_ts disabled -c:v copy -f nut -y "\$_drm_cap"
 _drm_rc=\$?
-echo "[drm-latency] grab exit=\$_drm_rc label=$label" >&2 ;
+echo "[drm-latency] grab exit=\$_drm_rc label=$label -- NUT to stdout" >&2
+cat "\$_drm_cap" 2>/dev/null ;
 CAM2PROG
 }
 

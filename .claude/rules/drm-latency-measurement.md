@@ -24,12 +24,22 @@ file is EMPTY (0 frames, no error; proven live in the M3 campaign). Bound the gr
 `-frames:v $((seconds * fps))` instead — a frame count is timestamp-independent. The orchestrator's
 `test_sh_grab_is_frame_bounded_never_duration_bounded` pins this.
 
-## GOTCHA — a raw grab cannot fit cam2's /tmp; STREAM the NUT over the ssh pipe to dev1
+## The grab lands in the box's RAM first, THEN the ssh pipe carries it (issue 1424)
+
+Streaming the NUT over ssh WHILE grabbing lets a slow link back-pressure ffmpeg: on the PP LAN
+(dev1 -> companion-pp router, 14.10.2026) 480 frames took 18.6 s with gaps up to 1.4 s, the
+wallclock stamps were taken late, and the median read 779 ms instead of ~155. So the remote program
+grabs into `/dev/shm/drm-lat-<label>.nut` (RAM: a cambox has GBs there, unlike its 100 MB /tmp; an
+MJPEG copy-mux is ~20 MB/s), then `cat`s it to stdout, and its EXIT trap removes the file. Sanity
+check every capture: `ffprobe -show_entries packet=pts_time` must span ~frames/fps seconds with no
+gap over ~2 frame periods; anything else is a transport artifact, never a latency.
+
+## GOTCHA — a raw grab cannot fit cam2's /tmp; the NUT reaches dev1 over the ssh pipe
 
 Raw YUYV 1080p60 is ~4.15 MB/frame (~250 MB/s) — a 20 s grab overflowed cam2's /tmp live ("No space
-left on device"). The orchestrator therefore never writes a remote file: the remote ffmpeg emits
-`-c:v copy -f nut -` to stdout and the dev1-side executor redirects the ssh pipe into the local
-capture (`ssh … bash -s > local.nut`), no scp step. Consequence: the remote program's stdout IS the
+left on device"). So nothing lands on /tmp: the MJPEG copy-mux goes to `/dev/shm` (section above)
+and is `cat` to stdout, and the dev1-side executor redirects the ssh pipe into the local capture
+(`ssh … bash -s > local.nut`), no scp step. Consequence: the remote program's stdout IS the
 NUT stream — EVERY progress echo goes to `>&2`, and the restore fn redirects its whole body (`} >&2`)
 because the spliced `camera_box_verify_active_cmds` block prints its success line to stdout.
 
