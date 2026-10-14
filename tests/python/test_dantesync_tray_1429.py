@@ -102,6 +102,7 @@ def test_the_gate_pin_is_read_when_no_override_is_set(tmp_path):
     pin = gate.split('DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-', 1)[1].split("}", 1)[0]
     r = F.bash('dantesync_install_tray && echo "rc=0" || echo "rc=$?"', sources=(DS_INSTALL,),
                env={"DANTESYNC_INSTALL_TRAY_BIN": str(F.tray_bin(tmp_path)),
+                    "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(F.tray_record(tmp_path)),
                     "DANTESYNC_RELEASE_BASE": F.fake_tray_release(tmp_path, version=pin)})
     assert _rc(r) == 0, r.stderr
     below = subprocess.run(["bash", "-c", '. "%s"; dantesync_install_version_ge "%s" 1.18.0' % (DS_INSTALL, pin)]).returncode
