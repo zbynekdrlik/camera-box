@@ -108,6 +108,7 @@ Three dev1-side pure parsers:
 | `ndi-discovery.sh --cambox-apply` | the config/drop-in removal | `systemctl daemon-reload` |
 | `rt-kernel-plan.sh` printed runbook (print-only) | the step's apt / grub work, its rc kept | (nothing started) the work's own FAIL / OK line |
 | `cambox-ro-units.sh` apply (`scripts/cambox-ro-units-apply.sh`, issue 1394) | (the apt units stopped just before it) the logrotate drop-in + netconsole unit (temp file + rename), `systemctl mask --no-reload` of the apt units | daemon-reload, reset-failed, `start logrotate`, `restart cambox-netconsole`, the `is-system-running` read-back |
+| `cambox-zram.sh` apply (`cambox_zram_apply_program`, issue 1428) | the `systemd-zram-generator` apt install (dpkg file writes only: the package has no maintainer scripts; the .deb lands in the /var/cache tmpfs), the drop-in (temp file + rename) | daemon-reload, `modprobe zram`, `systemctl start dev-zram0.swap`, the swapon read-back |
 
 - **cambox-ro-units apply (issue 1394):** a cambox-only site, so a root found writable is also
   forced back read-only (the decision below).

@@ -209,6 +209,10 @@
 #        file of Europe/Bratislava (scripts/lib/rig-timezone.sh, the ONE declaration setup-device.sh
 #        STEP 1 + create-usb-linux.sh write). Read with readlink, never timedatectl (its read-back
 #        lies on the read-only root). Etc/UTC, a copied file or an unreadable link FAILs.
+#   (at) zram swap (issue 1428) -- HARD FAIL: systemd-zram-generator installed, the drop-in
+#        /etc/systemd/zram-generator.conf.d/camera-box.conf byte-identical to scripts/lib/cambox-zram.sh,
+#        an active /dev/zram* swap of at least 90 % of RAM, and no swap on anything else (a swapfile
+#        on the USB stick wears it out). Graded by cambox_zram_verdict from that ONE lib.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -293,6 +297,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/rig-timezone.sh
 . "$HERE/lib/rig-timezone.sh"  # rig_timezone_gather_cmd / rig_timezone_verdict -- the (as) rig time-zone
                                # check (issue 1415; SAME lib setup-device.sh STEP 1 writes the zone with)
+# shellcheck source=scripts/lib/cambox-zram.sh
+. "$HERE/lib/cambox-zram.sh"  # cambox_zram_gather_remote_snippet / cambox_zram_verdict -- the (at) zram
+                              # swap check (issue 1428; SAME lib setup-device.sh / create-usb-linux.sh write with)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -927,6 +934,8 @@ Checks:
       or empty grub.cfg FAILs
   (as) the rig time zone (issue 1415): /etc/localtime links to the Europe/Bratislava zoneinfo file,
       read with readlink (never timedatectl) -- Etc/UTC, a copied file or an unreadable link FAILs
+  (at) zram swap (issue 1428): systemd-zram-generator installed, its camera-box drop-in in place, an
+      active /dev/zram* swap of at least 90 % of RAM and no swap on the USB stick
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1823,6 +1832,27 @@ else
     ok "time zone ${TZ_BOX}: /etc/localtime links to the rig zone -- local clocks on the box (issue 1415)"
   else
     fail "time zone: ${TZ_AS_VERDICT#FAIL: } -- re-run setup-device.sh (STEP 1 writes it)"
+  fi
+fi
+
+# (at) zram swap (issue 1428) -- HARD FAIL ---------------------------------------------------------
+# Owner 14.10.2026: every Linux box carries swap. A cambox swaps to compressed RAM (its root is a
+# read-only USB stick): systemd-zram-generator + the camera-box drop-in from scripts/lib/cambox-zram.sh,
+# which setup-device.sh `[zram-swap]` and create-usb-linux.sh write. One read-only ssh gather, graded by
+# the SAME lib's pure cambox_zram_verdict (fail-closed). Inserted after (as), before (ar): outside the
+# slices pytest executes ((ar)..(al), (aq)..(ao), (ao)..(an), (an)..(q)) and before (q), which stays last.
+atrc=0
+ZRAM_BLOCK="$(ssh_box "$(cambox_zram_gather_remote_snippet)")" || atrc=$?
+if [ "$atrc" -ne 0 ] || [ -z "$ZRAM_BLOCK" ]; then
+  fail "could not read the zram swap state over SSH (rc=$atrc) -- cannot certify the box's swap (issue 1428)"
+else
+  ZRAM_VERDICT="$(cambox_zram_verdict "$ZRAM_BLOCK")"
+  if [ "$ZRAM_VERDICT" = "ok" ]; then
+    ok "zram swap active (>= ${CAMBOX_ZRAM_MIN_PERCENT}% of RAM, ${CAMBOX_ZRAM_PACKAGE} + the camera-box drop-in), nothing swaps to the USB stick (issue 1428)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "zram swap: ${_reason#FAIL: }"
+    done <<<"$ZRAM_VERDICT"
   fi
 fi
 

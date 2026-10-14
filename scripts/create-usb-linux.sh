@@ -66,6 +66,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
                                        # + remote_log_journal_upload_conf_content/_dropin_content (#1311)
                                        # -- SAME source of truth as setup-device.sh/verify-device.sh for
                                        # off-box kernel(netconsole)+journal(upload) forensics
+# shellcheck source=scripts/lib/cambox-zram.sh
+. "$SCRIPT_DIR/lib/cambox-zram.sh"  # cambox_zram_install_dropin (issue 1428) -- SAME lib as setup-device.sh's
+                                    # [zram-swap] + verify-device.sh (at): the zram swap drop-in
 # shellcheck source=scripts/lib/efi-boot-entry.sh
 . "$SCRIPT_DIR/lib/efi-boot-entry.sh"  # efi_whole_disk_of / EFI_CAM_BOX_LABEL / EFI_CAM_BOX_LOADER
                                        # (#1066 D6) -- SAME source of truth as setup-device.sh/
@@ -356,6 +359,10 @@ EOF
     remote_log_journal_upload_conf_content > "$MOUNT_ROOT$REMOTE_LOG_JU_CONF_PATH"
     remote_log_journal_upload_dropin_content > "$MOUNT_ROOT$REMOTE_LOG_JU_DROPIN_PATH"
 
+    # issue 1428: swap on compressed RAM from the first boot (the package in the chroot install
+    # below; this drop-in = zram-size = ram, zstd). Never a swapfile: the root is a USB stick.
+    cambox_zram_install_dropin "$MOUNT_ROOT" || error "could not write the zram swap drop-in (issue 1428)"
+
     # #448 (2026-07-18 rescope, event finding #8): force-load the Intel iGPU DRM module at boot so a
     # HEADLESS first boot (no monitor attached) still brings up /dev/dri + /dev/fb0 for the painter /
     # cameraman-monitor framebuffer chain. On cam5-class hardware `i915` is only udev-probed when a
@@ -405,6 +412,7 @@ apt-get install -y \
     nftables \
     cloud-guest-utils \
     systemd-journal-remote \
+    systemd-zram-generator \
     tzdata
 
 # #362: bake the NDI/audio RUNTIME deps into the base image so a fresh clone can RUN camera-box

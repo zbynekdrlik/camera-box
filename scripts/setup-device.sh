@@ -65,6 +65,9 @@ fail() {
                                 # -- the on-box ssh-banner self-heal; ONE source of truth shared with
                                 # verify-device.sh's (aj) check (the pure decision embedded via declare -f)
 
+# shellcheck source=scripts/lib/cambox-zram.sh
+. "$HERE/lib/cambox-zram.sh"  # cambox_zram_install_dropin / CAMBOX_ZRAM_PACKAGE -- the [zram-swap] sub-step
+                              # (issue 1428; SAME lib verify-device.sh (at) + create-usb-linux.sh use)
 # shellcheck source=scripts/lib/bkshading-relay-provision.sh
 . "$HERE/lib/bkshading-relay-provision.sh"  # bkshading_relay_provision_install / _expected_enable_state /
                                             # _binary_plan / _fetch_binary (issue 808) -- the ONE relay install
@@ -1749,6 +1752,22 @@ EGRESS_PACING_ENABLED_STATE="$(systemctl is-enabled "$CAMBOX_EGRESS_PACING_SERVI
     || fail "${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service is not enabled (is-enabled='${EGRESS_PACING_ENABLED_STATE:-<none>}') after install -- the NDI egress would be UNPACED after the next reboot (issue 1242)"
 echo "  Installed: $CAMBOX_EGRESS_PACING_SCRIPT_PATH + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service (enabled; paces the default-route interface at next boot, fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT})"
 
+
+# =============================================================================
+# [zram-swap]: swap on compressed RAM (issue 1428, unnumbered sub-step, ENABLE-only)
+# =============================================================================
+# Owner 14.10.2026: every Linux box carries swap. This root is a read-only USB stick, so the swap is
+# zram (RAM), never a file on the stick: systemd's zram-generator (no maintainer scripts) plus the ONE
+# drop-in from scripts/lib/cambox-zram.sh (zram-size = ram, zstd). The generator reads /etc at boot,
+# so nothing is started here (.claude/rules/provisioning-scripts.md); the swap comes up at the next
+# boot and verify-device.sh (at) grades it. In the rw window, before STEP 18's read-only flip.
+echo ""
+echo -e "${GREEN}[zram-swap] Installing the zram swap (${CAMBOX_ZRAM_PACKAGE} + ${CAMBOX_ZRAM_DROPIN}, issue 1428)...${NC}"
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confold "$CAMBOX_ZRAM_PACKAGE" </dev/null \
+    || fail "apt-get install ${CAMBOX_ZRAM_PACKAGE} failed -- the box would have no swap (issue 1428)"
+cambox_zram_install_dropin "" \
+    || fail "could not write ${CAMBOX_ZRAM_DROPIN} -- the zram swap would stay at the package default (issue 1428)"
+echo "  Installed: ${CAMBOX_ZRAM_PACKAGE} + ${CAMBOX_ZRAM_DROPIN} (zram-size = ram; the swap comes up at the next boot)"
 
 # =============================================================================
 # #1311: off-box remote logging (unnumbered sub-step, enable-only). Get kernel + journal messages
