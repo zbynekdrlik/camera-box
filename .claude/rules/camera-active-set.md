@@ -16,8 +16,10 @@ paths:
 **CURRENT (issue 1413, owner 12.10.2026): the SNV rig SHRANK to `cam2 cam3 cam5`** — cam1/cam4/cam6/cam7
 moved to Poprad (`scripts/strih-boxes/strih-pp.env` `STRIH_CAMERAS=1 4 6 7`). The default is the SNV
 venue's `STRIH_CAMERAS` (strih-snv.env `2 3 5`) as cam names, pinned EQUAL by
-`harness_camera_set.rs::camera_active_set_default_is_the_snv_venue_cameras_1413`; the derived source
-box is cam3; `CAMERA_ALIGN_SET` is cam3 + every strih-routable active camera (`camera_align_default`,
+`harness_camera_set.rs::camera_active_set_default_is_the_snv_venue_cameras_1413`; the source box is
+cam5, the SNV box whose USB-C carries the test camera (`CAMERA_TEST_CAMERA_BOX`, set only for the
+default set, 14.10.2026 -- the release E2E aborted at the issue-1371 step with the camera on cam5
+and the derived source on cam3; an explicit set keeps the first-routable derivation); `CAMERA_ALIGN_SET` is cam3 + every strih-routable active camera (`camera_align_default`,
 SNV `cam3 cam5`, the unconditional cam4 is gone); the five python mirrors + the
 `rig-dev-handover-check.sh` fallback carry `cam2 cam3 cam5`. The PP cameras keep every fact and are
 maintained through the dantesync fleet's PP `reach` rows (`.claude/rules/dantesync-fleet.md`), never

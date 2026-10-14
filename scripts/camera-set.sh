@@ -194,6 +194,14 @@
 # box whose bkshading relay carries the test camera's USB. The PP cameras keep every fact below
 # (camera_resolve / camera_strih_route); they are maintained through the dantesync fleet's PP rows
 # (scripts/lib/dantesync-fleet.sh), never through this SNV measurement set.
+# CAMERA_TEST_CAMERA_BOX (issue 1413 follow-up, 14.10.2026): the SNV camera box whose USB-C carries
+# the test camera (the BMPCC) and runs its bkshading relay -- cam5. camera_source_box prefers it, so
+# the E2E source, the relay pause and the issue-1371 shutter/ISO step all land on the box that holds
+# the camera. It belongs to the SNV DEFAULT set only: an explicit CAMERA_ACTIVE_SET (a legacy or test
+# set) keeps the first-strih-routable derivation. Moving the camera's USB-C = this one word.
+if [ -z "${CAMERA_ACTIVE_SET:-}" ]; then
+  CAMERA_TEST_CAMERA_BOX="${CAMERA_TEST_CAMERA_BOX:-cam5}"
+fi
 CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}"
 
 # CAMERA_ALIGN_SET (the on-air strih cameras the #1003 floor-3 per-run aligner keeps phase-aligned)
@@ -321,6 +329,12 @@ camera_source_box() {
     return 0
   fi
   local cam
+  # issue 1413: the SNV default set's test-camera box first, when it is active and strih-routable.
+  cam="${CAMERA_TEST_CAMERA_BOX:-}"
+  if [ -n "$cam" ] && camera_is_active "$cam" && ( camera_strih_route "$cam" ) >/dev/null 2>&1; then
+    printf '%s' "$cam"
+    return 0
+  fi
   for cam in $CAMERA_ACTIVE_SET; do
     if ( camera_strih_route "$cam" ) >/dev/null 2>&1; then
       printf '%s' "$cam"
