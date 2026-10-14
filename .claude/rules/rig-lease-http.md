@@ -175,10 +175,40 @@ else {
 }
 ```
 
-Never a write from restreamer's side — it participates in NEITHER `mkdir`/`rm` on the lockdir NOR
-any acquire/release protocol. Restreamer's OWN "currently streaming" state is already ITS lease
-signal toward camera-box (unchanged by this ticket — see `scripts/rig-busy-gate.sh`'s existing
-OBS-state busy-check).
+**SUPERSEDED by issue 1432 for restreamer's writes:** on 14.10.2026 a 45-min restreamer CI stream
+at night was invisible to camera-box as a holder (it only read the lease), so restreamer now TAKES
+the lease through the write routes below. The read contract above stays for any other consumer.
+
+## The write routes (issue 1432) -- a remote holder takes the lease
+
+`POST /rig-lease/acquire | heartbeat | release` on the same server, contract posted on restreamer#349
+(comment 6179376408), logic in `scripts/rig_lease_write.py`, the lock itself ONLY
+`scripts/lib/rig-lease.sh` (run in a `bash` subprocess, argv only, `RIG_LEASE_DIR` = the server's).
+
+- **Auth:** `Authorization: Bearer <token>`, `hmac.compare_digest` against
+  `~/.config/camera-box/rig-lease-token` (`RIG_LEASE_TOKEN_FILE` / `--token-file`), read per request.
+  The file must be a regular file owned by the server's user with no group/other bits; absent, empty
+  or wrong mode = every write is a 401. The same value is the restreamer secret `RIG_LEASE_TOKEN`.
+- **acquire** `{repo, run_id, run_url, job, expected_secs 60..5400}`: 200
+  `{acquired, lease_id, holder, expected_release_at, reclaimed}` / 409 `{acquired:false, holder,
+  heartbeat_age_s}` / 400 / 401. Declared release = now + min(expected_secs, 900): the rolling
+  look-ahead, so a camera-box gate WAITS instead of failing fast (its 1800 s budget).
+- **heartbeat** `{lease_id}` every 30 s: `rig_lease_refresh_if_mine` with
+  `RIG_LEASE_MAX_HOLD_SECS = max_hold_s`: 200 `{refreshed, expected_release_at}` / 404 not_holder /
+  409 over_hold (past acquired_at + expected_secs) / 503 lease_io.
+- **release** `{lease_id}`: idempotent 200 `{released: true|false}`; a foreign id never removes the
+  holder (`rig_lease_release` by run_id, after the lease_id check).
+- **Per-holder fields** (`rig_lease_write_holder`'s optional env; unset = the six keys exactly as
+  before): `lease_id` (128-bit hex, NEVER served on GET: `_HOLDER_FIELDS` stays the six),
+  `stale_secs` 180, `max_hold_s`. `rig_lease_is_stale` and `rig_lease_state.holder_stale_secs`
+  grade a positive-integer `stale_secs` over the caller's threshold, so a silent remote holder is
+  reclaimable after 3 min; camera-box's own holders keep 5400 s.
+- Writes are serialized per server (a lock) on top of the lockdir mkdir; every POST logs one line
+  with the status and `repo#run_id`, never the token or the lease_id.
+- Tests: `tests/python/test_rig_lease_write_1432.py` (the real server + the real bash lib on a temp
+  lease dir, a random token per test session).
+- Live: the token install + restart is in `systemd/rig-lease-server.README.md`; restart only while
+  `held=false`.
 
 ### Known, INHERITED race — a fresh acquire's few-millisecond "absent holder.json" window
 

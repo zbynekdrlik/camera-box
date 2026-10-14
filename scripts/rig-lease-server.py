@@ -32,14 +32,13 @@ contract for restreamer#349: `.claude/rules/rig-lease-http.md`.
                           served only by the sampler's own endpoint on strih-snv
                           (scripts/program_audio_http.py, :8891); the dev1 route was retired on
                           8.10.2026 (issue 1404).
-  any other METHOD (POST/PUT/DELETE/OPTIONS/...) -> the stdlib default 501 Not Implemented (this
-                          server implements no do_POST/do_PUT/etc. handler at all -- never a write
-                          surface, never a 5xx from application code). This server accepts GET/HEAD
-                          only; restreamer's own "streaming in progress" state is ITS lease signal
-                          toward camera-box (see rig-busy-gate.sh), so this endpoint only ever needs
-                          to be READ.
+  POST /rig-lease/acquire, /rig-lease/heartbeat, /rig-lease/release -> issue 1432: the
+                          AUTHENTICATED write routes a holder on another host (restreamer's stream-box
+                          runner) uses to TAKE the lease; logic + contract in scripts/rig_lease_write.py,
+                          the lock itself stays scripts/lib/rig-lease.sh. Any other POST path -> 404.
+  any other METHOD (PUT/DELETE/OPTIONS/...) -> the stdlib default 501 Not Implemented.
 
-No authentication: the payload is a boolean + holder metadata (repo/run_id/job/timestamps) + a TTL
+No authentication on the GET routes: the payload is a boolean + holder metadata (repo/run_id/job/timestamps) + a TTL
 number -- nothing secret, matching the issue's own explicit call. The default bind (0.0.0.0) is
 safe here ONLY because dev1 has no public IP exposure -- it is reachable exclusively via the two
 private interfaces (LAN, reached by the name dev1 since the DHCP address drifts; tailscale 100.104.8.125), and its firewall is already LAN-open
@@ -62,6 +61,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
@@ -69,6 +69,7 @@ from http.server import ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rig_lease_state as rls  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
+import rig_lease_write as rlw  # noqa: E402
 
 DEFAULT_BIND = "0.0.0.0"
 DEFAULT_PORT = 8890
@@ -108,6 +109,11 @@ class RigLeaseHandler(rsf.ReadOnlyHandler):
     stale_secs = rls.DEFAULT_STALE_SECS
     # issue 1404: the dir the mirrored marker file is served from; None = that route is a 404.
     serve_dir = None
+    # issue 1432: the bearer-token file the three POST /rig-lease/* write routes check
+    # (scripts/rig_lease_write.py); an absent/unusable file refuses every write.
+    token_file = None
+    # One write at a time through this server (the bash lib's mkdir lock is the real guard).
+    _write_lock = threading.Lock()
 
     server_version = "rig-lease-server/1277"
 
@@ -144,9 +150,32 @@ class RigLeaseHandler(rsf.ReadOnlyHandler):
 
         self._send(404, "text/plain", b"")
 
+    def do_POST(self):
+        # issue 1432: the authenticated write routes. Every other POST path is a 404 and never
+        # reads the body; the other verbs keep the stdlib 501.
+        path = self._request_path()
+        raw = None
+        if path in rlw.WRITE_PATHS:
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                length = -1
+            if 0 <= length <= rlw.MAX_BODY:
+                raw = self.rfile.read(length)
+            else:
+                self.close_connection = True
+        with self._write_lock:
+            reply = rlw.handle(path, self.headers.get("Authorization"), raw, self.lease_dir,
+                               self.stale_secs, self.token_file or "")
+        holder = reply.payload.get("holder") or {}
+        log(f"POST {path} -> {reply.status} {reply.payload.get('error', '')} "
+            f"holder={holder.get('repo')}#{holder.get('run_id')}")
+        self._send(reply.status, "application/json", json.dumps(reply.payload).encode("utf-8"),
+                   no_store=True)
+
 
 def make_server(bind: str, port: int, lease_dir: str, stale_secs: int,
-                serve_dir: str | None = None) -> ThreadingHTTPServer:
+                serve_dir: str | None = None, token_file: str | None = None) -> ThreadingHTTPServer:
     """Build a ThreadingHTTPServer bound to a handler CLASS carrying (lease_dir, stale_secs,
     serve_dir) -- BaseHTTPRequestHandler subclasses are instantiated per-request by the server, so
     the config is threaded via class attributes on a small bound subclass rather than instance
@@ -154,7 +183,8 @@ def make_server(bind: str, port: int, lease_dir: str, stale_secs: int,
     bound_handler = type(
         "BoundRigLeaseHandler",
         (RigLeaseHandler,),
-        {"lease_dir": lease_dir, "stale_secs": stale_secs, "serve_dir": serve_dir},
+        {"lease_dir": lease_dir, "stale_secs": stale_secs, "serve_dir": serve_dir,
+         "token_file": token_file if token_file is not None else rlw.default_token_file()},
     )
     return ThreadingHTTPServer((bind, port), bound_handler)
 
@@ -178,6 +208,11 @@ def main(argv=None) -> int:
         help="dir of the issue-1404 served marker file (default $RIG_LEASE_SERVE_DIR or "
              "$XDG_RUNTIME_DIR/rig-lease-serve); never the lease dir",
     )
+    parser.add_argument(
+        "--token-file", default=rlw.default_token_file(),
+        help="issue 1432: the 0600 bearer-token file of the POST /rig-lease/* write routes "
+             "(default $RIG_LEASE_TOKEN_FILE or ~/.config/camera-box/rig-lease-token)",
+    )
     args = parser.parse_args(argv)
     # Only the lease-dir case stops the server: ownership/permissions are checked per served file,
     # so a bad serve dir never takes the lease endpoint itself down.
@@ -185,10 +220,12 @@ def main(argv=None) -> int:
     if inside:
         parser.error(inside)
 
-    server = make_server(args.bind, args.port, args.lease_dir, args.stale_secs, serve_dir=args.serve_dir)
+    server = make_server(args.bind, args.port, args.lease_dir, args.stale_secs, serve_dir=args.serve_dir,
+                         token_file=args.token_file)
     log(
         f"rig-lease-server listening on {args.bind}:{args.port} "
-        f"(lease_dir={args.lease_dir}, stale_secs={args.stale_secs}, serve_dir={args.serve_dir})"
+        f"(lease_dir={args.lease_dir}, stale_secs={args.stale_secs}, serve_dir={args.serve_dir}, "
+        f"writes={'enabled' if rlw.read_token(args.token_file) else 'refused (no usable token file)'})"
     )
     try:
         server.serve_forever()

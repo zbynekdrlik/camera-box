@@ -213,6 +213,15 @@ rig_lease_is_stale() {
   local path; path="$(rig_lease_holder_path)"
   [ -f "$path" ] || return 0
 
+  # issue 1432: a holder may declare its own threshold (`stale_secs` in holder.json; the HTTP write
+  # routes write 180 for a remote holder beating every 30 s). Only a positive ASCII integer counts;
+  # anything else keeps the caller's threshold. Mirrors rig_lease_state.holder_stale_secs.
+  local own; own="$(rig_lease_read_holder_field stale_secs)"
+  case "$own" in
+    "" | 0* | *[!0123456789]*) ;;
+    *) stale_secs="$own" ;;
+  esac
+
   local age; age="$(rig_lease_heartbeat_age_seconds)"
   if ! rig_lease_is_fresh "$age" "$stale_secs"; then
     return 0
@@ -236,19 +245,30 @@ rig_lease_write_holder() {
   local d; d="$(rig_lease_dir)"
   mkdir -p "$d"
   local acquired_at; acquired_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # issue 1432: optional per-holder fields, from env (empty/unset = the key is absent, so every
+  # existing caller writes the same six keys): RIG_LEASE_HOLDER_LEASE_ID (the HTTP holder's write
+  # capability, never served on GET), RIG_LEASE_HOLDER_STALE_SECS and RIG_LEASE_HOLDER_MAX_HOLD_SECS
+  # (positive integers, written as JSON numbers; anything else is dropped).
   python3 -c '
 import json, sys
-repo, run_id, run_url, job, acquired_at, expected_release_at, path = sys.argv[1:8]
+repo, run_id, run_url, job, acquired_at, expected_release_at, path, lease_id, stale, max_hold = sys.argv[1:11]
+data = {
+    "repo": repo,
+    "run_id": run_id,
+    "run_url": run_url,
+    "job": job,
+    "acquired_at": acquired_at,
+    "expected_release_at": expected_release_at,
+}
+if lease_id:
+    data["lease_id"] = lease_id
+for key, raw in (("stale_secs", stale), ("max_hold_s", max_hold)):
+    if raw.isascii() and raw.isdigit() and int(raw) > 0:
+        data[key] = int(raw)
 with open(path, "w") as f:
-    json.dump({
-        "repo": repo,
-        "run_id": run_id,
-        "run_url": run_url,
-        "job": job,
-        "acquired_at": acquired_at,
-        "expected_release_at": expected_release_at,
-    }, f)
-' "$repo" "$run_id" "$run_url" "$job" "$acquired_at" "$expected_release_at" "$(rig_lease_holder_path)"
+    json.dump(data, f)
+' "$repo" "$run_id" "$run_url" "$job" "$acquired_at" "$expected_release_at" "$(rig_lease_holder_path)" \
+    "${RIG_LEASE_HOLDER_LEASE_ID:-}" "${RIG_LEASE_HOLDER_STALE_SECS:-}" "${RIG_LEASE_HOLDER_MAX_HOLD_SECS:-}"
   touch "$(rig_lease_heartbeat_path)"
 }
 

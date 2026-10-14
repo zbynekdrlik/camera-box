@@ -1,5 +1,5 @@
 [Unit]
-Description=camera-box rig-lease read-only HTTP exposure (#1277) — GET /rig-lease.json on :8890
+Description=camera-box rig-lease HTTP on :8890 — GET /rig-lease.json (#1277) + authenticated POST /rig-lease/* (issue 1432)
 Documentation=https://github.com/zbynekdrlik/camera-box
 # No ordering on network-online.target: dev1's user manager reads it as LoadState=not-found (a user
 # manager cannot see system targets, checked 7.10.2026), so it only looked like one.
@@ -31,8 +31,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rig-lease-server
 
-# Security hardening: a read-only stdlib HTTP server that only ever stat()s/reads files under
-# RIG_LEASE_DIR (/var/tmp/rig-lease by default) and never writes anything itself.
+# Security hardening: a stdlib HTTP server that reads RIG_LEASE_DIR (/var/tmp/rig-lease by default)
+# and, since issue 1432, writes it only through scripts/lib/rig-lease.sh on an authenticated POST
+# (bearer token in the 0600 file ~/.config/camera-box/rig-lease-token, read-only under ProtectHome).
 #
 # PrivateTmp MUST stay "no" (declared intent -- see the VERIFIED-INERT note below for why it does
 # not currently DO anything on dev1): systemd's PrivateTmp namespaces BOTH /tmp AND /var/tmp, and

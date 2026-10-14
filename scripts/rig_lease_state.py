@@ -121,6 +121,18 @@ def _read_holder(lease_dir: str):
         return True, None
 
 
+def holder_stale_secs(holder_data, default: int) -> int:
+    """issue 1432: a holder may declare its OWN heartbeat-staleness threshold (`stale_secs`, a
+    positive int in holder.json; the HTTP write routes write 180 for a remote holder that beats
+    every 30 s). Mirrors scripts/lib/rig-lease.sh::rig_lease_is_stale: anything else (absent, a
+    string, a bool, <= 0, an unparseable holder) falls back to the caller's threshold."""
+    if isinstance(holder_data, dict):
+        value = holder_data.get("stale_secs")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return default
+
+
 def fail_closed_state(now: datetime) -> dict:
     """The shape scripts/rig-lease-server.py serves when lease_state() itself raises (should never
     happen -- it is pure and catches its own I/O errors -- but a request handler must NEVER 500 on
@@ -168,7 +180,7 @@ def lease_state(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_S
         result["stale"] = True
         return result
 
-    result["stale"] = not _is_fresh(age, stale_secs)
+    result["stale"] = not _is_fresh(age, holder_stale_secs(holder_data, stale_secs))
 
     if holder_data is None:
         # Present but unparseable -- fail-closed (held=true) but nothing more can be reported.
