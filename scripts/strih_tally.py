@@ -201,7 +201,7 @@ class Tally:
         lock = self._locks.setdefault(conn, asyncio.Lock())
         async with lock:   # one sender at a time per tally: a PVW + PGM pair never interleaves
             try:
-                for text in texts:
+                for text in decision.with_me2_aliases(texts):   # PP lights read the 2ME form
                     await asyncio.wait_for(conn.send(text), SEND_TIMEOUT_S)
             except Exception as exc:  # noqa: BLE001 -- one bad client never stops the others
                 if conn in self.clients:

@@ -95,3 +95,15 @@ def test_messages_order_and_noop():
     assert d.messages((3, 5), (3, 2)) == ["TALLY-PVW 2"]
     assert d.messages((3, 5), (4, 5)) == ["TALLY-PGM 4"]
     assert d.full_messages((0, 0)) == ["TALLY-PVW 0", "TALLY-PGM 0"]
+
+
+
+def test_every_pvw_and_pgm_frame_also_goes_out_in_the_2me_form():
+    """Owner 14.10.2026, PP: the lights there read `TALLY-PVW2` / `TALLY-PGM2` (what Companion sends)."""
+    assert d.with_me2_aliases(["TALLY-PVW 4", "TALLY-PGM 6"]) == [
+        "TALLY-PVW 4", "TALLY-PVW2 4", "TALLY-PGM 6", "TALLY-PGM2 6"]
+    assert d.with_me2_aliases(["TALLY-TRS", "TALLY-LOCK 1", "SET-LUMINANCE 90", "JOIN ESP-1-3"]) == [
+        "TALLY-TRS", "TALLY-LOCK 1", "SET-LUMINANCE 90", "JOIN ESP-1-3"]
+    assert d.with_me2_aliases(d.full_messages((7, 0))) == [
+        "TALLY-PVW 0", "TALLY-PVW2 0", "TALLY-PGM 7", "TALLY-PGM2 7"]
+    assert d.with_me2_aliases([]) == []

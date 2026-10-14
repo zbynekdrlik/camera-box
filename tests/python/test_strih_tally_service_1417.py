@@ -73,11 +73,22 @@ async def start(fake, **kw):
     return obs, t, srv, port
 
 
-async def recv_until(ws, want, timeout=3):
+ME2_TWINS = ("TALLY-PVW2 ", "TALLY-PGM2 ")
+
+
+async def recv_until(ws, want, timeout=3, me2=False):
+    """The frames up to `want`. The 2ME twins (owner 14.10.2026, the PP lights) are left out unless
+    me2=True; test_every_frame_goes_out_in_both_forms pins them."""
     got = []
     async def _r():
         while want not in got:
-            got.append(await ws.recv())
+            msg = await ws.recv()
+            if me2 or not msg.startswith(ME2_TWINS):
+                got.append(msg)
+        cmd, _, arg = want.partition(" ")
+        if not me2 and cmd in ("TALLY-PVW", "TALLY-PGM"):
+            twin = await ws.recv()   # the 2ME twin follows its plain frame at once
+            assert twin == f"{cmd}2 {arg}", twin
     await asyncio.wait_for(_r(), timeout)
     return got
 
@@ -232,7 +243,9 @@ async def recv_for(ws, seconds):
     got = []
     async def _r():
         while True:
-            got.append(await ws.recv())
+            msg = await ws.recv()
+            if not msg.startswith(ME2_TWINS):
+                got.append(msg)
     try:
         await asyncio.wait_for(_r(), seconds)
     except asyncio.TimeoutError:
@@ -379,5 +392,19 @@ def test_state_reports_the_mapped_cameras_and_clean_join_names():
             assert len(st["tallies"]) == 1
             name = st["tallies"][0]
             assert "\n" not in name and "\x1b" not in name and "ESP-3" in name, name
+        await t.stop(); srv.close(); obs.close()
+    run(go())
+
+
+
+def test_every_frame_goes_out_in_both_forms():
+    """Owner 14.10.2026: the Poprad lights read TALLY-PVW2 / TALLY-PGM2. Each PVW / PGM frame is
+    followed by its 2ME twin, so preview still precedes program in both forms."""
+    async def go():
+        fake = FakeObs()
+        obs, t, srv, port = await start(fake)
+        async with connect(f"ws://127.0.0.1:{port}/") as tally:
+            got = await recv_until(tally, "TALLY-PGM2 3", me2=True)
+            assert got[-4:] == ["TALLY-PVW 5", "TALLY-PVW2 5", "TALLY-PGM 3", "TALLY-PGM2 3"], got
         await t.stop(); srv.close(); obs.close()
     run(go())

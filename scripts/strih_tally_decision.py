@@ -69,3 +69,21 @@ def messages(prev, new):
     if prev[0] != new[0]:
         out.append(f"TALLY-PGM {new[0]}")
     return out
+
+
+# The Poprad tally lights (owner 14.10.2026) run a firmware build that dials tally.lan and reads the
+# 2ME form `TALLY-PVW2 <n>` / `TALLY-PGM2 <n>` (Companion there sends that form); the firmware in
+# tally/esp reads `TALLY-PVW <n>` / `TALLY-PGM <n>` and ignores the other. Every PVW / PGM frame goes
+# out in both forms, each right after its plain twin, so PVW still precedes PGM in both.
+ME2_ALIASES = {"TALLY-PVW": "TALLY-PVW2", "TALLY-PGM": "TALLY-PGM2"}
+
+
+def with_me2_aliases(texts):
+    """Each `TALLY-PVW n` / `TALLY-PGM n` followed by its 2ME twin; every other text unchanged."""
+    out = []
+    for text in texts:
+        out.append(text)
+        cmd, sep, arg = text.partition(" ")
+        if sep and cmd in ME2_ALIASES:
+            out.append(f"{ME2_ALIASES[cmd]} {arg}")
+    return out
