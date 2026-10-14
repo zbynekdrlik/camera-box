@@ -875,3 +875,135 @@ fn the_stamp_band_has_hysteresis_at_its_edge() {
     );
     assert_eq!(p.reseeds(), 0);
 }
+
+/// The note of each observed frame (issue 1371): `None` for a frame that neither re-seeded nor
+/// re-indexed.
+fn notes(t: &mut CapturePhaseTracker, frames: &[Frame]) -> Vec<Option<PhaseNote>> {
+    frames
+        .iter()
+        .map(|f| {
+            t.observe(f.seq, f.ts);
+            t.note().cloned()
+        })
+        .collect()
+}
+
+#[test]
+fn a_phase_step_notes_one_outlier_run_with_its_three_residuals_1371() {
+    let mut frames = camera(500, 15.9, 60_000.0, 7_000_000.0, 0x1371_0001);
+    for f in frames.iter_mut().skip(300) {
+        f.ts += 3_000_000;
+    }
+    let mut t = CapturePhaseTracker::new();
+    let got = notes(&mut t, &frames);
+    let noted: Vec<(usize, &PhaseNote)> = got
+        .iter()
+        .enumerate()
+        .filter_map(|(k, n)| n.as_ref().map(|n| (k, n)))
+        .collect();
+    assert_eq!(noted.len(), 1, "one re-seed, one note: {noted:?}");
+    let (k, note) = noted[0];
+    assert_eq!(k, 300 + RESEED_CONSECUTIVE_OUTLIERS as usize - 1);
+    let PhaseNote::OutlierRun { resid_ns } = note else {
+        panic!("expected an outlier run, got {note:?}");
+    };
+    assert_eq!(resid_ns.len(), RESEED_CONSECUTIVE_OUTLIERS as usize);
+    for r in resid_ns {
+        assert!(
+            (2_700_000..3_300_000).contains(r),
+            "each residual ~ +3 ms: {r}"
+        );
+    }
+    assert!(note
+        .describe()
+        .starts_with("re-seed: reason=outlier-run resid_us=[+"));
+}
+
+#[test]
+fn a_late_frame_over_half_a_period_notes_its_residual_1371() {
+    let mut frames = camera(400, 15.9, 60_000.0, 7_000_000.0, 0x1371_0002);
+    frames[300].ts += 10_000_000; // 10 ms late: over half a 16.7 ms period, not a whole one
+    let mut t = CapturePhaseTracker::new();
+    let got = notes(&mut t, &frames);
+    let PhaseNote::HalfPeriod { resid_ns } = got[300].clone().expect("frame 300 re-seeds") else {
+        panic!("expected half-period, got {:?}", got[300]);
+    };
+    assert!((9_700_000..10_300_000).contains(&resid_ns), "{resid_ns}");
+    assert_eq!(got[301], None, "the next frame carries no note");
+    assert_eq!(t.reseeds(), 1);
+}
+
+#[test]
+fn a_whole_period_late_frame_notes_a_hidden_drop_1371() {
+    let mut frames = camera(400, 0.0, 60_000.0, 7_000_000.0, 0x1371_0003);
+    for f in frames.iter_mut().skip(300) {
+        f.ts += I60; // the device skipped one frame: every later frame one period later
+    }
+    let mut t = CapturePhaseTracker::new();
+    let got = notes(&mut t, &frames);
+    let Some(PhaseNote::HiddenDrop {
+        frames: k,
+        resid_ns,
+    }) = got[300].clone()
+    else {
+        panic!("expected a hidden drop, got {:?}", got[300]);
+    };
+    assert_eq!(k, 1);
+    assert!((16_300_000..17_000_000).contains(&resid_ns), "{resid_ns}");
+    assert_eq!(got.iter().filter(|n| n.is_some()).count(), 1);
+    assert_eq!(t.reseeds(), 0);
+}
+
+#[test]
+fn a_backward_sequence_notes_a_discontinuity_1371() {
+    let frames = camera(200, 15.9, 60_000.0, 7_000_000.0, 0x1371_0004);
+    let mut t = CapturePhaseTracker::new();
+    notes(&mut t, &frames);
+    let next = frames.last().unwrap().ts + 40_000_000;
+    t.observe(0, next);
+    let note = t.note().cloned().expect("a re-open re-seeds");
+    assert!(matches!(note, PhaseNote::Discontinuity { seq_step, .. } if seq_step < 0));
+    assert!(note
+        .describe()
+        .starts_with("re-seed: reason=sequence-back "));
+}
+
+#[test]
+fn describe_reads_each_reason_1371() {
+    let d = |seq_step, dt_ns| PhaseNote::Discontinuity { seq_step, dt_ns }.describe();
+    assert_eq!(
+        d(-5, 40_000_000),
+        "re-seed: reason=sequence-back seq_step=-5 dt_us=40000"
+    );
+    assert_eq!(
+        d(12, 200_000_000),
+        "re-seed: reason=sequence-jump seq_step=12 dt_us=200000"
+    );
+    assert_eq!(d(1, 0), "re-seed: reason=time-stall seq_step=1 dt_us=0");
+    assert_eq!(
+        d(1, 250_000_000),
+        "re-seed: reason=gap seq_step=1 dt_us=250000"
+    );
+    assert_eq!(
+        PhaseNote::HalfPeriod {
+            resid_ns: -9_400_123
+        }
+        .describe(),
+        "re-seed: reason=half-period resid_us=-9400"
+    );
+    assert_eq!(
+        PhaseNote::OutlierRun {
+            resid_ns: vec![1_200_500, 2_000, -1_500_000]
+        }
+        .describe(),
+        "re-seed: reason=outlier-run resid_us=[+1200,+2,-1500]"
+    );
+    assert_eq!(
+        PhaseNote::HiddenDrop {
+            frames: 2,
+            resid_ns: 33_400_000
+        }
+        .describe(),
+        "hidden drop: frames=2 resid_us=+33400"
+    );
+}
