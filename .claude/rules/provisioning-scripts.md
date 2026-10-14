@@ -168,8 +168,8 @@ picking the spot. `(aq)` (#1394, GRUB fast boot) now sits after `(am)`, before `
 the read-only-root unit set) sits after `(ak)`, before `(al)`. Also keep a new check out of
 `(aq)..(ao)`: `tests/python/test_grub_fast_boot_1394.py` executes that slice, and out of `(ar)..(al)`:
 `tests/python/test_cambox_ro_units_1394.py` executes that one. `(as)` (issue 1415, the rig time zone)
-therefore sits after `(ak)`, BEFORE `(ar)`. `(at)` (issue 1428, the zram swap) sits after `(as)`,
-before `(ar)`; the next free letter is `(au)`.
+therefore sits after `(ak)`, BEFORE `(ar)`. `(at)` (issue 1428, the zram swap) sits after `(ak)`,
+before `(as)` (`test_rig_timezone_1415.py` EXECUTES `(as)..(ar)`); the next free letter is `(au)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 

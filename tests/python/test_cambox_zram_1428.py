@@ -269,8 +269,9 @@ def test_verify_device_grades_it_as_check_at_outside_the_executed_slices():
     s = VERIFY.read_text()
     assert '. "$HERE/lib/cambox-zram.sh"' in s
     at = s.index("\n# (at) zram swap (issue 1428)")
-    assert s.index("\n# (as) the rig time zone") < at < s.index("\n# (ar) read-only-root unit set (issue 1394) -- HARD FAIL")
-    block = s[at:s.index("\n# (ar) read-only-root unit set (issue 1394) -- HARD FAIL")]
+    # outside every slice another test EXECUTES: (as)..(ar) (issue 1415), (ar)..(al), (aq)..(ao), (an)..(q)
+    assert s.index("\n# (ak) off-box remote logging") < at < s.index("\n# (as) the rig time zone")
+    block = s[at:s.index("\n# (as) the rig time zone")]
     assert "cambox_zram_gather_remote_snippet" in block and "cambox_zram_verdict" in block
     assert 'warn "' not in block
     assert s.count("(at) zram swap (issue 1428)") == 3, "header, usage() and the check itself"

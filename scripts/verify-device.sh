@@ -1814,6 +1814,27 @@ else
   ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
 fi
 
+# (at) zram swap (issue 1428) -- HARD FAIL ---------------------------------------------------------
+# Owner 14.10.2026: every Linux box carries swap. A cambox swaps to compressed RAM (its root runs
+# read-only with no swap partition): systemd-zram-generator + the camera-box drop-in from scripts/lib/cambox-zram.sh,
+# which setup-device.sh `[zram-swap]` and create-usb-linux.sh write. One read-only ssh gather, graded by
+# the SAME lib's pure cambox_zram_verdict (fail-closed). Inserted after (ak), before (as): outside the
+# slices pytest executes ((as)..(ar), (ar)..(al), (aq)..(ao), (ao)..(an), (an)..(q)) and before (q), which stays last.
+atrc=0
+ZRAM_BLOCK="$(ssh_box "$(cambox_zram_gather_remote_snippet)")" || atrc=$?
+if [ "$atrc" -ne 0 ] || [ -z "$ZRAM_BLOCK" ]; then
+  fail "could not read the zram swap state over SSH (rc=$atrc) -- cannot certify the box's swap (issue 1428)"
+else
+  ZRAM_VERDICT="$(cambox_zram_verdict "$ZRAM_BLOCK")"
+  if [ "$ZRAM_VERDICT" = "ok" ]; then
+    ok "zram swap active (>= ${CAMBOX_ZRAM_MIN_PERCENT}% of RAM, ${CAMBOX_ZRAM_PACKAGE} + the camera-box drop-in), no other swap (issue 1428)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "zram swap: ${_reason#FAIL: }"
+    done <<<"$ZRAM_VERDICT"
+  fi
+fi
+
 # (as) the rig time zone (issue 1415) -- HARD FAIL -------------------------------------------------
 # Every freshly provisioned box used to run the image default Etc/UTC. setup-device.sh STEP 1 and
 # create-usb-linux.sh now point /etc/localtime at the rig zone through scripts/lib/rig-timezone.sh;
@@ -1832,27 +1853,6 @@ else
     ok "time zone ${TZ_BOX}: /etc/localtime links to the rig zone -- local clocks on the box (issue 1415)"
   else
     fail "time zone: ${TZ_AS_VERDICT#FAIL: } -- re-run setup-device.sh (STEP 1 writes it)"
-  fi
-fi
-
-# (at) zram swap (issue 1428) -- HARD FAIL ---------------------------------------------------------
-# Owner 14.10.2026: every Linux box carries swap. A cambox swaps to compressed RAM (its root runs
-# read-only with no swap partition): systemd-zram-generator + the camera-box drop-in from scripts/lib/cambox-zram.sh,
-# which setup-device.sh `[zram-swap]` and create-usb-linux.sh write. One read-only ssh gather, graded by
-# the SAME lib's pure cambox_zram_verdict (fail-closed). Inserted after (as), before (ar): outside the
-# slices pytest executes ((ar)..(al), (aq)..(ao), (ao)..(an), (an)..(q)) and before (q), which stays last.
-atrc=0
-ZRAM_BLOCK="$(ssh_box "$(cambox_zram_gather_remote_snippet)")" || atrc=$?
-if [ "$atrc" -ne 0 ] || [ -z "$ZRAM_BLOCK" ]; then
-  fail "could not read the zram swap state over SSH (rc=$atrc) -- cannot certify the box's swap (issue 1428)"
-else
-  ZRAM_VERDICT="$(cambox_zram_verdict "$ZRAM_BLOCK")"
-  if [ "$ZRAM_VERDICT" = "ok" ]; then
-    ok "zram swap active (>= ${CAMBOX_ZRAM_MIN_PERCENT}% of RAM, ${CAMBOX_ZRAM_PACKAGE} + the camera-box drop-in), no other swap (issue 1428)"
-  else
-    while IFS= read -r _reason; do
-      [ -n "$_reason" ] && fail "zram swap: ${_reason#FAIL: }"
-    done <<<"$ZRAM_VERDICT"
   fi
 fi
 

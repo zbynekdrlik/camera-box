@@ -39,6 +39,7 @@ const ALLOWLIST: &[&str] = &[
     "drm_output_outputs_1424.rs: std-only, a {tag}-{pid}-{counter} dir compile_and_run() removes",
     "drm_output_view_1346.rs: compile_and_run() removes its dir",
     "drm_output_view_mv_budget_1346.rs: the test removes its workdir at the end",
+    "drm_output_vk_deadline_1424.rs: std-only lift: pid + counter, compile_and_run() removes its dir",
     "drm_output_vk_direct_1346.rs: compile_and_run() removes its dir",
     "drm_output_vk_program_mode_1424.rs: std-only, a {tag}-{pid}-{counter} dir the test removes",
     "drm_output_vk_two_displays_1424.rs: std-only, a {tag}-{pid}-{counter} dir the test removes",
