@@ -148,12 +148,15 @@ def test_query_string_is_stripped_before_route_matching(tmp_path):
 
 
 def test_post_method_is_never_a_write_and_never_a_5xx(tmp_path):
-    """This server implements no do_POST -- BaseHTTPRequestHandler's stdlib default (501 Not
-    Implemented) is the honest behavior for an unsupported verb, never an application-level 500,
-    and (per the module's own GET-only contract) never any state mutation."""
+    """POST to the READ route is never a write and never an application 5xx. Since issue 1432 the
+    server has do_POST for the three authenticated /rig-lease/* write routes only
+    (test_rig_lease_write_1432.py); any other POST path is a plain 404, and the other verbs
+    (PUT/DELETE/...) keep the stdlib 501."""
     lease_dir = tmp_path / "does-not-exist"
     with _RunningServer(str(lease_dir)) as srv:
         status, _headers, _body = srv.request("POST", "/rig-lease.json")
+        assert status == 404
+        status, _headers, _body = srv.request("PUT", "/rig-lease.json")
         assert status == 501
         # confirm no write side effect occurred -- the lockdir must still be genuinely absent
         assert not lease_dir.exists()
