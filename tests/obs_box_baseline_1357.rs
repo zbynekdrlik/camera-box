@@ -764,10 +764,13 @@ thermald=
 pe_unit=enabled
 pe_guard=enabled
 touchpad=1
+swap_bytes=17179865088
+mem_bytes=16000000000
+swap_fstab=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 19] = [
+const ITEMS: [&str; 20] = [
     "timezone",
     "net",
     "perf",
@@ -787,6 +790,7 @@ const ITEMS: [&str; 19] = [
     "autostart",
     "power",
     "touchpad",
+    "swap",
 ];
 
 fn verdict(facts: &str) -> (i32, Vec<(String, String)>) {
@@ -986,6 +990,12 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("autostart", "autostart_unit=1", "autostart_unit=0"),
         ("power", "thermald=", "thermald=install ok installed"),
         ("touchpad", "touchpad=1", "touchpad=0"),
+        // issue 1428 (owner 14.10.2026): no swap is a gross violation; the swap must be active, at
+        // least ~RAM size, and in /etc/fstab.
+        ("swap", "swap_bytes=17179865088", "swap_bytes=0"),
+        ("swap", "swap_bytes=17179865088", "swap_bytes=4294967296"),
+        ("swap", "swap_fstab=1", "swap_fstab=0"),
+        ("swap", "swap_bytes=17179865088", "swap_bytes="),
     ] {
         assert!(GOOD_FACTS.contains(from), "fixture must carry `{from}`");
         let (c, rows) = verdict(&GOOD_FACTS.replacen(from, to, 1));
