@@ -212,6 +212,18 @@ fn resid_i64(resid: i128) -> i64 {
     resid.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
+/// The common offset of an outlier run (issue 1371): `Some(median)` when every residual lies
+/// within `bound_ns` of every other (one constant step), else `None` (a scatter: re-seed).
+pub fn consistent_run_offset(run_ns: &[i64], bound_ns: f64) -> Option<i64> {
+    let (&min, &max) = (run_ns.iter().min()?, run_ns.iter().max()?);
+    if (max as i128 - min as i128) as f64 > bound_ns {
+        return None;
+    }
+    let mut sorted = run_ns.to_vec();
+    sorted.sort_unstable();
+    Some(sorted[sorted.len() / 2])
+}
+
 /// One observed frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseObservation {
@@ -233,8 +245,12 @@ pub enum PhaseNote {
     Discontinuity { seq_step: i32, dt_ns: u64 },
     /// One sample half a period or more off the fit (signed residual, positive = late).
     HalfPeriod { resid_ns: i64 },
-    /// [`RESEED_CONSECUTIVE_OUTLIERS`] samples in a row off the fit (residuals, oldest first).
+    /// [`RESEED_CONSECUTIVE_OUTLIERS`] samples in a row off the fit that disagree with each other
+    /// (residuals, oldest first): a re-seed.
     OutlierRun { resid_ns: Vec<i64> },
+    /// A run of outliers that agree with each other: the fit moved by `shift_ns` (their median)
+    /// and kept its lock (issue 1371).
+    Reanchor { resid_ns: Vec<i64>, shift_ns: i64 },
     /// A sample a whole number of periods late, re-indexed as `frames` the device skipped.
     HiddenDrop { frames: u32, resid_ns: i64 },
 }
@@ -272,6 +288,15 @@ impl PhaseNote {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            PhaseNote::Reanchor { resid_ns, shift_ns } => format!(
+                "re-anchor: shift_us={} resid_us=[{}]",
+                us(*shift_ns),
+                resid_ns
+                    .iter()
+                    .map(|r| us(*r))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             PhaseNote::HiddenDrop { frames, resid_ns } => {
                 format!("hidden drop: frames={frames} resid_us={}", us(*resid_ns))
             }
@@ -301,6 +326,8 @@ pub struct CapturePhaseTracker {
     outlier_resid: Vec<i64>,
     /// The note of the most recent observed frame, if it re-seeded or re-indexed (issue 1371).
     note: Option<PhaseNote>,
+    /// Outlier runs that agreed with themselves and moved the fit instead of re-seeding (issue 1371).
+    reanchors: u64,
 }
 
 impl CapturePhaseTracker {
@@ -382,6 +409,26 @@ impl CapturePhaseTracker {
                         self.outlier_resid.push(resid_i64(resid));
                         if self.outlier_run >= RESEED_CONSECUTIVE_OUTLIERS {
                             let run = std::mem::take(&mut self.outlier_resid);
+                            if let Some(shift) = consistent_run_offset(&run, bound) {
+                                // Issue 1371: the run agrees with itself -- the delivered
+                                // timestamps stepped by a constant few ms (cam5: its Cam Link's
+                                // USB transport latency changes; a real phase step looks the
+                                // same). Move the fit onto the new phase and KEEP the lock and the
+                                // stamp-driven path; a re-seed would put the stream on the raw
+                                // path for ~2 s, where its slot flips are the E2E copies + gaps.
+                                self.reanchor(shift);
+                                self.outlier_run = 0;
+                                self.note = Some(PhaseNote::Reanchor {
+                                    resid_ns: run,
+                                    shift_ns: shift,
+                                });
+                                self.push(x, capture_mono_ns);
+                                self.update_lock();
+                                return PhaseObservation {
+                                    smoothed_mono_ns: self.locked.then(|| self.predict_ns(x)),
+                                    seq_advance,
+                                };
+                            }
                             self.reseed(seq, capture_mono_ns);
                             self.note = Some(PhaseNote::OutlierRun { resid_ns: run });
                             return none(0);
@@ -458,6 +505,21 @@ impl CapturePhaseTracker {
     /// The note of the most recent observed frame (issue 1371), cleared by the next frame.
     pub fn note(&self) -> Option<&PhaseNote> {
         self.note.as_ref()
+    }
+
+    /// Moves the whole fit by `shift_ns` (issue 1371): every sample's time shifts by the same
+    /// amount, so the slope, the window and the lock stay; the sums are relative to the oldest
+    /// sample and do not change.
+    fn reanchor(&mut self, shift_ns: i64) {
+        for sample in self.window.iter_mut() {
+            sample.1 = sample.1.saturating_add_signed(shift_ns);
+        }
+        self.reanchors += 1;
+    }
+
+    /// Re-anchors of the fit since the start (issue 1371).
+    pub fn reanchors(&self) -> u64 {
+        self.reanchors
     }
 
     fn reseed(&mut self, seq: u32, t: u64) {
