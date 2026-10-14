@@ -224,7 +224,9 @@ dantesync_install_version_ge() {
 
 # dantesync_install_tray -> install the pinned release's Linux tray at dantesync_install_tray_bin.
 #   * a pin below DANTESYNC_TRAY_FIRST_VERSION has no Linux tray asset: a named WARN, nothing downloaded,
-#     rc 0 (the tray arrives with the fleet roll to 1.18.0+ and the DANTESYNC_VERSION_PIN bump);
+#     rc 0 (the tray arrives with the fleet roll to 1.18.0+ and the DANTESYNC_VERSION_PIN bump); a tray
+#     (or its release record) left from a newer pin -- a rollback below 1.18.0 -- is removed, so the box
+#     follows the pin and verify's NOTE applies again;
 #   * else the release `.sha256` first: an installed, executable tray with that sha256 is kept (its mtime
 #     unchanged, which verify's process check compares against); otherwise the tray is downloaded to a
 #     temp dir, its sha256 verified BEFORE anything is installed, then installed 0755 as a sibling
@@ -238,6 +240,11 @@ dantesync_install_tray() {
   pin="$(dantesync_install_pinned_version)" || return 1
   if ! dantesync_install_version_ge "$pin" "$DANTESYNC_TRAY_FIRST_VERSION"; then
     echo "  WARN: dantesync v${pin} ships no Linux tray (dantesync-tray-linux-amd64 first in v${DANTESYNC_TRAY_FIRST_VERSION}) -- ${bin} not installed; it arrives with the fleet roll to v${DANTESYNC_TRAY_FIRST_VERSION}+ and the DANTESYNC_VERSION_PIN bump"
+    if [ -e "$bin" ] || [ -e "$(dantesync_install_tray_release_file)" ]; then
+      rm -f "$bin" "$(dantesync_install_tray_release_file)" \
+        || { echo "dantesync-install: could not remove the tray ${bin} left from a newer pin" >&2; return 1; }
+      echo "  removed the dantesync tray ${bin} + its release record: left from a newer pin (a rollback to v${pin})"
+    fi
     return 0
   fi
   url="$(dantesync_install_tray_url "$pin")"

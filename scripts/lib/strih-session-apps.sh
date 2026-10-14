@@ -291,7 +291,7 @@ strih_session_apps_install() {
       before="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
       dantesync_install_tray || {
         tray_failed=1
-        echo "  WARN: the dantesync tray was not installed (above) -- verify-strih (dantesync-tray) names it; re-run setup-strih.sh step 16d"
+        echo "  WARN: the dantesync tray step failed (above) -- verify-strih (dantesync-tray) names what is missing; re-run setup-strih.sh step 16d"
       }
       after="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
       [ "$before" = "$after" ] || w1=written

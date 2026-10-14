@@ -287,7 +287,8 @@ workstation, the stream role too (`obs_box_role_apply` keeps it next to the keep
   enablement and its autostart line are in place (else it FAILs on those); it still counts toward
   `strih_session_apps_row_count`. A missing binary at a 1.18.0+ pin FAILs `script-absent` naming
   step 16d. An installed binary is graded in full whatever the pin says (a pin rolled back below
-  1.18.0 with a tray left installed reads `stale` and FAILs: clean it by hand).
+  1.18.0 with a tray left installed reads `stale` and FAILs until step 16d runs: below the first Linux
+  tray the install REMOVES a leftover tray + its record, review round 2).
 - **Known gap:** `dantesync-fleet-upgrade.sh` does not refresh the Linux tray (its Windows arm does,
   issue 1372). After a fleet roll, re-run setup-strih step 16d on each Linux workstation; until then the
   row FAILs `stale`.

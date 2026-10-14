@@ -81,6 +81,15 @@ def test_a_pin_below_1_18_0_warns_and_installs_nothing(tmp_path):
     assert not F.tray_bin(tmp_path).exists()
 
 
+def test_a_rollback_below_1_18_0_removes_the_tray_left_from_the_newer_pin(tmp_path):
+    # review round 2: else verify reads stale forever and step 16d (which only WARNs there) cannot clear it
+    F.fake_tray(tmp_path)
+    r = _tray(tmp_path, env={"DANTESYNC_VERSION_PIN": "1.17.0"})
+    assert _rc(r) == 0, r.stderr
+    assert not F.tray_bin(tmp_path).exists() and not F.tray_record(tmp_path).exists()
+    assert "removed the dantesync tray" in r.stdout and "rollback to v1.17.0" in r.stdout
+
+
 def test_a_pin_below_1_18_0_never_downloads(tmp_path):
     # the release base does not exist: a download attempt would fail rc 1
     r = F.bash('dantesync_install_tray && echo "rc=0" || echo "rc=$?"', sources=(DS_INSTALL,),
@@ -357,7 +366,7 @@ def test_install_a_failed_tray_fetch_warns_and_provisions_every_other_app(tmp_pa
         tmp_path / "bad", sha="0" * 64)})
     assert r.returncode == 0, r.stdout + r.stderr
     assert "SHA256 MISMATCH" in r.stderr
-    assert "WARN: the dantesync tray was not installed" in r.stdout and "step 16d" in r.stdout
+    assert "WARN: the dantesync tray step failed" in r.stdout and "step 16d" in r.stdout
     tray_warns = [ln for ln in r.stdout.splitlines()
                   if "WARN" in ln and ("dantesync tray" in ln or str(F.tray_bin(tmp_path)) in ln)]
     assert len(tray_warns) == 1, "one WARN for one failed fetch (review round 1): %s" % tray_warns
