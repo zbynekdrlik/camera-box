@@ -52,10 +52,12 @@ if out="$(camera_source_box 2>/dev/null)"; then printf 'OK\t%s' "$out"; else pri
 }
 
 #[test]
-fn camera_source_box_defaults_to_cam3_on_the_shrunk_snv_rig_1413() {
+fn camera_source_box_defaults_to_cam5_the_test_camera_usb_box_1413() {
     // issue 1413 (owner 12.10.2026): cam1/cam4/cam6/cam7 moved to Poprad, the SNV default is
-    // "cam2 cam3 cam5", so the derived source is cam3 (cam2 is the painter, skipped) -- the box
-    // whose bkshading relay carries the test camera's USB. The history below is kept.
+    // "cam2 cam3 cam5". 14.10.2026: the test camera's USB-C is on cam5 (its bkshading relay runs
+    // there), so the default source is cam5 (CAMERA_TEST_CAMERA_BOX), not the first routable cam3;
+    // the release E2E 38520662080 aborted at issue 1371 with the camera found on no candidate box.
+    // The history below is kept.
     // issue 1198 (2026-08-27, owner ruling): both cam1's #1110 "hardware-defective" diagnosis and
     // cam2's #1170 "camera-under-test retired" diagnosis were built from EPISODES, not a permanent
     // card state -- the owner refused the physical card swap outright and a live journal check
@@ -74,9 +76,9 @@ fn camera_source_box_defaults_to_cam3_on_the_shrunk_snv_rig_1413() {
         "#1134: camera_source_box must resolve a source for the default active set"
     );
     assert_eq!(
-        got, "cam3",
-        "issue 1413: the default source box must be cam3 (the first strih-routable member of the \
-         current default CAMERA_ACTIVE_SET='cam2 cam3 cam5')"
+        got, "cam5",
+        "issue 1413: the default source box must be cam5, the SNV box whose USB-C carries the test \
+         camera (CAMERA_TEST_CAMERA_BOX), for the default CAMERA_ACTIVE_SET='cam2 cam3 cam5'"
     );
 }
 
@@ -305,4 +307,16 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
              at the SNV rig in a standalone run"
         );
     }
+}
+
+#[test]
+fn an_overridden_active_set_ignores_the_snv_test_camera_box_1413() {
+    // CAMERA_TEST_CAMERA_BOX belongs to the SNV DEFAULT set only: an explicit CAMERA_ACTIVE_SET
+    // (a legacy or test set) keeps the first-strih-routable derivation, even when it lists cam5.
+    let (ok, got) = source_box(Some("cam1 cam2 cam3 cam4 cam5"), None);
+    assert!(ok, "issue 1413: an explicit set must resolve a source");
+    assert_eq!(
+        got, "cam1",
+        "issue 1413: an explicit cam1-first set keeps cam1 even though it lists cam5"
+    );
 }

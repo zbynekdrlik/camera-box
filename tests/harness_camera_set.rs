@@ -351,13 +351,14 @@ fn camera_active_secondary_set_is_cam3_cam4_cam5_cam6_cam7_for_the_default_sourc
     // secondary set (everything else) is now cam3 + cam4 + cam5 + cam6 + cam7 -- the full fleet
     // minus the derived source (cam1) and the painter (cam2). The secondary set excludes the
     // DERIVED source (cam1) + cam2 unconditionally, never falling back to a literal.
-    // issue 1413: the default is cam2 cam3 cam5 -- the derived source is cam3, cam2 the
-    // painter, so the one secondary camera is cam5.
+    // issue 1413: the default is cam2 cam3 cam5 -- the source is cam5 (the SNV box whose USB-C
+    // carries the test camera, CAMERA_TEST_CAMERA_BOX, 14.10.2026), cam2 the painter, so the one
+    // secondary camera is cam3.
     assert_eq!(
         active_secondary_set(None),
-        "cam5",
-        "issue 1413: with source=cam3 (derived) and cam2=painter, the default active set's \
-         secondary camera is cam5"
+        "cam3",
+        "issue 1413: with source=cam5 (the test camera's USB box) and cam2=painter, the default \
+         active set's secondary camera is cam3"
     );
 }
 
@@ -792,14 +793,14 @@ printf 'SOURCE\t%s\n' "$(camera_source_box)"
     );
     assert_eq!(
         got.get("SECONDARY").map(String::as_str),
-        Some("cam5"),
-        "issue 1413: camera_active_secondary_set (active minus the derived source cam3 minus \
-         painter cam2) must be cam5: {got:?}"
+        Some("cam3"),
+        "issue 1413: camera_active_secondary_set (active minus the source cam5 minus painter \
+         cam2) must be cam3: {got:?}"
     );
     assert_eq!(
         got.get("SOURCE").map(String::as_str),
-        Some("cam3"),
-        "issue 1413: camera_source_box must resolve cam3 (the first strih-routable member): \
-         {got:?}"
+        Some("cam5"),
+        "issue 1413: camera_source_box must resolve cam5 (the SNV box whose USB-C carries the \
+         test camera): {got:?}"
     );
 }
