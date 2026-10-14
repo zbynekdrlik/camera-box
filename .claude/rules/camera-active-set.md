@@ -25,7 +25,11 @@ SNV `cam3 cam5`, the unconditional cam4 is gone); the five python mirrors + the
 maintained through the dantesync fleet's PP `reach` rows (`.claude/rules/dantesync-fleet.md`), never
 through this SNV measurement set: dantesync, and the camera-box binary through
 `deploy-fleet.sh --venue <name>` + the ci.yml away-venue step + the version gate's report-only
-`--other-venues` rows. Everything below is the history before it.
+`--other-venues` rows. **The default sweep (`camera_active_sweep_pairs`) OPENS on the source box**
+(14.10.2026): the E2E shows the source camera on strih program before StartRecord, so a sweep that
+opened elsewhere cut at the switch schedule's start, where the frames before the cut sit outside
+every window, and the strih burn counter jump of that cut was charged as one real drop in every
+run (`tests/python/test_sweep_starts_at_source_1413.py`). Everything below is the history before it.
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
 installed and MEASURED TODAY (default `cam1 cam2 cam3 cam4 cam5 cam6 cam7` — the FULL seven-camera

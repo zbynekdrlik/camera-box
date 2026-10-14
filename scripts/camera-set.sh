@@ -367,12 +367,22 @@ camera_active_secondary_set() {
 }
 
 # camera_active_sweep_pairs -> prints (space-separated, stdout) "Cam N:CAMN" pairs for EVERY
-# camera in CAMERA_ACTIVE_SET, in its own order — the canonical scene:label format
-# scripts/recording-e2e.sh's CAMBOX_SWEEP default derives from (#827). Mirrors the #753 1:1
-# mapping (scene "Cam N" shows camera camN) exactly — never re-derive that mapping separately.
+# camera in CAMERA_ACTIVE_SET — the canonical scene:label format scripts/recording-e2e.sh's
+# CAMBOX_SWEEP default derives from (#827). Mirrors the #753 1:1 mapping (scene "Cam N" shows
+# camera camN) exactly — never re-derive that mapping separately.
+# Issue 1413: the sweep OPENS on the source camera (camera_source_box), then follows the set's own
+# order and wraps. The E2E puts strih program on the source camera before StartRecord, so a sweep
+# that opened on another camera cut at the switch schedule's very start, where the frames before
+# the cut sit outside every schedule window and the strih burn counter jump of that cut was
+# charged as one real drop. A set without a routable source keeps its own order.
 camera_active_sweep_pairs() {
-  local cam n out=""
+  local cam n out="" src="" head="" tail="" seen=0
+  src="$(camera_source_box 2>/dev/null)" || src=""
   for cam in $CAMERA_ACTIVE_SET; do
+    [ "$cam" = "$src" ] && seen=1
+    if [ "$seen" -eq 1 ]; then head="${head:+$head }$cam"; else tail="${tail:+$tail }$cam"; fi
+  done
+  for cam in $head $tail; do
     n="${cam#cam}"
     out="${out:+$out }Cam ${n}:CAM${n}"
   done
