@@ -13423,20 +13423,23 @@ mod tests {
             "#624: unknown-on-thin-data must fail the gate closed, never a fabricated pass: {av_sync}"
         );
         for absent in ["cam4", "cam5", "cam6"] {
+            // issue 1413: a camera with no window in this run's switch schedule is not under
+            // test this run (a Poprad camera on the SNV rig), so it is EXCLUDED, never judged on
+            // samples it could not produce. A SCHEDULED camera with no samples (cam3 above)
+            // still fails closed.
             assert_eq!(
                 av_sync[absent]["verdict"],
-                serde_json::json!("unknown"),
-                "#312: {absent} never appeared in this sweep -> unknown: {av_sync}"
+                serde_json::json!("excluded"),
+                "issue 1413: {absent} has no window in this run's switch schedule -> excluded: {av_sync}"
             );
             assert_eq!(
                 av_sync[absent]["windows"],
                 serde_json::json!(0),
                 "#312: {absent} matched ZERO schedule windows this run: {av_sync}"
             );
-            assert_eq!(
-                av_sync[absent]["gate_pass"],
-                serde_json::json!(false),
-                "#624: {absent} absent from the sweep must also fail the gate closed: {av_sync}"
+            assert!(
+                av_sync[absent]["gate_pass"].is_null(),
+                "issue 1413: {absent} is outside the schedule, never judged pass or fail: {av_sync}"
             );
         }
         assert_eq!(
@@ -13944,16 +13947,24 @@ mod tests {
                  not fabricated true/false: {av_sync}"
             );
         }
+        // issue 1413: cam4 is NOT acked, but it has no window in this run's switch schedule, so
+        // it is excluded for that reason (the ack keeps its own reason above); a SCHEDULED camera
+        // with no samples still fails closed.
         assert_eq!(
             av_sync["cam4"]["verdict"],
-            serde_json::json!("unknown"),
-            "#855: cam4 is NOT acked -- absent-from-sweep must keep failing closed unchanged: {av_sync}"
+            serde_json::json!("excluded"),
+            "issue 1413: cam4 (unacked) is outside this run's switch schedule -> excluded: {av_sync}"
         );
-        assert_eq!(
-            av_sync["cam4"]["gate_pass"],
-            serde_json::json!(false),
-            "#855/#836: an unacked absent camera must still fail the gate -- excluding requires \
-             an EXPLICIT ack, never a bare lack of data: {av_sync}"
+        assert!(
+            av_sync["cam4"]["exclude_reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("issue 1413"),
+            "issue 1413: the unacked unscheduled camera names the schedule reason, not an ack: {av_sync}"
+        );
+        assert!(
+            av_sync["cam4"]["gate_pass"].is_null(),
+            "issue 1413: an unscheduled camera is never judged pass or fail: {av_sync}"
         );
     }
 
@@ -14005,12 +14016,14 @@ mod tests {
              (measured 500ms == expected_ms 500) -> the overall gate must be true: \
              {acked}"
         );
+        // issue 1413 superseded the pre-#855 premise: cameras with no window in this run's
+        // switch schedule are excluded without an ack, so the IDENTICAL fixture with NO acks now
+        // passes too (only cam1 + cam2 are judged, both pass). The ack still names its reason.
         assert_eq!(
             unacked["all_cambox_av_sync"]["gate_pass"],
-            serde_json::json!(false),
-            "sanity: the IDENTICAL fixture with NO acks reproduces the pre-#855 fail-closed bug \
-             (cam3..cam7 absent+unacked -> unknown -> gate FAILS) -- proving the ack is what \
-             changed the outcome, not an unrelated fixture difference: {unacked}"
+            serde_json::json!(true),
+            "issue 1413: with no acks the unscheduled cameras are excluded by the schedule, \
+             so only cam1 + cam2 are judged and the gate passes: {unacked}"
         );
     }
 
@@ -14261,11 +14274,12 @@ mod tests {
             "#714: the derivation must be self-labeled, never presented as a real measurement: {av_sync}"
         );
         for absent in ["cam4", "cam5", "cam6"] {
+            // issue 1413: no window in this run's switch schedule -> excluded (never a
+            // derivation from zero evidence either way).
             assert_eq!(
                 av_sync[absent]["verdict"],
-                serde_json::json!("unknown"),
-                "#714: {absent} never appeared in this sweep (no delivery sample either) -> \
-                 genuinely unknown, never a fabricated derivation from zero evidence: {av_sync}"
+                serde_json::json!("excluded"),
+                "issue 1413: {absent} has no window in this run's switch schedule -> excluded: {av_sync}"
             );
             assert!(
                 av_sync[absent]["derived_offset_ms"].is_null(),
