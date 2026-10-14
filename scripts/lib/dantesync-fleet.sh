@@ -88,7 +88,7 @@ fi
 #                a :8898 scan of every rig subnet at 1.8.28 / 1.8.20; never outside this table again.
 #   strih-pp / stream-pp / resolume-pp -- issue 1412: the Poprad (PP) venue. strih-pp is the PP NTP
 #                master (scripts/strih-boxes/strih-pp.env: STRIH_DANTESYNC_ROLE=server), stream-pp and
-#                resolume-pp (Windows, no obs-fleet row) follow it; all three lock to the PP PTP
+#                resolume-pp (Windows; its obs-fleet row, issue 1426, is only in the build-parity facet) follow it; all three lock to the PP PTP
 #                grandmaster (role `*-pp`). dev1 reaches the PP LAN as 10.76.8.x through the
 #                companion-pp subnet router, so the rows dial NAMES (strih-pp/stream-pp through their
 #                obs-fleet rows), and their homegate is `reach`: an unreachable PP box is skipped,
