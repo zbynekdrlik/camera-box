@@ -313,8 +313,11 @@ def test_install_runs_the_seed_and_the_isolation(tmp_path):
     r = _bash('strih_operator_install "$1" "$2"', args=(str(ini), ME),
               env={"FAKE_NM": str(nm.root), "STRIH_OPERATOR_NMCLI": str(nm.nmcli),
                    "STRIH_OPERATOR_IP_ADDR_CMD": "cat %s" % nm.addrs, "STRIH_NIC_IFACE": "enp7s0",
-                   "STRIH_OPERATOR_OBS_RUNNING_CMD": str(_obs(tmp_path, False))})
+                   "STRIH_OPERATOR_OBS_RUNNING_CMD": str(_obs(tmp_path, False)),
+                   # 14.10.2026: the keyboard step writes a scratch file and never touches this box's X.
+                   "STRIH_OPERATOR_KEYBOARD_FILE": str(tmp_path / "keyboard"), "STRIH_OPERATOR_SETXKBMAP": "true"})
     assert r.returncode == 0, r.stderr
+    assert 'XKBLAYOUT="us,sk"' in (tmp_path / "keyboard").read_text()
     assert _ini(ini).get("BasicWindow", "MultiviewMouseSwitch") == "true"
     assert "nmcli connection down u-onb" in nm.calls()
 
@@ -401,6 +404,11 @@ class _Surfaces(http.server.BaseHTTPRequestHandler):
         return
 
 
+# The operator keyboard (owner 14.10.2026): the file X reads at its start and `setxkbmap -query` on :0.
+KEYBOARD_OK = 'XKBMODEL="pc105"\nXKBLAYOUT="us,sk"\nXKBVARIANT=""\nXKBOPTIONS="grp:alt_shift_toggle"\n\nBACKSPACE="guess"\n'
+XKB_LIVE_OK = "rules:      evdev\nmodel:      pc105\nlayout:     us,sk\noptions:    grp:alt_shift_toggle\n"
+
+
 class Op:
     """A fake operator surface: X input devices, hci0, the deck on USB + the Satellite, OBS, the panel."""
 
@@ -415,6 +423,8 @@ class Op:
         _exec(self.bin / "xrandr", _FAKE_TOOL % ("xrandr", "xrandr", "xrandr"))
         _exec(self.bin / "journalctl", _FAKE_TOOL % ("journalctl", "klog", "klog"))
         _exec(self.bin / "wmctrl", _FAKE_CAT % "wmctrl")
+        # 14.10.2026 the operator keyboard: log the args, print the live `-query` text.
+        _exec(self.bin / "setxkbmap", '#!/bin/bash\necho "$*" >> "$FAKE_OP/xkb-calls"\ncat "$FAKE_OP/xkb" 2>/dev/null || true\n')
         self.seams = True  # STRIH_OPERATOR_XRANDR / _KLOG point at the fixture files
         self.xinput = _exec(tmp_path / "fake-xinput", _FAKE_XINPUT)
         self.hci = _exec(tmp_path / "fake-hciconfig", _FAKE_CAT % "hci")
@@ -453,6 +463,8 @@ class Op:
         (self.st / "grabs").write_text("MD5=aaaa\nMD5=bbbb\n")
         (self.st / "xrandr").write_text(XR_MODESETTING_SINK)
         (self.st / "klog").write_text(KLOG_CLEAN)
+        (self.st / "keyboard").write_text(KEYBOARD_OK)
+        (self.st / "xkb").write_text(XKB_LIVE_OK)
 
     def deck(self, present):
         d = self.sys / "bus" / "usb" / "devices" / "3-1"
@@ -484,7 +496,8 @@ class Op:
             self.server = None
 
     def env(self):
-        seams = {"STRIH_OPERATOR_XRANDR": str(self.st / "xrandr"), "STRIH_OPERATOR_KLOG": str(self.st / "klog")}
+        seams = {"STRIH_OPERATOR_XRANDR": str(self.st / "xrandr"), "STRIH_OPERATOR_KLOG": str(self.st / "klog"),
+                 "STRIH_OPERATOR_KEYBOARD_FILE": str(self.st / "keyboard")}
         return {**(seams if self.seams else {}), "PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "FAKE_OP": str(self.st),
                 "STRIH_OPERATOR_EUID": self.euid, "STRIH_OPERATOR_XINPUT": str(self.xinput),
                 "STRIH_OPERATOR_HCICONFIG": str(self.hci), "STRIH_OPERATOR_SYSFS": str(self.sys),
@@ -518,14 +531,14 @@ def op(tmp_path):
 
 
 ITEMS = ["tap-to-click", "bluetooth", "stream-deck", "mv-click", "operator-ini", "studio-mode", "ws-seed",
-         "qt6-svg", "operator-input", "panel-gpu", "drm-hang", "operator-panel", "mv-projector"]
+         "qt6-svg", "operator-input", "panel-gpu", "drm-hang", "keyboard", "operator-panel", "mv-projector"]
 
 
 def test_a_healthy_operator_surface_passes_every_row(op):
     rows = op.rows()
     assert [d.split(")", 1)[0][1:] for _, d in rows] == ITEMS
-    assert [st for st, _ in rows] == ["OK"] * 13, rows
-    assert _bash("strih_operator_row_count").stdout == "13"
+    assert [st for st, _ in rows] == ["OK"] * 14, rows
+    assert _bash("strih_operator_row_count").stdout == "14"
 
 
 def test_tap_to_click_off_on_the_live_touchpad_fails_naming_it(op):
@@ -851,7 +864,7 @@ def test_the_report_prints_every_row_through_the_callers_functions(op):
             'strih_operator_grade_report "$1" "$2" "$3"; echo "rc=$?"')
     r = _bash(body, env=op.env(), args=(str(REPO), str(op.home), "operator1"))
     assert r.returncode == 0, r.stderr
-    assert [ln.split()[0] for ln in r.stdout.splitlines()] == ["PASS"] * 13 + ["rc=0"]
+    assert [ln.split()[0] for ln in r.stdout.splitlines()] == ["PASS"] * 14 + ["rc=0"]
 
 
 # --- the wiring: setup-strih step 16g, verify-strih items 43 + 16 ---------------------------------------
@@ -1016,3 +1029,51 @@ def test_the_strih_role_still_fails_a_dead_bluetooth(op):
     (op.sys / "class" / "bluetooth" / "hci0").mkdir(parents=True)
     st, d = op.row("bluetooth", box="strih-pp")
     assert st == "FAIL", d
+
+
+# ---------------------------------------------------------------------------------------------
+# The operator keyboard (owner 14.10.2026): us + Slovak, Alt+Shift, in the file AND live on :0.
+# ---------------------------------------------------------------------------------------------
+def test_a_us_only_keyboard_file_fails_naming_the_layout(op):
+    """The 14.10.2026 state of strih-pp / stream-pp / strih-snv before the fix."""
+    (op.st / "keyboard").write_text('XKBMODEL="pc105"\nXKBLAYOUT="us"\nXKBVARIANT=""\nXKBOPTIONS=""\n')
+    st, d = op.row("keyboard")
+    assert st == "FAIL" and 'XKBLAYOUT="us"' in d and "16g" in d, d
+
+
+def test_a_live_x_without_the_slovak_layout_fails(op):
+    (op.st / "xkb").write_text("rules:      evdev\nmodel:      pc105\nlayout:     us\n")
+    st, d = op.row("keyboard")
+    assert st == "FAIL" and "running :0" in d and '"us"' in d, d
+
+
+def test_x_not_answering_fails_the_keyboard_row(op):
+    (op.st / "xkb").write_text("")
+    st, d = op.row("keyboard")
+    assert st == "FAIL" and "answered nothing" in d, d
+
+
+def test_keyboard_install_writes_the_file_and_applies_it_live(op, tmp_path):
+    kb = tmp_path / "keyboard"
+    kb.write_text('XKBMODEL="pc105"\nXKBLAYOUT="us"\nXKBVARIANT=""\nXKBOPTIONS=""\n\nBACKSPACE="guess"\n')
+    env = {**op.env(), "STRIH_OPERATOR_KEYBOARD_FILE": str(kb)}
+    r = _bash('strih_operator_keyboard_install operator1 "$1"', env=env, args=(str(op.home),))
+    assert r.returncode == 0, r.stdout + r.stderr
+    text = kb.read_text()
+    assert 'XKBLAYOUT="us,sk"' in text and 'XKBOPTIONS="grp:alt_shift_toggle"' in text, text
+    assert 'XKBMODEL="pc105"' in text and 'BACKSPACE="guess"' in text, "the other keys stay: %s" % text
+    assert "-layout us,sk -option  -option grp:alt_shift_toggle" in (op.st / "xkb-calls").read_text()
+    # Idempotent: a second run leaves the same file.
+    _bash('strih_operator_keyboard_install operator1 "$1"', env=env, args=(str(op.home),))
+    assert kb.read_text() == text
+    # The healthy grade reads it back as OK.
+    (op.st / "keyboard").write_text(text)
+    assert op.row("keyboard")[0] == "OK"
+
+
+def test_keyboard_install_creates_a_missing_file(op, tmp_path):
+    kb = tmp_path / "nokb"
+    env = {**op.env(), "STRIH_OPERATOR_KEYBOARD_FILE": str(kb)}
+    r = _bash('strih_operator_keyboard_install operator1 "$1"', env=env, args=(str(op.home),))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert 'XKBLAYOUT="us,sk"' in kb.read_text() and 'XKBOPTIONS="grp:alt_shift_toggle"' in kb.read_text()

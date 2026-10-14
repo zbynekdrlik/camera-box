@@ -312,7 +312,61 @@ strih_operator_install() {
   local uhome=""
   uhome="$(getent passwd "$user" | cut -d: -f6)"
   if [ -n "$coll" ]; then strih_operator_projector_seed "$coll" "$user" "${uhome}/.camera-box/drm-output.json"; fi
+  strih_operator_keyboard_install "$user" "$uhome" ||
+    echo "  WARN: the keyboard file $(strih_operator_keyboard_file) could not be written -- verify-strih (keyboard) FAILs until it is"
   strih_operator_nic_isolate
+}
+
+# --- the operator keyboard (owner 14.10.2026: "potrebujeme slovensku klavesnicu vediet sa prepnut") ----
+# Every Linux workstation box types us + Slovak (QWERTZ), Alt+Shift switching between them.
+strih_operator_kb_layout() { printf 'us,sk'; }
+strih_operator_kb_options() { printf 'grp:alt_shift_toggle'; }
+strih_operator_keyboard_file() { printf '%s' "${STRIH_OPERATOR_KEYBOARD_FILE:-/etc/default/keyboard}"; }
+
+# strih_operator_keyboard_install USER HOME -> write XKBLAYOUT / XKBOPTIONS into the keyboard file (read
+# by X at its start) and apply them to the running :0 (WARN-only when X does not answer). rc 1 when the
+# file cannot be written.
+strih_operator_keyboard_install() {
+  local user="$1" home="$2" f
+  f="$(strih_operator_keyboard_file)"
+  [ -f "$f" ] || printf 'XKBMODEL="pc105"\nXKBVARIANT=""\nBACKSPACE="guess"\n' >"$f" || return 1
+  local k v
+  for k in XKBLAYOUT XKBOPTIONS; do
+    if [ "$k" = XKBLAYOUT ]; then v="$(strih_operator_kb_layout)"; else v="$(strih_operator_kb_options)"; fi
+    if grep -q "^${k}=" "$f"; then
+      sed -i "s|^${k}=.*|${k}=\"${v}\"|" "$f" || return 1
+    else
+      printf '%s="%s"\n' "$k" "$v" >>"$f" || return 1
+    fi
+  done
+  echo "  keyboard: $(strih_operator_kb_layout), switch with Alt+Shift ($f)"
+  if ! _strih_operator_on_x "$user" "$home" 10 "${STRIH_OPERATOR_SETXKBMAP:-setxkbmap}" \
+    -layout "$(strih_operator_kb_layout)" -option "" -option "$(strih_operator_kb_options)"; then
+    echo "  WARN: the keyboard layout could not be applied to the running :0 (X down?) -- it applies at the next X start"
+  fi
+  return 0
+}
+
+# strih_operator_keyboard_verdict FILE_TEXT LIVE_QUERY -> ONE row (keyboard): the keyboard file AND the
+# live :0 (`setxkbmap -query`) both carry the us,sk layout with the Alt+Shift switch.
+strih_operator_keyboard_verdict() {
+  local file="${1-}" live="${2-}" want_l want_o fl fo ll lo
+  want_l="$(strih_operator_kb_layout)"; want_o="$(strih_operator_kb_options)"
+  fl="$(sed -n 's/^XKBLAYOUT="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' <<<"$file" | head -n 1)"
+  fo="$(sed -n 's/^XKBOPTIONS="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' <<<"$file" | head -n 1)"
+  ll="$(awk '$1 == "layout:" {print $2}' <<<"$live" | head -n 1)"
+  lo="$(awk '$1 == "options:" {print $2}' <<<"$live" | head -n 1)"
+  if [ "$fl" != "$want_l" ] || [[ ",$fo," != *",$want_o,"* ]]; then
+    printf 'FAIL|(keyboard) %s has XKBLAYOUT="%s" XKBOPTIONS="%s", want "%s" + "%s" -- re-run setup-strih.sh step 16g\n' \
+      "$(strih_operator_keyboard_file)" "$fl" "$fo" "$want_l" "$want_o"
+  elif [ -z "$live" ]; then
+    printf 'FAIL|(keyboard) setxkbmap on :0 answered nothing -- X is down or does not answer clients\n'
+  elif [ "$ll" != "$want_l" ] || [[ ",$lo," != *",$want_o,"* ]]; then
+    printf 'FAIL|(keyboard) the running :0 types layout "%s" options "%s", want "%s" + "%s" -- re-run setup-strih.sh step 16g (it applies it live)\n' \
+      "$ll" "$lo" "$want_l" "$want_o"
+  else
+    printf 'OK|(keyboard) %s, Alt+Shift switches (the file and the running :0)\n' "$want_l"
+  fi
 }
 
 # --- verify-strih item 43 --------------------------------------------------------------------------
@@ -854,6 +908,8 @@ strih_operator_grade_rows() {
   strih_operator_panel_gpu_verdict "$xr" "$xr_rc"
   if kl="$(strih_operator_klog_read)"; then kl_rc=0; else kl_rc=$?; fi
   strih_operator_drm_hang_verdict "$kl" "$kl_rc"
+  strih_operator_keyboard_verdict "$(cat "$(strih_operator_keyboard_file)" 2>/dev/null || true)" \
+    "$(_strih_operator_on_x "$user" "$home" 10 "${STRIH_OPERATOR_SETXKBMAP:-setxkbmap}" -query 2>/dev/null || true)"
   if [ "$obs_up" = 0 ]; then
     printf 'NOTE|(operator-panel) not graded: OBS is not running\n'
     printf 'NOTE|(mv-projector) not graded: OBS is not running\n'
@@ -892,7 +948,7 @@ strih_operator_projector_verdict() {
   fi
 }
 
-strih_operator_row_count() { printf '13'; }
+strih_operator_row_count() { printf '14'; }
 
 # strih_operator_grade_report REPO USER_HOME DESKTOP_USER -> print the rows through the CALLER's ok / note
 # / bad functions (verify-strih). rc 1 unless the grader printed every row.

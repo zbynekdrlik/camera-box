@@ -851,7 +851,7 @@ else note "(program-audio) not graded: ${WHY}"; fi
 # 42) issue 1417 camera tally (scripts/lib/strih-tally.sh): units, :9240 /state, atemrpi.local, OBS program.
 if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.." "${STRIH_LX_USER:-newlevel}" || bad "(tally) the grader did not print all of its rows"
 else note "(tally) not graded: ${WHY}"; fi
-# 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 13 rows) + 44) issue 1420 kiosk panel (scripts/lib/obs-box-panel.sh).
+# 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 14 rows) + 44) issue 1420 kiosk panel (scripts/lib/obs-box-panel.sh).
 strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"
 # 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh, its header: nginx + each name's cert + the upstreams + renewal).
 if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; else note "(https) not graded: ${WHY}"; fi

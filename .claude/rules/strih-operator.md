@@ -66,7 +66,7 @@ end (issue 1399, now setup-strih step 16i + verify item 45, `strih-https.md`), t
   - Caveat: a setup run over an ssh session to the OTHER interface's address cuts its own session.
     The genlock deploy dials STRIH_IP.
 
-**verify-strih item 43** (`strih_operator_grade_report`, 13 rows, FAIL unless noted). Every X read runs
+**verify-strih item 43** (`strih_operator_grade_report`, 14 rows, FAIL unless noted). Every X read runs
 on `:0` as the operator with their Xauthority (as root through `sudo -u`) and is bounded by `timeout`,
 so a hung X server FAILs a row instead of hanging verify.
 
@@ -160,3 +160,19 @@ on strih-pp, and three gaps, now all seeded by setup-strih with OBS stopped and 
 - the saved Multiview projector, graded live by `(mv-projector)`.
 Never copied: window geometry, the Panels cookie id, the rtmp service key, the stale Windows-era
 advanced-scene-switcher module data, and the transition duration (an operator choice).
+
+## The operator keyboard: us + Slovak, Alt+Shift (owner 14.10.2026)
+
+"potrebujeme slovensku klavesnicu vediet sa prepnut linuxoch": every Linux workstation box (strih-snv,
+strih-pp, stream-pp) types `us,sk` (Slovak QWERTZ) and switches with **Alt+Shift**
+(`grp:alt_shift_toggle`).
+- **Setup** (step 16g, inside `strih_operator_install`): `strih_operator_keyboard_install` writes
+  `XKBLAYOUT` / `XKBOPTIONS` into `/etc/default/keyboard` (X reads it at its start; the other keys
+  stay; a missing file is created) and applies it to the running `:0` with `setxkbmap`. A file it
+  cannot write is a WARN there, so the rig-subnet isolation after it still runs; verify FAILs it.
+- **Verify** (item 43, the `keyboard` row): the file AND the live `setxkbmap -query` on `:0` must
+  both carry the layout and the option; X not answering FAILs the row.
+- Seams: `STRIH_OPERATOR_KEYBOARD_FILE`, `STRIH_OPERATOR_SETXKBMAP`. A test that runs
+  `strih_operator_install` MUST set both, or it writes this box's real file and changes the
+  keyboard of dev1's own display.
+- Applied live on 14.10.2026 to strih-pp, stream-pp and strih-snv before the code landed.
