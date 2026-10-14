@@ -310,7 +310,9 @@ def test_post_to_the_markers_route_is_never_a_write(tmp_path):
     serve = _serve_dir(tmp_path)
     with _Server(tmp_path / "lease", str(serve)) as s:
         status, _h, _b = s.request("POST", "/rig-qpsk-markers.csv")
-    assert status == 501
+    # issue 1432: the lease server has do_POST for its /rig-lease/* write routes only; every other
+    # POST path is a plain 404 that never reads the body or writes anything.
+    assert status == 404
     assert list(serve.iterdir()) == []
 
 
