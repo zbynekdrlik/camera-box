@@ -183,6 +183,15 @@ The 5 s `#707 emit-1s: [..] cap-1s: [..] (1-second buckets, oldest first)` line 
   frames the device skipped without a sequence step (each costs one starvation repeat), so a lone
   repeat with no `crossings` increase is attributable.
 
+Every re-seed and every hidden drop also logs ONE line with what caused it (issue 1371),
+`#1371 capture phase re-seed: reason=<r> ...` or `#1371 capture phase hidden drop: frames=<k>
+resid_us=<+n>`. Reasons: `outlier-run resid_us=[a,b,c]` (the 3 residuals, oldest first),
+`half-period resid_us=<n>`, and `sequence-back` / `sequence-jump` / `time-stall` / `gap` with
+`seq_step=` + `dt_us=`. Residuals are signed us, positive = the frame arrived LATE. The tracker
+stores it as `PhaseNote` (`CapturePhase::note()`, cleared by the next frame); `describe()` builds
+the text. Use it to tell a delivery delayed on a shared USB bus (cam5: the bkshading relay polls a
+BMPCC on the Cam Link's bus 4, re-seeds ~1 per 10 s relay cycle) from a real phase step.
+
 All keys are mutually non-substring with each other and with `emit-1s:` / `cap-1s:`
 (`status_tokens_parse_and_their_keys_are_mutually_non_substring` parses the EMITTED line). The
 existing parsers match the prefix:
