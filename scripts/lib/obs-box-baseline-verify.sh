@@ -24,7 +24,8 @@
 # + the user-unit masks), crash (no operator crash popup), kiosk (lightdm + openbox installed, autologin
 # -> openbox, no GNOME), websocket (python3-websocket for the OBS seeders), brightness (the kiosk
 # panel-brightness keys),
-# autostart (the openbox autostart contract), power (thermald purged + PL1 envelope units), touchpad.
+# autostart (the openbox autostart contract), power (thermald purged + PL1 envelope units), touchpad,
+# swap (a RAM-sized swapfile, active + in fstab, issue 1428).
 # Fail-closed: a fact the gather could not read grades FAIL ("unreadable"), never a silent pass.
 
 # (the directory is a pure parameter expansion -- no dirname/cd -- like obs-box-baseline.sh's own)
@@ -261,6 +262,9 @@ echo "thermald=$(pkg thermald)"
 echo "pe_unit=$(systemctl is-enabled imag-power-envelope.service 2>/dev/null | first)"
 echo "pe_guard=$(systemctl is-enabled imag-power-envelope-guard.timer 2>/dev/null | first)"
 echo "touchpad=$(if grep -qF 'Option "Tapping" "on"' /etc/X11/xorg.conf.d/30-touchpad-tap.conf 2>/dev/null; then echo 1; else echo 0; fi)"
+echo "swap_bytes=$(swapon --show=SIZE --bytes --noheadings 2>/dev/null | awk '{s += $1} END {print s + 0}')"
+echo "mem_bytes=$(awk '/^MemTotal:/{print $2 * 1024; exit}' /proc/meminfo 2>/dev/null)"
+echo "swap_fstab=$(grep -cE '^[^#[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+swap[[:space:]]' /etc/fstab 2>/dev/null)"
 echo "gather_done=1"
 GATHER_EOF
 }
@@ -294,7 +298,7 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in timezone net perf cstate nosleep boot kernel affinity rtprio gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad; do
+        for v in timezone net perf cstate nosleep boot kernel affinity rtprio gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
@@ -436,5 +440,13 @@ obs_box_baseline_verdict() {
     # touchpad -- the libinput tap-to-click InputClass
     ok=0; [ "$(_obs_box_f touchpad)" = 1 ] && ok=1
     _obs_box_item touchpad "$ok" "30-touchpad-tap.conf tapping=$(_obs_box_f touchpad)"
+    # swap -- issue 1428: active swap of at least 90 % of RAM AND an fstab entry (obs_box_swap); an
+    # unreadable count is a FAIL, never a pass
+    local sb mb
+    sb="$(_obs_box_f swap_bytes)"; mb="$(_obs_box_f mem_bytes)"
+    ok=0
+    case "$sb$mb" in '' | *[!0-9]*) ;; *) [ "$((sb * 10))" -ge "$((mb * 9))" ] && [ "$sb" -gt 0 ] \
+        && case "$(_obs_box_f swap_fstab)" in '' | 0 | *[!0-9]*) false ;; *) true ;; esac && ok=1 ;; esac
+    _obs_box_item swap "$ok" "active swap=${sb:-unreadable} B, RAM=${mb:-unreadable} B, fstab swap lines=$(_obs_box_f swap_fstab) -- setup obs_box_swap (issue 1428)"
     [ "$fails" -eq 0 ]
 }

@@ -205,6 +205,24 @@ owns that 10-amdgpu.conf). Xorg then logs `Failed to load module "amdgpu"` (harm
   NVIDIA step by design. On any other NVIDIA box, after setup + an X restart,
   `xrandr --listproviders` must name the sink `modesetting`; then soak overnight and read `(drm-hang)`.
 
+## Swap (item `obs_box_swap`, grader row `swap`, issue 1428)
+
+Owner 14.10.2026 (verbatim): "To ze tam nieje swap je hrube a opakovane porusenie pravidiel pre linux
+boxy". stream-pp, strih-pp and strih-snv ran with NO swap; on stream-pp the OOM killer took the strih
+OBS browser source and the restreamer (14.10.2026 09:37).
+
+- **Install:** `obs_box_swap` (system half) creates `/swapfile` = RAM rounded up to whole GiB
+  (`fallocate`, chmod 600, `mkswap`), `swapon` when not active, ONE `/swapfile none swap sw 0 0` line
+  in `/etc/fstab`. Idempotent. A root that is not ext4 fails loud and writes nothing. Both setups call
+  it on the `obs_box_rtprio_off ;` line (setup-strih is at its 1000-line budget; keep the space before
+  `;` -- tests anchor `\nobs_box_rtprio_off `).
+- **Grader row `swap`** (last): active swap >= 90 % of RAM AND an fstab swap line; an unread count
+  FAILs. Gather keys `swap_bytes` / `mem_bytes` / `swap_fstab`.
+- **Camboxes are NOT this item:** read-only root on a stick, so their swap is zram (RAM-backed, no
+  disk writes) from setup-device / create-usb, graded by verify-device.
+- Tests: `tests/python/test_obs_box_swap_1428.py` (stubbed tools, path seams `OBS_BOX_SWAPFILE` /
+  `OBS_BOX_FSTAB` / `OBS_BOX_MEMINFO`), the `swap` rows in `tests/obs_box_baseline_1357.rs`.
+
 ## The rig time zone (item `obs_box_timezone`, grader row `timezone`, issue 1415)
 
 Every fresh box used to run the image default `Etc/UTC`, so the browser-source clocks (Camera info,

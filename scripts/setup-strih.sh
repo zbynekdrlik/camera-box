@@ -612,7 +612,7 @@ fi
 # rtprio stays OFF (issue 1357): the retired 11c grant pinned the render tick SCHED_FIFO on cores strih-snv
 # never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833). The shared
 # item removes a leftover grant; the grader's `rtprio` row (verify item 32) FAILs while one exists.
-obs_box_rtprio_off   # issue 1357: remove a retired render-tick rtprio grant
+obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)"   # issue 1357 rtprio off; issue 1428 swap
 
 # ---------------------------------------------------------------------------------------------
 # Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement
