@@ -128,8 +128,9 @@ obs_box_venue_sender_ips() {
 
 # obs_box_role_apply -> apply the loaded box's role + venue to the shell (setup-strih / verify-strih call
 # it once, right after the box loads, BEFORE their source-guard):
-#   * the stream role runs ONE session app, the browser-source keeper (STRIH_SESSION_APP_UNITS: step 16d,
-#     the kiosk autostart lines, verify items 37-40);
+#   * the stream role runs TWO session apps, the browser-source keeper and the dantesync tray (issue 1429:
+#     every Linux workstation shows the clock state) (STRIH_SESSION_APP_UNITS: step 16d, the kiosk
+#     autostart lines, verify items 37-40);
 #   * a venue other than snv lists its own boxes as the NDI senders (NDI_DISCOVERY_SENDER_HOSTS, read by
 #     scripts/lib/ndi-discovery.sh): never the SNV fleet's addresses on a PP box.
 # rc 1 + a stderr line on a fact that cannot be read.
@@ -139,7 +140,7 @@ obs_box_role_apply() {
   venue="$(strih_box_venue)" || return 1
   if [ "$role" = stream ]; then
     # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh
-    STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service)
+    STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service dantesync-tray.service)
   fi
   if [ "$venue" != snv ]; then
     NDI_DISCOVERY_SENDER_HOSTS="$(obs_box_venue_sender_ips "$venue")" || return 1

@@ -940,7 +940,7 @@ else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
-step "16d" "Session apps (issue 1399): browser-source keeper, shading panel window, Companion Satellite + its watch -- --user units, enable-only"
+step "16d" "Session apps (issue 1399): browser-source keeper, shading panel window, Companion Satellite + its watch, the dantesync tray (issue 1429) -- --user units, enable-only"
 # issue 1399 (owner 4.10.2026): the OBS browser sources reload themselves once their page server answers
 # (strih-browser-keeper.service), the shading panel runs as an app window titled "Shading"
 # (bkshading-panel-app.service), and Companion Satellite (the Stream Deck XL agent, installed in step 16)

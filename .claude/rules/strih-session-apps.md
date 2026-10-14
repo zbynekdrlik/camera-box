@@ -18,6 +18,9 @@ paths:
   - "tests/python/test_strih_companion_satellite_1399.py"
   - "tests/python/test_strih_satellite_watch_1399.py"
   - "tests/python/test_strih_lx_deploy_session_apps_1399.py"
+  - "systemd/dantesync-tray.service"
+  - "scripts/lib/dantesync-install.sh"
+  - "tests/python/test_dantesync_tray_1429.py"
 ---
 
 # strih-snv session apps: the browser-source keeper, the shading panel window, Companion Satellite + its watch (issue 1399)
@@ -237,12 +240,62 @@ Design comment 5979157737 (Approach 1); finding + live stopgap 5979039607.
   while the deck did not respond). The watch catches only the classes the REST shows. A hang it cannot
   see still needs a report, and the unit's own `Restart=always` only catches a Satellite that exits.
 
+## The dantesync tray (`dantesync-tray.service`, issue 1429)
+
+Owner, 14.10.2026: "dantesinc ma mat pod linuxom tiez v liste ikonuzo stavmi tak ako na windovse aby
+sme videli". Design comment 6176755827 (Approach 1). The fifth entry; it runs on EVERY Linux
+workstation, the stream role too (`obs_box_role_apply` keeps it next to the keeper).
+
+- **The program is a release binary, not a repo script** (the Satellite pattern):
+  `/usr/local/bin/dantesync-tray` = the PINNED dantesync release's `dantesync-tray-linux-amd64`
+  (first in v1.18.0, dantesync issue 132). It reads the local daemon's `127.0.0.1:8898/status` and
+  shows the state in the tint2 systray. `strih_session_app_script` is EMPTY for it;
+  `strih_session_app_program` prints `dantesync_install_tray_bin` (`DANTESYNC_INSTALL_TRAY_BIN`, the
+  ONE seam the install and the grader share).
+- **The install** is `dantesync_install_tray` (`scripts/lib/dantesync-install.sh`), called by step 16d
+  inside the per-entry loop:
+  - the pin is `dantesync_install_pinned_version`, the ONE `DANTESYNC_VERSION_PIN`; a pin below
+    `DANTESYNC_TRAY_FIRST_VERSION` (1.18.0) prints `WARN: dantesync vX ships no Linux tray ...` and
+    returns 0, nothing downloaded;
+  - otherwise the release `.sha256` first: an executable tray with that sha256 is KEPT (mtime
+    unchanged), anything else is downloaded, its sha256 verified BEFORE install, then
+    `install -D -m 0755` (a rename: a running tray keeps its inode). Unlike the daemon, the tray
+    FOLLOWS the pin;
+  - a download failure, a malformed `.sha256` or a mismatch is rc 1 + a stderr line, nothing installed.
+    Step 16d turns that into a WARN and provisions every other app (a GitHub outage must not stop a
+    deploy that already stopped OBS); verify FAILs the row.
+  - The loop compares the binary's sha256 before/after: a replaced tray is in the `try-restart` list
+    (`binary written`), an unchanged one is not.
+- **The runtime packages** `libgtk-3-0t64 libayatana-appindicator3-1 libxdo3` joined
+  `STRIH_SESSION_APP_PACKAGES` (the same install line; the stream role gets them too).
+- **The unit:** `DISPLAY=:0`, `Restart=always`, `RestartSec=5`, `StartLimitIntervalSec=0`,
+  `TimeoutStopSec=10`, journal output, `WantedBy=graphical-session.target`, and
+  `ConditionPathExists=/usr/local/bin/dantesync-tray`: while the pin has no Linux tray the autostart /
+  deploy `start` is a clean condition skip (rc 0, no `[strih-snv start]` WARNING), never a 5 s
+  restart loop on a missing ExecStart.
+- **The grader row `(dantesync-tray)`:** the binary branch (unit byte-identical, the binary present
+  and executable, enabled, the autostart line, active, `/proc/<MainPID>/exe` = the binary, started
+  after the newest of unit + binary). A MISSING binary while the pin is below 1.18.0 is a `NOTE|` row
+  (`strih_session_app_absent_note`), routed to verify-strih's `note`; it still counts toward
+  `strih_session_apps_row_count`. A missing binary at a 1.18.0+ pin FAILs `script-absent` naming
+  step 16d. An installed binary is graded in full whatever the pin says.
+- **Tests:** `tests/python/test_dantesync_tray_1429.py`. The shared fakes keep every run hermetic:
+  `F.bash` defaults `DANTESYNC_RELEASE_BASE` to a missing `file://` tree and
+  `DANTESYNC_INSTALL_TRAY_BIN` to an unwritable path; `F.tray_env` serves a fake release over
+  `file://` that the REAL curl reads.
+- **Live steps (supervisor):** roll the fleet dantesync to 1.18.0 (`dantesync-fleet-upgrade.sh`,
+  canaried) and bump `DANTESYNC_VERSION_PIN` to 1.18.0 in `scripts/dantesync-version-gate.sh`; then
+  re-run setup-strih on strih-snv / strih-pp / stream-pp (step 16d logs `installed the dantesync tray
+  v1.18.0`), `systemctl --user start dantesync-tray.service` (or the next kiosk login / genlock deploy),
+  and `verify-strih.sh` reads `(dantesync-tray) ... OK`. Before the pin bump every box reads the NOTE.
+  Acceptance: the tint2 panel shows the icon and its colour follows the daemon state.
+
 ## Start path: the kiosk autostart, not default.target
 
 Every entry is `WantedBy=graphical-session.target` like `strih-obs.service`, and like it STARTED by the
 kiosk openbox autostart (`strih_openbox_autostart_text` calls `strih_session_apps_autostart_lines`,
 after strih-obs + the bundle-state server, in `STRIH_SESSION_APP_UNITS` order: keeper, panel, Satellite,
-watch timer).
+watch timer, dantesync tray).
 - openbox never reaches graphical-session.target, so the WantedBy only makes `enable` meaningful.
 - A `default.target` unit would also start on a user-manager start with no X session (an ssh login,
   linger), where the panel or the Satellite tray cannot open a window. ONE login start path, the one OBS

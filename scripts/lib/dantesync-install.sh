@@ -23,11 +23,23 @@
 #
 # Path seams (tests): DANTESYNC_INSTALL_BIN (default STRIH_DANTESYNC_BIN, the path
 # strih_dantesync_install's restart decision reads), DANTESYNC_INSTALL_CONFIG, DANTESYNC_RELEASE_BASE,
-# DANTESYNC_VERSION_PIN (overrides the gate's pin), DANTESYNC_NTP_UPSTREAM (the master's NTP upstream).
+# DANTESYNC_VERSION_PIN (overrides the gate's pin), DANTESYNC_NTP_UPSTREAM (the master's NTP upstream),
+# DANTESYNC_INSTALL_TRAY_BIN (the Linux tray, issue 1429).
+#
+# Issue 1429 (owner 14.10.2026: the clock state as a tray icon on the Linux boxes too, like on Windows):
+# dantesync_install_tray installs the PINNED release's `dantesync-tray-linux-amd64` (first shipped in
+# v1.18.0, dantesync issue 132). It runs as the session app dantesync-tray.service
+# (scripts/lib/strih-session-apps.sh, setup-strih step 16d). Unlike the daemon, the tray FOLLOWS the pin:
+# an installed tray whose sha256 differs from the pinned release's is replaced (a tray is not
+# clock-critical, and one pin keeps it on the daemon's version).
 
 # The internet NTP upstream a `server` (NTP-master) box dates the fleet from: the value strih-snv's own
 # config carries (Cloudflare time). DANTESYNC_NTP_UPSTREAM overrides it.
 DANTESYNC_INSTALL_DEFAULT_NTP_UPSTREAM=162.159.200.1
+# The Linux tray: where it is installed (the path dantesync-tray.service runs), and the first release
+# that ships it.
+DANTESYNC_TRAY_DEFAULT_BIN=/usr/local/bin/dantesync-tray
+DANTESYNC_TRAY_FIRST_VERSION=1.18.0
 
 # dantesync_install_pinned_version -> the dantesync version the fleet is pinned to: DANTESYNC_VERSION_PIN
 # when set, else the default the version gate declares (one source, never a second literal). rc 1 + a
@@ -131,6 +143,91 @@ dantesync_install_config() {
     return 1
   fi
   echo "  wrote ${cfg} (role ${role}, gm_allowlist ${gm}, clock_discipline ptp_phase_lock)"
+}
+
+# --- the Linux tray (issue 1429) ---------------------------------------------------------------------
+
+# dantesync_install_tray_bin -> the installed tray path (DANTESYNC_INSTALL_TRAY_BIN, the ONE seam the
+# install and the verify-strih grader both read; default /usr/local/bin/dantesync-tray).
+dantesync_install_tray_bin() { printf '%s' "${DANTESYNC_INSTALL_TRAY_BIN:-$DANTESYNC_TRAY_DEFAULT_BIN}"; }
+
+# dantesync_install_tray_url VERSION -> the Linux tray release asset URL of VERSION.
+dantesync_install_tray_url() {
+  local v="${1:?version required}"
+  printf '%s/v%s/dantesync-tray-linux-amd64' \
+    "${DANTESYNC_RELEASE_BASE:-https://github.com/zbynekdrlik/dantesync/releases/download}" "$v"
+}
+
+# dantesync_install_version_ge A B -> rc 0 iff the X.Y.Z version A >= B, compared number by number (1.100.0
+# is above 1.18.0); rc 1 when below; rc 2 when either is not X.Y.Z. The digit sets are spelled out: a
+# bracket range follows the locale (issue 1302).
+dantesync_install_version_ge() {
+  local a="${1-}" b="${2-}" re='^[0123456789]+\.[0123456789]+\.[0123456789]+$' i
+  local -a x y
+  [[ "$a" =~ $re ]] && [[ "$b" =~ $re ]] || return 2
+  IFS=. read -r -a x <<<"$a"
+  IFS=. read -r -a y <<<"$b"
+  for i in 0 1 2; do
+    if ((10#${x[i]} > 10#${y[i]})); then return 0; fi
+    if ((10#${x[i]} < 10#${y[i]})); then return 1; fi
+  done
+  return 0
+}
+
+# dantesync_install_tray -> install the pinned release's Linux tray at dantesync_install_tray_bin.
+#   * a pin below DANTESYNC_TRAY_FIRST_VERSION has no Linux tray asset: a named WARN, nothing downloaded,
+#     rc 0 (the tray arrives with the fleet roll to 1.18.0+ and the DANTESYNC_VERSION_PIN bump);
+#   * else the release `.sha256` first: an installed, executable tray with that sha256 is kept (its mtime
+#     unchanged, which verify's process check compares against); otherwise the tray is downloaded to a
+#     temp dir, its sha256 verified BEFORE anything is installed, then `install -D -m 0755` (rename into
+#     place: a running tray keeps the inode it runs);
+#   * a download failure, a malformed `.sha256` or a sha256 mismatch: rc 1 + a stderr line, nothing
+#     installed (an installed tray is left as it is).
+dantesync_install_tray() {
+  local bin pin url tmp want have cur
+  bin="$(dantesync_install_tray_bin)"
+  pin="$(dantesync_install_pinned_version)" || return 1
+  if ! dantesync_install_version_ge "$pin" "$DANTESYNC_TRAY_FIRST_VERSION"; then
+    echo "  WARN: dantesync v${pin} ships no Linux tray (dantesync-tray-linux-amd64 first in v${DANTESYNC_TRAY_FIRST_VERSION}) -- ${bin} not installed; it arrives with the fleet roll to v${DANTESYNC_TRAY_FIRST_VERSION}+ and the DANTESYNC_VERSION_PIN bump"
+    return 0
+  fi
+  url="$(dantesync_install_tray_url "$pin")"
+  tmp="$(mktemp -d)" || { echo "dantesync-install: mktemp failed" >&2; return 1; }
+  if ! curl -fsSL "${url}.sha256" -o "${tmp}/dantesync-tray.sha256"; then
+    rm -rf "$tmp"
+    echo "dantesync-install: download of the dantesync v${pin} tray .sha256 failed (${url}.sha256)" >&2
+    return 1
+  fi
+  want="$(awk 'NR==1{print tolower($1)}' "${tmp}/dantesync-tray.sha256" 2>/dev/null || true)"
+  if ! [[ "$want" =~ ^[0123456789abcdef]{64}$ ]]; then
+    rm -rf "$tmp"
+    echo "dantesync-install: the release .sha256 of the dantesync v${pin} tray is not a sha256 ('${want}') -- refusing to install it" >&2
+    return 1
+  fi
+  cur="$(sha256sum "$bin" 2>/dev/null | awk '{print $1}' || true)"
+  if [ -x "$bin" ] && [ "$cur" = "$want" ]; then
+    rm -rf "$tmp"
+    echo "  dantesync tray v${pin} present (${bin}, sha256 matches the release) -- kept"
+    return 0
+  fi
+  if ! curl -fsSL "$url" -o "${tmp}/dantesync-tray"; then
+    rm -rf "$tmp"
+    echo "dantesync-install: download of the dantesync v${pin} tray failed (${url})" >&2
+    return 1
+  fi
+  have="$(sha256sum "${tmp}/dantesync-tray" 2>/dev/null | awk '{print $1}' || true)"
+  if [ "$want" != "$have" ]; then
+    rm -rf "$tmp"
+    echo "dantesync-install: SHA256 MISMATCH for the dantesync v${pin} tray (release '${want}', downloaded '${have}') -- refusing to install it" >&2
+    return 1
+  fi
+  install -D -m 0755 "${tmp}/dantesync-tray" "$bin" || { rm -rf "$tmp"; echo "dantesync-install: could not install ${bin}" >&2; return 1; }
+  rm -rf "$tmp"
+  if [ -n "$cur" ]; then
+    echo "  replaced the dantesync tray with v${pin} -> ${bin} (the installed sha256 ${cur:0:12}... differed)"
+  else
+    echo "  installed the dantesync tray v${pin} -> ${bin}"
+  fi
 }
 
 # dantesync_install ROLE GM -> the binary, then the config (both only when absent). rc 1 on a failure.

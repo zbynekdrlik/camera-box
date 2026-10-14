@@ -22,6 +22,12 @@
 #     scripts/strih_satellite_watch.py every 30 s: restarts the Satellite when its own REST shows a
 #     sustained fault (not connected while the Companion port answers / no surface while the Stream Deck
 #     is on USB), never while Companion is down.
+#   * dantesync-tray.service -> the dantesync tray (/usr/local/bin/dantesync-tray, the pinned dantesync
+#     release's `dantesync-tray-linux-amd64`, first in v1.18.0) -- the clock state as an icon in the tint2
+#     systray, like on the Windows boxes (issue 1429, owner 14.10.2026; design comment 6176755827). Every
+#     Linux workstation runs it, the stream role too. Step 16d installs the binary through
+#     dantesync_install_tray (scripts/lib/dantesync-install.sh); the unit carries ConditionPathExists, so
+#     while the pin is below 1.18.0 (no binary) its start is a clean skip, never a restart loop.
 #
 # Every entry is WantedBy=graphical-session.target like strih-obs.service, and like it STARTED by the
 # kiosk openbox autostart (strih_openbox_autostart_text calls strih_session_apps_autostart_lines):
@@ -31,14 +37,16 @@
 # session (scripts/lib/strih-snv-deploy.sh strih_lx_remote_start_cmd).
 #
 #   * strih_session_apps_install -- setup-strih step 16d: the packages (python3-gi + WebKit2 4.1 +
-#     python3-websocket) and an import preflight, the repo programs into the bin dir, every unit file
+#     python3-websocket, and the tray's GTK 3 / appindicator / xdo runtime) and an import preflight, the
+#     dantesync tray from the pinned release, the repo programs into the bin dir, every unit file
 #     into the operator's ~/.config/systemd/user (each written only when its bytes or mode differ), the
 #     4.10.2026 hand-made stopgaps taken over (any WantedBy=default.target link of an entry + the panel's
 #     ~/.local/bin copy removed; a unit file itself is overwritten under the same name), `systemctl
 #     --user enable`, and a `try-restart` of the entries whose files changed -- a stopped unit is never
 #     started (enable-only, the kiosk pattern), a running one is moved onto the new files.
 #   * strih_session_apps_grade_rows / _report -- verify-strih items 37 (keeper), 38 (panel), 39
-#     (Satellite) + 40 (its watch): each entry installed byte-identical to the checkout with its program,
+#     (Satellite) + 40 (its watch) + the (dantesync-tray) row: each entry installed byte-identical to the
+#     checkout with its program,
 #     enabled, started by the kiosk autostart, active, and its main process running the installed program
 #     and started after the files were written (for the watch timer: its last run); the keeper's and the
 #     watch's last pass recent; the panel window (its WM_CLASS + the title "Shading") on :0.
@@ -47,17 +55,24 @@
 # STRIH_SESSION_APPS_RUNTIME_DIR (/run/user/<uid>), STRIH_SESSION_APPS_EUID (the running uid),
 # STRIH_SESSION_APPS_PYTHON (/usr/bin/python3, the import preflight), STRIH_SESSION_APPS_WMCTRL
 # (wmctrl), STRIH_SESSION_APPS_PROC (/proc), STRIH_SESSION_APPS_SATELLITE_BIN (the /opt Satellite
-# binary); `dpkg-query`, `apt-get`, `sudo`, `systemctl` and `id` are looked up on PATH.
+# binary), DANTESYNC_INSTALL_TRAY_BIN (the dantesync tray, dantesync-install.sh's seam);
+# `dpkg-query`, `apt-get`, `sudo`, `systemctl`, `id` and `curl` are looked up on PATH.
 
 # issue 1412: the user unit dir is created with every level owned by the user (strih_user_home_dir).
 if ! declare -F strih_user_home_dir >/dev/null; then
   # shellcheck source=scripts/lib/strih-user-home.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-user-home.sh"
 fi
+# issue 1429: the dantesync tray binary (install + its path, the pin).
+if ! declare -F dantesync_install_tray >/dev/null; then
+  # shellcheck source=scripts/lib/dantesync-install.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/dantesync-install.sh"
+fi
 
 # The session apps, in start order (the kiosk autostart and the deploy start them in this order).
-STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer)
-STRIH_SESSION_APP_PACKAGES=(python3-gi gir1.2-webkit2-4.1 python3-websocket)
+STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dantesync-tray.service)
+# issue 1429: libgtk-3-0t64 + libayatana-appindicator3-1 + libxdo3 = the dantesync tray's runtime.
+STRIH_SESSION_APP_PACKAGES=(python3-gi gir1.2-webkit2-4.1 python3-websocket libgtk-3-0t64 libayatana-appindicator3-1 libxdo3)
 STRIH_SESSION_APP_WANTS_TARGET=graphical-session.target
 STRIH_PANEL_WINDOW_TITLE=Shading
 # `res_name.res_class` of the panel window as `wmctrl -lx` prints it: GDK takes both from the program
@@ -72,6 +87,8 @@ STRIH_SATELLITE_WATCH_STATE_FILE=strih-satellite-watch.json
 STRIH_COMPANION_SATELLITE_BIN=/opt/companion-satellite/companion-satellite
 # shellcheck disable=SC2034  # consumed cross-file by verify-strih.sh's (companion) item
 STRIH_COMPANION_SATELLITE_UNIT=companion-satellite.service
+# issue 1429: the dantesync tray's unit (its binary: dantesync_install_tray_bin).
+STRIH_DANTESYNC_TRAY_UNIT=dantesync-tray.service
 # The 4.10.2026 hand-made stopgaps (issue comments 5977460330 panel, 5979039607 Satellite): units
 # WantedBy=default.target, and the panel's ~/.local/bin copy of the app. Paths relative to the
 # operator's home; the wants dir holds the link of any entry enabled that way.
@@ -81,13 +98,15 @@ STRIH_PANEL_STOPGAP_BIN=.local/bin/bkshading-panel-app
 # --- constants + path seams ------------------------------------------------------------------------
 
 # strih_session_app_script UNIT -> the repo program (scripts/<name>) the entry installs into the bin dir;
-# EMPTY for the Satellite, whose program is the /opt binary step 16 installs (rc 1 for an unknown unit).
+# EMPTY for an entry that runs an installed binary: the Satellite (the /opt binary step 16 installs) and
+# the dantesync tray (the release binary step 16d installs). rc 1 for an unknown unit.
 strih_session_app_script() {
   case "${1-}" in
     strih-browser-keeper.service) printf 'strih_browser_keeper.py' ;;
     bkshading-panel-app.service) printf 'bkshading_panel_app.py' ;;
     companion-satellite.service) printf '' ;;
     strih-satellite-watch.timer) printf 'strih_satellite_watch.py' ;;
+    dantesync-tray.service) printf '' ;;
     *) return 1 ;;
   esac
 }
@@ -99,6 +118,7 @@ strih_session_app_item() {
     bkshading-panel-app.service) printf 'shading-app' ;;
     companion-satellite.service) printf 'companion-satellite' ;;
     strih-satellite-watch.timer) printf 'satellite-watch' ;;
+    dantesync-tray.service) printf 'dantesync-tray' ;;
     *) return 1 ;;
   esac
 }
@@ -106,16 +126,40 @@ strih_session_app_item() {
 strih_session_apps_bin_dir() { printf '%s' "${STRIH_SESSION_APPS_BIN_DIR:-/usr/local/bin}"; }
 
 # strih_session_app_program UNIT -> the absolute path of the program the entry runs on the box: the bin
-# dir copy of its repo program, or the /opt Satellite binary (STRIH_SESSION_APPS_SATELLITE_BIN, the
-# test seam). rc 1 for an unknown unit.
+# dir copy of its repo program, the /opt Satellite binary (STRIH_SESSION_APPS_SATELLITE_BIN, the test
+# seam) or the dantesync tray (dantesync_install_tray_bin, DANTESYNC_INSTALL_TRAY_BIN). rc 1 for an
+# unknown unit.
 strih_session_app_program() {
   local script
   script="$(strih_session_app_script "${1-}")" || return 1
   if [ -n "$script" ]; then
     printf '%s/%s' "$(strih_session_apps_bin_dir)" "$script"
+  elif [ "${1-}" = "$STRIH_DANTESYNC_TRAY_UNIT" ]; then
+    dantesync_install_tray_bin
   else
     printf '%s' "${STRIH_SESSION_APPS_SATELLITE_BIN:-$STRIH_COMPANION_SATELLITE_BIN}"
   fi
+}
+
+# strih_session_app_binary_installer UNIT -> what installs the binary of an entry that runs one (named
+# by the install WARN and the verify remedy).
+strih_session_app_binary_installer() {
+  case "${1-}" in
+    dantesync-tray.service) printf 'setup-strih.sh step 16d (it installs the dantesync tray from the pinned dantesync release, v%s+)' "$DANTESYNC_TRAY_FIRST_VERSION" ;;
+    *) printf 'setup-strih.sh step 16 (the Companion Satellite install)' ;;
+  esac
+}
+
+# strih_session_app_absent_note UNIT -> rc 0 + the NOTE text when an entry's binary is legitimately absent:
+# the dantesync tray while the pin is below the first release with a Linux tray. rc 1 otherwise (an
+# unreadable pin included: a missing binary is then graded as missing).
+strih_session_app_absent_note() {
+  local pin
+  [ "${1-}" = "$STRIH_DANTESYNC_TRAY_UNIT" ] || return 1
+  pin="$(dantesync_install_pinned_version 2>/dev/null)" || return 1
+  dantesync_install_version_ge "$pin" "$DANTESYNC_TRAY_FIRST_VERSION" && return 1
+  printf 'not installed: the pinned dantesync v%s ships no Linux tray (first in v%s) -- it arrives with the fleet roll to v%s+ and the DANTESYNC_VERSION_PIN bump, then setup-strih.sh step 16d' \
+    "$pin" "$DANTESYNC_TRAY_FIRST_VERSION" "$DANTESYNC_TRAY_FIRST_VERSION"
 }
 
 # strih_session_app_unit_files UNIT -> every unit file the entry installs, one per line: a timer brings
@@ -197,10 +241,12 @@ strih_session_apps_runtime_dir() {
 # rc 1 + a stderr line on a missing source file, a package that will not install, a failed import
 # preflight or a failed file install; a `systemctl --user enable` that cannot reach the user bus (a box
 # provisioned with nobody logged in) only WARNs -- the autostart starts the units regardless. A missing
-# /opt Satellite binary only WARNs too (step 16 installs it and fails loud itself).
+# /opt Satellite binary only WARNs too (step 16 installs it and fails loud itself), and so does a dantesync
+# tray that could not be fetched (dantesync_install_tray names why; verify-strih's (dantesync-tray) row
+# FAILs it): a GitHub outage must not stop the other session apps, in a deploy that already stopped OBS.
 strih_session_apps_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local bindir unitdir u f script program missing py w1 uw w2 err unit_written link
+  local bindir unitdir u f script program missing py w1 uw w2 err unit_written link before after
   local -a changed
   bindir="$(strih_session_apps_bin_dir)"
   unitdir="${home}/.config/systemd/user"
@@ -238,6 +284,13 @@ strih_session_apps_install() {
     w1=unchanged
     if [ -n "$script" ]; then
       w1="$(strih_session_apps_put "${repo}/scripts/${script}" "$program" 0755)" || return 1
+    elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ]; then
+      # issue 1429: the tray follows the pin; a replaced binary restarts a running tray (try-restart below)
+      before="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
+      dantesync_install_tray \
+        || echo "  WARN: the dantesync tray was not installed (above) -- verify-strih (dantesync-tray) names it; re-run setup-strih.sh step 16d"
+      after="$(sha256sum "$program" 2>/dev/null | awk '{print $1}' || true)"
+      [ "$before" = "$after" ] || w1=written
     fi
     uw=unchanged
     while IFS= read -r f; do
@@ -248,6 +301,8 @@ strih_session_apps_install() {
       changed+=("$u")
       if [ -n "$script" ]; then
         echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}): program ${w1}, unit ${uw}"
+      elif [ "$u" = "$STRIH_DANTESYNC_TRAY_UNIT" ]; then
+        echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}): binary ${w1}, unit ${uw}"
       else
         echo "  installed ${u} -> ${unitdir}/${u} (runs ${program}, installed by step 16): unit ${uw}"
       fi
@@ -256,8 +311,8 @@ strih_session_apps_install() {
     else
       echo "  ${u} unchanged (runs ${program})"
     fi
-    [ -n "$script" ] || [ -x "$program" ] \
-      || echo "  WARN: ${program} not installed -- re-run setup-strih.sh step 16 (the Companion Satellite install); ${u} cannot run without it"
+    [ -n "$script" ] || [ -x "$program" ] || strih_session_app_absent_note "$u" >/dev/null \
+      || echo "  WARN: ${program} not installed -- re-run $(strih_session_app_binary_installer "$u"); ${u} cannot run without it"
   done
 
   # A stopgap's WantedBy=default.target link would also start its app on a non-graphical login.
@@ -418,7 +473,7 @@ strih_session_app_remedy() {
   case "${1-}" in
     script-*)
       if [ -z "$script" ]; then
-        printf 're-run setup-strih.sh step 16 (the Companion Satellite install puts %s in place)' \
+        printf 're-run %s: it puts %s in place' "$(strih_session_app_binary_installer "$unit")" \
           "$(strih_session_app_program "$unit")"
       else
         printf 're-run setup-strih.sh step 16d (issue 1399)'
@@ -523,7 +578,8 @@ strih_session_app_pass_row() {
   return 0
 }
 
-# strih_session_apps_grade_rows REPO USER_HOME DESKTOP_USER -> verify-strih rows `OK|text` / `FAIL|text`:
+# strih_session_apps_grade_rows REPO USER_HOME DESKTOP_USER -> verify-strih rows `OK|text` / `FAIL|text` /
+# `NOTE|text` (only the dantesync tray below its first release):
 # one unit row per session app, the keeper's last-pass row, the panel window row and the Satellite
 # watch's last-pass row (strih_session_apps_row_count of them). Always rc 0.
 strih_session_apps_grade_rows() {
@@ -542,7 +598,13 @@ strih_session_apps_grade_rows() {
     if [ -n "$script" ]; then
       sstate="$(strih_session_app_file_state "$program" "${repo}/scripts/${script}")"
     else
-      sstate=absent; [ -x "$program" ] && sstate=ok  # the /opt binary step 16 installs: present, no checkout copy
+      sstate=absent; [ -x "$program" ] && sstate=ok  # an installed binary (step 16 / 16d): present, no checkout copy
+    fi
+    # issue 1429: no tray binary while the pin has no Linux tray = a NOTE, never a FAIL (an installed
+    # binary is graded in full whatever the pin says)
+    if [ "$sstate" = absent ] && [ -z "$script" ] && verdict="$(strih_session_app_absent_note "$u")"; then
+      printf 'NOTE|(%s) %s: %s\n' "$item" "$u" "$verdict"
+      continue
     fi
     enabled=0; [ -L "${unitdir}/${STRIH_SESSION_APP_WANTS_TARGET}.wants/${u}" ] && enabled=1
     autostart=0; grep -qxF "$(strih_session_app_autostart_line "$u")" "${home}/.config/openbox/autostart" 2>/dev/null && autostart=1
@@ -616,8 +678,9 @@ strih_session_apps_row_count() {
 }
 
 # strih_session_apps_grade_report REPO USER_HOME DESKTOP_USER -> print the rows through the CALLER's ok /
-# bad functions (verify-strih). rc 1 unless the grader printed every row: a grader that stopped part way
-# is a FAIL, never a quietly shorter list.
+# bad / note functions (verify-strih; a NOTE row is the dantesync tray waiting for its release, issue
+# 1429). rc 1 unless the grader printed every row: a grader that stopped part way is a FAIL, never a
+# quietly shorter list.
 strih_session_apps_grade_report() {
   local st d rows=0
   while IFS='|' read -r st d; do
@@ -625,6 +688,7 @@ strih_session_apps_grade_report() {
     rows=$((rows + 1))
     case "$st" in
       OK) ok "$d" ;;
+      NOTE) note "$d" ;;
       *) bad "$d" ;;
     esac
   done < <(strih_session_apps_grade_rows "$@")

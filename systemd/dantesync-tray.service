@@ -1,0 +1,34 @@
+[Unit]
+# issue 1429 -- the dantesync tray: the clock state (LOCK/NANO, acquiring, NTP-only, service stopped) as an
+# icon in the kiosk tint2 systray, like on the Windows boxes (owner 14.10.2026). The program is the PINNED
+# dantesync release's `dantesync-tray-linux-amd64` (first in v1.18.0), installed to
+# /usr/local/bin/dantesync-tray by setup-strih.sh step 16d (dantesync_install_tray,
+# scripts/lib/dantesync-install.sh); it reads the local daemon's 127.0.0.1:8898/status. Started at login by
+# the kiosk autostart and after strih-obs by the strih-snv genlock deploy; graded by verify-strih's
+# (dantesync-tray) row.
+Description=dantesync tray icon -- the clock state in the kiosk systray (issue 1429)
+Documentation=https://github.com/zbynekdrlik/camera-box
+# While the pin is below 1.18.0 there is no binary: the start is skipped cleanly (the unit reads
+# inactive, condition failed), never a Restart=always loop on a missing ExecStart.
+ConditionPathExists=/usr/local/bin/dantesync-tray
+# Never give up: the icon must show whenever the operator session runs.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The kiosk's plain Xorg session (the strih-obs-start.sh display); GTK reads ~/.Xauthority.
+Environment=DISPLAY=:0
+ExecStart=/usr/local/bin/dantesync-tray
+# always: a crash or an exit comes back after RestartSec.
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dantesync-tray
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk openbox autostart STARTS this unit at
+# every login (the strih-obs.service pattern); the WantedBy only makes `enable` meaningful.
+WantedBy=graphical-session.target
