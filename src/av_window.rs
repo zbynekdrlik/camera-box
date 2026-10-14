@@ -530,6 +530,24 @@ mod tests {
         );
     }
 
+    /// issue 1413 (14.10.2026): the SNV rig shrank to cam2/cam3/cam5, and the release E2E judged the
+    /// four Poprad cameras (no window in the switch schedule, zero samples) as A/V FAILs. A camera
+    /// with no scheduled window was never under test this run; cam2 pools the whole recording.
+    #[test]
+    fn only_scheduled_cameras_and_cam2_are_under_av_test_1413() {
+        let scheduled = vec!["CAM3".to_string(), "cam5".to_string()];
+        assert!(av_camera_under_test("cam2", &scheduled));
+        assert!(av_camera_under_test("cam3", &scheduled));
+        assert!(av_camera_under_test("cam5", &scheduled));
+        for gone in ["cam1", "cam4", "cam6", "cam7"] {
+            assert!(!av_camera_under_test(gone, &scheduled), "{gone}");
+        }
+        assert!(
+            av_camera_under_test("cam2", &[]),
+            "cam2 is judged even with an empty schedule"
+        );
+    }
+
     #[test]
     fn av_audio_zero_judged_cameras_never_claims_silent_748() {
         // Fail closed: if no camera was judged (e.g. every box operator-ack-excluded), the
