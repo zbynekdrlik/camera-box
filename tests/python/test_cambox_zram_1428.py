@@ -1,7 +1,7 @@
 """issue 1428 (owner 14.10.2026): every Linux box carries swap; a cambox swaps to compressed RAM.
 
 Owner (verbatim): "To ze tam nieje swap je hrube a opakovane porusenie pravidiel pre linux boxy".
-A cambox root is a read-only USB stick (the sticks already die from wear), so its swap is zram:
+A cambox root (an M.2 SATA SSD) is mounted read-only with no swap partition, so its swap is zram:
 systemd-zram-generator + ONE drop-in from scripts/lib/cambox-zram.sh. setup-device.sh `[zram-swap]`
 and create-usb-linux.sh write it, verify-device.sh (at) grades it, and cambox_zram_apply_program
 brings a live box up inside ONE verified rw window (issue 1407).
@@ -157,7 +157,7 @@ def test_verdict_fails_closed_on_every_broken_facet():
         "could not be read": _block(sha=""),
         "no zram swap is active": _block(swaps=[]),
         "under 90% of RAM": _block(swaps=[("/dev/zram0", 4 * 1024 ** 3)]),
-        "never swaps to its USB stick": _block(swaps=[("/dev/zram0", MEM_KB * 1024), ("/swapfile", 1024 ** 3)]),
+        "only the zram swap is provisioned": _block(swaps=[("/dev/zram0", MEM_KB * 1024), ("/swapfile", 1024 ** 3)]),
         "MemTotal could not be read": _block(mem=""),
         "no GATHER_DONE": _block(done=False),
     }

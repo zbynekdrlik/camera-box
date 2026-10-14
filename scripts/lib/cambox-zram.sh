@@ -8,15 +8,16 @@
 #
 # Owner 14.10.2026: every Linux box carries swap ("To ze tam nieje swap je hrube a opakovane
 # porusenie pravidiel pre linux boxy"). The OBS boxes get a RAM-sized swapfile on their SSD
-# (obs_box_swap in scripts/lib/obs-box-swap.sh). A cambox cannot: its root is READ-ONLY on a USB
-# stick, and the sticks already die from wear (never an experiment that can kill a cambox disk). So a
-# cambox swaps to compressed RAM: zram, set up at boot by systemd's own zram-generator (Ubuntu
+# (obs_box_swap in scripts/lib/obs-box-swap.sh). A cambox cannot: its root (an M.2 SATA SSD since the
+# issue-1311 migration, read 14.10.2026 on cam2/cam3/cam5) is mounted READ-ONLY (setup-device STEP 18),
+# swapon refuses a file on a read-only mount, and there is no swap partition (adding one means
+# repartitioning = a reflash of every box). So a cambox swaps to compressed RAM: zram, set up at boot by systemd's own zram-generator (Ubuntu
 # package systemd-zram-generator, no maintainer scripts), configured by ONE drop-in:
 #   - zram-size = ram (the swap reads as large as RAM, matching the OBS-box rule; zstd keeps the
 #     real RAM it uses at about a third of what is swapped out);
 #   - the package's own /etc/systemd/zram-generator.conf (a conffile, `[zram0]` = min(ram/2, 4 GiB))
 #     is never edited, so a package upgrade never asks a conffile question; the drop-in overrides it.
-# Nothing is written to the stick at runtime: the generator reads /etc at boot, the device lives in
+# Nothing is written to the disk at runtime: the generator reads /etc at boot, the device lives in
 # RAM.
 #
 # Consumers:
@@ -46,8 +47,8 @@ CAMBOX_ZRAM_MIN_PERCENT=90
 # write exactly this; verify-device compares its sha).
 cambox_zram_dropin_content() {
   cat <<'EOF'
-# camera-box issue 1428: swap on every Linux box. A cambox runs a read-only root on a USB stick, so
-# its swap is compressed RAM (zram), never a file on the stick. Written through
+# camera-box issue 1428: swap on every Linux box. A cambox runs a read-only root with no swap
+# partition, so its swap is compressed RAM (zram). Written through
 # scripts/lib/cambox-zram.sh; graded by verify-device.sh (at).
 [zram0]
 zram-size = ram
@@ -97,7 +98,7 @@ REMOTE
 #   - the package is installed (`install ok installed`);
 #   - the drop-in is byte-identical to cambox_zram_dropin_content;
 #   - the active zram swap is at least CAMBOX_ZRAM_MIN_PERCENT of RAM;
-#   - no swap on anything but /dev/zram* (a swapfile or partition on the stick wears it out).
+#   - no swap on anything but /dev/zram* (only zram is provisioned; anything else is hand-made drift).
 cambox_zram_verdict() {
   local block="${1:-}" line fails="" nl=$'\n' fix
   local pkg="" sha="" mem="" done="" zram=0 name bytes want_sha
@@ -146,7 +147,7 @@ cambox_zram_verdict() {
       ;;
   esac
   if [ "${#other[@]}" -gt 0 ]; then
-    fails="${fails}FAIL: swap on ${other[*]} -- a cambox never swaps to its USB stick (it wears out); remove it from /etc/fstab and swapoff it${nl}"
+    fails="${fails}FAIL: swap on ${other[*]} -- only the zram swap is provisioned on a cambox (anything else is hand-made drift); remove it from /etc/fstab and swapoff it${nl}"
   fi
   if [ -n "$fails" ]; then
     printf '%s' "$fails"

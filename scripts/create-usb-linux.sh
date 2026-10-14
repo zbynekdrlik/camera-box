@@ -360,7 +360,7 @@ EOF
     remote_log_journal_upload_dropin_content > "$MOUNT_ROOT$REMOTE_LOG_JU_DROPIN_PATH"
 
     # issue 1428: swap on compressed RAM from the first boot (the package in the chroot install
-    # below; this drop-in = zram-size = ram, zstd). Never a swapfile: the root is a USB stick.
+    # below; this drop-in = zram-size = ram, zstd). No swapfile: the root runs read-only after setup-device STEP 18.
     cambox_zram_install_dropin "$MOUNT_ROOT" || error "could not write the zram swap drop-in (issue 1428)"
 
     # #448 (2026-07-18 rescope, event finding #8): force-load the Intel iGPU DRM module at boot so a

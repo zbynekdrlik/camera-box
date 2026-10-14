@@ -1756,8 +1756,8 @@ echo "  Installed: $CAMBOX_EGRESS_PACING_SCRIPT_PATH + ${CAMBOX_EGRESS_PACING_SE
 # =============================================================================
 # [zram-swap]: swap on compressed RAM (issue 1428, unnumbered sub-step, ENABLE-only)
 # =============================================================================
-# Owner 14.10.2026: every Linux box carries swap. This root is a read-only USB stick, so the swap is
-# zram (RAM), never a file on the stick: systemd's zram-generator (no maintainer scripts) plus the ONE
+# Owner 14.10.2026: every Linux box carries swap. This root is mounted read-only (STEP 18) and has no
+# swap partition (a swap file cannot be activated on a read-only mount), so the swap is zram (RAM): systemd's zram-generator (no maintainer scripts) plus the ONE
 # drop-in from scripts/lib/cambox-zram.sh (zram-size = ram, zstd). The generator reads /etc at boot,
 # so nothing is started here (.claude/rules/provisioning-scripts.md); the swap comes up at the next
 # boot and verify-device.sh (at) grades it. In the rw window, before STEP 18's read-only flip.

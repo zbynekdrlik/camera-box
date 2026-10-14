@@ -576,11 +576,13 @@ the test calls without root, with goldens in `tests/fixtures/image_builder_fstab
   systemd-remount-fs remount the overlay root read-only. If the overlay ever goes, revisit that
   decision (the test checks the overlay is still there).
 
-## A cambox swaps to compressed RAM, never to its stick (issue 1428)
+## A cambox swaps to compressed RAM (issue 1428)
 
 Owner 14.10.2026: every Linux box carries swap. The OBS boxes get a RAM-sized swapfile on their SSD
-(`obs_box_swap`, `.claude/rules/obs-box-baseline.md`). A cambox root is a read-only USB stick that
-already dies from wear, so its swap is zram, in ONE lib, `scripts/lib/cambox-zram.sh`:
+(`obs_box_swap`, `.claude/rules/obs-box-baseline.md`). A cambox root (an M.2 SATA SSD since the
+issue-1311 migration; read 14.10.2026 on cam2/cam3/cam5) is mounted read-only, swapon refuses a file on
+a read-only mount, and a swap partition would mean repartitioning (a reflash of every box), so its swap is
+zram, in ONE lib, `scripts/lib/cambox-zram.sh`:
 - `systemd-zram-generator` (Ubuntu's package, no maintainer scripts) + the drop-in
   `/etc/systemd/zram-generator.conf.d/camera-box.conf` (`zram-size = ram`, zstd, priority 100). The
   package's own `/etc/systemd/zram-generator.conf` is a conffile and is never edited, so an upgrade
@@ -589,7 +591,7 @@ already dies from wear, so its swap is zram, in ONE lib, `scripts/lib/cambox-zra
   the drop-in; nothing is started, the generator brings the swap up at the next boot.
   create-usb installs the package in the chroot and writes the drop-in host-side.
 - verify-device `(at)` grades: package installed, drop-in byte-identical, an active `/dev/zram*`
-  swap of at least 90 % of RAM, and no swap on anything else (a swapfile on the stick FAILs).
+  swap of at least 90 % of RAM, and no swap on anything else (only zram is provisioned; anything else FAILs as drift).
 - A live box gets it without a setup-device re-run through `cambox_zram_apply_program` (pipe it into
   `ssh root@<box> bash -s` while no E2E holds the rig lease): the apt install + the drop-in inside
   ONE verified rw window, then daemon-reload, `modprobe zram`, `systemctl start dev-zram0.swap` and a
