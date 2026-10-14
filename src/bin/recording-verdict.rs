@@ -7210,6 +7210,11 @@ fn build_and_print_verdict_with_stream_diffs(
                     // is Unknown this run (derive_camera_av_sync then fails closed for every
                     // camera, never fabricating a number from a missing anchor).
                     let cam2_offset_ms = cam_syncs.get("cam2").and_then(|s| s.av_offset_ms);
+                    // issue 1413: the cameras this run actually scheduled; any other camera of
+                    // CAMERA_UNDER_TEST_NODES (a Poprad camera on the SNV rig) is reported
+                    // EXCLUDED below, never judged on samples it could not produce.
+                    let scheduled_cams: Vec<String> =
+                        schedule.iter().map(|w| w.cambox.clone()).collect();
                     for &camera in CAMERA_UNDER_TEST_NODES.iter() {
                         let whole_recording = camera == "cam2";
                         let cam_sync = cam_syncs.get(camera).expect(
@@ -7232,6 +7237,29 @@ fn build_and_print_verdict_with_stream_diffs(
                                     "node": camera,
                                     "excluded": true,
                                     "exclude_reason": reason,
+                                    "verdict": "excluded",
+                                    "gate_pass": serde_json::Value::Null,
+                                    "windows": cam_sync.windows,
+                                    "candidates": cam_sync.candidates,
+                                    "cluster_samples": cam_sync.cluster_samples,
+                                    "av_offset_ms": serde_json::Value::Null,
+                                    "mad_ms": serde_json::Value::Null,
+                                    "effective_offset_ms": serde_json::Value::Null,
+                                }),
+                            );
+                            continue;
+                        }
+                        if !av_window::av_camera_under_test(camera, &scheduled_cams) {
+                            println!(
+                                "  {camera}: EXCLUDED — not in this run's switch schedule \
+                                 [gate SKIPPED, issue 1413]"
+                            );
+                            av_json.insert(
+                                camera.to_string(),
+                                serde_json::json!({
+                                    "node": camera,
+                                    "excluded": true,
+                                    "exclude_reason": "not in this run's switch schedule (issue 1413)",
                                     "verdict": "excluded",
                                     "gate_pass": serde_json::Value::Null,
                                     "windows": cam_sync.windows,

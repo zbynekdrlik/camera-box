@@ -483,6 +483,15 @@ pub fn classify_av_audio_state(
     }
 }
 
+/// issue 1413 (14.10.2026): is `camera` under A/V test this run? A camera with no window in the
+/// run's switch schedule (`scheduled` = the windows' cambox names, any case) was never under test:
+/// it moved to another venue or left `CAMERA_ACTIVE_SET`, so it is reported EXCLUDED, never judged
+/// fail-closed on samples it could never produce. cam2 pools the whole recording, so it is always
+/// under test. A SCHEDULED camera with no samples still fails closed.
+pub fn av_camera_under_test(camera: &str, scheduled: &[String]) -> bool {
+    camera == "cam2" || scheduled.iter().any(|s| s.eq_ignore_ascii_case(camera))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
