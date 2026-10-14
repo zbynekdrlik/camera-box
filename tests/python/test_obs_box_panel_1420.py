@@ -32,15 +32,62 @@ def _bash(body, *args, env=None, box="stream-pp"):
                           capture_output=True, text=True, env=e, timeout=120)
 
 
-def test_the_config_is_one_bottom_panel_with_taskbar_tray_and_clock_and_no_launcher():
+def test_the_config_is_one_bottom_panel_with_taskbar_tray_and_clock():
     r = _bash("obs_box_panel_tint2rc")
     cfg = dict(ln.split(" = ", 1) for ln in r.stdout.splitlines() if " = " in ln and not ln.startswith("#"))
-    assert cfg["panel_items"] == "TSC"
+    assert cfg["panel_items"] == "TSC"            # a box with no known app: no launcher at all
     assert cfg["panel_position"].startswith("bottom")
     assert cfg["panel_size"] == "100% 30"
     assert cfg["strut_policy"] == "follow_size"
     assert cfg["mouse_right"] == "none" and cfg["mouse_middle"] == "none"   # nothing closes a window
     assert "launcher_item_app" not in r.stdout
+
+
+# Owner 14.10.2026 (verbatim): "dalsia vec aplikacie v liste na linuxe ked zavriem tak tam maju byt aby
+# som ich aj otvorit vedel lebo teraz neviem" -- a launcher per app the box has, started through its unit.
+def _apps_home(tmp_path, units=("strih-obs.service", "bkshading-panel-app.service"), restreamer=True,
+               rustdesk=True):
+    home = tmp_path / "home"
+    ud = home / ".config" / "systemd" / "user"
+    ud.mkdir(parents=True)
+    for u in units:
+        (ud / u).write_text("[Service]\n")
+    sysd = tmp_path / "sysunits"
+    sysd.mkdir()
+    if restreamer:
+        (sysd / "restreamer.service").write_text("[Service]\n")
+    rd = tmp_path / "rustdesk"
+    if rustdesk:
+        _exec(rd, "#!/bin/sh\n")
+    return home, {"OBS_BOX_PANEL_SYS_UNIT_DIR": str(sysd), "OBS_BOX_PANEL_RUSTDESK_BIN": str(rd)}
+
+
+def test_every_app_the_box_has_gets_a_launcher_started_through_its_unit(tmp_path):
+    home, env = _apps_home(tmp_path)
+    r = _bash('obs_box_panel_launchers "$1"', str(home), env=env)
+    rows = [ln.split("|") for ln in r.stdout.splitlines()]
+    assert [x[0] for x in rows] == ["obs", "shading", "restreamer", "rustdesk"], r.stdout + r.stderr
+    ex = {x[0]: x[2] for x in rows}
+    assert ex["obs"] == "systemctl --user start strih-obs.service"
+    assert ex["shading"] == "systemctl --user start bkshading-panel-app.service"
+    assert ex["restreamer"] == "systemctl --user start restreamer.service"
+    assert ex["rustdesk"] == str(tmp_path / "rustdesk")
+
+
+def test_a_box_without_an_app_gets_no_launcher_for_it(tmp_path):
+    home, env = _apps_home(tmp_path, units=("strih-obs.service",), restreamer=False, rustdesk=False)
+    r = _bash('obs_box_panel_launchers "$1"', str(home), env=env)
+    assert [ln.split("|")[0] for ln in r.stdout.splitlines()] == ["obs"]
+
+
+def test_the_config_puts_the_launchers_in_front_of_the_taskbar(tmp_path):
+    home, env = _apps_home(tmp_path)
+    r = _bash('obs_box_panel_tint2rc "$1"', str(home), env=env)
+    cfg = [ln for ln in r.stdout.splitlines() if not ln.startswith("#")]
+    assert "panel_items = LTSC" in cfg
+    apps = [ln.split(" = ", 1)[1] for ln in cfg if ln.startswith("launcher_item_app = ")]
+    assert apps == [str(home / ".local/share/applications/obs-box-panel-%s.desktop" % i)
+                    for i in ("obs", "shading", "restreamer", "rustdesk")]
 
 
 @pytest.mark.parametrize("box", ["stream-pp", "strih-pp", "strih-snv"])
@@ -95,7 +142,14 @@ class Box:
 
     def env(self):
         return {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "STRIH_SESSION_APPS_EUID": "1000",
-                "OBS_BOX_PANEL_PROC": str(self.proc)}
+                "OBS_BOX_PANEL_PROC": str(self.proc),
+                "OBS_BOX_PANEL_SYS_UNIT_DIR": str(self.tmp / "no-sys-units"),
+                "OBS_BOX_PANEL_RUSTDESK_BIN": str(self.tmp / "no-rustdesk")}
+
+    def with_obs(self):
+        ud = self.home / ".config" / "systemd" / "user"
+        ud.mkdir(parents=True, exist_ok=True)
+        (ud / "strih-obs.service").write_text("[Service]\n")
 
     def calls(self):
         return self.log.read_text() if self.log.exists() else ""
@@ -142,11 +196,36 @@ def _healthy(box):
     (box.state / "wm").write_text("0x01 -1 tint2.Tint2 strih-pp tint2\n0x02 0 obs.obs strih-pp OBS\n")
 
 
-def test_a_healthy_panel_passes_four_rows(box):
+def test_a_healthy_panel_passes_five_rows(box):
     _healthy(box)
     rows = _rows(box)
-    assert [st for st, _ in rows] == ["OK"] * 4, rows
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "4"
+    assert [st for st, _ in rows] == ["OK"] * 5, rows
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "5"
+
+
+def test_install_writes_the_obs_launcher_and_its_icon(box):
+    box.with_obs()
+    r = _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=box.env())
+    assert r.returncode == 0, r.stderr
+    desk = box.home / ".local/share/applications/obs-box-panel-obs.desktop"
+    text = desk.read_text()
+    assert "Exec=systemctl --user start strih-obs.service" in text and "Name=OBS Studio" in text
+    icon = box.home / ".local/share/icons/obs-box-panel/obs.png"
+    assert icon.read_bytes() == (REPO / "vendor/obs-studio/frontend/cmake/linux/icons/obs-logo-128.png").read_bytes()
+    assert "launcher_item_app = %s" % desk in (box.home / ".config/tint2/tint2rc").read_text()
+    st, d = [r for r in _rows_after_health(box) if "(panel-launchers)" in r[1]][0]
+    assert st == "OK", d
+    desk.write_text("[Desktop Entry]\nExec=obs\n")
+    st, d = [r for r in _rows(box) if "(panel-launchers)" in r[1]][0]
+    assert st == "FAIL" and "obs-box-panel-obs.desktop" in d, d
+
+
+def _rows_after_health(box):
+    (box.state / "en").write_text("enabled\n")
+    (box.state / "act").write_text("active\n")
+    (box.state / "pid").write_text("4242\n")
+    (box.state / "wm").write_text("0x01 -1 tint2.Tint2 strih-pp tint2\n")
+    return _rows(box)
 
 
 def test_each_broken_piece_fails_its_row(box):
@@ -156,7 +235,8 @@ def test_each_broken_piece_fails_its_row(box):
     (box.state / "wm").write_text("0x02 0 obs.obs strih-pp OBS\n")
     (box.state / "installed").unlink()
     rows = dict((d.split(")", 1)[0][1:], st) for st, d in _rows(box))
-    assert rows == {"panel-pkg": "FAIL", "panel-config": "FAIL", "panel-unit": "FAIL", "panel-window": "FAIL"}
+    assert rows == {"panel-pkg": "FAIL", "panel-config": "FAIL", "panel-launchers": "OK", "panel-unit": "FAIL",
+                    "panel-window": "FAIL"}
 
 
 def test_no_window_list_is_a_note_not_a_failure(box):
