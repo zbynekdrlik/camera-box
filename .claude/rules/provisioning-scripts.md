@@ -169,7 +169,9 @@ the read-only-root unit set) sits after `(ak)`, before `(al)`. Also keep a new c
 `(aq)..(ao)`: `tests/python/test_grub_fast_boot_1394.py` executes that slice, and out of `(ar)..(al)`:
 `tests/python/test_cambox_ro_units_1394.py` executes that one. `(as)` (issue 1415, the rig time zone)
 therefore sits after `(ak)`, BEFORE `(ar)`. `(at)` (issue 1428, the zram swap) sits after `(ak)`,
-before `(as)` (`test_rig_timezone_1415.py` EXECUTES `(as)..(ar)`); the next free letter is `(au)`.
+before `(as)` (`test_rig_timezone_1415.py` EXECUTES `(as)..(ar)`). `(au)` (issue 1367, the housekeeping
+cpus) sits after `(ak)`, before `(at)` (`test_cambox_zram_1428.py` takes `(at)..(as)` as its block); the next
+free letter is `(av)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 
@@ -598,3 +600,25 @@ zram, in ONE lib, `scripts/lib/cambox-zram.sh`:
   swapon read-back after the close. It is a supervisor step, like the 12.10 time-zone put-on.
 - Tests: `tests/python/test_cambox_zram_1428.py` (the apply on the issue-1407 fake box, with
   dpkg-query / apt-get / modprobe / swapon fakes).
+
+## systemd PID 1 and every unit stay off the capture-IRQ core (issue 1367)
+
+The issue-1198 split reserves one general core for the capture xhci IRQ, but that only kept
+camera-box's OWN threads off it. PID 1 and every unit it started still ran there, and a unit start
+delayed the capture: on cam5 (15.10.2026) 65 of 102 capture-phase re-seeds landed within 1 s of a unit
+start (chance 7.8 %). The 2-min `cambox-mgmt-selfcheck` timer and the looping `systemd-journal-upload`
+were the starts. With PID 1 off the core: 2 re-seeds in 9 min, none near a unit start.
+- `scripts/lib/cambox-housekeeping-cpus.sh` derives housekeeping = online - isolated - the reserved IRQ
+  core (the highest remaining, the SAME rule as `affinity::select_irq_reserved_core`; 0,1 on the 4-core
+  fleet) and writes `/etc/systemd/system.conf.d/60-camera-box-housekeeping-cpus.conf` (`[Manager]
+  CPUAffinity=`). camera-box keeps its own `CPUAffinity=` drop-in; the burn units pass their own.
+- setup-device `[housekeeping-cpus]` writes it in the rw window; verify-device `(au)` grades the drop-in
+  AND PID 1's running mask (`/proc/1/status` `Cpus_allowed_list`).
+- **systemd 255 applies the manager CPUAffinity to itself only at BOOT.** A `daemon-reexec` left PID 1
+  on 0-2 (cam2/cam3, 15.10.2026). A live box is brought over by `cambox_hk_apply_program` (pipe it into
+  `ssh root@<box> bash -s` while no E2E holds the lease): the drop-in inside one verified rw window, then
+  `taskset -pc <set> 1` and a read-back. Every unit started after that inherits PID 1's mask (checked
+  with a transient `systemd-run` unit). Applied live on cam2/cam3/cam5 on 15.10.2026.
+- A runtime A/B of every SERVICE restricted to 0-1 (PID 1 left alone) changed nothing: the trigger is
+  PID 1's own work on a unit start, not the started service.
+- Tests: `tests/python/test_cambox_housekeeping_cpus_1367.py`.
