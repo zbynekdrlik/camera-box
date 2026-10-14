@@ -584,6 +584,18 @@ bool drm_output_vk_create_swapchain_only(struct drm_output_vk_disp *d, VkSwapcha
 		}
 	blog(LOG_INFO, "drm-output: vk-direct swapchain %ux%u FIFO images=%u format=%d", d->mode_w,
 	     d->mode_h, n, (int)fmt.format);
+	/* issue 1424 (design 6164790116): the modes this surface offers, for a later MAILBOX decision */
+	VkPresentModeKHR pms[8];
+	uint32_t npm = 8;
+	char pm_list[64] = "";
+	if (d->dev->vk.vkGetPhysicalDeviceSurfacePresentModesKHR(d->dev->pd, d->surface, &npm, pms) >= 0) {
+		for (uint32_t i = 0; i < npm && i < 8u; i++) {
+			const size_t used = strlen(pm_list);
+			snprintf(pm_list + used, sizeof(pm_list) - used, "%s%d", i ? "," : "", (int)pms[i]);
+		}
+	}
+	blog(LOG_INFO, "drm-output: vk-direct present modes offered on '%s': %s (0 immediate, 1 mailbox, 2 fifo, 3 fifo-relaxed)",
+	     d->output_name, pm_list[0] ? pm_list : "unknown");
 	return true;
 }
 

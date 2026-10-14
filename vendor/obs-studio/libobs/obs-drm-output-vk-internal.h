@@ -56,6 +56,7 @@ typedef VkResult(VKAPI_PTR *drm_output_vk_randr_display_fn)(VkPhysicalDevice pd,
 	X(vkGetPhysicalDeviceSurfaceSupportKHR)          \
 	X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)     \
 	X(vkGetPhysicalDeviceSurfaceFormatsKHR)          \
+	X(vkGetPhysicalDeviceSurfacePresentModesKHR)    \
 	X(vkGetPhysicalDeviceFormatProperties)           \
 	X(vkReleaseDisplayEXT)
 
@@ -252,6 +253,12 @@ struct drm_output_vk_disp {
 	/* issue 1424 review: a rebuild's bounded drain timed out (present thread + teardown): the empty
 	 * submit's fence may still be pending, so no rebuild retries (it would reset/re-submit that fence). */
 	bool queue_wedged;
+	/* issue 1424 (design 6164790116), present thread only: the deadline pick. The margin the pick leaves
+	 * before the next vblank (grows one step per missed vblank, at most half a period), the last acquire's
+	 * return time and the missed vblanks since the open. */
+	uint64_t pick_margin_ns;
+	uint64_t last_acquire_ns;
+	unsigned long long late_presents;
 };
 
 /* The shared device and the display slots (defined in obs-drm-output-vk.c). */

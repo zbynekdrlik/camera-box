@@ -43,7 +43,8 @@
  * dlopen'd, so a box without the loader just logs and stays dormant). The pure helpers
  * drm_output_vk_present_pick + drm_output_vk_present_done + drm_output_vk_pick_claim are lift-compiled +
  * model-checked by
- * tests/drm_output_vk_direct_1346.rs.
+ * tests/drm_output_vk_direct_1346.rs; the deadline pick's helpers (issue 1424) by
+ * tests/drm_output_vk_deadline_1424.rs.
  */
 
 #if defined(__linux__)
@@ -113,6 +114,51 @@ static int drm_output_vk_pick_claim(int front, int pending, int ready, int n)
 			return i;
 	}
 	return -1;
+}
+
+/* issue 1424 (design 6164790116): the deadline pick. The acquire returns at the vblank that freed an
+ * image, and the frame presented now is shown at the NEXT vblank. So the pick waits until `period -
+ * margin` after the acquire and takes the newest READY frame then, not right after the previous vblank:
+ * up to one refresh less on screen. */
+#define DRM_OUTPUT_VK_PICK_MARGIN_START_NS 5000000ULL
+#define DRM_OUTPUT_VK_PICK_MARGIN_STEP_NS 1000000ULL
+
+/* One refresh of a mode in ns (0 = unknown, no wait). */
+static uint64_t drm_output_vk_period_ns(uint32_t refresh_mhz)
+{
+	if (refresh_mhz == 0u)
+		return 0u;
+	return 1000000000000ULL / (uint64_t)refresh_mhz;
+}
+
+/* When the pick may run: `period - margin` after the acquire, the margin clamped to half a period. A
+ * period of 0 = no wait (the acquire time itself). */
+static uint64_t drm_output_vk_pick_deadline_ns(uint64_t acquire_ns, uint64_t period_ns, uint64_t margin_ns)
+{
+	if (period_ns == 0u)
+		return acquire_ns;
+	const uint64_t cap = period_ns / 2u;
+	if (margin_ns > cap)
+		margin_ns = cap;
+	return acquire_ns + (period_ns - margin_ns);
+}
+
+/* A present that missed its vblank is shown one refresh later, so the next acquire returns 1.5..3.5
+ * periods after the previous one. A longer gap is a rebuild, a re-mode or a stall, never the pick. */
+static bool drm_output_vk_missed_vblank(uint64_t gap_ns, uint64_t period_ns)
+{
+	if (period_ns == 0u)
+		return false;
+	return gap_ns >= period_ns + period_ns / 2u && gap_ns < 3u * period_ns + period_ns / 2u;
+}
+
+/* The margin after a missed vblank: one step more, at most half a period. It never shrinks: a probe down
+ * would repeat a frame each time it went too far. */
+static uint64_t drm_output_vk_margin_after_miss(uint64_t margin_ns, uint64_t period_ns)
+{
+	const uint64_t cap = period_ns / 2u;
+	const uint64_t next = margin_ns + DRM_OUTPUT_VK_PICK_MARGIN_STEP_NS;
+	return next > cap ? cap : next;
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -263,6 +309,34 @@ static bool drm_output_vk_rebuild_or_give_up(struct drm_output_vk_disp *d, VkRes
 	return false;
 }
 
+/* Sleep until `when_ns` on CLOCK_MONOTONIC (the clock os_gettime_ns reads on Linux); a time already
+ * past returns at once. The callers' deadlines are at most one refresh ahead. */
+static void drm_output_vk_sleep_until(uint64_t when_ns)
+{
+	struct timespec ts = {.tv_sec = (time_t)(when_ns / 1000000000ULL), .tv_nsec = (long)(when_ns % 1000000000ULL)};
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {
+	}
+}
+
+/* issue 1424 (design 6164790116): count a missed vblank and grow the margin, then wait for the pick. */
+static void drm_output_vk_wait_for_pick(struct drm_output_vk_disp *d)
+{
+	const uint64_t acquired_ns = os_gettime_ns();
+	const uint64_t period_ns = drm_output_vk_period_ns(d->refresh_mhz);
+	if (d->last_acquire_ns && drm_output_vk_missed_vblank(acquired_ns - d->last_acquire_ns, period_ns)) {
+		d->late_presents++;
+		const uint64_t m = drm_output_vk_margin_after_miss(d->pick_margin_ns, period_ns);
+		if (m != d->pick_margin_ns) {
+			d->pick_margin_ns = m;
+			blog(LOG_INFO,
+			     "drm-output: vk-direct pick margin on '%s' -> %.1f ms (a present missed its vblank, %llu so far)",
+			     d->output_name, (double)m / 1e6, d->late_presents);
+		}
+	}
+	d->last_acquire_ns = acquired_ns;
+	drm_output_vk_sleep_until(drm_output_vk_pick_deadline_ns(acquired_ns, period_ns, d->pick_margin_ns));
+}
+
 /* The vblank-paced present loop (FIFO: vkAcquireNextImageKHR blocks until a swapchain image frees). */
 static void *drm_output_vk_present_thread(void *arg)
 {
@@ -295,6 +369,7 @@ static void *drm_output_vk_present_thread(void *arg)
 			break;
 		}
 		overdue = 0;
+		drm_output_vk_wait_for_pick(d); /* issue 1424: pick just before the vblank it is shown on */
 
 		bool took_new = false;
 		pthread_mutex_lock(&d->lock);
@@ -372,8 +447,10 @@ static void *drm_output_vk_present_thread(void *arg)
 				     d->output_name);
 			}
 			if (d->program_presents == 1ULL || d->program_presents % 3600ULL == 0ULL)
-				blog(LOG_INFO, "drm-output: program-present #%llu (vk-direct FIFO, '%s')", d->program_presents,
-				     d->output_name);
+				blog(LOG_INFO,
+				     "drm-output: program-present #%llu (vk-direct FIFO, '%s') pick margin %.1f ms, %llu "
+				     "missed vblanks",
+				     d->program_presents, d->output_name, (double)d->pick_margin_ns / 1e6, d->late_presents);
 		} else if (d->presents == 1ULL || d->presents % 3600ULL == 0ULL) {
 			blog(LOG_INFO, "drm-output: solid-present #%llu (vk-direct FIFO, the pattern before the first frame)", d->presents);
 		}
@@ -433,6 +510,9 @@ struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name,
 	d->program_presents = 0;
 	d->scanout_live_logged = false;
 	d->gl_skips = 0;
+	d->pick_margin_ns = DRM_OUTPUT_VK_PICK_MARGIN_START_NS;
+	d->last_acquire_ns = 0;
+	d->late_presents = 0;
 	d->submit_outstanding = false;
 	d->retire_countdown = 0;
 	os_atomic_set_long(&d->presents_since_surface, 0);

@@ -435,6 +435,22 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   (`drm_output_vk_pick_claim` / `_present_pick` / `_present_done`), model-checked over 200000 random
   interleavings in `tests/drm_output_vk_direct_1346.rs` (a mutant restoring the overwrite fails it with
   ~180000 violations); with no READY frame the claim is exactly the lease mailbox rule.
+- **The deadline pick (issue 1424, design 6164790116):** the acquire returns at the vblank that freed
+  an image (FIFO, images=2 on NVIDIA), and a present queued now is shown at the NEXT vblank. The present
+  thread therefore sleeps until `acquire + period - margin` (`drm_output_vk_wait_for_pick`, an absolute
+  `clock_nanosleep` on CLOCK_MONOTONIC) and only then takes the newest READY frame: up to one refresh
+  less on screen (~28 ms at 29.97 Hz, ~12 ms at 60 Hz with the 5 ms start margin). A missed vblank
+  shows as the next acquire 1.5..3.5 periods later; it grows the margin by 1 ms, at most to half a
+  period, never down (a probe down would repeat a frame each time). The minute line reads `program-present
+  #N (...) pick margin X ms, N missed vblanks`, each raise logs `vk-direct pick margin on '<c>' -> X ms`,
+  and the swapchain setup logs `vk-direct present modes offered on '<c>': 2,...` (0 immediate, 1
+  mailbox, 2 fifo, 3 fifo-relaxed) for a later MAILBOX decision. Pure helpers + anchors:
+  `tests/drm_output_vk_deadline_1424.rs`. NOT a backlog fix: the READY image is never overwritten, so
+  the queue never grows; before this the GPU side was 1.5..2.5 refreshes, after it ~0.5..1.5.
+  **Reading the 171 ms (14.10.2026, strih-pp HDMI-1 @29.970 -> Blackmagic HDMI->SDI -> SDI->HDMI ->
+  cam1 Cam Link, `drm_latency_report.py`):** min 144 / median 171 / max 197 ms; only ~50-85 ms of it is
+  the OBS side, the rest is the converters and cam1's grabber at 29.97 Hz (a whole 33 ms frame before
+  USB). The vestibule TV path has no Cam Link, so never present that number as the TV's latency.
 - **Bounded, and a replug is not the end:** the present loop's acquire/fence waits are 1 s and
   re-checked. `VK_ERROR_OUT_OF_DATE_KHR` / `VK_ERROR_SURFACE_LOST_KHR` (an HDMI or grabber replug)
   rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) with 10 tries
