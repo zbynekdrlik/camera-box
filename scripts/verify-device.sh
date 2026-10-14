@@ -213,6 +213,11 @@
 #        /etc/systemd/zram-generator.conf.d/camera-box.conf byte-identical to scripts/lib/cambox-zram.sh,
 #        an active /dev/zram* swap of at least 90 % of RAM, and no swap on anything else (only zram
 #        is provisioned). Graded by cambox_zram_verdict from that ONE lib.
+#   (au) housekeeping cpus (issue 1367) -- HARD FAIL: the systemd manager drop-in
+#        /etc/systemd/system.conf.d/60-camera-box-housekeeping-cpus.conf byte-identical to
+#        scripts/lib/cambox-housekeeping-cpus.sh (CPUAffinity = online - isolated - the reserved
+#        capture-IRQ core) AND PID 1 running on exactly that set, so systemd's unit starts never land
+#        on the capture-IRQ core. A box with no reserved IRQ core is OK with no drop-in.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -297,6 +302,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/rig-timezone.sh
 . "$HERE/lib/rig-timezone.sh"  # rig_timezone_gather_cmd / rig_timezone_verdict -- the (as) rig time-zone
                                # check (issue 1415; SAME lib setup-device.sh STEP 1 writes the zone with)
+# shellcheck source=scripts/lib/cambox-housekeeping-cpus.sh
+. "$HERE/lib/cambox-housekeeping-cpus.sh"  # cambox_hk_gather_remote_snippet / cambox_hk_verdict -- the (au)
+                              # housekeeping-cpus check (issue 1367; SAME lib setup-device.sh writes with)
 # shellcheck source=scripts/lib/cambox-zram.sh
 . "$HERE/lib/cambox-zram.sh"  # cambox_zram_gather_remote_snippet / cambox_zram_verdict -- the (at) zram
                               # swap check (issue 1428; SAME lib setup-device.sh / create-usb-linux.sh write with)
@@ -936,6 +944,8 @@ Checks:
       read with readlink (never timedatectl) -- Etc/UTC, a copied file or an unreadable link FAILs
   (at) zram swap (issue 1428): systemd-zram-generator installed, its camera-box drop-in in place, an
       active /dev/zram* swap of at least 90 % of RAM and no other swap
+  (au) housekeeping cpus (issue 1367): the systemd manager CPUAffinity drop-in in place and PID 1
+      running on the housekeeping cores, off the capture core and the capture-IRQ core
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1812,6 +1822,30 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
+fi
+
+# (au) housekeeping cpus (issue 1367) -- HARD FAIL -------------------------------------------------
+# systemd PID 1 and every unit it starts ran on the issue-1198 reserved capture-IRQ core: on cam5
+# (15.10.2026) 65 of 102 capture-phase re-seeds landed within 1 s of a unit start. setup-device.sh
+# `[housekeeping-cpus]` writes the manager CPUAffinity drop-in through scripts/lib/cambox-housekeeping-cpus.sh;
+# this reads the drop-in and PID 1's running mask back (one read-only ssh gather) and grades them with
+# the SAME lib's pure cambox_hk_verdict. Inserted after (ak), before (at): outside every slice pytest
+# executes, and before (q), which stays last.
+aurc=0
+HK_BLOCK="$(ssh_box "$(cambox_hk_gather_remote_snippet)")" || aurc=$?
+if [ "$aurc" -ne 0 ] || [ -z "$HK_BLOCK" ]; then
+  fail "could not read the cpu state over SSH (rc=$aurc) -- cannot certify PID 1 is off the capture-IRQ core (issue 1367)"
+else
+  HK_VERDICT="$(cambox_hk_verdict "$HK_BLOCK")"
+  case "$HK_VERDICT" in
+    ok) ok "housekeeping cpus: the systemd manager CPUAffinity drop-in in place, PID 1 off the capture core and the capture-IRQ core (issue 1367)" ;;
+    ok-none:*) ok "housekeeping cpus: ${HK_VERDICT#ok-none: } -- nothing to provision (issue 1367)" ;;
+    *)
+      while IFS= read -r _reason; do
+        [ -n "$_reason" ] && fail "housekeeping cpus: ${_reason#FAIL: }"
+      done <<<"$HK_VERDICT"
+      ;;
+  esac
 fi
 
 # (at) zram swap (issue 1428) -- HARD FAIL ---------------------------------------------------------

@@ -65,6 +65,9 @@ fail() {
                                 # -- the on-box ssh-banner self-heal; ONE source of truth shared with
                                 # verify-device.sh's (aj) check (the pure decision embedded via declare -f)
 
+# shellcheck source=scripts/lib/cambox-housekeeping-cpus.sh
+. "$HERE/lib/cambox-housekeeping-cpus.sh"  # cambox_hk_install_dropin -- the [housekeeping-cpus] sub-step
+                              # (issue 1367; SAME lib verify-device.sh (au) grades with)
 # shellcheck source=scripts/lib/cambox-zram.sh
 . "$HERE/lib/cambox-zram.sh"  # cambox_zram_install_dropin / CAMBOX_ZRAM_PACKAGE -- the [zram-swap] sub-step
                               # (issue 1428; SAME lib verify-device.sh (at) + create-usb-linux.sh use)
@@ -1768,6 +1771,20 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force
 cambox_zram_install_dropin "" \
     || fail "could not write ${CAMBOX_ZRAM_DROPIN} -- the zram swap would stay at the package default (issue 1428)"
 echo "  Installed: ${CAMBOX_ZRAM_PACKAGE} + ${CAMBOX_ZRAM_DROPIN} (zram-size = ram; the swap comes up at the next boot)"
+
+# =============================================================================
+# [housekeeping-cpus]: systemd PID 1 + every unit off the capture-IRQ core (issue 1367, ENABLE-only)
+# =============================================================================
+# The issue-1198 split reserves one general core for the capture xhci IRQ, but only camera-box's own
+# threads kept off it: systemd PID 1 and every unit it started still ran there, and a unit start
+# delayed the capture (cam5 15.10.2026: 65 of 102 capture-phase re-seeds within 1 s of a unit start).
+# The manager CPUAffinity drop-in from scripts/lib/cambox-housekeeping-cpus.sh puts PID 1 and every
+# unit on the remaining cores. camera-box keeps its own CPUAffinity drop-in. PID 1 reads it at the next
+# boot (or a daemon-reexec); verify-device.sh (au) grades it. In the rw window, before STEP 18.
+echo ""
+echo -e "${GREEN}[housekeeping-cpus] Keeping systemd PID 1 off the capture-IRQ core (${CAMBOX_HK_DROPIN}, issue 1367)...${NC}"
+cambox_hk_install_dropin "" \
+    || fail "could not write ${CAMBOX_HK_DROPIN} -- PID 1 would keep running on the capture-IRQ core (issue 1367)"
 
 # =============================================================================
 # #1311: off-box remote logging (unnumbered sub-step, enable-only). Get kernel + journal messages
