@@ -9,6 +9,10 @@
 # role gets it, and after seeing it live: "1 mame mat jeden typ linux pracovnych zariadeni ako su
 # nasetupovane mas to doplnit do nasho skriptu!!" -- one Linux workstation type (gate `16h-panel`).
 #
+# Owner 14.10.2026: "aplikacie v liste na linuxe ked zavriem tak tam maju byt aby som ich aj otvorit vedel"
+# -- a LAUNCHER button per app the box has (OBS, Shading, Restreamer, RustDesk where present), in front
+# of the window list; an app the box supervises starts through its own unit (a click on a running app
+# does nothing, never a second copy).
 # The panel is tint2 (the distro package) at the bottom of :0: the running windows (a click switches,
 # beside Alt-Tab; a right click does nothing, so no window is closed from the panel), the XEmbed system
 # tray (the Restreamer's appindicator icon falls back to XEmbed without a StatusNotifier host) and a
@@ -22,6 +26,7 @@
 #   * obs_box_panel_grade_report  -- verify-strih item 44, through the caller's ok / bad / note:
 #       (panel-pkg)    tint2 installed;
 #       (panel-config) the config equals the declared text;
+#       (panel-launchers) every declared launcher .desktop file exists with the declared text;
 #       (panel-unit)   the unit file equals the checkout, enabled, active, its main process /usr/bin/tint2;
 #       (panel-window) a tint2 window on :0 (`wmctrl -lx` class tint2.Tint2); NOTE when X has no
 #                      client list to read.
@@ -31,11 +36,69 @@ OBS_BOX_PANEL_PACKAGE=tint2
 OBS_BOX_PANEL_UNIT=obs-box-panel.service
 OBS_BOX_PANEL_BIN=/usr/bin/tint2
 OBS_BOX_PANEL_WM_CLASS=tint2.Tint2
-OBS_BOX_PANEL_ROWS=4
+OBS_BOX_PANEL_ROWS=5
+# The system user-unit dir (a distro package's --user unit, e.g. restreamer.service) and the RustDesk
+# binary -- seams for the offline tests.
+OBS_BOX_PANEL_SYS_UNIT_DIR="${OBS_BOX_PANEL_SYS_UNIT_DIR:-/usr/lib/systemd/user}"
+OBS_BOX_PANEL_RUSTDESK_BIN="${OBS_BOX_PANEL_RUSTDESK_BIN:-/usr/bin/rustdesk}"
 
-# obs_box_panel_tint2rc -> the declared tint2 config: one bottom panel 30 px high over every monitor,
-# taskbar (T) + system tray (S) + clock (C), no launcher, no window closing from the panel.
+# obs_box_panel_launchers USER_HOME -> one `id|Name|Exec|Icon` line per app this box has, in panel order:
+#   obs        strih-obs.service in the user's unit dir (every Linux OBS box; on stream-pp it is the stream OBS)
+#   shading    bkshading-panel-app.service in the user's unit dir (the strih role)
+#   restreamer restreamer.service (the restreamer package's --user unit) in the user's or the system unit dir
+#   rustdesk   the RustDesk binary
+# A supervised app starts through its unit, never its binary: the unit runs the box's own wrapper
+# (strih-obs-start.sh) and `start` on a running unit does nothing.
+obs_box_panel_launchers() {
+  local home="${1:?user home required}" ud
+  ud="${home}/.config/systemd/user"
+  [ -f "${ud}/strih-obs.service" ] \
+    && printf 'obs|OBS Studio|systemctl --user start strih-obs.service|%s\n' "$(obs_box_panel_obs_icon_path "$home")"
+  [ -f "${ud}/bkshading-panel-app.service" ] \
+    && printf 'shading|Shading|systemctl --user start bkshading-panel-app.service|video-display\n'
+  if [ -f "${ud}/restreamer.service" ] || [ -f "${OBS_BOX_PANEL_SYS_UNIT_DIR}/restreamer.service" ]; then
+    printf 'restreamer|Restreamer|systemctl --user start restreamer.service|Restreamer\n'
+  fi
+  [ -x "$OBS_BOX_PANEL_RUSTDESK_BIN" ] && printf 'rustdesk|RustDesk|%s|rustdesk\n' "$OBS_BOX_PANEL_RUSTDESK_BIN"
+  return 0
+}
+
+# obs_box_panel_obs_icon_path USER_HOME -> where step 16h puts the OBS logo (the vendored OBS tree's
+# obs-logo-128.png, copied into this lib's dir so the staged checkout carries it).
+obs_box_panel_obs_icon_path() { printf '%s/.local/share/icons/obs-box-panel/obs.png' "${1:?user home required}"; }
+
+# obs_box_panel_desktop_path USER_HOME ID -> the launcher's .desktop file.
+obs_box_panel_desktop_path() {
+  printf '%s/.local/share/applications/obs-box-panel-%s.desktop' "${1:?user home required}" "${2:?id required}"
+}
+
+# obs_box_panel_desktop_text NAME EXEC ICON -> the declared .desktop text of one launcher.
+obs_box_panel_desktop_text() {
+  printf '[Desktop Entry]\n# obs-box-panel launcher (issue 1420) -- WRITTEN BY setup-strih.sh step 16h; do not hand-edit.\n'
+  printf 'Type=Application\nName=%s\nExec=%s\nIcon=%s\nTerminal=false\nNoDisplay=true\n' "$1" "$2" "$3"
+}
+
+# obs_box_panel_tint2rc [USER_HOME] -> the declared tint2 config: one bottom panel 30 px high over every
+# monitor, launchers (L, one per app obs_box_panel_launchers finds for USER_HOME) + taskbar (T) + system
+# tray (S) + clock (C), no window closing from the panel. No USER_HOME (or no app): no launcher.
 obs_box_panel_tint2rc() {
+  local home="${1:-}" items=TSC launchers="" id rest
+  if [ -n "$home" ]; then
+    while IFS='|' read -r id rest; do
+      [ -n "$id" ] || continue
+      launchers="${launchers}launcher_item_app = $(obs_box_panel_desktop_path "$home" "$id")"$'\n'
+    done < <(obs_box_panel_launchers "$home")
+  fi
+  [ -n "$launchers" ] && items=LTSC
+  _obs_box_panel_tint2rc_base | sed "s/^panel_items = TSC\$/panel_items = ${items}/"
+  if [ -n "$launchers" ]; then
+    printf '\nlauncher_padding = 4 2 6\nlauncher_background_id = 0\nlauncher_icon_background_id = 0\n'
+    printf 'launcher_icon_size = 22\nlauncher_tooltip = 1\nstartup_notifications = 0\n'
+    printf '%s' "$launchers"
+  fi
+}
+
+_obs_box_panel_tint2rc_base() {
   cat <<'TINT2RC'
 # obs-box-panel (issue 1420) -- WRITTEN BY setup-strih.sh step 16h; do not hand-edit.
 # Background 1: the panel
@@ -135,7 +198,23 @@ obs_box_panel_install() {
   strih_user_home_dir "$home" "$user" "$(dirname "$cfg")" \
     || { echo "obs-box-panel: cannot create $(dirname "$cfg")" >&2; return 1; }
   strih_user_home_dir "$home" "$user" "$unitdir" || { echo "obs-box-panel: cannot create ${unitdir}" >&2; return 1; }
-  w="$(_obs_box_panel_put_text "$(obs_box_panel_tint2rc)" "$cfg")" || return 1
+  local id name ex icon dst appdir icondir
+  appdir="${home}/.local/share/applications"
+  icondir="$(dirname "$(obs_box_panel_obs_icon_path "$home")")"
+  strih_user_home_dir "$home" "$user" "$appdir" || { echo "obs-box-panel: cannot create ${appdir}" >&2; return 1; }
+  strih_user_home_dir "$home" "$user" "$icondir" || { echo "obs-box-panel: cannot create ${icondir}" >&2; return 1; }
+  w="$(strih_session_apps_put "${repo}/scripts/lib/obs-box-panel-obs.png" "$(obs_box_panel_obs_icon_path "$home")" 0644)" || return 1
+  chown "$user:$user" "$(obs_box_panel_obs_icon_path "$home")" 2>/dev/null || true
+  [ "$w" = written ] && changed=1
+  while IFS='|' read -r id name ex icon; do
+    [ -n "$id" ] || continue
+    dst="$(obs_box_panel_desktop_path "$home" "$id")"
+    w="$(_obs_box_panel_put_text "$(obs_box_panel_desktop_text "$name" "$ex" "$icon")" "$dst")" || return 1
+    chown "$user:$user" "$dst" 2>/dev/null || true
+    echo "  ${dst} ${w} (launcher: ${name})"
+    [ "$w" = written ] && changed=1
+  done < <(obs_box_panel_launchers "$home")
+  w="$(_obs_box_panel_put_text "$(obs_box_panel_tint2rc "$home")" "$cfg")" || return 1
   chown "$user:$user" "$cfg" 2>/dev/null || true
   echo "  ${cfg} ${w}"
   [ "$w" = written ] && changed=1
@@ -166,10 +245,22 @@ obs_box_panel_grade_rows() {
     printf 'FAIL|(panel-pkg) %s not installed -- re-run setup-strih.sh step 16h (issue 1420)\n' "$OBS_BOX_PANEL_PACKAGE"
   fi
   cfg="$(obs_box_panel_config_path "$home")"
-  if [ -f "$cfg" ] && [ "$(cat "$cfg")" = "$(obs_box_panel_tint2rc)" ]; then
+  if [ -f "$cfg" ] && [ "$(cat "$cfg")" = "$(obs_box_panel_tint2rc "$home")" ]; then
     printf 'OK|(panel-config) %s = the declared panel config\n' "$cfg"
   else
     printf 'FAIL|(panel-config) %s %s -- re-run setup-strih.sh step 16h\n' "$cfg" "$([ -f "$cfg" ] && echo 'differs from the declared config' || echo missing)"
+  fi
+  local id name ex icon dst badl="" nl=0
+  while IFS='|' read -r id name ex icon; do
+    [ -n "$id" ] || continue
+    nl=$((nl + 1))
+    dst="$(obs_box_panel_desktop_path "$home" "$id")"
+    [ -f "$dst" ] && [ "$(cat "$dst")" = "$(obs_box_panel_desktop_text "$name" "$ex" "$icon")" ] || badl="${badl:+$badl, }${dst}"
+  done < <(obs_box_panel_launchers "$home")
+  if [ -n "$badl" ]; then
+    printf 'FAIL|(panel-launchers) missing or not the declared launcher: %s -- re-run setup-strih.sh step 16h\n' "$badl"
+  else
+    printf 'OK|(panel-launchers) %s launcher(s), each the declared .desktop file\n' "$nl"
   fi
   unit="${home}/.config/systemd/user/${OBS_BOX_PANEL_UNIT}"
   en="$(strih_session_apps_user_systemctl "$user" is-enabled "$OBS_BOX_PANEL_UNIT" 2>/dev/null || true)"
