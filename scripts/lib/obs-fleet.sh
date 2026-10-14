@@ -141,12 +141,15 @@
 # dev1 reaches the PP LAN as 10.76.8.x through the companion-pp subnet router while the boxes carry
 # 10.77.8.x, so an IP row would never match the box's own STRIH_IP. `traveling` (polled only while
 # their OBS-WS answers) and in NO facet yet: no dev1 watchdog polls or pages them until a facet adds them.
+# issue 1426: resolume-pp (the PP CG PC, Windows, its own cg OBS) joins as a traveling NAME row, and
+# the three PP boxes are members of the `build-parity` facet only (the fleet version-parity pass).
 OBS_FLEET="${OBS_FLEET:-strih-snv|10.77.9.202|linux-genlock|always
 stream-snv|10.77.9.204|windows-genlock|always
 imag|10.77.9.182|linux-genlock|retired
 resolume-snv|resolume.lan|windows-genlock|traveling
 strih-pp|strih-pp.lan|linux-genlock|traveling
-stream-pp|stream-pp.lan|linux-genlock|traveling}"
+stream-pp|stream-pp.lan|linux-genlock|traveling
+resolume-pp|resolume-pp.lan|windows-genlock|traveling}"
 
 # OBS_FLEET_ALIASES -- issue 1414 (box names carry the venue): the names the SNV rows had before the
 # rename, as space-separated OLD=NEW pairs. The ONE alias table of the repo (the python twin
@@ -250,8 +253,9 @@ obs_fleet_facet_members() {
     win-baseline)  printf 'stream-snv resolume-snv' ;;   # issue 1357: the Windows OBS-box baseline (win-baseline-check.sh)
     audio-mixer)   printf 'strih-snv stream-snv resolume-snv' ;;   # issue 1381: mixer real time + VBAN pacer loss
     obs-handles)   printf 'strih-snv stream-snv resolume-snv' ;;   # issue 1406: the OBS process handle / fd count
+    build-parity)  printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp' ;;   # issue 1426: one OBS genlock build across both venues
     *)
-      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles)" >&2
+      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles build-parity)" >&2
       return 1
       ;;
   esac

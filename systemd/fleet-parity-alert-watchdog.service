@@ -1,0 +1,14 @@
+[Unit]
+# issue 1426: the fleet version-parity pass, DEV1-SIDE (dev1 is the only machine that reaches both
+# venues). Compares the OBS genlock build of every SNV + PP OBS box (:8899 genlock_build_sha) and
+# every dantesync node against DANTESYNC_VERSION_PIN; a dantesync node that came back after a roll is
+# caught up (dantesync-fleet-upgrade.sh --fleet) only while the rig lease is free and no OBS box
+# streams or records. A powered-off venue is AWAY, never a page. SHIPS DISABLED -- enable explicitly.
+Description=camera-box fleet version parity + dantesync catch-up (issue 1426) -- one pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+ExecStart=%h/devel/camera-box/scripts/fleet-parity-alert-watchdog.sh
+# A catch-up roll is canary-first and verifies each node; it is bounded inside the script (3600 s).
+TimeoutStartSec=4200
