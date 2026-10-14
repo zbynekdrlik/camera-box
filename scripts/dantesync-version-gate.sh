@@ -374,7 +374,7 @@ read_dantesync_version_output() {
     cmd="dantesync --version"
   fi
   sshpass -p "$(_dv_ssh_pass "$target" "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}")" ssh \
-    -o StrictHostKeyChecking=no -o BatchMode=no \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=no \
     -o "ConnectTimeout=${DANTESYNC_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" \
     "$cmd" 2>/dev/null || true
@@ -399,7 +399,7 @@ read_dantesync_tray_sha() {
   [ -n "$target" ] || { printf ''; return 0; }
   _dv_cred_missing "$target" && { printf ''; return 0; }
   out="$(sshpass -p "$(_dv_ssh_pass "$target" "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}")" ssh \
-    -o StrictHostKeyChecking=no -o BatchMode=no \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=no \
     -o "ConnectTimeout=${DANTESYNC_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" \
     "certutil -hashfile \"${DANTESYNC_TRAY_GATE_WIN_EXE}\" SHA256" 2>/dev/null || true)"

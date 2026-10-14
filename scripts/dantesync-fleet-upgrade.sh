@@ -568,10 +568,10 @@ node_pass() {
   if [ -n "$var" ]; then printf '%s' "${!var:-}"; else printf '%s' "$SSH_PASS"; fi
 }
 ssh_node() {  # ADDR CMD  (ADDR is user@ip)
-  sshpass -p "$(node_pass "$1")" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
+  sshpass -p "$(node_pass "$1")" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=12 "$1" "$2"
 }
 scp_node() {  # LOCAL_PATH  ADDR:REMOTE
-  sshpass -p "$(node_pass "${2%%:*}")" scp -O -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
+  sshpass -p "$(node_pass "${2%%:*}")" scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=12 "$1" "$2"
 }
 
 # #1077: the orchestrator downloads + sha256-verifies the pinned binary ONCE on dev1 (this box HAS
