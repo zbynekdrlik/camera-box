@@ -45,15 +45,16 @@ ONE missing frame per crossing.
     on the status line makes it visible.
   - From `OUTLIER_MIN_FRAMES` (30) samples on, a sample more than `RESEED_JITTER_MULTIPLE` (8) x the
     fit RMS off, and at least `RESEED_FLOOR_NS` (1 ms), is not folded. Under half a period it is
-    stamped from the prediction. `RESEED_CONSECUTIVE_OUTLIERS` (3) in a row whose residuals AGREE
-    (spread within the outlier bound, `consistent_run_offset`) RE-ANCHOR the fit by their median:
-    every window sample moves by the same amount, the slope, window and lock stay, the stream stays
-    stamp-driven (issue 1371: cam5's Cam Link timestamps step +1..+7 ms when USB traffic on its root
-    port changes its transport latency, and each re-seed put it ~2 s on the raw path = the E2E
-    copies + gaps; a real phase step is the same shape). A run that does NOT agree re-seeds; half a
-    period or more re-seeds at once (never a stamp from the old phase). Right after a re-anchor the
-    shift is the median of 3 jittery samples (~1 sigma off) and the fit settles within ~60 frames.
-    `reanchors()` counts them; each logs `#1371 capture phase re-anchor: shift_us=.. resid_us=[..]`.
+    stamped from the prediction and the lock is kept: HOLD, NEVER FOLLOW (issue 1371). Only
+    `RESEED_CONSECUTIVE_OUTLIERS` (30, ~0.5 s at 60 fps) in a row re-seed, a real phase step (a
+    grabber re-lock); half a period or more re-seeds at once (never a stamp from the old phase).
+    A Cam Link on a busy USB root port delivers frames +1..+7 ms LATE for a few frames while the
+    sensor keeps its phase. The 14.10.2026 re-anchor (move the fit by the median of 3 agreeing
+    outliers) followed those delays: on cam5 eight shifts of +1..+7 ms in 3 s, +30 ms summed, and
+    the E2E window read 14/14 (run 1922653182, design 6176639966). The older 3-in-a-row re-seed put
+    the stream ~2 s on the raw path = the 1/1 residual. Never move the fit onto a delivery delay.
+    The re-seed logs `#1371 capture phase re-seed: reason=outlier-run resid_us=[..]` with the
+    whole run.
   - A backward/stalled sequence (a device re-open), a step above `MAX_SEQ_ADVANCE` (8, hidden
     frames included), a timestamp that does not advance, or a gap longer than
     (sequence step + 1) x `MAX_FRAME_PERIOD_NS` (100 ms) re-seeds at any sample count (the `+ 1`

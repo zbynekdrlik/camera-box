@@ -1061,12 +1061,4 @@ fn describe_reads_each_reason_1371() {
         .describe(),
         "hidden drop: frames=2 resid_us=+33400"
     );
-    assert_eq!(
-        PhaseNote::Reanchor {
-            resid_ns: vec![2_144_000, 2_135_000, 2_134_000],
-            shift_ns: 2_135_000
-        }
-        .describe(),
-        "re-anchor: shift_us=+2135 resid_us=[+2144,+2135,+2134]"
-    );
 }
