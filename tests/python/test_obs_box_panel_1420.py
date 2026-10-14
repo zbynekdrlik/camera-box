@@ -86,7 +86,7 @@ def test_the_config_puts_the_launchers_in_front_of_the_taskbar(tmp_path):
     cfg = [ln for ln in r.stdout.splitlines() if not ln.startswith("#")]
     assert "panel_items = LTSC" in cfg
     apps = [ln.split(" = ", 1)[1] for ln in cfg if ln.startswith("launcher_item_app = ")]
-    assert apps == [str(home / ".local/share/applications/obs-box-panel-%s.desktop" % i)
+    assert apps == [str(home / (".local/share/applications/obs-box-panel-%s.desktop" % i))
                     for i in ("obs", "shading", "restreamer", "rustdesk")]
 
 
