@@ -18,7 +18,8 @@
 # near a unit start.
 #
 # The fix is ONE systemd manager setting: `[Manager] CPUAffinity=<housekeeping>` in a system.conf.d
-# drop-in. PID 1 runs there and every unit inherits it by default. camera-box keeps its own
+# drop-in. PID 1 runs there (from the next boot; a live box gets it through taskset) and every unit
+# inherits it by default. camera-box keeps its own
 # `CPUAffinity=` drop-in + per-thread sched_setaffinity (a soft mask, never a cpuset), and the burn
 # units pass their own --property=CPUAffinity, so the capture path is untouched.
 #
@@ -27,14 +28,14 @@
 # writes nothing.
 #
 # Consumers:
-#   - setup-device.sh `[housekeeping-cpus]` (rw window, takes effect at the next boot or a
-#     daemon-reexec) -- cambox_hk_install_dropin "";
+#   - setup-device.sh `[housekeeping-cpus]` (rw window, takes effect at the next
+#     boot; the apply program sets a live box) -- cambox_hk_install_dropin "";
 #   - verify-device.sh (au): cambox_hk_gather_remote_snippet (read-only, over ssh) +
 #     cambox_hk_verdict (pure);
 #   - a live box: cambox_hk_apply_program, piped into `ssh root@<box> bash -s` while no E2E holds the
 #     rig lease. It writes inside ONE rw window closed by the ONE verified close
-#     (scripts/lib/ro-window.sh, issue 1407), then `systemctl daemon-reexec` (no reboot) and reads
-#     PID 1's mask back.
+#     (scripts/lib/ro-window.sh, issue 1407), then sets PID 1's mask with taskset (no reboot) and
+#     reads it back.
 # Tests: tests/python/test_cambox_housekeeping_cpus_1367.py.
 
 if ! command -v ro_window_close_cmds >/dev/null 2>&1; then
@@ -149,7 +150,7 @@ REMOTE
 # cambox_hk_verdict BLOCK -> `ok`, `ok-none: <why>` (no reserved IRQ core on this box), or one
 # `FAIL: ...` line per broken facet. Fail-closed: a missing or unreadable fact is a FAIL. Pure bash.
 #   - the drop-in is byte-identical to cambox_hk_dropin_content <housekeeping>;
-#   - PID 1's running mask equals the housekeeping set (a drop-in not yet loaded = daemon-reexec).
+#   - PID 1's running mask equals the housekeeping set (the drop-in applies at boot, the apply program sets a live box).
 cambox_hk_verdict() {
   local block="${1:-}" line online="" iso="" pid1="" present="" done="" body="" nl=$'\n'
   local hk why want got have fails="" fix
@@ -188,7 +189,7 @@ cambox_hk_verdict() {
   else
     have="$(cambox_hk_cpulist_expand "$hk")"
     if [ "$got" != "$have" ]; then
-      fails="${fails}FAIL: PID 1 runs on cpus ${pid1}, not the housekeeping set ${hk} -- the drop-in is not loaded yet (systemctl daemon-reexec, or the next boot); ${fix}${nl}"
+      fails="${fails}FAIL: PID 1 runs on cpus ${pid1}, not the housekeeping set ${hk} -- PID 1 still has its old mask (the apply program sets it with taskset; the drop-in applies at the next boot); ${fix}${nl}"
     fi
   fi
   if [ -n "$fails" ]; then
@@ -205,8 +206,10 @@ cambox_hk_verdict() {
 #   2. the rw window, when the drop-in differs OR the root does not read `ro`: the drop-in (temp file
 #      + rename), then the ONE verified close. A failure inside reaches the EXIT trap, which runs the
 #      same close;
-#   3. after the close: `systemctl daemon-reexec` when PID 1's mask differs, then read it back. Exit 0
-#      only when PID 1 runs on exactly the housekeeping set (or the box has no reserved IRQ core).
+#   3. after the close: `taskset -pc <set> 1` when PID 1's mask differs, then read it back. systemd
+#      applies the drop-in to itself only at boot (systemd 255 skips it on a daemon-reexec, checked on
+#      cam2 15.10.2026); every unit started afterwards inherits PID 1's mask. Exit 0 only when PID 1
+#      runs on exactly the housekeeping set (or the box has no reserved IRQ core).
 cambox_hk_apply_program() {
   cat <<'PROG'
 # scripts/lib/cambox-housekeeping-cpus.sh (issue 1367): PID 1 off the capture-IRQ core.
@@ -237,7 +240,7 @@ _hk_close() {
   _hk_open=0
 PROG
   ro_window_close_cmds "issue 1367" "\$_hk_box" \
-    "The drop-in is on disk, but the root stays read-WRITE, so PID 1 is not re-executed." \
+    "The drop-in is on disk, but the root stays read-WRITE, so PID 1's mask is not changed." \
     "stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run the cambox housekeeping-cpus apply for this box (never reboot a cambox remotely)."
   cat <<'PROG'
 }
@@ -258,12 +261,13 @@ if [ "$_hk_do_d" = 1 ] || [ "$_hk_mode" != ro ]; then
 fi
 _hk_close
 trap - EXIT
-# --- 3. after the verified close: re-execute PID 1 when its mask differs, read back ---
+# --- 3. after the verified close: set PID 1's mask when it differs (the drop-in applies it at boot;
+#        systemd 255 does not re-apply CPUAffinity to itself on daemon-reexec, checked on cam2), read back ---
 _hk_want="$(cambox_hk_cpulist_expand "$_hk_set")"
 _hk_pid1() { cambox_hk_cpulist_expand "$(awk '/^Cpus_allowed_list:/ {print $2; exit}' "$_hk_proc/1/status" 2>/dev/null)" 2>/dev/null || true; }
 if [ "$(_hk_pid1)" != "$_hk_want" ]; then
-  if ! systemctl daemon-reexec; then
-    echo "FAIL: [issue 1367] systemctl daemon-reexec failed on $_hk_box" >&2
+  if ! taskset -pc "$_hk_set" 1 >/dev/null; then
+    echo "FAIL: [issue 1367] taskset -pc $_hk_set 1 failed on $_hk_box" >&2
     _hk_rc=1
   fi
 fi

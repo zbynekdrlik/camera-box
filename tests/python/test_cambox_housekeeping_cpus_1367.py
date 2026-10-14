@@ -130,7 +130,7 @@ def test_verdict_fails_a_dropin_naming_other_cores():
 
 def test_verdict_fails_pid1_still_on_the_irq_core():
     v = _verdict(_block(pid1="0-3"))
-    assert "PID 1 runs on cpus 0-3" in v and "daemon-reexec" in v
+    assert "PID 1 runs on cpus 0-3" in v and "taskset" in v
 
 
 def test_verdict_fails_an_unreadable_pid1_mask():
@@ -166,7 +166,7 @@ def test_the_real_gather_reads_a_temp_dropin_back_through_the_verdict(tmp_path):
 # --- the live apply program -----------------------------------------------------------------------
 
 def _stubs(tmp_path, mode="ro", reexec_sets: str | None = "0-1"):
-    """findmnt/mount/systemctl/hostname stubs. systemctl daemon-reexec rewrites the fake
+    """findmnt/mount/taskset/hostname stubs. `taskset -pc <set> 1` rewrites the fake
     /proc/1/status to reexec_sets (None = PID 1's mask does not change)."""
     b = tmp_path / "bin"
     b.mkdir()
@@ -188,8 +188,7 @@ def _stubs(tmp_path, mode="ro", reexec_sets: str | None = "0-1"):
                   f'case "$*" in *remount,rw*) echo rw >{state};; *remount,ro*) echo ro >{state};; esac\n')
     reexec = (f'printf "Name:\\tsystemd\\nCpus_allowed_list:\\t{reexec_sets}\\n" >{proc}/1/status\n'
               if reexec_sets else "")
-    stub("systemctl", f'echo "systemctl $*" >>{log}\n'
-                      f'case "$1" in daemon-reexec) {reexec};; esac\n')
+    stub("taskset", f'echo "taskset $*" >>{log}\n{reexec}')
     stub("sync", "exit 0\n")
     stub("fuser", "exit 1\n")
     stub("lsof", "exit 0\n")
@@ -207,14 +206,14 @@ def _apply(tmp_path, **kw):
     return r, dropin, (log.read_text() if log.exists() else "")
 
 
-def test_apply_writes_inside_the_rw_window_then_reexecs_pid1(tmp_path):
+def test_apply_writes_inside_the_rw_window_then_sets_pid1s_mask(tmp_path):
     r, dropin, log = _apply(tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "CPUAffinity=0,1" in dropin.read_text()
     lines = log.splitlines()
     rw = lines.index(next(l for l in lines if "remount,rw" in l))
     ro = lines.index(next(l for l in lines if "remount,ro" in l))
-    rex = lines.index("systemctl daemon-reexec")
+    rex = lines.index("taskset -pc 0,1 1")
     assert rw < ro < rex, log
     assert "PID 1 runs on cpus 0,1" in r.stdout
 
@@ -237,7 +236,7 @@ def test_apply_is_a_noop_on_a_box_already_in_place(tmp_path):
                        env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
     assert r.returncode == 0, r.stdout + r.stderr
     text = log.read_text() if log.exists() else ""
-    assert "remount" not in text and "daemon-reexec" not in text
+    assert "remount" not in text and "taskset" not in text
 
 
 # --- the wiring -----------------------------------------------------------------------------------

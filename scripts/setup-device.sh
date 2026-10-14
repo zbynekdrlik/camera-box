@@ -1780,7 +1780,7 @@ echo "  Installed: ${CAMBOX_ZRAM_PACKAGE} + ${CAMBOX_ZRAM_DROPIN} (zram-size = r
 # delayed the capture (cam5 15.10.2026: 65 of 102 capture-phase re-seeds within 1 s of a unit start).
 # The manager CPUAffinity drop-in from scripts/lib/cambox-housekeeping-cpus.sh puts PID 1 and every
 # unit on the remaining cores. camera-box keeps its own CPUAffinity drop-in. PID 1 reads it at the next
-# boot (or a daemon-reexec); verify-device.sh (au) grades it. In the rw window, before STEP 18.
+# boot (a live box: the cambox_hk_apply_program sets it with taskset); verify-device.sh (au) grades it. In the rw window, before STEP 18.
 echo ""
 echo -e "${GREEN}[housekeeping-cpus] Keeping systemd PID 1 off the capture-IRQ core (${CAMBOX_HK_DROPIN}, issue 1367)...${NC}"
 cambox_hk_install_dropin "" \
