@@ -50,7 +50,7 @@ CAMBOX_HK_DROPIN="${CAMBOX_HK_DROPIN:-/etc/systemd/system.conf.d/60-camera-box-h
 # unique. Anything that is not a cpulist prints nothing and returns 1.
 cambox_hk_cpulist_expand() {
   local list="${1//[[:space:]]/}" part lo hi c
-  local -a out=()
+  local -a _hk_out=()
   [ -n "$list" ] || return 0
   local IFS=,
   for part in $list; do
@@ -59,12 +59,12 @@ cambox_hk_cpulist_expand() {
       *-*)
         lo="${part%-*}" hi="${part#*-}"
         [ "$((10#$lo))" -le "$((10#$hi))" ] || return 1
-        for ((c = 10#$lo; c <= 10#$hi; c++)); do out+=("$c"); done
+        for ((c = 10#$lo; c <= 10#$hi; c++)); do _hk_out+=("$c"); done
         ;;
-      *) out+=("$((10#$part))") ;;
+      *) _hk_out+=("$((10#$part))") ;;
     esac
   done
-  printf '%s\n' "${out[@]}" | sort -n -u
+  printf '%s\n' "${_hk_out[@]}" | sort -n -u
 }
 
 # cambox_hk_cpus ONLINE ISOLATED -> the housekeeping cpus as a comma list ("0,1"), rc 0. rc 1 with a
@@ -72,7 +72,7 @@ cambox_hk_cpulist_expand() {
 # or an unreadable list): then nothing is provisioned, exactly like affinity.rs.
 cambox_hk_cpus() {
   local online iso c
-  local -a general=() hk=()
+  local -a _hk_general=() _hk_cores=()
   if ! online="$(cambox_hk_cpulist_expand "${1:-}")" || [ -z "$online" ]; then
     echo "no readable online cpu list ('${1:-}')" >&2
     return 1
@@ -86,16 +86,16 @@ cambox_hk_cpus() {
     return 1
   fi
   for c in $online; do
-    grep -qx "$c" <<<"$iso" || general+=("$c")
+    grep -qx "$c" <<<"$iso" || _hk_general+=("$c")
   done
-  if [ "${#general[@]}" -lt 2 ]; then
-    echo "fewer than 2 general cores (${general[*]:-none}), so no reserved capture-IRQ core" >&2
+  if [ "${#_hk_general[@]}" -lt 2 ]; then
+    echo "fewer than 2 general cores (${_hk_general[*]:-none}), so no reserved capture-IRQ core" >&2
     return 1
   fi
   # general is sorted ascending: the last one is the reserved IRQ core, the rest housekeeping.
-  hk=("${general[@]:0:${#general[@]}-1}")
+  _hk_cores=("${_hk_general[@]:0:${#_hk_general[@]}-1}")
   local IFS=,
-  printf '%s\n' "${hk[*]}"
+  printf '%s\n' "${_hk_cores[*]}"
 }
 
 # cambox_hk_dropin_content HK -> the drop-in, byte-for-byte (setup-device and the apply write exactly
