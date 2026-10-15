@@ -295,12 +295,38 @@ measurement rig; a PP measurement rig is an owner decision).
   fetch seam (or PATH-stubbed ping/curl for network-reach + bundle-state) with `OBS_FLEET_HOME`
   pinning the home check: PP away = no poll/no page, home + healthy = no page, home + fault = a page
   naming the box, a linux box never gets `schtasks` / the launch-obs-genlock plan.
-- **Supervisor dry-run runbook before relying on it** (dev1, read-only; scratch state files so no live
-  latch moves): for each of network-reach, bundle-state, obs-liveness, genlock-lock, render-freeze,
-  audio-lag, audio-mixer and obs-handles, `scripts/<watchdog>.sh --dry-run` with its
-  `*_STATE_FILE` pointed at a temp file. Expect the PP boxes logged `away` / `report_only=1` while PP
-  is off; with PP powered on and its OBS up, expect a verdict line per PP box (`HEALTHY` / `REACHABLE`)
-  and no `WOULD alert`. The watchdogs run from the checkout, so a merge activates the roster.
+- **network-reach never probes an away traveling box and never anchors on one.** An away box is
+  logged `away -- ... not probed this pass` and skipped (no `-> UNREACHABLE` line, no state); a powered-
+  off PP box's hostname lookups (ping's DNS is not bounded by `-W`) would only eat the unit's 90 s
+  start budget. Only a non-traveling box can prove "dev1 reaches the rig" in the dev1-side-outage
+  guard: a home PP box sits behind the companion-pp router, and counting it let an SNV uplink outage
+  page strih-snv (review round 1, reproduced). An explicit `NETWORK_REACH_REPORT_ONLY_BOXES` keeps the
+  #811 shape (those boxes are still probed and state-tracked, never paged).
+- **Known limits (stated, not fixed here).**
+  - "Home" is the OBS-WS `:4455` answering (`obs_fleet_is_home`). A powered-on PP box whose OBS
+    crashed therefore reads AWAY: obs-liveness, bundle-state (whose `:8899` server runs without OBS)
+    and network-reach skip it, so nothing pages for it -- the same as resolume-snv. And network-reach
+    can never page a traveling box (home means `:4455` answers means REACHABLE), so its "home +
+    unreachable pages" test covers a forced state only. A home signal that does not depend on OBS
+    (a per-row port, e.g. `:8899` or dantesync `:8898`) is a follow-up candidate.
+  - The development handover check (`rig-dev-handover-check.sh`) reads these watchdogs' dry-runs
+    for the WHOLE roster: an away PP box adds nothing, but a HOME PP box's DEGRADED / LAGGING / wedge
+    verdict reads as a "zabudol si" item in an SNV handover. Scoping the handover per venue is a
+    follow-up candidate.
+- **Supervisor dry-run runbook -- run it BEFORE the merge, with PP powered on.** The eight timers are
+  already ENABLED on dev1 and run from the checkout, so the merge turns PP paging on at once. On dev1,
+  read-only, each with its state file pointed at a temp file so no live latch moves:
+  `NETWORK_REACH_ALERT_STATE_FILE`, `BUNDLE_STATE_ALERT_STATE_FILE`, `OBS_WATCHDOG_STATE_FILE`,
+  `GENLOCK_LOCK_ALERT_STATE_FILE`, `RENDER_FREEZE_ALERT_STATE_FILE`, `AUDIO_LAG_ALERT_STATE_FILE`,
+  `AUDIO_MIXER_ALERT_STATE_FILE`, `OBS_HANDLES_ALERT_STATE_FILE` = `$(mktemp)`, then
+  `scripts/<watchdog>.sh --dry-run` for network-reach, bundle-state, obs-liveness, genlock-lock,
+  render-freeze, audio-lag, audio-mixer and obs-handles. Expect, with PP on and its OBS up, one
+  verdict line per PP box (`-> REACHABLE`, `HEALTHY`) and no `WOULD alert`; with PP off, the
+  `away` lines only. obs-liveness dials PP's OBS-WS with no password (`OBS_PASSWORD_<LABEL>` cannot
+  be set for a hyphenated label): setup-strih seeds `auth_required false` on every Linux OBS box and
+  verify-strih item 43 grades it (`(ws-seed)`), so read that row on strih-pp and stream-pp first; an
+  auth-enabled PP would read WS-DEAD and page. Both PP `:8899` bodies were read 15.10.2026 (strih-pp
+  24 keys, stream-pp 23: no `ndi_input_latency`, which no watchdog here reads).
 
 ## The last Windows-strih remnants — retired in issue 1317 part 4 (23.9.2026)
 
