@@ -17,6 +17,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn repo(rel: &str) -> PathBuf {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     assert!(p.exists(), "{} not found", p.display());
@@ -48,13 +52,15 @@ fn run_guard(outdir: &std::path::Path) -> (bool, String, String) {
     )
 }
 
-fn tempdir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "stale-dante-guard-test-{name}-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+fn tempdir(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("stale-dante-guard-test-{name}-"))
+        .tempdir()
+        .unwrap();
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 #[test]
@@ -126,10 +132,8 @@ fn silent_when_the_run_directory_has_no_dante_json() {
 fn silent_and_safe_when_the_run_directory_does_not_exist_yet() {
     // The guard must never itself fail (or `set -e`-abort the caller) when handed a directory
     // that hasn't been created — a defensive no-op, not a hard requirement of caller ordering.
-    let dir = std::env::temp_dir().join(format!(
-        "stale-dante-guard-test-missing-{}-does-not-exist",
-        std::process::id()
-    ));
+    let parent = tempfile::tempdir().unwrap();
+    let dir = parent.path().join("does-not-exist");
     let (ok, _stdout, stderr) = run_guard(&dir);
     assert!(ok, "must not fail on a missing directory. stderr={stderr}");
     assert!(!stderr.contains("WARNING"), "stderr: {stderr}");

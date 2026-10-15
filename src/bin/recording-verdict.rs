@@ -57,7 +57,7 @@ use camera_box::probe::recording_latency::{
     strih_stream_samples_from_stream, write_latency_csv, HopLatency, LatencySample, RunIds,
     BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
     BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_CG, BURN_RUN_ID_IMAG, BURN_RUN_ID_SONGPLAYER,
-    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH, MEASUREMENT_CLIP_RUN_ID,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -404,6 +404,13 @@ struct Args {
     /// for the full audit.
     #[arg(long, default_value_t = 25.0)]
     av_cluster_tol_ms: f64,
+    /// issue 1404 A/V-sync: pair through this SELF-MARKED run's own dual-QR tick instead of the cam2
+    /// painter's: the measurement clip `911016`, whose recording (a CG segment) carries its own QPSK
+    /// marker. `--av-marker-log` is then the clip's own `<clip>.markers.csv`. Requires `--av-sync`
+    /// (clap refuses it with any other mode); unset = the painter path, unchanged
+    /// (`camera_box::av_run_pairing`).
+    #[arg(long, requires = "av_sync")]
+    av_run: Option<u32>,
     /// issue 930 lipsync cross-validation: the SyncNet-aggregated offset (ms, video - audio) for
     /// the PAIRED lipsync-test-mode recording of the SAME rig state, from `scripts/av_sync_measure.py`
     /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
@@ -3001,6 +3008,7 @@ fn run_av_sync(args: &Args) -> Result<()> {
         args.av_threshold,
         args.av_min_matched,
         args.av_cluster_tol_ms,
+        args.av_run,
     )?;
     // The measured offset + the latency ADJUSTMENT it implies: ADD this (signed) to the video
     // source's current genlock latency to zero the offset (offset > 0 ⇒ video lags ⇒ negative
@@ -3021,6 +3029,9 @@ fn run_av_sync(args: &Args) -> Result<()> {
         // (additive key; every pre-existing key keeps its name and meaning).
         "audio_channel_pick": report.audio_channels,
     });
+    if let Some(run) = args.av_run {
+        json["av_run"] = serde_json::json!(run); // issue 1404: the self-marked run paired (additive)
+    }
     // issue 930/1032 — lipsync cross-validation: only added when the caller supplied the paired
     // lipsync-test-mode run's SyncNet offset (never printed on a plain --av-sync call, so every
     // pre-930 invocation's JSON shape is byte-for-byte unchanged).
@@ -3527,7 +3538,7 @@ fn build_and_print_verdict_with_stream_diffs(
     let strih_ids = RunIds {
         node_burn: args.burn_strih_run_id,
         cam2: cam2_pin,
-        other_burns: vec![args.burn_songplayer_run_id, args.burn_cg_run_id],
+        other_burns: cg_segment_excluded_ids(args).to_vec(), // issue 1404: + the clip
     };
     // cam→strih ABSOLUTE latency needs the strih recording (its in-frame strih-burn +
     // cam2 stamps). Skipped in cam1-only optical-readability mode.
@@ -3628,11 +3639,9 @@ fn build_and_print_verdict_with_stream_diffs(
             // #1301: the CG-chain burns can ride into the stream recording during a CG_CHAIN run —
             // exclude them alongside the forwarded strih burn so they are never read as cam2 in the
             // UNPINNED fallback (the `--cam2-run-id` pin already protects the normal path).
-            other_burns: vec![
-                args.burn_strih_run_id,
-                args.burn_songplayer_run_id,
-                args.burn_cg_run_id,
-            ],
+            other_burns: std::iter::once(args.burn_strih_run_id)
+                .chain(cg_segment_excluded_ids(args))
+                .collect(),
         };
         // #111 PART A: prefer the WHOLE strih→stream hop from the STREAM recording
         // ALONE — the stream frames carry the FORWARDED strih burn + stream's own burn,
@@ -3893,21 +3902,8 @@ fn build_and_print_verdict_with_stream_diffs(
             // BURN-READABILITY defect to FIX (never silently excluded); a genuinely absent
             // frame = a REAL drop. No percentages, no jargon.
             // ===========================================================================
-            let all_burns = [
-                args.burn_cam1_run_id,
-                args.burn_cam2_run_id,
-                args.burn_cam3_run_id,
-                args.burn_cam4_run_id,
-                args.burn_cam5_run_id,
-                args.burn_cam6_run_id,
-                args.burn_cam7_run_id,
-                args.burn_strih_run_id,
-                args.burn_stream_run_id,
-                // #1301: the CG-chain burns can ride into this recording during a CG_CHAIN run —
-                // exclude them from the cam2 optical detection like every other node burn.
-                args.burn_songplayer_run_id,
-                args.burn_cg_run_id,
-            ];
+            // #1301 / issue 1404: every node burn plus the CG-segment ids (`optical_exclusion_ids`).
+            let all_burns = optical_exclusion_ids(args);
             println!();
             println!(
                 "=== #186 ZERO-LOSS VERDICT — per-node burn-id contiguity (the ONE trustworthy check) ==="
@@ -4954,21 +4950,8 @@ fn build_and_print_verdict_with_stream_diffs(
                 // In practice every recording-e2e.sh invocation always pins `--cam2-run-id`,
                 // which takes precedence over this fallback — this widening only hardens the
                 // unpinned/manual-invocation path.
-                let all_burns = [
-                    args.burn_cam1_run_id,
-                    args.burn_cam2_run_id,
-                    args.burn_cam3_run_id,
-                    args.burn_cam4_run_id,
-                    args.burn_cam5_run_id,
-                    args.burn_cam6_run_id,
-                    args.burn_cam7_run_id,
-                    args.burn_strih_run_id,
-                    args.burn_stream_run_id,
-                    // #1301: exclude the CG-chain burns from the cam2 optical anchor like every
-                    // other node burn (they can ride in during a CG_CHAIN run).
-                    args.burn_songplayer_run_id,
-                    args.burn_cg_run_id,
-                ];
+                // #1301 / issue 1404: every node burn plus the CG-segment ids.
+                let all_burns = optical_exclusion_ids(args);
                 let (seg_frames, no_anchor) = segment_frames_from_recording(
                     stream_frames,
                     &anchor_run_ids,
@@ -4977,7 +4960,7 @@ fn build_and_print_verdict_with_stream_diffs(
                 );
                 // #781/#1196 — the per-window tear statistics. Computed BEFORE the continuity fold
                 // since issue 1367: the tear detector's per-window multi-path fraction decides each
-                // window's check scope (a MULTI-SOURCE window -- cam2 filming the strih-lx
+                // window's check scope (a MULTI-SOURCE window -- cam2 filming the strih-snv
                 // multiview -- is judged by its node burn; its copies/gaps, cadence and frozen_leg
                 // fold report-only, `camera_box::multi_source_window`). The tear JSON + LIVE fold
                 // further down read the SAME `tear_stats`.
@@ -6818,21 +6801,8 @@ fn build_and_print_verdict_with_stream_diffs(
                 // cam6 + strih + stream) so a forwarded camera burn is never mistaken for cam2's
                 // optical QR when no anchor id was found on a frame (the continuity sweep's own
                 // `all_burns` above never needed all of them, since it never reads every payload).
-                let latency_all_burns = [
-                    args.burn_cam1_run_id,
-                    args.burn_cam2_run_id,
-                    args.burn_cam3_run_id,
-                    args.burn_cam4_run_id,
-                    args.burn_cam5_run_id,
-                    args.burn_cam6_run_id,
-                    args.burn_cam7_run_id,
-                    args.burn_strih_run_id,
-                    args.burn_stream_run_id,
-                    // #1301: exclude the CG-chain burns from the cam2 optical anchor like every
-                    // other node burn (they can ride in during a CG_CHAIN run).
-                    args.burn_songplayer_run_id,
-                    args.burn_cg_run_id,
-                ];
+                // #1301 / issue 1404: every node burn plus the CG-segment ids.
+                let latency_all_burns = optical_exclusion_ids(args);
                 let (latency_windows, latency_no_anchor) = partition_frames_by_window(
                     stream_frames,
                     &anchor_run_ids,
@@ -7240,6 +7210,11 @@ fn build_and_print_verdict_with_stream_diffs(
                     // is Unknown this run (derive_camera_av_sync then fails closed for every
                     // camera, never fabricating a number from a missing anchor).
                     let cam2_offset_ms = cam_syncs.get("cam2").and_then(|s| s.av_offset_ms);
+                    // issue 1413: the cameras this run actually scheduled; any other camera of
+                    // CAMERA_UNDER_TEST_NODES (a Poprad camera on the SNV rig) is reported
+                    // EXCLUDED below, never judged on samples it could not produce.
+                    let scheduled_cams: Vec<String> =
+                        schedule.iter().map(|w| w.cambox.clone()).collect();
                     for &camera in CAMERA_UNDER_TEST_NODES.iter() {
                         let whole_recording = camera == "cam2";
                         let cam_sync = cam_syncs.get(camera).expect(
@@ -7262,6 +7237,29 @@ fn build_and_print_verdict_with_stream_diffs(
                                     "node": camera,
                                     "excluded": true,
                                     "exclude_reason": reason,
+                                    "verdict": "excluded",
+                                    "gate_pass": serde_json::Value::Null,
+                                    "windows": cam_sync.windows,
+                                    "candidates": cam_sync.candidates,
+                                    "cluster_samples": cam_sync.cluster_samples,
+                                    "av_offset_ms": serde_json::Value::Null,
+                                    "mad_ms": serde_json::Value::Null,
+                                    "effective_offset_ms": serde_json::Value::Null,
+                                }),
+                            );
+                            continue;
+                        }
+                        if !av_window::av_camera_under_test(camera, &scheduled_cams) {
+                            println!(
+                                "  {camera}: EXCLUDED — not in this run's switch schedule \
+                                 [gate SKIPPED, issue 1413]"
+                            );
+                            av_json.insert(
+                                camera.to_string(),
+                                serde_json::json!({
+                                    "node": camera,
+                                    "excluded": true,
+                                    "exclude_reason": "not in this run's switch schedule (issue 1413)",
                                     "verdict": "excluded",
                                     "gate_pass": serde_json::Value::Null,
                                     "windows": cam_sync.windows,
@@ -7791,6 +7789,38 @@ fn camera_under_test_burn_ids(args: &Args) -> Vec<u32> {
         .collect()
 }
 
+/// #1301 / issue 1404 — the ids a CG segment carries into a strih/stream recording: the SongPlayer
+/// origin burn, the cg OBS hop burn and the measurement clip's painted dual-QR. None of them is ever
+/// cam2's optical QR. The ONE list every cam2-optical exclusion site uses (the three
+/// [`optical_exclusion_ids`] lists, the #638 extract list, the strih/stream `RunIds::other_burns`),
+/// so a new CG id is added here once, never at each site.
+fn cg_segment_excluded_ids(args: &Args) -> [u32; 3] {
+    [
+        args.burn_songplayer_run_id,
+        args.burn_cg_run_id,
+        MEASUREMENT_CLIP_RUN_ID,
+    ]
+}
+
+/// Every reserved id that is never cam2's optical QR in a strih/stream recording: the seven camera
+/// burns, strih, stream, then [`cg_segment_excluded_ids`]. The #186 contiguity, the segment sweep
+/// and the per-camera latency lists all use this one builder.
+fn optical_exclusion_ids(args: &Args) -> Vec<u32> {
+    let mut ids = vec![
+        args.burn_cam1_run_id,
+        args.burn_cam2_run_id,
+        args.burn_cam3_run_id,
+        args.burn_cam4_run_id,
+        args.burn_cam5_run_id,
+        args.burn_cam6_run_id,
+        args.burn_cam7_run_id,
+        args.burn_strih_run_id,
+        args.burn_stream_run_id,
+    ];
+    ids.extend(cg_segment_excluded_ids(args));
+    ids
+}
+
 /// #208 + #186: the sibling directory (BESIDE the partial JSON) where `--extract-partial` writes
 /// this box's pixel-proof PNGs and `--merge-partials` looks for the pulled-back copies. For a
 /// partial `…/strih-partial-42.json` it is `…/strih-partial-42-pixels`. Deriving it the SAME way
@@ -7837,8 +7867,8 @@ fn extract_partial_flagged_frames(
     all_burns.push(args.burn_stream_run_id);
     // #1301: the CG-chain burns (SongPlayer origin + cg OBS hop) can ride into this recording
     // during a CG_CHAIN run — exclude them from the cam2 optical detection like every other burn.
-    all_burns.push(args.burn_songplayer_run_id);
-    all_burns.push(args.burn_cg_run_id);
+    // issue 1404: the measurement clip's painted QR (a CG segment) is never cam2's optical QR.
+    all_burns.extend(cg_segment_excluded_ids(args));
     // UNDECODABLE frames (no readable QR at all) — the exact set `report_recording_diag` extracts.
     let ticks = FrameTick::from_recording_frames(frames);
     let cfg = VerdictConfig {
@@ -8660,6 +8690,39 @@ mod tests {
         // #706
         scope_camera_window_to_own_schedule,
     };
+
+    /// issue 1404: every cam2-optical exclusion list carries the three CG-segment ids, the
+    /// measurement clip among them, and the optical list is the node burns plus exactly those.
+    #[test]
+    fn every_optical_exclusion_list_carries_the_cg_segment_ids_1404() {
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict"]);
+        let cg = super::cg_segment_excluded_ids(&args);
+        assert_eq!(
+            cg,
+            [
+                super::BURN_RUN_ID_SONGPLAYER,
+                super::BURN_RUN_ID_CG,
+                super::MEASUREMENT_CLIP_RUN_ID
+            ]
+        );
+        assert_eq!(super::MEASUREMENT_CLIP_RUN_ID, 911_016);
+        let optical = super::optical_exclusion_ids(&args);
+        assert_eq!(optical.len(), 12);
+        assert_eq!(&optical[9..], &cg[..]);
+        for id in [
+            args.burn_cam1_run_id,
+            args.burn_cam7_run_id,
+            args.burn_strih_run_id,
+            args.burn_stream_run_id,
+        ] {
+            assert!(
+                optical.contains(&id),
+                "{id} missing from the optical exclusion list"
+            );
+        }
+    }
 
     /// #312 — locks the key design split: `CAMERA_UNDER_TEST_NODES` (digital contiguity) is
     /// broader than `OPTICAL_INJECTION_NODES` (cam2→camera optical-injection latency) by EXACTLY
@@ -11749,7 +11812,7 @@ mod tests {
     }
 
     /// Issue 1367 (ROZHODNUTÉ 5843424054): a cambox window whose captured content is MULTI-SOURCE
-    /// (cam2 filming the strih-lx multiview: several generations of the painted pattern per frame)
+    /// (cam2 filming the strih-snv multiview: several generations of the painted pattern per frame)
     /// is judged by its node burn. Three otherwise-identical fixtures on ONE CAM2 window carrying
     /// copies=10 (a hard-frozen, over-tolerance tick sequence), the cam2 own burn and the strih
     /// anchor burn:
@@ -13360,20 +13423,23 @@ mod tests {
             "#624: unknown-on-thin-data must fail the gate closed, never a fabricated pass: {av_sync}"
         );
         for absent in ["cam4", "cam5", "cam6"] {
+            // issue 1413: a camera with no window in this run's switch schedule is not under
+            // test this run (a Poprad camera on the SNV rig), so it is EXCLUDED, never judged on
+            // samples it could not produce. A SCHEDULED camera with no samples (cam3 above)
+            // still fails closed.
             assert_eq!(
                 av_sync[absent]["verdict"],
-                serde_json::json!("unknown"),
-                "#312: {absent} never appeared in this sweep -> unknown: {av_sync}"
+                serde_json::json!("excluded"),
+                "issue 1413: {absent} has no window in this run's switch schedule -> excluded: {av_sync}"
             );
             assert_eq!(
                 av_sync[absent]["windows"],
                 serde_json::json!(0),
                 "#312: {absent} matched ZERO schedule windows this run: {av_sync}"
             );
-            assert_eq!(
-                av_sync[absent]["gate_pass"],
-                serde_json::json!(false),
-                "#624: {absent} absent from the sweep must also fail the gate closed: {av_sync}"
+            assert!(
+                av_sync[absent]["gate_pass"].is_null(),
+                "issue 1413: {absent} is outside the schedule, never judged pass or fail: {av_sync}"
             );
         }
         assert_eq!(
@@ -13881,16 +13947,24 @@ mod tests {
                  not fabricated true/false: {av_sync}"
             );
         }
+        // issue 1413: cam4 is NOT acked, but it has no window in this run's switch schedule, so
+        // it is excluded for that reason (the ack keeps its own reason above); a SCHEDULED camera
+        // with no samples still fails closed.
         assert_eq!(
             av_sync["cam4"]["verdict"],
-            serde_json::json!("unknown"),
-            "#855: cam4 is NOT acked -- absent-from-sweep must keep failing closed unchanged: {av_sync}"
+            serde_json::json!("excluded"),
+            "issue 1413: cam4 (unacked) is outside this run's switch schedule -> excluded: {av_sync}"
         );
-        assert_eq!(
-            av_sync["cam4"]["gate_pass"],
-            serde_json::json!(false),
-            "#855/#836: an unacked absent camera must still fail the gate -- excluding requires \
-             an EXPLICIT ack, never a bare lack of data: {av_sync}"
+        assert!(
+            av_sync["cam4"]["exclude_reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("issue 1413"),
+            "issue 1413: the unacked unscheduled camera names the schedule reason, not an ack: {av_sync}"
+        );
+        assert!(
+            av_sync["cam4"]["gate_pass"].is_null(),
+            "issue 1413: an unscheduled camera is never judged pass or fail: {av_sync}"
         );
     }
 
@@ -13942,12 +14016,14 @@ mod tests {
              (measured 500ms == expected_ms 500) -> the overall gate must be true: \
              {acked}"
         );
+        // issue 1413 superseded the pre-#855 premise: cameras with no window in this run's
+        // switch schedule are excluded without an ack, so the IDENTICAL fixture with NO acks now
+        // passes too (only cam1 + cam2 are judged, both pass). The ack still names its reason.
         assert_eq!(
             unacked["all_cambox_av_sync"]["gate_pass"],
-            serde_json::json!(false),
-            "sanity: the IDENTICAL fixture with NO acks reproduces the pre-#855 fail-closed bug \
-             (cam3..cam7 absent+unacked -> unknown -> gate FAILS) -- proving the ack is what \
-             changed the outcome, not an unrelated fixture difference: {unacked}"
+            serde_json::json!(true),
+            "issue 1413: with no acks the unscheduled cameras are excluded by the schedule, \
+             so only cam1 + cam2 are judged and the gate passes: {unacked}"
         );
     }
 
@@ -14198,11 +14274,12 @@ mod tests {
             "#714: the derivation must be self-labeled, never presented as a real measurement: {av_sync}"
         );
         for absent in ["cam4", "cam5", "cam6"] {
+            // issue 1413: no window in this run's switch schedule -> excluded (never a
+            // derivation from zero evidence either way).
             assert_eq!(
                 av_sync[absent]["verdict"],
-                serde_json::json!("unknown"),
-                "#714: {absent} never appeared in this sweep (no delivery sample either) -> \
-                 genuinely unknown, never a fabricated derivation from zero evidence: {av_sync}"
+                serde_json::json!("excluded"),
+                "issue 1413: {absent} has no window in this run's switch schedule -> excluded: {av_sync}"
             );
             assert!(
                 av_sync[absent]["derived_offset_ms"].is_null(),

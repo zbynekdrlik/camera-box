@@ -224,6 +224,13 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cg-obs-burn-backstop.sh
 . "$RIG_MODE_DIR/lib/cg-obs-burn-backstop.sh"
 
+# issue 1404: the stream program-audio sampler (the YouTube channel guard of the test streams) runs on
+# strih-snv in TEST mode only: TEST leaves the marker its unit checks and starts it, EVENT removes it
+# and stops it.
+# Report-only (a WARNING, never the exit status). Source-only lib, no side effects at source time.
+# shellcheck source=scripts/lib/program-audio-mode.sh
+. "$RIG_MODE_DIR/lib/program-audio-mode.sh"
+
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
@@ -517,18 +524,20 @@ fi
 # (2) belt-and-suspenders: pkill -x matches the process NAME only (comm), so it can NEVER match the
 #     remote shell's own cmdline — immune to the self-match that strands cleanups (NOT pkill -f).
 pkill -x frame-probe 2>/dev/null || true
-# (2.5) #892: stop + disable the PERMANENT cam2-painter.service if present -- EVENT mode must
+# (2.5) #1075: disarm the transient cam2-painter-deadman timer. TEST mode arms it as a standing
+#       net, and a SIGKILLed recording-e2e run leaves it armed too; it issues a start of the cam2
+#       painter every ~5 min -- and "disable" below does NOT stop such a start -- so without this
+#       the QR painter is resurrected ON AIR within ~5 min of switching to EVENT (live 2026-08-15).
+#       issue 1405: it runs FIRST, before the stop + disable below, because that step now fails
+#       loud (ending this script under set -e) when cam2's root cannot go back to read-only; a
+#       disarm placed after it would then never run. Reuses the deadman lib's disarm (stop .timer +
+#       reset-failed .service). Guarded: a box without the cam2-painter unit is unaffected.
+$(cam2_painter_deadman_disarm_cmds)
+# (2.6) #892: stop + disable the PERMANENT cam2-painter.service if present -- EVENT mode must
 #       NEVER (re)start it (the old #440 "restore" call was the live-broadcast QR hazard this
 #       ticket fixes), and disabling closes the reboot path too. A box without the unit is
 #       unaffected.
 $(cam2_painter_service_disable_cmds)
-# (2.6) #1075: ALSO disarm the transient cam2-painter-deadman timer. A recording-e2e run that was
-#       SIGKILLed leaves that PERIODIC timer armed; it issues a start of the cam2 painter every
-#       ~5 min -- and "disable" above does NOT stop such a start -- so without this the QR painter
-#       is resurrected ON AIR within ~5 min of switching to EVENT (live 2026-08-15). Reuses the
-#       deadman lib's disarm (stop .timer + reset-failed .service). Guarded: a box without the
-#       cam2-painter unit is unaffected (same guard shape as the disable above).
-$(cam2_painter_deadman_disarm_cmds)
 # (3) wait until /dev/fb0 is released by the painter, then RESTORE the unconditional-preview
 #     camera-box (#291/#528): remove the transient CAMERA_BOX_NO_DISPLAY=1 drop-in TEST mode
 #     installed, reload, and RESTART so the unit's Environment drops the opt-out and camera-box
@@ -1211,7 +1220,7 @@ park_stream_program_dev() {
 
 # print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — a Windows GUI
 # OBS launch goes via the win-* MCP; #701 proved plain scp/ssh reaches stream, but that doesn't
-# drive/verify a GUI app; the Linux strih-lx restarts its supervised user unit, issue 1317). #257: env-free; the wrapper just verifies the genlock
+# drive/verify a GUI app; the Linux strih-snv restarts its supervised user unit, issue 1317). #257: env-free; the wrapper just verifies the genlock
 # render tick is ENABLED (build default). Only needed if OBS is not already running on a box.
 print_genlock_relaunch_note() {
   local mode="$1"
@@ -1219,10 +1228,10 @@ print_genlock_relaunch_note() {
 # ---- OBS genlock relaunch (only if OBS is not already running) ----
 # The measurement burn for ${mode} mode was just toggled over WebSocket above (no relaunch). The
 # genlock build is hard-locked (render tick + ts-align always ON, latency 3 ms — NO env), so a
-# relaunch is only needed to (re)start a stopped/wedged OBS. The strih is the Linux strih-lx
+# relaunch is only needed to (re)start a stopped/wedged OBS. The strih is the Linux strih-snv
 # (issue 1317): restart its supervised user unit. The Windows stream box: paste the printed program
 # into its win-* MCP Shell:
-#   strih-lx : ssh newlevel@${STRIH_IP} 'systemctl --user restart strih-obs.service'
+#   strih-snv : ssh newlevel@${STRIH_IP} 'systemctl --user restart strih-obs.service'
 #   stream   : scripts/launch-obs-genlock.sh --box stream --force
 # Then confirm (per the e2e / obs-ops playbook skills): the right stream scene (${STREAM_PROG_SCENE}
 # for test; EVENT leaves the stream program to the owner, issue 1380), recording NATIVE 1080p (#225), DanteSync locked. The wrapper EXITS 0 only when the OBS
@@ -1322,7 +1331,22 @@ do_test() {
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
   echo
   echo "[relay] issue 1311: stop+disable bkshading-relay on the relay boxes (EVENT-only — removes the PTP-session power toggles + the issue-1229 polling noise from the shared USB hub during measurement):"
-  bkshading_relay_mode_apply test "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP"
+  # issue 1407 design addendum item 1 (the issue-868 pattern): a relay box whose state did not land
+  # (its root left read-WRITE, or no answer) makes the apply return non-zero, and under set -e that
+  # ended the TEST switch right here, before the painter. Record it, warn by name, run every step
+  # below, and fold it into the exit status at the end. ONE exception (decisions 5996845165 Q1 = B
+  # and 5997211658 Q3): when the failed box is the painter box itself and its rw window is broken
+  # (its root stayed read-WRITE, or it refused the rw remount), stop here, before the painter
+  # launch: the painter handoff would fail on that same root and leave cam2 dark.
+  local _relay_rc=0
+  bkshading_relay_mode_apply test "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || _relay_rc=$?
+  if [ "$_relay_rc" -ne 0 ] && bkshading_relay_mode_painter_window_stop test "$PAINTER_IP"; then
+    exit 1
+  fi
+  bkshading_relay_mode_warn_continue test "$_relay_rc"
+  echo
+  echo "[program-audio] issue 1404: start the stream program-audio sampler on the Linux strih (the test-stream YouTube guard, :8891):"
+  program_audio_mode_apply test "$STRIH_IP"
   echo
   echo "[cam2 ${PAINTER_IP}] #725 resolve the QPSK audio-marker device from cam2's LIVE aplay -l (never trust the hardcoded default):"
   local resolved_marker_device
@@ -1333,6 +1357,16 @@ do_test() {
   echo
   echo "[cam2 ${PAINTER_IP}] #725 post-launch re-check: does $resolved_marker_device STILL carry a live monitor?"
   verify_marker_device_monitor "$resolved_marker_device"
+  echo
+  # issue 1008 reopen (11.10.2026): the cam side reaches its durable steady state HERE, before any
+  # OBS step. Every OBS chain check below may end the run (exit 1); placed after them, one black
+  # strih program (cam1 off) skipped this handoff, the 2 h transient painter expired and the QPSK
+  # marker stopped. A failed check still fails the run, but cam2 keeps painting.
+  echo "[cam2 ${PAINTER_IP}] #1008/#937 hand STEADY STATE to the PERMANENT supervised cam2-painter.service (durable -- Restart=always, survives crash + reboot -- NOT a disposable 2h nohup):"
+  cam_ssh "$(cam2_painter_steady_state_handoff_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")"
+  echo
+  echo "[cam2 ${PAINTER_IP}] #1075 arm the transient cam2-painter dead-man as a standing 'never dark' net for the handed-off permanent painter (symmetric with EVENT mode's disarm; no-ops on every fire while the painter's own frame-probe is alive):"
+  cam_ssh "$(cam2_painter_deadman_arm_cmds)"
   echo
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
   toggle_burn test
@@ -1361,12 +1395,6 @@ do_test() {
   echo "[obs] #985: PARK stream's PROGRAM on the development scene (never on a measurement-only scene):"
   park_stream_program_dev
   echo
-  echo "[cam2 ${PAINTER_IP}] #1008/#937 hand STEADY STATE to the PERMANENT supervised cam2-painter.service (durable -- Restart=always, survives crash + reboot -- NOT a disposable 2h nohup):"
-  cam_ssh "$(cam2_painter_steady_state_handoff_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")"
-  echo
-  echo "[cam2 ${PAINTER_IP}] #1075 arm the transient cam2-painter dead-man as a standing 'never dark' net for the handed-off permanent painter (symmetric with EVENT mode's disarm; no-ops on every fire while the painter's own frame-probe is alive):"
-  cam_ssh "$(cam2_painter_deadman_arm_cmds)"
-  echo
   print_genlock_relaunch_note test
   echo
   echo "ACHIEVED (cam side): cam2 STEADY-STATE painter is now the PERMANENT cam2-painter.service (#1008/#937: durable dual-QR ${QR_SIZE}px + QPSK marker, Restart=always, enabled — survives crash + reboot; the disposable 2h nohup is gone, so TEST mode no longer dies silently)."
@@ -1379,6 +1407,10 @@ do_test() {
   echo "ACHIEVED (chain, #901): strih's live program scene confirmed NON-BLACK — the camera genuinely sees content, not just a live process."
   echo "                        mbc Dante transport confirmed bound + unmuted on stream."
   echo "                        measurement-audio arrival checked end to end (verdict printed above — PASS / non-blocking WARN / hard FAIL)."
+  if [ "${_relay_rc:-0}" -ne 0 ]; then
+    bkshading_relay_mode_result test "$_relay_rc"
+    exit 1
+  fi
   echo "RESULT: TEST mode — WHOLE CHAIN verified (cam emission + OBS program/burn/mapping + optical proof + Dante transport + measurement-audio arrival)."
 }
 
@@ -1655,7 +1687,14 @@ do_event() {
   warn_imag_genlock_stale
   echo
   echo "[obs] #524 pre-event guard: stop any stray recording left running on strih/stream (frees disk before going live):"
-  stop_stray_recordings
+  # issue 1410 (the #868 pattern): a box the guard cannot reach (strih-snv powered off, 11.10.2026:
+  # "No route to host") returns non-zero, and under set -e that ended EVENT here, before the cam2
+  # painter stop and the burn clear. Record it, warn, run every step below, fold it into the exit.
+  local _stray_rc=0
+  stop_stray_recordings || _stray_rc=$?
+  if [ "$_stray_rc" -ne 0 ]; then
+    echo "WARNING issue 1410: stray-recording guard FAILED (rc=$_stray_rc) — an OBS box was unreachable or a stray recording could not be confirmed stopped (see the box lines above); continuing with the painter stop and the burn clear, EVENT mode will still exit non-zero." >&2
+  fi
   echo
   echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove CAMERA_BOX_NO_DISPLAY drop-in -> restart camera-box -> verify HDMI preview restored"
   # #868: the cam-side restore must NOT be able to strand a measurement burn ON. Under `set -e` a
@@ -1677,7 +1716,16 @@ do_event() {
   camera_test_settings_restore "$RIG_MODE_DIR" "$STRIH_IP" "$STREAM_IP" "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || true
   echo
   echo "[relay] issue 1311: enable+start bkshading-relay on the relay boxes (EVENT-only — shading available for the broadcast):"
-  bkshading_relay_mode_apply event "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP"
+  # issue 1407 design addendum item 1 (the issue-868 pattern, as for the cam-side restore above): a
+  # relay box whose state did not land makes the apply return non-zero, and under set -e that ended
+  # EVENT here, BEFORE the burn-OFF below: a measurement burn left ON going into a production.
+  # Record it, warn by name, run every step below, and fold it into the exit status at the end.
+  local _relay_rc=0
+  bkshading_relay_mode_apply event "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || _relay_rc=$?
+  bkshading_relay_mode_warn_continue event "$_relay_rc"
+  echo
+  echo "[program-audio] issue 1404: stop the stream program-audio sampler on the Linux strih (EVENT: it stays down, across a reboot too):"
+  program_audio_mode_apply event "$STRIH_IP"
   echo
   # #721 (live 2026-08-16): the painter stop + the ledger sweep above leave every painter dead, but
   # the marker CSV they wrote (/run/rig-qpsk-markers.csv, root-owned on tmpfs) SURVIVES -- and item 8
@@ -1690,10 +1738,20 @@ do_event() {
   cam_ssh "$(event_artifact_purge_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")" 2>/dev/null || true
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
-  toggle_burn event
+  # issue 1410: the burn clear and the mapping enforce reach strih too, so an unreachable strih made
+  # them return non-zero and ended EVENT before the contract and the Discord confirmation. Same
+  # record-and-fold shape: the loops inside still clear every reachable box, the rc reaches the exit.
+  local _burn_rc=0 _ndimap_rc=0
+  toggle_burn event || _burn_rc=$?
+  if [ "$_burn_rc" -ne 0 ]; then
+    echo "WARNING issue 1410: genlock_burn OFF FAILED on at least one OBS box (rc=$_burn_rc, see the [box burn] lines above) — every reachable box was still cleared; continuing, EVENT mode will still exit non-zero." >&2
+  fi
   echo
   echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct — correct for broadcast too):"
-  enforce_strih_ndi_mapping
+  enforce_strih_ndi_mapping || _ndimap_rc=$?
+  if [ "$_ndimap_rc" -ne 0 ]; then
+    echo "WARNING issue 1410: strih NDI mapping enforce FAILED (rc=$_ndimap_rc, see the [strih ndi-map] lines above) — continuing, EVENT mode will still exit non-zero." >&2
+  fi
   echo
   print_genlock_relaunch_note event
   echo
@@ -1703,6 +1761,14 @@ do_event() {
   echo "===== [#722] EVENT-mode CONTRACT — the full machine-checkable assert phase ====="
   event_mode_assert
   camera_test_settings_restore_discord_note "${EVENT_ASSERT_DISCORD_MSG_PATH:-}"
+  bkshading_relay_mode_discord_note "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "$_relay_rc"
+  # issue 1410: the owner reads this on the phone, so a failed OBS-box step goes on top of it (the run
+  # exits non-zero below) instead of a confirmation that reads clean. Plain Slovak, no commands.
+  local _obs_failed=""
+  [ "$_stray_rc" -eq 0 ] || _obs_failed="kontrola zabudnutých nahrávok"
+  [ "$_burn_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }vypnutie meracích QR (burn)"
+  [ "$_ndimap_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }nastavenie NDI kamier na strihu"
+  [ -z "$_obs_failed" ] || event_mode_discord_note_add "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "⚠️ Prepnutie do EVENT: na OBS boxoch sa nepodarilo: ${_obs_failed}. Niektorý OBS box (strih, stream alebo imag) asi nebol dosiahnuteľný. Ostatné kroky prepnutia prebehli, výsledok kontroly je nižšie. Napíš Claudovi, nech to skontroluje." top
   echo "=================================================================================="
   echo
   # #724: send the Discord confirmation on BOTH outcomes (pass=confirmation, fail=warning naming
@@ -1711,15 +1777,27 @@ do_event() {
   event_mode_discord_confirm_send "$(cat "$EVENT_ASSERT_DISCORD_MSG_PATH" 2>/dev/null || echo "$EVENT_ASSERT_SUMMARY")"
   rm -f "$EVENT_ASSERT_DISCORD_MSG_PATH" "$EVENT_ASSERT_RESULT_JSON" 2>/dev/null || true
   echo
-  # #868: fold the recorded cam-side restore failure into the final verdict — deferring it past the
-  # burn-clear must never SWALLOW it.
-  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ]; then
+  # #868: fold the recorded cam-side restore failure (and, issue 1407, the relay step's; issue 1410,
+  # the stray-recording guard's, the burn clear's and the mapping enforce's) into the final verdict —
+  # deferring them past the burn-clear must never SWALLOW them. Every failure gets its own RESULT line.
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ] && [ "${_stray_rc:-0}" -eq 0 ] && [ "${_burn_rc:-0}" -eq 0 ] && [ "${_ndimap_rc:-0}" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
     exit 0
   fi
+  if [ "${_stray_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — stray-recording guard FAILED (issue 1410, rc=${_stray_rc}). The painter stop and the burns were still handled, but an OBS box was not verified free of a stray recording — see the guard lines above." >&2
+  fi
+  if [ "${_burn_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — genlock_burn OFF FAILED (issue 1410, rc=${_burn_rc}). Every reachable OBS box was cleared, but at least one was not — see the [box burn] lines above." >&2
+  fi
+  if [ "${_ndimap_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — strih NDI mapping enforce FAILED (issue 1410, rc=${_ndimap_rc}). The strih camera inputs were not verified distinct — see the [strih ndi-map] lines above." >&2
+  fi
+  bkshading_relay_mode_result event "${_relay_rc:-0}"
   if [ "${_cam_restore_rc:-0}" -ne 0 ]; then
     echo "RESULT: EVENT mode — cam-side restore FAILED (#868, rc=${_cam_restore_rc}). Burns were still cleared, but the rig is NOT confirmed clean — see the cam-side failure above." >&2
-  else
+  fi
+  if [ "$EVENT_ASSERT_PASS" -ne 0 ]; then
     echo "RESULT: EVENT mode — #722 CONTRACT FAILED. The rig is NOT confirmed clean for broadcast — see the assert summary above." >&2
   fi
   exit 1

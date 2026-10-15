@@ -128,7 +128,7 @@ described here. Now:
 
 A tick-by-tick port of the N==1 branches of `genlock_release_tick` (ACQUIRE / BACKLOG relock via
 `relock_select_nearest`, STEADY, GAP RESYNC, HOLD / late HOLD, the erase loop, the #859 drain)
-driven by a strih-lx sender model (render tick on the grid under test, send delay median 20.7 /
+driven by a strih-snv sender model (render tick on the grid under test, send delay median 20.7 /
 p99 24.9 ms + a late-render tail, per-second FLOOR stamp at SEND time) and a stream receiver
 (tick jitter p99 0.5 ms, 0.1 % of ticks 10–30 ms late), sampling the presented age every 150
 ticks like the 5 s audit. `GridModel::Legacy1970` keeps a local copy of the pre-fix arithmetic;
@@ -160,7 +160,7 @@ failed on today's arithmetic and the GREEN one passes.
   depth change. **Since the issue-1367 GAP hold (design 5833339163) that is true on a SHALLOW
   latched source only while the duplicate is already queued behind the late-labelled head;** when
   it has not arrived yet, the GAP hold reads the label as a real skip and costs a repeat + a
-  shallow shed (0 at the live strih-lx jitter, 22 + 22 per 2 h at σ 4 ms, pinned in
+  shallow shed (0 at the live strih-snv jitter, 22 + 22 per 2 h at σ 4 ms, pinned in
   `a_late_label_without_its_queued_duplicate_costs_a_bounded_repeat_1367`; see
   `genlock-n1-pin-derived-depth.md`). A deep source (the 2ME PGM) is unaffected. On the 1970 grid the same pair cost a held frame (a
   visible duplicate), a +1 frame A/V step, and later a drained frame (a visible skip). With the
@@ -201,7 +201,7 @@ Per 5 s `genlock-fifo audit 'NDI 2ME PGM'` line: `ts_head_skew_ms` must stay in 
 (no 31↔32 flips — the old 10–45/h), `late_holds` and `dropped_due` deltas 0 (no drain), the line
 must carry `stamp_dup=` / `stamp_gap=` (their rate is the sender residual, ~ tens/h, the input
 for the sender follow-up), and the relock log's `tick_phase_ns` is now the phase within the
-per-second grid. strih-lx's inputs get the counters too; judge `cg` / `CG-obs` like the 2ME PGM,
+per-second grid. strih-snv's inputs get the counters too; judge `cg` / `CG-obs` like the 2ME PGM,
 but expect a steady non-zero baseline on the 60 fps camera inputs (the free-running grabbers beat
 against the grid and their stamps key on the CAPTURE instant — the #889 copies/gaps residual),
 so compare a camera against its own earlier rate, never against zero.

@@ -1,16 +1,16 @@
 //! #1355 part 2 — the grid-drift BENCH: the deep stream `NDI 2ME PGM` FIFO (an N==1, 30-into-30
-//! source) fed by the strih-lx program sender, simulated tick by tick with the SAME decision
+//! source) fed by the strih-snv program sender, simulated tick by tick with the SAME decision
 //! functions the vendored C release uses, under the measured rig statistics — and under either the
 //! pre-#1355 1970 grid or the production grid (`crate::genlock_grid`).
 //!
-//! ## What it reproduces (live, 20.–24.9.2026, 10 stream logs + 2 strih-lx logs)
+//! ## What it reproduces (live, 20.–24.9.2026, 10 stream logs + 2 strih-snv logs)
 //!
 //! At a CONSTANT pin (987 ms) the 2ME PGM FIFO flipped between depth states 31 and 32 frames,
 //! 10–45 times per hour, bursty. Mechanism (#1355 design comment): the sender stamps on the
 //! per-second grid, the receiver floored its release deadline and ticked on the 1970 grid, and the
 //! two drift 10 ns/s apart; by 24.9. the stamps sat ~2.0 ms AFTER the floored deadline. A frame 2 ms
 //! past the deadline is "due" under the 5 ms hysteresis but NOT past it for the missing-stamp
-//! GAP-RESYNC check, so when the sender produces an irregular stamp — strih-lx stamps at SEND time,
+//! GAP-RESYNC check, so when the sender produces an irregular stamp — strih-snv stamps at SEND time,
 //! a slow frame lands in the next 1/30 s cell = a gap followed by a duplicate — the receiver HOLDs
 //! one tick (a `late_hold`) and the FIFO sits one frame deeper: 31 → 32. It comes back down only
 //! when a late stream render tick lets the #859 settle-back drain see one frame too many (32 → 31,
@@ -18,7 +18,7 @@
 //!
 //! ## Model (every number is a measured rig statistic, see [`BenchConfig::live_2026_09_24`])
 //!
-//! - **Sender (strih-lx OBS program output):** renders on its own genlock tick (the grid under
+//! - **Sender (strih-snv OBS program output):** renders on its own genlock tick (the grid under
 //!   test), hands the frame to NDI after a send delay (median 20.7 ms, p99 24.9 ms measured) plus a
 //!   rare late-render tail, and stamps it with the per-second FLOOR of the SEND instant — the
 //!   arithmetic of `genlock_floor_boundary_100ns` ([`per_second_floor`] in 100 ns units). Sends are
@@ -56,7 +56,7 @@
 //!
 //! The two TAIL rates (the sender's late-render frames, the receiver's late ticks) are the only
 //! calibrated knobs: the design measured their existence and the correlation (flips 11× more likely
-//! in strih-lx late-render windows) but not a per-frame rate. They are set so the 1970-grid run
+//! in strih-snv late-render windows) but not a per-frame rate. They are set so the 1970-grid run
 //! lands inside the live 10–45 flips/h band; the claim under test is that the SAME inputs on the
 //! production grid do not flip.
 
@@ -121,14 +121,14 @@ pub struct BenchConfig {
     /// The stream 2ME PGM pin.
     pub latency_ms: u32,
     pub seed: u64,
-    /// strih-lx render-tick -> NDI hand-over delay: median + spread (p99 = median + 2.33 σ).
+    /// strih-snv render-tick -> NDI hand-over delay: median + spread (p99 = median + 2.33 σ).
     pub send_delay_median_ns: u64,
     pub send_delay_sigma_ns: u64,
     /// Late-render tail: probability per frame (parts per million) and the extra delay range
     /// ADDED on top of one full interval (such a frame lands in the next 1/30 s cell).
     pub send_late_ppm: u64,
     pub send_late_extra_max_ns: u64,
-    /// strih-lx -> stream network hand-over (constant).
+    /// strih-snv -> stream network hand-over (constant).
     pub network_ns: u64,
     /// Stream render-tick lateness: half-normal core σ, plus a tail (ppm per tick) uniformly
     /// late in `[tick_late_min_ns, tick_late_max_ns]`.
@@ -136,7 +136,7 @@ pub struct BenchConfig {
     pub tick_late_ppm: u64,
     pub tick_late_min_ns: u64,
     pub tick_late_max_ns: u64,
-    /// One strih-lx OBS restart during the run (issue 1367), or none.
+    /// One strih-snv OBS restart during the run (issue 1367), or none.
     pub restart: Option<SenderRestart>,
     /// A constant phase error of the stream render tick's SCHEDULE against the grid, in ns
     /// (negative = early). A stress bound: a real tick is never held off the grid (see
@@ -168,7 +168,7 @@ pub struct TickStep {
 /// The per-tick slew clamp of the render tick (`GENLOCK_MAX_SLEW_NS` in obs-video.c).
 const TICK_MAX_SLEW_NS: i64 = 2_000_000;
 
-/// A sender restart (issue 1367): the strih-lx program output goes silent for `outage_ms`, then
+/// A sender restart (issue 1367): the strih-snv program output goes silent for `outage_ms`, then
 /// comes back with a `stall_slots`-slot STARTUP STALL. The first frames after the restart are
 /// handed to NDI late and all at once, and `ndi-output.cpp` stamps each with the per-second floor
 /// of its SEND instant. So the stream sees one frame stamped `stall_slots` slots after the first
@@ -185,7 +185,7 @@ pub struct SenderRestart {
 }
 
 impl BenchConfig {
-    /// The rig as measured for #1355 (stream log 23.–24.9. + strih-lx logs), pin 987 ms, offset
+    /// The rig as measured for #1355 (stream log 23.–24.9. + strih-snv logs), pin 987 ms, offset
     /// 2.0 ms. The two `*_ppm` tails are the calibrated knobs (see the module doc).
     pub fn live_2026_09_24(grid: GridModel) -> Self {
         BenchConfig {
@@ -289,7 +289,7 @@ impl Rng {
     }
 }
 
-/// The sender side: strih-lx render ticks -> send -> per-second FLOOR stamp -> arrival.
+/// The sender side: strih-snv render ticks -> send -> per-second FLOOR stamp -> arrival.
 struct Sender {
     grid: GridModel,
     tick: u64,
@@ -397,6 +397,13 @@ impl Fifo {
     pub(crate) fn receive(&mut self, arrival_wall_ns: u64, stamp_ns: u64) {
         self.queue.push_back(stamp_ns);
         self.rx_lag_ns = arrival_wall_ns.saturating_sub(stamp_ns);
+    }
+
+    /// Issue 1372 part B: the locked boundary, which the receive-FIFO relabel moves with the
+    /// presented frame (the C `genlock_fifo_relabel_apply` on `genlock_locked_next_boundary_ns`).
+    #[cfg(test)]
+    pub(crate) fn locked_boundary_mut(&mut self) -> &mut u64 {
+        &mut self.locked_next_boundary
     }
 
     /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order. `wall` is

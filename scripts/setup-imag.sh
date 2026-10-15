@@ -103,6 +103,8 @@ manifest_sha_for_path() {
 # Writes each marker temp-then-rename (a POSIX same-dir `mv -f`) so a concurrent drift-guard reader
 # never sees a half-written marker. A missing MARKER_DIR/GENLOCK_SHA/DISTROAV_SHA is fail-loud
 # (return 2), never a silent partial write — under this script's `set -e` a non-zero return aborts.
+# issue 1302: the optional 5th argument STATS_ABI writes GENLOCK_STATS_ABI.txt (the pair
+# `<stats>:<output_stats>`, two lines) or removes it (empty / anything else), exactly as the lib does.
 _genlock_marker_atomic() {
     local dest="$1" content="$2" tmp
     tmp="${dest}.tmp.$$"
@@ -119,7 +121,7 @@ _genlock_marker_atomic() {
     return 0
 }
 genlock_write_markers() {
-    local marker_dir="${1:-}" genlock_sha="${2:-}" distroav_sha="${3:-}" deployed_at="${4:-}"
+    local marker_dir="${1:-}" genlock_sha="${2:-}" distroav_sha="${3:-}" deployed_at="${4:-}" stats_abi="${5:-}"
     if [ -z "$marker_dir" ]; then
         echo "genlock_write_markers: MARKER_DIR (arg 1) is required" >&2; return 2
     fi
@@ -136,6 +138,15 @@ genlock_write_markers() {
     _genlock_marker_atomic "$marker_dir/GENLOCK_BUILD_SHA.txt"  "$genlock_sha"  || return 1
     _genlock_marker_atomic "$marker_dir/DISTROAV_BUILD_SHA.txt" "$distroav_sha" || return 1
     _genlock_marker_atomic "$marker_dir/DEPLOYED_AT"           "$deployed_at"  || return 1
+    if [[ "$stats_abi" =~ ^([123456789][0123456789]{0,8}):([123456789][0123456789]{0,8})$ ]]; then
+        _genlock_marker_atomic "$marker_dir/GENLOCK_STATS_ABI.txt" \
+            "${BASH_REMATCH[1]}"$'\n'"output_stats=${BASH_REMATCH[2]}" || return 1
+    else
+        [ -z "$stats_abi" ] || echo "genlock_write_markers: STATS_ABI '$stats_abi' is not a <stats>:<output_stats> pair -- GENLOCK_STATS_ABI.txt removed" >&2
+        if ! rm -f "$marker_dir/GENLOCK_STATS_ABI.txt" 2>/dev/null; then
+            echo "genlock_write_markers: could not remove $marker_dir/GENLOCK_STATS_ABI.txt" >&2; return 1
+        fi
+    fi
     return 0
 }
 
@@ -303,6 +314,9 @@ if command -v nmcli >/dev/null 2>&1; then
 else
     fail "nmcli missing — desktop Ubuntu expected (netplan-only path not implemented)"
 fi
+# issue 1415: the rig time zone (Europe/Bratislava), the shared baseline item setup-strih runs in its
+# step 1 too; every OBS browser-source clock shows the box's local time. verify-imag (bb) grades it.
+obs_box_timezone
 
 # =============================================================================
 step 2 "Network performance tuning (#486): sysctl + EEE off, flow-control advertised on the NDI NIC"
@@ -411,6 +425,8 @@ _RG_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_RG_HERE/lib/remoteos-mcp.sh"   # issue 1361: the ONE remoteos-mcp venv install (step 23; with setup-strih.sh + setup-device.sh)
 # shellcheck source=scripts/lib/bundle-state-files.sh
 . "$_RG_HERE/lib/bundle-state-files.sh"   # issue 1386: the ONE declared :8899 server file set (step 28; with setup-strih.sh)
+# shellcheck source=scripts/lib/drm-output-audio.sh
+. "$_RG_HERE/lib/drm-output-audio.sh"   # issue 1424: the WirePlumber rule that leaves the HDMI PCM to the in-OBS output (step 16; with setup-strih.sh)
 RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
   echo "FAIL: setup-imag: cannot resolve the PTP grandmaster host -- refusing to write an empty gm_allowlist (#1307)" >&2
   exit 1
@@ -546,7 +562,7 @@ IMAG_ISOLATED_CPUS="$OBS_BOX_ISOLATED_CPUS"
 # issue 1357: rtprio stays OFF. The #484 grant served the render-tick SCHED_FIFO pin, which now lands only
 # on isolated nohz_full cores; obs_box_cpu_affinity above keeps kernel isolation off, so the grant served
 # nothing and its FIFO leaked to the NDI threads (issue comment 5793075833). Remove a leftover grant.
-obs_box_rtprio_off   # issue 1357: remove a retired render-tick rtprio grant
+obs_box_rtprio_off ; obs_box_swap || fail "issue 1428: the RAM-sized swapfile could not be provisioned (above)"   # issue 1357 rtprio off; issue 1428 swap
 
 # =============================================================================
 step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary"
@@ -1278,6 +1294,10 @@ obs_box_openbox_menu_xml "imag-nb" "systemctl --user start imag-obs.service" "/u
     || fail "#785: could not generate $USER_HOME/.config/openbox/menu.xml"
 chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/menu.xml"
 
+# issue 1424: the in-OBS HDMI output writes the program mix straight into its connector's HDMI PCM, so
+# PipeWire must leave every HDMI/DP PCM alone -- the same generic rule setup-strih writes.
+drm_output_audio_wp_provision
+
 # =============================================================================
 step 17 "Launch OBS on the desktop session (X11 :0)"
 # =============================================================================
@@ -1548,7 +1568,7 @@ step 23 "RemoteOS MCP control-channel agent (#858): the venv install from the sh
 # The linux-imag-nb MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project
 # (ops skill #555). issue 1361: every box installs it through the ONE shared lib (setup-strih step 10,
 # setup-device STEP 17b): the project's own source + constraints.txt into /opt/remoteos-mcp-venv (the
-# shape strih-lx runs), never the upstream install-linux.sh, which pip-installs into the system python.
+# shape strih-snv runs), never the upstream install-linux.sh, which pip-installs into the system python.
 #
 # Auth-key handling (security-boundary): the key is a full-shell-RCE bearer token bound to
 # 0.0.0.0:8092, so it NEVER lands in this repo or in the unit text. REMOTEOS_MCP_AUTH_KEY (the env-secret

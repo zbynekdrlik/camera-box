@@ -61,7 +61,11 @@ model (90/160/184) was owner-REJECTED and REVERTED — never re-derive absolute 
 - **The `[4h/8]` #893 active-floor gate is MUTUALLY EXCLUSIVE with `[4i/8align]`** (`QR_ALIGN != 1`
   in the #893 condition). Both enforce "slowest camera at 3 ms"; if floor-3 floors cam4, no
   ACTIVE-set camera is at 3 and the NEXT run's #893 would abort. `[4i/8align]` owns the floor when on.
-- **`CAMERA_ALIGN_SET` is a deliberate SUPERSET of the ALIGNABLE part of `CAMERA_ACTIVE_SET`**
+- **Since issue 1413 `CAMERA_ALIGN_SET` = cam3 + every strih-routable member of
+  `CAMERA_ACTIVE_SET`** (`camera_align_default`, camera order; SNV default `cam3 cam5`). The
+  unconditional cam4 below is history: cam4 moved to Poprad, and nothing on-air stays outside the
+  measured set.
+- **`CAMERA_ALIGN_SET` was a deliberate SUPERSET of the ALIGNABLE part of `CAMERA_ACTIVE_SET`**
   (on-air alignment incl. cam4, which the measurable E2E sweep excludes) — with ONE named
   exclusion: **cam2 (the projection probe) NEVER derives into the align set** (issue 1216,
   2026-08-28). cam2's grabber captures imag-nb's HDMI output, so its painter-QR view arrives
@@ -258,7 +262,7 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
   regimes) so the floors are TRUE transports and the SLOWEST returns to pin 3 EVERY run (the owner's
   floor-3 doctrine, preserved). The count + since-line fetches go through the shared platform-resolved
   `strih_log_line_count` / `strih_log_since_line` (`scripts/lib/strih-log-read.sh`, issue 1360 — before
-  it, a Linux strih-lx read empty and the audit was skipped every run), `timeout`-bounded inside it. `QR_ALIGN_RESET_SETTLE_S` / `QR_ALIGN_AUDIT_WINDOW_S` tune the waits.
+  it, a Linux strih-snv read empty and the audit was skipped every run), `timeout`-bounded inside it. `QR_ALIGN_RESET_SETTLE_S` / `QR_ALIGN_AUDIT_WINDOW_S` tune the waits.
 - **`floor_aware_pins(arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins)`:** the slowest
   (min-delta) camera → `floor_ms` (inert, stays at its natural floor); every faster camera →
   `max(floor_ms, round(arrival_floor_i + pure_delta_i))` (its floor + the PURE present-age hold it must

@@ -37,7 +37,7 @@ def _run(tmp_path, args=(), env_extra=None, logs=None):
 
 def _logs(tmp_path, stream_sources=("NDI obs hudba",)):
     return {"CG_OBS": _log(tmp_path, "cg", ["sp-1_video"]),
-            "STRIH": _log(tmp_path, "strih", ["cg"]),
+            "STRIH": _log(tmp_path, "strih", ["CG-obs"]),
             "STREAM": _log(tmp_path, "stream", list(stream_sources))}
 
 
@@ -114,3 +114,15 @@ def test_rig_health_runs_only_the_strih_hop():
 def test_help_prints_the_whole_header():
     r = subprocess.run(["bash", str(_TOOL), "--help"], capture_output=True, text=True)
     assert "a missing strih `cg` still FAILs" in r.stdout
+
+
+def test_the_strih_hop_source_is_overridable_for_the_live_cg_obs_input(tmp_path):
+    # issue 1302: since SongPlayer's B4 (songplayer 221) the strih-snv input receiving SP-program is
+    # named `CG-obs`; it is the DEFAULT (strih-snv is the only strih), CG_CHAIN_STRIH_SRC overrides it.
+    logs = {"STRIH": _log(tmp_path, "strih", ["CG-obs"])}
+    r = _run(tmp_path, args=("--hops", "strih"), logs=logs)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any(ln.startswith("strih") and "CG-obs" in ln for ln in r.stdout.splitlines()), r.stdout
+    # An explicit override to the retired Windows strih's `cg` input looks for that one instead.
+    r2 = _run(tmp_path, args=("--hops", "strih"), env_extra={"CG_CHAIN_STRIH_SRC": "cg"}, logs=logs)
+    assert r2.returncode != 0, r2.stdout

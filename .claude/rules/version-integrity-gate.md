@@ -408,7 +408,7 @@ inventory (`imag-offline-ack.md`) had missed.
 `--imag-acked-offline` never needed to touch `drift-guard.sh` because every imag facet it skips
 (the `.so` byte facet, the cross-box parity entry) is a SEPARATE function call in
 `version-integrity-gate.sh`'s own `main()` — easy to wrap in an `if`. `--strih-linux` (skip strih's
-Windows-only facets on a Linux strih-lx) hit a DIFFERENT shape: two of the facets to skip
+Windows-only facets on a Linux strih-snv) hit a DIFFERENT shape: two of the facets to skip
 (`ndi_runtime`, `distroav_dll_paths`) are baked INSIDE `drift-guard.sh`'s single monolithic
 `compare_observed()` call — the mandatory `checks[]` array and `drift_check_plugin_paths` — which
 also runs the KEPT platform-agnostic facets (obs_version/output_fps/… and the manifest-gated byte

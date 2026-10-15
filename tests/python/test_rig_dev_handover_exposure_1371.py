@@ -136,7 +136,7 @@ def test_the_probe_line_the_orchestrator_captures_is_what_the_decision_parses(tm
     import subprocess
     snap = tmp_path / "camera-prod-exposure.json"
     snap.write_text(json.dumps({"schema": 1, "box": "cam1", "taken_utc": "2026-09-26T15:00:00Z",
-                                "values": {"iso": "800", "d002": "36000"}, "context": {"d007": "60"}}))
+                                "values": {"iso": "800", "d002": "36000"}, "context": {"d006": "6000"}}))
     env = dict(os.environ, CAMERA_PROD_EXPOSURE_SNAPSHOT=str(snap))
     cli = ["python3", str(_SCRIPTS / "camera_test_settings.py")]
     r = subprocess.run(cli + ["snapshot-state"], capture_output=True, text=True, env=env)

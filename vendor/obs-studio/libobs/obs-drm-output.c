@@ -7,6 +7,12 @@
  * render->scanout — no NDI hop, no external presenter. This M1 file proves the mechanism with a
  * solid-color double buffer; it is NOT yet bound to the Program render texture (M2 — see M2 HOOK).
  *
+ * camera-box issue 1424 part 2: this TU is the LEASE backend of ONE output instance at a time -- its
+ * state is a `struct drm_output_lease` per instance (g_lease[inst->index]), so two leased connectors
+ * each run their own lease, flip thread and GBM mailbox. The config grammar, the instance registry and
+ * the public entry points live in obs-drm-output-outputs.c; this TU exports drm_output_lease_backend
+ * (obs-drm-output-internal.h); the ONE raw blit both backends use lives in obs-drm-output-outputs.c.
+ *
  * This whole translation unit is Linux-only and is built only via libobs/cmake/os-linux.cmake.
  * The lift-compilable pure helper `drm_output_pick_free_crtc` is guarded by
  * tests/drm_output_lease_1152.rs (source anchors + a cc-compiled truth table); the xcb/drm glue is
@@ -39,7 +45,8 @@
 #include "obs.h"
 #include "obs-drm-output.h"
 #include "obs-drm-output-internal.h" /* camera-box issue 1346: the view TU seam */
-#include "graphics/vec4.h"
+#include "obs-drm-output-audio.h"    /* camera-box issue 1424: the connector's own HDMI audio */
+#include "util/platform.h"
 #include "util/threading.h"
 
 /* -------------------------------------------------------------------------------------------------
@@ -81,34 +88,8 @@ static int drm_output_pick_render_buf(int front, int pending, int ready, int n)
 	return -1;
 }
 
-/* Aspect-fit `src` into `dst` (centred letterbox/pillarbox, integer maths — the rig case is a
- * 1:1 1920x1080 pass-through). Any zero input fails open to the full destination rect. */
-static void drm_output_fit_rect(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t *out_x,
-				uint32_t *out_y, uint32_t *out_w, uint32_t *out_h)
-{
-	if (src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0) {
-		*out_x = 0;
-		*out_y = 0;
-		*out_w = dst_w;
-		*out_h = dst_h;
-		return;
-	}
-	uint32_t w, h;
-	if ((uint64_t)src_h * dst_w <= (uint64_t)src_w * dst_h) {
-		w = dst_w;
-		h = (uint32_t)((uint64_t)src_h * dst_w / src_w);
-	} else {
-		h = dst_h;
-		w = (uint32_t)((uint64_t)src_w * dst_h / src_h);
-	}
-	*out_x = (dst_w - w) / 2u;
-	*out_y = (dst_h - h) / 2u;
-	*out_w = w;
-	*out_h = h;
-}
-
 /* -------------------------------------------------------------------------------------------------
- * Module state (single instance; M1 drives one HDMI connector).
+ * The lease backend's state of ONE output instance (issue 1424 part 2: g_lease[inst->index]).
  * ------------------------------------------------------------------------------------------------- */
 #define DRM_OUTPUT_BUFFERS 2
 #define DRM_OUTPUT_PROGRAM_BUFFERS 3 /* M2 mailbox: front (scanout) + pending (flip) + render */
@@ -129,7 +110,8 @@ struct drm_output_pbuffer {
 	gs_texture_t *tex; /* dmabuf import; created LAZILY on the graphics thread */
 };
 
-static struct {
+struct drm_output_lease {
+	struct drm_output_inst *inst; /* the owning instance (its connector + present clock), set at start */
 	pthread_mutex_t lock;
 	bool active;   /* lease held + flip thread running (guarded by lock) */
 	bool stopping; /* a stop is mid-flight (join in progress) — guarded by lock */
@@ -153,8 +135,8 @@ static struct {
 	/* ---- M2 Program binding (see obs_drm_output_on_frame) ----
 	 * Lock order (deadlock rule): graphics context FIRST, then program_lock — shared by the
 	 * frame hook and the GL teardown; the flip thread takes program_lock alone (briefly) and
-	 * NEVER the graphics context, so no cycle exists. g_drm.lock never enters the flip loop
-	 * (the M1 invariant). */
+	 * NEVER the graphics context, so no cycle exists. The instance's `lock` never enters the flip
+	 * loop (the M1 invariant). */
 	volatile bool program_want; /* atomic fast-gate for the per-tick frame hook */
 	bool program_gl_ready;      /* textures imported (graphics thread; guarded by program_lock) */
 	bool program_crtc_live;     /* flip thread only: the CRTC scans a Program buffer */
@@ -165,15 +147,20 @@ static struct {
 	int p_pending;                /* buffer with a queued flip (-1 when none) */
 	int p_ready;                  /* newest rendered frame not yet taken (-1 when none) */
 	unsigned long long program_flips;
-} g_drm = {
-	.lock = PTHREAD_MUTEX_INITIALIZER,
-	.drm_fd = -1,
-	.lease = 0,
-	.program_lock = PTHREAD_MUTEX_INITIALIZER,
-	.p_front = -1,
-	.p_pending = -1,
-	.p_ready = -1,
 };
+
+#define DRM_OUTPUT_LEASE_INIT                                                                              \
+	{                                                                                                  \
+		.lock = PTHREAD_MUTEX_INITIALIZER, .drm_fd = -1, .lease = 0,                               \
+		.program_lock = PTHREAD_MUTEX_INITIALIZER, .p_front = -1, .p_pending = -1, .p_ready = -1 \
+	}
+static struct drm_output_lease g_lease[DRM_OUTPUT_MAX_OUTPUTS] = {DRM_OUTPUT_LEASE_INIT, DRM_OUTPUT_LEASE_INIT};
+_Static_assert(DRM_OUTPUT_MAX_OUTPUTS == 2, "one DRM_OUTPUT_LEASE_INIT per output slot");
+
+static struct drm_output_lease *drm_output_lease_of(struct drm_output_inst *inst)
+{
+	return &g_lease[inst->index];
+}
 
 /* Page-flip completion: the handler clears the pending flag the flip loop waits on. */
 static void drm_output_page_flip_handler(int fd, unsigned int seq, unsigned int tv_sec,
@@ -198,9 +185,9 @@ static void drm_output_fill_solid(struct drm_output_buffer *buf, uint32_t argb, 
 	}
 }
 
-/* Acquire the RandR output lease for `connector_name`. On success fills g_drm.conn/lease/drm_fd
+/* Acquire the RandR output lease for `connector_name`. On success fills d->conn/lease/drm_fd
  * and returns true; on failure cleans up whatever it opened and returns false. */
-static bool drm_output_acquire_lease(const char *connector_name)
+static bool drm_output_acquire_lease(struct drm_output_lease *d, const char *connector_name)
 {
 	int screen_num = 0;
 	xcb_connection_t *conn = xcb_connect(NULL, &screen_num);
@@ -313,29 +300,29 @@ static bool drm_output_acquire_lease(const char *connector_name)
 	int drm_fd = fds[0];
 	free(lr);
 
-	g_drm.conn = conn;
-	g_drm.lease = lease;
-	g_drm.have_lease = true;
-	g_drm.drm_fd = drm_fd;
+	d->conn = conn;
+	d->lease = lease;
+	d->have_lease = true;
+	d->drm_fd = drm_fd;
 	blog(LOG_INFO, "drm-output: lease acquired output='%s' crtc_xid=%u drm_fd=%d", connector_name,
 	     (unsigned)crtc_xid, drm_fd);
 	return true;
 }
 
 /* Discover the leased CRTC + connector + mode on the leased fd and set the initial scanout. */
-static bool drm_output_setup_scanout(uint32_t argb)
+static bool drm_output_setup_scanout(struct drm_output_lease *d, uint32_t argb)
 {
-	drmModeRes *res = drmModeGetResources(g_drm.drm_fd);
+	drmModeRes *res = drmModeGetResources(d->drm_fd);
 	if (!res || res->count_crtcs < 1 || res->count_connectors < 1) {
 		blog(LOG_WARNING, "drm-output: leased fd exposes no CRTC/connector");
 		if (res)
 			drmModeFreeResources(res);
 		return false;
 	}
-	g_drm.crtc_id = res->crtcs[0];
-	g_drm.connector_id = res->connectors[0];
+	d->crtc_id = res->crtcs[0];
+	d->connector_id = res->connectors[0];
 
-	drmModeConnector *conn = drmModeGetConnector(g_drm.drm_fd, g_drm.connector_id);
+	drmModeConnector *conn = drmModeGetConnector(d->drm_fd, d->connector_id);
 	if (!conn || conn->count_modes < 1) {
 		blog(LOG_WARNING, "drm-output: leased connector has no modes");
 		if (conn)
@@ -343,17 +330,17 @@ static bool drm_output_setup_scanout(uint32_t argb)
 		drmModeFreeResources(res);
 		return false;
 	}
-	g_drm.mode = conn->modes[0];
-	uint32_t w = g_drm.mode.hdisplay;
-	uint32_t h = g_drm.mode.vdisplay;
-	g_drm.mode_w = w;
-	g_drm.mode_h = h;
+	d->mode = conn->modes[0];
+	uint32_t w = d->mode.hdisplay;
+	uint32_t h = d->mode.vdisplay;
+	d->mode_w = w;
+	d->mode_h = h;
 	drmModeFreeConnector(conn);
 	drmModeFreeResources(res);
 
 	for (int i = 0; i < DRM_OUTPUT_BUFFERS; i++) {
-		struct drm_output_buffer *b = &g_drm.buffers[i];
-		if (drmModeCreateDumbBuffer(g_drm.drm_fd, w, h, 32, 0, &b->handle, &b->pitch,
+		struct drm_output_buffer *b = &d->buffers[i];
+		if (drmModeCreateDumbBuffer(d->drm_fd, w, h, 32, 0, &b->handle, &b->pitch,
 					    &b->size) != 0) {
 			/* out-params are undefined on failure — clear the handle so teardown does
 			 * not try to destroy a garbage GEM handle. */
@@ -364,18 +351,18 @@ static bool drm_output_setup_scanout(uint32_t argb)
 			     strerror(errno));
 			return false;
 		}
-		if (drmModeAddFB(g_drm.drm_fd, w, h, 24, 32, b->pitch, b->handle, &b->fb_id) != 0) {
+		if (drmModeAddFB(d->drm_fd, w, h, 24, 32, b->pitch, b->handle, &b->fb_id) != 0) {
 			blog(LOG_WARNING, "drm-output: addFB %d failed (%s)", i, strerror(errno));
 			return false;
 		}
 		uint64_t offset = 0;
-		if (drmModeMapDumbBuffer(g_drm.drm_fd, b->handle, &offset) != 0) {
+		if (drmModeMapDumbBuffer(d->drm_fd, b->handle, &offset) != 0) {
 			blog(LOG_WARNING, "drm-output: map dumb buffer %d failed (%s)", i,
 			     strerror(errno));
 			return false;
 		}
 		b->map = mmap(NULL, (size_t)b->size, PROT_READ | PROT_WRITE, MAP_SHARED,
-			      g_drm.drm_fd, (off_t)offset);
+			      d->drm_fd, (off_t)offset);
 		if (b->map == MAP_FAILED) {
 			b->map = NULL;
 			blog(LOG_WARNING, "drm-output: mmap dumb buffer %d failed (%s)", i,
@@ -389,14 +376,14 @@ static bool drm_output_setup_scanout(uint32_t argb)
 		drm_output_fill_solid(b, argb, h);
 	}
 
-	uint32_t conn_id = g_drm.connector_id;
-	if (drmModeSetCrtc(g_drm.drm_fd, g_drm.crtc_id, g_drm.buffers[0].fb_id, 0, 0, &conn_id, 1,
-			   &g_drm.mode) != 0) {
+	uint32_t conn_id = d->connector_id;
+	if (drmModeSetCrtc(d->drm_fd, d->crtc_id, d->buffers[0].fb_id, 0, 0, &conn_id, 1,
+			   &d->mode) != 0) {
 		blog(LOG_WARNING, "drm-output: setCrtc failed (%s)", strerror(errno));
 		return false;
 	}
 	blog(LOG_INFO, "drm-output: mode set %ux%u@%uHz crtc=%u connector=%u", w, h,
-	     (unsigned)g_drm.mode.vrefresh, (unsigned)g_drm.crtc_id, (unsigned)g_drm.connector_id);
+	     (unsigned)d->mode.vrefresh, (unsigned)d->crtc_id, (unsigned)d->connector_id);
 	return true;
 }
 
@@ -405,20 +392,20 @@ static bool drm_output_setup_scanout(uint32_t argb)
  * ------------------------------------------------------------------------------------------------- */
 
 /* Free the M2 GBM buffers + their DRM framebuffers (idempotent; safe on partial alloc). The GL
- * textures must already be gone (drm_output_program_gl_teardown). MUST run under g_drm.lock,
- * with g_drm.drm_fd still open (RmFB needs it). */
-static void drm_output_program_free_bufs_locked(void)
+ * textures must already be gone (drm_output_program_gl_teardown). MUST run under d->lock,
+ * with d->drm_fd still open (RmFB needs it). */
+static void drm_output_program_free_bufs_locked(struct drm_output_lease *d)
 {
 	/* Review finding (issue 1152 M2): disarm FIRST — the frame hook must never pass its gate
 	 * once the BOs are gone (the pthread_create-failure path in start() frees the buffers but
 	 * used to leave program_want armed, and the later lazy bind would then dereference a NULL
 	 * bo on the graphics thread). Restores the invariant "armed => buffers exist" on EVERY
 	 * teardown path; stop()'s own earlier disarm makes this a harmless redundancy there. */
-	os_atomic_set_bool(&g_drm.program_want, false);
+	os_atomic_set_bool(&d->program_want, false);
 	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
-		struct drm_output_pbuffer *p = &g_drm.pbufs[i];
+		struct drm_output_pbuffer *p = &d->pbufs[i];
 		if (p->fb_id) {
-			drmModeRmFB(g_drm.drm_fd, p->fb_id);
+			drmModeRmFB(d->drm_fd, p->fb_id);
 			p->fb_id = 0;
 		}
 		if (p->bo) {
@@ -426,32 +413,32 @@ static void drm_output_program_free_bufs_locked(void)
 			p->bo = NULL;
 		}
 	}
-	if (g_drm.gbm) {
-		gbm_device_destroy(g_drm.gbm);
-		g_drm.gbm = NULL;
+	if (d->gbm) {
+		gbm_device_destroy(d->gbm);
+		d->gbm = NULL;
 	}
-	g_drm.p_front = -1;
-	g_drm.p_pending = -1;
-	g_drm.p_ready = -1;
-	g_drm.program_crtc_live = false;
-	g_drm.program_flips = 0;
+	d->p_front = -1;
+	d->p_pending = -1;
+	d->p_ready = -1;
+	d->program_crtc_live = false;
+	d->program_flips = 0;
 }
 
 /* Allocate the M2 Program scanout buffers: GBM BOs with GBM_BO_USE_SCANOUT (a scanout-compatible
  * modifier BY CONSTRUCTION — the reason the EGL-export alternative was rejected) + modifier-aware
  * DRM framebuffers on the leased fd. The GL import happens LAZILY on the graphics thread (at
  * obs_startup autostart time the graphics subsystem does not exist yet). Failure is fail-open:
- * the output stays on the M1 solid pattern. MUST run under g_drm.lock (start path). */
-static bool drm_output_program_alloc_locked(void)
+ * the output stays on the M1 solid pattern. MUST run under d->lock (start path). */
+static bool drm_output_program_alloc_locked(struct drm_output_lease *d)
 {
-	g_drm.gbm = gbm_create_device(g_drm.drm_fd);
-	if (!g_drm.gbm) {
+	d->gbm = gbm_create_device(d->drm_fd);
+	if (!d->gbm) {
 		blog(LOG_WARNING, "drm-output: gbm_create_device failed — staying on the solid pattern");
 		return false;
 	}
 	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
-		struct drm_output_pbuffer *p = &g_drm.pbufs[i];
-		p->bo = gbm_bo_create(g_drm.gbm, g_drm.mode_w, g_drm.mode_h, DRM_FORMAT_XRGB8888,
+		struct drm_output_pbuffer *p = &d->pbufs[i];
+		p->bo = gbm_bo_create(d->gbm, d->mode_w, d->mode_h, DRM_FORMAT_XRGB8888,
 				      GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
 		if (!p->bo) {
 			blog(LOG_WARNING,
@@ -475,11 +462,11 @@ static bool drm_output_program_alloc_locked(void)
 		}
 		int r;
 		if (modifier != DRM_FORMAT_MOD_INVALID) {
-			r = drmModeAddFB2WithModifiers(g_drm.drm_fd, g_drm.mode_w, g_drm.mode_h,
+			r = drmModeAddFB2WithModifiers(d->drm_fd, d->mode_w, d->mode_h,
 						       DRM_FORMAT_XRGB8888, handles, strides, offsets, modifiers,
 						       &p->fb_id, DRM_MODE_FB_MODIFIERS);
 		} else {
-			r = drmModeAddFB2WithModifiers(g_drm.drm_fd, g_drm.mode_w, g_drm.mode_h,
+			r = drmModeAddFB2WithModifiers(d->drm_fd, d->mode_w, d->mode_h,
 						       DRM_FORMAT_XRGB8888, handles, strides, offsets, NULL,
 						       &p->fb_id, 0);
 		}
@@ -495,7 +482,7 @@ static bool drm_output_program_alloc_locked(void)
 	blog(LOG_INFO,
 	     "drm-output: program buffers allocated (%d x %ux%u XRGB8888) — GL bind deferred to the "
 	     "graphics thread",
-	     DRM_OUTPUT_PROGRAM_BUFFERS, g_drm.mode_w, g_drm.mode_h);
+	     DRM_OUTPUT_PROGRAM_BUFFERS, d->mode_w, d->mode_h);
 	return true;
 }
 
@@ -504,10 +491,10 @@ static bool drm_output_program_alloc_locked(void)
  * new graphics vtable export needed). Graphics thread only; the caller holds the graphics
  * CONTEXT (which alone excludes the GL teardown — the flip thread never reads the textures).
  * On failure the caller frees any partial imports and disarms. */
-static bool drm_output_program_gl_bind(void)
+static bool drm_output_program_gl_bind(struct drm_output_lease *d)
 {
 	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
-		struct drm_output_pbuffer *p = &g_drm.pbufs[i];
+		struct drm_output_pbuffer *p = &d->pbufs[i];
 		uint64_t modifier = gbm_bo_get_modifier(p->bo);
 		int n_planes = gbm_bo_get_plane_count(p->bo);
 		if (n_planes < 1 || n_planes > 4)
@@ -530,7 +517,7 @@ static bool drm_output_program_gl_bind(void)
 			offsets[pl] = gbm_bo_get_offset(p->bo, pl);
 			modifiers[pl] = modifier;
 		}
-		p->tex = gs_texture_create_from_dmabuf(g_drm.mode_w, g_drm.mode_h, DRM_FORMAT_XRGB8888, GS_BGRX,
+		p->tex = gs_texture_create_from_dmabuf(d->mode_w, d->mode_h, DRM_FORMAT_XRGB8888, GS_BGRX,
 						       (uint32_t)n_planes, fds, strides, offsets,
 						       modifier != DRM_FORMAT_MOD_INVALID ? modifiers : NULL);
 		close(bo_fd); /* EGL holds its own dma-buf reference after the import */
@@ -543,7 +530,7 @@ static bool drm_output_program_gl_bind(void)
 		}
 	}
 	blog(LOG_INFO, "drm-output: program bind ready (%d buffers %ux%u) — Program scanout armed",
-	     DRM_OUTPUT_PROGRAM_BUFFERS, g_drm.mode_w, g_drm.mode_h);
+	     DRM_OUTPUT_PROGRAM_BUFFERS, d->mode_w, d->mode_h);
 	return true;
 }
 
@@ -552,18 +539,18 @@ static bool drm_output_program_gl_bind(void)
  * buffer. Safe when none exist. Called from stop() after the flip thread is joined;
  * obs_shutdown() stops this output BEFORE stop_video(), so the graphics subsystem is still
  * alive here (obs_enter_graphics no-ops — and no textures can exist — when it never came up). */
-static void drm_output_program_gl_teardown(void)
+static void drm_output_program_gl_teardown(struct drm_output_lease *d)
 {
 	obs_enter_graphics();
-	pthread_mutex_lock(&g_drm.program_lock);
+	pthread_mutex_lock(&d->program_lock);
 	for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
-		if (g_drm.pbufs[i].tex) {
-			gs_texture_destroy(g_drm.pbufs[i].tex);
-			g_drm.pbufs[i].tex = NULL;
+		if (d->pbufs[i].tex) {
+			gs_texture_destroy(d->pbufs[i].tex);
+			d->pbufs[i].tex = NULL;
 		}
 	}
-	g_drm.program_gl_ready = false;
-	pthread_mutex_unlock(&g_drm.program_lock);
+	d->program_gl_ready = false;
+	pthread_mutex_unlock(&d->program_lock);
 	obs_leave_graphics();
 }
 
@@ -571,7 +558,7 @@ static void drm_output_program_gl_teardown(void)
  * flip-complete event — proving OBS holds the leased CRTC and page-flips at the display rate. */
 static void *drm_output_flip_thread(void *arg)
 {
-	(void)arg;
+	struct drm_output_lease *d = arg;
 	drmEventContext evctx;
 	memset(&evctx, 0, sizeof(evctx));
 	evctx.version = 2;
@@ -579,7 +566,7 @@ static void *drm_output_flip_thread(void *arg)
 
 	int front = 0;
 	bool fatal = false;
-	while (os_atomic_load_bool(&g_drm.running) && !fatal) {
+	while (os_atomic_load_bool(&d->running) && !fatal) {
 		int back = front ^ 1;
 
 		/* M2: prefer the Program mailbox when a rendered buffer is ready (or one is already
@@ -587,52 +574,53 @@ static void *drm_output_flip_thread(void *arg)
 		 * touched only under program_lock, held briefly — never across the flip wait. */
 		int pnext = -1;
 		bool program = false;
-		pthread_mutex_lock(&g_drm.program_lock);
-		if (g_drm.p_ready >= 0) {
-			pnext = g_drm.p_ready;
-			g_drm.p_ready = -1;
-			g_drm.p_pending = pnext;
+		pthread_mutex_lock(&d->program_lock);
+		if (d->p_ready >= 0) {
+			pnext = d->p_ready;
+			d->p_ready = -1;
+			d->p_pending = pnext;
 			program = true;
-		} else if (g_drm.program_crtc_live) {
+		} else if (d->program_crtc_live) {
 			/* Nothing new this vblank — re-flip the frame on scanout (keeps the loop
 			 * vblank-paced with no condvar; the producer and the panel are independent
 			 * clock domains, so an occasional repeated frame is inherent and correct). */
-			pnext = g_drm.p_front;
+			pnext = d->p_front;
 			program = true;
 		}
-		pthread_mutex_unlock(&g_drm.program_lock);
+		pthread_mutex_unlock(&d->program_lock);
 
 		uint32_t flip_fb;
 		if (program) {
-			if (!g_drm.program_crtc_live) {
+			if (!d->program_crtc_live) {
 				/* First Program frame: a one-shot SetCrtc moves scanout from the solid
 				 * dumb FB onto the GBM FB (a legacy page-flip across a modifier change
 				 * is not reliable); page-flips then run among the identical GBM FBs. */
-				uint32_t conn_id = g_drm.connector_id;
-				if (drmModeSetCrtc(g_drm.drm_fd, g_drm.crtc_id, g_drm.pbufs[pnext].fb_id, 0,
-						   0, &conn_id, 1, &g_drm.mode) != 0) {
+				uint32_t conn_id = d->connector_id;
+				if (drmModeSetCrtc(d->drm_fd, d->crtc_id, d->pbufs[pnext].fb_id, 0,
+						   0, &conn_id, 1, &d->mode) != 0) {
 					blog(LOG_WARNING,
 					     "drm-output: SetCrtc onto the Program buffer failed (%s) — "
 					     "stopping flip loop",
 					     strerror(errno));
 					break;
 				}
-				g_drm.program_crtc_live = true;
+				d->program_crtc_live = true;
 				blog(LOG_INFO,
-				     "drm-output: program scanout LIVE (Program buffer on the leased CRTC)");
-				pthread_mutex_lock(&g_drm.program_lock);
-				g_drm.p_pending = -1;
-				g_drm.p_front = pnext;
-				pthread_mutex_unlock(&g_drm.program_lock);
+				     "drm-output: program scanout LIVE (Program buffer on the leased CRTC of '%s')",
+				     d->inst->connector);
+				pthread_mutex_lock(&d->program_lock);
+				d->p_pending = -1;
+				d->p_front = pnext;
+				pthread_mutex_unlock(&d->program_lock);
 				continue; /* SetCrtc has no vblank event; the next iteration page-flips */
 			}
-			flip_fb = g_drm.pbufs[pnext].fb_id;
+			flip_fb = d->pbufs[pnext].fb_id;
 		} else {
-			flip_fb = g_drm.buffers[back].fb_id;
+			flip_fb = d->buffers[back].fb_id;
 		}
 
 		volatile int pending = 1;
-		if (drmModePageFlip(g_drm.drm_fd, g_drm.crtc_id, flip_fb, DRM_MODE_PAGE_FLIP_EVENT,
+		if (drmModePageFlip(d->drm_fd, d->crtc_id, flip_fb, DRM_MODE_PAGE_FLIP_EVENT,
 				    (void *)&pending) != 0) {
 			blog(LOG_WARNING, "drm-output: drmModePageFlip failed (%s) — stopping flip loop",
 			     strerror(errno));
@@ -643,9 +631,9 @@ static void *drm_output_flip_thread(void *arg)
 		 * never completes must NOT become a 100%-CPU spin on the 25W-clamped box — break out or
 		 * surface a wedge warning (the wedge-watchdog-pattern class). */
 		unsigned overdue = 0;
-		while (os_atomic_load_bool(&g_drm.running) && pending) {
+		while (os_atomic_load_bool(&d->running) && pending) {
 			struct pollfd pfd;
-			pfd.fd = g_drm.drm_fd;
+			pfd.fd = d->drm_fd;
 			pfd.events = POLLIN;
 			pfd.revents = 0;
 			int pr = poll(&pfd, 1, 1000);
@@ -664,7 +652,7 @@ static void *drm_output_flip_thread(void *arg)
 					blog(LOG_WARNING,
 					     "drm-output: page-flip completion overdue (%us) on crtc=%u — "
 					     "possible display wedge",
-					     overdue, (unsigned)g_drm.crtc_id);
+					     overdue, (unsigned)d->crtc_id);
 				continue;
 			}
 			if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
@@ -674,288 +662,196 @@ static void *drm_output_flip_thread(void *arg)
 				fatal = true;
 				break;
 			}
-			if ((pfd.revents & POLLIN) && drmHandleEvent(g_drm.drm_fd, &evctx) != 0) {
+			if ((pfd.revents & POLLIN) && drmHandleEvent(d->drm_fd, &evctx) != 0) {
 				blog(LOG_WARNING, "drm-output: drmHandleEvent failed — stopping");
 				fatal = true;
 				break;
 			}
 		}
 		if (program) {
-			pthread_mutex_lock(&g_drm.program_lock);
-			if (g_drm.p_pending == pnext)
-				g_drm.p_pending = -1;
-			g_drm.p_front = pnext;
-			pthread_mutex_unlock(&g_drm.program_lock);
-			g_drm.program_flips++;
-			if (g_drm.program_flips == 1ULL || g_drm.program_flips % 3600ULL == 0ULL)
+			drm_output_present_note_shown(&d->inst->clock, pnext, os_gettime_ns()); /* camera-box issue 1424 */
+			pthread_mutex_lock(&d->program_lock);
+			if (d->p_pending == pnext)
+				d->p_pending = -1;
+			d->p_front = pnext;
+			pthread_mutex_unlock(&d->program_lock);
+			d->program_flips++;
+			if (d->program_flips == 1ULL || d->program_flips % 3600ULL == 0ULL)
 				blog(LOG_INFO, "drm-output: program-flip #%llu (Program dma-buf scanout)",
-				     g_drm.program_flips);
+				     d->program_flips);
 		} else {
 			front = back;
 		}
-		g_drm.flips++;
+		d->flips++;
 		/* Log the first flip (immediate mechanism proof), then ~once/minute at 60Hz so this
 		 * never floods the OBS log the jitter_audit-family parsers grep once M2 runs steady. */
-		if (!program && (g_drm.flips == 1ULL || g_drm.flips % 3600ULL == 0ULL))
+		if (!program && (d->flips == 1ULL || d->flips % 3600ULL == 0ULL))
 			blog(LOG_INFO, "drm-output: page-flip #%llu (vblank-locked, solid M1 pattern)",
-			     g_drm.flips);
+			     d->flips);
 	}
 	/* Review finding (issue 1152 M2): a SELF-death of this loop (lease revoke, X restart, a
 	 * failed flip) must also disarm the frame hook — otherwise the graphics thread keeps
 	 * rendering + flushing a full-canvas copy ~60/s into a mailbox nobody drains, permanent
 	 * waste on the 25W-clamped box. stop() disarming again afterwards is harmless. */
-	os_atomic_set_bool(&g_drm.program_want, false);
-	blog(LOG_INFO, "drm-output: flip loop exited after %llu flips", g_drm.flips);
+	os_atomic_set_bool(&d->program_want, false);
+	blog(LOG_INFO, "drm-output: flip loop exited on '%s' after %llu flips", d->inst->connector, d->flips);
 	return NULL;
 }
 
 /* Tear down everything acquired by start (idempotent — safe on partial init). MUST run under lock. */
-static void drm_output_teardown_locked(void)
+static void drm_output_teardown_locked(struct drm_output_lease *d)
 {
-	if (g_drm.drm_fd >= 0) {
+	if (d->drm_fd >= 0) {
 		/* M2: Program FBs + GBM BOs first (RmFB needs the still-open fd). The GL textures
 		 * are already gone — stop() runs drm_output_program_gl_teardown before this, and
 		 * the start-failure path never created any. */
-		drm_output_program_free_bufs_locked();
+		drm_output_program_free_bufs_locked(d);
 		for (int i = 0; i < DRM_OUTPUT_BUFFERS; i++) {
-			struct drm_output_buffer *b = &g_drm.buffers[i];
+			struct drm_output_buffer *b = &d->buffers[i];
 			if (b->map) {
 				munmap(b->map, (size_t)b->size);
 				b->map = NULL;
 			}
 			if (b->fb_id) {
-				drmModeRmFB(g_drm.drm_fd, b->fb_id);
+				drmModeRmFB(d->drm_fd, b->fb_id);
 				b->fb_id = 0;
 			}
 			if (b->handle) {
-				drmModeDestroyDumbBuffer(g_drm.drm_fd, b->handle);
+				drmModeDestroyDumbBuffer(d->drm_fd, b->handle);
 				b->handle = 0;
 			}
 		}
-		close(g_drm.drm_fd);
-		g_drm.drm_fd = -1;
+		close(d->drm_fd);
+		d->drm_fd = -1;
 	}
-	if (g_drm.have_lease && g_drm.conn) {
+	if (d->have_lease && d->conn) {
 		/* terminate=1: revoke the lease so the connector returns to Xorg immediately. */
-		xcb_randr_free_lease(g_drm.conn, g_drm.lease, 1);
-		xcb_flush(g_drm.conn);
-		g_drm.have_lease = false;
-		g_drm.lease = 0;
+		xcb_randr_free_lease(d->conn, d->lease, 1);
+		xcb_flush(d->conn);
+		d->have_lease = false;
+		d->lease = 0;
 		blog(LOG_INFO, "drm-output: lease released — connector returned to Xorg");
 	}
-	if (g_drm.conn) {
-		xcb_disconnect(g_drm.conn);
-		g_drm.conn = NULL;
+	if (d->conn) {
+		xcb_disconnect(d->conn);
+		d->conn = NULL;
 	}
-	g_drm.crtc_id = 0;
-	g_drm.connector_id = 0;
+	d->crtc_id = 0;
+	d->connector_id = 0;
 }
 
-bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
-{
-	if (!cfg || !cfg->connector_name) {
-		blog(LOG_WARNING, "drm-output: start called with no connector — ignored");
-		return false;
-	}
-	/* camera-box issue 1346: the NVIDIA Vulkan direct-display backend owns this start. */
-	if (cfg->backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT)
-		return drm_output_vk_direct_backend.start(cfg);
+/* -------------------------------------------------------------------------------------------------
+ * The lease backend's entry points (drm_output_lease_backend, issue 1424 part 2: per instance).
+ * ------------------------------------------------------------------------------------------------- */
 
-	/* NOTE: the whole start sequence holds g_drm.lock across X round-trips + a full modeset
-	 * (seconds if X is slow). obs_drm_output_active() blocks for that window — fine for M1's
-	 * single-threaded activation; M2 must not call active() from a render-adjacent thread until
-	 * this lock scope is narrowed. */
-	pthread_mutex_lock(&g_drm.lock);
-	if (g_drm.stopping) {
-		pthread_mutex_unlock(&g_drm.lock);
-		blog(LOG_WARNING, "drm-output: start rejected — a stop is in progress");
+static bool lease_start(struct drm_output_inst *inst)
+{
+	struct drm_output_lease *d = drm_output_lease_of(inst);
+	/* NOTE: the whole start sequence holds d->lock across X round-trips + a full modeset
+	 * (seconds if X is slow). lease_active() blocks for that window — fine for the single-threaded
+	 * activation at obs_startup; never call it from a render-adjacent thread. */
+	pthread_mutex_lock(&d->lock);
+	if (d->stopping) {
+		pthread_mutex_unlock(&d->lock);
+		blog(LOG_WARNING, "drm-output: start rejected — a stop is in progress on '%s'", inst->connector);
 		return false;
 	}
-	if (g_drm.active) {
-		pthread_mutex_unlock(&g_drm.lock);
-		blog(LOG_INFO, "drm-output: already active — start ignored");
+	if (d->active) {
+		pthread_mutex_unlock(&d->lock);
+		blog(LOG_INFO, "drm-output: already active on '%s' — start ignored", inst->connector);
 		return true;
 	}
-	g_drm.flips = 0;
-	g_drm.program_flips = 0;
-	g_drm.program_gl_ready = false;
-	g_drm.program_crtc_live = false;
-	g_drm.p_front = -1;
-	g_drm.p_pending = -1;
-	g_drm.p_ready = -1;
+	d->inst = inst;
+	d->flips = 0;
+	d->program_flips = 0;
+	d->program_gl_ready = false;
+	d->program_crtc_live = false;
+	d->p_front = -1;
+	d->p_pending = -1;
+	d->p_ready = -1;
 
-	bool ok = drm_output_acquire_lease(cfg->connector_name) &&
-		  drm_output_setup_scanout(cfg->solid_argb);
+	bool ok = drm_output_acquire_lease(d, inst->connector) && drm_output_setup_scanout(d, inst->solid_argb);
 	if (!ok) {
-		drm_output_teardown_locked();
-		pthread_mutex_unlock(&g_drm.lock);
-		blog(LOG_WARNING, "drm-output: start FAILED for '%s'", cfg->connector_name);
+		drm_output_teardown_locked(d);
+		pthread_mutex_unlock(&d->lock);
+		blog(LOG_WARNING, "drm-output: start FAILED for '%s'", inst->connector);
 		return false;
 	}
 
 	/* M2: allocate the Program scanout buffers (fail-open — a failure stays on the solid
 	 * pattern rather than failing the whole output). The frame hook arms only on success. */
-	if (cfg->program) {
-		if (drm_output_program_alloc_locked()) {
-			os_atomic_set_bool(&g_drm.program_want, true);
+	if (inst->program) {
+		if (drm_output_program_alloc_locked(d)) {
+			os_atomic_set_bool(&d->program_want, true);
 		} else {
-			drm_output_program_free_bufs_locked();
-			os_atomic_set_bool(&g_drm.program_want, false);
+			drm_output_program_free_bufs_locked(d);
+			os_atomic_set_bool(&d->program_want, false);
 		}
 	} else {
-		os_atomic_set_bool(&g_drm.program_want, false);
+		os_atomic_set_bool(&d->program_want, false);
 	}
 
-	os_atomic_set_bool(&g_drm.running, true);
-	if (pthread_create(&g_drm.thread, NULL, drm_output_flip_thread, NULL) != 0) {
-		os_atomic_set_bool(&g_drm.running, false);
-		drm_output_teardown_locked();
-		pthread_mutex_unlock(&g_drm.lock);
-		blog(LOG_WARNING, "drm-output: could not create flip thread");
+	os_atomic_set_bool(&d->running, true);
+	if (pthread_create(&d->thread, NULL, drm_output_flip_thread, d) != 0) {
+		os_atomic_set_bool(&d->running, false);
+		drm_output_teardown_locked(d);
+		pthread_mutex_unlock(&d->lock);
+		blog(LOG_WARNING, "drm-output: could not create flip thread for '%s'", inst->connector);
 		return false;
 	}
-	g_drm.active = true;
-	pthread_mutex_unlock(&g_drm.lock);
-	blog(LOG_INFO, "drm-output: ACTIVE — page-flipping solid 0x%06x on '%s'",
-	     cfg->solid_argb & 0xFFFFFFu, cfg->connector_name);
+	d->active = true;
+	pthread_mutex_unlock(&d->lock);
+	blog(LOG_INFO, "drm-output: ACTIVE — page-flipping solid 0x%06x on '%s'", inst->solid_argb & 0xFFFFFFu,
+	     inst->connector);
 	return true;
 }
 
-void obs_drm_output_stop(void)
+static void lease_stop(struct drm_output_inst *inst)
 {
-	/* camera-box issue 1346: the vk-direct backend (a no-op when it never started). */
-	drm_output_vk_direct_backend.stop();
-
-	pthread_mutex_lock(&g_drm.lock);
-	if (!g_drm.active || g_drm.stopping) {
+	struct drm_output_lease *d = drm_output_lease_of(inst);
+	pthread_mutex_lock(&d->lock);
+	if (!d->active || d->stopping) {
 		/* Not running, or another stop already claimed the teardown — never join twice
 		 * (joining an already-joined pthread_t is undefined behaviour). */
-		pthread_mutex_unlock(&g_drm.lock);
+		pthread_mutex_unlock(&d->lock);
 		return;
 	}
-	g_drm.stopping = true; /* claim the transition: a racing stop returns above, a racing start rejects */
-	os_atomic_set_bool(&g_drm.running, false);
-	os_atomic_set_bool(&g_drm.program_want, false); /* M2: the frame hook stops producing */
-	pthread_t th = g_drm.thread;
-	pthread_mutex_unlock(&g_drm.lock);
+	d->stopping = true; /* claim the transition: a racing stop returns above, a racing start rejects */
+	os_atomic_set_bool(&d->running, false);
+	os_atomic_set_bool(&d->program_want, false); /* M2: the frame hook stops producing */
+	pthread_t th = d->thread;
+	pthread_mutex_unlock(&d->lock);
 
-	/* Join outside the lock: the flip loop reads g_drm fields but never takes g_drm.lock. */
+	/* Join outside the lock: the flip loop reads the lease state but never takes d->lock. */
 	pthread_join(th, NULL);
 
 	/* M2: destroy the GL side BEFORE the DRM/GBM teardown (the textures alias the BOs); it
 	 * takes graphics context + program_lock, so a frame hook mid-render finishes first. */
-	drm_output_program_gl_teardown();
+	drm_output_program_gl_teardown(d);
 	/* camera-box issue 1346: the Multiview texrender goes with the GL side (graphics alive). */
-	drm_output_view_gl_teardown();
+	drm_output_view_gl_teardown(inst);
 
-	pthread_mutex_lock(&g_drm.lock);
-	drm_output_teardown_locked();
-	g_drm.active = false;
-	g_drm.stopping = false;
-	pthread_mutex_unlock(&g_drm.lock);
-	blog(LOG_INFO, "drm-output: stopped");
+	pthread_mutex_lock(&d->lock);
+	drm_output_teardown_locked(d);
+	d->active = false;
+	d->stopping = false;
+	pthread_mutex_unlock(&d->lock);
+	blog(LOG_INFO, "drm-output: stopped (lease, '%s')", inst->connector);
 }
 
-bool obs_drm_output_active(void)
+static bool lease_active(struct drm_output_inst *inst)
 {
-	if (drm_output_vk_direct_backend.active()) /* camera-box issue 1346 */
-		return true;
-	pthread_mutex_lock(&g_drm.lock);
-	bool a = g_drm.active;
-	pthread_mutex_unlock(&g_drm.lock);
+	struct drm_output_lease *d = drm_output_lease_of(inst);
+	pthread_mutex_lock(&d->lock);
+	bool a = d->active;
+	pthread_mutex_unlock(&d->lock);
 	return a;
 }
 
-void obs_drm_output_maybe_autostart(void)
+static void lease_on_frame(struct drm_output_inst *inst)
 {
-	const char *home = getenv("HOME");
-	char path[1024];
-	if (!home || home[0] == '\0') {
-		blog(LOG_INFO, "drm-output: autostart disabled (no HOME) — module present, dormant");
-		return;
-	}
-	int n = snprintf(path, sizeof(path), "%s/.camera-box/drm-output.json", home);
-	if (n < 0 || (size_t)n >= sizeof(path)) {
-		blog(LOG_INFO, "drm-output: autostart disabled (config path too long) — dormant");
-		return;
-	}
-
-	if (access(path, R_OK) != 0) {
-		blog(LOG_INFO, "drm-output: autostart disabled (no config at %s) — module present, dormant",
-		     path);
-		return;
-	}
-
-	obs_data_t *data = obs_data_create_from_json_file(path);
-	if (!data) {
-		blog(LOG_WARNING, "drm-output: autostart config %s present but unparseable — dormant",
-		     path);
-		return;
-	}
-	bool enabled = obs_data_get_bool(data, "enabled");
-	const char *connector = obs_data_get_string(data, "connector");
-	bool has_argb = obs_data_has_user_value(data, "argb");
-	long long argb_ll = obs_data_get_int(data, "argb");
-	/* M2: optional "program" key — false keeps the M1 solid diagnostic pattern; absent or
-	 * true binds the Program (the point of the module). */
-	bool program = true;
-	if (obs_data_has_user_value(data, "program"))
-		program = obs_data_get_bool(data, "program");
-	/* camera-box issue 1346: the optional "view" key (program | multiview; absent = program) +
-	 * this config's path, which the live switch persists into. Handed over before the enabled
-	 * check so a disabled config still records the choice. */
-	const char *view = obs_data_get_string(data, "view");
-	drm_output_view_configure(view, path);
-	/* camera-box issue 1346: the optional "backend" key (lease | vk-direct; absent = lease). An unknown
-	 * value keeps the output dormant — the wrong backend only fails on the wrong GPU. */
-	const char *backend_s = obs_data_get_string(data, "backend");
-	int backend = drm_output_backend_from_config(backend_s);
-
-	if (!enabled) {
-		blog(LOG_INFO, "drm-output: autostart disabled ({\"enabled\":false} in %s) — dormant",
-		     path);
-		obs_data_release(data);
-		return;
-	}
-	if (!connector || connector[0] == '\0') {
-		blog(LOG_WARNING, "drm-output: autostart config %s has no \"connector\" — dormant", path);
-		obs_data_release(data);
-		return;
-	}
-	if (backend < 0) {
-		blog(LOG_WARNING,
-		     "drm-output: autostart config %s has an unknown \"backend\":\"%s\" (want lease or vk-direct) — "
-		     "dormant",
-		     path, backend_s);
-		obs_data_release(data);
-		return;
-	}
-
-	struct obs_drm_output_config cfg;
-	/* Copy the connector name onto the stack; obs_drm_output_start() consumes it synchronously
-	 * (strlen/memcmp/log) and never retains the pointer, so it need not outlive this call. */
-	char connector_buf[128];
-	snprintf(connector_buf, sizeof(connector_buf), "%s", connector);
-	cfg.connector_name = connector_buf;
-	/* Honour an explicit "argb": 0 (solid black); only fall back to dark grey when absent. */
-	cfg.solid_argb = has_argb ? (uint32_t)argb_ll : 0x00202020u;
-	cfg.program = program;
-	cfg.backend = (enum obs_drm_output_backend)backend;
-
-	blog(LOG_INFO, "drm-output: autostart ENABLED from %s — connector='%s'", path,
-	     cfg.connector_name);
-	if (cfg.backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT)
-		blog(LOG_INFO, "drm-output: backend=vk-direct (from %s) — NVIDIA Vulkan direct display", path);
-	obs_data_release(data);
-	(void)obs_drm_output_start(&cfg);
-}
-
-void obs_drm_output_on_frame(void)
-{
-	/* camera-box issue 1346: the vk-direct backend's own hook when it owns the output. */
-	if (drm_output_vk_direct_backend.on_frame())
-		return;
-	if (!os_atomic_load_bool(&g_drm.program_want))
+	struct drm_output_lease *d = drm_output_lease_of(inst);
+	if (!os_atomic_load_bool(&d->program_want))
 		return;
 
 	/* Lock discipline (the module's deadlock rule): graphics context FIRST, then program_lock
@@ -968,31 +864,31 @@ void obs_drm_output_on_frame(void)
 	 * obs_graphics_thread_loop call site), so the enter is a cheap recursive ref. */
 	obs_enter_graphics();
 
-	if (!os_atomic_load_bool(&g_drm.program_want)) { /* re-check: a stop may have disarmed */
+	if (!os_atomic_load_bool(&d->program_want)) { /* re-check: a stop may have disarmed */
 		obs_leave_graphics();
 		return;
 	}
 
-	if (!g_drm.program_gl_ready) {
-		if (!drm_output_program_gl_bind()) {
-			os_atomic_set_bool(&g_drm.program_want, false);
+	if (!d->program_gl_ready) {
+		if (!drm_output_program_gl_bind(d)) {
+			os_atomic_set_bool(&d->program_want, false);
 			/* Free any partially-imported textures right here — we hold the context. */
 			for (int i = 0; i < DRM_OUTPUT_PROGRAM_BUFFERS; i++) {
-				if (g_drm.pbufs[i].tex) {
-					gs_texture_destroy(g_drm.pbufs[i].tex);
-					g_drm.pbufs[i].tex = NULL;
+				if (d->pbufs[i].tex) {
+					gs_texture_destroy(d->pbufs[i].tex);
+					d->pbufs[i].tex = NULL;
 				}
 			}
 			obs_leave_graphics();
 			return;
 		}
-		g_drm.program_gl_ready = true;
+		d->program_gl_ready = true;
 	}
 
 	/* camera-box issue 1346: the selectable view. MULTIVIEW (the frontend's built-in grid,
 	 * budget-gated) is rendered by the view TU into a claimed buffer, or the last frame is kept;
 	 * only a PROGRAM tick falls through to the issue-1152 M2 copy below. */
-	if (drm_output_view_frame() != DRM_OUTPUT_TICK_PROGRAM) {
+	if (drm_output_view_frame(inst) != DRM_OUTPUT_TICK_PROGRAM) {
 		obs_leave_graphics();
 		return;
 	}
@@ -1003,8 +899,8 @@ void obs_drm_output_on_frame(void)
 		return;
 	}
 
-	/* CLAIM: take a buffer out of every mailbox role (see drm_output_claim_render_buf). */
-	int idx = drm_output_claim_render_buf();
+	/* CLAIM: take a buffer out of every mailbox role (see lease_claim). */
+	int idx = drm_output_claim_render_buf(inst);
 	if (idx < 0) {
 		obs_leave_graphics();
 		return;
@@ -1012,122 +908,62 @@ void obs_drm_output_on_frame(void)
 
 	/* PUBLISH only a buffer the blit really rendered (flush ordered BEFORE this); a claimed but
 	 * unpublished buffer simply stays role-free. */
-	if (drm_output_blit_raw(program, idx))
-		drm_output_publish_render_buf(idx);
+	if (drm_output_blit_raw(inst, program, idx))
+		drm_output_publish_render_buf(inst, idx);
 	obs_leave_graphics();
 }
 
-/* Raw SDR copy of `src` into scanout buffer `idx` (graphics thread, context held; the caller
- * claimed `idx`). Non-sRGB sampling + framebuffer sRGB encode OFF + blending OFF preserves the
- * texture BYTES exactly — the Program canvas and (issue 1346) the Multiview texrender are both
- * sRGB-ENCODED render targets, and the dma-buf scanout buffer is linear storage, so a byte copy
- * is the faithful transfer (the same values a monitor on the X desktop shows). Aspect-fit
- * letterboxes a size mismatch. Ends with gs_flush(): the kernel page-flip then waits on the BO's
- * implicit fence (i915/Xe dma-resv), so scanout never observes a half-rendered buffer — no
- * glFinish stall. Known limitation: SDR only (HDR would need a tonemap pass). Returns true iff
- * the buffer was rendered (the caller publishes only then). */
-bool drm_output_blit_raw(gs_texture_t *src, int idx)
-{
-	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-	gs_texture_t *dst = drm_output_render_buf_texture(idx);
-	if (!src || !effect || !dst)
-		return false;
-
-	uint32_t src_w = gs_texture_get_width(src);
-	uint32_t src_h = gs_texture_get_height(src);
-	uint32_t dst_w, dst_h; /* camera-box issue 1346: the owning backend's mode (lease or vk-direct) */
-	drm_output_mode_size(&dst_w, &dst_h);
-	uint32_t fx, fy, fw, fh;
-	drm_output_fit_rect(src_w, src_h, dst_w, dst_h, &fx, &fy, &fw, &fh);
-
-	gs_viewport_push();
-	gs_projection_push();
-	gs_matrix_push();
-	gs_matrix_identity();
-
-	gs_set_render_target(dst, NULL);
-	struct vec4 black;
-	vec4_zero(&black);
-	gs_clear(GS_CLEAR_COLOR, &black, 0.0f, 0);
-	gs_set_viewport((int)fx, (int)fy, (int)fw, (int)fh);
-	gs_ortho(0.0f, (float)src_w, 0.0f, (float)src_h, -100.0f, 100.0f);
-
-	gs_enable_depth_test(false);
-	gs_set_cull_mode(GS_NEITHER);
-	const bool prev_srgb = gs_framebuffer_srgb_enabled();
-	gs_enable_framebuffer_srgb(false);
-	gs_enable_blending(false);
-
-	gs_eparam_t *param = gs_effect_get_param_by_name(effect, "image");
-	gs_effect_set_texture(param, src);
-	while (gs_effect_loop(effect, "Draw"))
-		gs_draw_sprite(src, 0, 0, 0);
-
-	gs_enable_blending(true);
-	gs_enable_framebuffer_srgb(prev_srgb);
-	gs_set_render_target(NULL, NULL);
-
-	gs_matrix_pop();
-	gs_projection_pop();
-	gs_viewport_pop();
-
-	gs_flush();
-	return true;
-}
-
-/* -------------------------------------------------------------------------------------------------
- * camera-box issue 1346 — the mailbox seam shared with the view TU (obs-drm-output-internal.h).
- * Graphics thread, graphics context held (the frame hook) — the lock order is unchanged: the
- * context first, then program_lock, held only for the role transaction itself.
- * ------------------------------------------------------------------------------------------------- */
-
 /* CLAIM: take a buffer out of every mailbox role under the lock. Once claimed it is in NO role,
  * so the flip thread cannot select it while the caller renders into it lock-free. */
-int drm_output_claim_render_buf(void)
+static int lease_claim(struct drm_output_inst *inst)
 {
-	if (drm_output_vk_direct_backend.owns()) /* camera-box issue 1346 */
-		return drm_output_vk_direct_backend.claim();
-	pthread_mutex_lock(&g_drm.program_lock);
-	int idx = drm_output_pick_render_buf(g_drm.p_front, g_drm.p_pending, g_drm.p_ready,
-					     DRM_OUTPUT_PROGRAM_BUFFERS);
-	if (idx >= 0 && idx == g_drm.p_ready)
-		g_drm.p_ready = -1; /* claim the mailbox slot for overwrite (latest wins) */
-	pthread_mutex_unlock(&g_drm.program_lock);
+	struct drm_output_lease *d = drm_output_lease_of(inst);
+	pthread_mutex_lock(&d->program_lock);
+	int idx = drm_output_pick_render_buf(d->p_front, d->p_pending, d->p_ready, DRM_OUTPUT_PROGRAM_BUFFERS);
+	if (idx >= 0 && idx == d->p_ready)
+		d->p_ready = -1; /* claim the mailbox slot for overwrite (latest wins) */
+	pthread_mutex_unlock(&d->program_lock);
 	return idx;
 }
 
 /* PUBLISH: hand the rendered buffer to the flip thread — the caller flushed BEFORE this, so the
  * flip always finds the implicit fence attached. Skip when a stop disarmed the hook mid-render
  * (the mailbox is about to be torn down). */
-void drm_output_publish_render_buf(int idx)
+static void lease_publish(struct drm_output_inst *inst, int idx)
 {
-	if (drm_output_vk_direct_backend.owns()) { /* camera-box issue 1346 */
-		drm_output_vk_direct_backend.publish(idx);
-		return;
-	}
-	pthread_mutex_lock(&g_drm.program_lock);
-	if (os_atomic_load_bool(&g_drm.program_want))
-		g_drm.p_ready = idx;
-	pthread_mutex_unlock(&g_drm.program_lock);
+	struct drm_output_lease *d = drm_output_lease_of(inst);
+	pthread_mutex_lock(&d->program_lock);
+	if (os_atomic_load_bool(&d->program_want))
+		d->p_ready = idx;
+	pthread_mutex_unlock(&d->program_lock);
 }
 
-gs_texture_t *drm_output_render_buf_texture(int idx)
+static gs_texture_t *lease_texture(struct drm_output_inst *inst, int idx)
 {
-	if (drm_output_vk_direct_backend.owns()) /* camera-box issue 1346 */
-		return drm_output_vk_direct_backend.texture(idx);
+	struct drm_output_lease *d = drm_output_lease_of(inst);
 	if (idx < 0 || idx >= DRM_OUTPUT_PROGRAM_BUFFERS)
 		return NULL;
-	return g_drm.pbufs[idx].tex;
+	return d->pbufs[idx].tex;
 }
 
-void drm_output_mode_size(uint32_t *w, uint32_t *h)
+static void lease_mode_size(struct drm_output_inst *inst, uint32_t *w, uint32_t *h)
 {
-	if (drm_output_vk_direct_backend.owns()) { /* camera-box issue 1346 */
-		drm_output_vk_direct_backend.mode_size(w, h);
-		return;
-	}
-	*w = g_drm.mode_w;
-	*h = g_drm.mode_h;
+	struct drm_output_lease *d = drm_output_lease_of(inst);
+	*w = d->mode_w;
+	*h = d->mode_h;
 }
+
+const struct drm_output_backend_ops drm_output_lease_backend = {
+	.name = "lease",
+	.start = lease_start,
+	.stop = lease_stop,
+	.active = lease_active,
+	.on_frame = lease_on_frame,
+	.claim = lease_claim,
+	.publish = lease_publish,
+	.texture = lease_texture,
+	.mode_size = lease_mode_size,
+};
+
 
 #endif /* defined(__linux__) */

@@ -35,7 +35,7 @@
 #   scripts/launch-obs-genlock.sh --box stream --force   # force-kill a wedged obs64 first (obs-ops recovery)
 #   scripts/launch-obs-genlock.sh --box stream \
 #       --obs-dir 'C:\Program Files\obs-studio'          # override the OBS install dir
-# The Windows STRIH PC is RETIRED (M4 cut-over 20.9.2026, issue 1317): the strih is strih-lx, a Linux
+# The Windows STRIH PC is RETIRED (M4 cut-over 20.9.2026, issue 1317): the strih is strih-snv, a Linux
 # box launched by its strih-obs.service systemd user unit -- this Windows planner refuses it by name.
 # The per-box MCP/address/AHK facts come from the ONE shared table scripts/lib/genlock-fleet-boxes.sh.
 #
@@ -528,7 +528,7 @@ Usage:
 
   --box     stream (win-stream-snv, 10.77.9.204) or resolume (win-resolume, resolume.lan — the
             traveling cg OBS box, issue 1295) — selects the MCP. The Windows strih PC is RETIRED
-            (issue 1317): strih-lx is a Linux box launched by its strih-obs.service user unit.
+            (issue 1317): strih-snv is a Linux box launched by its strih-obs.service user unit.
   --force   force-kill a wedged obs64 first (documented obs-ops recovery; DEV rig).
   --obs-dir override the OBS install root (default 'C:\Program Files\obs-studio'; its bin\64bit is cwd).
 
@@ -561,12 +561,12 @@ main() {
   # (fleet_box_obs_profile) adds the `build <sha> - <label>: cg` title check on resolume (label localized).
   # resolume's host is the HOSTNAME resolume.lan, NEVER a pinned IP -- it DHCP-drifts and currently
   # collides with `bridge` at .201 (targets.md), so the emitted STEP-3/3b WS ops resolve it live via
-  # `--host resolume.lan`; confirm the box identity before trusting it. A Linux box (strih-lx) is
+  # `--host resolume.lan`; confirm the box identity before trusting it. A Linux box (strih-snv) is
   # refused: it has no win-* MCP and is launched by its strih-obs.service systemd user unit.
   local mcp box_ip ahk_mode title_profile=""
   case "$box" in
     strih)
-      echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is strih-lx, a Linux box launched by its strih-obs.service user unit, never this Windows planner" >&2
+      echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is strih-snv, a Linux box launched by its strih-obs.service user unit, never this Windows planner" >&2
       usage >&2; exit 2 ;;
   esac
   if ! mcp="$(fleet_box_mcp "$box")" || ! box_ip="$(fleet_box_ip "$box")"; then
@@ -575,8 +575,12 @@ main() {
   ahk_mode="$(fleet_box_ahk_mode "$box")"
   title_profile="$(fleet_box_obs_profile "$box")" || title_profile=""
 
-  local PROGRAM
+  local PROGRAM role
   PROGRAM="$(build_launch_program "$obs_dir" "$force" "$ahk_mode" "" "" "$title_profile")"
+  # issue 1414: the role tools below (latency_pins_verify.py, mark-imag-restart.sh) take a ROLE token
+  # (stream / resolume), never a fleet name -- the role is the fleet name before its venue.
+  role="$(obs_fleet_canonical_name "$box")"
+  role="${role%%-*}"
 
   echo "# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) ====="
   # resolume (issue 1295): the STEP-3/3b dev1-side WS ops below are keyed on the HOSTNAME
@@ -585,7 +589,7 @@ main() {
   # the dev1-side WS ops confirm the resolved address is REALLY RESOLUME-SNV (getent + its cg OBS
   # profile / OBS-WS identity, rig-state-inspection.md §2) and substitute the confirmed live
   # address for `resolume.lan` if in doubt -- mirrors the deploy plan's STEP -1 identity-confirm.
-  if [ "$box" = "resolume" ]; then
+  if [ "$(obs_fleet_canonical_name "$box")" = "resolume-snv" ]; then
     cat <<'RESCAVEAT'
 # STEP -1 (resolume ONLY -- box IDENTITY confirm, issue 1295): resolume.lan is a TRAVELING DHCP box
 #         currently resolving to 10.77.9.201 = the SAME IP `bridge` lists (targets.md). The dev1-side
@@ -631,7 +635,7 @@ ${PROGRAM}
 #         committed agreed-pins baseline (scripts/latency-pins-baseline.json) — it NEVER overwrites
 #         (forcing would fight the operator). Run ON DEV1 (read-only WS, session-agnostic, per
 #         win-ssh-vs-mcp), NOT in the ${mcp} MCP Shell:
-#           python3 scripts/latency_pins_verify.py --box ${box} --host ${box_ip}
+#           python3 scripts/latency_pins_verify.py --box ${role} --host ${box_ip}
 #         exit 0 = every agreed pin on baseline; exit 1 = drift (LOUD, names box+input+got+want — an
 #         ADVISORY signal, NOT a launch abort); exit 2 = a WS read failure (fail-closed). If the
 #         drift is a legitimate re-tune, record it by updating the baseline in a PR; if it is an
@@ -641,7 +645,7 @@ ${PROGRAM}
 #         (or use scripts/rig-mode.sh test|event, which does it for both boxes).
 # STEP 5 (#674): once STEP 2 confirms the relaunch succeeded, mark it on imag-nb's own journald so
 #         a future imag judder report can be time-correlated against this restart:
-#         scripts/mark-imag-restart.sh --box ${box} --reason "<why you relaunched>"
+#         scripts/mark-imag-restart.sh --box ${role} --reason "<why you relaunched>"
 PLAN
 }
 

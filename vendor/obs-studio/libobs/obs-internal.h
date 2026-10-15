@@ -35,6 +35,7 @@
 
 #include "media-io/audio-resampler.h"
 #include "media-io/asrc-compensator.h" /* camera-box #803 */
+#include "obs-genlock-fifo-relabel.h" /* camera-box issue 1372 part B: the per-source FIFO relabel state */
 #include "media-io/video-io.h"
 #include "media-io/audio-io.h"
 
@@ -1151,6 +1152,12 @@ struct obs_source {
 	uint32_t genlock_peak_depth;       /* high-water async_frames.num seen */
 	uint64_t genlock_ticks_since_drain; /* camera-box #859 follow-up: render ticks since the last SLEW-LIMITED SETTLE-BACK DRAIN fired (genlock_should_drain_one()). The #859 latency-relative backlog threshold stopped the backlog-relock branch firing every tick in steady state, but that branch was ALSO the FIFO's only mechanism for shedding excess queue depth after a genlock latency SETPOINT INCREASE — with it gated off, the plain N==1 steady release (one frame per tick) held depth CONSTANT forever (measured: a +34 ms setpoint step produced +134 ms of actual delay, stable across 6 samples). This counter rate-limits an ADDITIONAL bounded drain to at most one extra frame per GENLOCK_DRAIN_MIN_TICK_INTERVAL ticks — never a replacement for the backlog-relock branch. Reset to 0 whenever a drain fires; incremented every other steady N==1 tick. Zeroed at create (bzalloc, like the counters). Mirror of src/probe/genlock.rs ReleaseCadence::ticks_since_last_drain / src/genlock_backlog.rs DRAIN_MIN_TICK_INTERVAL (Tier-0 unit-tested). */
 	uint64_t genlock_n2_early; /* camera-box issue 1367 slice D1: cumulative N>=2 EARLY presents -- a tick of genlock_release_tick_n2_grid whose grid target had not arrived presented the newest arrived frame before it (nothing re-anchors; the next tick targets the grid again). Printed as n2_early= on the genlock-fifo audit line (audit-line-only, not in obs_genlock_stats); zeroed at create (bzalloc), never cleared. */
+	/* camera-box issue 1372 part B (design 6026394143): this source's receive-FIFO relabel -- the box
+	 * wall-step booking it applied last, the open arrival window, the last remembered raw stamp jump and
+	 * the relabelled-frame count (relabelled= on the genlock-fifo audit line, audit-line-only). Written by
+	 * the release (render thread) and the producer push, both under async_mutex; zeroed at create
+	 * (bzalloc). Decision: obs-genlock-fifo-relabel.h, src/genlock_fifo_relabel.rs. */
+	struct genlock_fifo_relabel_state genlock_relabel;
 	uint64_t genlock_last_log_ns;      /* last periodic audit-log wall stamp */
 	/* camera-box #148: last ts-align decision, SAMPLED per tick for the 5s audit line (the
 	 * blog() stays 5s-gated; only these cheap field writes are per-tick) — so a future

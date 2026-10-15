@@ -2,20 +2,120 @@
 //!
 //! Per participant: name/role/adapter/host plus the live counters a dev1 watchdog reads — rx/tx
 //! packets, jitter underruns/overruns, the age of the last received packet, and the input level in
-//! dBFS. The whole snapshot is rebuilt each block-status tick from the jitter buffers.
+//! dBFS. A VBAN leg also carries its jitter-buffer facet (target, depth, servo corrections, issue
+//! 1401). The whole snapshot is rebuilt each block-status tick from the jitter buffers.
 
 use serde::Serialize;
 
+use crate::hdmi_audio::{HdmiLegFacet, ALSA_HDMI_BUFFER_FRAMES, ALSA_HDMI_PERIOD_FRAMES};
 use crate::janus_rtp::JanusStats;
 use crate::local_audio::LocalAudioFacet;
 use crate::matrix::Matrix;
 use crate::ndi_video::VideoStats;
+use crate::vban_jitter::NetworkFillStats;
+
+/// A VBAN leg's jitter buffer as `/api/state` shows it (issue 1401): the target and the measured
+/// depth in frames (the hub `sample_rate` turns them into ms), and how often the drift servo
+/// dropped or repeated a single frame.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct JitterFacet {
+    /// The target pre-pop fill: live, a program feed's follows its sender's gaps.
+    pub target_frames: usize,
+    /// The mean pre-pop fill over the last 1 s window (0 before the first window).
+    pub depth_frames: usize,
+    /// The lowest pre-pop fill in that window (the underrun margin is this minus one block).
+    pub depth_min_frames: usize,
+    /// Single frames dropped because the fill sat high (the sender runs fast).
+    pub servo_drops: u64,
+    /// Single frames repeated because the fill sat low (the sender runs slow).
+    pub servo_repeats: u64,
+    /// The fill the servo holds now: `target_frames`, or while a target change is walked in (about
+    /// 37 s a block), the point the walk has reached. `depth_frames` follows this, not the target.
+    pub setpoint_frames: usize,
+    /// How many of `servo_drops` + `servo_repeats` walked a target change in (at most 7 a second);
+    /// the rest corrected the sender's drift.
+    pub servo_walk_steps: u64,
+    /// Times the stream stopped for more than 500 ms and came back: a sender outage on a program
+    /// feed, simply a mute on a cambox (it sends only while unmuted).
+    pub stalls: u64,
+    /// Audio is flowing (false while priming: before the first packet or after an underrun).
+    pub primed: bool,
+    /// A program feed's largest gap between two packets in the last 10 min, in ms (0.1 ms
+    /// resolution): what its adaptive target follows. Omitted for a leg with a fixed target (the
+    /// camboxes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_gap_ms_10min: Option<f64>,
+}
+
+/// The hub's HDMI audio leg as `/api/state` shows it (issue 1424 part 3): the connector the matrix
+/// names, the hw PCM it resolved to (or why it is silent), whether aplay runs, and its xruns. The
+/// pipe's fill and depth are in the participant's `local_audio` facet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HdmiLegState {
+    pub connector: String,
+    /// The connector matched exactly one HDMI PCM.
+    pub resolved: bool,
+    /// `hw:<card>,<device>` once resolved, else null.
+    pub hw: Option<String>,
+    /// The named reason of the last resolve (`matched`, or why the leg is silent).
+    pub reason: &'static str,
+    /// aplay is playing on `hw` (it has read from the pipe since its spawn).
+    pub running: bool,
+    /// Resolves since the hub started (one before every aplay spawn).
+    pub resolves: u64,
+    /// aplay's xruns (`underrun!!!`) since the hub started.
+    pub xruns: u64,
+    /// The leg's fixed delay after the pipe: aplay's ALSA buffer (kept full) and the period it holds.
+    /// The leg's total added delay = `local_audio.pipe_depth_frames` + these two (frames at the hub
+    /// rate), on top of the program feed's jitter target.
+    pub alsa_buffer_frames: usize,
+    pub alsa_period_frames: usize,
+}
+
+impl HdmiLegState {
+    fn new(connector: String, f: HdmiLegFacet) -> Self {
+        let hw = f.hw();
+        HdmiLegState {
+            connector,
+            resolved: hw.is_some(),
+            hw,
+            reason: f.reason(),
+            running: f.running,
+            resolves: f.resolves,
+            xruns: f.xruns,
+            alsa_buffer_frames: ALSA_HDMI_BUFFER_FRAMES,
+            alsa_period_frames: ALSA_HDMI_PERIOD_FRAMES,
+        }
+    }
+}
+
+impl From<NetworkFillStats> for JitterFacet {
+    fn from(s: NetworkFillStats) -> Self {
+        JitterFacet {
+            target_frames: s.target_frames,
+            depth_frames: s.depth_frames,
+            depth_min_frames: s.depth_min_frames,
+            servo_drops: s.servo_drops,
+            servo_repeats: s.servo_repeats,
+            setpoint_frames: s.setpoint_frames,
+            servo_walk_steps: s.servo_walk_steps,
+            stalls: s.stalls,
+            primed: s.primed,
+            max_gap_ms_10min: s
+                .max_gap_us_10min
+                .map(|us| (us as f64 / 100.0).round() / 10.0),
+        }
+    }
+}
 
 /// Per-participant runtime counters, gathered from its jitter buffer + tx side each tick.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RuntimeStats {
     pub rx_packets: u64,
     pub tx_packets: u64,
+    /// VBAN packets to this participant dropped because its own send socket was backed up (issue
+    /// 1401: a NIC or queue stall), instead of blocking the block loop.
+    pub tx_dropped: u64,
     pub underruns: u64,
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
@@ -30,6 +130,10 @@ pub struct RuntimeStats {
     /// The local PipeWire facet, present only for a `pipewire`-adapter participant — the
     /// `program_out` sink + the talkback capture (issue 1344).
     pub local_audio: Option<LocalAudioFacet>,
+    /// The VBAN leg's jitter-buffer facet (issue 1401), `None` for the other participants.
+    pub jitter: Option<JitterFacet>,
+    /// The HDMI audio leg facet (issue 1424 part 3), `None` for every non-`alsa_hdmi` participant.
+    pub hdmi: Option<HdmiLegFacet>,
 }
 
 /// One participant's serialized state.
@@ -41,6 +145,10 @@ pub struct ParticipantState {
     pub host: Option<String>,
     pub rx_packets: u64,
     pub tx_packets: u64,
+    /// VBAN packets to this participant dropped on a backed-up send socket (issue 1401). 0 in a
+    /// healthy run; a cambox that is off stays 0 too (the kernel discards its packets, and its
+    /// `tx_packets` keeps counting).
+    pub tx_dropped: u64,
     pub underruns: u64,
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
@@ -61,6 +169,13 @@ pub struct ParticipantState {
     /// `pipewire`-adapter participant — omitted from the JSON for every other participant (issue 1344).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_audio: Option<LocalAudioFacet>,
+    /// The VBAN leg's jitter buffer (target / depth / servo drops + repeats, issue 1401), present
+    /// only for a VBAN participant — omitted from the JSON for every other participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jitter: Option<JitterFacet>,
+    /// The HDMI audio leg (issue 1424 part 3), present only for an `alsa_hdmi` participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hdmi: Option<HdmiLegState>,
 }
 
 /// The whole hub state (the `/api/state` body + each `/ws` push).
@@ -74,6 +189,19 @@ pub struct HubState {
     /// last_error), present only when the hub has a `[video]` config (M3c) — omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoStats>,
+    /// Hub block-loop ticks run late since the daemon started (issue 1401, design 5980775411): the
+    /// loop woke more than a period late and ran the missed cycles at once, so no output lost a
+    /// block. Set by the daemon after the snapshot; the pure snapshot has no tick history.
+    pub caught_up_ticks: u64,
+    /// Hub block-loop ticks given up since the daemon started: the part of a late wake beyond the
+    /// four it runs late. Each one is a block lost on EVERY output, the program sink included (the
+    /// VBAN legs give the same block up). Set by the daemon after the snapshot.
+    pub lost_ticks: u64,
+    /// The hub-mix block loop thread's scheduling class as it read it at start (`SCHED_FIFO 10`,
+    /// or `SCHED_OTHER` when the unit's realtime grant is missing): a refused grant is visible
+    /// here without ssh. Set by the daemon; omitted from the pure snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mix_thread_sched: Option<String>,
 }
 
 impl HubState {
@@ -94,6 +222,7 @@ impl HubState {
                     host: p.host.clone(),
                     rx_packets: s.rx_packets,
                     tx_packets: s.tx_packets,
+                    tx_dropped: s.tx_dropped,
                     underruns: s.underruns,
                     overruns: s.overruns,
                     last_rx_age_ms: s.last_rx_age_ms,
@@ -102,6 +231,13 @@ impl HubState {
                     rate_rejects: vban.then_some(s.rate_rejects),
                     janus: s.janus,
                     local_audio: s.local_audio,
+                    jitter: s.jitter.filter(|_| vban),
+                    hdmi: s
+                        .hdmi
+                        .filter(|_| p.adapter == crate::matrix::ADAPTER_ALSA_HDMI)
+                        .map(|f| {
+                            HdmiLegState::new(p.hdmi_connector.clone().unwrap_or_default(), f)
+                        }),
                 }
             })
             .collect();
@@ -113,15 +249,25 @@ impl HubState {
             // The video facet is attached by the daemon (main.rs) after the snapshot when a `[video]`
             // config is present; the pure snapshot has no picture state of its own.
             video: None,
+            caught_up_ticks: 0,
+            lost_ticks: 0,
+            mix_thread_sched: None,
         }
     }
 
-    /// A one-line status summary for the periodic log (a dev1 watchdog greps it): worst underruns +
-    /// the participant levels, so a dead/underrunning leg is visible between E2E runs. Dropped
-    /// wrong-rate VBAN packets are named as `rate_rejects=N` when there are any (issue 1345), so a
-    /// rejected stream (which reads as silent) stays explained after its one warn scrolls away.
+    /// A one-line status summary for the periodic log (a dev1 watchdog greps it): the underruns and
+    /// overruns summed over every participant, each naming the leg with the most (issue 1401:
+    /// `underruns=220(fohabl)`), + the participant levels, so a dead/underrunning leg is visible
+    /// between E2E runs. When there are any, it also shows the non-cambox VBAN legs' stalls (a
+    /// program feed that stopped for more than 500 ms and came back, `stalls=1(fohabl)`; a cambox
+    /// stops on every mute, so it is left out), the block loop's lost ticks as `lost=N` (a block
+    /// lost on every output; a tick it caught up is no loss and stays off the line), the VBAN
+    /// packets dropped on a backed-up send socket as
+    /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the VBAN legs' drift-servo
+    /// corrections as `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as
+    /// `rate_rejects=N` (issue 1345), so a rejected stream (which reads as silent) stays explained
+    /// after its one warn scrolls away.
     pub fn status_line(&self) -> String {
-        let total_underruns: u64 = self.participants.iter().map(|p| p.underruns).sum();
         let total_rate_rejects: u64 = self
             .participants
             .iter()
@@ -138,13 +284,86 @@ impl HubState {
         } else {
             String::new()
         };
+        let (drops, repeats) = self
+            .participants
+            .iter()
+            .filter_map(|p| p.jitter)
+            .fold((0u64, 0u64), |(d, r), j| {
+                (d + j.servo_drops, r + j.servo_repeats)
+            });
+        let servo = if drops + repeats > 0 {
+            format!(" servo={drops}/{repeats}")
+        } else {
+            String::new()
+        };
+        let program_stalls = |p: &ParticipantState| {
+            if p.role == crate::matrix::CAMBOX_ROLE {
+                0
+            } else {
+                p.jitter.map_or(0, |j| j.stalls)
+            }
+        };
+        let stalls = if self.participants.iter().map(program_stalls).sum::<u64>() > 0 {
+            format!(" stalls={}", self.total_naming_worst(program_stalls))
+        } else {
+            String::new()
+        };
+        let lost = if self.lost_ticks > 0 {
+            format!(" lost={}", self.lost_ticks)
+        } else {
+            String::new()
+        };
+        let tx_dropped = if self.participants.iter().map(|p| p.tx_dropped).sum::<u64>() > 0 {
+            format!(" tx_dropped={}", self.total_naming_worst(|p| p.tx_dropped))
+        } else {
+            String::new()
+        };
+        // The HDMI audio legs (issue 1424 part 3): where each plays, its pipe depth and its xruns,
+        // or that it is silent (the reason is on /api/state and in the leg's own log line).
+        let hdmi: String = self
+            .participants
+            .iter()
+            .filter_map(|p| p.hdmi.as_ref().map(|h| (p, h)))
+            .map(|(p, h)| match &h.hw {
+                Some(hw) => format!(
+                    " hdmi={}:{hw}:depth={}:xruns={}",
+                    p.name,
+                    p.local_audio.map_or(0, |l| l.pipe_depth_frames),
+                    h.xruns
+                ),
+                None => format!(" hdmi={}:silent", p.name),
+            })
+            .collect();
         format!(
-            "intercom-hub: status participants={} underruns={}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{} {}",
             self.participants.len(),
-            total_underruns,
+            self.total_naming_worst(|p| p.underruns),
+            self.total_naming_worst(|p| p.overruns),
+            stalls,
+            lost,
+            tx_dropped,
+            servo,
             rejects,
+            hdmi,
             levels.join(" ")
         )
+    }
+
+    /// `N` summed over the participants, followed by `(name)` of the one with the most when `N` > 0
+    /// (the first of a tie). The total keeps leading, so a parser of the bare number still works.
+    fn total_naming_worst(&self, count: impl Fn(&ParticipantState) -> u64) -> String {
+        let total: u64 = self.participants.iter().map(&count).sum();
+        // The FIRST participant with the highest count (`max_by_key` would name the last of a tie).
+        let mut worst: Option<&ParticipantState> = None;
+        for p in &self.participants {
+            if worst.is_none_or(|w| count(p) > count(w)) {
+                worst = Some(p);
+            }
+        }
+        match worst {
+            Some(p) if total > 0 => format!("{total}({})", p.name),
+            _ => total.to_string(),
+        }
     }
 }
 
@@ -188,6 +407,7 @@ out_channels = 4
             RuntimeStats {
                 rx_packets: 10,
                 tx_packets: 9,
+                tx_dropped: 0,
                 underruns: 1,
                 overruns: 0,
                 last_rx_age_ms: Some(5),
@@ -196,6 +416,8 @@ out_channels = 4
                 rate_rejects: 0,
                 janus: None,
                 local_audio: None,
+                jitter: None,
+                hdmi: None,
             },
             RuntimeStats::default(),
         ];

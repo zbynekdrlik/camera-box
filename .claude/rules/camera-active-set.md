@@ -13,6 +13,24 @@ paths:
 
 # CAMERA_ACTIVE_SET — every fleet-enumeration consumer MUST derive from it, never a literal range
 
+**CURRENT (issue 1413, owner 12.10.2026): the SNV rig SHRANK to `cam2 cam3 cam5`** — cam1/cam4/cam6/cam7
+moved to Poprad (`scripts/strih-boxes/strih-pp.env` `STRIH_CAMERAS=1 4 6 7`). The default is the SNV
+venue's `STRIH_CAMERAS` (strih-snv.env `2 3 5`) as cam names, pinned EQUAL by
+`harness_camera_set.rs::camera_active_set_default_is_the_snv_venue_cameras_1413`; the source box is
+cam5, the SNV box whose USB-C carries the test camera (`CAMERA_TEST_CAMERA_BOX`, set only for the
+default set, 14.10.2026 -- the release E2E aborted at the issue-1371 step with the camera on cam5
+and the derived source on cam3; an explicit set keeps the first-routable derivation); `CAMERA_ALIGN_SET` is cam3 + every strih-routable active camera (`camera_align_default`,
+SNV `cam3 cam5`, the unconditional cam4 is gone); the five python mirrors + the
+`rig-dev-handover-check.sh` fallback carry `cam2 cam3 cam5`. The PP cameras keep every fact and are
+maintained through the dantesync fleet's PP `reach` rows (`.claude/rules/dantesync-fleet.md`), never
+through this SNV measurement set: dantesync, and the camera-box binary through
+`deploy-fleet.sh --venue <name>` + the ci.yml away-venue step + the version gate's report-only
+`--other-venues` rows. **The default sweep (`camera_active_sweep_pairs`) OPENS on the source box**
+(14.10.2026): the E2E shows the source camera on strih program before StartRecord, so a sweep that
+opened elsewhere cut at the switch schedule's start, where the frames before the cut sit outside
+every window, and the strih burn counter jump of that cut was charged as one real drop in every
+run (`tests/python/test_sweep_starts_at_source_1413.py`). Everything below is the history before it.
+
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
 installed and MEASURED TODAY (default `cam1 cam2 cam3 cam4 cam5 cam6 cam7` — the FULL seven-camera
 fleet, for the first time simultaneously — cam1+cam2 restored issue 1198 2026-08-27 — the owner

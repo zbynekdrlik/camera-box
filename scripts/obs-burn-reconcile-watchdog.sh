@@ -7,13 +7,13 @@
 # the UNATTENDED strih/stream OBS start paths.
 #
 # ROSTER (issue 1317 part 2, M4 cut-over): the boxes come from the ONE fleet list
-# (scripts/lib/obs-fleet.sh, facet `burn-reconcile` = strih-lx + stream), overridable byte-compatibly
+# (scripts/lib/obs-fleet.sh, facet `burn-reconcile` = strih-snv + stream), overridable byte-compatibly
 # via OBS_BURN_RECONCILE_BOXES="name|host ...". Everything here is OBS-WebSocket (GetStats +
-# obs_burn_filter sweeps), so it is platform-neutral: the production Linux strih-lx keeps the coverage
+# obs_burn_filter sweeps), so it is platform-neutral: the production Linux strih-snv keeps the coverage
 # the retired Windows strih had (its unattended starts are the boot autostart and the
-# strih-obs.service restart). STRIH_HOST still repoints the strih (now strih-lx) and STREAM_HOST the
-# stream box. State keys are the fleet NAME (`strih-lx_rtf`), so the first pass after this change
-# only SEEDS the strih-lx baseline -- never a false restart. A traveling member is probed only while
+# strih-obs.service restart). STRIH_HOST still repoints the strih (now strih-snv) and STREAM_HOST the
+# stream box. State keys are the fleet NAME (`strih-snv_rtf`), so the first pass after this change
+# only SEEDS the strih-snv baseline -- never a false restart. A traveling member is probed only while
 # home (obs_fleet_poll_now).
 #
 # WHY (#1060, a 1057 follow-up): issue 1057 closed the burn-resurrection window for the DELIBERATE
@@ -128,14 +128,9 @@ log() { printf '%s [obs-burn-reconcile-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:
 # 0 (coordinating) if a FRESH #281 rig-active heartbeat exists (recording-e2e.sh / rig-mode.sh
 # TEST) OR the #830 rig lease is held by a LIVE holder (a CI gate). Either => a burn set right now
 # is legitimate and this watchdog must DEFER, never sweep it.
+# The read is the ONE shared rig_held_reason (scripts/lib/rig-heartbeat.sh, issue 1394).
 rig_is_coordinating() {
-  if rig_heartbeat_active; then
-    return 0
-  fi
-  if [ -d "$(rig_lease_dir)" ] && ! rig_lease_is_stale "$RIG_LEASE_STALE_SECS"; then
-    return 0
-  fi
-  return 1
+  rig_held_reason "$RIG_LEASE_STALE_SECS" >/dev/null
 }
 
 # obs_burn_filter.py wrapper (reused for session-probe / sweep-check / sweep-off).
@@ -263,8 +258,8 @@ main() {
       continue
     fi
     case "$name" in
-      strih-lx) host="${STRIH_HOST:-$host}" ;;
-      stream) host="${STREAM_HOST:-$host}" ;;
+      strih-snv) host="${STRIH_HOST:-$host}" ;;
+      stream-snv) host="${STREAM_HOST:-$host}" ;;
     esac
     process_box "$name" "$host"
   done

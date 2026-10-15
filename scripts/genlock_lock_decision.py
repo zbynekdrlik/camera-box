@@ -17,7 +17,7 @@ LOCALLY under Tier-0 (#557 kills cargo). The orchestrator scripts/genlock-lock-a
 curls the JSON, calls `analyze` here, and drives obs-watchdog-decision.sh's confirm/throttle +
 airuleset notify (--dedup-key genlock-lock-$box, #1206).
 
-`decide()` is a byte-faithful Python MIRROR of src/genlock_lock_state.rs's `decide` (the Rust
+`decide()` is a byte-faithful Python MIRROR of src/genlock_lock_state/decision.rs's `decide` (the Rust
 authority, itself C-vs-Rust parity-gated against GenlockLockState.hpp). The watchdog trusts the
 `state` string the widget already decided and carries in the facet; `decide()` exists so the
 test suite can feed the SAME counters the Rust/C parity gate uses and assert the three-state
@@ -37,12 +37,12 @@ import argparse
 import json
 import sys
 
-# State strings -- match src/genlock_lock_state.rs LockState + the C genlock_state_name().
+# State strings -- match src/genlock_lock_state/decision.rs LockState + the C genlock_state_name().
 ST_LOCKED = "LOCKED"
 ST_DEGRADED = "DEGRADED"
 ST_UNLOCKED = "UNLOCKED"
 
-# Reason tokens -- match the C genlock_reason_key() + src/genlock_lock_state.rs LockReason.
+# Reason tokens -- match the C genlock_reason_key() + src/genlock_lock_state/decision.rs LockReason.
 R_NONE = "none"
 R_NO_GENLOCK = "no_genlock"
 R_CLOCK = "clock"
@@ -57,7 +57,7 @@ R_AUDIO_UNEXPECTED = "audio_unexpected"  # #1303: silent-by-contract source foun
 R_MEDIA_CLOCK = "media_clock"          # issue 1372 part D: the audio (media) clock does not follow the wall
 
 # Issue 1372 part D -- the media-clock (audio clock) verdict tokens + bounds (mirror
-# src/genlock_lock_state.rs + GenlockLockState.hpp / OBSBasicStatusBar.cpp).
+# src/genlock_lock_state/media_clock.rs + GenlockLockState.hpp / OBSBasicStatusBar.cpp).
 MC_OK = "ok"
 MC_DRIFT = "drift"
 MC_UNDISCIPLINED = "undisciplined"
@@ -68,7 +68,7 @@ GENLOCK_MEDIA_CLOCK_BAND_US = 100           # a pair off the centre's prediction
 # The Windows os_gettime_discipline() outcomes that mean "fell back to raw QPC".
 MEDIA_DISCIPLINE_RAW_FALLBACK = ("disabled", "read_failed", "api_missing")
 
-# #1299 Part 4 + #1357 scope C -- the wall-vs-QPC drift bounds (mirror src/genlock_lock_state.rs +
+# #1299 Part 4 + #1357 scope C -- the wall-vs-QPC drift bounds (mirror src/genlock_lock_state/qpc_step.rs +
 # GenlockLockState.hpp / OBSBasicStatusBar.cpp). The verdict is the wall STEP only -- not the unbounded
 # cumulative offset (grows ~50 ms/h on a disciplined Windows box, false-paged the fleet) and not a rate
 # (0 by construction on Linux's disciplined CLOCK_MONOTONIC, the free crystal on Windows: a rate check
@@ -157,7 +157,7 @@ def media_clock_verdict(window_ready, drift_us, drift_bound_us, discipline, cloc
 def decide(n_inputs, n_locked, recent_event, qpc_drift_beyond_bound, clock_present,
            clock_locked, clock_ntp_failed, output_present, output_stamping, n_absent=0,
            audio_unpaired=False, audio_unexpected=False, n_idle=0, media_clock=MC_OK):
-    """Pure three-state decision -- a byte-faithful mirror of src/genlock_lock_state.rs `decide`.
+    """Pure three-state decision -- a byte-faithful mirror of src/genlock_lock_state/decision.rs `decide`.
 
     UNLOCKED precedence: clock (absent/unlocked) > output (present but not stamping) >
     no-input-locked. DEGRADED precedence (only when no UNLOCKED condition holds): some-input-

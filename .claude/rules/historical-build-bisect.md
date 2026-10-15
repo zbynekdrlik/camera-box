@@ -24,8 +24,8 @@ resolve via the artifact's `head_sha`, or ancestry-check the green commit agains
 
 ## 2. Deploy a pinned artifact to a SUBSET
 `scripts/deploy-fleet.sh --run <run-id>` downloads that artifact and does a full byte-verified deploy
-(stop → remount,rw → scp → start → remount,ro → sha256 byte-verify → version read-back → genlock-emit
-check). Restrict the boxes with `CAMERA_SET="cam1 cam2"` (default is `$CAMERA_ACTIVE_SET`). For an
+(stop → remount,rw → scp → the verified ro close (`.claude/rules/ro-window.md`) → start → sha256
+byte-verify → version read-back → genlock-emit check). Restrict the boxes with `CAMERA_SET="cam1 cam2"` (default is `$CAMERA_ACTIVE_SET`). For an
 EXPIRED artifact, `--run` fails — rebuild the SHA on CI and use `deploy-fleet.sh --binary <camera-box>`.
 
 ## 3. The version-parity gate REFUSES a mixed fleet — neutralize it deliberately

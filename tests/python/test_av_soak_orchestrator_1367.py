@@ -401,10 +401,13 @@ def test_plan_is_the_default_and_touches_nothing(rig):
 
 
 def test_the_default_slot_leaves_the_measured_strih_lx_decode_time(tmp_path):
-    # ROZHODNUTÉ 5861667625: strih-lx decodes at ~8.5 frames/s on its idle E-cores, so the
+    # ROZHODNUTÉ 5861667625: strih-snv decodes at ~8.5 frames/s on its idle E-cores, so the
     # defaults are a 20 min slot and 20 s camera segments, and the decode budget must cover a
     # 7-camera window at that speed (with margin), not the 210 s the first design assumed.
     env = {k: v for k, v in os.environ.items() if not k.startswith("AV_SOAK_")}
+    # issue 1413: the SNV default is three cameras now; the budget is still proven for a full
+    # seven-camera rig (the worst case the slot was sized for).
+    env["AV_SOAK_CAMS"] = "cam1 cam2 cam3 cam4 cam5 cam6 cam7"
     r = subprocess.run(["bash", SOAK, "--plan", "--hours", "1"], env=env,
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -413,7 +416,7 @@ def test_the_default_slot_leaves_the_measured_strih_lx_decode_time(tmp_path):
     m = re.search(r"decode <= (\d+) s", r.stdout)
     assert m, r.stdout
     frames = 140 * 30
-    assert int(m.group(1)) >= frames / 8.5 * 1.5, "decode budget below 1.5x the measured strih-lx time"
+    assert int(m.group(1)) >= frames / 8.5 * 1.5, "decode budget below 1.5x the measured strih-snv time"
 
 
 def test_plan_never_names_a_writer_or_the_production_scene(rig):

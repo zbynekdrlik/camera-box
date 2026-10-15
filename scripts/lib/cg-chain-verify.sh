@@ -15,6 +15,12 @@
 #   * `camera_box::jitter_audit` parse + summarize  -> cg_chain_summarize_window
 #   * `camera_box::resolume_playback::evaluate`      -> cg_chain_verdict  (skew <= bound, ZERO
 #     dropped/underrun/relock/late-hold/backward-regime deltas, samples >= min)
+# Issue 1302 adds a TOOL-ONLY rule on top of the replica (never in the Rust evaluate, whose
+# jitter_audit input parses neither shallow_depth= nor the canvas rate): a SHALLOW-latched input
+# (audit `shallow_depth=` D > 0, issue 1367) is held at D frames by design, so its head age reads
+# D x interval; cg_chain_shallow_window grades it by its EXCURSION from that target, and a
+# `shallow_latches=` delta (a re-latch: a lock or a re-measure) FAILs. cg_chain_verdict takes that line as an OPTIONAL
+# fourth argument; without it (or with it empty) the verdict is byte-identical to the replica.
 # The asrc residual band follows `.claude/rules/asrc-residual-floor.md` (a steady +7..+8 ppm is the
 # physical Dante-GM-vs-UTC floor, NOT a defect; a value far outside +/-10 -- e.g. the -18 ppm
 # port-collision signature -- is what to chase), never "DVS off".
@@ -31,6 +37,47 @@ cg_chain_strip_high_bytes() {
   LC_ALL=C tr -d '\200-\377' || true
 }
 
+# _cg_chain_awk_common -- stdout: the awk function preamble that every audit-line parser below
+#   prepends to its own program, so the parsers share ONE copy and cannot drift (issue 1302):
+#     audit_source(line) -- the `genlock-fifo audit '<name>'` source name, or "" for any other line;
+#     getval(line, key)  -- the STRICT-integer value of a whitespace `key=value` token, or "";
+#     absval(x)          -- |x| as a NUMBER.
+#   Pure (prints a constant), so sourcing the lib still has no side effect.
+_cg_chain_awk_common() {
+  cat <<'AWK'
+function audit_source(line,    mark, idx, rest, q) {
+  mark = "genlock-fifo audit '"
+  idx = index(line, mark)
+  if (idx == 0) return ""
+  rest = substr(line, idx + length(mark))
+  q = index(rest, "'")
+  if (q == 0) return ""
+  return substr(rest, 1, q - 1)
+}
+function getval(line, key,    toks, n, i, eq, k, v) {
+  n = split(line, toks, /[ \t]+/)
+  for (i = 1; i <= n; i++) {
+    eq = index(toks[i], "=")
+    if (eq == 0) continue
+    k = substr(toks[i], 1, eq - 1)
+    if (k != key) continue
+    v = substr(toks[i], eq + 1)
+    # STRICT integer only -- mirror Rust jitter_audit set-macro val.parse, which leaves the field 0
+    # on any non-integer value. A lenient leading-digit extraction would diverge from the Rust source
+    # of truth on a malformed token; the real genlock-fifo audit line only ever emits clean integer
+    # tokens, so a non-match returns empty.
+    if (v ~ /^-?[0-9]+$/) return v
+    return ""
+  }
+  return ""
+}
+# issue 1302: x + 0 makes the value a NUMBER. getval returns a substr() string, and awk compares two
+# strings as text ("8" above "25"), which made the window max diverge from the numeric max of
+# jitter_audit summarize. Coerce every value that is compared or maxed.
+function absval(x) { x = x + 0; return x < 0 ? -x : x }
+AWK
+}
+
 # cg_chain_enumerate_sources [name_regex] -- stdin: OBS-log text; stdout: the distinct
 #   `genlock-fifo audit '<name>'` source names, one per line, in FIRST-SEEN order (never a static
 #   list -- the burn-target-enumeration discipline). An optional ERE filters the names (e.g.
@@ -40,15 +87,10 @@ cg_chain_strip_high_bytes() {
 #   (`CG_CHAIN_CGOBS_SRC_RE`), this just avoids a case-only miss. Always exits 0.
 cg_chain_enumerate_sources() {
   local re="${1:-}"
-  cg_chain_strip_high_bytes | awk -v RE="$re" '
+  cg_chain_strip_high_bytes | awk -v RE="$re" "$(_cg_chain_awk_common)"'
     {
-      mark = "genlock-fifo audit '\''"
-      idx = index($0, mark)
-      if (idx == 0) next
-      rest = substr($0, idx + length(mark))
-      q = index(rest, "'\''")
-      if (q == 0) next
-      src = substr(rest, 1, q - 1)
+      src = audit_source($0)
+      if (src == "") next
       if (RE != "" && tolower(src) !~ tolower(RE)) next
       if (!(src in seen)) { seen[src] = 1; order[++n] = src }
     }
@@ -65,34 +107,10 @@ cg_chain_enumerate_sources() {
 #   Always exits 0.
 cg_chain_summarize_window() {
   local source="${1:-}"
-  cg_chain_strip_high_bytes | awk -v SRC="$source" '
-    function getval(line, key,    toks, n, i, eq, k, v) {
-      n = split(line, toks, /[ \t]+/)
-      for (i = 1; i <= n; i++) {
-        eq = index(toks[i], "=")
-        if (eq == 0) continue
-        k = substr(toks[i], 1, eq - 1)
-        if (k != key) continue
-        v = substr(toks[i], eq + 1)
-        # STRICT integer only -- mirror Rust jitter_audit set-macro val.parse, which leaves the
-        # field 0 on any non-integer value. A lenient leading-digit extraction would diverge from
-        # the Rust source of truth on a malformed token; the real genlock-fifo audit line only ever
-        # emits clean integer tokens, so a non-match returns empty.
-        if (v ~ /^-?[0-9]+$/) return v
-        return ""
-      }
-      return ""
-    }
-    function absval(x) { return x < 0 ? -x : x }
+  cg_chain_strip_high_bytes | awk -v SRC="$source" "$(_cg_chain_awk_common)"'
     {
-      mark = "genlock-fifo audit '\''"
-      idx = index($0, mark)
-      if (idx == 0) next
-      rest = substr($0, idx + length(mark))
-      q = index(rest, "'\''")
-      if (q == 0) next
-      src = substr(rest, 1, q - 1)
-      if (src != SRC) next
+      src = audit_source($0)
+      if (src == "" || src != SRC) next
 
       skew = getval($0, "ts_head_skew_ms"); if (skew == "") skew = 0
       drp  = getval($0, "dropped_due");     if (drp  == "") drp  = 0
@@ -118,6 +136,72 @@ cg_chain_summarize_window() {
   ' || true
 }
 
+# cg_chain_shallow_window <source> -- issue 1302, TOOL-ONLY (not part of the evaluate replica).
+#   stdin: OBS-log text; stdout: ONE pipe-delimited line for <source>
+#     graded|skew_term_ms|depth|target_ms|d_shallow_latches|fps
+#   or EMPTY when no audit line of <source> carries a `shallow_depth=` / `shallow_latches=` token
+#   (a log from before issue 1367 -> the caller grades exactly as before).
+#   Per sample, the skew term is:
+#     * a SAMPLED tick (`ts_present` != 0) of a line with `shallow_depth=` D > 0 and a known canvas
+#       rate F (the `(~N frames @ F fps)` parenthetical, F > 0): round(|ts_head_skew_ms - D x 1000 / F|)
+#       -- the head age's excursion from the latched depth (issue 1367 holds it at D frames);
+#     * any other sample: |ts_head_skew_ms|, the replica's absolute term. An unsampled tick
+#       (genlock_clear_ts_sample zeroes ts_present + the skew) keeps its 0. D = 0 (not N==1, not yet
+#       latched, or capped by the imag min-latency guard) and an unknown rate (fps 0.000) keep the
+#       absolute grading, which is fail-closed. A DEEP N==1 input latches base + 1 too, so it is
+#       graded against that depth as well.
+#   skew_term_ms = the window max over every sample; graded = how many samples were graded
+#   target-relative (0 -> the verdict keeps the absolute rule). depth / target_ms / fps describe the
+#   sample that produced that max: its D, and round(D x 1000 / F) + its printed rate only when it was
+#   graded target-relative (both empty = graded absolutely). d_shallow_latches = last-minus-first
+#   (saturating) of `shallow_latches=` over the samples carrying it, empty when none does. Always
+#   exits 0.
+cg_chain_shallow_window() {
+  local source="${1:-}"
+  cg_chain_strip_high_bytes | awk -v SRC="$source" "$(_cg_chain_awk_common)"'
+    {
+      src = audit_source($0)
+      if (src == "" || src != SRC) next
+
+      dep = getval($0, "shallow_depth")
+      lat = getval($0, "shallow_latches")
+      if (dep != "" || lat != "") have_token = 1
+      skew = getval($0, "ts_head_skew_ms"); if (skew == "") skew = 0
+      skew = skew + 0
+      tsp = getval($0, "ts_present")
+      d = (dep == "") ? 0 : dep + 0
+      # anchored on "frames @ " so a source name carrying "@ <n>fps" can never be read as the rate
+      fps_s = ""
+      if (match($0, /frames @ [0-9]+(\.[0-9]+)?fps/)) fps_s = substr($0, RSTART + 9, RLENGTH - 12)
+      fps = fps_s + 0
+
+      tg_s = ""; fp_s = ""
+      if (d > 0 && fps > 0 && tsp != "0") {
+        tgt = d * 1000 / fps
+        term = int(absval(skew - tgt) + 0.5)
+        graded++
+        tg_s = int(tgt + 0.5); fp_s = fps_s
+      } else {
+        term = absval(skew)
+      }
+      n++
+      # the max sample PROVENANCE: its depth, and its target + rate only when it was graded
+      # target-relative (empty = graded absolutely), so the verdict names the sample it reports
+      if (n == 1 || term > maxterm) { maxterm = term; m_dep = d; m_tgt = tg_s; m_fps = fp_s }
+      if (lat != "") {
+        if (!have_lat) { f_lat = lat + 0; have_lat = 1 }
+        l_lat = lat + 0
+      }
+    }
+    END {
+      if (!have_token) exit 0
+      dl = ""
+      if (have_lat) dl = (l_lat - f_lat) > 0 ? (l_lat - f_lat) : 0
+      printf "%d|%d|%d|%s|%s|%s\n", graded, maxterm, m_dep, m_tgt, dl, m_fps
+    }
+  ' || true
+}
+
 # cg_chain_hop_absent_ok <hop> -- issue 1380: 0 when a hop's input may legitimately be absent from
 #   its OBS (the optional stream hop: the owner removed its old input on 27.9.2026), so a source with
 #   no audit line in the window is reported ABSENT instead of FAIL; 1 for every other hop (the
@@ -126,14 +210,19 @@ cg_chain_hop_absent_ok() {
   [ "${1:-}" = "stream" ]
 }
 
-# cg_chain_verdict <summary_line> [skew_bound_ms] [min_samples] -- replicate
+# cg_chain_verdict <summary_line> [skew_bound_ms] [min_samples] [shallow_line] -- replicate
 #   `resolume_playback::evaluate`. stdout: line 1 is `PASS` or `FAIL`; each subsequent line is one
 #   evidence-carrying reason. An EMPTY summary_line (source absent from the window) -> FAIL with an
 #   "absent" reason. Defaults mirror `PlaybackBounds::default()` (skew 20 ms, min_samples 2). Every
 #   failing check contributes its own reason (never short-circuits) so the operator sees the whole
 #   picture, exactly like `evaluate`. Always exits 0 (the verdict is in stdout, not the exit code).
+#   issue 1302, TOOL-ONLY: the optional shallow_line is cg_chain_shallow_window output. When it graded
+#   any sample target-relative, its skew term replaces the absolute max skew in the skew check (a
+#   named head-age-excursion reason, or the plain skew reason when the worst sample itself was graded
+#   absolutely); a d_shallow_latches > 0 adds a re-latch reason (every latch counts: a lock or a
+#   re-measure). An absent or EMPTY shallow_line leaves the output byte-identical to the replica.
 cg_chain_verdict() {
-  local line="${1:-}" skew_bound="${2:-20}" min_samples="${3:-2}"
+  local line="${1:-}" skew_bound="${2:-20}" min_samples="${3:-2}" shallow="${4:-}"
   case "$skew_bound"  in '' | *[!0-9]*) skew_bound=20 ;; esac
   case "$min_samples" in '' | *[!0-9]*) min_samples=2 ;; esac
   if [ -z "$line" ]; then
@@ -145,11 +234,21 @@ cg_chain_verdict() {
   # lat/lck are consumed positionally here (the orchestrator's table uses them); unused in verdict.
   # shellcheck disable=SC2034
   IFS='|' read -r samples lat maxskew d_drop d_und d_rel d_late d_brt lck <<<"$line"
+  local sh_graded="" sh_term="" sh_depth="" sh_target="" sh_dlatch="" sh_fps=""
+  if [ -n "$shallow" ]; then
+    IFS='|' read -r sh_graded sh_term sh_depth sh_target sh_dlatch sh_fps <<<"$shallow"
+  fi
   local -a reasons=()
   if [ "${samples:-0}" -lt "$min_samples" ]; then
     reasons+=("too few audit samples (${samples:-0} < ${min_samples}) -- window too short to confirm flat skew")
   fi
-  if [ "${maxskew:-0}" -gt "$skew_bound" ]; then
+  if [ "${sh_graded:-0}" -gt 0 ]; then
+    if [ "${sh_term:-0}" -gt "$skew_bound" ] && [ -n "$sh_target" ]; then
+      reasons+=("head-age excursion ${sh_term} ms from the latched shallow depth ${sh_depth} frame(s) (${sh_target} ms @ ${sh_fps} fps) > bound ${skew_bound} ms -- presentation not flat")
+    elif [ "${sh_term:-0}" -gt "$skew_bound" ]; then
+      reasons+=("skew excursion ${sh_term} ms > bound ${skew_bound} ms -- presentation not flat (that sample carried no latched depth or canvas rate, so it is graded absolutely)")
+    fi
+  elif [ "${maxskew:-0}" -gt "$skew_bound" ]; then
     reasons+=("skew excursion ${maxskew} ms > bound ${skew_bound} ms -- presentation not flat")
   fi
   [ "${d_drop:-0}" -gt 0 ] && reasons+=("${d_drop} dropped frame(s) in window")
@@ -157,6 +256,7 @@ cg_chain_verdict() {
   [ "${d_rel:-0}"  -gt 0 ] && reasons+=("${d_rel} FIFO relock(s) -- clock discipline unstable")
   [ "${d_late:-0}" -gt 0 ] && reasons+=("${d_late} late hold(s) in window")
   [ "${d_brt:-0}"  -gt 0 ] && reasons+=("${d_brt} backward-regime tick(s) -- hold bypassed / frame jump (duplicate)")
+  [ "${sh_dlatch:-0}" -gt 0 ] && reasons+=("${sh_dlatch} shallow re-latch(es) in window -- a lock (ACQUIRE, GAP RESYNC or pin change) or a re-measure; see the genlock-shallow-lock and genlock-shallow-remeasure lines")
   if [ "${#reasons[@]}" -eq 0 ]; then
     printf 'PASS\n'
   else
@@ -190,29 +290,10 @@ cg_chain_parse_asrc_ppm() {
 #   exits 0.
 cg_chain_parse_audio_facet() {
   local source="${1:-}"
-  cg_chain_strip_high_bytes | awk -v SRC="$source" '
-    function getval(line, key,    toks, n, i, eq, k, v) {
-      n = split(line, toks, /[ \t]+/)
-      for (i = 1; i <= n; i++) {
-        eq = index(toks[i], "=")
-        if (eq == 0) continue
-        k = substr(toks[i], 1, eq - 1)
-        if (k != key) continue
-        v = substr(toks[i], eq + 1)
-        if (v ~ /^-?[0-9]+$/) return v
-        return ""
-      }
-      return ""
-    }
+  cg_chain_strip_high_bytes | awk -v SRC="$source" "$(_cg_chain_awk_common)"'
     {
-      mark = "genlock-fifo audit '\''"
-      idx = index($0, mark)
-      if (idx == 0) next
-      rest = substr($0, idx + length(mark))
-      q = index(rest, "'\''")
-      if (q == 0) next
-      src = substr(rest, 1, q - 1)
-      if (src != SRC) next
+      src = audit_source($0)
+      if (src == "" || src != SRC) next
       # only a line that carries the #1303 audio facet counts (pre-#1303 lines have none)
       if (index($0, "audio_delay_ms=") == 0) next
       en = getval($0, "audio_enabled");        if (en  == "") en  = 0
@@ -243,24 +324,26 @@ cg_chain_asrc_in_band() {
 }
 
 # cg_chain_csv_header -- the soak CSV column header (one source-window row per line). The #1303
-# audio parity columns (enabled/delay/pairing) are APPENDED after asrc_ppm so an existing consumer's
-# earlier columns are byte-stable.
+# audio parity columns (enabled/delay/pairing) are APPENDED after asrc_ppm, then the issue-1302
+# d_shallow_latches column, so an existing consumer's earlier columns are byte-stable. For a
+# shallow-latched input max_abs_skew_ms carries the GRADED skew term (the head age's excursion from
+# its latched depth, cg_chain_shallow_window), so the 24 h flatness plot reads the same bar.
 cg_chain_csv_header() {
-  printf 'ts_utc,hop,source,verdict,max_abs_skew_ms,d_dropped,d_underruns,d_relocks,d_late_holds,d_backward_regime,asrc_ppm,audio_enabled,audio_delay_ms,audio_pairing_offset_ms\n'
+  printf 'ts_utc,hop,source,verdict,max_abs_skew_ms,d_dropped,d_underruns,d_relocks,d_late_holds,d_backward_regime,asrc_ppm,audio_enabled,audio_delay_ms,audio_pairing_offset_ms,d_shallow_latches\n'
 }
 
 # cg_chain_csv_row <ts> <hop> <source> <verdict> <maxskew> <d_dropped> <d_underruns> <d_relocks>
 #   <d_late_holds> <d_backward_regime> <asrc_ppm> [audio_enabled] [audio_delay_ms]
-#   [audio_pairing_offset_ms] -- one CSV data line matching cg_chain_csv_header. The three #1303
-#   audio columns are OPTIONAL (default empty) so a caller that has no audio facet still emits a
-#   column-count-matching row. Commas in a source name are replaced with ';' so the row never gains
-#   a column.
+#   [audio_pairing_offset_ms] [d_shallow_latches] -- one CSV data line matching cg_chain_csv_header.
+#   The three #1303 audio columns and the issue-1302 latch delta are OPTIONAL (default empty) so a
+#   caller that has no audio facet / no latch token still emits a column-count-matching row. Commas
+#   in a source name are replaced with ';' so the row never gains a column.
 cg_chain_csv_row() {
   local ts="${1:-}" hop="${2:-}" source="${3:-}" verdict="${4:-}" maxskew="${5:-}" \
     d_drop="${6:-}" d_und="${7:-}" d_rel="${8:-}" d_late="${9:-}" d_brt="${10:-}" asrc="${11:-}" \
-    aud_en="${12:-}" aud_dl="${13:-}" aud_po="${14:-}"
+    aud_en="${12:-}" aud_dl="${13:-}" aud_po="${14:-}" d_latch="${15:-}"
   source="${source//,/;}"
-  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+  printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$ts" "$hop" "$source" "$verdict" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrc" \
-    "$aud_en" "$aud_dl" "$aud_po"
+    "$aud_en" "$aud_dl" "$aud_po" "$d_latch"
 }

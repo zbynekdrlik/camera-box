@@ -98,3 +98,6 @@ assets/lipsync/*.jpg
 # issue 1345 phone PWA Playwright E2E (npm install + test output)
 intercom/tests/e2e/node_modules/
 intercom/tests/e2e/test-results/
+
+# issue 1417 -- the tally ESP firmware WiFi credentials (copy secrets.h.example, never commit it)
+tally/esp/WsTally/secrets.h

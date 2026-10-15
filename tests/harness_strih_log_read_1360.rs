@@ -7,14 +7,14 @@
 //!
 //! Root cause: each helper grew its own Windows-only reader (PowerShell `Get-Content`/`gc` of the
 //! newest `$env:APPDATA\obs-studio\logs\*.txt`) before the M4 cut-over moved the strih role to
-//! the Linux notebook strih-lx (10.77.9.202), so on strih-lx every read came back empty and each
+//! the Linux notebook strih-snv (10.77.9.202), so on strih-snv every read came back empty and each
 //! consumer fell back fail-open (`READ_FAIL`, `ssh flake/timeout`, settle never quiet).
 //!
 //! All Tier-0 (no rig, no real ssh): each case is a bash FILE run as `bash <case.sh> <tmpdir>`
 //! under the callers' own `set -euo pipefail` (the #1133 bare-statement class). PATH-stubbed
 //! `sshpass` logs its argv and execs the rest (`timeout T ssh …`); the PATH-stubbed `ssh` runs a
 //! LINUX remote command for real against a fixture HOME whose newest OBS log has SPACES in its
-//! name (`2026-09-23 09-23-36.txt`, the strih-lx naming) and answers a `powershell …` one with a
+//! name (`2026-09-23 09-23-36.txt`, the strih-snv naming) and answers a `powershell …` one with a
 //! canned Windows reply — so the platform branch actually taken is observable end-to-end.
 
 use std::fs;
@@ -350,7 +350,7 @@ fn genlock_settle_reads_the_linux_strih_log_1360() {
     assert_done(&o, "genlock-settle");
     assert!(
         o.stdout.contains("received=160"),
-        "[4j/8settle] must read the strih-lx OBS log: {}",
+        "[4j/8settle] must read the strih-snv OBS log: {}",
         o.stdout
     );
     assert!(
@@ -369,7 +369,7 @@ fn mv_reverify_received_tap_reads_the_linux_strih_log_1360() {
     assert_done(&o, "mv-reverify");
     assert!(
         has_line(&o.stdout, "RECV=160"),
-        "the received= tap must read the NEWEST received= off the strih-lx log (not READ_FAIL): {}",
+        "the received= tap must read the NEWEST received= off the strih-snv log (not READ_FAIL): {}",
         o.stdout
     );
     assert!(
@@ -388,7 +388,7 @@ fn frozen_cam_gate_tail_reads_the_linux_strih_log_1360() {
     assert_done(&o, "frozen-cam");
     assert!(
         o.stdout.contains("received=160"),
-        "[4c/8] must read the strih-lx OBS log: {}",
+        "[4c/8] must read the strih-snv OBS log: {}",
         o.stdout
     );
     assert!(
@@ -407,7 +407,7 @@ fn ndi_cadence_fetch_reads_the_linux_strih_log_1360() {
     assert_done(&o, "ndi-cadence");
     assert!(
         o.stdout.contains("recv-timing #797 'NDI cam1'"),
-        "the cadence verify must read the strih-lx recv-timing lines: {}",
+        "the cadence verify must read the strih-snv recv-timing lines: {}",
         o.stdout
     );
     assert!(
@@ -438,14 +438,14 @@ fn mv_fps_preflight_strih_token_resolves_the_platform_1360() {
         .unwrap_or("");
     assert!(
         linux.contains("rendered_fps=29.97"),
-        "[4d1/8] must read the strih-lx multiview-audit line when strih is Linux: {}",
+        "[4d1/8] must read the strih-snv multiview-audit line when strih is Linux: {}",
         o.stdout
     );
     assert!(
         o.log.lines().any(|l| l.starts_with("SSHPASS:")
             && l.contains("@10.77.9.202 ")
             && l.contains("-o UserKnownHostsFile=/dev/null")),
-        "[4d1/8]'s strih-lx read must not trust a stale known_hosts key (password auth): {}",
+        "[4d1/8]'s strih-snv read must not trust a stale known_hosts key (password auth): {}",
         o.log
     );
     assert!(
@@ -472,12 +472,12 @@ fn mv_fps_watchdog_strih_token_resolves_the_platform_1360() {
     assert!(
         o.stdout.contains("MVFPS_LOGID:2026-09-23 09-23-36.txt")
             && o.stdout.contains("rendered_fps=29.97"),
-        "the watchdog must read the strih-lx log (identity line + tail) on a Linux strih: {}",
+        "the watchdog must read the strih-snv log (identity line + tail) on a Linux strih: {}",
         o.stdout
     );
     assert!(
         o.log.contains("-o UserKnownHostsFile=/dev/null"),
-        "the watchdog's strih-lx read must not trust a stale known_hosts key (password auth): {}",
+        "the watchdog's strih-snv read must not trust a stale known_hosts key (password auth): {}",
         o.log
     );
     assert!(
@@ -507,7 +507,7 @@ fn qr_align_floor_aware_audit_reads_the_linux_strih_log_1360() {
     assert!(
         !o.stderr
             .contains("could not read the post-settle log line count"),
-        "the #1161 floor-aware audit must read the strih-lx log line count: {}",
+        "the #1161 floor-aware audit must read the strih-snv log line count: {}",
         o.stderr
     );
     assert!(

@@ -108,12 +108,16 @@ fn verify_block_uses_a_fresh_finder_the_picker_and_the_decision_helper() {
          fresh finder (find_create_v2 / find_wait_for_sources / find_get_current_sources / \
          ndi_find_url_for_source_name). Re-apply the #1180 verify."
     );
-    // The picked URL is compared to the bound URL via the pure decision helper.
+    // Since issue 1367 (decision 6009040469) the verify runs in ndi_identity_verify_1367 and decides
+    // on the duplicate-aware ndi_identity_verdict_1367, whose record-vs-bound comparison is this
+    // pure helper; the thread hands it the bound URL and keeps the #1180 BY-NAME block below.
     assert!(
-        src.contains("ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180)"),
-        "{NDI_SOURCE}: #1180 — the verify block no longer calls \
-         ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180) to decide MISMATCH. Re-apply \
-         the #1180 wiring."
+        src.contains("if (!ndi_by_url_identity_mismatch(bound_url, url)) listed = true;")
+            && src.contains("int verdict_1367 = ndi_identity_verify_1367(s, owned_source_name, owned_source_url,")
+            && src.contains("bool mismatch_1180 = verdict_1367 == NDI_VERIFY_MISMATCH_1367;"),
+        "{NDI_SOURCE}: #1180 — the verify no longer decides MISMATCH through the duplicate-aware \
+         verdict (ndi_identity_verify_1367 / ndi_identity_verdict_1367, comparing with \
+         ndi_by_url_identity_mismatch). Re-apply the #1180 + issue-1367 wiring."
     );
     // On a mismatch it forces a BY-NAME reset (sets the flag + re-arms the receiver reset).
     assert!(

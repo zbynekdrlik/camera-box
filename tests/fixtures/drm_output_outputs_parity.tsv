@@ -1,0 +1,69 @@
+# issue 1424 part 2 -- the drm-output config grammar, ONE table for the vendored C
+# (obs-drm-output-outputs.c drm_output_config_classify, lift-compiled against real jansson by
+# tests/drm_output_outputs_1424.rs) and the Python mirror (strih_scenes.drm_output_instances,
+# tests/python/test_drm_output_outputs_1424.py).
+# Columns (TAB-separated): name, the config text (<empty> = an empty file), the verdict, the
+# offending "outputs" position the C names (- = not checked), the outputs on "ok"
+# (connector|view|backend|argb, plus |noaudio when the entry turns its audio leg off -- issue 1424
+# part 3; ';'-separated; - = none).
+single_imag	{"enabled":true,"connector":"HDMI-1","argb":2105376}	ok	-	HDMI-1|program|lease|2105376
+single_strih_snv	{"enabled":true,"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"}	ok	-	HDMI-0|multiview|vk-direct|2105376
+single_live_strih_pp	{"enabled":true,"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"}	ok	-	HDMI-0|multiview|vk-direct|2105376
+single_unknown_view_reads_program	{"enabled":true,"connector":"HDMI-0","view":"Preview"}	ok	-	HDMI-0|program|lease|2105376
+single_nonstring_view_reads_program	{"enabled":true,"connector":"HDMI-0","view":1}	ok	-	HDMI-0|program|lease|2105376
+single_no_argb_is_dark_grey	{"enabled":true,"connector":"HDMI-1"}	ok	-	HDMI-1|program|lease|2105376
+single_argb_zero_is_black	{"enabled":true,"connector":"HDMI-1","argb":0}	ok	-	HDMI-1|program|lease|0
+single_argb_string_is_black	{"enabled":true,"connector":"HDMI-1","argb":"grey"}	ok	-	HDMI-1|program|lease|0
+single_argb_bool_is_black	{"enabled":true,"connector":"HDMI-1","argb":true}	ok	-	HDMI-1|program|lease|0
+single_argb_real_truncates	{"enabled":true,"connector":"HDMI-1","argb":3.9}	ok	-	HDMI-1|program|lease|3
+single_argb_negative_wraps	{"enabled":true,"connector":"HDMI-1","argb":-1}	ok	-	HDMI-1|program|lease|4294967295
+single_argb_low_32_bits	{"enabled":true,"connector":"HDMI-1","argb":4294967298}	ok	-	HDMI-1|program|lease|2
+single_backend_nonstring_is_lease	{"enabled":true,"connector":"HDMI-0","backend":7}	ok	-	HDMI-0|program|lease|2105376
+single_63_byte_connector	{"enabled":true,"connector":"ABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABC"}	ok	-	ABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABC|program|lease|2105376
+single_64_byte_connector	{"enabled":true,"connector":"ABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCDEFGHIJABCD"}	connector-invalid	-	-
+single_disabled	{"enabled":false,"connector":"HDMI-1"}	disabled	-	-
+single_enabled_string	{"enabled":"true","connector":"HDMI-1"}	disabled	-	-
+single_enabled_absent	{"connector":"HDMI-1"}	disabled	-	-
+single_no_connector	{"enabled":true}	connector-invalid	-	-
+single_empty_connector	{"enabled":true,"connector":""}	connector-invalid	-	-
+single_numeric_connector	{"enabled":true,"connector":7}	connector-invalid	-	-
+single_unknown_backend	{"enabled":true,"connector":"HDMI-0","backend":"vulkan"}	backend-unknown	-	-
+unreadable_garbage	garbage	unreadable	-	-
+strict_nan_argb	{"enabled":true,"connector":"HDMI-1","argb":NaN}	unreadable	-	-
+strict_infinity_argb	{"enabled":true,"connector":"HDMI-1","argb":Infinity}	unreadable	-	-
+strict_minus_infinity_argb	{"enabled":true,"connector":"HDMI-1","argb":-Infinity}	unreadable	-	-
+strict_int_over_64_bits	{"enabled":true,"connector":"HDMI-1","argb":9223372036854775808}	unreadable	-	-
+strict_real_overflow	{"enabled":true,"connector":"HDMI-1","argb":1e400}	unreadable	-	-
+strict_int_64_bit_max_is_read	{"enabled":true,"connector":"HDMI-1","argb":9223372036854775807}	ok	-	HDMI-1|program|lease|4294967295
+strict_nan_in_an_array_entry	{"enabled":true,"outputs":[{"connector":"HDMI-0","view":"multiview"},{"connector":"HDMI-1","argb":NaN}]}	unreadable	-	-
+unreadable_array	[]	unreadable	-	-
+unreadable_empty	<empty>	unreadable	-	-
+strih_pp_two_outputs	{"enabled":true,"outputs":[{"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"},{"connector":"HDMI-1","argb":2105376,"view":"program","backend":"vk-direct"}]}	ok	-	HDMI-0|multiview|vk-direct|2105376;HDMI-1|program|vk-direct|2105376
+strih_pp_vestibule_audio_owned_by_the_hub	{"enabled":true,"outputs":[{"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"},{"connector":"HDMI-1","argb":2105376,"view":"program","backend":"vk-direct","audio":false}]}	ok	-	HDMI-0|multiview|vk-direct|2105376;HDMI-1|program|vk-direct|2105376|noaudio
+array_audio_true_is_the_default	{"enabled":true,"outputs":[{"connector":"HDMI-1","view":"program","audio":true}]}	ok	-	HDMI-1|program|lease|2105376
+array_audio_string_is_invalid	{"enabled":true,"outputs":[{"connector":"HDMI-0"},{"connector":"HDMI-1","audio":"false"}]}	audio-invalid	1	-
+array_audio_number_is_invalid	{"enabled":true,"outputs":[{"connector":"HDMI-1","audio":0}]}	audio-invalid	0	-
+array_audio_null_is_invalid	{"enabled":true,"outputs":[{"connector":"HDMI-1","audio":null}]}	audio-invalid	0	-
+array_audio_checked_after_backend	{"enabled":true,"outputs":[{"connector":"HDMI-1","backend":"vulkan","audio":1}]}	backend-unknown	0	-
+array_audio_checked_before_duplicate	{"enabled":true,"outputs":[{"connector":"HDMI-1"},{"connector":"HDMI-1","audio":"no"}]}	audio-invalid	1	-
+single_form_ignores_audio	{"enabled":true,"connector":"HDMI-0","view":"multiview","backend":"vk-direct","audio":false}	ok	-	HDMI-0|multiview|vk-direct|2105376
+array_one_output	{"enabled":true,"outputs":[{"connector":"HDMI-1"}]}	ok	-	HDMI-1|program|lease|2105376
+array_mixed_backends	{"enabled":true,"outputs":[{"connector":"HDMI-1","view":"program"},{"connector":"HDMI-0","view":"multiview","backend":"vk-direct","argb":0}]}	ok	-	HDMI-1|program|lease|2105376;HDMI-0|multiview|vk-direct|0
+array_nonstring_view_reads_program	{"enabled":true,"outputs":[{"connector":"HDMI-0","view":null},{"connector":"HDMI-1","view":2}]}	ok	-	HDMI-0|program|lease|2105376;HDMI-1|program|lease|2105376
+array_wins_over_top_level_keys	{"enabled":true,"connector":"DP-2","view":"multiview","outputs":[{"connector":"HDMI-1","view":"program"}]}	ok	-	HDMI-1|program|lease|2105376
+array_keeps_the_program_key_out_of_the_entries	{"enabled":true,"program":false,"outputs":[{"connector":"HDMI-1"}]}	ok	-	HDMI-1|program|lease|2105376
+array_disabled	{"enabled":false,"outputs":[{"connector":"HDMI-1"}]}	disabled	-	-
+array_empty	{"enabled":true,"outputs":[]}	outputs-empty	-	-
+array_too_many	{"enabled":true,"outputs":[{"connector":"HDMI-0"},{"connector":"HDMI-1"},{"connector":"DP-1"}]}	outputs-too-many	2	-
+outputs_object	{"enabled":true,"outputs":{"connector":"HDMI-1"}}	outputs-not-array	-	-
+outputs_null	{"enabled":true,"outputs":null}	outputs-not-array	-	-
+outputs_string	{"enabled":true,"outputs":"HDMI-0 HDMI-1"}	outputs-not-array	-	-
+entry_not_object_second	{"enabled":true,"outputs":[{"connector":"HDMI-0"},5]}	entry-not-object	1	-
+entry_not_object_first	{"enabled":true,"outputs":["HDMI-0",{"connector":"HDMI-1"}]}	entry-not-object	0	-
+entry_no_connector	{"enabled":true,"outputs":[{"view":"program"},{"connector":"HDMI-1"}]}	connector-invalid	0	-
+entry_empty_connector_second	{"enabled":true,"outputs":[{"connector":"HDMI-0"},{"connector":""}]}	connector-invalid	1	-
+entry_duplicate_connector	{"enabled":true,"outputs":[{"connector":"HDMI-0","view":"multiview"},{"connector":"HDMI-0","view":"program"}]}	connector-duplicate	1	-
+entry_unknown_view	{"enabled":true,"outputs":[{"connector":"HDMI-0","view":"multiview"},{"connector":"HDMI-1","view":"Program"}]}	view-unknown	1	-
+entry_unknown_backend	{"enabled":true,"outputs":[{"connector":"HDMI-0","backend":"vulkan"},{"connector":"HDMI-1"}]}	backend-unknown	0	-
+entry_view_checked_before_backend	{"enabled":true,"outputs":[{"connector":"HDMI-0","view":"x","backend":"y"}]}	view-unknown	0	-
+entry_duplicate_checked_after_view	{"enabled":true,"outputs":[{"connector":"HDMI-0"},{"connector":"HDMI-0","view":"x"}]}	view-unknown	1	-

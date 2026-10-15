@@ -13,22 +13,22 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn read(p: &str) -> String {
     let path = format!("{}/{}", env!("CARGO_MANIFEST_DIR"), p);
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
 }
 
 /// Write `json` to a uniquely-named temp file for this test process; returns its path.
-fn write_json(name: &str, json: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "zero-loss-restart-gate-test-{}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.json"));
+fn write_json(name: &str, json: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.json"));
     let mut f = fs::File::create(&path).unwrap();
     f.write_all(json.as_bytes()).unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 fn run(bin: &str, args: &[&Path]) -> (i32, String) {

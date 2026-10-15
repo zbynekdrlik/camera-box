@@ -70,7 +70,12 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   (DRY-RUN driver, read-only ssh, `--box`/`--facts`/`--commands`, **NO apply mode** — enable-only:
   the code PLANS, the supervisor APPLIES). Full runbook: `docs/runbooks/899-realtime-isolation.md`.
   Verdict tokens: `already-lowlatency` / `ready` / `no-rt-candidate` (the fail-closed shape kept
-  for a genuinely-missing package). Plan tokens: `install-lowlatency` → `verify-lowlatency-config`
+  for a genuinely-missing package). Every mutating step's `--commands` text is ONE pasteable
+  program (`_rt_window_program`, issue 1407): `bash -s <<'RT_KERNEL_STEP'`, the rw open, the
+  work with its rc kept, the shared verified ro close from `scripts/lib/ro-window.sh` run whatever
+  the work did, then the work's own FAIL/OK line. Never print a bare `&& mount -o remount,ro /`
+  again (`.claude/rules/ro-window.md`); the step's apt/grub/TMPDIR text lives in the WORK argument,
+  so the multi-word `apt-get install` anchor below still holds. Plan tokens: `install-lowlatency` → `verify-lowlatency-config`
   → `grub-pin:*` → `safe-grub-regen` → `reboot-into-lowlatency` → `confirm-running-lowlatency` →
   `purge-superseded-generic` → `verify-single-kernel` → `post-verify`.
 - **SAFE atomic order** (the planner enforces): install → verify config → grub-pin → grub-regen →

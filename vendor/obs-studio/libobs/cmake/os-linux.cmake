@@ -17,10 +17,15 @@ find_package(Gio)
 target_sources(
   libobs
   PRIVATE
+    obs-drm-output-audio-match.h
+    obs-drm-output-audio.c
+    obs-drm-output-audio.h
     obs-drm-output-backend.c
     obs-drm-output-internal.h
+    obs-drm-output-outputs.c
     obs-drm-output-view.c
     obs-drm-output-vk-internal.h
+    obs-drm-output-vk-remode.c
     obs-drm-output-vk-setup.c
     obs-drm-output-vk.c
     obs-drm-output-vk.h

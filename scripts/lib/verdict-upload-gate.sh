@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # airuleset:script-ok source-only lib (defines one pure function, no top-level statements) — the
 # sibling scripts/lib/*.sh convention of NOT setting `set -euo pipefail` here: sourcing runs in the
-# CALLER's shell, and every caller (recording-verdict-on-imag.sh / -on-strih-lx.sh /
+# CALLER's shell, and every caller (recording-verdict-on-imag.sh / -on-strih-snv.sh /
 # -on-resolume.sh) already sets it itself.
 #
 # scripts/lib/verdict-upload-gate.sh — the ONE issue-1118 sha256 VERSION GATE for deploying the

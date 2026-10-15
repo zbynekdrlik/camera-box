@@ -69,7 +69,7 @@ esac
 # -- config (all env-overridable) ---------------------------------------------------------------
 # The OBS boxes to watch, as "name|ip" pairs (space-separated). Default DERIVED from the ONE
 # declared fleet list (scripts/lib/obs-fleet.sh, #1296): obs_fleet_boxes genlock-lock yields
-# strih-lx+stream+resolume (issue 1317: strih-lx is the production strih; imag is retired and
+# strih-snv+stream+resolume (issue 1317: strih-snv is the production strih; imag is retired and
 # dropped centrally). resolume is gated per-pass on obs_fleet_is_home (below). The
 # GENLOCK_LOCK_BOXES env override still wins unchanged.
 BOXES="${GENLOCK_LOCK_BOXES:-$(obs_fleet_boxes genlock-lock)}"

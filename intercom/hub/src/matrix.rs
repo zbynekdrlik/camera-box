@@ -24,8 +24,16 @@ pub const ADAPTER_VBAN: &str = "vban";
 pub const ADAPTER_NONE: &str = "none";
 pub const ADAPTER_JANUS: &str = "janus";
 /// The local PipeWire adapter (issue 1344): the `program_out` sink (egress) + the talkback capture
-/// (ingress) that replace the last VB-Matrix function on the strih-lx notebook.
+/// (ingress) that replace the last VB-Matrix function on the strih-snv notebook.
 pub const ADAPTER_PIPEWIRE: &str = "pipewire";
+/// The hub's own HDMI audio leg (issue 1424 part 3): the participant's N-1 bus played straight into
+/// the ALSA hw PCM of a NAMED connector (`hdmi_connector`) by a supervised `aplay`, no PipeWire node
+/// (the strih-pp vestibule TV behind the HDMI-to-SDI converter on HDMI-1). An output only.
+pub const ADAPTER_ALSA_HDMI: &str = "alsa_hdmi";
+
+/// The largest `hdmi_delay_ms` (issue 1424): a second of program audio is the most a picture path
+/// could ever need; a bigger value is a typo.
+pub const HDMI_DELAY_MAX_MS: u32 = 1000;
 
 /// The one role the `janus` adapter is permitted on (the phone/VDO.Ninja replacement leg).
 pub const JANUS_ONLY_ROLE: &str = "phones";
@@ -33,16 +41,19 @@ pub const JANUS_ONLY_ROLE: &str = "phones";
 /// The role of the local PipeWire program sink OBS captures (`ASIO zvuk`) — issue 1344.
 pub const PROGRAM_OUT_ROLE: &str = "program_out";
 
+/// The role of a camera box (cam1..7): its VBAN talkback stream stops whenever it is muted.
+pub const CAMBOX_ROLE: &str = "cambox";
+
 /// Roles a participant plays (informational + validated at load; the engine never branches on it).
 const KNOWN_ROLES: &[&str] = &[
-    "cambox",
+    CAMBOX_ROLE,
     "program_ref",
     "cutters",
-    "phones",
+    JANUS_ONLY_ROLE,
     "speakers",
     "line34",
     "program_monitor",
-    "program_out",
+    PROGRAM_OUT_ROLE,
 ];
 
 /// The Janus audiobridge edge config (the optional `[janus]` table, M3a). Absent → the hub runs the
@@ -105,11 +116,11 @@ pub fn resolve_secret_path(
 
 /// The Interkom picture (MJPEG) config (the optional `[video]` table, M3c). Absent → the hub serves no
 /// picture; present + `enabled` → the hub runs the NDI low-bandwidth receiver → decimate → JPEG →
-/// `/interkom.mjpeg` pipe. Until issue 1347 builds the `STRIH-LX (interkom)` NDI output, a dev override
+/// `/interkom.mjpeg` pipe. Until issue 1347 builds the `STRIH-SNV (interkom)` NDI output, a dev override
 /// points `ndi_source_name` at `CAM1 (usb)`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct VideoConfig {
-    /// The NDI source name the receiver looks for (default `STRIH-LX (interkom)`).
+    /// The NDI source name the receiver looks for (default `STRIH-SNV (interkom)`).
     #[serde(default = "default_video_source")]
     pub ndi_source_name: String,
     /// Target picture rate, frames/sec (validated 1..=30 at load).
@@ -124,7 +135,7 @@ pub struct VideoConfig {
 }
 
 fn default_video_source() -> String {
-    "STRIH-LX (interkom)".to_string()
+    "STRIH-SNV (interkom)".to_string()
 }
 fn default_video_fps() -> u32 {
     10
@@ -187,6 +198,15 @@ pub struct Participant {
     /// on and what `/api/state` reports — issue 1344.
     #[serde(default)]
     pub source_streams: Vec<String>,
+    /// The connector an `alsa_hdmi` participant plays on, as X RandR names it (`HDMI-1`); resolved
+    /// to its ALSA hw PCM by the connector's EDID against the PCMs' ELDs, never a card/device number
+    /// (issue 1424 part 3). Only on the `alsa_hdmi` adapter.
+    #[serde(default)]
+    pub hdmi_connector: Option<String>,
+    /// A fixed lip-sync delay of an `alsa_hdmi` leg in ms, 0..=1000 (issue 1424, 14.10.2026: the
+    /// vestibule heard the program ~170-210 ms before the picture). Absent = 0. Only on `alsa_hdmi`.
+    #[serde(default)]
+    pub hdmi_delay_ms: Option<u32>,
     /// Number of input channels the matrix routes FROM this participant.
     pub in_channels: usize,
     /// Number of output channels the matrix routes TO this participant.
@@ -284,6 +304,7 @@ impl Matrix {
 
         let mut index: HashMap<String, usize> = HashMap::new();
         let mut janus_count = 0usize;
+        let mut hdmi_connectors: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (id, p) in raw.participants.iter().enumerate() {
             if !KNOWN_ROLES.contains(&p.role.as_str()) {
                 bail!("participant '{}': unknown role '{}'", p.name, p.role);
@@ -292,8 +313,63 @@ impl Matrix {
                 && p.adapter != ADAPTER_NONE
                 && p.adapter != ADAPTER_JANUS
                 && p.adapter != ADAPTER_PIPEWIRE
+                && p.adapter != ADAPTER_ALSA_HDMI
             {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
+            }
+            // The HDMI leg (issue 1424 part 3): a named connector, an output only, one participant
+            // per connector (one aplay per hw PCM).
+            if p.adapter == ADAPTER_ALSA_HDMI {
+                let connector = p.hdmi_connector.as_deref().unwrap_or("");
+                if connector.is_empty() || connector.chars().any(char::is_whitespace) {
+                    bail!(
+                        "participant '{}': adapter 'alsa_hdmi' needs an hdmi_connector (the X RandR output name, e.g. HDMI-1), got '{}'",
+                        p.name,
+                        connector
+                    );
+                }
+                if p.in_channels != 0 {
+                    bail!(
+                        "participant '{}': adapter 'alsa_hdmi' is an output only (in_channels must be 0, got {})",
+                        p.name,
+                        p.in_channels
+                    );
+                }
+                // An HDA HDMI PCM opens with 2..=8 channels only (hw:0,7 on strih-pp: CHANNELS [2 8]).
+                if !(2..=8).contains(&p.out_channels) {
+                    bail!(
+                        "participant '{}': adapter 'alsa_hdmi' needs 2..=8 out_channels, got {}",
+                        p.name,
+                        p.out_channels
+                    );
+                }
+                if !hdmi_connectors.insert(connector) {
+                    bail!(
+                        "participant '{}': hdmi_connector '{}' is already played by another participant",
+                        p.name,
+                        connector
+                    );
+                }
+                if p.hdmi_delay_ms.is_some_and(|ms| ms > HDMI_DELAY_MAX_MS) {
+                    bail!(
+                        "participant '{}': hdmi_delay_ms must be 0..={}, got {}",
+                        p.name,
+                        HDMI_DELAY_MAX_MS,
+                        p.hdmi_delay_ms.unwrap_or(0)
+                    );
+                }
+            } else if p.hdmi_delay_ms.is_some() {
+                bail!(
+                    "participant '{}': hdmi_delay_ms is only for adapter 'alsa_hdmi' (got '{}')",
+                    p.name,
+                    p.adapter
+                );
+            } else if p.hdmi_connector.is_some() {
+                bail!(
+                    "participant '{}': hdmi_connector is only for adapter 'alsa_hdmi' (got '{}')",
+                    p.name,
+                    p.adapter
+                );
             }
             if p.adapter == ADAPTER_VBAN && p.out_stream.is_some() && p.host.is_none() {
                 bail!(
@@ -341,7 +417,7 @@ impl Matrix {
         let cambox_streams: std::collections::HashSet<&str> = raw
             .participants
             .iter()
-            .filter(|p| p.role == "cambox")
+            .filter(|p| p.role == CAMBOX_ROLE)
             .filter_map(|p| p.in_stream.as_deref())
             .collect();
         let vban_in_streams: std::collections::HashSet<&str> = raw
@@ -580,6 +656,29 @@ impl Matrix {
                 }
             })
             .collect()
+    }
+
+    /// The hub's HDMI audio legs (issue 1424 part 3), as `(participant id, connector, out_channels)`:
+    /// every `alsa_hdmi` participant, fed from its OWN N-1 output bus.
+    pub fn alsa_hdmi_outputs(&self) -> Vec<(usize, String, usize)> {
+        self.participants
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.adapter == ADAPTER_ALSA_HDMI)
+            .filter_map(|(id, p)| {
+                p.hdmi_connector
+                    .clone()
+                    .map(|connector| (id, connector, p.out_channels))
+            })
+            .collect()
+    }
+
+    /// The lip-sync delay of the `alsa_hdmi` participant `id` in ms (0 when absent).
+    pub fn alsa_hdmi_delay_ms(&self, id: usize) -> u32 {
+        self.participants
+            .get(id)
+            .and_then(|p| p.hdmi_delay_ms)
+            .unwrap_or(0)
     }
 
     /// Participants that receive a VBAN output from us (adapter `vban`, an `out_stream` + `host`),

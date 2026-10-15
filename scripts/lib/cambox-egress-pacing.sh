@@ -8,7 +8,7 @@
 # scripts/lib/cambox-egress-pacing.sh -- issue 1242: the cambox NDI egress PACING, made permanent.
 #
 # Why: all seven cameras hand their frame to NDI on the same genlock grid instant, so ~7 x 300 KB
-# reach strih-lx at the 5 Gb/s line rate in ~3-4 ms and its RTL8157 USB NIC answers with PAUSE
+# reach strih-snv at the 5 Gb/s line rate in ~3-4 ms and its RTL8157 USB NIC answers with PAUSE
 # storms (issue 1242 finding 5902816575). The owner approved staggered sending (5904641502).
 # Delaying the frame hand-off failed live twice because the NDI SDK encodes inside the send, so the
 # bursts are spread by pacing each cambox's KERNEL egress instead (decision 5904673375): an `fq`
@@ -16,7 +16,7 @@
 # (~7 ms for a 300-350 KB frame). `fq` paces per FLOW, so dantesync's PTP/NTP packets and the
 # intercom are their own flows and are never queued behind a video frame (a single `tbf` bucket
 # would delay them and bias the clock). `flow_limit` 2000 holds a whole frame (~240 packets).
-# Measured with it live on cam1-cam7 (result 5905948208): strih-lx PAUSE 39-110/min -> 28-36/min,
+# Measured with it live on cam1-cam7 (result 5905948208): strih-snv PAUSE 39-110/min -> 28-36/min,
 # receive-gap storms from ~1 per 5 min to ~1 per 30 min, the first release E2E with clean
 # continuity. It helps but is not the full cure; 10 GbE through a PCIe NIC (issue 1387) is.
 #
@@ -100,7 +100,7 @@ cambox_egress_pacing_boot_script() {
 # (camera-box issue 1242) and written by setup-device.sh; do not edit it on the box, re-run setup-device.sh.
 # Run at boot by ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service: paces this box's NDI egress with an fq
 # root qdisc (maxrate ${CAMBOX_EGRESS_PACING_RATE} per flow) on the default-route interface, so the
-# seven cameras' per-tick frame bursts reach strih-lx spread in time.
+# seven cameras' per-tick frame bursts reach strih-snv spread in time.
 set -euo pipefail
 PATH="\$PATH:/usr/sbin:/sbin"
 cep_attempts=${CAMBOX_EGRESS_PACING_RETRY_ATTEMPTS}

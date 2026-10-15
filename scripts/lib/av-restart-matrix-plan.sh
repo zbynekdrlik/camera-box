@@ -27,7 +27,7 @@ targets:
 EOF
   for k in $KINDS; do
     case "$k" in
-      strih-obs) echo "  strih-obs = strih-lx ${STRIH_HOST} (strih-obs.service, the --user unit; $(strih_platform "$STRIH_HOST"))" ;;
+      strih-obs) echo "  strih-obs = strih-snv ${STRIH_HOST} (strih-obs.service, the --user unit; $(strih_platform "$STRIH_HOST"))" ;;
       cambox) echo "  cambox = ${CAMBOX} ${CAMBOX_IP} (camera-box.service)" ;;
       dantesync) echo "  dantesync = ${DANTE_NODE} ${DANTE_IP} (dantesync.service; with no --dantesync-node it follows the cambox)" ;;
       stream-obs) echo "  stream-obs = stream ${STREAM_HOST} (SUPERVISOR step: no session-agnostic path launches the canonical stream OBS)" ;;

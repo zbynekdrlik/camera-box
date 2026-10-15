@@ -17,6 +17,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -48,13 +52,12 @@ fn run_sourced(body: &str) -> (i32, String, String) {
 }
 
 /// Write a status-text fixture and return its path.
-fn write_status(name: &str, text: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("win-status-args-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.txt"));
+fn write_status(name: &str, text: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.txt"));
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(text.as_bytes()).unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 #[test]

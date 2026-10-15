@@ -2,7 +2,7 @@
 //! (`camera_box::intercom_target::resolve_intercom_target`).
 //!
 //! The dev cambox root filesystem is READ-ONLY, so `/etc/camera-box/config.toml` cannot be edited to
-//! repoint the VBAN intercom at the new Linux strih-lx hub. camera-box therefore honours a
+//! repoint the VBAN intercom at the new Linux strih-snv hub. camera-box therefore honours a
 //! `CAMERA_BOX_INTERCOM_TARGET` env override (env > CLI flag > config.toml), carried by a `/run`
 //! systemd drop-in (`scripts/lib/intercom-target-dropin.sh`). This module pins the PURE resolution:
 //! a non-empty trimmed env value wins and yields a log note naming both hosts; `None`/empty/
@@ -38,9 +38,9 @@ fn env_whitespace_only_keeps_resolved_and_has_no_note() {
 
 #[test]
 fn env_override_replaces_target_and_notes() {
-    let (target, note) = resolve_intercom_target(Some("strih-lx.lan"), "strih.lan");
+    let (target, note) = resolve_intercom_target(Some("strih-snv.lan"), "strih.lan");
     assert_eq!(
-        target, "strih-lx.lan",
+        target, "strih-snv.lan",
         "the env value overrides the resolved host"
     );
     let note = note.expect("an override must produce a log note");
@@ -49,7 +49,7 @@ fn env_override_replaces_target_and_notes() {
         "note must name the env var: {note}"
     );
     assert!(
-        note.contains("strih-lx.lan"),
+        note.contains("strih-snv.lan"),
         "note must name the NEW host: {note}"
     );
     assert!(
@@ -60,9 +60,9 @@ fn env_override_replaces_target_and_notes() {
 
 #[test]
 fn env_override_is_trimmed() {
-    let (target, note) = resolve_intercom_target(Some("  strih-lx.lan\n"), "strih.lan");
+    let (target, note) = resolve_intercom_target(Some("  strih-snv.lan\n"), "strih.lan");
     assert_eq!(
-        target, "strih-lx.lan",
+        target, "strih-snv.lan",
         "surrounding whitespace is trimmed off the override"
     );
     assert!(

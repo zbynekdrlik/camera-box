@@ -21,7 +21,7 @@
 //! newest-N rank; only the small E2E-run files stay eligible for the DELETE set.
 //!
 //! PARITY: `scripts/strih-recordings-retention.ps1` (the Windows executor) and the `--local-sweep`
-//! bash decision in `scripts/strih-recordings-retention.sh` (the Linux strih-lx executor, issue 1317)
+//! bash decision in `scripts/strih-recordings-retention.sh` (the Linux strih-snv executor, issue 1317)
 //! are faithful ports of THIS decision (same allowlist shape + size floor + newest-N ∪ younger-than-D
 //! rule). This module + `tests/recordings_retention.rs` are the canonical spec. The bash port is pinned
 //! to it by ONE shared case table, `tests/fixtures/recordings_retention_parity.tsv`, that both the Rust

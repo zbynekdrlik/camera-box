@@ -45,7 +45,10 @@ _baseline_text = h._baseline_text
 # ---------------------------------------------------------------------------------------------
 RIG_MODE = os.path.join(REPO, "scripts", "rig-mode.sh")
 PROD = {"schema": 1, "box": "cam1", "taken_utc": "2026-09-26T15:00:00Z",
-        "values": {"iso": "800", "d002": "36000"}, "context": {"d007": "60"}}
+        "values": {"iso": "800", "d002": "36000"}, "context": {"d006": "6000"}}
+# issue 1402: a snapshot saved before the d006 switch carries the project fps as the WHOLE-fps
+# context.d007 (the old key). LEGACY: still restores and logs, until the next production snapshot.
+LEGACY_PROD = dict(PROD, context={"d007": "60"})
 
 
 def test_default_snapshot_path_is_in_the_runner_home_and_the_env_overrides_it():
@@ -56,7 +59,7 @@ def test_default_snapshot_path_is_in_the_runner_home_and_the_env_overrides_it():
 
 def test_build_snapshot_records_the_values_the_test_is_about_to_overwrite():
     b = cts.load_baseline(_baseline_text(_pinned()))
-    cur = {"iso": "800", "d002": "36000", "f-number": "f/4", "d004": "5600", "d005": "0", "d007": "60"}
+    cur = {"iso": "800", "d002": "36000", "f-number": "f/4", "d004": "5600", "d005": "0", "d006": "6000"}
     doc = cts.build_snapshot(cur, b, "cam1", "2026-09-26T15:00:00Z")
     assert doc == PROD
     # a pinned optional key is recorded too; an unpinned one is never touched, so never restored
@@ -68,7 +71,7 @@ def test_build_snapshot_records_the_values_the_test_is_about_to_overwrite():
 
 def test_build_snapshot_refuses_a_value_it_could_not_restore():
     b = cts.load_baseline(_baseline_text(_pinned()))
-    cur = {"iso": "Auto ISO", "d002": "36000", "d007": "60"}
+    cur = {"iso": "Auto ISO", "d002": "36000", "d006": "6000"}
     try:
         cts.build_snapshot(cur, b, "cam1", "t")
     except cts.SnapshotError as e:
@@ -85,6 +88,7 @@ def test_malformed_snapshots_are_refused():
         json.dumps({k: v for k, v in PROD.items() if k != "values"}),
         json.dumps(dict(PROD, values={})),
         json.dumps(dict(PROD, values={"d007": "60"})),  # fps is never restored
+        json.dumps(dict(PROD, values={"d006": "6000"})),  # neither is the project fps
         json.dumps(dict(PROD, values={"iso": "800; reboot"})),
         json.dumps(dict(PROD, values={"iso": 800})),
         json.dumps(dict(PROD, box="")),
@@ -100,7 +104,7 @@ def test_malformed_snapshots_are_refused():
 
 def test_restore_plan_and_grade_touch_only_the_snapshot_keys_that_differ():
     snap = PROD["values"]
-    assert cts.restore_plan(snap, {"iso": "8000", "d002": "2160", "d007": "60"}) == [("iso", "800"), ("d002", "36000")]
+    assert cts.restore_plan(snap, {"iso": "8000", "d002": "2160", "d006": "6000"}) == [("iso", "800"), ("d002", "36000")]
     assert cts.restore_plan(snap, {"iso": "800", "d002": "2160"}) == [("d002", "36000")]
     assert cts.restore_plan(snap, {"iso": "800", "d002": "36000"}) == []
     assert cts.grade_restore(snap, {"iso": "800", "d002": "36000"}) == []
@@ -113,6 +117,27 @@ def test_snapshot_summary_is_plain_slovak_with_the_shutter_as_1_over_n():
     assert cts.snapshot_summary(no_fps) == "ISO 800, uzávierka uhol 360°, cam1 2026-09-26T15:00:00Z"
     odd = dict(PROD, values={"iso": "8000", "d002": "2160"})
     assert "1/1000 s (uhol 21.6°)" in cts.snapshot_summary(odd)
+
+
+def test_snapshot_summary_reads_the_project_fps_from_d006_and_the_legacy_d007_only_without_it():
+    # issue 1402: context.d006 is the project fps x100
+    assert "1/50 s" in cts.snapshot_summary(dict(PROD, values={"iso": "800", "d002": "18000"},
+                                                  context={"d006": "2500"}))
+    # a legacy snapshot (whole-fps context.d007 only) logs the same 1/N s
+    assert cts.snapshot_summary(LEGACY_PROD) == cts.snapshot_summary(PROD)
+    assert "1/50 s" in cts.snapshot_summary(dict(LEGACY_PROD, values={"iso": "800", "d002": "18000"},
+                                                 context={"d007": "25"}))
+    # d006 present: the legacy key is never read, even when it disagrees (an off-speed d007)
+    assert "1/60 s" in cts.snapshot_summary(dict(PROD, context={"d006": "6000", "d007": "50"}))
+    # a present d006 that is null or not a number is unreadable, never "absent": no legacy fallback
+    # (review round 1: a null d006 fell back to the off-speed d007)
+    assert cts.context_fps100({"d006": None, "d007": "50"}) is None
+    assert cts.context_fps100({"d006": "x", "d007": "60"}) is None
+    assert cts.context_fps100({"d007": "60"}) == 6000
+    assert cts.context_fps100({"d006": "5994", "d007": "50"}) == 5994
+    assert cts.context_fps100({}) is None
+    no_number = dict(PROD, context={"d006": "x", "d007": "60"})
+    assert cts.snapshot_summary(no_number) == "ISO 800, uzávierka uhol 360°, cam1 2026-09-26T15:00:00Z"
 
 
 def test_consumed_path_and_the_newest_consumed_snapshot():
@@ -152,19 +177,19 @@ def test_cli_snapshot_writes_once_and_never_overwrites():
     try:
         p = os.path.join(root, "sub", "camera-prod-exposure.json")
         r = _cli(["snapshot", "--baseline", base, "--snapshot", p, "--box", "cam1"],
-                 _blocks({"iso": 800, "d002": 36000, "d007": 60}))
+                 _blocks({"iso": 800, "d002": 36000, "d006": 6000}))
         assert r.returncode == 0, r.stderr
         assert "SNAPSHOT saved" in r.stdout
         doc = json.load(open(p))
         assert doc["values"] == {"iso": "800", "d002": "36000"} and doc["box"] == "cam1"
         r = _cli(["snapshot", "--baseline", base, "--snapshot", p, "--box", "cam2"],
-                 _blocks({"iso": 8000, "d002": 2160, "d007": 60}))
+                 _blocks({"iso": 8000, "d002": 2160, "d006": 6000}))
         assert r.returncode == 0 and "SNAPSHOT kept" in r.stdout
         assert json.load(open(p)) == doc
         # an unrestorable value is refused and nothing is written
         q = os.path.join(root, "q.json")
         r = _cli(["snapshot", "--baseline", base, "--snapshot", q, "--box", "cam1"],
-                 _blocks({"iso": "Auto ISO", "d002": 36000, "d007": 60}))
+                 _blocks({"iso": "Auto ISO", "d002": 36000, "d006": 6000}))
         assert r.returncode == cts.EXIT_SNAPSHOT_FAILED and not os.path.exists(q)
     finally:
         shutil.rmtree(root)
@@ -187,7 +212,7 @@ def test_the_first_set_snapshots_the_owners_exposure_before_changing_it():
     assert r.rc == 0, r.out
     doc = json.loads(r.snapshot)
     assert doc["values"] == {"iso": "800", "d002": "36000"}
-    assert doc["box"] == "cam1" and doc["context"] == {"d007": "60"}
+    assert doc["box"] == "cam1" and doc["context"] == {"d006": "6000"}
     assert r.snapshot_at_set is True, "the snapshot must be on disk BEFORE the camera is changed"
     assert "SNAPSHOT saved" in r.out
 
@@ -259,6 +284,20 @@ def test_restore_puts_the_owners_exposure_back_and_consumes_the_snapshot():
     assert "RESTORE iso 400 -> 800" in r.out and "RESTORED iso 800" in r.out
     assert "✅" in r.discord and "ISO 800" in r.discord and "1/60 s" in r.discord
     assert r.discord.startswith("EVENT contract ok\n"), r.discord
+
+
+def test_a_legacy_snapshot_with_only_the_whole_fps_d007_still_restores_and_logs_the_same_shutter():
+    # issue 1402: a snapshot taken before the d006 switch, during a running development period;
+    # the camera is off-speed (d007 50), the project fps d006 is 60
+    r = _restore(dict(GOOD, iso="400", d002="18000", d007="50"), snapshot=LEGACY_PROD)
+    assert r.rc == 0, r.out
+    assert "AFTER-RESTORE rc=0 outcome=restored" in r.out
+    assert "SET 10.77.9.61 iso=800 d002=36000" in r.calls
+    assert r.camera["iso"] == "800" and r.camera["d002"] == "36000"
+    assert "pending production exposure: ISO 800, uzávierka 1/60 s (uhol 360°), cam1" in r.out
+    assert "SHUTTER AFTER 1/60 s at 60 fps" in r.out and "at 50 fps" not in r.out
+    assert "1/60 s" in r.discord
+    assert r.snapshot is None and len(r.consumed) == 1 and r.consumed_docs[0] == LEGACY_PROD
 
 
 def test_restore_when_the_camera_already_has_the_production_values_sets_nothing():
@@ -362,7 +401,7 @@ def test_the_snapshot_abort_does_not_depend_on_the_callers_pipefail():
 
 def test_build_snapshot_refuses_a_box_or_time_it_could_not_read_back():
     b = cts.load_baseline(_baseline_text(_pinned()))
-    cur = {"iso": "800", "d002": "36000", "d007": "60"}
+    cur = {"iso": "800", "d002": "36000", "d006": "6000"}
     for box, utc in (("cam 1", "t"), ("cam1", ""), ("cam1;x", "t")):
         try:
             cts.build_snapshot(cur, b, box, utc)

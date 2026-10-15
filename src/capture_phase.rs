@@ -85,8 +85,11 @@ pub const RESEED_JITTER_MULTIPLE: u64 = 8;
 /// sub-millisecond interrupt hiccup.
 pub const RESEED_FLOOR_NS: u64 = 1_000_000;
 
-/// This many outliers in a row is a real phase step (a grabber re-lock): re-seed.
-pub const RESEED_CONSECUTIVE_OUTLIERS: u32 = 3;
+/// This many outliers in a row is a real phase step (a grabber re-lock): re-seed. Shorter runs
+/// are delivery delays (issue 1371: a Cam Link on a busy USB port delivers frames +1..+7 ms late
+/// for a few frames while the sensor keeps its phase), held on the prediction and never followed.
+/// About half a second at 60 fps.
+pub const RESEED_CONSECUTIVE_OUTLIERS: u32 = 30;
 
 /// A forward sequence step above this (more than 8 frames lost at once) re-seeds: that is a device
 /// hiccup, not a dropped frame. It also bounds the window's sequence span, which keeps every `i128`
@@ -130,10 +133,9 @@ pub const STAMP_MODE_EXIT_RATE_PPM: u64 = 2_500;
 /// A move of the mono-to-real offset between two frames of at least this much is a realtime CLOCK
 /// STEP, not the camera drifting. A slewing clock (dantesync's `adjtimex` frequency and offset
 /// slews) moves `CLOCK_MONOTONIC` and `CLOCK_REALTIME` together, so the offset the capture loop
-/// re-samples every 100 captured frames moves only on a step, or when one of its two clock reads
-/// is preempted. A preempted read of 1 ms or more re-anchors twice (on the spike and on its
-/// return at the next re-sample), each at most one duplicate or missing slot when the instant
-/// sits within the hysteresis of an edge, and neither is counted as a crossing.
+/// holds (`genlock_stamp::StampOffset`) moves only on a step: in the frame the wall steps by 2 ms
+/// or more (issue 1372), else at its 100-frame cadence. Its clock read is bracketed, so a
+/// preempted read is never adopted and never re-anchors.
 pub const CLOCK_STEP_NS: u64 = 1_000_000;
 
 const _: () = assert!(LOCK_MIN_FRAMES >= 3 && LOCK_MIN_FRAMES <= FIT_WINDOW_FRAMES);
@@ -207,6 +209,12 @@ fn div_round(num: i128, den: i128) -> i128 {
     (2 * num + den).div_euclid(2 * den)
 }
 
+/// A residual for a [`PhaseNote`], saturated into `i64` (a residual this large is already a
+/// re-seed; the note only has to show its sign and size).
+fn resid_i64(resid: i128) -> i64 {
+    resid.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
 /// One observed frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseObservation {
@@ -216,6 +224,63 @@ pub struct PhaseObservation {
     /// host dropped) plus any frames the device skipped without a sequence step. `0` for the first
     /// frame of a (re-)seed or a frame without a timestamp.
     pub seq_advance: u32,
+}
+
+/// Why the fit re-seeded, or a frame it re-indexed as hidden device drops (issue 1371). The
+/// capture loop logs one line per note, so the residuals behind a re-seed can be read on the rig:
+/// a delivery delayed on a shared USB bus and a real phase step look different there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhaseNote {
+    /// A sequence step backward, a step above [`MAX_SEQ_ADVANCE`], a timestamp that did not
+    /// advance (`dt_ns == 0`) or a pause longer than any frame.
+    Discontinuity { seq_step: i32, dt_ns: u64 },
+    /// One sample half a period or more off the fit (signed residual, positive = late).
+    HalfPeriod { resid_ns: i64 },
+    /// [`RESEED_CONSECUTIVE_OUTLIERS`] samples in a row off the fit (residuals, oldest first): a
+    /// real phase step, re-seeded.
+    OutlierRun { resid_ns: Vec<i64> },
+    /// A sample a whole number of periods late, re-indexed as `frames` the device skipped.
+    HiddenDrop { frames: u32, resid_ns: i64 },
+}
+
+impl PhaseNote {
+    /// The log text after the `#1371 capture phase ` prefix, residuals in whole microseconds.
+    pub fn describe(&self) -> String {
+        fn us(ns: i64) -> String {
+            format!("{:+}", ns / 1000)
+        }
+        match self {
+            PhaseNote::Discontinuity { seq_step, dt_ns } => {
+                let why = if *seq_step <= 0 {
+                    "sequence-back"
+                } else if *seq_step as u32 > MAX_SEQ_ADVANCE {
+                    "sequence-jump"
+                } else if *dt_ns == 0 {
+                    "time-stall"
+                } else {
+                    "gap"
+                };
+                format!(
+                    "re-seed: reason={why} seq_step={seq_step} dt_us={}",
+                    dt_ns / 1000
+                )
+            }
+            PhaseNote::HalfPeriod { resid_ns } => {
+                format!("re-seed: reason=half-period resid_us={}", us(*resid_ns))
+            }
+            PhaseNote::OutlierRun { resid_ns } => format!(
+                "re-seed: reason=outlier-run resid_us=[{}]",
+                resid_ns
+                    .iter()
+                    .map(|r| us(*r))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            PhaseNote::HiddenDrop { frames, resid_ns } => {
+                format!("hidden drop: frames={frames} resid_us={}", us(*resid_ns))
+            }
+        }
+    }
 }
 
 /// The least-squares capture-phase fit of ONE stream. See the module doc.
@@ -236,6 +301,10 @@ pub struct CapturePhaseTracker {
     white_check_countdown: u32,
     reseeds: u64,
     hidden_drops: u64,
+    /// The residuals of the current outlier run, oldest first (issue 1371, for its note).
+    outlier_resid: Vec<i64>,
+    /// The note of the most recent observed frame, if it re-seeded or re-indexed (issue 1371).
+    note: Option<PhaseNote>,
 }
 
 impl CapturePhaseTracker {
@@ -250,6 +319,7 @@ impl CapturePhaseTracker {
             smoothed_mono_ns: None,
             seq_advance,
         };
+        self.note = None;
         if capture_mono_ns == 0 {
             return none(0);
         }
@@ -267,6 +337,10 @@ impl CapturePhaseTracker {
             // A backward / stalled / huge sequence step (a device re-open), a timestamp that does
             // not advance, or a pause longer than any frame: not this fit's stream any more.
             self.reseed(seq, capture_mono_ns);
+            self.note = Some(PhaseNote::Discontinuity {
+                seq_step: delta,
+                dt_ns: dt,
+            });
             return none(0);
         }
         let mut seq_advance = delta as u32;
@@ -294,19 +368,32 @@ impl CapturePhaseTracker {
                         seq_advance += k;
                         x += i64::from(k);
                         self.hidden_drops += u64::from(k);
+                        self.note = Some(PhaseNote::HiddenDrop {
+                            frames: k,
+                            resid_ns: resid_i64(resid),
+                        });
                     } else if r.abs() * 2.0 >= period {
                         // Half a frame or more: a real discontinuity, never a stamp from the old
                         // phase.
                         self.reseed(seq, capture_mono_ns);
+                        self.note = Some(PhaseNote::HalfPeriod {
+                            resid_ns: resid_i64(resid),
+                        });
                         return none(0);
                     } else {
                         self.last_x = x;
                         self.outlier_run += 1;
+                        self.outlier_resid.push(resid_i64(resid));
                         if self.outlier_run >= RESEED_CONSECUTIVE_OUTLIERS {
+                            // Issue 1371: only a run this long is a real phase step. A shorter one
+                            // is a delivery delay (the camera's phase never moved), held below.
+                            let run = std::mem::take(&mut self.outlier_resid);
                             self.reseed(seq, capture_mono_ns);
+                            self.note = Some(PhaseNote::OutlierRun { resid_ns: run });
                             return none(0);
                         }
-                        // One late/early timestamp: never folded, stamped from the prediction.
+                        // A late/early timestamp: never folded, stamped from the prediction,
+                        // the lock kept (issue 1371: never move the fit onto a delivery delay).
                         return PhaseObservation {
                             smoothed_mono_ns: self.locked.then_some(pred),
                             seq_advance,
@@ -317,6 +404,7 @@ impl CapturePhaseTracker {
         }
         self.last_x = x;
         self.outlier_run = 0;
+        self.outlier_resid.clear();
         self.push(x, capture_mono_ns);
         self.update_lock();
         PhaseObservation {
@@ -365,12 +453,18 @@ impl CapturePhaseTracker {
         self.window.clear();
         self.sums = FitSums::default();
         self.outlier_run = 0;
+        self.outlier_resid.clear();
         self.locked = false;
         self.white_check_countdown = 0;
         self.last_seq = Some(seq);
         self.last_x = 0;
         self.last_t = t;
         self.push(0, t);
+    }
+
+    /// The note of the most recent observed frame (issue 1371), cleared by the next frame.
+    pub fn note(&self) -> Option<&PhaseNote> {
+        self.note.as_ref()
     }
 
     fn reseed(&mut self, seq: u32, t: u64) {
@@ -675,6 +769,11 @@ impl CapturePhase {
     /// Frames the device skipped that the sequence did not show, since the start.
     pub fn hidden_drops(&self) -> u64 {
         self.tracker.hidden_drops()
+    }
+
+    /// Why the most recent frame re-seeded the fit or was re-indexed (issue 1371), else `None`.
+    pub fn note(&self) -> Option<&PhaseNote> {
+        self.tracker.note()
     }
 
     /// The tokens the 5 s `#707 emit-1s/cap-1s` line appends (leading space). Every key is

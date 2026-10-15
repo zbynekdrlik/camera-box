@@ -1,9 +1,9 @@
 //! issue 1351 — after the M4 cut-over (strih role moved from the Windows STRIH-SNV PC to the
-//! Linux notebook strih-lx, 10.77.9.202, `strih-obs.service` on GNOME/Wayland), the full-path E2E
+//! Linux notebook strih-snv, 10.77.9.202, `strih-obs.service` on GNOME/Wayland), the full-path E2E
 //! gate must learn a per-box strih PLATFORM (`scripts/lib/strih-platform.sh`) and branch its two
 //! Windows-only touch-points in `scripts/recording-e2e.sh`: the `[0/8]` obs64/AHK
 //! session-visibility gate, and the `[8/8a]` strih record-extraction path (a NEW Linux sibling,
-//! `scripts/recording-verdict-on-strih-lx.sh`, mirroring recording-verdict-on-imag.sh's
+//! `scripts/recording-verdict-on-strih-snv.sh`, mirroring recording-verdict-on-imag.sh's
 //! always-execute plain-ssh shape). The Windows path stays byte-identical (parallel-run
 //! tolerant) — this file's negative-anchor tests pin that.
 //!
@@ -24,7 +24,7 @@ fn lib_script() -> PathBuf {
 }
 
 fn onstrihlx_script() -> PathBuf {
-    manifest_dir().join("scripts/recording-verdict-on-strih-lx.sh")
+    manifest_dir().join("scripts/recording-verdict-on-strih-snv.sh")
 }
 
 fn read(rel: &str) -> String {
@@ -89,7 +89,7 @@ fn empty_host_defaults_to_windows() {
 
 #[test]
 fn strih_platform_env_override_wins_even_for_the_lx_ip() {
-    // an explicit STRIH_PLATFORM=windows must win outright, even against the known strih-lx IP —
+    // an explicit STRIH_PLATFORM=windows must win outright, even against the known strih-snv IP —
     // this is the escape hatch for testing/rollback the design calls for.
     let out = run_sourced_env(
         "strih_platform 10.77.9.202",
@@ -221,40 +221,40 @@ fn crlf_line_endings_do_not_cause_a_false_invisible() {
 }
 
 // ================================================================================================
-// scripts/recording-verdict-on-strih-lx.sh — the Linux [8/8a] extraction sibling.
+// scripts/recording-verdict-on-strih-snv.sh — the Linux [8/8a] extraction sibling.
 // ================================================================================================
 
 #[test]
 fn recording_verdict_on_strih_lx_script_exists_and_is_executable() {
     let meta = fs::metadata(onstrihlx_script())
-        .unwrap_or_else(|e| panic!("issue 1351: recording-verdict-on-strih-lx.sh missing: {e}"));
+        .unwrap_or_else(|e| panic!("issue 1351: recording-verdict-on-strih-snv.sh missing: {e}"));
     assert!(meta.is_file(), "must be a file");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert!(
             meta.permissions().mode() & 0o111 != 0,
-            "recording-verdict-on-strih-lx.sh must be executable"
+            "recording-verdict-on-strih-snv.sh must be executable"
         );
     }
 }
 
-/// Mirrors on_imag_helper_targets_imag_over_plain_ssh_not_mcp — strih-lx is reached over plain
+/// Mirrors on_imag_helper_targets_imag_over_plain_ssh_not_mcp — strih-snv is reached over plain
 /// ssh/scp, NEVER the win-* MCP plan-printing shape.
 #[test]
 fn on_strih_lx_helper_targets_plain_ssh_never_mcp() {
-    let s = read("scripts/recording-verdict-on-strih-lx.sh");
+    let s = read("scripts/recording-verdict-on-strih-snv.sh");
     assert!(
         s.contains("10.77.9.202"),
-        "issue 1351: the on-strih-lx helper must reference the strih-lx box IP 10.77.9.202."
+        "issue 1351: the on-strih-snv helper must reference the strih-snv box IP 10.77.9.202."
     );
     assert!(
         s.contains("sshpass") && s.contains("ssh"),
-        "issue 1351: the on-strih-lx helper must use plain ssh/scp."
+        "issue 1351: the on-strih-snv helper must use plain ssh/scp."
     );
     assert!(
         !s.contains("FileUpload") && !s.contains("FileDownload") && !s.contains("MCP Shell:"),
-        "issue 1351: the on-strih-lx helper must not print an MCP plan (it EXECUTES directly \
+        "issue 1351: the on-strih-snv helper must not print an MCP plan (it EXECUTES directly \
          over ssh/scp, unlike the win-strih Windows sibling)."
     );
 }
@@ -424,7 +424,7 @@ fn run_strih_extract_branches_on_platform_and_calls_the_linux_sibling() {
         "run_strih_extract must branch on strih_platform. Window:\n{window}"
     );
     assert!(
-        window.contains("recording-verdict-on-strih-lx.sh"),
+        window.contains("recording-verdict-on-strih-snv.sh"),
         "run_strih_extract must call the new Linux sibling on a linux strih. Window:\n{window}"
     );
     assert!(
@@ -473,10 +473,10 @@ fn run_strih_extract_windows_branch_is_byte_identical_to_the_original() {
     );
 }
 
-/// #1351 hotfix (supervisor, live-rig E2E finding): the strih-lx ssh/scp opts MUST carry
+/// #1351 hotfix (supervisor, live-rig E2E finding): the strih-snv ssh/scp opts MUST carry
 /// `-o UserKnownHostsFile=/dev/null`. The M4 cut-over gave 10.77.9.202 a new host key, and
 /// `StrictHostKeyChecking=no` does NOT override a CHANGED key — without this the [0/8] Linux
-/// visibility probe AND the record extraction fail with an empty read ("strih-lx unreachable"),
+/// visibility probe AND the record extraction fail with an empty read ("strih-snv unreachable"),
 /// aborting the E2E. Matches the fleet-standard ssh shape used everywhere else.
 #[test]
 fn strih_lx_ssh_opts_ignore_stale_known_hosts_1351() {
@@ -485,10 +485,10 @@ fn strih_lx_ssh_opts_ignore_stale_known_hosts_1351() {
         lib.contains("-o UserKnownHostsFile=/dev/null"),
         "strih_linux_visibility_check ssh must set UserKnownHostsFile=/dev/null (M4 .202 host-key change)"
     );
-    let ext = read("scripts/recording-verdict-on-strih-lx.sh");
+    let ext = read("scripts/recording-verdict-on-strih-snv.sh");
     assert!(
         ext.contains("-o UserKnownHostsFile=/dev/null"),
-        "recording-verdict-on-strih-lx.sh SSH_OPTS must set UserKnownHostsFile=/dev/null (ssh + scp)"
+        "recording-verdict-on-strih-snv.sh SSH_OPTS must set UserKnownHostsFile=/dev/null (ssh + scp)"
     );
 }
 
@@ -574,7 +574,7 @@ fn zero_eight_version_integrity_gate_windows_invocation_args_are_byte_identical_
 }
 
 // ================================================================================================
-// issue 1317 part 3 — the Windows-only strih paths refuse the Linux strih-lx, BEFORE any rig mutation.
+// issue 1317 part 3 — the Windows-only strih paths refuse the Linux strih-snv, BEFORE any rig mutation.
 // ================================================================================================
 
 /// The shared refusal gate + the restart-survival preflight: a Linux strih is refused (rc 1, named
@@ -594,7 +594,7 @@ fn windows_only_strih_modes_refuse_the_linux_strih_1317() {
     };
     let (c, err) = rc("strih_platform_refuse_windows_only_mode 10.77.9.202 'X mode'");
     assert_eq!(c, 1, "a Linux strih must be refused: {err}");
-    assert!(err.contains("X mode") && err.contains("strih-lx"), "{err}");
+    assert!(err.contains("X mode") && err.contains("strih-snv"), "{err}");
     let (c, err) = rc("strih_platform_refuse_windows_only_mode 192.0.2.10 'X mode'");
     assert_eq!(c, 0, "a Windows strih passes: {err}");
     assert!(err.is_empty(), "silent pass: {err}");
@@ -610,7 +610,7 @@ fn windows_only_strih_modes_refuse_the_linux_strih_1317() {
     let (c, err) = rc("ZERO_LOSS_RESTART_GATE=1 strih_zero_loss_restart_preflight 10.77.9.202");
     assert_eq!(
         c, 1,
-        "the Windows-only restart mode is refused on strih-lx: {err}"
+        "the Windows-only restart mode is refused on strih-snv: {err}"
     );
     let (c, _e) = rc("ZERO_LOSS_RESTART_GATE=1 strih_zero_loss_restart_preflight 192.0.2.10");
     assert_eq!(c, 0, "a Windows strih keeps the mode");

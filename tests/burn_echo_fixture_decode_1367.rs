@@ -1,6 +1,6 @@
 //! issue 1367 regression LOCK — the recording decode must never accept an ECHO of a node burn.
 //!
-//! THE BUG: the owner re-cabled cam2's capture input to the strih-lx built-in HDMI, which shows
+//! THE BUG: the owner re-cabled cam2's capture input to the strih-snv built-in HDMI, which shows
 //! the vk-direct MULTIVIEW. cam2 now films a screen that holds smaller, still decodable copies of
 //! the node burns inside the multiview cells (Preview, Program, the camera cells), cam2's OWN
 //! earlier burns among them. The decode accepted a node run_id wherever rqrr found it. On the

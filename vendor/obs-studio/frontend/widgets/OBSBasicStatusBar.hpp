@@ -1,5 +1,6 @@
 #pragma once
 
+#include "GenlockRecentEvents.hpp"
 #include "StatusBarWidget.hpp"
 
 #include <obs.hpp>
@@ -90,10 +91,9 @@ private:
 	double genlockClockFptpPpm = 0.0;
 	double genlockClockFphasePpm = 0.0;
 	qint64 genlockClockLastOkMs = -1; /* monotonic ms of the last successful :8898 poll; -1 = never */
-	/* recent-event (relock/underrun/late-hold/backward-step in the last 60 s) tracking */
-	quint64 genlockLastEventSum = 0;
-	qint64 genlockLastEventMs = -1; /* monotonic ms of the last observed counter increase */
-	bool genlockFirstSample = true;
+	/* issue 1302: the recent_event state -- each input's phase-event baseline + the last tick that saw
+	 * a NEW event (relock / late-hold / backward-step of a connected, non-idle input) */
+	GenlockRecentEvents genlockRecentEvents;
 	/* #1299 Part 4 + #1357: a ring of (monotonic ms, SIGNED cumulative drift ms) samples over
 	 * GENLOCK_QPC_WINDOW_S. The qpc_drift verdict keys on the largest single-sample wall STEP in it; the
 	 * windowed RATE it also yields is report-only telemetry (never the unbounded cumulative offset). */
@@ -105,11 +105,10 @@ private:
 	 * itself each tick, over GENLOCK_MEDIA_CLOCK_WINDOW_S. The media-clock term keys on their RATE (wall
 	 * steps left out): since part A the media clock follows the disciplined wall on every box. */
 	std::deque<std::pair<qint64, int64_t>> genlockMediaClockHistory;
-	/* #1341: per-input received-frame history (input name -> ring of (monotonic ms, cumulative
-	 * frames_received)) over GENLOCK_IDLE_WINDOW_MS. An input whose received DELTA over the window is
-	 * below GENLOCK_IDLE_INPUT_MIN_FRAMES is IDLE (keep-alive-only) and excluded from the DEGRADED
-	 * gate; entries for inputs no longer present are pruned each tick so the state stays bounded. */
-	std::map<std::string, std::deque<std::pair<qint64, uint64_t>>> genlockRxHistory;
+	/* #1341 + issue 1302: per-input received-frame rings + each input's class (UNCLASSIFIED / LIVE /
+	 * IDLE), ticked by genlock_idle_classify_tick (GenlockRecentEvents.cpp). Only a LIVE input is
+	 * graded; an input no longer connected is forgotten each tick so the state stays bounded. */
+	GenlockIdleClassifier genlockIdle;
 	/* genlock-lock: log-on-change de-dup */
 	int genlockLastLoggedState = -1;
 	int genlockLastLoggedReason = -1;

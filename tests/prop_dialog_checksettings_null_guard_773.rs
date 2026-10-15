@@ -220,10 +220,10 @@ fn settings_json_diff_computes_the_null_safe_truth_table_773() {
     }
     c.push_str("    return 0;\n}\n");
 
-    // Key the scratch dir on the pid so concurrent runs (worktree-fleet workers, nextest + a
-    // local run) never race on diff.bin (#975 class).
-    let dir = std::env::temp_dir().join(format!("prop_dialog_773_{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("create the scratch dir");
+    // A fresh tempfile dir per run, so concurrent runs (worktree-fleet workers, nextest + a
+    // local run) never race on diff.bin (#975 class) and nothing is left in /tmp (issue 1409).
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let cfile = dir.join("diff.c");
     let bin = dir.join("diff.bin");
     fs::write(&cfile, &c).expect("write the harness");

@@ -442,7 +442,9 @@ per-patch means are logged (ANSI-coloured) as `colour-dump (localized per-patch 
 expected=... mean=... chroma=... hue=... frames=12` lines inside
 `/tmp/recording-e2e-<RUN_ID>/{strih,stream}-extract-<RUN_ID>.log` — one line per patch (0-12, order
 white/black/R/G/B/C/M/Y/g0/g64/g128/g192/g255, `PATCH_COLOURS`). To extract a timeseries across
-many past runs (strip the ANSI codes FIRST or `grep "patch=N "` silently matches nothing):
+past runs (strip the ANSI codes FIRST or `grep "patch=N "` silently matches nothing; dev1 keeps
+only the newest 9 run dirs since issue 1395 and the CI artifact carries no extract log, so a
+longer series needs runs copied out of /tmp, see the `scripts/lib/e2e-rundir-retention.sh` header):
 ```bash
 for f in $(grep -rl "colour-dump" /tmp/recording-e2e-*/strih-extract-*.log 2>/dev/null); do
   mtime=$(stat -c '%y' "$f" | cut -d. -f1)
@@ -2219,9 +2221,10 @@ NOT the video frame the id was decoded at; use `.id`), then grep BOTH the same r
 downstream), it was never lost anywhere — SPURIOUS. This is the diagnostic-time twin of the
 already-shipped #356 cross-recording reconciliation fix (same "does the downstream recording
 prove delivery" idea, applied by hand during investigation instead of automatically in the
-verdict). **Two locally-cached CI runs' full partials (multi-MB JSON + pixel-proof dirs) survive
-in `/tmp/recording-e2e-<run>/` on dev1 for a long time after the run — check there BEFORE
-spending rig time on a fresh repro; the evidence may already exist.**
+verdict). **The newest locally-cached CI runs' full partials (multi-MB JSON + pixel-proof dirs)
+stay in `/tmp/recording-e2e-<run>/` on dev1 — check there BEFORE spending rig time on a fresh
+repro; the evidence may already exist. Since issue 1395 only the newest 9 run dirs are kept
+(`scripts/lib/e2e-rundir-retention.sh`); copy a run out of /tmp to keep it longer.**
 
 **The fix** (`src/probe/burn_contiguity.rs` + `src/bin/recording-verdict.rs`): a NEW `window_of`
 parameter (computed by reusing the EXISTING `frame_gen_ts_anchor`/`place_frame_in_window` #706/#312
@@ -2515,7 +2518,14 @@ The per-hop log tail is supplied explicitly (the tool ships no untested ssh/MCP 
 #   strih / stream: a byte-safe PowerShell gc tail over ssh (or a bundle-state :8899 fetch)
 #   cg-obs (RESOLUME-SNV): paste the win-resolume MCP FileRead of its OBS log to a file
 export CG_CHAIN_CG_OBS_LOG=/tmp/cg-obs-obs.log     # from win-resolume MCP FileRead
-export CG_CHAIN_STRIH_CMD='ssh -o StrictHostKeyChecking=no newlevel@10.77.9.202 "powershell -c \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName | select -last 4000\""'
+# strih is the LINUX strih-snv since the M4 cut-over; read it through the ONE platform-resolved strih
+# log reader (`.claude/rules/strih-log-read.md`, bounded ssh). The tool evals the command where HERE is
+# set, and STRIH_PW must be EXPORTED (an unset one reads the hop UNREADABLE). Its SongPlayer input is
+# `CG-obs` (issue 1302), held at a latched shallow depth, so its skew is graded as the excursion
+# from that depth (`.claude/rules/cg-chain-verify.md`):
+export STRIH_PW=...                                  # the strih-snv ssh password (targets.md)
+export CG_CHAIN_STRIH_SRC=CG-obs
+export CG_CHAIN_STRIH_CMD='. "$HERE/lib/strih-log-read.sh"; strih_log_tail 10.77.9.202 newlevel "$STRIH_PW" 1500 30'
 export CG_CHAIN_STREAM_CMD='ssh -o StrictHostKeyChecking=no newlevel@10.77.9.204 "powershell -c \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName | select -last 4000\""'
 scripts/cg-chain-verify.sh                          # one window, default hops cg-obs + strih → table + OVERALL, exit 3 on FAIL
 # the stream hop only on request (its old input `NDI obs hudba` was removed 27.9.2026); an input with no

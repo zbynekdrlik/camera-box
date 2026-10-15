@@ -67,25 +67,25 @@ _SNV_SCOPE = {
     "NDI_PORTMAP_NAME_PREFIX": "STRIH-SNV", "NDI_PORTMAP_ANCHOR": "STRIH-SNV (2ME PGM)",
 }
 
-# issue 1363: a live-shaped read of the Linux strih-lx box (dev1 `avahi-browse -rtp _ndi._tcp`,
-# 23.9.2026): libndi on Linux announces under the box's own avahi host `strih-lx.local` and the
-# uppercased hostname `STRIH-LX`; ONE NDI instance (no Arena Spout on Linux). The ports are the
+# issue 1363: a live-shaped read of the Linux strih-snv box (dev1 `avahi-browse -rtp _ndi._tcp`,
+# 23.9.2026): libndi on Linux announces under the box's own avahi host `strih-snv.local` and the
+# uppercased hostname `STRIH-SNV`; ONE NDI instance (no Arena Spout on Linux). The ports are the
 # shifted issue-1363 map -- sample data only.
-_H_LX = "strih-lx.local"
+_H_LX = "strih-snv.local"
 _TXT_LX = '"discovery=5960" "groups=public"'
 _AVAHI_LX = "\n".join([
-    "+;enp2s0;IPv4;STRIH-LX\\032\\0402ME\\032PGM\\041;_ndi._tcp;local",
-    f"=;enp2s0;IPv4;STRIH-LX\\032\\0402ME\\032PVW\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5966;{_TXT_LX}",
-    f"=;enp2s0;IPv4;STRIH-LX\\032\\040Grading\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5965;{_TXT_LX}",
-    f"=;enp2s0;IPv4;STRIH-LX\\032\\040MULTIVIEW\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5964;{_TXT_LX}",
-    f"=;enp2s0;IPv4;STRIH-LX\\032\\040interkom\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5963;{_TXT_LX}",
-    f"=;enp2s0;IPv4;STRIH-LX\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5962;{_TXT_LX}",
+    "+;enp2s0;IPv4;STRIH-SNV\\032\\0402ME\\032PGM\\041;_ndi._tcp;local",
+    f"=;enp2s0;IPv4;STRIH-SNV\\032\\0402ME\\032PVW\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5966;{_TXT_LX}",
+    f"=;enp2s0;IPv4;STRIH-SNV\\032\\040Grading\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5965;{_TXT_LX}",
+    f"=;enp2s0;IPv4;STRIH-SNV\\032\\040MULTIVIEW\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5964;{_TXT_LX}",
+    f"=;enp2s0;IPv4;STRIH-SNV\\032\\040interkom\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5963;{_TXT_LX}",
+    f"=;enp2s0;IPv4;STRIH-SNV\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5962;{_TXT_LX}",
     "=;enp2s0;IPv4;CAM1\\032\\040usb\\041;_ndi._tcp;local;CAM1.local;10.77.9.61;5961;\"g=p\"",
     "=;enp2s0;IPv4;STREAM-SNV\\032\\040stream\\041;_ndi._tcp;local;STREAM-SNV-0.local;10.77.9.204;5961;\"g=P\"",
 ]) + "\n"
 _LX_SENDERS = {
-    "STRIH-LX (2ME PGM)": 5962, "STRIH-LX (2ME PVW)": 5966, "STRIH-LX (Grading)": 5965,
-    "STRIH-LX (MULTIVIEW)": 5964, "STRIH-LX (interkom)": 5963,
+    "STRIH-SNV (2ME PGM)": 5962, "STRIH-SNV (2ME PVW)": 5966, "STRIH-SNV (Grading)": 5965,
+    "STRIH-SNV (MULTIVIEW)": 5964, "STRIH-SNV (interkom)": 5963,
 }
 _FLEET = _ROOT / "scripts" / "lib" / "obs-fleet.sh"
 
@@ -457,7 +457,7 @@ def _block_of(avahi_text):
 
 
 _LX_PGM_AT_OTHER_IP = (
-    '=;enp2s0;IPv4;STRIH-LX\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;other.local;10.77.9.99;5961;"g=P"\n')
+    '=;enp2s0;IPv4;STRIH-SNV\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;other.local;10.77.9.99;5961;"g=P"\n')
 
 
 def test_fleet_declares_the_ndi_portmap_facet_on_the_linux_strih_1363():
@@ -466,39 +466,39 @@ def test_fleet_declares_the_ndi_portmap_facet_on_the_linux_strih_1363():
     r = subprocess.run(["bash", "-c", f'. "{_FLEET}"; obs_fleet_facet_members ndi-portmap'],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["strih-lx"]
+    assert r.stdout.split() == ["strih-snv"]
 
 
 def test_anchor_ip_is_read_from_the_anchor_record_1363():
-    out = _bash(_block_of(_AVAHI_LX) + 'ndi_portmap_anchor_ip "$block" "STRIH-LX (2ME PGM)"')
+    out = _bash(_block_of(_AVAHI_LX) + 'ndi_portmap_anchor_ip "$block" "STRIH-SNV (2ME PGM)"')
     assert out.strip() == "10.77.9.202"
 
 
 def test_anchor_ip_fails_safe_on_two_ips_or_none_1363():
     two = _AVAHI_LX + _LX_PGM_AT_OTHER_IP
-    assert _bash(_block_of(two) + 'ndi_portmap_anchor_ip "$block" "STRIH-LX (2ME PGM)"').strip() == ""
+    assert _bash(_block_of(two) + 'ndi_portmap_anchor_ip "$block" "STRIH-SNV (2ME PGM)"').strip() == ""
     assert _bash(_block_of(_AVAHI_LX) + 'ndi_portmap_anchor_ip "$block" "STRIH-PP (2ME PGM)"').strip() == ""
     # a doubled resolve of the SAME ip (multi-homed avahi) is still ONE ip, not ambiguous.
     doubled = _AVAHI_LX + (
-        f'=;wlan0;IPv4;STRIH-LX\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5962;"g=P"\n')
-    assert _bash(_block_of(doubled) + 'ndi_portmap_anchor_ip "$block" "STRIH-LX (2ME PGM)"').strip() == "10.77.9.202"
+        f'=;wlan0;IPv4;STRIH-SNV\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;{_H_LX};10.77.9.202;5962;"g=P"\n')
+    assert _bash(_block_of(doubled) + 'ndi_portmap_anchor_ip "$block" "STRIH-SNV (2ME PGM)"').strip() == "10.77.9.202"
 
 
 def test_anchor_ip_ignores_an_ipv6_record_of_the_same_anchor_1363():
     # dev1 avahi runs with use-ipv6=yes: a dual-stack announce of the SAME anchor must stay ONE box
     # (IPv4), never "two addresses -> ambiguous -> permanently blind".
     v6 = _AVAHI_LX + (
-        f'=;enp2s0;IPv6;STRIH-LX\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;{_H_LX};fe80::1234:5678;5962;"g=P"\n')
-    assert _bash(_block_of(v6) + 'ndi_portmap_anchor_ip "$block" "STRIH-LX (2ME PGM)"').strip() == "10.77.9.202"
+        f'=;enp2s0;IPv6;STRIH-SNV\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;{_H_LX};fe80::1234:5678;5962;"g=P"\n')
+    assert _bash(_block_of(v6) + 'ndi_portmap_anchor_ip "$block" "STRIH-SNV (2ME PGM)"').strip() == "10.77.9.202"
     r = _audit("--json", v6, "/nonexistent/baseline.json", scope=None)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["senders"] == _LX_SENDERS
 
 
 def test_baseline_scope_match_is_exact_and_fails_closed_1363():
-    assert _bash('ndi_portmap_baseline_scope "STRIH-LX (2ME PGM)" "STRIH-LX (2ME PGM)"').strip() == "MATCH"
-    assert _bash('ndi_portmap_baseline_scope "STRIH-SNV (2ME PGM)" "STRIH-LX (2ME PGM)"').strip() == "MISMATCH"
-    assert _bash('ndi_portmap_baseline_scope "" "STRIH-LX (2ME PGM)"').strip() == "MISMATCH"
+    assert _bash('ndi_portmap_baseline_scope "STRIH-SNV (2ME PGM)" "STRIH-SNV (2ME PGM)"').strip() == "MATCH"
+    assert _bash('ndi_portmap_baseline_scope "STRIH-PP (2ME PGM)" "STRIH-SNV (2ME PGM)"').strip() == "MISMATCH"
+    assert _bash('ndi_portmap_baseline_scope "" "STRIH-SNV (2ME PGM)"').strip() == "MISMATCH"
 
 
 def test_audit_default_scope_is_resolved_from_the_fleet_1363():
@@ -507,8 +507,8 @@ def test_audit_default_scope_is_resolved_from_the_fleet_1363():
     r = _audit("--json", _AVAHI_LX, "/nonexistent/baseline.json", scope=None)
     assert r.returncode == 0, r.stderr
     data = json.loads(r.stdout)
-    assert data["box"] == "strih-lx"
-    assert data["anchor"] == "STRIH-LX (2ME PGM)"
+    assert data["box"] == "strih-snv"
+    assert data["anchor"] == "STRIH-SNV (2ME PGM)"
     assert data["ip"] == "10.77.9.202"
     assert data["senders"] == _LX_SENDERS
 
@@ -519,10 +519,10 @@ def test_audit_default_capture_then_check_is_stable_on_the_linux_strih_1363():
         r = _audit("--capture", _AVAHI_LX, base, scope=None)
         assert r.returncode == 0, r.stderr
         j = json.loads(pathlib.Path(base).read_text())
-        assert j["box"] == "strih-lx" and j["name_prefix"] == "STRIH-LX"
-        assert j["anchor"] == "STRIH-LX (2ME PGM)" and j["ip"] == "10.77.9.202"
+        assert j["box"] == "strih-snv" and j["name_prefix"] == "STRIH-SNV"
+        assert j["anchor"] == "STRIH-SNV (2ME PGM)" and j["ip"] == "10.77.9.202"
         assert j["senders"] == _LX_SENDERS
-        assert "STRIH-SNV" not in j["_comment"]
+        assert "resolved at capture time".upper() in j["_comment"].upper()
         r = _audit("--check", _AVAHI_LX, base, scope=None)
         assert r.returncode == 0, (r.stdout, r.stderr)
         assert "NDI-PORTMAP-STABLE" in r.stdout
@@ -530,28 +530,31 @@ def test_audit_default_capture_then_check_is_stable_on_the_linux_strih_1363():
 
 def test_audit_box_override_derives_prefix_and_anchor_from_the_box_name_1363():
     # a future strih (the Poprad box) needs no code change: the box name alone derives the scope.
-    pp = _AVAHI_LX.replace("STRIH-LX", "STRIH-PP").replace("strih-lx.local", "strih-pp.local")
+    pp = _AVAHI_LX.replace("STRIH-SNV", "STRIH-PP").replace("strih-snv.local", "strih-pp.local")
     r = _audit("--json", pp, "/nonexistent/baseline.json", scope=None,
                extra_env={"NDI_PORTMAP_BOX": "strih-pp"})
     assert r.returncode == 0, r.stderr
     data = json.loads(r.stdout)
     assert data["box"] == "strih-pp" and data["anchor"] == "STRIH-PP (2ME PGM)"
-    assert set(data["senders"]) == {k.replace("STRIH-LX", "STRIH-PP") for k in _LX_SENDERS}
+    assert set(data["senders"]) == {k.replace("STRIH-SNV", "STRIH-PP") for k in _LX_SENDERS}
 
 
 def test_audit_check_refuses_a_baseline_captured_for_another_box_1363():
-    # the checked-in baseline still records the retired Windows STRIH-SNV: diffing it against the
-    # live strih-lx map would read every baseline name ABSENT and report STABLE forever (a silently
-    # blind watchdog). It must be a LOUD, DISTINCT exit (4 = baseline scope stale, not a transient
-    # gather error) that names the re-capture instead.
+    # a baseline captured on ANOTHER strih box (the Poprad strih here; issue 1363 met it as the
+    # retired Windows strih's baseline): diffing it against the live strih-snv map would read every
+    # baseline name ABSENT and report STABLE forever (a silently blind watchdog). It must be a LOUD,
+    # DISTINCT exit (4 = baseline scope stale, not a transient gather error) that names the
+    # re-capture instead.
+    pp = _AVAHI_LX.replace("STRIH-SNV", "STRIH-PP").replace("strih-snv.local", "strih-pp.local")
     with tempfile.TemporaryDirectory() as d:
         base = str(pathlib.Path(d) / "baseline.json")
-        assert _audit("--capture", _AVAHI_LIVE, base).returncode == 0  # an SNV-scoped baseline
+        assert _audit("--capture", pp, base, scope=None,
+                      extra_env={"NDI_PORTMAP_BOX": "strih-pp"}).returncode == 0  # a PP-scoped baseline
         r = _audit("--check", _AVAHI_LX, base, scope=None)
         assert r.returncode == 4, (r.stdout, r.stderr)
         assert "NDI-PORTMAP-STABLE" not in r.stdout
         assert "--capture" in r.stderr
-        assert "STRIH-SNV (2ME PGM)" in r.stderr and "STRIH-LX (2ME PGM)" in r.stderr
+        assert "STRIH-PP (2ME PGM)" in r.stderr and "STRIH-SNV (2ME PGM)" in r.stderr
 
 
 def test_audit_unresolved_box_is_a_gather_error_not_a_recapture_hint_1363():
@@ -585,4 +588,4 @@ def test_portmap_scripts_bake_in_no_strih_box_name_1363():
         for line in path.read_text().splitlines():
             if line.lstrip().startswith("#"):
                 continue
-            assert "STRIH-SNV" not in line and "STRIH-LX" not in line, f"{path.name}: {line}"
+            assert "STRIH-SNV" not in line and "STRIH-SNV" not in line, f"{path.name}: {line}"

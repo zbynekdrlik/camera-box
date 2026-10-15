@@ -216,12 +216,12 @@ fn stage_one_is_the_verdict_decode_byte_for_byte() {
 
 #[test]
 fn strih_lx_export_runs_at_the_same_idle_priority_as_the_on_box_decode() {
-    let s = read("scripts/recording-verdict-on-strih-lx.sh");
+    let s = read("scripts/recording-verdict-on-strih-snv.sh");
     let (ok, snippet, err) = run("missing_slot_pixels_lowprio_snippet", &[]);
     assert!(ok, "{err}");
     assert!(
         s.contains(&format!("LOWPRIO_SNIPPET='{snippet}'")),
-        "the lib's idle-priority prefix must be byte-identical to the strih-lx decode's: {snippet}"
+        "the lib's idle-priority prefix must be byte-identical to the strih-snv decode's: {snippet}"
     );
 }
 
@@ -361,7 +361,7 @@ fn runner_exports_pulls_and_records_the_proofs_without_touching_the_verdict() {
         std::env::var("PATH").unwrap_or_default()
     );
     let snippet = format!(
-        "missing_slot_pixels_run '{}' '{}' 77 strih-lx.test linux '{}' stream.test 'C:\\stream.mkv' 'C:\\cb\\out'",
+        "missing_slot_pixels_run '{}' '{}' 77 strih-snv.test linux '{}' stream.test 'C:\\stream.mkv' 'C:\\cb\\out'",
         report.display(),
         outdir.display(),
         rec.display()

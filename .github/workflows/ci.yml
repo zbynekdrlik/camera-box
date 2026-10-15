@@ -79,7 +79,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -145,7 +145,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs)
 
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
@@ -209,7 +209,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs)
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@cargo-mutants
@@ -333,9 +333,25 @@ jobs:
         # proof) imports it at module load; the plotter test renders a real PNG.
         # opencv-python-headless + numpy: scripts/qr_screenshot_check.py (#722 pixel
         # proof) decodes QR codes from OBS screenshots via cv2.QRCodeDetector;
-        # headless avoids pulling in GUI/X11 deps this CI runner doesn't have.
+        # headless avoids pulling in GUI/X11 deps this CI runner doesn't have. PINNED to the
+        # version dev1 runs (issue 1404: the YouTube-leg decoder's real-pixel tests and its
+        # tick-cache key depend on the QR detector's behaviour, so CI tests the same detector).
         # Pillow + qrcode: test-only, generate REAL fixture QR codes to decode back.
-        run: pip install pytest websocket-client matplotlib opencv-python-headless numpy Pillow qrcode pyyaml
+        # websockets: scripts/strih_tally.py (issue 1417, the camera tally relay + OBS client) and
+        # its end-to-end test; PINNED to the python3-websockets the Ubuntu 26.04 strih boxes run.
+        run: pip install pytest websocket-client matplotlib opencv-python-headless==4.13.0.92 numpy Pillow qrcode pyyaml websockets==15.0.1
+
+      # ffmpeg: scripts/youtube_leg_verdict.py (issue 1404) decodes its real-session FLAC audio
+      # fixtures and builds its synthetic test videos with ffmpeg. The SAME pinned, sha256-verified
+      # static binary the Rust test job installs (never apt: see that step for why).
+      - name: Install ffmpeg
+        run: |
+          url=https://github.com/zbynekdrlik/camera-box/releases/download/ci-assets-ffmpeg-20260825/ffmpeg-N-126264-g007cd1fd43-linux64-gpl.tar.xz
+          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          echo "aa86544042631a525b03d1b732614d705f74ca971efdb73f298d75e50288ed3e  /tmp/ffmpeg.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
+          sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
+          ffmpeg -version | head -1
 
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party
@@ -440,7 +456,7 @@ jobs:
             target/release/bkshading
 
       # issue 1353: a SERVICE-dedicated deploy artifact (the service binary + the panel web assets)
-      # for provisioning the bkshading SERVICE on strih-lx (systemd/bkshading-service.service via
+      # for provisioning the bkshading SERVICE on strih-snv (systemd/bkshading-service.service via
       # setup-strih.sh step 16c). Separate from the relay's bkshading-linux-amd64 above, mirroring the
       # Windows bkshading-windows-amd64 / relay split. The artifact NAME is single-sourced in
       # scripts/lib/strih-provision.sh (strih_bkshading_artifact_name) — KEEP IN SYNC. The web assets
@@ -527,7 +543,7 @@ jobs:
 
   intercom-hub:
     name: intercom-hub (issue 1345)
-    # The strih-lx intercom hub + shared VBAN codec are SEPARATE workspace members
+    # The strih-snv intercom hub + shared VBAN codec are SEPARATE workspace members
     # (intercom/vban, intercom/hub). The appliance jobs above run cargo at the ROOT WITHOUT
     # --workspace, so they never build/test the hub (they DO compile intercom-vban as a path
     # dep, but its tests only run here); THIS job is the members' first clippy + test + build.
@@ -804,7 +820,7 @@ jobs:
     # self-hosted dev1 runner (the ONLY box with SSH to the rig LAN). Downloads the
     # camera-box-linux-amd64 artifact built by THIS SAME run's `build` job and deploys it to every
     # ACTIVE cam box (CAMERA_ACTIVE_SET minus acked-offline, via scripts/lib/deploy-set.sh) by
-    # REUSING scripts/deploy-fleet.sh (stop → remount,rw → scp → start → remount,ro → byte-verify →
+    # REUSING scripts/deploy-fleet.sh (stop → remount,rw → scp → verified ro close → start → byte-verify →
     # version read-back → genlock-emit check — no new deploy code, no new credential: deploy-fleet.sh
     # already defaults SSH_PASS to the fleet-wide value). Fails LOUDLY on any active-and-unacked box
     # that mismatches or is unreachable; an acked-offline box is skipped. The push:[dev,main] E2E
@@ -862,6 +878,35 @@ jobs:
           fi
           echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
           CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe
+
+      # issue 1413: the camboxes of every OTHER venue (Poprad since 11.10.2026) get the same build.
+      # The venues and their cameras come from the strih fact files (scripts/strih-boxes/*.env), so a
+      # third venue is a fact-file edit. Each camera is dialled at its dev1 address (the venue's
+      # STRIH_CAMERA_DEV1_NET); one that does not answer ssh :22 is SKIPPED by name (exit 0), and a
+      # reachable one that fails its swap reds this job, like an SNV box. Runs even when the SNV step
+      # failed (separate hardware); a binary step, its failure is never tolerated.
+      - name: Deploy to every other venue's camboxes (unreachable skipped)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          chmod +x dist/camera-box
+          # shellcheck source=scripts/lib/dantesync-fleet.sh
+          venues="$(. scripts/lib/dantesync-fleet.sh && dantesync_fleet_away_venues)"
+          if [ -z "$venues" ]; then
+            echo "no other venue lists a camera in scripts/strih-boxes/*.env -- nothing to deploy"
+            exit 0
+          fi
+          rc=0
+          for v in $venues; do
+            echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to venue $v"
+            v_rc=0
+            scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v" || v_rc=$?
+            if [ "$v_rc" -ne 0 ]; then
+              echo "::error::deploy-fleet.sh --venue $v exited $v_rc (its lines above name the cause)"
+              rc=1
+            fi
+          done
+          exit "$rc"
 
   notify-on-failure:
     name: Notify on red

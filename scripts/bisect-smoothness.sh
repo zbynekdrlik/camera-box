@@ -15,8 +15,8 @@ set -euo pipefail
 #   * DRY-RUN is the DEFAULT — nothing is deployed until --execute is passed.
 #   * The deploy set is the literal "cam1 cam2" (bisect_deploy_plan) — cam3 is NEVER redeployed.
 #   * The actual deploy REUSES scripts/deploy-fleet.sh (--run <id>): stop -> remount,rw -> scp ->
-#     start -> remount,ro -> sha256 byte-verify -> version read-back -> genlock-emit check. No new
-#     deploy code, no new credential.
+#     the verified ro close (scripts/lib/ro-window.sh) -> start -> sha256 byte-verify -> version
+#     read-back -> genlock-emit check. No new deploy code, no new credential.
 #   * State is DURABLE in the marker log (~/.camera-box/bisect-smoothness.log, never tmpfs) so a
 #     dead session / compaction resumes exactly where it stopped.
 #

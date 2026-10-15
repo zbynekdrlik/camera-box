@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -32,13 +36,15 @@ fn monitor() -> PathBuf {
 }
 
 /// A scratch dir unique to this test process; cleaned at the end of each test.
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "verdict-monitor-test-{}-{name}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("verdict-monitor-test-{name}-"))
+        .tempdir()
+        .unwrap();
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Run the monitor against `pid`, watching `output` for progress and `exit_marker`
@@ -115,8 +121,6 @@ fn dead_process_without_marker_fails_loud_not_hang() {
         all.contains("died") && all.contains("exit marker"),
         "must print a clear silent-death diagnostic, got:\n{all}"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -158,8 +162,6 @@ fn stalled_process_with_no_output_progress_fails_loud() {
             "monitor must kill the stalled verdict (expected death-by-signal, got {status:?})"
         );
     }
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -193,8 +195,6 @@ fn clean_completion_returns_the_verdicts_own_exit_code() {
             all.contains("finished"),
             "reports clean finish:\n{stdout}{stderr}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
@@ -356,5 +356,4 @@ fn stall_kill_takes_down_the_child_decode_not_just_the_wrapper() {
     );
     wrapper.kill().ok();
     wrapper.wait().ok();
-    std::fs::remove_dir_all(&dir).ok();
 }

@@ -5,19 +5,19 @@
 # WHY THIS EXISTS: the Linux OBS boxes were provisioned by two separately grown scripts. imag's
 # (scripts/setup-imag.sh) carried the appliance baseline -- a bare openbox kiosk on plain Xorg, the
 # low-latency kernel, the de-jitter masks, max-performance persistence, the power envelope -- while
-# strih-lx's (scripts/setup-strih.sh) re-implemented a subset differently and ran a full GNOME Wayland
+# strih-snv's (scripts/setup-strih.sh) re-implemented a subset differently and ran a full GNOME Wayland
 # desktop, so every fix on one box never reached the other (the owner's rulings on issue 1357:
 # "imag is the reference starting position", "a difference between boxes is a defect").
 #
 # WHAT IT IS: the imag box-level steps, moved VERBATIM out of setup-imag.sh into one function per
-# baseline item. setup-imag.sh AND setup-strih.sh call the same functions, so strih-lx gets the imag
+# baseline item. setup-imag.sh AND setup-strih.sh call the same functions, so strih-snv gets the imag
 # appliance by construction and the two can never diverge again. Box facts are ARGUMENTS derived per
 # box by the caller, never hard-coded imag values:
 #   BOX           the file/unit-name prefix (imag | strih): /etc/<BOX>-isolated-cpus.conf,
 #                 <BOX>-maxperf.service, 50-<BOX>-autologin.conf, ... (imag's names are unchanged)
 #   DESKTOP_USER  the kiosk autologin / OBS user
 #   NIC           the ONE rig NDI interface (resolved by the caller)
-#   SERIES        the Ubuntu release (obs_box_kernel_series: 24.04 imag, 26.04 strih-lx)
+#   SERIES        the Ubuntu release (obs_box_kernel_series: 24.04 imag, 26.04 strih-snv)
 #   OBS_CFG       the OBS config dir (ProcessPriority=High)
 #   PL1_W         the CPU's sustainable RAPL PL1 wattage (power envelope)
 #   STEPDOWN_W    the power-envelope guard's thermal step-down wattage (optional; imag's 25 W default)
@@ -26,6 +26,7 @@
 # The items, in the order both callers run them (imag's step numbers in brackets):
 #   obs_box_apt_lock_timeout [preamble, before any apt-get: the dpkg lock wait]
 #   obs_box_apt_update [every list refresh on both paths: the package-lists lock wait]
+#   obs_box_timezone [1, issue 1415: the rig time zone; in the kiosk half]
 #   obs_box_network_tuning [2]   obs_box_max_performance [4]   obs_box_never_sleep [5]
 #   obs_box_boot_safety_net [6]  obs_box_lowlatency_kernel [7] obs_box_cpu_affinity [8]
 #   obs_box_rtprio_off [8, after the affinity: removes a retired render-tick rtprio grant]
@@ -54,10 +55,13 @@
 # PATH (setup-imag.sh is sourced that way by its missing-tool tests).
 # shellcheck source=scripts/lib/obs-box-kiosk.sh
 if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-kiosk.sh"; else . ./obs-box-kiosk.sh; fi
+# obs_box_swap (issue 1428) lives in its own file for the same reason (this one is at the line budget).
+# shellcheck source=scripts/lib/obs-box-swap.sh
+if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-swap.sh"; else . ./obs-box-swap.sh; fi
 
 # obs_box_apt_lock_timeout_conf -> the apt drop-in that makes every apt-get WAIT for the dpkg lock.
 #
-# issue 1357 (24.9.2026): the canonical strih-lx genlock deploy failed twice at setup-strih step 4 with
+# issue 1357 (24.9.2026): the canonical strih-snv genlock deploy failed twice at setup-strih step 4 with
 # `E: Could not get lock /var/lib/dpkg/lock-frontend ... held by process (apt-get)` -- a periodic apt
 # run (apt-daily / unattended-upgrades) held the lock, and apt-get's default DPkg::Lock::Timeout is 0,
 # so a normal background apt run turned a correct deploy into a failed one. (Ubuntu's own
@@ -123,7 +127,7 @@ obs_box_write_if_changed() {
 
 # obs_box_apt_update_lock_held TEXT -> exit 0 iff TEXT is apt-get update's HELD package-lists lock error.
 #
-# The exact message, captured live on apt 2.8.3 (imag's 24.04) and apt 3.2.0 (strih-lx's 26.04):
+# The exact message, captured live on apt 2.8.3 (imag's 24.04) and apt 3.2.0 (strih-snv's 26.04):
 #   E: Could not get lock /var/lib/apt/lists/lock. It is held by process N (name)
 #   E: Unable to lock directory /var/lib/apt/lists/
 # Keyed on "Could not get lock" on the LISTS lock only: a permission failure prints "Could not open lock
@@ -138,7 +142,7 @@ obs_box_apt_update_lock_held() {
 # obs_box_apt_update -- the ONE `apt-get update` of every OBS-box provisioning run (issue 1357, main
 # ruling 5821855428). apt-daily refreshes the package lists twice a day and holds /var/lib/apt/lists/lock
 # while it does; a bare `apt-get update` fails at once on that held lock and aborts the run under
-# `set -euo pipefail`, the same class as the two failed strih-lx deploys. This retries ONLY while that
+# `set -euo pipefail`, the same class as the two failed strih-snv deploys. This retries ONLY while that
 # lock is held, logging every wait, for at most OBS_BOX_APT_UPDATE_BUDGET_S (600 s) total, polling every
 # OBS_BOX_APT_UPDATE_POLL_S (10 s). Any other error, or a lock that outlives the budget, fails loud via
 # the caller's fail() with apt's own output shown. Never call `apt-get update` directly on these paths
@@ -249,7 +253,7 @@ obs_box_same_unit() {
 }
 
 # obs_box_kernel_series [OS_RELEASE_FILE] -> the box's Ubuntu release series (os-release VERSION_ID,
-# e.g. 24.04 on imag, 26.04 on strih-lx) on stdout. The boot-safety kernel hold and the lowlatency
+# e.g. 24.04 on imag, 26.04 on strih-snv) on stdout. The boot-safety kernel hold and the lowlatency
 # meta package are both named by it (linux-*-hwe-<series>), so the ONE baseline serves both releases
 # instead of hard-coding noble. Fails (rc 1, a message on stderr, nothing on stdout) when the file has
 # no NN.NN VERSION_ID -- never a guessed series.
@@ -377,16 +381,25 @@ exit 0
 EOF
 chmod +x /etc/rc.local
 # power-profiles-daemon (0.30 on Ubuntu 26.04) rewrites every core's scaling_governor to powersave when
-# it starts, undoing the governor pin above -- strih-lx came back powersave after its kiosk reboot
+# it starts, undoing the governor pin above -- strih-snv came back powersave after its kiosk reboot
 # (issue 1357, 23.9.2026). The appliance has one power policy (this item + <BOX>-maxperf), so the
 # daemon is stopped and masked; <BOX>-maxperf.sh writes platform_profile itself.
 systemctl disable --now power-profiles-daemon.service >/dev/null 2>&1 || true
 systemctl mask power-profiles-daemon.service >/dev/null 2>&1 \
     || fail "could not mask power-profiles-daemon.service -- it would reset the governor to powersave at boot"
 systemctl daemon-reload
+# issue 1412: a box whose kernel binds no cpufreq driver (strih-pp: Ryzen 7 5800X with CPPC off in the
+# BIOS, `amd_pstate: the _CPC object is not present`) has no governor to pin -- the firmware runs the
+# cores. The unit would fail every boot, and its failed `enable --now` ended step 11 silently.
+if ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1; then
 systemctl enable --now cpu-performance.service >/dev/null 2>&1
 bash /etc/rc.local
 grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
+else
+systemctl disable cpu-performance.service >/dev/null 2>&1 || true
+bash /etc/rc.local 2>/dev/null
+echo "  NOTE: no cpufreq driver bound (no scaling_governor) -- the firmware runs the cores, no governor to pin; enable CPPC in the BIOS for the OS to manage them"
+fi
 }
 
 # obs_box_boot_safety_net SERIES BOX -- the imag step 6 (#487) boot safety net: hold the INSTALLED
@@ -465,7 +478,7 @@ fi
 # CONFIG package pulled by linux-lowlatency-hwe-<SERIES> (never a lowlatency-IMAGE downgrade); fails loud
 # when the config drop-in is missing or lacks preempt=full. Takes effect on the next boot.
 # Release-dependent (issue 1357 review): on imag (24.04) the meta added only the config package; on a
-# newer series the meta may ALSO pull that series' newest HWE generic image (strih-lx 26.04: candidate
+# newer series the meta may ALSO pull that series' newest HWE generic image (strih-snv 26.04: candidate
 # 7.0.0-34 over the running -31), so the next boot runs a NEWER kernel and the NVIDIA DKMS module
 # rebuilds for it -- verify nvidia-smi + the PRIME session after that boot.
 obs_box_lowlatency_kernel() {
@@ -485,7 +498,7 @@ if ! dpkg -s lowlatency-kernel >/dev/null 2>&1; then
     # (the lowlatency meta depends on the very HWE packages step 6 pins). Step 6 re-holds nothing
     # here; the hold is restored on the next provisioning pass, and the lowlatency packages get
     # their own hold right below.
-    # issue 1357 (live 23.9.2026, strih-lx 26.04): pin the config meta to the INSTALLED generic-hwe
+    # issue 1357 (live 23.9.2026, strih-snv 26.04): pin the config meta to the INSTALLED generic-hwe
     # kernel meta version. Unpinned, apt picked the newer 7.0.0-34 meta whose generic-image dependency
     # conflicts with the kernel step 6 just held at 7.0.0-31 ("Reached two conflicting assignments") --
     # and it would pull a NEW image anyway, which this step must never do (config-only, zero downgrade).
@@ -585,7 +598,7 @@ echo "  #483/#842: OBS core reservation is AFFINITY-ONLY (taskset ${OBS_BOX_ISOL
 
 # obs_box_rtprio_off -- issue 1357: no OBS box grants realtime priority. The genlock render tick pins
 # itself only onto isolated nohz_full cores, and a box that passes the grader's `affinity` row has none,
-# so a grant serves nothing; its SCHED_FIFO leaked to every NDI thread on strih-lx (comment 5793075833).
+# so a grant serves nothing; its SCHED_FIFO leaked to every NDI thread on strih-snv (comment 5793075833).
 # Self-heal: remove every retired `95-<box>-genlock-rtprio.conf` grant (imag's issue-484 one, strih's
 # retired 11c one); other limits.d files stay. OBS drops the grant at the next boot. The grader row
 # `rtprio` FAILs while one exists. OBS_BOX_LIMITS_DIR overrides the directory (the test seam).
@@ -712,6 +725,8 @@ fi
 if lspci -nn | obs_box_has_discrete_nvidia; then
     command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
     prime-select nvidia || fail "prime-select nvidia failed"
+    # issue 1418: the iGPU panel sink on the modesetting DDX (the kiosk half removes the amdgpu DDX).
+    obs_box_igpu_sink_modesetting
 fi
 # #295/#487: a DKMS driver install regenerates initramfs for the running kernel -- never trust
 # that blindly. Reuse the SAME safe_grub_regen helper the #482/#483 grub.d drops call above
@@ -912,7 +927,7 @@ echo "  issue 756/#791: full max-performance persistence provisioned (${BOX}-max
 }
 
 # obs_box_cpu_latency_bound_us -> the CPU idle wake-up latency bound (microseconds) every OBS box holds.
-# 150 us keeps C1 (1 us) and C2 (127 us) on strih-lx's ACPI idle driver and keeps out C3_ACPI (1048 us),
+# 150 us keeps C1 (1 us) and C2 (127 us) on strih-snv's ACPI idle driver and keeps out C3_ACPI (1048 us),
 # which was entered ~106 M times on cpu0 -- a ~1 ms wake-up landing on the genlock render tick (16.7 ms),
 # the audio thread (21.3 ms blocks) and the NDI receive threads (issue 1357 finding 5839598285). ONE
 # baseline value, never per box: systemd/obs-box-cpu-latency.service carries the same number (test-pinned)

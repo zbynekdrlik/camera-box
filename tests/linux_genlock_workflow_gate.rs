@@ -58,7 +58,7 @@ fn value_after(block: &str, prefix: &str) -> String {
         .to_string()
 }
 
-/// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-lx notebook runs Ubuntu 26.04 (resolute) —
+/// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-snv notebook runs Ubuntu 26.04 (resolute) —
 /// noble's ffmpeg/Qt sonames (`libavcodec60`/Qt 6.4) do not exist there, so the strih bundle must
 /// be built on the 26.04 runner. The strih JOB BLOCK pins `runs-on: ubuntu-26.04`; the imag-parity
 /// full build + the DistroAV compile-check stay on ubuntu-24.04 (imag-nb's noble). All three jobs
@@ -77,7 +77,7 @@ fn strih_job_runs_on_2604_the_imag_jobs_stay_2404() {
     );
     assert!(
         wf.contains("linux-genlock-build-strih:"),
-        "issue 1317: {WF} must define the linux-genlock-build-strih job — the strih-lx full bundle."
+        "issue 1317: {WF} must define the linux-genlock-build-strih job — the strih-snv full bundle."
     );
 
     let strih = job_block(&wf, "linux-genlock-build-strih");
@@ -162,7 +162,7 @@ fn full_build_depends_on_the_compile_check() {
 #[test]
 fn distroav_configured_against_installed_obs_sdk() {
     let wf = read(WF);
-    // issue 1317: the strih-lx full bundle is the THIRD job that builds DistroAV against its own
+    // issue 1317: the strih-snv full bundle is the THIRD job that builds DistroAV against its own
     // installed OBS SDK prefix, so every count below is 3 (compile-check + imag-parity + strih).
     assert_eq!(
         wf.matches("--component Development").count(),

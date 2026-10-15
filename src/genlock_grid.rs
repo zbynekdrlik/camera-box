@@ -198,7 +198,7 @@ pub const STAMP_TRACK_MIN_STEP_NS: u64 = 4_000_000;
 /// #1355 part 3 — per-input DUPLICATE / MISSING stamp-interval counters on ARRIVAL, the evidence
 /// behind the `stamp_dup=` / `stamp_gap=` tokens on the `genlock-fifo audit` line.
 ///
-/// A sender that stamps at SEND time (strih-lx's OBS program output) puts a slow frame into the
+/// A sender that stamps at SEND time (strih-snv's OBS program output) puts a slow frame into the
 /// NEXT 1/30 s cell: the receiver then sees a stamp that skips a slot (a gap) followed by a stamp
 /// equal to it (a duplicate). Before #1355 that pair moved the deep FIFO one frame; after it the
 /// FIFO absorbs it, but the irregularity is still a sender defect worth measuring — this tracker
@@ -478,7 +478,7 @@ mod tests {
         assert_eq!(t.min_delta_ns, 33_333_300);
     }
 
-    /// The strih-lx slow-frame signature: frame k lands in slot k+1 (a gap), frame k+1 stamps the
+    /// The strih-snv slow-frame signature: frame k lands in slot k+1 (a gap), frame k+1 stamps the
     /// same slot (a duplicate).
     #[test]
     fn stamp_track_counts_the_gap_then_duplicate_pair_1355() {

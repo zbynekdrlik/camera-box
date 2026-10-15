@@ -15,8 +15,12 @@
 //! recording-e2e.sh's WIRING is a static read of the shell text (the sibling-harness model).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -134,15 +138,8 @@ fn painter_up_cmds_reuse_the_presenter_aware_painting_signal() {
 /// Re-exec the painter-up REMOTE cmds with fake systemctl/journalctl/fuser on PATH (the #833
 /// pattern), simulating what the painter box would run.
 fn run_painter_up(active: &str, journal: &str, fuser_ok: bool, iters: &str) -> (i32, String) {
-    let dir = std::env::temp_dir().join(format!(
-        "mv_reverify_painter_up_{}_{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let write_fake = |name: &str, body: &str| {
         let p = dir.join(name);
         fs::write(&p, body).unwrap();
@@ -185,7 +182,6 @@ fn run_painter_up(active: &str, journal: &str, fuser_ok: bool, iters: &str) -> (
         .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
         .output()
         .expect("exec cmds");
-    let _ = fs::remove_dir_all(&dir);
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -248,7 +244,8 @@ fn obs_restart_ps_is_headless_safe_kill_plus_sentinel_only() {
 #[test]
 fn probe_received_extracts_the_newest_counter_for_the_named_source() {
     // Fake the whole ssh log read via MV_REVERIFY_RECEIVED_CMD (a stub printing raw log text).
-    let stub = std::env::temp_dir().join(format!("mv_rx_stub_{}.sh", std::process::id()));
+    let scratch = tempfile::tempdir().unwrap();
+    let stub = scratch.path().join("mv_rx_stub.sh");
     fs::write(
         &stub,
         "#!/usr/bin/env bash\ncat <<'L'\ngenlock-fifo audit 'NDI cam1': received=100 dropped=0\ngenlock-fifo audit 'NDI cam2': received=555 dropped=0\ngenlock-fifo audit 'NDI cam1': received=740 dropped=0\nL\n",
@@ -271,7 +268,8 @@ fn probe_received_extracts_the_newest_counter_for_the_named_source() {
 
 #[test]
 fn probe_received_is_empty_when_the_source_has_no_audit_line() {
-    let stub = std::env::temp_dir().join(format!("mv_rx_stub_none_{}.sh", std::process::id()));
+    let scratch = tempfile::tempdir().unwrap();
+    let stub = scratch.path().join("mv_rx_stub_none.sh");
     fs::write(&stub, "#!/usr/bin/env bash\nprintf 'no audit here\\n'\n").unwrap();
     let mut perms = fs::metadata(&stub).unwrap().permissions();
     use std::os::unix::fs::PermissionsExt;
@@ -293,9 +291,10 @@ fn probe_received_is_empty_when_the_source_has_no_audit_line() {
 /// Drive `mv_reverify_or_escalate` with fakes: a `preflight_mv_reverify` whose success is driven by
 /// a counter file, an env-stubbed received= reader, and an env-stubbed OBS restart. Returns
 /// (stdout+stderr, rc).
-fn run_orchestrator(preflight_body: &str, received_cmd: &str) -> (String, i32) {
-    let restart_log = std::env::temp_dir().join(format!("mv_restart_{}.log", nanos()));
-    let restart_stub = std::env::temp_dir().join(format!("mv_restart_{}.sh", nanos()));
+fn run_orchestrator(preflight_body: &str, received_cmd: &Path) -> (String, i32) {
+    let scratch = tempfile::tempdir().unwrap();
+    let restart_log = scratch.path().join("mv_restart.log");
+    let restart_stub = scratch.path().join("mv_restart.sh");
     fs::write(
         &restart_stub,
         format!(
@@ -316,7 +315,7 @@ fn run_orchestrator(preflight_body: &str, received_cmd: &str) -> (String, i32) {
          mv_reverify_or_escalate cam1 1; echo RC=$?\n",
         lib = lib_path().display(),
         here = manifest_dir().join("scripts").display(),
-        rx = received_cmd,
+        rx = received_cmd.display(),
         restart = restart_stub.display(),
         preflight = preflight_body,
     );
@@ -325,19 +324,10 @@ fn run_orchestrator(preflight_body: &str, received_cmd: &str) -> (String, i32) {
         .arg(&script)
         .output()
         .expect("orchestrator");
-    let _ = fs::remove_file(&restart_stub);
-    let _ = fs::remove_file(&restart_log);
     let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
     combined.push_str(&String::from_utf8_lossy(&out.stderr));
     let rc = extract_rc(&combined);
     (combined, rc)
-}
-
-fn nanos() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
 }
 
 fn make_exec(p: &PathBuf) {
@@ -356,21 +346,23 @@ fn extract_rc(s: &str) -> i32 {
 }
 
 /// A `received=` stub that ALWAYS prints a frozen counter (same value every call) -> WEDGE.
-fn frozen_rx_stub() -> String {
-    let p = std::env::temp_dir().join(format!("mv_rx_frozen_{}.sh", nanos()));
+fn frozen_rx_stub() -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("mv_rx_frozen.sh");
     fs::write(
         &p,
         "#!/usr/bin/env bash\nprintf \"genlock-fifo audit 'NDI cam1': received=500 dropped=0\\n\"\n",
     )
     .unwrap();
     make_exec(&p);
-    p.display().to_string()
+    TempPath { path: p, _dir: dir }
 }
 
 /// A `received=` stub that prints an ADVANCING counter (grows each call) -> NO_WEDGE.
-fn advancing_rx_stub() -> String {
-    let cnt = std::env::temp_dir().join(format!("mv_rx_cnt_{}", nanos()));
-    let p = std::env::temp_dir().join(format!("mv_rx_adv_{}.sh", nanos()));
+fn advancing_rx_stub() -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let cnt = dir.path().join("mv_rx_cnt");
+    let p = dir.path().join("mv_rx_adv.sh");
     fs::write(
         &p,
         format!(
@@ -380,7 +372,7 @@ fn advancing_rx_stub() -> String {
     )
     .unwrap();
     make_exec(&p);
-    p.display().to_string()
+    TempPath { path: p, _dir: dir }
 }
 
 #[test]
@@ -401,14 +393,13 @@ fn orchestrator_passes_straight_through_when_the_leg_is_live() {
 fn orchestrator_restarts_obs_once_and_recovers_on_a_receiver_wedge() {
     // preflight FAILS on the 1st call, SUCCEEDS on the 2nd (the post-restart re-check); received=
     // frozen -> WEDGE -> restart strih OBS once -> re-check passes.
-    let cnt = std::env::temp_dir().join(format!("mv_pf_{}", nanos()));
-    let _ = fs::remove_file(&cnt);
+    let scratch = tempfile::tempdir().unwrap();
+    let cnt = scratch.path().join("mv_pf");
     let preflight = format!(
         "preflight_mv_reverify() {{ n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; [ $n -ge 2 ]; }}",
         c = cnt.display()
     );
     let (out, rc) = run_orchestrator(&preflight, &frozen_rx_stub());
-    let _ = fs::remove_file(&cnt);
     assert!(
         out.contains("RESTARTED"),
         "#1093(b): a receiver wedge must restart strih OBS; out=\n{out}"
@@ -439,6 +430,7 @@ fn orchestrator_does_not_restart_obs_when_recv_is_advancing() {
 fn orchestrator_restarts_obs_at_most_once_per_run() {
     // preflight always fails + frozen received= (WEDGE). First escalation restarts; but with the
     // MV_REVERIFY_OBS_RESTARTED guard pre-set, a SECOND leg's escalation must NOT restart again.
+    let rx = frozen_rx_stub();
     let script = format!(
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
@@ -450,7 +442,7 @@ fn orchestrator_restarts_obs_at_most_once_per_run() {
          mv_reverify_or_escalate cam3 3; echo RC=$?\n",
         lib = lib_path().display(),
         here = manifest_dir().join("scripts").display(),
-        rx = frozen_rx_stub(),
+        rx = rx.display(),
         restart = "/bin/echo",
     );
     let out = Command::new("bash")
@@ -475,11 +467,12 @@ fn orchestrator_restarts_obs_at_most_once_per_run() {
 
 /// A `received=` stub that prints NOTHING -> the log READ failed (empty raw), distinct from a
 /// read that succeeded but has no audit line.
-fn empty_rx_stub() -> String {
-    let p = std::env::temp_dir().join(format!("mv_rx_empty_{}.sh", nanos()));
+fn empty_rx_stub() -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("mv_rx_empty.sh");
     fs::write(&p, "#!/usr/bin/env bash\nexit 0\n").unwrap();
     make_exec(&p);
-    p.display().to_string()
+    TempPath { path: p, _dir: dir }
 }
 
 #[test]
@@ -505,13 +498,15 @@ fn orchestrator_does_not_restart_obs_when_the_strih_log_read_fails() {
 fn orchestrator_fails_loud_without_killing_when_ahk_absent() {
     // #1093 review finding 2: a WEDGE whose restart reports MV_REVERIFY_NO_AHK (the respawn watcher
     // is absent) must fail loud WITHOUT having killed obs64 (never leave strih OBS down).
-    let no_ahk_stub = std::env::temp_dir().join(format!("mv_noahk_{}.sh", nanos()));
+    let scratch = tempfile::tempdir().unwrap();
+    let no_ahk_stub = scratch.path().join("mv_noahk.sh");
     fs::write(
         &no_ahk_stub,
         "#!/usr/bin/env bash\necho MV_REVERIFY_NO_AHK\n",
     )
     .unwrap();
     make_exec(&no_ahk_stub);
+    let rx = frozen_rx_stub();
     let script = format!(
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
@@ -522,7 +517,7 @@ fn orchestrator_fails_loud_without_killing_when_ahk_absent() {
          mv_reverify_or_escalate cam1 1; echo RC=$?\n",
         lib = lib_path().display(),
         here = manifest_dir().join("scripts").display(),
-        rx = frozen_rx_stub(),
+        rx = rx.display(),
         restart = no_ahk_stub.display(),
     );
     let out = Command::new("bash")
@@ -530,7 +525,6 @@ fn orchestrator_fails_loud_without_killing_when_ahk_absent() {
         .arg(&script)
         .output()
         .expect("run");
-    let _ = fs::remove_file(&no_ahk_stub);
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -656,6 +650,7 @@ fn orchestrator_restart_budget_allows_a_second_restart_within_cap() {
     use std::os::unix::fs::PermissionsExt;
     perms.set_mode(0o755);
     std::fs::set_permissions(&stub, perms).expect("chmod");
+    let rx = frozen_rx_stub();
     let script = format!(
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
@@ -668,7 +663,7 @@ fn orchestrator_restart_budget_allows_a_second_restart_within_cap() {
          mv_reverify_or_escalate cam3 3; echo RC2=$?\n",
         lib = lib_path().display(),
         here = manifest_dir().join("scripts").display(),
-        rx = frozen_rx_stub(),
+        rx = rx.display(),
         restart = stub.display(),
     );
     let out = Command::new("bash")
@@ -721,6 +716,7 @@ fn orchestrator_reopens_strih_multiview_after_a_receiver_wedge_restart() {
 
     // preflight FAILS on the 1st call, SUCCEEDS on the 2nd (the post-restart re-check).
     let cnt = dir.path().join("pf.cnt");
+    let rx = frozen_rx_stub();
     let script = format!(
         "set -uo pipefail\n. \"{lib}\" 2>/dev/null\n\
          HERE='{here}'\nSTRIH=10.0.0.9\nALL_CAMBOX=1\nSTRIH_USER=x\nSTRIH_PW=x\n\
@@ -732,7 +728,7 @@ fn orchestrator_reopens_strih_multiview_after_a_receiver_wedge_restart() {
          mv_reverify_or_escalate cam1 1; echo RC=$?\n",
         lib = lib_path().display(),
         here = manifest_dir().join("scripts").display(),
-        rx = frozen_rx_stub(),
+        rx = rx.display(),
         restart = restart_stub.display(),
         reopen = reopen_stub.display(),
         c = cnt.display(),

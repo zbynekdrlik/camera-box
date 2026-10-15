@@ -9,9 +9,9 @@
 # sourced by setup-strih.sh AND verify-strih.sh. The unit text (strih_dantesync_unit_text) and the pure
 # restart decision (strih_dantesync_restart_decision) live in scripts/lib/strih-provision.sh.
 #
-# WHY: strih-lx is the fleet's dantesync date master in daily mode. Its fleet line drifts ~0.7 s a day
+# WHY: strih-snv is the fleet's dantesync date master in daily mode. Its fleet line drifts ~0.7 s a day
 # against NTP and is stepped only in the nightly 02:00Z window. Step 2 used to rewrite the unit,
-# remove /var/run/dantesync.lock and restart the dantesync unit on EVERY run, and every strih-lx
+# remove /var/run/dantesync.lock and restart the dantesync unit on EVERY run, and every strih-snv
 # genlock deploy runs setup-strih -- so a deploy stepped the whole rig's date mid-day (29.9.2026
 # 00:35Z: a 0.67 s fleet step, cg OBS program audio broken until a relaunch).
 #

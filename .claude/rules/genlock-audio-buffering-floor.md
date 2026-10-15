@@ -105,7 +105,7 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
   NDI output audio and the obs-vban send to FOH run ≥ 85 ms behind from the first tick, where they
   used to run at 0 until the first media start grew it to 128–362 ms. No rig input consumes
   resolume's NDI audio (the certified table: every strih/stream NDI input is silent), so the
-  visible effect is the FOH VBAN latency while idle. strih-lx carries no mixed program audio over
+  visible effect is the FOH VBAN latency while idle. strih-snv carries no mixed program audio over
   NDI either; its mix now starts 85 ms behind.
 
 ## Tests and Tier-0
@@ -146,7 +146,7 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
 
 ## Live acceptance (supervisor)
 
-Full-bundle deploy on stream (and resolume + strih-lx, same libobs), then at least two OBS
+Full-bundle deploy on stream (and resolume + strih-snv, same libobs), then at least two OBS
 restarts. After each:
 - the log shows `buffering type:  fixed floor 85 ms` and exactly one floor line;
 - stream: `mbc` `target=` = 100 + offset and `level_avg` within ~5 ms of it after ~15 min,
@@ -156,7 +156,7 @@ restarts. After each:
   (expected; a hidden one logs a `buffering-guard:` line instead, issue 1381);
   the `sp-*_video` audio pairing (`audio_pairing_offset_ms`, `audio_health=0`) and the songplayer
   A/V gate unchanged; FOH hears the program audio ≥ 85 ms later than before while idle;
-- strih-lx: the floor line, no UNREACHABLE line, OBS audio monitoring normal.
+- strih-snv: the floor line, no UNREACHABLE line, OBS audio monitoring normal.
 
 ## The mix buffering GUARD: only a MIXED source can grow it (issue 1381, design 5862336131)
 

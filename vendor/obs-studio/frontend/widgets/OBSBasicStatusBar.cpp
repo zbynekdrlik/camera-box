@@ -93,16 +93,14 @@ static constexpr int64_t GENLOCK_AUDIO_PAIRING_BOUND_MS = 33;
  * always holds a fresh one even on a box whose state has not changed since startup. */
 static constexpr int GENLOCK_JSON_HEARTBEAT_TICKS = 30;
 
-/* camera-box #1341: a CONNECTED genlock input whose received-frame DELTA over the idle window is
- * below this floor is IDLE (keep-alive-only) — excluded from n_locked/n_connected and contributing 0
- * phase events, so an idle SongPlayer playlist input (~1 frame / 11 s -> ~5 frames / 60 s) never
- * flaps the box DEGRADED/recent_event, while a live source (>= 23.98 fps -> >= 1400 frames / 60 s)
- * clears it by a wide margin. */
-static constexpr uint64_t GENLOCK_IDLE_INPUT_MIN_FRAMES = 60;
-/* The window (ms) the received-frame delta is measured over — the SAME 60 s window recent_event
- * uses; an input is classified idle only once its per-input sample ring spans >= 90 % of it (the
- * qpc rate_ready precedent), so a live source is never mislabelled idle during the first ~54 s. */
-static constexpr qint64 GENLOCK_IDLE_WINDOW_MS = 60000;
+/* camera-box #1341 + issue 1302: the idle classification's window and floors (GENLOCK_IDLE_WINDOW_MS,
+ * GENLOCK_IDLE_INPUT_MIN_FRAMES and the fast first classification) live in GenlockLockState.hpp next to
+ * the parity-gated genlock_input_idle_class; the ring tick is genlock_idle_classify_tick
+ * (GenlockRecentEvents.cpp). */
+
+/* camera-box issue 1302: recent_event holds for this long after the last NEW phase event of a
+ * contributing input (the per-input baseline, genlock_recent_events_tick). */
+static constexpr int64_t GENLOCK_RECENT_EVENT_WINDOW_MS = 60000;
 
 namespace {
 /* camera-box #1299: the structured per-input record the genlock-lock-json: line carries (the
@@ -119,13 +117,19 @@ struct GenlockInputRow {
 	uint64_t late_holds = 0;
 	uint64_t backward_steps = 0; /* #1299 Part 3: phase-event class (with relocks+late_holds), NOT underruns */
 	uint32_t depth = 0;
+	/* issue 1302: the input's audio PLACEMENT (libobs stats v4), carried per input by the v8 json so a
+	 * consumer can wait until a freshly attached input's audio is really placed. */
+	bool audio_stats = false;            /* the four fields below are filled (stats version >= 4) */
+	std::string audio_hold;              /* the audit token: off / latency / timecode / pending (withheld) */
+	uint64_t audio_withheld = 0;         /* cumulative packets withheld while no video delay was known */
+	int64_t audio_place_err_ms = 0;      /* smoothed placement error, actual - intended (ms) */
+	bool audio_place_err_seeded = false; /* a placement error has been measured (else json null) */
 };
 struct GenlockScan {
 	int n_inputs = 0;
 	int n_locked = 0;
 	int n_absent = 0; /* #1299: of n_inputs, how many have NO live NDI receiver connection */
 	int n_idle = 0;   /* #1341: of n_inputs, how many are CONNECTED but IDLE (keep-alive-only) — computed post-scan from the received-frame delta */
-	quint64 event_sum = 0;
 	int64_t max_abs_qpc_drift_ms = 0;
 	int64_t qpc_signed_ms = 0; /* #1299 Part 4: the SIGNED cumulative wall-vs-QPC drift (process-global, so every input reports the same value; last wins) — feeds the windowed-rate ring */
 	uint32_t min_latency_ms = 0;
@@ -153,10 +157,9 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	scan->n_inputs++;
 	if (st.locked)
 		scan->n_locked++;
-	/* #1299 Part 3: the recent-event driver (scan->event_sum) is NO LONGER summed here — an
-	 * incremental sum over EVERY input + EVERY event class (incl. underruns + absent-sender rebind
-	 * churn) latched the 60 s window forever. It is recomputed AFTER the scan as the CONNECTED-only,
-	 * PHASE-only aggregate via genlock_input_phase_events (see UpdateGenlockLabel). */
+	/* #1299 Part 3 + issue 1302: the recent-event driver is NOT summed here -- a sum over EVERY input
+	 * and EVERY event class latched the 60 s window forever. UpdateGenlockLabel counts each input's
+	 * NEW phase events against its own baseline after the scan (genlock_recent_events_tick). */
 	const int64_t d = st.wall_qpc_drift_ms < 0 ? -st.wall_qpc_drift_ms : st.wall_qpc_drift_ms;
 	if (d > scan->max_abs_qpc_drift_ms)
 		scan->max_abs_qpc_drift_ms = d;
@@ -220,6 +223,14 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	rec.late_holds = st.late_holds;
 	rec.backward_steps = st.backward_steps; /* #1299 Part 3: feeds genlock_input_phase_events */
 	rec.depth = (uint32_t)st.depth;
+	/* issue 1302: the audio placement, named through libobs' own audit token function. */
+	if (st.version >= 4) {
+		rec.audio_stats = true;
+		rec.audio_hold = obs_genlock_audio_hold_token(st.audio_hold_mode);
+		rec.audio_withheld = st.audio_withheld;
+		rec.audio_place_err_ms = st.audio_place_err_ms;
+		rec.audio_place_err_seeded = st.audio_place_err_seeded;
+	}
 	scan->inputs.push_back(std::move(rec));
 	return true;
 }
@@ -460,11 +471,14 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 	 * report-only windowed-drift telemetry qpc_drift_ppm / qpc_expected_ppm / qpc_step at the END.
 	 * #1341 (v6) adds top-level n_idle + per-input idle (a connected-but-keep-alive-only input,
 	 * excluded from the DEGRADED gate). Issue 1372 part D (v7) adds the media_clock object at the END
-	 * ({state, drift_us, window_s, ready, discipline}). All additive: the bundle-state parser defaults
+	 * ({state, drift_us, window_s, ready, discipline}). Issue 1302 (v8) adds per-input audio_hold /
+	 * audio_withheld / audio_place_err_ms (the audio placement, omitted for a pre-v4 libobs), and
+	 * recent_event_inputs[].events counts the input's NEW events in the 60 s window (its own
+	 * baseline) instead of its lifetime total. All additive: the bundle-state parser defaults
 	 * n_absent->None, n_idle->None, connected->true, idle->false, the qpc_*_ppm trio->None, and OMITS
-	 * recent_event_inputs / audio_unexpected_inputs / media_clock when absent/empty, so a v1..v6 line
-	 * from an older build reads cleanly. */
-	std::string j = "{\"v\":7,\"state\":";
+	 * recent_event_inputs / audio_unexpected_inputs / media_clock / the per-input audio keys when
+	 * absent/empty, so a v1..v7 line from an older build reads cleanly. */
+	std::string j = "{\"v\":8,\"state\":";
 	genlock_json_append_escaped(j, state_name);
 	j += ",\"reason\":";
 	genlock_json_append_escaped(j, reason_key);
@@ -513,10 +527,26 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 			 r.latency_ms);
 		j += num;
 		snprintf(num, sizeof(num),
-			 "\"underruns\":%llu,\"relocks\":%llu,\"late_holds\":%llu,\"depth\":%u}",
+			 "\"underruns\":%llu,\"relocks\":%llu,\"late_holds\":%llu,\"depth\":%u",
 			 (unsigned long long)r.underruns, (unsigned long long)r.relocks,
 			 (unsigned long long)r.late_holds, r.depth);
 		j += num;
+		/* issue 1302 (v8): the audio placement -- the hold token, the withheld packets and the measured
+		 * placement error (null until one is measured). Omitted when libobs' stats predate v4. */
+		if (r.audio_stats) {
+			j += ",\"audio_hold\":";
+			genlock_json_append_escaped(j, r.audio_hold.c_str());
+			snprintf(num, sizeof(num), ",\"audio_withheld\":%llu,\"audio_place_err_ms\":",
+				 (unsigned long long)r.audio_withheld);
+			j += num;
+			if (r.audio_place_err_seeded) {
+				snprintf(num, sizeof(num), "%lld", (long long)r.audio_place_err_ms);
+				j += num;
+			} else {
+				j += "null";
+			}
+		}
+		j += "}";
 	}
 	j += "]";
 	/* #1299 Part 4 (v5): report-only windowed-drift telemetry at the END of the object. Since #1357 the
@@ -1309,44 +1339,36 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 
 	const qint64 now_ms = genlockClock.elapsed();
 
-	/* #1341: classify each CONNECTED input as IDLE (keep-alive-only) from its received-frame DELTA
-	 * over the same 60 s window recent_event uses. An idle SongPlayer playlist input keeps a live
-	 * NDI connection but sends ~1 frame / 11 s, so its FIFO re-acquires a boundary on each keep-alive
-	 * frame (a relock) — which would falsely feed recent_event and DEGRADE the box. An idle input is
-	 * excluded from n_locked + n_connected and contributes 0 phase events. A per-input sample ring
-	 * (name -> (monotonic ms, cumulative frames_received)) is pruned to the window; a counter DECREASE
-	 * re-baselines (reconnect); classification waits until the ring spans ~the full window so a live
-	 * source is never mislabelled idle at startup. */
+	/* #1341 + issue 1302: classify each CONNECTED input LIVE / IDLE / UNCLASSIFIED from its received
+	 * frames (genlock_idle_classify_tick, GenlockRecentEvents.cpp, over the parity-gated
+	 * genlock_input_idle_class). An idle SongPlayer playlist input keeps a live NDI connection but sends
+	 * ~1 frame / 11 s, so its FIFO re-acquires a boundary on each keep-alive frame (a relock), which
+	 * would falsely feed recent_event and DEGRADE the box. After a (re)connect, a first sight or an OBS
+	 * start an input is UNCLASSIFIED until it proves a live rate (>= 60 frames over >= 5 s) or the full
+	 * window classifies it. Only a LIVE input is graded: an UNCLASSIFIED or IDLE one takes the idle path
+	 * -- excluded from n_locked + n_connected, 0 phase events, never blamed as unlocked. */
 	{
-		std::set<std::string> present;
+		std::vector<GenlockRxInput> rx_inputs;
+		rx_inputs.reserve(scan.inputs.size());
+		for (const GenlockInputRow &r : scan.inputs) {
+			GenlockRxInput in;
+			in.name = r.name;
+			in.connected = r.connected;
+			in.frames_received = r.frames_received;
+			rx_inputs.push_back(std::move(in));
+		}
+		const std::vector<int> classes = genlock_idle_classify_tick(genlockIdle, now_ms, rx_inputs);
 		scan.n_idle = 0;
-		for (GenlockInputRow &r : scan.inputs) {
+		for (size_t i = 0; i < scan.inputs.size(); i++) {
+			GenlockInputRow &r = scan.inputs[i];
 			if (!r.connected)
 				continue; /* an absent input is n_absent, never idle (no live connection) */
-			present.insert(r.name);
-			auto &ring = genlockRxHistory[r.name];
-			if (!ring.empty() && r.frames_received < ring.back().second)
-				ring.clear(); /* received counter went backward -> reconnect reset, re-baseline */
-			ring.emplace_back(now_ms, r.frames_received);
-			while (ring.size() > 1 && now_ms - ring.front().first > GENLOCK_IDLE_WINDOW_MS)
-				ring.pop_front();
-			const qint64 span = ring.back().first - ring.front().first;
-			if (span >= GENLOCK_IDLE_WINDOW_MS * 9 / 10) {
-				const uint64_t delta = ring.back().second - ring.front().second;
-				r.idle = delta < GENLOCK_IDLE_INPUT_MIN_FRAMES;
-			}
+			r.idle = classes[i] != GENLOCK_INPUT_LIVE;
 			if (r.idle) {
 				scan.n_idle++;
 				if (r.locked)
 					scan.n_locked--; /* idle inputs are excluded from n_locked */
 			}
-		}
-		/* bound the remembered state: drop ring entries for inputs no longer present this tick. */
-		for (auto it = genlockRxHistory.begin(); it != genlockRxHistory.end();) {
-			if (present.count(it->first) == 0)
-				it = genlockRxHistory.erase(it);
-			else
-				++it;
 		}
 		/* an idle input must never be BLAMED as the unlocked offender: drop idle names from the
 		 * unlocked list (the scan built it over all connected-!locked inputs, idle-unaware). */
@@ -1362,39 +1384,29 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		}
 	}
 
-	/* #1299 Part 3: recompute the recent-event driver as the CONNECTED-only, PHASE-only aggregate
-	 * (relocks + late_holds + backward_steps). UNDERRUNS are DROPPED — a latency-budget miss owned
-	 * by the genlock-fifo audit + cg-chain-verify (issue 1302), and bursty, so counting it latched
-	 * the 60 s window chronically; an ABSENT input (its #1096 rebind churn) contributes 0. Also pick
-	 * the top offender — the connected input carrying the most phase events — so a DEGRADED reason
-	 * NAMES the culprit (reason=recent_event:<name>). genlock_input_phase_events is the pure rule
-	 * shared with src/genlock_lock_state.rs (C-vs-Rust parity-gated). */
-	scan.event_sum = 0;
-	std::string recent_event_input_name;
-	uint64_t recent_event_input_events = 0;
+	/* recent_event (a relock / late-hold / backward-step on a CONNECTED, non-idle input in the last
+	 * 60 s). #1299 Part 3: PHASE events only -- UNDERRUNS are dropped (a latency-budget miss the
+	 * genlock-fifo audit + cg-chain-verify own, and bursty) and an ABSENT or IDLE input contributes 0.
+	 * Issue 1302: counted per input against its own baseline, so a reconnect, a wake or a first sight
+	 * re-baselines instead of adding the input's lifetime total; the offender is the input with the
+	 * most new events in the window, named in the DEGRADED reason (reason=recent_event:<name>). */
+	std::vector<GenlockPhaseInput> phase_inputs;
+	phase_inputs.reserve(scan.inputs.size());
 	for (const GenlockInputRow &r : scan.inputs) {
-		const uint64_t pe = genlock_input_phase_events(r.connected ? 1 : 0, r.idle ? 1 : 0, r.relocks,
-							       r.late_holds, r.backward_steps);
-		scan.event_sum += pe;
-		if (pe > recent_event_input_events) {
-			recent_event_input_events = pe;
-			recent_event_input_name = r.name;
-		}
+		GenlockPhaseInput in;
+		in.name = r.name;
+		in.connected = r.connected;
+		in.idle = r.idle;
+		in.relocks = r.relocks;
+		in.late_holds = r.late_holds;
+		in.backward_steps = r.backward_steps;
+		phase_inputs.push_back(std::move(in));
 	}
-
-	/* recent-event (relock/late-hold/backward-step on a CONNECTED input in the last 60 s): detect an
-	 * INCREASE of the aggregate cumulative counter across ticks. A decrease (a reconnect reset
-	 * the counters) re-baselines with no event. */
-	if (genlockFirstSample) {
-		genlockLastEventSum = scan.event_sum;
-		genlockFirstSample = false;
-	} else if (scan.event_sum > genlockLastEventSum) {
-		genlockLastEventMs = now_ms;
-		genlockLastEventSum = scan.event_sum;
-	} else if (scan.event_sum < genlockLastEventSum) {
-		genlockLastEventSum = scan.event_sum;
-	}
-	const bool recent_event = genlockLastEventMs >= 0 && (now_ms - genlockLastEventMs) < 60000;
+	const GenlockRecentEventTick events =
+		genlock_recent_events_tick(genlockRecentEvents, now_ms, GENLOCK_RECENT_EVENT_WINDOW_MS, phase_inputs);
+	const bool recent_event = events.recent_event;
+	const std::string &recent_event_input_name = events.top_name;
+	const uint64_t recent_event_input_events = events.top_events;
 
 	/* clock present iff a successful :8898 poll landed within the last 3 s. */
 	const bool clock_present = genlockClockLastOkMs >= 0 && (now_ms - genlockClockLastOkMs) < 3000;

@@ -3,6 +3,7 @@ paths:
   - "scripts/lib/remote-logging.sh"
   - "scripts/dev1-remote-log-install.sh"
   - "tests/harness_remote_logging_1311.rs"
+  - "scripts/lib/cambox-ro-units.sh"
 ---
 
 # cambox off-box remote logging — netconsole + systemd-journal-upload (#1311, Finding 1 step 2)
@@ -136,3 +137,25 @@ ordering are what actually make it survive a clean boot.
 Tier-0 boot-order coverage: `tests/python/test_remote_logging_boot_order_1311.py` (a fake `ip` whose
 `route get` misses the first N calls proves the retry arm; unit/drop-in text asserts). Make
 `REMOTE_LOG_NC_CONFIGFS` env-overridable for that arm test.
+
+## The netconsole oneshot RETRIES a failed arm (issue 1394, live 8.10.2026)
+
+The in-script retry above is bounded (~60 s route + ~60-90 s MAC), and once it gave up the oneshot
+stayed `failed` until the next boot: cam1's netconsole had been failed since 4.10. 06:24Z (the reason
+was rotated away), no kernel printk reached dev1, and the box read `degraded`. The unit now carries
+`Restart=on-failure` + `RestartSec=30` + `RestartSteps=4` + `RestartMaxDelaySec=600` in `[Service]`
+and `StartLimitIntervalSec=0` in `[Unit]`, so a failed arm retries until dev1 answers, the delay
+growing from 30 s to 10 min (a box away from dev1, e.g. the travelling rig on mobile data, would
+otherwise write a failed arm into the issue-1309 journal on the USB stick every 30 s forever). The
+start-limit lift is a safeguard: at RestartSec=30 the default limit cannot trip.
+- **systemd 255 allows `Restart=on-failure` on `Type=oneshot`** (with `RemainAfterExit=yes`);
+  `always` / `on-success` are refused for a oneshot. `tests/python/test_cambox_ro_units_1394.py` runs
+  `systemd-analyze verify` on the generated unit (ExecStart swapped to `/bin/true`) and proves the
+  verifier refuses `Restart=always`.
+- **A unit in its retry loop reads `activating (auto-restart)`, not `failed`**, so it no longer makes
+  the box `degraded`. `(ak)` still FAILs it (not active), now with the unit's systemd `Result`; a
+  `failed` unit is named `FAILED (Result=exit-code)` from the new `NC_SVC_RESULT` gather line.
+- `verify-device (ar)` grades the unit FILE byte-for-byte against the generator and the loaded
+  `Restart=` (a unit written without a daemon-reload runs the old one). A live box gets the new unit
+  through `scripts/cambox-ro-units-apply.sh` (`.claude/rules/provisioning-scripts.md`); a box that
+  never got the issue-1311 unit gets a NOTE there and needs its setup-device re-run.

@@ -56,6 +56,13 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
    also carries `shallow_depth= shallow_capped= shallow_latches= audio_slew_ms= audio_slews=
    audio_steps= audio_withheld= audio_place_err_ms=` right after `n1_grows=` (audit-line-only;
    `audio_place_err_ms=` = the measured placement error of the samples, below).
+   **Issue 1302:** `audio_hold=`, `audio_withheld=` and `audio_place_err_ms=` are no longer
+   audit-line-only. They ride `obs_genlock_stats` v4 (`audio_hold_mode`, `audio_withheld`,
+   `audio_place_err_ms` + `audio_place_err_seeded`), the audit line prints them from the shared
+   snapshot `gs`, and the LOCK widget carries them per input on the v8 `genlock-lock-json:` line
+   (the `genlock_lock.inputs[<name>]` facet), so a consumer can wait for a freshly attached
+   input's audio to leave `pending`. `tests/genlock_audio_timecode_placement_1367.rs` pins the
+   `genlock_audio_hold_token(gs.audio_hold_mode),` form.
 
 ## The pure decision + parity discipline
 
@@ -323,7 +330,7 @@ for ~26 s and has no bench scenario yet (a follow-up candidate). The bench's rat
 drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
 proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
 
-**Live acceptance (supervisor).** Full-bundle deploy on resolume, strih-lx and stream. On resolume
+**Live acceptance (supervisor).** Full-bundle deploy on resolume, strih-snv and stream. On resolume
 the `sp-*_video` audit shows `audio_hold=timecode`, `audio_delay_ms` = the latched
 `shallow_depth × 33` (constant between restarts), `audio_pairing_offset_ms` within ±16 with
 `audio_health=0`, and `audio_slews=` / `audio_steps=` flat at 0 in steady state (`audio_withheld=`
@@ -834,7 +841,7 @@ Full contract: `genlock-lock-indicator.md` + `genlock-lock-facet.md`.
 ## LOCK-indicator audio DEGRADE term (#1303 part 3b — DONE)
 
 Landed as an additive term in the parity-gated LOCK decision: `GenlockFacets` (Rust
-`src/genlock_lock_state.rs` + the C `genlock_lock_facets_t` in `GenlockLockState.hpp`) gained a bool
+`src/genlock_lock_state/decision.rs` + the C `genlock_lock_facets_t` in `GenlockLockState.hpp`) gained a bool
 `audio_unpaired`; `decide` / `genlock_decide_lock_state` gained a lowest-precedence DEGRADED branch
 mapping it to a new `LockReason::AudioPairing` (=9); the statusbar widget `OBSBasicStatusBar.cpp`
 aggregates the per-source pairing-offset breach (`st.version >= 2 && st.audio_enabled &&

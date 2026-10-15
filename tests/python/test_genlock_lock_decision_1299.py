@@ -2,7 +2,7 @@
 (`scripts/genlock_lock_decision.py`).
 
 Layer 1 (this file, RED->GREEN, local + CI): the pure decision -- the three-state `decide()` mirror
-of src/genlock_lock_state.rs (fed the SAME precedence table the Rust/C parity gate uses, so the
+of src/genlock_lock_state/decision.rs (fed the SAME precedence table the Rust/C parity gate uses, so the
 facet can never disagree with the statusbar), plus `analyze()` classifying SKIP/UNKNOWN/HEALTHY/
 DEGRADED/UNLOCKED from the nested `genlock_lock` bundle-state facet. No I/O, no ssh, no OBS -- the
 strih-nic-selfheal #1199 / ndi-halving #1203 python-mirror precedent, so it RED->GREENs LOCALLY
@@ -25,7 +25,7 @@ import genlock_lock_decision as d
 
 
 # A fully healthy box: clock locked, every input locked, output stamping. Mirrors the
-# `healthy()` fixture in src/genlock_lock_state.rs's own tests.
+# `healthy()` fixture in src/genlock_lock_state/decision.rs's own tests.
 def healthy():
     return dict(n_inputs=7, n_locked=7, recent_event=False, qpc_drift_beyond_bound=False,
                 clock_present=True, clock_locked=True, clock_ntp_failed=False,
@@ -33,7 +33,7 @@ def healthy():
 
 
 # ------------------------------------------------------------------------------------------------
-# decide() -- the same precedence cases src/genlock_lock_state.rs pins, so this Python mirror and
+# decide() -- the same precedence cases src/genlock_lock_state/decision.rs pins, so this Python mirror and
 # the Rust/C authority agree on every three-state verdict (the "facet must agree with the statusbar"
 # parity the #1299 ticket requires -- both are fed the SAME counters here).
 # ------------------------------------------------------------------------------------------------
@@ -104,7 +104,7 @@ def test_qpc_drift_is_degraded_qpc():
     assert d.decide(**f) == (d.ST_DEGRADED, d.R_QPC_DRIFT)
 
 
-# ---- precedence (mirrors src/genlock_lock_state.rs's precedence tests) --------------------------
+# ---- precedence (mirrors src/genlock_lock_state/decision.rs's precedence tests) --------------------------
 def test_clock_beats_output_and_input():
     f = healthy()
     f["clock_locked"] = False
@@ -218,7 +218,7 @@ def test_analyze_unknown_when_facet_not_a_dict():
 # ================================================================================================
 # #1299 REOPEN — an absent-sender input (no live NDI receiver connection) must NEVER grade the box
 # DEGRADED. The Python `decide()` mirror gains an `n_absent` param; the input decisions judge only
-# CONNECTED inputs (n_connected = n_inputs - n_absent). Mirrors the src/genlock_lock_state.rs tests
+# CONNECTED inputs (n_connected = n_inputs - n_absent). Mirrors the src/genlock_lock_state/decision.rs tests
 # and the C parity gate's new n_absent axis. These FAIL on the pre-#1299 decide() (no n_absent kwarg
 # -> TypeError) and pass once the connected-term lands.
 # ================================================================================================
@@ -294,7 +294,7 @@ def test_analyze_n_absent_none_for_a_v1_facet():
 # #1341 — a CONNECTED-but-IDLE input (a keep-alive-only SongPlayer playlist input) must NEVER grade
 # the box DEGRADED. The Python `decide()` mirror gains an `n_idle` param; the input decisions judge
 # only CONNECTED-non-idle inputs (n_connected = n_inputs - n_absent - n_idle). Mirrors the
-# src/genlock_lock_state.rs tests + the C parity gate's new n_idle axis. These FAIL on the pre-#1341
+# src/genlock_lock_state/decision.rs tests + the C parity gate's new n_idle axis. These FAIL on the pre-#1341
 # decide() (no n_idle kwarg -> TypeError) and pass once the idle term lands.
 # ================================================================================================
 def test_idle_sender_only_unlocked_is_still_locked():
@@ -360,7 +360,7 @@ def test_analyze_n_idle_none_for_a_pre_v6_facet():
 
 # ------------------------------------------------------------------------------------------------
 # issue 1372 part D -- the media-clock (audio clock) term: the same precedence + verdict cases the
-# Rust authority pins (src/genlock_lock_state.rs), so the python mirror decides it identically.
+# Rust authority pins (src/genlock_lock_state/decision.rs + media_clock.rs), so the python mirror decides it identically.
 # ------------------------------------------------------------------------------------------------
 def test_media_clock_drift_or_undisciplined_is_degraded_media_clock():
     for mc in (d.MC_DRIFT, d.MC_UNDISCIPLINED):

@@ -151,6 +151,13 @@ transfer/deploy.
 
 ### 5b. The FAST-DLL variant (libobs-only change) — when the full bundle is overkill (issue 960, 2026-08-03)
 
+**Never hand-swap obs.dll when the change touches `struct obs_genlock_stats` / `struct
+obs_genlock_output_stats` or their versions (issue 1302):** the frontend keeps both structs on its
+stack, so a newer obs.dll filling a bigger struct crashes the old obs64.exe. Use
+`deploy-genlock-fleet.sh --fast`, which compares the box's two-line `GENLOCK_STATS_ABI.txt` with the
+build's `OBS_GENLOCK_STATS_VERSION` and `OBS_GENLOCK_OUTPUT_STATS_VERSION` and refuses a mismatch of
+either; a hand swap must make the same comparison first.
+
 When the merged vendor change touches ONLY `vendor/obs-studio/libobs/**` (compiles into `obs.dll`),
 the `windows-genlock-fast` artifact (`obs-genlock-fast-dll`: obs.dll + GENLOCK_BUILD_SHA.txt +
 fast manifest, ~1.3 MB) replaces steps 1-2 above — but FIRST prove the fast build's tree matches
@@ -297,7 +304,7 @@ rig looked half-alive):
    L2 truth for a dead box: router `/ip arp print` `incomplete`, MAC absent from every switch's
    `/interface bridge host print`, and the box's switch port (`/interface ethernet monitor <port>
    once`) showing `no-link` = power/cable/NIC, not software. strih (since the 20.9.2026 M4
-   cut-over) = strih-lx, USB RTL8156 MAC 6C:1F:F7:66:15:4B on foh1_video (10.77.9.4) `ether2`
+   cut-over) = strih-snv, USB RTL8156 MAC 6C:1F:F7:66:15:4B on foh1_video (10.77.9.4) `ether2`
    (2.5 G, verified 23.9.2026 for issue 1242). The old Windows strih PC was MAC 5C:6A:80:F6:6C:F7 on
    foh2_video (10.77.9.5) `sfp-sfpplus2::basic` (10 G DAC); that port has no link now.
 
@@ -325,6 +332,13 @@ rig looked half-alive):
    stdin, never on `bash -s`, which reads sudo's exhausted pipe (empty program) — a silent no-op.
 
 ## Force-kill relaunch (fast-DLL swap, recovery) LOSES obs-websocket runtime writes — save the collection FIRST (issue 1333, 17.9.2026)
+
+**Since issue 1367 the fleet deploy program (`deploy-genlock-fleet.sh`, stream + resolume) closes OBS
+cleanly first and forces only as a named fallback (`genlock-fleet-deploy.md`).** This checklist still
+applies to every remaining force-kill: a deploy whose log shows `-- forcing`, the scratch
+`fastdll-swap-*.ps1` programs, `launch-obs-genlock.sh --force` on a running OBS, and the
+mv-reverify escalation's Windows-strih branch (retired with the Windows strih; strih-snv restarts
+through its unit, and OBS saves on SIGTERM on Linux).
 
 `SetInputSettings` / `SetInputAudioSyncOffset` over obs-websocket change the RUNTIME source state but do
 NOT mark the project dirty, so OBS never rewrites the scene-collection JSON for them; a graceful exit

@@ -169,7 +169,14 @@
 #       the NEXT half-dead-stick death ships its kernel + journal messages off-box in real time,
 #       instead of dying with the stick like the on-STICK #1309 journal does. FAILs fail-closed on any
 #       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the dev1 sink,
-#       a separate supervisor step); enabled + correct config is the cambox-side bar.
+#       a separate supervisor step); enabled + correct config is the cambox-side bar. A `failed`
+#       netconsole is named with its systemd Result (issue 1394).
+#   (ar) the read-only-root unit set (issue 1394) -- HARD FAIL: the logrotate drop-in (state in /run,
+#        the ro-root canon) byte-for-byte AND loaded, logrotate.service's last Result success, the
+#        four apt timers/services masked + inactive, and the cambox-netconsole unit byte-identical to
+#        scripts/lib/remote-logging.sh (Restart=on-failure loaded) -- the four units that left every
+#        cambox `degraded` on 8.10.2026. Graded by cambox_ro_units_verdict (scripts/lib/cambox-ro-units.sh,
+#        the SAME lib scripts/cambox-ro-units-apply.sh fixes a live box with).
 #   (am) bkshading-relay blast-radius + info logging (#1309) -- HARD FAIL on the box that RUNS the
 #        relay: TasksMax <= 512 (fork/thread runaway can't starve the box pid space) AND a running
 #        relay logs at info (zero journal lines while active = an old binary predating info-by-
@@ -198,6 +205,19 @@
 #        boot after the first takes: only the masked grub-common clears the flag) sets timeout 0 --
 #        graded by grub_fast_boot_cfg_verdict from the ONE lib scripts/lib/grub-fast-boot.sh that
 #        create-usb-linux.sh / setup-device.sh STEP 10 apply. An unreadable or empty grub.cfg FAILs.
+#   (as) the rig time zone (issue 1415) -- HARD FAIL: /etc/localtime is a symlink to the zoneinfo
+#        file of Europe/Bratislava (scripts/lib/rig-timezone.sh, the ONE declaration setup-device.sh
+#        STEP 1 + create-usb-linux.sh write). Read with readlink, never timedatectl (its read-back
+#        lies on the read-only root). Etc/UTC, a copied file or an unreadable link FAILs.
+#   (at) zram swap (issue 1428) -- HARD FAIL: systemd-zram-generator installed, the drop-in
+#        /etc/systemd/zram-generator.conf.d/camera-box.conf byte-identical to scripts/lib/cambox-zram.sh,
+#        an active /dev/zram* swap of at least 90 % of RAM, and no swap on anything else (only zram
+#        is provisioned). Graded by cambox_zram_verdict from that ONE lib.
+#   (au) housekeeping cpus (issue 1367) -- HARD FAIL: the systemd manager drop-in
+#        /etc/systemd/system.conf.d/60-camera-box-housekeeping-cpus.conf byte-identical to
+#        scripts/lib/cambox-housekeeping-cpus.sh (CPUAffinity = online - isolated - the reserved
+#        capture-IRQ core) AND PID 1 running on exactly that set, so systemd's unit starts never land
+#        on the capture-IRQ core. A box with no reserved IRQ core is OK with no drop-in.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -260,6 +280,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
                                  # SAME source of truth as setup-device.sh / create-usb-linux.sh)
+# shellcheck source=scripts/lib/cambox-ro-units.sh
+. "$HERE/lib/cambox-ro-units.sh"  # cambox_ro_units_gather_remote_snippet/cambox_ro_units_verdict -- the (ar)
+                                  # read-only-root unit set (issue 1394; the SAME ro-root canon setup-device writes)
 # shellcheck source=scripts/lib/ndi-discovery.sh
 . "$HERE/lib/ndi-discovery.sh"   # ndi_discovery_cambox_verdict + the gather/section helpers --
                                  # the (an) check: a cambox carries no networks.ips (issue 1389; the
@@ -276,6 +299,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/grub-fast-boot.sh
 . "$HERE/lib/grub-fast-boot.sh"  # grub_fast_boot_cfg_verdict -- the (aq) no-menu, no-countdown GRUB check
                                  # (#1394; SAME lib create-usb-linux.sh / setup-device.sh STEP 10 apply)
+# shellcheck source=scripts/lib/rig-timezone.sh
+. "$HERE/lib/rig-timezone.sh"  # rig_timezone_gather_cmd / rig_timezone_verdict -- the (as) rig time-zone
+                               # check (issue 1415; SAME lib setup-device.sh STEP 1 writes the zone with)
+# shellcheck source=scripts/lib/cambox-housekeeping-cpus.sh
+. "$HERE/lib/cambox-housekeeping-cpus.sh"  # cambox_hk_gather_remote_snippet / cambox_hk_verdict -- the (au)
+                              # housekeeping-cpus check (issue 1367; SAME lib setup-device.sh writes with)
+# shellcheck source=scripts/lib/cambox-zram.sh
+. "$HERE/lib/cambox-zram.sh"  # cambox_zram_gather_remote_snippet / cambox_zram_verdict -- the (at) zram
+                              # swap check (issue 1428; SAME lib setup-device.sh / create-usb-linux.sh write with)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -889,6 +921,11 @@ Checks:
       cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
   (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
       target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
+      (a failed netconsole is named with its Result, issue 1394)
+  (ar) read-only-root unit set (issue 1394): the logrotate drop-in (state in /run) byte-for-byte and
+      loaded, logrotate's last Result success, the four apt timers/services masked + inactive, and the
+      netconsole unit byte-identical with Restart=on-failure loaded -- fix a live box with
+      scripts/cambox-ro-units-apply.sh --apply --box NAME
   (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a \`cam-box\` entry that is FIRST
       in BootOrder (read with -v), with an HD() path on the /boot/efi PARTUUID (issue 1311) -- FAILs if absent /
       not leading / mangled (VenHw) or stale path / efibootmgr or ESP PARTUUID unreadable (test-strictness)
@@ -903,6 +940,12 @@ Checks:
   (aq) no GRUB menu and no countdown (#1394): the generated /boot/grub/grub.cfg hides the menu with
       timeout 0 AND its recordfail branch (every boot after the first) sets timeout 0 -- an unreadable
       or empty grub.cfg FAILs
+  (as) the rig time zone (issue 1415): /etc/localtime links to the Europe/Bratislava zoneinfo file,
+      read with readlink (never timedatectl) -- Etc/UTC, a copied file or an unreadable link FAILs
+  (at) zram swap (issue 1428): systemd-zram-generator installed, its camera-box drop-in in place, an
+      active /dev/zram* swap of at least 90 % of RAM and no other swap
+  (au) housekeeping cpus (issue 1367): the systemd manager CPUAffinity drop-in in place and PID 1
+      running on the housekeeping cores, off the capture core and the capture-IRQ core
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1598,7 +1641,7 @@ fi
 
 # (ap) NDI egress pacing: fq maxrate root qdisc live + boot unit enabled (issue 1242) -- HARD FAIL --
 # All seven cameras hand their frame to NDI on the same grid instant, so their line-rate bursts
-# reach strih-lx together (its USB NIC answers with PAUSE storms). setup-device.sh's
+# reach strih-snv together (its USB NIC answers with PAUSE storms). setup-device.sh's
 # [egress-pacing] sub-step installs cambox-egress-pacing.service, which paces the default-route
 # interface at boot with the ONE declaration in scripts/lib/cambox-egress-pacing.sh. This reads
 # the live root qdisc, the unit state and what setup-device installed (the boot script's
@@ -1781,6 +1824,96 @@ else
   ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
 fi
 
+# (au) housekeeping cpus (issue 1367) -- HARD FAIL -------------------------------------------------
+# systemd PID 1 and every unit it starts ran on the issue-1198 reserved capture-IRQ core: on cam5
+# (15.10.2026) 65 of 102 capture-phase re-seeds landed within 1 s of a unit start. setup-device.sh
+# `[housekeeping-cpus]` writes the manager CPUAffinity drop-in through scripts/lib/cambox-housekeeping-cpus.sh;
+# this reads the drop-in and PID 1's running mask back (one read-only ssh gather) and grades them with
+# the SAME lib's pure cambox_hk_verdict. Inserted after (ak), before (at): outside every slice pytest
+# executes, and before (q), which stays last.
+aurc=0
+HK_BLOCK="$(ssh_box "$(cambox_hk_gather_remote_snippet)")" || aurc=$?
+if [ "$aurc" -ne 0 ] || [ -z "$HK_BLOCK" ]; then
+  fail "could not read the cpu state over SSH (rc=$aurc) -- cannot certify PID 1 is off the capture-IRQ core (issue 1367)"
+else
+  HK_VERDICT="$(cambox_hk_verdict "$HK_BLOCK")"
+  case "$HK_VERDICT" in
+    ok) ok "housekeeping cpus: the systemd manager CPUAffinity drop-in in place, PID 1 off the capture core and the capture-IRQ core; units started from now on inherit it, running services keep their mask until they restart (issue 1367)" ;;
+    ok-none:*) ok "housekeeping cpus: ${HK_VERDICT#ok-none: } -- nothing to provision (issue 1367)" ;;
+    *)
+      while IFS= read -r _reason; do
+        [ -n "$_reason" ] && fail "housekeeping cpus: ${_reason#FAIL: }"
+      done <<<"$HK_VERDICT"
+      ;;
+  esac
+fi
+
+# (at) zram swap (issue 1428) -- HARD FAIL ---------------------------------------------------------
+# Owner 14.10.2026: every Linux box carries swap. A cambox swaps to compressed RAM (its root runs
+# read-only with no swap partition): systemd-zram-generator + the camera-box drop-in from scripts/lib/cambox-zram.sh,
+# which setup-device.sh `[zram-swap]` and create-usb-linux.sh write. One read-only ssh gather, graded by
+# the SAME lib's pure cambox_zram_verdict (fail-closed). Inserted after (ak), before (as): outside the
+# slices pytest executes ((as)..(ar), (ar)..(al), (aq)..(ao), (ao)..(an), (an)..(q)) and before (q), which stays last.
+atrc=0
+ZRAM_BLOCK="$(ssh_box "$(cambox_zram_gather_remote_snippet)")" || atrc=$?
+if [ "$atrc" -ne 0 ] || [ -z "$ZRAM_BLOCK" ]; then
+  fail "could not read the zram swap state over SSH (rc=$atrc) -- cannot certify the box's swap (issue 1428)"
+else
+  ZRAM_VERDICT="$(cambox_zram_verdict "$ZRAM_BLOCK")"
+  if [ "$ZRAM_VERDICT" = "ok" ]; then
+    ok "zram swap active (>= ${CAMBOX_ZRAM_MIN_PERCENT}% of RAM, ${CAMBOX_ZRAM_PACKAGE} + the camera-box drop-in), no other swap (issue 1428)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "zram swap: ${_reason#FAIL: }"
+    done <<<"$ZRAM_VERDICT"
+  fi
+fi
+
+# (as) the rig time zone (issue 1415) -- HARD FAIL -------------------------------------------------
+# Every freshly provisioned box used to run the image default Etc/UTC. setup-device.sh STEP 1 and
+# create-usb-linux.sh now point /etc/localtime at the rig zone through scripts/lib/rig-timezone.sh;
+# this reads the link back over ssh (rig_timezone_gather_cmd, self-contained, never timedatectl,
+# whose read-back lies on the read-only root) and grades it with the SAME lib's rig_timezone_verdict.
+# Inserted after (ak), before (ar): outside the slices other tests EXECUTE ((ar)..(al), (aq)..(ao),
+# (ao)..(an), (an)..(q)) and before the .bak cruft check, which stays last.
+asrc=0
+TZ_BOX="$(ssh_box "$(rig_timezone_gather_cmd)")" || asrc=$?
+TZ_BOX="${TZ_BOX%%$'\n'*}"
+if [ "$asrc" -ne 0 ]; then
+  fail "could not read /etc/localtime over SSH (rc=$asrc) -- cannot certify the rig time zone ${RIG_TIMEZONE} (issue 1415)"
+else
+  TZ_AS_VERDICT="$(rig_timezone_verdict "$TZ_BOX")" || true
+  if [ "$TZ_AS_VERDICT" = "OK" ]; then
+    ok "time zone ${TZ_BOX}: /etc/localtime links to the rig zone -- local clocks on the box (issue 1415)"
+  else
+    fail "time zone: ${TZ_AS_VERDICT#FAIL: } -- re-run setup-device.sh (STEP 1 writes it)"
+  fi
+fi
+
+# (ar) read-only-root unit set (issue 1394) -- HARD FAIL -------------------------------------------
+# 8.10.2026 every cambox read `degraded`: logrotate kept its state on the read-only root (fails
+# every 15 min, /var/log not rotated), apt-daily(-upgrade) failed every pass with their timers only
+# disabled, and the issue-1311 netconsole oneshot never retried a boot-time miss. setup-device.sh
+# writes the fixes; scripts/cambox-ro-units-apply.sh brings a live box up to date. One read-only ssh
+# gather (cambox_ro_units_gather_remote_snippet), graded by the pure cambox_ro_units_verdict from the
+# SAME lib, against the ro-root canon and remote-logging.sh. HARD FAIL (fail-closed on an unreadable
+# fact). Inserted after (ak), before (al): outside the slices pytest executes ((aq)..(ao),
+# (ao)..(an), (an)..(q)) and before the .bak cruft check, which stays last.
+arrc=0
+RO_UNITS_BLOCK="$(ssh_box "$(cambox_ro_units_gather_remote_snippet)")" || arrc=$?
+if [ "$arrc" -ne 0 ] || [ -z "$RO_UNITS_BLOCK" ]; then
+  fail "could not read the read-only-root unit state over SSH (rc=$arrc) -- cannot certify logrotate / the apt masks / the netconsole retry (issue 1394)"
+else
+  RO_UNITS_VERDICT="$(cambox_ro_units_verdict "$RO_UNITS_BLOCK")"
+  if [ "$RO_UNITS_VERDICT" = "ok" ]; then
+    ok "read-only-root unit set in place: logrotate keeps its state in /run (last run success), the four apt units masked + inactive, netconsole retries on failure (issue 1394)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "read-only-root units: ${_reason#FAIL: }"
+    done <<<"$RO_UNITS_VERDICT"
+  fi
+fi
+
 # (al) named `cam-box` UEFI boot entry leads BootOrder (#1066 D6) -- HARD FAIL --------------------
 # The box must boot its internal disk via a named NVRAM entry, NOT the AMI firmware USB auto-entry
 # (which failed on cam2 after a warm reboot -> firmware setup screen). setup-device.sh STEP 17d
@@ -1923,7 +2056,7 @@ fi
 
 # (an) NDI discovery receiver config (issue 1342) -- HARD FAIL -------------------------------------
 # issue 1389 (ROZHODNUTÉ 5879261962): a cambox carries NO networks.ips at all. The camera-box service
-# receives only `STRIH-LX (interkom)` (the cameraman preview), which mDNS finds; any listed host would
+# receives only `STRIH-SNV (interkom)` (the cameraman preview), which mDNS finds; any listed host would
 # give it a TCP discovery connection whose teardown can abort camera-box inside libndi 6.3.2.
 # setup-device.sh STEP 7 (and, on a live box, `scripts/lib/ndi-discovery.sh --cambox-apply`) removes
 # the issue-1342 /etc/ndi/ndi-config.v1.json and its camera-box.service.d NDI_CONFIG_DIR drop-in. This

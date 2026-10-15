@@ -61,7 +61,7 @@ timer. No box-side change is made by this ticket.
 
 The av-sync dock measured-offset series is a **stream-only** signal: strih logs `av-sync-dock: ASRC
 section unavailable -- source 'mbc' not found on this box`, so it never carries the facet (it would
-always classify UNKNOWN there). The default `AV_STEP_BOXES="stream|10.77.9.204"` watches stream
+always classify UNKNOWN there). The default `AV_STEP_BOXES="stream-snv|10.77.9.204"` watches stream
 only; add strih via the env var only if that ever changes.
 
 ## Conservative gates (why it won't thrash or spam)

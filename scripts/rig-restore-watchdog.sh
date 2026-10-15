@@ -61,10 +61,10 @@ CAM2_IP="${CAM2_IP:-10.77.9.62}"
 CAM4_IP="${CAM4_IP:-10.77.9.64}"
 CAM_PW="${CAM_PW:-newlevel}"           # dev-rig root pw (same default convention as recording-e2e.sh)
 # OBS program boxes (issue 1317 part 2, M4 cut-over): the ONE fleet list's `rig-restore` facet
-# (scripts/lib/obs-fleet.sh = strih-lx + stream, `name|host` pairs), overridable byte-compatibly via
+# (scripts/lib/obs-fleet.sh = strih-snv + stream, `name|host` pairs), overridable byte-compatibly via
 # RIG_WATCHDOG_OBS_BOXES. The probe + teardown are OBS-WebSocket only (obs_phase2.py), so the
-# production Linux strih-lx keeps the coverage the retired Windows strih had. STRIH_HOST still
-# repoints the strih (now strih-lx) and STREAM_HOST the stream box (empty = the roster's host).
+# production Linux strih-snv keeps the coverage the retired Windows strih had. STRIH_HOST still
+# repoints the strih (now strih-snv) and STREAM_HOST the stream box (empty = the roster's host).
 OBS_BOXES="${RIG_WATCHDOG_OBS_BOXES:-$(obs_fleet_boxes rig-restore)}"
 OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}" # strih may require it; stream is no-auth (empty is fine)
 
@@ -140,11 +140,11 @@ probe_obs() {
 
 # ── OBS roster (issue 1317 part 2) ───────────────────────────────────────────
 # _rig_obs_resolve_host <name> <roster-host> -> the host to dial: STRIH_HOST repoints the strih
-# (strih-lx), STREAM_HOST the stream box; any other member dials its roster host.
+# (strih-snv), STREAM_HOST the stream box; any other member dials its roster host.
 _rig_obs_resolve_host() {
   case "${1:-}" in
-    strih-lx) printf '%s' "${STRIH_HOST:-${2:-}}" ;;
-    stream) printf '%s' "${STREAM_HOST:-${2:-}}" ;;
+    strih-snv) printf '%s' "${STRIH_HOST:-${2:-}}" ;;
+    stream-snv) printf '%s' "${STREAM_HOST:-${2:-}}" ;;
     *) printf '%s' "${2:-}" ;;
   esac
 }
@@ -358,7 +358,7 @@ main() {
   export RIG_OBS
 
   # #353 (review): how many of this pass's OBS roster boxes (issue 1317: the fleet `rig-restore`
-  # facet, strih-lx + stream) were UNREADABLE. probe_obs emits an `obs ...` record only for a readable
+  # facet, strih-snv + stream) were UNREADABLE. probe_obs emits an `obs ...` record only for a readable
   # box, so a roster name with no record is unreadable; an EMPTY roster counts 1 (fail-closed). An
   # unreadable box may hide a stranded scene, so the marker must NOT be cleared while any OBS probe
   # failed (below).

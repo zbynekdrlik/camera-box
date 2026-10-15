@@ -47,7 +47,7 @@ typedef struct genlock_lock_facets {
 	int n_locked;               /* of those, currently locked */
 	int n_absent;               /* #1299: of n_inputs, how many have NO live NDI receiver connection (sender not running); n_connected = n_inputs - n_absent is the DEGRADED-gate denominator */
 	int n_idle;                 /* #1341: of n_inputs, how many are CONNECTED but IDLE (keep-alive-only, received-frame rate below the idle floor over the window); excluded from n_locked + n_connected = n_inputs - n_absent - n_idle */
-	int recent_event;           /* bool: relock/underrun/late-hold/backward-step in last 60 s */
+	int recent_event;           /* bool: a NEW relock/late-hold/backward-step of a connected, non-idle input in the last 60 s (issue 1302: per-input baseline) */
 	int qpc_drift_beyond_bound; /* bool */
 	int clock_present;          /* bool: dantesync :8898/status answered */
 	int clock_locked;           /* bool: is_locked */
@@ -86,9 +86,11 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 	} else if (f->output_present && !f->output_stamping) {
 		reason = GENLOCK_LOCK_REASON_OUTPUT;
 		state = GENLOCK_LOCK_UNLOCKED;
-	} else if (f->n_locked <= 0) {
+	} else if (f->n_locked <= 0 && !(f->n_inputs <= 0 && f->output_present && f->output_stamping)) {
+		/* issue 1422: a sender-only box (no inputs, a stamping output) skips this branch and is
+		 * judged by the DEGRADED axes below. */
 		if (f->n_inputs <= 0) {
-			reason = GENLOCK_LOCK_REASON_NO_GENLOCK; /* no genlock configured at all */
+			reason = GENLOCK_LOCK_REASON_NO_GENLOCK; /* no inputs and no stamping output */
 			state = GENLOCK_LOCK_UNLOCKED;
 		} else if (n_connected <= 0) {
 			reason = GENLOCK_LOCK_REASON_NONE; /* #1299: inputs present but all senderless -> HEALTHY-idle */
@@ -151,6 +153,63 @@ static inline uint64_t genlock_input_phase_events(int connected, int idle, uint6
 		return UINT64_MAX;
 	sum += backward_steps;
 	return sum;
+}
+
+/* issue 1302 — the NEW phase events of ONE input since the widget's previous tick: the per-input
+ * event BASELINE that replaced the #1299 aggregate compare (it summed every input's lifetime total,
+ * so a reconnecting or waking input added its whole total at once and held the box DEGRADED
+ * recent_event for 60 s after every reattach). The totals are the input-phase-events values above;
+ * contributing = connected and not idle; has_prev 0 = the widget has no sample of the input (first
+ * sight, or it left the scan and was forgotten). Contributing in BOTH samples and the total rose:
+ * the rise. It just started contributing (reconnect, wake from idle, first sight): 0, and the current
+ * total becomes its baseline. The total went backward (a counter reset): 0, re-baseline. Not
+ * contributing now: 0. Byte-for-byte mirror of camera_box::genlock_lock_state::input_new_phase_events,
+ * parity-gated by tests/genlock_phase_baseline_1302.rs. */
+static inline uint64_t genlock_input_new_phase_events(int has_prev, int prev_contributing, uint64_t prev_total,
+						      int contributing, uint64_t total)
+{
+	if (!has_prev || !prev_contributing || !contributing)
+		return 0;
+	if (total < prev_total)
+		return 0;
+	return total - prev_total;
+}
+
+/* issue 1302 + #1341 — the per-input idle classification the widget's ring tick (GenlockRecentEvents.cpp,
+ * genlock_idle_classify_tick) asks once per input per 1 Hz tick. The ring holds (monotonic ms, cumulative
+ * frames received) pruned to the idle window; span_ms = its newest minus oldest sample time, delta_frames
+ * = the frames received across it, prev_class = the previous tick's class (UNCLASSIFIED after a
+ * (re)connect, a first sight or a received-counter reset). Only a LIVE input is graded and feeds
+ * recent_event; UNCLASSIFIED and IDLE take the idle path. Byte-for-byte mirror of
+ * camera_box::genlock_lock_state::input_idle_class and its constants, parity-gated by
+ * tests/genlock_idle_class_1302.rs (which lifts from the window constant through the function). */
+#define GENLOCK_IDLE_WINDOW_MS INT64_C(60000)
+#define GENLOCK_IDLE_FULL_SPAN_MS (GENLOCK_IDLE_WINDOW_MS * 9 / 10)
+#define GENLOCK_IDLE_INPUT_MIN_FRAMES UINT64_C(60)
+#define GENLOCK_IDLE_FAST_SPAN_MS INT64_C(5000)
+#define GENLOCK_IDLE_FAST_MIN_FRAMES UINT64_C(60)
+
+typedef enum genlock_input_idle_class {
+	GENLOCK_INPUT_UNCLASSIFIED = 0, /* just (re)connected or first seen: not yet proven live */
+	GENLOCK_INPUT_LIVE = 1,         /* delivers frames at a live rate */
+	GENLOCK_INPUT_IDLE = 2,         /* #1341 keep-alive-only over the full window */
+} genlock_input_idle_class_t;
+
+static inline genlock_input_idle_class_t genlock_input_idle_class(int64_t span_ms, uint64_t delta_frames,
+								  genlock_input_idle_class_t prev_class)
+{
+	/* the full window: the #1341 rule decides */
+	if (span_ms >= GENLOCK_IDLE_FULL_SPAN_MS)
+		return delta_frames < GENLOCK_IDLE_INPUT_MIN_FRAMES ? GENLOCK_INPUT_IDLE : GENLOCK_INPUT_LIVE;
+	/* the fast rule: >= 60 frames over >= 5 s is a live rate, whatever the previous class (a
+	 * keep-alive input never meets it); it never says IDLE */
+	if (span_ms >= GENLOCK_IDLE_FAST_SPAN_MS && delta_frames >= GENLOCK_IDLE_FAST_MIN_FRAMES)
+		return GENLOCK_INPUT_LIVE;
+	/* else the previous class holds on a short ring (a ring a long widget stall pruned): LIVE is
+	 * never demoted, IDLE stays IDLE, anything else stays UNCLASSIFIED */
+	if (prev_class == GENLOCK_INPUT_LIVE || prev_class == GENLOCK_INPUT_IDLE)
+		return prev_class;
+	return GENLOCK_INPUT_UNCLASSIFIED;
 }
 
 /* #1303 — case-insensitive ASCII substring test, a private helper for genlock_name_is_camera below.

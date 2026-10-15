@@ -22,7 +22,7 @@
 #              | step-unread:<us> (no readable /status, no date_authority: the step bound, named)
 #              | out (date_correction_falling_behind=true) | paused (date_micro_paused=true)
 #              | unknown (a micro-capable master whose flags are not JSON booleans)
-# The four @ files are /status captured read-only from the live fleet on 26.9.2026 (strih-lx master
+# The four @ files are /status captured read-only from the live fleet on 26.9.2026 (strih-snv master
 # and the stream slave, both dantesync 1.9.0) plus two legacy nodes synthesized from the pre-1.9.0
 # field shape (no clock_discipline / ptp_phase_locked / date_* fields).
 # The two 1.11.1 @ files are /status captured read-only from the same two live nodes on 26.9.2026
@@ -32,7 +32,7 @@
 # date_correction_falling_behind is graded on the micro bound (DANTESYNC_DATE_MICRO_BOUND_MS,
 # default 5) + margin, falling behind = out, paused = paused; a master without it (1.9.0 / 1.10.0)
 # is graded on date_step_bound_ms exactly as before (the mixed fleet during the roll).
-live_master_1_9_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.9.0.json	PTP_PHASE_LOCK	ok	no	step:51000
+live_master_1_9_0	@tests/fixtures/dantesync_status_1372/strih-snv-master-1.9.0.json	PTP_PHASE_LOCK	ok	no	step:51000
 live_slave_1_9_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.9.0.json	PTP_PHASE_LOCK	none	no	step:51000
 legacy_build_slew_on	@tests/fixtures/dantesync_status_1372/legacy-slew-1.8.52.json	LEGACY_SLEW	none	no	step-unread:51000
 legacy_build_slew_off	@tests/fixtures/dantesync_status_1372/legacy-no-slew-1.8.52.json	LEGACY_NO_SLEW	none	no	step-unread:51000
@@ -69,7 +69,7 @@ master_error_not_finite	{"date_authority":"master","date_offset_error_ms":1e400,
 master_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no	step:51000
 master_bound_absurd	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":1e20}	UNKNOWN	unknown	no	step:51000
 master_error_huge_integer	{"date_authority":"master","date_offset_error_ms":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no	step:51000
-live_master_1_11_1	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.11.1.json	PTP_PHASE_LOCK	ok	no	micro:6000
+live_master_1_11_1	@tests/fixtures/dantesync_status_1372/strih-snv-master-1.11.1.json	PTP_PHASE_LOCK	ok	no	micro:6000
 live_slave_1_11_1	@tests/fixtures/dantesync_status_1372/stream-slave-1.11.1.json	PTP_PHASE_LOCK	none	no	step:51000
 master_1_10_shape_on_step_bound	{"date_authority":"master","date_offset_error_ms":-28.8,"date_step_bound_ms":50.0,"date_slew_active":false,"date_slew_remaining_ms":null,"date_slew_ppm":null}	UNKNOWN	ok	no	step:51000
 master_1_10_shape_past_step_bound	{"date_authority":"master","date_offset_error_ms":-51.5,"date_step_bound_ms":50.0,"date_slew_active":false,"date_slew_remaining_ms":null,"date_slew_ppm":null}	UNKNOWN	out	no	step:51000
@@ -105,7 +105,7 @@ micro_falling_behind_is_a_number	{"date_authority":"master","date_offset_error_m
 # field, the mode or the daily bound unreadable). date_correction_mode "micro" or "" keeps the
 # 1.11 grade. The two 1.12.0 @ files are SYNTHESIZED from the 1.11.1 captures plus the four new
 # fields in dantesync src/status.rs order, until a live capture after the roll replaces them.
-live_master_1_12_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.12.0.json	PTP_PHASE_LOCK	ok	no	daily:3001000
+live_master_1_12_0	@tests/fixtures/dantesync_status_1372/strih-snv-master-1.12.0.json	PTP_PHASE_LOCK	ok	no	daily:3001000
 live_slave_1_12_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.12.0.json	PTP_PHASE_LOCK	none	no	step:51000
 daily_a_days_drift_is_ok	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
 daily_first_day_no_nightly_step_yet	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":null,"date_daily_last_step_ms":null}	UNKNOWN	ok	no	daily:3001000

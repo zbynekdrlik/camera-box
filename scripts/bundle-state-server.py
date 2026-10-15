@@ -72,6 +72,7 @@ from bundle_state_windows import (  # noqa: E402
     resolve_shortcut,
     tasklist_csv,
     vb_matrix_start_time,
+    windows_obs_handles,
 )
 
 
@@ -400,6 +401,13 @@ def _windows_identity_facets(timings, *, ahk_path, startup_shortcut, distroav_sc
     return facets
 
 
+def _obs_handles_facets():
+    """Issue 1406 -- the OBS process's handle count for the dev1 obs-handles watchdog, on BOTH
+    platforms: the Windows process snapshot (windows_obs_handles) or the Linux /proc fd count
+    (bsg.linux_obs_handles). {} when no OBS process is readable -> the keys are omitted."""
+    return windows_obs_handles() if IS_WINDOWS else bsg.linux_obs_handles()
+
+
 def gather_bundle_state(
     obs_host, password, obs_log_dir, ndi_runtime_dll, distroav_scan_roots,
     genlock_build_sha_file=DEFAULT_GENLOCK_BUILD_SHA_FILE,
@@ -463,6 +471,7 @@ def gather_bundle_state(
             obs_dll_path=obs_dll_path,
             ndi_runtime_dll=ndi_runtime_dll,
         )
+    obs_handles = _timed(timings, "obs_handles", _obs_handles_facets)
 
     result = bsg.build_bundle_state(
         ndi_input_latency=bsg.ndi_input_latency_csv(ndi_inputs),
@@ -470,6 +479,7 @@ def gather_bundle_state(
         genlock_build_sha=genlock_build_sha_val,
         **log_facets,
         **identity,
+        **obs_handles,
     )
 
     # #1299 — the genlock_lock facet is a NESTED object, not a flat string, so it is attached here

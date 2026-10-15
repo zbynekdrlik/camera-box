@@ -208,7 +208,7 @@ pub fn should_hold_n1_phase(
 
 // ---- issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW N==1 source's per-LOCK depth ----------------
 //
-// WHY. A SHALLOW N==1 source (a cg feed at a 3 ms pin: resolume `sp-*_video`, strih-lx `CG-obs`) has a
+// WHY. A SHALLOW N==1 source (a cg feed at a 3 ms pin: resolume `sp-*_video`, strih-snv `CG-obs`) has a
 // depth set by its ARRIVAL, not its pin, so the deep rule above never acts on it and its depth
 // FLOATED: live `sp-slow_video` stepped 66 / 100 / 133 ms between 5 s audits, and the Option-3 audio
 // hold followed every step (72 audio re-placements in 42 min = the songplayer gate's 33 ms dropout).
@@ -808,11 +808,11 @@ pub fn n1_shallow_hold_due(
 ///
 /// A gap whose head is already DUPLICATED behind it (`next_stamp_ns`, the second queued frame's
 /// stamp, `0` = none queued, is at or below the head's) is not missing content: a sender that
-/// stamps at SEND time (strih-lx, the #1355 residual) labels a slow frame one slot late and the
+/// stamps at SEND time (strih-snv, the #1355 residual) labels a slow frame one slot late and the
 /// next frame carries the same stamp, so the head IS the frame due now and the GAP RESYNC puts it
 /// on air on time (the stamp age reads one frame short for that tick only). The guard only sees a
 /// duplicate that is ALREADY QUEUED: when it has not arrived yet the hold fires on a late label and
-/// costs one repeat plus a later shallow shed (review round 1: 0 at the live-calibrated strih-lx
+/// costs one repeat plus a later shallow shed (review round 1: 0 at the live-calibrated strih-snv
 /// jitter, 22 + 22 per 2 h at σ 4 ms, pinned by the grid bench). The stamps alone cannot tell that
 /// case from a real skip (the next frame of a real skip has usually not arrived either); a real
 /// fix needs per-frame arrival times. Mirror of the C `genlock_n1_shallow_gap_hold_due`.

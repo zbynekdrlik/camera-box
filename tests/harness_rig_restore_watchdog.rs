@@ -276,7 +276,7 @@ fn obs_on_prod_scene_is_not_a_stranded_signal() {
     // A prod scene name is NOT in the default known-test-scene set → no action (no false positive).
     let d = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
-        &["obs strih scene=Cam 5", "obs stream scene=PRE"],
+        &["obs strih scene=Cam 5", "obs stream-snv scene=PRE"],
     );
     assert_eq!(d.get("act").map(String::as_str), Some("0"));
     assert_eq!(d.get("confirm").map(String::as_str), Some("0"));
@@ -289,14 +289,14 @@ fn multiple_stranded_signals_each_get_a_restore_action() {
         &[
             "cam cam1 down=1 probe=0",
             "cam cam4 down=0 probe=1",
-            "obs stream scene=PHASE2-PROBE",
+            "obs stream-snv scene=PHASE2-PROBE",
         ],
     );
     assert_eq!(d.get("act").map(String::as_str), Some("1"));
     let actions = d.get("actions").cloned().unwrap_or_default();
     assert!(actions.contains("restore_cam:cam1"), "got {actions}");
     assert!(actions.contains("restore_cam:cam4"), "got {actions}");
-    assert!(actions.contains("restore_obs:stream"), "got {actions}");
+    assert!(actions.contains("restore_obs:stream-snv"), "got {actions}");
 }
 
 #[test]
@@ -325,12 +325,12 @@ fn known_test_scene_set_is_overridable_via_env() {
             ("RIG_PREV_CONFIRM", "1"),
             ("RIG_KNOWN_TEST_SCENES", "PHASE2-PROBE REC-STRIH-TMP"),
         ],
-        &["obs stream scene=REC-STRIH-TMP"],
+        &["obs stream-snv scene=REC-STRIH-TMP"],
     );
     assert_eq!(d.get("act").map(String::as_str), Some("1"));
     assert!(d
         .get("actions")
-        .map(|s| s.contains("restore_obs:stream"))
+        .map(|s| s.contains("restore_obs:stream-snv"))
         .unwrap_or(false));
 }
 
@@ -350,7 +350,7 @@ fn spaced_scene_name_in_known_set_does_not_match_full_record() {
             ("RIG_PREV_CONFIRM", "1"),
             ("RIG_KNOWN_TEST_SCENES", "NDI 2ME PGM"),
         ],
-        &["obs stream scene=NDI 2ME PGM"],
+        &["obs stream-snv scene=NDI 2ME PGM"],
     );
     assert_eq!(
         d.get("act").map(String::as_str),
@@ -373,7 +373,7 @@ fn spaced_scene_name_in_known_set_does_not_match_full_record() {
             ("RIG_PREV_CONFIRM", "1"),
             ("RIG_KNOWN_TEST_SCENES", "NDI-2ME-PGM"),
         ],
-        &["obs stream scene=NDI-2ME-PGM"],
+        &["obs stream-snv scene=NDI-2ME-PGM"],
     );
     assert_eq!(
         hyphenated.get("act").map(String::as_str),
@@ -400,7 +400,7 @@ fn rec_strih_tmp_no_longer_default_scene_marker_detects_instead() {
     // would still flag it — GREEN after the default drops to "PHASE2-PROBE".
     let no_marker = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
-        &["obs stream scene=REC-STRIH-TMP"],
+        &["obs stream-snv scene=REC-STRIH-TMP"],
     );
     assert_eq!(
         no_marker.get("act").map(String::as_str),
@@ -419,7 +419,7 @@ fn rec_strih_tmp_no_longer_default_scene_marker_detects_instead() {
             ("RIG_PREV_CONFIRM", "1"),
             ("RIG_E2E_MARKER", "1"),
         ],
-        &["obs stream scene=REC-STRIH-TMP"],
+        &["obs stream-snv scene=REC-STRIH-TMP"],
     );
     assert_eq!(
         with_marker.get("act").map(String::as_str),
@@ -432,9 +432,9 @@ fn rec_strih_tmp_no_longer_default_scene_marker_detects_instead() {
     assert!(
         with_marker
             .get("actions")
-            .map(|s| s.contains("restore_obs:stream"))
+            .map(|s| s.contains("restore_obs:stream-snv"))
             .unwrap_or(false),
-        "actions must include restore_obs:stream — got {:?}",
+        "actions must include restore_obs:stream-snv — got {:?}",
         with_marker.get("actions")
     );
 }
@@ -454,7 +454,7 @@ fn marker_present_strands_every_observed_obs_box_regardless_of_scene() {
             ("RIG_E2E_MARKER", "1"),
         ],
         // both boxes on genuine PROD scenes — scene scraping would flag NEITHER
-        &["obs strih scene=Cam 5", "obs stream scene=PRO"],
+        &["obs strih scene=Cam 5", "obs stream-snv scene=PRO"],
     );
     assert_eq!(
         d.get("act").map(String::as_str),
@@ -466,7 +466,7 @@ fn marker_present_strands_every_observed_obs_box_regardless_of_scene() {
     );
     let actions = d.get("actions").cloned().unwrap_or_default();
     assert!(actions.contains("restore_obs:strih"), "got {actions}");
-    assert!(actions.contains("restore_obs:stream"), "got {actions}");
+    assert!(actions.contains("restore_obs:stream-snv"), "got {actions}");
 }
 
 #[test]
@@ -480,7 +480,7 @@ fn marker_present_is_still_gated_by_a_fresh_heartbeat() {
             ("RIG_PREV_CONFIRM", "5"),
             ("RIG_E2E_MARKER", "1"),
         ],
-        &["obs stream scene=PRO"],
+        &["obs stream-snv scene=PRO"],
     );
     assert_eq!(
         d.get("act").map(String::as_str),
@@ -506,7 +506,7 @@ fn marker_absent_falls_back_to_scene_list_no_false_positive() {
     );
     let on_prod = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
-        &["obs strih scene=Cam 5", "obs stream scene=PRO"],
+        &["obs strih scene=Cam 5", "obs stream-snv scene=PRO"],
     );
     assert_eq!(
         on_prod.get("act").map(String::as_str),
@@ -666,7 +666,7 @@ fn prod_scene_pro_not_in_default_known_test_scenes() {
     // known-test-scenes set, so (with no marker) it never triggers a restore (no false positive).
     let d = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
-        &["obs strih scene=Cam 5", "obs stream scene=PRO"],
+        &["obs strih scene=Cam 5", "obs stream-snv scene=PRO"],
     );
     assert_eq!(
         d.get("act").map(String::as_str),
@@ -690,12 +690,12 @@ fn stream_development_scene_is_not_a_stranded_test_scene_1380() {
     // stranded measurement scene — with no marker it must never trigger a restore, like PRO.
     let d = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
-        &["obs strih scene=Cam 1", "obs stream scene=Development"],
+        &["obs strih scene=Cam 1", "obs stream-snv scene=Development"],
     );
     assert_eq!(
         d.get("act").map(String::as_str),
         Some("0"),
-        "the stream development scene must NOT trigger a restore — got act={:?} reason={:?}",
+        "the stream-snv development scene must NOT trigger a restore — got act={:?} reason={:?}",
         d.get("act"),
         d.get("reason")
     );
@@ -1271,7 +1271,7 @@ fn alert_throttle_partial_sig_change_always_alerts() {
     // Signature changed (different unreadable box) → alert immediately
     let m = alert_throttle(
         "partial",
-        "partial:stream:0",
+        "partial:stream-snv:0",
         "partial:strih:0",
         "2",
         Some("5"),
@@ -1283,7 +1283,7 @@ fn alert_throttle_partial_sig_change_always_alerts() {
     );
     assert_eq!(
         m.get("new_sig").map(String::as_str),
-        Some("partial:stream:0"),
+        Some("partial:stream-snv:0"),
         "#370: new_sig must reflect the new (changed) current_sig"
     );
     assert_eq!(
@@ -1365,7 +1365,7 @@ fn idle_cam_stale_probe_without_test_state_is_observe_only() {
         &[
             "cam cam2 down=0 probe=1",
             "obs strih scene=Cam 5",
-            "obs stream scene=PRO",
+            "obs stream-snv scene=PRO",
         ],
     );
     assert_eq!(
@@ -1394,7 +1394,7 @@ fn idle_cam_down_without_test_state_is_observe_only() {
     // (reboot, deploy, power) — without a test-state signal the watchdog must not touch them.
     let d = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
-        &["cam cam1 down=1 probe=0", "obs stream scene=PRO"],
+        &["cam cam1 down=1 probe=0", "obs stream-snv scene=PRO"],
     );
     assert_eq!(
         d.get("act").map(String::as_str),
@@ -1692,8 +1692,8 @@ printf 'BEGIN\n%s\nEND\n' "$RIG_OBS"
         format!("cam cam1 down=0 probe=0 pid={main_pid}"),
         format!("cam cam2 down=0 probe=0 pid={main_pid}"),
         format!("cam cam4 down=0 probe=0 pid={main_pid}"),
-        format!("obs strih-lx scene=STUB pid={main_pid}"),
-        format!("obs stream scene=STUB pid={main_pid}"),
+        format!("obs strih-snv scene=STUB pid={main_pid}"),
+        format!("obs stream-snv scene=STUB pid={main_pid}"),
     ];
     assert_eq!(
         body,
@@ -1705,8 +1705,8 @@ printf 'BEGIN\n%s\nEND\n' "$RIG_OBS"
 }
 
 // ─── issue 1317 (M4): the OBS roster derives from the ONE fleet list (`rig-restore` facet) ─────
-// The production strih is the Linux strih-lx at .202 (the Windows strih PC is retired). The OBS
-// probe + teardown are OBS-WebSocket only (obs_phase2.py program-scene / teardown), so strih-lx
+// The production strih is the Linux strih-snv at .202 (the Windows strih PC is retired). The OBS
+// probe + teardown are OBS-WebSocket only (obs_phase2.py program-scene / teardown), so strih-snv
 // keeps the coverage -- under its own fleet NAME, never the retired `strih`.
 
 /// Source the watchdog (main is guarded) with scratch state + unroutable cams and run `body`.
@@ -1754,7 +1754,7 @@ fn watchdog_obs_roster_derives_from_the_rig_restore_fleet_facet_1317() {
     );
     for gone in [
         "probe_obs strih",
-        "for _box_name in strih stream",
+        "for _box_name in strih stream-snv",
         "strih) host=",
     ] {
         assert!(
@@ -1766,8 +1766,8 @@ fn watchdog_obs_roster_derives_from_the_rig_restore_fleet_facet_1317() {
     assert_eq!(code, 0, "stderr={err}");
     assert_eq!(
         out.trim(),
-        "strih-lx 10.77.9.202\nstream 10.77.9.204",
-        "the default OBS roster is the production strih-lx + stream"
+        "strih-snv 10.77.9.202\nstream-snv 10.77.9.204",
+        "the default OBS roster is the production strih-snv + stream-snv"
     );
 }
 
@@ -1779,23 +1779,23 @@ fn watchdog_obs_roster_keeps_the_host_and_roster_env_overrides_1317() {
     );
     assert_eq!(
         out.trim(),
-        "strih-lx 192.0.2.11\nstream 192.0.2.12",
+        "strih-snv 192.0.2.11\nstream-snv 192.0.2.12",
         "stderr={err}"
     );
     let (_c, out, err) = rig_sourced(
-        &[("RIG_WATCHDOG_OBS_BOXES", "stream|10.77.9.204")],
+        &[("RIG_WATCHDOG_OBS_BOXES", "stream-snv|10.77.9.204")],
         "rig_obs_targets",
     );
-    assert_eq!(out.trim(), "stream 10.77.9.204", "stderr={err}");
+    assert_eq!(out.trim(), "stream-snv 10.77.9.204", "stderr={err}");
 }
 
 #[test]
 fn watchdog_restore_obs_resolves_the_host_from_the_roster_1317() {
-    // restore_obs must tear down the SAME host the probe read (STRIH_HOST repoints strih-lx), and
+    // restore_obs must tear down the SAME host the probe read (STRIH_HOST repoints strih-snv), and
     // an unknown box name is skipped, never torn down blindly.
     let (_c, out, err) = rig_sourced(
         &[("STRIH_HOST", "192.0.2.11")],
-        "rig_obs_host strih-lx; echo; rig_obs_host bogus && echo FOUND || echo NOHOST",
+        "rig_obs_host strih-snv; echo; rig_obs_host bogus && echo FOUND || echo NOHOST",
     );
     assert_eq!(out.trim(), "192.0.2.11\nNOHOST", "stderr={err}");
 }
@@ -1803,15 +1803,15 @@ fn watchdog_restore_obs_resolves_the_host_from_the_roster_1317() {
 #[test]
 fn watchdog_unreadable_obs_names_follow_the_roster_1317() {
     // The marker-clear / partial-alert accounting counts UNREADABLE boxes against the roster --
-    // a strih-lx with no `obs` record is unreadable; never a hardcoded `strih stream` pair.
+    // a strih-snv with no `obs` record is unreadable; never a hardcoded `strih stream` pair.
     let (_c, out, err) = rig_sourced(
         &[],
-        "RIG_OBS='obs stream scene=PRO'\nrig_obs_unreadable_names",
+        "RIG_OBS='obs stream-snv scene=PRO'\nrig_obs_unreadable_names",
     );
-    assert_eq!(out.trim(), "strih-lx", "stderr={err}");
+    assert_eq!(out.trim(), "strih-snv", "stderr={err}");
     let (_c, out, err) = rig_sourced(
         &[],
-        "RIG_OBS=$'obs strih-lx scene=Cam 3\\nobs stream scene=PRO'\nprintf '[%s]' \"$(rig_obs_unreadable_names)\"",
+        "RIG_OBS=$'obs strih-snv scene=Cam 3\\nobs stream-snv scene=PRO'\nprintf '[%s]' \"$(rig_obs_unreadable_names)\"",
     );
     assert_eq!(out.trim(), "[]", "stderr={err}");
 }
@@ -1825,11 +1825,11 @@ fn watchdog_unreadable_obs_names_follow_the_roster_1317() {
 fn unreadable_count_is_roster_relative_and_fail_closed_on_an_empty_roster_1317() {
     let cases = [
         (
-            "RIG_OBS_TARGETS=$'strih-lx 10.77.9.202\\nstream 10.77.9.204'\nRIG_OBS='obs stream scene=PRO'",
+            "RIG_OBS_TARGETS=$'strih-snv 10.77.9.202\\nstream-snv 10.77.9.204'\nRIG_OBS='obs stream-snv scene=PRO'",
             "1",
         ),
         (
-            "RIG_OBS_TARGETS=$'strih-lx 10.77.9.202\\nstream 10.77.9.204'\nRIG_OBS=$'obs strih-lx scene=Cam 3\\nobs stream scene=PRO'",
+            "RIG_OBS_TARGETS=$'strih-snv 10.77.9.202\\nstream-snv 10.77.9.204'\nRIG_OBS=$'obs strih-snv scene=Cam 3\\nobs stream-snv scene=PRO'",
             "0",
         ),
         ("RIG_OBS_TARGETS=''\nRIG_OBS=''", "1"),

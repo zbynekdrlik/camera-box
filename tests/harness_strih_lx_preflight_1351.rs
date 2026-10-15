@@ -1,15 +1,15 @@
 //! issue 1351 — the `[0/8]` Linux-strih preflight TIMEOUT + named-banner hardening.
 //!
-//! After the M4 cut-over (strih = the Linux notebook strih-lx, 10.77.9.202), the full-path E2E
+//! After the M4 cut-over (strih = the Linux notebook strih-snv, 10.77.9.202), the full-path E2E
 //! `[0/8]` preflight band could HANG ~23 min silently on a strih-touching call that had no
 //! harness-level `timeout`, aborting BEFORE `RUN_ID` is exported (recording-e2e.sh) so the #703
 //! fail-closed guard reported "no verdict" with NO named stage. This pins the fix (Approach 1):
 //!
-//!   - a new sourced lib `scripts/lib/strih-lx-preflight.sh` owns the timeout+named-banner
+//!   - a new sourced lib `scripts/lib/strih-snv-preflight.sh` owns the timeout+named-banner
 //!     mechanism as ONE source of truth: `strih_lx_gate_prefix <secs> <host>` (the `timeout <secs>`
 //!     command prefix, emitted ONLY on the linux-strih path — empty on Windows so that path stays
 //!     behaviorally byte-identical) and `strih_lx_preflight_timeout_banner <rc> <label> <secs>`
-//!     (a named `[0/8] strih-lx <label>` banner emitted ONLY on a timeout kill: rc 124/137);
+//!     (a named `[0/8] strih-snv <label>` banner emitted ONLY on a timeout kill: rc 124/137);
 //!   - the genuine unbounded call — the `obs_phase2.py record --action status` WS round-trip inside
 //!     `strih_linux_visibility_check` (scripts/lib/strih-platform.sh) — is wrapped in `timeout`;
 //!   - `scripts/recording-e2e.sh` computes the prefix once and threads `${STRIH_LX_GATE_PREFIX:-}`
@@ -29,7 +29,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn lib_script() -> PathBuf {
-    let s = manifest_dir().join("scripts/lib/strih-lx-preflight.sh");
+    let s = manifest_dir().join("scripts/lib/strih-snv-preflight.sh");
     assert!(s.exists(), "issue 1351: {} not found", s.display());
     s
 }
@@ -43,7 +43,7 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// Source strih-platform.sh (for `strih_platform`) THEN strih-lx-preflight.sh, run `body`, return
+/// Source strih-platform.sh (for `strih_platform`) THEN strih-snv-preflight.sh, run `body`, return
 /// the full Output (so a test can inspect stdout AND stderr — the banner writes to stderr).
 fn run_sourced(body: &str) -> Output {
     let harness = format!("set -uo pipefail\n. \"$PLATFORM\"\n. \"$SCRIPT\"\n{body}");
@@ -95,7 +95,7 @@ fn gate_prefix_honours_the_requested_seconds() {
 
 #[test]
 fn gate_prefix_respects_the_strih_platform_env_override() {
-    // STRIH_PLATFORM=windows must force the empty prefix even for the strih-lx IP (rollback hatch).
+    // STRIH_PLATFORM=windows must force the empty prefix even for the strih-snv IP (rollback hatch).
     let harness =
         "set -uo pipefail\n. \"$PLATFORM\"\n. \"$SCRIPT\"\nstrih_lx_gate_prefix 180 10.77.9.202";
     let out = Command::new("bash")
@@ -115,7 +115,7 @@ fn gate_prefix_respects_the_strih_platform_env_override() {
 }
 
 // ================================================================================================
-// strih_lx_preflight_timeout_banner — named `[0/8] strih-lx <label>` banner, ONLY on a timeout kill.
+// strih_lx_preflight_timeout_banner — named `[0/8] strih-snv <label>` banner, ONLY on a timeout kill.
 // ================================================================================================
 
 #[test]
@@ -124,8 +124,8 @@ fn banner_names_the_call_and_issue_on_a_timeout_kill() {
     assert!(out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("[0/8] strih-lx") && err.contains("DanteSync NTP+PTP gate") && err.contains("1351"),
-        "a timeout kill (rc 124) must emit a named `[0/8] strih-lx <label>` banner citing issue 1351. err={err:?}"
+        err.contains("[0/8] strih-snv") && err.contains("DanteSync NTP+PTP gate") && err.contains("1351"),
+        "a timeout kill (rc 124) must emit a named `[0/8] strih-snv <label>` banner citing issue 1351. err={err:?}"
     );
 }
 
@@ -136,7 +136,7 @@ fn banner_also_fires_on_a_sigkill_137() {
     assert!(out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("[0/8] strih-lx") && err.contains("dantesync version-parity gate"),
+        err.contains("[0/8] strih-snv") && err.contains("dantesync version-parity gate"),
         "a SIGKILL (rc 137) must ALSO emit the named banner (timeout --kill-after path). err={err:?}"
     );
 }
@@ -181,8 +181,8 @@ fn visibility_ws_roundtrip_is_timeout_bounded_1351() {
 fn recording_e2e_sources_the_new_preflight_lib_1351() {
     let body = read("scripts/recording-e2e.sh");
     assert!(
-        body.contains("lib/strih-lx-preflight.sh"),
-        "recording-e2e.sh must source scripts/lib/strih-lx-preflight.sh"
+        body.contains("lib/strih-snv-preflight.sh"),
+        "recording-e2e.sh must source scripts/lib/strih-snv-preflight.sh"
     );
 }
 
@@ -213,7 +213,7 @@ fn dantesync_ntp_gate_is_bounded_on_the_linux_strih_path_1351() {
     );
     assert!(
         window.contains("strih_lx_preflight_timeout_banner"),
-        "the DanteSync NTP+PTP gate must emit the named strih-lx banner on a timeout kill. Window:\n{window}"
+        "the DanteSync NTP+PTP gate must emit the named strih-snv banner on a timeout kill. Window:\n{window}"
     );
     // The gate is still invoked with its enforce env + win-http nodes (unchanged argv).
     assert!(
@@ -242,7 +242,7 @@ fn dantesync_version_parity_gate_is_bounded_on_the_linux_strih_path_1351() {
     );
     assert!(
         window.contains("strih_lx_preflight_timeout_banner"),
-        "the dantesync version-parity gate must emit the named strih-lx banner on a timeout kill. \
+        "the dantesync version-parity gate must emit the named strih-snv banner on a timeout kill. \
          Window:\n{window}"
     );
     // #1351: the argv now routes --win through the computed DV_WIN_NODES variable (strih is

@@ -1,6 +1,6 @@
 #!/bin/bash
 # verify-strih.sh (issue 1317) -- see the extended header below the strict-mode line.
-# strih-lx acceptance gate: RUN ON the box, read-only, fail loud on any missing item.
+# strih-snv acceptance gate: RUN ON the box, read-only, fail loud on any missing item.
 set -euo pipefail
 #
 # The imag verify-imag.sh pattern: pure decision predicates live in scripts/lib/strih-provision.sh
@@ -8,7 +8,7 @@ set -euo pipefail
 # into them and prints one PASS/FAIL line per acceptance item. Exit 0 = all clear, 1 = a gate item
 # failed. Latency pins are REPORT-ONLY (per-source latency is the operator's A/V-align domain).
 #
-# Usage (on the box):  ./verify-strih.sh [--box <name>]   (default box: strih-lx; issue 1361 -- the
+# Usage (on the box):  ./verify-strih.sh [--box <name>]   (default box: strih-snv; issue 1361 -- the
 #                      box's facts come from scripts/strih-boxes/<name>.env; a TODO_OWNER fact refuses)
 #                      [STRIH_LX_HOST / OBS_WS_HOST override the WS target]
 
@@ -37,6 +37,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/remoteos-mcp.sh"
 # shellcheck source=scripts/lib/obs-downstream-keyer.sh
 . "${HERE}/lib/obs-downstream-keyer.sh"
+# issue 1399: item 28's collection reads (moved out of this file, which sits at its line budget).
+# shellcheck source=scripts/lib/strih-obs-collection.sh
+. "${HERE}/lib/strih-obs-collection.sh"
 # issue 1317: the dantesync item grades a FRESH offset via the SHARED freshness-aware verdict (the
 # cambox verify-device (d) shape) instead of reading a Windows/imag dantesync JSON config file a
 # flag-based Linux client never creates. clock-offset-guard.sh has its own source-guard, so sourcing
@@ -49,6 +52,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || { echo "usage: verify-strih.sh [--box <name>]" >&2; exit 1; }
 strih_box_load "$STRIH_FACT_BOX" \
   || { echo -e "${RED}FAIL: box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above)${NC}" >&2; exit 1; }
+STRIH_FACT_BOX="$(strih_box_loaded_name)"   # issue 1414: an old box name loaded its renamed box
+obs_box_role_apply || { echo "verify-strih: the role / venue facts of box ${STRIH_FACT_BOX} could not be applied (issue 1412)" >&2; exit 1; }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live checks ----------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -145,20 +150,19 @@ fi
 # 3) OBS-WebSocket :4455.
 tcp_open "$WS_HOST" 4455 && ok "obs-websocket :4455 answering" || bad "obs-websocket :4455 not answering on ${WS_HOST}"
 
-# 4) NDI outputs namespaced STRIH-LX (...) (never a 2nd STRIH-SNV sender). Live enum via
+# 4) NDI outputs namespaced with the box's own prefix (STRIH-SNV (...) on strih-snv). Live enum via
 #    obs_phase2.py when present; fall back to the seed manifest (what the box will publish).
-if [ -f /opt/camera-box/strih-lx-seed.json ] && command -v python3 >/dev/null 2>&1; then
-  LIVE_OUTS="$(python3 -c 'import json,sys; d=json.load(open("/opt/camera-box/strih-lx-seed.json")); print("\n".join(d.get("outputs",[])))' 2>/dev/null || true)"
+if [ -f /opt/camera-box/strih-seed.json ] && command -v python3 >/dev/null 2>&1; then
+  LIVE_OUTS="$(python3 -c 'import json,sys; d=json.load(open("/opt/camera-box/strih-seed.json")); print("\n".join(d.get("outputs",[])))' 2>/dev/null || true)"
   if [ -n "$LIVE_OUTS" ]; then
     all_ns=1
     while IFS= read -r o; do [ -n "$o" ] || continue; strih_lx_output_name_ok "$o" || all_ns=0; done <<< "$LIVE_OUTS"
     [ "$all_ns" = 1 ] && ok "all declared NDI outputs are ${NDI_PREFIX_V}-namespaced" || bad "a declared NDI output is not ${NDI_PREFIX_V}-namespaced"
-    printf '%s\n' "$LIVE_OUTS" | strih_lx_no_second_strihsnv_sender && ok "no 2nd STRIH-SNV sender in the output set" || bad "a STRIH-SNV sender is present (collision with the Windows PC)"
   else
-    note "no outputs in strih-lx-seed.json to check"
+    note "no outputs in strih-seed.json to check"
   fi
 else
-  note "strih-lx-seed.json / python3 absent -- run setup-strih.sh step 6 first"
+  note "strih-seed.json / python3 absent -- run setup-strih.sh step 6 first"
 fi
 
 # 4b) seeded NDI INPUTS present as genlock_fifo sources (issue 1317) -- REPORT-ONLY. Runs the seeder's
@@ -183,15 +187,11 @@ else
   note "strih_scenes.py / python3 absent -- run setup-strih.sh step 6 first (seed-input parity report skipped)"
 fi
 
-# 4c) issue 1346 (owner 24.9.2026): the fixed HDMI output = the in-OBS DRM-lease output (issue 1152),
-#     selectable Program / built-in Multiview -- never a projector window, never the desktop. SKIP
-#     when no HDMI monitor is connected (the kernel connector status for a lease box; the X RandR
-#     view for a vk-direct box, whose NVIDIA connector reads `disconnected` in sysfs -- main design
-#     5840508308).
-#     With one plugged in: ~/.camera-box/drm-output.json must arm the lease (classified by the ONE
-#     Python grammar in strih_scenes.py, the C module's own contract) and the newest OBS log must
-#     reach `drm-output: program scanout LIVE` -- plus `drm-output: multiview bind LIVE` for the
-#     multiview view. The pure verdict is strih_drm_output_verdict (scripts/lib/strih-drm-output.sh).
+# 4c) issue 1346: the fixed HDMI output = the in-OBS DRM output, Program / built-in Multiview. SKIP with
+#     no HDMI monitor (kernel status for lease, X RandR for vk-direct, design 5840508308). Armed: the
+#     config (the ONE strih_scenes grammar) + `program scanout LIVE` (+ `multiview bind LIVE`) in the
+#     newest OBS log. issue 1424 part 2: an "outputs" array is graded per output by the lib (all helpers:
+#     scripts/lib/strih-drm-output.sh).
 DRM_CONF_V="${USER_HOME}/.camera-box/drm-output.json"
 DRM_BACKEND_FACT="$(strih_lx_hdmi_output_backend 2>/dev/null || echo "?")"
 DRM_XRANDR_V=""
@@ -232,8 +232,13 @@ if [ -n "$DRM_LOG" ] && strih_drm_vk_present_dead < "$DRM_LOG"; then
   DRM_VK_DEAD=1
 fi
 DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" "$DRM_BACKEND_V" "$DRM_BACKEND_FACT" "$DRM_VK_DEAD" || true)"
+[ "$DRM_BACKEND_FACT" != none ] || DRM_VERDICT=skip-no-output   # issue 1412: a stream box has no fixed HDMI output
+if strih_drm_outputs_verify_dispatch "$DRM_VERDICT" "$USER_HOME" "$SCN_BIN" "$DRM_CONF_V" "$DRM_LOG" \
+     "$DRM_BACKEND_FACT" "$DRM_XRANDR_V"; then DRM_VERDICT=per-output; fi
 case "$DRM_VERDICT" in
-  ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
+  per-output)         ;;  # issue 1424 part 2: graded per output just above
+  skip-no-output)     note "HDMI output: not graded -- STRIH_HDMI_OUTPUT_BACKEND=none (this box has no fixed HDMI output)" ;;
+  ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)"; drm_output_audio_verify_report "$USER_HOME" "${USER_HOME##*/}" "$DRM_LOG" "" "" "$DRM_VIEW_V" ;;  # issue 1424
   x-unreadable)       bad  "HDMI output: the box fact is vk-direct, which detects the HDMI monitor through X RandR, but xrandr on :0 answered nothing (Xorg down, or ${USER_HOME}/.Xauthority unreadable for $(id -un)) -- cannot grade the HDMI output" ;;
   skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
   hdmi-unplugged)     note "HDMI output: ${DRM_ARMED} is armed in ${DRM_CONF_V} but no HDMI monitor is connected (report-only)" ;;
@@ -252,10 +257,10 @@ esac
 if grep -qi '^SaveProjectors=true' "$(dirname "$OBS_LOG_DIR")/user.ini" 2>/dev/null; then
   ok "laptop projector persistence: SaveProjectors=true pre-seeded in user.ini"
 else
-  note "laptop projector persistence: SaveProjectors=true NOT pre-seeded in user.ini (re-run setup-strih.sh step 7)"
+  note "laptop projector persistence: SaveProjectors=true NOT pre-seeded in user.ini (re-run setup-strih.sh step 16g)"
 fi
 
-# 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-lx key) -- REPORT-ONLY.
+# 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-snv key) -- REPORT-ONLY.
 BASELINE="${HERE}/latency-pins-baseline.json"
 if command -v python3 >/dev/null 2>&1 && [ -f "$BASELINE" ]; then
   PIN_BOX_V="$(strih_lx_hostname)"
@@ -272,7 +277,7 @@ fi
 #    offset with the PTP servo LOCKED is disciplined near-zero (the #550 reasoning) -> PASS; not
 #    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 refuses an ambiguous
 #    role+args shape (strih_lx_dantesync_role_ok) at install time; the role itself is graded in 6b.
-#    Issue 1372: strih-lx is the fleet DATE master, whose `(date authority, ..., step bound Nus)`
+#    Issue 1372: strih-snv is the fleet DATE master, whose `(date authority, ..., step bound Nus)`
 #    journal line is graded through the shared dantesync_journal_clock_verdict
 #    (clock-offset-guard.sh) by the capability its OWN :8898/status reports: a micro-capable
 #    dantesync 1.11.x master on the micro bound + margin and its falling_behind/paused flags; a
@@ -359,7 +364,7 @@ AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/nul
 if systemctl is-active intercom-hub >/dev/null 2>&1; then
   # hub active (M4+): grade the real program-feed rx off the hub /api/state.
   if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
-       | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="fohabl" and p.get("rx_packets",0)>0 for p in d.get("participants",[])) else 1)'; then
+       | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
     AUDIO_RX=1
   else
     AUDIO_RX=0
@@ -375,7 +380,7 @@ case "$AUDIO_VERDICT" in
   NOTE*) note "program audio: $AUDIO_VERDICT" ;;
   *)     bad  "program audio: $AUDIO_VERDICT" ;;
 esac
-# talkback capture (report-only): the MiniFuse 4 is the operator talkback mic (the hub reads it).
+strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs; then the MiniFuse talkback (report-only)
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 
 # 9b) MiniFuse period + graph quantum (issue 1345, owner accepted 25.9.2026): both operator-session
@@ -408,8 +413,11 @@ else
   note "(audio-quantum) ${Q_DETAIL} -- report-only; restart the operator PipeWire session (or reboot) so the min-quantum drop-in applies"
 fi
 
+strih_home_ownership_grade "$USER_HOME"   # issue 1412: a root-owned ~/.config level crash-loops the desktop apps
 # 10) NVENC encoder available.
-{ ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"
+if WHY="$(obs_box_step_applies 3-nvenc)"; then   # issue 1412: the stream role grades its own encoder
+{ ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"; obs_box_strih_profile_grade "${USER_HOME}/.config/obs-studio/basic/profiles/$(strih_lx_obs_profile)"
+else obs_box_stream_encoder_grade "${USER_HOME}/.config/obs-studio/basic/profiles/$(strih_lx_obs_profile)"; obs_box_stream_dev_grade "$HERE"; obs_box_stream_restreamer_host_grade; fi
 
 # 12) single timesync authority (dantesync only).
 UNITS="$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')"
@@ -484,16 +492,17 @@ else
   bad "bundle release parity FAILED: ${FLAGS_FILE} must carry 'TARGET-RELEASE: ubuntu-${BOX_VERSION_ID}' (box VERSION_ID=${BOX_VERSION_ID}); a bundle built for another release must never run here"
 fi
 
-# 16) intercom hub unit (issue 1345 M1): the strih-lx intercom hub is installed ENABLE-ONLY while the
-#     Windows VB-Matrix stays the live intercom (M4 is the cut-over). REPORT-ONLY: an installed +
-#     enabled but NOT active unit is the CORRECT parallel-run state, never a FAIL.
+# 16) intercom hub unit (issue 1345): inactive/disabled FAILs on the strih role (issue 1418), a crash loop on every role (issue 1412).
 if [ -f /etc/systemd/system/intercom-hub.service ]; then
-  IH_EN="$(systemctl is-enabled intercom-hub 2>/dev/null || echo unknown)"
-  IH_ACT="$(systemctl is-active intercom-hub 2>/dev/null || echo inactive)"
-  note "intercom-hub.service installed (enabled=${IH_EN}, active=${IH_ACT}); enable-only until the M4 cut-over (issue 1345) -- report-only, an inactive unit is correct while parallel"
-else
-  note "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1345 M1); report-only"
-fi
+  IH_EN="$(systemctl is-enabled intercom-hub 2>/dev/null || true)"
+  IH_ACT="$(systemctl is-active intercom-hub 2>/dev/null || true)"
+  if IH_LOOP="$(strih_intercom_hub_crash_loop)"; then bad "intercom-hub.service ${IH_LOOP} -- journalctl -u intercom-hub names the cause (issue 1412)"
+  elif [ "${IH_EN}/${IH_ACT}" = enabled/active ]; then ok "intercom-hub.service enabled + active"
+  elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service enabled=${IH_EN:-unknown} active=${IH_ACT:-unknown} -- the interkom is down (issue 1418): systemctl enable --now intercom-hub; journalctl -u intercom-hub"
+  else note "intercom-hub.service installed (enabled=${IH_EN:-unknown}, active=${IH_ACT:-unknown}) -- ${WHY}"; fi
+  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d   # issue 1412: the role drop-in
+elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1418: the interkom runs on it)"
+else note "intercom-hub.service not installed -- ${WHY}"; fi
 
 # 17) Janus audiobridge audio edge (issue 1345 M3a) -- REPORT-ONLY. Janus is installed ENABLE-ONLY
 #     while the phones leg is not yet cut over (the M4 cut-over starts it with the hub), so an
@@ -532,16 +541,17 @@ else
   note "janus audiobridge jcfg absent (${JANUS_AB}) -- run setup-strih.sh step 14; report-only"
 fi
 
-# 19) Bitfocus Companion Satellite installed + desktop udev rule + kiosk launch + controller
+# 19) Bitfocus Companion Satellite installed + desktop udev rule + kiosk start + controller
 #     host seeded (issue 1317 rework -- the (companion) item, DESKTOP tarball model). /opt binary +
-#     /etc/udev/rules.d/50-satellite-desktop.rules + the openbox autostart launch line (issue 1357:
-#     the kiosk launches it; openbox runs no XDG ~/.config/autostart) + the seeded app
+#     /etc/udev/rules.d/50-satellite-desktop.rules + the openbox autostart line that starts
+#     companion-satellite.service (issue 1399; the unit itself is graded by item 39) + the seeded app
 #     config.json's remoteIp == the controller (strih_companion_verdict, fail-closed). FAIL loud on
 #     any missing part.
+if WHY="$(obs_box_step_applies 16)"; then   # issue 1412
 CS_INSTALLED=0; [ -x "$(strih_companion_satellite_bin)" ] && CS_INSTALLED=1
 CS_UDEV_OK=0; [ -f "$(strih_companion_satellite_udev_rule)" ] && CS_UDEV_OK=1
 CS_AUTOSTART="${USER_HOME}/.config/openbox/autostart"
-CS_AUTOSTART_OK=0; grep -qxF "$(strih_companion_satellite_openbox_line)" "$CS_AUTOSTART" 2>/dev/null && CS_AUTOSTART_OK=1
+CS_AUTOSTART_OK=0; grep -qxF "$(strih_session_app_autostart_line "$STRIH_COMPANION_SATELLITE_UNIT")" "$CS_AUTOSTART" 2>/dev/null && CS_AUTOSTART_OK=1
 CS_HOST_OK=0
 CS_APPCFG="${COMPANION_SATELLITE_CONF:-${USER_HOME}/.config/Companion Satellite/config.json}"
 # Exact JSON read-back (never a regex whose dots would wildcard the IP); fail-closed on unreadable.
@@ -569,11 +579,12 @@ except Exception:
 fi
 CS_VERDICT="$(strih_companion_status_verdict "$CS_FILE_VERDICT" "$CS_RUNNING" "$CS_CONNECTED" || true)"
 if strih_companion_status_verdict "$CS_FILE_VERDICT" "$CS_RUNNING" "$CS_CONNECTED" >/dev/null 2>&1; then
-  ok "(companion) Companion Satellite ${CS_VERDICT} -- /opt + desktop udev rule + openbox autostart launch + controller $(strih_companion_satellite_host) (REST running=${CS_RUNNING} connected=${CS_CONNECTED})"
+  ok "(companion) Companion Satellite ${CS_VERDICT} -- /opt + desktop udev rule + openbox autostart start + controller $(strih_companion_satellite_host) (REST running=${CS_RUNNING} connected=${CS_CONNECTED})"
 else
   bad "(companion) Companion Satellite gate: ${CS_VERDICT} (bin=${CS_INSTALLED} udev=${CS_UDEV_OK} autostart=${CS_AUTOSTART_OK} host=${CS_HOST_OK} running=${CS_RUNNING} connected=${CS_CONNECTED}) -- re-run setup-strih.sh step 16"
 fi
 
+else note "(companion) not graded: ${WHY}"; fi
 # 20) OBS helper binaries beside /usr/bin/obs (issue 1317, live 20.9.2026): OBS resolves its helper
 #     processes -- obs-ffmpeg-mux (the recording muxer) + obs-nvenc-test (the NVENC probe) -- NEXT TO
 #     ITS OWN EXECUTABLE, so the prefix install must place them in /usr/bin. Missing = a broken record
@@ -587,14 +598,16 @@ if [ "$OBSH_VERDICT" = ok ]; then
 else
   bad "(obs-helpers) ${OBSH_VERDICT} beside /usr/bin/obs (mux=${CS_MUX_OK} nvenc-test=${CS_NVT_OK}) -- the prefix install must copy the WHOLE bundle bin/ (re-run setup-strih.sh step 4)"
 fi
+strih_bundle_exec_grade "$STRIH_LIBDIR" "$({ [ -f "$FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$FLAGS_FILE")"; } && echo 1 || echo 0)"   # issue 1412
 OBS_LOG_DIR="${USER_HOME}/.config/obs-studio/logs"
 NEWEST_OBS_LOG="$(ls -1t "${OBS_LOG_DIR}"/*.txt 2>/dev/null | head -1 || true)"
 if [ -n "$NEWEST_OBS_LOG" ] && [ -r "$NEWEST_OBS_LOG" ]; then
   NVENC_VERDICT="$(strih_nvenc_log_verdict < "$NEWEST_OBS_LOG" || true)"
-  case "$NVENC_VERDICT" in
-    nvenc-ok)          note "(obs-helpers) NVENC live: the newest OBS log carries '[obs-nvenc] NVENC version:'" ;;
-    nvenc-unsupported) bad  "(obs-helpers) the newest OBS log says 'NVENC not supported' with no version line -- obs-nvenc-test missing/broken (re-run setup-strih.sh step 4, then restart OBS)" ;;
-    *)                 note "(obs-helpers) NVENC state unknown from the OBS log (OBS not running or no NVENC line yet)" ;;
+  NVENC_DGPU=0; if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then NVENC_DGPU=1; fi
+  NVENC_GRADE="$(strih_nvenc_grade "$NVENC_VERDICT" "$NVENC_DGPU")"
+  case "${NVENC_GRADE%%|*}" in
+    bad) bad  "(obs-helpers) ${NVENC_GRADE#*|}" ;;
+    *)   note "(obs-helpers) ${NVENC_GRADE#*|}" ;;
   esac
 else
   note "(obs-helpers) no OBS log to read the live NVENC state (OBS not running -- report-only)"
@@ -651,15 +664,17 @@ command -v avahi-browse >/dev/null 2>&1 \
 
 # 25) DistroAV [NDIPlugin] output identity in user.ini (issue 1352): the BARE names
 #     MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + both Enabled=true (DistroAV prepends the
-#     hostname -> announced STRIH-LX (2ME PGM)/(2ME PVW); a namespaced name here would double it).
+#     hostname -> announced STRIH-SNV (2ME PGM)/(2ME PVW); a namespaced name here would double it).
 #     FAIL loud.
 NDI_USER_INI="${USER_HOME}/.config/obs-studio/user.ini"
 NDI_INI_MISSING=""
-for _kv in 'MainOutputName=2ME PGM' 'PreviewOutputName=2ME PVW' 'MainOutputEnabled=true' 'PreviewOutputEnabled=true'; do
+mapfile -t NDI_KVS < <(obs_box_ndi_output_kvs)   # issue 1412: the role's set (strih: MainOutputName=2ME PGM / PreviewOutputName=2ME PVW)
+[ "${#NDI_KVS[@]}" -gt 0 ] || NDI_INI_MISSING=" [obs_box_ndi_output_kvs printed nothing]"
+for _kv in "${NDI_KVS[@]}"; do
   grep -qF "$_kv" "$NDI_USER_INI" 2>/dev/null || NDI_INI_MISSING="${NDI_INI_MISSING} [${_kv}]"
 done
 if [ -z "$NDI_INI_MISSING" ]; then
-  ok "(ndi-outputs) user.ini [NDIPlugin] MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + Enabled=true"
+  ok "(ndi-outputs) user.ini [NDIPlugin] ${NDI_KVS[*]}"
 else
   bad "(ndi-outputs) ${NDI_USER_INI} missing DistroAV output identity:${NDI_INI_MISSING} -- re-run setup-strih.sh step 7"
 fi
@@ -697,48 +712,9 @@ fi
 #     entries in the ACTIVE collection JSON via the pure strih_collection_hygiene_verdict; NOTE only --
 #     provisioning NEVER rewrites the owner's collection, it only reports (a re-import re-introduces the
 #     boot popups this bake-in warns about).
-OBS_BASE="${USER_HOME}/.config/obs-studio"
-COLL_NAME="$(sed -n 's/^SceneCollectionFile=//p' "${OBS_BASE}/global.ini" 2>/dev/null | head -1 || true)"
-COLL_JSON=""
-if [ -n "$COLL_NAME" ] && [ -f "${OBS_BASE}/basic/scenes/${COLL_NAME}.json" ]; then
-  COLL_JSON="${OBS_BASE}/basic/scenes/${COLL_NAME}.json"
-else
-  # Fallback: newest *.json (the `*.json` glob already excludes the `*.json.bak*` backups). No ls|grep.
-  for _cj in "${OBS_BASE}/basic/scenes/"*.json; do
-    [ -e "$_cj" ] || continue
-    if [ -z "$COLL_JSON" ] || [ "$_cj" -nt "$COLL_JSON" ]; then COLL_JSON="$_cj"; fi
-  done
-fi
+COLL_JSON="$(strih_active_collection_json "${USER_HOME}/.config/obs-studio")"
 if [ -n "$COLL_JSON" ] && command -v python3 >/dev/null 2>&1; then
-  HYG_COUNTS="$(python3 - "$COLL_JSON" <<'PYHY' 2>/dev/null || true
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)   # print nothing -> caller NOTEs "could not parse"
-def count_id(o, val):
-    n = 0
-    if isinstance(o, dict):
-        if o.get("id") == val:
-            n += 1
-        for v in o.values():
-            n += count_id(v, val)
-    elif isinstance(o, list):
-        for v in o:
-            n += count_id(v, val)
-    return n
-shader = count_id(d, "shader_filter")
-lua = 0
-mods = d.get("modules", {}) if isinstance(d, dict) else {}
-st = mods.get("scripts-tool") if isinstance(mods, dict) else None
-if isinstance(st, list):
-    lua = len(st)
-elif isinstance(st, dict):
-    inner = st.get("scripts")
-    lua = len(inner) if isinstance(inner, list) else (1 if st else 0)
-print("%d %d" % (shader, lua))
-PYHY
-)"
+  HYG_COUNTS="$(strih_collection_hygiene_counts "$COLL_JSON")"
   if [ -n "$HYG_COUNTS" ]; then
     # HYG_COUNTS is "SHADER LUA" -- word-split into the two args on purpose.
     # shellcheck disable=SC2086
@@ -840,6 +816,7 @@ fi
 #     the :8770 listener OWNER must be the bkshading binary (the rule's "confirm the listener's owner"
 #     check via ss -tlnp) AND /api/version must answer (the SERVICE's route -- /api/state is the
 #     relay's / intercom hub's endpoint, :8770/api/state is 404), else the service is broken (FAIL loud).
+if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412
 BKSH_PORT="${BKSHADING_SERVICE_PORT:-8770}"
 if [ -f /etc/systemd/system/bkshading-service.service ]; then
   BKSH_EN="$(systemctl is-enabled bkshading-service 2>/dev/null || echo unknown)"
@@ -861,52 +838,74 @@ else
   bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
 fi
 
+else note "(bkshading-service) not graded: ${WHY}"; fi
+# 37)-40) issue 1399 session apps (scripts/lib/strih-session-apps.sh, sourced by strih-provision.sh): the
+#     browser-source keeper (unit + its last pass), the shading panel window (unit + "Shading" on :0),
+#     Companion Satellite (unit + the /opt binary as its main process) and its watch (timer + last pass).
+strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session-apps) the grader did not print all of its rows"
+
+# 41) issue 1404 stream program-audio sampler (scripts/lib/strih-program-audio.sh, its header: the rows).
+if WHY="$(obs_box_step_applies 16e)"; then   # issue 1412: only a box that runs the sampler grades it
+  strih_program_audio_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(program-audio) the grader did not print all of its rows"
+else note "(program-audio) not graded: ${WHY}"; fi
+# 42) issue 1417 camera tally (scripts/lib/strih-tally.sh): units, :9240 /state, atemrpi.local, OBS program.
+if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.." "${STRIH_LX_USER:-newlevel}" || bad "(tally) the grader did not print all of its rows"
+else note "(tally) not graded: ${WHY}"; fi
+# 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 14 rows) + 44) issue 1420 kiosk panel (scripts/lib/obs-box-panel.sh).
+strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"
+# 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh, its header: nginx + each name's cert + the upstreams + renewal).
+if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; else note "(https) not graded: ${WHY}"; fi
+
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
 #     that IRQ's /proc/interrupts counter must be ADVANCING over a live 2-s window (NEVER a static
 #     file check -- a smp_affinity_list read alone is a lying gate). Read-only, drain-safe, fail loud.
-IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"
-IRQ_IFACE="${STRIH_NIC_IFACE:-}"
-if [ -z "$IRQ_IFACE" ]; then
-  # driver-first (the box's STRIH_NIC_DRIVER fact -- strih-lx: the r8152 USB NIC), then fall back to
-  # the address match; MULTI -> NOTE + no iface.
-  IRQ_DRV="$(strih_nic_iface_by_driver /sys "$(strih_lx_nic_driver)" 2>/dev/null || true)"
-  case "$IRQ_DRV" in
-    MULTI:*) note "  multiple $(strih_lx_nic_driver) NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
-    "")      IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
-    *)       IRQ_IFACE="$IRQ_DRV" ;;
-  esac
-fi
-IRQ_PCIFN=""; [ -n "$IRQ_IFACE" ] && IRQ_PCIFN="$(strih_nic_xhci_pci_function /sys "$IRQ_IFACE" 2>/dev/null || true)"
-IRQ_NUMS="";  [ -n "$IRQ_PCIFN" ] && IRQ_NUMS="$(strih_nic_xhci_irqs /proc/interrupts "$IRQ_PCIFN" 2>/dev/null || true)"
-if [ -z "$IRQ_IFACE" ] || [ -z "$IRQ_PCIFN" ] || [ -z "$IRQ_NUMS" ]; then
-  bad "NIC xhci IRQ affinity: could not resolve the xhci IRQ (iface='${IRQ_IFACE}' pcifn='${IRQ_PCIFN}' irqs='${IRQ_NUMS}')"
-else
-  ATOM_FIRST="$(strih_cpulist_min "$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)" 2>/dev/null || true)"
-  # On this hybrid box cpu_atom is a stable kernel file; if it is unreadable the verdict skips the
-  # E-core floor (>= first cpu_atom) and enforces only single-cpu placement -- surface that so a
-  # low-P-core pin can't read "ok" silently on a transient cpu_atom read failure.
-  [ -n "$ATOM_FIRST" ] || note "  cpu_atom unreadable -- E-core floor check skipped (single-cpu placement still enforced)"
-  irq_all_ok=1
-  for irqn in $IRQ_NUMS; do
-    AFF="$(cat "/proc/irq/${irqn}/smp_affinity_list" 2>/dev/null || true)"
-    VERD="$(strih_nic_irq_affinity_verdict "$AFF" "$ATOM_FIRST" 2>/dev/null || true)"
-    C1="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
-    sleep 2
-    C2="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
-    ADV=no; strih_counter_advanced "$C1" "$C2" && ADV=yes || true
-    if [ "$VERD" = ok ] && [ "$ADV" = yes ]; then
-      : # this IRQ passes both the single-E-core placement and the advancing-counter liveness
-    else
-      irq_all_ok=0
-      note "  IRQ ${irqn}: affinity='${AFF}' verdict=${VERD} advancing=${ADV} (want a single cpu >= ${ATOM_FIRST}, advancing)"
-    fi
-  done
-  if [ "$irq_all_ok" = 1 ]; then
-    ok "NIC xhci IRQ(s) [${IRQ_NUMS}] pinned to a single E-core (>= cpu ${ATOM_FIRST}) and advancing (iface ${IRQ_IFACE})"
-  else
-    bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
+if WHY="$(obs_box_step_applies 11b)"; then   # issue 1412: a PCIe rig NIC has no xhci IRQ to grade
+  IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"
+  IRQ_IFACE="${STRIH_NIC_IFACE:-}"
+  if [ -z "$IRQ_IFACE" ]; then
+    # driver-first (the box's STRIH_NIC_DRIVER fact -- a USB rig NIC, e.g. r8152), then fall back to
+    # the address match; MULTI -> NOTE + no iface.
+    IRQ_DRV="$(strih_nic_iface_by_driver /sys "$(strih_lx_nic_driver)" 2>/dev/null || true)"
+    case "$IRQ_DRV" in
+      MULTI:*) note "  multiple $(strih_lx_nic_driver) NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
+      "")      IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
+      *)       IRQ_IFACE="$IRQ_DRV" ;;
+    esac
   fi
+  IRQ_PCIFN=""; [ -n "$IRQ_IFACE" ] && IRQ_PCIFN="$(strih_nic_xhci_pci_function /sys "$IRQ_IFACE" 2>/dev/null || true)"
+  IRQ_NUMS="";  [ -n "$IRQ_PCIFN" ] && IRQ_NUMS="$(strih_nic_xhci_irqs /proc/interrupts "$IRQ_PCIFN" 2>/dev/null || true)"
+  if [ -z "$IRQ_IFACE" ] || [ -z "$IRQ_PCIFN" ] || [ -z "$IRQ_NUMS" ]; then
+    bad "NIC xhci IRQ affinity: could not resolve the xhci IRQ (iface='${IRQ_IFACE}' pcifn='${IRQ_PCIFN}' irqs='${IRQ_NUMS}')"
+  else
+    ATOM_FIRST="$(strih_cpulist_min "$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)" 2>/dev/null || true)"
+    # On this hybrid box cpu_atom is a stable kernel file; if it is unreadable the verdict skips the
+    # E-core floor (>= first cpu_atom) and enforces only single-cpu placement -- surface that so a
+    # low-P-core pin can't read "ok" silently on a transient cpu_atom read failure.
+    [ -n "$ATOM_FIRST" ] || note "  cpu_atom unreadable -- E-core floor check skipped (single-cpu placement still enforced)"
+    irq_all_ok=1
+    for irqn in $IRQ_NUMS; do
+      AFF="$(cat "/proc/irq/${irqn}/smp_affinity_list" 2>/dev/null || true)"
+      VERD="$(strih_nic_irq_affinity_verdict "$AFF" "$ATOM_FIRST" 2>/dev/null || true)"
+      C1="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
+      sleep 2
+      C2="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
+      ADV=no; strih_counter_advanced "$C1" "$C2" && ADV=yes || true
+      if [ "$VERD" = ok ] && [ "$ADV" = yes ]; then
+        : # this IRQ passes both the single-E-core placement and the advancing-counter liveness
+      else
+        irq_all_ok=0
+        note "  IRQ ${irqn}: affinity='${AFF}' verdict=${VERD} advancing=${ADV} (want a single cpu >= ${ATOM_FIRST}, advancing)"
+      fi
+    done
+    if [ "$irq_all_ok" = 1 ]; then
+      ok "NIC xhci IRQ(s) [${IRQ_NUMS}] pinned to a single E-core (>= cpu ${ATOM_FIRST}) and advancing (iface ${IRQ_IFACE})"
+    else
+      bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
+    fi
+  fi
+else
+  note "NIC xhci IRQ affinity not graded: ${WHY}"
 fi
 
 # 36) rig NIC driver version, USB Gen 2 link, 5G link, NM pinning vs the box facts (issue 1391, strih-nic-driver.sh).
@@ -914,7 +913,7 @@ strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "
 
 # 35) Downstream Keyer OBS plugin (issue 1361): setup-strih.sh step 4c installs the pinned upstream
 #     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the
-#     exact file strih-lx ran by hand before) and its locale is present. Placed BEFORE item 34: the
+#     exact file strih-snv ran by hand before) and its locale is present. Placed BEFORE item 34: the
 #     item-34 behaviour test runs the text from "# 34)" up to "# 32)" with only ndi-discovery.sh
 #     sourced; the baseline item 32 (which also grades rtprio-off, the retired item 33) closes the list.
 _dsk_so="$(obs_dsk_so_path "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}")"
@@ -930,7 +929,7 @@ fi
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
 #     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with --
-#     strih-lx/stream; the traveling resolume hostname is best-effort, never required), lists NO cambox
+#     strih-snv/stream; the traveling resolume hostname is best-effort, never required), lists NO cambox
 #     IP (issue 1389: this OBS's discovery connection into a cambox aborts camera-box when OBS exits)
 #     and carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
 #     bkshading-service) and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) --
@@ -982,7 +981,7 @@ while IFS='|' read -r _bl_item _bl_state _bl_detail; do
   if [ "$_bl_state" = OK ]; then
     ok "(baseline:${_bl_item}) ${_bl_detail}"
   else
-    bad "(baseline:${_bl_item}) ${_bl_detail} -- re-run setup-strih.sh step 11 (the shared OBS-box baseline) and reboot"
+    bad "(baseline:${_bl_item}) ${_bl_detail} -- re-run setup-strih.sh step $([ "$_bl_item" = timezone ] && echo 1 || echo 11) (the shared OBS-box baseline) and reboot"
   fi
 done < <(obs_box_baseline_verdict <<<"$BASELINE_FACTS" || true)
 CRASH_DIR_V="${STRIH_CRASH_DIR:-/var/crash}"
@@ -991,9 +990,7 @@ if [ "$CRASH_REPORTS_V" != 0 ]; then
   note "(crash-popup) ${CRASH_REPORTS_V} stale crash report(s) in ${CRASH_DIR_V} -- update-notifier re-raises the popup for them at login; inspect (coredumpctl list) and clear them (supervisor data action)"
 fi
 
-# (item 33, the strih-only rtprio-off check, moved into the shared grader as the baseline `rtprio`
-#  row graded by item 32 above -- issue 1357.)
-
+# (item 33, the strih-only rtprio-off check, is the baseline `rtprio` row of item 32 now -- issue 1357.)
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0

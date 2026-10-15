@@ -26,6 +26,8 @@ A SINGLE run's slowest-box verdict is unstable (transient grabber DQBUF stalls /
 noisy middle), so task 2 picks the target box from MANY runs — and re-runs this after every
 reduction attempt. `--multi` folds several runs (REUSING the same per-run `decompose()` via
 `mine_run_dir`, never a new parser):
+(dev1 keeps only the newest 9 run dirs since issue 1395; to mine more, see the
+`scripts/lib/e2e-rundir-retention.sh` header.)
 
 ```
 python3 scripts/arrival_floor_decompose.py --multi --runs-glob '/tmp/recording-e2e-*' \

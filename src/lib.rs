@@ -31,6 +31,8 @@ pub mod ndi;
 pub mod genlock_pacing;
 // #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Linux-gated because it reuses
 // the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
+// Issue 1372: it also holds the capture loop's mono->realtime stamp offset (`StampOffset`), re-sampled
+// in the frame the wall clock steps.
 #[cfg(target_os = "linux")]
 pub mod genlock_stamp;
 // (#889) dupe-preferring decimation for the genlock capture->emit gate — a fast/over-rate
@@ -46,7 +48,7 @@ pub mod vban;
 
 // #1345 M1b — the pure appliance-side intercom-target env override (`resolve_intercom_target`).
 // The dev cambox root fs is read-only, so `config.toml` can't be edited to repoint the VBAN
-// intercom at the Linux strih-lx hub; a `CAMERA_BOX_INTERCOM_TARGET` env override (carried by a
+// intercom at the Linux strih-snv hub; a `CAMERA_BOX_INTERCOM_TARGET` env override (carried by a
 // /run systemd drop-in) is the only seam. No I/O — the caller passes the raw env value in — so it
 // unit-tests Tier-0; cross-platform (un-gated) like `vban`.
 pub mod intercom_target;
@@ -137,6 +139,12 @@ pub mod colour_verify;
 // and stays green while render chokes (the 2026-07-02 60→27fps burn regression). No probe deps,
 // so it unit-tests Tier-0; the rig E2E (recording-e2e.sh live OBS WS GetStats) calls it to gate.
 pub mod render_budget;
+
+// issue 1424 — the Rust twin of the vendored libobs header `obs-drm-output-audio-match.h`: which
+// ALSA hw PCM carries the fixed HDMI output's own connector (EDID vs per-PCM ELD), its IEC958 switch, and
+// how one program-mix block is placed against the picture. Pure, so it unit-tests Tier-0;
+// `tests/drm_output_audio_1424.rs` compiles the C header and requires the same answers.
+pub mod drm_output_audio_match;
 
 // #373 — the zero-loss HEADLINE analyzed-span duration gate (pure decision). A collapsed/partial
 // cam2 optical read must not vacuously pass the headline over a handful of frames. No probe deps,
@@ -322,6 +330,19 @@ pub mod switch_in_transient;
 // deliverable 4 wires the ±20ms bound on top of this).
 pub mod av_window;
 
+// issue 1404 Task 5 part b — `recording-verdict --av-sync --av-run <run>`: the A/V of a SELF-MARKED
+// run (the camera-box measurement clip, 911016) paired through its OWN dual-QR tick and its own
+// marker in the same recording, instead of the cam2 painter's tick. The pure tick source (the
+// selected run's per-frame tick + the restart refusal); the probe glue
+// (`probe::av_sync_recording`) decodes and pairs through the same calls as the painter path.
+pub mod av_run_pairing;
+
+// issue 1404 (the CI timeout of the probe CLI test) — what the `--av-sync` video decode asks the
+// #207 fast-path gate for: `--av-run <run>` exactly its own dual-QR (no node burn it cannot
+// carry), the painter path today's cam1/strih/stream set after a cheap head that stops a recording
+// with neither a cam2 tick nor a rig burn. Pure, so it unit-tests Tier-0.
+pub mod av_sync_decode_plan;
+
 // #656 — capture-delivery-rate sanity check (pure decision, prevention item 1). Given the
 // periodic captured-fps sample the appliance's own capture loop already computes, decides
 // whether the box's capture device has silently drifted off its negotiated rate for enough
@@ -412,7 +433,7 @@ pub mod genlock_grid;
 pub mod genlock_render_tick_pin;
 
 // #1355 part 2 — the grid-drift bench: the deep N==1 stream `NDI 2ME PGM` FIFO fed by the
-// strih-lx sender, simulated tick by tick with the production decision functions under the
+// strih-snv sender, simulated tick by tick with the production decision functions under the
 // measured rig statistics; reproduces the live 31/32 depth flip on the 1970 grid and proves the
 // per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
 pub mod genlock_grid_bench;
@@ -426,7 +447,7 @@ pub mod genlock_grid_bench;
 pub mod genlock_n2_grid;
 
 // Issue 1367 slice D1 — the 60-into-30 two-clock bench of the grid-exact N>=2 conveyor: seven
-// cameras with the arrival lag measured on strih-lx 28.9.2026, random receiver restarts; every
+// cameras with the arrival lag measured on strih-snv 28.9.2026, random receiver restarts; every
 // camera presents the same frame on every restart. Test-only.
 #[cfg(test)]
 mod genlock_n2_grid_bench;
@@ -475,6 +496,22 @@ pub mod genlock_audio_buffering;
 #[cfg(test)]
 mod genlock_wall_step_bench;
 
+// Issue 1372 part B — the genlock receive FIFO relabels its OLD-EPOCH frames by the booked wall step
+// (queued at the booking, late arrivals while the sender has not stepped, one latency window at
+// most), so the nightly dantesync fleet date step costs no frame on an input whose sender's stamps
+// follow its own step (a cambox's stamps follow within one frame: `genlock_stamp::StampOffset`). A booking
+// reaches only a source that was releasing at the step. Crate-root + std-only (Tier-0); the C twin
+// `vendor/obs-studio/libobs/obs-genlock-fifo-relabel.h` is held identical by the committed parity
+// gate `tests/genlock_fifo_relabel_parity_1372.rs`.
+pub mod genlock_fifo_relabel;
+
+// Issue 1372 part B — the two-clock bench of the relabel: the measured +1543.16 ms and the quantized
+// +1600 ms step against the deep N==1 2ME PGM, the shallow cg feed and an N>=2 camera, the sender
+// stepping 0–30 ms either side of the receiver; the camera through the production cambox stamp
+// offset (`genlock_stamp::StampOffset`). Test-only; Linux-gated with `genlock_stamp`.
+#[cfg(all(test, target_os = "linux"))]
+mod genlock_fifo_relabel_bench;
+
 // Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined system-time rate: the
 // vendored `os_gettime_ns()` (platform-windows.c) integrates QPC deltas at the system-time rate
 // `inc / adj` from GetSystemTimeAdjustmentPrecise, rebasing on a rate change. Crate-root +
@@ -493,7 +530,8 @@ pub mod vban_pacing;
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
-// committed parity gate `tests/genlock_lock_state_parity.rs`.
+// committed parity gate `tests/genlock_lock_state_parity.rs`. Split by concern into
+// `src/genlock_lock_state/` (issue 1302); every item is re-exported at this path.
 pub mod genlock_lock_state;
 
 // #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (issue 1367: audio placed at
@@ -544,7 +582,7 @@ pub mod send_stall;
 
 // #1242 — per-camera NDI SEND stagger inside the genlock frame slot (pure decision): camera N hands
 // its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate decision so the seven per-tick
-// bursts no longer land on the strih-lx 2.5 GbE switch port at once. Camera number from the box's
+// bursts no longer land on the strih-snv 2.5 GbE switch port at once. Camera number from the box's
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
 pub mod send_stagger;
@@ -642,7 +680,7 @@ pub mod burn_tick_cache;
 // #1122 — PURE, dependency-free E2E recordings retention decision (keep newest-N runs UNION
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
 // a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 (Windows) and
-// the --local-sweep bash decision in scripts/strih-recordings-retention.sh (strih-lx) mirror.
+// the --local-sweep bash decision in scripts/strih-recordings-retention.sh (strih-snv) mirror.
 pub mod recordings_retention;
 // #789 (residual B / criterion 5) — standalone retention decision for the deploy/backup DIRECTORIES
 // the fleet deploy leaves behind (dated `<stamp>-789` box-backups + per-sha stage dirs); keep newest
@@ -669,7 +707,7 @@ pub mod optical_floor;
 // windows) folds into overall_pass. One-line disarmable (`gates_overall_pass()` → `false`).
 pub mod tear_detect;
 // issue 1367 — a cambox window whose captured content is MULTI-SOURCE (tear_detect's multi-path
-// fraction over MULTI_PATH_SUSPECT_CEILING, e.g. cam2 filming the strih-lx multiview) is judged by its
+// fraction over MULTI_PATH_SUSPECT_CEILING, e.g. cam2 filming the strih-snv multiview) is judged by its
 // node burn: its copies/gaps, cadence and frozen_leg checks fold report-only, the burn stays blocking.
 // Pure crate-root (Tier-0); consumed by recording-verdict's all-cambox sweep.
 pub mod multi_source_window;

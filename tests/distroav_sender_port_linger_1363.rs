@@ -3,7 +3,7 @@
 //! libndi shuts a connection down gracefully before it closes it), so no TIME_WAIT survives on its
 //! port and the next OBS keeps the whole captured sender port map (2ME PGM on :5961 …).
 //!
-//! Root cause (measured on strih-lx + dev1, libndi 6.3.2): libndi binds each sender listener
+//! Root cause (measured on strih-snv + dev1, libndi 6.3.2): libndi binds each sender listener
 //! WITHOUT `SO_REUSEADDR`. On Linux a connection left in TIME_WAIT on :5961 by the previous OBS
 //! (60 s, fixed) makes the next OBS's first sender bind fail, and libndi's in-process port cursor
 //! never retries a port it failed to bind — so the reserved program sender (the port-1185 pin)
@@ -19,7 +19,7 @@
 //! counting ONLY libndi's sender port band `:5961..:6959`. Part 3 of the ticket: a libndi RECEIVER
 //! pulling a remote source opens its own listener on `:6960+` from a libndi thread while it
 //! connects (measured dev1 <- dev2 source: :6961, :6962, a transient :6960, :6963 ...; live
-//! strih-lx `:6961..:6973`), so on strih-lx the
+//! strih-snv `:6961..:6973`), so on strih-snv the
 //! back-to-back `MULTIVIEW` / `Grading` creates saw two new listeners and were never identified.
 //! An unidentified sender logs its OWN `PORTID-1363` label — `WARN-1363` stays reserved for the
 //! TIME_WAIT/live listener on :5961 at the reserve.
@@ -566,7 +566,7 @@ fn pure_helpers_compute_the_spec_truth_table() {
         (&[], &[5960, 5963], 5963),
         (&[5960], &[0, 5960, 5963], 5963), // a 0 entry is ignored
         (&[5960, 5961], &[5960, 5962], 5962), // a listener that vanished does not matter
-        // Part 3 — the live strih-lx failure: a libndi RECEIVER pulling a remote camera opens its
+        // Part 3 — the live strih-snv failure: a libndi RECEIVER pulling a remote camera opens its
         // own :6960+ listener from a libndi thread while the MULTIVIEW/Grading create runs (not
         // serialized by the create mutex). It is never a sender port, so the sender is identified.
         (
@@ -807,7 +807,7 @@ fn real_module_aborts_the_connection_so_no_time_wait_survives() {
         get("race.after_state"),
         "0",
         "issue 1363 part 3: with a libndi RECEIVER listener opening during the create (the live \
-         strih-lx MULTIVIEW/Grading case) the sender must still be identified and its connection \
+         strih-snv MULTIVIEW/Grading case) the sender must still be identified and its connection \
          aborted, so the port is FREE right after the stop:\n{stdout}"
     );
     assert_eq!(

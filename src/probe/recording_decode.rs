@@ -256,7 +256,7 @@ fn tile_pass_reads(img: &GrayImage, gate: NodeBurnGate) -> Vec<LocatedPayload> {
 /// the bottom burns' SLOTS, it never adds a real node burn — `out` stays a strict SUPERSET of
 /// what it carried on entry — so it is safe to fire without knowing which run_id the optical is
 /// (pin-independent). It CAN read a node burn's optical ECHO when a camera films a monitor showing
-/// OBS (issue 1367, cam2 on the strih-lx HDMI multiview); the recording decode gates those out
+/// OBS (issue 1367, cam2 on the strih-snv HDMI multiview); the recording decode gates those out
 /// ([`crate::probe::burn_echo`]). This is the top-band twin of [`robust_tile_passes`] (which
 /// crops the BOTTOM band for the small burns); see [`OPTICAL_TOP_BAND_FRAC`] for the #751/#754
 /// root cause and the 30/30-vs-0/30 offline measurement that fixes the band fraction.

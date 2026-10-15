@@ -25,8 +25,24 @@ paths:
   - "vendor/obs-studio/libobs/obs-drm-output-vk.h"
   - "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h"
   - "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-vk-remode.c"
   - "tests/drm_output_vk_direct_1346.rs"
   - "tests/c/drm_output_vk_rig_harness.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-audio.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-audio.h"
+  - "vendor/obs-studio/libobs/obs-drm-output-audio-match.h"
+  - "src/drm_output_audio_match.rs"
+  - "tests/drm_output_audio_1424.rs"
+  - "tests/drm_output_vk_program_mode_1424.rs"
+  - "tests/drm_output_vk_two_displays_1424.rs"
+  - "scripts/lib/drm-output-audio.sh"
+  - "tests/python/test_drm_output_audio_1424.py"
+  - "vendor/obs-studio/libobs/obs-drm-output-outputs.c"
+  - "tests/drm_output_outputs_1424.rs"
+  - "tests/fixtures/drm_output_outputs_parity.tsv"
+  - "tests/python/test_drm_output_outputs_1424.py"
+  - "scripts/lib/strih-drm-output.sh"
+  - "scripts/drm_output_config.py"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -275,7 +291,7 @@ DORMANT unit instead: with the config gone the wrapper touches nothing and `proj
 to hard-failing on a missing HDMI monitor — which is correct for a genuinely unplugged projector
 and exactly why the restore must come first.
 
-## The VIEW — Program or the built-in Multiview (issue 1346, strih-lx, owner 24.9.2026)
+## The VIEW — Program or the built-in Multiview (issue 1346, strih-snv, owner 24.9.2026)
 
 The output scans out one of two views, chosen by `"view"` in the same config (`program` | `multiview`;
 absent = program, so imag is byte-for-byte unchanged in behaviour):
@@ -345,12 +361,12 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   (`tests/fixtures/drm_output_view_parity.tsv`) shared with the Python mirror in
   `scripts/strih_scenes.py`.
 - **NVIDIA:** the LEASE path is Intel-only in practice. The NVIDIA X driver refuses the RandR lease
-  (live on strih-lx 25.9.2026, also with `non-desktop 1`), so an NVIDIA-driven connector uses the
+  (live on strih-snv 25.9.2026, also with `non-desktop 1`), so an NVIDIA-driven connector uses the
   vk-direct backend below, never this one.
 - **imag stays Program:** the Tools switch ships in the whole Linux bundle, and `program scanout
   LIVE` fires for either view, so the imag `drm_output` facet (`scripts/lib/imag-display-path.sh`)
   gathers `DRM_OUTPUT_VIEW` and grades `"view":"multiview"` as DRIFT (audience projection + cam2 tap).
-- **Live-verify items the first strih-lx run must read (review round 1):** (1) the laptop Multiview
+- **Live-verify items the first strih-snv run must read (review round 1):** (1) the laptop Multiview
   projector's `multiview-audit rendered_fps` next to the new `multiview-render` line — the HDMI
   Multiview renders in the frame hook BEFORE `render_displays()`, so it takes budget first; if the
   laptop projector sags under its floor, move the view render after `render_displays()` or share one
@@ -359,15 +375,15 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   publish (libobs exposes only the GPU-side `gs_sync_wait`, so that is a graphics-vtable addition).
 - strih provisioning / verify: `.claude/rules/strih-linux-provisioning.md` (issue 1346 section).
 
-## The vk-direct backend — NVIDIA Vulkan direct display (issue 1346, strih-lx built-in HDMI)
+## The vk-direct backend — NVIDIA Vulkan direct display (issue 1346, strih-snv built-in HDMI)
 
-The owner ruled the strih-lx HDMI output must use the BUILT-IN port (NVIDIA RTX 5050, X output
+The owner ruled the strih-snv HDMI output must use the BUILT-IN port (NVIDIA RTX 5050, X output
 `HDMI-0`) and must be indestructible like imag's (never an X window, no mouse; rulings 5838578002 +
 5838662632). The NVIDIA X driver refuses the X RandR lease, so the module has a SECOND backend:
 `VK_EXT_acquire_xlib_display` + `VK_KHR_display`, the NVIDIA-supported way to take a display away
 from X (SteamVR/Monado direct mode). Selected by `"backend":"vk-direct"` in the SAME config file
 (absent / `"lease"` = the lease backend, so imag is byte-for-byte unchanged); on strih boxes it comes
-from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
+from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
 
 - **Structure:** `obs-drm-output.c` routes its public entry points (start/stop/active/the frame hook)
   and its mailbox seam (claim/publish/texture/mode size) to `drm_output_vk_direct_backend` (a
@@ -376,7 +392,8 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   (`drm_output_parse_backend`, one TSV with the Python mirror) + the OBS side (a GS_BGRA
   intermediate at the display mode size that the ONE raw blit fills, the lazy bind, the frame hook,
   the ordered stop). `obs-drm-output-vk.c` = present thread + lifecycle + GL side;
-  `obs-drm-output-vk-setup.c` = Vulkan/X setup + teardown. The view TU, the budget gate, the
+  `obs-drm-output-vk-setup.c` = Vulkan/X setup + teardown; `obs-drm-output-vk-remode.c` (issue 1424,
+  split for the 1000-line budget) = the open's settle wait, the re-mode and the presentation rebuild. The view TU, the budget gate, the
   Tools-menu switch and the `drm-output:` log family are shared.
 - **Build:** Vulkan HEADERS only (`find_package(Vulkan REQUIRED)` + `Vulkan::Headers`, `libvulkan-dev`
   in linux-genlock.yml); `libvulkan.so.1` is `dlopen`ed (`VK_NO_PROTOTYPES`), so a box without the
@@ -384,7 +401,12 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   declared locally with RROutput as `unsigned long` (no libxrandr-dev). GL entry points are resolved
   at run time through `eglGetProcAddress` (OBS runs EGL/X11).
 - **The X precondition (STEP 0 finding):** `vkAcquireXlibDisplayEXT` returns `-13`
-  (VK_ERROR_INITIALIZATION_FAILED) while the output has an X CRTC. `strih-obs-start.sh` already runs
+  (VK_ERROR_INITIALIZATION_FAILED) while the output has an X CRTC. Two more -13 causes with NO X CRTC
+  (issue 1424, live strih-pp RTX 3060, bisected in the real core): another display of the SAME process
+  is bringing its presentation up (its first presents = the mode set on its head; an open 0 us after
+  the other display's open fails, 50 ms after succeeds, a separate X connection per display fails the
+  same way), and a display this process RELEASED while the shared VkInstance lives on for another
+  display (at any delay, any X connection; only a fresh instance acquires it again). `strih-obs-start.sh` already runs
   `xrandr --output <connector> --off` for any armed config, and the kiosk autostart keeps HDMI off.
   After `vkReleaseDisplayEXT` the output comes back to X DISABLED (no CRTC), never onto the desktop.
   OBS closes an X projector whose screen leaves X (`OBSProjector::ScreenRemoved`), and a saved
@@ -413,12 +435,36 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   (`drm_output_vk_pick_claim` / `_present_pick` / `_present_done`), model-checked over 200000 random
   interleavings in `tests/drm_output_vk_direct_1346.rs` (a mutant restoring the overwrite fails it with
   ~180000 violations); with no READY frame the claim is exactly the lease mailbox rule.
+- **The deadline pick (issue 1424, design 6164790116):** the acquire returns at the vblank that freed
+  an image (FIFO, images=2 on NVIDIA), and a present queued now is shown at the NEXT vblank. The present
+  thread therefore sleeps until `acquire + period - margin` (`drm_output_vk_wait_for_pick`, an absolute
+  `clock_nanosleep` on CLOCK_MONOTONIC) and only then takes the newest READY frame: up to one refresh
+  less on screen (~28 ms at 29.97 Hz, ~12 ms at 60 Hz with the 5 ms start margin). A missed vblank
+  shows as the next acquire 1.5..3.5 periods later; it grows the margin by 1 ms, at most to half a
+  period, never down (a probe down would repeat a frame each time). The minute line reads `program-present
+  #N (...) pick margin X ms, N missed vblanks`, each raise logs `vk-direct pick margin on '<c>' -> X ms`,
+  and the swapchain setup logs `vk-direct present modes offered on '<c>': 2,...` (0 immediate, 1
+  mailbox, 2 fifo, 3 fifo-relaxed) for a later MAILBOX decision. Pure helpers + anchors:
+  `tests/drm_output_vk_deadline_1424.rs`. NOT a backlog fix: the READY image is never overwritten, so
+  the queue never grows; before this the GPU side was 1.5..2.5 refreshes, after it ~0.5..1.5.
+  **Reading the 171 ms (14.10.2026, strih-pp HDMI-1 @29.970 -> Blackmagic HDMI->SDI -> SDI->HDMI ->
+  cam1 Cam Link, `drm_latency_report.py`):** min 144 / median 171 / max 197 ms; only ~50-85 ms of it is
+  the OBS side, the rest is the converters and cam1's grabber at 29.97 Hz (a whole 33 ms frame before
+  USB). The vestibule TV path has no Cam Link, so never present that number as the TV's latency.
 - **Bounded, and a replug is not the end:** the present loop's acquire/fence waits are 1 s and
   re-checked. `VK_ERROR_OUT_OF_DATE_KHR` / `VK_ERROR_SURFACE_LOST_KHR` (an HDMI or grabber replug)
   rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) with 10 tries
-  1 s apart, without any device wait: the replaced swapchain (+ surface) is RETIRED (handed over as
-  `oldSwapchain`, freed after 4 later signalled fences or at the teardown) and the per-image present
-  semaphores live across rebuilds, so a still-queued present never waits a destroyed object; the
+  1 s apart, without any device wait: a swapchain-only rebuild RETIRES the replaced swapchain (handed
+  over as `oldSwapchain`, freed after 4 later signalled fences or at the teardown) and the per-image
+  present semaphores live across rebuilds, so a still-queued present never waits a destroyed object.
+  **A surface rebuild never retires the surface** (issue 1424, live strih-pp: the old display-plane
+  surface destroyed 4 fences after its replacement presented ended the NEW presentation,
+  `vkQueuePresentKHR FAILED VkResult -13`): it drains the display's queue BOUNDED
+  (`drm_output_vk_drain_queue_bounded`, then resets the per-vblank fence the drain signalled), destroys
+  the old swapchain(s) + surface, THEN creates the new surface; a queue that never drains gives up by
+  name, and marks the display's queue wedged (`queue_wedged` + `submit_outstanding`): the empty
+  submit's fence may still be pending, so no retry resets or re-submits it and the teardown waits it
+  bounded first. The Program re-mode below goes through this path; the
   committed mode never changes during a rebuild, and a display
   that now offers a different size gives up by name (the shared images no longer fit — restart OBS).
   The teardown waits an outstanding copy bounded (5 x 1 s); a TIMEOUT LEAKS the Vulkan objects (and
@@ -442,13 +488,18 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   with staged headers — never on dev1) with its own EGL/GL 3.3 core context and publishes red, green,
   blue and 50 % grey phases, then a 2 s BURST that claims with no pause (claim FIRST, render only when
   claimed — like the OBS hook) and requires `gl_skips > 0`, a present loop still alive after a GL drain,
-  and a clean release. Live on strih-lx 25.9.2026: 716 phase publishes, 0 skipped; cam2 (which captures
+  and a clean release. Live on strih-snv 25.9.2026: 716 phase publishes, 0 skipped; cam2 (which captures
   HDMI-0) read `245/0/0`, `0/255/0`, `0/0/239`, `127/128/127` — channel order right, no gamma step;
   the burst published 121 frames in 2 s (the 60 Hz display rate) with 7835 skipped claims, released
   with VkResult 0 and exited. After ANY harness run check `pgrep -x vk-rig-harness` is empty (NOT `pgrep -f`, which matches the ssh `bash -c` that carries the name) — a hung
-  harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP).
-- **Enable (supervisor runbook, after CI + a FULL Linux bundle deploy on strih-lx):** re-run
-  `setup-strih.sh --box strih-lx` step 6 with the HDMI monitor/grabber plugged (it writes or upserts
+  harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP). The boxes carry no
+  dev headers: stage dev1's `/usr/include/{vulkan,vk_video,X11,xcb,EGL,GL,KHR}` as one tarball into a
+  box scratch dir, plus `libobs/util` and the vk files, and link the runtime sonames directly
+  (`-l:libX11.so.6 -l:libX11-xcb.so.1 -l:libxcb.so.1 -l:libxcb-randr.so.0 -l:libEGL.so.1`). Stop OBS only
+  for the run (`systemctl --user stop strih-obs.service`, an EXIT trap starts it again) and confirm
+  `multiview bind LIVE` afterwards.
+- **Enable (supervisor runbook, after CI + a FULL Linux bundle deploy on strih-snv):** re-run
+  `setup-strih.sh --box strih-snv` step 6 with the HDMI monitor/grabber plugged (it writes or upserts
   `"backend":"vk-direct"` and installs `libvulkan1`) — or write the one line by hand as the desktop
   user — then `systemctl --user restart strih-obs.service`. Expect in the OBS log: `autostart ENABLED`
   → `backend=vk-direct` → `vk-direct display acquired` → `ACTIVE (vk-direct)` → `program bind ready`
@@ -483,3 +534,204 @@ helper wraps) gains a NEW call that consults live host/rig state, grep every OTH
 stub there too** — a shared decision function reused by multiple test files each maintaining
 their OWN mock helper is exactly this trap: adding a call inside the function under test is
 invisible to a mock helper written before that call existed.
+
+## The output's own HDMI audio + the Program-view mode (issue 1424, owner 13.10.2026)
+
+The fixed HDMI output plays the OBS program mix (mix 0) on ITS OWN connector's HDMI audio, written
+straight into that connector's ALSA hw PCM (`hw:<card>,<device>`) -- owner: "Ziadnych milion vrstiev
+po ceste": no PipeWire, no OBS monitoring device, no mixer in between, never a per-box setting.
+
+- **The match** (`obs-drm-output-audio-match.h`, pure C, Rust twin `src/drm_output_audio_match.rs`,
+  parity gate `tests/drm_output_audio_1424.rs` over the strih-pp fixtures in
+  `tests/fixtures/drm_output_audio_1424.tsv`): the connector's EDID (X RandR output property `EDID`,
+  read by output name BEFORE the backend takes the connector; readable while vk-direct holds it)
+  against the ELD of every HDMI/DP PCM. EDID bytes 8..11 ARE ELD bytes 16..19 (the kernel's /proc
+  prints them as little-endian `manufacture_id` / `product_id`), so the raw bytes compare, no swap;
+  the monitor name only breaks a tie. Two identical monitors = AMBIGUOUS = no audio.
+- **The ELD comes from the per-PCM ALSA control** `iface=PCM,name='ELD',device=<pcm>`
+  (`/dev/snd/controlC<card>`, kernel uapi ioctls), NEVER `/proc/asound/card*/eld#C.P`: that index is
+  the codec pin (+dev_id), not a PCM number (strih-snv card0 = ONE pin 0x5, dev_ids 0..3 behind PCMs
+  3/7/8/9, dynamic PCM assignment). The control is the kernel's own pcm->pin map.
+- **GOTCHA -- the NVIDIA HDA driver publishes a connector's ELD only once a mode is driven on it.** The
+  leg opens AFTER the backend start succeeded and re-reads for `DRM_OUTPUT_AUDIO_RESOLVE_WINDOW_MS`
+  (10 s) before the ONE `drm-output audio: NO AUDIO on '<conn>' -- <reason>` line. Never decide from a
+  read taken before the scanout starts.
+- **GOTCHA -- `<alsa/asoundlib.h>` and the kernel `<sound/asound.h>` cannot share a TU** (conflicting
+  `snd_pcm_format_t` / `snd_ctl_elem_iface_t` typedefs). alsa-lib is dlopen'd (`libasound.so.2`, the
+  vk-direct loader pattern) with its few prototypes declared locally; the control ioctls use the kernel
+  header.
+- **The matched PCM's "IEC958 Playback Switch" is turned on**: no sound server unmutes it any more.
+  Its index = the PCM's rank among the card's ELD-carrying PCMs (`drm_output_audio_iec958_index`;
+  strih-snv 3/7/8/9 <-> 0/1/2/3) -- written ONLY when the card's switch count equals its HDMI PCM
+  count; an extra analog S/PDIF switch on the same card (an Intel HDA laptop) leaves it untouched and
+  the open line says `IEC958 switch ambiguous`.
+- **Placement** (`drm_output_audio_plan_block`): each block plays at its OBS timestamp + the output's
+  measured present delay (render tick noted at the ONE publish entry `drm_output_publish_render_buf`,
+  on-screen at the lease flip event / the vk-direct present -- a lower bound by up to one refresh)
+  against `snd_pcm_delay`. Early audio is held, a queue grown past the floor (3 blocks) by more
+  than the threshold is trimmed at most a block at a time; inside the threshold the clock drift (OBS
+  clock vs the HDMI audio clock, tens of ppm) is walked back ONE frame per block outside a 5 ms band
+  (`nudge_frames`, inaudible) -- never a silence insert or a cut every ~20 min. **Physics:** the mix leaves the raw callback ~the audio-buffering floor
+  (85 ms+) after its timestamp, the picture ~1-2 frames after it, so the audio normally runs BEHIND
+  the picture; the open line `drm-output audio: pcm hw:C,D card C device D delay <hold> ms (...
+  audio N ms behind the picture ...)` and a 60 s report line name the residual. Closing it would need
+  a video hold on the HDMI picture (an owner decision on picture latency).
+- **The Multiview view mutes it** (the cutter's own monitor never gets the program audio). It then
+  places no block, so its only open line is the resolver's `drm-output audio: '<conn>' matched
+  hw:C,D` -- verify counts that line as open too.
+- **The resolver stays as the leg's watcher:** every 5 s it re-reads the ELDs (never on libobs's audio
+  thread, which neither allocates nor opens devices: the hold's silence buffer is allocated at open);
+  a PCM that no longer carries the connector's monitor (a replug or a re-mode moved the NVIDIA map)
+  is muted and named until it does again (verify reads that mute, and a `write to hw:` failure, as
+  no audio; the last outcome line wins). It never re-resolves to a NEW PCM: a moved map stays muted
+  until OBS restarts (follow-up). The 60 s report line counts holds / trims / nudges / xruns /
+  `dropped_frames` (what a full ring refused). **Read `nudges` on the first live run:** the 5 ms band
+  sees one raw `snd_pcm_delay` sample per block, so a nudge count near one per block means jitter, not
+  drift, and the band needs smoothing; a transient lost/again pair around the startup re-mode is
+  expected.
+- **Known limits:** a runtime audio reset (a profile switch) drops the mix callback without a line;
+  the EDID comes only from X RandR (a connector X still lists `disconnected` after an earlier lease
+  has none -> NO AUDIO, named); verify-imag has no audio row yet.
+- **Box side** (`scripts/lib/drm-output-audio.sh`): ONE WirePlumber rule disabling every ALSA node on
+  an `hdmi:` path (0.5 SPA-JSON drop-in in `/etc/wireplumber/wireplumber.conf.d/`, 0.4 Lua in
+  `main.lua.d/`, by `wireplumber --version`), so PipeWire leaves the PCM to OBS (EBUSY otherwise).
+  Written by setup-strih step 6 (inside `strih_drm_output_provision`) and setup-imag; never restarts
+  the running audio session -- it applies at the next session start. verify-strih item 4c (when the
+  output is live) grades the rule, `pw-dump`'s HDMI node count and the module's outcome line.
+  `DRM_OUTPUT_AUDIO_WP_ROOT` is the test seam for the rule's root.
+- **The Program view's MODE (vk-direct):** the vestibule SDI chain does not carry 1080p60, so
+  `drm_output_vk_pick_mode` prefers the CANVAS size at the CANVAS rate (within 0.2 %: 30.000 over
+  29.970, 29.970 when 30 is absent, never 25), else the issue-1346 rule; the Multiview keeps the
+  native ~60 Hz. The canvas exists only after the frontend's video reset (after the autostart), so the
+  output opens with the 1346 rule and the frame hook hands the canvas over (`drm_output_vk_want_mode`);
+  the present thread re-modes through the surface rebuild only when the pick changes and keeps the
+  size (a size change is named, kept until an OBS restart). The lease backend (imag) is unchanged.
+  The re-mode line names the pick: `program view: exact canvas rate`, `program view: near-rate, canvas
+  30.000 Hz -- one frame dropped every 33 s` (the live strih-pp HDMI-1 -> Blackmagic HDMI-to-SDI sink
+  offers 1080 @ 60/59.94/50/29.97/25/23.98 and 720 @ 60/59.94/50, NO 1080 @ 30.000, and 1080p60 does
+  not pass its SDI cable), or the native fallback. 720p60 vs 1080p29.97 is the owner's call after a
+  measurement, never code.
+- **Live acceptance (supervisor, strih-pp):** full Linux bundle deploy, setup-strih step 6 (the rule),
+  restart the operator's WirePlumber or re-login, remove the monitoring-device stopgap, restart OBS:
+  the OBS log shows `drm-output audio: pcm hw:0,<d>`, `pw-dump` has no hdmi node, the vestibule hears
+  the program; with the Program view on a 30 fps canvas the HDMI-1 sink reads `vk-direct: re-mode
+  1920x1080@60.000Hz -> @29.970Hz (program view: near-rate ...)`, and the SDI chain reaches cam1.
+
+## Two fixed outputs at once (issue 1424 part 2, owner 13.10.2026)
+
+strih-pp drives HDMI-0 = the cutter's Multiview (BenQ) AND HDMI-1 = the Program + its audio for the
+vestibule (Blackmagic HDMI-to-SDI), both vk-direct on the RTX 3060 (main design 6150029770). No
+picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: zero picture latency).
+
+- **Config grammar** (`obs-drm-output-outputs.c`: OBS's UTF-8 reader, which drops a byte-order mark as
+  the old obs_data loader did, then jansson directly): the single-object form
+  is unchanged (imag + strih-snv byte-identical); `{"enabled":true,"outputs":[{connector, argb, view,
+  backend}, ...]}` drives up to `OBS_DRM_OUTPUT_MAX_OUTPUTS` (2). ALL OR NOTHING: not an array, empty,
+  more than 2, a non-object entry, a bad connector (1..63 bytes), an unknown view / backend or a
+  duplicate connector starts NO output and logs one `"outputs" is malformed (<verdict> at entry N)`
+  line. jansson, not obs_data: obs_data's JSON loader drops a non-object array member silently and
+  would start half a pair. The pure grammar is the marked `BEGIN/END pure config grammar` block, lifted
+  verbatim and compiled against real jansson by `tests/drm_output_outputs_1424.rs` over
+  `tests/fixtures/drm_output_outputs_parity.tsv`, the table the Python twin
+  `scripts/drm_output_config.py` is pinned to. That module (split out of strih_scenes.py, which
+  re-exports every name; setup-strih step 6 installs it beside strih_scenes.py) reads the file the C's
+  way: a BOM dropped, and a NaN / Infinity literal, an integer outside 64 bits or an overflowing real
+  makes the WHOLE file unreadable, as jansson does. imag_scenes' classifier agrees on every row except
+  those strict-JSON ones (imag reads a machine-written single object). CI's test / coverage / mutants
+  jobs install `libjansson-dev` for the lift.
+- **Per-instance state** (`struct drm_output_inst`, `obs-drm-output-internal.h`): connector, backend
+  ops, view, present clock, audio leg. The lease backend keeps `g_lease[inst->index]`, the vk-direct
+  OBS side `g_vkd[inst->index]` and the vk core display slot `inst->index` (`drm_output_vk_open(slot,
+  ...)`, refused while that slot is open), so an instance never points at the other one's display; the registry (count published after the instance is fully written)
+  routes the entry points and the mailbox seam through `inst->ops`. An output that fails to start never
+  stops the other (`output '<c>' did not start — the other output keeps running`). The ONE raw blit +
+  `drm_output_fit_rect` moved to the outputs TU.
+- **The vk core** splits into ONE `struct drm_output_vk_device` (loader, X connection, VkInstance,
+  VkDevice; one queue per display slot when the family offers it, else queue 0 shared, each with a
+  host-access mutex taken around every vkQueueSubmit + vkQueuePresentKHR) and a `struct drm_output_vk_disp` per
+  output (own VkDisplayKHR, display plane -- the open path, under the device lock, skips a plane another
+  open display presents on; a rebuild relies on `currentDisplay` --,
+  surface, swapchain, shared images, present thread). A second output on another GPU is refused by name.
+  Closing one display drains ITS queue BOUNDED (`drm_output_vk_drain_queue_bounded`: an empty submit's
+  fence, 5 x 1 s; never an unbounded vkQueueWaitIdle -- on a one-queue GPU a queue the other display
+  wedged would hang `obs_shutdown`); a timeout leaks that display and marks the device wedged (never
+  destroyed); the device goes with the last display (`dev->refs`). The core
+  reports presents through a callback (`drm_output_vk_shown_fn`), so the rig harness links without the
+  audio TU.
+- **The second display waits for the first to settle (issue 1424, live strih-pp):** OBS starts the
+  two outputs back to back, and NVIDIA refuses an acquire (-13) while another display of the process
+  brings its presentation up, so the second display never acquired, whichever connector was second.
+  `drm_output_vk_setup` raises `dev->acquiring`, waits (bounded, `DRM_OUTPUT_VK_SETTLE_WAIT_MS` 2 s,
+  5 ms steps) until every other presenting display (its frame gate `want_frames` up, so a loop that
+  died on its own never blocks) has presented N+1 times on its CURRENT surface, N = its swapchain's
+  image count (`settle_images`; never below `DRM_OUTPUT_VK_SETTLE_PRESENTS` = 3, a 2-image FIFO;
+  `presents_since_surface` is reset by every new surface; the pure `drm_output_vk_settle_need` +
+  `drm_output_vk_first_unsettled`, truth-tabled in `tests/drm_output_vk_two_displays_1424.rs`), then
+  acquires. Rejected alternative (review): acquire EVERY display before any presents (no overlap by
+  construction) -- it needs a two-phase open across the outputs layer and the vk core API; the settle
+  wait is causal (presents, not a sleep) and also covers a re-mode on the other display. Known limit
+  (review round 2): a REPLUG rebuild of the other display (`drm_output_vk_rebuild_or_give_up`) does not
+  check `dev->acquiring`, so an HDMI replug exactly while an output opens can still fail that open's
+  acquire with -13; opens happen only at OBS startup, so it is left named, not guarded. A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
+  resets its settle count BEFORE re-checking the flag (both seq-cst), so an open and a re-mode can never
+  miss each other. Logs: `waited N ms for the other display to settle before acquiring '<c>'`, or the
+  WARNING `'<other>' is still bringing its presentation up after N ms -- acquiring '<c>' anyway`.
+- **Rig harness:** `./vk-rig-harness HDMI-0 HDMI-1=1920x1080@30000` (an argument may carry the Program
+  canvas mode in mHz, handed over like the OBS frame hook; the run fails unless that mode is on scanout,
+  `MODE output=... wanted=yes`) proves both displays on one device, then closes display 0 while display
+  1 keeps presenting (its count must advance at ITS OWN refresh, 29.97 Hz after the re-mode), then
+  closes display 1 too and re-opens BOTH on a fresh device. A re-open BESIDE a live display is refused
+  by NVIDIA (the released-display -13 above) -- a known limit OBS never hits: the outputs start once
+  at autostart and stop together at `obs_shutdown`. Live 13.10.2026 on strih-pp: both acquired (waited
+  75 ms), HDMI-0 2560x1440@59.951, HDMI-1 re-moded to 1920x1080@29.970 and presenting, rc=0.
+- **Audio + mode per output:** each leg reads its OWN output's view (`const volatile long *view`) and
+  present clock, so the Multiview output's leg is muted while the Program output plays (verify grades
+  a Multiview leg that gave up, e.g. a BenQ with no audio, as a NOTE); the Program
+  view's canvas-rate mode pick (part 1) is per display.
+- **An output whose PCM is owned elsewhere (part 3, owner ruling, design comment 6151522810):** an
+  "outputs" entry carries an optional boolean `"audio"` (absent / true = the module's own leg; false =
+  the connector's PCM belongs to someone else; a non-boolean = `audio-invalid`, all or nothing; the
+  single-object form always has its leg). strih-pp's HDMI-1 is such an output: the intercom hub writes
+  the vestibule audio into its PCM, so the module reads no EDID, resolves and opens nothing there and
+  logs ONE line `drm-output audio: '<connector>' off by config (owned elsewhere)`. The box fact spells
+  it `CONNECTOR:VIEW:noaudio` (strih-pp `HDMI-0:multiview HDMI-1:program:noaudio`); step 6 writes
+  `"audio":false` from the FACT (never kept from an old config: it is box ownership, not an operator
+  choice); verify item 4c grades that line instead of the open line, FAILs an opened PCM or a missing
+  line on such an output, and FAILs a config whose flag differs from the fact. The single-object form
+  logs one WARNING when it carries an `"audio"` key (ignored there).
+  **The PCM owner's contract (the hub lane, not this module):** with the module's leg off, three duties
+  move to whoever writes that PCM: (1) find WHICH `hw:C,D` is the connector by its monitor's ELD (the
+  NVIDIA PCM-to-pin map is dynamic; never a fixed device number); (2) turn on that PCM's `IEC958
+  Playback Switch` (no sound server unmutes it, and the step-6 WirePlumber rule keeps PipeWire off every
+  HDMI PCM, so the writer opens hw directly); (3) survive the re-mode shortly after OBS starts (the
+  Program view moves HDMI-1 from 60 to 29.97 Hz, and a re-mode can move the NVIDIA PCM map: re-resolve
+  when the device disappears or no longer carries the monitor).
+- **Log lines name the connector** where verify grades them: `program scanout LIVE (... of '<c>')`,
+  `multiview bind LIVE (... of '<c>')`, `vk-direct present loop exited on '<c>'`; the audio lines
+  already did. The prefixes the single-output grading greps are unchanged.
+- **Frontend:** one Multiview + one Tools-menu pair per output (`HDMI výstup <connector>: Program /
+  Multiview` when several; a one-output box keeps `HDMI výstup: Program / Multiview`), persisting
+  into that output's entry (`obs_drm_output_set_view_of`). `obs_drm_output_get_view/set_view/
+  set_view_renderer` stay as output 0.
+- **Box side:** the fact `STRIH_HDMI_OUTPUTS` (`auto` = one output on the first connected HDMI, `none`
+  exactly when the backend is none, or 1..2 `CONNECTOR:VIEW`; strih-pp `HDMI-0:multiview
+  HDMI-1:program`). setup-strih step 6 (`strih_drm_output_provision`, 5th argument or the loaded
+  fact) writes a fresh array config when X RandR names at least one listed connector connected (each
+  unplugged one WARNed), or migrates an existing config with `strih_scenes.write_drm_outputs` --
+  every connector the config already drives KEEPS its view and argb. `strih-obs-start.sh` takes every
+  armed connector out of X (`drm_output_lease_connectors`). The fact grammar is ONE function,
+  `strih_box_hdmi_outputs_ok` in the facts lib. verify-strih item 4c dispatches (through
+  `strih_drm_outputs_verify_dispatch`) an array
+  config (or a single one on a box whose fact is a list) to `strih_drm_outputs_verify_report`: the
+  array valid, its connectors = the fact's, and every output graded on ITS OWN log lines (open line,
+  multiview bind, present loop, audio leg via `drm_output_audio_verify_report ... "" <conn>`).
+  `strih_scenes.py --projector <view> --connector <c>` is the scripted twin. Known limit: on the LEASE
+  backend the per-output "connected" check reads any kernel HDMI connector (X RandR sticks at
+  disconnected after a lease and names connectors differently); every strih box is vk-direct.
+- **Live acceptance (supervisor, strih-pp):** full Linux bundle deploy, re-run setup-strih step 6 (the
+  live single config migrates to the array, HDMI-0 keeps multiview), restart OBS: the log shows
+  `autostart ENABLED ... 2 outputs`, two `vk-direct display acquired`, `program scanout LIVE` for
+  both connectors, `multiview bind LIVE ... of 'HDMI-0'`, `drm-output audio: pcm hw:...` on 'HDMI-1'
+  and the HDMI-0 leg `matched ... (muted while the view is multiview)`; verify-strih item 4c green
+  for both; the BenQ shows the Multiview and the vestibule the Program with sound. Run the rig harness
+  with both connectors first on the new box.

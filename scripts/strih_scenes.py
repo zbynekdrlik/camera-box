@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""strih_scenes.py -- strih-lx OBS input/scene/Studio-Mode seeder (issue 1317).
+"""strih_scenes.py -- strih-snv OBS input/scene/Studio-Mode seeder (issue 1317).
 
-The strih-lx notebook's OBS boots EMPTY (no scenes, no inputs) -- it cannot receive or switch any
+The strih-snv notebook's OBS boots EMPTY (no scenes, no inputs) -- it cannot receive or switch any
 of the fleet's NDI sources until something seeds it. imag has scripts/imag_scenes.py, seeded on
-every launch by imag-obs-start.sh; this is the focused strih-lx sibling (design comment on issue
+every launch by imag-obs-start.sh; this is the focused strih-snv sibling (design comment on issue
 1317, Prístup 1). It reuses the on-box obs_phase2.py certified-genlock primitives rather than
-importing imag's 70KB DRM-lease/encoder/picom machinery that strih-lx does not need.
+importing imag's 70KB DRM-lease/encoder/picom machinery that strih-snv does not need.
 
-SCOPE: the 10 NDI INPUTS + one per-input scene + Studio Mode, from /opt/camera-box/strih-lx-seed.json
-(setup-strih.sh step 6). The 5 STRIH-LX NDI OUTPUTS are a SEPARATE ticket -- this seeder never
+SCOPE: the 10 NDI INPUTS + one per-input scene + Studio Mode, from /opt/camera-box/strih-seed.json
+(setup-strih.sh step 6). The 5 STRIH-SNV NDI OUTPUTS are a SEPARATE ticket -- this seeder never
 touches outputs.
 
 Idempotent: CreateScene/CreateInput "already exists" errors are ignored, and the certified genlock
@@ -47,36 +47,47 @@ import sys
 
 from websocket import create_connection
 
-SEED_MANIFEST_PATH = "/opt/camera-box/strih-lx-seed.json"
+SEED_MANIFEST_PATH = "/opt/camera-box/strih-seed.json"
 # The genlock latency floor every camera input rides (strih_lx_camera_latency_ms; the rig floor).
-# obs_phase2._PROBE_NDI_SETTINGS uses latency 0 (the probe default); strih-lx rides the manifest's
+# obs_phase2._PROBE_NDI_SETTINGS uses latency 0 (the probe default); strih-snv rides the manifest's
 # floor 3 -- so the certified settings here override ONLY latency, keeping the #63/#149 genlock keys.
 DEFAULT_CAMERA_LATENCY_MS = 3
 # issue 1317: the 2ME PGM/PVW FEEDBACK inputs are NOT genlocked. They are the strih's own post-render
 # 30 fps program/preview outputs received back as monitoring feedback; a post-render output is off the
 # camera boundary grid and every program CUT is a timecode discontinuity, so a genlock FIFO underruns
-# and relocks on every cut (110,222 underruns / 899 relocks measured live on strih-lx 19.9.). The
+# and relocks on every cut (110,222 underruns / 899 relocks measured live on strih-snv 19.9.). The
 # Windows strih receives these NON-genlocked (light.json NDI 2ME PGM/PVW: ndi_sync=1, latency=1, no
 # genlock_fifo); the feedback class mirrors that. `latency` here is the stock DistroAV receive-buffer
 # MODE enum (1 = LOW), NOT milliseconds -- FIXED at 1 (a feedback monitor, not a camera on the
 # aligned grid), independent of the camera manifest floor (which rides genlock_latency_ms_src).
 FEEDBACK_LATENCY_MODE = 1
 
-# --- issue 1346: the HDMI output = the in-OBS DRM-lease output, view Program / Multiview ------------
-# Owner ROZHODNUTE (24.9.2026, supersedes the 19.9. OBS fullscreen projector): the strih-lx HDMI
-# output is the SAME fixed hardware output imag has -- the vendored libobs DRM-lease output (issue
-# 1152, .claude/rules/obs-drm-output.md) -- selectable between the Program and the BUILT-IN Multiview.
-# It is never a projector window and never the desktop. The module's activation contract is ONE
-# file of the OBS user: ~/.camera-box/drm-output.json ({"enabled":true,"connector":"HDMI-0",
-# "argb":2105376,"view":"multiview"}, provisioned by setup-strih.sh step 6 only when an HDMI monitor
-# is plugged in). The operator's switch lives in OBS (Tools > HDMI vystup: Program / Multiview),
-# which switches live and writes "view" back; `--projector program|multiview` is the scripted twin
-# (effective at the next OBS start).
-DRM_OUTPUT_CONF = "~/.camera-box/drm-output.json"
-DRM_OUTPUT_VIEWS = ("program", "multiview")
-# issue 1346: how the output leaves the X desktop -- the X RandR lease (the default = the absent key) or
-# the NVIDIA Vulkan direct display. Mirrors obs-drm-output-backend.c drm_output_parse_backend.
-DRM_OUTPUT_BACKENDS = ("lease", "vk-direct")
+# issue 1424 part 2: the HDMI output config grammar + writers live in drm_output_config.py (installed
+# next to this file); every name stays reachable as strih_scenes.<name>.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from drm_output_config import (  # noqa: E402,F401
+    DRM_OUTPUT_BACKENDS,
+    DRM_OUTPUT_CONF,
+    DRM_OUTPUT_CONNECTOR_MAX,
+    DRM_OUTPUT_DEFAULT_ARGB,
+    DRM_OUTPUT_MAX_OUTPUTS,
+    DRM_OUTPUT_VIEWS,
+    drm_json_loads,
+    drm_output_backend_of,
+    drm_output_backend_token,
+    drm_output_config_text,
+    drm_output_instances,
+    drm_output_lease_connector,
+    drm_output_lease_connectors,
+    drm_output_outputs_entry,
+    drm_output_spec_of,
+    drm_output_view_of,
+    drm_output_view_token,
+    read_drm_view,
+    write_drm_backend,
+    write_drm_outputs,
+    write_drm_view,
+)
 
 
 def certified_genlock_settings(latency):
@@ -86,10 +97,53 @@ def certified_genlock_settings(latency):
     the key latency_pins_verify.py reads). NOT the stock DistroAV `latency` key: that is a
     receive-buffer MODE enum which the genlock build's certified coercion forces back to 0 (NORMAL) on
     every genlock_fifo input, so a seeded `latency: 3` read back 0 forever and made --bootstrap
-    re-write + name-re-enforce every camera on every launch (live strih-lx finding, 19.9.2026).
+    re-write + name-re-enforce every camera on every launch (live strih-snv finding, 19.9.2026).
     ndi_source_name is NOT included here -- it is a per-input top-level field the seed merges in.
     Returned fresh each call (never a shared mutable default)."""
     return {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "genlock_latency_ms_src": latency}
+
+
+def program_settings():
+    """issue 1412: the stream box's genlocked strih PROGRAM input (`NDI 2ME PGM`, manifest class
+    "program"): genlock_fifo + SOURCE_TIMECODE + full bandwidth like a camera, but WITHOUT
+    genlock_latency_ms_src -- the stream A/V delay is the operator's knob, the seeder never writes it.
+    Returned fresh each call."""
+    return {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2}
+
+
+# issue 1412: the classes a manifest object entry may name explicitly ("class"); an entry without one
+# is classified by its names (input_class_for).
+ENTRY_CLASSES = ("camera", "feedback", "program")
+
+
+def settings_for_class(cls, latency):
+    """issue 1412: the seed settings of an input CLASS."""
+    if cls == "feedback":
+        return feedback_settings()
+    if cls == "program":
+        return program_settings()
+    return certified_genlock_settings(latency)
+
+
+def entry_class(entry, sender, input_name):
+    """issue 1412: the class of ONE manifest entry -- an object's explicit "class" (one of
+    ENTRY_CLASSES) wins; otherwise the name rule (either name carrying the 2ME marker -> feedback)."""
+    if isinstance(entry, dict) and entry.get("class") in ENTRY_CLASSES:
+        return entry["class"]
+    if input_class_for(sender) == "feedback" or input_class_for(input_name) == "feedback":
+        return "feedback"
+    return "camera"
+
+
+def parse_program_audio_input(text):
+    """issue 1412: the OBS program-audio input NAME from the manifest's `program_audio_input` (the
+    ported stream collection names it `Zvuk z mixu`), else AUDIO_INPUT_NAME. Lenient, never raises."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return AUDIO_INPUT_NAME
+    name = d.get("program_audio_input") if isinstance(d, dict) else None
+    return name if isinstance(name, str) and name else AUDIO_INPUT_NAME
 
 
 def feedback_settings():
@@ -126,11 +180,12 @@ def program_audio_input_settings():
     return {"device_id": AUDIO_MONITOR_DEVICE}
 
 
-def program_audio_input_kind_from_inputs(inputs):
-    """Pure: the OBS inputKind of the `ASIO zvuk` input from a GetInputList `inputs` list, or None
-    when it is absent. Used by --audio-input-kind + verify-strih's derived audio verdict."""
+def program_audio_input_kind_from_inputs(inputs, name=AUDIO_INPUT_NAME):
+    """Pure: the OBS inputKind of the program-audio input NAME (default `ASIO zvuk`) from a GetInputList
+    `inputs` list, or None when it is absent. Used by --audio-input-kind + verify-strih's derived audio
+    verdict."""
     for i in inputs or []:
-        if i.get("inputName") == AUDIO_INPUT_NAME:
+        if i.get("inputName") == name:
             return i.get("inputKind")
     return None
 
@@ -153,7 +208,7 @@ def input_class_for(name):
     `2ME PGM` / `2ME PVW` (as a SUBSTRING) is a post-render FEEDBACK monitor -> 'feedback'. This
     matches BOTH the parallel-phase sender form `STRIH-SNV (2ME PGM)` AND the OPERATOR collection's
     explicit input names `NDI 2ME PVW` / `NDI 2ME PGM (mv)` (this lane) -- regardless of the
-    STRIH-SNV/STRIH-LX prefix or the `(mv)` suffix, neither of which ENDS in `(2ME PGM)`. Everything
+    STRIH-<box> prefix or the `(mv)` suffix, neither of which ENDS in `(2ME PGM)`. Everything
     else -- the `CAMn (usb)` / `NDI camN` grabbers AND the `RESOLUME-SNV (cg-obs)` / `cg` / `CG-obs`
     genlocked sources (issue 1300) -- is a genlocked source -> 'camera'."""
     n = name or ""
@@ -204,7 +259,7 @@ def _entry_fields(entry):
 
 
 def parse_seed_manifest(text):
-    """Pure: parse /opt/camera-box/strih-lx-seed.json text -> (inputs, outputs, latency).
+    """Pure: parse /opt/camera-box/strih-seed.json text -> (inputs, outputs, latency).
 
     inputs/outputs are the non-empty string entries in manifest order; latency is camera_latency_ms
     coerced to int (falling back to DEFAULT_CAMERA_LATENCY_MS on a missing/garbage value). Raises
@@ -212,7 +267,7 @@ def parse_seed_manifest(text):
     silently-empty collection)."""
     d = json.loads(text)
     if not isinstance(d, dict):
-        raise ValueError("strih-lx seed manifest must be a JSON object, got %r" % type(d).__name__)
+        raise ValueError("strih-snv seed manifest must be a JSON object, got %r" % type(d).__name__)
     # issue 1317 (this lane): an `inputs` entry may be a bare STRING (parallel/imag shape) OR an
     # explicit-name OBJECT {sender,input,scene} (the OPERATOR collection). Keep every usable entry in
     # its ORIGINAL shape (seed_inputs normalizes via _entry_fields); drop the junk (int/None/empty/a
@@ -264,10 +319,8 @@ def seed_inputs(inputs, latency):
         if input_name in seen:
             continue
         seen.add(input_name)
-        cls = "camera"
-        if input_class_for(sender) == "feedback" or input_class_for(input_name) == "feedback":
-            cls = "feedback"
-        settings = feedback_settings() if cls == "feedback" else certified_genlock_settings(latency)
+        cls = entry_class(entry, sender, input_name)
+        settings = settings_for_class(cls, latency)
         plan.append({
             "scene": scene,
             "input": input_name,
@@ -279,7 +332,7 @@ def seed_inputs(inputs, latency):
 
 def scene_order(inputs):
     """Pure: the stable, deterministic scene order (the scene names in manifest order, de-duplicated
-    by INPUT name). strih-lx has no operator-tuned order to preserve; the seed creates scenes in this
+    by INPUT name). strih-snv has no operator-tuned order to preserve; the seed creates scenes in this
     fixed order. Handles both bare-string and object entries (issue 1317, this lane) via _entry_fields."""
     order = []
     seen = set()
@@ -365,7 +418,7 @@ def input_classes_summary(inputs):
     per-input label keeps the SENDER name (the bare-string report shape)."""
     seen = set()
     pairs = []
-    ncam = nfb = 0
+    ncam = nfb = nprog = 0
     for entry in inputs:
         fields = _entry_fields(entry)
         if fields is None:
@@ -374,152 +427,17 @@ def input_classes_summary(inputs):
         if input_name in seen:
             continue
         seen.add(input_name)
-        cls = "camera"
-        if input_class_for(sender) == "feedback" or input_class_for(input_name) == "feedback":
-            cls = "feedback"
+        cls = entry_class(entry, sender, input_name)
         pairs.append("%s=%s" % (sender, cls))
         if cls == "feedback":
             nfb += 1
+        elif cls == "program":
+            nprog += 1
         else:
             ncam += 1
+    if nprog:
+        return "%d camera, %d feedback, %d program (%s)" % (ncam, nfb, nprog, ", ".join(pairs))
     return "%d camera, %d feedback (%s)" % (ncam, nfb, ", ".join(pairs))
-
-
-# --- issue 1346: DRM-lease HDMI output helpers (pure + the file read/write; no WS dependency) --------
-
-def drm_output_view_of(value):
-    """Pure: the "view" JSON value -> "program" | "multiview" | None (unknown). Mirrors the vendored C
-    grammar (obs-drm-output-view.c drm_output_parse_view) row for row -- ONE shared table,
-    tests/fixtures/drm_output_view_parity.tsv. Absent (None) / empty / a non-string (which
-    obs_data_get_string reads as "") -> "program" (the issue-1152 default, imag unchanged); only the
-    exact lowercase names count."""
-    if value is None or not isinstance(value, str) or value == "":
-        return "program"
-    return value if value in DRM_OUTPUT_VIEWS else None
-
-
-def drm_output_lease_connector(config_text):
-    """Pure: the connector IFF the drm-output config arms the in-OBS DRM output, else "".
-    The C module's OWN contract (and imag_scenes.drm_output_lease_connector's, pinned equal by
-    tests/python/test_strih_drm_output_1346.py): a full JSON parse, a boolean "enabled": true, a
-    non-empty string "connector" AND (issue 1346) a known "backend" -- the C keeps the output dormant on
-    an unknown one, so the wrapper must not take the connector out of X for it (a black HDMI).
-    Empty / malformed / disabled / unknown backend -> "" (dormant), never a raise."""
-    if not config_text:
-        return ""
-    try:
-        cfg = json.loads(config_text)
-        if cfg.get("enabled") is not True:
-            return ""
-        if drm_output_backend_of(cfg.get("backend")) is None:
-            return ""
-        connector = cfg.get("connector")
-        return connector if isinstance(connector, str) and connector else ""
-    except (ValueError, AttributeError):
-        return ""
-
-
-def drm_output_view_token(config_text):
-    """Pure: the config's view as ONE token for verify-strih -- "program" | "multiview" | "unknown".
-    An unreadable config is "program" (it arms nothing; the connector half reports that)."""
-    try:
-        cfg = json.loads(config_text) if config_text else {}
-    except ValueError:
-        return "program"
-    if not isinstance(cfg, dict):
-        return "program"
-    return drm_output_view_of(cfg.get("view")) or "unknown"
-
-
-def drm_output_backend_of(value):
-    """Pure: the "backend" JSON value -> "lease" | "vk-direct" | None (unknown). Mirrors the vendored C
-    grammar (obs-drm-output-backend.c drm_output_parse_backend) row for row -- ONE shared table,
-    tests/fixtures/drm_output_backend_parity.tsv. Absent (None) / empty / a non-string (which
-    obs_data_get_string reads as "") -> "lease" (the issue-1152 default, imag unchanged); only the exact
-    lowercase names count. The C keeps the output DORMANT on an unknown value."""
-    if value is None or not isinstance(value, str) or value == "":
-        return "lease"
-    return value if value in DRM_OUTPUT_BACKENDS else None
-
-
-def drm_output_backend_token(config_text):
-    """Pure: the config's backend as ONE token for verify-strih -- "lease" | "vk-direct" | "unknown". An
-    unreadable config is "lease" (it arms nothing; the connector half reports that)."""
-    try:
-        cfg = json.loads(config_text) if config_text else {}
-    except ValueError:
-        return "lease"
-    if not isinstance(cfg, dict):
-        return "lease"
-    return drm_output_backend_of(cfg.get("backend")) or "unknown"
-
-
-def drm_output_config_text(path=DRM_OUTPUT_CONF):
-    """The drm-output config text of THIS user (or `path`), "" when absent/unreadable (never raises
-    -- the strih-obs-start.sh launch path must never abort on it)."""
-    try:
-        with open(os.path.expanduser(path)) as fh:
-            return fh.read()
-    except OSError:
-        return ""
-
-
-def read_drm_view(path=DRM_OUTPUT_CONF):
-    """The persisted view ("program" | "multiview"), None when the config is absent/unreadable or
-    its view is unknown."""
-    text = drm_output_config_text(path)
-    if not text:
-        return None
-    tok = drm_output_view_token(text)
-    return None if tok == "unknown" else tok
-
-
-def _rewrite_drm_config(path, mutate):
-    """Rewrite an EXISTING drm-output config through `mutate(cfg)`: every other key kept in order, ONE
-    compact line (the machine-written contract obs-drm-output.md pins), an atomic temp-file rename.
-    Raises ValueError on an absent file (the output is not provisioned -- setup-strih.sh step 6 writes
-    it only with an HDMI monitor plugged in) or a config that is not a JSON object (never rewritten)."""
-    real = os.path.expanduser(path)
-    try:
-        with open(real) as fh:
-            cfg = json.loads(fh.read())
-    except OSError as e:
-        raise ValueError("%s not readable (%s) -- the HDMI output is not provisioned; attach the HDMI "
-                         "monitor and re-run setup-strih.sh" % (path, e))
-    except ValueError as e:
-        raise ValueError("%s is not valid JSON (%s) -- not rewriting it" % (path, e))
-    if not isinstance(cfg, dict):
-        raise ValueError("%s is not a JSON object -- not rewriting it" % path)
-    mutate(cfg)
-    tmp = real + ".tmp"
-    with open(tmp, "w") as fh:
-        fh.write(json.dumps(cfg, separators=(",", ":")) + "\n")
-    os.replace(tmp, real)
-
-
-def write_drm_view(view, path=DRM_OUTPUT_CONF):
-    """Persist `view` into an EXISTING drm-output config (every other key kept -- see
-    _rewrite_drm_config). Raises ValueError on an unknown view or an unprovisioned / broken config."""
-    if view not in DRM_OUTPUT_VIEWS:
-        raise ValueError("unknown HDMI output view %r (want 'program' or 'multiview')" % (view,))
-    _rewrite_drm_config(path, lambda cfg: cfg.__setitem__("view", view))
-
-
-def write_drm_backend(backend, path=DRM_OUTPUT_CONF):
-    """issue 1346: persist the box's HDMI-output backend (the fact STRIH_HDMI_OUTPUT_BACKEND) into an
-    EXISTING drm-output config, keeping the operator's view and every other key. `lease` is the ABSENT
-    key (a lease config stays byte-identical to the pre-backend shape); `vk-direct` is written
-    explicitly. Raises ValueError on an unknown backend or an unprovisioned / broken config."""
-    if backend not in DRM_OUTPUT_BACKENDS:
-        raise ValueError("unknown HDMI output backend %r (want 'lease' or 'vk-direct')" % (backend,))
-
-    def mutate(cfg):
-        if backend == "lease":
-            cfg.pop("backend", None)
-        else:
-            cfg["backend"] = backend
-
-    _rewrite_drm_config(path, mutate)
 
 
 def _obs_phase2_module():
@@ -539,7 +457,7 @@ def _obs_phase2_module():
 
 
 class Obs:
-    """Minimal OBS-WebSocket 5.x client (sibling of imag_scenes.Obs). no-auth on strih-lx
+    """Minimal OBS-WebSocket 5.x client (sibling of imag_scenes.Obs). no-auth on strih-snv
     (auth_required false, setup-strih.sh step 7); a password is still honoured if the server ever
     demands auth."""
 
@@ -620,32 +538,57 @@ def _current_scene_name(obs):
     return scenes[0].get("sceneName") if scenes else None
 
 
-def seed_program_audio_input(obs):
+def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME):
     """The ONE allowed create/replace (issue 1344): ensure the `ASIO zvuk` program-audio input exists
     as pulse_input_capture on strih-program-source (the OBS program capture). A missing input is
     CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED + recreated;
     a correct pulse_input_capture is left alone. Returns a short status string for the log."""
     inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
-    exists = any(i.get("inputName") == AUDIO_INPUT_NAME for i in inputs)
-    kind = program_audio_input_kind_from_inputs(inputs)
+    exists = any(i.get("inputName") == name for i in inputs)
+    kind = program_audio_input_kind_from_inputs(inputs, name)
     action = audio_input_action(exists, kind)
     if action == "ok":
         return "matched"
     scene = _current_scene_name(obs)
     if scene is None:
         return "no-scene (deferred)"
+    keep_scenes, offset = [], None
     if action == "replace":
-        obs.req("RemoveInput", {"inputName": AUDIO_INPUT_NAME}, ignore_err=True)
+        # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
+        # collection carries it in scenes the seed plan does not name).
+        keep_scenes = _scenes_holding(obs, name)
+        offset = (obs.req("GetInputAudioSyncOffset", {"inputName": name}, ignore_err=True) or {}).get(
+            "inputAudioSyncOffset")
+        obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
+    if keep_scenes:
+        scene = keep_scenes[0]
     obs.req("CreateInput", {
         "sceneName": scene,
-        "inputName": AUDIO_INPUT_NAME,
+        "inputName": name,
         "inputKind": AUDIO_INPUT_KIND,
         "inputSettings": program_audio_input_settings(),
     }, ignore_err=True)
-    return "created" if action == "create" else "replaced (was %s)" % (kind or "absent")
+    for other in keep_scenes[1:]:
+        obs.req("CreateSceneItem", {"sceneName": other, "sourceName": name}, ignore_err=True)
+    if isinstance(offset, int) and offset:
+        obs.req("SetInputAudioSyncOffset", {"inputName": name, "inputAudioSyncOffset": offset}, ignore_err=True)
+    if action == "create":
+        return "created"
+    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", len(keep_scenes))
 
 
-def ensure_program_audio_in_every_scene(obs, plan):
+def _scenes_holding(obs, name):
+    """issue 1412: the scenes whose items include the source NAME, in the scene list's order."""
+    out = []
+    for sc in (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes", []) or []:
+        sn = sc.get("sceneName")
+        items = (obs.req("GetSceneItemList", {"sceneName": sn}, ignore_err=True) or {}).get("sceneItems", [])
+        if any(i.get("sourceName") == name for i in items or []):
+            out.append(sn)
+    return out
+
+
+def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
     """issue 1344 item 3 (20.9.2026 live diagnosis): the `ASIO zvuk` program-audio input must be a
     scene item in EVERY declared operator scene, not just the one it happened to be created in --
     OBS only plays a scene item's audio while its OWNING scene is active, so seeding it into a single
@@ -660,16 +603,16 @@ def ensure_program_audio_in_every_scene(obs, plan):
     for scene in scenes:
         items = (obs.req("GetSceneItemList", {"sceneName": scene}, ignore_err=True) or {}).get(
             "sceneItems", [])
-        if any(i.get("sourceName") == AUDIO_INPUT_NAME for i in items):
+        if any(i.get("sourceName") == name for i in items):
             continue
         obs.req("CreateSceneItem", {
-            "sceneName": scene, "sourceName": AUDIO_INPUT_NAME,
+            "sceneName": scene, "sourceName": name,
         }, ignore_err=True)
         added += 1
     return added
 
 
-def bootstrap(obs, plan, studio=True, update_only=False):
+def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
     CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
@@ -735,15 +678,15 @@ def bootstrap(obs, plan, studio=True, update_only=False):
             result[inp] = "matched"
     # issue 1344: the ONE allowed create/replace — the `ASIO zvuk` program-audio input on the
     # strih-program-source loopback node (the OBS program capture that Failed to create on Linux).
-    audio_status = seed_program_audio_input(obs)
+    audio_status = seed_program_audio_input(obs, audio_name)
     # issue 1344 item 3: once the input exists, make sure it is a scene item in EVERY declared
     # scene (never only the one it happened to be created/matched in) -- skip when the input itself
     # could not be resolved (no scene existed at all: "no-scene (deferred)"), nothing to attach to.
     if not audio_status.startswith("no-scene"):
-        added = ensure_program_audio_in_every_scene(obs, plan)
+        added = ensure_program_audio_in_every_scene(obs, plan, audio_name)
         if added:
             audio_status += " (+%d scene items)" % added
-    result[AUDIO_INPUT_NAME] = audio_status
+    result[audio_name] = audio_status
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
     return result
@@ -785,7 +728,7 @@ def main():
     ap.add_argument("--port", type=int, default=4455)
     ap.add_argument("--password", default=None)
     ap.add_argument("--manifest", default=SEED_MANIFEST_PATH,
-                    help="path to strih-lx-seed.json (default %s)" % SEED_MANIFEST_PATH)
+                    help="path to strih-seed.json (default %s)" % SEED_MANIFEST_PATH)
     ap.add_argument("--bootstrap", action="store_true",
                     help="seed scenes/inputs with the certified genlock settings + Studio Mode")
     ap.add_argument("--verify-parity", action="store_true",
@@ -797,6 +740,9 @@ def main():
                     help="issue 1346: set the HDMI output view (program|multiview) in "
                          "~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the "
                          "next OBS start (the live switch is OBS Tools > HDMI vystup)")
+    ap.add_argument("--connector", default=None,
+                    help="issue 1424 part 2: with --projector, the output whose view to set (required when "
+                         "the config drives several outputs, e.g. HDMI-0)")
     args = ap.parse_args()
 
     # An explicit mode is REQUIRED (issue 1317 review): a bare invocation must never silently connect
@@ -810,20 +756,26 @@ def main():
     # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
     # the seed manifest.
     if args.audio_input_kind:
+        # issue 1412: the input NAME follows the manifest's program_audio_input when it is readable.
+        try:
+            audio_name = parse_program_audio_input(_read_manifest(args.manifest))
+        except OSError:
+            audio_name = AUDIO_INPUT_NAME
         obs = Obs(args.host, args.port, args.password)
         inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
-        print(program_audio_input_kind_from_inputs(inputs) or "absent")
+        print(program_audio_input_kind_from_inputs(inputs, audio_name) or "absent")
         return
 
     # --projector (issue 1346): persist the HDMI output view. Touches only drm-output.json -- never
     # the input seed manifest and never OBS (the running OBS switches live from its own Tools menu).
     if args.projector is not None:
         try:
-            write_drm_view(args.projector, DRM_OUTPUT_CONF)
+            write_drm_view(args.projector, DRM_OUTPUT_CONF, args.connector)
         except ValueError as e:
             sys.exit("FAIL issue 1346: %s" % e)
-        print("HDMI output view set to %s in %s -- takes effect at the next OBS start (switch it live in "
-              "OBS Tools > HDMI vystup)" % (args.projector, DRM_OUTPUT_CONF))
+        print("HDMI output view set to %s%s in %s -- takes effect at the next OBS start (switch it live in "
+              "OBS Tools > HDMI vystup)" % (args.projector, " on %s" % args.connector if args.connector else "",
+                                             DRM_OUTPUT_CONF))
         return
 
     manifest_text = _read_manifest(args.manifest)
@@ -838,11 +790,17 @@ def main():
     inputs, _outputs, latency = parse_seed_manifest(manifest_text)
     mode = parse_seed_mode(manifest_text)
     plan = seed_inputs(inputs, latency)
-    statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"))
+    statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"),
+                         audio_name=parse_program_audio_input(manifest_text))
     print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
           % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))
     print("scene order: " + " | ".join(scene_order(inputs)))
+    # issue 1380: a stream-role manifest carries the YouTube-safe Development scene (stream_dev_safe.py).
+    if '"dev_scene"' in manifest_text:
+        import stream_dev_safe
+        spec = stream_dev_safe.parse_dev_scene(manifest_text)
+        print("dev-scene seed: %s" % (", ".join(stream_dev_safe.apply_dev_safe(obs, spec)) or "present (no change)"))
 
 
 if __name__ == "__main__":

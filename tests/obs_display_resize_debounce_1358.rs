@@ -2,7 +2,7 @@
 //! every preview AND projector window) DEBOUNCES its resize events, so an interactive window drag
 //! calls `obs_display_resize` once with the final size instead of on every configure event.
 //!
-//! Background (measured live on strih-lx, 23.9.2026): dragging the multiview projector window
+//! Background (measured live on strih-snv, 23.9.2026): dragging the multiview projector window
 //! 1851×1011 → 1657×901 stalled the PROGRAM render (`program-render-audit lagged=80`, then 54,
 //! then 15 of 150 frames). `obs_display_resize` only stores `next_cx/next_cy`; the graphics thread
 //! then resizes the swap chain (`gs_resize`) on its next render of that display, and a drag emits

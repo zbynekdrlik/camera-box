@@ -2,7 +2,7 @@
 through DKMS from a vendored source, and verify-strih item 36 grading the facts that decide whether the
 5 GbE link loses packets.
 
-WHY: on 29.9.2026 strih-lx got a Ubiquiti UACC-Adapter-RJ45-USBC-5GE (Realtek RTL8157, USB 0bda:8157).
+WHY: on 29.9.2026 strih-snv got a Ubiquiti UACC-Adapter-RJ45-USBC-5GE (Realtek RTL8157, USB 0bda:8157).
 The in-tree r8152 of the 7.0 kernels does not bind it, so the Realtek driver v2.21.4 was built on dev1 and
 copied by hand as a plain module to /lib/modules/<kernel>/updates/r8152.ko -- the next kernel boots
 without it. Measured live the same day: the laptop's USB-C port trained the adapter at Gen 1 (5000 Mb/s)
@@ -13,7 +13,7 @@ What this pins:
   * the vendored tree vendor/realtek-r8152: SHA256SUMS verifies, no dev1 build artifact, dkms.conf names
     match the lib's constants, the source is the RTL8157-capable v2.21.4;
   * the facts loader: the three new facts (STRIH_NIC_OOT_DRIVER, STRIH_NIC_MIN_USB_MBPS,
-    STRIH_NIC_MIN_LINK_MBPS) load for strih-lx, are TODO_OWNER in strih-pp, refuse a missing / malformed
+    STRIH_NIC_MIN_LINK_MBPS) load for strih-snv, are TODO_OWNER in strih-pp, refuse a missing / malformed
     value;
   * the PURE planner scripts/lib/strih-nic-driver.sh `strih_nic_driver_plan` (SKIP/NOOP/INSTALL/UPGRADE)
     over `dkms status` fixtures in both DKMS shapes;
@@ -45,7 +45,7 @@ FACTS = SCRIPTS / "lib" / "strih-box-facts.sh"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 SETUP = SCRIPTS / "setup-strih.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
-DEPLOY = SCRIPTS / "lib" / "strih-lx-deploy.sh"
+DEPLOY = SCRIPTS / "lib" / "strih-snv-deploy.sh"
 VENDOR = REPO / "vendor" / "realtek-r8152"
 BOXES = SCRIPTS / "strih-boxes"
 
@@ -157,34 +157,70 @@ def test_loader_lists_the_new_keys_after_the_nic_driver_key():
 
 
 def test_strih_lx_loads_the_new_facts():
-    r = _bash("strih_box_load strih-lx || exit 9\n"
-              'printf "%s|%s|%s\\n" "$(strih_lx_nic_oot_driver)" "$(strih_lx_nic_min_usb_mbps)" '
-              '"$(strih_lx_nic_min_link_mbps)"', sources=(FACTS,))
+    # issue 1411: strih-snv is a new notebook whose rig NIC is the 10 GbE Thunderbolt Aquantia: in-tree
+    # `atlantic`, PCIe (no USB device), a 10GBASE-T link.
+    r = _bash("strih_box_load strih-snv || exit 9\n"
+              'printf "%s|%s|%s|%s\\n" "$(strih_lx_nic_driver)" "$(strih_lx_nic_oot_driver)" '
+              '"$(strih_lx_nic_min_usb_mbps)" "$(strih_lx_nic_min_link_mbps)"', sources=(FACTS,))
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "%s|10000|5000" % SPEC
+    assert r.stdout.strip() == "atlantic|none|none|10000"
 
 
-def test_strih_pp_names_every_new_fact_as_todo_owner():
+def test_a_usb_box_with_the_vendored_driver_still_loads(tmp_path):
+    # the vendored realtek-r8152 path stays: a USB box (the returned strih-snv shape) loads its facts
+    env = _fixture(tmp_path, [])
+    r = _bash("strih_box_load strih-snv || exit 9\n"
+              'printf "%s|%s|%s|%s\\n" "$(strih_lx_nic_driver)" "$(strih_lx_nic_oot_driver)" '
+              '"$(strih_lx_nic_min_usb_mbps)" "$(strih_lx_nic_min_link_mbps)"', env=env, sources=(FACTS,))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "r8152|%s|10000|5000" % SPEC
+
+
+def test_strih_pp_declares_its_pcie_nic_facts():
+    # issue 1412: strih-pp's rig NIC is the RTL8125 on PCIe (in-tree r8169, no USB device, 2.5 GbE);
+    # the facts are decided now (read off the box in the 11.10.2026 recon), never TODO_OWNER.
+    lines = (BOXES / "strih-pp.env").read_text().splitlines()
+    for want in ("STRIH_NIC_DRIVER=r8169", "STRIH_NIC_OOT_DRIVER=none", "STRIH_NIC_MIN_USB_MBPS=none",
+                 "STRIH_NIC_MIN_LINK_MBPS=2500"):
+        assert want in lines, want
     r = _bash("strih_box_load strih-pp", sources=(FACTS,))
-    assert r.returncode != 0
     for k in NEW_KEYS:
-        assert "%s is TODO_OWNER" % k in r.stderr, r.stderr
+        assert "%s is TODO_OWNER" % k not in r.stderr, r.stderr
+
+
+# issue 1411: strih-snv's own rig NIC is PCIe now (atlantic, no out-of-tree driver). The USB/DKMS tests run
+# on a USB box: the strih-snv facts with the returned notebook's RTL8157 NIC facts (issue 1391).
+USB_BOX_NIC_FACTS = {"STRIH_NIC_DRIVER": "r8152", "STRIH_NIC_OOT_DRIVER": SPEC,
+                     "STRIH_NIC_MIN_USB_MBPS": "10000", "STRIH_NIC_MIN_LINK_MBPS": "5000"}
+
+
+def _usb_box_body():
+    lines = (BOXES / "strih-snv.env").read_text().splitlines(keepends=True)
+    out, seen = [], set()
+    for ln in lines:
+        key = ln.split("=", 1)[0]
+        if key in USB_BOX_NIC_FACTS:
+            ln = "%s=%s\n" % (key, USB_BOX_NIC_FACTS[key])
+            seen.add(key)
+        out.append(ln)
+    assert seen == set(USB_BOX_NIC_FACTS), seen
+    return "".join(out)
 
 
 def _fixture(tmp_path, edits):
-    body = (BOXES / "strih-lx.env").read_text()
+    body = _usb_box_body()
     for old, new in edits:
         assert body.count(old) == 1, old
         body = body.replace(old, new)
-    (tmp_path / "strih-lx.env").write_text(body)
+    (tmp_path / "strih-snv.env").write_text(body)
     return {"STRIH_BOXES_DIR": str(tmp_path)}
 
 
 @pytest.mark.parametrize("key", NEW_KEYS)
 def test_a_missing_new_fact_refuses(tmp_path, key):
-    line = next(ln for ln in (BOXES / "strih-lx.env").read_text().splitlines() if ln.startswith(key + "="))
+    line = next(ln for ln in _usb_box_body().splitlines() if ln.startswith(key + "="))
     env = _fixture(tmp_path, [(line + "\n", "")])
-    r = _bash("strih_box_load strih-lx", env=env, sources=(FACTS,))
+    r = _bash("strih_box_load strih-snv", env=env, sources=(FACTS,))
     assert r.returncode != 0
     assert "missing fact %s" % key in r.stderr, r.stderr
 
@@ -201,9 +237,9 @@ def test_a_missing_new_fact_refuses(tmp_path, key):
     ("STRIH_NIC_MIN_LINK_MBPS", "5 000"),
 ])
 def test_a_malformed_new_fact_refuses_by_name(tmp_path, key, value):
-    line = next(ln for ln in (BOXES / "strih-lx.env").read_text().splitlines() if ln.startswith(key + "="))
+    line = next(ln for ln in _usb_box_body().splitlines() if ln.startswith(key + "="))
     env = _fixture(tmp_path, [(line, "%s=%s" % (key, value))])
-    r = _bash("strih_box_load strih-lx", env=env, sources=(FACTS,))
+    r = _bash("strih_box_load strih-snv", env=env, sources=(FACTS,))
     assert r.returncode != 0, value
     assert "%s '%s'" % (key, value) in r.stderr, r.stderr
 
@@ -211,7 +247,7 @@ def test_a_malformed_new_fact_refuses_by_name(tmp_path, key, value):
 def test_none_is_accepted_for_the_driver_and_the_usb_speed(tmp_path):
     env = _fixture(tmp_path, [("STRIH_NIC_OOT_DRIVER=%s" % SPEC, "STRIH_NIC_OOT_DRIVER=none"),
                               ("STRIH_NIC_MIN_USB_MBPS=10000", "STRIH_NIC_MIN_USB_MBPS=none")])
-    r = _bash("strih_box_load strih-lx && strih_lx_nic_oot_driver && echo && strih_lx_nic_min_usb_mbps",
+    r = _bash("strih_box_load strih-snv && strih_lx_nic_oot_driver && echo && strih_lx_nic_min_usb_mbps",
               env=env, sources=(FACTS,))
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["none", "none"]
@@ -774,6 +810,7 @@ case "$args" in
   "-g connection.id connection show "*) awk -F'|' -v u="${args##* }" '$1 == u { print $2 }' "$FAKE_NM" ;;
   "-g connection.interface-name connection show "*) awk -F'|' -v u="${args##* }" '$1 == u { print $3 }' "$FAKE_NM" ;;
   "-g ipv4.addresses connection show "*) awk -F'|' -v u="${args##* }" '$1 == u { print $4 }' "$FAKE_NM" ;;
+  "-g ethtool.ring-rx connection show "*) awk -F'|' -v u="${args##* }" '$1 == u { print $5 }' "$FAKE_NM" ;;
   *) echo "fake nmcli: $args" >&2; exit 2 ;;
 esac
 '''
@@ -827,6 +864,10 @@ class Sysfs:
         (tmp_path / "nm.tsv").write_text(nm)
 
     def grade(self, facts_env=None, drop=()):
+        if facts_env is None:  # issue 1411: this fake sysfs is a USB box, never the PCIe strih-snv
+            boxes = self.tmp / "usb-box"
+            boxes.mkdir(exist_ok=True)
+            facts_env = _fixture(boxes, [])
         env = {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "FAKE": str(self.fake),
                "FAKE_NM": str(self.tmp / "nm.tsv"), "STRIH_NIC_DRV_KERNEL": KERNEL,
                "STRIH_NIC_DRV_MODULES_ROOT": str(self.tmp / "no-modules")}
@@ -938,6 +979,72 @@ def test_grade_notes_a_box_without_an_out_of_tree_driver_or_usb_nic(tmp_path):
     assert st["(nic-link)"] == "OK" and st["(nic-nm)"] == "OK", rows
 
 
+class PcieSysfs:
+    """issue 1411: a fake /sys with the new strih-snv rig NIC -- the 10 GbE Thunderbolt Aquantia on PCIe
+    (in-tree atlantic, enp7s0), the onboard RTL8168 (r8169, enp2s0) and lo. No USB device, no r8152."""
+
+    def __init__(self, tmp_path, link="10000", nm=None):
+        self.tmp = tmp_path
+        s = tmp_path / "sys"
+        self.sys = s
+        (s / "class/net").mkdir(parents=True)
+        for iface, pcifn, drv, speed in (("enp7s0", "0000:07:00.0", "atlantic", link),
+                                         ("enp2s0", "0000:02:00.0", "r8169", "1000")):
+            dev = s / "devices/pci0000:00/0000:00:1c.4" / pcifn
+            net = dev / "net" / iface
+            net.mkdir(parents=True)
+            if speed is not None:
+                (net / "speed").write_text(speed + "\n")
+            (s / "bus/pci/drivers" / drv).mkdir(parents=True)
+            os.symlink(s / "bus/pci/drivers" / drv, dev / "driver")
+            os.symlink(dev, net / "device")
+            os.symlink(net, s / "class/net" / iface)
+        lo = s / "devices/virtual/net/lo"
+        lo.mkdir(parents=True)
+        os.symlink(lo, s / "class/net/lo")
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        _exe(self.bin / "nmcli", FAKE_NMCLI)
+        (tmp_path / "nm.tsv").write_text(nm if nm is not None else "u-1|strih-lan|enp7s0|10.77.9.202/23\n")
+
+    def grade(self):
+        # the REAL strih-snv facts (no STRIH_BOXES_DIR); dkms is deliberately absent from PATH's fake bin
+        env = {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "FAKE_NM": str(self.tmp / "nm.tsv"),
+               "SYSROOT": str(self.sys)}
+        r = _bash('strih_nic_grade_rows "$SYSROOT" ""', env=env, sources=(PROVISION, LIB))
+        assert r.returncode == 0, r.stderr
+        return [tuple(line.split("|", 1)) for line in r.stdout.splitlines()]
+
+
+def test_grade_passes_the_new_strih_lx_pcie_10g_nic(tmp_path):
+    rows = PcieSysfs(tmp_path).grade()
+    st = _states(rows)
+    assert st == {"(nic-driver)": "NOTE", "(nic-usb)": "NOTE", "(nic-link)": "OK", "(nic-nm)": "OK"}, rows
+    text = "\n".join(d for _, d in rows)
+    assert "enp7s0: not graded (STRIH_NIC_MIN_USB_MBPS=none, not a USB NIC)" in text
+    assert "Ethernet link 10000 Mb/s >= 10000" in text
+    assert "strih-lan carrying 10.77.9.202 is pinned to enp7s0" in text
+
+
+@pytest.mark.parametrize("link", ["5000", "2500", "-1", None])
+def test_grade_fails_the_new_strih_lx_nic_below_10g(tmp_path, link):
+    rows = PcieSysfs(tmp_path, link=link).grade()
+    assert _states(rows)["(nic-link)"] == "FAIL", rows
+
+
+def test_a_slow_10g_link_names_the_10gbase_t_cable(tmp_path):
+    # issue 1411 review: the link FAIL named only "5GBASE-T needs Cat6", wrong advice for a 10 GbE box
+    rows = PcieSysfs(tmp_path, link="5000").grade()
+    link = [d for s, d in rows if d.startswith("(nic-link)")]
+    assert "Ethernet link 5000 Mb/s < 10000" in link[0], rows
+    assert "10GBASE-T needs Cat6a" in link[0], rows
+
+
+def test_grade_fails_the_new_strih_lx_profile_pinned_to_the_onboard_nic(tmp_path):
+    rows = PcieSysfs(tmp_path, nm="u-1|strih-lan|enp2s0|10.77.9.202/23\n").grade()
+    assert _states(rows)["(nic-nm)"] == "FAIL", rows
+
+
 def test_grade_fails_when_the_rig_nic_cannot_be_resolved(tmp_path):
     s = Sysfs(tmp_path)
     (s.sys / "class/net" / NIC).unlink()
@@ -997,13 +1104,66 @@ def test_verify_strih_grades_item_36_before_item_35():
 
 
 def test_the_deploy_archive_stages_the_vendored_driver():
+    # issue 1404 moved the archive list into strih_lx_tree_paths (it adds the program-audio sampler's
+    # vendored dock headers); the driver must stay in that list and the archive must use the list.
     d = DEPLOY.read_text()
-    assert "git -C \"$repo\" archive --format=tar HEAD scripts systemd intercom vendor/realtek-r8152 |" in d
+    assert 'git -C "$repo" archive --format=tar HEAD "${tree_paths[@]}" |' in d
+    assert "mapfile -t tree_paths < <(strih_lx_tree_paths)" in d
+    out = subprocess.run(
+        ["bash", "-c", '. "$1" && strih_lx_tree_paths', "harness", str(DEPLOY)],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert "vendor/realtek-r8152" in out, out
 
 
 def test_the_step_and_item_carry_no_box_identity_literal():
-    # the strih-lx identity net (tests/strih_box_facts_1361.rs) scans these two for the fact values on a
+    # the strih-snv identity net (tests/strih_box_facts_1361.rs) scans these two for the fact values on a
     # code line; the module name must come from the facts / the lib, never a literal here.
     for path in (SETUP, VERIFY):
         for line in _code_lines(path):
             assert "r8152" not in line, (path.name, line)
+
+
+# --- issue 1411: ethtool.ring-rx on the atlantic rig NIC is a link-flap loop ------------------------
+# Live 11.10.2026 on the new strih notebook: the NM profile carried ethtool.ring-rx 4096 (the RTL8157-era
+# operator note). On every link-up NetworkManager re-applied it, the atlantic driver reset the NIC on the
+# ring change and the 10 GbE link dropped one second later -- 2744 flaps in the first hours, the box off
+# 10.77.9.202. Removing the setting held the link at once.
+
+@pytest.mark.parametrize("drv,ring,fails", [
+    ("atlantic", "4096", True), ("atlantic", "", False), ("r8152", "4096", False), ("r8169", "2048", False)])
+def test_ring_verdict_fails_only_a_ring_override_on_atlantic_1411(drv, ring, fails):
+    r = _bash('strih_nic_nm_ring_verdict "$D" strih-lan "$R"', env={"D": drv, "R": ring})
+    if fails:
+        assert r.returncode == 1, r
+        assert r.stdout.startswith("FAIL|(nic-ring)"), r.stdout
+        assert "ethtool.ring-rx" in r.stdout and "strih-lan" in r.stdout, r.stdout
+    else:
+        assert r.returncode == 0 and r.stdout == "", r
+
+
+def test_grade_fails_a_ring_override_on_the_atlantic_profile_1411(tmp_path):
+    rows = PcieSysfs(tmp_path, nm="u-1|strih-lan|enp7s0|10.77.9.202/23|4096\n").grade()
+    assert _states(rows)["(nic-ring)"] == "FAIL", rows
+
+
+def test_grade_prints_no_ring_row_without_an_override_1411(tmp_path):
+    rows = PcieSysfs(tmp_path).grade()
+    assert "(nic-ring)" not in _states(rows), rows
+
+
+@pytest.mark.parametrize("drv,want,banned", [
+    ("r8152", "set ethtool.ring-rx 4096", "never"),
+    ("atlantic", "never set ethtool.ring-rx", "ring-rx 4096"),
+    ("r8169", "", "ring-rx")])
+def test_step1_ring_note_follows_the_nic_driver_1411(drv, want, banned):
+    r = _bash('strih_nic_ring_note "$D"', env={"D": drv})
+    assert r.returncode == 0, r
+    assert want in r.stdout and banned not in r.stdout, r.stdout
+
+
+def test_setup_step1_prints_the_driver_ring_note_1411():
+    text = SETUP.read_text()
+    assert 'strih_nic_ring_note "$(strih_lx_nic_driver)"' in text
+    assert "set ethtool.ring-rx 4096 --" not in text
+

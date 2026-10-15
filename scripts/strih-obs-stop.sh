@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# strih-obs-stop.sh -- graceful OBS stop for the strih-lx box (issue 1317); extended header below.
+# strih-obs-stop.sh -- graceful OBS stop for the strih-snv box (issue 1317); extended header below.
 set -euo pipefail
 #
-# Sibling of imag-obs-stop.sh (issue 785/882) for the strih-lx notebook. Two modes:
+# Sibling of imag-obs-stop.sh (issue 785/882) for the strih-snv notebook. Two modes:
 #
 #   * PLAIN invocation (deploy / recovery / an operator menu): if strih-obs.service is active, route
 #     the stop through `systemctl --user stop` -- systemd only suppresses Restart=on-failure for a

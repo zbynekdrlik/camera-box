@@ -194,6 +194,119 @@ fn worker_lifecycle_follows_the_output() {
         start_at < capture_at,
         "issue 1367: the decode worker must be running before the video callbacks start"
     );
+    // issue 1381: both decode jobs' copy buffers are sized AND written on the starting thread --
+    // after quirc_resize (the grid size is set right after it), before the worker starts -- so
+    // st_raw_video's first frame into each slot neither allocates nor first-touches a page there.
+    let prepare_at = start
+        .find(
+            "st->cb_decode_mailbox.prepare_slots( [st](st_video_decode_job &job) { \
+             st_video_decode_job_prepare(st, job); })",
+        )
+        .expect("issue 1381: st_start must pre-fault both decode jobs through prepare_slots");
+    assert!(
+        resize_at < prepare_at && prepare_at < start_at,
+        "issue 1381: prepare_slots must run after the geometry is set and before the worker starts"
+    );
+    // The pre-fault sizes come from the SAME helpers the per-frame fills use. The top band's plan
+    // is derived ONCE, in st_cb_top_band_rows: the bytes helper, the fill's buffer size and the
+    // rows it copies all come from it (a copy of more rows than the buffer holds overruns it).
+    let prepare = unique_body_of(
+        &src,
+        "void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)",
+    );
+    for need in [
+        "job.band.assign(st_cb_top_band_bytes(st), 0);",
+        "job.grid.assign(st_norihiro_grid_bytes(st), 0);",
+    ] {
+        assert!(
+            prepare.contains(need),
+            "issue 1381: st_video_decode_job_prepare no longer has `{need}`"
+        );
+    }
+    let rows_helper = unique_body_of(
+        &src,
+        "static uint32_t st_cb_top_band_rows(const struct sync_test_output *st)",
+    );
+    for need in [
+        "const camerabox::CbTopBandPlan plan = \
+         camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);",
+        "return plan.band_h;",
+    ] {
+        assert!(
+            rows_helper.contains(need),
+            "issue 1381: st_cb_top_band_rows must be the output geometry's plan rows: `{need}`"
+        );
+    }
+    assert!(
+        unique_body_of(
+            &src,
+            "static size_t st_cb_top_band_bytes(const struct sync_test_output *st)"
+        )
+        .contains("return (size_t)st->video_width * st_cb_top_band_rows(st);"),
+        "issue 1381: the top band's byte size must be video_width x st_cb_top_band_rows"
+    );
+    let band_fill: &[&str] = &[
+        "const uint32_t rows = st_cb_top_band_rows(st);",
+        "const size_t need = st_cb_top_band_bytes(st);",
+        "camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, rows, dst.data());",
+    ];
+    let grid_fill: &[&str] = &["const size_t need = st_norihiro_grid_bytes(st);"];
+    for (sig, needs) in [
+        (
+            "static void st_cb_gather_top_band(const struct sync_test_output *st, \
+             const struct video_data *frame, std::vector<uint8_t> &dst)",
+            band_fill,
+        ),
+        (
+            "static void st_norihiro_gather_grid(const struct sync_test_output *st, \
+             const struct video_data *frame, std::vector<uint8_t> &dst)",
+            grid_fill,
+        ),
+    ] {
+        let body = unique_body_of(&src, sig);
+        for need in needs {
+            assert!(
+                body.contains(need),
+                "issue 1381: the per-frame fill must size and copy with the helpers the pre-fault \
+                 uses: `{need}`"
+            );
+        }
+        assert!(
+            !body.contains("cb_top_band_decode_plan("),
+            "issue 1381: a per-frame fill must derive no top-band plan of its own"
+        );
+    }
+    // Review round 4: the decode worker reads the SAME row count, and only from a band that holds
+    // every byte it reads (the grid decode is guarded the same way).
+    let decoder = unique_body_of(
+        &src,
+        "static bool st_raw_video_camera_box_decode(struct sync_test_output *st, \
+         const uint8_t *src, uint64_t timestamp)",
+    );
+    for need in [
+        "const uint32_t rows = st_cb_top_band_rows(st);",
+        "camerabox::cb_box_downscale_luma(src, st->video_width, rows, qbuf, (uint32_t)w, (uint32_t)h);",
+    ] {
+        assert!(
+            decoder.contains(need),
+            "issue 1381: the top-band decoder must read the shared row count: `{need}`"
+        );
+    }
+    assert!(
+        !decoder.contains("plan.band_h"),
+        "issue 1381: the top-band decoder must not read rows from a plan of its own"
+    );
+    let job_run = unique_body_of(
+        &src,
+        "void st_video_decode_job_run(struct sync_test_output *st, st_video_decode_job &job)",
+    );
+    assert!(
+        job_run.contains(
+            "if (job.band.size() >= st_cb_top_band_bytes(st)) \
+             st_raw_video_camera_box_decode(st, job.band.data(), job.timestamp);"
+        ),
+        "issue 1381: the worker must decode only a band holding every byte the decoder reads"
+    );
 
     let stop = unique_body_of(&src, "static void st_stop(void *data, uint64_t)");
     assert!(

@@ -134,17 +134,32 @@ def test_corrupt_holder_json_is_held_true_holder_null_fail_closed(tmp_path):
     assert state["stale"] is False
 
 
-def test_absent_holder_json_lockdir_only_is_unconditionally_stale(tmp_path):
+def test_absent_holder_json_lockdir_past_the_grace_is_stale(tmp_path):
     # lockdir exists (e.g. a crashed mkdir-then-write acquire) but holder.json was never written --
-    # mirrors `[ -f "$path" ] || return 0` in rig_lease_is_stale: unconditionally stale/reclaimable,
-    # regardless of heartbeat freshness.
+    # mirrors rig_lease_is_stale: stale/reclaimable once the lockdir is older than the
+    # issue-1432 no-holder grace, regardless of heartbeat freshness.
     _touch_heartbeat(tmp_path, age_s=1)  # deliberately FRESH heartbeat -- must not matter
+    stamp = (_NOW - timedelta(seconds=rls.NO_HOLDER_GRACE_SECS + 5)).timestamp()
+    os.utime(tmp_path, (stamp, stamp))
 
     state = rls.lease_state(str(tmp_path), _NOW, 5400)
 
     assert state["held"] is True
     assert state["holder"] is None
     assert state["stale"] is True
+
+
+def test_absent_holder_json_inside_the_grace_is_an_acquire_in_progress_1432(tmp_path):
+    # issue 1432: a lockdir a few ms old with no holder.json yet is an acquire in progress (mkdir
+    # done, holder.json not yet written) -- NOT reclaimable, or a second host's acquire steals it.
+    stamp = (_NOW - timedelta(seconds=1)).timestamp()
+    os.utime(tmp_path, (stamp, stamp))
+
+    state = rls.lease_state(str(tmp_path), _NOW, 5400)
+
+    assert state["held"] is True
+    assert state["holder"] is None
+    assert state["stale"] is False
 
 
 # --------------------------------------------------------------------------- expected_release_at in the past

@@ -15,6 +15,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -99,13 +103,12 @@ const NO_HTTP: &str = "/nonexistent-686-linux-http-fixture";
 /// same "caller pre-fetches the status to a file" pattern, extended to dantesync-gate.sh's Linux
 /// SSH-gather path (which, unlike the painter gate, ALSO grades the PTP-lock signal from the same
 /// journal text).
-fn write_dante_journal(name: &str, lines: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("dante-gate-journal-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.log"));
+fn write_dante_journal(name: &str, lines: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.log"));
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(lines.as_bytes()).unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 #[test]
@@ -485,13 +488,12 @@ const HTTP_STRIH_OK: &str = "{\"offset_ns\":164707,\"drift_ppm\":-7.68,\"gm_sour
 \"ntp_failed\":false}";
 
 /// Write `json` to a temp file and return its path -- the DANTESYNC_GATE_WIN_HTTP_<NAME> fixture.
-fn write_win_http_fixture(name: &str, json: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("dante-gate-http-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.json"));
+fn write_win_http_fixture(name: &str, json: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.json"));
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(json.as_bytes()).unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 #[test]
@@ -660,14 +662,12 @@ fn help_describes_win_http_and_its_freshness_requirement() {
 
 /// Write `json` to a temp file and return its path -- the DANTESYNC_GATE_LINUX_HTTP_<NAME>
 /// fixture (mirrors write_win_http_fixture above, #648).
-fn write_linux_http_fixture(name: &str, json: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("dante-gate-linux-http-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.json"));
+fn write_linux_http_fixture(name: &str, json: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.json"));
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(json.as_bytes()).unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 #[test]
@@ -939,13 +939,9 @@ fn gate_linux_journal_override_maps_a_hyphenated_node_name_to_a_valid_env_var() 
 /// skips spacing). `responses` is the ordered list of raw JSON payloads to return, one per call;
 /// calls beyond the list length keep returning the LAST response, so a caller need not know the
 /// exact number of times it will be invoked.
-fn write_multi_read_fixture(name: &str, responses: &[String]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "dante-gate-multi-http-test-{}-{}",
-        std::process::id(),
-        name
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+fn write_multi_read_fixture(_name: &str, responses: &[String]) -> TempPath {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let responses_path = dir.join("responses.txt");
     let mut body = responses.join("\n");
     body.push('\n');
@@ -972,7 +968,10 @@ fn write_multi_read_fixture(name: &str, responses: &[String]) -> PathBuf {
     let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&script_path, perms).unwrap();
-    script_path
+    TempPath {
+        path: script_path,
+        _dir: tmp,
+    }
 }
 
 /// A DanteSync HTTP status-pipe JSON payload with the given (updated_ts, ntp_offset_us),
@@ -3518,7 +3517,7 @@ fn gate_still_fails_a_genuine_sustained_client_desync_with_the_slew_rescue_1055(
 /// so offset+PTP both PASS -- isolating the grandmaster-identity behavior. `gm_prefix` is spliced
 /// in verbatim at the front of the JSON object, so pass either e.g.
 /// `"\"gm_source_ip\":\"10.77.7.109\","` or `""` (field entirely absent).
-fn write_gm_fixture(name: &str, gm_prefix: &str) -> PathBuf {
+fn write_gm_fixture(name: &str, gm_prefix: &str) -> TempPath {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -4570,7 +4569,7 @@ fn gate_win_http_client_missing_step_threshold_field_falls_back_to_700_1129() {
 /// offset, on the rig grandmaster -- so offset+PTP+GM all PASS, isolating the phase_slew behavior.
 /// `ps_fragment` is spliced verbatim, so pass e.g. `",\"phase_slew_enabled\":false"`,
 /// `",\"phase_slew_enabled\":true"`, or `""` (field entirely absent).
-fn write_phase_slew_fixture(name: &str, ps_fragment: &str) -> PathBuf {
+fn write_phase_slew_fixture(name: &str, ps_fragment: &str) -> TempPath {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

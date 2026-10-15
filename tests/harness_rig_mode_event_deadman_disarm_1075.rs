@@ -96,20 +96,27 @@ fn event_mode_disarms_the_deadman_timer_1075() {
 }
 
 #[test]
-fn event_mode_disarm_runs_after_the_892_disable_1075() {
-    // The disarm belongs at step (2.5), right after the #892 stop+disable of the permanent painter
-    // — the same place EVENT already tears down the painter it must never leave running.
+fn event_mode_disarm_runs_before_the_892_stop_and_disable_1405() {
+    // issue 1405 (was: the disarm right AFTER the #892 stop+disable). The disable step now fails
+    // loud when cam2's root cannot go back to read-only, and it runs under `set -e`. Had the disarm
+    // stayed after it, that failure would end the EVENT script with the TEST-armed dead-man still
+    // live, and the dead-man starts the QR painter on air within ~5 min. Disarming first leaves no
+    // resurrection timer behind any failure in the disable step, and it closes the race of the
+    // timer firing between the stop and the disarm (the issue-1351 frame-probe swap uses the same
+    // order: the dead-man stop precedes the painter stop).
     let p = painter_stop();
-    let disable_pos = p
-        .find("disabling")
-        .expect("#892: expected the permanent-painter stop+disable text");
     let disarm_pos = p
         .find("systemctl stop cam2-painter-deadman.timer")
         .expect("#1075: expected the deadman disarm");
+    let stop_pos = p
+        .find("systemctl stop cam2-painter.service")
+        .expect("#892: expected the permanent-painter stop");
+    let disable_pos = p
+        .find("systemctl disable cam2-painter.service ||")
+        .expect("#892: expected the permanent-painter disable call");
     assert!(
-        disable_pos < disarm_pos,
-        "#1075: the deadman disarm must run alongside/after the #892 permanent-painter disable. \
-         Got:\n{p}"
+        disarm_pos < stop_pos && stop_pos < disable_pos,
+        "issue 1405: the deadman disarm must run BEFORE the #892 stop+disable. Got:\n{p}"
     );
 }
 

@@ -2,7 +2,7 @@
 //!
 //! The hub mixes in 256-frame (5.33 ms) blocks. The old Janus sender emitted a 20 ms packet whenever
 //! 960 frames had piled up, i.e. every 3.75 blocks. Packets therefore left on a 16/21 ms beat
-//! (measured on strih-lx: sd 2.29 ms, min 15.3, max 22.4 ms). The Janus audiobridge mixes each
+//! (measured on strih-snv: sd 2.29 ms, min 15.3, max 22.4 ms). The Janus audiobridge mixes each
 //! participant every 20 ms from a small buffer, so that beat made it conceal.
 //!
 //! Now the block loop only feeds a [`PacedRing`], and a sender with its own monotonic
@@ -10,7 +10,7 @@
 //!
 //! - a short underflow is bridged with a whole silent frame, then the ring re-primes to its target
 //!   (never a partial zero-splice);
-//! - a fill that drifts (a missed mix tick, a rate offset) is pulled back by a gentle 1 ms/s
+//! - a fill that drifts (a lost mix tick, a rate offset) is pulled back by a gentle 1 ms/s
 //!   servo, long before either edge case below;
 //! - an overflow trims the oldest samples back to the target;
 //! - one packet per tick keeps the RTP timestamps contiguous by construction.
@@ -95,7 +95,8 @@ enum ServoAction {
 /// The ring between the block loop (push, 256 frames every 5.33 ms) and the paced sender (pop,
 /// 960 frames every 20 ms). Mono 48 kHz samples.
 ///
-/// The two sides run on the same monotonic clock, but a missed mix tick loses a block and any
+/// The two sides run on the same monotonic clock, but a lost mix tick (since issue 1401 only the
+/// part of a late wake beyond the four ticks the hub-mix thread runs late) loses a block and any
 /// rounding in the block period is a slow rate offset. So a gentle fill servo keeps the pre-pop
 /// fill inside a band: after [`SERVO_TICKS`] pops in a row above `target + FRAME/2` it drops
 /// [`SERVO_STEP_FRAMES`]; after as many below `target - FRAME/4` it repeats 1 ms inside the frame

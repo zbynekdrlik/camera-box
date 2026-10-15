@@ -129,7 +129,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shared with the #979 dev1 watchdog, never a second detector for the same signal.
 # shellcheck source=scripts/lib/obs-session-visibility.sh
 . "$HERE/lib/obs-session-visibility.sh"
-# issue 1351: strih PLATFORM resolver (windows|linux) after the M4 cut-over to strih-lx, plus the
+# issue 1351: strih PLATFORM resolver (windows|linux) after the M4 cut-over to strih-snv, plus the
 # Linux operator-session-visibility predicate that replaces the obs64/AHK CIM probe above for a
 # Linux strih -- never a second host-detection mechanism, one resolver both [0/8] and [8/8a] use.
 # shellcheck source=scripts/lib/strih-platform.sh
@@ -141,11 +141,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-audit-snapshot.sh
 . "$HERE/lib/genlock-audit-snapshot.sh"
 # issue 1351: the ONE source of truth for BOUNDING every strih-touching [0/8] call on the
-# Linux-strih path with a timeout + a named [0/8] strih-lx banner (strih_lx_gate_prefix /
+# Linux-strih path with a timeout + a named [0/8] strih-snv banner (strih_lx_gate_prefix /
 # strih_lx_preflight_timeout_banner) -- so a silent hang can never swallow RUN_ID. Depends on
 # strih_platform() above; the Windows path stays byte-identical (an empty prefix, no banner).
-# shellcheck source=scripts/lib/strih-lx-preflight.sh
-. "$HERE/lib/strih-lx-preflight.sh"
+# shellcheck source=scripts/lib/strih-snv-preflight.sh
+. "$HERE/lib/strih-snv-preflight.sh"
 # #863: WARN-only (never `exit`) verification that the PERMANENT cam2-painter.service genuinely
 # came back active + painting after cleanup() restarts it below -- a fire-and-forget restart call
 # that used to be a silent no-op (the permanent painter unit was never installed, see #863).
@@ -359,6 +359,9 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # not at decode time.
 # shellcheck source=scripts/lib/live-freeze-watch.sh
 . "$HERE/lib/live-freeze-watch.sh"
+# issue 1421: the stream program must carry the measurement signal alone (preflight + in-run watch).
+# shellcheck source=scripts/lib/e2e-program-audio.sh
+. "$HERE/lib/e2e-program-audio.sh"
 # #882/#1232: restart-and-settle for the [1/8] imag render-health sweep -- the leading windows
 # (right after a fresh OBS start) can measure a real, transient warm-up dip that is not a
 # regression; a settle-adaptive PHASE (bounded by a wall budget) absorbs however many leading
@@ -411,6 +414,10 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # bundle_state_gather.recordings_free_line (the soak uses the same reader).
 # shellcheck source=scripts/lib/recordings-free-line.sh
 . "$HERE/lib/recordings-free-line.sh"
+# issue 1395: bounded retention of the dev1 run dirs -- keeps this run + the newest
+# E2E_RUNDIR_KEEP (default 8) older ones, removes the rest, never aborts the run.
+# shellcheck source=scripts/lib/e2e-rundir-retention.sh
+. "$HERE/lib/e2e-rundir-retention.sh"
 # #1134: the SOURCE-camera role (the "cam1 role") is no longer hard-pinned to cam1 -- it is the
 # first strih-routable member of CAMERA_ACTIVE_SET (camera_source_box, scripts/camera-set.sh), so
 # retiring cam1 from the active set (its USB grabber hw-faulted -- #1110 -EPROTO, owner order
@@ -485,11 +492,11 @@ camera_secondary_ip() {
 }
 STRIH=10.77.9.202
 # issue 1317 part 3: the Windows strih verdict planner has NO default box any more (its old default
-# was this same address, now the Linux strih-lx), so hand it the harness's own strih explicitly --
+# was this same address, now the Linux strih-snv), so hand it the harness's own strih explicitly --
 # it then refuses a Linux strih by platform, and only a STRIH_PLATFORM=windows run reaches it.
 export STRIH_BOX="$STRIH"
 # issue 1317 part 3: the opt-in restart-survival mode plans the Windows per-box decode and has no
-# strih-lx port yet -- refuse it HERE, before any rig mutation, never after the whole preflight.
+# strih-snv port yet -- refuse it HERE, before any rig mutation, never after the whole preflight.
 strih_zero_loss_restart_preflight "$STRIH" || exit 2
 STREAM=10.77.9.204
 # #462 (EPIC #466 Topology v2): imag-nb — the NEW 60fps low-latency IMAG cutter of all 6 NDI
@@ -516,11 +523,11 @@ STRIH_USER="${STRIH_USER:-newlevel}"
 STRIH_PW="${STRIH_PW:-newlevel}"
 STREAM_USER="${STREAM_USER:-newlevel}"
 STREAM_PW="${STREAM_PW:-newlevel}"
-# issue 1351: bound every strih-touching [0/8] gate on the Linux-strih path (strih-lx = the M4
+# issue 1351: bound every strih-touching [0/8] gate on the Linux-strih path (strih-snv = the M4
 # notebook, 10.77.9.202) with `timeout`, so a wedged strih call fails FAST with a named
-# [0/8] strih-lx banner instead of a ~23-min silent [0/8] hang that aborts before RUN_ID is exported
+# [0/8] strih-snv banner instead of a ~23-min silent [0/8] hang that aborts before RUN_ID is exported
 # below (the #703 fail-closed guard then reporting "no verdict" with NO named stage). Resolved ONCE
-# here (before any [0/8] gate the static-anchor tests slice) via the strih-lx-preflight lib; a
+# here (before any [0/8] gate the static-anchor tests slice) via the strih-snv-preflight lib; a
 # Windows / other strih yields an EMPTY prefix so that path stays behaviorally byte-identical. It is
 # threaded via ${STRIH_LX_GATE_PREFIX:-} into the DanteSync NTP+PTP and dantesync version-parity gate
 # invocations below (the two heaviest strih-touching [0/8] gate calls).
@@ -678,6 +685,7 @@ esac
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
 stale_dante_artifact_warn "$OUTDIR"
+e2e_rundir_retention "$(dirname "$OUTDIR")" "$OUTDIR"
 # #359: wall-clock run start. The painter ground-truth CSV (gen_ts_ns = CLOCK_REALTIME epoch
 # ns under --wall-clock) is freshness-gated against this — a stale CSV whose first gen_ts is
 # hours off (run 354002 was 14.9h off) is REJECTED before it can corrupt the verdict.
@@ -863,7 +871,7 @@ echo "[0/8] obs64/AHK session-visibility gate — fail when strih/stream OBS (or
 # precedent below (`timeout` execvp()s its command directly, so it cannot invoke a shell FUNCTION
 # like win_ssh_run -- route through `bash -c`, re-sourcing the lib inside that subshell).
 SVG_SSH_TIMEOUT="${SVG_SSH_TIMEOUT:-30}"
-# issue 1351: strih-lx (Linux) never runs the Windows obs64/AHK CIM probe -- strih_platform
+# issue 1351: strih-snv (Linux) never runs the Windows obs64/AHK CIM probe -- strih_platform
 # resolves the branch; the Windows probe below is UNCHANGED (byte-identical) for the old
 # STRIH-SNV box / any other target. strih_linux_visibility_check lives in the sourced lib.
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
@@ -877,9 +885,9 @@ fi
 if [ -n "$_svg_strih_msg" ]; then
   echo "ERROR: [0/8] strih INVISIBLE: $_svg_strih_msg" >&2
   # issue 1317 part 3: the Windows strih relaunch planner arm is retired -- name the recovery that
-  # matches the strih's platform (the Linux strih-lx restarts its supervised user unit).
+  # matches the strih's platform (the Linux strih-snv restarts its supervised user unit).
   if [ "$(strih_platform "$STRIH")" = "linux" ]; then
-    echo "       Recovery: ssh ${STRIH_USER}@${STRIH} 'systemctl --user restart strih-obs.service'   # strih-lx supervised user unit (issue 1317)" >&2
+    echo "       Recovery: ssh ${STRIH_USER}@${STRIH} 'systemctl --user restart strih-obs.service'   # strih-snv supervised user unit (issue 1317)" >&2
   else
     echo "       Recovery: relaunch OBS in the strih box's operator session via its win-* MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
   fi
@@ -941,7 +949,7 @@ echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must AL
 # dantesync 1.9.0's ptp_phase_lock (phase_slew off by design) or a pre-1.9.0 node with phase_slew
 # on pass, a pre-1.9.0 node that would STEP (phase_slew off) or a phase lock that is not locked
 # HARD-fails here (->20), an unreadable discipline is INCOMPLETE (->11). The fleet date master
-# (strih-lx, date_authority=master) is graded on its own date step bound, always on.
+# (strih-snv, date_authority=master) is graded on its own date step bound, always on.
 DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 ${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
@@ -978,7 +986,7 @@ fetch_box_state() {
     "$STREAM") _bs_user="$STREAM_USER"; _bs_pw="$STREAM_PW" ;;
     *)         _bs_user="$STRIH_USER";  _bs_pw="$STRIH_PW" ;;
   esac
-  # issue 1317: the restart is class-resolved -- the Linux strih-lx runs a systemd --user unit, never
+  # issue 1317: the restart is class-resolved -- the Linux strih-snv runs a systemd --user unit, never
   # a Windows Scheduled Task, so it must not be sent the Windows restart line (the stream box stays
   # Windows even under a forced strih-platform override -- the lib resolver checks the strih host first).
   _bs_class="$(bundle_state_selfheal_class "$host" "$STRIH")"
@@ -1108,7 +1116,7 @@ if [ -n "$IMAG_GENLOCK_SHA" ]; then
   [ -n "$IMAG_SO_CSV" ] && AUTO_IMAG_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" linux-genlock.yml obs-genlock-linux-x86_64 \
     "$IMAG_GENLOCK_SHA" "$OUTDIR/imag-linux-manifest.json")"
 fi
-# issue 1351 follow-up: strih-lx (the Linux notebook) serves none of the Windows-only version-
+# issue 1351 follow-up: strih-snv (the Linux notebook) serves none of the Windows-only version-
 # integrity facets (the #826 OBS-identity set + distroav_dll_paths + ndi_runtime) -- pass
 # --strih-linux so the gate SKIPS them (loud SKIPPED, counted ok) instead of UNKNOWN-refusing,
 # while still verifying strih's genlock build via the platform-agnostic byte/capability/parity
@@ -1185,9 +1193,9 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
 else
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}@$IMAG_IP"
 fi
-# issue 1351: on the M4 Linux strih (strih-lx, 10.77.9.202) the --win arm reads dantesync via the
+# issue 1351: on the M4 Linux strih (strih-snv, 10.77.9.202) the --win arm reads dantesync via the
 # Windows quoted-exe-path ssh call, which returns nothing on Linux -> strih UNKNOWN -> the gate
-# refuses (exit 11). strih-lx answers `dantesync --version` on the bare command line (the --linux
+# refuses (exit 11). strih-snv answers `dantesync --version` on the bare command line (the --linux
 # arm's read, .claude/rules/dantesync-version-reading.md), so route strih through the --linux node
 # list there and pass only stream via --win. A Windows strih keeps strih+stream BOTH under --win
 # (byte-identical to the pre-1351 argv). Computed into DV_WIN_NODES so the SINGLE gate invocation is
@@ -1244,6 +1252,7 @@ stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the camera-box + painter 
 cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
   --linux "$CAMBOX_VERSION_LINUX" \
+  --other-venues \
   --candidate-pin "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$HERE/../Cargo.toml" | head -1)"
 
 # issue 1138: pre-gate auto-align of the cam2 STEADY-STATE painter (/usr/local/bin/frame-probe,
@@ -1794,6 +1803,8 @@ cambox_egress_pacing_e2e_report "$LEG_HEALTH_TARGETS" "$CAM_PW"
 echo "[0/8] optical head-end blur/shutter preflight — $CAMERA_NAME must not capture BLURRED (slow shutter/anti-flicker, #1141)"
 optical_preflight_assert "$CAM1_IP" root "$CAM_PW" "$CAMERA_NAME"
 
+echo "[0/8] stream program-audio preflight -- the stream program must carry the measurement signal ALONE, no music (issue 1421)"
+e2e_program_audio_preflight "$HERE" "$STREAM" || exit 1
 # cam1 v4l2 capture controls (#338/#312, range-aware since #744): apply the device's OWN
 # --list-ctrls default for saturation+contrast BEFORE the run. The old "sharp set" (saturation=0,
 # contrast=75) was meant to aid the optical dual-QR decode but HURT it (#312 run 312005:
@@ -4291,7 +4302,7 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # BEFORE the preview cycle starts, so the fetch below can skip straight past everything
   # older than this calibration window — never a blind `-Tail N` that can silently include
   # many minutes of unrelated prior activity. Issue 1360: both reads go through the ONE
-  # platform-resolved strih OBS-log reader (plain ssh on the Linux strih-lx, the verbatim
+  # platform-resolved strih OBS-log reader (plain ssh on the Linux strih-snv, the verbatim
   # PowerShell on a Windows strih). Sourced explicitly here for locality: it is already loaded
   # transitively (mv-reverify-escalate.sh near the top sources it), but this step must not depend
   # on that indirection.
@@ -4433,7 +4444,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "${QR_ALIGN:-1}" != "1" ] && ! measurement_
 fi
 
 # [4i/8align] #1003 floor-3 per-run camera alignment (owner rework 2026-08-20). The SIMULTANEOUS
-# painter-QR screenshot spread across every on-air strih camera (CAMERA_ALIGN_SET, INCLUDING cam4)
+# painter-QR screenshot spread across every on-air strih camera (CAMERA_ALIGN_SET, issue 1413: cam3 + the active)
 # is BOTH the alignment basis AND the owner's acceptance instrument ("ak spravím screenshot, musím
 # vidieť rovnaké monotonic a time v KAŽDOM QR"). This BLOCKING preflight measures the spread, applies
 # floor-3 pins (the slowest/max-transport camera -> pin 3, every other -> 3 + its relative delivery
@@ -4701,6 +4712,8 @@ else
   echo "    #887: could not resolve imag's HDMI-A-1 connector to a debugfs CRTC dir — skipping (report-only, never a run failure)"
 fi
 
+e2e_program_audio_watch_start "$HERE" "$OUTDIR"   # issue 1421: poll the program-audio guard while recording
+
 if [ "$ALL_CAMBOX" = "1" ]; then
   # #332: the all-cambox sweep now runs on the DEFAULT decode-on-stream path (VERDICT_ON_STREAM=1,
   # #193 — decode where the video lives, never pull the multi-GB recordings to dev1). The per-box
@@ -4774,6 +4787,7 @@ echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #17
 # #758 item 3 — disarm the in-run freeze watch now that the recording window has ended (its own
 # verdict is read further below, at recording-verdict time, from the poison file this leaves behind).
 live_freeze_watch_stop "$FREEZE_WATCH_PID_FILE"
+e2e_program_audio_watch_stop "$HERE" "$STREAM" "$OUTDIR" || exit 1   # issue 1421: foreign audio in the window = an invalid run
 # #178: the StopRecord→verdict region is RESILIENT. run 172046073 completed the recording
 # + StopRecord, then a set -e abort (a non-zero $(StopRecord) capture / a transient ssh /
 # an absent optional recording hitting a `[ -f ] && ...` guard) jumped straight to the
@@ -5354,14 +5368,14 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # stream extract below, and with imag's own extract further down) while default plan-print
   # mode still calls it in the FOREGROUND exactly as before (EXEC_STRIH_ARGS is empty there, so
   # the invocation text/behavior is unchanged from the pre-#703 call).
-  # issue 1351: strih-lx (Linux) has no win-* MCP path -- decode-in-place goes over plain
-  # ssh/scp via recording-verdict-on-strih-lx.sh (the imag-nb precedent), always executing for
+  # issue 1351: strih-snv (Linux) has no win-* MCP path -- decode-in-place goes over plain
+  # ssh/scp via recording-verdict-on-strih-snv.sh (the imag-nb precedent), always executing for
   # real (no plan-print mode, matching recording-verdict-on-imag.sh -- ssh/scp to a plain Linux
   # box is always allowed on this rig). STRIH_LX_REMOTE_OUT_DIR mirrors IMAG_REMOTE_OUT_DIR.
   STRIH_LX_REMOTE_OUT_DIR="${STRIH_LX_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}"
   run_strih_extract() {
     if [ "$(strih_platform "$STRIH")" = "linux" ]; then
-      STRIH_LX_BOX="$STRIH" "$HERE/recording-verdict-on-strih-lx.sh" \
+      STRIH_LX_BOX="$STRIH" "$HERE/recording-verdict-on-strih-snv.sh" \
         --verdict-bin "$VERDICT_BIN" --out-dir "$STRIH_LX_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
         --strih-rec "$STRIH_HOST_PATH" \
         -- --extract-partial strih --strih "$STRIH_HOST_PATH" --capture-fps "$STRIH_CAPTURE_FPS" \
@@ -5387,8 +5401,8 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   else
     run_strih_extract
   fi
-  # issue 1317 part 4: strih-lx pulls the partial + pixel proofs back over scp itself
-  # (recording-verdict-on-strih-lx.sh) -- only a Windows strih gets the MCP download plan.
+  # issue 1317 part 4: strih-snv pulls the partial + pixel proofs back over scp itself
+  # (recording-verdict-on-strih-snv.sh) -- only a Windows strih gets the MCP download plan.
   if [ "$(strih_platform "$STRIH")" = "linux" ]; then
     strih_lx_partial_pullback_note "$STRIH_PARTIAL" "$STRIH_PIXELS"
   else
@@ -5774,7 +5788,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "    verdict + partials + pixel-proofs above are the evidence that is KEPT; the source"
       echo "    recordings are re-derivable by re-running). NEVER a directory sweep — the EXACT"
       echo "    paths StopRecord returned for THIS run only:"
-      # issue 1317 part 4: strih-lx gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
+      # issue 1317 part 4: strih-snv gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
       if [ "$(strih_platform "$STRIH")" = "linux" ]; then
         strih_lx_recording_cleanup_note "      " "$STRIH" "${STRIH_HOST_PATH:-<unknown>}"
       else
@@ -5796,7 +5810,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     exit "$GATE"
   fi
 
-  strih_planner_holder_note "$STRIH"   # issue 1317 part 4: on strih-lx only 8/8b is the holder's
+  strih_planner_holder_note "$STRIH"   # issue 1317 part 4: on strih-snv only 8/8b is the holder's
   echo "    #186 proof dirs) to dev1, then runs the 8/8d merge above on dev1. A recording is NEVER"
   echo "    copied box-to-box nor to dev1 — only the small partial JSONs (+ the painter CSV + the"
   echo "    handful of flagged-frame PNGs) move (#208/#186/#462)."
@@ -5815,7 +5829,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     echo "    verdict + partials + pixel-proofs above are the evidence that is KEPT; the source"
     echo "    recordings are re-derivable by re-running). NEVER a directory sweep — the EXACT"
     echo "    paths StopRecord returned for THIS run only:"
-    # issue 1317 part 4: strih-lx gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
+    # issue 1317 part 4: strih-snv gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
     if [ "$(strih_platform "$STRIH")" = "linux" ]; then
       strih_lx_recording_cleanup_note "      " "$STRIH" "${STRIH_HOST_PATH:-<unknown>}"
     else
@@ -5903,7 +5917,7 @@ if [ -s "$REPORT_JSON" ]; then
   else
     echo "#652: verdict JSON secured at $REPORT_JSON — free rig disk by deleting ONLY this run's"
     echo "own strih+stream recordings (never a sweep — the EXACT StopRecord paths for THIS run):"
-    # issue 1317 part 4: strih-lx gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
+    # issue 1317 part 4: strih-snv gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
     if [ "$(strih_platform "$STRIH")" = "linux" ]; then
       strih_lx_recording_cleanup_note "  " "$STRIH" "${STRIH_HOST_PATH:-<unknown>}"
     else

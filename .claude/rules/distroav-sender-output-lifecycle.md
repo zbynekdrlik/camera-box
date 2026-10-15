@@ -50,7 +50,7 @@ PGM is pinned; PVW + filters still reshuffle (mitigated by the issue-1181 dev1 p
 
 ## Linux: a TIME_WAIT on :5961 from the previous OBS walks the pin to :5962 (issue 1363)
 
-On strih-lx the reserve AND the adopt both ran (`reserved the first NDI port …` / `adopted the
+On strih-snv the reserve AND the adopt both ran (`reserved the first NDI port …` / `adopted the
 port-reserved main NDI sender …` in the OBS log) and the program still landed on :5962, with nothing
 listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
 
@@ -62,7 +62,7 @@ listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
   :5961, and every sender shifts up by one. On **Windows** a plain `bind()` succeeds over TIME_WAIT
   connections, which is why the pin held on the Windows strih.
 - Whether a TIME_WAIT is left depends on which side of each :5961 connection closed first at
-  shutdown (timing-dependent). strih-lx history 23.9.2026: gaps of 35 s and 45 s kept :5961, 36.8 s
+  shutdown (timing-dependent). strih-snv history 23.9.2026: gaps of 35 s and 45 s kept :5961, 36.8 s
   and 59.0 s shifted to :5962. A shift only ever happens inside the 60 s window.
 - libndi 6.3.2 has no config key for a sender port (the full `ndi.*` key list: groups, networks,
   rudp/tcp/unicast/multicast send+recv enable, codec, log, machinename, vendor, sourcefilter). A
@@ -99,8 +99,8 @@ listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
 
 ## IMPLEMENTED (issue 1363, option C): Linux linger-0 + immediate AF_UNSPEC reset before every sender destroy — `ndi-sender-port.{h,cpp}`
 
-Live on strih-lx only after the FULL strih bundle deploy + an OBS relaunch within 60 s of the
-previous stop shows `STRIH-LX (2ME PGM)` on :5961 in avahi AND the OBS log carries the
+Live on strih-snv only after the FULL strih bundle deploy + an OBS relaunch within 60 s of the
+previous stop shows `STRIH-SNV (2ME PGM)` on :5961 in avahi AND the OBS log carries the
 `ndi-sender-port: TCP :5961 ('2ME PGM'): N connection(s) set to close with RST` INFO line from
 the previous session's stop (proof the real OBS SIGTERM shutdown runs the stop/filter-destroy hooks
 while libndi's sockets are still open — the dev1 repro used a libndi harness, not OBS).
@@ -120,11 +120,11 @@ while libndi's sockets are still open — the dev1 repro used a libndi harness, 
   (`ndi_is_sender_band_port`, `NDI_RECEIVER_FIRST_TCP_PORT 6960`): the FIRST `send_create` of a
   process also opens libndi's `:5960` messaging listener (below the band), and — the part-3 trap —
   a libndi RECEIVER that pulls a REMOTE source opens its OWN listener on **:6960+** from a libndi
-  thread while it connects. On strih-lx, OBS holds :6961..:6973, one per camera receiver. On dev1,
+  thread while it connects. On strih-snv, OBS holds :6961..:6973, one per camera receiver. On dev1,
   4 receivers pulling a dev2 source listed :6961, :6962, a TRANSIENT :6960, then :6963. A local
   (127.0.0.1 / own-IP) source opens none, which is why a single-box repro never sees it. Those
   appear on OTHER threads, so the create mutex cannot keep them out of the diff. Before part 3,
-  the MULTIVIEW/Grading creates on strih-lx were ambiguous on EVERY start. Two new band ports stay
+  the MULTIVIEW/Grading creates on strih-snv were ambiguous on EVERY start. Two new band ports stay
   `NDI_LISTEN_PORT_AMBIGUOUS` (never a guess). An unidentified sender logs its OWN label
   `PORTID-1363 - ndi-sender-port: could not identify … (<reason>)`, and the reason comes from the
   pure `ndi_listen_port_failure_text`: unreadable / more than one / no new listener. That sender
@@ -162,7 +162,7 @@ while libndi's sockets are still open — the dev1 repro used a libndi harness, 
   failed`. K > 0 raises it to a WARNING, and then linger-0 is the only guard. One possible cause:
   a kernel that carries "tcp: deny tcp_disconnect() when threads are waiting" without the later
   "allow again" fix returns EBUSY while a libndi thread waits on the socket. dev1's kernel 7.0 reset
-  every connection in the repro. Check the strih-lx log for `reset failed` after a deploy.
+  every connection in the repro. Check the strih-snv log for `reset failed` after a deploy.
 - NOT covered (a TIME_WAIT can still form; harmful only on a relaunch within 60 s): a connection
   libndi closes by itself DURING the session (not at destroy). A socket already IN TIME_WAIT is past
   reach.
@@ -177,7 +177,7 @@ while libndi's sockets are still open — the dev1 repro used a libndi harness, 
   `/usr/lib/ndi/libndi.so.6.3.2`, private group `t1363-private`, two processes back to back with a
   receiver connected (the lane's `obs_sim.cpp`): control PGM 5963 / OTHER 5964, fix 5961 / 5962; a
   same-process destroy+recreate keeps its port with the abort, walks up without it. The part-3
-  shape (`obs_sim2.cpp`) reproduces strih-lx's back-to-back creates. It creates 5 senders about
+  shape (`obs_sim2.cpp`) reproduces strih-snv's back-to-back creates. It creates 5 senders about
   40 ms apart while a thread creates 12 receivers pulling a REMOTE private source on another box
   (dev2: copy a probe binary + `NDI_LIB=/usr/lib/ndi/libndi.so.6`, libndi 6.3.1 there). Each
   receiver opens a :6960+ listener, which is the race. Use a CAPTURING viewer (`recv_capture_v3` in a

@@ -42,7 +42,7 @@
   the same list through a GUI.
 
 .PARAMETER Ips
-  The comma-separated sender IP list to add. Default: the pinned rig list (strih-lx + stream). A list
+  The comma-separated sender IP list to add. Default: the pinned rig list (strih-snv + stream). A list
   that names a -RemoveIps entry is refused.
 
 .PARAMETER RemoveIps

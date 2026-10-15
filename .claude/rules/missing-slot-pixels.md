@@ -45,10 +45,10 @@ NodeSpec `source`. The cap (`MISSING_SLOT_PIXELS_CAP`, default 12) counts SLOTS,
 
 ## Per box
 
-- **strih-lx (Linux)**: one ssh bash script (`missing_slot_pixels_linux_script`, every dynamic value
+- **strih-snv (Linux)**: one ssh bash script (`missing_slot_pixels_linux_script`, every dynamic value
   `%q`-quoted — OBS file names have spaces) probes the size, then runs both stages at the SAME idle
   priority as the on-box decode: `missing_slot_pixels_lowprio_snippet` is byte-identical to
-  `recording-verdict-on-strih-lx.sh`'s `LOWPRIO_SNIPPET` (a test pins the two equal; issue 1354 —
+  `recording-verdict-on-strih-snv.sh`'s `LOWPRIO_SNIPPET` (a test pins the two equal; issue 1354 —
   a P-core bulk decode relock-storms the live NDI receivers). Remote dir
   `$STRIH_LX_REMOTE_OUT_DIR/missing-slot-pixels-strih-<RUN_ID>`, scp -r back, then the remote PNGs
   and the dir are removed (never a sweep: our own run-keyed dir, `rm -f` of its `frame-*.png`, then

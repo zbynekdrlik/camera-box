@@ -1,7 +1,7 @@
 //! issue 1361 (slice: the fresh-install gaps, design comment 5830231872), G2 -- the ONE shared
 //! RemoteOS MCP installer `scripts/lib/remoteos-mcp.sh`, used by setup-strih step 10, setup-imag
 //! step 23 and setup-device STEP 17b: the project's GitHub API tarball (the GH token on curl's
-//! STDIN, never argv) pip-installed into `/opt/remoteos-mcp-venv`, the live strih-lx unit shape with
+//! STDIN, never argv) pip-installed into `/opt/remoteos-mcp-venv`, the live strih-snv unit shape with
 //! the key in a 0600 EnvironmentFile, idempotent, graded by verify-strih item 8.
 //!
 //! G1 lives in `tests/obs_box_baseline_1357.rs`; G3 + G4 in `tests/fresh_install_gaps_1361.rs`.
@@ -81,7 +81,7 @@ fn remoteos_lib_is_source_only_and_defines_its_api() {
     assert!(err.is_empty(), "sourcing must be silent: {err}");
 }
 
-/// The desktop unit is the live strih-lx unit (read 25.9.2026) with ONE change: the key moved out of
+/// The desktop unit is the live strih-snv unit (read 25.9.2026) with ONE change: the key moved out of
 /// the world-readable ExecStart into a 0600 EnvironmentFile (remoteos reads REMOTEOS_AUTH_KEY).
 #[test]
 fn remoteos_desktop_unit_is_the_live_strih_lx_shape_with_the_key_moved_out() {
@@ -165,7 +165,7 @@ fn remoteos_paths_follow_their_overrides() {
     );
 }
 
-/// Review round 1: the source is PINNED to the commit the live strih-lx venv runs (pin-not-latest,
+/// Review round 1: the source is PINNED to the commit the live strih-snv venv runs (pin-not-latest,
 /// like the Downstream Keyer), so a deploy never silently installs whatever upstream `main` is.
 #[test]
 fn remoteos_source_is_the_github_api_tarball_of_the_pinned_commit() {
@@ -502,7 +502,7 @@ fn remoteos_install_first_run_then_an_idempotent_rerun() {
     );
 }
 
-/// A box provisioned by the upstream installer / the strih-lx hand fix has the key only in the
+/// A box provisioned by the upstream installer / the strih-snv hand fix has the key only in the
 /// unit's ExecStart: the migration must keep THAT key (dev1's .mcp.json holds it).
 #[test]
 fn remoteos_install_keeps_a_legacy_unit_key() {

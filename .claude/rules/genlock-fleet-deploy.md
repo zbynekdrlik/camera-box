@@ -2,16 +2,119 @@
 paths:
   - "scripts/deploy-genlock-fleet.sh"
   - "scripts/lib/genlock-markers.sh"
+  - "scripts/lib/genlock-stats-abi.sh"
   - "scripts/lib/genlock-fleet-boxes.sh"
-  - "scripts/lib/strih-lx-deploy.sh"
+  - "scripts/lib/strih-snv-deploy.sh"
   - "scripts/lib/genlock-plugin-deploy.sh"
+  - "scripts/lib/obs-clean-close-win.sh"
+  - "scripts/lib/mv-reverify-escalate.sh"
 ---
 
 **Line budget (issue 1372):** `tests/deploy_genlock_fleet.rs` pins `deploy-genlock-fleet.sh` under
 1000 lines. The FULL-mode plugin PowerShell blocks (distroav to its ProgramData load path, the paced
 obs-vban backup + byte-verify) live in `scripts/lib/genlock-plugin-deploy.sh` as pure printers
 (`genlock_plugin_backup_ps` / `genlock_plugin_deploy_ps MODE`); add a new plugin's block there,
-never inline in the main script.
+never inline in the main script. It sits at 997 lines since issue 1302: the stats-ABI blocks live in
+`scripts/lib/genlock-stats-abi.sh` for the same reason.
+
+## A FAST deploy refuses an obs.dll with another stats ABI (issue 1302, design 6028838843, ROZHODNUTÉ 6030159870)
+
+`--fast` swaps obs.dll alone and keeps the frontend (obs64.exe) of the LAST full-bundle deploy. The
+frontend allocates `struct obs_genlock_stats` AND `struct obs_genlock_output_stats` on its stack and
+passes no size to `obs_source_get_genlock_stats` / `obs_output_get_genlock_stats`, so an obs.dll that
+fills a bigger struct writes past the frontend's copy and OBS crashes. Live 7.10.2026: stream ran a
+stats-v3 build (`a33d91a8e`, its last deploy a FAST one: the box's `BUNDLE_MANIFEST.json` 08:36, its
+SHA marker 14:58) while dev carried v4.
+
+- **The ABI is a PAIR: both struct versions.** The planner carries it as ONE value
+  `<stats>:<output_stats>` (e.g. `4:1`; `genlock_stats_abi_part` / `genlock_stats_abi_is_pair`), so no
+  pass-through call site in `deploy-genlock-fleet.sh` changed (line budget). The box marker
+  `GENLOCK_STATS_ABI.txt` holds it as two lines: the stats version, then `output_stats=<N>`.
+- **Every full-bundle deploy the planner drives records the frontend's pair** in
+  `GENLOCK_STATS_ABI.txt` next to `GENLOCK_BUILD_SHA.txt`:
+  - The Windows program removes it at step (3c), right before the copy (`genlock_stats_abi_clear_ps`;
+    fail-closed, `-ErrorAction Stop`, so a marker it cannot remove stops the program before the copy),
+    so a copy that fails half way reads as "missing".
+  - It writes the new pair at step (5b) (`genlock_stats_abi_marker_ps`, after the other markers, through
+    `Write-MarkerAtomic` with a two-element array: one CRLF line each).
+  - The Linux legs write it through `genlock_write_markers`' 5th argument, the pair. The imag program
+    passes it. strih-snv gets it as `bundle/GENLOCK_STATS_ABI.txt` in the marker format, staged by the
+    planner after `strih_lx_prepare` (`genlock_stats_abi_stage`). `setup-strih.sh` reads it back from
+    the STAGE with `genlock_stats_abi_pair_from_marker` (it sources `genlock-stats-abi.sh`), never from
+    `/opt/obs-genlock`, which still holds the previous deploy's marker.
+  - `setup-imag.sh`'s inline copy of `genlock_write_markers` does the same, behaviour for behaviour
+    (pinned by the pytest); its own provisioning install cannot name the pair, so it REMOVES the marker.
+  - Anything but a complete pair (a bare stats version too) removes the marker, with a note: a marker
+    naming one struct would let a fast deploy through unchecked on the other.
+- **The versions come from the deployed build's own obs.h.** `genlock_stats_abi_resolve` reads
+  `vendor/obs-studio/libobs/obs.h` AT the deployed commit from the checkout's object store (`show
+  <sha>:<path>`, plan AND execute mode, before any box is touched) and takes the ONE
+  `#define OBS_GENLOCK_STATS_VERSION` and the ONE `#define OBS_GENLOCK_OUTPUT_STATS_VERSION`.
+  - Execute mode first fetches that ONE commit from origin when the stats define is unreadable (the
+    commit is not in the checkout). Full 40-hex SHA only, `GIT_TERMINAL_PROMPT=0`, 120 s bound, git's
+    own message kept on stderr when it fails. Plan mode never fetches, so a test's short SHA never
+    reaches the network.
+  - Still unreadable (a missing / duplicate / malformed define, named in the message): a `--fast` that
+    swaps an obs.dll is REFUSED (exit 3: "fetch the commit or deploy --full" when the commit is not
+    in the checkout, "deploy --full" when its stats version read fine and only the output-stats
+    define is missing, since a fetch cannot help there). That is a box with a win-* MCP in the list:
+    `fleet_boxes_swap_obs_dll` in the per-box table, the one predicate main's own Windows switch reads
+    too.
+  - Any other run warns and the full-bundle programs REMOVE the box's marker, so a later fast deploy
+    refuses until a full deploy records a known pair.
+  - A readable version is carried as it is, whatever its value: the plan-time stopgap that refused a
+    Windows `--fast` unless the output-stats version was 1 (`GENLOCK_STATS_ABI_OUTPUT_COVERED`) is
+    retired, because the box gate compares that version now.
+- **The FAST program gates at step (0f)**, right after the `(0)` path preflight and BEFORE the
+  issue-1367 obs-websocket read, the power plan, AutoHotkey64, the keep-alive tasks, the stop, the
+  backup and the copy.
+  - Each struct that is not proven equal adds one part, the stats struct first, joined with `; `:
+    `FAST DEPLOY REFUSED: frontend stats ABI vN, new obs.dll vM; frontend output stats ABI vK, new
+    obs.dll vL: a full-bundle deploy is required. Nothing on this box was changed.` Then exit 13
+    (`Write-Host`, never `Write-Error`, so the number survives `$ErrorActionPreference = 'Stop'`).
+  - The box side of a part reads `missing (no GENLOCK_STATS_ABI.txt)`, `unreadable (line 1 of
+    GENLOCK_STATS_ABI.txt is not a version)`, `missing (no output_stats line in GENLOCK_STATS_ABI.txt)`
+    (a one-line marker written before ROZHODNUTÉ 6030159870), `unreadable (line 2 of
+    GENLOCK_STATS_ABI.txt is not output_stats=<version>)` or `unreadable (GENLOCK_STATS_ABI.txt has
+    more than two lines)` (fail-closed: a later format never passes an older gate).
+  - A FAST deploy leaves the marker as it is: it names the frontend, which it keeps.
+- **A reference decision and its transcription.** `genlock_fast_abi_verdict PAIR present|missing
+  TEXT` is the reference rule (no production path calls it); the (0f) PowerShell block, which is what
+  decides on the box, transcribes it. The marker is read as raw bytes, ASCII-decoded, split on LF,
+  every ASCII whitespace inside a line removed, blank lines skipped, `-cmatch '^[1-9][0-9]{0,8}$'` on
+  line 1 and `-cmatch '^output_stats=([1-9][0-9]{0,8})$'` on line 2 (case-sensitive like the bash
+  `=~`), compared as strings. The bash side is locale-independent too (review round 1):
+  `_genlock_stats_abi_marker_fields` strips the explicit ASCII set ` \t\r\v\f`, and every bash
+  `=~` pattern spells its sets out (`[123456789][0123456789]{0,8}`; the hex SHA set and the
+  define-name letters likewise). A bracket RANGE such as `[1-9]` follows the locale's collation, and
+  under en_US.UTF-8 it also matches Arabic-Indic, superscript and fullwidth digits the gate refuses;
+  a pytest refuses any `X-Y` range inside a bracket on a bash `=~` line of the stats-ABI code.
+  `genlock_stats_abi_pair_from_marker` reads a NUL byte as `?` (bash `read` would drop it silently;
+  the gate reads it as a non-digit), and an unreadable stdin reads as no marker, never an abort of
+  its caller. A pair that reaches the
+  builders is validated part by part first, so a quote in an operator `--sha` never reaches either
+  program.
+- **A struct change must bump its version** (the rule in obs.h's comment). The gate compares
+  versions, so the pytest pins each struct's body (comments stripped, the first 16 hex digits of its
+  sha256) to its version: a field change without a bump fails CI.
+- **Tests:** `tests/python/test_genlock_stats_abi_1302.py`:
+  - the reader (the repo's obs.h, a throwaway two-commit repo whose working tree differs), the
+    verdict vectors (each struct alone, both, the one-line marker, malformed lines, partial pairs);
+  - the (0f) block RUN in pwsh on 31 marker/pair vectors (incl. non-ASCII digits and NUL bytes)
+    against the bash verdict, run in a UTF-8 locale (en_US.UTF-8 where the box has it), same result,
+    same text; and the (5b) writer run in pwsh feeding the (0f) gate;
+  - the emitted program order for stream + resolume, a pwsh parse + PS-7-only token scan of every
+    program, the whole FAST program run in pwsh against a box without the right marker (exit 13, no
+    file changed);
+  - the `--plan` CLI, the execute-mode order and the Linux legs (the writer, the staged file, the
+    read-back, the round trip to the install dir).
+
+  A harness that runs bash with a variable value passes it as an ARGUMENT (`"$1"`), never inside
+  the script text: the first draft interpolated an injection vector and its own `rm -rf /` ran (GNU
+  rm refused the root). Injection vectors print `INJECTED`, never a destructive command.
+- **Deploy note:** the FIRST `--fast` on every box is refused until one full-bundle deploy has
+  recorded the two-line marker. A box whose marker was written before this change (one line) refuses
+  as "missing output stats" until its next full deploy. That is intended.
 
 # One canonical genlock deploy path across the whole rig (#789 bod 4 + bod 5)
 
@@ -26,18 +129,18 @@ Full-path E2E at the `genlock_parity` preflight (the recurring #923/#932 pain).
 - Pure builder functions emit each box's program; unit-tested by sourcing (`tests/deploy_genlock_fleet.rs`).
 - **Windows (strih/stream) is EMIT-ONLY** — a bash script cannot drive the `win-*` MCP
   (`win-ssh-vs-mcp` HARD rule), so it PRINTS the PowerShell program the agent pastes into the box's
-  MCP Shell. **imag and strih-lx are Linux** (file copy + CLI = Context B), so execute mode actually
-  ssh-deploys them (strih-lx: `scripts/lib/strih-lx-deploy.sh`, issue 1317 part 6 — below).
+  MCP Shell. **imag and strih-snv are Linux** (file copy + CLI = Context B), so execute mode actually
+  ssh-deploys them (strih-snv: `scripts/lib/strih-snv-deploy.sh`, issue 1317 part 6 — below).
 - `--plan --run-id <id> --sha <headSha> --stage <dir> [--full|--fast] [--boxes …]` prints the whole
   plan offline (no network) — this is the Tier-0-tested surface. Execute mode (`--run-id …`) resolves
   + downloads + deploys live (supervisor-driven; the download/scp/ssh glue is untestable offline).
 
-## The strih is strih-lx; the Windows `strih` arm is RETIRED (issue 1317 part 3, M4 cut-over 20.9.2026)
+## The strih is strih-snv; the Windows `strih` arm is RETIRED (issue 1317 part 3, M4 cut-over 20.9.2026)
 
-The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-lx. So:
+The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-snv. So:
 
-- **Default fleet = `strih-lx,stream`** (canonical order `strih-lx,stream,imag,resolume`). `--boxes
-  strih` is REFUSED by name ("RETIRED … the strih is strih-lx"), and every per-box Windows function
+- **Default fleet = `strih-snv,stream`** (canonical order `strih-snv,stream,imag,resolume`). `--boxes
+  strih` is REFUSED by name ("RETIRED … the strih is strih-snv"), and every per-box Windows function
   (`fleet_box_mcp` / `fleet_box_ip` / `fleet_box_ahk_script` / `fleet_box_ahk_prefer`) returns 2 for
   it. `build_windows_deploy_program BOX … HAS_AHK=1` for a box with no AHK identity is a loud rc 2 —
   it used to fall back silently to the retired strih's `D:\_APPS` path.
@@ -48,51 +151,55 @@ The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-lx. So:
   row. The move was byte-neutral for stream / resolume / imag (plan output diffed identical, full +
   fast); keep `tests/deploy_genlock_fleet.rs`'s `per_box_table_lives_in_the_shared_lib_1317` green
   (no inline redefinition, no `win-strih` / `.202` in the lib, deploy script < 1000 lines).
-- **The strih-lx plan is `emit_strih_lx_plan`, NOT `emit_imag_plan`.** The old arm printed the imag
-  program under a `box=imag` header — it restarts `imag-obs.service`, a unit strih-lx does not have,
-  so it would have failed AFTER installing bytes. strih-lx installs the strih FULL artifact
+- **The strih-snv plan is `emit_strih_lx_plan`, NOT `emit_imag_plan`.** The old arm printed the imag
+  program under a `box=imag` header — it restarts `imag-obs.service`, a unit strih-snv does not have,
+  so it would have failed AFTER installing bytes. strih-snv installs the strih FULL artifact
   (`obs-genlock-linux-x86_64-strih`, also under `--fast` — fast is Windows-only) into `/usr` through
   `setup-strih.sh` (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is
   supervised by `strih-obs.service`. **Every plan line is a `#` comment** (the issue-1295 saved-.ps1
   parse rule holds for a mixed plan).
 
-## strih-lx EXECUTE arm (issue 1317 part 6) — `scripts/lib/strih-lx-deploy.sh`
+## strih-snv EXECUTE arm (issue 1317 part 6) — `scripts/lib/strih-snv-deploy.sh`
 
-`deploy-genlock-fleet.sh --run-id <id> --boxes strih-lx` deploys the production strih end to end;
+`deploy-genlock-fleet.sh --run-id <id> --boxes strih-snv` deploys the production strih end to end;
 it replaced the supervisor's ad-hoc scratch script, which twice failed half-silently (the box's
 `/tmp` is a 7.5 GB tmpfs, each stage ~2.2 GB, rsync died `Disk quota exceeded` rc 11 and the old
 build kept running with nothing refusing). The arm is a sourced lib (the deploy script has a
 < 1000-line budget pinned by `per_box_table_lives_in_the_shared_lib_1317`), and the `--plan` arm
 prints the SAME remote-command builders (`strih_lx_plan_steps`). Each failure =
-`ERROR: [strih-lx <step>] failed (rc=N): …`; a failed strih-lx writes NO fleet-log line.
+`ERROR: [strih-snv <step>] failed (rc=N): …`; a failed strih-snv writes NO fleet-log line.
 
 **Two phases — every requested box resolves BEFORE any box changes.** `strih_lx_prepare` (exit 3, box
 untouched) runs before the Windows and imag resolution; `strih_lx_apply` (exit 4) runs after them and
-before the imag ssh deploy. A default `strih-lx,stream` run with no Windows build at the SHA can
+before the imag ssh deploy. A default `strih-snv,stream` run with no Windows build at the SHA can
 therefore never leave the production strih on a different commit than stream (genlock_parity).
-The Windows paste-programs are printed only AFTER strih-lx VERIFIED (nobody pastes stream while the
-strih apply can still fail), and the verified strih-lx gets its OWN fleet-log line at once (the rest
+The Windows paste-programs are printed only AFTER strih-snv VERIFIED (nobody pastes stream while the
+strih apply can still fail), and the verified strih-snv gets its OWN fleet-log line at once (the rest
 of the fleet is logged at the end), so a later imag failure never hides the strih deploy.
 
 1. **prepare** — the `linux-genlock.yml` run at the anchor SHA; the artifact is REFUSED unless its
    `GENLOCK_BUILD_SHA.txt` is the canonical SHA and its `BUNDLE_MANIFEST.json` carries the
    `lib/x86_64-linux-gnu/libobs.so.30` sha256 (the read-back needs it). The dial host must be a dotted
-   IPv4 (`strih_lx_is_ipv4`; the fleet row is one, `strih-lx.lan` does not resolve on dev1, a
+   IPv4 (`strih_lx_is_ipv4`; the fleet row is one, a DNS name is refused, a
    flag-shaped / mistyped override is refused). The box's OWN address is not the dial host: since
    issue 1361 setup-strih.sh reads it from the box's fact file, so the runner exports no STRIH_LX_IP.
    The provisioning tree is the COMMITTED `scripts/ systemd/ intercom/` + `vendor/realtek-r8152` (the
-   rig NIC driver source setup-strih step 1b builds through DKMS, issue 1391) of the checkout (the
-   archive of HEAD — uncommitted edits never ship) + a generated `run-setup.sh`, and it must carry
-   `scripts/strih-boxes/strih-lx.env` plus the intercom routing file that fact file's
+   rig NIC driver source setup-strih step 1b builds through DKMS, issue 1391) + every
+   `STRIH_PROGRAM_AUDIO_FILES` entry outside those dirs (the two vendored av-sync-dock headers the
+   step-16e decoder shim builds from, issue 1404) of the checkout (the archive of HEAD — uncommitted
+   edits never ship) + a generated `run-setup.sh`. The ONE list is `strih_lx_tree_paths`: a new
+   file setup-strih reads outside `scripts/` goes into it, or the deploy fails mid-install after the
+   OBS stop (live 8.10.2026: step 16e, `camera-box-audio.hpp not found`). The tree must carry
+   `scripts/strih-boxes/strih-snv.env` plus the intercom routing file that fact file's
    `STRIH_INTERCOM_CONFIG` names (read with sed, never sourced on dev1); it is the checkout's tree,
    not the bundle's SHA (a scripts-only fix never triggers a genlock build; setup-strih.sh is box
    config — the same split as imag's `genlock-markers.sh`). Token: `STRIH_LX_GH_TOKEN` (read-only)
    else `gh auth token`.
 2. **preflight** — the box's `hostname` must equal the fact file's `STRIH_HOSTNAME` (a dial override
-   that reaches another box would otherwise be provisioned AS strih-lx: its hostname, IP, janus
+   that reaches another box would otherwise be provisioned AS strih-snv: its hostname, IP, janus
    `local_ip`, NTP-master role), and no previous `setup-strih.sh` may still run (`pgrep -x`): the sweep
    would delete the stage it is reading and a second installer would race it. LAST, immediately
-   before the first mutation: the shared rig-busy guard `stray_session_check_assert` at the strih-lx
+   before the first mutation: the shared rig-busy guard `stray_session_check_assert` at the strih-snv
    dial IP + the obs-fleet stream host — strih or stream streaming/recording = exit 4 naming what is
    live, nothing changed (`.claude/rules/rig-mutation-broadcast-guard.md`, third caller). The SAME
    guard runs again right before step 5's stop (exit 4 in step `stop`, OBS NOT stopped). prepare
@@ -105,7 +212,7 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    from the committed tree, at the deploy's own host. The deploying stage is re-checked; any other
    stage dir still present is a loud WARNING (the rsync is the hard gate).
 4. **stage** — `rsync -a --delete --timeout=120` bundle → `/tmp/genlock-stage-<sha>/bundle/`, tree →
-   `…/repo/` (ONE per-sha dir the next sweep removes whole; the old fixed `/tmp/strih-lx-deploy-repo`
+   `…/repo/` (ONE per-sha dir the next sweep removes whole; the old fixed `/tmp/strih-snv-deploy-repo`
    is gone). **OBS is still running** — an rsync failure exits 4 BEFORE anything is stopped.
 5. **stop** — delegated to `/usr/local/bin/strih-obs-stop.sh` (plain mode = `systemctl --user stop`,
    so the unit `ExecStop` runs and `Restart=on-failure` stays quiet) + a bounded wait for the unit AND
@@ -113,11 +220,17 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    is the unit's contract. Not stopped in 30 s = exit 4, nothing installed, best-effort start.
 6. **setup** — `sudo -k -S … bash <stage>/repo/run-setup.sh`, stdin = the sudo password line then
    `ghtoken:<token>`. The runner reads the token line (skipping a password line a NOPASSWD sudo left
-   unread), exports `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle`, and re-execs itself `setsid nohup`
-   to run `setup-strih.sh --box strih-lx` DIRECTLY (the explicit fact-file box, issue 1361) and write
-   `<stage>/setup-strih.rc`; dev1 polls it
-   (default 45 min). An ssh drop cannot kill the install mid-apt; the token is never an argv or a
-   file. **OBS is never started over a still-running installer**: a launch whose ssh returned
+   unread), writes `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle` (+ `CAM_PW` / `STRIH_NDI_PEER` when
+   set) into a 0600 `<stage>/.runner.env`, and re-execs itself as a SYSTEM transient unit
+   (`systemd-run --unit=strih-snv-setup-<epoch> --collect`) to run `setup-strih.sh --box strih-snv`
+   DIRECTLY (the explicit fact-file box, issue 1361) and write `<stage>/setup-strih.rc`; the child
+   sources the env file and deletes it at once; dev1 polls the rc
+   (default 45 min). An ssh drop cannot kill the install mid-apt; the token is never an argv.
+   **Never `setsid nohup` (issue 1411):** setsid leaves the child in the ssh session scope under
+   `user-1000.slice`; on a FRESH box step 11's desktop purge ends the last GUI session, systemd stops
+   the user slice and kills setup-strih mid-apt with no rc (new strih notebook, 11.10.2026 --
+   journal `session-N.scope: Killing process … (setup-strih.sh) with signal SIGTERM`). A killed
+   apt leaves dpkg half-configured: `dpkg --configure -a` before the re-run. **OBS is never started over a still-running installer**: a launch whose ssh returned
    non-zero while setup-strih.sh runs is THIS deploy's detached installer (the preflight saw none), so
    the deploy follows it through the rc poll (WARNING, not a failure — never the strih left dark); an
    rc timeout with the installer still running (or the box unreachable) is exit 4 "wait for
@@ -129,7 +242,9 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    in setup-strih.sh), never on "next boot", which the baseline prints on routine lines every run. A
    settle time the observable read-back window `(polls - 1) x secs` cannot outlast is refused in
    prepare (exit 3).
-7. **start + verify** — touch `<stage>/obs-start.marker`, start the unit, then poll (default 24 x 10 s)
+7. **start + verify** — touch `<stage>/obs-start.marker`, start the unit, then the issue-1399 session apps
+   (`STRIH_SESSION_APP_UNITS`, setup-strih installs them enable-only; the remote rc stays OBS's, an app
+   that does not start is a WARNING, `.claude/rules/strih-session-apps.md`), then poll (default 24 x 10 s)
    and REFUSE unless the polls pass `strih_lx_deploy_verdict` (marker == canonical,
    installed `libobs.so.30` sha256 == the manifest's — the BYTES, not only the marker, since `:8899`
    serves the same marker file — unit `active`, `render tick ENABLED` in an OBS log newer than the
@@ -151,7 +266,7 @@ the step commands' distinguishing substrings: `pgrep -x setup-strih.sh`, `--loca
 `GENLOCK_BUILD_SHA.txt`, `--user start`), plus the generated runner (root check stripped for the test)
 and `--stages-only` on real temp dirs. A test SHA must stay SHORT hex — a 40-hex literal trips the
 secret-staging hook. Remaining supervisor step after a green execute: the WS filter-enum survival
-check (printed as ACCEPTANCE in the plan); after a reboot-pending run, `verify-strih.sh --box strih-lx`
+check (printed as ACCEPTANCE in the plan); after a reboot-pending run, `verify-strih.sh --box strih-snv`
 after the reboot.
 
 ## GOTCHA — setup-strih.sh's own final gate FAILS while the deploy has OBS stopped (issue 1317 part 6)
@@ -163,10 +278,10 @@ there → setup exits 1 after EVERY install step succeeded (the old scratch scri
 ignored the rc). The arm therefore accepts exactly that failure — rc 1 AND the step-17 line `verify-
 strih.sh acceptance gate did not pass` among the log's last lines (`fail()` exits at the first
 failure, so nothing else failed) — starts OBS, passes the read-back, and then runs `sudo
-verify-strih.sh --box strih-lx` from the staged tree ITSELF as the acceptance gate. Its failure is
+verify-strih.sh --box strih-snv` from the staged tree ITSELF as the acceptance gate. Its failure is
 **exit 5**, not 4 — the new build IS installed, running and read back; verify-strih grades the whole
 box, incl. items no deploy changes (e.g. the dantesync offset item on the NTP master) — the error lists
-the verify FAIL lines and the fleet log records `strih-lx:accept-failed`. A read-only root run of
+the verify FAIL lines and the fleet log records `strih-snv:accept-failed`. A read-only root run of
 verify-strih.sh on the healthy box (24.9.2026) was ALL CLEAR in 9 s (inside the 180 s ssh bound). A test pins the gate text in setup-strih.sh. The clean fix is a deploy mode in
 setup-strih.sh that skips step 17 (it belongs to the provisioning lane) — returned as a follow-up
 candidate in the part-6 LANE-RETURN; until then do NOT "fix" the arm by ignoring setup's rc.
@@ -213,7 +328,8 @@ and directs the mandatory post-restart WS filter-enum survival check
 ## Marker helper is ONE source of truth (bod 4)
 
 `scripts/lib/genlock-markers.sh` (`genlock_write_markers` — atomic temp-then-rename of
-`GENLOCK_BUILD_SHA.txt` + `DISTROAV_BUILD_SHA.txt` + `DEPLOYED_AT`) is shared. `setup-imag.sh` carries
+`GENLOCK_BUILD_SHA.txt` + `DISTROAV_BUILD_SHA.txt` + `DEPLOYED_AT`, and since issue 1302 the optional
+5th argument's `GENLOCK_STATS_ABI.txt`, removed when that argument is empty or malformed) is shared. `setup-imag.sh` carries
 a behaviorally-identical INLINE copy (it ships standalone to the box, so it cannot source the sibling
 lib) locked by a byte-parity test. Retention (`genlock_retention_delete_plan`, keep newest N=3) is
 PLAN-ONLY by default (`--yes` gates actual deletion; the deploy never silently `rm`s a backup).
@@ -391,16 +507,108 @@ The airuleset `post-push-ci-cleanup` hook cancels every run whose commit is an a
 
 After every fleet relaunch, re-run `scripts/ndi-portmap-audit.sh --check`: the sender-output pin (issue 1185) re-orders strih's NDI ports on relaunch, so the checked-in baseline goes stale and the dev1 port-map watchdog pages (14 pages 15./16.9.) — `--capture` + commit the baseline as part of the deploy sitting.
 
-## GOTCHA — a FAST/full deploy's OBS stop DROPS live WS-applied values that OBS never saved (23.9.2026)
+## The Windows deploy closes OBS CLEANLY so runtime WS writes persist (issue 1367)
 
-The Windows deploy program stops OBS hard to swap the bytes, so any input setting written over
-OBS-WS since OBS last saved its scene collection is lost at the relaunch. Live: the `[8/8g]` apply
-had set stream `NDI 2ME PGM genlock_latency_ms_src` 987 + `mbc` audio sync offset +2 (recorded in
-`~/.camera-box/av-sync-last.json`), and after the next FAST deploy + relaunch the box came back at
-976 / +29 (the values last saved). The #1265 swing guard then compares the next run against a pin
-the box is not actually running. After EVERY stream deploy/relaunch: read the live pin + `mbc`
-offset over WS and, if they differ from `av-sync-last.json`'s `applied_latency_ms` /
-`audio_offset_ms`, re-apply those (read-back verified) before the next E2E.
+**The persistence finding.** A setting written over obs-websocket (`SetInputSettings`,
+`SetInputAudioSyncOffset`: the #856 A/V apply, the latency pins) changes OBS RUNTIME only. It reaches
+the scene-collection JSON at OBS's next save, and a clean exit always saves
+(`OBSBasic::closeEvent` -> `closeWindow()` -> `saveAll()`). A `Stop-Process -Force` skips that save,
+so the relaunch reloads the last SAVED values. Live: 23.9.2026 the stream pin 987 / `mbc` +2 came back
+as 976 / +29 after a FAST deploy; 6.10.2026 runtime `mbc` sync 37 ms vs saved 29 ms
+(`Stream_Obs.json`), and the 30.9 runtime pin 1020 most likely came back as the saved 1040 behind the
++48 ms rig A/V shift (issue 1367 comment 6013239473).
+
+**What the deploy program does now** (one shared lib, `scripts/lib/obs-clean-close-win.sh`, the same
+bytes for stream and resolume; design comment 6014590298):
+
+- **(0a)**, before ANY change on the box (before the power plan, the AutoHotkey64 stop, the
+  keep-alive disable): defines the on-box obs-websocket client (`ClientWebSocket`, Windows PowerShell
+  5.1, `ws://127.0.0.1:4455`, rpc v1, no event subscriptions) and reads GetStreamStatus +
+  GetRecordStatus. A live stream = `clean close REFUSED`, **exit 12**, nothing changed. :4455
+  unreadable while obs64 runs = a named WARNING and the deploy goes on (the rig-busy guard's rule:
+  refuse what it can READ as live). A password is answered only when the Hello asks, from the box's
+  own `plugin_config\obs-websocket\config.json`. obs64 is counted LIVE only (`Get-CcLiveObs`:
+  not `HasExited`, threads > 0), so a stale handle of an exited obs64 (the 12.9.2026 resolume
+  case) neither counts as a second OBS nor keeps the close waiting.
+- **(1c)**, only on a box with keep-alive tasks (stream): `Invoke-CcRefusalRestore`, which
+  re-enables the tasks step (1b) disabled. The step-(2) refusal calls it when it is defined.
+- **(2)**: re-read right before the close (a stream that started since (0a) = exit 12, after the
+  (1c) hook). A running recording gets StopRecord + a GetRecordStatus confirm (30 s). Then, when the
+  ONE live obs64 in the program's own session shows OBS's own window in front (title `OBS ...`;
+  `UpdateTitleBar` always starts it so), `CloseMainWindow()`, waited up to
+  `$ccCloseTimeoutMs = 45000`: `clean close OK in N ms '<title>'`. WM_CLOSE goes to the front
+  unowned window, so a projector in front is never sent it (it would close the projector, wait out
+  the 45 s and log a false `timed out -- forcing`; closing a projector saves nothing, so the
+  relaunch would restore it). The old `Get-Process obs64,obs-browser-page | Stop-Process -Force` runs only
+  inside `if ($ccForce)`, after one of five named lines: wrong obs64 count / session, `has no main
+  window`, `shows '<title>' in front, not the OBS main window`, `did not take the close (disabled
+  behind a modal dialog)`, `clean close timed out -- forcing`. A clean exit only sweeps leftover
+  obs-browser-page processes.
+- **(2b)**, REPORT-ONLY, after the stop: from the active collection (`user.ini`
+  `SceneCollectionFile=`, OBS 32 stores it WITH `.json`; else `global.ini`) every `ndi_source`'s saved
+  `genlock_latency_ms_src` (absent = the build default) and every source with `mixers != 0` (libobs
+  saves 0 for a source without audio) with its saved `sync` in ms. Any failure is one `read-back
+  UNREAD` line, never an exit.
+
+**Limits, stated:**
+
+- The close needs the INTERACTIVE session. The win-* MCP Shell is session 1 (read live on stream and
+  resolume), so WM_CLOSE reaches the window; a program run over plain ssh (session 0) gets the named
+  force line. 6.10.2026 a MANUAL WM_CLOSE of stream OBS in the interactive session exited in 6.6 s;
+  this program's own close first runs live at the next deploy (its OK / timeout lines are the proof).
+- A stream it cannot READ is not protected: with :4455 down (e.g. the 18.9 regenerated config with
+  `server_enabled false`) a streaming OBS asks to confirm the exit, the 45 s bound runs out and the
+  named force kills it under the stream, the same as before this change.
+- The MCP Shell timeout for the program is now >= 360 s (the plan says so): the close may wait 30 s
+  for a recording and 45 s for OBS on top of the copy.
+- OBS asks to confirm the exit when `ConfirmOnExit` is set and an output is still active (replay
+  buffer, virtual camera, a recording that would not stop). Nobody answers it, so the 45 s bound runs
+  out and the named force follows, and the runtime writes are lost THAT time. After a deploy whose log
+  shows a `-- forcing` line, read the live pin + `mbc` offset over WS and re-apply
+  `~/.camera-box/av-sync-last.json`'s `applied_latency_ms` / `audio_offset_ms` (read back) before
+  the next E2E, as before. A `clean close OK` deploy needs no re-apply: compare the (2b) lines with
+  the values read before the deploy.
+- **`scripts/lib/mv-reverify-escalate.sh` stays a force-kill.** It restarts strih OBS headless over
+  ssh (session 0 cannot post WM_CLOSE to a session-1 window, issue 958) and this OBS build has no
+  `ExitOBS` request, so that escalation still loses unsaved runtime writes. Since issue 1317 it acts
+  only on a Windows strih. strih-snv restarts through its systemd unit, and a SIGTERM on Linux runs
+  `OBSApp::processSigTerm` -> `saveAll()` before `quit()` (`vendor/obs-studio/frontend/OBSApp.cpp`),
+  so the Linux boxes keep their runtime writes on a unit stop or restart.
+- Other obs64 force-kills that still skip the save: `scripts/launch-obs-genlock.sh --force` on a
+  RUNNING OBS (its stop before the relaunch) and `scripts/obs-guarded-launch.ps1`. In the deploy flow
+  OBS is already down at the STEP-2 relaunch, so nothing is lost there; a standalone `--force`
+  relaunch still needs the save-trigger checklist in `rig-state-inspection.md` (issue 1333).
+
+**Tests** (`tests/python/test_deploy_clean_close_win_1367.py`, CI's `pytest tests/python`): the
+emitted program for stream + resolume, FULL + FAST (order, the 45 s bound, the force only in the
+named branch, the (1c) hook on stream only, the read-back, one shared fragment), a pwsh parse of
+every program, a token scan banning the syntax pwsh 7 accepts and Windows PowerShell 5.1 rejects
+(`&&` `||` `??` `?.` the ternary), and the fragment RUN in pwsh against a stdlib fake obs-websocket
+(`tests/python/obs_ws_fake_1367.py`) and a fake `obs64` (a copy of `sleep`). pwsh on Linux has no
+OBS window, so the runs shadow `Get-Process` with a function (the stub-function pattern of
+`tests/pwsh/run_dantesync_tray_swap_1372.sh`) that returns only the test's OWN fake with a scripted
+`MainWindowTitle` + `CloseMainWindow`: a clean exit (SIGTERM, never a SIGKILL, done well under the
+bound), a hang (bound shortened by the test, then the named force), no window, a projector in front,
+a refused close, a stream that starts between the (0a) and (2) reads (the REAL (1c) hook runs over a
+`schtasks` stand-in on PATH), and what a Windows box can list next to OBS: its own pid still listed
+after the exit, a 0-thread obs64 sibling, a `HasExited` that throws. 21 mutants of the lib and the
+planner are killed (the commit messages list them).
+
+**A throwing property getter reads as `$null` in PowerShell (non-strict), it does not abort.** An
+access-denied `HasExited` therefore counts the process as live and nothing ends the program, even
+under `$ErrorActionPreference = 'Stop'` (read on the stream box under Windows PowerShell 5.1 and in
+pwsh 7, 6.10.2026). The live filter keeps the repo's `-not $_.HasExited -and $_.Threads.Count -gt
+0` idiom; the thread count from the process snapshot still rules out a dead handle.
+
+**PowerShell trap the run caught:** an awaited void Task's `.GetAwaiter().GetResult()` returns a
+`VoidTaskResult` object in PowerShell. Unassigned, it lands in the function's output, so a function
+that returned the socket returned an array. Assign every such call to `$null`.
+
+**Live read-only check of the fragment** (no close, no kill): build a `.ps1` from the (0a) and (2b)
+blocks only, write it with the win-* MCP FileWrite to the box's `%TEMP%`, run it with `powershell
+-NoProfile -ExecutionPolicy Bypass -File`, then delete it. 6.10.2026 it read `streaming=False
+recording=False` and printed the saved pins and sync on both stream and resolume (Windows PowerShell
+5.1.26100).
 
 ## Lookups in the emitted remote programs must fail through a NAMED line (issue 1367)
 

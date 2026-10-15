@@ -6,7 +6,7 @@ Fakes behind the documented seams:
     --lease-run-id <the matrix's lease>`); the fake checks that lease, writes the soak's own CSV
     row (scripts/av_soak_decision.py row_from_verdict) + recording.state, and exits like the soak;
   - AV_SOAK_OBS_DIR/obs_phase2.py: rig-busy-check + program-scene (the WebSocket reads);
-  - sshpass + curl on PATH: the strih-lx / cambox restart, health and ensure-running texts, the
+  - sshpass + curl on PATH: the strih-snv / cambox restart, health and ensure-running texts, the
     dantesync :8898/status read;
   - RIG_LEASE_DIR in a tmp dir -- the REAL dev1 lease is never touched (a soak/E2E may hold it).
 """
@@ -182,7 +182,7 @@ windows="$(cat "$FAKE_STATE/windows" 2>/dev/null || echo 0)"
 case "$text" in
   *"restart strih-obs.service"*)
     if [ -n "${FAKE_STRIH_NO_UNIT:-}" ]; then
-      echo "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on strih-lx"; exit 2
+      echo "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on strih-snv"; exit 2
     fi
     echo "MV_REVERIFY_OBS_RESTART: strih-obs.service restarted" ;;
   *"systemctl restart camera-box"* | *"systemctl restart dantesync"*)
@@ -370,7 +370,7 @@ def test_the_lib_builds_one_service_restart_never_a_reboot():
     (("--repeats", "0"), "--repeats"),
     (("--cambox", "cam2"), "cam2"),
     (("--cambox", "cam99"), "unknown camera"),
-    (("--dantesync-node", "strih-lx"), "camera"),
+    (("--dantesync-node", "strih-snv"), "camera"),
     (("--settle-secs", "-1"), "--settle-secs"),
     (("--hours", "1"), "unknown argument"),
 ])

@@ -11,10 +11,10 @@ set -euo pipefail
 # any operator folder are always protected).
 #
 # Modes (issue 1317 part 3: there is NO default box -- name one; the old default was the Windows
-# strih PC at 10.77.9.202, RETIRED at the M4 cut-over, whose address is the Linux strih-lx now):
+# strih PC at 10.77.9.202, RETIRED at the M4 cut-over, whose address is the Linux strih-snv now):
 #   --box <fleet-name>           the fleet-list way (scripts/lib/obs-fleet.sh): the box's host + CLASS
 #                                pick the driver -- windows-genlock -> the .ps1 driver below;
-#                                linux-genlock (strih-lx, imag) -> ssh + --local-sweep, like --imag.
+#                                linux-genlock (strih-snv, imag) -> ssh + --local-sweep, like --imag.
 #   --host <win-ip>              DRIVER for a Windows box (stream/resolume): scp -O obs-backup-retention.ps1
 #                                to the box and run it via `powershell -File` (dry-run leg read-only),
 #                                NEVER a nested `powershell -Command` over ssh. A linux-genlock fleet
@@ -32,15 +32,15 @@ set -euo pipefail
 # allowlist shapes). That Rust module + tests/obs_backup_retention.rs are the canonical spec.
 #
 # Usage:
-#   scripts/obs-backup-retention.sh --box strih-lx                     # dry-run on strih-lx (linux, bash)
+#   scripts/obs-backup-retention.sh --box strih-snv                     # dry-run on strih-snv (linux, bash)
 #   scripts/obs-backup-retention.sh --box stream                       # dry-run on stream (win .ps1)
 #   scripts/obs-backup-retention.sh --host 10.77.9.204                 # dry-run on stream (win), by address
 #   scripts/obs-backup-retention.sh --imag                             # dry-run on imag (bash)
-#   scripts/obs-backup-retention.sh --box strih-lx --execute           # SUPERVISOR only
+#   scripts/obs-backup-retention.sh --box strih-snv --execute           # SUPERVISOR only
 #   scripts/obs-backup-retention.sh --imag --execute                   # SUPERVISOR only
 #   scripts/obs-backup-retention.sh --local-sweep --backup-root <dir> --stage-parent <dir>  # test
 #   ... --local-sweep --stages-only ...   stage dirs ONLY -- the dated rollback backups are never
-#                                          touched (the strih-lx execute deploy frees its /tmp quota
+#                                          touched (the strih-snv execute deploy frees its /tmp quota
 #                                          this way, as the operator, issue 1317 part 6)
 #
 # Env: STRIH_SSH_PW (win boxes, default "newlevel"); IMAG_IP (default 10.77.9.182),
@@ -94,7 +94,8 @@ if [ "$MODE" = "box" ] || [ "$MODE" = "win" ]; then
   . "$HERE/lib/obs-fleet.sh"
 fi
 if [ "$MODE" = "box" ]; then
-  [ "$BOX" != "strih" ] || { echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is 'strih-lx' (Linux): use --box strih-lx" >&2; exit 2; }
+  [ "$BOX" != "strih" ] || { echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is 'strih-snv' (Linux): use --box strih-snv" >&2; exit 2; }
+  BOX="$(obs_fleet_canonical_name "$BOX")"   # issue 1414: a pre-1414 name addresses its renamed row
   BOX_CLASS="$(obs_fleet_class "$BOX")" || { echo "ERROR: --box '$BOX' is not in the fleet list (scripts/lib/obs-fleet.sh)" >&2; exit 2; }
   HOST="$(obs_fleet_host "$BOX")"
   case "$BOX_CLASS" in
@@ -203,7 +204,7 @@ case "$MODE" in
     if [ "$MODE" = "imag" ]; then
       IMAG_IP="${IMAG_IP:-10.77.9.182}"; IMAG_USER="${IMAG_USER:-newlevel}"; IMAG_PW="${IMAG_PW:-newlevel}"
     else
-      # a linux-genlock fleet --box (strih-lx): the same bash --local-sweep over ssh as imag, at the
+      # a linux-genlock fleet --box (strih-snv): the same bash --local-sweep over ssh as imag, at the
       # fleet host. The IMAG_* names are this leg's transport variables (shared, not imag-specific).
       IMAG_IP="$HOST"; IMAG_USER="${LINUX_BOX_USER:-newlevel}"; IMAG_PW="${LINUX_BOX_PW:-newlevel}"
     fi

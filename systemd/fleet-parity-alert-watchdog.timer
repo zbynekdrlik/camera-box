@@ -1,0 +1,14 @@
+[Unit]
+# issue 1426: every 30 min. Versions change only on a deploy or when a box comes back, so a slower
+# cadence than the 5-min health watchdogs keeps dev1's load and the ssh logins on the camboxes low.
+Description=Run the camera-box fleet version-parity pass every 30 min (issue 1426)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

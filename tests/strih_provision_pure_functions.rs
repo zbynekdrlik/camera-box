@@ -1,5 +1,5 @@
 //! Functional (execution) guard for `scripts/lib/strih-provision.sh`'s pure #1317 decision
-//! helpers — the Linux strih notebook (`strih-lx`) role FACTS + decisions.
+//! helpers — the Linux strih notebook (`strih-snv`) role FACTS + decisions.
 //!
 //! Same convention as `tests/setup_imag_pure_functions.rs::run_sourced` /
 //! `tests/deploy_genlock_fleet.rs`: the lib is source-only (no top-level statements, its own
@@ -56,37 +56,43 @@ fn lib_is_source_only_and_defines_the_pure_functions() {
 
 #[test]
 fn ndi_inputs_are_the_ten_role_inputs() {
+    // issue 1413: the inputs follow strih-snv.env's STRIH_CAMERAS (the SNV venue now has cam2/cam3/
+    // cam5; cam1/cam4/cam6/cam7 moved to Poprad) -- one per camera + the 2ME pair + the CG sender.
     let (code, out, _e) = run_sourced(&[], "strih_lx_ndi_inputs");
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 10, "exactly 10 NDI inputs, got: {out}");
+    assert_eq!(lines.len(), 6, "3 cameras + 2ME PGM/PVW + CG, got: {out}");
     for want in [
-        "CAM1 (usb)",
-        "CAM7 (usb)",
+        "CAM2 (usb)",
+        "CAM3 (usb)",
+        "CAM5 (usb)",
         "STRIH-SNV (2ME PGM)",
         "STRIH-SNV (2ME PVW)",
-        "RESOLUME-SNV (cg-obs)",
+        "RESOLUME-SNV (SP-program)",
     ] {
         assert!(lines.contains(&want), "missing input {want} in: {out}");
+    }
+    for gone in ["CAM1 (usb)", "CAM4 (usb)", "CAM6 (usb)", "CAM7 (usb)"] {
+        assert!(
+            !lines.contains(&gone),
+            "{gone} is in Poprad (issue 1413): {out}"
+        );
     }
 }
 
 #[test]
-fn ndi_outputs_and_republishes_are_namespaced_strih_lx_never_strih_snv() {
+fn ndi_outputs_and_republishes_are_namespaced_with_the_box_prefix() {
+    // issue 1414: the SNV strih publishes under its own `<role>-<venue>` hostname, STRIH-SNV.
     let (_c, outs, _e) = run_sourced(&[], "strih_lx_ndi_outputs; strih_lx_ndi_republishes");
     for l in outs.lines().filter(|l| !l.is_empty()) {
         assert!(
-            l.starts_with("STRIH-LX ("),
-            "every output/republish must be STRIH-LX-namespaced, got: {l}"
-        );
-        assert!(
-            !l.starts_with("STRIH-SNV "),
-            "a STRIH-SNV sender leaked: {l}"
+            l.starts_with("STRIH-SNV ("),
+            "every output/republish must be STRIH-SNV-namespaced, got: {l}"
         );
     }
-    assert!(outs.contains("STRIH-LX (2ME PGM)"));
-    assert!(outs.contains("STRIH-LX (2ME PVW)"));
-    assert!(outs.contains("STRIH-LX (MULTIVIEW)"));
+    assert!(outs.contains("STRIH-SNV (2ME PGM)"));
+    assert!(outs.contains("STRIH-SNV (2ME PVW)"));
+    assert!(outs.contains("STRIH-SNV (MULTIVIEW)"));
 }
 
 #[test]
@@ -103,7 +109,7 @@ fn bundle_artifact_is_the_strih_variant() {
 
 #[test]
 fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
-    // issue 1361: the client upstream is the box fact STRIH_DANTESYNC_UPSTREAM. strih-lx is the NTP
+    // issue 1361: the client upstream is the box fact STRIH_DANTESYNC_UPSTREAM. strih-snv is the NTP
     // master (role server, NO upstream), so asking it for client args fails closed -- there is no
     // guessed `strih.lan` default any more.
     let (c, out, err) = run_sourced(&[], "strih_lx_dantesync_client_args");
@@ -195,29 +201,28 @@ fn audio_input_name_is_asio_zvuk_and_the_fail_loud_flag_is_gone() {
 }
 
 #[test]
-fn output_name_ok_accepts_strih_lx_and_rejects_strih_snv() {
-    let (c1, _o, _e) = run_sourced(&[], "strih_lx_output_name_ok 'STRIH-LX (2ME PGM)'");
+fn output_name_ok_accepts_the_box_prefix_and_rejects_another_box() {
+    let (c1, _o, _e) = run_sourced(&[], "strih_lx_output_name_ok 'STRIH-SNV (2ME PGM)'");
     assert_eq!(c1, 0);
-    let (c2, _o, _e) = run_sourced(&[], "strih_lx_output_name_ok 'STRIH-SNV (2ME PGM)'");
-    assert_ne!(c2, 0, "a STRIH-SNV output name must be rejected");
+    // another venue's strih, and the box's own pre-rename prefix, are not this box's outputs
+    let (c2, _o, _e) = run_sourced(&[], "strih_lx_output_name_ok 'STRIH-PP (2ME PGM)'");
+    assert_ne!(c2, 0, "another box's output name must be rejected");
     let (c3, _o, _e) = run_sourced(&[], "strih_lx_output_name_ok 'random'");
     assert_ne!(c3, 0);
+    // issue 1414: the box's own pre-rename prefix is not a current output name either
+    let old = "strih_lx_output_name_ok 'STRIH-LX (2ME PGM)'"; // issue 1414
+    let (c4, _o, _e) = run_sourced(&[], old);
+    assert_ne!(c4, 0, "the pre-rename prefix must be rejected");
 }
 
 #[test]
-fn no_second_strih_snv_sender_guard_fires_on_a_collision() {
-    // A clean strih-lx-only output set passes.
-    let (code, _o, _e) = run_sourced(
-        &[],
-        "printf '%s\\n' 'STRIH-LX (2ME PGM)' 'STRIH-LX (MULTIVIEW)' | strih_lx_no_second_strihsnv_sender",
-    );
-    assert_eq!(code, 0, "a clean STRIH-LX-only output set must pass");
-    // A STRIH-SNV name in the live set must fail (never a 2nd STRIH-SNV sender).
-    let (code2, _o, _e) = run_sourced(
-        &[],
-        "printf '%s\\n' 'STRIH-LX (2ME PGM)' 'STRIH-SNV (2ME PGM)' | strih_lx_no_second_strihsnv_sender",
-    );
-    assert_ne!(code2, 0, "a second STRIH-SNV sender must be rejected");
+fn the_parallel_run_second_sender_guard_is_gone_1414() {
+    // issue 1414: STRIH-SNV is the SNV strih's own prefix now, so the parallel-run guard against a
+    // second `STRIH-SNV (...)` sender (the retired Windows strih's names) cannot exist any more.
+    let lib = read_script("scripts/lib/strih-provision.sh");
+    assert!(!lib.contains("strih_lx_no_second_strihsnv_sender"));
+    let verify = read_script("scripts/verify-strih.sh");
+    assert!(!verify.contains("strih_lx_no_second_strihsnv_sender"));
 }
 
 // --- issue 1317 (F6): chrome-sandbox setuid-root builder + verdict ------------------------------
@@ -628,13 +633,15 @@ fn setup_strih_installs_runtime_packages_before_the_prefix_install_and_enable() 
 
 /// issue 1317: `strih_install_bundle_prefix` copies the bundle libs into LIBDIR BEFORE `ldconfig`
 /// (an ldconfig before the copy would not pick up the new libs) and installs the frontend to
-/// BINDIR/obs — the imag on-box program's install shape.
+/// BINDIR/obs — the imag on-box program's install shape. issue 1412: the copy is the tree install
+/// (an unchanged file untouched, a changed one through a temp sibling + rename), never a `cp -a`
+/// that rewrites a library a running OBS maps.
 #[test]
 fn install_bundle_prefix_copies_libs_before_ldconfig() {
     let lib = read_script("scripts/lib/strih-provision.sh");
     let cp = lib
-        .find("cp -a \"${bundle}/lib/x86_64-linux-gnu/.\"")
-        .expect("strih_install_bundle_prefix must cp -a the bundle libs into LIBDIR");
+        .find("strih_bundle_tree_install \"${bundle}/lib/x86_64-linux-gnu\" \"$libdir\"")
+        .expect("strih_install_bundle_prefix must tree-install the bundle libs into LIBDIR");
     let ldconfig = lib
         .find("\n  ldconfig")
         .expect("strih_install_bundle_prefix must run ldconfig");
@@ -759,7 +766,7 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
         out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan"),
         "the default client ExecStart must carry the client args: {out2b}"
     );
-    // ...and on a box with NO upstream (strih-lx is the NTP master) `client ''` is refused and emits
+    // ...and on a box with NO upstream (strih-snv is the NTP master) `client ''` is refused and emits
     // nothing -- never a guessed default host.
     let (c2c, out2c, _e) = run_sourced(&[], "strih_dantesync_unit_text client ''");
     assert_ne!(c2c, 0, "client with no upstream fact must refuse: {out2c}");
@@ -879,7 +886,7 @@ fn setup_strih_installs_the_dantesync_unit_in_step_2() {
         lib.contains("STRIH_DANTESYNC_UNIT:-/etc/systemd/system/dantesync.service"),
         "the dantesync install must write the unit to /etc/systemd/system/dantesync.service"
     );
-    // issue 1361: the role is a FACT of the selected box (strih-lx.env: server, the post-M4 NTP
+    // issue 1361: the role is a FACT of the selected box (strih-snv.env: server, the post-M4 NTP
     // master), no longer a per-run STRIH_LX_DANTESYNC_ROLE env knob.
     assert!(
         s.contains("DS_ROLE=\"$(strih_lx_dantesync_role)\""),
@@ -1155,7 +1162,7 @@ fn setup_strih_installs_janus_enable_only_before_final_verify() {
 
 // ==============================================================================
 // issue 1317 (this lane): the two provisioning steps the owner caught missing live on the
-// strih-lx notebook -- (1) CPU PERFORMANCE governor, (2) Bitfocus Companion Satellite.
+// strih-snv notebook -- (1) CPU PERFORMANCE governor, (2) Bitfocus Companion Satellite.
 // The pure emitters/predicates below live in scripts/lib/strih-provision.sh and are wired
 // as two new numbered steps in setup-strih.sh + two acceptance items in verify-strih.sh.
 // =====================================================================================
@@ -1319,17 +1326,27 @@ fn companion_satellite_appconfig_json_seeds_remoteip_remoteport() {
     assert_eq!(jcode, 0, "app config must be valid JSON; stderr={jerr}");
 }
 
-/// issue 1357: Companion Satellite is launched by the kiosk OPENBOX autostart (openbox runs no XDG
-/// ~/.config/autostart): ONE backgrounded line launching the installed /opt binary -- the SAME string
-/// setup-strih writes and verify-strih greps (owner rule: a needed feature is always-ON by default).
+/// issue 1399: Companion Satellite runs as the supervised session app `companion-satellite.service`
+/// (Restart=always, journal output); the kiosk openbox autostart STARTS that unit with the SAME line
+/// setup-strih writes and verify-strih greps. The bare backgrounded launch of the /opt binary is gone.
 #[test]
-fn companion_satellite_openbox_line_launches_the_opt_binary_backgrounded() {
-    let (code, line, _e) = run_sourced(&[], "strih_companion_satellite_openbox_line");
+fn companion_satellite_is_started_as_its_session_app_unit_1399() {
+    let (code, line, _e) = run_sourced(
+        &[],
+        "strih_session_app_autostart_line \"$STRIH_COMPANION_SATELLITE_UNIT\"",
+    );
     assert_eq!(code, 0);
     assert_eq!(
-        line, "/opt/companion-satellite/companion-satellite >/dev/null 2>&1 &",
-        "one backgrounded launch of the installed binary, no trailing newline"
+        line, "systemctl --user start companion-satellite.service || true",
+        "the autostart starts the unit, no trailing newline"
     );
+    let (code, bin, _e) = run_sourced(&[], "strih_companion_satellite_bin");
+    assert_eq!(
+        (code, bin.as_str()),
+        (0, "/opt/companion-satellite/companion-satellite")
+    );
+    let (code, _o, _e) = run_sourced(&[], "declare -F strih_companion_satellite_openbox_line");
+    assert_ne!(code, 0, "the bare launch line helper is removed");
 }
 
 /// The Companion Satellite install emitter downloads the PINNED tar.gz, VERIFIES its sha256
@@ -1425,7 +1442,7 @@ fn setup_strih_wires_companion_satellite_before_final_verify() {
 
 /// verify-strih.sh grades performance through the SHARED baseline grader (issue 1357: its `perf` item
 /// = governor + strih-maxperf persistence) and carries the (companion) item, which now reads the
-/// openbox autostart launch line.
+/// openbox autostart line that starts companion-satellite.service (issue 1399).
 #[test]
 fn verify_strih_carries_perf_and_companion_items() {
     let v = read_script("scripts/verify-strih.sh");
@@ -1438,8 +1455,10 @@ fn verify_strih_carries_perf_and_companion_items() {
         "verify-strih must run the companion verdict for the (companion) item"
     );
     assert!(
-        v.contains("grep -qxF \"$(strih_companion_satellite_openbox_line)\" \"$CS_AUTOSTART\""),
-        "the (companion) autostart signal is the openbox autostart launch line (issue 1357)"
+        v.contains(
+            "grep -qxF \"$(strih_session_app_autostart_line \"$STRIH_COMPANION_SATELLITE_UNIT\")\" \"$CS_AUTOSTART\""
+        ),
+        "the (companion) autostart signal is the openbox autostart unit start line (issue 1399)"
     );
 }
 
@@ -1458,9 +1477,10 @@ fn seed_manifest_json_is_update_only_with_the_explicit_operator_names() {
         out.contains("\"mode\": \"update-only\""),
         "mode update-only: {out}"
     );
+    // issue 1413: the SNV cameras cam2/cam3/cam5 (strih-snv.env STRIH_CAMERAS).
     for name in [
-        "\"NDI cam1\"",
-        "\"NDI cam7\"",
+        "\"NDI cam2\"",
+        "\"NDI cam5\"",
         "\"NDI 2ME PVW\"",
         "\"NDI 2ME PGM (mv)\"",
         "\"cg\"",
@@ -1469,9 +1489,13 @@ fn seed_manifest_json_is_update_only_with_the_explicit_operator_names() {
         assert!(out.contains(name), "manifest must carry {name}: {out}");
     }
     // senders (the DATA name-map) + the unchanged namespaced outputs
-    assert!(out.contains("\"CAM1 (usb)\""), "sender name-map: {out}");
+    assert!(out.contains("\"CAM2 (usb)\""), "sender name-map: {out}");
     assert!(
-        out.contains("STRIH-LX (2ME PGM)"),
+        !out.contains("\"NDI cam1\""),
+        "cam1 is in Poprad (issue 1413): {out}"
+    );
+    assert!(
+        out.contains("STRIH-SNV (2ME PGM)"),
         "outputs unchanged: {out}"
     );
     assert!(
@@ -1510,7 +1534,7 @@ assert m.parse_seed_mode(text) == "update-only", "mode"
 by = {p["input"]: p for p in m.seed_inputs(inputs, latency)}
 assert by["NDI 2ME PVW"]["settings"]["genlock_fifo"] is False, "2ME PVW must be feedback"
 assert by["NDI 2ME PGM (mv)"]["settings"]["genlock_fifo"] is False, "2ME PGM must be feedback"
-assert by["NDI cam1"]["settings"]["genlock_fifo"] is True, "cam must be genlock"
+assert by["NDI cam2"]["settings"]["genlock_fifo"] is True, "cam must be genlock"
 assert by["cg"]["settings"]["genlock_fifo"] is True, "cg is a genlocked sender"
 print("OK")
 '"#,
@@ -1519,7 +1543,7 @@ print("OK")
     assert!(out.contains("OK"), "cross-check printed OK: {out}");
 }
 
-/// The Companion Satellite install emitter installs `curl` in the dep line (a fresh strih-lx has NO
+/// The Companion Satellite install emitter installs `curl` in the dep line (a fresh strih-snv has NO
 /// curl -- the emitter's own download failed on the first live run without it).
 #[test]
 fn companion_satellite_install_deps_include_curl() {
@@ -1597,8 +1621,8 @@ fn companion_status_verdict_is_live_aware() {
 fn setup_strih_uses_the_operator_manifest_and_the_baseline_performance_items() {
     let s = read_script("scripts/setup-strih.sh");
     assert!(
-        s.contains("strih_lx_seed_manifest_json"),
-        "setup-strih step 6 must write the manifest via strih_lx_seed_manifest_json"
+        s.contains("obs_box_seed_manifest_json > /opt/camera-box/strih-seed.json"),
+        "setup-strih step 6 must write the manifest via obs_box_seed_manifest_json (strih role = strih_lx_seed_manifest_json, issue 1412)"
     );
     assert!(
         s.contains("obs_box_max_performance \"$STRIH_NIC\" strih")
@@ -1968,7 +1992,7 @@ fn setup_and_verify_wire_the_pipewire_program_audio() {
 }
 
 // --- issue 1317 slice: bake qt6-svg-plugins + /usr-prefix chrome-sandbox setuid ------------------
-// The strih-lx OBS UI needs (1) the Qt6 SVG icon-engine/imageformat plugins (Ubuntu 26.04 ships them
+// The strih-snv OBS UI needs (1) the Qt6 SVG icon-engine/imageformat plugins (Ubuntu 26.04 ships them
 // in the SEPARATE `qt6-svg-plugins` package, NOT libqt6svg6) so OBS 32's SVG Yami theme renders its
 // icons, and (2) the CEF chrome-sandbox setuid at EVERY path the running OBS could load it from --
 // including the /usr-prefix obs-plugins copy the /usr-install OBS actually loads (the /opt bundle
@@ -2129,7 +2153,7 @@ fn verify_strih_asserts_qt6_svg_and_usr_chrome_sandbox() {
 }
 
 // =====================================================================================
-// issue 1352: strih-lx OBS on the RTX 5050 via XWayland PRIME -- provisioning bake
+// issue 1352: strih-snv OBS on the RTX 5050 via XWayland PRIME -- provisioning bake
 // (helper + unit + Janus local_ip + DistroAV output names + self-loop seed; the GPU env printer went
 // away with the XWayland session, issue 1357)
 // =====================================================================================
@@ -2201,27 +2225,25 @@ fn janus_audiobridge_jcfg_pins_local_ip_in_general_when_given() {
     );
 }
 
-/// issue 1352 (f): the 2ME feedback pair receives strih-lx's OWN `STRIH-LX (2ME …)` outputs (the M4
-/// self-loop); the dead parallel-phase `STRIH-SNV (2ME …)` senders are gone.
+/// issue 1352 (f): the 2ME feedback pair receives the box's OWN `<PREFIX> (2ME …)` outputs (the M4
+/// self-loop; strih-snv = `STRIH-SNV (2ME …)` since issue 1414).
 #[test]
 fn seed_manifest_2me_feedback_senders_are_the_strih_lx_self_loop() {
     let (code, out, err) = run_sourced(&[], "strih_lx_seed_manifest_json");
     assert_eq!(code, 0, "manifest must succeed; stderr={err}");
     assert!(
-        out.contains(r#"{"sender": "STRIH-LX (2ME PVW)", "input": "NDI 2ME PVW""#),
-        "2ME PVW must receive the STRIH-LX self-loop sender: {out}"
+        out.contains(r#"{"sender": "STRIH-SNV (2ME PVW)", "input": "NDI 2ME PVW""#),
+        "2ME PVW must receive the STRIH-SNV self-loop sender: {out}"
     );
     assert!(
-        out.contains(r#"{"sender": "STRIH-LX (2ME PGM)", "input": "NDI 2ME PGM (mv)""#),
-        "2ME PGM must receive the STRIH-LX self-loop sender: {out}"
+        out.contains(r#"{"sender": "STRIH-SNV (2ME PGM)", "input": "NDI 2ME PGM (mv)""#),
+        "2ME PGM must receive the STRIH-SNV self-loop sender: {out}"
     );
-    assert!(
-        !out.contains("STRIH-SNV (2ME PVW)"),
-        "no dead STRIH-SNV (2ME PVW) sender: {out}"
-    );
-    assert!(
-        !out.contains("STRIH-SNV (2ME PGM)"),
-        "no dead STRIH-SNV (2ME PGM) sender: {out}"
+    assert_eq!(
+        out.matches(r#""sender": "STRIH-"#).count()
+            - out.matches(r#""sender": "STRIH-SNV (2ME P"#).count(),
+        0,
+        "every strih sender in the manifest is the box's own self-loop: {out}"
     );
 }
 
@@ -2361,7 +2383,7 @@ fn verify_strih_asserts_the_1352_provisioning_items() {
 }
 
 /// issue 1352 acceptance run (22.9.2026): `verify-strih.sh` aborted SILENTLY (exit 1, no line) right
-/// after the remoteos item on strih-lx, because `strih_lx_program_audio_verdict` returns non-zero on a
+/// after the remoteos item on strih-snv, because `strih_lx_program_audio_verdict` returns non-zero on a
 /// FAIL verdict and its `$(...)` assignment ran WITHOUT the `|| true` every sibling verdict assignment
 /// carries -- under `set -e` a failing command substitution in an assignment terminates the script, so
 /// the ~10 items after it (mv-host, gpu-env, avahi, ndi-outputs, ...) never ran. The verdict text is
@@ -2397,7 +2419,7 @@ fn verify_strih_audio_verdict_assignment_survives_set_e() {
 }
 
 /// issue 1352 acceptance run (22.9.2026): the NVENC gate line piped `ffmpeg -encoders || cat "$LOG"`
-/// into `strih_lx_nvenc_available_ok` -- on strih-lx the distro ffmpeg exits 0 WITHOUT any nvenc
+/// into `strih_lx_nvenc_available_ok` -- on strih-snv the distro ffmpeg exits 0 WITHOUT any nvenc
 /// encoder, so the `||` fallback never reached the OBS log even though the very next report-only line
 /// proved `[obs-nvenc] NVENC version:` live in OBS. Both evidence sources must be concatenated (`;`),
 /// so either the ffmpeg encoder list or the OBS log satisfies the predicate.
@@ -2774,7 +2796,7 @@ fn setup_strih_installs_ffmpeg_and_verify_checks_ffprobe() {
 }
 
 // ===========================================================================================
-// issue 1353: strih-lx bkshading SERVICE provisioning -- the shading panel backend moved off the
+// issue 1353: strih-snv bkshading SERVICE provisioning -- the shading panel backend moved off the
 // Windows PC to the notebook as a systemd unit. Three pure printers (artifact name / system unit /
 // config seed) + setup-strih step 16c (enable-only) + verify-strih item + the ci.yml service
 // artifact. The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs), so the
@@ -3009,13 +3031,13 @@ fn bkshading_listener_owner_extracts_the_bare_process_name() {
 }
 
 // =============================================================================
-// issue 1317 item H: strih-lx USB-NIC xhci IRQ placement (NET_RX softirq off the OBS cores).
+// issue 1317 item H: strih-snv USB-NIC xhci IRQ placement (NET_RX softirq off the OBS cores).
 // The pure resolvers + the emitted boot script + the systemd unit are driven over /proc-shaped
 // fixtures matching the real box (issue 1354: iface enx6c1ff766154b -> xhci PCI function
 // 0000:00:14.0 -> IRQ 125, cpu_atom 12-15 -> target E-core 15).
 // =============================================================================
 
-/// Build a /sys + /proc/interrupts + cpu_atom + /proc/irq fixture shaped like the real strih-lx box
+/// Build a /sys + /proc/interrupts + cpu_atom + /proc/irq fixture shaped like the real strih-snv box
 /// and return the TempDir (keep it alive; $FX = its path in the harness bodies below).
 fn irq_fixture(iface: &str) -> tempfile::TempDir {
     use std::os::unix::fs::symlink;
@@ -3367,12 +3389,19 @@ fn nic_iface_by_driver_resolves_r8152_and_fails_loud_on_multiple() {
 fn emitted_irq_script_resolves_iface_by_driver_without_the_address() {
     // With NO STRIH_NIC_IFACE and NO matching address in the fixture, the boot script must STILL
     // resolve the iface via the r8152 driver (the whole point of the boot-safe path) and pin cpu 15.
+    // issue 1411: strih-snv's own rig NIC is PCIe now (atlantic), so the script is rendered for a USB
+    // box -- the strih-snv facts with the r8152 driver -- the only kind of box that installs it.
     let dir = irq_fixture("enx6c1ff766154b");
     let root = dir.path().to_str().unwrap().to_string();
-    let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
+    let boxes = manifest_dir().join("scripts/strih-boxes");
+    let boxes = boxes.to_str().unwrap();
+    let body = "mkdir -p \"$FX/boxes\"; \
+                sed 's/^STRIH_NIC_DRIVER=.*/STRIH_NIC_DRIVER=r8152/' \"$BOXES/strih-snv.env\" > \"$FX/boxes/strih-snv.env\"; \
+                export STRIH_BOXES_DIR=\"$FX/boxes\"; \
+                strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
                 SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
                 IRQ_DIR=\"$FX/irq\" bash \"$FX/affinity.sh\"";
-    let (code, out, err) = run_sourced(&[("FX", root.as_str())], body);
+    let (code, out, err) = run_sourced(&[("FX", root.as_str()), ("BOXES", boxes)], body);
     assert_eq!(
         code, 0,
         "boot script must resolve by driver with no address; stderr={err} stdout={out}"
@@ -3502,7 +3531,7 @@ fn verify_strih_bkshading_probe_hits_a_real_service_route() {
     );
 }
 
-// ---- issue 1357: strih-lx as the shared OBS-box appliance (the baseline's strih facts) -------------
+// ---- issue 1357: strih-snv as the shared OBS-box appliance (the baseline's strih facts) -------------
 //
 // setup-strih.sh now runs the SAME appliance baseline as imag (scripts/lib/obs-box-baseline.sh) and
 // verify-strih.sh the SAME grader (scripts/lib/obs-box-baseline-verify.sh). These pin the strih side:
@@ -3543,8 +3572,9 @@ const IP_ADDR: &str = "1: lo    inet 127.0.0.1/8 scope host lo\n\
                        3: enx00e04c680001    inet 10.77.9.202/23 brd 10.77.9.255 scope global enx00e04c680001\n";
 
 #[test]
-fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
-    let one = fake_sysroot(&[("enx00e04c680001", "r8152"), ("enp3s0", "r8169")]);
+fn rig_nic_prefers_the_override_then_the_one_fact_driver_nic_then_the_static_ip() {
+    // issue 1411: strih-snv's rig NIC driver fact is the in-tree atlantic (the 10 GbE Thunderbolt NIC).
+    let one = fake_sysroot(&[("enx00e04c680001", "atlantic"), ("enp3s0", "r8169")]);
     let root = one.path().to_str().unwrap();
     let (c, out, err) = run_sourced(
         &[("R", root), ("A", IP_ADDR)],
@@ -3553,7 +3583,7 @@ fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
     assert_eq!(
         (c, out.as_str()),
         (0, "enx00e04c680001"),
-        "the ONE r8152 NIC wins; stderr={err}"
+        "the ONE atlantic NIC wins; stderr={err}"
     );
 
     let (c, out, _e) = run_sourced(
@@ -3566,7 +3596,7 @@ fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
         "STRIH_NIC_IFACE overrides everything"
     );
 
-    // no r8152 -> the interface carrying the static IP
+    // no atlantic -> the interface carrying the static IP
     let none = fake_sysroot(&[("enp3s0", "r8169"), ("enx00e04c680001", "cdc_ncm")]);
     let (c, out, _e) = run_sourced(
         &[("R", none.path().to_str().unwrap()), ("A", IP_ADDR)],
@@ -3578,8 +3608,11 @@ fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
         "falls back to the STATIC_IP interface"
     );
 
-    // two r8152 NICs -> ambiguous by driver -> the static-IP interface decides
-    let two = fake_sysroot(&[("enx00e04c680001", "r8152"), ("enx00e04c680002", "r8152")]);
+    // two atlantic NICs -> ambiguous by driver -> the static-IP interface decides
+    let two = fake_sysroot(&[
+        ("enx00e04c680001", "atlantic"),
+        ("enx00e04c680002", "atlantic"),
+    ]);
     let (c, out, _e) = run_sourced(
         &[("R", two.path().to_str().unwrap()), ("A", IP_ADDR)],
         "strih_lx_rig_nic \"$R\" \"$A\" 10.77.9.202",
@@ -3600,7 +3633,7 @@ fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
 }
 
 /// PL1 is never pinned BELOW what the firmware already runs (the issue-1357 review read 80 W live on
-/// strih-lx; pinning the 55 W spec base under it would starve the cutter): max(55, firmware), with
+/// strih-snv; pinning the 55 W spec base under it would starve the cutter): max(55, firmware), with
 /// STRIH_LX_PL1_W winning outright.
 #[test]
 fn pl1_watts_never_undercuts_the_firmware_pl1() {
@@ -3663,6 +3696,52 @@ fn baked_pl1_watts_reads_the_envelope_unit_environment() {
     }
 }
 
+/// issue 1412 (stream-pp, 11.10.2026): the notebook panel's native mode is 1920x1200, and the fixed
+/// 1920x1080 pin left black bars above and below. The kiosk takes the panel's PREFERRED mode at 60 Hz
+/// first, then 1920x1080@60, then --auto.
+#[test]
+fn openbox_autostart_takes_the_panels_preferred_mode_first_1412() {
+    let baseline = manifest_dir().join("scripts/lib/obs-box-baseline.sh");
+    let (c, out, err) = run_sourced(
+        &[("BL", baseline.to_str().unwrap())],
+        ". \"$BL\"; strih_openbox_autostart_text",
+    );
+    assert_eq!(c, 0, "stderr={err}");
+    let pref = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("PREF="))
+        .unwrap_or_else(|| panic!("the autostart reads the panel's preferred mode:\n{out}"));
+    // one xrandr line per element: a `\` line continuation would strip the mode lines' leading
+    // spaces, and those spaces are what tells a mode line from a connector line
+    let xrandr = [
+        "Screen 0: minimum 320 x 200, current 1920 x 1080, maximum 16384 x 16384",
+        "eDP connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 302mm x 189mm",
+        "   1920x1200     60.00 +",
+        "   1920x1080     60.00*",
+        "   1600x1200     60.00",
+        "HDMI-A-0 disconnected (normal left inverted right x axis y axis)",
+        "   1280x720      60.00 +",
+        "",
+    ]
+    .join("\n");
+    let script =
+        format!("xrandr() {{ printf '%s' \"$FIX\"; }}\nPANEL=eDP\n{pref}\nprintf '%s' \"$PREF\"\n");
+    let o = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("FIX", &xrandr)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "1920x1200", "{o:?}");
+    let first = out
+        .find("--primary --mode \"$PREF\" --rate 60")
+        .unwrap_or_else(|| panic!("the preferred mode at 60 Hz is tried:\n{out}"));
+    let pinned = out
+        .find("--primary --mode 1920x1080 --rate 60")
+        .expect("1920x1080@60 stays the fallback");
+    assert!(first < pinned, "the preferred mode comes first:\n{out}");
+}
+
 /// The guard's thermal step-down is strih's own value, never imag's 25 W iGPU clamp.
 #[test]
 fn pl1_stepdown_watts_is_strih_specific_with_an_override() {
@@ -3676,7 +3755,7 @@ fn pl1_stepdown_watts_is_strih_specific_with_an_override() {
 }
 
 /// The kiosk openbox autostart: the shared preamble lines VERBATIM (the baseline verify greps them),
-/// ONE start per supervised --user unit, the Companion Satellite launch line, and valid bash.
+/// ONE start per supervised --user unit (Companion Satellite is one, issue 1399), and valid bash.
 #[test]
 fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
     let baseline = manifest_dir().join("scripts/lib/obs-box-baseline.sh");
@@ -3692,13 +3771,17 @@ fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
         "rm -rf \"$HOME/.config/obs-studio/.sentinel\"/* 2>/dev/null || true",
         "systemctl --user start strih-obs.service || true",
         "systemctl --user start strih-bundle-state-server.service || true",
-        "/opt/companion-satellite/companion-satellite >/dev/null 2>&1 &",
+        "systemctl --user start companion-satellite.service || true",
     ] {
         assert!(
             lines.contains(&want),
             "autostart must carry the line `{want}`:\n{out}"
         );
     }
+    assert!(
+        !out.contains("/opt/companion-satellite"),
+        "the bare Companion Satellite launch line is gone (issue 1399): {out}"
+    );
     let syntax = Command::new("bash")
         .arg("-n")
         .arg("-c")
@@ -3982,7 +4065,7 @@ fn setup_strih_final_verify_reports_pending_items_before_the_reboot() {
     );
 }
 
-// issue 1317 (M4): strih-lx is the production strih at 10.77.9.202 and `strih-lx.lan` does not
+// issue 1317 (M4): strih-snv is the production strih at 10.77.9.202 and `strih-snv.lan` does not
 // resolve on dev1, so the dial default is the ONE fleet list's host (scripts/lib/obs-fleet.sh).
 // STRIH_LX_HOST stays the explicit override.
 #[test]
@@ -3999,10 +4082,10 @@ fn strih_lx_host_defaults_to_the_fleet_list_address_1317() {
 #[test]
 fn strih_lx_hostname_is_the_fleet_name_not_the_dial_address_1317() {
     let (_c, out, _e) = run_sourced(&[("STRIH_LX_HOST", "10.77.9.202")], "strih_lx_hostname");
-    assert_eq!(out.trim(), "strih-lx");
+    assert_eq!(out.trim(), "strih-snv");
     let setup = read_script("scripts/setup-strih.sh");
     assert!(
-        setup.contains("hostnamectl set-hostname \"$(strih_lx_hostname)\""),
+        setup.contains("strih_hostname_apply \"$(strih_lx_hostname)\" /etc/hosts"),
         "setup-strih.sh must set the hostname from strih_lx_hostname"
     );
     assert!(
@@ -4011,7 +4094,7 @@ fn strih_lx_hostname_is_the_fleet_name_not_the_dial_address_1317() {
     );
 }
 
-/// Live incident 24.9.2026: the strih-lx deploy ran setup-strih.sh under a 077 umask, so
+/// Live incident 24.9.2026: the strih-snv deploy ran setup-strih.sh under a 077 umask, so
 /// `install -Dm644 ... /etc/intercom-hub/intercom.toml` created the parent directory 0700 root.
 /// The hub (User=newlevel) could not read its config and crash-looped (NRestarts 15925) until the
 /// directory was chmod-ed by hand. setup-strih.sh must pin a 022 umask before it creates anything.

@@ -3,7 +3,7 @@ name = "intercom-hub"
 version.workspace = true
 edition = "2021"
 authors = ["zbynekdrlik"]
-description = "strih-lx intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345 M1)"
+description = "strih-snv intercom mix-minus (N-1) hub — VBAN to the camboxes + declared routing (issue 1345 M1)"
 license = "MIT"
 repository = "https://github.com/zbynekdrlik/camera-box"
 
@@ -31,8 +31,9 @@ ndi = ["dep:libloading"]
 [dependencies]
 # The ONE shared VBAN codec (byte-identical to the appliance's src/vban.rs re-export).
 intercom-vban = { path = "../vban" }
-# axum `ws` = the /ws live-state push; tokio `net`+`time`+`sync` = the UDP adapter + block ticker +
-# the watch channel the http layer reads (the bkshading service skeleton).
+# axum `ws` = the /ws live-state push; tokio `net`+`time`+`sync` = the UDP adapter + the output
+# re-resolve / Janus keepalive timers + the watch channel the http layer reads (the bkshading service
+# skeleton). The block loop itself runs on its own OS thread, not on tokio's timer (issue 1401).
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 serde = { version = "1", features = ["derive", "rc"] }   # rc: Serialize for Arc<HubState> (the /api/state Json body)
@@ -54,7 +55,12 @@ jpeg-encoder = "0.7"
 # The phones leg's Opus codec (issue 1345, 25.9.2026: 48 kHz mono, 20 ms, in-band FEC). `opus` 0.4
 # links libopus through `opusic-sys`, whose DEFAULT `bundled` feature builds the vendored libopus
 # source with cmake and links it statically — no libopus-dev at build time, no libopus.so on
-# strih-lx at run time (the CI `intercom-hub` job checks cmake is present).
+# strih-snv at run time (the CI `intercom-hub` job checks cmake is present).
 opus = "0.4"
 tokio-stream = "0.1"
 libloading = { version = "0.8", optional = true }
+# The FIONREAD ioctl that measures a pw-cat playback pipe's fill before every write, and the
+# hub-mix thread's sched_setscheduler + clock_nanosleep (issue 1401). std has none of these; libc
+# is already in the dependency graph through tokio, so nothing new is downloaded (rustix was
+# rejected: a new crate for one call).
+libc = "0.2"

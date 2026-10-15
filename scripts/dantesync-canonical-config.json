@@ -10,8 +10,12 @@
     "policy (ptp_phase_lock ignores it), so it is {\"$ignore\": true}: present or absent, not graded.",
     "Every leaf of a template must match the node. Keys starting with '_' are comments on both sides.",
     "A node key the template does not have is reported as an extra key.",
-    "Value tokens: '@video_gm' = the rig grandmaster name (scripts/lib/rig-grandmaster.sh,",
-    "video-clock.lan); '@audio_gm' = DANTESYNC_AUDIO_GM_HOST (scripts/lib/dantesync-fleet.sh).",
+    "Value tokens: '@video_gm' = the video grandmaster of the role's venue: the rig grandmaster name",
+    "(scripts/lib/rig-grandmaster.sh, video-clock.lan) for video/ntp-master, the venue's grandmaster",
+    "(STRIH_DANTE_GM of its NTP-master strih fact file, issue 1412) for video-<venue>/ntp-master-<venue>;",
+    "'@audio_gm' = DANTESYNC_AUDIO_GM_HOST (scripts/lib/dantesync-fleet.sh).",
+    "Venue roles (issue 1412): video-pp / ntp-master-pp = the Poprad venue, the home-venue policy with",
+    "the PP grandmaster; a PP client's NTP upstream is the PP NTP master strih-pp.lan.",
     "{\"$optional\": V} = the key may be absent, but when present it must equal V (the camboxes pass",
     "ntp_server on the unit's --ntp-server command line, so their config has no ntp_server key).",
     "{\"$any\": true} = the key must be present; any value is accepted.",
@@ -33,6 +37,20 @@
                  "phase_slew": {"$ignore": true}}
     },
     "ntp-master": {
+      "http_status": {"enabled": true, "port": 8898},
+      "ntp_server": {"$any": true},
+      "ntp_server_mode": {"enabled": true, "max_step_us": 100000, "port": 123, "stratum": 3},
+      "system": {"gm_allowlist": ["@video_gm"], "clock_discipline": {"$optional": "ptp_phase_lock"},
+                 "phase_slew": {"$ignore": true}}
+    },
+    "video-pp": {
+      "http_status": {"enabled": true, "port": 8898},
+      "ntp_server": {"$optional": "strih-pp.lan"},
+      "ntp_server_mode": {"enabled": false, "max_step_us": 100000, "port": 123, "stratum": 3},
+      "system": {"gm_allowlist": ["@video_gm"], "clock_discipline": {"$optional": "ptp_phase_lock"},
+                 "phase_slew": {"$ignore": true}}
+    },
+    "ntp-master-pp": {
       "http_status": {"enabled": true, "port": 8898},
       "ntp_server": {"$any": true},
       "ntp_server_mode": {"enabled": true, "max_step_us": 100000, "port": 123, "stratum": 3},

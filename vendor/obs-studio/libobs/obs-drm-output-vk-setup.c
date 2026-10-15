@@ -14,26 +14,52 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <X11/Xlib-xcb.h>
 #include <xcb/randr.h>
 #include <xcb/xcb.h>
 
 #include "util/base.h"
+#include "util/threading.h"
 #include "obs-drm-output-vk-internal.h"
 
 /* -------------------------------------------------------------------------------------------------
  * Pure decision helper (Tier-0, lift-compiled + truth-tabled by tests/drm_output_vk_direct_1346.rs).
  * ------------------------------------------------------------------------------------------------- */
 
-/* Pick the display mode to present: among the modes whose visible size equals the display's native
- * (physical) resolution — or among all modes when the native size is unknown (0) or no mode matches
- * it — the one whose refresh (mHz) is closest to 60 Hz; the first wins a tie. -1 when n <= 0. The
- * lease backend takes the connector's preferred mode; Vulkan exposes no "preferred" flag, so the
- * physical resolution stands in for it, and the rig's genlock cadence is 60 Hz. */
+/* Pick the display mode to present.
+ * camera-box issue 1424: for the PROGRAM view the caller passes the canvas as the wanted mode (want_w x
+ * want_h at want_mhz): a mode of exactly that size whose refresh is within 0.2 % of it wins, the
+ * closest first (30.000 over 29.970 for a 30 Hz canvas, 29.970 accepted when 30 is absent, never 25),
+ * so one render tick = one scanout (1080p30 = the HD-SDI 1.5G rate the vestibule SDI chain carries).
+ * No such mode, or no wanted mode (0 = the Multiview view), falls back to the issue-1346 rule: among the
+ * modes whose visible size equals the display's native (physical) resolution — or among all modes when
+ * the native size is unknown (0) or no mode matches it — the one whose refresh (mHz) is closest to
+ * 60 Hz; the first wins a tie. -1 when n <= 0. The lease backend takes the connector's preferred mode;
+ * Vulkan exposes no "preferred" flag, so the physical resolution stands in for it. */
 static int drm_output_vk_pick_mode(const uint32_t *w, const uint32_t *h, const uint32_t *refresh_mhz, int n,
-				   uint32_t native_w, uint32_t native_h)
+				   uint32_t native_w, uint32_t native_h, uint32_t want_w, uint32_t want_h,
+				   uint32_t want_mhz)
 {
+	if (want_w != 0 && want_h != 0 && want_mhz != 0) {
+		const uint32_t tol = want_mhz / 500u;
+		int pick = -1;
+		uint32_t pick_dist = 0;
+		for (int i = 0; i < n; i++) {
+			if (w[i] != want_w || h[i] != want_h)
+				continue;
+			uint32_t dist = refresh_mhz[i] > want_mhz ? refresh_mhz[i] - want_mhz : want_mhz - refresh_mhz[i];
+			if (dist > tol)
+				continue;
+			if (pick < 0 || dist < pick_dist) {
+				pick = i;
+				pick_dist = dist;
+			}
+		}
+		if (pick >= 0)
+			return pick;
+	}
 	bool any_native = false;
 	for (int i = 0; i < n; i++) {
 		if (native_w != 0 && native_h != 0 && w[i] == native_w && h[i] == native_h)
@@ -76,37 +102,37 @@ static bool drm_output_vk_has_ext(const VkExtensionProperties *props, uint32_t n
 }
 
 /* Load libvulkan.so.1 and the global entry points. */
-static bool drm_output_vk_load(void)
+static bool drm_output_vk_load(struct drm_output_vk_disp *d)
 {
-	g_drm_vk.lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-	if (!g_drm_vk.lib) {
+	d->dev->lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+	if (!d->dev->lib) {
 		blog(LOG_WARNING, "drm-output: vk-direct: libvulkan.so.1 not loadable (%s) -- output dormant",
 		     dlerror());
 		return false;
 	}
-	g_drm_vk.vk.vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(g_drm_vk.lib, "vkGetInstanceProcAddr");
-	if (!g_drm_vk.vk.vkGetInstanceProcAddr) {
+	d->dev->vk.vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(d->dev->lib, "vkGetInstanceProcAddr");
+	if (!d->dev->vk.vkGetInstanceProcAddr) {
 		blog(LOG_WARNING, "drm-output: vk-direct: libvulkan.so.1 has no vkGetInstanceProcAddr -- output dormant");
 		return false;
 	}
-	g_drm_vk.vk.vkCreateInstance = (PFN_vkCreateInstance)g_drm_vk.vk.vkGetInstanceProcAddr(NULL, "vkCreateInstance");
-	g_drm_vk.vk.vkEnumerateInstanceExtensionProperties = (PFN_vkEnumerateInstanceExtensionProperties)
-		g_drm_vk.vk.vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceExtensionProperties");
-	return g_drm_vk.vk.vkCreateInstance && g_drm_vk.vk.vkEnumerateInstanceExtensionProperties;
+	d->dev->vk.vkCreateInstance = (PFN_vkCreateInstance)d->dev->vk.vkGetInstanceProcAddr(NULL, "vkCreateInstance");
+	d->dev->vk.vkEnumerateInstanceExtensionProperties = (PFN_vkEnumerateInstanceExtensionProperties)
+		d->dev->vk.vkGetInstanceProcAddr(NULL, "vkEnumerateInstanceExtensionProperties");
+	return d->dev->vk.vkCreateInstance && d->dev->vk.vkEnumerateInstanceExtensionProperties;
 }
 
-static bool drm_output_vk_create_instance(void)
+static bool drm_output_vk_create_instance(struct drm_output_vk_disp *d)
 {
 	const char *want[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_DISPLAY_EXTENSION_NAME,
 			      VK_EXT_DIRECT_MODE_DISPLAY_EXTENSION_NAME, DRM_OUTPUT_VK_EXT_ACQUIRE_XLIB};
 	const uint32_t n_want = (uint32_t)(sizeof(want) / sizeof(want[0]));
 
 	uint32_t n = 0;
-	g_drm_vk.vk.vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
+	d->dev->vk.vkEnumerateInstanceExtensionProperties(NULL, &n, NULL);
 	VkExtensionProperties *props = calloc(n ? n : 1, sizeof(*props));
 	if (!props)
 		return false;
-	g_drm_vk.vk.vkEnumerateInstanceExtensionProperties(NULL, &n, props);
+	d->dev->vk.vkEnumerateInstanceExtensionProperties(NULL, &n, props);
 	bool ok = true;
 	for (uint32_t i = 0; i < n_want; i++) {
 		if (!drm_output_vk_has_ext(props, n, want[i])) {
@@ -125,7 +151,7 @@ static bool drm_output_vk_create_instance(void)
 				    .pApplicationInfo = &app,
 				    .enabledExtensionCount = n_want,
 				    .ppEnabledExtensionNames = want};
-	VkResult r = g_drm_vk.vk.vkCreateInstance(&ici, NULL, &g_drm_vk.instance);
+	VkResult r = d->dev->vk.vkCreateInstance(&ici, NULL, &d->dev->instance);
 	if (r != VK_SUCCESS) {
 		blog(LOG_WARNING, "drm-output: vk-direct: vkCreateInstance FAILED VkResult %d", (int)r);
 		return false;
@@ -133,18 +159,18 @@ static bool drm_output_vk_create_instance(void)
 
 	bool all = true;
 #define DRM_OUTPUT_VK_LOAD_I(name)                                                                         \
-	g_drm_vk.vk.name = (PFN_##name)g_drm_vk.vk.vkGetInstanceProcAddr(g_drm_vk.instance, #name);                    \
-	if (!g_drm_vk.vk.name) {                                                                               \
+	d->dev->vk.name = (PFN_##name)d->dev->vk.vkGetInstanceProcAddr(d->dev->instance, #name);                    \
+	if (!d->dev->vk.name) {                                                                               \
 		blog(LOG_WARNING, "drm-output: vk-direct: instance entry point " #name " missing");       \
 		all = false;                                                                               \
 	}
 	DRM_OUTPUT_VK_INSTANCE_FNS(DRM_OUTPUT_VK_LOAD_I)
 #undef DRM_OUTPUT_VK_LOAD_I
-	g_drm_vk.vk.vkGetRandROutputDisplayEXT = (drm_output_vk_randr_display_fn)g_drm_vk.vk.vkGetInstanceProcAddr(
-		g_drm_vk.instance, "vkGetRandROutputDisplayEXT");
-	g_drm_vk.vk.vkAcquireXlibDisplayEXT =
-		(drm_output_vk_acquire_xlib_fn)g_drm_vk.vk.vkGetInstanceProcAddr(g_drm_vk.instance, "vkAcquireXlibDisplayEXT");
-	if (!g_drm_vk.vk.vkGetRandROutputDisplayEXT || !g_drm_vk.vk.vkAcquireXlibDisplayEXT) {
+	d->dev->vk.vkGetRandROutputDisplayEXT = (drm_output_vk_randr_display_fn)d->dev->vk.vkGetInstanceProcAddr(
+		d->dev->instance, "vkGetRandROutputDisplayEXT");
+	d->dev->vk.vkAcquireXlibDisplayEXT =
+		(drm_output_vk_acquire_xlib_fn)d->dev->vk.vkGetInstanceProcAddr(d->dev->instance, "vkAcquireXlibDisplayEXT");
+	if (!d->dev->vk.vkGetRandROutputDisplayEXT || !d->dev->vk.vkAcquireXlibDisplayEXT) {
 		blog(LOG_WARNING, "drm-output: vk-direct: VK_EXT_acquire_xlib_display entry points missing");
 		all = false;
 	}
@@ -152,10 +178,10 @@ static bool drm_output_vk_create_instance(void)
 }
 
 /* The RandR output XID named `name` on our own X connection; logs the X-layout precondition. */
-static unsigned long drm_output_vk_find_output(const char *name)
+static unsigned long drm_output_vk_find_output(struct drm_output_vk_disp *d, const char *name)
 {
-	xcb_connection_t *conn = XGetXCBConnection(g_drm_vk.dpy);
-	xcb_window_t root = (xcb_window_t)DefaultRootWindow(g_drm_vk.dpy);
+	xcb_connection_t *conn = XGetXCBConnection(d->dev->dpy);
+	xcb_window_t root = (xcb_window_t)DefaultRootWindow(d->dev->dpy);
 	xcb_randr_get_screen_resources_current_reply_t *res =
 		xcb_randr_get_screen_resources_current_reply(conn, xcb_randr_get_screen_resources_current(conn, root),
 							     NULL);
@@ -191,119 +217,176 @@ static unsigned long drm_output_vk_find_output(const char *name)
 	return found;
 }
 
-/* Pick the GPU that owns the output, and acquire the display away from X. */
-static bool drm_output_vk_acquire(unsigned long output)
+/* issue 1424 part 2: true when ANOTHER open display presents on display plane `plane` (one plane per
+ * display). Open path only, under g_drm_vk_dev.lock (a rebuild relies on currentDisplay instead). */
+static bool drm_output_vk_plane_taken(const struct drm_output_vk_disp *d, int plane)
+{
+	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {
+		const struct drm_output_vk_disp *o = &g_drm_vk_disp[i];
+		if (o != d && o->in_use && o->surface != VK_NULL_HANDLE && o->plane == plane)
+			return true;
+	}
+	return false;
+}
+
+/* Acquire the output's display away from X; a later display must be on the first one's GPU (one VkDevice). */
+static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long output)
 {
 	uint32_t n = 0;
-	if (g_drm_vk.vk.vkEnumeratePhysicalDevices(g_drm_vk.instance, &n, NULL) != VK_SUCCESS || n == 0) {
+	if (d->dev->vk.vkEnumeratePhysicalDevices(d->dev->instance, &n, NULL) != VK_SUCCESS || n == 0) {
 		blog(LOG_WARNING, "drm-output: vk-direct: no Vulkan physical device");
 		return false;
 	}
 	VkPhysicalDevice pds[8];
 	if (n > 8)
 		n = 8;
-	g_drm_vk.vk.vkEnumeratePhysicalDevices(g_drm_vk.instance, &n, pds);
-	for (uint32_t i = 0; i < n && !g_drm_vk.pd; i++) {
-		VkDisplayKHR d = VK_NULL_HANDLE;
-		if (g_drm_vk.vk.vkGetRandROutputDisplayEXT(pds[i], g_drm_vk.dpy, output, &d) == VK_SUCCESS && d != VK_NULL_HANDLE) {
-			g_drm_vk.pd = pds[i];
-			g_drm_vk.display = d;
+	d->dev->vk.vkEnumeratePhysicalDevices(d->dev->instance, &n, pds);
+	VkPhysicalDevice pd = VK_NULL_HANDLE;
+	for (uint32_t i = 0; i < n && !pd; i++) {
+		VkDisplayKHR disp = VK_NULL_HANDLE;
+		if (d->dev->vk.vkGetRandROutputDisplayEXT(pds[i], d->dev->dpy, output, &disp) == VK_SUCCESS &&
+		    disp != VK_NULL_HANDLE) {
+			pd = pds[i];
+			d->display = disp;
 		}
 	}
-	if (!g_drm_vk.pd) {
-		blog(LOG_WARNING, "drm-output: vk-direct: no Vulkan device drives output '%s'", g_drm_vk.output_name);
+	if (!pd) {
+		blog(LOG_WARNING, "drm-output: vk-direct: no Vulkan device drives output '%s'", d->output_name);
 		return false;
 	}
+	if (d->dev->pd && pd != d->dev->pd) {
+		blog(LOG_WARNING,
+		     "drm-output: vk-direct: output '%s' is driven by another GPU than the open output(s) -- two "
+		     "outputs on two GPUs are not supported (one shared VkDevice)",
+		     d->output_name);
+		d->display = VK_NULL_HANDLE;
+		return false;
+	}
+	d->dev->pd = pd;
 	VkPhysicalDeviceProperties pr;
-	g_drm_vk.vk.vkGetPhysicalDeviceProperties(g_drm_vk.pd, &pr);
-	VkResult r = g_drm_vk.vk.vkAcquireXlibDisplayEXT(g_drm_vk.pd, g_drm_vk.dpy, g_drm_vk.display);
+	d->dev->vk.vkGetPhysicalDeviceProperties(pd, &pr);
+	VkResult r = d->dev->vk.vkAcquireXlibDisplayEXT(pd, d->dev->dpy, d->display);
 	if (r != VK_SUCCESS) {
 		blog(LOG_WARNING,
-		     "drm-output: vk-direct: vkAcquireXlibDisplayEXT('%s') FAILED VkResult %d on %s (-13 = the output "
-		     "is still in the X layout)",
-		     g_drm_vk.output_name, (int)r, pr.deviceName);
+		     "drm-output: vk-direct: vkAcquireXlibDisplayEXT('%s') FAILED VkResult %d on %s (-13 = NVIDIA "
+		     "refused: the output is still in the X layout, another display of this process is mid mode set, "
+		     "or this process released it earlier while another display keeps the Vulkan instance)",
+		     d->output_name, (int)r, pr.deviceName);
 		return false;
 	}
-	g_drm_vk.acquired = true;
+	d->acquired = true;
+	drm_output_vk_mark_disruption(d->dev);
 	blog(LOG_INFO, "drm-output: vk-direct display acquired output='%s' gpu='%s' (off the X desktop)",
-	     g_drm_vk.output_name, pr.deviceName);
+	     d->output_name, pr.deviceName);
+	return true;
+}
+
+/* Free a mode list (struct drm_output_vk_mode_list, obs-drm-output-vk-internal.h). */
+void drm_output_vk_mode_list_free(struct drm_output_vk_mode_list *ml)
+{
+	free(ml->modes);
+	free(ml->w);
+	free(ml->h);
+	free(ml->r);
+	memset(ml, 0, sizeof(*ml));
+}
+
+/* false = no modes / no memory (named); true = ml filled, ml->best = the pick (-1 = none). */
+bool drm_output_vk_mode_list_read(struct drm_output_vk_disp *d, struct drm_output_vk_mode_list *ml)
+{
+	memset(ml, 0, sizeof(*ml));
+	ml->best = -1;
+	ml->want_w = (uint32_t)os_atomic_load_long(&d->want_w);
+	ml->want_h = (uint32_t)os_atomic_load_long(&d->want_h);
+	ml->want_mhz = (uint32_t)os_atomic_load_long(&d->want_mhz);
+	uint32_t nd = 0;
+	d->dev->vk.vkGetPhysicalDeviceDisplayPropertiesKHR(d->dev->pd, &nd, NULL);
+	VkDisplayPropertiesKHR *dprops = calloc(nd ? nd : 1, sizeof(*dprops));
+	if (!dprops)
+		return false;
+	d->dev->vk.vkGetPhysicalDeviceDisplayPropertiesKHR(d->dev->pd, &nd, dprops);
+	for (uint32_t i = 0; i < nd; i++)
+		if (dprops[i].display == d->display)
+			ml->native = dprops[i].physicalResolution;
+	free(dprops);
+
+	uint32_t nm = 0;
+	if (d->dev->vk.vkGetDisplayModePropertiesKHR(d->dev->pd, d->display, &nm, NULL) != VK_SUCCESS || nm == 0) {
+		blog(LOG_WARNING, "drm-output: vk-direct: the display reports no modes");
+		return false;
+	}
+	ml->modes = calloc(nm, sizeof(*ml->modes));
+	ml->w = calloc(nm, sizeof(uint32_t));
+	ml->h = calloc(nm, sizeof(uint32_t));
+	ml->r = calloc(nm, sizeof(uint32_t));
+	if (!ml->modes || !ml->w || !ml->h || !ml->r ||
+	    d->dev->vk.vkGetDisplayModePropertiesKHR(d->dev->pd, d->display, &nm, ml->modes) != VK_SUCCESS) {
+		drm_output_vk_mode_list_free(ml);
+		return false;
+	}
+	ml->n = nm;
+	for (uint32_t i = 0; i < nm; i++) {
+		ml->w[i] = ml->modes[i].parameters.visibleRegion.width;
+		ml->h[i] = ml->modes[i].parameters.visibleRegion.height;
+		ml->r[i] = ml->modes[i].parameters.refreshRate;
+	}
+	ml->best = drm_output_vk_pick_mode(ml->w, ml->h, ml->r, (int)nm, ml->native.width, ml->native.height,
+					   ml->want_w, ml->want_h, ml->want_mhz);
 	return true;
 }
 
 /* The native ~60 Hz mode, a display plane that can show it, and the display-plane surface. The chosen
- * mode is committed to g_drm_vk.mode_* only when the surface exists. `rebuild` (the present thread's
+ * mode is committed to d->mode_* only when the surface exists. `rebuild` (the present thread's
  * rebuild after a lost surface) requires the mode to have the SAME size as the committed one -- the
  * shared images and the OBS intermediate are sized to it, and the graphics thread reads mode_* without
  * a lock -- so a rebuild never changes mode_* at all; a different size refuses by name. */
-static bool drm_output_vk_create_surface(bool rebuild)
+bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)
 {
-	VkExtent2D native = {0, 0};
-	uint32_t nd = 0;
-	g_drm_vk.vk.vkGetPhysicalDeviceDisplayPropertiesKHR(g_drm_vk.pd, &nd, NULL);
-	VkDisplayPropertiesKHR *dprops = calloc(nd ? nd : 1, sizeof(*dprops));
-	if (!dprops)
+	struct drm_output_vk_mode_list ml;
+	if (!drm_output_vk_mode_list_read(d, &ml))
 		return false;
-	g_drm_vk.vk.vkGetPhysicalDeviceDisplayPropertiesKHR(g_drm_vk.pd, &nd, dprops);
-	for (uint32_t i = 0; i < nd; i++)
-		if (dprops[i].display == g_drm_vk.display)
-			native = dprops[i].physicalResolution;
-	free(dprops);
-
-	uint32_t nm = 0;
-	if (g_drm_vk.vk.vkGetDisplayModePropertiesKHR(g_drm_vk.pd, g_drm_vk.display, &nm, NULL) != VK_SUCCESS || nm == 0) {
-		blog(LOG_WARNING, "drm-output: vk-direct: the display reports no modes");
-		return false;
-	}
-	VkDisplayModePropertiesKHR *modes = calloc(nm, sizeof(*modes));
-	uint32_t *mw = calloc(nm, sizeof(uint32_t));
-	uint32_t *mh = calloc(nm, sizeof(uint32_t));
-	uint32_t *mr = calloc(nm, sizeof(uint32_t));
+	const VkExtent2D native = ml.native;
+	const uint32_t nm = ml.n;
 	bool ok = false;
-	if (modes && mw && mh && mr && g_drm_vk.vk.vkGetDisplayModePropertiesKHR(g_drm_vk.pd, g_drm_vk.display, &nm, modes) == VK_SUCCESS) {
-		for (uint32_t i = 0; i < nm; i++) {
-			mw[i] = modes[i].parameters.visibleRegion.width;
-			mh[i] = modes[i].parameters.visibleRegion.height;
-			mr[i] = modes[i].parameters.refreshRate;
-		}
-		int best = drm_output_vk_pick_mode(mw, mh, mr, (int)nm, native.width, native.height);
+	{
+		const int best = ml.best;
 		if (best >= 0) {
-			VkDisplayModePropertiesKHR mode = modes[best];
-			const uint32_t sel_w = mw[best], sel_h = mh[best], sel_hz = mr[best];
-			if (rebuild && (sel_w != g_drm_vk.mode_w || sel_h != g_drm_vk.mode_h)) {
+			VkDisplayModePropertiesKHR mode = ml.modes[best];
+			const uint32_t sel_w = ml.w[best], sel_h = ml.h[best], sel_hz = ml.r[best];
+			if (rebuild && (sel_w != d->mode_w || sel_h != d->mode_h)) {
 				blog(LOG_WARNING,
 				     "drm-output: vk-direct: the display now offers %ux%u instead of %ux%u -- the shared images "
 				     "no longer fit (restart OBS)",
-				     sel_w, sel_h, g_drm_vk.mode_w, g_drm_vk.mode_h);
-				free(modes);
-				free(mw);
-				free(mh);
-				free(mr);
+				     sel_w, sel_h, d->mode_w, d->mode_h);
+				drm_output_vk_mode_list_free(&ml);
 				return false;
 			}
 
 			uint32_t npl = 0;
-			g_drm_vk.vk.vkGetPhysicalDeviceDisplayPlanePropertiesKHR(g_drm_vk.pd, &npl, NULL);
+			d->dev->vk.vkGetPhysicalDeviceDisplayPlanePropertiesKHR(d->dev->pd, &npl, NULL);
 			VkDisplayPlanePropertiesKHR *plp = calloc(npl ? npl : 1, sizeof(*plp));
 			int plane = -1;
 			if (plp) {
-				g_drm_vk.vk.vkGetPhysicalDeviceDisplayPlanePropertiesKHR(g_drm_vk.pd, &npl, plp);
+				d->dev->vk.vkGetPhysicalDeviceDisplayPlanePropertiesKHR(d->dev->pd, &npl, plp);
 				for (uint32_t p = 0; p < npl && plane < 0; p++) {
-					if (plp[p].currentDisplay != VK_NULL_HANDLE && plp[p].currentDisplay != g_drm_vk.display)
+					if (plp[p].currentDisplay != VK_NULL_HANDLE && plp[p].currentDisplay != d->display)
 						continue;
+					if (!rebuild && drm_output_vk_plane_taken(d, (int)p))
+						continue; /* issue 1424 part 2: the other display presents on it */
 					uint32_t ns = 0;
-					g_drm_vk.vk.vkGetDisplayPlaneSupportedDisplaysKHR(g_drm_vk.pd, p, &ns, NULL);
+					d->dev->vk.vkGetDisplayPlaneSupportedDisplaysKHR(d->dev->pd, p, &ns, NULL);
 					VkDisplayKHR sup[16];
 					if (ns > 16)
 						ns = 16;
-					g_drm_vk.vk.vkGetDisplayPlaneSupportedDisplaysKHR(g_drm_vk.pd, p, &ns, sup);
+					d->dev->vk.vkGetDisplayPlaneSupportedDisplaysKHR(d->dev->pd, p, &ns, sup);
 					for (uint32_t j = 0; j < ns; j++)
-						if (sup[j] == g_drm_vk.display)
+						if (sup[j] == d->display)
 							plane = (int)p;
 				}
 			}
 			if (plane < 0) {
 				blog(LOG_WARNING, "drm-output: vk-direct: no display plane can show output '%s'",
-				     g_drm_vk.output_name);
+				     d->output_name);
 			} else {
 				VkDisplaySurfaceCreateInfoKHR dsci = {
 					.sType = VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR,
@@ -314,12 +397,15 @@ static bool drm_output_vk_create_surface(bool rebuild)
 					.globalAlpha = 1.0f,
 					.alphaMode = VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR,
 					.imageExtent = mode.parameters.visibleRegion};
-				VkResult r = g_drm_vk.vk.vkCreateDisplayPlaneSurfaceKHR(g_drm_vk.instance, &dsci, NULL, &g_drm_vk.surface);
+				VkResult r = d->dev->vk.vkCreateDisplayPlaneSurfaceKHR(d->dev->instance, &dsci, NULL, &d->surface);
 				if (r == VK_SUCCESS) {
 					ok = true;
-					g_drm_vk.mode_w = sel_w;
-					g_drm_vk.mode_h = sel_h;
-					g_drm_vk.refresh_mhz = sel_hz;
+					d->plane = plane;
+					d->mode_w = sel_w;
+					d->mode_h = sel_h;
+					d->refresh_mhz = sel_hz;
+					/* issue 1424 part 2: a committed surface is a new mode set -- unsettled again */
+					os_atomic_set_long(&d->presents_since_surface, 0);
 					blog(LOG_INFO,
 					     "drm-output: vk-direct mode %ux%u@%u.%03uHz on display plane %d (native %ux%u, "
 					     "%u modes)",
@@ -332,25 +418,22 @@ static bool drm_output_vk_create_surface(bool rebuild)
 			free(plp);
 		}
 	}
-	free(modes);
-	free(mw);
-	free(mh);
-	free(mr);
+	drm_output_vk_mode_list_free(&ml);
 	return ok;
 }
 
-static bool drm_output_vk_create_device(void)
+static bool drm_output_vk_create_device(struct drm_output_vk_disp *d)
 {
 	uint32_t nq = 0;
-	g_drm_vk.vk.vkGetPhysicalDeviceQueueFamilyProperties(g_drm_vk.pd, &nq, NULL);
+	d->dev->vk.vkGetPhysicalDeviceQueueFamilyProperties(d->dev->pd, &nq, NULL);
 	VkQueueFamilyProperties qf[16];
 	if (nq > 16)
 		nq = 16;
-	g_drm_vk.vk.vkGetPhysicalDeviceQueueFamilyProperties(g_drm_vk.pd, &nq, qf);
+	d->dev->vk.vkGetPhysicalDeviceQueueFamilyProperties(d->dev->pd, &nq, qf);
 	int qfi = -1;
 	for (uint32_t i = 0; i < nq && qfi < 0; i++) {
 		VkBool32 present = VK_FALSE;
-		g_drm_vk.vk.vkGetPhysicalDeviceSurfaceSupportKHR(g_drm_vk.pd, i, g_drm_vk.surface, &present);
+		d->dev->vk.vkGetPhysicalDeviceSurfaceSupportKHR(d->dev->pd, i, d->surface, &present);
 		if (present && (qf[i].queueFlags & VK_QUEUE_GRAPHICS_BIT))
 			qfi = (int)i;
 	}
@@ -358,17 +441,17 @@ static bool drm_output_vk_create_device(void)
 		blog(LOG_WARNING, "drm-output: vk-direct: no graphics queue can present to the display surface");
 		return false;
 	}
-	g_drm_vk.qfi = (uint32_t)qfi;
+	d->dev->qfi = (uint32_t)qfi;
 
 	const char *want[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
 			      VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME};
 	const uint32_t n_want = (uint32_t)(sizeof(want) / sizeof(want[0]));
 	uint32_t n = 0;
-	g_drm_vk.vk.vkEnumerateDeviceExtensionProperties(g_drm_vk.pd, NULL, &n, NULL);
+	d->dev->vk.vkEnumerateDeviceExtensionProperties(d->dev->pd, NULL, &n, NULL);
 	VkExtensionProperties *props = calloc(n ? n : 1, sizeof(*props));
 	if (!props)
 		return false;
-	g_drm_vk.vk.vkEnumerateDeviceExtensionProperties(g_drm_vk.pd, NULL, &n, props);
+	d->dev->vk.vkEnumerateDeviceExtensionProperties(d->dev->pd, NULL, &n, props);
 	bool ok = true;
 	for (uint32_t i = 0; i < n_want; i++) {
 		if (!drm_output_vk_has_ext(props, n, want[i])) {
@@ -380,25 +463,29 @@ static bool drm_output_vk_create_device(void)
 	if (!ok)
 		return false;
 
-	float prio = 1.0f;
+	/* issue 1424 part 2: one queue per display slot, else queue 0 shared under its lock. */
+	d->dev->n_queues = qf[qfi].queueCount < DRM_OUTPUT_VK_MAX_DISPLAYS ? qf[qfi].queueCount : DRM_OUTPUT_VK_MAX_DISPLAYS;
+	if (d->dev->n_queues < 1)
+		d->dev->n_queues = 1;
+	const float prio[DRM_OUTPUT_VK_MAX_DISPLAYS] = {1.0f, 1.0f};
 	VkDeviceQueueCreateInfo dqci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-					.queueFamilyIndex = g_drm_vk.qfi,
-					.queueCount = 1,
-					.pQueuePriorities = &prio};
+					.queueFamilyIndex = d->dev->qfi,
+					.queueCount = d->dev->n_queues,
+					.pQueuePriorities = prio};
 	VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
 				  .queueCreateInfoCount = 1,
 				  .pQueueCreateInfos = &dqci,
 				  .enabledExtensionCount = n_want,
 				  .ppEnabledExtensionNames = want};
-	VkResult r = g_drm_vk.vk.vkCreateDevice(g_drm_vk.pd, &dci, NULL, &g_drm_vk.device);
+	VkResult r = d->dev->vk.vkCreateDevice(d->dev->pd, &dci, NULL, &d->dev->device);
 	if (r != VK_SUCCESS) {
 		blog(LOG_WARNING, "drm-output: vk-direct: vkCreateDevice FAILED VkResult %d", (int)r);
 		return false;
 	}
 	bool all = true;
 #define DRM_OUTPUT_VK_LOAD_D(name)                                                                  \
-	g_drm_vk.vk.name = (PFN_##name)g_drm_vk.vk.vkGetDeviceProcAddr(g_drm_vk.device, #name);                 \
-	if (!g_drm_vk.vk.name) {                                                                        \
+	d->dev->vk.name = (PFN_##name)d->dev->vk.vkGetDeviceProcAddr(d->dev->device, #name);                 \
+	if (!d->dev->vk.name) {                                                                        \
 		blog(LOG_WARNING, "drm-output: vk-direct: device entry point " #name " missing");  \
 		all = false;                                                                        \
 	}
@@ -406,28 +493,31 @@ static bool drm_output_vk_create_device(void)
 #undef DRM_OUTPUT_VK_LOAD_D
 	if (!all)
 		return false;
-	g_drm_vk.vk.vkGetDeviceQueue(g_drm_vk.device, g_drm_vk.qfi, 0, &g_drm_vk.queue);
+	for (uint32_t q = 0; q < d->dev->n_queues; q++)
+		d->dev->vk.vkGetDeviceQueue(d->dev->device, d->dev->qfi, q, &d->dev->queues[q]);
+	blog(LOG_INFO, "drm-output: vk-direct device created (queue family %u, %u queue%s for %d display slots)",
+	     d->dev->qfi, d->dev->n_queues, d->dev->n_queues == 1 ? "" : "s", DRM_OUTPUT_VK_MAX_DISPLAYS);
 	return true;
 }
 
 /* The swapchain (+ its images and per-image present semaphores) at the current mode. Called at open
  * and by the rebuild. */
-static bool drm_output_vk_create_swapchain_only(VkSwapchainKHR old_swapchain)
+bool drm_output_vk_create_swapchain_only(struct drm_output_vk_disp *d, VkSwapchainKHR old_swapchain)
 {
 	VkSurfaceCapabilitiesKHR caps;
-	if (g_drm_vk.vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_drm_vk.pd, g_drm_vk.surface, &caps) != VK_SUCCESS)
+	if (d->dev->vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d->dev->pd, d->surface, &caps) != VK_SUCCESS)
 		return false;
 	if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
 		blog(LOG_WARNING, "drm-output: vk-direct: the display surface cannot be a transfer destination");
 		return false;
 	}
 	uint32_t nf = 0;
-	g_drm_vk.vk.vkGetPhysicalDeviceSurfaceFormatsKHR(g_drm_vk.pd, g_drm_vk.surface, &nf, NULL);
+	d->dev->vk.vkGetPhysicalDeviceSurfaceFormatsKHR(d->dev->pd, d->surface, &nf, NULL);
 	VkSurfaceFormatKHR fmts[32];
 	VkFormat plain[32];
 	if (nf > 32)
 		nf = 32;
-	if (nf == 0 || g_drm_vk.vk.vkGetPhysicalDeviceSurfaceFormatsKHR(g_drm_vk.pd, g_drm_vk.surface, &nf, fmts) != VK_SUCCESS)
+	if (nf == 0 || d->dev->vk.vkGetPhysicalDeviceSurfaceFormatsKHR(d->dev->pd, d->surface, &nf, fmts) != VK_SUCCESS)
 		return false;
 	for (uint32_t i = 0; i < nf; i++)
 		plain[i] = fmts[i].format;
@@ -441,8 +531,8 @@ static bool drm_output_vk_create_swapchain_only(VkSwapchainKHR old_swapchain)
 	}
 	VkSurfaceFormatKHR fmt = fmts[pick];
 	VkFormatProperties dstp, srcp;
-	g_drm_vk.vk.vkGetPhysicalDeviceFormatProperties(g_drm_vk.pd, fmt.format, &dstp);
-	g_drm_vk.vk.vkGetPhysicalDeviceFormatProperties(g_drm_vk.pd, VK_FORMAT_R8G8B8A8_UNORM, &srcp);
+	d->dev->vk.vkGetPhysicalDeviceFormatProperties(d->dev->pd, fmt.format, &dstp);
+	d->dev->vk.vkGetPhysicalDeviceFormatProperties(d->dev->pd, VK_FORMAT_R8G8B8A8_UNORM, &srcp);
 	if (!(dstp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
 	    !(srcp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT)) {
 		blog(LOG_WARNING, "drm-output: vk-direct: the GPU cannot blit RGBA8 into swapchain format %d", (int)fmt.format);
@@ -453,11 +543,11 @@ static bool drm_output_vk_create_swapchain_only(VkSwapchainKHR old_swapchain)
 	if (caps.maxImageCount && min_images > caps.maxImageCount)
 		min_images = caps.maxImageCount;
 	VkSwapchainCreateInfoKHR sci = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-					.surface = g_drm_vk.surface,
+					.surface = d->surface,
 					.minImageCount = min_images,
 					.imageFormat = fmt.format,
 					.imageColorSpace = fmt.colorSpace,
-					.imageExtent = {g_drm_vk.mode_w, g_drm_vk.mode_h},
+					.imageExtent = {d->mode_w, d->mode_h},
 					.imageArrayLayers = 1,
 					.imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT,
 					.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -467,159 +557,107 @@ static bool drm_output_vk_create_swapchain_only(VkSwapchainKHR old_swapchain)
 					.presentMode = VK_PRESENT_MODE_FIFO_KHR,
 					.clipped = VK_TRUE,
 					.oldSwapchain = old_swapchain};
-	VkResult r = g_drm_vk.vk.vkCreateSwapchainKHR(g_drm_vk.device, &sci, NULL, &g_drm_vk.swapchain);
+	VkResult r = d->dev->vk.vkCreateSwapchainKHR(d->dev->device, &sci, NULL, &d->swapchain);
 	if (r != VK_SUCCESS) {
-		g_drm_vk.swapchain = VK_NULL_HANDLE;
+		d->swapchain = VK_NULL_HANDLE;
 		blog(LOG_WARNING, "drm-output: vk-direct: vkCreateSwapchainKHR FAILED VkResult %d", (int)r);
 		return false;
 	}
 	uint32_t n = 0;
-	g_drm_vk.vk.vkGetSwapchainImagesKHR(g_drm_vk.device, g_drm_vk.swapchain, &n, NULL);
+	d->dev->vk.vkGetSwapchainImagesKHR(d->dev->device, d->swapchain, &n, NULL);
 	if (n == 0 || n > DRM_OUTPUT_VK_MAX_SWAP) {
 		blog(LOG_WARNING, "drm-output: vk-direct: unexpected swapchain image count %u", n);
 		return false;
 	}
-	g_drm_vk.vk.vkGetSwapchainImagesKHR(g_drm_vk.device, g_drm_vk.swapchain, &n, g_drm_vk.swap_images);
-	g_drm_vk.n_swap = n;
+	d->dev->vk.vkGetSwapchainImagesKHR(d->dev->device, d->swapchain, &n, d->swap_images);
+	d->n_swap = n;
+	os_atomic_set_long(&d->settle_images, (long)n); /* issue 1424 part 2: the settle threshold */
 
 	/* The per-image present semaphores live across rebuilds (a retired swapchain's queued present may
 	 * still wait one; re-signalling a semaphore whose earlier wait is already submitted is valid): only
 	 * the missing slots are created, all of them go in the teardown. */
 	VkSemaphoreCreateInfo smci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 	for (uint32_t i = 0; i < n; i++)
-		if (!g_drm_vk.sem_done[i] &&
-		    g_drm_vk.vk.vkCreateSemaphore(g_drm_vk.device, &smci, NULL, &g_drm_vk.sem_done[i]) != VK_SUCCESS) {
-			g_drm_vk.sem_done[i] = VK_NULL_HANDLE;
+		if (!d->sem_done[i] &&
+		    d->dev->vk.vkCreateSemaphore(d->dev->device, &smci, NULL, &d->sem_done[i]) != VK_SUCCESS) {
+			d->sem_done[i] = VK_NULL_HANDLE;
 			return false;
 		}
-	blog(LOG_INFO, "drm-output: vk-direct swapchain %ux%u FIFO images=%u format=%d", g_drm_vk.mode_w,
-	     g_drm_vk.mode_h, n, (int)fmt.format);
+	blog(LOG_INFO, "drm-output: vk-direct swapchain %ux%u FIFO images=%u format=%d", d->mode_w,
+	     d->mode_h, n, (int)fmt.format);
+	/* issue 1424 (design 6164790116): the modes this surface offers, for a later MAILBOX decision */
+	VkPresentModeKHR pms[8];
+	uint32_t npm = 8;
+	char pm_list[64] = "";
+	if (d->dev->vk.vkGetPhysicalDeviceSurfacePresentModesKHR(d->dev->pd, d->surface, &npm, pms) >= 0) {
+		for (uint32_t i = 0; i < npm && i < 8u; i++) {
+			const size_t used = strlen(pm_list);
+			snprintf(pm_list + used, sizeof(pm_list) - used, "%s%d", i ? "," : "", (int)pms[i]);
+		}
+	}
+	blog(LOG_INFO, "drm-output: vk-direct present modes offered on '%s': %s (0 immediate, 1 mailbox, 2 fifo, 3 fifo-relaxed)",
+	     d->output_name, pm_list[0] ? pm_list : "unknown");
 	return true;
 }
 
 /* The swapchain + the per-vblank sync objects and command buffer (open only). */
-static bool drm_output_vk_create_swapchain(void)
+static bool drm_output_vk_create_swapchain(struct drm_output_vk_disp *d)
 {
-	if (!drm_output_vk_create_swapchain_only(VK_NULL_HANDLE))
+	if (!drm_output_vk_create_swapchain_only(d, VK_NULL_HANDLE))
 		return false;
 	VkSemaphoreCreateInfo smci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-	if (g_drm_vk.vk.vkCreateSemaphore(g_drm_vk.device, &smci, NULL, &g_drm_vk.sem_acquire) != VK_SUCCESS)
+	if (d->dev->vk.vkCreateSemaphore(d->dev->device, &smci, NULL, &d->sem_acquire) != VK_SUCCESS)
 		return false;
 	VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-	if (g_drm_vk.vk.vkCreateFence(g_drm_vk.device, &fci, NULL, &g_drm_vk.fence) != VK_SUCCESS)
+	if (d->dev->vk.vkCreateFence(d->dev->device, &fci, NULL, &d->fence) != VK_SUCCESS)
 		return false;
 	VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
 					.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-					.queueFamilyIndex = g_drm_vk.qfi};
-	if (g_drm_vk.vk.vkCreateCommandPool(g_drm_vk.device, &cpci, NULL, &g_drm_vk.pool) != VK_SUCCESS)
+					.queueFamilyIndex = d->dev->qfi};
+	if (d->dev->vk.vkCreateCommandPool(d->dev->device, &cpci, NULL, &d->pool) != VK_SUCCESS)
 		return false;
 	VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-					    .commandPool = g_drm_vk.pool,
+					    .commandPool = d->pool,
 					    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
 					    .commandBufferCount = 1};
-	return g_drm_vk.vk.vkAllocateCommandBuffers(g_drm_vk.device, &cbai, &g_drm_vk.cmd) == VK_SUCCESS;
+	return d->dev->vk.vkAllocateCommandBuffers(d->dev->device, &cbai, &d->cmd) == VK_SUCCESS;
 }
 
 /* Drop the current swapchain (the device must be idle -- the teardown). The present semaphores stay
  * (destroy_all frees them). */
-static void drm_output_vk_destroy_swapchain(void)
+void drm_output_vk_destroy_swapchain(struct drm_output_vk_disp *d)
 {
-	if (g_drm_vk.swapchain)
-		g_drm_vk.vk.vkDestroySwapchainKHR(g_drm_vk.device, g_drm_vk.swapchain, NULL);
-	g_drm_vk.swapchain = VK_NULL_HANDLE;
-	memset(g_drm_vk.swap_images, 0, sizeof(g_drm_vk.swap_images));
-	g_drm_vk.n_swap = 0;
+	if (d->swapchain)
+		d->dev->vk.vkDestroySwapchainKHR(d->dev->device, d->swapchain, NULL);
+	d->swapchain = VK_NULL_HANDLE;
+	memset(d->swap_images, 0, sizeof(d->swap_images));
+	d->n_swap = 0;
 }
 
-void drm_output_vk_free_retired(void)
+void drm_output_vk_free_retired(struct drm_output_vk_disp *d)
 {
-	if (g_drm_vk.retired_swapchain)
-		g_drm_vk.vk.vkDestroySwapchainKHR(g_drm_vk.device, g_drm_vk.retired_swapchain, NULL);
-	if (g_drm_vk.retired_surface)
-		g_drm_vk.vk.vkDestroySurfaceKHR(g_drm_vk.instance, g_drm_vk.retired_surface, NULL);
-	g_drm_vk.retired_swapchain = VK_NULL_HANDLE;
-	g_drm_vk.retired_surface = VK_NULL_HANDLE;
-	g_drm_vk.retire_countdown = 0;
-}
-
-bool drm_output_vk_rebuild_presentation(bool surface_lost)
-{
-	const uint32_t w = g_drm_vk.mode_w, h = g_drm_vk.mode_h;
-	/* No device wait (it cannot be bounded and halt() joins this thread). The replaced swapchain -- whose
-	 * last present may still be queued, waiting a present semaphore -- is RETIRED, not destroyed: it is
-	 * handed to the new swapchain as oldSwapchain (same surface) and freed after RETIRE_FRAMES later
-	 * signalled fences or at the teardown.
-	 * Back-to-back rebuilds (a rebuilt swapchain whose very first acquire is out of date again): the
-	 * current presentation never queued a present, so nothing waits on it -- destroy it directly and KEEP
-	 * the older retiree, whose present may still be queued. A presentation that queued a present (even a
-	 * rejected one, which still queues its semaphore wait) is retired instead and replaces the older
-	 * retiree: its copy's fence signalled after the older retiree's last present was queued. */
-	const bool pending_retiree = g_drm_vk.retired_swapchain || g_drm_vk.retired_surface;
-	const bool fresh = pending_retiree && !g_drm_vk.present_queued_since_rebuild;
-	VkSwapchainKHR old_for_create = VK_NULL_HANDLE;
-	if (fresh) {
-		drm_output_vk_destroy_swapchain();
-		if (surface_lost && g_drm_vk.surface) {
-			if (!g_drm_vk.retired_surface) {
-				/* the retiree was retired on THIS surface: the surface must outlive it, retire it too */
-				g_drm_vk.retired_surface = g_drm_vk.surface;
-			} else {
-				/* the retiree lives on an older surface: this one carried only the never-used swapchain */
-				g_drm_vk.vk.vkDestroySurfaceKHR(g_drm_vk.instance, g_drm_vk.surface, NULL);
-			}
-			g_drm_vk.surface = VK_NULL_HANDLE;
-		}
-	} else {
-		drm_output_vk_free_retired();
-		g_drm_vk.retired_swapchain = g_drm_vk.swapchain;
-		g_drm_vk.swapchain = VK_NULL_HANDLE;
-		memset(g_drm_vk.swap_images, 0, sizeof(g_drm_vk.swap_images));
-		g_drm_vk.n_swap = 0;
-		g_drm_vk.retire_countdown = DRM_OUTPUT_VK_RETIRE_FRAMES;
-		if (surface_lost) {
-			/* the retired swapchain belongs to the old surface: retire both, free them together */
-			g_drm_vk.retired_surface = g_drm_vk.surface;
-			g_drm_vk.surface = VK_NULL_HANDLE;
-		} else {
-			old_for_create = g_drm_vk.retired_swapchain; /* a swapchain is retired into at most one */
-		}
-	}
-	g_drm_vk.present_queued_since_rebuild = false;
-	if (surface_lost) {
-		if (!drm_output_vk_create_surface(true))
-			return false;
-		VkBool32 present = VK_FALSE;
-		g_drm_vk.vk.vkGetPhysicalDeviceSurfaceSupportKHR(g_drm_vk.pd, g_drm_vk.qfi, g_drm_vk.surface, &present);
-		if (!present) {
-			blog(LOG_WARNING, "drm-output: vk-direct: the rebuilt display surface is not presentable from queue family %u",
-			     g_drm_vk.qfi);
-			return false;
-		}
-	}
-	if (!drm_output_vk_create_swapchain_only(old_for_create)) {
-		drm_output_vk_destroy_swapchain();
-		return false;
-	}
-	blog(LOG_INFO, "drm-output: vk-direct presentation rebuilt on '%s' (%ux%u)", g_drm_vk.output_name, w, h);
-	return true;
+	if (d->retired_swapchain)
+		d->dev->vk.vkDestroySwapchainKHR(d->dev->device, d->retired_swapchain, NULL);
+	d->retired_swapchain = VK_NULL_HANDLE;
+	d->retire_countdown = 0;
 }
 
 /* The shared images: device-local, optimal tiling, exportable as OPAQUE_FD with a DEDICATED allocation
  * (the GL side declares GL_DEDICATED_MEMORY_OBJECT_EXT to match), + an exportable binary semaphore each.
  * RGBA8 UNORM = GL_RGBA8 storage byte-for-byte; the present blit converts to the swapchain's BGRA. */
-static bool drm_output_vk_create_shared(void)
+static bool drm_output_vk_create_shared(struct drm_output_vk_disp *d)
 {
 	VkPhysicalDeviceMemoryProperties mp;
-	g_drm_vk.vk.vkGetPhysicalDeviceMemoryProperties(g_drm_vk.pd, &mp);
+	d->dev->vk.vkGetPhysicalDeviceMemoryProperties(d->dev->pd, &mp);
 	for (int i = 0; i < DRM_OUTPUT_VK_SHARED_IMAGES; i++) {
-		struct drm_output_vk_shared *s = &g_drm_vk.shared[i];
+		struct drm_output_vk_shared *s = &d->shared[i];
 		VkExternalMemoryImageCreateInfo emi = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
 						       .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
 		VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 					 .pNext = &emi,
 					 .imageType = VK_IMAGE_TYPE_2D,
 					 .format = VK_FORMAT_R8G8B8A8_UNORM,
-					 .extent = {g_drm_vk.mode_w, g_drm_vk.mode_h, 1},
+					 .extent = {d->mode_w, d->mode_h, 1},
 					 .mipLevels = 1,
 					 .arrayLayers = 1,
 					 .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -628,12 +666,12 @@ static bool drm_output_vk_create_shared(void)
 						  VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 					 .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 					 .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
-		if (g_drm_vk.vk.vkCreateImage(g_drm_vk.device, &ici, NULL, &s->image) != VK_SUCCESS) {
+		if (d->dev->vk.vkCreateImage(d->dev->device, &ici, NULL, &s->image) != VK_SUCCESS) {
 			blog(LOG_WARNING, "drm-output: vk-direct: shared image %d create failed", i);
 			return false;
 		}
 		VkMemoryRequirements req;
-		g_drm_vk.vk.vkGetImageMemoryRequirements(g_drm_vk.device, s->image, &req);
+		d->dev->vk.vkGetImageMemoryRequirements(d->dev->device, s->image, &req);
 		uint32_t type = UINT32_MAX;
 		for (uint32_t t = 0; t < mp.memoryTypeCount && type == UINT32_MAX; t++)
 			if ((req.memoryTypeBits & (1u << t)) &&
@@ -652,8 +690,8 @@ static bool drm_output_vk_create_shared(void)
 					    .pNext = &exp,
 					    .allocationSize = req.size,
 					    .memoryTypeIndex = type};
-		if (g_drm_vk.vk.vkAllocateMemory(g_drm_vk.device, &mai, NULL, &s->memory) != VK_SUCCESS ||
-		    g_drm_vk.vk.vkBindImageMemory(g_drm_vk.device, s->image, s->memory, 0) != VK_SUCCESS) {
+		if (d->dev->vk.vkAllocateMemory(d->dev->device, &mai, NULL, &s->memory) != VK_SUCCESS ||
+		    d->dev->vk.vkBindImageMemory(d->dev->device, s->image, s->memory, 0) != VK_SUCCESS) {
 			blog(LOG_WARNING, "drm-output: vk-direct: shared image %d memory allocation failed", i);
 			return false;
 		}
@@ -661,7 +699,7 @@ static bool drm_output_vk_create_shared(void)
 		VkExportSemaphoreCreateInfo esi = {.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
 						   .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT};
 		VkSemaphoreCreateInfo smci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, .pNext = &esi};
-		if (g_drm_vk.vk.vkCreateSemaphore(g_drm_vk.device, &smci, NULL, &s->sem) != VK_SUCCESS) {
+		if (d->dev->vk.vkCreateSemaphore(d->dev->device, &smci, NULL, &s->sem) != VK_SUCCESS) {
 			blog(LOG_WARNING, "drm-output: vk-direct: shared semaphore %d create failed", i);
 			return false;
 		}
@@ -669,112 +707,175 @@ static bool drm_output_vk_create_shared(void)
 	return true;
 }
 
-bool drm_output_vk_setup(const char *output_name)
+bool drm_output_vk_setup(struct drm_output_vk_disp *d)
 {
-	g_drm_vk.dpy = XOpenDisplay(NULL);
-	if (!g_drm_vk.dpy) {
-		blog(LOG_WARNING, "drm-output: vk-direct: cannot open the X display (DISPLAY) -- output dormant");
-		return false;
+	struct drm_output_vk_device *dev = d->dev;
+	d->plane = -1;
+	/* issue 1424 part 2: the X connection, loader + VkInstance come with the first display, the VkDevice
+	 * with the first display's surface. */
+	if (!dev->dpy) {
+		dev->dpy = XOpenDisplay(NULL);
+		if (!dev->dpy) {
+			blog(LOG_WARNING, "drm-output: vk-direct: cannot open the X display (DISPLAY) -- output dormant");
+			return false;
+		}
 	}
-	unsigned long output = 0;
-	return drm_output_vk_load() && drm_output_vk_create_instance() &&
-	       (output = drm_output_vk_find_output(output_name)) != 0 && drm_output_vk_acquire(output) &&
-	       drm_output_vk_create_surface(false) && drm_output_vk_create_device() && drm_output_vk_create_swapchain() &&
-	       drm_output_vk_create_shared();
+	if (!dev->instance && !(drm_output_vk_load(d) && drm_output_vk_create_instance(d)))
+		return false;
+	const unsigned long output = drm_output_vk_find_output(d, d->output_name);
+	if (output == 0)
+		return false;
+	/* issue 1424 part 2: never acquire while another display brings its presentation up (NVIDIA -13), and
+	 * hold the other displays' re-modes (a new mode set) off until this acquire returned. */
+	os_atomic_set_bool(&dev->acquiring, true);
+	drm_output_vk_mark_disruption(d->dev); /* issue 1424: the other displays' misses from here are this bring-up */
+	drm_output_vk_wait_others_settled(d);
+	const bool acquired = drm_output_vk_acquire(d, output);
+	os_atomic_set_bool(&dev->acquiring, false);
+	if (!acquired || !drm_output_vk_create_surface(d, false))
+		return false;
+	if (!dev->device) {
+		if (!drm_output_vk_create_device(d))
+			return false;
+	} else {
+		VkBool32 present = VK_FALSE;
+		dev->vk.vkGetPhysicalDeviceSurfaceSupportKHR(dev->pd, dev->qfi, d->surface, &present);
+		if (!present) {
+			blog(LOG_WARNING,
+			     "drm-output: vk-direct: output '%s' cannot be presented from the shared device's queue family %u",
+			     d->output_name, dev->qfi);
+			return false;
+		}
+	}
+	const uint32_t q = (uint32_t)d->slot < dev->n_queues ? (uint32_t)d->slot : 0u;
+	d->queue = dev->queues[q];
+	d->queue_lock = &dev->queue_lock[q];
+	if (!drm_output_vk_create_swapchain(d) || !drm_output_vk_create_shared(d))
+		return false;
+	dev->refs++;
+	return true;
 }
 
-/* Free everything open() built (idempotent, safe on partial init). The present thread is halted. */
-void drm_output_vk_destroy_all(void)
+/* The shared part goes with the last display (dev->lock held). A device a wedged display leaked is
+ * forgotten, never destroyed (the driver may still use it); a later open builds a fresh one. */
+static void drm_output_vk_destroy_device(struct drm_output_vk_device *dev)
 {
-	if (g_drm_vk.device && g_drm_vk.submit_outstanding && g_drm_vk.fence) {
-		/* The present loop exited on a fence it never saw signalled: wait BOUNDED (5 x 1 s). A GPU that
-		 * never finishes the copy leaks the Vulkan objects instead of hanging the OBS shutdown in an
-		 * unbounded vkDeviceWaitIdle. */
+	if (dev->wedged) {
+		blog(LOG_WARNING,
+		     "drm-output: vk-direct: leaking the shared Vulkan device, instance, loader and X connection (a "
+		     "display's last copy never completed)");
+	} else {
+		if (dev->device) {
+			dev->vk.vkDeviceWaitIdle(dev->device);
+			dev->vk.vkDestroyDevice(dev->device, NULL);
+		}
+		if (dev->instance)
+			dev->vk.vkDestroyInstance(dev->instance, NULL);
+		if (dev->dpy)
+			XCloseDisplay(dev->dpy);
+		if (dev->lib)
+			dlclose(dev->lib);
+	}
+	dev->wedged = false;
+	dev->lib = NULL;
+	memset(&dev->vk, 0, sizeof(dev->vk));
+	memset(&dev->gl, 0, sizeof(dev->gl));
+	dev->gl_resolved = false;
+	dev->dpy = NULL;
+	dev->instance = VK_NULL_HANDLE;
+	dev->pd = VK_NULL_HANDLE;
+	dev->device = VK_NULL_HANDLE;
+	dev->qfi = 0;
+	dev->n_queues = 0;
+	memset(dev->queues, 0, sizeof(dev->queues));
+}
+
+/* Free what setup built for display `d` (idempotent; present thread halted, dev->lock held). */
+void drm_output_vk_destroy_display(struct drm_output_vk_disp *d)
+{
+	struct drm_output_vk_device *dev = d->dev;
+	bool leak = false;
+	if (dev->device && d->submit_outstanding && d->fence) {
+		/* A fence never seen signalled: wait BOUNDED (5 x 1 s); a GPU that never finishes the copy leaks
+		 * this display (and, at the last close, the device) instead of hanging the OBS shutdown. */
 		VkResult fr = VK_TIMEOUT;
 		for (int i = 0; i < 5 && fr == VK_TIMEOUT; i++)
-			fr = g_drm_vk.vk.vkWaitForFences(g_drm_vk.device, 1, &g_drm_vk.fence, VK_TRUE, DRM_OUTPUT_VK_WAIT_NS);
+			fr = dev->vk.vkWaitForFences(dev->device, 1, &d->fence, VK_TRUE, DRM_OUTPUT_VK_WAIT_NS);
 		if (fr == VK_TIMEOUT) { /* a lost device returns at once: destroy it normally below */
 			blog(LOG_WARNING,
 			     "drm-output: vk-direct: the last copy never completed (VkResult %d) -- leaking the Vulkan objects "
 			     "of '%s' instead of hanging the shutdown",
-			     (int)fr, g_drm_vk.output_name);
-			g_drm_vk.device = VK_NULL_HANDLE;
-			g_drm_vk.surface = VK_NULL_HANDLE;
-			g_drm_vk.acquired = false;
-			g_drm_vk.instance = VK_NULL_HANDLE;
-			/* the driver may still use the loader and the X connection: leak them too */
-			g_drm_vk.lib = NULL;
-			g_drm_vk.dpy = NULL;
+			     (int)fr, d->output_name);
+			leak = true;
+			dev->wedged = true;
 		}
-		g_drm_vk.submit_outstanding = false;
+		d->submit_outstanding = false;
 	}
-	if (g_drm_vk.device) {
-		g_drm_vk.vk.vkDeviceWaitIdle(g_drm_vk.device);
+	if (dev->device && !leak && !drm_output_vk_drain_queue_bounded(d)) {
+		blog(LOG_WARNING, "drm-output: vk-direct: the queue of '%s' never drained -- leaking its Vulkan objects",
+		     d->output_name);
+		leak = true;
+		dev->wedged = true;
+	}
+	if (dev->device && !leak) {
 		for (int i = 0; i < DRM_OUTPUT_VK_SHARED_IMAGES; i++) {
-			struct drm_output_vk_shared *s = &g_drm_vk.shared[i];
+			struct drm_output_vk_shared *s = &d->shared[i];
 			if (s->sem)
-				g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, s->sem, NULL);
+				dev->vk.vkDestroySemaphore(dev->device, s->sem, NULL);
 			if (s->image)
-				g_drm_vk.vk.vkDestroyImage(g_drm_vk.device, s->image, NULL);
+				dev->vk.vkDestroyImage(dev->device, s->image, NULL);
 			if (s->memory)
-				g_drm_vk.vk.vkFreeMemory(g_drm_vk.device, s->memory, NULL);
-			memset(s, 0, sizeof(*s));
+				dev->vk.vkFreeMemory(dev->device, s->memory, NULL);
 		}
-		if (g_drm_vk.pool)
-			g_drm_vk.vk.vkDestroyCommandPool(g_drm_vk.device, g_drm_vk.pool, NULL);
-		if (g_drm_vk.fence)
-			g_drm_vk.vk.vkDestroyFence(g_drm_vk.device, g_drm_vk.fence, NULL);
-		if (g_drm_vk.sem_acquire)
-			g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, g_drm_vk.sem_acquire, NULL);
-		drm_output_vk_destroy_swapchain();
-		drm_output_vk_free_retired();
+		if (d->pool)
+			dev->vk.vkDestroyCommandPool(dev->device, d->pool, NULL);
+		if (d->fence)
+			dev->vk.vkDestroyFence(dev->device, d->fence, NULL);
+		if (d->sem_acquire)
+			dev->vk.vkDestroySemaphore(dev->device, d->sem_acquire, NULL);
+		drm_output_vk_destroy_swapchain(d);
+		drm_output_vk_free_retired(d);
 		for (uint32_t i = 0; i < DRM_OUTPUT_VK_MAX_SWAP; i++) {
-			if (g_drm_vk.sem_done[i])
-				g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, g_drm_vk.sem_done[i], NULL);
-			g_drm_vk.sem_done[i] = VK_NULL_HANDLE;
+			if (d->sem_done[i])
+				dev->vk.vkDestroySemaphore(dev->device, d->sem_done[i], NULL);
 		}
-		g_drm_vk.vk.vkDestroyDevice(g_drm_vk.device, NULL);
 	}
-	if (g_drm_vk.surface)
-		g_drm_vk.vk.vkDestroySurfaceKHR(g_drm_vk.instance, g_drm_vk.surface, NULL);
-	if (g_drm_vk.acquired) {
-		VkResult r = g_drm_vk.vk.vkReleaseDisplayEXT(g_drm_vk.pd, g_drm_vk.display);
+	if (!leak && d->surface && dev->instance)
+		dev->vk.vkDestroySurfaceKHR(dev->instance, d->surface, NULL);
+	if (d->acquired && !leak) {
+		VkResult r = dev->vk.vkReleaseDisplayEXT(dev->pd, d->display);
 		blog(LOG_INFO,
 		     "drm-output: vk-direct display released (VkResult %d) -- '%s' stays OFF in X, never back on the "
 		     "desktop by itself",
-		     (int)r, g_drm_vk.output_name);
+		     (int)r, d->output_name);
 	}
-	if (g_drm_vk.instance)
-		g_drm_vk.vk.vkDestroyInstance(g_drm_vk.instance, NULL);
-	if (g_drm_vk.dpy)
-		XCloseDisplay(g_drm_vk.dpy);
-	if (g_drm_vk.lib)
-		dlclose(g_drm_vk.lib);
 
-	g_drm_vk.lib = NULL;
-	memset(&g_drm_vk.vk, 0, sizeof(g_drm_vk.vk));
-	g_drm_vk.dpy = NULL;
-	g_drm_vk.instance = VK_NULL_HANDLE;
-	g_drm_vk.pd = VK_NULL_HANDLE;
-	g_drm_vk.display = VK_NULL_HANDLE;
-	g_drm_vk.acquired = false;
-	g_drm_vk.surface = VK_NULL_HANDLE;
-	g_drm_vk.device = VK_NULL_HANDLE;
-	g_drm_vk.queue = VK_NULL_HANDLE;
-	g_drm_vk.swapchain = VK_NULL_HANDLE;
-	memset(g_drm_vk.swap_images, 0, sizeof(g_drm_vk.swap_images));
-	memset(g_drm_vk.sem_done, 0, sizeof(g_drm_vk.sem_done));
-	g_drm_vk.n_swap = 0;
-	g_drm_vk.sem_acquire = VK_NULL_HANDLE;
-	g_drm_vk.fence = VK_NULL_HANDLE;
-	g_drm_vk.pool = VK_NULL_HANDLE;
-	g_drm_vk.cmd = VK_NULL_HANDLE;
-	g_drm_vk.retired_swapchain = VK_NULL_HANDLE; /* leaked with a wedged device, or already freed */
-	g_drm_vk.retired_surface = VK_NULL_HANDLE;
-	g_drm_vk.retire_countdown = 0;
-	g_drm_vk.present_queued_since_rebuild = false;
-	g_drm_vk.front = g_drm_vk.pending = g_drm_vk.ready = -1;
-	g_drm_vk.open = false;
+	memset(d->shared, 0, sizeof(d->shared));
+	d->display = VK_NULL_HANDLE;
+	d->acquired = false;
+	d->surface = VK_NULL_HANDLE;
+	d->queue = VK_NULL_HANDLE;
+	d->queue_lock = NULL;
+	d->swapchain = VK_NULL_HANDLE;
+	memset(d->swap_images, 0, sizeof(d->swap_images));
+	memset(d->sem_done, 0, sizeof(d->sem_done));
+	d->n_swap = 0;
+	d->sem_acquire = VK_NULL_HANDLE;
+	d->fence = VK_NULL_HANDLE;
+	d->pool = VK_NULL_HANDLE;
+	d->cmd = VK_NULL_HANDLE;
+	d->retired_swapchain = VK_NULL_HANDLE; /* leaked with a wedged device, or already freed */
+	d->retire_countdown = 0;
+	d->present_queued_since_rebuild = false;
+	d->queue_wedged = false;
+	d->plane = -1;
+	d->front = d->pending = d->ready = -1;
+	if (d->open)
+		dev->refs--; /* setup counted this display only once it fully succeeded */
+	d->open = false;
+	d->in_use = false;
+	if (dev->refs == 0)
+		drm_output_vk_destroy_device(dev);
 }
 
 #endif /* defined(__linux__) */

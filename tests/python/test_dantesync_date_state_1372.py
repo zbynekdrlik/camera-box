@@ -171,12 +171,13 @@ def test_the_emitted_linux_rollback_removes_the_date_state_after_the_stop_inside
     assert _DATE_LINE in run.stdout.splitlines(), run.stdout
     assert not st.exists()
     assert (bindir / "dantesync").read_text() == "the pre-upgrade binary\n"
+    # issue 1407: the window closes (verified) BEFORE the restart, never at EXIT after it.
     assert calls == [
         "mount -o remount,rw / state=present",
         "systemctl stop dantesync state=present",
+        "mount -o remount,ro / state=absent",
         "systemctl restart dantesync state=absent",
         "dantesync --version state=absent",
-        "mount -o remount,ro / state=absent",
     ], calls
 
 
@@ -290,9 +291,9 @@ def test_rollback_node_threads_the_role_and_the_restored_version_to_both_program
 def test_the_date_state_line_is_relayed_to_the_roll_log(tmp_path):
     out = f"x\r\n{_DATE_LINE}\r\ndantesync 1.14.0\r\n"
     (tmp_path / "out.txt").write_text(out)
-    r = _source(tmp_path, f'dantesync_rollback_date_state_note strih-lx "$(cat "{tmp_path / "out.txt"}")"; echo rc=$?')
-    assert r.stdout == f"[strih-lx] {_DATE_LINE}\nrc=0\n", repr(r.stdout)
-    r = _source(tmp_path, 'set -e; dantesync_rollback_date_state_note strih-lx ""; echo rc=$?')
+    r = _source(tmp_path, f'dantesync_rollback_date_state_note strih-snv "$(cat "{tmp_path / "out.txt"}")"; echo rc=$?')
+    assert r.stdout == f"[strih-snv] {_DATE_LINE}\nrc=0\n", repr(r.stdout)
+    r = _source(tmp_path, 'set -e; dantesync_rollback_date_state_note strih-snv ""; echo rc=$?')
     assert r.stdout == "rc=0\n", repr(r.stdout + r.stderr)
 
 
@@ -343,7 +344,7 @@ def test_roll_of_a_slave_that_fails_verify_rolls_back_without_touching_the_date_
 
 def test_date_role_is_the_ntp_master_the_way_verify_names_it(tmp_path):
     body = ("dantesync_date_role stream stream; echo\n"
-            "dantesync_date_role stream strih-lx; echo\n"
+            "dantesync_date_role stream strih-snv; echo\n"
             "dantesync_date_role stream ''; echo")
     r = _source(tmp_path, body)
     assert r.stdout.splitlines() == ["ntp-master", "slave", "slave"], r.stdout + r.stderr
@@ -436,11 +437,15 @@ def test_the_emitted_linux_downgrade_of_the_master_deletes_after_the_start_insid
     assert _DATE_LINE in run.stdout.splitlines(), run.stdout
     assert not st.exists()
     assert (bindir / "dantesync").read_text() == "the 1.14.0 binary\n"
+    # issue 1407: the swap's window closes (verified) before the restart; the delete after the
+    # good start opens its own window and closes it verified too.
     assert calls == [
         "mount -o remount,rw / state=present",
         "systemctl stop dantesync state=present",
+        "mount -o remount,ro / state=present",
         "systemctl restart dantesync state=present",
         "dantesync --version state=present",
+        "mount -o remount,rw / state=present",
         "mount -o remount,ro / state=absent",
     ], calls
 
@@ -454,14 +459,18 @@ def test_a_failed_start_of_the_downgrade_self_heals_with_the_saved_date_intact(t
     assert st.is_file(), "the 1.15 binary came back without its saved fleet date"
     assert (bindir / "dantesync").read_text() == "the 1.15.0 binary\n"
     assert "date-offset" not in run.stdout, run.stdout
-    assert calls[-2:] == ["systemctl restart dantesync state=present", "mount -o remount,ro / state=present"], calls
+    # issue 1407: the self-heal reopens the window for the .bak, closes it verified, then restarts.
+    assert calls[-3:] == ["mount -o remount,rw / state=present", "mount -o remount,ro / state=present",
+                          "systemctl restart dantesync state=present"], calls
 
 
 def test_the_emitted_linux_downgrade_of_a_slave_keeps_the_date_state(tmp_path):
     run, calls, st, _ = _run_linux_downgrade(tmp_path, "slave")
     assert run.returncode == 0, run.stdout + run.stderr
     assert st.is_file() and "date-offset" not in run.stdout, run.stdout
-    assert calls[-1] == "mount -o remount,ro / state=present", calls
+    # issue 1407: the verified close precedes the restart; nothing reopens the window afterwards.
+    assert calls[-3:] == ["mount -o remount,ro / state=present", "systemctl restart dantesync state=present",
+                          "dantesync --version state=present"], calls
 
 
 @pytest.mark.parametrize("role,fail_start,want_line,want_state,want_exe", [

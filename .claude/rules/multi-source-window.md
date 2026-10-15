@@ -18,7 +18,7 @@ The all-cambox sweep's per-window test-pattern checks read the cam2 dual-QR Vern
 tick is the max optical id in each recorded frame (`RecordingFrame::tick`). The checks assume the
 window films ONE painted feed.
 
-When a camera films an OBS monitor instead (cam2 filming the strih-lx vk-direct multiview since
+When a camera films an OBS monitor instead (cam2 filming the strih-snv vk-direct multiview since
 25.9.2026), one frame holds several generations of the pattern. On release PR 1373's runs the tiles
 were ~248 / 413 / 546 ms old, including cam2's own recursion, and the multiview renders ~30 fps off
 the program grid. When the newest tile misses, the tick falls back to an older one. The result is

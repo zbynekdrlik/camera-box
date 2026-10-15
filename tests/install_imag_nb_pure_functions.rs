@@ -14,6 +14,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -66,11 +70,15 @@ fn fake_casper(dir: &std::path::Path) {
     std::fs::write(dir.join("filesystem.manifest"), b"x").unwrap();
 }
 
-fn tmpdir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("imag-nb-test-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmpdir(tag: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("imag-nb-test-{tag}-"))
+        .tempdir()
+        .unwrap();
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Secure Boot OFF: the install layers are base + standard, LOWEST FIRST, and NOTHING else — no
@@ -98,31 +106,42 @@ fn layer_chain_without_secureboot_is_base_then_standard_only() {
     );
 }
 
-/// Secure Boot ON: the enhanced-secureboot delta is appended LAST (it is a delta on
-/// minimal.standard, so it must sit highest in the overlay stack).
+/// Secure Boot ON installs the SAME two layers as Secure Boot off (issue 1412). The
+/// enhanced-secureboot delta is Ubuntu's TPM-backed FDE variant: it ships `boot-managed-by-snapd`,
+/// which conflicts with grub-efi-amd64, so the chroot's GRUB install failed on stream-pp
+/// (11.10.2026, Secure Boot on). Secure Boot is served by shim-signed + grub-efi-amd64-signed.
 #[test]
-fn layer_chain_with_secureboot_appends_enhanced_layer_last() {
+fn layer_chain_with_secureboot_never_stacks_the_snapd_boot_layer_1412() {
     let d = tmpdir("sb-on");
     let casper = d.join("casper");
     fake_casper(&casper);
     let (code, out, err) = run_sourced(&format!("imag_layer_chain '{}' enabled", casper.display()));
     assert_eq!(code, 0, "layer chain should resolve. stderr: {err}");
     let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 3, "expected 3 layers, got {lines:?}");
+    assert_eq!(lines.len(), 2, "expected the 2 base layers, got {lines:?}");
     assert!(
-        lines[2].ends_with("minimal.standard.enhanced-secureboot.squashfs"),
-        "enhanced-secureboot must be the TOP layer; got {lines:?}"
+        lines[0].ends_with("/minimal.squashfs") && lines[1].ends_with("/minimal.standard.squashfs"),
+        "minimal then minimal.standard; got {lines:?}"
+    );
+    assert!(
+        !out.contains("enhanced-secureboot"),
+        "the snapd-boot (TPM FDE) layer must never be installed: {out}"
     );
     assert!(
         !out.contains(".live."),
         "the .live layer must NEVER be installed: {out}"
     );
-    assert!(
-        !lines
-            .iter()
-            .any(|l| l.ends_with("minimal.enhanced-secureboot.squashfs")),
-        "the minimal-only secureboot variant is the wrong chain branch; got {lines:?}"
-    );
+}
+
+/// The chroot installs the signed boot chain that serves Secure Boot (issue 1412).
+#[test]
+fn chroot_installs_the_signed_shim_and_grub_for_secure_boot_1412() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let line = body
+        .lines()
+        .find(|l| l.contains("apt-get install") && l.contains("grub-efi-amd64-signed"))
+        .expect("the chroot boot-chain apt-get install line");
+    assert!(line.contains("shim-signed"), "{line}");
 }
 
 /// A casper dir missing the base layer is a broken/unknown ISO — fail LOUD rather than install a
@@ -226,7 +245,93 @@ fn nm_keyfile_pins_the_static_address() {
     );
 }
 
-/// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-lx notebook runs Ubuntu 26.04, so the chroot
+/// issue 1412: the chroot installed linux-generic-hwe-26.04 7.0.0-30 while the archive already had
+/// 7.0.0-38, and the lowlatency config meta exists ONLY at 7.0.0-38, so setup's step 11 failed on
+/// every fresh box (new strih notebook, stream-pp, strih-pp). The kernel meta version is the newest
+/// one its lowlatency twin also has.
+#[test]
+fn kernel_meta_version_is_the_newest_the_lowlatency_meta_also_has_1412() {
+    let cases = [
+        ("7.0.0-38.38\n7.0.0-30.30", "7.0.0-38.38", "7.0.0-38.38"),
+        (
+            "7.0.0-40.40\n7.0.0-38.38\n7.0.0-30.30",
+            "7.0.0-38.38\n7.0.0-30.30",
+            "7.0.0-38.38",
+        ),
+        ("7.0.0-30.30", "", ""),
+        ("7.0.0-30.30", "7.0.0-38.38", ""),
+    ];
+    for (meta, ll, want) in cases {
+        let (code, out, err) = run_sourced(&format!(
+            "imag_kernel_meta_version \"$(printf '{meta}')\" \"$(printf '{ll}')\""
+        ));
+        assert_eq!(code, 0, "{meta} / {ll}: {err}");
+        assert_eq!(out.trim(), want, "{meta} / {ll}");
+    }
+    let chroot = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        chroot.contains("imag_kernel_meta_version \"\\$meta_vers\" \"\\$ll_vers\""),
+        "the chroot must pick the kernel meta version through imag_kernel_meta_version"
+    );
+}
+
+/// issue 1412: the NetworkManager profile is named after the box (`<hostname up to the first ->-lan`),
+/// never the imag literal: stream-pp came up with an `imag-lan` profile and the owner asked why.
+#[test]
+fn nm_profile_name_follows_the_hostname_1412() {
+    for (host, want) in [
+        ("stream-pp", "stream-lan"),
+        ("strih-pp", "strih-lan"),
+        ("strih-snv", "strih-lan"),
+        ("imag-nb", "imag-lan"),
+        ("imag", "imag-lan"),
+    ] {
+        let (code, out, err) = run_sourced(&format!("imag_nm_con_id {host}"));
+        assert_eq!(code, 0, "{host}: {err}");
+        assert_eq!(out.trim(), want, "{host}");
+    }
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        !body.contains("NM_CON_ID=\"imag-lan\""),
+        "the profile name must not be the imag literal"
+    );
+}
+
+/// issue 1412: the live layers ship cloud-init. On the installed stream-pp its
+/// cloud-init-network.service waited 4 min for a datasource on every boot (the owner saw a spinner),
+/// and its 50-cloud-init.yaml netplan added a second DHCP profile. The installed system disables it.
+#[test]
+fn installed_system_disables_cloud_init_1412() {
+    let d = tmpdir("cloudinit");
+    let root = d.join("root");
+    std::fs::create_dir_all(root.join("etc/cloud")).unwrap();
+    std::fs::create_dir_all(root.join("etc/netplan")).unwrap();
+    std::fs::write(root.join("etc/netplan/50-cloud-init.yaml"), "network: {}\n").unwrap();
+    std::fs::write(
+        root.join("etc/netplan/01-network-manager-all.yaml"),
+        "network: {}\n",
+    )
+    .unwrap();
+    let (code, _out, err) = run_sourced(&format!("imag_disable_cloud_init '{}'", root.display()));
+    assert_eq!(code, 0, "{err}");
+    assert!(root.join("etc/cloud/cloud-init.disabled").exists());
+    assert!(!root.join("etc/netplan/50-cloud-init.yaml").exists());
+    assert!(root
+        .join("etc/netplan/01-network-manager-all.yaml")
+        .exists());
+    // a root without cloud-init stays fine
+    let bare = d.join("bare");
+    std::fs::create_dir_all(bare.join("etc")).unwrap();
+    let (code, _out, err) = run_sourced(&format!("imag_disable_cloud_init '{}'", bare.display()));
+    assert_eq!(code, 0, "{err}");
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains("imag_disable_cloud_init \"$MOUNT_ROOT\""),
+        "the install flow must call it on the target root"
+    );
+}
+
+/// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-snv notebook runs Ubuntu 26.04, so the chroot
 /// kernel meta can no longer be hardcoded to noble's `linux-generic-hwe-24.04` (that package does
 /// not exist on 26.04 — the install would fail or ship no kernel). The chroot step must DERIVE the
 /// kernel meta from the target release via the pure `imag_kernel_meta_package` decision, reading

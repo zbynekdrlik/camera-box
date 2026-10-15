@@ -42,6 +42,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -219,14 +223,15 @@ fn av_restart_painter_calls_the_shared_self_check_before_recording_starts() {
 // #431 — emission-assert tests (see the module doc for why these EXECUTE the real snippet)
 // -------------------------------------------------------------------------------------------
 
-fn emission_scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "audio-marker-emit-431-{}-{}",
-        std::process::id(),
-        name
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+fn emission_scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("audio-marker-emit-431-{name}-"))
+        .tempdir()
+        .unwrap();
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Source the shared helper, build the `audio_marker_emission_check_cmds LOG ON_FAIL EXTRA`

@@ -3,7 +3,7 @@
 # against -- see the extended header below the strict-mode line.
 set -euo pipefail
 #
-# WHY: the strih-lx genlock bundle links release-specific Qt6 / ffmpeg 8 / libOpenGL runtime
+# WHY: the strih-snv genlock bundle links release-specific Qt6 / ffmpeg 8 / libOpenGL runtime
 # libraries. A fresh Ubuntu 26.04 box has none of them, so `obs` dies at exec with
 # `libavcodec.so.62: cannot open shared object file`. A hand-curated 26.04 package list rots on
 # every soname bump -- the runner that BUILT the binary is the only authority on what it links.

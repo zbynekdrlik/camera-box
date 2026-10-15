@@ -20,12 +20,33 @@ regardless) — the exact race #830/#1277 exist to close. The supervisor still p
 `enable --now` at integration (this ticket's own worker never installs/enables/starts anything);
 this note documents the INTENDED end state, not something already done.
 
-## Why GET-only, no auth
+## The write routes (issue 1432) -- token install
+
+Since issue 1432 the server also has three AUTHENTICATED write routes, `POST /rig-lease/acquire`,
+`/heartbeat` and `/release`, so restreamer's stream-box runner TAKES the lease instead of only
+reading it (contract: restreamer#349 comment 6179376408, logic: `scripts/rig_lease_write.py`, the
+lock itself stays `scripts/lib/rig-lease.sh`). Every write needs `Authorization: Bearer <token>`,
+checked against a token file; with no usable token file every write is a 401 (the reads are
+unchanged). Install the token once on dev1, never printing it:
+
+```bash
+install -d -m 0700 ~/.config/camera-box
+umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > ~/.config/camera-box/rig-lease-token
+chmod 0600 ~/.config/camera-box/rig-lease-token
+# the same value as the restreamer repo secret, from stdin (never argv):
+gh secret set RIG_LEASE_TOKEN -R zbynekdrlik/restreamer < ~/.config/camera-box/rig-lease-token
+systemctl --user restart rig-lease-server.service   # only while held=false
+journalctl --user -u rig-lease-server -n 3          # the start line ends "writes=enabled"
+```
+
+The token is read per request, so rotating it needs no restart. The file must be owned by the
+server's user with no group/other bits, or the server refuses every write.
+
+## Why the GET route has no auth
 
 The payload is `held` (bool) + `holder` (repo/run_id/job/timestamps) + a TTL number — nothing
-secret (the issue's own explicit call). The server never accepts a write; restreamer's own
-"streaming in progress" state is already ITS lease signal toward camera-box (`rig-busy-gate.sh`'s
-existing OBS-state check), so this endpoint only ever needs to be **read**, never written.
+secret (the issue's own explicit call). A remote holder's `lease_id` (its write capability) is never
+part of it.
 
 ## Supervisor install + live-verify procedure
 
@@ -47,7 +68,7 @@ systemctl --user daemon-reload
 
 # 3. Live-verify BEFORE (or right after) enabling:
 systemctl --user start rig-lease-server.service
-curl -sS http://10.77.9.103:8890/rig-lease.json   # LAN — the path restreamer's stream-box runner uses
+curl -sS http://dev1:8890/rig-lease.json   # LAN by NAME — the path restreamer's stream-box runner uses (never a literal LAN IP, it drifts)
 curl -sS http://100.104.8.125:8890/rig-lease.json # tailscale (if reachable from wherever you check)
 journalctl --user -u rig-lease-server -n 30
 
@@ -57,10 +78,24 @@ systemctl --user is-enabled rig-lease-server.service   # -> enabled
 
 # 5. Confirm the LIVE lease transition is visible (proves "computed fresh per request", never a
 #    stale cached snapshot) — during an actual E2E run holding the lease:
-curl -sS http://10.77.9.103:8890/rig-lease.json   # before: held=false
+curl -sS http://dev1:8890/rig-lease.json   # before: held=false
 #   ... start a full-path-e2e.yml run (or scripts/rig-busy-gate.sh acquire manually) ...
-curl -sS http://10.77.9.103:8890/rig-lease.json   # during: held=true, holder={...}, stale=false
+curl -sS http://dev1:8890/rig-lease.json   # during: held=true, holder={...}, stale=false
 ```
+
+## Issue 1404: one more read-only route
+
+The server also serves `/rig-qpsk-markers.csv` from `--serve-dir` (default
+`$XDG_RUNTIME_DIR/rig-lease-serve`; never the lease dir). It still writes nothing: another dev1
+unit writes that file (`rig-marker-mirror.README.md`).
+
+`/program-audio.json` is not served here any more: the dev1 route was retired on 8.10.2026, and the
+server answers 404 for it once it is restarted on that code (`program-audio-sampler.README.md`,
+the post-merge step). The program-audio sampler runs on strih-snv and serves
+`http://10.77.9.202:8891/program-audio.json` itself (`program-audio-sampler.README.md`).
+
+Picking up a route change needs a `systemctl --user restart rig-lease-server.service`, done while
+`/rig-lease.json` reads `held=false`.
 
 ## What this does NOT do
 

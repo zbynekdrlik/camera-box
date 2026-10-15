@@ -65,6 +65,20 @@ script gained text that a negated `!p.contains(...)` on the output could have ca
 a heredoc builder, also grep the tests that call it for negated output assertions. Run the one or two
 real test files that drive it with plain rustc (the stub-rlib recipe below).
 
+**A new line in an EMBEDDED builder can steal a `.find()` anchor whose count only goes N→N+1**
+(issue 1405). The persist emitter's ro-verify FAIL line read `systemctl is-active
+cam2-painter.service`. EVENT's `painter_stop_remote` embeds that text at step 2.6, so it became the
+FIRST `is-active cam2-painter` in the rendered script. `harness_rig_mode_fb0_blank_1176.rs` finds
+the step-5 "painter confirmed stopped" check by exactly that text and orders it before the fb0 `dd`.
+The count went 2→3, so no 1→2 sweep flags it, and every test stayed green. But a deleted step-5
+check would then pass too (a fresh-context reviewer ran that mutant). Two rules:
+- Before adding a command to a builder that another script embeds, find every `.find(...)` /
+  `.contains(...)` over the EMBEDDING script's rendered output for that command's text, and check
+  your copy cannot become the first match. Spell the new read another way instead
+  (`systemctl show -p ActiveState --value` for the state).
+- Prove an ordering anchor still bites with the mutant: delete the real check from the RENDERED
+  text and confirm the anchor's `find` returns -1.
+
 ## Adding a STEP between the merge call and `exit "$GATE"`: the occurrence-count sweep is BLIND to the 703 byte-DISTANCE window too (#1265)
 
 Sibling blind-spot to the #1263 negated-region one above, hit live on #1265. `tests/harness_e2e_execute_verdict_703.rs` does NOT anchor on a literal — it slices a FIXED BYTE WINDOW from the
@@ -656,6 +670,34 @@ dev-dep) — a kernel-atomic O_EXCL random name that CANNOT collide, whose Drop 
 the trailing manual `remove_dir_all` race. Rule: never hand-roll a unique temp path from
 pid+timestamp in a test; use `tempfile::tempdir()`.
 
+**Guarded since issue 1409.** `tests/no_hand_rolled_tempdirs_1409.rs` (std-only) fails on any
+`tests/**/*.rs` whose code calls `process::id()` and names `temp_dir` or a literal `/tmp/`, unless
+the file is on its ALLOWLIST as `"<file>: <why it does not leak>"`; a stale entry fails too. 30
+leaking harnesses were converted; the shapes, for the next one:
+- A fixture writer or scratch helper returns the ONE shared `TempPath { path, _dir: TempDir }`
+  from `tests/support/temp_path.rs` (`Deref<Target = Path>` + `AsRef<Path>`, public fields), never a
+  per-file copy (issue 1416 folded 25 copies into it). Include it with
+  `#[path = "support/temp_path.rs"] mod temp_path; use temp_path::TempPath;`, so call sites stay
+  unchanged. Keep the old name with `tempfile::Builder::new().prefix(..)`.
+- **Drop timing is the trap.** A helper that builds a `TempPath` and returns only a string derived
+  from it, or a `format!(.. x = helper(), ..)` / `cmd.env(k, &*helper())` whose result outlives the
+  statement, deletes the file before the bash under test reads it. Bind it for the whole test.
+- An inline site holds `let scratch = tempfile::tempdir().unwrap(); let dir = scratch.path();`;
+  a later `remove_dir_all(&dir)` on that `&Path` trips clippy `needless_borrows_for_generic_args`,
+  so drop it (the TempDir already removes the dir).
+- Verify locally with the stand-in rlib (the issue-1367 entry below; it needs `Builder` and
+  `NamedTempFile` too), run each file, then `clippy-driver -D warnings` on it.
+
+**A std-only lift-and-compile gate must not compile to a FIXED temp path either (issue 1367).** Six
+replay tests each compiled the same C harness to `<temp>/…/sequence.c/.bin`; under a parallel runner
+one test ran the binary while another rewrote it ("Text file busy", ETXTBSY). Measured: 9 of 10
+default-thread runs failed, while every local run used `--test-threads 1` and stayed green, and CI's
+nextest is parallel. Fix without giving up the plain-rustc path (`tempfile` is not std): name each
+compile `{tag}-{pid}-{counter}` with a `static AtomicUsize` counter. The counter separates threads of
+one process (unlike a clock), the pid separates nextest's per-test processes. Remove the call's own
+files after the run (`tests/support/ndi_source_lift_1367.rs`). Run every new lift gate at least once
+with the DEFAULT thread count, several times, before trusting it.
+
 ## A shared JSON/state file read FIELD-BY-FIELD (N separate parses) tears when a peer deletes it mid-read; read it ATOMICALLY (#970/#980)
 
 `scripts/lib/rig-lease.sh`'s `rig_lease_holder_summary` read holder.json via FIVE separate
@@ -1073,6 +1115,9 @@ compiles it as an ordinary program whose `main` can call the module's items dire
 `--test`-run and the append-`main` build are two separate standalone-rustc invocations of the same
 copied source; neither needs cargo.) This is the Rust analogue of the vendored-C lift-and-compile
 recipe and pairs with a bash-replica `diff` to prove the two implementations agree exhaustively.
+A module split into a directory (`genlock_lock_state` since issue 1302: `#[path]` submodules under
+`src/genlock_lock_state/`) needs that directory copied next to the copy, or mount the original
+with `#[path]` in a scratch lib.rs instead of copying it.
 
 ## A delegation-parity pytest that loads BOTH modules via `spec_from_file_location` CANNOT assert `is`-identity across them (#1308)
 
@@ -1157,14 +1202,14 @@ pattern already establishes, just applied for byte-budget reasons rather than an
 
 ## A new Linux-box-reached-over-plain-ssh sibling script: `recording-verdict-on-imag.sh` is the reusable TEMPLATE, including its issue-1118 sha256 upload gate — copy the WHOLE pattern, not just the shape
 
-Adding a NEW per-box script for a box reached over plain ssh/scp (imag-nb, strih-lx, any future
+Adding a NEW per-box script for a box reached over plain ssh/scp (imag-nb, strih-snv, any future
 Linux OBS box — as opposed to the win-* MCP-only Windows boxes) should start from
 `scripts/recording-verdict-on-imag.sh` as the template: its "always execute for real, never a
 plan-print mode" shape (ssh/scp to a plain Linux box is always allowed on this rig), its
 `--skip-if-exists` idempotency check, its `<partial>-pixels` pull-back convention — AND its
 **issue-1118 sha256 VERSION GATE** (`onimag_upload_decision`: force wins / absent uploads / unknown
 local sha fails safe to upload / differing sha re-uploads / identical sha skips). A first draft of
-`recording-verdict-on-strih-lx.sh` (issue 1351) copied everything EXCEPT the sha gate — a mere
+`recording-verdict-on-strih-snv.sh` (issue 1351) copied everything EXCEPT the sha gate — a mere
 `[ -x "$REMOTE_BIN" ]` presence check, which silently reuses a schema-drifted binary exactly the way
 imag-nb's pre-1118 bug did. A fresh-context review agent caught it on the FIRST pass; it would not
 have been caught by any local Tier-0 check (bash -n/shellcheck/fmt are all blind to "missing a
@@ -1213,7 +1258,7 @@ one call you wrapped (`--win-http "stream=$STREAM"`, `"$HERE/dantesync-version-g
 FULL bounded call (`timeout "${STRIH_LX_WS_TIMEOUT:-20}" python3 "$here/obs_phase2.py"`), not the
 bare `obs_phase2.py` literal that also appears in the lib's own doc comments (the #832 self-collision).
 
-The SSoT lib is `scripts/lib/strih-lx-preflight.sh` (`strih_lx_gate_prefix` / `strih_lx_preflight_timeout_banner`).
+The SSoT lib is `scripts/lib/strih-snv-preflight.sh` (`strih_lx_gate_prefix` / `strih_lx_preflight_timeout_banner`).
 Verify locally under Tier-0 with a `bash <file>` sourced-lib harness (the gm_enforce slice shape with
 a fake gate + a real `timeout 2` hang→124→banner path) + the python occurrence-count sweep — a
 worktree worker's `bash -c` is refused, but `bash <written-file>` runs (see the #1265/#1308 refinement).
@@ -1238,6 +1283,9 @@ repeatedly this session (a worktree worker on issue 1317):
   refused ("runs python with a program computed at runtime"), even with zero git in it.
 - Any two-command sequence joined with `&&`/`|`/`;` or a trailing `| tail`/`echo "${PIPESTATUS[0]}"`
   is refused as "too complex".
+- A pipe into `awk '{...}'` is refused even for a pure field print ("runs awk with a program that
+  can execute commands", issue 1367: `avahi-browse -rtp _ndi._tcp | grep | awk`). Parse the output
+  in a python script file that runs the tool through `subprocess.run`.
 
 Workarounds that DO run (all used this session): (1) write the file with the **`Write` tool**, never
 a Bash heredoc, when its content holds a `github.com`/`git`-substring URL (Write is not a Bash-hook
@@ -1336,7 +1384,7 @@ It also catches the truth-table shape std-only vendored-C gates love: a row slic
 
 ## Pinning a PRINTED shell command: parse it with BASH, never python `shlex` (issue 1317 part 4)
 
-A test that pins a plan line an operator pastes (e.g. the strih-lx `ssh host "rm -f -- '<path>'"`
+A test that pins a plan line an operator pastes (e.g. the strih-snv `ssh host "rm -f -- '<path>'"`
 cleanup line) must prove it survives BOTH parses — the local paste AND ssh's remote shell (ssh joins
 its args into one string the remote shell re-parses, so a single-level `'…'` quote around a spaced
 OBS filename silently becomes two `rm` args, hidden by `-f`). Python `shlex.split` is NOT a bash
@@ -1467,6 +1515,14 @@ each other with `crate::`. Write one scratch `lib.rs`:
 
 Then `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test lib.rs` (the env var serves a test's
 `env!` fixture path) and `clippy-driver --edition 2021 --test -D warnings lib.rs`.
+- **Splitting a crate-root module into a directory breaks this mount unless the submodules carry
+  explicit paths** (issue 1302). rustc treats a `#[path]`-mounted file like a `mod.rs`, so a bare
+  `mod decision;` inside `src/foo.rs` is looked up at `src/decision.rs` (E0583), while the real crate
+  finds `src/foo/decision.rs`. Write `#[path = "foo/decision.rs"] mod decision;`: a path attribute is
+  relative to the file's directory in both cases. A test inside a submodule that needs a sibling
+  imports it through `super::super::`, never `crate::foo::`, so the module also compiles when a
+  replica copies it in as the crate root. Prove all three mounts (`src/genlock_lock_state.rs` is the
+  worked example).
 - A module that derives `serde::{Serialize, Deserialize}` has no serde crate here. Include a COPY with
   the `use serde::…` line and the `, Serialize, Deserialize` derive entries sed-stripped. The derive
   is attribute-only, so the behaviour under test is unchanged.
@@ -1544,6 +1600,27 @@ Limits:
   run cannot catch that.
 - A runner that sources a repo script must not reuse its variable names. The sourced
   `dantesync-fleet-upgrade.sh` sets `HERE`.
+- pwsh 7 also PARSES syntax 5.1 rejects (`&&` `||` `??` `?.` the ternary), so a pwsh parse proves
+  nothing about 5.1 syntax. Scan the tokens: `ParseFile(..., [ref]$tokens, [ref]$errors)` and
+  refuse `Kind -in 'AndAnd','OrOr','QuestionQuestion','QuestionDot','QuestionMark', …`
+  (`test_the_fragment_uses_no_powershell_7_only_syntax`, issue 1367).
+
+Three more harness traps from the issue-1367 clean-close tests (`tests/python/test_deploy_clean_close_win_1367.py`):
+- **`pwsh -Command '<script>' a b c` does NOT bind `a b c` to `$args`:** the extra words are
+  appended to the command text and parsed with it. Write the script to a file and run
+  `pwsh -File script.ps1 a b c`.
+- **A shadow function can hand the program a Process with a SCRIPTED method:** `Get-Process`
+  defined as an advanced function wraps `Microsoft.PowerShell.Management\Get-Process
+  @PSBoundParameters` and adds `Add-Member -Force -MemberType ScriptMethod -Name CloseMainWindow`
+  / `NoteProperty -Name MainWindowTitle` to the real object; the instance member wins over the .NET
+  one, and `Stop-Process` still takes the object. Filter it to the test's OWN fake pid, so two runs
+  in parallel lanes never kill each other's fake.
+- **A python test server's listening socket: `close()` does not wake an `accept()` blocked on
+  another thread on Linux** — that accept still takes one more connection, so an "unreachable"
+  case read a live server. `shutdown(socket.SHUT_RDWR)` first (accept then fails EINVAL). For a
+  plain "nothing listens there" URI, bind a socket to port 0, read the port, close it without
+  `listen()`. Reap a fake child process from a thread (`threading.Thread(target=popen.wait)`), or a
+  SIGTERMed fake stays a zombie that `Get-Process` still lists.
 
 ## A pytest that sources a bash lib must source it under the CALLER's `set -euo pipefail` (issue 1357)
 
@@ -1660,3 +1737,163 @@ append `# airuleset:secret-ok <reason: public commit shas of this repo, the live
 to every `git add` / `git commit` call that stages that file. Never "hide" the sha by building it
 at runtime or splitting the literal. A synthetic sha the test only needs to be well-formed can be
 `"b" * 40`, which the scan never sees.
+
+## `mapfile < <(cmd; printf 'rc\0%s\0' "$?")` loses `cmd`'s exit code under `set -e` (issue 808)
+
+A process substitution INHERITS the caller's errexit. Under `set -euo pipefail`, a failing `cmd`
+ends that subshell before the trailing `printf` appends its exit code, so the caller reads its
+default ("nothing found") for every failure. Live: the SBC WiFi takeover read every netplan-reader
+failure as "no WiFi YAML" and, with a conf already present, exited 0 with netplan's wlan0 still live
+(caught by a fresh-context review, reproduced). Start the substitution with `set +e`:
+`mapfile -d '' -t f < <(set +e; cmd; printf 'rc\0%s\0' "$?")`. A test must assert the refusal TEXT of
+the real failure branch, not a word that the wrong branch prints too: the first refusal test passed
+on the broken code because both branches said "nothing changed".
+
+## A test that runs a real tool where it exists must ALSO pass where it does not (issue 808)
+
+`tests/python/test_bkshading_sbc_provision_808.py` runs the real `wpa_passphrase` on dev1 and an exact
+emulation elsewhere (the GitHub runner has no wpasupplicant). Green on dev1 proves only the first
+path. Run the other path locally with a PATH that lacks the tool: a scratch dir of symlinks to every
+`/usr/local/bin` `/usr/bin` `/bin` `/usr/sbin` `/sbin` entry except the tool (skip a name already
+linked, `[ -e x ] || [ -L x ]`, since dangling symlinks exist there), then `PATH=<that dir> python3 -m
+pytest …`, from a script FILE in a worktree lane. Pin the expected value independently of both
+paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against the tool's own output.
+
+## Splitting an over-budget pytest file mechanically, and testing a bash restore trap (issue 808 heal review)
+
+- **Split by `ast` segments, recompute imports from free names.** A segment is everything after the
+  previous top-level node's `end_lineno` up to this node's `end_lineno`, so a node moves with the
+  comments and blank lines above it. Classify segments by node name. A helper used by BOTH halves
+  goes to a shared non-`test_` module, which pytest never collects; tests import it after
+  `sys.path.insert(0, HERE)`. Build each file's `import` block from its free names (Load names minus
+  local defs, args, `*args`/`**kw`, nested defs, builtins). A name neither half defines aborts the
+  split. Prove it: pyflakes clean, and the collected test count unchanged (`pytest --collect-only`).
+  Worked split: tests/python/test_bkshading_sbc_provision_808.py -> wifi_takeover / wifi_heal /
+  wifi_heal_stuck + bkshading_sbc_fakes_808.py.
+- **A moved fixture that looks like a secret is blocked at `git add` AND `git commit`.** Append
+  `# airuleset:secret-ok <reason>` to each call. The worktree guard refuses a `git commit <<'EOF'`
+  heredoc followed by that comment ("names git in a form too complex"). Write the message with the
+  Write tool, then `git commit -F <file> -- <paths> # airuleset:secret-ok ...` as a plain call.
+- **Testing a trap in a bash script under test:**
+  - Let a stub the script runs send the signal. The stub must find the script's own bash among its
+    ancestors by `/proc/<pid>/cmdline`, never by guessing `getppid()`'s parent: a mutation that drops
+    a `timeout` wrapper would otherwise signal the pytest process.
+  - Bash with a TERM/INT trap runs it once the foreground child returns, so the trap's commands
+    land in the stub log in order.
+  - Drive an EXIT arm with a command that really fails under errexit inside the armed window. For
+    example, a stub turns a file the script will `rm -f` into a non-empty directory.
+  - Prove each arm with a mutant (delete the `trap` line in a scratch copy, run the test).
+
+## Two fixture traps that let a mutant survive (issue 1399)
+
+- **A "not UTF-8" fixture must hold INVALID UTF-8.** `b"obs\xc4\x9b"` is valid UTF-8 (`obsě`), so a
+  strict `.decode()` mutant of a bytes-safe /proc read still passed. Use a byte sequence that cannot
+  decode (`b"\xff\xc4"`, a lone lead byte at the end). Prove it with that mutant on a scratch copy.
+- **A fake server that logs a request BEFORE it decides to drop the connection** counts the dropped
+  request as one that ran. If the test means "this request never reached the target", remove the
+  logged entry when the fake drops (`DropOnPress` in `tests/python/test_strih_browser_keeper_obs_run_1399.py`).
+
+## A test harness that runs bash must pass values as ARGUMENTS, never inside the script text (issue 1302)
+
+A pytest helper like `_bash(f'. "{LIB}"; fn \'{value}\'')` builds shell text from a Python value. A
+test whose value is an injection vector (`4'; rm -rf /; '`, written to prove the CODE rejects it)
+then breaks the HARNESS quoting and the harness itself runs the payload. It happened: the first draft
+of `tests/python/test_genlock_stats_abi_1302.py` ran `rm -rf /` on dev1, and only GNU rm's
+`--preserve-root` refused it. Pass every variable as a positional argument:
+`subprocess.run(["bash", "-c", script, "harness", *args])` and use `"$1"`, `"$2"` in the script (the
+`_bash` / `_lib` helpers there). And never use a destructive payload as the injection vector: `touch
+INJECTED` proves the same point.
+
+## A pwsh Remove-Item that must fail NON-terminating: a read-only parent directory, not a non-empty one (issue 1302)
+
+To prove an emitted PowerShell step is fail-closed (`-ErrorAction Stop`) where it used to be silent
+(`-ErrorAction SilentlyContinue`), the failure must be one SilentlyContinue really swallows.
+`Remove-Item` on a NON-EMPTY directory under `pwsh -NonInteractive` fails TERMINATING (the host
+cannot ask the recurse confirmation) whatever `-ErrorAction` says, so the old code fails too and the
+test is not RED. A read-only parent directory (`chmod 0555`) makes the delete a non-terminating
+access error, the stand-in for a file another process holds open on Windows. It needs a non-root
+user (root ignores the mode); the test fails loudly as root rather than skipping, and restores the
+mode in `finally` so pytest can clean the temp dir.
+
+## A bash bracket RANGE in a validation regex follows the locale: spell the set out (issue 1302)
+
+Under `en_US.UTF-8` (dev1, the operator's ssh locale), bash `[[ x =~ ^[1-9][0-9]*$ ]]` also accepts
+Arabic-Indic, superscript and fullwidth digits (the review counted 568 BMP code points), and
+`[A-Z]` accepts accented letters. GitHub's runners run `C.UTF-8`, where the same range is ASCII-only,
+so CI never sees it. A bash check that must agree with a PowerShell / Rust / C twin (all ASCII) is
+then looser than its twin. Spell the set out (`[123456789][0123456789]{0,8}`,
+`[0123456789abcdefABCDEF]`), run the pytest's bash with `LC_ALL=en_US.utf8` when the box has it, and
+pin it with a lint that refuses any `X-Y` range inside a bracket on a `=~` line
+(`test_every_bash_version_pattern_names_ascii_digits_explicitly_1302`). Same review: bash `read` and
+`$(cat)` drop a NUL byte silently, so a byte-reading twin that treats NUL as a character needs a
+`tr '\000' '?'` before the bash parse.
+
+## A mutation harness that runs the replica with a MINIMAL env reports every mutant "killed" (issue 1404)
+
+A python mutation driver that runs each scratch tree through `subprocess.run([...], env={"PATH": ..., "HOME": ...})`
+lost the rustup toolchain env, so the REAL tree failed too and all 7 mutants read "killed". Pass
+`env=dict(os.environ, ...)`, print the REAL tree's result first, and trust a kill only when that line
+reads pass. Also: an unsigned `now - last < BOUND`
+after a `now >= last` guard makes the guard's removal an equivalent mutant (the wrap reads huge);
+drop such a mutant instead of counting it as surviving.
+
+## An awk replica pinned by a parity harness: its fixtures must sort differently as text and as numbers (issue 1302)
+
+awk compares two STRINGS as text. A value cut out with `substr()` (or `split()` + `substr()`) is a
+plain string, not a number, so `if (a > max) max = a` over such values takes a TEXT max: 8 then 25
+reads 8, 99 then 100 reads 99. The `scripts/lib/cg-chain-verify.sh` replica of
+`jitter_audit::summarize` did exactly that for months. Its Rust parity harness stayed green because
+every fixture's skews (-4/8/-6, 3/-9, -40/52) happened to sort the same both ways. Two rules:
+- coerce with `+ 0` before any compare or max (`x = x + 0`), in a shared awk preamble so every
+  parser of the file has the same copy (`_cg_chain_awk_common`);
+- give every parity fixture at least one set of values whose text order differs from their number
+  order (8, 25, -100, 99: the text max is 99, the number max 100). A fixture that sorts the same
+  both ways cannot catch the bug.
+
+## A sourced lib that DELETES files must reset the caller's shell state first (issue 1395)
+
+A function a caller runs as a bare statement inherits that caller's shell state, also inside a
+`( ... )` subshell. A fresh-context review reproduced each of these on the first cut of
+`scripts/lib/e2e-rundir-retention.sh`:
+- with `nocasematch` + `nocaseglob`, the name check accepted an upper-case look-alike and it was
+  removed;
+- with `failglob`, an empty parent killed the subshell before its one log line;
+- with `IFS` set to newline+tab, the `read -r mtime name` loop removed nothing.
+
+So a lib that removes anything starts its subshell body with `set +e +f`,
+`shopt -u nocasematch nocaseglob failglob`, `unset GLOBIGNORE`, `IFS=$' \t\n'` and
+`export LC_ALL=C`; none of it leaks back to the caller. Test each one by running the helper behind
+that caller state (the `caller_setup` argument of `_run` in
+`tests/python/test_e2e_rundir_retention_1395.py`). Two traps in those tests:
+- **GLOBIGNORE patterns match the whole expanded path, and `*` there does not cross `/`.** A test
+  `GLOBIGNORE='*recording-e2e-4'` ignores nothing, so it passes with or without the reset. Use the
+  full path (`GLOBIGNORE="$2/recording-e2e-4"`, the parent passed as an argument).
+- **Pin a printed size through a `du` stub, never a real file.** 3076 KiB prints "3.0 MB" under both
+  `/1024` and `/1000`, so a real 3 MiB file cannot see the unit. A stub reporting 5000 KiB pins the
+  exact `4.8 MB` and makes the test filesystem-independent.
+
+The locale half (a bracket range under en_US.UTF-8) is the issue-1302 entry above: spell the digit
+set out (`[0123456789]`) and pin it with a lint.
+
+## A "hung box" fixture must hang BEFORE it answers, and `timeout 0` is no bound (issue 1413)
+
+Two traps from bounding a remote read with `timeout` (the away-venue camera-box version read):
+- **A fake that prints the answer and THEN sleeps tests nothing.** The bounded read captures the
+  answer before the kill and reads OK, so the test passes for the wrong reason (the first cut of
+  `test_gate_other_venues_bounds_a_camera_whose_read_hangs` did exactly that). Sleep first, answer
+  after. Prove it on a copy of the pre-fix script: the test must take the full sleep and fail.
+- **GNU `timeout 0` means NO timeout.** An env override that reaches `timeout` must be clamped:
+  anything but a positive whole number falls back to the default (`[[ $v =~ ^[123456789][0123456789]*$ ]]`).
+  Pin it with a stub `timeout` first on PATH that logs its first argument.
+- `ssh -o ConnectTimeout=N` bounds only the connect and the banner, never the login or the remote
+  command: a box that answers :22 but has a dying stick or fork exhaustion hangs the read.
+
+## A scratch-tree mutation run must COMPILE the test against the scratch tree: `env!("CARGO_MANIFEST_DIR")` is baked in (issue 1424)
+
+The std-only lift/anchor tests read their sources through `env!("CARGO_MANIFEST_DIR")`, which rustc
+expands at COMPILE time. A mutation driver that copies the sources to a scratch tree, mutates them and
+runs the ALREADY-built test binary with `CARGO_MANIFEST_DIR=<scratch>` in the runtime env still reads
+the REAL worktree, so every mutant "survives" (7 of 7 read as surviving on the first run). Build the
+test once with `CARGO_MANIFEST_DIR=<scratch>` set on rustc, then mutate the scratch files between runs
+(the files are read at run time). As always, print the real tree's result first and trust a kill only
+when that line passes.

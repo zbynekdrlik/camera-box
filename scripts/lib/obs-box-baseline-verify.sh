@@ -13,16 +13,19 @@
 #   obs_box_baseline_verdict        (stdin: the facts)        -> `item|OK|detail` / `item|FAIL|detail`
 #                                                                lines, rc 1 when any item FAILs
 #
-# Items (the obs-box-baseline.sh functions they grade): net (network tuning), perf (governor +
+# Items (the obs-box-baseline.sh functions they grade): timezone (the rig time zone from
+# scripts/lib/rig-timezone.sh, read off the /etc/localtime link, issue 1415), net (network tuning), perf (governor +
 # <BOX>-maxperf persistence), cstate (the PM QoS idle wake-up latency bound: the holder unit + no state
 # deeper than the bound entered over a 1 s sample), nosleep, boot (boot safety net), kernel (preempt=full low-latency),
 # affinity (AFFINITY-ONLY core reservation, no kernel isolcpus/nohz_full), rtprio (no retired
 # render-tick rtprio grant, issue 1357), gpu (PRIME nvidia-primary on
-# a dGPU box, the iGPU max-frequency pin otherwise), dejitter (oomd + off-hours + OBS ProcessPriority=High
+# a dGPU box, the iGPU max-frequency pin otherwise), igpu-sink (no amdgpu Xorg DDX on a dGPU box, so its iGPU
+# panel sink runs on modesetting, issue 1418), dejitter (oomd + off-hours + OBS ProcessPriority=High
 # + the user-unit masks), crash (no operator crash popup), kiosk (lightdm + openbox installed, autologin
 # -> openbox, no GNOME), websocket (python3-websocket for the OBS seeders), brightness (the kiosk
 # panel-brightness keys),
-# autostart (the openbox autostart contract), power (thermald purged + PL1 envelope units), touchpad.
+# autostart (the openbox autostart contract), power (thermald purged + PL1 envelope units), touchpad,
+# swap (a RAM-sized swapfile, active + in fstab, issue 1428).
 # Fail-closed: a fact the gather could not read grades FAIL ("unreadable"), never a silent pass.
 
 # (the directory is a pure parameter expansion -- no dirname/cd -- like obs-box-baseline.sh's own)
@@ -134,19 +137,21 @@ obs_box_baseline_gather_snippet() {
     printf 'BOX=%q\nU=%q\nUNIT=%q\n' "$box" "$user" "$unit"
     declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
-        obs_box_cpu_latency_bound_us
+        obs_box_cpu_latency_bound_us rig_timezone_read obs_box_amdgpu_ddx_package obs_box_pkg_status
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
 fexists() { if [ -e "$1" ]; then echo 1; else echo 0; fi; }
 first() { head -n1 2>/dev/null | tr -d '\r'; }
 pkg() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null; }
+echo "timezone=$(rig_timezone_read | first)"
 echo "sysctl_conf=$(fexists /etc/sysctl.d/99-network-performance.conf)"
 echo "rmem_max=$(sysctl -n net.core.rmem_max 2>/dev/null | first)"
 echo "nic_hook=$(if [ -x /etc/networkd-dispatcher/routable.d/optimize-nic ]; then echo 1; else echo 0; fi)"
 echo "cpu_perf_unit=$(systemctl is-enabled cpu-performance.service 2>/dev/null | first)"
 echo "rc_local_eee=$(if [ -x /etc/rc.local ] && grep -qF 'ethtool --set-eee' /etc/rc.local 2>/dev/null; then echo 1; else echo 0; fi)"
 echo "rc_local_active=$(systemctl is-active rc-local.service 2>/dev/null | first)"
+echo "cpufreq_policies=$(ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | wc -l)"
 echo "governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "maxperf_active=$(systemctl is-active "${BOX}-maxperf.service" 2>/dev/null | first)"
 echo "maxperf_udev=$(fexists "/etc/udev/rules.d/99-${BOX}-maxperf-pm.rules")"
@@ -184,6 +189,7 @@ read -r _ _cs_a <<<"$(_cs_sum)"
 sleep 1
 read -r _cs_n _cs_b <<<"$(_cs_sum)"
 echo "cstate_states=${_cs_n}"
+echo "cpuidle_driver=$(cat "$_cs_root/cpuidle/current_driver" 2>/dev/null | first)"
 echo "cstate_deep=${_cs_deep}"
 echo "cstate_deep_delta=$(case "${_cs_a}${_cs_b}" in ''|*[!0-9]*) ;; *) echo $((_cs_b - _cs_a)) ;; esac)"
 echo "ppd=$(systemctl is-enabled power-profiles-daemon.service 2>/dev/null | first)"
@@ -202,7 +208,9 @@ echo "obs_running=$(if ! command -v pgrep >/dev/null 2>&1; then :; elif [ -n "$_
 echo "obs_rtprio_limit=$(if [ -n "$_op" ]; then awk '/^Max realtime priority/{print $4; exit}' "/proc/${_op}/limits" 2>/dev/null; fi)"
 echo "dgpu=$(if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then echo 1; else echo 0; fi)"
 echo "prime=$(prime-select query 2>/dev/null | first)"
+echo "display_gpus=$(lspci -nn 2>/dev/null | grep -Eic '(vga compatible controller|3d controller|display controller)')"
 echo "igpu_unit=$(systemctl is-enabled "${BOX}-igpu-maxperf.service" 2>/dev/null | first)"
+echo "amdgpu_ddx=$(obs_box_pkg_status "$(obs_box_amdgpu_ddx_package)")"
 echo "oomd=$(systemctl is-enabled systemd-oomd.service 2>/dev/null | first)"
 echo "offhours=$(fexists "/etc/systemd/system/apt-daily-upgrade.timer.d/${BOX}-offhours.conf")"
 echo "process_priority=$(if grep -qx 'ProcessPriority=High' "${HOMEDIR}/.config/obs-studio/global.ini" 2>/dev/null; then echo 1; else echo 0; fi)"
@@ -254,6 +262,9 @@ echo "thermald=$(pkg thermald)"
 echo "pe_unit=$(systemctl is-enabled imag-power-envelope.service 2>/dev/null | first)"
 echo "pe_guard=$(systemctl is-enabled imag-power-envelope-guard.timer 2>/dev/null | first)"
 echo "touchpad=$(if grep -qF 'Option "Tapping" "on"' /etc/X11/xorg.conf.d/30-touchpad-tap.conf 2>/dev/null; then echo 1; else echo 0; fi)"
+echo "swap_bytes=$(swapon --show=SIZE --bytes --noheadings 2>/dev/null | awk '{s += $1} END {print s + 0}')"
+echo "mem_bytes=$(awk '/^MemTotal:/{print $2 * 1024; exit}' /proc/meminfo 2>/dev/null)"
+echo "swap_fstab=$(grep -cE '^[^#[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+swap[[:space:]]' /etc/fstab 2>/dev/null)"
 echo "gather_done=1"
 GATHER_EOF
 }
@@ -287,12 +298,17 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in net perf cstate nosleep boot kernel affinity rtprio gpu dejitter crash kiosk websocket brightness autostart power touchpad; do
+        for v in timezone net perf cstate nosleep boot kernel affinity rtprio gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad swap; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
     fi
-    local ok
+    local ok tz_verdict
+    # timezone -- issue 1415: the box runs the rig time zone, read off the /etc/localtime link (never
+    # timedatectl, whose read-back lies on a read-only root); graded by the ONE rig-timezone.sh verdict.
+    # Set by setup step 1 (obs_box_timezone).
+    ok=0; tz_verdict="$(rig_timezone_verdict "$(_obs_box_f timezone)")" && ok=1
+    _obs_box_item timezone "$ok" "/etc/localtime -> '$(_obs_box_f timezone)' (rig zone ${RIG_TIMEZONE}): ${tz_verdict} -- setup step 1 sets it (obs_box_timezone)"
     # net -- sysctl drop-in present AND live, EEE/flow-control dispatcher hook installed
     ok=0; [ "$(_obs_box_f sysctl_conf)" = 1 ] && [ "$(_obs_box_f rmem_max)" = 134217728 ] && [ "$(_obs_box_f nic_hook)" = 1 ] && ok=1
     _obs_box_item net "$ok" "sysctl_conf=$(_obs_box_f sysctl_conf) rmem_max=$(_obs_box_f rmem_max) nic_hook=$(_obs_box_f nic_hook)"
@@ -300,22 +316,29 @@ obs_box_baseline_verdict() {
     # maxperf unit active + udev rule, power-profiles-daemon masked or absent (it resets the governor).
     # Whether rc-local.service ran it this boot is REPORTED (a release
     # without the rc-local generator never runs it; the networkd-dispatcher hook still covers EEE).
-    ok=0; [ "$(_obs_box_f cpu_perf_unit)" = enabled ] && obs_box_governor_ok "$(_obs_box_f governors)" \
+    # issue 1412: a box with NO cpufreq driver (cpufreq_policies=0, the firmware runs the cores) has no
+    # governor or governor unit to grade; an unreadable count stays strict.
+    local gov_ok=0
+    if [ "$(_obs_box_f cpufreq_policies)" = 0 ]; then gov_ok=1
+    elif [ "$(_obs_box_f cpu_perf_unit)" = enabled ] && obs_box_governor_ok "$(_obs_box_f governors)"; then gov_ok=1; fi
+    ok=0; [ "$gov_ok" = 1 ] \
         && [ "$(_obs_box_f rc_local_eee)" = 1 ] \
         && [ "$(_obs_box_f maxperf_active)" = active ] && [ "$(_obs_box_f maxperf_udev)" = 1 ] \
         && case "$(_obs_box_f ppd)" in masked|masked-runtime|not-found|'') true ;; *) false ;; esac && ok=1
-    _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) governors=[$(_obs_box_f governors)] rc.local-eee=$(_obs_box_f rc_local_eee) rc-local.service=$(_obs_box_f rc_local_active) maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev) power-profiles-daemon=$(_obs_box_f ppd)"
+    _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) cpufreq-policies=$(_obs_box_f cpufreq_policies) governors=[$(_obs_box_f governors)] rc.local-eee=$(_obs_box_f rc_local_eee) rc-local.service=$(_obs_box_f rc_local_active) maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev) power-profiles-daemon=$(_obs_box_f ppd)"
     # cstate -- the PM QoS idle wake-up latency bound (issue 1357): obs-box-cpu-latency.service enabled +
     # active with the baseline bound configured, at least one cpuidle state readable, and no state whose
     # exit latency exceeds the bound entered during the gather's 1 s sample (the kernel honours the held
-    # request; a box with no deeper state trivially passes that part)
+    # request; a box with no deeper state trivially passes that part). Issue 1412: a box with NO cpuidle driver
+    # (current_driver none, no states: strih-pp with C-states off in the BIOS) enters no deep state at all
     local cs_delta cs_states cs_bound
     cs_delta="$(_obs_box_f cstate_deep_delta)"
     cs_states="$(_obs_box_f cstate_states)"
     cs_bound="$(_obs_box_f cstate_bound)"
     ok=0; [ "$(_obs_box_f cstate_unit)" = enabled ] && [ "$(_obs_box_f cstate_active)" = active ] \
         && [ "$cs_bound" = "$(obs_box_cpu_latency_bound_us)" ] \
-        && [[ "$cs_states" =~ ^[1-9][0-9]*$ ]] && [ "$cs_delta" = 0 ] && ok=1
+        && { { [[ "$cs_states" =~ ^[1-9][0-9]*$ ]] && [ "$cs_delta" = 0 ]; } \
+            || { [ "$cs_states" = 0 ] && [ "$(_obs_box_f cpuidle_driver)" = none ]; }; } && ok=1
     _obs_box_item cstate "$ok" "obs-box-cpu-latency.service=$(_obs_box_f cstate_unit)/$(_obs_box_f cstate_active) bound=${cs_bound:-unset} us (baseline $(obs_box_cpu_latency_bound_us) us) cpuidle-states=${cs_states:-unreadable} deeper-than-bound=[$(_obs_box_f cstate_deep)] entries-in-1s=${cs_delta:-unreadable}"
     # nosleep -- sleep.target masked + both logind drop-ins
     ok=0; [ "$(_obs_box_f sleep_target)" = masked ] && [ "$(_obs_box_f logind_nosleep)" = 1 ] && [ "$(_obs_box_f logind_powerkey)" = 1 ] && ok=1
@@ -348,11 +371,28 @@ obs_box_baseline_verdict() {
     _obs_box_item rtprio "$ok" "genlock rtprio grants=[$(_obs_box_f rtprio_grants)] OBS running=${orun:-unreadable} realtime limit=${rl:-unreadable}"
     # gpu -- a dGPU box renders NVIDIA-primary (PRIME); an iGPU-only box has nothing to select
     if [ "$(_obs_box_f dgpu)" = 1 ]; then
-        ok=0; [ "$(_obs_box_f prime)" = nvidia ] && ok=1
-        _obs_box_item gpu "$ok" "discrete NVIDIA present, prime-select=$(_obs_box_f prime)"
+        # issue 1412: with the NVIDIA as the ONLY display adapter (strih-pp, a desktop) there is no PRIME
+        # pair; prime-select nvidia answers "no integrated GPU detected" and the query stays on-demand.
+        ok=0; { [ "$(_obs_box_f prime)" = nvidia ] || [ "$(_obs_box_f display_gpus)" = 1 ]; } && ok=1
+        _obs_box_item gpu "$ok" "discrete NVIDIA present, prime-select=$(_obs_box_f prime) display-adapters=$(_obs_box_f display_gpus)"
     else
         ok=0; [ "$(_obs_box_f igpu_unit)" = enabled ] && ok=1
         _obs_box_item gpu "$ok" "no discrete NVIDIA GPU: the iGPU max-frequency pin unit=$(_obs_box_f igpu_unit)"
+    fi
+    # igpu-sink -- issue 1418: no amdgpu Xorg DDX on a dGPU box. Its package's own 10-amdgpu.conf puts the
+    # reverse-PRIME iGPU panel sink on amdgpu (it beats any OutputClass), and that sink froze the strih-snv
+    # panel 11/12.10.2026; the Intel notebook ran the sink on modesetting and was stable.
+    if [ "$(_obs_box_f dgpu)" = 1 ]; then
+        v="$(_obs_box_f amdgpu_ddx)"
+        if [ -z "$v" ]; then
+            _obs_box_item igpu-sink 0 "discrete NVIDIA box: the $(obs_box_amdgpu_ddx_package) status is unread (dpkg-query failed) -- cannot tell whether the amdgpu DDX drives the iGPU panel sink"
+        elif obs_box_pkg_status_absent "$v"; then
+            _obs_box_item igpu-sink 1 "discrete NVIDIA box: $(obs_box_amdgpu_ddx_package) not installed (status=${v}) -- the iGPU panel sink runs on modesetting"
+        else
+            _obs_box_item igpu-sink 0 "discrete NVIDIA box: $(obs_box_amdgpu_ddx_package) is on the box (status=${v}) -- its 10-amdgpu.conf puts the iGPU panel sink on the amdgpu DDX (the strih-snv freeze 11/12.10.2026), no OutputClass overrides it; setup removes it, then restart X"
+        fi
+    else
+        _obs_box_item igpu-sink 1 "no discrete NVIDIA GPU: no reverse-PRIME panel sink to pin"
     fi
     # dejitter -- systemd-oomd masked, the apt-daily-upgrade off-hours pin, OBS ProcessPriority=High and
     # every obs_box_dejitter_user_units member masked for the desktop user
@@ -400,5 +440,13 @@ obs_box_baseline_verdict() {
     # touchpad -- the libinput tap-to-click InputClass
     ok=0; [ "$(_obs_box_f touchpad)" = 1 ] && ok=1
     _obs_box_item touchpad "$ok" "30-touchpad-tap.conf tapping=$(_obs_box_f touchpad)"
+    # swap -- issue 1428: active swap of at least 90 % of RAM AND an fstab entry (obs_box_swap); an
+    # unreadable count is a FAIL, never a pass
+    local sb mb
+    sb="$(_obs_box_f swap_bytes)"; mb="$(_obs_box_f mem_bytes)"
+    ok=0
+    case "$sb$mb" in '' | *[!0-9]*) ;; *) [ "$((sb * 10))" -ge "$((mb * 9))" ] && [ "$sb" -gt 0 ] \
+        && case "$(_obs_box_f swap_fstab)" in '' | 0 | *[!0-9]*) false ;; *) true ;; esac && ok=1 ;; esac
+    _obs_box_item swap "$ok" "active swap=${sb:-unreadable} B, RAM=${mb:-unreadable} B, fstab swap lines=$(_obs_box_f swap_fstab) -- setup obs_box_swap (issue 1428)"
     [ "$fails" -eq 0 ]
 }

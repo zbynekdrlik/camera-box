@@ -19,7 +19,7 @@
 # here: setup-strih.sh derives them on the box.
 
 # The box a bare setup-strih.sh / verify-strih.sh (no --box) provisions -- today's production strih.
-STRIH_BOX_DEFAULT=strih-lx
+STRIH_BOX_DEFAULT=strih-snv
 
 # The not-yet-decided marker a template fact carries until the owner answers it.
 STRIH_BOX_TODO=TODO_OWNER
@@ -36,7 +36,11 @@ strih_box_fact_keys() {
     STRIH_NIC_OOT_DRIVER STRIH_NIC_MIN_USB_MBPS STRIH_NIC_MIN_LINK_MBPS \
     STRIH_OBS_PROFILE STRIH_OBS_COLLECTION \
     STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
-    STRIH_HDMI_OUTPUT_BACKEND
+    STRIH_HDMI_OUTPUT_BACKEND \
+    STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
+    STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
+    STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
+    STRIH_HDMI_OUTPUTS
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -115,6 +119,29 @@ _strih_box_ipv4() {
   for o in ${ip//./ }; do [ "$((10#$o))" -le 255 ] || return 1; done
 }
 
+# _strih_box_https_name NAME -> 0 iff NAME is a lower-case DNS name of two or more labels (letters,
+# digits, inner `-`; a label never starts or ends with `-`). The character sets are spelled out: a
+# bracket RANGE follows the locale in bash (ci-testing-gotchas.md, issue 1302).
+_strih_box_https_name() {
+  local l='[abcdefghijklmnopqrstuvwxyz0123456789]' m='[abcdefghijklmnopqrstuvwxyz0123456789-]'
+  [[ "${1-}" =~ ^${l}(${m}*${l})?(\.${l}(${m}*${l})?)+$ ]]
+}
+
+# strih_box_hdmi_outputs_ok VALUE -> 0 iff VALUE is 1..2 space-separated CONNECTOR:VIEW[:noaudio] tokens
+# (CONNECTOR = an X RandR output name of letters, digits, `.` `_` `-`; VIEW = program | multiview;
+# `:noaudio` = the connector's PCM is owned elsewhere, issue 1424 part 3), no connector twice. The character set is spelled out (a bracket RANGE follows the locale in bash). The ONE grammar of
+# the fact: scripts/lib/strih-drm-output.sh (step 6, verify item 4c) calls it too (issue 1424 review).
+strih_box_hdmi_outputs_ok() {
+  local c='[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-]' t n=0 seen=" "
+  for t in ${1-}; do
+    [[ "$t" =~ ^${c}+:(program|multiview)(:noaudio)?$ ]] || return 1
+    case "$seen" in *" ${t%%:*} "*) return 1 ;; esac
+    seen="${seen}${t%%:*} "
+    n=$((n + 1))
+  done
+  [ "$n" -ge 1 ] && [ "$n" -le 2 ]
+}
+
 # strih_box_validate NAME  (stdin: the parsed KEY=value lines) -> rc 0 iff the facts are complete and
 # coherent for box NAME; else one `strih-box <NAME>: ...` stderr line per problem, rc 1. Order: a
 # missing key, then every TODO_OWNER value (all named, then stop -- a template is not "malformed"),
@@ -182,16 +209,108 @@ strih_box_validate() {
   # issue 1346: how the fixed HDMI output leaves the X desktop -- `lease` (the issue-1152 X RandR lease,
   # an Intel-driven connector) or `vk-direct` (Vulkan direct display, an NVIDIA-driven connector whose X
   # driver refuses the lease). The same grammar the vendored C module + strih_scenes read.
-  case "${f[STRIH_HDMI_OUTPUT_BACKEND]}" in
-    lease | vk-direct) ;;
-    *) echo "strih-box ${name}: STRIH_HDMI_OUTPUT_BACKEND '${f[STRIH_HDMI_OUTPUT_BACKEND]}' must be lease or vk-direct" >&2; bad=1 ;;
+  case "${f[STRIH_HDMI_OUTPUT_BACKEND]}:${f[STRIH_ROLE]}" in
+    lease:* | vk-direct:* | none:stream) ;;
+    *) echo "strih-box ${name}: STRIH_HDMI_OUTPUT_BACKEND '${f[STRIH_HDMI_OUTPUT_BACKEND]}' must be lease or vk-direct (none only for the stream role)" >&2; bad=1 ;;
   esac
-  if [[ ! "${f[STRIH_CAMERAS]}" =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]]; then
+  # issue 1424 part 2 (owner 13.10.2026): which connectors the fixed HDMI output drives and their default
+  # views -- `auto` (ONE output on the first connected HDMI, the issue-1346 behaviour), `none` (exactly
+  # when the backend is none), or 1..2 space-separated CONNECTOR:VIEW (an X RandR output name; program |
+  # multiview), no connector twice. setup-strih step 6 writes the list into drm-output.json's "outputs".
+  v="${f[STRIH_HDMI_OUTPUTS]}"
+  case "${f[STRIH_HDMI_OUTPUT_BACKEND]}:${v}" in
+    none:none) ;;
+    none:* | *:none) echo "strih-box ${name}: STRIH_HDMI_OUTPUTS '${v}' must be none exactly when STRIH_HDMI_OUTPUT_BACKEND is none" >&2; bad=1 ;;
+    *:auto) ;;
+    *) strih_box_hdmi_outputs_ok "$v" \
+      || { echo "strih-box ${name}: STRIH_HDMI_OUTPUTS '${v}' must be auto, none or 1..2 space-separated CONNECTOR:program|multiview[:noaudio] (no connector twice)" >&2; bad=1; } ;;
+  esac
+  # issue 1412: the box ROLE (strih = the cutter, stream = the stream OBS box), the PTP grandmaster the
+  # dantesync config allows (setup-strih step 2 writes it into a FRESH box's /etc/dantesync/config.json)
+  # and whether the box runs the YouTube-guard program-audio sampler (setup-strih step 16e / verify 41).
+  case "${f[STRIH_ROLE]}" in
+    strih | stream) ;;
+    *) echo "strih-box ${name}: STRIH_ROLE '${f[STRIH_ROLE]}' must be strih or stream" >&2; bad=1 ;;
+  esac
+  _strih_box_host "${f[STRIH_DANTE_GM]}" \
+    || { echo "strih-box ${name}: STRIH_DANTE_GM '${f[STRIH_DANTE_GM]}' is not a host name / address (the PTP grandmaster)" >&2; bad=1; }
+  case "${f[STRIH_PROGRAM_AUDIO_SAMPLER]}" in
+    on | off) ;;
+    *) echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_SAMPLER '${f[STRIH_PROGRAM_AUDIO_SAMPLER]}' must be on or off" >&2; bad=1 ;;
+  esac
+  # issue 1412 slice B: the NDI program a stream box receives (`none` on a strih), and the venue whose
+  # boxes list each other as NDI senders (snv = the obs-fleet ndi-sender facet; any other venue = the
+  # STRIH_IP of every fact file of that venue, scripts/lib/obs-box-role.sh).
+  case "${f[STRIH_ROLE]}:${f[STRIH_PROGRAM_SENDER]}" in
+    strih:none) ;;
+    stream:none | strih:*) echo "strih-box ${name}: STRIH_PROGRAM_SENDER '${f[STRIH_PROGRAM_SENDER]}' must be none for the strih role and an NDI source name for the stream role" >&2; bad=1 ;;
+    stream:*) [[ "${f[STRIH_PROGRAM_SENDER]}" =~ ^[A-Z0-9][A-Z0-9.-]*\ \([A-Za-z0-9\ ._-]+\)$ ]] \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_SENDER '${f[STRIH_PROGRAM_SENDER]}' is not an NDI source name (HOST (name))" >&2; bad=1; } ;;
+  esac
+  [[ "${f[STRIH_VENUE]}" =~ ^[a-z][a-z0-9]*$ ]] \
+    || { echo "strih-box ${name}: STRIH_VENUE '${f[STRIH_VENUE]}' must be a lower-case venue name (snv, pp)" >&2; bad=1; }
+  if [ "${f[STRIH_ROLE]}" = stream ] && [ "${f[STRIH_CAMERAS]}" = none ]; then
+    :  # a stream box receives no camera
+  elif [[ ! "${f[STRIH_CAMERAS]}" =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]]; then
     echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' must be space-separated camera numbers (1, 2, ... no leading zero)" >&2; bad=1
   elif [ "$(tr ' ' '\n' <<<"${f[STRIH_CAMERAS]}" | sort -u | wc -l)" -ne "$(wc -w <<<"${f[STRIH_CAMERAS]}")" ]; then
     echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' lists a camera twice" >&2; bad=1
   fi
+  # issue 1413: how dev1 dials this venue's camboxes (the dantesync fleet's camera rows,
+  # scripts/lib/dantesync-fleet.sh): `direct` = camera_resolve's own address (dev1 sits on that LAN),
+  # `A.B.C` = the /24 dev1 reaches the venue's camera LAN through (the camera keeps camera_resolve's
+  # last octet), `none` = the box lists no camera. The octets are spelled out (a bracket RANGE follows
+  # the locale in bash, ci-testing-gotchas.md).
+  case "${f[STRIH_CAMERAS]}:${f[STRIH_CAMERA_DEV1_NET]}" in
+    none:none) ;;
+    none:* | *:none) echo "strih-box ${name}: STRIH_CAMERA_DEV1_NET '${f[STRIH_CAMERA_DEV1_NET]}' must be none exactly when STRIH_CAMERAS is none" >&2; bad=1 ;;
+    *:direct) ;;
+    *) _strih_box_ipv4 "${f[STRIH_CAMERA_DEV1_NET]}.0" && [[ "${f[STRIH_CAMERA_DEV1_NET]}" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+$ ]] \
+      || { echo "strih-box ${name}: STRIH_CAMERA_DEV1_NET '${f[STRIH_CAMERA_DEV1_NET]}' must be direct, none or the dev1-side /24 prefix A.B.C" >&2; bad=1; } ;;
+  esac
+  # issue 1399: the TLS front end the box serves itself (setup-strih step 16i, verify-strih item 45):
+  # STRIH_HTTPS_INTERKOM_HOSTS = the cert's first name + its SANs, STRIH_HTTPS_SHADING_HOST = one name;
+  # `none` = no such site. The stream role serves no intercom / shading page, and a name is one site.
+  local n
+  local -a names
+  local -A https_seen=()
+  for k in STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST; do
+    v="${f[$k]}"
+    [ "$v" = none ] && continue
+    if [ "${f[STRIH_ROLE]}" = stream ]; then
+      echo "strih-box ${name}: ${k} '${v}' must be none for the stream role (it serves no intercom / shading page)" >&2; bad=1; continue
+    fi
+    IFS=' ' read -r -a names <<<"$v"
+    if [ "$k" = STRIH_HTTPS_SHADING_HOST ] && [ "${#names[@]}" != 1 ]; then
+      echo "strih-box ${name}: ${k} '${v}' must be ONE DNS name or none" >&2; bad=1; continue
+    fi
+    for n in "${names[@]}"; do
+      if ! _strih_box_https_name "$n"; then
+        echo "strih-box ${name}: ${k} '${v}': '${n}' is not a lower-case DNS name (none, or space-separated names like interkom.newlevel.media)" >&2; bad=1
+      elif [ -n "${https_seen[$n]+set}" ]; then
+        echo "strih-box ${name}: ${k}: '${n}' is declared twice across STRIH_HTTPS_INTERKOM_HOSTS / STRIH_HTTPS_SHADING_HOST (one name, one site)" >&2; bad=1
+      else
+        https_seen[$n]=1
+      fi
+    done
+  done
   [ "$bad" = 0 ]
+}
+
+# strih_box_alias_of NAME -> print the box NAME is an issue-1414 transition alias of, rc 0; rc 1 (no
+# output) when NAME is no alias. The SNV strih was named strih-lx until issue 1414 (box names carry the
+# venue): a deploy or a hand run that still says the old name loads the renamed box with ONE warning.
+# The ONE alias table is obs-fleet.sh's OBS_FLEET_ALIASES (sourced lazily from this lib's own dir);
+# an alias counts here only when its renamed box has a fact file.
+strih_box_alias_of() {
+  local want="${1-}" canon
+  if ! declare -F _obs_fleet_alias_of >/dev/null; then
+    # shellcheck source=scripts/lib/obs-fleet.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/obs-fleet.sh" || return 1
+  fi
+  canon="$(_obs_fleet_alias_of "$want")" || return 1
+  [ -f "$(strih_box_dir)/${canon}.env" ] || return 1
+  printf '%s' "$canon"
 }
 
 # strih_box_load NAME -> load box NAME's facts into the STRIH_BOX_FACTS map (+ STRIH_BOX_LOADED=NAME),
@@ -199,12 +318,16 @@ strih_box_validate() {
 # list has a row for NAME whose host is an IP other than STRIH_IP, or when a per-run env knob
 # (STRIH_LX_IP / STRIH_LX_DANTESYNC_ROLE) contradicts the loaded fact. Nothing is loaded on failure.
 strih_box_load() {
-  local name="${1-}" file parsed line fleet_ip
+  local name="${1-}" file parsed line fleet_ip canon
   strih_box_unload
   STRIH_BOX_LOAD_FAILED="${name:-<empty>}"   # cleared only when this load succeeds (see strih_box_ensure_loaded)
   if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     echo "strih-box: box name '${name}' is invalid (lower-case letters, digits, '-'; never a path)" >&2
     return 1
+  fi
+  if canon="$(strih_box_alias_of "$name")"; then
+    echo "strih-box: '${name}' is the old name of box '${canon}' (issue 1414: box names carry the venue) -- loading ${canon}; use --box ${canon}" >&2
+    name="$canon"
   fi
   file="$(strih_box_dir)/${name}.env"
   if [ ! -f "$file" ]; then
@@ -352,6 +475,7 @@ strih_lx_ndi_prefix() { strih_box_fact STRIH_NDI_PREFIX; }
 strih_lx_cameras() {
   local c
   c="$(strih_box_fact STRIH_CAMERAS)" || return 1
+  [ "$c" != none ] || return 0  # issue 1412: a stream box receives no camera
   # shellcheck disable=SC2086  # word-split the validated space-separated number list on purpose
   printf '%s\n' $c
 }
@@ -363,9 +487,47 @@ strih_lx_cg_sender() {
   [ "$c" = none ] || printf '%s' "$c"
 }
 
+# strih_box_role -> the box's role (fact STRIH_ROLE: strih | stream, issue 1412).
+strih_box_role() { strih_box_fact STRIH_ROLE; }
+
+# strih_lx_dante_gm -> the PTP grandmaster host the box's dantesync config allows (fact STRIH_DANTE_GM;
+# RIG_GRANDMASTER_IP overrides it for one run, the same override every rig grandmaster read honours).
+strih_lx_dante_gm() {
+  if [ -n "${RIG_GRANDMASTER_IP:-}" ]; then
+    printf '%s' "$RIG_GRANDMASTER_IP"
+  else
+    strih_box_fact STRIH_DANTE_GM
+  fi
+}
+
+# strih_lx_program_sender -> the NDI program a stream box receives (fact STRIH_PROGRAM_SENDER), empty on
+# a strih (`none`).
+strih_lx_program_sender() {
+  local s
+  s="$(strih_box_fact STRIH_PROGRAM_SENDER)" || return 1
+  [ "$s" = none ] || printf '%s' "$s"
+}
+
+# strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
+strih_box_venue() { strih_box_fact STRIH_VENUE; }
+
+# strih_lx_https_interkom_hosts / strih_lx_https_shading_host -> the names of the TLS front end the box
+# serves itself (facts STRIH_HTTPS_INTERKOM_HOSTS = first name + SANs, STRIH_HTTPS_SHADING_HOST; `none`
+# = no such site; issue 1399, scripts/lib/strih-https.sh).
+strih_lx_https_interkom_hosts() { strih_box_fact STRIH_HTTPS_INTERKOM_HOSTS; }
+strih_lx_https_shading_host() { strih_box_fact STRIH_HTTPS_SHADING_HOST; }
+
+# strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
+# item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).
+strih_lx_program_audio_sampler() { strih_box_fact STRIH_PROGRAM_AUDIO_SAMPLER; }
+
 # strih_lx_hdmi_output_backend -> how the box's fixed HDMI output leaves the X desktop (fact
 # STRIH_HDMI_OUTPUT_BACKEND: lease | vk-direct), written into ~/.camera-box/drm-output.json (issue 1346).
 strih_lx_hdmi_output_backend() { strih_box_fact STRIH_HDMI_OUTPUT_BACKEND; }
+
+# strih_lx_hdmi_outputs -> the connectors the fixed HDMI output drives + their default views (fact
+# STRIH_HDMI_OUTPUTS: auto | none | CONNECTOR:VIEW ..., issue 1424 part 2).
+strih_lx_hdmi_outputs() { strih_box_fact STRIH_HDMI_OUTPUTS; }
 
 # strih_lx_intercom_config -> the repo-relative intercom hub routing file (fact STRIH_INTERCOM_CONFIG),
 # installed as /etc/intercom-hub/intercom.toml.

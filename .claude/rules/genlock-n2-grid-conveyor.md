@@ -19,7 +19,7 @@ Every strih camera is a 60 fps source in a 30 fps canvas (N = 2). Until D1 its r
 boundary conveyor: each present re-anchored the locked boundary to the presented stamp, so WHICH
 frame of each 60 fps pair went on air was whatever the lock picked, and the lock picked by ARRIVAL
 (ACQUIRE / backlog relock by the frame nearest the latency among the arrived ones, GAP RESYNC by the
-head). The #1049 shed's dead band held both parities. The camera arrival lag on strih-lx sits at
+head). The #1049 shed's dead band held both parities. The camera arrival lag on strih-snv sits at
 35-50 ms, straddling the 16.7 ms edges, so every strih OBS restart, lock or relock drew a new
 33 / 50 / 67 ms presented age per camera (live 28.9.2026: every camera flipped between 50 and 67
 within one session, `converge_sheds` 337-1487 per camera per day).
@@ -209,7 +209,7 @@ Count anchors this slice moved (update them together): `genlock_n1_tick_wall_now
 
 ## Live acceptance (supervisor)
 
-Full-bundle genlock deploy on strih-lx AND the stream box (libobs changed; the stream box's
+Full-bundle genlock deploy on strih-snv AND the stream box (libobs changed; the stream box's
 `Zaloha kamera` is an N>=2 input too). Then:
 1. Every strih camera's `genlock-fifo audit` line: `video_delay_ms=67` (66.7 ms), `n2_early=`
    present, `relocks=` and `converge_sheds=` flat, `dropped_due` +1 per tick (the erased pair frame),
@@ -227,7 +227,7 @@ Full-bundle genlock deploy on strih-lx AND the stream box (libobs changed; the s
 5. The deep-pin shift is confirmed (ROZHODNUTÉ 5881023948): move `Zaloha kamera` 1000 → 960 ms (1016.7 ms, its
    pre-deploy `video_delay_ms` 1017), a recorded step, and re-read its audit line.
 6. The target is keyed on the RECEIVER wall clock (by design): a dantesync date step that reaches
-   strih-lx before or after the cameras costs about 2 held or early ticks per N>=2 camera. Read
+   strih-snv before or after the cameras costs about 2 held or early ticks per N>=2 camera. Read
    `late_holds=` / `n2_early=` across the nightly step (02:00 UTC) once after the deploy.
 7. The fleet parity gate deploys the same libobs to imag and resolume: confirm neither has an N>=2
    input (`received` ≈ 2 × `consumed` on its audit line; imag is 60 into 60, the cg feeds 30 into

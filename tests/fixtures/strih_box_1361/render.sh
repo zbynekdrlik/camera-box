@@ -7,9 +7,9 @@ set -euo pipefail
 # Sources REPO_ROOT/scripts/setup-strih.sh with `--box BOX` (its source-guard stops before the
 # root-only provisioning flow, so nothing is written anywhere) and prints, section by section, the
 # exact text each generator produces -- the same function calls setup-strih.sh makes. The committed
-# `strih-lx.golden` next to this file was captured from the PRE-issue-1361 scripts (strih-lx literals,
+# `strih-snv.golden` next to this file was captured from the PRE-issue-1361 scripts (strih-snv literals,
 # run as `STRIH_LX_IP=10.77.9.202`, the documented real invocation); tests/strih_box_facts_1361.rs
-# renders `--box strih-lx` from the fact file and diffs it against that golden, so the fact file must
+# renders `--box strih-snv` from the fact file and diffs it against that golden, so the fact file must
 # reproduce today's output byte-for-byte.
 #
 # The `type -t` fallbacks exist ONLY so this one script also ran against the pre-change tree (where
@@ -39,7 +39,7 @@ strih_lx_ndi_republishes
 section ndi-inputs
 strih_lx_ndi_inputs
 section seed-manifest
-strih_lx_seed_manifest_json
+if has obs_box_seed_manifest_json; then obs_box_seed_manifest_json; else strih_lx_seed_manifest_json; fi
 section profile-facts
 strih_lx_profile_facts
 section dantesync-unit
@@ -63,7 +63,7 @@ section intercom-toml
 if has strih_lx_intercom_config; then
   IC="$(strih_lx_intercom_config)"
 else
-  IC="intercom/intercom.strih-lx.toml"
+  IC="intercom/intercom.strih-snv.toml"
 fi
 # the installed /etc/intercom-hub/intercom.toml is a verbatim copy -- pin its content by sha256.
 sha256sum < "${ROOT}/${IC}" | cut -d' ' -f1

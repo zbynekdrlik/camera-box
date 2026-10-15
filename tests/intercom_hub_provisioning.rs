@@ -1,10 +1,11 @@
-//! Static-anchor wiring tests for the strih-lx intercom hub provisioning (issue 1345 M1).
+//! Static-anchor wiring tests for the strih-snv intercom hub provisioning (issue 1345 M1).
 //!
-//! The hub's systemd unit + routing TOML are installed by `setup-strih.sh` ENABLE-ONLY (never
-//! started while the Windows VB-Matrix is still the live intercom — M4 is the cut-over), reported
-//! REPORT-ONLY by `verify-strih.sh`, and built/tested/uploaded by the `intercom-hub` CI job. These
+//! The hub's systemd unit + routing TOML are installed by `setup-strih.sh`, which also STARTS a
+//! stopped hub on the strih role (issue 1418: the interkom runs on it since the M4 cut-over) and never
+//! restarts a running one. `verify-strih.sh` FAILs an inactive hub on the strih role and only reports
+//! it on the stream role, and the `intercom-hub` CI job builds/tests/uploads it. These
 //! tests pin that wiring textually (same `read + .contains` convention as
-//! `tests/strih_provision_pure_functions.rs`), so a silent removal or a stray `systemctl start`
+//! `tests/strih_provision_pure_functions.rs`), so a silent removal, a restart or an ungated start
 //! surfaces on CI. Std-only — runs in the appliance `test` job (Tier-0 #557: CI is the first run).
 
 use std::path::PathBuf;
@@ -33,14 +34,30 @@ fn setup_strih_installs_the_unit_and_toml_enable_only() {
         s.contains("systemctl enable intercom-hub"),
         "setup-strih must ENABLE the intercom-hub unit"
     );
-    // ENABLE-ONLY: the M4 cut-over starts it, never this provisioning step.
+    // issue 1418: a STOPPED hub is started on the strih role only (behind the 13-hub-live gate and an
+    // is-active check); a running hub is never restarted by provisioning.
+    let gate = s
+        .find("if WHY=\"$(obs_box_step_applies 13-hub-live)\"")
+        .expect("the hub start is gated on the strih role");
+    let active = s
+        .find("systemctl is-active --quiet intercom-hub")
+        .expect("the hub start checks is-active first");
+    let start = s
+        .find("systemctl start intercom-hub")
+        .expect("setup-strih starts a stopped hub on the strih role");
     assert!(
-        !s.contains("systemctl start intercom-hub"),
-        "setup-strih must NOT start intercom-hub (enable-only until the M4 cut-over)"
+        gate < active && active < start,
+        "gate -> is-active -> start, in that order"
+    );
+    // The unit's LoadCredential needs the room secret step 14 writes: start only after it.
+    let step14 = s.find("step 14 ").expect("step 14");
+    assert!(
+        step14 < start,
+        "the hub starts after step 14 wrote its room secret"
     );
     assert!(
         !s.contains("systemctl restart intercom-hub"),
-        "setup-strih must NOT restart intercom-hub (enable-only until the M4 cut-over)"
+        "setup-strih must NOT restart a running intercom-hub"
     );
     assert!(
         s.contains("TOTAL_STEPS=17"),
@@ -110,6 +127,35 @@ fn systemd_unit_loads_the_room_secret_credential_and_keeps_dynamicuser() {
     );
 }
 
+/// Issue 1401 (design 5980775411): the hub's block loop runs on one thread, "hub-mix", at
+/// SCHED_FIFO 10. The unit that strih-snv runs (the base unit plus the step-12 local-audio drop-in)
+/// must let it: `LimitRTPRIO=10` in the base unit's `[Service]`, and the drop-in neither lowers nor
+/// forbids it.
+#[test]
+fn the_real_hub_unit_lets_the_hub_mix_thread_run_sched_fifo_10() {
+    let unit = read("systemd/intercom-hub.service");
+    let service = unit
+        .split("[Service]")
+        .nth(1)
+        .and_then(|s| s.split("[Install]").next())
+        .expect("the unit has a [Service] section");
+    assert!(
+        service.lines().any(|l| l.trim() == "LimitRTPRIO=10"),
+        "the base unit's [Service] must grant LimitRTPRIO=10"
+    );
+    assert!(!unit.contains("RestrictRealtime=yes"));
+    let lib = read("scripts/lib/strih-provision.sh");
+    let start = lib
+        .find("strih_intercom_audio_dropin() {")
+        .expect("the step-12 drop-in renderer");
+    let body = &lib[start..];
+    let dropin = &body[..body.find("\nDROPIN\n").expect("its heredoc end")];
+    assert!(
+        !dropin.contains("LimitRTPRIO") && !dropin.contains("RestrictRealtime"),
+        "the local-audio drop-in must leave the realtime grant alone"
+    );
+}
+
 #[test]
 fn verify_strih_reports_janus_as_a_note_only() {
     let v = read("scripts/verify-strih.sh");
@@ -138,25 +184,32 @@ fn verify_strih_reports_janus_as_a_note_only() {
 }
 
 #[test]
-fn verify_strih_reports_the_unit_as_a_note_only() {
+fn verify_strih_grades_the_unit_by_role() {
     let v = read("scripts/verify-strih.sh");
+    let a = v
+        .find("# 16) intercom hub unit")
+        .expect("verify-strih item 16");
+    let b = v[a..].find("# 17)").map(|i| a + i).expect("item 17");
+    let item = &v[a..b];
+    // issue 1418: the strih role FAILs an inactive / disabled / missing hub (the interkom runs on it) ...
     assert!(
-        v.contains("intercom-hub.service"),
-        "verify-strih must report the intercom-hub unit"
+        item.contains("obs_box_step_applies 13-hub-live"),
+        "item 16 grades the hub by the 13-hub-live role gate: {item}"
     );
-    // It is a NOTE (report-only), never a hard gate item while running parallel with Windows strih.
-    let idx = v
+    assert!(
+        item.contains("bad \"intercom-hub.service enabled=")
+            && item.contains("bad \"intercom-hub.service not installed"),
+        "an inactive or missing hub is a FAIL on the strih role: {item}"
+    );
+    // ... and the stream role keeps the report-only NOTE.
+    let idx = item
         .find("intercom-hub.service installed")
-        .expect("verify-strih must carry the intercom-hub NOTE line");
-    let window = &v[idx.saturating_sub(200)..idx];
+        .expect("the stream-role NOTE line");
     assert!(
-        window.contains("note "),
-        "the intercom-hub item must be a NOTE (report-only), not ok/bad"
+        item[idx.saturating_sub(200)..idx].contains("note "),
+        "the stream role's hub line is a NOTE: {item}"
     );
-    assert!(
-        v.contains("report-only"),
-        "the intercom-hub verify item must state it is report-only"
-    );
+    assert!(!item.contains("M4"), "no stale M4 wording: {item}");
 }
 
 #[test]

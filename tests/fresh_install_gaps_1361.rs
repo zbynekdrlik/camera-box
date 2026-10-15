@@ -1,5 +1,5 @@
 //! issue 1361 (slice: the fresh-install gaps, design comment 5830231872) -- a fresh
-//! `setup-strih.sh` run must reproduce the production strih-lx box, not a box missing the hand fixes.
+//! `setup-strih.sh` run must reproduce the production strih-snv box, not a box missing the hand fixes.
 //!
 //! - G3: the Downstream Keyer OBS plugin from the pinned upstream .deb (sha256 on the .deb AND on the
 //!   extracted plugin), `scripts/lib/obs-downstream-keyer.sh`, setup-strih step 4c, verify-strih

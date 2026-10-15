@@ -14,7 +14,7 @@
 # watchdog uses -- `schtasks /run /tn "BundleStateServer"` over ssh (a HIDDEN headless supervisor
 # task; NEVER the `/it` interactive form, a documented dead end on these boxes) -- then re-fetches
 # over a bounded retry window before giving up with an HONEST one-line fault. issue 1317: the restart
-# is class-resolved via the shared bundle_state_restart_remote_cmd -- the Linux strih-lx (a systemd
+# is class-resolved via the shared bundle_state_restart_remote_cmd -- the Linux strih-snv (a systemd
 # --user unit) gets `systemctl --user restart`, never the Windows schtasks line.
 #
 # WHY here and not only in issue-732's watchdog: that watchdog restarts on a 5-min cadence, which
@@ -29,12 +29,12 @@
 #   string (single-quoted printf format -- the backticks and `schtasks` token are LITERAL, never a
 #   command substitution), so the wording is pinned by a Tier-0 test.
 #   issue 1317: an optional 3rd arg <class> (the obs-fleet class) makes the Recover hint
-#   platform-true -- a `linux-genlock` box (strih-lx) names its systemd --user unit; anything else
+#   platform-true -- a `linux-genlock` box (strih-snv) names its systemd --user unit; anything else
 #   (the no-arg default) keeps the byte-identical Windows hint.
 bundle_state_down_message() {
   local box="${1:-?}" port="${2:-8899}" class="${3:-}"
   if [ "$class" = "linux-genlock" ]; then
-    printf "bundle-state-server DOWN on %s (nothing on :%s) -- automatic self-heal did not restore it; the version-integrity gate will refuse (exit 11). Recover: ssh to %s and run \`systemctl --user restart '*-bundle-state-server.service'\` (strih-bundle-state-server.service on strih-lx; confirm it is listed by \`systemctl --user list-units --all '*-bundle-state-server.service'\` and check its journal).\n" "$box" "$port" "$box"
+    printf "bundle-state-server DOWN on %s (nothing on :%s) -- automatic self-heal did not restore it; the version-integrity gate will refuse (exit 11). Recover: ssh to %s and run \`systemctl --user restart '*-bundle-state-server.service'\` (strih-bundle-state-server.service on strih-snv; confirm it is listed by \`systemctl --user list-units --all '*-bundle-state-server.service'\` and check its journal).\n" "$box" "$port" "$box"
     return 0
   fi
   printf 'bundle-state-server DOWN on %s (nothing on :%s) -- automatic self-heal did not restore it; the version-integrity gate will refuse (exit 11). Recover: run `schtasks /run /tn "BundleStateServer"` on %s (or check scripts/run-bundle-state-server.ps1).\n' "$box" "$port" "$box"

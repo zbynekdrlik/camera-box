@@ -25,7 +25,7 @@
 //!   quiet-zone box, located inside the crop by [`crate::burn_quiet_zone`], decoded alone inside a
 //!   white border. The camera slot models the burn at 320 px, the writer renders it 287 px (315 for
 //!   a version-5 payload), so the fixed crop also holds 24-41 px of whatever surrounds the burn;
-//!   when cam2 films the strih-lx multiview that is QR content, and rqrr's one pass reads nothing.
+//!   when cam2 films the strih-snv multiview that is QR content, and rqrr's one pass reads nothing.
 //!   Only when that also read no burn of the slot does it get a [`BURN_REGION_UPSCALE`]x CatmullRom
 //!   look.
 //! - A run_id without a reserved slot (the aux marks, SongPlayer, an operator override) is never
@@ -50,7 +50,9 @@ use crate::colour_scale::Rect;
 use crate::probe::burn_echo::{reads_in_frame, LocatedPayload};
 use crate::probe::payload::Payload;
 use crate::probe::qr::{decode_qr_luma_all_reads, merge_payloads, otsu_threshold};
-use crate::probe::recording_latency::{AUX_TICK_RUN_ID, BURN_RUN_ID_SONGPLAYER};
+use crate::probe::recording_latency::{
+    AUX_TICK_RUN_ID, BURN_RUN_ID_SONGPLAYER, MEASUREMENT_CLIP_RUN_ID,
+};
 use image::{GrayImage, Luma};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -234,14 +236,18 @@ pub fn tight_box_reads(
 
 /// Log ONCE per process when an expected burn run_id is not a reserved id at all (an operator
 /// `--burn-*-run-id` override), so the pass silently skipping it stays visible. The reserved ids
-/// without a fixed overlay slot (SongPlayer, the painted aux marks) are expected and not logged.
+/// without a fixed overlay slot (SongPlayer, the painted aux marks, the measurement clip) are
+/// expected and not logged.
 fn warn_once_on_unlocalized(missing_run_ids: &[u32]) {
     static WARNED: AtomicBool = AtomicBool::new(false);
     let unlocalized: Vec<u32> = missing_run_ids
         .iter()
         .copied()
         .filter(|&id| {
-            slot_for_run_id(id).is_none() && id != BURN_RUN_ID_SONGPLAYER && id != AUX_TICK_RUN_ID
+            slot_for_run_id(id).is_none()
+                && id != BURN_RUN_ID_SONGPLAYER
+                && id != AUX_TICK_RUN_ID
+                && id != MEASUREMENT_CLIP_RUN_ID
         })
         .collect();
     if !unlocalized.is_empty() && !WARNED.swap(true, Ordering::Relaxed) {

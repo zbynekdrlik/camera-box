@@ -4,12 +4,20 @@
 //! and the QPSK marker from the recording's AUDIO track (the hand-mic'd cam2 HDMI marker, captured
 //! into the stream OBS as the "mbc" input), then pairs them via the cam2 emit log
 //! (`index → frame_id`) to compute the video↔audio offset. Cross-platform (ffmpeg + the pure
-//! `qpsk_marker` decode + `recording::analyze_recording`) so it runs ON stream.lan alongside the
+//! `qpsk_marker` decode + the `recording` analysis) so it runs ON stream.lan alongside the
 //! zero-loss `recording-verdict` (#193). All the JUDGEMENT (decode, pair, offset, interpolation)
 //! is pure Tier-0 in `crate::qpsk_marker`, and the per-channel decode + best-channel pick (issue
-//! 1367, never a downmix) in `crate::qpsk_channel_select`; this module is only the ffmpeg I/O glue.
+//! 1367, never a downmix) in `crate::qpsk_channel_select`; what the video decode requests (issue
+//! 1404) is `crate::av_sync_decode_plan`. This module is only the ffmpeg I/O glue.
 
-use crate::probe::recording::analyze_recording;
+use crate::av_run_pairing::{check_av_run, run_frame_tick, run_tick_samples};
+use crate::av_sync_decode_plan::{
+    av_decode_request, no_cam2_tick_message, painter_full_request, painter_head_request,
+    painter_head_verdict, PainterHead, PAINTER_HEAD_FRAMES,
+};
+use crate::probe::recording::{
+    analyze_recording_head, analyze_recording_with_grouped_burns_optical, NODE_BURN_RUN_IDS,
+};
 use crate::qpsk_channel_select::{
     decode_best_channel, f32le_to_channels, ffmpeg_extract_args, ffprobe_channels_args,
     parse_ffprobe_channels, BestChannelDecode, ChannelPick,
@@ -201,6 +209,37 @@ fn decode_best_audio_channel(
     })
 }
 
+/// Issue 1404: the painter path's head check. Decodes the first [`PAINTER_HEAD_FRAMES`] frames with
+/// the head request (nothing required, so no frame goes robust) and stops with "no cam2 tick" when
+/// they show the self-marked measurement clip and none of them a cam2 tick or a rig node burn
+/// (`painter_head_verdict`). Any other head goes on to the full decode, and its observation (one
+/// `(cam2 tick, run ids)` per head frame) decides that decode's request (`painter_full_request`).
+fn check_painter_head(recording: &Path) -> Result<Vec<(Option<u32>, Vec<u32>)>> {
+    let request = painter_head_request();
+    let head = analyze_recording_head(
+        recording,
+        PAINTER_HEAD_FRAMES,
+        &request.mandatory_burns,
+        request.min_distinct_optical,
+    )
+    .with_context(|| format!("decode the head of {}", recording.display()))?;
+    let seen: Vec<(Option<u32>, Vec<u32>)> = head
+        .iter()
+        .map(|f| (f.tick, f.payloads.iter().map(|p| p.run_id).collect()))
+        .collect();
+    let verdict = painter_head_verdict(&seen);
+    tracing::info!(
+        file = %recording.display(), head_frames = head.len(), verdict = ?verdict,
+        "av-sync painter head (issue 1404): a cam2 tick or a rig burn sends it to the full decode"
+    );
+    match verdict {
+        PainterHead::FullDecode => Ok(seen),
+        PainterHead::NoCam2Tick { frames } => {
+            anyhow::bail!("{}: {}", recording.display(), no_cam2_tick_message(frames))
+        }
+    }
+}
+
 /// Measure the A/V-sync offset of `recording` (which carries BOTH the cam2 dual-QR video and the
 /// mbc audio marker) using the cam2 `marker_log_csv` (the emitter's `index,frame_id,emit_ts_ns`).
 ///
@@ -209,6 +248,12 @@ fn decode_best_audio_channel(
 /// index-match, deduping near-simultaneous same-`frame_id` duplicates (`av_offset_candidates_deduped`,
 /// #733); the offset is the median of the DENSEST cluster of those candidates (`cluster_offset_ms`)
 /// — robust to false audio decodes and the index wrap.
+///
+/// issue 1404 Task 5 part b: `av_run = Some(run)` pairs through that SELF-MARKED run's own dual-QR
+/// tick (`crate::av_run_pairing`, the measurement clip 911016, whose recording carries its own
+/// marker; `marker_log_csv` is then the clip's marker log) instead of `RecordingFrame::tick`, and
+/// refuses a run that restarted inside the recording. `None` is the cam2 painter path, unchanged.
+#[allow(clippy::too_many_arguments)]
 pub fn av_sync_from_recording(
     recording: &Path,
     marker_log_csv: &str,
@@ -217,7 +262,11 @@ pub fn av_sync_from_recording(
     threshold: f64,
     min_matched: usize,
     cluster_tol_ms: f64,
+    av_run: Option<u32>,
 ) -> Result<AvSyncReport> {
+    if let Some(run) = av_run {
+        check_av_run(run).map_err(anyhow::Error::msg)?;
+    }
     let fps = probe_video_fps(recording)?;
     let emit_log = parse_qpsk_marker_log(marker_log_csv);
     anyhow::ensure!(
@@ -230,18 +279,49 @@ pub fn av_sync_from_recording(
     let audio_start = probe_stream_start_time(recording, &format!("a:{audio_track}"))?;
 
     // Video: decode every frame's optical tick → sorted (tick, video_ts) samples, first per tick.
-    let frames = analyze_recording(recording)
-        .with_context(|| format!("decode video {}", recording.display()))?;
-    let mut ticks: Vec<(u32, f64)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for fr in &frames {
-        if let Some(t) = fr.tick {
-            if seen.insert(t) {
-                ticks.push((t, video_start + fr.frame_index as f64 / fps));
+    // Issue 1404: the decode asks the #207 gate for exactly the QRs this path reads
+    // (`crate::av_sync_decode_plan`); the painter path stops after a cheap head on a recording with
+    // neither a cam2 tick nor a rig burn, instead of running every frame through the robust recovery,
+    // and otherwise asks its full decode for exactly the node burns that head read.
+    let request = match av_run {
+        Some(_) => av_decode_request(av_run),
+        None => painter_full_request(&check_painter_head(recording)?, &NODE_BURN_RUN_IDS),
+    };
+    let frames = analyze_recording_with_grouped_burns_optical(
+        recording,
+        &request.mandatory_burns,
+        &request.any_of_burns,
+        request.min_distinct_optical,
+    )
+    .with_context(|| format!("decode video {}", recording.display()))?;
+    let ticks: Vec<(u32, f64)> = match av_run {
+        None => {
+            let mut ticks: Vec<(u32, f64)> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for fr in &frames {
+                if let Some(t) = fr.tick {
+                    if seen.insert(t) {
+                        ticks.push((t, video_start + fr.frame_index as f64 / fps));
+                    }
+                }
             }
+            ticks.sort_by_key(|&(t, _)| t);
+            ticks
         }
-    }
-    ticks.sort_by_key(|&(t, _)| t);
+        // issue 1404: the selected run's own tick (the payloads keep every run; `tick` drops 911016)
+        Some(run) => {
+            let run_frames: Vec<(u64, Option<u32>)> = frames
+                .iter()
+                .map(|fr| {
+                    let pairs = fr.payloads.iter().map(|p| (p.run_id, p.frame_id));
+                    (fr.frame_index, run_frame_tick(pairs, run))
+                })
+                .collect();
+            run_tick_samples(&run_frames, fps, video_start)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("run {run} ticks of {}", recording.display()))?
+        }
+    };
     let video_ticks = ticks.len();
 
     // #936 FAIL-CLOSED GUARD: the emit-log's frame_id coverage must overlap the recording's own

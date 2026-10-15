@@ -10,7 +10,7 @@
 # ROSTER (issue 1317 part 2, M4 cut-over): the boxes come from the ONE fleet list
 # (scripts/lib/obs-fleet.sh, facet `obs-session` = stream + resolume), overridable byte-compatibly via
 # OBS_SESSION_WATCHDOG_BOXES="name|host ...". The session-0 / AHK premise is Windows-only, so each
-# box is ALSO class-gated here (windows-genlock only): the Linux production strih-lx at .202 is never
+# box is ALSO class-gated here (windows-genlock only): the Linux production strih-snv at .202 is never
 # handed the PowerShell probe (the old literal `strih` arm failed there every pass with "no probe
 # output"). The traveling resolume is probed only while home (obs_fleet_poll_now).
 #
@@ -76,7 +76,7 @@ esac
 # pairs; OBS_SESSION_WATCHDOG_BOXES overrides it byte-compatibly (the fleet <X>_BOXES convention).
 BOXES="${OBS_SESSION_WATCHDOG_BOXES:-$(obs_fleet_boxes obs-session)}"
 # Per-box host + ssh credential overrides are GENERIC per fleet name (obs_session_box_env below):
-# <NAME>_HOST / <NAME>_USER / <NAME>_PW (STREAM_HOST, RESOLUME_PW, ...), so a new Windows fleet box
+# <NAME>_HOST / <NAME>_USER / <NAME>_PW (STREAM_SNV_HOST, RESOLUME_SNV_PW, ...), so a new Windows fleet box
 # needs no edit here. Defaults: the roster's host, and targets.md's fleet-wide Win32-OpenSSH login.
 OBS_SESSION_DEFAULT_USER="${OBS_SESSION_DEFAULT_USER:-newlevel}"
 OBS_SESSION_DEFAULT_PW="${OBS_SESSION_DEFAULT_PW:-newlevel}"
@@ -171,8 +171,8 @@ process_box() {
 
 # ── roster (issue 1317 part 2) ───────────────────────────────────────────────
 # obs_session_box_env <name> <SUFFIX> <default> -> the value of the env var <NAME>_<SUFFIX> (the box
-# name upper-cased, every non-alphanumeric byte turned into `_`: stream -> STREAM_HOST, resolume ->
-# RESOLUME_PW), or <default> when that var is unset/empty. The derived name is validated before the
+# name upper-cased, every non-alphanumeric byte turned into `_`: stream-snv -> STREAM_SNV_HOST,
+# resolume-snv -> RESOLUME_SNV_PW), or <default> when that var is unset/empty. The derived name is validated before the
 # indirect expansion, so a hostile roster name can never expand anything else.
 obs_session_box_env() {
   local name="${1:-}" suffix="${2:-}" default="${3:-}" var
@@ -187,7 +187,7 @@ obs_session_box_env() {
 # obs_session_targets -> one `name host has_ahk` line per box to probe THIS pass, in roster order.
 # A box is probed only when BOTH hold:
 #   * its fleet class is windows-genlock -- the session-0/AHK probe is PowerShell over win_ssh_run,
-#     so a Linux box (strih-lx) or a name the fleet list does not know is SKIPPED (logged), even when
+#     so a Linux box (strih-snv) or a name the fleet list does not know is SKIPPED (logged), even when
 #     an OBS_SESSION_WATCHDOG_BOXES override names it (defense in depth beyond the facet policy);
 #   * obs_fleet_poll_now says so -- a traveling box (resolume) only while home, never a false
 #     "invisible" verdict on a box that is simply away.
@@ -199,7 +199,7 @@ obs_session_box_env() {
 # `resolume-snv`, and the probe sees its AHK watcher in session 1 -- so today the address IS
 # RESOLUME-SNV. Narrow (needs a foreign Windows OBS at the address AND a session-0 fault), same
 # residual obs-liveness documents; confirm identity again if the event-LAN DHCP lease moves.
-# <NAME>_HOST (STREAM_HOST, RESOLUME_HOST, ...) repoints a box; otherwise the roster's host is
+# <NAME>_HOST (STREAM_SNV_HOST, RESOLUME_SNV_HOST, ...) repoints a box; otherwise the roster's host is
 # dialled. has_ahk is the shared obs-fleet fact (obs_fleet_has_ahk), never a per-script table.
 obs_session_targets() {
   local pair name host class

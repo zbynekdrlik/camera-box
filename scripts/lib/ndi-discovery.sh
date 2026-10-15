@@ -29,11 +29,11 @@
 #
 # The list is GENERATED, never hand-typed (a hand-kept list is what went stale on the old Windows
 # strih, dead 10.77.8.5x addresses): every member of the obs-fleet `ndi-sender` facet
-# (scripts/lib/obs-fleet.sh: strih-lx, stream, resolume; `retired` rows excluded by obs_fleet_boxes).
+# (scripts/lib/obs-fleet.sh: strih-snv, stream, resolume; `retired` rows excluded by obs_fleet_boxes).
 # A fleet host that is a hostname (resolume.lan, a traveling DHCP box) is resolved to IPv4 at WRITE
 # time; unresolvable -> skipped with a log line, and its sources stay mDNS-only exactly as before.
 # The VERIFIERS require only the PINNED part (every IPv4 entry), so a traveling lease never makes a
-# verify flap, while a renumbered strih-lx / stream still FAILS until re-provisioned.
+# verify flap, while a renumbered strih-snv / stream still FAILS until re-provisioned.
 #
 # NEVER A CAMBOX (issue 1389). A finder with extra IPs opens a TCP discovery connection to each
 # listed sender's :5960 listener (an mDNS-only finder opens none -- proven live), and camera-box
@@ -48,7 +48,7 @@
 # would hold OUTBOUND discovery connections to the very boxes whose restarts trigger the abort.
 #
 # Config LOCATION: the Linux SDK reads `$HOME/.ndi/ndi-config.v1.json`, or
-# `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. strih-lx's intercom-hub runs with
+# `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. strih-snv's intercom-hub runs with
 # `ProtectHome=true`, so its config lives in the system dir /etc/ndi and an intercom-hub.service.d
 # drop-in points NDI_CONFIG_DIR at it. The camboxes used the same pair (/etc/ndi + a camera-box.service.d
 # drop-in) until issue 1389; the cambox writer below now removes both, so camera-box (root,
@@ -65,6 +65,11 @@ if ! command -v obs_fleet_boxes >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/obs-fleet.sh
   . "${BASH_SOURCE[0]%/*}/obs-fleet.sh"
 fi
+# The ONE verified ro close of the --cambox-apply window (issue 1407), lazy-sourced the same way.
+if ! command -v ro_window_close_cmds >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/ro-window.sh
+  . "${BASH_SOURCE[0]%/*}/ro-window.sh"
+fi
 
 # --- shared constants (single source of truth, consumed cross-file) ---------------------------
 # The SDK's own config file name.
@@ -75,7 +80,7 @@ NDI_DISCOVERY_SYSTEM_DIR="${NDI_DISCOVERY_SYSTEM_DIR:-/etc/ndi}"
 # 1342); since issue 1389 the cambox writer removes it with the config. Overridable for tests.
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (removal) + verify-device.sh (an)
 NDI_DISCOVERY_CAMBOX_DROPIN="${NDI_DISCOVERY_CAMBOX_DROPIN:-/etc/systemd/system/camera-box.service.d/ndi-discovery.conf}"
-# The strih-lx intercom-hub drop-in (ProtectHome hides ~/.ndi from it). Overridable for tests.
+# The strih-snv intercom-hub drop-in (ProtectHome hides ~/.ndi from it). Overridable for tests.
 # shellcheck disable=SC2034  # consumed cross-file by setup-strih.sh (install) + verify-strih.sh (item 34)
 NDI_DISCOVERY_INTERCOM_DROPIN="${NDI_DISCOVERY_INTERCOM_DROPIN:-/etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf}"
 # The obs-fleet facet whose members are the managed OBS-box NDI SENDERS.
@@ -120,6 +125,12 @@ ndi_discovery_cambox_ips() {
 # Non-zero when the facet or a member is missing from OBS_FLEET -- the caller then writes nothing.
 ndi_discovery_fleet_hosts() {
   local roster pair
+  # issue 1412: a box of another venue (Poprad) lists its own venue's boxes, set by the provisioner
+  # (scripts/lib/obs-box-role.sh obs_box_role_apply) as NDI_DISCOVERY_SENDER_HOSTS, one host per line.
+  if [ -n "${NDI_DISCOVERY_SENDER_HOSTS:-}" ]; then
+    printf '%s\n' "$NDI_DISCOVERY_SENDER_HOSTS"
+    return 0
+  fi
   roster="$(obs_fleet_boxes "$NDI_DISCOVERY_FLEET_FACET")" || return 1
   for pair in $roster; do
     printf '%s\n' "${pair#*|}"
@@ -212,7 +223,7 @@ _ndi_discovery_json_string() {
 # absent or null. With python3, any other non-null value (a hand-edited array, a number, true/false)
 # comes back as its compact JSON; the grep fallback reads strings only (the cambox plan counts the rest
 # itself, see its no-python3 branch).
-# With python3 (dev1, strih-lx, the camboxes, the tests) it reads that exact JSON path, so an unrelated
+# With python3 (dev1, strih-snv, the camboxes, the tests) it reads that exact JSON path, so an unrelated
 # `"KEY"` elsewhere in the file never stands in for it (issue 1389). Without python3 (a stripped-down
 # box), or when TEXT is not JSON, it falls back to the grep reader above. Never errors.
 _ndi_discovery_networks_key() {
@@ -299,7 +310,7 @@ ndi_discovery_list_common() {
 # PINNED list, FORBIDDEN to every cambox IP (ndi_discovery_cambox_ips). Facets:
 #   missing   -- TEXT empty (no config file on the box)
 #   JSON      -- TEXT is not valid JSON (checked only when python3 is available; verify-strih runs
-#                this on strih-lx, which has it)
+#                this on strih-snv, which has it)
 #   discovery -- a networks.discovery is set (it would silence this box's senders on mDNS)
 #   ips       -- networks.ips is empty, or a REQUIRED IP is absent from it (a renumber / new
 #                sender: re-provision).
@@ -472,7 +483,7 @@ ndi_discovery_block_section() {
 
 # --- the CAMBOX config: NO networks.ips at all (issue 1389, ROZHODNUTÉ 5879261962) ---------------
 # A cambox is an mDNS-only NDI receiver. camera-box's finder needs only the strih preview source
-# (`STRIH-LX (interkom)`), which mDNS finds in milliseconds, and any listed host would give the cambox
+# (`STRIH-SNV (interkom)`), which mDNS finds in milliseconds, and any listed host would give the cambox
 # an OUTBOUND discovery connection whose teardown at every strih / stream / resolume restart is the
 # same abort risk as the inbound one. So setup-device STEP 7 and `--cambox-apply` take the list OFF a
 # cambox (the plan/apply pair below), and verify-device (an) FAILs a cambox that still lists any IP
@@ -649,9 +660,11 @@ ndi_discovery_cambox_verdict() {
 # re-running setup-device.sh STEP 7. It embeds the SAME plan/apply pair STEP 7 calls (declare -f, never
 # a copy). A clean box (plan none) writes nothing and never remounts; a refused plan (a foreign drop-in)
 # exits non-zero with nothing touched. Otherwise, on a read-only root it remounts rw, carries out the
-# plan, syncs and remounts ro again (retried 3x; a root it cannot put back is a loud non-zero, and the
-# EXIT trap puts it back on any failure), then runs `systemctl daemon-reload` when it removed the
-# drop-in. It needs no fleet list, so the program is the same for every cambox.
+# plan, and closes the window with the ONE verified ro close (scripts/lib/ro-window.sh, issue 1407:
+# the root mode is READ, a root left writable is a loud non-zero naming the writers, no retry; the
+# EXIT trap closes it the same way on any failure), then runs `systemctl daemon-reload` when it
+# removed the drop-in -- only after the verified close. It needs no fleet list, so the program is the
+# same for every cambox.
 ndi_discovery_cambox_apply_remote_snippet() {
   printf 'set -eu\n'
   printf 'NDI_DISCOVERY_CONFIG_NAME=%q\n' "$NDI_DISCOVERY_CONFIG_NAME"
@@ -659,7 +672,7 @@ ndi_discovery_cambox_apply_remote_snippet() {
   declare -f _ndi_discovery_json_string _ndi_discovery_networks_key ndi_discovery_config_ips \
     ndi_discovery_config_servers _ndi_discovery_norm_list ndi_discovery_dropin_config_dir \
     _ndi_discovery_dropin_foreign ndi_discovery_config_json _ndi_discovery_stripped_json ndi_discovery_cambox_plan \
-    ndi_discovery_cambox_apply_plan
+    ndi_discovery_cambox_apply_plan ro_root_mount_mode
   cat <<'NDI_APPLY'
 _ndi_plan="$(ndi_discovery_cambox_plan "$_ndi_dir" "$_ndi_dropin")"
 case "$_ndi_plan" in
@@ -676,29 +689,26 @@ _ndi_had_dropin=0
 [ ! -e "$_ndi_dropin" ] || _ndi_had_dropin=1
 _ndi_ro=0
 _ndi_opts="$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)"
-case "$_ndi_opts" in ro | ro,*) _ndi_ro=1 ;; esac
+case "$(ro_root_mount_mode "$_ndi_opts")" in ro) _ndi_ro=1 ;; esac
+_ndi_open=0
 _ndi_restore_ro() {
-  [ "$_ndi_ro" = 1 ] || return 0
-  for _ndi_try in 1 2 3; do
-    if mount -o remount,ro /; then
-      _ndi_ro=0
-      return 0
-    fi
-    [ "$_ndi_try" = 3 ] || sleep 2
-  done
-  echo "ERROR: mount -o remount,ro / FAILED 3x -- the root stays read-WRITE; find the holder (lsof +L1; fuser -vm /) and run 'mount -o remount,ro /' by hand" >&2
-  return 1
+  [ "$_ndi_open" = 1 ] || return 0
+  _ndi_open=0
+NDI_APPLY
+  # issue 1407: the ONE verified ro close -- `exit 1` naming the writers when the root does not
+  # read ro again; called on the normal path and by the EXIT trap, at most once (_ndi_open).
+  ro_window_close_cmds "issue 1407" "\$(hostname 2>/dev/null || echo this cambox)" \
+    "The NDI discovery change is on disk, but the root stays read-WRITE, so the daemon-reload is not run." \
+    "stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then run the daemon-reload there by hand (a re-run finds nothing left to do)."
+  cat <<'NDI_APPLY'
 }
-trap '_ndi_restore_ro || true' EXIT
+trap '_ndi_restore_ro' EXIT
 if [ "$_ndi_ro" = 1 ]; then
   mount -o remount,rw /
+  _ndi_open=1
 fi
 ndi_discovery_cambox_apply_plan "$_ndi_dir" "$_ndi_dropin" "$_ndi_plan"
-sync
-if ! _ndi_restore_ro; then
-  trap - EXIT
-  exit 1
-fi
+_ndi_restore_ro
 trap - EXIT
 if [ "$_ndi_had_dropin" = 1 ] && [ ! -e "$_ndi_dropin" ]; then
   systemctl daemon-reload

@@ -334,7 +334,8 @@ def test_a_tray_failure_never_throws_out_of_the_program(ps):
 
 def test_the_service_self_heal_and_the_dead_task_purge_are_unchanged(ps):
     assert ps.find("Copy-Item -Force $exe $bak") < ps.find("Copy-Item -Force $tmp $exe")
-    assert "Copy-Item -Force $bak $exe -ErrorAction SilentlyContinue" in ps
+    assert "try { Copy-Item -Force $bak $exe } catch {" in ps
+    assert "try { Start-Service dantesync } catch {" in ps
     assert 'cmd /c "schtasks /Delete /TN \\"DanteSyncUpdate\\" /F >nul 2>&1"' in ps
 
 

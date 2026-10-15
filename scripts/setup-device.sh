@@ -48,6 +48,11 @@ fail() {
                            # verify-device.sh's (u) check and create-usb-linux.sh, single source
                            # of truth for the journald RuntimeMaxUse cap path/value
 
+# shellcheck source=scripts/lib/ro-root.sh
+. "$HERE/lib/ro-root.sh"  # ro_root_root_line / ro_root_tmpfs_line (issue 808) -- the ONE read-only
+                          # root canon STEP 18 writes, shared with bkshading-provision-sbc.sh (the
+                          # handheld SBC goes read-only the same way)
+
 # shellcheck source=scripts/lib/remoteos-mcp.sh
 . "$HERE/lib/remoteos-mcp.sh"  # remoteos_mcp_install -- the ONE remoteos-mcp venv install (the MCP agent step; issue 1361)
 # shellcheck source=scripts/lib/mgmt-liveness.sh
@@ -60,6 +65,12 @@ fail() {
                                 # -- the on-box ssh-banner self-heal; ONE source of truth shared with
                                 # verify-device.sh's (aj) check (the pure decision embedded via declare -f)
 
+# shellcheck source=scripts/lib/cambox-housekeeping-cpus.sh
+. "$HERE/lib/cambox-housekeeping-cpus.sh"  # cambox_hk_install_dropin -- the [housekeeping-cpus] sub-step
+                              # (issue 1367; SAME lib verify-device.sh (au) grades with)
+# shellcheck source=scripts/lib/cambox-zram.sh
+. "$HERE/lib/cambox-zram.sh"  # cambox_zram_install_dropin / CAMBOX_ZRAM_PACKAGE -- the [zram-swap] sub-step
+                              # (issue 1428; SAME lib verify-device.sh (at) + create-usb-linux.sh use)
 # shellcheck source=scripts/lib/bkshading-relay-provision.sh
 . "$HERE/lib/bkshading-relay-provision.sh"  # bkshading_relay_provision_install / _expected_enable_state /
                                             # _binary_plan / _fetch_binary (issue 808) -- the ONE relay install
@@ -116,6 +127,10 @@ fail() {
 . "$HERE/lib/grub-fast-boot.sh"  # grub_fast_boot_apply (#1394) -- the ONE declaration of the no-menu,
                                  # no-countdown GRUB settings STEP 10 applies; shared with
                                  # create-usb-linux.sh / build-image.sh and verify-device.sh (aq)
+# shellcheck source=scripts/lib/rig-timezone.sh
+. "$HERE/lib/rig-timezone.sh"  # rig_timezone_apply / rig_timezone_zoneinfo (issue 1415) -- the ONE rig
+                               # time zone STEP 1 writes; shared with create-usb-linux.sh, the OBS-box
+                               # baseline and verify-device.sh (as)
 
 # shellcheck source=scripts/dantesync-version-gate.sh
 . "$HERE/dantesync-version-gate.sh"  # DANTESYNC_VERSION_PIN (#1066, source-safe: its source-guard
@@ -267,14 +282,12 @@ EOF
 
 # root_mount_is_readonly OPTS -> 0 iff the FIRST comma-token of a mount-options string is exactly
 # "ro" (the kernel always emits ro/rw first). Substring-safe: a rw mount carrying
-# "errors=remount-ro" is correctly NOT read as read-only. Mirrors verify-device.sh's function of
-# the same name/contract (#547) -- kept as a local copy (not a shared-lib extraction) to keep
-# #599's fix scoped to this file.
+# "errors=remount-ro" is correctly NOT read as read-only. issue 808: the reading itself is
+# ro_root_mount_mode in scripts/lib/ro-root.sh (sourced above; shared with the handheld SBC
+# provisioning and the relay deploy). verify-device.sh keeps its own copy of the same contract
+# (#547), parity-tested against the lib by tests/python/test_ro_root_808.py.
 root_mount_is_readonly() {
-    case "$1" in
-        ro | ro,*) return 0 ;;
-        *) return 1 ;;
-    esac
+    [ "$(ro_root_mount_mode "${1:-}")" = ro ]
 }
 
 # ROOT_WAS_RO -- set by ensure_root_writable(), read by restore_root_mode() (#599). Tracks whether
@@ -615,6 +628,17 @@ echo "$DEVICE_NAME" > /etc/hostname
 hostnamectl set-hostname "$DEVICE_NAME"
 sed -i "s/127.0.1.1.*/127.0.1.1\t$DEVICE_NAME/" /etc/hosts
 echo "  Hostname set to: $DEVICE_NAME"
+# issue 1415: the rig time zone (Europe/Bratislava) -- the /etc/localtime symlink + /etc/timezone written
+# directly by the shared lib. Never timedatectl: on a read-only-root appliance systemd-timedated keeps its
+# own mount namespace, set-timezone fails "Read-only file system" even inside this rw window, and its
+# read-back then reports a zone /etc/localtime does not have (live 12.10.2026). verify-device.sh (as)
+# grades the link.
+if [ ! -f "$(rig_timezone_zoneinfo)" ]; then
+    echo "  $(rig_timezone_zoneinfo) missing -- installing tzdata"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tzdata
+fi
+rig_timezone_apply || fail "issue 1415: could not set the rig time zone ${RIG_TIMEZONE} (/etc/localtime) -- see the line above"
 
 # =============================================================================
 # STEP 2: Configure static IP
@@ -1011,12 +1035,12 @@ camera_box_free_capture_device_dropin_content > /etc/systemd/system/camera-box.s
 echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/video on every start (#772)"
 # issue 1342 -- the camera box publishes ONE NDI output, `CAMn (usb)`. The retired secondary
 # 30fps blend stream had no consumer (the main's read-only OBS-WS read on 24.9.2026 found 0 of the
-# strih-lx + stream NDI inputs bound to a (30p) source, and no mapping/pin/scene table in this repo
+# strih-snv + stream NDI inputs bound to a (30p) source, and no mapping/pin/scene table in this repo
 # names one); its code is gone and a re-provision DELETES the drop-in that used to enable it, so a
 # live box that still carries it converges (the env var is ignored by the new binary either way).
 rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
 # issue 1389 (ROZHODNUTÉ 5879261962) -- a cambox carries NO receiver-side networks.ips at all: the
-# camera-box service receives only `STRIH-LX (interkom)` for the cameraman HDMI preview, which mDNS finds
+# camera-box service receives only `STRIH-SNV (interkom)` for the cameraman HDMI preview, which mDNS finds
 # in milliseconds, and ANY listed host would give it a TCP discovery connection whose teardown (at every
 # strih / stream / resolume restart) can abort camera-box inside libndi 6.3.2. Issue 1342 wrote
 # /etc/ndi/ndi-config.v1.json + a camera-box.service.d NDI_CONFIG_DIR drop-in here; this step now takes
@@ -1279,9 +1303,18 @@ touch /etc/cloud/cloud-init.disabled 2>/dev/null || true
 # Auto updates — #295: an active unattended-upgrades auto-installed a kernel without an initrd that
 # bricked CAM3/CAM4. PIN the kernel and disable unattended upgrades entirely; an appliance must
 # never silently gain a new kernel.
-systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
-    apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+systemctl disable --now unattended-upgrades.service 2>/dev/null || true
 systemctl mask unattended-upgrades.service 2>/dev/null || true
+# issue 1394: MASK the apt timers + services (the ONE list in scripts/lib/ro-root.sh), never only
+# disable them. On the read-only root apt-daily(-upgrade).service fail every pass (exit 2,
+# /var/lib/apt is read-only) and leave the box `degraded`, and a package upgrade's maintainer
+# scripts re-enable a timer that is only disabled (live on every cambox, 8.10.2026). Stopped first
+# (best-effort: a minimal image may lack one), then masked fail-loud. STEP 16's apt-get below is
+# unaffected: apt-get never goes through these units. verify-device.sh (ar) grades the masks.
+mapfile -t RO_ROOT_APT_UNITS < <(ro_root_masked_apt_units)
+systemctl disable --now "${RO_ROOT_APT_UNITS[@]}" 2>/dev/null || true
+systemctl mask "${RO_ROOT_APT_UNITS[@]}" \
+    || fail "could not mask ${RO_ROOT_APT_UNITS[*]} -- they would fail on the read-only root and leave the box degraded (issue 1394)"
 apt-mark hold linux-image-generic linux-headers-generic linux-generic 2>/dev/null || true
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
 // Camera-box appliance: never auto-update (#295 — kernels are pinned with apt-mark hold).
@@ -1594,13 +1627,13 @@ Wants=network.target
 
 [Service]
 Type=simple
-# Sync to the cluster master strih (10.77.9.202), NOT the dantesync binary's default public NTP
-# pool (sk.pool.ntp.org / time.cloudflare.com) — every node must discipline its clock to the SAME
-# reference or the wall-clock genlock in src/ndi.rs silently diverges across cameras (#8). Use the
-# IP, not strih.lan: per CLAUDE.md/targets.md .lan DNS may not resolve on a freshly-provisioned
-# read-only-rootfs camera, and a failed resolve makes dantesync fall back to its public-pool
-# default and silently desync — the exact regression #8 guards against.
-ExecStart=/usr/local/bin/dantesync --ntp-server 10.77.9.202
+# Sync to the venue's strih by NAME (strih.lan: strih-snv in SNV, strih-pp in Poprad), NOT the
+# dantesync binary's default public NTP pool -- every node must discipline its clock to the SAME
+# reference or the wall-clock genlock in src/ndi.rs silently diverges across cameras (#8). Issue 1412:
+# the old literal SNV IP left every Poprad cambox with no NTP at all (cam7 ~150 s off strih-pp). The
+# CLI value is resolved on every query, so an unresolvable name is a counted NTP failure, never a
+# public-pool fallback, and it recovers once DNS answers.
+ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -1698,7 +1731,7 @@ echo "  Installed: $DSCP_NFT_RULESET_PATH (udp dport 123 -> dscp ${DSCP_NFT_CLAS
 # [egress-pacing]: pace this box's NDI egress at boot (issue 1242, unnumbered sub-step, ENABLE-only)
 # =============================================================================
 # All seven cameras hand their frame to NDI on the same genlock grid instant, so their line-rate
-# bursts reach strih-lx together and its USB NIC answers with PAUSE storms. An fq root qdisc with a
+# bursts reach strih-snv together and its USB NIC answers with PAUSE storms. An fq root qdisc with a
 # per-flow maxrate (the ONE declaration in scripts/lib/cambox-egress-pacing.sh) spreads each frame
 # over ~7 ms while dantesync's PTP/NTP and the intercom stay their own flows. It ran by hand on
 # cam1-cam7 from 30.9.2026 and was lost on every reboot; this makes it permanent. The appliance has
@@ -1722,6 +1755,36 @@ EGRESS_PACING_ENABLED_STATE="$(systemctl is-enabled "$CAMBOX_EGRESS_PACING_SERVI
     || fail "${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service is not enabled (is-enabled='${EGRESS_PACING_ENABLED_STATE:-<none>}') after install -- the NDI egress would be UNPACED after the next reboot (issue 1242)"
 echo "  Installed: $CAMBOX_EGRESS_PACING_SCRIPT_PATH + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service (enabled; paces the default-route interface at next boot, fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT})"
 
+
+# =============================================================================
+# [zram-swap]: swap on compressed RAM (issue 1428, unnumbered sub-step, ENABLE-only)
+# =============================================================================
+# Owner 14.10.2026: every Linux box carries swap. This root is mounted read-only (STEP 18) and has no
+# swap partition (a swap file cannot be activated on a read-only mount), so the swap is zram (RAM): systemd's zram-generator (no maintainer scripts) plus the ONE
+# drop-in from scripts/lib/cambox-zram.sh (zram-size = ram, zstd). The generator reads /etc at boot,
+# so nothing is started here (.claude/rules/provisioning-scripts.md); the swap comes up at the next
+# boot and verify-device.sh (at) grades it. In the rw window, before STEP 18's read-only flip.
+echo ""
+echo -e "${GREEN}[zram-swap] Installing the zram swap (${CAMBOX_ZRAM_PACKAGE} + ${CAMBOX_ZRAM_DROPIN}, issue 1428)...${NC}"
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confold "$CAMBOX_ZRAM_PACKAGE" </dev/null \
+    || fail "apt-get install ${CAMBOX_ZRAM_PACKAGE} failed -- the box would have no swap (issue 1428)"
+cambox_zram_install_dropin "" \
+    || fail "could not write ${CAMBOX_ZRAM_DROPIN} -- the zram swap would stay at the package default (issue 1428)"
+echo "  Installed: ${CAMBOX_ZRAM_PACKAGE} + ${CAMBOX_ZRAM_DROPIN} (zram-size = ram; the swap comes up at the next boot)"
+
+# =============================================================================
+# [housekeeping-cpus]: systemd PID 1 + every unit off the capture-IRQ core (issue 1367, ENABLE-only)
+# =============================================================================
+# The issue-1198 split reserves one general core for the capture xhci IRQ, but only camera-box's own
+# threads kept off it: systemd PID 1 and every unit it started still ran there, and a unit start
+# delayed the capture (cam5 15.10.2026: 65 of 102 capture-phase re-seeds within 1 s of a unit start).
+# The manager CPUAffinity drop-in from scripts/lib/cambox-housekeeping-cpus.sh puts PID 1 and every
+# unit on the remaining cores. camera-box keeps its own CPUAffinity drop-in. PID 1 reads it at the next
+# boot (a live box: the cambox_hk_apply_program sets it with taskset); verify-device.sh (au) grades it. In the rw window, before STEP 18.
+echo ""
+echo -e "${GREEN}[housekeeping-cpus] Keeping systemd PID 1 off the capture-IRQ core (${CAMBOX_HK_DROPIN}, issue 1367)...${NC}"
+cambox_hk_install_dropin "" \
+    || fail "could not write ${CAMBOX_HK_DROPIN} -- PID 1 would keep running on the capture-IRQ core (issue 1367)"
 
 # =============================================================================
 # #1311: off-box remote logging (unnumbered sub-step, enable-only). Get kernel + journal messages
@@ -1880,30 +1943,34 @@ else
 fi
 
 # Create new fstab with read-only root and tmpfs mounts.
-# The heredoc is UNQUOTED (it expands ROOT_UUID and two $(...) lines), so a backtick in its comment
+# The heredoc is UNQUOTED (it expands ROOT_UUID and the $(...) lines), so a backtick in its comment
 # text is a command substitution: escape every one as \` (issue 1311 -- a bare `nofail` ran as a
 # command and vanished from the written fstab).
+# issue 808: the root line and every tmpfs line come from scripts/lib/ro-root.sh (the handheld SBC
+# writes the same set); the EFI line and the journal-partition line stay here, so the written fstab
+# is byte-identical to before (tests/fixtures/ro_root_fstab_808/ is the golden).
+[ -n "$ROOT_UUID" ] || fail "could not read the root filesystem UUID (findmnt -n -o UUID /) -- refusing to write an fstab without a root line"
 cat > /etc/fstab << FSTABEOF
 # Root filesystem - read-only for reliability
-UUID=${ROOT_UUID} / ext4 ro 0 1
+$(ro_root_root_line "$ROOT_UUID" ext4)
 
 # EFI partition (if exists)
 $(grep '/boot/efi' /etc/fstab.bak 2>/dev/null || echo "# No EFI partition")
 
 # tmpfs mounts for writable directories
-tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
-tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
+$(ro_root_tmpfs_line /tmp)
+$(ro_root_tmpfs_line /var/log)
 # #1309: persistent journal on the dedicated ext4 partition, mounted OVER the /var/log tmpfs (systemd
 # orders /var/log first by path prefix). \`nofail\` -> a box WITHOUT the partition (an old box not yet
 # reflashed via create-usb-linux.sh) still boots and journald simply falls back to a volatile journal
 # on the tmpfs above. Emitted only when the labelled partition actually exists, so setup-device.sh on
 # such an old box writes a harmless comment instead of an unmountable entry.
 $(if blkid -L "$LOG_DIET_JOURNAL_PART_LABEL" >/dev/null 2>&1; then log_diet_journal_fstab_line; else echo "# no '$LOG_DIET_JOURNAL_PART_LABEL' partition on this box -- reflash via create-usb-linux.sh for a persistent journal (#1309)"; fi)
-tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
+$(ro_root_tmpfs_line /var/tmp)
 # #295: size /var/cache >=512M (uniformly across the fleet) so apt can never ENOSPC and leave a
 # freshly-installed kernel without its initrd (a 100M /var/cache filled up and did exactly that).
-tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
-tmpfs /var/spool tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=10M 0 0
+$(ro_root_tmpfs_line /var/cache)
+$(ro_root_tmpfs_line /var/spool)
 FSTABEOF
 
 echo "  Root filesystem: read-only (ro)"
@@ -1921,9 +1988,17 @@ echo "  To remount read-write: mount -o remount,rw /"
 mkdir -p "$(dirname "$LOG_BOUND_TIMER_DROPIN_PATH")"
 log_bound_logrotate_config > "$LOG_BOUND_LOGROTATE_PATH"
 log_bound_timer_dropin > "$LOG_BOUND_TIMER_DROPIN_PATH"
+# issue 1394: that bound holds only if logrotate RUNS, and on the read-only root it could not: its
+# state file /var/lib/logrotate/status is on the root, so every 15-min pass failed (exit 3) and left
+# the box `degraded` (cam1/cam2/cam5, 8.10.2026). The drop-in keeps the state in /run -- the shared
+# ro-root canon, the same base the handheld SBC writes. The daemon-reload below loads it;
+# verify-device.sh (ar) grades it byte-for-byte.
+RO_ROOT_LOGROTATE_DROPIN="/etc/systemd/system/$(ro_root_logrotate_dropin_relpath)"
+mkdir -p "$(dirname "$RO_ROOT_LOGROTATE_DROPIN")"
+ro_root_logrotate_dropin_content > "$RO_ROOT_LOGROTATE_DROPIN"
 systemctl daemon-reload
 systemctl restart logrotate.timer
-echo "  /var/log bound: ${LOG_BOUND_LOGROTATE_PATH} size cap ${LOG_BOUND_SIZE_CAP}, logrotate.timer every 15min (#679)"
+echo "  /var/log bound: ${LOG_BOUND_LOGROTATE_PATH} size cap ${LOG_BOUND_SIZE_CAP}, logrotate.timer every 15min (#679), logrotate state in $(ro_root_logrotate_state_file) (issue 1394)"
 
 # =============================================================================
 # #599: restore root to its original mode now that STEP 15-18 are done -- a no-op on a

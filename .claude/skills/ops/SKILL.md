@@ -134,6 +134,11 @@ because it carried no dantesync — this brings it under the fleet clock-discipl
   adaptation are NOT gated; the frame-jump signal `backward_regime_ticks` IS). For the 24h
   acceptance (skew flat ±20 ms), sample a long OBS-log window and raise `--min-samples`. The
   supervisor owns the live deploy + the 24h run; this is a verify tool, not a hard E2E gate.
+  **Not for a shallow-latched input (issue 1302):** the strih-snv CG input (`CG-obs`, 3 ms pin) is
+  held at a latched depth D (audit `shallow_depth=`), so its head age reads D × interval (100 ms at
+  D=3). `--verdict-source` grades that ABSOLUTE head age and FAILs it by design. Verify the CG feed
+  with `scripts/cg-chain-verify.sh` (`CG_CHAIN_STRIH_SRC=CG-obs`), which grades the excursion from D
+  and counts re-latches (`.claude/rules/cg-chain-verify.md`).
 - **Dev1 fleet registration — the ONE declared OBS_FLEET list (#1296).** resolume is now a member of
   `scripts/lib/obs-fleet.sh` (`OBS_FLEET`, class `windows-genlock`, host `resolume.lan`, home-check
   `traveling`), from which all six dev1 watchdogs DERIVE their box rosters (`.claude/rules/obs-fleet-list.md`).
@@ -412,9 +417,14 @@ chmod +x ./dist/camera-box
 
 # DEVICE_ROOT_PW: the box root password (NOT committed — export it from your password store before deploying)
 # 2. Deploy to device (device root pw — NOT committed)
+# Prefer scripts/deploy-fleet.sh --binary ./dist/camera-box (CAMERA_SET=camN): it closes the rw
+# window with the ONE verified ro close (scripts/lib/ro-window.sh, issue 1407) BEFORE the start.
+# By hand, the same order -- never start inside the window, never swallow the ro remount:
 sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "mount -o remount,rw / && systemctl stop camera-box"
 sshpass -p "$DEVICE_ROOT_PW" scp ./dist/camera-box root@10.77.9.6X:/usr/local/bin/
-sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "systemctl start camera-box && mount -o remount,ro / 2>/dev/null; true"
+sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "sync -f /; mount -o remount,ro /; findmnt -no OPTIONS /"
+# findmnt must print ro,... -- only then:
+sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "systemctl start camera-box"
 ```
 
 Use IP addresses — `.lan` DNS may not resolve.
@@ -834,7 +844,7 @@ when it closes; on 28.9.2026 an mDNS-only finder listed every cambox source in <
 `CAMn (usb)` is an mDNS question, never a reason to add a cambox IP. The part-1 Discovery Server was dropped because a configured SENDER
 stops mDNS; see `.claude/rules/ndi-discovery.md`. When diagnosing "camera missing from OBS dropdown", check WHICH case it is
 (boot-race/flap → re-announce should cure within ~2s; a stable cambox whose announce was lost → a
-`camera-box.service` restart re-registers it; a missing OBS-box source on strih-lx → check it has the
+`camera-box.service` restart re-registers it; a missing OBS-box source on strih-snv → check it has the
 generated `networks.ips` list, `verify-strih` item 34).
 
 **Rig verify (supervisor):** reboot a box, confirm it reappears in the OBS NDI dropdown within
@@ -854,9 +864,9 @@ rewrite, applied at SOME point after the paragraph above was written). **cam2 an
 genuinely rw-root** (a direct `/etc/...` write succeeds with no remount). The
 dantesync-deployment skill's "cam3 is the ONE exception" framing is now WRONG — treat EVERY box
 individually: attempt the plain write first, and on `Read-only file system` wrap it in
-`mount -o remount,rw /` ... `mount -o remount,ro / 2>/dev/null || true` (the same pattern
-`setup-device.sh`'s own `ensure_root_writable`/`restore_root_mode` already uses). Never assume a
-box's mode from this doc or from another box's result — check live.
+`mount -o remount,rw /` ... `mount -o remount,ro /`, then check `findmnt -no OPTIONS /` reads ro
+(never `2>/dev/null || true` on the ro remount: issue 1407, `.claude/rules/ro-window.md`). Never
+assume a box's mode from this doc or from another box's result — check live.
 
 **The brick (NOT fs corruption):** `unattended-upgrades` was active → auto-installed a `6.8.0-124`
 kernel; a FULL 100M `/var/cache` tmpfs broke apt with ENOSPC so its **initrd never generated**; a
@@ -1152,7 +1162,7 @@ its own CLAUDE.md, its own `.claude/skills/install` playbook, and its own versio
 use the agent's own installer (below). The ONE exception is PROVISIONING a Linux box: since issue
 1361 `setup-strih.sh` step 10, `setup-imag.sh` step 23 and `setup-device.sh` STEP 17b all call the
 shared `scripts/lib/remoteos-mcp.sh`, which pip-installs the project's own source (GitHub API tarball
-of ONE pinned commit, `remoteos_mcp_pinned_ref` = what strih-lx runs; bump it deliberately) with the
+of ONE pinned commit, `remoteos_mcp_pinned_ref` = what strih-snv runs; bump it deliberately) with the
 project's own `constraints.txt` into a venv at `/opt/remoteos-mcp-venv`, so a freshly hardware'd box
 comes up with a working MCP surface. The dependency pins stay the project's own.
 
@@ -1168,9 +1178,9 @@ comes up with a working MCP surface. The dependency pins stay the project's own.
   process serving the request — this is expected, not a failure; the upgrade completes
   server-side before the kill. Verify by simply calling `GetSystemInfo`/`Ping` again right after
   (fresh HTTP request, same host:port:auth_key) and `pip show remoteos-mcp`.
-- **Linux (strih-lx/imag-nb/cam1-4):** `systemd` unit `remoteos-mcp.service` running
+- **Linux (strih-snv/imag-nb/cam1-4):** `systemd` unit `remoteos-mcp.service` running
   `/opt/remoteos-mcp-venv/bin/python -m remoteos` with the key in the 0600
-  `/etc/remoteos-mcp/remoteos-mcp.env` (issue 1361; strih-lx ran this venv by hand first). Boxes
+  `/etc/remoteos-mcp/remoteos-mcp.env` (issue 1361; strih-snv ran this venv by hand first). Boxes
   provisioned earlier still carry the upstream installer's system-pip install + a key in ExecStart
   until their provisioner re-runs (it keeps the key). Upgrade = bump `remoteos_mcp_pinned_ref` (or
   `REMOTEOS_MCP_REF=<sha>` for one run) and re-run the box's provisioner step: the new commit changes

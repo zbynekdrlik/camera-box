@@ -38,8 +38,11 @@ set -euo pipefail
 #     SELF-HEALING — the remote upgrade script backs up the current binary, then arms a restore
 #     trap (bash `trap ... ERR` / PowerShell try-catch) so any failure AFTER the point of no
 #     return rolls the binary back and restarts the service ON THE BOX before returning non-zero.
-#     The orchestrator therefore only ever needs an EXTERNAL rollback on the VERIFY-failure path
-#     (where the swap provably completed and the service is running the new-but-unverified binary);
+#     (issue 1407: on a read-only-root node the restart runs only after the window closed verified;
+#     a close that leaves the root writable starts nothing and is reported as such, never as a
+#     self-heal.) The orchestrator therefore only ever needs an EXTERNAL rollback on the
+#     VERIFY-failure path (where the swap provably completed and the service is running the
+#     new-but-unverified binary);
 #     a failed upgrade command is already recovered remotely and is only reported, never blindly
 #     rolled back (which — with a pre-existing `.bak` — would otherwise stop a HEALTHY master and
 #     downgrade it).
@@ -95,7 +98,7 @@ set -euo pipefail
 # Env: SSH_PASS (default: the rig's shared ssh password, never printed here; also the sudo password fed to sudo -S on non-root Linux nodes),
 #      DANTESYNC_GATE_BOUND_US (offset bound, passed to the gate),
 #      GATE_WAIT_TRIES/GATE_WAIT_SECS (post-restart settle poll for a SLAVE node's verification gate),
-#      NTP_MASTER (the master node name; default DANTESYNC_NTP_MASTER_NAME, else the fleet ntp-master role),
+#      NTP_MASTER (the master node name(s), space-separated; default DANTESYNC_NTP_MASTER_NAME, else every fleet ntp-master* role),
 #      MASTER_GATE_WAIT_TRIES/MASTER_GATE_WAIT_SECS (#1077: the LONGER bounded settle window the
 #      master node gets so verifying it right after its own restart waits out the fleet sawtooth).
 # Linux privilege (#1077): a root@ node runs the generated script directly; a non-root node
@@ -221,39 +224,44 @@ if [ "\$expected" != "\$actual" ]; then
   exit 1
 fi
 chmod +x "\$tmp/dantesync"
-# 1.5 cam boxes run a DELIBERATE read-only root (the deploy-fleet.sh remount cycle exists for
-# exactly this; the 2026-08-16 canary failed here with 'cp: ... Read-only file system').
-# Detect a read-only root, remount rw for the swap, and restore ro via the EXIT trap — so BOTH
-# the success path and the self-heal ERR path end read-only again. #1077 defect (3): read the
-# ACTUAL mount state (findmnt, with a /proc/mounts fallback for a findmnt-less box), never a
-# 'touch' write probe — a write probe conflates a read-only filesystem with a mere permission
-# error, and now that the script always runs escalated it would read as writable everywhere a
-# real move is possible. Mirrors setup-device.sh's ensure_root_writable()/root_mount_is_readonly()
-# (#599): match 'ro' as the FIRST comma-token so 'errors=remount-ro' never false-positives.
-ro_root=0
-opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null)"
-case "\$opts" in ro | ro,*) ro_root=1 ;; esac
-if [ "\$ro_root" = 1 ]; then mount -o remount,rw /; fi
-_dantesync_remount_ro() {
-  if [ "\$ro_root" = 1 ]; then mount -o remount,ro / 2>/dev/null || true; fi
-}
+# 1.5 cam boxes run a DELIBERATE read-only root (the 2026-08-16 canary failed here with
+# 'cp: ... Read-only file system'). The ONE window prologue (dantesync-rollback.sh, issue 1407):
+# read the ACTUAL mount state (#1077: findmnt + the /proc/mounts fallback, never a write probe),
+# remount rw on a read-only root, and the window helpers. Only writes and the stop run inside it;
+# the window closes VERIFIED before the restart, and the EXIT trap closes it on any failure.
+$(_dantesync_linux_rw_window_sh)
 trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT
 # 2. back up the current binary BEFORE overwriting it (rollback target)
 cp -a "$DANTESYNC_LINUX_BIN" "$DANTESYNC_LINUX_BAK"
-# 3. self-heal: from here (the point of no return), restore the .bak on ANY error
+# 3. self-heal: from here (the point of no return), restore the .bak on ANY error -- in its own
+#    rw window, closed verified, so the old binary comes back up on a read-only root
 _dantesync_restore() {
-  cp -a "$DANTESYNC_LINUX_BAK" "$DANTESYNC_LINUX_BIN" 2>/dev/null || true
-  systemctl restart dantesync 2>/dev/null || true
-  echo "SELF-HEAL: restored previous dantesync binary" >&2
+  _dantesync_reopen_rw
+  if cp -a "$DANTESYNC_LINUX_BAK" "$DANTESYNC_LINUX_BIN"; then
+    _dantesync_remount_ro
+    systemctl restart dantesync 2>/dev/null || true
+    echo "SELF-HEAL: restored previous dantesync binary" >&2
+  else
+    _dantesync_remount_ro
+    systemctl restart dantesync 2>/dev/null || true
+    echo "SELF-HEAL FAILED: the previous binary could NOT be copied back -- dantesync runs whatever is installed now; restore $DANTESYNC_LINUX_BAK by hand" >&2
+  fi
 }
 trap '_dantesync_restore' ERR
-# 4. swap + restart
+# 4. swap, close the window (verified, issue 1407), then the restart on the read-only root
 systemctl stop dantesync
 install -m 0755 "\$tmp/dantesync" $DANTESYNC_LINUX_BIN
+_dantesync_remount_ro
 systemctl restart dantesync
-trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT   # success — disarm the restore trap, keep tmp cleanup + ro restore
+# success: re-set the EXIT trap (tmp cleanup + the ro close, a no-op once closed). The ERR self-heal
+# stays ARMED through the version read below: a new binary that cannot even print its version is
+# rolled back too (the orchestrator then reports the self-heal). It is disarmed right after it, so
+# nothing that follows (the master's date-state delete) can roll the master back to its .bak after
+# its date file is gone -- the state the issue-1372 delete-last order exists to avoid.
+trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT
 # 5. read the new version back
 dantesync --version
+trap - ERR
 EOF
   _dantesync_linux_date_state_rm_sh "${2:-}" "$version"
 }
@@ -323,8 +331,9 @@ $(dantesync_windows_wait_service_exit_ps)
     Copy-Item -Force \$tmp \$exe
     Start-Service dantesync
 } catch {
-    Copy-Item -Force \$bak \$exe -ErrorAction SilentlyContinue
-    Start-Service dantesync -ErrorAction SilentlyContinue
+    # A locked-exe IOException terminates despite -ErrorAction: never let it skip the start (12.10.2026).
+    try { Copy-Item -Force \$bak \$exe } catch { Write-Output ('SELF-HEAL: restore of the .bak failed: ' + \$_.Exception.Message) }
+    try { Start-Service dantesync } catch { Write-Output ('SELF-HEAL: Start-Service failed: ' + \$_.Exception.Message) }
     throw
 }
 EOF
@@ -420,11 +429,11 @@ EOF
   fi
 }
 
-# dantesync_is_ntp_master NODE MASTER_NAME -> 0 iff NODE is the (non-empty) configured NTP master.
-# #1077: the master node is graded/settled differently at verify time (see verify_node) -- an empty
-# master name means NO node is the master (never a false match).
+# dantesync_is_ntp_master NODE MASTER_NAMES -> 0 iff NODE is one of the (space-separated) configured
+# NTP masters (issue 1412: one per venue). #1077: a master is graded/settled differently at verify
+# time (see verify_node) -- an empty list means NO node is the master (never a false match).
 dantesync_is_ntp_master() {
-  [ -n "$2" ] && [ "$1" = "$2" ]
+  [ -n "$1" ] && case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
 # --- traveling CG box (RESOLUME-SNV) support (issue 1297) -------------------------------------
@@ -438,23 +447,24 @@ dantesync_is_ntp_master() {
 dantesync_resolume_win_spec() {
   local ip="${1:-}"
   [ -n "$ip" ] || { printf ''; return 0; }
-  printf 'resolume=%s@%s' "${DANTESYNC_RESOLUME_USER:-newlevel}" "$ip"
+  printf 'resolume-snv=%s@%s' "${DANTESYNC_RESOLUME_USER:-newlevel}" "$ip"
 }
 
 # dantesync_gate_env_for NAME -> the env assignment the per-node verification gate needs (stdout,
 # one `KEY=VALUE` word, or nothing). issue 1372: an AUDIO-role node (mbc, fohabl) locks to the
 # audio-VLAN grandmaster, so its dantesync-gate.sh run must compare gm_source_ip against THAT, never
-# the video grandmaster (which only stays harmless while DANTESYNC_GATE_GM_ENFORCE is off). A video
-# node or an unknown name prints nothing: the gate keeps its own default (video-clock.lan). An audio
-# node whose grandmaster does not resolve (only possible with a hostname override) fails LOUDLY
-# (stderr + rc 1) -- its verify must fail, never fall back to the video grandmaster.
+# the video grandmaster (which only stays harmless while DANTESYNC_GATE_GM_ENFORCE is off); issue
+# 1412: a venue-role node (video-pp, ntp-master-pp) the same against its venue's grandmaster. A
+# home-video node or an unknown name prints nothing: the gate keeps its own default (video-clock.lan).
+# A grandmaster that does not resolve fails LOUDLY (stderr + rc 1) -- the verify must fail, never
+# fall back to the video grandmaster.
 dantesync_gate_env_for() {
   local role gm
   role="$(dantesync_fleet_field "${1:-}" role 2>/dev/null || true)"
-  [ "$role" = "audio" ] || return 0
-  gm="$(dantesync_fleet_role_gm_ip audio 2>/dev/null || true)"
+  case "$role" in "" | video | ntp-master) return 0 ;; esac
+  gm="$(dantesync_fleet_role_gm_ip "$role" 2>/dev/null || true)"
   if [ -z "$gm" ]; then
-    echo "dantesync-fleet-upgrade: cannot resolve the audio grandmaster '$DANTESYNC_AUDIO_GM_HOST' for $1 -- refusing to verify it against the video grandmaster" >&2
+    echo "dantesync-fleet-upgrade: cannot resolve the $role grandmaster for $1 -- refusing to verify it against the video grandmaster" >&2
     return 1
   fi
   printf 'RIG_GRANDMASTER_IP=%s' "$gm"
@@ -466,26 +476,29 @@ dantesync_gate_env_for() {
 # simply SKIPS it while it is powered off/away, instead of failing the whole roll on an unreachable
 # node. Returns 1 (do NOT skip) for an always-home box, a home traveling box, OR an unknown name
 # (fail-safe: never silently skip a box we cannot classify -- it proceeds and fails loudly on its
-# own reachability check if it really is unreachable).
+# own reachability check if it really is unreachable). Issue 1412: a fleet `reach` node (the PP
+# boxes; the fleet gate wins over their obs-fleet row) is skipped while it is unreachable.
 dantesync_skip_away_traveling() {
   local name="${1:-}" check
+  if [ "$(dantesync_fleet_field "$name" homegate 2>/dev/null)" = reach ]; then
+    ! dantesync_fleet_present "$name"; return
+  fi
   check="$(obs_fleet_home_check "$name" 2>/dev/null || true)"
   [ "$check" = "traveling" ] || return 1
   obs_fleet_is_home "$name" && return 1
   return 0
 }
 
-# dantesync_upgrade_default_master GIVEN -> the master verified master-aware: GIVEN, else the fleet's
-# ntp-master role (strih-lx), else "strih". Issue 1372: "strih" without --fleet graded the date master
-# as a SLAVE and rolled a healthy swap back twice (29.9.2026).
+# dantesync_upgrade_default_master GIVEN -> the master(s) verified master-aware: GIVEN, else every
+# fleet NTP master (strih-snv + the venue masters, issue 1412: strih-pp), else "strih". Issue 1372:
+# "strih" without --fleet graded the date master as a SLAVE and rolled a healthy swap back twice.
 dantesync_upgrade_default_master() {
   local given="${1:-}" m
   if [ -n "$given" ]; then
     printf '%s' "$given"
     return 0
   fi
-  m="$(dantesync_fleet_names role=ntp-master 2>/dev/null || true)"
-  m="${m%% *}"
+  m="$(dantesync_fleet_master_names 2>/dev/null || true)"
   printf '%s' "${m:-strih}"
 }
 
@@ -555,10 +568,10 @@ node_pass() {
   if [ -n "$var" ]; then printf '%s' "${!var:-}"; else printf '%s' "$SSH_PASS"; fi
 }
 ssh_node() {  # ADDR CMD  (ADDR is user@ip)
-  sshpass -p "$(node_pass "$1")" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
+  sshpass -p "$(node_pass "$1")" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=12 "$1" "$2"
 }
 scp_node() {  # LOCAL_PATH  ADDR:REMOTE
-  sshpass -p "$(node_pass "${2%%:*}")" scp -O -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
+  sshpass -p "$(node_pass "${2%%:*}")" scp -O -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=12 "$1" "$2"
 }
 
 # #1077: the orchestrator downloads + sha256-verifies the pinned binary ONCE on dev1 (this box HAS
@@ -692,7 +705,9 @@ verify_node() {
 # run_upgrade NAME KIND ADDR -> run the OS-appropriate upgrade, capturing combined remote output
 # into REMOTE_OUT. Returns the remote command's rc. The remote scripts are self-healing (see the
 # header): a failure PAST the swap restores the previous binary on the box before returning
-# non-zero, so a non-zero rc here means the service is on the PREVIOUS (working) version already.
+# non-zero, so a non-zero rc here means the service is on the PREVIOUS (working) version already --
+# EXCEPT a Linux program that stopped at a failed ro close (issue 1407, ro_window_close_failed on
+# REMOTE_OUT): nothing is started on a writable root, and upgrade_node says so.
 REMOTE_OUT=""
 
 run_upgrade() {
@@ -811,7 +826,15 @@ upgrade_node() {
   esac
 
   if ! run_upgrade "$name" "$kind" "$addr"; then
-    err "[$name] upgrade command failed — the box self-healed to its previous version (not rolled forward)"
+    if ro_window_close_failed "$REMOTE_OUT"; then
+      # issue 1407: the program stopped at an ro close that failed -- nothing was started after it,
+      # so this is NOT a self-heal: dantesync can be left STOPPED on a writable root there.
+      err "[$name] upgrade command failed: the node's root did NOT go back read-only -- NOT self-healed; dantesync may be LEFT STOPPED there (the FAIL lines below name the writers)"
+    elif case "$REMOTE_OUT" in *"SELF-HEAL FAILED"*) true ;; *) false ;; esac; then
+      err "[$name] upgrade command failed and its self-heal could NOT restore the previous binary -- NOT self-healed; inspect dantesync on the node by hand"
+    else
+      err "[$name] upgrade command failed — the box self-healed to its previous version (not rolled forward)"
+    fi
     [ -n "$REMOTE_OUT" ] && err "[$name] upgrade output: $REMOTE_OUT"
     return 1
   fi
@@ -838,7 +861,7 @@ add_node() {  # NAME KIND ADDR
   # issue 1297: a TRAVELING obs-fleet box (resolume) that is currently AWAY is SKIPPED from the
   # roll (never a failed node) -- a fleet roll may always list it; it joins only while home.
   if dantesync_skip_away_traveling "$1"; then
-    log "  $1 SKIPPED (traveling box away -- obs_fleet_is_home false; will roll when home)"
+    log "  $1 SKIPPED (traveling box away or unreachable -- not home this pass; will roll when home)"
     return 0
   fi
   # issue 1372: a node that needs its OWN ssh credential (fohabl) is never dialled without it.

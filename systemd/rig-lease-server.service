@@ -1,8 +1,8 @@
 [Unit]
-Description=camera-box rig-lease read-only HTTP exposure (#1277) — GET /rig-lease.json on :8890
+Description=camera-box rig-lease HTTP on :8890 — GET /rig-lease.json (#1277) + authenticated POST /rig-lease/* (issue 1432)
 Documentation=https://github.com/zbynekdrlik/camera-box
-After=network-online.target
-Wants=network-online.target
+# No ordering on network-online.target: dev1's user manager reads it as LoadState=not-found (a user
+# manager cannot see system targets, checked 7.10.2026), so it only looked like one.
 
 # Bound any runaway restart storm (mirrors camera-box.service #828 / bkshading-relay.service).
 # StartLimit* are UNIT-level directives (placing them in [Service] silently no-ops).
@@ -13,7 +13,7 @@ StartLimitBurst=20
 Type=simple
 # %h = the installing user's home on dev1 (newlevel). Adjust if the checkout lives elsewhere.
 # --bind 0.0.0.0: dev1's firewall is already LAN-open (verified before this was designed, see the
-# issue's own design comment) -- the two reachable private interfaces are LAN 10.77.9.103 and
+# issue's own design comment) -- the two reachable private interfaces are LAN (by the name dev1, the DHCP address drifts) and
 # tailscale 100.104.8.125; NEVER bind the box's public IP. Restreamer's stream-box runner has no
 # tailscale address, so the LAN path is the one it actually uses (address-by-tailscale rule: LAN is
 # the primary path here ONLY because the consumer cannot reach tailscale, not the general default).
@@ -31,8 +31,9 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rig-lease-server
 
-# Security hardening: a read-only stdlib HTTP server that only ever stat()s/reads files under
-# RIG_LEASE_DIR (/var/tmp/rig-lease by default) and never writes anything itself.
+# Security hardening: a stdlib HTTP server that reads RIG_LEASE_DIR (/var/tmp/rig-lease by default)
+# and, since issue 1432, writes it only through scripts/lib/rig-lease.sh on an authenticated POST
+# (bearer token in the 0600 file ~/.config/camera-box/rig-lease-token, read-only under ProtectHome).
 #
 # PrivateTmp MUST stay "no" (declared intent -- see the VERIFIED-INERT note below for why it does
 # not currently DO anything on dev1): systemd's PrivateTmp namespaces BOTH /tmp AND /var/tmp, and

@@ -52,6 +52,9 @@
 #   - scripts/lib/rig-heartbeat.sh (the holder's issue-281 refresher: rig_lease_refresh_if_mine on
 #                                 every beat, issue 1383) + scripts/av-soak.sh (slot boundaries) +
 #                                 scripts/rig-busy-gate.sh (busy-wait + the lease-only keep-alive)
+#   - scripts/cambox-ro-units-apply.sh --apply (issue 1394: holds it as camera-box-ro-units-apply
+#                                 for its whole run, beats only once per box, so its heartbeat can
+#                                 read minutes old while the apply is alive; releases on every exit)
 #
 # Tunables (env, all optional):
 #   RIG_LEASE_DIR              lockdir path (default /var/tmp/rig-lease; tests override for isolation)
@@ -208,7 +211,39 @@ rig_lease_holder_run_status() {
 rig_lease_is_stale() {
   local stale_secs="${1:-5400}"
   local path; path="$(rig_lease_holder_path)"
-  [ -f "$path" ] || return 0
+  if [ ! -f "$path" ]; then
+    # issue 1432: a lockdir with no holder.json is an acquire in progress for a few ms (mkdir done,
+    # holder.json not yet written), and a crashed acquire's leftover after that. Reclaimable only
+    # once the lockdir is RIG_LEASE_NOHOLDER_GRACE_SECS old, or a second acquirer (the dev1 HTTP
+    # route for a remote holder) steals a lease the first one already reported as ACQUIRED.
+    # Mirrors rig_lease_state.NO_HOLDER_GRACE_SECS.
+    local grace="${RIG_LEASE_NOHOLDER_GRACE_SECS:-10}" dmtime now
+    case "$grace" in "" | *[!0123456789]*) grace=10 ;; esac
+    dmtime="$(stat -c %Y "$(rig_lease_dir)" 2>/dev/null)" || return 0
+    now="$(date +%s)"
+    [ "$((now - dmtime))" -ge "$grace" ] && return 0
+    return 1
+  fi
+
+  # issue 1432: a holder may declare its own threshold (`stale_secs` in holder.json; the HTTP write
+  # routes write 180 for a remote holder beating every 30 s). Only a positive JSON integer counts
+  # (a JSON string "180" does not, like rig_lease_state.holder_stale_secs); anything else keeps the
+  # caller's threshold.
+  local own
+  own="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        v = json.load(f).get("stale_secs")
+    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+        print(v)
+except Exception:
+    pass
+' "$path" 2>/dev/null)" || own=""
+  case "$own" in
+    "" | 0* | *[!0123456789]*) ;;
+    *) stale_secs="$own" ;;
+  esac
 
   local age; age="$(rig_lease_heartbeat_age_seconds)"
   if ! rig_lease_is_fresh "$age" "$stale_secs"; then
@@ -233,19 +268,30 @@ rig_lease_write_holder() {
   local d; d="$(rig_lease_dir)"
   mkdir -p "$d"
   local acquired_at; acquired_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # issue 1432: optional per-holder fields, from env (empty/unset = the key is absent, so every
+  # existing caller writes the same six keys): RIG_LEASE_HOLDER_LEASE_ID (the HTTP holder's write
+  # capability, never served on GET), RIG_LEASE_HOLDER_STALE_SECS and RIG_LEASE_HOLDER_MAX_HOLD_SECS
+  # (positive integers, written as JSON numbers; anything else is dropped).
   python3 -c '
 import json, sys
-repo, run_id, run_url, job, acquired_at, expected_release_at, path = sys.argv[1:8]
+repo, run_id, run_url, job, acquired_at, expected_release_at, path, lease_id, stale, max_hold = sys.argv[1:11]
+data = {
+    "repo": repo,
+    "run_id": run_id,
+    "run_url": run_url,
+    "job": job,
+    "acquired_at": acquired_at,
+    "expected_release_at": expected_release_at,
+}
+if lease_id:
+    data["lease_id"] = lease_id
+for key, raw in (("stale_secs", stale), ("max_hold_s", max_hold)):
+    if raw.isascii() and raw.isdigit() and int(raw) > 0:
+        data[key] = int(raw)
 with open(path, "w") as f:
-    json.dump({
-        "repo": repo,
-        "run_id": run_id,
-        "run_url": run_url,
-        "job": job,
-        "acquired_at": acquired_at,
-        "expected_release_at": expected_release_at,
-    }, f)
-' "$repo" "$run_id" "$run_url" "$job" "$acquired_at" "$expected_release_at" "$(rig_lease_holder_path)"
+    json.dump(data, f)
+' "$repo" "$run_id" "$run_url" "$job" "$acquired_at" "$expected_release_at" "$(rig_lease_holder_path)" \
+    "${RIG_LEASE_HOLDER_LEASE_ID:-}" "${RIG_LEASE_HOLDER_STALE_SECS:-}" "${RIG_LEASE_HOLDER_MAX_HOLD_SECS:-}"
   touch "$(rig_lease_heartbeat_path)"
 }
 
@@ -387,18 +433,23 @@ rig_lease_sweep_releasing() {
   done
 }
 
-# rig_lease_release <run_id> -> release the lease -- ONLY if RUN_ID is still its current holder
-# (never destroys a DIFFERENT, later holder's lease out from under it -- e.g. a run that lost the
-# acquire race, or one whose lease was already reclaimed as stale by someone else). Idempotent /
+# rig_lease_release <run_id> [<lease_id>] -> release the lease -- ONLY if RUN_ID is still its
+# current holder (never destroys a DIFFERENT, later holder's lease out from under it -- e.g. a run
+# that lost the acquire race, or one whose lease was already reclaimed as stale by someone else).
+# With LEASE_ID (issue 1432, the HTTP holder), the holder's lease_id must match too. Idempotent /
 # safe to call even when the lease dir does not exist.
 rig_lease_release() {
-  local run_id="$1"
+  local run_id="$1" lease_id="${2:-}"
   local d; d="$(rig_lease_dir)"
   rig_lease_sweep_releasing
   [ -d "$d" ] || return 0
   local holder_run_id; holder_run_id="$(rig_lease_read_holder_field run_id)"
   if [ "$holder_run_id" != "$run_id" ]; then
     echo "[rig-lease] NOT releasing -- current holder (run_id=${holder_run_id:-unknown}) is not us (run_id=${run_id}); it must have been reclaimed already." >&2
+    return 0
+  fi
+  if [ -n "$lease_id" ] && [ "$(rig_lease_read_holder_field lease_id)" != "$lease_id" ]; then
+    echo "[rig-lease] NOT releasing -- the holder run_id=${run_id} carries another lease_id; it was re-acquired." >&2
     return 0
   fi
   # ATOMIC teardown (#857): rename the whole lockdir aside in ONE syscall, THEN delete the renamed

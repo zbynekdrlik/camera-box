@@ -10,20 +10,28 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn lib() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/lib/painter-csv-freshness.sh")
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("painter-freshness-{}-{}", std::process::id(), name));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("painter-freshness-{name}-"))
+        .tempdir()
+        .unwrap();
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Write a painter CSV (header + the given `(tick, gen_ts_ns)` rows; flip_ts_ns = gen_ts_ns) and
-/// return its path.
-fn write_csv(name: &str, rows: &[(u64, i128)]) -> PathBuf {
+/// return its path (the returned value holds the scratch dir).
+fn write_csv(name: &str, rows: &[(u64, i128)]) -> TempPath {
     let dir = scratch(name);
     let path = dir.join("painter.csv");
     let mut s = String::from("tick,gen_ts_ns,flip_ts_ns\n");
@@ -31,7 +39,10 @@ fn write_csv(name: &str, rows: &[(u64, i128)]) -> PathBuf {
         s.push_str(&format!("{tick},{gen},{gen}\n"));
     }
     fs::write(&path, s).unwrap();
-    path
+    TempPath {
+        path,
+        _dir: dir._dir,
+    }
 }
 
 /// Call `painter_csv_freshness <csv> <run_start> <dur>` and return (exit_code, "verdict span offset").

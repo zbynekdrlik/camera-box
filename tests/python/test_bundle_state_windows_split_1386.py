@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import functools
 import importlib.util
 import io
 import json
@@ -364,6 +365,15 @@ def _served_steps(fake, tmp):
                 st.enter_context(mock.patch.object(bss.bsg, "local_seconds_of_day", lambda *a: 43200.0))
                 st.enter_context(mock.patch.object(bss, "DEFAULT_VB_MATRIX_INSTALL_DIRS",
                                                    (str(host / "vbm"),)))
+                # issue 1406: the obs_handles readers run for real over leaves that read nothing
+                # (the ctypes process snapshot fails, the /proc root does not exist), so the served
+                # JSON stays the slice-D capture; the facet itself is pinned in
+                # test_obs_handles_gather_1406.py.
+                st.enter_context(mock.patch.object(bsw, "system_process_information",
+                                                   lambda: None))
+                st.enter_context(mock.patch.object(
+                    bss.bsg, "linux_obs_handles",
+                    functools.partial(bss.bsg.linux_obs_handles, str(host / "no-proc"))))
                 st.enter_context(mock.patch.dict(os.environ, env, clear=True))
                 for request in (1, 2):
                     step = _run_step(fake, tmp, f"gather[{log_name},windows={windows},#{request}]",

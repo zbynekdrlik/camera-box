@@ -35,6 +35,17 @@ source) and flows `SongPlayer → cg OBS (RESOLUME-SNV) → strih → stream`.
   composites it at `burn_geom::Corner::BottomCenterRight` (the mirror of imag's BottomCenterLeft
   from the right; resolved from the `resolume` hostname in `ndi-burn-filter.cpp`'s host-role map).
 
+**911016 = the measurement clip (issue 1404), a third CG-segment ORIGIN.** SongPlayer and the cg OBS
+play `measurement-clip-v1.mp4` (`scripts/gen_measurement_clip.py`), which paints the painter's
+dual-QR under `MEASUREMENT_CLIP_RUN_ID`. Registered exactly like 911014 below: tick-excluded, in
+every exclusion array and python mirror, no slot, never `CAMERA_UNDER_TEST_NODES`. Details:
+`.claude/rules/measurement-clip.md`.
+
+**The stream av-sync dock never pairs a QR of any of the three CG origins** (911014, 911015, 911016;
+`CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS` in `vendor/av-sync-dock/src/camera-box-qr.hpp`, issue 1404 Task
+5 part b): its audio is the cam2 painter's marker, so a CG tick line would feed it a meaningless
+offset. A new CG origin id goes into that list too (its parity tests fail otherwise).
+
 Both ids ARE tick-excluded (`src/probe/recording.rs::NODE_BURN_RUN_IDS`) + in the python mirrors
 (`qr_align_pins.py`, `mv_skew_snapshot.py`) + in EVERY `all_burns`/`latency_all_burns` exclusion
 array + the `#638` push site in `recording-verdict.rs` — because a CG burn can ride into a
@@ -456,7 +467,7 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   anything but Cut).
 - **The strih/stream hops (issue 1302 slice 2):** items 2 + 3 above — the `--cg-chain-burns` flag
   (`cg_chain_extract_burn_flag`, spliced as `${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"}` into all
-  three extract calls: strih-lx, Windows strih, stream — an empty flag adds NO argv word) and
+  three extract calls: strih-snv, Windows strih, stream — an empty flag adds NO argv word) and
   `cg_chain_merge_args_append` (which also feeds the on-box cg partial). `tests/harness_cg_chain_hops_1302.rs`
   pins both (std-only, runs with plain `rustc --test`); the verdict side is pinned by the
   `*_1302` tests in `recording-verdict.rs` (CI-only) and the `cg_chain_gate` unit tests (Tier-0 via

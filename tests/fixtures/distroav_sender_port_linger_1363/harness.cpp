@@ -16,7 +16,7 @@ struct fake_sender {
 };
 
 // What else opens a listener while this create runs: 0 nothing, 1 a receiver listener outside
-// the sender band (the live strih-lx race), 2 a second sender-band listener (ambiguous).
+// the sender band (the live strih-snv race), 2 a second sender-band listener (ambiguous).
 static int g_extra_mode = 0;
 
 // A 0.0.0.0 listener WITHOUT SO_REUSEADDR on `port` (0 = ephemeral). -1 on failure.
@@ -131,7 +131,7 @@ int main()
 	int rc = scenario("control", false);
 	if (rc == 0)
 		rc = scenario("linger", true);
-	// The live strih-lx race: a libndi receiver opens its listener during the create.
+	// The live strih-snv race: a libndi receiver opens its listener during the create.
 	g_extra_mode = 1;
 	if (rc == 0)
 		rc = scenario("race", true);

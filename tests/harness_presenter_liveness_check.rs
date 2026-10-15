@@ -38,6 +38,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -53,14 +57,15 @@ fn lib_path() -> PathBuf {
     manifest_dir().join(LIB_REL)
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "presenter-liveness-464-{}-{}",
-        std::process::id(),
-        name
-    ));
-    fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("presenter-liveness-464-{name}-"))
+        .tempdir()
+        .unwrap();
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 fn set_exec(p: &Path) {

@@ -104,8 +104,9 @@ DEFAULT_MAP = FULL_MAP
 # again -- a DEAD_PORT leg on the new splitter (flat static frame, siblings cam6/cam7 read
 # colour). issue 1216 completion (2026-08-30, owner directive "kamery od 1-7 bezia" after a
 # physical cable reseat): cam4 (#947) and cam5 (DEAD_PORT) BOTH rejoin -- the full
-# seven-camera fleet is active, for the first time simultaneously.
-DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
+# seven-camera fleet is active, for the first time simultaneously. issue 1413 (2026-10-12):
+# cam1/cam4/cam6/cam7 moved to Poprad, the SNV rig keeps cam2/cam3/cam5.
+DEFAULT_ACTIVE_SET = os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3 cam5")
 
 
 def _camera_name_of(ndi_input):

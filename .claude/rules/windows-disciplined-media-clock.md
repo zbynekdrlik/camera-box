@@ -23,7 +23,7 @@ rate. The Tier-0 authority is `src/os_clock_discipline.rs`.
 ## What it follows, and what it does NOT
 
 - It follows dantesync's **system-time RATE**: the PTP frequency plus the NTP phase slew. It
-  matches every other dantesync-disciplined box (other Windows OBS, strih-lx, the hub).
+  matches every other dantesync-disciplined box (other Windows OBS, strih-snv, the hub).
 - It does **NOT** follow dantesync's phase **steps**. Live on win-resolume, a −146 µs step landed
   inside a 40 s window; the rate matched 1:1 around it. So `os_gettime_ns` vs system time over a
   window with a step reads the step as "drift". Judge the rate per second, never across a step.

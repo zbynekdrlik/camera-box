@@ -8,39 +8,54 @@
 # genlock OBS planners. Before it, deploy-genlock-fleet.sh (then at 999 lines) carried the MCP/IP/AHK
 # table inline and launch-obs-genlock.sh + obs-self-heal-install.sh each kept their own copy of the
 # same facts, so retiring the Windows strih PC (M4 cut-over 20.9.2026 -- its address belongs to the
-# Linux strih-lx now) meant three edits with nothing checking they agreed. Now every planner reads these
+# Linux strih-snv now) meant three edits with nothing checking they agreed. Now every planner reads these
 # functions, and the box ADDRESSES + the AHK fact come from the fleet list (scripts/lib/obs-fleet.sh:
 # obs_fleet_host / obs_fleet_has_ahk), so a box is registered once.
 #
-# There is NO Windows `strih` entry any more: the production strih is strih-lx (a linux-genlock box,
+# There is NO Windows `strih` entry any more: the production strih is strih-snv (a linux-genlock box,
 # deployed by setup-strih.sh, launched by its strih-obs.service systemd user unit), and every Windows
 # function below returns 2 for it -- a Windows program can never be emitted for the Linux strih.
 
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$(dirname "${BASH_SOURCE[0]}")/obs-fleet.sh"
 
-# fleet_box_mcp BOX -> the win-* MCP server that drives a WINDOWS genlock box (stream, resolume);
-# rc 2 for any other name (a Linux box has no win-* MCP).
-fleet_box_mcp() { case "${1:-}" in stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
+# issue 1414: every BOX argument below is read through the obs-fleet alias table first
+# (obs_fleet_canonical_name), so a pre-1414 name (stream, resolume, strih-lx) keeps addressing the
+# renamed fleet row (stream-snv, resolume-snv, strih-snv). The retired Windows `strih` is no alias.
+_fleet_box() { obs_fleet_canonical_name "${1:-}"; }
+
+# fleet_box_mcp BOX -> the win-* MCP server that drives a WINDOWS genlock box (stream-snv,
+# resolume-snv); rc 2 for any other name (a Linux box has no win-* MCP).
+fleet_box_mcp() { case "$(_fleet_box "${1:-}")" in stream-snv) echo "win-stream-snv" ;; resolume-snv) echo "win-resolume" ;; *) return 2 ;; esac; }
+# fleet_boxes_swap_obs_dll CSV -> 1 when the list holds a Windows box (one with a win-* MCP above: the
+# boxes a --fast deploy swaps obs.dll on), else 0. issue 1302: the stats-ABI gate's scope.
+fleet_boxes_swap_obs_dll() {
+  local b IFS=','
+  for b in ${1:-}; do
+    if fleet_box_mcp "$b" >/dev/null 2>&1; then echo 1; return 0; fi
+  done
+  echo 0
+}
 
 # fleet_box_ip BOX -> the address a planner prints/dials. stream + resolume come from the fleet list
 # (resolume's is the HOSTNAME resolume.lan -- NEVER a pinned literal IP: it is DHCP-drifting and
 # currently collides with `bridge` at .201, targets.md, so a plan resolves + identity-confirms it
-# live). imag keeps its ssh alias `imag`; strih-lx dials STRIH_LX_IP else the fleet host
-# (strih-lx.lan has no DNS entry on dev1). rc 2 for an unknown name.
+# live). imag keeps its ssh alias `imag`; strih-snv dials STRIH_LX_IP else the fleet host
+# (a fixed box dials its address, never a DNS name). rc 2 for an unknown name.
 fleet_box_ip() {
-  case "${1:-}" in
-    stream|resolume) obs_fleet_host "$1" && echo || return 2 ;;
-    imag)            echo "imag" ;;
-    strih-lx)        fleet_strih_lx_ip ;;
-    *)               return 2 ;;
+  local b; b="$(_fleet_box "${1:-}")"
+  case "$b" in
+    stream-snv|resolume-snv) obs_fleet_host "$b" && echo || return 2 ;;
+    imag)                    echo "imag" ;;
+    strih-snv)               fleet_strih_lx_ip ;;
+    *)                       return 2 ;;
   esac
 }
-# strih-lx: STRIH_LX_IP, else the obs-fleet host; no row = rc 2 (fail closed, never a guessed name).
-fleet_strih_lx_ip() { local h="${STRIH_LX_IP:-}"; [ -n "$h" ] || h="$(obs_fleet_host strih-lx)" || return 2; [ -n "$h" ] && echo "$h" || return 2; }
+# strih-snv: STRIH_LX_IP, else the obs-fleet host; no row = rc 2 (fail closed, never a guessed name).
+fleet_strih_lx_ip() { local h="${STRIH_LX_IP:-}"; [ -n "$h" ] || h="$(obs_fleet_host strih-snv)" || return 2; [ -n "$h" ] && echo "$h" || return 2; }
 
 # fleet_box_has_ahk BOX -> 1|0, the ONE obs-fleet AHK fact (resolume runs NL_STARTUP.ahk).
-fleet_box_has_ahk() { obs_fleet_has_ahk "${1:-}"; echo; }
+fleet_box_has_ahk() { obs_fleet_has_ahk "$(_fleet_box "${1:-}")"; echo; }
 
 # fleet_box_ahk_script / fleet_box_ahk_prefer BOX -> the PER-BOX AHK relaunch identity passed into
 # the shared scripts/lib/ahk-watchdog.sh primitive (issue 1295). resolume (RESOLUME-SNV) runs
@@ -49,8 +64,8 @@ fleet_box_has_ahk() { obs_fleet_has_ahk "${1:-}"; echo; }
 # break the relaunch. Only meaningful when fleet_box_has_ahk BOX = 1; rc 2 for a box with no AHK
 # watcher, so a caller asking for an identity that does not exist fails loud instead of silently
 # relaunching another box's script.
-fleet_box_ahk_script() { case "${1:-}" in resolume) echo 'C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk' ;; *) return 2 ;; esac; }
-fleet_box_ahk_prefer() { case "${1:-}" in resolume) echo "lnk" ;; *) return 2 ;; esac; }
+fleet_box_ahk_script() { case "$(_fleet_box "${1:-}")" in resolume-snv) echo 'C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk' ;; *) return 2 ;; esac; }
+fleet_box_ahk_prefer() { case "$(_fleet_box "${1:-}")" in resolume-snv) echo "lnk" ;; *) return 2 ;; esac; }
 
 # fleet_box_ahk_mode BOX -> guard|0, the AHK POLICY the deploy + launch planners pass as their
 # HAS_AHK argument (issue 1372, owner ruling "ale ahk nespustaj"). A box whose owner runs an AHK
@@ -64,7 +79,7 @@ fleet_box_ahk_mode() { if [ "$(fleet_box_has_ahk "${1:-}")" = "1" ]; then echo "
 # fleet_box_obs_profile BOX -> the OBS profile the launch program expects in the window title
 # (`build <short sha> - <label>: <profile>`, the label localized, issue 1372): resolume's cg OBS runs profile `cg`. rc 2
 # (no output) for a box with no pinned profile -- its launch program carries no title identity check.
-fleet_box_obs_profile() { case "${1:-}" in resolume) echo "cg" ;; *) return 2 ;; esac; }
+fleet_box_obs_profile() { case "$(_fleet_box "${1:-}")" in resolume-snv) echo "cg" ;; *) return 2 ;; esac; }
 
 # fleet_resolume_identity_confirm_note -> the IDENTITY-CONFIRM preamble the resolume deploy plan
 # prints (issue 1295). RESOLUME-SNV is a TRAVELING box addressed by HOSTNAME, and resolume.lan
@@ -99,8 +114,8 @@ NOTE
 # is a one-line change, not a hardcoded pile inline at the call site.
 # Task names MUST be whitespace-free: the emitter word-splits this space-separated list.
 fleet_box_keepalive_tasks() {
-  case "${1:-}" in
-    stream) echo 'avsync-keepalive camera-box-obs-self-heal-stream' ;;
+  case "$(_fleet_box "${1:-}")" in
+    stream-snv) echo 'avsync-keepalive camera-box-obs-self-heal-stream' ;;
     *)      echo '' ;;
   esac
 }

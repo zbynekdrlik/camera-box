@@ -24,6 +24,8 @@ strih/stream OUTPUT and decodes ticks. A `copies` event = a painted tick decoded
 ## The discriminator: the painter's own CSV EXONERATES or incriminates stage 1
 The painter logs `tick,gen_ts_ns,flip_ts_ns` (one row/painted-frame) to `painter-*.csv` in every
 run dir (`/tmp/recording-e2e-*/`). `flip_ts_ns` = page-flip-COMPLETE = on-screen instant.
+(dev1 keeps only the newest 9 run dirs since issue 1395; to mine more, see the
+`scripts/lib/e2e-rundir-retention.sh` header.)
 `src/painter_pacing.rs::analyze_csv(text)` computes, purely + Tier-0 tested:
 - painted-tick **duplicates / skips / non-monotonic** (the painter emitting a bad logical sequence);
 - **missed DRM-vsync deadlines**: an inter-flip interval `>= 1.5x` the run's OWN median (nominal)

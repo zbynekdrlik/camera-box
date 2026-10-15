@@ -46,7 +46,7 @@ set -uo pipefail
 # NODE ROSTER (issue 1372: DERIVED from the ONE declared dantesync fleet, scripts/lib/dantesync-fleet.sh):
 # every camera camera_resolve knows (incl. those retired from CAMERA_ACTIVE_SET -- still powered,
 # still running dantesync), dev1 (the local node), the OBS boxes resolved via obs-fleet.sh's
-# obs_fleet_host (issue 1317: strih-lx is the production strih since M4; imag is retired), and the
+# obs_fleet_host (issue 1317: strih-snv is the production strih since M4; imag is retired), and the
 # audio-VLAN PCs mbc + fohabl (the `fixed` nodes). resolume is a TRAVELING CG box: paged only while
 # obs_fleet_is_home resolume holds (the #1296 condition); away -> skipped (never a false page against
 # a box that is simply not here). An OFF cam reads UNREACHABLE -> SKIP (deferred to the #1001
@@ -91,14 +91,17 @@ esac
 # (issue 1372: dantesync_fleet_camera_names, the camera_resolve walk -- never a literal range) --
 # NOT CAMERA_ACTIVE_SET, which can exclude a camera retired from measurement that is still powered
 # and still running dantesync (so it can silently lose the clock too). Each name resolves to its IP
-# via camera-set.sh's camera_resolve (single source of truth, no second IP literal).
+# via camera-set.sh's camera_resolve (single source of truth, no second IP literal). issue 1413: only
+# the HOME venue's cameras (the strih-snv.env STRIH_CAMERAS list, `always` rows); a camera that moved to
+# Poprad is a `reach` row of the fleet and is watched once, through DANTE_CLOCK_REACH_NODES below, at
+# its dev1-reachable PP address against the PP grandmaster.
 DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_camera_names)}"
 # The OBS-box dantesync nodes (space-separated NAMES); IPs + the resolume home-gate come from
 # obs-fleet.sh. imag(-nb) IS a dantesync node; resolume is the traveling CG box.
 # issue 1316: `imag` DROPPED from the default — imag-nb was returned to the owner (dark), so it is
 # no longer a dantesync node. (obs_fleet_is_home imag is also `retired`/false now, so even if named
 # it would SKIP; dropping it from the default removes the dead ssh/probe entirely.)
-# issue 1317 (M4 cut-over 20.9.2026): the production strih is `strih-lx` (the Linux notebook at
+# issue 1317 (M4 cut-over 20.9.2026): the production strih is `strih-snv` (the Linux notebook at
 # 10.77.9.202, the NTP master since M4); the Windows `strih` row is retired from obs-fleet.sh, so the
 # old `strih` name would resolve to nothing and silently drop the strih from clock paging.
 # issue 1372: derived from the dantesync fleet (its obsfleet-gated rows; a `retired` obs-fleet box
@@ -107,6 +110,11 @@ DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-$(dantesync_fleet_names homegate=
 # issue 1372: the FIXED non-camera nodes -- the audio-VLAN PCs mbc + fohabl (Windows, always home).
 # Probed like any remote node; box-up = ssh :22; graded against their role's grandmaster.
 DANTE_CLOCK_FIXED_NODES="${DANTE_CLOCK_FIXED_NODES-$(dantesync_fleet_fixed_names)}"
+# issue 1412: the `reach` nodes -- the Poprad (PP) boxes, read only while their ssh port answers
+# (dantesync_fleet_present: dev1 reaches them only through the companion-pp subnet route). An
+# unreachable one is skipped (no fetch, no page); a reachable one is graded like a fixed node
+# (box-up = ssh :22) against ITS venue's grandmaster, never video-clock.lan.
+DANTE_CLOCK_REACH_NODES="${DANTE_CLOCK_REACH_NODES-$(dantesync_fleet_names homegate=reach)}"
 # #1313: the LOCAL node(s) -- dev1 itself. dev1 runs dantesync too (its clock feeds every dev1-hosted
 # gate: clock-offset-painter-gate.sh, the recording-verdict wall references, every date-stamped gate
 # window), yet it is NOT a probed cam/obs node -- so on 14.9.2026 it silently sat NTP-only for ~a day
@@ -169,7 +177,7 @@ log() { printf '%s [dantesync-clock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:
 
 # -- roster: NAME|IP|HOMEGATE[|ROLE] lines -------------------------------------------------------
 # HOMEGATE ∈ always (cams: probe unconditionally; an OFF box -> UNREACHABLE -> SKIP) |
-# obsfleet (obs_fleet_is_home decides -- always-true for strih-lx/stream, false for a retired box, the traveling gate for
+# obsfleet (obs_fleet_is_home decides -- always-true for strih-snv/stream, false for a retired box, the traveling gate for
 # resolume) | local (#1313: dev1 itself -- loopback :8898, NO ssh/TCP reach probe, box up by
 # definition so a dead :8898 is NO_DANTESYNC not SKIP) | fixed (issue 1372: an always-home
 # non-camera node -- mbc/fohabl; box-up = ssh :22, no ssh-banner management axis). ROLE (issue
@@ -209,6 +217,15 @@ build_roster() {
     host="$(dantesync_fleet_field "$n" addr 2>/dev/null || true)"
     if [ -n "$host" ]; then
       printf '%s|%s|fixed|%s\n' "$n" "$host" "$(_roster_role "$n")"
+    else
+      log "roster: dantesync_fleet_field failed for '$n' -- skipping (check dantesync-fleet.sh)"
+    fi
+  done
+  # issue 1412: the reach-gated nodes (the PP boxes) -- address + role from the dantesync fleet.
+  for n in $DANTE_CLOCK_REACH_NODES; do
+    host="$(dantesync_fleet_field "$n" addr 2>/dev/null || true)"
+    if [ -n "$host" ]; then
+      printf '%s|%s|reach|%s\n' "$n" "$host" "$(_roster_role "$n")"
     else
       log "roster: dantesync_fleet_field failed for '$n' -- skipping (check dantesync-fleet.sh)"
     fi
@@ -370,6 +387,10 @@ handle_node() {
     log "$name away (obs_fleet_is_home false) -- traveling box, skipping this pass (no fetch, no page)"
     return 0
   fi
+  if [ "$homegate" = "reach" ] && ! dantesync_fleet_present "$name"; then
+    log "$name away (unreachable: ssh :$DANTESYNC_FLEET_REACH_PORT did not answer) -- reach-gated box, skipping this pass (no fetch, no page)"
+    return 0
+  fi
 
   local -a extra=()
   # #1313: the local node (dev1) grades with analyze_local -- box up by definition (dead :8898 ->
@@ -454,9 +475,12 @@ handle_node() {
   confirm_then_alert "mgmt_${name}" 0 "dante-clock-${name}-mgmt"   # #1309
   local steps_note=""
   [ -n "$steps" ] && [ "$steps" != "null" ] && steps_note=", ${steps} NTP krokov/h"
-  # issue 1372: an audio-VLAN node locks to the audio grandmaster, never video-clock.lan.
-  local fix_txt="Náprava: over grandmaster (DNS video-clock.lan / DHCP), dantesync na boxe, gm_allowlist."
+  # issue 1372: an audio-VLAN node locks to the audio grandmaster, never video-clock.lan; issue 1412:
+  # a venue node (the PP boxes) to its venue's grandmaster.
+  local fix_txt="Náprava: over grandmaster (DNS video-clock.lan / DHCP), dantesync na boxe, gm_allowlist." venue
   [ "$role" = "audio" ] && fix_txt="Náprava: over audio grandmaster na audio VLAN (${DANTESYNC_AUDIO_GM_HOST}, Audinate), dantesync na boxe, gm_allowlist."
+  venue="$(dantesync_fleet_role_venue "$role" 2>/dev/null || true)"
+  [ -n "$venue" ] && fix_txt="Náprava: over PTP grandmaster miesta ${venue} (${gm:-<neznámy>}), dantesync na boxe, gm_allowlist."
   confirm_then_alert "node_${name}" 1 "dante-clock-${name}" \
     "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) STRATIL dante clock -- dôvod **${reason}**${steps_note}.${vnote_txt} Uzol nie je PTP-zosynchronizovaný na rig grandmaster (${gm:-<neznámy>}); pri produkcii to potichu rozhodí A/V aj genlock celej fleet. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. ${fix_txt}"
 }
@@ -524,7 +548,7 @@ require_tools() {
 }
 
 main() {
-  log "pass start (dry_run=$DRY_RUN, confirm=$CONFIRM_THRESHOLD, reping=${REPING_INTERVAL_S}s, local='$DANTE_CLOCK_LOCAL_NODES', cams='$DANTE_CLOCK_CAM_NODES', obs='$DANTE_CLOCK_OBS_NODES', fixed='$DANTE_CLOCK_FIXED_NODES')"
+  log "pass start (dry_run=$DRY_RUN, confirm=$CONFIRM_THRESHOLD, reping=${REPING_INTERVAL_S}s, local='$DANTE_CLOCK_LOCAL_NODES', cams='$DANTE_CLOCK_CAM_NODES', obs='$DANTE_CLOCK_OBS_NODES', fixed='$DANTE_CLOCK_FIXED_NODES', reach='$DANTE_CLOCK_REACH_NODES')"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
   # Resolve the grandmaster ONCE per pass (the DNS name video-clock.lan -> its IPv4, #1307).
@@ -557,6 +581,9 @@ main() {
     log "audio-VLAN grandmaster UNRESOLVABLE ($DANTESYNC_AUDIO_GM_HOST) -- audio nodes graded without the gm check this pass"
   fi
 
+  # issue 1412: a venue grandmaster (the PP nodes' reference) -- resolved once per role per pass, the
+  # same never-a-false-wrong_gm rule when it does not resolve.
+  local -A venue_gm=()
   local triple name ip homegate role node_gm
   while IFS= read -r triple; do
     [ -n "$triple" ] || continue
@@ -564,6 +591,13 @@ main() {
     role="${role:-video}"
     node_gm="$gm"
     [ "$role" = "audio" ] && node_gm="$audio_gm"
+    if dantesync_fleet_role_venue "$role" >/dev/null 2>&1; then
+      if [ -z "${venue_gm[$role]+x}" ]; then
+        venue_gm[$role]="$(dantesync_fleet_role_gm_ip "$role" 2>/dev/null || true)"
+        log "role $role grandmaster: ${venue_gm[$role]:-UNRESOLVABLE -- its nodes graded without the gm check this pass}"
+      fi
+      node_gm="${venue_gm[$role]}"
+    fi
     handle_node "$name" "$ip" "$homegate" "$node_gm" "$vpin" "$role"
   done < <(build_roster)
   log "pass end"

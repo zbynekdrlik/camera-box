@@ -1,0 +1,8 @@
+Oct 12 16:50:01 strih-snv kernel: Linux version 7.0.0-38-generic (buildd@lcy02-amd64-031) (x86_64-linux-gnu-gcc-14) #38-Ubuntu SMP PREEMPT_DYNAMIC
+Oct 12 16:50:01 strih-snv kernel: Command line: BOOT_IMAGE=/boot/vmlinuz-7.0.0-38-generic root=UUID=0b6e1f8c ro quiet splash preempt=full
+Oct 12 16:50:08 strih-snv kernel: nvidia: loading out-of-tree module taints kernel.
+Oct 12 16:50:09 strih-snv kernel: [drm] Initialized amdgpu 3.64.0 for 0000:64:00.0 on minor 1
+Oct 12 16:50:10 strih-snv kernel: [drm] [nvidia-drm] [GPU ID 0x00000100] Loading driver
+Oct 12 16:50:14 strih-snv kernel: Bluetooth: hci0: RTL: loading rtl_bt/rtl8852bu_fw.bin
+Oct 12 16:50:14 strih-snv kernel: Bluetooth: hci0: Opcode 0xfcf0 failed: -16
+Oct 12 16:50:22 strih-snv kernel: r8152 2-1:1.0 enx6c1ff7661cb2: carrier on

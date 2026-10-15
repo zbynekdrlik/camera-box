@@ -331,7 +331,21 @@ def test_sh_cam2_program_builder_is_pure_and_shaped():
     assert "use_wallclock_as_timestamps" in prog
     assert "trap" in prog  # the always-restore trap
     assert "systemctl restart camera-box" in prog
-    assert "-f nut -" in prog  # the capture STREAMS to stdout (dev1 reads the ssh pipe)
+    assert "-f nut -" in prog  # the capture is NUT; dev1 reads it from the ssh pipe
+
+
+def test_sh_grab_lands_in_ram_before_the_ssh_pipe_carries_it_1424():
+    # issue 1424 (14.10.2026): streaming the NUT over ssh WHILE grabbing let a slow link
+    # (the PP LAN through the companion-pp router) back-pressure ffmpeg -- 480 frames took
+    # 18.6 s, the wallclock stamps were late, the median read 779 ms. The grab writes into the
+    # box's RAM (/dev/shm) and only then is cat to stdout; the trap removes the file.
+    out = _source_and_run('drm_latency_cam2_program /dev/video0 mjpeg 1920x1080 60 8 VEST')
+    assert out.returncode == 0, out.stderr
+    prog = out.stdout
+    assert "_drm_cap=/dev/shm/drm-lat-VEST.nut" in prog
+    grab = prog.index('-f nut -y "$_drm_cap"')
+    assert grab < prog.index('cat "$_drm_cap"'), "the transfer starts only after the grab"
+    assert 'rm -f "$_drm_cap"' in prog, "the RAM capture is removed on every exit"
 
 
 def test_sh_grab_is_frame_bounded_never_duration_bounded():

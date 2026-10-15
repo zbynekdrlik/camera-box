@@ -1,0 +1,42 @@
+# stream-pp intercom hub routing (issue 1412, the Poprad rework of 11.10.2026) -- PROGRAM-ONLY.
+# The Linux stream box takes the program audio as the VBAN stream `stream` from lv1 (owner
+# ROZHODNUTE 11.10.2026, replacing the earlier resolume-pp + resampler plan); the hub writes it to
+# the `strih-program` PipeWire sink, which OBS captures as its program audio input (`Zvuk z mixu`).
+# Loaded through the daemon's own Matrix::from_toml by intercom/hub/tests/deployed_matrix_pp_1412.rs.
+
+[hub]
+bind = "0.0.0.0:8790"
+vban_bind = "0.0.0.0:6980"
+sample_rate = 48000
+block_frames = 256
+
+[[participant]]
+name = "lv1"
+role = "program_ref"
+adapter = "vban"
+host = "lv1.lan"
+in_stream = "stream"
+in_channels = 2
+out_channels = 0
+
+[[participant]]
+name = "program_out"
+role = "program_out"
+adapter = "pipewire"
+pipewire_target = "strih-program"
+source_streams = ["stream"]
+in_channels = 0
+out_channels = 2
+
+# The program mix is summed through these points (source_streams only names the streams).
+[[point]]
+src = "lv1"
+in_ch = 1
+dst = "program_out"
+out_ch = 1
+
+[[point]]
+src = "lv1"
+in_ch = 2
+dst = "program_out"
+out_ch = 2

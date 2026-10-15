@@ -43,6 +43,15 @@ OBS_PHASE2_PY="${OBS_PHASE2_PY:-$HERE/obs_phase2.py}"
 MAX_ITERATIONS="${RIG_BUSY_GATE_ITERATIONS:-30}"
 SLEEP_SECS="${RIG_BUSY_GATE_SLEEP_SECS:-60}"
 STRAY_HEAL_THRESHOLD="${STRAY_HEAL_THRESHOLD:-3}"
+# issue 1404 rig race (14.10.2026): one idle read is not a free rig. restreamer's YouTube disconnect
+# test republishes stream OBS with a deliberate gap (up to ~45 s), and run 38520662080 was admitted
+# on a read inside a 10 s gap. A run is admitted only after strih + stream read idle CONTINUOUSLY for
+# IDLE_HOLD_SECS: one read every IDLE_STEP_SECS of the hold (IDLE_POLL_SECS apart; it follows
+# SLEEP_SECS down to 0 so the offline tests stay instant). The hold runs WITHOUT the rig lease, and
+# the lease is never held while a box streams, so a foreign stream run is never failed by our lease.
+IDLE_HOLD_SECS="${RIG_BUSY_GATE_IDLE_HOLD_SECS:-60}"
+IDLE_STEP_SECS=5
+IDLE_POLL_SECS="${RIG_BUSY_GATE_IDLE_POLL_SECS:-$((SLEEP_SECS < IDLE_STEP_SECS ? SLEEP_SECS : IDLE_STEP_SECS))}"
 
 # Always echo the outcome to stdout (so it shows in the plain job log, and is asserted by the
 # harness tests) AND append it to GITHUB_STEP_SUMMARY when running under GitHub Actions.
@@ -188,30 +197,71 @@ self_heal_stray_box() {
   fi
 }
 
-LAST_OUTPUT=""
-for ((i = 1; i <= MAX_ITERATIONS; i++)); do
-  echo "[rig-busy-gate] check ${i}/${MAX_ITERATIONS} — querying strih ($STRIH_HOST) + stream ($STREAM_HOST) OBS WebSocket..."
+# rig_busy_read -> one rig-busy-check over strih + stream: sets OUTPUT, LAST_OUTPUT and BUSY
+# (True / False); an unreachable rig ends the gate here (exit 43, unchanged).
+rig_busy_read() {
+  local rc
   set +e
   OUTPUT=$(python3 "$OBS_PHASE2_PY" rig-busy-check \
     --strih-host "$STRIH_HOST" --stream-host "$STREAM_HOST" \
     --password "$OBS_PASSWORD" 2>&1)
-  RC=$?
+  rc=$?
   set -e
   echo "[rig-busy-gate] $OUTPUT"
   LAST_OUTPUT="$OUTPUT"
 
-  if [ "$RC" -eq 3 ]; then
+  if [ "$rc" -eq 3 ]; then
     echo "::error title=RIG UNREACHABLE - gate not run::obs_phase2.py rig-busy-check could not reach strih and/or stream OBS WebSocket: $OUTPUT"
     report_outcome "OUTCOME=RIG_UNREACHABLE"
     exit 43
   fi
-  if [ "$RC" -ne 0 ]; then
-    echo "::error title=RIG UNREACHABLE - gate not run::obs_phase2.py rig-busy-check exited unexpectedly ($RC): $OUTPUT"
+  if [ "$rc" -ne 0 ]; then
+    echo "::error title=RIG UNREACHABLE - gate not run::obs_phase2.py rig-busy-check exited unexpectedly ($rc): $OUTPUT"
     report_outcome "OUTCOME=RIG_UNREACHABLE"
     exit 43
   fi
-
   BUSY=$(printf '%s' "$OUTPUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["busy"])')
+}
+
+# rig_busy_any_streaming -> 0 iff the last read names a box that is STREAMING (a broadcast, ours never).
+rig_busy_any_streaming() {
+  [ "$(printf '%s' "$OUTPUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("yes" if any(x.get("streaming") for x in d.get("diagnostics", [])) else "")' 2>/dev/null || true)" = yes ]
+}
+
+# rig_busy_idle_hold -> 0 iff every read over the next IDLE_HOLD_SECS is idle (issue 1404). Runs
+# with our lease released; returns 1 at the first busy read, with OUTPUT/BUSY holding that read.
+rig_busy_idle_hold() {
+  local n reads=$(((IDLE_HOLD_SECS + IDLE_STEP_SECS - 1) / IDLE_STEP_SECS))
+  echo "[rig-busy-gate] idle read -- confirming the rig stays idle for ${IDLE_HOLD_SECS} s (${reads} reads, issue 1404: a stream republish gap is not a free rig); the lease is not held meanwhile"
+  for ((n = 1; n <= reads; n++)); do
+    sleep "$IDLE_POLL_SECS"
+    rig_busy_read
+    if [ "$BUSY" != "False" ]; then
+      echo "[rig-busy-gate] the rig went busy again after $((n * IDLE_STEP_SECS)) s of the idle hold -- not a free rig"
+      return 1
+    fi
+  done
+  return 0
+}
+
+LAST_OUTPUT=""
+LEASE_HELD=1   # rig_lease_acquire_or_wait above returned with the lease held
+for ((i = 1; i <= MAX_ITERATIONS; i++)); do
+  echo "[rig-busy-gate] check ${i}/${MAX_ITERATIONS} — querying strih ($STRIH_HOST) + stream ($STREAM_HOST) OBS WebSocket..."
+  rig_busy_read
+
+  if [ "$BUSY" = "False" ]; then
+    if [ "$LEASE_HELD" -eq 1 ]; then
+      rig_lease_release "$RIG_LEASE_RUN_ID"
+      LEASE_HELD=0
+    fi
+    if rig_busy_idle_hold; then
+      rig_lease_acquire_or_wait
+      LEASE_HELD=1
+      echo "[rig-busy-gate] idle for the whole hold -- final read under the lease"
+      rig_busy_read
+    fi
+  fi
   if [ "$BUSY" = "False" ]; then
     echo "[rig-busy-gate] rig is free — proceeding."
     # #830: this gate keeps the lease HELD across the exit — the recording step that follows in
@@ -231,7 +281,21 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
   # the default budgets -- MAX_ITERATIONS*SLEEP_SECS <= RIG_LEASE_STALE_SECS -- but cheap and
   # correct regardless of overrides). issue 1383: through the one holder keep-alive, which never
   # bumps a foreign holder's heartbeat and rolls the declared release time while we wait.
-  rig_lease_refresh_if_mine "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID" >/dev/null || true
+  # issue 1404: never hold the lease while a box STREAMS (a foreign broadcast in progress, e.g.
+  # restreamer's YouTube run, whose own restart refuses a held lease); it is taken again only after
+  # the idle hold. A stray recording alone keeps it: the #657 self-heal below mutates the rig.
+  if rig_busy_any_streaming; then
+    if [ "$LEASE_HELD" -eq 1 ]; then
+      echo "[rig-busy-gate] a box is streaming -- releasing our rig lease while we wait (issue 1404)"
+      rig_lease_release "$RIG_LEASE_RUN_ID"
+      LEASE_HELD=0
+    fi
+  elif [ "$LEASE_HELD" -eq 1 ]; then
+    rig_lease_refresh_if_mine "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID" >/dev/null || true
+  else
+    rig_lease_acquire_or_wait
+    LEASE_HELD=1
+  fi
 
   # #649 item 3: surface obs_phase2.py's plain-English diagnostic hint (per-box streaming vs
   # recording state -> stray-test-recording-vs-real-broadcast) as its OWN log line, not just

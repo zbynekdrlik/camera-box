@@ -102,13 +102,21 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # rolls to it with this pin (dantesync-fleet-upgrade.sh --target); until then the gate names every 1.11.1 node.
 # Bumped 2026-09-29: fleet rolled to v1.13.0 (dantesync PR 124, issue 112 -- a node that stops hearing
 # PTP re-joins the multicast on its own after 10 s instead of needing a service restart, and /status
-# reports NTP-only + is_locked=false while PTP is stale instead of a frozen LOCK; the strih-lx USB NIC
+# reports NTP-only + is_locked=false while PTP is stale instead of a frozen LOCK; the strih-snv USB NIC
 # replugs of 29.9 left the fleet date master on NTP until a restart stepped the whole fleet).
 # Bumped 2026-09-29: fleet rolled to v1.14.0 (dantesync PR 125 -- a grandmaster FREQUENCY step, e.g. a
 # Dante leader re-election (~25 ppm), is detected and fed forward into the phase-lock integrator: the
 # learned frequency settles in <= ~22 s instead of the ~8-12 min PI slew that pulled every OBS media
 # clock off the Dante tick for minutes, camera-box issue 1372).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.14.0}"
+# Bumped 2026-10-01: fleet rolled to v1.15.0 (dantesync PR 127, dantesync issue 126 -- the date master
+# persists its fleet date offset D in date-offset.json and restores it on a restart, and a follower
+# whose master goes silent HOLDS D (date_authority "holding") instead of falling back to its own NTP:
+# a master restart no longer steps the fleet date. Rolled 1.10.2026 02:05-02:25Z after the nightly step,
+# followers first then the strih-snv master; a verification restart of the master stepped no follower).
+# Bumped 2026-10-07: v1.16.0 (dantesync PR 128, a991f13 -- the daily-mode nightly date step is rounded
+# to a 200 ms quantum (`date_daily_step_quantum_ms`), a whole number of frames at 25/30/50/60 fps, so
+# the 02:00 UTC step no longer shifts any genlock grid's phase; camera-box issue 1372 part A).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.18.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
@@ -366,7 +374,7 @@ read_dantesync_version_output() {
     cmd="dantesync --version"
   fi
   sshpass -p "$(_dv_ssh_pass "$target" "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}")" ssh \
-    -o StrictHostKeyChecking=no -o BatchMode=no \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=no \
     -o "ConnectTimeout=${DANTESYNC_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" \
     "$cmd" 2>/dev/null || true
@@ -391,7 +399,7 @@ read_dantesync_tray_sha() {
   [ -n "$target" ] || { printf ''; return 0; }
   _dv_cred_missing "$target" && { printf ''; return 0; }
   out="$(sshpass -p "$(_dv_ssh_pass "$target" "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}")" ssh \
-    -o StrictHostKeyChecking=no -o BatchMode=no \
+    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=no \
     -o "ConnectTimeout=${DANTESYNC_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" \
     "certutil -hashfile \"${DANTESYNC_TRAY_GATE_WIN_EXE}\" SHA256" 2>/dev/null || true)"
@@ -501,6 +509,16 @@ main() {
       dantesync_fleet_present "$fname" \
         || echo "  $fname SKIPPED (traveling box away -- obs_fleet_is_home false; it is gated when home)"
     done
+    # issue 1412: a `reach` node (the PP boxes) is read only while its ssh port answers. The --present
+    # spec above already probed it, so a node absent from both arms is the unreachable one (no 2nd probe).
+    named=" "
+    for fpair in "${linux_pairs[@]}" "${win_pairs[@]}"; do
+      named="${named}${fpair%%=*} "
+    done
+    for fname in $(dantesync_fleet_names homegate=reach); do
+      case "$named" in *" $fname "*) continue ;; esac
+      echo "  $fname SKIPPED (unreachable -- ssh :$DANTESYNC_FLEET_REACH_PORT did not answer; it is gated when reachable)"
+    done
   fi
 
   if [ "${#linux_pairs[@]}" -eq 0 ] && [ "${#local_names[@]}" -eq 0 ] && [ "${#win_pairs[@]}" -eq 0 ]; then
@@ -569,6 +587,39 @@ main() {
     32) echo "!! DANTESYNC-PIN-LAG ALARM: pin ${pin} is behind the newest published release ${newest} -- roll the fleet + bump DANTESYNC_VERSION_PIN (report-only, does NOT block this run)." >&2 ;;
     33) echo "!! DANTESYNC-PIN-LAG ALARM: could not resolve the newest dantesync gh release to check pin lag (report-only)." >&2 ;;
   esac
+
+  # issue 1372 (owner 13.10.2026: the SNV IEM PC ran dantesync outside the fleet table, unseen) --
+  # REPORT-ONLY: every :8898 node of the declared rig nets whose address is not a fleet target.
+  if [ "$fleet" = 1 ]; then
+    echo
+    echo "-- dantesync nodes outside the fleet table (report-only, ALARM never blocks) --"
+    local -a known=() scan_cmd=()
+    local kpair khost kip uline uip uname
+    # every fleet row's address (also a node skipped this run: an away `reach` box is still a fleet node)
+    # plus every explicitly named target
+    for kpair in "${linux_pairs[@]}" "${win_pairs[@]}" \
+      $({ dantesync_fleet_rows 2>/dev/null || true; } | awk -F'|' '$2 != "local" {print "x=" $2}'); do
+      khost="${kpair#*=}"
+      khost="${khost#*@}"
+      known+=("$khost")
+      for kip in $(getent ahostsv4 "$khost" 2>/dev/null | awk '{print $1}' | sort -u); do known+=("$kip"); done
+    done
+    for kip in $(hostname -I 2>/dev/null); do known+=("$kip"); done
+    if [ -n "${DANTESYNC_FLEET_SCAN_CMD:-}" ]; then
+      scan_cmd=("$DANTESYNC_FLEET_SCAN_CMD")
+    else
+      scan_cmd=(python3 "${HERE}/dantesync_fleet_scan.py")
+    fi
+    local uout found=0
+    uout="$(timeout 180 "${scan_cmd[@]}" --nets "$DANTESYNC_FLEET_SCAN_NETS" --known "${known[@]}" 2>/dev/null || true)"
+    while read -r uline uip uname; do
+      [ "$uline" = UNKNOWN ] || continue
+      found=1
+      printf '  %-15s %-28s OUTSIDE-FLEET  (dantesync answers :8898; add a row to scripts/lib/dantesync-fleet.sh)\n' "$uip" "$uname"
+      echo "!! DANTESYNC-FLEET ALARM: ${uip} (${uname}) runs dantesync but is NOT in the fleet table -- no roll, gate or watchdog reaches it (report-only, does NOT block this run)." >&2
+    done <<<"$uout"
+    [ "$found" = 1 ] || echo "  none           OK  (every dantesync node on ${DANTESYNC_FLEET_SCAN_NETS} is a fleet node)"
+  fi
 
   exit "$rc"
 }

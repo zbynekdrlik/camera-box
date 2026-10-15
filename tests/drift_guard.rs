@@ -16,6 +16,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -118,10 +122,11 @@ const OBS_LOG_FIXTURE: &str = "\
 11:37:09.027: [distroav] plugin loaded (full NDI features) (version 6.2.1)
 ";
 
-fn write_temp(name: &str, body: &str) -> PathBuf {
-    let p = std::env::temp_dir().join(format!("{name}_{}.md", std::process::id()));
-    std::fs::write(&p, body).expect("write temp file");
-    p
+fn write_temp(name: &str, body: &str) -> TempPath {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(format!("{name}.md"));
+    std::fs::write(&path, body).expect("write temp file");
+    TempPath { path, _dir: dir }
 }
 
 #[test]
@@ -325,7 +330,8 @@ fn genlock_parser_reads_running_state_from_log() {
     for i in 0..5000 {
         big.push_str(&format!("11:40:40.{i:04}: filler log line {i}\n"));
     }
-    let logfile = std::env::temp_dir().join(format!("dg_biglog_{}.txt", std::process::id()));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let logfile = tmp.path().join("dg_biglog.txt");
     std::fs::write(&logfile, &big).expect("write big log");
     let out = run_sourced(
         "genlock_from_log \"$(cat \"$LOGFILE\")\"",
@@ -434,8 +440,8 @@ fn real_manifest_pins_output_fps_per_box_strih_30_stream_30_459() {
 fn check_pins_flags_manifest_vs_vendored_source_drift() {
     // A manifest that pins a DistroAV version the vendored source does not carry is drift the
     // guard must catch in CI (subtree pulled but table left stale, or vice versa).
-    let dir = std::env::temp_dir().join(format!("dg_xcheck_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     std::fs::create_dir_all(dir.join("distroav")).unwrap();
     let readme = dir.join("README.md");
     std::fs::write(
@@ -465,7 +471,6 @@ fn check_pins_flags_manifest_vs_vendored_source_drift() {
 
     let (code, stdout, stderr) =
         run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
-    let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(
         code, 20,
@@ -484,9 +489,8 @@ fn check_pins_fails_loudly_on_incomplete_manifest() {
     // 1 — never a silent opaque abort. This guards the `|| true` in the parsers: without it, the
     // no-match `grep|sed|head` trips `set -e` in main()'s command substitution and the script dies
     // before check_pins can report which pin is missing.
-    let dir = std::env::temp_dir().join(format!("dg_incomplete_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let readme = dir.join("README.md");
     std::fs::write(
         &readme,
@@ -503,7 +507,6 @@ fn check_pins_fails_loudly_on_incomplete_manifest() {
 
     let (code, stdout, stderr) =
         run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
-    let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(
         code, 1,
@@ -526,8 +529,8 @@ fn check_pins_flags_source_latency_range_pin_that_disagrees_with_the_code_clamp(
     // GENLOCK_LATENCY_MS_MIN/_MAX constants in drift-guard.sh are two independent copies (markdown
     // vs bash) — a manifest typo (here `range:3-200`, missing a zero) must NOT silently narrow the
     // sane backstop. check-pins must catch the disagreement loudly, exit 1, and name both values.
-    let dir = std::env::temp_dir().join(format!("dg_range_mismatch_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     std::fs::create_dir_all(dir.join("distroav")).unwrap();
     let readme = dir.join("README.md");
     std::fs::write(
@@ -557,7 +560,6 @@ fn check_pins_flags_source_latency_range_pin_that_disagrees_with_the_code_clamp(
 
     let (code, stdout, stderr) =
         run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
-    let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(
         code, 1,
@@ -579,8 +581,8 @@ fn check_pins_fails_loudly_on_a_missing_imag_pin_463() {
     // offline), so a malformed/blank imag pin would only ever surface via a LIVE --check-imag
     // SSH run against imag-nb, never caught by CI. Manifest here has every OTHER required pin
     // but omits `genlock_latency_ms_imag` entirely.
-    let dir = std::env::temp_dir().join(format!("dg_missing_imag_pin_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     std::fs::create_dir_all(dir.join("distroav")).unwrap();
     let readme = dir.join("README.md");
     std::fs::write(
@@ -609,7 +611,6 @@ fn check_pins_fails_loudly_on_a_missing_imag_pin_463() {
 
     let (code, stdout, stderr) =
         run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
-    let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(
         code, 1,
@@ -629,8 +630,8 @@ fn check_pins_fails_loudly_on_a_missing_dantesync_locked_pin_489() {
     // -- deliberately wired into this offline --check-pins gate, mirroring #463's own precedent
     // for those two sibling pins. Manifest here has every OTHER required pin but omits
     // `dantesync_locked_imag` entirely.
-    let dir = std::env::temp_dir().join(format!("dg_missing_dantesync_pin_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     std::fs::create_dir_all(dir.join("distroav")).unwrap();
     let readme = dir.join("README.md");
     std::fs::write(
@@ -660,7 +661,6 @@ fn check_pins_fails_loudly_on_a_missing_dantesync_locked_pin_489() {
 
     let (code, stdout, stderr) =
         run_script(&["--check-pins", "--readme", readme.to_str().unwrap()]);
-    let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(
         code, 1,
@@ -5089,8 +5089,8 @@ fn dantesync_locked_from_log_survives_a_large_journal_without_sigpipe_489() {
             "Jul 05 09:58:{i:04}: imag-nb dantesync[1234]: filler heartbeat line {i}\n"
         ));
     }
-    let logfile =
-        std::env::temp_dir().join(format!("dg_dantesync_biglog_{}.txt", std::process::id()));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let logfile = tmp.path().join("dg_dantesync_biglog.txt");
     std::fs::write(&logfile, &big).expect("write big log");
     let out = run_sourced(
         "dantesync_locked_from_log \"$(cat \"$LOGFILE\")\"",

@@ -21,7 +21,7 @@
 # newline-strip gotcha of a `$(...)`-embedded helper (CLAUDE.md) cannot glue it to anything; the
 # single-statement lines still end with `;`.
 #
-# Needs scripts/lib/mv-reverify-escalate.sh (the strih-lx restart) sourced by the caller.
+# Needs scripts/lib/mv-reverify-escalate.sh (the strih-snv restart) sourced by the caller.
 
 # The restart kinds, in run order (the same four as av_restart_matrix_decision.KINDS).
 AV_MATRIX_KINDS_ALL="strih-obs cambox dantesync stream-obs"
@@ -44,7 +44,7 @@ av_matrix_default_cambox() {
 }
 
 # av_matrix_restart_remote_cmd KIND -> the REMOTE bash text that restarts ONE service and says so.
-#   strih-obs  -- the strih-lx `strih-obs.service` --user unit, through the ONE existing headless
+#   strih-obs  -- the strih-snv `strih-obs.service` --user unit, through the ONE existing headless
 #                 restart (mv_reverify_obs_restart_linux_cmd, scripts/lib/mv-reverify-escalate.sh:
 #                 unit-installed guard, reset-failed, a BLOCKING restart so the old OBS is gone
 #                 before the health read; markers MV_REVERIFY_OBS_RESTART / _NO_UNIT / _FAILED).
@@ -67,7 +67,7 @@ av_matrix_restart_remote_cmd() {
 
 # av_matrix_restart_outcome KIND OUTPUT -> ok | not_performed | failed. A restart is `ok` only on
 # its POSITIVE marker (an ssh/auth/timeout failure prints none and is `not_performed`, never a
-# performed restart); the strih-lx unit missing is `not_performed` (nothing would relaunch OBS, so
+# performed restart); the strih-snv unit missing is `not_performed` (nothing would relaunch OBS, so
 # it was never touched); the unit's own restart job failing is `failed`.
 av_matrix_restart_outcome() {
   local kind="$1" out="${2:-}"

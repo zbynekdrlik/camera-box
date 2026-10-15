@@ -483,6 +483,15 @@ pub fn classify_av_audio_state(
     }
 }
 
+/// issue 1413 (14.10.2026): is `camera` under A/V test this run? A camera with no window in the
+/// run's switch schedule (`scheduled` = the windows' cambox names, any case) was never under test:
+/// it moved to another venue or left `CAMERA_ACTIVE_SET`, so it is reported EXCLUDED, never judged
+/// fail-closed on samples it could never produce. cam2 pools the whole recording, so it is always
+/// under test. A SCHEDULED camera with no samples still fails closed.
+pub fn av_camera_under_test(camera: &str, scheduled: &[String]) -> bool {
+    camera == "cam2" || scheduled.iter().any(|s| s.eq_ignore_ascii_case(camera))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,6 +536,24 @@ mod tests {
         assert_eq!(
             classify_av_audio_state(6, false, 0).av_audio_silent_flag(),
             None
+        );
+    }
+
+    /// issue 1413 (14.10.2026): the SNV rig shrank to cam2/cam3/cam5, and the release E2E judged the
+    /// four Poprad cameras (no window in the switch schedule, zero samples) as A/V FAILs. A camera
+    /// with no scheduled window was never under test this run; cam2 pools the whole recording.
+    #[test]
+    fn only_scheduled_cameras_and_cam2_are_under_av_test_1413() {
+        let scheduled = vec!["CAM3".to_string(), "cam5".to_string()];
+        assert!(av_camera_under_test("cam2", &scheduled));
+        assert!(av_camera_under_test("cam3", &scheduled));
+        assert!(av_camera_under_test("cam5", &scheduled));
+        for gone in ["cam1", "cam4", "cam6", "cam7"] {
+            assert!(!av_camera_under_test(gone, &scheduled), "{gone}");
+        }
+        assert!(
+            av_camera_under_test("cam2", &[]),
+            "cam2 is judged even with an empty schedule"
         );
     }
 

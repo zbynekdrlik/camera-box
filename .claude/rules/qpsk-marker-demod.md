@@ -37,6 +37,12 @@ marker has the zero nibble == 0 by construction.
   noise, so a high crc_fail rate is expected and can never go >50% on a music mix. The reliability metric is
   the CLUSTER (matched size / mad / offset stability), never the crc_ok/crc_fail ratio (a stronger gate
   correctly LOWERS that ratio by moving false decodes into crc_fail). Don't tune to the ratio.
+- **A raw crc_ok count is not marker presence either, and neither is the self-consistency cluster on
+  tonal audio** (issue 1404). A held in-band chord decodes runs of the SAME index every ~25 ms (up to
+  80 CRC-valid words per 2 s; `cb_consistency_cluster_size` reads such a run as consistent). Any new
+  "is the marker there" consumer must use the program-audio guard's rule: merge same-index re-hits,
+  drop indices that repeat inside a span shorter than one wrap (256/60 s), then a 60/s ±2 timecode
+  chain (`scripts/program_audio.py`, `.claude/rules/program-audio-guard.md`).
 
 ## The scan kernel and the streaming decoder (issue 1381)
 Issue 1381 split the kernel out (`src/qpsk_marker_scan.rs`, `camera-box-marker-scan.hpp`) and made it

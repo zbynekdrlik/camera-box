@@ -1,6 +1,6 @@
 [Unit]
 # dev1-side inter-PC AUDIO rate gate (issue 1372 part C). ONE capture -> grade -> alert pass: a ~60 s
-# tcpdump on strih-lx (the dantesync-disciplined receiver, VBAN magic filter, snaplen 96) streamed
+# tcpdump on strih-snv (the dantesync-disciplined receiver, VBAN magic filter, snaplen 96) streamed
 # back to dev1, every VBAN stream ARRIVING there graded by FRAME COUNTER (rate vs nominal +-N ppm,
 # loss vs a ceiling) by the pure scripts/vban_rate.py. REPORT-ONLY (gates nothing); a confirmed fault
 # is on-air audio, so it re-pings on the production-critical time bucket. SHIPS DISABLED: the

@@ -445,9 +445,9 @@ class TestMcpNameForHost:
         assert phase_sync_calibrate.mcp_name_for_host("10.77.9.204") == "win-stream-snv"
 
     def test_strih_host_resolves_to_linux_strih_lx_1317(self):
-        # issue 1317 part 4: 10.77.9.202 is the Linux strih-lx since the M4 cut-over (the Windows
-        # strih PC is retired) -- its MCP is linux-strih-lx, never the retired win-strih.
-        assert phase_sync_calibrate.mcp_name_for_host("10.77.9.202") == "linux-strih-lx"
+        # issue 1317 part 4: 10.77.9.202 is the Linux strih-snv since the M4 cut-over (the Windows
+        # strih PC is retired) -- its MCP is linux-strih-snv, never the retired win-strih.
+        assert phase_sync_calibrate.mcp_name_for_host("10.77.9.202") == "linux-strih-snv"
 
     def test_unknown_host_returns_none(self):
         assert phase_sync_calibrate.mcp_name_for_host("10.0.0.99") is None
@@ -468,12 +468,12 @@ class TestRemotePushPlan:
 
     def test_plan_for_the_linux_strih_names_the_linux_destination_1317(self):
         # issue 1317 part 4: the destination follows the host's obs-fleet CLASS -- a linux-genlock
-        # box (strih-lx) gets the ~/.camera-box path its own default_last_json_path() uses when the
-        # script runs ON it, and the linux-strih-lx MCP; never the Windows ProgramData path.
+        # box (strih-snv) gets the ~/.camera-box path its own default_last_json_path() uses when the
+        # script runs ON it, and the linux-strih-snv MCP; never the Windows ProgramData path.
         payload = {"cameras": [], "ts": 1.0}
         plan = phase_sync_calibrate.remote_push_plan("10.77.9.202", payload)
         assert "/home/newlevel/.camera-box/phase-sync-last.json" in plan
-        assert "linux-strih-lx" in plan
+        assert "linux-strih-snv" in plan
         assert "ProgramData" not in plan and "win-strih" not in plan
 
     def test_plan_includes_the_exact_json_content(self):
@@ -615,9 +615,9 @@ class TestCLI:
         phase_sync_calibrate.main()
         out = capsys.readouterr().out
         assert "REMOTE PUSH REQUIRED" in out
-        # issue 1317 part 4: --host 10.77.9.202 is the Linux strih-lx -> the Linux destination.
+        # issue 1317 part 4: --host 10.77.9.202 is the Linux strih-snv -> the Linux destination.
         assert "/home/newlevel/.camera-box/phase-sync-last.json" in out
-        assert "linux-strih-lx" in out and "win-strih" not in out
+        assert "linux-strih-snv" in out and "win-strih" not in out
 
     def test_printed_plan_json_matches_what_was_actually_persisted(
         self, monkeypatch, tmp_path, capsys,
@@ -688,16 +688,9 @@ class TestActiveNdiSources:
         # owner directive "kamery od 1-7 bezia" after a physical cable reseat): cam4 (#947) and
         # cam5 (DEAD_PORT) both rejoin -- default mirrors camera-set.sh's CAMERA_ACTIVE_SET =
         # "cam1 cam2 cam3 cam4 cam5 cam6 cam7", the full seven-camera fleet.
+        # issue 1413 (2026-10-12): cam1/cam4/cam6/cam7 moved to Poprad, the SNV default is cam2 cam3 cam5.
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert phase_sync_calibrate.active_ndi_sources() == {
-            "NDI cam1",
-            "NDI cam2",
-            "NDI cam3",
-            "NDI cam4",
-            "NDI cam5",
-            "NDI cam6",
-            "NDI cam7",
-        }
+        assert phase_sync_calibrate.active_ndi_sources() == {"NDI cam2", "NDI cam3", "NDI cam5"}
 
     def test_env_override_narrows_and_widens(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam5")

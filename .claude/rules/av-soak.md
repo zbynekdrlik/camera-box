@@ -36,7 +36,7 @@ Every rig action is an existing primitive: the issue-830 lease (own holder name
 `camera-box-av-soak`, expected release = the whole run, so a CI E2E fails fast), the issue-281
 heartbeat, `stray_session_check_assert` (at setup, before the setup mutations, before EVERY
 StartRecord), `obs_phase2.py record/switch/program-scene`, `obs_burn_filter.py
-check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-verdict-on-strih-lx.sh`
+check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-verdict-on-strih-snv.sh`
 + `recording-verdict-on-stream.sh --execute` (parallel, each under `timeout`), `recording-verdict
 --merge-partials`.
 
@@ -110,7 +110,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
 - **A decode is stopped on the box too.** Killing the local `timeout` does not stop a remote
   `recording-verdict`: on a decode timeout, and in cleanup while a decode runs, the soak stops
   THIS run's decode, matched by its own output name `av-soak-<stamp>-s...`
-  (`pkill -f 'recording-verdic[t] --extract-partial strih .*av-soak-<stamp>-s'` on strih-lx --
+  (`pkill -f 'recording-verdic[t] --extract-partial strih .*av-soak-<stamp>-s'` on strih-snv --
   the bracket keeps pkill off its own shell, the issue-626 self-match; a `Win32_Process`
   `CommandLine` match + `Stop-Process -Id` on the stream box, else the next slot's exe upload
   meets a locked file).
@@ -124,7 +124,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   Before every slot a record volume below `RECORDINGS_FREE_MIN_GB` (50) STOPS the run cleanly
   (UNKNOWN, never a false pass).
 - **The slot budget is checked up front:** window + decode + merge + overhead (90 s) must fit the
-  slot; the decode bound defaults to what the slot leaves (880 s for 7 x 20 s in 1200 s -- strih-lx decodes ~8.5 frames/s at idle priority, ROZHODNUTÉ 5861667625), merge 90 s,
+  slot; the decode bound defaults to what the slot leaves (880 s for 7 x 20 s in 1200 s -- strih-snv decodes ~8.5 frames/s at idle priority, ROZHODNUTÉ 5861667625), merge 90 s,
   and a decode bound under 60 s refuses the run (exit 3, the message names the budget that does not
   fit). Every slot writes a `timing.tsv` line -- read it after the 1 h run before trusting the
   budget.
@@ -213,7 +213,7 @@ its own as soon as the CSV covers the first hour; the exit code is the FULL run'
 ## Runbook (SUPERVISOR -- the lane never touches the rig)
 
 Preconditions: rig in TEST mode (`bash scripts/rig-mode.sh test`), no E2E running (the lease is free:
-`curl -s http://10.77.9.103:8890/rig-lease.json` -> `"held": false`), the CI artifacts of the commit
+`curl -s http://dev1:8890/rig-lease.json` -> `"held": false`), the CI artifacts of the commit
 under test, and a 0600 env file `~/.config/camera-box/av-soak.env` with `CAM_PW`, `STREAM_USER`,
 `STREAM_PW`, `STRIH_USER`, `STRIH_PW` (the values recording-e2e.sh uses, targets.md -- never
 committed). `--run` refuses (exit 4) when any of the five is missing.

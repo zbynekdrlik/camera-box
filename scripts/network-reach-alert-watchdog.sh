@@ -29,7 +29,7 @@
 # once when a box we paged for returns.
 #
 # NOTE: the retired Windows strih PC carried an on-box NIC-fail self-heal watcher (issue 1199); it was
-# removed with the PC (issue 1317 part 4). The production strih is the Linux strih-lx, which has no
+# removed with the PC (issue 1317 part 4). The production strih is the Linux strih-snv, which has no
 # on-box self-heal -- this dev1-side alert is the only signal of a strih outage.
 #
 # DEV1-SIDE-OUTAGE GUARD: before deciding, probe a set of REFERENCE rig nodes (cam1/cam2/imag-nb --
@@ -88,8 +88,8 @@ BOXES="${NETWORK_REACH_BOXES:-$(obs_fleet_boxes network-reach)}"
 # explicit env override (tests, or a supervisor forcing a state) wins byte-compatibly AND keeps the
 # offline tests offline (no live probe).
 if [ -z "${NETWORK_REACH_REPORT_ONLY_BOXES+set}" ]; then
-  _nr_report_only_default="resolume"
-  if obs_fleet_is_home resolume; then _nr_report_only_default=""; fi
+  _nr_report_only_default="resolume-snv"
+  if obs_fleet_is_home resolume-snv; then _nr_report_only_default=""; fi
   REPORT_ONLY_BOXES="$_nr_report_only_default"
 else
   REPORT_ONLY_BOXES="$NETWORK_REACH_REPORT_ONLY_BOXES"

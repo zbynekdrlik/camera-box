@@ -97,3 +97,14 @@ recovery one-liner under three names, and the three fetches that only differed b
    state-write hardening (a /dev/full symlink as the temp file reproduces a failed temp write for
    any user, root included) and the errexit fix each landed as a failing test first, then the fix,
    then the move.
+
+## A cambox ssh login is not free: 11 lines in its persistent stick journal (issue 1404)
+
+Measured on cam2 (6.10.2026): one root ssh login writes 11 journal lines (`Accepted password`, the
+pam/logind session open and close, the session scope). The cambox journal is persistent on its USB
+stick (`Storage=persistent`, `SystemMaxUse=200M`, at the cap), so every login pushes forensic
+history out and adds stick writes. Poll a cambox over ssh every few minutes at most (the 5-min
+watchdog cadence). Anything faster holds ONE connection and streams (the rig-marker-mirror pattern,
+`.claude/rules/program-audio-guard.md`). A probe of whether a box is reachable uses ICMP, never a bare
+TCP connect to :22, which logs a pre-auth line too.
+

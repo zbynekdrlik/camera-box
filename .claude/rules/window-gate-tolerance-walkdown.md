@@ -135,6 +135,8 @@ RELAXED verdict applies. It is walked between 0 and 3 as the upstream genlock re
 per-window distribution in the retained verdict JSONs, never from taste. The procedure:
 
 ## 1. Mine the distribution from `/tmp/recording-e2e-*/verdict-*.json`
+(dev1 keeps only the newest 9 run dirs since issue 1395; to mine more, see the
+`scripts/lib/e2e-rundir-retention.sh` header.)
 Per-window `copies`/`gaps`/`undecodable` live in `.all_cambox_continuity.segments[]`. The tolerance
 gates each term INDEPENDENTLY (`copies <= TOL && gaps <= TOL`), so the binding metric is
 `max(maxCopies, maxGaps)` across the run's windows. A useful one-liner:

@@ -1663,7 +1663,7 @@ EXPORT bool obs_source_get_genlock_connected(const obs_source_t *source);
  * — both route through one internal fill (genlock_fill_stats). Additive + versioned: grow it
  * ONLY by appending fields and bumping OBS_GENLOCK_STATS_VERSION; a consumer reads `version`
  * before touching any field added after v1. */
-#define OBS_GENLOCK_STATS_VERSION 3
+#define OBS_GENLOCK_STATS_VERSION 4
 struct obs_genlock_stats {
 	uint32_t version;             /* = OBS_GENLOCK_STATS_VERSION */
 	bool genlock_fifo;            /* this source is genlock-FIFO enabled */
@@ -1698,7 +1698,21 @@ struct obs_genlock_stats {
 	 * a dead/frozen sender is the #1001/#1052 watchdogs' concern. Default true (see genlock_connected
 	 * in obs-source.c) so an old build with the setter unresolved never regresses the decision. */
 	bool connected;
+	/* camera-box issue 1302 — the audio PLACEMENT (added in v4; a consumer reads `version >= 4`
+	 * before touching these). The same values the `genlock-fifo audit` line prints as audio_hold= /
+	 * audio_withheld= / audio_place_err_ms=, through this one fill, so the LOCK widget's per-input
+	 * heartbeat can show whether an input's audio is placed yet (a box-level LOCKED says nothing
+	 * about a freshly attached input whose audio is still withheld). */
+	int audio_hold_mode;          /* the hold last applied: 0 off, 1 latency, 2 timecode, 3 pending (withheld); obs_genlock_audio_hold_token() names it */
+	uint64_t audio_withheld;      /* cumulative audio packets withheld while no video delay was known */
+	int64_t audio_place_err_ms;   /* smoothed placement error of the samples, actual - intended, ms (negative = early); valid only when audio_place_err_seeded */
+	bool audio_place_err_seeded;  /* a placement error has been measured since the hold became active */
 };
+
+/* camera-box issue 1302: the audit token of an obs_genlock_stats.audio_hold_mode ("off", "latency",
+ * "timecode", "pending") -- the ONE token function the `genlock-fifo audit` line uses, so a consumer
+ * never keeps its own copy of the strings. Never NULL; an unknown mode reads "off". */
+EXPORT const char *obs_genlock_audio_hold_token(int mode);
 
 /* Fill `stats` from `source`'s live genlock counters (version-stamped). Returns true for a
  * valid source; false (with `stats` zero-filled, version set) for an invalid handle. Safe

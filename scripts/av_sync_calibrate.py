@@ -102,15 +102,15 @@ AUDIO_OFFSET_CLAMP_MS = 500
 REMOTE_PROGRAMDATA_JSON_PATH = r"C:\ProgramData\camera-box\av-sync-last.json"
 
 # issue 1317 part 4: the Linux destination of the SAME payload -- where default_last_json_path()
-# lands when this script runs ON a Linux OBS box (strih-lx). A linux-genlock host gets this path.
+# lands when this script runs ON a Linux OBS box (strih-snv). A linux-genlock host gets this path.
 REMOTE_LINUX_JSON_PATH = "/home/newlevel/.camera-box/av-sync-last.json"
 
 # Known rig hosts -> their MCP tool name. Only used to make the printed push plan
 # concrete/copy-pasteable; an unrecognized host still gets a usable plan (destination + content),
-# just without a resolved MCP tool name. 10.77.9.202 is the Linux strih-lx (issue 1317 part 4); the
+# just without a resolved MCP tool name. 10.77.9.202 is the Linux strih-snv (issue 1317 part 4); the
 # push DESTINATION follows the host's fleet class (remote_dest_for_host below).
 _KNOWN_MCP_HOSTS = {
-    "10.77.9.202": "linux-strih-lx",
+    "10.77.9.202": "linux-strih-snv",
     "10.77.9.204": "win-stream-snv",
 }
 

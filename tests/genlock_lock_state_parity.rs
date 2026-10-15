@@ -1,6 +1,6 @@
 //! #1298 — an EXECUTABLE C-vs-Rust parity gate for the genlock lock-state decision.
 //!
-//! `src/genlock_lock_state.rs` is the Tier-0 authority and
+//! `src/genlock_lock_state.rs` (its submodules under `src/genlock_lock_state/`) is the Tier-0 authority and
 //! `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is the production port the
 //! OBS statusbar widget actually calls; the two are required to be numerically identical.
 //! A static text anchor (see `tests/genlock_preload.rs`) proves the C still *says* the
@@ -523,7 +523,7 @@ fn c_qpc_drift_beyond_bound_matches_the_rust_authority_1299_part4() {
     // (rate_ready, drift_delta_ms, elapsed_ms, max_step_ms, step_bound_ms) — #1357 scope C: the
     // verdict is the wall STEP only (one semantics on every box); the windowed rate is report-only
     // telemetry both ports must still compute identically. Reopen shapes, the live 24.9. shapes
-    // (strih-lx 0 ppm, stream 23.4 ppm) + edge cases (negative drift/step, elapsed 0, at-bound).
+    // (strih-snv 0 ppm, stream 23.4 ppm) + edge cases (negative drift/step, elapsed 0, at-bound).
     let vs: [(i32, i64, i64, i64, i64); 14] = [
         (1, 641, 45_000_000, 0, 33), // overnight strih slope ≈14.24 ppm -> not beyond
         (0, 0, 0, 40, 33),           // 40 ms step -> beyond (rate not ready)
@@ -532,7 +532,7 @@ fn c_qpc_drift_beyond_bound_matches_the_rust_authority_1299_part4() {
         (0, 0, 0, -40, 33),          // negative step magnitude -> beyond
         (1, -641, 45_000_000, 0, 33), // wall stepping back slowly -> not beyond
         (1, 5, 0, 0, 33),            // rate_ready but elapsed 0 -> measured 0.0 guard
-        (1, 0, 300_000, 0, 33),      // strih-lx live: disciplined monotonic, 0 ppm -> not beyond
+        (1, 0, 300_000, 0, 33),      // strih-snv live: disciplined monotonic, 0 ppm -> not beyond
         (1, 7, 299_000, 1, 33),      // stream live 05:09:00: 23.4 ppm -> not beyond
         (1, 0, 300_000, 33, 33),     // step exactly at bound (not > ) -> not beyond
         (1, 0, 300_000, 34, 33),     // step one over bound -> beyond

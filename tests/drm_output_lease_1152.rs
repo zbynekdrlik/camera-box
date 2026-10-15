@@ -235,8 +235,8 @@ fn pick_free_crtc_computes_the_spec_truth_table() {
     }
     c.push_str("    return 0;\n}\n");
 
-    let dir = std::env::temp_dir().join(format!("drm_output_pick_1152_{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("create the scratch dir");
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let cfile = dir.join("pick.c");
     let bin = dir.join("pick.bin");
     fs::write(&cfile, &c).expect("write the harness");

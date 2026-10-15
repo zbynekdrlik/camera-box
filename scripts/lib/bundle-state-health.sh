@@ -79,7 +79,7 @@ bundle_state_alert_detail() {
 
 # bundle_state_restart_remote_cmd [class] -> stdout: the exact remote command to (re)start the
 #   box's :8899 bundle-state server, resolved from the box's obs-fleet CLASS (issue 1317):
-#   * `linux-genlock` (strih-lx, the production strih since M4; imag): the server is a systemd
+#   * `linux-genlock` (strih-snv, the production strih since M4; imag): the server is a systemd
 #     `--user` unit named `<role>-bundle-state-server.service` (strih-/imag-), reached over a plain
 #     ssh login (pam_systemd sets XDG_RUNTIME_DIR; the boxes run with Linger=yes). The unit name is
 #     matched by the shared `*-bundle-state-server.service` pattern -- single-quoted so the REMOTE

@@ -39,7 +39,7 @@ _NDI_CADENCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/camera-box-restart-verify.sh
 . "$_NDI_CADENCE_DIR/camera-box-restart-verify.sh"
 # issue 1360: the strih OBS-log read goes through the ONE platform-resolved reader (Windows STRIH-SNV
-# or Linux strih-lx).
+# or Linux strih-snv).
 # shellcheck source=scripts/lib/strih-log-read.sh
 if [ -f "$_NDI_CADENCE_DIR/strih-log-read.sh" ]; then
   . "$_NDI_CADENCE_DIR/strih-log-read.sh"

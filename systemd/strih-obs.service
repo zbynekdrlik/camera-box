@@ -1,13 +1,13 @@
 [Unit]
-Description=strih-lx supervised OBS (genlock) -- auto-restart on segfault, issue 1317
+Description=strih-snv supervised OBS (genlock) -- auto-restart on segfault, issue 1317
 Documentation=https://github.com/zbynekdrlik/camera-box
 After=graphical-session.target
 Wants=graphical-session.target
 
 [Service]
 Type=simple
-# The strih-lx OBS launcher (sibling of imag-obs-start.sh / imag-obs-stop.sh) starts OBS with the
-# strih-lx profile + scene collection. It is installed by setup-strih.sh; the launcher itself is
+# The strih-snv OBS launcher (sibling of imag-obs-start.sh / imag-obs-stop.sh) starts OBS with the
+# strih-snv profile + scene collection. It is installed by setup-strih.sh; the launcher itself is
 # the first follow-up (a bespoke start/stop pair like scripts/imag-obs-start.sh, issue 882).
 ExecStart=/usr/local/bin/strih-obs-start.sh
 ExecStop=/usr/local/bin/strih-obs-stop.sh --exec-stop

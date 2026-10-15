@@ -39,7 +39,9 @@ baseline); only `cur < prev` (both numeric) is fresh.
   while still catching a real restart that coincides with a dev1 reboot (prev survives).
 - **Coordination = defer while a live gate/TEST harness drives the rig** — a FRESH `#281` heartbeat
   (`rig_heartbeat_active`) OR a held `#830` rig lease (`[ -d rig_lease_dir ] && ! rig_lease_is_stale`;
-  note the polarity — `rig_lease_is_stale` returns 0 when STALE, non-zero for a LIVE holder). Never
+  note the polarity — `rig_lease_is_stale` returns 0 when STALE, non-zero for a LIVE holder). Since
+  issue 1394 that read is the ONE shared `rig_held_reason` in `scripts/lib/rig-heartbeat.sh` (the
+  cambox read-only-root apply refuses on it too); `rig_is_coordinating` calls it. Never
   sweep a burn a live gate deliberately set. A deferred fresh restart sets the `unresolved` flag so
   it retries after the gate releases.
 

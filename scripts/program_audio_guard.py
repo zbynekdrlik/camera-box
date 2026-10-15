@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""issue 1404 -- the stream program-audio GUARD: may the stream program go to YouTube right now?
+
+Reads `http://10.77.9.202:8891/program-audio.json` (strih-snv since issue 1404 ROZHODNUTE 6039368611;
+the dev1 :8890 route was retired on 8.10.2026), written and served by the sampler itself
+(scripts/program_audio_sampler.py + scripts/program_audio_http.py, `age_s` recomputed per request),
+and answers with an exit code.
+Both YouTube gates call it before the broadcast starts and every ~10 s while it is live (camera-box
+`scripts/lib/youtube-leg.sh`, restreamer issue 357) and stop the broadcast on anything but 0.
+
+  exit 0  MEASUREMENT or SILENT, and fresh (-1 s <= age_s <= --max-age), and no FOREIGN window
+          within --latch-s; a MEASUREMENT must also carry its `marker_chain` (the QPSK marker
+          requirement, ROZHODNUTÉ issue 1404 comment 6026826572) -- one without it comes from a
+          sampler older than that requirement and reads UNKNOWN
+  exit 1  FOREIGN (non-measurement audio on the program) -- also when stale: an old FOREIGN
+          reading is never downgraded to "maybe" -- and also when the CURRENT window is clean but
+          a FOREIGN window ended within --latch-s (`last_foreign_age_s`, the sampler's latch;
+          default 30 s, three times a ~10 s gate poll plus the guard's own runtime), so a gate
+          that polls at least every ~25 s never misses a FOREIGN window between two polls
+  exit 2  UNKNOWN, stale (age_s > --max-age, missing, or more than 1 s in the future -- a small
+          negative age is a dantesync date step), unreachable, an HTTP or protocol error, an
+          unreadable payload, an unexpected verdict -- fail CLOSED
+
+Output, always exactly one line on stdout:
+  program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s> markers=<n> chain=<c>[ reason=<why>]
+<V> is the EFFECTIVE verdict (UNKNOWN when the reading cannot be trusted), `-` for a missing
+number, `markers` / `chain` the sampler's raw CRC-valid word count and timecode chain over the
+trailing 4 s, and `reason=` explains every non-trivial outcome (stale, unreachable, the sampler's
+own UNKNOWN reason). Consumers act on the EXIT CODE; the line is for logs and people.
+
+Usage:
+  program_audio_guard.py [--url http://10.77.9.202:8891/program-audio.json] [--max-age 10] [--latch-s 30]
+                         [--timeout 5]
+"""
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import math
+import sys
+import urllib.error
+import urllib.request
+
+DEFAULT_URL = "http://10.77.9.202:8891/program-audio.json"
+DEFAULT_MAX_AGE_S = 10.0
+DEFAULT_TIMEOUT_S = 5.0
+DEFAULT_LATCH_S = 30.0
+NEGATIVE_AGE_TOLERANCE_S = 1.0  # a dantesync date step moves the serving host's clock by tens of ms
+
+EXIT_OK = 0
+EXIT_FOREIGN = 1
+EXIT_UNKNOWN = 2
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+
+def _fmt(v) -> str:
+    v = _num(v)
+    return "-" if v is None else f"{v:.1f}"
+
+
+def _count(v):
+    """A marker count from the payload: a non-negative whole number, else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    return int(v) if v >= 0 and v == int(v) else None
+
+
+def _fmt_count(v) -> str:
+    v = _count(v)
+    return "-" if v is None else str(v)
+
+
+def _line(verdict, rms, outside, age, reason=None, markers=None, chain=None) -> str:
+    line = (f"program-audio verdict={verdict} rms={_fmt(rms)} outside_band={_fmt(outside)}% "
+            f"age={_fmt(age)} markers={_fmt_count(markers)} chain={_fmt_count(chain)}")
+    if reason:
+        line += " reason=" + " ".join(str(reason).split())
+    return line
+
+
+def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) -> tuple[int, str]:
+    """(exit code, the one output line) for a fetched payload."""
+    verdict = payload.get("verdict")
+    rms, outside, age = payload.get("rms_dbfs"), payload.get("outside_band_pct"), _num(payload.get("age_s"))
+    counts = {"markers": payload.get("markers_decoded"), "chain": payload.get("marker_chain")}
+    stale = age is None or age > max_age_s or age < -NEGATIVE_AGE_TOLERANCE_S
+    if age is None:
+        stale_why = "stale (no age)"
+    elif age < -NEGATIVE_AGE_TOLERANCE_S:
+        stale_why = f"stale (age {age:.1f} s is in the future)"
+    else:
+        stale_why = f"stale (age {age:.1f} s > max {max_age_s:g} s)"
+    if verdict == "FOREIGN":
+        return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age, stale_why if stale else None, **counts)
+    last_foreign = _num(payload.get("last_foreign_age_s"))
+    if last_foreign is not None and last_foreign <= latch_s:
+        return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age,
+                                   f"FOREIGN window {last_foreign:.1f} s ago (latched; current {verdict})",
+                                   **counts)
+    if verdict in ("MEASUREMENT", "SILENT"):
+        if stale:
+            return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, f"{stale_why}, last verdict {verdict}",
+                                       **counts)
+        if verdict == "MEASUREMENT" and _count(counts["chain"]) is None:
+            return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age,
+                                       "MEASUREMENT without a marker chain (a sampler older than the "
+                                       "marker requirement -- restart program-audio-sampler)", **counts)
+        return EXIT_OK, _line(verdict, rms, outside, age, **counts)
+    if verdict == "UNKNOWN":
+        return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, payload.get("reason") or "sampler UNKNOWN",
+                                   **counts)
+    return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, f"unexpected verdict {verdict!r}", **counts)
+
+
+def fetch(url: str, timeout_s: float) -> dict:
+    """GET + parse. Raises ValueError with a one-line reason on any failure."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise ValueError(f"HTTP {exc.code} from {url}") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        reason = getattr(exc, "reason", exc)
+        raise ValueError(f"unreachable: {url}: {reason}") from exc
+    except http.client.HTTPException as exc:  # a garbled status line, a truncated body
+        raise ValueError(f"broken HTTP response from {url}: {exc!r}") from exc
+    try:
+        payload = json.loads(body)
+    except ValueError as exc:
+        raise ValueError(f"unreadable payload from {url}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"unreadable payload from {url}: not a JSON object")
+    return payload
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="issue 1404 -- stream program-audio guard (exit 0/1/2)")
+    ap.add_argument("--url", default=DEFAULT_URL, help=f"default {DEFAULT_URL}")
+    ap.add_argument("--max-age", type=float, default=DEFAULT_MAX_AGE_S,
+                    help=f"seconds a reading stays fresh (default {DEFAULT_MAX_AGE_S:g})")
+    ap.add_argument("--latch-s", type=float, default=DEFAULT_LATCH_S,
+                    help=f"exit 1 while a FOREIGN window ended this recently (default {DEFAULT_LATCH_S:g})")
+    ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S,
+                    help=f"HTTP timeout in seconds (default {DEFAULT_TIMEOUT_S:g})")
+    args = ap.parse_args(argv)
+    try:
+        payload = fetch(args.url, args.timeout)
+        code, line = decide(payload, args.max_age, args.latch_s)
+    except Exception as exc:  # fail CLOSED with the contract line on anything unforeseen
+        reason = str(exc) if isinstance(exc, ValueError) else f"guard error: {exc!r}"
+        print(_line("UNKNOWN", None, None, None, reason), flush=True)
+        return EXIT_UNKNOWN
+    print(line, flush=True)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

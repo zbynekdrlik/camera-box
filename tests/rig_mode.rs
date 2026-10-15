@@ -1059,13 +1059,13 @@ fn burn_action_maps_mode_to_add_or_remove() {
 fn genlock_relaunch_note_is_env_free_no_mode() {
     for mode in ["test", "event"] {
         let note = run_sourced(&format!("print_genlock_relaunch_note {mode}"));
-        // issue 1317 part 3: the strih is the Linux strih-lx (its supervised user unit), never the
+        // issue 1317 part 3: the strih is the Linux strih-snv (its supervised user unit), never the
         // retired Windows `--box strih` planner arm (which now refuses).
         assert!(
             note.contains("systemctl --user restart strih-obs.service")
                 && note.contains("--box stream")
                 && !note.contains("--box strih"),
-            "#257: the relaunch note must cover strih-lx AND stream. mode={mode} note=\n{note}"
+            "#257: the relaunch note must cover strih-snv AND stream. mode={mode} note=\n{note}"
         );
         // #257: env-free relaunch — NO --mode and NO OBS_GENLOCK_*/OBS_BURN_* env.
         assert!(
@@ -1283,6 +1283,101 @@ fn event_mode_cam_restore_failure_does_not_strand_the_burn_clear_868() {
         tail.contains("_cam_restore_rc:-0") && tail.contains("exit 1"),
         "#868: the recorded cam-side failure must be folded into the final exit status — deferring \
          it past the burn-clear must not swallow it. Got tail:\n{tail}"
+    );
+}
+
+/// issue 1410 — an UNREACHABLE OBS box must never stop the EVENT switch at the stray-recording
+/// guard.
+///
+/// On 11.10.2026 strih-snv (10.77.9.202) was powered off. `stop_stray_recordings` returned the
+/// failing `obs_phase2.py record --action guard` rc (`OSError: [Errno 113] No route to host`), and
+/// do_event called it BARE under `set -euo pipefail`, so the whole EVENT switch ended right there:
+/// the cam2 painter stop, the relay start, the program-audio stop, the burn clear and the EVENT
+/// contract never ran. From TEST mode that would have left the QR painter and the burns ON. The
+/// guard's failure is now RECORDED (the #868 / issue-1407 shape), warned on stderr, every later step
+/// still runs, and the recorded rc keeps EVENT from exiting 0 even when the contract passes.
+#[test]
+fn event_mode_stray_recording_guard_failure_is_recorded_not_fatal_1410() {
+    let whole = fs::read_to_string(script()).expect("read rig-mode.sh");
+    let s = do_event_body(&whole);
+
+    // No bare call: every non-comment line of do_event that runs the guard must capture its rc.
+    for line in s.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') || !t.starts_with("stop_stray_recordings") {
+            continue;
+        }
+        assert!(
+            t.contains("|| _stray_rc=$?"),
+            "issue 1410: do_event must not call the stray-recording guard bare under set -e; an \
+             unreachable OBS box aborted the whole EVENT switch. Got line: {t}"
+        );
+    }
+
+    let capture = s
+        .find("stop_stray_recordings || _stray_rc=$?")
+        .expect("issue 1410: the stray-recording guard's rc must be captured into _stray_rc");
+    let painter = s
+        .find("cam_ssh \"$(painter_stop_remote")
+        .expect("issue 1410: expected the cam-side painter stop in do_event");
+    let burn_clear = s
+        .find("\n  toggle_burn event")
+        .expect("issue 1410: expected do_event's burn-clear invocation");
+    assert!(
+        capture < painter && capture < burn_clear,
+        "issue 1410: the guard runs (and is captured) BEFORE the painter stop and the burn clear"
+    );
+
+    // The rc starts at 0, so a clean guard leaves the fold untouched.
+    let init = s
+        .find("_stray_rc=0")
+        .expect("issue 1410: _stray_rc must be initialised to 0 before the guard runs");
+    assert!(
+        init < capture,
+        "issue 1410: _stray_rc=0 must come before the capture"
+    );
+
+    // A loud WARNING on stderr, right after the capture and before the painter stop.
+    let warn_region = &s[capture..painter];
+    let warn_line = warn_region
+        .lines()
+        .find(|l| l.contains("WARNING") && l.contains("issue 1410"))
+        .expect(
+            "issue 1410: a failed stray-recording guard must print a WARNING naming issue 1410",
+        );
+    assert!(
+        warn_line.contains(">&2") && warn_line.contains("_stray_rc"),
+        "issue 1410: the WARNING must go to stderr and carry the recorded rc. Got: {warn_line}"
+    );
+
+    // The fold: the ONE exit-0 branch requires a clean guard too, so a passing EVENT contract can
+    // no longer hide an unverified OBS box.
+    let pass_if = s
+        .find("if [ \"$EVENT_ASSERT_PASS\" -eq 0 ]")
+        .expect("issue 1410: expected the final exit-status fold");
+    let pass_line = s[pass_if..].lines().next().unwrap_or("");
+    assert!(
+        pass_line.contains("\"${_stray_rc:-0}\" -eq 0"),
+        "issue 1410: the exit-0 condition must require _stray_rc == 0. Got: {pass_line}"
+    );
+
+    // Its own RESULT line on stderr, before the final non-zero exit.
+    let tail = &s[pass_if..];
+    let result_line = tail
+        .lines()
+        .find(|l| l.contains("RESULT:") && l.contains("_stray_rc"))
+        .expect("issue 1410: the recorded guard failure must get its own RESULT line");
+    assert!(
+        result_line.contains(">&2"),
+        "issue 1410: the guard's RESULT line must go to stderr. Got: {result_line}"
+    );
+    let result_pos = tail.find(result_line).unwrap_or(usize::MAX);
+    let last_exit_1 = tail
+        .rfind("exit 1")
+        .expect("issue 1410: expected the final exit 1");
+    assert!(
+        result_pos < last_exit_1,
+        "issue 1410: the guard's RESULT line must print before the final exit 1"
     );
 }
 

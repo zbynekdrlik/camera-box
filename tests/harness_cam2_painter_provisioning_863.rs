@@ -20,6 +20,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -280,15 +284,15 @@ fn cleanup_calls_the_restore_verify_right_after_starting_cam2_painter() {
 // journalctl/fuser stand-ins (never a live ssh/rig dependency).
 // ---------------------------------------------------------------------------------------------
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cam2-painter-restore-verify-863-{}-{}",
-        std::process::id(),
-        name
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("cam2-painter-restore-verify-863-{name}-"))
+        .tempdir()
+        .expect("create scratch dir");
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 fn write_fake_bin(dir: &Path, name: &str, script: &str) {

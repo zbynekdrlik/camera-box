@@ -9,17 +9,17 @@ paths:
 # OBS deploy/backup directory retention — dry-run-first sweep (#789 residual B / criterion 5)
 
 **`--box <fleet-name>` and no default box (issue 1317 part 3).** The driver used to default
-`HOST=10.77.9.202` (the retired Windows strih; now the Linux strih-lx). It now requires a target:
+`HOST=10.77.9.202` (the retired Windows strih; now the Linux strih-snv). It now requires a target:
 `--box <name>` resolves host + CLASS from `scripts/lib/obs-fleet.sh` — `windows-genlock` → the `.ps1`
-driver, `linux-genlock` (strih-lx, imag) → ssh + the bash `--local-sweep` (the imag leg, generalized;
+driver, `linux-genlock` (strih-snv, imag) → ssh + the bash `--local-sweep` (the imag leg, generalized;
 creds `LINUX_BOX_USER`/`LINUX_BOX_PW`, default newlevel). `--host` stays the Windows `.ps1` driver
-and refuses a linux-genlock address. **On strih-lx this is the sanctioned stage-dir prune** the
+and refuses a linux-genlock address. **On strih-snv this is the sanctioned stage-dir prune** the
 ~2.2 GB-per-bundle `/tmp` quota needs before every deploy (`strih-linux-provisioning.md`):
-`obs-backup-retention.sh --box strih-lx` (dry-run) then `--keep-runs 1 --keep-days 0 --execute`.
+`obs-backup-retention.sh --box strih-snv` (dry-run) then `--keep-runs 1 --keep-days 0 --execute`.
 The `--local-sweep` leg runs ON the box via `bash -s` and never sources the fleet lib. Tests:
 `tests/python/test_windows_strih_retired_retention_1317.py` (fake `sshpass` on PATH).
 `--stages-only` (issue 1317 part 6) skips the dated `<stamp>-789` kind entirely (never touched, a
-`SKIPPED` line instead) — the strih-lx execute deploy (`scripts/lib/strih-lx-deploy.sh`) runs
+`SKIPPED` line instead) — the strih-snv execute deploy (`scripts/lib/strih-snv-deploy.sh`) runs
 `--local-sweep --stages-only --keep-runs 1 --keep-days 0 --execute` as the operator before staging,
 with its own stage touched newest so it is always the one kept (test:
 `retention_stages_only_never_touches_dated_backups_1317`).

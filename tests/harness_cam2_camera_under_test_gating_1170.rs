@@ -115,11 +115,18 @@ fn default_align_set_includes_cam1_but_never_cam2_keeps_cam3_and_cam4_1198() {
     // PROJECTION PROBE (its grabber captures imag-nb's HDMI output), so its painter-QR view is
     // structurally ~8 ids behind the splitter family and the floor-3 mutual align cannot
     // equalize it -- its sweep/active membership is untouched (see the sweep tests around this).
+    // issue 1413 (2026-10-12): cam1 and cam4 moved to Poprad, so the default align set is the
+    // always-on-air cam3 + the strih-routable SNV cameras = cam3 cam5; cam1 re-derives into it the
+    // moment an override names it again.
     let (_, align, _) = resolved(None);
+    assert_eq!(
+        align, "cam3 cam5",
+        "issue 1413: the default CAMERA_ALIGN_SET"
+    );
+    let (_, with_cam1, _) = resolved(Some("cam1 cam2 cam3"));
     assert!(
-        has_word(&align, "cam1"),
-        "issue 1198: cam1 must be in the default CAMERA_ALIGN_SET (card restored healthy \
-         2026-08-27). Got ALIGN=[{align}]"
+        has_word(&with_cam1, "cam1"),
+        "issue 1198: cam1 derives into CAMERA_ALIGN_SET when active. Got ALIGN=[{with_cam1}]"
     );
     assert!(
         !has_word(&align, "cam2"),
@@ -127,8 +134,9 @@ fn default_align_set_includes_cam1_but_never_cam2_keeps_cam3_and_cam4_1198() {
          Got ALIGN=[{align}]"
     );
     assert!(
-        has_word(&align, "cam3") && has_word(&align, "cam4"),
-        "cam3 (source) + cam4 (on-air, #947) stay in the on-air align superset. Got ALIGN=[{align}]"
+        has_word(&align, "cam3") && !has_word(&align, "cam4"),
+        "cam3 (source) stays in the align set; cam4 (Poprad since issue 1413) is no longer an \
+         unconditional member. Got ALIGN=[{align}]"
     );
 }
 

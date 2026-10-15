@@ -15,11 +15,11 @@
 #
 # WHY (issue 1360): each helper grew its own Windows-only reader (PowerShell Get-Content of the
 # newest %APPDATA%\obs-studio\logs file) before the M4 cut-over moved the strih role to the Linux
-# notebook strih-lx; on strih-lx every read came back empty and each consumer fell back fail-open
+# notebook strih-snv; on strih-snv every read came back empty and each consumer fell back fail-open
 # (READ_FAIL, "ssh flake/timeout", settle never quiet, the align without its measured arrival floor).
 #
 # PLATFORM: resolved once per read via strih-platform.sh `strih_platform HOST` (the STRIH_PLATFORM
-# env override, else the strih-lx address -> linux, else windows).
+# env override, else the strih-snv address -> linux, else windows).
 #   linux   -> plain ssh running tail / wc / tail -n +N on the NEWEST ~/.config/obs-studio/logs/*.txt
 #              (newest by mtime via `ls -t`; the filename carries SPACES, e.g.
 #              `2026-09-23 09-23-36.txt`, so it is always used as the quoted "$F").
@@ -32,7 +32,7 @@
 # PATH- or function-stubbed sshpass stays the outermost command (the ci-testing-gotchas stub-bypass
 # rule), and the ssh itself is bounded. UserKnownHostsFile=/dev/null: 10.77.9.202 was the Windows
 # STRIH-SNV address before M4, so a stale known_hosts key would otherwise make OpenSSH refuse
-# password auth to strih-lx. Any failure (unreachable, auth, no log, timeout) -> EMPTY output,
+# password auth to strih-snv. Any failure (unreachable, auth, no log, timeout) -> EMPTY output,
 # return 0 -- every consumer already treats empty as "unread", never as a measurement.
 #
 # Public API (all: <host> <user> <pw> ... [timeout_s], default STRIH_LOG_READ_TIMEOUT or 20):

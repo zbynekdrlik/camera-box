@@ -40,6 +40,12 @@
 # STEP 1: the free official-archive low-latency meta (no Ubuntu Pro), matching the imag-nb precedent.
 rt_kernel_flavour() { printf 'linux-lowlatency-hwe-24.04'; }
 
+# The ONE verified close of a read-only-root rw window (issue 1407), printed into every mutating
+# step's program below. Sourcing it only defines functions (it lazy-sources ro-root.sh the same way).
+# shellcheck source=scripts/lib/ro-window.sh
+command -v ro_window_close_cmds >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/ro-window.sh"
+
 # _rt_truthy VALUE -> exit 0 iff VALUE is a truthy token (1/yes/true), else exit 1. Set-e-safe:
 # used only as an `if` condition, never bare.
 _rt_truthy() {
@@ -75,6 +81,43 @@ _rt_purge_pkglist() {
     esac
   done
   printf '%s' "${out# }"
+}
+
+# _rt_window_program STEP WORK [WHY] -> the self-contained program the supervisor pastes into the
+# box's root shell for ONE mutating step (issue 1407 design addendum item 3). It opens the rw window,
+# runs WORK there keeping its exit status, ALWAYS closes the window with the shared verified close
+# (scripts/lib/ro-window.sh: the ro remount, the root mode READ back, the writers named and exit 1 on
+# a root left writable), and only then reports WORK's own failure. The old one-liners ended
+# `&& mount -o remount,ro /`: never verified, and skipped entirely once an earlier step failed, so a
+# failed apt or grub step left the cambox on a writable root. The program runs in a child
+# `bash -s <<'RT_KERNEL_STEP'`, so an exit inside it ends that child, never the root session it was
+# pasted into. That heredoc is also the child's STDIN, so WORK runs as a function reading /dev/null:
+# a step that reads stdin (a dpkg or debconf prompt) would otherwise eat the rest of the program,
+# the verified close included (review round 1). A WORK still holding an unreplaced `<...>`
+# placeholder (`<OLD_VER>`, `<Advanced...>`) refuses before the root is touched; the check reads the
+# function as the supervisor edited it. WHY (optional) becomes a comment line. Print-only: nothing in
+# this lib runs it.
+# shellcheck disable=SC2016  # every $ here is remote text, printed literally for the box's shell
+_rt_window_program() {
+  local step="$1" work="$2" why="${3:-}" close
+  close="$(ro_window_close_cmds "issue 899" "\$(hostname 2>/dev/null || echo this box)" \
+    "The $step step may have changed files on it." \
+    "the root is still read-WRITE: stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run the $step step.")"
+  printf '%s\n' "bash -s <<'RT_KERNEL_STEP'"
+  if [ -n "$why" ]; then printf '# %s\n' "$why"; fi
+  printf '%s\n' '_rt_work() {' "  $work" '}'
+  case "$work" in
+    *'<'[A-Za-z]*'>'*)
+      printf 'if declare -f _rt_work | grep -q '"'"'<[A-Za-z][^>]*>'"'"'; then echo "FAIL: [issue 899] replace the placeholder in the %s step first; nothing was changed" >&2; exit 2; fi\n' "$step"
+      ;;
+  esac
+  printf '%s\n' '_rt_rc=0' 'if mount -o remount,rw /; then'
+  printf '%s\n' '  _rt_work </dev/null || _rt_rc=$?'
+  printf '%s\n' 'else' '  _rt_rc=$?' 'fi'
+  printf '%s\n' "$close"
+  printf 'if [ "$_rt_rc" -ne 0 ]; then echo "FAIL: [issue 899] the %s step failed (rc=$_rt_rc); the root reads ro again -- fix the cause, then re-run this step" >&2; exit "$_rt_rc"; fi\n' "$step"
+  printf 'echo "OK: [issue 899] %s done; the root reads ro again"\n' "$step"
+  printf '%s\n' 'RT_KERNEL_STEP'
 }
 
 # rt_kernel_readiness_verdict RUNNING_LOWLAT LOWLAT_INSTALLED CANDIDATE_PRESENT -> one verdict token.
@@ -156,8 +199,10 @@ rt_kernel_upgrade_plan() {
 }
 
 # rt_kernel_step_command TOKEN [STALE] -> the concrete shell the SUPERVISOR runs for one plan token,
-# or a `# SUPERVISOR:` note for the reboot-class / post-reboot gates. Mutating commands wrap the `ro`
-# root remount themselves so each token is self-contained and copy-pasteable. `unknown-token` for
+# or a `# SUPERVISOR:` note for the reboot-class / post-reboot gates. Every step that changes the box
+# prints ONE self-contained program (_rt_window_program: the rw window, the work, the shared verified
+# ro close whatever the work did; issue 1407), after its note line when it has one, so each token is
+# copy-pasteable into the box's root shell. `unknown-token` for
 # anything unrecognised (fail-loud, never a silent empty command). STALE (optional 2nd arg) is used
 # ONLY by `purge-superseded-generic`: when the OBSERVED stale set is passed, the note names those
 # exact packages; with no STALE arg it keeps the per-box `<OLD_VER>` placeholder note (back-compat).
@@ -169,17 +214,22 @@ rt_kernel_step_command() {
       # and the lowlatency meta depends on the HWE packages, so the install must be allowed to move
       # the hold -- exactly as setup-imag.sh step 7 does (#820). This ADDS the lowlatency config
       # (preempt=full) and, on a box without the HWE generic meta, a new generic HWE image.
-      printf 'mount -o remount,rw / && mkdir -p /root/apt-tmp /root/tmpbig && export TMPDIR=/root/tmpbig && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -o Dir::Cache::archives=/root/apt-tmp -y --allow-change-held-packages linux-lowlatency-hwe-24.04 && mount -o remount,ro /   # /var/cache+/tmp are tmpfs (512M/100M) -> cache .debs + build initrd on the rootfs (issue 899 supervisor finding 2026-08-22)' ;;
+      _rt_window_program install-lowlatency \
+        'mkdir -p /root/apt-tmp /root/tmpbig && export TMPDIR=/root/tmpbig && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -o Dir::Cache::archives=/root/apt-tmp -y --allow-change-held-packages linux-lowlatency-hwe-24.04' \
+        '/var/cache+/tmp are tmpfs (512M/100M) -> cache .debs + build initrd on the rootfs (issue 899 supervisor finding 2026-08-22)' ;;
     verify-lowlatency-config)
       printf '# SUPERVISOR: assert the config package landed -- test -f /etc/default/grub.d/99-lowlatency.cfg AND grep -q preempt=full /etc/default/grub.d/99-lowlatency.cfg (refuse to trust it otherwise, mirrors setup-imag.sh step 7)' ;;
     grub-pin:saved)
-      printf '# SUPERVISOR: GRUB_DEFAULT=saved box (cam2/cam3) -- pick the NEW HWE generic entry id in /boot/grub/grub.cfg (the newest kernel version), then: mount -o remount,rw / && grub-set-default "<Advanced...>the new kernel>" && mount -o remount,ro /' ;;
+      printf '%s\n' '# SUPERVISOR: GRUB_DEFAULT=saved box (cam2/cam3) -- pick the NEW HWE generic entry id in /boot/grub/grub.cfg (the newest kernel version), put it in place of the <Advanced...> placeholder below, then run:'
+      _rt_window_program grub-pin:saved 'grub-set-default "<Advanced...>the new kernel>"' ;;
     grub-pin:menuentry)
       printf '# SUPERVISOR: numeric GRUB_DEFAULT box (cam1: =0) -- entry 0 is grub-sorted newest-first, so update-grub makes the new HWE image default; confirm GRUB_DEFAULT still points at it in /etc/default/grub' ;;
     safe-grub-regen)
       # The #295 safe pattern: guarantee every installed kernel has an initrd BEFORE update-grub,
       # then update-grub once (the preempt=full grub.d drop applies to every entry).
-      printf 'mount -o remount,rw / && mkdir -p /root/tmpbig && export TMPDIR=/root/tmpbig && for v in /boot/vmlinuz-*; do k="${v#/boot/vmlinuz-}"; [ -e "/boot/initrd.img-$k" ] || update-initramfs -c -k "$k"; done && update-grub && mount -o remount,ro /   # #295: initrd-guarantee before grub; /tmp tmpfs (100M) -> TMPDIR on the rootfs (issue 899, 2026-08-22)' ;;
+      _rt_window_program safe-grub-regen \
+        'mkdir -p /root/tmpbig && export TMPDIR=/root/tmpbig && for v in /boot/vmlinuz-*; do k="${v#/boot/vmlinuz-}"; [ -e "/boot/initrd.img-$k" ] || update-initramfs -c -k "$k"; done && update-grub' \
+        '#295: initrd-guarantee before grub; /tmp tmpfs (100M) -> TMPDIR on the rootfs (issue 899, 2026-08-22)' ;;
     reboot-into-lowlatency)
       printf '# SUPERVISOR: reboot the box (reboot-class, one box at a time, in a window with NO live E2E; the old generic entry stays in GRUB as rollback)' ;;
     confirm-running-lowlatency)
@@ -189,9 +239,13 @@ rt_kernel_step_command() {
       # would remove the kernel the box is running. When gather_facts has read the OBSERVED stale set
       # off the box (2nd arg), name those EXACT packages; otherwise keep the per-box `<OLD_VER>` note.
       if _rt_stale_present "$stale"; then
-        printf '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the OBSERVED superseded generic package(s): mount -o remount,rw / && apt-get purge -y --allow-change-held-packages %s && mount -o remount,ro / . NEVER a wildcard generic purge (that removes the new running kernel).' "$(_rt_purge_pkglist "$stale")"
+        printf '%s\n' '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the OBSERVED superseded generic package(s) below. NEVER a wildcard generic purge (that removes the new running kernel).'
+        _rt_window_program purge-superseded-generic \
+          "DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-change-held-packages $(_rt_purge_pkglist "$stale")"
       else
-        printf '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the specific pre-upgrade image (the old uname -r noted before the upgrade), e.g.: mount -o remount,rw / && apt-get purge -y --allow-change-held-packages "linux-image-<OLD_VER>" "linux-modules-<OLD_VER>" && mount -o remount,ro / . NEVER a wildcard generic purge (that removes the new running kernel).'
+        printf '%s\n' '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the specific pre-upgrade image (the old uname -r noted before the upgrade; put it in place of <OLD_VER> below). NEVER a wildcard generic purge (that removes the new running kernel).'
+        _rt_window_program purge-superseded-generic \
+          'DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-change-held-packages "linux-image-<OLD_VER>" "linux-modules-<OLD_VER>"'
       fi ;;
     verify-single-kernel)
       printf '# SUPERVISOR: re-run verify-device.sh -- check (k) single-kernel invariant is restored; check (ac) still WARNs "not PREEMPT_RT" (EXPECTED -- preempt=full is STEP 1, full RT is STEP 2)' ;;
@@ -200,7 +254,8 @@ rt_kernel_step_command() {
     noop:already-lowlatency)
       printf '# nothing to do -- box already runs the low-latency profile (preempt=full active)' ;;
     blocked:no-rt-candidate)
-      printf '# BLOCKED: linux-lowlatency-hwe-24.04 has no apt candidate -- run: mount -o remount,rw / && apt-get update && mount -o remount,ro /, confirm the main archive is reachable, then re-plan' ;;
+      printf '%s\n' '# BLOCKED: linux-lowlatency-hwe-24.04 has no apt candidate -- refresh the apt index with the program below, confirm the main archive is reachable, then re-plan'
+      _rt_window_program blocked:no-rt-candidate 'apt-get update' ;;
     *)
       printf 'unknown-token' ;;
   esac

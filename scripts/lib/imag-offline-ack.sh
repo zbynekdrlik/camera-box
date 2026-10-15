@@ -37,7 +37,7 @@ imag_leg_skip_note() {
 # old bare `ping -c1 -W2` used by rig-mode.sh's two sites (resolve_imag_offline_leg /
 # require_imag_genlock_current) and by recording-e2e.sh's [0/8] imag-acked branch. WHY not ping:
 # imag-nb (10.77.9.182) is OUT of the rig ~1 year (owner 20.9.2026 — its USB ethernet dongle now
-# carries strih-lx at .202), yet on the venue LAN a router / proxy-ARP / foreign responder still
+# carries strih-snv at .202), yet on the venue LAN a router / proxy-ARP / foreign responder still
 # answers ICMP for .182 (ip neigh INCOMPLETE, erratic RTT) while the box's own services are dead.
 # ICMP therefore proves only "some responder holds the IP", not "imag-nb's services are back", so a
 # ping-based staleness probe rejects a legitimate ack as STALE and hard-blocks the whole gate. A

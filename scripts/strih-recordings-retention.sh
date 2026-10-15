@@ -19,12 +19,12 @@ set -euo pipefail
 # (against rr_plan() over a real fixture dir) -- a drift in either fails its own side.
 #
 # Modes (there is NO default box -- issue 1317 part 3: the old default 10.77.9.202 was the Windows
-# strih PC, RETIRED at the M4 cut-over; that address is the Linux strih-lx now):
+# strih PC, RETIRED at the M4 cut-over; that address is the Linux strih-snv now):
 #   --box <fleet-name>   the fleet-list way (scripts/lib/obs-fleet.sh): the box's host + CLASS pick the
-#                        executor -- linux-genlock (strih-lx) -> ssh + THIS script fed to `bash -s` in
+#                        executor -- linux-genlock (strih-snv) -> ssh + THIS script fed to `bash -s` in
 #                        --local-sweep mode (the box resolves its own record dir from its active OBS
 #                        profile: [Output] Mode=Advanced -> [AdvOut] RecFilePath (FFFilePath when
-#                        RecType=FFmpeg), else [SimpleOutput] FilePath; strih-lx = /srv/_REC);
+#                        RecType=FFmpeg), else [SimpleOutput] FilePath; strih-snv = /srv/_REC);
 #                        windows-genlock (stream, resolume) -> the .ps1 driver below.
 #   --host <win-ip>      the Windows .ps1 driver by address: scp -O the .ps1 and run it via
 #                        `powershell -NoProfile -ExecutionPolicy Bypass -File` -- NEVER a nested
@@ -42,8 +42,8 @@ set -euo pipefail
 # --keep-runs 0 (it could delete the recording OBS is writing right now).
 #
 # Usage:
-#   scripts/strih-recordings-retention.sh --box strih-lx                                 # strih-lx dry-run
-#   scripts/strih-recordings-retention.sh --box strih-lx --keep-runs 20 --keep-days 3 --execute   # SUPERVISOR only
+#   scripts/strih-recordings-retention.sh --box strih-snv                                 # strih-snv dry-run
+#   scripts/strih-recordings-retention.sh --box strih-snv --keep-runs 20 --keep-days 3 --execute   # SUPERVISOR only
 #   scripts/strih-recordings-retention.sh --box stream --record-dir 'C:\Users\newlevel\Videos'    # stream box, dry-run
 #   scripts/strih-recordings-retention.sh --host <win-ip> --keep-runs 20 --keep-days 3   # a Windows box recording to C:\_REC
 #   scripts/strih-recordings-retention.sh --local-sweep --record-dir <dir>               # this machine, dry-run
@@ -106,7 +106,7 @@ rr_is_harness_recording() {
 
 # rr_horizon_ceil <keep_days> -> ceil(keep_days * 86400). The Rust rule is `age < days*86400` on f64;
 # for an INTEGER age that is exactly `age < ceil(days*86400)`. awk does the same double arithmetic as
-# Rust f64; %.0f (not %d) because mawk (strih-lx's awk) clamps %d at 2^31-1.
+# Rust f64; %.0f (not %d) because mawk (strih-snv's awk) clamps %d at 2^31-1.
 rr_horizon_ceil() {
   awk -v d="$1" 'BEGIN { h = d * 86400; c = int(h); if (c < h) c = c + 1; printf "%.0f", c }'
 }
@@ -392,7 +392,8 @@ if [ "$MODE" = "box" ] || [ "$MODE" = "win" ]; then
   . "$HERE/lib/obs-fleet.sh"
 fi
 if [ "$MODE" = "box" ]; then
-  [ "$BOX" != "strih" ] || { echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is 'strih-lx' (Linux): use --box strih-lx" >&2; exit 2; }
+  [ "$BOX" != "strih" ] || { echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is 'strih-snv' (Linux): use --box strih-snv" >&2; exit 2; }
+  BOX="$(obs_fleet_canonical_name "$BOX")"   # issue 1414: a pre-1414 name addresses its renamed row
   BOX_CLASS="$(obs_fleet_class "$BOX")" || { echo "ERROR: --box '$BOX' is not in the fleet list (scripts/lib/obs-fleet.sh)" >&2; exit 2; }
   HOST="$(obs_fleet_host "$BOX")"
   case "$BOX_CLASS" in
@@ -403,9 +404,9 @@ if [ "$MODE" = "box" ]; then
 elif [ "$MODE" = "win" ]; then
   [ -n "$HOST" ] || { echo "ERROR: --host needs a Windows OBS box address" >&2; exit 2; }
   obs_fleet_refuse_linux_target "$HOST" "strih-recordings-retention.sh --host (the Windows .ps1 driver)" \
-    || { echo "       use --box <fleet-name> for a Linux box (e.g. --box strih-lx: ssh + the bash --local-sweep)" >&2; exit 2; }
+    || { echo "       use --box <fleet-name> for a Linux box (e.g. --box strih-snv: ssh + the bash --local-sweep)" >&2; exit 2; }
 fi
-[ -n "$MODE" ] || { echo "ERROR: name a target: --box <fleet-name> | --host <windows-obs-box> | --local-sweep -- there is no default box (the Windows strih PC this tool defaulted to is RETIRED, issue 1317; the strih is --box strih-lx)" >&2; exit 2; }
+[ -n "$MODE" ] || { echo "ERROR: name a target: --box <fleet-name> | --host <windows-obs-box> | --local-sweep -- there is no default box (the Windows strih PC this tool defaulted to is RETIRED, issue 1317; the strih is --box strih-snv)" >&2; exit 2; }
 
 if [ "$EXECUTE" = 1 ] && [ "$PLAN_TSV" = 1 ]; then
   echo "ERROR: --plan-tsv is a print-only view; it cannot be combined with --execute" >&2
@@ -436,9 +437,9 @@ case "$MODE" in
     # The dev1 banner goes to stderr so stdout is ONLY the box's report (pure TSV under --plan-tsv).
     echo "[$BOX] ssh ${LB_USER}@${HOST} -> $REMOTE_CMD  ($([ "$EXECUTE" = 1 ] && echo 'EXECUTE -- DELETING' || echo 'DRY-RUN -- no deletion'))" >&2
     # THIS script is the program `bash -s` reads from stdin; no sudo -- the OBS record dir is owned by
-    # the OBS user (strih-lx /srv/_REC = newlevel:newlevel 775). The address was the Windows strih PC
+    # the OBS user (strih-snv /srv/_REC = newlevel:newlevel 775). The address was the Windows strih PC
     # until M4, so a stale known_hosts key must not block the leg (UserKnownHostsFile=/dev/null, the
-    # strih-lx ssh convention); timeout sits INSIDE sshpass so sshpass stays the outer command.
+    # strih-snv ssh convention); timeout sits INSIDE sshpass so sshpass stays the outer command.
     # shellcheck disable=SC2029  # REMOTE_CMD is built with printf %q for the remote shell on purpose.
     sshpass -p "$LB_PW" timeout "$LB_TIMEOUT" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -o LogLevel=ERROR -o ConnectTimeout=15 "${LB_USER}@${HOST}" \

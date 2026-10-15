@@ -40,6 +40,8 @@ means adding a bound to the RECORDING verdict, not touching differ/frame-probe.
 
 ## Calibrate any new recording-path bound from the green verdict JSONs (never guess)
 
+(dev1 keeps only the newest 9 run dirs since issue 1395; to mine more, see the
+`scripts/lib/e2e-rundir-retention.sh` header.)
 Recent green runs' verdicts sit at `/tmp/recording-e2e-*/verdict-*.json` on dev1. Mine the real
 distribution before setting a bound:
 ```bash

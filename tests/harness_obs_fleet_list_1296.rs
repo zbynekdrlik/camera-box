@@ -3,7 +3,7 @@
 //! box-roster default derives from.
 //!
 //! Root cause (issue 1296): fleet membership was duplicated as SIX independent literals — the five
-//! `BOXES="${X_BOXES:-strih|… stream|…}"` defaults in
+//! `BOXES="${X_BOXES:-strih|… stream-snv|…}"` defaults in
 //! audio-lag/av-step/bundle-state/network-reach/vb-matrix-alert-watchdog.sh, plus obs-liveness's
 //! hardcoded STRIH_HOST/STREAM_HOST `--box` pair — so registering RESOLUME-SNV meant editing six
 //! files with no source of truth. This file pins the new single-source-of-truth lib: the pure
@@ -76,32 +76,41 @@ fn fleet_lib_defines_the_public_functions_1296() {
 // ---------------------------------------------------------------------------------------------
 #[test]
 fn fleet_host_resolves_each_declared_box_1296() {
-    // issue 1317 (M4 cut-over, 20.9.2026): 10.77.9.202 is now the Linux strih-lx notebook; the
+    // issue 1317 (M4 cut-over, 20.9.2026): 10.77.9.202 is now the Linux strih-snv notebook; the
     // Windows strih PC is RETIRED and its row is gone from the fleet list.
-    assert_eq!(fleet_stdout("obs_fleet_host strih-lx"), "10.77.9.202");
-    assert_eq!(fleet_stdout("obs_fleet_host stream"), "10.77.9.204");
+    assert_eq!(fleet_stdout("obs_fleet_host strih-snv"), "10.77.9.202");
+    assert_eq!(fleet_stdout("obs_fleet_host stream-snv"), "10.77.9.204");
     assert_eq!(fleet_stdout("obs_fleet_host imag"), "10.77.9.182");
     // resolume is a TRAVELING box — its host is the HOSTNAME, not a pinned IP (DHCP drift + the
     // 10.77.9.201/`bridge` collision, see the lib header + targets.md).
-    assert_eq!(fleet_stdout("obs_fleet_host resolume"), "resolume.lan");
+    assert_eq!(fleet_stdout("obs_fleet_host resolume-snv"), "resolume.lan");
 }
 
 #[test]
 fn fleet_class_distinguishes_windows_from_linux_genlock_1296() {
-    assert_eq!(fleet_stdout("obs_fleet_class stream"), "windows-genlock");
-    assert_eq!(fleet_stdout("obs_fleet_class resolume"), "windows-genlock");
-    assert_eq!(fleet_stdout("obs_fleet_class strih-lx"), "linux-genlock");
+    assert_eq!(
+        fleet_stdout("obs_fleet_class stream-snv"),
+        "windows-genlock"
+    );
+    assert_eq!(
+        fleet_stdout("obs_fleet_class resolume-snv"),
+        "windows-genlock"
+    );
+    assert_eq!(fleet_stdout("obs_fleet_class strih-snv"), "linux-genlock");
     assert_eq!(fleet_stdout("obs_fleet_class imag"), "linux-genlock");
 }
 
 #[test]
 fn fleet_home_check_is_always_for_fixed_boxes_traveling_for_resolume_1296() {
-    assert_eq!(fleet_stdout("obs_fleet_home_check strih-lx"), "always");
-    assert_eq!(fleet_stdout("obs_fleet_home_check stream"), "always");
+    assert_eq!(fleet_stdout("obs_fleet_home_check strih-snv"), "always");
+    assert_eq!(fleet_stdout("obs_fleet_home_check stream-snv"), "always");
     // issue 1316: imag-nb was RETURNED to the owner (16.9.2026); its home-check is now `retired`
     // (was `always`). The row + host lookup are KEPT (the role returns on a new notebook next year).
     assert_eq!(fleet_stdout("obs_fleet_home_check imag"), "retired");
-    assert_eq!(fleet_stdout("obs_fleet_home_check resolume"), "traveling");
+    assert_eq!(
+        fleet_stdout("obs_fleet_home_check resolume-snv"),
+        "traveling"
+    );
 }
 
 #[test]
@@ -128,32 +137,32 @@ fn boxes(facet: &str) -> String {
 
 #[test]
 fn fleet_boxes_reproduces_the_legacy_byte_exact_defaults_1296() {
-    // issue 1317: audio-lag watches the PRODUCTION strih (now the Linux strih-lx at .202 -- its
+    // issue 1317: audio-lag watches the PRODUCTION strih (now the Linux strih-snv at .202 -- its
     // vendored OBS emits the same `audio-telemetry #800` lines) + stream. vb-matrix is WINDOWS-only
-    // (PipeWire replaced VB-Matrix on strih-lx), so it is stream alone.
+    // (PipeWire replaced VB-Matrix on strih-snv), so it is stream alone.
     assert_eq!(
         boxes("audio-lag"),
-        "strih-lx|10.77.9.202 stream|10.77.9.204"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
     );
-    assert_eq!(boxes("vb-matrix"), "stream|10.77.9.204");
+    assert_eq!(boxes("vb-matrix"), "stream-snv|10.77.9.204");
     // av-step: stream only (the av-sync dock box, #1267).
-    assert_eq!(boxes("av-step"), "stream|10.77.9.204");
+    assert_eq!(boxes("av-step"), "stream-snv|10.77.9.204");
 }
 
 #[test]
 fn fleet_boxes_carries_resolume_only_where_the_facet_applies_1296() {
     for facet in ["bundle-state", "network-reach", "obs-liveness"] {
         assert!(
-            boxes(facet).contains("resolume|resolume.lan"),
-            "facet {facet} must carry resolume: {}",
+            boxes(facet).contains("resolume-snv|resolume.lan"),
+            "facet {facet} must carry resolume-snv: {}",
             boxes(facet)
         );
     }
     // resolume has no mbc audio (audio-lag/av-step) and no VB-Matrix — it must NOT be in those.
     for facet in ["audio-lag", "av-step", "vb-matrix"] {
         assert!(
-            !boxes(facet).contains("resolume"),
-            "facet {facet} must NOT carry resolume: {}",
+            !boxes(facet).contains("resolume-snv"),
+            "facet {facet} must NOT carry resolume-snv: {}",
             boxes(facet)
         );
     }
@@ -167,12 +176,12 @@ fn fleet_boxes_genlock_lock_excludes_retired_imag_1316() {
     // resolume cg box. `obs_fleet_facet_members genlock-lock` still LISTS imag (the policy is
     // unchanged); the exclusion is the `retired` filter in obs_fleet_boxes, so a one-word flip back
     // to `always` on re-provision restores it automatically.
-    // issue 1317: strih-lx (the Linux strih notebook) also joins genlock-lock (a linux-genlock box
+    // issue 1317: strih-snv (the Linux strih notebook) also joins genlock-lock (a linux-genlock box
     // that locks every input to the fleet clock), appended after resolume.
-    // issue 1317 (M4): the Windows strih row is retired; strih-lx takes the strih slot at .202.
+    // issue 1317 (M4): the Windows strih row is retired; strih-snv takes the strih slot at .202.
     assert_eq!(
         boxes("genlock-lock"),
-        "strih-lx|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
     );
     // A retired imag must not appear in ANY facet roster.
     for facet in [
@@ -192,21 +201,21 @@ fn fleet_boxes_genlock_lock_excludes_retired_imag_1316() {
 
 #[test]
 fn fleet_strih_lx_is_the_always_home_production_strih_at_202_1317() {
-    // issue 1317 (M4 cut-over 20.9.2026): strih-lx IS the production strih. Its row dials the real
-    // address (strih-lx.lan has no DNS entry on dev1 -- the old traveling row read it as AWAY, so
+    // issue 1317 (M4 cut-over 20.9.2026): strih-snv IS the production strih. Its row dials the real
+    // address (a fixed box dials its IP -- the old traveling `.lan` row read it as AWAY, so
     // every dev1 watchdog was blind to the production strih) and it is permanently home.
-    assert_eq!(fleet_stdout("obs_fleet_host strih-lx"), "10.77.9.202");
-    assert_eq!(fleet_stdout("obs_fleet_class strih-lx"), "linux-genlock");
-    assert_eq!(fleet_stdout("obs_fleet_home_check strih-lx"), "always");
+    assert_eq!(fleet_stdout("obs_fleet_host strih-snv"), "10.77.9.202");
+    assert_eq!(fleet_stdout("obs_fleet_class strih-snv"), "linux-genlock");
+    assert_eq!(fleet_stdout("obs_fleet_home_check strih-snv"), "always");
     assert!(
-        is_home("strih-lx", &[]),
-        "strih-lx must be home with no probe"
+        is_home("strih-snv", &[]),
+        "strih-snv must be home with no probe"
     );
-    // No facet may still dial the unresolvable hostname.
+    // No facet may dial a DNS name for the fixed strih (issue 1317 M4).
     for facet in ALL_FACETS {
         assert!(
-            !boxes(facet).contains("strih-lx.lan"),
-            "facet {facet} still dials the unresolvable strih-lx.lan: {}",
+            !boxes(facet).contains("strih-snv.lan"),
+            "facet {facet} still dials the strih-snv.lan name: {}",
             boxes(facet)
         );
     }
@@ -215,7 +224,7 @@ fn fleet_strih_lx_is_the_always_home_production_strih_at_202_1317() {
 #[test]
 fn fleet_windows_strih_row_is_retired_from_the_list_1317() {
     // The Windows strih PC is gone (M4, 20.9.2026). Its row is REMOVED (not `retired`): its address
-    // .202 now belongs to strih-lx, so keeping `strih|10.77.9.202|windows-genlock` would make
+    // .202 now belongs to strih-snv, so keeping `strih|10.77.9.202|windows-genlock` would make
     // `obs_fleet_host strih` hand a Linux box to a Windows-class caller. An explicit `strih` lookup
     // fails closed like any unknown name.
     let (rc, out, _err) = run_fleet("obs_fleet_host strih", &[]);
@@ -244,7 +253,7 @@ fn fleet_windows_strih_row_is_retired_from_the_list_1317() {
 
 #[test]
 fn fleet_strih_lx_facet_membership_by_premise_1317() {
-    // strih-lx joins every facet whose premise is a platform-neutral read of the production strih
+    // strih-snv joins every facet whose premise is a platform-neutral read of the production strih
     // (ping / OBS-WS :4455 / its own :8899 bundle-state server / its dantesync :8898).
     for facet in [
         "audio-lag",
@@ -255,21 +264,21 @@ fn fleet_strih_lx_facet_membership_by_premise_1317() {
         "render-freeze",
     ] {
         assert!(
-            boxes(facet).contains("strih-lx|10.77.9.202"),
-            "facet {facet} must watch the production strih-lx: {}",
+            boxes(facet).contains("strih-snv|10.77.9.202"),
+            "facet {facet} must watch the production strih-snv: {}",
             boxes(facet)
         );
     }
     assert_eq!(
         fleet_stdout("obs_fleet_facet_members ndi-portmap"),
-        "strih-lx"
+        "strih-snv"
     );
-    // vb-matrix is a WINDOWS VB-Audio Matrix process check (PipeWire replaced it on strih-lx);
+    // vb-matrix is a WINDOWS VB-Audio Matrix process check (PipeWire replaced it on strih-snv);
     // av-step is the stream box's av-sync dock only.
     for facet in ["vb-matrix", "av-step"] {
         assert!(
-            !boxes(facet).contains("strih-lx"),
-            "facet {facet} must NOT carry strih-lx: {}",
+            !boxes(facet).contains("strih-snv"),
+            "facet {facet} must NOT carry strih-snv: {}",
             boxes(facet)
         );
     }
@@ -286,11 +295,11 @@ fn dantesync_clock_default_obs_nodes_name_the_production_strih_1317() {
             "DANTE_CLOCK_OBS_NODES",
             &[]
         ),
-        "strih-lx stream resolume"
+        "strih-snv stream-snv resolume-snv"
     );
 }
 
-const ALL_FACETS: [&str; 15] = [
+const ALL_FACETS: [&str; 16] = [
     "audio-lag",
     "av-step",
     "vb-matrix",
@@ -306,6 +315,7 @@ const ALL_FACETS: [&str; 15] = [
     "ndi-sender",
     "win-baseline",
     "audio-mixer",
+    "obs-handles",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -319,7 +329,7 @@ fn fleet_obs_session_facet_is_windows_genlock_only_1317() {
     // boxes: stream + resolume (the latter gated on is_home by the consumer).
     assert_eq!(
         boxes("obs-session"),
-        "stream|10.77.9.204 resolume|resolume.lan"
+        "stream-snv|10.77.9.204 resolume-snv|resolume.lan"
     );
     for m in fleet_stdout("obs_fleet_facet_members obs-session").split_whitespace() {
         assert_eq!(
@@ -333,12 +343,12 @@ fn fleet_obs_session_facet_is_windows_genlock_only_1317() {
 #[test]
 fn fleet_burn_reconcile_and_rig_restore_facets_watch_strih_lx_1317() {
     // Both are OBS-WebSocket-only (GetStats renderTotalFrames + obs_burn_filter sweeps; the
-    // obs_phase2 program-scene read + teardown) -- platform-neutral, so the production strih-lx
+    // obs_phase2 program-scene read + teardown) -- platform-neutral, so the production strih-snv
     // keeps the coverage the Windows strih had.
     for facet in ["burn-reconcile", "rig-restore"] {
         assert_eq!(
             boxes(facet),
-            "strih-lx|10.77.9.202 stream|10.77.9.204",
+            "strih-snv|10.77.9.202 stream-snv|10.77.9.204",
             "facet {facet}"
         );
     }
@@ -355,21 +365,21 @@ fn poll_now(name: &str, env: &[(&str, &str)]) -> bool {
 
 #[test]
 fn fleet_poll_now_gates_traveling_and_retired_boxes_only_1317() {
-    let force = [("OBS_FLEET_HOME", "resolume")];
+    let force = [("OBS_FLEET_HOME", "resolume-snv")];
     assert!(
-        poll_now("strih-lx", &force),
+        poll_now("strih-snv", &force),
         "an always box is polled even when not in the force-list"
     );
-    assert!(poll_now("stream", &force));
-    assert!(poll_now("resolume", &force), "traveling + home -> poll");
+    assert!(poll_now("stream-snv", &force));
+    assert!(poll_now("resolume-snv", &force), "traveling + home -> poll");
     let away = [("OBS_FLEET_HOME", "nobody")];
     assert!(
-        !poll_now("resolume", &away),
+        !poll_now("resolume-snv", &away),
         "traveling + away -> never poll"
     );
     assert!(!poll_now("imag", &[]), "a retired box is never polled");
     assert!(
-        poll_now("strih-pp", &away),
+        poll_now("strih-zz", &away),
         "an unknown override name is polled as given"
     );
 }
@@ -399,8 +409,8 @@ fn is_home(name: &str, env: &[(&str, &str)]) -> bool {
 #[test]
 fn fleet_is_home_always_box_is_unconditionally_home_1296() {
     // a `home-check=always` box needs no probe and no force-list.
-    assert!(is_home("strih-lx", &[]));
-    assert!(is_home("stream", &[]));
+    assert!(is_home("strih-snv", &[]));
+    assert!(is_home("stream-snv", &[]));
 }
 
 #[test]
@@ -414,9 +424,15 @@ fn fleet_retired_box_is_never_home_1316() {
 #[test]
 fn fleet_is_home_traveling_box_both_branches_via_force_list_1296() {
     // HOME branch: the force-list names resolume -> home.
-    assert!(is_home("resolume", &[("OBS_FLEET_HOME", "resolume")]));
+    assert!(is_home(
+        "resolume-snv",
+        &[("OBS_FLEET_HOME", "resolume-snv")]
+    ));
     // AWAY branch: the force-list names a DIFFERENT box -> resolume is away (deterministic, no I/O).
-    assert!(!is_home("resolume", &[("OBS_FLEET_HOME", "stream")]));
+    assert!(!is_home(
+        "resolume-snv",
+        &[("OBS_FLEET_HOME", "stream-snv")]
+    ));
 }
 
 #[test]
@@ -504,26 +520,26 @@ fn sourced_boxes_default_is_byte_exact_for_the_legacy_facets_1296() {
     // The three pre-#1296 facets reproduce their exact legacy literal when sourced with no override.
     assert_eq!(
         watchdog_var("audio-lag-alert-watchdog.sh", "BOXES", &[]),
-        "strih-lx|10.77.9.202 stream|10.77.9.204"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
     );
     assert_eq!(
         watchdog_var("av-step-alert-watchdog.sh", "BOXES", &[]),
-        "stream|10.77.9.204"
+        "stream-snv|10.77.9.204"
     );
     assert_eq!(
         watchdog_var("vb-matrix-alert-watchdog.sh", "BOXES", &[]),
-        "stream|10.77.9.204"
+        "stream-snv|10.77.9.204"
     );
 }
 
 #[test]
 fn bundle_state_default_carries_resolume_1296() {
-    // issue 1317 (M4): the production strih is the Linux strih-lx at .202 (the Windows strih row
+    // issue 1317 (M4): the production strih is the Linux strih-snv at .202 (the Windows strih row
     // is retired) -- a fully-unreachable traveling box (resolume) is deferred to the reachability
     // watchdog by bundle-state itself, so it is traveling-safe without a gate.
     assert_eq!(
         watchdog_var("bundle-state-alert-watchdog.sh", "BOXES", &[]),
-        "strih-lx|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
     );
 }
 
@@ -542,9 +558,9 @@ fn boxes_env_override_still_wins_byte_compatibly_1296() {
         watchdog_var(
             "vb-matrix-alert-watchdog.sh",
             "BOXES",
-            &[("VB_MATRIX_BOXES", "stream|1.2.3.4")]
+            &[("VB_MATRIX_BOXES", "stream-snv|1.2.3.4")]
         ),
-        "stream|1.2.3.4"
+        "stream-snv|1.2.3.4"
     );
     assert_eq!(
         watchdog_var(
@@ -553,11 +569,14 @@ fn boxes_env_override_still_wins_byte_compatibly_1296() {
             // OBS_FLEET_HOME forces is_home deterministically so sourcing network-reach never fires a
             // live getent/:4455 probe — keeps this Tier-0 case offline + fast (#1296 review 🔵2).
             &[
-                ("NETWORK_REACH_BOXES", "strih|127.0.0.1 resolume|127.0.0.2"),
+                (
+                    "NETWORK_REACH_BOXES",
+                    "strih|127.0.0.1 resolume-snv|127.0.0.2"
+                ),
                 ("OBS_FLEET_HOME", "strih"),
             ]
         ),
-        "strih|127.0.0.1 resolume|127.0.0.2"
+        "strih|127.0.0.1 resolume-snv|127.0.0.2"
     );
 }
 
@@ -573,16 +592,16 @@ fn network_reach_resolume_report_only_when_away_paging_when_home_1296() {
         watchdog_var(
             "network-reach-alert-watchdog.sh",
             "REPORT_ONLY_BOXES",
-            &[("OBS_FLEET_HOME", "stream")]
+            &[("OBS_FLEET_HOME", "stream-snv")]
         ),
-        "resolume"
+        "resolume-snv"
     );
     // HOME (force-list names resolume) -> resolume PROMOTED to a paging node (report-only empty).
     assert_eq!(
         watchdog_var(
             "network-reach-alert-watchdog.sh",
             "REPORT_ONLY_BOXES",
-            &[("OBS_FLEET_HOME", "resolume")]
+            &[("OBS_FLEET_HOME", "resolume-snv")]
         ),
         ""
     );
@@ -596,11 +615,11 @@ fn network_reach_report_only_env_override_still_wins_1296() {
             "network-reach-alert-watchdog.sh",
             "REPORT_ONLY_BOXES",
             &[
-                ("NETWORK_REACH_REPORT_ONLY_BOXES", "resolume"),
-                ("OBS_FLEET_HOME", "resolume"),
+                ("NETWORK_REACH_REPORT_ONLY_BOXES", "resolume-snv"),
+                ("OBS_FLEET_HOME", "resolume-snv"),
             ]
         ),
-        "resolume"
+        "resolume-snv"
     );
 }
 
@@ -612,7 +631,10 @@ fn network_reach_report_only_env_override_still_wins_1296() {
 fn obs_liveness_keeps_strih_stream_ip_literals_1296() {
     let src = watchdog_src("obs-liveness-watchdog.sh");
     assert!(src.contains("10.77.9.202"), "strih IP literal must remain");
-    assert!(src.contains("10.77.9.204"), "stream IP literal must remain");
+    assert!(
+        src.contains("10.77.9.204"),
+        "stream-snv IP literal must remain"
+    );
     assert!(
         src.contains("obs_fleet_boxes obs-liveness"),
         "obs-liveness must derive its poll set from obs_fleet_boxes"
@@ -622,48 +644,57 @@ fn obs_liveness_keeps_strih_stream_ip_literals_1296() {
 #[test]
 fn obs_liveness_polls_resolume_only_when_home_1296() {
     // Stub the python probe to echo one verdict line per --box it receives, so VERDICT_LINES names
-    // exactly the polled boxes. AWAY -> strih-lx+stream only; HOME -> + resolume.
+    // exactly the polled boxes. AWAY -> strih-snv+stream only; HOME -> + resolume.
     let stub = manifest_dir().join("tests/fixtures/obs_liveness_echo_probe_1296.py");
     let stub = stub.to_string_lossy().to_string();
-    let away = watchdog_measure(&[("OBS_FLEET_HOME", "stream"), ("OBS_LIVENESS_PROBE", &stub)]);
+    let away = watchdog_measure(&[
+        ("OBS_FLEET_HOME", "stream-snv"),
+        ("OBS_LIVENESS_PROBE", &stub),
+    ]);
     assert!(
-        away.contains("strih-lx") && away.contains("stream"),
+        away.contains("strih-snv") && away.contains("stream-snv"),
         "away: {away}"
     );
     assert!(
-        !away.contains("resolume"),
-        "away must not poll resolume: {away}"
+        !away.contains("resolume-snv"),
+        "away must not poll resolume-snv: {away}"
     );
     let home = watchdog_measure(&[
-        ("OBS_FLEET_HOME", "resolume"),
+        ("OBS_FLEET_HOME", "resolume-snv"),
         ("OBS_LIVENESS_PROBE", &stub),
     ]);
-    assert!(home.contains("resolume"), "home must poll resolume: {home}");
+    assert!(
+        home.contains("resolume-snv"),
+        "home must poll resolume-snv: {home}"
+    );
 }
 
 #[test]
 fn obs_liveness_strih_lx_arm_keeps_the_strih_knobs_1317() {
-    // issue 1317: strih-lx is polled through its OWN arm, which keeps the strih knobs
+    // issue 1317: strih-snv is polled through its OWN arm, which keeps the strih knobs
     // (STRIH_HOST + STRIH_TARGET_FPS) -- not the generic default-fps fallback. The echo stub prints
     // the full `--box name=host:fps` value, so the chosen host/fps are observable.
     let stub = manifest_dir().join("tests/fixtures/obs_liveness_echo_probe_1296.py");
     let stub = stub.to_string_lossy().to_string();
     let out = watchdog_measure(&[
-        ("OBS_FLEET_HOME", "stream"),
+        ("OBS_FLEET_HOME", "stream-snv"),
         ("OBS_LIVENESS_PROBE", &stub),
         ("STRIH_HOST", "1.2.3.4"),
         ("STRIH_TARGET_FPS", "29"),
         ("OBS_LIVENESS_DEFAULT_FPS", "17"),
     ]);
     assert!(
-        out.contains("box=strih-lx=1.2.3.4:29"),
-        "strih-lx must use STRIH_HOST + STRIH_TARGET_FPS: {out}"
+        out.contains("box=strih-snv=1.2.3.4:29"),
+        "strih-snv must use STRIH_HOST + STRIH_TARGET_FPS: {out}"
     );
-    // Default: the knob-free STRIH_HOST default is strih-lx's fleet address .202.
-    let dflt = watchdog_measure(&[("OBS_FLEET_HOME", "stream"), ("OBS_LIVENESS_PROBE", &stub)]);
+    // Default: the knob-free STRIH_HOST default is strih-snv's fleet address .202.
+    let dflt = watchdog_measure(&[
+        ("OBS_FLEET_HOME", "stream-snv"),
+        ("OBS_LIVENESS_PROBE", &stub),
+    ]);
     assert!(
-        dflt.contains("box=strih-lx=10.77.9.202:30"),
-        "strih-lx default must be .202 at 30 fps: {dflt}"
+        dflt.contains("box=strih-snv=10.77.9.202:30"),
+        "strih-snv default must be .202 at 30 fps: {dflt}"
     );
 }
 
@@ -694,10 +725,10 @@ fn fleet_has_ahk_is_the_one_ahk_watcher_fact_1317() {
     // issue 1317 part 3: the retired Windows strih's planner arms are gone, so the name `strih` no
     // longer carries the AHK fact either (it used to, for those legacy arms).
     for (name, want) in [
-        ("resolume", "1"),
+        ("resolume-snv", "1"),
         ("strih", "0"),
-        ("stream", "0"),
-        ("strih-lx", "0"),
+        ("stream-snv", "0"),
+        ("strih-snv", "0"),
         ("imag", "0"),
     ] {
         assert_eq!(
@@ -709,17 +740,17 @@ fn fleet_has_ahk_is_the_one_ahk_watcher_fact_1317() {
 }
 
 /// issue 1317 part 3: the ONE class gate a Windows-only dev1 tool calls before touching an address.
-/// 10.77.9.202 (and the name strih-lx) resolve to the linux-genlock class, so a PowerShell/schtasks/
+/// 10.77.9.202 (and the name strih-snv) resolve to the linux-genlock class, so a PowerShell/schtasks/
 /// C:\ tool aimed at the production strih refuses; a Windows fleet box passes; an address the list
 /// does not know passes (an explicit ops target stays authoritative).
 #[test]
 fn fleet_class_for_host_and_the_linux_refusal_gate_1317() {
     for (host, want) in [
         ("10.77.9.202", "linux-genlock"),
-        ("strih-lx", "linux-genlock"),
+        ("strih-snv", "linux-genlock"),
         ("10.77.9.204", "windows-genlock"),
         ("resolume.lan", "windows-genlock"),
-        ("resolume", "windows-genlock"),
+        ("resolume-snv", "windows-genlock"),
     ] {
         assert_eq!(
             fleet_stdout(&format!("obs_fleet_class_for_host {host}")),
@@ -736,7 +767,7 @@ fn fleet_class_for_host_and_the_linux_refusal_gate_1317() {
     );
     assert_eq!(
         rc, 1,
-        "a Windows action at the Linux strih-lx must be refused"
+        "a Windows action at the Linux strih-snv must be refused"
     );
     assert!(
         err.contains("some-tool.sh")

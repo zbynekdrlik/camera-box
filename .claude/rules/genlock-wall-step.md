@@ -22,7 +22,7 @@ three of them. The decision is ROZHODNUTÉ 5841039244 on the ticket.
 | consumer | before | now |
 |---|---|---|
 | render tick, `genlock_next_deadline` (obs-video.c) | the correction toward the stepped wall grid is clamped to 2 ms/tick: ~9 ticks off phase at 30 fps, and the NDI sender (DistroAV floors the wall clock AT EMIT) stamps off phase meanwhile | ONE detector (`obs-genlock-wall-step.h` ↔ `src/genlock_wall_step.rs`): a bracketed mono/wall/mono read; a wall−media jump > 2 ms vs the previous tick is a step; the deadline takes the wall-grid target UNCLAMPED in that one tick. One `genlock-regrid:` log line. |
-| LOCK indicator `qpc_drift` (OBSBasicStatusBar.cpp) | the single-sample jump sat in the 300 s history: DEGRADED for 300 s | `genlock_qpc_wall_step_rebase_ms` (GenlockLockState.hpp ↔ `src/genlock_lock_state.rs`) BOOKS a jump with 33 ms < \|jump\| ≤ 66 ms (two frames; dantesync steps the date at a 50 ms error), at most 1 per window: the history is re-based by it, one `genlock-wall-step:` line, LOCKED. A bigger jump (> 66 ms: a clock set, an NTP-fallback step) or a second step in the window stays in the history and DEGRADES through the unchanged `genlock_qpc_drift_beyond_bound`. |
+| LOCK indicator `qpc_drift` (OBSBasicStatusBar.cpp) | the single-sample jump sat in the 300 s history: DEGRADED for 300 s | `genlock_qpc_wall_step_rebase_ms` (GenlockLockState.hpp ↔ `src/genlock_lock_state/qpc_step.rs`) BOOKS a jump with 33 ms < \|jump\| ≤ 66 ms (two frames; dantesync steps the date at a 50 ms error), at most 1 per window: the history is re-based by it, one `genlock-wall-step:` line, LOCKED. A bigger jump (> 66 ms: a clock set, an NTP-fallback step) or a second step in the window stays in the history and DEGRADES through the unchanged `genlock_qpc_drift_beyond_bound`. |
 | ASRC (asrc-compensator.c ↔ `src/asrc_bench.rs`) | the stream `mbc` really lost 44 ms of Dante samples (upstream of OBS); the re-base armed the proportional ±100 ppm restore: 3–4 min | a re-based step the buffer level CONFIRMS is booked as `step_recover_ms` with a setpoint move of the same size, and paid back at `ASRC_STEP_RECOVER_PPM` = 1000 ppm as `step_recover_ppm`, a separate term on top of `applied_ppm`. `recover_ms=` on the `asrc:` line. |
 
 DistroAV needs no change: its video stamp is `floor(wall at emit)`, so once the tick is on the new
@@ -75,7 +75,11 @@ sender) is the supervisor's rig investigation, not this code.
   exactly as on any late tick; the re-grid itself never adds a lagged frame when it lands on time.
 - **The stamp interval that carries the step is inherent**: after a −51 ms step the next stamp is one
   slot BACKWARD (a receiver shows a repeated frame), after +51 ms it skips a slot. No sender change can
-  avoid it (the wall moved); the re-grid only keeps every stamp after it on the grid.
+  avoid it (the wall moved); the re-grid only keeps every stamp after it on the grid. It is inherent
+  only at the SENDER: on this fleet every receiver steps too, so since issue 1372 part B the receive
+  FIFO relabels the old-epoch frames by the booked step and a step of 100 ms or more (the nightly
+  dantesync step, a multiple of 200 ms since 1.16.0) costs a receiver nothing
+  (`genlock-fifo-relabel.md`). A smaller step still pays this interval.
 - **The recovery books the MEASURED loss** (the regression residual, which counts the lost samples
   exactly), confirmed by the SIGNED level corroboration (the buffer moved the same way by ≥ half), the
   total owed capped at ±`ASRC_STEP_RECOVER_MAX_MS` = 100 ms. The per-callback level only confirms: it
@@ -123,9 +127,9 @@ sender) is the supervisor's rig investigation, not this code.
 ## Live acceptance (supervisor, FULL bundle: libobs + frontend)
 
 At the next fleet date step: one `genlock-regrid:` and one `genlock-wall-step:` line per OBS box
-(the Windows boxes and strih-lx alike — a date step moves `CLOCK_REALTIME`, never `CLOCK_MONOTONIC`);
+(the Windows boxes and strih-snv alike — a date step moves `CLOCK_REALTIME`, never `CLOCK_MONOTONIC`);
 resolume LOCK stays LOCKED; stream `mbc` `recover_ms=` > 0 on the step's `asrc:` line and `level_avg=`
-back within ±2 ms of `target=` inside a minute, `applied=` inside its steady band; strih-lx `CG-obs`
+back within ±2 ms of `target=` inside a minute, `applied=` inside its steady band; strih-snv `CG-obs`
 and stream `2ME PGM` 0 new relocks at the step.
 
 ## Not this path: the resolume `cg-obs` bursts

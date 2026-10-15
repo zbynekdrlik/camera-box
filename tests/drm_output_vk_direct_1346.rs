@@ -1,8 +1,8 @@
-//! issue 1346 -- the strih-lx BUILT-IN HDMI (NVIDIA, X output HDMI-0) as a fixed, indestructible
+//! issue 1346 -- the strih-snv BUILT-IN HDMI (NVIDIA, X output HDMI-0) as a fixed, indestructible
 //! output like imag's: a second backend of the vendored DRM-output module, NVIDIA Vulkan direct
 //! display (`VK_EXT_acquire_xlib_display` + `VK_KHR_display`), selected by `"backend":"vk-direct"`
 //! in `~/.camera-box/drm-output.json` (owner rulings 5838578002 + 5838662632, main design
-//! 5838663570; STEP 0 + the GPU interop proven live on strih-lx, 5838745730 + 5839007372).
+//! 5838663570; STEP 0 + the GPU interop proven live on strih-snv, 5838745730 + 5839007372).
 //!
 //! Shape pinned here:
 //! - libobs: `enum obs_drm_output_backend` + a `backend` field in the config; the lease backend
@@ -36,11 +36,16 @@ const VK_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.h";
 const VK_INTERNAL_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h";
 const VK_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.c";
 const VK_SETUP_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c";
+/// issue 1424 review: the re-mode + rebuild moved out of the setup TU (the 1000-line budget).
+const VK_REMODE_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-remode.c";
 const LIBOBS_LINUX_CMAKE: &str = "vendor/obs-studio/libobs/cmake/os-linux.cmake";
 const LINUX_GENLOCK_YML: &str = ".github/workflows/linux-genlock.yml";
 const VERIFY_STRIH: &str = "scripts/verify-strih.sh";
 const RIG_HARNESS: &str = "tests/c/drm_output_vk_rig_harness.c";
 const PARITY_TSV: &str = "tests/fixtures/drm_output_backend_parity.tsv";
+/// issue 1424 part 2: the instance registry routes each output to its backend's ops (the routing that
+/// used to be the `owns()` checks of obs-drm-output.c), and the autostart + the ONE raw blit live here.
+const OUTPUTS_C: &str = "vendor/obs-studio/libobs/obs-drm-output-outputs.c";
 
 fn repo(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
@@ -98,15 +103,15 @@ fn header_declares_the_backend_enum_and_config_field() {
     let i = squish(&file(INTERNAL_H));
     for token in [
         "struct drm_output_backend_ops {",
-        "bool (*start)(const struct obs_drm_output_config *cfg);",
-        "void (*stop)(void);",
-        "bool (*on_frame)(void);",
-        "bool (*owns)(void);",
-        "int (*claim)(void);",
-        "void (*publish)(int idx);",
-        "gs_texture_t *(*texture)(int idx);",
-        "void (*mode_size)(uint32_t *w, uint32_t *h);",
+        "bool (*start)(struct drm_output_inst *inst);",
+        "void (*stop)(struct drm_output_inst *inst);",
+        "void (*on_frame)(struct drm_output_inst *inst);",
+        "int (*claim)(struct drm_output_inst *inst);",
+        "void (*publish)(struct drm_output_inst *inst, int idx);",
+        "gs_texture_t *(*texture)(struct drm_output_inst *inst, int idx);",
+        "void (*mode_size)(struct drm_output_inst *inst, uint32_t *w, uint32_t *h);",
         "extern const struct drm_output_backend_ops drm_output_vk_direct_backend;",
+        "extern const struct drm_output_backend_ops drm_output_lease_backend;",
         "int drm_output_backend_from_config(const char *value);",
     ] {
         assert!(
@@ -118,13 +123,14 @@ fn header_declares_the_backend_enum_and_config_field() {
 
 #[test]
 fn the_new_tus_are_linux_only_and_built_by_libobs_with_vulkan_headers_only() {
-    for rel in [BACKEND_C, VK_C, VK_SETUP_C] {
+    for rel in [BACKEND_C, VK_C, VK_SETUP_C, VK_REMODE_C] {
         wholly_linux(rel);
     }
     let cmake = squish(&file(LIBOBS_LINUX_CMAKE));
     for token in [
         "obs-drm-output-backend.c",
         "obs-drm-output-vk-internal.h",
+        "obs-drm-output-vk-remode.c",
         "obs-drm-output-vk-setup.c",
         "obs-drm-output-vk.c",
         "obs-drm-output-vk.h",
@@ -185,10 +191,10 @@ fn the_vk_core_takes_the_display_off_x_and_presents_fifo() {
     }
     for (token, why) in [
         (
-            "g_drm_vk.vk.vkGetRandROutputDisplayEXT(",
+            "d->dev->vk.vkGetRandROutputDisplayEXT(",
             "the X RandR output -> VkDisplayKHR",
         ),
-        ("g_drm_vk.vk.vkAcquireXlibDisplayEXT(", "the acquire itself"),
+        ("d->dev->vk.vkAcquireXlibDisplayEXT(", "the acquire itself"),
         (
             "vkCreateDisplayPlaneSurfaceKHR(",
             "a display-plane surface, never an X window",
@@ -197,10 +203,7 @@ fn the_vk_core_takes_the_display_off_x_and_presents_fifo() {
             ".presentMode = VK_PRESENT_MODE_FIFO_KHR,",
             "FIFO = vblank-locked, tear-free",
         ),
-        (
-            "g_drm_vk.vk.vkReleaseDisplayEXT(",
-            "a clean release on stop",
-        ),
+        ("dev->vk.vkReleaseDisplayEXT(", "a clean release on stop"),
         (
             "VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT",
             "GL-shareable images",
@@ -250,124 +253,139 @@ fn the_vk_core_takes_the_display_off_x_and_presents_fifo() {
             "issue 1346: {VK_C} must contain `{token}` -- {why}"
         );
     }
+    // issue 1424 part 2: one display's teardown waits ITS queue idle and releases ITS display; the
+    // shared device + the instance go with the last display (destroy_device, called at the end).
+    let setup_src = file(VK_SETUP_C);
     let destroy = body_of(
-        &file(VK_SETUP_C),
-        "void drm_output_vk_destroy_all(void)",
+        &setup_src,
+        "void drm_output_vk_destroy_display(struct drm_output_vk_disp *d)",
         VK_SETUP_C,
     );
     let wait = destroy
-        .find("vkDeviceWaitIdle(")
-        .expect("destroy waits idle first");
+        .find("drm_output_vk_drain_queue_bounded(d)")
+        .expect("destroy drains the display's queue (bounded) first");
     let release = destroy
         .find("vkReleaseDisplayEXT(")
         .expect("destroy releases the display");
-    let inst = destroy
-        .find("vkDestroyInstance(")
-        .expect("destroy frees the instance");
+    let last = destroy
+        .find("drm_output_vk_destroy_device(dev);")
+        .expect("the last display frees the device + instance");
     assert!(
-        wait < release && release < inst,
-        "issue 1346: teardown order = wait idle -> release the display -> destroy the instance"
+        wait < release && release < last,
+        "issue 1346: teardown order = wait idle -> release the display -> destroy the device + instance"
+    );
+    let device = body_of(
+        &setup_src,
+        "static void drm_output_vk_destroy_device(struct drm_output_vk_device *dev)",
+        VK_SETUP_C,
+    );
+    let dwait = device
+        .find("vkDeviceWaitIdle(")
+        .expect("the device idle wait");
+    let ddev = device.find("vkDestroyDevice(").expect("the device destroy");
+    let dinst = device
+        .find("vkDestroyInstance(")
+        .expect("the instance destroy");
+    assert!(
+        dwait < ddev && ddev < dinst,
+        "issue 1346: device idle -> device -> instance"
     );
 }
 
 #[test]
 fn the_lease_module_routes_to_vk_direct_and_keeps_the_lease_default() {
-    let c = file(DRM_C);
+    // issue 1424 part 2: each output instance carries its backend's ops; the registry picks them from
+    // the instance's backend (lease = the default), and every entry point + the mailbox seam routes
+    // through them -- the per-instance form of the issue-1346 `owns()` routing.
+    let o = file(OUTPUTS_C);
+    let add = body_of(
+        &o,
+        "static struct drm_output_inst *drm_output_inst_add_locked(const struct drm_output_spec *sp, bool program)",
+        OUTPUTS_C,
+    );
+    assert!(
+        squish(&add).contains(
+            "inst->ops = inst->backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT ? &drm_output_vk_direct_backend : &drm_output_lease_backend;"
+        ),
+        "issue 1346: an instance is routed to vk-direct only for the vk-direct backend, else the lease"
+    );
     let start = body_of(
-        &c,
-        "bool obs_drm_output_start(const struct obs_drm_output_config *cfg)",
-        DRM_C,
+        &o,
+        "static bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
+        OUTPUTS_C,
     );
-    let route = start
-        .find("if (cfg->backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT)")
-        .expect("start() must route the vk-direct backend");
-    let lease = start
-        .find("pthread_mutex_lock(&g_drm.lock);")
-        .expect("the lease start");
     assert!(
-        route < lease,
-        "issue 1346: the backend is chosen BEFORE any lease work"
+        start.contains("if (!inst->ops->start(inst)) {"),
+        "issue 1346: start goes to the backend"
     );
-    assert!(start.contains("return drm_output_vk_direct_backend.start(cfg);"));
-
-    let stop = body_of(&c, "void obs_drm_output_stop(void)", DRM_C);
-    let vk_stop = stop
-        .find("drm_output_vk_direct_backend.stop();")
-        .expect("stop() stops vk-direct");
-    let join = stop
-        .find("pthread_join(th, NULL);")
-        .expect("the lease join");
+    let stop = body_of(
+        &o,
+        "static void drm_output_inst_stop_locked(struct drm_output_inst *inst)",
+        OUTPUTS_C,
+    );
     assert!(
-        vk_stop < join,
-        "issue 1346: vk-direct is stopped before the lease path runs"
+        stop.contains("inst->ops->stop(inst);"),
+        "issue 1346: stop goes to the backend"
     );
-
-    let frame = body_of(&c, "void obs_drm_output_on_frame(void)", DRM_C);
-    let vk_frame = frame
-        .find("if (drm_output_vk_direct_backend.on_frame())")
-        .expect("the frame hook routes vk-direct");
-    let lease_gate = frame
-        .find("if (!os_atomic_load_bool(&g_drm.program_want))")
-        .expect("the lease fast gate");
+    let frame = body_of(&o, "void obs_drm_output_on_frame(void)", OUTPUTS_C);
     assert!(
-        vk_frame < lease_gate,
-        "issue 1346: the vk-direct hook runs first and returns"
+        frame.contains("g_outs[i].ops->on_frame(&g_outs[i]);"),
+        "issue 1346: the frame hook runs every output's backend hook"
     );
-
     for (sig, call) in [
         (
-            "int drm_output_claim_render_buf(void)",
-            "return drm_output_vk_direct_backend.claim();",
+            "int drm_output_claim_render_buf(struct drm_output_inst *inst)",
+            "return inst->ops->claim(inst);",
         ),
         (
-            "void drm_output_publish_render_buf(int idx)",
-            "drm_output_vk_direct_backend.publish(idx);",
+            "void drm_output_publish_render_buf(struct drm_output_inst *inst, int idx)",
+            "inst->ops->publish(inst, idx);",
         ),
         (
-            "gs_texture_t *drm_output_render_buf_texture(int idx)",
-            "return drm_output_vk_direct_backend.texture(idx);",
+            "gs_texture_t *drm_output_render_buf_texture(struct drm_output_inst *inst, int idx)",
+            "return inst->ops->texture(inst, idx);",
         ),
         (
-            "void drm_output_mode_size(uint32_t *w, uint32_t *h)",
-            "drm_output_vk_direct_backend.mode_size(w, h);",
+            "void drm_output_mode_size(struct drm_output_inst *inst, uint32_t *w, uint32_t *h)",
+            "inst->ops->mode_size(inst, w, h);",
         ),
     ] {
-        let b = body_of(&c, sig, DRM_C);
+        let b = body_of(&o, sig, OUTPUTS_C);
         assert!(
-            b.contains("if (drm_output_vk_direct_backend.owns())") && b.contains(call),
-            "issue 1346: the seam `{sig}` must route to vk-direct while it owns the output"
+            b.contains(call),
+            "issue 1346: the seam `{sig}` must route to the output's backend"
         );
     }
     let blit = body_of(
-        &c,
-        "bool drm_output_blit_raw(gs_texture_t *src, int idx)",
-        DRM_C,
+        &o,
+        "bool drm_output_blit_raw(struct drm_output_inst *inst, gs_texture_t *src, int idx)",
+        OUTPUTS_C,
     );
     assert!(
-        blit.contains("drm_output_mode_size(&dst_w, &dst_h);")
-            && !blit.contains("g_drm.mode_w, g_drm.mode_h"),
-        "issue 1346: the ONE raw blit fits into the OWNING backend's mode, not the lease mode"
+        blit.contains("drm_output_mode_size(inst, &dst_w, &dst_h);") && !blit.contains("mode_w"),
+        "issue 1346: the ONE raw blit fits into the OWNING output's backend mode"
     );
-
-    let auto = body_of(&c, "void obs_drm_output_maybe_autostart(void)", DRM_C);
-    for token in [
-        "obs_data_get_string(data, \"backend\")",
-        "drm_output_backend_from_config(backend_s)",
-        "cfg.backend = (enum obs_drm_output_backend)backend;",
-    ] {
-        assert!(
-            auto.contains(token),
-            "issue 1346: autostart must contain `{token}`"
-        );
-    }
+    let classify = body_of(
+        &o,
+        "static int drm_output_config_classify(const json_t *root, struct drm_output_spec *specs, size_t cap, size_t *n,",
+        OUTPUTS_C,
+    );
+    assert!(
+        classify.contains("drm_output_backend_from_config(drm_output_cfg_str(json_object_get(root, \"backend\")))")
+            && classify.contains("return DRM_OUTPUT_CFG_BACKEND;"),
+        "issue 1346: the autostart reads \"backend\" with the ONE grammar and refuses an unknown one"
+    );
+    let auto = body_of(&o, "void obs_drm_output_maybe_autostart(void)", OUTPUTS_C);
     let unknown = auto
-        .find("if (backend < 0) {")
-        .expect("an unknown backend is refused");
+        .find("has an unknown \\\"backend\\\" (want lease or vk-direct)")
+        .expect("an unknown backend is named");
     let started = auto
-        .find("(void)obs_drm_output_start(&cfg);")
+        .find("drm_output_inst_start_locked(")
         .expect("the start call");
     assert!(
-        unknown < started && auto[unknown..started].contains("dormant"),
+        unknown < started
+            && auto[unknown..started].contains("dormant")
+            && auto[unknown..started].contains("return;"),
         "issue 1346: an unknown \"backend\" keeps the output DORMANT (never a guessed backend)"
     );
 }
@@ -375,15 +393,19 @@ fn the_lease_module_routes_to_vk_direct_and_keeps_the_lease_default() {
 #[test]
 fn the_obs_side_stops_in_order_and_fails_open() {
     let b = file(BACKEND_C);
-    let stop = body_of(&b, "static void vkd_stop(void)", BACKEND_C);
+    let stop = body_of(
+        &b,
+        "static void vkd_stop(struct drm_output_inst *inst)",
+        BACKEND_C,
+    );
     let order = [
-        "drm_output_vk_halt();",
+        "drm_output_vk_halt(k->disp);",
         "obs_enter_graphics();",
-        "drm_output_vk_gl_unbind();",
-        "gs_texture_destroy(g_vkd.mid);",
+        "drm_output_vk_gl_unbind(k->disp);",
+        "gs_texture_destroy(k->mid);",
         "obs_leave_graphics();",
-        "drm_output_view_gl_teardown();",
-        "drm_output_vk_close();",
+        "drm_output_view_gl_teardown(inst);",
+        "drm_output_vk_close(k->disp);",
     ];
     let mut last = 0usize;
     for token in order {
@@ -393,15 +415,19 @@ fn the_obs_side_stops_in_order_and_fails_open() {
             .unwrap_or_else(|| panic!("issue 1346: vkd_stop must run {order:?} in this order; `{token}` is missing or early"));
         last = at + token.len();
     }
-    let frame = body_of(&b, "static bool vkd_on_frame(void)", BACKEND_C);
+    let frame = body_of(
+        &b,
+        "static void vkd_on_frame(struct drm_output_inst *inst)",
+        BACKEND_C,
+    );
     for token in [
         "obs_enter_graphics();",
-        "drm_output_view_frame() != DRM_OUTPUT_TICK_PROGRAM",
+        "drm_output_view_frame(inst) != DRM_OUTPUT_TICK_PROGRAM",
         "obs_get_main_texture()",
-        "drm_output_claim_render_buf()",
-        "drm_output_blit_raw(program, idx)",
-        "drm_output_publish_render_buf(idx);",
-        "os_atomic_set_bool(&g_vkd.program, false);",
+        "drm_output_claim_render_buf(inst)",
+        "drm_output_blit_raw(inst, program, idx)",
+        "drm_output_publish_render_buf(inst, idx);",
+        "os_atomic_set_bool(&k->program, false);",
     ] {
         assert!(
             frame.contains(token),
@@ -442,17 +468,17 @@ fn the_log_family_is_shared_with_verify_strih() {
     let h = file(RIG_HARNESS);
     for token in [
         "drm_output_vk_open(",
-        "drm_output_vk_gl_bind()",
+        "drm_output_vk_gl_bind(disp[i])",
         "drm_output_vk_publish_gl(",
-        "drm_output_vk_close();",
+        "drm_output_vk_close(disp[i]);",
     ] {
         assert!(
             h.contains(token),
             "issue 1346: the rig harness must drive the REAL core via `{token}`"
         );
     }
-    assert!(file(VK_H).contains(
-        "bool drm_output_vk_publish_gl(int idx, unsigned int src_gl_name, uint32_t w, uint32_t h);"
+    assert!(squish(&file(VK_H)).contains(
+        "bool drm_output_vk_publish_gl(struct drm_output_vk_disp *d, int idx, unsigned int src_gl_name, uint32_t w, uint32_t h);"
     ));
 }
 
@@ -640,7 +666,7 @@ fn pick_mode_computes_the_mode_truth_table() {
             v.join(", ")
         };
         c.push_str(&format!(
-            "    {{ const uint32_t w{i}[{cap}] = {{{}}}; const uint32_t h{i}[{cap}] = {{{}}}; const uint32_t r{i}[{cap}] = {{{}}};\n      printf(\"%d\\n\", drm_output_vk_pick_mode(w{i}, h{i}, r{i}, {n}, {nw}u, {nh}u)); }}\n",
+            "    {{ const uint32_t w{i}[{cap}] = {{{}}}; const uint32_t h{i}[{cap}] = {{{}}}; const uint32_t r{i}[{cap}] = {{{}}};\n      printf(\"%d\\n\", drm_output_vk_pick_mode(w{i}, h{i}, r{i}, {n}, {nw}u, {nh}u, 0u, 0u, 0u)); }}\n",
             list(&|m| m.0),
             list(&|m| m.1),
             list(&|m| m.2),
@@ -843,7 +869,7 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         "issue 1346: an HDMI replug (out of date / surface lost) is rebuilt, not the end of the output"
     );
     let fence = thread
-        .find("if (!drm_output_vk_wait_fence())")
+        .find("if (!drm_output_vk_wait_fence(d))")
         .expect("the fence wait");
     let done = thread
         .find("drm_output_vk_present_done(")
@@ -854,7 +880,7 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
     );
     let policy = body_of(
         &core,
-        "static bool drm_output_vk_rebuild_or_give_up(VkResult why, unsigned *rebuilds)",
+        "static bool drm_output_vk_rebuild_or_give_up(struct drm_output_vk_disp *d, VkResult why, unsigned *rebuilds)",
         VK_C,
     );
     assert!(
@@ -863,20 +889,33 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
     );
     let setup = file(VK_SETUP_C);
     assert!(
-        setup.contains("bool drm_output_vk_rebuild_presentation(bool surface_lost)"),
-        "issue 1346: the rebuild lives with the setup code"
+        file(VK_REMODE_C).contains(
+            "bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost)"
+        ),
+        "issue 1346: the rebuild lives with the presentation-change code (issue 1424: the remode TU)"
     );
-    let destroy = body_of(&setup, "void drm_output_vk_destroy_all(void)", VK_SETUP_C);
+    let destroy = body_of(
+        &setup,
+        "void drm_output_vk_destroy_display(struct drm_output_vk_disp *d)",
+        VK_SETUP_C,
+    );
     let quiesce = destroy
-        .find("g_drm_vk.submit_outstanding")
+        .find("d->submit_outstanding")
         .expect("the teardown quiesces an outstanding copy");
-    let idle = destroy.find("vkDeviceWaitIdle(").expect("the idle wait");
+    // issue 1424 part 2: one display waits ITS queue idle (the device belongs to both displays)
+    let idle = destroy
+        .find("drm_output_vk_drain_queue_bounded(d)")
+        .expect("the bounded queue drain");
     assert!(
         quiesce < idle && destroy.contains("leaking the Vulkan objects"),
         "issue 1346: an outstanding copy is waited BOUNDED before the idle wait; a wedged GPU leaks \
          instead of hanging the OBS shutdown"
     );
-    let unbind = body_of(&core, "void drm_output_vk_gl_unbind(void)", VK_C);
+    let unbind = body_of(
+        &core,
+        "void drm_output_vk_gl_unbind(struct drm_output_vk_disp *d)",
+        VK_C,
+    );
     let finish = unbind
         .find("g->Finish();")
         .expect("glFinish before the deletes");
@@ -890,9 +929,9 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         "issue 1346: the GL lookup also asks an already (privately) loaded libEGL"
     );
     let rebuild = body_of(
-        &setup,
-        "bool drm_output_vk_rebuild_presentation(bool surface_lost)",
-        VK_SETUP_C,
+        &file(VK_REMODE_C),
+        "bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost)",
+        VK_REMODE_C,
     );
     assert!(
         !rebuild.contains("vkDeviceWaitIdle("),
@@ -900,27 +939,34 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
          never block in an unbounded device wait"
     );
     assert!(
-        rebuild.contains("drm_output_vk_create_surface(true)")
+        rebuild.contains("drm_output_vk_create_surface(d, true)")
             && rebuild.contains("vkGetPhysicalDeviceSurfaceSupportKHR("),
         "issue 1346 review round 2: a rebuilt surface keeps the committed size and is re-checked for \
          present support"
     );
     assert!(
-        rebuild.contains("g_drm_vk.retired_swapchain = g_drm_vk.swapchain;")
-            && rebuild.contains("g_drm_vk.retired_surface = g_drm_vk.surface;")
+        rebuild.contains("d->retired_swapchain = d->swapchain;")
             && setup.contains(".oldSwapchain = old_swapchain"),
-        "issue 1346 review round 3: a rebuild RETIRES the replaced swapchain (+ surface) -- its last \
+        "issue 1346 review round 3: a swapchain-only rebuild RETIRES the replaced swapchain -- its last \
          present may still be queued -- instead of destroying it"
     );
+    // issue 1424 (live strih-pp): a SURFACE is never retired -- destroying a retired display-plane
+    // surface after its replacement presents ends the new presentation (-13). A surface rebuild drains
+    // the display's queue (bounded) and destroys the old presentation first
+    // (tests/drm_output_vk_two_displays_1424.rs pins the order).
     assert!(
-        rebuild.contains("const bool fresh = pending_retiree && !g_drm_vk.present_queued_since_rebuild;")
-            && thread.contains("g_drm_vk.present_queued_since_rebuild = true;"),
+        !rebuild.contains("d->retired_surface = d->surface;"),
+        "issue 1424: a display-plane surface is never retired"
+    );
+    assert!(
+        rebuild.contains("const bool fresh = d->retired_swapchain && !d->present_queued_since_rebuild;")
+            && thread.contains("d->present_queued_since_rebuild = true;"),
         "issue 1346 review round 4: a back-to-back rebuild destroys the never-presented presentation \
          and KEEPS the older retiree (its present may still be queued)"
     );
     let swap_destroy = body_of(
         &setup,
-        "static void drm_output_vk_destroy_swapchain(void)",
+        "void drm_output_vk_destroy_swapchain(struct drm_output_vk_disp *d)",
         VK_SETUP_C,
     );
     assert!(
@@ -928,20 +974,20 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         "issue 1346 review round 3: the present semaphores live across rebuilds"
     );
     assert!(
-        thread.contains("--g_drm_vk.retire_countdown == 0u")
-            && thread.contains("drm_output_vk_free_retired();"),
+        thread.contains("--d->retire_countdown == 0u")
+            && thread.contains("drm_output_vk_free_retired(d);"),
         "issue 1346 review round 3: the retirees go after RETIRE_FRAMES later signalled fences"
     );
     let surface = body_of(
         &setup,
-        "static bool drm_output_vk_create_surface(bool rebuild)",
+        "bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)",
         VK_SETUP_C,
     );
     let refuse = surface
-        .find("if (rebuild && (sel_w != g_drm_vk.mode_w || sel_h != g_drm_vk.mode_h))")
+        .find("if (rebuild && (sel_w != d->mode_w || sel_h != d->mode_h))")
         .expect("a rebuild refuses a different size");
     let commit = surface
-        .find("g_drm_vk.mode_w = sel_w;")
+        .find("d->mode_w = sel_w;")
         .expect("the mode is committed");
     let created = surface
         .find("vkCreateDisplayPlaneSurfaceKHR(")

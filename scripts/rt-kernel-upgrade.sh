@@ -115,13 +115,19 @@ emit_plan() {
   echo "# readiness: $(rt_kernel_readiness_verdict "$run" "$inst" "$cand")"
   echo "# kernel choice: $(rt_kernel_flavour)  (free Ubuntu main archive, no Pro -- STEP 1)"
   echo "# ---- atomic per-box plan (SUPERVISOR applies; reboot-class, one box at a time) ----"
-  local plan tok
+  local plan tok cmd
   plan="$(rt_kernel_upgrade_plan "$run" "$inst" "$gen" "$gd" "$cand" "$stale")"
   while IFS= read -r tok; do
     [ -n "$tok" ] || continue
     if [ "$commands" = "1" ]; then
       # stale is used only by the purge token; every other token ignores the 2nd arg.
-      printf '%-28s %s\n' "$tok" "$(rt_kernel_step_command "$tok" "$stale")"
+      cmd="$(rt_kernel_step_command "$tok" "$stale")"
+      case "$cmd" in
+        # a multi-line step (issue 1407: a pasteable `bash -s` program) goes BELOW its token, so the
+        # line a supervisor copies never carries the token in front of `bash -s`
+        *$'\n'*) printf '%s\n%s\n' "$tok" "$cmd" ;;
+        *) printf '%-28s %s\n' "$tok" "$cmd" ;;
+      esac
     else
       printf '%s\n' "$tok"
     fi

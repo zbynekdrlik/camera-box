@@ -20,6 +20,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -217,11 +221,15 @@ elif "stream-detail" in args:
     fs::write(&p, fake).expect("write fake obs_phase2.py");
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("stray-check-1271-{}-{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).expect("mkdir scratch");
-    d
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("stray-check-1271-{name}-"))
+        .tempdir()
+        .expect("mkdir scratch");
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Source the lib under the caller's REAL `set -euo pipefail` (proves the bare-statement call is

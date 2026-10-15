@@ -111,7 +111,9 @@ derivable from the verdict JSON the harness already holds post-merge.
   "rerun the edge"). Wired post-verdict ONLY on a FAILED run (`$GATE!=0`). Thresholds are
   DATA-calibrated from 19 local verdict JSONs: fires on EXACTLY the FIFO run 1804432786 (CAM2 pin
   168 frac 0.04, per-seg 5/4,7/7,5/4) and no other (not the healthy post-snap 66065064, not the
-  frozen-storm 547108056). Re-calibrate against `/tmp/recording-e2e-*/verdict-*.json`, never a feel.
+  frozen-storm 547108056). Re-calibrate against `/tmp/recording-e2e-*/verdict-*.json`, never a feel
+  (dev1 keeps only the newest 9 run dirs since issue 1395; to mine more, see the
+  `scripts/lib/e2e-rundir-retention.sh` header).
 - **Post-record stomp re-check** — reuses `obs_phase2.py verify-measurement-pins --role
   strih|stream` right after StopRecord (pins still in force; teardown restores only at cleanup exit).
 

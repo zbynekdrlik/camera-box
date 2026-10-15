@@ -1,0 +1,22 @@
+# issue 1417: the camera tally lights driven by the strih OBS -- a WebSocket relay on :9240 (the
+# WsTally protocol of tally/esp/) + an obs-websocket client to the local strih OBS. TEMPLATE:
+# setup-strih step 16f (scripts/lib/strih-tally.sh) fills the User= line with the operator and
+# installs it as /etc/systemd/system/strih-tally.service; verify-strih item 42 grades it.
+[Unit]
+Description=Camera tally relay + strih OBS client (issue 1417)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=@USER@
+ExecStart=/usr/bin/python3 /usr/local/lib/camera-box/strih_tally.py --port 9240 --obs ws://127.0.0.1:4455
+Restart=always
+# hardening: the process reads its files and talks over the network / D-Bus only
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -85,7 +85,7 @@ mv_fps_preflight_read_cmd() {
 #   (empty on read failure / no audit line -> the caller treats it as UNKNOWN, never a page). The whole
 #   read is overridable via MV_FPS_PREFLIGHT_PROBE_CMD (invoked as `$cmd <ip> <os>`) so tests drive the
 #   decision with no ssh. All greps end `|| true` so a no-match never trips the caller's `set -e`.
-#   os `strih` (issue 1360) = the strih box, whose platform (linux strih-lx | win STRIH-SNV) is
+#   os `strih` (issue 1360) = the strih box, whose platform (linux strih-snv | win STRIH-SNV) is
 #   resolved by the shared strih_log_os (scripts/lib/strih-log-read.sh) instead of being hard-coded;
 #   the resolved token then takes the unchanged linux/win read_cmd below.
 mv_fps_preflight_probe() {
@@ -98,7 +98,7 @@ mv_fps_preflight_probe() {
       os="$(strih_log_os "$ip")"
     fi
     rcmd="$(mv_fps_preflight_read_cmd "$os" "$tail_n")" || return 0
-    # issue 1360: UserKnownHostsFile=/dev/null -- the strih-lx address was the Windows box before
+    # issue 1360: UserKnownHostsFile=/dev/null -- the strih-snv address was the Windows box before
     # the cut-over, and a stale known_hosts key with StrictHostKeyChecking=no makes OpenSSH disable
     # password auth (a silent empty read); same options as scripts/lib/strih-log-read.sh.
     raw="$(timeout "${MV_FPS_PREFLIGHT_SSH_TIMEOUT:-20}" sshpass -p "$pw" \

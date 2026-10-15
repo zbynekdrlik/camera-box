@@ -1,20 +1,20 @@
 """issue 1317 part 4 -- the last Windows-strih remnants after the M4 cut-over.
 
-The strih role moved to the Linux notebook strih-lx (10.77.9.202) on 20.9.2026 and the Windows
+The strih role moved to the Linux notebook strih-snv (10.77.9.202) on 20.9.2026 and the Windows
 strih PC is retired. Parts 1-3 retired it from the fleet list, the watchdogs and the planners; this
 file pins the remaining seven remnants:
 
-  1. mv-reverify escalation: the headless strih-OBS restart routes by platform (strih-lx =
+  1. mv-reverify escalation: the headless strih-OBS restart routes by platform (strih-snv =
      `systemctl --user restart strih-obs.service` over plain ssh; Windows = the unchanged
      PowerShell/AHK program).
   2. phase_sync/av_sync calibrate push plans map the host by its obs-fleet CLASS (covered in
      test_phase_sync_calibrate.py / test_av_sync_calibrate.py) -- here: the shared python reader
      of the fleet table they (and the rig-health-audit twin) use.
-  3. rig-dev-handover-check.sh routes strih through the dantesync gate's --linux arm on strih-lx.
+  3. rig-dev-handover-check.sh routes strih through the dantesync gate's --linux arm on strih-snv.
   4. recording-e2e.sh prints platform-correct [8/8a] / pull-back / cleanup text.
   5. the retired strih's AHK defaults (has_ahk=1 + D:\\_APPS\\NL_STARTUP.ahk) are gone.
   6. ONE authority for "is this the Linux strih": the obs-fleet list, alias-aware (case, a `.lan`
-     suffix, a DNS name that resolves to the strih-lx address), and strih_platform delegates to it.
+     suffix, a DNS name that resolves to the strih-snv address), and strih_platform delegates to it.
   7. the retired PC's NIC self-heal watcher is removed.
 
 Tier-0: every check here runs bash functions directly or reads files -- no cargo, no rig.
@@ -67,12 +67,12 @@ def _platform(body: str, env: dict | None = None):
 
 # --- item 6: one alias-aware authority --------------------------------------------------------------
 
-@pytest.mark.parametrize("host", ["strih-lx.lan", "STRIH-LX", "Strih-Lx.lan", "strih.lan",
-                                  "10.77.9.202", "strih-lx"])
+@pytest.mark.parametrize("host", ["strih-snv.lan", "STRIH-SNV", "Strih-Lx.lan", "strih.lan",
+                                  "10.77.9.202", "strih-snv"])
 def test_fleet_class_for_host_catches_every_alias_of_the_linux_strih(host):
     r = _fleet(f'obs_fleet_class_for_host "{host}"')
     assert r.returncode == 0 and r.stdout == "linux-genlock", (
-        f"issue 1317: {host!r} names the Linux strih-lx and must read linux-genlock: {r!r}")
+        f"issue 1317: {host!r} names the Linux strih-snv and must read linux-genlock: {r!r}")
     r = _fleet(f'obs_fleet_refuse_linux_target "{host}" some-tool.sh')
     assert r.returncode == 1 and "some-tool.sh" in r.stderr, (
         f"issue 1317: a Windows tool aimed at {host!r} (the Linux strih) must be refused: {r!r}")
@@ -99,7 +99,7 @@ def test_unknown_names_still_pass_and_ip_literals_are_never_resolved(tmp_path):
 
 
 @pytest.mark.parametrize("host,want", [
-    ("10.77.9.202", "linux"), ("strih-lx.lan", "linux"), ("STRIH-LX", "linux"),
+    ("10.77.9.202", "linux"), ("strih-snv.lan", "linux"), ("STRIH-SNV", "linux"),
     ("strih.lan", "linux"), ("10.77.9.204", "windows"), ("192.0.2.10", "windows"), ("", "windows"),
 ])
 def test_strih_platform_delegates_to_the_fleet_list(host, want):
@@ -110,9 +110,9 @@ def test_strih_platform_delegates_to_the_fleet_list(host, want):
 
 def test_strih_platform_follows_the_fleet_class_not_a_hardcoded_name(monkeypatch):
     # review round 1: the next strih (a Linux strih-pp) must be ONE table row, no code edit in either
-    # language -- strih_platform reads the addressed row's CLASS, never the literal name strih-lx.
-    table = ("strih-lx|10.77.9.202|linux-genlock|always\nstrih-pp|10.9.8.7|linux-genlock|always\n"
-             "stream|10.77.9.204|windows-genlock|always")
+    # language -- strih_platform reads the addressed row's CLASS, never the literal name strih-snv.
+    table = ("strih-snv|10.77.9.202|linux-genlock|always\nstrih-pp|10.9.8.7|linux-genlock|always\n"
+             "stream-snv|10.77.9.204|windows-genlock|always")
     assert _platform("strih_platform 10.9.8.7", {"OBS_FLEET": table}).stdout == "linux"
     assert _platform("strih_platform strih-pp.lan", {"OBS_FLEET": table}).stdout == "linux"
     import importlib.util
@@ -127,9 +127,9 @@ def test_strih_platform_follows_the_fleet_class_not_a_hardcoded_name(monkeypatch
 
 def test_python_reader_skips_whitespace_only_rows_like_bash(monkeypatch):
     import obs_fleet_table as t
-    monkeypatch.setenv("OBS_FLEET", "strih-lx|10.77.9.202|linux-genlock|always\n   \n"
-                                     "stream|10.77.9.204|windows-genlock|always")
-    assert [r[0] for r in t.fleet_rows()] == ["strih-lx", "stream"]
+    monkeypatch.setenv("OBS_FLEET", "strih-snv|10.77.9.202|linux-genlock|always\n   \n"
+                                     "stream-snv|10.77.9.204|windows-genlock|always")
+    assert [r[0] for r in t.fleet_rows()] == ["strih-snv", "stream-snv"]
 
 
 def test_resolver_seam_is_time_bounded():
@@ -140,7 +140,7 @@ def test_resolver_seam_is_time_bounded():
 
 
 def test_strih_platform_keeps_its_env_overrides():
-    assert _platform("strih_platform strih-lx.lan", {"STRIH_PLATFORM": "windows"}).stdout == "windows"
+    assert _platform("strih_platform strih-snv.lan", {"STRIH_PLATFORM": "windows"}).stdout == "windows"
     assert _platform("strih_platform 192.0.2.10", {"STRIH_PLATFORM": "linux"}).stdout == "linux"
     assert _platform("strih_platform 10.9.9.9", {"STRIH_LX_HOST": "10.9.9.9"}).stdout == "linux"
 
@@ -149,15 +149,15 @@ def test_python_fleet_reader_matches_the_bash_table(monkeypatch):
     import obs_fleet_table as t
     monkeypatch.delenv("OBS_FLEET", raising=False)
     names = [row[0] for row in t.fleet_rows()]
-    r = _fleet('for n in strih-lx stream imag resolume; do obs_fleet_host "$n"; echo; done')
-    assert names[:1] == ["strih-lx"] and "stream" in names, names
-    assert [t.fleet_host(n) for n in ("strih-lx", "stream", "imag", "resolume")] == \
+    r = _fleet('for n in strih-snv stream-snv imag resolume-snv; do obs_fleet_host "$n"; echo; done')
+    assert names[:1] == ["strih-snv"] and "stream-snv" in names, names
+    assert [t.fleet_host(n) for n in ("strih-snv", "stream-snv", "imag", "resolume-snv")] == \
         r.stdout.splitlines(), "the python reader must read the SAME table as obs-fleet.sh"
 
     def stub(host):
         return "10.77.9.202" if host == "strih.lan" else ""
 
-    for host in ["strih-lx.lan", "STRIH-LX", "strih.lan", "10.77.9.202", "10.77.9.204",
+    for host in ["strih-snv.lan", "STRIH-SNV", "strih.lan", "10.77.9.202", "10.77.9.204",
                  "resolume.lan", "foo.example", "10.1.2.3", ""]:
         bash = _fleet(f'obs_fleet_class_for_host "{host}"').stdout or None
         assert t.fleet_class_for_host(host, resolve=stub) == bash, (
@@ -233,10 +233,10 @@ def test_restart_run_without_the_positive_marker_is_a_failed_restart(tmp_path, f
 def test_wait_and_failure_messages_are_platform_correct():
     text = (LIB / "mv-reverify-escalate.sh").read_text()
     wait = text[text.index("mv_reverify_wait_obs_ws() {"):text.index("mv_reverify_reopen_multiview_run() {")]
-    assert "after the AHK respawn" not in wait, "the :4455 wait runs on strih-lx too (no AHK there)"
+    assert "after the AHK respawn" not in wait, "the :4455 wait runs on strih-snv too (no AHK there)"
     orch = text[text.index("mv_reverify_or_escalate() {"):text.index("mv_reverify_resolve_wait() {")]
     i = orch.index("restart FAILED")
-    assert "_lx" in orch[max(0, i - 400):i], "the strih-lx restart-FAILED text must be gated on the platform"
+    assert "_lx" in orch[max(0, i - 400):i], "the strih-snv restart-FAILED text must be gated on the platform"
 
 
 def test_restart_run_on_a_windows_strih_keeps_the_powershell_program(tmp_path):
@@ -253,32 +253,32 @@ def test_orchestrator_names_the_linux_unit_when_the_restart_is_impossible():
     text = (LIB / "mv-reverify-escalate.sh").read_text()
     orch = text[text.index("mv_reverify_or_escalate() {"):text.index("mv_reverify_resolve_wait() {")]
     assert "strih-obs.service" in orch, (
-        "the escalation's restart-impossible message must name the Linux unit on strih-lx")
+        "the escalation's restart-impossible message must name the Linux unit on strih-snv")
 
 
-# --- item 3: the handover check routes strih-lx through the dantesync --linux arm --------------------
-# issue 1372: the routing now lives in the ONE dantesync fleet list (strih-lx is a `linux` row), and the
+# --- item 3: the handover check routes strih-snv through the dantesync --linux arm --------------------
+# issue 1372: the routing now lives in the ONE dantesync fleet list (strih-snv is a `linux` row), and the
 # handover check derives its whole node set from it through the gate's --fleet.
 
 def test_handover_check_uses_the_fleet_routed_nodes():
     s = (SCRIPTS / "rig-dev-handover-check.sh").read_text()
-    assert '--win "strih=' not in s, "issue 1317: the handover check must not hand strih-lx to --win"
+    assert '--win "strih=' not in s, "issue 1317: the handover check must not hand strih-snv to --win"
     assert 'run_probe dantesync bash "$DANTESYNC_PROBE" --fleet' in s
     fleet = (SCRIPTS / "lib" / "dantesync-fleet.sh").read_text()
-    assert "strih-lx|obs:strih-lx|linux|" in fleet
+    assert "strih-snv|obs:strih-snv|linux|" in fleet
 
 
 # --- item 4: recording-e2e platform-correct plan text ----------------------------------------------
 
 def test_access_label_is_platform_correct():
-    assert _platform("strih_access_label 10.77.9.202").stdout == "strih-lx, plain ssh/scp"
+    assert _platform("strih_access_label 10.77.9.202").stdout == "strih-snv, plain ssh/scp"
     assert _platform("strih_access_label 192.0.2.10").stdout == "win-strih"
 
 
 def test_linux_pullback_note_names_scp_not_a_win_strih_download():
     # The Windows FileDownload text stays INLINE in recording-e2e.sh (its else-branch) because
     # tests/harness_recording_e2e_paths.rs pins `FileDownload $STRIH_PIXELS_WIN` in that file; the
-    # helper owns only the strih-lx text.
+    # helper owns only the strih-snv text.
     lx = _platform("strih_lx_partial_pullback_note '/o/p.json' '/o/p-pixels'").stdout
     assert "win-strih" not in lx and "FileDownload" not in lx and "scp" in lx, lx
     assert "/o/p.json" in lx and "/o/p-pixels" in lx, lx
@@ -287,7 +287,7 @@ def test_linux_pullback_note_names_scp_not_a_win_strih_download():
 def test_linux_cleanup_note_is_an_exact_path_rm_never_a_sweep():
     r = _platform("strih_lx_recording_cleanup_note '  ' 10.77.9.202 \"/srv/_REC/2026-09-23 20-00-07.mkv\"")
     out = r.stdout
-    assert out.startswith("  strih-lx ssh:"), out
+    assert out.startswith("  strih-snv ssh:"), out
     assert "Remove-Item" not in out and "*" not in out
     # review round 1: the printed line is pasted into a LOCAL shell and ssh re-parses the joined
     # remote command in the REMOTE shell -- so run it through BASH both times (python's shlex does
@@ -309,7 +309,7 @@ def test_linux_cleanup_note_is_an_exact_path_rm_never_a_sweep():
 
 def test_planner_holder_note_is_platform_correct():
     lx = _platform("strih_planner_holder_note 10.77.9.202").stdout
-    assert "8/8a" in lx and "8/8b on stream" in lx and "strih-lx" in lx, lx
+    assert "8/8a" in lx and "8/8b on stream" in lx and "strih-snv" in lx, lx
     win = _platform("strih_planner_holder_note 192.0.2.10").stdout
     assert win.startswith("    The win-* MCP holder runs 8/8a + 8/8b on strih+stream"), win
 
@@ -323,7 +323,7 @@ def test_recording_e2e_routes_every_strih_plan_line_through_the_platform():
     start = next(i for i, ln in enumerate(lines) if ln.startswith("  run_strih_extract() {"))
     end = next(i for i, ln in enumerate(lines) if "[8/8b-pre] PUSH" in ln)
     # Every win-strih plan line in the [8/8a] region and at each #652 cleanup site must be the
-    # WINDOWS branch of a strih_platform split whose linux branch calls the strih-lx helper.
+    # WINDOWS branch of a strih_platform split whose linux branch calls the strih-snv helper.
     sites = [i for i, ln in enumerate(lines)
              if ("win-strih FileDownload" in ln and start < i < end) or "win-strih Shell:" in ln]
     assert len(sites) == 5, sites

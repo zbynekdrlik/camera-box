@@ -8,7 +8,7 @@
 //! WHICH frame of each 60 fps pair went on air was whatever the lock had picked. The lock picked by
 //! ARRIVAL (the ACQUIRE / backlog relock took the frame nearest the configured latency among the
 //! frames that had arrived; a GAP RESYNC adopted the head), and the #1049 converge shed's dead band
-//! (a source interval + 15 ms) held both parities. The camera arrival lag on strih-lx sits around
+//! (a source interval + 15 ms) held both parities. The camera arrival lag on strih-snv sits around
 //! the 16.7 ms edge (35–50 ms, measured 28.9.2026), so every strih OBS restart, lock or relock drew
 //! a new 33 / 50 / 67 ms presented age per camera — the S half of the per-restart camera lottery.
 //!
@@ -47,7 +47,7 @@
 use crate::genlock_grid::grid_floor_ns;
 
 /// The fixed part of an N>=2 source's presented stamp age, added to the pin. 50 ms covers the
-/// measured strih-lx camera arrival lag (stamp to receive, 35–50 ms at p50, 28.9.2026) with a
+/// measured strih-snv camera arrival lag (stamp to receive, 35–50 ms at p50, 28.9.2026) with a
 /// margin; at the production pin 3 ms the presented age is 66.7 ms = four 60 fps frames. ONE fleet
 /// constant, never a per-box number; the pin stays the one knob. Mirror of the C
 /// `GENLOCK_N2_AGE_BASE_NS` (obs-source.c). The dev1 Python twin (`scripts/genlock_n2_grid.py`)

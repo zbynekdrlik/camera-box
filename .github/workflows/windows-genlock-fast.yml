@@ -255,6 +255,26 @@ jobs:
           if ($internal -notmatch [regex]::Escape('uint64_t genlock_n2_early;') -or $internal -match [regex]::Escape('genlock_acquire_bracket_ticks')) { Write-Error "the n2_early counter field is missing or the dead #1161 bracket counter is back (issue 1367 D1)"; exit 1 }
           Write-Output "issue 1367 D1 grid-exact N>=2 release present — OK"
 
+      # issue 1372 part B: the receive FIFO relabels its old-epoch frames by a booked fleet date step
+      # (queued at the booking, late arrivals until the sender steps). Mirrors
+      # tests/genlock_fifo_relabel_wiring_1372.rs (RELABEL_WIRING / RELABEL_INTERNAL). Pure source-text
+      # guard (no build).
+      - name: Assert the receive-FIFO date-step relabel (issue 1372)
+        shell: pwsh
+        run: |
+          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
+          $internal = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
+          if ($src -notmatch [regex]::Escape('#include "obs-genlock-fifo-relabel.h"')) { Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('output->timestamp = genlock_fifo_relabel_receive(&source->genlock_relabel, source->genlock_rx_last_ts, output->timestamp, source->genlock_rx_min_delta_ns, os_gettime_ns());')) { Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('const uint64_t relabel_mono_before = os_gettime_ns(); const uint64_t wall_now = genlock_wall_now_ns(); const uint64_t relabel_mono_after = os_gettime_ns(); genlock_fifo_relabel_tick(source, relabel_mono_before, wall_now, relabel_mono_after, interval, reserve_ms);')) { Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('static struct genlock_fifo_relabel_booking genlock_relabel_booking;')) { Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('source->genlock_relabel.arrival.old_epoch = false; source->genlock_relabel.jump_ns = 0; source->genlock_relabel.last_release_mono_ns = 0;')) { Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('"relabelled=%llu "')) { Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('(unsigned long long)source->genlock_n2_early, (unsigned long long)source->genlock_relabel.relabelled,')) { Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          if ($internal -notmatch [regex]::Escape('#include "obs-genlock-fifo-relabel.h"')) { Write-Error "obs-internal.h: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          if ($internal -notmatch [regex]::Escape('struct genlock_fifo_relabel_state genlock_relabel;')) { Write-Error "obs-internal.h: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
+          Write-Output "issue 1372 receive-FIFO date-step relabel present — OK"
+
       # #1298: the fast path builds obs.dll + the frontend from the real vendored source, so a
       # `git subtree pull` (#44) that reverts the in-OBS genlock LOCK indicator would hot-swap a
       # bundle with no lock UI un-gated. Mirror the slow windows-genlock.yml #1298 gate + the
@@ -303,14 +323,29 @@ jobs:
             Write-Error "OBSBasicStatusBar.cpp: the #1303 audio-UNEXPECTED LOCK-indicator term is gone — an audible silent-by-contract source would no longer show DEGRADED; re-apply"; exit 1
           }
           # #1299 Part 3: recent_event is fed by CONNECTED inputs' PHASE events only (relocks+late_holds+backward_steps; underruns dropped), and the top offender rides the json (recent_event_inputs). A revert re-opens the chronic recent_event false-page. Mirror of src/genlock_lock_state.rs::input_phase_events + tests/genlock_lock_json_guards.rs::genlock_lock_recent_event_offender_present_1299_part3.
-          if ($sb -notmatch [regex]::Escape('genlock_input_phase_events(r.connected ? 1 : 0, r.idle ? 1 : 0, r.relocks,') -or $sb -notmatch [regex]::Escape('recent_event_input_name')) {
+          if ($sb -notmatch [regex]::Escape('recent_event_input_name')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 3 connected-phase recent_event feed / offender attribution is gone — the chronic recent_event false-page would re-open; re-apply"; exit 1
           }
           # #1341: a CONNECTED-but-IDLE input (a keep-alive-only SongPlayer playlist input) is excluded from the DEGRADED gate — the widget derives per-input idle from the received-frame delta over the window, carries n_idle + per-input idle in the v6 json, and passes idle to the pure phase-events rule. A revert re-opens the chronic idle-sender recent_event false-page on the cg OBS. Mirror of src/genlock_lock_state.rs (n_idle facet + InputEventCounts.idle) + GenlockLockState.hpp + tests/genlock_lock_json_guards.rs::genlock_lock_idle_input_class_present_1341.
-          if ($sb -notmatch [regex]::Escape('f.n_idle = scan.n_idle;') -or $sb -notmatch [regex]::Escape('GENLOCK_IDLE_INPUT_MIN_FRAMES') -or $sb -notmatch [regex]::Escape('r.idle ? "true" : "false"')) {
+          if ($sb -notmatch [regex]::Escape('f.n_idle = scan.n_idle;') -or $sb -notmatch [regex]::Escape('genlock_idle_classify_tick(genlockIdle, now_ms, rx_inputs)') -or $sb -notmatch [regex]::Escape('r.idle ? "true" : "false"')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1341 connected-but-idle input class is gone — an idle SongPlayer input would flap the box DEGRADED again; re-apply"; exit 1
           }
-          # #1299 Part 4 + #1357 scope C: the qpc_drift verdict is the wall STEP only (one semantics on every box) — NOT the cumulative wall-vs-QPC offset (grew unbounded, false-paged the fleet overnight 15./16.9.) and NOT a rate vs the dantesync f_ptp+f_phase slew (0 by construction on Linux's disciplined CLOCK_MONOTONIC, the free crystal on Windows: 28 false DEGRADED on strih-lx + 4 on stream 24.9.). Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_drift_is_the_step_only_1357.
+          # issue 1302: recent_event counts each input's NEW phase events against its own baseline (genlock_input_new_phase_events, the widget's genlock_recent_events_tick in its own TU GenlockRecentEvents.cpp, registered in frontend/cmake/ui-widgets.cmake), so a reconnect, a wake from idle or a first sight re-baselines instead of counting the input's lifetime total -- the #1299 aggregate compare held the box DEGRADED recent_event for 60 s after every reattach (the SongPlayer A/V gate). A revert brings that false DEGRADED back. Mirror of src/genlock_lock_state.rs::input_new_phase_events + tests/genlock_lock_json_guards.rs::genlock_lock_recent_event_baseline_present_1302 (parity + replay: tests/genlock_phase_baseline_1302.rs).
+          $rh = (Get-Content "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp" -Raw) -replace '\s+', ' '
+          $re = (Get-Content "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.cpp" -Raw) -replace '\s+', ' '
+          $cm = (Get-Content "vendor/obs-studio/frontend/cmake/ui-widgets.cmake" -Raw) -replace '\s+', ' '
+          if ($rh -notmatch [regex]::Escape('static inline uint64_t genlock_input_new_phase_events(int has_prev, int prev_contributing, uint64_t prev_total, int contributing, uint64_t total)') -or $sb -notmatch [regex]::Escape('genlock_recent_events_tick(genlockRecentEvents, now_ms, GENLOCK_RECENT_EVENT_WINDOW_MS, phase_inputs);') -or $re -notmatch [regex]::Escape('const uint64_t fresh = genlock_input_new_phase_events(has_prev, b.contributing ? 1 : 0, b.total, contributing, total);') -or $re -notmatch [regex]::Escape('genlock_input_phase_events(in.connected ? 1 : 0, in.idle ? 1 : 0, in.relocks,') -or $cm -notmatch [regex]::Escape('widgets/GenlockRecentEvents.cpp widgets/GenlockRecentEvents.hpp') -or $sb -match [regex]::Escape('genlockLastEventSum')) {
+            Write-Error "OBSBasicStatusBar.cpp: the issue-1302 per-input recent-event baseline is gone (or the aggregate compare is back) — every input reattach would read DEGRADED recent_event for 60 s again; re-apply"; exit 1
+          }
+          # issue 1302: the fast first idle classification -- after a (re)connect, a first sight or an OBS start an input is UNCLASSIFIED and contributes nothing until it proves a live rate (>= 60 frames over >= 5 s) or the full #1341 window classifies it (genlock_input_idle_class in GenlockLockState.hpp, the ring tick genlock_idle_classify_tick in GenlockRecentEvents.cpp). A revert re-opens the ~54 s window in which a reconnected keep-alive input's relocks DEGRADE the box. Mirror of src/genlock_lock_state.rs::input_idle_class + tests/genlock_lock_json_guards.rs::genlock_lock_idle_first_classification_present_1302 (parity + replay: tests/genlock_idle_class_1302.rs).
+          if ($rh -notmatch [regex]::Escape('static inline genlock_input_idle_class_t genlock_input_idle_class(int64_t span_ms, uint64_t delta_frames, genlock_input_idle_class_t prev_class)') -or $rh -notmatch [regex]::Escape('#define GENLOCK_IDLE_FAST_SPAN_MS INT64_C(5000)') -or $rh -notmatch [regex]::Escape('#define GENLOCK_IDLE_INPUT_MIN_FRAMES UINT64_C(60)') -or $re -notmatch [regex]::Escape('ring.idle_class = (int)genlock_input_idle_class(span_ms, delta_frames, (genlock_input_idle_class_t)ring.idle_class);') -or $sb -notmatch [regex]::Escape('r.idle = classes[i] != GENLOCK_INPUT_LIVE;') -or $sb -match [regex]::Escape('genlockRxHistory')) {
+            Write-Error "GenlockLockState.hpp / GenlockRecentEvents.cpp / OBSBasicStatusBar.cpp: the issue-1302 fast first idle classification is gone (or the widget's own idle ring is back) -- a reconnected keep-alive input would DEGRADE the box for ~54 s again; re-apply"; exit 1
+          }
+          # issue 1302: each input's audio PLACEMENT (hold mode off/latency/timecode/pending, withheld packets, the measured placement error) rides obs_genlock_stats v4 through the ONE shared fill (the genlock-fifo audit line prints the same snapshot) and the v8 genlock-lock-json inputs[] (audio_hold / audio_withheld / audio_place_err_ms), so the SongPlayer A/V gate can wait for real audio per input. The frontend names the mode through the libobs export obs_genlock_audio_hold_token (never a retyped token). Mirror of tests/genlock_lock_indicator_guards.rs::audio_placement_stats_present_1302 + tests/genlock_lock_json_guards.rs::genlock_lock_input_audio_placement_present_1302.
+          if ($api -notmatch [regex]::Escape('#define OBS_GENLOCK_STATS_VERSION 4') -or $api -notmatch [regex]::Escape('int audio_hold_mode;') -or $api -notmatch [regex]::Escape('bool audio_place_err_seeded;') -or $api -notmatch [regex]::Escape('EXPORT const char *obs_genlock_audio_hold_token(int mode);') -or $obs -notmatch [regex]::Escape('stats->audio_hold_mode = source->genlock_audio_hold_mode;') -or $obs -notmatch [regex]::Escape('genlock_audio_hold_token(gs.audio_hold_mode),') -or $obs -notmatch [regex]::Escape('const char *obs_genlock_audio_hold_token(int mode) { return genlock_audio_hold_token(mode); }') -or $sb -notmatch [regex]::Escape('rec.audio_hold = obs_genlock_audio_hold_token(st.audio_hold_mode);') -or $sb -notmatch [regex]::Escape('",\"audio_hold\":"') -or $sb -notmatch [regex]::Escape('"{\"v\":8,\"state\":"')) {
+            Write-Error "obs.h / obs-source.c / OBSBasicStatusBar.cpp: the issue-1302 per-input audio placement (stats v4 + genlock-lock-json v8) is gone — the SongPlayer A/V gate could no longer wait for real audio; re-apply"; exit 1
+          }
+          # #1299 Part 4 + #1357 scope C: the qpc_drift verdict is the wall STEP only (one semantics on every box) — NOT the cumulative wall-vs-QPC offset (grew unbounded, false-paged the fleet overnight 15./16.9.) and NOT a rate vs the dantesync f_ptp+f_phase slew (0 by construction on Linux's disciplined CLOCK_MONOTONIC, the free crystal on Windows: 28 false DEGRADED on strih-snv + 4 on stream 24.9.). Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_drift_is_the_step_only_1357.
           if ($sb -notmatch [regex]::Escape('genlock_qpc_drift_beyond_bound( qpc_rate_ready, qpc_delta_ms, qpc_elapsed_ms, qpc_max_step_ms, GENLOCK_QPC_STEP_BOUND_MS, &qpc_measured_ppm);') -or $sb -match [regex]::Escape('GENLOCK_QPC_DRIFT_PPM_BOUND')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1357 step-only qpc_drift verdict is gone (or the per-box rate bound is back) — the per-box false DEGRADED would re-open; re-apply"; exit 1
           }
@@ -388,11 +423,13 @@ jobs:
           # camera-box #1180 (P0 2026-08-23): a BY-URL bind (#1096) never verifies the connected sender's NAME, so a sender-restart NDI port reshuffle can bind the receiver to the WRONG sender and frames flow from the wrong camera under the stored label with nothing re-checking (every "2ME PGM" receiver showed Grading/cam3 live). The fix re-resolves the name via a FRESH finder once frames flow and forces a BY-NAME reset on a confirmed mismatch. This FAST path ships distroav.dll for hot-swap, so re-assert here too -- mirrors tests/distroav_by_url_identity_verify_1180.rs.
           if ($ndi -notmatch [regex]::Escape('static inline bool ndi_by_url_identity_mismatch(')) { Write-Error "ndi-source.cpp: the #1180 ndi_by_url_identity_mismatch decision helper is gone -- a BY-URL receiver never re-validates it is bound to the RIGHT sender, so a reshuffled port shows the wrong camera under the stored label"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('if (!force_by_name_1180 && owned_source_name && owned_source_name[0]) {')) { Write-Error "ndi-source.cpp: the #1180 reset block no longer gates the #1096 fresh-finder BY-URL resolution on !force_by_name_1180 -- a confirmed identity mismatch cannot force a BY-NAME reset and would re-resolve the SAME wrong-sender URL"; exit 1 }
-          if ($ndi -notmatch [regex]::Escape('ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180)')) { Write-Error "ndi-source.cpp: the #1180 verify block no longer calls ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180) once frames flow -- a wrong-sender BY-URL bind is never detected"; exit 1 }
+          if ($ndi -notmatch [regex]::Escape('if (!ndi_by_url_identity_mismatch(bound_url, url)) listed = true;')) { Write-Error "ndi-source.cpp: the #1180 verify no longer compares the bound URL with the name's records through ndi_by_url_identity_mismatch (the issue-1367 duplicate-aware verdict) once frames flow -- a wrong-sender BY-URL bind is never detected"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('force_by_name_next_reset_1180 = true;')) { Write-Error "ndi-source.cpp: the #1180 verify no longer sets force_by_name_next_reset_1180 = true on a mismatch -- the wrong-sender feed is never corrected"; exit 1 }
           # camera-box #1287: a BY-URL bind that delivers ZERO frames (a dead cached sender port after a graceful cambox restart -- the #1096 "fresh" finder keeps serving the dying sender's cached advertisement) loops BY-URL forever, because #1180's identity verify is frames-gated so it never fires and both reset-forcing arms take the default BY-URL path. The fix's pure helper forces BY-NAME on the NEXT reset after a frame-less BY-URL bind (alternating BY-URL<->BY-NAME so neither this stale-URL wedge nor the #1096 poisoned-name wedge can pin a leg). This FAST path ships distroav.dll for hot-swap, so gate here too -- mirrors tests/distroav_frameless_by_url_escape_1287.rs.
           if ($ndi -notmatch [regex]::Escape('static inline bool ndi_force_by_name_after_frameless(')) { Write-Error "ndi-source.cpp: the #1287 ndi_force_by_name_after_frameless decision helper is gone -- a frame-less BY-URL bind (dead cached sender port after a graceful restart) can no longer be forced onto BY-NAME and loops BY-URL forever"; exit 1 }
           if (([regex]::Matches($ndi, [regex]::Escape('ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;'))).Count -lt 3) { Write-Error "ndi-source.cpp: the #1287 helper-gated corrective set is wired at fewer than 3 reset-forcing arms -- it must gate AND SET force_by_name_next_reset_1180 in the no_connections==0 arm, the #767 stale-while-connected arm, AND the #1096 (reopen 16.9) connected-but-frameless arm (anchoring the whole adjacency so deleting only the set is caught), else a frame-less bind is never flipped to BY-NAME"; exit 1 }
+          # camera-box issue 1367 (decision 6009040469): after a sender restart moves its NDI port the finder can list the STALE old-port record first. Two senders cannot share a URL, so a record of the name whose URL another name advertises is stale: both pick sites skip it (and the two 120 s exclusion slots), the verify is duplicate-aware, and only a proven-stale bind is excluded and retargeted BY-URL to the picker's choice -- else the receiver loops ~1 min, or locks onto another sender. This FAST path ships distroav.dll for hot-swap, so gate here too -- mirrors tests/distroav_stale_duplicate_retarget_1367.rs.
+          foreach ($tok1367 in @('static inline bool ndi_url_contested_1367(', 'static inline int ndi_identity_verdict_1367(', '#define NDI_URL_SLOTS_1367 2', 'ndi_find_url_for_source_name(owned_source_name, fresh_sources, n_fresh, stale_1367.excluded[0], stale_1367.excluded[1])', 'const char *pick = ndi_find_url_for_source_name(name, v_sources, n_v, ex0, ex1);', 'int action = ndi_stale_apply_verdict_1367(st, verdict, bound_url, *verify_url_out, os_gettime_ns());', 'if (ndi_stale_reset_1367(&stale_1367, obs_source_name, force_by_name_1180, &owned_source_url)) { url_resolved_1096 = true; url_bind_kind_1096 = 3; } else if (!force_by_name_1180 && owned_source_name && owned_source_name[0]) {', 'int verdict_1367 = ndi_identity_verify_1367(s, owned_source_name, owned_source_url, &stale_1367, &last_delivered_url_1096, &verify_url_1180, &was_disconnected, &force_by_name_next_reset_1180); if (verdict_1367 == NDI_VERIFY_STALE_1367) { bfree(verify_url_1180); continue; } bool mismatch_1180 = verdict_1367 == NDI_VERIFY_MISMATCH_1367;')) { if ($ndi -notmatch [regex]::Escape($tok1367)) { Write-Error "ndi-source.cpp: the issue-1367 evidence-based stale-duplicate wiring is gone (missing: $tok1367) -- after a sender port move the receiver re-picks the stale finder record, loops ~1 min or locks onto another sender"; exit 1 } }
           # camera-box #1096 (reopen 16.9): a bind that CONNECTS (no_connections>0) but delivers ZERO frames (reset BY-NAME into the poisoned finder in the 12:10 fleet-deploy wedge on cam2/5/6) leaves s->last_frame_timestamp==0, invisible to genlock_reconnect_decision (which skips last_frame_ns==0), so the leg sits frameless for an hour. The fix ages a connected, never-delivered bind from its recv_create_v3 timestamp (recv_bind_ns_1096) over FRAMELESS_BIND_STALE_NS and forces the SAME reset ladder. This FAST path ships distroav.dll for hot-swap, so gate here too -- mirrors tests/distroav_frameless_connected_1096.rs.
           if ($ndi -notmatch [regex]::Escape('static inline bool genlock_frameless_bind_reconnect_decision(')) { Write-Error "ndi-source.cpp: the #1096 (reopen 16.9) genlock_frameless_bind_reconnect_decision helper is gone -- a connected-but-frameless bind has no aging clock and sits black forever"; exit 1 }
           if ($ndi -notmatch [regex]::Escape('genlock_frameless_bind_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,')) { Write-Error "ndi-source.cpp: the receiver loop no longer CALLS the #1096 (reopen 16.9) connected-but-frameless watchdog -- a bind that never delivers a frame is never force-rebound"; exit 1 }
@@ -799,6 +836,50 @@ jobs:
           if ($output -notmatch [regex]::Escape('#include "camera-box-frame-copy.hpp"')) {
             Write-Error "dock output sources: the frame copies no longer come from camera-box-frame-copy.hpp (issue 1367)"; exit 1
           }
+          # issue 1381: both decode jobs' copy buffers are sized AND written on the starting thread
+          # (after the geometry is set, before the worker starts) by the helpers the per-frame fills
+          # use, so st_raw_video's first frame into each slot neither allocates nor first-touches a page.
+          # Mirrors worker_lifecycle_follows_the_output in tests/av_sync_dock_decode_mailbox_1367.rs.
+          $vbody = Get-DockBody $output 'static bool st_start(void *data)'
+          $iResize = $vbody.IndexOf('quirc_resize(')
+          $iPrepare = $vbody.IndexOf('st->cb_decode_mailbox.prepare_slots( [st](st_video_decode_job &job) { st_video_decode_job_prepare(st, job); })')
+          $iWorker = $vbody.IndexOf('st->cb_decode_mailbox.start(')
+          if ($iResize -lt 0 -or $iPrepare -lt 0 -or $iWorker -lt 0 -or $iResize -gt $iPrepare -or $iPrepare -gt $iWorker) {
+            Write-Error "dock output sources: st_start no longer pre-faults both decode jobs through prepare_slots between the geometry and the worker start (issue 1381)"; exit 1
+          }
+          $prep = Get-DockBody $output 'void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)'
+          foreach ($need in @('job.band.assign(st_cb_top_band_bytes(st), 0);', 'job.grid.assign(st_norihiro_grid_bytes(st), 0);')) {
+            if (-not $prep.Contains($need)) { Write-Error "dock output sources: st_video_decode_job_prepare no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          # The top band's plan is derived ONCE (st_cb_top_band_rows): the byte size, the fill's buffer
+          # size and the rows it copies all come from it; a copy of more rows than the buffer holds
+          # would overrun it on the video-output thread.
+          $rowsBody = Get-DockBody $output 'static uint32_t st_cb_top_band_rows(const struct sync_test_output *st)'
+          foreach ($need in @('const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);', 'return plan.band_h;')) {
+            if (-not $rowsBody.Contains($need)) { Write-Error "dock output sources: st_cb_top_band_rows is no longer the output geometry's plan rows: '$need' (issue 1381)"; exit 1 }
+          }
+          $bytesBody = Get-DockBody $output 'static size_t st_cb_top_band_bytes(const struct sync_test_output *st)'
+          if (-not $bytesBody.Contains('return (size_t)st->video_width * st_cb_top_band_rows(st);')) {
+            Write-Error "dock output sources: the top band's byte size is no longer video_width x st_cb_top_band_rows (issue 1381)"; exit 1
+          }
+          $fillBand = Get-DockBody $output 'static void st_cb_gather_top_band(const struct sync_test_output *st, const struct video_data *frame, std::vector<uint8_t> &dst)'
+          $fillGrid = Get-DockBody $output 'static void st_norihiro_gather_grid(const struct sync_test_output *st, const struct video_data *frame, std::vector<uint8_t> &dst)'
+          foreach ($need in @('const uint32_t rows = st_cb_top_band_rows(st);', 'const size_t need = st_cb_top_band_bytes(st);', 'camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, rows, dst.data());')) {
+            if (-not $fillBand.Contains($need)) { Write-Error "dock output sources: st_cb_gather_top_band no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          if ((-not $fillGrid.Contains('const size_t need = st_norihiro_grid_bytes(st);')) -or $fillBand.Contains('cb_top_band_decode_plan(') -or $fillGrid.Contains('cb_top_band_decode_plan(')) {
+            Write-Error "dock output sources: a per-frame fill no longer sizes with the helper the pre-fault uses, or derives a top-band plan of its own (issue 1381)"; exit 1
+          }
+          # Review round 4: the decode worker reads the same row count, and only from a band that holds
+          # every byte it reads (the grid decode is guarded the same way).
+          $decoder = Get-DockBody $output 'static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const uint8_t *src, uint64_t timestamp)'
+          foreach ($need in @('const uint32_t rows = st_cb_top_band_rows(st);', 'camerabox::cb_box_downscale_luma(src, st->video_width, rows, qbuf, (uint32_t)w, (uint32_t)h);')) {
+            if (-not $decoder.Contains($need)) { Write-Error "dock output sources: the top-band decoder no longer reads the shared row count: '$need' (issue 1381)"; exit 1 }
+          }
+          $jobRun = Get-DockBody $output 'void st_video_decode_job_run(struct sync_test_output *st, st_video_decode_job &job)'
+          if ($decoder.Contains('plan.band_h') -or (-not $jobRun.Contains('if (job.band.size() >= st_cb_top_band_bytes(st)) st_raw_video_camera_box_decode(st, job.band.data(), job.timestamp);'))) {
+            Write-Error "dock output sources: the top-band decoder reads rows from its own plan, or the worker decodes a band without checking it holds every byte read (issue 1381)"; exit 1
+          }
           Write-Output "dock decode off the video-output thread (issue 1367) — OK"
 
       - name: Assert dock decodes the marker per channel (issue 1367)
@@ -884,6 +965,21 @@ jobs:
           if (-not $cb.Contains('cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } if (cb_active) { cb_audio_gate_and_publish(st, frames, last_qr_ns); return; }')) {
             Write-Error "dock output sources: st_raw_audio no longer hands camera-box mode to the gate + FIFO copy (issue 1381)"; exit 1
           }
+          # Review round 1: camera-box mode and norihiro's phone params are read in ONE section under
+          # st->mutex, so no block reads the mode before the decode worker latched it and the rig's
+          # params after (that block ran norihiro's inline demod on the audio thread). Mirrors
+          # the_audio_callback_reads_the_mode_and_the_phone_params_in_one_lock in
+          # tests/av_sync_dock_audio_worker_1381.rs.
+          $iLock = $cb.IndexOf('lock(st->mutex)'); $iBranch = $cb.IndexOf('if (cb_active) {')
+          if ($iLock -lt 0 -or $iBranch -lt 0 -or $cb.IndexOf('lock(st->mutex)', $iLock + 1) -ge 0) {
+            Write-Error "dock output sources: st_raw_audio must take st->mutex exactly once, before the camera-box branch (issue 1381)"; exit 1
+          }
+          foreach ($need in @('f = st->f;', 'c = st->c;', 'q_ms = st->q_ms;', 'cb_active = st->cb_mode_active;')) {
+            $iNeed = $cb.IndexOf($need)
+            if ($iNeed -lt $iLock -or $iNeed -gt $iBranch) {
+              Write-Error "dock output sources: st_raw_audio no longer reads '$need' in its one lock section before the camera-box branch (issue 1381)"; exit 1
+            }
+          }
           $publish = Get-DockBody $output 'static void cb_audio_gate_and_publish(struct sync_test_output *st, const struct audio_data *frames, uint64_t last_qr_ns)'
           foreach ($need in @('const camerabox::CbAudioGate gate = camerabox::cb_audio_decode_gate( true, st->cb_measure_source_present.load(std::memory_order_relaxed), now, last_qr_ns, CAMERA_BOX_TEST_SIGNAL_FRESH_NS);', 'if (gate == camerabox::CbAudioGate::Open) {', 'st->cb_audio_fifo.publish(planes, nch, frames->frames, frames->timestamp);', 'st->cb_audio_fifo.end_session((unsigned)gate);', 'camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - publish_start_ns);')) {
             if (-not $publish.Contains($need)) {
@@ -921,7 +1017,7 @@ jobs:
           foreach ($need in @('if (st->cb_audio_dec) st->cb_audio_dec->reset_window();', 'cb_audio_forget_lock(st);', 'signal_stale_changed(st->context, true);', 'st->cb_audio_paused = true;')) {
             if (-not $end.Contains($need)) { Write-Error "dock output sources: st_audio_session_end no longer has '$need' (issue 1381)"; exit 1 }
           }
-          $record = Get-DockBody $output 'static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, uint64_t video_ts)'
+          $record = Get-DockBody $output 'static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id, uint32_t frame_id, uint64_t video_ts)'
           if (-not $record.Contains('cb_refresh_measure_source(st, video_ts);')) {
             Write-Error "dock output sources: the QR record no longer refreshes the measurement-source check on the decode worker (issue 1381)"; exit 1
           }
@@ -1282,6 +1378,34 @@ jobs:
           $dock = (Get-Content "vendor/av-sync-dock/src/sync-test-dock.cpp" -Raw) -replace '\s+', ' '
           if ($dock -notmatch [regex]::Escape('cb_dock_latency_display_ms(dock_native_ts_ns, data.gate_convention)')) { Write-Error "on_sync_found no longer routes through cb_dock_latency_display_ms (#999) — dock display sign fix reverted"; exit 1 }
           Write-Output "#398 camera-box dual-QR dock patch present - OK"
+
+      # issue 1404 Task 5 part b: the dock pairs only the cam2 painter's QRs, never a reserved
+      # ORIGIN run of the CG path (SongPlayer 911014, the cg OBS 911015, the measurement clip 911016):
+      # cb_video_qr_record refuses one as its first statement, and both QR decodes drop a refused QR
+      # before any signal. Twin of tests/av_sync_dock_reserved_origin_1404.rs.
+      - name: Assert dock never pairs a reserved origin QR (issue 1404)
+        shell: pwsh
+        run: |
+          $hdr = (Get-Content "vendor/av-sync-dock/src/camera-box-qr.hpp" -Raw) -replace '\s+', ' '
+          if (([regex]::Matches($hdr, [regex]::Escape('#define CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS {911014u, 911015u, 911016u}'))).Count -ne 1) { Write-Error "camera-box-qr.hpp: the reserved origin list is not exactly 911014, 911015, 911016 (issue 1404)"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('static const uint32_t reserved[] = CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS;')) { Write-Error "camera-box-qr.hpp: camera_box_reserved_origin_index no longer reads the one list (issue 1404)"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('inline bool camera_box_qr_is_paired_run(uint32_t run_id) { return camera_box_reserved_origin_index(run_id) < 0; }')) { Write-Error "camera-box-qr.hpp: camera_box_qr_is_paired_run is no longer exactly 'not in the one list' (issue 1404)"; exit 1 }
+          . ./vendor/av-sync-dock/test/dock-output-source.ps1
+          $src = Get-DockOutputSource
+          $sig = 'static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id, uint32_t frame_id, uint64_t video_ts)'
+          $record = Get-DockBody $src $sig
+          if (-not $record.StartsWith("$sig { if (!camera_box_qr_is_paired_run(run_id)) {", [StringComparison]::Ordinal)) { Write-Error "dock output sources: cb_video_qr_record no longer STARTS with the reserved-origin refusal (issue 1404)"; exit 1 }
+          $refuse = $record.IndexOf('return false;', [StringComparison]::Ordinal)
+          $ring = $record.IndexOf('st->cb_video_ts_ns[low] = video_ts;', [StringComparison]::Ordinal)
+          if ($refuse -lt 0 -or $ring -lt 0 -or $refuse -gt $ring) { Write-Error "dock output sources: the reserved-origin refusal must return before the ring write (issue 1404)"; exit 1 }
+          if (-not $record.Contains('if (st->cb_ignored_origin_log.due(camera_box_reserved_origin_index(run_id), video_ts)) blog(LOG_INFO,')) { Write-Error "dock output sources: cb_video_qr_record no longer logs an ignored QR only through the per-run rate limit (issue 1404)"; exit 1 }
+          $guard = 'if (!cb_video_qr_record(st, cb.run_id, cb.frame_id, timestamp - st->start_ts)) continue;'
+          if (([regex]::Matches($src, [regex]::Escape($guard))).Count -ne 2) { Write-Error "dock output sources: the guarded QR record != 2 (issue 1404) -- a QR decode records without the run filter"; exit 1 }
+          foreach ($need in @("if (decode_camera_box_qr((char *)data.payload, &cb)) { $guard", "if (!decode_camera_box_qr((char *)data.payload, &cb)) continue; $guard")) {
+            if (([regex]::Matches($src, [regex]::Escape($need))).Count -ne 1) { Write-Error "dock output sources: a QR decode no longer runs the guarded record right after the decode: '$need' (issue 1404)"; exit 1 }
+          }
+          if ($src -match [regex]::Escape('cb_video_qr_record(st, cb.frame_id,')) { Write-Error "dock output sources: the OLD unfiltered QR record call is back (issue 1404)"; exit 1 }
+          Write-Output "issue 1404 dock reserved-origin filter present - OK"
 
       # #188: compile-check the A/V sync dock against the SAME installed OBS SDK (reuses the
       # OBS build above — no second full OBS build). Catches a dock C++/Qt/CMake error at the

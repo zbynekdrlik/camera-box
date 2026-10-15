@@ -245,7 +245,7 @@ def _deploy_program(box):
     return r.stdout
 
 
-@pytest.mark.parametrize("box", ["stream", "resolume"])
+@pytest.mark.parametrize("box", ["stream-snv", "resolume-snv"])
 def test_deploy_program_sets_the_power_plan_before_any_obs_stop(box):
     p = _deploy_program(box)
     set_at = p.index("powercfg /setactive")
@@ -267,30 +267,30 @@ def _gate(tmp_path, extra):
     env = {**os.environ, "VERSION_INTEGRITY_GATE_VENDOR_NEWEST": "0000000hermetictest",
            "VERSION_INTEGRITY_GATE_VENDOR_PENDING": ""}
     return subprocess.run(
-        ["bash", str(SCRIPTS / "version-integrity-gate.sh"), "--win-state", f"stream={state}", *extra],
+        ["bash", str(SCRIPTS / "version-integrity-gate.sh"), "--win-state", f"stream-snv={state}", *extra],
         capture_output=True, text=True, cwd=REPO, timeout=120, env=env,
     )
 
 
 def test_gate_win_baseline_facet_is_report_only(tmp_path):
     base = _gate(tmp_path, [])
-    drift = _gate(tmp_path, ["--win-baseline", f"resolume={FIX / 'resolume_balanced_all_drift.txt'}"])
-    ok = _gate(tmp_path, ["--win-baseline", f"stream={FIX / 'dup_high_performance_all_ok.txt'}"])
-    unread = _gate(tmp_path, ["--win-baseline", f"stream={tmp_path / 'absent.txt'}"])
-    live = _gate(tmp_path, ["--win-baseline", f"stream={FIX / 'stream_live_2026-09-27.txt'}",
-                            "--win-baseline", "resolume"])
+    drift = _gate(tmp_path, ["--win-baseline", f"resolume-snv={FIX / 'resolume_balanced_all_drift.txt'}"])
+    ok = _gate(tmp_path, ["--win-baseline", f"stream-snv={FIX / 'dup_high_performance_all_ok.txt'}"])
+    unread = _gate(tmp_path, ["--win-baseline", f"stream-snv={tmp_path / 'absent.txt'}"])
+    live = _gate(tmp_path, ["--win-baseline", f"stream-snv={FIX / 'stream_live_2026-09-27.txt'}",
+                            "--win-baseline", "resolume-snv"])
     assert drift.returncode == base.returncode == ok.returncode == unread.returncode == live.returncode, (
         base.returncode, drift.returncode, ok.returncode, unread.returncode, live.returncode)
     # the roll-up (the GATE FAILED / INCOMPLETE lines and their box counts) must be byte-identical:
     # a baseline row can never add a box to bad/unknown, whatever it grades
     for run in (drift, ok, unread, live):
         assert run.stderr == base.stderr, (base.stderr, run.stderr)
-    assert re.search(r"stream\s+win_baseline wer_dontshowui\s+DRIFT", live.stdout), live.stdout
-    assert re.search(r"resolume\s+win_baseline power_scheme\s+UNKNOWN", live.stdout), live.stdout
-    assert re.search(r"resolume\s+win_baseline power_scheme\s+DRIFT .*Balanced", drift.stdout), drift.stdout
+    assert re.search(r"stream-snv\s+win_baseline wer_dontshowui\s+DRIFT", live.stdout), live.stdout
+    assert re.search(r"resolume-snv\s+win_baseline power_scheme\s+UNKNOWN", live.stdout), live.stdout
+    assert re.search(r"resolume-snv\s+win_baseline power_scheme\s+DRIFT .*Balanced", drift.stdout), drift.stdout
     assert "report-only" in drift.stdout
-    assert re.search(r"stream\s+win_baseline power_scheme\s+OK", ok.stdout), ok.stdout
-    assert re.search(r"stream\s+win_baseline power_scheme\s+UNKNOWN", unread.stdout), unread.stdout
+    assert re.search(r"stream-snv\s+win_baseline power_scheme\s+OK", ok.stdout), ok.stdout
+    assert re.search(r"stream-snv\s+win_baseline power_scheme\s+UNKNOWN", unread.stdout), unread.stdout
     # (the tmp dir name carries the test name, so assert on the row shape, not the bare word)
     assert not re.search(r"win_baseline power_scheme", base.stdout), base.stdout
 
@@ -307,49 +307,49 @@ def _seam(tmp_path, mapping):
 
 
 def test_check_reads_each_box_and_names_the_drift(tmp_path):
-    seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt",
-                            "resolume": FIX / "resolume_balanced_all_drift.txt"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt",
+                            "resolume-snv": FIX / "resolume_balanced_all_drift.txt"})
     r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
-                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"},
+                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv resolume-snv"},
                        timeout=60)
     assert r.returncode == 20, r.stdout + r.stderr
-    assert re.search(r"^box=stream win_baseline=OK$", r.stdout, re.M), r.stdout
-    assert re.search(r"^box=resolume win_baseline=DRIFT "
+    assert re.search(r"^box=stream-snv win_baseline=OK$", r.stdout, re.M), r.stdout
+    assert re.search(r"^box=resolume-snv win_baseline=DRIFT "
                      r"drift=power_scheme,sleep_ac,hibernate_ac,usb_selective_suspend,wer_dontshowui$",
                      r.stdout, re.M), r.stdout
-    assert re.search(r"box=resolume item=power_scheme verdict=DRIFT detail=.*Balanced", r.stdout), r.stdout
+    assert re.search(r"box=resolume-snv item=power_scheme verdict=DRIFT detail=.*Balanced", r.stdout), r.stdout
 
 
 def test_check_over_the_live_captures_names_the_wer_drift(tmp_path):
-    seam = _seam(tmp_path, {"stream": FIX / "stream_live_2026-09-27.txt",
-                            "resolume": FIX / "resolume_gather_program_live_2026-09-27.txt"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "stream_live_2026-09-27.txt",
+                            "resolume-snv": FIX / "resolume_gather_program_live_2026-09-27.txt"})
     r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
-                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"},
+                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv resolume-snv"},
                        timeout=60)
     assert r.returncode == 20, r.stdout + r.stderr
-    for box in ("stream", "resolume"):
+    for box in ("stream-snv", "resolume-snv"):
         assert f"box={box} item=wer_dontshowui verdict=DRIFT" in r.stdout, r.stdout
         assert re.search(rf"^box={box} win_baseline=DRIFT drift=wer_dontshowui$", r.stdout, re.M), r.stdout
     assert "unbound variable" not in r.stderr, r.stderr
 
 
 def test_check_skips_a_traveling_box_that_is_away(tmp_path):
-    seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt"})
     r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
-                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"},
+                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"},
                        timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "box=resolume win_baseline=SKIPPED" in r.stdout
+    assert "box=resolume-snv win_baseline=SKIPPED" in r.stdout
 
 
 def test_check_failed_fetch_is_unknown(tmp_path):
     seam = _seam(tmp_path, {})
-    r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh"), "--box", "stream"],
+    r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh"), "--box", "stream-snv"],
                        capture_output=True, text=True,
-                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"},
+                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"},
                        timeout=60)
     assert r.returncode == 11, r.stdout + r.stderr
-    assert re.search(r"^box=stream win_baseline=UNKNOWN unknown=power_scheme,sleep_ac,hibernate_ac,"
+    assert re.search(r"^box=stream-snv win_baseline=UNKNOWN unknown=power_scheme,sleep_ac,hibernate_ac,"
                      r"usb_selective_suspend,wer_dontshowui$", r.stdout, re.M), r.stdout
 
 
@@ -361,12 +361,12 @@ def test_check_emit_ps1_is_the_lib_gather_program():
 
 
 def test_check_out_dir_keeps_the_raw_gather_for_the_gate(tmp_path):
-    seam = _seam(tmp_path, {"stream": FIX / "stream_live_2026-09-27.txt"})
+    seam = _seam(tmp_path, {"stream-snv": FIX / "stream_live_2026-09-27.txt"})
     out = tmp_path / "raw"
-    subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh"), "--box", "stream", "--out-dir", str(out)],
+    subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh"), "--box", "stream-snv", "--out-dir", str(out)],
                    capture_output=True, text=True,
-                   env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"}, timeout=60)
-    assert (out / "stream.txt").read_bytes() == (FIX / "stream_live_2026-09-27.txt").read_bytes()
+                   env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"}, timeout=60)
+    assert (out / "stream-snv.txt").read_bytes() == (FIX / "stream_live_2026-09-27.txt").read_bytes()
 
 
 # --- the fleet roster + rig-health row ---------------------------------------------------------------
@@ -374,7 +374,7 @@ def test_check_out_dir_keeps_the_raw_gather_for_the_gate(tmp_path):
 def test_obs_fleet_win_baseline_facet_is_the_windows_obs_boxes():
     r = _bash(f'. "{SCRIPTS}/lib/obs-fleet.sh"; obs_fleet_facet_members win-baseline')
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["stream", "resolume"]
+    assert r.stdout.split() == ["stream-snv", "resolume-snv"]
 
 
 def _audit():
@@ -387,23 +387,23 @@ def _audit():
 def test_rig_health_win_baseline_row_is_note_and_names_drift():
     mod = _audit()
     assert mod.WIN_BASELINE_REPORT_VERDICT == "NOTE"
-    out = ("box=resolume item=power_scheme verdict=DRIFT detail=Balanced (381b4222-f694-41f0-9685-ff5bb260df2e) is not max-performance class\n"
-           "box=resolume item=sleep_ac verdict=OK detail=never\n"
-           "box=resolume win_baseline=DRIFT drift=power_scheme\n"
-           "box=stream win_baseline=OK\n"
+    out = ("box=resolume-snv item=power_scheme verdict=DRIFT detail=Balanced (381b4222-f694-41f0-9685-ff5bb260df2e) is not max-performance class\n"
+           "box=resolume-snv item=sleep_ac verdict=OK detail=never\n"
+           "box=resolume-snv win_baseline=DRIFT drift=power_scheme\n"
+           "box=stream-snv win_baseline=OK\n"
            "box=imag win_baseline=SKIPPED (away)\n")
     rows = mod.win_baseline_rows_from_output(out)
-    assert rows["resolume"].startswith("win_baseline=DRIFT")
-    assert "power_scheme=DRIFT" in rows["resolume"] and "Balanced" in rows["resolume"]
-    assert rows["stream"].startswith("win_baseline=OK")
-    assert "report-only" in rows["stream"]
+    assert rows["resolume-snv"].startswith("win_baseline=DRIFT")
+    assert "power_scheme=DRIFT" in rows["resolume-snv"] and "Balanced" in rows["resolume-snv"]
+    assert rows["stream-snv"].startswith("win_baseline=OK")
+    assert "report-only" in rows["stream-snv"]
     assert "imag" not in rows  # a skipped (away) box is omitted, never a stale row
 
 
 def test_rig_health_empty_verdict_is_unknown_and_named():
     rows = _audit().win_baseline_rows_from_output(
-        "box=stream item=wer_dontshowui verdict= detail=\nbox=stream win_baseline=UNKNOWN\n")
-    assert "wer_dontshowui=UNKNOWN" in rows["stream"], rows
+        "box=stream-snv item=wer_dontshowui verdict= detail=\nbox=stream-snv win_baseline=UNKNOWN\n")
+    assert "wer_dontshowui=UNKNOWN" in rows["stream-snv"], rows
 
 
 def _fake_reader(tmp_path, body):
@@ -420,19 +420,19 @@ def test_rig_health_survives_a_non_utf8_reader_byte(tmp_path, capsys):
     # take the whole audit down
     mod = _audit()
     mod.WIN_BASELINE_SCRIPT = _fake_reader(
-        tmp_path, b"box=stream item=power_scheme verdict=DRIFT detail=Vysok\xec v\xfdkon (x) is not\n"
-                  b"box=stream win_baseline=DRIFT drift=power_scheme\n")
+        tmp_path, b"box=stream-snv item=power_scheme verdict=DRIFT detail=Vysok\xec v\xfdkon (x) is not\n"
+                  b"box=stream-snv win_baseline=DRIFT drift=power_scheme\n")
     mod.check_win_baseline()
     out = capsys.readouterr().out
-    assert "[NOTE] stream-win win_baseline=DRIFT power_scheme=DRIFT[" in out, out
+    assert "[NOTE] stream-snv-win win_baseline=DRIFT power_scheme=DRIFT[" in out, out
 
 
 def test_rig_health_reader_crash_after_some_rows_is_still_a_note_row(tmp_path, capsys):
     mod = _audit()
-    mod.WIN_BASELINE_SCRIPT = _fake_reader(tmp_path, b"box=stream win_baseline=OK\nCRASH\n")
+    mod.WIN_BASELINE_SCRIPT = _fake_reader(tmp_path, b"box=stream-snv win_baseline=OK\nCRASH\n")
     mod.check_win_baseline()
     out = capsys.readouterr().out
-    assert "[NOTE] stream-win win_baseline=OK" in out, out
+    assert "[NOTE] stream-snv-win win_baseline=OK" in out, out
     assert "[NOTE] win-baseline" in out and "rc=3" in out, out
 
 

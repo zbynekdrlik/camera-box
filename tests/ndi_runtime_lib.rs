@@ -42,7 +42,7 @@ fn lib_is_source_only_and_defines_the_emitter() {
 }
 
 /// The emitted recipe carries the fleet-convention `/usr/local/lib/libndi.so.6` symlink DistroAV's
-/// Linux loader scans — without it the plugin loads UI-only with ERR-404 (live on imag-nb + strih-lx).
+/// Linux loader scans — without it the plugin loads UI-only with ERR-404 (live on imag-nb + strih-snv).
 #[test]
 fn emits_the_usr_local_lib_symlink_distroav_scans() {
     let (code, out, _e) = run_sourced("ndi_runtime_install_cmds 10.77.9.61 secretpw newlevel");

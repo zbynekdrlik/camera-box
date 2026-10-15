@@ -279,7 +279,7 @@ jobs:
           if-no-files-found: error
 
 
-  # issue 1317: the strih-lx FULL build variant. The strih role needs the same full plugin set as
+  # issue 1317: the strih-snv FULL build variant. The strih role needs the same full plugin set as
   # the imag-parity full build above (obs-websocket, obs-ffmpeg + NVENC, obs-x264, obs-outputs,
   # obs-filters, image-source, text-freetype2, linux-capture/v4l2, DistroAV) -- all ON in the
   # ubuntu-ci preset default (AJA/decklink/VLC/whatsnew off), so this job copies the full build
@@ -294,7 +294,7 @@ jobs:
   linux-genlock-build-strih:
     name: Full Linux genlock bundle -- strih variant (issue 1317)
     needs: [linux-distroav-compile-check]
-    # issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-lx notebook runs Ubuntu 26.04 (resolute) --
+    # issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-snv notebook runs Ubuntu 26.04 (resolute) --
     # noble's ffmpeg/Qt sonames (libavcodec60 / Qt 6.4) do not exist there, so the strih bundle must
     # be built on the 26.04 runner or it cannot load on the box. ONLY this job moves; the imag-parity
     # full build (linux-genlock-build) and the DistroAV compile-check stay on ubuntu-24.04 (imag-nb

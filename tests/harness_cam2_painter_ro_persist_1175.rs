@@ -8,7 +8,15 @@
 //!
 //! The shared `cam2_painter_persist_state_cmds` builder opens a `mount -o remount,rw /` window, runs
 //! the change FAIL-LOUD, restores ro, and VERIFIES the resulting `is-enabled` state. These tests
-//! run its emitted remote bash with a fake `systemctl`/`mount` on PATH — no rig.
+//! run its emitted remote bash with a fake `systemctl`/`mount`/`findmnt`/`fuser` on PATH — no rig.
+//!
+//! issue 1405: `enable-now` no longer runs `systemctl enable --now` inside the window. The ro
+//! remount after it failed and the `|| true` hid it (cam2 ran on a read-write root, 4.10.2026; that
+//! the start opened the blocking writer is inferred from the timing). Only `systemctl enable` runs in
+//! the window; after the ro
+//! remount `findmnt -no OPTIONS /` must read `ro` (else FAIL LOUD naming the writers, no start),
+//! and only then `systemctl start`. The full run-the-text matrix lives in
+//! `tests/python/test_cam2_painter_ro_verify_1405.py`.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -52,21 +60,47 @@ fn write_fake(dir: &Path, name: &str, body: &str) {
 }
 
 /// Execute an emitted remote-bash snippet under `set -e` with a fake `systemctl` (is-enabled prints
-/// `$ISENABLED`) and `mount` (exits `$MOUNT_RC`) on PATH. Returns (exit_code, combined output).
+/// `$ISENABLED`), `mount` (exits `$MOUNT_RC`), `findmnt` (the root reads `ro,relatime`) and `fuser`
+/// on PATH. Returns (exit_code, combined output).
 fn run_emitted(snippet: &str, is_enabled: &str, mount_rc: &str) -> (i32, String) {
+    let (code, out, _calls) = run_emitted_on_root(snippet, is_enabled, mount_rc, "ro,relatime");
+    (code, out)
+}
+
+/// As `run_emitted`, with the root mount options the fake `findmnt` reports after the window
+/// (`ROOT_OPTS`). Also returns every `systemctl` call, one per line, so a test can prove the
+/// painter was (or was never) started.
+fn run_emitted_on_root(
+    snippet: &str,
+    is_enabled: &str,
+    mount_rc: &str,
+    root_opts: &str,
+) -> (i32, String, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin = dir.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
+    let calls = dir.path().join("systemctl-calls");
     write_fake(
         &bin,
         "systemctl",
-        "#!/usr/bin/env bash\ncase \"$1\" in\n  is-enabled) echo \"${ISENABLED:-disabled}\"; \
+        "#!/usr/bin/env bash\necho \"$*\" >>\"$CALLS\"\ncase \"$1\" in\n  is-enabled) echo \"${ISENABLED:-disabled}\"; \
          [ \"${ISENABLED:-disabled}\" = enabled ] && exit 0 || exit 1 ;;\n  *) exit 0 ;;\nesac\n",
     );
     write_fake(
         &bin,
         "mount",
         "#!/usr/bin/env bash\nexit \"${MOUNT_RC:-0}\"\n",
+    );
+    write_fake(
+        &bin,
+        "findmnt",
+        "#!/usr/bin/env bash\necho \"$ROOT_OPTS\"\n",
+    );
+    write_fake(
+        &bin,
+        "fuser",
+        "#!/usr/bin/env bash\necho '                     USER        PID ACCESS COMMAND' >&2\n\
+         echo '/:                   root     76355 F.... systemd-journal' >&2\n",
     );
     let path = format!(
         "{}:{}",
@@ -79,11 +113,14 @@ fn run_emitted(snippet: &str, is_enabled: &str, mount_rc: &str) -> (i32, String)
         .env("PATH", path)
         .env("ISENABLED", is_enabled)
         .env("MOUNT_RC", mount_rc)
+        .env("ROOT_OPTS", root_opts)
+        .env("CALLS", &calls)
         .output()
         .expect("run emitted");
     let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
     s.push_str(&String::from_utf8_lossy(&out.stderr));
-    (out.status.code().unwrap_or(-1), s)
+    let called = fs::read_to_string(&calls).unwrap_or_default();
+    (out.status.code().unwrap_or(-1), s, called)
 }
 
 // ---- the shared builder emits a remount-safe, fail-loud, read-back-verified change -------------- //
@@ -115,15 +152,25 @@ fn disable_builder_is_remount_safe_fail_loud_and_read_back_verified() {
 }
 
 #[test]
-fn enable_builder_runs_enable_now_and_verifies_enabled() {
+fn enable_builder_enables_in_the_window_and_starts_after_the_ro_verify_1405() {
     let e = emit("cam2_painter_persist_state_cmds enable-now");
     assert!(
-        e.contains("systemctl enable --now cam2-painter.service"),
-        "must enable --now. Got:\n{e}"
+        !e.contains("systemctl enable --now"),
+        "issue 1405: the painter must never START inside the remount-rw window. Got:\n{e}"
     );
+    let rw = e.find("mount -o remount,rw /").expect("must remount rw");
+    let enable = e
+        .find("systemctl enable cam2-painter.service ||")
+        .expect("must enable inside the window (the call, not a message naming it)");
+    let verify = e
+        .find("findmnt -no OPTIONS /")
+        .expect("issue 1405: must read the root mount state after the window");
+    let start = e
+        .find("systemctl start cam2-painter.service")
+        .expect("issue 1405: must start the painter after the verify");
     assert!(
-        e.contains("mount -o remount,rw /"),
-        "must remount rw. Got:\n{e}"
+        rw < enable && enable < verify && verify < start,
+        "issue 1405: remount rw -> enable -> ro verify -> start. Got:\n{e}"
     );
     assert!(
         e.contains("[ \"$_pss_state\" != \"enabled\" ]"),
@@ -174,11 +221,57 @@ fn disable_that_did_not_take_effect_fails_loud() {
 #[test]
 fn enable_happy_path_exits_zero_and_confirms_enabled() {
     let e = emit("cam2_painter_persist_state_cmds enable-now");
-    let (code, out) = run_emitted(&e, "enabled", "0");
+    let (code, out, calls) = run_emitted_on_root(&e, "enabled", "0", "ro,relatime");
     assert_eq!(code, 0, "enable happy path must exit 0. out:\n{out}");
     assert!(
         out.contains("ENABLED + persisted"),
         "must confirm the enable persisted. out:\n{out}"
+    );
+    assert!(
+        calls.lines().any(|l| l == "start cam2-painter.service"),
+        "issue 1405: a verified read-only root must be followed by the start. calls:\n{calls}"
+    );
+}
+
+#[test]
+fn enable_with_the_root_left_rw_fails_loud_and_never_starts_1405() {
+    let e = emit("cam2_painter_persist_state_cmds enable-now");
+    let (code, out, calls) = run_emitted_on_root(&e, "enabled", "0", "rw,relatime");
+    assert_ne!(
+        code, 0,
+        "issue 1405: a root left read-write must fail loud. out:\n{out}"
+    );
+    assert!(
+        out.contains("FAIL: [#1405]") && out.contains("systemd-journal"),
+        "issue 1405: the failure must name the writers holding / (fuser -vm /). out:\n{out}"
+    );
+    assert!(
+        !out.contains("fuser printed no listing"),
+        "issue 1405: a listing with a writer must never also claim there was no listing. out:\n{out}"
+    );
+    assert!(
+        !calls
+            .lines()
+            .any(|l| l.starts_with("start") || l.contains("--now")),
+        "issue 1405: the painter must NOT start on a writable root. calls:\n{calls}"
+    );
+}
+
+#[test]
+fn disable_with_the_root_left_rw_fails_loud_1405() {
+    let d = emit("cam2_painter_persist_state_cmds disable");
+    let (code, out, calls) = run_emitted_on_root(&d, "disabled", "0", "rw,relatime");
+    assert_ne!(
+        code, 0,
+        "issue 1405: disable leaving a read-write root must fail loud. out:\n{out}"
+    );
+    assert!(
+        out.contains("FAIL: [#1405]"),
+        "must name the read-write root. out:\n{out}"
+    );
+    assert!(
+        !calls.lines().any(|l| l.starts_with("start")),
+        "disable must never start the painter. calls:\n{calls}"
     );
 }
 
@@ -216,12 +309,17 @@ fn handoff_embeds_the_persist_builder_for_the_enable() {
         "cam2_painter_steady_state_handoff_cmds /run/rig-painter.pid /run/rig-qpsk-markers.csv",
     );
     assert!(
-        h.contains("systemctl enable --now cam2-painter.service"),
-        "handoff must enable --now. Got:\n{h}"
+        h.contains("systemctl enable cam2-painter.service")
+            && !h.contains("systemctl enable --now"),
+        "issue 1405: the handoff enables inside the window and never starts there. Got:\n{h}"
     );
     assert!(
         h.contains("mount -o remount,rw /"),
         "handoff's enable must go through the remount-rw window. Got:\n{h}"
+    );
+    assert!(
+        h.contains("findmnt -no OPTIONS /") && h.contains("systemctl start cam2-painter.service"),
+        "issue 1405: the handoff starts the painter only after the ro verify. Got:\n{h}"
     );
 }
 

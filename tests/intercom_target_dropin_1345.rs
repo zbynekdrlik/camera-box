@@ -1,5 +1,5 @@
 //! #1345 M1b — behavioral guard for `scripts/lib/intercom-target-dropin.sh`, the supervisor tool
-//! that repoints ONE dev cambox's VBAN intercom target at the Linux strih-lx hub via a `/run`
+//! that repoints ONE dev cambox's VBAN intercom target at the Linux strih-snv hub via a `/run`
 //! systemd drop-in (`Environment=CAMERA_BOX_INTERCOM_TARGET=<host>`). The cambox root fs is
 //! READ-ONLY, so this env override is the only appliance-side seam. This lib is a SUPERVISOR tool:
 //! it is NOT wired into `recording-e2e.sh`/`rig-mode.sh`.
@@ -61,12 +61,12 @@ const PROD_DROPIN: &str = "/run/systemd/system/camera-box.service.d/zz-intercom-
 #[test]
 fn set_cmds_emit_environment_reload_restart_readback() {
     let (code, out, err) = run_sourced(
-        "intercom_target_dropin_set_cmds strih-lx.lan",
+        "intercom_target_dropin_set_cmds strih-snv.lan",
         &[("INTERCOM_TARGET_DROPIN", PROD_DROPIN)],
     );
     assert_eq!(code, 0, "stderr={err}");
     assert!(
-        out.contains("Environment=CAMERA_BOX_INTERCOM_TARGET=strih-lx.lan"),
+        out.contains("Environment=CAMERA_BOX_INTERCOM_TARGET=strih-snv.lan"),
         "must set the env var to the host: {out}"
     );
     assert!(
@@ -78,7 +78,7 @@ fn set_cmds_emit_environment_reload_restart_readback() {
         "must restart camera-box: {out}"
     );
     assert!(
-        out.contains("CAMERA_BOX_INTERCOM_TARGET=strih-lx.lan"),
+        out.contains("CAMERA_BOX_INTERCOM_TARGET=strih-snv.lan"),
         "must read the effective env back: {out}"
     );
     assert!(
@@ -167,9 +167,9 @@ fn set_then_clear_writes_then_removes_the_dropin_functionally() {
 
     // Run the emitted SET text, then assert the file exists with the right content.
     let body = "export PATH=\"$FAKEBIN:$PATH\"\n\
-                eval \"$(intercom_target_dropin_set_cmds strih-lx.lan)\"\n\
+                eval \"$(intercom_target_dropin_set_cmds strih-snv.lan)\"\n\
                 test -f \"$INTERCOM_TARGET_DROPIN\" && echo SET_FILE_OK\n\
-                grep -q 'Environment=CAMERA_BOX_INTERCOM_TARGET=strih-lx.lan' \"$INTERCOM_TARGET_DROPIN\" && echo SET_CONTENT_OK\n\
+                grep -q 'Environment=CAMERA_BOX_INTERCOM_TARGET=strih-snv.lan' \"$INTERCOM_TARGET_DROPIN\" && echo SET_CONTENT_OK\n\
                 eval \"$(intercom_target_dropin_clear_cmds)\"\n\
                 test ! -f \"$INTERCOM_TARGET_DROPIN\" && echo CLEARED_OK\n";
     let (code, out, err) = run_sourced(

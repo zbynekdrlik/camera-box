@@ -1,5 +1,5 @@
 //! issue 1317 (follow-up F6) — the CEF `chrome-sandbox` SUID sandbox helper must be owned
-//! root:root mode 4755 (setuid root) on the strih-lx box or the 4 browser sources cannot launch
+//! root:root mode 4755 (setuid root) on the strih-snv box or the 4 browser sources cannot launch
 //! (Chromium aborts the sandbox helper without `--no-sandbox`, which is the rejected approach —
 //! it weakens every browser source's isolation session-wide).
 //!
@@ -17,6 +17,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -32,15 +36,15 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "strih-chrome-sandbox-1317-{}-{}",
-        std::process::id(),
-        name
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("strih-chrome-sandbox-1317-{name}-"))
+        .tempdir()
+        .expect("create scratch dir");
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Install a fake `chown`/`chmod` on PATH that appends its argv (space-joined) as one line to

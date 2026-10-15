@@ -121,9 +121,16 @@ before/after journal recipe further down this runbook, and additionally note cam
   purge — the planner's `superseded_generic` axis distinguishes the two.)
 - Kernel apt-holds differ (cam1 holds the specific GA image + modules; cam2/cam3 hold the generic
   metas), so the install needs `--allow-change-held-packages` — same as `setup-imag.sh` step 7.
-- Root is `ro` on cam2/cam3 (and normally on cam1). Every mutating step below wraps
-  `mount -o remount,rw /` … `mount -o remount,ro /` around itself; the planner's `--commands`
-  output already includes those remounts, so a step is copy-paste-safe on a `ro`-root box.
+- Root is `ro` on cam2/cam3 (and normally on cam1). Every mutating step below is ONE
+  self-contained program in the planner's `--commands` output (issue 1407): paste everything from
+  `bash -s <<'RT_KERNEL_STEP'` through the closing `RT_KERNEL_STEP` into the box's root shell. It
+  opens the rw window, runs the step, ALWAYS closes the window with the shared verified close (the
+  ro remount, then `findmnt` must read `ro`; a root left writable prints its writers and fails),
+  and only then reports the step's own failure. An `exit` inside it ends only that child shell, not
+  your session, and the step's commands read `/dev/null`, so a dpkg/debconf prompt can never eat
+  the rest of the program. Edit a placeholder (`<OLD_VER>`, `<Advanced...>`) inside the program
+  before pasting: a step that still holds one refuses before it touches the root. The token sits
+  on its own line above its program; copy from `bash -s`.
 
 ### The mechanical planner — DRY-RUN, read-only, never mutates a box
 

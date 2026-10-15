@@ -714,6 +714,32 @@ def _heal_projector_strays(host, kinds):
 DRM_OUTPUT_CONF = "~/.camera-box/drm-output.json"
 
 
+def _drm_output_array_connectors(outputs):
+    """issue 1424 part 2: the connectors of a VALID "outputs" array, [] for a malformed one -- the C
+    module's all-or-nothing grammar (obs-drm-output-outputs.c drm_output_config_classify; the same
+    table strih_scenes.drm_output_instances is pinned to, tests/fixtures/drm_output_outputs_parity.tsv):
+    an array of 1..2 objects, each a "connector" string of 1..63 UTF-8 bytes, a known "view" and
+    "backend" (a non-string reads as "", the default), a boolean "audio" when present, no connector twice."""
+    if not isinstance(outputs, list) or not 1 <= len(outputs) <= 2:
+        return []
+    got = []
+    for entry in outputs:
+        if not isinstance(entry, dict):
+            return []
+        conn = entry.get("connector")
+        if not isinstance(conn, str) or not 0 < len(conn.encode("utf-8")) < 64:
+            return []
+        view, backend = entry.get("view"), entry.get("backend")
+        if (isinstance(view, str) and view not in ("", "program", "multiview")) or (
+                isinstance(backend, str) and backend not in ("", "lease", "vk-direct")) or (
+                "audio" in entry and not isinstance(entry["audio"], bool)):  # issue 1424 part 3
+            return []
+        if conn in got:
+            return []
+        got.append(conn)
+    return got
+
+
 def drm_output_lease_connector(config_text):
     """issue 1152 pure: the connector name IFF the drm-output config JSON arms the in-OBS
     DRM-lease output, else "". Mirrors the vendored C module's OWN contract exactly
@@ -721,13 +747,18 @@ def drm_output_lease_connector(config_text):
     AND a non-empty string "connector" (the C is dormant without one). Matching the C is the
     review-mandated single grammar: a config the C would ignore must NEVER arm the wrapper or
     the seeder (a divergent bash-grep reading once re-opened the crash-loop / dark-projector
-    class this milestone kills). Empty / missing / malformed -> "" (dormant), never a raise."""
+    class this milestone kills). Empty / missing / malformed -> "" (dormant), never a raise.
+    issue 1424 part 2: an "outputs" array config -> its FIRST connector when the whole array is valid,
+    else "" (the C starts no output of a malformed array)."""
     if not config_text:
         return ""
     try:
-        cfg = json.loads(config_text)
+        cfg = json.loads(config_text[1:] if config_text.startswith("\ufeff") else config_text)
         if cfg.get("enabled") is not True:
             return ""
+        if "outputs" in cfg:
+            connectors = _drm_output_array_connectors(cfg["outputs"])
+            return connectors[0] if connectors else ""
         # issue 1346: the C keeps the output dormant on an unknown "backend" (a non-string reads as
         # "" = the lease default; only "lease" / "vk-direct" are known) -- mirror it, so the wrapper
         # never takes the connector out of X for an output that will not start.
@@ -735,7 +766,7 @@ def drm_output_lease_connector(config_text):
         if isinstance(backend, str) and backend not in ("", "lease", "vk-direct"):
             return ""
         connector = cfg.get("connector")
-        return connector if isinstance(connector, str) and connector else ""
+        return connector if isinstance(connector, str) and 0 < len(connector.encode("utf-8")) < 64 else ""
     except (ValueError, AttributeError):
         return ""
 

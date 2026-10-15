@@ -30,39 +30,40 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
 }
 
-/// The dantesync systemd unit each setup script writes must aim at the cluster master by its IP
-/// (10.77.9.202 = strih) — NOT the binary's default public NTP pool, and NOT a `.lan` hostname
-/// (per CLAUDE.md/targets.md, .lan DNS may not resolve on a freshly-provisioned read-only-rootfs
-/// camera, and a failed resolve silently falls back to the public pool). The literal master
-/// reference is asserted exactly so a future refactor pointing dantesync at any OTHER server
-/// (e.g. a `$NTP` that expands to a public pool) cannot satisfy this guard.
+/// The dantesync systemd unit each setup script writes must aim at the venue's strih by NAME
+/// (`strih.lan`) -- NOT the binary's default public NTP pool, and NOT a venue-specific IP.
+///
+/// Issue 1412: the old literal `10.77.9.202` is the SNV strih. In the Poprad venue nothing answers
+/// there (strih-pp is 10.77.8.202), so the PP camboxes ran with no NTP at all, free-ran on their
+/// RTC (cam7 ~150 s ahead of strih-pp) and stuttered on strih-pp's genlock FIFO. `strih.lan`
+/// resolves to the strih of whichever venue the box is in. The old fear that a failed `.lan` resolve
+/// "falls back to the public pool" does not hold: dantesync's `--ntp-server` CLI value overrides the
+/// config and is resolved on every query, so an unresolvable name is a counted NTP failure, exactly
+/// like an unreachable IP, and recovers once DNS answers. The literal is asserted exactly so a future
+/// refactor pointing dantesync at any OTHER server cannot satisfy this guard.
 #[test]
 fn setup_scripts_point_dantesync_at_the_cluster_master() {
-    // strih's IP from targets.md — the single source of truth for the cluster master reference.
-    const MASTER_IP: &str = "10.77.9.202";
-    // Only one script left to check since #563 retired scripts/setup.sh — a plain value instead
-    // of a single-element loop (clippy::single_element_loop).
+    // The venue strih's DNS name: strih-snv in SNV, strih-pp in Poprad.
+    const MASTER: &str = "strih.lan";
     let script = "scripts/setup-device.sh";
     let body = read(script);
     assert!(
-        body.contains(&format!("dantesync --ntp-server {MASTER_IP}")),
-        "{script} must launch dantesync against the cluster master by IP \
-         (--ntp-server {MASTER_IP}) so a re-provisioned camera disciplines to the SAME clock \
-         as the rest of the cluster — not a bare `dantesync` (public-pool default) and not a \
-         `.lan` hostname that may not resolve on the read-only rootfs"
+        body.contains(&format!(
+            "ExecStart=/usr/local/bin/dantesync --ntp-server {MASTER}\n"
+        )),
+        "{script} must launch dantesync against the venue strih by name \
+         (--ntp-server {MASTER}) so a camera in ANY venue disciplines to that venue's strih"
     );
-    // The bare ExecStart with no server must NOT remain — a bare line would let the daemon
+    // The bare ExecStart with no server must NOT remain -- a bare line would let the daemon
     // fall back to the public-pool default and silently leave the camera on the wrong clock.
     assert!(
         !body.contains("ExecStart=/usr/local/bin/dantesync\n"),
-        "{script} still has a BARE `ExecStart=/usr/local/bin/dantesync` (no --ntp-server) — \
-         that desyncs a re-provisioned camera from the cluster master. Point it at {MASTER_IP}."
+        "{script} still has a BARE `ExecStart=/usr/local/bin/dantesync` (no --ntp-server)"
     );
-    // A `.lan` master reference is explicitly rejected (DNS-resolution risk on the device).
+    // A venue-specific IP must not come back (issue 1412: the SNV IP left every PP cambox clockless).
     assert!(
-        !body.contains("dantesync --ntp-server strih.lan"),
-        "{script} points dantesync at the `.lan` hostname — use the IP {MASTER_IP} (targets.md) \
-         so a failed `.lan` resolve cannot silently drop the camera to the public-pool default"
+        !body.contains("dantesync --ntp-server 10."),
+        "{script} points dantesync at a literal IP -- use {MASTER}, which resolves in every venue"
     );
 }
 

@@ -2,7 +2,7 @@
 //!
 //! The imag notebook's box-level provisioning (the owner's reference starting position) moved
 //! VERBATIM out of `scripts/setup-imag.sh` into `scripts/lib/obs-box-baseline.sh` (+ its kiosk half
-//! `scripts/lib/obs-box-kiosk.sh`), and BOTH `setup-imag.sh` and `setup-strih.sh` call it, so strih-lx
+//! `scripts/lib/obs-box-kiosk.sh`), and BOTH `setup-imag.sh` and `setup-strih.sh` call it, so strih-snv
 //! gets the imag appliance by construction. `scripts/lib/obs-box-baseline-verify.sh` is the ONE grader
 //! `verify-imag.sh` and `verify-strih.sh` both run. These tests pin:
 //!
@@ -98,7 +98,7 @@ fn the_baseline_libs_are_source_only() {
         "for f in obs_box_network_tuning obs_box_max_performance obs_box_never_sleep \
          obs_box_boot_safety_net obs_box_lowlatency_kernel obs_box_cpu_affinity obs_box_nvidia_prime \
          obs_box_dejitter obs_box_crash_popups_off obs_box_kiosk obs_box_power_envelope obs_box_touchpad \
-         obs_box_maxperf_persistence obs_box_cpu_latency obs_box_cpu_latency_bound_us \
+         obs_box_maxperf_persistence obs_box_cpu_latency obs_box_cpu_latency_bound_us obs_box_timezone \
          obs_box_openbox_menu_xml obs_box_openbox_autostart_preamble \
          obs_box_baseline_gather_snippet obs_box_baseline_verdict \
          obs_box_apt_lock_timeout_conf obs_box_apt_lock_timeout \
@@ -300,7 +300,7 @@ fn the_lowlatency_item_is_release_neutral() {
     );
 }
 
-/// The power envelope's thermal step-down wattage is a per-box argument (strih-lx must never fall to
+/// The power envelope's thermal step-down wattage is a per-box argument (strih-snv must never fall to
 /// imag's 25 W iGPU clamp), defaulting to the caller's env / imag's 25 W.
 #[test]
 fn the_power_envelope_takes_a_per_box_stepdown() {
@@ -323,6 +323,8 @@ fn the_power_envelope_takes_a_per_box_stepdown() {
 #[test]
 fn setup_imag_runs_every_baseline_item_in_its_original_step() {
     for (step, call) in [
+        // issue 1415: the rig time zone, on the step that owns the box identity
+        (1, "obs_box_timezone"),
         (2, "obs_box_network_tuning \"$NIC\" imag"),
         (4, "obs_box_max_performance \"$NIC\" imag"),
         (5, "obs_box_never_sleep \"$DESKTOP_USER\" imag"),
@@ -391,7 +393,7 @@ fn setup_imag_sources_the_baseline_and_delegates_its_helpers() {
 }
 
 /// Every box-named file the baseline writes carries the BOX prefix, so imag keeps its historical
-/// names and strih-lx gets its own -- never an `imag` literal on strih-lx.
+/// names and strih-snv gets its own -- never an `imag` literal on strih-snv.
 #[test]
 fn every_box_named_file_is_derived_from_the_box_argument() {
     let libs = format!("{}\n{}", read(BASELINE), read(KIOSK));
@@ -609,11 +611,11 @@ fn openbox_menu_printer_is_parameterised_and_fails_without_its_args() {
     let (c, out, err) = run(
         KIOSK,
         &[],
-        "obs_box_openbox_menu_xml strih-lx 'systemctl --user start strih-obs.service' /usr/local/bin/strih-obs-stop.sh",
+        "obs_box_openbox_menu_xml strih-snv 'systemctl --user start strih-obs.service' /usr/local/bin/strih-obs-stop.sh",
     );
     assert_eq!(c, 0, "stderr={err}");
     for want in [
-        "<menu id=\"root-menu\" label=\"strih-lx\">",
+        "<menu id=\"root-menu\" label=\"strih-snv\">",
         "<command>systemctl --user start strih-obs.service</command>",
         "<item label=\"Zastav OBS (korektne)\">",
         "<command>/usr/local/bin/strih-obs-stop.sh</command>",
@@ -622,7 +624,7 @@ fn openbox_menu_printer_is_parameterised_and_fails_without_its_args() {
     ] {
         assert!(out.contains(want), "menu must carry `{want}`:\n{out}");
     }
-    for args in ["", "strih-lx", "strih-lx start-cmd", "'' start stop"] {
+    for args in ["", "strih-snv", "strih-snv start-cmd", "'' start stop"] {
         let (c, out, _e) = run(KIOSK, &[], &format!("obs_box_openbox_menu_xml {args}"));
         assert_eq!(c, 1, "`{args}` must be refused");
         assert!(out.is_empty(), "no partial menu: {out}");
@@ -679,7 +681,7 @@ fn the_kiosk_item_installs_xorg_and_switches_the_dm_before_the_gnome_purge() {
 
 /// issue 1361 (G1): `python3-websocket` rides the shared baseline's package install, so EVERY OBS box
 /// has it (strih-obs-start.sh refuses to launch OBS without it; imag_scenes.py imports it too). It was
-/// only a hand install on strih-lx; setup-imag.sh's own step-11b install stays (a no-op then).
+/// only a hand install on strih-snv; setup-imag.sh's own step-11b install stays (a no-op then).
 #[test]
 fn the_kiosk_package_install_carries_python3_websocket_1361() {
     let k = baseline_fn("obs_box_kiosk");
@@ -697,12 +699,14 @@ fn the_kiosk_package_install_carries_python3_websocket_1361() {
 // the shared grader
 // ------------------------------------------------------------------------------------------------
 
-const GOOD_FACTS: &str = "sysctl_conf=1
+const GOOD_FACTS: &str = "timezone=Europe/Bratislava
+sysctl_conf=1
 rmem_max=134217728
 nic_hook=1
 cpu_perf_unit=enabled
 rc_local_eee=1
 rc_local_active=active
+cpufreq_policies=16
 governors=performance
 maxperf_active=active
 maxperf_udev=1
@@ -711,6 +715,7 @@ cstate_unit=enabled
 cstate_active=active
 cstate_bound=150
 cstate_states=64
+cpuidle_driver=acpi_idle
 cstate_deep=C3_ACPI:1048us
 cstate_deep_delta=0
 sleep_target=masked
@@ -727,7 +732,9 @@ obs_running=1
 obs_rtprio_limit=0
 dgpu=1
 prime=nvidia
+display_gpus=2
 igpu_unit=
+amdgpu_ddx=deinstall ok config-files
 oomd=masked
 offhours=1
 process_priority=1
@@ -757,10 +764,14 @@ thermald=
 pe_unit=enabled
 pe_guard=enabled
 touchpad=1
+swap_bytes=17179865088
+mem_bytes=16000000000
+swap_fstab=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 17] = [
+const ITEMS: [&str; 20] = [
+    "timezone",
     "net",
     "perf",
     "cstate",
@@ -770,6 +781,7 @@ const ITEMS: [&str; 17] = [
     "affinity",
     "rtprio",
     "gpu",
+    "igpu-sink",
     "dejitter",
     "crash",
     "kiosk",
@@ -778,6 +790,7 @@ const ITEMS: [&str; 17] = [
     "autostart",
     "power",
     "touchpad",
+    "swap",
 ];
 
 fn verdict(facts: &str) -> (i32, Vec<(String, String)>) {
@@ -815,10 +828,90 @@ fn verdict_passes_a_fully_provisioned_box_with_one_row_per_item() {
     assert!(rows.iter().all(|(_, st)| st == "OK"), "{rows:?}");
 }
 
+/// issue 1412 (strih-pp, Ryzen 7 5800X, BIOS CPPC off): the kernel binds no cpufreq driver, so there
+/// is no governor to pin and cpu-performance.service cannot run. The firmware runs the cores (4.0 GHz
+/// read live), so perf is OK without the unit and the governor rows; any other perf fact still counts.
+#[test]
+fn perf_is_ok_on_a_box_without_a_cpufreq_driver_1412() {
+    let no_cpufreq = GOOD_FACTS
+        .replace("cpufreq_policies=16", "cpufreq_policies=0")
+        .replace("cpu_perf_unit=enabled", "cpu_perf_unit=disabled")
+        .replace("governors=performance", "governors=");
+    let (_c, rows) = verdict(&no_cpufreq);
+    let perf = rows.iter().find(|(n, _)| n == "perf").unwrap();
+    assert_eq!(perf.1, "OK", "{rows:?}");
+    let (_c, rows) =
+        verdict(&no_cpufreq.replace("maxperf_active=active", "maxperf_active=inactive"));
+    let perf = rows.iter().find(|(n, _)| n == "perf").unwrap();
+    assert_eq!(perf.1, "FAIL", "the other perf facts still count: {rows:?}");
+    // a box that HAS cpufreq policies still needs the unit and the performance governor
+    let (_c, rows) = verdict(&GOOD_FACTS.replace("governors=performance", "governors="));
+    let perf = rows.iter().find(|(n, _)| n == "perf").unwrap();
+    assert_eq!(perf.1, "FAIL", "{rows:?}");
+    // the installer only enables the governor unit where a cpufreq driver exists
+    let lib = read(BASELINE);
+    let body = &lib[lib.find("obs_box_max_performance() {").unwrap()..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    let gate = body
+        .find("cpufreq/scaling_governor >/dev/null 2>&1; then")
+        .expect("a cpufreq presence gate");
+    let enable = body
+        .find("systemctl enable --now cpu-performance.service")
+        .unwrap();
+    assert!(
+        gate < enable,
+        "the unit is enabled only behind the cpufreq gate"
+    );
+}
+
+/// issue 1412 (strih-pp, Ryzen 7 5800X + RTX 3060, no iGPU, CPPC/C-states off in the BIOS): the
+/// kernel has no cpuidle driver (`current_driver` none, no cpuidle states), so no deep C-state can be
+/// entered and there is nothing for the latency bound to keep out; and with the NVIDIA the ONLY display
+/// adapter, `prime-select nvidia` answers "no integrated GPU detected" and the query stays on-demand.
+/// Both rows grade OK on that box, and stay strict everywhere else.
+#[test]
+fn cstate_and_gpu_rows_accept_a_box_without_cpuidle_or_igpu_1412() {
+    let row = |facts: &str, item: &str| -> String {
+        let (_c, rows) = verdict(facts);
+        rows.iter().find(|(n, _)| n == item).unwrap().1.clone()
+    };
+    let no_idle = GOOD_FACTS
+        .replace("cstate_states=64", "cstate_states=0")
+        .replace("cpuidle_driver=acpi_idle", "cpuidle_driver=none")
+        .replace("cstate_deep=C3_ACPI:1048us", "cstate_deep=");
+    assert_eq!(row(&no_idle, "cstate"), "OK");
+    assert_eq!(
+        row(
+            &no_idle.replace("cstate_active=active", "cstate_active=inactive"),
+            "cstate"
+        ),
+        "FAIL",
+        "the latency holder itself still counts"
+    );
+    // zero states with a cpuidle driver bound (or unreadable) stays a FAIL
+    let unreadable = GOOD_FACTS.replace("cstate_states=64", "cstate_states=0");
+    assert_eq!(row(&unreadable, "cstate"), "FAIL");
+    let only_nvidia = GOOD_FACTS
+        .replace("prime=nvidia", "prime=on-demand")
+        .replace("display_gpus=2", "display_gpus=1");
+    assert_eq!(row(&only_nvidia, "gpu"), "OK");
+    // a hybrid box (iGPU + NVIDIA) still needs NVIDIA-primary
+    assert_eq!(
+        row(
+            &GOOD_FACTS.replace("prime=nvidia", "prime=on-demand"),
+            "gpu"
+        ),
+        "FAIL"
+    );
+}
+
 /// Every item FAILs when its own fact is broken -- and only that item.
 #[test]
 fn verdict_fails_each_item_on_its_own_broken_fact() {
     for (item, from, to) in [
+        // issue 1415: a box left on the image default, and one whose /etc/localtime is no symlink
+        ("timezone", "timezone=Europe/Bratislava", "timezone=Etc/UTC"),
+        ("timezone", "timezone=Europe/Bratislava", "timezone="),
         ("net", "rmem_max=134217728", "rmem_max=212992"),
         (
             "perf",
@@ -860,6 +953,12 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("rtprio", "obs_rtprio_limit=0", "obs_rtprio_limit="),
         ("rtprio", "obs_running=1", "obs_running="),
         ("gpu", "prime=nvidia", "prime=on-demand"),
+        // issue 1418: the amdgpu DDX installed on a discrete-NVIDIA box
+        (
+            "igpu-sink",
+            "amdgpu_ddx=deinstall ok config-files",
+            "amdgpu_ddx=install ok installed",
+        ),
         ("dejitter", "oomd=masked", "oomd=enabled"),
         ("dejitter", "process_priority=1", "process_priority=0"),
         ("dejitter", "user_masked=9/9", "user_masked=7/9"),
@@ -891,6 +990,12 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("autostart", "autostart_unit=1", "autostart_unit=0"),
         ("power", "thermald=", "thermald=install ok installed"),
         ("touchpad", "touchpad=1", "touchpad=0"),
+        // issue 1428 (owner 14.10.2026): no swap is a gross violation; the swap must be active, at
+        // least ~RAM size, and in /etc/fstab.
+        ("swap", "swap_bytes=17179865088", "swap_bytes=0"),
+        ("swap", "swap_bytes=17179865088", "swap_bytes=4294967296"),
+        ("swap", "swap_fstab=1", "swap_fstab=0"),
+        ("swap", "swap_bytes=17179865088", "swap_bytes="),
     ] {
         assert!(GOOD_FACTS.contains(from), "fixture must carry `{from}`");
         let (c, rows) = verdict(&GOOD_FACTS.replacen(from, to, 1));
@@ -1060,7 +1165,7 @@ fn setup_strih_consumes_the_same_baseline() {
     );
 }
 
-/// Live 23.9.2026 on strih-lx (26.04): step 6 had just held the kernel at 7.0.0-31, and the unpinned
+/// Live 23.9.2026 on strih-snv (26.04): step 6 had just held the kernel at 7.0.0-31, and the unpinned
 /// `apt-get install linux-lowlatency-hwe-26.04` picked the NEWER meta 7.0.0-34, which depends on
 /// `linux-image-generic-hwe-26.04 (= 7.0.0-34)` — apt refused ("Reached two conflicting assignments")
 /// and the conversion failed. The meta is config-only by design (never a new image): install it at
@@ -1080,7 +1185,7 @@ fn lowlatency_meta_is_pinned_to_the_installed_generic_hwe_version() {
 
 /// power-profiles-daemon (0.30 on 26.04) resets every core's scaling_governor to `powersave` when it
 /// starts, so a box whose governor the baseline pinned to `performance` came back `powersave` after
-/// the strih-lx conversion reboot (23.9.2026). The max-performance item masks the daemon BEFORE it
+/// the strih-snv conversion reboot (23.9.2026). The max-performance item masks the daemon BEFORE it
 /// checks the governor; the maxperf boot script writes platform_profile itself and only asks the
 /// daemon when it actually runs.
 #[test]
@@ -1115,7 +1220,7 @@ fn verdict_accepts_an_absent_power_profiles_daemon() {
     assert_eq!(c, 0, "{rows:?}");
 }
 
-/// The kiosk disables bluetooth on a box with no Bluetooth input (imag). strih-lx is operated with a
+/// The kiosk disables bluetooth on a box with no Bluetooth input (imag). strih-snv is operated with a
 /// Bluetooth mouse (MX Anywhere 2S), so it passes `keep-bluetooth` and the service stays enabled --
 /// a box fact, the same disable list otherwise.
 #[test]
@@ -1142,7 +1247,7 @@ fn kiosk_keeps_bluetooth_only_when_the_box_asks() {
 }
 
 // ------------------------------------------------------------------------------------------------
-// The dpkg lock wait (issue 1357 dpkg-lock slice). 24.9.2026: the canonical strih-lx genlock deploy
+// The dpkg lock wait (issue 1357 dpkg-lock slice). 24.9.2026: the canonical strih-snv genlock deploy
 // failed twice at setup-strih step 4 with `E: Could not get lock /var/lib/dpkg/lock-frontend ...
 // held by process (apt-get)` -- a periodic apt run held the lock and apt-get's default
 // DPkg::Lock::Timeout is 0. The baseline writes ONE apt drop-in so every present and future apt-get
@@ -1306,7 +1411,7 @@ fn apt_lock_timeout_is_written_before_the_first_apt_get() {
 // refresh holds it. `obs_box_apt_update` is the ONE update call on both provisioning paths: it retries
 // ONLY while that lock is HELD (bounded, 600 s total by default, a log line per wait) and fails loud
 // on anything else or on timeout. The held-lock text below was captured live from apt 2.8.3 (dev1)
-// and apt 3.2.0 (strih-lx).
+// and apt 3.2.0 (strih-snv).
 // ------------------------------------------------------------------------------------------------
 
 const LISTS_LOCK_HELD: &str = "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1794555 (apt-get)\nE: Unable to lock directory /var/lib/apt/lists/";
@@ -1466,9 +1571,13 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         BASELINE,
         KIOSK,
         "scripts/lib/strih-box-facts.sh",
+        // issue 1415: the rig time zone (sourced by the kiosk half)
+        "scripts/lib/rig-timezone.sh",
         "scripts/lib/strih-provision.sh",
         "scripts/lib/strih-drm-output.sh",
         "scripts/lib/genlock-markers.sh",
+        // issue 1302: setup-strih reads the staged stats-ABI marker back through it
+        "scripts/lib/genlock-stats-abi.sh",
         "scripts/lib/ndi-discovery.sh",
         "scripts/lib/ndi-runtime.sh",
         "scripts/lib/imag-power-envelope.sh",
@@ -1480,6 +1589,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/strih-dantesync.sh",
         // issue 1391: the rig NIC driver via DKMS (setup-strih step 1b + verify-strih item 36)
         "scripts/lib/strih-nic-driver.sh",
+        // issue 1418: the operator surface (setup-strih step 16g + verify-strih item 43)
+        "scripts/lib/strih-operator.sh",
         // sourced one level down (strih-box-facts.sh / ndi-discovery.sh)
         "scripts/lib/obs-fleet.sh",
         "scripts/camera-set.sh",

@@ -28,6 +28,10 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -125,15 +129,15 @@ fn resolve_cmd_sets_the_shared_variable_from_the_boxs_own_sys_file_707() {
 // newlines from captured output, so a `_cmd` helper embedded mid-string must never rely on its
 // own trailing newline to separate it from whatever literal text follows at the embedding site).
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cpu-affinity-burn-707-{}-{}",
-        std::process::id(),
-        name
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("cpu-affinity-burn-707-{name}-"))
+        .tempdir()
+        .expect("create scratch dir");
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 #[test]

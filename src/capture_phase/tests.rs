@@ -177,33 +177,88 @@ fn one_late_timestamp_is_not_folded_and_does_not_reseed() {
 }
 
 #[test]
-fn a_real_phase_step_reseeds_once_then_relocks_on_the_new_phase() {
-    let mut frames = camera(700, 15.9, 60_000.0, 7_000_000.0, 0x1367_d206);
+fn a_delivery_delay_burst_keeps_the_lock_and_the_phase_1371() {
+    // Issue 1371 (live cam5, run 1922653182): a USB burst delivers frames +1..+7 ms late for a few
+    // frames at a time, the camera's own phase never moves. Those frames are stamped from the
+    // prediction and the fit is never moved onto them: every stamp stays on the TRUE phase.
+    let mut frames = camera(900, 15.9, 60_000.0, 7_000_000.0, 0x1371_0010);
+    // Eight runs of three late frames inside ~3 s, the 19:13:00-19:13:03 shape (+30 ms summed).
+    let runs: [(usize, [u64; 3]); 8] = [
+        (300, [2_000_000, 2_057_000, 1_994_000]),
+        (320, [1_208_000, 1_248_000, 1_204_000]),
+        (340, [2_875_000, 2_837_000, 2_883_000]),
+        (360, [4_525_000, 4_556_000, 4_551_000]),
+        (380, [7_282_000, 7_283_000, 7_279_000]),
+        (400, [3_544_000, 3_521_000, 3_534_000]),
+        (420, [2_608_000, 2_708_000, 2_662_000]),
+        (440, [4_637_000, 6_669_000, 6_972_000]),
+    ];
+    for (start, late) in runs {
+        for (i, d) in late.iter().enumerate() {
+            frames[start + i].ts += d; // delivered late; the truth (sensor instant) is unchanged
+        }
+    }
+    let mut t = CapturePhaseTracker::new();
+    let mut worst = 0.0f64;
+    for (k, f) in frames.iter().enumerate() {
+        let obs = t.observe(f.seq, f.ts);
+        if k >= 300 {
+            let est = obs
+                .smoothed_mono_ns
+                .expect("a delay burst never unlocks the fit") as f64;
+            worst = worst.max((est - f.truth).abs());
+        }
+    }
+    assert!(
+        worst < 30_000.0,
+        "the stamp stays on the true phase through the bursts: worst {} us",
+        worst / 1000.0
+    );
+    assert_eq!(t.reseeds(), 0, "a delivery burst is never a re-seed");
+    assert!(t.locked());
+}
+
+#[test]
+fn a_persistent_phase_step_reseeds_after_its_outlier_run_1371() {
+    // A REAL phase step (a grabber re-lock) persists. It is held for RESEED_CONSECUTIVE_OUTLIERS - 1
+    // frames, then re-seeds once; after the re-seed the fit relocks on the new phase.
+    let mut frames = camera(900, 15.9, 60_000.0, 7_000_000.0, 0x1367_d206);
     for f in frames.iter_mut().skip(300) {
-        f.ts += 3_000_000; // a grabber re-lock: every later frame 3 ms later
+        f.ts += 3_000_000;
         f.truth += 3_000_000.0;
     }
     let mut t = CapturePhaseTracker::new();
-    let mut unlocked_after_step = 0;
+    let reseed_at = 300 + RESEED_CONSECUTIVE_OUTLIERS as usize - 1;
     for (k, f) in frames.iter().enumerate() {
         let obs = t.observe(f.seq, f.ts);
-        if k >= 300 && obs.smoothed_mono_ns.is_none() {
-            unlocked_after_step += 1;
-        }
-        if k >= 300 + RESEED_CONSECUTIVE_OUTLIERS as usize + LOCK_MIN_FRAMES {
-            let est = obs.smoothed_mono_ns.expect("relocked") as f64;
+        if k < reseed_at && k >= 300 {
             assert!(
-                (est - f.truth).abs() < 30_000.0,
-                "frame {k} on the new phase"
+                obs.smoothed_mono_ns.is_some(),
+                "frame {k}: held, still locked"
             );
         }
+        if k == reseed_at {
+            assert_eq!(t.reseeds(), 1, "the run re-seeds on its last frame");
+        }
     }
-    assert_eq!(t.reseeds(), 1, "one phase step = one re-seed");
-    assert_eq!(
-        unlocked_after_step,
-        LOCK_MIN_FRAMES - 1,
-        "from the re-seed frame on, the fit seeds exactly like a fresh start (raw stamp)"
-    );
+    assert_eq!(t.reseeds(), 1, "one persistent step = one re-seed");
+    assert!(t.locked(), "relocked on the new phase");
+}
+
+#[test]
+fn a_scattered_outlier_run_is_held_not_reseeded_1371() {
+    // Three outliers that disagree with each other (each under half a period) are delivery noise:
+    // held, never folded, never a re-seed.
+    let mut frames = camera(500, 15.9, 60_000.0, 7_000_000.0, 0x1371_0005);
+    frames[300].ts += 2_000_000;
+    frames[301].ts += 6_000_000;
+    frames[302].ts += 3_500_000;
+    let mut t = CapturePhaseTracker::new();
+    for f in &frames {
+        t.observe(f.seq, f.ts);
+    }
+    assert_eq!(t.reseeds(), 0);
+    assert!(t.locked());
 }
 
 #[test]
@@ -874,4 +929,136 @@ fn the_stamp_band_has_hysteresis_at_its_edge() {
         "1900 ppm re-enters it"
     );
     assert_eq!(p.reseeds(), 0);
+}
+
+/// The note of each observed frame (issue 1371): `None` for a frame that neither re-seeded nor
+/// re-indexed.
+fn notes(t: &mut CapturePhaseTracker, frames: &[Frame]) -> Vec<Option<PhaseNote>> {
+    frames
+        .iter()
+        .map(|f| {
+            t.observe(f.seq, f.ts);
+            t.note().cloned()
+        })
+        .collect()
+}
+
+#[test]
+fn a_persistent_step_notes_one_outlier_run_with_its_residuals_1371() {
+    let mut frames = camera(600, 15.9, 60_000.0, 7_000_000.0, 0x1371_0001);
+    for f in frames.iter_mut().skip(300) {
+        f.ts += 3_000_000;
+    }
+    let mut t = CapturePhaseTracker::new();
+    let got = notes(&mut t, &frames);
+    let noted: Vec<(usize, &PhaseNote)> = got
+        .iter()
+        .enumerate()
+        .filter_map(|(k, n)| n.as_ref().map(|n| (k, n)))
+        .collect();
+    assert_eq!(noted.len(), 1, "one step, one note: {noted:?}");
+    let (k, note) = noted[0];
+    assert_eq!(k, 300 + RESEED_CONSECUTIVE_OUTLIERS as usize - 1);
+    let PhaseNote::OutlierRun { resid_ns } = note else {
+        panic!("expected an outlier-run re-seed, got {note:?}");
+    };
+    assert_eq!(resid_ns.len(), RESEED_CONSECUTIVE_OUTLIERS as usize);
+    for r in resid_ns {
+        assert!(
+            (2_700_000..3_300_000).contains(r),
+            "each residual ~ +3 ms: {r}"
+        );
+    }
+    assert!(note
+        .describe()
+        .starts_with("re-seed: reason=outlier-run resid_us=[+"));
+}
+
+#[test]
+fn a_late_frame_over_half_a_period_notes_its_residual_1371() {
+    let mut frames = camera(400, 15.9, 60_000.0, 7_000_000.0, 0x1371_0002);
+    frames[300].ts += 10_000_000; // 10 ms late: over half a 16.7 ms period, not a whole one
+    let mut t = CapturePhaseTracker::new();
+    let got = notes(&mut t, &frames);
+    let PhaseNote::HalfPeriod { resid_ns } = got[300].clone().expect("frame 300 re-seeds") else {
+        panic!("expected half-period, got {:?}", got[300]);
+    };
+    assert!((9_700_000..10_300_000).contains(&resid_ns), "{resid_ns}");
+    assert_eq!(got[301], None, "the next frame carries no note");
+    assert_eq!(t.reseeds(), 1);
+}
+
+#[test]
+fn a_whole_period_late_frame_notes_a_hidden_drop_1371() {
+    let mut frames = camera(400, 0.0, 60_000.0, 7_000_000.0, 0x1371_0003);
+    for f in frames.iter_mut().skip(300) {
+        f.ts += I60; // the device skipped one frame: every later frame one period later
+    }
+    let mut t = CapturePhaseTracker::new();
+    let got = notes(&mut t, &frames);
+    let Some(PhaseNote::HiddenDrop {
+        frames: k,
+        resid_ns,
+    }) = got[300].clone()
+    else {
+        panic!("expected a hidden drop, got {:?}", got[300]);
+    };
+    assert_eq!(k, 1);
+    assert!((16_300_000..17_000_000).contains(&resid_ns), "{resid_ns}");
+    assert_eq!(got.iter().filter(|n| n.is_some()).count(), 1);
+    assert_eq!(t.reseeds(), 0);
+}
+
+#[test]
+fn a_backward_sequence_notes_a_discontinuity_1371() {
+    let frames = camera(200, 15.9, 60_000.0, 7_000_000.0, 0x1371_0004);
+    let mut t = CapturePhaseTracker::new();
+    notes(&mut t, &frames);
+    let next = frames.last().unwrap().ts + 40_000_000;
+    t.observe(0, next);
+    let note = t.note().cloned().expect("a re-open re-seeds");
+    assert!(matches!(note, PhaseNote::Discontinuity { seq_step, .. } if seq_step < 0));
+    assert!(note
+        .describe()
+        .starts_with("re-seed: reason=sequence-back "));
+}
+
+#[test]
+fn describe_reads_each_reason_1371() {
+    let d = |seq_step, dt_ns| PhaseNote::Discontinuity { seq_step, dt_ns }.describe();
+    assert_eq!(
+        d(-5, 40_000_000),
+        "re-seed: reason=sequence-back seq_step=-5 dt_us=40000"
+    );
+    assert_eq!(
+        d(12, 200_000_000),
+        "re-seed: reason=sequence-jump seq_step=12 dt_us=200000"
+    );
+    assert_eq!(d(1, 0), "re-seed: reason=time-stall seq_step=1 dt_us=0");
+    assert_eq!(
+        d(1, 250_000_000),
+        "re-seed: reason=gap seq_step=1 dt_us=250000"
+    );
+    assert_eq!(
+        PhaseNote::HalfPeriod {
+            resid_ns: -9_400_123
+        }
+        .describe(),
+        "re-seed: reason=half-period resid_us=-9400"
+    );
+    assert_eq!(
+        PhaseNote::OutlierRun {
+            resid_ns: vec![1_200_500, 2_000, -1_500_000]
+        }
+        .describe(),
+        "re-seed: reason=outlier-run resid_us=[+1200,+2,-1500]"
+    );
+    assert_eq!(
+        PhaseNote::HiddenDrop {
+            frames: 2,
+            resid_ns: 33_400_000
+        }
+        .describe(),
+        "hidden drop: frames=2 resid_us=+33400"
+    );
 }

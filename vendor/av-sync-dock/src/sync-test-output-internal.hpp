@@ -155,7 +155,9 @@ struct corner_type
  * taken on libobs's single video-output thread and decoded on the dock's own worker thread
  * (camera-box-decode-mailbox.hpp), so a slow QR decode can never make video-io skip output frames.
  * The buffers live in the mailbox's two slots and are reused, so there is no per-frame allocation
- * once they have grown. */
+ * once they have grown. Since issue 1381 st_start sizes and writes `band` and `grid` in both slots
+ * (prepare_slots + st_video_decode_job_prepare), so the video thread's first frame neither allocates
+ * nor first-touches a page; only the phone-mode marker `patches` still grow on use. */
 struct st_marker_patch
 {
 	camerabox::CbPatchRect rect; // the circle's bounding box in the full-res frame
@@ -247,6 +249,11 @@ struct sync_test_output
 	 * CAMERA_BOX_TEST_SIGNAL_FRESH_NS). Written on the decode worker thread in `cb_video_qr_record`, read
 	 * on the audio decode worker (issue 1381) under the same mutex as the other cb_video_* fields. */
 	uint64_t cb_video_last_decode_ts_ns = 0;
+
+	/* issue 1404: the per-run rate limit of the "ignoring reserved origin run N" line (at most one line
+	 * per run per CAMERA_BOX_IGNORED_ORIGIN_LOG_NS of frame time, however the QRs alternate). Decode
+	 * worker only. */
+	CameraBoxIgnoredOriginLog cb_ignored_origin_log;
 
 	/* #398 fix: rolling history of recently-resolved (audio_ts, offset_ns) samples for
 	 * `cb_smooth_offset_ns` — median-smooths the displayed offset so a single false CRC-4 accept
@@ -382,6 +389,7 @@ struct sync_test_output
 /* sync-test-output-video.cpp */
 void st_raw_video(void *, struct video_data *);
 void st_video_decode_job_run(struct sync_test_output *, st_video_decode_job &);
+void st_video_decode_job_prepare(const struct sync_test_output *, st_video_decode_job &);
 void st_decode_worker_thread_setup();
 void signal_sync_found(obs_output_t *, const struct sync_index *);
 void sync_index_found(struct sync_test_output *, int, uint64_t, bool, uint32_t);

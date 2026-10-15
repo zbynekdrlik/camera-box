@@ -91,7 +91,7 @@ SITS at (24, 41) inside the 336 px crop, 287 px (286 wide after the recording sc
 multiview frames).
 
 So the fixed camera crop (792, 728, 336 x 336) always holds a 24 px strip left of the burn and a
-41 px strip above it. Over ordinary camera picture that is harmless. When cam2 films the strih-lx
+41 px strip above it. Over ordinary camera picture that is harmless. When cam2 films the strih-snv
 multiview, those strips hold multiview QR content, and rqrr's one grid pass over the crop reads
 nothing. Run 324220913 had 7 such cam2 frames (1775, 2008, 7808, 8149, 8150, 8167, 8170), counted
 as `BURN-UNREADABLE`.
@@ -165,7 +165,11 @@ exactly `qr::cam1_burn_origin(320)`.
 
 ## Verifying a decode change here at Tier-0 (no cargo)
 
-The probe path compiles at CI only, but the REAL rqrr can run locally:
+The probe path compiles at CI only, but the REAL rqrr can run locally. Shortest path (issue 1404):
+link a small std-only harness against the self-hosted runner's release build,
+`rustc --edition 2021 -O h.rs --extern rqrr=<…/target/release/deps/librqrr-*.rlib> -L <that deps dir>`
+(`~/actions-runner-camera-box/_work/camera-box/camera-box/target/release/deps`, same toolchain), and
+feed it a PIL `.y8` dump through `PreparedImage::prepare_from_greyscale`. Otherwise build it:
 1. Build `rqrr` 0.9.3 without its `img` feature, plus its chain (unicode-ident, proc-macro2 with
    `--cfg wrap_proc_macro`, quote, syn 2, g2poly, g2gen proc-macro, g2p, lru without hashbrown),
    with plain `rustc` from `~/.cargo/registry/src/*/`. It takes a few seconds.
@@ -225,7 +229,7 @@ Two more from the issue-1367 tight-box lane:
 ## The echo gate — a node burn counts only in its own slot (issue 1367)
 
 A camera that films a monitor showing OBS captures decodable copies of node burns. On run
-386740541 cam2 filmed the strih-lx HDMI multiview, and its Preview, Program and camera cells held
+386740541 cam2 filmed the strih-snv HDMI multiview, and its Preview, Program and camera cells held
 burns, cam2's own among them. rqrr reads them like any QR.
 - The echoes put stale ids into cam2's contiguity (copies/gaps 145/151 and 51/53).
 - On frame 1521 an echo of strih's burn and one of cam3's burn satisfied the fast-path gate, so

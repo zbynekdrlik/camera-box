@@ -1680,19 +1680,19 @@ fn recording_e2e_default_sweep_covers_the_full_seven_camera_fleet_1216() {
          (camera-set.sh, CAMERA_ACTIVE_SET-driven) — never a second hardcoded scene:label list."
     );
 
+    // issue 1413 (2026-10-12): cam1/cam4/cam6/cam7 moved to Poprad -- the default sweep covers
+    // exactly the SNV cameras cam2/cam3/cam5.
     let resolved = resolve_cambox_sweep_default(None);
-    for expect in [
-        "Cam 1:CAM1",
-        "Cam 2:CAM2",
-        "Cam 3:CAM3",
-        "Cam 4:CAM4",
-        "Cam 5:CAM5",
-        "Cam 6:CAM6",
-        "Cam 7:CAM7",
-    ] {
+    for expect in ["Cam 2:CAM2", "Cam 3:CAM3", "Cam 5:CAM5"] {
         assert!(
             resolved.contains(expect),
-            "issue 1216 completion: the default sweep must cover {expect}: {resolved}"
+            "issue 1413: the default sweep must cover {expect}: {resolved}"
+        );
+    }
+    for poprad in ["Cam 1:CAM1", "Cam 4:CAM4", "Cam 6:CAM6", "Cam 7:CAM7"] {
+        assert!(
+            !resolved.contains(poprad),
+            "issue 1413: {poprad} is in Poprad -- never in the SNV default sweep: {resolved}"
         );
     }
     // Reversibility, shrink direction -- the derivation still correctly excludes whatever an
@@ -1935,11 +1935,11 @@ fn recording_e2e_runs_the_dantesync_version_gate() {
         .find("dantesync-version-gate.sh")
         .expect("#862: recording-e2e.sh must invoke dantesync-version-gate.sh");
     let window = &s[gate_idx..(gate_idx + 400).min(s.len())];
-    // #1351: strih is now the Linux notebook strih-lx, read via the gate's --linux arm on a Linux
+    // #1351: strih is now the Linux notebook strih-snv, read via the gate's --linux arm on a Linux
     // strih (with --win carrying only stream there) and via --win on a Windows strih -- both are
     // the ssh arms (DANTESYNC_VERSION_LINUX + the computed DV_WIN_NODES), never the removed
     // --win-state bundle-state path. The gate's --win arg is now the computed DV_WIN_NODES variable
-    // (the pre-1351 hard-coded `--win "strih=…"` was the Windows-only read that broke on strih-lx).
+    // (the pre-1351 hard-coded `--win "strih=…"` was the Windows-only read that broke on strih-snv).
     assert!(
         window.contains("--win \"$DV_WIN_NODES\"") && window.contains("--linux"),
         "#862 follow-up (#1351): the dantesync version gate must read strih/stream via the ssh \

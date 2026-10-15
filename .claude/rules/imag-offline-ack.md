@@ -135,7 +135,7 @@ hardware work (issue 1053 is the strih/stream counterpart), never bundled into t
 
 imag-nb is OUT of the rig ~1 year (owner ROZHODNUTE 20.9.2026: „to je jedno ze je to imag dongle
 teraz ho chcem pouzivat na strih …") — its USB ethernet dongle now permanently carries the
-strih-lx notebook at 10.77.9.202, so imag-nb has NO NIC. **But 10.77.9.182 still ANSWERS ICMP on
+strih-snv notebook at 10.77.9.202, so imag-nb has NO NIC. **But 10.77.9.182 still ANSWERS ICMP on
 the venue LAN** (a router / proxy-ARP / foreign responder holds the vacated IP — `ip neigh`
 INCOMPLETE, `+1 duplicates`, erratic 0.15–526 ms RTT), while imag-nb's own services are dead
 (ssh:22 refused, remoteos MCP down, mDNS silent). A bare `ping` therefore proves only "some
@@ -163,15 +163,15 @@ fool, so the venue-LAN DHCP-drift class stops producing false STALE verdicts.
 ## PERMANENT-RETIRED ack (issue 1316, 16.9.2026 → refined 20.9.2026) — the box is GONE, not "taken after an event"
 
 imag-nb was RETURNED to the owner 16.9.2026 (10.77.9.182 physically dark), and the owner ruled
-20.9.2026 that the IMAG role stays out ~1 year (its dongle now serves strih-lx; a new NIC only when
+20.9.2026 that the IMAG role stays out ~1 year (its dongle now serves strih-snv; a new NIC only when
 the role is addressed). The ack shape is the SAME box-name mechanism as the temporary case above,
 BOTH names present in `rig-fleet.txt` (the naming trap: `imag` for the reachability/leg/parity
 sites, `imag-nb` for the dantesync-version-gate node); the reason carries the owner-decision date
 and stays comma-free (the parser splits `CAMBOX_OFFLINE_ACK` on commas):
 
 ```
-imag:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-lx .202)
-imag-nb:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-lx .202)
+imag:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-snv .202)
+imag-nb:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-snv .202)
 ```
 
 - **Stale-ack implication:** the stale-ack guard (`lib/cambox-offline-ack.sh`) still fires if the

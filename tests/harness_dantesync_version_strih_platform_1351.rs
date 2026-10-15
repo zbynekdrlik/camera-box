@@ -1,4 +1,4 @@
-//! issue 1351 — the `[0/8]` dantesync version-parity gate must read the M4 Linux strih (strih-lx,
+//! issue 1351 — the `[0/8]` dantesync version-parity gate must read the M4 Linux strih (strih-snv,
 //! 10.77.9.202) via the gate's `--linux` arm (`dantesync --version` over plain ssh, which answers on
 //! Linux), NOT the `--win` Windows quoted-exe-path arm (which returns nothing on Linux → strih
 //! UNKNOWN → the gate refuses, exit 11). A Windows strih keeps strih+stream BOTH under `--win`

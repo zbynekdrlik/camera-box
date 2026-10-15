@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# strih-obs-start.sh -- strih-lx supervised OBS launcher (issue 1317); extended header below.
+# strih-obs-start.sh -- strih-snv supervised OBS launcher (issue 1317); extended header below.
 set -euo pipefail
 #
 # WHY: systemd/strih-obs.service (ExecStart=/usr/local/bin/strih-obs-start.sh) supervises OBS on the
 # Linux strih notebook, Restart=on-failure. This is the sibling of imag-obs-start.sh (issue 882) but
-# for the strih-lx box, whose facts differ (see the Design comment on issue 1317):
+# for the strih-snv box, whose facts differ (see the Design comment on issue 1317):
 #   * the plain Xorg `:0` session of the lightdm-autologin openbox kiosk (issue 1357 -- the SAME
 #     appliance session imag runs; the GNOME Wayland session and its WAYLAND_DISPLAY path are gone):
 #     DISPLAY=:0 when the X0 socket exists, else FAIL LOUD (OBS is started by the openbox autostart, so
@@ -85,8 +85,8 @@ fi
 
 # --profile / --collection ONLY when those OBS dirs exist -- a fresh box has none, so the launcher
 # must fall back to the default (never pass a flag for a profile/collection OBS has not seeded yet).
-STRIH_OBS_PROFILE="${STRIH_OBS_PROFILE:-strih-lx}"
-STRIH_OBS_COLLECTION="${STRIH_OBS_COLLECTION:-strih-lx}"
+STRIH_OBS_PROFILE="${STRIH_OBS_PROFILE:-strih-snv}"
+STRIH_OBS_COLLECTION="${STRIH_OBS_COLLECTION:-strih-snv}"
 OBS_ARGS=(--disable-shutdown-check)
 if [ -d "${OBS_CFG}/basic/profiles/${STRIH_OBS_PROFILE}" ]; then
   OBS_ARGS+=(--profile "$STRIH_OBS_PROFILE")
@@ -126,13 +126,15 @@ fi
 # import was proven by the preflight above. Armed -> take the connector out of the X layout NOW, so
 # the desktop never extends onto HDMI and the in-OBS lease finds it idle. Best effort + LOUD: a
 # failed xrandr never aborts the unit (the verify-strih drm-output item names a lease that did not
-# go live).
-DRM_CONNECTOR="$(python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_scenes; print(strih_scenes.drm_output_lease_connector(strih_scenes.drm_output_config_text()))" 2>/dev/null || true)"
-if [ -n "$DRM_CONNECTOR" ]; then
-  echo "drm-lease mode ENABLED (${DRM_CONNECTOR} = the in-OBS DRM-lease HDMI output) -- taking it out of the X layout"
+# go live). issue 1424 part 2: the config may arm SEVERAL connectors (an "outputs" array, e.g. strih-pp's
+# HDMI-0 Multiview + HDMI-1 Program) -- every one leaves the X layout (an X CRTC on any of them makes
+# its vk-direct acquire fail).
+DRM_CONNECTORS="$(python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_scenes; print(' '.join(strih_scenes.drm_output_lease_connectors(strih_scenes.drm_output_config_text())))" 2>/dev/null || true)"
+for DRM_CONNECTOR in $DRM_CONNECTORS; do
+  echo "drm-lease mode ENABLED (${DRM_CONNECTOR} = an in-OBS DRM-lease HDMI output) -- taking it out of the X layout"
   xrandr --output "$DRM_CONNECTOR" --off 2>/dev/null \
     || echo "WARN issue 1346: xrandr --output ${DRM_CONNECTOR} --off failed -- if ${DRM_CONNECTOR} is still active in X the in-OBS lease may fail (continuing, never aborting the unit)"
-fi
+done
 
 if [ -n "$ISOLATED_CPUS" ]; then
   echo "launching: taskset -c ${ISOLATED_CPUS} ${OBS_BIN} ${OBS_ARGS[*]}"
@@ -167,7 +169,7 @@ echo "OK: OBS bezi (pid $OBS_PID), WS :4455 up."
 # --host defaults to 127.0.0.1 inside strih_scenes.py.
 #
 # BEST-EFFORT (issue 1317 review): OBS is ALREADY launched (pid $OBS_PID). A RUNTIME seed failure --
-# a transient WS hiccup, a corrupt strih-lx-seed.json, or the WS demanding auth after a config regen
+# a transient WS hiccup, a corrupt strih-seed.json, or the WS demanding auth after a config regen
 # (a documented strih incident) -- must NOT abort this wrapper under `set -euo pipefail`, because that
 # would SIGTERM the cgroup (the live OBS) and Restart=on-failure would FLAP a healthy cut. An
 # empty-but-running OBS is strictly better than a flapping one; verify-strih item 4b reports the

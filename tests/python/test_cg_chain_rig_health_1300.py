@@ -83,3 +83,18 @@ def test_empty_output_is_safe():
     assert "overall=?" in detail
     assert "sources_pass=0" in detail
     assert "sources_fail=0" in detail
+
+
+def test_the_cg_chain_row_reads_only_the_log_tail_not_the_session_head_1302():
+    # issue 1302: obs_log_tail returns HEAD (600 lines) + TAIL; the verdict must not compute its
+    # deltas from the session start, so check_cg_chain drops the head block before grading.
+    import importlib.util, pathlib
+    p = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "rig-health-audit.py"
+    spec = importlib.util.spec_from_file_location("rha_cg_tail_1302", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    text = "\n".join([f"head {i}" for i in range(600)] + [f"tail {i}" for i in range(1500)])
+    out = m.cg_chain_tail_window(text)
+    assert out.splitlines()[0] == "tail 0" and out.splitlines()[-1] == "tail 1499"
+    assert "head" not in out
+    assert m.CG_CHAIN_TAIL_LINES == 1500

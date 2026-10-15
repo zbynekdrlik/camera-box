@@ -100,17 +100,17 @@ def enforce_jitter_floor_ms(new_ms) -> int:
 REMOTE_PROGRAMDATA_JSON_PATH = r"C:\ProgramData\camera-box\phase-sync-last.json"
 
 # issue 1317 part 4: the Linux destination of the SAME payload -- where default_last_json_path()
-# lands when this script runs ON a Linux OBS box (strih-lx, the production strih since the M4
+# lands when this script runs ON a Linux OBS box (strih-snv, the production strih since the M4
 # cut-over). A linux-genlock host gets this path, never the Windows ProgramData one.
 REMOTE_LINUX_JSON_PATH = "/home/newlevel/.camera-box/phase-sync-last.json"
 
 # Known rig hosts -> their MCP tool name (same mapping as av_sync_calibrate.py's _KNOWN_MCP_HOSTS).
 # Only used to make the printed push plan concrete/copy-pasteable; an unrecognized host still gets
 # a usable plan (destination + content), just without a resolved MCP tool name. 10.77.9.202 is the
-# Linux strih-lx (issue 1317 part 4); the push DESTINATION follows the host's fleet class
+# Linux strih-snv (issue 1317 part 4); the push DESTINATION follows the host's fleet class
 # (remote_dest_for_host below), so a strih at another address still gets the right path.
 _KNOWN_MCP_HOSTS = {
-    "10.77.9.202": "linux-strih-lx",
+    "10.77.9.202": "linux-strih-snv",
     "10.77.9.204": "win-stream-snv",
 }
 
@@ -250,7 +250,7 @@ def compute_phase_sync_offsets(measured: dict, gate_bin: "str | None" = None) ->
 
 def active_ndi_sources() -> set:
     """#893 -- the 'NDI camN' strih source names for every camera currently in
-    CAMERA_ACTIVE_SET (env var, default "cam1 cam2 cam3 cam4 cam5 cam6 cam7" -- issue 1198
+    CAMERA_ACTIVE_SET (env var, default "cam2 cam3 cam5" -- issue 1413 (2026-10-12): the SNV rig shrank to cam2/cam3/cam5, cam1/cam4/cam6/cam7 moved to Poprad; the history before it: issue 1198
     (2026-08-27): cam1 + cam2 RESTORED, both healthy on a live journal check, owner refused the
     physical card swap; issue 1216 (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter
     fitted; issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter (flat
@@ -269,7 +269,7 @@ def active_ndi_sources() -> set:
     retired camera could otherwise corrupt the whole formula's notion of "slowest", and
     --apply could write a pin to a camera that isn't even installed.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3 cam5")
     return {f"NDI {tok.strip()}" for tok in raw.replace(",", " ").split() if tok.strip()}
 
 

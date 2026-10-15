@@ -214,12 +214,16 @@ fn setup_device_fstab_heredoc_runs_no_comment_command_and_keeps_nofail_1311() {
         .expect("FSTABEOF terminator must exist");
     let mut block = lines[start..=end].join("\n");
     block = block.replacen("cat > /etc/fstab", "cat", 1);
+    // issue 808: STEP 18 writes the root + tmpfs lines through scripts/lib/ro-root.sh, which
+    // setup-device.sh sources at the top; the lifted block needs the lib sourced the same way.
     let harness = format!(
-        "set -uo pipefail\nROOT_UUID=TESTUUID\nLOG_DIET_JOURNAL_PART_LABEL=cambox-journal\n\
+        "set -uo pipefail\n. \"$RO_ROOT_LIB\"\nROOT_UUID=TESTUUID\n\
+         LOG_DIET_JOURNAL_PART_LABEL=cambox-journal\n\
          log_diet_journal_fstab_line() {{ echo JOURNALLINE; }}\nblkid() {{ return 1; }}\n\
          grep() {{ return 1; }}\n{block}\n"
     );
-    let (code, out, err) = run_bash(&harness, &[]);
+    let lib = manifest_dir().join("scripts/lib/ro-root.sh");
+    let (code, out, err) = run_bash(&harness, &[("RO_ROOT_LIB", lib.display().to_string())]);
     assert_eq!(code, 0, "the fstab heredoc must run clean; stderr: {err}");
     assert!(
         !err.contains("command not found"),

@@ -410,7 +410,7 @@ mod aux_self_exclusion_1346 {
         renders
     }
 
-    /// The live strih-lx numbers (25.9.2026): pre 15 ms + a 14 ms Multiview fits the 30 ms budget,
+    /// The live strih-snv numbers (25.9.2026): pre 15 ms + a 14 ms Multiview fits the 30 ms budget,
     /// so the view renders EVERY tick = 30 fps, not the render/skip alternation (15 fps).
     #[test]
     fn live_numbers_render_every_tick_when_the_own_render_is_excluded() {

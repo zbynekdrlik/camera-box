@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# scripts/lib/ro-root.sh — the ONE read-only-root canon of the provisioning scripts (issue 808).
+#
+# A cambox (scripts/setup-device.sh STEP 18) and a handheld SBC (scripts/bkshading-provision-sbc.sh
+# --install) both run with a READ-ONLY root plus tmpfs for the directories the system must write.
+# An abrupt power-off (a cambox switched off with the rig, a handheld unplugged after each use) then
+# cannot corrupt the root filesystem. Owner ruling 5948648089 (2.10.2026): the SBC root goes
+# read-only "the same as the camboxes". So the tmpfs set, the root line and the "is the root ro?"
+# reading live HERE, once:
+#   - setup-device.sh STEP 18 calls ro_root_root_line + ro_root_tmpfs_line per path inside its own
+#     heredoc: the cambox fstab also carries the EFI line (from fstab.bak) and the issue-1309 journal
+#     partition line BETWEEN /var/log and /var/tmp, so it shares the LINES, not a whole-file builder.
+#     Its written fstab is byte-identical to before (golden: tests/fixtures/ro_root_fstab_808/).
+#   - bkshading-provision-sbc.sh writes ro_root_fstab_text: the same root line + every other mount
+#     of the original fstab kept + the same tmpfs block.
+#   - ro_root_mount_mode is the one first-token reading: setup-device.sh's root_mount_is_readonly
+#     calls it, verify-device.sh keeps its own copy (a python parity test pins both), the SBC
+#     --check and bkshading-deploy-relay.sh decide from it, and cam2-painter-ro-persist.sh emits its
+#     definition into cam2's remote text to verify the root went back to ro (issue 1405).
+#   - the image builders write through it too (issue 1400). create-usb-linux.sh's
+#     create_usb_first_boot_fstab takes ro_root_tmpfs_line /var/cache; its rw root line (rw until
+#     STEP 18 replaces the fstab) and its own EFI and journal-partition lines are deliberate.
+#     build-image.sh's build_image_fstab_text writes ro_root_tmpfs_lines and no root line (its / is an
+#     initramfs overlayfs). Goldens: tests/fixtures/image_builder_fstab_1400/. A test fails when any
+#     other script under scripts/ hand-types one of these tmpfs lines.
+#   - the units a read-only root breaks (issue 1394): logrotate's state file and the apt timers. The
+#     logrotate drop-in BASE is ro_root_logrotate_dropin_service; setup-device.sh and the cambox live
+#     apply (scripts/lib/cambox-ro-units.sh) write ro_root_logrotate_dropin_content, the SBC builds its
+#     own drop-in from the same base plus its Armbian ramlog resets.
+#
+# Source-only: pure functions, NO side effects, and deliberately no `set -euo pipefail` (it would
+# leak into the sourcing shell — .claude/rules/ci-testing-gotchas.md). No grep/awk/sed either: the
+# issue-1311 heredoc test runs STEP 18 with `grep` stubbed out.
+# airuleset:script-ok source-only lib — set -euo pipefail would leak into the sourcing shell (ci-testing-gotchas)
+
+# The writable tmpfs mount points of a read-only-root box, in fstab order.
+ro_root_tmpfs_paths() {
+  printf '%s\n' /tmp /var/log /var/tmp /var/cache /var/spool
+}
+
+# ro_root_tmpfs_line PATH -> the fstab line mounting PATH as tmpfs. An unknown PATH prints nothing
+# and returns 1. Sizes: /var/cache is >= 512M fleet-wide so apt can never ENOSPC and leave a kernel
+# without its initrd (issue 295); /var/log is bounded by logrotate on a cambox (issue 679).
+ro_root_tmpfs_line() {
+  case "${1:-}" in
+    /tmp) printf '%s\n' 'tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0' ;;
+    /var/log) printf '%s\n' 'tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0' ;;
+    /var/tmp) printf '%s\n' 'tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0' ;;
+    /var/cache) printf '%s\n' 'tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0' ;;
+    /var/spool) printf '%s\n' 'tmpfs /var/spool tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=10M 0 0' ;;
+    *) return 1 ;;
+  esac
+}
+
+# ro_root_tmpfs_lines -> every tmpfs line, in ro_root_tmpfs_paths order.
+ro_root_tmpfs_lines() {
+  local p
+  for p in $(ro_root_tmpfs_paths); do
+    ro_root_tmpfs_line "$p"
+  done
+}
+
+# ro_root_root_line UUID FSTYPE -> the read-only root line `UUID=<uuid> / <fstype> ro 0 1`.
+# An empty UUID or FSTYPE prints nothing and returns 1 (never an unbootable `UUID= /` line).
+ro_root_root_line() {
+  local uuid="${1:-}" fstype="${2:-}"
+  [ -n "$uuid" ] && [ -n "$fstype" ] || return 1
+  printf 'UUID=%s / %s ro 0 1\n' "$uuid" "$fstype"
+}
+
+# ro_root_mount_mode OPTS -> `ro` | `rw` | `unknown`, from the FIRST comma-token of a mount-options
+# string (`findmnt -no OPTIONS /`; the kernel always emits ro/rw first). Substring-safe: an rw mount
+# carrying `errors=remount-ro` is `rw`. An empty or unexpected read is `unknown`: a caller must treat
+# it as unreadable, never as rw or ro.
+ro_root_mount_mode() {
+  case "${1:-}" in
+    ro | ro,*) printf '%s\n' ro ;;
+    rw | rw,*) printf '%s\n' rw ;;
+    *) printf '%s\n' unknown ;;
+  esac
+}
+
+# ro_root_is_tmpfs_path PATH -> 0 when PATH is one of the tmpfs mount points.
+ro_root_is_tmpfs_path() {
+  local p
+  for p in $(ro_root_tmpfs_paths); do
+    [ "$p" = "${1:-}" ] && return 0
+  done
+  return 1
+}
+
+# ro_root_kept_mounts ORIGINAL_FSTAB_TEXT -> the original fstab's mount lines that the read-only
+# fstab keeps VERBATIM: every entry except the root (`/`, replaced by the ro root line) and the
+# tmpfs mount points (replaced by the canonical set). Comments and blank lines are dropped. This is
+# what keeps a board's own extra mount (a Raspberry Pi OS `/boot/firmware`, a swap entry) intact.
+ro_root_kept_mounts() {
+  local line first mnt
+  while IFS= read -r line || [ -n "$line" ]; do
+    read -r first mnt _ <<<"$line"
+    [ -n "$first" ] || continue
+    case "$first" in \#*) continue ;; esac
+    [ "$mnt" = "/" ] && continue
+    ro_root_is_tmpfs_path "$mnt" && continue
+    printf '%s\n' "$line"
+  done <<<"${1:-}"
+}
+
+# ro_root_fstab_text UUID FSTYPE ORIGINAL_FSTAB_TEXT -> the whole read-only fstab for a box with a
+# single root filesystem (the handheld SBC): the ro root line, the kept mounts, the tmpfs set.
+# Idempotent: fed its own output it returns the same text. Returns 1 (and prints nothing) on an
+# empty UUID or FSTYPE.
+ro_root_fstab_text() {
+  local root kept
+  root="$(ro_root_root_line "${1:-}" "${2:-}")" || return 1
+  kept="$(ro_root_kept_mounts "${3:-}")"
+  printf '%s\n' "# Root filesystem - read-only (scripts/lib/ro-root.sh, the cambox canon; issue 808)."
+  printf '%s\n' "# Update it with: mount -o remount,rw /  ->  change  ->  mount -o remount,ro /"
+  printf '%s\n' "$root"
+  printf '\n%s\n' "# Other mounts kept from the original fstab"
+  if [ -n "$kept" ]; then
+    printf '%s\n' "$kept"
+  else
+    printf '%s\n' "# (none)"
+  fi
+  printf '\n%s\n' "# tmpfs mounts for writable directories"
+  ro_root_tmpfs_lines
+}
+
+# --- the units a read-only root breaks (issue 1394; the SBC since issue 808) -----------------------
+
+# logrotate keeps its state in /var/lib/logrotate/status, which is on the read-only root: every run
+# failed "error opening state file ... Read-only file system" (exit 3) and left the box `degraded`
+# (the handheld SBC 4.10.2026; cam1/cam2/cam5 8.10.2026, every 15 min since the issue-679 timer).
+# /run is a tmpfs, so the state lives there. /var/log is a tmpfs too and is wiped at every boot, so
+# only rotation within one boot matters: after a boot logrotate finds no state, stamps every log as
+# just rotated and rotates nothing time-based in that boot; the size rules still apply.
+ro_root_logrotate_state_file() { printf '%s\n' /run/logrotate.status; }
+
+# ro_root_logrotate_dropin_service [LINE...] -> the drop-in's [Service] section, the BASE every
+# read-only-root box shares: the section header, each LINE given (a box's own resets, e.g. the SBC's
+# Armbian `ExecStartPre=` / `ExecStartPost=`), then the ExecStart override. `ExecStart=` comes first:
+# a oneshot runs EVERY ExecStart line, so the stock one must be cleared before it is re-stated. The
+# config argument is the stock /etc/logrotate.conf of both images (Ubuntu 24.04, Debian/Armbian).
+# shellcheck disable=SC2120  # the LINE arguments come from bkshading-sbc-runtime.sh (another file)
+ro_root_logrotate_dropin_service() {
+  printf '%s\n' "[Service]"
+  [ "$#" -eq 0 ] || printf '%s\n' "$@"
+  printf '%s\n' "ExecStart=" "ExecStart=/usr/sbin/logrotate --state $(ro_root_logrotate_state_file) /etc/logrotate.conf"
+}
+
+# The cambox drop-in's path relative to the unit dir (/etc/systemd/system). `zz-` sorts after any
+# letter-named drop-in (drop-ins of all dirs apply in filename order). The SBC keeps its own
+# historical name, zz-bkshading-ro-root.conf (bkshading-sbc-runtime.sh): handheld-1 carries it.
+ro_root_logrotate_dropin_relpath() { printf '%s\n' logrotate.service.d/zz-camera-box-ro-root.conf; }
+
+# ro_root_logrotate_dropin_content -> the whole cambox drop-in: two comment lines + the base.
+# verify-device.sh (ar) grades the box's file byte-for-byte against this.
+ro_root_logrotate_dropin_content() {
+  printf '%s\n' \
+    "# Written by scripts/setup-device.sh / scripts/cambox-ro-units-apply.sh (issue 1394): the root is" \
+    "# read-only, so logrotate keeps its state in /run (the base is scripts/lib/ro-root.sh)."
+  ro_root_logrotate_dropin_service
+}
+
+# The apt timers and services a read-only-root CAMBOX masks. apt-daily(-upgrade).service exit 2 on
+# every pass (apt cannot write /var/lib/apt), and a timer that is only DISABLED is enabled again by
+# a package upgrade's maintainer scripts; a mask (a link to /dev/null) survives it. apt-get itself
+# never goes through these units. setup-device.sh STEP 15, build-image.sh (the overlay image), the
+# cambox live apply (scripts/lib/cambox-ro-units.sh) and verify-device (ar) all read this ONE list.
+# The handheld SBC does not use it yet (its own masks are bkshading_sbc_masked_units).
+# dpkg-db-backup (live 8.10.2026): its daily savelog into /var/backups fails on the read-only root
+# (exit 4) and left cam3/cam4/cam6/cam7 degraded after the apt masks, so it is masked here too.
+ro_root_masked_apt_units() {
+  printf '%s\n' apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service \
+    dpkg-db-backup.timer dpkg-db-backup.service
+}

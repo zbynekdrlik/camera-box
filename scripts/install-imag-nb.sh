@@ -10,9 +10,9 @@ set -euo pipefail
 #
 # RELEASE-AGNOSTIC (issue 1317): supports BOTH a 24.04 (noble) and a 26.04 (resolute) live stick —
 # the casper layer chain is the same and the chroot kernel meta is DERIVED from the target's own
-# /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID>, the HWE line the imag/strih-lx role
+# /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID>, the HWE line the imag/strih-snv role
 # runs, else linux-generic) via `imag_kernel_meta_package`, never a hardcoded release literal. The
-# strih-lx notebook (owner 18.9.) uses a 26.04 stick with --hostname strih-lx --ip 10.77.9.203.
+# strih-snv notebook (owner 18.9.) uses a 26.04 stick with --hostname strih-snv --ip 10.77.9.203.
 #
 # WHY squashfs LAYERS and not a copy of the running live session: an Ubuntu live ISO stacks
 #   minimal.squashfs  ->  minimal.standard.squashfs  ->  minimal.standard.live.squashfs
@@ -37,7 +37,6 @@ IMAG_DNS=""
 IMAG_HOSTNAME="imag-nb"
 DESKTOP_USER="newlevel"
 DESKTOP_PW="newlevel"
-NM_CON_ID="imag-lan"
 MOUNT_ROOT="/mnt/imag-root"
 MOUNT_SRC="/mnt/imag-src"
 LAYER_MNT_BASE="/mnt/imag-layer"
@@ -70,8 +69,11 @@ error() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
 # imag_layer_chain CASPER_DIR SECUREBOOT_STATE -> ordered squashfs layer paths, LOWEST FIRST.
 #
-# The install chain is minimal -> minimal.standard (+ the enhanced-secureboot delta on top when
-# Secure Boot is enabled). DELIBERATELY excluded: `*.live.squashfs` (the live session itself —
+# The install chain is minimal -> minimal.standard, whatever the Secure Boot state. DELIBERATELY
+# excluded: `minimal.standard.enhanced-secureboot.squashfs` (issue 1412: Ubuntu's TPM-backed FDE
+# variant, boot managed by snapd; its boot-managed-by-snapd package conflicts with grub-efi-amd64, so
+# the chroot GRUB install failed on stream-pp with Secure Boot on; Secure Boot is served by the
+# shim-signed + grub-efi-amd64-signed chain the chroot installs), `*.live.squashfs` (the live session itself —
 # casper + the `ubuntu` user; installing it is the classic "my install is just a live clone" bug),
 # every per-language delta (`minimal.de.squashfs`, `minimal.standard.fr.squashfs`, …) and the
 # `minimal.enhanced-secureboot.squashfs` branch (a delta on `minimal`, not on `minimal.standard`
@@ -88,11 +90,31 @@ imag_layer_chain() {
         [ -f "$f" ] || { echo "imag_layer_chain: required layer missing: $f" >&2; return 3; }
     done
     printf '%s\n%s\n' "$base" "$std"
-
     if [ "$sb" = "enabled" ]; then
-        [ -f "$sbl" ] || { echo "imag_layer_chain: Secure Boot is on but layer missing: $sbl" >&2; return 3; }
-        printf '%s\n' "$sbl"
+        echo "imag_layer_chain: Secure Boot on -- the signed shim + grub chain, not ${sbl##*/}" >&2
     fi
+}
+
+# imag_nm_con_id HOSTNAME -> the NetworkManager profile name: the hostname up to its first `-`, then
+# `-lan` (imag-nb -> imag-lan, stream-pp -> stream-lan, strih-pp -> strih-lan). Issue 1412: the old
+# fixed `imag-lan` showed up on every box this installer set up.
+imag_nm_con_id() {
+    local host="${1:-}"
+    [ -n "$host" ] || { echo "imag_nm_con_id: hostname required" >&2; return 2; }
+    printf '%s-lan\n' "${host%%-*}"
+}
+
+# imag_disable_cloud_init ROOT -> disable cloud-init on the installed system at ROOT. Issue 1412: the
+# live layers ship it; on stream-pp its cloud-init-network.service held every boot 4 min waiting for a
+# datasource, and its 50-cloud-init.yaml netplan added a second DHCP profile next to ours. A root
+# without cloud-init is left as it is.
+imag_disable_cloud_init() {
+    local root="${1:-}"
+    [ -n "$root" ] && [ -d "$root/etc" ] || { echo "imag_disable_cloud_init: target root required" >&2; return 2; }
+    if [ -d "$root/etc/cloud" ]; then
+        : > "$root/etc/cloud/cloud-init.disabled"
+    fi
+    rm -f "$root/etc/netplan/50-cloud-init.yaml"
 }
 
 # imag_kernel_meta_package VERSION_ID AVAILABLE -> the apt kernel meta-package to install in the
@@ -112,6 +134,21 @@ imag_kernel_meta_package() {
     else
         printf '%s\n' "linux-generic"
     fi
+}
+
+# imag_kernel_meta_version META_VERSIONS LL_VERSIONS -> the newest version of the kernel meta (META,
+# newest first, one per line as `apt-cache madison` lists them) that its lowlatency twin (LL) also has,
+# or nothing when they share none (the caller then installs the meta unpinned). Issue 1412: the chroot
+# installed linux-generic-hwe-26.04 7.0.0-30 while the archive had 7.0.0-38, and the lowlatency config
+# meta exists only at 7.0.0-38, so setup's step 11 failed on every fresh box. Always rc 0.
+imag_kernel_meta_version() {
+    local meta="${1:-}" ll="${2:-}" v
+    [ -n "$ll" ] || return 0
+    while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        if grep -qxF -- "$v" <<<"$ll"; then printf '%s\n' "$v"; return 0; fi
+    done <<<"$meta"
+    return 0
 }
 
 # imag_apt_drop_cdrom_sources ETC_APT_DIR -> remove the live-ISO apt sources from a target's
@@ -352,6 +389,9 @@ EOF
     [ -n "$IMAG_DNS" ] || IMAG_DNS="$IMAG_GW"
     [ -n "$IMAG_GW" ] || error "cannot determine the default gateway — pass --gateway"
 
+    imag_disable_cloud_init "$MOUNT_ROOT" || error "cannot disable cloud-init on the target"
+    local NM_CON_ID
+    NM_CON_ID="$(imag_nm_con_id "$IMAG_HOSTNAME")" || error "cannot derive the NetworkManager profile name"
     mkdir -p "$MOUNT_ROOT/etc/NetworkManager/system-connections"
     imag_nm_keyfile "$NM_CON_ID" "$IMAG_IP" "$IMAG_PREFIX" "$IMAG_GW" "$IMAG_DNS" \
         > "$MOUNT_ROOT/etc/NetworkManager/system-connections/${NM_CON_ID}.nmconnection"
@@ -374,7 +414,7 @@ configure_in_chroot() {
     # target's apt would abort on it. Serialize the pure drop-helper the SAME way (declare -f) and run
     # it on /etc/apt as the first apt-touching step, so the archive update below has a clean set.
     local kernel_meta_fn cdrom_fn
-    kernel_meta_fn="$(declare -f imag_kernel_meta_package)"
+    kernel_meta_fn="$(declare -f imag_kernel_meta_package imag_kernel_meta_version)"
     cdrom_fn="$(declare -f imag_apt_drop_cdrom_sources)"
     cat > "$MOUNT_ROOT/tmp/imag-chroot.sh" <<CHROOT
 set -euo pipefail
@@ -397,16 +437,23 @@ apt-get install -y --no-install-recommends openssh-server network-manager grub-e
 # HWE line (the incumbent box on 6.17; on imag, setup-imag.sh's step-6 HWE holds + the
 # linux-lowlatency-hwe-<rel> install depend on exactly these packages, so a GA baseline aborts
 # provisioning) and it carries the 13th-gen CPU/iGPU/USB-NIC support #482 deliberately kept — the SAME
-# hardware class the strih-lx notebook (setup-strih.sh follow-on) is on. issue 1317: the release is
+# hardware class the strih-snv notebook (setup-strih.sh follow-on) is on. issue 1317: the release is
 # DERIVED from the target's own /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID> when
 # available on that release, else linux-generic) via imag_kernel_meta_package (serialized in above),
-# never a hardcoded noble literal — so the ONE installer serves both an imag (24.04) and a strih-lx
+# never a hardcoded noble literal — so the ONE installer serves both an imag (24.04) and a strih-snv
 # (26.04) stick.
 if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
     version_id="\$( . /etc/os-release; printf '%s' "\${VERSION_ID:-}" )"
     kernel_avail="\$(apt-cache pkgnames linux-generic 2>/dev/null || true)"
     kernel_meta="\$(imag_kernel_meta_package "\$version_id" "\$kernel_avail")" || exit 1
-    apt-get install -y "\$kernel_meta" >/dev/null || exit 1
+    meta_vers="\$(apt-cache madison "\$kernel_meta" 2>/dev/null | awk -F'|' '{gsub(/ /, "", \$2); print \$2}')"
+    ll_vers="\$(apt-cache madison "\${kernel_meta/generic/lowlatency}" 2>/dev/null | awk -F'|' '{gsub(/ /, "", \$2); print \$2}')"
+    kernel_ver="\$(imag_kernel_meta_version "\$meta_vers" "\$ll_vers")"
+    if [ -n "\$kernel_ver" ]; then
+        apt-get install -y "\$kernel_meta=\$kernel_ver" >/dev/null || exit 1
+    else
+        apt-get install -y "\$kernel_meta" >/dev/null || exit 1
+    fi
 fi
 ls /boot/vmlinuz-* >/dev/null 2>&1 || { echo "no kernel installed in the chroot" >&2; exit 1; }
 

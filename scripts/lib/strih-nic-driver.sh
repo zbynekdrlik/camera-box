@@ -8,7 +8,7 @@
 # scripts/lib/strih-nic-driver.sh -- issue 1391: the strih rig NIC's out-of-tree kernel driver, and the
 # two link facts that decide whether its 5 GbE link loses packets.
 #
-# The rig NIC of strih-lx since 29.9.2026 is a Ubiquiti UACC-Adapter-RJ45-USBC-5GE = Realtek RTL8157 (USB
+# The rig NIC of strih-snv since 29.9.2026 is a Ubiquiti UACC-Adapter-RJ45-USBC-5GE = Realtek RTL8157 (USB
 # 0bda:8157). The in-tree r8152 of the 7.0 kernels has no 0bda:8157 id, so the Realtek out-of-tree driver
 # is vendored at vendor/realtek-r8152 (the pinned v2.21.4 source + camera-box's dkms.conf + SHA256SUMS)
 # and built through DKMS, which rebuilds it for every kernel installed later. Measured live 29.9.2026:
@@ -462,7 +462,7 @@ strih_nic_speed_verdict() {
   local kind="${1-}" val="${2-}" min="${3-}" nic="${4-}" v label fix
   case "$kind" in
     usb) label="USB link"; fix=" -- ${STRIH_NIC_USB_FIX}" ;;
-    link) label="Ethernet link"; fix=" -- check the switch port, its module and the cable (5GBASE-T needs Cat6)" ;;
+    link) label="Ethernet link"; fix=" -- check the switch port, its module and the cable (10GBASE-T needs Cat6a, 5GBASE-T Cat6)" ;;
     *) printf 'FAIL|(nic) unknown speed kind %s\n' "$kind"; return 1 ;;
   esac
   v="${val//[[:space:]]/}"
@@ -563,6 +563,94 @@ strih_nic_nm_pin_verdict() {
   printf 'OK|(nic-nm) NetworkManager connection %s carrying %s is pinned to %s\n' "$pinned" "$ip" "$nic"
 }
 
+# strih_nic_nm_ring_verdict DRIVER NAME RING -> a `FAIL|(nic-ring)` row and rc 1 when the rig NIC is
+# `atlantic` and its NetworkManager connection NAME carries an ethtool.ring-rx override (RING non-empty);
+# otherwise nothing, rc 0. issue 1411: NetworkManager re-applies the ring on every link-up, the atlantic
+# driver resets the NIC on a ring change, and the 10 GbE link drops a second later -- a flap loop (live
+# 11.10.2026: 2744 flaps, the strih off its address). The ring stays recorded-only on other drivers.
+strih_nic_nm_ring_verdict() {
+  local drv="${1-}" name="${2-}" ring="${3-}"
+  [ "$drv" = atlantic ] && [ -n "$ring" ] || return 0
+  printf 'FAIL|(nic-ring) NetworkManager connection %s sets ethtool.ring-rx %s on the atlantic rig NIC -- a ring change resets the NIC and NM re-applies it on every link-up (a link-flap loop); remove it: nmcli connection modify %s ethtool.ring-rx ""\n' "$name" "$ring" "$name"
+  return 1
+}
+
+# _strih_nic_ip4_int A.B.C.D -> the address as one integer (rc 1 on a malformed address).
+_strih_nic_ip4_int() {
+  local a b c d
+  IFS=. read -r a b c d <<<"${1-}"
+  for v in "$a" "$b" "$c" "$d"; do [[ "$v" =~ ^[0123456789]{1,3}$ ]] && [ "$v" -le 255 ] || return 1; done
+  printf '%s' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
+}
+
+# strih_nic_rig_prefix NIC IP IP_ADDR_TEXT -> the prefix length IP carries on NIC in IP_ADDR_TEXT
+# (`ip -o -4 addr show`); rc 1 when IP sits on no NIC (or is not an address).
+strih_nic_rig_prefix() {
+  local nic="${1-}" ip="${2-}" text="${3-}" ifc addr line pfx=""
+  while IFS= read -r line; do
+    read -r _ ifc _ addr _ <<<"$line"
+    [ "$ifc" = "$nic" ] && [ "${addr%%/*}" = "$ip" ] && pfx="${addr##*/}"
+  done <<<"$text"
+  [[ "$pfx" =~ ^[0123456789]{1,2}$ ]] && [ "$pfx" -le 32 ] && _strih_nic_ip4_int "$ip" >/dev/null || return 1
+  printf '%s' "$pfx"
+}
+
+# strih_nic_on_subnet IP PREFIX ADDRESS -> rc 0 when ADDRESS (a `/len` suffix is ignored) is inside IP/PREFIX.
+strih_nic_on_subnet() {
+  local pfx="${2-}" want net mask
+  [[ "$pfx" =~ ^[0123456789]{1,2}$ ]] && [ "$pfx" -le 32 ] || return 1
+  want="$(_strih_nic_ip4_int "${1-}")" && net="$(_strih_nic_ip4_int "${3%%/*}")" || return 1
+  mask=$(( pfx == 0 ? 0 : (0xFFFFFFFF << (32 - pfx)) & 0xFFFFFFFF ))
+  [ $(( net & mask )) -eq $(( want & mask )) ]
+}
+
+# strih_nic_rig_subnet_others NIC IP IP_ADDR_TEXT -> one `IFACE ADDRESS` line per OTHER interface (never
+# NIC, never lo) carrying an address on the rig subnet (IP's prefix on NIC), in the text's order; rc 1
+# when IP sits on no NIC (the subnet is unknown). The ONE subnet rule of item 36's (nic-homed) row and
+# setup-strih step 16g, which takes those interfaces' profiles off the subnet (issue 1418).
+strih_nic_rig_subnet_others() {
+  local nic="${1-}" ip="${2-}" text="${3-}" pfx line ifc addr
+  pfx="$(strih_nic_rig_prefix "$nic" "$ip" "$text")" || return 1
+  while IFS= read -r line; do
+    read -r _ ifc _ addr _ <<<"$line"
+    [ -n "$ifc" ] && [ "$ifc" != "$nic" ] && [ "$ifc" != lo ] || continue
+    if strih_nic_on_subnet "$ip" "$pfx" "$addr"; then printf '%s %s\n' "$ifc" "${addr%%/*}"; fi
+  done <<<"$text"
+  return 0
+}
+
+# strih_nic_single_homed_verdict NIC IP IP_ADDR_TEXT -> `OK|(nic-homed)` when only NIC carries an address
+# on the rig subnet (the prefix of IP on NIC in IP_ADDR_TEXT, `ip -o -4 addr show`), `FAIL|(nic-homed)`
+# + rc 1 naming every other interface that does, or when IP sits on no interface. Empty text: no row.
+# issue 1411: a second interface on the rig /23 (the onboard port's DHCP profile) won the routes, every
+# reply left from its address, and every dantesync follower lost PTP for ~22 h.
+strih_nic_single_homed_verdict() {
+  local nic="${1-}" ip="${2-}" text="${3-}" rig_pfx others other="" ifc addr
+  [ -n "$text" ] || return 0
+  if ! rig_pfx="$(strih_nic_rig_prefix "$nic" "$ip" "$text")"; then
+    printf 'FAIL|(nic-homed) the rig address %s is on no interface %s -- setup-strih step 1\n' "$ip" "${nic:-<unresolved>}"
+    return 1
+  fi
+  others="$(strih_nic_rig_subnet_others "$nic" "$ip" "$text")"
+  while read -r ifc addr; do
+    if [ -n "$ifc" ]; then other="${other}${other:+, }${ifc} ${addr}"; fi
+  done <<<"$others"
+  if [ -n "$other" ]; then
+    printf 'FAIL|(nic-homed) %s also on the rig subnet next to %s -- its routes win and the strih answers from it; setup-strih.sh step 16g takes such a profile down (issue 1418), or by hand: nmcli connection modify <name> connection.autoconnect no && nmcli connection down <name>\n' "$other" "$nic"
+    return 1
+  fi
+  printf 'OK|(nic-homed) only %s carries the rig subnet (%s/%s)\n' "$nic" "$ip" "$rig_pfx"
+}
+
+# strih_nic_ring_note DRIVER -> the ring-rx part of setup-strih step 1's operator note: " and set
+# ethtool.ring-rx 4096" for the USB r8152 NIC, a "never" for atlantic (issue 1411), nothing otherwise.
+strih_nic_ring_note() {
+  case "${1-}" in
+    r8152) printf ' and set ethtool.ring-rx 4096' ;;
+    atlantic) printf ' and never set ethtool.ring-rx on it (the atlantic driver resets the link on a ring change, a flap loop)' ;;
+  esac
+}
+
 # _strih_nic_nm_rows -> `UUID|NAME|INTERFACE_NAME|IPV4_ADDRESSES` per NetworkManager connection (read-only
 # nmcli, one property per call so no value is ever split on a separator); rc 1 when nmcli is absent.
 _strih_nic_nm_rows() {
@@ -582,7 +670,7 @@ _strih_nic_nm_rows() {
 # IP_ADDR_TEXT is `ip -o -4 addr show` output, the fallback of the rig-NIC resolver strih_lx_rig_nic
 # (scripts/lib/strih-provision.sh, which the caller sources). Read-only; always rc 0 (the rows are the verdict).
 strih_nic_grade_rows() {
-  local sysroot="${1:-/sys}" addrs="${2-}" spec nicdrv ip nic k minusb minlink usbf present n nmrows
+  local sysroot="${1:-/sys}" addrs="${2-}" spec nicdrv ip nic k minusb minlink usbf present n nmrows u ifn
   if ! spec="$(strih_lx_nic_oot_driver)" || ! nicdrv="$(strih_lx_nic_driver)" || ! ip="$(strih_lx_ip)" \
     || ! minusb="$(strih_lx_nic_min_usb_mbps)" || ! minlink="$(strih_lx_nic_min_link_mbps)"; then
     printf 'FAIL|(nic) the box facts are not readable\n'
@@ -618,9 +706,14 @@ strih_nic_grade_rows() {
   for n in "${sysroot}"/class/net/*; do [ -e "$n" ] && present="${present} ${n##*/}"; done
   if nmrows="$(_strih_nic_nm_rows)"; then
     strih_nic_nm_pin_verdict "$ip" "$nic" "$present" <<<"$nmrows" || true
+    while IFS='|' read -r u n ifn _; do
+      [ -n "$u" ] && [ "$ifn" = "$nic" ] || continue
+      strih_nic_nm_ring_verdict "$nicdrv" "$n" "$(nmcli -g ethtool.ring-rx connection show "$u" 2>/dev/null || true)" || true
+    done <<<"$nmrows"
   else
     printf 'FAIL|(nic-nm) nmcli is not installed -- the NetworkManager pinning cannot be read\n'
   fi
+  strih_nic_single_homed_verdict "$nic" "$ip" "$addrs" || true
   return 0
 }
 

@@ -11,6 +11,8 @@ paths:
   - "scripts/rig-busy-gate.sh"
   - "tests/python/test_rig_lease_refresh_1383.py"
   - "tests/python/test_rig_lease_refresh_races_1383.py"
+  - "scripts/rig_serve_files.py"
+  - "tests/python/test_rig_marker_mirror_1404.py"
 ---
 
 # rig-lease HTTP exposure (#1277) — the read-only window onto the #830 lockdir for a foreign host
@@ -72,6 +74,24 @@ issue 1383 the holder keeps its own lease truthful from acquire to release:
      stderr, so a mismatched identity is visible in the run log.
   3. `av-soak.sh` itself at every slot start and in the between-slot wait (not ours → abort; past its
      window → abort with that reason; an fs error → logged, carry on).
+- **A fourth holder, `scripts/cambox-ro-units-apply.sh --apply` (issue 1394),** takes the lease as
+  `camera-box-ro-units-apply` + `ro-units-apply-<stamp>-<pid>` for its whole run (a root write on
+  the camboxes, minutes per box) and gives it back on every exit. It declares the rolling look-ahead
+  (`RIG_LEASE_LOOKAHEAD_SECS`, 900 s), never its whole run, so a CI E2E that starts meanwhile WAITS
+  for the release instead of failing fast (the gate refuses a holder whose release lies past its
+  1800 s wait budget). It beats only before each box, so while one box runs (the netconsole arm can
+  wait minutes for dev1) its `heartbeat_age_s` reads minutes old although the holder is alive.
+  restreamer's :8890 consumer waits its 900 s cap for any live holder, so an apply delays a
+  restreamer stream E2E by up to ~15 min although it never touches OBS.
+- **Checklist for a NEW holder script** (both items were review-round-4 findings on the apply,
+  reproduced):
+  - Declare `expected_release_at` = now + the look-ahead and keep it rolling with
+    `rig_lease_refresh_if_mine`, unless you WANT a CI E2E to fail fast (the soak does). The gate
+    fails fast (exit 44) on any holder whose release lies past its 1800 s wait budget.
+  - Store the run id the cleanup releases BEFORE calling `rig_lease_acquire`, never from its result.
+    On a TERM, bash finishes the `$(rig_lease_acquire …)` substitution (the holder gets written) and
+    only then runs the trap, so an id set after it leaves a live lease nobody releases. Releasing an
+    id that never became the holder is safe: `rig_lease_release` checks the run_id.
 - **The hold CEILING keeps the #830 "never a permanent deadlock" backstop:** no beat past
   `acquired_at + RIG_LEASE_MAX_HOLD_SECS` (default 4500 s = `full-path-e2e.yml`'s `timeout-minutes:
   75`, lock-stepped by a test; the soak sets its declared run window). An unparseable `acquired_at`
@@ -105,7 +125,8 @@ which beats once per poll, `RIG_BUSY_GATE_SLEEP_SECS` 60 s). `ttl_s` is the larg
 release and the rolling look-ahead: ≈ 1980-2700 s in the first ~30 min of a CI run (acquire +
 45 min still wins the max), ≈ 870-900 s after that — NOT the run's end time (the run ends when
 `held` goes `false`). A held lease whose heartbeat is many minutes old is a dead holder or one past
-its hold ceiling — reclaimable once `stale` flips — not a long step. Supervisor live check: during a
+its hold ceiling — reclaimable once `stale` flips — not a long step; the one exception is the
+`camera-box-ro-units-apply` holder above, which beats only once per box. Supervisor live check: during a
 release E2E, read `curl -s http://127.0.0.1:8890/rig-lease.json` twice ~40 s apart, once during the
 verdict-exe fetch step and once past minute 45 of the run: `heartbeat_age_s` < 60 and `ttl_s` > 0
 both times, and past minute 45 `ttl_s` ≈ 870-900 with `expected_release_at` moving forward between
@@ -118,7 +139,7 @@ Before every `StartStream`, restreamer's stream-box runner does:
 
 ```powershell
 try {
-    $lease = Invoke-RestMethod -Uri "http://10.77.9.103:8890/rig-lease.json" -TimeoutSec 5
+    $lease = Invoke-RestMethod -Uri "http://dev1:8890/rig-lease.json" -TimeoutSec 5
 } catch {
     # connection refused / timeout -> PROCEED + log. Fail-OPEN: an endpoint that is down is NOT
     # the same as camera-box holding the rig, and camera-box's OWN OBS-state gate
@@ -154,10 +175,56 @@ else {
 }
 ```
 
-Never a write from restreamer's side — it participates in NEITHER `mkdir`/`rm` on the lockdir NOR
-any acquire/release protocol. Restreamer's OWN "currently streaming" state is already ITS lease
-signal toward camera-box (unchanged by this ticket — see `scripts/rig-busy-gate.sh`'s existing
-OBS-state busy-check).
+**SUPERSEDED by issue 1432 for restreamer's writes:** on 14.10.2026 a 45-min restreamer CI stream
+at night was invisible to camera-box as a holder (it only read the lease), so restreamer now TAKES
+the lease through the write routes below. The read contract above stays for any other consumer.
+
+## The write routes (issue 1432) -- a remote holder takes the lease
+
+`POST /rig-lease/acquire | heartbeat | release` on the same server, contract posted on restreamer#349
+(comment 6179376408), logic in `scripts/rig_lease_write.py`, the lock itself ONLY
+`scripts/lib/rig-lease.sh` (run in a `bash` subprocess, argv only, `RIG_LEASE_DIR` = the server's).
+
+- **Auth:** `Authorization: Bearer <token>`, `hmac.compare_digest` against
+  `~/.config/camera-box/rig-lease-token` (`RIG_LEASE_TOKEN_FILE` / `--token-file`), read per request.
+  The file must be a regular file owned by the server's user with no group/other bits; absent, empty
+  or wrong mode = every write is a 401. The same value is the restreamer secret `RIG_LEASE_TOKEN`.
+- **acquire** `{repo, run_id, run_url, job, expected_secs 60..5400}`: 200
+  `{acquired, lease_id, holder, expected_release_at, reclaimed}` / 409 `{acquired:false, holder,
+  heartbeat_age_s}` / 400 / 401. Declared release = now + min(expected_secs, 900): the rolling
+  look-ahead, so a camera-box gate WAITS instead of failing fast (its 1800 s budget).
+- **heartbeat** `{lease_id}` every 30 s: `rig_lease_refresh_if_mine` with
+  `RIG_LEASE_MAX_HOLD_SECS = max_hold_s`: 200 `{refreshed, expected_release_at}` / 404 not_holder /
+  409 over_hold (past acquired_at + expected_secs) / 503 lease_io.
+- **release** `{lease_id}`: idempotent 200 `{released: true|false}`; a foreign id never removes the
+  holder (`rig_lease_release` by run_id, after the lease_id check).
+- **Per-holder fields** (`rig_lease_write_holder`'s optional env; unset = the six keys exactly as
+  before): `lease_id` (128-bit hex, NEVER served on GET: `_HOLDER_FIELDS` stays the six),
+  `stale_secs` 180, `max_hold_s`. `rig_lease_is_stale` and `rig_lease_state.holder_stale_secs`
+  grade a positive-integer `stale_secs` over the caller's threshold, so a silent remote holder is
+  reclaimable after 3 min; camera-box's own holders keep 5400 s.
+- Writes are serialized per server (a lock) on top of the lockdir mkdir; every POST logs one line
+  with the status and `repo#run_id`, never the token or the lease_id.
+- Tests: `tests/python/test_rig_lease_write_1432.py` (the real server + the real bash lib on a temp
+  lease dir, a random token per test session).
+- Live: the token install + restart is in `systemd/rig-lease-server.README.md`; restart only while
+  `held=false`.
+
+### Since issue 1432: a lockdir with no holder.json is held for 10 s, then reclaimable
+
+`rig_lease_is_stale` (bash) and `rig_lease_state` (python, the GET view) treat a lockdir without
+`holder.json` as an acquire in progress until it is `RIG_LEASE_NOHOLDER_GRACE_SECS` (default 10, one
+override for both) old; only after that is it a crashed acquire's leftover and reclaimable. Before,
+it was stale at once, so the dev1 HTTP acquire could reclaim a lockdir a camera-box gate had just
+made (both then believed they held the rig; reproduced in review). The section below describes the
+old window, which this closes for the absent-holder case.
+
+**Still open, pre-existing (found in the issue-1432 review, not introduced by it):** two acquirers
+that BOTH judge the same old holder stale in the same ~100 ms can both reclaim it, and the later
+write wins (`rig_lease_write_holder` rewrites holder.json in place). A rename-aside reclaim like the
+issue-857 release would close it, but it needs a compare of the aside's identity with the holder
+that was judged stale, or a fresh lease can be moved aside. Reachable only when a stale lease meets
+two acquirers at once.
 
 ### Known, INHERITED race — a fresh acquire's few-millisecond "absent holder.json" window
 
@@ -182,9 +249,12 @@ rather than silently ignored.
 The global `machine-identities.md` rule says address dev1 by tailscale, not LAN IP, because the
 LAN IP drifts when equipment travels to events. That rule assumes the CONSUMER has a tailscale
 address to prefer. Here it does not: the stream box (10.77.9.204) has **no tailscale interface at
-all** (verified before this was designed — `Test-NetConnection 10.77.9.103 -Port 22` succeeded
-over LAN from the stream box; tailscale was never in the picture). So `http://10.77.9.103:8890/`
-(LAN) is the path restreamer's runner actually uses; `http://100.104.8.125:8890/` (tailscale) is
+all** (verified before this was designed — `Test-NetConnection` to dev1's LAN address on port 22 succeeded
+over LAN from the stream box; tailscale was never in the picture). So the LAN path is the one
+restreamer's runner actually uses, addressed by the NAME `http://dev1:8890/` (it resolves on the rig LAN
+from the stream box), never a literal LAN IP: dev1's DHCP address drifted from 10.77.9.103 to 10.77.9.109,
+and restreamer's fail-open consumer then silently never waited (found 5.10.2026, issue 1404). Tested from
+stream.lan on 5.10.2026: `dev1` OK, `10.77.9.109` OK, tailscale times out, `dev1.lan` does not resolve; `http://100.104.8.125:8890/` (tailscale) is
 served identically and stays available for any OTHER consumer that does have a tailscale address.
 
 ## Port choice
@@ -209,6 +279,38 @@ as an ADVISORY signal for restreamer to wait a bounded time. If this server is d
 proceeding anyway is the correct, documented behavior — it is not a silent hole, it is the explicit
 design (Prístup 1's own trade-off statement: the server is new coordination surface, not a new
 hard dependency either side must have to function at all).
+
+## One more read-only route: the cam2 marker log (issue 1404)
+
+The same server serves `GET/HEAD /rig-qpsk-markers.csv` (`text/csv`, `X-Mirror-Age-S`) from
+`--serve-dir` (`$RIG_LEASE_SERVE_DIR`, default `$XDG_RUNTIME_DIR/rig-lease-serve` = tmpfs, 0700,
+`scripts/rig_serve_files.py`). It is a 404 while its file is absent, or when the server runs
+without a serve dir. A file another user owns is never served.
+- **The serve dir is NEVER the lease dir or inside it.** The lease dir's mere existence is
+  `held=true`, so a writer's `mkdir -p` there would fake a held lease. `main()` refuses it; a
+  bad owner/mode of the serve dir is checked per file, so it never stops the lease endpoint.
+- **`/rig-lease.json`, `/healthz` and the 404 are byte-identical** with and without a serve dir,
+  pinned to golden bytes captured from the pre-change server. The marker route sits after them in
+  `_handle()`; `_send()` gained only an optional `extra_headers`. An empty `$RIG_LEASE_DIR` now
+  means the default, as in `scripts/lib/rig-lease.sh` (`rsf.default_lease_dir()`).
+- **The server stays stdlib-only.** The numpy analysis lives in the sampler, never here.
+- **`/program-audio.json` is no dev1 route any more (retired 8.10.2026, design 6054654255).** The
+  program-audio sampler moved to strih-snv and serves its own `:8891/program-audio.json`
+  (`.claude/rules/program-audio-guard.md`, "The host"); every consumer reads that. Running this
+  code (a restart while `held=false`, `systemd/program-audio-sampler.README.md` post-merge step),
+  the dev1 server answers its plain 404 for the path even when an old payload sits in its serve dir
+  (`test_the_dev1_server_no_longer_serves_program_audio`), and the dev1 sampler unit file is gone.
+  The payload rules (ages per request, a chain-less MEASUREMENT = UNKNOWN) stay in
+  `rig_serve_files.program_audio_response`, used by the sampler's endpoint.
+- **Proving a retired file route live: read it while the stale file is still there.** Every file
+  route here is already a 404 on the OLD code once its file is absent. A check that deletes the
+  leftover first and then reads 404 passes whether or not the server was restarted. Order: restart
+  (while `held=false`), wait for `/healthz` (the unit is `Type=simple`, the restart returns before
+  it listens), read the route (want 404), then delete the file. On a re-run the file is gone and
+  the 404 proves nothing (`systemd/program-audio-sampler.README.md`, the dev1 post-merge block).
+- Writer, contract and runbook: `systemd/rig-marker-mirror.README.md`. The running unit picks up a
+  change to the routes only after `systemctl --user restart rig-lease-server.service`; do it while
+  `held=false`.
 
 ## Supervisor install step
 

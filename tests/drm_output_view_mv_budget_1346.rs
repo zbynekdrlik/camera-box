@@ -1,4 +1,4 @@
-//! issue 1346 -- the DRM-output HDMI Multiview ran at HALF rate (15 fps instead of 30) on strih-lx
+//! issue 1346 -- the DRM-output HDMI Multiview ran at HALF rate (15 fps instead of 30) on strih-snv
 //! (main design comment 5840501628).
 //!
 //! Root cause: `drm_output_view_frame()` gates each Multiview render with the aux budget gate
@@ -16,7 +16,7 @@
 //! 1. parity with the Tier-0 authority `camera_box::render_budget::aux_sender_should_skip_excluding`
 //!    over a grid of vectors (every guard, both sides of the budget, self 0 / small / over-total);
 //! 2. the wrapper is byte-identical to `_excluding(..., 0)` on every vector (the #879 senders);
-//! 3. the live strih-lx numbers: pre 15 ms + mv 14 ms at a 33.3 ms interval renders 30/30 ticks,
+//! 3. the live strih-snv numbers: pre 15 ms + mv 14 ms at a 33.3 ms interval renders 30/30 ticks,
 //!    pre 25 ms + mv 14 ms still skips to the #293 floor.
 //!
 //! Fails loudly (never skips) when no C compiler is present.

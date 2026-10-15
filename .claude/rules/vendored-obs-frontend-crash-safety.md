@@ -234,3 +234,24 @@ Include dirs: the scratch dir, `libobs`, `frontend`, `frontend/api`, every `shar
 `QtXml` dirs under `/usr/include/x86_64-linux-gnu/qt6`. Then
 `g++ -fsyntax-only -std=c++17 -fPIC -Wall -Wextra <includes> <file>.cpp`. Put the command in a
 script FILE (the worktree guard refuses the include-array expansion inline).
+
+## Testable frontend logic goes in its own plain-C++ TU, not a lifted block (issue 1302)
+
+The LOCK widget's per-input recent-event tick first lived in `OBSBasicStatusBar.cpp`'s anonymous
+namespace and a test lifted it by text. The review moved it to `widgets/GenlockRecentEvents.{hpp,cpp}`:
+the file stops growing, and the test compiles the SHIPPED file instead of a slice. The recipe:
+
+- The header holds only std types and the function declaration, so the class header can include it
+  for a member. It does NOT include the C decision header (`GenlockLockState.hpp`): that one goes
+  into the `.cpp` only, so the status bar's other includers never see its `static inline` helpers.
+- A new `.cpp` MUST be added to `frontend/cmake/ui-widgets.cmake` (alphabetical, `.cpp` and `.hpp`),
+  or the link fails on CI. An unlisted HEADER is fine (`GenlockLockState.hpp` never was listed).
+  Pin the CMake entry with a squished anchor (`widgets/X.cpp widgets/X.hpp`) in the Rust guard and
+  both pwsh gates.
+- The test: `c++ -std=c++17 -Wall -Wextra -Werror -I<widgets> harness.cpp <widgets>/X.cpp`, plus an
+  assertion that neither file includes `<obs`, `<Q` or `"OBSBasic`. Anchor that on the `#include`
+  text: a bare `OBSBasic` matched the header's own comment.
+- Locally, the rest of a widget change (a scan function, a builder, a block in `UpdateGenlockLabel`)
+  can be lifted into one `g++ -fsyntax-only -Werror` file against the REAL `obs.h` (`-I libobs`
+  plus the four-define `obsconfig.h` stub). That catches a wrong struct field or a missing export
+  declaration without uic/moc stubs. Prove the harness bites with one deliberate typo.
