@@ -1838,7 +1838,7 @@ if [ "$aurc" -ne 0 ] || [ -z "$HK_BLOCK" ]; then
 else
   HK_VERDICT="$(cambox_hk_verdict "$HK_BLOCK")"
   case "$HK_VERDICT" in
-    ok) ok "housekeeping cpus: the systemd manager CPUAffinity drop-in in place, PID 1 off the capture core and the capture-IRQ core (issue 1367)" ;;
+    ok) ok "housekeeping cpus: the systemd manager CPUAffinity drop-in in place, PID 1 off the capture core and the capture-IRQ core; units started from now on inherit it, running services keep their mask until they restart (issue 1367)" ;;
     ok-none:*) ok "housekeeping cpus: ${HK_VERDICT#ok-none: } -- nothing to provision (issue 1367)" ;;
     *)
       while IFS= read -r _reason; do

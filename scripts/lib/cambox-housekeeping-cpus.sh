@@ -23,9 +23,13 @@
 # `CPUAffinity=` drop-in + per-thread sched_setaffinity (a soft mask, never a cpuset), and the burn
 # units pass their own --property=CPUAffinity, so the capture path is untouched.
 #
-# housekeeping = online - isolated - (the highest remaining core), the SAME rule as affinity.rs.
-# With no isolated core, or fewer than 2 general cores, affinity.rs reserves no IRQ core and this
-# writes nothing.
+# housekeeping = online - every isolated core - the reserved IRQ core (the highest remaining core,
+# affinity.rs select_irq_reserved_core). The fleet runs ONE isolated core, so this is affinity.rs's
+# split; with several isolated cores it also keeps housekeeping off the spare isolated ones. With no
+# isolated core, fewer than 2 general cores, or a PREEMPT_RT kernel (affinity.rs then co-locates the
+# capture IRQ on the capture core and reserves no general core), this writes nothing. On a fresh box
+# the running kernel has no isolcpus yet (setup-device STEP 10 only wrote GRUB), so the install reads
+# the isolated set from that GRUB file when sysfs has none.
 #
 # Consumers:
 #   - setup-device.sh `[housekeeping-cpus]` (rw window, takes effect at the next
@@ -67,12 +71,17 @@ cambox_hk_cpulist_expand() {
   printf '%s\n' "${_hk_out[@]}" | sort -n -u
 }
 
-# cambox_hk_cpus ONLINE ISOLATED -> the housekeeping cpus as a comma list ("0,1"), rc 0. rc 1 with a
-# reason on stderr when there is no reserved IRQ core (no isolated core, fewer than 2 general cores,
-# or an unreadable list): then nothing is provisioned, exactly like affinity.rs.
+# cambox_hk_cpus ONLINE ISOLATED [RT] -> the housekeeping cpus as a comma list ("0,1"), rc 0. rc 1
+# with a reason on stderr when there is no reserved IRQ core (RT=1: a PREEMPT_RT kernel, no isolated
+# core, fewer than 2 general cores, or an unreadable list): then nothing is provisioned, like
+# affinity.rs.
 cambox_hk_cpus() {
   local online iso c
   local -a _hk_general=() _hk_cores=()
+  if [ "${3:-0}" = 1 ]; then
+    echo "a PREEMPT_RT kernel: the capture IRQ shares the capture core, no reserved capture-IRQ core" >&2
+    return 1
+  fi
   if ! online="$(cambox_hk_cpulist_expand "${1:-}")" || [ -z "$online" ]; then
     echo "no readable online cpu list ('${1:-}')" >&2
     return 1
@@ -98,6 +107,41 @@ cambox_hk_cpus() {
   printf '%s\n' "${_hk_cores[*]}"
 }
 
+# cambox_hk_isolated_from_grub FILE -> the isolcpus= cpu list of the last active GRUB_CMDLINE_LINUX*
+# line in FILE (flags such as managed_irq,domain dropped), or nothing. Comment lines never count.
+cambox_hk_isolated_from_grub() {
+  local file="${1:-}" line tok val="" item list=""
+  [ -r "$file" ] || return 0
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      GRUB_CMDLINE_LINUX=* | GRUB_CMDLINE_LINUX_DEFAULT=*) ;;
+      *) continue ;;
+    esac
+    line="${line#*=}"
+    line="${line//\"/}"
+    line="${line//\'/}"
+    for tok in $line; do
+      case "$tok" in isolcpus=*) val="${tok#isolcpus=}" ;; esac
+    done
+  done <"$file"
+  [ -n "$val" ] || return 0
+  local IFS=,
+  for item in $val; do
+    case "$item" in *[!0123456789-]* | '') continue ;; esac
+    list="${list:+$list,}$item"
+  done
+  printf '%s\n' "$list"
+}
+
+# cambox_hk_kernel_rt -> 1 on a PREEMPT_RT kernel (/sys/kernel/realtime = 1, or uname -v names
+# PREEMPT_RT, the affinity.rs kernel_is_preempt_rt rule), else 0.
+cambox_hk_kernel_rt() {
+  local flag
+  flag="$(cat "${CAMBOX_HK_REALTIME:-/sys/kernel/realtime}" 2>/dev/null)" || flag=""
+  case "$flag" in *1*) echo 1; return 0 ;; esac
+  case "$(uname -v 2>/dev/null)" in *PREEMPT_RT*) echo 1 ;; *) echo 0 ;; esac
+}
+
 # cambox_hk_dropin_content HK -> the drop-in, byte-for-byte (setup-device and the apply write exactly
 # this; verify-device compares it).
 cambox_hk_dropin_content() {
@@ -113,12 +157,17 @@ EOF
 # cambox_hk_install_dropin ROOT -> derives the housekeeping set from THIS box's
 # /sys/devices/system/cpu/{online,isolated} and writes ROOT$CAMBOX_HK_DROPIN through a temp file +
 # rename. With no reserved IRQ core it writes nothing, says why, and returns 0. Non-zero only on a
-# failed write. Test seams: CAMBOX_HK_SYS (the cpu sysfs dir) and, for the apply program,
-# CAMBOX_HK_PROC (the /proc root it reads PID 1's mask from).
+# failed write. Test seams: CAMBOX_HK_SYS (the cpu sysfs dir), CAMBOX_HK_GRUB (the GRUB defaults
+# file), CAMBOX_HK_REALTIME (/sys/kernel/realtime) and, for the apply program, CAMBOX_HK_PROC (the
+# /proc root it reads PID 1's mask from).
 cambox_hk_install_dropin() {
-  local root="${1:-}" sys="${CAMBOX_HK_SYS:-/sys/devices/system/cpu}" path hk why
+  local root="${1:-}" sys="${CAMBOX_HK_SYS:-/sys/devices/system/cpu}" path hk why iso
   path="${root}${CAMBOX_HK_DROPIN}"
-  if ! hk="$(cambox_hk_cpus "$(cat "$sys/online" 2>/dev/null)" "$(cat "$sys/isolated" 2>/dev/null)" 2>&1)"; then
+  iso="$(cat "$sys/isolated" 2>/dev/null)" || iso=""
+  iso="${iso//[[:space:]]/}"
+  # A fresh box: STEP 10 wrote isolcpus into GRUB, the running kernel has none until the reboot.
+  [ -n "$iso" ] || iso="$(cambox_hk_isolated_from_grub "${CAMBOX_HK_GRUB:-${root}/etc/default/grub}")"
+  if ! hk="$(cambox_hk_cpus "$(cat "$sys/online" 2>/dev/null)" "$iso" "$(cambox_hk_kernel_rt)" 2>&1)"; then
     why="$hk"
     echo "  housekeeping cpus: not written -- ${why} (issue 1367)"
     return 0
@@ -141,6 +190,7 @@ cambox_hk_gather_remote_snippet() {
   cat <<'REMOTE'
 echo "ONLINE=$(cat /sys/devices/system/cpu/online 2>/dev/null)"
 echo "ISOLATED=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)"
+case "$(cat /sys/kernel/realtime 2>/dev/null)$(uname -v 2>/dev/null)" in 1* | *PREEMPT_RT*) echo "RT=1" ;; *) echo "RT=0" ;; esac
 echo "PID1=$(awk '/^Cpus_allowed_list:/ {print $2; exit}' /proc/1/status 2>/dev/null)"
 if [ -e "$_hk_d" ]; then echo "DROPIN_PRESENT=1"; while IFS= read -r _hk_l || [ -n "$_hk_l" ]; do echo "DROPIN=$_hk_l"; done <"$_hk_d"; else echo "DROPIN_PRESENT=0"; fi
 echo "GATHER_DONE=1"
@@ -152,12 +202,13 @@ REMOTE
 #   - the drop-in is byte-identical to cambox_hk_dropin_content <housekeeping>;
 #   - PID 1's running mask equals the housekeeping set (the drop-in applies at boot, the apply program sets a live box).
 cambox_hk_verdict() {
-  local block="${1:-}" line online="" iso="" pid1="" present="" done="" body="" nl=$'\n'
+  local block="${1:-}" line online="" iso="" rt="" pid1="" present="" done="" body="" nl=$'\n'
   local hk why want got have fails="" fix
   while IFS= read -r line; do
     case "$line" in
       ONLINE=*) online="${line#*=}" ;;
       ISOLATED=*) iso="${line#*=}" ;;
+      RT=*) rt="${line#*=}" ;;
       PID1=*) pid1="${line#*=}" ;;
       DROPIN_PRESENT=*) present="${line#*=}" ;;
       DROPIN=*) body="${body}${line#DROPIN=}${nl}" ;;
@@ -169,7 +220,7 @@ cambox_hk_verdict() {
     printf 'FAIL: the cpu state could not be read (no GATHER_DONE) -- %s\n' "$fix"
     return 0
   fi
-  if ! hk="$(cambox_hk_cpus "$online" "$iso" 2>&1)"; then
+  if ! hk="$(cambox_hk_cpus "$online" "$iso" "$rt" 2>&1)"; then
     why="$hk"
     if [ "$present" = 1 ]; then
       printf 'FAIL: %s carries a housekeeping CPUAffinity, but this box has %s -- remove the drop-in\n' "$CAMBOX_HK_DROPIN" "$why"
@@ -219,18 +270,19 @@ PROG
   printf '_hk_d=%q\n' "$CAMBOX_HK_DROPIN"
   printf '_hk_sys=%q\n' "${CAMBOX_HK_SYS:-/sys/devices/system/cpu}"
   printf '_hk_proc=%q\n' "${CAMBOX_HK_PROC:-/proc}"
-  printf '%s\n' "$(declare -f ro_root_mount_mode cambox_hk_cpulist_expand cambox_hk_cpus cambox_hk_dropin_content)"
+  printf '%s\n' "$(declare -f ro_root_mount_mode cambox_hk_cpulist_expand cambox_hk_cpus cambox_hk_kernel_rt cambox_hk_dropin_content)"
   cat <<'PROG'
 _hk_box="$(hostname 2>/dev/null || echo this cambox)"
 # --- 1. what this box needs (read before anything is written) ---
 _hk_mode="$(ro_root_mount_mode "$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)")"
-if ! _hk_set="$(cambox_hk_cpus "$(cat "$_hk_sys/online" 2>/dev/null)" "$(cat "$_hk_sys/isolated" 2>/dev/null)" 2>&1)"; then
+if ! _hk_set="$(cambox_hk_cpus "$(cat "$_hk_sys/online" 2>/dev/null)" "$(cat "$_hk_sys/isolated" 2>/dev/null)" "$(cambox_hk_kernel_rt)" 2>&1)"; then
   echo "OK ($_hk_box): nothing to do -- $_hk_set (issue 1367)"
   return 0
 fi
 _hk_body="$(cambox_hk_dropin_content "$_hk_set")"
 _hk_do_d=0
-if [ ! -e "$_hk_d" ] || [ "$(cat "$_hk_d")" != "$_hk_body" ]; then _hk_do_d=1; fi
+# exact bytes: the verify compares the file byte for byte, so a trailing blank line is a rewrite too
+if ! cmp -s "$_hk_d" <(printf '%s\n' "$_hk_body"); then _hk_do_d=1; fi
 echo "PLAN ($_hk_box): root $_hk_mode; housekeeping CPUAffinity=$_hk_set; drop-in $([ "$_hk_do_d" = 1 ] && echo write || echo in-place)"
 _hk_rc=0
 # --- 2. the rw window, closed by the ONE verified close ---
