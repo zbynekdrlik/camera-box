@@ -236,24 +236,24 @@ def test_netconsole_unit_is_a_valid_oneshot_for_systemd(tmp_path):
 
 
 _AK_GREEN = ("NC_SVC_ENABLED=enabled\nNC_SVC_ACTIVE=active\nNC_SVC_RESULT=success\nNC_SCRIPT_X=yes\n"
-             "NC_ENABLED=1\nNC_REMOTE_IP=10.77.9.200\nNC_REMOTE_PORT=514\nJU_SVC_ENABLED=enabled\n"
-             "JU_URL=http://10.77.9.200:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state")
+             "NC_ENABLED=1\nNC_REMOTE_IP=10.77.9.202\nNC_REMOTE_PORT=514\nJU_SVC_ENABLED=enabled\n"
+             "JU_URL=http://10.77.9.202:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state")
 
 
 def test_ak_gathers_and_names_a_failed_netconsole_result():
     snippet = _lib(REMOTE_LOG, "remote_log_gather_remote_snippet")
     assert 'echo "NC_SVC_RESULT=$(systemctl show -p Result --value cambox-netconsole 2>/dev/null)"' in snippet
-    assert _lib(REMOTE_LOG, 'remote_log_verdict "$B"', env={"B": _AK_GREEN}).strip() == "ok"
+    assert _lib(REMOTE_LOG, 'remote_log_verdict "$B" 10.77.9.202', env={"B": _AK_GREEN}).strip() == "ok"
     failed = _AK_GREEN.replace("NC_SVC_ACTIVE=active", "NC_SVC_ACTIVE=failed").replace(
         "NC_SVC_RESULT=success", "NC_SVC_RESULT=exit-code")
-    v = _lib(REMOTE_LOG, 'remote_log_verdict "$B"', env={"B": failed})
+    v = _lib(REMOTE_LOG, 'remote_log_verdict "$B" 10.77.9.202', env={"B": failed})
     assert "cambox-netconsole.service FAILED (Result=exit-code)" in v, v
     retrying = failed.replace("NC_SVC_ACTIVE=failed", "NC_SVC_ACTIVE=activating")
-    v = _lib(REMOTE_LOG, 'remote_log_verdict "$B"', env={"B": retrying})
+    v = _lib(REMOTE_LOG, 'remote_log_verdict "$B" 10.77.9.202', env={"B": retrying})
     assert "is not active (state=activating, Result=exit-code)" in v, v
     # an old gather without the Result line still grades (never an unbound read)
     old = failed.replace("NC_SVC_RESULT=exit-code\n", "")
-    v = _lib(REMOTE_LOG, 'remote_log_verdict "$B"', env={"B": old})
+    v = _lib(REMOTE_LOG, 'remote_log_verdict "$B" 10.77.9.202', env={"B": old})
     assert "FAILED (Result=<unread>)" in v, v
 
 
