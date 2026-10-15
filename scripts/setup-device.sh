@@ -1020,6 +1020,10 @@ EOF
 # #451) rather than a hardcoded literal. Every fleet camera emits 60fps today (the stream box
 # decimates 60->30 downstream), so this resolves to the same value as before -- but a future
 # per-camera divergence now needs only a camera-set.sh edit, not a setup-device.sh edit too.
+# issue 1367: the base unit above never ran the IRQ split (only build-image's unit carried the
+# ExecStartPre); this drop-in runs `camera-box --setup-irq-affinity` before every start.
+cambox_hk_irq_dropin_install "" \
+    || fail "could not write ${CAMBOX_HK_IRQ_DROPIN} -- the capture-IRQ split would never run (issue 1367)"
 cat > /etc/systemd/system/camera-box.service.d/genlock.conf << EOF
 [Service]
 Environment=CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}
