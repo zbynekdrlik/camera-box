@@ -83,6 +83,13 @@ issue 1383 the holder keeps its own lease truthful from acquire to release:
   wait minutes for dev1) its `heartbeat_age_s` reads minutes old although the holder is alive.
   restreamer's :8890 consumer waits its 900 s cap for any live holder, so an apply delays a
   restreamer stream E2E by up to ~15 min although it never touches OBS.
+- **A fifth holder, ci.yml's post-merge "Deploy to camera fleet" job (issue 1432),** runs
+  `scripts/rig-busy-gate.sh` with the run's `RIG_LEASE_*` before `deploy-fleet.sh` (it restarts
+  camera-box on every active cambox) and releases with `rig-lease-release.sh` in an `always()` step
+  right after the SNV deploy, before the other venues' deploy. On 15.10.2026 it restarted
+  cam2/cam3/cam5 under restreamer's lease and the program-audio guard stopped restreamer's run.
+  Any NEW CI job that touches the SNV rig takes the lease the same way
+  (`tests/python/test_deploy_fleet_takes_rig_lease_1432.py`).
 - **Checklist for a NEW holder script** (both items were review-round-4 findings on the apply,
   reproduced):
   - Declare `expected_release_at` = now + the look-ahead and keep it rolling with

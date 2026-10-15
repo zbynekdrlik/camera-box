@@ -857,6 +857,19 @@ jobs:
           name: probe-tools-linux-amd64
           path: dist-probe
 
+      # issue 1432: the deploy restarts camera-box on every active cambox, so it takes the shared rig
+      # lease first through the SAME gate the full-path E2E uses: it waits for a live holder
+      # (restreamer's YouTube E2E holds it while it streams) and refuses while a box streams. On
+      # 15.10.2026 03:33Z this job restarted cam2/cam3/cam5 under restreamer's lease and its
+      # program-audio guard stopped the run.
+      - name: Take the shared rig lease (rig-busy gate, #830/issue 1432)
+        env:
+          RIG_LEASE_REPO: ${{ github.repository }}
+          RIG_LEASE_RUN_ID: ${{ github.run_id }}
+          RIG_LEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RIG_LEASE_JOB: ${{ github.job }}
+        run: bash scripts/rig-busy-gate.sh
+
       - name: Deploy to the active cam fleet (acked-offline boxes skipped)
         run: |
           set -euo pipefail
@@ -878,6 +891,14 @@ jobs:
           fi
           echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
           CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe
+
+      # issue 1432: release the SNV rig lease right after the SNV deploy (also on a failure or a
+      # cancellation); the other venues' deploy below is a different rig the lease does not cover.
+      - name: Release the shared rig lease (issue 1432, always)
+        if: always()
+        env:
+          RIG_LEASE_RUN_ID: ${{ github.run_id }}
+        run: bash scripts/rig-lease-release.sh
 
       # issue 1413: the camboxes of every OTHER venue (Poprad since 11.10.2026) get the same build.
       # The venues and their cameras come from the strih fact files (scripts/strih-boxes/*.env), so a
