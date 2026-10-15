@@ -140,9 +140,10 @@ fn fleet_boxes_reproduces_the_legacy_byte_exact_defaults_1296() {
     // issue 1317: audio-lag watches the PRODUCTION strih (now the Linux strih-snv at .202 -- its
     // vendored OBS emits the same `audio-telemetry #800` lines) + stream. vb-matrix is WINDOWS-only
     // (PipeWire replaced VB-Matrix on strih-snv), so it is stream alone.
+    // issue 1441: the Poprad strih-pp + stream-pp serve the same facet and join (traveling rows).
     assert_eq!(
         boxes("audio-lag"),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
     assert_eq!(boxes("vb-matrix"), "stream-snv|10.77.9.204");
     // av-step: stream only (the av-sync dock box, #1267).
@@ -179,9 +180,11 @@ fn fleet_boxes_genlock_lock_excludes_retired_imag_1316() {
     // issue 1317: strih-snv (the Linux strih notebook) also joins genlock-lock (a linux-genlock box
     // that locks every input to the fleet clock), appended after resolume.
     // issue 1317 (M4): the Windows strih row is retired; strih-snv takes the strih slot at .202.
+    // issue 1441: the Poprad strih-pp + stream-pp join after the SNV boxes.
     assert_eq!(
         boxes("genlock-lock"),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan \
+         strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
     // A retired imag must not appear in ANY facet roster.
     for facet in [
@@ -518,9 +521,10 @@ fn each_boxes_watchdog_derives_its_default_from_obs_fleet_boxes_1296() {
 #[test]
 fn sourced_boxes_default_is_byte_exact_for_the_legacy_facets_1296() {
     // The three pre-#1296 facets reproduce their exact legacy literal when sourced with no override.
+    // issue 1441: + the Poprad strih-pp / stream-pp.
     assert_eq!(
         watchdog_var("audio-lag-alert-watchdog.sh", "BOXES", &[]),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
     assert_eq!(
         watchdog_var("av-step-alert-watchdog.sh", "BOXES", &[]),
@@ -536,10 +540,12 @@ fn sourced_boxes_default_is_byte_exact_for_the_legacy_facets_1296() {
 fn bundle_state_default_carries_resolume_1296() {
     // issue 1317 (M4): the production strih is the Linux strih-snv at .202 (the Windows strih row
     // is retired) -- a fully-unreachable traveling box (resolume) is deferred to the reachability
-    // watchdog by bundle-state itself, so it is traveling-safe without a gate.
+    // watchdog by bundle-state itself. issue 1441: + the Poprad strih-pp / stream-pp; every
+    // traveling box is probed only while home (obs_fleet_poll_now in main).
     assert_eq!(
         watchdog_var("bundle-state-alert-watchdog.sh", "BOXES", &[]),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan \
+         strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
 }
 
@@ -587,23 +593,25 @@ fn boxes_env_override_still_wins_byte_compatibly_1296() {
 // ---------------------------------------------------------------------------------------------
 #[test]
 fn network_reach_resolume_report_only_when_away_paging_when_home_1296() {
-    // AWAY (force-list omits resolume) -> resolume STAYS report-only (never pages).
+    // AWAY (force-list omits resolume) -> resolume STAYS report-only (never pages). issue 1441: the
+    // default is generic (every away `traveling` row), so the away Poprad boxes are report-only too.
     assert_eq!(
         watchdog_var(
             "network-reach-alert-watchdog.sh",
             "REPORT_ONLY_BOXES",
             &[("OBS_FLEET_HOME", "stream-snv")]
         ),
-        "resolume-snv"
+        "resolume-snv strih-pp stream-pp"
     );
-    // HOME (force-list names resolume) -> resolume PROMOTED to a paging node (report-only empty).
+    // HOME (force-list names resolume) -> resolume PROMOTED to a paging node; the PP boxes, still
+    // away, stay report-only.
     assert_eq!(
         watchdog_var(
             "network-reach-alert-watchdog.sh",
             "REPORT_ONLY_BOXES",
             &[("OBS_FLEET_HOME", "resolume-snv")]
         ),
-        ""
+        "strih-pp stream-pp"
     );
 }
 

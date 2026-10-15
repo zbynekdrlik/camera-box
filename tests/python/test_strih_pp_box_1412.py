@@ -174,9 +174,12 @@ def test_the_pp_boxes_are_traveling_linux_name_rows(name):
     assert r.stdout.strip() == "%s.lan|linux-genlock|traveling" % name
 
 
-def test_the_pp_boxes_are_in_no_facet():
-    facets = ("audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze "
-              "ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles")
+def test_the_pp_boxes_are_in_no_snv_only_facet():
+    # issue 1441 put strih-pp / stream-pp into the dev1 watchdog facets (tests/python/
+    # test_pp_watchdog_roster_1441.py pins those); the Windows-only, stream-snv-only and SNV
+    # measurement-rig facets (and the NDI sender list) still carry no PP box.
+    facets = ("av-step vb-matrix ndi-portmap obs-session burn-reconcile rig-restore ndi-sender "
+              "win-baseline")
     r = _bash('for f in %s; do printf "%%s=%%s\\n" "$f" "$(obs_fleet_facet_members "$f")"; done' % facets,
               sources=(FLEET,))
     assert r.returncode == 0, r.stderr

@@ -20,9 +20,11 @@ def _bash(script, env=None):
 def test_obs_fleet_audio_mixer_facet_is_every_obs_box_that_mixes_audio():
     r = _bash(f'. "{_SCRIPTS}/lib/obs-fleet.sh"; obs_fleet_facet_members audio-mixer')
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "strih-snv stream-snv resolume-snv"
+    # issue 1441: + the Poprad strih-pp / stream-pp (traveling, polled only while home).
+    assert r.stdout == "strih-snv stream-snv resolume-snv strih-pp stream-pp"
     r = _bash(f'. "{_SCRIPTS}/lib/obs-fleet.sh"; obs_fleet_boxes audio-mixer')
-    assert r.stdout == "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
+    assert r.stdout == ("strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan "
+                        "strih-pp|strih-pp.lan stream-pp|stream-pp.lan")
 
 
 def test_obs_fleet_unknown_facet_message_names_audio_mixer():
