@@ -3322,10 +3322,6 @@ echo "[4b2/8] #748 audio-presence preflight — the mbc measurement chain MUST b
 # sanctioned exception to the one-full-test rule (a preflight, not a partial measurement).
 AUDIO_PREFLIGHT_ENABLE="${AUDIO_PREFLIGHT_ENABLE:-1}"
 AUDIO_PREFLIGHT_THRESHOLD_DB="${AUDIO_PREFLIGHT_THRESHOLD_DB:--60}"
-# issue 1323 — the POLLUTION ceiling (single-sourced from the lib, env-overridable like every knob).
-# A loud FOREIGN signal flooding the mbc chain reads far above this and drowns the QPSK marker, so
-# the run would burn ~40 min then fail on cluster_samples=0; refuse it up front, next to the floor.
-AUDIO_PREFLIGHT_CEILING_DB="${AUDIO_PREFLIGHT_CEILING_DB:-$(audio_preflight_default_ceiling_db)}"
 AUDIO_PREFLIGHT_PROBE_SECS="${AUDIO_PREFLIGHT_PROBE_SECS:-15}"
 AUDIO_PREFLIGHT_SSH_TIMEOUT="${AUDIO_PREFLIGHT_SSH_TIMEOUT:-90}"
 # #748 live finding (run 29282790031): OBS-WS StopRecord's RPC reply lands BEFORE the mp4 muxer
@@ -3375,22 +3371,9 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
     echo "ERROR: $(audio_preflight_silent_message "$_ap_db" "$AUDIO_PREFLIGHT_THRESHOLD_DB")" >&2
     exit 1
   fi
-  # issue 1323 — level CEILING: above the silence floor, but a loud foreign flood drowns the marker.
-  # REPORT-ONLY by default (supervisor calibration correction, 16.9.2026): the -20 dB ceiling was
-  # derived from a BROKEN chain's marker-only plateau; a HEALTHY marker bursts to ~-5 dBFS at the
-  # mbc input (green run 34856629289 read max_volume -18.9 dB), so a level bar alone cannot tell a
-  # loud marker from a loud foreign flood -- the [4b3/8] decodability probe (issue 1324) is the
-  # honest signal. Flip AUDIO_PREFLIGHT_CEILING_ENFORCE=1 only after the ceiling is re-calibrated
-  # from >= 3 healthy runs; until then the classification is logged as a WARNING and never aborts.
-  AUDIO_PREFLIGHT_CEILING_ENFORCE="${AUDIO_PREFLIGHT_CEILING_ENFORCE:-0}"
-  if [ "$(audio_preflight_is_polluted "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" = "true" ]; then
-    if [ "$AUDIO_PREFLIGHT_CEILING_ENFORCE" = "1" ]; then
-      echo "ERROR: $(audio_preflight_polluted_message "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" >&2
-      exit 1
-    fi
-    echo "    WARNING (report-only, issue 1323 ceiling not yet calibrated on healthy runs): $(audio_preflight_polluted_message "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" >&2
-  fi
-  echo "    ok: mbc measurement audio AUDIBLE (max_volume ${_ap_db} dB >= ${AUDIO_PREFLIGHT_THRESHOLD_DB} dB threshold, <= ${AUDIO_PREFLIGHT_CEILING_DB} dB ceiling)"
+  # issue 1443: no level ceiling here. A healthy marker drives the mic AGC to -16..-5 dB, so a level
+  # cannot tell it from a foreign flood; the marker-decodability probe below (issue 1324) judges pollution.
+  echo "    ok: mbc measurement audio AUDIBLE (max_volume ${_ap_db} dB >= ${AUDIO_PREFLIGHT_THRESHOLD_DB} dB threshold)"
 else
   echo "    [audio-presence preflight] SKIPPED (AUDIO_PREFLIGHT_ENABLE=0)"
 fi
@@ -3413,7 +3396,7 @@ AUDIO_DECODABILITY_SSH_TIMEOUT="${AUDIO_DECODABILITY_SSH_TIMEOUT:-120}"
 AUDIO_DECODABILITY_READ_ATTEMPTS="${AUDIO_DECODABILITY_READ_ATTEMPTS:-4}"
 AUDIO_DECODABILITY_READ_RETRY_SLEEP="${AUDIO_DECODABILITY_READ_RETRY_SLEEP:-3}"
 # The −60 floor and −20 loud covariate are SINGLE-SOURCED from audio-presence-preflight.sh, never
-# retyped here (the same values the [4b2/8] floor/ceiling read).
+# retyped here (the -60 floor the [4b2/8] step reads; the -20 bar is only the decodability covariate).
 AUDIO_DECODABILITY_SILENT_DB="${AUDIO_DECODABILITY_SILENT_DB:-$(audio_preflight_default_threshold_db)}"
 AUDIO_DECODABILITY_LOUD_DB="${AUDIO_DECODABILITY_LOUD_DB:-$(audio_preflight_default_ceiling_db)}"
 _md_probe_bin="$PROBE_BIN_DIR/recording-verdict"

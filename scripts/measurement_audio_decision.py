@@ -34,12 +34,9 @@ Verdicts (classify):
             removed input, or InputVolumeMeters unavailable on this build), or a present meter with
             no numeric level → no reading to judge, held, never a fabricated page.
   SILENT  — reachable, `mbc` meter present, peak_db < threshold → page after a 2-pass confirm.
-  POLLUTED — (#1323) reachable, `mbc` meter present, peak_db > ceiling (a loud foreign signal
-             flooding the chain drowns the QPSK marker) → page after a 2-pass confirm. Only when a
-             ceiling is passed in (the #1310 3/4-arg callers keep the SILENT/PRESENT-only behavior).
-  PRESENT — reachable, `mbc` meter present, peak_db >= threshold and (ceiling_db is None or
-             peak_db <= ceiling) → healthy. (No upper bound when no ceiling is passed — the #1310
-             SILENT/PRESENT-only behavior.)
+  PRESENT — reachable, `mbc` meter present, peak_db >= threshold → healthy. No upper bound
+             (issue 1443): a healthy marker drives the mic AGC to -16..-5 dB, so a level cannot tell
+             it from a foreign flood; pollution is the [4b3/8] decodability preflight's verdict.
 """
 import argparse
 import sys
@@ -80,7 +77,7 @@ def extract_probe(probe_text):
     return (_peak_from_lines(probe_text), _meter_present_from_lines(probe_text))
 
 
-def classify(peak_db, box_reachable, meter_present, threshold_db, ceiling_db=None):
+def classify(peak_db, box_reachable, meter_present, threshold_db):
     """One pass's verdict.
 
       box_reachable != 1     -> SKIP     (defer #1001/#732; never our page)
@@ -89,18 +86,7 @@ def classify(peak_db, box_reachable, meter_present, threshold_db, ceiling_db=Non
                                           false HEALTHY whose confirm-reset would be the wrong dir)
       peak_db < threshold_db -> SILENT   (strict '<' — exactly at the bar is PRESENT, matching
                                           audio_preflight_is_silent)
-      peak_db > ceiling_db   -> POLLUTED (#1323: strict '>' — a loud foreign signal floods the mbc
-                                          chain and drowns the QPSK marker; the same single-sourced
-                                          audio_preflight_default_ceiling_db bar the [4b2/8] preflight
-                                          uses. ceiling_db None DISABLES it — the #1310 4-arg call is
-                                          byte-unchanged, so a loud reading stays PRESENT there)
       otherwise              -> PRESENT
-
-    `ceiling_db` is passed IN (never a hardcoded default) exactly like `threshold_db`: the
-    orchestrator sources scripts/lib/audio-presence-preflight.sh and passes
-    audio_preflight_default_ceiling_db, so the -20 literal is never retyped here. Since the SILENT
-    floor is far below the POLLUTED ceiling (-60 < -20), the two are mutually exclusive; SILENT is
-    checked first.
     """
     if box_reachable != 1:
         return "SKIP"
@@ -110,19 +96,16 @@ def classify(peak_db, box_reachable, meter_present, threshold_db, ceiling_db=Non
         return "UNKNOWN"
     if peak_db < threshold_db:
         return "SILENT"
-    if ceiling_db is not None and peak_db > ceiling_db:
-        return "POLLUTED"
     return "PRESENT"
 
 
-def analyze(probe_text, box_reachable, threshold_db, ceiling_db=None):
+def analyze(probe_text, box_reachable, threshold_db):
     """Fetch-result -> `{"verdict", "peak_db", "meter_present"}`. When the box was not reachable,
-    returns SKIP WITHOUT parsing the (empty) body, mirroring the caller's no-double-page guard.
-    `ceiling_db` (#1323) defaults to None so the #1310 3-arg call is unchanged (POLLUTED disabled)."""
+    returns SKIP WITHOUT parsing the (empty) body, mirroring the caller's no-double-page guard."""
     if box_reachable != 1:
         return {"verdict": "SKIP", "peak_db": None, "meter_present": 0}
     peak, present = extract_probe(probe_text)
-    verdict = classify(peak, box_reachable, present, threshold_db, ceiling_db)
+    verdict = classify(peak, box_reachable, present, threshold_db)
     return {"verdict": verdict, "peak_db": peak, "meter_present": present}
 
 
@@ -140,10 +123,6 @@ def _main(argv):
     # REQUIRED — no hardcoded -60 default. Production sources audio-presence-preflight.sh and passes
     # audio_preflight_default_threshold_db so the #748 bar is single-source (never retyped here).
     a.add_argument("--threshold-db", type=float, required=True)
-    # OPTIONAL (#1323) — the POLLUTION ceiling. When omitted, POLLUTED is disabled (the #1310 CLI is
-    # byte-unchanged). Production sources audio-presence-preflight.sh and passes
-    # audio_preflight_default_ceiling_db so the -20 bar is single-source (never retyped here).
-    a.add_argument("--ceiling-db", type=float, default=None)
 
     ns = ap.parse_args(argv)
 
@@ -152,7 +131,7 @@ def _main(argv):
         # ndi_halving #1203 precedent: a strict read that raised was swallowed by 2>/dev/null and read
         # as SKIP forever). box_reachable=0 needs no stdin.
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
-        res = analyze(text, ns.box_reachable, ns.threshold_db, ns.ceiling_db)
+        res = analyze(text, ns.box_reachable, ns.threshold_db)
         for k in ("verdict", "peak_db", "meter_present"):
             print(f"{k}={_fmt(res[k])}")
         return 0
