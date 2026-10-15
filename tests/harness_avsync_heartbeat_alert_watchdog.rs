@@ -696,6 +696,10 @@ fn dev2_host_reads_the_watchdog_leg_over_plain_ssh_and_skips_the_vlc_leg() {
         .arg(". \"$SCRIPT\"\nmain")
         .env("SCRIPT", script())
         .env("AVSYNC_HEARTBEAT_HOST", "dev2")
+        // issue 1441: the watchdog loops every venue; pin the traveling PP stream box AWAY (a
+        // non-empty force-list that does not name it) so this test never probes the live network.
+        // SNV's stream box is `always` home and is read as before.
+        .env("OBS_FLEET_HOME", "stream-snv")
         .env("AVSYNC_HEARTBEAT_STATE_FILE", &state_file)
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
         // #1331: neutralize the report pass (a `true` fetch => no rows => the report pass

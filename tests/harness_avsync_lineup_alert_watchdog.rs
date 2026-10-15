@@ -433,8 +433,8 @@ fn offset_fires_notify_with_a_bucketed_dedup_key_when_not_dry_run() {
     let (_c, _o, _e) = h.run(". \"$SCRIPT\"\nmain", &[("FAKE_STREAM_ACTIVE", "True")]);
     let calls = h.notify_calls();
     assert!(
-        calls.contains("ROZLADENIE") && calls.contains("--dedup-key avsync-offset-stream-"),
-        "a confirmed offset ALARM must invoke notify with a TIME-BUCKETED dedup key: calls={calls:?}"
+        calls.contains("ROZLADENIE") && calls.contains("--dedup-key avsync-snv-offset-stream-"),
+        "a confirmed offset ALARM must invoke notify with a TIME-BUCKETED, per-venue (issue 1441) dedup key: calls={calls:?}"
     );
 }
 
