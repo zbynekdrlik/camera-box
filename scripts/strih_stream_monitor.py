@@ -79,6 +79,9 @@ HEARTBEAT_S = 5.0
 DRAIN_S = 3.0
 STATE_MAX_AGE_S = 30.0
 STATE_VERSION = 1
+# The stderr text that names a fault (the children run in the C locale, so it is English).
+NO_AUDIO_TEXT = "matches no streams"
+BUSY_TEXT = "resource busy"
 # The states verify FAILs (anything else it does not know FAILs too).
 FAULT_STATES = ("no-card", "busy", "aplay-failing", "no-audio")
 # The process that may hold the headphone PCM: our own aplay. Anything else (pipewire, wireplumber, a
@@ -204,12 +207,15 @@ def fionread(fd):
 
 class StderrTail:
     """Reads a child's stderr on a daemon thread (a full stderr pipe must never block the child): keeps the
-    last non-empty line and counts lines containing COUNT."""
+    last non-empty line, counts lines containing COUNT, and keeps in `seen` the first line holding each
+    WATCH substring (a tool's telling line is not always its last: ffmpeg prints five for a missing map)."""
 
-    def __init__(self, stream, count=None):
+    def __init__(self, stream, count=None, watch=()):
         self.last = ""
         self.counted = 0
+        self.seen = {}
         self._count = count
+        self._watch = watch
         self._t = threading.Thread(target=self._run, args=(stream,), daemon=True)
         self._t.start()
 
@@ -220,6 +226,9 @@ class StderrTail:
                 self.last = line
                 if self._count and self._count in line:
                     self.counted += 1
+                for w in self._watch:
+                    if w in line and w not in self.seen:
+                        self.seen[w] = line
         stream.close()
 
     def join(self, timeout=1.0):
@@ -270,6 +279,7 @@ class Monitor:
         self.stopping = False
         self.st = {"version": STATE_VERSION, "state": "starting", "url": url, "device": None, "card": None,
                    "pcm_device": None, "connects": 0, "dropped_bytes": 0, "reason": "", "owner": None,
+                   "last_play_failed": None,
                    "since_epoch_s": time.time(), "updated_epoch_s": time.time()}
         self._last_write = 0.0
         self._logged = None
@@ -296,7 +306,10 @@ class Monitor:
             self._write_state()
 
     def set_idle(self, state, reason, **info):
-        """An idle state (waiting / busy / no-card): logged once per (state, reason) change."""
+        """An idle state (waiting / busy / no-card / no-audio / aplay-failing): logged once per (state, reason)
+        change. Only aplay-failing keeps the retry backoff: any other outcome retries at the plain pace."""
+        if state != "aplay-failing":
+            self.fail_streak = 0
         if self.st["state"] != state:
             self.st["since_epoch_s"] = time.time()
         self.st.update(state=state, reason=reason, **info)
@@ -321,7 +334,7 @@ class Monitor:
             return
         ff = subprocess.Popen(ffmpeg_argv(self.ffmpeg, self.url), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, env=self.child_env)
-        ff_err = StderrTail(ff.stderr)
+        ff_err = StderrTail(ff.stderr, watch=(NO_AUDIO_TEXT,))
         ap = None
         try:
             first = self._read(ff, self.connect_timeout_s)
@@ -330,9 +343,9 @@ class Monitor:
                 ff_err.join()
                 if self.stopping:
                     return
-                if "matches no streams" in ff_err.last:
+                if NO_AUDIO_TEXT in ff_err.seen:
                     self.set_idle("no-audio", "the stream on %s carries no audio track (ffmpeg: %s)"
-                                  % (self.url, ff_err.last), owner=None)
+                                  % (self.url, ff_err.seen[NO_AUDIO_TEXT]), owner=None)
                 else:
                     self.set_idle("waiting", "nothing published on %s (ffmpeg: %s) -- silent, retrying every %g s"
                                   % (self.url, ff_err.last or "no audio within %g s" % self.connect_timeout_s,
@@ -341,7 +354,7 @@ class Monitor:
             self._mute_speaker(pcm["card_id"])
             ap = subprocess.Popen(aplay_argv(self.aplay, device), stdin=subprocess.PIPE,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=self.child_env)
-            ap_err = StderrTail(ap.stderr, count="underrun")
+            ap_err = StderrTail(ap.stderr, count="underrun", watch=(BUSY_TEXT,))
             self._play(ff, ap, ap_err, ff_err, device, first)
         finally:
             _stop(ff)
@@ -451,21 +464,27 @@ class Monitor:
         except subprocess.TimeoutExpired:
             self.log("aplay did not finish within %g s of its EOF -- stopping it" % DRAIN_S)
         ap_err.join()
-        if ap.returncode not in (0, None) and end != "stopping" and not end.startswith("aplay exited"):
-            # a short stream can end before the relay saw aplay fail its open: its exit code says so
+        if ap.returncode is not None and ap.returncode > 0 and end != "stopping" and not end.startswith("aplay exited"):
+            # a short stream can end before the relay saw aplay fail its open: its exit code says so (a
+            # negative code is a signal -- a shutdown, never an aplay fault)
             end = "aplay exited %s: %s" % (ap.returncode, ap_err.last or "no message")
         self.log("stream ended after %.1f s: %s; %d ms dropped over the %d ms ceiling; %d aplay underrun(s)"
                  % (time.monotonic() - start, end, dropped * 1000 // (RATE * FRAME_BYTES),
                     self.ceiling * 1000 // (RATE * FRAME_BYTES), ap_err.counted))
-        if end.startswith("aplay exited") and "busy" in end.lower():
+        aplay_failed = end.startswith("aplay exited") and not end.startswith("aplay exited -")
+        if aplay_failed and (BUSY_TEXT in ap_err.seen or "busy" in end.lower()):
             self.set_idle("busy", "the headphone PCM %s: %s" % (device, end), owner=None)
-        elif end.startswith("aplay exited"):
+        elif aplay_failed:
             self.fail_streak += 1
+            # sticky until a stream really plays: a later "nothing published" must not read healthy
+            self.st["last_play_failed"] = end
             self.set_idle("aplay-failing", "aplay on the headphone PCM %s: %s -- retrying with a doubling pause"
                           % (device, end.split(": ", 1)[-1]), owner=None)
         else:
             self.fail_streak = 0
             self._logged = None  # after a real stream the next idle state is news again
+            if end != "stopping":
+                self.st["last_play_failed"] = None
             self.st.update(state="ended", reason=end)
             self._write_state()
 
@@ -509,6 +528,9 @@ def check_state(path, now, asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, max_age
     if owner["state"] == "open" and owner["comm"] not in OWNER_OK:
         return False, ("%s (pid %s) holds the headphone PCM %s -- nothing but the monitor's aplay may play to it "
                        "(PipeWire must not)" % (owner["comm"] or "?", owner["pid"], device))
+    if st.get("last_play_failed") and state != "playing":
+        return False, ("%s, but the last connect failed and no stream has played since: %s"
+                       % (state, st["last_play_failed"]))
     holder = "free" if owner["state"] == "closed" else "held by %s pid %s" % (owner["comm"], owner["pid"])
     if state == "playing":
         return True, "playing %s -> %s (connect %s), headphone PCM %s, %d ms dropped in total" % (

@@ -60,8 +60,12 @@ box now does the same, through ALSA, never PipeWire.
   - a stream end (ffmpeg EOF) or no audio for 5 s (stall) stops ffmpeg first (the subscriber goes at
     once), aplay plays out its buffer; reconnect after 3 s. Nothing published = ffmpeg fails
     `Input/output error` / `Connection refused`: silent, logged once. A stream without an audio track is
-    the fault state `no-audio`; an aplay that fails (not busy) is `aplay-failing`, retried after a
-    doubling pause (up to 20 x 3 s);
+    the fault state `no-audio` (ffmpeg prints five lines for it and `matches no streams` is not the last:
+    the stderr reader keeps the first line holding each watched text, never only the last line); an
+    aplay that fails (not busy) is `aplay-failing`, retried after a doubling pause (up to 20 x 3 s),
+    and any other outcome resets the pause. A failed play stays a fault (`last_play_failed`) until a
+    stream plays, so a later `waiting` never reads healthy; a signal-killed aplay (a shutdown) is not
+    an aplay fault;
   - logs: `watching ...` at start, `playing <url> -> <plughw> (connect N)`, `stream ended after N s:
     <why>; N ms dropped over the 200 ms ceiling; N aplay underrun(s)`, and one line per idle-state
     change (`waiting:` / `busy:` / `no-card:`);
@@ -82,7 +86,9 @@ box now does the same, through ALSA, never PipeWire.
     on the card reads `closed` and passes: denying the card to PipeWire is the issue-1437 migration;
   - `(stream-monitor-key)` = `--grade-key`: `rtmp_custom` to `rtmp://127.0.0.1:1234/live` with exactly
     the box name as the key, AND `hostname -s` = that name (the unit plays `/%l`);
-  - `(stream-monitor-obs)` = `strih_scenes.py --audio-monitor-type` (on `OBS_WS_HOST`):
+  - the Speaker mute is the player's own act at every connect (logged once), not a verify row; it
+    re-mutes a speaker someone turned on by hand while a stream plays to the headphones;
+  - `(stream-monitor-obs)` = `strih_scenes.py --audio-monitor-type` (on `OBS_WS_HOST`, its LAST line):
     `OBS_MONITORING_TYPE_NONE`; rc 2 (`unreachable: ...`, OBS not running) is a NOTE, an `absent` input
     and a reader failure FAIL with their own remedy.
 - Seams: `STRIH_STREAM_MONITOR_ASOUND` / `_PROC` (the player), `_HOSTNAME` / `_SCENES` / `_MANIFEST`

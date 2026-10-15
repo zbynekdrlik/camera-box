@@ -75,12 +75,12 @@ strih_stream_monitor_obs_row() {
     printf 'NOTE|(stream-monitor-obs) OBS websocket not answering (%s) -- the monitoring of %s is graded while OBS runs\n' "${out%%$'\n'*}" "$name"
   elif [ "$rc" != 0 ]; then
     printf 'FAIL|(stream-monitor-obs) the monitoring reader failed (rc %s: %s) -- run strih_scenes.py --audio-monitor-type by hand\n' "$rc" "${out##*$'\n'}"
-  elif [ "$out" = OBS_MONITORING_TYPE_NONE ]; then
+  elif [ "${out##*$'\n'}" = OBS_MONITORING_TYPE_NONE ]; then
     printf 'OK|(stream-monitor-obs) %s is on Monitor Off: the headphones hear only the outgoing stream\n' "$name"
-  elif [ "$out" = absent ]; then
+  elif [ "${out##*$'\n'}" = absent ]; then
     printf 'FAIL|(stream-monitor-obs) the program-audio input %s is absent from the OBS collection -- port the collection (obs_collection_port.py --preset stream-pp) or let the seeder create it at the next OBS start\n' "$name"
   else
-    printf 'FAIL|(stream-monitor-obs) %s monitoring reads %s -- the seeder turns it off at the next OBS start (strih-obs-start.sh runs strih_scenes.py --bootstrap), or set Monitor Off by hand\n' "$name" "${out%%$'\n'*}"
+    printf 'FAIL|(stream-monitor-obs) %s monitoring reads %s -- the seeder turns it off at the next OBS start (strih-obs-start.sh runs strih_scenes.py --bootstrap), or set Monitor Off by hand\n' "$name" "${out##*$'\n'}"
   fi
   return 0
 }

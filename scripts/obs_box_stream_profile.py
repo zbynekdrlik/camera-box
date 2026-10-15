@@ -289,7 +289,8 @@ def _key_note(existing, svc, key):
     now = svc["settings"].get("key")
     if not now:
         return "not set -- the owner pastes it"
-    old = ((existing or {}).get("settings") or {}).get("key") if isinstance(existing, dict) else None
+    old_settings = existing.get("settings") if isinstance(existing, dict) else None
+    old = old_settings.get("key") if isinstance(old_settings, dict) else None
     if key and now == key and old != key:
         return "%s written (the box name, issue 1436)" % key
     if key and now != key:
