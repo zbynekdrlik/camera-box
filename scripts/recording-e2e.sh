@@ -326,6 +326,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # issue 1380: the stream development scene (the production scene nested in it) + its seeder.
 # shellcheck source=scripts/lib/stream-dev-scene.sh
 . "$HERE/lib/stream-dev-scene.sh"
+# shellcheck source=scripts/lib/strih-transition.sh
+. "$HERE/lib/strih-transition.sh"
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -2161,6 +2163,7 @@ fi"
   # run was interrupted during the cold hold (or a single-appearance sweep) left it idled/black.
   # Inert no-op unless COLD_CUT_BYPASS_CAM was set AND the machine is still at phase=idled.
   cold_cut_cleanup_restore "$STRIH" "${OBS_PASSWORD:-}" "$HERE/obs_phase2.py"
+  strih_transition_restore "$HERE" "$STRIH" "${OBS_PASSWORD:-}"
   # #1301: CG_CHAIN leak-guard — turn the SongPlayer output burn OFF (it must NEVER stay on the LED
   # wall, the #246/#844 class) and StopRecord cg OBS, even on an early abort. A pure no-op unless
   # CG_CHAIN=1; ALWAYS returns 0 so it can never trip cleanup()'s own flow.
@@ -3157,6 +3160,7 @@ echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod in
 # scene is touched (idempotent, operator-wins, never writes to the production scene; a missing
 # production scene aborts here, loud, instead of routing the stream box anywhere else).
 stream_dev_scene_ensure "$HERE" "$STREAM" "${OBS_PASSWORD:-}" "$STREAM_PROG_SCENE" "$STREAM_PRODUCTION_SCENE_DEFAULT"
+strih_transition_force_cut "$HERE" "$STRIH" "${OBS_PASSWORD:-}"
 if [ -n "$GENLOCK_TEST_LATENCY_MS" ]; then
   echo "      #358: forcing $GENLOCK_TEST_LATENCY_SOURCE genlock_latency_ms_src=$GENLOCK_TEST_LATENCY_MS for delivery-verify (explicit override)"
 else
