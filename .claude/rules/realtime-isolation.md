@@ -58,6 +58,25 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   The DEEPER "also move NDI emit threads off core 3" rework (the rejected Approach 2) still needs a
   live #728-style emit measurement and stays staged; per-thread FIFO here does NOT do that.
 
+- **issue 1367 — the reserved capture-IRQ core must be QUIET, not only reserved.** Three things
+  still ran on core 2 after the 1198 split, each measured on cam5 (15.10.2026) as capture-phase
+  re-seeds of the leg:
+  - **systemd PID 1 and every unit start** (65 of 102 re-seeds within 1 s of a unit start). Fix: the
+    manager `CPUAffinity` drop-in from `scripts/lib/cambox-housekeeping-cpus.sh` (housekeeping =
+    online − isolated − reserved). systemd 255 applies it to itself only at boot; a live box needs
+    `taskset -pc <set> 1` (the lib's apply program), a `daemon-reexec` does not move PID 1.
+  - **the NIC IRQ** (`enp1s0`, allowed on 0-2 by `irqaffinity=0-2`): moving it off cut the re-seeds
+    from 22-31 per run to 2. camera-box's `setup_irq_affinity` now moves every non-capture device IRQ
+    off the reserved core (pure plan `src/irq_offload.rs`) and sets `/proc/irq/default_smp_affinity`
+    to the same set, so an IRQ allocated later (a NIC re-open) does not land there.
+  - **the split never ran on the fleet at all:** setup-device's unit had no
+    `ExecStartPre=... --setup-irq-affinity` (only build-image's unit did). setup-device STEP 7 now
+    writes `camera-box.service.d/irq-affinity.conf` with `ExecStartPre=-+...` ('+' runs it outside
+    `ProtectSystem=strict`/`ReadOnlyPaths=/`, which make /proc/irq read-only). verify-device `(au)`
+    grades the LOADED unit (`systemctl show ExecStartPreEx` flags `privileged`), a 2 s
+    /proc/interrupts sample (a non-capture IRQ that FIRED on the reserved core fails; an idle IRQ
+    allowed there does not) and the default affinity.
+
 ## What is STAGED (reboot-class — SUPERVISOR only, never from a code lane)
 
 - **STEP 1 — `linux-lowlatency-hwe-24.04`** (the free main-archive low-latency meta, no Pro). On
