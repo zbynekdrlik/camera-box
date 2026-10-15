@@ -419,6 +419,10 @@ reads into `scripts/lib/strih-obs-collection.sh` before adding items 37/38 (the 
 Item 41 (issue 1404, the stream program-audio sampler moved here from dev1) is such a lib grader:
 `scripts/lib/strih-program-audio.sh` (sourced by strih-provision.sh) holds setup-strih step 16e + the
 item's 3 rows; verify-strih gained 4 lines. Details: `.claude/rules/program-audio-guard.md` ("The host").
+**The cambox log sink (issue 1394)** is setup-strih step 16k / verify-strih item 46, one call each
+(`scripts/lib/strih-cambox-log-sink.sh`, `.claude/rules/cambox-remote-logging.md`); four repeated
+"A lettered sub-step so TOTAL_STEPS stays 17" comment lines in setup-strih paid for the step, and
+item 46's comment rides on its own call line. Both scripts are now exactly 1000 lines.
 **verify-strih.sh is exactly 1000 lines; setup-strih.sh is ~966** (issue 1415 added the one
 `obs_box_timezone` call to step 1 and folded the timezone fix hint into item 32's existing line;
 issue 1418 moved the step-7 [BasicWindow] upsert into `scripts/lib/strih-operator.sh` and paid for
