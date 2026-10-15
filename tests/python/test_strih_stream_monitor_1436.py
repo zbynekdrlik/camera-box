@@ -79,7 +79,7 @@ def asound(tmp_path, analog=True, owner=None, second_analog=False):
     (pid, comm) holding the analog playback PCM, else it reads `closed`."""
     root = tmp_path / "asound"
     proc = tmp_path / "proc"
-    proc.mkdir(exist_ok=True)
+    proc.mkdir(parents=True, exist_ok=True)
 
     def pcm(card, dev, name, status="closed", kind="p"):
         d = root / ("card%d" % card) / ("pcm%d%s" % (dev, kind))
@@ -267,7 +267,7 @@ def test_a_published_stream_plays_to_the_resolved_card_and_ends_cleanly(tmp_path
     lines = r.stdout.splitlines()
     assert any(ln.startswith("playing rtmp://127.0.0.1:1234/live/stream-pp -> plughw:CARD=Generic_1,DEV=0")
                for ln in lines), lines
-    assert any(ln.startswith("stream ended after") and "0 ms dropped" in ln for ln in lines), lines
+    assert any(ln.startswith("stream ended after") and "; 0 ms dropped" in ln for ln in lines), lines
     assert st["connects"] == 1 and st["url"] == "rtmp://127.0.0.1:1234/live/stream-pp"
     assert st["device"] == "plughw:CARD=Generic_1,DEV=0" and st["card"] == 1 and st["pcm_device"] == 0
 
@@ -315,7 +315,7 @@ def test_a_card_slower_than_the_stream_drops_over_the_ceiling_instead_of_pausing
     assert played and played[0] + st["dropped_bytes"] == 192000, (played, st["dropped_bytes"])
     assert played[0] <= 7680 + 3840 + 65536
     ended = [ln for ln in r.stdout.splitlines() if ln.startswith("stream ended")]
-    assert ended and "dropped" in ended[0] and "0 ms dropped" not in ended[0], ended
+    assert ended and "dropped" in ended[0] and "; 0 ms dropped" not in ended[0], ended
 
 
 def test_a_stalled_stream_is_dropped_not_held(tmp_path):
@@ -546,5 +546,5 @@ def test_the_pass_row_fails_a_stale_pass(tmp_path, boxes):
 
 def test_the_session_apps_grader_prints_the_monitor_rows_only_on_the_stream_role(tmp_path, boxes):
     src = APPS.read_text()
-    assert "_strih_session_apps_has strih-stream-monitor.service" in src
+    assert '_strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT"' in src
     assert "strih_stream_monitor_grade_rows" in src
