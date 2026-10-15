@@ -612,6 +612,10 @@ venue's stream, SNV and PP today, from ONE table.
 - `AVSYNC_VENUE_TABLE` overrides the whole table (test / ops seam, like `OBS_FLEET`). Every row is
   validated with spelled-out ASCII sets; a malformed row is dropped with a named stderr line. A new
   venue = a stream-role fact file + an obs-fleet row, no edit here.
+- **Derive it once per pass:** `avsync_venue_table_load` (in the caller's own shell, never inside
+  `$(...)`) caches the rows for the inputs they came from; every later accessor reuses them, also in a
+  subshell, so its warnings print once. The watchdogs, the measurer and the installer call it.
+- `AVSYNC_VENUES` is split with `read -a` (never glob-expanded: a `*` names no venue).
 
 ## dev2: one template instance per venue
 
@@ -642,8 +646,28 @@ venue's stream, SNV and PP today, from ONE table.
 - `avsync-heartbeat-alert-watchdog.sh` and `avsync-lineup-alert-watchdog.sh` run their pass once per
   `avsync_watchdog_venues` venue (the retired Windows `stream` host = the legacy venue only).
 - **AWAY:** a venue whose stream box fails `obs_fleet_poll_now` (a traveling box that is not home) is
-  logged `<venue>: AWAY ... never a page` and nothing is read for it (the issue-1001 doctrine); its
-  state stays for when the box returns. stream-snv is `always`, stream-pp `traveling`.
+  logged `<venue>: AWAY ... never a page`; its heartbeat and stream state are not read (the issue-1001
+  doctrine). Its pending confirm/throttle state stays as it is for when the box returns, so the first
+  ALARM pass after the return can act at once. stream-snv is `always`, stream-pp `traveling`.
+- **The REPORT pass runs for an AWAY venue too** (review round 1): it reads only dev2's day logs, and a
+  traveling box shut down right after its broadcast is AWAY by the time the END message is due (600 s
+  without a measured row). Gating it would deliver the END days later, with old times.
+- **A table that watches less than it must PAGES** (`avsync_venue_table_problem`): nothing selected,
+  or (with no `AVSYNC_VENUES` narrowing) no legacy-venue row. The heartbeat watchdog pages it once
+  under the stable key `avsync-venue-table`; the lineup watchdog only logs it. A production-critical
+  alarm never fails open by silently watching nothing.
+- **The legacy venue falls back to the old single files on dev2:** its heartbeat read is
+  `{ cat <per-venue> || cat ~/.camera-box/avsync-watchdog-heartbeat.txt; }`
+  (`avsync_venue_dev2_legacy_heartbeat_remote_path`), and its report reads the old
+  `measurements-<day>.tsv` too (the decider sorts and dedups rows by epoch). So SNV never pages stale
+  whichever of dev1 / dev2 is upgraded first. PP has no old file.
+- **The report state moves once:** the legacy venue seeds its work copy from the pre-issue-1441
+  `AVSYNC_REPORT_STATE_FILE` while `<base>-snv.json` does not exist, and removes the old file only
+  after the per-venue file was committed (`--dry-run` never moves it). No START re-post on the rollout.
+- Env knobs that changed meaning: `STREAM_OBS_WS_HOST` is no longer read (each venue's OBS-WS host
+  comes from the table); `AVSYNC_HB_DEV2_WATCHDOG_PATH` is only the default of a no-venue caller of
+  `avsync_heartbeat_linux_probe_cmd`; `STREAM_IP` (the retired Windows host) defaults to the legacy
+  venue's table host. No dev1 unit or drop-in set any of them (checked 15.10.2026).
 - **Keys:** state `<venue>_<leg>_*`, `<venue>_lineup_*`, `<venue>_offset_*`; report state
   `<AVSYNC_REPORT_STATE_FILE base>-<venue>.json`; dedup `avsync-<venue>-heartbeat-<leg>` (bucketed),
   `avsync-<venue>-lineup-liveness`, `avsync-<venue>-offset-stream` (bucketed),
@@ -653,13 +677,20 @@ venue's stream, SNV and PP today, from ONE table.
   `[PP] NO-GO ...`); exit 1 on any NO-GO or when no venue's box is home.
 - The report fetch seam `AVSYNC_REPORT_FETCH_CMD` receives the venue as `$1`.
 
-## Rollout order (supervisor) -- dev2 FIRST
+## Rollout order (supervisor) -- dev2 FIRST, before the merge reaches dev1's checkout
 
-The dev1 watchdogs read the per-venue files, which only the template instances write. Install dev2
-(`--install`), see one heartbeat per venue appear (~2 min), THEN let dev1 pick up the new watchdogs.
-In the other order the heartbeat watchdog reads no `-snv`/`-pp` file and pages both venues stale
-(production-critical, re-pinged). A live read-only `--dry-run` with scratch state files
-(`AVSYNC_*_STATE_FILE`) before dev2 is installed shows exactly that (15.10.2026).
+The dev1 units run straight from `~/devel/camera-box`, which fast-forwards at session start. SNV is
+safe in either order (the fallback above). PP is not: with the PP box home, a dev1 that reads
+`avsync-watchdog-heartbeat-pp.txt` before dev2's `@pp` instance wrote it pages PP stale
+(production-critical, re-pinged). So run `scripts/avsync-dev2-install.sh --install` from the lane
+branch (or right at the merge), see one heartbeat per venue on dev2 (~2 min), then let dev1 pick up
+the new watchdogs. A live read-only `--dry-run` with scratch state files (`AVSYNC_*_STATE_FILE`)
+before dev2 was installed showed both venues stale (15.10.2026, before the SNV fallback existed).
+
+**Measured content can be older than the heartbeat.** The freshness gate runs on the grab, BEFORE a
+pass may wait up to the 180 s cap for the other venue's SyncNet run, so the clip a heartbeat reports
+can be ~3.5 min old when both venues measure at once. The verdict line's own `[stamp]` is the
+measurement time.
 
 ## Tests
 
