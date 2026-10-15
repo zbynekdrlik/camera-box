@@ -210,6 +210,22 @@ the lease through the write routes below. The read contract above stays for any 
 - Live: the token install + restart is in `systemd/rig-lease-server.README.md`; restart only while
   `held=false`.
 
+### Since issue 1432: a lockdir with no holder.json is held for 10 s, then reclaimable
+
+`rig_lease_is_stale` (bash) and `rig_lease_state` (python, the GET view) treat a lockdir without
+`holder.json` as an acquire in progress until it is `RIG_LEASE_NOHOLDER_GRACE_SECS` (default 10, one
+override for both) old; only after that is it a crashed acquire's leftover and reclaimable. Before,
+it was stale at once, so the dev1 HTTP acquire could reclaim a lockdir a camera-box gate had just
+made (both then believed they held the rig; reproduced in review). The section below describes the
+old window, which this closes for the absent-holder case.
+
+**Still open, pre-existing (found in the issue-1432 review, not introduced by it):** two acquirers
+that BOTH judge the same old holder stale in the same ~100 ms can both reclaim it, and the later
+write wins (`rig_lease_write_holder` rewrites holder.json in place). A rename-aside reclaim like the
+issue-857 release would close it, but it needs a compare of the aside's identity with the holder
+that was judged stale, or a fresh lease can be moved aside. Reachable only when a stale lease meets
+two acquirers at once.
+
 ### Known, INHERITED race — a fresh acquire's few-millisecond "absent holder.json" window
 
 `scripts/lib/rig-lease.sh::rig_lease_write_holder` is NOT atomic: it `mkdir`s the lockdir (or reuses

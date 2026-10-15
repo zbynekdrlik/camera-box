@@ -139,6 +139,12 @@ def holder_stale_secs(holder_data, default: int) -> int:
     return default
 
 
+def _no_holder_grace_secs() -> int:
+    """NO_HOLDER_GRACE_SECS, or the RIG_LEASE_NOHOLDER_GRACE_SECS override bash honours too."""
+    raw = os.environ.get("RIG_LEASE_NOHOLDER_GRACE_SECS", "")
+    return int(raw) if raw.isascii() and raw.isdigit() else NO_HOLDER_GRACE_SECS
+
+
 def _no_holder_grace_expired(lease_dir: str, now: datetime) -> bool:
     """True when a holderless lockdir is older than NO_HOLDER_GRACE_SECS (or its age cannot be
     read: a crashed acquire must stay reclaimable)."""
@@ -146,7 +152,7 @@ def _no_holder_grace_expired(lease_dir: str, now: datetime) -> bool:
         mtime = os.stat(lease_dir).st_mtime
     except OSError:
         return True
-    return (_aware(now).timestamp() - mtime) >= NO_HOLDER_GRACE_SECS
+    return (_aware(now).timestamp() - mtime) >= _no_holder_grace_secs()
 
 
 def fail_closed_state(now: datetime) -> dict:

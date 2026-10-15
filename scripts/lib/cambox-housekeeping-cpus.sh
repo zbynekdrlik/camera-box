@@ -138,7 +138,7 @@ cambox_hk_isolated_from_grub() {
 cambox_hk_kernel_rt() {
   local flag
   flag="$(cat "${CAMBOX_HK_REALTIME:-/sys/kernel/realtime}" 2>/dev/null)" || flag=""
-  case "$flag" in *1*) echo 1; return 0 ;; esac
+  [ "${flag//[[:space:]]/}" = 1 ] && { echo 1; return 0; }
   case "$(uname -v 2>/dev/null)" in *PREEMPT_RT*) echo 1 ;; *) echo 0 ;; esac
 }
 
@@ -169,6 +169,11 @@ cambox_hk_install_dropin() {
   [ -n "$iso" ] || iso="$(cambox_hk_isolated_from_grub "${CAMBOX_HK_GRUB:-${root}/etc/default/grub}")"
   if ! hk="$(cambox_hk_cpus "$(cat "$sys/online" 2>/dev/null)" "$iso" "$(cambox_hk_kernel_rt)" 2>&1)"; then
     why="$hk"
+    if [ -e "$path" ]; then
+      rm -f "$path" || { echo "FAIL: [issue 1367] could not remove the leftover ${path}" >&2; return 1; }
+      echo "  housekeeping cpus: removed the leftover ${path} -- ${why} (issue 1367)"
+      return 0
+    fi
     echo "  housekeeping cpus: not written -- ${why} (issue 1367)"
     return 0
   fi
@@ -190,9 +195,9 @@ cambox_hk_gather_remote_snippet() {
   cat <<'REMOTE'
 echo "ONLINE=$(cat /sys/devices/system/cpu/online 2>/dev/null)"
 echo "ISOLATED=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)"
-case "$(cat /sys/kernel/realtime 2>/dev/null)$(uname -v 2>/dev/null)" in 1* | *PREEMPT_RT*) echo "RT=1" ;; *) echo "RT=0" ;; esac
+_hk_rtf="$(cat /sys/kernel/realtime 2>/dev/null)"; case "${_hk_rtf//[[:space:]]/}|$(uname -v 2>/dev/null)" in 1\|* | *PREEMPT_RT*) echo "RT=1" ;; *) echo "RT=0" ;; esac
 echo "PID1=$(awk '/^Cpus_allowed_list:/ {print $2; exit}' /proc/1/status 2>/dev/null)"
-if [ -e "$_hk_d" ]; then echo "DROPIN_PRESENT=1"; while IFS= read -r _hk_l || [ -n "$_hk_l" ]; do echo "DROPIN=$_hk_l"; done <"$_hk_d"; else echo "DROPIN_PRESENT=0"; fi
+if [ -e "$_hk_d" ]; then echo "DROPIN_PRESENT=1"; if [ -n "$(tail -c1 "$_hk_d" 2>/dev/null)" ]; then echo "DROPIN_NL=0"; else echo "DROPIN_NL=1"; fi; while IFS= read -r _hk_l || [ -n "$_hk_l" ]; do echo "DROPIN=$_hk_l"; done <"$_hk_d"; else echo "DROPIN_PRESENT=0"; fi
 echo "GATHER_DONE=1"
 REMOTE
 }
@@ -202,7 +207,7 @@ REMOTE
 #   - the drop-in is byte-identical to cambox_hk_dropin_content <housekeeping>;
 #   - PID 1's running mask equals the housekeeping set (the drop-in applies at boot, the apply program sets a live box).
 cambox_hk_verdict() {
-  local block="${1:-}" line online="" iso="" rt="" pid1="" present="" done="" body="" nl=$'\n'
+  local block="${1:-}" line online="" iso="" rt="" nl_ok="" pid1="" present="" done="" body="" nl=$'\n'
   local hk why want got have fails="" fix
   while IFS= read -r line; do
     case "$line" in
@@ -211,6 +216,7 @@ cambox_hk_verdict() {
       RT=*) rt="${line#*=}" ;;
       PID1=*) pid1="${line#*=}" ;;
       DROPIN_PRESENT=*) present="${line#*=}" ;;
+      DROPIN_NL=*) nl_ok="${line#*=}" ;;
       DROPIN=*) body="${body}${line#DROPIN=}${nl}" ;;
       GATHER_DONE=1) done=1 ;;
     esac
@@ -232,7 +238,7 @@ cambox_hk_verdict() {
   want="$(cambox_hk_dropin_content "$hk")${nl}"
   if [ "$present" != 1 ]; then
     fails="${fails}FAIL: ${CAMBOX_HK_DROPIN} is missing -- PID 1 and every unit may run on the capture-IRQ core; ${fix}${nl}"
-  elif [ "$body" != "$want" ]; then
+  elif [ "$body" != "$want" ] || [ "$nl_ok" = 0 ]; then
     fails="${fails}FAIL: ${CAMBOX_HK_DROPIN} differs from scripts/lib/cambox-housekeeping-cpus.sh (want CPUAffinity=${hk}); ${fix}${nl}"
   fi
   if ! got="$(cambox_hk_cpulist_expand "$pid1")" || [ -z "$got" ]; then
@@ -275,15 +281,23 @@ PROG
 _hk_box="$(hostname 2>/dev/null || echo this cambox)"
 # --- 1. what this box needs (read before anything is written) ---
 _hk_mode="$(ro_root_mount_mode "$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)")"
+_hk_none=0 _hk_do_d=0 _hk_do_rm=0
 if ! _hk_set="$(cambox_hk_cpus "$(cat "$_hk_sys/online" 2>/dev/null)" "$(cat "$_hk_sys/isolated" 2>/dev/null)" "$(cambox_hk_kernel_rt)" 2>&1)"; then
-  echo "OK ($_hk_box): nothing to do -- $_hk_set (issue 1367)"
-  return 0
+  # No reserved IRQ core: nothing to provision, but a leftover drop-in (e.g. after a move to a
+  # PREEMPT_RT kernel) is removed, or verify (au) fails it.
+  _hk_none=1
+  if [ ! -e "$_hk_d" ]; then
+    echo "OK ($_hk_box): nothing to do -- $_hk_set (issue 1367)"
+    return 0
+  fi
+  _hk_do_rm=1
+  echo "PLAN ($_hk_box): root $_hk_mode; $_hk_set; drop-in remove"
+else
+  _hk_body="$(cambox_hk_dropin_content "$_hk_set")"
+  # exact bytes: the verify compares the file byte for byte, so a trailing blank line is a rewrite too
+  if ! cmp -s "$_hk_d" <(printf '%s\n' "$_hk_body"); then _hk_do_d=1; fi
+  echo "PLAN ($_hk_box): root $_hk_mode; housekeeping CPUAffinity=$_hk_set; drop-in $([ "$_hk_do_d" = 1 ] && echo write || echo in-place)"
 fi
-_hk_body="$(cambox_hk_dropin_content "$_hk_set")"
-_hk_do_d=0
-# exact bytes: the verify compares the file byte for byte, so a trailing blank line is a rewrite too
-if ! cmp -s "$_hk_d" <(printf '%s\n' "$_hk_body"); then _hk_do_d=1; fi
-echo "PLAN ($_hk_box): root $_hk_mode; housekeeping CPUAffinity=$_hk_set; drop-in $([ "$_hk_do_d" = 1 ] && echo write || echo in-place)"
 _hk_rc=0
 # --- 2. the rw window, closed by the ONE verified close ---
 _hk_open=0
@@ -297,7 +311,7 @@ PROG
   cat <<'PROG'
 }
 trap '_hk_close' EXIT
-if [ "$_hk_do_d" = 1 ] || [ "$_hk_mode" != ro ]; then
+if [ "$_hk_do_d" = 1 ] || [ "$_hk_do_rm" = 1 ] || [ "$_hk_mode" != ro ]; then
   if ! mount -o remount,rw /; then
     echo "FAIL: [issue 1367] could not remount / read-write on $_hk_box -- nothing was written" >&2
     exit 1
@@ -310,9 +324,17 @@ if [ "$_hk_do_d" = 1 ] || [ "$_hk_mode" != ro ]; then
       exit 1
     fi
   fi
+  if [ "$_hk_do_rm" = 1 ] && ! rm -f "$_hk_d"; then
+    echo "FAIL: [issue 1367] could not remove $_hk_d on $_hk_box -- the window is closed again by the verified close" >&2
+    exit 1
+  fi
 fi
 _hk_close
 trap - EXIT
+if [ "$_hk_none" = 1 ]; then
+  echo "OK ($_hk_box): removed the leftover $_hk_d -- $_hk_set (PID 1 keeps its mask until the next boot; issue 1367)"
+  return 0
+fi
 # --- 3. after the verified close: set PID 1's mask when it differs (the drop-in applies it at boot;
 #        systemd 255 does not re-apply CPUAffinity to itself on daemon-reexec, checked on cam2), read back ---
 _hk_want="$(cambox_hk_cpulist_expand "$_hk_set")"
