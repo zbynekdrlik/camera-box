@@ -197,6 +197,13 @@ echo "ONLINE=$(cat /sys/devices/system/cpu/online 2>/dev/null)"
 echo "ISOLATED=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)"
 _hk_rtf="$(cat /sys/kernel/realtime 2>/dev/null)"; case "${_hk_rtf//[[:space:]]/}|$(uname -v 2>/dev/null)" in 1\|* | *PREEMPT_RT*) echo "RT=1" ;; *) echo "RT=0" ;; esac
 echo "PID1=$(awk '/^Cpus_allowed_list:/ {print $2; exit}' /proc/1/status 2>/dev/null)"
+while IFS= read -r _hk_l; do
+  _hk_n="${_hk_l%%:*}"; _hk_n="${_hk_n//[[:space:]]/}"
+  case "$_hk_n" in '' | *[!0123456789]*) continue ;; esac
+  case "$_hk_l" in *xhci* | *ehci* | *ohci* | *uvcvideo*) _hk_c=1 ;; *) _hk_c=0 ;; esac
+  _hk_a="$(cat "/proc/irq/$_hk_n/smp_affinity_list" 2>/dev/null)" || continue
+  echo "IRQ=$_hk_n $_hk_c $_hk_a"
+done </proc/interrupts
 if [ -e "$_hk_d" ]; then echo "DROPIN_PRESENT=1"; if [ -n "$(tail -c1 "$_hk_d" 2>/dev/null)" ]; then echo "DROPIN_NL=0"; else echo "DROPIN_NL=1"; fi; while IFS= read -r _hk_l || [ -n "$_hk_l" ]; do echo "DROPIN=$_hk_l"; done <"$_hk_d"; else echo "DROPIN_PRESENT=0"; fi
 echo "GATHER_DONE=1"
 REMOTE
@@ -207,7 +214,7 @@ REMOTE
 #   - the drop-in is byte-identical to cambox_hk_dropin_content <housekeeping>;
 #   - PID 1's running mask equals the housekeeping set (the drop-in applies at boot, the apply program sets a live box).
 cambox_hk_verdict() {
-  local block="${1:-}" line online="" iso="" rt="" nl_ok="" pid1="" present="" done="" body="" nl=$'\n'
+  local block="${1:-}" line online="" iso="" rt="" nl_ok="" irqs="" pid1="" present="" done="" body="" nl=$'\n'
   local hk why want got have fails="" fix
   while IFS= read -r line; do
     case "$line" in
@@ -218,6 +225,7 @@ cambox_hk_verdict() {
       DROPIN_PRESENT=*) present="${line#*=}" ;;
       DROPIN_NL=*) nl_ok="${line#*=}" ;;
       DROPIN=*) body="${body}${line#DROPIN=}${nl}" ;;
+      IRQ=*) irqs="${irqs}${line#IRQ=}${nl}" ;;
       GATHER_DONE=1) done=1 ;;
     esac
   done <<<"$block"
@@ -248,6 +256,17 @@ cambox_hk_verdict() {
     if [ "$got" != "$have" ]; then
       fails="${fails}FAIL: PID 1 runs on cpus ${pid1}, not the housekeeping set ${hk} -- PID 1 still has its old mask (the apply program sets it with taskset; the drop-in applies at the next boot); ${fix}${nl}"
     fi
+  fi
+  # issue 1367: no OTHER device IRQ may still run on the reserved capture-IRQ core (the NIC IRQ sat
+  # there on cam3/cam5); camera-box's setup_irq_affinity moves them at every start.
+  local reserved irq_n irq_c irq_a on_core=""
+  reserved="$(cambox_hk_cpulist_expand "$online" | while read -r c; do grep -qx "$c" <<<"$(cambox_hk_cpulist_expand "$iso")" || echo "$c"; done | tail -1)"
+  if [ -n "$reserved" ]; then
+    while read -r irq_n irq_c irq_a; do
+      [ -n "$irq_n" ] && [ "$irq_c" = 0 ] || continue
+      cambox_hk_cpulist_expand "$irq_a" 2>/dev/null | grep -qx "$reserved" && on_core="${on_core:+$on_core, }IRQ $irq_n (cpus $irq_a)"
+    done <<<"$irqs"
+    [ -z "$on_core" ] || fails="${fails}FAIL: ${on_core} may run on the reserved capture-IRQ core ${reserved} -- camera-box's IRQ setup (issue 1367) has not moved it; restart camera-box on a build that carries it${nl}"
   fi
   if [ -n "$fails" ]; then
     printf '%s' "$fails"
