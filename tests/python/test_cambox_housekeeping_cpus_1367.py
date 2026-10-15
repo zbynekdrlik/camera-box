@@ -302,3 +302,53 @@ def test_the_live_apply_rewrites_a_dropin_with_an_extra_trailing_blank_line(tmp_
 
 def test_the_verify_ok_line_says_running_daemons_move_at_the_next_boot():
     assert "running services keep their mask until they restart" in VERIFY.read_text()
+
+
+# --- review round 2 -------------------------------------------------------------------------------
+
+def test_install_removes_a_leftover_dropin_on_a_box_with_no_reserved_irq_core(tmp_path):
+    root = tmp_path / "root"
+    f = root / "etc/systemd/system.conf.d/60-camera-box-housekeeping-cpus.conf"
+    f.parent.mkdir(parents=True)
+    f.write_text("[Manager]\nCPUAffinity=0,1\n")
+    rt = tmp_path / "realtime"
+    rt.write_text("1\n")
+    r = _bash('cambox_hk_install_dropin "$1"', str(root),
+              env={"CAMBOX_HK_SYS": str(_sys(tmp_path)), "CAMBOX_HK_REALTIME": str(rt)})
+    assert r.returncode == 0, r.stderr
+    assert not f.exists() and "removed" in r.stdout
+
+
+def test_the_live_apply_removes_a_leftover_dropin_inside_the_rw_window(tmp_path):
+    b, log, proc = _stubs(tmp_path)
+    dropin = tmp_path / "d.conf"
+    dropin.write_text("[Manager]\nCPUAffinity=0,1\n")
+    env = {"CAMBOX_HK_DROPIN": str(dropin), "CAMBOX_HK_SYS": str(_sys(tmp_path, isolated="")),
+           "CAMBOX_HK_PROC": str(proc)}
+    prog = _bash("cambox_hk_apply_program", env=env).stdout
+    r = subprocess.run(["bash", "-s"], input=prog, capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not dropin.exists()
+    lines = log.read_text().splitlines()
+    assert any("remount,rw" in l for l in lines) and any("remount,ro" in l for l in lines)
+
+
+def test_the_realtime_flag_must_read_exactly_1(tmp_path):
+    rt = tmp_path / "realtime"
+    rt.write_text("10\n")
+    r = _bash("cambox_hk_kernel_rt", env={"CAMBOX_HK_REALTIME": str(rt)})
+    assert r.stdout.strip() == "0" or "PREEMPT_RT" in os.uname().version
+    rt.write_text("1\n")
+    assert _bash("cambox_hk_kernel_rt", env={"CAMBOX_HK_REALTIME": str(rt)}).stdout.strip() == "1"
+
+
+def test_verify_fails_a_dropin_without_its_final_newline(tmp_path):
+    d = tmp_path / "hk.conf"
+    d.write_text(_bash('cambox_hk_dropin_content "$1"', "0,1").stdout.rstrip("\n"))
+    snippet = _bash("cambox_hk_gather_remote_snippet", env={"CAMBOX_HK_DROPIN": str(d)}).stdout
+    out = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, timeout=30).stdout
+    assert "DROPIN_NL=0" in out
+    block = "\n".join(l for l in out.splitlines() if not l.startswith(("ONLINE=", "ISOLATED=", "PID1=", "RT=")))
+    v = _verdict("ONLINE=0-3\nISOLATED=3\nPID1=0-1\nRT=0\n" + block + "\n")
+    assert "differs" in v, v

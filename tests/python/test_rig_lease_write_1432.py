@@ -444,3 +444,18 @@ def test_handle_answers_503_instead_of_raising(tmp_path, monkeypatch):
 def test_the_no_holder_grace_is_one_number_in_bash_and_python():
     text = LIB.read_text()
     assert f'RIG_LEASE_NOHOLDER_GRACE_SECS:-{rls.NO_HOLDER_GRACE_SECS}' in text
+
+
+def test_the_python_grace_honours_the_same_env_override_as_bash(tmp_path):
+    lease = tmp_path / "rig-lease"
+    lease.mkdir()
+    t = time.time() - 20
+    os.utime(lease, (t, t))
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import rig_lease_state as r; "
+            "from datetime import datetime, timezone; "
+            "print(r.lease_state(sys.argv[2], datetime.now(timezone.utc), 5400)['stale'])")
+    out = subprocess.run([sys.executable, "-c", code, str(_SCRIPTS), str(lease)], capture_output=True,
+                         text=True, env=dict(os.environ, RIG_LEASE_NOHOLDER_GRACE_SECS="60")).stdout
+    assert out.strip() == "False"
+    r = _bash(lease, 'rig_lease_is_stale 5400; echo rc=$?')
+    assert "rc=0" in r.stdout  # bash default grace 10 s: 20 s old = stale
