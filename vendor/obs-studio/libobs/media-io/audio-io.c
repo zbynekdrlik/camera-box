@@ -77,7 +77,53 @@ struct audio_output {
 	void *input_param;
 	pthread_mutex_t input_mutex;
 	struct audio_mix mixes[MAX_AUDIO_MIXES];
+
+	/* camera-box issue 1381: the audio thread's stall attribution (audio-io.h) */
+	struct audio_output_stall_stats stall;
 };
+
+/* camera-box issue 1381 BEGIN -- what the audio thread spends its time on between two mixer ticks
+ * (obs-audio.c's `audio-stall #1367` line measured only the gap between ticks and the mix itself).
+ * Window maxima in `audio->stall`: the audio thread is their only writer, and the 60 s dump that
+ * takes them (audio_output_take_stall_stats) runs on it too, so plain fields. No allocation, no
+ * log and no lock of its own: one clock read per measured edge; the one lock here is the input
+ * mutex upstream already takes at both call sites. */
+static inline void audio_stall_note_max(uint64_t *max_ns, uint64_t start_ns, uint64_t end_ns)
+{
+	if (end_ns > start_ns && end_ns - start_ns > *max_ns)
+		*max_ns = end_ns - start_ns;
+}
+
+/* how late the thread woke for the tick due at target_ns; `slept` = it really slept (the OS woke
+ * it late), else the tick started behind because the previous one ran long */
+static inline void audio_stall_note_wake(struct audio_output *audio, uint64_t target_ns, bool slept, uint64_t woke_ns)
+{
+	audio_stall_note_max(&audio->stall.wake_late_max_ns, target_ns, woke_ns);
+	if (slept)
+		audio_stall_note_max(&audio->stall.sleep_over_max_ns, target_ns, woke_ns);
+}
+
+/* the input mutex, with the wait for it measured (audio_output_connect / _disconnect hold it on
+ * other threads) */
+static inline void audio_stall_lock_input(struct audio_output *audio)
+{
+	const uint64_t wait_start_ns = os_gettime_ns();
+	pthread_mutex_lock(&audio->input_mutex);
+	audio_stall_note_max(&audio->stall.lock_wait_max_ns, wait_start_ns, os_gettime_ns());
+}
+
+/* the slowest output callback of the window and who it was */
+static inline void audio_stall_note_callback(struct audio_output *audio, audio_output_callback_t callback, void *param,
+					     size_t mix_idx, uint64_t start_ns, uint64_t end_ns)
+{
+	if (end_ns > start_ns && end_ns - start_ns > audio->stall.cb_max_ns) {
+		audio->stall.cb_max_ns = end_ns - start_ns;
+		audio->stall.cb_max_callback = callback;
+		audio->stall.cb_max_param = param;
+		audio->stall.cb_max_mix = mix_idx;
+	}
+}
+/* camera-box issue 1381 END */
 
 /* ------------------------------------------------------------------------- */
 
@@ -109,7 +155,7 @@ static inline void do_audio_output(struct audio_output *audio, size_t mix_idx, u
 	struct audio_mix *mix = &audio->mixes[mix_idx];
 	struct audio_data data;
 
-	pthread_mutex_lock(&audio->input_mutex);
+	audio_stall_lock_input(audio);
 
 	for (size_t i = mix->inputs.num; i > 0; i--) {
 		struct audio_input *input = mix->inputs.array + (i - 1);
@@ -122,8 +168,16 @@ static inline void do_audio_output(struct audio_output *audio, size_t mix_idx, u
 		data.frames = frames;
 		data.timestamp = timestamp;
 
-		if (resample_audio_output(input, &data))
-			input->callback(input->param, mix_idx, &data);
+		if (resample_audio_output(input, &data)) {
+			/* camera-box issue 1381: time each output callback; its identity is read before
+			 * the call (a callback may disconnect itself under the recursive mutex) */
+			const audio_output_callback_t callback = input->callback;
+			void *const callback_param = input->param;
+			const uint64_t callback_start_ns = os_gettime_ns();
+			callback(callback_param, mix_idx, &data);
+			audio_stall_note_callback(audio, callback, callback_param, mix_idx, callback_start_ns,
+						  os_gettime_ns());
+		}
 	}
 
 	pthread_mutex_unlock(&audio->input_mutex);
@@ -172,7 +226,7 @@ static void input_and_output(struct audio_output *audio, uint64_t audio_time, ui
 #endif
 
 	/* get mixers */
-	pthread_mutex_lock(&audio->input_mutex);
+	audio_stall_lock_input(audio);
 	for (size_t i = 0; i < MAX_AUDIO_MIXES; i++) {
 		if (audio->mixes[i].inputs.num)
 			active_mixes |= (1 << i);
@@ -194,12 +248,17 @@ static void input_and_output(struct audio_output *audio, uint64_t audio_time, ui
 	if (!success)
 		return;
 
+	/* camera-box issue 1381: the whole output pass of this tick (clamp + every mix's outputs) */
+	const uint64_t out_pass_start_ns = os_gettime_ns();
+
 	/* clamps audio data to -1.0..1.0 */
 	clamp_audio_output(audio, bytes);
 
 	/* output */
 	for (size_t i = 0; i < MAX_AUDIO_MIXES; i++)
 		do_audio_output(audio, i, new_ts, AUDIO_OUTPUT_FRAMES);
+
+	audio_stall_note_max(&audio->stall.out_pass_max_ns, out_pass_start_ns, os_gettime_ns());
 }
 
 static void *audio_thread(void *param)
@@ -224,7 +283,9 @@ static void *audio_thread(void *param)
 		samples += AUDIO_OUTPUT_FRAMES;
 		uint64_t audio_time = start_time + audio_frames_to_ns(rate, samples);
 
-		os_sleepto_ns_fast(audio_time);
+		/* camera-box issue 1381: how late the thread woke for this tick */
+		const bool slept = os_sleepto_ns_fast(audio_time);
+		audio_stall_note_wake(audio, audio_time, slept, os_gettime_ns());
 
 		profile_start(audio_thread_name);
 
@@ -452,4 +513,18 @@ size_t audio_output_get_channels(const audio_t *audio)
 uint32_t audio_output_get_sample_rate(const audio_t *audio)
 {
 	return audio->info.samples_per_sec;
+}
+
+/* camera-box issue 1381: copy the stall window and start a new one -- the audio thread only (the
+ * 60 s dump in obs-audio.c), see audio-io.h */
+void audio_output_take_stall_stats(audio_t *audio, struct audio_output_stall_stats *stats)
+{
+	if (!stats)
+		return;
+	if (!audio) {
+		memset(stats, 0, sizeof(*stats));
+		return;
+	}
+	*stats = audio->stall;
+	memset(&audio->stall, 0, sizeof(audio->stall));
 }

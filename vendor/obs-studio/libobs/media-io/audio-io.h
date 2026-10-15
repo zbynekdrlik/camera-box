@@ -215,6 +215,29 @@ EXPORT bool audio_output_connect(audio_t *video, size_t mix_idx, const struct au
 				 audio_output_callback_t callback, void *param);
 EXPORT void audio_output_disconnect(audio_t *video, size_t mix_idx, audio_output_callback_t callback, void *param);
 
+/* camera-box issue 1381: what the audio thread spent its time on between two mixer ticks, as
+ * window maxima (ns) since the last take:
+ * - wake_late: how late the thread woke after its sleep to the tick, for any reason (a tick that
+ *   starts behind because the previous one ran long counts too);
+ * - sleep_over: the same, only on ticks where the thread really slept (the OS woke it late);
+ * - lock_wait: the longest wait for the input mutex;
+ * - out_pass: the longest output pass of one tick (clamp + every mix's output callbacks);
+ * - cb_max: the slowest single output callback, with its function, param and mix index.
+ * Libobs-internal: taken (copied and reset) by the 60 s audio dump in obs-audio.c, which runs ON
+ * the audio thread, the counters' only writer. Never call it from another thread. */
+struct audio_output_stall_stats {
+	uint64_t wake_late_max_ns;
+	uint64_t sleep_over_max_ns;
+	uint64_t lock_wait_max_ns;
+	uint64_t out_pass_max_ns;
+	uint64_t cb_max_ns;
+	audio_output_callback_t cb_max_callback;
+	void *cb_max_param;
+	size_t cb_max_mix;
+};
+
+void audio_output_take_stall_stats(audio_t *audio, struct audio_output_stall_stats *stats);
+
 EXPORT bool audio_output_active(const audio_t *audio);
 
 EXPORT size_t audio_output_get_block_size(const audio_t *audio);
