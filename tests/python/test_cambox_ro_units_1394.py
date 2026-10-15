@@ -905,6 +905,12 @@ def test_cli_apply_goes_ahead_on_a_stale_or_broken_lease(tmp_path):
     lease.mkdir(exist_ok=True)
     (lease / "holder.json").unlink(missing_ok=True)
     (lease / "heartbeat").write_text("")
+    # issue 1432: a holderless lockdir younger than the no-holder grace is an acquire in progress
+    # and refuses; past the grace it is a crashed acquire's leftover and is reclaimed.
+    r, _sshdir = _cli(tmp_path, "--apply", "--box", "cam1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    old = time.time() - 60
+    os.utime(lease, (old, old))
     r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1")
     assert r.returncode == 0, r.stdout + r.stderr
 
