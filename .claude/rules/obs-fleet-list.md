@@ -300,7 +300,9 @@ measurement rig; a PP measurement rig is an owner decision).
   off PP box's hostname lookups (ping's DNS is not bounded by `-W`) would only eat the unit's 90 s
   start budget. Only a non-traveling box can prove "dev1 reaches the rig" in the dev1-side-outage
   guard: a home PP box sits behind the companion-pp router, and counting it let an SNV uplink outage
-  page strih-snv (review round 1, reproduced). An explicit `NETWORK_REACH_REPORT_ONLY_BOXES` keeps the
+  page strih-snv (review round 1, reproduced). Keyed on home-check, it drops a home resolume-snv
+  from the anchor too: both reference cams + strih-snv dark with resolume home now reads "nothing to
+  decide" instead of paging strih-snv (rare, errs toward silence). An explicit `NETWORK_REACH_REPORT_ONLY_BOXES` keeps the
   #811 shape (those boxes are still probed and state-tracked, never paged).
 - **Known limits (stated, not fixed here).**
   - "Home" is the OBS-WS `:4455` answering (`obs_fleet_is_home`). A powered-on PP box whose OBS

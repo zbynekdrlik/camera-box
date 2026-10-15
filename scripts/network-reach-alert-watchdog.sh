@@ -308,7 +308,7 @@ main() {
   anchor_flags+=("${reach_flags[@]}")
   anchor="$(net_reach_any_reachable "${anchor_flags[@]}")"
   if [ "$anchor" != "1" ]; then
-    log "no reference rig node AND no watched box reachable -- dev1-side path to the rig subnet is down -- nothing to decide this pass"
+    log "no reference rig node AND no non-traveling watched box reachable -- dev1-side path to the rig subnet is down -- nothing to decide this pass (a home traveling box is not decided either)"
     log "pass end"
     return 0
   fi

@@ -64,7 +64,10 @@ network-reach`); PP powered off is their normal state. An AWAY box found by this
 probed at all (logged `away -- ... not probed this pass`, no verdict line, no state), and only a
 NON-traveling box counts toward the dev1-side-outage anchor: a home PP box sits behind the
 companion-pp router, so counting it let an SNV uplink outage page strih-snv (review round 1,
-reproduced). A traveling box named in an explicit `NETWORK_REACH_REPORT_ONLY_BOXES` is still
+reproduced). The exclusion is by home-check, so it also drops a home resolume-snv from the anchor
+(an SNV change, review round 2): with both reference cams AND strih-snv dark while resolume is home,
+the pass now reads "nothing to decide" instead of paging strih-snv -- rare, and it errs toward
+silence. A traveling box named in an explicit `NETWORK_REACH_REPORT_ONLY_BOXES` is still
 probed and state-tracked report-only (the #811 shape below); the development handover check skips
 its `report_only=1` line. Limit: home means OBS-WS `:4455` answers, which also means REACHABLE, so
 this watchdog can never page a traveling box (`.claude/rules/obs-fleet-list.md`, Poprad section).
