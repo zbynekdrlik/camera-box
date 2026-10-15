@@ -227,7 +227,8 @@ def grade_key(profile_dir, key):
         svc = json.loads(_read(path) or "")
     except (OSError, ValueError) as e:
         return ["service.json unreadable (%s: %s)" % (path, e)]
-    settings = svc.get("settings") if isinstance(svc, dict) else None
+    svc = svc if isinstance(svc, dict) else {}
+    settings = svc.get("settings")
     settings = settings if isinstance(settings, dict) else {}
     out = []
     if svc.get("type") != "rtmp_custom" or settings.get("server") != DEFAULT_RTMP_SERVER:

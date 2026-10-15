@@ -21,17 +21,24 @@ WHAT, one supervised --user unit (strih-stream-monitor.service, Restart=always):
   * runs `ffmpeg` on the restreamer's RTMP (default rtmp://127.0.0.1:1234/live/<short hostname>, the
     key setup-strih writes into the stream OBS profile): the audio only, s16le 48 kHz stereo on stdout.
     Nothing published = ffmpeg fails, the player stays silent and retries every RETRY_S;
-  * on the first audio it starts `aplay -N` on the card (the intercom hub's AplaySink pattern: a busy
-    PCM fails the open at once instead of hanging) and relays the audio through a pipe;
+  * on the first audio it mutes the card's `Speaker` switch by control name (PipeWire leaves the laptop
+    speaker route to itself, Auto-Mute disabled: the stream must sound in the headphones only), then
+    starts `aplay -N` on the card (the intercom hub's AplaySink pattern: a busy PCM fails the open at once
+    instead of hanging) and relays the audio through a pipe, in whole frames;
   * NEVER holds a paused subscriber (restreamer's per-subscriber channel is unbounded): the relay always
-    reads ffmpeg, and a chunk that would push the aplay pipe past the latency ceiling (FIONREAD, the
-    hub's pipe-fill measure, default 200 ms) is dropped and counted. That also bounds the latency when
-    the card's clock runs slower than the sender's; a faster card shows as an aplay underrun.
-  * the stream ends (ffmpeg EOF) or stalls (no audio for STALL_S) = both processes are stopped and it
-    reconnects after RETRY_S.
+    reads ffmpeg, writes the aplay pipe NON-blocking, and drops (and counts) a chunk that would push the
+    pipe past the latency ceiling (FIONREAD, the hub's pipe-fill measure, default 200 ms) or that the
+    full pipe refuses. That also bounds the latency when the card's clock runs slower than the sender's;
+    a faster card shows as an aplay underrun.
+  * the stream ends (ffmpeg EOF) or stalls (no audio for STALL_S) = ffmpeg is stopped first (the
+    subscriber goes at once), aplay plays out its buffer, and it reconnects after RETRY_S. An aplay that
+    fails (not busy) is the fault state `aplay-failing`, retried with a doubling pause (up to 20 x);
+    a stream with no audio track is `no-audio`. Children run in the C locale (the busy / underrun text
+    the player reads is English).
 
 Logs: one line per connect (`playing <url> -> <device>`) and per disconnect (`stream ended after ...`),
-and one line when the idle state changes (`waiting` / `busy` / `no-card`); a quiet retry logs nothing.
+and one line when the idle state changes (`waiting` / `busy` / `no-card` / `no-audio` / `aplay-failing`); a
+quiet retry logs nothing.
 State file (atomic, %t/strih-stream-monitor.json): verify-strih's `--check-state` reads it and the card
 owner: a PipeWire stream on the headphone card FAILs. Std-only.
 """
@@ -52,8 +59,12 @@ import time
 
 DEFAULT_SERVER = "rtmp://127.0.0.1:1234/live"
 # A playback PCM name ending in " Analog": the notebook codec's analog output (stream-pp: `ALC257
-# Analog`, read live 15.10.2026). HDMI PCMs are named `HDMI <n>`, a USB interface `USB Audio`.
-DEFAULT_PCM_MATCH = r" Analog$"
+# Analog`, read live 15.10.2026). HDMI PCMs are named `HDMI <n>`, a USB interface `USB Audio`; a Realtek
+# codec's second analog PCM (`ALC257 Alt Analog`) is never the jack.
+DEFAULT_PCM_MATCH = r"(?<!\bAlt) Analog$"
+# The mixer switch muted before the stream sounds (PipeWire's ACP keeps Auto-Mute disabled and routes the
+# speaker itself; stream-pp 15.10.2026: Auto-Mute Mode Disabled, Speaker off, Headphone on).
+DEFAULT_SPEAKER_CONTROL = "Speaker"
 RATE = 48000
 CHANNELS = 2
 FRAME_BYTES = 4  # s16le stereo
@@ -61,12 +72,15 @@ CHUNK_BYTES = 3840  # 20 ms
 DEFAULT_CEILING_MS = 200
 APLAY_BUFFER_US = 100000
 RETRY_S = 3.0
+BACKOFF_MAX = 20  # an aplay that keeps failing is retried after up to 20 x RETRY_S
 CONNECT_TIMEOUT_S = 15.0
 STALL_S = 5.0
 HEARTBEAT_S = 5.0
 DRAIN_S = 3.0
 STATE_MAX_AGE_S = 30.0
 STATE_VERSION = 1
+# The states verify FAILs (anything else it does not know FAILs too).
+FAULT_STATES = ("no-card", "busy", "aplay-failing", "no-audio")
 # The process that may hold the headphone PCM: our own aplay. Anything else (pipewire, wireplumber, a
 # second player) is a fault verify names.
 OWNER_OK = ("aplay",)
@@ -222,7 +236,10 @@ def _stop(proc, grace=2.0):
     except subprocess.TimeoutExpired:
         print("pid %d ignored SIGTERM for %g s -- killing it" % (proc.pid, grace), file=sys.stderr, flush=True)
         proc.kill()
-        proc.wait(grace)
+        try:
+            proc.wait(grace)
+        except subprocess.TimeoutExpired:
+            print("pid %d did not exit %g s after SIGKILL (D state?)" % (proc.pid, grace), file=sys.stderr, flush=True)
     except OSError as e:
         print("cannot stop pid %d: %s" % (proc.pid, e), file=sys.stderr, flush=True)
 
@@ -230,12 +247,19 @@ def _stop(proc, grace=2.0):
 class Monitor:
     def __init__(self, url, state_file, pcm_match=DEFAULT_PCM_MATCH, ffmpeg="ffmpeg", aplay="aplay",
                  asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, retry_s=RETRY_S, connect_timeout_s=CONNECT_TIMEOUT_S,
-                 stall_s=STALL_S, ceiling=ceiling_bytes(DEFAULT_CEILING_MS), log=None):
+                 stall_s=STALL_S, ceiling=ceiling_bytes(DEFAULT_CEILING_MS), log=None, amixer="amixer",
+                 speaker_control=DEFAULT_SPEAKER_CONTROL):
         self.url = url
         self.state_file = state_file
         self.pcm_match = pcm_match
         self.ffmpeg = ffmpeg
         self.aplay = aplay
+        self.amixer = amixer
+        self.speaker_control = speaker_control
+        # the C locale for every child: the busy / underrun / no-stream text read below is English
+        self.child_env = dict(os.environ, LC_ALL="C")
+        self.fail_streak = 0
+        self._speaker_logged = None
         self.asound_root = asound_root
         self.proc_root = proc_root
         self.retry_s = retry_s
@@ -296,7 +320,7 @@ class Monitor:
                           % (device, owner["comm"] or "?", owner["pid"], self.retry_s), owner=owner["comm"])
             return
         ff = subprocess.Popen(ffmpeg_argv(self.ffmpeg, self.url), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE)
+                              stderr=subprocess.PIPE, env=self.child_env)
         ff_err = StderrTail(ff.stderr)
         ap = None
         try:
@@ -304,18 +328,43 @@ class Monitor:
             if not first:
                 _stop(ff)
                 ff_err.join()
-                if not self.stopping:
+                if self.stopping:
+                    return
+                if "matches no streams" in ff_err.last:
+                    self.set_idle("no-audio", "the stream on %s carries no audio track (ffmpeg: %s)"
+                                  % (self.url, ff_err.last), owner=None)
+                else:
                     self.set_idle("waiting", "nothing published on %s (ffmpeg: %s) -- silent, retrying every %g s"
                                   % (self.url, ff_err.last or "no audio within %g s" % self.connect_timeout_s,
                                      self.retry_s), owner=None)
                 return
+            self._mute_speaker(pcm["card_id"])
             ap = subprocess.Popen(aplay_argv(self.aplay, device), stdin=subprocess.PIPE,
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=self.child_env)
             ap_err = StderrTail(ap.stderr, count="underrun")
             self._play(ff, ap, ap_err, ff_err, device, first)
         finally:
             _stop(ff)
             _stop(ap)
+
+    def _mute_speaker(self, card_id):
+        """Mute the card's speaker switch by control name before the stream sounds; logged once per outcome."""
+        if not self.speaker_control:
+            return
+        argv = [self.amixer, "-q", "-c", card_id, "sset", self.speaker_control, "mute"]
+        try:
+            r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5,
+                               env=self.child_env)
+            line = (r.stderr or r.stdout).strip().splitlines()
+            out = ("muted the %s switch of %s (the stream plays in the headphones only)" % (self.speaker_control, card_id)
+                   if r.returncode == 0 else
+                   "could not mute the %s switch of %s (amixer rc %d: %s) -- playing anyway"
+                   % (self.speaker_control, card_id, r.returncode, line[-1] if line else "no message"))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out = "could not mute the %s switch of %s (%s) -- playing anyway" % (self.speaker_control, card_id, e)
+        if out != self._speaker_logged:
+            self._speaker_logged = out
+            self.log(out)
 
     def _read(self, ff, timeout):
         """Up to CHUNK_BYTES from ffmpeg within TIMEOUT (in 1 s slices, so a stop is seen); b"" on EOF or
@@ -332,19 +381,32 @@ class Monitor:
             self.heartbeat()
         return b""
 
+    def _drop(self, n):
+        self.st["dropped_bytes"] += n
+        return n
+
     def _relay(self, ff, ap, ap_err, ff_err, data):
-        """Relay ffmpeg -> aplay until the stream ends; returns (why it ended, dropped bytes)."""
+        """Relay ffmpeg -> aplay until the stream ends; returns (why it ended, dropped bytes). The aplay pipe
+        is written NON-blocking in whole frames: a chunk past the ceiling, or one the full pipe refuses,
+        is dropped -- the ffmpeg side (the RTMP subscriber) is never held."""
         out = ap.stdin.fileno()
+        os.set_blocking(out, False)
         dropped = 0
+        carry = b""
         while True:
             if ap.poll() is not None:
                 ap_err.join()
                 return "aplay exited %s: %s" % (ap.returncode, ap_err.last or "no message"), dropped
-            if relay_action(fionread(out), len(data), self.ceiling) == "write":
+            data = carry + data
+            cut = len(data) - len(data) % FRAME_BYTES
+            data, carry = data[:cut], data[cut:]
+            if data and relay_action(fionread(out), len(data), self.ceiling) == "write":
                 try:
-                    view = memoryview(data)
-                    while view:
-                        view = view[os.write(out, view):]
+                    n = os.write(out, data)  # <= PIPE_BUF: atomic, all or EAGAIN
+                    if n < len(data):
+                        dropped += self._drop(len(data) - n)
+                except BlockingIOError:
+                    dropped += self._drop(len(data))
                 except BrokenPipeError:
                     try:
                         ap.wait(DRAIN_S)
@@ -352,9 +414,8 @@ class Monitor:
                         self.log("aplay closed its input but did not exit within %g s" % DRAIN_S)
                     ap_err.join()
                     return "aplay exited %s: %s" % (ap.returncode, ap_err.last or "broken pipe"), dropped
-            else:
-                dropped += len(data)
-                self.st["dropped_bytes"] += len(data)
+            elif data:
+                dropped += self._drop(len(data))
             if self.stopping:
                 return "stopping", dropped
             data = self._read(ff, self.stall_s)
@@ -369,12 +430,13 @@ class Monitor:
     def _play(self, ff, ap, ap_err, ff_err, device, data):
         self.st["connects"] += 1
         self.st.update(state="playing", reason="", owner="aplay", since_epoch_s=time.time())
-        self._logged = None
         start = time.monotonic()
         self.log("playing %s -> %s (connect %d)" % (self.url, device, self.st["connects"]))
         self._write_state()
         end, dropped = self._relay(ff, ap, ap_err, ff_err, data)
+        _stop(ff)  # the subscriber goes at once, never held through the aplay drain
         try:
+            os.set_blocking(ap.stdin.fileno(), True)
             ap.stdin.close()  # EOF: aplay plays out its buffer and exits
         except OSError as e:
             self.log("closing the aplay input failed: %s" % e)
@@ -383,12 +445,21 @@ class Monitor:
         except subprocess.TimeoutExpired:
             self.log("aplay did not finish within %g s of its EOF -- stopping it" % DRAIN_S)
         ap_err.join()
+        if ap.returncode not in (0, None) and end != "stopping" and not end.startswith("aplay exited"):
+            # a short stream can end before the relay saw aplay fail its open: its exit code says so
+            end = "aplay exited %s: %s" % (ap.returncode, ap_err.last or "no message")
         self.log("stream ended after %.1f s: %s; %d ms dropped over the %d ms ceiling; %d aplay underrun(s)"
                  % (time.monotonic() - start, end, dropped * 1000 // (RATE * FRAME_BYTES),
                     self.ceiling * 1000 // (RATE * FRAME_BYTES), ap_err.counted))
-        if "busy" in end.lower():
+        if end.startswith("aplay exited") and "busy" in end.lower():
             self.set_idle("busy", "the headphone PCM %s: %s" % (device, end), owner=None)
+        elif end.startswith("aplay exited"):
+            self.fail_streak += 1
+            self.set_idle("aplay-failing", "aplay on the headphone PCM %s: %s -- retrying with a doubling pause"
+                          % (device, end.split(": ", 1)[-1]), owner=None)
         else:
+            self.fail_streak = 0
+            self._logged = None  # after a real stream the next idle state is news again
             self.st.update(state="ended", reason=end)
             self._write_state()
 
@@ -399,7 +470,8 @@ class Monitor:
             self.cycle()
             if self.stopping or (cycles is not None and n >= cycles):
                 break
-            deadline = time.monotonic() + self.retry_s
+            wait = self.retry_s * (min(2 ** self.fail_streak, BACKOFF_MAX) if self.fail_streak else 1)
+            deadline = time.monotonic() + wait
             while not self.stopping and time.monotonic() < deadline:
                 time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
                 self.heartbeat()
@@ -420,10 +492,8 @@ def check_state(path, now, asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, max_age
         return False, "last pass %.0f s ago (> %.0f s) -- the monitor is not running" % (age, max_age)
     state = st.get("state")
     device = st.get("device") or "?"
-    if state == "no-card":
-        return False, "no-card: %s" % st.get("reason", "")
-    if state == "busy":
-        return False, "busy: %s" % st.get("reason", "")
+    if state in FAULT_STATES:
+        return False, "%s: %s" % (state, st.get("reason", ""))
     card, dev = st.get("card"), st.get("pcm_device")
     if not isinstance(card, int) or not isinstance(dev, int):
         return False, "state %s names no headphone PCM -- the monitor resolved no card" % state
@@ -453,6 +523,9 @@ def main(argv=None):
     ap.add_argument("--pcm-match", default=DEFAULT_PCM_MATCH, help="regex on the playback PCM name")
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--aplay", default="aplay")
+    ap.add_argument("--amixer", default="amixer")
+    ap.add_argument("--speaker-control", default=DEFAULT_SPEAKER_CONTROL,
+                    help="the mixer switch muted before the stream sounds ('' = leave the mixer alone)")
     ap.add_argument("--asound-root", default=ASOUND_ROOT)
     ap.add_argument("--proc-root", default=PROC_ROOT)
     ap.add_argument("--retry-s", type=float, default=RETRY_S)
@@ -470,7 +543,8 @@ def main(argv=None):
     if a.ceiling_ms < 20 or ceiling_bytes(a.ceiling_ms) + CHUNK_BYTES > 65536:
         ap.error("--ceiling-ms must keep the pipe ceiling + one chunk within one 64 KiB pipe buffer")
     mon = Monitor(a.url or default_url(), a.state_file, a.pcm_match, a.ffmpeg, a.aplay, a.asound_root, a.proc_root,
-                  a.retry_s, a.connect_timeout_s, a.stall_s, ceiling_bytes(a.ceiling_ms))
+                  a.retry_s, a.connect_timeout_s, a.stall_s, ceiling_bytes(a.ceiling_ms), amixer=a.amixer,
+                  speaker_control=a.speaker_control)
 
     def _stop_signal(_sig, _frm):
         mon.stopping = True
