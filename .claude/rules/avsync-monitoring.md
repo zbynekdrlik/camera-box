@@ -16,6 +16,8 @@ paths:
   - "scripts/lib/avsync-measure.sh"
   - "scripts/avsync-dev2-install.sh"
   - "systemd/avsync-measure-dev2*"
+  - "scripts/lib/avsync-venues.sh"
+  - "scripts/avsync_report.py"
 ---
 
 # Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (#812/#807)
@@ -420,13 +422,13 @@ only safe amount of ML load on the encoding box during live is ZERO.
 
 **The topology now (contract unchanged, only the HOST + heartbeat SOURCE moved):**
 `stream OBS → restreamer xiu RTMP (0.0.0.0:1234, LAN-pullable) → dev2 ffmpeg 35 s clip → SyncNet
-(CUDA) → ~/.camera-box/avsync-watchdog-heartbeat.txt (dev2) → dev1 watchdogs (ssh cat) →
+(CUDA) → ~/.camera-box/avsync-watchdog-heartbeat-<venue>.txt (dev2, per venue since issue 1441) → dev1 watchdogs (ssh cat) →
 avsync_lineup.py → Discord`. The heartbeat LINE contract (`<epoch>\t<status>` with the exact
 `measured: db=… …` / `no-signal: …` shapes) and the whole dev1 alerting/forward logic are
 BYTE-identical to the stream-box path — only the host + transport changed.
 
 - **The measurer:** `scripts/avsync-measure-dev2.sh` — ONE pass per invocation (a `systemd --user`
-  timer, `systemd/avsync-measure-dev2.{service,timer}`, `OnUnitInactiveSec=90s`, drives cadence, no
+  timer, the template `systemd/avsync-measure-dev2@.{service,timer}` since issue 1441 (one per venue), `OnUnitInactiveSec=90s`, drives cadence, no
   loop). Pure parts (status-line composition, freshness-reason, clip path, the ffmpeg encode argv
   as SINGLE SOURCE OF TRUTH vs `avsync-watchdog.ps1:99`) live in `scripts/lib/avsync-measure.sh`
   (`run_sourced` pytest `tests/python/test_avsync_measure_dev2.py`). It runs `av_sync_measure.py`
@@ -501,7 +503,7 @@ supplemented) by the verified-SESSION report below; the separate `offset` ALARM 
 
 **The per-day durable log on dev2.** The heartbeat file holds only the LAST pass (overwritten every
 ~90 s), so `scripts/avsync-measure-dev2.sh` now ALSO appends every pass's `<epoch>\t<status>` record
-as one row to `~/avsync/measurements-<YYYY-MM-DD>.tsv` (the day is the LOCAL date of the pass epoch;
+as one row to `~/avsync/measurements-<venue>-<YYYY-MM-DD>.tsv` (per venue since issue 1441; the day is the LOCAL date of the pass epoch;
 a single-`printf` atomic append; NEVER fatal — a failed append costs the report one sample, the
 heartbeat contract is unchanged). The path + row builders (`avsync_measure_log_path` /
 `avsync_measure_log_line`, the row byte-identical to the heartbeat record) live in the PURE
@@ -582,3 +584,87 @@ touching python) — added as a DEFAULT in the shared `run_bash_body_with_env`, 
 two tests that build their OWN `Command` (`empty_probe_output_...`, `dev2_host_reads_...`). General
 rule: when a watchdog gains a NEW pass that shells out, add an env seam that no-ops it and set that
 seam in every pre-existing behavioral test that isn't testing the new pass.
+
+# One measurement + one pair of alarms PER VENUE (issue 1441)
+
+Owner rulings 15.10.2026 (issue 1441): one unified PP/SNV solution ("pozadujem aby sa budovalo jednotne
+riesenie pp/snv ... aj lipsync ai detektor za stream obs"), Linux is the standard ("linux je main
+standard"). The SyncNet measurement, its heartbeat alarm and its line-up/offset alarm now cover every
+venue's stream, SNV and PP today, from ONE table.
+
+## The venue table -- `scripts/lib/avsync-venues.sh`
+
+- One row per venue, `venue|box|host|key`. Accessors: `avsync_venue_rtmp_url`, `avsync_venue_ws_host`,
+  `avsync_venue_box`, `avsync_venue_label` (`SNV`/`PP`), `avsync_venue_heartbeat_file`,
+  `avsync_selected_venues` (`AVSYNC_VENUES` narrows), `avsync_watchdog_venues HOST`.
+- **Derived, never typed.** A Linux stream box = a fact file `scripts/strih-boxes/<box>.env` with
+  `STRIH_ROLE=stream` (venue = `STRIH_VENUE`, stream key = the box name, the issue-1436 convention). It
+  is parsed with the loader's own `strih_box_parse_file`, never sourced. The hand-built Windows
+  stream-snv is the ONE declared row (`snv|stream-snv|obs-e2e-test`) until it moves to the Linux stream
+  role; its fact file then wins and the stale declared row is named on stderr.
+- **The host is the obs-fleet row host, NOT `STRIH_IP`.** `stream-pp.env` `STRIH_IP=10.77.8.204` is
+  the on-box address: :1234 / :4455 answer on it from neither dev1 nor dev2 (measured 15.10.2026),
+  while `stream-pp.lan` (10.76.8.204 through companion-pp) answers from both. The fleet row is the
+  repo's single "how a dev box dials a box" source (`.claude/rules/obs-fleet-list.md`).
+- RTMP endpoint convention `rtmp://<host>:1234/live/<key>` (`AVSYNC_RTMP_PORT` / `AVSYNC_RTMP_APP`):
+  SNV = `rtmp://10.77.9.204:1234/live/obs-e2e-test` (byte-identical to the old fixed URL), PP =
+  `rtmp://stream-pp.lan:1234/live/stream-pp`.
+- `AVSYNC_VENUE_TABLE` overrides the whole table (test / ops seam, like `OBS_FLEET`). Every row is
+  validated with spelled-out ASCII sets; a malformed row is dropped with a named stderr line. A new
+  venue = a stream-role fact file + an obs-fleet row, no edit here.
+
+## dev2: one template instance per venue
+
+- `avsync-measure-dev2.sh --venue <venue>` (default `snv`, the old single unit's venue) via the
+  template `systemd/avsync-measure-dev2@.{service,timer}` (`@snv`, `@pp`; 90 s `OnUnitInactiveSec`,
+  `TimeoutStartSec=600` = grab + a wait for the other venue + its own run).
+- Per-venue files: heartbeat `~/.camera-box/avsync-watchdog-heartbeat-<venue>.txt`, clip
+  `live-clip-<venue>.mp4` (a shared clip name would let one instance grab over the other's), day log
+  `~/avsync/measurements-<venue>-<day>.tsv` (two venues' broadcasts must never merge into one report
+  session).
+- **One SyncNet run at a time on dev2:** `run_measure` takes the shared flock
+  (`avsync_measure_lock_path`, in the clip dir), waiting up to the 180 s cap for the other venue's run;
+  past that the heartbeat carries `ERROR: SyncNet lock busy ...` (never two models on the GPU at once).
+  The lock fd is inherited by the python run, so a run outliving the function still holds it. A
+  missing `flock` is an ERROR status, never a silent unlocked run (`--check` probes it).
+- **SNV compatibility symlink:** the legacy venue writing its default heartbeat keeps
+  `~/.camera-box/avsync-watchdog-heartbeat.txt` as an atomic relative symlink to its per-venue file
+  (replacing a regular file the old unit left), so a dev1 watchdog that predates issue 1441 keeps
+  reading SNV during the rollout. An explicit `--heartbeat` path never gets one. Remove it (and
+  `AVSYNC_LEGACY_HEARTBEAT_VENUE`'s link role) once dev1 runs the venue-aware watchdogs everywhere.
+- `scripts/avsync-dev2-install.sh --install` ships the measurer + `LIB_FILES` (avsync-measure,
+  avsync-venues, obs-fleet, strih-box-facts) + `scripts/strih-boxes/*.env`, retires the single
+  `avsync-measure-dev2.timer` (disable + unit files removed) and enables one timer per venue
+  (`dev2_enable_remote_cmd`). Adding a venue = re-run `--install`.
+
+## dev1: both watchdogs loop the venues
+
+- `avsync-heartbeat-alert-watchdog.sh` and `avsync-lineup-alert-watchdog.sh` run their pass once per
+  `avsync_watchdog_venues` venue (the retired Windows `stream` host = the legacy venue only).
+- **AWAY:** a venue whose stream box fails `obs_fleet_poll_now` (a traveling box that is not home) is
+  logged `<venue>: AWAY ... never a page` and nothing is read for it (the issue-1001 doctrine); its
+  state stays for when the box returns. stream-snv is `always`, stream-pp `traveling`.
+- **Keys:** state `<venue>_<leg>_*`, `<venue>_lineup_*`, `<venue>_offset_*`; report state
+  `<AVSYNC_REPORT_STATE_FILE base>-<venue>.json`; dedup `avsync-<venue>-heartbeat-<leg>` (bucketed),
+  `avsync-<venue>-lineup-liveness`, `avsync-<venue>-offset-stream` (bucketed),
+  `avsync-<venue>-lineup-preflight-nogo`. The SNV keys changed once on the rollout (one fresh card).
+- **Every page and report post names the venue** (`[PP]`, `[SNV] 📐 A/V overené ...`).
+- `--assert` sends ONE Discord test-ping and grades every home venue (`[SNV] GO ...` /
+  `[PP] NO-GO ...`); exit 1 on any NO-GO or when no venue's box is home.
+- The report fetch seam `AVSYNC_REPORT_FETCH_CMD` receives the venue as `$1`.
+
+## Rollout order (supervisor) -- dev2 FIRST
+
+The dev1 watchdogs read the per-venue files, which only the template instances write. Install dev2
+(`--install`), see one heartbeat per venue appear (~2 min), THEN let dev1 pick up the new watchdogs.
+In the other order the heartbeat watchdog reads no `-snv`/`-pp` file and pages both venues stale
+(production-critical, re-pinged). A live read-only `--dry-run` with scratch state files
+(`AVSYNC_*_STATE_FILE`) before dev2 is installed shows exactly that (15.10.2026).
+
+## Tests
+
+`tests/python/test_avsync_venues_1441.py` (the table), `test_avsync_measure_venue_1441.py` (the
+measurer per venue, the symlink, the flock, the template, the installer),
+`test_avsync_watchdogs_venues_1441.py` (both watchdogs, a fake dev2 `ssh` answering per venue from the
+remote command, `OBS_FLEET_HOME` pinning which traveling box is home). The Rust behavioral harnesses
+pin `AVSYNC_HEARTBEAT_HOST=stream` (legacy venue only) or the PP box away, so they stay off the network.
