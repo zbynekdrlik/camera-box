@@ -182,7 +182,14 @@ pub fn smp_affinity_mask_hex(cores: &[usize]) -> String {
             mask |= 1u64 << c;
         }
     }
-    format!("{mask:x}")
+    // issue 1367: the kernel takes at most 8 hex digits per comma group (EOVERFLOW otherwise), so a
+    // core >= 32 goes in its own group: [40] => "100,00000000".
+    let high = mask >> 32;
+    if high == 0 {
+        format!("{mask:x}")
+    } else {
+        format!("{high:x},{:08x}", mask & 0xffff_ffff)
+    }
 }
 
 /// Normalise a `/proc/irq/<n>/smp_affinity` mask string for comparison: drop the
@@ -570,6 +577,8 @@ pub fn setup_irq_affinity() {
         "#289/899 IRQ affinity: kernel preempt_rt={is_rt}; routing capture IRQs {irqs:?} to cores {target:?} (capture core={core}, smp_affinity={mask})"
     );
     let total = irqs.len();
+    // issue 1367: the capture IRQ list, kept for the offload of every OTHER device IRQ below.
+    let capture_irqs = irqs.clone();
     let mut applied = 0usize;
     let mut unchanged = 0usize;
     let mut failed = 0usize;
@@ -614,6 +623,85 @@ pub fn setup_irq_affinity() {
             "#1198 core split NOT fully applied: {failed}/{total} capture IRQ(s) rejected the smp_affinity write (managed MSI → still on the cmdline irqaffinity default, SHARED with the painter — the 1198 failure mode); {applied} written, {unchanged} already correct. Needs the cmdline irqaffinity path (#303)."
         );
     }
+    offload_other_irqs(
+        &interrupts,
+        &capture_irqs,
+        core,
+        reserved,
+        &isolated,
+        &online,
+    );
+}
+
+/// issue 1367: move every non-capture device IRQ that may run on the reserved capture-IRQ core
+/// (the NIC IRQ sat there on cam3/cam5 and its softirq delayed the capture URBs) onto the
+/// housekeeping cores, and set `/proc/irq/default_smp_affinity` to them so an IRQ allocated later (a
+/// NIC re-open, a hot-plugged device) does not land there either. The decision is the pure
+/// [`crate::irq_offload::plan_offload`]. Best-effort like the rest of `setup_irq_affinity`: a
+/// rejected write is logged and skipped, never fatal.
+fn offload_other_irqs(
+    interrupts: &str,
+    capture_irqs: &[u32],
+    core: usize,
+    reserved: Option<usize>,
+    isolated: &[usize],
+    online: &[usize],
+) {
+    let Some(reserved) = reserved else {
+        return;
+    };
+    let Some(cores) =
+        crate::irq_offload::select_offload_cores(core, Some(reserved), isolated, online)
+    else {
+        return;
+    };
+    let mask = smp_affinity_mask_hex(&cores);
+    let default_path = "/proc/irq/default_smp_affinity";
+    let default_prev = std::fs::read_to_string(default_path).unwrap_or_default();
+    match crate::irq_offload::mask_hex_to_cores(&default_prev) {
+        Some(current) if !crate::irq_offload::needs_offload(&current, reserved) => {}
+        _ => match std::fs::write(default_path, format!("{mask}\n")) {
+            Ok(()) => tracing::info!(
+                "issue 1367 default_smp_affinity {} -> {mask} (IRQs allocated from now on stay off core {reserved})",
+                default_prev.trim()
+            ),
+            Err(e) => tracing::warn!(
+                "issue 1367 could not set default_smp_affinity to {mask} ({e}) -- an IRQ allocated later may land on the reserved core {reserved}"
+            ),
+        },
+    }
+    let plan = crate::irq_offload::plan_offload(interrupts, capture_irqs, reserved, |irq| {
+        std::fs::read_to_string(format!("/proc/irq/{irq}/smp_affinity")).ok()
+    });
+    let (mut moved, mut refused, mut failed) = (0usize, 0usize, 0usize);
+    for (irq, prev) in &plan.moves {
+        match std::fs::write(format!("/proc/irq/{irq}/smp_affinity"), format!("{mask}\n")) {
+            Ok(()) => {
+                moved += 1;
+                tracing::info!(
+                    "issue 1367 IRQ {irq}: smp_affinity {prev} -> {mask} (off the reserved capture-IRQ core {reserved})"
+                );
+            }
+            // EIO: the kernel never lets this IRQ move (the timer, a managed or per-cpu IRQ). It is
+            // refused at every start, so it is not a warning.
+            Err(e) if e.raw_os_error() == Some(5) => {
+                refused += 1;
+                tracing::info!(
+                    "issue 1367 IRQ {irq}: the kernel keeps its affinity ({e}) -- a fixed or managed IRQ"
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    "issue 1367 IRQ {irq}: could not move it off the reserved capture-IRQ core {reserved} ({e})"
+                );
+            }
+        }
+    }
+    tracing::info!(
+        "issue 1367 other device IRQs: {moved} moved onto cores {cores:?}, {} already off core {reserved}, {refused} fixed by the kernel, {failed} failed",
+        plan.kept
+    );
 }
 
 #[cfg(test)]
@@ -806,6 +894,12 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     fn smp_mask_ignores_out_of_range_cores() {
         // Cores >= 64 don't fit a u64 mask and are skipped (no shift overflow).
         assert_eq!(smp_affinity_mask_hex(&[0, 64, 65]), "1");
+    }
+
+    #[test]
+    fn smp_affinity_mask_hex_puts_a_core_above_31_in_its_own_group() {
+        assert_eq!(smp_affinity_mask_hex(&[40]), "100,00000000");
+        assert_eq!(smp_affinity_mask_hex(&[0, 33]), "2,00000001");
     }
 
     #[test]

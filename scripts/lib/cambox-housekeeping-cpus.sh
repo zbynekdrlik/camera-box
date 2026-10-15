@@ -34,12 +34,16 @@
 # Consumers:
 #   - setup-device.sh `[housekeeping-cpus]` (rw window, takes effect at the next
 #     boot; the apply program sets a live box) -- cambox_hk_install_dropin "";
+#   - setup-device.sh STEP 7: cambox_hk_irq_dropin_install "" (the camera-box irq-affinity drop-in
+#     that runs `camera-box --setup-irq-affinity` privileged before every start);
 #   - verify-device.sh (au): cambox_hk_gather_remote_snippet (read-only, over ssh) +
-#     cambox_hk_verdict (pure);
+#     cambox_hk_verdict (pure) -- the manager drop-in, PID 1's mask, the loaded IRQ split, a 2 s
+#     interrupt sample and /proc/irq/default_smp_affinity;
 #   - a live box: cambox_hk_apply_program, piped into `ssh root@<box> bash -s` while no E2E holds the
 #     rig lease. It writes inside ONE rw window closed by the ONE verified close
 #     (scripts/lib/ro-window.sh, issue 1407), then sets PID 1's mask with taskset (no reboot) and
-#     reads it back.
+#     reads it back. It also writes the irq-affinity drop-in inside that window and runs
+#     daemon-reload after the close (the split runs at the next camera-box start).
 # Tests: tests/python/test_cambox_housekeeping_cpus_1367.py.
 
 if ! command -v ro_window_close_cmds >/dev/null 2>&1; then
@@ -49,6 +53,10 @@ fi
 
 # The drop-in on the box. Overridable so a test can point the gather and the program at a temp tree.
 CAMBOX_HK_DROPIN="${CAMBOX_HK_DROPIN:-/etc/systemd/system.conf.d/60-camera-box-housekeeping-cpus.conf}"
+# The camera-box drop-in that runs the IRQ split (`camera-box --setup-irq-affinity`: the capture IRQ
+# onto the reserved core, every other device IRQ off it). setup-device's base unit never carried it
+# (only the build-image unit did), so the split never ran on the fleet (live 15.10.2026).
+CAMBOX_HK_IRQ_DROPIN="${CAMBOX_HK_IRQ_DROPIN:-/etc/systemd/system/camera-box.service.d/irq-affinity.conf}"
 
 # cambox_hk_cpulist_expand LIST -> the cpus of a kernel cpulist ("0-2,5") one per line, sorted,
 # unique. Anything that is not a cpulist prints nothing and returns 1.
@@ -71,13 +79,13 @@ cambox_hk_cpulist_expand() {
   printf '%s\n' "${_hk_out[@]}" | sort -n -u
 }
 
-# cambox_hk_cpus ONLINE ISOLATED [RT] -> the housekeeping cpus as a comma list ("0,1"), rc 0. rc 1
-# with a reason on stderr when there is no reserved IRQ core (RT=1: a PREEMPT_RT kernel, no isolated
-# core, fewer than 2 general cores, or an unreadable list): then nothing is provisioned, like
-# affinity.rs.
-cambox_hk_cpus() {
-  local online iso c
-  local -a _hk_general=() _hk_cores=()
+# cambox_hk_reserved_core ONLINE ISOLATED [RT] -> the reserved capture-IRQ core, rc 0; rc 1 with a
+# reason on stderr when there is none. The affinity.rs rule: the capture core is the highest isolated
+# core (select_capture_core), the reserved core the highest online core besides it, only with at
+# least 2 such cores (select_irq_reserved_core); none on a PREEMPT_RT kernel.
+cambox_hk_reserved_core() {
+  local online iso c capture
+  local -a _hk_other=()
   if [ "${3:-0}" = 1 ]; then
     echo "a PREEMPT_RT kernel: the capture IRQ shares the capture core, no reserved capture-IRQ core" >&2
     return 1
@@ -90,21 +98,61 @@ cambox_hk_cpus() {
     echo "unreadable isolated cpu list ('${2:-}')" >&2
     return 1
   fi
-  if [ -z "$iso" ]; then
+  capture=""
+  for c in $iso; do grep -qx "$c" <<<"$online" && capture="$c"; done
+  if [ -z "$capture" ]; then
     echo "no isolated capture core, so no reserved capture-IRQ core" >&2
     return 1
   fi
-  for c in $online; do
-    grep -qx "$c" <<<"$iso" || _hk_general+=("$c")
-  done
-  if [ "${#_hk_general[@]}" -lt 2 ]; then
-    echo "fewer than 2 general cores (${_hk_general[*]:-none}), so no reserved capture-IRQ core" >&2
+  for c in $online; do [ "$c" = "$capture" ] || _hk_other+=("$c"); done
+  if [ "${#_hk_other[@]}" -lt 2 ]; then
+    echo "fewer than 2 general cores (${_hk_other[*]:-none}), so no reserved capture-IRQ core" >&2
     return 1
   fi
-  # general is sorted ascending: the last one is the reserved IRQ core, the rest housekeeping.
-  _hk_cores=("${_hk_general[@]:0:${#_hk_general[@]}-1}")
+  printf '%s\n' "${_hk_other[${#_hk_other[@]}-1]}"
+}
+
+# cambox_hk_cpus ONLINE ISOLATED [RT] -> the housekeeping cpus as a comma list ("0,1"), rc 0: online -
+# every isolated core - the reserved capture-IRQ core (the offload set of irq_offload.rs
+# select_offload_cores). rc 1 with a reason on stderr when there is no reserved IRQ core or nothing is
+# left: then nothing is provisioned, like affinity.rs.
+cambox_hk_cpus() {
+  local online iso reserved c
+  local -a _hk_cores=()
+  reserved="$(cambox_hk_reserved_core "${1:-}" "${2:-}" "${3:-0}")" || return 1
+  online="$(cambox_hk_cpulist_expand "${1:-}")"
+  iso="$(cambox_hk_cpulist_expand "${2:-}")"
+  for c in $online; do
+    [ "$c" = "$reserved" ] && continue
+    grep -qx "$c" <<<"$iso" && continue
+    _hk_cores+=("$c")
+  done
+  if [ "${#_hk_cores[@]}" -lt 1 ]; then
+    echo "no housekeeping core left besides the isolated and the reserved capture-IRQ core" >&2
+    return 1
+  fi
   local IFS=,
   printf '%s\n' "${_hk_cores[*]}"
+}
+
+# cambox_hk_mask_has_cpu MASK CPU -> rc 0 when the /proc/irq-style hex MASK ("7", "00000003",
+# "4,00000001") includes CPU, rc 1 when not, rc 2 when MASK is not a mask.
+cambox_hk_mask_has_cpu() {
+  local mask="${1//[[:space:]]/}" cpu="${2:-}" g n=0 want
+  local -a _hk_g=()
+  case "$mask" in '' | *[!0123456789abcdefABCDEF,]* | ,* | *, | *,,*) return 2 ;; esac
+  case "$cpu" in '' | *[!0123456789]*) return 2 ;; esac
+  IFS=, read -r -a _hk_g <<<"$mask"
+  want=$((cpu / 32))
+  for ((n = ${#_hk_g[@]} - 1; n >= 0; n--)); do
+    g="${_hk_g[$n]}"
+    [ "${#g}" -le 8 ] || return 2
+    if [ "$((${#_hk_g[@]} - 1 - n))" = "$want" ]; then
+      [ "$(((16#$g >> (cpu % 32)) & 1))" = 1 ] && return 0
+      return 1
+    fi
+  done
+  return 1
 }
 
 # cambox_hk_isolated_from_grub FILE -> the isolcpus= cpu list of the last active GRUB_CMDLINE_LINUX*
@@ -154,6 +202,31 @@ CPUAffinity=${1}
 EOF
 }
 
+# cambox_hk_irq_dropin_content -> the camera-box irq-affinity drop-in, byte-for-byte.
+cambox_hk_irq_dropin_content() {
+  cat <<'EOF'
+# camera-box issue 1367: run the IRQ split before every start (the capture IRQ onto its reserved
+# core, every other device IRQ and default_smp_affinity off it; src/affinity.rs setup_irq_affinity).
+# '-' never blocks the start; '+' runs it outside the unit sandbox (ProtectSystem=strict and
+# ReadOnlyPaths=/ would make /proc/irq read-only).
+[Service]
+ExecStartPre=-+/usr/local/bin/camera-box --setup-irq-affinity
+EOF
+}
+
+# cambox_hk_irq_dropin_install ROOT -> writes ROOT$CAMBOX_HK_IRQ_DROPIN (temp file + rename).
+cambox_hk_irq_dropin_install() {
+  local path="${1:-}${CAMBOX_HK_IRQ_DROPIN}"
+  if mkdir -p "${path%/*}" && cambox_hk_irq_dropin_content >"$path.new" && chmod 0644 "$path.new" \
+    && mv -f "$path.new" "$path"; then
+    echo "  irq split: ${path} (camera-box --setup-irq-affinity before every start)"
+    return 0
+  fi
+  rm -f "$path.new"
+  echo "FAIL: [issue 1367] could not write ${path}" >&2
+  return 1
+}
+
 # cambox_hk_install_dropin ROOT -> derives the housekeeping set from THIS box's
 # /sys/devices/system/cpu/{online,isolated} and writes ROOT$CAMBOX_HK_DROPIN through a temp file +
 # rename. With no reserved IRQ core it writes nothing, says why, and returns 0. Non-zero only on a
@@ -192,11 +265,47 @@ cambox_hk_install_dropin() {
 # GATHER_DONE=1, so a cut read is told apart.
 cambox_hk_gather_remote_snippet() {
   printf '_hk_d=%q\n' "$CAMBOX_HK_DROPIN"
+  printf '_hk_sample=%q\n' "${CAMBOX_HK_IRQ_SAMPLE_S:-2}"
   cat <<'REMOTE'
 echo "ONLINE=$(cat /sys/devices/system/cpu/online 2>/dev/null)"
 echo "ISOLATED=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)"
 _hk_rtf="$(cat /sys/kernel/realtime 2>/dev/null)"; case "${_hk_rtf//[[:space:]]/}|$(uname -v 2>/dev/null)" in 1\|* | *PREEMPT_RT*) echo "RT=1" ;; *) echo "RT=0" ;; esac
 echo "PID1=$(awk '/^Cpus_allowed_list:/ {print $2; exit}' /proc/1/status 2>/dev/null)"
+# the LOADED unit (a file on disk without a daemon-reload, or an empty ExecStartPre= reset, is not
+# running): 1 = runs privileged ('+') or with /proc/irq writable, 2 = runs inside the sandbox, 0 = absent
+_hk_show="$(systemctl show -p ExecStartPreEx -p ReadWritePaths camera-box.service 2>/dev/null)"
+_hk_pre="$(printf '%s\n' "$_hk_show" | sed -n 's/^ExecStartPreEx=//p' | tr '}' '\n' | grep -F 'argv[]=/usr/local/bin/camera-box --setup-irq-affinity ;')"
+_hk_rwp=" $(printf '%s\n' "$_hk_show" | sed -n 's/^ReadWritePaths=//p') "
+if [ -z "$_hk_pre" ]; then echo "IRQ_DROPIN=0"
+elif printf '%s\n' "$_hk_pre" | grep -q 'flags=[^;]*privileged'; then echo "IRQ_DROPIN=1"
+else case "$_hk_rwp" in *" /proc/irq "* | *" /proc "*) echo "IRQ_DROPIN=1" ;; *) echo "IRQ_DROPIN=2" ;; esac; fi
+echo "DEFAULT_AFF=$(cat /proc/irq/default_smp_affinity 2>/dev/null)"
+_hk_i0="$(cat /proc/interrupts 2>/dev/null)"
+sleep "${_hk_sample:-2}"
+_hk_i1="$(cat /proc/interrupts 2>/dev/null)"
+[ -n "$_hk_i0" ] && [ -n "$_hk_i1" ] && printf '%s\n' "$_hk_i0" | awk -v later="$_hk_i1" '
+  BEGIN {
+    n = split(later, L, "\n")
+    for (i = 1; i <= n; i++) {
+      split(L[i], f, " "); k = f[1]; sub(/:$/, "", k)
+      if (k ~ /^[0-9]+$/) after[k] = L[i]
+    }
+  }
+  NR == 1 { ncpu = NF; for (i = 1; i <= NF; i++) { lab[i] = $i; sub(/^CPU/, "", lab[i]) } next }
+  {
+    k = $1; sub(/:$/, "", k)
+    if (k !~ /^[0-9]+$/ || !(k in after)) next
+    split(after[k], g, " ")
+    d = ""
+    for (c = 2; c <= ncpu + 1; c++) { x = g[c] - $c; if (x < 0) x = 0; d = d (c > 2 ? "," : "") lab[c - 1] ":" x }
+    cap = ($0 ~ /xhci|ehci|ohci|uvcvideo/) ? 1 : 0
+    aff = ""
+    getline aff < ("/proc/irq/" k "/smp_affinity_list")
+    close("/proc/irq/" k "/smp_affinity_list")
+    if (aff == "") aff = "-"
+    print "IRQ=" k " " cap " " aff " " d
+  }' && echo "IRQ_SAMPLE_DONE=1"
+
 if [ -e "$_hk_d" ]; then echo "DROPIN_PRESENT=1"; if [ -n "$(tail -c1 "$_hk_d" 2>/dev/null)" ]; then echo "DROPIN_NL=0"; else echo "DROPIN_NL=1"; fi; while IFS= read -r _hk_l || [ -n "$_hk_l" ]; do echo "DROPIN=$_hk_l"; done <"$_hk_d"; else echo "DROPIN_PRESENT=0"; fi
 echo "GATHER_DONE=1"
 REMOTE
@@ -207,8 +316,8 @@ REMOTE
 #   - the drop-in is byte-identical to cambox_hk_dropin_content <housekeeping>;
 #   - PID 1's running mask equals the housekeeping set (the drop-in applies at boot, the apply program sets a live box).
 cambox_hk_verdict() {
-  local block="${1:-}" line online="" iso="" rt="" nl_ok="" pid1="" present="" done="" body="" nl=$'\n'
-  local hk why want got have fails="" fix
+  local block="${1:-}" line online="" iso="" rt="" nl_ok="" irqs="" irq_dropin="" pid1="" present="" done="" body="" nl=$'\n'
+  local sample_done="" default_aff="" have_default=0 hk why want got have fails="" fix irq_fail=""
   while IFS= read -r line; do
     case "$line" in
       ONLINE=*) online="${line#*=}" ;;
@@ -218,6 +327,10 @@ cambox_hk_verdict() {
       DROPIN_PRESENT=*) present="${line#*=}" ;;
       DROPIN_NL=*) nl_ok="${line#*=}" ;;
       DROPIN=*) body="${body}${line#DROPIN=}${nl}" ;;
+      IRQ=*) irqs="${irqs}${line#IRQ=}${nl}" ;;
+      IRQ_DROPIN=*) irq_dropin="${line#*=}" ;;
+      IRQ_SAMPLE_DONE=1) sample_done=1 ;;
+      DEFAULT_AFF=*) default_aff="${line#*=}" have_default=1 ;;
       GATHER_DONE=1) done=1 ;;
     esac
   done <<<"$block"
@@ -226,11 +339,21 @@ cambox_hk_verdict() {
     printf 'FAIL: the cpu state could not be read (no GATHER_DONE) -- %s\n' "$fix"
     return 0
   fi
+  # the IRQ split runs on every box, a PREEMPT_RT one too (the capture IRQ onto the capture core)
+  case "$irq_dropin" in
+    1) ;;
+    0) irq_fail="FAIL: camera-box.service does not run 'camera-box --setup-irq-affinity' before its start (${CAMBOX_HK_IRQ_DROPIN} missing or not loaded) -- the capture-IRQ split never runs; ${fix}${nl}" ;;
+    2) irq_fail="FAIL: camera-box.service runs 'camera-box --setup-irq-affinity' inside the unit sandbox, where /proc/irq is read-only -- every IRQ write fails; ${fix}${nl}" ;;
+    *) irq_fail="FAIL: the camera-box IRQ setup could not be read (no IRQ_DROPIN) -- ${fix}${nl}" ;;
+  esac
   if ! hk="$(cambox_hk_cpus "$online" "$iso" "$rt" 2>&1)"; then
     why="$hk"
     if [ "$present" = 1 ]; then
       printf 'FAIL: %s carries a housekeeping CPUAffinity, but this box has %s -- remove the drop-in\n' "$CAMBOX_HK_DROPIN" "$why"
-    else
+    fi
+    if [ -n "$irq_fail" ]; then
+      printf '%s' "$irq_fail"
+    elif [ "$present" != 1 ]; then
       printf 'ok-none: %s\n' "$why"
     fi
     return 0
@@ -248,6 +371,34 @@ cambox_hk_verdict() {
     if [ "$got" != "$have" ]; then
       fails="${fails}FAIL: PID 1 runs on cpus ${pid1}, not the housekeeping set ${hk} -- PID 1 still has its old mask (the apply program sets it with taskset; the drop-in applies at the next boot); ${fix}${nl}"
     fi
+  fi
+  fails="${fails}${irq_fail}"
+  # issue 1367: no OTHER device IRQ may still run on the reserved capture-IRQ core (the NIC IRQ sat
+  # there on cam3/cam5); camera-box's setup_irq_affinity moves them at every start.
+  local reserved irq_n irq_c irq_a irq_d on_core="" fired pair rc_mask
+  local -a _hk_dl=()
+  reserved="$(cambox_hk_reserved_core "$online" "$iso" "$rt" 2>/dev/null)" || reserved=""
+  if [ -n "$reserved" ]; then
+    if [ "$sample_done" != 1 ]; then
+      fails="${fails}FAIL: the 2 s interrupt sample could not be read (no IRQ_SAMPLE_DONE) -- cannot certify the reserved capture-IRQ core ${reserved}${nl}"
+    fi
+    while read -r irq_n irq_c irq_a irq_d; do
+      [ -n "$irq_n" ] && [ "$irq_c" = 0 ] || continue
+      IFS=, read -r -a _hk_dl <<<"$irq_d"
+      fired=0
+      for pair in "${_hk_dl[@]}"; do
+        [ "${pair%%:*}" = "$reserved" ] && fired="${pair#*:}"
+      done
+      case "$fired" in '' | *[!0123456789]*) fired=0 ;; esac
+      [ "$fired" -gt 0 ] && on_core="${on_core:+$on_core, }IRQ $irq_n (cpus $irq_a, $fired interrupts in the sample)"
+    done <<<"$irqs"
+    [ -z "$on_core" ] || fails="${fails}FAIL: ${on_core} fired on the reserved capture-IRQ core ${reserved} -- camera-box's IRQ setup (issue 1367) has not moved it; restart camera-box on a build that carries it${nl}"
+    rc_mask=0
+    if [ "$have_default" = 1 ]; then cambox_hk_mask_has_cpu "$default_aff" "$reserved" || rc_mask=$?; else rc_mask=2; fi
+    case "$rc_mask" in
+      0) fails="${fails}FAIL: /proc/irq/default_smp_affinity (${default_aff}) includes the reserved capture-IRQ core ${reserved} -- an IRQ allocated later lands on core ${reserved}; restart camera-box on a build that carries the issue 1367 IRQ setup${nl}" ;;
+      2) fails="${fails}FAIL: /proc/irq/default_smp_affinity could not be read ('${default_aff}') -- cannot certify the reserved capture-IRQ core ${reserved}${nl}" ;;
+    esac
   fi
   if [ -n "$fails" ]; then
     printf '%s' "$fails"
@@ -276,27 +427,30 @@ PROG
   printf '_hk_d=%q\n' "$CAMBOX_HK_DROPIN"
   printf '_hk_sys=%q\n' "${CAMBOX_HK_SYS:-/sys/devices/system/cpu}"
   printf '_hk_proc=%q\n' "${CAMBOX_HK_PROC:-/proc}"
-  printf '%s\n' "$(declare -f ro_root_mount_mode cambox_hk_cpulist_expand cambox_hk_cpus cambox_hk_kernel_rt cambox_hk_dropin_content)"
+  printf '_hk_irqd=%q\n' "$CAMBOX_HK_IRQ_DROPIN"
+  printf '_hk_irqbody=%q\n' "$(cambox_hk_irq_dropin_content)"
+  printf '%s\n' "$(declare -f ro_root_mount_mode cambox_hk_cpulist_expand cambox_hk_reserved_core cambox_hk_cpus cambox_hk_kernel_rt cambox_hk_dropin_content)"
   cat <<'PROG'
 _hk_box="$(hostname 2>/dev/null || echo this cambox)"
 # --- 1. what this box needs (read before anything is written) ---
 _hk_mode="$(ro_root_mount_mode "$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)")"
-_hk_none=0 _hk_do_d=0 _hk_do_rm=0
+_hk_none=0 _hk_do_d=0 _hk_do_rm=0 _hk_do_irq=0
+cmp -s "$_hk_irqd" <(printf '%s\n' "$_hk_irqbody") || _hk_do_irq=1
 if ! _hk_set="$(cambox_hk_cpus "$(cat "$_hk_sys/online" 2>/dev/null)" "$(cat "$_hk_sys/isolated" 2>/dev/null)" "$(cambox_hk_kernel_rt)" 2>&1)"; then
   # No reserved IRQ core: nothing to provision, but a leftover drop-in (e.g. after a move to a
   # PREEMPT_RT kernel) is removed, or verify (au) fails it.
   _hk_none=1
-  if [ ! -e "$_hk_d" ]; then
+  if [ ! -e "$_hk_d" ] && [ "$_hk_do_irq" = 0 ]; then
     echo "OK ($_hk_box): nothing to do -- $_hk_set (issue 1367)"
     return 0
   fi
-  _hk_do_rm=1
-  echo "PLAN ($_hk_box): root $_hk_mode; $_hk_set; drop-in remove"
+  [ ! -e "$_hk_d" ] || _hk_do_rm=1
+  echo "PLAN ($_hk_box): root $_hk_mode; $_hk_set; drop-in $([ "$_hk_do_rm" = 1 ] && echo remove || echo absent); irq drop-in $([ "$_hk_do_irq" = 1 ] && echo write || echo in-place)"
 else
   _hk_body="$(cambox_hk_dropin_content "$_hk_set")"
   # exact bytes: the verify compares the file byte for byte, so a trailing blank line is a rewrite too
   if ! cmp -s "$_hk_d" <(printf '%s\n' "$_hk_body"); then _hk_do_d=1; fi
-  echo "PLAN ($_hk_box): root $_hk_mode; housekeeping CPUAffinity=$_hk_set; drop-in $([ "$_hk_do_d" = 1 ] && echo write || echo in-place)"
+  echo "PLAN ($_hk_box): root $_hk_mode; housekeeping CPUAffinity=$_hk_set; drop-in $([ "$_hk_do_d" = 1 ] && echo write || echo in-place); irq drop-in $([ "$_hk_do_irq" = 1 ] && echo write || echo in-place)"
 fi
 _hk_rc=0
 # --- 2. the rw window, closed by the ONE verified close ---
@@ -311,7 +465,7 @@ PROG
   cat <<'PROG'
 }
 trap '_hk_close' EXIT
-if [ "$_hk_do_d" = 1 ] || [ "$_hk_do_rm" = 1 ] || [ "$_hk_mode" != ro ]; then
+if [ "$_hk_do_d" = 1 ] || [ "$_hk_do_rm" = 1 ] || [ "$_hk_do_irq" = 1 ] || [ "$_hk_mode" != ro ]; then
   if ! mount -o remount,rw /; then
     echo "FAIL: [issue 1367] could not remount / read-write on $_hk_box -- nothing was written" >&2
     exit 1
@@ -324,6 +478,13 @@ if [ "$_hk_do_d" = 1 ] || [ "$_hk_do_rm" = 1 ] || [ "$_hk_mode" != ro ]; then
       exit 1
     fi
   fi
+  if [ "$_hk_do_irq" = 1 ]; then
+    if ! { mkdir -p "${_hk_irqd%/*}" && printf '%s\n' "$_hk_irqbody" >"$_hk_irqd.new" && chmod 0644 "$_hk_irqd.new" && mv -f "$_hk_irqd.new" "$_hk_irqd"; }; then
+      rm -f "$_hk_irqd.new"
+      echo "FAIL: [issue 1367] could not write $_hk_irqd on $_hk_box -- the window is closed again by the verified close" >&2
+      exit 1
+    fi
+  fi
   if [ "$_hk_do_rm" = 1 ] && ! rm -f "$_hk_d"; then
     echo "FAIL: [issue 1367] could not remove $_hk_d on $_hk_box -- the window is closed again by the verified close" >&2
     exit 1
@@ -331,8 +492,16 @@ if [ "$_hk_do_d" = 1 ] || [ "$_hk_do_rm" = 1 ] || [ "$_hk_mode" != ro ]; then
 fi
 _hk_close
 trap - EXIT
+if [ "$_hk_do_irq" = 1 ]; then
+  if systemctl daemon-reload; then
+    echo "OK ($_hk_box): $_hk_irqd in place -- the IRQ split runs at the next camera-box start (issue 1367)"
+  else
+    echo "FAIL: [issue 1367] systemctl daemon-reload failed on $_hk_box" >&2
+    return 1
+  fi
+fi
 if [ "$_hk_none" = 1 ]; then
-  echo "OK ($_hk_box): removed the leftover $_hk_d -- $_hk_set (PID 1 keeps its mask until the next boot; issue 1367)"
+  [ "$_hk_do_rm" = 0 ] || echo "OK ($_hk_box): removed the leftover $_hk_d -- $_hk_set (PID 1 keeps its mask until the next boot; issue 1367)"
   return 0
 fi
 # --- 3. after the verified close: set PID 1's mask when it differs (the drop-in applies it at boot;

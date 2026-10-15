@@ -217,7 +217,10 @@
 #        /etc/systemd/system.conf.d/60-camera-box-housekeeping-cpus.conf byte-identical to
 #        scripts/lib/cambox-housekeeping-cpus.sh (CPUAffinity = online - isolated - the reserved
 #        capture-IRQ core) AND PID 1 running on exactly that set, so systemd's unit starts never land
-#        on the capture-IRQ core. A box with no reserved IRQ core is OK with no drop-in.
+#        on the capture-IRQ core. A box with no reserved IRQ core is OK with no drop-in. Also the
+#        LOADED camera-box unit runs the IRQ split privileged (the irq-affinity drop-in), no other
+#        device IRQ fired on the reserved core in a 2 s /proc/interrupts sample, and
+#        /proc/irq/default_smp_affinity leaves the reserved core out. A missing fact FAILs.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -945,7 +948,9 @@ Checks:
   (at) zram swap (issue 1428): systemd-zram-generator installed, its camera-box drop-in in place, an
       active /dev/zram* swap of at least 90 % of RAM and no other swap
   (au) housekeeping cpus (issue 1367): the systemd manager CPUAffinity drop-in in place and PID 1
-      running on the housekeeping cores, off the capture core and the capture-IRQ core
+      running on the housekeeping cores, off the capture core and the capture-IRQ core; the camera-box
+      IRQ split loaded and privileged, no other IRQ firing on the capture-IRQ core in a 2 s sample,
+      and the default IRQ affinity off it
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1828,7 +1833,8 @@ fi
 # systemd PID 1 and every unit it starts ran on the issue-1198 reserved capture-IRQ core: on cam5
 # (15.10.2026) 65 of 102 capture-phase re-seeds landed within 1 s of a unit start. setup-device.sh
 # `[housekeeping-cpus]` writes the manager CPUAffinity drop-in through scripts/lib/cambox-housekeeping-cpus.sh;
-# this reads the drop-in and PID 1's running mask back (one read-only ssh gather) and grades them with
+# this reads the drop-in, PID 1's running mask, the loaded camera-box IRQ setup, a 2 s interrupt
+# sample and the default IRQ affinity back (one read-only ssh gather) and grades them with
 # the SAME lib's pure cambox_hk_verdict. Inserted after (ak), before (at): outside every slice pytest
 # executes, and before (q), which stays last.
 aurc=0
