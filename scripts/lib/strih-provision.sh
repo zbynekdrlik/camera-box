@@ -57,6 +57,11 @@ if ! declare -F strih_https_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-https.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-https.sh"
 fi
+# issue 1394: the cambox log sink's own source-only lib (setup-strih step 16k, verify-strih item 46).
+if ! declare -F strih_cambox_log_sink_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-cambox-log-sink.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-cambox-log-sink.sh"
+fi
 # issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
 # fetch (step 13's intercom-hub binary, step 16c's bkshading service).
 if ! declare -F dantesync_install >/dev/null; then

@@ -859,7 +859,6 @@ echo "  Companion Satellite v${CS_VER} installed to /opt (run by companion-satel
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
 step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, permanent password from a 0600 file"
 # issue 1317: install RustDesk from the PINNED .deb (sha256-verified, fail-loud on mismatch), enable
 # --now the service, and apply the permanent password read INSIDE the emitted block from a 0600 file
@@ -883,7 +882,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
 step "16c" "bkshading shading-control service (issue 1353) -- CI artifact -> /opt/bkshading, seed config + unit, enable-only"
 if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412: scripts/lib/obs-box-role.sh
 # issue 1353: the shading panel BACKEND (bkshading/service) ran only on the Windows strih PC; post-M4
@@ -939,7 +937,6 @@ fi
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
 step "16d" "Session apps (issue 1399): browser-source keeper, shading panel window, Companion Satellite + its watch, the dantesync tray (issue 1429) -- --user units, enable-only"
 # issue 1399 (owner 4.10.2026): the OBS browser sources reload themselves once their page server answers
 # (strih-browser-keeper.service), the shading panel runs as an app window titled "Shading"
@@ -951,7 +948,6 @@ strih_session_apps_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
   || fail "issue 1399: the session apps (keeper, panel window, Companion Satellite + its watch) could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
-# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
 step "16e" "Stream program-audio sampler (issue 1404): numpy, the sampler files + decoder shim, the E-core --user unit -- enable-only"
 if WHY="$(obs_box_step_applies 16e)"; then   # issue 1412 (G11): a box fact, never the box name
   strih_program_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
@@ -980,6 +976,10 @@ else echo "  SKIP: ${WHY}"; fi
 # ---------------------------------------------------------------------------------------------
 step "16j" "Restreamer control-room host (restreamer issue 388): Google Chrome from its signed repo + xvfb -- stream role"
 if WHY="$(obs_box_step_applies 16j-restreamer)"; then obs_box_stream_restreamer_host_provision || fail "the restreamer host packages could not be provisioned (above)"; else echo "  SKIP: ${WHY}"; fi
+
+# ---------------------------------------------------------------------------------------------
+step "16k" "Cambox log sink (issue 1394): journal-remote + the netconsole rsyslog instance, idle priority -- enable-only"
+if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_install || fail "issue 1394: the cambox log sink could not be provisioned (above)"; else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"

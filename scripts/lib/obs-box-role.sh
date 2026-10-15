@@ -74,7 +74,7 @@ obs_box_step_applies() {
         printf 'STRIH_PROGRAM_AUDIO_SAMPLER=%s -- this box runs no stream program-audio sampler' "$v"
         return 1
       fi ;;
-    3-nvenc | 14 | 16 | 16c | 16f | 16i | 13-hub-live)
+    3-nvenc | 14 | 16 | 16c | 16f | 16i | 16k | 13-hub-live)
       v="$(strih_box_role)" || return 0
       if [ "$v" = stream ]; then
         case "$step" in
@@ -84,6 +84,7 @@ obs_box_step_applies() {
           16c) printf 'the stream role runs no bkshading shading service' ;;
           16f) printf 'the stream role runs no camera tally (no camera operators on stream-pp)' ;;
           16i) printf 'the stream role serves no intercom / shading page (issue 1399)' ;;
+          16k) printf 'the stream role receives no cambox logs: the venue strih is the sink (issue 1394)' ;;
           13-hub-live) printf 'the stream role grades its hub report-only (issue 1418 FAILs an inactive hub on the strih role)' ;;
         esac
         return 1
