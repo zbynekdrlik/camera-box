@@ -20,6 +20,11 @@ paths:
 
 # Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (#812/#807)
 
+> The Linux stream-role twin of `avsync-vlc-monitor.ps1` (the operator hears the restreamer's local RTMP)
+> is `strih-stream-monitor.service`, provisioned by setup-strih (issue 1436):
+> `.claude/rules/stream-headphone-monitor.md`. Keep the two the same design: the encoded stream from the
+> restreamer, only while one runs.
+
 Windows-side long-running loops on the stream box (10.77.9.204) that measure A/V sync and let an
 operator listen to the program audio, plus the dev1-side alert that watches both for silence.
 Distinct from `.claude/rules/imag-obs-supervision.md` (a DIFFERENT box, OBS process supervision,

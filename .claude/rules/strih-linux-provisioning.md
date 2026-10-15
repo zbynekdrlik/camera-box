@@ -208,7 +208,9 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   stream encoder instead), 14, 16 and 16c; a box with HDMI backend `none` skips 6-hdmi, and its
   kiosk autostart leaves HDMI to X. verify uses the same gates.
 - **`obs_box_role_apply`** (after the box load, before the source-guard, in BOTH scripts): a stream
-  box runs only `strih-browser-keeper.service` as a session app; a non-snv venue sets
+  box runs three session apps, `strih-browser-keeper.service`, `strih-stream-monitor.service` (the
+  headphones play the real outgoing stream, issue 1436, `.claude/rules/stream-headphone-monitor.md`) and
+  `dantesync-tray.service` (issue 1429); a non-snv venue sets
   `NDI_DISCOVERY_SENDER_HOSTS` to the STRIH_IP of that venue's fact files (C collation order), which
   `ndi_discovery_fleet_hosts` lists instead of the SNV fleet, so step 4b / item 34 write and expect
   `10.77.8.204,10.77.8.202` on both PP boxes. The PP OBS_FLEET rows are names reached over NAT from
@@ -216,9 +218,11 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
 - **Step 3 on a stream box** (`obs_box_stream_encoder_provision`): NVENC when an NVIDIA GPU is
   present, else VAAPI (`mesa-va-drivers` + `vainfo`, the desktop user into `render`, H.264 High
   encode checked with vainfo). `scripts/obs_box_stream_profile.py` writes the profile ONLY with OBS
-  stopped: Advanced output, 1080p30 NV12, CBR 19000, keyint 2, `service.json` `rtmp_custom` with the
-  server only (`OBS_BOX_STREAM_RTMP_SERVER`, default the local restreamer). A stream key already in
-  service.json is kept, a new one is never written. It reads utf-8-sig (a ported Windows profile has
+  stopped: Advanced output, 1080p30 NV12, CBR 19000, keyint 2, `service.json` `rtmp_custom` to
+  `OBS_BOX_STREAM_RTMP_SERVER` (default the local restreamer). Since issue 1436 it also writes the box
+  name as the stream key (`--key`, `obs_box_stream_key`) when service.json carries none, so OBS publishes
+  `rtmp://127.0.0.1:1234/live/<box>`, the URL the headphone monitor plays; a stream key already there is
+  the operator's and is kept. It reads utf-8-sig (a ported Windows profile has
   a BOM) and parses every input before writing anything. verify item 10 grades the written encoder.
 - **Step 6 manifest** (`obs_box_seed_manifest_json`): one entry `NDI 2ME PGM` <- the program sender
   in scene `PRO`, class `program` (genlock_fifo + ndi_sync 2, the latency pin NEVER written: it is
