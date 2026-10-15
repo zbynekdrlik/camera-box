@@ -192,18 +192,37 @@ cambox_hk_install_dropin() {
 # GATHER_DONE=1, so a cut read is told apart.
 cambox_hk_gather_remote_snippet() {
   printf '_hk_d=%q\n' "$CAMBOX_HK_DROPIN"
+  printf '_hk_sample=%q\n' "${CAMBOX_HK_IRQ_SAMPLE_S:-2}"
   cat <<'REMOTE'
 echo "ONLINE=$(cat /sys/devices/system/cpu/online 2>/dev/null)"
 echo "ISOLATED=$(cat /sys/devices/system/cpu/isolated 2>/dev/null)"
 _hk_rtf="$(cat /sys/kernel/realtime 2>/dev/null)"; case "${_hk_rtf//[[:space:]]/}|$(uname -v 2>/dev/null)" in 1\|* | *PREEMPT_RT*) echo "RT=1" ;; *) echo "RT=0" ;; esac
 echo "PID1=$(awk '/^Cpus_allowed_list:/ {print $2; exit}' /proc/1/status 2>/dev/null)"
-while IFS= read -r _hk_l; do
-  _hk_n="${_hk_l%%:*}"; _hk_n="${_hk_n//[[:space:]]/}"
-  case "$_hk_n" in '' | *[!0123456789]*) continue ;; esac
-  case "$_hk_l" in *xhci* | *ehci* | *ohci* | *uvcvideo*) _hk_c=1 ;; *) _hk_c=0 ;; esac
-  _hk_a="$(cat "/proc/irq/$_hk_n/smp_affinity_list" 2>/dev/null)" || continue
-  echo "IRQ=$_hk_n $_hk_c $_hk_a"
-done </proc/interrupts
+_hk_i0="$(cat /proc/interrupts 2>/dev/null)"
+sleep "${_hk_sample:-2}"
+_hk_i1="$(cat /proc/interrupts 2>/dev/null)"
+printf '%s\n' "$_hk_i0" | awk -v later="$_hk_i1" '
+  BEGIN {
+    n = split(later, L, "\n")
+    for (i = 1; i <= n; i++) {
+      split(L[i], f, " "); k = f[1]; sub(/:$/, "", k)
+      if (k ~ /^[0-9]+$/) after[k] = L[i]
+    }
+  }
+  NR == 1 { ncpu = NF; next }
+  {
+    k = $1; sub(/:$/, "", k)
+    if (k !~ /^[0-9]+$/ || !(k in after)) next
+    split(after[k], g, " ")
+    d = ""
+    for (c = 2; c <= ncpu + 1; c++) { x = g[c] - $c; if (x < 0) x = 0; d = d (c > 2 ? "," : "") x }
+    cap = ($0 ~ /xhci|ehci|ohci|uvcvideo/) ? 1 : 0
+    aff = ""
+    getline aff < ("/proc/irq/" k "/smp_affinity_list")
+    close("/proc/irq/" k "/smp_affinity_list")
+    print "IRQ=" k " " cap " " aff " " d
+  }'
+
 if [ -e "$_hk_d" ]; then echo "DROPIN_PRESENT=1"; if [ -n "$(tail -c1 "$_hk_d" 2>/dev/null)" ]; then echo "DROPIN_NL=0"; else echo "DROPIN_NL=1"; fi; while IFS= read -r _hk_l || [ -n "$_hk_l" ]; do echo "DROPIN=$_hk_l"; done <"$_hk_d"; else echo "DROPIN_PRESENT=0"; fi
 echo "GATHER_DONE=1"
 REMOTE
@@ -259,14 +278,18 @@ cambox_hk_verdict() {
   fi
   # issue 1367: no OTHER device IRQ may still run on the reserved capture-IRQ core (the NIC IRQ sat
   # there on cam3/cam5); camera-box's setup_irq_affinity moves them at every start.
-  local reserved irq_n irq_c irq_a on_core=""
+  local reserved irq_n irq_c irq_a irq_d on_core="" fired
+  local -a _hk_dl=()
   reserved="$(cambox_hk_cpulist_expand "$online" | while read -r c; do grep -qx "$c" <<<"$(cambox_hk_cpulist_expand "$iso")" || echo "$c"; done | tail -1)"
   if [ -n "$reserved" ]; then
-    while read -r irq_n irq_c irq_a; do
+    while read -r irq_n irq_c irq_a irq_d; do
       [ -n "$irq_n" ] && [ "$irq_c" = 0 ] || continue
-      cambox_hk_cpulist_expand "$irq_a" 2>/dev/null | grep -qx "$reserved" && on_core="${on_core:+$on_core, }IRQ $irq_n (cpus $irq_a)"
+      IFS=, read -r -a _hk_dl <<<"$irq_d"
+      fired="${_hk_dl[$reserved]:-0}"
+      case "$fired" in '' | *[!0123456789]*) fired=0 ;; esac
+      [ "$fired" -gt 0 ] && on_core="${on_core:+$on_core, }IRQ $irq_n (cpus $irq_a, $fired interrupts in the sample)"
     done <<<"$irqs"
-    [ -z "$on_core" ] || fails="${fails}FAIL: ${on_core} may run on the reserved capture-IRQ core ${reserved} -- camera-box's IRQ setup (issue 1367) has not moved it; restart camera-box on a build that carries it${nl}"
+    [ -z "$on_core" ] || fails="${fails}FAIL: ${on_core} fired on the reserved capture-IRQ core ${reserved} -- camera-box's IRQ setup (issue 1367) has not moved it; restart camera-box on a build that carries it${nl}"
   fi
   if [ -n "$fails" ]; then
     printf '%s' "$fails"
