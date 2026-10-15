@@ -162,7 +162,7 @@ def test_an_800_line_older_than_a_newer_floor_line_is_not_current():
     # previous buffering, never compared with the new start.
     lines = [FLOOR, _t800("16:00:00.000", 170, 8),
              FLOOR.replace("15:57:53.164", "16:00:30.000")]
-    assert bsg.audio_buffering_from_log(_text(lines))[:2] == ("", "85")
+    assert bsg.audio_buffering_from_log(_text(lines)) == ("", "", "", "")
     lines.append(_t800("16:01:00.000", 85, 4))
     assert bsg.audio_buffering_from_log(_text(lines))[:2] == ("85", "85")
 
