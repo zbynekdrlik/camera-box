@@ -26,6 +26,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 GATE = os.path.join(REPO, "scripts", "rig-busy-gate.sh")
 
 IDLE = {"busy": False, "reasons": [], "diagnostics": []}
+STRAY = {
+    "busy": True,
+    "reasons": ["strih is recording (GetRecordStatus.outputActive=true)"],
+    "diagnostics": [{"host": "strih", "streaming": False, "recording": True}],
+}
 STREAMING = {
     "busy": True,
     "reasons": ["stream is streaming (GetStreamStatus.outputActive=true)"],
@@ -41,13 +46,21 @@ n = 0
 if os.path.exists(log_path):
     n = sum(1 for _ in open(log_path))
 answer = seq[min(n, len(seq) - 1)]
+steal = os.environ.get("FAKE_STEAL_AT")
+if steal and n == int(steal) and os.path.isdir(lease_dir):
+    # a foreign holder takes over the lockdir mid-hold, declared far past the gate's wait budget
+    with open(os.path.join(lease_dir, "holder.json"), "w") as f:
+        json.dump({"repo": "zbynekdrlik/restreamer", "run_id": "999", "run_url": "u", "job": "j",
+                   "acquired_at": "2026-01-01T00:00:00Z", "expected_release_at": "2099-01-01T00:00:00Z"}, f)
+    open(os.path.join(lease_dir, "heartbeat"), "a").close()
+    os.utime(os.path.join(lease_dir, "heartbeat"))
 with open(log_path, "a") as f:
     f.write("%d %s\n" % (int(os.path.exists(os.path.join(lease_dir, "holder.json"))), "busy" if answer["busy"] else "idle"))
 print(json.dumps(answer))
 '''
 
 
-def run_gate(seq, iterations=3):
+def run_gate(seq, iterations=3, extra_env=None):
     d = tempfile.mkdtemp(prefix="rbg1404-")
     fake = os.path.join(d, "obs_phase2.py")
     with open(fake, "w") as f:
@@ -73,6 +86,7 @@ def run_gate(seq, iterations=3):
         "RIG_BUSY_GATE_ITERATIONS": str(iterations),
         "RIG_BUSY_GATE_SLEEP_SECS": "0",
     })
+    env.update(extra_env or {})
     r = subprocess.run(["bash", GATE], env=env, capture_output=True, text=True, timeout=120)
     calls = []
     if os.path.exists(log_path):
@@ -90,6 +104,34 @@ class IdleHold1404(unittest.TestCase):
         self.assertIn("OUTCOME=RIG_BUSY", out)
         self.assertNotIn("OUTCOME=RIG_FREE", out)
         self.assertFalse(held, "a refused gate leaves no lease behind")
+        # issue 1432: the read that breaks the hold runs under the lease taken for it; every read
+        # after it sees a box streaming, so the lease is released and stays released
+        self.assertEqual(calls[2], ["1", "busy"], calls)
+        self.assertTrue(calls[3:], calls)
+        self.assertTrue(all(c[0] == "0" for c in calls[3:]), calls)
+
+    def test_a_busy_read_inside_the_hold_ends_the_hold(self):
+        r, calls, _held = run_gate([IDLE, STREAMING, IDLE], iterations=1)
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 42, out)
+        self.assertNotIn("OUTCOME=RIG_FREE", out)
+
+    def test_a_stray_recording_wait_keeps_the_lease_flag_in_step(self):
+        # streaming (lease released), then a stray recording (busy, not streaming: the lease is
+        # taken back), then idle: the hold must run under that lease, not wait on our own lease
+        r, calls, held = run_gate([STREAMING, STRAY, IDLE], iterations=4)
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 0, out)
+        self.assertIn("OUTCOME=RIG_FREE", out)
+        self.assertTrue(held)
+
+    def test_a_lease_taken_over_during_the_hold_never_admits(self):
+        # a foreign holder replaces ours on the 5th read (inside the hold); the gate must not admit
+        # on a lease that is no longer ours
+        r, calls, _held = run_gate([IDLE], iterations=2, extra_env={"FAKE_STEAL_AT": "4"})
+        out = r.stdout + r.stderr
+        self.assertNotEqual(r.returncode, 0, out)
+        self.assertNotIn("OUTCOME=RIG_FREE", out)
 
     def test_a_continuous_idle_hold_admits_and_keeps_the_lease(self):
         r, calls, held = run_gate([STREAMING, IDLE], iterations=3)
