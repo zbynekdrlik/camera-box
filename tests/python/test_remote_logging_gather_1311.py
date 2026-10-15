@@ -5,7 +5,8 @@ D9 -- `remote_log_gather_remote_snippet`'s JU_STATE_SAVE extraction greps the FI
       default `--save-state=/var/lib/...` BEFORE the real `ExecStart=` line, so verify-device read the
       comment and failed check (ak) on a correctly provisioned box (the self-collision anchor class).
 (D8, the dev1 receiver's sink-dir ownership, left with the dev1 installer in issue 1394: the receiver
-is the venue strih now, scripts/lib/strih-cambox-log-sink.sh, whose own tests pin the dir owner.)
+is the venue strih now, scripts/lib/strih-cambox-log-sink.sh: test_strih_cambox_log_sink_1394.py
+pins its User=syslog + LogsDirectory=cambox + `su syslog syslog` rotation.)
 """
 
 import os

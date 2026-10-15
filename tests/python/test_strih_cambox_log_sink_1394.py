@@ -189,11 +189,16 @@ def _calls(tmp_path):
     return (tmp_path / "calls").read_text().splitlines()
 
 
-def test_install_writes_every_file_and_only_enables(tmp_path):
+def test_install_writes_every_file_enables_and_starts_the_receivers(tmp_path):
+    # Review round 1: an enable-only receiver left item 46 failing on every deploy (setup-strih step 17
+    # runs verify-strih). The receivers are passive idle-priority listeners, so they run at once (the
+    # strih-tally precedent): `enable --now` a unit not yet enabled, `start` an enabled one.
     env = _rig(tmp_path)
+    env["FAKE_INSTALLED"] = "rsyslog"
+    env["FAKE_ENABLED"] = "disabled"
     r = _bash("strih_cambox_log_sink_install", env=env)
     calls = _calls(tmp_path)
-    assert "apt-get install -y systemd-journal-remote rsyslog logrotate" in calls, calls
+    assert "apt-get install -y systemd-journal-remote logrotate" in calls, calls
     files = _bash("strih_cambox_log_sink_files", env=env).stdout.splitlines()
     assert len(files) == 7
     for line in files:
@@ -202,11 +207,48 @@ def test_install_writes_every_file_and_only_enables(tmp_path):
         assert Path(path).read_text() == want, path
         assert oct(Path(path).stat().st_mode & 0o777) == "0o644", path
     assert "systemctl daemon-reload" in calls
-    assert "systemctl enable " + " ".join(UNITS) in calls, calls
-    assert "systemctl try-restart cambox-netconsole-sink.service systemd-journal-remote.service " \
-           "cambox-netconsole-rotate.timer" in calls, calls
-    assert not any(c.startswith(("systemctl start", "systemctl restart")) or "--now" in c for c in calls), calls
-    assert "enable-only" in r.stdout
+    tr = calls.index("systemctl try-restart cambox-netconsole-sink.service systemd-journal-remote.service "
+                     "cambox-netconsole-rotate.timer")
+    now = calls.index("systemctl enable --now " + " ".join(UNITS))
+    assert calls.index("systemctl daemon-reload") < tr < now, calls
+    assert not any(c.startswith(("systemctl start", "systemctl restart")) for c in calls), calls
+    assert "enabled + started" in r.stdout, r.stdout
+
+
+def test_install_starts_an_enabled_but_stopped_receiver(tmp_path):
+    env = _rig(tmp_path)
+    env["FAKE_INSTALLED"] = "systemd-journal-remote rsyslog logrotate"
+    _bash("strih_cambox_log_sink_install", env=env)
+    calls = _calls(tmp_path)
+    assert "systemctl start " + " ".join(UNITS) in calls, calls
+    assert not any("--now" in c for c in calls), calls
+
+
+def test_a_freshly_installed_distro_rsyslog_is_disabled_again(tmp_path):
+    # Review round 1: installing the package enables + starts the distro's own rsyslog.service, which
+    # would then write /var/log/syslog on the production box. Only the dedicated instance may run; a
+    # box that already had rsyslog keeps its own (never touched).
+    env = _rig(tmp_path)
+    env["FAKE_INSTALLED"] = "systemd-journal-remote logrotate"
+    r = _bash("strih_cambox_log_sink_install", env=env)
+    calls = _calls(tmp_path)
+    apt = calls.index("apt-get install -y rsyslog")
+    off = calls.index("systemctl disable --now rsyslog.service")
+    assert apt < off, calls
+    assert "rsyslog.service" in r.stdout and "disabled" in r.stdout, r.stdout
+    (tmp_path / "calls").write_text("")
+    env["FAKE_INSTALLED"] = "systemd-journal-remote rsyslog logrotate"
+    _bash("strih_cambox_log_sink_install", env=env)
+    assert not any("rsyslog.service" in c for c in _calls(tmp_path)), _calls(tmp_path)
+
+
+def test_the_sink_writes_as_syslog_into_its_own_log_directory():
+    # the ownership the dev1 receiver once got wrong (rsyslog dropped to syslog, the dir was root's):
+    # the unit owns /var/log/cambox for its User, and logrotate rotates as that same user.
+    unit = _bash('strih_cambox_log_sink_unit_text ""').stdout.splitlines()
+    for want in ("User=syslog", "Group=syslog", "LogsDirectory=cambox", "LogsDirectoryMode=0755"):
+        assert want in unit, want
+    assert "    su syslog syslog" in _bash("strih_cambox_log_sink_logrotate_conf").stdout.splitlines()
 
 
 def test_a_second_install_changes_nothing(tmp_path):
@@ -216,7 +258,7 @@ def test_a_second_install_changes_nothing(tmp_path):
     (tmp_path / "calls").write_text("")
     r = _bash("strih_cambox_log_sink_install", env=env)
     calls = _calls(tmp_path)
-    assert calls == ["systemctl enable " + " ".join(UNITS)], calls
+    assert calls == [f"systemctl is-enabled {u}" for u in UNITS] + ["systemctl start " + " ".join(UNITS)], calls
     assert r.stdout.count(" unchanged") == 7, r.stdout
 
 

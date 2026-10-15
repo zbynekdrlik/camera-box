@@ -113,6 +113,14 @@ def test_a_bad_sink_address_or_an_unparseable_fact_file_refuses(tmp_path):
     assert r.returncode == 1 and "does not parse" in r.stderr, r.stderr
 
 
+def test_the_address_check_does_not_depend_on_the_callers_ifs():
+    # review round 1: `for o in ${ip//./ }` split on the caller's IFS; a newline IFS aborted set -e callers
+    r = _bash("IFS=$'\\n'\nremote_log_ipv4_ok 10.77.9.202 && echo ok1\n"
+              "remote_log_ipv4_ok 10.77.9.256 || echo bad1\nremote_log_journal_url 10.77.8.202")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["ok1", "bad1", "http://10.77.8.202:19532"], r.stdout
+
+
 def test_the_resolver_leaves_the_callers_shell_alone_and_survives_noglob():
     # setup-device / verify-device run under set -euo pipefail; the version gates build specs under -f.
     r = _bash('set -f\nshopt -s failglob\nx="$(remote_log_sink_ip cam5)"\necho "sink=$x"\n'
