@@ -263,3 +263,37 @@ def test_the_table_warnings_print_once_per_pass(tmp_path):
     p = d.run(_HB, ["--dry-run"], extra={"AVSYNC_VENUE_TABLE": table})
     assert p.returncode == 0, p.stderr
     assert p.stderr.count("dropping malformed row") == 1, p.stderr
+
+
+# ── review round 2 ───────────────────────────────────────────────────────────────────────────────
+
+
+def test_an_inherited_cache_is_never_trusted():
+    # only an in-process avsync_venue_table_load may fill the cache: variables inherited from the
+    # environment are dropped at source time, so an injected unvalidated row never reaches a caller.
+    key = subprocess.run(
+        ["bash", "-c", '. "$1"; _avsync_venue_cache_key', "x", str(_VENUES)],
+        env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True,
+    ).stdout
+    p = subprocess.run(
+        ["bash", "-c", 'set -euo pipefail; . "$1"; avsync_venue_table', "x", str(_VENUES)],
+        env={"PATH": "/usr/bin:/bin", "_AVSYNC_VENUE_ROWS_KEY": key,
+             "_AVSYNC_VENUE_ROWS": "evil|b|h;rm|k"},
+        capture_output=True, text=True,
+    )
+    assert p.returncode == 0, p.stderr
+    assert "evil" not in p.stdout
+    assert p.stdout.splitlines()[0] == "snv|stream-snv|10.77.9.204|obs-e2e-test"
+
+
+def test_assert_is_no_go_when_the_table_lost_the_legacy_venue(tmp_path):
+    d = Dev2(tmp_path)
+    d.heartbeat("avsync-watchdog-heartbeat-pp.txt")
+    systemctl = _exe(d.stub / "systemctl", "#!/bin/sh\nexit 0\n")
+    p = d.run(
+        _LINEUP, ["--assert"], home_boxes="stream-pp",
+        extra={"AVSYNC_VENUE_TABLE": "pp|stream-pp|stream-pp.lan|stream-pp\n",
+               "AVSYNC_LINEUP_SYSTEMCTL": str(systemctl)},
+    )
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert any(l.startswith("NO-GO") and "venue table" in l for l in p.stdout.splitlines()), p.stdout
