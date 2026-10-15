@@ -287,7 +287,7 @@ handle_box() {
       src_txt="zdroj: ${bsrc}"
       [ -n "$bsrc" ] || src_txt="zdroj nie je v logu (riadok so zvýšením už vypadol z konca logu)"
       handle_arm "$box" "RAISED" "audio-buffering" "audio-buffering" \
-        "🚨 Oneskorenie zvuku ($REPO_SLUG): **$box** ($ip) — OBS zvýšil zvukové oneskorenie mixu z ${bstart} ms na **${bnow} ms** (+${bdelta} ms, ${src_txt}). Celý zvukový výstup tohto OBS (stream/strih) je teraz o ${bdelta} ms neskôr a ostane tak až do reštartu OBS. Príčinou býva zaseknutie zvukového vlákna (15.10.: 432 ms → +85 ms). Treba rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
+        "🚨 Oneskorenie zvuku ($REPO_SLUG): **$box** ($ip) — OBS zvýšil zvukové oneskorenie mixu z ${bstart} ms na **${bnow} ms** (+${bdelta} ms, ${src_txt}). Celý zvukový výstup tohto OBS je teraz o ${bdelta} ms neskôr a ostane tak až do reštartu OBS. Príčinou býva zaseknutie zvukového vlákna (15.10.: 432 ms → +85 ms). Treba rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
     *)       log "$box buffering: unexpected verdict '${bverdict:-<empty>}' -- holding, no page" ;;
   esac
 }

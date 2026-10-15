@@ -179,14 +179,18 @@ it grades only the newest 60 s dump, and a stall that catches up leaves the tick
 nominal. The lasting, audible effect is the buffering, so this third arm pages it.
 
 - **Gather** (`audio_buffering_from_log`, `bundle_state_audio.py`, the shared `tail=`):
-  - `audio_buffering_ms` = the newest `#800` `total_buffering=` in the tail; no `#800` line in the
-    tail = the whole facet absent -> UNKNOWN;
-  - `audio_buffering_start_ms` = the NEWEST `genlock audio buffering floor ... is now N` line in the
-    bounded read (printed at the first tick, so a long session keeps it in the head slice; an audio
-    reset prints a new one), else the first NON-ZERO `#800` total of the tail (a build before the
-    floor). **The first `#800` line of every session reads `total_buffering=0 ms (ticks=0/45)`**
-    (printed in the same millisecond as the floor line, before the first tick), so it is never a
-    start value -- read live on stream-snv 13.10 + 15.10;
+  - `audio_buffering_ms` = the newest `#800` `total_buffering=` in the tail that comes AFTER the
+    tail's newest floor line (a total logged before an audio reset's floor line, or the session's
+    first line before the first tick, is not the current buffering); none = the whole facet absent
+    -> UNKNOWN;
+  - `audio_buffering_start_ms` = the NEWEST `genlock audio buffering floor ... is now N` line, in
+    the tail or else the head slice (printed at the first tick, so a long session keeps it in the
+    head; an audio reset prints a new one). Without one, only a WHOLE-FILE read (a build before the
+    floor) falls back to its first NON-ZERO `#800` total; a bounded read reports no start (UNKNOWN),
+    because its tail's first total can be an old raise (review round 1). **The first `#800` line of
+    a session can read `total_buffering=0 ms (ticks=0/45)`** (stream-snv 13.10 + 15.10: printed in
+    the same millisecond as the floor line, before the first tick; resolume 14.10 read 85 there), so
+    it is never a start value;
   - `audio_buffering_source` = the newest `ABOVE the floor ... (source: <name>)` line in the bounded
     read. **The `#800` `buffering_source=` reads `-` on every live line, also after a raise**, so it
     is only a fallback when it names something. A raise whose ABOVE line left both slices of a long
@@ -206,11 +210,14 @@ nominal. The lasting, audible effect is the buffering, so this third arm pages i
   machine-channel RECOVERY line. The ratchet only ends with an OBS restart, so the recovery IS that
   restart. The page says the stream/strih output audio is now N ms later until an OBS restart and
   names the source.
-- **resolume (stated, a review point):** the cg OBS legitimately grows its buffering on a media /
-  `NDI test` start ON PROGRAM (`genlock-audio-buffering-floor.md`; the mix guard stops only hidden
-  sources), so the arm pages there too. That delay is real on the cg output (its NDI audio into
-  SongPlayer runs later until a restart), but it is not a stall; the design left an absolute bound
-  to review.
+- **resolume:** a media / `NDI test` start ON PROGRAM can still grow the cg OBS buffering
+  (`genlock-audio-buffering-floor.md`; the mix guard stops only hidden and late-entering sources),
+  and the arm would page it: the delay is real on the cg output until a restart. Read-only on
+  15.10.2026 (review round 1): the six resolume OBS sessions since 7.10 (incl. the 141 MB 8.10 event
+  day) each carry exactly one floor line (14.10: line 79, deep in the 2 MB head), no
+  `ABOVE the floor` line, and a newest `#800` of 85 ms, so the arm would not have paged resolume
+  once. If such a page ever turns out to be a legitimate media start, the fix is an
+  `audio-buffering` obs-fleet facet without resolume, not a change to the decision.
 - **Deploy:** the facet is new on the `:8899` gather, so the bundle-state server tree must be
   redeployed on stream-snv, strih-snv and resolume (supervisor step, every file of
   `scripts/lib/bundle-state-files.txt`). Until then the facet is absent and the arm reads UNKNOWN.

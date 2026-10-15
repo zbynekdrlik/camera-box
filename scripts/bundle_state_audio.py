@@ -378,34 +378,55 @@ def _audio_stall_dump_in_head(text):
 # whole output until an OBS restart, while the mixer tick counts recover. `#800` logs the current
 # total every minute; the floor line (`genlock audio buffering floor ... is now N`) is the
 # session's start value, and only the `ABOVE the floor ... (source: <name>)` line names the source
-# (the #800 `buffering_source=` reads `-` on every live line). The FIRST #800 line of a session is
-# printed before the first tick and reads 0, so it is never a start value.
+# (the #800 `buffering_source=` reads `-` on every live line). The first #800 line of a session can
+# be printed before the first tick and read 0 (stream-snv), so it is never a start value.
 _AUDIO_800_TOTAL_RE = re.compile(
     r"audio-telemetry #800: total_buffering=(\d+) ms \(ticks=\d+/\d+\) buffering_source=(.*)$")
 _AUDIO_FLOOR_RE = re.compile(
-    r"genlock audio buffering floor \(issue 1367\): total audio buffering is now (\d+) milliseconds")
+    r"genlock audio buffering floor \(issue 1367\): total audio buffering is now (\d+) "
+    r"milliseconds")
 _AUDIO_ABOVE_SOURCE_RE = re.compile(
     r"genlock audio buffering ABOVE the floor \(issue 1367\): adding \d+ milliseconds of audio "
     r"buffering, total audio buffering is now \d+ milliseconds \(source: (.*?)\); ASRC level band")
 
 
+def _newest_floor_ms(text):
+    """The value of the newest genlock floor line in `text`, or None."""
+    floor = None
+    for line in (text or "").splitlines():
+        if "genlock audio buffering floor" in line:
+            m = _AUDIO_FLOOR_RE.search(line)
+            if m:
+                floor = m.group(1)
+    return floor
+
+
 def audio_buffering_from_log(text, tail=None):
     """issue 1381 -- `(now_ms, start_ms, source, age_s)` of the audio mix buffering, all strings,
-    or four `""` when the tail holds no `#800` summary line (absent -> UNKNOWN downstream).
+    or four `""` when the tail holds no current `#800` summary line (absent -> UNKNOWN downstream).
 
-    * `now_ms` -- the newest `#800` `total_buffering=` in the tail.
-    * `start_ms` -- the session's start value: the NEWEST floor line anywhere in the bounded read
-      (it is printed at the first tick, so a long session keeps it in the head slice; an audio
-      reset prints a new one); without one (a build before the floor) the first NON-ZERO `#800`
-      total of the tail. `""` when neither exists.
+    * `now_ms` -- the newest `#800` `total_buffering=` in the tail that comes AFTER the tail's
+      newest floor line: a total logged before a floor line describes the buffering before an
+      audio reset (or the session's first line, before the first tick), never the current one.
+    * `start_ms` -- the session's start value: the NEWEST floor line, in the tail or else in the
+      head slice (it is printed at the first tick, so a long session keeps it in the head; an
+      audio reset prints a new one). Without one, a whole-file read (a build before the floor)
+      falls back to its first NON-ZERO `#800` total; a bounded read reports `""` (its tail's first
+      total can be an old raise, so it is never guessed).
     * `source` -- the newest `ABOVE the floor` line's source in the bounded read, else the newest
       `#800` `buffering_source` that is not `-`, else `""` (never a guess).
     * `age_s` -- the newest `#800` line's in-log age behind the log head (the audio-mixer recency
       convention). `tail` = a precomputed `timestamped_tail_lines(text)`."""
     stamped, head = tail if tail is not None else timestamped_tail_lines(text)
-    newest = None          # (pos_s, total, source) of the newest #800 line in the tail
+    newest = None          # (pos_s, total, source) of the newest current #800 line in the tail
     first_nonzero = None
+    tail_floor = None
     for pos, line in stamped:
+        if "genlock audio buffering floor" in line:
+            m = _AUDIO_FLOOR_RE.search(line)
+            if m:
+                tail_floor, newest = m.group(1), None
+            continue
         if "audio-telemetry #800: total_buffering=" not in line:
             continue
         m = _AUDIO_800_TOTAL_RE.search(line.rstrip("\r"))
@@ -416,17 +437,18 @@ def audio_buffering_from_log(text, tail=None):
             first_nonzero = m.group(1)
     if newest is None:
         return ("", "", "", "")
-    floor = above_source = None
-    for line in (text or "").splitlines():
-        if "genlock audio buffering" not in line:
-            continue
-        m = _AUDIO_FLOOR_RE.search(line)
-        if m:
-            floor = m.group(1)
-            continue
-        m = _AUDIO_ABOVE_SOURCE_RE.search(line)
-        if m:
-            above_source = m.group(1)
-    start = floor if floor is not None else (first_nonzero or "")
+    t = text or ""
+    bounded = LOG_BOUNDED_READ_SEPARATOR in t
+    start = tail_floor
+    if start is None and bounded:
+        start = _newest_floor_ms(t.partition(LOG_BOUNDED_READ_SEPARATOR)[0])
+    if start is None:
+        start = "" if bounded else (first_nonzero or "")
+    above_source = None
+    for line in t.splitlines():
+        if "genlock audio buffering ABOVE" in line:
+            m = _AUDIO_ABOVE_SOURCE_RE.search(line)
+            if m:
+                above_source = m.group(1)
     source = above_source or ("" if newest[2] in ("", "-") else newest[2])
     return (newest[1], start, source, str(round(head - newest[0])))
