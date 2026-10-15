@@ -367,19 +367,19 @@ class Monitor:
             self.log(out)
 
     def _read(self, ff, timeout):
-        """Up to CHUNK_BYTES from ffmpeg within TIMEOUT (in 1 s slices, so a stop is seen); b"" on EOF or
-        timeout."""
+        """Up to CHUNK_BYTES from ffmpeg within TIMEOUT (in 1 s slices, so a stop is seen): the bytes, b"" on
+        EOF, None on a timeout or a stop."""
         fd = ff.stdout.fileno()
         deadline = time.monotonic() + timeout
         while not self.stopping:
             left = deadline - time.monotonic()
             if left <= 0:
-                return b""
+                return None
             r, _w, _x = select.select([fd], [], [], min(1.0, left))
             if r:
                 return os.read(fd, CHUNK_BYTES)
             self.heartbeat()
-        return b""
+        return None
 
     def _drop(self, n):
         self.st["dropped_bytes"] += n
@@ -419,11 +419,17 @@ class Monitor:
             if self.stopping:
                 return "stopping", dropped
             data = self._read(ff, self.stall_s)
-            if not data:
+            if data is None:
                 if self.stopping:
                     return "stopping", dropped
-                if ff.poll() is None:
-                    return "stalled (no audio for %g s)" % self.stall_s, dropped
+                return "stalled (no audio for %g s)" % self.stall_s, dropped
+            if not data:
+                # EOF: ffmpeg closes its output a moment before it exits at a stream end
+                try:
+                    ff.wait(2.0)
+                except subprocess.TimeoutExpired:
+                    self.log("ffmpeg closed its output but did not exit within 2 s")
+                ff_err.join()
                 return "ended (ffmpeg rc %s%s)" % (ff.returncode, ": " + ff_err.last if ff_err.last else ""), dropped
             self.heartbeat()
 
