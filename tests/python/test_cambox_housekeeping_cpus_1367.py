@@ -189,17 +189,27 @@ def _stubs(tmp_path, mode="ro", reexec_sets: str | None = "0-1"):
     reexec = (f'printf "Name:\\tsystemd\\nCpus_allowed_list:\\t{reexec_sets}\\n" >{proc}/1/status\n'
               if reexec_sets else "")
     stub("taskset", f'echo "taskset $*" >>{log}\n{reexec}')
+    stub("systemctl", f'echo "systemctl $*" >>{log}\n')
     stub("sync", "exit 0\n")
     stub("fuser", "exit 1\n")
     stub("lsof", "exit 0\n")
     return b, log, proc
 
 
+def _irq_in_place(tmp_path):
+    """The camera-box irq-affinity drop-in already in place (the older apply tests are about the
+    manager drop-in and PID 1, not this one)."""
+    p = tmp_path / "irq-affinity.conf"
+    if not p.exists():
+        p.write_text(_bash("cambox_hk_irq_dropin_content").stdout)
+    return p
+
+
 def _apply(tmp_path, **kw):
     b, log, proc = _stubs(tmp_path, **kw)
     dropin = tmp_path / "etc" / "system.conf.d" / "60-camera-box-housekeeping-cpus.conf"
     env = {"CAMBOX_HK_DROPIN": str(dropin), "CAMBOX_HK_SYS": str(_sys(tmp_path)),
-           "CAMBOX_HK_PROC": str(proc)}
+           "CAMBOX_HK_PROC": str(proc), "CAMBOX_HK_IRQ_DROPIN": str(_irq_in_place(tmp_path))}
     prog = _bash("cambox_hk_apply_program", env=env).stdout
     r = subprocess.run(["bash", "-s"], input=prog, capture_output=True, text=True, timeout=60,
                        env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
@@ -230,7 +240,7 @@ def test_apply_is_a_noop_on_a_box_already_in_place(tmp_path):
     dropin = tmp_path / "d.conf"
     dropin.write_text(_bash('cambox_hk_dropin_content "$1"', "0,1").stdout)
     env = {"CAMBOX_HK_DROPIN": str(dropin), "CAMBOX_HK_SYS": str(_sys(tmp_path)),
-           "CAMBOX_HK_PROC": str(proc)}
+           "CAMBOX_HK_PROC": str(proc), "CAMBOX_HK_IRQ_DROPIN": str(_irq_in_place(tmp_path))}
     prog = _bash("cambox_hk_apply_program", env=env).stdout
     r = subprocess.run(["bash", "-s"], input=prog, capture_output=True, text=True, timeout=60,
                        env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
@@ -291,7 +301,7 @@ def test_the_live_apply_rewrites_a_dropin_with_an_extra_trailing_blank_line(tmp_
     dropin = tmp_path / "d.conf"
     dropin.write_text(_bash('cambox_hk_dropin_content "$1"', "0,1").stdout + "\n")
     env = {"CAMBOX_HK_DROPIN": str(dropin), "CAMBOX_HK_SYS": str(_sys(tmp_path)),
-           "CAMBOX_HK_PROC": str(proc)}
+           "CAMBOX_HK_PROC": str(proc), "CAMBOX_HK_IRQ_DROPIN": str(_irq_in_place(tmp_path))}
     prog = _bash("cambox_hk_apply_program", env=env).stdout
     r = subprocess.run(["bash", "-s"], input=prog, capture_output=True, text=True, timeout=60,
                        env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
@@ -324,7 +334,7 @@ def test_the_live_apply_removes_a_leftover_dropin_inside_the_rw_window(tmp_path)
     dropin = tmp_path / "d.conf"
     dropin.write_text("[Manager]\nCPUAffinity=0,1\n")
     env = {"CAMBOX_HK_DROPIN": str(dropin), "CAMBOX_HK_SYS": str(_sys(tmp_path, isolated="")),
-           "CAMBOX_HK_PROC": str(proc)}
+           "CAMBOX_HK_PROC": str(proc), "CAMBOX_HK_IRQ_DROPIN": str(_irq_in_place(tmp_path))}
     prog = _bash("cambox_hk_apply_program", env=env).stdout
     r = subprocess.run(["bash", "-s"], input=prog, capture_output=True, text=True, timeout=60,
                        env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
