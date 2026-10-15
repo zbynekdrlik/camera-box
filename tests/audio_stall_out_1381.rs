@@ -233,7 +233,7 @@ fn the_dump_names_the_slowest_callback_without_ever_waiting_for_a_lock_1381() {
         "ID encbusy-out kind=output name='NDI PGM' held=0 blocked=0",
         "ID trunc kind=output name='NDI' held=0 blocked=0",
         "ID noname kind=output name='' held=0 blocked=0",
-        "ID ctl kind=output name='a?b?c' held=0 blocked=0",
+        "ID ctl kind=output name='a?b?c?' held=0 blocked=0",
     ];
     let got: Vec<&String> = harness_trace()
         .iter()

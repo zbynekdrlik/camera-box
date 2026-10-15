@@ -345,7 +345,12 @@ static void run_audio_io(void)
 	print_window("W1", out);
 	print_window("W1R", out); /* the take reset the window */
 
-	/* window 2, one tick that sleeps and the OS wakes 2 ms late (the worst wake of this window,
+	/* windows 2 and 3 run audio_thread again on the SAME audio_output, so its current-iteration
+	 * record carries over from the previous run. Real libobs never restarts the thread on one
+	 * object (audio_output_close frees it); the expectations read like one continuous thread whose
+	 * window was taken between two ticks.
+	 *
+	 * window 2, one tick that sleeps and the OS wakes 2 ms late (the worst wake of this window,
 	 * so its breakdown is window 1's last iteration): the get-mixers lock waits 5 ms, output B
 	 * (mix 1) is the slowest this time. */
 	script_clear();
@@ -446,7 +451,7 @@ static int h_identity_lock(pthread_mutex_t *m)
 static struct obs_output out1 = {{"NDI PGM", NULL}};
 static struct obs_output out2 = {{"Rec", NULL}};
 static struct obs_output out3 = {{NULL, NULL}};
-static struct obs_output out4 = {{"a\nb\tc", NULL}};
+static struct obs_output out4 = {{"a\nb\tc\x7f", NULL}};
 static struct obs_encoder enc1 = {{"aac'enc", NULL}};
 static int raw_tag;
 
