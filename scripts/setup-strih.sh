@@ -978,7 +978,7 @@ step "16j" "Restreamer control-room host (restreamer issue 388): Google Chrome f
 if WHY="$(obs_box_step_applies 16j-restreamer)"; then obs_box_stream_restreamer_host_provision || fail "the restreamer host packages could not be provisioned (above)"; else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-step "16k" "Cambox log sink (issue 1394): journal-remote + the netconsole rsyslog instance, idle priority -- enable-only"
+step "16k" "Cambox log sink (issue 1394): journal-remote + the netconsole rsyslog instance, idle priority, enabled + running"
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_install || fail "issue 1394: the cambox log sink could not be provisioned (above)"; else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------

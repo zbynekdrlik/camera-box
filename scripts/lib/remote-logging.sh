@@ -97,8 +97,11 @@ REMOTE_LOG_JU_PKG="systemd-journal-remote"
 # number set is spelled out: a bracket RANGE follows the locale in bash (ci-testing-gotchas.md).
 remote_log_ipv4_ok() {
   local ip="${1-}" o
+  local -a parts
   [[ "$ip" =~ ^[0123456789]{1,3}\.[0123456789]{1,3}\.[0123456789]{1,3}\.[0123456789]{1,3}$ ]] || return 1
-  for o in ${ip//./ }; do [ "$((10#$o))" -le 255 ] || return 1; done
+  # split on the dots alone, whatever IFS the caller set (review round 1)
+  IFS=. read -r -a parts <<<"$ip"
+  for o in "${parts[@]}"; do [ "$((10#$o))" -le 255 ] || return 1; done
   return 0
 }
 

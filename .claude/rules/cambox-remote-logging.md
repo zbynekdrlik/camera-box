@@ -114,7 +114,8 @@ the current boot.
   camera the box lists (`/var/log/cambox/camN-kernel.log`, the sender matched by its
   `camera_resolve` address = netconsole's source) and `other-senders.log` for anything else: a
   fixed set of files, nothing dropped. No workDirectory, no disk queue. The box's own
-  `rsyslog.service` is never touched.
+  `rsyslog.service` is never touched; when step 16k itself had to install the `rsyslog` package (a
+  box with no syslog daemon), the distro unit the package starts is disabled again (review round 1).
   - **Why a subdirectory of /etc/rsyslog.d:** Ubuntu ENFORCES an AppArmor profile on
     `/usr/sbin/rsyslogd` that reads only `/etc/rsyslog.conf` + `/etc/rsyslog.d/**` and writes
     `/var/log/**` + `/var/spool/rsyslog/**` (dev1, 15.10.2026: `rsyslogd -N1 -f <scratch file>` =
@@ -128,11 +129,16 @@ the current boot.
 - **Idle priority, never the production OBS:** every receiver unit carries `Nice=19`,
   `CPUSchedulingPolicy=idle`, `IOSchedulingClass=idle`, and on a hybrid CPU `CPUAffinity=` the
   E-cores (`strih_program_audio_ecores`, the strih_lx_lowprio_prefix reading). strih-snv is AMD (no
-  `cpu_atom`): no affinity line, every cpu.
-- **Install (step 16k) is enable-only:** packages only when missing, every file through
-  `strih_session_apps_put` (written only when its bytes or mode differ), a daemon-reload after a unit
-  change, `enable` of the socket + sink + rotate timer, a `try-restart` of a RUNNING unit whose files
-  changed; a stopped unit is never started. The supervisor starts them once (runbook below).
+  `cpu_atom`): no affinity line, every cpu. Known limit, accepted: on a box at 100 % CPU a SCHED_IDLE
+  receiver can fall behind, and the kernel drops netconsole UDP lines past the socket buffer; the
+  journal upload retries, netconsole does not.
+- **Install (step 16k) leaves them RUNNING** (the strih-tally precedent): packages only when missing,
+  every file through `strih_session_apps_put` (written only when its bytes or mode differ), a
+  daemon-reload after a unit change, a `try-restart` of a RUNNING unit whose files changed, then
+  `enable --now` of a unit not yet enabled and `start` of an enabled one. Review round 1: an
+  enable-only step left item 46 failing, and setup-strih step 17 (verify-strih) is the strih-snv
+  genlock deploy's accept gate, so every deploy would have gone red. The receivers are passive
+  idle-priority listeners; nothing on the cambox side waits for them.
 - **verify-strih item 46** (`strih_cambox_log_sink_grade_report`, 3 rows): `(log-sink-files)`
   packages + every file byte-identical to its renderer; `(log-sink-units)` the three units enabled +
   active (a FAIL names the `systemctl start`); `(log-sink-listen)` UDP :514 and TCP :19532.
@@ -155,9 +161,8 @@ outside the unit dir.
 
 1. **strih-snv** (10.77.9.202) and **strih-pp** (10.77.8.202, dial `strih-pp.lan` from dev1): run
    setup-strih (`--box <box>`; the strih-snv genlock deploy runs it anyway), or only step 16k from a
-   checkout; then `sudo systemctl start systemd-journal-remote.socket cambox-netconsole-sink.service
-   cambox-netconsole-rotate.timer`; then `sudo ./scripts/verify-strih.sh --box <box>` -> item 46 =
-   3 PASS. Read back: `ss -lunp | grep ':514 '` names rsyslogd, `ss -ltnp | grep ':19532 '` names
+   checkout (it enables and starts the three receivers); then
+   `sudo ./scripts/verify-strih.sh --box <box>` -> item 46 = 3 PASS. Read back: `ss -lunp | grep ':514 '` names rsyslogd, `ss -ltnp | grep ':19532 '` names
    systemd.
 2. **The camboxes** (no E2E holding the rig lease; never a reboot):
    `scripts/cambox-ro-units-apply.sh --plan --active` (SNV: cam2 cam3 cam5) and `--plan --venue pp`

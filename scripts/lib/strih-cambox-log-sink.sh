@@ -19,7 +19,9 @@
 #     User=syslog + CAP_NET_BIND_SERVICE), imudp on :514, writing one file per camera of this venue
 #     (/var/log/cambox/camN-kernel.log, the sender matched by the camera's camera_resolve address)
 #     and everything else to /var/log/cambox/other-senders.log -- a fixed set of files, nothing
-#     dropped. The box's own rsyslog.service is never touched. Its config lives in a SUBDIRECTORY of
+#     dropped. The box's own rsyslog.service is never touched (when step 16k itself had to install the
+#     rsyslog package, the distro unit the package starts is disabled again: the box had no syslog
+#     daemon before). Its config lives in a SUBDIRECTORY of
 #     /etc/rsyslog.d: Ubuntu's ENFORCED AppArmor profile for /usr/sbin/rsyslogd lets it read only
 #     /etc/rsyslog.conf + /etc/rsyslog.d/** and write /var/log/** + /var/spool/rsyslog/** (checked on
 #     dev1: a config elsewhere is "Permission denied"), while the box's own instance loads only
@@ -32,12 +34,17 @@
 #   * every receiver runs at IDLE priority (Nice=19, CPUSchedulingPolicy=idle, IOSchedulingClass=idle)
 #     and, on a hybrid CPU, on the E-cores (CPUAffinity= read the strih_lx_lowprio_prefix way through
 #     strih_program_audio_ecores; strih-snv is AMD, so no affinity line there), so the production OBS
-#     is untouched.
+#     is untouched. Known limit, accepted (owner's idle-priority rule): on a box at 100 % CPU a
+#     SCHED_IDLE receiver can fall behind and the kernel drops UDP netconsole lines past the socket
+#     buffer; the journal upload retries, netconsole does not.
 #
-#   * strih_cambox_log_sink_install -- setup-strih step 16k (as root), ENABLE-ONLY: the packages only
-#     when missing, every file written only when its bytes or mode differ (strih_session_apps_put), a
-#     daemon-reload after a unit change, `enable` of the socket, the sink and the rotate timer, and a
-#     `try-restart` of a RUNNING unit whose files changed. A stopped unit is never started here.
+#   * strih_cambox_log_sink_install -- setup-strih step 16k (as root): the packages only when missing,
+#     every file written only when its bytes or mode differ (strih_session_apps_put), a daemon-reload
+#     after a unit change, a `try-restart` of a RUNNING unit whose files changed, then `enable --now`
+#     of a unit not yet enabled and `start` of an enabled one (the strih-tally precedent): the
+#     receivers are passive idle-priority listeners, and item 46 -- which setup-strih step 17 and the
+#     strih-snv genlock deploy's accept gate run -- grades them active (review round 1: an enable-only
+#     step failed every deploy).
 #   * strih_cambox_log_sink_grade_rows / _report -- verify-strih item 46, 3 rows:
 #       (log-sink-files)  the packages installed and every file byte-identical to its renderer;
 #       (log-sink-units)  the socket, the sink and the rotate timer enabled + active;
@@ -300,8 +307,8 @@ strih_cambox_log_sink_missing_packages() {
 # strih_cambox_log_sink_install -> see the header. One line per action. rc 1 + a stderr line on a
 # package that will not install, a renderer that fails, a failed write or a failed systemctl call.
 strih_cambox_log_sink_install() {
-  local ecores missing path fn tmp w changed_sink=0 changed_jr=0 changed_timer=0 changed_units=0
-  local -a restart=()
+  local ecores missing path fn tmp w changed_sink=0 changed_jr=0 changed_timer=0 changed_units=0 u
+  local -a restart=() to_enable=() to_start=()
   ecores="$(strih_log_sink_ecores)"
   missing="$(strih_cambox_log_sink_missing_packages)"
   if [ -n "$missing" ]; then
@@ -309,6 +316,12 @@ strih_cambox_log_sink_install() {
     # shellcheck disable=SC2086  # one word per package name
     DEBIAN_FRONTEND=noninteractive apt-get install -y $missing || {
       echo "strih-cambox-log-sink: apt-get install ${missing//$'\n'/ } failed" >&2; return 1; }
+    if [[ $'\n'"${missing}"$'\n' == *$'\n'rsyslog$'\n'* ]]; then
+      # the package enables + starts the distro rsyslog.service; this box had no syslog daemon before
+      strih_log_sink_systemctl disable --now rsyslog.service || {
+        echo "strih-cambox-log-sink: systemctl disable --now rsyslog.service failed" >&2; return 1; }
+      echo "  rsyslog.service (the distro instance the package installed) disabled + stopped: only the dedicated sink runs"
+    fi
   fi
   tmp="$(mktemp)" || { echo "strih-cambox-log-sink: mktemp failed" >&2; return 1; }
   while IFS=$'\t' read -r path fn; do
@@ -332,18 +345,32 @@ strih_cambox_log_sink_install() {
   if [ "$changed_units" = 1 ]; then
     strih_log_sink_systemctl daemon-reload || { echo "strih-cambox-log-sink: systemctl daemon-reload failed" >&2; return 1; }
   fi
-  strih_log_sink_systemctl enable "$STRIH_LOG_SINK_JR_SOCKET" "$STRIH_LOG_SINK_UNIT" "$STRIH_LOG_SINK_ROTATE_TIMER" || {
-    echo "strih-cambox-log-sink: systemctl enable ${STRIH_LOG_SINK_JR_SOCKET} ${STRIH_LOG_SINK_UNIT} ${STRIH_LOG_SINK_ROTATE_TIMER} failed" >&2
-    return 1; }
-  echo "  enabled ${STRIH_LOG_SINK_JR_SOCKET} ${STRIH_LOG_SINK_UNIT} ${STRIH_LOG_SINK_ROTATE_TIMER} (enable-only: never started here)"
   [ "$changed_sink" = 1 ] && restart+=("$STRIH_LOG_SINK_UNIT")
   [ "$changed_jr" = 1 ] && restart+=("$STRIH_LOG_SINK_JR_SERVICE")
   [ "$changed_timer" = 1 ] && restart+=("$STRIH_LOG_SINK_ROTATE_TIMER")
   if [ "${#restart[@]}" -gt 0 ]; then
-    # only a RUNNING unit moves onto its new files; a stopped one stays stopped
+    # a RUNNING unit moves onto its new files; a stopped one is started below
     strih_log_sink_systemctl try-restart "${restart[@]}" || {
       echo "strih-cambox-log-sink: systemctl try-restart ${restart[*]} failed" >&2; return 1; }
     echo "  try-restart ${restart[*]}"
+  fi
+  for u in "$STRIH_LOG_SINK_JR_SOCKET" "$STRIH_LOG_SINK_UNIT" "$STRIH_LOG_SINK_ROTATE_TIMER"; do
+    if [ "$(strih_log_sink_systemctl is-enabled "$u" 2>/dev/null || true)" = enabled ]; then
+      to_start+=("$u")
+    else
+      to_enable+=("$u")
+    fi
+  done
+  if [ "${#to_enable[@]}" -gt 0 ]; then
+    strih_log_sink_systemctl enable --now "${to_enable[@]}" || {
+      echo "strih-cambox-log-sink: systemctl enable --now ${to_enable[*]} failed" >&2; return 1; }
+    echo "  enabled + started ${to_enable[*]}"
+  fi
+  if [ "${#to_start[@]}" -gt 0 ]; then
+    # a no-op on a running unit: the receivers always run
+    strih_log_sink_systemctl start "${to_start[@]}" || {
+      echo "strih-cambox-log-sink: systemctl start ${to_start[*]} failed" >&2; return 1; }
+    echo "  running ${to_start[*]}"
   fi
   return 0
 }
@@ -392,7 +419,7 @@ strih_cambox_log_sink_grade_rows() {
   if [ "$units_ok" = 1 ]; then
     printf 'OK|(log-sink-units)%s\n' "$states"
   else
-    printf 'FAIL|(log-sink-units)%s -- setup-strih step 16k only enables them: systemctl start %s %s %s (issue 1394)\n' \
+    printf 'FAIL|(log-sink-units)%s -- re-run setup-strih.sh step 16k, or systemctl start %s %s %s; journalctl names the cause (issue 1394)\n' \
       "$states" "$STRIH_LOG_SINK_JR_SOCKET" "$STRIH_LOG_SINK_UNIT" "$STRIH_LOG_SINK_ROTATE_TIMER"
   fi
 
