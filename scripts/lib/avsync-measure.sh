@@ -15,7 +15,14 @@ set -euo pipefail
 # for the encode params, the status-line composition, the fail-CLOSED freshness reason, and the
 # clip temp path, so the orchestrator holds only I/O.
 #
-# Source-only: defines the functions below; runs nothing on its own.
+# Source-only: defines the functions below; runs nothing on its own (beyond sourcing the venue table).
+#
+# issue 1441: the measurement runs once PER VENUE (snv, pp, ...). Which venues exist, and the grab URL
+# of each, come from the ONE venue table scripts/lib/avsync-venues.sh (derived from the declared fleet).
+# The per-venue file names below (clip, heartbeat, day log) keep two venues' passes apart on dev2.
+
+# shellcheck source=scripts/lib/avsync-venues.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/avsync-venues.sh"
 
 # Canonical cadence (seconds). SINGLE SOURCE OF TRUTH for the systemd timer's OnUnitInactiveSec and
 # any documentation of the loop period -- mirrors avsync-watchdog.ps1's ~90 s natural cadence.
@@ -42,10 +49,35 @@ avsync_measure_clip_dir() {
   fi
 }
 
-# avsync_measure_clip_path [DIR] -> the clip file path inside DIR (default: avsync_measure_clip_dir).
+# avsync_measure_clip_path [DIR] [VENUE] -> the clip file path inside DIR (default:
+# avsync_measure_clip_dir). With VENUE the name carries it (issue 1441): two venues' instances share the
+# clip dir, and one clip name would let one pass grab over the other's clip.
 avsync_measure_clip_path() {
-  local dir="${1:-$(avsync_measure_clip_dir)}"
-  printf '%s/live-clip.mp4' "$dir"
+  local dir="${1:-$(avsync_measure_clip_dir)}" venue="${2:-}"
+  if [ -n "$venue" ]; then
+    printf '%s/live-clip-%s.mp4' "$dir" "$venue"
+  else
+    printf '%s/live-clip.mp4' "$dir"
+  fi
+}
+
+# avsync_measure_lock_path -> the dev2-wide SyncNet lock (issue 1441): every venue's instance takes it
+# around its SyncNet run, so two live venues never run the model on the GPU at the same time. It sits
+# in the shared clip dir (one per dev2 user).
+avsync_measure_lock_path() {
+  printf '%s/syncnet.lock' "$(avsync_measure_clip_dir)"
+}
+
+# avsync_measure_heartbeat_path HOME VENUE -> the venue's heartbeat file, the one the dev1 watchdogs
+# read (`<HOME>/.camera-box/avsync-watchdog-heartbeat-<venue>.txt`, name from the venue table).
+avsync_measure_heartbeat_path() {
+  printf '%s/.camera-box/%s' "${1:-$HOME}" "$(avsync_venue_heartbeat_file "${2:-}")"
+}
+
+# avsync_measure_legacy_heartbeat_path HOME -> the old single heartbeat file (before issue 1441). The
+# legacy venue's instance keeps it as a compatibility symlink to its per-venue file.
+avsync_measure_legacy_heartbeat_path() {
+  printf '%s/.camera-box/avsync-watchdog-heartbeat.txt' "${1:-$HOME}"
 }
 
 # Per-read I/O timeout (microseconds) on the RTMP INPUT -- a dead/half-open relay delivers no data,
@@ -121,12 +153,18 @@ avsync_measure_heartbeat_record() {
 # the single source of truth for the log PATH and the log ROW; the append I/O itself lives in the
 # orchestrator (scripts/avsync-measure-dev2.sh), keeping this lib pure.
 
-# avsync_measure_log_path [BASE] DAY -> the per-day log path "<BASE>/avsync/measurements-<DAY>.tsv"
-# (BASE defaults to $HOME; DAY is a YYYY-MM-DD string the caller derives from the pass epoch in
-# LOCAL time). The dev1 report reads today's + yesterday's files by this exact shape.
+# avsync_measure_log_path [BASE] DAY [VENUE] -> the per-day log path
+# "<BASE>/avsync/measurements-<VENUE>-<DAY>.tsv" ("measurements-<DAY>.tsv" without a VENUE, the
+# pre-issue-1441 name). BASE defaults to $HOME; DAY is a YYYY-MM-DD string the caller derives from the
+# pass epoch in LOCAL time. The dev1 report reads each venue's today + yesterday files by this shape --
+# one file per venue, so two venues' broadcasts never merge into one session.
 avsync_measure_log_path() {
-  local base="${1:-$HOME}" day="$2"
-  printf '%s/avsync/measurements-%s.tsv' "$base" "$day"
+  local base="${1:-$HOME}" day="$2" venue="${3:-}"
+  if [ -n "$venue" ]; then
+    printf '%s/avsync/measurements-%s-%s.tsv' "$base" "$venue" "$day"
+  else
+    printf '%s/avsync/measurements-%s.tsv' "$base" "$day"
+  fi
 }
 
 # avsync_measure_log_line EPOCH STATUS -> one per-day-log ROW, BYTE-IDENTICAL to the heartbeat

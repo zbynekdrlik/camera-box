@@ -6,7 +6,13 @@ set -euo pipefail
 # This script provisions dev2 to run scripts/avsync-measure-dev2.sh on a systemd --user timer:
 # it rsyncs the SyncNet checkout + weights + the measurer's python deps from dev1 to dev2:~/avsync,
 # builds a venv (torch/cv2/scipy/numpy from the system cu128 install via --system-site-packages;
-# only the SyncNet-specific pip deps are added), and installs+enables the timer. IDEMPOTENT.
+# only the SyncNet-specific pip deps are added), and installs+enables the timers. IDEMPOTENT.
+#
+# issue 1441: ONE timer PER VENUE (the template avsync-measure-dev2@<venue>.timer, one per row of the
+# venue table scripts/lib/avsync-venues.sh -- today snv + pp). --install ships the venue table's files
+# (its lib + obs-fleet.sh + strih-box-facts.sh + scripts/strih-boxes/*.env, which the measurer derives
+# each venue's grab URL from), retires the old single avsync-measure-dev2.timer, and enables every
+# venue's timer. Adding a venue later = re-run --install (its fact file + fleet row ship with it).
 #
 # RUNS ON dev1 (where the source lives); pushes to dev2 over key-auth ssh/rsync (dev1->dev2 is key
 # auth -- machine-identities.md; NEVER a password here). The SUPERVISOR runs `--install`; `--check`
@@ -14,13 +20,15 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/avsync-dev2-install.sh --check     # read-only: report every prerequisite's state, exit 0
-#   scripts/avsync-dev2-install.sh --install    # provision dev2 (idempotent) then enable the timer
+#   scripts/avsync-dev2-install.sh --install    # provision dev2 (idempotent), enable a timer per venue
 #   scripts/avsync-dev2-install.sh --help
 #
 # Exit codes: 0 = ok (check printed / install done), 2 = usage error, 3 = install step failed.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+# shellcheck source=scripts/lib/avsync-venues.sh
+. "$HERE/lib/avsync-venues.sh"
 
 # ── config (env-overridable) ──────────────────────────────────────────────────
 DEV2_SSH="${AVSYNC_DEV2_SSH:-newlevel@dev2}"
@@ -36,9 +44,35 @@ PIP_DEPS=(scenedetect python_speech_features)
 #   torch numpy scipy cv2 scenedetect python_speech_features tqdm websocket
 # the python helper files the measurer + av_sync_measure.py need co-located at dev2:~/avsync/
 PY_FILES=(av_sync_measure.py avsync_freshness.py av_sync_outer_loop_guard.py obs_phase2.py)
-UNITS=(avsync-measure-dev2.service avsync-measure-dev2.timer)
+UNITS=(avsync-measure-dev2@.service avsync-measure-dev2@.timer)
+# issue 1441: the measurer's sourced libs (scripts/lib/ -> dev2:~/avsync/scripts/lib/). The venue
+# table needs obs-fleet.sh (the dial host) and strih-box-facts.sh (the fact-file parser), and the fact
+# files themselves ship to dev2:~/avsync/scripts/strih-boxes/ (strih_box_dir = <lib>/../strih-boxes).
+LIB_FILES=(avsync-measure.sh avsync-venues.sh obs-fleet.sh strih-box-facts.sh)
+# The pre-issue-1441 single unit, retired by --install.
+OLD_UNITS=(avsync-measure-dev2.service avsync-measure-dev2.timer)
 
-usage() { sed -n '4,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+# dev2_timer_units -> the per-venue timer units, space-separated, venue-table order.
+dev2_timer_units() {
+  local v out=""
+  for v in $(avsync_venue_names); do
+    out="${out:+$out }avsync-measure-dev2@${v}.timer"
+  done
+  printf '%s' "$out"
+}
+
+# dev2_enable_remote_cmd -> the dev2 command that retires the old single timer (disable + remove its
+# unit files) and enables one timer per venue. `$HOME` stays literal for the remote shell.
+dev2_enable_remote_cmd() {
+  local units old="" u
+  units="$(dev2_timer_units)"
+  [ -n "$units" ] || { echo "avsync-dev2-install: the venue table is empty -- no timer to enable" >&2; return 1; }
+  for u in "${OLD_UNITS[@]}"; do old="${old} \"\$HOME/.config/systemd/user/${u}\""; done
+  printf 'systemctl --user daemon-reload && { systemctl --user disable --now avsync-measure-dev2.timer 2>/dev/null || true; } && rm -f%s && systemctl --user daemon-reload && systemctl --user enable --now %s' \
+    "$old" "$units"
+}
+
+usage() { sed -n '4,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 log() { printf '%s [avsync-dev2-install] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 die() { log "FATAL: $*"; exit 3; }
@@ -59,13 +93,16 @@ do_check() {
   for f in "${PY_FILES[@]}"; do
     if [ -f "$ROOT/scripts/$f" ]; then echo "dev1 script $f: OK"; else echo "dev1 script $f: MISSING"; ok=0; fi
   done
-  # dev2 side (one ssh; each probe fail-safe)
+  # dev2 side (one ssh; each probe fail-safe). The venue names travel as arguments (the heredoc is
+  # single-quoted, so it cannot interpolate them).
   local remote
-  remote="$(rssh "bash -s" <<'REMOTE' 2>/dev/null || true
+  remote="$(rssh "bash -s -- $(avsync_venue_names | tr '\n' ' ')" <<'REMOTE' 2>/dev/null || true
 set -uo pipefail
 BASE="$HOME/avsync"
 printf 'ffmpeg=%s\n' "$(command -v ffmpeg || echo MISSING)"
 printf 'ffprobe=%s\n' "$(command -v ffprobe || echo MISSING)"
+printf 'flock=%s\n' "$(command -v flock || echo MISSING)"
+printf 'venue_table=%s\n' "$([ -f "$BASE/scripts/lib/avsync-venues.sh" ] && [ -d "$BASE/scripts/strih-boxes" ] && echo OK || echo MISSING)"
 printf 'venv=%s\n' "$([ -x "$BASE/venv/bin/python" ] && echo OK || echo MISSING)"
 printf 'syncnet=%s\n' "$([ -f "$BASE/syncnet_python/data/syncnet_v2.model" ] && echo OK || echo MISSING)"
 printf 'measurer=%s\n' "$([ -x "$BASE/scripts/avsync-measure-dev2.sh" ] && echo OK || echo MISSING)"
@@ -79,10 +116,15 @@ fi
 # systemctl prints its verdict ("enabled"/"not-found") to STDOUT even on a non-zero exit, so take
 # only the FIRST line of the capture (a `|| echo` would append a second stray line -- the cosmetic
 # double-output caught in --check testing) and default an empty capture to a clear sentinel.
-te="$(systemctl --user is-enabled avsync-measure-dev2.timer 2>/dev/null | head -n1)"
-printf 'timer=%s\n' "${te:-not-installed}"
-ta="$(systemctl --user is-active avsync-measure-dev2.timer 2>/dev/null | head -n1)"
-printf 'timer_active=%s\n' "${ta:-inactive}"
+for v in "$@"; do
+  te="$(systemctl --user is-enabled "avsync-measure-dev2@${v}.timer" 2>/dev/null | head -n1)"
+  printf 'timer.%s=%s\n' "$v" "${te:-not-installed}"
+  ta="$(systemctl --user is-active "avsync-measure-dev2@${v}.timer" 2>/dev/null | head -n1)"
+  printf 'timer_active.%s=%s\n' "$v" "${ta:-inactive}"
+done
+# the pre-issue-1441 single timer must be gone once --install ran
+to="$(systemctl --user is-enabled avsync-measure-dev2.timer 2>/dev/null | head -n1)"
+printf 'old_single_timer=%s\n' "${to:-removed}"
 REMOTE
 )"
   if [ -z "$remote" ]; then
@@ -102,15 +144,19 @@ do_install() {
   command -v rsync >/dev/null 2>&1 || die "rsync not installed on dev1"
 
   log "1/6 create dev2 dirs"
-  rssh "mkdir -p \"\$HOME/$REMOTE_BASE/scripts/lib\" \"\$HOME/.camera-box\" \"\$HOME/.config/systemd/user\"" \
+  rssh "mkdir -p \"\$HOME/$REMOTE_BASE/scripts/lib\" \"\$HOME/$REMOTE_BASE/scripts/strih-boxes\" \"\$HOME/.camera-box\" \"\$HOME/.config/systemd/user\"" \
     || die "mkdir on dev2 failed"
 
-  log "2/6 rsync the measurer + its lib + the python helpers"
+  log "2/6 rsync the measurer + its libs + the venue table's fact files + the python helpers"
   rsync -az -e "ssh ${SSH_OPTS[*]}" \
     "$ROOT/scripts/avsync-measure-dev2.sh" "${DEV2_SSH}:${REMOTE_BASE}/scripts/" || die "rsync measurer failed"
-  rsync -az -e "ssh ${SSH_OPTS[*]}" \
-    "$ROOT/scripts/lib/avsync-measure.sh" "${DEV2_SSH}:${REMOTE_BASE}/scripts/lib/" || die "rsync lib failed"
   local f
+  for f in "${LIB_FILES[@]}"; do
+    rsync -az -e "ssh ${SSH_OPTS[*]}" \
+      "$ROOT/scripts/lib/$f" "${DEV2_SSH}:${REMOTE_BASE}/scripts/lib/" || die "rsync lib $f failed"
+  done
+  rsync -az --delete --include='*.env' --exclude='*' -e "ssh ${SSH_OPTS[*]}" \
+    "$ROOT/scripts/strih-boxes/" "${DEV2_SSH}:${REMOTE_BASE}/scripts/strih-boxes/" || die "rsync fact files failed"
   for f in "${PY_FILES[@]}"; do
     rsync -az -e "ssh ${SSH_OPTS[*]}" \
       "$ROOT/scripts/$f" "${DEV2_SSH}:${REMOTE_BASE}/" || die "rsync $f failed"
@@ -137,11 +183,13 @@ REMOTE
       "$ROOT/systemd/$u" "${DEV2_SSH}:.config/systemd/user/" || die "rsync unit $u failed"
   done
 
-  log "6/6 daemon-reload + enable --now the timer"
-  rssh "systemctl --user daemon-reload && systemctl --user enable --now avsync-measure-dev2.timer" \
+  log "6/6 retire the single timer + enable one timer per venue ($(dev2_timer_units))"
+  local enable_cmd
+  enable_cmd="$(dev2_enable_remote_cmd)" || die "no venue timer to enable"
+  rssh "$enable_cmd" \
     || die "systemctl enable failed (is 'loginctl enable-linger newlevel' set on dev2 for a headless timer?)"
 
-  log "DONE. Verify: scripts/avsync-dev2-install.sh --check ; then on dev1 flip the watchdogs to AVSYNC_HEARTBEAT_HOST=dev2 and restart their timers."
+  log "DONE. Verify: scripts/avsync-dev2-install.sh --check ; dev1's watchdogs read every venue's heartbeat (AVSYNC_HEARTBEAT_HOST=dev2)."
 }
 
 # ── flow ─────────────────────────────────────────────────────────────────────

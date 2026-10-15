@@ -1,0 +1,17 @@
+[Unit]
+# Fires the dev2 lipsync measurement of venue %i every ~90 s (#1331, issue 1441), matching
+# avsync-watchdog.ps1's own natural cadence. OnUnitInactiveSec (not OnUnitActiveSec) so the next pass
+# starts 90 s AFTER the previous one FINISHES -- a variable-length SyncNet run can never overlap itself.
+# One timer per venue (avsync-measure-dev2@snv.timer, avsync-measure-dev2@pp.timer); the two venues'
+# SyncNet runs are serialized by the measurer's shared GPU lock.
+Description=Run the camera-box dev2 lipsync measurement of venue %i every ~90 s (issue 1441)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=90s
+AccuracySec=10s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

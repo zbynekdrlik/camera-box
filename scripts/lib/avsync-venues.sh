@@ -52,11 +52,18 @@ AVSYNC_DECLARED_STREAM_VENUES="snv|stream-snv|obs-e2e-test"
 # shellcheck disable=SC2034  # read by scripts/avsync-measure-dev2.sh
 AVSYNC_LEGACY_HEARTBEAT_VENUE=snv
 
-# _avsync_venue_row_ok VENUE BOX HOST KEY -> 0 iff the row is well-formed. ASCII sets spelled out (a
-# bracket RANGE follows the locale, .claude/rules/ci-testing-gotchas.md issue 1302).
+# avsync_venue_name_ok NAME -> 0 iff NAME is a plain venue name (ASCII lower-case letters and digits;
+# it names files on dev2 and state/dedup keys on dev1). The ASCII sets are spelled out: a bracket RANGE
+# follows the locale (.claude/rules/ci-testing-gotchas.md, issue 1302).
+avsync_venue_name_ok() {
+  local LC_ALL=C lower='abcdefghijklmnopqrstuvwxyz' digit='0123456789'
+  [[ "${1-}" =~ ^[${lower}${digit}]+$ ]]
+}
+
+# _avsync_venue_row_ok VENUE BOX HOST KEY -> 0 iff the row is well-formed (same spelled-out sets).
 _avsync_venue_row_ok() {
   local LC_ALL=C lower='abcdefghijklmnopqrstuvwxyz' upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ' digit='0123456789'
-  [[ "${1-}" =~ ^[${lower}${digit}]+$ ]] || return 1
+  avsync_venue_name_ok "${1-}" || return 1
   [[ "${2-}" =~ ^[${lower}${digit}][${lower}${digit}-]*$ ]] || return 1
   _strih_box_host "${3-}" || return 1
   [[ "${4-}" =~ ^[${lower}${upper}${digit}][${lower}${upper}${digit}._-]*$ ]] || return 1
