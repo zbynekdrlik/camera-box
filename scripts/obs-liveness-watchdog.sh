@@ -90,9 +90,9 @@ log() { printf '%s [obs-liveness-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')
 # #1296: the box SET is DERIVED from the ONE declared fleet list (scripts/lib/obs-fleet.sh) —
 # obs_fleet_boxes obs-liveness = strih-snv, stream, resolume (issue 1317: strih-snv is the production
 # strih since M4). strih-snv/stream keep their own
-# STRIH_HOST/STREAM_HOST (+ per-box target fps) exactly as before; resolume (a genlock cg-obs box)
-# is added ONLY while obs_fleet_is_home resolume holds, so a traveling box that is away is never
-# polled and never produces a false wedge verdict (the #391 "no probe output = nothing to decide"
+# STRIH_HOST/STREAM_HOST (+ per-box target fps) exactly as before; a traveling box (resolume-snv,
+# and since issue 1441 strih-pp / stream-pp) is added ONLY while obs_fleet_poll_now says it is home,
+# so a traveling box that is away is never polled and never produces a false wedge verdict (the #391 "no probe output = nothing to decide"
 # short-circuit only covers a box the probe TRIED and couldn't reach).
 measure_boxes() {
   local -a box_args=()

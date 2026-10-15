@@ -90,14 +90,18 @@ BOXES="${NETWORK_REACH_BOXES:-$(obs_fleet_boxes network-reach)}"
 # issue 1441: the default is GENERIC, keyed on each row's home-check, never on a box name -- every
 # BOXES member that obs_fleet_poll_now would not poll this pass (a `traveling` box that is away:
 # resolume-snv, strih-pp, stream-pp; a `retired` one) is report-only; an `always` box and a name the
-# fleet list does not know (an ops override) always page.
+# fleet list does not know (an ops override) always page. Such an AWAY box is moreover not probed at
+# all this pass (AWAY_BOXES, main logs it and moves on): its absence is the normal state, and the
+# probes of a powered-off box's hostname (ping's DNS lookup is not bounded by -W) would only eat the
+# unit's start budget. An explicit NETWORK_REACH_REPORT_ONLY_BOXES keeps the #811 shape: its boxes
+# are probed, classified and state-tracked, never paged.
+AWAY_BOXES=""
 if [ -z "${NETWORK_REACH_REPORT_ONLY_BOXES+set}" ]; then
-  _nr_report_only_default=""
   for _nr_pair in $BOXES; do
     obs_fleet_poll_now "${_nr_pair%%|*}" && continue
-    _nr_report_only_default="${_nr_report_only_default:+$_nr_report_only_default }${_nr_pair%%|*}"
+    AWAY_BOXES="${AWAY_BOXES:+$AWAY_BOXES }${_nr_pair%%|*}"
   done
-  REPORT_ONLY_BOXES="$_nr_report_only_default"
+  REPORT_ONLY_BOXES="$AWAY_BOXES"
 else
   REPORT_ONLY_BOXES="$NETWORK_REACH_REPORT_ONLY_BOXES"
 fi
@@ -265,6 +269,12 @@ main() {
   local reach_flags=()
   for pair in $BOXES; do
     box="${pair%%|*}"; ip="${pair##*|}"
+    case " $AWAY_BOXES " in
+      *" $box "*)
+        log "$box ($ip): away -- traveling box not home (obs_fleet_poll_now), not probed this pass, report-only (issue 1441)"
+        continue
+        ;;
+    esac
     names+=("$box"); ips+=("$ip")
     local ro
     ro="$(net_reach_box_is_report_only "$box" "$REPORT_ONLY_BOXES" | sed -n 's/^report_only=//p')"
@@ -275,12 +285,18 @@ main() {
     # ever read a meaningless "down"); classify it on ping OR :4455 only (#811).
     if [ "$ro" = "1" ]; then b=0; else b="$(probe_tcp "$ip" "$BUNDLE_PORT")"; fi
     pings+=("$p"); wss+=("$w"); bundles+=("$b")
-    reach_flags+=("$([ "$(net_reach_classify_box "$p" "$w" "$b")" = REACHABLE ] && echo 1 || echo 0)")
+    # issue 1441: only a box on the rig's own path anchors the dev1-side-outage guard. A `traveling`
+    # row (resolume-snv, the Poprad boxes reached through the companion-pp router) never proves that
+    # dev1 reaches the rig, so a home PP box cannot turn an SNV uplink outage into false pages.
+    if [ "$(obs_fleet_home_check "$box" 2>/dev/null || true)" != "traveling" ]; then
+      reach_flags+=("$([ "$(net_reach_classify_box "$p" "$w" "$b")" = REACHABLE ] && echo 1 || echo 0)")
+    fi
   done
 
   # -- dev1-side-outage guard --------------------------------------------------------------------
   # dev1's path to the rig subnet is PROVEN up if ANY reference rig node answers ping OR any watched
-  # box is itself reachable (a reachable box is direct proof of connectivity). Only when NOTHING is
+  # non-traveling box is itself reachable (a reachable box on the rig path is direct proof of
+  # connectivity; a traveling box may sit on another path, issue 1441). Only when NOTHING is
   # reachable — no reference node AND neither box — is the pass "nothing to decide" (per-box state
   # left untouched), so a dev1-side uplink flap never false-pages both boxes. An EMPTY reference set
   # disables the guard (the box-reachability proof still applies), never silently muting the whole
