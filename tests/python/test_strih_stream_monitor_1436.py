@@ -243,6 +243,16 @@ if mode == "fail":
     sys.exit(1)
 if mode == "slow":
     time.sleep(float(os.environ.get("FAKE_AP_SLEEP", "1.5")))
+if mode == "fail_then_kill":
+    # fail the first connect; the second aplay dies by a signal before it reads anything (an OOM kill)
+    cnt = os.environ["FAKE_AP_OUT"] + ".count"
+    k = int(open(cnt).read()) if os.path.exists(cnt) else 0
+    open(cnt, "w").write(str(k + 1))
+    if k < 1:
+        sys.stderr.write("aplay: set_params:1387: Channels count non available\n")
+        sys.exit(1)
+    import signal
+    os.kill(os.getpid(), signal.SIGKILL)
 if mode == "fail2":
     # fail the first two connects, then play
     cnt = os.environ["FAKE_AP_OUT"] + ".count"
@@ -830,18 +840,18 @@ def _ff_gaps(tmp_path):
 
 def test_the_aplay_failure_backoff_doubles(tmp_path):
     # retry 0.3 s: the pauses are 0.6 then 1.2 s; without the backoff both are 0.3 s
-    r, _calls, _played, st, _e = run_monitor(tmp_path, cycles=3, ap="fail", extra=("--retry-s", "0.3"))
+    r, _calls, _played, st, _e = run_monitor(tmp_path, cycles=3, ap="fail", extra=("--retry-s", "0.5"))
     assert st["state"] == "aplay-failing", r.stdout
     g = _ff_gaps(tmp_path)
-    assert len(g) == 2 and g[1] - g[0] >= 0.4, g
+    assert len(g) == 2 and g[1] - g[0] >= 0.5, g  # expected growth 1.0 s; none without the backoff
 
 
 def test_a_play_after_failures_resets_the_backoff_and_the_fault(tmp_path):
     # two failed connects, then a stream plays: the third gap is the plain retry again
-    r, _calls, played, st, _e = run_monitor(tmp_path, cycles=4, ap="fail2", extra=("--retry-s", "0.3"))
+    r, _calls, played, st, _e = run_monitor(tmp_path, cycles=4, ap="fail2", extra=("--retry-s", "0.5"))
     assert played == [19200, 19200], r.stdout
     g = _ff_gaps(tmp_path)
-    assert len(g) == 3 and g[2] < g[1] - 0.4, g
+    assert len(g) == 3 and g[2] < g[1] - 0.8, g  # 2.0 s backoff pause vs the plain 0.5 s one
     assert st["state"] == "ended" and not st.get("last_play_failed"), st
 
 
@@ -903,3 +913,11 @@ def test_key_note_survives_settings_that_are_not_an_object(tmp_path):
     (d / "service.json").write_text(json.dumps({"type": "rtmp_custom", "settings": ["x"]}))
     prof.apply(str(d), "ffmpeg_vaapi_tex", "rtmp://127.0.0.1:1234/live", "stream-pp", key="stream-pp")
     assert json.loads((d / "service.json").read_text())["settings"]["key"] == "stream-pp"
+
+
+# --- review round 3 ------------------------------------------------------------------------------------------------
+
+def test_a_signal_killed_aplay_that_played_nothing_keeps_the_failed_play_mark(tmp_path):
+    r, _calls, played, st, _e = run_monitor(tmp_path, cycles=2, ap="fail_then_kill", ff="play:400000")
+    assert played == [], r.stdout
+    assert st["last_play_failed"] and "Channels count non available" in st["last_play_failed"], st
