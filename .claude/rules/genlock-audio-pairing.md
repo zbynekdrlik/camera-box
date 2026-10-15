@@ -3,6 +3,8 @@ paths:
   - "src/genlock_audio_pairing.rs"
   - "vendor/obs-studio/libobs/obs-audio.c"
   - "tests/audio_telemetry_800.rs"
+  - "vendor/obs-studio/libobs/media-io/audio-io.c"
+  - "tests/audio_stall_out_1381.rs"
   - "src/genlock_audio_pairing_bench.rs"
   - "tests/genlock_audio_pairing_parity.rs"
   - "tests/genlock_audio_timecode_placement_1367.rs"
@@ -282,6 +284,44 @@ callback, obs-vban included — on the SAME thread, so a blocking output callbac
 - a clean probe (`ticks_over=0`) while VBAN still gaps → obs-vban's own send path (its socket /
   sender thread), outside this thread.
 Anchored by `tests/audio_telemetry_800.rs` (both `audio_callback` returns close the probe's tick).
+
+**Issue 1381 -- the same line names WHAT took the time** (design 6191167734). `media-io/audio-io.c`
+keeps window maxima on `struct audio_output` (`audio_output_stall_stats`, taken and reset by the
+dump through the libobs-internal `audio_output_take_stall_stats`). The dump's ONE helper
+`audio_stall_dump` writes them after `tick_ms=`: `wake_late_max_ms= sleep_over_max_ms=
+lock_wait_max_ms= out_pass_max_ms= tail_max_ms= late_slept= late_prev_busy_ms= late_prev_mix_ms=
+late_prev_pass_ms= late_prev_lock_ms= late_prev_tail_ms= out_cb_max_ms= out_cb_mix= out_cb_kind=
+out_cb_fn=0x.. out_cb_param=0x.. out_cb_name='..'`. Reading it:
+- the maxima are independent (each may come from a different tick); `late_*` ties ONE event
+  together: the tick with the worst `wake_late_max_ms`, whether it slept (`late_slept=1`: the OS
+  woke it late) and the iteration just before it (busy wake -> next sleep, its mix =
+  `audio_callback`, its output pass, its longest input-mutex wait, its tail). `late_slept=0` with
+  a `late_prev_busy_ms` over a tick = that iteration ran long; a small one = earlier iterations
+  each ran a little over a tick and the lateness added up;
+- `sleep_over_max_ms` large = the OS woke the thread late from its sleep to the tick (it counts only
+  ticks where the thread really slept);
+- `lock_wait_max_ms` = a wait for audio-io's `input_mutex` (another thread connecting or
+  disconnecting an audio output / encoder holds it);
+- `tail_max_ms` = from the end of the output pass to the next sleep (libobs's profiler bookkeeping,
+  the stop check);
+- `out_cb_*` = the slowest single output callback: `output` (a raw-audio output, e.g. the NDI main
+  output or the av-sync dock; `out_cb_param` is the obs_output), `encoder` (an audio encoder of a
+  recording / stream), `unlisted` (on neither list: an `obs_add_raw_audio_callback` consumer, or an
+  output / encoder destroyed since; only the pointers), `busy` (a list was held at the dump: the
+  name walk only TRIES the list locks, it runs on the audio thread), `-` (no output callback ran).
+  Control characters in a name print as `?`.
+The fields stay at the END of the line, the free-text name last, so `scripts/bundle_state_audio.py`
+keeps parsing it (`tests/python/test_audio_stall_out_parse_1381.py` renders the real C format).
+The stall line lives in `audio_stall_dump`, not inline in the #800 block:
+`tests/audio_telemetry_800.rs` reads the per-source walk's lock within 2500 bytes of the #800
+header, and the inline line pushed it past. Tier-0: `tests/audio_stall_out_1381.rs` compiles the
+REAL audio-io.c into `tests/c/audio_stall_out_1381_harness.c` (fake clock: a sleep overshoot, ticks
+that start behind, scripted input-mutex waits, a profiler tail, scripted callback durations, a
+callback that disconnects itself) and lifts the dump's name resolver and its `blog()` verbatim;
+42/42 scratch mutants killed (a blocking lock in the resolver is counted as `blocked=`, never a
+hang). Read it on the box: the newest OBS log, `Select-String -Pattern 'audio-stall #1367'`
+(Windows, win-* MCP) or `grep 'audio-stall #1367' ~/.config/obs-studio/logs/<newest>`
+(strih-snv), one line a minute.
 
 **Lock-step anchors of THIS change** (all must move together): the std-only
 `tests/genlock_audio_timecode_placement_1367.rs` (tracker at the present tail after the presented
