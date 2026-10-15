@@ -37,8 +37,8 @@ def _py_format(c_fmt):
 
 def _render(ts, ticks, over, name="NDI PGM"):
     fmt = _py_format(_c_format())
-    values = [101.4, 1.7, ticks, over, 21.3, 95.3, 3.1, 12.3, 88.9, 80.1, 1, "output",
-              0x7FF612345678, 0xDEADBEEF00, name]
+    values = [101.4, 1.7, ticks, over, 21.3, 95.3, 3.1, 12.3, 88.9, 5.6, 1, 98.1, 1.0, 93.1, 12.4,
+              4.0, 80.1, 1, "output", 0x7FF612345678, 0xDEADBEEF00, name]
     assert fmt.count("%") == len(values), fmt
     return f"{ts}: " + fmt % tuple(values)
 
@@ -47,10 +47,13 @@ def test_the_c_line_keeps_the_1367_fields_first_and_carries_the_attribution():
     line = _render("06:08:15.416", 2816, 441)
     assert ("audio-stall #1367: tick_gap_max_ms=101.4 callback_max_ms=1.7 ticks=2816 "
             "ticks_over=441 tick_ms=21.3 wake_late_max_ms=95.3") in line
-    for field in ("sleep_over_max_ms=", "lock_wait_max_ms=", "out_pass_max_ms=",
-                  "out_cb_max_ms=", "out_cb_mix=", "out_cb_kind=", "out_cb_fn=0x",
-                  "out_cb_param=0x", "out_cb_name='NDI PGM'"):
+    for field in ("sleep_over_max_ms=", "lock_wait_max_ms=", "out_pass_max_ms=", "tail_max_ms=",
+                  "late_slept=1", "late_prev_busy_ms=", "late_prev_mix_ms=", "late_prev_pass_ms=",
+                  "late_prev_lock_ms=", "late_prev_tail_ms=", "out_cb_max_ms=", "out_cb_mix=",
+                  "out_cb_kind=", "out_cb_fn=0x", "out_cb_param=0x"):
         assert field in line, field
+    # the free-text output name is the LAST field
+    assert line.endswith(" out_cb_name='NDI PGM'"), line
 
 
 def test_the_mixer_facet_still_parses_the_extended_line():

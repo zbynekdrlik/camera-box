@@ -15,7 +15,8 @@
  * stub that captures the line.
  *
  * Output lines (the Rust test holds the truth table):
- *   W<n> wake=.. sleep=.. lock=.. pass=.. cb=.. fn=A|B|- param=PA|PB|- mix=..
+ *   W<n> wake=.. sleep=.. lock=.. pass=.. cb=.. fn=A|B|C|- param=PA|PB|PC|- mix=.. tail=..
+ *        lslept=.. pbusy=.. pmix=.. ppass=.. plock=.. ptail=..
  *   ID <case> kind=.. name='..' held=.. blocked=..
  *   LINE <the captured LOG_INFO line>
  */
@@ -46,7 +47,10 @@ static uint64_t overshoot_ns[MAX_TICKS + 1];
 static uint64_t mix_ns[MAX_TICKS + 1];
 static uint64_t a_ns[MAX_TICKS + 1];
 static uint64_t b_ns[MAX_TICKS + 1];
+static uint64_t c_ns[MAX_TICKS + 1];
+static uint64_t tail_ns[MAX_TICKS + 1]; /* the profiler bookkeeping after the output pass */
 static uint64_t lock_wait_ns[MAX_TICKS + 1][MAX_LOCKS];
+static bool b_disconnects_itself;
 
 static void script_clear(void)
 {
@@ -54,7 +58,10 @@ static void script_clear(void)
 	memset(mix_ns, 0, sizeof(mix_ns));
 	memset(a_ns, 0, sizeof(a_ns));
 	memset(b_ns, 0, sizeof(b_ns));
+	memset(c_ns, 0, sizeof(c_ns));
+	memset(tail_ns, 0, sizeof(tail_ns));
 	memset(lock_wait_ns, 0, sizeof(lock_wait_ns));
+	b_disconnects_itself = false;
 	tick = 0;
 }
 
@@ -139,6 +146,8 @@ void profile_start(const char *name)
 void profile_end(const char *name)
 {
 	(void)name;
+	if (running && tick >= 1 && tick <= MAX_TICKS)
+		fake_now += tail_ns[tick];
 }
 
 void profile_reenable_thread(void) {}
@@ -203,9 +212,11 @@ void blog(int log_level, const char *format, ...)
 }
 
 /* ---------------------------------------------------------------- the scripted mix + outputs */
-static int tag_a, tag_b;
+static int tag_a, tag_b, tag_c;
 #define PARAM_A ((void *)&tag_a)
 #define PARAM_B ((void *)&tag_b)
+#define PARAM_C ((void *)&tag_c)
+static struct audio_output *harness_out;
 
 static bool fake_mix(void *param, uint64_t start_ts, uint64_t end_ts, uint64_t *new_ts, uint32_t active_mixers,
 		     struct audio_output_data *mixes)
@@ -229,10 +240,20 @@ static void cb_a(void *param, size_t mix_idx, struct audio_data *data)
 
 static void cb_b(void *param, size_t mix_idx, struct audio_data *data)
 {
+	(void)data;
+	fake_now += b_ns[tick];
+	/* a callback that disconnects itself under the recursive input mutex: B sits BEFORE C in
+	 * mix 1, so its erase moves C into its slot */
+	if (b_disconnects_itself)
+		audio_output_disconnect(harness_out, mix_idx, cb_b, param);
+}
+
+static void cb_c(void *param, size_t mix_idx, struct audio_data *data)
+{
 	(void)param;
 	(void)mix_idx;
 	(void)data;
-	fake_now += b_ns[tick];
+	fake_now += c_ns[tick];
 }
 
 static const char *fn_name(audio_output_callback_t fn)
@@ -241,6 +262,8 @@ static const char *fn_name(audio_output_callback_t fn)
 		return "A";
 	if (fn == cb_b)
 		return "B";
+	if (fn == cb_c)
+		return "C";
 	return fn ? "?" : "-";
 }
 
@@ -250,6 +273,8 @@ static const char *param_name(const void *param)
 		return "PA";
 	if (param == PARAM_B)
 		return "PB";
+	if (param == PARAM_C)
+		return "PC";
 	return param ? "?" : "-";
 }
 
@@ -258,11 +283,15 @@ static void print_window(const char *label, struct audio_output *out)
 	struct audio_output_stall_stats s;
 	memset(&s, 0xA5, sizeof(s));
 	audio_output_take_stall_stats(out, &s);
-	printf("%s wake=%llu sleep=%llu lock=%llu pass=%llu cb=%llu fn=%s param=%s mix=%zu\n", label,
-	       (unsigned long long)s.wake_late_max_ns, (unsigned long long)s.sleep_over_max_ns,
+	printf("%s wake=%llu sleep=%llu lock=%llu pass=%llu cb=%llu fn=%s param=%s mix=%zu tail=%llu lslept=%d "
+	       "pbusy=%llu pmix=%llu ppass=%llu plock=%llu ptail=%llu\n",
+	       label, (unsigned long long)s.wake_late_max_ns, (unsigned long long)s.sleep_over_max_ns,
 	       (unsigned long long)s.lock_wait_max_ns, (unsigned long long)s.out_pass_max_ns,
 	       (unsigned long long)s.cb_max_ns, fn_name(s.cb_max_callback), param_name(s.cb_max_param),
-	       s.cb_max_mix);
+	       s.cb_max_mix, (unsigned long long)s.tail_max_ns, s.late_slept ? 1 : 0,
+	       (unsigned long long)s.late_prev_busy_ns, (unsigned long long)s.late_prev_mix_ns,
+	       (unsigned long long)s.late_prev_pass_ns, (unsigned long long)s.late_prev_lock_ns,
+	       (unsigned long long)s.late_prev_tail_ns);
 }
 
 static void run_ticks(struct audio_output *out, int n)
@@ -276,6 +305,7 @@ static void run_ticks(struct audio_output *out, int n)
 static void run_audio_io(void)
 {
 	struct audio_output *out = bzalloc(sizeof(struct audio_output));
+	harness_out = out;
 	out->info.name = "harness";
 	out->info.format = AUDIO_FORMAT_FLOAT_PLANAR;
 	out->info.samples_per_sec = 48000;
@@ -295,8 +325,9 @@ static void run_audio_io(void)
 
 	/* window 1, four ticks from S = the clock at audio_thread entry (tick k is due at
 	 * S + floor(k * 1024 * 1e9 / 48000)): tick 1 sleeps and the OS wakes it 30 ms late; tick 2
-	 * starts behind and output A takes 80 ms; tick 3 starts behind and waits 12 ms for the input
-	 * mutex of mix 0; tick 4 ends with output B, a short callback after the slow one. */
+	 * starts behind, output A takes 80 ms, mix 1's input mutex waits 12 ms and the profiler tail
+	 * takes 4 ms; tick 3 starts furthest behind (the worst wake); tick 4 ends with output B, a
+	 * short callback after the slow one. */
 	script_clear();
 	overshoot_ns[1] = 30000000;
 	for (int k = 1; k <= 4; k++) {
@@ -307,21 +338,39 @@ static void run_audio_io(void)
 	a_ns[1] = 2000000;
 	b_ns[1] = 5000000;
 	a_ns[2] = 80000000;
-	lock_wait_ns[3][1] = 12000000;
+	lock_wait_ns[2][2] = 12000000;
+	tail_ns[2] = 4000000;
 	a_ns[4] = 3000000;
 	run_ticks(out, 4);
 	print_window("W1", out);
 	print_window("W1R", out); /* the take reset the window */
 
-	/* window 2, one tick that sleeps and wakes on time: the get-mixers lock waits 5 ms, output B
+	/* window 2, one tick that sleeps and the OS wakes 2 ms late (the worst wake of this window,
+	 * so its breakdown is window 1's last iteration): the get-mixers lock waits 5 ms, output B
 	 * (mix 1) is the slowest this time. */
 	script_clear();
+	overshoot_ns[1] = 2000000;
 	mix_ns[1] = 1000000;
 	a_ns[1] = 2000000;
 	b_ns[1] = 4000000;
 	lock_wait_ns[1][0] = 5000000;
 	run_ticks(out, 1);
 	print_window("W2", out);
+
+	/* window 3, one tick that wakes exactly on time: output B is the slowest and disconnects
+	 * itself inside its callback; the window must still name B, not C which moved into its slot. */
+	if (!audio_output_connect(out, 1, NULL, cb_c, PARAM_C)) {
+		printf("ERR connect C\n");
+		exit(2);
+	}
+	script_clear();
+	mix_ns[1] = 1000000;
+	a_ns[1] = 2000000;
+	b_ns[1] = 9000000;
+	c_ns[1] = 1000000;
+	b_disconnects_itself = true;
+	run_ticks(out, 1);
+	print_window("W3", out);
 
 	audio_output_take_stall_stats(NULL, NULL);
 }
@@ -397,6 +446,7 @@ static int h_identity_lock(pthread_mutex_t *m)
 static struct obs_output out1 = {{"NDI PGM", NULL}};
 static struct obs_output out2 = {{"Rec", NULL}};
 static struct obs_output out3 = {{NULL, NULL}};
+static struct obs_output out4 = {{"a\nb\tc", NULL}};
 static struct obs_encoder enc1 = {{"aac'enc", NULL}};
 static int raw_tag;
 
@@ -416,6 +466,7 @@ static void run_identity(void)
 {
 	out1.context.next = &out2.context;
 	out2.context.next = &out3.context;
+	out3.context.next = &out4.context;
 	obs->data.first_output = &out1;
 	obs->data.first_encoder = &enc1;
 
@@ -430,6 +481,7 @@ static void run_identity(void)
 	id_case("encbusy-out", &out1, 5, 64, false, true);
 	id_case("trunc", &out1, 5, 4, false, false);
 	id_case("noname", &out3, 5, 64, false, false);
+	id_case("ctl", &out4, 5, 64, false, false);
 }
 
 /* ---------------------------------------------------------------- the dump's log statement */
@@ -451,6 +503,13 @@ static void run_log_line(void)
 	out_stall.cb_max_callback = (audio_output_callback_t)(uintptr_t)0x7ff612345678ULL;
 	out_stall.cb_max_param = (void *)(uintptr_t)0xdeadbeef00ULL;
 	out_stall.cb_max_mix = 1;
+	out_stall.tail_max_ns = 5560000;
+	out_stall.late_slept = true;
+	out_stall.late_prev_busy_ns = 98060000;
+	out_stall.late_prev_mix_ns = 1020000;
+	out_stall.late_prev_pass_ns = 93070000;
+	out_stall.late_prev_lock_ns = 12440000;
+	out_stall.late_prev_tail_ns = 4030000;
 	const char *out_cb_kind = "output";
 	char out_cb_name[128] = "NDI PGM";
 	last_line[0] = '\0';
