@@ -43,20 +43,22 @@ pub fn mask_hex_to_cores(mask: &str) -> Option<Vec<usize>> {
     Some(cores)
 }
 
-/// The cores a non-capture device IRQ is moved to: the general cores minus the reserved
-/// capture-IRQ core (on the 4-core fleet `[0, 1]`). `None` when there is no reserved core (a
-/// PREEMPT_RT kernel, or a box too small to reserve one) or nothing would be left, so the caller
-/// changes nothing.
+/// The cores a non-capture device IRQ is moved to: the online cores minus the capture core, minus
+/// every isolated core and minus the reserved capture-IRQ core (on the 4-core fleet `[0, 1]`). This
+/// is the housekeeping set `scripts/lib/cambox-housekeeping-cpus.sh` derives for systemd PID 1, so
+/// the IRQs and PID 1 share one rule. `None` when there is no reserved core (a PREEMPT_RT kernel, or
+/// a box too small to reserve one) or nothing would be left, so the caller changes nothing.
 pub fn select_offload_cores(
     capture_core: usize,
     reserved: Option<usize>,
+    isolated: &[usize],
     online: &[usize],
 ) -> Option<Vec<usize>> {
     let reserved = reserved?;
     let cores: Vec<usize> = online
         .iter()
         .copied()
-        .filter(|&c| c != capture_core && c != reserved)
+        .filter(|&c| c != capture_core && c != reserved && !isolated.contains(&c))
         .collect();
     if cores.is_empty() {
         None
@@ -68,6 +70,44 @@ pub fn select_offload_cores(
 /// True when an IRQ whose affinity is `current` may run on `reserved`, i.e. it must be moved.
 pub fn needs_offload(current: &[usize], reserved: usize) -> bool {
     current.contains(&reserved)
+}
+
+/// The planned offload: every non-capture device IRQ whose current affinity includes the reserved
+/// core, with the mask text it had (`moves`), and how many were already off it (`kept`). An IRQ whose
+/// mask cannot be read or parsed is left alone (counted nowhere).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct OffloadPlan {
+    pub moves: Vec<(u32, String)>,
+    pub kept: usize,
+}
+
+/// Plan the offload from the `/proc/interrupts` text. `read_mask(irq)` returns that IRQ's
+/// `smp_affinity` text (`None` = unreadable). The capture IRQs are NEVER moved: they were just put
+/// ON the reserved core by the issue-1198 split.
+pub fn plan_offload(
+    interrupts: &str,
+    capture_irqs: &[u32],
+    reserved: usize,
+    read_mask: impl Fn(u32) -> Option<String>,
+) -> OffloadPlan {
+    let mut plan = OffloadPlan::default();
+    for irq in parse_device_irqs(interrupts) {
+        if capture_irqs.contains(&irq) {
+            continue;
+        }
+        let Some(prev) = read_mask(irq) else {
+            continue;
+        };
+        let Some(current) = mask_hex_to_cores(&prev) else {
+            continue;
+        };
+        if needs_offload(&current, reserved) {
+            plan.moves.push((irq, prev.trim().to_string()));
+        } else {
+            plan.kept += 1;
+        }
+    }
+    plan
 }
 
 #[cfg(test)]
@@ -106,15 +146,24 @@ mod tests {
     #[test]
     fn the_four_core_fleet_offloads_onto_0_and_1() {
         assert_eq!(
-            select_offload_cores(3, Some(2), &[0, 1, 2, 3]),
+            select_offload_cores(3, Some(2), &[3], &[0, 1, 2, 3]),
             Some(vec![0, 1])
         );
     }
 
     #[test]
+    fn a_spare_isolated_core_never_takes_an_offloaded_irq() {
+        // the housekeeping rule of cambox-housekeeping-cpus.sh: isolated 2,3, capture 3, reserved 1
+        assert_eq!(
+            select_offload_cores(3, Some(1), &[2, 3], &[0, 1, 2, 3]),
+            Some(vec![0])
+        );
+    }
+
+    #[test]
     fn no_reserved_core_means_nothing_moves() {
-        assert_eq!(select_offload_cores(3, None, &[0, 1, 2, 3]), None);
-        assert_eq!(select_offload_cores(1, Some(0), &[0, 1]), None);
+        assert_eq!(select_offload_cores(3, None, &[3], &[0, 1, 2, 3]), None);
+        assert_eq!(select_offload_cores(1, Some(0), &[1], &[0, 1]), None);
     }
 
     #[test]
@@ -123,5 +172,43 @@ mod tests {
         assert!(needs_offload(&[0, 1, 2], 2));
         assert!(!needs_offload(&[0, 1], 2));
         assert!(!needs_offload(&[], 2));
+    }
+
+    fn masks<'a>(table: &'a [(u32, &'a str)]) -> impl Fn(u32) -> Option<String> + 'a {
+        move |irq| {
+            table
+                .iter()
+                .find(|(n, _)| *n == irq)
+                .map(|(_, m)| m.to_string())
+        }
+    }
+
+    #[test]
+    fn the_capture_irq_on_the_reserved_core_is_never_planned_off_it() {
+        // 129 = the capture xhci IRQ the issue-1198 split just put on core 2
+        let plan = plan_offload(
+            CAM5_INTERRUPTS,
+            &[129],
+            2,
+            masks(&[(0, "1"), (124, "7"), (129, "4"), (135, "4"), (136, "3")]),
+        );
+        assert!(plan.moves.iter().all(|(irq, _)| *irq != 129), "{plan:?}");
+        assert_eq!(
+            plan.moves,
+            vec![(124, "7".to_string()), (135, "4".to_string())]
+        );
+        assert_eq!(plan.kept, 2);
+    }
+
+    #[test]
+    fn an_unreadable_or_garbled_mask_is_left_alone() {
+        let plan = plan_offload(
+            CAM5_INTERRUPTS,
+            &[129],
+            2,
+            masks(&[(0, "zz"), (135, "00000004\n")]),
+        );
+        assert_eq!(plan.moves, vec![(135, "00000004".to_string())]);
+        assert_eq!(plan.kept, 0);
     }
 }
