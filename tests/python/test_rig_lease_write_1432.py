@@ -379,3 +379,68 @@ def test_a_garbage_stale_secs_falls_back_to_the_callers_threshold(tmp_path):
     assert "rc=1" in r.stdout
     state = rls.lease_state(str(lease), datetime.now(timezone.utc), 5400)
     assert state["stale"] is False
+
+
+# --- review round 1 (issue 1432) ----------------------------------------------------------------
+
+def test_an_acquire_never_steals_a_lockdir_another_acquirer_just_made(tmp_path):
+    """A camera-box gate that has just done its mkdir has a lockdir with no holder.json for a few
+    ms. The HTTP acquire must answer 409, never reclaim it (review: it returned 200 reclaimed)."""
+    lease = tmp_path / "rig-lease"
+    lease.mkdir()
+    with _Server(lease, _token_file(tmp_path)) as s:
+        status, payload = s.post("/rig-lease/acquire", _acquire_body())
+    assert status == 409, payload
+    assert not (lease / "holder.json").exists()
+
+
+def test_a_holderless_lockdir_past_the_grace_is_reclaimed(tmp_path):
+    lease = tmp_path / "rig-lease"
+    lease.mkdir()
+    t = time.time() - (rls.NO_HOLDER_GRACE_SECS + 5)
+    os.utime(lease, (t, t))
+    with _Server(lease, _token_file(tmp_path)) as s:
+        status, payload = s.post("/rig-lease/acquire", _acquire_body())
+    assert status == 200, payload
+    assert payload["reclaimed"] is True
+
+
+def test_a_string_stale_secs_is_ignored_by_bash_like_python(tmp_path):
+    lease = tmp_path / "rig-lease"
+    lease.mkdir()
+    h = {"repo": "r", "run_id": "1", "run_url": "u", "job": "j", "acquired_at": "2099-01-01T00:00:00Z",
+         "expected_release_at": "2099-01-01T00:00:00Z", "stale_secs": "180"}
+    (lease / "holder.json").write_text(json.dumps(h))
+    (lease / "heartbeat").touch()
+    t = time.time() - 200
+    os.utime(lease / "heartbeat", (t, t))
+    r = _bash(lease, 'rig_lease_is_stale 5400; echo rc=$?')
+    assert "rc=1" in r.stdout, r.stdout
+    assert rls.lease_state(str(lease), datetime.now(timezone.utc), 5400)["stale"] is False
+
+
+def test_release_never_removes_a_holder_with_the_same_run_id_but_another_lease_id(tmp_path):
+    lease = tmp_path / "rig-lease"
+    r = _bash(lease, 'rig_lease_release "$@"; echo rc=$?', "555", "a" * 32)
+    assert "rc=0" in r.stdout  # no lease: a no-op
+    with _Server(lease, _token_file(tmp_path)) as s:
+        _, acq = s.post("/rig-lease/acquire", _acquire_body(run_id="555"))
+    r = _bash(lease, 'rig_lease_release "$@"', "555", "b" * 32)
+    assert _holder(lease)["lease_id"] == acq["lease_id"], r.stderr
+    r = _bash(lease, 'rig_lease_release "$@"', "555", acq["lease_id"])
+    assert not lease.exists(), r.stderr
+
+
+def test_handle_answers_503_instead_of_raising(tmp_path, monkeypatch):
+    import rig_lease_write as rlw
+    def boom(*_a, **_k):
+        raise OSError("disk gone")
+    monkeypatch.setattr(rlw, "read_token", boom)
+    reply = rlw.handle("/rig-lease/acquire", "Bearer x", b"{}", str(tmp_path / "l"), 5400,
+                       str(tmp_path / "t"))
+    assert reply.status == 503 and reply.payload["error"] == "lease_io"
+
+
+def test_the_no_holder_grace_is_one_number_in_bash_and_python():
+    text = LIB.read_text()
+    assert f'RIG_LEASE_NOHOLDER_GRACE_SECS:-{rls.NO_HOLDER_GRACE_SECS}' in text
