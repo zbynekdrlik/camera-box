@@ -21,7 +21,8 @@
 #   14      Janus            skipped (no phones leg on a stream box)
 #   16      Satellite        skipped (no Stream Deck)
 #   16c     bkshading        skipped (no shading panel)
-#   16d     4 session apps   the browser-source keeper only
+#   16d     4 session apps   the browser-source keeper, the headphone monitor of the outgoing stream
+#                            (issue 1436) and the dantesync tray
 #   16f     tally            skipped
 #   16i     HTTPS front      skipped (no intercom / shading page; the facts declare none, issue 1399)
 #   13-hub-live  verify item 16: an inactive hub FAILs   report-only (issue 1418)
@@ -37,6 +38,9 @@
 OBS_BOX_STREAM_INPUT="NDI 2ME PGM"
 OBS_BOX_STREAM_SCENE="PRO"
 OBS_BOX_STREAM_AUDIO_INPUT="Zvuk z mixu"
+# issue 1436: the seeder keeps that input's OBS monitoring OFF -- the stream box's headphones play the
+# real outgoing stream (strih-stream-monitor.service), never one monitored source.
+OBS_BOX_STREAM_AUDIO_MONITOR=off
 OBS_BOX_STREAM_OUTPUT_NAME="stream"
 # issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
 # video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
@@ -47,6 +51,11 @@ OBS_BOX_STREAM_DEV_CLIP="/opt/camera-box/measurement-clip-v1.mp4"
 OBS_BOX_STREAM_DEV_CLIP_FRAMES=3840   # gen_measurement_clip.py: 128 s x 30 fps
 # The local restreamer the stream OBS sends to (the stream-pp laptop runs it; recon 11.10.2026).
 OBS_BOX_STREAM_RTMP_SERVER="${OBS_BOX_STREAM_RTMP_SERVER:-rtmp://127.0.0.1:1234/live}"
+
+# obs_box_stream_key -> the stream role's OBS stream key = the box name (issue 1436): OBS publishes to
+# <OBS_BOX_STREAM_RTMP_SERVER>/<key>, and strih-stream-monitor.service plays rtmp://127.0.0.1:1234/live/%l
+# (%l = the short hostname setup step 1 sets to the same fact). rc 1 when the fact cannot be read.
+obs_box_stream_key() { strih_lx_hostname; }
 
 # obs_box_step_applies STEP -> rc 0 when the loaded box runs STEP; rc 1 with the reason on stdout when
 # it skips it. A step with no rule here always runs. A fact that cannot be read never skips a step.
@@ -74,7 +83,7 @@ obs_box_step_applies() {
         printf 'STRIH_PROGRAM_AUDIO_SAMPLER=%s -- this box runs no stream program-audio sampler' "$v"
         return 1
       fi ;;
-    3-nvenc | 14 | 16 | 16c | 16f | 16i | 13-hub-live)
+    3-nvenc | 14 | 16 | 16c | 16f | 16i | 16k | 13-hub-live)
       v="$(strih_box_role)" || return 0
       if [ "$v" = stream ]; then
         case "$step" in
@@ -84,6 +93,7 @@ obs_box_step_applies() {
           16c) printf 'the stream role runs no bkshading shading service' ;;
           16f) printf 'the stream role runs no camera tally (no camera operators on stream-pp)' ;;
           16i) printf 'the stream role serves no intercom / shading page (issue 1399)' ;;
+          16k) printf 'the stream role receives no cambox logs: the venue strih is the sink (issue 1394)' ;;
           13-hub-live) printf 'the stream role grades its hub report-only (issue 1418 FAILs an inactive hub on the strih role)' ;;
         esac
         return 1
@@ -128,9 +138,10 @@ obs_box_venue_sender_ips() {
 
 # obs_box_role_apply -> apply the loaded box's role + venue to the shell (setup-strih / verify-strih call
 # it once, right after the box loads, BEFORE their source-guard):
-#   * the stream role runs TWO session apps, the browser-source keeper and the dantesync tray (issue 1429:
-#     every Linux workstation shows the clock state) (STRIH_SESSION_APP_UNITS: step 16d, the kiosk
-#     autostart lines, verify items 37-40);
+#   * the stream role runs THREE session apps: the browser-source keeper, the headphone monitor that plays
+#     the real outgoing stream (issue 1436) and the dantesync tray (issue 1429: every Linux workstation
+#     shows the clock state) (STRIH_SESSION_APP_UNITS: step 16d, the kiosk autostart lines, verify items
+#     37-40 + the monitor's rows);
 #   * a venue other than snv lists its own boxes as the NDI senders (NDI_DISCOVERY_SENDER_HOSTS, read by
 #     scripts/lib/ndi-discovery.sh): never the SNV fleet's addresses on a PP box.
 # rc 1 + a stderr line on a fact that cannot be read.
@@ -140,7 +151,7 @@ obs_box_role_apply() {
   venue="$(strih_box_venue)" || return 1
   if [ "$role" = stream ]; then
     # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh
-    STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service dantesync-tray.service)
+    STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service)
   fi
   if [ "$venue" != snv ]; then
     NDI_DISCOVERY_SENDER_HOSTS="$(obs_box_venue_sender_ips "$venue")" || return 1
@@ -165,8 +176,8 @@ obs_box_stream_seed_manifest_json() {
   printf '    {"sender": "%s", "input": "%s", "scene": "%s", "class": "program"}\n' \
     "$sender" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_SCENE"
   printf '  ],\n  "outputs": [\n    "%s (%s)"\n  ],\n' "$prefix" "$OBS_BOX_STREAM_OUTPUT_NAME"
-  printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s",\n' \
-    "$(strih_lx_camera_latency_ms)" "$OBS_BOX_STREAM_AUDIO_INPUT"
+  printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s",\n  "program_audio_monitor": "%s",\n' \
+    "$(strih_lx_camera_latency_ms)" "$OBS_BOX_STREAM_AUDIO_INPUT" "$OBS_BOX_STREAM_AUDIO_MONITOR"
   printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
     "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP"
 }
@@ -215,12 +226,14 @@ obs_box_vaapi_h264_encode() {
 # obs_box_stream_encoder_provision OBS_CFG DESKTOP_USER PROFILE -> setup-strih step 3 for the stream
 # role: the encoder by GPU (NVENC on an NVIDIA dGPU -- the baseline's step 11 installs the driver --
 # else VAAPI: mesa-va-drivers + vainfo, the desktop user in group render), then the profile
-# (scripts/obs_box_stream_profile.py: basic.ini, streamEncoder.json, service.json server only). The
+# (scripts/obs_box_stream_profile.py: basic.ini, streamEncoder.json, service.json = the server + the box
+# name as the stream key when it carries none, issue 1436). The
 # profile is written ONLY while OBS is stopped (OBS rewrites it on exit): a running OBS gets a WARNING
 # and the files are left alone. rc 1 + a stderr line on a failure.
 obs_box_stream_encoder_provision() {
   local cfg="${1:?obs config dir required}" user="${2:?desktop user required}" profile="${3:?profile required}"
-  local nv=0 dir
+  local nv=0 dir key
+  key="$(obs_box_stream_key)" || { echo "obs-box-role: the box name (the stream key) could not be read" >&2; return 1; }
   if obs_box_has_nvidia; then
     nv=1
     echo "  NVIDIA dGPU present -- stream encoder NVENC (the driver is baseline step 11)"
@@ -241,7 +254,7 @@ obs_box_stream_encoder_provision() {
   fi
   dir="${cfg%/}/basic/profiles/${profile}"
   python3 "$(dirname "${BASH_SOURCE[0]}")/../obs_box_stream_profile.py" --profile-dir "$dir" \
-    --profile-name "$profile" --has-nvidia "$nv" --server "$OBS_BOX_STREAM_RTMP_SERVER" \
+    --profile-name "$profile" --has-nvidia "$nv" --server "$OBS_BOX_STREAM_RTMP_SERVER" --key "$key" \
     || { echo "obs-box-role: the stream profile write failed (above)" >&2; return 1; }
   chown -R "$user:$user" "${cfg%/}/basic" 2>/dev/null || echo "  WARNING: could not chown ${cfg%/}/basic to ${user}" >&2
   return 0

@@ -29,6 +29,10 @@
 #     dantesync_install_tray (scripts/lib/dantesync-install.sh); the unit carries
 #     ConditionFileIsExecutable, so while the pin is below 1.18.0 (no binary) its start is a clean skip,
 #     never a restart loop.
+#   * strih-stream-monitor.service -> scripts/strih_stream_monitor.py, the STREAM role only (issue 1436,
+#     owner 15.10.2026): the headphones play the audio of the real outgoing RTMP stream straight to the
+#     jack's ALSA PCM, never through PipeWire. Its packages + three extra verify rows live in
+#     scripts/lib/strih-stream-monitor.sh.
 #
 # Every entry is WantedBy=graphical-session.target like strih-obs.service, and like it STARTED by the
 # kiosk openbox autostart (strih_openbox_autostart_text calls strih_session_apps_autostart_lines):
@@ -63,6 +67,11 @@
 if ! declare -F strih_user_home_dir >/dev/null; then
   # shellcheck source=scripts/lib/strih-user-home.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-user-home.sh"
+fi
+# issue 1436: the stream-role headphone monitor's packages + verify rows.
+if ! declare -F strih_stream_monitor_grade_rows >/dev/null; then
+  # shellcheck source=scripts/lib/strih-stream-monitor.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-stream-monitor.sh"
 fi
 # issue 1429: the dantesync tray binary (install + its path, the pin).
 if ! declare -F dantesync_install_tray >/dev/null; then
@@ -108,6 +117,7 @@ strih_session_app_script() {
     companion-satellite.service) printf '' ;;
     strih-satellite-watch.timer) printf 'strih_satellite_watch.py' ;;
     dantesync-tray.service) printf '' ;;
+    strih-stream-monitor.service) printf 'strih_stream_monitor.py' ;;
     *) return 1 ;;
   esac
 }
@@ -120,6 +130,7 @@ strih_session_app_item() {
     companion-satellite.service) printf 'companion-satellite' ;;
     strih-satellite-watch.timer) printf 'satellite-watch' ;;
     dantesync-tray.service) printf 'dantesync-tray' ;;
+    strih-stream-monitor.service) printf 'stream-monitor' ;;
     *) return 1 ;;
   esac
 }
@@ -194,11 +205,20 @@ strih_session_apps_autostart_lines() {
   done
 }
 
-# strih_session_apps_missing_packages -> each package of STRIH_SESSION_APP_PACKAGES that dpkg does not
+# strih_session_apps_packages -> the packages step 16d installs, one per line: STRIH_SESSION_APP_PACKAGES
+# plus the headphone monitor's (ffmpeg + alsa-utils) when the box runs it (issue 1436, the stream role).
+strih_session_apps_packages() {
+  printf '%s\n' "${STRIH_SESSION_APP_PACKAGES[@]}"
+  if _strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT"; then
+    printf '%s\n' "${STRIH_STREAM_MONITOR_PACKAGES[@]}"
+  fi
+}
+
+# strih_session_apps_missing_packages -> each package of strih_session_apps_packages that dpkg does not
 # report "install ok installed", one per line. Always rc 0.
 strih_session_apps_missing_packages() {
   local p
-  for p in "${STRIH_SESSION_APP_PACKAGES[@]}"; do
+  for p in $(strih_session_apps_packages); do
     [ "$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null || true)" = "install ok installed" ] || printf '%s\n' "$p"
   done
   return 0
@@ -273,7 +293,7 @@ strih_session_apps_install() {
   "$py" -c "$(strih_session_apps_import_check)" || {
     echo "strih-session-apps: ${py} cannot import websocket + Gtk 3 + WebKit2 4.1 (packages ${STRIH_SESSION_APP_PACKAGES[*]})" >&2
     return 1; }
-  echo "  packages present + importable: ${STRIH_SESSION_APP_PACKAGES[*]}"
+  echo "  packages present + importable: $(strih_session_apps_packages | tr '\n' ' ')"
 
   install -d -m 0755 "$bindir" || { echo "strih-session-apps: cannot create ${bindir}" >&2; return 1; }
   strih_user_home_dir "$home" "$user" "$unitdir" || { echo "strih-session-apps: cannot create ${unitdir}" >&2; return 1; }   # issue 1412: every level the user's
@@ -667,6 +687,11 @@ strih_session_apps_grade_rows() {
     strih_session_app_pass_row satellite-watch strih_satellite_watch.py "$STRIH_SATELLITE_WATCH_STATE_FILE" \
       strih-satellite-watch.service "$repo" "$user"
   fi
+
+  # issue 1436: the stream role's headphone monitor -- its last pass + card owner, the OBS key, Monitor Off
+  if _strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT"; then
+    strih_stream_monitor_grade_rows "$repo" "$home" "$user"
+  fi
   return 0
 }
 
@@ -681,12 +706,14 @@ _strih_session_apps_has() {
 }
 
 # strih_session_apps_row_count -> how many rows strih_session_apps_grade_rows prints (one per unit +
-# the keeper's last pass + the panel window + the Satellite watch's last pass).
+# the keeper's last pass + the panel window + the Satellite watch's last pass + the stream monitor's
+# STRIH_STREAM_MONITOR_ROWS).
 strih_session_apps_row_count() {
   local n="${#STRIH_SESSION_APP_UNITS[@]}" u
   for u in strih-browser-keeper.service bkshading-panel-app.service strih-satellite-watch.timer; do
     _strih_session_apps_has "$u" && n=$((n + 1))
   done
+  _strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT" && n=$((n + STRIH_STREAM_MONITOR_ROWS))
   printf '%s' "$n"
 }
 

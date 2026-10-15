@@ -1,0 +1,33 @@
+[Unit]
+# issue 1436 -- the stream box's headphones play the REAL outgoing stream (owner 15.10.2026: the SNV way,
+# one unified PP/SNV design). scripts/strih_stream_monitor.py plays the AUDIO of the restreamer's local
+# RTMP (the key setup-strih step 3 writes into the stream OBS profile = the box name = %l) straight to
+# the headphone jack's ALSA PCM (resolved by its PCM name), never through PipeWire (issue 1437). Silent
+# while nothing is published, a reconnect after every stream. Installed by setup-strih.sh step 16d on
+# the stream role (scripts/lib/strih-session-apps.sh), started at login by the kiosk autostart, graded by
+# verify-strih's (stream-monitor) rows.
+Description=Stream box headphone monitor -- play the outgoing RTMP stream's audio to the headphone jack (issue 1436)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=strih-obs.service
+# Never give up: the operator must hear the stream whenever the session runs.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# %l = the short hostname (setup step 1 sets it to the box name = the stream key); %t = the user runtime
+# dir: the state file verify-strih reads for "last pass recent" + the headphone PCM owner.
+ExecStart=/usr/bin/python3 /usr/local/bin/strih_stream_monitor.py --url rtmp://127.0.0.1:1234/live/%l --state-file %t/strih-stream-monitor.json
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=strih-stream-monitor
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk openbox autostart STARTS this unit at
+# every login (the strih-obs.service pattern); the WantedBy only makes `enable` meaningful.
+WantedBy=graphical-session.target

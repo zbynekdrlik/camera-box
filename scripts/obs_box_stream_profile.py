@@ -9,8 +9,11 @@ writes into ~/.config/obs-studio/basic/profiles/<profile>/:
     output at 30 fps, the stream output rescaled to 3840x2160 lanczos (ADVOUT_RESCALE), NV12 / 709 / partial, 48 kHz stereo. Every other key is kept (an upsert).
   * streamEncoder.json -- the advanced-output stream encoder settings: CBR 19000 kb/s, a keyframe
     every 2 s, H.264 High, no B-frames (the old Windows AMF profile of the box, issue 1412 recon).
-  * service.json -- `rtmp_custom` to the local restreamer. ONLY the server is written: the stream key
-    is the owner's and never written by us; an existing key is kept as it is.
+  * service.json -- `rtmp_custom` to the local restreamer: the server, and (issue 1436) an explicit
+    stream key derived from the box name (`--key stream-pp` -> rtmp://127.0.0.1:1234/live/stream-pp,
+    the URL shape stream-snv's monitor plays) when the file carries NO key. A key already there (one
+    the operator pasted) is kept as it is: the operator wins. The headphone monitor
+    (scripts/strih_stream_monitor.py) plays that key, and verify grades it (`--grade-key`).
 
 Pure helpers + a small CLI; tests/python/test_obs_box_stream_role_1412.py.
 """
@@ -196,9 +199,10 @@ def grade_video(profile_dir):
             for k in keys if vid.get(k) != BASIC_INI["Video"][k]]
 
 
-def service_json(existing, server):
-    """The service.json dict: `rtmp_custom` to SERVER. Only the server is written; an existing key and
-    every other setting are kept, and no key is ever added."""
+def service_json(existing, server, key=None):
+    """The service.json dict: `rtmp_custom` to SERVER. An existing non-blank key and every other
+    setting are kept. KEY (issue 1436, the box name) is written only when the file carries no key or a
+    blank one; with KEY None no key is ever added (the old contract)."""
     d = dict(existing) if isinstance(existing, dict) else {}
     settings = dict(d.get("settings") or {}) if isinstance(d.get("settings"), dict) else {}
     if d.get("type") != "rtmp_custom":
@@ -208,8 +212,31 @@ def service_json(existing, server):
     d["type"] = "rtmp_custom"
     settings["server"] = server
     settings.setdefault("use_auth", False)
+    current = settings.get("key")
+    if key and not (isinstance(current, str) and current.strip()):
+        settings["key"] = key
     d["settings"] = settings
     return d
+
+
+def grade_key(profile_dir, key):
+    """issue 1436: the stream service's drift from the key the headphone monitor plays, one text per
+    problem; empty = the service is `rtmp_custom` to DEFAULT_RTMP_SERVER with exactly KEY. Read-only."""
+    path = os.path.join(profile_dir, "service.json")
+    try:
+        svc = json.loads(_read(path) or "")
+    except (OSError, ValueError) as e:
+        return ["service.json unreadable (%s: %s)" % (path, e)]
+    svc = svc if isinstance(svc, dict) else {}
+    settings = svc.get("settings")
+    settings = settings if isinstance(settings, dict) else {}
+    out = []
+    if svc.get("type") != "rtmp_custom" or settings.get("server") != DEFAULT_RTMP_SERVER:
+        out.append("service.json %s server %r (want rtmp_custom %s)" % (svc.get("type"), settings.get("server"),
+                                                                         DEFAULT_RTMP_SERVER))
+    if settings.get("key") != key:
+        out.append("service.json key %r (want %r)" % (settings.get("key"), key))
+    return out
 
 
 def _write(path, text, mode):
@@ -232,8 +259,9 @@ def _read(path):
         return fh.read()
 
 
-def apply(profile_dir, encoder, server, profile_name):
-    """Write the three files under PROFILE_DIR (created). Returns the lines to log."""
+def apply(profile_dir, encoder, server, profile_name, key=None):
+    """Write the three files under PROFILE_DIR (created). KEY: the box's stream key (issue 1436),
+    written only where service.json carries none. Returns the lines to log."""
     os.makedirs(profile_dir, exist_ok=True)
     ini = os.path.join(profile_dir, "basic.ini")
     svc_path = os.path.join(profile_dir, "service.json")
@@ -246,14 +274,28 @@ def apply(profile_dir, encoder, server, profile_name):
             existing = json.loads(svc_text)
         except ValueError:
             raise ValueError("service.json unreadable -- the profile is left untouched")
-    svc = service_json(existing, server)
+    svc = service_json(existing, server, key)
     _write(ini, ini_text, 0o644)
     _write(os.path.join(profile_dir, "streamEncoder.json"),
            json.dumps(stream_encoder_settings(encoder), indent=4) + "\n", 0o644)
     _write(svc_path, json.dumps(svc, indent=4) + "\n", 0o600)
     return ["basic.ini: Advanced output, %s, 1920x1080 @ 30 fps NV12" % encoder,
             "streamEncoder.json: CBR %d kb/s, keyint %d s, High" % (STREAM_BITRATE_KBPS, STREAM_KEYINT_S),
-            "service.json: rtmp_custom %s (stream key %s)" % (server, "kept" if svc["settings"].get("key") else "not set -- the owner pastes it")]
+            "service.json: rtmp_custom %s (stream key %s)" % (server, _key_note(existing, svc, key))]
+
+
+def _key_note(existing, svc, key):
+    """The log text of the service.json key: written, kept (the operator's) or not set."""
+    now = svc["settings"].get("key")
+    if not now:
+        return "not set -- the owner pastes it"
+    old_settings = existing.get("settings") if isinstance(existing, dict) else None
+    old = old_settings.get("key") if isinstance(old_settings, dict) else None
+    if key and now == key and old != key:
+        return "%s written (the box name, issue 1436)" % key
+    if key and now != key:
+        return "kept: %s (the operator's; the headphone monitor plays %s)" % (now, key)
+    return "%s kept" % now if key else "kept"
 
 
 def grade_drift(profile_dir):
@@ -293,7 +335,18 @@ def main(argv=None):
     ap.add_argument("--profile-name")
     ap.add_argument("--has-nvidia", choices=("0", "1"))
     ap.add_argument("--server", default=DEFAULT_RTMP_SERVER)
+    ap.add_argument("--key", default=None,
+                    help="issue 1436: the box's stream key, written when service.json carries none")
+    ap.add_argument("--grade-key", metavar="PROFILE_DIR", default=None,
+                    help="read-only: print the service.json drift from --key (nothing printed = no drift)")
     a = ap.parse_args(argv)
+    if a.grade_key is not None:
+        if not a.key:
+            ap.error("--grade-key needs --key")
+        drift = grade_key(a.grade_key, a.key)
+        if drift:
+            print(", ".join(drift))
+        return
     if a.grade is not None:
         drift = grade_drift(a.grade)
         if drift:
@@ -322,7 +375,7 @@ def main(argv=None):
     if not (a.profile_dir and a.profile_name and a.has_nvidia):
         ap.error("--profile-dir, --profile-name and --has-nvidia are required (or --grade DIR)")
     try:
-        lines = apply(a.profile_dir, encoder_for(a.has_nvidia == "1"), a.server, a.profile_name)
+        lines = apply(a.profile_dir, encoder_for(a.has_nvidia == "1"), a.server, a.profile_name, a.key)
     except (ValueError, OSError) as e:
         sys.exit("FAIL issue 1412: %s" % e)
     for ln in lines:

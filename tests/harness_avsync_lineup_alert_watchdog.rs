@@ -104,9 +104,9 @@ fn watchdog_runs_the_offset_arm_after_the_liveness_pass() {
 fn offset_arm_uses_a_time_bucketed_production_critical_dedup_key() {
     let body = read("scripts/avsync-lineup-alert-watchdog.sh");
     assert!(
-        body.contains("watchdog_notify_key \"avsync-offset-stream\""),
+        body.contains("watchdog_notify_key \"avsync-${VENUE}-offset-stream\""),
         "#1331: an on-air A/V rozladenie is production-critical (issue 1308) -- its dedup key must \
-         time-bucket via the shared watchdog_notify_key helper: {body}"
+         time-bucket via the shared watchdog_notify_key helper, one key per venue (issue 1441): {body}"
     );
 }
 
@@ -433,8 +433,8 @@ fn offset_fires_notify_with_a_bucketed_dedup_key_when_not_dry_run() {
     let (_c, _o, _e) = h.run(". \"$SCRIPT\"\nmain", &[("FAKE_STREAM_ACTIVE", "True")]);
     let calls = h.notify_calls();
     assert!(
-        calls.contains("ROZLADENIE") && calls.contains("--dedup-key avsync-offset-stream-"),
-        "a confirmed offset ALARM must invoke notify with a TIME-BUCKETED dedup key: calls={calls:?}"
+        calls.contains("ROZLADENIE") && calls.contains("--dedup-key avsync-snv-offset-stream-"),
+        "a confirmed offset ALARM must invoke notify with a TIME-BUCKETED, per-venue (issue 1441) dedup key: calls={calls:?}"
     );
 }
 

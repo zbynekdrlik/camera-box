@@ -19,7 +19,10 @@
 #   - verify-device.sh (ar): cambox_ro_units_gather_remote_snippet (read-only, over ssh) +
 #     cambox_ro_units_verdict (pure);
 #   - scripts/cambox-ro-units-apply.sh: cambox_ro_units_apply_program, the remote program that
-#     brings an already-provisioned box up to date without a setup-device re-run.
+#     brings an already-provisioned box up to date without a setup-device re-run. Given the box's log
+#     sink (issue 1394: its OWN venue strih, remote_log_sink_ip), it also re-points the issue-1311
+#     off-box logging files (the netconsole script, journal-upload.conf, the upload drop-in) inside
+#     the same window, and restarts the uploader after the close.
 # The program writes everything inside ONE rw window and closes it with the ONE verified close
 # (scripts/lib/ro-window.sh, issue 1407): only file writes and masks inside, the root mode READ
 # back, nothing started before the close. The apt units are stopped before the window. After the
@@ -43,6 +46,9 @@ fi
 # The systemd unit dir on the box. Overridable so a test can point the gather and the program at a
 # temp tree; production never sets it.
 CAMBOX_RO_UNITS_UNIT_DIR="${CAMBOX_RO_UNITS_UNIT_DIR:-/etc/systemd/system}"
+# A prefix for the two off-box logging files outside the unit dir (the netconsole setup script and
+# journal-upload.conf, issue 1394): the same test seam; production leaves it empty.
+CAMBOX_RO_UNITS_FS_ROOT="${CAMBOX_RO_UNITS_FS_ROOT:-}"
 
 cambox_ro_units_logrotate_dropin_path() {
   printf '%s/%s\n' "$CAMBOX_RO_UNITS_UNIT_DIR" "$(ro_root_logrotate_dropin_relpath)"
@@ -52,11 +58,12 @@ cambox_ro_units_netconsole_unit_path() {
   printf '%s/%s\n' "$CAMBOX_RO_UNITS_UNIT_DIR" "${REMOTE_LOG_NC_SERVICE_PATH##*/}"
 }
 
-# cambox_ro_units_sha FUNCTION -> the sha256 hex of FUNCTION's output: the bytes setup-device
-# writes, the same bytes the box's file must hold.
+# cambox_ro_units_sha FUNCTION [ARG...] -> the sha256 hex of `FUNCTION ARG...`'s output plus ONE
+# newline: the bytes setup-device writes (the program writes printf '%s\n' of the captured text), the
+# same bytes the box's file must hold.
 cambox_ro_units_sha() {
   local s
-  s="$("$1" | sha256sum)"
+  s="$(printf '%s\n' "$("$@")" | sha256sum)"
   printf '%s\n' "${s%% *}"
 }
 
@@ -185,9 +192,21 @@ cambox_ro_units_verdict() {
 #      netconsole (it must arm; if it cannot, the unit now retries, backing off from 30 s to 10 min,
 #      and the box FAILS even though is-system-running then reads running), read back
 #      `is-system-running` (must be running).
-# Exit 0 only when every step held. The text is the same for every cambox (the box names itself).
+# With SINK_IP (issue 1394, the box's venue strih from remote_log_sink_ip), on a box where issue 1311
+# put the netconsole unit, step 1 also reads and step 2 also writes the three logging files that carry
+# or serve the sink (the netconsole setup script 0755, journal-upload.conf, the upload drop-in), each
+# only when it differs; step 3 restarts systemd-journal-upload when one of them was written (the
+# netconsole restart picks up its script anyway). A non-IPv4 SINK_IP prints nothing and returns 1.
+# Without SINK_IP the program is the issue-1394 unit set alone.
+# Exit 0 only when every step held. Without a sink the text is the same for every cambox (the box
+# names itself); with one it is per box.
 cambox_ro_units_apply_program() {
-  local apt lr nc
+  local apt lr nc sink="${1-}" rl_script="" rl_conf="" rl_drop=""
+  if [ -n "$sink" ]; then
+    rl_script="$(remote_log_netconsole_setup_script_content "$sink")" || return 1
+    rl_conf="$(remote_log_journal_upload_conf_content "$sink")" || return 1
+    rl_drop="$(remote_log_journal_upload_dropin_content)" || return 1
+  fi
   apt="$(ro_root_masked_apt_units)"
   lr="$(ro_root_logrotate_dropin_content)"
   nc="$(remote_log_netconsole_service_unit_content)"
@@ -204,13 +223,24 @@ PROG
   printf '_rou_nc_want=%q\n' "$(cambox_ro_units_sha remote_log_netconsole_service_unit_content)"
   printf '_rou_nc_unit=%q\n' "${REMOTE_LOG_NC_SERVICE_NAME}.service"
   printf '_rou_apt="%s"\n' "${apt//$'\n'/ }"
+  # issue 1394: the off-box logging files (empty _rou_rl_sink = not part of this run)
+  printf '_rou_rl_sink=%q\n' "$sink"
+  printf '_rou_rl_script=%q\n' "${CAMBOX_RO_UNITS_FS_ROOT}${REMOTE_LOG_NC_SCRIPT_PATH}"
+  printf '_rou_rl_script_body=%q\n' "$rl_script"
+  printf '_rou_rl_conf=%q\n' "${CAMBOX_RO_UNITS_FS_ROOT}${REMOTE_LOG_JU_CONF_PATH}"
+  printf '_rou_rl_conf_body=%q\n' "$rl_conf"
+  printf '_rou_rl_drop=%q\n' "$CAMBOX_RO_UNITS_UNIT_DIR/${REMOTE_LOG_JU_DROPIN_PATH#/etc/systemd/system/}"
+  printf '_rou_rl_drop_body=%q\n' "$rl_drop"
+  printf '_rou_ju_unit=%q\n' "${REMOTE_LOG_JU_SERVICE_NAME}.service"
   printf '%s\n' "$(declare -f ro_root_mount_mode)"
   cat <<'PROG'
 _rou_box="$(hostname 2>/dev/null || echo this cambox)"
 _rou_sha() { if [ -e "$1" ]; then _rou_s="$(sha256sum <"$1")"; echo "${_rou_s%% *}"; else echo __ABSENT__; fi; }
-# Inside the window only: a temp file + rename, so a cut write never leaves half a unit file.
+# Inside the window only: a temp file + rename, so a cut write never leaves half a unit file. An
+# optional third argument is the file mode (the netconsole setup script runs: 0755).
 _rou_write() {
-  if mkdir -p "${1%/*}" && printf '%s\n' "$2" >"$1.new" && mv -f "$1.new" "$1"; then
+  if mkdir -p "${1%/*}" && printf '%s\n' "$2" >"$1.new" && { [ -z "${3-}" ] || chmod "$3" "$1.new"; } \
+    && mv -f "$1.new" "$1"; then
     return 0
   fi
   rm -f "$1.new"
@@ -225,11 +255,31 @@ _rou_nc_present=0
 [ ! -e "$_rou_nc" ] || _rou_nc_present=1
 _rou_do_nc=0
 if [ "$_rou_nc_present" = 1 ] && [ "$(_rou_sha "$_rou_nc")" != "$_rou_nc_want" ]; then _rou_do_nc=1; fi
+# issue 1394: the off-box logging files that carry or serve the sink, only where issue 1311 put the
+# netconsole unit (a box without it needs setup-device, like the unit); a script that lost its
+# executable bit is rewritten too.
+_rou_rl_todo=""
+_rou_rl_need() {
+  local want sha
+  want="$(printf '%s\n' "$2" | sha256sum)"
+  sha="$(_rou_sha "$1")"
+  [ "$sha" = "${want%% *}" ] || return 0
+  [ -z "${3-}" ] || [ -x "$1" ] || return 0
+  return 1
+}
+if [ -n "$_rou_rl_sink" ] && [ "$_rou_nc_present" = 1 ]; then
+  if _rou_rl_need "$_rou_rl_script" "$_rou_rl_script_body" x; then _rou_rl_todo="$_rou_rl_todo script"; fi
+  if _rou_rl_need "$_rou_rl_conf" "$_rou_rl_conf_body"; then _rou_rl_todo="$_rou_rl_todo conf"; fi
+  if _rou_rl_need "$_rou_rl_drop" "$_rou_rl_drop_body"; then _rou_rl_todo="$_rou_rl_todo dropin"; fi
+fi
 _rou_mask=""
 for _rou_u in $_rou_apt; do
   [ "$(systemctl is-enabled "$_rou_u" 2>/dev/null || true)" = masked ] || _rou_mask="$_rou_mask $_rou_u"
 done
 echo "PLAN ($_rou_box): root $_rou_mode; logrotate drop-in $([ "$_rou_do_lr" = 1 ] && echo write || echo in-place); netconsole unit $([ "$_rou_nc_present" = 0 ] && echo absent || { [ "$_rou_do_nc" = 1 ] && echo write || echo in-place; }); mask:${_rou_mask:- none (all masked)}"
+if [ -n "$_rou_rl_sink" ] && [ "$_rou_nc_present" = 1 ]; then
+  echo "PLAN ($_rou_box): off-box log sink $_rou_rl_sink (issue 1394, the venue strih): write:${_rou_rl_todo:- none (in place)}"
+fi
 if [ "$_rou_nc_present" = 0 ]; then
   echo "NOTE: no $_rou_nc on $_rou_box -- issue 1311 netconsole is not provisioned here; re-run setup-device.sh for it (this program writes no new unit)"
 fi
@@ -262,7 +312,7 @@ PROG
 trap '_rou_close' EXIT
 _rou_wrote=0
 _rou_opened=0
-if [ "$_rou_do_lr" = 1 ] || [ "$_rou_do_nc" = 1 ] || [ -n "$_rou_mask" ] || [ "$_rou_mode" != ro ]; then
+if [ "$_rou_do_lr" = 1 ] || [ "$_rou_do_nc" = 1 ] || [ -n "$_rou_mask" ] || [ -n "$_rou_rl_todo" ] || [ "$_rou_mode" != ro ]; then
 if ! mount -o remount,rw /; then
   echo "FAIL: [issue 1394] could not remount / read-write on $_rou_box -- nothing was written" >&2
   exit 1
@@ -271,6 +321,9 @@ _rou_open=1
 _rou_opened=1
 if [ "$_rou_do_lr" = 1 ]; then _rou_write "$_rou_lr" "$_rou_lr_body"; _rou_wrote=1; fi
 if [ "$_rou_do_nc" = 1 ]; then _rou_write "$_rou_nc" "$_rou_nc_body"; _rou_wrote=1; fi
+case " $_rou_rl_todo " in *" script "*) _rou_write "$_rou_rl_script" "$_rou_rl_script_body" 0755; _rou_wrote=1 ;; esac
+case " $_rou_rl_todo " in *" conf "*) _rou_write "$_rou_rl_conf" "$_rou_rl_conf_body"; _rou_wrote=1 ;; esac
+case " $_rou_rl_todo " in *" dropin "*) _rou_write "$_rou_rl_drop" "$_rou_rl_drop_body"; _rou_wrote=1 ;; esac
 # The masks are links on the root; --no-reload: the daemon-reload runs after the close.
 if [ -n "$_rou_mask" ]; then
   if ! systemctl mask --no-reload $_rou_mask; then
@@ -318,6 +371,16 @@ if [ "$_rou_nc_present" = 1 ]; then
     _rou_rc=1
   fi
 fi
+case " $_rou_rl_todo " in
+  *" conf "* | *" dropin "*)
+    if systemctl restart "$_rou_ju_unit"; then
+      echo "OK: $_rou_ju_unit restarted -> $_rou_rl_sink (issue 1394)"
+    else
+      echo "FAIL: [issue 1394] $_rou_ju_unit did not restart on $_rou_box -- read: journalctl -u $_rou_ju_unit -n 20" >&2
+      _rou_rc=1
+    fi
+    ;;
+esac
 _rou_state="$(systemctl is-system-running 2>/dev/null || true)"
 if [ "$_rou_state" = running ]; then
   echo "OK: is-system-running = running on $_rou_box"

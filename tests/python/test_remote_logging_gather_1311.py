@@ -4,19 +4,18 @@ D9 -- `remote_log_gather_remote_snippet`'s JU_STATE_SAVE extraction greps the FI
       occurrence in the journal-upload drop-in dir; the shipped drop-in's own COMMENT names the stock
       default `--save-state=/var/lib/...` BEFORE the real `ExecStart=` line, so verify-device read the
       comment and failed check (ak) on a correctly provisioned box (the self-collision anchor class).
-D8 -- `dev1-remote-log-install.sh` creates /var/log/cambox root:root 0755 while rsyslog drops to
-      syslog:syslog -> `open error: Permission denied`, the per-box kernel file was never written.
+(D8, the dev1 receiver's sink-dir ownership, left with the dev1 installer in issue 1394: the receiver
+is the venue strih now, scripts/lib/strih-cambox-log-sink.sh: test_strih_cambox_log_sink_1394.py
+pins its User=syslog + LogsDirectory=cambox + `su syslog syslog` rotation.)
 """
 
 import os
-import re
 import subprocess
 import tempfile
 import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 LIB = os.path.join(REPO, "scripts", "lib", "remote-logging.sh")
-INSTALLER = os.path.join(REPO, "scripts", "dev1-remote-log-install.sh")
 
 
 def _bash(script: str) -> subprocess.CompletedProcess:
@@ -42,18 +41,6 @@ class JournalUploadStateGather(unittest.TestCase):
             cmd = line[0].replace("/etc/systemd/system/systemd-journal-upload.service.d", d)
             out = _bash(cmd).stdout.strip()
             self.assertEqual(out, "JU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state", out)
-
-
-class Dev1SinkDirOwnership(unittest.TestCase):
-    def test_installer_creates_the_sink_dir_owned_by_rsyslogs_dropped_user(self):
-        text = open(INSTALLER).read()
-        lines = [l for l in text.splitlines() if re.search(r"install -d .*CAMBOX_LOG_DIR", l)]
-        self.assertTrue(lines, "the installer must create the sink dir")
-        for l in lines:
-            self.assertIn("-o syslog -g adm", l, f"sink dir must be owned by rsyslog's PrivDropToUser (got: {l.strip()})")
-        r = _bash(f'bash "{INSTALLER}"')
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("install -d -m 0755 -o syslog -g adm /var/log/cambox", r.stdout)
 
 
 if __name__ == "__main__":

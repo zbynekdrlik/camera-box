@@ -22,6 +22,11 @@
 # This watchdog closes both gaps by reading the SAME on-box heartbeat + the stream's outputActive and
 # routing the whole judgment through the pure avsync_lineup.py decider -- no fourth measurement path.
 #
+# issue 1441: both modes cover EVERY venue of the venue table (scripts/lib/avsync-venues.sh -- snv,
+# pp): each venue's own dev2 heartbeat, its stream box's outputActive (the OBS-WS host from the table),
+# per-venue state/dedup keys (avsync-<venue>-...), the venue named in every page. A venue whose
+# stream box is away is AWAY (nothing read, never a page).
+#
 # Usage:
 #   scripts/avsync-lineup-alert-watchdog.sh                # one run-time liveness pass
 #   scripts/avsync-lineup-alert-watchdog.sh --assert       # one-shot pre-event GO/NO-GO (exit 0/1)
@@ -37,6 +42,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/avsync-heartbeat.sh
 . "$HERE/lib/avsync-heartbeat.sh"
+# shellcheck source=scripts/lib/avsync-venues.sh
+. "$HERE/lib/avsync-venues.sh"
 # avsync-heartbeat.sh sets `-e` for ITS OWN sourcing safety, and that `-e` LEAKS into this caller
 # (source runs in the same shell). `set -uo pipefail` alone does NOT clear it (it only turns options
 # ON), so we EXPLICITLY `set +e` -- otherwise a `var="$(decider)"` assignment where the decider
@@ -44,6 +51,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ASSIGNMENT, before the verdict is ever printed (ci-testing-gotchas.md's leaked-`set -e` trap). This
 # watchdog must survive a bad pass and keep polling on the next timer tick (see the header).
 set +e -uo pipefail
+# issue 1441: derive the venue table once for this pass (every accessor below reuses it).
+avsync_venue_table_load
 
 MODE="liveness"
 DRY_RUN=0
@@ -52,7 +61,7 @@ while [ "$#" -gt 0 ]; do
     --assert) MODE="assert" ;;
     --dry-run) DRY_RUN=1 ;;
     --help|-h)
-      sed -n '5,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '5,35p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "avsync-lineup-alert-watchdog: unknown arg '$1' (try --help)" >&2; exit 2 ;;
@@ -63,8 +72,9 @@ done
 # ── config (all env-overridable) ─────────────────────────────────────────────
 # #1331: the shared lib's stream-fallback ssh prefix reads STREAM_USER/STREAM_PW/STREAM_IP directly
 # (normalize them here; the old *_SSH aliases were retired when the inline sshpass call moved into
-# avsync_heartbeat_ssh_prefix_argv). STREAM_IP still also feeds STREAM_OBS_WS_HOST below.
-STREAM_IP="${STREAM_IP:-10.77.9.204}"
+# avsync_heartbeat_ssh_prefix_argv). issue 1441: the retired Windows path measured SNV on SNV's
+# stream box -- its address comes from the venue table; each venue's OBS-WS host does too.
+STREAM_IP="${STREAM_IP:-$(avsync_venue_host "$AVSYNC_LEGACY_HEARTBEAT_VENUE" 2>/dev/null || true)}"
 STREAM_USER="${STREAM_USER:-newlevel}"
 STREAM_PW="${STREAM_PW:-newlevel}"
 # run-time staleness window: 20 min (the ticket's operator-tolerable event window). The pure decider
@@ -85,8 +95,8 @@ OFFSET_CONF_FLOOR="${AVSYNC_LINEUP_OFFSET_CONF_FLOOR:-4.0}"
 
 # stream OBS WebSocket (for the outputActive read via obs_phase2.py stream-status). A missing/wrong
 # password just makes the read fail -> stream state UNKNOWN -> SUPPRESSED (fail-safe: never a false
-# page, and the network-reach/obs-liveness watchdogs own "OBS unreachable").
-STREAM_OBS_WS_HOST="${STREAM_OBS_WS_HOST:-$STREAM_IP}"
+# page, and the network-reach/obs-liveness watchdogs own "OBS unreachable"). issue 1441: the host is
+# each venue's stream box from the venue table (avsync_venue_ws_host), read per venue in the loop.
 # The stream box OBS-WS requires a password; the repo-standard env is OBS_WS_PASSWORD (rig-mode.sh's
 # convention). Defaulting to it (NOT an empty string) is what keeps the stream-state read from
 # silently failing -> None -> SUPPRESSED every pass -> a permanently-inert alarm (the #3 review
@@ -114,6 +124,40 @@ STATE_DIR="${AVSYNC_LINEUP_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 STATE_FILE="${AVSYNC_LINEUP_STATE_FILE:-$STATE_DIR/camera-box-avsync-lineup.state}"
 
 log() { printf '%s [avsync-lineup-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
+
+# issue 1441: the venue a pass is working on (set by the venue loop), its label (`SNV`, `PP`), its
+# stream box and that box's OBS-WS host.
+VENUE=""
+VENUE_LABEL=""
+VENUE_BOX=""
+STREAM_OBS_WS_HOST=""
+
+# select_venue VENUE -> set the VENUE_* globals; rc 1 (logged) when the table has no stream box for it.
+select_venue() {
+  VENUE="$1"
+  VENUE_LABEL="$(avsync_venue_label "$VENUE")"
+  VENUE_BOX="$(avsync_venue_box "$VENUE")" || { log "ERROR: $VENUE: no stream box in the venue table -- skipped"; return 1; }
+  STREAM_OBS_WS_HOST="$(avsync_venue_ws_host "$VENUE")" || return 1
+  return 0
+}
+
+# home_venues -> the venues this pass grades, one per line: every selected venue whose stream box is
+# home (issue 1001 doctrine: an away traveling box is AWAY -- nothing read, never a page).
+# A table that would watch less than it must is LOGGED here; the heartbeat watchdog pages it (one page).
+home_venues() {
+  local v box problem
+  problem="$(avsync_venue_table_problem "$(avsync_heartbeat_host)")"
+  [ -z "$problem" ] || log "ERROR: venue table: $problem"
+  for v in $(avsync_watchdog_venues "$(avsync_heartbeat_host)"); do
+    box="$(avsync_venue_box "$v")" || continue
+    if obs_fleet_poll_now "$box"; then
+      printf '%s\n' "$v"
+    else
+      log "$v: AWAY (stream box $box is not home) -- skipped, never a page"
+    fi
+  done
+  return 0
+}
 
 # #813 (#6): fail LOUD by name if a hard dependency is missing. Without this the run-time liveness
 # pass fails OPEN on a tooling gap (a missing jq -> empty facts -> the decider's json.load errors,
@@ -145,7 +189,11 @@ gather_heartbeat() {
     HEARTBEAT_EPOCH=""; HEARTBEAT_STATUS=""
     return 0
   fi
-  probe_out="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd)" 2>/dev/null || true)"
+  # issue 1441: dev2 reads VENUE's own heartbeat file (the retired stream host keeps its fixed path).
+  # (the legacy venue falls back to the old single file a not-yet-upgraded dev2 still writes)
+  probe_out="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd "" \
+    "$(avsync_venue_dev2_heartbeat_remote_path "$VENUE")" \
+    "$(avsync_venue_dev2_legacy_heartbeat_remote_path "$VENUE")")" 2>/dev/null || true)"
   watchdog_segment="$(avsync_heartbeat_extract_segment "$probe_out" watchdog)"
   HEARTBEAT_EPOCH="$(avsync_heartbeat_last_epoch "$watchdog_segment")"
   HEARTBEAT_STATUS="$(avsync_heartbeat_last_status "$watchdog_segment")"
@@ -157,6 +205,7 @@ gather_heartbeat() {
 STREAM_ACTIVE_JSON="null"
 gather_stream_state() {
   local out active
+  STREAM_ACTIVE_JSON="null"
   local args=(stream-status --host "$STREAM_OBS_WS_HOST")
   [ -n "$STREAM_OBS_WS_PW" ] && args+=(--password "$STREAM_OBS_WS_PW")
   out="$(python3 "$OBS_PHASE2" "${args[@]}" 2>/dev/null || true)"
@@ -208,8 +257,9 @@ send_discord_test_ping() {
   printf '%s' "$http_code"
 }
 
+# issue 1441: KEY is the per-venue dedup key the caller builds (avsync-<venue>-...).
 fire_notify() {
-  local body="$1" key="${2:-avsync-lineup}"
+  local body="$1" key="${2:-avsync-${VENUE}-lineup}"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "[dry-run] WOULD alert: $body"
     return 0
@@ -230,7 +280,7 @@ fire_offset_notify() {
     return 0
   fi
   python3 "$NOTIFY" notify --body "$body" \
-    --dedup-key "$(watchdog_notify_key "avsync-offset-stream" "$(date +%s)")" \
+    --dedup-key "$(watchdog_notify_key "avsync-${VENUE}-offset-stream" "$(date +%s)")" \
     >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
 }
 
@@ -258,7 +308,7 @@ run_liveness_pass() {
   local sig
   reason="$(printf '%s\n' "$out" | sed -n 's/^action=[A-Za-z]* reason=\(.*\) sig=[A-Za-z0-9-]*$/\1/p' | tail -1)"
   sig="$(printf '%s\n' "$out" | sed -n 's/.* sig=\([A-Za-z0-9-]*\)$/\1/p' | tail -1)"
-  log "stream_active=$STREAM_ACTIVE_JSON heartbeat_epoch=${HEARTBEAT_EPOCH:-<none>} status='${HEARTBEAT_STATUS:-<none>}' -> action=${action:-<none>} sig=${sig:-<none>}"
+  log "$VENUE: stream_active=$STREAM_ACTIVE_JSON heartbeat_epoch=${HEARTBEAT_EPOCH:-<none>} status='${HEARTBEAT_STATUS:-<none>}' -> action=${action:-<none>} sig=${sig:-<none>}"
 
   # confirm/throttle ONLY on ALARM; OK and SUPPRESSED both reset the pending state (a live-again OK,
   # or an off-air stream, clears any pending confirmation -- same "reset on clean signal" discipline
@@ -266,36 +316,36 @@ run_liveness_pass() {
   local wedged=0
   [ "$action" = "ALARM" ] && wedged=1
   local prev_confirm decision confirm act
-  prev_confirm="$(read_state_field "lineup_confirm" 0)"
+  prev_confirm="$(read_state_field "${VENUE}_lineup_confirm" 0)"
   decision="$(obs_watchdog_confirm "$prev_confirm" "$wedged" "$CONFIRM_THRESHOLD")"
   confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
   act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
-  write_state_field "lineup_confirm" "${confirm:-0}"
+  write_state_field "${VENUE}_lineup_confirm" "${confirm:-0}"
 
   if [ "$wedged" -eq 0 ]; then
-    write_state_field "lineup_alert_sig" ""
-    write_state_field "lineup_alert_passes" 0
+    write_state_field "${VENUE}_lineup_alert_sig" ""
+    write_state_field "${VENUE}_lineup_alert_passes" 0
     return 0
   fi
-  [ "${act:-0}" = "1" ] || { log "ALARM pending (confirm ${confirm}/${CONFIRM_THRESHOLD})"; return 0; }
+  [ "${act:-0}" = "1" ] || { log "$VENUE: ALARM pending (confirm ${confirm}/${CONFIRM_THRESHOLD})"; return 0; }
 
   local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
   # #4: throttle on the COARSE decider sig (no-audio/wedged/stale/no-signal), never the timestamped
   # heartbeat text -- a sustained condition keeps ONE signature so the ~1h throttle actually holds.
   current_sig="lineup:${sig:-alarm}"
-  prior_sig="$(read_state_field "lineup_alert_sig" "")"
-  prior_passes="$(read_state_field "lineup_alert_passes" 0)"
+  prior_sig="$(read_state_field "${VENUE}_lineup_alert_sig" "")"
+  prior_passes="$(read_state_field "${VENUE}_lineup_alert_passes" 0)"
   throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
   alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
   new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
   new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
-  write_state_field "lineup_alert_sig" "$new_sig"
-  write_state_field "lineup_alert_passes" "$new_passes"
+  write_state_field "${VENUE}_lineup_alert_sig" "$new_sig"
+  write_state_field "${VENUE}_lineup_alert_passes" "$new_passes"
 
   if [ "${alert_now:-0}" = "1" ]; then
-    fire_notify "🚨 avsync-lineup-alert-watchdog: meracia A/V-sync linka je MRTVA pocas ZIVEHO streamu -- ${reason} (${REPO_SLUG})." "avsync-lineup-liveness"
+    fire_notify "🚨 avsync-lineup-alert-watchdog [${VENUE_LABEL}]: meracia A/V-sync linka streamu ${VENUE_LABEL} (${VENUE_BOX}) je MRTVA pocas ZIVEHO streamu -- ${reason} (${REPO_SLUG})." "avsync-${VENUE}-lineup-liveness"
   else
-    log "ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
+    log "$VENUE: ALERT suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
   fi
 }
 
@@ -324,7 +374,7 @@ run_offset_pass() {
   action="$(printf '%s\n' "$out" | sed -n 's/^action=\([A-Za-z]*\).*/\1/p' | tail -1)"
   reason="$(printf '%s\n' "$out" | sed -n 's/^action=[A-Za-z]* reason=\(.*\) sig=[A-Za-z0-9-]*$/\1/p' | tail -1)"
   sig="$(printf '%s\n' "$out" | sed -n 's/.* sig=\([A-Za-z0-9-]*\)$/\1/p' | tail -1)"
-  log "offset: stream_active=$STREAM_ACTIVE_JSON status='${HEARTBEAT_STATUS:-<none>}' -> offset_action=${action:-<none>} sig=${sig:-<none>}"
+  log "$VENUE offset: stream_active=$STREAM_ACTIVE_JSON status='${HEARTBEAT_STATUS:-<none>}' -> offset_action=${action:-<none>} sig=${sig:-<none>}"
 
   # confirm/throttle ONLY on ALARM; OK and SUPPRESSED reset the pending state (same discipline as
   # the liveness arm). SUPPRESSED is DELIBERATELY never an alarm (stream off / not measured / low
@@ -332,37 +382,37 @@ run_offset_pass() {
   local wedged=0
   [ "$action" = "ALARM" ] && wedged=1
   local prev_confirm decision confirm act
-  prev_confirm="$(read_state_field "offset_confirm" 0)"
+  prev_confirm="$(read_state_field "${VENUE}_offset_confirm" 0)"
   decision="$(obs_watchdog_confirm "$prev_confirm" "$wedged" "$CONFIRM_THRESHOLD")"
   confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
   act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
-  write_state_field "offset_confirm" "${confirm:-0}"
+  write_state_field "${VENUE}_offset_confirm" "${confirm:-0}"
 
   if [ "$wedged" -eq 0 ]; then
-    write_state_field "offset_alert_sig" ""
-    write_state_field "offset_alert_passes" 0
+    write_state_field "${VENUE}_offset_alert_sig" ""
+    write_state_field "${VENUE}_offset_alert_passes" 0
     return 0
   fi
-  [ "${act:-0}" = "1" ] || { log "offset ALARM pending (confirm ${confirm}/${CONFIRM_THRESHOLD})"; return 0; }
+  [ "${act:-0}" = "1" ] || { log "$VENUE: offset ALARM pending (confirm ${confirm}/${CONFIRM_THRESHOLD})"; return 0; }
 
   local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
   # throttle on the COARSE decider sig (offset), never the timestamped heartbeat text, so a sustained
   # rozladenie keeps ONE signature; the TIME-BUCKETED dedup key (fire_offset_notify) then turns each
   # throttled re-fire into a fresh ping while it persists (the production-critical class).
   current_sig="offset:${sig:-alarm}"
-  prior_sig="$(read_state_field "offset_alert_sig" "")"
-  prior_passes="$(read_state_field "offset_alert_passes" 0)"
+  prior_sig="$(read_state_field "${VENUE}_offset_alert_sig" "")"
+  prior_passes="$(read_state_field "${VENUE}_offset_alert_passes" 0)"
   throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
   alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
   new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
   new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
-  write_state_field "offset_alert_sig" "$new_sig"
-  write_state_field "offset_alert_passes" "$new_passes"
+  write_state_field "${VENUE}_offset_alert_sig" "$new_sig"
+  write_state_field "${VENUE}_offset_alert_passes" "$new_passes"
 
   if [ "${alert_now:-0}" = "1" ]; then
-    fire_offset_notify "🚨 avsync-lineup-alert-watchdog: A/V-sync ROZLADENIE pocas ZIVEHO streamu -- ${reason} (${REPO_SLUG})."
+    fire_offset_notify "🚨 avsync-lineup-alert-watchdog [${VENUE_LABEL}]: A/V-sync ROZLADENIE pocas ZIVEHO streamu ${VENUE_LABEL} (${VENUE_BOX}) -- ${reason} (${REPO_SLUG})."
   else
-    log "offset ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
+    log "$VENUE: offset ALERT suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
   fi
 }
 
@@ -375,14 +425,12 @@ forwarder_present_json() {
   printf '%s' "$present"
 }
 
+# issue 1441: the forwarder check and the ONE Discord test-ping are venue-independent (one per
+# assert); every HOME venue is then graded on its own heartbeat + stream state. Exit 1 when any venue
+# is NO-GO, or when no venue's stream box is home (nothing could be proven ready).
 run_preflight_assert() {
-  gather_heartbeat
-  # #3: also read the stream state so preflight can prove the OBS-WS read WORKS -- a None (unreadable)
-  # read means the run-time alarm's own stream gate can't function, and the decider makes that NO-GO.
-  gather_stream_state
   [ "$DRY_RUN" -eq 1 ] || require_tools curl
-  local now fwd http factfile facts go_out rc
-  now="$(date +%s)"
+  local fwd http http_json v venues rc_all=0 graded=0
   fwd="$(forwarder_present_json)"
   if [ "$DRY_RUN" -eq 1 ]; then
     http=""   # never send a real ping in dry-run; preflight then correctly reports it undelivered
@@ -390,11 +438,41 @@ run_preflight_assert() {
   else
     http="$(send_discord_test_ping "✅ avsync-lineup pre-event test ping ($(date '+%Y-%m-%d %H:%M:%S'))")"
   fi
-  local http_json
   case "$http" in
     ''|*[!0-9]*) http_json="null" ;;
     *) http_json="$http" ;;
   esac
+  # a table that lost a venue (or selects none) can never be GO: the pre-event check must not pass on
+  # the venues that are left while one goes unwatched (issue 1441 review round 2)
+  local problem
+  problem="$(avsync_venue_table_problem "$(avsync_heartbeat_host)")"
+  if [ -n "$problem" ]; then
+    printf 'NO-GO: venue table -- %s\n' "$problem"
+    fire_notify "🚨 avsync-lineup PRE-EVENT NO-GO: tabuľka miest merania lipsync je neúplná -- ${problem} (${REPO_SLUG})." "avsync-venue-table-preflight-nogo"
+    rc_all=1
+  fi
+  venues="$(home_venues)"
+  for v in $venues; do
+    select_venue "$v" || { rc_all=1; continue; }
+    graded=$((graded + 1))
+    preflight_venue "$fwd" "$http_json" || rc_all=1
+  done
+  if [ "$graded" -eq 0 ]; then
+    printf 'NO-GO: no venue stream box is home -- nothing to prove ready\n'
+    return 1
+  fi
+  return "$rc_all"
+}
+
+# preflight_venue FWD_JSON HTTP_JSON -> grade VENUE (the globals) through the pure decider; prints
+# "[<LABEL>] <GO/NO-GO line>", fires the venue's NO-GO alert, returns the decider's rc.
+preflight_venue() {
+  local fwd="$1" http_json="$2" now factfile facts go_out rc
+  gather_heartbeat
+  # #3: also read the stream state so preflight can prove the OBS-WS read WORKS -- a None (unreadable)
+  # read means the run-time alarm's own stream gate can't function, and the decider makes that NO-GO.
+  gather_stream_state
+  now="$(date +%s)"
   factfile="$(mktemp)"
   facts="$(jq -n \
     --argjson epoch "$(epoch_json)" \
@@ -408,10 +486,10 @@ run_preflight_assert() {
   printf '%s' "$facts" > "$factfile"
   go_out="$(python3 "$LINEUP_DECIDER" preflight --facts "$factfile" 2>/dev/null)"; rc=$?
   rm -f "$factfile"
-  printf '%s\n' "$go_out"
+  printf '[%s] %s\n' "$VENUE_LABEL" "$go_out"
   if [ "$rc" -ne 0 ]; then
     # NO-GO -> loud alert BEFORE the event (not just an exit code buried in a terminal).
-    fire_notify "🚨 avsync-lineup PRE-EVENT NO-GO: meracia A/V-sync linka NIE JE pripravena -- ${go_out} (${REPO_SLUG})." "avsync-lineup-preflight-nogo"
+    fire_notify "🚨 avsync-lineup PRE-EVENT NO-GO [${VENUE_LABEL}]: meracia A/V-sync linka streamu ${VENUE_LABEL} (${VENUE_BOX}) NIE JE pripravena -- ${go_out} (${REPO_SLUG})." "avsync-${VENUE}-lineup-preflight-nogo"
   fi
   return "$rc"
 }
@@ -430,9 +508,13 @@ main() {
     exit $?
   fi
   log "liveness pass (dry_run=$DRY_RUN, stale_s=$STALE_S, threshold=$CONFIRM_THRESHOLD)"
-  run_liveness_pass
-  # #1331: the offset arm runs on the SAME facts run_liveness_pass just gathered (globals), no re-fetch.
-  run_offset_pass
+  local v
+  for v in $(home_venues); do
+    select_venue "$v" || continue
+    run_liveness_pass
+    # #1331: the offset arm runs on the SAME facts run_liveness_pass just gathered (globals), no re-fetch.
+    run_offset_pass
+  done
   log "pass end"
 }
 

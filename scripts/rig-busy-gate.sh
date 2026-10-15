@@ -47,8 +47,8 @@ STRAY_HEAL_THRESHOLD="${STRAY_HEAL_THRESHOLD:-3}"
 # test republishes stream OBS with a deliberate gap (up to ~45 s), and run 38520662080 was admitted
 # on a read inside a 10 s gap. A run is admitted only after strih + stream read idle CONTINUOUSLY for
 # IDLE_HOLD_SECS: one read every IDLE_STEP_SECS of the hold (IDLE_POLL_SECS apart; it follows
-# SLEEP_SECS down to 0 so the offline tests stay instant). The lease is never held while a box
-# streams, so a foreign broadcast is never failed by our lease. Since issue 1432 (ROZHODNUTÉ
+# SLEEP_SECS down to 0 so the offline tests stay instant). The lease is released at the first read
+# that sees a box streaming, so a foreign broadcast is never failed by our lease. Since issue 1432 (ROZHODNUTÉ
 # 6182938785) the hold runs UNDER the lease: every restreamer stream-lan job takes the lease for its
 # whole job (restreamer PR 400), so its republish gaps happen under its own lease, and releasing
 # during the hold let restreamer's next job take the rig (run 38667117544 starved).
@@ -261,8 +261,22 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
       LEASE_HELD=1
     fi
     if rig_busy_idle_hold; then
-      echo "[rig-busy-gate] idle for the whole hold -- final read under the lease"
-      rig_busy_read
+      # beat the lease (nothing refreshed it over the hold) and confirm it is still ours: never
+      # admit on a lease another holder took over meanwhile (rc 1). rc 2 (a filesystem error on
+      # the beat) and rc 3 (past the hold ceiling, only reachable after a >75 min gate wait) leave
+      # the lease ours, so they are admitted, logged.
+      _refresh_rc=0
+      rig_lease_refresh_if_mine "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID" >/dev/null || _refresh_rc=$?
+      [ "$_refresh_rc" -eq 0 ] || [ "$_refresh_rc" -eq 1 ] \
+        || echo "[rig-busy-gate] WARNING: lease beat after the idle hold returned rc ${_refresh_rc} (the lease is still ours) -- admitting"
+      if [ "$_refresh_rc" -eq 1 ]; then
+        echo "[rig-busy-gate] our rig lease was taken over during the idle hold -- not admitted (issue 1432)"
+        LEASE_HELD=0
+        BUSY="True"
+      else
+        echo "[rig-busy-gate] idle for the whole hold -- final read under the lease"
+        rig_busy_read
+      fi
     fi
   fi
   if [ "$BUSY" = "False" ]; then
@@ -285,8 +299,8 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
   # correct regardless of overrides). issue 1383: through the one holder keep-alive, which never
   # bumps a foreign holder's heartbeat and rolls the declared release time while we wait.
   # issue 1404: never hold the lease while a box STREAMS (a foreign broadcast in progress, e.g.
-  # restreamer's YouTube run, whose own restart refuses a held lease); it is taken again only after
-  # the idle hold. A stray recording alone keeps it: the #657 self-heal below mutates the rig.
+  # restreamer's YouTube run, whose own restart refuses a held lease); it is taken again on the
+  # next idle read, before the idle hold (issue 1432). A stray recording alone keeps it: the #657 self-heal below mutates the rig.
   if rig_busy_any_streaming; then
     if [ "$LEASE_HELD" -eq 1 ]; then
       echo "[rig-busy-gate] a box is streaming -- releasing our rig lease while we wait (issue 1404)"

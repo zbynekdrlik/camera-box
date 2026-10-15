@@ -54,10 +54,10 @@ case "$args" in
     n=$(( $(cat "$CNT" 2>/dev/null || echo 0) + 1 ))
     echo "$n" > "$CNT"
     if [ "$n" -le "$FAIL_UNTIL" ]; then exit 0; fi
-    echo "10.77.9.200 dev eth0 src 10.77.9.99 uid 0 cache"
+    echo "10.77.9.202 dev eth0 src 10.77.9.99 uid 0 cache"
     ;;
   *"neigh show"*)
-    echo "10.77.9.200 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+    echo "10.77.9.202 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
     ;;
   *) : ;;
 esac
@@ -81,7 +81,7 @@ class NetconsoleWaitsForLateRoute(unittest.TestCase):
             counter = os.path.join(tmp, "route_calls")
             # Generate the setup script with fast (sleep 0) retries baked in.
             script = _sourced(
-                "remote_log_netconsole_setup_script_content",
+                "remote_log_netconsole_setup_script_content 10.77.9.202",
                 {
                     "REMOTE_LOG_NC_CONFIGFS": cfg,
                     "REMOTE_LOG_NC_ROUTE_RETRIES": "30",

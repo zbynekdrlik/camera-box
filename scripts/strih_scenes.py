@@ -24,6 +24,9 @@ Modes:
   --verify-parity        read-only: report whether the 10 seed inputs exist as genlock_fifo sources
                          (the imag verify_parity grep-qxF whole-line shape; consumed report-only by
                          verify-strih.sh so a not-yet-launched box is never a hard FAIL).
+  --audio-monitor-type   issue 1436, read-only: print the OBS monitoring type of the program-audio input
+                         (`OBS_MONITORING_TYPE_NONE` ...), `absent`, or `unreachable: <why>` with rc 2
+                         when the OBS websocket does not answer (verify-strih's stream-monitor row).
   --projector T          issue 1346: set the HDMI output VIEW (program|multiview) in
                          ~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the
                          next OBS start. The operator's live switch is in OBS (Tools menu); this is
@@ -144,6 +147,23 @@ def parse_program_audio_input(text):
         return AUDIO_INPUT_NAME
     name = d.get("program_audio_input") if isinstance(d, dict) else None
     return name if isinstance(name, str) and name else AUDIO_INPUT_NAME
+
+
+# issue 1436: the stream role's manifest declares `"program_audio_monitor": "off"`. The stream box's
+# headphones play the real outgoing stream (strih-stream-monitor.service), so the program-audio input
+# must not ALSO be monitored to the jack (stream-pp had `Zvuk z mixu` on Monitor and Output).
+AUDIO_MONITOR_NONE = "OBS_MONITORING_TYPE_NONE"
+
+
+def parse_program_audio_monitor(text):
+    """issue 1436: `"off"` when the manifest declares `"program_audio_monitor": "off"`, else None (the
+    strih role: the seeder never touches monitoring). Lenient, never raises."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return None
+    v = d.get("program_audio_monitor") if isinstance(d, dict) else None
+    return "off" if v == "off" else None
 
 
 def feedback_settings():
@@ -577,6 +597,32 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME):
     return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", len(keep_scenes))
 
 
+def audio_monitor_type_of(obs, name=AUDIO_INPUT_NAME):
+    """issue 1436: the OBS monitoring type of the input NAME (`OBS_MONITORING_TYPE_*`), `absent` when no
+    such input exists, `unreadable` when OBS answers without a type."""
+    inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
+    if not any(i.get("inputName") == name for i in inputs or []):
+        return "absent"
+    cur = (obs.req("GetInputAudioMonitorType", {"inputName": name}, ignore_err=True) or {}).get("monitorType")
+    return cur if isinstance(cur, str) and cur else "unreadable"
+
+
+def ensure_audio_monitor_off(obs, name=AUDIO_INPUT_NAME):
+    """issue 1436, update-only: set the existing input NAME to Monitor Off when OBS monitors it, read it
+    back. Returns the status for the seed line: `monitor off`, `monitor off (was <type>)`, or a refusal
+    named by what OBS still reports."""
+    cur = (obs.req("GetInputAudioMonitorType", {"inputName": name}, ignore_err=True) or {}).get("monitorType")
+    if not cur:
+        return "monitor unreadable"
+    if cur == AUDIO_MONITOR_NONE:
+        return "monitor off"
+    obs.req("SetInputAudioMonitorType", {"inputName": name, "monitorType": AUDIO_MONITOR_NONE}, ignore_err=True)
+    back = (obs.req("GetInputAudioMonitorType", {"inputName": name}, ignore_err=True) or {}).get("monitorType")
+    if back == AUDIO_MONITOR_NONE:
+        return "monitor off (was %s)" % cur
+    return "monitor still %s (SetInputAudioMonitorType refused)" % (back or cur)
+
+
 def _scenes_holding(obs, name):
     """issue 1412: the scenes whose items include the source NAME, in the scene list's order."""
     out = []
@@ -612,7 +658,7 @@ def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
     return added
 
 
-def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME):
+def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME, audio_monitor=None):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
     CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
@@ -627,6 +673,10 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
     ndi_source_name -- the operator's source binding is authoritative, so the seeder never renames it),
     conditionally on drift. This is the fix for the live duplicate-receiver defect: the launch seed no
     longer creates `NDI CAMn (usb)` duplicates alongside the operator's `NDI camN` inputs.
+
+    issue 1436: AUDIO_MONITOR "off" (the stream manifest's `program_audio_monitor`) then sets the
+    program-audio input to Monitor Off when OBS monitors it (`ensure_audio_monitor_off`, named in its
+    status); None never touches monitoring.
 
     Then SetStudioModeEnabled. Returns {input: status} for the log."""
     op = _obs_phase2_module()
@@ -686,6 +736,8 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
         added = ensure_program_audio_in_every_scene(obs, plan, audio_name)
         if added:
             audio_status += " (+%d scene items)" % added
+        if audio_monitor == "off":
+            audio_status += "; " + ensure_audio_monitor_off(obs, audio_name)
     result[audio_name] = audio_status
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
@@ -736,6 +788,9 @@ def main():
     ap.add_argument("--audio-input-kind", action="store_true",
                     help="issue 1344: print the OBS inputKind of the `ASIO zvuk` program-audio input "
                          "(or `absent`) — read-only, for verify-strih's derived audio verdict")
+    ap.add_argument("--audio-monitor-type", action="store_true",
+                    help="issue 1436: print the OBS monitoring type of the program-audio input (or "
+                         "`absent`; `unreachable: <why>` + rc 2 when OBS does not answer) -- read-only")
     ap.add_argument("--projector", choices=["program", "multiview"], default=None,
                     help="issue 1346: set the HDMI output view (program|multiview) in "
                          "~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the "
@@ -749,7 +804,7 @@ def main():
     # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only; --projector sets the HDMI
     # output view (issue 1346).
     if (not args.bootstrap and not args.verify_parity and args.projector is None
-            and not args.audio_input_kind):
+            and not args.audio_input_kind and not args.audio_monitor_type):
         ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), "
                  "--audio-input-kind (read-only), or --projector program|multiview")
 
@@ -764,6 +819,21 @@ def main():
         obs = Obs(args.host, args.port, args.password)
         inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
         print(program_audio_input_kind_from_inputs(inputs, audio_name) or "absent")
+        return
+
+    # --audio-monitor-type (issue 1436): read-only, for verify-strih's stream-monitor row. An OBS that
+    # does not answer is rc 2 (verify reads it as a NOTE: OBS not running), never a monitoring verdict.
+    if args.audio_monitor_type:
+        try:
+            audio_name = parse_program_audio_input(_read_manifest(args.manifest))
+        except OSError:
+            audio_name = AUDIO_INPUT_NAME
+        try:
+            obs = Obs(args.host, args.port, args.password)
+        except Exception as e:  # noqa: BLE001 -- refused / reset / handshake: any of them = OBS not answering
+            print("unreachable: %s: %s" % (type(e).__name__, e))
+            sys.exit(2)
+        print(audio_monitor_type_of(obs, audio_name))
         return
 
     # --projector (issue 1346): persist the HDMI output view. Touches only drm-output.json -- never
@@ -791,7 +861,8 @@ def main():
     mode = parse_seed_mode(manifest_text)
     plan = seed_inputs(inputs, latency)
     statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"),
-                         audio_name=parse_program_audio_input(manifest_text))
+                         audio_name=parse_program_audio_input(manifest_text),
+                         audio_monitor=parse_program_audio_monitor(manifest_text))
     print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
           % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))

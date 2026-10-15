@@ -855,6 +855,7 @@ else note "(tally) not graded: ${WHY}"; fi
 strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"
 # 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh, its header: nginx + each name's cert + the upstreams + renewal).
 if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; else note "(https) not graded: ${WHY}"; fi
+if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_grade_report || bad "(log-sink) the grader did not print all of its rows"; else note "(log-sink) not graded: ${WHY}"; fi   # 46) issue 1394 cambox log sink (scripts/lib/strih-cambox-log-sink.sh: files, units, listeners)
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND

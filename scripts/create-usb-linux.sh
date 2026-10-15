@@ -61,11 +61,6 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
                                  # (dantesync issue 52) -- SAME source of truth as
                                  # setup-device.sh/verify-device.sh for the NTP-client DSCP
                                  # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + oneshot
-# shellcheck source=scripts/lib/remote-logging.sh
-. "$SCRIPT_DIR/lib/remote-logging.sh"  # remote_log_netconsole_setup_script_content/_service_unit_content
-                                       # + remote_log_journal_upload_conf_content/_dropin_content (#1311)
-                                       # -- SAME source of truth as setup-device.sh/verify-device.sh for
-                                       # off-box kernel(netconsole)+journal(upload) forensics
 # shellcheck source=scripts/lib/cambox-zram.sh
 . "$SCRIPT_DIR/lib/cambox-zram.sh"  # cambox_zram_install_dropin (issue 1428) -- SAME lib as setup-device.sh's
                                     # [zram-swap] + verify-device.sh (at): the zram swap drop-in
@@ -345,19 +340,11 @@ EOF
     dscp_nft_ruleset_content > "$MOUNT_ROOT$DSCP_NFT_RULESET_PATH"
     dscp_nft_service_unit_content > "$MOUNT_ROOT$DSCP_NFT_SERVICE_PATH"
 
-    # #1311: bake off-box remote logging into the base image too (same dual-bake as the DSCP writes
-    # above), so a freshly-imaged box ships kernel(netconsole)+journal(upload) forensics from first
-    # boot -- before setup-device.sh ever re-runs. netconsole ships kernel printk over UDP from kernel
-    # memory (survives the #1309 half-dead stick death), systemd-journal-upload forwards the rich
-    # journal to the dev1 sink. Plain host-side file writes; the `systemd-journal-remote` install +
-    # `systemctl enable cambox-netconsole systemd-journal-upload` happen in the chroot setup.sh below.
-    mkdir -p "$MOUNT_ROOT$(dirname "$REMOTE_LOG_NC_SCRIPT_PATH")" "$MOUNT_ROOT$(dirname "$REMOTE_LOG_NC_SERVICE_PATH")"
-    remote_log_netconsole_setup_script_content > "$MOUNT_ROOT$REMOTE_LOG_NC_SCRIPT_PATH"
-    chmod +x "$MOUNT_ROOT$REMOTE_LOG_NC_SCRIPT_PATH"
-    remote_log_netconsole_service_unit_content > "$MOUNT_ROOT$REMOTE_LOG_NC_SERVICE_PATH"
-    mkdir -p "$MOUNT_ROOT$(dirname "$REMOTE_LOG_JU_CONF_PATH")" "$MOUNT_ROOT$(dirname "$REMOTE_LOG_JU_DROPIN_PATH")"
-    remote_log_journal_upload_conf_content > "$MOUNT_ROOT$REMOTE_LOG_JU_CONF_PATH"
-    remote_log_journal_upload_dropin_content > "$MOUNT_ROOT$REMOTE_LOG_JU_DROPIN_PATH"
+    # #1311 / issue 1394: the base image carries NO off-box logging files. Their target is the box's
+    # OWN venue strih (scripts/lib/remote-logging.sh remote_log_sink_ip), which only setup-device.sh
+    # knows (it runs next, with the box name); this image is the same for every box. The package that
+    # ships systemd-journal-upload is installed in the chroot below; setup-device writes + enables both
+    # transports.
 
     # issue 1428: swap on compressed RAM from the first boot (the package in the chroot install
     # below; this drop-in = zram-size = ram, zstd). No swapfile: the root runs read-only after setup-device STEP 18.
@@ -387,10 +374,10 @@ set -e
 
 export DEBIAN_FRONTEND=noninteractive
 
-# #1311 (cam1 M.2 install, 2026-09-24): the host side already baked /etc/systemd/journal-upload.conf
-# before this script runs, and systemd-journal-remote ships the same conffile -- without these
-# options dpkg asks keep-or-replace, reads EOF on stdin and aborts the whole install. Keep the
-# pre-baked conffiles for every package install below.
+# #1311 (cam1 M.2 install, 2026-09-24): a conffile the host side baked before this script runs (then
+# /etc/systemd/journal-upload.conf, which systemd-journal-remote ships too) made dpkg ask
+# keep-or-replace, read EOF on stdin and abort the whole install. Keep any pre-baked conffile for
+# every package install below.
 cat > /etc/apt/apt.conf.d/90camera-box-keep-conffiles << 'APT_CONF_EOF'
 Dpkg::Options { "--force-confdef"; "--force-confold"; };
 APT_CONF_EOF
@@ -561,13 +548,6 @@ systemctl enable systemd-resolved
 # the `nftables` package is installed above). Enable-only -- the rule applies on first boot. rsntp's
 # Linux client cannot setsockopt(IP_TOS), so this marks the request direction (scripts/lib/dscp-nft.sh).
 systemctl enable dantesync-dscp
-
-# #1311: enable off-box remote logging (units + scripts + confs were baked into the image host-side
-# above; the systemd-journal-remote package that ships systemd-journal-upload is installed above).
-# Enable-only -- both apply on first boot. netconsole ships kernel printk to dev1 (survives the #1309
-# half-dead stick death), systemd-journal-upload forwards the rich journal (scripts/lib/remote-logging.sh).
-systemctl enable cambox-netconsole
-systemctl enable systemd-journal-upload
 
 # #448: MASK systemd-networkd-wait-online. The base debootstrap pulls it in with NO
 # `--interface`/`--any` bound, so on first boot it waits for EVERY interface to be fully

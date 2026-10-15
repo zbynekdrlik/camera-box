@@ -523,6 +523,9 @@ section above), and a box that reads `degraded` hides real failures.
   daemon-reload, reset-failed, one logrotate run, the netconsole restart, and an
   `is-system-running` = running read-back. A box without the issue-1311 unit gets a NOTE and no new unit (that box needs its
   setup-device re-run); the CLI's RESULT names it.
+  - **Issue 1394 (the log sink):** the CLI resolves every box's venue strih sink
+    (`remote_log_sink_ip`) before any box, and the same window re-points the issue-1311 logging files
+    (`.claude/rules/cambox-remote-logging.md`); `--venue pp` dials the Poprad boxes at 10.76.9.x.
   - **It is a root write on a cambox, so `--apply` TAKES the rig lease for its whole run** (repo
     `camera-box-ro-units-apply`, a per-run id, released on EXIT/INT/TERM; a live foreign holder
     refuses the run before any box, a stale one is reclaimed). One box can take minutes (the

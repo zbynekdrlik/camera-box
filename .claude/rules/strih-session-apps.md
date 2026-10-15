@@ -240,6 +240,15 @@ Design comment 5979157737 (Approach 1); finding + live stopgap 5979039607.
   while the deck did not respond). The watch catches only the classes the REST shows. A hang it cannot
   see still needs a report, and the unit's own `Restart=always` only catches a Satellite that exits.
 
+## The stream role's headphone monitor (`strih-stream-monitor.service`, issue 1436)
+
+A session app on the STREAM role only (`obs_box_role_apply`: keeper, monitor, tray): the headphones play
+the audio of the real outgoing RTMP stream straight through ALSA (the SNV VLC design, never PipeWire). It
+uses the install / unit row / autostart machinery above unchanged; its packages (`ffmpeg alsa-utils`, via
+`strih_session_apps_packages`) and its three extra verify rows live in `scripts/lib/strih-stream-monitor.sh`
+(`STRIH_STREAM_MONITOR_ROWS` counted by `strih_session_apps_row_count`). Everything else:
+`.claude/rules/stream-headphone-monitor.md`.
+
 ## The dantesync tray (`dantesync-tray.service`, issue 1429)
 
 Owner, 14.10.2026: "dantesinc ma mat pod linuxom tiez v liste ikonuzo stavmi tak ako na windovse aby

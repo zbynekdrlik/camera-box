@@ -22,6 +22,8 @@ def _run_dry_run(env_extra, tmp_path):
         # An unknown host => avsync_heartbeat_ssh_prefix_argv returns nothing => empty probe =>
         # the heartbeat legs are skipped, no ssh/network. The report pass still runs.
         "AVSYNC_HEARTBEAT_HOST": "none",
+        # issue 1441: the watchdog loops every venue; these are SNV-session tests (one venue).
+        "AVSYNC_VENUES": "snv",
         "AVSYNC_HEARTBEAT_STATE_FILE": str(tmp_path / "hb.state"),
         "AVSYNC_REPORT_STATE_FILE": str(tmp_path / "report-state.json"),
     }
@@ -105,13 +107,15 @@ def _run_live(tmp_path, curl_http_code, fetch):
     disc_env = tmp_path / "discord.env"
     disc_env.write_text("DISCORD_BOT_TOKEN=faketoken\n")
 
-    state_path = tmp_path / "report-state.json"
+    # issue 1441: the report state is per venue, derived from AVSYNC_REPORT_STATE_FILE.
+    state_path = tmp_path / "report-state-snv.json"
     env = {
         "PATH": f"{binp}:/usr/bin:/bin",
         "HOME": _HOME,
         "AVSYNC_HEARTBEAT_HOST": "none",
+        "AVSYNC_VENUES": "snv",
         "AVSYNC_HEARTBEAT_STATE_FILE": str(tmp_path / "hb.state"),
-        "AVSYNC_REPORT_STATE_FILE": str(state_path),
+        "AVSYNC_REPORT_STATE_FILE": str(tmp_path / "report-state.json"),
         "AVSYNC_DISCORD_ENV": str(disc_env),
         "AVSYNC_REPORT_FETCH_CMD": fetch,
     }
@@ -148,5 +152,6 @@ def test_dry_run_never_mutates_the_production_report_state(tmp_path):
     proc = _run_dry_run({"AVSYNC_REPORT_FETCH_CMD": _START_FETCH}, tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "WOULD post" in proc.stderr
-    state_path = tmp_path / "report-state.json"
+    state_path = tmp_path / "report-state-snv.json"
     assert not state_path.exists(), "--dry-run must never create/mutate the production report state"
+    assert not (tmp_path / "report-state.json").exists()

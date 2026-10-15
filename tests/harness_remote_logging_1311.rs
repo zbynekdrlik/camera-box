@@ -6,12 +6,12 @@
 //! partition -- which dies WITH the stick. The next death must be diagnosable, so messages have to
 //! leave the box before the fs is needed. `scripts/lib/remote-logging.sh` is the single source of
 //! truth: netconsole (kernel printk over UDP, survives the death instant) + systemd-journal-upload
-//! (the rich journal to a dev1 sink), wired into all three provisioners
-//! (setup-device.sh [remote-logging] + STEP 16 pkg, create-usb-linux.sh base image, verify-device.sh
-//! (ak) acceptance check) and a dev1-side receiver installer (scripts/dev1-remote-log-install.sh).
+//! (the rich journal), both to the box's OWN venue strih (issue 1394: the sink is resolved from the
+//! venue fact files, never dev1), wired into setup-device.sh ([remote-logging] + STEP 16 pkg) and
+//! verify-device.sh ((ak) acceptance check). The receivers live on the strih box (setup-strih 16k).
 //!
 //! These tests (a) source the REAL lib for its pure MAC parser / content generators / fail-closed
-//! verdict, and (b) static-anchor the four consumers -- the same convention as
+//! verdict, and (b) static-anchor the consumers -- the same convention as
 //! `tests/harness_dscp_nft_ds52.rs` / `tests/harness_mgmt_liveness_1309.rs`. Tier-0: no kernel / root
 //! / network needed; the GREEN fixture is the exact live-rendered gather output.
 
@@ -70,7 +70,25 @@ fn call_over_arg(func: &str, arg: &str) -> String {
 }
 
 // A fully-healthy gathered state (the exact KEY=VALUE shape remote_log_gather_remote_snippet emits).
-const GREEN_BLOCK: &str = "NC_SVC_ENABLED=enabled\nNC_SVC_ACTIVE=active\nNC_SCRIPT_X=yes\nNC_ENABLED=1\nNC_REMOTE_IP=10.77.9.200\nNC_REMOTE_PORT=514\nJU_SVC_ENABLED=enabled\nJU_URL=http://10.77.9.200:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state";
+const GREEN_BLOCK: &str = "NC_SVC_ENABLED=enabled\nNC_SVC_ACTIVE=active\nNC_SCRIPT_X=yes\nNC_ENABLED=1\nNC_REMOTE_IP=10.77.9.202\nNC_REMOTE_PORT=514\nJU_SVC_ENABLED=enabled\nJU_URL=http://10.77.9.202:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state";
+
+// The box's venue strih sink the GREEN block points at (issue 1394: strih-snv, cam2/cam3/cam5).
+const SINK: &str = "10.77.9.202";
+
+/// Source the lib and run `remote_log_verdict "$ARG" "$SINK"` (both via env, never interpolated).
+fn verdict(block: &str) -> String {
+    let harness = "set -uo pipefail\n. \"$SCRIPT\"\nremote_log_verdict \"$ARG\" \"$SINK\"";
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", lib_script())
+        .env("ARG", block)
+        .env("SINK", SINK)
+        .output()
+        .expect("failed to run bash harness");
+    assert!(out.status.success(), "verdict harness exited non-zero");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
 
 // -------------------------------------------------------------------------------------------
 // pure MAC parser
@@ -121,7 +139,7 @@ fn mac_parser_returns_empty_for_unresolved_or_absent() {
 
 #[test]
 fn netconsole_setup_script_embeds_the_mac_parser_and_arms_the_target() {
-    let s = run_sourced("remote_log_netconsole_setup_script_content");
+    let s = run_sourced("remote_log_netconsole_setup_script_content 10.77.9.202");
     // ONE source of truth: the pure parser is embedded via `declare -f` (renders `name ()`).
     assert!(
         s.contains("remote_log_mac_from_neigh ()"),
@@ -129,10 +147,10 @@ fn netconsole_setup_script_embeds_the_mac_parser_and_arms_the_target() {
     );
     assert!(
         s.contains("ip neigh show"),
-        "setup script must resolve dev1's MAC from the neigh cache: {s}"
+        "setup script must resolve the sink's MAC from the neigh cache: {s}"
     );
     assert!(
-        s.contains("echo \"$DEV1_IP\" > \"$CFG/remote_ip\"")
+        s.contains("echo \"$SINK_IP\" > \"$CFG/remote_ip\"")
             && s.contains("echo 1 > \"$CFG/enabled\""),
         "setup script must configure + enable the dynamic configfs target: {s}"
     );
@@ -172,12 +190,12 @@ fn netconsole_service_is_a_boot_enabled_oneshot_after_network_online() {
 }
 
 #[test]
-fn journal_upload_conf_points_at_the_dev1_sink() {
-    let c = run_sourced("remote_log_journal_upload_conf_content");
+fn journal_upload_conf_points_at_the_venue_strih_sink() {
+    let c = run_sourced("remote_log_journal_upload_conf_content 10.77.9.202");
     assert!(c.contains("[Upload]"), "must be an [Upload] section: {c}");
     assert!(
-        c.contains("URL=http://10.77.9.200:19532"),
-        "must point at the dev1 journal-remote sink: {c}"
+        c.contains("URL=http://10.77.9.202:19532"),
+        "must point at the given sink's journal-remote: {c}"
     );
 }
 
@@ -212,34 +230,34 @@ fn journal_upload_dropin_redirects_the_cursor_to_run_for_the_ro_root() {
 
 #[test]
 fn verdict_ok_only_when_every_facet_is_healthy() {
-    assert_eq!(
-        call_over_arg("remote_log_verdict", GREEN_BLOCK).trim(),
-        "ok"
-    );
+    assert_eq!(verdict(GREEN_BLOCK).trim(), "ok");
 }
 
 #[test]
 fn verdict_fails_closed_on_missing_or_wrong_facets() {
     // empty -> fail-closed (never read as "safely logging")
-    let v = call_over_arg("remote_log_verdict", "");
+    let v = verdict("");
     assert!(v.contains("FAIL:"), "empty must fail-closed: {v}");
 
     // netconsole target absent
     let no_target = GREEN_BLOCK.replace("NC_ENABLED=1", "NC_ENABLED=__NO_TARGET__");
-    let v = call_over_arg("remote_log_verdict", &no_target);
+    let v = verdict(&no_target);
     assert!(
         v.contains("no netconsole configfs target"),
         "must fail when the target is absent: {v}"
     );
 
     // wrong remote_ip
-    let wrong_ip = GREEN_BLOCK.replace("NC_REMOTE_IP=10.77.9.200", "NC_REMOTE_IP=10.77.9.201");
-    let v = call_over_arg("remote_log_verdict", &wrong_ip);
-    assert!(v.contains("!= dev1"), "must fail on a wrong remote_ip: {v}");
+    let wrong_ip = GREEN_BLOCK.replace("NC_REMOTE_IP=10.77.9.202", "NC_REMOTE_IP=10.77.9.201");
+    let v = verdict(&wrong_ip);
+    assert!(
+        v.contains("!= the venue strih sink"),
+        "must fail on a wrong remote_ip: {v}"
+    );
 
     // netconsole service not enabled
     let nc_off = GREEN_BLOCK.replace("NC_SVC_ENABLED=enabled", "NC_SVC_ENABLED=disabled");
-    let v = call_over_arg("remote_log_verdict", &nc_off);
+    let v = verdict(&nc_off);
     assert!(
         v.contains("not enabled"),
         "must fail when netconsole is not enabled: {v}"
@@ -250,7 +268,7 @@ fn verdict_fails_closed_on_missing_or_wrong_facets() {
         "--save-state=/run/systemd/journal-upload/state",
         "--save-state=/var/lib/systemd/journal-upload/state",
     );
-    let v = call_over_arg("remote_log_verdict", &bad_state);
+    let v = verdict(&bad_state);
     assert!(
         v.contains("not redirected to /run"),
         "must fail when the cursor is not on /run: {v}"
@@ -258,10 +276,10 @@ fn verdict_fails_closed_on_missing_or_wrong_facets() {
 
     // journal-upload URL wrong
     let bad_url = GREEN_BLOCK.replace(
-        "JU_URL=http://10.77.9.200:19532",
-        "JU_URL=http://10.77.9.200:9999",
+        "JU_URL=http://10.77.9.202:19532",
+        "JU_URL=http://10.77.9.202:9999",
     );
-    let v = call_over_arg("remote_log_verdict", &bad_url);
+    let v = verdict(&bad_url);
     assert!(
         v.contains("journal-upload URL"),
         "must fail on a wrong URL: {v}"
@@ -270,21 +288,18 @@ fn verdict_fails_closed_on_missing_or_wrong_facets() {
 
 #[test]
 fn verdict_does_not_gate_journal_upload_active_state() {
-    // journal-upload's ACTIVE state depends on the dev1 receiver (a separate supervisor step); a
+    // journal-upload's ACTIVE state depends on the venue strih's receiver (setup-strih 16k); a
     // cambox is correctly provisioned even before the sink exists. The GREEN block carries no
     // JU_SVC_ACTIVE line at all, and it must still be "ok".
     assert!(
         !GREEN_BLOCK.contains("JU_SVC_ACTIVE"),
         "the healthy fixture must not need a journal-upload active line"
     );
-    assert_eq!(
-        call_over_arg("remote_log_verdict", GREEN_BLOCK).trim(),
-        "ok"
-    );
+    assert_eq!(verdict(GREEN_BLOCK).trim(), "ok");
 }
 
 // -------------------------------------------------------------------------------------------
-// static anchors: the four consumers all wire the SAME source of truth
+// static anchors: the consumers all wire the SAME source of truth
 // -------------------------------------------------------------------------------------------
 
 #[test]
@@ -299,11 +314,11 @@ fn setup_device_installs_and_enables_both_transports() {
         "setup-device.sh must have the [remote-logging] install sub-step"
     );
     assert!(
-        s.contains("remote_log_netconsole_setup_script_content > \"$REMOTE_LOG_NC_SCRIPT_PATH\""),
+        s.contains("remote_log_netconsole_setup_script_content \"$REMOTE_LOG_SINK_IP\" > \"$REMOTE_LOG_NC_SCRIPT_PATH\""),
         "setup-device.sh must write the netconsole setup script"
     );
     assert!(
-        s.contains("remote_log_journal_upload_conf_content > \"$REMOTE_LOG_JU_CONF_PATH\""),
+        s.contains("remote_log_journal_upload_conf_content \"$REMOTE_LOG_SINK_IP\" > \"$REMOTE_LOG_JU_CONF_PATH\""),
         "setup-device.sh must write the journal-upload conf"
     );
     assert!(
@@ -317,25 +332,30 @@ fn setup_device_installs_and_enables_both_transports() {
     );
 }
 
+/// Issue 1394: the base image has no box identity, so it cannot know the box's venue log sink;
+/// setup-device (always run next, with the box name) writes + enables both transports.
 #[test]
-fn create_usb_bakes_and_enables_both_transports_in_the_base_image() {
+fn create_usb_bakes_no_box_specific_logging_file_1394() {
     let s = read("scripts/create-usb-linux.sh");
+    let code: String = s
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for word in [
+        "remote_log_",
+        "REMOTE_LOG_",
+        "systemctl enable cambox-netconsole",
+        "systemctl enable systemd-journal-upload",
+    ] {
+        assert!(
+            !code.contains(word),
+            "create-usb-linux.sh must not carry `{word}`"
+        );
+    }
     assert!(
-        s.contains(". \"$SCRIPT_DIR/lib/remote-logging.sh\""),
-        "create-usb-linux.sh must source the lib"
-    );
-    assert!(
-        s.contains("remote_log_netconsole_setup_script_content > \"$MOUNT_ROOT$REMOTE_LOG_NC_SCRIPT_PATH\""),
-        "create-usb-linux.sh must bake the netconsole setup script into the base image"
-    );
-    assert!(
-        s.contains("systemctl enable cambox-netconsole")
-            && s.contains("systemctl enable systemd-journal-upload"),
-        "create-usb-linux.sh chroot must enable both transports"
-    );
-    assert!(
-        s.contains("systemd-journal-remote"),
-        "create-usb-linux.sh chroot must apt-install systemd-journal-remote"
+        code.contains("systemd-journal-remote"),
+        "create-usb-linux.sh chroot still apt-installs systemd-journal-remote"
     );
 }
 
@@ -380,66 +400,5 @@ fn verify_device_has_the_ak_check_before_q() {
     assert!(
         ak < q,
         "the (ak) check must be inserted BEFORE the (q) block"
-    );
-}
-
-/// Run the dev1 installer (an executable planner) with args, return stdout. Asserts exit 0.
-fn run_installer(args: &[&str]) -> String {
-    let p = manifest_dir().join("scripts/dev1-remote-log-install.sh");
-    let out = Command::new("bash")
-        .arg(&p)
-        .args(args)
-        .output()
-        .expect("failed to run dev1-remote-log-install.sh");
-    assert!(
-        out.status.success(),
-        "installer {:?} exited non-zero: {:?}",
-        args,
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
-
-#[test]
-fn dev1_installer_emits_the_udp_receiver_config() {
-    let rs = run_installer(&["--emit", "rsyslog"]);
-    // rsyslog imudp on :514 with a dedicated ruleset, writing one RENDERED file per source box.
-    assert!(
-        rs.contains("module(load=\"imudp\")") && rs.contains("ruleset=\"cambox_netconsole\""),
-        "rsyslog config must load imudp into a dedicated ruleset: {rs}"
-    );
-    assert!(
-        rs.contains("input(type=\"imudp\" port=\"514\""),
-        "rsyslog config must listen on UDP :514: {rs}"
-    );
-    assert!(
-        rs.contains("/var/log/cambox/%fromhost-ip%-kernel.log"),
-        "rsyslog config must write per-source-box kernel files: {rs}"
-    );
-}
-
-#[test]
-fn dev1_installer_emits_the_http_journal_receiver_config() {
-    let dropin = run_installer(&["--emit", "journal-remote-dropin"]);
-    assert!(
-        dropin.contains("--listen-http=-3"),
-        "journal-remote must switch to plain HTTP (the cambox uploaders use http://): {dropin}"
-    );
-    assert!(
-        dropin.contains("--output=/var/log/journal/remote/"),
-        "journal-remote must store uploaded journals under /var/log/journal/remote/: {dropin}"
-    );
-}
-
-#[test]
-fn dev1_installer_plan_documents_the_mgmt_dead_correlation() {
-    let plan = run_installer(&[]);
-    assert!(
-        plan.contains("MGMT_DEAD"),
-        "the default plan must document the MGMT_DEAD correlation command: {plan}"
-    );
-    assert!(
-        plan.contains("/var/log/cambox/") && plan.contains("/var/log/journal/remote/"),
-        "the plan must name both off-box log locations for correlation: {plan}"
     );
 }

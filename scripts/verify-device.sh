@@ -164,12 +164,12 @@
 #       enabled -- the local ssh-banner probe + restart-ssh/remoteos-mcp safety net the 2026-09-13
 #       half-dead wedge had none of. FAILs if the script is missing or the timer is not enabled.
 #   (ak) off-box remote logging effective (#1311) -- HARD FAIL: netconsole (cambox-netconsole.service
-#       enabled+active + a live configfs target enabled=1 to dev1:514) AND systemd-journal-upload
-#       (enabled, URL -> the dev1 sink, cursor --save-state redirected to /run for the ro root) -- so
+#       enabled+active + a live configfs target enabled=1 to the box's venue strih :514, issue 1394)
+#       AND systemd-journal-upload (enabled, URL -> that sink, cursor --save-state on /run) -- so
 #       the NEXT half-dead-stick death ships its kernel + journal messages off-box in real time,
 #       instead of dying with the stick like the on-STICK #1309 journal does. FAILs fail-closed on any
-#       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the dev1 sink,
-#       a separate supervisor step); enabled + correct config is the cambox-side bar. A `failed`
+#       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the venue strih sink,
+#       provisioned by setup-strih step 16k); enabled + correct config is the cambox-side bar. A `failed`
 #       netconsole is named with its systemd Result (issue 1394).
 #   (ar) the read-only-root unit set (issue 1394) -- HARD FAIL: the logrotate drop-in (state in /run,
 #        the ro-root canon) byte-for-byte AND loaded, logrotate.service's last Result success, the
@@ -923,7 +923,7 @@ Checks:
   (aj) on-box mgmt-liveness self-heal (#1309): cambox-mgmt-selfcheck.sh present+executable AND
       cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
   (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
-      target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
+      target to the box's venue strih :514, AND systemd-journal-upload enabled with URL -> that sink + a /run cursor
       (a failed netconsole is named with its Result, issue 1394)
   (ar) read-only-root unit set (issue 1394): the logrotate drop-in (state in /run) byte-for-byte and
       loaded, logrotate's last Result success, the four apt timers/services masked + inactive, and the
@@ -1812,21 +1812,24 @@ fi
 # drops off the bus (the half-dead wedge) -- it dies WITH the medium. setup-device.sh's
 # [remote-logging] sub-step arms two off-box transports so the NEXT stick death is diagnosable:
 # netconsole ships kernel printk over UDP from kernel memory (the ONLY transport that survives the
-# fs dropping out), and systemd-journal-upload forwards the rich journal to the dev1 sink. This
-# proves both are LIVE + reboot-surviving: the netconsole oneshot enabled+active with a live configfs
-# target to dev1, and the journal uploader enabled with the right URL + a ro-root-safe /run cursor
-# (see scripts/lib/remote-logging.sh for the fail-closed verdict). Inserted BEFORE (q) -- see
+# fs dropping out), and systemd-journal-upload forwards the rich journal to the sink. The sink is THIS
+# box's own venue strih, resolved from the venue fact files (remote_log_sink_ip, issue 1394 -- never
+# dev1). This proves both are LIVE + reboot-surviving: the netconsole oneshot enabled+active with a
+# live configfs target to that sink, and the journal uploader enabled with its URL + a ro-root-safe
+# /run cursor (see scripts/lib/remote-logging.sh for the fail-closed verdict; an unresolvable sink
+# FAILs). Inserted BEFORE (q) -- see
 # .claude/rules/provisioning-scripts.md ((q) stays the LAST check). Uses fail() (a hard FAIL), so it
 # never trips the check_q_is_wired (q)-to-EOF no-fail slice (it is above (q)).
 akrc=0
 REMOTELOG_BLOCK="$(ssh_box "$(remote_log_gather_remote_snippet)")" || akrc=$?
-REMOTELOG_VERDICT="$(remote_log_verdict "$REMOTELOG_BLOCK")"
+REMOTELOG_SINK="$(remote_log_sink_ip "$CAMERA_NAME")" || REMOTELOG_SINK=""   # the reason goes to stderr
+REMOTELOG_VERDICT="$(remote_log_verdict "$REMOTELOG_BLOCK" "$REMOTELOG_SINK")"
 if [ "$akrc" -ne 0 ]; then
   fail "could not reach the box to read the netconsole + systemd-journal-upload state (ssh rc=$akrc, #1311)"
 elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
-  ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
+  ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
 fi
 
 # (au) housekeeping cpus (issue 1367) -- HARD FAIL -------------------------------------------------
