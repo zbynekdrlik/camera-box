@@ -352,3 +352,26 @@ def test_verify_fails_a_dropin_without_its_final_newline(tmp_path):
     block = "\n".join(l for l in out.splitlines() if not l.startswith(("ONLINE=", "ISOLATED=", "PID1=", "RT=")))
     v = _verdict("ONLINE=0-3\nISOLATED=3\nPID1=0-1\nRT=0\n" + block + "\n")
     assert "differs" in v, v
+
+
+# --- other device IRQs off the reserved capture-IRQ core (the NIC IRQ finding) --------------------
+
+def test_verify_fails_another_device_irq_allowed_on_the_reserved_core():
+    block = _block() + "IRQ=129 1 2\nIRQ=135 0 0-2\nIRQ=136 0 0-1\n"
+    v = _verdict(block)
+    assert v.startswith("FAIL: ") and "IRQ 135" in v and "136" not in v, v
+
+
+def test_verify_accepts_other_irqs_off_the_reserved_core_and_the_capture_irq_on_it():
+    block = _block() + "IRQ=129 1 2\nIRQ=135 0 0-1\n"
+    assert _verdict(block) == "ok\n"
+
+
+def test_the_real_gather_lists_the_irqs_with_their_capture_flag_and_affinity():
+    snippet = _bash("cambox_hk_gather_remote_snippet").stdout
+    out = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, timeout=30).stdout
+    irq_lines = [l for l in out.splitlines() if l.startswith("IRQ=")]
+    assert irq_lines, out
+    for l in irq_lines:
+        n, flag, aff = l[4:].split(" ", 2)
+        assert n.isdigit() and flag in ("0", "1")
