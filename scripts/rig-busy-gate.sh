@@ -47,8 +47,11 @@ STRAY_HEAL_THRESHOLD="${STRAY_HEAL_THRESHOLD:-3}"
 # test republishes stream OBS with a deliberate gap (up to ~45 s), and run 38520662080 was admitted
 # on a read inside a 10 s gap. A run is admitted only after strih + stream read idle CONTINUOUSLY for
 # IDLE_HOLD_SECS: one read every IDLE_STEP_SECS of the hold (IDLE_POLL_SECS apart; it follows
-# SLEEP_SECS down to 0 so the offline tests stay instant). The hold runs WITHOUT the rig lease, and
-# the lease is never held while a box streams, so a foreign stream run is never failed by our lease.
+# SLEEP_SECS down to 0 so the offline tests stay instant). The lease is never held while a box
+# streams, so a foreign broadcast is never failed by our lease. Since issue 1432 (ROZHODNUTÉ
+# 6182938785) the hold runs UNDER the lease: every restreamer stream-lan job takes the lease for its
+# whole job (restreamer PR 400), so its republish gaps happen under its own lease, and releasing
+# during the hold let restreamer's next job take the rig (run 38667117544 starved).
 IDLE_HOLD_SECS="${RIG_BUSY_GATE_IDLE_HOLD_SECS:-60}"
 IDLE_STEP_SECS=5
 IDLE_POLL_SECS="${RIG_BUSY_GATE_IDLE_POLL_SECS:-$((SLEEP_SECS < IDLE_STEP_SECS ? SLEEP_SECS : IDLE_STEP_SECS))}"
@@ -229,10 +232,10 @@ rig_busy_any_streaming() {
 }
 
 # rig_busy_idle_hold -> 0 iff every read over the next IDLE_HOLD_SECS is idle (issue 1404). Runs
-# with our lease released; returns 1 at the first busy read, with OUTPUT/BUSY holding that read.
+# with our lease held (issue 1432); returns 1 at the first busy read, with OUTPUT/BUSY holding that read.
 rig_busy_idle_hold() {
   local n reads=$(((IDLE_HOLD_SECS + IDLE_STEP_SECS - 1) / IDLE_STEP_SECS))
-  echo "[rig-busy-gate] idle read -- confirming the rig stays idle for ${IDLE_HOLD_SECS} s (${reads} reads, issue 1404: a stream republish gap is not a free rig); the lease is not held meanwhile"
+  echo "[rig-busy-gate] idle read -- confirming the rig stays idle for ${IDLE_HOLD_SECS} s (${reads} reads, issue 1404: a stream republish gap is not a free rig); our lease stays held meanwhile (issue 1432)"
   for ((n = 1; n <= reads; n++)); do
     sleep "$IDLE_POLL_SECS"
     rig_busy_read
@@ -251,13 +254,13 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
   rig_busy_read
 
   if [ "$BUSY" = "False" ]; then
-    if [ "$LEASE_HELD" -eq 1 ]; then
-      rig_lease_release "$RIG_LEASE_RUN_ID"
-      LEASE_HELD=0
-    fi
-    if rig_busy_idle_hold; then
+    # issue 1432: take the lease back (it was released while a box streamed) BEFORE the hold, and
+    # keep it through the hold, so no other holder can take the rig between the hold and the run.
+    if [ "$LEASE_HELD" -eq 0 ]; then
       rig_lease_acquire_or_wait
       LEASE_HELD=1
+    fi
+    if rig_busy_idle_hold; then
       echo "[rig-busy-gate] idle for the whole hold -- final read under the lease"
       rig_busy_read
     fi
