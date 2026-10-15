@@ -570,6 +570,8 @@ pub fn setup_irq_affinity() {
         "#289/899 IRQ affinity: kernel preempt_rt={is_rt}; routing capture IRQs {irqs:?} to cores {target:?} (capture core={core}, smp_affinity={mask})"
     );
     let total = irqs.len();
+    // issue 1367: the capture IRQ list, kept for the offload of every OTHER device IRQ below.
+    let capture_irqs = irqs.clone();
     let mut applied = 0usize;
     let mut unchanged = 0usize;
     let mut failed = 0usize;
@@ -614,6 +616,62 @@ pub fn setup_irq_affinity() {
             "#1198 core split NOT fully applied: {failed}/{total} capture IRQ(s) rejected the smp_affinity write (managed MSI → still on the cmdline irqaffinity default, SHARED with the painter — the 1198 failure mode); {applied} written, {unchanged} already correct. Needs the cmdline irqaffinity path (#303)."
         );
     }
+    offload_other_irqs(&interrupts, &capture_irqs, core, reserved, &online);
+}
+
+/// issue 1367: move every non-capture device IRQ that may run on the reserved capture-IRQ core
+/// (the NIC IRQ sat there on cam3/cam5 and its softirq delayed the capture URBs) onto the
+/// painter/housekeeping cores. Best-effort like the rest of `setup_irq_affinity`: a rejected write
+/// (a managed IRQ) is logged and skipped, never fatal.
+fn offload_other_irqs(
+    interrupts: &str,
+    capture_irqs: &[u32],
+    core: usize,
+    reserved: Option<usize>,
+    online: &[usize],
+) {
+    let Some(reserved) = reserved else {
+        return;
+    };
+    let Some(cores) = crate::irq_offload::select_offload_cores(core, Some(reserved), online) else {
+        return;
+    };
+    let mask = smp_affinity_mask_hex(&cores);
+    let (mut moved, mut kept, mut failed) = (0usize, 0usize, 0usize);
+    for irq in crate::irq_offload::parse_device_irqs(interrupts) {
+        if capture_irqs.contains(&irq) {
+            continue;
+        }
+        let path = format!("/proc/irq/{irq}/smp_affinity");
+        let Ok(prev) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(current) = crate::irq_offload::mask_hex_to_cores(&prev) else {
+            continue;
+        };
+        if !crate::irq_offload::needs_offload(&current, reserved) {
+            kept += 1;
+            continue;
+        }
+        match std::fs::write(&path, format!("{mask}\n")) {
+            Ok(()) => {
+                moved += 1;
+                tracing::info!(
+                    "issue 1367 IRQ {irq}: smp_affinity {} -> {mask} (off the reserved capture-IRQ core {reserved})",
+                    prev.trim()
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    "issue 1367 IRQ {irq}: could not move it off the reserved capture-IRQ core {reserved} ({e}) -- likely a managed IRQ"
+                );
+            }
+        }
+    }
+    tracing::info!(
+        "issue 1367 other device IRQs: {moved} moved onto cores {cores:?}, {kept} already off core {reserved}, {failed} rejected"
+    );
 }
 
 #[cfg(test)]

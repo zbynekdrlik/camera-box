@@ -11,7 +11,6 @@
 // lock-step. vban (pure UDP) and the probe tree (which the verdict needs) stay cross-platform.
 #[cfg(target_os = "linux")]
 pub mod affinity;
-pub mod irq_offload;
 #[cfg(target_os = "linux")]
 pub mod capture;
 #[cfg(target_os = "linux")]
@@ -22,6 +21,7 @@ pub mod display;
 pub mod grab_record;
 #[cfg(target_os = "linux")]
 pub mod intercom;
+pub mod irq_offload;
 #[cfg(target_os = "linux")]
 pub mod ndi;
 // (#1113) genlock capture->emit pacing gate — the pure wall-clock decimation math extracted out of

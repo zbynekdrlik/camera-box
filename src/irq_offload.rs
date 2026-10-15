@@ -11,14 +11,36 @@
 
 /// Every numbered IRQ in `/proc/interrupts` (device IRQs; `NMI:`, `LOC:` and the header are
 /// skipped), sorted and unique.
-pub fn parse_device_irqs(_contents: &str) -> Vec<u32> {
-    Vec::new()
+pub fn parse_device_irqs(contents: &str) -> Vec<u32> {
+    let mut out: Vec<u32> = contents
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .filter_map(|(label, _)| label.trim().parse::<u32>().ok())
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The cores of a `/proc/irq/<n>/smp_affinity` hex mask (`"8"`, `"0000000c"`,
 /// `"00000000,00000004"`), ascending. Unparseable text gives `None`.
-pub fn mask_hex_to_cores(_mask: &str) -> Option<Vec<usize>> {
-    None
+pub fn mask_hex_to_cores(mask: &str) -> Option<Vec<usize>> {
+    let groups: Vec<&str> = mask.trim().split(',').collect();
+    let mut cores = Vec::new();
+    for (gi, group) in groups.iter().rev().enumerate() {
+        let g = group.trim();
+        if g.is_empty() || g.len() > 8 {
+            return None;
+        }
+        let bits = u32::from_str_radix(g, 16).ok()?;
+        for b in 0..32 {
+            if bits & (1u32 << b) != 0 {
+                cores.push(gi * 32 + b as usize);
+            }
+        }
+    }
+    cores.sort_unstable();
+    Some(cores)
 }
 
 /// The cores a non-capture device IRQ is moved to: the general cores minus the reserved
@@ -26,16 +48,26 @@ pub fn mask_hex_to_cores(_mask: &str) -> Option<Vec<usize>> {
 /// PREEMPT_RT kernel, or a box too small to reserve one) or nothing would be left, so the caller
 /// changes nothing.
 pub fn select_offload_cores(
-    _capture_core: usize,
-    _reserved: Option<usize>,
-    _online: &[usize],
+    capture_core: usize,
+    reserved: Option<usize>,
+    online: &[usize],
 ) -> Option<Vec<usize>> {
-    None
+    let reserved = reserved?;
+    let cores: Vec<usize> = online
+        .iter()
+        .copied()
+        .filter(|&c| c != capture_core && c != reserved)
+        .collect();
+    if cores.is_empty() {
+        None
+    } else {
+        Some(cores)
+    }
 }
 
 /// True when an IRQ whose affinity is `current` may run on `reserved`, i.e. it must be moved.
-pub fn needs_offload(_current: &[usize], _reserved: usize) -> bool {
-    false
+pub fn needs_offload(current: &[usize], reserved: usize) -> bool {
+    current.contains(&reserved)
 }
 
 #[cfg(test)]
@@ -55,7 +87,10 @@ mod tests {
 
     #[test]
     fn every_numbered_irq_is_a_device_irq() {
-        assert_eq!(parse_device_irqs(CAM5_INTERRUPTS), vec![0, 124, 129, 135, 136]);
+        assert_eq!(
+            parse_device_irqs(CAM5_INTERRUPTS),
+            vec![0, 124, 129, 135, 136]
+        );
     }
 
     #[test]
@@ -70,7 +105,10 @@ mod tests {
 
     #[test]
     fn the_four_core_fleet_offloads_onto_0_and_1() {
-        assert_eq!(select_offload_cores(3, Some(2), &[0, 1, 2, 3]), Some(vec![0, 1]));
+        assert_eq!(
+            select_offload_cores(3, Some(2), &[0, 1, 2, 3]),
+            Some(vec![0, 1])
+        );
     }
 
     #[test]
