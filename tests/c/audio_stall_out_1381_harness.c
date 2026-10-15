@@ -16,7 +16,7 @@
  *
  * Output lines (the Rust test holds the truth table):
  *   W<n> wake=.. sleep=.. lock=.. pass=.. cb=.. fn=A|B|- param=PA|PB|- mix=..
- *   ID <case> kind=.. name='..' held=..
+ *   ID <case> kind=.. name='..' held=.. blocked=..
  *   LINE <the captured LOG_INFO line>
  */
 #include <errno.h>
@@ -361,6 +361,7 @@ static const char *obs_encoder_get_name(const struct obs_encoder *encoder)
 
 static bool outputs_busy, encoders_busy;
 static int held;
+static int blocked; /* a blocking lock in the resolver: counted, never waited on (no hang) */
 
 static int h_mutex_trylock(pthread_mutex_t *m)
 {
@@ -377,11 +378,21 @@ static int h_mutex_unlock(pthread_mutex_t *m)
 	return 0;
 }
 
+static int h_identity_lock(pthread_mutex_t *m)
+{
+	(void)m;
+	blocked++;
+	held++;
+	return 0;
+}
+
 #define pthread_mutex_trylock(m) h_mutex_trylock(m)
 #define pthread_mutex_unlock(m) h_mutex_unlock(m)
+#define pthread_mutex_lock(m) h_identity_lock(m)
 @IDENTITY_FN@
 #undef pthread_mutex_trylock
 #undef pthread_mutex_unlock
+#undef pthread_mutex_lock
 
 static struct obs_output out1 = {{"NDI PGM", NULL}};
 static struct obs_output out2 = {{"Rec", NULL}};
@@ -395,9 +406,10 @@ static void id_case(const char *label, const void *param, uint64_t cb_max_ns, si
 	outputs_busy = ob;
 	encoders_busy = eb;
 	held = 0;
+	blocked = 0;
 	memset(name, 'X', sizeof(name));
 	const char *kind = audio_stall_out_cb_identity(param, cb_max_ns, name, name_size);
-	printf("ID %s kind=%s name='%s' held=%d\n", label, kind, name, held);
+	printf("ID %s kind=%s name='%s' held=%d blocked=%d\n", label, kind, name, held, blocked);
 }
 
 static void run_identity(void)

@@ -181,17 +181,17 @@ fn a_new_window_starts_clean_and_measures_the_get_mixers_lock_1381() {
 #[test]
 fn the_dump_names_the_slowest_callback_without_ever_waiting_for_a_lock_1381() {
     let expect = [
-        "ID none kind=- name='' held=0",
-        "ID out1 kind=output name='NDI PGM' held=0",
-        "ID out2 kind=output name='Rec' held=0",
-        "ID enc kind=encoder name='aac'enc' held=0",
-        "ID raw kind=raw name='' held=0",
-        "ID outbusy-enc kind=encoder name='aac'enc' held=0",
-        "ID outbusy-raw kind=busy name='' held=0",
-        "ID encbusy-raw kind=busy name='' held=0",
-        "ID encbusy-out kind=output name='NDI PGM' held=0",
-        "ID trunc kind=output name='NDI' held=0",
-        "ID noname kind=output name='' held=0",
+        "ID none kind=- name='' held=0 blocked=0",
+        "ID out1 kind=output name='NDI PGM' held=0 blocked=0",
+        "ID out2 kind=output name='Rec' held=0 blocked=0",
+        "ID enc kind=encoder name='aac'enc' held=0 blocked=0",
+        "ID raw kind=raw name='' held=0 blocked=0",
+        "ID outbusy-enc kind=encoder name='aac'enc' held=0 blocked=0",
+        "ID outbusy-raw kind=busy name='' held=0 blocked=0",
+        "ID encbusy-raw kind=busy name='' held=0 blocked=0",
+        "ID encbusy-out kind=output name='NDI PGM' held=0 blocked=0",
+        "ID trunc kind=output name='NDI' held=0 blocked=0",
+        "ID noname kind=output name='' held=0 blocked=0",
     ];
     let got: Vec<&String> = harness_trace()
         .iter()
@@ -236,9 +236,10 @@ fn the_attribution_is_read_only_on_the_dump_path_1381() {
     let take = src
         .find("audio_output_take_stall_stats(audio->audio, &")
         .unwrap();
-    let call = src
-        .find("audio_stall_out_cb_identity(out_stall.cb_max_param")
-        .unwrap();
+    // the call site (the definition reads `*audio_stall_out_cb_identity(const void`); short and
+    // wrap-independent
+    assert_eq!(src.matches("= audio_stall_out_cb_identity(").count(), 1);
+    let call = src.find("= audio_stall_out_cb_identity(").unwrap();
     let line = src.find(STALL_FMT).unwrap();
     assert!(
         gate < take && take < call && call < line,
