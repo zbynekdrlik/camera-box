@@ -96,6 +96,16 @@ cannot see: a clean exit (`Restart=on-failure` ignores exit 0) and a wedged-but-
   locally here (Tier-0, build-ok DISABLED #477) — prove behaviour by running the watchdog directly
   in bash with the same shims, and rely on CI for the Rust assertions.
 
+## The Poprad boxes + the generic home gate (issue 1441)
+
+The roster carries strih-pp + stream-pp (linux-genlock, `traveling`). `main` skips any box
+`obs_fleet_poll_now` would not poll (an away traveling row: resolume-snv, strih-pp, stream-pp), logging
+`away / retired -- not probed this pass`: no probe, no restart, no page, and it never counts toward the
+dev1-side-outage anchor. A home PP box with `:8899` down gets the SAME class-resolved remedy as
+strih-snv (the guarded `systemctl --user restart '*-bundle-state-server.service'`), never `schtasks`
+(the design on issue 1441 asked to skip the restart on a Linux box; the existing Linux equivalent was
+kept instead, because skipping it by class would also remove strih-snv's restart).
+
 ## Ships DISABLED — supervisor installs
 
 Units are committed but NOT enabled. Install/live-verify/enable per

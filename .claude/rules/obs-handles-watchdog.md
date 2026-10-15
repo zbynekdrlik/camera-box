@@ -111,7 +111,9 @@ the leak 168,750/h.
   confirm alone (a REBASE is the same process, never a restart, so it never logs a recovery).
 - PRODUCTION-CRITICAL class: `--dedup-key "$(watchdog_notify_key "obs-handles-<box>" "$now_epoch")"`,
   allowlisted in `tests/python/test_notify_dedup_key_sweep_1206.py`.
-- Roster: obs-fleet facet `obs-handles` = strih-snv stream resolume; resolume via `obs_fleet_poll_now`.
+- Roster: obs-fleet facet `obs-handles` = strih-snv stream resolume + (issue 1441) strih-pp stream-pp;
+  every traveling box via `obs_fleet_poll_now`. The PP boxes are Linux, so their ceiling and growth
+  bound follow their own soft `obs_handles_limit` (524288 read on strih-pp 15.10.2026).
   Timer on the `watchdog-roster.sh` handover roster (`:core`).
 - Tier-0 seams: `OBS_HANDLES_FETCH_CMD` (the body), `OBS_HANDLES_NOW_EPOCH` (the pass time),
   `OBS_HANDLES_ALERT_STATE_FILE`, `AIRULESET_NOTIFY` (a fake notify for a real-pass test).

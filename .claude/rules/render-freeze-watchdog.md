@@ -60,12 +60,13 @@ check.
 ## Fleet roster + never-false-page
 
 Roster = the NEW `render-freeze` facet in `scripts/lib/obs-fleet.sh`
-(`obs_fleet_boxes render-freeze` = **strih stream resolume strih-snv**). resolume runs the cg-obs
-PROGRAM render + receives, so it IS in scope. The **only** page condition is a
-SUCCESSFULLY-FETCHED positive reading, so a dark box (a not-yet-provisioned strih-snv, a traveling
-resolume that is away, a `:8899` outage) → `box_reachable=0` → **SKIP** → deferred to #732/#1001, no
-page. This is why resolume (traveling) needs **no** `is_home` gate here, and why there is no
-reference-anchor / dev1-side-outage guard.
+(`obs_fleet_boxes render-freeze` = **strih-snv stream-snv resolume-snv strih-pp stream-pp**, the
+Poprad boxes since issue 1441). resolume runs the cg-obs PROGRAM render + receives, so it IS in scope.
+The **only** page condition is a SUCCESSFULLY-FETCHED positive reading, so a dark box (a `:8899`
+outage) → `box_reachable=0` → **SKIP** → deferred to #732/#1001, no page, and there is no
+reference-anchor / dev1-side-outage guard. A traveling box (resolume-snv, strih-pp, stream-pp) is
+moreover read only while home (issue 1441: the generic `obs_fleet_poll_now` gate, logged `away /
+retired -- not polled`). Tier-0 replay seam: `RENDER_FREEZE_FETCH_CMD` (`<cmd> <ip>` prints the body).
 
 ## DETECTION ONLY — ships DISABLED
 

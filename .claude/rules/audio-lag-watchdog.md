@@ -105,6 +105,14 @@ already DETECTS a dead OBS, so no fault is missed (at most a duplicate alert). A
 log-mtime supplement (same box clock, no foreign-clock comparison) would close the duplicate cleanly
 later; it is deliberately out of this ticket's "while the log kept advancing" scope.
 
+## The Poprad boxes (issue 1441)
+
+The roster (`obs_fleet_boxes audio-lag`) carries strih-pp + stream-pp: both serve `audio_ts_lag_*`
+on `:8899` (read 15.10.2026). `main` reads a traveling box only while home (`obs_fleet_poll_now`, all
+three arms skip it, logged `away / retired -- not polled`). No `mbc` source on PP, so the band and
+buffered arms read UNKNOWN there. Tier-0 replay seam: `AUDIO_LAG_FETCH_CMD` (every arm passes it to
+`fetch_bundle_json`).
+
 ## #1206 notify discipline + ships DISABLED
 
 ALERT carries a STABLE `--dedup-key "audio-lag-$box"` (no per-pass component — a growing lag EDITS

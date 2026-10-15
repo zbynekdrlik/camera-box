@@ -273,8 +273,9 @@ strih-snv's current log (196 dumps, review round 1) read ticks=2813 with ticks_o
 
 ## Watchdog shape
 
-- Roster: obs-fleet facet `audio-mixer` = strih-snv stream resolume (`obs_fleet_boxes audio-mixer`,
-  env override `AUDIO_MIXER_BOXES`); resolume is polled only while home (`obs_fleet_poll_now`).
+- Roster: obs-fleet facet `audio-mixer` = strih-snv stream resolume + (issue 1441) strih-pp stream-pp
+  (`obs_fleet_boxes audio-mixer`, env override `AUDIO_MIXER_BOXES`); every traveling box (resolume,
+  the PP boxes) is polled only while home (`obs_fleet_poll_now`).
 - PRODUCTION-CRITICAL (issue 1308): both arms time-bucket their key —
   `watchdog_notify_key "audio-mixer-<box>"` / `"vban-loss-<box>"` — and the file is on the
   `_PRODUCTION_CRITICAL_TIME_BUCKETED` allowlist. The throttle signature is arm + box, never the

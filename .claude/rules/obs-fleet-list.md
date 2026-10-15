@@ -60,15 +60,15 @@ tests/ops). Three helpers consume it:
 - **The env override (`X_BOXES=`) must stay authoritative** — each watchdog writes
   `BOXES="${X_BOXES:-$(obs_fleet_boxes <facet>)}"`, so a test/ops override bypasses the derivation
   entirely (byte-compatible).
-- **resolume is a TRAVELING box — never false-page it while away.** The is-home gate is applied by
-  the CONSUMER, never baked into the pure list:
-  - `network-reach` keeps resolume REPORT-ONLY by default and promotes it to a paging node ONLY while
-    `obs_fleet_is_home resolume` holds. The is-home probe is computed ONLY when
+- **A TRAVELING box (resolume-snv, strih-pp, stream-pp) is never false-paged while away.** The home
+  gate is applied by the CONSUMER, never baked into the pure list, and since issue 1441 it is ONE
+  generic gate keyed on the row's home-check (`obs_fleet_poll_now`), never on a box name:
+  - `network-reach` keeps every away traveling box REPORT-ONLY by default and pages it ONLY while
+    `obs_fleet_poll_now` holds. The home probe is computed ONLY when
     `NETWORK_REACH_REPORT_ONLY_BOXES` is UNSET, so an explicit override wins byte-compatibly AND the
     issue-811 offline test stays offline (no live probe).
-  - `obs-liveness` polls resolume ONLY while home (away → not in the `--box` set → no false wedge).
-  - `bundle-state` needs no is-home gate — a fully-unreachable box is already deferred to the reach
-    watchdog (no page / no restart against a dark box).
+  - `obs-liveness`, `bundle-state`, `render-freeze`, `audio-lag`, `genlock-lock`, `audio-mixer` and
+    `obs-handles` skip an away traveling box (no probe / fetch, no false wedge, no restart).
 - **obs-liveness collision residual (#1296 review, narrow + supervisor-gated).** The is-home gate is
   collision-SAFE for `network-reach` (its promotion AND page condition both key on .201 liveness, so
   they cannot contradict), but `obs-liveness` is a PAGING watchdog whose promotion signal (is_home =
@@ -97,7 +97,8 @@ Owner (verbatim, issue 1414): "inak tim ze si dal take nazvy ako strih-lx tak ja
 pp ci snv ... a tiez to slovo lx je zbytocne len sposobuje zmatok".
 
 - **The rename's consumers:** every name-keyed arm (bundle-state ssh creds, burn-reconcile / rig-restore
-  host overrides, obs-liveness, network-reach + obs-liveness `obs_fleet_is_home resolume-snv`, the
+  host overrides, obs-liveness, network-reach + obs-liveness `obs_fleet_is_home resolume-snv` (a
+  name gate issue 1441 replaced with the generic `obs_fleet_poll_now`), the
   dantesync-maintenance default box, the cg backstop box, the dantesync fleet rows, the deploy
   planner's `--boxes` vocabulary `strih-snv,stream-snv,imag,resolume-snv`). Watchdog state files and
   alert dedup keys are name-keyed, so the first pass after the rename seeds fresh state (a one-off).
@@ -145,14 +146,14 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 
 | Facet | Members | Why strih-snv is in or out |
 |---|---|---|
-| network-reach | strih-snv stream resolume | ping / OBS-WS :4455 / :8899 — platform-neutral |
-| bundle-state | strih-snv stream resolume | curl :8899 is neutral; the AUTO-RESTART is class-resolved (guarded `systemctl --user` on linux-genlock, `schtasks` on windows-genlock — the dev1 watchdog AND the E2E `[0/8]` self-heal, `.claude/rules/bundle-state-watchdog.md`) |
-| obs-liveness | strih-snv stream resolume | OBS-WS GetStats — neutral; the strih-snv arm keeps `STRIH_HOST`/`STRIH_TARGET_FPS`, and the alert's recovery is class-resolved (`recovery_plan_for`: plain-ssh `systemctl --user restart '*-obs.service'` = strih-obs.service on a linux-genlock box, the `launch-obs-genlock.sh` + win-* MCP plan only on windows-genlock — that planner refuses a Linux box name) |
-| genlock-lock | strih-snv stream imag resolume | the box's own :8899 `genlock_lock` facet; imag `retired` → dropped |
-| render-freeze | strih-snv stream resolume | :8899 `program_render_lagged` / `relock_bursts` |
-| audio-mixer | strih-snv stream resolume | issue 1381: :8899 `audio_mixer_*` (every OBS box's libobs mixer) + `vban_pacer_*` (resolume's obs-vban senders); the consumer polls resolume only while home (`obs_fleet_poll_now`) |
-| obs-handles | strih-snv stream resolume | issue 1406: :8899 `obs_handles*` -- the OBS process's handle count (Windows) or open-fd count (Linux `/proc`); every managed OBS can leak; resolume polled only while home (`obs_fleet_poll_now`) |
-| audio-lag | strih-snv stream | :8899 `audio_ts_lag_*` from the vendored OBS `audio-telemetry #800` lines — the same on Linux (reads UNKNOWN while no source carries audio, never a page) |
+| network-reach | strih-snv stream resolume strih-pp stream-pp | ping / OBS-WS :4455 / :8899 — platform-neutral |
+| bundle-state | strih-snv stream resolume strih-pp stream-pp | curl :8899 is neutral; the AUTO-RESTART is class-resolved (guarded `systemctl --user` on linux-genlock, `schtasks` on windows-genlock — the dev1 watchdog AND the E2E `[0/8]` self-heal, `.claude/rules/bundle-state-watchdog.md`) |
+| obs-liveness | strih-snv stream resolume strih-pp stream-pp | OBS-WS GetStats — neutral; the strih-snv arm keeps `STRIH_HOST`/`STRIH_TARGET_FPS`, and the alert's recovery is class-resolved (`recovery_plan_for`: plain-ssh `systemctl --user restart '*-obs.service'` = strih-obs.service on a linux-genlock box, the `launch-obs-genlock.sh` + win-* MCP plan only on windows-genlock — that planner refuses a Linux box name) |
+| genlock-lock | strih-snv stream imag resolume strih-pp stream-pp | the box's own :8899 `genlock_lock` facet; imag `retired` → dropped |
+| render-freeze | strih-snv stream resolume strih-pp stream-pp | :8899 `program_render_lagged` / `relock_bursts` |
+| audio-mixer | strih-snv stream resolume strih-pp stream-pp | issue 1381: :8899 `audio_mixer_*` (every OBS box's libobs mixer) + `vban_pacer_*` (resolume's obs-vban senders); the consumer polls resolume only while home (`obs_fleet_poll_now`) |
+| obs-handles | strih-snv stream resolume strih-pp stream-pp | issue 1406: :8899 `obs_handles*` -- the OBS process's handle count (Windows) or open-fd count (Linux `/proc`); every managed OBS can leak; resolume polled only while home (`obs_fleet_poll_now`) |
+| audio-lag | strih-snv stream strih-pp stream-pp | :8899 `audio_ts_lag_*` from the vendored OBS `audio-telemetry #800` lines — the same on Linux (reads UNKNOWN while no source carries audio, never a page) |
 | vb-matrix | stream | a Windows VB-Audio Matrix process check; strih-snv has none (PipeWire replaced it, issue 1344) |
 | av-step | stream | the av-sync dock is on the stream box only |
 | ndi-portmap | strih-snv | the ONE strih whose NDI sender port map is watched (issue 1363) |
@@ -192,8 +193,9 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   can never be handed PowerShell even if someone widens the facet. Same shape for any future
   Windows-only consumer: facet policy decides membership, the class gate is the backstop.
 - **`obs_fleet_poll_now <name>` is the traveling/retired gate for a NEW per-box loop** (the three
-  issue-1317 part-2 consumers use it; obs-liveness / network-reach predate it and still call
-  `obs_fleet_is_home` for resolume themselves). `always` →
+  issue-1317 part-2 consumers use it, and since issue 1441 so does EVERY roster watchdog --
+  network-reach, obs-liveness, bundle-state, render-freeze, audio-lag, genlock-lock,
+  audio-mixer, obs-handles; none gates a box by its name any more). `always` →
   poll WITHOUT consulting `obs_fleet_is_home` (so the `OBS_FLEET_HOME` force-list test seam never
   drops a fixed box), `traveling` → only while home, `retired` → never, a name with no row (an ops
   override) → polled as given. Use it instead of re-deciding per watchdog. In rig-restore an away
@@ -257,15 +259,48 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   dantesync-clock all `reachable=1`. A strih swap (the Poprad strih-pp next) is again a table +
   facet-policy edit here.
 
-## The Poprad rows (issue 1412)
+## The Poprad rows (issues 1412, 1441)
 
 `strih-pp|strih-pp.lan|linux-genlock|traveling` and `stream-pp|stream-pp.lan|linux-genlock|traveling`:
 NAME rows (dev1 reaches the PP LAN as 10.76.8.x through the companion-pp subnet router, the boxes
-carry 10.77.8.x, so an IP row could never equal `STRIH_IP`), in NO facet but `build-parity`. issue
-1426 added `resolume-pp|resolume-pp.lan|windows-genlock|traveling` (the PP CG PC) the same way. They only make the class
-gate and `strih_platform` read the PP boxes as Linux; a watchdog starts polling one when a facet names
-it. `harness_obs_fleet_list_1296.rs` uses `strih-zz` as its "unknown override" name since strih-pp is
-a real row now.
+carry 10.77.8.x, so an IP row could never equal `STRIH_IP`). issue 1426 added
+`resolume-pp|resolume-pp.lan|windows-genlock|traveling` (the PP CG PC), in `build-parity` only (no
+`:8899` yet). `harness_obs_fleet_list_1296.rs` uses `strih-zz` as its "unknown override" name since
+strih-pp is a real row now.
+
+**issue 1441 (owner 15.10.2026: one unified PP/SNV solution, Linux is the standard)** put strih-pp +
+stream-pp into every dev1 watchdog facet whose premise is a platform-neutral read: network-reach,
+bundle-state, obs-liveness, genlock-lock, render-freeze, audio-mixer, obs-handles and audio-lag. Both
+boxes serve every one of those `:8899` facets (read-only check 15.10.2026: strih-pp 24 keys,
+stream-pp 23, `audio_ts_lag_*` on both). They stay OUT of win-baseline / vb-matrix / obs-session
+(Windows-only), av-step (the stream-snv dock) and burn-reconcile / rig-restore / ndi-portmap (the SNV
+measurement rig; a PP measurement rig is an owner decision).
+
+- **PP is often powered off: away is the NORMAL state, never a page.** Every roster watchdog gates a
+  box through `obs_fleet_poll_now` (the row's home-check, never a name): an away traveling box is not
+  probed or fetched (network-reach logs it as a `report_only=1` line instead), so it never pages.
+  The development handover check (`rig_dev_handover_decision.net_tokens`) skips a `report_only=1`
+  line, so a powered-off PP box is never a "zabudol si".
+- **A Windows-only action is class-selected** (`obs_fleet_class`): bundle-state's restart is the
+  guarded `systemctl --user restart '*-bundle-state-server.service'` on a linux-genlock box and
+  `schtasks /run` only on windows-genlock; obs-liveness's recovery text is the plain-ssh
+  `systemctl --user restart '*-obs.service'` plan on linux-genlock, the `launch-obs-genlock.sh`
+  + win-* MCP plan only on windows-genlock. The PP boxes therefore get the same Linux remedy as
+  strih-snv (a design note on the ticket: the Linux equivalent was kept, not removed).
+- obs-liveness grades PP at the default 30 fps target (`OBS_LIVENESS_DEFAULT_FPS`; both PP canvases
+  are 30 fps).
+- render-freeze and audio-lag gained the `*_FETCH_CMD` replay seam (`RENDER_FREEZE_FETCH_CMD`,
+  `AUDIO_LAG_FETCH_CMD`) through the shared `fetch_bundle_json <ip> <SEAM>` argument.
+- Tests: `tests/python/test_pp_watchdog_roster_1441.py` replays each watchdog `--dry-run` through its
+  fetch seam (or PATH-stubbed ping/curl for network-reach + bundle-state) with `OBS_FLEET_HOME`
+  pinning the home check: PP away = no poll/no page, home + healthy = no page, home + fault = a page
+  naming the box, a linux box never gets `schtasks` / the launch-obs-genlock plan.
+- **Supervisor dry-run runbook before relying on it** (dev1, read-only; scratch state files so no live
+  latch moves): for each of network-reach, bundle-state, obs-liveness, genlock-lock, render-freeze,
+  audio-lag, audio-mixer and obs-handles, `scripts/<watchdog>.sh --dry-run` with its
+  `*_STATE_FILE` pointed at a temp file. Expect the PP boxes logged `away` / `report_only=1` while PP
+  is off; with PP powered on and its OBS up, expect a verdict line per PP box (`HEALTHY` / `REACHABLE`)
+  and no `WOULD alert`. The watchdogs run from the checkout, so a merge activates the roster.
 
 ## The last Windows-strih remnants — retired in issue 1317 part 4 (23.9.2026)
 

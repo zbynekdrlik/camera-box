@@ -54,6 +54,16 @@ box we actually paged for returns (the `alerted_<box>` latch). No OBS-WS passwor
 on dev1 like the siblings: `systemctl --user enable --now network-reach-alert-watchdog.timer` (units
 in `systemd/`). Runs entirely dev1-side; nothing is deployed to strih/stream.
 
+## Every away traveling box is REPORT-ONLY, by home-check (issue 1441)
+
+Since issue 1441 the report-only default is GENERIC: every `BOXES` member that `obs_fleet_poll_now`
+would not poll this pass (a `traveling` row that is away -- resolume-snv, strih-pp, stream-pp -- or a
+`retired` one) is report-only, and is promoted to a paging node while it is home. No box name is
+coded in the watchdog any more. The Poprad strih-pp + stream-pp are in the roster (`obs_fleet_boxes
+network-reach`); PP powered off is their normal state, so they log a `report_only=1 ->
+UNREACHABLE` line and never page. The development handover check skips such a line. The section below
+is the original resolume history; the mechanism is the same for every traveling row.
+
 ## resolume — a REPORT-ONLY node (a traveling box, #811)
 
 resolume-snv (RESOLUME-SNV, the CG box) is watched too, but it is a **traveling box normally

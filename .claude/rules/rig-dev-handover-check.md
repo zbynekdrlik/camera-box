@@ -44,7 +44,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | pins | `latency_pins_verify.py` (strih/stream/imag) | exit 0 | exit 1 | exit 2 |
 | clock | `dantesync-clock-alert-watchdog.sh --dry-run` | `verdict=OK` | NO_CLOCK/NO_DANTESYNC/MGMT_DEAD | SKIP/UNKNOWN |
 | obs | `obs-liveness-watchdog.sh --dry-run` | `verdict=HEALTHY` | FPS-ZERO/WEDGED-.../WS-DEAD/... | no verdict |
-| net | `network-reach-alert-watchdog.sh --dry-run` | `-> REACHABLE` | `-> UNREACHABLE` | no line |
+| net | `network-reach-alert-watchdog.sh --dry-run` | `-> REACHABLE` | `-> UNREACHABLE` | no line; a `report_only=1` line (an away traveling box: resolume, the Poprad boxes, issue 1441) is skipped |
 | audiolag | `audio-lag-alert-watchdog.sh --dry-run` | `verdict=HEALTHY` | LAGGING/STALE/DRIFTING | SKIP/UNKNOWN |
 | genlock | `genlock-lock-alert-watchdog.sh --dry-run` | `verdict=HEALTHY` | DEGRADED/UNLOCKED | **UNKNOWN facet = UNKNOWN, NEVER forgot** |
 | dantesync | `dantesync-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
