@@ -107,11 +107,13 @@ class IdleHold1404(unittest.TestCase):
         # the very first read may run under the initial lease (fail-fast acquire, issue 830);
         # the later streaming read sees it released (a foreign broadcast in progress)
         self.assertEqual(calls[1], ["0", "busy"], calls)
-        # issue 1432: from the first idle read on, the lease is held -- the whole idle hold and the
+        # the poll read that finds the rig idle still runs with the lease released (it decides to
+        # take it back); issue 1432: from there on the lease is held -- the whole idle hold and the
         # final admission read run under it, so no other holder can take the rig in between
-        idle = calls[2:]
-        self.assertGreaterEqual(len(idle), 14, calls)
-        self.assertTrue(all(c == ["1", "idle"] for c in idle), calls)
+        self.assertEqual(calls[2], ["0", "idle"], calls)
+        hold = calls[3:]
+        self.assertGreaterEqual(len(hold), 13, calls)
+        self.assertTrue(all(c == ["1", "idle"] for c in hold), calls)
         self.assertTrue(held)
 
     def test_an_idle_first_read_keeps_the_initial_lease_through_the_hold(self):
