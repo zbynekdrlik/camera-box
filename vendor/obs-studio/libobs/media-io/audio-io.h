@@ -222,7 +222,14 @@ EXPORT void audio_output_disconnect(audio_t *video, size_t mix_idx, audio_output
  * - sleep_over: the same, only on ticks where the thread really slept (the OS woke it late);
  * - lock_wait: the longest wait for the input mutex;
  * - out_pass: the longest output pass of one tick (clamp + every mix's output callbacks);
- * - cb_max: the slowest single output callback, with its function, param and mix index.
+ * - cb_max: the slowest single output callback, with its function, param and mix index;
+ * - tail_max: the longest stretch from the end of a tick's output pass to the next sleep (the
+ *   audio thread's profiler bookkeeping and its stop check);
+ * - late_*: the breakdown behind the window's worst wake_late, so the maxima above can be tied to
+ *   ONE event: whether that tick slept (late_slept: the OS woke it late) and, for the iteration
+ *   just before it, how long it was busy from its wake to the next sleep, and its mix
+ *   (input_cb), output pass, longest input-mutex wait and tail. A late tick that did not sleep
+ *   started behind because of those (or of earlier iterations that each ran over a tick).
  * Libobs-internal: taken (copied and reset) by the 60 s audio dump in obs-audio.c, which runs ON
  * the audio thread, the counters' only writer. Never call it from another thread. */
 struct audio_output_stall_stats {
@@ -234,6 +241,13 @@ struct audio_output_stall_stats {
 	audio_output_callback_t cb_max_callback;
 	void *cb_max_param;
 	size_t cb_max_mix;
+	uint64_t tail_max_ns;
+	bool late_slept;
+	uint64_t late_prev_busy_ns;
+	uint64_t late_prev_mix_ns;
+	uint64_t late_prev_pass_ns;
+	uint64_t late_prev_lock_ns;
+	uint64_t late_prev_tail_ns;
 };
 
 void audio_output_take_stall_stats(audio_t *audio, struct audio_output_stall_stats *stats);

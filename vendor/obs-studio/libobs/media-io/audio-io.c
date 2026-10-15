@@ -62,6 +62,17 @@ struct audio_mix {
 	float buffer_unclamped[MAX_AUDIO_CHANNELS][AUDIO_OUTPUT_FRAMES];
 };
 
+/* camera-box issue 1381: one audio-thread iteration, wake to the next sleep */
+struct audio_stall_iter {
+	uint64_t wake_ns;       /* when it woke (0 = no iteration yet) */
+	uint64_t busy_ns;       /* wake -> the next sleep */
+	uint64_t mix_ns;        /* input_cb (obs-audio.c audio_callback) */
+	uint64_t pass_ns;       /* the output pass */
+	uint64_t lock_ns;       /* its longest input-mutex wait */
+	uint64_t tail_ns;       /* end of input_and_output -> the next sleep */
+	uint64_t tail_start_ns; /* when input_and_output returned (0 = not yet) */
+};
+
 struct audio_output {
 	struct audio_output_info info;
 	size_t block_size;
@@ -78,8 +89,10 @@ struct audio_output {
 	pthread_mutex_t input_mutex;
 	struct audio_mix mixes[MAX_AUDIO_MIXES];
 
-	/* camera-box issue 1381: the audio thread's stall attribution (audio-io.h) */
+	/* camera-box issue 1381: the audio thread's stall attribution (audio-io.h): the window, and
+	 * the current iteration for the worst-wake breakdown */
 	struct audio_output_stall_stats stall;
+	struct audio_stall_iter stall_cur;
 };
 
 /* camera-box issue 1381 BEGIN -- what the audio thread spends its time on between two mixer ticks
@@ -94,13 +107,44 @@ static inline void audio_stall_note_max(uint64_t *max_ns, uint64_t start_ns, uin
 		*max_ns = end_ns - start_ns;
 }
 
+static inline uint64_t audio_stall_span(uint64_t start_ns, uint64_t end_ns)
+{
+	return end_ns > start_ns ? end_ns - start_ns : 0;
+}
+
+/* the start of the next sleep ends the current iteration: close its tail and busy time (it is
+ * read as "the iteration just before" by the wake that follows, then reset) */
+static inline void audio_stall_iter_end(struct audio_output *audio, uint64_t now_ns)
+{
+	struct audio_stall_iter *cur = &audio->stall_cur;
+	if (!cur->wake_ns)
+		return;
+	if (cur->tail_start_ns) {
+		cur->tail_ns = audio_stall_span(cur->tail_start_ns, now_ns);
+		audio_stall_note_max(&audio->stall.tail_max_ns, cur->tail_start_ns, now_ns);
+	}
+	cur->busy_ns = audio_stall_span(cur->wake_ns, now_ns);
+}
+
 /* how late the thread woke for the tick due at target_ns; `slept` = it really slept (the OS woke
- * it late), else the tick started behind because the previous one ran long */
+ * it late), else the tick started behind because the previous one ran long. A new worst wake
+ * keeps the previous iteration's breakdown with it. Then a new iteration starts. */
 static inline void audio_stall_note_wake(struct audio_output *audio, uint64_t target_ns, bool slept, uint64_t woke_ns)
 {
-	audio_stall_note_max(&audio->stall.wake_late_max_ns, target_ns, woke_ns);
+	if (woke_ns > target_ns && woke_ns - target_ns > audio->stall.wake_late_max_ns) {
+		const struct audio_stall_iter *prev = &audio->stall_cur; /* the iteration that just ended */
+		audio->stall.wake_late_max_ns = woke_ns - target_ns;
+		audio->stall.late_slept = slept;
+		audio->stall.late_prev_busy_ns = prev->busy_ns;
+		audio->stall.late_prev_mix_ns = prev->mix_ns;
+		audio->stall.late_prev_pass_ns = prev->pass_ns;
+		audio->stall.late_prev_lock_ns = prev->lock_ns;
+		audio->stall.late_prev_tail_ns = prev->tail_ns;
+	}
 	if (slept)
 		audio_stall_note_max(&audio->stall.sleep_over_max_ns, target_ns, woke_ns);
+	memset(&audio->stall_cur, 0, sizeof(audio->stall_cur));
+	audio->stall_cur.wake_ns = woke_ns;
 }
 
 /* the input mutex, with the wait for it measured (audio_output_connect / _disconnect hold it on
@@ -109,7 +153,9 @@ static inline void audio_stall_lock_input(struct audio_output *audio)
 {
 	const uint64_t wait_start_ns = os_gettime_ns();
 	pthread_mutex_lock(&audio->input_mutex);
-	audio_stall_note_max(&audio->stall.lock_wait_max_ns, wait_start_ns, os_gettime_ns());
+	const uint64_t locked_ns = os_gettime_ns();
+	audio_stall_note_max(&audio->stall.lock_wait_max_ns, wait_start_ns, locked_ns);
+	audio_stall_note_max(&audio->stall_cur.lock_ns, wait_start_ns, locked_ns);
 }
 
 /* the slowest output callback of the window and who it was */
@@ -244,12 +290,14 @@ static void input_and_output(struct audio_output *audio, uint64_t audio_time, ui
 	}
 
 	/* get new audio data */
+	/* camera-box issue 1381: the mix (input_cb) and then the whole output pass of this tick (clamp
+	 * + every mix's outputs) are timed for the worst-wake breakdown */
+	const uint64_t mix_start_ns = os_gettime_ns();
 	success = audio->input_cb(audio->input_param, prev_time, audio_time, &new_ts, active_mixes, data);
+	const uint64_t out_pass_start_ns = os_gettime_ns();
+	audio->stall_cur.mix_ns = audio_stall_span(mix_start_ns, out_pass_start_ns);
 	if (!success)
 		return;
-
-	/* camera-box issue 1381: the whole output pass of this tick (clamp + every mix's outputs) */
-	const uint64_t out_pass_start_ns = os_gettime_ns();
 
 	/* clamps audio data to -1.0..1.0 */
 	clamp_audio_output(audio, bytes);
@@ -258,7 +306,9 @@ static void input_and_output(struct audio_output *audio, uint64_t audio_time, ui
 	for (size_t i = 0; i < MAX_AUDIO_MIXES; i++)
 		do_audio_output(audio, i, new_ts, AUDIO_OUTPUT_FRAMES);
 
-	audio_stall_note_max(&audio->stall.out_pass_max_ns, out_pass_start_ns, os_gettime_ns());
+	const uint64_t out_pass_end_ns = os_gettime_ns();
+	audio_stall_note_max(&audio->stall.out_pass_max_ns, out_pass_start_ns, out_pass_end_ns);
+	audio->stall_cur.pass_ns = audio_stall_span(out_pass_start_ns, out_pass_end_ns);
 }
 
 static void *audio_thread(void *param)
@@ -283,13 +333,15 @@ static void *audio_thread(void *param)
 		samples += AUDIO_OUTPUT_FRAMES;
 		uint64_t audio_time = start_time + audio_frames_to_ns(rate, samples);
 
-		/* camera-box issue 1381: how late the thread woke for this tick */
+		/* camera-box issue 1381: the previous iteration ends here; how late this one woke */
+		audio_stall_iter_end(audio, os_gettime_ns());
 		const bool slept = os_sleepto_ns_fast(audio_time);
 		audio_stall_note_wake(audio, audio_time, slept, os_gettime_ns());
 
 		profile_start(audio_thread_name);
 
 		input_and_output(audio, audio_time, prev_time);
+		audio->stall_cur.tail_start_ns = os_gettime_ns(); /* camera-box issue 1381 */
 		prev_time = audio_time;
 
 		profile_end(audio_thread_name);

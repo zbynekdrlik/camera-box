@@ -730,15 +730,28 @@ static void audio_stall_probe_exit(uint64_t entry_ns)
 		audio_stall_busy_max_ns = now - entry_ns;
 }
 
+/* camera-box issue 1381: copy an output / encoder name into the dump's buffer, every control
+ * character replaced, so a name can never split or forge a log line */
+static void audio_stall_copy_name(char *name, size_t name_size, const char *src)
+{
+	snprintf(name, name_size, "%s", src ? src : "");
+	for (char *c = name; *c; c++) {
+		if ((unsigned char)*c < 0x20)
+			*c = '?';
+	}
+}
+
 /* camera-box issue 1381: who the slowest output callback of the stall window was
  * (audio_output_take_stall_stats, media-io/audio-io.c). Called from the 60 s dump only, which runs
  * on the audio thread, so the output and encoder lists are only TRIED (pthread_mutex_trylock): the
  * thread never waits for a frontend or websocket thread holding them. The param is compared by
  * value; a name is read only from a context still on its list and copied into `name` before the
  * list is unlocked. Returns the kind: "-" (no output callback ran), "output" (a raw-audio output,
- * param = the output), "encoder" (an audio encoder, param = the encoder), "raw" (an
- * obs_add_raw_audio_callback consumer: only its pointers are printed) or "busy" (a list was held,
- * so the param may still be on it). */
+ * param = the output), "encoder" (an audio encoder, param = the encoder), "unlisted" (on neither
+ * list: an obs_add_raw_audio_callback consumer, or an output / encoder destroyed since its
+ * callback; only the pointers are printed) or "busy" (a list was held, so the param may still be
+ * on it). A param whose object was destroyed and its address reused by a new output or encoder
+ * within the window would carry the new object's name. */
 static const char *audio_stall_out_cb_identity(const void *param, uint64_t cb_max_ns, char *name, size_t name_size)
 {
 	bool busy = false;
@@ -752,8 +765,7 @@ static const char *audio_stall_out_cb_identity(const void *param, uint64_t cb_ma
 		     output = (struct obs_output *)output->context.next) {
 			if ((const void *)output != param)
 				continue;
-			const char *output_name = obs_output_get_name(output);
-			snprintf(name, name_size, "%s", output_name ? output_name : "");
+			audio_stall_copy_name(name, name_size, obs_output_get_name(output));
 			pthread_mutex_unlock(&obs->data.outputs_mutex);
 			return "output";
 		}
@@ -767,8 +779,7 @@ static const char *audio_stall_out_cb_identity(const void *param, uint64_t cb_ma
 		     encoder = (struct obs_encoder *)encoder->context.next) {
 			if ((const void *)encoder != param)
 				continue;
-			const char *encoder_name = obs_encoder_get_name(encoder);
-			snprintf(name, name_size, "%s", encoder_name ? encoder_name : "");
+			audio_stall_copy_name(name, name_size, obs_encoder_get_name(encoder));
 			pthread_mutex_unlock(&obs->data.encoders_mutex);
 			return "encoder";
 		}
@@ -777,7 +788,44 @@ static const char *audio_stall_out_cb_identity(const void *param, uint64_t cb_ma
 		busy = true;
 	}
 
-	return busy ? "busy" : "raw";
+	return busy ? "busy" : "unlisted";
+}
+
+/* camera-box issue 1367 + 1381: the 60 s stall line, written by the #800 dump in audio_callback
+ * (so on the audio thread): the 1367 probe's window (the gap between ticks, the mix's own
+ * duration), then what took the time between two ticks -- the media-io/audio-io.c window (how
+ * late the thread woke, the input-mutex wait, the output pass, the tail, the breakdown behind
+ * the worst late wake, the slowest output callback and who it was). Both windows are taken and
+ * reset here. The free-text name stays LAST on the line. */
+static void audio_stall_dump(audio_t *audio_io, size_t sample_rate)
+{
+	struct audio_output_stall_stats out_stall;
+	char out_cb_name[128];
+	audio_output_take_stall_stats(audio_io, &out_stall);
+	const char *out_cb_kind = audio_stall_out_cb_identity(out_stall.cb_max_param, out_stall.cb_max_ns, out_cb_name,
+							      sizeof(out_cb_name));
+	blog(LOG_INFO,
+	     "audio-stall #1367: tick_gap_max_ms=%.1f callback_max_ms=%.1f ticks=%llu ticks_over=%llu "
+	     "tick_ms=%.1f wake_late_max_ms=%.1f sleep_over_max_ms=%.1f lock_wait_max_ms=%.1f "
+	     "out_pass_max_ms=%.1f tail_max_ms=%.1f late_slept=%u late_prev_busy_ms=%.1f "
+	     "late_prev_mix_ms=%.1f late_prev_pass_ms=%.1f late_prev_lock_ms=%.1f late_prev_tail_ms=%.1f "
+	     "out_cb_max_ms=%.1f out_cb_mix=%u out_cb_kind=%s out_cb_fn=0x%llx out_cb_param=0x%llx "
+	     "out_cb_name='%s'",
+	     (double)audio_stall_gap_max_ns / 1e6, (double)audio_stall_busy_max_ns / 1e6,
+	     (unsigned long long)audio_stall_ticks, (unsigned long long)audio_stall_ticks_over,
+	     (double)audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES) / 1e6,
+	     (double)out_stall.wake_late_max_ns / 1e6, (double)out_stall.sleep_over_max_ns / 1e6,
+	     (double)out_stall.lock_wait_max_ns / 1e6, (double)out_stall.out_pass_max_ns / 1e6,
+	     (double)out_stall.tail_max_ns / 1e6, (unsigned)out_stall.late_slept,
+	     (double)out_stall.late_prev_busy_ns / 1e6, (double)out_stall.late_prev_mix_ns / 1e6,
+	     (double)out_stall.late_prev_pass_ns / 1e6, (double)out_stall.late_prev_lock_ns / 1e6,
+	     (double)out_stall.late_prev_tail_ns / 1e6, (double)out_stall.cb_max_ns / 1e6,
+	     (unsigned)out_stall.cb_max_mix, out_cb_kind, (unsigned long long)(uintptr_t)out_stall.cb_max_callback,
+	     (unsigned long long)(uintptr_t)out_stall.cb_max_param, out_cb_name);
+	audio_stall_gap_max_ns = 0;
+	audio_stall_busy_max_ns = 0;
+	audio_stall_ticks = 0;
+	audio_stall_ticks_over = 0;
 }
 
 bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint64_t *out_ts, uint32_t mixers,
@@ -938,32 +986,8 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 			     (int)(audio->total_buffering_ticks * AUDIO_OUTPUT_FRAMES * 1000 / sample_rate),
 			     (int)audio->total_buffering_ticks, (int)audio->max_buffering_ticks,
 			     buffering_name ? buffering_name : "-");
-			/* camera-box issue 1367: the audio-thread stall probe's window (see above), then reset.
-			 * Issue 1381: the same line names what took the time between two ticks -- the
-			 * media-io/audio-io.c window (how late the thread woke, the input-mutex wait, the
-			 * output pass, the slowest output callback and who it was), taken and reset here. */
-			struct audio_output_stall_stats out_stall;
-			char out_cb_name[128];
-			audio_output_take_stall_stats(audio->audio, &out_stall);
-			const char *out_cb_kind = audio_stall_out_cb_identity(
-				out_stall.cb_max_param, out_stall.cb_max_ns, out_cb_name, sizeof(out_cb_name));
-			blog(LOG_INFO,
-			     "audio-stall #1367: tick_gap_max_ms=%.1f callback_max_ms=%.1f ticks=%llu ticks_over=%llu "
-			     "tick_ms=%.1f wake_late_max_ms=%.1f sleep_over_max_ms=%.1f lock_wait_max_ms=%.1f "
-			     "out_pass_max_ms=%.1f out_cb_max_ms=%.1f out_cb_mix=%u out_cb_kind=%s out_cb_fn=0x%llx "
-			     "out_cb_param=0x%llx out_cb_name='%s'",
-			     (double)audio_stall_gap_max_ns / 1e6, (double)audio_stall_busy_max_ns / 1e6,
-			     (unsigned long long)audio_stall_ticks, (unsigned long long)audio_stall_ticks_over,
-			     (double)audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES) / 1e6,
-			     (double)out_stall.wake_late_max_ns / 1e6, (double)out_stall.sleep_over_max_ns / 1e6,
-			     (double)out_stall.lock_wait_max_ns / 1e6, (double)out_stall.out_pass_max_ns / 1e6,
-			     (double)out_stall.cb_max_ns / 1e6, (unsigned)out_stall.cb_max_mix, out_cb_kind,
-			     (unsigned long long)(uintptr_t)out_stall.cb_max_callback,
-			     (unsigned long long)(uintptr_t)out_stall.cb_max_param, out_cb_name);
-			audio_stall_gap_max_ns = 0;
-			audio_stall_busy_max_ns = 0;
-			audio_stall_ticks = 0;
-			audio_stall_ticks_over = 0;
+			/* camera-box issue 1367 + 1381: the audio-thread stall line (see audio_stall_dump) */
+			audio_stall_dump(audio->audio, sample_rate);
 			pthread_mutex_lock(&data->audio_sources_mutex);
 			struct obs_source *tsrc = data->first_audio_source;
 			while (tsrc) {
