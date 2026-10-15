@@ -483,7 +483,7 @@ class Monitor:
         else:
             self.fail_streak = 0
             self._logged = None  # after a real stream the next idle state is news again
-            if end != "stopping":
+            if ap.returncode == 0:  # aplay took the stream to its EOF: a stream really played
                 self.st["last_play_failed"] = None
             self.st.update(state="ended", reason=end)
             self._write_state()
