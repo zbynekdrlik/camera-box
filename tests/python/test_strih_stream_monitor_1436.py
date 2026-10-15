@@ -232,12 +232,26 @@ if mode == "fail":
     sys.exit(1)
 if mode == "slow":
     time.sleep(float(os.environ.get("FAKE_AP_SLEEP", "1.5")))
+ff_pid = None
 n = 0
 while True:
     b = sys.stdin.buffer.read(4096)
     if not b:
         break
     n += len(b)
+if mode == "check_ff":
+    # at our EOF: is the ffmpeg (the RTMP subscriber) still running? The player must stop it first.
+    for w in open(log + ".env").read().split():
+        if w.startswith("pid="):
+            ff_pid = int(w.split("=")[1])
+            break
+    try:
+        os.kill(ff_pid, 0)
+        alive = 1
+    except ProcessLookupError:
+        alive = 0
+    with open(os.environ["FAKE_AP_OUT"] + ".ff", "a") as f:
+        f.write("ffalive=%d\n" % alive)
 with open(os.environ["FAKE_AP_OUT"], "a") as f:
     f.write("%d\n" % n)
 '''
@@ -346,7 +360,7 @@ def test_a_card_slower_than_the_stream_drops_over_the_ceiling_instead_of_pausing
     assert r.returncode == 0, r.stderr
     assert st["dropped_bytes"] > 0
     assert played and played[0] + st["dropped_bytes"] == 192000, (played, st["dropped_bytes"])
-    assert played[0] <= 7680 + 3840 + 65536
+    assert played[0] <= 7680, "the 40 ms ceiling bounds the pipe, not the 64 KiB pipe buffer"
     ended = [ln for ln in r.stdout.splitlines() if ln.startswith("stream ended")]
     assert ended and "dropped" in ended[0] and "; 0 ms dropped" not in ended[0], ended
 
@@ -681,22 +695,39 @@ def test_a_stream_without_audio_is_a_fault_not_waiting(tmp_path):
     assert not ok and "no-audio" in line
 
 
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def test_sigterm_stops_the_player_and_both_children(tmp_path):
     argv, env, log, _apout, _state_ = _monitor_cmd(tmp_path, cycles=None, ff="play:400000000")
+    envlog = Path(str(log) + ".env")
     p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-    deadline = time.monotonic() + 20
-    while time.monotonic() < deadline and "aplay pid=" not in (Path(str(log) + ".env").read_text()
-                                                              if Path(str(log) + ".env").exists() else ""):
-        time.sleep(0.05)
-    p.send_signal(15)
-    out, _err = p.communicate(timeout=15)
+    out, leaked = "", []
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and "aplay pid=" not in (envlog.read_text() if envlog.exists() else ""):
+            time.sleep(0.05)
+        p.send_signal(15)
+        out, _err = p.communicate(timeout=15)
+        time.sleep(0.2)
+        pids = [int(w.split("=")[1]) for w in envlog.read_text().split() if w.startswith("pid=")]
+        assert len(pids) == 2, envlog.read_text()
+        leaked = [pid for pid in pids if _alive(pid)]
+    finally:
+        # a failed run must never leave the player or a fake child holding pytest's output pipe
+        if p.poll() is None:
+            p.kill()
+            p.communicate(timeout=5)
+        for w in (envlog.read_text().split() if envlog.exists() else []):
+            if w.startswith("pid=") and _alive(int(w.split("=")[1])):
+                os.kill(int(w.split("=")[1]), 9)
     assert p.returncode == 0
-    pids = [int(w.split("=")[1]) for w in Path(str(log) + ".env").read_text().split() if w.startswith("pid=")]
-    assert len(pids) == 2
-    time.sleep(0.2)
-    for pid in pids:
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+    assert leaked == [], "the player left its children running"
     assert any(ln.startswith("stream ended") and "stopping" in ln for ln in out.splitlines()), out
 
 
@@ -745,3 +776,11 @@ def test_the_stream_role_grade_report_prints_every_row(tmp_path, boxes):
     assert lines[-1] == "REPORT-OK", r.stdout
     assert len(lines) - 1 == 4, r.stdout
     assert any("(stream-monitor) strih-stream-monitor.service" in ln for ln in lines)
+
+
+def test_the_subscriber_is_stopped_before_aplay_drains(tmp_path):
+    # a stalled stream: ffmpeg still runs (sleeping) when the relay ends; it must be gone by aplay's EOF
+    r, _calls, played, _st, _e = run_monitor(tmp_path, ff="stall:7680", ap="check_ff", extra=("--stall-s", "1"))
+    assert r.returncode == 0, r.stderr
+    assert played == [7680]
+    assert (tmp_path / "aplay.out.ff").read_text() == "ffalive=0\n"
