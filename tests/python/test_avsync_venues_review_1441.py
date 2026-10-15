@@ -208,8 +208,12 @@ def test_the_whole_table_present_never_pages_the_table(tmp_path):
 def test_the_old_report_state_moves_to_the_snv_file_without_a_repost(tmp_path):
     d = Dev2(tmp_path)
     d.heartbeat("avsync-watchdog-heartbeat-snv.txt")
+    # One fixed row epoch for both passes. With `$(date +%s)` each pass saw a row stamped at its own
+    # second, so two passes straddling a second boundary (a slow CI runner) read as a NEW session
+    # and re-posted the START -- a timing-dependent failure that is not about the migration.
+    row_epoch = int(time.time())
     fetch = (
-        'printf "%s\\t%s\\n" "$(date +%s)" '
+        f'printf "%s\\t%s\\n" "{row_epoch}" '
         '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"'
     )
     extra = {"AVSYNC_REPORT_FETCH_CMD": fetch, "AVSYNC_VENUES": "snv"}
