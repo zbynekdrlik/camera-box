@@ -381,3 +381,44 @@ def test_the_real_gather_lists_the_irqs_with_flag_affinity_and_deltas():
         assert n.isdigit() and flag in ("0", "1")
         ds = deltas.split(",")
         assert len(ds) == ncpu and all(d.isdigit() for d in ds), l
+
+
+# --- the fleet unit never ran the IRQ split: the irq-affinity drop-in ------------------------------
+
+def test_the_irq_affinity_dropin_runs_the_irq_setup_with_proc_irq_writable():
+    body = _bash("cambox_hk_irq_dropin_content").stdout
+    assert "[Service]\n" in body
+    assert "ExecStartPre=-/usr/local/bin/camera-box --setup-irq-affinity\n" in body
+    assert "ReadWritePaths=/proc/irq\n" in body
+
+
+def test_setup_device_writes_the_irq_affinity_dropin_in_step_7():
+    setup = SETUP.read_text()
+    step7 = setup[setup.index("# STEP 7: Create systemd service"):setup.index("# STEP 8")]
+    assert "cambox_hk_irq_dropin_install" in step7
+
+
+def test_verify_fails_a_box_whose_camera_box_unit_lacks_the_irq_setup():
+    v = _verdict(_block() + "IRQ_DROPIN=0\n")
+    assert v.startswith("FAIL: ") and "--setup-irq-affinity" in v
+    assert _verdict(_block() + "IRQ_DROPIN=1\n") == "ok\n"
+
+
+def test_the_live_apply_writes_the_irq_dropin_and_reloads(tmp_path):
+    b, log, proc = _stubs(tmp_path)
+    (b / "systemctl").write_text(f'#!/bin/bash\necho "systemctl $*" >>{log}\n')
+    (b / "systemctl").chmod(0o755)
+    (proc / "1" / "status").write_text("Name:\tsystemd\nCpus_allowed_list:\t0-1\n")
+    dropin = tmp_path / "d.conf"
+    dropin.write_text(_bash('cambox_hk_dropin_content "$1"', "0,1").stdout)
+    irq = tmp_path / "irq.conf"
+    env = {"CAMBOX_HK_DROPIN": str(dropin), "CAMBOX_HK_SYS": str(_sys(tmp_path)),
+           "CAMBOX_HK_PROC": str(proc), "CAMBOX_HK_IRQ_DROPIN": str(irq)}
+    prog = _bash("cambox_hk_apply_program", env=env).stdout
+    r = subprocess.run(["bash", "-s"], input=prog, capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert irq.read_text() == _bash("cambox_hk_irq_dropin_content").stdout
+    text = log.read_text()
+    assert "remount,rw" in text and "systemctl daemon-reload" in text
+    assert text.index("remount,ro") < text.index("systemctl daemon-reload")
