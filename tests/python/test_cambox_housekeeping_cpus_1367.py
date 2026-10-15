@@ -355,23 +355,29 @@ def test_verify_fails_a_dropin_without_its_final_newline(tmp_path):
 
 
 # --- other device IRQs off the reserved capture-IRQ core (the NIC IRQ finding) --------------------
+# IRQ=<n> <capture flag> <smp_affinity_list> <per-cpu interrupt deltas over a 2 s sample>
 
-def test_verify_fails_another_device_irq_allowed_on_the_reserved_core():
-    block = _block() + "IRQ=129 1 2\nIRQ=135 0 0-2\nIRQ=136 0 0-1\n"
+def test_verify_fails_another_device_irq_that_fired_on_the_reserved_core():
+    block = _block() + "IRQ=129 1 2 0,0,5000,0\nIRQ=135 0 0-2 0,0,4210,0\nIRQ=136 0 0-2 3,0,0,0\n"
     v = _verdict(block)
     assert v.startswith("FAIL: ") and "IRQ 135" in v and "IRQ 136" not in v, v
+    assert "4210" in v
 
 
-def test_verify_accepts_other_irqs_off_the_reserved_core_and_the_capture_irq_on_it():
-    block = _block() + "IRQ=129 1 2\nIRQ=135 0 0-1\n"
+def test_verify_ignores_idle_irqs_and_the_capture_irq_on_the_reserved_core():
+    # an idle IRQ allowed on the reserved core (i8042, a per-cpu wifi queue) never fires there
+    block = _block() + "IRQ=1 0 0-2 0,0,0,0\nIRQ=141 0 2 0,0,0,0\nIRQ=129 1 2 0,0,5000,0\nIRQ=135 0 0-1 900,0,0,0\n"
     assert _verdict(block) == "ok\n"
 
 
-def test_the_real_gather_lists_the_irqs_with_their_capture_flag_and_affinity():
-    snippet = _bash("cambox_hk_gather_remote_snippet").stdout
+def test_the_real_gather_lists_the_irqs_with_flag_affinity_and_deltas():
+    snippet = _bash("cambox_hk_gather_remote_snippet", env={"CAMBOX_HK_IRQ_SAMPLE_S": "0.2"}).stdout
     out = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, timeout=30).stdout
     irq_lines = [l for l in out.splitlines() if l.startswith("IRQ=")]
     assert irq_lines, out
+    ncpu = os.cpu_count()
     for l in irq_lines:
-        n, flag, aff = l[4:].split(" ", 2)
+        n, flag, aff, deltas = l[4:].split(" ")
         assert n.isdigit() and flag in ("0", "1")
+        ds = deltas.split(",")
+        assert len(ds) == ncpu and all(d.isdigit() for d in ds), l
