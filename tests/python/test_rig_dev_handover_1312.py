@@ -422,3 +422,14 @@ def test_evaluate_missing_captures_are_unknown_not_forgot(tmp_path):
     assert code == 2
     assert all(e["status"] == d.UNKNOWN for e in entries)
     assert summary.startswith("nič si nezabudol, ale neoverené:")
+
+
+def test_mic_polluted_is_unknown_and_named_not_called_unreachable():
+    # 15.10.2026: a healthy loud marker read verdict=POLLUTED (peak -17.6 dB over the uncalibrated
+    # -20 dB ceiling) and the owner-facing line claimed "stream OBS or cam2 unreachable". The line
+    # must name the level ceiling, so nobody chases a box that is up.
+    polluted = ("2026-10-15 21:31:26 [measurement-audio-alert-watchdog] stream (10.77.9.204:4455): "
+                "reachable=1 verdict=POLLUTED peak_db=-17.58 meter_present=1\n")
+    e = _item("mic").decide({"mic": (polluted, 0)})
+    assert e["status"] == d.UNKNOWN
+    assert "POLLUTED" in e["message"]
