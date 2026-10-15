@@ -12,7 +12,11 @@ set -euo pipefail
 #     is started before the root reads read-only again, and a root that stays writable fails by
 #     name with its writers;
 #   - the apt timers/services stopped before the window; after the close: daemon-reload,
-#     reset-failed, one logrotate run, the netconsole restart, and the `is-system-running` read-back.
+#     reset-failed, one logrotate run, the netconsole restart, and the `is-system-running` read-back;
+#   - the box's off-box log sink (issue 1394, owner 9.10.2026: its OWN venue strih, never dev1):
+#     remote_log_sink_ip resolves it per box from the venue fact files BEFORE the first box is
+#     touched, and the same window rewrites the netconsole script, journal-upload.conf and the upload
+#     drop-in where issue 1311 put them; systemd-journal-upload restarts after the close.
 #
 # It is a root write on a cambox, so --apply TAKES the rig lease (scripts/lib/rig-lease.sh, repo
 # camera-box-ro-units-apply) for its whole run and releases it on every exit: a live foreign holder
@@ -33,8 +37,11 @@ set -euo pipefail
 #   scripts/cambox-ro-units-apply.sh --plan  --box <name> [--box <name> ...]   print the program, touch nothing
 #   scripts/cambox-ro-units-apply.sh --apply --box <name> [--box <name> ...]   run it as root over ssh (bash -s)
 #   scripts/cambox-ro-units-apply.sh --plan|--apply --active                   every box in CAMERA_ACTIVE_SET
+#   scripts/cambox-ro-units-apply.sh --plan|--apply --venue <venue>            every camera a venue lists
 # A box name resolves through scripts/camera-set.sh (camera_resolve); --active reads the fleet from
-# CAMERA_ACTIVE_SET (never a typed camera range). --apply goes on to the next box after a failure and
+# CAMERA_ACTIVE_SET (never a typed camera range); --venue reads the cameras a venue's strih fact file
+# lists, each dialled at its dev1 address from scripts/lib/dantesync-fleet.sh
+# (dantesync_fleet_venue_camera_rows: the Poprad boxes are 10.76.9.x through companion-pp). --apply goes on to the next box after a failure and
 # names every failed box at the end, and every box that has no issue-1311 netconsole unit.
 #
 # Env: CAM_PW (cambox root password, default newlevel -- the fleet's dev password, as verify-device.sh),
@@ -48,6 +55,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"
+# shellcheck source=scripts/lib/remote-logging.sh
+. "$HERE/lib/remote-logging.sh"  # remote_log_sink_ip: the box's venue strih log sink (issue 1394)
 # shellcheck source=scripts/lib/cambox-ro-units.sh
 . "$HERE/lib/cambox-ro-units.sh"
 # shellcheck source=scripts/lib/rig-heartbeat.sh
@@ -64,13 +73,14 @@ RIG_BUSY_HERE="${CAMBOX_RO_UNITS_OBS_PHASE2_DIR:-$HERE}"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/cambox-ro-units-apply.sh --plan|--apply [--force-live] (--box <name> [--box <name> ...] | --active)
+Usage: scripts/cambox-ro-units-apply.sh --plan|--apply [--force-live] (--box <name> [--box <name> ...] | --active | --venue <venue>)
   --plan        print, per box, the remote program --apply would run; touches nothing
   --apply       run it as root on each box over ssh (bash -s); refused while the rig lease is held,
                 the rig heartbeat is fresh, or strih/stream broadcast
   --force-live  skip that rig guard (supervisor-only, logged)
   --box         a camera name from scripts/camera-set.sh (repeatable)
   --active      every box in CAMERA_ACTIVE_SET
+  --venue       every camera a venue's strih fact file lists, at its dev1 address (e.g. --venue pp)
 Env: CAM_PW (default newlevel), SSH_TIMEOUT (default 10). Exit 0 ok, 1 a box failed or the rig
 guard refused, 2 usage.
 EOF
@@ -79,6 +89,7 @@ EOF
 MODE=""
 FORCE_LIVE=0
 BOXES=()
+VENUES=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --plan | --apply)
@@ -103,6 +114,15 @@ while [ "$#" -gt 0 ]; do
       read -r -a _active <<<"$CAMERA_ACTIVE_SET"
       BOXES+=("${_active[@]}")
       ;;
+    --venue)
+      if [ "$#" -lt 2 ]; then
+        echo "ERROR: --venue needs a venue name" >&2
+        usage >&2
+        exit 2
+      fi
+      VENUES+=("$2")
+      shift
+      ;;
     -h | --help)
       usage
       exit 0
@@ -115,37 +135,64 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-if [ -z "$MODE" ] || [ "${#BOXES[@]}" -eq 0 ]; then
+if [ -z "$MODE" ] || { [ "${#BOXES[@]}" -eq 0 ] && [ "${#VENUES[@]}" -eq 0 ]; }; then
   usage >&2
   exit 2
 fi
 
-# Resolve every name BEFORE the first box is touched: a typo stops the run with nothing changed. A box
-# named twice (cam1 and CAM1) is applied once.
+# Resolve every name, its dial address and its log sink BEFORE the first box is touched: a typo, an
+# unknown venue or a box no venue lists stops the run with nothing changed. A box named twice (cam1
+# and CAM1, or by --box and --venue) is applied once, at the first address it was named with.
 NAMES=()
 IPS=()
+SINKS=()
+add_box() {  # add_box NAME DIAL_ADDRESS -> 0 added / 1 named before; exit 2 when no sink resolves
+  local sink
+  case " ${NAMES[*]:-} " in
+    *" $1 "*)
+      echo "NOTE: $1 is named more than once -- applied once" >&2
+      return 1
+      ;;
+  esac
+  sink="$(remote_log_sink_ip "$1")" || {
+    echo "ERROR: no log sink for $1 (the line above) -- nothing was touched" >&2
+    exit 2
+  }
+  NAMES+=("$1")
+  IPS+=("$2")
+  SINKS+=("$sink")
+}
 for _box in "${BOXES[@]}"; do
   _name="$(printf '%s' "$_box" | tr '[:upper:]' '[:lower:]')"
   camera_resolve "$_name" || exit 2
-  case " ${NAMES[*]:-} " in
-    *" $CAMERA_NAME "*)
-      echo "NOTE: $CAMERA_NAME is named more than once -- applied once" >&2
-      continue
-      ;;
-  esac
-  NAMES+=("$CAMERA_NAME")
-  IPS+=("$CAMERA_IP")
+  add_box "$CAMERA_NAME" "$CAMERA_IP" || continue
   camera_is_active "$CAMERA_NAME" \
     || echo "NOTE: $CAMERA_NAME is not in CAMERA_ACTIVE_SET ('$CAMERA_ACTIVE_SET') -- going on, as asked" >&2
 done
-
-PROGRAM="$(cambox_ro_units_apply_program)"
+if [ "${#VENUES[@]}" -gt 0 ]; then
+  # shellcheck source=scripts/lib/dantesync-fleet.sh
+  . "$HERE/lib/dantesync-fleet.sh"
+  for _venue in "${VENUES[@]}"; do
+    _rows="$(dantesync_fleet_venue_camera_rows "$_venue")" || {
+      echo "ERROR: venue '$_venue': the strih fact files do not resolve cleanly (the line above names it) -- nothing was touched" >&2
+      exit 2
+    }
+    [ -n "$_rows" ] || {
+      echo "ERROR: venue '$_venue' lists no camera (scripts/strih-boxes/*.env STRIH_VENUE + STRIH_CAMERAS) -- nothing was touched" >&2
+      exit 2
+    }
+    while IFS='|' read -r _name _addr _; do
+      [ -n "$_name" ] || continue
+      add_box "$_name" "$_addr" || true
+    done <<<"$_rows"
+  done
+fi
 
 if [ "$MODE" = plan ]; then
   for _i in "${!NAMES[@]}"; do
-    printf '== %s (%s): the program --apply runs as root over ssh (bash -s); nothing was touched ==\n' \
-      "${NAMES[$_i]}" "${IPS[$_i]}"
-    printf '%s\n' "$PROGRAM"
+    printf '== %s (%s): the program --apply runs as root over ssh (bash -s); log sink %s; nothing was touched ==\n' \
+      "${NAMES[$_i]}" "${IPS[$_i]}" "${SINKS[$_i]}"
+    cambox_ro_units_apply_program "${SINKS[$_i]}"
   done
   exit 0
 fi
@@ -157,7 +204,7 @@ command -v sshpass >/dev/null 2>&1 || {
 
 # The rig lease this run holds (review round 3): taken before the first box and released on every
 # exit, so no E2E / soak can take the rig while a box is applied (one box can take minutes: the
-# netconsole arm waits for dev1). A foreign live holder refuses the run before any box; a stale one is
+# netconsole arm waits for the log sink). A foreign live holder refuses the run before any box; a stale one is
 # reclaimed (rig_lease_acquire). Its identity is this repo's apply + a per-run id.
 RIG_LEASE_REPO_NAME="camera-box-ro-units-apply"
 RIG_LEASE_OURS=""
@@ -235,6 +282,11 @@ UNTOUCHED=()
 for _i in "${!NAMES[@]}"; do
   _name="${NAMES[$_i]}"
   _ip="${IPS[$_i]}"
+  PROGRAM="$(cambox_ro_units_apply_program "${SINKS[$_i]}")" || {
+    echo "ERROR: the program for $_name could not be built (log sink ${SINKS[$_i]})" >&2
+    FAILED+=("$_name (the program could not be built)")
+    continue
+  }
   if [ "$FORCE_LIVE" = 0 ]; then
     # keep our own lease truthful (the :8890 view) while the run goes on; a no-op when not ours
     rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "$_hold_s" >/dev/null 2>&1 || true
@@ -244,7 +296,7 @@ for _i in "${!NAMES[@]}"; do
       break
     fi
   fi
-  echo "== $_name ($_ip): applying the issue-1394 read-only-root unit set =="
+  echo "== $_name ($_ip): applying the issue-1394 read-only-root unit set + the log sink ${SINKS[$_i]} =="
   _rc=0
   # ServerAlive: a dead connection ends this ssh within ~60 s instead of holding the fleet loop.
   printf '%s\n' "$PROGRAM" \
