@@ -205,6 +205,27 @@ avsync_venue_heartbeat_file() {
   printf 'avsync-watchdog-heartbeat-%s.txt' "${1-}"
 }
 
+# avsync_venue_dev2_heartbeat_remote_path VENUE -> the venue's heartbeat path as a dev1 watchdog
+# hands it to dev2's shell: `$HOME` stays LITERAL so dev2 expands it (the same file
+# avsync_measure_heartbeat_path writes there).
+avsync_venue_dev2_heartbeat_remote_path() {
+  printf '$HOME/.camera-box/%s' "$(avsync_venue_heartbeat_file "${1-}")"
+}
+
+# avsync_watchdog_venues HOST -> the venues a dev1 watchdog pass reads from heartbeat HOST, one per
+# line: every selected venue (avsync_selected_venues) for the dev2 measurer; only the legacy venue for
+# the retired Windows "stream" host (it only ever measured SNV, on SNV's own stream box).
+avsync_watchdog_venues() {
+  local v
+  for v in $(avsync_selected_venues); do
+    if [ "${1-}" = stream ] && [ "$v" != "$AVSYNC_LEGACY_HEARTBEAT_VENUE" ]; then
+      continue
+    fi
+    printf '%s\n' "$v"
+  done
+  return 0
+}
+
 # avsync_selected_venues -> the venues a dev1 watchdog pass handles, in table order: every table venue,
 # or only those AVSYNC_VENUES (space-separated) names; a name with no row is named on stderr.
 avsync_selected_venues() {

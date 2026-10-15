@@ -16,6 +16,10 @@
 # confirm/throttle state per leg, reusing the SAME pure scripts/lib/obs-watchdog-decision.sh #391
 # already established (never a third alerting mechanism).
 #
+# issue 1441: one pass covers EVERY venue of the venue table (scripts/lib/avsync-venues.sh -- snv, pp):
+# each venue's own dev2 heartbeat + day logs, per-venue state/dedup keys (avsync-<venue>-...), the
+# venue named in every page and report post. A venue whose stream box is away is AWAY (never a page).
+#
 # Usage:
 #   scripts/avsync-heartbeat-alert-watchdog.sh            # one pass: measure -> decide -> alert
 #   scripts/avsync-heartbeat-alert-watchdog.sh --dry-run  # measure + decide + LOG only; never alert
@@ -29,6 +33,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/avsync-heartbeat.sh
 . "$HERE/lib/avsync-heartbeat.sh"
+# shellcheck source=scripts/lib/avsync-venues.sh
+. "$HERE/lib/avsync-venues.sh"
 # avsync-heartbeat.sh sets `-e` for ITS OWN sourcing safety; re-assert this script's own intended
 # options afterward so a stray non-zero return from a plain assignment never aborts a pass early
 # (this watchdog must survive a bad pass and keep polling on the next timer tick, see the header).
@@ -39,7 +45,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help|-h)
-    sed -n '5,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -49,8 +55,9 @@ esac
 # ── config (all env-overridable) ─────────────────────────────────────────────
 # #1331: the shared lib's stream-fallback ssh prefix reads STREAM_USER/STREAM_PW/STREAM_IP directly
 # (normalize them here so a sourced-lib call sees the same values; the old *_SSH aliases were retired
-# when the inline sshpass call moved into avsync_heartbeat_ssh_prefix_argv).
-STREAM_IP="${STREAM_IP:-10.77.9.204}"
+# when the inline sshpass call moved into avsync_heartbeat_ssh_prefix_argv). issue 1441: the retired
+# Windows path measured SNV on SNV's stream box -- its address comes from the venue table.
+STREAM_IP="${STREAM_IP:-$(avsync_venue_host "$AVSYNC_LEGACY_HEARTBEAT_VENUE" 2>/dev/null || true)}"
 STREAM_USER="${STREAM_USER:-newlevel}"
 STREAM_PW="${STREAM_PW:-newlevel}"
 # 2x avsync-watchdog.ps1's ~90s natural cadence AND 2x avsync-vlc-monitor.ps1's ~15-35s cadence,
@@ -88,6 +95,19 @@ REPORT_SCRIPT="${AVSYNC_REPORT_SCRIPT:-$HERE/avsync_report.py}"
 REPORT_PYTHON="${AVSYNC_REPORT_PYTHON:-python3}"
 REPORT_STATE_FILE="${AVSYNC_REPORT_STATE_FILE:-$STATE_DIR/avsync-report-state.json}"
 
+# issue 1441: the venue this pass is working on (set by main's venue loop; read by measure / the legs /
+# the report pass) and its display label (`SNV`, `PP`) and stream box.
+VENUE=""
+VENUE_LABEL=""
+VENUE_BOX=""
+
+# report_state_path VENUE -> the venue's own report-state file, derived from REPORT_STATE_FILE
+# (`<base>-<venue>.json`): two venues' broadcasts are two sessions, never one.
+report_state_path() {
+  local base="${REPORT_STATE_FILE%.json}"
+  printf '%s-%s.json' "$base" "$1"
+}
+
 log() { printf '%s [avsync-heartbeat-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # ── measure (SSH + the shared avsync-heartbeat probe) ───────────────────────
@@ -96,6 +116,7 @@ log() { printf '%s [avsync-heartbeat-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H
 # "stream" keeps the retired Windows box's sshpass+`type` path). The stream-path STREAM_* env the
 # lib reads is the SAME the config block above sets (STREAM_PW/STREAM_USER/STREAM_IP), so the
 # fallback credentials are unchanged.
+# issue 1441: dev2 reads VENUE's own heartbeat file (the retired stream host keeps its fixed paths).
 measure() {
   local -a pfx=()
   mapfile -t pfx < <(avsync_heartbeat_ssh_prefix_argv)
@@ -104,7 +125,7 @@ measure() {
     PROBE_OUT=""
     return 0
   fi
-  PROBE_OUT="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd)" 2>/dev/null || true)"
+  PROBE_OUT="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd "" "$(avsync_venue_dev2_heartbeat_remote_path "$VENUE")")" 2>/dev/null || true)"
 }
 
 # ── read / write persisted state (same key=value shape as the #391/#882 siblings) ──────────────
@@ -186,9 +207,10 @@ post_discord_verdict() {
 # files under dev2's local date -- correct while both boxes share Europe/Bratislava (they do). The
 # fetch pulls today's + YESTERDAY's file, so a row written near local midnight is still in the window;
 # and aggregation is EPOCH-based (TZ-independent), so only which files are fetched depends on the day.
+# issue 1441: VENUE's own day files (measurements-<venue>-<day>.tsv); the fetch seam gets the venue as $1.
 report_fetch_rows() {
   if [ -n "${AVSYNC_REPORT_FETCH_CMD:-}" ]; then
-    bash -c "$AVSYNC_REPORT_FETCH_CMD" 2>/dev/null || true
+    bash -c "$AVSYNC_REPORT_FETCH_CMD" avsync-report-fetch "$VENUE" 2>/dev/null || true
     return 0
   fi
   local -a pfx=()
@@ -200,7 +222,7 @@ report_fetch_rows() {
   local today yday
   today="$(date +%Y-%m-%d)"
   yday="$(date -d 'yesterday' +%Y-%m-%d 2>/dev/null || echo "$today")"
-  "${pfx[@]}" "cat ~/avsync/measurements-$yday.tsv ~/avsync/measurements-$today.tsv 2>/dev/null" \
+  "${pfx[@]}" "cat ~/avsync/measurements-$VENUE-$yday.tsv ~/avsync/measurements-$VENUE-$today.tsv 2>/dev/null" \
     2>/dev/null || true
 }
 
@@ -216,30 +238,33 @@ report_fetch_rows() {
 # NEVER touches the production state (it works on the discarded copy), so a manual dry-run during a
 # live can never consume the real dedup and suppress a production message.
 run_report_pass() {
-  local rows rows_file work_state msgs line all_ok=1
+  local rows rows_file work_state msgs line all_ok=1 state_file
+  state_file="$(report_state_path "$VENUE")"
   rows="$(report_fetch_rows)"
   if [ -z "$rows" ]; then
-    log "report: no rows fetched this pass (nothing to aggregate)"
+    log "$VENUE report: no rows fetched this pass (nothing to aggregate)"
     return 0
   fi
   rows_file="$(mktemp 2>/dev/null)" || { log "report: mktemp failed (non-fatal)"; return 0; }
   printf '%s\n' "$rows" > "$rows_file"
   work_state="$(mktemp 2>/dev/null)" || { rm -f "$rows_file"; log "report: mktemp failed (non-fatal)"; return 0; }
-  mkdir -p "$(dirname "$REPORT_STATE_FILE")" 2>/dev/null || true
+  mkdir -p "$(dirname "$state_file")" 2>/dev/null || true
   # Run the decider against a COPY of the committed state (decider rewrites --state in place).
-  if [ -f "$REPORT_STATE_FILE" ]; then cp -f "$REPORT_STATE_FILE" "$work_state" 2>/dev/null || true; fi
+  if [ -f "$state_file" ]; then cp -f "$state_file" "$work_state" 2>/dev/null || true; fi
   msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$work_state" --rows "$rows_file" \
     2>/dev/null || true)"
   rm -f "$rows_file"
   if [ -z "$msgs" ]; then
     # No messages to deliver -> committing the advanced session-tracking is safe (nothing to lose),
     # except in --dry-run which must never mutate the production state.
-    if [ "$DRY_RUN" -eq 1 ]; then rm -f "$work_state" 2>/dev/null || true; else mv -f "$work_state" "$REPORT_STATE_FILE" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true; fi
-    log "report: no new messages this pass"
+    if [ "$DRY_RUN" -eq 1 ]; then rm -f "$work_state" 2>/dev/null || true; else mv -f "$work_state" "$state_file" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true; fi
+    log "$VENUE report: no new messages this pass"
     return 0
   fi
+  # issue 1441: every post names its venue ("[PP] 📐 A/V overené ...").
   while IFS= read -r line; do
     [ -n "$line" ] || continue
+    line="[${VENUE_LABEL}] ${line}"
     if [ "$DRY_RUN" -eq 1 ]; then
       log "[dry-run] WOULD post report message: $line"
     else
@@ -249,72 +274,72 @@ run_report_pass() {
   if [ "$DRY_RUN" -eq 1 ]; then
     rm -f "$work_state" 2>/dev/null || true
   elif [ "$all_ok" -eq 1 ]; then
-    mv -f "$work_state" "$REPORT_STATE_FILE" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true
+    mv -f "$work_state" "$state_file" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true
   else
-    log "report: a Discord POST failed this pass -- discarding advanced state so the next pass re-emits"
+    log "$VENUE report: a Discord POST failed this pass -- discarding advanced state so the next pass re-emits"
     rm -f "$work_state" 2>/dev/null || true
   fi
 }
 
 # ── one leg's confirm/throttle/alert pass -- reused for BOTH "watchdog" and "vlc" ───────────────
+# issue 1441: per VENUE -- state keys `<venue>_<leg>_*`, dedup key `avsync-<venue>-heartbeat-<leg>`.
 process_leg() {
-  local leg="$1" epoch="$2" now epoch_display wedged prev_confirm decision confirm act
+  local leg="$1" epoch="$2" now epoch_display wedged prev_confirm decision confirm act key
+  key="${VENUE}_${leg}"
   now="$(date +%s)"
   wedged=0
   if avsync_heartbeat_is_stale "$epoch" "$now" "$STALE_S"; then wedged=1; fi
   epoch_display="${epoch:-<none>}"
-  log "$leg: last_heartbeat_epoch=$epoch_display now=$now stale_s=$STALE_S wedged=$wedged"
+  log "$VENUE $leg: last_heartbeat_epoch=$epoch_display now=$now stale_s=$STALE_S wedged=$wedged"
 
-  prev_confirm="$(read_state_field "${leg}_confirm" 0)"
+  prev_confirm="$(read_state_field "${key}_confirm" 0)"
   decision="$(obs_watchdog_confirm "$prev_confirm" "$wedged" "$CONFIRM_THRESHOLD")"
   confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
   act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
-  write_state_field "${leg}_confirm" "${confirm:-0}"
-  log "$leg: confirm=$prev_confirm -> $confirm act=$act"
+  write_state_field "${key}_confirm" "${confirm:-0}"
+  log "$VENUE $leg: confirm=$prev_confirm -> $confirm act=$act"
 
   if [ "$wedged" -eq 0 ]; then
-    write_state_field "${leg}_alert_sig" ""
-    write_state_field "${leg}_alert_passes" 0
+    write_state_field "${key}_alert_sig" ""
+    write_state_field "${key}_alert_passes" 0
     return 0
   fi
   [ "${act:-0}" = "1" ] || return 0
 
   local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
   current_sig="${leg}:stale"
-  prior_sig="$(read_state_field "${leg}_alert_sig" "")"
-  prior_passes="$(read_state_field "${leg}_alert_passes" 0)"
+  prior_sig="$(read_state_field "${key}_alert_sig" "")"
+  prior_passes="$(read_state_field "${key}_alert_passes" 0)"
   throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
   alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
   new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
   new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
-  write_state_field "${leg}_alert_sig" "$new_sig"
-  write_state_field "${leg}_alert_passes" "$new_passes"
+  write_state_field "${key}_alert_sig" "$new_sig"
+  write_state_field "${key}_alert_passes" "$new_passes"
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD alert: $leg heartbeat CONFIRMED stale (last=$epoch_display) alert_now=$alert_now"
+    log "[dry-run] WOULD alert: $VENUE $leg heartbeat CONFIRMED stale (last=$epoch_display) alert_now=$alert_now"
     return 0
   fi
 
   if [ "${alert_now:-0}" = "1" ]; then
-    log "ALERT: firing Discord notification for $leg"
+    log "ALERT: firing Discord notification for $VENUE $leg"
     python3 "$NOTIFY" notify --body \
-      "🚨 A/V-sync monitor ($REPO_SLUG): heartbeat vetvy $leg na stream-boxe je STARÝ (naposledy=${epoch_display}, limit=${STALE_S}s) — monitorovanie A/V-sync/VLC na stream-boxe zrejme spadlo. Rieši Claude automaticky, ty nemusíš nič robiť." \
-      --dedup-key "$(watchdog_notify_key "avsync-heartbeat-$leg" "$(date +%s)")" \
+      "🚨 A/V-sync monitor [${VENUE_LABEL}] ($REPO_SLUG): heartbeat vetvy $leg merania streamu ${VENUE_LABEL} (${VENUE_BOX}) je STARÝ (naposledy=${epoch_display}, limit=${STALE_S}s) — meranie A/V-sync pre ${VENUE_LABEL} zrejme spadlo. Rieši Claude automaticky, ty nemusíš nič robiť." \
+      --dedup-key "$(watchdog_notify_key "avsync-${VENUE}-heartbeat-$leg" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
-    log "ALERT: suppressed by throttle for $leg (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
+    log "ALERT: suppressed by throttle for $VENUE $leg (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
   fi
 }
 
-# ── main pass ────────────────────────────────────────────────────────────────
-main() {
-  log "pass start (dry_run=$DRY_RUN, stale_s=$STALE_S, threshold=$CONFIRM_THRESHOLD)"
-
+# ── one venue's pass: its heartbeat legs + its report ───────────────────────
+run_venue_pass() {
   measure
   if [ -z "${PROBE_OUT:-}" ]; then
     # #1331: the heartbeat legs have nothing to decide, but the report pass is INDEPENDENT (its own
     # fetch), so we skip only the legs here -- never the report.
-    log "ERROR: no probe output from stream box (ssh/connectivity failure) -- skipping heartbeat legs this pass"
+    log "ERROR: $VENUE: no probe output (ssh/connectivity failure) -- skipping its heartbeat legs this pass"
   else
     local watchdog_segment vlc_segment watchdog_epoch vlc_epoch
     watchdog_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" watchdog)"
@@ -329,13 +354,33 @@ main() {
     if avsync_heartbeat_has_vlc_leg; then
       process_leg "vlc" "$vlc_epoch"
     else
-      log "vlc: skipped (host=$(avsync_heartbeat_host) has no VLC-monitor heartbeat leg)"
+      log "$VENUE vlc: skipped (host=$(avsync_heartbeat_host) has no VLC-monitor heartbeat leg)"
     fi
   fi
 
   # #1331: the verified-A/V SESSION report (replaces the raw one-clip forward). Independent fetch,
   # always run regardless of the heartbeat-leg outcome above.
   run_report_pass
+}
+
+# ── main pass: every venue of the table (issue 1441) ────────────────────────
+main() {
+  log "pass start (dry_run=$DRY_RUN, stale_s=$STALE_S, threshold=$CONFIRM_THRESHOLD)"
+
+  local venues
+  venues="$(avsync_watchdog_venues "$(avsync_heartbeat_host)")"
+  [ -n "$venues" ] || log "ERROR: no venue to watch (the venue table is empty or AVSYNC_VENUES names none)"
+  for VENUE in $venues; do
+    VENUE_LABEL="$(avsync_venue_label "$VENUE")"
+    VENUE_BOX="$(avsync_venue_box "$VENUE")" || { log "ERROR: $VENUE: no stream box in the venue table -- skipped"; continue; }
+    # issue 1001 doctrine: a venue whose stream box is away (a traveling box, not home) is AWAY --
+    # nothing is read and nothing pages; its state is left as it is for when the box returns.
+    if ! obs_fleet_poll_now "$VENUE_BOX"; then
+      log "$VENUE: AWAY (stream box $VENUE_BOX is not home) -- skipped, never a page"
+      continue
+    fi
+    run_venue_pass
+  done
 
   log "pass end"
 }

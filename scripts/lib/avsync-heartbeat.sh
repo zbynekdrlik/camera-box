@@ -130,12 +130,15 @@ avsync_heartbeat_linux_probe_cmd() {
   printf 'cat "%s" 2>/dev/null; echo "%s"' "$watchdog_path" "$AVSYNC_HB_SEP"
 }
 
-# avsync_heartbeat_remote_cmd [HOST] -> the remote read command string for the selected HOST:
-# dev2 -> the Linux `cat` probe above; stream -> the existing Windows `type` probe (both files).
+# avsync_heartbeat_remote_cmd [HOST] [DEV2_PATH] -> the remote read command string for the selected
+# HOST: dev2 -> the Linux `cat` probe above (of DEV2_PATH when given -- issue 1441: each venue's own
+# heartbeat file -- else the default path); stream -> the existing Windows `type` probe (both files).
 avsync_heartbeat_remote_cmd() {
-  local host="${1:-$(avsync_heartbeat_host)}"
+  local host="${1:-$(avsync_heartbeat_host)}" dev2_path="${2:-}"
   case "$host" in
-    dev2)   avsync_heartbeat_linux_probe_cmd ;;
+    dev2)
+      if [ -n "$dev2_path" ]; then avsync_heartbeat_linux_probe_cmd "$dev2_path"; else avsync_heartbeat_linux_probe_cmd; fi
+      ;;
     stream) avsync_heartbeat_probe_cmd ;;
     *) return 1 ;;
   esac
