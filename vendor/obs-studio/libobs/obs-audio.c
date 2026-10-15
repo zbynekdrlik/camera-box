@@ -736,7 +736,7 @@ static void audio_stall_copy_name(char *name, size_t name_size, const char *src)
 {
 	snprintf(name, name_size, "%s", src ? src : "");
 	for (char *c = name; *c; c++) {
-		if ((unsigned char)*c < 0x20)
+		if ((unsigned char)*c < 0x20 || (unsigned char)*c == 0x7f)
 			*c = '?';
 	}
 }
