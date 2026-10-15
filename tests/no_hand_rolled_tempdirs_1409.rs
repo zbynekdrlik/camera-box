@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// Files allowed to keep a pid-named temp path, as `"<file under tests/>: <why it does not leak>"`.
 const ALLOWLIST: &[&str] = &[
+    "audio_stall_out_1381.rs: a Drop guard removes the pid + counter dir",
     "aux_sender_budget_879.rs: every workdir() caller removes it at the end",
     "av_run_recording_1404.rs: the test removes its dir at the end",
     "av_stack_update.rs: each test removes its temp README",

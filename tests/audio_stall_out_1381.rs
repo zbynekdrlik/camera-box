@@ -113,7 +113,8 @@ fn harness_trace() -> &'static Vec<String> {
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         );
-        let dir = std::env::temp_dir().join(&tag);
+        let scratch = Scratch(std::env::temp_dir().join(&tag));
+        let dir = scratch.0.clone();
         fs::create_dir_all(&dir).expect("issue 1381: scratch dir");
         let c = dir.join("harness.c");
         let bin = dir.join("harness");
@@ -138,7 +139,7 @@ fn harness_trace() -> &'static Vec<String> {
         let run = Command::new(&bin)
             .output()
             .expect("issue 1381: run the harness");
-        let _ = fs::remove_dir_all(&dir);
+        drop(scratch);
         assert!(
             run.status.success(),
             "issue 1381: the harness failed: {}",
@@ -367,4 +368,14 @@ fn the_per_tick_measurement_never_allocates_logs_or_takes_a_new_lock_1381() {
     assert!(h.contains(
         "void audio_output_take_stall_stats(audio_t *audio, struct audio_output_stall_stats *stats);"
     ));
+}
+
+/// The pid + counter scratch dir of one harness build, removed on every exit path (a failed
+/// compile assert included), so the gate never leaves a dir in the temp dir (issue 1409).
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
