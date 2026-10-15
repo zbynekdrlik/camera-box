@@ -97,8 +97,15 @@ def test_install_writes_nothing_on_a_box_without_an_isolated_core(tmp_path):
 
 # --- the verdict --------------------------------------------------------------------------------
 
-def _block(dropin: str | None = "0,1", pid1="0-1", online="0-3", iso="3", done=True) -> str:
+def _block(dropin: str | None = "0,1", pid1="0-1", online="0-3", iso="3", done=True,
+           irq_dropin="1", default_aff="3", sample_done=True) -> str:
     lines = [f"ONLINE={online}", f"ISOLATED={iso}", f"PID1={pid1}"]
+    if irq_dropin is not None:
+        lines.append(f"IRQ_DROPIN={irq_dropin}")
+    if default_aff is not None:
+        lines.append(f"DEFAULT_AFF={default_aff}")
+    if sample_done:
+        lines.append("IRQ_SAMPLE_DONE=1")
     if dropin is None:
         lines.append("DROPIN_PRESENT=0")
     else:
@@ -368,7 +375,7 @@ def test_verify_fails_a_dropin_without_its_final_newline(tmp_path):
 # IRQ=<n> <capture flag> <smp_affinity_list> <per-cpu interrupt deltas over a 2 s sample>
 
 def test_verify_fails_another_device_irq_that_fired_on_the_reserved_core():
-    block = _block() + "IRQ=129 1 2 0,0,5000,0\nIRQ=135 0 0-2 0,0,4210,0\nIRQ=136 0 0-2 3,0,0,0\n"
+    block = _block() + "IRQ=129 1 2 0:0,1:0,2:5000,3:0\nIRQ=135 0 0-2 0:0,1:0,2:4210,3:0\nIRQ=136 0 0-2 0:3,1:0,2:0,3:0\n"
     v = _verdict(block)
     assert v.startswith("FAIL: ") and "IRQ 135" in v and "IRQ 136" not in v, v
     assert "4210" in v
@@ -376,7 +383,7 @@ def test_verify_fails_another_device_irq_that_fired_on_the_reserved_core():
 
 def test_verify_ignores_idle_irqs_and_the_capture_irq_on_the_reserved_core():
     # an idle IRQ allowed on the reserved core (i8042, a per-cpu wifi queue) never fires there
-    block = _block() + "IRQ=1 0 0-2 0,0,0,0\nIRQ=141 0 2 0,0,0,0\nIRQ=129 1 2 0,0,5000,0\nIRQ=135 0 0-1 900,0,0,0\n"
+    block = _block() + "IRQ=1 0 0-2 0:0,1:0,2:0,3:0\nIRQ=141 0 2 0:0,1:0,2:0,3:0\nIRQ=129 1 2 0:0,1:0,2:5000,3:0\nIRQ=135 0 0-1 0:900,1:0,2:0,3:0\n"
     assert _verdict(block) == "ok\n"
 
 
@@ -385,21 +392,23 @@ def test_the_real_gather_lists_the_irqs_with_flag_affinity_and_deltas():
     out = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, timeout=30).stdout
     irq_lines = [l for l in out.splitlines() if l.startswith("IRQ=")]
     assert irq_lines, out
-    ncpu = os.cpu_count()
+    assert "IRQ_SAMPLE_DONE=1" in out.splitlines()
+    assert any(l.startswith("DEFAULT_AFF=") for l in out.splitlines()), out
+    online = os.sched_getaffinity(0) | set(range(os.cpu_count() or 1))
     for l in irq_lines:
         n, flag, aff, deltas = l[4:].split(" ")
-        assert n.isdigit() and flag in ("0", "1")
-        ds = deltas.split(",")
-        assert len(ds) == ncpu and all(d.isdigit() for d in ds), l
+        assert n.isdigit() and flag in ("0", "1") and aff, l
+        pairs = [d.split(":") for d in deltas.split(",")]
+        assert all(c.isdigit() and x.isdigit() and int(c) in online for c, x in pairs), l
 
 
 # --- the fleet unit never ran the IRQ split: the irq-affinity drop-in ------------------------------
 
-def test_the_irq_affinity_dropin_runs_the_irq_setup_with_proc_irq_writable():
+def test_the_irq_affinity_dropin_runs_the_irq_setup_outside_the_unit_sandbox():
     body = _bash("cambox_hk_irq_dropin_content").stdout
     assert "[Service]\n" in body
-    assert "ExecStartPre=-/usr/local/bin/camera-box --setup-irq-affinity\n" in body
-    assert "ReadWritePaths=/proc/irq\n" in body
+    assert "ExecStartPre=-+/usr/local/bin/camera-box --setup-irq-affinity\n" in body
+    assert "ReadWritePaths" not in body
 
 
 def test_setup_device_writes_the_irq_affinity_dropin_in_step_7():
@@ -409,9 +418,9 @@ def test_setup_device_writes_the_irq_affinity_dropin_in_step_7():
 
 
 def test_verify_fails_a_box_whose_camera_box_unit_lacks_the_irq_setup():
-    v = _verdict(_block() + "IRQ_DROPIN=0\n")
+    v = _verdict(_block(irq_dropin="0"))
     assert v.startswith("FAIL: ") and "--setup-irq-affinity" in v
-    assert _verdict(_block() + "IRQ_DROPIN=1\n") == "ok\n"
+    assert _verdict(_block(irq_dropin="1")) == "ok\n"
 
 
 def test_the_live_apply_writes_the_irq_dropin_and_reloads(tmp_path):
@@ -432,3 +441,141 @@ def test_the_live_apply_writes_the_irq_dropin_and_reloads(tmp_path):
     text = log.read_text()
     assert "remount,rw" in text and "systemctl daemon-reload" in text
     assert text.index("remount,ro") < text.index("systemctl daemon-reload")
+
+
+# --- review round (issue 1367): every IRQ facet fails closed --------------------------------------
+
+def test_verify_fails_a_gather_without_the_irq_facets():
+    v = _verdict(_block(irq_dropin=None))
+    assert v.startswith("FAIL: ") and "IRQ_DROPIN" in v, v
+    v = _verdict(_block(sample_done=False))
+    assert v.startswith("FAIL: ") and "interrupt sample" in v, v
+    v = _verdict(_block(default_aff=None))
+    assert v.startswith("FAIL: ") and "default_smp_affinity" in v, v
+
+
+def test_verify_fails_an_irq_dropin_that_runs_inside_the_unit_sandbox():
+    v = _verdict(_block(irq_dropin="2"))
+    assert v.startswith("FAIL: ") and "sandbox" in v, v
+
+
+def test_verify_fails_a_default_irq_affinity_that_includes_the_reserved_core():
+    v = _verdict(_block(default_aff="7"))
+    assert v.startswith("FAIL: ") and "default_smp_affinity" in v and "core 2" in v, v
+    assert _verdict(_block(default_aff="00000003")) == "ok\n"
+    # a core above 31 sits in its own comma group
+    v = _verdict(_block(online="0-35", iso="35", pid1="0-33", dropin="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33",
+                        default_aff="4,00000001"))
+    assert "default_smp_affinity" in v and "core 34" in v, v
+
+
+def test_verify_grades_the_irq_dropin_on_a_box_without_a_reserved_core():
+    assert _verdict(_block(dropin=None, iso="")).startswith("ok-none: ")
+    v = _verdict(_block(dropin=None, iso="", irq_dropin="0"))
+    assert v.startswith("FAIL: ") and "--setup-irq-affinity" in v, v
+
+
+def test_an_irq_whose_affinity_could_not_be_read_still_counts_its_interrupts():
+    v = _verdict(_block() + "IRQ=135 0 - 0:0,1:0,2:4210,3:0\n")
+    assert "IRQ 135" in v and "4210" in v, v
+
+
+def test_the_deltas_follow_the_header_cpu_labels_not_the_column_index():
+    # cpu1 offline: the columns are CPU0 CPU2 CPU3, so the reserved core 2 is the SECOND column
+    v = _verdict(_block(online="0,2-3") + "IRQ=135 0 0,2 0:0,2:4210,3:0\n")
+    assert "IRQ 135" in v, v
+
+
+def test_verify_and_rust_pick_the_same_reserved_core_with_two_isolated_cores():
+    # affinity.rs: capture = the highest isolated core (3), reserved = the highest other core (2)
+    r = _bash('cambox_hk_reserved_core "$1" "$2"', "0-3", "2-3")
+    assert r.stdout.strip() == "2", r.stdout + r.stderr
+    # housekeeping = online - every isolated core - the reserved core
+    r = _bash('cambox_hk_cpus "$1" "$2" || echo rc=$?', "0-3", "2-3")
+    assert r.stdout.strip() == "0,1", r.stdout + r.stderr
+
+
+def _fake_systemctl(tmp_path, show: str):
+    b = tmp_path / "sbin"
+    b.mkdir(exist_ok=True)
+    out = tmp_path / "show.txt"
+    out.write_text(show)
+    (b / "systemctl").write_text(f'#!/bin/bash\n[ "$1" = show ] && cat {out}\nexit 0\n')
+    (b / "systemctl").chmod(0o755)
+    return b
+
+
+def _gather_irq_dropin(tmp_path, show: str) -> str:
+    b = _fake_systemctl(tmp_path, show)
+    snippet = _bash("cambox_hk_gather_remote_snippet", env={"CAMBOX_HK_IRQ_SAMPLE_S": "0"}).stdout
+    out = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, timeout=30,
+                         env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}")).stdout
+    return next(l for l in out.splitlines() if l.startswith("IRQ_DROPIN="))
+
+
+def test_the_gather_reads_the_loaded_unit_for_the_irq_setup(tmp_path):
+    pre = ("ExecStartPreEx={ path=/usr/local/bin/camera-box-free-capture-device.sh ; argv[]=/usr/local/bin/camera-box-free-capture-device.sh ; flags=ignore-failure ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }"
+           " ; { path=/usr/local/bin/camera-box ; argv[]=/usr/local/bin/camera-box --setup-irq-affinity ; flags=ignore-failure privileged ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\n")
+    assert _gather_irq_dropin(tmp_path, pre + "ReadWritePaths=/dev /sys /run\n") == "IRQ_DROPIN=1"
+    # loaded without '+' and without a /proc/irq grant: the write would fail EROFS
+    sandboxed = pre.replace("flags=ignore-failure privileged", "flags=ignore-failure")
+    assert _gather_irq_dropin(tmp_path, sandboxed + "ReadWritePaths=/dev /sys /run\n") == "IRQ_DROPIN=2"
+    assert _gather_irq_dropin(tmp_path, sandboxed + "ReadWritePaths=/dev /sys /run /proc/irq\n") == "IRQ_DROPIN=1"
+    # the file on disk but no daemon-reload yet, or an empty ExecStartPre= reset: not loaded
+    only_free = pre.split(" ; { path=/usr/local/bin/camera-box ;")[0] + "\n"
+    assert _gather_irq_dropin(tmp_path, only_free + "ReadWritePaths=/dev /sys /run\n") == "IRQ_DROPIN=0"
+
+
+def _apply_env(tmp_path, proc, dropin, irq, sys_dir=None):
+    return {"CAMBOX_HK_DROPIN": str(dropin), "CAMBOX_HK_SYS": str(sys_dir or _sys(tmp_path)),
+            "CAMBOX_HK_PROC": str(proc), "CAMBOX_HK_IRQ_DROPIN": str(irq)}
+
+
+def _run_prog(b, env):
+    prog = _bash("cambox_hk_apply_program", env=env).stdout
+    return subprocess.run(["bash", "-s"], input=prog, capture_output=True, text=True, timeout=60,
+                          env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
+
+
+def test_a_failed_irq_dropin_write_closes_the_window_and_never_reloads(tmp_path):
+    b, log, proc = _stubs(tmp_path)
+    (proc / "1" / "status").write_text("Name:\tsystemd\nCpus_allowed_list:\t0-1\n")
+    dropin = tmp_path / "d.conf"
+    dropin.write_text(_bash('cambox_hk_dropin_content "$1"', "0,1").stdout)
+    blocker = tmp_path / "notadir"
+    blocker.write_text("x")
+    r = _run_prog(b, _apply_env(tmp_path, proc, dropin, blocker / "irq.conf"))
+    assert r.returncode != 0
+    assert "could not write" in r.stderr
+    text = log.read_text()
+    assert "remount,rw" in text and "remount,ro" in text
+    assert "daemon-reload" not in text
+
+
+def test_a_failed_daemon_reload_fails_the_apply(tmp_path):
+    b, log, proc = _stubs(tmp_path)
+    (b / "systemctl").write_text(f'#!/bin/bash\necho "systemctl $*" >>{log}\nexit 1\n')
+    (proc / "1" / "status").write_text("Name:\tsystemd\nCpus_allowed_list:\t0-1\n")
+    dropin = tmp_path / "d.conf"
+    dropin.write_text(_bash('cambox_hk_dropin_content "$1"', "0,1").stdout)
+    r = _run_prog(b, _apply_env(tmp_path, proc, dropin, tmp_path / "irq.conf"))
+    assert r.returncode != 0
+    assert "daemon-reload failed" in r.stderr
+
+
+def test_a_box_without_a_reserved_core_still_gets_the_irq_dropin(tmp_path):
+    b, log, proc = _stubs(tmp_path)
+    irq = tmp_path / "irq.conf"
+    r = _run_prog(b, _apply_env(tmp_path, proc, tmp_path / "absent.conf", irq,
+                                sys_dir=_sys(tmp_path, isolated="")))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert irq.read_text() == _bash("cambox_hk_irq_dropin_content").stdout
+    text = log.read_text()
+    assert text.index("remount,ro") < text.index("systemctl daemon-reload")
+    assert "taskset" not in text
+    assert "irq drop-in write" in r.stdout
+
+
+def test_the_plan_line_names_the_irq_dropin(tmp_path):
+    r, _dropin, _log = _apply(tmp_path)
+    assert "irq drop-in in-place" in r.stdout, r.stdout
