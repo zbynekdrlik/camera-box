@@ -46,6 +46,10 @@ _avsync_venues_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AVSYNC_RTMP_PORT="${AVSYNC_RTMP_PORT:-1234}"
 AVSYNC_RTMP_APP="${AVSYNC_RTMP_APP:-live}"
 
+# The table cache (avsync_venue_table_load) is filled ONLY in this process: anything inherited from the
+# environment is dropped here, so an unvalidated row can never pose as a cached one.
+unset _AVSYNC_VENUE_ROWS _AVSYNC_VENUE_ROWS_KEY
+
 # The declared Windows stream boxes with no fact file (`venue|box|key`, one per line).
 AVSYNC_DECLARED_STREAM_VENUES="snv|stream-snv|obs-e2e-test"
 

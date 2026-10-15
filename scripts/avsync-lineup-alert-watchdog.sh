@@ -442,6 +442,15 @@ run_preflight_assert() {
     ''|*[!0-9]*) http_json="null" ;;
     *) http_json="$http" ;;
   esac
+  # a table that lost a venue (or selects none) can never be GO: the pre-event check must not pass on
+  # the venues that are left while one goes unwatched (issue 1441 review round 2)
+  local problem
+  problem="$(avsync_venue_table_problem "$(avsync_heartbeat_host)")"
+  if [ -n "$problem" ]; then
+    printf 'NO-GO: venue table -- %s\n' "$problem"
+    fire_notify "🚨 avsync-lineup PRE-EVENT NO-GO: tabuľka miest merania lipsync je neúplná -- ${problem} (${REPO_SLUG})." "avsync-venue-table-preflight-nogo"
+    rc_all=1
+  fi
   venues="$(home_venues)"
   for v in $venues; do
     select_venue "$v" || { rc_all=1; continue; }

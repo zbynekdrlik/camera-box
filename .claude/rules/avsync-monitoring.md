@@ -656,6 +656,8 @@ venue's stream, SNV and PP today, from ONE table.
   or (with no `AVSYNC_VENUES` narrowing) no legacy-venue row. The heartbeat watchdog pages it once
   under the stable key `avsync-venue-table`; the lineup watchdog only logs it. A production-critical
   alarm never fails open by silently watching nothing.
+  The lineup `--assert` is NO-GO on a table problem (review round 2: never GO on the venues left
+  while one goes unwatched). The table cache is never inherited: sourcing the lib unsets it.
 - **The legacy venue falls back to the old single files on dev2:** its heartbeat read is
   `{ cat <per-venue> || cat ~/.camera-box/avsync-watchdog-heartbeat.txt; }`
   (`avsync_venue_dev2_legacy_heartbeat_remote_path`), and its report reads the old
