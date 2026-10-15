@@ -6,8 +6,11 @@ so restreamer's own restart found the lease held and failed.
 The gate must:
 - admit a run only after strih + stream have read idle CONTINUOUSLY for the idle hold (60 s, read
   every 5 s = 13 reads), never on a single idle read;
-- not hold the rig lease while a box is streaming (a foreign broadcast in progress), and not during
-  the idle hold either -- the lease is taken only after the hold, with one final idle read under it.
+- not hold the rig lease while a box is streaming (a foreign broadcast in progress);
+- HOLD the lease through the idle hold (issue 1432, ROZHODNUTÉ 6182938785): every restreamer
+  stream-lan job now takes the lease itself for its whole job (restreamer PR 400), so a republish gap
+  happens under restreamer's lease; releasing during the hold let restreamer's NEXT job take the rig
+  and starved the release E2E (run 38667117544).
 
 The fake obs_phase2.py serves a scripted sequence of rig-busy-check answers (the last one repeats)
 and records, per call, whether the lease holder file existed at that moment.
@@ -98,16 +101,25 @@ class IdleHold1404(unittest.TestCase):
         # 13 hold reads (60 s / 5 s + 1) plus the final read under the lease
         self.assertGreaterEqual(idle_reads, 14, calls)
 
-    def test_the_lease_is_not_held_while_a_box_streams_nor_during_the_idle_hold(self):
-        r, calls, _ = run_gate([STREAMING, STREAMING, IDLE], iterations=4)
+    def test_the_lease_is_not_held_while_a_box_streams_but_is_held_through_the_idle_hold(self):
+        r, calls, held = run_gate([STREAMING, STREAMING, IDLE], iterations=4)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # the very first read may run under the initial lease (fail-fast acquire, issue 830);
-        # every later streaming read and every idle-hold read must see the lease free,
-        # and only the final admission read runs under it
-        later = calls[1:-1]
-        self.assertTrue(later, calls)
-        self.assertTrue(all(c[0] == "0" for c in later), calls)
-        self.assertEqual(calls[-1], ["1", "idle"], calls)
+        # the later streaming read sees it released (a foreign broadcast in progress)
+        self.assertEqual(calls[1], ["0", "busy"], calls)
+        # issue 1432: from the first idle read on, the lease is held -- the whole idle hold and the
+        # final admission read run under it, so no other holder can take the rig in between
+        idle = calls[2:]
+        self.assertGreaterEqual(len(idle), 14, calls)
+        self.assertTrue(all(c == ["1", "idle"] for c in idle), calls)
+        self.assertTrue(held)
+
+    def test_an_idle_first_read_keeps_the_initial_lease_through_the_hold(self):
+        r, calls, held = run_gate([IDLE], iterations=2)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue(all(c[0] == "1" for c in calls), calls)
+        self.assertNotIn("releasing", r.stdout)
+        self.assertTrue(held)
 
 
 if __name__ == "__main__":
