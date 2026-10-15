@@ -60,8 +60,13 @@ print(json.dumps(answer))
 '''
 
 
+# One parent dir for every run of this module, removed when the interpreter exits (its finalizer),
+# so the test leaves nothing in /tmp (issue 1409: 174 rbg1404-* dirs had piled up).
+_BASE = tempfile.TemporaryDirectory(prefix="rbg1404-")
+
+
 def run_gate(seq, iterations=3, extra_env=None):
-    d = tempfile.mkdtemp(prefix="rbg1404-")
+    d = tempfile.mkdtemp(dir=_BASE.name)
     fake = os.path.join(d, "obs_phase2.py")
     with open(fake, "w") as f:
         f.write(FAKE)
