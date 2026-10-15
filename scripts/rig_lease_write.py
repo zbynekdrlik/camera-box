@@ -226,7 +226,8 @@ def release(lease_dir: str, body: dict) -> Reply:
     holder = _owned_holder(lease_dir, body)
     if holder is None:
         return Reply(200, {"released": False})
-    r = _bash(lease_dir, 'rig_lease_release "$@"', [str(holder.get("run_id", ""))])
+    r = _bash(lease_dir, 'rig_lease_release "$@"',
+              [str(holder.get("run_id", "")), str(holder.get("lease_id", ""))])
     if r.returncode != 0:
         raise Reply(503, {"error": "lease_io", "detail": "release rc=%d" % r.returncode})
     still = _read_holder(lease_dir)
@@ -251,3 +252,5 @@ def handle(path: str, auth_header: str | None, raw_body: bytes | None, lease_dir
         return release(lease_dir, body)
     except Reply as reply:
         return reply
+    except Exception as exc:  # an unreadable token file, an undecodable bash answer
+        return Reply(503, {"error": "lease_io", "detail": type(exc).__name__})

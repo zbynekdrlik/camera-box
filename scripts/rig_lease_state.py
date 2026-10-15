@@ -56,6 +56,12 @@ SCHEMA_VERSION = 1
 # the number a third time; see test_rig_lease_state_1277.py::test_default_stale_secs_matches_rig_busy_gate_sh.
 DEFAULT_STALE_SECS = 5400
 
+# issue 1432: a lockdir with no holder.json is an acquire in progress (mkdir done, holder.json not
+# yet written) for a few ms, and a crashed acquire's leftover after that. It is reclaimable only once
+# the lockdir is this many seconds old -- mirrors RIG_LEASE_NOHOLDER_GRACE_SECS in
+# scripts/lib/rig-lease.sh (pinned equal by test_rig_lease_write_1432.py).
+NO_HOLDER_GRACE_SECS = 10
+
 
 def format_ts(dt: datetime) -> str:
     """Render a datetime as the same Z-suffixed UTC string rig-lease.sh writes/expects."""
@@ -133,6 +139,16 @@ def holder_stale_secs(holder_data, default: int) -> int:
     return default
 
 
+def _no_holder_grace_expired(lease_dir: str, now: datetime) -> bool:
+    """True when a holderless lockdir is older than NO_HOLDER_GRACE_SECS (or its age cannot be
+    read: a crashed acquire must stay reclaimable)."""
+    try:
+        mtime = os.stat(lease_dir).st_mtime
+    except OSError:
+        return True
+    return (_aware(now).timestamp() - mtime) >= NO_HOLDER_GRACE_SECS
+
+
 def fail_closed_state(now: datetime) -> dict:
     """The shape scripts/rig-lease-server.py serves when lease_state() itself raises (should never
     happen -- it is pure and catches its own I/O errors -- but a request handler must NEVER 500 on
@@ -173,6 +189,11 @@ def lease_state(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_S
     result["heartbeat_age_s"] = age
 
     holder_exists, holder_data = _read_holder(lease_dir)
+
+    if not holder_exists and not _no_holder_grace_expired(lease_dir, now):
+        # issue 1432: an acquire in progress -- held, holder not written yet, never reclaimable.
+        result["stale"] = False
+        return result
 
     if not holder_exists:
         # Mirrors `[ -f "$path" ] || return 0` -- an absent holder.json is unconditionally

@@ -211,12 +211,35 @@ rig_lease_holder_run_status() {
 rig_lease_is_stale() {
   local stale_secs="${1:-5400}"
   local path; path="$(rig_lease_holder_path)"
-  [ -f "$path" ] || return 0
+  if [ ! -f "$path" ]; then
+    # issue 1432: a lockdir with no holder.json is an acquire in progress for a few ms (mkdir done,
+    # holder.json not yet written), and a crashed acquire's leftover after that. Reclaimable only
+    # once the lockdir is RIG_LEASE_NOHOLDER_GRACE_SECS old, or a second acquirer (the dev1 HTTP
+    # route for a remote holder) steals a lease the first one already reported as ACQUIRED.
+    # Mirrors rig_lease_state.NO_HOLDER_GRACE_SECS.
+    local grace="${RIG_LEASE_NOHOLDER_GRACE_SECS:-10}" dmtime now
+    case "$grace" in "" | *[!0123456789]*) grace=10 ;; esac
+    dmtime="$(stat -c %Y "$(rig_lease_dir)" 2>/dev/null)" || return 0
+    now="$(date +%s)"
+    [ "$((now - dmtime))" -ge "$grace" ] && return 0
+    return 1
+  fi
 
   # issue 1432: a holder may declare its own threshold (`stale_secs` in holder.json; the HTTP write
-  # routes write 180 for a remote holder beating every 30 s). Only a positive ASCII integer counts;
-  # anything else keeps the caller's threshold. Mirrors rig_lease_state.holder_stale_secs.
-  local own; own="$(rig_lease_read_holder_field stale_secs)"
+  # routes write 180 for a remote holder beating every 30 s). Only a positive JSON integer counts
+  # (a JSON string "180" does not, like rig_lease_state.holder_stale_secs); anything else keeps the
+  # caller's threshold.
+  local own
+  own="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        v = json.load(f).get("stale_secs")
+    if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+        print(v)
+except Exception:
+    pass
+' "$path" 2>/dev/null)" || own=""
   case "$own" in
     "" | 0* | *[!0123456789]*) ;;
     *) stale_secs="$own" ;;
@@ -410,18 +433,23 @@ rig_lease_sweep_releasing() {
   done
 }
 
-# rig_lease_release <run_id> -> release the lease -- ONLY if RUN_ID is still its current holder
-# (never destroys a DIFFERENT, later holder's lease out from under it -- e.g. a run that lost the
-# acquire race, or one whose lease was already reclaimed as stale by someone else). Idempotent /
+# rig_lease_release <run_id> [<lease_id>] -> release the lease -- ONLY if RUN_ID is still its
+# current holder (never destroys a DIFFERENT, later holder's lease out from under it -- e.g. a run
+# that lost the acquire race, or one whose lease was already reclaimed as stale by someone else).
+# With LEASE_ID (issue 1432, the HTTP holder), the holder's lease_id must match too. Idempotent /
 # safe to call even when the lease dir does not exist.
 rig_lease_release() {
-  local run_id="$1"
+  local run_id="$1" lease_id="${2:-}"
   local d; d="$(rig_lease_dir)"
   rig_lease_sweep_releasing
   [ -d "$d" ] || return 0
   local holder_run_id; holder_run_id="$(rig_lease_read_holder_field run_id)"
   if [ "$holder_run_id" != "$run_id" ]; then
     echo "[rig-lease] NOT releasing -- current holder (run_id=${holder_run_id:-unknown}) is not us (run_id=${run_id}); it must have been reclaimed already." >&2
+    return 0
+  fi
+  if [ -n "$lease_id" ] && [ "$(rig_lease_read_holder_field lease_id)" != "$lease_id" ]; then
+    echo "[rig-lease] NOT releasing -- the holder run_id=${run_id} carries another lease_id; it was re-acquired." >&2
     return 0
   fi
   # ATOMIC teardown (#857): rename the whole lockdir aside in ONE syscall, THEN delete the renamed
