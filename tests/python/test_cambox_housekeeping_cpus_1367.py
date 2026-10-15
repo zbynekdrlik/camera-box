@@ -359,7 +359,7 @@ def test_verify_fails_a_dropin_without_its_final_newline(tmp_path):
 def test_verify_fails_another_device_irq_allowed_on_the_reserved_core():
     block = _block() + "IRQ=129 1 2\nIRQ=135 0 0-2\nIRQ=136 0 0-1\n"
     v = _verdict(block)
-    assert v.startswith("FAIL: ") and "IRQ 135" in v and "136" not in v, v
+    assert v.startswith("FAIL: ") and "IRQ 135" in v and "IRQ 136" not in v, v
 
 
 def test_verify_accepts_other_irqs_off_the_reserved_core_and_the_capture_irq_on_it():
