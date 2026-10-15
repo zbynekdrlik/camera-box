@@ -214,6 +214,10 @@ while left > 0:
     time.sleep(0.002)
 if kind == "stall":
     time.sleep(30)
+if kind == "eofwait":
+    out.flush()
+    os.close(1)  # EOF first (sys.stdout never closes fd 1 itself), the process exits a moment later
+    time.sleep(1.5)
 '''
 
 FAKE_AP = r'''
@@ -784,3 +788,12 @@ def test_the_subscriber_is_stopped_before_aplay_drains(tmp_path):
     assert r.returncode == 0, r.stderr
     assert played == [7680]
     assert (tmp_path / "aplay.out.ff").read_text() == "ffalive=0\n"
+
+
+def test_an_eof_before_ffmpeg_exits_is_a_stream_end_not_a_stall(tmp_path):
+    # found by the real-ffmpeg RTMP smoke: ffmpeg closes stdout a moment before it exits at a stream end
+    r, _calls, played, _st, _e = run_monitor(tmp_path, ff="eofwait:7680")
+    assert r.returncode == 0, r.stderr
+    assert played == [7680]
+    ended = [ln for ln in r.stdout.splitlines() if ln.startswith("stream ended")]
+    assert ended and "ended (ffmpeg rc 0" in ended[0] and "stalled" not in ended[0], ended
