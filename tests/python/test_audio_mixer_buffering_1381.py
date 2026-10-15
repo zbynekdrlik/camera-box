@@ -20,8 +20,9 @@ This slice reads it:
     `audio-buffering-<box>`, recovery a machine-channel log line only.
 
 Two live facts the parser follows (read-only, stream-snv logs of 13.10 and 15.10):
-  * the FIRST #800 line of a session reads `total_buffering=0 ms (ticks=0/45)` (printed in the same
-    millisecond as the floor line, before the first tick), so it is never the start value;
+  * the FIRST #800 line of a session can read `total_buffering=0 ms (ticks=0/45)` (stream-snv: in
+    the same millisecond as the floor line, before the first tick; resolume 14.10 read 85), so it
+    is never the start value;
   * `buffering_source=` on the #800 line reads `-` on every live line, also after a raise.
 
 Tier-0 pytest (no cargo).
@@ -144,6 +145,32 @@ def test_the_newest_floor_line_wins_after_an_audio_reset():
              _t800("16:01:00.000", 92, 4)]
     now, start, _src, _age = bsg.audio_buffering_from_log(_text(lines))
     assert (now, start) == ("92", "92")
+
+
+def test_a_bounded_read_without_a_floor_line_is_unknown_not_a_guess():
+    # Review round 1: without a floor line the first non-zero total of a TAIL is not the session
+    # start -- a raise older than the tail would read 170/170 and grade HEALTHY. Only a whole-file
+    # read may fall back to it.
+    head = ["10:00:00.000: OBS 32.0.0 (64-bit, windows)"]
+    tail = [_t800("12:00:00.000", 170, 8), _t800("12:01:00.000", 170, 8)]
+    now, start, _src, _age = bsg.audio_buffering_from_log(_text(head) + SEP + _text(tail))
+    assert (now, start) == ("170", "")
+
+
+def test_an_800_line_older_than_a_newer_floor_line_is_not_current():
+    # Review round 1: an audio reset prints a new floor line; a #800 total logged BEFORE it is the
+    # previous buffering, never compared with the new start.
+    lines = [FLOOR, _t800("16:00:00.000", 170, 8),
+             FLOOR.replace("15:57:53.164", "16:00:30.000")]
+    assert bsg.audio_buffering_from_log(_text(lines))[:2] == ("", "85")
+    lines.append(_t800("16:01:00.000", 85, 4))
+    assert bsg.audio_buffering_from_log(_text(lines))[:2] == ("85", "85")
+
+
+def test_the_first_minute_of_a_session_is_absent_not_zero():
+    # The session's first #800 line (0 ms, before the first tick) precedes the floor line.
+    lines = [_t800("21:28:27.715", 0, 0), FLOOR.replace("15:57:53.164", "21:28:27.715")]
+    assert bsg.audio_buffering_from_log(_text(lines)) == ("", "", "", "")
 
 
 def test_a_named_800_source_is_used_without_an_above_line():
