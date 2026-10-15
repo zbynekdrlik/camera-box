@@ -116,6 +116,9 @@ the current boot.
   fixed set of files, nothing dropped. No workDirectory, no disk queue. The box's own
   `rsyslog.service` is never touched; when step 16k itself had to install the `rsyslog` package (a
   box with no syslog daemon), the distro unit the package starts is disabled again (review round 1).
+  The `syslog.socket` it pulled in (from the systemd package) stays active with nothing behind it
+  until the next reboot: harmless, journald does not forward to it by default and nothing pulls it
+  at boot (review round 2).
   - **Why a subdirectory of /etc/rsyslog.d:** Ubuntu ENFORCES an AppArmor profile on
     `/usr/sbin/rsyslogd` that reads only `/etc/rsyslog.conf` + `/etc/rsyslog.d/**` and writes
     `/var/log/**` + `/var/spool/rsyslog/**` (dev1, 15.10.2026: `rsyslogd -N1 -f <scratch file>` =
