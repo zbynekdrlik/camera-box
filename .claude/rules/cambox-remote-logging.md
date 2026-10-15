@@ -1,7 +1,10 @@
 ---
 paths:
   - "scripts/lib/remote-logging.sh"
-  - "scripts/dev1-remote-log-install.sh"
+  - "scripts/lib/strih-cambox-log-sink.sh"
+  - "scripts/cambox-ro-units-apply.sh"
+  - "tests/python/test_remote_log_sink_1394.py"
+  - "tests/python/test_strih_cambox_log_sink_1394.py"
   - "tests/harness_remote_logging_1311.rs"
   - "scripts/lib/cambox-ro-units.sh"
 ---
@@ -68,44 +71,18 @@ boot) — chosen over a hard-coded `netconsole=` cmdline.
 writable). A runtime-only cursor is fine — the box dies anyway; on a clean reboot it resumes from
 the current boot.
 
-## dev1 RECEIVER = a SUPERVISOR step (this repo never touches dev1 services)
+## RECEIVER
 
-`scripts/dev1-remote-log-install.sh` is a PURE PLANNER (prints the plan + `--emit <target>` renders
-one config; `--apply` as root is the supervisor's convenience). It stands up:
-
-- **rsyslog imudp on :514** (dev1 already runs `rsyslog.service`; imudp is commented out in the
-  stock `/etc/rsyslog.conf`) → a dedicated `cambox_netconsole` ruleset writing
-  `/var/log/cambox/<src-ip>-kernel.log` (keyed by source IP — netconsole carries no syslog
-  hostname; box↔IP map: `targets.md`) + a logrotate config.
-- **systemd-journal-remote --listen-http on :19532** (plain HTTP — the cambox uploaders use
-  `http://`) → `/var/log/journal/remote/<host>.journal`.
-
-Verify after apply: `ss -lunp | grep :514` (netconsole sink up) and `ss -ltnp | grep :19532`
-(journal sink up).
-
-## MGMT_DEAD correlation aid (#1309/#1311)
-
-When the dante-clock watchdog pages `MGMT_DEAD` / box-down for `<box>`, read the last 5 min of that
-box's off-box logs on dev1 (replace `<ip>`/`<host>` from `targets.md`):
-
-```bash
-# kernel (netconsole): the RFC3339 timestamp is field 1 of each line
-awk -v cutoff="$(date -d '5 minutes ago' '+%Y-%m-%dT%H:%M:%S')" '$1 >= cutoff' /var/log/cambox/<ip>-kernel.log
-# journal (upload):
-journalctl --file /var/log/journal/remote/*<host>*.journal --since '5 minutes ago'
-```
-
-The dev1 installer's default plan (`scripts/dev1-remote-log-install.sh` with no args) prints these
-exact commands.
+(rewritten below by the issue-1394 receiver slice)
 
 ## Tier-0 verification (worktree worker cannot run the sourced-bash Rust harness)
 
-`tests/harness_remote_logging_1311.rs` sources the lib + runs the dev1 installer + static-anchors
-all three provisioners — a worktree-isolated worker CANNOT run it (the isolation guard refuses
+`tests/harness_remote_logging_1311.rs` sources the lib + static-anchors
+the provisioners — a worktree-isolated worker CANNOT run it (the isolation guard refuses
 `bash -c '…source lib…'`, per `ci-testing-gotchas.md`). The local net a worker CAN run:
 `bash -n` + `shellcheck -S warning` on every `.sh`; `bash <scratch-file>` replicas that source the
 lib and call each pure function (mac parser cases, verdict green/fail-closed, generator shapes,
-`bash -n` on the generated on-box setup script); a `--emit`/plan render of the installer; and
+`bash -n` on the generated on-box setup script); and
 `cargo fmt --all --check` (parses the `.rs`). The Rust harness runs at CI / for the supervisor.
 
 ## GOTCHA — network-online.target is INSTANT on a cambox (wait-online is masked), so every network-dependent unit must RETRY or order on systemd-networkd.service (#1311, live on cam2 15.9.2026)

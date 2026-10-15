@@ -543,6 +543,10 @@ if [ -z "$DEVICE_NAME_ARG" ]; then
 fi
 
 resolve_device_name "$DEVICE_NAME_ARG"
+# issue 1394: the off-box log sink = this box's OWN venue strih, from the venue fact files
+# (scripts/lib/remote-logging.sh remote_log_sink_ip), resolved before anything is written.
+REMOTE_LOG_SINK_IP="$(remote_log_sink_ip "$CAMERA_NAME")" \
+    || fail "no venue log sink for ${CAMERA_NAME} -- a strih fact file in scripts/strih-boxes/ must list it in STRIH_CAMERAS (issue 1394)"
 
 case "$RIG_MODE_ARG" in
     test | event) ;;
@@ -1796,26 +1800,28 @@ cambox_hk_install_dropin "" \
 # persistent journal (#1309) dies WITH the stick. Two complementary transports (see
 # scripts/lib/remote-logging.sh): netconsole ships kernel printk over UDP from kernel memory (survives
 # the fs dropping off the bus, the ONLY transport that does), and systemd-journal-upload forwards the
-# rich structured journal to a dev1 sink for the minutes-before-the-drop context. Mirrors the
+# rich structured journal to the sink for the minutes-before-the-drop context. The sink is this box's
+# OWN venue strih ($REMOTE_LOG_SINK_IP, resolved from the venue fact files right after the box name,
+# issue 1394 -- never dev1). Mirrors the
 # mgmt-selfcheck + 17c blocks: writes files + enables, defers to the next reboot (never a live start,
 # per .claude/rules/provisioning-scripts.md). MUST sit in the rw window, BEFORE STEP 18 flips root
-# ro (it writes under /usr/local/sbin + /etc/systemd). The dev1-side receivers are a SEPARATE
-# supervisor step (scripts/dev1-remote-log-install.sh); this cambox side only SENDS -- and netconsole
-# + journal-upload each need no listener to start, so a cambox is correctly provisioned even before
-# the dev1 sink exists. Proven live post-reboot by verify-device.sh's (ak) check.
+# ro (it writes under /usr/local/sbin + /etc/systemd). The receivers live on the venue strih
+# (setup-strih.sh step 16k, scripts/lib/strih-cambox-log-sink.sh); this cambox side only SENDS -- and
+# netconsole + journal-upload each need no listener to start, so a cambox is correctly provisioned
+# even before the sink exists. Proven live post-reboot by verify-device.sh's (ak) check.
 # =============================================================================
 echo ""
 echo -e "${GREEN}[remote-logging] Installing off-box kernel(netconsole)+journal(upload) forensics (#1311)...${NC}"
 # netconsole (kernel path): the boot oneshot + the generated setup script that arms the dynamic
-# configfs target (resolving dev1's next-hop MAC at boot).
+# configfs target (resolving the sink's next-hop MAC at boot).
 mkdir -p "$(dirname "$REMOTE_LOG_NC_SCRIPT_PATH")" "$(dirname "$REMOTE_LOG_NC_SERVICE_PATH")"
-remote_log_netconsole_setup_script_content > "$REMOTE_LOG_NC_SCRIPT_PATH"
+remote_log_netconsole_setup_script_content "$REMOTE_LOG_SINK_IP" > "$REMOTE_LOG_NC_SCRIPT_PATH"
 chmod +x "$REMOTE_LOG_NC_SCRIPT_PATH"
 remote_log_netconsole_service_unit_content > "$REMOTE_LOG_NC_SERVICE_PATH"
 # journal-upload (rich path): the URL conf + the ro-root cursor-redirect drop-in. The
 # systemd-journal-upload.service unit itself ships in the systemd-journal-remote package (STEP 16).
 mkdir -p "$(dirname "$REMOTE_LOG_JU_CONF_PATH")" "$(dirname "$REMOTE_LOG_JU_DROPIN_PATH")"
-remote_log_journal_upload_conf_content > "$REMOTE_LOG_JU_CONF_PATH"
+remote_log_journal_upload_conf_content "$REMOTE_LOG_SINK_IP" > "$REMOTE_LOG_JU_CONF_PATH"
 remote_log_journal_upload_dropin_content > "$REMOTE_LOG_JU_DROPIN_PATH"
 systemctl daemon-reload
 systemctl enable "$REMOTE_LOG_NC_SERVICE_NAME"   # fail-loud (set -e) -- a freshly-written+reloaded unit must enable cleanly
@@ -1825,8 +1831,8 @@ NC_ENABLED_STATE="$(systemctl is-enabled "$REMOTE_LOG_NC_SERVICE_NAME" 2>/dev/nu
 systemctl enable "$REMOTE_LOG_JU_SERVICE_NAME" 2>/dev/null || true
 JU_ENABLED_STATE="$(systemctl is-enabled "$REMOTE_LOG_JU_SERVICE_NAME" 2>/dev/null || true)"
 [ "$JU_ENABLED_STATE" = "enabled" ] \
-    || fail "${REMOTE_LOG_JU_SERVICE_NAME}.service is not enabled (is-enabled='${JU_ENABLED_STATE:-<none>}') after install -- the box would not upload its journal to dev1 (#1311)"
-echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_NETCONSOLE_PORT}) + systemd-journal-upload (-> ${REMOTE_LOG_JOURNAL_URL}) installed + enabled; both apply at next boot, proven live by verify-device.sh (ak)"
+    || fail "${REMOTE_LOG_JU_SERVICE_NAME}.service is not enabled (is-enabled='${JU_ENABLED_STATE:-<none>}') after install -- the box would not upload its journal to its venue strih (#1311)"
+echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_SINK_IP}:${REMOTE_LOG_NETCONSOLE_PORT}) + systemd-journal-upload (-> $(remote_log_journal_url "$REMOTE_LOG_SINK_IP")) installed + enabled; both apply at next boot, proven live by verify-device.sh (ak)"
 
 
 # =============================================================================

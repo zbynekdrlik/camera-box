@@ -20,40 +20,46 @@
 #      memory + the NIC driver. It touches no filesystem and needs no userspace fork, so it keeps
 #      emitting through the exact half-dead state (fs gone, exec dead) that kills everything else —
 #      the ONLY transport that survives the death instant. Configured via the DYNAMIC configfs
-#      target by a boot oneshot that resolves dev1's next-hop MAC at boot (ping -> `ip neigh`), so a
-#      dev1 NIC/MAC change is re-resolved every boot (robust vs a hard-coded `netconsole=` cmdline).
+#      target by a boot oneshot that resolves the sink's next-hop MAC at boot (ping -> `ip neigh`), so
+#      a sink NIC/MAC change is re-resolved every boot (robust vs a hard-coded `netconsole=` cmdline).
 #      Carries only kernel printk (no service logs) and is fire-and-forget UDP — acceptable because
 #      transport 2 covers the rich run-up.
 #   2. systemd-journal-upload — part of systemd (one apt package, systemd-journal-remote), buffers
 #      in memory and uploads the FULL structured journal (kernel + every service unit) incrementally
-#      to a dev1 systemd-journal-remote HTTP sink, so the last successfully-uploaded entries survive
+#      to the venue strih's systemd-journal-remote HTTP sink, so the last successfully-uploaded entries survive
 #      the death and give the minutes-before-the-drop context netconsole cannot. It never has to
 #      survive the death instant (that is netconsole's job). Works from a ro root by redirecting its
 #      cursor `--save-state` to a /run (tmpfs) path (a persistent cursor on ro root would fail; a
 #      runtime cursor is fine — the box dies anyway). NO rsyslog reinstall — respects #762.
 #
-# The DECISION (verdict) + the dev1-MAC parser are PURE bash here (exhaustively unit-testable at
+# The DECISION (verdict) + the sink-MAC parser are PURE bash here (exhaustively unit-testable at
 # Tier-0, #557 kills local cargo). The generated on-box netconsole script EMBEDS the pure MAC parser
 # via `declare -f`, so there is ONE source of truth — no drifting inlined copy, and no repo-lib
 # dependency on the appliance (the same self-contained-generated-script pattern as mgmt-liveness.sh).
 #
 # Single source of truth: setup-device.sh (STEP 16 pkg + a [remote-logging] install sub-step),
-# create-usb-linux.sh (base-image mirror), and verify-device.sh's (ak) acceptance check all consume
-# THESE functions so they can never drift — the SAME discipline dscp-nft.sh / mgmt-liveness.sh apply.
+# verify-device.sh's (ak) acceptance check, scripts/lib/cambox-ro-units.sh (the live re-point of an
+# already-provisioned box) and the strih-side receiver (scripts/lib/strih-cambox-log-sink.sh, the
+# ports) all consume THESE functions so they can never drift — the SAME discipline dscp-nft.sh /
+# mgmt-liveness.sh apply. create-usb-linux.sh bakes none of it (issue 1394): its image has no box
+# identity, so it cannot know the box's venue sink.
 #
 # Source-only: defines pure functions + shared constants, no side effects on its own.
 
 # --- shared constants (single source of truth, consumed cross-file) ---------------------------
-# dev1 (10.77.9.200) is the fleet log sink (machine-identities.md — the primary workstation +
-# deploy target on the venue LAN, reachable at L2 from every cam box so netconsole's UDP-to-next-hop
-# reaches it directly).
-REMOTE_LOG_DEV1_IP="${REMOTE_LOG_DEV1_IP:-10.77.9.200}"
-# netconsole UDP target port on dev1 (rsyslog imudp), and the journal-upload HTTP sink port
-# (systemd-journal-remote --listen-http). Both dev1-side receivers are installed by the SUPERVISOR
-# via scripts/dev1-remote-log-install.sh — this cambox side only sends.
+# The SINK (issue 1394, owner ROZHODNUTE 9.10.2026): the cambox's OWN venue strih box -- "strih nb,
+# which has the performance and the disk"; no rig service and no rig data on dev1. It is never a
+# literal here: remote_log_sink_ip CAMERA derives it from the venue fact files
+# (scripts/strih-boxes/*.env, the STRIH_IP of the strih-role box whose STRIH_CAMERAS lists the camera),
+# and every generator / the verdict takes it as an argument. A cambox reaches its venue strih at L2
+# (the same /23), which netconsole's UDP-to-next-hop needs. The receivers are provisioned on the strih
+# box by setup-strih step 16k (scripts/lib/strih-cambox-log-sink.sh) and graded by verify-strih item 46.
+# The directory this lib lives in (the fact loader scripts/lib/strih-box-facts.sh sits next to it).
+REMOTE_LOG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# netconsole UDP target port on the sink (rsyslog imudp), and the journal-upload HTTP sink port
+# (systemd-journal-remote --listen-http). The receiver lib reads these two, so both sides agree.
 REMOTE_LOG_NETCONSOLE_PORT="${REMOTE_LOG_NETCONSOLE_PORT:-514}"
 REMOTE_LOG_JOURNAL_PORT="${REMOTE_LOG_JOURNAL_PORT:-19532}"
-REMOTE_LOG_JOURNAL_URL="http://${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_JOURNAL_PORT}"
 
 # netconsole (kernel path)
 REMOTE_LOG_NC_TARGET="cambox"                                     # configfs dynamic target dir name
@@ -63,10 +69,10 @@ REMOTE_LOG_NC_SCRIPT_PATH="/usr/local/sbin/cambox-netconsole-setup.sh"
 REMOTE_LOG_NC_SERVICE_NAME="cambox-netconsole"
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + create-usb-linux.sh (base image)
 REMOTE_LOG_NC_SERVICE_PATH="/etc/systemd/system/cambox-netconsole.service"
-# How long the boot oneshot keeps re-resolving dev1's MAC before giving up (ping + neigh read).
+# How long the boot oneshot keeps re-resolving the sink's MAC before giving up (ping + neigh read).
 REMOTE_LOG_NC_MAC_RETRIES="${REMOTE_LOG_NC_MAC_RETRIES:-30}"
 REMOTE_LOG_NC_MAC_RETRY_SLEEP_S="${REMOTE_LOG_NC_MAC_RETRY_SLEEP_S:-2}"
-# How long the boot oneshot waits for the egress ROUTE to dev1 to appear before giving up. A cambox
+# How long the boot oneshot waits for the egress ROUTE to the sink to appear before giving up. A cambox
 # MASKS systemd-networkd-wait-online (setup-device.sh STEP 11 / create-usb-linux.sh — the #547
 # boot-stall fix), so network-online.target is reached INSTANTLY, before systemd-networkd applies
 # the static IP/route. This retry is what makes the oneshot survive a clean boot where the route
@@ -87,9 +93,77 @@ REMOTE_LOG_JU_BIN="/usr/lib/systemd/systemd-journal-upload"
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (STEP 16 pkg) + create-usb-linux.sh (chroot apt)
 REMOTE_LOG_JU_PKG="systemd-journal-remote"
 
+# remote_log_ipv4_ok VALUE -> 0 iff VALUE is a dotted-quad IPv4 address (each octet 0-255). The
+# number set is spelled out: a bracket RANGE follows the locale in bash (ci-testing-gotchas.md).
+remote_log_ipv4_ok() {
+  local ip="${1-}" o
+  [[ "$ip" =~ ^[0123456789]{1,3}\.[0123456789]{1,3}\.[0123456789]{1,3}\.[0123456789]{1,3}$ ]] || return 1
+  for o in ${ip//./ }; do [ "$((10#$o))" -le 255 ] || return 1; done
+  return 0
+}
+
+# remote_log_journal_url SINK_IP -> the systemd-journal-upload URL of that sink (plain HTTP: the
+# receiver runs --listen-http on a private venue LAN). rc 1 + a stderr line for a non-IPv4 sink.
+remote_log_journal_url() {
+  remote_log_ipv4_ok "${1-}" || { echo "remote-logging: sink '${1-}' is not an IPv4 address (issue 1394)" >&2; return 1; }
+  printf 'http://%s:%s\n' "$1" "$REMOTE_LOG_JOURNAL_PORT"
+}
+
+# remote_log_sink_ip CAMERA -> the cambox's log sink (issue 1394): the STRIH_IP of the ONE strih fact
+# file (scripts/strih-boxes/*.env, PARSED through scripts/lib/strih-box-facts.sh, never sourced) whose
+# STRIH_ROLE is `strih` and whose STRIH_CAMERAS lists CAMERA's number -- the cutter of the venue that
+# HAS the camera. stdout = the address, rc 0. rc 1 + one `remote-logging:` stderr line, nothing on
+# stdout, for: a name that is not camN, a fact file that does not parse, no such file, two of them, or
+# a STRIH_IP that is not IPv4. Never a guessed or default address. Runs in a subshell: the caller's
+# shell (shell options, the loader's globals) is left as it was. STRIH_BOXES_DIR moves the fact dir
+# (the loader's own seam).
+remote_log_sink_ip() {
+  (
+    set +f
+    shopt -u nullglob failglob nocaseglob nocasematch 2>/dev/null || true
+    cam="${1-}"
+    case "$cam" in
+      cam*) n="${cam#cam}" ;;
+      *) echo "remote-logging: '${cam}' is not a camera name (camN) -- no log sink (issue 1394)" >&2; exit 1 ;;
+    esac
+    [[ "$n" =~ ^[123456789][0123456789]*$ ]] \
+      || { echo "remote-logging: '${cam}' is not a camera name (camN) -- no log sink (issue 1394)" >&2; exit 1; }
+    if ! declare -F strih_box_parse_file >/dev/null; then
+      # shellcheck source=scripts/lib/strih-box-facts.sh
+      . "${REMOTE_LOG_LIB_DIR}/strih-box-facts.sh" || exit 1
+    fi
+    dir="$(strih_box_dir)"
+    hits="" sink=""
+    for f in "$dir"/*.env; do
+      [ -f "$f" ] || continue
+      parsed="$(strih_box_parse_file "$f")" \
+        || { echo "remote-logging: ${f} does not parse -- no log sink for ${cam} (issue 1394)" >&2; exit 1; }
+      role="" cams="" ip=""
+      while IFS= read -r line; do
+        case "$line" in
+          STRIH_ROLE=*) role="${line#*=}" ;;
+          STRIH_CAMERAS=*) cams="${line#*=}" ;;
+          STRIH_IP=*) ip="${line#*=}" ;;
+        esac
+      done <<<"$parsed"
+      [ "$role" = strih ] || continue
+      case " ${cams} " in *" ${n} "*) ;; *) continue ;; esac
+      hits="${hits:+${hits} }${f##*/}"
+      sink="$ip"
+    done
+    case "$hits" in
+      "") echo "remote-logging: no strih fact file in ${dir} lists ${cam} in STRIH_CAMERAS -- no log sink (issue 1394)" >&2; exit 1 ;;
+      *" "*) echo "remote-logging: ${cam} is listed by two strih fact files (${hits}) -- a camera is in one venue (issue 1394)" >&2; exit 1 ;;
+    esac
+    remote_log_ipv4_ok "$sink" \
+      || { echo "remote-logging: ${hits} STRIH_IP '${sink}' is not an IPv4 address -- no log sink for ${cam} (issue 1394)" >&2; exit 1; }
+    printf '%s\n' "$sink"
+  )
+}
+
 # remote_log_mac_from_neigh NEIGH_TEXT -> the resolved lladdr MAC (lowercase colon form) iff the
 # neighbour entry is genuinely resolved, else EMPTY. `ip neigh show <ip>` yields a line like
-# `10.77.9.200 dev enp2s0 lladdr aa:bb:cc:dd:ee:ff REACHABLE`; an UNRESOLVED entry is
+# `10.77.9.202 dev enp2s0 lladdr aa:bb:cc:dd:ee:ff REACHABLE`; an UNRESOLVED entry is
 # `... FAILED` / `... INCOMPLETE` (no usable lladdr, or a stale one being probed). A pure, exhaustively
 # unit-testable parser: netconsole needs a CORRECT next-hop MAC, so a FAILED/INCOMPLETE state must
 # read as "not yet resolved" (empty) — the boot oneshot then keeps retrying rather than writing a
@@ -103,23 +177,29 @@ remote_log_mac_from_neigh() {
   printf '%s' "$mac"
 }
 
-# remote_log_netconsole_setup_script_content -> the full on-box setup script written to
-# ${REMOTE_LOG_NC_SCRIPT_PATH} and run by the boot oneshot. It EMBEDS remote_log_mac_from_neigh via
-# `declare -f` (ONE source of truth). `set -uo pipefail` (never `set -e` — the many `|| true` are
-# deliberate best-effort steps against a configfs that rejects a write while the target is enabled).
-# It: ensures configfs + the netconsole module are loaded; resolves the egress dev + local ip toward
-# dev1; resolves dev1's next-hop MAC with a bounded ping/neigh retry; then (idempotently) creates the
-# dynamic configfs target and enables it. Fire-and-forget after that — the kernel emits printk over
-# UDP with zero fs/userspace dependency, so it survives the #1309 half-dead wedge.
+# remote_log_netconsole_setup_script_content SINK_IP -> the full on-box setup script written to
+# ${REMOTE_LOG_NC_SCRIPT_PATH} and run by the boot oneshot, with SINK_IP (the venue strih,
+# remote_log_sink_ip) baked in. rc 1 + a stderr line, no output, for a non-IPv4 SINK_IP. It EMBEDS
+# remote_log_mac_from_neigh via `declare -f` (ONE source of truth). `set -uo pipefail` (never
+# `set -e` — the many `|| true` are deliberate best-effort steps against a configfs that rejects a
+# write while the target is enabled). It: ensures configfs + the netconsole module are loaded;
+# resolves the egress dev + local ip toward the sink; resolves the sink's next-hop MAC with a bounded
+# ping/neigh retry; then (idempotently) creates the dynamic configfs target and enables it.
+# Fire-and-forget after that — the kernel emits printk over UDP with zero fs/userspace dependency, so
+# it survives the #1309 half-dead wedge.
 remote_log_netconsole_setup_script_content() {
+  local sink="${1-}"
+  remote_log_ipv4_ok "$sink" \
+    || { echo "remote-logging: the netconsole setup script needs the sink IPv4 address (got '${sink}', issue 1394)" >&2; return 1; }
   cat <<SCRIPT_HEAD
 #!/usr/bin/env bash
 # cambox-netconsole-setup.sh (#1311) — GENERATED by scripts/lib/remote-logging.sh. Do not hand-edit;
-# re-provision (setup-device.sh) to change it. Brings up the netconsole DYNAMIC configfs target so
-# the kernel ships printk to dev1 in real time, surviving the #1309 half-dead-stick wedge.
+# re-provision (setup-device.sh / scripts/cambox-ro-units-apply.sh) to change it. Brings up the
+# netconsole DYNAMIC configfs target so the kernel ships printk to this box's venue strih (the log
+# sink, issue 1394) in real time, surviving the #1309 half-dead-stick wedge.
 set -uo pipefail
 
-DEV1_IP="${REMOTE_LOG_DEV1_IP}"
+SINK_IP="${sink}"
 PORT="${REMOTE_LOG_NETCONSOLE_PORT}"
 CFG="${REMOTE_LOG_NC_CONFIGFS}"
 RETRIES="${REMOTE_LOG_NC_MAC_RETRIES}"
@@ -137,37 +217,37 @@ modprobe configfs 2>/dev/null || true
 mountpoint -q /sys/kernel/config 2>/dev/null || mount -t configfs none /sys/kernel/config 2>/dev/null || true
 modprobe netconsole 2>/dev/null || true
 
-# Egress interface + local ip toward dev1 (resolved live — no hard-coded NIC name). A cambox MASKS
+# Egress interface + local ip toward the sink (resolved live — no hard-coded NIC name). A cambox MASKS
 # systemd-networkd-wait-online (#547 boot-stall fix), so network-online.target is reached BEFORE
 # networkd applies the static IP/route — wait for the route to appear in a bounded retry loop rather
 # than giving up on the first miss (#1311).
 DEV=""
 r=0
 while [ "$r" -lt "$ROUTE_RETRIES" ]; do
-  DEV="$(ip -o route get "$DEV1_IP" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)"
+  DEV="$(ip -o route get "$SINK_IP" 2>/dev/null | grep -oE 'dev [^ ]+' | awk '{print $2}' | head -1)"
   [ -n "$DEV" ] && break
   r=$((r + 1))
   sleep "$ROUTE_RETRY_SLEEP"
 done
 if [ -z "$DEV" ]; then
-  echo "cambox-netconsole: no egress route to dev1 ($DEV1_IP) after ${ROUTE_RETRIES} tries — netconsole not armed" >&2
+  echo "cambox-netconsole: no egress route to the log sink ($SINK_IP) after ${ROUTE_RETRIES} tries — netconsole not armed" >&2
   exit 1
 fi
-LOCAL_IP="$(ip -o route get "$DEV1_IP" 2>/dev/null | grep -oE 'src [^ ]+' | awk '{print $2}' | head -1)"
+LOCAL_IP="$(ip -o route get "$SINK_IP" 2>/dev/null | grep -oE 'src [^ ]+' | awk '{print $2}' | head -1)"
 
-# Resolve dev1's next-hop MAC (netconsole needs the L2 dest). Ping to populate the neigh cache, then
-# read it; retry until resolved or the bound is hit. dev1 is always up on the venue LAN.
+# Resolve the sink's next-hop MAC (netconsole needs the L2 dest). Ping to populate the neigh cache,
+# then read it; retry until resolved or the bound is hit.
 MAC=""
 i=0
 while [ "$i" -lt "$RETRIES" ]; do
-  ping -c1 -W1 "$DEV1_IP" >/dev/null 2>&1 || true
-  MAC="$(remote_log_mac_from_neigh "$(ip neigh show "$DEV1_IP" 2>/dev/null)")"
+  ping -c1 -W1 "$SINK_IP" >/dev/null 2>&1 || true
+  MAC="$(remote_log_mac_from_neigh "$(ip neigh show "$SINK_IP" 2>/dev/null)")"
   [ -n "$MAC" ] && break
   i=$((i + 1))
   sleep "$RETRY_SLEEP"
 done
 if [ -z "$MAC" ]; then
-  echo "cambox-netconsole: could not resolve dev1 ($DEV1_IP) MAC after ${RETRIES} tries — netconsole not armed" >&2
+  echo "cambox-netconsole: could not resolve the log sink ($SINK_IP) MAC after ${RETRIES} tries — netconsole not armed" >&2
   exit 1
 fi
 
@@ -178,7 +258,7 @@ mkdir -p "$CFG"
 echo 0 > "$CFG/enabled" 2>/dev/null || true
 echo "$DEV" > "$CFG/dev_name"
 [ -n "$LOCAL_IP" ] && { echo "$LOCAL_IP" > "$CFG/local_ip" 2>/dev/null || true; }
-echo "$DEV1_IP" > "$CFG/remote_ip"
+echo "$SINK_IP" > "$CFG/remote_ip"
 echo "$PORT" > "$CFG/remote_port"
 echo "$MAC" > "$CFG/remote_mac"
 echo 1 > "$CFG/enabled"
@@ -189,10 +269,10 @@ echo 1 > "$CFG/enabled"
 # netconsole is the death-instant transport, so a truthful is-active matters — fail the unit if the
 # target did not end up enabled.
 if [ "$(cat "$CFG/enabled" 2>/dev/null)" != "1" ]; then
-  echo "cambox-netconsole: arm FAILED (target enabled != 1) -> ${DEV1_IP}:${PORT}" >&2
+  echo "cambox-netconsole: arm FAILED (target enabled != 1) -> ${SINK_IP}:${PORT}" >&2
   exit 1
 fi
-echo "cambox-netconsole: armed -> ${DEV1_IP}:${PORT} via ${DEV} (dev1 mac ${MAC})"
+echo "cambox-netconsole: armed -> ${SINK_IP}:${PORT} via ${DEV} (sink mac ${MAC})"
 SCRIPT_BODY
 }
 
@@ -201,7 +281,7 @@ SCRIPT_BODY
 # network-online.target is meaningless on this box class (wait-online is MASKED, #547/#1311), so the
 # setup script also retries the egress-route lookup. Type=oneshot + RemainAfterExit
 # so `systemctl is-active` reads `active` after a successful arm (the verify (ak) check keys on that).
-# Issue 1394: an arm that still fails (dev1's MAC not resolvable, a late route) used to stay failed
+# Issue 1394: an arm that still fails (the sink's MAC not resolvable, a late route) used to stay failed
 # until the next boot (cam1 from 4.10 06:24Z, the box `degraded`, no kernel printk off-box).
 # Restart=on-failure retries it (30 s backing off to 10 min), with no start-rate limit. systemd 255
 # allows on-failure for a oneshot (always/on-success it refuses) and has RestartSteps /
@@ -210,7 +290,7 @@ SCRIPT_BODY
 remote_log_netconsole_service_unit_content() {
   cat <<EOF
 [Unit]
-Description=netconsole: ship kernel printk to dev1 in real time (camera-box #1311)
+Description=netconsole: ship kernel printk to the venue strih log sink in real time (camera-box #1311, #1394)
 Documentation=https://github.com/zbynekdrlik/camera-box/issues/1311
 # #1311: a cambox MASKS systemd-networkd-wait-online (#547 boot-stall fix), so network-online.target
 # is reached INSTANTLY — before networkd applies the static IP/route. Order after systemd-networkd
@@ -227,9 +307,9 @@ StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Issue 1394: a failed arm retries until dev1 answers, instead of staying failed (and the box
-# degraded) until the next boot. The delay grows from 30 s to 10 min over 4 steps, so a box away
-# from dev1 (the travelling rig) does not write a failed arm into the stick journal every 30 s.
+# Issue 1394: a failed arm retries until the sink answers, instead of staying failed (and the box
+# degraded) until the next boot. The delay grows from 30 s to 10 min over 4 steps, so a box whose
+# sink is down does not write a failed arm into the on-box journal every 30 s.
 Restart=on-failure
 RestartSec=30
 RestartSteps=4
@@ -241,13 +321,16 @@ WantedBy=multi-user.target
 EOF
 }
 
-# remote_log_journal_upload_conf_content -> /etc/systemd/journal-upload.conf. Points the uploader at
-# the dev1 systemd-journal-remote HTTP sink. Plain HTTP (not HTTPS) — the venue LAN is private and
-# TLS on a headless appliance is not worth the cert lifecycle; the receiver runs --listen-http.
+# remote_log_journal_upload_conf_content SINK_IP -> /etc/systemd/journal-upload.conf. Points the
+# uploader at the venue strih's systemd-journal-remote HTTP sink (remote_log_journal_url). Plain HTTP
+# (not HTTPS) — the venue LAN is private and TLS on a headless appliance is not worth the cert
+# lifecycle; the receiver runs --listen-http. rc 1 + a stderr line, no output, for a non-IPv4 sink.
 remote_log_journal_upload_conf_content() {
+  local url
+  url="$(remote_log_journal_url "${1-}")" || return 1
   cat <<EOF
 [Upload]
-URL=${REMOTE_LOG_JOURNAL_URL}
+URL=${url}
 EOF
 }
 
@@ -259,15 +342,15 @@ EOF
 remote_log_journal_upload_dropin_content() {
   cat <<EOF
 [Unit]
-# #1311 boot-order: on a cambox network-online.target is reached BEFORE dev1 is reachable (masked
+# #1311 boot-order: on a cambox network-online.target is reached BEFORE the sink is reachable (masked
 # wait-online, #547), so the stock unit's Restart=on-failure + default StartLimit exhausts after 5
 # instant "connection refused" restarts and the unit stays FAILED for the whole boot. Disable the
-# start-limit so the uploader keeps retrying until dev1 answers (it is idempotent — the /run cursor
+# start-limit so the uploader keeps retrying until the sink answers (it is idempotent — the /run cursor
 # resumes; a down sink is harmless).
 StartLimitIntervalSec=0
 
 [Service]
-# #1311: keep retrying the upload until the dev1 sink is reachable; RestartSec spaces the retries so
+# #1311: keep retrying the upload until the venue strih sink is reachable; RestartSec spaces the retries so
 # a genuinely-down sink is not hammered.
 Restart=always
 RestartSec=5
@@ -309,28 +392,34 @@ echo "JU_STATE_SAVE=$(grep -hE '^ExecStart=.*[-][-]save-state=' /etc/systemd/sys
 REMOTE
 }
 
-# remote_log_verdict STATE_BLOCK -> "ok" or the newline-joined "FAIL: ..." reasons. STATE_BLOCK is
-# the KEY=VALUE text from remote_log_gather_remote_snippet (or a test fixture). Fail-closed: an
-# absent/unparseable value is NEVER read as "safely logging" (test-strictness), mirroring
+# remote_log_verdict STATE_BLOCK SINK_IP -> "ok" or the newline-joined "FAIL: ..." reasons.
+# STATE_BLOCK is the KEY=VALUE text from remote_log_gather_remote_snippet (or a test fixture); SINK_IP
+# is THIS box's venue strih (remote_log_sink_ip). Fail-closed: an absent/unparseable value, or a
+# missing/non-IPv4 SINK_IP, is NEVER read as "safely logging" (test-strictness), mirroring
 # dscp_nft_verdict / log_diet_provision_verdict.
 #
-# netconsole facets (the kernel path — does NOT depend on the dev1 receiver, so all are gated):
+# netconsole facets (the kernel path — does NOT depend on the sink's receiver, so all are gated):
 #   * cambox-netconsole.service enabled (reboot survival) AND active (RemainAfterExit oneshot armed)
 #   * the setup script is present + executable
-#   * the dynamic configfs target is live: enabled==1, remote_ip==dev1, remote_port==514
+#   * the dynamic configfs target is live: enabled==1, remote_ip==SINK_IP, remote_port==514
 # journal-upload facets (the rich path):
 #   * systemd-journal-upload.service enabled (reboot survival)
-#   * the upload URL points at the dev1 sink
+#   * the upload URL points at SINK_IP's journal sink
 #   * the cursor --save-state is redirected to /run (ro-root safe)
 # NOTE: journal-upload ACTIVE is deliberately NOT gated — the uploader's active state depends on the
-# dev1 receiver being up, which is a SEPARATE supervisor step; a cambox is correctly provisioned even
-# before the dev1 sink exists (netconsole is fire-and-forget and needs no listener either). enabled +
-# correct config is the cambox-side acceptance bar.
+# sink's receiver being up (setup-strih step 16k, graded on the strih box by verify-strih item 46); a
+# cambox is correctly provisioned even before the sink exists (netconsole is fire-and-forget and
+# needs no listener either). enabled + correct config is the cambox-side acceptance bar.
 remote_log_verdict() {
-  local block="$1" fails="" nl
+  local block="$1" sink="${2-}" url="" fails="" nl
   nl=$'\n'
   local nc_enabled_svc nc_active nc_result nc_script_x nc_target nc_ip nc_port
   local ju_enabled ju_url ju_state
+  if remote_log_ipv4_ok "$sink"; then
+    url="$(remote_log_journal_url "$sink")"
+  else
+    fails="FAIL: no log sink resolved for this box (got '${sink}') -- its venue strih fact file must list it in STRIH_CAMERAS (issue 1394)"
+  fi
   nc_enabled_svc="$(printf '%s\n' "$block" | sed -n 's/^NC_SVC_ENABLED=//p' | tr -d '[:space:]')"
   nc_active="$(printf '%s\n' "$block" | sed -n 's/^NC_SVC_ACTIVE=//p' | tr -d '[:space:]')"
   nc_result="$(printf '%s\n' "$block" | sed -n 's/^NC_SVC_RESULT=//p' | tr -d '[:space:]')"
@@ -355,12 +444,12 @@ remote_log_verdict() {
     fails="${fails:+$fails$nl}FAIL: no netconsole configfs target at ${REMOTE_LOG_NC_CONFIGFS} -- kernel printk is not leaving the box (#1311)"
   else
     [ "$nc_target" = "1" ] || fails="${fails:+$fails$nl}FAIL: the netconsole target is not enabled (enabled=${nc_target:-<none>}) (#1311)"
-    [ "$nc_ip" = "$REMOTE_LOG_DEV1_IP" ] || fails="${fails:+$fails$nl}FAIL: the netconsole target remote_ip=${nc_ip:-<none>} != dev1 ${REMOTE_LOG_DEV1_IP} (#1311)"
+    { [ -n "$url" ] && [ "$nc_ip" = "$sink" ]; } || fails="${fails:+$fails$nl}FAIL: the netconsole target remote_ip=${nc_ip:-<none>} != the venue strih sink ${sink:-<unresolved>} (#1311, issue 1394)"
     [ "$nc_port" = "$REMOTE_LOG_NETCONSOLE_PORT" ] || fails="${fails:+$fails$nl}FAIL: the netconsole target remote_port=${nc_port:-<none>} != ${REMOTE_LOG_NETCONSOLE_PORT} (#1311)"
   fi
 
   [ "$ju_enabled" = "enabled" ] || fails="${fails:+$fails$nl}FAIL: ${REMOTE_LOG_JU_SERVICE_NAME}.service is not enabled (state=${ju_enabled:-<none>}) -- the journal uploader will not survive a reboot (#1311)"
-  [ "$ju_url" = "$REMOTE_LOG_JOURNAL_URL" ] || fails="${fails:+$fails$nl}FAIL: journal-upload URL=${ju_url:-<none>} != ${REMOTE_LOG_JOURNAL_URL} (#1311)"
+  { [ -n "$url" ] && [ "$ju_url" = "$url" ]; } || fails="${fails:+$fails$nl}FAIL: journal-upload URL=${ju_url:-<none>} != ${url:-<the venue strih sink, unresolved>} (#1311, issue 1394)"
   case "$ju_state" in
     *--save-state=/run/*) : ;;
     *) fails="${fails:+$fails$nl}FAIL: journal-upload --save-state is not redirected to /run (got '${ju_state:-<none>}') -- the cursor would be unwritable on the ro root (#1311)" ;;
