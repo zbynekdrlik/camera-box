@@ -11,6 +11,7 @@
 // lock-step. vban (pure UDP) and the probe tree (which the verdict needs) stay cross-platform.
 #[cfg(target_os = "linux")]
 pub mod affinity;
+pub mod irq_offload;
 #[cfg(target_os = "linux")]
 pub mod capture;
 #[cfg(target_os = "linux")]
