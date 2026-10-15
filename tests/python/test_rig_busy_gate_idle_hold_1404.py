@@ -92,6 +92,7 @@ def run_gate(seq, iterations=3, extra_env=None):
     if os.path.exists(log_path):
         calls = [line.split() for line in open(log_path).read().splitlines()]
     held_at_exit = os.path.exists(os.path.join(lease_dir, "holder.json"))
+    r.lease_dir = lease_dir
     return r, calls, held_at_exit
 
 
@@ -130,8 +131,14 @@ class IdleHold1404(unittest.TestCase):
         # on a lease that is no longer ours
         r, calls, _held = run_gate([IDLE], iterations=2, extra_env={"FAKE_STEAL_AT": "4"})
         out = r.stdout + r.stderr
-        self.assertNotEqual(r.returncode, 0, out)
+        # the gate gives the lease up and waits on the foreign holder, which is declared far past
+        # its wait budget: fail fast (exit 44), never admit, never release the foreign lease
+        self.assertEqual(r.returncode, 44, out)
+        self.assertIn("OUTCOME=RIG_LEASE_HELD", out)
         self.assertNotIn("OUTCOME=RIG_FREE", out)
+        self.assertIn("taken over during the idle hold", out)
+        with open(os.path.join(r.lease_dir, "holder.json")) as f:
+            self.assertEqual(json.load(f)["run_id"], "999", "the foreign lease is never released")
 
     def test_a_continuous_idle_hold_admits_and_keeps_the_lease(self):
         r, calls, held = run_gate([STREAMING, IDLE], iterations=3)

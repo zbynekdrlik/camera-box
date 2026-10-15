@@ -262,9 +262,13 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
     fi
     if rig_busy_idle_hold; then
       # beat the lease (nothing refreshed it over the hold) and confirm it is still ours: never
-      # admit on a lease another holder took over meanwhile
+      # admit on a lease another holder took over meanwhile (rc 1). rc 2 (a filesystem error on
+      # the beat) and rc 3 (past the hold ceiling, only reachable after a >75 min gate wait) leave
+      # the lease ours, so they are admitted, logged.
       _refresh_rc=0
       rig_lease_refresh_if_mine "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID" >/dev/null || _refresh_rc=$?
+      [ "$_refresh_rc" -eq 0 ] || [ "$_refresh_rc" -eq 1 ] \
+        || echo "[rig-busy-gate] WARNING: lease beat after the idle hold returned rc ${_refresh_rc} (the lease is still ours) -- admitting"
       if [ "$_refresh_rc" -eq 1 ]; then
         echo "[rig-busy-gate] our rig lease was taken over during the idle hold -- not admitted (issue 1432)"
         LEASE_HELD=0
