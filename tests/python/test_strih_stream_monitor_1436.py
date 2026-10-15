@@ -74,7 +74,7 @@ def boxes(tmp_path):
 
 # --- a fake /proc/asound + /proc (stream-pp's two cards, read live 15.10.2026) ---------------------------------
 
-def asound(tmp_path, analog=True, owner=None, second_analog=False):
+def asound(tmp_path, analog=True, owner=None, second_analog=False, alt_analog=False):
     """stream-pp's cards: card0 `Generic` (HDMI 0 / HDMI 1), card1 `Generic_1` (ALC257 Analog). OWNER =
     (pid, comm) holding the analog playback PCM, else it reads `closed`."""
     root = tmp_path / "asound"
@@ -101,6 +101,8 @@ def asound(tmp_path, analog=True, owner=None, second_analog=False):
         (proc / str(owner[0]) / "comm").write_text(owner[1] + "\n")
     pcm(1, 0, "ALC257 Analog" if analog else "ALC257 Digital", status)
     pcm(1, 0, "ALC257 Analog", "closed", kind="c")  # the capture side is never a candidate
+    if alt_analog:
+        pcm(1, 2, "ALC257 Alt Analog")  # a Realtek codec's second analog PCM: never the jack
     if second_analog:
         (root / "card2").mkdir(parents=True)
         (root / "card2" / "id").write_text("Device\n")
@@ -187,15 +189,22 @@ import os, sys, time
 log = os.environ["FAKE_LOG"]
 with open(log, "a") as f:
     f.write("ffmpeg " + " ".join(sys.argv[1:]) + "\n")
+with open(log + ".env", "a") as f:
+    f.write("ffmpeg pid=%d LC_ALL=%s\n" % (os.getpid(), os.environ.get("LC_ALL")))
 mode = os.environ.get("FAKE_FF_MODE", "play:19200")
-kind, _, n = mode.partition(":")
+kind, _, rest = mode.partition(":")
+n, _, chunk = rest.partition(":")
+chunk = int(chunk or 3840)
 if kind == "none":
     sys.stderr.write("rtmp://127.0.0.1:1234/live/x: Input/output error\n")
+    sys.exit(1)
+if kind == "noaudio":
+    sys.stderr.write("Stream map '0:a:0' matches no streams.\n")
     sys.exit(1)
 out = sys.stdout.buffer
 left = int(n)
 while left > 0:
-    k = min(3840, left)
+    k = min(chunk, left)
     try:
         out.write(b"\x01" * k)
         out.flush()
@@ -212,12 +221,17 @@ import os, sys, time
 log = os.environ["FAKE_LOG"]
 with open(log, "a") as f:
     f.write("aplay " + " ".join(sys.argv[1:]) + "\n")
+with open(log + ".env", "a") as f:
+    f.write("aplay pid=%d LC_ALL=%s\n" % (os.getpid(), os.environ.get("LC_ALL")))
 mode = os.environ.get("FAKE_AP_MODE", "read")
 if mode == "busy":
     sys.stderr.write("aplay: main:850: audio open error: Device or resource busy\n")
     sys.exit(1)
+if mode == "fail":
+    sys.stderr.write("aplay: set_params:1387: Channels count non available\n")
+    sys.exit(1)
 if mode == "slow":
-    time.sleep(1.5)
+    time.sleep(float(os.environ.get("FAKE_AP_SLEEP", "1.5")))
 n = 0
 while True:
     b = sys.stdin.buffer.read(4096)
@@ -229,16 +243,26 @@ with open(os.environ["FAKE_AP_OUT"], "a") as f:
 '''
 
 
+FAKE_AMIXER = r'''
+import os, sys
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write("amixer " + " ".join(sys.argv[1:]) + "\n")
+if os.environ.get("FAKE_AMIXER_MODE") == "missing":
+    sys.stderr.write("amixer: Unable to find simple control 'Speaker',0\n")
+    sys.exit(1)
+'''
+
+
 def _fakes(tmp_path):
     b = tmp_path / "fakebin"
     b.mkdir(exist_ok=True)
-    for name, body in (("ffmpeg", FAKE_FF), ("aplay", FAKE_AP)):
+    for name, body in (("ffmpeg", FAKE_FF), ("aplay", FAKE_AP), ("amixer", FAKE_AMIXER)):
         (b / name).write_text("#!%s\n%s" % (sys.executable, body))
         (b / name).chmod(0o755)
     return b
 
 
-def run_monitor(tmp_path, cycles=1, ff="play:19200", ap="read", owner=None, analog=True, extra=(), timeout=60):
+def _monitor_cmd(tmp_path, cycles=1, ff="play:19200", ap="read", owner=None, analog=True, extra=(), env_extra=None):
     root, proc = asound(tmp_path, analog=analog, owner=owner)
     b = _fakes(tmp_path)
     state = tmp_path / "run" / "strih-stream-monitor.json"
@@ -246,9 +270,18 @@ def run_monitor(tmp_path, cycles=1, ff="play:19200", ap="read", owner=None, anal
     apout = tmp_path / "aplay.out"
     env = {k: v for k, v in os.environ.items() if k not in LEAKY}
     env.update({"FAKE_LOG": str(log), "FAKE_FF_MODE": ff, "FAKE_AP_MODE": ap, "FAKE_AP_OUT": str(apout)})
+    env.update(env_extra or {})
     argv = [sys.executable, str(PROG), "--url", "rtmp://127.0.0.1:1234/live/stream-pp", "--state-file", str(state),
-            "--ffmpeg", str(b / "ffmpeg"), "--aplay", str(b / "aplay"), "--asound-root", str(root),
-            "--proc-root", str(proc), "--retry-s", "0.05", "--cycles", str(cycles)] + list(extra)
+            "--ffmpeg", str(b / "ffmpeg"), "--aplay", str(b / "aplay"), "--amixer", str(b / "amixer"),
+            "--asound-root", str(root), "--proc-root", str(proc), "--retry-s", "0.05"]
+    if cycles is not None:
+        argv += ["--cycles", str(cycles)]
+    return argv + list(extra), env, log, apout, state
+
+
+def run_monitor(tmp_path, cycles=1, ff="play:19200", ap="read", owner=None, analog=True, extra=(), timeout=60,
+                env_extra=None):
+    argv, env, log, apout, state = _monitor_cmd(tmp_path, cycles, ff, ap, owner, analog, extra, env_extra)
     t0 = time.monotonic()
     r = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
     elapsed = time.monotonic() - t0
@@ -460,6 +493,9 @@ FAKE_SCENES = r'''
 import os, sys
 assert "--audio-monitor-type" in sys.argv
 mode = os.environ.get("FAKE_SCENES_MODE", "none")
+if mode == "crash":
+    sys.stderr.write("Traceback: boom\n")
+    sys.exit(1)
 if mode == "unreachable":
     print("unreachable: ConnectionRefusedError: [Errno 111] Connection refused")
     sys.exit(2)
@@ -468,7 +504,7 @@ print({"none": "OBS_MONITORING_TYPE_NONE", "both": "OBS_MONITORING_TYPE_MONITOR_
 '''
 
 
-def _grade(tmp_path, boxes, key="stream-pp", hostname="stream-pp", scenes="none", owner=None, fresh=True):
+def _grade_env(tmp_path, boxes, key="stream-pp", hostname="stream-pp", scenes="none", owner=None, fresh=True):
     home = tmp_path / "home"
     prof = home / ".config/obs-studio/basic/profiles/stream-pp"
     prof.mkdir(parents=True)
@@ -483,10 +519,16 @@ def _grade(tmp_path, boxes, key="stream-pp", hostname="stream-pp", scenes="none"
     root, proc = asound(tmp_path, owner=owner)
     fs = tmp_path / "fake_scenes.py"
     fs.write_text(FAKE_SCENES)
-    env = {"STRIH_BOXES_DIR": str(boxes), "STRIH_SESSION_APPS_RUNTIME_DIR": str(run), "STRIH_SESSION_APPS_EUID": "1000",
-           "STRIH_STREAM_MONITOR_HOSTNAME": hostname, "STRIH_STREAM_MONITOR_SCENES": str(fs),
-           "STRIH_STREAM_MONITOR_MANIFEST": str(tmp_path / "seed.json"), "FAKE_SCENES_MODE": scenes,
-           "STRIH_STREAM_MONITOR_ASOUND": str(root), "STRIH_STREAM_MONITOR_PROC": str(proc)}
+    return {"STRIH_BOXES_DIR": str(boxes), "STRIH_SESSION_APPS_RUNTIME_DIR": str(run), "STRIH_SESSION_APPS_EUID": "1000",
+            "STRIH_STREAM_MONITOR_HOSTNAME": hostname, "STRIH_STREAM_MONITOR_SCENES": str(fs),
+            "STRIH_STREAM_MONITOR_MANIFEST": str(tmp_path / "seed.json"), "FAKE_SCENES_MODE": scenes,
+            "STRIH_STREAM_MONITOR_ASOUND": str(root), "STRIH_STREAM_MONITOR_PROC": str(proc)}
+
+
+def _grade(tmp_path, boxes, key="stream-pp", hostname="stream-pp", scenes="none", owner=None, fresh=True):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    home = tmp_path / "home"
+    env = _grade_env(tmp_path, boxes, key, hostname, scenes, owner, fresh)
     r = _bash('strih_box_load stream-pp\nstrih_stream_monitor_grade_rows "%s" "%s" newlevel' % (REPO, home), env=env)
     assert r.returncode == 0, r.stderr
     rows = {}
@@ -548,3 +590,158 @@ def test_the_session_apps_grader_prints_the_monitor_rows_only_on_the_stream_role
     src = APPS.read_text()
     assert '_strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT"' in src
     assert "strih_stream_monitor_grade_rows" in src
+
+
+# --- review round 1 ------------------------------------------------------------------------------------------------
+
+def test_a_realtek_alt_analog_pcm_is_never_the_jack(tmp_path):
+    m = _mod()
+    root, _proc = asound(tmp_path, alt_analog=True)
+    pcm, why = m.resolve_pcm(m.list_playback_pcms(str(root)), m.DEFAULT_PCM_MATCH)
+    assert why is None and (pcm["card_id"], pcm["device"]) == ("Generic_1", 0), why
+
+
+def test_the_children_run_in_the_c_locale(tmp_path):
+    # the busy / underrun text the player matches is English: never a translated message
+    _r, _calls, _played, _st, _e = run_monitor(tmp_path)
+    env = (tmp_path / "fake.log.env").read_text()
+    assert "ffmpeg pid=" in env and "aplay pid=" in env
+    assert "LC_ALL=None" not in env and env.count("LC_ALL=C\n") == 2, env
+
+
+def test_the_speaker_is_muted_by_name_before_the_card_plays(tmp_path):
+    r, calls, played, _st, _e = run_monitor(tmp_path)
+    assert played == [19200]
+    assert "amixer -q -c Generic_1 sset Speaker mute" in calls
+    assert calls.index("amixer ") < calls.index("aplay "), "the speaker is off before the stream sounds"
+
+
+def test_a_card_without_a_speaker_control_still_plays_and_says_so_once(tmp_path):
+    r, calls, played, _st, _e = run_monitor(tmp_path, cycles=2, env_extra={"FAKE_AMIXER_MODE": "missing"})
+    assert played == [19200, 19200]
+    notes = [ln for ln in r.stdout.splitlines() if "Speaker" in ln]
+    assert len(notes) == 1 and "Unable to find simple control" in notes[0], r.stdout
+
+
+def test_an_unreadable_pipe_level_never_blocks_the_rtmp_reader(tmp_path):
+    # FIONREAD unknown + an aplay that does not read for 3 s: a blocking write would hold ffmpeg (the RTMP
+    # subscriber) paused for 3 s and drop nothing; the relay must drop instead
+    m = _mod()
+    argv, env, log, apout, state = _monitor_cmd(tmp_path, ff="play:400000", ap="slow",
+                                                env_extra={"FAKE_AP_SLEEP": "3"})
+    os.environ.update({k: env[k] for k in ("FAKE_LOG", "FAKE_FF_MODE", "FAKE_AP_MODE", "FAKE_AP_OUT", "FAKE_AP_SLEEP")})
+    try:
+        m.fionread = lambda fd: None
+        mon = m.Monitor(argv[argv.index("--url") + 1], str(state), ffmpeg=argv[argv.index("--ffmpeg") + 1],
+                        aplay=argv[argv.index("--aplay") + 1], amixer=argv[argv.index("--amixer") + 1],
+                        asound_root=argv[argv.index("--asound-root") + 1],
+                        proc_root=argv[argv.index("--proc-root") + 1], retry_s=0.05, log=lambda s: None)
+        t0 = time.monotonic()
+        mon.cycle()
+        st = mon.st
+    finally:
+        for k in ("FAKE_LOG", "FAKE_FF_MODE", "FAKE_AP_MODE", "FAKE_AP_OUT", "FAKE_AP_SLEEP"):
+            os.environ.pop(k, None)
+    played = [int(x) for x in apout.read_text().split()] if apout.exists() else []
+    assert st["dropped_bytes"] > 0, "a full pipe drops, never blocks"
+    assert played and played[0] + st["dropped_bytes"] == 400000
+    assert time.monotonic() - t0 < 10
+
+
+def test_every_relayed_and_dropped_chunk_is_whole_frames(tmp_path):
+    # ffmpeg's pipe reads can end mid-frame; a dropped odd chunk would swap the channels / shift the samples
+    r, calls, played, st, _e = run_monitor(tmp_path, ff="play:192192:1001", ap="slow", extra=("--ceiling-ms", "40"))
+    assert r.returncode == 0, r.stderr
+    assert st["dropped_bytes"] > 0 and st["dropped_bytes"] % 4 == 0, st["dropped_bytes"]
+    assert played and played[0] % 4 == 0 and played[0] + st["dropped_bytes"] == 192192
+
+
+def test_an_aplay_that_keeps_failing_is_a_fault_logged_once_and_backed_off(tmp_path):
+    r, calls, played, st, elapsed = run_monitor(tmp_path, cycles=3, ap="fail")
+    assert r.returncode == 0, r.stderr
+    assert st["state"] == "aplay-failing"
+    fails = [ln for ln in r.stdout.splitlines() if ln.startswith("aplay-failing")]
+    assert len(fails) == 1 and "Channels count non available" in fails[0], r.stdout
+    assert elapsed >= 0.05 * (2 + 4), "the retry backs off after each aplay failure"
+    m = _mod()
+    root, proc = asound(tmp_path / "chk")
+    p = _state(tmp_path, state="aplay-failing", reason=st["reason"])
+    ok, line = m.check_state(str(p), time.time(), str(root), str(proc))
+    assert not ok and "aplay-failing" in line
+
+
+def test_a_stream_without_audio_is_a_fault_not_waiting(tmp_path):
+    r, calls, played, st, _e = run_monitor(tmp_path, cycles=2, ff="noaudio")
+    assert st["state"] == "no-audio" and "aplay " not in calls
+    assert len([ln for ln in r.stdout.splitlines() if ln.startswith("no-audio")]) == 1
+    m = _mod()
+    root, proc = asound(tmp_path / "chk")
+    ok, line = m.check_state(str(_state(tmp_path, state="no-audio", reason=st["reason"])), time.time(), str(root),
+                             str(proc))
+    assert not ok and "no-audio" in line
+
+
+def test_sigterm_stops_the_player_and_both_children(tmp_path):
+    argv, env, log, _apout, _state_ = _monitor_cmd(tmp_path, cycles=None, ff="play:400000000")
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline and "aplay pid=" not in (Path(str(log) + ".env").read_text()
+                                                              if Path(str(log) + ".env").exists() else ""):
+        time.sleep(0.05)
+    p.send_signal(15)
+    out, _err = p.communicate(timeout=15)
+    assert p.returncode == 0
+    pids = [int(w.split("=")[1]) for w in Path(str(log) + ".env").read_text().split() if w.startswith("pid=")]
+    assert len(pids) == 2
+    time.sleep(0.2)
+    for pid in pids:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    assert any(ln.startswith("stream ended") and "stopping" in ln for ln in out.splitlines()), out
+
+
+def test_the_player_server_is_the_profile_and_role_server(boxes):
+    m = _mod()
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("obs_box_stream_profile_1436b", SCRIPTS / "obs_box_stream_profile.py")
+    prof = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prof)
+    r = _bash('printf "%s" "$OBS_BOX_STREAM_RTMP_SERVER"', env={"STRIH_BOXES_DIR": str(boxes)})
+    assert m.DEFAULT_SERVER == prof.DEFAULT_RTMP_SERVER == r.stdout
+
+
+def test_grade_key_survives_a_service_json_that_is_not_an_object(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("obs_box_stream_profile_1436c", SCRIPTS / "obs_box_stream_profile.py")
+    prof = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prof)
+    (tmp_path / "service.json").write_text("[]")
+    drift = prof.grade_key(str(tmp_path), "stream-pp")
+    assert drift and "want 'stream-pp'" in " ".join(drift)
+
+
+def test_the_obs_row_names_an_absent_input_and_a_reader_failure(tmp_path, boxes):
+    st, text = _grade(tmp_path / "a", boxes, scenes="absent")["stream-monitor-obs"]
+    assert st == "FAIL" and "absent from the OBS collection" in text, text
+    st, text = _grade(tmp_path / "b", boxes, scenes="crash")["stream-monitor-obs"]
+    assert st == "FAIL" and "reader failed" in text, text
+
+
+def test_the_stream_role_grade_report_prints_every_row(tmp_path, boxes):
+    # the session-apps report with the stream role's monitor entry: the unit row + the three rows, and the
+    # report's own row count check holds (rc 0)
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import strih_session_apps_fakes_1399 as F
+    rows_env = _grade_env(tmp_path, boxes)
+    b, _log = F.fake_bin(tmp_path)
+    body = ('strih_box_load stream-pp\nSTRIH_SESSION_APP_UNITS=(strih-stream-monitor.service)\n'
+            'ok(){ echo "PASS $*"; }\nbad(){ echo "FAIL $*"; }\nnote(){ echo "NOTE $*"; }\n'
+            'strih_session_apps_grade_report "%s" "%s" newlevel && echo REPORT-OK' % (REPO, tmp_path / "home"))
+    env = dict(rows_env)
+    env["PATH"] = "%s:%s" % (b, os.environ["PATH"])
+    r = _bash(body, env=env)
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.splitlines()
+    assert lines[-1] == "REPORT-OK", r.stdout
+    assert len(lines) - 1 == 4, r.stdout
+    assert any("(stream-monitor) strih-stream-monitor.service" in ln for ln in lines)
