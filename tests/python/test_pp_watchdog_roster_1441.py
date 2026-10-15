@@ -37,7 +37,8 @@ PP_FACETS = ("network-reach", "bundle-state", "obs-liveness", "genlock-lock", "r
 NOT_PP_FACETS = ("win-baseline", "vb-matrix", "av-step", "obs-session", "burn-reconcile",
                  "rig-restore", "ndi-portmap")
 
-# A healthy :8899 body as strih-pp served it on 15.10.2026 (the keys the watchdogs read).
+# A healthy :8899 body SHAPED LIKE the one strih-pp served on 15.10.2026: the keys the watchdogs
+# read, with the live values for the graded ones; the build sha and the genlock inputs are made up.
 _HEALTHY = {
     "obs_version": "32.2.0",
     "genlock_build_sha": "b" * 40,
@@ -344,6 +345,7 @@ def _stub_bin(tmp_path):
     b.mkdir(exist_ok=True)
     ping = b / "ping"
     ping.write_text('#!/usr/bin/env bash\nip="${*: -1}"\n'
+                    '[ -z "${TEST_PING_LOG:-}" ] || echo "$ip" >> "$TEST_PING_LOG"\n'
                     'case " ${TEST_PING_UP:-} " in *" $ip "*) exit 0;; *) exit 1;; esac\n',
                     encoding="utf-8")
     curl = b / "curl"
@@ -408,13 +410,31 @@ def test_network_reach_report_only_is_keyed_on_the_home_check_not_a_name():
     assert out == "strih-zz"
 
 
-def test_network_reach_pp_away_never_pages(tmp_path):
+def test_network_reach_pp_away_never_pages_and_is_not_probed(tmp_path):
+    # Review round 1: an away traveling box is not probed at all (a powered-off PP box's hostname
+    # lookups must not eat the unit's 90 s start budget), and it never pages.
     env = _netreach_env(tmp_path, "stream-snv", "127.0.0.9 127.0.0.3")
+    env["TEST_PING_LOG"] = str(tmp_path / "ping.log")
     outs = [_probe_run(tmp_path, "network-reach-alert-watchdog.sh", env) for _ in range(3)]
     for out in outs:
         for box in PP:
             assert not _would_alerts(out, box), out
-    assert "[report-only] strih-pp CONFIRMED unreachable" in outs[-1]
+        assert "strih-pp (127.0.0.1): away" in out, out
+        assert "-> UNREACHABLE" not in out, out   # no PP verdict line, so no handover "forgot"
+    pinged = (tmp_path / "ping.log").read_text(encoding="utf-8").split()
+    assert "127.0.0.1" not in pinged and "127.0.0.2" not in pinged, pinged
+    assert "127.0.0.3" in pinged, pinged
+
+
+def test_network_reach_a_home_pp_box_never_anchors_an_snv_outage(tmp_path):
+    # Review round 1 (reproduced): a home PP box is reached through the companion-pp router, not
+    # the SNV rig path. With every SNV reference node and both SNV boxes dark it must not prove
+    # "dev1 reaches the rig", or strih-snv would page "fyzický zásah" on an SNV uplink outage.
+    env = _netreach_env(tmp_path, "strih-pp", "127.0.0.1")
+    outs = [_probe_run(tmp_path, "network-reach-alert-watchdog.sh", env) for _ in range(3)]
+    for out in outs:
+        assert not _would_alerts(out, "strih-snv"), out
+        assert "nothing to decide" in out, out
 
 
 def test_network_reach_pp_home_unreachable_pages(tmp_path):
