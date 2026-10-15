@@ -60,8 +60,13 @@ def verdict_tokens(text):
 def net_tokens(text):
     """Every REACHABLE/UNREACHABLE token from network-reach-alert-watchdog's per-box line
     `$box ($ip): ping=.. ws:..=.. bundle:..=.. report_only=.. -> REACHABLE|UNREACHABLE` (it does
-    NOT use the `verdict=` shape)."""
-    return _NET_RE.findall(text or "")
+    NOT use the `verdict=` shape).
+
+    A `report_only=1` line is SKIPPED (issue 1441): it is a traveling box that is away (resolume-snv,
+    the Poprad boxes -- PP powered off is the normal state), which the watchdog itself never pages,
+    so it must never read as a forgotten step either."""
+    return [tok for line in (text or "").splitlines() if "report_only=1" not in line
+            for tok in _NET_RE.findall(line)]
 
 
 def bare_token(text):

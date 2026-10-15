@@ -125,10 +125,12 @@ handle_box() {
   local box="$1" ip="$2" body reachable analyze_out verdict state reason n_absent qpc_ppm qpc_exp
   local media_clock media_drift media_disc
 
-  # resolume is a TRAVELING box -- page it only while home (the #1296 condition). strih/stream/imag
-  # are home-check=always so this never skips them; resolume away -> no fetch, no page.
-  if ! obs_fleet_is_home "$box"; then
-    log "$box away (obs_fleet_is_home false) -- traveling box, skipping this pass (no fetch, no page)"
+  # A TRAVELING box (resolume-snv, strih-pp, stream-pp) is paged only while home (the #1296
+  # condition); issue 1441: through the ONE generic gate obs_fleet_poll_now, which polls an `always`
+  # box without consulting obs_fleet_is_home (so the OBS_FLEET_HOME test force-list never drops one).
+  # Away -> no fetch, no page.
+  if ! obs_fleet_poll_now "$box"; then
+    log "$box away (obs_fleet_poll_now false) -- traveling box, skipping this pass (no fetch, no page)"
     return 0
   fi
 

@@ -87,9 +87,16 @@ BOXES="${NETWORK_REACH_BOXES:-$(obs_fleet_boxes network-reach)}"
 # obs_fleet_is_home probe is computed ONLY when NETWORK_REACH_REPORT_ONLY_BOXES is UNSET, so an
 # explicit env override (tests, or a supervisor forcing a state) wins byte-compatibly AND keeps the
 # offline tests offline (no live probe).
+# issue 1441: the default is GENERIC, keyed on each row's home-check, never on a box name -- every
+# BOXES member that obs_fleet_poll_now would not poll this pass (a `traveling` box that is away:
+# resolume-snv, strih-pp, stream-pp; a `retired` one) is report-only; an `always` box and a name the
+# fleet list does not know (an ops override) always page.
 if [ -z "${NETWORK_REACH_REPORT_ONLY_BOXES+set}" ]; then
-  _nr_report_only_default="resolume-snv"
-  if obs_fleet_is_home resolume-snv; then _nr_report_only_default=""; fi
+  _nr_report_only_default=""
+  for _nr_pair in $BOXES; do
+    obs_fleet_poll_now "${_nr_pair%%|*}" && continue
+    _nr_report_only_default="${_nr_report_only_default:+$_nr_report_only_default }${_nr_pair%%|*}"
+  done
   REPORT_ONLY_BOXES="$_nr_report_only_default"
 else
   REPORT_ONLY_BOXES="$NETWORK_REACH_REPORT_ONLY_BOXES"
@@ -216,7 +223,7 @@ handle_box() {
     local p_s="DOWN" w_s="DOWN"
     [ "$ping_ok" = "1" ] && p_s="up"
     [ "$ws_ok" = "1" ] && w_s="up"
-    log "[report-only] $box CONFIRMED unreachable (ping $p_s, OBS-WS:$OBS_WS_PORT $w_s; :$BUNDLE_PORT not probed for a report-only box) -- traveling box (#811), NOT paging. Verify manually via ops SKILL resolume-snv."
+    log "[report-only] $box CONFIRMED unreachable (ping $p_s, OBS-WS:$OBS_WS_PORT $w_s; :$BUNDLE_PORT not probed for a report-only box) -- traveling box away (#811, issue 1441), NOT paging. Verify manually via the ops SKILL for $box."
     return 0
   fi
 

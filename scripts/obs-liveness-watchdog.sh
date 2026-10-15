@@ -100,6 +100,10 @@ measure_boxes() {
   for pair in $(obs_fleet_boxes obs-liveness); do
     name="${pair%%|*}"
     host="${pair##*|}"
+    # issue 1441: ONE generic home gate keyed on the row's home-check, never on a box name -- a
+    # `traveling` box (resolume-snv, strih-pp, stream-pp) is polled only while it is home, so an
+    # away box is never probed and never produces a false wedge verdict; an `always` box always.
+    obs_fleet_poll_now "$name" || continue
     case "$name" in
       # issue 1317 (M4): the production strih is the Linux strih-snv (the Windows `strih` row is
       # retired from the fleet list). It keeps the strih knobs: STRIH_HOST (default = its .202
@@ -107,8 +111,7 @@ measure_boxes() {
       strih-snv) host="$STRIH_HOST"; fps="$STRIH_TARGET_FPS" ;;
       stream-snv) host="$STREAM_HOST"; fps="$STREAM_TARGET_FPS" ;;
       resolume-snv)
-        obs_fleet_is_home resolume-snv || continue   # away -> do not poll a traveling box
-        fps="$RESOLUME_TARGET_FPS"
+        fps="$RESOLUME_TARGET_FPS"   # the home gate above already skipped it while away
         # RESIDUAL (#1296 review): unlike network-reach (whose promotion AND page condition are BOTH
         # keyed on .201 liveness, so they cannot contradict), THIS is a PAGING watchdog whose
         # promotion signal (is_home = OBS-WS :4455 answers) DIFFERS from its page condition (render
@@ -123,6 +126,8 @@ measure_boxes() {
         # identity-confirm-before-poll (read resolume's own :8899 bundle-state profile name) would
         # close it in code; until then it is a documented, supervisor-gated residual.
         ;;
+      # issue 1441: strih-pp / stream-pp (both 30 fps canvases, scripts/obs_box_stream_profile.py)
+      # and any later row take the default target.
       *) fps="${OBS_LIVENESS_DEFAULT_FPS:-30}" ;;
     esac
     box_args+=(--box "${name}=${host}:${fps}")

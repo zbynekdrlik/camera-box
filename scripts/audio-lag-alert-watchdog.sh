@@ -70,7 +70,8 @@ esac
 # audio chain on the CG box), so obs_fleet_boxes audio-lag yields the strih + stream. Issue 1317
 # (M4): the strih is now the Linux strih-snv at 10.77.9.202 -- its vendored OBS writes the same
 # `audio-telemetry #800` lines and its own :8899 server exposes the same facet, so the read is
-# platform-neutral. The AUDIO_LAG_BOXES env override still wins unchanged.
+# platform-neutral. Issue 1441: the Poprad strih-pp + stream-pp (linux-genlock, traveling) serve the
+# same facet and join, read only while home. The AUDIO_LAG_BOXES env override still wins unchanged.
 BOXES="${AUDIO_LAG_BOXES:-$(obs_fleet_boxes audio-lag)}"
 BUNDLE_PORT="${AUDIO_LAG_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
 # shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
@@ -134,7 +135,9 @@ log() { printf '%s [audio-lag-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%
 # fetch_bundle_json <ip> (scripts/lib/watchdog-common.sh, reads CURL_TIMEOUT / BUNDLE_PORT /
 # BUNDLE_PATH) -> prints the JSON body to stdout and returns 0 iff a 200 with a body that starts
 # with `{` came back (a real JSON object). A curl failure or a wedged-but-listening non-JSON answer
-# returns 1 (box_reachable=0 for this pass -> SKIP; deferred to #732/#1001).
+# returns 1 (box_reachable=0 for this pass -> SKIP; deferred to #732/#1001). Every arm passes
+# AUDIO_LAG_FETCH_CMD (Tier-0 seam, issue 1441): an executable run as `<cmd> <ip>` whose stdout
+# replaces the curl fetch, so a `--dry-run` replays a captured body with no live box.
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
 # read_state_field / write_state_field / clear_box_throttle / recovery_latch_fires live in
@@ -164,7 +167,7 @@ lag_minutes() {
 handle_box() {
   local box="$1" ip="$2" body reachable verdict lag src age analyze_out
 
-  if body="$(fetch_bundle_json "$ip")"; then
+  if body="$(fetch_bundle_json "$ip" AUDIO_LAG_FETCH_CMD)"; then
     reachable=1
   else
     reachable=0
@@ -267,7 +270,7 @@ handle_box() {
 handle_box_band() {
   local box="$1" ip="$2" body reachable band_out verdict high base low duty n src
 
-  if body="$(fetch_bundle_json "$ip")"; then
+  if body="$(fetch_bundle_json "$ip" AUDIO_LAG_FETCH_CMD)"; then
     reachable=1
   else
     reachable=0
@@ -387,7 +390,7 @@ require_tools() {
 handle_box_buffered() {
   local box="$1" ip="$2" body reachable buf_out verdict slope max_step n age
 
-  if body="$(fetch_bundle_json "$ip")"; then
+  if body="$(fetch_bundle_json "$ip" AUDIO_LAG_FETCH_CMD)"; then
     reachable=1
   else
     reachable=0
@@ -412,6 +415,12 @@ main() {
   local pair box ip
   for pair in $BOXES; do
     box="${pair%%|*}"; ip="${pair##*|}"
+    # issue 1441: the ONE generic home gate -- a `traveling` box (strih-pp, stream-pp) is read only
+    # while home (all three arms skip it); an `always` box every pass.
+    if ! obs_fleet_poll_now "$box"; then
+      log "$box ($ip): away / retired -- not polled this pass (no fetch, no page)"
+      continue
+    fi
     handle_box "$box" "$ip"
     # #1265 — the BAND arm (self-contained, disjoint state; runs regardless of the lag arm's verdict).
     handle_box_band "$box" "$ip"

@@ -90,15 +90,25 @@
 #                   handles -- the 5.10.2026 stream obs64 held 4M after ~22 h -- and the :8899
 #                   `obs_handles*` facet reads its count on Windows AND Linux (strih-snv: /proc fds).
 #                   The consumer polls resolume only while home, via obs_fleet_poll_now.)
+#   issue 1441 (owner 15.10.2026: one PP/SNV solution): strih-pp + stream-pp, the two Poprad
+#   linux-genlock `traveling` boxes, join network-reach, bundle-state, obs-liveness, genlock-lock,
+#   render-freeze, audio-mixer, obs-handles AND audio-lag -- both serve every one of those :8899
+#   facets (read 15.10.2026, `audio_ts_lag_*` included). They stay OUT of the Windows-only facets
+#   (win-baseline, vb-matrix, obs-session), the stream-snv-only av-step, and the SNV measurement-rig
+#   facets (burn-reconcile, rig-restore, ndi-portmap): a PP measurement rig is an owner decision.
 #
-# TRAVELING-BOX SAFETY (resolume is home only sometimes): a naive add to the PAGING watchdogs would
-# false-page whenever resolume is away (the owner's hardest sensitivity -- the #739 5x false-page
-# incident). So the is_home gate is applied by each CONSUMER, never baked into this pure list:
-#   * network-reach keeps resolume REPORT-ONLY by default and promotes it to a paging node ONLY while
-#     obs_fleet_is_home resolume holds (the NETWORK_REACH_REPORT_ONLY_BOXES env override still wins).
-#   * obs-liveness includes resolume in its poll set ONLY while obs_fleet_is_home resolume holds.
-#   * bundle-state defers a fully-unreachable box to #1001 already (no page/restart against a dark
-#     box), so it is traveling-safe without an is_home gate.
+# TRAVELING-BOX SAFETY (resolume and the PP boxes are home only sometimes): a naive add to the PAGING
+# watchdogs would false-page whenever a traveling box is away (the owner's hardest sensitivity -- the
+# #739 5x false-page incident). So the home gate is applied by each CONSUMER, never baked into this
+# pure list, and it is the ONE generic gate keyed on the row's home-check, never on a box name
+# (issue 1441): obs_fleet_poll_now (always = poll, traveling = only while obs_fleet_is_home, retired
+# = never).
+#   * network-reach keeps every away traveling box REPORT-ONLY by default and pages it ONLY while
+#     obs_fleet_poll_now holds (the NETWORK_REACH_REPORT_ONLY_BOXES env override still wins).
+#   * obs-liveness, bundle-state, render-freeze, audio-lag, audio-mixer, obs-handles and genlock-lock
+#     skip a traveling box that is away (no probe, no fetch, no page).
+#   * A Windows-only action (bundle-state's `schtasks /run`, obs-liveness's launch-obs-genlock plan)
+#     is selected by the box CLASS: a linux-genlock box gets its systemd --user equivalent instead.
 #
 # home-check PORT (#1296): the ticket's example home-check was "resolves + :8898/status answers".
 # RESOLUME-SNV DOES run dantesync (1.8.54, :8898 answers whenever the box is up -- supervisor read-back
@@ -140,9 +150,11 @@
 # strih, scripts/strih-boxes/strih-pp.env) and stream-pp (the PP stream box). They dial their NAMES:
 # dev1 reaches the PP LAN as 10.76.8.x through the companion-pp subnet router while the boxes carry
 # 10.77.8.x, so an IP row would never match the box's own STRIH_IP. `traveling` (polled only while
-# their OBS-WS answers) and in NO facet yet: no dev1 watchdog polls or pages them until a facet adds them.
+# their OBS-WS answers).
 # issue 1426: resolume-pp (the PP CG PC, Windows, its own cg OBS) joins as a traveling NAME row, and
-# the three PP boxes are members of the `build-parity` facet only (the fleet version-parity pass).
+# the three PP boxes are members of the `build-parity` facet (the fleet version-parity pass).
+# issue 1441: strih-pp + stream-pp also joined the dev1 alert-watchdog facets (FACET POLICY above);
+# resolume-pp stays in build-parity only (no :8899 yet, issue 1426).
 OBS_FLEET="${OBS_FLEET:-strih-snv|10.77.9.202|linux-genlock|always
 stream-snv|10.77.9.204|windows-genlock|always
 imag|10.77.9.182|linux-genlock|retired
@@ -237,22 +249,25 @@ obs_fleet_home_check() {
 obs_fleet_facet_members() {
   local facet="${1:-}"
   case "$facet" in
-    audio-lag)     printf 'strih-snv stream-snv' ;;
+    # issue 1441: the Poprad boxes (strih-pp, stream-pp: linux-genlock, traveling) join every facet
+    # whose premise is a platform-neutral read of their own :8899 / OBS-WS / ping; each consumer
+    # polls a traveling box only while obs_fleet_poll_now says it is home.
+    audio-lag)     printf 'strih-snv stream-snv strih-pp stream-pp' ;;
     av-step)       printf 'stream-snv' ;;
     vb-matrix)     printf 'stream-snv' ;;
-    bundle-state)  printf 'strih-snv stream-snv resolume-snv' ;;
-    network-reach) printf 'strih-snv stream-snv resolume-snv' ;;
-    obs-liveness)  printf 'strih-snv stream-snv resolume-snv' ;;
-    genlock-lock)  printf 'strih-snv stream-snv imag resolume-snv' ;;
-    render-freeze) printf 'strih-snv stream-snv resolume-snv' ;;
+    bundle-state)  printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;
+    network-reach) printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;
+    obs-liveness)  printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;
+    genlock-lock)  printf 'strih-snv stream-snv imag resolume-snv strih-pp stream-pp' ;;
+    render-freeze) printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;
     ndi-portmap)   printf 'strih-snv' ;;
     obs-session)   printf 'stream-snv resolume-snv' ;;
     burn-reconcile) printf 'strih-snv stream-snv' ;;
     rig-restore)   printf 'strih-snv stream-snv' ;;
     ndi-sender)    printf 'strih-snv stream-snv resolume-snv' ;;
     win-baseline)  printf 'stream-snv resolume-snv' ;;   # issue 1357: the Windows OBS-box baseline (win-baseline-check.sh)
-    audio-mixer)   printf 'strih-snv stream-snv resolume-snv' ;;   # issue 1381: mixer real time + VBAN pacer loss
-    obs-handles)   printf 'strih-snv stream-snv resolume-snv' ;;   # issue 1406: the OBS process handle / fd count
+    audio-mixer)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1381: mixer real time + VBAN pacer loss
+    obs-handles)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1406: the OBS process handle / fd count
     build-parity)  printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp' ;;   # issue 1426: one OBS genlock build across both venues
     *)
       echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles build-parity)" >&2
@@ -411,8 +426,10 @@ obs_fleet_refuse_linux_target() {
 
 # obs_fleet_poll_now <name> -> returns 0 when a per-box consumer loop should poll NAME this pass, 1
 # when it must skip it (issue 1317 part 2 -- the traveling/retired gate the issue-1317 per-box
-# consumers share: the obs-session, burn-reconcile and rig-restore watchdogs; obs-liveness and
-# network-reach predate it and gate resolume with obs_fleet_is_home themselves). An `always` box is
+# consumers share: the obs-session, burn-reconcile, rig-restore, audio-mixer and obs-handles
+# watchdogs; since issue 1441 also network-reach + obs-liveness (which gated resolume by its NAME),
+# bundle-state, render-freeze, audio-lag (no gate before) and genlock-lock (obs_fleet_is_home)).
+# An `always` box is
 # polled WITHOUT consulting obs_fleet_is_home, so the OBS_FLEET_HOME force-list (a traveling-box
 # test seam) never drops a fixed box; a `traveling` box only while obs_fleet_is_home holds; a
 # `retired` box never. A name with NO row (an ops `<X>_BOXES` override naming a box the table does

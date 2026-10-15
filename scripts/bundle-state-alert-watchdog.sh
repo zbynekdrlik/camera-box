@@ -66,10 +66,11 @@ esac
 # declared fleet list (scripts/lib/obs-fleet.sh, #1296): strih-snv (the production strih since the
 # issue-1317 M4 cut-over -- a linux-genlock box, so its auto-restart is `systemctl --user`, see
 # box_fleet_class), stream AND resolume (RESOLUME-SNV,
-# a genlock cg-obs box). resolume is TRAVELING-SAFE here with no is-home gate — a fully-unreachable
-# box (ping + :4455 + :8899 all down) is deferred to the #1001 reach watchdog below (no page, no
-# pointless restart against a dark box), which is exactly the normal away state. The
-# BUNDLE_STATE_BOXES env override still wins unchanged.
+# a genlock cg-obs box), plus since issue 1441 the Poprad strih-pp + stream-pp (linux-genlock, so
+# their restart is the systemd --user one too). A `traveling` box (resolume, the PP boxes) is probed
+# only while home (obs_fleet_poll_now in main); a fully-unreachable box (ping + :4455 + :8899 all
+# down) is still deferred to the #1001 reach watchdog (no page, no pointless restart against a dark
+# box). The BUNDLE_STATE_BOXES env override still wins unchanged.
 BOXES="${BUNDLE_STATE_BOXES:-$(obs_fleet_boxes bundle-state)}"
 OBS_WS_PORT="${BUNDLE_STATE_OBS_WS_PORT:-4455}"       # OBS WebSocket, live on both boxes (box-up signal)
 BUNDLE_PORT="${BUNDLE_STATE_BUNDLE_PORT:-8899}"       # the bundle-state HTTP service under test (#650)
@@ -317,6 +318,13 @@ main() {
   local anchor_reach_flags=()
   for pair in $BOXES; do
     box="${pair%%|*}"; ip="${pair##*|}"
+    # issue 1441: the ONE generic home gate (obs_fleet_poll_now, keyed on the row's home-check): a
+    # `traveling` box that is away (resolume-snv, strih-pp, stream-pp) is not probed at all -- no
+    # restart attempt, no page, and it never counts toward the dev1-side-outage anchor.
+    if ! obs_fleet_poll_now "$box"; then
+      log "$box ($ip): away / retired -- not probed this pass (no restart, no page)"
+      continue
+    fi
     names+=("$box"); ips+=("$ip")
     local p w b
     p="$(probe_ping "$ip")"; w="$(probe_tcp "$ip" "$OBS_WS_PORT")"; b="$(probe_http_bundle "$ip")"

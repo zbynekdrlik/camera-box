@@ -28,8 +28,8 @@
 #
 # NO reference-anchor / dev1-side-outage guard is needed: the ONLY page condition is a SUCCESSFULLY
 # FETCHED positive reading, so a dev1-side path outage / a dark box -> box_reachable=0 -> SKIP -> no
-# page (a box/:8899-down page is #732/#1001 territory). This is why resolume (traveling) is safe in
-# the roster with no is_home gate.
+# page (a box/:8899-down page is #732/#1001 territory). A traveling box (resolume-snv, strih-pp,
+# stream-pp) is moreover read only while home (issue 1441: the generic obs_fleet_poll_now gate).
 #
 # Usage:
 #   scripts/render-freeze-alert-watchdog.sh            # one pass: fetch -> decide -> alert
@@ -83,8 +83,11 @@ STATE_FILE="${RENDER_FREEZE_ALERT_STATE_FILE:-$_state_default}"
 log() { printf '%s [render-freeze-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # -- I/O probe (dev1-local; NOT pure) -----------------------------------------------------------
-# fetch_bundle_json <ip> (scripts/lib/watchdog-common.sh, reads CURL_TIMEOUT / BUNDLE_PORT /
-# BUNDLE_PATH) -> prints the JSON body + returns 0 iff a 200 with a `{`-body came back.
+# fetch_bundle_json <ip> RENDER_FREEZE_FETCH_CMD (scripts/lib/watchdog-common.sh, reads CURL_TIMEOUT /
+# BUNDLE_PORT / BUNDLE_PATH) -> prints the JSON body + returns 0 iff a 200 with a `{`-body came back.
+# RENDER_FREEZE_FETCH_CMD (Tier-0 seam, issue 1441): an executable run as `<cmd> <ip>` whose stdout
+# replaces the curl fetch, so a `--dry-run` replays a captured body with no live box (the
+# genlock-lock / audio-mixer / obs-handles seam). A non-zero exit still reads unreachable -> SKIP.
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
 # read_state_field / write_state_field / recovery_latch_fires live in scripts/lib/watchdog-common.sh.
@@ -153,7 +156,7 @@ handle_box() {
   local box="$1" ip="$2" body reachable out
   local rverdict lagged lagged_age zverdict bursts bursts_age
 
-  if body="$(fetch_bundle_json "$ip")"; then reachable=1; else reachable=0; body=""; fi
+  if body="$(fetch_bundle_json "$ip" RENDER_FREEZE_FETCH_CMD)"; then reachable=1; else reachable=0; body=""; fi
   out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
     --lagged-floor "$LAGGED_FLOOR" --render-fresh-age-s "$RENDER_FRESH_AGE_S" \
     --min-bursts "$MIN_BURSTS" --relock-fresh-age-s "$RELOCK_FRESH_AGE_S" 2>/dev/null)"
@@ -208,6 +211,12 @@ main() {
   local pair box ip
   for pair in $BOXES; do
     box="${pair%%|*}"; ip="${pair##*|}"
+    # issue 1441: the ONE generic home gate -- a `traveling` box (resolume-snv, strih-pp, stream-pp)
+    # is read only while home; an `always` box every pass.
+    if ! obs_fleet_poll_now "$box"; then
+      log "$box ($ip): away / retired -- not polled this pass (no fetch, no page)"
+      continue
+    fi
     handle_box "$box" "$ip"
   done
   log "pass end"
