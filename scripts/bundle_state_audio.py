@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The OBS audio facet parsers of the bundle-state gather: the `audio-telemetry #800` lag +
 freshness (#1226 / #1231), the reference-source ts_lag band (#1265), the buffered_ms drift/step
-shape (#1325), and the audio MIXER real-time facet (issue 1381 / 1385). The obs-vban pacer
+shape (#1325), the audio MIXER real-time facet (issue 1381 / 1385) and the mix BUFFERING
+ratchet facet (issue 1381). The obs-vban pacer
 loss facet read beside the mixer lives in `bundle_state_vban`.
 
 Part of the bundle-state gather split (issue 1386): a PURE facet family re-exported by
@@ -370,3 +371,62 @@ def _audio_stall_dump_in_head(text):
         return False
     head_slice = t.partition(LOG_BOUNDED_READ_SEPARATOR)[0]
     return _AUDIO_STALL_RE.search(head_slice) is not None
+
+
+# issue 1381 -- the audio mix BUFFERING ratchet. A stall of the audio callback (15.10.2026: 432 ms
+# on stream-snv) makes libobs add buffering ABOVE the genlock floor, and that delay stays on the
+# whole output until an OBS restart, while the mixer tick counts recover. `#800` logs the current
+# total every minute; the floor line (`genlock audio buffering floor ... is now N`) is the
+# session's start value, and only the `ABOVE the floor ... (source: <name>)` line names the source
+# (the #800 `buffering_source=` reads `-` on every live line). The FIRST #800 line of a session is
+# printed before the first tick and reads 0, so it is never a start value.
+_AUDIO_800_TOTAL_RE = re.compile(
+    r"audio-telemetry #800: total_buffering=(\d+) ms \(ticks=\d+/\d+\) buffering_source=(.*)$")
+_AUDIO_FLOOR_RE = re.compile(
+    r"genlock audio buffering floor \(issue 1367\): total audio buffering is now (\d+) milliseconds")
+_AUDIO_ABOVE_SOURCE_RE = re.compile(
+    r"genlock audio buffering ABOVE the floor \(issue 1367\): adding \d+ milliseconds of audio "
+    r"buffering, total audio buffering is now \d+ milliseconds \(source: (.*?)\); ASRC level band")
+
+
+def audio_buffering_from_log(text, tail=None):
+    """issue 1381 -- `(now_ms, start_ms, source, age_s)` of the audio mix buffering, all strings,
+    or four `""` when the tail holds no `#800` summary line (absent -> UNKNOWN downstream).
+
+    * `now_ms` -- the newest `#800` `total_buffering=` in the tail.
+    * `start_ms` -- the session's start value: the NEWEST floor line anywhere in the bounded read
+      (it is printed at the first tick, so a long session keeps it in the head slice; an audio
+      reset prints a new one); without one (a build before the floor) the first NON-ZERO `#800`
+      total of the tail. `""` when neither exists.
+    * `source` -- the newest `ABOVE the floor` line's source in the bounded read, else the newest
+      `#800` `buffering_source` that is not `-`, else `""` (never a guess).
+    * `age_s` -- the newest `#800` line's in-log age behind the log head (the audio-mixer recency
+      convention). `tail` = a precomputed `timestamped_tail_lines(text)`."""
+    stamped, head = tail if tail is not None else timestamped_tail_lines(text)
+    newest = None          # (pos_s, total, source) of the newest #800 line in the tail
+    first_nonzero = None
+    for pos, line in stamped:
+        if "audio-telemetry #800: total_buffering=" not in line:
+            continue
+        m = _AUDIO_800_TOTAL_RE.search(line.rstrip("\r"))
+        if not m:
+            continue
+        newest = (pos, m.group(1), m.group(2).strip())
+        if first_nonzero is None and int(m.group(1)) > 0:
+            first_nonzero = m.group(1)
+    if newest is None:
+        return ("", "", "", "")
+    floor = above_source = None
+    for line in (text or "").splitlines():
+        if "genlock audio buffering" not in line:
+            continue
+        m = _AUDIO_FLOOR_RE.search(line)
+        if m:
+            floor = m.group(1)
+            continue
+        m = _AUDIO_ABOVE_SOURCE_RE.search(line)
+        if m:
+            above_source = m.group(1)
+    start = floor if floor is not None else (first_nonzero or "")
+    source = above_source or ("" if newest[2] in ("", "-") else newest[2])
+    return (newest[1], start, source, str(round(head - newest[0])))

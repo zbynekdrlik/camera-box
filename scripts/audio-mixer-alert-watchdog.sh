@@ -16,6 +16,10 @@
 #     time, a surplus too) or OVERLOADED (more than 30 late ticks in the minute).
 #   * vban_pacer_* -- the per-destination obs-vban pacer loss-counter increase inside the last
 #     660 s of the log. The VBAN arm pages VBAN_LOSS when any loss counter moved.
+#   * audio_buffering_* -- the audio mix buffering (`audio-telemetry #800: total_buffering=`) and
+#     its session start (the genlock floor line). The BUFFERING arm pages RAISED (issue 1381) when it
+#     sits at least one mixer tick above the start: a stall of the audio callback ratcheted it, and
+#     the whole output stays that much later until an OBS restart (15.10.2026: 85 -> 170 ms).
 # The MIXER arm also pages STALLED (issue 1385): the newest dump is > 180 s behind the log head
 # while the log head itself is live on the box's own clock (`obs_log_head_age_s` <= 60 s) -- the
 # audio thread stopped while OBS keeps logging, silence on air on a box without VBAN outputs.
@@ -52,7 +56,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -207,6 +211,7 @@ handle_box() {
   local mverdict ticks over tick_ms age head_age expected dev window
   local -a clock_args=()
   local vverdict events loss_ms dest vage loss_txt
+  local bverdict bnow bstart bdelta bticks bsrc bage src_txt
 
   if body="$(fetch_bundle_json "$ip" AUDIO_MIXER_FETCH_CMD)"; then reachable=1; else reachable=0; body=""; fi
   # issue 1385: the previous pass's log head age feeds the log-clock check (AUDIO_MIXER_NOW_EPOCH is
@@ -232,7 +237,11 @@ handle_box() {
   vverdict="$(field "$out" vban_verdict)"; events="$(field "$out" vban_events)"
   loss_ms="$(field "$out" vban_loss_ms)"; dest="$(field "$out" vban_dest)"
   vage="$(field "$out" vban_age_s)"
-  log "$box ($ip): reachable=$reachable mixer=${mverdict:-<none>} ticks=${ticks} over=${over} tick_ms=${tick_ms} window_ms=${window} age=${age} log_head_age=${head_age} dev=${dev} | vban=${vverdict:-<none>} events=${events} loss_ms=${loss_ms} dest=${dest} age=${vage}"
+  bverdict="$(field "$out" buffering_verdict)"; bnow="$(field "$out" buffering_ms)"
+  bstart="$(field "$out" buffering_start_ms)"; bdelta="$(field "$out" buffering_delta_ms)"
+  bticks="$(field "$out" buffering_raised_ticks)"; bsrc="$(field "$out" buffering_source)"
+  bage="$(field "$out" buffering_age_s)"
+  log "$box ($ip): reachable=$reachable mixer=${mverdict:-<none>} ticks=${ticks} over=${over} tick_ms=${tick_ms} window_ms=${window} age=${age} log_head_age=${head_age} dev=${dev} | vban=${vverdict:-<none>} events=${events} loss_ms=${loss_ms} dest=${dest} age=${vage} | buffering=${bverdict:-<none>} now_ms=${bnow} start_ms=${bstart} delta_ms=${bdelta} ticks=${bticks} source=${bsrc} age=${bage}"
 
   # MIXER arm
   case "$mverdict" in
@@ -264,6 +273,22 @@ handle_box() {
       handle_arm "$box" "VBAN_LOSS" "vban-loss" "vban-loss" \
         "🚨 VBAN výpadok ($REPO_SLUG): **$box** ($ip) — VBAN výstup **${dest}** stratil zvuk za posledných ~11 min: **${events} udalostí straty**${loss_txt} (podtečenie/pretečenie/orezanie alebo ticho/preskok). Príjemca (FOH/lv1) počuje výpadky. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
     *)       log "$box vban: unexpected verdict '${vverdict:-<empty>}' -- holding, no page" ;;
+  esac
+
+  # BUFFERING arm (issue 1381; independent, disjoint state): the mix buffering ratcheted above its
+  # session start. It ends only with an OBS restart, so recovery is that restart (log-only).
+  case "$bverdict" in
+    SKIP)    : ;;   # already logged for the mixer arm (same fetch)
+    UNKNOWN) log "$box buffering: no audio-telemetry #800 line / no start value (fresh OBS start / older build or gather) -- holding, no page" ;;
+    STALE)   log "$box buffering: STALE -- newest #800 line ${bage}s behind the log head or the log head is not live (${head_age:-no}s old) -- machine channel only, no page"
+             reset_arm_confirm "$box" "audio-buffering" ;;
+    HEALTHY) handle_healthy_arm "$box" "audio-buffering" ;;
+    RAISED)
+      src_txt="zdroj: ${bsrc}"
+      [ -n "$bsrc" ] || src_txt="zdroj nie je v logu (riadok so zvýšením už vypadol z konca logu)"
+      handle_arm "$box" "RAISED" "audio-buffering" "audio-buffering" \
+        "🚨 Oneskorenie zvuku ($REPO_SLUG): **$box** ($ip) — OBS zvýšil zvukové oneskorenie mixu z ${bstart} ms na **${bnow} ms** (+${bdelta} ms, ${src_txt}). Celý zvukový výstup tohto OBS (stream/strih) je teraz o ${bdelta} ms neskôr a ostane tak až do reštartu OBS. Príčinou býva zaseknutie zvukového vlákna (15.10.: 432 ms → +85 ms). Treba rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
+    *)       log "$box buffering: unexpected verdict '${bverdict:-<empty>}' -- holding, no page" ;;
   esac
 }
 

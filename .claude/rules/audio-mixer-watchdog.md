@@ -23,12 +23,13 @@ facet exist on resolume, and the VBAN arm reads UNKNOWN there by design ("no VBA
 -- holding, no page"). The MIXER arm still watches the cg OBS. The VBAN arm comes back by itself
 if a box sends VBAN again.
 
-## The two signals
+## The signals
 
 | Facet group (gather) | Log line | Arm | Pages |
 |---|---|---|---|
 | `audio_mixer_ticks` / `_ticks_over` / `_tick_ms` / `_window_ms` / `_age_s` + `obs_log_head_age_s` | `audio-stall #1367: ... ticks=N ticks_over=M tick_ms=21.3` (obs-audio.c, one per dump) | MIXER | BEHIND: `abs(ticks - 2812.5) > 5`; OVERLOADED: `ticks_over > 30`; STALLED: dump age > 180 s AND log head age <= 60 s (issue 1385) |
 | `vban_pacer_loss_events` / `_loss_ms` / `_loss_dest` / `vban_pacer_age_s` | `[obs-vban] obs-vban pacing: ...` (every 10 s per output) | VBAN | VBAN_LOSS: any loss counter moved in the window |
+| `audio_buffering_ms` / `_start_ms` / `_source` / `_age_s` | `audio-telemetry #800: total_buffering=N ms` (every 60 s) + the genlock floor / `ABOVE the floor` lines (obs-audio.c) | BUFFERING | RAISED: at least one mixer tick above the session start (issue 1381, the section below) |
 
 Both are parsed from the TAIL of the #1222 bounded read, in the server's one `obs_log_parse`
 tuple (appended at the END; the unpack is order-sensitive). Omit-when-empty: a box with no dump yet
@@ -169,6 +170,55 @@ must not page a stopped thread too:
   are written by the same 60 s block of `audio_callback`. A second pager on it would double-page
   one fault. This watchdog's STALLED is the one pager for a stopped audio thread.
 
+## BUFFERING = the mix buffering ratcheted above its session start (issue 1381, design 6201780920)
+
+On 15.10.2026 a 432 ms stall of the stream-snv audio callback made libobs add 85 ms of mix
+buffering (85 -> 170 ms, `ABOVE the floor ... (source: pre-fotky video)`), and the whole stream
+output stayed 85 ms later until the OBS restart at 21:28. The MIXER arm read HEALTHY on every pass:
+it grades only the newest 60 s dump, and a stall that catches up leaves the tick counts near
+nominal. The lasting, audible effect is the buffering, so this third arm pages it.
+
+- **Gather** (`audio_buffering_from_log`, `bundle_state_audio.py`, the shared `tail=`):
+  - `audio_buffering_ms` = the newest `#800` `total_buffering=` in the tail; no `#800` line in the
+    tail = the whole facet absent -> UNKNOWN;
+  - `audio_buffering_start_ms` = the NEWEST `genlock audio buffering floor ... is now N` line in the
+    bounded read (printed at the first tick, so a long session keeps it in the head slice; an audio
+    reset prints a new one), else the first NON-ZERO `#800` total of the tail (a build before the
+    floor). **The first `#800` line of every session reads `total_buffering=0 ms (ticks=0/45)`**
+    (printed in the same millisecond as the floor line, before the first tick), so it is never a
+    start value -- read live on stream-snv 13.10 + 15.10;
+  - `audio_buffering_source` = the newest `ABOVE the floor ... (source: <name>)` line in the bounded
+    read. **The `#800` `buffering_source=` reads `-` on every live line, also after a raise**, so it
+    is only a fallback when it names something. A raise whose ABOVE line left both slices of a long
+    session has no source: the page says so, never a guess;
+  - `audio_buffering_age_s` = the newest `#800` line's age behind the log head.
+- **Decision** (`classify_buffering`): RAISED when the raise is at least one mixer tick, counted in
+  WHOLE ticks (`round(delta / tick) >= 1`). libobs truncates the totals to whole ms (4 ticks = 85,
+  5 ticks = 106), so a one-tick raise reads 21 ms, under the 21.3 ms tick: a plain `delta >= tick`
+  would miss it. The tick comes from the mixer facet's `audio_mixer_tick_ms` when it is a known
+  sample rate, else the shortest known tick (`buffering_tick_ms`, derived from
+  `AUDIO_OUTPUT_FRAMES` and the rates, never a literal). STALE when the `#800` line is older than
+  `AUDIO_MIXER_STALE_AFTER_S` or the log head is frozen (> 180 s, the mixer arm's bound); a lower
+  value than the start (an audio reset) is HEALTHY.
+- **Watchdog:** the third arm, state prefix and key base `audio-buffering`: 2-pass confirm, the
+  arm + box throttle, `watchdog_notify_key "audio-buffering-<box>"` (production-critical, on air
+  until a restart), STALE resets the confirm (the date-less-log rule above), HEALTHY = one
+  machine-channel RECOVERY line. The ratchet only ends with an OBS restart, so the recovery IS that
+  restart. The page says the stream/strih output audio is now N ms later until an OBS restart and
+  names the source.
+- **resolume (stated, a review point):** the cg OBS legitimately grows its buffering on a media /
+  `NDI test` start ON PROGRAM (`genlock-audio-buffering-floor.md`; the mix guard stops only hidden
+  sources), so the arm pages there too. That delay is real on the cg output (its NDI audio into
+  SongPlayer runs later until a restart), but it is not a stall; the design left an absolute bound
+  to review.
+- **Deploy:** the facet is new on the `:8899` gather, so the bundle-state server tree must be
+  redeployed on stream-snv, strih-snv and resolume (supervisor step, every file of
+  `scripts/lib/bundle-state-files.txt`). Until then the facet is absent and the arm reads UNKNOWN.
+- Tier-0: `tests/python/test_audio_mixer_buffering_1381.py` -- the parser over the real 15.10 lines
+  (the `#800` line rendered from the C format string), the truth table, and the real bash watchdog
+  through `AUDIO_MIXER_FETCH_CMD` (RAISED twice -> one page, HEALTHY -> one RECOVERY line, the
+  time-bucketed key read from a fake notify).
+
 ## VBAN loss = counter increase inside a 660 s window, per destination
 
 The pacer counters are cumulative since the output thread started, so the gather reports how much
@@ -275,8 +325,8 @@ strih-snv's current log (196 dumps, review round 1) read ticks=2813 with ticks_o
 
 - Roster: obs-fleet facet `audio-mixer` = strih-snv stream resolume (`obs_fleet_boxes audio-mixer`,
   env override `AUDIO_MIXER_BOXES`); resolume is polled only while home (`obs_fleet_poll_now`).
-- PRODUCTION-CRITICAL (issue 1308): both arms time-bucket their key —
-  `watchdog_notify_key "audio-mixer-<box>"` / `"vban-loss-<box>"` — and the file is on the
+- PRODUCTION-CRITICAL (issue 1308): all three arms time-bucket their key —
+  `watchdog_notify_key "audio-mixer-<box>"` / `"vban-loss-<box>"` / `"audio-buffering-<box>"` — and the file is on the
   `_PRODUCTION_CRITICAL_TIME_BUCKETED` allowlist. The throttle signature is arm + box, never the
   verdict, so a BEHIND ↔ OVERLOADED flip of one fault is not a new incident. Throttle 12 passes (~1 h).
 - DETECTION ONLY, recovery log-only, ships DISABLED; the timer is on `scripts/lib/watchdog-roster.sh`
