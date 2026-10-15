@@ -167,6 +167,27 @@ def test_an_800_line_older_than_a_newer_floor_line_is_not_current():
     assert bsg.audio_buffering_from_log(_text(lines))[:2] == ("85", "85")
 
 
+def _floor(ts, ms):
+    return (f"{ts}: genlock audio buffering floor (issue 1367): total audio buffering is now {ms} "
+            "milliseconds from the first audio tick, dynamically increasing above")
+
+
+def test_a_bounded_read_takes_the_tails_floor_over_the_heads():
+    # Review round 2: an audio reset inside the tail (e.g. a sample-rate change) wins over the
+    # session's floor line in the head slice.
+    head = [_floor("09:00:00.000", 85), _t800("09:01:00.000", 85, 4)]
+    tail = [_floor("12:00:00.000", 92), _t800("12:01:00.000", 92, 4)]
+    now, start, _src, _age = bsg.audio_buffering_from_log(_text(head) + SEP + _text(tail))
+    assert (now, start) == ("92", "92")
+
+
+def test_a_bounded_read_takes_the_newest_floor_of_the_head():
+    head = [_floor("09:00:00.000", 85), _floor("09:30:00.000", 92)]
+    tail = [_t800("12:01:00.000", 92, 4)]
+    now, start, _src, _age = bsg.audio_buffering_from_log(_text(head) + SEP + _text(tail))
+    assert (now, start) == ("92", "92")
+
+
 def test_the_first_minute_of_a_session_is_absent_not_zero():
     # The session's first #800 line (0 ms, before the first tick) precedes the floor line.
     lines = [_t800("21:28:27.715", 0, 0), FLOOR.replace("15:57:53.164", "21:28:27.715")]

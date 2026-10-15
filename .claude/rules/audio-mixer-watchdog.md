@@ -208,8 +208,8 @@ nominal. The lasting, audible effect is the buffering, so this third arm pages i
   arm + box throttle, `watchdog_notify_key "audio-buffering-<box>"` (production-critical, on air
   until a restart), STALE resets the confirm (the date-less-log rule above), HEALTHY = one
   machine-channel RECOVERY line. The ratchet only ends with an OBS restart, so the recovery IS that
-  restart. The page says the stream/strih output audio is now N ms later until an OBS restart and
-  names the source.
+  restart. The page says the OBS output audio is now N ms later until an OBS restart and names the
+  source (or that its line left the log tail).
 - **resolume:** a media / `NDI test` start ON PROGRAM can still grow the cg OBS buffering
   (`genlock-audio-buffering-floor.md`; the mix guard stops only hidden and late-entering sources),
   and the arm would page it: the delay is real on the cg output until a restart. Read-only on
