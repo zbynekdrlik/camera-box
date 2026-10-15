@@ -44,7 +44,7 @@ def test_cut_plan_never_overwrites_an_existing_save():
     saved = {"name": "Fade", "duration_ms": 500, "fixed": False}
     plan = obs_phase2.transition_cut_plan(CUT, saved=saved)
     assert plan["save"] is None
-    assert plan["set"] == "Cut"
+    assert plan["set"] is None   # already on Cut: no request, same as a Cut box without a save
 
 
 def test_cut_plan_on_a_cut_box_saves_cut_and_sets_nothing():
