@@ -1,0 +1,17 @@
+[Unit]
+# dev2 lipsync (SyncNet) A/V-sync measurement of ONE venue's stream -- one pass (#1331, issue 1441).
+# The instance name is the venue (avsync-measure-dev2@snv, avsync-measure-dev2@pp): the measurer takes
+# the venue's grab URL from the venue table (scripts/lib/avsync-venues.sh) and writes
+# ~/.camera-box/avsync-watchdog-heartbeat-<venue>.txt, which the dev1 watchdogs read
+# (AVSYNC_HEARTBEAT_HOST=dev2). Runs on dev2 (GPU), never on an encoding stream box.
+Description=camera-box dev2 lipsync (SyncNet) measurement of venue %i -- one pass (issue 1441)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# Installed to ~/avsync/ on dev2 by scripts/avsync-dev2-install.sh. %h = the dev2 user's home.
+ExecStart=%h/avsync/scripts/avsync-measure-dev2.sh --venue %i
+# One 35 s RTMP grab (~50 s with its read timeout) + a wait for the OTHER venue's SyncNet run on the
+# shared dev2 GPU lock (<= the 180 s cap) + this venue's own SyncNet run (<= 180 s, bounded INSIDE the
+# script). 600 s covers the worst case; a pass never overlaps itself (the timer's OnUnitInactiveSec).
+TimeoutStartSec=600

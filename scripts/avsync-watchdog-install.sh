@@ -198,7 +198,7 @@ retire_plan() {
   cat <<PLAN
 # ===== #1331 avsync stream-box RETIREMENT plan (${mcp}, ${box_ip}) =====
 # The A/V-sync (SyncNet) measurement moved OFF this encoding box onto dev2 (scripts/
-# avsync-measure-dev2.sh + systemd/avsync-measure-dev2.timer), because measuring on the encoding
+# avsync-measure-dev2.sh + systemd/avsync-measure-dev2@.timer, one per venue), because measuring on the encoding
 # laptop during live caused OBS render lag + audio buffer steps (17.9.2026 evidence:
 # program-render-audit lagged>0 in 19/24/28 windows over 10 min, two audio buffer steps). These
 # stream-box tasks STAY disabled -- run this via the ${mcp} MCP Shell (schtasks, session-agnostic):

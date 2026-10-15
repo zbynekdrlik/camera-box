@@ -275,7 +275,7 @@ def test_append_day_log_creates_the_day_file_and_appends_rows(tmp_path):
         'avsync_measure_append_day_log 1700000000 "measured: db=-5.0 x"\n'
         'avsync_measure_append_day_log 1700000090 "no-signal: y"\n'
         'day=$(date -d @1700000000 +%Y-%m-%d)\n'
-        'cat "$HOME/avsync/measurements-$day.tsv"\n'
+        'cat "$HOME/avsync/measurements-snv-$day.tsv"\n'
     )
     out = _source(_MEASURER, body, {"HOME": str(tmp_path)})
     assert out.splitlines() == [
@@ -295,7 +295,8 @@ def test_append_day_log_uses_the_local_day_from_the_pass_epoch(tmp_path):
     day = _sp.run(
         ["date", "-d", "@1700000000", "+%Y-%m-%d"], capture_output=True, text=True
     ).stdout.strip()
-    assert out.strip() == f"measurements-{day}.tsv"
+    # issue 1441: one day log per venue (the sourced measurer's default venue is snv)
+    assert out.strip() == f"measurements-snv-{day}.tsv"
 
 
 def test_main_appends_the_day_log_after_writing_the_heartbeat():
