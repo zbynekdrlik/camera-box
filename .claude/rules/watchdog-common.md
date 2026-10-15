@@ -71,6 +71,19 @@ recovery one-liner under three names, and the three fetches that only differed b
   bundle-state, ndi-halving and vban-rate, whose `--help` prints a line range that reaches into the
   source block. There it goes after the last source line, so `--help` stays byte-identical.
 
+## Two harness traps when sourcing a watchdog from a test (issue 1441)
+
+- **`bash -c '. "$1"; …' harness <path>` hands `$1` to the watchdog's own CLI parser**, which
+  refuses it (`unknown arg '<path>'`, exit 2). Clear the positionals first:
+  `wd="$1"; set --; . "$wd"`.
+- **Gate a per-box loop with `obs_fleet_poll_now`, never `obs_fleet_is_home`.** Under the
+  `OBS_FLEET_HOME` test force-list `obs_fleet_is_home` reads an `always` box (strih-snv) as AWAY
+  unless it is listed, so a test naming only the PP boxes silently drops the SNV boxes;
+  `obs_fleet_poll_now` polls an `always` box without asking. Replay a roster watchdog through its
+  `*_FETCH_CMD` seam with a per-HOST fixture script (`<dir>/<host>.json`, absent = exit 1 = SKIP),
+  so the default roster's real SNV IPs never reach the network
+  (`tests/python/test_pp_watchdog_roster_1441.py`).
+
 ## Proving a helper move is behaviour-neutral (the issue-1386 recipe)
 
 1. **`declare -f` identity — the load-bearing proof.** Source the old and the new copy of every
