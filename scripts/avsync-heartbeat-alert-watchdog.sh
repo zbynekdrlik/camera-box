@@ -40,6 +40,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # (this watchdog must survive a bad pass and keep polling on the next timer tick, see the header).
 # `set +e` is load-bearing: `set -uo pipefail` alone never clears the lib's -e (issue 1386).
 set +e -uo pipefail
+# issue 1441: derive the venue table once for this pass (every accessor below reuses it).
+avsync_venue_table_load
 
 DRY_RUN=0
 case "${1:-}" in
@@ -125,7 +127,10 @@ measure() {
     PROBE_OUT=""
     return 0
   fi
-  PROBE_OUT="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd "" "$(avsync_venue_dev2_heartbeat_remote_path "$VENUE")")" 2>/dev/null || true)"
+  # the legacy venue falls back to the old single file a not-yet-upgraded dev2 still writes
+  PROBE_OUT="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd "" \
+    "$(avsync_venue_dev2_heartbeat_remote_path "$VENUE")" \
+    "$(avsync_venue_dev2_legacy_heartbeat_remote_path "$VENUE")")" 2>/dev/null || true)"
 }
 
 # ── read / write persisted state (same key=value shape as the #391/#882 siblings) ──────────────
@@ -219,11 +224,16 @@ report_fetch_rows() {
     log "report: no ssh transport for host=$(avsync_heartbeat_host) -- no rows this pass"
     return 0
   fi
-  local today yday
+  local today yday files
   today="$(date +%Y-%m-%d)"
   yday="$(date -d 'yesterday' +%Y-%m-%d 2>/dev/null || echo "$today")"
-  "${pfx[@]}" "cat ~/avsync/measurements-$VENUE-$yday.tsv ~/avsync/measurements-$VENUE-$today.tsv 2>/dev/null" \
-    2>/dev/null || true
+  files="\$HOME/avsync/measurements-$VENUE-$yday.tsv \$HOME/avsync/measurements-$VENUE-$today.tsv"
+  # the legacy venue also reads the old single day logs (a not-yet-upgraded dev2 still writes them;
+  # the decider sorts + dedups rows by epoch, so reading both never double-counts a pass)
+  if [ "$VENUE" = "$AVSYNC_LEGACY_HEARTBEAT_VENUE" ]; then
+    files="$files \$HOME/avsync/measurements-$yday.tsv \$HOME/avsync/measurements-$today.tsv"
+  fi
+  "${pfx[@]}" "cat $files 2>/dev/null" 2>/dev/null || true
 }
 
 # run_report_pass -> fetch the rows, run the PURE decider, and post each returned message (one Discord
@@ -237,9 +247,16 @@ report_fetch_rows() {
 # outage never permanently drops a verified-A/V message (the owner's original complaint). And --dry-run
 # NEVER touches the production state (it works on the discarded copy), so a manual dry-run during a
 # live can never consume the real dedup and suppress a production message.
+# issue 1441: the legacy venue adopts the pre-issue-1441 single state file once (no START re-post on
+# the rollout): it seeds the work copy while the per-venue file does not exist yet, and is removed
+# only after the per-venue file was committed (never by --dry-run).
 run_report_pass() {
-  local rows rows_file work_state msgs line all_ok=1 state_file
+  local rows rows_file work_state msgs line all_ok=1 state_file seed_state="" committed=0
   state_file="$(report_state_path "$VENUE")"
+  if [ ! -f "$state_file" ] && [ "$VENUE" = "$AVSYNC_LEGACY_HEARTBEAT_VENUE" ] \
+      && [ -f "$REPORT_STATE_FILE" ] && [ "$REPORT_STATE_FILE" != "$state_file" ]; then
+    seed_state="$REPORT_STATE_FILE"
+  fi
   rows="$(report_fetch_rows)"
   if [ -z "$rows" ]; then
     log "$VENUE report: no rows fetched this pass (nothing to aggregate)"
@@ -250,14 +267,25 @@ run_report_pass() {
   work_state="$(mktemp 2>/dev/null)" || { rm -f "$rows_file"; log "report: mktemp failed (non-fatal)"; return 0; }
   mkdir -p "$(dirname "$state_file")" 2>/dev/null || true
   # Run the decider against a COPY of the committed state (decider rewrites --state in place).
-  if [ -f "$state_file" ]; then cp -f "$state_file" "$work_state" 2>/dev/null || true; fi
+  if [ -f "$state_file" ]; then
+    cp -f "$state_file" "$work_state" 2>/dev/null || true
+  elif [ -n "$seed_state" ]; then
+    cp -f "$seed_state" "$work_state" 2>/dev/null || true
+  fi
   msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$work_state" --rows "$rows_file" \
     2>/dev/null || true)"
   rm -f "$rows_file"
   if [ -z "$msgs" ]; then
     # No messages to deliver -> committing the advanced session-tracking is safe (nothing to lose),
     # except in --dry-run which must never mutate the production state.
-    if [ "$DRY_RUN" -eq 1 ]; then rm -f "$work_state" 2>/dev/null || true; else mv -f "$work_state" "$state_file" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true; fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+      rm -f "$work_state" 2>/dev/null || true
+    elif mv -f "$work_state" "$state_file" 2>/dev/null; then
+      committed=1
+    else
+      rm -f "$work_state" 2>/dev/null || true
+    fi
+    [ "$committed" = 1 ] && [ -n "$seed_state" ] && rm -f "$seed_state" 2>/dev/null
     log "$VENUE report: no new messages this pass"
     return 0
   fi
@@ -274,7 +302,11 @@ run_report_pass() {
   if [ "$DRY_RUN" -eq 1 ]; then
     rm -f "$work_state" 2>/dev/null || true
   elif [ "$all_ok" -eq 1 ]; then
-    mv -f "$work_state" "$state_file" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true
+    if mv -f "$work_state" "$state_file" 2>/dev/null; then
+      [ -n "$seed_state" ] && rm -f "$seed_state" 2>/dev/null
+    else
+      rm -f "$work_state" 2>/dev/null || true
+    fi
   else
     log "$VENUE report: a Discord POST failed this pass -- discarding advanced state so the next pass re-emits"
     rm -f "$work_state" 2>/dev/null || true
@@ -363,20 +395,42 @@ run_venue_pass() {
   run_report_pass
 }
 
+# ── a venue table that would watch less than it must PAGES (issue 1441 review) ──────────────────
+# A production-critical alarm must never fail OPEN: a table that lost the legacy venue (a renamed fleet
+# row, a broken fact file) or selects nothing would otherwise silently watch nothing. Stable key: one
+# card per incident (a repeat edits it). Only this watchdog pages it (the lineup sibling logs it).
+check_venue_table() {
+  local problem
+  problem="$(avsync_venue_table_problem "$(avsync_heartbeat_host)")"
+  [ -n "$problem" ] || return 0
+  log "ERROR: venue table: $problem"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: venue table: $problem"
+    return 0
+  fi
+  python3 "$NOTIFY" notify --body \
+    "🚨 A/V-sync monitor ($REPO_SLUG): tabuľka miest merania lipsync je neúplná -- $problem. Rieši Claude, ty nemusíš nič robiť." \
+    --dedup-key "avsync-venue-table" \
+    >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+}
+
 # ── main pass: every venue of the table (issue 1441) ────────────────────────
 main() {
   log "pass start (dry_run=$DRY_RUN, stale_s=$STALE_S, threshold=$CONFIRM_THRESHOLD)"
 
+  check_venue_table
   local venues
   venues="$(avsync_watchdog_venues "$(avsync_heartbeat_host)")"
-  [ -n "$venues" ] || log "ERROR: no venue to watch (the venue table is empty or AVSYNC_VENUES names none)"
   for VENUE in $venues; do
     VENUE_LABEL="$(avsync_venue_label "$VENUE")"
     VENUE_BOX="$(avsync_venue_box "$VENUE")" || { log "ERROR: $VENUE: no stream box in the venue table -- skipped"; continue; }
-    # issue 1001 doctrine: a venue whose stream box is away (a traveling box, not home) is AWAY --
-    # nothing is read and nothing pages; its state is left as it is for when the box returns.
+    # issue 1001 doctrine: a venue whose stream box is away (a traveling box, not home) is AWAY -- its
+    # heartbeat is not read and nothing pages; its state is left as it is for when the box returns.
+    # The REPORT still runs: it reads only dev2's day logs, and a box shut down right after its
+    # broadcast must still get the end-of-broadcast report on time.
     if ! obs_fleet_poll_now "$VENUE_BOX"; then
-      log "$VENUE: AWAY (stream box $VENUE_BOX is not home) -- skipped, never a page"
+      log "$VENUE: AWAY (stream box $VENUE_BOX is not home) -- heartbeat skipped, never a page; the report still runs"
+      run_report_pass
       continue
     fi
     run_venue_pass

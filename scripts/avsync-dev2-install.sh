@@ -197,6 +197,7 @@ if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0   # sourced (tests): only define functions above
 fi
 
+avsync_venue_table_load   # issue 1441: derive the venue table once for this run
 case "${1:-}" in
   --check) do_check ;;
   --install) do_install ;;

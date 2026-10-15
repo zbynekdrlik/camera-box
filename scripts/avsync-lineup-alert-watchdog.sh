@@ -51,6 +51,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ASSIGNMENT, before the verdict is ever printed (ci-testing-gotchas.md's leaked-`set -e` trap). This
 # watchdog must survive a bad pass and keep polling on the next timer tick (see the header).
 set +e -uo pipefail
+# issue 1441: derive the venue table once for this pass (every accessor below reuses it).
+avsync_venue_table_load
 
 MODE="liveness"
 DRY_RUN=0
@@ -141,8 +143,11 @@ select_venue() {
 
 # home_venues -> the venues this pass grades, one per line: every selected venue whose stream box is
 # home (issue 1001 doctrine: an away traveling box is AWAY -- nothing read, never a page).
+# A table that would watch less than it must is LOGGED here; the heartbeat watchdog pages it (one page).
 home_venues() {
-  local v box
+  local v box problem
+  problem="$(avsync_venue_table_problem "$(avsync_heartbeat_host)")"
+  [ -z "$problem" ] || log "ERROR: venue table: $problem"
   for v in $(avsync_watchdog_venues "$(avsync_heartbeat_host)"); do
     box="$(avsync_venue_box "$v")" || continue
     if obs_fleet_poll_now "$box"; then
@@ -185,7 +190,10 @@ gather_heartbeat() {
     return 0
   fi
   # issue 1441: dev2 reads VENUE's own heartbeat file (the retired stream host keeps its fixed path).
-  probe_out="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd "" "$(avsync_venue_dev2_heartbeat_remote_path "$VENUE")")" 2>/dev/null || true)"
+  # (the legacy venue falls back to the old single file a not-yet-upgraded dev2 still writes)
+  probe_out="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd "" \
+    "$(avsync_venue_dev2_heartbeat_remote_path "$VENUE")" \
+    "$(avsync_venue_dev2_legacy_heartbeat_remote_path "$VENUE")")" 2>/dev/null || true)"
   watchdog_segment="$(avsync_heartbeat_extract_segment "$probe_out" watchdog)"
   HEARTBEAT_EPOCH="$(avsync_heartbeat_last_epoch "$watchdog_segment")"
   HEARTBEAT_STATUS="$(avsync_heartbeat_last_status "$watchdog_segment")"

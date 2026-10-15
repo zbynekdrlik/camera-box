@@ -124,20 +124,31 @@ avsync_heartbeat_host() {
 # emitted -- the "vlc" half is intentionally absent (empty segment; the dev1 vlc leg is skipped for
 # host=dev2 via avsync_heartbeat_has_vlc_leg, never a false stale-page). `2>/dev/null` swallows a
 # not-yet-written file's error so a fresh box produces an empty (never a crashing) segment.
+# issue 1441: an optional FALLBACK path is read only when the first file is missing/unreadable (the
+# legacy venue reads its per-venue file, else the old single file a not-yet-upgraded dev2 still writes).
 # shellcheck disable=SC2120  # optional arg is used by the test harness; in-file callers use the default
 avsync_heartbeat_linux_probe_cmd() {
-  local watchdog_path="${1:-$AVSYNC_HB_DEV2_WATCHDOG_PATH}"
-  printf 'cat "%s" 2>/dev/null; echo "%s"' "$watchdog_path" "$AVSYNC_HB_SEP"
+  local watchdog_path="${1:-$AVSYNC_HB_DEV2_WATCHDOG_PATH}" fallback="${2:-}"
+  if [ -n "$fallback" ]; then
+    printf '{ cat "%s" 2>/dev/null || cat "%s" 2>/dev/null; }; echo "%s"' "$watchdog_path" "$fallback" "$AVSYNC_HB_SEP"
+  else
+    printf 'cat "%s" 2>/dev/null; echo "%s"' "$watchdog_path" "$AVSYNC_HB_SEP"
+  fi
 }
 
-# avsync_heartbeat_remote_cmd [HOST] [DEV2_PATH] -> the remote read command string for the selected
-# HOST: dev2 -> the Linux `cat` probe above (of DEV2_PATH when given -- issue 1441: each venue's own
-# heartbeat file -- else the default path); stream -> the existing Windows `type` probe (both files).
+# avsync_heartbeat_remote_cmd [HOST] [DEV2_PATH] [DEV2_FALLBACK] -> the remote read command string for
+# the selected HOST: dev2 -> the Linux `cat` probe above (of DEV2_PATH when given -- issue 1441: each
+# venue's own heartbeat file, DEV2_FALLBACK when that one is missing -- else the default path);
+# stream -> the existing Windows `type` probe (both files).
 avsync_heartbeat_remote_cmd() {
-  local host="${1:-$(avsync_heartbeat_host)}" dev2_path="${2:-}"
+  local host="${1:-$(avsync_heartbeat_host)}" dev2_path="${2:-}" dev2_fallback="${3:-}"
   case "$host" in
     dev2)
-      if [ -n "$dev2_path" ]; then avsync_heartbeat_linux_probe_cmd "$dev2_path"; else avsync_heartbeat_linux_probe_cmd; fi
+      if [ -n "$dev2_path" ]; then
+        avsync_heartbeat_linux_probe_cmd "$dev2_path" "$dev2_fallback"
+      else
+        avsync_heartbeat_linux_probe_cmd
+      fi
       ;;
     stream) avsync_heartbeat_probe_cmd ;;
     *) return 1 ;;

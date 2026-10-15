@@ -236,6 +236,7 @@ run_measure() {
 
 # ── the single pass ───────────────────────────────────────────────────────────
 main() {
+  avsync_venue_table_load   # derive the venue table once (its warnings print once per pass)
   resolve_venue_config
   log "pass start (venue=$VENUE grab_url=$GRAB_URL repo=$REPO heartbeat=$HEARTBEAT)"
 
