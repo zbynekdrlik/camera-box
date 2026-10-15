@@ -253,3 +253,52 @@ def test_setup_device_writes_the_dropin_and_verify_device_grades_it():
     assert verify.index("\n# (ak) off-box remote logging") < au < verify.index("\n# (at) zram swap")
     assert au < verify.rindex("# (q) .bak cruft drift")
     assert verify.count("(au) housekeeping cpus (issue 1367)") == 3, "header, usage() and the check"
+
+
+# --- review round 1 -------------------------------------------------------------------------------
+
+def test_a_fresh_box_reads_isolcpus_from_the_grub_file_step10_just_wrote(tmp_path):
+    """Review: on a fresh box the running kernel has no isolcpus yet (STEP 10 only wrote GRUB), so
+    the drop-in was never written and (au) failed after the first reboot."""
+    root = tmp_path / "root"
+    grub = tmp_path / "grub"
+    grub.write_text('GRUB_DEFAULT=0\nGRUB_CMDLINE_LINUX=" isolcpus=3 nohz_full=3 rcu_nocbs=3 irqaffinity=0-2"\n')
+    r = _bash('cambox_hk_install_dropin "$1"', str(root),
+              env={"CAMBOX_HK_SYS": str(_sys(tmp_path, isolated="")), "CAMBOX_HK_GRUB": str(grub)})
+    assert r.returncode == 0, r.stderr
+    f = root / "etc/systemd/system.conf.d/60-camera-box-housekeeping-cpus.conf"
+    assert "CPUAffinity=0,1" in f.read_text(), r.stdout
+
+
+def test_the_grub_isolcpus_parser_drops_flags_and_ignores_comments(tmp_path):
+    g = tmp_path / "grub"
+    g.write_text('# GRUB_CMDLINE_LINUX="isolcpus=9"\nGRUB_CMDLINE_LINUX_DEFAULT="quiet isolcpus=managed_irq,domain,2-3"\n')
+    r = _bash('cambox_hk_isolated_from_grub "$1"', str(g))
+    assert r.stdout.strip() == "2-3"
+    g.write_text('GRUB_CMDLINE_LINUX="quiet"\n')
+    assert _bash('cambox_hk_isolated_from_grub "$1"', str(g)).stdout.strip() == ""
+
+
+def test_a_preempt_rt_kernel_reserves_no_irq_core():
+    r = _bash('cambox_hk_cpus "$1" "$2" "$3" || echo rc=$?', "0-3", "3", "1")
+    assert "rc=1" in r.stdout and "PREEMPT_RT" in r.stderr
+    assert _verdict(_block(dropin=None) + "RT=1\n").startswith("ok-none: ")
+
+
+def test_the_live_apply_rewrites_a_dropin_with_an_extra_trailing_blank_line(tmp_path):
+    b, log, proc = _stubs(tmp_path)
+    (proc / "1" / "status").write_text("Name:\tsystemd\nCpus_allowed_list:\t0-1\n")
+    dropin = tmp_path / "d.conf"
+    dropin.write_text(_bash('cambox_hk_dropin_content "$1"', "0,1").stdout + "\n")
+    env = {"CAMBOX_HK_DROPIN": str(dropin), "CAMBOX_HK_SYS": str(_sys(tmp_path)),
+           "CAMBOX_HK_PROC": str(proc)}
+    prog = _bash("cambox_hk_apply_program", env=env).stdout
+    r = subprocess.run(["bash", "-s"], input=prog, capture_output=True, text=True, timeout=60,
+                       env=dict(os.environ, PATH=f"{b}:{os.environ['PATH']}"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "drop-in write" in r.stdout
+    assert dropin.read_text() == _bash('cambox_hk_dropin_content "$1"', "0,1").stdout
+
+
+def test_the_verify_ok_line_says_running_daemons_move_at_the_next_boot():
+    assert "running services keep their mask until they restart" in VERIFY.read_text()
