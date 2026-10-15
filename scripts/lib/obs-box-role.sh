@@ -37,6 +37,9 @@
 OBS_BOX_STREAM_INPUT="NDI 2ME PGM"
 OBS_BOX_STREAM_SCENE="PRO"
 OBS_BOX_STREAM_AUDIO_INPUT="Zvuk z mixu"
+# issue 1436: the seeder keeps that input's OBS monitoring OFF -- the stream box's headphones play the
+# real outgoing stream (strih-stream-monitor.service), never one monitored source.
+OBS_BOX_STREAM_AUDIO_MONITOR=off
 OBS_BOX_STREAM_OUTPUT_NAME="stream"
 # issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
 # video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
@@ -47,6 +50,11 @@ OBS_BOX_STREAM_DEV_CLIP="/opt/camera-box/measurement-clip-v1.mp4"
 OBS_BOX_STREAM_DEV_CLIP_FRAMES=3840   # gen_measurement_clip.py: 128 s x 30 fps
 # The local restreamer the stream OBS sends to (the stream-pp laptop runs it; recon 11.10.2026).
 OBS_BOX_STREAM_RTMP_SERVER="${OBS_BOX_STREAM_RTMP_SERVER:-rtmp://127.0.0.1:1234/live}"
+
+# obs_box_stream_key -> the stream role's OBS stream key = the box name (issue 1436): OBS publishes to
+# <OBS_BOX_STREAM_RTMP_SERVER>/<key>, and strih-stream-monitor.service plays rtmp://127.0.0.1:1234/live/%l
+# (%l = the short hostname setup step 1 sets to the same fact). rc 1 when the fact cannot be read.
+obs_box_stream_key() { strih_lx_hostname; }
 
 # obs_box_step_applies STEP -> rc 0 when the loaded box runs STEP; rc 1 with the reason on stdout when
 # it skips it. A step with no rule here always runs. A fact that cannot be read never skips a step.
@@ -166,8 +174,8 @@ obs_box_stream_seed_manifest_json() {
   printf '    {"sender": "%s", "input": "%s", "scene": "%s", "class": "program"}\n' \
     "$sender" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_SCENE"
   printf '  ],\n  "outputs": [\n    "%s (%s)"\n  ],\n' "$prefix" "$OBS_BOX_STREAM_OUTPUT_NAME"
-  printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s",\n' \
-    "$(strih_lx_camera_latency_ms)" "$OBS_BOX_STREAM_AUDIO_INPUT"
+  printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s",\n  "program_audio_monitor": "%s",\n' \
+    "$(strih_lx_camera_latency_ms)" "$OBS_BOX_STREAM_AUDIO_INPUT" "$OBS_BOX_STREAM_AUDIO_MONITOR"
   printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
     "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP"
 }
@@ -216,12 +224,14 @@ obs_box_vaapi_h264_encode() {
 # obs_box_stream_encoder_provision OBS_CFG DESKTOP_USER PROFILE -> setup-strih step 3 for the stream
 # role: the encoder by GPU (NVENC on an NVIDIA dGPU -- the baseline's step 11 installs the driver --
 # else VAAPI: mesa-va-drivers + vainfo, the desktop user in group render), then the profile
-# (scripts/obs_box_stream_profile.py: basic.ini, streamEncoder.json, service.json server only). The
+# (scripts/obs_box_stream_profile.py: basic.ini, streamEncoder.json, service.json = the server + the box
+# name as the stream key when it carries none, issue 1436). The
 # profile is written ONLY while OBS is stopped (OBS rewrites it on exit): a running OBS gets a WARNING
 # and the files are left alone. rc 1 + a stderr line on a failure.
 obs_box_stream_encoder_provision() {
   local cfg="${1:?obs config dir required}" user="${2:?desktop user required}" profile="${3:?profile required}"
-  local nv=0 dir
+  local nv=0 dir key
+  key="$(obs_box_stream_key)" || { echo "obs-box-role: the box name (the stream key) could not be read" >&2; return 1; }
   if obs_box_has_nvidia; then
     nv=1
     echo "  NVIDIA dGPU present -- stream encoder NVENC (the driver is baseline step 11)"
@@ -242,7 +252,7 @@ obs_box_stream_encoder_provision() {
   fi
   dir="${cfg%/}/basic/profiles/${profile}"
   python3 "$(dirname "${BASH_SOURCE[0]}")/../obs_box_stream_profile.py" --profile-dir "$dir" \
-    --profile-name "$profile" --has-nvidia "$nv" --server "$OBS_BOX_STREAM_RTMP_SERVER" \
+    --profile-name "$profile" --has-nvidia "$nv" --server "$OBS_BOX_STREAM_RTMP_SERVER" --key "$key" \
     || { echo "obs-box-role: the stream profile write failed (above)" >&2; return 1; }
   chown -R "$user:$user" "${cfg%/}/basic" 2>/dev/null || echo "  WARNING: could not chown ${cfg%/}/basic to ${user}" >&2
   return 0
