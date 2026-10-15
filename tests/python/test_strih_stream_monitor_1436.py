@@ -191,6 +191,8 @@ with open(log, "a") as f:
     f.write("ffmpeg " + " ".join(sys.argv[1:]) + "\n")
 with open(log + ".env", "a") as f:
     f.write("ffmpeg pid=%d LC_ALL=%s\n" % (os.getpid(), os.environ.get("LC_ALL")))
+with open(log + ".times", "a") as f:
+    f.write("%.3f\n" % time.time())
 mode = os.environ.get("FAKE_FF_MODE", "play:19200")
 kind, _, rest = mode.partition(":")
 n, _, chunk = rest.partition(":")
@@ -199,7 +201,12 @@ if kind == "none":
     sys.stderr.write("rtmp://127.0.0.1:1234/live/x: Input/output error\n")
     sys.exit(1)
 if kind == "noaudio":
-    sys.stderr.write("Stream map '0:a:0' matches no streams.\n")
+    # the five lines the real ffmpeg 6.1 prints for a video-only input (read on dev1, review round 2)
+    sys.stderr.write("Stream map '0:a:0' matches no streams.\n"
+                     "To ignore this, add a trailing '?' to the map.\n"
+                     "Failed to set value '0:a:0' for option 'map': Invalid argument\n"
+                     "Error parsing options for output file pipe:1.\n"
+                     "Error opening output files: Invalid argument\n")
     sys.exit(1)
 out = sys.stdout.buffer
 left = int(n)
@@ -236,6 +243,14 @@ if mode == "fail":
     sys.exit(1)
 if mode == "slow":
     time.sleep(float(os.environ.get("FAKE_AP_SLEEP", "1.5")))
+if mode == "fail2":
+    # fail the first two connects, then play
+    cnt = os.environ["FAKE_AP_OUT"] + ".count"
+    k = int(open(cnt).read()) if os.path.exists(cnt) else 0
+    open(cnt, "w").write(str(k + 1))
+    if k < 2:
+        sys.stderr.write("aplay: set_params:1387: Channels count non available\n")
+        sys.exit(1)
 ff_pid = None
 n = 0
 while True:
@@ -258,6 +273,9 @@ if mode == "check_ff":
         f.write("ffalive=%d\n" % alive)
 with open(os.environ["FAKE_AP_OUT"], "a") as f:
     f.write("%d\n" % n)
+if mode == "sigself":
+    import signal
+    os.kill(os.getpid(), signal.SIGTERM)  # a SIGTERM during the drain (a shutdown), never an aplay fault
 '''
 
 
@@ -511,6 +529,10 @@ FAKE_SCENES = r'''
 import os, sys
 assert "--audio-monitor-type" in sys.argv
 mode = os.environ.get("FAKE_SCENES_MODE", "none")
+if mode == "warn":
+    sys.stderr.write("DeprecationWarning: something in a library\n")
+    print("OBS_MONITORING_TYPE_NONE")
+    sys.exit(0)
 if mode == "crash":
     sys.stderr.write("Traceback: boom\n")
     sys.exit(1)
@@ -797,3 +819,87 @@ def test_an_eof_before_ffmpeg_exits_is_a_stream_end_not_a_stall(tmp_path):
     assert played == [7680]
     ended = [ln for ln in r.stdout.splitlines() if ln.startswith("stream ended")]
     assert ended and "ended (ffmpeg rc 0" in ended[0] and "stalled" not in ended[0], ended
+
+
+# --- review round 2 ------------------------------------------------------------------------------------------------
+
+def _ff_gaps(tmp_path):
+    t = [float(x) for x in (tmp_path / "fake.log.times").read_text().split()]
+    return [b - a for a, b in zip(t, t[1:])]
+
+
+def test_the_aplay_failure_backoff_doubles(tmp_path):
+    # retry 0.3 s: the pauses are 0.6 then 1.2 s; without the backoff both are 0.3 s
+    r, _calls, _played, st, _e = run_monitor(tmp_path, cycles=3, ap="fail", extra=("--retry-s", "0.3"))
+    assert st["state"] == "aplay-failing", r.stdout
+    g = _ff_gaps(tmp_path)
+    assert len(g) == 2 and g[1] - g[0] >= 0.4, g
+
+
+def test_a_play_after_failures_resets_the_backoff_and_the_fault(tmp_path):
+    # two failed connects, then a stream plays: the third gap is the plain retry again
+    r, _calls, played, st, _e = run_monitor(tmp_path, cycles=4, ap="fail2", extra=("--retry-s", "0.3"))
+    assert played == [19200, 19200], r.stdout
+    g = _ff_gaps(tmp_path)
+    assert len(g) == 3 and g[2] < g[1] - 0.4, g
+    assert st["state"] == "ended" and not st.get("last_play_failed"), st
+
+
+def test_a_non_aplay_outcome_resets_the_backoff():
+    m = _mod()
+    mon = m.Monitor("rtmp://x/live/y", None, log=lambda s: None)
+    mon.fail_streak = 3
+    mon.set_idle("waiting", "nothing published")
+    assert mon.fail_streak == 0
+
+
+def test_the_real_ffmpeg_no_audio_text_is_no_audio(tmp_path):
+    r, calls, _played, st, _e = run_monitor(tmp_path, ff="noaudio")
+    assert st["state"] == "no-audio", r.stdout
+    assert "matches no streams" in st["reason"]
+
+
+def test_a_failed_connect_stays_a_fault_while_nothing_is_published(tmp_path):
+    m = _mod()
+    root, proc = asound(tmp_path)
+    p = _state(tmp_path, state="waiting", last_play_failed="aplay exited 1: Channels count non available")
+    ok, line = m.check_state(str(p), time.time(), str(root), str(proc))
+    assert not ok and "Channels count non available" in line, line
+
+
+def test_the_failed_play_mark_is_written_and_kept_into_waiting(tmp_path):
+    # aplay fails on a short stream, then nothing is published: the state reads waiting + the failure
+    import shutil
+    r, _c, _p, st, _e = run_monitor(tmp_path, cycles=1, ap="fail")
+    assert st["last_play_failed"], st
+    m = _mod()
+    root, proc = asound(tmp_path / "chk")
+    st["state"] = "waiting"
+    p = tmp_path / "st2.json"
+    p.write_text(json.dumps(st))
+    ok, _line = m.check_state(str(p), time.time(), str(root), str(proc))
+    assert not ok
+    shutil.rmtree(tmp_path / "chk")
+
+
+def test_a_sigterm_during_the_drain_is_not_an_aplay_fault(tmp_path):
+    r, _calls, played, st, _e = run_monitor(tmp_path, ap="sigself")
+    assert played == [19200]
+    assert st["state"] == "ended", (st, r.stdout)
+
+
+def test_the_obs_row_reads_the_last_line_only(tmp_path, boxes):
+    st, text = _grade(tmp_path, boxes, scenes="warn")["stream-monitor-obs"]
+    assert st == "OK", text
+
+
+def test_key_note_survives_settings_that_are_not_an_object(tmp_path):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("obs_box_stream_profile_1436d", SCRIPTS / "obs_box_stream_profile.py")
+    prof = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prof)
+    d = tmp_path / "prof"
+    d.mkdir()
+    (d / "service.json").write_text(json.dumps({"type": "rtmp_custom", "settings": ["x"]}))
+    prof.apply(str(d), "ffmpeg_vaapi_tex", "rtmp://127.0.0.1:1234/live", "stream-pp", key="stream-pp")
+    assert json.loads((d / "service.json").read_text())["settings"]["key"] == "stream-pp"
