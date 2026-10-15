@@ -114,6 +114,9 @@ RIGMODE_LIB="${RDH_RIGMODE_LIB:-$HERE/lib/rig-mode-state.sh}"
 WATCHDOG_ROSTER="${RDH_WATCHDOG_ROSTER:-$HERE/lib/watchdog-roster.sh}"
 DECIDE="${RDH_DECIDE:-$HERE/rig_dev_handover_decision.py}"
 
+# shellcheck source=scripts/lib/unit-env.sh
+. "$HERE/lib/unit-env.sh"
+
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rig-dev-handover.XXXXXX")"
 cleanup() { [ "$KEEP" -eq 1 ] || rm -rf "$WORKDIR"; }
 trap cleanup EXIT
@@ -139,7 +142,17 @@ run_probe() {
     printf '%s\n' "$RC_MISSING" >"$rcf"
     return 0
   fi
-  timeout "$t" "$interp" "$script" "$@" >"$out" 2>&1 || rc=$?
+  # A dev1 alert watchdog runs with the SAME Environment= its systemd --user unit gives the production
+  # timer (unit = the script's own name + .service), so this check grades what the timer grades
+  # (15.10.2026: obs-liveness's gate binary is set only by the unit's dev1 drop-in). A variable the
+  # caller already set wins; no unit = no change.
+  local unit_env=()
+  case "$(basename "$script")" in
+    *watchdog.sh)
+      mapfile -t unit_env < <(unit_env_assignments "$(basename "$script" .sh).service")
+      ;;
+  esac
+  timeout "$t" env "${unit_env[@]}" "$interp" "$script" "$@" >"$out" 2>&1 || rc=$?
   printf '%s\n' "$rc" >"$rcf"
   return 0
 }
