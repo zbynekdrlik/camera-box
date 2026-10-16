@@ -64,6 +64,9 @@ sudo ./scripts/create-usb-linux.sh /dev/sdX
 > should have a monitor connected so the connector/`fb0` initializes before any headless-boot automation
 > takes over — this is exactly the cam5 headless-boot pain (event finding #8) the modules-load.d pin +
 > this note together close. Boxes with no capture/display grabber (e.g. cam4) are unaffected.
+> Not on an N150 (`8086:46d4`, cam5/6/7) on 6.8: i915 loads there but does not bind (its 6.8 id
+> table stops at `46D2`), so there is no `/dev/dri`; such a box needs the Ubuntu 24.04 HWE kernel
+> (issue 1446, `.claude/rules/realtime-isolation.md`, verify-device `(av)`).
 
 **SSH Connection Details (fresh install):**
 - Username: `root`
