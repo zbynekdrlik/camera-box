@@ -1,4 +1,5 @@
-/* camera-box issue 1381 -- the C harness of tests/genlock_audio_mix_guard_1381.rs.
+/* camera-box issue 1381 -- the C harness of tests/genlock_audio_mix_guard_1381.rs (issue 1425 E2 slice 2
+ * adds the buffering-freeze scenarios: the three E1 replays, the settle restarts, an ingest race).
  *
  * NOT compiled on its own: the test substitutes the shipped obs-audio.c / audio-io.h code, lifted
  * verbatim, for the six at-sign markers below, compiles the result with cc and compares
@@ -122,6 +123,9 @@ struct obs_source {
 	uint64_t genlock_mix_guard_dropped_ns;
 	uint64_t genlock_mix_guard_logged_events;
 	uint64_t genlock_mix_guard_last_log_ns;
+	/* issue 1425 */
+	uint64_t genlock_mixed_late_events;
+	uint64_t genlock_mixed_late_dropped_ns;
 	/* the harness's source model (obs-source.c ingest), never read by the lift */
 	const char *h_name;
 	bool h_keeps_stamp;
@@ -143,6 +147,10 @@ struct obs_core_audio {
 	int max_buffering_ticks;
 	int floor_buffering_ticks;
 	bool fixed_buffer;
+	/* issue 1425 */
+	uint64_t genlock_settle_tick;
+	bool genlock_buffering_frozen;
+	uint64_t genlock_mixed_late_events;
 };
 struct obs_core_data {
 	pthread_mutex_t audio_sources_mutex;
@@ -172,6 +180,13 @@ static inline uint64_t os_gettime_ns(void)
 static inline const char *obs_source_get_name(const obs_source_t *s)
 {
 	return s->h_name;
+}
+/* obs-output.c (issue 1425): the outputs running an audio encoder -- a stream or a recording */
+static long h_encoders;
+static long obs_output_genlock_audio_encoder_outputs(void) __attribute__((unused));
+static long obs_output_genlock_audio_encoder_outputs(void)
+{
+	return h_encoders;
 }
 static inline obs_source_t *obs_source_get_ref(obs_source_t *s)
 {
@@ -250,6 +265,16 @@ static inline void clear_audio_output_buf(obs_source_t *source, struct obs_core_
 /* ---- lifted verbatim from obs-audio.c / audio-io.h ---- */
 @LIFTED_FUNCTIONS@
 /* ---- end lift ---- */
+
+/* issue 1425: the guard's decision with the freeze input (the RED commit compiled this harness against
+ * the pre-freeze header, whose decision has no frozen argument). */
+#ifdef GENLOCK_MIX_GUARD_MIXED_LATE
+#define H_REASON(member, entered, composite, ts, start, frozen) \
+	genlock_mix_guard_reason(member, entered, composite, ts, start, frozen)
+#else
+#define H_REASON(member, entered, composite, ts, start, frozen) \
+	((void)(frozen), genlock_mix_guard_reason(member, entered, composite, ts, start))
+#endif
 
 /* ---- the harness: a source model and scenarios ---- */
 #define H_RATE 48000u
@@ -446,10 +471,21 @@ static void h_summary(const char *scenario)
 	       h_guard_lines, h_above_lines, h_restart_lines);
 }
 
+/* issue 1425: the freeze at the end of a scenario and what the late source lost to it */
+static void h_freeze_summary(const char *scenario)
+{
+	printf("%s freeze: frozen=%d encoders=%ld '%s' mixed_late=%" PRIu64 " mixed_late_dropped_ms=%.1f mix_mixed_late=%" PRIu64
+	       "\n",
+	       scenario, h_obs.audio.genlock_buffering_frozen ? 1 : 0, h_encoders, h_other.h_name,
+	       h_other.genlock_mixed_late_events, (double)h_other.genlock_mixed_late_dropped_ns / 1e6,
+	       h_obs.audio.genlock_mixed_late_events);
+}
+
 static void h_begin(const char *scenario, const char *other, bool keeps_stamp, int64_t lag_ns, bool timing_set)
 {
 	printf("== %s\n", scenario);
 	h_launch();
+	h_encoders = 0;
 	h_waits = h_mic_missed = 0;
 	h_tick_no = 0;
 	h_race_tick = -1;
@@ -475,7 +511,7 @@ static void h_probe(const char *what, uint64_t behind_ns, size_t floats, bool di
 	s.timing_set = true;
 	s.audio_ts = behind_ns ? start - behind_ns : 0;
 	t = s;
-	const int reason = genlock_mix_guard_reason(false, false, false, s.audio_ts, start);
+	const int reason = H_REASON(false, false, false, s.audio_ts, start, false);
 	int sync = -1;
 	const char *parity = "n/a";
 	if (reason != GENLOCK_MIX_GUARD_NONE || direct)
@@ -615,6 +651,82 @@ int main(void)
 		h_step2(i >= 10, i >= 10);
 	h_summary("launch-late");
 
+	/* issue 1425 (E2 slice 2, design 6216736061): the E1 replays. Each event grew the stream-snv mix for
+	 * good in stock libobs (and stepped every running encoder's audio later, F1). With the freeze the
+	 * mix stays at the floor: the late member is re-anchored (MIXED_LATE), one counted dropout of its
+	 * late span, and the mic is heard on every tick. The replays reproduce the LOGGED growth: a member
+	 * that keeps its stamp delivers a backlog stamped at capture, its oldest packet behind the window. */
+
+	/* (f) 15.10 04:00: `adding 128 ms ... now 213 ms (source: mbc)`, an ASIO outage on mbc while the
+	 * stream runs (an audio encoder is active). */
+	h_begin("e1-asio-outage-128", "mbc", true, 0, true);
+	h_encoders = 1;
+	for (int i = 0; i < 600; i++) {
+		if (i == 200)
+			h_other.h_running = false;
+		if (i == 211)
+			h_burst(&h_other, h_t + h_tick_ns, 230000000);
+		h_step(true);
+	}
+	h_summary("e1-asio-outage-128");
+	h_freeze_summary("e1-asio-outage-128");
+
+	/* (g) 11.10 07:09: `adding 192 ms ... now 277 ms (source: mbc)`, a longer outage. */
+	h_begin("e1-asio-outage-192", "mbc", true, 0, true);
+	h_encoders = 1;
+	for (int i = 0; i < 600; i++) {
+		if (i == 200)
+			h_other.h_running = false;
+		if (i == 214)
+			h_burst(&h_other, h_t + h_tick_ns, 290000000);
+		h_step(true);
+	}
+	h_summary("e1-asio-outage-192");
+	h_freeze_summary("e1-asio-outage-192");
+
+	/* (h) 15.10 17:43: `adding 85 ms ... now 170 ms (source: pre-fotky video)` after a 432 ms mixer
+	 * callback stall; no encoder in this replay, the mix is frozen by the 30 s settle (launched 34 s
+	 * before). */
+	h_begin("e1-media-stall-85", "pre-fotky video", true, 0, true);
+	for (int i = 0; i < 2000; i++) {
+		if (i == 1600)
+			h_other.h_running = false;
+		if (i == 1609)
+			h_burst(&h_other, h_t + h_tick_ns, 180000000);
+		h_step(true);
+	}
+	h_summary("e1-media-stall-85");
+	h_freeze_summary("e1-media-stall-85");
+
+	/* (i) the settle restarts: no encoder, the mic alone for 34 s (frozen), then a member joins (on time)
+	 * and goes 150 ms late 100 ticks later -- a join restarts the settle, so the mix grows; 1350 ticks
+	 * after that growth (1450 after the join) it goes 300 ms late -- the growth restarted the settle, so
+	 * it grows again; 1550 ticks after the last growth it goes 500 ms late for good -- frozen: re-anchored
+	 * on every tick (the persistent case slice 2b would size; here a dropout, a line a minute). */
+	h_begin("settle-restarts", "Media", true, 0, true);
+	for (int i = 0; i < 4600 + H_MINUTE_TICKS + 10; i++) {
+		if (i == 1700)
+			h_other.h_lag_ns = 150000000;
+		if (i == 3050)
+			h_other.h_lag_ns = 300000000;
+		if (i == 4600)
+			h_other.h_lag_ns = 500000000;
+		h_step(i >= 1600);
+	}
+	h_summary("settle-restarts");
+	h_freeze_summary("settle-restarts");
+
+	/* (j) a stream runs; the ingest thread re-places a MIXED source 300 ms late between the render loop
+	 * and calc_min_ts: the frozen action never grows the mix for it, the next tick re-anchors it. */
+	h_begin("frozen-ingest-race", "NDI race", false, 0, false);
+	h_encoders = 1;
+	h_race_tick = 100;
+	h_race_behind_ns = 300000000;
+	for (int i = 0; i < 300; i++)
+		h_step(true);
+	h_summary("frozen-ingest-race");
+	h_freeze_summary("frozen-ingest-race");
+
 	/* The guard's exact-sample edges and its locked re-check, called directly. */
 	printf("== probes\n");
 	h_launch();
@@ -629,5 +741,37 @@ int main(void)
 	/* entry = not in the mix on the previous tick; a source's first membership is an entry */
 	printf("probe joined: first-tick=%d next-tick=%d skipped-a-tick=%d later-first=%d\n", genlock_mix_joined(0, 1),
 	       genlock_mix_joined(5, 6), genlock_mix_joined(4, 6), genlock_mix_joined(0, 7));
+	/* issue 1425: the reason over member / entered / composite / behind / frozen (bit 4 .. bit 0) */
+	{
+		char table[33];
+		for (int k = 0; k < 32; k++) {
+			const uint64_t start = 5000000000ULL;
+			const uint64_t ts = (k & 2) ? start - 2 : start;
+			const int r = H_REASON((k & 16) != 0, (k & 8) != 0, (k & 4) != 0, ts, start, (k & 1) != 0);
+			table[k] = (char)('0' + r);
+		}
+		table[32] = '\0';
+		printf("probe reason-1425 mecbf=00000..11111: %s\n", table);
+	}
+	/* issue 1425: a MIXED_LATE re-anchor counts on the source and the mix, and names the freeze */
+	{
+		static obs_source_t m;
+		const uint64_t start = 5000000000ULL;
+		memset(&m, 0, sizeof(m));
+		m.h_name = "probe late";
+		for (size_t ch = 0; ch < MAX_AUDIO_CHANNELS; ch++)
+			m.audio_input_buf[ch].virt = true;
+		for (size_t ch = 0; ch < H_CH; ch++)
+			m.audio_input_buf[ch].size = 960 * sizeof(float);
+		m.timing_set = true;
+		m.audio_ts = start - 10000000ULL;
+		h_obs.audio.total_buffering_ticks = 4;
+		const int reason = H_REASON(true, false, false, m.audio_ts, start, true);
+		const bool sync = genlock_mix_guard_reanchor(&h_obs.audio, &m, H_CH, H_RATE, start, reason);
+		printf("probe mixed-late: reason=%d in_sync=%d events=%" PRIu64 " mixed_late=%" PRIu64
+		       " mixed_late_dropped_ms=%.1f mix_mixed_late=%" PRIu64 "\n",
+		       reason, sync ? 1 : 0, m.genlock_mix_guard_events, m.genlock_mixed_late_events,
+		       (double)m.genlock_mixed_late_dropped_ns / 1e6, h_obs.audio.genlock_mixed_late_events);
+	}
 	return 0;
 }

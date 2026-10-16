@@ -23,6 +23,11 @@
 //!   scene), a launch in the frontend's order, plus direct probes of the guard's edges and its
 //!   `ignore_audio` mirror. The printed trace is the truth table. `cc` is required — it FAILS LOUDLY
 //!   rather than skips.
+//! - Issue 1425 (E2 slice 2, design 6216736061): the buffering FREEZE through the same lift. The three
+//!   E1 replays (a 128 ms and a 192 ms ASIO outage on `mbc`, a media source late after a 432 ms mixer
+//!   stall) grew the mix +128 / +192 / +85 ms for good; frozen, the mix stays at the floor and the
+//!   late member is re-anchored once (`MIXED_LATE`). The settle restarts (a member join, a growth),
+//!   the frozen ingest race, and the reason's truth table with the freeze input.
 
 use std::fs;
 use std::path::PathBuf;
@@ -260,17 +265,6 @@ fn lift_functions() -> String {
 /// step are apart, so the harness can land an ingest-thread packet between them.
 fn lift_callback_blocks() -> [String; 5] {
     let s = read(OBS_AUDIO);
-    let decision_start = "\tconst int genlock_buffering = genlock_audio_buffering_action(";
-    let decision_tail =
-        "add_audio_buffering(audio, sample_rate, &ts, min_ts, buffering_name);\n\t}\n";
-    assert_eq!(s.matches(decision_start).count(), 1);
-    let a = s
-        .find(decision_start)
-        .expect("issue 1381: the 1367 tick decision is gone");
-    let b = s[a..]
-        .find(decision_tail)
-        .expect("issue 1381: the 1367 tick decision's end is gone")
-        + decision_tail.len();
     let sep = "\t/* ------------------------------------------------ */\n";
     [
         // the render-order build after the output mixes: the mark + the catch-all loop
@@ -291,7 +285,12 @@ fn lift_callback_blocks() -> [String; 5] {
             "\t/* get minimum audio timestamp */\n",
             "\t/* camera-box #800: audio-side telemetry",
         ),
-        s[a..a + b].to_string(),
+        // the 1367 tick decision and (issue 1425) the settle restart of a growth, up to the mix
+        slice_between(
+            &s,
+            "\tconst int genlock_buffering = genlock_audio_buffering_action(",
+            &format!("{sep}\t/* mix audio */"),
+        ),
         // mix + discard
         slice_between(
             &s,
@@ -482,6 +481,34 @@ const EXPECTED_TRACE: &[&str] = &[
     "L200 buffering-guard: 'ASIO' entered the mix late: its audio ran 18.0 ms behind the mix window; re-anchored (dropped 18.0 ms) instead of adding 21 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=11, +10 since the last line, dropped_total=206.0 ms)",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 128 milliseconds (source: ASIO); ASRC level band BROKEN: buffering + 9 ms base lands -37.0 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
     "launch-late: waits=6 total_ms=128 mic_missed=0 'ASIO' events=11 dropped_ms=206.0 mixed=286 stale=0 guard_lines=2 above_lines=1 restart_lines=0",
+    "== e1-asio-outage-128",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 buffering-guard: 'mbc' fell behind the mix (frozen at 85 ms): its audio ran 123.3 ms behind the mix window; re-anchored (dropped 123.4 ms) instead of adding 128 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=123.4 ms)",
+    "e1-asio-outage-128: waits=4 total_ms=85 mic_missed=0 'mbc' events=1 dropped_ms=123.4 mixed=588 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
+    "e1-asio-outage-128 freeze: frozen=1 encoders=1 'mbc' mixed_late=1 mixed_late_dropped_ms=123.4 mix_mixed_late=1",
+    "== e1-asio-outage-192",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 buffering-guard: 'mbc' fell behind the mix (frozen at 85 ms): its audio ran 183.3 ms behind the mix window; re-anchored (dropped 183.4 ms) instead of adding 192 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=183.4 ms)",
+    "e1-asio-outage-192: waits=4 total_ms=85 mic_missed=0 'mbc' events=1 dropped_ms=183.4 mixed=585 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
+    "e1-asio-outage-192 freeze: frozen=1 encoders=1 'mbc' mixed_late=1 mixed_late_dropped_ms=183.4 mix_mixed_late=1",
+    "== e1-media-stall-85",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 buffering-guard: 'pre-fotky video' fell behind the mix (frozen at 85 ms): its audio ran 73.3 ms behind the mix window; re-anchored (dropped 73.4 ms) instead of adding 85 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=73.4 ms)",
+    "e1-media-stall-85: waits=4 total_ms=85 mic_missed=0 'pre-fotky video' events=1 dropped_ms=73.4 mixed=1990 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
+    "e1-media-stall-85 freeze: frozen=1 encoders=0 'pre-fotky video' mixed_late=1 mixed_late_dropped_ms=73.4 mix_mixed_late=1",
+    "== settle-restarts",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 106 milliseconds of audio buffering, total audio buffering is now 192 milliseconds (source: Media); ASRC level band BROKEN: buffering + 9 ms base lands -101.0 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 149 milliseconds of audio buffering, total audio buffering is now 341 milliseconds (source: Media); ASRC level band BROKEN: buffering + 9 ms base lands -250.3 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
+    "L200 buffering-guard: 'Media' fell behind the mix (frozen at 341 ms): its audio ran 162.0 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 170 ms to the whole mix's 341 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
+    "L200 buffering-guard: 'Media' fell behind the mix (frozen at 341 ms): its audio ran 162.7 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 170 ms to the whole mix's 341 ms of audio buffering (issue 1381; events=2814, +2813 since the last line, dropped_total=60030.0 ms)",
+    "settle-restarts: waits=16 total_ms=341 mic_missed=0 'Media' events=2823 dropped_ms=60220.0 mixed=2986 stale=0 guard_lines=2 above_lines=2 restart_lines=0",
+    "settle-restarts freeze: frozen=1 encoders=0 'Media' mixed_late=2823 mixed_late_dropped_ms=60220.0 mix_mixed_late=2823",
+    "== frozen-ingest-race",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 buffering-guard: 'NDI race' fell behind the mix (frozen at 85 ms): its audio ran 214.7 ms behind the mix window; re-anchored (dropped 214.7 ms) instead of adding 234 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=214.7 ms)",
+    "frozen-ingest-race: waits=4 total_ms=85 mic_missed=0 'NDI race' events=1 dropped_ms=214.7 mixed=295 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
+    "frozen-ingest-race freeze: frozen=1 encoders=1 'NDI race' mixed_late=1 mixed_late_dropped_ms=214.7 mix_mixed_late=1",
     "== probes",
     "probe 1ns-behind-is-rounding: reason=0 in_sync=-1 ts=start-1ns left=960 pending=0 timing_set=1 events=0 ignore_audio=n/a",
     "L200 buffering-guard: 'probe' is not mixed: its audio ran 0.0 ms behind the mix window; re-anchored (dropped 0.0 ms) instead of adding 0 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=0.0 ms)",
@@ -496,6 +523,9 @@ const EXPECTED_TRACE: &[&str] = &[
     "probe moved-on-before-the-lock: reason=0 in_sync=0 ts=start-1ns left=960 pending=0 timing_set=1 events=0 ignore_audio=n/a",
     "probe reset-before-the-lock: reason=0 in_sync=0 ts=restarted left=960 pending=0 timing_set=1 events=0 ignore_audio=n/a",
     "probe joined: first-tick=1 next-tick=0 skipped-a-tick=1 later-first=1",
+    "probe reason-1425 mecbf=00000..11111: 00110000001100000003000000220000",
+    "L200 buffering-guard: 'probe late' fell behind the mix (frozen at 85 ms): its audio ran 10.0 ms behind the mix window; re-anchored (dropped 10.0 ms) instead of adding 21 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=10.0 ms)",
+    "probe mixed-late: reason=3 in_sync=1 events=1 mixed_late=1 mixed_late_dropped_ms=10.0 mix_mixed_late=1",
 ];
 
 #[test]
@@ -583,7 +613,9 @@ fn the_guard_lines_are_loud_and_name_what_they_saved_1381() {
     for l in lines {
         assert!(
             l.starts_with("L200 buffering-guard: '")
-                && (l.contains("' is not mixed: ") || l.contains("' entered the mix late: "))
+                && (l.contains("' is not mixed: ")
+                    || l.contains("' entered the mix late: ")
+                    || l.contains("' fell behind the mix (frozen at "))
                 && l.contains(" ms behind the mix window; re-anchored (dropped ")
                 && l.contains(" instead of adding ")
                 && l.contains(" (issue 1381; events=")
@@ -632,6 +664,129 @@ fn the_guard_holds_its_exact_sample_edges_1381() {
             probes.join("\n")
         );
     }
+}
+
+/// The freeze line of `scenario`.
+fn freeze<'a>(trace: &'a [String], scenario: &str) -> &'a str {
+    let head = format!("{scenario} freeze: ");
+    trace
+        .iter()
+        .find(|l| l.starts_with(&head))
+        .unwrap_or_else(|| panic!("issue 1425: no freeze line for {scenario}"))
+}
+
+#[test]
+fn the_e1_events_no_longer_grow_a_frozen_mix_1425() {
+    let trace = c_trace();
+    // Stock libobs grew the stream-snv mix +128 / +192 / +85 ms for good on these three events. Frozen
+    // (a stream runs, or the mix settled 30 s ago), the mix stays at the floor, no tick is a hole
+    // (waits = the launch floor's 4), the mic is heard on every tick, and the late member is
+    // re-anchored ONCE: one counted dropout of its late span, then it is mixed again.
+    for (scenario, src, late_ms) in [
+        ("e1-asio-outage-128", "mbc", "123.4"),
+        ("e1-asio-outage-192", "mbc", "183.4"),
+        ("e1-media-stall-85", "pre-fotky video", "73.4"),
+    ] {
+        let s = summary(trace, scenario);
+        assert!(
+            s.contains(" waits=4 total_ms=85 mic_missed=0 ")
+                && s.contains(&format!("'{src}' events=1 dropped_ms={late_ms} "))
+                && s.contains(" stale=0 guard_lines=1 above_lines=0 "),
+            "issue 1425: {scenario} grew the frozen mix or cut a hole:
+{s}
+
+{}",
+            section(trace, scenario).join("\n")
+        );
+        let f = freeze(trace, scenario);
+        assert!(
+            f.contains(" frozen=1 ")
+                && f.contains(&format!(
+                    " mixed_late=1 mixed_late_dropped_ms={late_ms} mix_mixed_late=1"
+                )),
+            "issue 1425: {scenario} was not one counted MIXED_LATE dropout:
+{f}"
+        );
+        assert!(
+            section(trace, scenario).iter().any(|l| l
+                .contains(&format!("'{src}' fell behind the mix (frozen at 85 ms)"))
+                && l.contains(" instead of adding ")),
+            "issue 1425: {scenario}'s re-anchor must name the freeze and what it saved"
+        );
+    }
+    // The late member is mixed again after its one dropout (output continuous).
+    let s = summary(trace, "e1-asio-outage-128");
+    let mixed: u64 = s
+        .split(" mixed=")
+        .nth(1)
+        .and_then(|t| t.split_whitespace().next())
+        .and_then(|t| t.parse().ok())
+        .expect("mixed= field");
+    assert!(mixed > 500, "issue 1425: mbc was not mixed again: {s}");
+}
+
+#[test]
+fn a_join_or_a_growth_restarts_the_settle_1425() {
+    let trace = c_trace();
+    // A member joining 100 ticks before it goes late, and a growth 1350 ticks before the next one,
+    // each keep the mix unfrozen (upstream grows twice: 16 waits, 341 ms); 1550 ticks after the last
+    // growth the mix is frozen and the member, now late for good, is re-anchored on every tick (a line
+    // a minute) instead of growing it a third time.
+    let s = summary(trace, "settle-restarts");
+    assert!(
+        s.contains(" waits=16 total_ms=341 mic_missed=0 ")
+            && s.contains(" above_lines=2 ")
+            && s.contains(" guard_lines=2 "),
+        "issue 1425: the settle did not restart on a join / a growth, or did not freeze after it:
+{s}
+
+{}",
+        section(trace, "settle-restarts").join("\n")
+    );
+    let f = freeze(trace, "settle-restarts");
+    assert!(
+        f.contains(" frozen=1 encoders=0 "),
+        "issue 1425: settle-restarts did not end frozen:
+{f}"
+    );
+}
+
+#[test]
+fn a_frozen_mix_never_grows_for_an_ingest_race_1425() {
+    // The ingest thread places a mixed source late between the render loop and calc_min_ts: min_ts
+    // falls behind the window, but the frozen action adds nothing; the next tick re-anchors it.
+    let trace = c_trace();
+    let s = summary(trace, "frozen-ingest-race");
+    assert!(
+        s.contains(" waits=4 total_ms=85 mic_missed=0 ") && s.contains(" above_lines=0 "),
+        "issue 1425: the frozen action grew the mix for an ingest race:
+{s}"
+    );
+    assert!(
+        freeze(trace, "frozen-ingest-race").contains(" mixed_late=1 "),
+        "issue 1425: the raced source was not re-anchored as MIXED_LATE"
+    );
+}
+
+#[test]
+fn mixed_late_is_only_a_frozen_member_behind_the_window_1425() {
+    // Bits m e c b f (member, entered, composite, behind, frozen), 00000 .. 11111: a composite or a
+    // source on time is never re-anchored; NOT_MIXED (1) and ENTERED (2) win over the freeze; only a
+    // member, not entering, behind, while frozen is MIXED_LATE (3).
+    let trace = c_trace();
+    assert!(
+        trace
+            .iter()
+            .any(|l| l == "probe reason-1425 mecbf=00000..11111: 00110000001100000003000000220000"),
+        "issue 1425: the guard's reason table changed:
+{}",
+        section(trace, "probes").join("\n")
+    );
+    assert!(
+        trace.iter().any(|l| l
+            == "probe mixed-late: reason=3 in_sync=1 events=1 mixed_late=1 mixed_late_dropped_ms=10.0 mix_mixed_late=1"),
+        "issue 1425: a MIXED_LATE re-anchor must count on the source and the mix"
+    );
 }
 
 #[test]

@@ -316,6 +316,8 @@ struct obs_core_audio {{
 	int max_buffering_ticks;
 	int floor_buffering_ticks;
 	bool fixed_buffer;
+	/* issue 1425: the freeze this tick (never set here: the floor and the dynamic increase as before) */
+	bool genlock_buffering_frozen;
 }};
 struct obs_audio_info2 {{
 	uint32_t samples_per_sec;
