@@ -183,7 +183,10 @@ def _item(key):
 
 
 def test_mic_item():
-    assert _item("mic").decide({"mic": (MIC_PRESENT, 0)})["status"] == d.OK
+    # issue 1447: an OK also needs the program-audio guard to read only the measurement signal
+    guard_ok = ("program-audio verdict=MEASUREMENT rms=-35.7 outside_band=13.4% age=0.9 "
+                "markers=8 chain=7\n", 0)
+    assert _item("mic").decide({"mic": (MIC_PRESENT, 0), "mic_guard": guard_ok})["status"] == d.OK
     e = _item("mic").decide({"mic": (MIC_SILENT, 0)})
     assert e["status"] == d.FORGOT
     assert "Abletone" in e["message"]
