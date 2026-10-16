@@ -705,6 +705,22 @@ int main(void)
 	h_summary("settle-restarts");
 	h_freeze_summary("settle-restarts");
 
+	/* (k) the slice-2b limit in the resolume shape (review round 1): a media clip that keeps its stamp is
+	 * in the program mix with no audio, then starts in place (no cut, so no join) 34 s after launch, its
+	 * stamps 128 ms late for good. Stock libobs grew the mix once and played it; frozen, every packet is
+	 * re-anchored, so the clip is MUTED while it stays late (a line a minute) -- never a growth. */
+	h_begin("frozen-late-start-kept-stamp", "media clip", true, 128000000, true);
+	h_other.h_running = false;
+	for (int i = 0; i < 1900; i++) {
+		if (i == 1600) {
+			h_other.h_running = true;
+			h_other.h_fed_until_ns = h_t;
+		}
+		h_step(true);
+	}
+	h_summary("frozen-late-start-kept-stamp");
+	h_freeze_summary("frozen-late-start-kept-stamp");
+
 	/* (j) a stream runs; the ingest thread re-places a MIXED source 300 ms late between the render loop
 	 * and calc_min_ts: the frozen action never grows the mix for it, the next tick re-anchors it. */
 	h_begin("frozen-ingest-race", "NDI race", false, 0, false);

@@ -504,6 +504,11 @@ const EXPECTED_TRACE: &[&str] = &[
     "L200 buffering-guard: 'Media' fell behind the mix (frozen at 341 ms): its audio ran 162.7 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 170 ms to the whole mix's 341 ms of audio buffering (issue 1381; events=2814, +2813 since the last line, dropped_total=60030.0 ms)",
     "settle-restarts: waits=16 total_ms=341 mic_missed=0 'Media' events=2823 dropped_ms=60220.0 mixed=2986 stale=0 guard_lines=2 above_lines=2 restart_lines=0",
     "settle-restarts freeze: frozen=1 encoders=0 'Media' mixed_late=2823 mixed_late_dropped_ms=60220.0 mix_mixed_late=2823",
+    "== frozen-late-start-kept-stamp",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 buffering-guard: 'media clip' fell behind the mix (frozen at 85 ms): its audio ran 42.7 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 42 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
+    "frozen-late-start-kept-stamp: waits=4 total_ms=85 mic_missed=0 'media clip' events=300 dropped_ms=6390.0 mixed=0 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
+    "frozen-late-start-kept-stamp freeze: frozen=1 encoders=0 'media clip' mixed_late=300 mixed_late_dropped_ms=6390.0 mix_mixed_late=300",
     "== frozen-ingest-race",
     "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
     "L200 buffering-guard: 'NDI race' fell behind the mix (frozen at 85 ms): its audio ran 214.7 ms behind the mix window; re-anchored (dropped 214.7 ms) instead of adding 234 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=214.7 ms)",
@@ -748,6 +753,25 @@ fn a_join_or_a_growth_restarts_the_settle_1425() {
         f.contains(" frozen=1 encoders=0 "),
         "issue 1425: settle-restarts did not end frozen:
 {f}"
+    );
+}
+
+#[test]
+fn a_member_that_stays_late_in_a_frozen_mix_is_muted_never_grown_1425() {
+    // The slice-2b limit, in the resolume shape: a media clip in the program mix starts in place 34 s
+    // after launch (no cut, so no join, the mix is frozen) with its stamps 128 ms late for good. Stock
+    // libobs grew the mix once; frozen, every packet is re-anchored, so the clip is never mixed while
+    // it stays late (one line, the counters carry the rest). Slice 2b (delay that one source) is the
+    // owner's call; this pins today's behaviour so a change to it is visible.
+    let trace = c_trace();
+    let s = summary(trace, "frozen-late-start-kept-stamp");
+    assert!(
+        s.contains(" waits=4 total_ms=85 mic_missed=0 ")
+            && s.contains("'media clip' events=300 ")
+            && s.contains(" mixed=0 ")
+            && s.contains(" guard_lines=1 above_lines=0 "),
+        "issue 1425: a member late for good in a frozen mix must be re-anchored on every tick, never \
+         grow the mix:\n{s}"
     );
 }
 
