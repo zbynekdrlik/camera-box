@@ -24,6 +24,7 @@ paths:
   - "tests/genlock_audio_relabel_pending_parity_1381.rs"
   - "src/asrc_stamp_bench.rs"
   - "tests/genlock_audio_stamp_basis_wiring_1425.rs"
+  - "tests/genlock_audio_asrc_basis_parity_1425.rs"
 ---
 
 # Receiver-side AUDIO genlock parity (#1303)
@@ -896,7 +897,12 @@ every other source out of it.
   about 9 ms).
 - **Not in this slice:** a sticky basis (the consult's "leave Stamp only after 8 non-direct
   packets"). A source whose stamps hover at OBS's 2 s direct window would flip basis and flush the
-  regression each time; no rig source does today.
+  regression each time; no rig source does today. A second flip cause (review round 2): on an
+  async-VIDEO source with direct audio (a media clip), the render thread writes `timing_adjust`
+  without a lock (`obs_source_update_async_video`), so a write that lands between the audio thread
+  zeroing it and the basis read makes that one packet Arrival (two regression flushes). Audio-only
+  sources (`mbc`, PulseAudio) never hit it. Raised with the Design-question (decide on audio-thread
+  state instead).
 - **Tests:** the unit table (`a_directly_stamped_mixed_source_is_judged_by_its_stamp_1425`); the parity
   gate `c_asrc_placement_matches_the_rust_authority_1425` in its own file
   `tests/genlock_audio_asrc_basis_parity_1425.rs` (the issue-1303 parity file is at the line budget);

@@ -1,7 +1,7 @@
 //! Issue 1425 (E2 slice 1, design 6205974120) — the WIRING of the STAMP basis of the per-source ASRC.
 //!
 //! The decision is pinned elsewhere: `src/genlock_audio_pairing.rs` `audio_asrc_placement` /
-//! `audio_place_measured` (their C port by `tests/genlock_audio_pairing_parity.rs`), the behaviour by
+//! `audio_place_measured` (their C port by `tests/genlock_audio_asrc_basis_parity_1425.rs`), the behaviour by
 //! the two-clock bench `src/asrc_stamp_bench.rs`, the compensator (unchanged) by
 //! `tests/asrc_compensator_parity_1367.rs`. This file pins that `obs-source.c` CALLS them where the
 //! design says:
@@ -103,7 +103,7 @@ fn the_ingest_judges_a_directly_stamped_source_by_its_stamp_1425() {
         direct < basis,
         "issue 1425: the basis must read the direct-stamp verdict of this packet"
     );
-    // ... the compensator learns it before any setpoint shift of this packet (a no-op in its
+    // ... the compensator learns it before the placement shifts of this packet (a no-op in its
     // placement-judged mode), the measure gate reads it, and the servo is fed after the unlock.
     let mode = at(ingest, STAMP_BASIS_WIRING[1]);
     let first_shift = at(
