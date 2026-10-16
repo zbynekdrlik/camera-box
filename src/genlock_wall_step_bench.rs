@@ -534,7 +534,8 @@ fn a_step_storm_and_a_clock_set_still_degrade_1372() {
 
 // ---- 3. the stream `mbc` ASRC level --------------------------------------------------------------
 
-const MBC_TARGET_MS: f64 = 113.0; // live: 100 ms absolute + the +13 ms sync offset
+// the live `mbc` depth (issue 1425: the arrival servo holds the depth it locked at)
+const MBC_START_MS: f64 = 113.0;
 const EVENT_AT_S: f64 = 1200.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -549,9 +550,12 @@ enum MbcEvent {
 
 #[derive(Debug)]
 struct MbcRun {
-    /// Largest |1 s mean level − target| from the event + 60 s to the end.
+    /// Largest |1 s mean level − target| from the event + 60 s to the end, against the setpoint
+    /// captured before the event.
     settled_err_ms: f64,
-    /// The captured setpoint at the end (the owed recovery moved it and must have returned it).
+    /// The setpoint captured before the event, and the one at the end (the owed recovery moved it and
+    /// must have returned it).
+    target_before_ms: f64,
     final_target_ms: f64,
     /// Still owed at the event + 60 s.
     owed_at_60s_ms: f64,
@@ -576,8 +580,7 @@ fn run_mbc(event: MbcEvent) -> MbcRun {
     let tick_s = tick_ms / 1000.0;
     let mut rng = Lcg(0x1372_0044);
     let mut c = RealtimeAsrcCompensator::new();
-    c.set_level_offset_ms(MBC_TARGET_MS - 100.0);
-    let mut buffer_ms = MBC_TARGET_MS + tick_ms / 2.0;
+    let mut buffer_ms = MBC_START_MS + tick_ms / 2.0;
     let mut t = 0.0_f64;
     let mut next_tick_s = tick_s;
     let mut prev_jitter = 0.0_f64;
@@ -586,6 +589,7 @@ fn run_mbc(event: MbcEvent) -> MbcRun {
     let (mut sec_sum, mut sec_n, mut sec_end) = (0.0_f64, 0_u32, 1.0_f64);
     let mut run = MbcRun {
         settled_err_ms: 0.0,
+        target_before_ms: f64::NAN,
         final_target_ms: 0.0,
         owed_at_60s_ms: f64::NAN,
         recover_ppm_before: 0.0,
@@ -597,6 +601,7 @@ fn run_mbc(event: MbcEvent) -> MbcRun {
     while t < EVENT_AT_S + 900.0 {
         if !event_done && t >= EVENT_AT_S {
             event_done = true;
+            run.target_before_ms = c.level_target_ms();
             match event {
                 MbcEvent::Loss(ms) => {
                     // no callback for `ms`: the mixer keeps draining, and the next callback's master
@@ -643,7 +648,7 @@ fn run_mbc(event: MbcEvent) -> MbcRun {
         if t >= sec_end {
             let mean = sec_sum / f64::from(sec_n);
             if sec_end >= EVENT_AT_S + 60.0 {
-                run.settled_err_ms = run.settled_err_ms.max((mean - MBC_TARGET_MS).abs());
+                run.settled_err_ms = run.settled_err_ms.max((mean - run.target_before_ms).abs());
             }
             sec_sum = 0.0;
             sec_n = 0;
@@ -662,7 +667,7 @@ fn the_mbc_loss_is_recovered_within_60_s_1372() {
         "issue 1372: the mbc level must be back within ±2 ms of its target from the step + 60 s on: {r:?}"
     );
     assert!(
-        r.owed_at_60s_ms == 0.0 && (r.final_target_ms - MBC_TARGET_MS).abs() < 1e-6,
+        r.owed_at_60s_ms == 0.0 && (r.final_target_ms - r.target_before_ms).abs() < 1e-6,
         "issue 1372: the whole 44 ms must be paid back and the setpoint returned: {r:?}"
     );
     assert!(

@@ -60,6 +60,7 @@ if _HERE not in sys.path:
     sys.path.append(_HERE)
 
 from bundle_state_audio import (  # noqa: E402 -- after the sibling path setup above
+    AUDIO_BUFFERING_SETTLE_S,
     AUDIO_REF_BAND_DEFAULT_SRC,
     AUDIO_REF_BAND_DUTY_MARGIN_MS,
     AUDIO_REF_BAND_WINDOW_CAP,
@@ -151,6 +152,7 @@ __all__ = [
     "BUNDLE_STATE_KEYS",
     "build_bundle_state",
     # bundle_state_audio
+    "AUDIO_BUFFERING_SETTLE_S",
     "AUDIO_REF_BAND_DEFAULT_SRC",
     "AUDIO_REF_BAND_DUTY_MARGIN_MS",
     "AUDIO_REF_BAND_WINDOW_CAP",

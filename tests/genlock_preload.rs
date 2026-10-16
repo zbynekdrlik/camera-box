@@ -2035,82 +2035,60 @@ mod vendored_source {
     }
 
     #[test]
-    fn asrc_absolute_level_setpoint_1355() {
-        // issue #1355: the ASRC level setpoint is ABSOLUTE — ASRC_LEVEL_TARGET_MS plus the source's
-        // deliberate placement offset (last_sync_offset + the #1303 genlock audio hold) — instead of
-        // the depth the mixer happened to have at the first lock (a random per-launch A/V level), and
-        // an unreachable target is BOUNDED (fall back to the live depth after
-        // ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error, logged at LOG_WARNING). Src
-        // authority + Tier-0 gate: src/asrc_bench.rs (LEVEL_TARGET_MS /
-        // LEVEL_TARGET_UNREACHABLE_WINDOWS + the three *_1355 benches). This static guard keeps the
-        // vendored C mirror in lock-step (a subtree pull / hand-edit restoring the depth-at-lock
-        // capture would ship an obs.dll whose A/V level is random per launch again). Keep byte-exact
-        // with the shipped lines.
+    fn asrc_level_setpoint_is_the_depth_at_lock_1425() {
+        // issue 1425 (E2 slice 3, design 6220191978): the #1355 ABSOLUTE level target
+        // (ASRC_LEVEL_TARGET_MS + the source's placement offset) walked an arrival-basis source's
+        // buffer after its lock, and its UNREACHABLE fallback re-latched the setpoint at runtime.
+        // Once synced nothing may move a buffer (owner, 16.10.2026), so both are gone: an arrival
+        // source captures the window-mean depth at its lock, a placement-judged source (timecode /
+        // stamp basis) holds its placement error at 0. Src authority + Tier-0 gates:
+        // src/asrc_bench.rs (an_arrival_source_holds_its_depth_at_lock_and_never_walks_1425), the
+        // executable parity gate tests/asrc_compensator_parity_1367.rs and the std-only
+        // tests/genlock_audio_slice3_1425.rs. Keep byte-exact with the shipped lines.
         let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
-        assert!(
-            h.contains("#define ASRC_LEVEL_TARGET_MS 100.0")
-                && h.contains("#define ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS 2400"),
-            "{ASRC_COMPENSATOR_H}: #1355 — the ASRC_LEVEL_TARGET_MS = 100.0 absolute setpoint and/or the \
-             ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS = 2400 bound are no longer defined; re-sync with \
-             src/asrc_bench.rs LEVEL_TARGET_MS / LEVEL_TARGET_UNREACHABLE_WINDOWS."
-        );
-        assert!(
-            h.contains("double level_offset_ms;")
-                && h.contains("uint32_t level_unconverged_windows;")
-                && h.contains("uint32_t level_fallback_count;")
-                && h.contains("bool level_fallback_pending;")
-                && h.contains("bool level_fallback_done;")
-                && h.contains("bool level_absolute;")
-                && h.contains(
-                    "EXPORT void asrc_compensator_set_level_offset_ms(struct asrc_compensator *c, double offset_ms);"
-                )
-                && h.contains(
-                    "EXPORT void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolute);"
-                ),
-            "{ASRC_COMPENSATOR_H}: #1355 — the placement-offset / absolute-rule / unreachable-bound \
-             state fields or the asrc_compensator_set_level_offset_ms / _set_level_absolute \
-             declarations are gone."
-        );
+        for gone in [
+            "ASRC_LEVEL_TARGET_MS",
+            "ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS",
+            "level_offset_ms",
+            "level_unconverged_windows",
+            "level_fallback",
+            "level_absolute",
+        ] {
+            assert!(
+                !h.contains(gone),
+                "{ASRC_COMPENSATOR_H}: issue 1425 -- `{gone}` (the retired absolute level target or \
+                 its unreachable fallback) is back."
+            );
+        }
 
         let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
         assert!(
             c.contains(
-                "c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms : window_level_ms;"
+                "if (c->timecode) c->level_target_ms = 0.0; else c->level_target_ms = window_level_ms;"
             ),
-            "{ASRC_COMPENSATOR_C}: #1355 — the level capture is no longer the ABSOLUTE target plus the \
-             placement offset (depth at lock only for a non-absolute source — since #1367 the \
-             window's MEAN level); keep numerically identical to src/asrc_bench.rs \
-             compensate_with_level."
+            "{ASRC_COMPENSATOR_C}: issue 1425 -- the level capture is no longer the window-mean depth \
+             at lock (0 in timecode mode); keep numerically identical to src/asrc_bench.rs \
+             compensate_core."
         );
         assert!(
             !c.contains("c->level_target_ms = buffered_ms; c->level_captured = true;"),
-            "{ASRC_COMPENSATOR_C}: #1355 — the pre-#1355 depth-at-lock capture is BACK; every stream \
-             launch would freeze a random mix-buffer depth (a random A/V level) again."
+            "{ASRC_COMPENSATOR_C}: #1367 -- the capture reads the one closing reading again instead of \
+             the window mean."
         );
         assert!(
-            c.contains(
-                "if (!c->timecode && !c->level_fallback_done && fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {"
-            ) && c.contains(
-                "if (++c->level_unconverged_windows >= ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS) {"
-            ) && c.contains("c->level_target_ms += c->level_err_ema_ms; c->level_fallback_done = true;")
-                && c.contains("c->level_fallback_pending = true;"),
-            "{ASRC_COMPENSATOR_C}: #1355 — the unreachable-setpoint bound (smoothed error outside the \
-             restore exit band for ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS -> ONE fallback per capture \
-             to the SMOOTHED depth + flag) is gone; an unreachable target would push the restore \
-             burst and the P term forever, or ratchet."
+            !c.contains("level_fallback") && !c.contains("ASRC_LEVEL_TARGET"),
+            "{ASRC_COMPENSATOR_C}: issue 1425 -- the unreachable-setpoint fallback (a runtime re-latch \
+             of the setpoint) or the absolute target is back."
         );
 
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(
-            src.contains(
-                "asrc_compensator_set_level_absolute(&source->asrc, !source->genlock_fifo && source->monitoring_type != OBS_MONITORING_TYPE_MONITOR_ONLY);"
-            ) && src.contains(
-                "asrc_compensator_set_level_offset_ms(&source->asrc, (double)source->last_sync_offset / 1e6);"
-            ),
-            "{OBS_SOURCE}: #1355 — asrc_process_audio no longer hands the compensator the capture rule \
-             (absolute only for a mixed, non-genlock source) and the placement offset the buffered \
-             samples carry (last_sync_offset); the absolute capture would hit a genlock hold or a \
-             MONITOR_ONLY depth of 0, or ignore the sync offset."
+            !src.contains("asrc_compensator_set_level_absolute")
+                && !src.contains("asrc_compensator_set_level_offset_ms")
+                && !src.contains("UNREACHABLE after")
+                && !src.contains("fallbacks=%u"),
+            "{OBS_SOURCE}: issue 1425 -- asrc_process_audio calls a retired absolute-target setter \
+             again, or the UNREACHABLE warning / the fallbacks= telemetry field is back."
         );
         assert!(
             src.contains("if (genlock_action == GENLOCK_AUDIO_ACT_SLEW) {")
@@ -2120,17 +2098,11 @@ mod vendored_source {
                 && src.contains(
                     "asrc_compensator_shift_level_target(&source->asrc, (double)genlock_slew_step_ns / 1e6);"
                 ),
-            "{OBS_SOURCE}: #1355 + issue 1367 (ROZHODNUTÉ 5827497952) — a change of the applied \
+            "{OBS_SOURCE}: #1355 + issue 1367 (ROZHODNUTÉ 5827497952) -- a change of the applied \
              genlock audio hold no longer SLEWS while audio plays (moving the ASRC level setpoint \
              with every slew step), or a (re)placement no longer shifts the setpoint by the true \
              buffer jump; the level loop would walk the depth back and undo the hold, or the audio \
              would step (the audible dropout)."
-        );
-        assert!(
-            src.contains("UNREACHABLE after %d windows outside +/-%.0fms")
-                && src.contains("restore=%d (#1335) fallbacks=%u (#1355)"),
-            "{OBS_SOURCE}: #1355 — the LOG_WARNING unreachable-fallback line and/or the asrc: \
-             telemetry fallbacks= field are gone; a fallback would be silent."
         );
     }
 
@@ -2182,10 +2154,11 @@ mod vendored_source {
         );
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(
-            src.contains("restore=%d (#1335) fallbacks=%u (#1355) \" \"level_avg=%.2fms (#1367)\"")
-                && src.contains("source->asrc.level_fallback_count, source->asrc.level_avg_ms,"),
+            src.contains("restore=%d (#1335) \" \"level_avg=%.2fms (#1367)\"")
+                && src.contains("(int)source->asrc.level_restore, source->asrc.level_avg_ms,"),
             "{OBS_SOURCE}: #1367 — the asrc: telemetry line no longer carries level_avg= (the \
-             tick-free level) appended after the byte-identical fallbacks=%u (#1355) suffix."
+             tick-free level) appended after the byte-identical restore=%d (#1335) suffix (issue \
+             1425 removed the fallbacks= field between them)."
         );
         // issue 1372: the confirmed-step recovery still owed rides AFTER level_avg= as recover_ms=,
         // so every name-extracting parser of the line is unaffected.
@@ -2219,7 +2192,7 @@ mod vendored_source {
         let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
         assert!(
             c.contains("if (!c->timecode) asrc_step_recover_book(c, r_s, buffered_ms);")
-                && c.contains("if (c->timecode) c->level_target_ms = 0.0; else c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms : window_level_ms;")
+                && c.contains("if (c->timecode) c->level_target_ms = 0.0; else c->level_target_ms = window_level_ms;")
                 && c.contains("void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms) { /* camera-box issue 1367")
                 && c.contains("const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);")
                 && c.contains("const double owed_ms = asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);")

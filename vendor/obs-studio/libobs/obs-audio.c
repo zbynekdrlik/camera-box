@@ -375,11 +375,11 @@ static void set_fixed_audio_buffering(struct obs_core_audio *audio, size_t sampl
 }
 
 /* camera-box issue 1367 (ROZHODNUTE 5857354949): the genlock FLOOR, raised on the first mixer tick
- * of every launch, so every launch starts with the same buffering (stock OBS started at 0 and grew
- * only when a source happened to arrive late). The dynamic increase stays active above it
- * (add_audio_buffering). The line keeps the "total audio buffering is now %d milliseconds" text the
- * #786 launch gates parse; the floor (85 ms at 48 kHz, 92 ms at 44.1 kHz) is under their 100 ms
- * bound. */
+ * of a launch when GENLOCK_AUDIO_BUFFERING_FLOOR_MS is above 0. The dynamic increase stays active
+ * above it (add_audio_buffering). The line keeps the "total audio buffering is now %d milliseconds"
+ * text the #786 launch gates parse. Issue 1425 (E2 slice 3): the floor is 0, so this never runs: a
+ * launch starts at 0 like stock OBS and grows only for a late mixed source (frozen while an audio
+ * encoder runs). It stays for a box that ever needs a floor again. */
 static void set_floor_audio_buffering(struct obs_core_audio *audio, size_t sample_rate, struct ts_info *ts)
 {
 	const size_t total_ms = raise_audio_buffering(audio, sample_rate, ts, audio->floor_buffering_ticks);
@@ -388,6 +388,38 @@ static void set_floor_audio_buffering(struct obs_core_audio *audio, size_t sampl
 	     "genlock audio buffering floor (issue 1367): total audio buffering is now %d milliseconds from the "
 	     "first audio tick, dynamically increasing above",
 	     (int)total_ms);
+}
+
+/* camera-box issue 1425 slice 3 (ROZHODNUTE 6221252305): the launch settle window. The mix time of the
+ * mix's first audio tick, audio thread only: a file-scope static like the issue-1381 mixer tick, never
+ * reset, so an audio reset of a running OBS opens no new window. */
+static uint64_t genlock_launch_first_tick_ns = 0;
+/* This tick: an audio encoder runs while the launch has not settled (set by genlock_buffering_frozen_now). */
+static bool genlock_launch_encoder_unsettled = false;
+/* The settle-window growth line is logged once per process. */
+static bool genlock_launch_growth_logged = false;
+
+/* This tick's freeze (obs-genlock-audio-buffering.h): an audio encoder runs AND the launch's startup race
+ * is over. `tick_start_ns` = audio_callback's input tick start (start_ts_in), which only advances -- never
+ * the processed window's start, which a growth moves back in front of the first tick. */
+static inline bool genlock_buffering_frozen_now(uint64_t tick_start_ns, bool encoder_active)
+{
+	if (!genlock_launch_first_tick_ns)
+		genlock_launch_first_tick_ns = tick_start_ns;
+	const bool settled = genlock_audio_buffering_launch_settled(genlock_launch_first_tick_ns, tick_start_ns);
+	genlock_launch_encoder_unsettled = encoder_active && !settled;
+	return genlock_audio_buffering_frozen(encoder_active, settled);
+}
+
+/* A growth of `ms` while an encoder ran inside the launch settle window: that output's audio is later
+ * by it for good. One LOUD line per process, so the one-off launch-time effect is visible. */
+static inline void genlock_launch_growth_log(size_t ms)
+{
+	if (!genlock_launch_encoder_unsettled || genlock_launch_growth_logged)
+		return;
+	genlock_launch_growth_logged = true;
+	blog(LOG_WARNING, "genlock audio buffering: grew %d ms while an encoder ran inside the launch settle window",
+	     (int)ms);
 }
 
 static void add_audio_buffering(struct obs_core_audio *audio, size_t sample_rate, struct ts_info *ts, uint64_t min_ts,
@@ -422,28 +454,16 @@ static void add_audio_buffering(struct obs_core_audio *audio, size_t sample_rate
 	total_ms = audio->total_buffering_ticks * AUDIO_OUTPUT_FRAMES * 1000 / sample_rate;
 
 	/* camera-box issue 1367: an increase ABOVE the genlock floor is one LOUD named line: the late
-	 * source and the new total (keeping the "total audio buffering is now %d milliseconds" text the
-	 * #786 launch gates parse), and where the new total leaves the #1335/#1355 ASRC level band -- a
-	 * mixed source on an absolute level target (the stream `mbc`) then sits more than
-	 * GENLOCK_AUDIO_LEVEL_REACH_NS from its natural depth (buffering + the ~9 ms nominal base) and
-	 * the servo cannot reach it. libobs has no box identity: on the resolume cg OBS a media / NDI
-	 * start legitimately grows the buffering, and the note then only matters for a mixed source
-	 * on an absolute target there. */
-	const int64_t genlock_band_err_ns = genlock_audio_buffering_band_error_ns(
-		genlock_audio_buffering_ticks_ns((uint32_t)audio->total_buffering_ticks, AUDIO_OUTPUT_FRAMES,
-						 (uint32_t)sample_rate),
-		GENLOCK_AUDIO_LEVEL_BASE_NOMINAL_NS, (int64_t)(ASRC_LEVEL_TARGET_MS * 1e6));
-	const bool genlock_band_ok = genlock_audio_buffering_band_ok(genlock_band_err_ns);
+	 * source and the new total, keeping the "total audio buffering is now %d milliseconds" text the
+	 * #786 launch gates parse. Issue 1425 (E2 slice 3): with the floor at 0 every growth logs here; a
+	 * launch's own startup race draws 0-85 ms. Since slice 1 a stamped source's A/V does not depend on
+	 * the buffering, and since slice 2 it never grows while an audio encoder runs (a late member is
+	 * re-anchored instead), so the line names the latency added, not an A/V fault. */
 	blog(LOG_WARNING,
 	     "genlock audio buffering ABOVE the floor (issue 1367): adding %d milliseconds of audio buffering, total "
-	     "audio buffering is now %d milliseconds (source: %s); ASRC level band %s: buffering + %d ms base lands "
-	     "%.1f ms off the %.0f ms level target (reach +/-%d ms)%s",
-	     (int)ms, (int)total_ms, buffering_name, genlock_band_ok ? "ok" : "BROKEN",
-	     (int)(GENLOCK_AUDIO_LEVEL_BASE_NOMINAL_NS / 1000000ULL), (double)genlock_band_err_ns / 1e6,
-	     ASRC_LEVEL_TARGET_MS, (int)(GENLOCK_AUDIO_LEVEL_REACH_NS / 1000000LL),
-	     genlock_band_ok ? ""
-			     : " -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) "
-			       "cannot reach it at this buffering");
+	     "audio buffering is now %d milliseconds (source: %s)",
+	     (int)ms, (int)total_ms, buffering_name);
+	genlock_launch_growth_log(ms);
 #if DEBUG_AUDIO == 1
 	blog(LOG_DEBUG,
 	     "min_ts (%" PRIu64 ") < start timestamp "
@@ -907,10 +927,12 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	 * tree reached. Mark it before the loop below adds every other audio source (rendered for meters
 	 * and monitoring, never mixed). */
 	genlock_mix_mark_members(audio);
-	/* camera-box issue 1425 (E2 slice 2, ROZHODNUTE 6217557472): the buffering FREEZE for this tick --
-	 * an output with an audio encoder is active. A member that then falls behind the window is
-	 * re-anchored (MIXED_LATE) and the dynamic increase is off; with no encoder, stock growth. */
-	audio->genlock_buffering_frozen = genlock_audio_buffering_frozen(obs_output_genlock_audio_encoder_outputs() > 0);
+	/* camera-box issue 1425 (E2 slice 2, ROZHODNUTE 6217557472 + 6221252305): the buffering FREEZE for
+	 * this tick -- an output with an audio encoder is active and the launch settle window is over. A
+	 * member that then falls behind the window is re-anchored (MIXED_LATE) and the dynamic increase is
+	 * off; with no encoder, or inside the window, stock growth. */
+	audio->genlock_buffering_frozen =
+		genlock_buffering_frozen_now(start_ts_in, obs_output_genlock_audio_encoder_outputs() > 0);
 
 	pthread_mutex_lock(&data->audio_sources_mutex);
 
@@ -1032,8 +1054,9 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 
 	/* ------------------------------------------------ */
 	/* if a source has gone backward in time, buffer    */
-	/* camera-box issue 1367: the genlock floor first (the first tick of every launch), then OBS's own
-	 * dynamic increase above it -- genlock_audio_buffering_action() (obs-genlock-audio-buffering.h).
+	/* camera-box issue 1367: the genlock floor first (the first tick of a launch; 0 since issue 1425
+	 * slice 3, so never), then OBS's own dynamic increase above it --
+	 * genlock_audio_buffering_action() (obs-genlock-audio-buffering.h).
 	 * The upstream fixed branch stays byte-identical for rebases; the genlock plan never sets
 	 * fixed_buffer, so it is unreachable. */
 	const int genlock_buffering = genlock_audio_buffering_action(audio->total_buffering_ticks,

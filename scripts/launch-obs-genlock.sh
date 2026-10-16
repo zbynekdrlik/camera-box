@@ -354,9 +354,11 @@ Start-Sleep -Seconds 3
 #     shrinks until OBS restarts -> the whole session's A/V sync is off by ~0.9 s (live incident
 #     2026-07-15: operator's 900 ms genlock latency needed ~2000 ms to compensate). A bad draw is
 #     fully decided in the first seconds and is visible in the fresh log, so gate + redraw here.
-#     THRESHOLD = 100 ms: the box STANDARD is the genlock libobs 85 ms floor since issue 1367
-#     (92 ms at 44.1 kHz; 0, 64 or 85 ms per launch before it), so 100 = norm + small headroom. The user's rule:
-#     OBS must never come up with more than the standard draw.
+#     THRESHOLD = 100 ms: since issue 1425 (E2 slice 3) the genlock libobs has no buffering floor,
+#     so a clean launch draws only what its own ASIO / PulseAudio startup race adds (stock OBS drew
+#     0, 64 or 85 ms per launch) or logs no growth line at all; 100 = above every clean draw. A directly stamped source's A/V
+#     does not depend on the draw, so a high draw is added latency, never an A/V fault. The user's
+#     rule: OBS must never come up with more than the standard draw.
 #     NB fail-open asymmetry: an empty/absent log reads as peak 0 = "AUDIO OK" here, but step (4)
 #     below fails CLOSED (exit 1) on the same missing log, so a silent overall pass is impossible.
 \$logDir = "\$env:APPDATA\\obs-studio\\logs"

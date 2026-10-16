@@ -391,42 +391,6 @@ pub const LEVEL_KP_MAX_PPM: f64 = 50.0;
 /// asrc-compensator.h ASRC_LEVEL_EMA_TAU_S — keep numerically identical.
 pub const LEVEL_EMA_TAU_S: f64 = 10.0;
 
-/// issue #1355: the ABSOLUTE buffer-LEVEL setpoint, in ms of mix-buffer depth EXCLUDING the
-/// source's deliberate placement offset (its audio sync offset, the one the buffered samples were
-/// placed with, supplied via [`RealtimeAsrcCompensator::set_level_offset_ms`]). On capture (first lock, and every
-/// relock after a flush) the setpoint becomes `LEVEL_TARGET_MS + level_offset_ms` instead of
-/// whatever depth the mixer happened to have. Before, each stream-OBS launch froze a random
-/// `mbc` depth (captured 58.9 … 126.1 ms over 10 launches, 18.–23.9.) and the loop then HELD it,
-/// so every launch had its own A/V level (the dock + `mbc` level ≈ 135 ± 6 ms invariant). Now the
-/// P/I terms, plus the restore burst the sustained-error arm fires, walk every launch to the SAME depth.
-/// Value from the stream-box data: OBS's own audio buffering was 0, 64 or 85 ms per launch (random —
-/// since issue 1367 every launch starts at a deterministic 85 ms floor, `genlock_audio_buffering`),
-/// the offset-free depth sat at ≈ 70–102 ms; 100 ms is above the 85 ms buffering floor with a
-/// margin wider than the ±8–10 ms 1-s level scatter, inside the observed 64–126 ms band, and near the
-/// level median (≈ 91 ms), so the one-time A/V shift the calibrated pin/audio offset absorbs stays
-/// small. A target the mixer cannot reach is bounded by [`LEVEL_TARGET_UNREACHABLE_WINDOWS`]. Only
-/// for a source whose depth has that direct-timestamp base: a `genlock_fifo` source (depth = the
-/// #1303 video-paired hold + a ~0–25 ms transport base; stream's `fallback repro` sat at 967/1001 ms
-/// under a ~976 ms hold) and a MONITOR_ONLY source (never feeds the mix, depth 0) keep the pre-#1355
-/// depth-at-lock capture ([`RealtimeAsrcCompensator::set_level_absolute`]). Mirror of
-/// asrc-compensator.h ASRC_LEVEL_TARGET_MS — keep numerically identical.
-pub const LEVEL_TARGET_MS: f64 = 100.0;
-
-/// issue #1355: how many CONSECUTIVE accepted windows the SMOOTHED level error
-/// (`|level_err_ema_ms|`) may stay at or above [`LEVEL_RESTORE_ARM_MS`] (the restore's own exit
-/// band) before the setpoint is declared UNREACHABLE. At that point the loop FALLS BACK to the
-/// SMOOTHED live depth (`target + level_err_ema_ms`, never one noisy reading): the restore burst
-/// stops and the P error is zeroed, so the restore burst and the P term can never push against a
-/// buffer that will not move. At most ONE fallback per capture (a steady residual the P+I terms
-/// hold at ≥ 5 ms would otherwise re-trip it every 40 min and ratchet the target away). A
-/// telemetry counter + a one-shot pending flag are raised, and the C caller logs it LOUDLY
-/// (`blog(LOG_WARNING, …)`). The EMA (not the raw level) is counted so the ±10 ms tick noise cannot
-/// reset it. 2400 windows (40 min) is ≈ 2× the slowest legitimate walk the bench measures: a 98 ms
-/// walk from the lowest depth ever logged (26 ms) to a +24 ms-offset target (124 ms) under the
-/// ±10 ms tick noise converges to within 5 ms in ~1180 s (~20 min); a 10 ms walk takes ~410 s.
-/// Mirror of asrc-compensator.h ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS — keep numerically identical.
-pub const LEVEL_TARGET_UNREACHABLE_WINDOWS: u32 = 2400;
-
 /// issue #960: sanity ceiling on the (issue #962: WINDOWED, duration-weighted-summed) measured
 /// ppm, in ppm — above this, the measurement carries no real timing information (a starved or
 /// bursting audio source, e.g. a muted/idle device path delivering near-zero samples) and must be
@@ -542,11 +506,10 @@ pub struct RealtimeAsrcCompensator {
     reg_locked: bool,
     /// issue #1335: the buffer-LEVEL setpoint, in ms — captured the FIRST time the rate regression
     /// locks, re-captured after every flush/relock (see [`Self::regression_flush`] +
-    /// [`Self::level_captured`]). issue #1355: the capture is ABSOLUTE, [`LEVEL_TARGET_MS`] +
-    /// `level_offset_ms` (it used to be the depth the mixer happened to have, a random per-launch
-    /// A/V level); it then follows a deliberate sync-offset change 1:1
-    /// ([`Self::shift_level_target`]) and falls back to the live depth only when unreachable
-    /// ([`LEVEL_TARGET_UNREACHABLE_WINDOWS`]). The level loop drives `buffered_ms` toward this.
+    /// [`Self::level_captured`]). Issue 1425 (E2 slice 3): the capture is the window-mean depth at
+    /// that lock (0 in timecode mode), never an absolute target; it then follows a deliberate
+    /// sync-offset change 1:1 ([`Self::shift_level_target`]) and a booked step (issue 1372). The
+    /// level loop drives `buffered_ms` toward this.
     level_target_ms: f64,
     /// issue #1335: the integral of the level error, in ppm, folded ADDITIVELY into the correction
     /// target INSIDE the servo loop (alongside `estimated_ppm` + `outer_bias_ppm`), clamped to
@@ -589,36 +552,6 @@ pub struct RealtimeAsrcCompensator {
     /// gates the one-shot EMA seed (first accepted window seeds `ema = err`, later windows blend).
     /// Cleared by a flush so a relock re-seeds. Mirror of the C `level_err_ema_seeded`.
     level_err_ema_seeded: bool,
-    /// issue #1355: the source's deliberate placement offset, in ms, that is ALREADY reflected in the
-    /// buffered samples (the C caller passes `last_sync_offset / 1e6` every callback via [`Self::set_level_offset_ms`]). The capture sets
-    /// `level_target_ms = LEVEL_TARGET_MS + level_offset_ms`. NOT reset by a flush — it is caller
-    /// state, not servo state. Mirror of the C `level_offset_ms`.
-    level_offset_ms: f64,
-    /// issue #1355: count of CONSECUTIVE accepted windows with `|level_err_ema_ms| >=
-    /// LEVEL_RESTORE_ARM_MS`; reaching [`LEVEL_TARGET_UNREACHABLE_WINDOWS`] triggers the unreachable
-    /// fallback. Reset by a converged window, the fallback, a flush and construction. Mirror of the C
-    /// `level_unconverged_windows`.
-    level_unconverged_windows: u32,
-    /// issue #1355: running count of unreachable-setpoint fallbacks (never reset, like `step_count`) —
-    /// the C mirror prints it as the `asrc:` line's `fallbacks=` field.
-    level_fallback_count: u32,
-    /// issue #1355: the abandoned (unreachable) setpoint of the most recent fallback, in ms — the C
-    /// caller's LOG_WARNING line reports it. Telemetry only.
-    level_fallback_from_ms: f64,
-    /// issue #1355: one-shot flag raised by a fallback; the C caller logs the event and clears it
-    /// (Rust: [`Self::take_level_fallback_pending`]). Mirror of the C `level_fallback_pending`.
-    level_fallback_pending: bool,
-    /// issue #1355: whether this capture already fell back once — at most ONE fallback per capture
-    /// (cleared by a flush and by a re-capture forced through [`Self::set_level_absolute`]). Mirror
-    /// of the C `level_fallback_done`.
-    level_fallback_done: bool,
-    /// issue #1355: whether the capture uses the ABSOLUTE target (`LEVEL_TARGET_MS +
-    /// level_offset_ms`, true by default) or the pre-#1355 depth at lock (false). The C caller sets
-    /// it every callback: false for a `genlock_fifo` source (its depth is the #1303 video-paired hold
-    /// plus a transport base of ~0–25 ms, not the ~90 ms `mbc` base the 100 ms target is calibrated
-    /// on) and for a MONITOR_ONLY source (it never feeds the mix buffer, depth 0). Mirror of the C
-    /// `level_absolute`.
-    level_absolute: bool,
     /// issue #1367: sum of every callback's `buffered_ms` in the CURRENT (not yet closed) window —
     /// with [`Self::window_level_count`] it gives the window's MEAN level, which the level loop reads
     /// instead of the one reading of the window-closing callback. The mixer drains the buffer in
@@ -684,32 +617,25 @@ impl RealtimeAsrcCompensator {
             cum_master_s: 0.0,
             cum_ymm_s: 0.0,
             reg_locked: false,
-            level_target_ms: 0.0,          // issue #1335
-            level_integral_ppm: 0.0,       // issue #1335
-            level_last_ms: 0.0,            // issue #1335
-            level_captured: false,         // issue #1335
-            step_count: 0,                 // issue #1335 follow-up 2
-            last_step_ms: 0.0,             // issue #1335 follow-up 2
-            level_restore: false,          // issue #1335 follow-up 2
-            level_err_windows: 0,          // issue #1335 follow-up 4
-            level_err_ema_ms: 0.0,         // issue #1335 follow-up 5
-            level_err_ema_seeded: false,   // issue #1335 follow-up 5
-            level_offset_ms: 0.0,          // issue #1355
-            level_unconverged_windows: 0,  // issue #1355
-            level_fallback_count: 0,       // issue #1355
-            level_fallback_from_ms: 0.0,   // issue #1355
-            level_fallback_pending: false, // issue #1355
-            level_fallback_done: false,    // issue #1355
-            level_absolute: true,          // issue #1355
-            window_level_sum_ms: 0.0,      // issue #1367
-            window_level_count: 0,         // issue #1367
-            level_avg_ms: 0.0,             // issue #1367
-            step_recover_ms: 0.0,          // issue 1372
-            step_recover_ppm: 0.0,         // issue 1372
-            step_recover_hold: false,      // issue 1372
-            timecode: false,               // issue 1367
-            place_jump_count: 0,           // issue 1367
-            last_place_jump_ms: 0.0,       // issue 1367
+            level_target_ms: 0.0,        // issue #1335
+            level_integral_ppm: 0.0,     // issue #1335
+            level_last_ms: 0.0,          // issue #1335
+            level_captured: false,       // issue #1335
+            step_count: 0,               // issue #1335 follow-up 2
+            last_step_ms: 0.0,           // issue #1335 follow-up 2
+            level_restore: false,        // issue #1335 follow-up 2
+            level_err_windows: 0,        // issue #1335 follow-up 4
+            level_err_ema_ms: 0.0,       // issue #1335 follow-up 5
+            level_err_ema_seeded: false, // issue #1335 follow-up 5
+            window_level_sum_ms: 0.0,    // issue #1367
+            window_level_count: 0,       // issue #1367
+            level_avg_ms: 0.0,           // issue #1367
+            step_recover_ms: 0.0,        // issue 1372
+            step_recover_ppm: 0.0,       // issue 1372
+            step_recover_hold: false,    // issue 1372
+            timecode: false,             // issue 1367
+            place_jump_count: 0,         // issue 1367
+            last_place_jump_ms: 0.0,     // issue 1367
             // issue 1425
             placement: timecode::PlacementJudge::new(),
         }
@@ -749,11 +675,6 @@ impl RealtimeAsrcCompensator {
         // the smoothed level error re-seeds from the first post-relock window.
         self.level_err_ema_ms = 0.0;
         self.level_err_ema_seeded = false;
-        // issue #1355: a flush re-captures the (absolute) setpoint, so the unreachable-walk count
-        // and the one-fallback-per-capture latch restart with it. level_offset_ms / level_absolute
-        // are caller state and survive.
-        self.level_unconverged_windows = 0;
-        self.level_fallback_done = false;
         // Issue 1372: a flush re-captures the setpoint, so a step still owed is abandoned with the
         // capture it was booked against.
         self.step_recover_ms = 0.0;
@@ -834,38 +755,6 @@ impl RealtimeAsrcCompensator {
         self.level_restore
     }
 
-    /// issue #1355: tell the servo the source's deliberate placement offset, in ms, that the
-    /// buffered samples ALREADY carry — the C caller passes `last_sync_offset / 1e6` every
-    /// callback. A pure store: it never moves an already-captured
-    /// setpoint (a later deliberate sync-offset change still goes through
-    /// [`Self::shift_level_target`], so the target stays `LEVEL_TARGET_MS + offset` 1:1). It only
-    /// decides the NEXT capture: `level_target_ms = LEVEL_TARGET_MS + level_offset_ms`. Mirror of
-    /// the C `asrc_compensator_set_level_offset_ms`.
-    pub fn set_level_offset_ms(&mut self, offset_ms: f64) {
-        self.level_offset_ms = offset_ms;
-    }
-
-    /// issue #1355: choose the capture rule — ABSOLUTE (`LEVEL_TARGET_MS + level_offset_ms`) or the
-    /// pre-#1355 depth at lock. The C caller passes `!genlock_fifo && monitoring_type !=
-    /// MONITOR_ONLY` every callback. A CHANGE while captured drops the capture (like a flush for the
-    /// level loop only — the rate regression, its lock and the integral are kept), so the next
-    /// accepted window re-captures under the new rule. Mirror of the C
-    /// `asrc_compensator_set_level_absolute`.
-    pub fn set_level_absolute(&mut self, absolute: bool) {
-        if absolute != self.level_absolute {
-            self.level_absolute = absolute;
-            self.level_captured = false;
-            self.level_restore = false;
-            self.level_err_windows = 0;
-            self.level_err_ema_ms = 0.0;
-            self.level_err_ema_seeded = false;
-            self.level_unconverged_windows = 0;
-            self.level_fallback_done = false;
-            // Issue 1372: the owed step belongs to the dropped capture.
-            self.step_recover_ms = 0.0;
-        }
-    }
-
     /// Issue 1372: the part of a confirmed sample-count step still owed, in ms (the C `asrc:` line's
     /// `recover_ms=` field).
     pub fn step_recover_ms(&self) -> f64 {
@@ -938,22 +827,6 @@ impl RealtimeAsrcCompensator {
         self.level_err_ema_ms
     }
 
-    /// issue #1355: running count of unreachable-setpoint fallbacks (the C `fallbacks=` field).
-    pub fn level_fallback_count(&self) -> u32 {
-        self.level_fallback_count
-    }
-
-    /// issue #1355: the abandoned setpoint of the most recent unreachable fallback, in ms.
-    pub fn level_fallback_from_ms(&self) -> f64 {
-        self.level_fallback_from_ms
-    }
-
-    /// issue #1355: read-and-clear the one-shot fallback flag (the C caller logs the event and
-    /// clears `level_fallback_pending` the same way).
-    pub fn take_level_fallback_pending(&mut self) -> bool {
-        std::mem::take(&mut self.level_fallback_pending)
-    }
-
     /// issue #1335 follow-up: shift the captured buffer-LEVEL setpoint by `delta_ms` to track a
     /// DELIBERATE audio sync-offset change. A sync-offset change of Δ (ns→ms) moves this source's
     /// audio placement — and therefore its mix-buffer depth — by exactly Δ (obs-source.c applies
@@ -985,7 +858,7 @@ impl RealtimeAsrcCompensator {
         // same callback as this shift, so the readings already folded into the open window are moved
         // by delta too: the closing mean is then all in the new frame, and the smoothed error sees no
         // blended half-old/half-new transient. Done whether or not the setpoint is captured yet, so
-        // a shift inside the capture window of a non-absolute source captures the new-frame mean too.
+        // a shift inside the capture window of an arrival source captures the new-frame mean too.
         // Exact mirror of the C shift.
         self.window_level_sum_ms += delta_ms * f64::from(self.window_level_count);
         if self.level_captured {
@@ -1255,21 +1128,15 @@ impl RealtimeAsrcCompensator {
                     self.level_avg_ms = window_level_ms;
                     if self.reg_locked {
                         if !self.level_captured {
-                            // issue #1355: setpoint = the ABSOLUTE target plus the deliberate placement
-                            // offset the buffered samples carry — NOT whatever depth the mixer happened
-                            // to have at lock (that froze a random per-launch A/V level). Re-captured
-                            // (to the same absolute value) after every flush/relock; the P term plus the
-                            // restore burst the sustained-error arm fires walk the buffer there.
+                            // Issue 1425 (E2 slice 3): setpoint = the window-mean depth at this lock,
+                            // re-captured after every flush/relock. It already carries the placement
+                            // offset of the buffered samples, and nothing walks it afterwards: the
+                            // #1355 absolute target did, a runtime latency change once synced.
                             // Issue 1367: in timecode mode the level is the placement error, whose
                             // setpoint is 0 (the packet lands where its stamp says), never the
                             // lock-time depth.
-                            self.level_target_ms = if self.timecode {
-                                0.0
-                            } else if self.level_absolute {
-                                LEVEL_TARGET_MS + self.level_offset_ms
-                            } else {
-                                window_level_ms
-                            };
+                            self.level_target_ms =
+                                if self.timecode { 0.0 } else { window_level_ms };
                             self.level_captured = true;
                         }
                         // issue #1335 follow-up 5: SMOOTH the per-window level error with an EMA (time
@@ -1328,39 +1195,6 @@ impl RealtimeAsrcCompensator {
                             } else {
                                 self.level_err_windows = 0;
                             }
-                        }
-                        // issue #1355: BOUND an unreachable setpoint. With an absolute target a mixer
-                        // that cannot reach it (a buffer pinned by OBS's own buffering, a source whose
-                        // placement does not follow the stretch) would keep the restore burst and the
-                        // P term pushing forever. Count consecutive accepted windows whose SMOOTHED
-                        // error stays outside the restore's exit band; at the bound FALL BACK to the
-                        // SMOOTHED live depth (target + ema, not one noisy reading): stop the restore,
-                        // zero the P error, count it and raise the one-shot flag the C caller logs
-                        // LOUDLY. At most ONE fallback per capture (level_fallback_done, cleared only
-                        // by a re-capture): a steady residual the P+I terms hold at >= 5 ms would
-                        // otherwise re-trip the bound every 40 min and ratchet the target away.
-                        // Issue 1367 (review round 1): never in timecode mode -- the setpoint is the
-                        // packet's own stamp (0), always reachable by the stretch; falling back would
-                        // accept a lasting A/V offset as the new truth.
-                        if !self.timecode
-                            && !self.level_fallback_done
-                            && self.level_err_ema_ms.abs() >= LEVEL_RESTORE_ARM_MS
-                        {
-                            self.level_unconverged_windows += 1;
-                            if self.level_unconverged_windows >= LEVEL_TARGET_UNREACHABLE_WINDOWS {
-                                self.level_fallback_from_ms = self.level_target_ms;
-                                self.level_target_ms += self.level_err_ema_ms;
-                                self.level_fallback_done = true;
-                                self.level_restore = false;
-                                self.level_err_windows = 0;
-                                self.level_err_ema_ms = 0.0;
-                                self.level_unconverged_windows = 0;
-                                self.level_fallback_count =
-                                    self.level_fallback_count.saturating_add(1);
-                                self.level_fallback_pending = true;
-                            }
-                        } else {
-                            self.level_unconverged_windows = 0;
                         }
                     }
                 }
@@ -3132,422 +2966,35 @@ mod tests {
         );
     }
 
-    /// issue #1355 bench helper: one closed-loop mix-buffer simulation at the live `mbc` floor
-    /// (−5 ppm, one accepted 1 s window per block, no hidden residual). `noise_ms` is the ±N ms
-    /// alternating mixer-tick phase noise on the READ level (the buffer itself is exact); `floor_ms`
-    /// models a mixer that cannot drain the buffer below that depth (OBS re-pads a source that runs
-    /// short), which makes a lower setpoint physically UNREACHABLE. The run keeps per-window
-    /// `(buffer_ms, applied_ppm, estimated_ppm)` plus the servo.
-    struct LevelRun1355 {
-        trace: Vec<(f64, f64, f64)>,
-        c: RealtimeAsrcCompensator,
-        buffer_ms: f64,
-        max_step_ppm: f64,
-    }
-
-    fn run_level_1355(
+    /// Issue 1425 bench helper (the issue-1355 level run, cut down): one closed-loop mix-buffer
+    /// simulation at the live `mbc` rate (−5 ppm, one accepted 1 s window per block, no hidden
+    /// residual, an exact level reading). Returns the depth after every window plus the servo.
+    fn run_level_1425(
         mut c: RealtimeAsrcCompensator,
         start_ms: f64,
         windows: usize,
-        noise_ms: f64,
-        floor_ms: Option<f64>,
-    ) -> LevelRun1355 {
+    ) -> (Vec<f64>, RealtimeAsrcCompensator) {
         let clock = DriftingAudioClock::new(-5.0);
         let mut buffer_ms = start_ms;
         let mut trace = Vec::with_capacity(windows);
-        let mut max_step_ppm = 0.0_f64;
-        for i in 0..windows {
-            let noise = if i % 2 == 0 { noise_ms } else { -noise_ms };
-            let before = c.applied_ppm();
-            let corrected = c.compensate_with_level(clock.raw_advance(1.0), 1.0, buffer_ms + noise);
-            max_step_ppm = max_step_ppm.max((c.applied_ppm() - before).abs());
+        for _ in 0..windows {
+            let corrected = c.compensate_with_level(clock.raw_advance(1.0), 1.0, buffer_ms);
             buffer_ms += (corrected - 1.0) * 1000.0;
-            if let Some(floor) = floor_ms {
-                buffer_ms = buffer_ms.max(floor);
-            }
-            trace.push((buffer_ms, c.applied_ppm(), c.estimated_ppm()));
+            trace.push(buffer_ms);
         }
-        LevelRun1355 {
-            trace,
-            c,
-            buffer_ms,
-            max_step_ppm,
-        }
+        (trace, c)
     }
 
-    fn tail_mean_1355(trace: &[(f64, f64, f64)], n: usize) -> f64 {
-        let tail = &trace[trace.len() - n..];
-        tail.iter().map(|(b, _, _)| *b).sum::<f64>() / n as f64
-    }
-
-    /// issue #1355: the level setpoint is ABSOLUTE. Before, it was captured as whatever depth the
-    /// mixer had at the first lock, so a launch that locked at 64 ms held 64 ms and one that locked at
-    /// 126 ms held 126 ms: three launches, three different audio delays (the per-launch A/V level,
-    /// 18.–23.9. stream logs: captured 58.9 … 126.1 ms). Now every start depth in the measured band
-    /// (64 / 90 / 126 ms, with and without the ±10 ms tick noise) is walked to the SAME
-    /// `LEVEL_TARGET_MS` and held there, well inside the unreachable bound, with no fallback, no
-    /// per-window rate step beyond the existing slew limit and no correction beyond the existing
-    /// clamps (restore + P + integral).
+    /// Issue 1425 (E2 slice 3): an arrival-basis source whose depth is 0 (a MONITOR_ONLY source never
+    /// places into the mix buffer) captures 0 at the lock and is never pushed: applied stays ON the
+    /// rate estimate once locked. (Before slice 3 only a genlock / MONITOR_ONLY source took this
+    /// rule, through a capture-rule switch; it is now the only arrival rule.)
     #[test]
-    fn absolute_level_setpoint_converges_every_start_depth_1355() {
-        const WINDOWS: usize = 3600;
-        let max_dev_ppm = LEVEL_RESTORE_MAX_PPM + LEVEL_KP_MAX_PPM + LEVEL_INTEGRAL_MAX_PPM + 1.0;
-        for noise_ms in [0.0, 10.0] {
-            let mut holds = Vec::new();
-            for start_ms in [64.0, 90.0, 126.0] {
-                let r = run_level_1355(
-                    RealtimeAsrcCompensator::new(),
-                    start_ms,
-                    WINDOWS,
-                    noise_ms,
-                    None,
-                );
-                let hold = tail_mean_1355(&r.trace, 600);
-                let converged_at = r
-                    .trace
-                    .iter()
-                    .skip(70)
-                    .position(|(b, _, _)| (b - LEVEL_TARGET_MS).abs() < 5.0)
-                    .map(|i| i + 70);
-                assert!(
-                    (hold - LEVEL_TARGET_MS).abs() < 3.0,
-                    "issue #1355: start {start_ms} ms (noise ±{noise_ms}) must be HELD at the absolute \
-                     target {LEVEL_TARGET_MS} ms, got a last-10-min mean of {hold:.2} ms (target \
-                     captured {:.2} ms)",
-                    r.c.level_target_ms()
-                );
-                let at = converged_at.unwrap_or(usize::MAX);
-                assert!(
-                    at < LEVEL_TARGET_UNREACHABLE_WINDOWS as usize / 2,
-                    "issue #1355: start {start_ms} ms must reach the target within half the \
-                     unreachable bound ({} windows), got {at}",
-                    LEVEL_TARGET_UNREACHABLE_WINDOWS / 2
-                );
-                assert_eq!(
-                    r.c.level_fallback_count(),
-                    0,
-                    "issue #1355: a reachable target must never fall back (start {start_ms} ms, \
-                     noise ±{noise_ms})"
-                );
-                assert!(
-                    r.max_step_ppm <= MAX_SLEW_PPM_PER_S + 1e-9,
-                    "issue #1355: the walk must not step the applied rate beyond the existing slew \
-                     limit, got {:.3} ppm in one 1 s window",
-                    r.max_step_ppm
-                );
-                let worst_dev = r
-                    .trace
-                    .iter()
-                    .map(|(_, a, e)| (a - e).abs())
-                    .fold(0.0_f64, f64::max);
-                assert!(
-                    worst_dev <= max_dev_ppm,
-                    "issue #1355: the walk must stay inside the existing restore + P + integral \
-                     clamps ({max_dev_ppm} ppm off the estimate), got {worst_dev:.2} ppm"
-                );
-                holds.push(hold);
-            }
-            let hi = holds.iter().copied().fold(f64::MIN, f64::max);
-            let lo = holds.iter().copied().fold(f64::MAX, f64::min);
-            assert!(
-                hi - lo < 3.0,
-                "issue #1355: the three start depths must end at ONE hold (spread < 3 ms), got \
-                 {holds:?} (noise ±{noise_ms})"
-            );
-        }
-    }
-
-    /// issue #1355: the absolute setpoint INCLUDES the source's deliberate placement offset, and a
-    /// deliberate trim still moves the held level 1:1.
-    /// (a) An offset already in force BEFORE the first lock (the persisted `mbc` sync offset, +24 ms
-    /// on 23.9.) makes the capture `LEVEL_TARGET_MS + 24`, whatever the start depth.
-    /// (b) A trim AFTER capture (the E2E audio split, −14 ms: the setter + the existing shift + the
-    /// buffer re-stamp) moves the held level by exactly −14 and the integral does not wind.
-    /// (c) A flush + relock afterwards re-captures to `LEVEL_TARGET_MS + the current offset`, the
-    /// same held level, so a relock no longer re-randomizes the A/V level.
-    #[test]
-    fn absolute_setpoint_carries_the_offset_and_trims_move_it_1_to_1_1355() {
-        const OFFSET_MS: f64 = 24.0;
-        const TRIM_MS: f64 = -14.0;
-
-        // (a) pre-capture offset.
-        let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_offset_ms(OFFSET_MS);
-        let r = run_level_1355(c, 64.0, 3600, 10.0, None);
-        let hold_a = tail_mean_1355(&r.trace, 600);
-        assert!(
-            (r.c.level_target_ms() - (LEVEL_TARGET_MS + OFFSET_MS)).abs() < 1e-9,
-            "issue #1355 (a): the capture must be LEVEL_TARGET_MS + the offset in force, got target \
-             {:.3} ms",
-            r.c.level_target_ms()
-        );
-        assert!(
-            (hold_a - (LEVEL_TARGET_MS + OFFSET_MS)).abs() < 3.0,
-            "issue #1355 (a): the buffer must be held at {} ms, got {hold_a:.2} ms",
-            LEVEL_TARGET_MS + OFFSET_MS
-        );
-
-        // (b) deliberate trim after capture, against a no-trim CONTROL continuation of the same
-        // state (the level loop is still settling its integral after the walk, so "unchanged" is
-        // measured relative to the control, never to a single pre-trim sample). Zero tick noise here:
-        // the bench feeds ONE level reading per window, so a ±10 ms alternating reading around an
-        // error of ~0 never lands inside the restore's raw ±5 ms exit band and the shift-armed restore
-        // would never exit. Live, `asrc_compensator_compensate` runs every audio callback and the
-        // buffer sweeps its whole ±10 ms tick sawtooth within one mixer tick, so the raw exit fires
-        // at once. Noise robustness of the capture/walk is covered by the test above.
-        let mut control = r.c.clone();
-        let control_start_ms = r.buffer_ms;
-        let mut c = r.c;
-        let mut buffer_ms = r.buffer_ms;
-        c.set_level_offset_ms(OFFSET_MS + TRIM_MS);
-        c.shift_level_target(TRIM_MS);
-        buffer_ms += TRIM_MS;
-        let r = run_level_1355(c, buffer_ms, 3600, 0.0, None);
-        control.set_level_offset_ms(OFFSET_MS);
-        let rc = run_level_1355(control, control_start_ms, 3600, 0.0, None);
-        let hold_b = tail_mean_1355(&r.trace, 1800);
-        let hold_control = tail_mean_1355(&rc.trace, 1800);
-        assert!(
-            (hold_b - (hold_control + TRIM_MS)).abs() < 1.0,
-            "issue #1355 (b): a {TRIM_MS} ms trim must move the held level 1:1 (control {hold_control:.2} \
-             → {:.2} ms), got {hold_b:.2} ms",
-            hold_control + TRIM_MS
-        );
-        assert!(
-            (r.c.level_integral_ppm() - rc.c.level_integral_ppm()).abs() < 0.05,
-            "issue #1355 (b): the trim must not wind the level integral: {:.3} ppm vs the no-trim \
-             control {:.3} ppm",
-            r.c.level_integral_ppm(),
-            rc.c.level_integral_ppm()
-        );
-        assert_eq!(r.c.level_fallback_count(), 0);
-
-        // (c) flush (a non-positive master block = an NTP step) + relock re-captures the same level.
-        let mut c = r.c;
-        let buffer_ms = r.buffer_ms;
-        c.compensate_with_level(0.001, 0.0, buffer_ms);
-        let r = run_level_1355(c, buffer_ms, 1800, 0.0, None);
-        assert!(
-            (r.c.level_target_ms() - (LEVEL_TARGET_MS + OFFSET_MS + TRIM_MS)).abs() < 1e-9,
-            "issue #1355 (c): the relock must re-capture LEVEL_TARGET_MS + the CURRENT offset, got \
-             {:.3} ms",
-            r.c.level_target_ms()
-        );
-        let hold_c = tail_mean_1355(&r.trace, 600);
-        assert!(
-            (hold_c - (LEVEL_TARGET_MS + OFFSET_MS + TRIM_MS)).abs() < 2.0,
-            "issue #1355 (c): a relock must keep the held level at {} ms, got {hold_c:.2} ms",
-            LEVEL_TARGET_MS + OFFSET_MS + TRIM_MS
-        );
-    }
-
-    /// issue #1355: a setpoint the mixer cannot reach is BOUNDED, never an endless push. The mixer
-    /// here cannot drain the buffer below 60 ms while the offset asks for 40 ms: the level loop pushes
-    /// for `LEVEL_TARGET_UNREACHABLE_WINDOWS`, then falls back to the live depth (the pre-#1355
-    /// capture) exactly once, raises the one-shot flag the C caller logs as a LOG_WARNING, stops the
-    /// restore and lets `applied` return to the rate estimate (no pinned compress). A reachable
-    /// target under the ±10 ms tick noise never falls back (the counted error is the SMOOTHED one).
-    #[test]
-    fn unreachable_setpoint_falls_back_once_bounded_and_loud_1355() {
-        const FLOOR_MS: f64 = 60.0;
-        const OFFSET_MS: f64 = -60.0; // target = LEVEL_TARGET_MS - 60 = 40 ms, below the 60 ms floor
-        let bound = LEVEL_TARGET_UNREACHABLE_WINDOWS as usize;
-
-        let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_offset_ms(OFFSET_MS);
-        let mut r = run_level_1355(c, 100.0, bound + 3600, 0.0, Some(FLOOR_MS));
-        assert_eq!(
-            r.c.level_fallback_count(),
-            1,
-            "issue #1355: an unreachable target must fall back exactly once within the bound"
-        );
-        assert!(
-            r.c.take_level_fallback_pending(),
-            "issue #1355: the fallback must raise the one-shot flag the C caller logs"
-        );
-        assert!(
-            !r.c.take_level_fallback_pending(),
-            "issue #1355: the fallback flag is one-shot (read-and-clear)"
-        );
-        assert!(
-            (r.c.level_fallback_from_ms() - (LEVEL_TARGET_MS + OFFSET_MS)).abs() < 1e-9,
-            "issue #1355: the abandoned target must be reported, got {:.3} ms",
-            r.c.level_fallback_from_ms()
-        );
-        assert!(
-            (r.c.level_target_ms() - FLOOR_MS).abs() < 2.0,
-            "issue #1355: after the fallback the setpoint is the live depth (~{FLOOR_MS} ms), got \
-             {:.3} ms",
-            r.c.level_target_ms()
-        );
-        assert!(
-            !r.c.level_restore(),
-            "issue #1355: the fallback must stop the restore burst"
-        );
-        // The last 50 min: no pinned push, applied is back on the rate estimate.
-        let last_dev = r.trace[r.trace.len() - 3000..]
-            .iter()
-            .map(|(_, a, e)| (a - e).abs())
-            .fold(0.0_f64, f64::max);
-        assert!(
-            last_dev < LEVEL_INTEGRAL_MAX_PPM + 2.0,
-            "issue #1355: after the fallback applied must return to the estimate (no pinned push), \
-             got max |applied − estimated| {last_dev:.2} ppm over the last 50 min"
-        );
-
-        // Reachable target + ±10 ms tick noise for 3 h: never a fallback.
-        let r = run_level_1355(RealtimeAsrcCompensator::new(), 100.0, 3 * 3600, 10.0, None);
-        assert_eq!(
-            r.c.level_fallback_count(),
-            0,
-            "issue #1355: tick noise around a reachable target must never fake an unreachable setpoint"
-        );
-    }
-
-    /// issue #1355 review helper: drive the servo with a SYNTHETIC level reading per window (the
-    /// buffer does not respond to the correction), so the unreachable-bound bookkeeping can be pinned
-    /// window by window. `reading(i)` is the level reported in window `i`; `flush_at` injects one
-    /// non-positive master block (an NTP step = a flush) before that window. Returns the window
-    /// indices at which the one-shot fallback flag fired.
-    fn synthetic_fallbacks_1355(
-        windows: usize,
-        reading: impl Fn(usize) -> f64,
-        flush_at: Option<usize>,
-    ) -> (Vec<usize>, RealtimeAsrcCompensator) {
+    fn a_depth_zero_arrival_source_captures_zero_and_is_never_pushed_1425() {
         let clock = DriftingAudioClock::new(-5.0);
         let mut c = RealtimeAsrcCompensator::new();
-        let mut fired = Vec::new();
-        for i in 0..windows {
-            if flush_at == Some(i) {
-                c.compensate_with_level(0.001, 0.0, reading(i));
-            }
-            c.compensate_with_level(clock.raw_advance(1.0), 1.0, reading(i));
-            if c.take_level_fallback_pending() {
-                fired.push(i);
-            }
-        }
-        (fired, c)
-    }
-
-    /// issue #1355 (review findings): the unreachable bound counts CONSECUTIVE out-of-band windows,
-    /// restarts on a flush, falls back at most ONCE per capture, and leaves the loop quiet on the
-    /// exact fallback window (restore off, smoothed error zeroed, target = the smoothed depth).
-    #[test]
-    fn unreachable_bound_is_consecutive_once_per_capture_and_restarts_on_flush_1355() {
-        let bound = LEVEL_TARGET_UNREACHABLE_WINDOWS as usize;
-        let out_of_band = LEVEL_TARGET_MS + 20.0;
-
-        // Baseline: a reading stuck 20 ms above the target falls back once, ~one bound after capture.
-        let (fired, _) = synthetic_fallbacks_1355(3 * bound, |_| out_of_band, None);
-        assert_eq!(
-            fired.len(),
-            1,
-            "issue #1355: a stuck error must fall back ONCE per capture, fired at {fired:?}"
-        );
-        let first = fired[0];
-        assert!(
-            (bound..bound + 200).contains(&first),
-            "issue #1355: the fallback must fire ~one bound after capture, fired at {first}"
-        );
-
-        // A 40-window in-band dip at 1500 restarts the CONSECUTIVE count: no fallback one bound
-        // after capture, only one bound after the dip.
-        let (fired, _) = synthetic_fallbacks_1355(
-            4 * bound,
-            |i| {
-                if (1500..1540).contains(&i) {
-                    LEVEL_TARGET_MS
-                } else {
-                    out_of_band
-                }
-            },
-            None,
-        );
-        assert_eq!(fired.len(), 1, "issue #1355: dip case fired at {fired:?}");
-        assert!(
-            fired[0] >= 1500 + bound,
-            "issue #1355: an in-band dip must restart the consecutive count, fired at {} (< {})",
-            fired[0],
-            1500 + bound
-        );
-
-        // A flush at 1500 restarts the count with the re-capture.
-        let (fired, _) = synthetic_fallbacks_1355(4 * bound, |_| out_of_band, Some(1500));
-        assert_eq!(fired.len(), 1, "issue #1355: flush case fired at {fired:?}");
-        assert!(
-            fired[0] >= 1500 + bound,
-            "issue #1355: a flush must restart the count, fired at {} (< {})",
-            fired[0],
-            1500 + bound
-        );
-
-        // The exact fallback window, under ±7 ms tick noise: every reading stays ≥ 12 ms off target
-        // (13 / 27 ms), so the sustained arm keeps the restore burst ACTIVE up to the fallback, and
-        // the raw reading differs from the smoothed depth by 7 ms (outside the ±5 ms restore exit).
-        // Expected: restore off, smoothed error zeroed, target = the SMOOTHED depth, never the one
-        // noisy reading of that window.
-        let noisy = |i: usize| out_of_band + if i.is_multiple_of(2) { 7.0 } else { -7.0 };
-        let (fired, _) = synthetic_fallbacks_1355(2 * bound, noisy, None);
-        assert_eq!(fired.len(), 1, "issue #1355: noisy case fired at {fired:?}");
-        let (_, c) = synthetic_fallbacks_1355(fired[0] + 1, noisy, None);
-        assert!(
-            !c.level_restore(),
-            "issue #1355: the fallback window must stop the restore burst at once"
-        );
-        assert!(
-            c.level_err_ema_ms().abs() < 1e-9,
-            "issue #1355: the fallback must zero the smoothed error, got {:.6} ms",
-            c.level_err_ema_ms()
-        );
-        assert!(
-            (c.level_target_ms() - out_of_band).abs() < 1.0,
-            "issue #1355: the fallback target is the SMOOTHED depth (~{out_of_band} ms), got {:.3} ms",
-            c.level_target_ms()
-        );
-        assert!(
-            (c.level_fallback_from_ms() - LEVEL_TARGET_MS).abs() < 1e-9,
-            "issue #1355: the abandoned absolute target must be reported"
-        );
-    }
-
-    /// issue #1355 (review finding): a residual the rate loop cannot see and the P+I terms hold at
-    /// ≥ 5 ms must NOT ratchet the target — at most one fallback per capture over 6 h (before the
-    /// latch: 8 fallbacks walking the target 100 → 136 ms at 14 ppm).
-    #[test]
-    fn steady_unseen_residual_falls_back_at_most_once_1355() {
-        for hidden_ppm in [14.0, 20.0, 30.0] {
-            let clock = DriftingAudioClock::new(-5.0);
-            let mut c = RealtimeAsrcCompensator::new();
-            let mut buffer_ms = LEVEL_TARGET_MS;
-            for i in 0..6 * 3600 {
-                let noise = if i % 2 == 0 { 10.0 } else { -10.0 };
-                let corrected =
-                    c.compensate_with_level(clock.raw_advance(1.0), 1.0, buffer_ms + noise);
-                buffer_ms += (corrected - 1.0) * 1000.0 - hidden_ppm / 1e6 * 1000.0;
-            }
-            assert!(
-                c.level_fallback_count() <= 1,
-                "issue #1355: a {hidden_ppm} ppm unseen residual must fall back at most once per \
-                 capture, got {} fallbacks (target now {:.2} ms)",
-                c.level_fallback_count(),
-                c.level_target_ms()
-            );
-        }
-    }
-
-    /// issue #1355: the absolute capture is only for a source whose depth has the calibrated
-    /// direct-timestamp base. With `set_level_absolute(false)` (a genlock_fifo or MONITOR_ONLY source
-    /// in the C caller) the capture is the pre-#1355 depth at lock: a MONITOR_ONLY source (depth 0)
-    /// captures 0 and never pushes or falls back, a 64 ms source holds 64. Switching the rule while
-    /// captured re-captures under the new rule (64 → walked to the absolute 100).
-    #[test]
-    fn non_absolute_sources_keep_the_depth_at_lock_and_a_rule_change_recaptures_1355() {
-        // MONITOR_ONLY shape: depth stays 0 whatever the servo does.
-        let clock = DriftingAudioClock::new(-5.0);
-        let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         let mut worst_push = 0.0_f64;
-        for i in 0..(LEVEL_TARGET_UNREACHABLE_WINDOWS as usize + 600) {
+        for i in 0..3000 {
             c.compensate_with_level(clock.raw_advance(1.0), 1.0, 0.0);
             // After lock + the slew onto the estimate (~65 s + 1 s): applied must sit ON the rate
             // estimate — no level push. Before that, applied is 0 by design (default-safe pre-lock).
@@ -3556,38 +3003,47 @@ mod tests {
             }
         }
         assert!(
-            c.level_target_ms().abs() < 1e-9 && c.level_fallback_count() == 0,
-            "issue #1355: a depth-0 non-absolute source must capture 0 and never fall back, got \
-             target {:.3} ms / {} fallbacks",
-            c.level_target_ms(),
-            c.level_fallback_count()
+            c.level_target_ms().abs() < 1e-9 && !c.level_restore(),
+            "issue 1425: a depth-0 arrival source must capture 0 and never arm the restore, got \
+             target {:.3} ms",
+            c.level_target_ms()
         );
         assert!(
             worst_push < 1.0,
-            "issue #1355: a depth-0 non-absolute source must not be pushed, got {worst_push:.2} ppm"
+            "issue 1425: a depth-0 arrival source must not be pushed, got {worst_push:.2} ppm"
         );
+    }
 
-        // A 64 ms non-absolute source holds 64; switching to absolute walks it to 100.
-        let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
-        let r = run_level_1355(c, 64.0, 1800, 0.0, None);
-        assert!(
-            (r.c.level_target_ms() - 64.0).abs() < 1.0
-                && (tail_mean_1355(&r.trace, 600) - 64.0).abs() < 2.0,
-            "issue #1355: a non-absolute source keeps its depth at lock (~64 ms), got target {:.2}",
-            r.c.level_target_ms()
-        );
-        let mut c = r.c;
-        c.set_level_absolute(true);
-        let r = run_level_1355(c, r.buffer_ms, 3600, 0.0, None);
-        assert!(
-            (r.c.level_target_ms() - LEVEL_TARGET_MS).abs() < 1e-9
-                && (tail_mean_1355(&r.trace, 600) - LEVEL_TARGET_MS).abs() < 3.0,
-            "issue #1355: a rule change must re-capture the absolute target and walk there, got \
-             target {:.2} ms, hold {:.2} ms",
-            r.c.level_target_ms(),
-            tail_mean_1355(&r.trace, 600)
-        );
+    /// Issue 1425 (E2 slice 3, design 6220191978): an ARRIVAL-basis source holds the depth it had
+    /// when the rate regression locked, whatever that depth is. Once synced, nothing may move a
+    /// buffer at runtime (owner, 16.10.2026), and the absolute 100 ms target did exactly that: it
+    /// walked a source that locked at 9 ms (the `mbc` depth at zero buffering) or at 126 ms to
+    /// 100 ms, tens of ms of audio moved after the lock. A default compensator, at the live −5 ppm,
+    /// with no setter called, must capture the depth at lock and hold it for an hour.
+    #[test]
+    fn an_arrival_source_holds_its_depth_at_lock_and_never_walks_1425() {
+        const WINDOWS: usize = 3600;
+        // the regression locks after a 60 s span; the depth drains 0.3 ms before that at −5 ppm
+        const LOCK_FROM: usize = 70;
+        for start_ms in [0.0, 9.0, 64.0, 126.0, 300.0] {
+            let (trace, c) = run_level_1425(RealtimeAsrcCompensator::new(), start_ms, WINDOWS);
+            let at_lock = trace[LOCK_FROM];
+            let worst = trace[LOCK_FROM..]
+                .iter()
+                .map(|b| (b - at_lock).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                (c.level_target_ms() - start_ms).abs() < 1.0 && worst < 1.0,
+                "issue 1425: an arrival source that locked at {start_ms} ms must keep that depth \
+                 (no walk to an absolute target): target {:.3} ms, depth moved up to {worst:.3} ms \
+                 after the lock",
+                c.level_target_ms()
+            );
+            assert!(
+                !c.level_restore() && c.step_count() == 0,
+                "issue 1425: a held depth arms no restore and re-bases nothing (start {start_ms} ms)"
+            );
+        }
     }
 
     /// issue #1367 bench: the LIVE stream `mbc` operating point, one audio callback at a time. A
@@ -3612,9 +3068,12 @@ mod tests {
         const BLOCK_S: f64 = 128.0 / 48_000.0;
         const TICK_MS: f64 = 1024.0 / 48_000.0 * 1000.0;
         const LEVEL_BLOCK_S: f64 = 1200.0;
+        // the live `mbc` depth around which the arrival servo locks (issue 1425: it holds what it
+        // locked at, so any start depth would do)
+        const START_DEPTH_MS: f64 = 100.0;
         let period_s = BLOCK_S / (1.0 + DRIFT_PPM / 1_000_000.0);
         let mut c = RealtimeAsrcCompensator::new();
-        let mut buffer_ms = LEVEL_TARGET_MS + TICK_MS / 2.0;
+        let mut buffer_ms = START_DEPTH_MS + TICK_MS / 2.0;
         let mut t = 0.0_f64;
         let mut next_tick_s = TICK_MS / 1000.0;
         let mut prev_jitter = 0.0_f64;
@@ -3676,7 +3135,7 @@ mod tests {
     /// true buffer depth held within ±2 ms. At the live operating point (+20 ppm, 128-sample
     /// callbacks, 21.33 ms ticks, bursty delivery 1–2 ms) the rate chatter must stay under 1 ppm sd
     /// (single-reading RED: ~3.7 ppm), the true 20-min depth within target ±2 ms, no restore, no
-    /// fallback, no step. With perfectly regular delivery (no jitter) the callback/tick phase walks
+    /// step. With perfectly regular delivery (no jitter) the callback/tick phase walks
     /// only 0.02 ms per window, and the reading mean carries a slow phase bias of at most half a
     /// block: that case is held to a per-second change under 0.25 ppm rms (the chatter) and a sd
     /// under 1.5 ppm (the slow beat; single-reading RED: 11.7 ppm sd, 0.27 ppm rms change).
@@ -3692,19 +3151,19 @@ mod tests {
                 "issue #1367: with {jitter_ms} ms bursty delivery the applied − estimated rate \
                  chatter must stay under 1 ppm sd (single-reading level loop: ~3.7), got {sd:.3} ppm"
             );
+            let target = r.c.level_target_ms();
             for (i, lvl) in r.block_levels_ms.iter().enumerate() {
                 assert!(
-                    (lvl - LEVEL_TARGET_MS).abs() <= 2.0,
+                    (lvl - target).abs() <= 2.0,
                     "issue #1367: 20-min block {i} true depth {lvl:.3} ms must hold target \
-                     {LEVEL_TARGET_MS} ± 2 ms ({jitter_ms} ms jitter)"
+                     {target:.3} ± 2 ms ({jitter_ms} ms jitter)"
                 );
             }
             assert!(
-                !r.restore_seen && r.c.level_fallback_count() == 0 && r.c.step_count() == 0,
-                "issue #1367: the tick sawtooth must never arm the restore, fall back or re-base \
-                 ({jitter_ms} ms jitter): restore={} fallbacks={} steps={}",
+                !r.restore_seen && r.c.step_count() == 0,
+                "issue #1367: the tick sawtooth must never arm the restore or re-base \
+                 ({jitter_ms} ms jitter): restore={} steps={}",
                 r.restore_seen,
-                r.c.level_fallback_count(),
                 r.c.step_count()
             );
             assert!(
@@ -3725,24 +3184,24 @@ mod tests {
              under 0.25 ppm rms and the slow phase beat under 1.5 ppm sd (single reading: 0.27 / \
              11.7), got {diff_rms:.3} / {sd:.3}"
         );
+        let target = r.c.level_target_ms();
         for (i, lvl) in r.block_levels_ms.iter().enumerate() {
             assert!(
-                (lvl - LEVEL_TARGET_MS).abs() <= 2.0,
-                "issue #1367: 20-min block {i} true depth {lvl:.3} ms must hold target ± 2 ms \
-                 (no jitter)"
+                (lvl - target).abs() <= 2.0,
+                "issue #1367: 20-min block {i} true depth {lvl:.3} ms must hold target {target:.3} \
+                 ± 2 ms (no jitter)"
             );
         }
     }
 
     /// issue #1367: `level_avg_ms` is the MEAN of every callback's reading in the closed window and
     /// the level loop reads it, while `level_last_ms` (`level=`) keeps the one raw reading of the
-    /// closing callback. Four 0.25 s callbacks per window read 70 / 80 / 90 / 100 ms (mean 85): a
-    /// non-absolute source captures its depth-at-lock from the MEAN (85, never the raw 100), and the
+    /// closing callback. Four 0.25 s callbacks per window read 70 / 80 / 90 / 100 ms (mean 85): an
+    /// arrival source captures its depth-at-lock from the MEAN (85, never the raw 100), and the
     /// smoothed error then sits at exactly 0.
     #[test]
     fn level_avg_is_the_window_mean_and_feeds_the_level_loop_1367() {
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         let readings = [70.0, 80.0, 90.0, 100.0];
         for _ in 0..120 {
             for r in readings {
@@ -3773,7 +3232,6 @@ mod tests {
     #[test]
     fn mid_window_shift_moves_the_open_window_mean_1367() {
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         for _ in 0..480 {
             c.compensate_with_level(0.25, 0.25, 90.0);
         }
@@ -3806,14 +3264,13 @@ mod tests {
         );
     }
 
-    /// issue #1367: a deliberate shift that lands INSIDE the capture window of a non-absolute source
+    /// issue #1367: a deliberate shift that lands INSIDE the capture window of an arrival source
     /// (before the setpoint is captured, e.g. a genlock pin write right at the first lock) must move
     /// the open window sum too, so the depth-at-lock capture is the new-frame mean (102), never a
     /// blend (96). Four 0.25 s callbacks per window: the regression locks on window 60 (span 60 s).
     #[test]
     fn pre_capture_mid_window_shift_captures_the_new_frame_mean_1367() {
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         for _ in 0..240 {
             c.compensate_with_level(0.25, 0.25, 90.0);
         }

@@ -37,7 +37,8 @@ barely changes between two passes is ADVANCING; if its head still reads older th
 bound, the two clocks disagree and the whole mixer arm reads STALE, blind. MISMATCH pages once
 (the orchestrator's stable-key CLOCK page); OK = consistent; UNKNOWN = not judgeable this pass.
 BUFFERING arm (classify_buffering, issue 1381) -- the audio mix buffering against its session start
-value (the genlock floor). A stall of the audio callback makes libobs add buffering above the floor
+value (the launch's own draw since issue 1425; the genlock floor before). A stall of the audio
+callback makes libobs add buffering above it
 (15.10.2026 stream-snv: 85 -> 170 ms), and the whole output stays that much later until an OBS
 restart while the tick counts recover, so the MIXER arm reads HEALTHY:
   SKIP / UNKNOWN (no `#800` line or no start value) as above; STALE when the newest `#800` line is
