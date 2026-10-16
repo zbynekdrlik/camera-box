@@ -291,6 +291,28 @@ extern "C" {
  * numerically identical. */
 #define ASRC_PLACE_JUMP_MIN_MS 10.0
 
+/* camera-box issue 1425 (E2 slice 1, design 6206822792): the basis the servo judges a packet by --
+ * the ONE input of its mode (asrc_compensator_set_basis). Every basis but ARRIVAL is placement-judged
+ * (the issue-1367 timecode mode); STAMP (a directly stamped, non-genlock source) also books a placement
+ * jump only once it is CONFIRMED. The values equal obs-source.c's GENLOCK_AUDIO_ASRC_BASIS_* (pinned
+ * by tests/asrc_compensator_stamp_parity_1425.rs). Mirror of src/genlock_audio_pairing.rs AsrcBasis. */
+#define ASRC_BASIS_ARRIVAL 0
+#define ASRC_BASIS_TIMECODE 1
+#define ASRC_BASIS_STAMP 2
+
+/* camera-box issue 1425: on the STAMP basis a placement jump is booked only when it PERSISTS -- the
+ * error stays beyond the band, with one sign, for at least ASRC_PLACE_CONFIRM_MS of SOURCE audio (the
+ * sum of the packets' own durations) AND ASRC_PLACE_CONFIRM_PACKETS packets. A driver that stamps
+ * "arrival minus the packet" (PulseAudio, WASAPI without device timing) puts a delivery stall of S ms
+ * into its stamps as a transient of about -S that returns by itself within S ms of audio; a real
+ * sample loss stays. The window keeps its newest errors in a ring of ASRC_PLACE_CONFIRM_RING; the
+ * booked amount is the median of the last half of the window, capped at the ring. Mirror of
+ * src/asrc_bench_timecode.rs PLACE_CONFIRM_MS / PLACE_CONFIRM_PACKETS / PLACE_CONFIRM_RING -- keep
+ * identical. */
+#define ASRC_PLACE_CONFIRM_MS 1000.0
+#define ASRC_PLACE_CONFIRM_PACKETS 8u
+#define ASRC_PLACE_CONFIRM_RING 256u
+
 /* Per-source servo state. One instance lives per obs_source_t (see
  * obs-internal.h's `struct asrc_compensator asrc` field) and is mutated only
  * from the audio-ingest call path (process_audio(), always invoked from the
@@ -489,6 +511,19 @@ struct asrc_compensator {
 	/* camera-box issue 1367: the most recent booked placement jump, in ms (negative = the audio sat
 	 * early; the asrc: line's last_jump_ms=). Mirror of RealtimeAsrcCompensator::last_place_jump_ms. */
 	double last_place_jump_ms;
+	/* camera-box issue 1425: the basis (ASRC_BASIS_*) -- `timecode` above is derived from it -- and the
+	 * STAMP basis's open confirmation candidate: open, its sign (early = the error below the
+	 * reference), the source audio (ms) and packets it saw, the smoothed error at the open (the
+	 * reference is the setpoint + this; a confirmed booking puts the smoothed error back to it) and
+	 * its errors, packet k at k % ASRC_PLACE_CONFIRM_RING. Mirror of
+	 * src/asrc_bench_timecode.rs PlacementJudge. */
+	int basis;
+	bool place_cand_open;
+	bool place_cand_early;
+	double place_cand_ms;
+	uint32_t place_cand_packets;
+	double place_cand_ema_ms;
+	double place_cand_err_ms[ASRC_PLACE_CONFIRM_RING];
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -605,6 +640,13 @@ EXPORT void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, b
  * RealtimeAsrcCompensator::set_timecode. */
 EXPORT void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timecode);
 
+/* camera-box issue 1425 (design 6206822792): the basis (ASRC_BASIS_*) obs-source.c decided for this
+ * packet -- the ONE input of the servo's mode; asrc_compensator_set_timecode is
+ * set_basis(timecode ? TIMECODE : ARRIVAL). A basis change drops an open confirmation candidate; a
+ * change of the placement-judged flag (every basis but ARRIVAL) also flushes. Mirror of
+ * src/asrc_bench_timecode.rs RealtimeAsrcCompensator::set_basis. */
+EXPORT void asrc_compensator_set_basis(struct asrc_compensator *c, int basis);
+
 /* camera-box issue 1367 (design 5845361166): observe one packet's placement error `place_err_ms` in
  * timecode mode (actual - intended from its RAW stamp, the owed placement slew excluded; negative = the
  * audio sits EARLY), BEFORE the packet's reading enters the window (asrc_compensator_compensate with
@@ -621,7 +663,12 @@ EXPORT void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timec
  * were measured on a timeline the placement replaced; its own jump is measured against the fresh
  * setpoint and the smoothed error is re-seeded to its error against the resulting setpoint. The stale
  * EMA of a 682 ms wall step was otherwise re-booked as a phantom after every placement (the 29.9.2026
- * cg OBS sawtooth). */
+ * cg OBS sawtooth).
+ * camera-box issue 1425 (design 6206822792): on the STAMP basis a jump is booked only once CONFIRMED
+ * (asrc_confirm_placement_jump: one sign beyond the band for ASRC_PLACE_CONFIRM_MS of audio and
+ * ASRC_PLACE_CONFIRM_PACKETS packets, dropped the moment it comes back inside; booked once at the
+ * median of the last half of the window against the reference at the open). A placed packet drops an
+ * open candidate; outside the mode or before the capture an open candidate is dropped. */
 EXPORT void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
 					       bool placed);
 

@@ -342,12 +342,12 @@ fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
             "the placement error (audio_place_err_ms) must be measured against the raw-stamp intended landing",
         ),
         (
-            "genlock_audio_asrc_timecode(genlock_hold_mode, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY, source->asrc_enabled && source->resampler);",
-            "the ASRC must enter timecode mode exactly for audio placed at its timecode that reaches the mix",
+            "const int genlock_asrc_basis = genlock_audio_asrc_placement( genlock_hold_mode, genlock_direct_ts, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY, source->asrc_enabled && source->resampler);",
+            "the ASRC basis must be decided from the hold mode (issue 1425: and this packet's direct-stamp flag) for audio that reaches the mix",
         ),
         (
-            "asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);",
-            "the compensator must be told the mode on every packet",
+            "asrc_compensator_set_basis(&source->asrc, genlock_asrc_basis);",
+            "the compensator must be told the basis (its mode) on every packet",
         ),
         (
             "genlock_asrc_err_ms = genlock_audio_asrc_error_ms(genlock_place_err_ns, source->genlock_audio_slew_remaining_ns);",
@@ -371,7 +371,7 @@ fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
     // the mode is set before any setpoint shift of this packet (a PLACE / sync-offset / fold shift is
     // a no-op in timecode mode), and the servo runs after the buffer lock is released.
     let set = ingest
-        .find("asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);")
+        .find("asrc_compensator_set_basis(&source->asrc, genlock_asrc_basis);")
         .expect("the mode");
     for shift in [
         "push_back = false; asrc_compensator_shift_level_target(",
@@ -408,8 +408,8 @@ fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
             "the recovery payment must wait while the placement slew owes (never 2000 ppm; the bench's SkipThenSlew)",
         ),
         (
-            "if (master_s > 0.0) asrc_compensator_compensate(&source->asrc, source->asrc_tc_prev_raw_s, master_s, err_ms, &applied_ppm);",
-            "a placed packet or a duplicated slot adds no rate point and never flushes",
+            "if (point.due) asrc_compensator_compensate(&source->asrc, point.raw_s, point.master_s, err_ms, &applied_ppm);",
+            "a placed packet or a duplicated slot adds no rate point and never flushes (issue 1425: genlock_audio_asrc_rate_point)",
         ),
     ] {
         assert!(
@@ -440,7 +440,7 @@ fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
     }
     assert_has(
         &src,
-        "\" recover_ms=%.1f (issue 1372)\" \" timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)\",",
+        "\" recover_ms=%.1f (issue 1372)\" \" timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)\" \" basis=%s (issue 1425)\",",
         "the asrc: line must say whether the servo runs on the timecode placement",
     );
 }

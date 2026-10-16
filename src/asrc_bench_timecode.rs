@@ -27,6 +27,7 @@
 //! identical (the parity gate `tests/asrc_compensator_parity_1367.rs`, scenario `tc`).
 
 use super::*;
+use crate::genlock_audio_pairing::AsrcBasis;
 
 /// Issue 1367: the smallest placement jump, in ms, the timecode error books. The band is
 /// max(half the packet, this): a whole-packet jump (a skipped or duplicated 1600-sample SongPlayer
@@ -34,12 +35,105 @@ use super::*;
 /// book on a few ms of jitter. Mirror of asrc-compensator.h ASRC_PLACE_JUMP_MIN_MS — keep identical.
 pub const PLACE_JUMP_MIN_MS: f64 = 10.0;
 
+/// Issue 1425 (E2 slice 1, design 6206822792): on the STAMP basis a placement jump is booked only
+/// when it PERSISTS: the error stays beyond the band, with one sign, for at least this much SOURCE
+/// audio (the sum of the packets' own durations). A driver that stamps "arrival minus the packet"
+/// (PulseAudio, WASAPI without device timing) puts a delivery stall of S ms into its stamps as a
+/// transient of about -S that returns by itself within S ms of audio; a real sample loss stays.
+/// Mirror of asrc-compensator.h ASRC_PLACE_CONFIRM_MS, keep identical.
+pub const PLACE_CONFIRM_MS: f64 = 1000.0;
+/// Issue 1425: and for at least this many packets. Mirror of ASRC_PLACE_CONFIRM_PACKETS.
+pub const PLACE_CONFIRM_PACKETS: u32 = 8;
+/// Issue 1425: the confirmation window keeps its newest errors in a ring of this size. The booked
+/// amount is the median of the last half of the window, capped at the ring (all of it for
+/// 128-sample packets, the newest part of the last half for smaller ones). Mirror of
+/// ASRC_PLACE_CONFIRM_RING.
+pub const PLACE_CONFIRM_RING: usize = 256;
+
+/// Issue 1425: what the placement-judged servo judges by, and the STAMP basis's open confirmation
+/// candidate. The basis is the ONE input ([`RealtimeAsrcCompensator::set_basis`]); the timecode
+/// ("placement-judged") flag is derived from it, so the two can never disagree. Mirror of the C
+/// `basis` + `place_cand_*` fields.
+#[derive(Debug, Clone)]
+pub(super) struct PlacementJudge {
+    basis: AsrcBasis,
+    /// A candidate is open: the error left the band and has not come back.
+    open: bool,
+    /// The candidate's sign: true = the error sits below the reference (the audio EARLY).
+    early: bool,
+    /// Source audio the candidate has seen, ms.
+    elapsed_ms: f64,
+    /// Packets the candidate has seen.
+    packets: u32,
+    /// The smoothed error when the candidate opened. The reference is the setpoint plus this, and a
+    /// confirmed booking puts the smoothed error back to it: the 10 s EMA absorbed part of the jump
+    /// during the window, and booked against the open reference the whole jump is paid at
+    /// 1000 ppm, the same as an immediate booking one window later.
+    ema_at_open_ms: f64,
+    /// The candidate's errors, packet `k` at `k % PLACE_CONFIRM_RING`.
+    ring: [f64; PLACE_CONFIRM_RING],
+}
+
+impl PlacementJudge {
+    pub(super) fn new() -> Self {
+        Self {
+            basis: AsrcBasis::Arrival,
+            open: false,
+            early: false,
+            elapsed_ms: 0.0,
+            packets: 0,
+            ema_at_open_ms: 0.0,
+            ring: [0.0; PLACE_CONFIRM_RING],
+        }
+    }
+
+    fn drop_candidate(&mut self) {
+        self.open = false;
+        self.elapsed_ms = 0.0;
+        self.packets = 0;
+    }
+
+    /// The median of the newest ceil(n/2) errors (capped at the ring). Sorted with a stable compare
+    /// (equal values keep their order), an even count averaged, like the C insertion sort.
+    fn last_half_median_ms(&self) -> f64 {
+        let n = self.packets as usize;
+        let m = n.div_ceil(2).min(PLACE_CONFIRM_RING);
+        let mut v: Vec<f64> = (0..m)
+            .map(|i| self.ring[(n - 1 - i) % PLACE_CONFIRM_RING])
+            .collect();
+        v.sort_by(|a, b| a.partial_cmp(b).expect("a finite placement error"));
+        if m % 2 == 1 {
+            v[m / 2]
+        } else {
+            0.5 * (v[m / 2 - 1] + v[m / 2])
+        }
+    }
+}
+
 impl RealtimeAsrcCompensator {
     /// Issue 1367: enter or leave timecode mode (obs-source.c passes, per packet, whether the
     /// source's audio is placed by the genlock pairing at its timecode). A CHANGE discards the open
     /// window and flushes: the regression points, the capture and anything owed were measured on the
     /// other basis. Mirror of the C `asrc_compensator_set_timecode`.
     pub fn set_timecode(&mut self, timecode: bool) {
+        self.set_basis(if timecode {
+            AsrcBasis::Timecode
+        } else {
+            AsrcBasis::Arrival
+        });
+    }
+
+    /// Issue 1425 (design 6206822792): the basis the ingest decided for this packet, the ONE input
+    /// of the servo's mode. Every basis but [`AsrcBasis::Arrival`] is placement-judged (the
+    /// issue-1367 timecode mode); [`AsrcBasis::Stamp`] also books a placement jump only once it is
+    /// CONFIRMED. A basis change drops an open candidate; a change of the placement-judged flag also
+    /// flushes, as [`Self::set_timecode`] always did. Mirror of the C `asrc_compensator_set_basis`.
+    pub fn set_basis(&mut self, basis: AsrcBasis) {
+        if basis != self.placement.basis {
+            self.placement.basis = basis;
+            self.placement.drop_candidate();
+        }
+        let timecode = basis != AsrcBasis::Arrival;
         if timecode == self.timecode {
             return;
         }
@@ -55,6 +149,21 @@ impl RealtimeAsrcCompensator {
     /// Issue 1367: whether the servo runs in timecode mode (the C `asrc:` line's `timecode=`).
     pub fn timecode(&self) -> bool {
         self.timecode
+    }
+
+    /// Issue 1425: the basis the servo judges by.
+    pub fn basis(&self) -> AsrcBasis {
+        self.placement.basis
+    }
+
+    /// Issue 1425: the packets the open confirmation candidate has seen, 0 with none open (the
+    /// parity trace's `cand=`).
+    pub fn place_candidate_packets(&self) -> u32 {
+        if self.placement.open {
+            self.placement.packets
+        } else {
+            0
+        }
     }
 
     /// Issue 1367: cumulative booked placement jumps (the C `asrc:` line's `place_jumps=`).
@@ -95,12 +204,19 @@ impl RealtimeAsrcCompensator {
     /// skips every ~80 s for 18 min on the cg OBS. The placed packet's own jump is measured against
     /// the fresh setpoint (a placement that still lands off its raw stamp books that), and the EMA
     /// is re-seeded to its error against the resulting setpoint.
+    ///
+    /// Issue 1425 (design 6206822792): on the STAMP basis a jump is booked only once CONFIRMED
+    /// (`confirm_placement_jump`); a placed packet drops an open candidate (the placement replaced
+    /// the timeline) and its own error may open a new one. Outside the mode or before the capture an
+    /// open candidate is dropped (a flush or a capture-rule change dropped the setpoint it was
+    /// measured against).
     pub fn observe_placement(&mut self, place_err_ms: f64, packet_ms: f64, placed: bool) {
         if !self.timecode || !self.level_captured {
+            self.placement.drop_candidate();
             return;
         }
         if !placed {
-            self.book_placement_jump(place_err_ms, packet_ms);
+            self.judge_placement_jump(place_err_ms, packet_ms);
             return;
         }
         self.step_recover_set(0.0);
@@ -109,7 +225,8 @@ impl RealtimeAsrcCompensator {
         self.level_err_windows = 0;
         self.window_level_sum_ms = 0.0;
         self.window_level_count = 0;
-        self.book_placement_jump(place_err_ms, packet_ms);
+        self.placement.drop_candidate();
+        self.judge_placement_jump(place_err_ms, packet_ms);
         // the EMA is already seeded here: a placement is observed only on a captured setpoint, and
         // the capture seeds it in the same window (both are cleared together)
         self.level_err_ema_ms = place_err_ms - self.level_target_ms;
@@ -133,15 +250,83 @@ impl RealtimeAsrcCompensator {
         if jump_ms.abs() < Self::place_jump_band_ms(packet_ms) {
             return;
         }
+        self.book_jump_ms(jump_ms);
+    }
+
+    /// Issue 1367: book `jump_ms` with its own sign, capped at +-[`STEP_RECOVER_MAX_MS`] owed; false
+    /// when the cap left nothing to book. Mirror of the C `asrc_book_jump_ms`.
+    fn book_jump_ms(&mut self, jump_ms: f64) -> bool {
         let owed_ms =
             (self.step_recover_ms - jump_ms).clamp(-STEP_RECOVER_MAX_MS, STEP_RECOVER_MAX_MS);
         // review round 1: at the owed cap a packet still beyond it books nothing and counts nothing
         if owed_ms == self.step_recover_ms {
-            return;
+            return false;
         }
         self.step_recover_set(owed_ms);
         self.place_jump_count = self.place_jump_count.saturating_add(1);
         self.last_place_jump_ms = jump_ms;
+        true
+    }
+
+    /// Issue 1425: the booking the basis asks for: at once on the timecode basis (issue 1367,
+    /// unchanged), CONFIRMED on the stamp basis. Mirror of the C `asrc_judge_placement_jump`.
+    fn judge_placement_jump(&mut self, place_err_ms: f64, packet_ms: f64) {
+        if self.placement.basis == AsrcBasis::Stamp {
+            self.confirm_placement_jump(place_err_ms, packet_ms);
+        } else {
+            self.book_placement_jump(place_err_ms, packet_ms);
+        }
+    }
+
+    /// Issue 1425 (design 6206822792): the STAMP basis's CONFIRMED booking. A candidate opens when
+    /// the error leaves the band (max(half the packet, [`PLACE_JUMP_MIN_MS`])) around the reference
+    /// (the setpoint plus the smoothed error at the open), and is dropped without booking the moment
+    /// the error comes back inside; beyond the band with the other sign it starts again with that
+    /// sign. It confirms once it saw at least [`PLACE_CONFIRM_MS`] of source audio AND
+    /// [`PLACE_CONFIRM_PACKETS`] packets, and books the MEDIAN error of the last half of its window
+    /// against the open reference (one booking, paid at 1000 ppm), putting the smoothed error back
+    /// to its value at the open. Mirror of the C `asrc_confirm_placement_jump`.
+    fn confirm_placement_jump(&mut self, place_err_ms: f64, packet_ms: f64) {
+        let band_ms = Self::place_jump_band_ms(packet_ms);
+        let reference_ema_ms = if self.placement.open {
+            self.placement.ema_at_open_ms
+        } else {
+            self.level_err_ema_ms
+        };
+        let mut jump_ms = place_err_ms - (self.level_target_ms + reference_ema_ms);
+        if jump_ms.abs() < band_ms {
+            self.placement.drop_candidate();
+            return;
+        }
+        if self.placement.open && (jump_ms < 0.0) != self.placement.early {
+            // beyond the band with the other sign: a new candidate against today's reference
+            self.placement.drop_candidate();
+            jump_ms = place_err_ms - (self.level_target_ms + self.level_err_ema_ms);
+            if jump_ms.abs() < band_ms {
+                return;
+            }
+        }
+        if !self.placement.open {
+            self.placement.open = true;
+            self.placement.early = jump_ms < 0.0;
+            self.placement.ema_at_open_ms = self.level_err_ema_ms;
+        }
+        let k = self.placement.packets as usize % PLACE_CONFIRM_RING;
+        self.placement.ring[k] = place_err_ms;
+        self.placement.packets = self.placement.packets.saturating_add(1);
+        self.placement.elapsed_ms += packet_ms;
+        if self.placement.elapsed_ms < PLACE_CONFIRM_MS
+            || self.placement.packets < PLACE_CONFIRM_PACKETS
+        {
+            return;
+        }
+        let ema_at_open_ms = self.placement.ema_at_open_ms;
+        let booked_ms =
+            self.placement.last_half_median_ms() - (self.level_target_ms + ema_at_open_ms);
+        self.placement.drop_candidate();
+        if booked_ms.abs() >= band_ms && self.book_jump_ms(booked_ms) {
+            self.level_err_ema_ms = ema_at_open_ms;
+        }
     }
 
     /// Issue 1381 (design 5882391108, piece 3) — the BACKSTOP, asked by the ingest BEFORE a timecode
@@ -502,3 +687,9 @@ mod tests {
         assert_eq!(fresh.place_jump_count(), 0);
     }
 }
+
+/// Issue 1425 (design 6206822792): the stamp basis's confirmed booking, in its own file so this
+/// module does not grow past its budget.
+#[cfg(test)]
+#[path = "asrc_bench_stamp_confirm_tests.rs"]
+mod stamp_confirm_tests;

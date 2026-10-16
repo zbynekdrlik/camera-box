@@ -145,6 +145,8 @@ static struct h_out h_ingest(obs_source_t *source, const struct audio_data *data
 	h_info_set = false;
 	const uint64_t genlock_step_packet_ns = conv_frames_to_time(sample_rate, in.frames);
 @INGEST_BRANCH@
+	/* issue 1425 round 2: the branch clears the direct-stamp flag the basis reads further down */
+	(void)genlock_direct_ts;
 	struct h_out out = {genlock_relabel,
 			    genlock_relabel_pending,
 			    push_back,

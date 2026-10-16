@@ -636,12 +636,72 @@ pub fn audio_intended_raw_ns(
         .wrapping_add(term_ns as u64)
 }
 
-/// Issue 1367 — does the ASRC run in TIMECODE mode for this packet? Only for audio the genlock
-/// pairing places at its timecode, that reaches the mix (not MONITOR_ONLY) and has a resampler to
-/// correct it. Every other source — `mbc`, every ASIO/WASAPI input, a genlock source on the latency
-/// hold — keeps the arrival-based servo. Mirror of `genlock_audio_asrc_timecode`.
-pub fn audio_asrc_timecode(mode: AudioHoldMode, monitor_only: bool, can_resample: bool) -> bool {
-    mode == AudioHoldMode::Timecode && !monitor_only && can_resample
+/// Issue 1425 (E2 slice 1, design 6205974120) — what the per-source ASRC judges one packet by.
+/// Discriminants match the C `GENLOCK_AUDIO_ASRC_BASIS_*` defines. Both placement bases put the
+/// compensator in its issue-1367 timecode ("placement-judged") mode: level = the placement error,
+/// setpoint 0, rate = the stamp advance, jumps booked at 1000 ppm, no unreachable fallback.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsrcBasis {
+    /// The arrival servo: the buffer DEPTH against its setpoint.
+    Arrival = 0,
+    /// Issue 1367: a genlock source placed at its NDI timecode, judged by its landing against that
+    /// timecode, setpoint 0.
+    Timecode = 1,
+    /// Issue 1425: a directly stamped, non-genlock mixed source, judged by its landing against its
+    /// OWN stamp, setpoint 0.
+    Stamp = 2,
+}
+
+impl AsrcBasis {
+    /// The integer the C helpers use.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+    /// The `asrc:` line token (`basis=`).
+    pub fn token(self) -> &'static str {
+        match self {
+            AsrcBasis::Arrival => "arrival",
+            AsrcBasis::Timecode => "timecode",
+            AsrcBasis::Stamp => "stamp",
+        }
+    }
+}
+
+/// Issue 1425 — the basis the ASRC judges this packet by. Only audio that reaches the mix (not
+/// MONITOR_ONLY) and has a resampler to correct it is placement-judged:
+///
+/// - a genlock source on the issue-1367 timecode hold: [`AsrcBasis::Timecode`];
+/// - a non-genlock source (`mode` [`AudioHoldMode::Off`]) whose stamps are DIRECT (`direct_ts`: OBS
+///   detected them within its 2 s window and applies no `timing_adjust`) — `mbc`, a PulseAudio input,
+///   a media clip: [`AsrcBasis::Stamp`], so the launch-random global buffering and the packet-vs-tick
+///   phase drop out of its A/V;
+/// - everything else (a latency hold, a withheld source, a source on OBS's own `timing_adjust`):
+///   [`AsrcBasis::Arrival`].
+///
+/// Mirror of `genlock_audio_asrc_placement`.
+pub fn audio_asrc_placement(
+    mode: AudioHoldMode,
+    direct_ts: bool,
+    monitor_only: bool,
+    can_resample: bool,
+) -> AsrcBasis {
+    if monitor_only || !can_resample {
+        return AsrcBasis::Arrival;
+    }
+    match mode {
+        AudioHoldMode::Timecode => AsrcBasis::Timecode,
+        AudioHoldMode::Off if direct_ts => AsrcBasis::Stamp,
+        _ => AsrcBasis::Arrival,
+    }
+}
+
+/// Issue 1425 — does the ingest measure this packet's placement error? Under an active genlock hold
+/// (the pairing audit) or for a placement-judged basis (its servo input). Only a genlock hold writes
+/// the pairing audit facet; the ingest gates that on the mode itself. Mirror of
+/// `genlock_audio_place_measured`.
+pub fn audio_place_measured(mode: AudioHoldMode, basis: AsrcBasis) -> bool {
+    mode.is_active() || basis != AsrcBasis::Arrival
 }
 
 /// Issue 1367 — the ASRC's error input for one packet, in ms: its placement error (actual − the
@@ -664,6 +724,92 @@ pub fn audio_stamp_mono_ns(raw_ts_ns: u64, off_live_ns: i64) -> u64 {
 /// 0 or negative, which adds no rate point). Mirror of `genlock_audio_stamp_interval_s`.
 pub fn audio_stamp_interval_s(prev_ns: u64, now_ns: u64) -> f64 {
     now_ns.wrapping_sub(prev_ns) as i64 as f64 / 1e9
+}
+
+/// Issue 1425 round 2 — the rate point one packet adds to a placement-judged ASRC's regression.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AsrcRatePoint {
+    /// A point is due now: the regression gets `raw_s` against `master_s`.
+    pub due: bool,
+    /// Its raw advance (the pre-resample duration it covers), s.
+    pub raw_s: f64,
+    /// Its master block (the stamp advance it covers), s.
+    pub master_s: f64,
+    /// The next interval starts at the previous packet's stamp, not this one's.
+    pub keep_prev_stamp: bool,
+}
+
+/// Issue 1425 round 2 — the STAMP basis's rate point that waits one packet: a following packet with
+/// no stamp advance still adds its predecessor's samples to it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AsrcRatePending {
+    pub raw_s: f64,
+    pub master_s: f64,
+    pub due: bool,
+}
+
+/// Issue 1425 round 2 (design 6206822792) — the rate point of one measured packet. A point needs two
+/// appended packets in a row (`contiguous`); `master_s` is the stamp advance from the previous packet
+/// and `prev_raw_s` the previous packet's pre-resample duration.
+///
+/// - **TIMECODE basis (issue 1367, unchanged):** a positive advance is a point now; a non-positive
+///   one is a sender's duplicated slot, whose samples are a repeat: no point.
+/// - **STAMP basis:** a driver that stamps each packet "arrival minus its own duration" (PulseAudio,
+///   WASAPI without device timing) gives a run of packets read at one arrival EQUAL stamps, and only
+///   the run's LAST stamp is right. So the point waits one packet (`pending`): a positive advance
+///   emits the waiting point and makes this interval the new one; a packet with no advance CARRIES
+///   its predecessor's samples into the waiting point (whose interval then ends at the run's last
+///   stamp) and the next interval keeps its start stamp. Dropped, those samples read the source slow
+///   (round 1's review: +4.9 ms over ~10 min); carried FORWARD into the next interval instead, every
+///   run moves one packet of samples between two points and, on 1024-frame packets, each move is a
+///   per-window residual over the 10 ms step re-base (the bench's burst feed walked 31 ms).
+///
+/// A packet that is not contiguous (placed, or no previous packet) starts afresh and drops a waiting
+/// point. Mirror of `genlock_audio_asrc_rate_point`.
+pub fn audio_asrc_rate_point(
+    basis: AsrcBasis,
+    contiguous: bool,
+    master_s: f64,
+    prev_raw_s: f64,
+    pending: &mut AsrcRatePending,
+) -> AsrcRatePoint {
+    let mut point = AsrcRatePoint {
+        due: false,
+        raw_s: 0.0,
+        master_s: 0.0,
+        keep_prev_stamp: false,
+    };
+    if basis != AsrcBasis::Stamp {
+        *pending = AsrcRatePending::default();
+        if contiguous && master_s > 0.0 {
+            point.due = true;
+            point.raw_s = prev_raw_s;
+            point.master_s = master_s;
+        }
+        return point;
+    }
+    if !contiguous {
+        *pending = AsrcRatePending::default();
+        return point;
+    }
+    if master_s > 0.0 {
+        if pending.due {
+            point.due = true;
+            point.raw_s = pending.raw_s;
+            point.master_s = pending.master_s;
+        }
+        *pending = AsrcRatePending {
+            raw_s: prev_raw_s,
+            master_s,
+            due: true,
+        };
+        return point;
+    }
+    if pending.due {
+        pending.raw_s += prev_raw_s;
+    }
+    point.keep_prev_stamp = true;
+    point
 }
 
 // Issue 1381 (design 5882391108) — the per-source audio SKEW HOLD across a wall step lives in its

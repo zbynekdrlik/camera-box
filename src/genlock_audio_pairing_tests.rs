@@ -752,3 +752,141 @@ fn the_pairing_offset_reads_the_samples_not_the_bookkeeping_1367() {
         audio_applied_delay_ns(133, 33_000_000)
     );
 }
+
+#[test]
+fn a_directly_stamped_mixed_source_is_judged_by_its_stamp_1425() {
+    use AudioHoldMode::*;
+    // the stream mbc / a PulseAudio input / a media clip: no genlock hold, direct stamps.
+    assert_eq!(
+        audio_asrc_placement(Off, true, false, true),
+        AsrcBasis::Stamp
+    );
+    // the issue-1367 timecode hold keeps its basis, direct stamps or not.
+    assert_eq!(
+        audio_asrc_placement(Timecode, false, false, true),
+        AsrcBasis::Timecode
+    );
+    assert_eq!(
+        audio_asrc_placement(Timecode, true, false, true),
+        AsrcBasis::Timecode
+    );
+    // stamps that are not direct (OBS timing_adjust in use), a latency hold or a withheld source:
+    // the arrival servo.
+    assert_eq!(
+        audio_asrc_placement(Off, false, false, true),
+        AsrcBasis::Arrival
+    );
+    assert_eq!(
+        audio_asrc_placement(Latency, true, false, true),
+        AsrcBasis::Arrival
+    );
+    assert_eq!(
+        audio_asrc_placement(Pending, true, false, true),
+        AsrcBasis::Arrival
+    );
+    // never a MONITOR_ONLY source or one with no resampler.
+    for mode in [Off, Latency, Timecode, Pending] {
+        for direct in [false, true] {
+            assert_eq!(
+                audio_asrc_placement(mode, direct, true, true),
+                AsrcBasis::Arrival
+            );
+            assert_eq!(
+                audio_asrc_placement(mode, direct, false, false),
+                AsrcBasis::Arrival
+            );
+        }
+    }
+    // a stamp-judged source is measured although no genlock hold is active; an arrival-judged one
+    // only under an active hold (the issue-1367 latency hold).
+    assert!(audio_place_measured(Off, AsrcBasis::Stamp));
+    assert!(audio_place_measured(Timecode, AsrcBasis::Timecode));
+    assert!(audio_place_measured(Latency, AsrcBasis::Arrival));
+    assert!(!audio_place_measured(Off, AsrcBasis::Arrival));
+    assert!(!audio_place_measured(Pending, AsrcBasis::Arrival));
+    assert_eq!(
+        [AsrcBasis::Arrival, AsrcBasis::Timecode, AsrcBasis::Stamp].map(|b| (b.code(), b.token())),
+        [(0, "arrival"), (1, "timecode"), (2, "stamp")]
+    );
+}
+
+/// Issue 1425 round 2: feed one packet per (stamp, raw) through the rate-point decision the way the
+/// ingest does, and return the points emitted.
+fn rate_points(basis: AsrcBasis, packets: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut pending = AsrcRatePending::default();
+    let mut points = Vec::new();
+    let (mut prev_stamp, mut prev_raw) = (packets[0].0, packets[0].1);
+    for &(stamp, raw) in &packets[1..] {
+        let pt = audio_asrc_rate_point(basis, true, stamp - prev_stamp, prev_raw, &mut pending);
+        if pt.due {
+            points.push((pt.raw_s, pt.master_s));
+        }
+        if !pt.keep_prev_stamp {
+            prev_stamp = stamp;
+        }
+        prev_raw = raw;
+    }
+    points
+}
+
+#[test]
+fn an_arrival_stamped_burst_keeps_every_rate_point_exact_on_the_stamp_basis_1425() {
+    // a driver stamps each packet "arrival minus its own duration": a run read at one arrival gets
+    // EQUAL stamps and only its last one is right (packet k starts at k * p; packets 3..=5 arrive
+    // together at 6 p)
+    let p = 0.0213;
+    let packets: Vec<(f64, f64)> = (0..10)
+        .map(|k| {
+            let stamp = if (3..=5).contains(&k) {
+                5.0 * p
+            } else {
+                k as f64 * p
+            };
+            (stamp, p)
+        })
+        .collect();
+    let points = rate_points(AsrcBasis::Stamp, &packets);
+    for (raw, master) in &points {
+        assert!(
+            (raw - master).abs() < 1e-12,
+            "issue 1425: every stamp-basis point must pair the samples with the time they span: \
+             raw {raw} vs master {master}"
+        );
+    }
+    let raw: f64 = points.iter().map(|pt| pt.0).sum();
+    assert!(
+        (raw - 8.0 * p).abs() < 1e-12,
+        "issue 1425: no sample is dropped from the regression (the last interval waits): {raw}"
+    );
+    // the timecode basis drops the run's samples: a duplicated slot is a repeat there
+    let tc: f64 = rate_points(AsrcBasis::Timecode, &packets)
+        .iter()
+        .map(|pt| pt.0)
+        .sum();
+    // (it emits one interval earlier, so 7 p against the stamp basis's 8 p, the run's 2 p dropped)
+    assert!(
+        (tc - 7.0 * p).abs() < 1e-12,
+        "issue 1425: the timecode basis keeps the issue-1367 duplicated-slot drop: {tc}"
+    );
+}
+
+#[test]
+fn a_placement_or_a_run_with_nothing_waiting_starts_afresh_1425() {
+    let mut pending = AsrcRatePending::default();
+    let p = 0.01;
+    // nothing waiting yet: a run with no advance carries nothing and emits nothing
+    let pt = audio_asrc_rate_point(AsrcBasis::Stamp, true, 0.0, p, &mut pending);
+    assert!(!pt.due && pt.keep_prev_stamp && !pending.due);
+    // a first advance only starts the waiting point
+    let pt = audio_asrc_rate_point(AsrcBasis::Stamp, true, p, p, &mut pending);
+    assert!(!pt.due && pending.due);
+    // a placed packet drops it, and so does a change to the timecode basis
+    let pt = audio_asrc_rate_point(AsrcBasis::Stamp, false, p, p, &mut pending);
+    assert!(!pt.due && !pt.keep_prev_stamp && pending == AsrcRatePending::default());
+    audio_asrc_rate_point(AsrcBasis::Stamp, true, p, p, &mut pending);
+    let pt = audio_asrc_rate_point(AsrcBasis::Timecode, true, p, 2.0 * p, &mut pending);
+    assert!(
+        pt.due && pt.raw_s == 2.0 * p && pending == AsrcRatePending::default(),
+        "issue 1425: the timecode basis emits at once and keeps nothing waiting"
+    );
+}

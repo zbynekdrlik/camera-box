@@ -662,6 +662,9 @@ pub struct RealtimeAsrcCompensator {
     /// Issue 1367: the most recent booked placement jump, in ms (negative = the audio sat early).
     /// Mirror of the C `last_place_jump_ms`.
     last_place_jump_ms: f64,
+    /// Issue 1425: the basis (its one input) and the stamp basis's confirmation candidate
+    /// (`asrc_bench_timecode.rs`). Mirror of the C `basis` + `place_cand_*` fields.
+    placement: timecode::PlacementJudge,
 }
 
 impl RealtimeAsrcCompensator {
@@ -707,6 +710,8 @@ impl RealtimeAsrcCompensator {
             timecode: false,               // issue 1367
             place_jump_count: 0,           // issue 1367
             last_place_jump_ms: 0.0,       // issue 1367
+            // issue 1425
+            placement: timecode::PlacementJudge::new(),
         }
     }
 
@@ -1428,7 +1433,9 @@ mod step_recover_tests;
 /// and the stamp-fed rate — in its own file, so this module does not grow past its budget.
 #[path = "asrc_bench_timecode.rs"]
 mod timecode;
-pub use timecode::PLACE_JUMP_MIN_MS;
+pub use timecode::{
+    PLACE_CONFIRM_MS, PLACE_CONFIRM_PACKETS, PLACE_CONFIRM_RING, PLACE_JUMP_MIN_MS,
+};
 
 #[cfg(test)]
 mod tests {

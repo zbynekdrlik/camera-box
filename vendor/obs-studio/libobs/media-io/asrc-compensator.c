@@ -143,6 +143,12 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->timecode = false; /* camera-box issue 1367 */
 	c->place_jump_count = 0; /* camera-box issue 1367 */
 	c->last_place_jump_ms = 0.0; /* camera-box issue 1367 */
+	c->basis = ASRC_BASIS_ARRIVAL; /* camera-box issue 1425 */
+	c->place_cand_early = false; /* camera-box issue 1425 */
+	c->place_cand_ema_ms = 0.0; /* camera-box issue 1425 */
+	c->place_cand_open = false; /* camera-box issue 1425 */
+	c->place_cand_ms = 0.0; /* camera-box issue 1425 */
+	c->place_cand_packets = 0; /* camera-box issue 1425 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
@@ -623,8 +629,27 @@ void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, bool hol
 
 /* camera-box issue 1367 (design 5845361166): the TIMECODE mode. See the header and
  * src/asrc_bench_timecode.rs (the Rust authority) for the full contract. */
+static void asrc_place_cand_drop(struct asrc_compensator *c)
+{
+	c->place_cand_open = false;
+	c->place_cand_ms = 0.0;
+	c->place_cand_packets = 0;
+}
+
 void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timecode)
 {
+	asrc_compensator_set_basis(c, timecode ? ASRC_BASIS_TIMECODE : ASRC_BASIS_ARRIVAL);
+}
+
+/* camera-box issue 1425 (design 6206822792): the ONE input of the servo's mode. Mirror of
+ * RealtimeAsrcCompensator::set_basis. */
+void asrc_compensator_set_basis(struct asrc_compensator *c, int basis)
+{
+	if (basis != c->basis) {
+		c->basis = basis;
+		asrc_place_cand_drop(c);
+	}
+	const bool timecode = basis != ASRC_BASIS_ARRIVAL;
 	if (timecode == c->timecode)
 		return;
 	c->timecode = timecode;
@@ -659,29 +684,115 @@ static double asrc_place_jump_band_ms(double packet_ms)
 /* camera-box issue 1367: book the jump of place_err_ms against the servo's expectation (setpoint +
  * smoothed error), with its own sign, capped at +/-ASRC_STEP_RECOVER_MAX_MS owed. Mirror of
  * RealtimeAsrcCompensator::book_placement_jump. */
+/* camera-box issue 1367: book jump_ms with its own sign, capped at +/-ASRC_STEP_RECOVER_MAX_MS owed;
+ * false when the cap left nothing to book. Mirror of RealtimeAsrcCompensator::book_jump_ms. */
+static bool asrc_book_jump_ms(struct asrc_compensator *c, double jump_ms)
+{
+	const double owed_ms =
+		asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);
+	/* review round 1: at the owed cap a packet still beyond it books nothing and counts nothing */
+	if (owed_ms == c->step_recover_ms)
+		return false;
+	asrc_step_recover_set(c, owed_ms);
+	if (c->place_jump_count < UINT32_MAX)
+		c->place_jump_count++;
+	c->last_place_jump_ms = jump_ms;
+	return true;
+}
+
 static void asrc_book_placement_jump(struct asrc_compensator *c, double place_err_ms, double packet_ms)
 {
 	const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
 	if (fabs(jump_ms) < asrc_place_jump_band_ms(packet_ms))
 		return;
-	const double owed_ms =
-		asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);
-	/* review round 1: at the owed cap a packet still beyond it books nothing and counts nothing */
-	if (owed_ms == c->step_recover_ms)
+	(void)asrc_book_jump_ms(c, jump_ms);
+}
+
+/* camera-box issue 1425: the median of the newest ceil(n/2) candidate errors (capped at the ring), an
+ * even count averaged. A stable insertion sort (equal values keep their order). Mirror of
+ * PlacementJudge::last_half_median_ms. */
+static double asrc_place_cand_median_ms(const struct asrc_compensator *c)
+{
+	double v[ASRC_PLACE_CONFIRM_RING];
+	const uint32_t n = c->place_cand_packets;
+	uint32_t m = n / 2u + n % 2u;
+	if (m > ASRC_PLACE_CONFIRM_RING)
+		m = ASRC_PLACE_CONFIRM_RING;
+	for (uint32_t i = 0; i < m; i++)
+		v[i] = c->place_cand_err_ms[(n - 1u - i) % ASRC_PLACE_CONFIRM_RING];
+	for (uint32_t i = 1; i < m; i++) {
+		const double x = v[i];
+		uint32_t j = i;
+		while (j > 0 && v[j - 1] > x) {
+			v[j] = v[j - 1];
+			j--;
+		}
+		v[j] = x;
+	}
+	return m % 2u == 1u ? v[m / 2u] : 0.5 * (v[m / 2u - 1u] + v[m / 2u]);
+}
+
+/* camera-box issue 1425 (design 6206822792): the STAMP basis's CONFIRMED booking. A candidate opens
+ * when the error leaves the band around the reference (the setpoint + the smoothed error at the open)
+ * and is dropped without booking the moment the error comes back inside; beyond the band with the
+ * other sign it starts again with that sign. It confirms after ASRC_PLACE_CONFIRM_MS of source audio
+ * AND ASRC_PLACE_CONFIRM_PACKETS packets, and books the median of the last half of its window against
+ * the open reference, putting the smoothed error back to its value at the open (the 10 s EMA absorbed
+ * part of the jump during the window; booked this way the whole jump is paid at 1000 ppm). Mirror of
+ * RealtimeAsrcCompensator::confirm_placement_jump. */
+static void asrc_confirm_placement_jump(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	const double band_ms = asrc_place_jump_band_ms(packet_ms);
+	const double reference_ema_ms = c->place_cand_open ? c->place_cand_ema_ms : c->level_err_ema_ms;
+	double jump_ms = place_err_ms - (c->level_target_ms + reference_ema_ms);
+	if (fabs(jump_ms) < band_ms) {
+		asrc_place_cand_drop(c);
 		return;
-	asrc_step_recover_set(c, owed_ms);
-	if (c->place_jump_count < UINT32_MAX)
-		c->place_jump_count++;
-	c->last_place_jump_ms = jump_ms;
+	}
+	if (c->place_cand_open && (jump_ms < 0.0) != c->place_cand_early) {
+		/* beyond the band with the other sign: a new candidate against today's reference */
+		asrc_place_cand_drop(c);
+		jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
+		if (fabs(jump_ms) < band_ms)
+			return;
+	}
+	if (!c->place_cand_open) {
+		c->place_cand_open = true;
+		c->place_cand_early = jump_ms < 0.0;
+		c->place_cand_ema_ms = c->level_err_ema_ms;
+	}
+	c->place_cand_err_ms[c->place_cand_packets % ASRC_PLACE_CONFIRM_RING] = place_err_ms;
+	if (c->place_cand_packets < UINT32_MAX)
+		c->place_cand_packets++;
+	c->place_cand_ms += packet_ms;
+	if (c->place_cand_ms < ASRC_PLACE_CONFIRM_MS || c->place_cand_packets < ASRC_PLACE_CONFIRM_PACKETS)
+		return;
+	const double ema_at_open_ms = c->place_cand_ema_ms;
+	const double booked_ms = asrc_place_cand_median_ms(c) - (c->level_target_ms + ema_at_open_ms);
+	asrc_place_cand_drop(c);
+	if (fabs(booked_ms) >= band_ms && asrc_book_jump_ms(c, booked_ms))
+		c->level_err_ema_ms = ema_at_open_ms;
+}
+
+/* camera-box issue 1425: the booking the basis asks for -- at once on the timecode basis (issue 1367,
+ * unchanged), CONFIRMED on the stamp basis. Mirror of RealtimeAsrcCompensator::judge_placement_jump. */
+static void asrc_judge_placement_jump(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	if (c->basis == ASRC_BASIS_STAMP)
+		asrc_confirm_placement_jump(c, place_err_ms, packet_ms);
+	else
+		asrc_book_placement_jump(c, place_err_ms, packet_ms);
 }
 
 void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
 					bool placed)
 {
-	if (!c->timecode || !c->level_captured)
+	if (!c->timecode || !c->level_captured) {
+		asrc_place_cand_drop(c);
 		return;
+	}
 	if (!placed) {
-		asrc_book_placement_jump(c, place_err_ms, packet_ms);
+		asrc_judge_placement_jump(c, place_err_ms, packet_ms);
 		return;
 	}
 	/* camera-box issue 1381 (design 5882391108, piece 1): a placement puts the samples on their stamp,
@@ -694,7 +805,8 @@ void asrc_compensator_observe_placement(struct asrc_compensator *c, double place
 	c->level_err_windows = 0;
 	c->window_level_sum_ms = 0.0;
 	c->window_level_count = 0;
-	asrc_book_placement_jump(c, place_err_ms, packet_ms);
+	asrc_place_cand_drop(c);
+	asrc_judge_placement_jump(c, place_err_ms, packet_ms);
 	/* the EMA is already seeded here: observe_placement only acts on a captured setpoint, and the
 	 * capture seeds it in the same window (both are cleared together) */
 	c->level_err_ema_ms = place_err_ms - c->level_target_ms;

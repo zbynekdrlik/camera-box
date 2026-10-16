@@ -2223,7 +2223,7 @@ mod vendored_source {
                 && c.contains("void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms) { /* camera-box issue 1367")
                 && c.contains("const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);")
                 && c.contains("const double owed_ms = asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);")
-                && c.contains("if (owed_ms == c->step_recover_ms) return; asrc_step_recover_set(c, owed_ms);"),
+                && c.contains("if (owed_ms == c->step_recover_ms) return false; asrc_step_recover_set(c, owed_ms);"),
             "{ASRC_COMPENSATOR_C}: issue 1367 — the timecode mode (no residual booking, setpoint 0, \
              no-op shift, the signed placement-jump booking) is gone; a timecode-placed source \
              would be judged by arrival timing and its buffer depth again."

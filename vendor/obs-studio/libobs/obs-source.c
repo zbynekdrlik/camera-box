@@ -1967,11 +1967,40 @@ static inline uint64_t genlock_audio_intended_raw_ns(uint64_t raw_ts_ns, uint64_
 {
 	return raw_ts_ns + timing_adjust_ns + (uint64_t)sync_offset_ns - resample_offset_ns + (uint64_t)term_ns;
 }
-/* issue 1367: the ASRC runs in TIMECODE mode only for audio placed at its timecode that reaches the mix
- * and has a resampler; mbc, every ASIO/WASAPI input and a latency hold keep the arrival servo. */
-static inline bool genlock_audio_asrc_timecode(int mode, bool monitor_only, bool can_resample)
+/* camera-box issue 1425 (E2 slice 1, design 6205974120): what the per-source ASRC judges a packet by.
+ * TIMECODE (issue 1367): audio the genlock pairing places at its NDI timecode, judged by its landing
+ * against that timecode. STAMP: a directly stamped (timing_adjust 0), non-genlock source -- mbc, a
+ * PulseAudio input, a media clip -- judged by its landing against its OWN stamp, setpoint 0, so the
+ * launch-random global buffering and packet-vs-tick phase drop out of its A/V. Both need the mix (not
+ * MONITOR_ONLY) and a resampler; everything else keeps the arrival servo (buffer depth). Mirror of
+ * AsrcBasis / audio_asrc_placement. */
+#define GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL 0
+#define GENLOCK_AUDIO_ASRC_BASIS_TIMECODE 1
+#define GENLOCK_AUDIO_ASRC_BASIS_STAMP 2
+static inline int genlock_audio_asrc_placement(int mode, bool direct_ts, bool monitor_only, bool can_resample)
 {
-	return mode == GENLOCK_AUDIO_HOLD_TIMECODE && !monitor_only && can_resample;
+	if (monitor_only || !can_resample)
+		return GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL;
+	if (mode == GENLOCK_AUDIO_HOLD_TIMECODE)
+		return GENLOCK_AUDIO_ASRC_BASIS_TIMECODE;
+	if (mode == GENLOCK_AUDIO_HOLD_OFF && direct_ts)
+		return GENLOCK_AUDIO_ASRC_BASIS_STAMP;
+	return GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL;
+}
+/* issue 1425: the ingest measures a packet's placement error under an active genlock hold (the pairing
+ * audit) or for a placement-judged ASRC basis (its servo input). Mirror of audio_place_measured. */
+static inline bool genlock_audio_place_measured(int mode, int basis)
+{
+	return genlock_audio_mode_active(mode) || basis != GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL;
+}
+/* issue 1425: the asrc: line token (basis=). Mirror of AsrcBasis::token. */
+static inline const char *genlock_audio_asrc_basis_token(int basis)
+{
+	if (basis == GENLOCK_AUDIO_ASRC_BASIS_TIMECODE)
+		return "timecode";
+	if (basis == GENLOCK_AUDIO_ASRC_BASIS_STAMP)
+		return "stamp";
+	return "arrival";
 }
 /* issue 1367: the ASRC's error input (ms): the placement error plus the placement slew still owed (a
  * hold slew is paid by its own 1000 ppm term, so until then the packet is early by exactly that). */
@@ -1989,6 +2018,59 @@ static inline uint64_t genlock_audio_stamp_mono_ns(uint64_t raw_ts_ns, int64_t o
 static inline double genlock_audio_stamp_interval_s(uint64_t prev_ns, uint64_t now_ns)
 {
 	return (double)(int64_t)(now_ns - prev_ns) / 1e9;
+}
+/* camera-box issue 1425 round 2 (design 6206822792): the rate point of one measured packet -- two
+ * appended packets in a row, master_s = the stamp advance, prev_raw_s = the previous packet's
+ * duration. TIMECODE basis (issue 1367, unchanged): a positive advance is a point now, a non-positive
+ * one a duplicated slot (no point). STAMP basis: a driver that stamps each packet "arrival minus its own
+ * duration" gives a run read at one arrival EQUAL stamps, and only the run's LAST stamp is right, so the
+ * point waits one packet (*pend_*): a positive advance emits the waiting point and waits with this
+ * interval; a packet with no advance carries its predecessor's samples into the waiting point and the
+ * next interval keeps its start stamp. Not contiguous: start afresh, drop a waiting point. Mirror of
+ * AsrcRatePoint / AsrcRatePending / audio_asrc_rate_point. */
+struct genlock_audio_rate_point {
+	bool due;
+	double raw_s;
+	double master_s;
+	bool keep_prev_stamp;
+};
+static inline struct genlock_audio_rate_point genlock_audio_asrc_rate_point(int basis, bool contiguous, double master_s,
+									     double prev_raw_s, double *pend_raw_s,
+									     double *pend_master_s, bool *pend_due)
+{
+	struct genlock_audio_rate_point point = {false, 0.0, 0.0, false};
+	if (basis != GENLOCK_AUDIO_ASRC_BASIS_STAMP) {
+		*pend_raw_s = 0.0;
+		*pend_master_s = 0.0;
+		*pend_due = false;
+		if (contiguous && master_s > 0.0) {
+			point.due = true;
+			point.raw_s = prev_raw_s;
+			point.master_s = master_s;
+		}
+		return point;
+	}
+	if (!contiguous) {
+		*pend_raw_s = 0.0;
+		*pend_master_s = 0.0;
+		*pend_due = false;
+		return point;
+	}
+	if (master_s > 0.0) {
+		if (*pend_due) {
+			point.due = true;
+			point.raw_s = *pend_raw_s;
+			point.master_s = *pend_master_s;
+		}
+		*pend_raw_s = prev_raw_s;
+		*pend_master_s = master_s;
+		*pend_due = true;
+		return point;
+	}
+	if (*pend_due)
+		*pend_raw_s += prev_raw_s;
+	point.keep_prev_stamp = true;
+	return point;
 }
 /* camera-box issue 1381 (design 5882391108, piece 2): the per-source SKEW HOLD across a wall step. A
  * fleet date step moves the receiver's wall at once; the sender (SongPlayer, same box) follows only
@@ -2383,18 +2465,27 @@ static inline int genlock_audio_decide_health(int audio_enabled, int is_program_
  * advance between two APPENDED packets as its master block and the previous packet's pre-resample
  * duration as its raw advance, so a sender's pacing, the network and the receive thread never read as a
  * rate. A placed packet or a non-positive advance (a duplicated slot) adds no point and never flushes.
- * The payment this call computes rides on the NEXT packet's resampler (asrc_process_audio takes it). */
+ * The payment this call computes rides on the NEXT packet's resampler (asrc_process_audio takes it).
+ * Issue 1425: a directly stamped non-genlock source (the STAMP basis) runs here too, against its OWN
+ * stamp. A driver that stamps at ARRIVAL (PulseAudio, WASAPI without device timing) carries its
+ * delivery timing in that stamp, so a delivery stall over the jump band reads as a placement jump. */
 static void asrc_timecode_ingest(obs_source_t *source, uint64_t stamp_mono_ns, double err_ms, bool appended)
 {
 	const bool contiguous = appended && source->asrc_tc_have_prev;
 	const double master_s =
 		contiguous ? genlock_audio_stamp_interval_s(source->asrc_tc_prev_stamp_ns, stamp_mono_ns) : 0.0;
+	/* issue 1425 round 2: on the STAMP basis a packet with no stamp advance carries its predecessor's
+	 * samples into the rate point still waiting (genlock_audio_asrc_rate_point). */
+	const struct genlock_audio_rate_point point = genlock_audio_asrc_rate_point(
+		source->genlock_asrc_basis, contiguous, master_s, source->asrc_tc_prev_raw_s, &source->asrc_tc_pend_raw_s,
+		&source->asrc_tc_pend_master_s, &source->asrc_tc_pend_due);
 	double applied_ppm = 0.0;
 	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
 	asrc_compensator_observe_placement(&source->asrc, err_ms, source->asrc_tc_raw_s * 1000.0, !appended);
-	if (master_s > 0.0)
-		asrc_compensator_compensate(&source->asrc, source->asrc_tc_prev_raw_s, master_s, err_ms, &applied_ppm);
-	source->asrc_tc_prev_stamp_ns = stamp_mono_ns;
+	if (point.due)
+		asrc_compensator_compensate(&source->asrc, point.raw_s, point.master_s, err_ms, &applied_ppm);
+	if (!point.keep_prev_stamp)
+		source->asrc_tc_prev_stamp_ns = stamp_mono_ns;
 	source->asrc_tc_prev_raw_s = source->asrc_tc_raw_s;
 	source->asrc_tc_have_prev = true;
 }
@@ -2612,6 +2703,12 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 		source->timing_set = true;
 		using_direct_ts = true;
 	}
+	/* camera-box issue 1425 round 2 (design 6206822792): whether THIS packet's stamps are direct, decided
+	 * on audio-thread state only: the direct verdict above, cleared below only where this audio path
+	 * itself makes timing_adjust non-zero (the decoupled smoothing branch, the second reset). Never read
+	 * source->timing_adjust for it: the render thread writes that for every async video frame, and a
+	 * write between two reads flipped the ASRC basis (and flushed its regression) for one packet. */
+	bool genlock_direct_ts = using_direct_ts;
 
 	if (!source->timing_set) {
 		reset_audio_timing(source, in.timestamp, os_time);
@@ -2624,8 +2721,10 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 			handle_ts_jump(source, source->next_audio_ts_min, in.timestamp, diff, os_time);
 			genlock_timeline_reset = true;
 		} else if (diff < TS_SMOOTHING_THRESHOLD) {
-			if (source->async_unbuffered && source->async_decoupled)
+			if (source->async_unbuffered && source->async_decoupled) {
 				source->timing_adjust = os_time - in.timestamp;
+				genlock_direct_ts = false;
+			}
 			in.timestamp = source->next_audio_ts_min;
 		} else {
 			blog(LOG_DEBUG,
@@ -2674,6 +2773,7 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 			 * just clear the audio data in that small window and force a
 			 * resync.  This handles all cases rather than just looping. */
 			reset_audio_timing(source, data->timestamp, os_time);
+			genlock_direct_ts = false;
 			in.timestamp = data->timestamp + source->timing_adjust;
 			genlock_timeline_reset = true;
 		}
@@ -2720,15 +2820,23 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	const uint64_t genlock_intended_ns = genlock_audio_intended_raw_ns(
 		data->timestamp, genlock_timing_adjust, sync_offset, source->resample_offset, genlock_term_ns);
 	/* camera-box issue 1367: a source whose audio is placed at its timecode is judged by the ASRC on that
-	 * placement, not on arrival (asrc_timecode_ingest below); every other source -- mbc, ASIO/WASAPI, a
-	 * latency hold -- keeps the arrival servo byte-identical. Decided before any setpoint shift below,
-	 * which the timecode mode ignores (the placement error already carries a deliberate move). */
-	const bool genlock_asrc_tc =
-		genlock_audio_asrc_timecode(genlock_hold_mode, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY,
-					    source->asrc_enabled && source->resampler);
+	 * placement, not on arrival (asrc_timecode_ingest below). Issue 1425 (E2 slice 1, design
+	 * 6205974120): so is every directly stamped (genlock_direct_ts), non-genlock source -- mbc, a
+	 * PulseAudio input, a media clip -- on its landing against its OWN stamp, setpoint 0; only a
+	 * MONITOR_ONLY source, one without a resampler, a latency hold and a source on OBS's timing_adjust
+	 * keep the arrival servo. The compensator's timecode flag means "placement-judged". Decided before
+	 * any setpoint shift below, which that mode ignores (the placement error already carries a
+	 * deliberate move). */
+	const int genlock_asrc_basis = genlock_audio_asrc_placement(
+		genlock_hold_mode, genlock_direct_ts, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY,
+		source->asrc_enabled && source->resampler);
+	const bool genlock_asrc_tc = genlock_asrc_basis != GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL;
+	source->genlock_asrc_basis = genlock_asrc_basis;
 	if (source->asrc.timecode != genlock_asrc_tc)
 		source->asrc_tc_have_prev = false;
-	asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);
+	/* issue 1425 round 2: the compensator is keyed on the basis itself (the stamp basis books a placement
+	 * jump only once confirmed); its placement-judged flag is derived from it. */
+	asrc_compensator_set_basis(&source->asrc, genlock_asrc_basis);
 	bool genlock_asrc_measured = false;
 	bool genlock_asrc_appended = false;
 	double genlock_asrc_err_ms = 0.0;
@@ -2833,15 +2941,19 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 		 * size are the mixer's consistent pair. Design 5845361166: measured against the RAW-stamp
 		 * intended landing (genlock_intended_ns), BEFORE the 70 ms smoothing -- against the snapped
 		 * in.timestamp a skipped or duplicated slot read 0. The same error, the owed placement slew
-		 * excluded, is the timecode ASRC's input. */
-		if (genlock_audio_mode_active(genlock_hold_mode)) {
+		 * excluded, is the timecode ASRC's input. Issue 1425: a stamp-judged source is measured too (its
+		 * servo input), but only a genlock hold writes the pairing audit facet. */
+		if (genlock_audio_place_measured(genlock_hold_mode, genlock_asrc_basis)) {
 			const uint64_t genlock_actual_ns = genlock_audio_actual_place_ns(
 				push_back && source->audio_ts, source->audio_ts,
 				conv_frames_to_time(sample_rate, source->audio_input_buf[0].size / sizeof(float)), in.timestamp);
 			const int64_t genlock_place_err_ns = genlock_audio_place_error_ns(genlock_actual_ns, genlock_intended_ns);
-			source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns(
-				source->genlock_audio_place_err_ns, genlock_place_err_ns, source->genlock_audio_place_err_seeded);
-			source->genlock_audio_place_err_seeded = true;
+			if (genlock_audio_mode_active(genlock_hold_mode)) {
+				source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns(
+					source->genlock_audio_place_err_ns, genlock_place_err_ns,
+					source->genlock_audio_place_err_seeded);
+				source->genlock_audio_place_err_seeded = true;
+			}
 			genlock_asrc_err_ms =
 				genlock_audio_asrc_error_ms(genlock_place_err_ns, source->genlock_audio_slew_remaining_ns);
 			genlock_asrc_appended = push_back && source->audio_ts;
@@ -5444,7 +5556,8 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	/* camera-box issue 1367 (design 5845361166): a source whose audio is placed at its NDI timecode is
 	 * judged per packet by where it lands against its stamp (asrc_timecode_ingest, in
 	 * source_output_audio_data); its arrival timing and buffer depth never drive it. Here it only reads
-	 * the servo. Every other source runs the arrival servo exactly as before. */
+	 * the servo. Issue 1425: so does a directly stamped non-genlock source (the STAMP basis, against its
+	 * own stamp). Every other source runs the arrival servo exactly as before. */
 	if (source->asrc.timecode)
 		applied_ppm = source->asrc.applied_ppm;
 	else
@@ -5546,7 +5659,9 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		/* camera-box issue 1367 (design 5845361166): timecode= place_jumps= last_jump_ms= appended AFTER
 		 * the byte-identical 'recover_ms=%.1f (issue 1372)' suffix (parsers extract by name). With
 		 * timecode=1 the level= / level_avg= fields are the packet PLACEMENT error in ms (actual - raw-stamp
-		 * intended) and target= is 0 minus what is still owed; estimated= follows the stamps. */
+		 * intended) and target= is 0 minus what is still owed; estimated= follows the stamps. Issue 1425:
+		 * basis= appended after the byte-identical '(issue 1367)' suffix: arrival|timecode|stamp, what the
+		 * servo judges this source by (timecode=1 for both placement bases). */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
@@ -5554,14 +5669,16 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355) "
 		     "level_avg=%.2fms (#1367)"
 		     " recover_ms=%.1f (issue 1372)"
-		     " timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)",
+		     " timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)"
+		     " basis=%s (issue 1425)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
 		     (int)source->asrc.level_restore, source->asrc.level_fallback_count,
 		     source->asrc.level_avg_ms, source->asrc.step_recover_ms, (int)source->asrc.timecode,
-		     source->asrc.place_jump_count, source->asrc.last_place_jump_ms);
+		     source->asrc.place_jump_count, source->asrc.last_place_jump_ms,
+		     genlock_audio_asrc_basis_token(source->genlock_asrc_basis));
 	}
 }
 

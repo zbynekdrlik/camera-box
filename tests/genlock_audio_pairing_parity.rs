@@ -33,8 +33,7 @@ use camera_box::genlock_audio_pairing::{
     AudioHoldMode, AudioPairingFacets, VideoDelayTracker, VIDEO_DELAY_LOCK_PENDING,
 };
 use camera_box::genlock_audio_pairing::{
-    audio_asrc_error_ms, audio_asrc_timecode, audio_intended_raw_ns, audio_stamp_interval_s,
-    audio_stamp_mono_ns,
+    audio_asrc_error_ms, audio_intended_raw_ns, audio_stamp_interval_s, audio_stamp_mono_ns,
 };
 // The lift / compile / run helpers are shared with the issue-1381 skew-hold gate
 // (tests/genlock_audio_step_hold_parity_1381.rs); a directory module, so cargo does not build it as a
@@ -837,7 +836,7 @@ fn c_audio_placement_measurement_matches_the_rust_authority_1367() {
 }
 
 /// Issue 1367 (design 5845361166) — the timecode ASRC's inputs: the RAW-stamp intended landing
-/// (`genlock_audio_intended_raw_ns`), the mode predicate (`genlock_audio_asrc_timecode`), the error
+/// (`genlock_audio_intended_raw_ns`), the error
 /// with the owed slew excluded (`genlock_audio_asrc_error_ms`), the stamp on the monotonic clock
 /// (`genlock_audio_stamp_mono_ns`) and its signed advance (`genlock_audio_stamp_interval_s`) must match
 /// the Rust authority on every mode, both signs and the wrap extremes.
@@ -879,7 +878,6 @@ fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
         (u64::MAX, 32),
         (0, u64::MAX),
     ];
-    let b = |v: bool| i32::from(v);
     let mut body = String::new();
     for (ts, ta, so, ro, term) in &intended {
         body.push_str(&format!(
@@ -887,15 +885,6 @@ fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
             i64_lit(*so),
             i64_lit(*term)
         ));
-    }
-    for m in 0..4_u8 {
-        for (mo, rs) in [(false, false), (false, true), (true, false), (true, true)] {
-            body.push_str(&format!(
-                "    printf(\"%d\\n\", genlock_audio_asrc_timecode({m}, {}, {}) ? 1 : 0);\n",
-                b(mo),
-                b(rs)
-            ));
-        }
     }
     for (e, r) in &err {
         body.push_str(&format!(
@@ -920,11 +909,6 @@ fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
     for (ts, ta, so, ro, term) in &intended {
         want.push(audio_intended_raw_ns(*ts, *ta, *so, *ro, *term).to_string());
     }
-    for m in 0..4_u8 {
-        for (mo, rs) in [(false, false), (false, true), (true, false), (true, true)] {
-            want.push(b(audio_asrc_timecode(mode_of(m), mo, rs)).to_string());
-        }
-    }
     for (e, r) in &err {
         want.push(format!("{:.9}", audio_asrc_error_ms(*e, *r)));
     }
@@ -941,6 +925,4 @@ fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
     // a skipped slot snapped contiguous: the raw stamp is one packet later than the snapped one, so the
     // placement read against the raw stamp is one packet EARLY; the owed slew is not the servo's error
     assert!(audio_asrc_error_ms(-33_333_333, 33_333_333).abs() < 1e-12);
-    assert!(audio_asrc_timecode(AudioHoldMode::Timecode, false, true));
-    assert!(!audio_asrc_timecode(AudioHoldMode::Latency, false, true));
 }

@@ -16,6 +16,14 @@ paths:
 
 # The genlock audio-buffering FLOOR (issue 1367, ROZHODNUTÉ 5857354949)
 
+> **Issue 1425 (E2, design 6205974120): the floor now stays only until slices 2 and 3.** Since slice 1
+> a directly stamped mixed source (`mbc`, a PulseAudio input, a media clip) is judged by its own
+> stamp, setpoint 0 (`genlock-audio-pairing.md`, the issue-1425 section), so the absolute 100 ms
+> target the floor was sized for no longer holds such a source. The floor stays for now because a
+> buffering increase while an encoder runs still steps that output's audio later for good: slice 2
+> freezes the ratchet once the mix settles, and slice 3 then sets the floor to 0 and deletes the
+> absolute target. Do not remove the floor before slice 2 has shipped.
+
 ## Why
 
 Stock libobs starts the mix window with 0 audio buffering. It grows the buffering only when a

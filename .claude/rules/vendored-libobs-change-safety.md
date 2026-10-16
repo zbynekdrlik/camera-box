@@ -656,6 +656,11 @@ and drives it tick by tick. Lessons from its two review rounds:
   `$src -notmatch [regex]::Escape('<needle>')` with `'` doubled, `-match` for an absent shape, and
   join with `-or`. The Rust test asserts that each yml contains exactly those strings, so the three
   copies cannot drift.
+  - **The fast yml writes many gates on ONE line** (`if (...) { Write-Error "..."; exit 1 }`), the
+    full yml over three. A generator that replaces the whole `if` line with `if (<cond>) {` drops the
+    fast gate's body and its closing brace, and the Rust needle check still passes (issue 1425
+    round 2). Keep the tail from `) { Write-Error` on, then RUN both ymls' gate lines with the
+    portable pwsh against the new tree (must pass) and the old one (must fail).
 - **Keep C comments out of needles.** A needle that spans a comment breaks on a reword. Put the
   explanation above the `if`, not inside the block.
 - **Run the generated lines for real.** Extract each `if ($src -notmatch ...)` line (or its
