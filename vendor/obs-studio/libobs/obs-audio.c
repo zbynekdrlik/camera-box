@@ -400,12 +400,13 @@ static bool genlock_launch_encoder_unsettled = false;
 static bool genlock_launch_growth_logged = false;
 
 /* This tick's freeze (obs-genlock-audio-buffering.h): an audio encoder runs AND the launch's startup race
- * is over. `mix_ts` = the processed window's start. */
-static inline bool genlock_buffering_frozen_now(uint64_t mix_ts, bool encoder_active)
+ * is over. `tick_start_ns` = audio_callback's input tick start (start_ts_in), which only advances -- never
+ * the processed window's start, which a growth moves back in front of the first tick. */
+static inline bool genlock_buffering_frozen_now(uint64_t tick_start_ns, bool encoder_active)
 {
 	if (!genlock_launch_first_tick_ns)
-		genlock_launch_first_tick_ns = mix_ts;
-	const bool settled = genlock_audio_buffering_launch_settled(genlock_launch_first_tick_ns, mix_ts);
+		genlock_launch_first_tick_ns = tick_start_ns;
+	const bool settled = genlock_audio_buffering_launch_settled(genlock_launch_first_tick_ns, tick_start_ns);
 	genlock_launch_encoder_unsettled = encoder_active && !settled;
 	return genlock_audio_buffering_frozen(encoder_active, settled);
 }
@@ -931,7 +932,7 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	 * member that then falls behind the window is re-anchored (MIXED_LATE) and the dynamic increase is
 	 * off; with no encoder, or inside the window, stock growth. */
 	audio->genlock_buffering_frozen =
-		genlock_buffering_frozen_now(ts.start, obs_output_genlock_audio_encoder_outputs() > 0);
+		genlock_buffering_frozen_now(start_ts_in, obs_output_genlock_audio_encoder_outputs() > 0);
 
 	pthread_mutex_lock(&data->audio_sources_mutex);
 

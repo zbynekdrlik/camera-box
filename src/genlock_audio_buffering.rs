@@ -181,15 +181,15 @@ pub fn action(
 /// startup race draws it). Mirror of `GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS`.
 pub const LAUNCH_SETTLE_NS: u64 = 30_000_000_000;
 
-/// Whether the launch's startup race is over: at least [`LAUNCH_SETTLE_NS`] of mix time since the
-/// mix's first audio tick (`first_tick_ns`, 0 = no tick yet). A mix time before the first tick
-/// reads settled, so the freeze never lifts mid-run. Mirror of
-/// `genlock_audio_buffering_launch_settled`.
+/// Whether the launch's startup race is over: at least [`LAUNCH_SETTLE_NS`] since the mix's first
+/// audio tick (`first_tick_ns`, 0 = no tick yet). Both are `audio_callback`'s INPUT tick start, which
+/// only advances. An instant before the first tick reads NOT settled: the window keeps the mix
+/// unfrozen, never mutes a member. Mirror of `genlock_audio_buffering_launch_settled`.
 pub fn launch_settled(first_tick_ns: u64, now_ns: u64) -> bool {
     if first_tick_ns == 0 {
         return false;
     }
-    now_ns < first_tick_ns || now_ns - first_tick_ns >= LAUNCH_SETTLE_NS
+    now_ns >= first_tick_ns && now_ns - first_tick_ns >= LAUNCH_SETTLE_NS
 }
 
 /// Issue 1425 (ROZHODNUTÉ 6217557472 + 6221252305): whether the mix's buffering is frozen on this
@@ -366,8 +366,9 @@ mod tests {
         assert!(!launch_settled(first, first + LAUNCH_SETTLE_NS - 1));
         assert!(launch_settled(first, first + LAUNCH_SETTLE_NS));
         assert!(launch_settled(first, first + 3_600_000_000_000));
-        // A mix time before the first tick reads settled: the freeze never lifts mid-run.
-        assert!(launch_settled(first, first - 1));
+        // An instant before the first tick reads NOT settled (the input tick only advances, so it
+        // never happens live; if it did, the window keeps the mix unfrozen rather than mute).
+        assert!(!launch_settled(first, first - 1));
         // Never overflows at the top of the clock.
         assert!(!launch_settled(u64::MAX - 1, u64::MAX));
     }

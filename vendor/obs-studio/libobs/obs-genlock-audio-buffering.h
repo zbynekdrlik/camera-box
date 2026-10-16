@@ -124,14 +124,15 @@ static inline int genlock_audio_buffering_action(int total_ticks, int floor_tick
 }
 
 /* issue 1425 slice 3 (ROZHODNUTE 6221252305): whether the launch's startup race is over -- at least
- * GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS of mix time since the mix's first audio tick (first_tick_ns,
- * 0 = no tick yet). A mix time before the first tick (never on the monotonic audio timeline) reads
- * settled, so the freeze never lifts mid-run. Mirror of launch_settled. */
+ * GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS since the mix's first audio tick (first_tick_ns, 0 = no tick
+ * yet). Both are audio_callback's INPUT tick start, which only advances (the processed window does not:
+ * a growth pushes earlier windows in front of it). An instant before the first tick reads NOT settled:
+ * the window keeps the mix unfrozen, never mutes a member. Mirror of launch_settled. */
 static inline bool genlock_audio_buffering_launch_settled(uint64_t first_tick_ns, uint64_t now_ns)
 {
 	if (first_tick_ns == 0)
 		return false;
-	return now_ns < first_tick_ns || now_ns - first_tick_ns >= GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS;
+	return now_ns >= first_tick_ns && now_ns - first_tick_ns >= GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS;
 }
 
 /* issue 1425 (ROZHODNUTE 6217557472 + 6221252305): whether the mix's buffering is frozen on this tick --

@@ -51,8 +51,10 @@ paths:
   output, never "A/V MIMO" (a stamped source's A/V does not depend on it).
 - **The launch settle window (ROZHODNUTÉ 6221252305).** The freeze arms only when an audio encoder runs
   AND 30 s of mix time passed since the mix's first audio tick (`GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS`
-  ↔ `LAUNCH_SETTLE_NS`, `genlock_audio_buffering_launch_settled`; the first tick is a never-reset
-  file static in obs-audio.c like the 1381 mixer tick, so an audio reset opens no new window). An
+  ↔ `LAUNCH_SETTLE_NS`, `genlock_audio_buffering_launch_settled`, read on `audio_callback`'s INPUT
+  tick start `start_ts_in`, which only advances: the processed window `ts.start` moves back in front of
+  the first tick when the race grows the mix; the first tick is a never-reset file static in
+  obs-audio.c like the 1381 mixer tick, so an audio reset opens no new window). An
   output started inside it (`--startstreaming`, Companion, an operator right after a launch) gets the
   launch's growth instead of a muted member, logged once: `genlock audio buffering: grew N ms while an
   encoder ran inside the launch settle window` (LOG_WARNING). Pinned by the 1381 lift's
@@ -60,7 +62,11 @@ paths:
   MIXED_LATE); the E1 replays start their stream at tick 1500, after the window. stream-snv's obs64
   tasks are one-shot TimeTriggers months past (main's live read), so none fires today. A direct-stamp
   member that joins later while an encoder runs and is later than the launch drew stays the slice-2b
-  limit (now without the 85 ms margin).
+  limit (now without the 85 ms margin). Two more known limits: after an `obs_reset_audio` of a running
+  OBS (audio settings changed while no output runs) the buffering restarts at 0 with no window, so an
+  output started seconds later can mute a late member again; and the window counts from the audio
+  thread's first tick, which the frontend starts BEFORE it loads the scene collection, so a box whose
+  collection load plus the sources' first packets take over 30 s gets its race after the window.
 - **Other boxes.** strih-snv, stream-snv and the resolume cg OBS all start at 0: the mix runs only
   as far behind real time as their own sources need, so wall-clock-stamped outputs (the DistroAV NDI
   output audio, obs-vban) are 85 ms earlier than with the floor.
@@ -94,7 +100,7 @@ paths:
 After each of at least two OBS restarts per box: the reset block reads `dynamically increasing from
 0 ms`, a launch's `ABOVE the floor` lines total under the 100 ms bound (stock drew 0, 64 or 85 ms
 on stream), the #786 launcher reads it clean, a stream started by `--startstreaming` (or a recording
-started within the launch's first seconds) still carries `mbc` and the mic, and on stream `#800 buffered_ms` and the per-camera A/V are identical within ±5 ms
+started within the launch's first seconds) still carries `mbc` and the mic (and the reset block to the first `ABOVE the floor` line on stream-snv is well under 30 s), and on stream `#800 buffered_ms` and the per-camera A/V are identical within ±5 ms
 across two restarts whose draws differ. The `asrc:` lines carry no `fallbacks=` field; an arrival
 source's `target=` is its depth at lock.
 
