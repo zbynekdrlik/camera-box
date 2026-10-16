@@ -393,10 +393,13 @@ strih_lx_venue_strih_box() {
 # it is dialled), else the venue's one strih fact file (strih_lx_venue_strih_box) at its fleet host. Its
 # stream is the ONE venue table's stream host (avsync_venue_host: a stream-role fact file, else the
 # declared Windows stream-snv). strih-snv -> "<its dial IP> 10.77.9.204" exactly as before; stream-pp ->
-# "strih-pp.lan stream-pp.lan". rc 2 + one stderr line naming the venue and the missing piece. Pure.
+# "strih-pp.lan stream-pp.lan". rc 2 + one stderr line naming the venue and the missing piece. The venue
+# table is read with its watchdog seams (AVSYNC_VENUE_TABLE, STRIH_BOXES_DIR) unset, so a test override
+# exported in the operator's shell can never retarget the guard before the OBS stop. Pure.
 strih_lx_guard_hosts() {
   local box="$1" dial="$2" venue s t sbox
-  venue="$(strih_lx_fact "$box" STRIH_VENUE)"
+  venue="$(strih_lx_fact "$box" STRIH_VENUE)" \
+    || { echo "strih_lx_guard_hosts: the ${box}.env fact file does not parse (above)" >&2; return 2; }
   [ -n "$venue" ] || { echo "strih_lx_guard_hosts: ${box} has no STRIH_VENUE fact" >&2; return 2; }
   if [ "$(strih_lx_fact "$box" STRIH_ROLE)" = strih ]; then
     s="$dial"
@@ -404,7 +407,7 @@ strih_lx_guard_hosts() {
     sbox="$(strih_lx_venue_strih_box "$venue")" && s="$(fleet_box_ip "$sbox")" \
       || { echo "strih_lx_guard_hosts: venue ${venue} has no single strih fact file with an obs-fleet row" >&2; return 2; }
   fi
-  t="$(avsync_venue_host "$venue")" && [ -n "$t" ] \
+  t="$(unset AVSYNC_VENUE_TABLE STRIH_BOXES_DIR; avsync_venue_host "$venue")" && [ -n "$t" ] \
     || { echo "strih_lx_guard_hosts: venue ${venue} has no stream box in the venue table (a stream-role fact file or a declared stream row)" >&2; return 2; }
   [ -n "$s" ] || return 2
   printf '%s %s\n' "$s" "$t"
@@ -414,7 +417,8 @@ strih_lx_guard_hosts() {
 # holds what the box deploy needs: setup-strih.sh, verify-strih.sh, obs-backup-retention.sh,
 # systemd/strih-obs.service, the box fact file scripts/strih-boxes/BOX.env (issue 1361) and the
 # intercom routing file its STRIH_INTERCOM_CONFIG names (setup-strih.sh step 13 installs it). The fact
-# file is read with sed, never sourced on dev1. rc 1 + a named reason on stderr otherwise. Pure.
+# file is read through strih_box_parse_file, never sourced on dev1; one that does not parse is named as
+# such. rc 1 + a named reason on stderr otherwise. Pure.
 strih_lx_tree_check() {
   local tree="$1" box="$2" env ic hn f
   env="$tree/scripts/strih-boxes/$box.env"
@@ -422,6 +426,7 @@ strih_lx_tree_check() {
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f" >&2; return 1; }
   done
   [ -f "$env" ] || { echo "strih_lx_tree_check: no scripts/strih-boxes/$box.env (the box fact file)" >&2; return 1; }
+  strih_box_parse_file "$env" >/dev/null || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env does not parse (above)" >&2; return 1; }
   ic="$(strih_lx_fact "$box" STRIH_INTERCOM_CONFIG "$tree/scripts/strih-boxes")" || ic=""
   [ -n "$ic" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_INTERCOM_CONFIG" >&2; return 1; }
   [ -f "$tree/$ic" ] || { echo "strih_lx_tree_check: no $ic (STRIH_INTERCOM_CONFIG) -- the intercom/ dir must be staged" >&2; return 1; }
