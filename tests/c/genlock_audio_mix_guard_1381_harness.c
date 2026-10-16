@@ -643,8 +643,9 @@ int main(void)
 	/* issue 1425 (E2 slice 2, design 6216736061): the E1 replays. Each event grew the stream-snv mix for
 	 * good in stock libobs (and stepped every running encoder's audio later, F1). With the freeze the
 	 * mix stays at the floor while the stream's audio encoder runs: the late member is re-anchored
-	 * (MIXED_LATE), one counted dropout of its late span, and the mic is heard on every tick. The replays reproduce the LOGGED growth: a member
-	 * that keeps its stamp delivers a backlog stamped at capture, its oldest packet behind the window. */
+	 * (MIXED_LATE), one counted dropout of its late span, and the mic is heard on every tick. The
+	 * replays reproduce the LOGGED growth: a member that keeps its stamp delivers a backlog stamped at
+	 * capture, its oldest packet behind the window. */
 
 	/* (f) 15.10 04:00: `adding 128 ms ... now 213 ms (source: mbc)`, an ASIO outage on mbc while the
 	 * stream runs (an audio encoder is active). */
@@ -702,8 +703,9 @@ int main(void)
 
 	/* (i) only a running encoder freezes the mix, read on every tick: no encoder, the member goes 150 ms
 	 * late (the mix grows); a stream starts, the member goes 300 ms late for good (frozen: re-anchored
-	 * on every tick, a line a minute, never a growth); the stream stops 38 s later (past any quiet time)
-	 * and the still-late member grows the mix again and plays. */
+	 * on every tick, a line a minute, never a growth); the stream stops 38 s after launch, 32 s after the
+	 * last growth (past the retired 30 s settle, which kept it frozen), and the still-late member grows
+	 * the mix again and plays. */
 	h_begin("encoder-on-off", "Media", true, 0, true);
 	for (int i = 0; i < 1800 + 300; i++) {
 		if (i == 300)

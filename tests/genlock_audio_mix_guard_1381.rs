@@ -287,7 +287,7 @@ fn lift_callback_blocks() -> [String; 5] {
             "\t/* get minimum audio timestamp */\n",
             "\t/* camera-box #800: audio-side telemetry",
         ),
-        // the 1367 tick decision and (issue 1425) the settle restart of a growth, up to the mix
+        // the 1367 tick decision, up to the mix
         slice_between(
             &s,
             "\tconst int genlock_buffering = genlock_audio_buffering_action(",
@@ -695,7 +695,7 @@ fn freeze<'a>(trace: &'a [String], scenario: &str) -> &'a str {
 fn the_e1_events_no_longer_grow_a_frozen_mix_1425() {
     let trace = c_trace();
     // Stock libobs grew the stream-snv mix +128 / +192 / +85 ms for good on these three events. Frozen
-    // (a stream runs, or the mix settled 30 s ago), the mix stays at the floor, no tick is a hole
+    // (the stream's audio encoder runs), the mix stays at the floor, no tick is a hole
     // (waits = the launch floor's 4), the mic is heard on every tick, and the late member is
     // re-anchored ONCE: one counted dropout of its late span, then it is mixed again.
     for (scenario, src, late_ms) in [
@@ -761,8 +761,9 @@ fn only_a_running_audio_encoder_freezes_the_mix_1425() {
     );
     // The encoder is read on every tick: no encoder, a late member grows the mix (170 ms); a stream
     // starts and the member goes 300 ms late for good: re-anchored on every tick (700 events, one
-    // line), never a growth; the stream stops 38 s later and the still-late member grows the mix
-    // again (320 ms) and plays.
+    // line), never a growth; the stream stops 38 s after launch, 32 s after the last growth (past the
+    // retired 30 s settle, which kept it frozen), and the still-late member grows the mix again
+    // (320 ms) and plays.
     let s = summary(trace, "encoder-on-off");
     assert!(
         s.contains(" waits=15 total_ms=320 mic_missed=0 ")
