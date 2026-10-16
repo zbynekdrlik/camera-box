@@ -60,7 +60,7 @@ const SLICE3_PRESENT: [(&str, &str); 6] = [
         OBS_AUDIO,
         "\"genlock audio buffering ABOVE the floor (issue 1367): adding %d milliseconds of audio buffering, total \" \"audio buffering is now %d milliseconds (source: %s)\",",
     ),
-    (GUARDED_LAUNCH, "(norma 0-43 ms)"),
+    (GUARDED_LAUNCH, "(norma pod 100 ms)"),
 ];
 
 /// `(file, needle)`, each must be GONE.
@@ -120,7 +120,8 @@ fn the_floor_is_zero_and_the_absolute_target_is_gone_1425() {
 #[test]
 fn the_launch_gates_keep_their_bound_and_drop_the_85_ms_norm_1425() {
     // The 100 ms bound stays: a draw above it still redraws. Only the norm text moved: a clean
-    // launch logs 0-43 ms (one or two ticks for a late PulseAudio / ASIO start) or no growth line.
+    // launch draws only what its ASIO / PulseAudio startup race adds (stock OBS drew 0, 64 or 85 ms
+    // per launch) or no growth line.
     let py = read(RIG_HEALTH);
     assert!(
         py.contains("AUDIO_BUF_BOUND_MS = 100") && !py.contains("85 ms floor"),
@@ -128,12 +129,12 @@ fn the_launch_gates_keep_their_bound_and_drop_the_85_ms_norm_1425() {
     );
     let sh = read(LAUNCH_GENLOCK);
     assert!(
-        sh.contains("0-43 ms"),
-        "issue 1425 slice 3: {LAUNCH_GENLOCK} (3b) names the new clean draw (0-43 ms)"
+        sh.contains("stock OBS drew") && sh.contains("0, 64 or 85 ms per launch"),
+        "issue 1425 slice 3: {LAUNCH_GENLOCK} (3b) names the stock clean draws (0, 64 or 85 ms)"
     );
     let ps = read(GUARDED_LAUNCH);
     assert!(
-        ps.contains("$threshold  = 100") && ps.matches("(norma 0-43 ms)").count() == 1,
-        "issue 1425 slice 3: {GUARDED_LAUNCH} keeps the 100 ms bound and names the 0-43 ms norm"
+        ps.contains("$threshold  = 100") && ps.matches("norma pod 100 ms)").count() == 2,
+        "issue 1425 slice 3: {GUARDED_LAUNCH} keeps the 100 ms bound and both popups name it as the norm"
     );
 }

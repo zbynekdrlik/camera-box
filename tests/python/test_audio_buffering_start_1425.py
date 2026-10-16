@@ -8,7 +8,7 @@ all (the arm read UNKNOWN for good) and a whole-file read fell back to its first
 which on a launch that drew no buffering is the raise itself. Since slice 3 the audio reset block's
 `buffering type:  dynamically increasing from N ms (genlock floor, issue 1425)` line marks a new
 audio session, and the start is the first `#800` total logged at least
-AUDIO_BUFFERING_SETTLE_S after it: by then the launch's own startup race (0-43 ms) is done.
+AUDIO_BUFFERING_SETTLE_S after it: by then the launch's own startup race is done.
 
 The lines are rendered from the shipped C format strings (obs.c, obs-audio.c), never hand-typed.
 Tier-0 pytest (no cargo).

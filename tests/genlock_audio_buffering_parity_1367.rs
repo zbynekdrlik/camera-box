@@ -353,10 +353,10 @@ fn launch_gate_bound(rel: &str, prefix: &str) -> u32 {
 #[test]
 fn the_floor_reads_clean_on_every_786_launch_gate_1367() {
     // The three #786 launch gates parse "total audio buffering is now N milliseconds" and call a
-    // launch BAD above their bound. The floor itself, and the one or two ticks a late ASIO /
-    // PulseAudio start adds on top of it (issue 1425: a clean launch logs 0-43 ms), must read as a
-    // clean draw on every one of them at both production rates, or every launch would be redrawn
-    // (the guarded launcher kills OBS up to three times).
+    // launch BAD above their bound. The floor itself, and the up to four ticks a late ASIO /
+    // PulseAudio start adds on top of it (issue 1425: stock OBS drew 0, 64 or 85 ms per launch),
+    // must read as a clean draw on every one of them at both production rates, or every launch
+    // would be redrawn (the guarded launcher kills OBS up to three times).
     let bounds = [
         launch_gate_bound("scripts/rig-health-audit.py", "AUDIO_BUF_BOUND_MS = "),
         launch_gate_bound("scripts/obs-guarded-launch.ps1", "$threshold  = "),
@@ -365,7 +365,7 @@ fn the_floor_reads_clean_on_every_786_launch_gate_1367() {
     ];
     for rate in [44_100, 48_000] {
         let floor = plan(0, false, rate, AUDIO_OUTPUT_FRAMES).floor_ticks;
-        for ticks in [floor, floor + 1, floor + 2] {
+        for ticks in [floor, floor + 1, floor + 2, floor + 3, floor + 4] {
             // obs-audio.c logs the total as ticks * frames * 1000 / rate, truncated.
             let logged =
                 (u64::from(ticks) * u64::from(AUDIO_OUTPUT_FRAMES) * 1000 / u64::from(rate)) as u32;

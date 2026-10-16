@@ -17,7 +17,7 @@
 //! Issue 1425 removed that reason. Since E2 slice 1 a directly stamped mixed source is judged by its
 //! own stamp (setpoint 0), so its A/V no longer depends on the buffering. Since slice 2 the buffering
 //! cannot grow while an audio encoder runs. Slice 3 deleted the absolute target and set the floor to
-//! 0: a launch starts at 0 like stock OBS, its own startup race draws 0–43 ms, and nothing moves it
+//! 0: a launch starts at 0 like stock OBS, its own startup race draws 0–85 ms, and nothing moves it
 //! once an encoder runs.
 //!
 //! ## What it decides (ROZHODNUTÉ 5857354949: a FLOOR, never a hard cap)
@@ -119,7 +119,21 @@ pub fn ticks_ns(ticks: u32, frames: u32, rate: u32) -> u64 {
 /// The buffering plan for a reset request: the floor, the dynamic maximum, and whether the
 /// request was overridden. `req_max_ms == 0` means "OBS default" ([`DEFAULT_MAX_TICKS`]).
 pub fn plan(req_max_ms: u32, req_fixed: bool, rate: u32, frames: u32) -> BufferingPlan {
-    let floor_ticks = ticks_for_ms(FLOOR_MS, rate, frames);
+    plan_with_floor(FLOOR_MS, req_max_ms, req_fixed, rate, frames)
+}
+
+/// [`plan`] for a given floor. The shipped floor is 0 (issue 1425 slice 3), where the override of
+/// a request below the floor and the lift of the maximum to the floor never act; this keeps both
+/// rules of `genlock_audio_buffering_make_plan` testable (the C lift drives them with a 4-tick
+/// floor set by hand).
+pub fn plan_with_floor(
+    floor_ms: u32,
+    req_max_ms: u32,
+    req_fixed: bool,
+    rate: u32,
+    frames: u32,
+) -> BufferingPlan {
+    let floor_ticks = ticks_for_ms(floor_ms, rate, frames);
     let req_ticks = if req_max_ms != 0 {
         ticks_for_ms(req_max_ms, rate, frames)
     } else {
@@ -237,12 +251,29 @@ mod tests {
 
     #[test]
     fn the_maximum_never_sits_below_the_floor() {
-        // No rate: no floor, OBS default maximum.
-        let p = plan(0, false, 0, AUDIO_OUTPUT_FRAMES);
-        assert_eq!((p.floor_ticks, p.max_ticks), (0, DEFAULT_MAX_TICKS));
-        // A rate so high that even the default maximum is exceeded by nothing: still the default.
-        let p = plan(0, false, 768_000, AUDIO_OUTPUT_FRAMES);
-        assert_eq!((p.floor_ticks, p.max_ticks), (0, DEFAULT_MAX_TICKS));
+        // The shipped floor 0: no rate or any rate keeps the OBS default maximum.
+        for rate in [0, 48_000, 768_000] {
+            let p = plan(0, false, rate, AUDIO_OUTPUT_FRAMES);
+            assert_eq!((p.floor_ticks, p.max_ticks), (0, DEFAULT_MAX_TICKS));
+        }
+        // A non-zero floor (the issue-1367 85 ms): a request below it is overridden to the
+        // default maximum, and at a rate where the floor is more ticks than the default maximum the
+        // default itself sits below it (overridden) and is lifted to the floor (85 ms at 768 kHz =
+        // 64 ticks).
+        let p = plan_with_floor(85, 50, false, 48_000, AUDIO_OUTPUT_FRAMES);
+        assert_eq!(
+            (p.floor_ticks, p.max_ticks, p.overridden),
+            (4, DEFAULT_MAX_TICKS, true)
+        );
+        let p = plan_with_floor(85, 0, false, 768_000, AUDIO_OUTPUT_FRAMES);
+        assert_eq!((p.floor_ticks, p.max_ticks, p.overridden), (64, 64, true));
+        // plan() is plan_with_floor(FLOOR_MS, ..).
+        for (max, fixed) in [(0, false), (20, true), (500, false)] {
+            assert_eq!(
+                plan(max, fixed, 44_100, AUDIO_OUTPUT_FRAMES),
+                plan_with_floor(FLOOR_MS, max, fixed, 44_100, AUDIO_OUTPUT_FRAMES)
+            );
+        }
     }
 
     #[test]

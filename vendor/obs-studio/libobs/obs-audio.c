@@ -424,7 +424,7 @@ static void add_audio_buffering(struct obs_core_audio *audio, size_t sample_rate
 	/* camera-box issue 1367: an increase ABOVE the genlock floor is one LOUD named line: the late
 	 * source and the new total, keeping the "total audio buffering is now %d milliseconds" text the
 	 * #786 launch gates parse. Issue 1425 (E2 slice 3): with the floor at 0 every growth logs here; a
-	 * launch's own startup race draws 0-43 ms. Since slice 1 a stamped source's A/V does not depend on
+	 * launch's own startup race draws 0-85 ms. Since slice 1 a stamped source's A/V does not depend on
 	 * the buffering, and since slice 2 it never grows while an audio encoder runs (a late member is
 	 * re-anchored instead), so the line names the latency added, not an A/V fault. */
 	blog(LOG_WARNING,

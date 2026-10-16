@@ -17,7 +17,8 @@
 #   * vban_pacer_* -- the per-destination obs-vban pacer loss-counter increase inside the last
 #     660 s of the log. The VBAN arm pages VBAN_LOSS when any loss counter moved.
 #   * audio_buffering_* -- the audio mix buffering (`audio-telemetry #800: total_buffering=`) and
-#     its session start (the genlock floor line). The BUFFERING arm pages RAISED (issue 1381) when it
+#     its session start (the launch's own draw since issue 1425; the genlock floor line before). The
+#     BUFFERING arm pages RAISED (issue 1381) when it
 #     sits at least one mixer tick above the start: a stall of the audio callback ratcheted it, and
 #     the whole output stays that much later until an OBS restart (15.10.2026: 85 -> 170 ms).
 # The MIXER arm also pages STALLED (issue 1385): the newest dump is > 180 s behind the log head

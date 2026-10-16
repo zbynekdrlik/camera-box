@@ -394,7 +394,7 @@ the servo's correction does not. Reported to the supervisor as a follow-up candi
 
 **The global audio buffering has no floor since issue 1425 slice 3.** Issue 1367 started every genlock
 OBS launch 85 ms behind real time; now a launch starts at 0 like stock OBS and its own startup race
-draws 0-43 ms (`obs-genlock-audio-buffering.h`, floor 0), and OBS's own dynamic increase stays
+draws what stock OBS drew, 0, 64 or 85 ms (`obs-genlock-audio-buffering.h`, floor 0), and OBS's own dynamic increase stays
 active above it while no audio encoder runs. The genlock audio holds above ride on top of that, so a cg
 feed's audio on resolume still grows the buffering on a media start (a loud `ABOVE the floor` line,
 never dropped). Full rule: `genlock-audio-buffering-floor.md`.

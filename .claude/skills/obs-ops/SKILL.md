@@ -514,8 +514,8 @@ floods stale audio in the ~1s window before **Dante Virtual Soundcard** finishes
 43× "adding 21 ms" in 0.9s → `Max audio buffering reached!` → 960ms, stuck for the whole session.
 Healthy launch (since issue 1425 slice 3, no floor) = zero to two `genlock audio buffering ABOVE the
 floor (issue 1367): adding 21 milliseconds ... total audio buffering is now N milliseconds (source:
-<name>)` lines in the first seconds, total 0-43 ms at 48 kHz (issue 1367 started every launch at an
-85 ms floor; before it, ONE `adding 64 milliseconds` line or none). The draw adds latency to every
+<name>)` lines in the first seconds, total under 100 ms (stock OBS drew 0, 64 or 85 ms per launch;
+issue 1367 had started every launch at an 85 ms floor). The draw adds latency to every
 output, not A/V offset: a stamped source's A/V does not depend on it. Effect of a bad draw: audio +896ms vs
 normal → the operator's ~900ms genlock latency reads as ~2000ms-worth wrong; OBS restart with a
 clean launch restores it. **Launch-window only** — a 7h bad session showed ZERO further growth, so
@@ -523,7 +523,7 @@ it cannot flip spontaneously mid-event; only a relaunch re-rolls the dice.
 
 **Diagnóza (10s):** v čerstvom logu `Select-String "Max audio buffering|total audio buffering"` —
 `960` alebo čokoľvek nad `100` = zlý štart (reštartuj OBS); čistý štart = žiadny riadok, alebo jeden
-až dva `ABOVE the floor` riadky so zdrojom spolu 0-43 ms pri 48 kHz (od issue 1425 slice 3 bez
-podlahy; `genlock-audio-buffering-floor.md`). **Núdzová kompenzácia naživo bez
+až niekoľko `ABOVE the floor` riadkov so zdrojom spolu pod 100 ms (stock OBS ťahal 0, 64 alebo 85 ms;
+od issue 1425 slice 3 bez podlahy; `genlock-audio-buffering-floor.md`). **Núdzová kompenzácia naživo bez
 reštartu:** genlock latency +~900ms (overené operátorom). Trvalý fix = launch-gate v
 `launch-obs-genlock.sh` (#786).

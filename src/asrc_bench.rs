@@ -858,7 +858,7 @@ impl RealtimeAsrcCompensator {
         // same callback as this shift, so the readings already folded into the open window are moved
         // by delta too: the closing mean is then all in the new frame, and the smoothed error sees no
         // blended half-old/half-new transient. Done whether or not the setpoint is captured yet, so
-        // a shift inside the capture window of a non-absolute source captures the new-frame mean too.
+        // a shift inside the capture window of an arrival source captures the new-frame mean too.
         // Exact mirror of the C shift.
         self.window_level_sum_ms += delta_ms * f64::from(self.window_level_count);
         if self.level_captured {

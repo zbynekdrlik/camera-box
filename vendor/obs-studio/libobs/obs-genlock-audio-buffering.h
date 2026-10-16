@@ -6,9 +6,8 @@
  * TS-smoothing reach. Issue 1425 retired that: since E2 slice 1 a directly stamped mixed source is
  * judged by its own stamp, so its A/V no longer depends on the buffering; since slice 2 the buffering
  * cannot grow while an audio encoder runs; and slice 3 (design 6220191978) deleted the absolute target
- * and set the floor to 0. A launch now starts at 0 like stock OBS, its own startup race grows it to
- * 0-43 ms (one tick for a late ASIO block, two for a PulseAudio packet), and nothing moves it after an
- * encoder starts.
+ * and set the floor to 0. A launch now starts at 0 like stock OBS, its own startup race grows it
+ * (stock OBS drew 0, 64 or 85 ms per launch), and nothing moves it after an encoder starts.
  *
  * - genlock_audio_buffering_make_plan() (obs_reset_audio2): the floor is GENLOCK_AUDIO_BUFFERING_FLOOR_MS
  *   rounded up to whole ticks the way OBS rounds its own maximum (0 ticks today). Fixed buffering is

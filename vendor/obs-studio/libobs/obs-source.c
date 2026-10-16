@@ -5633,7 +5633,8 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
-		     (int)source->asrc.level_restore, source->asrc.level_avg_ms, source->asrc.step_recover_ms, (int)source->asrc.timecode,
+		     (int)source->asrc.level_restore, source->asrc.level_avg_ms,
+		     source->asrc.step_recover_ms, (int)source->asrc.timecode,
 		     source->asrc.place_jump_count, source->asrc.last_place_jump_ms,
 		     genlock_audio_asrc_basis_token(source->genlock_asrc_basis));
 	}

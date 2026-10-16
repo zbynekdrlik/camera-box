@@ -188,7 +188,7 @@ nominal. The lasting, audible effect is the buffering, so this third arm pages i
     else the head slice (both print in a session's first minute, so a long session keeps them in the
     head; an audio reset prints new ones): a floor line's value (an issue-1367 build), or for a
     floorless build the first `#800` total at least `AUDIO_BUFFERING_SETTLE_S` (30 s) after the
-    `buffering type:` line, zero included: by then the launch's own startup race (0-43 ms) is done,
+    `buffering type:` line, zero included: by then the launch's own startup race is done,
     so the launch draw is the start and a later raise reads RAISED. A session younger than that
     reports no start (UNKNOWN). With no marker at all, only a WHOLE-FILE read falls back to its first
     NON-ZERO `#800` total; a bounded read reports no start, because its tail's first total can be an

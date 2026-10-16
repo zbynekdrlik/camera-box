@@ -375,10 +375,11 @@ def _audio_stall_dump_in_head(text):
 
 
 # issue 1381 -- the audio mix BUFFERING ratchet. A stall of the audio callback (15.10.2026: 432 ms
-# on stream-snv) makes libobs add buffering ABOVE the genlock floor, and that delay stays on the
+# on stream-snv) makes libobs add buffering above the session start, and that delay stays on the
 # whole output until an OBS restart, while the mixer tick counts recover. `#800` logs the current
-# total every minute; the floor line (`genlock audio buffering floor ... is now N`) is the
-# session's start value, and only the `ABOVE the floor ... (source: <name>)` line names the source
+# total every minute; the session's start value is the floor line (`genlock audio buffering floor
+# ... is now N`) on an issue-1367 build, or since issue 1425 (no floor) the launch's settled draw
+# (`_session_start_ms`), and only the `ABOVE the floor ... (source: <name>)` line names the source
 # (the #800 `buffering_source=` reads `-` on every live line). The first #800 line of a session can
 # be printed before the first tick and read 0 (stream-snv), so it is never a start value.
 _AUDIO_800_TOTAL_RE = re.compile(

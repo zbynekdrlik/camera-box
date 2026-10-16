@@ -14,7 +14,7 @@
 //!   44.1 kHz, the maximum and (by hand) a non-zero floor. The printed trace is the truth table.
 //!   `cc` is required — it FAILS LOUDLY rather than skips.
 //! - Issue 1425 E2 slice 3 (design 6220191978): the shipped floor is 0, so a launch starts at 0 like
-//!   stock OBS and its startup race draws 0-43 ms; the #1355 UNREACHABLE line and the ASRC level band
+//!   stock OBS and its startup race draws 0-85 ms; the #1355 UNREACHABLE line and the ASRC level band
 //!   note are gone with the absolute target.
 
 use std::fs;
@@ -360,7 +360,7 @@ int main(void)
 
 	/* A launch (issue 1425: no floor): nothing behind leaves it at 0. The startup race then makes a
 	 * source 10 ms behind real time (an ASIO block) and one 30 ms behind (a PulseAudio packet):
-	 * OBS's own dynamic increase, one tick each -- a clean launch draws 0-43 ms. */
+	 * OBS's own dynamic increase, one tick each (stock OBS drew 0, 64 or 85 ms per launch). */
 	reset(48000, 0, false);
 	tick(48000, t, 0, "-");
 	t += tick_ns;
@@ -506,7 +506,7 @@ fn expected_trace() -> Vec<String> {
         )
     };
     vec![
-        // a launch: 0, then the startup race adds one tick per late source (0-43 ms)
+        // a launch: 0, then the startup race adds one tick per late source (here 21 / 42 ms)
         "reset rate=48000 max_ms=0 fixed=0 -> floor=0 max=45 fixed_buffer=0".into(),
         "tick total=0 wait=0 pushes=0 window_back_ms=0".into(),
         above(21, 21, "ASIO Input Capture"),

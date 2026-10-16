@@ -23,10 +23,12 @@ paths:
 
 - **What ships.** `GENLOCK_AUDIO_BUFFERING_FLOOR_MS 0u` (`obs-genlock-audio-buffering.h`) ↔ Rust
   `FLOOR_MS = 0` (`src/genlock_audio_buffering.rs`). A launch starts at 0 ms like stock OBS, and its
-  own startup race grows the buffering once in the first seconds: one tick for a late ASIO block, two
-  for a PulseAudio packet, so a clean launch draws **0-43 ms** at 48 kHz (or logs no growth line).
-  The FLOOR action, `set_floor_audio_buffering` and the plan's floor field stay as a mechanism
-  (`raise_audio_buffering` is still the fixed mode's body); at 0 they never run.
+  own startup race grows the buffering in the first seconds: a clean launch draws what stock OBS drew,
+  **0, 64 or 85 ms** on stream (the history below; the lift's 21 / 42 ms launch is a model, not a
+  measurement), or logs no growth line. The FLOOR action, `set_floor_audio_buffering` and the plan's
+  floor field stay as the design's mechanism (`raise_audio_buffering` is still the fixed mode's body);
+  at 0 they never run, and `plan_with_floor` keeps the Rust plan's floor rules tested. Deleting the
+  path is a design call (reported in the slice-3 lane return).
 - **Why it could go.** The 85 ms floor (issue 1367, ROZHODNUTÉ 5857354949) existed only so the stream
   `mbc` could reach the #1355 absolute ASRC level target (100 ms + sync offset) inside half of OBS's
   70 ms TS-smoothing reach. Since slice 1 a directly stamped source is judged by its own stamp
@@ -44,15 +46,22 @@ paths:
     session start from the reset line instead (`audio-mixer-watchdog.md`).
 - **The #786 launch gates** (`obs-guarded-launch.ps1`, `launch-obs-genlock.sh` (3b),
   `rig-health-audit.py`) still parse `total audio buffering is now (\d+) milliseconds` against their
-  100 ms bound and still redraw above it. Only the wording moved: the norm is 0-43 ms, and a high draw
-  is added LATENCY on every output, never "A/V MIMO" (a stamped source's A/V does not depend on it).
+  100 ms bound and still redraw above it. Only the wording moved: the norm is "under the 100 ms
+  bound" (the guarded launcher's popup: `norma pod 100 ms`), and a high draw is added LATENCY on every
+  output, never "A/V MIMO" (a stamped source's A/V does not depend on it).
 - **The known limit (pinned: the 1381 lift's `encoder-at-launch`).** With no floor, an output that
   starts BEFORE the launch's startup race (an audio encoder from the first tick) freezes the mix at
   0 ms, so every member that reaches the mixer even 1.3 ms behind real time is re-anchored on every
-  tick and muted until the output stops. Live, a stream or recording starts long after the first
-  seconds of a launch (nothing auto-starts one at launch). The same holds for a direct-stamp member
-  that joins later while an encoder runs and is later than the launch drew (the slice-2b limit, now
-  without the 85 ms margin).
+  tick and muted until the output stops. **Something CAN start one at launch:** stream-snv has an
+  `OBSStream` scheduled task that runs a bare `obs64.exe --startstreaming` (`av-restart-matrix.md`,
+  read 28.9.2026; its trigger was not checked), and a Companion button or the frontend's auto-start
+  options can do the same. Whether the frontend's `--startstreaming` (after the scene collection
+  loads) lands before or after the sources' first late packets is NOT measured. The 85 ms floor
+  absorbed a member up to 85 ms late here, so this path can go from working to muted; reported as the
+  open question of the slice-3 lane return (read the task's trigger read-only, or arm the freeze only
+  after the launch's startup race). The same holds for a direct-stamp member that joins later while an
+  encoder runs and is later than the launch drew (the slice-2b limit, now without the 85 ms margin).
+  The 1381 lift's E1 replays start their encoder at tick 100 (after the race) for this reason.
 - **Other boxes.** strih-snv, stream-snv and the resolume cg OBS all start at 0: the mix runs only
   as far behind real time as their own sources need, so wall-clock-stamped outputs (the DistroAV NDI
   output audio, obs-vban) are 85 ms earlier than with the floor.
@@ -84,8 +93,9 @@ paths:
 ## Live acceptance (supervisor, FULL bundle on every OBS box)
 
 After each of at least two OBS restarts per box: the reset block reads `dynamically increasing from
-0 ms`, a launch logs 0-2 `ABOVE the floor` lines totalling at most 43 ms (48 kHz), the #786 launcher
-reads it clean, and on stream `#800 buffered_ms` and the per-camera A/V are identical within ±5 ms
+0 ms`, a launch's `ABOVE the floor` lines total under the 100 ms bound (stock drew 0, 64 or 85 ms
+on stream), the #786 launcher reads it clean, a stream started by `--startstreaming` (or a recording
+started within the launch's first seconds) still carries `mbc` and the mic, and on stream `#800 buffered_ms` and the per-camera A/V are identical within ±5 ms
 across two restarts whose draws differ. The `asrc:` lines carry no `fallbacks=` field; an arrival
 source's `target=` is its depth at lock.
 

@@ -55,7 +55,7 @@ between them (or a value far outside ±10) is the thing worth chasing, not the n
 findstr /c:"source 'mbc' estimated" *.txt` (and `/c:"audio buffering"`) returns every session's lines
 prefixed by the log file name, so each launch's captured `target=`, level median and OBS audio
 buffering (64 or 85 ms, random per launch until issue 1367; an 85 ms floor until issue 1425
-slice 3; 0-43 ms per launch since) come out of one read — no PowerShell. Quote the command
+slice 3; stock again since: 0, 64 or 85 ms per launch) come out of one read — no PowerShell. Quote the command
 in bash DOUBLE quotes: inside a single-quoted bash string the `''` around `mbc` collapses and findstr
 matches nothing. The `mbc` sync offset in force lives in `basic\scenes\Stream_Obs.json` (`sync`, ns),
 readable with a `.ps1` via `-EncodedCommand`. Password via `$PW`, never literal.
@@ -255,5 +255,5 @@ buffering floor (`asrc-bench-harness.md` / `genlock-audio-buffering-floor.md`, t
 `mbc` and every directly stamped mixed source run on the STAMP basis since slice 1 (`basis=stamp`,
 `timecode=1`, `target=0`, `level_avg=` the placement error, ≈ 0 ± 2 ms healthy). An ARRIVAL-basis
 source's `target=` is the depth it had at the lock again, so it differs per launch by design (the
-buffering a launch draws, 0-43 ms, no longer moves A/V). The line has no `fallbacks=` field; there is
+buffering a launch draws no longer moves A/V). The line has no `fallbacks=` field; there is
 no UNREACHABLE warning to chase any more.
