@@ -143,6 +143,12 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->timecode = false; /* camera-box issue 1367 */
 	c->place_jump_count = 0; /* camera-box issue 1367 */
 	c->last_place_jump_ms = 0.0; /* camera-box issue 1367 */
+	c->basis = ASRC_BASIS_ARRIVAL; /* camera-box issue 1425 */
+	c->place_cand_early = false; /* camera-box issue 1425 */
+	c->place_cand_ema_ms = 0.0; /* camera-box issue 1425 */
+	c->place_cand_open = false; /* camera-box issue 1425 */
+	c->place_cand_ms = 0.0; /* camera-box issue 1425 */
+	c->place_cand_packets = 0; /* camera-box issue 1425 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
@@ -623,8 +629,27 @@ void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, bool hol
 
 /* camera-box issue 1367 (design 5845361166): the TIMECODE mode. See the header and
  * src/asrc_bench_timecode.rs (the Rust authority) for the full contract. */
+static void asrc_place_cand_drop(struct asrc_compensator *c)
+{
+	c->place_cand_open = false;
+	c->place_cand_ms = 0.0;
+	c->place_cand_packets = 0;
+}
+
 void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timecode)
 {
+	asrc_compensator_set_basis(c, timecode ? ASRC_BASIS_TIMECODE : ASRC_BASIS_ARRIVAL);
+}
+
+/* camera-box issue 1425 (design 6206822792): the ONE input of the servo's mode. Mirror of
+ * RealtimeAsrcCompensator::set_basis. */
+void asrc_compensator_set_basis(struct asrc_compensator *c, int basis)
+{
+	if (basis != c->basis) {
+		c->basis = basis;
+		asrc_place_cand_drop(c);
+	}
+	const bool timecode = basis != ASRC_BASIS_ARRIVAL;
 	if (timecode == c->timecode)
 		return;
 	c->timecode = timecode;
@@ -675,13 +700,23 @@ static void asrc_book_placement_jump(struct asrc_compensator *c, double place_er
 	c->last_place_jump_ms = jump_ms;
 }
 
+/* camera-box issue 1425: the booking the basis asks for -- at once on the timecode basis (issue 1367,
+ * unchanged), CONFIRMED on the stamp basis. Mirror of RealtimeAsrcCompensator::judge_placement_jump. */
+static void asrc_judge_placement_jump(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	/* issue 1425 RED: the stamp basis still books a jump at once, like the timecode basis */
+	asrc_book_placement_jump(c, place_err_ms, packet_ms);
+}
+
 void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
 					bool placed)
 {
-	if (!c->timecode || !c->level_captured)
+	if (!c->timecode || !c->level_captured) {
+		asrc_place_cand_drop(c);
 		return;
+	}
 	if (!placed) {
-		asrc_book_placement_jump(c, place_err_ms, packet_ms);
+		asrc_judge_placement_jump(c, place_err_ms, packet_ms);
 		return;
 	}
 	/* camera-box issue 1381 (design 5882391108, piece 1): a placement puts the samples on their stamp,
@@ -694,7 +729,8 @@ void asrc_compensator_observe_placement(struct asrc_compensator *c, double place
 	c->level_err_windows = 0;
 	c->window_level_sum_ms = 0.0;
 	c->window_level_count = 0;
-	asrc_book_placement_jump(c, place_err_ms, packet_ms);
+	asrc_place_cand_drop(c);
+	asrc_judge_placement_jump(c, place_err_ms, packet_ms);
 	/* the EMA is already seeded here: observe_placement only acts on a captured setpoint, and the
 	 * capture seeds it in the same window (both are cleared together) */
 	c->level_err_ema_ms = place_err_ms - c->level_target_ms;
