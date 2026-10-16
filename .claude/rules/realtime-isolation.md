@@ -5,6 +5,8 @@ paths:
   - "scripts/rt-kernel-upgrade.sh"
   - "tests/rt_kernel_provision.rs"
   - "docs/runbooks/899-realtime-isolation.md"
+  - "scripts/lib/display-gpu.sh"
+  - "tests/python/test_display_gpu_1446.py"
 ---
 
 # Realtime isolation on the cam fleet (issue 899)
@@ -110,6 +112,31 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   ≥6.12 has RT merged; a CI build job → a `.deb` artifact → the same deploy path + the SAME atomic
   reboot-class sequence as STEP 1. Maintenance-heavier (self-owned kernel), so gated on the STEP-1
   before/after measurement. Runbook/rule only in the current lane — NOT built here.
+
+## The N150 boxes need the HWE kernel for a GPU driver (issue 1446)
+
+- **cam5, cam6 and cam7 carry the N150 (Twin Lake) GPU `8086:46d4`.** The fleet kernel
+  6.8.0-142's i915 lists only `46D0 46D1 46D2` (`modinfo -F alias i915`), so that GPU has NO driver:
+  no `/dev/dri`, no `/sys/class/drm`. The cameraman HDMI preview then lives only on the firmware
+  framebuffer, which the UEFI firmware sets up only when a monitor is connected and on at POST. A
+  monitor plugged in later never lights (cam5, 16.10.2026). cam1-4 carry `8086:46d1`: i915 is
+  bound there, and the framebuffer follows hotplug.
+- **Both HWE kernels list `46D3`/`46D4`** (read from the i915.ko in each package's linux-modules
+  .deb): `linux-image-generic-hwe-24.04` -> 7.0.0-38, and the lowlatency 6.11.0-1016 image.
+- **`linux-lowlatency-hwe-24.04` (STEP 1 above) now resolves to the GENERIC HWE kernel 7.0.0-38 +
+  `lowlatency-kernel`** (`/etc/default/grub.d/99-lowlatency.cfg`: `preempt=full rcu_nocbs=all`),
+  not the 6.11 lowlatency image the archive's separate meta still names (read on cam5, 16.10.2026).
+  So the STEP 1 install also gives an N150 box its GPU driver: one kernel line on the fleet, the
+  same `scripts/rt-kernel-upgrade.sh` planner and the same reboot-before-purge order.
+- **The install pulls a libc6 upgrade, and the root stays writable until the next boot.** Running
+  processes (avahi, cron, dantesync, dbus-daemon, camera-box, old shells) keep the deleted old
+  libc mapped, so the step's verified ro close FAILs by name (`.claude/rules/ro-window.md`), and
+  dbus cannot be restarted safely. So install right before a planned PHYSICAL power cycle: a short
+  power-button press (a clean ACPI poweroff), then power on. Never a remote reboot of a cambox.
+- **verify-device `(av)` "display GPU driven" is the gate** (`scripts/lib/display-gpu.sh`): it
+  FAILs every PCI display controller (class `0x03*`) with no driver bound, naming its
+  vendor:device id and the running kernel. `/dev/fb0` is not the signal: a driven box with no
+  monitor has none, and an undriven box whose monitor was on at boot has one.
 
 ## Gotchas
 

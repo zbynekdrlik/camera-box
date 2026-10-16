@@ -170,8 +170,10 @@ the read-only-root unit set) sits after `(ak)`, before `(al)`. Also keep a new c
 `tests/python/test_cambox_ro_units_1394.py` executes that one. `(as)` (issue 1415, the rig time zone)
 therefore sits after `(ak)`, BEFORE `(ar)`. `(at)` (issue 1428, the zram swap) sits after `(ak)`,
 before `(as)` (`test_rig_timezone_1415.py` EXECUTES `(as)..(ar)`). `(au)` (issue 1367, the housekeeping
-cpus) sits after `(ak)`, before `(at)` (`test_cambox_zram_1428.py` takes `(at)..(as)` as its block); the next
-free letter is `(av)`.
+cpus) sits after `(ak)`, before `(at)` (`test_cambox_zram_1428.py` takes `(at)..(as)` as its block).
+`(av)` (issue 1446, display GPU driven) sits after `(ak)`, before `(au)`
+(`tests/python/test_display_gpu_1446.py` executes the `(av)..(au)` block); the next free letter is
+`(aw)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 
