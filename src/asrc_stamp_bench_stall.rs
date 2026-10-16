@@ -48,6 +48,11 @@ const STALL_SETTLE_S: usize = 10;
 const BOOKED_WITHIN_S: f64 = 1.5;
 /// What the 1000 ppm payment (1 ms per second) can already have repaid within that time, ms.
 const PAID_WITHIN_BOOKING_MS: f64 = 1.5;
+/// Issue 1425 slice 3: the arrival servo holds the depth it locked at, and for a tick-long packet that
+/// reading carries the packet-vs-tick phase (−6.5 … +9.8 ms over the four launch phases, the stamp
+/// bench). Its stall displacement is compared within that phase on such a source (measured: pulse
+/// 120 ms stall, 31.5 stamp vs 39.6 arrival).
+const ARRIVAL_PHASE_MS: f64 = 10.0;
 /// The A/V of a loss is back within 1 ms no later than the arrival servo's + this.
 const LOSS_BACK_SLACK_S: usize = 2;
 const BACK_MS: f64 = 1.0;
@@ -143,12 +148,16 @@ fn a_stall_past_the_smoothing_threshold_is_booked_once_and_repaid_1425() {
             let a = run(&event_case(src, Servo::Arrival, stall));
             let moved = r.av_s[at + 1] - pre_mean_ms(&r);
             let arrival_moved = a.av_s[at + 1] - pre_mean_ms(&a);
-            // the second after the stall already carries part of the stamp basis's payment. Issue 1425
-            // slice 3: the arrival servo now holds the depth it locked at, and for a tick-long packet
-            // that reading carries the walking packet-vs-tick phase (several ms off the stamp), so the
-            // two are compared on the sub-tick `mbc` packets only
-            let same_as_arrival = src.packet_frames >= TICK_FRAMES
-                || (moved - arrival_moved).abs() <= STALL_EXCURSION_MS + PAID_WITHIN_BOOKING_MS;
+            // the second after the stall already carries part of the stamp basis's payment; a
+            // tick-long packet's arrival reading also carries its packet-vs-tick phase (issue 1425
+            // slice 3, ARRIVAL_PHASE_MS)
+            let phase_ms = if src.packet_frames >= TICK_FRAMES {
+                ARRIVAL_PHASE_MS
+            } else {
+                0.0
+            };
+            let same_as_arrival = (moved - arrival_moved).abs()
+                <= STALL_EXCURSION_MS + PAID_WITHIN_BOOKING_MS + phase_ms;
             assert!(
                 moved > 20.0 && same_as_arrival,
                 "issue 1425: {} {ms} ms stall: OBS's own placement displaces the audio, the same on \
