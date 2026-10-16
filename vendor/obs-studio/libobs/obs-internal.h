@@ -1032,6 +1032,10 @@ struct obs_source {
 	double asrc_tc_prev_raw_s;      /* the previous timecode packet's pre-resample duration */
 	uint64_t asrc_tc_prev_stamp_ns; /* the previous timecode packet's stamp on the OBS monotonic clock */
 	bool asrc_tc_have_prev;         /* a previous timecode packet exists (the rate interval is defined) */
+	/* camera-box issue 1425 (E2 slice 1): the ASRC basis the ingest decided for the last packet
+	 * (GENLOCK_AUDIO_ASRC_BASIS_*: 0 arrival, 1 timecode, 2 stamp), printed as basis= on the asrc: line.
+	 * Audio thread, same writer and reader as `asrc`. */
+	int genlock_asrc_basis;
 	pthread_mutex_t audio_actions_mutex;
 	pthread_mutex_t audio_buf_mutex;
 	pthread_mutex_t audio_mutex;

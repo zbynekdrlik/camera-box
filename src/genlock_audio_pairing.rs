@@ -636,16 +636,10 @@ pub fn audio_intended_raw_ns(
         .wrapping_add(term_ns as u64)
 }
 
-/// Issue 1367 — does the ASRC run in TIMECODE mode for this packet? Only for audio the genlock
-/// pairing places at its timecode, that reaches the mix (not MONITOR_ONLY) and has a resampler to
-/// correct it. Every other source — `mbc`, every ASIO/WASAPI input, a genlock source on the latency
-/// hold — keeps the arrival-based servo. Mirror of `genlock_audio_asrc_timecode`.
-pub fn audio_asrc_timecode(mode: AudioHoldMode, monitor_only: bool, can_resample: bool) -> bool {
-    mode == AudioHoldMode::Timecode && !monitor_only && can_resample
-}
-
-/// Issue 1425 (E2 slice 1) — what the per-source ASRC judges one packet by. Discriminants match the C
-/// `GENLOCK_AUDIO_ASRC_BASIS_*` defines.
+/// Issue 1425 (E2 slice 1, design 6205974120) — what the per-source ASRC judges one packet by.
+/// Discriminants match the C `GENLOCK_AUDIO_ASRC_BASIS_*` defines. Both placement bases put the
+/// compensator in its issue-1367 timecode ("placement-judged") mode: level = the placement error,
+/// setpoint 0, rate = the stamp advance, jumps booked at 1000 ppm, no unreachable fallback.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsrcBasis {
@@ -674,27 +668,40 @@ impl AsrcBasis {
     }
 }
 
-/// Issue 1425 — the basis the ASRC judges this packet by. RED stub: today's predicate (a timecode
-/// hold only). Mirror of `genlock_audio_asrc_placement`.
+/// Issue 1425 — the basis the ASRC judges this packet by. Only audio that reaches the mix (not
+/// MONITOR_ONLY) and has a resampler to correct it is placement-judged:
+///
+/// - a genlock source on the issue-1367 timecode hold: [`AsrcBasis::Timecode`];
+/// - a non-genlock source (`mode` [`AudioHoldMode::Off`]) whose stamps are DIRECT (`direct_ts`: OBS
+///   detected them within its 2 s window and applies no `timing_adjust`) — `mbc`, a PulseAudio input,
+///   a media clip: [`AsrcBasis::Stamp`], so the launch-random global buffering and the packet-vs-tick
+///   phase drop out of its A/V;
+/// - everything else (a latency hold, a withheld source, a source on OBS's own `timing_adjust`):
+///   [`AsrcBasis::Arrival`].
+///
+/// Mirror of `genlock_audio_asrc_placement`.
 pub fn audio_asrc_placement(
     mode: AudioHoldMode,
     direct_ts: bool,
     monitor_only: bool,
     can_resample: bool,
 ) -> AsrcBasis {
-    let _ = direct_ts;
-    if audio_asrc_timecode(mode, monitor_only, can_resample) {
-        AsrcBasis::Timecode
-    } else {
-        AsrcBasis::Arrival
+    if monitor_only || !can_resample {
+        return AsrcBasis::Arrival;
+    }
+    match mode {
+        AudioHoldMode::Timecode => AsrcBasis::Timecode,
+        AudioHoldMode::Off if direct_ts => AsrcBasis::Stamp,
+        _ => AsrcBasis::Arrival,
     }
 }
 
-/// Issue 1425 — does the ingest measure this packet's placement error? RED stub: an active genlock
-/// hold only. Mirror of `genlock_audio_place_measured`.
+/// Issue 1425 — does the ingest measure this packet's placement error? Under an active genlock hold
+/// (the pairing audit) or for a placement-judged basis (its servo input). Only a genlock hold writes
+/// the pairing audit facet; the ingest gates that on the mode itself. Mirror of
+/// `genlock_audio_place_measured`.
 pub fn audio_place_measured(mode: AudioHoldMode, basis: AsrcBasis) -> bool {
-    let _ = basis;
-    mode.is_active()
+    mode.is_active() || basis != AsrcBasis::Arrival
 }
 
 /// Issue 1367 — the ASRC's error input for one packet, in ms: its placement error (actual − the
