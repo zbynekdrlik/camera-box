@@ -83,7 +83,7 @@ def test_handover_runs_the_obs_watchdog_with_its_units_environment(tmp_path):
         "RDH_OBS_PROBE": str(stub),
         "RDH_TIMEOUT": "10",
     }
-    for item in ("MIC", "PAINTER", "CLOCK", "NET", "AUDIOLAG", "GENLOCK", "BURN", "MAPPING",
+    for item in ("MIC", "MIC_GUARD", "PAINTER", "CLOCK", "NET", "AUDIOLAG", "GENLOCK", "BURN", "MAPPING",
                  "PINS", "DANTESYNC", "CAMBOX", "AVLATENCY", "EXPOSURE", "RIGMODE_LIB",
                  "WATCHDOG_ROSTER", "CAMSET_LIB"):
         key = f"RDH_{item}" if item.endswith("_LIB") or item == "WATCHDOG_ROSTER" else f"RDH_{item}_PROBE"
