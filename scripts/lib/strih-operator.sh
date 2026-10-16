@@ -499,6 +499,8 @@ PY
 }
 
 # strih_operator_bt_verdict HCICONFIG_TEXT [ADAPTER] -> ONE row: hci0 UP with a non-zero BD address.
+# Report-only on every role since the owner's 16.10.2026 ruling ("ok nemusis to riesit netreba mys"):
+# a dead or unreadable controller is a NOTE naming the state, never a FAIL.
 # ADAPTER (1/0, default 1) = the kernel registered a Bluetooth adapter (/sys/class/bluetooth/hci*).
 # A box with none (strih-pp: a desktop with a USB receiver mouse, 12.10.2026) has nothing to pair: NOTE.
 strih_operator_bt_verdict() {
@@ -508,7 +510,7 @@ strih_operator_bt_verdict() {
     return 0
   fi
   if [ -z "$text" ]; then
-    printf 'FAIL|(bluetooth) no hci0 Bluetooth controller (hciconfig hci0 answered nothing) -- the operator'"'"'s Bluetooth mouse cannot pair\n'
+    printf 'NOTE|(bluetooth) no hci0 Bluetooth controller (hciconfig hci0 answered nothing) -- report-only, the operator needs no Bluetooth mouse (owner 16.10.2026)\n'
     return 0
   fi
   addr="$(sed -n 's/.*BD Address: \([0123456789ABCDEFabcdef:]*\).*/\1/p' <<<"$text")"
@@ -516,7 +518,7 @@ strih_operator_bt_verdict() {
   if ! grep -Eq '^[[:space:]]+UP( |$)' <<<"$text"; then bad="DOWN"; fi
   case "$addr" in '' | 00:00:00:00:00:00) bad="${bad}${bad:+, }BD address ${addr:-unreadable}" ;; esac
   if [ -n "$bad" ]; then
-    printf 'FAIL|(bluetooth) hci0 %s -- the Bluetooth controller does not work and the operator'"'"'s Bluetooth mouse cannot pair (the 12.10.2026 rtl8852bu: "Can'"'"'t init device hci0"); journalctl -k | grep -i bluetooth\n' "$bad"
+    printf 'NOTE|(bluetooth) hci0 %s -- the Bluetooth controller does not work (strih-snv rtl8852bu ROM v3: no eco-4 Linux firmware upstream, issue 1418); report-only, the operator needs no Bluetooth mouse (owner 16.10.2026)\n' "$bad"
   else
     printf 'OK|(bluetooth) hci0 UP, BD address %s\n' "$addr"
   fi
@@ -879,7 +881,7 @@ strih_operator_grade_rows() {
   if [ "$(strih_box_role 2>/dev/null || echo strih)" = stream ]; then
     printf 'NOTE|(bluetooth) not graded: the stream role needs no Bluetooth (owner 13.10.2026: only strih-snv)\n'
   elif [ "$bt" = '<no-hciconfig>' ]; then
-    printf 'FAIL|(bluetooth) hciconfig is not installed (package bluez) -- the Bluetooth controller cannot be read\n'
+    printf 'NOTE|(bluetooth) hciconfig is not installed (package bluez) -- the Bluetooth controller cannot be read; report-only (owner 16.10.2026)\n'
   else
     if compgen -G "$(strih_operator_sysfs)/class/bluetooth/hci*" >/dev/null; then bt_adapter=1; else bt_adapter=0; fi
     strih_operator_bt_verdict "$bt" "$bt_adapter"
