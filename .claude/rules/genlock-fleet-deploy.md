@@ -178,9 +178,10 @@ until the fleet-parity watchdog. Now:
 - **Dial the fleet NAME, never the venue IP.** A PP box is dialled at its obs-fleet row host
   (`strih-pp.lan` / `stream-pp.lan`, which dev1 reaches through companion-pp), via `fleet_box_ip`. The
   fact file's `STRIH_IP` (10.77.8.x) is the box's address on its own venue LAN and is not routable from
-  dev1 (the avsync-venues rule). A `traveling` row must dial a plain DNS name
-  (`strih_lx_dial_host_check` / `strih_lx_is_dns_name`, spelled-out ASCII sets); strih-snv (`always`)
-  keeps the dotted-IPv4 rule and its `STRIH_LX_IP` override. `STRIH_LX_IP` never applies to a PP box.
+  dev1 (the avsync-venues rule). A `traveling` row must dial a plain DNS name that is NOT an
+  address (`strih_lx_dial_host_check` / `strih_lx_is_dns_name`, spelled-out ASCII sets): a row that
+  holds an IP is refused with exit 3 naming the box. strih-snv (`always`) keeps the dotted-IPv4 rule
+  and its `STRIH_LX_IP` override. `STRIH_LX_IP` never applies to a PP box.
 - **One download + one tree, per-box everything else.** `strih_lx_prepare ... <boxes>` resolves EVERY
   box (dial host, the venue guard hosts, the fact-file hostname, its own `run-setup.<box>.sh`) before
   any box is touched, downloads the strih FULL artifact once and archives the tree once. `strih_lx_apply
@@ -188,9 +189,14 @@ until the fleet-parity watchdog. Now:
   `setup-strih.sh --box <box>` / `verify-strih.sh --box <box>`; every error reads `[<box> <step>]`.
 - **The rig-busy guard reads the box's VENUE** (`strih_lx_guard_hosts`): the venue is the fact file's
   `STRIH_VENUE`; its strih is the box itself when its `STRIH_ROLE` is strih (the dial host, so the
-  strih-snv override is read where it is dialled), else the row `strih-<venue>`; its stream is the row
-  `stream-<venue>` (the issue-1414 `<role>-<venue>` names). strih-snv reads exactly what it read
-  before (its dial IP + stream-snv); both PP boxes read `strih-pp.lan` + `stream-pp.lan`.
+  strih-snv override is read where it is dialled), else the venue's one strih-role fact file
+  (`strih_lx_venue_strih_box`) at its fleet host; its stream is the ONE venue table's
+  `avsync_venue_host` (a stream-role fact file, else the declared Windows stream-snv). strih-snv reads
+  exactly what it read before (its dial IP + 10.77.9.204); both PP boxes read `strih-pp.lan` +
+  `stream-pp.lan`. Every fact read goes through `strih_box_parse_file` (`strih_lx_fact`, also used by
+  `strih_lx_tree_check`); the plan and the execute arm read the same checkout's fact files.
+- **Plan == execute routing:** both pick the Linux arm with `fleet_box_runs_setup_strih` first, so a
+  box that later gains a fact file can never get the Windows plan and the Linux execute.
 - **AWAY, never a failure:** a `traveling` box whose identity ssh does not connect (rc 255 = ssh could
   not connect or resolve, rc 124 = the bound) prints one `AWAY: [<box>] ...` line and is skipped
   (`strih_lx_apply` rc 6, nothing changed, no fleet-log line); the other boxes go on and the run exits
