@@ -223,8 +223,9 @@ on the rig.
 
 **vlc-video: resolved by issue 1425 S4v (design 6225701358).** The stock plugin stamped
 `libvlc_clock()` relative to plugin load, libobs latched an offset, and after issue 1372 stream's
-"NL playlist" drifted against the disciplined mixer at the discipline rate (≈ 72 ms/h at 20 ppm,
-VLC's clock being QPC) until its audio was re-placed 70 ms at a time. Now:
+"NL playlist" drifted against the disciplined mixer at the discipline rate (≈ 72 ms/h at 20 ppm:
+VLC's clock is not the disciplined system-time rate; which Windows counter VLC 3 reads by default is not
+verified) until its audio was re-placed 70 ms at a time. Now:
 
 - Every genlock configure builds the plugin (`-DENABLE_VLC=ON` in `windows-genlock.yml`, both
   `windows-genlock-fast.yml` configures and both `linux-genlock.yml` builds). The headers come from
@@ -242,9 +243,17 @@ VLC's clock being QPC) until its audio was re-placed 70 ms at a time. Now:
 - Tests: `tests/vlc_video_media_clock_1425.rs` (the helper lifted with the mapper and run for both
   branches, the configure flags, the stage steps, the deploy printers) and the `VLC_WIRING` needles of
   `tests/genlock_audio_arrival_rebase_wiring_1425.rs` (also in both pwsh gates).
+- **The 2 s direct window (review round 1).** VLC's audio `pts` is its presentation date, and VLC 3
+  may hand audio over up to ~2 s before it (by the reviewer's reading of `DecoderPlayAudio`, not verified
+  live). The mapping keeps that lead (the stamp lands in the future, where VLC wants it played), but
+  libobs reads a stamp within 2 s (`MAX_TS_VAR`) of now as DIRECT: a lead near 2 s would flip the source
+  between the stamp and the arrival basis. The plugin logs the largest lead once a minute:
+  `[vlc_source: '<name>'] audio lead_max_ms=<ms> (issue 1425)` (`vlcs_audio_lead_log`, tested in
+  `tests/vlc_video_media_clock_1425.rs`). A lead that reaches ~2000 ms needs the sticky basis the
+  issue-1425 rule lists as not done.
 - Live (supervisor): after the FULL deploy, stream's `asrc: source 'NL playlist'` line reads
-  `basis=stamp` with `level_avg` within ±2 ms, and no `genlock-audio-arrival-rebase` line over ≥ 2 h
-  of playback.
+  `basis=stamp` with `level_avg` within ±2 ms, the `audio lead_max_ms=` lines stay far under 2000, and
+  no `genlock-audio-arrival-rebase` line appears over ≥ 2 h of playback.
 
 Third-party plugins are not vendored: stream's `obs-asio.dll` (feeds `mbc`) and resolume's
 `obs-vban.dll`. Both import the `os_gettime_ns` symbol (checked 25.9.2026 by reading the DLL

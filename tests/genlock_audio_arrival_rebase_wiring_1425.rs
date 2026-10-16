@@ -26,24 +26,25 @@ const WINDOWS_WORKFLOWS: [&str; 2] = [
 ];
 
 /// The `obs-source.c` wiring (squished). The pwsh gate in both Windows workflows requires each one.
-const ARRIVAL_REBASE_WIRING: [&str; 9] = [
-    "const bool genlock_rebase_monitor_only = source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY; const bool genlock_rebase_can_resample = source->asrc_enabled && source->resampler; const int genlock_rebase_basis = genlock_audio_asrc_placement( genlock_hold_mode, using_direct_ts, genlock_rebase_monitor_only, genlock_rebase_can_resample);",
-    "const bool genlock_arrival_rebase_ts = source->timing_set && source->next_audio_ts_min != 0 && genlock_audio_arrival_rebase(genlock_rebase_basis, genlock_rebase_monitor_only, genlock_rebase_can_resample, source->asrc.level_captured, uint64_diff(source->next_audio_ts_min, data->timestamp)); if (genlock_arrival_rebase_ts) { genlock_arrival_drift_ns = (int64_t)(data->timestamp - source->next_audio_ts_min); source->next_audio_ts_min = data->timestamp; }",
-    "const bool genlock_arrival_rebase_sys = source->next_audio_sys_ts_min != 0 && genlock_audio_arrival_rebase(genlock_rebase_basis, genlock_rebase_monitor_only, genlock_rebase_can_resample, source->asrc.level_captured, uint64_diff(source->next_audio_sys_ts_min, in.timestamp));",
+const ARRIVAL_REBASE_WIRING: [&str; 10] = [
+    "static bool genlock_audio_arrival_rebase_source(const obs_source_t *source, int hold_mode, bool direct_ts, uint64_t cont_ns, uint64_t ts_ns) { const bool monitor_only = source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY; const bool can_resample = source->asrc_enabled && source->resampler; return cont_ns != 0 && genlock_audio_arrival_rebase(genlock_audio_asrc_placement(hold_mode, direct_ts, monitor_only, can_resample), monitor_only, can_resample, source->asrc.level_captured, uint64_diff(cont_ns, ts_ns)); }",
+    "const int64_t genlock_arrival_drift_ns = (int64_t)(data->timestamp - source->next_audio_ts_min); const bool genlock_arrival_rebase_ts = source->timing_set && genlock_audio_arrival_rebase_source(source, genlock_hold_mode, using_direct_ts, source->next_audio_ts_min, data->timestamp); if (genlock_arrival_rebase_ts) source->next_audio_ts_min = data->timestamp;",
+    "const int64_t genlock_arrival_sys_drift_ns = (int64_t)(in.timestamp - source->next_audio_sys_ts_min); const bool genlock_arrival_rebase_sys = genlock_audio_arrival_rebase_source( source, genlock_hold_mode, using_direct_ts, source->next_audio_sys_ts_min, in.timestamp);",
     "if ((genlock_relabel || genlock_relabel_pending || genlock_arrival_rebase_sys) && source->next_audio_sys_ts_min) source->next_audio_sys_ts_min = in.timestamp; if (source->next_audio_sys_ts_min == in.timestamp) { push_back = true;",
-    "if ((genlock_arrival_rebase_ts || genlock_arrival_rebase_sys) && source->audio_ts) { source->genlock_arrival_rebases++; source->genlock_arrival_rebase_due = true; source->genlock_arrival_rebase_sys = !genlock_arrival_rebase_ts; source->genlock_arrival_rebase_drift_ns = genlock_arrival_rebase_ts ? genlock_arrival_drift_ns : genlock_arrival_sys_drift_ns; }",
+    "genlock_audio_arrival_rebase_record(source, genlock_arrival_rebase_ts, genlock_arrival_rebase_sys, genlock_arrival_drift_ns, genlock_arrival_sys_drift_ns); sync_offset = source->sync_offset;",
     "genlock_audio_arrival_rebase_log(source, os_time); source_signal_audio_data(source, data, source_muted(source, os_time));",
     "\"genlock-audio-arrival-rebase '%s': domain=%s drift_ms=%+.1f rebases=%u (issue 1425)\"",
     "_Static_assert(GENLOCK_AUDIO_TS_SMOOTHING_NS == TS_SMOOTHING_THRESHOLD,",
     "#define GENLOCK_AUDIO_ARRIVAL_REBASE_LOG_NS (60ULL * 1000000000ULL)",
+    "if (!(rebase_ts || rebase_sys) || !source->audio_ts) return; source->genlock_arrival_rebases++; source->genlock_arrival_rebase_due = true; source->genlock_arrival_rebase_sys = !rebase_ts; source->genlock_arrival_rebase_drift_ns = rebase_ts ? ts_drift_ns : sys_drift_ns;",
 ];
 
 /// The `vlc-video-source.c` wiring (squished): both stamp sites on the OBS media clock.
 const VLC_WIRING: [&str; 4] = [
     "#ifdef _WIN32 #include <util/windows/qpc-timestamp.h> #endif",
-    "return os_foreign_clock_ns_to_gettime_ns(stamp_ns, (uint64_t)libvlc_clock_() * 1000ULL);",
-    "c->frame.timestamp = vlcs_media_clock_ns(libvlc_clock_());",
-    "c->audio.timestamp = vlcs_media_clock_ns(pts);",
+    "return os_foreign_clock_ns_to_gettime_ns(stamp_ns, vlc_now_us > 0 ? (uint64_t)vlc_now_us * 1000ULL : 0);",
+    "const int64_t vlc_now_us = libvlc_clock_(); c->frame.timestamp = vlcs_media_clock_ns(vlc_now_us, vlc_now_us);",
+    "const int64_t vlc_now_us = libvlc_clock_(); c->audio.timestamp = vlcs_media_clock_ns(pts, vlc_now_us); vlcs_audio_lead_log(c, pts - vlc_now_us, os_gettime_ns());",
 ];
 
 /// Shapes that must be GONE from `vlc-video-source.c`: the stamps relative to plugin load.
@@ -109,7 +110,6 @@ fn the_ingest_rebases_a_locked_arrival_source_in_both_domains_1425() {
         ingest,
         "if (uint64_diff(in.timestamp, os_time) < MAX_TS_VAR) {",
     );
-    let basis = at(ingest, ARRIVAL_REBASE_WIRING[0]);
     let rebase_ts = at(ingest, ARRIVAL_REBASE_WIRING[1]);
     let smooth = at(
         ingest,
@@ -119,24 +119,33 @@ fn the_ingest_rebases_a_locked_arrival_source_in_both_domains_1425() {
     let rebase_sys = at(ingest, ARRIVAL_REBASE_WIRING[2]);
     let sys = at(ingest, ARRIVAL_REBASE_WIRING[3]);
     let record = at(ingest, ARRIVAL_REBASE_WIRING[4]);
-    let sync = at(ingest, "sync_offset = source->sync_offset;");
     let unlock = at(ingest, "pthread_mutex_unlock(&source->audio_buf_mutex);");
     let log = at(ingest, ARRIVAL_REBASE_WIRING[5]);
     assert!(
-        direct < basis
-            && basis < rebase_ts
+        direct < rebase_ts
             && rebase_ts < smooth
             && smooth < lock
             && lock < rebase_sys
             && rebase_sys < sys
             && sys < record
-            && record < sync
-            && sync < unlock
+            && record < unlock
             && unlock < log,
         "issue 1425: the stamp-domain rebase must follow the direct-stamp detection and precede the \
          smoothing, the system-domain rebase must run inside the buffer lock before its check, the \
-         count is recorded under the lock and printed after it"
+         count is recorded under the lock (as the branch's last statement) and printed after it"
     );
+    // the helpers sit before the ingest
+    let ingest_at = at(&src, "static void source_output_audio_data(");
+    for helper in [
+        ARRIVAL_REBASE_WIRING[0],
+        "static void genlock_audio_arrival_rebase_record(",
+        "static void genlock_audio_arrival_rebase_log(",
+    ] {
+        assert!(
+            at(&src, helper) < ingest_at,
+            "issue 1425: `{helper}` must precede the ingest"
+        );
+    }
     // the basis the rebase predicts is decided from the same inputs as the ASRC basis
     assert!(
         ingest.contains("genlock_audio_asrc_placement( genlock_hold_mode, genlock_direct_ts, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY, source->asrc_enabled && source->resampler);"),

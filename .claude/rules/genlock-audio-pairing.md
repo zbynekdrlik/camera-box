@@ -976,21 +976,38 @@ moves a placement at runtime.
   `TS_SMOOTHING_THRESHOLD`). The two extra inputs are an anchor correction of the design (comment
   6225848114): `audio_asrc_placement` returns Arrival for a listen-only and a resampler-less source
   too, and `level_captured` can be true on both.
-- **The wiring** (`source_output_audio_data`): right after the direct-stamp detection the basis is
-  predicted from `genlock_hold_mode` + `using_direct_ts` + the same monitoring / resampler inputs; a
-  rebase sets `next_audio_ts_min = data->timestamp` (the packet snaps onto itself: no "exceeded"
-  placement, no `handle_ts_jump`). Under `audio_buf_mutex` the same decision on the system-domain diff
-  joins the issue-1381 relabel rebase (`… || genlock_arrival_rebase_sys) && source->next_audio_sys_ts_min`),
-  so the packet appends and never reaches the second `MAX_TS_VAR` reset. A rebased packet with a live
-  `audio_ts` is counted and recorded on the source (`genlock_arrival_rebases`, `_due`, `_sys`,
-  `_drift_ns`); `genlock_audio_arrival_rebase_log` prints after the lock:
+- **The wiring** (`source_output_audio_data`, through two helpers so the function does not grow):
+  `genlock_audio_arrival_rebase_source(source, hold_mode, direct_ts, cont_ns, ts_ns)` predicts the
+  basis from `genlock_hold_mode` + `using_direct_ts` (the verdict before the smoothing) + the same
+  monitoring / resampler inputs and decides. Right after the direct-stamp detection a rebase sets
+  `next_audio_ts_min = data->timestamp` (the packet snaps onto itself: no "exceeded" placement, no
+  `handle_ts_jump`). Under `audio_buf_mutex` the same decision on the system-domain diff joins the
+  issue-1381 relabel rebase (`… || genlock_arrival_rebase_sys) && source->next_audio_sys_ts_min`), so
+  the packet appends and never reaches the second `MAX_TS_VAR` reset.
+  `genlock_audio_arrival_rebase_record` (the branch's last statement) counts a rebased packet with a
+  live `audio_ts` (`genlock_arrival_rebases`, `_due`, `_sys`, `_drift_ns`); a later forced placement of
+  the same packet (a sync-offset change, a latency-hold placement) is still counted.
+  `genlock_audio_arrival_rebase_log` prints after the lock:
   `genlock-audio-arrival-rebase '<src>': domain=stamp|system drift_ms=%+.1f rebases=%u (issue 1425)`,
   at most once per 60 s per source (`rebases=` counts every one).
+- **Conservative on purpose:** a direct-stamped source in the decoupled unbuffered branch (OBS re-latches
+  its `timing_adjust` every packet) is predicted Stamp and never rebased; `cont_ns != 0` is an
+  equivalent guard (a zero continuation exists only before the first packet, when nothing is captured).
 - **Unchanged:** an unlocked source (the launch alignment), a stopped one (`audio_ts` 0: OBS still
   places it, nothing counted), listen-only, resampler-less, stamp- and timecode-basis sources.
 - **A pause on an arrival source.** Within ~2 mixer ticks without data the mixer declares the source
-  stopped (`discard_if_stopped`, `audio_ts` 0), so a resume after a real pause is placed as before. A
-  stamp discontinuity with CONTINUOUS arrival appends (the depth is the arrival servo's authority).
+  stopped (`discard_if_stopped`, `audio_ts` 0), so a resume after a real pause is placed by OBS at
+  `stamp + timing_adjust`. A stamp discontinuity with CONTINUOUS arrival appends (the depth is the arrival
+  servo's authority).
+- **Known limit (review round 1, raised to the main as a design question): a rebase continues the
+  timelines but keeps `timing_adjust`.** After rebases that added up to a drift D, `stamp + timing_adjust`
+  sits D off where the samples really are, so a placement OBS still forces lands D off: the resume after
+  a stop, an operator's sync-offset change, a latency-hold placement (a latency-hold source's
+  `audio_place_err_ms` / pairing offset also read D). A real ≥ 2 s break is no longer re-latched either.
+  In practice D stays near 0 once S4v ships (NL playlist is a stamp-basis source then; an NDI genlock-off
+  source never drifts, the bench's twin); a stock VLC source accumulates ~72 ms/h at 20 ppm. The fix the
+  review proposes (carry the drift as a per-source offset added with `timing_adjust`, so forced placements
+  land on the continuation) is a change of the decided mechanism, so it was not made here.
 - **Tests:** unit `src/genlock_audio_pairing_arrival_tests.rs`; parity
   `tests/genlock_audio_asrc_basis_parity_1425.rs` (`c_arrival_rebase_matches_the_rust_authority_1425`,
   70 ms −1/0/+1); the ingest lift `tests/genlock_audio_arrival_rebase_1425.rs` (the issue-1381 harness,
@@ -1001,7 +1018,8 @@ moves a placement at runtime.
   ways); the wiring `tests/genlock_audio_arrival_rebase_wiring_1425.rs` (`ARRIVAL_REBASE_WIRING`, also
   in both pwsh gates; the issue-1381 `RELABEL_WIRING[2]` carries the extended condition). Mutation:
   20/20 C mutants killed (19 by the ingest / parity behaviour, the dropped log call by the wiring
-  needles and the pwsh lines), 5/5 Rust mutants.
+  needles and the pwsh lines), 5/5 Rust mutants. Review round 1 (helpers, VLC lead log): 26/28 by
+  behaviour, the dropped log call by the wiring needles + pwsh, `cont_ns != 0` equivalent (above).
 - **Live acceptance (supervisor), with S4v below:** stream FULL bundle; `NL playlist` reads
   `basis=stamp` once the VLC plugin ships (S4v), so 0 rebase lines in ≥ 2 h of playback. With S4 live
   and a stock VLC (before S4v) expect one rebase line about every 58 min with `drift_ms` ≈ ±70 and

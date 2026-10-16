@@ -2494,6 +2494,41 @@ static void genlock_audio_arrival_rebase_log(obs_source_t *source, uint64_t now_
 	     (double)source->genlock_arrival_rebase_drift_ns / 1e6, source->genlock_arrival_rebases);
 }
 
+/* camera-box issue 1425 (E3 slice S4, design 6225701358): does this packet ARRIVAL-rebase the timeline whose
+ * continuation is cont_ns (0 = none yet)? A LOCKED arrival-basis source never has its placement moved by its
+ * stamps: its continuation advances by the resampled frames, so stamps on a clock other than the mixer's drift
+ * from it (stock VLC: ~3.6 ms/h per ppm), and from 70 ms OBS would PLACE the packet at its stamp (a gap or
+ * overwrite of its own audio) or, past 2 s, drop the buffer and re-latch timing_adjust. The basis is predicted
+ * from the inputs the ASRC basis reads further down, with this packet's direct-stamp verdict from before the
+ * smoothing (a decoupled source's per-packet re-latch is therefore never rebased: the conservative side).
+ * Decision: src/genlock_audio_pairing.rs audio_arrival_rebase. */
+static bool genlock_audio_arrival_rebase_source(const obs_source_t *source, int hold_mode, bool direct_ts,
+						uint64_t cont_ns, uint64_t ts_ns)
+{
+	const bool monitor_only = source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY;
+	const bool can_resample = source->asrc_enabled && source->resampler;
+	return cont_ns != 0 &&
+	       genlock_audio_arrival_rebase(genlock_audio_asrc_placement(hold_mode, direct_ts, monitor_only, can_resample),
+					    monitor_only, can_resample, source->asrc.level_captured,
+					    uint64_diff(cont_ns, ts_ns));
+}
+
+/* camera-box issue 1425 (E3 slice S4): count a packet a rebase let reach the system-domain check appending
+ * and record it for genlock_audio_arrival_rebase_log (printed after audio_buf_mutex). A rebase in either domain
+ * always leaves that check appending (the same decision rebases the system timeline from 70 ms on, and under
+ * 70 ms it appends anyway); a stopped source -- audio_ts 0 -- is still placed by OBS and counts nothing. A
+ * later forced placement of the same packet (a sync-offset change, a latency-hold placement) is still counted. */
+static void genlock_audio_arrival_rebase_record(obs_source_t *source, bool rebase_ts, bool rebase_sys,
+						int64_t ts_drift_ns, int64_t sys_drift_ns)
+{
+	if (!(rebase_ts || rebase_sys) || !source->audio_ts)
+		return;
+	source->genlock_arrival_rebases++;
+	source->genlock_arrival_rebase_due = true;
+	source->genlock_arrival_rebase_sys = !rebase_ts;
+	source->genlock_arrival_rebase_drift_ns = rebase_ts ? ts_drift_ns : sys_drift_ns;
+}
+
 /* camera-box issue 1367 (design 5845361166): the ASRC of a source whose audio is placed at its NDI
  * timecode runs HERE, once per placed-or-appended packet, on where the packet landed against its RAW
  * stamp (err_ms: actual - intended, the owed placement slew excluded) -- never on arrival timing
@@ -2746,28 +2781,14 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	 * source->timing_adjust for it: the render thread writes that for every async video frame, and a
 	 * write between two reads flipped the ASRC basis (and flushed its regression) for one packet. */
 	bool genlock_direct_ts = using_direct_ts;
-	/* camera-box issue 1425 (E3 slice S4, design 6225701358): a LOCKED arrival-basis source never has its
-	 * placement moved by its stamps. Its continuation advances by the resampled frames, so stamps on a
-	 * clock other than the mixer's drift from it (stock VLC: ~3.6 ms/h per ppm); at 70 ms the smoothing
-	 * below would PLACE the packet at its stamp (a gap or overwrite of its own audio), past 2 s drop the
-	 * buffer and re-latch timing_adjust. The stamp-domain timeline continues from this packet's stamp
-	 * instead, so it snaps onto itself; the system domain does the same under audio_buf_mutex. The basis
-	 * is predicted from the same inputs the ASRC basis reads below (an Off hold on non-direct stamps or
-	 * a latency hold). Decision: src/genlock_audio_pairing.rs audio_arrival_rebase. */
-	const bool genlock_rebase_monitor_only = source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY;
-	const bool genlock_rebase_can_resample = source->asrc_enabled && source->resampler;
-	const int genlock_rebase_basis = genlock_audio_asrc_placement(
-		genlock_hold_mode, using_direct_ts, genlock_rebase_monitor_only, genlock_rebase_can_resample);
-	int64_t genlock_arrival_drift_ns = 0;
+	/* camera-box issue 1425 (E3 slice S4): a locked arrival source's stamp timeline continues from this
+	 * packet's stamp, so the smoothing below snaps it onto itself (genlock_audio_arrival_rebase_source). */
+	const int64_t genlock_arrival_drift_ns = (int64_t)(data->timestamp - source->next_audio_ts_min);
 	const bool genlock_arrival_rebase_ts =
-		source->timing_set && source->next_audio_ts_min != 0 &&
-		genlock_audio_arrival_rebase(genlock_rebase_basis, genlock_rebase_monitor_only,
-					     genlock_rebase_can_resample, source->asrc.level_captured,
-					     uint64_diff(source->next_audio_ts_min, data->timestamp));
-	if (genlock_arrival_rebase_ts) {
-		genlock_arrival_drift_ns = (int64_t)(data->timestamp - source->next_audio_ts_min);
+		source->timing_set && genlock_audio_arrival_rebase_source(source, genlock_hold_mode, using_direct_ts,
+									  source->next_audio_ts_min, data->timestamp);
+	if (genlock_arrival_rebase_ts)
 		source->next_audio_ts_min = data->timestamp;
-	}
 
 	if (!source->timing_set) {
 		reset_audio_timing(source, in.timestamp, os_time);
@@ -2814,13 +2835,9 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	 * does a pending relabel's start. Issue 1425 (E3 slice S4): and a locked arrival source's packet 70 ms or
 	 * more off its system-domain continuation (its stamps were rebased above, or timing_adjust moved): it
 	 * appends, never placed and never the second MAX_TS_VAR reset. */
-	const int64_t genlock_arrival_sys_drift_ns =
-		source->next_audio_sys_ts_min ? (int64_t)(in.timestamp - source->next_audio_sys_ts_min) : 0;
-	const bool genlock_arrival_rebase_sys =
-		source->next_audio_sys_ts_min != 0 &&
-		genlock_audio_arrival_rebase(genlock_rebase_basis, genlock_rebase_monitor_only,
-					     genlock_rebase_can_resample, source->asrc.level_captured,
-					     uint64_diff(source->next_audio_sys_ts_min, in.timestamp));
+	const int64_t genlock_arrival_sys_drift_ns = (int64_t)(in.timestamp - source->next_audio_sys_ts_min);
+	const bool genlock_arrival_rebase_sys = genlock_audio_arrival_rebase_source(
+		source, genlock_hold_mode, using_direct_ts, source->next_audio_sys_ts_min, in.timestamp);
 	if ((genlock_relabel || genlock_relabel_pending || genlock_arrival_rebase_sys) &&
 	    source->next_audio_sys_ts_min)
 		source->next_audio_sys_ts_min = in.timestamp;
@@ -2847,17 +2864,8 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 			genlock_timeline_reset = true;
 		}
 	}
-	/* camera-box issue 1425 (E3 slice S4): count a packet an arrival rebase let append and record it for
-	 * genlock_audio_arrival_rebase_log, printed after the lock. A rebase in either domain always leaves the
-	 * system-domain check appending (the same decision rebases the system timeline from 70 ms on, and under
-	 * 70 ms it appends anyway); a stopped source -- audio_ts 0 -- is still placed by OBS and counts nothing. */
-	if ((genlock_arrival_rebase_ts || genlock_arrival_rebase_sys) && source->audio_ts) {
-		source->genlock_arrival_rebases++;
-		source->genlock_arrival_rebase_due = true;
-		source->genlock_arrival_rebase_sys = !genlock_arrival_rebase_ts;
-		source->genlock_arrival_rebase_drift_ns = genlock_arrival_rebase_ts ? genlock_arrival_drift_ns
-										    : genlock_arrival_sys_drift_ns;
-	}
+	genlock_audio_arrival_rebase_record(source, genlock_arrival_rebase_ts, genlock_arrival_rebase_sys,
+					    genlock_arrival_drift_ns, genlock_arrival_sys_drift_ns);
 
 	sync_offset = source->sync_offset;
 	in.timestamp += sync_offset;

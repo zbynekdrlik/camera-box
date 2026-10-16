@@ -77,6 +77,12 @@ struct vlc_source {
 	obs_hotkey_id stop_hotkey;
 	obs_hotkey_id playlist_next_hotkey;
 	obs_hotkey_id playlist_prev_hotkey;
+
+	/* camera-box issue 1425 (S4v): the largest audio lead (pts - libvlc_clock()) since the last log
+	 * line, and when that line was printed (OBS monotonic, 0 = never); VLC's audio thread only. */
+	int64_t audio_lead_max_us;
+	bool audio_lead_seen;
+	uint64_t audio_lead_log_ns;
 };
 
 static libvlc_media_t *get_media(media_file_array_t *files, const char *path)
@@ -364,27 +370,47 @@ static void *vlcs_video_lock(void *data, void **planes)
 }
 
 /* camera-box issue 1425 (E3 slice S4v, design 6225701358): a libvlc_clock() value (us) on the OBS media
- * clock, os_gettime_ns(), mapped by its AGE on VLC's own clock. Stock stamped libvlc_clock() relative to
- * plugin load: not direct, so libobs latched a timing_adjust and the source drifted against the mixer at
- * the dantesync discipline rate on Windows (~3.6 ms/h per ppm, issue 1372; VLC's clock is QPC there, the
- * mixer the disciplined system-time rate), until its audio was re-placed 70 ms at a time. Mapped, the
- * stamps are direct: the audio is judged by its own stamp (the issue-1425 STAMP basis) and the video is
- * presented on the same clock. On Linux libvlc_clock() is CLOCK_MONOTONIC, the clock os_gettime_ns()
- * reads, so the mapping is the identity. */
-static inline uint64_t vlcs_media_clock_ns(int64_t vlc_us)
+ * clock, os_gettime_ns(), mapped by its AGE on VLC's own clock (vlc_now_us = libvlc_clock() read by the
+ * caller). Stock stamped libvlc_clock() relative to plugin load: not direct, so libobs latched a
+ * timing_adjust and the source drifted against the mixer at the dantesync discipline rate on Windows
+ * (~3.6 ms/h per ppm, issue 1372: VLC's clock is not the disciplined system-time rate the mixer runs at),
+ * until its audio was re-placed 70 ms at a time. Mapped, the stamps are direct: the audio is judged by its
+ * own stamp (the issue-1425 STAMP basis) and the video is presented on the same clock. On Linux
+ * libvlc_clock() is CLOCK_MONOTONIC, the clock os_gettime_ns() reads, so the mapping is the identity. */
+static inline uint64_t vlcs_media_clock_ns(int64_t vlc_us, int64_t vlc_now_us)
 {
 	const uint64_t stamp_ns = vlc_us > 0 ? (uint64_t)vlc_us * 1000ULL : 0;
 #ifdef _WIN32
-	return os_foreign_clock_ns_to_gettime_ns(stamp_ns, (uint64_t)libvlc_clock_() * 1000ULL);
+	return os_foreign_clock_ns_to_gettime_ns(stamp_ns, vlc_now_us > 0 ? (uint64_t)vlc_now_us * 1000ULL : 0);
 #else
+	(void)vlc_now_us;
 	return stamp_ns;
 #endif
+}
+
+/* camera-box issue 1425 (S4v): how far ahead of VLC's clock the audio arrives (the lead of its presentation
+ * date). libobs reads a stamp within 2 s (MAX_TS_VAR) of now as DIRECT, so a lead near 2 s would flip the
+ * source between the stamp and the arrival basis. The largest lead of each minute is logged (the first at
+ * once) for the live acceptance. */
+#define VLCS_AUDIO_LEAD_LOG_NS (60ULL * 1000000000ULL)
+static void vlcs_audio_lead_log(struct vlc_source *c, int64_t lead_us, uint64_t now_ns)
+{
+	if (!c->audio_lead_seen || lead_us > c->audio_lead_max_us)
+		c->audio_lead_max_us = lead_us;
+	c->audio_lead_seen = true;
+	if (c->audio_lead_log_ns != 0 && now_ns - c->audio_lead_log_ns < VLCS_AUDIO_LEAD_LOG_NS)
+		return;
+	c->audio_lead_log_ns = now_ns ? now_ns : 1;
+	blog(LOG_INFO, "[vlc_source: '%s'] audio lead_max_ms=%.1f (issue 1425)", obs_source_get_name(c->source),
+	     (double)c->audio_lead_max_us / 1000.0);
+	c->audio_lead_seen = false;
 }
 
 static void vlcs_video_display(void *data, void *picture)
 {
 	struct vlc_source *c = data;
-	c->frame.timestamp = vlcs_media_clock_ns(libvlc_clock_());
+	const int64_t vlc_now_us = libvlc_clock_();
+	c->frame.timestamp = vlcs_media_clock_ns(vlc_now_us, vlc_now_us);
 	obs_source_output_video(c->source, &c->frame);
 
 	UNUSED_PARAMETER(picture);
@@ -493,7 +519,9 @@ static void vlcs_audio_play(void *data, const void *samples, unsigned count, int
 	}
 
 	memcpy((void *)c->audio.data[0], samples, size);
-	c->audio.timestamp = vlcs_media_clock_ns(pts);
+	const int64_t vlc_now_us = libvlc_clock_();
+	c->audio.timestamp = vlcs_media_clock_ns(pts, vlc_now_us);
+	vlcs_audio_lead_log(c, pts - vlc_now_us, os_gettime_ns());
 	c->audio.frames = count;
 
 	obs_source_output_audio(c->source, &c->audio);

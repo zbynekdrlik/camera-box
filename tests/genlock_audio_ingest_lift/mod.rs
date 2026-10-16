@@ -82,6 +82,9 @@ pub fn ingest_harness() -> String {
             "static void source_signal_audio_data(",
         ),
         lift_fn(&src, "static inline uint64_t uint64_diff("),
+        // issue 1425 (E3 slice S4): the arrival rebase decision and its record, called by the branch
+        lift_fn(&src, "static bool genlock_audio_arrival_rebase_source("),
+        lift_fn(&src, "static void genlock_audio_arrival_rebase_record("),
         lift_fn(&src, "static int genlock_audio_step_hold_source("),
         lift_fn(&src, "static bool genlock_audio_relabel_source("),
         lift_fn(&src, "static bool genlock_audio_relabel_pending_source("),
