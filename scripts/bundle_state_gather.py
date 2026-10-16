@@ -65,6 +65,7 @@ from bundle_state_audio import (  # noqa: E402 -- after the sibling path setup a
     AUDIO_REF_BAND_WINDOW_CAP,
     AUDIO_TS_LAG_STALE_AFTER_S,
     BUFFERED_MS_DEFAULT_SRC,
+    audio_buffering_from_log,
     audio_mixer_from_log,
     audio_ref_band_from_log,
     audio_telemetry_from_log,
@@ -155,6 +156,7 @@ __all__ = [
     "AUDIO_REF_BAND_WINDOW_CAP",
     "AUDIO_TS_LAG_STALE_AFTER_S",
     "BUFFERED_MS_DEFAULT_SRC",
+    "audio_buffering_from_log",
     "audio_mixer_from_log",
     "audio_ref_band_from_log",
     "audio_telemetry_from_log",
@@ -342,6 +344,15 @@ BUNDLE_STATE_KEYS = (
     "audio_mixer_window_ms",
     "audio_mixer_tick_ms",
     "audio_mixer_age_s",
+    # issue 1381 -- the audio mix BUFFERING ratchet facet the dev1 audio-mixer watchdog's third arm
+    # reads (`audio_buffering_from_log`): the newest `#800` total, the session's start value (the
+    # genlock floor line), the source that raised it (the newest `ABOVE the floor` line) and the
+    # newest `#800` line's in-log age. Omit-when-empty: "0" is KEPT, a log with no `#800` line in
+    # the tail omits them -> UNKNOWN downstream, never a fake 0.
+    "audio_buffering_ms",
+    "audio_buffering_start_ms",
+    "audio_buffering_source",
+    "audio_buffering_age_s",
     "vban_pacer_loss_events",
     "vban_pacer_loss_ms",
     "vban_pacer_loss_dest",

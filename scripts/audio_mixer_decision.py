@@ -36,6 +36,14 @@ which assumes OBS's log stamps and the gather's clock share one time zone. A log
 barely changes between two passes is ADVANCING; if its head still reads older than the frozen
 bound, the two clocks disagree and the whole mixer arm reads STALE, blind. MISMATCH pages once
 (the orchestrator's stable-key CLOCK page); OK = consistent; UNKNOWN = not judgeable this pass.
+BUFFERING arm (classify_buffering, issue 1381) -- the audio mix buffering against its session start
+value (the genlock floor). A stall of the audio callback makes libobs add buffering above the floor
+(15.10.2026 stream-snv: 85 -> 170 ms), and the whole output stays that much later until an OBS
+restart while the tick counts recover, so the MIXER arm reads HEALTHY:
+  SKIP / UNKNOWN (no `#800` line or no start value) as above; STALE when the newest `#800` line is
+  old or the log head is frozen (log-only, the watchdog resets the confirm); RAISED when the
+  buffering sits at least one mixer tick above the start (counted in whole ticks: libobs truncates
+  the totals to whole ms, 4 -> 5 ticks reads 85 -> 106 = 21 ms); HEALTHY otherwise.
 VBAN arm (classify_vban) -- the per-destination loss-counter increase inside the gather window:
   SKIP / UNKNOWN (no VBAN output on this box) as above; VBAN_LOSS when any loss counter moved
   (events > 0 or loss ms > 0, decided before staleness: loss in the window is real even if the
@@ -124,6 +132,40 @@ def classify_mixer(ticks, ticks_over, window_ms, tick_ms, age_s, box_reachable,
     return res
 
 
+def buffering_tick_ms(tick_ms):
+    """The mixer tick length (ms) the BUFFERING arm counts in: the mixer facet's `tick_ms` when it
+    is a known sample rate, else the SHORTEST known tick -- half of it is still under any real
+    tick step, so a raise is never missed. Derived from AUDIO_OUTPUT_FRAMES and the rates, never a
+    literal."""
+    ticks_per_min = expected_ticks_per_min(tick_ms)
+    if ticks_per_min is not None:
+        return 60000.0 / ticks_per_min
+    return min(AUDIO_OUTPUT_FRAMES * 1000.0 / rate for rate in KNOWN_SAMPLE_RATES)
+
+
+def classify_buffering(now_ms, start_ms, age_s, box_reachable, tick_ms=None,
+                       stale_after_s=DEFAULT_STALE_AFTER_S, log_head_age_s=None):
+    """One box's BUFFERING verdict (see the module doc) + the raise it graded: `delta_ms`
+    (now - start) and `raised_ticks` (the raise in whole ticks, 0 when not above the start)."""
+    res = {"verdict": "SKIP", "delta_ms": None, "raised_ticks": None, "tick_ms": None}
+    if box_reachable != 1:
+        return res
+    if now_ms is None or start_ms is None:
+        res["verdict"] = "UNKNOWN"
+        return res
+    if ((age_s is not None and age_s > stale_after_s)
+            or (log_head_age_s is not None and log_head_age_s > DEFAULT_LOG_FROZEN_S)):
+        # the #800 telemetry stopped, or the whole log did (OBS down / hung): not the current value
+        res["verdict"] = "STALE"
+        return res
+    tick = buffering_tick_ms(tick_ms)
+    delta = now_ms - start_ms
+    ticks = max(0, int(delta / tick + 0.5))
+    res.update(delta_ms=delta, raised_ticks=ticks, tick_ms=tick,
+               verdict="RAISED" if ticks >= 1 else "HEALTHY")
+    return res
+
+
 def classify_log_clock(head_age_s, prev_head_age_s, gap_s, frozen_s=DEFAULT_LOG_FROZEN_S,
                        min_gap_s=LOG_CLOCK_MIN_GAP_S, max_gap_s=LOG_CLOCK_MAX_GAP_S):
     """issue 1385 -- do the OBS log clock and the gather clock agree? `head_age_s` now and
@@ -208,6 +250,12 @@ def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
     events = _num(obj, "vban_pacer_loss_events", int)
     loss_ms = _num(obj, "vban_pacer_loss_ms", float)
     vban_age = _num(obj, "vban_pacer_age_s", int)
+    buf_now = _num(obj, "audio_buffering_ms", int)
+    buf_start = _num(obj, "audio_buffering_start_ms", int)
+    buf_age = _num(obj, "audio_buffering_age_s", int)
+    buffering = classify_buffering(buf_now, buf_start, buf_age, box_reachable, tick_ms,
+                                   stale_after_s, log_head_age_s=head_age)
+    buf_src = obj.get("audio_buffering_source") if isinstance(obj, dict) else None
     return {
         "mixer_verdict": mixer["verdict"], "ticks": ticks, "ticks_over": over,
         "window_ms": window_ms, "tick_ms": tick_ms, "age_s": age_s, "log_head_age_s": head_age,
@@ -220,6 +268,11 @@ def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
         "vban_events": events, "vban_loss_ms": loss_ms,
         "vban_dest": obj.get("vban_pacer_loss_dest") if isinstance(obj, dict) else None,
         "vban_age_s": vban_age,
+        "buffering_verdict": buffering["verdict"], "buffering_ms": buf_now,
+        "buffering_start_ms": buf_start, "buffering_delta_ms": buffering["delta_ms"],
+        "buffering_raised_ticks": buffering["raised_ticks"],
+        "buffering_source": buf_src if isinstance(buf_src, str) and buf_src.strip() else None,
+        "buffering_age_s": buf_age,
     }
 
 
@@ -234,9 +287,9 @@ def _fmt(key, v):
 
 
 def _main(argv):
-    ap = argparse.ArgumentParser(description="pure audio-mixer / VBAN-loss decisions (issue 1381)")
+    ap = argparse.ArgumentParser(description="pure audio-mixer decisions (issue 1381)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    a = sub.add_parser("analyze", help="read /bundle-state.json on stdin -> both arms' verdicts")
+    a = sub.add_parser("analyze", help="read /bundle-state.json on stdin -> every arm's verdict")
     a.add_argument("--box-reachable", type=int, required=True)
     a.add_argument("--tolerance", type=float, default=DEFAULT_TOLERANCE)
     a.add_argument("--over-max", type=float, default=DEFAULT_OVER_MAX)
@@ -254,7 +307,9 @@ def _main(argv):
     for k in ("mixer_verdict", "ticks", "ticks_over", "window_ms", "tick_ms", "age_s",
               "log_head_age_s", "log_clock",
               "rate_per_min", "expected_per_min", "deviation_per_min", "over_per_min",
-              "vban_verdict", "vban_events", "vban_loss_ms", "vban_dest", "vban_age_s"):
+              "vban_verdict", "vban_events", "vban_loss_ms", "vban_dest", "vban_age_s",
+              "buffering_verdict", "buffering_ms", "buffering_start_ms", "buffering_delta_ms",
+              "buffering_raised_ticks", "buffering_source", "buffering_age_s"):
         print(f"{k}={_fmt(k, res[k])}")
     return 0
 

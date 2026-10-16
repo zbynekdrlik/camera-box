@@ -2826,6 +2826,80 @@ def open_multiview(a):
         ws.close()
 
 
+# issue 1367 (16.10.2026): the E2E sweep must cut the strih program with the Cut transition. The
+# operator left strih on "Fade 500 ms" after a production, and every E2E cut then mixed the outgoing
+# and incoming camera for 0.5 s (blended QR frames, a ~0.73 s hole in the new camera's ticks), so
+# the release gate measured the transition instead of the cameras. The harness records the
+# operator's transition, sets Cut for its own switches and puts the original back in cleanup().
+# The save file is durable: an aborted run never loses the operator's original to a later run's Cut.
+TRANSITION_CUT_NAME = "Cut"
+
+
+def transition_cut_plan(current, saved):
+    """`current` = GetCurrentSceneTransition's reply, `saved` = an existing save (or None).
+    Returns {"save": dict-or-None, "set": name-or-None}: what to record and what to select."""
+    name = (current or {}).get("transitionName")
+    save = None
+    if saved is None:
+        save = {"name": name, "duration_ms": (current or {}).get("transitionDuration"),
+                "fixed": bool((current or {}).get("transitionFixed"))}
+    return {"save": save, "set": None if name == TRANSITION_CUT_NAME else TRANSITION_CUT_NAME}
+
+
+def transition_restore_plan(saved):
+    """The requests that put a saved transition back (none without a save)."""
+    if not saved or not saved.get("name"):
+        return []
+    reqs = [("SetCurrentSceneTransition", {"transitionName": saved["name"]})]
+    if not saved.get("fixed") and saved.get("duration_ms") is not None:
+        reqs.append(("SetCurrentSceneTransitionDuration",
+                     {"transitionDuration": int(saved["duration_ms"])}))
+    return reqs
+
+
+def _transition_saved(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except FileNotFoundError:
+        return None
+
+
+def transition_cut(a):
+    ws = _conn(a.host, a.password)
+    current = _rpc(ws, "GetCurrentSceneTransition")
+    plan = transition_cut_plan(current, _transition_saved(a.save))
+    if plan["save"] is not None:
+        os.makedirs(os.path.dirname(os.path.abspath(a.save)), exist_ok=True)
+        tmp = a.save + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(plan["save"], fh)
+        os.replace(tmp, a.save)
+    if plan["set"]:
+        _rpc(ws, "SetCurrentSceneTransition", {"transitionName": plan["set"]})
+    after = _rpc(ws, "GetCurrentSceneTransition").get("transitionName")
+    print(f"[obs] {a.host}: transition {current.get('transitionName')} -> {after} "
+          f"(saved operator transition in {a.save}, issue 1367)")
+    if after != TRANSITION_CUT_NAME:
+        raise SystemExit(f"[obs] {a.host}: could not select the {TRANSITION_CUT_NAME} transition "
+                         f"(still {after!r}) -- a measurement on a blending transition is not a "
+                         f"measurement (issue 1367)")
+
+
+def transition_restore(a):
+    saved = _transition_saved(a.save)
+    reqs = transition_restore_plan(saved)
+    if not reqs:
+        print(f"[obs] {a.host}: no saved transition at {a.save} -- nothing to restore (issue 1367)")
+        return
+    ws = _conn(a.host, a.password)
+    for rtype, rdata in reqs:
+        _rpc(ws, rtype, rdata)
+    os.remove(a.save)
+    print(f"[obs] {a.host}: transition restored to {saved['name']} (issue 1367)")
+
+
 def ensure_studio_mode_on(a):
     """#767 preflight — Studio Mode must be ON on EVERY broadcast box, imag included (user hard
     rule, 2026-07-15: without Studio Mode the multiview's Preview cell is DEAD — "studio mode je
@@ -3125,7 +3199,7 @@ def main():
         "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
         "republish-black-check", "idle-receiver", "apply-measurement-pins",
-        "verify-measurement-pins", "dev-scene",
+        "verify-measurement-pins", "dev-scene", "transition-cut", "transition-restore",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -3258,6 +3332,10 @@ def main():
             # (OBS_NONBLACK_MIN_MEAN_PROD) instead of the #312 default -- the stream development
             # program is real production content.
             p.add_argument("--prod-floor", action="store_true")
+        if name in ("transition-cut", "transition-restore"):
+            # issue 1367: the durable save of the operator's transition (default under ~/.camera-box)
+            p.add_argument("--save", default=os.path.expanduser(
+                "~/.camera-box/strih-transition-saved.json"))
         if name == "dev-scene":
             # issue 1380: ensure the stream development scene nests the production scene
             # (idempotent, operator-wins, never writes to the production scene).
@@ -3294,7 +3372,9 @@ def main():
      "republish-black-check": republish_black_check,
      "idle-receiver": idle_receiver,
      "apply-measurement-pins": apply_measurement_pins,
-     "verify-measurement-pins": verify_measurement_pins}[a.cmd]
+     "verify-measurement-pins": verify_measurement_pins,
+     "transition-cut": transition_cut,
+     "transition-restore": transition_restore}[a.cmd]
     try:
         handler(a)
     except ForbiddenSceneError as e:

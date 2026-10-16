@@ -60,3 +60,14 @@ The pattern (`cg_chain_cleanup_burns_first` in `scripts/lib/cg-chain-e2e.sh`):
   again by an unverified OFF. A "verified ON" flag misses a signal between the ON request and its
   read-back, and it misses an OFF that ended in a LEAK;
 - the late cleanup call waits for the jobs, then retries with the normal attempts (the verdict).
+
+## The strih program transition is snapshot + Cut + restore, like the stream pin (issue 1367)
+
+An operator's `Fade` on strih (16.10.2026, after a production) made every E2E cut mix two cameras
+and failed the release gate on the transition, not the cameras. `strih_transition_force_cut`
+(`scripts/lib/strih-transition.sh`, right after `stream_dev_scene_ensure`, before the first strih
+program switch) saves the operator's transition to the durable
+`~/.camera-box/strih-transition-saved.json` and selects `Cut`; `strih_transition_restore` in
+`cleanup()` (right after `cold_cut_cleanup_restore`) puts it back and deletes the save. An existing
+save is never overwritten, so an aborted run's next start still restores the operator's real choice.
+Any other operator OBS state a measurement must override follows the same save/restore shape.

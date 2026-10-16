@@ -237,8 +237,8 @@ def _av_offset_log_facets(log_text):
 
 def _audio_log_facets(log_text, log_read_tod, ref_band_src):
     """The OBS audio facets of the bounded log: the #1226/#1231 ts_lag max + freshness, the #1265
-    reference band, the #1325 buffered_ms shape, the issue-1381 mixer + obs-vban pacer loss, and the
-    issue-1385 log-head age. A dict of `build_bundle_state` keywords."""
+    reference band, the #1325 buffered_ms shape, the issue-1381 mixer + obs-vban pacer loss + mix
+    buffering, and the issue-1385 log-head age. A dict of `build_bundle_state` keywords."""
     # issue 1381: the timestamped tail is parsed ONCE and shared by the mixer + pacer facets below.
     stamped_tail = bsg.timestamped_tail_lines(log_text)
     ts_lag_ms, ts_lag_src, ts_lag_age_s = bsg.audio_telemetry_from_log(log_text)
@@ -250,6 +250,8 @@ def _audio_log_facets(log_text, log_read_tod, ref_band_src):
      mixer_age_s) = bsg.audio_mixer_from_log(log_text, tail=stamped_tail)
     (vban_events, vban_ms, vban_dest,
      vban_age_s) = bsg.vban_pacer_loss_from_log(log_text, tail=stamped_tail)
+    (buffering_ms, buffering_start_ms, buffering_src,
+     buffering_age_s) = bsg.audio_buffering_from_log(log_text, tail=stamped_tail)
     return {
         "audio_ts_lag_ms": ts_lag_ms,
         "audio_ts_lag_src": ts_lag_src,
@@ -269,6 +271,10 @@ def _audio_log_facets(log_text, log_read_tod, ref_band_src):
         "audio_mixer_window_ms": mixer_window_ms,
         "audio_mixer_tick_ms": mixer_tick_ms,
         "audio_mixer_age_s": mixer_age_s,
+        "audio_buffering_ms": buffering_ms,
+        "audio_buffering_start_ms": buffering_start_ms,
+        "audio_buffering_source": buffering_src,
+        "audio_buffering_age_s": buffering_age_s,
         "vban_pacer_loss_events": vban_events,
         "vban_pacer_loss_ms": vban_ms,
         "vban_pacer_loss_dest": vban_dest,

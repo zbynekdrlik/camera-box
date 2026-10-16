@@ -339,7 +339,8 @@ ITEMS = [
     Item("mic", "merací mikrofón (mbc)", ["mic"], "verdict",
          ok_msg="merací mikrofón na kanáli 'mbc' hrá (peak nad prahom)",
          forgot_msg="merací mikrofón je stlmený/vypnutý — odmutuj kanál 'mbc' v Abletone",
-         unknown_msg="stav meracieho mikrofónu sa nepodarilo prečítať (stream OBS alebo cam2 nedostupné)",
+         unknown_msg="stav meracieho mikrofónu sa nepodarilo potvrdiť (stream OBS alebo cam2 nedostupné, "
+                     "alebo verdict=POLLUTED: peak nad stropom úrovne — pozri capture)",
          good={"PRESENT"}, forgot={"SILENT"}),
     Item("mode", "rig režim (TEST/EVENT)", ["mode"], "bare",
          ok_msg="rig je v TEST režime (development)",
