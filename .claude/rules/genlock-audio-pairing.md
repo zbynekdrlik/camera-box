@@ -892,24 +892,38 @@ every other source out of it.
 - **Reading the `asrc:` line.** `basis=stamp timecode=1`: `level=` / `level_avg=` are the placement
   error against the source's own stamp (≈ 0 ± 2 ms healthy), `target=0`, `fallbacks=0`;
   `place_jumps=` flat (a real sample loss is booked and paid at 1000 ppm). The `#800 buffered_ms`
-  of such a source drops to its natural depth (about B + 9 ms for `mbc`).
+  of such a source drops to its natural depth (about B + its base + its sync offset; the `mbc` base is
+  about 9 ms).
 - **Not in this slice:** a sticky basis (the consult's "leave Stamp only after 8 non-direct
   packets"). A source whose stamps hover at OBS's 2 s direct window would flip basis and flush the
   regression each time; no rig source does today.
-- **Tests:** the unit table (`a_directly_stamped_mixed_source_is_judged_by_its_stamp_1425`), the parity
-  gate `c_asrc_placement_matches_the_rust_authority_1425`, the one needle list
-  `tests/genlock_audio_stamp_basis_wiring_1425.rs` (`STAMP_BASIS_WIRING` / `_ABSENT`), required in both
-  `windows-genlock*.yml` pwsh gates, and the two-clock bench `src/asrc_stamp_bench.rs` (mbc 128-sample /
+- **Tests:** the unit table (`a_directly_stamped_mixed_source_is_judged_by_its_stamp_1425`); the parity
+  gate `c_asrc_placement_matches_the_rust_authority_1425` in its own file
+  `tests/genlock_audio_asrc_basis_parity_1425.rs` (the issue-1303 parity file is at the line budget);
+  the one needle list `tests/genlock_audio_stamp_basis_wiring_1425.rs` (`STAMP_BASIS_WIRING` /
+  `_ABSENT`), required in both `windows-genlock*.yml` pwsh gates; and the two-clock bench
+  `src/asrc_stamp_bench.rs` (mbc 128-sample /
   PulseAudio 1024-frame packets, −20/0/+20 ppm, an 8 h ±1 ppm wander, buffering 0..6 extra ticks, four
-  launch phases): |A/V| ≤ 0.72 ms, spread ≤ 0.34 ms, 8 h drift ≤ 0.60 ms, no phantom jump. Its
-  `Arrival` variant spreads the A/V by ~95 ms over the buffering, `Unservoed` drifts with the rate.
+  launch phases): |A/V| ≤ 0.72 ms, spread ≤ 0.34 ms, 8 h drift ≤ 0.60 ms, 0 booked jumps under its
+  1–2 ms delivery jitter. Its `Arrival` variant spreads the A/V by ~95 ms over the buffering,
+  `Unservoed` drifts with the rate.
+- **Known limit, open (Design-question 6206590736): a delivery STALL on an arrival-stamped source.**
+  PulseAudio (`pulse-input.c` stamps "now minus the packet") and WASAPI without device timing carry
+  their delivery timing in the stamp. A stall of ≥ 15 ms arrives as a burst whose stamps are up to the
+  stall late while the samples append contiguously, so the placement error jumps by about −S and
+  recovers by itself; `observe_placement` books it anyway (band max(½ packet, 10 ms)) and the 1000 ppm
+  repayment moves the audio late (scratch run, `mbc` shape: 20 ms → +6.5 ms, back within 1 ms after
+  ~800 s; 8 / 12 ms → nothing). The bench's jitter never reaches the band, so its "0 jumps" is about
+  jitter only. A non-positive stamp advance also drops that packet's raw samples from the rate
+  regression (built for a duplicated NDI slot); on an arrival-stamped source that walks the A/V.
   Mutation: 8/8 C decision, 8/8 wiring (Rust gate AND the real pwsh lines of both ymls, run with the
   portable pwsh), 6/6 Rust decision mutants killed.
 - **Live acceptance (supervisor).** FULL bundle on stream-snv, strih-snv, resolume (libobs changed).
   Expect a one-time A/V shift at the first deploy (`mbc` −2…−7 ms, strih program inputs −27…−41 ms,
   stream-pp about −37 ms; that box's YouTube lipsync is kept by raising its sync offset 100 → 137 ms,
   a fact-file change outside this slice). Then ≥ 2 stream OBS restarts: the release E2E A/V gate green
-  each time, per-camera A/V within ±5 ms across them, the `mbc` line `basis=stamp`, `level_avg` ±2 ms.
+  each time, per-camera A/V within ±5 ms across them, the `mbc` line `basis=stamp`, `level_avg` ±2 ms,
+  `place_jumps=` flat across at least 1 h.
   The 85 ms floor stays until slices 2 and 3 (`genlock-audio-buffering-floor.md`).
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)

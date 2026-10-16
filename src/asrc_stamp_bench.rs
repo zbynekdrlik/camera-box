@@ -55,8 +55,15 @@
 //! Production, from the steady state (600 s) on: |A/V| ≤ 1 ms at B ∈ {0, 1, 2, 4, 6} ticks, every
 //! launch phase and −20 / 0 / +20 ppm, for 128- and 1024-sample packets; the spread across B and the
 //! launch phase ≤ 1 ms; over 8 h with a ±1 ppm wander the A/V moves < 2 ms; no placement jump is ever
-//! booked (no phantom jump from stamp jitter on 128-sample packets) and nothing underruns. `Arrival`
-//! must spread A/V across B and the phase; `Unservoed` must drift with the rate.
+//! booked (no phantom jump from the 1–2 ms delivery jitter on 128-sample packets) and nothing
+//! underruns. `Arrival` must spread A/V across B and the phase; `Unservoed` must drift with the rate.
+//!
+//! **What this does NOT prove: a delivery STALL.** The modelled jitter is a fifth of the compensator's
+//! 10 ms jump band, so the "0 jumps" assertion is about jitter only. A driver that stamps at arrival
+//! (PulseAudio, WASAPI without device timing) puts a stall of ≥ 15 ms into its stamps; the stamp basis
+//! then books a phantom jump and repays it (a scratch run of this plant: `mbc` 20 ms stall → A/V
+//! +6.5 ms, back within 1 ms after ~800 s). The fix is the open Design-question on issue 1425
+//! (comment 6206590736).
 //!
 //! ## Measured (at landing)
 //!

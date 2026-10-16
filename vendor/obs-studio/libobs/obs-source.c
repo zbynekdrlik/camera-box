@@ -2412,7 +2412,10 @@ static inline int genlock_audio_decide_health(int audio_enabled, int is_program_
  * advance between two APPENDED packets as its master block and the previous packet's pre-resample
  * duration as its raw advance, so a sender's pacing, the network and the receive thread never read as a
  * rate. A placed packet or a non-positive advance (a duplicated slot) adds no point and never flushes.
- * The payment this call computes rides on the NEXT packet's resampler (asrc_process_audio takes it). */
+ * The payment this call computes rides on the NEXT packet's resampler (asrc_process_audio takes it).
+ * Issue 1425: a directly stamped non-genlock source (the STAMP basis) runs here too, against its OWN
+ * stamp. A driver that stamps at ARRIVAL (PulseAudio, WASAPI without device timing) carries its
+ * delivery timing in that stamp, so a delivery stall over the jump band reads as a placement jump. */
 static void asrc_timecode_ingest(obs_source_t *source, uint64_t stamp_mono_ns, double err_ms, bool appended)
 {
 	const bool contiguous = appended && source->asrc_tc_have_prev;
@@ -5483,7 +5486,8 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	/* camera-box issue 1367 (design 5845361166): a source whose audio is placed at its NDI timecode is
 	 * judged per packet by where it lands against its stamp (asrc_timecode_ingest, in
 	 * source_output_audio_data); its arrival timing and buffer depth never drive it. Here it only reads
-	 * the servo. Every other source runs the arrival servo exactly as before. */
+	 * the servo. Issue 1425: so does a directly stamped non-genlock source (the STAMP basis, against its
+	 * own stamp). Every other source runs the arrival servo exactly as before. */
 	if (source->asrc.timecode)
 		applied_ppm = source->asrc.applied_ppm;
 	else
