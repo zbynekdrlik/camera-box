@@ -221,6 +221,11 @@
 #        LOADED camera-box unit runs the IRQ split privileged (the irq-affinity drop-in), no other
 #        device IRQ fired on the reserved core in a 2 s /proc/interrupts sample, and
 #        /proc/irq/default_smp_affinity leaves the reserved core out. A missing fact FAILs.
+#   (av) display GPU driven (issue 1446) -- HARD FAIL: every PCI display controller (class 0x03*)
+#        has a kernel driver bound, read from /sys/bus/pci/devices with the running kernel and graded
+#        by display_gpu_verdict (scripts/lib/display-gpu.sh). An N150 GPU (8086:46d4) on 6.8.0-142
+#        has none, so its HDMI preview lights only when a monitor was on at power-on; the remedy is
+#        the HWE kernel through scripts/rt-kernel-upgrade.sh. No controller or a cut read FAILs.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -308,6 +313,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-housekeeping-cpus.sh
 . "$HERE/lib/cambox-housekeeping-cpus.sh"  # cambox_hk_gather_remote_snippet / cambox_hk_verdict -- the (au)
                               # housekeeping-cpus check (issue 1367; SAME lib setup-device.sh writes with)
+# shellcheck source=scripts/lib/display-gpu.sh
+. "$HERE/lib/display-gpu.sh"  # display_gpu_gather_remote_snippet / display_gpu_verdict -- the (av)
+                              # display-GPU-driven check (issue 1446)
 # shellcheck source=scripts/lib/cambox-zram.sh
 . "$HERE/lib/cambox-zram.sh"  # cambox_zram_gather_remote_snippet / cambox_zram_verdict -- the (at) zram
                               # swap check (issue 1428; SAME lib setup-device.sh / create-usb-linux.sh write with)
@@ -951,6 +959,9 @@ Checks:
       running on the housekeeping cores, off the capture core and the capture-IRQ core; the camera-box
       IRQ split loaded and privileged, no other IRQ firing on the capture-IRQ core in a 2 s sample,
       and the default IRQ affinity off it
+  (av) display GPU driven (issue 1446): every PCI display controller has a kernel driver bound (an
+      N150 8086:46d4 on 6.8.0-142 has none: the HDMI preview then lights only when a monitor was on
+      at power-on); the remedy is the HWE kernel via scripts/rt-kernel-upgrade.sh
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1830,6 +1841,30 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
+fi
+
+# (av) display GPU driven (issue 1446) -- HARD FAIL ------------------------------------------------
+# cam5/cam6/cam7 carry the N150 GPU 8086:46d4, which the fleet kernel 6.8.0-142's i915 does not list,
+# so it had no driver: the cameraman HDMI preview then lived only on the firmware framebuffer, which
+# exists only when a monitor was on at power-on, and a monitor plugged in later stayed dark (cam5,
+# 16.10.2026). /dev/fb0 is not the signal (a driven box with no monitor has none). One read-only ssh
+# gather of the PCI display controllers + the running kernel, graded on dev1 by the SAME lib's pure
+# display_gpu_verdict (fail-closed). Inserted after (ak), before (au): outside every slice pytest
+# executes, and before (q), which stays last.
+avrc=0
+GPU_BLOCK="$(ssh_box "$(display_gpu_gather_remote_snippet)")" || avrc=$?
+if [ "$avrc" -ne 0 ] || [ -z "$GPU_BLOCK" ]; then
+  fail "could not read the PCI display controllers over SSH (rc=$avrc) -- cannot certify the HDMI preview has a GPU driver (issue 1446)"
+else
+  GPU_VERDICT="$(display_gpu_verdict "$GPU_BLOCK")" || true
+  case "$GPU_VERDICT" in
+    OK:*) ok "display GPU driven: ${GPU_VERDICT#OK: } -- a monitor plugged in at any time lights the HDMI preview (issue 1446)" ;;
+    *)
+      while IFS= read -r _reason; do
+        if [ -n "$_reason" ]; then fail "display GPU: ${_reason#FAIL: }"; fi
+      done <<<"$GPU_VERDICT"
+      ;;
+  esac
 fi
 
 # (au) housekeeping cpus (issue 1367) -- HARD FAIL -------------------------------------------------
