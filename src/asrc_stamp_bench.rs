@@ -90,7 +90,8 @@
 //! - A real 44 ms loss: booked once at 701.05 s (`mbc`) / 701.03 s (pulse), back within 1 ms at
 //!   743 s (the arrival servo: 742 s / not back in the run).
 //! - Equal-stamp bursts, 8 h: drift 0.13 ms (`mbc`) / 0.24 ms (pulse) from 1800 s on, 0 jumps. The
-//!   pulse A/V settles 5.5 ms late (the bursts' stamp bias); `mbc` 0.6 ms.
+//!   A/V settles p·d late (0.66 ms `mbc` / 5.5 ms pulse at p = 0.25): only the early-stamped first
+//!   packet of each pair reaches the level loop (the second has no rate point of its own).
 
 use crate::asrc_bench::RealtimeAsrcCompensator;
 use crate::genlock_audio_pairing::{
@@ -118,6 +119,8 @@ const DRIFT_BOUND_MS: f64 = 2.0;
 const BUFFERINGS: [u64; 5] = [0, 1, 2, 4, 6];
 const PHASES_QUARTER_TICKS: [u64; 4] = [0, 1, 2, 3];
 const RATES_PPM: [f64; 3] = [-20.0, 0.0, 20.0];
+/// Issue 1425 round 2: the chance a draw of [`Event::EqualStampBursts`] is a two-packet read.
+const BURST_PAIR_P: f64 = 0.25;
 
 fn frames_ns(frames: u64) -> u64 {
     frames * NS_PER_S / RATE
@@ -170,8 +173,8 @@ enum Event {
         at_s: f64,
         ms: f64,
     },
-    /// From the start, a quarter of the packets arrive together with the next one (one arrival, so
-    /// equal stamps: a driver read that returns two packets).
+    /// From the start, each draw delivers two packets in one read with probability
+    /// [`BURST_PAIR_P`] (one arrival, so equal stamps), else one.
     EqualStampBursts,
 }
 
@@ -501,7 +504,7 @@ fn run(case: &Case) -> Run {
             }
             Event::EqualStampBursts => {
                 if burst_left == 0 {
-                    burst_left = if rng.next() < 0.25 { 2 } else { 1 };
+                    burst_left = if rng.next() < BURST_PAIR_P { 2 } else { 1 };
                     let last = start + f64::from(burst_left) * packet_ns / (1.0 + ppm * 1e-6);
                     burst_arrival = last + case.src.jitter_ns as f64 * rng.next();
                 }

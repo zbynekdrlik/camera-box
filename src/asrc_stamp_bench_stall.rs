@@ -24,12 +24,15 @@
 //! regression for its 600 s span: +1.03 ms on `mbc`), while the arrival servo keeps the whole
 //! displacement.
 //!
-//! **Equal-stamp bursts move the A/V by their stamp bias.** The first packet of a burst is stamped
-//! one packet late, so the stamps' mean sits late by about a fifth of a packet and the stamp basis,
-//! whose setpoint is the stamp, settles there (PulseAudio: +5.4 ms over the bench's jitter-only
-//! A/V). The level loop walks there with its ~500 s time constant, so the drift is read from
-//! 1800 s on. The arrival servo cannot hold this feed at all (it never locks: the bench's
-//! `Arrival` run walks with the source rate).
+//! **Equal-stamp bursts move the A/V by p·d.** The first packet of a pair is stamped one packet (d)
+//! late and reaches the level loop with an error of −d; the second, whose stamp is right, has no
+//! stamp advance and so no rate point, and its reading never enters the window. The level loop then
+//! settles the audio p·d late, p the pair probability (measured: 0.66 ms `mbc`, 5.52 ms PulseAudio
+//! at p = 0.25; 1.34 / 11.15 ms at p = 0.5 in the review's scratch run). The row pins that offset
+//! (so a change of mechanism shows) and reads the drift from 1800 s on, after the level loop's
+//! ~500 s walk there. The arrival servo cannot hold this feed at all (it never locks: the bench's
+//! `Arrival` run walks with the source rate). Removing the offset (correcting the early stamps of a
+//! run, the same insight as the waiting rate point) is a design question left to the main.
 
 use super::*;
 
@@ -43,6 +46,8 @@ const STALL_SETTLED_MS: f64 = 0.5;
 const STALL_SETTLE_S: usize = 10;
 /// A loss is booked within this many seconds of it.
 const BOOKED_WITHIN_S: f64 = 1.5;
+/// What the 1000 ppm payment (1 ms per second) can already have repaid within that time, ms.
+const PAID_WITHIN_BOOKING_MS: f64 = 1.5;
 /// The A/V of a loss is back within 1 ms no later than the arrival servo's + this.
 const LOSS_BACK_SLACK_S: usize = 2;
 const BACK_MS: f64 = 1.0;
@@ -138,10 +143,10 @@ fn a_stall_past_the_smoothing_threshold_is_booked_once_and_repaid_1425() {
             let a = run(&event_case(src, Servo::Arrival, stall));
             let moved = r.av_s[at + 1] - pre_mean_ms(&r);
             let arrival_moved = a.av_s[at + 1] - pre_mean_ms(&a);
-            // the second after the stall already carries up to 1.5 ms of the stamp basis's payment
+            // the second after the stall already carries part of the stamp basis's payment
             assert!(
                 moved > 20.0
-                    && (moved - arrival_moved).abs() <= STALL_EXCURSION_MS + BOOKED_WITHIN_S,
+                    && (moved - arrival_moved).abs() <= STALL_EXCURSION_MS + PAID_WITHIN_BOOKING_MS,
                 "issue 1425: {} {ms} ms stall: OBS's own placement displaces the audio, the same on \
                  the arrival servo: {moved:.3} vs {arrival_moved:.3} ms",
                 src.name
@@ -204,10 +209,14 @@ fn a_real_loss_is_booked_once_and_repaid_like_the_arrival_servo_1425() {
         );
         let back = back_within_s(&r, BACK_MS);
         let arrival_back = back_within_s(&a, BACK_MS);
+        // absolute too: on PulseAudio the arrival servo never comes back in the run, so the
+        // relative bound alone would pass a loss that is never repaid (review round 3)
+        let paid_by = EVENT_S as usize + 2 + LOSS_MS.ceil() as usize;
         assert!(
-            back <= arrival_back + LOSS_BACK_SLACK_S,
-            "issue 1425: {}: the A/V must be back within {BACK_MS} ms no later than the arrival \
-             servo's + {LOSS_BACK_SLACK_S} s: {back} s vs {arrival_back} s",
+            back <= arrival_back + LOSS_BACK_SLACK_S && back <= paid_by,
+            "issue 1425: {}: the A/V must be back within {BACK_MS} ms once paid at 1000 ppm (by \
+             {paid_by} s) and no later than the arrival servo's + {LOSS_BACK_SLACK_S} s: {back} s \
+             vs {arrival_back} s",
             src.name
         );
     }
@@ -220,6 +229,22 @@ fn equal_stamp_bursts_do_not_drift_over_eight_hours_1425() {
         case.run_s = EIGHT_HOURS_S;
         let r = run(&case);
         let drift = drift_from_ms(&r, BURST_SETTLED_FROM_S);
+        // the settled offset against the same feed without bursts is p·d (module doc)
+        let mut plain = event_case(src, Servo::Production, Event::None);
+        plain.run_s = 2 * BURST_SETTLED_FROM_S as u64;
+        let plain = run(&plain);
+        let settled = |run: &Run| {
+            let s = &run.av_s[BURST_SETTLED_FROM_S..2 * BURST_SETTLED_FROM_S];
+            s.iter().sum::<f64>() / s.len() as f64
+        };
+        let offset = settled(&r) - settled(&plain);
+        let want = BURST_PAIR_P * frames_ns(src.packet_frames) as f64 / 1e6;
+        assert!(
+            (offset - want).abs() <= (0.1 * want).max(0.1),
+            "issue 1425: {} equal-stamp bursts: the A/V must settle p·d = {want:.3} ms late (the \
+             early-stamped first packet of each pair is the one the level loop reads): {offset:.3} ms",
+            src.name
+        );
         assert!(
             drift <= BURST_DRIFT_MS,
             "issue 1425: {} over 8 h with equal-stamp bursts: the minute A/V must move <= \

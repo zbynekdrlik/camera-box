@@ -911,8 +911,8 @@ every other source out of it.
   1–2 ms delivery jitter. Its `Arrival` variant spreads the A/V by ~95 ms over the buffering,
   `Unservoed` drifts with the rate. Round 2 adds the rows of `src/asrc_stamp_bench_stall.rs`
   (stalls 8–60 ms: 0 jumps, ≤ 0.21 ms; the 120 ms stall above; a real 44 ms loss booked once within
-  1.5 s and back within 1 ms no later than the arrival servo + 2 s; equal-stamp bursts: 8 h drift
-  ≤ 0.24 ms from 1800 s), the rate-point parity `c_asrc_rate_point_matches_the_rust_authority_1425`
+  1.5 s, back within 1 ms by 746 s and no later than the arrival servo + 2 s; equal-stamp bursts:
+  8 h drift ≤ 0.24 ms from 1800 s, the A/V settled p·d late, pinned), the rate-point parity `c_asrc_rate_point_matches_the_rust_authority_1425`
   and `tests/asrc_compensator_stamp_parity_1425.rs` (the compensator). Round 2 mutation: 47/47 (19 C
   compensator, 5 C rate point, 8 wiring, 15 Rust); the first run left 5 C compensator mutants alive
   until the parity's `stx` edge scenarios (see the asrc rule).
