@@ -70,14 +70,16 @@ fleet_box_runs_setup_strih() {
 # stream-snv, imag and the traveling Windows resolume-snv (issue 1426). A new venue's Linux OBS box is
 # one fleet row + one fact file, no edit here. resolume-pp has no deploy path yet (no win-* MCP).
 fleet_deploy_order() {
-  local line
+  local line b seen=" "
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    if fleet_box_runs_setup_strih "${line%%|*}"; then printf '%s\n' "${line%%|*}"; fi
+    if fleet_box_runs_setup_strih "${line%%|*}"; then printf '%s\n' "${line%%|*}"; seen+="${line%%|*} "; fi
   done <<EOF
 ${OBS_FLEET}
 EOF
-  printf '%s\n' stream-snv imag resolume-snv
+  for b in stream-snv imag resolume-snv; do
+    case "$seen" in *" $b "*) ;; *) printf '%s\n' "$b" ;; esac
+  done
 }
 
 # fleet_normalize_boxes CSV -> the requested boxes in canonical order (fleet_deploy_order), deduped

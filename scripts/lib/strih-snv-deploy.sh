@@ -93,6 +93,13 @@ if ! declare -F strih_session_apps_autostart_lines >/dev/null; then
 fi
 # issue 1404: setup-strih step 16e installs the program-audio sampler from STRIH_PROGRAM_AUDIO_FILES,
 # which names two vendored dock headers outside scripts/ -- the staged tree must carry them.
+# issue 1426: the ONE fact-file parser (strih_box_parse_file, never executes the file) and the ONE
+# venue table (avsync_venue_host: a venue's stream box + how dev1 dials it), both read from this
+# checkout's scripts/strih-boxes -- the same files the plan and the execute arm read.
+if ! declare -F avsync_venue_host >/dev/null; then
+  # shellcheck source=scripts/lib/avsync-venues.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/avsync-venues.sh"
+fi
 if ! declare -p STRIH_PROGRAM_AUDIO_FILES >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/strih-program-audio.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
@@ -336,40 +343,70 @@ strih_lx_is_dns_name() {
 }
 
 # strih_lx_dial_host_check BOX HOST -> rc 0 when HOST is how the deploy may dial BOX (issue 1426): a
-# `traveling` obs-fleet row (strih-pp, stream-pp) dials its fleet NAME, a plain DNS name (dev1 reaches
-# the PP LAN through companion-pp; the fact file's STRIH_IP is the venue address, never dialled); every
-# other row (strih-snv, `always`) a dotted IPv4 (the fleet row is one). Else the named exit-3 refusal.
+# `traveling` obs-fleet row (strih-pp, stream-pp) dials its fleet NAME, a plain DNS name that is not an
+# address (dev1 reaches the PP LAN through companion-pp; the fact file's STRIH_IP is the venue address,
+# never dialled, so a row that holds an IP is refused here); every other row (strih-snv, `always`) a
+# dotted IPv4 (the fleet row is one). Else the named exit-3 refusal.
 strih_lx_dial_host_check() {
   local box="$1" host="$2"
   if [ "$(obs_fleet_home_check "$box" 2>/dev/null)" = traveling ]; then
-    strih_lx_is_dns_name "$host" && return 0
-    _strih_lx_fail resolve 2 3 "${box} host '$host' must be its obs-fleet NAME (a plain DNS name like ${box}.lan -- a traveling box is dialled by name, never by the venue STRIH_IP)"; return
+    if strih_lx_is_dns_name "$host" && ! [[ "$host" =~ ^[0123456789.]+$ ]]; then return 0; fi
+    _strih_lx_fail resolve 2 3 "${box} host '$host' must be its obs-fleet NAME (a plain DNS name like ${box}.lan -- a traveling box is dialled by name, never by an address such as the venue STRIH_IP)"; return
   fi
   strih_lx_is_ipv4 "$host" && return 0
   _strih_lx_fail resolve 2 3 "${box} host '$host' must be a dotted IPv4 (the fleet row is one; a DNS name is refused here, and a flag-shaped or mistyped override is refused up front)"
 }
 
-# strih_lx_fact BOX KEY [DIR] -> the value of KEY= in the box fact file DIR/BOX.env (default: this
-# checkout's scripts/strih-boxes), read with sed, never sourced; empty when absent. Pure.
+# strih_lx_fact BOX KEY [DIR] -> the value of KEY in the box fact file DIR/BOX.env (default: this
+# checkout's scripts/strih-boxes), through the ONE parser strih_box_parse_file (never sourced). Empty
+# (rc 0) when the file or the key is absent; empty + rc 2 when the file does not parse (its own stderr
+# lines name why). Pure.
 strih_lx_fact() {
-  local dir="${3:-$(dirname "${BASH_SOURCE[0]}")/../strih-boxes}"
+  local dir="${3:-$(dirname "${BASH_SOURCE[0]}")/../strih-boxes}" parsed line
   [ -f "$dir/$1.env" ] || return 0
-  sed -n "/^$2=/{s/^$2=//p;q}" "$dir/$1.env"
+  parsed="$(strih_box_parse_file "$dir/$1.env")" || return 2
+  while IFS= read -r line; do
+    case "$line" in "$2="*) printf '%s\n' "${line#*=}"; return 0 ;; esac
+  done <<< "$parsed"
+  return 0
 }
 
-# strih_lx_guard_hosts BOX DIAL_HOST [DIR] -> "<strih host> <stream host>": the venue the rig-busy guard
-# reads before BOX's OBS is stopped (issue 1426). The venue is BOX's fact-file STRIH_VENUE; its strih is
-# BOX itself when BOX's STRIH_ROLE is strih (DIAL_HOST, so the strih-snv STRIH_LX_IP override is read
-# where it is dialled), else the obs-fleet row strih-<venue>; its stream is the row stream-<venue> (the
-# issue-1414 <role>-<venue> names). strih-snv -> "<its dial IP> 10.77.9.204" exactly as before; stream-pp
-# -> "strih-pp.lan stream-pp.lan". rc 2 (no output) when a fact or a row is missing. Pure.
+# strih_lx_venue_strih_box VENUE [DIR] -> the ONE fact-file box of VENUE whose STRIH_ROLE is strih
+# (strih-snv for snv, strih-pp for pp); rc 2 (no output) for none or more than one. Pure.
+strih_lx_venue_strih_box() {
+  local venue="$1" dir="${2:-$(dirname "${BASH_SOURCE[0]}")/../strih-boxes}" f b found=""
+  for f in "$dir"/*.env; do
+    [ -f "$f" ] || continue
+    b="$(basename "$f" .env)"
+    [ "$(strih_lx_fact "$b" STRIH_VENUE "$dir")" = "$venue" ] || continue
+    [ "$(strih_lx_fact "$b" STRIH_ROLE "$dir")" = strih ] || continue
+    [ -z "$found" ] || return 2
+    found="$b"
+  done
+  [ -n "$found" ] || return 2
+  printf '%s\n' "$found"
+}
+
+# strih_lx_guard_hosts BOX DIAL_HOST -> "<strih host> <stream host>": the venue the rig-busy guard reads
+# before BOX's OBS is stopped (issue 1426). The venue is BOX's fact-file STRIH_VENUE. Its strih is BOX
+# itself when BOX's STRIH_ROLE is strih (DIAL_HOST, so the strih-snv STRIH_LX_IP override is read where
+# it is dialled), else the venue's one strih fact file (strih_lx_venue_strih_box) at its fleet host. Its
+# stream is the ONE venue table's stream host (avsync_venue_host: a stream-role fact file, else the
+# declared Windows stream-snv). strih-snv -> "<its dial IP> 10.77.9.204" exactly as before; stream-pp ->
+# "strih-pp.lan stream-pp.lan". rc 2 + one stderr line naming the venue and the missing piece. Pure.
 strih_lx_guard_hosts() {
-  local box="$1" dial="$2" dir="${3:-}" venue s t
-  venue="$(strih_lx_fact "$box" STRIH_VENUE "$dir")"
-  [ -n "$venue" ] || return 2
-  if [ "$(strih_lx_fact "$box" STRIH_ROLE "$dir")" = strih ]; then s="$dial"; else s="$(fleet_box_ip "strih-$venue")" || return 2; fi
-  t="$(fleet_box_ip "stream-$venue")" || return 2
-  [ -n "$s" ] && [ -n "$t" ] || return 2
+  local box="$1" dial="$2" venue s t sbox
+  venue="$(strih_lx_fact "$box" STRIH_VENUE)"
+  [ -n "$venue" ] || { echo "strih_lx_guard_hosts: ${box} has no STRIH_VENUE fact" >&2; return 2; }
+  if [ "$(strih_lx_fact "$box" STRIH_ROLE)" = strih ]; then
+    s="$dial"
+  else
+    sbox="$(strih_lx_venue_strih_box "$venue")" && s="$(fleet_box_ip "$sbox")" \
+      || { echo "strih_lx_guard_hosts: venue ${venue} has no single strih fact file with an obs-fleet row" >&2; return 2; }
+  fi
+  t="$(avsync_venue_host "$venue")" && [ -n "$t" ] \
+    || { echo "strih_lx_guard_hosts: venue ${venue} has no stream box in the venue table (a stream-role fact file or a declared stream row)" >&2; return 2; }
+  [ -n "$s" ] || return 2
   printf '%s %s\n' "$s" "$t"
 }
 
@@ -385,10 +422,10 @@ strih_lx_tree_check() {
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f" >&2; return 1; }
   done
   [ -f "$env" ] || { echo "strih_lx_tree_check: no scripts/strih-boxes/$box.env (the box fact file)" >&2; return 1; }
-  ic="$(sed -n 's/^STRIH_INTERCOM_CONFIG=//p' "$env" | head -n 1)"
+  ic="$(strih_lx_fact "$box" STRIH_INTERCOM_CONFIG "$tree/scripts/strih-boxes")" || ic=""
   [ -n "$ic" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_INTERCOM_CONFIG" >&2; return 1; }
   [ -f "$tree/$ic" ] || { echo "strih_lx_tree_check: no $ic (STRIH_INTERCOM_CONFIG) -- the intercom/ dir must be staged" >&2; return 1; }
-  hn="$(sed -n 's/^STRIH_HOSTNAME=//p' "$env" | head -n 1)"
+  hn="$(strih_lx_fact "$box" STRIH_HOSTNAME "$tree/scripts/strih-boxes")" || hn=""
   [ -n "$hn" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_HOSTNAME" >&2; return 1; }
   for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f (setup-strih step 16e installs the program-audio sampler from it, issue 1404)" >&2; return 1; }
@@ -479,7 +516,7 @@ strih_lx_prepare() {
     # the rig-busy guard's inputs, resolved here so a missing one refuses before any box is touched:
     # the venue's strih + stream OBS hosts (strih_lx_guard_hosts: obs-fleet rows, the box's fact file).
     guard="$(strih_lx_guard_hosts "$b" "$host")" \
-      || { _strih_lx_fail resolve 2 3 "no stream host (obs-fleet row) for the rig-busy guard"; return; }
+      || { _strih_lx_fail resolve 2 3 "no stream host (obs-fleet row) for the rig-busy guard -- the venue strih/stream of ${b} (above)"; return; }
     STRIH_LX_BOX_HOST[$b]="$host"; STRIH_LX_BOX_GUARD[$b]="$guard"
   done
   STRIH_LX_BOX="$boxes"
@@ -543,9 +580,10 @@ strih_lx_apply() {
   STRIH_LX_BOX="$box"
   STRIH_LX_PREP_HOST="${STRIH_LX_BOX_HOST[$box]:-}"
   STRIH_LX_PREP_HOSTNAME="${STRIH_LX_BOX_HOSTNAME[$box]:-}"
-  STRIH_LX_PREP_GUARD_STRIH="${STRIH_LX_BOX_GUARD[$box]%% *}"
-  STRIH_LX_PREP_STREAM_HOST="${STRIH_LX_BOX_GUARD[$box]#* }"
-  [ -n "$STRIH_LX_PREP_HOST" ] && [ -n "$STRIH_LX_PREP_HOSTNAME" ] \
+  local guard="${STRIH_LX_BOX_GUARD[$box]:-}"
+  STRIH_LX_PREP_GUARD_STRIH="${guard%% *}"
+  STRIH_LX_PREP_STREAM_HOST="${guard#* }"
+  [ -n "$STRIH_LX_PREP_HOST" ] && [ -n "$STRIH_LX_PREP_HOSTNAME" ] && [ -n "$guard" ] \
     || { _strih_lx_fail preflight 2 4 "${box} was not resolved by strih_lx_prepare -- nothing changed"; return; }
   cp -f "$w/run-setup.$box.sh" "$w/repo/run-setup.sh" \
     || { _strih_lx_fail preflight 1 4 "cannot stage the run-setup.sh of ${box} -- nothing changed"; return; }

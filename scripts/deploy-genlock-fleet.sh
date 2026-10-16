@@ -821,13 +821,13 @@ main() {
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
+      # issue 1317 part 3: strih-snv gets its OWN plan (setup-strih.sh + strih-obs.service), never the
+      # imag on-box program (which restarts imag-obs.service, a unit strih-snv does not have); issue
+      # 1426: so does every setup-strih box (strih-pp, stream-pp), routed by the predicate execute uses.
+      if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan "$stage" "$sha" "$run_id" "$b"; continue; fi
       case "$b" in
         stream-snv|resolume-snv) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
         imag)            emit_imag_plan "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
-        # issue 1317 part 3: strih-snv gets its OWN plan (setup-strih.sh + strih-obs.service), never
-        # the imag on-box program (which restarts imag-obs.service, a unit strih-snv does not have);
-        # issue 1426: so does every other setup-strih box (strih-pp, stream-pp), with its own name.
-        *)               emit_strih_lx_plan "$stage" "$sha" "$run_id" "$b" ;;
       esac
     done )
     # issue 1295: emit the fleet-deploy log record as a COMMENT and end the printed plan on `exit 0`.
