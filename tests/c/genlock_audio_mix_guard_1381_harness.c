@@ -806,6 +806,24 @@ int main(void)
 	h_summary("encoder-after-settle");
 	h_freeze_summary("encoder-after-settle");
 
+	/* (n) the window reads audio_callback's INPUT tick start, which only advances: a member 100 ms late
+	 * on the first tick grows the mix 5 ticks at once, and the processed windows that follow start
+	 * before the first tick. Read on the processed window they would count as settled and freeze the
+	 * mix for those ticks; on the input tick no tick of the window is ever frozen. */
+	h_begin("encoder-at-launch-deep-race", "ASIO", true, 100000000, true);
+	h_encoders = 1;
+	{
+		int frozen_ticks = 0;
+		for (int i = 0; i < 300; i++) {
+			h_step(true);
+			if (h_obs.audio.genlock_buffering_frozen)
+				frozen_ticks++;
+		}
+		printf("encoder-at-launch-deep-race frozen_ticks=%d\n", frozen_ticks);
+	}
+	h_summary("encoder-at-launch-deep-race");
+	h_freeze_summary("encoder-at-launch-deep-race");
+
 	/* The guard's exact-sample edges and its locked re-check, called directly. */
 	printf("== probes\n");
 	h_launch();

@@ -554,6 +554,12 @@ const EXPECTED_TRACE: &[&str] = &[
     "L200 buffering-guard: 'mbc' fell behind the mix (frozen at 42 ms): its audio ran 6.0 ms behind the mix window; re-anchored (dropped 6.0 ms) instead of adding 21 ms to the whole mix's 42 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=6.0 ms)",
     "encoder-after-settle: waits=2 total_ms=42 mic_missed=2 'mbc' events=200 dropped_ms=1611.7 mixed=1596 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
     "encoder-after-settle freeze: frozen=1 encoders=1 'mbc' mixed_late=200 mixed_late_dropped_ms=1611.7 mix_mixed_late=200",
+    "== encoder-at-launch-deep-race",
+    "L200 buffering-guard: 'ASIO' entered the mix late: its audio ran 100.0 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 106 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 128 milliseconds of audio buffering, total audio buffering is now 128 milliseconds (source: ASIO)",
+    "encoder-at-launch-deep-race frozen_ticks=0",
+    "encoder-at-launch-deep-race: waits=6 total_ms=128 mic_missed=2 'ASIO' events=1 dropped_ms=20.0 mixed=292 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
+    "encoder-at-launch-deep-race freeze: frozen=0 encoders=1 'ASIO' mixed_late=0 mixed_late_dropped_ms=0.0 mix_mixed_late=0",
     "== probes",
     "probe 1ns-behind-is-rounding: reason=0 in_sync=-1 ts=start-1ns left=960 pending=0 timing_set=1 events=0 ignore_audio=n/a",
     "L200 buffering-guard: 'probe' is not mixed: its audio ran 0.0 ms behind the mix window; re-anchored (dropped 0.0 ms) instead of adding 0 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=0.0 ms)",
@@ -892,6 +898,27 @@ fn an_output_started_inside_the_launch_settle_window_grows_once_and_plays_1425()
             &"L200 genlock audio buffering: grew 42 ms while an encoder ran inside the launch settle window"
         ),
         "issue 1425: the settle-window growth line names the growth"
+    );
+}
+
+#[test]
+fn the_launch_settle_window_reads_the_input_tick_never_the_processed_window_1425() {
+    // A member 100 ms late on the first tick grows the mix several ticks at once, so the processed
+    // windows that follow start BEFORE the first tick. The window counts on audio_callback's input
+    // tick start, which only advances: no tick inside the window is frozen, and nothing is
+    // re-anchored as MIXED_LATE.
+    let trace = c_trace();
+    assert!(
+        trace
+            .iter()
+            .any(|l| l == "encoder-at-launch-deep-race frozen_ticks=0"),
+        "issue 1425: a tick inside the launch settle window was frozen:\n{}",
+        section(trace, "encoder-at-launch-deep-race").join("\n")
+    );
+    assert!(
+        freeze(trace, "encoder-at-launch-deep-race")
+            .contains(" frozen=0 encoders=1 'ASIO' mixed_late=0 "),
+        "issue 1425: the deep startup race must not be re-anchored as MIXED_LATE"
     );
 }
 
