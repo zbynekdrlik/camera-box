@@ -49,19 +49,18 @@ paths:
   100 ms bound and still redraw above it. Only the wording moved: the norm is "under the 100 ms
   bound" (the guarded launcher's popup: `norma pod 100 ms`), and a high draw is added LATENCY on every
   output, never "A/V MIMO" (a stamped source's A/V does not depend on it).
-- **The known limit (pinned: the 1381 lift's `encoder-at-launch`).** With no floor, an output that
-  starts BEFORE the launch's startup race (an audio encoder from the first tick) freezes the mix at
-  0 ms, so every member that reaches the mixer even 1.3 ms behind real time is re-anchored on every
-  tick and muted until the output stops. **Something CAN start one at launch:** stream-snv has an
-  `OBSStream` scheduled task that runs a bare `obs64.exe --startstreaming` (`av-restart-matrix.md`,
-  read 28.9.2026; its trigger was not checked), and a Companion button or the frontend's auto-start
-  options can do the same. Whether the frontend's `--startstreaming` (after the scene collection
-  loads) lands before or after the sources' first late packets is NOT measured. The 85 ms floor
-  absorbed a member up to 85 ms late here, so this path can go from working to muted; reported as the
-  open question of the slice-3 lane return (read the task's trigger read-only, or arm the freeze only
-  after the launch's startup race). The same holds for a direct-stamp member that joins later while an
-  encoder runs and is later than the launch drew (the slice-2b limit, now without the 85 ms margin).
-  The 1381 lift's E1 replays start their encoder at tick 100 (after the race) for this reason.
+- **The launch settle window (ROZHODNUTÉ 6221252305).** The freeze arms only when an audio encoder runs
+  AND 30 s of mix time passed since the mix's first audio tick (`GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS`
+  ↔ `LAUNCH_SETTLE_NS`, `genlock_audio_buffering_launch_settled`; the first tick is a never-reset
+  file static in obs-audio.c like the 1381 mixer tick, so an audio reset opens no new window). An
+  output started inside it (`--startstreaming`, Companion, an operator right after a launch) gets the
+  launch's growth instead of a muted member, logged once: `genlock audio buffering: grew N ms while an
+  encoder ran inside the launch settle window` (LOG_WARNING). Pinned by the 1381 lift's
+  `encoder-at-launch` (`mbc` 2.7 ms late: grows 42 ms, plays) and `encoder-after-settle` (frozen,
+  MIXED_LATE); the E1 replays start their stream at tick 1500, after the window. stream-snv's obs64
+  tasks are one-shot TimeTriggers months past (main's live read), so none fires today. A direct-stamp
+  member that joins later while an encoder runs and is later than the launch drew stays the slice-2b
+  limit (now without the 85 ms margin).
 - **Other boxes.** strih-snv, stream-snv and the resolume cg OBS all start at 0: the mix runs only
   as far behind real time as their own sources need, so wall-clock-stamped outputs (the DistroAV NDI
   output audio, obs-vban) are 85 ms earlier than with the floor.
@@ -305,8 +304,9 @@ so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
     `waits=2 total_ms=42 mic_missed=2` (the mic's startup race, before any output), and the dropouts
     read 166.0 / 226.0 / 116.0 ms (measured against a 42 ms draw, not an 85 ms floor);
   - `e1-asio-outage-128-no-encoder`: the same outage with no encoder grows the mix to 213 ms as stock;
-  - `encoder-at-launch` (issue 1425 slice 3): an encoder from the first tick freezes the mix at 0 and
-    mutes the late members -- the known limit of no floor, pinned;
+  - `encoder-at-launch` / `encoder-after-settle` (issue 1425 slice 3, ROZHODNUTÉ 6221252305): an
+    encoder from the first tick does not freeze the mix inside the launch settle window (it grows
+    once, logged, and `mbc` plays); one started after the window freezes it (MIXED_LATE);
   - `encoder-on-off`: unfrozen growth, a frozen span (MIXED_LATE on every tick), unfrozen growth
     again when the stream stops;
   - `late-start-kept-stamp` (no encoder: the mix grows to 149 ms and the clip plays) and its twin
