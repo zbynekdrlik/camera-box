@@ -585,7 +585,7 @@ def test_execute_mode_stages_the_abi_before_strih_lx_is_touched_1302():
                          main.index("# --- execute mode"))
     prepare = main.index('strih_lx_prepare "$sha"')
     stage = main.index('genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$stats_abi" || exit 3')
-    apply_ = main.index('strih_lx_apply "$sha"')
+    apply_ = main.index('strih_lx_apply_all "$sha"')
     assert resolve < prepare < stage < apply_
     assert '"$yes" "$stats_abi"' in main
     assert 'build_imag_deploy_program "$imag_stage" \'/opt/obs-genlock\' \'/opt/obs-backup\' "$sha" "$sha" "$RETENTION_KEEP" "$yes" "$stats_abi"' in main
