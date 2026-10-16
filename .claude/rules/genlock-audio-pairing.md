@@ -25,6 +25,8 @@ paths:
   - "src/asrc_stamp_bench.rs"
   - "tests/genlock_audio_stamp_basis_wiring_1425.rs"
   - "tests/genlock_audio_asrc_basis_parity_1425.rs"
+  - "tests/asrc_compensator_stamp_parity_1425.rs"
+  - "src/asrc_stamp_bench_stall.rs"
 ---
 
 # Receiver-side AUDIO genlock parity (#1303)
@@ -882,9 +884,9 @@ every other source out of it.
   can_resample`; everything else `Arrival`. `audio_place_measured(mode, basis)` = an active hold or a
   non-arrival basis. `AsrcBasis::token` ↔ `genlock_audio_asrc_basis_token`. The timecode-only
   predicate (`audio_asrc_timecode` / `genlock_audio_asrc_timecode`) is gone.
-- **The wiring** (`source_output_audio_data`): the basis reads `using_direct_ts &&
-  source->timing_adjust == 0` (OBS's own direct-stamp verdict of this packet); the compensator's
-  timecode flag ("placement-judged") is set for every basis but arrival; the measure gate reads the
+- **The wiring** (`source_output_audio_data`): the basis reads the local `genlock_direct_ts`
+  (round 2, below); the compensator is handed the basis (`asrc_compensator_set_basis`, its
+  placement-judged flag derived from it); the measure gate reads the
   basis, while only a genlock hold writes the pairing audit facet (`genlock_audio_place_err_ns` /
   `_seeded`); `asrc_timecode_ingest` is unchanged (a mode-Off source has `genlock_off_ns = 0`, so its
   stamp is `data->timestamp`). The basis is kept in `source->genlock_asrc_basis` and printed as
@@ -897,12 +899,7 @@ every other source out of it.
   about 9 ms).
 - **Not in this slice:** a sticky basis (the consult's "leave Stamp only after 8 non-direct
   packets"). A source whose stamps hover at OBS's 2 s direct window would flip basis and flush the
-  regression each time; no rig source does today. A second flip cause (review round 2): on an
-  async-VIDEO source with direct audio (a media clip), the render thread writes `timing_adjust`
-  without a lock (`obs_source_update_async_video`), so a write that lands between the audio thread
-  zeroing it and the basis read makes that one packet Arrival (two regression flushes). Audio-only
-  sources (`mbc`, PulseAudio) never hit it. Raised with the Design-question (decide on audio-thread
-  state instead).
+  regression each time; no rig source does today.
 - **Tests:** the unit table (`a_directly_stamped_mixed_source_is_judged_by_its_stamp_1425`); the parity
   gate `c_asrc_placement_matches_the_rust_authority_1425` in its own file
   `tests/genlock_audio_asrc_basis_parity_1425.rs` (the issue-1303 parity file is at the line budget);
@@ -912,18 +909,41 @@ every other source out of it.
   PulseAudio 1024-frame packets, −20/0/+20 ppm, an 8 h ±1 ppm wander, buffering 0..6 extra ticks, four
   launch phases): |A/V| ≤ 0.72 ms, spread ≤ 0.34 ms, 8 h drift ≤ 0.60 ms, 0 booked jumps under its
   1–2 ms delivery jitter. Its `Arrival` variant spreads the A/V by ~95 ms over the buffering,
-  `Unservoed` drifts with the rate.
-- **Known limit, open (Design-question 6206590736): a delivery STALL on an arrival-stamped source.**
-  PulseAudio (`pulse-input.c` stamps "now minus the packet") and WASAPI without device timing carry
-  their delivery timing in the stamp. A stall of ≥ 15 ms arrives as a burst whose stamps are up to the
-  stall late while the samples append contiguously, so the placement error jumps by about −S and
-  recovers by itself; `observe_placement` books it anyway (band max(½ packet, 10 ms)) and the 1000 ppm
-  repayment moves the audio late (scratch run, `mbc` shape: 20 ms → +6.5 ms, back within 1 ms after
-  ~800 s; 8 / 12 ms → nothing). The bench's jitter never reaches the band, so its "0 jumps" is about
-  jitter only. A non-positive stamp advance also drops that packet's raw samples from the rate
-  regression (built for a duplicated NDI slot); on an arrival-stamped source that walks the A/V.
-  Mutation: 8/8 C decision, 8/8 wiring (Rust gate AND the real pwsh lines of both ymls, run with the
-  portable pwsh), 6/6 Rust decision mutants killed.
+  `Unservoed` drifts with the rate. Round 2 adds the rows of `src/asrc_stamp_bench_stall.rs`
+  (stalls 8–60 ms: 0 jumps, ≤ 0.21 ms; the 120 ms stall above; a real 44 ms loss booked once within
+  1.5 s and back within 1 ms no later than the arrival servo + 2 s; equal-stamp bursts: 8 h drift
+  ≤ 0.24 ms from 1800 s), the rate-point parity `c_asrc_rate_point_matches_the_rust_authority_1425`
+  and `tests/asrc_compensator_stamp_parity_1425.rs` (the compensator). Round 2 mutation: 47/47 (19 C
+  compensator, 5 C rate point, 8 wiring, 15 Rust); the first run left 5 C compensator mutants alive
+  until the parity's `stx` edge scenarios (see the asrc rule).
+- **Round 2 (design 6206822792): a delivery STALL on an arrival-stamped source.** PulseAudio
+  (`pulse-input.c` stamps "now minus the packet") and WASAPI without device timing carry their
+  delivery timing in the stamp. A stall of S ms arrives as a burst whose stamps are up to S late
+  while the samples append contiguously: a placement-error transient of about −S that recovers by
+  itself (round 1 booked it: `mbc` 20 ms → +6.5 ms for ~800 s). Three changes:
+  1. **Confirmed booking** (the compensator, `asrc-bench-harness.md` round-2 section): on the stamp
+     basis a jump is booked only after one second of audio AND 8 packets beyond the band with one
+     sign, at the median of the last half of the window; the timecode basis books at once as before.
+  2. **The waiting rate point** (`audio_asrc_rate_point` ↔ `genlock_audio_asrc_rate_point`, in the
+     lifted block): the burst's packets get EQUAL stamps (only the run's last one is right). On the
+     stamp basis the rate point waits one packet, a packet with no stamp advance carries its
+     predecessor's samples into it and the next interval keeps its start stamp; every point stays
+     exact and no sample is dropped. The timecode basis keeps the duplicated-slot drop. Carried
+     FORWARD into the next interval instead (the first idea), a 1024-frame burst pair puts ±21 ms
+     into two windows, over the 10 ms step re-base: the bench's burst feed walked 31 ms in 8 h.
+     State: `asrc_tc_pend_raw_s` / `_master_s` / `_due` in `struct obs_source`.
+  3. **The basis on audio-thread state:** `genlock_direct_ts` = `using_direct_ts`, cleared only in
+     the `async_unbuffered && async_decoupled` smoothing branch and at the second
+     `reset_audio_timing`. `source->timing_adjust`, which the render thread writes for every async
+     video frame (`obs_source_update_async_video`), is never read for the basis (a write between two
+     reads made one packet Arrival and flushed the regression twice).
+- **A stall of 70 ms or more is not a transient.** Past OBS's `TS_SMOOTHING_THRESHOLD` the burst's
+  equal stamps fall off the continuous timeline and OBS places a burst packet at its stamp,
+  overwriting what it had queued: the audio after the stall lands late on EVERY basis (120 ms: +45 ms
+  `mbc`, +32 ms PulseAudio; the arrival servo keeps it). The stamp basis books that once and pays it
+  back (back within 1 ms in ~45 s); the burst's compressed stamps then hold the A/V within ~1 ms
+  while they stay in the 600 s rate regression. The design's "120 ms: 0 jumps, ≤ 1 ms" row cannot
+  hold in OBS's ingest; reported on the ticket.
 - **Live acceptance (supervisor).** FULL bundle on stream-snv, strih-snv, resolume (libobs changed).
   Expect a one-time A/V shift at the first deploy (`mbc` −2…−7 ms, strih program inputs −27…−41 ms,
   stream-pp about −37 ms; that box's YouTube lipsync is kept by raising its sync offset 100 → 137 ms,

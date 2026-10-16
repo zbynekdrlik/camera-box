@@ -58,12 +58,13 @@
 //! booked (no phantom jump from the 1–2 ms delivery jitter on 128-sample packets) and nothing
 //! underruns. `Arrival` must spread A/V across B and the phase; `Unservoed` must drift with the rate.
 //!
-//! **What this does NOT prove: a delivery STALL.** The modelled jitter is a fifth of the compensator's
-//! 10 ms jump band, so the "0 jumps" assertion is about jitter only. A driver that stamps at arrival
-//! (PulseAudio, WASAPI without device timing) puts a stall of ≥ 15 ms into its stamps; the stamp basis
-//! then books a phantom jump and repays it (a scratch run of this plant: `mbc` 20 ms stall → A/V
-//! +6.5 ms, back within 1 ms after ~800 s). The fix is the open Design-question on issue 1425
-//! (comment 6206590736).
+//! **A delivery STALL, a real loss and equal-stamp bursts are the rows of `asrc_stamp_bench_stall.rs`**
+//! (round 2, design 6206822792). The jitter here is a fifth of the compensator's 10 ms jump band, so
+//! the "0 jumps" assertions above are about jitter only. A driver that stamps at arrival (PulseAudio,
+//! WASAPI without device timing) puts a stall into its stamps as a transient of about −S: the stamp
+//! basis books a placement jump only once it persists (one second of audio and 8 packets), and a
+//! packet with no stamp advance carries its samples into the rate point still waiting
+//! (`audio_asrc_rate_point`). Before round 2 a 20 ms `mbc` stall moved the A/V +6.5 ms for ~800 s.
 //!
 //! ## Measured (at landing)
 //!
@@ -76,6 +77,20 @@
 //!   B = 0 / 1 / 2 / 4 / 6 ticks; for pulse the launch phase alone moves it 2.1 … 15 ms at one B.
 //!   The absolute 100 ms target only fits B = 4 extra ticks of this plant, the floor's own design.
 //! - `Unservoed` at ±20 ppm: ±12 ms more A/V over the 600 s steady window.
+//!
+//! ## Measured (round 2, design 6206822792; the rows above unchanged to the printed digit)
+//!
+//! - Stalls of 8 / 12 / 15 / 20 / 30 / 60 ms at 700 s: 0 jumps; |A/V − pre-stall mean| ≤ 0.042 ms
+//!   (`mbc`) / 0.211 ms (pulse) from the stall second on.
+//! - The 120 ms stall: OBS's own placement past its 70 ms smoothing leaves the audio +44.8 ms
+//!   (`mbc`) / +31.5 ms (pulse) late on every basis (the arrival servo +44.5 / +33.5 ms, never back
+//!   within 1 ms in the run). The stamp basis books it once at 701.09 s and is back within 1 ms at
+//!   745 s / 732 s; the burst's compressed stamps then hold the A/V within 1.03 / 0.52 ms while they
+//!   stay in the 600 s rate regression.
+//! - A real 44 ms loss: booked once at 701.05 s (`mbc`) / 701.03 s (pulse), back within 1 ms at
+//!   743 s (the arrival servo: 742 s / not back in the run).
+//! - Equal-stamp bursts, 8 h: drift 0.13 ms (`mbc`) / 0.24 ms (pulse) from 1800 s on, 0 jumps. The
+//!   pulse A/V settles 5.5 ms late (the bursts' stamp bias); `mbc` 0.6 ms.
 
 use crate::asrc_bench::RealtimeAsrcCompensator;
 use crate::genlock_audio_pairing::{

@@ -7,6 +7,7 @@ paths:
   - "scripts/av_sync_outer_loop_guard.py"
   - "scripts/av_sync_measure.py"
   - "vendor/**/RequestHandler_Inputs.cpp"
+  - "tests/asrc_compensator_stamp_parity_1425.rs"
 ---
 
 # ASRC bench harness (#804, epic #800 A/V-desync endgame round)
@@ -895,3 +896,39 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
   backstop probes (also on a LOCKED arrival-mode servo). `tcw` = 5 s of skew, the placement, then
   8 s of a 15 ms error that must NOT arm the restore, which proves the sustained count restarts at
   the placement.
+
+## Issue 1425 round 2 (design 6206822792) — the STAMP basis books a placement jump only once confirmed
+
+The compensator now takes the BASIS as its one mode input: `set_basis(AsrcBasis)` ↔
+`asrc_compensator_set_basis(c, int)` (`ASRC_BASIS_ARRIVAL|TIMECODE|STAMP`, values pinned equal to
+obs-source.c's `GENLOCK_AUDIO_ASRC_BASIS_*` by the parity test). `timecode` is derived from it;
+`set_timecode(bool)` is a wrapper the issue-1367 scenarios and the timecode bench keep using. A
+basis change drops an open candidate; a placement-judged-flag change also flushes, as before.
+
+- **The candidate** (`PlacementJudge` in `src/asrc_bench_timecode.rs` ↔ the `place_cand_*` fields):
+  opens when the placement error leaves the band (max(half a packet, 10 ms)) around the reference =
+  setpoint + the smoothed error AT THE OPEN; is dropped the moment the error comes back inside
+  (judged against the same reference); beyond the band with the other sign it restarts with that
+  sign; confirms at `PLACE_CONFIRM_MS` (1000) of source audio (the sum of the packets' durations)
+  AND `PLACE_CONFIRM_PACKETS` (8). 375 packets of 128 samples sum to 999.99999 ms in floating point,
+  so the 376th confirms (tests count with the same sum, `packets_to_confirm`).
+- **The booking:** the median of the newest ceil(n/2) errors (a ring of `PLACE_CONFIRM_RING` = 256,
+  stable sort, an even count averaged) minus the reference at the open, through the shared capped
+  `book_jump_ms` / `asrc_book_jump_ms`. When it books, the smoothed error goes BACK to its value at
+  the open: the 10 s EMA took part of the jump during the window, and left there it would be paid by
+  the P term over ~500 s instead of at 1000 ppm (a real 44 ms loss would come back ~12 min late). A
+  median inside the band, or a booking the owed cap refuses, books nothing and restores nothing.
+- **Dropped:** a basis change, a placement (its own error may open a new one), an observe without a
+  capture or outside the mode. The timecode basis books at once, byte-identical.
+- **Tests:** `src/asrc_bench_stamp_confirm_tests.rs` (a `#[path]` child of the timecode module);
+  `tests/asrc_compensator_stamp_parity_1425.rs` (the real asrc-compensator.c vs the authority: `st` a
+  closed-loop stamp plant with stalls, a loss, a duplicate, an excursion, a sign flip, a placement, a
+  stamp → timecode → stamp change and a leave of the mode; `str` the ring / even median / packet
+  gate; `stx` the edges the first mutation run left alive: a window close inside a candidate, a lost
+  capture, a placement, a median inside the band against a paying setpoint, a cap refusal).
+- **Local run (Tier-0):** the parity needs a stub `camera_box` rlib of BOTH `asrc_bench.rs` and
+  `genlock_audio_pairing.rs` now (the timecode module imports `AsrcBasis`); the replica crate the
+  same. Mutation (47/47): the C mutants run against one compiled test set with
+  `CARGO_MANIFEST_DIR` at a scratch tree (the C is read at run time); the Rust mutants recompile the
+  replica and the rlib per mutant (~1.5 min each on dev1).
+
