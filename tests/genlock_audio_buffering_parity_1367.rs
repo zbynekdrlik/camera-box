@@ -383,7 +383,7 @@ fn c_audio_buffering_matches_the_rust_authority_1367() {
             && has("planf 21 0 0 48000 1024 1 45 0 0")
             && has("settled 1000000000 30999999999 0")
             && has("settled 1000000000 31000000000 1")
-            && has("settled 1000000000 999999999 1")
+            && has("settled 1000000000 999999999 0")
             && has("settled 0 1000000000 0")
             && has("frozen 0 1 0")
             && has("frozen 1 0 0")

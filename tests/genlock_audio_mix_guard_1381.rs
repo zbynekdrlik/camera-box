@@ -546,7 +546,8 @@ const EXPECTED_TRACE: &[&str] = &[
     "L200 buffering-guard: 'mbc' entered the mix late: its audio ran 2.7 ms behind the mix window; re-anchored (dropped 2.7 ms) instead of adding 21 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=2.7 ms)",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: mbc)",
     "L200 genlock audio buffering: grew 42 ms while an encoder ran inside the launch settle window",
-    "encoder-at-launch: waits=2 total_ms=42 mic_missed=2 'mbc' events=1 dropped_ms=2.7 mixed=296 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 85 milliseconds (source: mbc)",
+    "encoder-at-launch: waits=4 total_ms=85 mic_missed=2 'mbc' events=1 dropped_ms=2.7 mixed=293 stale=0 guard_lines=1 above_lines=2 restart_lines=0",
     "encoder-at-launch freeze: frozen=0 encoders=1 'mbc' mixed_late=0 mixed_late_dropped_ms=0.0 mix_mixed_late=0",
     "== encoder-after-settle",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Mic/Aux)",
@@ -861,13 +862,15 @@ fn an_output_started_inside_the_launch_settle_window_grows_once_and_plays_1425()
     // 0 ms and `mbc` + the mic were re-anchored on every tick, muted for the whole output. Inside the
     // 30 s launch settle window the startup race grows the mix as without an encoder: `mbc` is
     // re-anchored once as it joins, then grows the mix 42 ms and plays; the mic only misses the
-    // launch's two hole ticks. The growth while the encoder runs is logged once.
+    // launch's two hole ticks. `mbc` goes 50 ms later at 4 s, still inside the window, and grows it
+    // again to 85 ms (two more hole ticks). The growth while the encoder runs is logged ONCE, for
+    // the first growth: two growths, one line (the log-once latch).
     let trace = c_trace();
     let s = summary(trace, "encoder-at-launch");
     assert!(
-        s.contains(LAUNCH)
-            && s.contains("'mbc' events=1 dropped_ms=2.7 mixed=296 ")
-            && s.contains(" above_lines=1 "),
+        s.contains(" waits=4 total_ms=85 mic_missed=2 ")
+            && s.contains("'mbc' events=1 dropped_ms=2.7 mixed=293 ")
+            && s.contains(" above_lines=2 "),
         "issue 1425: an output started inside the launch settle window must not mute the late \
          members:\n{s}\n\n{}",
         section(trace, "encoder-at-launch").join("\n")

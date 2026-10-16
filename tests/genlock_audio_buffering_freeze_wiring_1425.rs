@@ -41,9 +41,9 @@ const MIX_GUARD_H: &str = "vendor/obs-studio/libobs/obs-genlock-mix-guard.h";
 
 /// `(file, squished needle)`, each required exactly once.
 const FREEZE_WIRING: [(&str, &str); 24] = [
-    (OBS_AUDIO, "audio->genlock_buffering_frozen = genlock_buffering_frozen_now(ts.start, obs_output_genlock_audio_encoder_outputs() > 0);"),
+    (OBS_AUDIO, "audio->genlock_buffering_frozen = genlock_buffering_frozen_now(start_ts_in, obs_output_genlock_audio_encoder_outputs() > 0);"),
     (OBS_AUDIO, "static uint64_t genlock_launch_first_tick_ns = 0;"),
-    (OBS_AUDIO, "if (!genlock_launch_first_tick_ns) genlock_launch_first_tick_ns = mix_ts;"),
+    (OBS_AUDIO, "if (!genlock_launch_first_tick_ns) genlock_launch_first_tick_ns = tick_start_ns;"),
     (OBS_AUDIO, "blog(LOG_WARNING, \"genlock audio buffering: grew %d ms while an encoder ran inside the launch settle window\", (int)ms);"),
     (OBS_AUDIO, "genlock_launch_growth_log(ms);"),
     (OBS_AUDIO, "const int genlock_guard = genlock_mix_guard_reason( genlock_mix_source_is_member(source), source->genlock_mix_entered, source->info.audio_render != NULL, source->audio_ts, ts.start, audio->genlock_buffering_frozen);"),
@@ -61,7 +61,7 @@ const FREEZE_WIRING: [(&str, &str); 24] = [
     (OBS_INTERNAL, "extern long obs_output_genlock_audio_encoder_outputs(void);"),
     (BUFFERING_H, "static inline bool genlock_audio_buffering_frozen(bool encoder_active, bool settled) { return encoder_active && settled; }"),
     (BUFFERING_H, "#define GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS 30000000000ULL"),
-    (BUFFERING_H, "return now_ns < first_tick_ns || now_ns - first_tick_ns >= GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS;"),
+    (BUFFERING_H, "return now_ns >= first_tick_ns && now_ns - first_tick_ns >= GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS;"),
     (BUFFERING_H, "return source_behind && !frozen ? GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC : GENLOCK_AUDIO_BUFFERING_ACTION_NONE;"),
     (MIX_GUARD_H, "#define GENLOCK_MIX_GUARD_MIXED_LATE 3"),
     (MIX_GUARD_H, "return frozen ? GENLOCK_MIX_GUARD_MIXED_LATE : GENLOCK_MIX_GUARD_NONE;"),

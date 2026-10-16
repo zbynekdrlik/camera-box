@@ -387,6 +387,8 @@ static bool h_tick(obs_source_t *const *mix, size_t n_mix)
 	const size_t sample_rate = H_RATE;
 	const size_t channels = H_CH;
 	struct ts_info ts = {h_t, h_t + h_tick_ns};
+	/* audio_callback's own input tick start (issue 1425: the launch settle window counts from it) */
+	const uint64_t start_ts_in = ts.start;
 	size_t audio_size;
 	uint64_t min_ts;
 
@@ -778,12 +780,16 @@ int main(void)
 	/* (l) issue 1425 slice 3 (ROZHODNUTE 6221252305): an output started inside the launch's startup race
 	 * (an audio encoder from the first tick: --startstreaming, Companion, an operator right after a
 	 * launch) with `mbc` 2.7 ms late. The launch settle window keeps the mix unfrozen, so the startup
-	 * race grows it as without an encoder and both members play; the growth while the encoder runs is
-	 * logged once. Without the window the mix froze at 0 ms and both were muted for the whole output. */
+	 * race grows it as without an encoder and both members play; `mbc` then goes 50 ms later at 4 s,
+	 * still inside the window, and grows it again. The growth while the encoder runs is logged ONCE.
+	 * Without the window the mix froze at 0 ms and both were muted for the whole output. */
 	h_begin("encoder-at-launch", "mbc", true, 2700000, true);
 	h_encoders = 1;
-	for (int i = 0; i < 300; i++)
+	for (int i = 0; i < 300; i++) {
+		if (i == 200)
+			h_other.h_lag_ns = 52700000;
 		h_step(true);
+	}
 	h_summary("encoder-at-launch");
 	h_freeze_summary("encoder-at-launch");
 
