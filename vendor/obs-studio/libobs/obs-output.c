@@ -2485,6 +2485,19 @@ static inline bool preserve_active(struct obs_output *output)
 	return (output->delay_flags & OBS_OUTPUT_DELAY_PRESERVE) != 0;
 }
 
+/* camera-box issue 1425 (E2 slice 2, design 6216736061): how many outputs run an audio ENCODER. A growth
+ * of the mix's audio buffering while one runs makes its audio permanently later (obs-encoder.c counts
+ * audio pts in samples after the start), so obs-audio.c freezes the buffering while this is above 0
+ * (obs-genlock-audio-buffering.h genlock_audio_buffering_frozen). Bumped where an encoded output's
+ * audio encoders start (hook_data_capture) and stop (end_data_capture_thread): one start and one stop
+ * per capture; a delayed output that keeps its encoders over a restart keeps its count. */
+static volatile long genlock_audio_encoder_outputs = 0;
+
+long obs_output_genlock_audio_encoder_outputs(void)
+{
+	return os_atomic_load_long(&genlock_audio_encoder_outputs);
+}
+
 static void hook_data_capture(struct obs_output *output)
 {
 	encoded_callback_t encoded_callback;
@@ -2513,6 +2526,9 @@ static void hook_data_capture(struct obs_output *output)
 
 		if (has_audio)
 			start_audio_encoders(output, encoded_callback);
+		/* camera-box issue 1425: the audio buffering freezes while this output's audio encodes */
+		if (has_audio)
+			os_atomic_inc_long(&genlock_audio_encoder_outputs);
 		if (has_video)
 			start_video_encoders(output, encoded_callback);
 	} else {
@@ -2851,6 +2867,9 @@ static void *end_data_capture_thread(void *data)
 			stop_video_encoders(output, encoded_callback);
 		if (has_audio)
 			stop_audio_encoders(output, encoded_callback);
+		/* camera-box issue 1425: the matching stop of hook_data_capture's count */
+		if (has_audio)
+			os_atomic_dec_long(&genlock_audio_encoder_outputs);
 	} else {
 		if (has_video)
 			stop_raw_video(output->video, default_raw_video_callback, output);

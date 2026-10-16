@@ -575,6 +575,12 @@ struct obs_core_audio {
 	 * of every launch; OBS's dynamic increase stays active above it (obs-genlock-audio-buffering.h). */
 	int floor_buffering_ticks;
 	bool fixed_buffer;
+	/* camera-box issue 1425 (E2 slice 2): the buffering FREEZE (obs-genlock-audio-buffering.h), audio
+	 * thread only. The mixer tick of the last growth or member join (0 = none since this audio reset),
+	 * this tick's decision, and the mix-wide count of MIXED_LATE re-anchors for the #800 line. */
+	uint64_t genlock_settle_tick;
+	bool genlock_buffering_frozen;
+	uint64_t genlock_mixed_late_events;
 
 	pthread_mutex_t monitoring_mutex;
 	DARRAY(struct audio_monitor *) monitors;
@@ -1066,6 +1072,10 @@ struct obs_source {
 	uint64_t genlock_mix_guard_dropped_ns;
 	uint64_t genlock_mix_guard_logged_events;
 	uint64_t genlock_mix_guard_last_log_ns;
+	/* camera-box issue 1425: the MIXED_LATE re-anchors of this source (a member behind the window while
+	 * the mix's buffering is frozen) and the audio they dropped; also counted in the guard's totals. */
+	uint64_t genlock_mixed_late_events;
+	uint64_t genlock_mixed_late_dropped_ns;
 
 	/* async video data */
 	gs_texture_t *async_textures[MAX_AV_PLANES];
@@ -1663,6 +1673,9 @@ extern bool obs_output_delay_start(obs_output_t *output);
 extern void obs_output_delay_stop(obs_output_t *output);
 extern bool obs_output_actual_start(obs_output_t *output);
 extern void obs_output_actual_stop(obs_output_t *output, bool force, uint64_t ts);
+/* camera-box issue 1425: how many outputs run an audio ENCODER right now (obs-output.c, counted at
+ * their data-capture start and stop); obs-audio.c reads it once per mixer tick for the freeze. */
+extern long obs_output_genlock_audio_encoder_outputs(void);
 
 extern const struct obs_output_info *find_output(const char *id);
 

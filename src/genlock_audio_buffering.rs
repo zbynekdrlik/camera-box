@@ -45,6 +45,22 @@
 //!   band. The shipped floor keeps it inside for a base of 0–25 ms at 44.1 and 48 kHz; the libobs
 //!   log names a dynamic increase that leaves it.
 //!
+//! ## Issue 1425 (E2 slice 2, design 6216736061): the FREEZE
+//!
+//! A buffering increase while an encoder runs makes that encoder's audio permanently later
+//! (obs-encoder.c counts audio pts in samples after the output start). On stream-snv the E1 events
+//! grew the mix +85 / +128 / +192 ms (two ASIO outages, a 432 ms mixer stall), each an
+//! audio-after-picture step on every live output until a restart. So once the mix has settled the
+//! dynamic increase is OFF:
+//!
+//! - [`frozen`]: frozen while an output with an audio encoder is active, or once the mix has gone
+//!   [`SETTLE_NS`] without a growth and without a member joining ([`ns_since`] measures that in
+//!   mixer ticks).
+//! - [`action`] takes it: a frozen mix never grows dynamically. The floor is never frozen.
+//! - A mixed source that falls behind a frozen mix is re-anchored instead (obs-genlock-mix-guard.h
+//!   `MIXED_LATE`, pinned by the issue-1381 lift): one counted dropout of its late span on that
+//!   source. Nothing ever steps down mid-run; the buffering starts over at the next launch.
+//!
 //! The C twin is `vendor/obs-studio/libobs/obs-genlock-audio-buffering.h` (stdint/stdbool only).
 //! `tests/genlock_audio_buffering_parity_1367.rs` compiles it as-is, requires byte-identical results,
 //! and lifts the C defines the invariant depends on.
@@ -78,6 +94,11 @@ pub const LEVEL_BASE_NOMINAL_NS: u64 = 9_000_000;
 /// The base range the band invariant is proven over, ns: 0 up to the ~25 ms transport base a
 /// genlock source shows (asrc-compensator.h).
 pub const LEVEL_BASE_MAX_NS: u64 = 25_000_000;
+
+/// Issue 1425: how long the mix must go without a growth and without a member joining before its
+/// buffering freezes, ns (30 s: the launch-time joins and the startup race all happen in the first
+/// seconds, E2 consult §3).
+pub const SETTLE_NS: u64 = 30_000_000_000;
 
 /// What [`plan`] decides at `obs_reset_audio2`. Mirror of the C
 /// `struct genlock_audio_buffering_plan` (built by `genlock_audio_buffering_make_plan`).
@@ -155,22 +176,42 @@ pub fn plan(req_max_ms: u32, req_fixed: bool, rate: u32, frames: u32) -> Bufferi
 
 /// The floor-then-dynamic rule for one mixer tick. `source_behind` is obs-audio.c's
 /// `min_ts < ts.start` (a source's audio lies before the mix window). At the maximum nothing is
-/// added (`audio_buffering_maxed`); below the floor the floor is raised first.
+/// added (`audio_buffering_maxed`); below the floor the floor is raised first. `frozen` is this
+/// tick's [`frozen`] decision (issue 1425): a frozen mix never grows dynamically, the floor still
+/// rises.
 pub fn action(
     total_ticks: i32,
     floor_ticks: i32,
     max_ticks: i32,
     source_behind: bool,
+    frozen: bool,
 ) -> BufferingAction {
     if total_ticks >= max_ticks {
         BufferingAction::None
     } else if total_ticks < floor_ticks {
         BufferingAction::Floor
-    } else if source_behind {
+    } else if source_behind && !frozen {
         BufferingAction::Dynamic
     } else {
         BufferingAction::None
     }
+}
+
+/// Issue 1425: the time since the mix last grew or a member joined it, ns — the mixer ticks from
+/// `anchor_tick` to `cur_tick` times `tick_ns`, saturating at `u64::MAX`. 0 while there is no
+/// anchor yet (`anchor_tick` 0: an audio reset zeroed it, the first tick's floor raise sets it) or
+/// the anchor is this tick.
+pub fn ns_since(anchor_tick: u64, cur_tick: u64, tick_ns: u64) -> u64 {
+    if anchor_tick == 0 || cur_tick <= anchor_tick {
+        return 0;
+    }
+    (cur_tick - anchor_tick).saturating_mul(tick_ns)
+}
+
+/// Issue 1425: whether the mix's buffering is frozen on this tick — an output with an audio
+/// encoder is active, or the mix has gone `settle_ns` without a growth and without a member join.
+pub fn frozen(ns_since_last_growth_or_join: u64, encoder_active: bool, settle_ns: u64) -> bool {
+    encoder_active || ns_since_last_growth_or_join >= settle_ns
 }
 
 /// The gap the level servo must bridge, ns: the absolute level target minus the natural depth
@@ -300,24 +341,79 @@ mod tests {
     fn the_first_tick_raises_the_floor_then_obs_grows_dynamically_above_it() {
         use BufferingAction::*;
         // First tick of a launch: the floor, whether or not a source is behind.
-        assert_eq!(action(0, 4, 45, false), Floor);
-        assert_eq!(action(0, 4, 45, true), Floor);
+        assert_eq!(action(0, 4, 45, false, false), Floor);
+        assert_eq!(action(0, 4, 45, true, false), Floor);
         // Partial (never happens in one pass, but the rule is "below the floor -> floor").
-        assert_eq!(action(3, 4, 45, true), Floor);
+        assert_eq!(action(3, 4, 45, true, false), Floor);
         // At the floor: nothing unless a source is behind the window.
-        assert_eq!(action(4, 4, 45, false), None);
-        assert_eq!(action(4, 4, 45, true), Dynamic);
+        assert_eq!(action(4, 4, 45, false, false), None);
+        assert_eq!(action(4, 4, 45, true, false), Dynamic);
         // Above the floor the dynamic increase stays active up to the maximum.
-        assert_eq!(action(17, 4, 45, true), Dynamic);
-        assert_eq!(action(44, 4, 45, true), Dynamic);
-        assert_eq!(action(45, 4, 45, true), None);
-        assert_eq!(action(46, 4, 45, true), None);
+        assert_eq!(action(17, 4, 45, true, false), Dynamic);
+        assert_eq!(action(44, 4, 45, true, false), Dynamic);
+        assert_eq!(action(45, 4, 45, true, false), None);
+        assert_eq!(action(46, 4, 45, true, false), None);
         // A maximum at the floor: the floor is reached, then nothing grows.
-        assert_eq!(action(0, 4, 4, true), Floor);
-        assert_eq!(action(4, 4, 4, true), None);
+        assert_eq!(action(0, 4, 4, true, false), Floor);
+        assert_eq!(action(4, 4, 4, true, false), None);
         // No floor (no rate): stock dynamic behaviour.
-        assert_eq!(action(0, 0, 45, true), Dynamic);
-        assert_eq!(action(0, 0, 45, false), None);
+        assert_eq!(action(0, 0, 45, true, false), Dynamic);
+        assert_eq!(action(0, 0, 45, false, false), None);
+    }
+
+    #[test]
+    fn a_frozen_mix_never_grows_dynamically_but_still_raises_the_floor_1425() {
+        use BufferingAction::*;
+        // Frozen: a source behind the window no longer grows the mix (the E1 ratchet).
+        assert_eq!(action(4, 4, 45, true, true), None);
+        assert_eq!(action(17, 4, 45, true, true), None);
+        assert_eq!(action(4, 4, 45, false, true), None);
+        // The floor is never frozen: the first tick of a launch (or an audio reset) still raises it.
+        assert_eq!(action(0, 4, 45, true, true), Floor);
+        assert_eq!(action(0, 4, 45, false, true), Floor);
+        assert_eq!(action(3, 4, 45, true, true), Floor);
+        // Not frozen: OBS's own dynamic increase, as before.
+        assert_eq!(action(4, 4, 45, true, false), Dynamic);
+        assert_eq!(action(45, 4, 45, true, false), None);
+    }
+
+    #[test]
+    fn the_mix_freezes_while_an_audio_encoder_runs_or_once_settled_1425() {
+        const S: u64 = SETTLE_NS;
+        // An audio encoder (a stream or a recording) freezes it at once, settled or not.
+        assert!(frozen(0, true, S));
+        assert!(frozen(S - 1, true, S));
+        // Without one: frozen exactly from SETTLE_NS on.
+        assert!(!frozen(0, false, S));
+        assert!(!frozen(S - 1, false, S));
+        assert!(frozen(S, false, S));
+        assert!(frozen(u64::MAX, false, S));
+        // The settle parameter is used, not the constant.
+        assert!(frozen(5, false, 5) && !frozen(4, false, 5));
+        assert_eq!(SETTLE_NS, 30_000_000_000);
+    }
+
+    #[test]
+    fn the_settle_is_counted_in_mixer_ticks_from_the_last_growth_or_join_1425() {
+        let tick = ticks_ns(1, AUDIO_OUTPUT_FRAMES, 48_000);
+        assert_eq!(tick, 21_333_333);
+        // No anchor yet (an audio reset): never settled.
+        assert_eq!(ns_since(0, 5_000, tick), 0);
+        // The anchor is this tick (or ahead of it after a wrap that cannot happen): 0.
+        assert_eq!(ns_since(7, 7, tick), 0);
+        assert_eq!(ns_since(9, 7, tick), 0);
+        assert_eq!(ns_since(7, 8, tick), tick);
+        // 30 s at 48 kHz is 1407 ticks (1406 fall 1 tick short).
+        assert!(!frozen(ns_since(1, 1 + 1406, tick), false, SETTLE_NS));
+        assert!(frozen(ns_since(1, 1 + 1407, tick), false, SETTLE_NS));
+        // A huge gap saturates instead of wrapping into a small number.
+        assert_eq!(ns_since(1, u64::MAX, tick), u64::MAX);
+        assert_eq!(
+            ns_since(1, 1 + (u64::MAX / tick), tick),
+            (u64::MAX / tick) * tick
+        );
+        assert_eq!(ns_since(1, 2 + (u64::MAX / tick), tick), u64::MAX);
+        assert_eq!(ns_since(1, 100, 0), 0);
     }
 
     #[test]

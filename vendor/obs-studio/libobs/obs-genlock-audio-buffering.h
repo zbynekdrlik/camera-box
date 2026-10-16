@@ -20,6 +20,14 @@
  *   the resolume cg OBS legitimately grows 128-362 ms (ROZHODNUTE 5857354949: a floor, never a cap).
  * - genlock_audio_buffering_band_error_ns() / _band_ok(): the gap the servo must bridge and whether
  *   it fits; obs-audio.c names a dynamic increase that leaves the band.
+ * - genlock_audio_buffering_frozen() (issue 1425, E2 slice 2, design 6216736061): the FREEZE. A
+ *   buffering increase while an encoder runs makes that encoder's audio permanently later
+ *   (obs-encoder.c counts audio pts in samples after the start), so once the mix has settled the
+ *   dynamic increase is OFF: while an output with an audio encoder is active, or after
+ *   GENLOCK_AUDIO_BUFFERING_SETTLE_NS with no growth and no member joining the mix. A mixed source that
+ *   then falls behind the window is re-anchored instead (obs-genlock-mix-guard.h MIXED_LATE). The
+ *   floor is never frozen, and nothing ever steps down mid-run: the buffering starts over at the
+ *   next launch.
  *
  * Pure: stdint/stdbool only, no libobs types -- tests/genlock_audio_buffering_parity_1367.rs
  * compiles this header as-is and requires byte-identical results from the Tier-0 Rust authority
@@ -41,6 +49,11 @@
 /* The measured `mbc` base (its offset-free depth at zero buffering: 8.4 / 8.9 ms), ns, for the log
  * note. Mirror of LEVEL_BASE_NOMINAL_NS. */
 #define GENLOCK_AUDIO_LEVEL_BASE_NOMINAL_NS 9000000ULL
+
+/* issue 1425: how long the mix must go without a growth and without a member joining before its
+ * buffering freezes, ns. Spelled as a product (tests/audio_telemetry_800.rs pins the #800 60 s literal
+ * once). Mirror of src/genlock_audio_buffering.rs SETTLE_NS. */
+#define GENLOCK_AUDIO_BUFFERING_SETTLE_NS (30ULL * 1000000000ULL)
 
 /* genlock_audio_buffering_action() results. Mirror of src/genlock_audio_buffering.rs BufferingAction. */
 #define GENLOCK_AUDIO_BUFFERING_ACTION_NONE 0
@@ -93,15 +106,40 @@ static inline struct genlock_audio_buffering_plan genlock_audio_buffering_make_p
 	return p;
 }
 
-/* The floor-then-dynamic rule for one mixer tick; source_behind = obs-audio.c `min_ts < ts.start`.
- * Mirror of action. */
-static inline int genlock_audio_buffering_action(int total_ticks, int floor_ticks, int max_ticks, bool source_behind)
+/* The floor-then-dynamic rule for one mixer tick; source_behind = obs-audio.c `min_ts < ts.start`,
+ * frozen = genlock_audio_buffering_frozen() for this tick (issue 1425: no dynamic increase once the mix
+ * is settled; the floor is never frozen). Mirror of action. */
+static inline int genlock_audio_buffering_action(int total_ticks, int floor_ticks, int max_ticks, bool source_behind,
+						 bool frozen)
 {
 	if (total_ticks >= max_ticks)
 		return GENLOCK_AUDIO_BUFFERING_ACTION_NONE;
 	if (total_ticks < floor_ticks)
 		return GENLOCK_AUDIO_BUFFERING_ACTION_FLOOR;
-	return source_behind ? GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC : GENLOCK_AUDIO_BUFFERING_ACTION_NONE;
+	return source_behind && !frozen ? GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC : GENLOCK_AUDIO_BUFFERING_ACTION_NONE;
+}
+
+/* issue 1425: the time since the mix last grew or a member joined it, ns: the mixer ticks from
+ * anchor_tick to cur_tick times the tick length, saturating at UINT64_MAX. 0 while there is no anchor
+ * yet (anchor_tick 0: an audio reset zeroed it, the floor raise of the first tick sets it) or the
+ * anchor is this tick. Mirror of ns_since. */
+static inline uint64_t genlock_audio_buffering_ns_since(uint64_t anchor_tick, uint64_t cur_tick, uint64_t tick_ns)
+{
+	if (anchor_tick == 0 || cur_tick <= anchor_tick)
+		return 0;
+	const uint64_t ticks = cur_tick - anchor_tick;
+	if (tick_ns != 0 && ticks > UINT64_MAX / tick_ns)
+		return UINT64_MAX;
+	return ticks * tick_ns;
+}
+
+/* issue 1425: whether the mix's buffering is frozen on this tick -- an output with an audio encoder is
+ * active, or the mix has gone settle_ns without a growth and without a member joining. Mirror of
+ * frozen. */
+static inline bool genlock_audio_buffering_frozen(uint64_t ns_since_last_growth_or_join, bool encoder_active,
+						  uint64_t settle_ns)
+{
+	return encoder_active || ns_since_last_growth_or_join >= settle_ns;
 }
 
 /* The gap the level servo must bridge, ns: target - (buffering + base). The sync offset moves both
