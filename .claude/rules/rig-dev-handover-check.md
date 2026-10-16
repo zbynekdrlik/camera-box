@@ -218,6 +218,11 @@ enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
 - **Reuse, never re-derive.** Every item runs an EXISTING probe. When a probe's dry-run verdict
   vocabulary changes, update the `good`/`forgot` token sets in `ITEMS` (rig_dev_handover_decision.py)
   and the fixtures in the test — do NOT reimplement the probe's grading here.
+- **One item, two differently graded probes (issue 1447):** `Item(capture_kinds={"<capture>":
+  "exit"}, forgot_msgs={...})` grades one capture by its exit code inside a verdict-kind item and
+  names each FORGOT capture's own fix (joined in capture order). Every capture of an item must be
+  present for OK, so add the new capture to the full all-OK fixture and point its `RDH_*_PROBE` at a
+  missing path in the unit-env test, or that test reaches the live rig.
 - The `#1310`/`#1307`/`#1299` watchdogs may be absent on an older base — a MISSING probe script is
   the RC_MISSING sentinel → UNKNOWN, so the orchestrator is forward-compatible (it picks a probe up
   the moment it exists).
