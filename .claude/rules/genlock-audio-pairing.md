@@ -22,6 +22,8 @@ paths:
   - "src/genlock_audio_pairing_pending_tests.rs"
   - "src/asrc_timecode_pending_bench.rs"
   - "tests/genlock_audio_relabel_pending_parity_1381.rs"
+  - "src/asrc_stamp_bench.rs"
+  - "tests/genlock_audio_stamp_basis_wiring_1425.rs"
 ---
 
 # Receiver-side AUDIO genlock parity (#1303)
@@ -862,6 +864,53 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   released=relabel-pending … pending=1` line with `step_ms=+33.333` and `residual_ms` = −r; no
   hole; `place_jumps` flat. A date step that small is rare (the nightly steps are hundreds of ms),
   so this may only be seen on a daytime restart step.
+
+## Issue 1425 (E2 slice 1, design 6205974120) — a directly stamped mixed source is judged by its OWN stamp
+
+**Why.** The arrival servo held a non-genlock mixed source (`mbc`, a PulseAudio input, a media clip)
+at the issue-1355 absolute depth (100 ms + its offset). That depth carries the launch-random global
+audio buffering and, for a PulseAudio input (one 1024-frame packet per mixer tick, stamped "now minus
+the packet"), the launch-random packet-vs-tick phase, so the A/V moved with every OBS launch. The
+issue-1367 timecode mode already judged a genlock source by its own stamp; only the predicate kept
+every other source out of it.
+
+- **The decision** (`src/genlock_audio_pairing.rs` ↔ the lifted C block, parity-gated):
+  `audio_asrc_placement(mode, direct_ts, monitor_only, can_resample) -> AsrcBasis` (C
+  `genlock_audio_asrc_placement`, `GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL|TIMECODE|STAMP`). `Timecode` for
+  the timecode hold; `Stamp` for mode `Off` with direct stamps; both need `!monitor_only &&
+  can_resample`; everything else `Arrival`. `audio_place_measured(mode, basis)` = an active hold or a
+  non-arrival basis. `AsrcBasis::token` ↔ `genlock_audio_asrc_basis_token`. The timecode-only
+  predicate (`audio_asrc_timecode` / `genlock_audio_asrc_timecode`) is gone.
+- **The wiring** (`source_output_audio_data`): the basis reads `using_direct_ts &&
+  source->timing_adjust == 0` (OBS's own direct-stamp verdict of this packet); the compensator's
+  timecode flag ("placement-judged") is set for every basis but arrival; the measure gate reads the
+  basis, while only a genlock hold writes the pairing audit facet (`genlock_audio_place_err_ns` /
+  `_seeded`); `asrc_timecode_ingest` is unchanged (a mode-Off source has `genlock_off_ns = 0`, so its
+  stamp is `data->timestamp`). The basis is kept in `source->genlock_asrc_basis` and printed as
+  ` basis=arrival|timecode|stamp (issue 1425)` after the byte-identical issue-1367 suffix of the
+  `asrc:` line. The compensator does not change.
+- **Reading the `asrc:` line.** `basis=stamp timecode=1`: `level=` / `level_avg=` are the placement
+  error against the source's own stamp (≈ 0 ± 2 ms healthy), `target=0`, `fallbacks=0`;
+  `place_jumps=` flat (a real sample loss is booked and paid at 1000 ppm). The `#800 buffered_ms`
+  of such a source drops to its natural depth (about B + 9 ms for `mbc`).
+- **Not in this slice:** a sticky basis (the consult's "leave Stamp only after 8 non-direct
+  packets"). A source whose stamps hover at OBS's 2 s direct window would flip basis and flush the
+  regression each time; no rig source does today.
+- **Tests:** the unit table (`a_directly_stamped_mixed_source_is_judged_by_its_stamp_1425`), the parity
+  gate `c_asrc_placement_matches_the_rust_authority_1425`, the one needle list
+  `tests/genlock_audio_stamp_basis_wiring_1425.rs` (`STAMP_BASIS_WIRING` / `_ABSENT`), required in both
+  `windows-genlock*.yml` pwsh gates, and the two-clock bench `src/asrc_stamp_bench.rs` (mbc 128-sample /
+  PulseAudio 1024-frame packets, −20/0/+20 ppm, an 8 h ±1 ppm wander, buffering 0..6 extra ticks, four
+  launch phases): |A/V| ≤ 0.72 ms, spread ≤ 0.34 ms, 8 h drift ≤ 0.60 ms, no phantom jump. Its
+  `Arrival` variant spreads the A/V by ~95 ms over the buffering, `Unservoed` drifts with the rate.
+  Mutation: 8/8 C decision, 8/8 wiring (Rust gate AND the real pwsh lines of both ymls, run with the
+  portable pwsh), 6/6 Rust decision mutants killed.
+- **Live acceptance (supervisor).** FULL bundle on stream-snv, strih-snv, resolume (libobs changed).
+  Expect a one-time A/V shift at the first deploy (`mbc` −2…−7 ms, strih program inputs −27…−41 ms,
+  stream-pp about −37 ms; that box's YouTube lipsync is kept by raising its sync offset 100 → 137 ms,
+  a fact-file change outside this slice). Then ≥ 2 stream OBS restarts: the release E2E A/V gate green
+  each time, per-camera A/V within ±5 ms across them, the `mbc` line `basis=stamp`, `level_avg` ±2 ms.
+  The 85 ms floor stays until slices 2 and 3 (`genlock-audio-buffering-floor.md`).
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 

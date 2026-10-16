@@ -809,8 +809,9 @@ the ~130 ppm level loop dragged the audio ~40 ms off its stamps for ~9 min; and 
 catch-up read as a +200…+288 ppm "rate". `audio_place_err_ms` compared against the already-snapped
 stamp and read 0.
 
-**What.** One mode, set per packet by the ingest (`genlock_audio_asrc_timecode`: timecode hold, not
-MONITOR_ONLY, a resampler), everything else byte-identical (the tick/shift/step C traces equal
+**What.** One mode, set per packet by the ingest (since issue 1425 `genlock_audio_asrc_placement`:
+the timecode hold, or a directly stamped non-genlock source, not MONITOR_ONLY, a resampler; see
+`genlock-audio-pairing.md`, the issue-1425 section), everything else byte-identical (the tick/shift/step C traces equal
 before/after over 283 lines):
 
 | Piece | Rust | C |
