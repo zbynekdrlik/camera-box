@@ -41,15 +41,93 @@ fleet_boxes_swap_obs_dll() {
 # (resolume's is the HOSTNAME resolume.lan -- NEVER a pinned literal IP: it is DHCP-drifting and
 # currently collides with `bridge` at .201, targets.md, so a plan resolves + identity-confirms it
 # live). imag keeps its ssh alias `imag`; strih-snv dials STRIH_LX_IP else the fleet host
-# (a fixed box dials its address, never a DNS name). rc 2 for an unknown name.
+# (a fixed box dials its address, never a DNS name). Every other setup-strih box (issue 1426:
+# strih-pp, stream-pp) dials its obs-fleet row host, the NAME dev1 reaches the venue by
+# (strih-pp.lan through companion-pp), never its fact file's STRIH_IP (the venue address, not
+# routable from dev1). rc 2 for an unknown name.
 fleet_box_ip() {
   local b; b="$(_fleet_box "${1:-}")"
   case "$b" in
     stream-snv|resolume-snv) obs_fleet_host "$b" && echo || return 2 ;;
     imag)                    echo "imag" ;;
     strih-snv)               fleet_strih_lx_ip ;;
-    *)                       return 2 ;;
+    *)                       fleet_box_runs_setup_strih "$b" || return 2; obs_fleet_host "$b" && echo || return 2 ;;
   esac
+}
+
+# fleet_box_runs_setup_strih BOX -> rc 0 when BOX is an obs-fleet linux-genlock row with a fact file
+# scripts/strih-boxes/<BOX>.env, i.e. a box setup-strih.sh provisions and the deploy planner rolls
+# through the ONE Linux execute arm (scripts/lib/strih-snv-deploy.sh, issue 1426); rc 1 otherwise.
+# imag is linux-genlock with no fact file (its own setup-imag path). Pure (reads the checkout).
+fleet_box_runs_setup_strih() {
+  local b; b="$(_fleet_box "${1:-}")"
+  [ "$(obs_fleet_class "$b" 2>/dev/null)" = linux-genlock ] || return 1
+  [ -f "$(dirname "${BASH_SOURCE[0]}")/../strih-boxes/$b.env" ]
+}
+
+# fleet_deploy_order -> every box the deploy planner accepts, in its canonical order, one per line:
+# the setup-strih boxes in obs-fleet row order (strih-snv, strih-pp, stream-pp), then the Windows
+# stream-snv, imag and the traveling Windows resolume-snv (issue 1426). A new venue's Linux OBS box is
+# one fleet row + one fact file, no edit here. resolume-pp has no deploy path yet (no win-* MCP).
+fleet_deploy_order() {
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if fleet_box_runs_setup_strih "${line%%|*}"; then printf '%s\n' "${line%%|*}"; fi
+  done <<EOF
+${OBS_FLEET}
+EOF
+  printf '%s\n' stream-snv imag resolume-snv
+}
+
+# fleet_normalize_boxes CSV -> the requested boxes in canonical order (fleet_deploy_order), deduped
+# and validated. Empty -> the DEFAULT fleet strih-snv,stream-snv ONLY. An unknown box is a fail-loud
+# usage error (return 2).
+#   * strih-snv = the production strih since the M4 cut-over (20.9.2026): the Linux notebook, a
+#     linux-genlock box. issue 1317 part 3 made it the default strih and RETIRED the Windows `strih`
+#     arm -- the STRIH-SNV PC is gone and its address is strih-snv's now, so a `strih` request is
+#     refused by name (never a Windows robocopy/AHK program for the Linux box).
+#   * strih-pp / stream-pp (issue 1426) = the PP Linux OBS boxes, the same setup-strih arm with their
+#     own box name; named explicitly only (the PP venue is often powered off).
+#   * resolume = RESOLUME-SNV, the traveling CG box (issue 1295): a windows-genlock box on the
+#     Windows emit-only plan path, deployed ONLY when explicitly named (`--boxes resolume`) -- often
+#     off/away and not a measured E2E source (targets.md), so never in the empty default.
+#   * imag was dropped from the empty default (issue 1316, imag-nb returned to the owner); it stays
+#     a VALID explicit target (`--boxes imag`) so the IMAG role's re-provisioning needs no code change.
+fleet_normalize_boxes() {
+  local csv="${1:-}" b c out="" want=" " order
+  [ -n "$csv" ] || csv="strih-snv,stream-snv"
+  order="$(fleet_deploy_order)"
+  local IFS=','
+  for b in $csv; do
+    b="${b//[[:space:]]/}"
+    [ -z "$b" ] && continue
+    c="$(obs_fleet_canonical_name "$b")"   # issue 1414: a pre-1414 name addresses its renamed row
+    if [ "$c" = strih ]; then
+      echo "fleet_normalize_boxes: box 'strih' is the RETIRED Windows strih PC -- the strih is 'strih-snv' (Linux, $(obs_fleet_host strih-snv)) since the M4 cut-over (issue 1317)" >&2; return 2
+    fi
+    case $'\n'"$order"$'\n' in
+      *$'\n'"$c"$'\n'*) want+="$c " ;;
+      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: ${order//$'\n'/, })" >&2; return 2 ;;
+    esac
+  done
+  IFS=$'\n'
+  for c in $order; do
+    case "$want" in *" $c "*) out="${out:+$out,}$c" ;; esac
+  done
+  [ -n "$out" ] || { echo "fleet_normalize_boxes: empty box set" >&2; return 2; }
+  printf '%s\n' "$out"
+}
+
+# fleet_split_setup_strih CSV -> two lines: the setup-strih boxes of CSV, then the others, each a
+# comma list in CSV order (empty line when none). The deploy planner's execute mode rolls the first
+# set through the Linux arm before it prints the Windows programs or deploys imag (issue 1426).
+fleet_split_setup_strih() {
+  local b lx="" rest="" IFS=','
+  for b in ${1:-}; do
+    if fleet_box_runs_setup_strih "$b"; then lx="${lx:+$lx,}$b"; else rest="${rest:+$rest,}$b"; fi
+  done
+  printf '%s\n%s\n' "$lx" "$rest"
 }
 # strih-snv: STRIH_LX_IP, else the obs-fleet host; no row = rc 2 (fail closed, never a guessed name).
 fleet_strih_lx_ip() { local h="${STRIH_LX_IP:-}"; [ -n "$h" ] || h="$(obs_fleet_host strih-snv)" || return 2; [ -n "$h" ] && echo "$h" || return 2; }
