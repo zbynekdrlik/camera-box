@@ -23,10 +23,12 @@
 //!   scene), a launch in the frontend's order, plus direct probes of the guard's edges and its
 //!   `ignore_audio` mirror. The printed trace is the truth table. `cc` is required — it FAILS LOUDLY
 //!   rather than skips.
-//! - Issue 1425 (E2 slice 2, design 6216736061): the buffering FREEZE through the same lift. The three
-//!   E1 replays (a 128 ms and a 192 ms ASIO outage on `mbc`, a media source late after a 432 ms mixer
-//!   stall) grew the mix +128 / +192 / +85 ms for good; frozen, the mix stays at the floor and the
-//!   late member is re-anchored once (`MIXED_LATE`). The settle restarts (a member join, a growth),
+//! - Issue 1425 (E2 slice 2, design 6216736061 + ROZHODNUTÉ 6217557472): the buffering FREEZE through
+//!   the same lift. The three E1 replays (a 128 ms and a 192 ms ASIO outage on `mbc`, a media source
+//!   late after a 432 ms mixer stall, all while stream-snv streamed) grew the mix +128 / +192 / +85 ms
+//!   for good; frozen by the running audio encoder, the mix stays at the floor and the late member is
+//!   re-anchored once (`MIXED_LATE`). With no audio encoder nothing freezes: the outage replay and a
+//!   clip started late in place grow the mix as stock libobs does. The encoder switching on and off,
 //!   the frozen ingest race, and the reason's truth table with the freeze input.
 
 use std::fs;
@@ -495,20 +497,29 @@ const EXPECTED_TRACE: &[&str] = &[
     "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
     "L200 buffering-guard: 'pre-fotky video' fell behind the mix (frozen at 85 ms): its audio ran 73.3 ms behind the mix window; re-anchored (dropped 73.4 ms) instead of adding 85 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=73.4 ms)",
     "e1-media-stall-85: waits=4 total_ms=85 mic_missed=0 'pre-fotky video' events=1 dropped_ms=73.4 mixed=1990 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
-    "e1-media-stall-85 freeze: frozen=1 encoders=0 'pre-fotky video' mixed_late=1 mixed_late_dropped_ms=73.4 mix_mixed_late=1",
-    "== settle-restarts",
+    "e1-media-stall-85 freeze: frozen=1 encoders=1 'pre-fotky video' mixed_late=1 mixed_late_dropped_ms=73.4 mix_mixed_late=1",
+    "== e1-asio-outage-128-no-encoder",
     "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
-    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 106 milliseconds of audio buffering, total audio buffering is now 192 milliseconds (source: Media); ASRC level band BROKEN: buffering + 9 ms base lands -101.0 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
-    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 149 milliseconds of audio buffering, total audio buffering is now 341 milliseconds (source: Media); ASRC level band BROKEN: buffering + 9 ms base lands -250.3 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
-    "L200 buffering-guard: 'Media' fell behind the mix (frozen at 341 ms): its audio ran 162.0 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 170 ms to the whole mix's 341 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
-    "L200 buffering-guard: 'Media' fell behind the mix (frozen at 341 ms): its audio ran 162.7 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 170 ms to the whole mix's 341 ms of audio buffering (issue 1381; events=2814, +2813 since the last line, dropped_total=60030.0 ms)",
-    "settle-restarts: waits=16 total_ms=341 mic_missed=0 'Media' events=2823 dropped_ms=60220.0 mixed=2986 stale=0 guard_lines=2 above_lines=2 restart_lines=0",
-    "settle-restarts freeze: frozen=1 encoders=0 'Media' mixed_late=2823 mixed_late_dropped_ms=60220.0 mix_mixed_late=2823",
-    "== frozen-late-start-kept-stamp",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 128 milliseconds of audio buffering, total audio buffering is now 213 milliseconds (source: mbc); ASRC level band BROKEN: buffering + 9 ms base lands -122.3 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
+    "e1-asio-outage-128-no-encoder: waits=10 total_ms=213 mic_missed=0 'mbc' events=0 dropped_ms=0.0 mixed=1982 stale=0 guard_lines=0 above_lines=1 restart_lines=0",
+    "e1-asio-outage-128-no-encoder freeze: frozen=0 encoders=0 'mbc' mixed_late=0 mixed_late_dropped_ms=0.0 mix_mixed_late=0",
+    "== encoder-on-off",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 85 milliseconds of audio buffering, total audio buffering is now 170 milliseconds (source: Media); ASRC level band BROKEN: buffering + 9 ms base lands -79.7 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
+    "L200 buffering-guard: 'Media' fell behind the mix (frozen at 170 ms): its audio ran 136.0 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 149 ms to the whole mix's 170 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 149 milliseconds of audio buffering, total audio buffering is now 320 milliseconds (source: Media); ASRC level band BROKEN: buffering + 9 ms base lands -229.0 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
+    "encoder-on-off: waits=15 total_ms=320 mic_missed=0 'Media' events=700 dropped_ms=14930.0 mixed=1385 stale=0 guard_lines=1 above_lines=2 restart_lines=0",
+    "encoder-on-off freeze: frozen=0 encoders=0 'Media' mixed_late=700 mixed_late_dropped_ms=14930.0 mix_mixed_late=700",
+    "== late-start-kept-stamp",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 64 milliseconds of audio buffering, total audio buffering is now 149 milliseconds (source: media clip); ASRC level band BROKEN: buffering + 9 ms base lands -58.3 ms off the 100 ms level target (reach +/-35 ms) -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering",
+    "late-start-kept-stamp: waits=7 total_ms=149 mic_missed=0 'media clip' events=0 dropped_ms=0.0 mixed=296 stale=0 guard_lines=0 above_lines=1 restart_lines=0",
+    "late-start-kept-stamp freeze: frozen=0 encoders=0 'media clip' mixed_late=0 mixed_late_dropped_ms=0.0 mix_mixed_late=0",
+    "== late-start-kept-stamp-encoder",
     "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
     "L200 buffering-guard: 'media clip' fell behind the mix (frozen at 85 ms): its audio ran 42.7 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 42 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
-    "frozen-late-start-kept-stamp: waits=4 total_ms=85 mic_missed=0 'media clip' events=300 dropped_ms=6390.0 mixed=0 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
-    "frozen-late-start-kept-stamp freeze: frozen=1 encoders=0 'media clip' mixed_late=300 mixed_late_dropped_ms=6390.0 mix_mixed_late=300",
+    "late-start-kept-stamp-encoder: waits=4 total_ms=85 mic_missed=0 'media clip' events=300 dropped_ms=6390.0 mixed=0 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
+    "late-start-kept-stamp-encoder freeze: frozen=1 encoders=1 'media clip' mixed_late=300 mixed_late_dropped_ms=6390.0 mix_mixed_late=300",
     "== frozen-ingest-race",
     "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
     "L200 buffering-guard: 'NDI race' fell behind the mix (frozen at 85 ms): its audio ran 214.7 ms behind the mix window; re-anchored (dropped 214.7 ms) instead of adding 234 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=214.7 ms)",
@@ -731,47 +742,64 @@ fn the_e1_events_no_longer_grow_a_frozen_mix_1425() {
 }
 
 #[test]
-fn a_join_or_a_growth_restarts_the_settle_1425() {
+fn only_a_running_audio_encoder_freezes_the_mix_1425() {
+    // ROZHODNUTÉ 6217557472: with no audio encoder (the resolume cg OBS shape) the 128 ms outage, 34 s
+    // after launch, grows the mix exactly as stock libobs: +128 ms, one hole of 6 ticks, no re-anchor.
     let trace = c_trace();
-    // A member joining 100 ticks before it goes late, and a growth 1350 ticks before the next one,
-    // each keep the mix unfrozen (upstream grows twice: 16 waits, 341 ms); 1550 ticks after the last
-    // growth the mix is frozen and the member, now late for good, is re-anchored on every tick (a line
-    // a minute) instead of growing it a third time.
-    let s = summary(trace, "settle-restarts");
+    let s = summary(trace, "e1-asio-outage-128-no-encoder");
     assert!(
-        s.contains(" waits=16 total_ms=341 mic_missed=0 ")
-            && s.contains(" above_lines=2 ")
-            && s.contains(" guard_lines=2 "),
-        "issue 1425: the settle did not restart on a join / a growth, or did not freeze after it:
-{s}
-
-{}",
-        section(trace, "settle-restarts").join("\n")
+        s.contains(" waits=10 total_ms=213 mic_missed=0 ")
+            && s.contains("'mbc' events=0 ")
+            && s.contains(" guard_lines=0 above_lines=1 "),
+        "issue 1425: a box with no audio encoder must keep stock growth:\n{s}\n\n{}",
+        section(trace, "e1-asio-outage-128-no-encoder").join("\n")
     );
-    let f = freeze(trace, "settle-restarts");
     assert!(
-        f.contains(" frozen=1 encoders=0 "),
-        "issue 1425: settle-restarts did not end frozen:
-{f}"
+        freeze(trace, "e1-asio-outage-128-no-encoder")
+            .contains(" frozen=0 encoders=0 'mbc' mixed_late=0 "),
+        "issue 1425: nothing but an audio encoder may freeze the mix"
+    );
+    // The encoder is read on every tick: no encoder, a late member grows the mix (170 ms); a stream
+    // starts and the member goes 300 ms late for good: re-anchored on every tick (700 events, one
+    // line), never a growth; the stream stops 38 s later and the still-late member grows the mix
+    // again (320 ms) and plays.
+    let s = summary(trace, "encoder-on-off");
+    assert!(
+        s.contains(" waits=15 total_ms=320 mic_missed=0 ")
+            && s.contains("'Media' events=700 ")
+            && s.contains(" guard_lines=1 above_lines=2 "),
+        "issue 1425: the freeze must follow the encoder on and off:\n{s}\n\n{}",
+        section(trace, "encoder-on-off").join("\n")
+    );
+    assert!(
+        freeze(trace, "encoder-on-off").contains(" frozen=0 encoders=0 'Media' mixed_late=700 "),
+        "issue 1425: encoder-on-off must end unfrozen with the 700 re-anchors of the frozen span"
     );
 }
 
 #[test]
-fn a_member_that_stays_late_in_a_frozen_mix_is_muted_never_grown_1425() {
-    // The slice-2b limit, in the resolume shape: a media clip in the program mix starts in place 34 s
-    // after launch (no cut, so no join, the mix is frozen) with its stamps 128 ms late for good. Stock
-    // libobs grew the mix once; frozen, every packet is re-anchored, so the clip is never mixed while
-    // it stays late (one line, the counters carry the rest). Slice 2b (delay that one source) is the
-    // owner's call; this pins today's behaviour so a change to it is visible.
+fn a_clip_started_late_in_place_grows_the_mix_unless_an_encoder_runs_1425() {
+    // The resolume shape: a media clip in the program mix starts in place 34 s after launch (no cut,
+    // so no join) with its stamps 128 ms late for good. No audio encoder: stock growth, the clip plays.
     let trace = c_trace();
-    let s = summary(trace, "frozen-late-start-kept-stamp");
+    let s = summary(trace, "late-start-kept-stamp");
+    assert!(
+        s.contains(" total_ms=149 mic_missed=0 ")
+            && s.contains("'media clip' events=0 ")
+            && s.contains(" mixed=296 ")
+            && s.contains(" above_lines=1 "),
+        "issue 1425: with no audio encoder a late clip must grow the mix and play:\n{s}"
+    );
+    // Its twin while a recording runs: frozen, every packet is re-anchored, so the clip is muted while
+    // it stays late (the slice-2b limit, the owner's call) and the mix never grows.
+    let s = summary(trace, "late-start-kept-stamp-encoder");
     assert!(
         s.contains(" waits=4 total_ms=85 mic_missed=0 ")
             && s.contains("'media clip' events=300 ")
             && s.contains(" mixed=0 ")
             && s.contains(" guard_lines=1 above_lines=0 "),
-        "issue 1425: a member late for good in a frozen mix must be re-anchored on every tick, never \
-         grow the mix:\n{s}"
+        "issue 1425: a member late for good while an encoder runs must be re-anchored on every \
+         tick, never grow the mix:\n{s}"
     );
 }
 

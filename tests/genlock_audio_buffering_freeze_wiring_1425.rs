@@ -1,10 +1,11 @@
-//! Issue 1425 (E2 slice 2, design 6216736061) — the audio-buffering FREEZE is wired.
+//! Issue 1425 (E2 slice 2, design 6216736061 + ROZHODNUTÉ 6217557472) — the audio-buffering FREEZE is
+//! wired.
 //!
 //! Stock libobs (and the issue-1367 floor above it) grew the WHOLE mix's buffering whenever a mixed
 //! source fell behind the window; a growth while an encoder runs makes that encoder's audio
 //! permanently later. On stream-snv the E1 events grew it +85 / +128 / +192 ms for good. Since slice 2
-//! the mix freezes once an output with an audio encoder runs, or after 30 s without a growth and
-//! without a member join, and a mixed source that falls behind is re-anchored (`MIXED_LATE`).
+//! the mix freezes while an output with an audio encoder runs (and only then), and a mixed source that
+//! falls behind it is re-anchored (`MIXED_LATE`).
 //!
 //! The decisions are pinned elsewhere: the freeze + action by
 //! `tests/genlock_audio_buffering_parity_1367.rs` (C vs the Rust authority), the behaviour by the
@@ -37,12 +38,10 @@ const BUFFERING_H: &str = "vendor/obs-studio/libobs/obs-genlock-audio-buffering.
 const MIX_GUARD_H: &str = "vendor/obs-studio/libobs/obs-genlock-mix-guard.h";
 
 /// `(file, squished needle)`, each required exactly once.
-const FREEZE_WIRING: [(&str, &str); 20] = [
-    (OBS_AUDIO, "if (source->genlock_mix_entered) audio->genlock_settle_tick = tick;"),
-    (OBS_AUDIO, "audio->genlock_buffering_frozen = genlock_audio_buffering_frozen( genlock_audio_buffering_ns_since(audio->genlock_settle_tick, genlock_mix_tick_now, audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES)), obs_output_genlock_audio_encoder_outputs() > 0, GENLOCK_AUDIO_BUFFERING_SETTLE_NS);"),
+const FREEZE_WIRING: [(&str, &str); 18] = [
+    (OBS_AUDIO, "audio->genlock_buffering_frozen = genlock_audio_buffering_frozen(obs_output_genlock_audio_encoder_outputs() > 0);"),
     (OBS_AUDIO, "const int genlock_guard = genlock_mix_guard_reason( genlock_mix_source_is_member(source), source->genlock_mix_entered, source->info.audio_render != NULL, source->audio_ts, ts.start, audio->genlock_buffering_frozen);"),
     (OBS_AUDIO, "const int genlock_buffering = genlock_audio_buffering_action(audio->total_buffering_ticks, audio->floor_buffering_ticks, audio->max_buffering_ticks, min_ts < ts.start, audio->genlock_buffering_frozen);"),
-    (OBS_AUDIO, "if (genlock_buffering != GENLOCK_AUDIO_BUFFERING_ACTION_NONE) audio->genlock_settle_tick = genlock_mix_tick_now;"),
     (OBS_AUDIO, "if (reason == GENLOCK_MIX_GUARD_MIXED_LATE) { source->genlock_mixed_late_events++; source->genlock_mixed_late_dropped_ns += dropped_ns; audio->genlock_mixed_late_events++; }"),
     (OBS_AUDIO, "snprintf(why, sizeof(why), \"fell behind the mix (frozen at %d ms)\", total_ms);"),
     (OBS_AUDIO, "\"audio-telemetry #800 mix: frozen=%d mixed_late=%\" PRIu64,"),
@@ -51,22 +50,27 @@ const FREEZE_WIRING: [(&str, &str); 20] = [
     (OBS_OUTPUT, "long obs_output_genlock_audio_encoder_outputs(void) { return os_atomic_load_long(&genlock_audio_encoder_outputs); }"),
     (OBS_OUTPUT, "if (has_audio) os_atomic_inc_long(&genlock_audio_encoder_outputs);"),
     (OBS_OUTPUT, "if (has_audio) os_atomic_dec_long(&genlock_audio_encoder_outputs);"),
-    (OBS_INTERNAL, "uint64_t genlock_settle_tick; bool genlock_buffering_frozen; uint64_t genlock_mixed_late_events;"),
+    (OBS_INTERNAL, "bool genlock_buffering_frozen; uint64_t genlock_mixed_late_events;"),
     (OBS_INTERNAL, "uint64_t genlock_mixed_late_events; uint64_t genlock_mixed_late_dropped_ns;"),
     (OBS_INTERNAL, "extern long obs_output_genlock_audio_encoder_outputs(void);"),
-    (BUFFERING_H, "#define GENLOCK_AUDIO_BUFFERING_SETTLE_NS (30ULL * 1000000000ULL)"),
+    (BUFFERING_H, "static inline bool genlock_audio_buffering_frozen(bool encoder_active) { return encoder_active; }"),
     (BUFFERING_H, "return source_behind && !frozen ? GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC : GENLOCK_AUDIO_BUFFERING_ACTION_NONE;"),
     (MIX_GUARD_H, "#define GENLOCK_MIX_GUARD_MIXED_LATE 3"),
     (MIX_GUARD_H, "return frozen ? GENLOCK_MIX_GUARD_MIXED_LATE : GENLOCK_MIX_GUARD_NONE;"),
 ];
 
-/// `(file, squished needle)`, each must be GONE: the pre-freeze action and reason calls.
-const FREEZE_ABSENT: [(&str, &str); 2] = [
+/// `(file, squished needle)`, each must be GONE: the pre-freeze action and reason calls, and the
+/// settle arm ROZHODNUTÉ 6217557472 dropped (nothing but a running audio encoder freezes the mix).
+const FREEZE_ABSENT: [(&str, &str); 6] = [
     (OBS_AUDIO, "audio->max_buffering_ticks, min_ts < ts.start);"),
     (
         OBS_AUDIO,
         "source->info.audio_render != NULL, source->audio_ts, ts.start);",
     ),
+    (OBS_AUDIO, "genlock_settle_tick"),
+    (OBS_INTERNAL, "genlock_settle_tick"),
+    (BUFFERING_H, "GENLOCK_AUDIO_BUFFERING_SETTLE_NS"),
+    (BUFFERING_H, "genlock_audio_buffering_ns_since"),
 ];
 
 const WINDOWS_WORKFLOWS: [&str; 2] = [
@@ -118,7 +122,7 @@ fn function_body(src: &str, start: &str) -> String {
 }
 
 #[test]
-fn the_freeze_is_decided_after_the_mark_before_the_render_loop_and_a_growth_restarts_it_1425() {
+fn the_freeze_is_decided_after_the_mark_before_the_render_loop_1425() {
     let s = squish(&read(OBS_AUDIO));
     let pos = |needle: &str| {
         s.find(needle)
@@ -129,23 +133,20 @@ fn the_freeze_is_decided_after_the_mark_before_the_render_loop_and_a_growth_rest
     let render = pos("/* render audio data */");
     let reason = pos("const int genlock_guard = genlock_mix_guard_reason(");
     let action = pos("const int genlock_buffering = genlock_audio_buffering_action(");
-    let regrow = pos(
-        "if (genlock_buffering != GENLOCK_AUDIO_BUFFERING_ACTION_NONE) audio->genlock_settle_tick",
-    );
     let mix = pos("/* mix audio */");
     assert!(
-        mark < decide && decide < render && render < reason && reason < action && action < regrow && regrow < mix,
-        "issue 1425: the per-tick order must be mark (joins restart the settle) -> the freeze -> the \
-         render loop (MIXED_LATE) -> the tick decision -> the growth's settle restart -> the mix"
+        mark < decide && decide < render && render < reason && reason < action && action < mix,
+        "issue 1425: the per-tick order must be the mark -> the freeze (read once) -> the render loop \
+         (MIXED_LATE) -> the tick decision -> the mix"
     );
-    // The join restart lives in the mark itself.
+    // ROZHODNUTÉ 6217557472: no settle -- the mark records no join time.
     assert!(
-        function_body(
+        !function_body(
             &read(OBS_AUDIO),
             "static void genlock_mix_mark_members(struct obs_core_audio *audio)"
         )
-        .contains("if (source->genlock_mix_entered) audio->genlock_settle_tick = tick;"),
-        "issue 1425: a member join must restart the settle in genlock_mix_mark_members"
+        .contains("audio->genlock_"),
+        "issue 1425: genlock_mix_mark_members must not feed the freeze (only an audio encoder does)"
     );
 }
 

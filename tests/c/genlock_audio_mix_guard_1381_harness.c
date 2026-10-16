@@ -1,5 +1,6 @@
 /* camera-box issue 1381 -- the C harness of tests/genlock_audio_mix_guard_1381.rs (issue 1425 E2 slice 2
- * adds the buffering-freeze scenarios: the three E1 replays, the settle restarts, an ingest race).
+ * adds the buffering-freeze scenarios: the E1 replays with and without an audio encoder, the encoder
+ * switching on and off, a clip started in place late, an ingest race).
  *
  * NOT compiled on its own: the test substitutes the shipped obs-audio.c / audio-io.h code, lifted
  * verbatim, for the six at-sign markers below, compiles the result with cc and compares
@@ -642,8 +643,8 @@ int main(void)
 
 	/* issue 1425 (E2 slice 2, design 6216736061): the E1 replays. Each event grew the stream-snv mix for
 	 * good in stock libobs (and stepped every running encoder's audio later, F1). With the freeze the
-	 * mix stays at the floor: the late member is re-anchored (MIXED_LATE), one counted dropout of its
-	 * late span, and the mic is heard on every tick. The replays reproduce the LOGGED growth: a member
+	 * mix stays at the floor while the stream's audio encoder runs: the late member is re-anchored
+	 * (MIXED_LATE), one counted dropout of its late span, and the mic is heard on every tick. The replays reproduce the LOGGED growth: a member
 	 * that keeps its stamp delivers a backlog stamped at capture, its oldest packet behind the window. */
 
 	/* (f) 15.10 04:00: `adding 128 ms ... now 213 ms (source: mbc)`, an ASIO outage on mbc while the
@@ -674,9 +675,9 @@ int main(void)
 	h_freeze_summary("e1-asio-outage-192");
 
 	/* (h) 15.10 17:43: `adding 85 ms ... now 170 ms (source: pre-fotky video)` after a 432 ms mixer
-	 * callback stall; no encoder in this replay, the mix is frozen by the 30 s settle (launched 34 s
-	 * before). */
+	 * callback stall, while the stream ran (an audio encoder is active). */
 	h_begin("e1-media-stall-85", "pre-fotky video", true, 0, true);
+	h_encoders = 1;
 	for (int i = 0; i < 2000; i++) {
 		if (i == 1600)
 			h_other.h_running = false;
@@ -687,29 +688,42 @@ int main(void)
 	h_summary("e1-media-stall-85");
 	h_freeze_summary("e1-media-stall-85");
 
-	/* (i) the settle restarts: no encoder, the mic alone for 34 s (frozen), then a member joins (on time)
-	 * and goes 150 ms late 100 ticks later -- a join restarts the settle, so the mix grows; 1350 ticks
-	 * after that growth (1450 after the join) it goes 300 ms late -- the growth restarted the settle, so
-	 * it grows again; 1550 ticks after the last growth it goes 500 ms late for good -- frozen: re-anchored
-	 * on every tick (the persistent case slice 2b would size; here a dropout, a line a minute). */
-	h_begin("settle-restarts", "Media", true, 0, true);
-	for (int i = 0; i < 4600 + H_MINUTE_TICKS + 10; i++) {
-		if (i == 1700)
-			h_other.h_lag_ns = 150000000;
-		if (i == 3050)
-			h_other.h_lag_ns = 300000000;
-		if (i == 4600)
-			h_other.h_lag_ns = 500000000;
-		h_step(i >= 1600);
+	/* (h') ROZHODNUTE 6217557472: the 128 ms outage on a box with NO audio encoder (the resolume cg OBS
+	 * shape), 34 s after launch: nothing freezes the mix, so it grows exactly as stock libobs does. */
+	h_begin("e1-asio-outage-128-no-encoder", "mbc", true, 0, true);
+	for (int i = 0; i < 2000; i++) {
+		if (i == 1600)
+			h_other.h_running = false;
+		if (i == 1611)
+			h_burst(&h_other, h_t + h_tick_ns, 230000000);
+		h_step(true);
 	}
-	h_summary("settle-restarts");
-	h_freeze_summary("settle-restarts");
+	h_summary("e1-asio-outage-128-no-encoder");
+	h_freeze_summary("e1-asio-outage-128-no-encoder");
 
-	/* (k) the slice-2b limit in the resolume shape (review round 1): a media clip that keeps its stamp is
+	/* (i) only a running encoder freezes the mix, read on every tick: no encoder, the member goes 150 ms
+	 * late (the mix grows); a stream starts, the member goes 300 ms late for good (frozen: re-anchored
+	 * on every tick, a line a minute, never a growth); the stream stops 38 s later (past any quiet time)
+	 * and the still-late member grows the mix again and plays. */
+	h_begin("encoder-on-off", "Media", true, 0, true);
+	for (int i = 0; i < 1800 + 300; i++) {
+		if (i == 300)
+			h_other.h_lag_ns = 150000000;
+		if (i == 1000)
+			h_encoders = 1;
+		if (i == 1100)
+			h_other.h_lag_ns = 300000000;
+		if (i == 1800)
+			h_encoders = 0;
+		h_step(true);
+	}
+	h_summary("encoder-on-off");
+	h_freeze_summary("encoder-on-off");
+
+	/* (k) the resolume shape (review round 1, ROZHODNUTE 6217557472): a media clip that keeps its stamp is
 	 * in the program mix with no audio, then starts in place (no cut, so no join) 34 s after launch, its
-	 * stamps 128 ms late for good. Stock libobs grew the mix once and played it; frozen, every packet is
-	 * re-anchored, so the clip is MUTED while it stays late (a line a minute) -- never a growth. */
-	h_begin("frozen-late-start-kept-stamp", "media clip", true, 128000000, true);
+	 * stamps 128 ms late for good. No audio encoder: the mix grows once and the clip plays, as stock. */
+	h_begin("late-start-kept-stamp", "media clip", true, 128000000, true);
 	h_other.h_running = false;
 	for (int i = 0; i < 1900; i++) {
 		if (i == 1600) {
@@ -718,8 +732,24 @@ int main(void)
 		}
 		h_step(true);
 	}
-	h_summary("frozen-late-start-kept-stamp");
-	h_freeze_summary("frozen-late-start-kept-stamp");
+	h_summary("late-start-kept-stamp");
+	h_freeze_summary("late-start-kept-stamp");
+
+	/* (k') its twin while a recording runs (an audio encoder): frozen, every packet of the late clip is
+	 * re-anchored, so the clip is MUTED while it stays late -- never a growth (the slice-2b limit). */
+	h_begin("late-start-kept-stamp-encoder", "media clip", true, 128000000, true);
+	h_other.h_running = false;
+	for (int i = 0; i < 1900; i++) {
+		if (i == 1500)
+			h_encoders = 1;
+		if (i == 1600) {
+			h_other.h_running = true;
+			h_other.h_fed_until_ns = h_t;
+		}
+		h_step(true);
+	}
+	h_summary("late-start-kept-stamp-encoder");
+	h_freeze_summary("late-start-kept-stamp-encoder");
 
 	/* (j) a stream runs; the ingest thread re-places a MIXED source 300 ms late between the render loop
 	 * and calc_min_ts: the frozen action never grows the mix for it, the next tick re-anchors it. */

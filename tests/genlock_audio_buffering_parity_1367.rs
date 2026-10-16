@@ -11,14 +11,14 @@
 //!   `ASRC_LEVEL_TARGET_MS`, the #1333 split's `AUDIO_OFFSET_CLAMP_MS`, and the three #786 launch
 //!   gates' 100 ms bound. A target change that leaves the band, a floor the launch gates would read
 //!   as a bad draw, or a threshold change all go RED here.
-//! - Issue 1425 (E2 slice 2): the FREEZE rides the same gate -- the action's `frozen` input, the
-//!   settle clock (`ns_since`, saturating) and the decision (`frozen`), plus `SETTLE_NS`.
+//! - Issue 1425 (E2 slice 2, ROZHODNUTÉ 6217557472): the FREEZE rides the same gate -- the action's
+//!   `frozen` input and the decision (`frozen`: an audio encoder runs, nothing else).
 
 use camera_box::asrc_bench::LEVEL_TARGET_MS;
 use camera_box::genlock_audio_buffering::{
-    action, band_error_ns, band_ok, floor_holds_band, frozen, level_gap_ns, ns_since, plan,
-    ticks_for_ms, ticks_ns, BufferingAction, AUDIO_OUTPUT_FRAMES, DEFAULT_MAX_TICKS, FLOOR_MS,
-    LEVEL_BASE_MAX_NS, LEVEL_BASE_NOMINAL_NS, LEVEL_REACH_NS, SETTLE_NS, TS_SMOOTHING_THRESHOLD_NS,
+    action, band_error_ns, band_ok, floor_holds_band, frozen, level_gap_ns, plan, ticks_for_ms,
+    ticks_ns, BufferingAction, AUDIO_OUTPUT_FRAMES, DEFAULT_MAX_TICKS, FLOOR_MS, LEVEL_BASE_MAX_NS,
+    LEVEL_BASE_NOMINAL_NS, LEVEL_REACH_NS, TS_SMOOTHING_THRESHOLD_NS,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -82,42 +82,9 @@ fn action_vectors() -> Vec<(i32, i32, i32, bool, bool)> {
     v
 }
 
-/// Issue 1425: the settle clock `(anchor_tick, cur_tick, tick_ns)` -- no anchor, the anchor tick
-/// itself, behind it, one tick on, the 30 s edge at 48 kHz (1406 / 1407 ticks), the saturation edge,
-/// and a zero tick length.
-fn since_vectors() -> Vec<(u64, u64, u64)> {
-    let tick = 21_333_333_u64;
-    let q = u64::MAX / tick;
-    vec![
-        (0, 0, tick),
-        (0, 5_000, tick),
-        (7, 7, tick),
-        (9, 7, tick),
-        (7, 8, tick),
-        (1, 1 + 1406, tick),
-        (1, 1 + 1407, tick),
-        (1, 1 + q, tick),
-        (1, 2 + q, tick),
-        (1, u64::MAX, tick),
-        (5, 100, 0),
-        (5, 100, u64::MAX),
-        (u64::MAX - 1, u64::MAX, tick),
-    ]
-}
-
-/// Issue 1425: the freeze decision `(ns_since, encoder_active, settle_ns)` at both edges of the
-/// shipped settle, with and without an encoder, and with a settle that is not the constant.
-fn frozen_vectors() -> Vec<(u64, bool, u64)> {
-    let mut v = Vec::new();
-    for since in [0_u64, 1, SETTLE_NS - 1, SETTLE_NS, SETTLE_NS + 1, u64::MAX] {
-        for enc in [false, true] {
-            v.push((since, enc, SETTLE_NS));
-        }
-    }
-    for (since, settle) in [(4_u64, 5_u64), (5, 5), (0, 0), (u64::MAX, u64::MAX)] {
-        v.push((since, false, settle));
-    }
-    v
+/// Issue 1425: the freeze decision over its one input, an audio encoder running.
+fn frozen_vectors() -> Vec<bool> {
+    vec![false, true]
 }
 
 fn band_vectors() -> Vec<(u64, u64, i64)> {
@@ -185,17 +152,11 @@ fn rust_trace() -> Vec<String> {
             action_token(action(total, floor, max, behind, fr))
         ));
     }
-    for (anchor, cur, tick) in since_vectors() {
+    for enc in frozen_vectors() {
         out.push(format!(
-            "since {anchor} {cur} {tick} {}",
-            ns_since(anchor, cur, tick)
-        ));
-    }
-    for (since, enc, settle) in frozen_vectors() {
-        out.push(format!(
-            "frozen {since} {} {settle} {}",
+            "frozen {} {}",
             u8::from(enc),
-            u8::from(frozen(since, enc, settle))
+            u8::from(frozen(enc))
         ));
     }
     for (buf, base, target) in band_vectors() {
@@ -242,14 +203,9 @@ fn c_harness() -> String {
             if fr { "true" } else { "false" }
         ));
     }
-    for (anchor, cur, tick) in since_vectors() {
+    for enc in frozen_vectors() {
         body.push_str(&format!(
-            "\tsince_line({anchor}ULL, {cur}ULL, {tick}ULL);\n"
-        ));
-    }
-    for (since, enc, settle) in frozen_vectors() {
-        body.push_str(&format!(
-            "\tfrozen_line({since}ULL, {}, {settle}ULL);\n",
+            "\tfrozen_line({});\n",
             if enc { "true" } else { "false" }
         ));
     }
@@ -289,16 +245,9 @@ static void action_line(int total, int floor, int max, bool behind, bool frozen)
 	       genlock_audio_buffering_action(total, floor, max, behind, frozen));
 }}
 
-static void since_line(uint64_t anchor, uint64_t cur, uint64_t tick)
+static void frozen_line(bool enc)
 {{
-	printf("since %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n", anchor, cur, tick,
-	       genlock_audio_buffering_ns_since(anchor, cur, tick));
-}}
-
-static void frozen_line(uint64_t since, bool enc, uint64_t settle)
-{{
-	printf("frozen %" PRIu64 " %d %" PRIu64 " %d\n", since, enc ? 1 : 0, settle,
-	       genlock_audio_buffering_frozen(since, enc, settle) ? 1 : 0);
+	printf("frozen %d %d\n", enc ? 1 : 0, genlock_audio_buffering_frozen(enc) ? 1 : 0);
 }}
 
 static void band_line(uint64_t buf, uint64_t base, int64_t target)
@@ -396,12 +345,8 @@ fn c_audio_buffering_matches_the_rust_authority_1367() {
             && has("action 4 4 45 1 0 2")
             && has("action 4 4 45 1 1 0")
             && has("action 45 4 45 1 0 0")
-            && has("since 1 1407 21333333 29994666198")
-            && has("since 1 1408 21333333 30015999531")
-            && has("since 1 18446744073709551615 21333333 18446744073709551615")
-            && has("frozen 29999999999 0 30000000000 0")
-            && has("frozen 30000000000 0 30000000000 1")
-            && has("frozen 0 1 30000000000 1")
+            && has("frozen 0 0")
+            && has("frozen 1 1")
             && r.iter()
                 .any(|l| l.starts_with("band ") && l.ends_with(" 0"))
             && r.iter()
@@ -409,33 +354,8 @@ fn c_audio_buffering_matches_the_rust_authority_1367() {
             && has("band 65000000 0 100000000 35000000 1")
             && has("band 64999999 0 100000000 35000001 0"),
         "issue 1367: the parity vectors no longer reach the floor, the override, the maximum, the \
-         dynamic increase, the freeze, the settle edge and its saturation, and both band outcomes"
+         dynamic increase, the freeze, and both band outcomes"
     );
-}
-
-/// Issue 1425: `GENLOCK_AUDIO_BUFFERING_SETTLE_NS` is spelled as a product (the #800 test pins its
-/// 60 s literal once in obs-audio.c); its value must be the Rust `SETTLE_NS`.
-#[test]
-fn the_settle_define_is_the_rust_constant_1425() {
-    let h = read(HEADER);
-    let needle = "#define GENLOCK_AUDIO_BUFFERING_SETTLE_NS ";
-    let line = h
-        .lines()
-        .find(|l| l.starts_with(needle))
-        .unwrap_or_else(|| panic!("issue 1425: `{needle}` not found in {HEADER}"));
-    let expr = line[needle.len()..].trim();
-    let value: u64 = expr
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .split('*')
-        .map(|f| {
-            f.trim()
-                .trim_end_matches(|c: char| c.is_ascii_alphabetic())
-                .parse::<u64>()
-                .unwrap_or_else(|e| panic!("issue 1425: factor `{f}` of `{expr}`: {e}"))
-        })
-        .product();
-    assert_eq!(value, SETTLE_NS, "issue 1425: {HEADER} settle `{expr}`");
 }
 
 #[test]
