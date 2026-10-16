@@ -36,7 +36,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 
 | item | probe (read-only) | good → OK | forgot → FORGOT | else → UNKNOWN |
 |---|---|---|---|---|
-| mic | `measurement-audio-alert-watchdog.sh --dry-run` | `verdict=PRESENT` | `verdict=SILENT` (owner: odmutuj `mbc` v Abletone) | SKIP/UNKNOWN/cam2-down |
+| mic | `measurement-audio-alert-watchdog.sh --dry-run` + `program_audio_guard.py` (capture `mic_guard`, graded on its EXIT code, issue 1447) | `verdict=PRESENT` AND guard exit 0 | `verdict=SILENT` (owner: odmutuj `mbc` v Abletone); guard exit 1 = FOREIGN (owner: v Abletone na mbc nechaj do streamu len merací mikrofón — the peak alone reads a foreign flood as PRESENT) | SKIP/UNKNOWN/cam2-down; guard exit 2/timeout/missing (strih-snv :8891 down — the sampler is stopped in EVENT) |
 | mode | `lib/rig-mode-state.sh` (cam2 painter probe) | `TEST` | `EVENT` (supervisor: `rig-mode.sh test`) | cam2 down |
 | painter | `optical-chain-alert-watchdog.sh --dry-run` | `verdict=healthy`/`log-only:*` | `verdict=alert:*` | `nothing to decide` |
 | burns | `obs_burn_filter.py sweep-check` (strih+stream) | exit 1 (≥1 burn ON) | exit 0 (no burns) | exit 2 |
@@ -192,7 +192,10 @@ enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
   the owner hands the rig back, while it is usually still in EVENT — `mic` and `painter` read
   UNKNOWN. Switch the rig back with `rig-mode.sh test` (the `mode=EVENT→FORGOT` action) and re-run
   the check: `mic`/`painter` only verify once the rig is in TEST. The muted-mic that motivated the
-  ticket is caught on the SECOND pass.
+  ticket is caught on the SECOND pass. The `mic_guard` half (issue 1447) has two timing effects on
+  that re-run: the sampler `rig-mode.sh test` starts needs ~4 s of warm-up (UNKNOWN until then), and
+  the guard latches a FOREIGN for 30 s, so wait ~30 s after the owner fixes Ableton before
+  re-running, or the item still reads FORGOT for a problem already fixed.
 - **Multi-box items are strict (no masking).** For `burns` (strih+stream) and `pins`
   (strih+stream+imag) the item is OK only when EVERY probed box is OK; a single unreadable box
   makes the item UNKNOWN (never masked by an OK sibling — the honesty the `neoverené` line needs).
@@ -215,6 +218,11 @@ enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
 - **Reuse, never re-derive.** Every item runs an EXISTING probe. When a probe's dry-run verdict
   vocabulary changes, update the `good`/`forgot` token sets in `ITEMS` (rig_dev_handover_decision.py)
   and the fixtures in the test — do NOT reimplement the probe's grading here.
+- **One item, two differently graded probes (issue 1447):** `Item(capture_kinds={"<capture>":
+  "exit"}, forgot_msgs={...})` grades one capture by its exit code inside a verdict-kind item and
+  names each FORGOT capture's own fix (joined in capture order). Every capture of an item must be
+  present for OK, so add the new capture to the full all-OK fixture and point its `RDH_*_PROBE` at a
+  missing path in the unit-env test, or that test reaches the live rig.
 - The `#1310`/`#1307`/`#1299` watchdogs may be absent on an older base — a MISSING probe script is
   the RC_MISSING sentinel → UNKNOWN, so the orchestrator is forward-compatible (it picks a probe up
   the moment it exists).

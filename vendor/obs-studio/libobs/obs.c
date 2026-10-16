@@ -1631,13 +1631,14 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	if (!oai)
 		return true;
 
-	/* camera-box issue 1367 (ROZHODNUTE 5857354949): the genlock audio-buffering FLOOR. Every launch
-	 * starts at the same GENLOCK_AUDIO_BUFFERING_FLOOR_MS (raised on the first mixer tick,
-	 * obs-audio.c), and OBS's dynamic increase stays active above it up to the maximum. Stock OBS
-	 * started at 0 and grew only on a startup race, which made the stream `mbc` ASRC level (and its
-	 * A/V position) differ per launch. Fixed buffering is never used: the frontend low-latency
-	 * toggle is overridden and logged. The decision is the pure genlock_audio_buffering_make_plan()
-	 * (obs-genlock-audio-buffering.h <-> src/genlock_audio_buffering.rs). */
+	/* camera-box issue 1367 (ROZHODNUTE 5857354949): the genlock audio-buffering FLOOR. A launch
+	 * starts at GENLOCK_AUDIO_BUFFERING_FLOOR_MS (raised on the first mixer tick, obs-audio.c), and
+	 * OBS's dynamic increase stays active above it up to the maximum. Issue 1425 (E2 slice 3): the
+	 * floor is 0 -- a stamped source's A/V no longer depends on the buffering, and it is frozen while
+	 * an audio encoder runs -- so a launch starts at 0 like stock OBS. Fixed buffering is never used:
+	 * the frontend low-latency toggle is overridden and logged. The decision is the pure
+	 * genlock_audio_buffering_make_plan() (obs-genlock-audio-buffering.h <->
+	 * src/genlock_audio_buffering.rs). */
 	const struct genlock_audio_buffering_plan genlock_buf = genlock_audio_buffering_make_plan(
 		oai->max_buffering_ms, oai->fixed_buffering, oai->samples_per_sec, AUDIO_OUTPUT_FRAMES);
 	audio->max_buffering_ticks = (int)genlock_buf.max_ticks;
@@ -1662,13 +1663,12 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	     "\tsamples per sec: %d\n"
 	     "\tspeakers:        %d\n"
 	     "\tmax buffering:   %d milliseconds\n"
-	     "\tbuffering type:  fixed floor %d ms, dynamically increasing above",
+	     "\tbuffering type:  dynamically increasing from %d ms (genlock floor, issue 1425)",
 	     (int)ai.samples_per_sec, (int)ai.speakers, max_buffering_ms, genlock_floor_ms);
 	if (genlock_buf.overridden)
 		blog(LOG_WARNING,
 		     "genlock audio buffering (issue 1367): the requested %s audio buffering (max %u ms) is "
-		     "OVERRIDDEN -- every launch starts at the fixed %d ms floor and increases dynamically above it "
-		     "(max %d ms)",
+		     "OVERRIDDEN -- every launch starts at %d ms and increases dynamically above it (max %d ms)",
 		     oai->fixed_buffering ? "fixed (low-latency)" : "dynamic", oai->max_buffering_ms, genlock_floor_ms,
 		     max_buffering_ms);
 

@@ -1,22 +1,25 @@
 //! Issue 1367 (ROZHODNUTÉ 5857354949) — an EXECUTABLE C-vs-Rust parity gate for the genlock
-//! audio-buffering FLOOR, and the band invariant held on the values the shipped code really uses.
+//! audio-buffering FLOOR (0 since issue 1425 E2 slice 3, design 6220191978).
 //!
 //! - `vendor/obs-studio/libobs/obs-genlock-audio-buffering.h` is pure `<stdint.h>`/`<stdbool.h>`, so
 //!   it is `#include`d as-is (never a retyped copy), compiled under `-Wall -Wextra -Wconversion
-//!   -Wformat=2 -Werror`, and driven over the tick rounding, the reset plan, the floor-then-dynamic
-//!   action and the band. Every printed value must be byte-identical to the Tier-0 Rust authority
-//!   `camera_box::genlock_audio_buffering`. `cc` is required — it FAILS LOUDLY rather than skips.
-//! - The invariant is held on the LIFTED definitions: the header's defines, obs-source.c
-//!   `TS_SMOOTHING_THRESHOLD`, media-io `AUDIO_OUTPUT_FRAMES`, asrc-compensator.h
-//!   `ASRC_LEVEL_TARGET_MS`, the #1333 split's `AUDIO_OFFSET_CLAMP_MS`, and the three #786 launch
-//!   gates' 100 ms bound. A target change that leaves the band, a floor the launch gates would read
-//!   as a bad draw, or a threshold change all go RED here.
+//!   -Wformat=2 -Werror`, and driven over the tick rounding, the reset plan and the
+//!   floor-then-dynamic action. Every printed value must be byte-identical to the Tier-0 Rust
+//!   authority `camera_box::genlock_audio_buffering`. `cc` is required — it FAILS LOUDLY rather than
+//!   skips.
+//! - The header's defines are lifted and held equal to the Rust constants, and the three #786 launch
+//!   gates' 100 ms bound is lifted: a launch's own draw (the floor, plus the one or two ticks a late
+//!   source adds at startup) must read as clean on every gate.
+//! - Issue 1425 (E2 slice 2, ROZHODNUTÉ 6217557472): the FREEZE rides the same gate -- the action's
+//!   `frozen` input and the decision (`frozen`: an audio encoder runs, nothing else). Slice 3
+//!   removed the band (the gap to the retired absolute ASRC level target) the floor was sized for,
+//!   and (ROZHODNUTÉ 6221252305) the freeze waits out the launch settle window (`launch_settled`).
+//!   The plan is also driven at non-zero floors (`plan_with_floor` vs
+//!   `genlock_audio_buffering_make_plan_floor`), so the override and the max lift stay pinned.
 
-use camera_box::asrc_bench::LEVEL_TARGET_MS;
 use camera_box::genlock_audio_buffering::{
-    action, band_error_ns, band_ok, floor_holds_band, level_gap_ns, plan, ticks_for_ms, ticks_ns,
-    BufferingAction, AUDIO_OUTPUT_FRAMES, DEFAULT_MAX_TICKS, FLOOR_MS, LEVEL_BASE_MAX_NS,
-    LEVEL_BASE_NOMINAL_NS, LEVEL_REACH_NS, TS_SMOOTHING_THRESHOLD_NS,
+    action, frozen, launch_settled, plan, plan_with_floor, ticks_for_ms, ticks_ns, BufferingAction,
+    AUDIO_OUTPUT_FRAMES, DEFAULT_MAX_TICKS, FLOOR_MS, LAUNCH_SETTLE_NS,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -66,40 +69,63 @@ fn plan_vectors() -> Vec<(u32, bool, u32, u32)> {
     v
 }
 
-fn action_vectors() -> Vec<(i32, i32, i32, bool)> {
+/// The plan at non-zero floors (ms): the override of a request below the floor and the lift of the
+/// maximum to a floor above the default maximum, which the shipped floor 0 never reaches.
+fn plan_floor_vectors() -> Vec<(u32, u32, bool, u32, u32)> {
+    let mut v = Vec::new();
+    for floor in [0_u32, 21, 85, 960, 1200] {
+        for (max, fixed, rate) in [
+            (0_u32, false, 48_000_u32),
+            (20, false, 48_000),
+            (50, false, 48_000),
+            (85, false, 48_000),
+            (500, false, 44_100),
+            (20, true, 48_000),
+            (0, false, 768_000),
+            (0, false, 0),
+        ] {
+            v.push((floor, max, fixed, rate, 1024));
+        }
+    }
+    v
+}
+
+/// Issue 1425 slice 3: the launch settle window over its edges (first tick, mix time).
+fn settled_vectors() -> Vec<(u64, u64)> {
+    let first = 1_000_000_000_u64;
+    vec![
+        (0, 0),
+        (0, first),
+        (0, u64::MAX),
+        (first, first),
+        (first, first + LAUNCH_SETTLE_NS - 1),
+        (first, first + LAUNCH_SETTLE_NS),
+        (first, first + 3_600_000_000_000),
+        (first, first - 1),
+        (u64::MAX - 1, u64::MAX),
+        (1, LAUNCH_SETTLE_NS),
+        (1, LAUNCH_SETTLE_NS + 1),
+    ]
+}
+
+fn action_vectors() -> Vec<(i32, i32, i32, bool, bool)> {
     let mut v = Vec::new();
     for total in [-1, 0, 1, 3, 4, 5, 44, 45, 46] {
         for (floor, max) in [(0, 45), (4, 45), (4, 4), (5, 8), (45, 45), (60, 45)] {
             for behind in [false, true] {
-                v.push((total, floor, max, behind));
+                for frozen in [false, true] {
+                    v.push((total, floor, max, behind, frozen));
+                }
             }
         }
     }
     v
 }
 
-fn band_vectors() -> Vec<(u64, u64, i64)> {
-    let mut v = Vec::new();
-    let t = 100_000_000_i64;
-    for buf in [
-        0_u64,
-        64_000_000,
-        64_999_999,
-        65_000_000,
-        85_333_333,
-        106_666_666,
-        126_000_000,
-        126_000_001,
-        128_000_000,
-        u64::MAX,
-    ] {
-        for base in [0_u64, 9_000_000, 25_000_000] {
-            for target in [t, 0, -t, i64::MIN, i64::MAX] {
-                v.push((buf, base, target));
-            }
-        }
-    }
-    v
+/// Issue 1425: the freeze decision over its inputs, an audio encoder running and the launch
+/// settled.
+fn frozen_vectors() -> Vec<(bool, bool)> {
+    vec![(false, false), (false, true), (true, false), (true, true)]
 }
 
 fn action_token(a: BufferingAction) -> i32 {
@@ -135,30 +161,40 @@ fn rust_trace() -> Vec<String> {
             u8::from(p.overridden)
         ));
     }
-    for (total, floor, max, behind) in action_vectors() {
+    for (floor, max, fixed, rate, frames) in plan_floor_vectors() {
+        let p = plan_with_floor(floor, max, fixed, rate, frames);
         out.push(format!(
-            "action {total} {floor} {max} {} {}",
-            u8::from(behind),
-            action_token(action(total, floor, max, behind))
+            "planf {floor} {max} {} {rate} {frames} {} {} {} {}",
+            u8::from(fixed),
+            p.floor_ticks,
+            p.max_ticks,
+            u8::from(p.fixed),
+            u8::from(p.overridden)
         ));
     }
-    for (buf, base, target) in band_vectors() {
-        let e = band_error_ns(buf, base, target);
+    for (first, now) in settled_vectors() {
         out.push(format!(
-            "band {buf} {base} {target} {e} {}",
-            u8::from(band_ok(e))
+            "settled {first} {now} {}",
+            u8::from(launch_settled(first, now))
+        ));
+    }
+    for (total, floor, max, behind, fr) in action_vectors() {
+        out.push(format!(
+            "action {total} {floor} {max} {} {} {}",
+            u8::from(behind),
+            u8::from(fr),
+            action_token(action(total, floor, max, behind, fr))
+        ));
+    }
+    for (enc, settled) in frozen_vectors() {
+        out.push(format!(
+            "frozen {} {} {}",
+            u8::from(enc),
+            u8::from(settled),
+            u8::from(frozen(enc, settled))
         ));
     }
     out
-}
-
-/// An i64 as a C expression (`INT64_MIN` has no literal form).
-fn c_i64(v: i64) -> String {
-    if v == i64::MIN {
-        "INT64_MIN".to_string()
-    } else {
-        format!("{v}LL")
-    }
 }
 
 fn c_harness() -> String {
@@ -179,16 +215,27 @@ fn c_harness() -> String {
             if fixed { "true" } else { "false" }
         ));
     }
-    for (total, floor, max, behind) in action_vectors() {
+    for (floor, max, fixed, rate, frames) in plan_floor_vectors() {
         body.push_str(&format!(
-            "\taction_line({total}, {floor}, {max}, {});\n",
-            if behind { "true" } else { "false" }
+            "\tplanf_line({floor}u, {max}u, {}, {rate}u, {frames}u);\n",
+            if fixed { "true" } else { "false" }
         ));
     }
-    for (buf, base, target) in band_vectors() {
+    for (first, now) in settled_vectors() {
+        body.push_str(&format!("\tsettled_line({first}ULL, {now}ULL);\n"));
+    }
+    for (total, floor, max, behind, fr) in action_vectors() {
         body.push_str(&format!(
-            "\tband_line({buf}ULL, {base}ULL, {});\n",
-            c_i64(target)
+            "\taction_line({total}, {floor}, {max}, {}, {});\n",
+            if behind { "true" } else { "false" },
+            if fr { "true" } else { "false" }
+        ));
+    }
+    for (enc, settled) in frozen_vectors() {
+        body.push_str(&format!(
+            "\tfrozen_line({}, {});\n",
+            if enc { "true" } else { "false" },
+            if settled { "true" } else { "false" }
         ));
     }
     format!(
@@ -215,17 +262,29 @@ static void plan_line(uint32_t max, bool fixed, uint32_t rate, uint32_t frames)
 	       frames, p.floor_ticks, p.max_ticks, p.fixed ? 1 : 0, p.overridden ? 1 : 0);
 }}
 
-static void action_line(int total, int floor, int max, bool behind)
+static void planf_line(uint32_t floor, uint32_t max, bool fixed, uint32_t rate, uint32_t frames)
 {{
-	printf("action %d %d %d %d %d\n", total, floor, max, behind ? 1 : 0,
-	       genlock_audio_buffering_action(total, floor, max, behind));
+	const struct genlock_audio_buffering_plan p =
+		genlock_audio_buffering_make_plan_floor(floor, max, fixed, rate, frames);
+	printf("planf %" PRIu32 " %" PRIu32 " %d %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 " %d %d\n", floor, max,
+	       fixed ? 1 : 0, rate, frames, p.floor_ticks, p.max_ticks, p.fixed ? 1 : 0, p.overridden ? 1 : 0);
 }}
 
-static void band_line(uint64_t buf, uint64_t base, int64_t target)
+static void settled_line(uint64_t first, uint64_t now)
 {{
-	const int64_t e = genlock_audio_buffering_band_error_ns(buf, base, target);
-	printf("band %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " %d\n", buf, base, target, e,
-	       genlock_audio_buffering_band_ok(e) ? 1 : 0);
+	printf("settled %" PRIu64 " %" PRIu64 " %d\n", first, now,
+	       genlock_audio_buffering_launch_settled(first, now) ? 1 : 0);
+}}
+
+static void action_line(int total, int floor, int max, bool behind, bool frozen)
+{{
+	printf("action %d %d %d %d %d %d\n", total, floor, max, behind ? 1 : 0, frozen ? 1 : 0,
+	       genlock_audio_buffering_action(total, floor, max, behind, frozen));
+}}
+
+static void frozen_line(bool enc, bool settled)
+{{
+	printf("frozen %d %d %d\n", enc ? 1 : 0, settled ? 1 : 0, genlock_audio_buffering_frozen(enc, settled) ? 1 : 0);
 }}
 
 int main(void)
@@ -307,21 +366,30 @@ fn c_audio_buffering_matches_the_rust_authority_1367() {
     // The vectors reach every path they claim to cover.
     let has = |needle: &str| r.iter().any(|l| l.starts_with(needle));
     assert!(
-        has("plan 20 1 48000 1024 4 45 0 1")
-            && has("plan 0 0 48000 1024 4 45 0 0")
-            && has("plan 85 0 48000 1024 4 4 0 0")
-            && has("plan 0 0 768000 1024 64 64 0 1")
-            && has("action 0 4 45 0 1")
-            && has("action 4 4 45 1 2")
-            && has("action 45 4 45 1 0")
-            && r.iter()
-                .any(|l| l.starts_with("band ") && l.ends_with(" 0"))
-            && r.iter()
-                .any(|l| l.starts_with("band ") && l.ends_with(" 1"))
-            && has("band 65000000 0 100000000 35000000 1")
-            && has("band 64999999 0 100000000 35000001 0"),
-        "issue 1367: the parity vectors no longer reach the floor, the override, the maximum, the \
-         dynamic increase and both band outcomes"
+        has("plan 20 1 48000 1024 0 45 0 1")
+            && has("plan 0 0 48000 1024 0 45 0 0")
+            && has("plan 85 0 48000 1024 0 4 0 0")
+            && has("plan 0 0 768000 1024 0 45 0 0")
+            && has("action 0 0 45 1 0 2")
+            && has("action 0 0 45 1 1 0")
+            && has("action 0 0 45 0 0 0")
+            && has("action 0 4 45 0 0 1")
+            && has("action 0 4 45 1 1 1")
+            && has("action 4 4 45 1 0 2")
+            && has("action 4 4 45 1 1 0")
+            && has("action 45 4 45 1 0 0")
+            && has("planf 85 50 0 48000 1024 4 45 0 1")
+            && has("planf 85 0 0 768000 1024 64 64 0 1")
+            && has("planf 21 0 0 48000 1024 1 45 0 0")
+            && has("settled 1000000000 30999999999 0")
+            && has("settled 1000000000 31000000000 1")
+            && has("settled 1000000000 999999999 0")
+            && has("settled 0 1000000000 0")
+            && has("frozen 0 1 0")
+            && has("frozen 1 0 0")
+            && has("frozen 1 1 1"),
+        "issue 1367: the parity vectors no longer reach the 0 floor's stock growth, a floor raise, \
+         the override, the maximum, the dynamic increase, the freeze and the launch settle window"
     );
 }
 
@@ -333,16 +401,12 @@ fn the_header_defines_are_the_rust_constants_1367() {
         FLOOR_MS.to_string()
     );
     assert_eq!(
+        lift_define(&h, "GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS"),
+        LAUNCH_SETTLE_NS.to_string()
+    );
+    assert_eq!(
         lift_define(&h, "GENLOCK_AUDIO_BUFFERING_DEFAULT_MAX_TICKS"),
         DEFAULT_MAX_TICKS.to_string()
-    );
-    assert_eq!(
-        lift_define(&h, "GENLOCK_AUDIO_LEVEL_REACH_NS"),
-        LEVEL_REACH_NS.to_string()
-    );
-    assert_eq!(
-        lift_define(&h, "GENLOCK_AUDIO_LEVEL_BASE_NOMINAL_NS"),
-        LEVEL_BASE_NOMINAL_NS.to_string()
     );
     for (name, v) in [
         ("GENLOCK_AUDIO_BUFFERING_ACTION_NONE", BufferingAction::None),
@@ -365,98 +429,8 @@ fn the_header_defines_are_the_rust_constants_1367() {
         ),
         AUDIO_OUTPUT_FRAMES.to_string()
     );
-    // The band is half the real re-placement threshold.
-    let ts: i64 = lift_define(
-        &read("vendor/obs-studio/libobs/obs-source.c"),
-        "TS_SMOOTHING_THRESHOLD",
-    )
-    .parse()
-    .unwrap();
-    assert_eq!(ts, TS_SMOOTHING_THRESHOLD_NS);
-    assert_eq!(LEVEL_REACH_NS * 2, ts);
-}
-
-/// The shipped ASRC level target, lifted from the C and held equal to the Rust mirror, ns.
-fn shipped_target_ns() -> i64 {
-    let c: f64 = lift_define(
-        &read("vendor/obs-studio/libobs/media-io/asrc-compensator.h"),
-        "ASRC_LEVEL_TARGET_MS",
-    )
-    .parse()
-    .unwrap();
-    assert_eq!(
-        c, LEVEL_TARGET_MS,
-        "issue 1367: asrc-compensator.h ASRC_LEVEL_TARGET_MS and src/asrc_bench.rs LEVEL_TARGET_MS disagree"
-    );
-    (c * 1e6).round() as i64
-}
-
-#[test]
-fn the_shipped_floor_keeps_the_shipped_level_target_in_reach_1367() {
-    // A change of the floor, the target or the threshold that leaves the band fails here, at
-    // both production rates, for every base of the band.
-    let target = shipped_target_ns();
-    for rate in [44_100, 48_000] {
-        let p = plan(0, false, rate, AUDIO_OUTPUT_FRAMES);
-        assert!(
-            floor_holds_band(p.floor_ticks, rate, AUDIO_OUTPUT_FRAMES, target),
-            "issue 1367: the {} ms floor ({} ticks at {rate} Hz) no longer holds the {} ms ASRC \
-             level target within +/-{} ms for a 0..{} ms base",
-            FLOOR_MS,
-            p.floor_ticks,
-            target / 1_000_000,
-            LEVEL_REACH_NS / 1_000_000,
-            LEVEL_BASE_MAX_NS / 1_000_000
-        );
-        // And the nominal mbc base sits well inside it.
-        let e = band_error_ns(
-            ticks_ns(p.floor_ticks, AUDIO_OUTPUT_FRAMES, rate),
-            LEVEL_BASE_NOMINAL_NS,
-            target,
-        );
-        assert!(band_ok(e));
-    }
-    // The band has teeth on the shipped target: no buffering (the live 12-18-15 session) and
-    // 6 ticks at 48 kHz both leave it.
-    assert!(!floor_holds_band(0, 48_000, AUDIO_OUTPUT_FRAMES, target));
-    assert!(!floor_holds_band(6, 48_000, AUDIO_OUTPUT_FRAMES, target));
-}
-
-#[test]
-fn the_sync_offset_clamp_cannot_break_reach_1367() {
-    // Over the WHOLE range the #1333 split may write (its own clamp, lifted), the gap the servo
-    // must bridge is the offset-free band error: the offset moves the depth and the target 1:1.
-    let text = read("scripts/av_sync_calibrate.py");
-    let line = text
-        .lines()
-        .find(|l| l.starts_with("AUDIO_OFFSET_CLAMP_MS = "))
-        .expect("issue 1367: AUDIO_OFFSET_CLAMP_MS not found in scripts/av_sync_calibrate.py");
-    let clamp_ms: i64 = line["AUDIO_OFFSET_CLAMP_MS = ".len()..]
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert!(clamp_ms > 0);
-    let target = shipped_target_ns();
-    let buffering = ticks_ns(
-        plan(0, false, 48_000, AUDIO_OUTPUT_FRAMES).floor_ticks,
-        AUDIO_OUTPUT_FRAMES,
-        48_000,
-    );
-    for base in [0, LEVEL_BASE_NOMINAL_NS, LEVEL_BASE_MAX_NS] {
-        let e = band_error_ns(buffering, base, target);
-        for x_ms in (-clamp_ms..=clamp_ms)
-            .step_by(7)
-            .chain([-clamp_ms, clamp_ms])
-        {
-            assert_eq!(
-                level_gap_ns(buffering, base, target, x_ms * 1_000_000),
-                e,
-                "issue 1367: a {x_ms} ms sync offset changed the reach gap"
-            );
-        }
-    }
+    // Issue 1425 E2 slice 3: no floor.
+    assert_eq!(lift_define(&h, "GENLOCK_AUDIO_BUFFERING_FLOOR_MS"), "0");
 }
 
 /// The #786 launch-gate bound of one consumer, lifted from its source.
@@ -476,9 +450,10 @@ fn launch_gate_bound(rel: &str, prefix: &str) -> u32 {
 #[test]
 fn the_floor_reads_clean_on_every_786_launch_gate_1367() {
     // The three #786 launch gates parse "total audio buffering is now N milliseconds" and call a
-    // launch BAD above their bound. The floor itself must read as a clean draw on every one of
-    // them at both production rates, or every launch would be redrawn (the guarded launcher kills
-    // OBS up to three times).
+    // launch BAD above their bound. The floor itself, and the up to four ticks a late ASIO /
+    // PulseAudio start adds on top of it (issue 1425: stock OBS drew 0, 64 or 85 ms per launch),
+    // must read as a clean draw on every one of them at both production rates, or every launch
+    // would be redrawn (the guarded launcher kills OBS up to three times).
     let bounds = [
         launch_gate_bound("scripts/rig-health-audit.py", "AUDIO_BUF_BOUND_MS = "),
         launch_gate_bound("scripts/obs-guarded-launch.ps1", "$threshold  = "),
@@ -487,14 +462,17 @@ fn the_floor_reads_clean_on_every_786_launch_gate_1367() {
     ];
     for rate in [44_100, 48_000] {
         let floor = plan(0, false, rate, AUDIO_OUTPUT_FRAMES).floor_ticks;
-        // obs-audio.c logs the total as floor_ticks * frames * 1000 / rate, truncated.
-        let logged =
-            (u64::from(floor) * u64::from(AUDIO_OUTPUT_FRAMES) * 1000 / u64::from(rate)) as u32;
-        for b in bounds {
-            assert!(
-                logged <= b,
-                "issue 1367: the {logged} ms floor at {rate} Hz is over a #786 launch-gate bound of {b} ms"
-            );
+        for ticks in [floor, floor + 1, floor + 2, floor + 3, floor + 4] {
+            // obs-audio.c logs the total as ticks * frames * 1000 / rate, truncated.
+            let logged =
+                (u64::from(ticks) * u64::from(AUDIO_OUTPUT_FRAMES) * 1000 / u64::from(rate)) as u32;
+            for b in bounds {
+                assert!(
+                    logged <= b,
+                    "issue 1367: a {logged} ms launch draw at {rate} Hz is over a #786 launch-gate \
+                     bound of {b} ms"
+                );
+            }
         }
     }
 }

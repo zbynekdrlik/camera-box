@@ -183,7 +183,10 @@ def _item(key):
 
 
 def test_mic_item():
-    assert _item("mic").decide({"mic": (MIC_PRESENT, 0)})["status"] == d.OK
+    # issue 1447: an OK also needs the program-audio guard to read only the measurement signal
+    guard_ok = ("program-audio verdict=MEASUREMENT rms=-35.7 outside_band=13.4% age=0.9 "
+                "markers=8 chain=7\n", 0)
+    assert _item("mic").decide({"mic": (MIC_PRESENT, 0), "mic_guard": guard_ok})["status"] == d.OK
     e = _item("mic").decide({"mic": (MIC_SILENT, 0)})
     assert e["status"] == d.FORGOT
     assert "Abletone" in e["message"]
@@ -381,6 +384,9 @@ def test_evaluate_over_a_work_dir(tmp_path):
     # a full all-OK capture set -> exit 0
     caps = {
         "mic": (MIC_PRESENT, 0),
+        # issue 1447: the program-audio guard reads only the measurement signal (exit 0)
+        "mic_guard": ("program-audio verdict=MEASUREMENT rms=-35.7 outside_band=13.4% age=0.9 "
+                      "markers=8 chain=7\n", 0),
         "mode": ("TEST\n", 0),
         "painter": (OPTICAL_HEALTHY, 0),
         "burns_strih": ("", 1), "burns_stream": ("", 1),

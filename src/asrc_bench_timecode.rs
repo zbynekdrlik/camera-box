@@ -387,7 +387,6 @@ mod tests {
     #[test]
     fn timecode_capture_is_zero_never_the_lock_time_depth_1367() {
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         c.set_timecode(true);
         for _ in 0..(120.0 / PACKET_S) as usize {
             // a steady 7 ms early placement: the level loop must hold it toward 0, not capture it
@@ -503,22 +502,19 @@ mod tests {
     #[test]
     fn timecode_mode_never_falls_back_to_a_nonzero_setpoint_1367() {
         // Review round 1: a placement error the loop cannot pull in (this plant ignores the stretch)
-        // for longer than the #1355 unreachable bound. The arrival rule falls back to the live depth;
-        // in timecode mode that would bake a lasting A/V offset in as the new truth, so the setpoint
-        // must stay 0 and no fallback may fire.
+        // for longer than the retired #1355 unreachable bound (2400 windows). Moving the setpoint
+        // would bake a lasting A/V offset in as the new truth, so it must stay 0. (Issue 1425 slice 3
+        // deleted that fallback for every basis; this pins that nothing else moves it either.)
         let mut c = locked_timecode();
-        let windows = f64::from(LEVEL_TARGET_UNREACHABLE_WINDOWS) + 200.0;
+        let windows = 2600.0;
         for _ in 0..(windows / PACKET_S) as usize {
             c.observe_placement(-8.0, PACKET_MS, false);
             c.compensate_with_level(PACKET_S, PACKET_S, -8.0);
             c.take_step_recover_ppm();
         }
         assert!(
-            c.level_fallback_count() == 0
-                && !c.take_level_fallback_pending()
-                && c.level_target_ms() == 0.0,
-            "issue 1367: the timecode setpoint stays 0: fallbacks {} target {}",
-            c.level_fallback_count(),
+            c.level_target_ms() == 0.0,
+            "issue 1367: the timecode setpoint stays 0: target {}",
             c.level_target_ms()
         );
     }

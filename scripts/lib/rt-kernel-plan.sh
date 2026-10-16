@@ -231,7 +231,7 @@ rt_kernel_step_command() {
         'mkdir -p /root/tmpbig && export TMPDIR=/root/tmpbig && for v in /boot/vmlinuz-*; do k="${v#/boot/vmlinuz-}"; [ -e "/boot/initrd.img-$k" ] || update-initramfs -c -k "$k"; done && update-grub' \
         '#295: initrd-guarantee before grub; /tmp tmpfs (100M) -> TMPDIR on the rootfs (issue 899, 2026-08-22)' ;;
     reboot-into-lowlatency)
-      printf '# SUPERVISOR: reboot the box (reboot-class, one box at a time, in a window with NO live E2E; the old generic entry stays in GRUB as rollback)' ;;
+      printf '# SUPERVISOR: reboot the box (reboot-class, one box at a time, in a window with NO live E2E; the old generic entry stays in GRUB as rollback). A cambox: a PHYSICAL power cycle at the rig (a short power-button press = a clean shutdown, then power on), never a remote reboot -- a warm reboot can hang it on the USB firmware' ;;
     confirm-running-lowlatency)
       printf '# SUPERVISOR: after reboot, confirm preempt=full is ACTIVE: grep -qw preempt=full /proc/cmdline AND (cat /sys/kernel/debug/sched/preempt shows "(full)"); uname -r is still *-generic (the config meta keeps the generic image), NOT *-lowlatency' ;;
     purge-superseded-generic)

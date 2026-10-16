@@ -16,6 +16,12 @@
  * behaviour: the dynamic increase above the 1367 floor, ignore_audio at the maximum. That includes a
  * source whose audio STARTS only after it joined the mix (a media start on program).
  *
+ * Issue 1425 (E2 slice 2, design 6216736061): while the mix's buffering is FROZEN
+ * (obs-genlock-audio-buffering.h genlock_audio_buffering_frozen: an output with an audio encoder is
+ * active), a MIXED source that falls behind the window -- a member, not
+ * entering -- is re-anchored the same way (MIXED_LATE) instead of growing the whole mix: one counted
+ * dropout of its late span on that source, never a step in every output.
+ *
  * Known limit: the restart of an exhausted re-anchor moves a source only when its placement follows
  * timing_adjust (a stamp that is not direct, outside a genlock TIMECODE hold). A source that KEEPS its
  * stamp -- a direct one (within MAX_TS_VAR of the OBS clock: ASIO/WASAPI capture, media) or a genlock
@@ -35,6 +41,8 @@
 #define GENLOCK_MIX_GUARD_NONE 0
 #define GENLOCK_MIX_GUARD_NOT_MIXED 1
 #define GENLOCK_MIX_GUARD_ENTERED 2
+/* issue 1425: a member, not entering, behind the window while the mix's buffering is frozen */
+#define GENLOCK_MIX_GUARD_MIXED_LATE 3
 
 /* A re-anchored source logs every entry (a cut) and its first event at once, and later not-mixed
  * events at most once a minute (the #800 telemetry cadence): a hidden source that keeps a late stamp
@@ -62,17 +70,20 @@ static inline bool genlock_mix_joined(uint64_t prev_source_tick, uint64_t cur_ti
 }
 
 /* The guard's decision for one rendered source: a timeline behind the window (by more than the 1 ns
- * rounding discard_audio tolerates) of a source that is not mixed, or of one that joined the mix on
- * this tick. A composite (scene, transition) takes its timestamp from its children and is never
- * re-anchored itself; a source with no timeline has nothing to re-anchor. */
+ * rounding discard_audio tolerates) of a source that is not mixed, of one that joined the mix on this
+ * tick, or (issue 1425) of a member while the mix's buffering is frozen. A composite (scene,
+ * transition) takes its timestamp from its children and is never re-anchored itself; a source with no
+ * timeline has nothing to re-anchor. */
 static inline int genlock_mix_guard_reason(bool member, bool entered, bool composite, uint64_t audio_ts,
-					   uint64_t window_start)
+					   uint64_t window_start, bool frozen)
 {
 	if (composite || !audio_ts || audio_ts + 1 >= window_start)
 		return GENLOCK_MIX_GUARD_NONE;
 	if (!member)
 		return GENLOCK_MIX_GUARD_NOT_MIXED;
-	return entered ? GENLOCK_MIX_GUARD_ENTERED : GENLOCK_MIX_GUARD_NONE;
+	if (entered)
+		return GENLOCK_MIX_GUARD_ENTERED;
+	return frozen ? GENLOCK_MIX_GUARD_MIXED_LATE : GENLOCK_MIX_GUARD_NONE;
 }
 
 /* What stock OBS would have added for a source `behind_ns` behind the window, ms: add_audio_buffering's

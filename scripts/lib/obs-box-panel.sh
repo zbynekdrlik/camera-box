@@ -41,12 +41,14 @@ OBS_BOX_PANEL_ROWS=5
 # binary -- seams for the offline tests.
 OBS_BOX_PANEL_SYS_UNIT_DIR="${OBS_BOX_PANEL_SYS_UNIT_DIR:-/usr/lib/systemd/user}"
 OBS_BOX_PANEL_RUSTDESK_BIN="${OBS_BOX_PANEL_RUSTDESK_BIN:-/usr/bin/rustdesk}"
+OBS_BOX_PANEL_DISCORD_BIN="${OBS_BOX_PANEL_DISCORD_BIN:-/usr/bin/discord}"
 
 # obs_box_panel_launchers USER_HOME -> one `id|Name|Exec|Icon` line per app this box has, in panel order:
 #   obs        strih-obs.service in the user's unit dir (every Linux OBS box; on stream-pp it is the stream OBS)
 #   shading    bkshading-panel-app.service in the user's unit dir (the strih role)
 #   restreamer restreamer.service (the restreamer package's --user unit) in the user's or the system unit dir
 #   rustdesk   the RustDesk binary
+#   discord    the Discord binary (issue 1448)
 # A supervised app starts through its unit, never its binary: the unit runs the box's own wrapper
 # (strih-obs-start.sh) and `start` on a running unit does nothing.
 obs_box_panel_launchers() {
@@ -60,6 +62,9 @@ obs_box_panel_launchers() {
     printf 'restreamer|Restreamer|systemctl --user start restreamer.service|Restreamer\n'
   fi
   [ -x "$OBS_BOX_PANEL_RUSTDESK_BIN" ] && printf 'rustdesk|RustDesk|%s|rustdesk\n' "$OBS_BOX_PANEL_RUSTDESK_BIN"
+  # issue 1448 (owner 16.10.2026, "ma byt na lavo discord v liste"): Discord where it is installed. It
+  # is single-instance, so a click on a running one focuses its window, never a second copy.
+  [ -x "$OBS_BOX_PANEL_DISCORD_BIN" ] && printf 'discord|Discord|%s|discord\n' "$OBS_BOX_PANEL_DISCORD_BIN"
   return 0
 }
 

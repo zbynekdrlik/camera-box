@@ -250,7 +250,7 @@ class Item(object):
 
     def __init__(self, key, label, captures, kind, ok_msg, forgot_msg, unknown_msg,
                  good=None, forgot=None, good_prefixes=(), forgot_prefixes=(),
-                 ok_codes=None, forgot_codes=None):
+                 ok_codes=None, forgot_codes=None, capture_kinds=None, forgot_msgs=None):
         self.key = key
         self.label = label
         self.captures = captures
@@ -264,24 +264,32 @@ class Item(object):
         self.forgot_prefixes = tuple(forgot_prefixes)
         self.ok_codes = set(ok_codes or ())
         self.forgot_codes = set(forgot_codes or ())
+        # issue 1447: one item may combine captures graded differently (the `mic` peak read by its
+        # verdict line + the program-audio guard by its exit code). `capture_kinds` overrides `kind`
+        # per capture name; `forgot_msgs` names the owner's fix per FORGOT capture (joined in
+        # capture order), falling back to `forgot_msg`.
+        self.capture_kinds = dict(capture_kinds or {})
+        self.forgot_msgs = dict(forgot_msgs or {})
 
-    def _status_for_capture(self, text, rc):
-        """Status contribution of ONE captured (text, rc) pair, per this item's kind."""
-        if self.kind == "verdict":
+    def _status_for_capture(self, text, rc, kind=None):
+        """Status contribution of ONE captured (text, rc) pair, per this item's (or the capture's)
+        kind."""
+        kind = kind or self.kind
+        if kind == "verdict":
             return reduce_tokens(verdict_tokens(text), self.good, self.forgot,
                                  self.good_prefixes, self.forgot_prefixes)
-        if self.kind == "net":
+        if kind == "net":
             return reduce_tokens(net_tokens(text), {"REACHABLE"}, {"UNREACHABLE"})
-        if self.kind == "bare":
+        if kind == "bare":
             t = bare_token(text)
             if t in self.forgot:
                 return FORGOT
             if t in self.good:
                 return OK
             return UNKNOWN
-        if self.kind == "exit":
+        if kind == "exit":
             return status_from_exit(rc, self.ok_codes, self.forgot_codes)
-        raise ValueError("unknown item kind %r" % self.kind)
+        raise ValueError("unknown item kind %r" % kind)
 
     def decide(self, captures_data, imag_retired=False):
         """`captures_data`: {name: (text, rc)} for THIS item's captures (a missing name reads as
@@ -302,6 +310,7 @@ class Item(object):
                 entry["names"] = r["off"]  # the timers the supervisor must (re-)enable, for the summary
             return entry
         statuses = []
+        forgot_names = []
         for name in self.captures:
             # issue 1316: a retired imag-nb (returned to the owner) drops its OWN capture (e.g.
             # `pins_imag`) so the item is judged on the remaining boxes only — probing the dark box
@@ -312,9 +321,14 @@ class Item(object):
             if imag_retired and (name == "imag" or name.endswith("_imag")):
                 continue
             text, rc = captures_data.get(name, ("", RC_MISSING))
-            statuses.append(self._status_for_capture(text, rc))
+            st = self._status_for_capture(text, rc, self.capture_kinds.get(name))
+            statuses.append(st)
+            if st == FORGOT:
+                forgot_names.append(name)
         status = combine_statuses(statuses)
         msg = {OK: self.ok_msg, FORGOT: self.forgot_msg, UNKNOWN: self.unknown_msg}[status]
+        if status == FORGOT and self.forgot_msgs:
+            msg = "; ".join(self.forgot_msgs.get(n, self.forgot_msg) for n in forgot_names)
         return {"key": self.key, "label": self.label, "status": status, "message": msg}
 
 
@@ -336,12 +350,26 @@ def combine_statuses(statuses):
 
 # The ordered checklist. Every item reuses an EXISTING probe -- no new probes.
 ITEMS = [
-    Item("mic", "merací mikrofón (mbc)", ["mic"], "verdict",
-         ok_msg="merací mikrofón na kanáli 'mbc' hrá (peak nad prahom)",
+    # issue 1447: the mbc PEAK (the measurement-audio watchdog) cannot tell music/room sound on top
+    # of the marker from the healthy marker, so the item also reads the strih-snv program-audio
+    # guard on its EXIT CODE (its contract): 0 = only the measurement signal (or silence), 1 =
+    # FOREIGN -> the owner forgot to take the extra source off mbc, anything else (2 = unknown /
+    # stale / unreachable, a timeout, a missing probe) = UNKNOWN, never OK.
+    Item("mic", "merací mikrofón (mbc)", ["mic", "mic_guard"], "verdict",
+         ok_msg="merací mikrofón na kanáli 'mbc' hrá (peak nad prahom) a do streamu nejde iný zvuk "
+                "ako merací signál",
          forgot_msg="merací mikrofón je stlmený/vypnutý — odmutuj kanál 'mbc' v Abletone",
-         unknown_msg="stav meracieho mikrofónu sa nepodarilo potvrdiť (stream OBS alebo cam2 nedostupné, "
+         unknown_msg="stav meracieho mikrofónu sa nepodarilo potvrdiť (stream OBS, cam2 alebo "
+                     "program-audio guard na strih-snv :8891 nedostupné, "
                      "alebo verdict=POLLUTED: peak nad stropom úrovne — pozri capture)",
-         good={"PRESENT"}, forgot={"SILENT"}),
+         good={"PRESENT"}, forgot={"SILENT"},
+         ok_codes={0}, forgot_codes={1},
+         capture_kinds={"mic_guard": "exit"},
+         forgot_msgs={
+             "mic": "merací mikrofón je stlmený/vypnutý — odmutuj kanál 'mbc' v Abletone",
+             "mic_guard": "mbc posiela do streamu aj iný zvuk ako merací signál — v Abletone na "
+                          "mbc nechaj do streamu len merací mikrofón",
+         }),
     Item("mode", "rig režim (TEST/EVENT)", ["mode"], "bare",
          ok_msg="rig je v TEST režime (development)",
          forgot_msg="rig je v EVENT (produkčnom) režime — spusti `scripts/rig-mode.sh test` "

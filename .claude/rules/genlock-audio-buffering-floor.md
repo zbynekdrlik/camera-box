@@ -9,162 +9,100 @@ paths:
   - "tests/genlock_audio_mix_guard_1381.rs"
   - "tests/c/genlock_audio_mix_guard_1381_harness.c"
   - "vendor/obs-studio/libobs/obs-genlock-mix-guard.h"
+  - "vendor/obs-studio/libobs/obs-output.c"
+  - "tests/genlock_audio_buffering_freeze_wiring_1425.rs"
+  - "tests/genlock_audio_slice3_1425.rs"
   - "scripts/obs-guarded-launch.ps1"
   - "scripts/rig-health-audit.py"
   - "scripts/launch-obs-genlock.sh"
 ---
 
-# The genlock audio-buffering FLOOR (issue 1367, ROZHODNUTÉ 5857354949)
+# The genlock audio buffering: no floor (issue 1425 slice 3), the 1381 guard, the 1425 freeze
 
-> **Issue 1425 (E2, design 6205974120): the floor now stays only until slices 2 and 3.** Since slice 1
-> a directly stamped mixed source (`mbc`, a PulseAudio input, a media clip) is judged by its own
-> stamp, setpoint 0 (`genlock-audio-pairing.md`, the issue-1425 section), so the absolute 100 ms
-> target the floor was sized for no longer holds such a source. The floor stays for now because a
-> buffering increase while an encoder runs still steps that output's audio later for good: slice 2
-> freezes the ratchet once the mix settles, and slice 3 then sets the floor to 0 and deletes the
-> absolute target. Do not remove the floor before slice 2 has shipped.
+## The floor is 0 (issue 1425 E2 slice 3, design 6220191978)
 
-## Why
-
-Stock libobs starts the mix window with 0 audio buffering. It grows the buffering only when a
-source happens to arrive late at startup (`add_audio_buffering`, the dynamic increase), so every
-launch drew its own value. On the stream box that draw decided whether the `mbc` ASRC could reach
-its #1355 absolute level target (100 ms + the sync offset) at all. The two stream OBS logs of
-27.9.2026:
-
-| Session | Buffering | `mbc` result |
-|---|---|---|
-| `01-33-25` | `adding 85 milliseconds … (source: ASIO Input Capture)` | Target held for 10 h, through the trims 41 → 26 → 23 → 18 ms. `level_avg` 118.1 at target 118, 0 fallbacks. |
-| `12-18-15` | none | Level 27 ms against 118. The restore pushed −136 … −141 ppm for 40 min; the level sawtoothed 27 → 78 → 36 → 86 ms. Two `UNREACHABLE … fell back` lines re-latched the target at 54.8 and 73.5 ms. The release E2E then read −28 ms on every camera. |
-
-## The physics the constant is sized by
-
-- **Natural depth.** The depth a direct-timestamp source (`mbc`, ASIO) settles on without a servo
-  correction is `buffering + base + sync_offset`.
-  - `base` is its arrival latency against the mix window plus the mean of the 21.33 ms tick
-    sawtooth.
-  - It measured 8.4 ms (`01-33-25`, first `level_avg` 134.74 at offset 41) and 8.9 ms
-    (`12-18-15`, 26.94 at offset 18), with the buffering 85 ms apart.
-- **The sync offset CANCELS.** The #1355 target is `100 + last_sync_offset`, and the placement adds
-  the same offset to the depth (`in.timestamp += sync_offset`), so the servo must bridge
-  `100 − (buffering + base)`, whatever the #1333 split / #856 trim writes.
-  - The first design said "100 + the largest sync offset + headroom ≤ buffering". With the code's
-    own ±500 ms clamp (`AUDIO_OFFSET_CLAMP_MS`) that asked for ~600 ms of buffering and a target out
-    of reach from ABOVE (Design-question 5857343807).
-- **Reach is limited in BOTH directions.** Stretching or compressing moves the source's smoothed
-  timeline off its raw stamps; at `TS_SMOOTHING_THRESHOLD` (70 ms, a symmetric `uint64_diff` in
-  `source_output_audio_data`) the next packet is re-placed at its raw stamp and the correction is
-  gone. Live, the `12-18-15` restore got the level at most +51 … +59 ms above natural before the
-  snap.
-- **The band:** `|100 − (buffering + base)| ≤ 35 ms` (half the threshold), for a base of 0–25 ms,
-  at 44.1 and 48 kHz.
-  - `FLOOR_MS` 85 = 4 ticks = 85.33 ms at 48 kHz (92.88 ms at 44.1 kHz): the servo stretches ~6 ms
-    at the measured base. This is the live-proven `01-33-25` configuration.
-  - 0, 3 ticks (64 ms) and 6 ticks (128 ms) all leave the band. 5 ticks (106.67 ms) would still
-    hold it.
-  - The ±35 ms band is a chosen margin; the observed physical reach is about 51–59 ms.
-
-## What ships
-
-| Piece | C | Rust / test |
-|---|---|---|
-| the plan (floor, max, override) | `genlock_audio_buffering_make_plan` (→ `struct genlock_audio_buffering_plan`) in `obs-genlock-audio-buffering.h`, called by `obs_reset_audio2` | `plan` in `src/genlock_audio_buffering.rs` |
-| the tick rule (floor first, then OBS's dynamic increase) | `genlock_audio_buffering_action` (`GENLOCK_AUDIO_BUFFERING_ACTION_*`) → `set_floor_audio_buffering` / `add_audio_buffering` in `audio_callback` | `action` |
-| the band | `genlock_audio_buffering_band_error_ns` / `_band_ok` | `band_error_ns` / `band_ok` / `floor_holds_band` |
-| raise-to-N-ticks body | `raise_audio_buffering` (upstream's fixed-mode body, shared by fixed and floor) | the C lift in `tests/genlock_audio_buffering_wiring_1367.rs` |
-
-- **A FLOOR, not a cap.** The resolume cg OBS legitimately grows 128–362 ms on media / `NDI test`
-  starts (logs `2026-09-26 09-29-12`, `14-50-56`, `16-35-04`); a hard 85 ms cap would drop that
-  late audio on FOH/VBAN. The maximum stays the caller's (45 ticks by default). Since issue 1381
-  only a MIXED source grows it: a hidden one is re-anchored instead (the guard section below).
-- **Fixed buffering is never used.** The frontend LowLatencyAudioBuffering toggle (fixed 20 ms) is
-  overridden: one `genlock audio buffering (issue 1367): … OVERRIDDEN` WARNING at reset, max back to
-  45 ticks. The upstream fixed branch in `audio_callback` stays byte-identical for rebases
-  (`set_fixed_audio_buffering` is now a thin wrapper over the shared `raise_audio_buffering`); the
-  plan never sets `fixed_buffer`, so that branch is unreachable.
-- **The log:**
-  - `buffering type:  fixed floor 85 ms, dynamically increasing above` in the reset block;
-  - `genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds …`
-    at the first tick;
-  - every later increase is ONE `LOG_WARNING` line, `genlock audio buffering ABOVE the floor
-    (issue 1367): adding N … total audio buffering is now M milliseconds (source: <name>); ASRC
-    level band ok|BROKEN: …`. BROKEN means buffering + the 9 ms nominal base left the band (M above
-    126 ms): a mixed source on an absolute ASRC level target (the stream `mbc`) cannot reach it at
-    this buffering. libobs has no box identity, so the note prints on every box; on resolume it only
-    matters for a mixed non-genlock source on an absolute target there.
-- **The #786 launch gates keep working.** `obs-guarded-launch.ps1`, `launch-obs-genlock.sh` (3b)
-  and `rig-health-audit.py` parse `total audio buffering is now (\d+) milliseconds` against a 100 ms
-  bound.
-  - Both new lines keep that text.
-  - The floor alone reads 85 / 92 ms, a clean draw.
-  - A late-source increase above 100 ms is still a BAD draw, as before (the 960 ms ASIO ratchet of
-    #786 is unchanged: the dynamic increase above the floor is stock OBS).
-  - A clean launch now logs exactly the floor line (85 ms at 48 kHz); the scripts' comments, the
-    guarded launcher's popup (`norma 85 ms`) and the obs-ops skill say so since issue 1367.
-- **The #1355 UNREACHABLE fallback is only a logged safety net now — on the stream box.** Its line
-  also names `total_audio_buffering=` and `floor=` at that moment: above the floor, a late source
-  raised the buffering (its own ABOVE line says which); at the floor, the cause is not the buffering.
-  On resolume a media / `NDI test` start on program still grows the buffering past the band
-  (128–362 ms), so a mixed, non-genlock, non-monitor-only source there (the ASRC is on by default and its target is
-  absolute for such a source) can still fall back — reported to the supervisor as a follow-up
-  candidate, not this slice.
-- **Other boxes.** The floor applies to every genlock OBS (same libobs). The mix output lags real
-  time by the buffering, and wall-clock-stamped audio outputs follow it: on resolume the DistroAV
-  NDI output audio and the obs-vban send to FOH run ≥ 85 ms behind from the first tick, where they
-  used to run at 0 until the first media start grew it to 128–362 ms. No rig input consumes
-  resolume's NDI audio (the certified table: every strih/stream NDI input is silent), so the
-  visible effect is the FOH VBAN latency while idle. strih-snv carries no mixed program audio over
-  NDI either; its mix now starts 85 ms behind.
+- **What ships.** `GENLOCK_AUDIO_BUFFERING_FLOOR_MS 0u` (`obs-genlock-audio-buffering.h`) ↔ Rust
+  `FLOOR_MS = 0` (`src/genlock_audio_buffering.rs`). A launch starts at 0 ms like stock OBS, and its
+  own startup race grows the buffering in the first seconds: a clean launch draws what stock OBS drew,
+  **0, 64 or 85 ms** on stream (the history below; the lift's 21 / 42 ms launch is a model, not a
+  measurement), or logs no growth line. The FLOOR action, `set_floor_audio_buffering` and the plan's
+  floor field stay as the design's mechanism (`raise_audio_buffering` is still the fixed mode's body);
+  at 0 they never run, and `plan_with_floor` keeps the Rust plan's floor rules tested. Deleting the
+  path is a design call (reported in the slice-3 lane return).
+- **Why it could go.** The 85 ms floor (issue 1367, ROZHODNUTÉ 5857354949) existed only so the stream
+  `mbc` could reach the #1355 absolute ASRC level target (100 ms + sync offset) inside half of OBS's
+  70 ms TS-smoothing reach. Since slice 1 a directly stamped source is judged by its own stamp
+  (setpoint 0) and its A/V does not depend on the buffering; since slice 2 the buffering cannot grow
+  while an audio encoder runs; slice 3 deleted the absolute target and its UNREACHABLE fallback
+  (`asrc-bench-harness.md`, the issue-1425 slice-3 section). The ASRC level band
+  (`band_error_ns` / `band_ok`, `LEVEL_REACH_NS`, the `ASRC level band ok|BROKEN` note) went with it.
+- **The log.**
+  - Reset block: `buffering type:  dynamically increasing from 0 ms (genlock floor, issue 1425)`; a
+    fixed / low-latency request is still `OVERRIDDEN` (one WARNING, dynamic from 0).
+  - Every growth: ONE `LOG_WARNING` `genlock audio buffering ABOVE the floor (issue 1367): adding N
+    milliseconds of audio buffering, total audio buffering is now M milliseconds (source: <name>)`.
+    The source ends the line now (the band note is gone); the gather's parser takes both shapes.
+  - No floor line at the first tick any more. The audio-mixer watchdog's BUFFERING arm takes its
+    session start from the reset line instead (`audio-mixer-watchdog.md`).
+- **The #786 launch gates** (`obs-guarded-launch.ps1`, `launch-obs-genlock.sh` (3b),
+  `rig-health-audit.py`) still parse `total audio buffering is now (\d+) milliseconds` against their
+  100 ms bound and still redraw above it. Only the wording moved: the norm is "under the 100 ms
+  bound" (the guarded launcher's popup: `norma pod 100 ms`), and a high draw is added LATENCY on every
+  output, never "A/V MIMO" (a stamped source's A/V does not depend on it).
+- **The launch settle window (ROZHODNUTÉ 6221252305).** The freeze arms only when an audio encoder runs
+  AND 30 s of mix time passed since the mix's first audio tick (`GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS`
+  ↔ `LAUNCH_SETTLE_NS`, `genlock_audio_buffering_launch_settled`, read on `audio_callback`'s INPUT
+  tick start `start_ts_in`, which only advances: the processed window `ts.start` moves back in front of
+  the first tick when the race grows the mix; the first tick is a never-reset file static in
+  obs-audio.c like the 1381 mixer tick, so an audio reset opens no new window). An
+  output started inside it (`--startstreaming`, Companion, an operator right after a launch) gets the
+  launch's growth instead of a muted member, logged once: `genlock audio buffering: grew N ms while an
+  encoder ran inside the launch settle window` (LOG_WARNING). Pinned by the 1381 lift's
+  `encoder-at-launch` (`mbc` 2.7 ms late: grows 42 ms, plays) and `encoder-after-settle` (frozen,
+  MIXED_LATE); the E1 replays start their stream at tick 1500, after the window. stream-snv's obs64
+  tasks are one-shot TimeTriggers months past (main's live read), so none fires today. A direct-stamp
+  member that joins later while an encoder runs and is later than the launch drew stays the slice-2b
+  limit (now without the 85 ms margin). Two more known limits: after an `obs_reset_audio` of a running
+  OBS (audio settings changed while no output runs) the buffering restarts at 0 with no window, so an
+  output started seconds later can mute a late member again; and the window counts from the audio
+  thread's first tick, which the frontend starts BEFORE it loads the scene collection, so a box whose
+  collection load plus the sources' first packets take over 30 s gets its race after the window.
+- **Other boxes.** strih-snv, stream-snv and the resolume cg OBS all start at 0: the mix runs only
+  as far behind real time as their own sources need, so wall-clock-stamped outputs (the DistroAV NDI
+  output audio, obs-vban) are 85 ms earlier than with the floor.
+- **History (1367).** Stock OBS drew 0 or 85 ms per launch (27.9.2026: `01-33-25` 85 ms, `mbc` held
+  its absolute target; `12-18-15` none, `mbc` 91 ms under it, the fallback re-latched at 54.8 / 73.5
+  ms, release A/V -28 ms). The floor fixed that draw for the absolute target; slices 1-3 removed the
+  target, so the draw no longer matters for A/V.
 
 ## Tests and Tier-0
 
-- `src/genlock_audio_buffering.rs`, the authority: the rounding, the plan and override, the tick
-  rule, the band (4/5 ticks hold, 0/3/6 fail), the offset cancellation over ±500 ms, and the two
-  measured sessions.
+- `src/genlock_audio_buffering.rs`: the rounding, the plan and override, the floor rule (on a 4-tick
+  floor and on the shipped 0), the freeze; `the_floor_is_zero_ticks_at_both_rates_1425`.
 - `tests/genlock_audio_buffering_parity_1367.rs` compiles the header as-is against the Rust over
-  vector spreads. It then holds the band on LIFTED values:
-  - `ASRC_LEVEL_TARGET_MS` (and equal to `asrc_bench::LEVEL_TARGET_MS`);
-  - `TS_SMOOTHING_THRESHOLD`, `AUDIO_OUTPUT_FRAMES`;
-  - the split's `AUDIO_OFFSET_CLAMP_MS`;
-  - the three launch-gate bounds.
-- `tests/genlock_audio_buffering_wiring_1367.rs` is std-only.
-  - It checks the wiring anchors and the retired upstream lines.
-  - It checks the pwsh mirror in both `windows-genlock*.yml` (ONE `WIRING` list).
-  - It runs a C LIFT of the shipped reset block, tick decision and buffering functions, driven
-    through a launch, late sources, the low-latency toggle, 44.1 kHz, a maximum at the floor and a
-    clamp past the maximum.
-  - The lift runs ONCE per test binary (`OnceLock`): two parallel tests compiling into one scratch
-    dir raced.
-- Local runs:
-  - the module: `rustc --test` + `clippy-driver --test -D warnings`;
-  - the parity gate: a stub `camera_box` rlib of `genlock_audio_buffering` + `asrc_bench`;
-  - the wiring file: plain `rustc --test` with `CARGO_MANIFEST_DIR`;
-  - the three C files: the `obs-drm-output.md` `-fsyntax-only` recipe.
-- Mutation proof: point `CARGO_MANIFEST_DIR` at a scratch tree holding the mutated header /
-  `obs.c` / `obs-audio.c` plus the lifted files, and recompile each test per mutant. 23/23 C mutants
-  died after review round 2 (incl. each band edge made strict, the raise no-op guard removed, the
-  UNREACHABLE total/floor arguments swapped), and 3/3 Rust constant mutants.
-- The C lift models the window `audio_callback` really processes: the front of
-  `buffered_timestamps`, which stays `start − total × tick` behind real time (the queue keeps
-  `total_buffering_ticks` windows forever; while ticks wait that is `buffered_ts − wait × tick`).
-  Delays are behind REAL time: 10 ms is absorbed by the floor; the stream ASIO startup race runs
-  undrained (85 ms absorbed, 100 ms adds one tick); every total is `max(floor, stock)`.
-  `raise_audio_buffering` to the current total is a no-op. (Review round 2 caught the first model,
-  which put the window back at real time once the waits drained.)
+  vector spreads, lifts every define (the floor must read 0) and holds a launch's own draw (the floor
+  plus one or two ticks) under all three #786 launch-gate bounds.
+- `tests/genlock_audio_buffering_wiring_1367.rs` (std-only): the wiring anchors (ONE `WIRING` list,
+  also required by the pwsh step "Assert the genlock audio-buffering floor is present" in both
+  `windows-genlock*.yml`) and a C LIFT of the shipped reset block, tick decision and buffering
+  functions: a launch with its startup race (21 / 42 ms), a late source (149 ms), the low-latency
+  toggle, 44.1 kHz, a maximum, and a 4-tick floor set by hand (`max(floor, stock)`). The lift models
+  the window `audio_callback` really processes (the front of `buffered_timestamps`, `start − total ×
+  tick`) and runs ONCE per test binary (`OnceLock`).
+- `tests/genlock_audio_slice3_1425.rs` (std-only): the floor define is 0 and the absolute target, its
+  fallback and the band are gone from the C and the Rust mirror; the launch-gate wording.
+- Local: the module via a plain-rustc replica + `clippy-driver --test -D warnings`; the parity gate
+  via a stub `camera_box` rlib; the wiring and slice-3 files with plain `rustc --test` and
+  `CARGO_MANIFEST_DIR`; the C files with the `obs-drm-output.md` `-fsyntax-only` recipe.
 
-## Live acceptance (supervisor)
+## Live acceptance (supervisor, FULL bundle on every OBS box)
 
-Full-bundle deploy on stream (and resolume + strih-snv, same libobs), then at least two OBS
-restarts. After each:
-- the log shows `buffering type:  fixed floor 85 ms` and exactly one floor line;
-- stream: `mbc` `target=` = 100 + offset and `level_avg` within ~5 ms of it after ~15 min,
-  `fallbacks=0`; the release A/V gate is green and the per-camera A/V is the same across the
-  restarts;
-- resolume: the floor line, then an `ABOVE the floor` line per media / `NDI test` start ON PROGRAM
-  (expected; a hidden one logs a `buffering-guard:` line instead, issue 1381);
-  the `sp-*_video` audio pairing (`audio_pairing_offset_ms`, `audio_health=0`) and the songplayer
-  A/V gate unchanged; FOH hears the program audio ≥ 85 ms later than before while idle;
-- strih-snv: the floor line, no UNREACHABLE line, OBS audio monitoring normal.
+After each of at least two OBS restarts per box: the reset block reads `dynamically increasing from
+0 ms`, a launch's `ABOVE the floor` lines total under the 100 ms bound (stock drew 0, 64 or 85 ms
+on stream), the #786 launcher reads it clean, a stream started by `--startstreaming` (or a recording
+started within the launch's first seconds) still carries `mbc` and the mic (and the reset block to the first `ABOVE the floor` line on stream-snv is well under 30 s), and on stream `#800 buffered_ms` and the per-camera A/V are identical within ±5 ms
+across two restarts whose draws differ. The `asrc:` lines carry no `fallbacks=` field; an arrival
+source's `target=` is its depth at lock.
 
 ## The mix buffering GUARD: only a MIXED source can grow it (issue 1381, design 5862336131)
 
@@ -295,8 +233,106 @@ then reaches the same upstream increase as before (`launch-late`: 128 ms).
 **Live acceptance (supervisor, FULL-bundle deploy -- obs.dll/libobs).** On resolume with a hidden
 late NDI source (a test NDI input in a scene that is not on program): 0 `ABOVE the floor` /
 `adding N milliseconds` lines from it, a `buffering-guard: '<name>' is not mixed` line instead, the
-#800 `total_buffering=` stays at the floor, the `audio-stall #1367` `ticks` stay at ~2812/min. A cut
+#800 `total_buffering=` stays at the launch's own draw, the `audio-stall #1367` `ticks` stay at ~2812/min. A cut
 to it: one `entered the mix late` line; for an NDI source with genlock off or on the latency hold no
 ABOVE line and no obs-vban underflow / discontinuity at the cut; a genlock TIMECODE-hold source that
 stays late may still log one ABOVE line a tick or two later (the known limit). A media start on
 program still logs its ABOVE line (upstream).
+
+## The FREEZE: no growth while an audio encoder runs (issue 1425, E2 slice 2, design 6216736061 + ROZHODNUTÉ 6217557472)
+
+**Why.** A buffering increase while an encoder runs makes that encoder's audio permanently later:
+after the output start, `obs-encoder.c` counts audio pts in samples (`cur_pts += framesize`), and
+the added ticks drain with `audio_callback` returning false. On stream-snv, while it streamed, the
+E1 events grew the mix +128 (15.10 04:00, an ASIO outage on `mbc`), +192 (11.10 07:09, a longer one)
+and +85 ms (15.10 17:43, `pre-fotky video` after a 432 ms mixer callback stall), each an
+audio-after-picture step on every live output until an OBS restart.
+
+**Only a running audio encoder freezes it (ROZHODNUTÉ 6217557472).** The first cut also froze a mix
+that had gone 30 s without a growth or a member join. Its own scenario showed that this mutes, on a
+box with no audio encoder (the resolume cg OBS feeding FOH), a clip started in place whose stamps
+stay late, where stock OBS grows the mix once and plays it. With no encoder a growth moves no live
+output's A/V, and slice 1 already makes the stamp-judged sources' A/V independent of the buffering,
+so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
+
+**What ships.**
+
+| Piece | C | Rust / test |
+|---|---|---|
+| the decision: frozen while an output with an audio encoder runs, and only then | `genlock_audio_buffering_frozen(encoder_active)` | `frozen` |
+| the action: `frozen` turns DYNAMIC into NONE; the FLOOR is never frozen | `genlock_audio_buffering_action(..., source_behind, frozen)` | `action` |
+| a member behind the window while frozen is re-anchored | `GENLOCK_MIX_GUARD_MIXED_LATE` (3) from `genlock_mix_guard_reason(..., frozen)` -> `genlock_mix_guard_reanchor` (the 1381 path: drop the behind samples, restart the timeline when nothing is left) | the 1381 lift (no Rust authority: the guard's reasons are pinned by its truth table) |
+| the encoder count | `obs-output.c`: `os_atomic_inc_long` in `hook_data_capture` and `os_atomic_dec_long` in `end_data_capture_thread`, both in the ENCODED branch; read by `obs_output_genlock_audio_encoder_outputs()` | `tests/genlock_audio_buffering_freeze_wiring_1425.rs` |
+
+- **Per tick, in `audio_callback`:** `genlock_mix_mark_members` -> the freeze decision, read once into
+  `audio->genlock_buffering_frozen` -> the render loop (the reason gets it) -> `calc_min_ts` -> the
+  tick decision (the action gets it). A stream or recording that starts or stops takes effect on the
+  next tick (`encoder-on-off`).
+- **Only audio ENCODERS count.** A raw-audio output (the DistroAV NDI main output, obs-vban) never
+  freezes the mix, so the cg OBS on resolume grows on a late media / `NDI test` start as before.
+- **No step-down.** A mid-run decrease would skip a tick of every output and move every running
+  encoder's audio a tick earlier. Nothing grows while an encoder runs, so nothing steps down; a
+  growth taken while no encoder ran stays until the next launch.
+- **The log.**
+  - `buffering-guard: '<src>' fell behind the mix (frozen at T ms): its audio ran X ms behind the
+    mix window; re-anchored (dropped Y ms[, timeline restarted]) instead of adding Z ms to the whole
+    mix's T ms ...` -- the same LOG_WARNING family and cadence as 1381 (a source's first event at
+    once, later at most once a minute; `+K since the last line` counts the rest).
+  - `audio-telemetry #800 mix: frozen=0|1 mixed_late=N` -- a NEW line right after the #800 summary
+    (the summary line is parsed to end of line by `bundle_state_audio.py` and formatted with four
+    arguments by its pytest, so it stays byte-identical); the per-source #800 line ends with
+    `mixed_late=N`.
+  - Per source `genlock_mixed_late_events` / `genlock_mixed_late_dropped_ns`; a MIXED_LATE also
+    counts in the guard's `events=` / `dropped_total=`.
+- **Known limit (slice 2b, an owner product call).** While an encoder runs, a member that KEEPS its
+  stamp and stays late for good (a device whose buffer really grew, a media clip whose stamps run
+  late) is re-anchored on every tick: its audio is dropped, the mix never grows (pinned by
+  `late-start-kept-stamp-encoder`: a clip 128 ms late started in place is never mixed; and the frozen
+  span of `encoder-on-off`: 700 events, one line). Delaying that one source instead is slice 2b,
+  built only if a `mixed_late` storm is seen live (the owner decides delay vs drop). Nothing pages on
+  it yet: the audio-mixer watchdog does not read `mixed_late`, and the per-source meters read the
+  source before the mix. Paging on a growing `#800 mix: mixed_late=` was reported to the supervisor
+  as a follow-up candidate in the slice-2 lane return.
+- **Log cadence.** The guard's "first event logs at once" flag is shared across reasons: a source
+  that logged a not-mixed or entered line in the last minute logs its first MIXED_LATE only with the
+  next minute's line (`+K since the last line` counts it). The counters and `#800` see it at once.
+
+**Tests and Tier-0.**
+- `src/genlock_audio_buffering.rs` unit tests + the 1367 parity gate (the action's `frozen`, the
+  decision over its one input).
+- The 1381 lift (`tests/genlock_audio_mix_guard_1381.rs`; the harness stub has an encoder count
+  `h_encoders`):
+  - the three E1 replays with the stream's audio encoder running (a member that keeps its stamp
+    delivers a backlog stamped at capture; stock libobs reproduces exactly the logged +128 / +192 /
+    +85 ms, the first RED commit); GREEN: the mix stays at the launch's draw, the mic heard on every
+    tick after it, one counted dropout of the late span. Since issue 1425 slice 3 (no floor) the
+    stream starts 2 s after launch (`H_STREAM_TICK`), every scenario starts with the launch draw
+    `waits=2 total_ms=42 mic_missed=2` (the mic's startup race, before any output), and the dropouts
+    read 166.0 / 226.0 / 116.0 ms (measured against a 42 ms draw, not an 85 ms floor);
+  - `e1-asio-outage-128-no-encoder`: the same outage with no encoder grows the mix to 213 ms as stock;
+  - `encoder-at-launch` / `encoder-after-settle` (issue 1425 slice 3, ROZHODNUTÉ 6221252305): an
+    encoder from the first tick does not freeze the mix inside the launch settle window (it grows
+    once, logged, and `mbc` plays); one started after the window freezes it (MIXED_LATE);
+  - `encoder-on-off`: unfrozen growth, a frozen span (MIXED_LATE on every tick), unfrozen growth
+    again when the stream stops;
+  - `late-start-kept-stamp` (no encoder: the mix grows to 149 ms and the clip plays) and its twin
+    `late-start-kept-stamp-encoder` (muted while late, the 2b limit);
+  - `frozen-ingest-race` (the action's frozen term) and the probes `reason-1425` (the 32-row truth
+    table over member / entered / composite / behind / frozen) and `mixed-late` (the counters).
+- `tests/genlock_audio_buffering_freeze_wiring_1425.rs` (std-only): ONE `FREEZE_WIRING` /
+  `FREEZE_ABSENT` list (the absent half refuses the retired settle: `genlock_settle_tick`, the
+  settle define, the settle clock), required by the pwsh step "Assert the audio buffering freeze is
+  present (issue 1425)" in both `windows-genlock*.yml`; the per-tick order; the count's two capture
+  sites in the encoded branch.
+- Mutation (scratch tree, the tests compiled once against it, both pwsh steps run for real): see the
+  lane returns on the ticket (round 1: 36/38 killed, 2 equivalent; round 2: the re-run on the
+  encoder-only code).
+- **Live acceptance (supervisor):** FULL bundle on every OBS box; `#800 mix: frozen=1` while a
+  stream / recording runs and `frozen=0` otherwise; `total_buffering=` flat while frozen; a forced
+  member outage while streaming locally logs one `fell behind the mix (frozen at …)` line and no
+  `total audio buffering is now` growth, and `mixed_late=` rises by that one event and then stays
+  flat (a rising count = a storm, the 2b limit); on resolume (no encoder) a late media / `NDI test`
+  start still logs its ABOVE line and FOH hears it; the release E2E A/V gate green.
+- **Size.** `audio_callback` is about 265 lines and `obs-audio.c` about 1105 (already over 1000
+  upstream): the next audio-thread addition first moves the #800 telemetry block into a helper, as
+  `audio_stall_dump` already was.

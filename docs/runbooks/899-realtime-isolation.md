@@ -159,7 +159,10 @@ one, never purge the kernel you are still running):
 4. `safe-grub-regen` — guarantee every installed kernel has an initrd (issue 295 brick-hardening),
    then `update-grub` once (the preempt=full grub.d drop applies to every entry).
 5. `reboot-into-lowlatency` — **reboot the box, in a window with NO live E2E**, one box at a time;
-   the old generic entry stays in GRUB as rollback.
+   the old generic entry stays in GRUB as rollback. On a cambox that reboot is a PHYSICAL power
+   cycle at the rig (a short power-button press = a clean shutdown, then power on), never a remote
+   reboot: a warm reboot can hang a cambox on its USB firmware. An N150 box (`8086:46d4`, cam5/6/7)
+   gets its GPU driver from this kernel (issue 1446, verify-device `(av)`).
 6. `confirm-running-lowlatency` — confirm `preempt=full` is ACTIVE: `grep -qw preempt=full
    /proc/cmdline` AND `/sys/kernel/debug/sched/preempt` shows `(full)`. `uname -r` stays `*-generic`.
 7. `purge-superseded-generic` — restore single-kernel: purge ONLY the SPECIFIC pre-upgrade image

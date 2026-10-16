@@ -396,8 +396,6 @@ impl Obs {
             let master_s = (mono_now - self.last_mono) as f64 / 1e9;
             self.last_mono = mono_now;
             let buffered_ms = self.buffered_ns() as f64 / 1e6;
-            self.c.set_level_absolute(false);
-            self.c.set_level_offset_ms(0.0);
             self.c.set_step_recover_hold(self.slew_remaining_ns != 0);
             let (applied, recover) = if self.c.timecode() {
                 (self.c.applied_ppm(), self.c.take_step_recover_ppm())

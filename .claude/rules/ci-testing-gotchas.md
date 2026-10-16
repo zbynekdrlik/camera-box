@@ -1835,6 +1835,13 @@ a high-entropy secret. Do not bypass it; hold the sets in locals and build the b
 (`avsync_venue_name_ok` in `scripts/lib/avsync-venues.sh`). Each literal stays under the threshold,
 and the regex is still ASCII-only under any locale.
 
+**Scope that range lint to the regex itself, not the whole `=~` line (issue 1446).** A line such as
+`if [ -n "$x" ] || ! [[ $id =~ ^[$hex]{4}$ ]]` also holds test brackets: `[ -n "$x" ]` reads as a
+bracket body with a `-` in it, so a whole-line lint fails a clean lib. Lint only the text between
+`=~` and the closing `]]` (`test_no_bracket_range_on_any_regex_line_of_the_lib` in
+`tests/python/test_display_gpu_1446.py`). That lint also covers a runner with no en_US.UTF-8 locale,
+where a runtime test under that locale falls back to C and cannot catch a range.
+
 ## A mutation harness that runs the replica with a MINIMAL env reports every mutant "killed" (issue 1404)
 
 A python mutation driver that runs each scratch tree through `subprocess.run([...], env={"PATH": ..., "HOME": ...})`
@@ -1904,3 +1911,12 @@ the REAL worktree, so every mutant "survives" (7 of 7 read as surviving on the f
 test once with `CARGO_MANIFEST_DIR=<scratch>` set on rustc, then mutate the scratch files between runs
 (the files are read at run time). As always, print the real tree's result first and trust a kill only
 when that line passes.
+
+## A test that renders log lines from the shipped C format strings is RED for the wrong reason before the C changes (issue 1425)
+
+A pytest that builds its fixture lines from the C source (`_c_string(OBS_C, '"\tbuffering type: ...')`,
+the house style so a format change cannot drift from the parser) fails with an `index` / `%` error
+on a RED commit that precedes the C change. That failure is the harness, not the code under test.
+Prove the behavioural RED on a scratch tree before committing: `git archive HEAD scripts` + the NEW
+C files + the new test, run there, and require assertion failures on the parser's output (issue
+1425: 8 failed / 1 passed). State that run on the ticket, since the RED commit alone cannot show it.

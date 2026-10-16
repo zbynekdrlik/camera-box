@@ -1,0 +1,63 @@
+# ===== issue 789 genlock FLEET deploy PLAN — run=4242 sha=abc123def4567890 boxes=strih-snv mode=full =====
+# ================= FLEET PLAN: box=strih-snv (ssh newlevel@10.77.9.202, linux-genlock) =================
+# PREFLIGHT (report-only, #1303 part 4) -- audit strih-snv's NDI-input forced table (audio + yuv) BEFORE
+#   the swap. Report-only: it NEVER writes and NEVER gates the deploy -- it prints a per-input verdict
+#   against the CERTIFIED per-box table (owner ruling 2026-09-15): the cg OBS (resolume) is the ONLY
+#   program-audio box (its sp-*/SongPlayer/music inputs carry ndi_audio=true); strih/stream/imag carry
+#   the mastered mix over Dante/ASIO, so EVERY NDI input there stays silent and NDI audio ENABLED on
+#   any of them is the double-audio defect. So a program-audio box is not shipped with ndi_audio=false
+#   (the #1303 event-morning live defect) and a Dante-fed box is not shipped with NDI audio bleeding
+#   into the mixer. On dev1, enumerate strih-snv's live NDI inputs over OBS-WS -- reuse latency_pins_verify.py's
+#   _conn + GetInputList + GetInputSettings (host 10.77.9.202) -- emitting one TSV row per input:
+#   name<TAB>ndi_audio<TAB>yuv_range<TAB>yuv_colorspace. Pipe that into the classifier and review it:
+#     <ws-enumerate 10.77.9.202 as TSV> | bash -c '. scripts/lib/genlock-forced-table-audit.sh; genlock_forced_table_audit strih'
+#   Act on every 'MISMATCH-*' row (and any yuv NOTE) over OBS-WS BEFORE running STEP 0 below.
+# EXECUTE mode runs every step below itself, fail-loud (a failed step exits 4 and names itself; the
+#   old build keeps running until the whole stage is on the box; every requested box is resolved
+#   before any box is changed):
+#     scripts/deploy-genlock-fleet.sh --run-id 4242 --boxes strih-snv
+#   strih-snv always gets the strih FULL build (obs-genlock-linux-x86_64-strih); --fast is Windows-only.
+#   Every ssh below is 'sshpass -p $PW timeout 180 ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=12 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 newlevel@10.77.9.202 <cmd>'.
+# STEP 0 (resolve): the linux-genlock.yml run at abc123def4567890; download its 'obs-genlock-linux-x86_64-strih'
+#          artifact to /stage/bundle -- REFUSED unless its GENLOCK_BUILD_SHA.txt is abc123def4567890 and its
+#          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30. The planner adds
+#          bundle/GENLOCK_STATS_ABI.txt = the stats + output-stats versions of obs.h at abc123def4567890 (removed
+#          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
+# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 + the program-audio sampler's vendored
+#          dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
+#          generated run-setup.sh -> /stage/repo.
+# STEP 2 (preflight): the box must be the fact file's host ('hostname' == STRIH_HOSTNAME),
+#          and no previous install may run:  if pgrep -x setup-strih.sh >/dev/null; then echo alive; else echo idle; fi
+#          and no broadcast may be LIVE: the shared rig-busy guard stray_session_check_assert
+#          (scripts/lib/stray-session-check.sh) reads strih 10.77.9.202 + the obs-fleet stream host --
+#          streaming/recording on either = exit 4, nothing changed (re-checked right before STEP 5).
+# STEP 3 (sweep): the stage is created + touched NEWEST, then the obs-backup-retention.sh
+#          --local-sweep decision (what 'obs-backup-retention.sh --box strih-snv' runs), stage dirs
+#          only, as the operator, keeps only it:
+#            mkdir -p '/tmp/genlock-stage-abc123def4567890/bundle' '/tmp/genlock-stage-abc123def4567890/repo' && touch '/tmp/genlock-stage-abc123def4567890'
+#            bash -s -- --local-sweep --stages-only --stage-parent /tmp --keep-runs 1 --keep-days 0 --execute   < scripts/obs-backup-retention.sh (the committed tree)
+#            test -d '/tmp/genlock-stage-abc123def4567890/bundle' && test -d '/tmp/genlock-stage-abc123def4567890/repo' || exit 3; for d in /tmp/genlock-stage-* /tmp/stage-genlock-*; do if [ -d "$d" ] && [ "$d" != '/tmp/genlock-stage-abc123def4567890' ]; then echo "LEFTOVER $d"; fi; done; exit 0
+# STEP 4 (stage, OBS still running):
+#            rsync -a --delete --timeout=120 -e "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=12 -o ServerAliveInterval=15 -o ServerAliveCountMax=4" /stage/bundle/ newlevel@10.77.9.202:/tmp/genlock-stage-abc123def4567890/bundle/
+#            rsync -a --delete --timeout=120 -e "ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=12 -o ServerAliveInterval=15 -o ServerAliveCountMax=4" /stage/repo/ newlevel@10.77.9.202:/tmp/genlock-stage-abc123def4567890/repo/
+# STEP 5 (stop, delegated to the sanctioned stop code; the deploy sends no kill itself):
+#            export XDG_RUNTIME_DIR=/run/user/$(id -u); if [ -x /usr/local/bin/strih-obs-stop.sh ]; then /usr/local/bin/strih-obs-stop.sh || exit 5; else systemctl --user stop strih-obs.service || exit 5; fi; i=0; while systemctl --user is-active --quiet strih-obs.service || pgrep -x obs >/dev/null; do i=$((i+1)); if [ "$i" -gt 30 ]; then echo "strih-obs/obs still running 30 s after the graceful stop" >&2; exit 5; fi; sleep 1; done; echo "strih-obs stopped (graceful)"
+# STEP 6 (setup, detached on the box): 'setup-strih.sh --box strih-snv' as root with
+#          STRIH_LX_BUNDLE_SRC=/tmp/genlock-stage-abc123def4567890/bundle and GH_TOKEN read from stdin (a 'ghtoken:<token>' line, never argv):
+#            sudo -k -S -p '' bash '/tmp/genlock-stage-abc123def4567890/repo/run-setup.sh'   < (the sudo password line + ghtoken:<token>)
+#          then poll: cat '/tmp/genlock-stage-abc123def4567890/setup-strih.rc' 2>/dev/null || true  (0 = done; else the log tail + FAIL;
+#          OBS is never started while setup-strih.sh still runs)
+# STEP 7 (start): export XDG_RUNTIME_DIR=/run/user/$(id -u); touch '/tmp/genlock-stage-abc123def4567890/obs-start.marker'; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service; obs_rc=$?; systemctl --user start strih-browser-keeper.service,bkshading-panel-app.service,companion-satellite.service,strih-satellite-watch.timer,dantesync-tray.service || echo "WARNING: [strih-snv start] the session apps (strih-browser-keeper.service,bkshading-panel-app.service,companion-satellite.service,strih-satellite-watch.timer,dantesync-tray.service) did not start -- verify-strih items 37-40 name why" >&2; exit "$obs_rc"
+# STEP 8 (verify, fail-closed, held for 90 s): /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == abc123def4567890,
+#          /usr/lib/x86_64-linux-gnu/libobs.so.30 sha256 == the manifest's, strih-obs.service active with
+#          the SAME MainPID + NRestarts, 'render tick ENABLED' in the OBS log written after the start,
+#          and http://10.77.9.202:8899/bundle-state.json genlock_build_sha == abc123def4567890.
+# STEP 9 (accept): setup-strih.sh's own final gate runs with OBS stopped; when that gate is its ONLY
+#          failure (tail -n 5 '/tmp/genlock-stage-abc123def4567890/setup-strih.log' 2>/dev/null | grep -F -c 'verify-strih.sh acceptance gate did not pass' || true), execute runs the gate itself now:
+#            sudo -k -S -p '' '/tmp/genlock-stage-abc123def4567890/repo/scripts/verify-strih.sh' --box strih-snv   < (the sudo password line)
+#          (a reboot-pending run only reports -- run verify-strih.sh --box strih-snv after the reboot).
+# ACCEPTANCE (supervisor, after a green execute): from dev1
+#          'python3 scripts/obs_burn_filter.py check --host 10.77.9.202' (the WS filter-enum survives).
+# fleet-deploy log line (append to /home/newlevel/.camera-box/genlock-fleet-deploy.log once the deploy is done):
+#   <DATE>	4242	abc123def4567890	strih-snv	full
+exit 0

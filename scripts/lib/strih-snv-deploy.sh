@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (function definitions + three constants, nothing executed) --
+# airuleset:script-ok source-only lib (function definitions + constants and the per-box maps, nothing executed) --
 # the scripts/lib/*.sh convention of NOT setting `set -euo pipefail` here: sourcing executes it in
 # the CALLER's shell (deploy-genlock-fleet.sh sets its own strict mode). Every step below checks its
 # own rc explicitly and returns a named failure, because the caller runs it in an `||` context where
@@ -8,6 +8,14 @@
 # scripts/lib/strih-snv-deploy.sh -- issue 1317 part 6: the strih-snv EXECUTE arm of
 # scripts/deploy-genlock-fleet.sh, plus the builders its --plan arm prints (the remote commands are
 # the same strings in both).
+#
+# issue 1426: the arm is per BOX. Every obs-fleet linux-genlock box with a scripts/strih-boxes/<box>.env
+# fact file (strih-snv, strih-pp, stream-pp; fleet_box_runs_setup_strih) runs it with its own name:
+# `setup-strih.sh --box <box>`, `verify-strih.sh --box <box>`, errors as `[<box> <step>]`. A traveling
+# box is dialled by its obs-fleet NAME (strih-pp.lan: dev1 reaches the PP LAN through companion-pp),
+# never its fact file's STRIH_IP; one that does not answer over ssh is AWAY (strih_lx_apply rc 6, one
+# line, nothing changed, never a failure). The rig-busy guard reads the box's venue (strih_lx_guard_hosts).
+# strih_lx_apply_all rolls the boxes in order: an acceptance failure stops only that box (exit 5).
 #
 # strih-snv (10.77.9.202, a linux-genlock box since the M4 cut-over) installs the strih FULL genlock
 # artifact through scripts/setup-strih.sh (release-parity gate, runtime packages, /usr prefix,
@@ -63,7 +71,7 @@
 #                  (a crash-looping Type=simple unit reads `active` between restarts), the OBS log
 #                  written after the start shows `render tick ENABLED`, and :8899 reports the SHA.
 #
-# Every failure prints `ERROR: [strih-snv <step>] failed (rc=N): <what>` on stderr. Exit 5 = installed,
+# Every failure prints `ERROR: [<box> <step>] failed (rc=N): <what>` on stderr. Exit 5 = installed,
 # running and read back, but the in-deploy verify-strih.sh acceptance gate is not clear.
 #
 # Test seams (tests/deploy_genlock_fleet_strih_lx_exec_1317.rs stubs gh/sshpass/ssh/rsync/curl on
@@ -85,6 +93,13 @@ if ! declare -F strih_session_apps_autostart_lines >/dev/null; then
 fi
 # issue 1404: setup-strih step 16e installs the program-audio sampler from STRIH_PROGRAM_AUDIO_FILES,
 # which names two vendored dock headers outside scripts/ -- the staged tree must carry them.
+# issue 1426: the ONE fact-file parser (strih_box_parse_file, never executes the file) and the ONE
+# venue table (avsync_venue_host: a venue's stream box + how dev1 dials it), both read from this
+# checkout's scripts/strih-boxes -- the same files the plan and the execute arm read.
+if ! declare -F avsync_venue_host >/dev/null; then
+  # shellcheck source=scripts/lib/avsync-venues.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/avsync-venues.sh"
+fi
 if ! declare -p STRIH_PROGRAM_AUDIO_FILES >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/strih-program-audio.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
@@ -109,6 +124,11 @@ strih_lx_tree_paths() {
 STRIH_LX_STAGE_PARENT="/tmp"
 STRIH_LX_SSH_OPTS="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=12 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
 STRIH_LX_RETENTION_ARGS="--local-sweep --stages-only --stage-parent /tmp --keep-runs 1 --keep-days 0 --execute"
+# issue 1426: per-box values strih_lx_prepare resolves for every requested setup-strih box (the dial
+# host, "<strih host> <stream host>" for the rig-busy guard, the fact-file hostname); strih_lx_apply
+# loads one box's values into the STRIH_LX_PREP_* globals. STRIH_LX_BOX names the box being deployed.
+declare -gA STRIH_LX_BOX_HOST=() STRIH_LX_BOX_GUARD=() STRIH_LX_BOX_HOSTNAME=()
+STRIH_LX_BOX="strih-snv"
 
 # strih_lx_stage_dir SHA -> /tmp/genlock-stage-<sha>, the obs-backup-retention allowlist shape
 # (`^(stage-genlock|genlock-stage)-[0-9a-f]+$`) so a later sweep can prune it. A non-hex SHA is
@@ -201,8 +221,8 @@ strih_lx_remote_setup_notes_cmd() {
 # deploy's acceptance step) name it.
 strih_lx_remote_start_cmd() {
   # shellcheck disable=SC2016  # expanded on the box, not here
-  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); touch %s; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service; obs_rc=$?; systemctl --user start %s || echo "WARNING: [strih-snv start] the session apps (%s) did not start -- verify-strih items 37-40 name why" >&2; exit "$obs_rc"\n' \
-    "'$1/obs-start.marker'" "${STRIH_SESSION_APP_UNITS[*]}" "${STRIH_SESSION_APP_UNITS[*]}"
+  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); touch %s; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service; obs_rc=$?; systemctl --user start %s || echo "WARNING: [%s start] the session apps (%s) did not start -- verify-strih items 37-40 name why" >&2; exit "$obs_rc"\n' \
+    "'$1/obs-start.marker'" "${STRIH_SESSION_APP_UNITS[*]}" "${2:-strih-snv}" "${STRIH_SESSION_APP_UNITS[*]}"
 }
 
 # one line `installed=<marker sha> active=<unit state> pid=<MainPID> restarts=<NRestarts>
@@ -256,7 +276,7 @@ rm -f "$S/setup-strih.rc" "$S/setup-strih.log"
     if [ -n "${!v:-}" ]; then printf 'export %s=%q\n' "$v" "${!v}"; fi
   done
 ) > "$S/.runner.env" || { echo "run-setup: cannot write $S/.runner.env" >&2; exit 2; }
-UNIT="strih-snv-setup-$(date +%s)"
+UNIT="$BOX-setup-$(date +%s)"
 if ! systemd-run --unit="$UNIT" --collect --quiet bash "$0" --child; then
   rm -f "$S/.runner.env"
   echo "run-setup: systemd-run could not start the setup unit" >&2
@@ -313,11 +333,92 @@ strih_lx_is_ipv4() {
   return 0
 }
 
+# strih_lx_is_dns_name NAME -> rc 0 for a plain lower-case DNS name of one or more dot-separated
+# labels (letters, digits, inner hyphens; never a leading `-`, so never flag-shaped). The ASCII sets are
+# spelled out: a bracket RANGE follows the locale (.claude/rules/ci-testing-gotchas.md). Pure.
+strih_lx_is_dns_name() {
+  local LC_ALL=C lower='abcdefghijklmnopqrstuvwxyz' digit='0123456789'
+  local label="[${lower}${digit}]([${lower}${digit}-]*[${lower}${digit}])?"
+  [[ "${1:-}" =~ ^${label}(\.${label})*$ ]]
+}
+
+# strih_lx_dial_host_check BOX HOST -> rc 0 when HOST is how the deploy may dial BOX (issue 1426): a
+# `traveling` obs-fleet row (strih-pp, stream-pp) dials its fleet NAME, a plain DNS name that is not an
+# address (dev1 reaches the PP LAN through companion-pp; the fact file's STRIH_IP is the venue address,
+# never dialled, so a row that holds an IP is refused here); every other row (strih-snv, `always`) a
+# dotted IPv4 (the fleet row is one). Else the named exit-3 refusal.
+strih_lx_dial_host_check() {
+  local box="$1" host="$2"
+  if [ "$(obs_fleet_home_check "$box" 2>/dev/null)" = traveling ]; then
+    if strih_lx_is_dns_name "$host" && ! [[ "$host" =~ ^[0123456789.]+$ ]]; then return 0; fi
+    _strih_lx_fail resolve 2 3 "${box} host '$host' must be its obs-fleet NAME (a plain DNS name like ${box}.lan -- a traveling box is dialled by name, never by an address such as the venue STRIH_IP)"; return
+  fi
+  strih_lx_is_ipv4 "$host" && return 0
+  _strih_lx_fail resolve 2 3 "${box} host '$host' must be a dotted IPv4 (the fleet row is one; a DNS name is refused here, and a flag-shaped or mistyped override is refused up front)"
+}
+
+# strih_lx_fact BOX KEY [DIR] -> the value of KEY in the box fact file DIR/BOX.env (default: this
+# checkout's scripts/strih-boxes), through the ONE parser strih_box_parse_file (never sourced). Empty
+# (rc 0) when the file or the key is absent; empty + rc 2 when the file does not parse (its own stderr
+# lines name why). Pure.
+strih_lx_fact() {
+  local dir="${3:-$(dirname "${BASH_SOURCE[0]}")/../strih-boxes}" parsed line
+  [ -f "$dir/$1.env" ] || return 0
+  parsed="$(strih_box_parse_file "$dir/$1.env")" || return 2
+  while IFS= read -r line; do
+    case "$line" in "$2="*) printf '%s\n' "${line#*=}"; return 0 ;; esac
+  done <<< "$parsed"
+  return 0
+}
+
+# strih_lx_venue_strih_box VENUE [DIR] -> the ONE fact-file box of VENUE whose STRIH_ROLE is strih
+# (strih-snv for snv, strih-pp for pp); rc 2 (no output) for none or more than one. Pure.
+strih_lx_venue_strih_box() {
+  local venue="$1" dir="${2:-$(dirname "${BASH_SOURCE[0]}")/../strih-boxes}" f b found=""
+  for f in "$dir"/*.env; do
+    [ -f "$f" ] || continue
+    b="$(basename "$f" .env)"
+    [ "$(strih_lx_fact "$b" STRIH_VENUE "$dir")" = "$venue" ] || continue
+    [ "$(strih_lx_fact "$b" STRIH_ROLE "$dir")" = strih ] || continue
+    [ -z "$found" ] || return 2
+    found="$b"
+  done
+  [ -n "$found" ] || return 2
+  printf '%s\n' "$found"
+}
+
+# strih_lx_guard_hosts BOX DIAL_HOST -> "<strih host> <stream host>": the venue the rig-busy guard reads
+# before BOX's OBS is stopped (issue 1426). The venue is BOX's fact-file STRIH_VENUE. Its strih is BOX
+# itself when BOX's STRIH_ROLE is strih (DIAL_HOST, so the strih-snv STRIH_LX_IP override is read where
+# it is dialled), else the venue's one strih fact file (strih_lx_venue_strih_box) at its fleet host. Its
+# stream is the ONE venue table's stream host (avsync_venue_host: a stream-role fact file, else the
+# declared Windows stream-snv). strih-snv -> "<its dial IP> 10.77.9.204" exactly as before; stream-pp ->
+# "strih-pp.lan stream-pp.lan". rc 2 + one stderr line naming the venue and the missing piece. The venue
+# table is read with its watchdog seams (AVSYNC_VENUE_TABLE, STRIH_BOXES_DIR) unset, so a test override
+# exported in the operator's shell can never retarget the guard before the OBS stop. Pure.
+strih_lx_guard_hosts() {
+  local box="$1" dial="$2" venue s t sbox
+  venue="$(strih_lx_fact "$box" STRIH_VENUE)" \
+    || { echo "strih_lx_guard_hosts: the ${box}.env fact file does not parse (above)" >&2; return 2; }
+  [ -n "$venue" ] || { echo "strih_lx_guard_hosts: ${box} has no STRIH_VENUE fact" >&2; return 2; }
+  if [ "$(strih_lx_fact "$box" STRIH_ROLE)" = strih ]; then
+    s="$dial"
+  else
+    sbox="$(strih_lx_venue_strih_box "$venue")" && s="$(fleet_box_ip "$sbox")" \
+      || { echo "strih_lx_guard_hosts: venue ${venue} has no single strih fact file with an obs-fleet row" >&2; return 2; }
+  fi
+  t="$(unset AVSYNC_VENUE_TABLE STRIH_BOXES_DIR; avsync_venue_host "$venue")" && [ -n "$t" ] \
+    || { echo "strih_lx_guard_hosts: venue ${venue} has no stream box in the venue table (a stream-role fact file or a declared stream row)" >&2; return 2; }
+  [ -n "$s" ] || return 2
+  printf '%s %s\n' "$s" "$t"
+}
+
 # strih_lx_tree_check TREE BOX -> prints the fact file's STRIH_HOSTNAME (rc 0) when the staged tree
 # holds what the box deploy needs: setup-strih.sh, verify-strih.sh, obs-backup-retention.sh,
 # systemd/strih-obs.service, the box fact file scripts/strih-boxes/BOX.env (issue 1361) and the
 # intercom routing file its STRIH_INTERCOM_CONFIG names (setup-strih.sh step 13 installs it). The fact
-# file is read with sed, never sourced on dev1. rc 1 + a named reason on stderr otherwise. Pure.
+# file is read through strih_box_parse_file, never sourced on dev1; one that does not parse is named as
+# such. rc 1 + a named reason on stderr otherwise. Pure.
 strih_lx_tree_check() {
   local tree="$1" box="$2" env ic hn f
   env="$tree/scripts/strih-boxes/$box.env"
@@ -325,10 +426,11 @@ strih_lx_tree_check() {
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f" >&2; return 1; }
   done
   [ -f "$env" ] || { echo "strih_lx_tree_check: no scripts/strih-boxes/$box.env (the box fact file)" >&2; return 1; }
-  ic="$(sed -n 's/^STRIH_INTERCOM_CONFIG=//p' "$env" | head -n 1)"
+  strih_box_parse_file "$env" >/dev/null || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env does not parse (above)" >&2; return 1; }
+  ic="$(strih_lx_fact "$box" STRIH_INTERCOM_CONFIG "$tree/scripts/strih-boxes")" || ic=""
   [ -n "$ic" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_INTERCOM_CONFIG" >&2; return 1; }
   [ -f "$tree/$ic" ] || { echo "strih_lx_tree_check: no $ic (STRIH_INTERCOM_CONFIG) -- the intercom/ dir must be staged" >&2; return 1; }
-  hn="$(sed -n 's/^STRIH_HOSTNAME=//p' "$env" | head -n 1)"
+  hn="$(strih_lx_fact "$box" STRIH_HOSTNAME "$tree/scripts/strih-boxes")" || hn=""
   [ -n "$hn" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_HOSTNAME" >&2; return 1; }
   for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f (setup-strih step 16e installs the program-audio sampler from it, issue 1404)" >&2; return 1; }
@@ -338,8 +440,8 @@ strih_lx_tree_check() {
 
 # --- execute arm ----------------------------------------------------------------------------------
 
-_strih_lx_fail() {  # STEP RC EXIT MESSAGE -> prints the named error, returns EXIT
-  echo "ERROR: [strih-snv $1] failed (rc=$2): $4" >&2
+_strih_lx_fail() {  # STEP RC EXIT MESSAGE -> prints the named error (the box being deployed), returns EXIT
+  echo "ERROR: [${STRIH_LX_BOX:-strih-snv} $1] failed (rc=$2): $4" >&2
   return "$3"
 }
 
@@ -369,21 +471,22 @@ strih_lx_obs_phase2_dir() {
 }
 
 # _strih_lx_broadcast_guard STEP WHAT_KEPT -> the ONE shared rig-busy guard (stray_session_check_assert)
-# at the strih-snv dial IP + the stream host. It `exit 1`s on a refusal (written for bare-statement
+# at the box's venue: its strih (the strih-snv dial IP for strih-snv) + its stream host
+# (strih_lx_guard_hosts, issue 1426). It `exit 1`s on a refusal (written for bare-statement
 # callers), so it runs in a subshell here: its stdout passes through, its stderr is re-printed and
-# names what is live (stray_session_busy_summary). Returns 0, or 4 with `[strih-snv STEP]` naming what
+# names what is live (stray_session_busy_summary). Returns 0, or 4 with `[<box> STEP]` naming what
 # is live + WHAT_KEPT (what the box still has).
 _strih_lx_broadcast_guard() {
   local step="$1" kept="$2" guard_err grc
-  { guard_err="$( ( stray_session_check_assert "$STRIH_LX_PREP_OBS_PHASE2_DIR" "$STRIH_LX_PREP_HOST" "$STRIH_LX_PREP_STREAM_HOST" "the strih-snv OBS deploy (stop + setup-strih.sh)" ) 2>&1 1>&3 3>&- )"; grc=$?; } 3>&1
+  { guard_err="$( ( stray_session_check_assert "$STRIH_LX_PREP_OBS_PHASE2_DIR" "$STRIH_LX_PREP_GUARD_STRIH" "$STRIH_LX_PREP_STREAM_HOST" "the ${STRIH_LX_BOX} OBS deploy (stop + setup-strih.sh)" ) 2>&1 1>&3 3>&- )"; grc=$?; } 3>&1
   [ -n "$guard_err" ] && printf '%s\n' "$guard_err" >&2
   [ "$grc" = 0 ] && return 0
-  _strih_lx_fail "$step" "$grc" 4 "a broadcast is LIVE on strih/stream: $(stray_session_busy_summary "$guard_err") -- refusing to stop the strih OBS; ${kept} (ONLY if the hint above names our own leftover recording -- recording ON, streaming OFF -- stop it over OBS-WS and re-run; never a live production)"
+  _strih_lx_fail "$step" "$grc" 4 "a broadcast is LIVE on strih/stream: $(stray_session_busy_summary "$guard_err") -- refusing to stop the ${STRIH_LX_BOX} OBS; ${kept} (ONLY if the hint above names our own leftover recording -- recording ON, streaming OFF -- stop it over OBS-WS and re-run; never a live production)"
 }
 
 _strih_lx_start_best_effort() {
-  echo "# strih-snv: starting the installed OBS best-effort so the box is not left dark" >&2
-  _strih_lx_ssh "$(strih_lx_remote_start_cmd "$STRIH_LX_PREP_STAGE")" || true
+  echo "# ${STRIH_LX_BOX}: starting the installed OBS best-effort so the box is not left dark" >&2
+  _strih_lx_ssh "$(strih_lx_remote_start_cmd "$STRIH_LX_PREP_STAGE" "$STRIH_LX_BOX")" || true
 }
 
 _strih_lx_installer_state() {  # -> alive | idle | unreachable (the ssh itself failed)
@@ -396,21 +499,33 @@ _strih_lx_installer_state() {  # -> alive | idle | unreachable (the ssh itself f
   esac
 }
 
-# strih_lx_prepare SHA WORKDIR REPO GENLOCK_REPO -> everything that needs no box: resolve, download,
-# the provisioning tree, the token. Sets the STRIH_LX_PREP_* globals strih_lx_apply reads. 0 or 3.
+# strih_lx_prepare SHA WORKDIR REPO GH_REPO [BOXES] -> everything that needs no box: resolve, download,
+# the provisioning tree, the token. BOXES (default strih-snv; issue 1426: any comma list of setup-strih
+# boxes) share ONE download + tree; each box's dial host, guard hosts, fact-file hostname and runner are
+# resolved here too (the STRIH_LX_BOX_* maps), so every box is resolved before any box is touched. Sets
+# the STRIH_LX_PREP_* globals strih_lx_apply reads. 0 or 3.
 strih_lx_prepare() {
-  local sha="$1" work="$2" repo="$3" gh_repo="$4"
-  local w="$work/strih-snv" art lrun rc art_sha tree_rev tool f
+  local sha="$1" work="$2" repo="$3" gh_repo="$4" boxes="${5:-strih-snv}"
+  local w="$work/strih-snv" art lrun rc art_sha tree_rev tool f b host guard
+  local -a box_list
+  IFS=',' read -r -a box_list <<< "$boxes"
+  STRIH_LX_BOX="$boxes"   # a shared step's error names every box it serves
   STRIH_LX_PREP_WORK="$w"
   STRIH_LX_PREP_USER="${STRIH_LX_USER:-newlevel}"
   STRIH_LX_PREP_PW="${STRIH_LX_PW:-newlevel}"
-  STRIH_LX_PREP_HOST="$(fleet_box_ip strih-snv)" || { _strih_lx_fail resolve 2 3 "no strih-snv host (STRIH_LX_IP / obs-fleet row)"; return; }
-  strih_lx_is_ipv4 "$STRIH_LX_PREP_HOST" \
-    || { _strih_lx_fail resolve 2 3 "strih-snv host '$STRIH_LX_PREP_HOST' must be a dotted IPv4 (the fleet row is one; a DNS name is refused here, and a flag-shaped or mistyped override is refused up front)"; return; }
-  # the rig-busy guard's inputs, resolved here so a missing one refuses before any box is touched: the
-  # stream OBS host (the obs-fleet row), the obs_phase2.py it runs, and the shared guard itself.
-  STRIH_LX_PREP_STREAM_HOST="$(fleet_box_ip stream)" && [ -n "$STRIH_LX_PREP_STREAM_HOST" ] \
-    || { _strih_lx_fail resolve 2 3 "no stream host (obs-fleet row) for the rig-busy guard"; return; }
+  STRIH_LX_BOX_HOST=(); STRIH_LX_BOX_GUARD=(); STRIH_LX_BOX_HOSTNAME=()
+  for b in "${box_list[@]}"; do
+    STRIH_LX_BOX="$b"
+    host="$(fleet_box_ip "$b")" || { _strih_lx_fail resolve 2 3 "no ${b} host (STRIH_LX_IP / obs-fleet row)"; return; }
+    strih_lx_dial_host_check "$b" "$host" || return
+    # the rig-busy guard's inputs, resolved here so a missing one refuses before any box is touched:
+    # the venue's strih + stream OBS hosts (strih_lx_guard_hosts: obs-fleet rows, the box's fact file).
+    guard="$(strih_lx_guard_hosts "$b" "$host")" \
+      || { _strih_lx_fail resolve 2 3 "no stream host (obs-fleet row) for the rig-busy guard -- the venue strih/stream of ${b} (above)"; return; }
+    STRIH_LX_BOX_HOST[$b]="$host"; STRIH_LX_BOX_GUARD[$b]="$guard"
+  done
+  STRIH_LX_BOX="$boxes"
+  STRIH_LX_PREP_HOST="${STRIH_LX_BOX_HOST[${box_list[0]}]}"
   STRIH_LX_PREP_OBS_PHASE2_DIR="$(strih_lx_obs_phase2_dir)" && [ -f "$STRIH_LX_PREP_OBS_PHASE2_DIR/obs_phase2.py" ] \
     || { _strih_lx_fail resolve 2 3 "no obs_phase2.py in '${STRIH_LX_PREP_OBS_PHASE2_DIR:-}' -- the rig-busy guard could not read strih/stream"; return; }
   declare -F stray_session_check_assert >/dev/null && declare -F stray_session_busy_summary >/dev/null \
@@ -422,9 +537,9 @@ strih_lx_prepare() {
     _strih_lx_fail resolve 2 3 "STRIH_LX_VERIFY_SETTLE_SECS=$st cannot fit the read-back window (${vp} - 1) x ${vs} s -- the deploy would always be refused"; return
   fi
   for tool in sshpass rsync curl tar jq timeout python3; do
-    command -v "$tool" >/dev/null 2>&1 || { _strih_lx_fail resolve 127 3 "$tool is required for the strih-snv deploy"; return; }
+    command -v "$tool" >/dev/null 2>&1 || { _strih_lx_fail resolve 127 3 "$tool is required for the ${STRIH_LX_BOX} deploy"; return; }
   done
-  art="$(fleet_linux_bundle_artifact_for strih-snv)"
+  art="$(fleet_linux_bundle_artifact_for "${box_list[0]}")"
   lrun="$(gh run list --repo "$gh_repo" --workflow linux-genlock.yml --json databaseId,headSha,conclusion --limit 50 2>/dev/null | fleet_pick_run_at_sha "$sha")" || true
   [ -n "$lrun" ] || { _strih_lx_fail resolve 1 3 "no successful linux-genlock.yml run at $sha -- build the strih artifact at that commit first (a tag dispatch)"; return; }
 
@@ -437,39 +552,63 @@ strih_lx_prepare() {
   [ "$art_sha" = "$sha" ] || { _strih_lx_fail download 1 3 "$art (run $lrun) carries GENLOCK_BUILD_SHA ${art_sha:-<none>}, not the canonical $sha -- refusing to stage a foreign build"; return; }
   STRIH_LX_PREP_LIBSHA="$(jq -r '.files[]? | select(.path == "lib/x86_64-linux-gnu/libobs.so.30") | .sha256' "$w/bundle/BUNDLE_MANIFEST.json" 2>/dev/null | head -n 1)"
   [ -n "$STRIH_LX_PREP_LIBSHA" ] || { _strih_lx_fail download 1 3 "$art BUNDLE_MANIFEST.json has no lib/x86_64-linux-gnu/libobs.so.30 sha256 -- the read-back could not prove the installed bytes"; return; }
-  echo "# strih-snv: $art (run $lrun) downloaded, GENLOCK_BUILD_SHA=$art_sha"
+  echo "# ${STRIH_LX_BOX}: $art (run $lrun) downloaded, GENLOCK_BUILD_SHA=$art_sha"
 
   tree_rev="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)" || tree_rev=""
   [ -n "$tree_rev" ] || { _strih_lx_fail tree 1 3 "$repo is not a git checkout"; return; }
   local -a tree_paths; mapfile -t tree_paths < <(strih_lx_tree_paths)
   git -C "$repo" archive --format=tar HEAD "${tree_paths[@]}" | tar -x -C "$w/repo"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving ${tree_paths[*]} at $tree_rev failed"; return; }
-  STRIH_LX_PREP_HOSTNAME="$(strih_lx_tree_check "$w/repo" strih-snv)" \
-    || { _strih_lx_fail tree 1 3 "the provisioning tree at $tree_rev is incomplete (above)"; return; }
-  strih_lx_setup_runner "$STRIH_LX_PREP_STAGE" strih-snv > "$w/repo/run-setup.sh" || { _strih_lx_fail tree 1 3 "cannot write run-setup.sh"; return; }
+  for b in "${box_list[@]}"; do
+    STRIH_LX_BOX="$b"
+    STRIH_LX_BOX_HOSTNAME[$b]="$(strih_lx_tree_check "$w/repo" "$b")" \
+      || { _strih_lx_fail tree 1 3 "the provisioning tree at $tree_rev is incomplete (above)"; return; }
+    # one runner per box (it runs `setup-strih.sh --box <box>`); apply copies it to repo/run-setup.sh.
+    strih_lx_setup_runner "$STRIH_LX_PREP_STAGE" "$b" > "$w/run-setup.$b.sh" || { _strih_lx_fail tree 1 3 "cannot write run-setup.sh"; return; }
+  done
+  STRIH_LX_BOX="$boxes"
   STRIH_LX_PREP_TOKEN="${STRIH_LX_GH_TOKEN:-}"
   [ -n "$STRIH_LX_PREP_TOKEN" ] || STRIH_LX_PREP_TOKEN="$(gh auth token 2>/dev/null)" || STRIH_LX_PREP_TOKEN=""
   [ -n "$STRIH_LX_PREP_TOKEN" ] || { _strih_lx_fail tree 1 3 "no GH token (STRIH_LX_GH_TOKEN / gh auth token) -- setup-strih.sh needs GH_TOKEN for the bundle-state + bkshading fetch"; return; }
-  echo "# strih-snv: provisioning tree = the committed ${tree_paths[*]} at $tree_rev; target ${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$STRIH_LX_PREP_STAGE"
+  for b in "${box_list[@]}"; do
+    echo "# ${b}: provisioning tree = the committed ${tree_paths[*]} at $tree_rev; target ${STRIH_LX_PREP_USER}@${STRIH_LX_BOX_HOST[$b]}:$STRIH_LX_PREP_STAGE"
+  done
 }
 
-# strih_lx_apply SHA -> the box steps, after strih_lx_prepare (and every other box's resolution)
-# succeeded. 0 only after the fail-closed read-back passed; 4 with a named step otherwise.
+# strih_lx_apply SHA [BOX] -> the box steps for BOX (default strih-snv; issue 1426: any box
+# strih_lx_prepare resolved), after strih_lx_prepare (and every other box's resolution) succeeded.
+# 0 only after the fail-closed read-back passed; 4 with a named step otherwise; 5 = installed and read
+# back, acceptance not clear; 6 = AWAY: a `traveling` box whose ssh does not connect (rc 255, or the
+# 124 bound) is skipped with one AWAY line, nothing changed -- never a failure (its venue is off).
 strih_lx_apply() {
-  local sha="$1" w="$STRIH_LX_PREP_WORK" stage="$STRIH_LX_PREP_STAGE" rc out line
+  local sha="$1" box="${2:-strih-snv}" w="$STRIH_LX_PREP_WORK" stage="$STRIH_LX_PREP_STAGE" rc out line
+  STRIH_LX_BOX="$box"
+  STRIH_LX_PREP_HOST="${STRIH_LX_BOX_HOST[$box]:-}"
+  STRIH_LX_PREP_HOSTNAME="${STRIH_LX_BOX_HOSTNAME[$box]:-}"
+  local guard="${STRIH_LX_BOX_GUARD[$box]:-}"
+  STRIH_LX_PREP_GUARD_STRIH="${guard%% *}"
+  STRIH_LX_PREP_STREAM_HOST="${guard#* }"
+  [ -n "$STRIH_LX_PREP_HOST" ] && [ -n "$STRIH_LX_PREP_HOSTNAME" ] && [ -n "$guard" ] \
+    || { _strih_lx_fail preflight 2 4 "${box} was not resolved by strih_lx_prepare -- nothing changed"; return; }
+  cp -f "$w/run-setup.$box.sh" "$w/repo/run-setup.sh" \
+    || { _strih_lx_fail preflight 1 4 "cannot stage the run-setup.sh of ${box} -- nothing changed"; return; }
 
-  # [preflight] the right box (a dial override must not provision another box as strih-snv) ...
+  # [preflight] the right box (a dial override must not provision another box as ${box}) ...
   out="$(_strih_lx_ssh "$(strih_lx_remote_identity_cmd)")"; rc=$?
+  if [ "$rc" != 0 ] && { [ "$rc" = 255 ] || [ "$rc" = 124 ]; } && [ "$(obs_fleet_home_check "$box" 2>/dev/null)" = traveling ]; then
+    echo "AWAY: [${box}] ${STRIH_LX_PREP_HOST} does not answer over ssh (rc=$rc; a traveling box, its venue is off) -- skipped, nothing changed; deploy it with --boxes ${box} once it is back"
+    return 6
+  fi
   [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "cannot reach ${STRIH_LX_PREP_HOST} over ssh -- nothing changed"; return; }
   out="$(printf '%s' "$out" | tr -d '[:space:]')"
   # issue 1414: a box that still runs the pre-rename hostname of THIS box (exactly the old name in the
   # one transition alias table) IS this box -- setup-strih step 1 renames it from the fact file.
   if [ "$out" != "$STRIH_LX_PREP_HOSTNAME" ] && [ "$out" = "${out,,}" ] \
      && [ "$(_obs_fleet_alias_of "$out")" = "$STRIH_LX_PREP_HOSTNAME" ]; then
-    echo "WARNING: [strih-snv preflight] the box at ${STRIH_LX_PREP_HOST} still runs its pre-rename hostname '${out}' (issue 1414) -- deploying; setup-strih renames it to '${STRIH_LX_PREP_HOSTNAME}'" >&2
+    echo "WARNING: [${box} preflight] the box at ${STRIH_LX_PREP_HOST} still runs its pre-rename hostname '${out}' (issue 1414) -- deploying; setup-strih renames it to '${STRIH_LX_PREP_HOSTNAME}'" >&2
     out="$STRIH_LX_PREP_HOSTNAME"
   fi
-  [ "$out" = "$STRIH_LX_PREP_HOSTNAME" ] || { _strih_lx_fail preflight 1 4 "the box at ${STRIH_LX_PREP_HOST} is '${out:-<none>}', not '${STRIH_LX_PREP_HOSTNAME}' (scripts/strih-boxes/strih-snv.env) -- refusing to provision it as strih-snv; nothing changed"; return; }
+  [ "$out" = "$STRIH_LX_PREP_HOSTNAME" ] || { _strih_lx_fail preflight 1 4 "the box at ${STRIH_LX_PREP_HOST} is '${out:-<none>}', not '${STRIH_LX_PREP_HOSTNAME}' (scripts/strih-boxes/${box}.env) -- refusing to provision it as ${box}; nothing changed"; return; }
   # ... and never race a previous install (the sweep would delete the stage it is reading).
   out="$(_strih_lx_ssh "$(strih_lx_remote_installer_cmd)")"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "cannot reach ${STRIH_LX_PREP_HOST} over ssh -- nothing changed"; return; }
@@ -486,7 +625,7 @@ strih_lx_apply() {
   out="$(_strih_lx_ssh "$(strih_lx_remote_stage_check_cmd "$stage")")"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail sweep "$rc" 4 "$stage is not intact after the sweep -- refusing to continue"; return; }
   while IFS= read -r line; do
-    case "$line" in LEFTOVER\ *) echo "WARNING: [strih-snv sweep] could not remove ${line#LEFTOVER } -- it still counts against the /tmp quota" >&2 ;; esac
+    case "$line" in LEFTOVER\ *) echo "WARNING: [${box} sweep] could not remove ${line#LEFTOVER } -- it still counts against the /tmp quota" >&2 ;; esac
   done <<< "$out"
 
   # [stage] every byte on the box BEFORE anything is stopped.
@@ -494,7 +633,7 @@ strih_lx_apply() {
   [ "$rc" = 0 ] || { _strih_lx_fail stage "$rc" 4 "rsync of the bundle to $stage/bundle failed (rc 11/23 = the /tmp quota) -- OBS NOT stopped, the old build keeps running"; return; }
   _strih_lx_rsync "$w/repo/" "$stage/repo/"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail stage "$rc" 4 "rsync of the provisioning tree to $stage/repo failed -- OBS NOT stopped, the old build keeps running"; return; }
-  echo "# strih-snv: staged $stage/{bundle,repo}"
+  echo "# ${box}: staged $stage/{bundle,repo}"
 
   # [stop] the guard again first: staging can take minutes, and one early check is not enough
   # (.claude/rules/rig-mutation-broadcast-guard.md). Then delegated to the sanctioned stop code.
@@ -507,7 +646,6 @@ strih_lx_apply() {
 
   # [setup] detached as root; the token rides the launch's stdin only.
   _strih_lx_ssh "$(strih_lx_remote_setup_launch_cmd "$stage")" < <(printf '%s\n' "$STRIH_LX_PREP_PW"; printf 'ghtoken:%s\n' "$STRIH_LX_PREP_TOKEN"); rc=$?
-  STRIH_LX_PREP_TOKEN=""
   if [ "$rc" != 0 ]; then
     # The preflight saw no installer, so one running now is THIS deploy's (the ssh dropped after the
     # detach -- exactly what the detach is for): follow it through the rc poll below.
@@ -518,7 +656,7 @@ strih_lx_apply() {
       unreachable)
         _strih_lx_fail setup "$rc" 4 "the launch ssh returned rc=$rc and the box is unreachable -- the installer state is unknown; NOT starting OBS: check $stage/setup-strih.rc once the box answers"; return ;;
     esac
-    echo "WARNING: [strih-snv setup] the launch ssh returned rc=$rc but setup-strih.sh is running -- following it through the rc poll" >&2
+    echo "WARNING: [${box} setup] the launch ssh returned rc=$rc but setup-strih.sh is running -- following it through the rc poll" >&2
   fi
   local polls="${STRIH_LX_SETUP_POLLS:-270}" secs="${STRIH_LX_SETUP_POLL_SECS:-10}" i=0 src=""
   while [ "$i" -lt "$polls" ]; do
@@ -530,7 +668,7 @@ strih_lx_apply() {
     if [ "$(_strih_lx_installer_state)" != idle ]; then
       _strih_lx_fail setup 124 4 "setup-strih.sh wrote no rc after $polls polls x ${secs} s and is still running (or the box is unreachable) -- NOT starting OBS over it; wait for $stage/setup-strih.rc"; return
     fi
-    echo "# strih-snv: setup-strih.log tail:"; _strih_lx_ssh "$(strih_lx_remote_setup_log_cmd "$stage")" || true
+    echo "# ${box}: setup-strih.log tail:"; _strih_lx_ssh "$(strih_lx_remote_setup_log_cmd "$stage")" || true
     _strih_lx_start_best_effort
     _strih_lx_fail setup 124 4 "setup-strih.sh wrote no rc and is no longer running (killed?)"; return
   fi
@@ -541,22 +679,22 @@ strih_lx_apply() {
       # every install step passed; only step 17's verify-strih.sh failed because OBS is stopped by
       # this deploy -- the real acceptance gate runs below, once OBS is up and read back.
       accept=1; src=0
-      echo "# strih-snv: setup-strih.sh installed everything; its own final gate ran with OBS stopped -- the acceptance gate runs after the start"
+      echo "# ${box}: setup-strih.sh installed everything; its own final gate ran with OBS stopped -- the acceptance gate runs after the start"
     fi
   fi
   if [ "$src" != 0 ]; then
-    echo "# strih-snv: setup-strih.log tail:"; _strih_lx_ssh "$(strih_lx_remote_setup_log_cmd "$stage")" || true
+    echo "# ${box}: setup-strih.log tail:"; _strih_lx_ssh "$(strih_lx_remote_setup_log_cmd "$stage")" || true
     _strih_lx_start_best_effort
     _strih_lx_fail setup "$src" 4 "setup-strih.sh exited rc=$src (log above, $stage/setup-strih.log) -- the deploy is FAILED"; return
   fi
-  echo "# strih-snv: setup-strih.sh done"
+  echo "# ${box}: setup-strih.sh done"
   out="$(_strih_lx_ssh "$(strih_lx_remote_setup_notes_cmd "$stage")" 2>/dev/null)" || out=""
   while IFS= read -r line; do
-    [ -n "$line" ] && echo "# strih-snv: NOTE from setup-strih.sh: $line"
+    [ -n "$line" ] && echo "# ${box}: NOTE from setup-strih.sh: $line"
   done <<< "$out"
 
   # [start]
-  _strih_lx_ssh "$(strih_lx_remote_start_cmd "$stage")"; rc=$?
+  _strih_lx_ssh "$(strih_lx_remote_start_cmd "$stage" "$box")"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail start "$rc" 4 "systemctl --user start strih-obs.service failed"; return; }
 
   _strih_lx_verify "$sha" || return
@@ -564,14 +702,44 @@ strih_lx_apply() {
     # [accept] the acceptance gate setup-strih.sh could not run meaningfully with OBS stopped. A
     # failure here is exit 5, NOT 4: the new build is installed, running and read back; only the
     # whole-box gate (which also grades things the deploy cannot change) is not clear.
-    out="$(_strih_lx_ssh "$(strih_lx_remote_accept_cmd "$stage" strih-snv)" < <(printf '%s\n' "$STRIH_LX_PREP_PW"))"; rc=$?
+    out="$(_strih_lx_ssh "$(strih_lx_remote_accept_cmd "$stage" "$box")" < <(printf '%s\n' "$STRIH_LX_PREP_PW"))"; rc=$?
     printf '%s\n' "$out"
     if [ "$rc" != 0 ]; then
-      _strih_lx_fail accept "$rc" 5 "the new build is installed + running (read back), but verify-strih.sh --box strih-snv did not pass: $(printf '%s\n' "$out" | grep -F 'FAIL' | sed 's/\x1b\[[0-9;]*m//g; s/^[[:space:]]*//' | tr '\n' ';')"
+      _strih_lx_fail accept "$rc" 5 "the new build is installed + running (read back), but verify-strih.sh --box ${box} did not pass: $(printf '%s\n' "$out" | grep -F 'FAIL' | sed 's/\x1b\[[0-9;]*m//g; s/^[[:space:]]*//' | tr '\n' ';')"
       return
     fi
-    echo "# strih-snv: acceptance gate (verify-strih.sh --box strih-snv) passed"
+    echo "# ${box}: acceptance gate (verify-strih.sh --box ${box}) passed"
   fi
+}
+
+# strih_lx_apply_all SHA LX_BOXES OTHER_BOXES RUN MODE LOG -> strih_lx_apply for each setup-strih box of
+# the comma list LX_BOXES, in order (issue 1426), the fleet-log line of each written the moment it is
+# known (deploy-genlock-fleet.sh's fleet_log_line): VERIFIED = `<box>`, acceptance not clear =
+# `<box>:accept-failed`, AWAY = no line. A failed acceptance stops only that box (the next box still
+# deploys) and the call returns 5 naming it, with OTHER_BOXES (the Windows / imag boxes the planner would
+# do next) WITHHELD; an AWAY box never fails the run; any other failure returns at once (4). The GH
+# token is cleared once every box has launched its setup.
+strih_lx_apply_all() {
+  local sha="$1" lx="$2" others="$3" run="$4" mode="$5" log="$6" b rc accept_failed="" away=""
+  local -a list
+  IFS=',' read -r -a list <<< "$lx"
+  mkdir -p "$(dirname "$log")"
+  for b in "${list[@]}"; do
+    rc=0
+    strih_lx_apply "$sha" "$b" || rc=$?
+    case "$rc" in
+      0) fleet_log_line "$run" "$sha" "$b" "$mode" >> "$log" ;;   # logged at once, a later failure never hides it
+      5) fleet_log_line "$run" "$sha" "$b:accept-failed" "$mode" >> "$log"; accept_failed="${accept_failed:+$accept_failed,}$b" ;;
+      6) away="${away:+$away,}$b" ;;
+      *) STRIH_LX_PREP_TOKEN=""; return "$rc" ;;
+    esac
+  done
+  STRIH_LX_PREP_TOKEN=""
+  [ -z "$away" ] || echo "# AWAY (skipped, nothing changed): ${away} -- deploy at $sha with --boxes ${away} once back"
+  [ -n "$accept_failed" ] || return 0
+  [ -z "$others" ] || echo "NOTE: the other boxes (${others}) were WITHHELD -- deploy them at $sha once the acceptance items are understood, or the fleet stays on two builds" >&2
+  [ "$accept_failed" = "$lx" ] || echo "NOTE: the acceptance gate is not clear on ${accept_failed} (installed + running)" >&2
+  return 5
 }
 
 # [verify] fail-closed: every field must pass, and the SAME non-zero MainPID + NRestarts must hold from
@@ -597,7 +765,7 @@ _strih_lx_verify() {
     if [ "$have_first" = 1 ]; then
       if verdict="$(strih_lx_stable_verdict "$first_pid" "$first_r" "$pid" "$restarts")"; then
         if [ $((SECONDS - first_t)) -ge "$settle" ]; then
-          echo "# strih-snv: VERIFIED -- marker + libobs bytes = $sha, strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED, :8899=$bs"
+          echo "# ${STRIH_LX_BOX}: VERIFIED -- marker + libobs bytes = $sha, strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED, :8899=$bs"
           return 0
         fi
         verdict="FAIL: MainPID $pid stable for $((SECONDS - first_t)) s only (settle ${settle} s)"
@@ -613,19 +781,27 @@ _strih_lx_verify() {
 
 # --- plan arm -------------------------------------------------------------------------------------
 
-# strih_lx_plan_steps LOCAL_STAGE SHA HOST RUN_ID -> the strih-snv part of `--plan`: the SAME remote
-# commands the execute arm runs (built by the builders above), every line a #-comment so a saved
-# whole-plan .ps1 still parses (the issue-1295 file-mode rule). Pure.
+# strih_lx_plan_steps LOCAL_STAGE SHA HOST RUN_ID [BOX] -> the BOX part of `--plan` (default strih-snv;
+# issue 1426: any setup-strih box, e.g. strih-pp at strih-pp.lan): the SAME remote commands the execute
+# arm runs (built by the builders above), every line a #-comment so a saved whole-plan .ps1 still parses
+# (the issue-1295 file-mode rule). A traveling box's plan states the AWAY skip. Pure.
 strih_lx_plan_steps() {
-  local lstage="$1" sha="$2" host="$3" run="$4" stage art u="${STRIH_LX_USER:-newlevel}"
+  local lstage="$1" sha="$2" host="$3" run="$4" box="${5:-strih-snv}" stage art guard gstrih away=""
+  local u="${STRIH_LX_USER:-newlevel}"
   stage="$(strih_lx_stage_dir "$sha")" || return 2
-  art="$(fleet_linux_bundle_artifact_for strih-snv)"
+  art="$(fleet_linux_bundle_artifact_for "$box")"
+  guard="$(strih_lx_guard_hosts "$box" "$host")" || { echo "strih_lx_plan_steps: no venue strih/stream host for ${box} (fact file STRIH_VENUE / obs-fleet rows)" >&2; return 2; }
+  gstrih="${guard%% *}"
+  if [ "$(obs_fleet_home_check "$box" 2>/dev/null)" = traveling ]; then
+    away=$'\n'"#   ${box} is a TRAVELING box: when ${host} does not answer over ssh it is reported AWAY and skipped
+#   (nothing changed, the other boxes go on) -- never a failure; deploy it again once it is back."
+  fi
   cat <<PLAN
 # EXECUTE mode runs every step below itself, fail-loud (a failed step exits 4 and names itself; the
 #   old build keeps running until the whole stage is on the box; every requested box is resolved
 #   before any box is changed):
-#     scripts/deploy-genlock-fleet.sh --run-id ${run} --boxes strih-snv
-#   strih-snv always gets the strih FULL build (${art}); --fast is Windows-only.
+#     scripts/deploy-genlock-fleet.sh --run-id ${run} --boxes ${box}
+#   ${box} always gets the strih FULL build (${art}); --fast is Windows-only.${away}
 #   Every ssh below is 'sshpass -p \$PW timeout 180 ssh ${STRIH_LX_SSH_OPTS} ${u}@${host} <cmd>'.
 # STEP 0 (resolve): the linux-genlock.yml run at ${sha}; download its '${art}'
 #          artifact to ${lstage}/bundle -- REFUSED unless its GENLOCK_BUILD_SHA.txt is ${sha} and its
@@ -638,10 +814,10 @@ strih_lx_plan_steps() {
 # STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),
 #          and no previous install may run:  $(strih_lx_remote_installer_cmd)
 #          and no broadcast may be LIVE: the shared rig-busy guard stray_session_check_assert
-#          (scripts/lib/stray-session-check.sh) reads strih ${host} + the obs-fleet stream host --
+#          (scripts/lib/stray-session-check.sh) reads strih ${gstrih} + the obs-fleet stream host --
 #          streaming/recording on either = exit 4, nothing changed (re-checked right before STEP 5).
 # STEP 3 (sweep): the stage is created + touched NEWEST, then the obs-backup-retention.sh
-#          --local-sweep decision (what 'obs-backup-retention.sh --box strih-snv' runs), stage dirs
+#          --local-sweep decision (what 'obs-backup-retention.sh --box ${box}' runs), stage dirs
 #          only, as the operator, keeps only it:
 #            $(strih_lx_remote_prep_cmd "$stage")
 #            $(strih_lx_remote_sweep_cmd)   < scripts/obs-backup-retention.sh (the committed tree)
@@ -651,20 +827,20 @@ strih_lx_plan_steps() {
 #            rsync -a --delete --timeout=120 -e "ssh ${STRIH_LX_SSH_OPTS}" ${lstage}/repo/ ${u}@${host}:${stage}/repo/
 # STEP 5 (stop, delegated to the sanctioned stop code; the deploy sends no kill itself):
 #            $(strih_lx_remote_stop_cmd)
-# STEP 6 (setup, detached on the box): 'setup-strih.sh --box strih-snv' as root with
+# STEP 6 (setup, detached on the box): 'setup-strih.sh --box ${box}' as root with
 #          STRIH_LX_BUNDLE_SRC=${stage}/bundle and GH_TOKEN read from stdin (a 'ghtoken:<token>' line, never argv):
 #            $(strih_lx_remote_setup_launch_cmd "$stage")   < (the sudo password line + ghtoken:<token>)
 #          then poll: $(strih_lx_remote_setup_rc_cmd "$stage")  (0 = done; else the log tail + FAIL;
 #          OBS is never started while setup-strih.sh still runs)
-# STEP 7 (start): $(strih_lx_remote_start_cmd "$stage")
+# STEP 7 (start): $(strih_lx_remote_start_cmd "$stage" "$box")
 # STEP 8 (verify, fail-closed, held for ${STRIH_LX_VERIFY_SETTLE_SECS:-90} s): /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == ${sha},
 #          /usr/lib/x86_64-linux-gnu/libobs.so.30 sha256 == the manifest's, strih-obs.service active with
 #          the SAME MainPID + NRestarts, 'render tick ENABLED' in the OBS log written after the start,
 #          and $(strih_lx_bundle_state_url "$host") genlock_build_sha == ${sha}.
 # STEP 9 (accept): setup-strih.sh's own final gate runs with OBS stopped; when that gate is its ONLY
 #          failure ($(strih_lx_remote_setup_gate_cmd "$stage")), execute runs the gate itself now:
-#            $(strih_lx_remote_accept_cmd "$stage" strih-snv)   < (the sudo password line)
-#          (a reboot-pending run only reports -- run verify-strih.sh --box strih-snv after the reboot).
+#            $(strih_lx_remote_accept_cmd "$stage" "$box")   < (the sudo password line)
+#          (a reboot-pending run only reports -- run verify-strih.sh --box ${box} after the reboot).
 # ACCEPTANCE (supervisor, after a green execute): from dev1
 #          'python3 scripts/obs_burn_filter.py check --host ${host}' (the WS filter-enum survives).
 PLAN

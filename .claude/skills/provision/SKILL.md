@@ -92,7 +92,9 @@ so the `i915` DRM driver force-loads at every boot (headless included) — that 
 DRIVER; on some firmware the DRM connector + framebuffer only bring up cleanly with a display
 present at boot, so as belt-and-braces the FIRST physical boot of such a box should have a monitor
 attached (this is exactly the cam5 headless no-fb0 pain the pin + this note together close). Boxes
-with no capture/display grabber (cam4) are unaffected.
+with no capture/display grabber (cam4) are unaffected. Not on an N150 (`8086:46d4`, cam5/6/7) on
+6.8: i915 loads there but does not bind (its 6.8 id table stops at `46D2`), so there is no `/dev/dri`;
+such a box needs the HWE kernel (issue 1446, Known gotchas below, verify-device `(av)`).
 
 ### Phase 3 — provision (`setup-device.sh`)
 
@@ -175,6 +177,10 @@ It checks (all must pass, exit 0 only if every check is OK):
 | (q) | no stale `.bak`/`.bak-*` cruft under `/usr/lib/ndi` or the systemd drop-in dir | `ls` both dirs over SSH — **WARNING only, never a FAIL** (#453). Inert leftovers (ldconfig/systemd never load a `.bak`) are surfaced as drift but don't fail an otherwise-healthy box; `setup-device.sh`'s `cleanup_bak_cruft` self-heals them on the next provisioning pass |
 | (r) | dantesync is the **SOLE** timesync authority — NO competing daemon | one SSH call gathers, per `systemd-timesyncd`/`chrony`/`ntp`/`ntpsec`/`openntpd`, its `dpkg -s` install state + `systemctl is-active` + `is-enabled` into a `NAME\|DPKG\|ACTIVE\|ENABLED` block; `timesync_authority_verdict()` HARD-FAILs any that is INSTALLED (even masked) / ACTIVE / enabled (#591 — cam5/6 ran `systemd-timesyncd` alongside dantesync → a real 5.28s desync). A minimalist appliance PURGES them (`setup-device.sh` STEP 17 + `create-usb-linux.sh` chroot); masking is only a backstop |
 
+The table stops at (r); the later two-char checks are listed in the script's own header and
+`--help`. One of them matters for new hardware: **(av) display GPU driven (issue 1446)** FAILs a
+box whose PCI display controller has no kernel driver bound (below, Known gotchas).
+
 Every check **except (q)** is a hard FAIL on an unreachable/unreadable signal too (test-strictness —
 no silent pass on "couldn't tell"); **(q) is the sole WARNING-only check** — inert `.bak` cruft is
 drift to surface, not a functional defect, so it never fails the gate.
@@ -191,6 +197,18 @@ hand-patched box. Converging an outlier onto the canonical layout is separate wo
 something `verify-device.sh` should be loosened to tolerate.
 
 ## Known gotchas (found bringing up cam5/cam6 — all fixed IN THE SCRIPTS, never hand-patched)
+
+- **An N150 box (`8086:46d4`: cam5, cam6, cam7) needs the Ubuntu 24.04 HWE kernel for a GPU driver
+  (issue 1446).** The 6.8.0-142 i915 lists only `46D0-46D2`, so on 6.8 the HDMI preview lights only
+  when a monitor was on at power-on, and a monitor plugged in later stays dark. The HWE 6.11
+  lowlatency and 7.0 generic kernels list `46D3`/`46D4`. Install it through the issue-899 STEP 1
+  path (`scripts/rt-kernel-upgrade.sh`, `.claude/rules/realtime-isolation.md`):
+  `linux-lowlatency-hwe-24.04` now resolves to the generic HWE 7.0.0-38 + `lowlatency-kernel`
+  (`preempt=full rcu_nocbs=all`). The install pulls a libc6 upgrade whose deleted-but-mapped old
+  libc keeps the root writable until the next boot, so install right before a planned PHYSICAL
+  power cycle (never a remote reboot of a cambox). verify-device `(av)` is the gate: it FAILs a
+  display controller with no driver, naming the id and the kernel. Check the GPU id of any NEW box
+  model the same way (`lspci -nn | grep -E 'VGA|3D|Display'`, then `modinfo -F alias i915` for that id).
 
 - **A fresh stick that boots once, then lands in the FIRMWARE SETUP screen after a WARM `reboot`, is a
   DETECTION failure, not a stick defect (cam2, 14.9.2026).** The cam boxes boot a stick ONLY through the

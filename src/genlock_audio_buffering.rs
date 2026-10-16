@@ -1,60 +1,62 @@
-//! Issue 1367 — the genlock libobs audio-buffering FLOOR: every OBS launch starts with the SAME
-//! global audio buffering, so the stream `mbc` ASRC level (and with it the audio position against
-//! the video) no longer depends on a startup race.
+//! Issue 1367 — the genlock libobs audio-buffering FLOOR, and since issue 1425 the FREEZE. Since
+//! issue 1425 E2 slice 3 (design 6220191978) the floor is 0.
 //!
 //! ## Why this module exists
 //!
 //! libobs mixes audio in 1024-sample ticks. The mix window runs `buffering` behind real time,
 //! and stock OBS grows `buffering` DYNAMICALLY: it adds ticks only when a source is behind the
-//! window at startup (obs-audio.c `add_audio_buffering`). Whether it grows is a startup race. On the
-//! stream box the release E2E of 27.9.2026 found both outcomes:
+//! window (obs-audio.c `add_audio_buffering`). Whether it grows at launch is a startup race (the
+//! stream box drew 0 ms and 85 ms on 27.9.2026).
 //!
-//! - session `2026-09-27 01-33-25`: `adding 85 milliseconds of audio buffering (source: ASIO Input
-//!   Capture)`; the `mbc` ASRC held its #1355 absolute target all session;
-//! - session `2026-09-27 12-18-15`: NO buffering; `mbc` sat at 27 ms against the 118 ms target,
-//!   the restore pushed −140 ppm for 40 min, then the #1355 fallback re-latched the target at a
-//!   random depth (54.8 ms, 73.5 ms). Every camera read −28 ms on the release A/V gate.
+//! Issue 1367 raised every launch to an 85 ms floor. The reason was the #1355 absolute ASRC level
+//! target (100 ms + the sync offset): a direct-timestamp source (`mbc`) settles at `buffering + base +
+//! sync_offset` (base ≈ 9 ms), and the level servo can bridge only about half of OBS's 70 ms
+//! TS-smoothing threshold, so a launch with no buffering left the target out of reach and its
+//! fallback re-latched at a random depth.
 //!
-//! The depth a direct-timestamp source (`mbc`, ASIO) settles on without any servo correction —
-//! its NATURAL depth — is `buffering + base + sync_offset`. `base` is its own arrival latency
-//! against the mix window plus the mean of the tick sawtooth. It was measured at 8.4 ms and 8.9 ms
-//! in the two sessions above, whose buffering differed by 85 ms. The #1355 absolute target is
-//! `LEVEL_TARGET_MS + sync_offset`, so the sync offset CANCELS: the level servo must bridge
-//! `target − (buffering + base)`, whatever offset the #1333 split / #856 trim writes.
+//! Issue 1425 removed that reason. Since E2 slice 1 a directly stamped mixed source is judged by its
+//! own stamp (setpoint 0), so its A/V no longer depends on the buffering. Since slice 2 the buffering
+//! cannot grow while an audio encoder runs. Slice 3 deleted the absolute target and set the floor to
+//! 0: a launch starts at 0 like stock OBS, its own startup race draws 0–85 ms, and nothing moves it
+//! once an encoder runs.
 //!
-//! The servo cannot bridge an arbitrary gap. It stretches or compresses the source's samples, which
-//! moves the source's smoothed timeline away from its raw timestamps. Once they are
-//! `TS_SMOOTHING_THRESHOLD` (70 ms, obs-source.c) apart, the next packet is re-placed at its raw
-//! stamp and the correction is gone. The threshold is a symmetric `uint64_diff`, so this limits
-//! both directions. Live: at −140 ppm the `mbc` level climbed at most +51…+59 ms and then snapped
-//! back. The band this module holds is therefore HALF that threshold ([`LEVEL_REACH_NS`], ±35 ms).
-//! It has a LOWER and an UPPER edge: too little buffering leaves the target out of reach from
-//! below (the no-buffering session), and too much buffering puts it out of reach from above.
-//!
-//! ## What it decides (ROZHODNUTÉ 5857354949: a deterministic FLOOR, not a hard cap)
+//! ## What it decides (ROZHODNUTÉ 5857354949: a FLOOR, never a hard cap)
 //!
 //! - [`plan`] (at `obs_reset_audio2`): the floor is [`FLOOR_MS`] rounded up to whole ticks exactly
-//!   as OBS rounds its own maximum ([`ticks_for_ms`]). Fixed buffering is never honoured, so the
-//!   frontend low-latency toggle (fixed 20 ms) is OVERRIDDEN and reported. The maximum stays the
-//!   caller's, or OBS's default 45 ticks when it would not sit above the floor.
+//!   as OBS rounds its own maximum ([`ticks_for_ms`]); 0 ticks today. Fixed buffering is never
+//!   honoured, so the frontend low-latency toggle (fixed 20 ms) is OVERRIDDEN and reported. The
+//!   maximum stays the caller's, or OBS's default 45 ticks when it would not sit above the floor.
 //! - [`action`] (every mixer tick): below the floor, raise the buffering to the floor in one tick
-//!   (the first audio tick of every launch); at or above it, OBS's dynamic increase for a late
-//!   source stays active up to the maximum. The resolume cg OBS legitimately grows 128–362 ms on
-//!   media / `NDI test` starts, and a hard cap would drop that late audio on FOH/VBAN.
-//! - [`band_error_ns`] / [`band_ok`]: the gap the servo must bridge, and whether it is inside the
-//!   band. The shipped floor keeps it inside for a base of 0–25 ms at 44.1 and 48 kHz; the libobs
-//!   log names a dynamic increase that leaves it.
+//!   (never at a 0 floor); at or above it, OBS's dynamic increase for a late source stays active up to
+//!   the maximum. The resolume cg OBS legitimately grows 128–362 ms on media / `NDI test` starts, and
+//!   a hard cap would drop that late audio on FOH/VBAN.
+//!
+//! ## Issue 1425 (E2 slice 2, design 6216736061 + ROZHODNUTÉ 6217557472): the FREEZE
+//!
+//! A buffering increase while an encoder runs makes that encoder's audio permanently later
+//! (obs-encoder.c counts audio pts in samples after the output start). On stream-snv the E1 events
+//! grew the mix +85 / +128 / +192 ms (two ASIO outages, a 432 ms mixer stall) while it streamed,
+//! each an audio-after-picture step on every live output until a restart. So while an encoder runs
+//! the dynamic increase is OFF:
+//!
+//! - [`frozen`]: frozen while an output with an audio encoder is active, and only then. With no
+//!   encoder a growth moves no live output's A/V, so such a box (the resolume cg OBS) keeps stock
+//!   growth.
+//! - [`action`] takes it: a frozen mix never grows dynamically. The floor is never frozen.
+//! - A mixed source that falls behind a frozen mix is re-anchored instead (obs-genlock-mix-guard.h
+//!   `MIXED_LATE`, pinned by the issue-1381 lift): one counted dropout of its late span on that
+//!   source. Nothing ever steps down mid-run; the buffering starts over at the next launch.
 //!
 //! The C twin is `vendor/obs-studio/libobs/obs-genlock-audio-buffering.h` (stdint/stdbool only).
 //! `tests/genlock_audio_buffering_parity_1367.rs` compiles it as-is, requires byte-identical results,
-//! and lifts the C defines the invariant depends on.
+//! and lifts the C defines.
 //!
 //! Pure `std`, no `crate::` imports — standalone-rustc Tier-0 testable.
 
-/// The genlock audio-buffering floor, ms, before tick rounding: 4 ticks = 85.33 ms at 48 kHz,
-/// 92.88 ms at 44.1 kHz. It is the live-proven `01-33-25` configuration: the `mbc` absolute target
-/// held for 10 h, through four trims, with 0 fallbacks.
-pub const FLOOR_MS: u32 = 85;
+/// The genlock audio-buffering floor, ms, before tick rounding. 0 since issue 1425 E2 slice 3: it was
+/// 85 (4 ticks = 85.33 ms at 48 kHz) only so the retired #1355 absolute ASRC level target stayed in
+/// reach.
+pub const FLOOR_MS: u32 = 0;
 
 /// OBS's own maximum when the caller asks for none (`obs_reset_audio2`: 45 ticks = 960 ms at
 /// 48 kHz). It is also the maximum when the request is overridden.
@@ -62,22 +64,6 @@ pub const DEFAULT_MAX_TICKS: u32 = 45;
 
 /// libobs `AUDIO_OUTPUT_FRAMES` (media-io/audio-io.h): the samples per mixer tick.
 pub const AUDIO_OUTPUT_FRAMES: u32 = 1024;
-
-/// obs-source.c `TS_SMOOTHING_THRESHOLD`, ns: the timeline distance at which a packet is re-placed
-/// at its raw stamp, which discards whatever the level servo stretched or compressed.
-pub const TS_SMOOTHING_THRESHOLD_NS: i64 = 70_000_000;
-
-/// How far from the natural depth the absolute level target may sit, ns: half of
-/// [`TS_SMOOTHING_THRESHOLD_NS`], so the servo never works near the re-placement edge.
-pub const LEVEL_REACH_NS: i64 = TS_SMOOTHING_THRESHOLD_NS / 2;
-
-/// The `mbc` base, ns: its offset-free depth at zero buffering. Measured at 8.4 ms (`01-33-25`,
-/// 85.33 ms buffering) and 8.9 ms (`12-18-15`, none). Used for the libobs log note only.
-pub const LEVEL_BASE_NOMINAL_NS: u64 = 9_000_000;
-
-/// The base range the band invariant is proven over, ns: 0 up to the ~25 ms transport base a
-/// genlock source shows (asrc-compensator.h).
-pub const LEVEL_BASE_MAX_NS: u64 = 25_000_000;
 
 /// What [`plan`] decides at `obs_reset_audio2`. Mirror of the C
 /// `struct genlock_audio_buffering_plan` (built by `genlock_audio_buffering_make_plan`).
@@ -133,7 +119,21 @@ pub fn ticks_ns(ticks: u32, frames: u32, rate: u32) -> u64 {
 /// The buffering plan for a reset request: the floor, the dynamic maximum, and whether the
 /// request was overridden. `req_max_ms == 0` means "OBS default" ([`DEFAULT_MAX_TICKS`]).
 pub fn plan(req_max_ms: u32, req_fixed: bool, rate: u32, frames: u32) -> BufferingPlan {
-    let floor_ticks = ticks_for_ms(FLOOR_MS, rate, frames);
+    plan_with_floor(FLOOR_MS, req_max_ms, req_fixed, rate, frames)
+}
+
+/// [`plan`] for a given floor. The shipped floor is 0 (issue 1425 slice 3), where the override of
+/// a request below the floor and the lift of the maximum to the floor never act; this keeps both
+/// rules of `genlock_audio_buffering_make_plan` testable (the C lift drives them with a 4-tick
+/// floor set by hand).
+pub fn plan_with_floor(
+    floor_ms: u32,
+    req_max_ms: u32,
+    req_fixed: bool,
+    rate: u32,
+    frames: u32,
+) -> BufferingPlan {
+    let floor_ticks = ticks_for_ms(floor_ms, rate, frames);
     let req_ticks = if req_max_ms != 0 {
         ticks_for_ms(req_max_ms, rate, frames)
     } else {
@@ -155,89 +155,62 @@ pub fn plan(req_max_ms: u32, req_fixed: bool, rate: u32, frames: u32) -> Bufferi
 
 /// The floor-then-dynamic rule for one mixer tick. `source_behind` is obs-audio.c's
 /// `min_ts < ts.start` (a source's audio lies before the mix window). At the maximum nothing is
-/// added (`audio_buffering_maxed`); below the floor the floor is raised first.
+/// added (`audio_buffering_maxed`); below the floor the floor is raised first. `frozen` is this
+/// tick's [`frozen`] decision (issue 1425): a frozen mix never grows dynamically, the floor still
+/// rises.
 pub fn action(
     total_ticks: i32,
     floor_ticks: i32,
     max_ticks: i32,
     source_behind: bool,
+    frozen: bool,
 ) -> BufferingAction {
     if total_ticks >= max_ticks {
         BufferingAction::None
     } else if total_ticks < floor_ticks {
         BufferingAction::Floor
-    } else if source_behind {
+    } else if source_behind && !frozen {
         BufferingAction::Dynamic
     } else {
         BufferingAction::None
     }
 }
 
-/// The gap the level servo must bridge, ns: the absolute level target minus the natural depth
-/// `buffering + base`. The sync offset is not an input — it moves both sides by the same amount
-/// (see [`level_gap_ns`]). Positive = the servo must stretch (depth below target). Wrapping two's
-/// complement, like the C.
-pub fn band_error_ns(buffering_ns: u64, base_ns: u64, target_ns: i64) -> i64 {
-    (target_ns as u64).wrapping_sub(buffering_ns.wrapping_add(base_ns)) as i64
+/// Issue 1425 slice 3 (ROZHODNUTÉ 6221252305): the launch settle window, ns of mix time after the
+/// mix's first audio tick, during which a running encoder does not freeze the buffering (the
+/// startup race draws it). Mirror of `GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS`.
+pub const LAUNCH_SETTLE_NS: u64 = 30_000_000_000;
+
+/// Whether the launch's startup race is over: at least [`LAUNCH_SETTLE_NS`] since the mix's first
+/// audio tick (`first_tick_ns`, 0 = no tick yet). Both are `audio_callback`'s INPUT tick start, which
+/// only advances. An instant before the first tick reads NOT settled: the window keeps the mix
+/// unfrozen, never mutes a member. Mirror of `genlock_audio_buffering_launch_settled`.
+pub fn launch_settled(first_tick_ns: u64, now_ns: u64) -> bool {
+    if first_tick_ns == 0 {
+        return false;
+    }
+    now_ns >= first_tick_ns && now_ns - first_tick_ns >= LAUNCH_SETTLE_NS
 }
 
-/// Whether the gap is inside the band the level servo can hold (±[`LEVEL_REACH_NS`]).
-pub fn band_ok(error_ns: i64) -> bool {
-    (-LEVEL_REACH_NS..=LEVEL_REACH_NS).contains(&error_ns)
-}
-
-/// The natural depth of a direct-timestamp source at a sync offset, ns: `buffering + base +
-/// sync_offset`. The placement adds the offset before the samples enter the buffer
-/// (obs-source.c `in.timestamp += sync_offset`). Live, a −4 → −18 ms trim moved `mbc` 96.8 → 81.1
-/// ms, and the `01-33-25` trims 41 → 18 ms moved the level with its target.
-pub fn natural_depth_ns(buffering_ns: u64, base_ns: u64, sync_offset_ns: i64) -> i64 {
-    (buffering_ns.wrapping_add(base_ns) as i64).wrapping_add(sync_offset_ns)
-}
-
-/// The #1355 absolute level target at a sync offset, ns: `target + sync_offset`
-/// (`asrc_compensator_set_level_offset_ms(last_sync_offset)`).
-pub fn absolute_target_ns(target_ns: i64, sync_offset_ns: i64) -> i64 {
-    target_ns.wrapping_add(sync_offset_ns)
-}
-
-/// The gap at a given sync offset: [`absolute_target_ns`] − [`natural_depth_ns`]. It equals
-/// [`band_error_ns`] for every offset — this is the cancellation the band relies on.
-pub fn level_gap_ns(buffering_ns: u64, base_ns: u64, target_ns: i64, sync_offset_ns: i64) -> i64 {
-    absolute_target_ns(target_ns, sync_offset_ns).wrapping_sub(natural_depth_ns(
-        buffering_ns,
-        base_ns,
-        sync_offset_ns,
-    ))
-}
-
-/// Whether a floor of `floor_ticks` keeps `target_ns` inside the band for EVERY base in
-/// `0..=`[`LEVEL_BASE_MAX_NS`] at `rate`. The two band edges are the extreme bases, since the gap
-/// is linear in the base.
-pub fn floor_holds_band(floor_ticks: u32, rate: u32, frames: u32, target_ns: i64) -> bool {
-    let buffering = ticks_ns(floor_ticks, frames, rate);
-    band_ok(band_error_ns(buffering, 0, target_ns))
-        && band_ok(band_error_ns(buffering, LEVEL_BASE_MAX_NS, target_ns))
+/// Issue 1425 (ROZHODNUTÉ 6217557472 + 6221252305): whether the mix's buffering is frozen on this
+/// tick — an output with an audio encoder is active AND the launch has settled. Nothing else
+/// freezes it.
+pub fn frozen(encoder_active: bool, settled: bool) -> bool {
+    encoder_active && settled
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The #1355 absolute level target (asrc_bench LEVEL_TARGET_MS = 100.0), ns. The integration
-    /// gate lifts the shipped C value and holds the invariant on THAT; this copy only drives the
-    /// unit tests.
-    const TARGET_NS: i64 = 100_000_000;
-    const RATES: [u32; 2] = [44_100, 48_000];
-    const MS: u64 = 1_000_000;
-
     #[test]
     fn ticks_round_up_like_obs_reset_audio2() {
         // OBS's own max: 960 ms at 48 kHz is exactly 45 ticks; the low-latency 20 ms is 1 tick.
         assert_eq!(ticks_for_ms(960, 48_000, AUDIO_OUTPUT_FRAMES), 45);
         assert_eq!(ticks_for_ms(20, 48_000, AUDIO_OUTPUT_FRAMES), 1);
-        // The floor: 4 ticks at both production rates.
-        assert_eq!(ticks_for_ms(FLOOR_MS, 48_000, AUDIO_OUTPUT_FRAMES), 4);
-        assert_eq!(ticks_for_ms(FLOOR_MS, 44_100, AUDIO_OUTPUT_FRAMES), 4);
+        // 85 ms (the issue-1367 floor) is 4 ticks at both production rates.
+        assert_eq!(ticks_for_ms(85, 48_000, AUDIO_OUTPUT_FRAMES), 4);
+        assert_eq!(ticks_for_ms(85, 44_100, AUDIO_OUTPUT_FRAMES), 4);
         assert_eq!(ticks_ns(4, AUDIO_OUTPUT_FRAMES, 48_000), 85_333_333);
         assert_eq!(ticks_ns(4, AUDIO_OUTPUT_FRAMES, 44_100), 92_879_818);
         // An exact multiple does not round up; one sample over does.
@@ -248,21 +221,33 @@ mod tests {
     }
 
     #[test]
+    fn the_floor_is_zero_ticks_at_both_rates_1425() {
+        // Issue 1425 E2 slice 3: no floor. A launch starts at 0 like stock OBS.
+        assert_eq!(FLOOR_MS, 0);
+        for rate in [44_100, 48_000] {
+            assert_eq!(ticks_for_ms(FLOOR_MS, rate, AUDIO_OUTPUT_FRAMES), 0);
+            assert_eq!(plan(0, false, rate, AUDIO_OUTPUT_FRAMES).floor_ticks, 0);
+        }
+    }
+
+    #[test]
     fn plan_starts_every_launch_at_the_floor_and_keeps_the_dynamic_maximum() {
         // The frontend's normal request: no maximum, not fixed.
         let p = plan(0, false, 48_000, AUDIO_OUTPUT_FRAMES);
         assert_eq!(
             p,
             BufferingPlan {
-                floor_ticks: 4,
+                floor_ticks: 0,
                 max_ticks: DEFAULT_MAX_TICKS,
                 fixed: false,
                 overridden: false
             }
         );
-        // An explicit maximum above the floor is kept.
+        // An explicit maximum is kept, whatever its size.
         let p = plan(500, false, 48_000, AUDIO_OUTPUT_FRAMES);
-        assert_eq!((p.floor_ticks, p.max_ticks, p.overridden), (4, 24, false));
+        assert_eq!((p.floor_ticks, p.max_ticks, p.overridden), (0, 24, false));
+        let p = plan(50, false, 48_000, AUDIO_OUTPUT_FRAMES);
+        assert_eq!((p.floor_ticks, p.max_ticks, p.overridden), (0, 3, false));
     }
 
     #[test]
@@ -270,159 +255,121 @@ mod tests {
         // OBSBasic::ResetAudio's LowLatencyAudioBuffering: fixed 20 ms.
         let p = plan(20, true, 48_000, AUDIO_OUTPUT_FRAMES);
         assert!(p.overridden && !p.fixed);
-        assert_eq!((p.floor_ticks, p.max_ticks), (4, DEFAULT_MAX_TICKS));
-        // A fixed request at any size is still dynamic above the floor.
+        assert_eq!((p.floor_ticks, p.max_ticks), (0, DEFAULT_MAX_TICKS));
+        // A fixed request at any size is still dynamic.
         let p = plan(500, true, 48_000, AUDIO_OUTPUT_FRAMES);
         assert!(p.overridden && !p.fixed);
         assert_eq!(p.max_ticks, DEFAULT_MAX_TICKS);
-        // A maximum below the floor would be a hard cap at (or under) the floor: overridden.
-        let p = plan(50, false, 48_000, AUDIO_OUTPUT_FRAMES);
-        assert!(p.overridden);
-        assert_eq!(p.max_ticks, DEFAULT_MAX_TICKS);
-        // A maximum exactly at the floor is allowed (the floor ticks are reachable).
-        let p = plan(FLOOR_MS, false, 48_000, AUDIO_OUTPUT_FRAMES);
+        // With no floor, a small dynamic maximum is a maximum, not an override.
+        let p = plan(1, false, 48_000, AUDIO_OUTPUT_FRAMES);
         assert!(!p.overridden);
-        assert_eq!(p.max_ticks, 4);
+        assert_eq!(p.max_ticks, 1);
     }
 
     #[test]
     fn the_maximum_never_sits_below_the_floor() {
-        // A rate so high that the floor exceeds OBS's default 45 ticks: the maximum follows it.
-        let p = plan(0, false, 768_000, AUDIO_OUTPUT_FRAMES);
-        assert!(p.floor_ticks > DEFAULT_MAX_TICKS);
-        assert_eq!(p.max_ticks, p.floor_ticks);
-        // No rate: no floor, OBS default maximum.
-        let p = plan(0, false, 0, AUDIO_OUTPUT_FRAMES);
-        assert_eq!((p.floor_ticks, p.max_ticks), (0, DEFAULT_MAX_TICKS));
+        // The shipped floor 0: no rate or any rate keeps the OBS default maximum.
+        for rate in [0, 48_000, 768_000] {
+            let p = plan(0, false, rate, AUDIO_OUTPUT_FRAMES);
+            assert_eq!((p.floor_ticks, p.max_ticks), (0, DEFAULT_MAX_TICKS));
+        }
+        // A non-zero floor (the issue-1367 85 ms): a request below it is overridden to the
+        // default maximum, and at a rate where the floor is more ticks than the default maximum the
+        // default itself sits below it (overridden) and is lifted to the floor (85 ms at 768 kHz =
+        // 64 ticks).
+        let p = plan_with_floor(85, 50, false, 48_000, AUDIO_OUTPUT_FRAMES);
+        assert_eq!(
+            (p.floor_ticks, p.max_ticks, p.overridden),
+            (4, DEFAULT_MAX_TICKS, true)
+        );
+        let p = plan_with_floor(85, 0, false, 768_000, AUDIO_OUTPUT_FRAMES);
+        assert_eq!((p.floor_ticks, p.max_ticks, p.overridden), (64, 64, true));
+        // plan() is plan_with_floor(FLOOR_MS, ..).
+        for (max, fixed) in [(0, false), (20, true), (500, false)] {
+            assert_eq!(
+                plan(max, fixed, 44_100, AUDIO_OUTPUT_FRAMES),
+                plan_with_floor(FLOOR_MS, max, fixed, 44_100, AUDIO_OUTPUT_FRAMES)
+            );
+        }
     }
 
     #[test]
-    fn the_first_tick_raises_the_floor_then_obs_grows_dynamically_above_it() {
+    fn the_first_tick_raises_a_floor_then_obs_grows_dynamically_above_it() {
         use BufferingAction::*;
-        // First tick of a launch: the floor, whether or not a source is behind.
-        assert_eq!(action(0, 4, 45, false), Floor);
-        assert_eq!(action(0, 4, 45, true), Floor);
-        // Partial (never happens in one pass, but the rule is "below the floor -> floor").
-        assert_eq!(action(3, 4, 45, true), Floor);
-        // At the floor: nothing unless a source is behind the window.
-        assert_eq!(action(4, 4, 45, false), None);
-        assert_eq!(action(4, 4, 45, true), Dynamic);
-        // Above the floor the dynamic increase stays active up to the maximum.
-        assert_eq!(action(17, 4, 45, true), Dynamic);
-        assert_eq!(action(44, 4, 45, true), Dynamic);
-        assert_eq!(action(45, 4, 45, true), None);
-        assert_eq!(action(46, 4, 45, true), None);
-        // A maximum at the floor: the floor is reached, then nothing grows.
-        assert_eq!(action(0, 4, 4, true), Floor);
-        assert_eq!(action(4, 4, 4, true), None);
-        // No floor (no rate): stock dynamic behaviour.
-        assert_eq!(action(0, 0, 45, true), Dynamic);
-        assert_eq!(action(0, 0, 45, false), None);
+        // The rule, on a 4-tick floor (the issue-1367 shape the action still implements).
+        assert_eq!(action(0, 4, 45, false, false), Floor);
+        assert_eq!(action(0, 4, 45, true, false), Floor);
+        assert_eq!(action(3, 4, 45, true, false), Floor);
+        assert_eq!(action(4, 4, 45, false, false), None);
+        assert_eq!(action(4, 4, 45, true, false), Dynamic);
+        assert_eq!(action(17, 4, 45, true, false), Dynamic);
+        assert_eq!(action(44, 4, 45, true, false), Dynamic);
+        assert_eq!(action(45, 4, 45, true, false), None);
+        assert_eq!(action(46, 4, 45, true, false), None);
+        assert_eq!(action(0, 4, 4, true, false), Floor);
+        assert_eq!(action(4, 4, 4, true, false), None);
+        // The shipped 0 floor: stock dynamic behaviour from the first tick.
+        assert_eq!(action(0, 0, 45, true, false), Dynamic);
+        assert_eq!(action(0, 0, 45, false, false), None);
+        assert_eq!(action(1, 0, 45, true, false), Dynamic);
     }
 
     #[test]
-    fn the_shipped_floor_holds_the_band_for_every_base_at_both_rates() {
-        for rate in RATES {
-            let floor = plan(0, false, rate, AUDIO_OUTPUT_FRAMES).floor_ticks;
-            assert!(
-                floor_holds_band(floor, rate, AUDIO_OUTPUT_FRAMES, TARGET_NS),
-                "{floor} ticks at {rate} Hz leave the band"
-            );
-            let buffering = ticks_ns(floor, AUDIO_OUTPUT_FRAMES, rate);
-            for base_ms in 0..=25_u64 {
-                let e = band_error_ns(buffering, base_ms * MS, TARGET_NS);
-                assert!(band_ok(e), "{rate} Hz base {base_ms} ms: gap {e} ns");
-            }
-        }
+    fn a_frozen_mix_never_grows_dynamically_but_still_raises_the_floor_1425() {
+        use BufferingAction::*;
+        // Frozen: a source behind the window no longer grows the mix (the E1 ratchet).
+        assert_eq!(action(4, 4, 45, true, true), None);
+        assert_eq!(action(17, 4, 45, true, true), None);
+        assert_eq!(action(4, 4, 45, false, true), None);
+        assert_eq!(action(0, 0, 45, true, true), None);
+        // A floor is never frozen: the first tick of a launch (or an audio reset) still raises it.
+        assert_eq!(action(0, 4, 45, true, true), Floor);
+        assert_eq!(action(0, 4, 45, false, true), Floor);
+        assert_eq!(action(3, 4, 45, true, true), Floor);
+        // Not frozen: OBS's own dynamic increase, as before.
+        assert_eq!(action(4, 4, 45, true, false), Dynamic);
+        assert_eq!(action(45, 4, 45, true, false), None);
     }
 
     #[test]
-    fn too_little_or_too_much_buffering_leaves_the_band() {
-        let r = 48_000;
-        let f = AUDIO_OUTPUT_FRAMES;
-        // No buffering (the 12-18-15 session): gap ~91 ms at the nominal base.
-        let e = band_error_ns(0, LEVEL_BASE_NOMINAL_NS, TARGET_NS);
-        assert_eq!(e, 91_000_000);
-        assert!(!band_ok(e));
-        assert!(!floor_holds_band(0, r, f, TARGET_NS));
-        // 3 ticks (64 ms) is too little at a 0 ms base; 6 ticks (128 ms) too much at a 25 ms base.
-        assert!(!floor_holds_band(3, r, f, TARGET_NS));
-        assert!(!floor_holds_band(6, r, f, TARGET_NS));
-        // 4 and 5 ticks hold it.
-        assert!(floor_holds_band(4, r, f, TARGET_NS));
-        assert!(floor_holds_band(5, r, f, TARGET_NS));
-        // The ROZHODNUTÉ edge: buffering + 9 ms base above 135 ms breaks it.
-        assert!(band_ok(band_error_ns(
-            126 * MS,
-            LEVEL_BASE_NOMINAL_NS,
-            TARGET_NS
-        )));
-        assert!(!band_ok(band_error_ns(
-            126 * MS + 1,
-            LEVEL_BASE_NOMINAL_NS,
-            TARGET_NS
-        )));
+    fn only_a_running_audio_encoder_after_the_launch_settle_freezes_the_mix_1425() {
+        // A stream or a recording freezes it once the launch has settled; with no audio encoder
+        // (the resolume cg OBS) the mix keeps stock growth, however long it has been quiet.
+        assert!(frozen(true, true));
+        assert!(!frozen(false, true));
+        // ROZHODNUTÉ 6221252305: inside the launch settle window an encoder does not freeze it.
+        assert!(!frozen(true, false));
+        assert!(!frozen(false, false));
+        assert_eq!(
+            action(0, 0, 45, true, frozen(false, true)),
+            BufferingAction::Dynamic
+        );
+        assert_eq!(
+            action(0, 0, 45, true, frozen(true, true)),
+            BufferingAction::None
+        );
+        assert_eq!(
+            action(0, 0, 45, true, frozen(true, false)),
+            BufferingAction::Dynamic
+        );
     }
 
     #[test]
-    fn a_target_change_that_leaves_the_band_is_caught() {
-        // The shipped 4-tick floor at 48 kHz holds 100 ms, and the band edges are where they
-        // must be: 85.33 ms + 0 base + 35 = 120.33 ms highest, 85.33 + 25 − 35 = 75.33 lowest.
-        let f = AUDIO_OUTPUT_FRAMES;
-        assert!(floor_holds_band(4, 48_000, f, 120_333_333));
-        assert!(!floor_holds_band(4, 48_000, f, 120_333_334));
-        assert!(floor_holds_band(4, 48_000, f, 75_333_333));
-        assert!(!floor_holds_band(4, 48_000, f, 75_333_332));
-        assert!(!floor_holds_band(4, 48_000, f, 150_000_000));
-    }
-
-    #[test]
-    fn the_sync_offset_cancels_out_of_the_gap() {
-        // Over the whole ±500 ms range the #1333 split may write (AUDIO_OFFSET_CLAMP_MS; the
-        // integration gate lifts the real clamp), the gap is the offset-free band error.
-        let buffering = ticks_ns(4, AUDIO_OUTPUT_FRAMES, 48_000);
-        for base_ms in [0_u64, 9, 25] {
-            let e = band_error_ns(buffering, base_ms * MS, TARGET_NS);
-            for x_ms in -500..=500_i64 {
-                assert_eq!(
-                    level_gap_ns(buffering, base_ms * MS, TARGET_NS, x_ms * 1_000_000),
-                    e
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_two_measured_sessions_fit_the_model() {
-        // 01-33-25: 4 ticks (85.33 ms), offset 41 ms, first level_avg 134.74 ms.
-        // 12-18-15: no buffering, offset 18 ms, first level_avg 26.94 ms.
-        let a_buf = ticks_ns(4, AUDIO_OUTPUT_FRAMES, 48_000) as i64;
-        let a_base = 134_740_000 - 41_000_000 - a_buf;
-        let b_base = 26_940_000 - 18_000_000;
-        // Both bases land in the band's 0..25 ms and agree within 1 ms, whatever the buffering.
-        for base in [a_base, b_base] {
-            assert!(
-                (0..=LEVEL_BASE_MAX_NS as i64).contains(&base),
-                "base {base}"
-            );
-        }
-        assert!((a_base - b_base).abs() < 1_000_000);
-        // With them, the 85 ms session holds the band and the no-buffering one does not.
-        assert!(band_ok(band_error_ns(
-            a_buf as u64,
-            a_base as u64,
-            TARGET_NS
-        )));
-        assert!(!band_ok(band_error_ns(0, b_base as u64, TARGET_NS)));
-        // The nominal base is the rounded measurement.
-        assert!((LEVEL_BASE_NOMINAL_NS as i64 - b_base).abs() < 1_000_000);
-    }
-
-    #[test]
-    fn the_band_is_half_the_re_placement_threshold() {
-        assert_eq!(LEVEL_REACH_NS * 2, TS_SMOOTHING_THRESHOLD_NS);
-        assert!(band_ok(LEVEL_REACH_NS) && band_ok(-LEVEL_REACH_NS));
-        assert!(!band_ok(LEVEL_REACH_NS + 1) && !band_ok(-LEVEL_REACH_NS - 1));
-        assert!(!band_ok(i64::MIN) && !band_ok(i64::MAX));
+    fn the_launch_settles_30_s_of_mix_time_after_the_first_tick_1425() {
+        let first = 1_000_000_000;
+        assert_eq!(LAUNCH_SETTLE_NS, 30_000_000_000);
+        // No tick yet: never settled.
+        assert!(!launch_settled(0, first));
+        assert!(!launch_settled(0, u64::MAX));
+        // The first tick, then the window's edge.
+        assert!(!launch_settled(first, first));
+        assert!(!launch_settled(first, first + LAUNCH_SETTLE_NS - 1));
+        assert!(launch_settled(first, first + LAUNCH_SETTLE_NS));
+        assert!(launch_settled(first, first + 3_600_000_000_000));
+        // An instant before the first tick reads NOT settled (the input tick only advances, so it
+        // never happens live; if it did, the window keeps the mix unfrozen rather than mute).
+        assert!(!launch_settled(first, first - 1));
+        // Never overflows at the top of the clock.
+        assert!(!launch_settled(u64::MAX - 1, u64::MAX));
     }
 }

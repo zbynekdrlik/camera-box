@@ -577,18 +577,19 @@ def test_as_root_the_x_reads_run_as_the_operator(op):
     assert "sudo -u operator1 env DISPLAY=:0 XAUTHORITY=%s/.Xauthority" % op.home in op.calls()
 
 
-def test_the_12_10_dead_bluetooth_adapter_fails_naming_down_and_the_zero_address(op):
+def test_the_12_10_dead_bluetooth_adapter_is_a_note_naming_down_and_the_zero_address(op):
+    # owner 16.10.2026 ("ok nemusis to riesit netreba mys"): Bluetooth is report-only on every role
     (op.st / "hci").write_text(HCI_DEAD)
     st, d = op.row("bluetooth")
-    assert st == "FAIL" and "DOWN" in d and "00:00:00:00:00:00" in d, d
+    assert st == "NOTE" and "DOWN" in d and "00:00:00:00:00:00" in d, d
 
 
-def test_an_adapter_that_hciconfig_cannot_read_fails(op):
-    """A Bluetooth adapter the kernel registered (/sys/class/bluetooth/hci0) that hciconfig cannot read FAILs."""
+def test_an_adapter_that_hciconfig_cannot_read_is_a_note(op):
+    """A registered adapter hciconfig cannot read is named, report-only (owner 16.10.2026)."""
     (op.st / "hci").write_text("")
     (op.sys / "class" / "bluetooth" / "hci0").mkdir(parents=True)
     st, d = op.row("bluetooth")
-    assert st == "FAIL" and "hci0" in d, d
+    assert st == "NOTE" and "hci0" in d, d
 
 
 def test_a_box_with_no_bluetooth_adapter_is_a_note_not_a_failure(op):
@@ -1024,11 +1025,12 @@ def test_the_stream_role_does_not_grade_bluetooth(op):
     assert st == "NOTE" and "stream role" in d, d
 
 
-def test_the_strih_role_still_fails_a_dead_bluetooth(op):
+def test_the_strih_role_reports_a_dead_bluetooth_as_a_note(op):
+    # owner 16.10.2026 supersedes the 13.10 strih-role FAIL: the operator needs no Bluetooth mouse
     (op.st / "hci").write_text(HCI_DEAD)
     (op.sys / "class" / "bluetooth" / "hci0").mkdir(parents=True)
     st, d = op.row("bluetooth", box="strih-pp")
-    assert st == "FAIL", d
+    assert st == "NOTE" and "DOWN" in d, d
 
 
 # ---------------------------------------------------------------------------------------------

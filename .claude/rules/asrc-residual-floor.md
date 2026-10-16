@@ -54,7 +54,8 @@ between them (or a value far outside ±10) is the thing worth chasing, not the n
 **Per-launch level history in one call (issue 1355):** plain ssh `cd /d "%APPDATA%\obs-studio\logs" &&
 findstr /c:"source 'mbc' estimated" *.txt` (and `/c:"audio buffering"`) returns every session's lines
 prefixed by the log file name, so each launch's captured `target=`, level median and OBS audio
-buffering (64 or 85 ms, random per launch until issue 1367; an 85 ms floor since) come out of one read — no PowerShell. Quote the command
+buffering (64 or 85 ms, random per launch until issue 1367; an 85 ms floor until issue 1425
+slice 3; stock again since: 0, 64 or 85 ms per launch) come out of one read — no PowerShell. Quote the command
 in bash DOUBLE quotes: inside a single-quoted bash string the `''` around `mbc` collapses and findstr
 matches nothing. The `mbc` sync offset in force lives in `basic\scenes\Stream_Obs.json` (`sync`, ns),
 readable with a `.ps1` via `-EncodedCommand`. Password via `$PW`, never literal.
@@ -161,6 +162,9 @@ in BEFORE both the level integral and the #1325 negation — re-derive its sign 
 
 ## Addendum (issue 1355, 23.9.2026): `target=` is now ABSOLUTE — the same value every launch
 
+**RETIRED by issue 1425 slice 3 (16.10.2026), see the last addendum.** Read this one only for logs
+of builds before it.
+
 Before #1355, the `asrc: source 'mbc' … level=… target=…` line's `target=` was whatever depth the
 mixer had at the first lock (58.9 … 126.1 ms across 10 launches), and every launch held its own A/V
 level. On a #1355 build, `target=` is `ASRC_LEVEL_TARGET_MS` (100 ms) + the source's sync offset
@@ -175,9 +179,9 @@ after ~15 min, `restore=0`, `fallbacks=0 (#1355)` at the end of the line. A `LOG
 target … UNREACHABLE … fell back to the live depth … (#1355)` line (and `fallbacks=` > 0) means this
 source's buffer did NOT follow the stretch for 40 min. Its A/V level is then the per-launch value
 again. Chase why the depth cannot move there, for example OBS audio buffering or a source whose
-placement is not contiguous. Since issue 1367 every launch starts at an 85 ms buffering floor and
-the fallback line names `total_audio_buffering=` / `floor=` (`genlock-audio-buffering-floor.md`):
-above the floor, a late source raised the buffering and its own `ABOVE the floor` line names it. Do not raise the bound. The one-time A/V shift at the first #1355
+placement is not contiguous. (Issue 1367 added an 85 ms buffering floor and named
+`total_audio_buffering=` / `floor=` on the fallback line; issue 1425 slice 3 removed the floor, the
+target and the fallback, see the last addendum.) Do not raise the bound. The one-time A/V shift at the first #1355
 deploy is `(100 + offset) − the level that launch had`, and the E2E calibrated pin/audio offset
 absorbs it once.
 
@@ -189,7 +193,8 @@ of a ~21 ms sawtooth: the 24.9. production `level=` samples had sd 6.44 ms again
 for a uniform tick phase, while the 20-min block means stayed within ±2 ms of `target=`. A
 `level=` spread of ±10 ms is therefore tick phase, never buffer wander.
 
-On a #1367 build the `asrc:` line ends `… fallbacks=%u (#1355) level_avg=<ms> (#1367)`. That field
+On a #1367 build the `asrc:` line ends `… fallbacks=%u (#1355) level_avg=<ms> (#1367)` (since issue
+1425 slice 3: `… restore=%d (#1335) level_avg=<ms> (#1367)`, no `fallbacks=`). That field
 is the MEAN of every callback's `buffered_ms` over the last closed window, and it is also what the
 level loop now holds. The window is not a whole number of ticks, so a residual of a few tenths of a
 ms remains. Read the depth from it:
@@ -205,7 +210,7 @@ ms remains. Read the depth from it:
 - **No consumer parses `level=`.** asio-starve-health reads `starved_blocks=` and cg-chain-verify
   reads `estimated=`, both by name, and `level_avg=` does not contain the substring `level=`. A new
   parser reading the depth should key on `level_avg=`.
-- **Discriminator:** a steady `level_avg=` far from `target=` with `restore=0 fallbacks=0` points at
+- **Discriminator:** a steady `level_avg=` far from `target=` with `restore=0` (and `fallbacks=0` before issue 1425) points at
   a real level-loop problem. `level_avg=` tracking `target=` while `level=` jumps ±10 ms is the
   normal sawtooth.
 
@@ -242,3 +247,13 @@ then `level=` / `level_avg=` are the packet placement error in ms (≈ 0 healthy
 minus what is still owed, and `estimated=` follows the stamps (≈ 0 on a correct sender). `mbc`
 and every non-genlock source stay `timecode=0` and read as above. Full contract:
 `asrc-bench-harness.md`, the issue-1367 TIMECODE section.
+
+## Addendum (issue 1425 slice 3, 16.10.2026): no absolute target, no fallback, no buffering floor
+
+The #1355 absolute target and its UNREACHABLE fallback are deleted, and so is the issue-1367 85 ms
+buffering floor (`asrc-bench-harness.md` / `genlock-audio-buffering-floor.md`, the slice-3 sections).
+`mbc` and every directly stamped mixed source run on the STAMP basis since slice 1 (`basis=stamp`,
+`timecode=1`, `target=0`, `level_avg=` the placement error, ≈ 0 ± 2 ms healthy). An ARRIVAL-basis
+source's `target=` is the depth it had at the lock again, so it differs per launch by design (the
+buffering a launch draws no longer moves A/V). The line has no `fallbacks=` field; there is
+no UNREACHABLE warning to chase any more.
