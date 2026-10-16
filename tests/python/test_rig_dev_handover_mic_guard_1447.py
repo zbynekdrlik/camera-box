@@ -104,6 +104,14 @@ def test_a_silent_mic_keeps_its_own_line_and_never_names_the_foreign_fix():
     assert FOREIGN_LINE_TEXT not in e["message"]
 
 
+def test_silent_mic_and_foreign_guard_name_both_fixes():
+    e = _decide((MIC_SILENT, 0), GUARD_FOREIGN)
+    assert e["status"] == d.FORGOT
+    assert "odmutuj" in e["message"]
+    assert FOREIGN_LINE_TEXT in e["message"]
+    assert e["message"].index("odmutuj") < e["message"].index(FOREIGN_LINE_TEXT)
+
+
 def test_the_checklist_summary_blames_the_owner_for_a_foreign_mbc():
     e = _decide((MIC_PRESENT, 0), GUARD_FOREIGN)
     lines, summary, code = d.build_checklist([e])

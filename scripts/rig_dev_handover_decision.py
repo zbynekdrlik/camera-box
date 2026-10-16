@@ -356,8 +356,8 @@ ITEMS = [
     # FOREIGN -> the owner forgot to take the extra source off mbc, anything else (2 = unknown /
     # stale / unreachable, a timeout, a missing probe) = UNKNOWN, never OK.
     Item("mic", "merací mikrofón (mbc)", ["mic", "mic_guard"], "verdict",
-         ok_msg="merací mikrofón na kanáli 'mbc' hrá (peak nad prahom) a do streamu ide len merací "
-                "signál",
+         ok_msg="merací mikrofón na kanáli 'mbc' hrá (peak nad prahom) a do streamu nejde iný zvuk "
+                "ako merací signál",
          forgot_msg="merací mikrofón je stlmený/vypnutý — odmutuj kanál 'mbc' v Abletone",
          unknown_msg="stav meracieho mikrofónu sa nepodarilo potvrdiť (stream OBS, cam2 alebo "
                      "program-audio guard na strih-snv :8891 nedostupné, "

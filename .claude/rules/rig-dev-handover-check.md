@@ -192,7 +192,10 @@ enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
   the owner hands the rig back, while it is usually still in EVENT — `mic` and `painter` read
   UNKNOWN. Switch the rig back with `rig-mode.sh test` (the `mode=EVENT→FORGOT` action) and re-run
   the check: `mic`/`painter` only verify once the rig is in TEST. The muted-mic that motivated the
-  ticket is caught on the SECOND pass.
+  ticket is caught on the SECOND pass. The `mic_guard` half (issue 1447) has two timing effects on
+  that re-run: the sampler `rig-mode.sh test` starts needs ~4 s of warm-up (UNKNOWN until then), and
+  the guard latches a FOREIGN for 30 s, so wait ~30 s after the owner fixes Ableton before
+  re-running, or the item still reads FORGOT for a problem already fixed.
 - **Multi-box items are strict (no masking).** For `burns` (strih+stream) and `pins`
   (strih+stream+imag) the item is OK only when EVERY probed box is OK; a single unreadable box
   makes the item UNKNOWN (never masked by an OK sibling — the honesty the `neoverené` line needs).
