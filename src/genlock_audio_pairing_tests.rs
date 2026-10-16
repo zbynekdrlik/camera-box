@@ -809,3 +809,84 @@ fn a_directly_stamped_mixed_source_is_judged_by_its_stamp_1425() {
         [(0, "arrival"), (1, "timecode"), (2, "stamp")]
     );
 }
+
+/// Issue 1425 round 2: feed one packet per (stamp, raw) through the rate-point decision the way the
+/// ingest does, and return the points emitted.
+fn rate_points(basis: AsrcBasis, packets: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    let mut pending = AsrcRatePending::default();
+    let mut points = Vec::new();
+    let (mut prev_stamp, mut prev_raw) = (packets[0].0, packets[0].1);
+    for &(stamp, raw) in &packets[1..] {
+        let pt = audio_asrc_rate_point(basis, true, stamp - prev_stamp, prev_raw, &mut pending);
+        if pt.due {
+            points.push((pt.raw_s, pt.master_s));
+        }
+        if !pt.keep_prev_stamp {
+            prev_stamp = stamp;
+        }
+        prev_raw = raw;
+    }
+    points
+}
+
+#[test]
+fn an_arrival_stamped_burst_keeps_every_rate_point_exact_on_the_stamp_basis_1425() {
+    // a driver stamps each packet "arrival minus its own duration": a run read at one arrival gets
+    // EQUAL stamps and only its last one is right (packet k starts at k * p; packets 3..=5 arrive
+    // together at 6 p)
+    let p = 0.0213;
+    let packets: Vec<(f64, f64)> = (0..10)
+        .map(|k| {
+            let stamp = if (3..=5).contains(&k) {
+                5.0 * p
+            } else {
+                k as f64 * p
+            };
+            (stamp, p)
+        })
+        .collect();
+    let points = rate_points(AsrcBasis::Stamp, &packets);
+    for (raw, master) in &points {
+        assert!(
+            (raw - master).abs() < 1e-12,
+            "issue 1425: every stamp-basis point must pair the samples with the time they span: \
+             raw {raw} vs master {master}"
+        );
+    }
+    let raw: f64 = points.iter().map(|pt| pt.0).sum();
+    assert!(
+        (raw - 8.0 * p).abs() < 1e-12,
+        "issue 1425: no sample is dropped from the regression (the last interval waits): {raw}"
+    );
+    // the timecode basis drops the run's samples: a duplicated slot is a repeat there
+    let tc: f64 = rate_points(AsrcBasis::Timecode, &packets)
+        .iter()
+        .map(|pt| pt.0)
+        .sum();
+    // (it emits one interval earlier, so 7 p against the stamp basis's 8 p, the run's 2 p dropped)
+    assert!(
+        (tc - 7.0 * p).abs() < 1e-12,
+        "issue 1425: the timecode basis keeps the issue-1367 duplicated-slot drop: {tc}"
+    );
+}
+
+#[test]
+fn a_placement_or_a_run_with_nothing_waiting_starts_afresh_1425() {
+    let mut pending = AsrcRatePending::default();
+    let p = 0.01;
+    // nothing waiting yet: a run with no advance carries nothing and emits nothing
+    let pt = audio_asrc_rate_point(AsrcBasis::Stamp, true, 0.0, p, &mut pending);
+    assert!(!pt.due && pt.keep_prev_stamp && !pending.due);
+    // a first advance only starts the waiting point
+    let pt = audio_asrc_rate_point(AsrcBasis::Stamp, true, p, p, &mut pending);
+    assert!(!pt.due && pending.due);
+    // a placed packet drops it, and so does a change to the timecode basis
+    let pt = audio_asrc_rate_point(AsrcBasis::Stamp, false, p, p, &mut pending);
+    assert!(!pt.due && !pt.keep_prev_stamp && pending == AsrcRatePending::default());
+    audio_asrc_rate_point(AsrcBasis::Stamp, true, p, p, &mut pending);
+    let pt = audio_asrc_rate_point(AsrcBasis::Timecode, true, p, 2.0 * p, &mut pending);
+    assert!(
+        pt.due && pt.raw_s == 2.0 * p && pending == AsrcRatePending::default(),
+        "issue 1425: the timecode basis emits at once and keeps nothing waiting"
+    );
+}

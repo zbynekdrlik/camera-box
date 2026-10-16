@@ -2019,6 +2019,38 @@ static inline double genlock_audio_stamp_interval_s(uint64_t prev_ns, uint64_t n
 {
 	return (double)(int64_t)(now_ns - prev_ns) / 1e9;
 }
+/* camera-box issue 1425 round 2 (design 6206822792): the rate point of one measured packet -- two
+ * appended packets in a row, master_s = the stamp advance, prev_raw_s = the previous packet's
+ * duration. TIMECODE basis (issue 1367, unchanged): a positive advance is a point now, a non-positive
+ * one a duplicated slot (no point). STAMP basis: a driver that stamps each packet "arrival minus its own
+ * duration" gives a run read at one arrival EQUAL stamps, and only the run's LAST stamp is right, so the
+ * point waits one packet (*pend_*): a positive advance emits the waiting point and waits with this
+ * interval; a packet with no advance carries its predecessor's samples into the waiting point and the
+ * next interval keeps its start stamp. Not contiguous: start afresh, drop a waiting point. Mirror of
+ * AsrcRatePoint / AsrcRatePending / audio_asrc_rate_point. */
+struct genlock_audio_rate_point {
+	bool due;
+	double raw_s;
+	double master_s;
+	bool keep_prev_stamp;
+};
+static inline struct genlock_audio_rate_point genlock_audio_asrc_rate_point(int basis, bool contiguous, double master_s,
+									     double prev_raw_s, double *pend_raw_s,
+									     double *pend_master_s, bool *pend_due)
+{
+	/* issue 1425 RED: every basis still drops a packet with no stamp advance */
+	struct genlock_audio_rate_point point = {false, 0.0, 0.0, false};
+	(void)basis;
+	*pend_raw_s = 0.0;
+	*pend_master_s = 0.0;
+	*pend_due = false;
+	if (contiguous && master_s > 0.0) {
+		point.due = true;
+		point.raw_s = prev_raw_s;
+		point.master_s = master_s;
+	}
+	return point;
+}
 /* camera-box issue 1381 (design 5882391108, piece 2): the per-source SKEW HOLD across a wall step. A
  * fleet date step moves the receiver's wall at once; the sender (SongPlayer, same box) follows only
  * seconds later, so every packet in between is stamped on the OLD wall while the live offset is on the

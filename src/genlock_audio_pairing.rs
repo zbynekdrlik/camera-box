@@ -726,6 +726,70 @@ pub fn audio_stamp_interval_s(prev_ns: u64, now_ns: u64) -> f64 {
     now_ns.wrapping_sub(prev_ns) as i64 as f64 / 1e9
 }
 
+/// Issue 1425 round 2 — the rate point one packet adds to a placement-judged ASRC's regression.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AsrcRatePoint {
+    /// A point is due now: the regression gets `raw_s` against `master_s`.
+    pub due: bool,
+    /// Its raw advance (the pre-resample duration it covers), s.
+    pub raw_s: f64,
+    /// Its master block (the stamp advance it covers), s.
+    pub master_s: f64,
+    /// The next interval starts at the previous packet's stamp, not this one's.
+    pub keep_prev_stamp: bool,
+}
+
+/// Issue 1425 round 2 — the STAMP basis's rate point that waits one packet: a following packet with
+/// no stamp advance still adds its predecessor's samples to it.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AsrcRatePending {
+    pub raw_s: f64,
+    pub master_s: f64,
+    pub due: bool,
+}
+
+/// Issue 1425 round 2 (design 6206822792) — the rate point of one measured packet. A point needs two
+/// appended packets in a row (`contiguous`); `master_s` is the stamp advance from the previous packet
+/// and `prev_raw_s` the previous packet's pre-resample duration.
+///
+/// - **TIMECODE basis (issue 1367, unchanged):** a positive advance is a point now; a non-positive
+///   one is a sender's duplicated slot, whose samples are a repeat: no point.
+/// - **STAMP basis:** a driver that stamps each packet "arrival minus its own duration" (PulseAudio,
+///   WASAPI without device timing) gives a run of packets read at one arrival EQUAL stamps, and only
+///   the run's LAST stamp is right. So the point waits one packet (`pending`): a positive advance
+///   emits the waiting point and makes this interval the new one; a packet with no advance CARRIES
+///   its predecessor's samples into the waiting point (whose interval then ends at the run's last
+///   stamp) and the next interval keeps its start stamp. Dropped, those samples read the source slow
+///   (round 1's review: +4.9 ms over ~10 min); carried FORWARD into the next interval instead, every
+///   run moves one packet of samples between two points and, on 1024-frame packets, each move is a
+///   per-window residual over the 10 ms step re-base (the bench's burst feed walked 31 ms).
+///
+/// A packet that is not contiguous (placed, or no previous packet) starts afresh and drops a waiting
+/// point. Mirror of `genlock_audio_asrc_rate_point`.
+pub fn audio_asrc_rate_point(
+    basis: AsrcBasis,
+    contiguous: bool,
+    master_s: f64,
+    prev_raw_s: f64,
+    pending: &mut AsrcRatePending,
+) -> AsrcRatePoint {
+    // issue 1425 RED: every basis still drops a packet with no stamp advance
+    let _ = basis;
+    *pending = AsrcRatePending::default();
+    let mut point = AsrcRatePoint {
+        due: false,
+        raw_s: 0.0,
+        master_s: 0.0,
+        keep_prev_stamp: false,
+    };
+    if contiguous && master_s > 0.0 {
+        point.due = true;
+        point.raw_s = prev_raw_s;
+        point.master_s = master_s;
+    }
+    point
+}
+
 // Issue 1381 (design 5882391108) — the per-source audio SKEW HOLD across a wall step lives in its
 // own path child (this module passed the ~1000-line budget); re-exported, so every path stays.
 #[path = "genlock_audio_step_hold.rs"]

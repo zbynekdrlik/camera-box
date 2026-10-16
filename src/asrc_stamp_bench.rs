@@ -79,9 +79,10 @@
 
 use crate::asrc_bench::RealtimeAsrcCompensator;
 use crate::genlock_audio_pairing::{
-    audio_actual_place_ns, audio_asrc_error_ms, audio_asrc_placement, audio_hold_action,
-    audio_intended_raw_ns, audio_place_error_ns, audio_place_measured, audio_place_term_ns,
-    audio_stamp_interval_s, audio_stamp_mono_ns, AsrcBasis, AudioHoldAction, AudioHoldMode,
+    audio_actual_place_ns, audio_asrc_error_ms, audio_asrc_placement, audio_asrc_rate_point,
+    audio_hold_action, audio_intended_raw_ns, audio_place_error_ns, audio_place_measured,
+    audio_place_term_ns, audio_stamp_interval_s, audio_stamp_mono_ns, AsrcBasis, AsrcRatePending,
+    AudioHoldAction, AudioHoldMode,
 };
 
 const RATE: u64 = 48_000;
@@ -138,6 +139,27 @@ enum Servo {
     Unservoed,
 }
 
+/// Issue 1425 round 2 (design 6206822792): a disturbance of the delivery, the acceptance rows of
+/// `asrc_stamp_bench_stall.rs`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Event {
+    None,
+    /// Delivery stops at `at_s` for `ms`: every packet completed in that span arrives at its end,
+    /// in one burst (the driver stamps each "arrival minus the packet").
+    Stall {
+        at_s: f64,
+        ms: f64,
+    },
+    /// A real sample loss: the packets completed in `ms` from `at_s` are never delivered.
+    Loss {
+        at_s: f64,
+        ms: f64,
+    },
+    /// From the start, a quarter of the packets arrive together with the next one (one arrival, so
+    /// equal stamps: a driver read that returns two packets).
+    EqualStampBursts,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Case {
     src: Source,
@@ -147,6 +169,7 @@ struct Case {
     phase_ns: u64,
     run_s: u64,
     servo: Servo,
+    event: Event,
 }
 
 impl Case {
@@ -159,6 +182,7 @@ impl Case {
             phase_ns: frames_ns(TICK_FRAMES) * phase_quarter / 4,
             run_s: RUN_S,
             servo,
+            event: Event::None,
         }
     }
 }
@@ -195,6 +219,7 @@ struct Obs {
     have_prev: bool,
     prev_stamp_mono: u64,
     prev_raw_s: f64,
+    pending: AsrcRatePending,
     underruns: u32,
     backstops: u32,
     placements: u32,
@@ -225,6 +250,7 @@ impl Obs {
             have_prev: false,
             prev_stamp_mono: 0,
             prev_raw_s: 0.0,
+            pending: AsrcRatePending::default(),
             underruns: 0,
             backstops: 0,
             placements: 0,
@@ -321,7 +347,7 @@ impl Obs {
         if self.c.timecode() != tc {
             self.have_prev = false;
         }
-        self.c.set_timecode(tc);
+        self.c.set_basis(basis);
         let action = audio_hold_action(mode, 0, mode, 0, push_back, true, false);
         assert_eq!(
             action,
@@ -357,14 +383,28 @@ impl Obs {
             self.c
                 .observe_placement(err_ms, self.raw_cur_s * 1000.0, !appended);
             let stamp_mono = audio_stamp_mono_ns(stamp, 0);
-            if appended && self.have_prev {
-                let master_s = audio_stamp_interval_s(self.prev_stamp_mono, stamp_mono);
-                if master_s > 0.0 {
-                    self.c
-                        .compensate_with_level(self.prev_raw_s, master_s, err_ms);
-                }
+            let contiguous = appended && self.have_prev;
+            let master_s = if contiguous {
+                audio_stamp_interval_s(self.prev_stamp_mono, stamp_mono)
+            } else {
+                0.0
+            };
+            // issue 1425 round 2: on the stamp basis a packet with no advance adds its
+            // predecessor's samples to the rate point still waiting
+            let point = audio_asrc_rate_point(
+                basis,
+                contiguous,
+                master_s,
+                self.prev_raw_s,
+                &mut self.pending,
+            );
+            if point.due {
+                self.c
+                    .compensate_with_level(point.raw_s, point.master_s, err_ms);
             }
-            self.prev_stamp_mono = stamp_mono;
+            if !point.keep_prev_stamp {
+                self.prev_stamp_mono = stamp_mono;
+            }
             self.prev_raw_s = self.raw_cur_s;
             self.have_prev = true;
         }
@@ -382,6 +422,8 @@ struct Run {
     placements: u32,
     fallbacks: u32,
     basis: Option<AsrcBasis>,
+    /// Issue 1425 round 2: arrival time (s) of the packet that made the first booked jump.
+    first_jump_s: Option<f64>,
 }
 
 impl Run {
@@ -416,6 +458,8 @@ fn run(case: &Case) -> Run {
     let half_jitter = case.src.jitter_ns as f64 / 2.0;
     let mut start = (MONO0 + case.phase_ns) as f64;
     let mut prev_arrival = 0_u64;
+    // Event::EqualStampBursts: packets left in the current burst, and its one arrival
+    let (mut burst_left, mut burst_arrival) = (0_u32, 0.0_f64);
     let (mut sum, mut n, mut second) = (0.0_f64, 0_u32, 0_u64);
     let mut r = Run::default();
     let end_ns = (MONO0 + case.run_s * NS_PER_S) as f64;
@@ -425,8 +469,32 @@ fn run(case: &Case) -> Run {
             case.ppm + case.wander_ppm * (2.0 * std::f64::consts::PI * t_s / WANDER_PERIOD_S).sin();
         // the source clock runs `ppm` fast: a nominal packet takes less mixer time
         let complete = start + packet_ns / (1.0 + ppm * 1e-6);
-        let arrival =
-            ((complete + case.src.jitter_ns as f64 * rng.next()) as u64).max(prev_arrival);
+        let complete_s = (complete - MONO0 as f64) / 1e9;
+        let mut arrival_f = complete + case.src.jitter_ns as f64 * rng.next();
+        match case.event {
+            Event::None => {}
+            Event::Stall { at_s, ms } => {
+                if complete_s >= at_s && complete_s < at_s + ms / 1e3 {
+                    arrival_f = arrival_f.max(MONO0 as f64 + (at_s + ms / 1e3) * 1e9);
+                }
+            }
+            Event::Loss { at_s, ms } => {
+                if complete_s >= at_s && complete_s < at_s + ms / 1e3 {
+                    start = complete;
+                    continue;
+                }
+            }
+            Event::EqualStampBursts => {
+                if burst_left == 0 {
+                    burst_left = if rng.next() < 0.25 { 2 } else { 1 };
+                    let last = start + f64::from(burst_left) * packet_ns / (1.0 + ppm * 1e-6);
+                    burst_arrival = last + case.src.jitter_ns as f64 * rng.next();
+                }
+                burst_left -= 1;
+                arrival_f = burst_arrival;
+            }
+        }
+        let arrival = (arrival_f as u64).max(prev_arrival);
         prev_arrival = arrival;
         let stamp = arrival - frames_ns(case.src.packet_frames);
         // the stamp without its jitter: the true capture instant + the driver's constant bias
@@ -434,6 +502,9 @@ fn run(case: &Case) -> Run {
         obs.mix_until(arrival);
         let dur = obs.asrc_process(arrival);
         let actual = obs.ingest(stamp, arrival, dur);
+        if r.first_jump_s.is_none() && obs.c.place_jump_count() > 0 {
+            r.first_jump_s = Some((arrival - MONO0) as f64 / 1e9);
+        }
         let av_ms = (actual as f64 - truth) / 1e6;
         let sec = (arrival - MONO0) / NS_PER_S;
         if sec != second {
@@ -452,6 +523,11 @@ fn run(case: &Case) -> Run {
     r.basis = obs.basis_seen;
     r
 }
+
+/// Issue 1425 round 2: the stall / loss / equal-stamp acceptance rows, in their own file so this one
+/// does not grow past its budget.
+#[path = "asrc_stamp_bench_stall.rs"]
+mod stall;
 
 /// Every buffering x launch phase at +20 ppm (the live mbc residual), for one source.
 fn sweep(src: Source, servo: Servo) -> Vec<(u64, u64, Run)> {
