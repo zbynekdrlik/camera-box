@@ -249,7 +249,8 @@ verified) until its audio was re-placed 70 ms at a time. Now:
   libobs reads a stamp within 2 s (`MAX_TS_VAR`) of now as DIRECT: a lead near 2 s would flip the source
   between the stamp and the arrival basis. The plugin logs the largest lead once a minute:
   `[vlc_source: '<name>'] audio lead_max_ms=<ms> (issue 1425)` (`vlcs_audio_lead_log`, tested in
-  `tests/vlc_video_media_clock_1425.rs`). A lead that reaches ~2000 ms needs the sticky basis the
+  `tests/vlc_video_media_clock_1425.rs`; one short OBS-log line per minute per playing VLC source,
+  never a page). A lead that reaches ~2000 ms needs the sticky basis the
   issue-1425 rule lists as not done.
 - Live (supervisor): after the FULL deploy, stream's `asrc: source 'NL playlist'` line reads
   `basis=stamp` with `level_avg` within ±2 ms, the `audio lead_max_ms=` lines stay far under 2000, and

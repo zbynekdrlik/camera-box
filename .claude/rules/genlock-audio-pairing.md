@@ -1004,8 +1004,11 @@ moves a placement at runtime.
   sits D off where the samples really are, so a placement OBS still forces lands D off: the resume after
   a stop, an operator's sync-offset change, a latency-hold placement (a latency-hold source's
   `audio_place_err_ms` / pairing offset also read D). A real ≥ 2 s break is no longer re-latched either.
-  In practice D stays near 0 once S4v ships (NL playlist is a stamp-basis source then; an NDI genlock-off
-  source never drifts, the bench's twin); a stock VLC source accumulates ~72 ms/h at 20 ppm. The fix the
+  D stays near 0 only for a source whose stamps advance at the mixer's rate (NL playlist on the stamp
+  basis after S4v, an NDI genlock-off sender on a dantesync-disciplined wall clock: the bench's twin).
+  Any other locked arrival source accumulates D at its stamp-clock rate (≈ 72 ms/h at 20 ppm): a stock
+  VLC, a genlock-off NDI sender on an undisciplined machine, a latency-hold source whose timecode is
+  counted from its samples. The fix the
   review proposes (carry the drift as a per-source offset added with `timing_adjust`, so forced placements
   land on the continuation) is a change of the decided mechanism, so it was not made here.
 - **Tests:** unit `src/genlock_audio_pairing_arrival_tests.rs`; parity
