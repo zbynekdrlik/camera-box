@@ -21,9 +21,9 @@ paths:
 > **Issue 1425 (E2, design 6205974120): the floor now stays only until slice 3.** Since slice 1
 > a directly stamped mixed source (`mbc`, a PulseAudio input, a media clip) is judged by its own
 > stamp, setpoint 0 (`genlock-audio-pairing.md`, the issue-1425 section), so the absolute 100 ms
-> target the floor was sized for no longer holds such a source. Since slice 2 (design 6216736061,
-> the FREEZE section at the end) the buffering no longer grows once the mix has settled, so a
-> transient can no longer step a running output's audio later. Slice 3 then sets the floor to 0 and
+> target the floor was sized for no longer holds such a source. Since slice 2 (design 6216736061 +
+> ROZHODNUTÉ 6217557472, the FREEZE section at the end) the buffering no longer grows while an audio
+> encoder runs, so a transient can no longer step a running output's audio later. Slice 3 then sets the floor to 0 and
 > deletes the absolute target. Do not remove the floor before slice 2 is live on every box.
 
 ## Why
@@ -303,41 +303,40 @@ ABOVE line and no obs-vban underflow / discontinuity at the cut; a genlock TIMEC
 stays late may still log one ABOVE line a tick or two later (the known limit). A media start on
 program still logs its ABOVE line (upstream).
 
-## The FREEZE: a settled mix never grows (issue 1425, E2 slice 2, design 6216736061)
+## The FREEZE: no growth while an audio encoder runs (issue 1425, E2 slice 2, design 6216736061 + ROZHODNUTÉ 6217557472)
 
 **Why.** A buffering increase while an encoder runs makes that encoder's audio permanently later:
 after the output start, `obs-encoder.c` counts audio pts in samples (`cur_pts += framesize`), and
-the added ticks drain with `audio_callback` returning false. On stream-snv the E1 events grew the
-mix +128 (15.10 04:00, an ASIO outage on `mbc`), +192 (11.10 07:09, a longer one) and +85 ms (15.10
-17:43, `pre-fotky video` after a 432 ms mixer callback stall), each an audio-after-picture step on
-every live output until an OBS restart.
+the added ticks drain with `audio_callback` returning false. On stream-snv, while it streamed, the
+E1 events grew the mix +128 (15.10 04:00, an ASIO outage on `mbc`), +192 (11.10 07:09, a longer one)
+and +85 ms (15.10 17:43, `pre-fotky video` after a 432 ms mixer callback stall), each an
+audio-after-picture step on every live output until an OBS restart.
+
+**Only a running audio encoder freezes it (ROZHODNUTÉ 6217557472).** The first cut also froze a mix
+that had gone 30 s without a growth or a member join. Its own scenario showed that this mutes, on a
+box with no audio encoder (the resolume cg OBS feeding FOH), a clip started in place whose stamps
+stay late, where stock OBS grows the mix once and plays it. With no encoder a growth moves no live
+output's A/V, and slice 1 already makes the stamp-judged sources' A/V independent of the buffering,
+so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
 
 **What ships.**
 
 | Piece | C | Rust / test |
 |---|---|---|
-| the decision: frozen while an output with an audio encoder runs, or after `SETTLE` (30 s) without a growth and without a member join | `genlock_audio_buffering_frozen(ns_since, encoder_active, settle_ns)`, `GENLOCK_AUDIO_BUFFERING_SETTLE_NS` (spelled `(30ULL * 1000000000ULL)`: the #800 test pins its 60 s literal once) | `frozen`, `SETTLE_NS` |
-| the settle clock: mixer ticks since the anchor x the tick length, saturating; 0 with no anchor | `genlock_audio_buffering_ns_since(anchor_tick, cur_tick, tick_ns)` | `ns_since` |
+| the decision: frozen while an output with an audio encoder runs, and only then | `genlock_audio_buffering_frozen(encoder_active)` | `frozen` |
 | the action: `frozen` turns DYNAMIC into NONE; the FLOOR is never frozen | `genlock_audio_buffering_action(..., source_behind, frozen)` | `action` |
 | a member behind the window while frozen is re-anchored | `GENLOCK_MIX_GUARD_MIXED_LATE` (3) from `genlock_mix_guard_reason(..., frozen)` -> `genlock_mix_guard_reanchor` (the 1381 path: drop the behind samples, restart the timeline when nothing is left) | the 1381 lift (no Rust authority: the guard's reasons are pinned by its truth table) |
 | the encoder count | `obs-output.c`: `os_atomic_inc_long` in `hook_data_capture` and `os_atomic_dec_long` in `end_data_capture_thread`, both in the ENCODED branch; read by `obs_output_genlock_audio_encoder_outputs()` | `tests/genlock_audio_buffering_freeze_wiring_1425.rs` |
 
-- **Per tick, in `audio_callback`:** `genlock_mix_mark_members` (a member that JOINS sets
-  `audio->genlock_settle_tick` = this tick) -> the freeze decision (once, into
-  `audio->genlock_buffering_frozen`) -> the render loop (the reason gets it) -> `calc_min_ts` -> the
-  tick decision (the action gets it) -> a growth (FLOOR or DYNAMIC) sets the settle tick. The anchor
-  lives in `struct obs_core_audio`, so an audio reset zeroes it: no anchor = not frozen by the
-  settle until the first tick's floor raise anchors it again. The mixer tick itself is the
-  never-reset file-scope `genlock_mix_tick_now` (1381).
-- **Only audio ENCODERS freeze it at once.** A raw-audio output (the DistroAV NDI main output,
-  obs-vban) freezes the mix only through the 30 s settle like everything else. A cut to a scene is
-  a member join, so a source cut to program is unfrozen for 30 s and may still grow the mix. On
-  resolume a media / `NDI test` start IN PLACE (no cut) more than 30 s after the last one no longer
-  grows the mix: a backlog-shaped lateness is one MIXED_LATE dropout, but a clip whose stamps stay
-  late is muted while it stays late (the limit below, pinned by `frozen-late-start-kept-stamp`).
+- **Per tick, in `audio_callback`:** `genlock_mix_mark_members` -> the freeze decision, read once into
+  `audio->genlock_buffering_frozen` -> the render loop (the reason gets it) -> `calc_min_ts` -> the
+  tick decision (the action gets it). A stream or recording that starts or stops takes effect on the
+  next tick (`encoder-on-off`).
+- **Only audio ENCODERS count.** A raw-audio output (the DistroAV NDI main output, obs-vban) never
+  freezes the mix, so the cg OBS on resolume grows on a late media / `NDI test` start as before.
 - **No step-down.** A mid-run decrease would skip a tick of every output and move every running
-  encoder's audio a tick earlier. With the freeze nothing grows after settle, so nothing steps
-  down; the buffering starts over at the next launch.
+  encoder's audio a tick earlier. Nothing grows while an encoder runs, so nothing steps down; a
+  growth taken while no encoder ran stays until the next launch.
 - **The log.**
   - `buffering-guard: '<src>' fell behind the mix (frozen at T ms): its audio ran X ms behind the
     mix window; re-anchored (dropped Y ms[, timeline restarted]) instead of adding Z ms to the whole
@@ -349,46 +348,49 @@ every live output until an OBS restart.
     `mixed_late=N`.
   - Per source `genlock_mixed_late_events` / `genlock_mixed_late_dropped_ns`; a MIXED_LATE also
     counts in the guard's `events=` / `dropped_total=`.
-- **Known limit (slice 2b, an owner product call).** A member that KEEPS its stamp and stays late
-  for good (a device whose buffer really grew, a media clip whose stamps run late) is re-anchored on
-  every tick while frozen: its audio is dropped, the mix never grows (pinned by the `settle-restarts`
-  tail: 2823 events, a line a minute; and `frozen-late-start-kept-stamp`: a clip 128 ms late started
-  in place is never mixed). Delaying that one source instead is slice 2b, built only if a
-  `mixed_late` storm is seen live (the owner decides delay vs drop). Nothing pages on it yet: the
-  audio-mixer watchdog does not read `mixed_late`, and the per-source meters read the source before
-  the mix. Paging on a growing `#800 mix: mixed_late=` was reported to the supervisor as a follow-up
-  candidate in the slice-2 lane return.
+- **Known limit (slice 2b, an owner product call).** While an encoder runs, a member that KEEPS its
+  stamp and stays late for good (a device whose buffer really grew, a media clip whose stamps run
+  late) is re-anchored on every tick: its audio is dropped, the mix never grows (pinned by
+  `late-start-kept-stamp-encoder`: a clip 128 ms late started in place is never mixed; and the frozen
+  span of `encoder-on-off`: 700 events, one line). Delaying that one source instead is slice 2b,
+  built only if a `mixed_late` storm is seen live (the owner decides delay vs drop). Nothing pages on
+  it yet: the audio-mixer watchdog does not read `mixed_late`, and the per-source meters read the
+  source before the mix. Paging on a growing `#800 mix: mixed_late=` was reported to the supervisor
+  as a follow-up candidate in the slice-2 lane return.
 - **Log cadence.** The guard's "first event logs at once" flag is shared across reasons: a source
   that logged a not-mixed or entered line in the last minute logs its first MIXED_LATE only with the
   next minute's line (`+K since the last line` counts it). The counters and `#800` see it at once.
 
 **Tests and Tier-0.**
 - `src/genlock_audio_buffering.rs` unit tests + the 1367 parity gate (the action's `frozen`, the
-  settle clock's no-anchor / 30 s / saturation edges, the decision's edges, the settle define).
-- The 1381 lift (`tests/genlock_audio_mix_guard_1381.rs`, BLOCK3 now runs from the tick decision
-  up to the mix separator so it carries the growth's settle restart; the harness stub has an
-  encoder count `h_encoders`): the three E1 replays (a member that keeps its stamp delivers a
-  backlog stamped at capture; stock libobs reproduces exactly the logged +128 / +192 / +85 ms --
-  the RED commit), `settle-restarts` (a join, then a growth, each keep the mix unfrozen; frozen
-  1550 ticks after the last growth), `frozen-ingest-race` (the action's frozen term), and the
-  probes `reason-1425` (the 32-row truth table over member / entered / composite / behind / frozen)
-  and `mixed-late` (the counters). GREEN: the mix stays at 85 ms, `waits=4`, the mic heard on every
-  tick, one counted dropout of 123.4 / 183.4 / 73.4 ms.
+  decision over its one input).
+- The 1381 lift (`tests/genlock_audio_mix_guard_1381.rs`; the harness stub has an encoder count
+  `h_encoders`):
+  - the three E1 replays with the stream's audio encoder running (a member that keeps its stamp
+    delivers a backlog stamped at capture; stock libobs reproduces exactly the logged +128 / +192 /
+    +85 ms, the first RED commit); GREEN: the mix stays at 85 ms, `waits=4`, the mic heard on every
+    tick, one counted dropout of 123.4 / 183.4 / 73.4 ms;
+  - `e1-asio-outage-128-no-encoder`: the same outage with no encoder grows +128 ms as stock;
+  - `encoder-on-off`: unfrozen growth, a frozen span (MIXED_LATE on every tick), unfrozen growth
+    again when the stream stops;
+  - `late-start-kept-stamp` (no encoder: the mix grows to 149 ms and the clip plays) and its twin
+    `late-start-kept-stamp-encoder` (muted while late, the 2b limit);
+  - `frozen-ingest-race` (the action's frozen term) and the probes `reason-1425` (the 32-row truth
+    table over member / entered / composite / behind / frozen) and `mixed-late` (the counters).
 - `tests/genlock_audio_buffering_freeze_wiring_1425.rs` (std-only): ONE `FREEZE_WIRING` /
-  `FREEZE_ABSENT` list, required by the pwsh step "Assert the audio buffering freeze is present
-  (issue 1425)" in both `windows-genlock*.yml`; the per-tick order; the count's two capture sites
-  in the encoded branch.
-- Mutation (scratch tree, the tests compiled once against it, both pwsh steps run for real):
-  36/38 killed; the two survivors are the C and Rust twins of `cur_tick <= anchor_tick` -> `<`,
-  equivalent (at equality the subtraction already gives 0).
-- **Live acceptance (supervisor):** FULL bundle on every OBS box; `#800 mix: frozen=1` once a
-  stream / recording runs or 30 s after the last cut, `total_buffering=` flat after it; a forced
+  `FREEZE_ABSENT` list (the absent half refuses the retired settle: `genlock_settle_tick`, the
+  settle define, the settle clock), required by the pwsh step "Assert the audio buffering freeze is
+  present (issue 1425)" in both `windows-genlock*.yml`; the per-tick order; the count's two capture
+  sites in the encoded branch.
+- Mutation (scratch tree, the tests compiled once against it, both pwsh steps run for real): see the
+  lane returns on the ticket (round 1: 36/38 killed, 2 equivalent; round 2: the re-run on the
+  encoder-only code).
+- **Live acceptance (supervisor):** FULL bundle on every OBS box; `#800 mix: frozen=1` while a
+  stream / recording runs and `frozen=0` otherwise; `total_buffering=` flat while frozen; a forced
   member outage while streaming locally logs one `fell behind the mix (frozen at …)` line and no
   `total audio buffering is now` growth, and `mixed_late=` rises by that one event and then stays
-  flat (a rising count = a storm, the 2b limit); on resolume a media / `NDI test` start in place
-  more than 30 s after the last cut: FOH hears it (a `mixed_late` storm there = the clip is muted);
-  the release E2E A/V gate green.
-- **Size.** `audio_callback` is about 268 lines and `obs-audio.c` about 1113 (already over 1000
+  flat (a rising count = a storm, the 2b limit); on resolume (no encoder) a late media / `NDI test`
+  start still logs its ABOVE line and FOH hears it; the release E2E A/V gate green.
+- **Size.** `audio_callback` is about 265 lines and `obs-audio.c` about 1105 (already over 1000
   upstream): the next audio-thread addition first moves the #800 telemetry block into a helper, as
   `audio_stall_dump` already was.
-
