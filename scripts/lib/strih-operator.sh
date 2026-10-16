@@ -920,6 +920,12 @@ strih_operator_grade_rows() {
   sleep "$gap"
   d2="$(strih_operator_grab "$user" "$home")"
   strih_operator_panel_verdict "$d1" "$d2" "$gap"
+  # issue 1418 (16.10.2026): the stream role has one screen carrying the stream OBS and the Restreamer
+  # dashboard; a fullscreen Multiview projector would cover them, so the row is not graded there.
+  if [ "$(strih_box_role 2>/dev/null || echo strih)" = stream ]; then
+    printf 'NOTE|(mv-projector) not graded: the stream role has no Multiview projector (one screen, it would cover the stream OBS and the Restreamer dashboard)\n'
+    return 0
+  fi
   local hdmi_mv=0
   if strih_operator_hdmi_shows_multiview "${home}/.camera-box/drm-output.json"; then hdmi_mv=1; fi
   strih_operator_projector_verdict "$(_strih_operator_on_x "$user" "$home" 10 \
