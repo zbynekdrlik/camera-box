@@ -16,6 +16,10 @@
 //! - `str`: open loop on a locked servo: 16-sample packets (the ring wraps; the median of the newest
 //!   256), 1500-sample packets (an even last half: the two middle errors averaged) and 200 ms packets
 //!   (the 8-packet gate).
+//! - `stx` (mutation round): the reference stays the one at the open across a window close, a lost
+//!   and re-taken capture and a placement each start a new candidate, a median inside the band
+//!   against the setpoint at the confirmation books nothing, and a jump the owed cap refuses leaves
+//!   the smoothed error alone.
 //!
 //! The issue-1367 scenarios (`tests/asrc_compensator_parity_1367.rs`) keep the timecode and arrival
 //! bases; this file adds only the stamp basis, so neither file grows past its budget. It also pins
@@ -166,10 +170,75 @@ static void str_scenario(void)
 	}
 }
 
+/* the candidate's edges, open loop on a locked 128-sample servo:
+ * - stxema: a steady -10.5 ms error the level loop reads too, so a window close moves the smoothed
+ *   error inside the candidate; judged against the reference at the open it still confirms;
+ * - stxinert: a candidate, then the capture dropped (a capture-rule change) and re-taken while the
+ *   placement error stays beyond the band: the re-taken capture starts a new candidate;
+ * - stxplace: a placement inside a candidate starts a new one;
+ * - stxband: a payment walks the setpoint up while the error tracks it 10.2 ms above it; the median of
+ *   the last half lands inside the band against the setpoint at the confirmation: nothing is booked;
+ * - stxcap: with the payment held, a second jump the owed cap refuses books nothing and leaves the
+ *   smoothed error where the window took it. */
+static void stx_scenario(void)
+{
+	const double p = 128.0 / 48000.0;
+	const double pm = p * 1000.0;
+	struct asrc_compensator c;
+	double applied = 0.0;
+	st_lock(&c, p);
+	for (long k = 0; k < 800; k++) {
+		asrc_compensator_observe_placement(&c, -10.5, pm, false);
+		asrc_compensator_compensate(&c, p, p, -10.5, &applied);
+		(void)asrc_compensator_take_step_recover_ppm(&c);
+		if (k % 50 == 49 || (k >= 370 && k <= 380))
+			stline("stxema", k, &c, 0.0);
+	}
+	st_lock(&c, p);
+	for (long k = 0; k < 150; k++)
+		asrc_compensator_observe_placement(&c, -44.0, pm, false);
+	asrc_compensator_set_level_absolute(&c, false);
+	for (long k = 0; k < 900; k++) {
+		asrc_compensator_observe_placement(&c, -44.0, pm, false);
+		asrc_compensator_compensate(&c, p, p, 0.0, &applied);
+		(void)asrc_compensator_take_step_recover_ppm(&c);
+		if (k % 25 == 24)
+			stline("stxinert", k, &c, 0.0);
+	}
+	st_lock(&c, p);
+	for (long k = 0; k < 500; k++) {
+		asrc_compensator_observe_placement(&c, -44.0, pm, k == 100);
+		if (k % 25 == 24 || k == 100 || k == 101)
+			stline("stxplace", k, &c, 0.0);
+	}
+	st_lock(&c, p);
+	for (long k = 0; k < 376; k++)
+		asrc_compensator_observe_placement(&c, -50.0, pm, false);
+	const double e0 = c.level_err_ema_ms;
+	for (long k = 0; k < 800; k++) {
+		const double err = c.level_target_ms + e0 + 10.2;
+		asrc_compensator_observe_placement(&c, err, pm, false);
+		asrc_compensator_compensate(&c, p, p, err, &applied);
+		(void)asrc_compensator_take_step_recover_ppm(&c);
+		if (k % 50 == 49 || (k >= 370 && k <= 380))
+			stline("stxband", k, &c, 0.0);
+	}
+	st_lock(&c, p);
+	asrc_compensator_set_step_recover_hold(&c, true);
+	for (long k = 0; k < 800; k++) {
+		asrc_compensator_observe_placement(&c, -150.0, pm, false);
+		asrc_compensator_compensate(&c, p, p, -150.0, &applied);
+		(void)asrc_compensator_take_step_recover_ppm(&c);
+		if (k % 50 == 49 || (k >= 370 && k <= 380) || (k >= 745 && k <= 760))
+			stline("stxcap", k, &c, 0.0);
+	}
+}
+
 int main(void)
 {
 	st_scenario();
 	str_scenario();
+	stx_scenario();
 	return 0;
 }
 "##;
@@ -328,6 +397,61 @@ fn rust_trace() -> Vec<String> {
             out.push(stline("str200", k, &c, 0.0));
         }
     }
+    // stx
+    {
+        let p = 128.0 / 48000.0;
+        let pm = p * 1000.0;
+        let feed = |c: &mut RealtimeAsrcCompensator, err: f64, level: f64| {
+            c.observe_placement(err, pm, false);
+            c.compensate_with_level(p, p, level);
+            c.take_step_recover_ppm();
+        };
+        let mut c = st_lock(p);
+        for k in 0..800_i64 {
+            feed(&mut c, -10.5, -10.5);
+            if k % 50 == 49 || (370..=380).contains(&k) {
+                out.push(stline("stxema", k, &c, 0.0));
+            }
+        }
+        let mut c = st_lock(p);
+        for _ in 0..150 {
+            c.observe_placement(-44.0, pm, false);
+        }
+        c.set_level_absolute(false);
+        for k in 0..900_i64 {
+            feed(&mut c, -44.0, 0.0);
+            if k % 25 == 24 {
+                out.push(stline("stxinert", k, &c, 0.0));
+            }
+        }
+        let mut c = st_lock(p);
+        for k in 0..500_i64 {
+            c.observe_placement(-44.0, pm, k == 100);
+            if k % 25 == 24 || k == 100 || k == 101 {
+                out.push(stline("stxplace", k, &c, 0.0));
+            }
+        }
+        let mut c = st_lock(p);
+        for _ in 0..376 {
+            c.observe_placement(-50.0, pm, false);
+        }
+        let e0 = c.level_err_ema_ms();
+        for k in 0..800_i64 {
+            let err = c.level_target_ms() + e0 + 10.2;
+            feed(&mut c, err, err);
+            if k % 50 == 49 || (370..=380).contains(&k) {
+                out.push(stline("stxband", k, &c, 0.0));
+            }
+        }
+        let mut c = st_lock(p);
+        c.set_step_recover_hold(true);
+        for k in 0..800_i64 {
+            feed(&mut c, -150.0, -150.0);
+            if k % 50 == 49 || (370..=380).contains(&k) || (745..=760).contains(&k) {
+                out.push(stline("stxcap", k, &c, 0.0));
+            }
+        }
+    }
     out
 }
 
@@ -474,6 +598,36 @@ fn c_stamp_basis_matches_the_rust_authority_1425() {
     assert!(
         field(at(&r, "str200", 6), "jumps") == 0.0 && field(at(&r, "str200", 7), "jumps") == 1.0,
         "the 8-packet gate holds a large-packet source"
+    );
+    let last = |tag: &str| {
+        r.iter()
+            .rev()
+            .find(|l| l.starts_with(&format!("{tag} ")))
+            .unwrap_or_else(|| panic!("no {tag} line"))
+    };
+    assert!(
+        field(at(&r, "stxema", 380), "jumps") == 1.0
+            && (field(at(&r, "stxema", 380), "lastj") + 10.5).abs() < 1e-9,
+        "a window close inside the candidate does not move its reference"
+    );
+    assert_eq!(
+        field(last("stxinert"), "jumps"),
+        1.0,
+        "the re-taken capture confirms its own candidate"
+    );
+    assert!(
+        field(at(&r, "stxplace", 474), "jumps") == 0.0
+            && field(at(&r, "stxplace", 499), "jumps") == 1.0,
+        "a placement restarts the window"
+    );
+    assert_eq!(
+        field(last("stxband"), "jumps"),
+        1.0,
+        "a median inside the band against the setpoint at the confirmation books nothing"
+    );
+    assert!(
+        field(last("stxcap"), "jumps") == 1.0 && field(last("stxcap"), "rec") == 100.0,
+        "the owed cap refuses the second jump"
     );
 }
 
