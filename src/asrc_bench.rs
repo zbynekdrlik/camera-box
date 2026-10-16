@@ -3590,6 +3590,38 @@ mod tests {
         );
     }
 
+    /// Issue 1425 (E2 slice 3, design 6220191978): an ARRIVAL-basis source holds the depth it had
+    /// when the rate regression locked, whatever that depth is. Once synced, nothing may move a
+    /// buffer at runtime (owner, 16.10.2026), and the absolute 100 ms target did exactly that: it
+    /// walked a source that locked at 9 ms (the `mbc` depth at zero buffering) or at 126 ms to
+    /// 100 ms, tens of ms of audio moved after the lock. A default compensator, at the live −5 ppm,
+    /// with no setter called, must capture the depth at lock and hold it for an hour.
+    #[test]
+    fn an_arrival_source_holds_its_depth_at_lock_and_never_walks_1425() {
+        const WINDOWS: usize = 3600;
+        // the regression locks after a 60 s span; the depth drains 0.3 ms before that at −5 ppm
+        const LOCK_FROM: usize = 70;
+        for start_ms in [0.0, 9.0, 64.0, 126.0, 300.0] {
+            let r = run_level_1355(RealtimeAsrcCompensator::new(), start_ms, WINDOWS, 0.0, None);
+            let at_lock = r.trace[LOCK_FROM].0;
+            let worst = r.trace[LOCK_FROM..]
+                .iter()
+                .map(|(b, _, _)| (b - at_lock).abs())
+                .fold(0.0_f64, f64::max);
+            assert!(
+                (r.c.level_target_ms() - start_ms).abs() < 1.0 && worst < 1.0,
+                "issue 1425: an arrival source that locked at {start_ms} ms must keep that depth \
+                 (no walk to an absolute target): target {:.3} ms, depth moved up to {worst:.3} ms \
+                 after the lock",
+                r.c.level_target_ms()
+            );
+            assert!(
+                !r.c.level_restore() && r.c.step_count() == 0,
+                "issue 1425: a held depth arms no restore and re-bases nothing (start {start_ms} ms)"
+            );
+        }
+    }
+
     /// issue #1367 bench: the LIVE stream `mbc` operating point, one audio callback at a time. A
     /// +20 ppm source (the 24.9. production `estimated=`) delivers 128-sample blocks (the Dante VSC
     /// block, 2.667 ms) into a mix buffer the OBS mixer drains 1024 samples at a time (one 21.33 ms

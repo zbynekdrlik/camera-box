@@ -684,6 +684,32 @@ fn the_arrival_servo_moves_av_with_the_buffering_and_the_phase_1425() {
     }
 }
 
+/// Issue 1425 (E2 slice 3, design 6220191978): the arrival servo keeps the A/V it had when it locked.
+/// Its setpoint is the depth at lock (the absolute 100 ms target is gone), so nothing walks the
+/// buffer after the lock, at any buffering and launch phase: the owner's rule that a synced OBS never
+/// moves a buffer at runtime. On `mbc`'s 128-sample packets the per-callback depth reading is
+/// averaged over many packets per tick; a tick-long PulseAudio packet carries its walking
+/// packet-vs-tick phase into that reading (consult F2), which is why such a source runs on the stamp
+/// basis in production.
+#[test]
+fn the_arrival_servo_keeps_the_av_it_locked_at_1425() {
+    // the regression locks after a 60 s span; read the ten seconds right after
+    const LOCK_S: std::ops::Range<usize> = 61..71;
+    for (b, p, r) in sweep(MBC, Servo::Arrival) {
+        let at_lock = r.av_s[LOCK_S].iter().sum::<f64>() / LOCK_S.len() as f64;
+        let moved = r
+            .steady()
+            .iter()
+            .fold(0.0_f64, |m, v| m.max((v - at_lock).abs()));
+        assert!(
+            moved <= SPREAD_BOUND_MS,
+            "issue 1425: mbc B={b} ticks phase={p}/4: the arrival servo must keep the A/V it locked \
+             at ({at_lock:.3} ms): it moved up to {moved:.3} ms (steady mean {:.3} ms)",
+            r.steady_mean_ms()
+        );
+    }
+}
+
 #[test]
 fn without_a_servo_the_av_walks_with_the_source_rate_1425() {
     // anti-tautology: no ASRC. +20 ppm = the samples land 20 us/s later than their stamps, -20 earlier.
