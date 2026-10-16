@@ -390,6 +390,37 @@ static void set_floor_audio_buffering(struct obs_core_audio *audio, size_t sampl
 	     (int)total_ms);
 }
 
+/* camera-box issue 1425 slice 3 (ROZHODNUTE 6221252305): the launch settle window. The mix time of the
+ * mix's first audio tick, audio thread only: a file-scope static like the issue-1381 mixer tick, never
+ * reset, so an audio reset of a running OBS opens no new window. */
+static uint64_t genlock_launch_first_tick_ns = 0;
+/* This tick: an audio encoder runs while the launch has not settled (set by genlock_buffering_frozen_now). */
+static bool genlock_launch_encoder_unsettled = false;
+/* The settle-window growth line is logged once per process. */
+static bool genlock_launch_growth_logged = false;
+
+/* This tick's freeze (obs-genlock-audio-buffering.h): an audio encoder runs AND the launch's startup race
+ * is over. `mix_ts` = the processed window's start. */
+static inline bool genlock_buffering_frozen_now(uint64_t mix_ts, bool encoder_active)
+{
+	if (!genlock_launch_first_tick_ns)
+		genlock_launch_first_tick_ns = mix_ts;
+	const bool settled = genlock_audio_buffering_launch_settled(genlock_launch_first_tick_ns, mix_ts);
+	genlock_launch_encoder_unsettled = encoder_active && !settled;
+	return genlock_audio_buffering_frozen(encoder_active, settled);
+}
+
+/* A growth of `ms` while an encoder ran inside the launch settle window: that output's audio is later
+ * by it for good. One LOUD line per process, so the one-off launch-time effect is visible. */
+static inline void genlock_launch_growth_log(size_t ms)
+{
+	if (!genlock_launch_encoder_unsettled || genlock_launch_growth_logged)
+		return;
+	genlock_launch_growth_logged = true;
+	blog(LOG_WARNING, "genlock audio buffering: grew %d ms while an encoder ran inside the launch settle window",
+	     (int)ms);
+}
+
 static void add_audio_buffering(struct obs_core_audio *audio, size_t sample_rate, struct ts_info *ts, uint64_t min_ts,
 				const char *buffering_name)
 {
@@ -431,6 +462,7 @@ static void add_audio_buffering(struct obs_core_audio *audio, size_t sample_rate
 	     "genlock audio buffering ABOVE the floor (issue 1367): adding %d milliseconds of audio buffering, total "
 	     "audio buffering is now %d milliseconds (source: %s)",
 	     (int)ms, (int)total_ms, buffering_name);
+	genlock_launch_growth_log(ms);
 #if DEBUG_AUDIO == 1
 	blog(LOG_DEBUG,
 	     "min_ts (%" PRIu64 ") < start timestamp "
@@ -894,10 +926,12 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	 * tree reached. Mark it before the loop below adds every other audio source (rendered for meters
 	 * and monitoring, never mixed). */
 	genlock_mix_mark_members(audio);
-	/* camera-box issue 1425 (E2 slice 2, ROZHODNUTE 6217557472): the buffering FREEZE for this tick --
-	 * an output with an audio encoder is active. A member that then falls behind the window is
-	 * re-anchored (MIXED_LATE) and the dynamic increase is off; with no encoder, stock growth. */
-	audio->genlock_buffering_frozen = genlock_audio_buffering_frozen(obs_output_genlock_audio_encoder_outputs() > 0);
+	/* camera-box issue 1425 (E2 slice 2, ROZHODNUTE 6217557472 + 6221252305): the buffering FREEZE for
+	 * this tick -- an output with an audio encoder is active and the launch settle window is over. A
+	 * member that then falls behind the window is re-anchored (MIXED_LATE) and the dynamic increase is
+	 * off; with no encoder, or inside the window, stock growth. */
+	audio->genlock_buffering_frozen =
+		genlock_buffering_frozen_now(ts.start, obs_output_genlock_audio_encoder_outputs() > 0);
 
 	pthread_mutex_lock(&data->audio_sources_mutex);
 

@@ -7,7 +7,8 @@
  * judged by its own stamp, so its A/V no longer depends on the buffering; since slice 2 the buffering
  * cannot grow while an audio encoder runs; and slice 3 (design 6220191978) deleted the absolute target
  * and set the floor to 0. A launch now starts at 0 like stock OBS, its own startup race grows it
- * (stock OBS drew 0, 64 or 85 ms per launch), and nothing moves it after an encoder starts.
+ * (stock OBS drew 0, 64 or 85 ms per launch), and nothing moves it once an encoder runs after the
+ * launch settle window (ROZHODNUTE 6221252305).
  *
  * - genlock_audio_buffering_make_plan() (obs_reset_audio2): the floor is GENLOCK_AUDIO_BUFFERING_FLOOR_MS
  *   rounded up to whole ticks the way OBS rounds its own maximum (0 ticks today). Fixed buffering is
@@ -23,7 +24,11 @@
  *   encoder a growth moves no live output's A/V, so such a box (the resolume cg OBS) keeps stock
  *   growth. A mixed source that falls behind a frozen window is re-anchored instead
  *   (obs-genlock-mix-guard.h MIXED_LATE). Nothing ever steps down mid-run: the buffering starts over
- *   at the next launch.
+ *   at the next launch. Since issue 1425 slice 3 (ROZHODNUTE 6221252305) the freeze also waits out
+ *   the launch's startup race: GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS of mix time after the mix's
+ *   first audio tick (genlock_audio_buffering_launch_settled), so an output started within seconds
+ *   of a launch (--startstreaming, Companion, an operator) never mutes a member that is a few ms
+ *   late; it gets that launch's growth instead, logged once.
  *
  * Pure: stdint/stdbool only, no libobs types -- tests/genlock_audio_buffering_parity_1367.rs
  * compiles this header as-is and requires byte-identical results from the Tier-0 Rust authority
@@ -39,6 +44,10 @@
 /* OBS's own maximum when the caller asks for none (obs_reset_audio2), and the maximum of an
  * overridden request. Mirror of DEFAULT_MAX_TICKS. */
 #define GENLOCK_AUDIO_BUFFERING_DEFAULT_MAX_TICKS 45u
+/* issue 1425 slice 3 (ROZHODNUTE 6221252305): the launch settle window, ns of mix time after the mix's
+ * first audio tick, during which a running encoder does not freeze the buffering (the startup race
+ * draws it). Mirror of src/genlock_audio_buffering.rs LAUNCH_SETTLE_NS. */
+#define GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS 30000000000ULL
 
 /* genlock_audio_buffering_action() results. Mirror of src/genlock_audio_buffering.rs BufferingAction. */
 #define GENLOCK_AUDIO_BUFFERING_ACTION_NONE 0
@@ -74,13 +83,15 @@ static inline uint64_t genlock_audio_buffering_ticks_ns(uint32_t ticks, uint32_t
 	return (uint64_t)ticks * (uint64_t)frames * 1000000000ULL / (uint64_t)rate;
 }
 
-/* The floor, the dynamic maximum, and whether the request was overridden. req_max_ms == 0 means
- * OBS's default maximum. Mirror of plan. */
-static inline struct genlock_audio_buffering_plan genlock_audio_buffering_make_plan(uint32_t req_max_ms, bool req_fixed,
-									       uint32_t rate, uint32_t frames)
+/* The plan for a given floor (ms): the floor, the dynamic maximum, and whether the request was
+ * overridden. req_max_ms == 0 means OBS's default maximum. Mirror of plan_with_floor; the shipped
+ * floor 0 never reaches the override or the max lift, this keeps both testable. */
+static inline struct genlock_audio_buffering_plan
+genlock_audio_buffering_make_plan_floor(uint32_t floor_ms, uint32_t req_max_ms, bool req_fixed, uint32_t rate,
+					uint32_t frames)
 {
 	struct genlock_audio_buffering_plan p;
-	p.floor_ticks = genlock_audio_buffering_ticks(GENLOCK_AUDIO_BUFFERING_FLOOR_MS, rate, frames);
+	p.floor_ticks = genlock_audio_buffering_ticks(floor_ms, rate, frames);
 	const uint32_t req_ticks = req_max_ms != 0 ? genlock_audio_buffering_ticks(req_max_ms, rate, frames)
 						   : GENLOCK_AUDIO_BUFFERING_DEFAULT_MAX_TICKS;
 	p.overridden = req_fixed || req_ticks < p.floor_ticks;
@@ -89,6 +100,14 @@ static inline struct genlock_audio_buffering_plan genlock_audio_buffering_make_p
 		p.max_ticks = p.floor_ticks;
 	p.fixed = false;
 	return p;
+}
+
+/* The plan at the shipped floor (obs_reset_audio2). Mirror of plan. */
+static inline struct genlock_audio_buffering_plan genlock_audio_buffering_make_plan(uint32_t req_max_ms, bool req_fixed,
+									       uint32_t rate, uint32_t frames)
+{
+	return genlock_audio_buffering_make_plan_floor(GENLOCK_AUDIO_BUFFERING_FLOOR_MS, req_max_ms, req_fixed, rate,
+						       frames);
 }
 
 /* The floor-then-dynamic rule for one mixer tick; source_behind = obs-audio.c `min_ts < ts.start`,
@@ -104,10 +123,21 @@ static inline int genlock_audio_buffering_action(int total_ticks, int floor_tick
 	return source_behind && !frozen ? GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC : GENLOCK_AUDIO_BUFFERING_ACTION_NONE;
 }
 
-/* issue 1425 (ROZHODNUTE 6217557472): whether the mix's buffering is frozen on this tick -- an output
- * with an audio encoder is active. Nothing else freezes it: a box with no audio encoder keeps stock
- * growth. Mirror of frozen. */
-static inline bool genlock_audio_buffering_frozen(bool encoder_active)
+/* issue 1425 slice 3 (ROZHODNUTE 6221252305): whether the launch's startup race is over -- at least
+ * GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS of mix time since the mix's first audio tick (first_tick_ns,
+ * 0 = no tick yet). A mix time before the first tick (never on the monotonic audio timeline) reads
+ * settled, so the freeze never lifts mid-run. Mirror of launch_settled. */
+static inline bool genlock_audio_buffering_launch_settled(uint64_t first_tick_ns, uint64_t now_ns)
 {
-	return encoder_active;
+	if (first_tick_ns == 0)
+		return false;
+	return now_ns < first_tick_ns || now_ns - first_tick_ns >= GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS;
+}
+
+/* issue 1425 (ROZHODNUTE 6217557472 + 6221252305): whether the mix's buffering is frozen on this tick --
+ * an output with an audio encoder is active AND the launch has settled. Nothing else freezes it: a box
+ * with no audio encoder keeps stock growth. Mirror of frozen. */
+static inline bool genlock_audio_buffering_frozen(bool encoder_active, bool settled)
+{
+	return encoder_active && settled;
 }

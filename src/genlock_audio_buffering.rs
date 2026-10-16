@@ -176,10 +176,27 @@ pub fn action(
     }
 }
 
-/// Issue 1425 (ROZHODNUTÉ 6217557472): whether the mix's buffering is frozen on this tick — an
-/// output with an audio encoder is active. Nothing else freezes it.
-pub fn frozen(encoder_active: bool) -> bool {
-    encoder_active
+/// Issue 1425 slice 3 (ROZHODNUTÉ 6221252305): the launch settle window, ns of mix time after the
+/// mix's first audio tick, during which a running encoder does not freeze the buffering (the
+/// startup race draws it). Mirror of `GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS`.
+pub const LAUNCH_SETTLE_NS: u64 = 30_000_000_000;
+
+/// Whether the launch's startup race is over: at least [`LAUNCH_SETTLE_NS`] of mix time since the
+/// mix's first audio tick (`first_tick_ns`, 0 = no tick yet). A mix time before the first tick
+/// reads settled, so the freeze never lifts mid-run. Mirror of
+/// `genlock_audio_buffering_launch_settled`.
+pub fn launch_settled(first_tick_ns: u64, now_ns: u64) -> bool {
+    if first_tick_ns == 0 {
+        return false;
+    }
+    now_ns < first_tick_ns || now_ns - first_tick_ns >= LAUNCH_SETTLE_NS
+}
+
+/// Issue 1425 (ROZHODNUTÉ 6217557472 + 6221252305): whether the mix's buffering is frozen on this
+/// tick — an output with an audio encoder is active AND the launch has settled. Nothing else
+/// freezes it.
+pub fn frozen(encoder_active: bool, settled: bool) -> bool {
+    encoder_active && settled
 }
 
 #[cfg(test)]
@@ -315,15 +332,43 @@ mod tests {
     }
 
     #[test]
-    fn only_a_running_audio_encoder_freezes_the_mix_1425() {
-        // A stream or a recording freezes it; with no audio encoder (the resolume cg OBS) the mix
-        // keeps stock growth, however long it has been quiet.
-        assert!(frozen(true));
-        assert!(!frozen(false));
+    fn only_a_running_audio_encoder_after_the_launch_settle_freezes_the_mix_1425() {
+        // A stream or a recording freezes it once the launch has settled; with no audio encoder
+        // (the resolume cg OBS) the mix keeps stock growth, however long it has been quiet.
+        assert!(frozen(true, true));
+        assert!(!frozen(false, true));
+        // ROZHODNUTÉ 6221252305: inside the launch settle window an encoder does not freeze it.
+        assert!(!frozen(true, false));
+        assert!(!frozen(false, false));
         assert_eq!(
-            action(0, 0, 45, true, frozen(false)),
+            action(0, 0, 45, true, frozen(false, true)),
             BufferingAction::Dynamic
         );
-        assert_eq!(action(0, 0, 45, true, frozen(true)), BufferingAction::None);
+        assert_eq!(
+            action(0, 0, 45, true, frozen(true, true)),
+            BufferingAction::None
+        );
+        assert_eq!(
+            action(0, 0, 45, true, frozen(true, false)),
+            BufferingAction::Dynamic
+        );
+    }
+
+    #[test]
+    fn the_launch_settles_30_s_of_mix_time_after_the_first_tick_1425() {
+        let first = 1_000_000_000;
+        assert_eq!(LAUNCH_SETTLE_NS, 30_000_000_000);
+        // No tick yet: never settled.
+        assert!(!launch_settled(0, first));
+        assert!(!launch_settled(0, u64::MAX));
+        // The first tick, then the window's edge.
+        assert!(!launch_settled(first, first));
+        assert!(!launch_settled(first, first + LAUNCH_SETTLE_NS - 1));
+        assert!(launch_settled(first, first + LAUNCH_SETTLE_NS));
+        assert!(launch_settled(first, first + 3_600_000_000_000));
+        // A mix time before the first tick reads settled: the freeze never lifts mid-run.
+        assert!(launch_settled(first, first - 1));
+        // Never overflows at the top of the clock.
+        assert!(!launch_settled(u64::MAX - 1, u64::MAX));
     }
 }
