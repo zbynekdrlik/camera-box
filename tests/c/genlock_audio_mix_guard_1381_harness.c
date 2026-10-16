@@ -183,7 +183,6 @@ static inline const char *obs_source_get_name(const obs_source_t *s)
 }
 /* obs-output.c (issue 1425): the outputs running an audio encoder -- a stream or a recording */
 static long h_encoders;
-static long obs_output_genlock_audio_encoder_outputs(void) __attribute__((unused));
 static long obs_output_genlock_audio_encoder_outputs(void)
 {
 	return h_encoders;
@@ -265,16 +264,6 @@ static inline void clear_audio_output_buf(obs_source_t *source, struct obs_core_
 /* ---- lifted verbatim from obs-audio.c / audio-io.h ---- */
 @LIFTED_FUNCTIONS@
 /* ---- end lift ---- */
-
-/* issue 1425: the guard's decision with the freeze input (the RED commit compiled this harness against
- * the pre-freeze header, whose decision has no frozen argument). */
-#ifdef GENLOCK_MIX_GUARD_MIXED_LATE
-#define H_REASON(member, entered, composite, ts, start, frozen) \
-	genlock_mix_guard_reason(member, entered, composite, ts, start, frozen)
-#else
-#define H_REASON(member, entered, composite, ts, start, frozen) \
-	((void)(frozen), genlock_mix_guard_reason(member, entered, composite, ts, start))
-#endif
 
 /* ---- the harness: a source model and scenarios ---- */
 #define H_RATE 48000u
@@ -511,7 +500,7 @@ static void h_probe(const char *what, uint64_t behind_ns, size_t floats, bool di
 	s.timing_set = true;
 	s.audio_ts = behind_ns ? start - behind_ns : 0;
 	t = s;
-	const int reason = H_REASON(false, false, false, s.audio_ts, start, false);
+	const int reason = genlock_mix_guard_reason(false, false, false, s.audio_ts, start, false);
 	int sync = -1;
 	const char *parity = "n/a";
 	if (reason != GENLOCK_MIX_GUARD_NONE || direct)
@@ -747,7 +736,7 @@ int main(void)
 		for (int k = 0; k < 32; k++) {
 			const uint64_t start = 5000000000ULL;
 			const uint64_t ts = (k & 2) ? start - 2 : start;
-			const int r = H_REASON((k & 16) != 0, (k & 8) != 0, (k & 4) != 0, ts, start, (k & 1) != 0);
+			const int r = genlock_mix_guard_reason((k & 16) != 0, (k & 8) != 0, (k & 4) != 0, ts, start, (k & 1) != 0);
 			table[k] = (char)('0' + r);
 		}
 		table[32] = '\0';
@@ -766,7 +755,7 @@ int main(void)
 		m.timing_set = true;
 		m.audio_ts = start - 10000000ULL;
 		h_obs.audio.total_buffering_ticks = 4;
-		const int reason = H_REASON(true, false, false, m.audio_ts, start, true);
+		const int reason = genlock_mix_guard_reason(true, false, false, m.audio_ts, start, true);
 		const bool sync = genlock_mix_guard_reanchor(&h_obs.audio, &m, H_CH, H_RATE, start, reason);
 		printf("probe mixed-late: reason=%d in_sync=%d events=%" PRIu64 " mixed_late=%" PRIu64
 		       " mixed_late_dropped_ms=%.1f mix_mixed_late=%" PRIu64 "\n",
