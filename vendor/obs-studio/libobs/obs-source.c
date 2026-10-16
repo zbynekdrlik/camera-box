@@ -2038,17 +2038,38 @@ static inline struct genlock_audio_rate_point genlock_audio_asrc_rate_point(int 
 									     double prev_raw_s, double *pend_raw_s,
 									     double *pend_master_s, bool *pend_due)
 {
-	/* issue 1425 RED: every basis still drops a packet with no stamp advance */
 	struct genlock_audio_rate_point point = {false, 0.0, 0.0, false};
-	(void)basis;
-	*pend_raw_s = 0.0;
-	*pend_master_s = 0.0;
-	*pend_due = false;
-	if (contiguous && master_s > 0.0) {
-		point.due = true;
-		point.raw_s = prev_raw_s;
-		point.master_s = master_s;
+	if (basis != GENLOCK_AUDIO_ASRC_BASIS_STAMP) {
+		*pend_raw_s = 0.0;
+		*pend_master_s = 0.0;
+		*pend_due = false;
+		if (contiguous && master_s > 0.0) {
+			point.due = true;
+			point.raw_s = prev_raw_s;
+			point.master_s = master_s;
+		}
+		return point;
 	}
+	if (!contiguous) {
+		*pend_raw_s = 0.0;
+		*pend_master_s = 0.0;
+		*pend_due = false;
+		return point;
+	}
+	if (master_s > 0.0) {
+		if (*pend_due) {
+			point.due = true;
+			point.raw_s = *pend_raw_s;
+			point.master_s = *pend_master_s;
+		}
+		*pend_raw_s = prev_raw_s;
+		*pend_master_s = master_s;
+		*pend_due = true;
+		return point;
+	}
+	if (*pend_due)
+		*pend_raw_s += prev_raw_s;
+	point.keep_prev_stamp = true;
 	return point;
 }
 /* camera-box issue 1381 (design 5882391108, piece 2): the per-source SKEW HOLD across a wall step. A

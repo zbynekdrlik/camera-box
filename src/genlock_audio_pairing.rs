@@ -773,20 +773,42 @@ pub fn audio_asrc_rate_point(
     prev_raw_s: f64,
     pending: &mut AsrcRatePending,
 ) -> AsrcRatePoint {
-    // issue 1425 RED: every basis still drops a packet with no stamp advance
-    let _ = basis;
-    *pending = AsrcRatePending::default();
     let mut point = AsrcRatePoint {
         due: false,
         raw_s: 0.0,
         master_s: 0.0,
         keep_prev_stamp: false,
     };
-    if contiguous && master_s > 0.0 {
-        point.due = true;
-        point.raw_s = prev_raw_s;
-        point.master_s = master_s;
+    if basis != AsrcBasis::Stamp {
+        *pending = AsrcRatePending::default();
+        if contiguous && master_s > 0.0 {
+            point.due = true;
+            point.raw_s = prev_raw_s;
+            point.master_s = master_s;
+        }
+        return point;
     }
+    if !contiguous {
+        *pending = AsrcRatePending::default();
+        return point;
+    }
+    if master_s > 0.0 {
+        if pending.due {
+            point.due = true;
+            point.raw_s = pending.raw_s;
+            point.master_s = pending.master_s;
+        }
+        *pending = AsrcRatePending {
+            raw_s: prev_raw_s,
+            master_s,
+            due: true,
+        };
+        return point;
+    }
+    if pending.due {
+        pending.raw_s += prev_raw_s;
+    }
+    point.keep_prev_stamp = true;
     point
 }
 
