@@ -14,8 +14,10 @@ paths:
 1000 lines. The FULL-mode plugin PowerShell blocks (distroav to its ProgramData load path, the paced
 obs-vban backup + byte-verify) live in `scripts/lib/genlock-plugin-deploy.sh` as pure printers
 (`genlock_plugin_backup_ps` / `genlock_plugin_deploy_ps MODE`); add a new plugin's block there,
-never inline in the main script. It sits at 997 lines since issue 1302: the stats-ABI blocks live in
-`scripts/lib/genlock-stats-abi.sh` for the same reason.
+never inline in the main script. The stats-ABI blocks live in `scripts/lib/genlock-stats-abi.sh`
+for the same reason (issue 1302), and since issue 1426 the box list itself (`fleet_normalize_boxes`,
+`fleet_deploy_order`) lives in `scripts/lib/genlock-fleet-boxes.sh` and the per-box Linux apply loop
+(`strih_lx_apply_all`) in `scripts/lib/strih-snv-deploy.sh`; the script sits at 958 lines.
 
 ## A FAST deploy refuses an obs.dll with another stats ABI (issue 1302, design 6028838843, ROZHODNUTÉ 6030159870)
 
@@ -158,6 +160,58 @@ The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-snv. So:
   `setup-strih.sh` (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is
   supervised by `strih-obs.service`. **Every plan line is a `#` comment** (the issue-1295 saved-.ps1
   parse rule holds for a mixed plan).
+
+## The PP Linux boxes take the SAME arm (issue 1426) — dial the fleet NAME, an away box is AWAY
+
+Before issue 1426 the planner knew only strih-snv / stream-snv / imag / resolume-snv, so the 13.10.2026
+PP roll was done by hand and strih-pp went back to an older build the next day with nothing noticing
+until the fleet-parity watchdog. Now:
+
+- **Which boxes take the Linux arm:** every obs-fleet `linux-genlock` row that has a fact file
+  `scripts/strih-boxes/<box>.env` (`fleet_box_runs_setup_strih`): strih-snv, strih-pp, stream-pp.
+  imag is linux-genlock with no fact file and keeps its own setup-imag path. A new venue's Linux OBS
+  box is one fleet row + one fact file; no planner edit.
+- **Order + default:** `fleet_deploy_order` = the setup-strih boxes in fleet row order, then
+  stream-snv, imag, resolume-snv. The default `--boxes` stays `strih-snv,stream-snv`; the PP boxes are
+  named explicitly (`--boxes strih-pp,stream-pp`). resolume-pp has no deploy path (no win-* MCP) and is
+  refused like an unknown box.
+- **Dial the fleet NAME, never the venue IP.** A PP box is dialled at its obs-fleet row host
+  (`strih-pp.lan` / `stream-pp.lan`, which dev1 reaches through companion-pp), via `fleet_box_ip`. The
+  fact file's `STRIH_IP` (10.77.8.x) is the box's address on its own venue LAN and is not routable from
+  dev1 (the avsync-venues rule). A `traveling` row must dial a plain DNS name
+  (`strih_lx_dial_host_check` / `strih_lx_is_dns_name`, spelled-out ASCII sets); strih-snv (`always`)
+  keeps the dotted-IPv4 rule and its `STRIH_LX_IP` override. `STRIH_LX_IP` never applies to a PP box.
+- **One download + one tree, per-box everything else.** `strih_lx_prepare ... <boxes>` resolves EVERY
+  box (dial host, the venue guard hosts, the fact-file hostname, its own `run-setup.<box>.sh`) before
+  any box is touched, downloads the strih FULL artifact once and archives the tree once. `strih_lx_apply
+  SHA BOX` copies that box's runner to `repo/run-setup.sh` and runs the unchanged steps with
+  `setup-strih.sh --box <box>` / `verify-strih.sh --box <box>`; every error reads `[<box> <step>]`.
+- **The rig-busy guard reads the box's VENUE** (`strih_lx_guard_hosts`): the venue is the fact file's
+  `STRIH_VENUE`; its strih is the box itself when its `STRIH_ROLE` is strih (the dial host, so the
+  strih-snv override is read where it is dialled), else the row `strih-<venue>`; its stream is the row
+  `stream-<venue>` (the issue-1414 `<role>-<venue>` names). strih-snv reads exactly what it read
+  before (its dial IP + stream-snv); both PP boxes read `strih-pp.lan` + `stream-pp.lan`.
+- **AWAY, never a failure:** a `traveling` box whose identity ssh does not connect (rc 255 = ssh could
+  not connect or resolve, rc 124 = the bound) prints one `AWAY: [<box>] ...` line and is skipped
+  (`strih_lx_apply` rc 6, nothing changed, no fleet-log line); the other boxes go on and the run exits
+  0. Any other ssh failure (a wrong password is sshpass rc 5) is still a named exit 4. An `always` box
+  (strih-snv) that does not answer stays exit 4.
+- **Exit 5 stops only that box:** `strih_lx_apply_all` logs each box the moment it is known (`<box>` or
+  `<box>:accept-failed`), goes on with the next Linux box after an acceptance failure, and returns 5
+  at the end; the non-Linux boxes (Windows programs, imag) are WITHHELD with the same NOTE as before.
+  Any exit 4 still stops the whole run at once.
+- **The SNV output is byte-identical.** `tests/fixtures/deploy_genlock_fleet_plan_strih_snv_1426.txt`
+  is the `--plan --boxes strih-snv` output captured from origin/dev before the change (date masked,
+  HOME=/home/newlevel). Before merging the change every SNV box set (strih-snv, strih-snv,stream-snv,
+  the full SNV fleet, full and fast, stdout + stderr) was diffed identical.
+- **Tests:** `tests/python/test_deploy_genlock_fleet_pp_1426.py` (the golden, the PP plan per box, the
+  order, unknown / undeployable boxes, and the execute arm with host-aware stubs: both PP boxes dialled
+  by name with the PP venue guard, an AWAY box skipped, an unreachable strih-snv still exit 4, an
+  acceptance failure on one box). The stub `ssh` answers `hostname` with the dialled host minus `.lan`.
+
+Live (supervisor, never a worker): roll strih-pp + stream-pp to the anchor build with
+`scripts/deploy-genlock-fleet.sh --run-id <anchor> --boxes strih-pp,stream-pp`; the fleet-parity
+watchdog then reads no PP outlier.
 
 ## strih-snv EXECUTE arm (issue 1317 part 6) — `scripts/lib/strih-snv-deploy.sh`
 
