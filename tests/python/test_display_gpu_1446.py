@@ -156,13 +156,47 @@ def test_two_driven_controllers_are_ok():
     assert rc == 0 and out.startswith("OK: ") and "10de:28e0" in out and "8086:46d1" in out, out
 
 
+def _utf8_locale():
+    """en_US.UTF-8 where the box has it (a bracket RANGE is locale-wide only there), else C.UTF-8."""
+    have = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout.split()
+    norm = {x.lower().replace("-", "") for x in have}
+    return "en_US.UTF-8" if "en_us.utf8" in norm else "C.UTF-8"
+
+
 def test_the_verdict_is_ascii_only_under_a_utf8_locale():
     # a non-ASCII digit in the id must not pass the hex check (the issue-1302 locale trap)
-    env = {"LC_ALL": "en_US.UTF-8"}
+    env = {"LC_ALL": _utf8_locale()}
     r = _lib('rc=0; display_gpu_verdict "$1" || rc=$?; echo "RC=$rc"',
              _rows("0000:00:02.0 8086:46d١ i915"), env=env)
     assert r.returncode == 0, r.stderr
     assert "RC=0" not in r.stdout and "FAIL: " in r.stdout, r.stdout
+
+
+def test_no_bracket_range_on_any_regex_line_of_the_lib():
+    """The locale-independent half of the test above (a runner without en_US.UTF-8 cannot bite):
+    every `=~` set is spelled out, never an X-Y range (.claude/rules/ci-testing-gotchas.md)."""
+    regexes = [ln.split("=~", 1)[1].split("]]", 1)[0]
+               for ln in _code(_read(LIB)).splitlines() if "=~" in ln]
+    assert regexes, "the lib validates ids with =~"
+    for rx in regexes:
+        for body in re.findall(r"\[([^\]]*)\]", rx):
+            assert "-" not in body, rx
+    assert "hex='0123456789abcdef'" in _read(LIB)
+
+
+def test_a_row_after_the_end_row_fails():
+    rc, out = _verdict(_rows(N100_I915) + N150_NO_DRIVER + "\n")
+    assert rc != 0 and out.startswith("FAIL: "), out
+    assert "after the end row" in out, out
+    rc, out = _verdict(_rows(N100_I915) + "end\n")
+    assert rc != 0 and "after the end row" in out, out
+
+
+def test_an_unreadable_pci_root_is_named_not_reported_as_no_controller():
+    rc, out = _verdict(_rows(kernel=K70).replace("end\n", "root-unreadable /sys/bus/pci/devices\nend\n"))
+    assert rc != 0 and out.startswith("FAIL: "), out
+    assert "/sys/bus/pci/devices is not readable" in out, out
+    assert "no PCI display controller" not in out, out
 
 
 # --- the gather snippet, run locally ------------------------------------------------------------
@@ -222,6 +256,15 @@ def test_the_gather_on_an_empty_tree_reports_no_controller(tmp_path):
     assert rc != 0 and "no PCI display controller" in v, v
 
 
+def test_the_gather_names_a_missing_pci_root(tmp_path):
+    missing = tmp_path / "no-such-pci"
+    out = _gather(env={"DISPLAY_GPU_PCI_ROOT": str(missing)})
+    assert f"root-unreadable {missing}" in out.splitlines(), out
+    assert out.splitlines()[-1] == "end", out
+    rc, v = _verdict(out)
+    assert rc != 0 and f"{missing} is not readable" in v, v
+
+
 def test_the_gather_on_this_machines_real_sysfs_parses(tmp_path):
     """The default root (/sys/bus/pci/devices): every row the real tree yields must parse.
     A runner may have no display controller; that is a named FAIL, never a malformed one."""
@@ -275,11 +318,11 @@ def test_verify_device_av_is_a_hard_gate_over_the_shared_lib():
     assert 'fail "' in code and 'warn "' not in code
 
 
-def _run_av(ssh_out, ssh_rc=0):
+def _run_av(ssh_out, ssh_rc=0, override=""):
     block = _av_block(_read(VERIFY_DEVICE))
     prelude = (f'. "{LIB}"\n'
                'ok() { echo "OK $1"; }\nfail() { echo "FAIL $1"; }\n'
-               'ssh_box() { printf "%s" "$SSH_OUT"; return "$SSH_RC"; }\n')
+               'ssh_box() { printf "%s" "$SSH_OUT"; return "$SSH_RC"; }\n' + override)
     r = _bash("set -euo pipefail\n" + prelude + block,
               env={"SSH_OUT": ssh_out, "SSH_RC": str(ssh_rc)})
     assert r.returncode == 0, r.stdout + r.stderr
@@ -298,3 +341,10 @@ def test_verify_device_av_passes_a_driven_gpu_and_fails_n150_on_68_and_unreadabl
     assert out.startswith("FAIL ") and "rc=255" in out, out
     out = _run_av(_rows())
     assert out.startswith("FAIL ") and "no PCI display controller" in out, out
+
+
+def test_verify_device_av_fails_an_empty_verdict_never_silently_passes():
+    # a verdict that printed nothing (a broken lib) must still FAIL the item, not fall through
+    out = _run_av(_rows(N100_I915), override="display_gpu_verdict() { return 1; }\n")
+    assert out.startswith("FAIL ") and "verdict was empty" in out, out
+    assert "OK " not in out, out
