@@ -38,7 +38,6 @@
 #include "obs.h"
 #include "obs-internal.h"
 #include "obs-genlock-grid.h" /* camera-box #1355: the ONE per-second genlock grid */
-#include "obs-genlock-audio-buffering.h" /* camera-box issue 1367: the audio-buffering floor */
 #include "obs-genlock-wall-step.h" /* camera-box issue 1381: GENLOCK_WALL_STEP_MIN_NS for the audio skew hold */
 #include "obs-genlock-fifo-relabel.h" /* camera-box issue 1372 part B: the receive-FIFO relabel */
 
@@ -5538,18 +5537,6 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	const uint32_t out_sample_rate = audio_output_get_sample_rate(obs->audio.audio);
 	const double buffered_ms = obs_source_input_buf_ms(source->audio_input_buf[0].size, out_sample_rate);
 	double applied_ppm = 0.0;
-	/* camera-box #1355: the level setpoint is ABSOLUTE (ASRC_LEVEL_TARGET_MS) plus this source's
-	 * deliberate placement offset -- the one the samples ALREADY in the buffer were placed with:
-	 * last_sync_offset (source_output_audio_data's in.timestamp += sync_offset, recorded there after
-	 * the placement; a pending sync_offset change reaches the setpoint through the shift there). Only
-	 * for a source whose depth has the direct-timestamp base the 100 ms target is calibrated on: a
-	 * genlock_fifo source (depth = the #1303 video-paired hold + a ~0-25 ms transport base) and a
-	 * MONITOR_ONLY source (never placed into the mix buffer, depth 0) keep the pre-#1355 depth-at-lock
-	 * capture. Pure stores, read only at the next capture (a rule CHANGE drops the capture). Audio
-	 * thread, same writer as the rest of source->asrc. */
-	asrc_compensator_set_level_absolute(&source->asrc, !source->genlock_fifo && source->monitoring_type !=
-									       OBS_MONITORING_TYPE_MONITOR_ONLY);
-	asrc_compensator_set_level_offset_ms(&source->asrc, (double)source->last_sync_offset / 1e6);
 	/* camera-box issue 1372: a confirmed-step recovery waits while the genlock audio placement slew
 	 * still owes a move on this resampler, so the two never stack past one 1000 ppm pitch budget. */
 	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
@@ -5562,33 +5549,6 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		applied_ppm = source->asrc.applied_ppm;
 	else
 		asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
-	/* camera-box #1355: an ABSOLUTE setpoint the mixer cannot reach is bounded inside the
-	 * compensator (ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error outside the restore's exit
-	 * band -> fall back to the live depth). Say so LOUDLY, once per event -- it means this source's
-	 * buffer does not follow the stretch, and its A/V level is again the per-launch value. */
-	/* camera-box issue 1367: since the genlock audio-buffering FLOOR (obs-genlock-audio-buffering.h)
-	 * every launch starts with the buffering the absolute target was sized for, so this fallback is
-	 * only a logged SAFETY NET. The line names the global buffering at that moment against the
-	 * floor: above it, a late source raised the buffering (its own loud line says which); at it, the
-	 * cause is not the buffering. total_buffering_ticks is the mixer's; one unlocked int read, telemetry
-	 * like the #800 dump. */
-	if (source->asrc.level_fallback_pending) {
-		source->asrc.level_fallback_pending = false;
-		blog(LOG_WARNING,
-		     "asrc: source '%s' level target %.1fms UNREACHABLE after %d windows outside +/-%.0fms -- "
-		     "fell back to the live depth %.1fms (fallbacks=%u) (#1355) total_audio_buffering=%dms "
-		     "floor=%dms (issue 1367: a safety net -- above the floor a late source raised the buffering, at it "
-		     "the cause is not the buffering)",
-		     obs_source_get_name(source), source->asrc.level_fallback_from_ms,
-		     ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS, ASRC_LEVEL_RESTORE_ARM_MS, source->asrc.level_target_ms,
-		     source->asrc.level_fallback_count,
-		     (int)(genlock_audio_buffering_ticks_ns((uint32_t)obs->audio.total_buffering_ticks, AUDIO_OUTPUT_FRAMES,
-							    out_sample_rate) /
-			   1000000ULL),
-		     (int)(genlock_audio_buffering_ticks_ns((uint32_t)obs->audio.floor_buffering_ticks, AUDIO_OUTPUT_FRAMES,
-							    out_sample_rate) /
-			   1000000ULL));
-	}
 
 	/* Refresh the compensation over an ASRC_COMPENSATION_DISTANCE_MS window every callback --
 	 * swr_set_compensation() replaces any still-pending ramp, so re-issuing it each callback
@@ -5647,11 +5607,7 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * byte-identical '(#1335)' suffix so every dev1 asrc:-line parser (asio-starve-health,
 		 * cg-chain-verify -- both extract by name with .*) is unaffected. steps=cumulative STEP
 		 * re-base count, last_step_ms=the last step's residual, restore=fast-restore active 0|1. */
-		/* camera-box #1355: fallbacks= appended AFTER the byte-identical 'restore=%d (#1335)' suffix
-		 * (parsers extract by name): the running count of unreachable-setpoint fallbacks, 0 on a
-		 * healthy source. target= is now the ABSOLUTE setpoint (ASRC_LEVEL_TARGET_MS + the source's
-		 * placement offset), identical across launches. */
-		/* camera-box #1367: level_avg= appended AFTER the byte-identical 'fallbacks=%u (#1355)' suffix
+		/* camera-box #1367: level_avg= appended AFTER the byte-identical 'restore=%d (#1335)' suffix
 		 * (parsers extract by name; level_avg= does not contain the substring level=): the MEAN of
 		 * every callback's buffered_ms over the last closed window -- the tick-free level the loop
 		 * now holds. level= stays the one raw reading, which lands on the 21.33 ms mixer-tick
@@ -5661,12 +5617,14 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * timecode=1 the level= / level_avg= fields are the packet PLACEMENT error in ms (actual - raw-stamp
 		 * intended) and target= is 0 minus what is still owed; estimated= follows the stamps. Issue 1425:
 		 * basis= appended after the byte-identical '(issue 1367)' suffix: arrival|timecode|stamp, what the
-		 * servo judges this source by (timecode=1 for both placement bases). */
+		 * servo judges this source by (timecode=1 for both placement bases). Issue 1425 (E2 slice 3):
+		 * the #1355 fallbacks= field is gone with the fallback; target= is the depth captured at the
+		 * lock (0 in timecode mode), never an absolute value. */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
 		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
-		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355) "
+		     "steps=%u last_step_ms=%.1f restore=%d (#1335) "
 		     "level_avg=%.2fms (#1367)"
 		     " recover_ms=%.1f (issue 1372)"
 		     " timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)"
@@ -5675,8 +5633,7 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
-		     (int)source->asrc.level_restore, source->asrc.level_fallback_count,
-		     source->asrc.level_avg_ms, source->asrc.step_recover_ms, (int)source->asrc.timecode,
+		     (int)source->asrc.level_restore, source->asrc.level_avg_ms, source->asrc.step_recover_ms, (int)source->asrc.timecode,
 		     source->asrc.place_jump_count, source->asrc.last_place_jump_ms,
 		     genlock_audio_asrc_basis_token(source->genlock_asrc_basis));
 	}

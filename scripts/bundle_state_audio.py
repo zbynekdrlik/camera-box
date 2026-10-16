@@ -17,6 +17,7 @@ import re
 from bundle_state_av_offset import AV_OFFSET_RECENT_WINDOW_S
 from bundle_state_log import (
     LOG_BOUNDED_READ_SEPARATOR,
+    _file_order_elapsed,
     _log_line_seconds,
     _recency_gap_s,
     timestamped_tail_lines,
@@ -385,20 +386,53 @@ _AUDIO_800_TOTAL_RE = re.compile(
 _AUDIO_FLOOR_RE = re.compile(
     r"genlock audio buffering floor \(issue 1367\): total audio buffering is now (\d+) "
     r"milliseconds")
+# The source ends the line since issue 1425 slice 3; a build before it appended the ASRC level band.
 _AUDIO_ABOVE_SOURCE_RE = re.compile(
     r"genlock audio buffering ABOVE the floor \(issue 1367\): adding \d+ milliseconds of audio "
-    r"buffering, total audio buffering is now \d+ milliseconds \(source: (.*?)\); ASRC level band")
+    r"buffering, total audio buffering is now \d+ milliseconds \(source: (.*?)\)"
+    r"(?:; ASRC level band|\s*$)")
+# issue 1425 (E2 slice 3): the genlock libobs has no floor, so no floor line follows the audio reset
+# block; its `buffering type:` line marks a new audio session instead, and the launch's own startup
+# race sets the buffering in its first seconds. The session start is the first #800 total logged at
+# least AUDIO_BUFFERING_SETTLE_S after that line (zero included: a launch that drew none starts at 0).
+_AUDIO_DYNAMIC_START_RE = re.compile(
+    r"buffering type:\s+dynamically increasing from \d+ ms \(genlock floor, issue 1425\)")
+AUDIO_BUFFERING_SETTLE_S = 30.0
 
 
-def _newest_floor_ms(text):
-    """The value of the newest genlock floor line in `text`, or None."""
-    floor = None
+def _stamped_lines(text):
+    """`(pos_s, line)` of every timestamped line of `text`, in file order (the head slice's
+    counterpart of `timestamped_tail_lines`)."""
+    stamped = []
     for line in (text or "").splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            stamped.append((ts, line))
+    return list(zip(_file_order_elapsed([ts for ts, _ in stamped]), (ln for _, ln in stamped)))
+
+
+def _session_start_ms(stamped):
+    """`(seen, start)` of the NEWEST audio session in `stamped`: seen = a session marker (a genlock
+    floor line, or the issue-1425 dynamic `buffering type:` line) is there; start = the floor value,
+    or the first #800 total at least AUDIO_BUFFERING_SETTLE_S after the dynamic marker, or None
+    while that session has not settled yet."""
+    seen, start, dyn_at = False, None, None
+    for pos, line in stamped:
         if "genlock audio buffering floor" in line:
             m = _AUDIO_FLOOR_RE.search(line)
             if m:
-                floor = m.group(1)
-    return floor
+                seen, start, dyn_at = True, m.group(1), None
+            continue
+        if "buffering type:" in line and _AUDIO_DYNAMIC_START_RE.search(line):
+            seen, start, dyn_at = True, None, pos
+            continue
+        if dyn_at is None or start is not None:
+            continue
+        if "audio-telemetry #800: total_buffering=" in line and pos - dyn_at >= AUDIO_BUFFERING_SETTLE_S:
+            m = _AUDIO_800_TOTAL_RE.search(line.rstrip("\r"))
+            if m:
+                start = m.group(1)
+    return seen, start
 
 
 def audio_buffering_from_log(text, tail=None):
@@ -406,13 +440,16 @@ def audio_buffering_from_log(text, tail=None):
     or four `""` when the tail holds no current `#800` summary line (absent -> UNKNOWN downstream).
 
     * `now_ms` -- the newest `#800` `total_buffering=` in the tail that comes AFTER the tail's
-      newest floor line: a total logged before a floor line describes the buffering before an
-      audio reset (or the session's first line, before the first tick), never the current one.
-    * `start_ms` -- the session's start value: the NEWEST floor line, in the tail or else in the
-      head slice (it is printed at the first tick, so a long session keeps it in the head; an
-      audio reset prints a new one). Without one, a whole-file read (a build before the floor)
-      falls back to its first NON-ZERO `#800` total; a bounded read reports `""` (its tail's first
-      total can be an old raise, so it is never guessed).
+      newest session marker (a floor line, or the issue-1425 `buffering type:` line): a total
+      logged before it describes the buffering before an audio reset (or the session's first line,
+      before the first tick), never the current one.
+    * `start_ms` -- the session's start value (`_session_start_ms`): the NEWEST floor line, or since
+      issue 1425 slice 3 (no floor) the first `#800` total at least AUDIO_BUFFERING_SETTLE_S after
+      the newest `buffering type:` line, in the tail or else in the head slice (both are printed
+      in the session's first minute, so a long session keeps them in the head; an audio reset
+      prints new ones). A session not settled yet reports `""`. With no marker at all, a whole-file
+      read (a build before the floor) falls back to its first NON-ZERO `#800` total; a bounded read
+      reports `""` (its tail's first total can be an old raise, so it is never guessed).
     * `source` -- the newest `ABOVE the floor` line's source in the bounded read, else the newest
       `#800` `buffering_source` that is not `-`, else `""` (never a guess).
     * `age_s` -- the newest `#800` line's in-log age behind the log head (the audio-mixer recency
@@ -420,12 +457,10 @@ def audio_buffering_from_log(text, tail=None):
     stamped, head = tail if tail is not None else timestamped_tail_lines(text)
     newest = None          # (pos_s, total, source) of the newest current #800 line in the tail
     first_nonzero = None
-    tail_floor = None
     for pos, line in stamped:
-        if "genlock audio buffering floor" in line:
-            m = _AUDIO_FLOOR_RE.search(line)
-            if m:
-                tail_floor, newest = m.group(1), None
+        if ("genlock audio buffering floor" in line and _AUDIO_FLOOR_RE.search(line)) or (
+                "buffering type:" in line and _AUDIO_DYNAMIC_START_RE.search(line)):
+            newest = None
             continue
         if "audio-telemetry #800: total_buffering=" not in line:
             continue
@@ -439,11 +474,11 @@ def audio_buffering_from_log(text, tail=None):
         return ("", "", "", "")
     t = text or ""
     bounded = LOG_BOUNDED_READ_SEPARATOR in t
-    start = tail_floor
-    if start is None and bounded:
-        start = _newest_floor_ms(t.partition(LOG_BOUNDED_READ_SEPARATOR)[0])
+    seen, start = _session_start_ms(stamped)
+    if not seen and bounded:
+        seen, start = _session_start_ms(_stamped_lines(t.partition(LOG_BOUNDED_READ_SEPARATOR)[0]))
     if start is None:
-        start = "" if bounded else (first_nonzero or "")
+        start = "" if (bounded or seen) else (first_nonzero or "")
     above_source = None
     for line in t.splitlines():
         if "genlock audio buffering ABOVE" in line:

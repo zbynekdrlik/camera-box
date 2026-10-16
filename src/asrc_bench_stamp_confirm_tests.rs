@@ -299,8 +299,8 @@ fn leaving_the_mode_drops_the_candidate_1425() {
     for _ in 0..half {
         c.observe_placement(-44.0, SLOT_S * 1000.0, false);
     }
-    // the capture is dropped (a capture-rule change): observe is inert and forgets the candidate
-    c.set_level_absolute(!c.level_absolute);
+    // the capture is dropped (as a flush drops it): observe is inert and forgets the candidate
+    c.level_captured = false;
     c.observe_placement(-44.0, SLOT_S * 1000.0, false);
     c.level_captured = true;
     for _ in 0..second - 1 {

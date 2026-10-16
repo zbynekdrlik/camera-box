@@ -5,14 +5,17 @@
 //! `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/genlock_audio_buffering_wiring_1367.rs`.
 //!
 //! - The wiring anchors: `obs_reset_audio2` takes the pure plan (never the caller's fixed flag),
-//!   the reset log names the floor, `audio_callback` raises the floor first and keeps OBS's own
-//!   dynamic increase above it, the increase is one loud named line, and the #1355 UNREACHABLE
-//!   line names the buffering. The same list is required by the pwsh guard in both
-//!   `windows-genlock*.yml` workflows.
+//!   the reset log names the floor, `audio_callback` raises a floor first and keeps OBS's own
+//!   dynamic increase above it, and the increase is one loud named line. The same list is required
+//!   by the pwsh guard in both `windows-genlock*.yml` workflows.
 //! - A C LIFT of the shipped bytes: the reset block (`obs.c`), the tick decision (`obs-audio.c`
 //!   `audio_callback`) and the buffering functions (`obs-audio.c`, verbatim) compiled with a stub
-//!   and driven through a launch, a late source, the low-latency toggle, 44.1 kHz and the maximum.
-//!   The printed trace is the truth table. `cc` is required — it FAILS LOUDLY rather than skips.
+//!   and driven through a launch with its startup race, a late source, the low-latency toggle,
+//!   44.1 kHz, the maximum and (by hand) a non-zero floor. The printed trace is the truth table.
+//!   `cc` is required — it FAILS LOUDLY rather than skips.
+//! - Issue 1425 E2 slice 3 (design 6220191978): the shipped floor is 0, so a launch starts at 0 like
+//!   stock OBS and its startup race draws 0-43 ms; the #1355 UNREACHABLE line and the ASRC level band
+//!   note are gone with the absolute target.
 
 use std::fs;
 use std::path::PathBuf;
@@ -33,7 +36,6 @@ fn squish(s: &str) -> String {
 
 const OBS_C: &str = "vendor/obs-studio/libobs/obs.c";
 const OBS_AUDIO: &str = "vendor/obs-studio/libobs/obs-audio.c";
-const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
 const HEADER: &str = "vendor/obs-studio/libobs/obs-genlock-audio-buffering.h";
 
@@ -45,7 +47,10 @@ const WIRING: [(&str, &str); 12] = [
     (OBS_C, "audio->max_buffering_ticks = (int)genlock_buf.max_ticks;"),
     (OBS_C, "audio->floor_buffering_ticks = (int)genlock_buf.floor_ticks;"),
     (OBS_C, "audio->fixed_buffer = genlock_buf.fixed;"),
-    (OBS_C, "buffering type: fixed floor %d ms, dynamically increasing above"),
+    (
+        OBS_C,
+        "buffering type: dynamically increasing from %d ms (genlock floor, issue 1425)",
+    ),
     (OBS_AUDIO, "#include \"obs-genlock-audio-buffering.h\""),
     (OBS_AUDIO, "const int genlock_buffering = genlock_audio_buffering_action("),
     (
@@ -61,7 +66,7 @@ const WIRING: [(&str, &str); 12] = [
         "const size_t total_ms = raise_audio_buffering(audio, sample_rate, ts, audio->floor_buffering_ticks);",
     ),
     (OBS_AUDIO, "genlock audio buffering ABOVE the floor (issue 1367)"),
-    (HEADER, "#define GENLOCK_AUDIO_BUFFERING_FLOOR_MS 85u"),
+    (HEADER, "#define GENLOCK_AUDIO_BUFFERING_FLOOR_MS 0u"),
 ];
 
 /// The upstream lines the floor replaced — each must stay GONE (squished).
@@ -136,50 +141,6 @@ fn every_buffering_line_keeps_the_786_launch_gate_text_1367() {
     assert!(
         squish(&s).contains("blog(LOG_WARNING, \"genlock audio buffering ABOVE the floor"),
         "issue 1367: an increase above the floor must be LOUD (LOG_WARNING)"
-    );
-}
-
-#[test]
-fn the_unreachable_fallback_names_the_buffering_1367() {
-    let s = squish(&read(OBS_SOURCE));
-    assert!(
-        s.contains("UNREACHABLE after %d windows outside +/-%.0fms")
-            && s.contains("(fallbacks=%u) (#1355) total_audio_buffering=%dms \" \"floor=%dms (issue 1367: a safety net")
-            && s.contains("#include \"obs-genlock-audio-buffering.h\""),
-        "issue 1367: the #1355 UNREACHABLE line must name the global buffering and the floor \
-         (the fallback is only a logged safety net now)"
-    );
-}
-
-#[test]
-fn the_unreachable_line_prints_total_then_floor_1367() {
-    // The format names total_audio_buffering= before floor=; the arguments must follow in that
-    // order (a swap would print the floor as the total and hide a late source).
-    let s = squish(&read(OBS_SOURCE));
-    let call = s
-        .find("UNREACHABLE after %d windows outside +/-%.0fms")
-        .expect("issue 1367: the UNREACHABLE line is gone");
-    let end = call
-        + s[call..]
-            .find(");")
-            .expect("issue 1367: the UNREACHABLE call does not end");
-    let body = &s[call..end];
-    let fmt_total = body
-        .find("total_audio_buffering=%dms")
-        .expect("total_audio_buffering=");
-    let fmt_floor = body.find("floor=%dms").expect("floor=");
-    let arg_count = body
-        .find("source->asrc.level_fallback_count,")
-        .expect("fallback count arg");
-    let arg_total = body
-        .find("(uint32_t)obs->audio.total_buffering_ticks")
-        .expect("total arg");
-    let arg_floor = body
-        .find("(uint32_t)obs->audio.floor_buffering_ticks")
-        .expect("floor arg");
-    assert!(
-        fmt_total < fmt_floor && arg_count < arg_total && arg_total < arg_floor,
-        "issue 1367: the UNREACHABLE line's total / floor arguments are out of order"
     );
 }
 
@@ -286,7 +247,6 @@ fn c_harness() -> String {
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "media-io/asrc-compensator.h"
 #include "obs-genlock-audio-buffering.h"
 
 #define AUDIO_OUTPUT_FRAMES 1024
@@ -398,35 +358,48 @@ int main(void)
 	uint64_t t = 1000000000000ULL;
 	const uint64_t tick_ns = audio_frames_to_ns(48000, AUDIO_OUTPUT_FRAMES);
 
-	/* A launch: the first tick raises the floor; nothing behind keeps it there. */
+	/* A launch (issue 1425: no floor): nothing behind leaves it at 0. The startup race then makes a
+	 * source 10 ms behind real time (an ASIO block) and one 30 ms behind (a PulseAudio packet):
+	 * OBS's own dynamic increase, one tick each -- a clean launch draws 0-43 ms. */
 	reset(48000, 0, false);
 	tick(48000, t, 0, "-");
 	t += tick_ns;
-	tick(48000, t, 0, "-");
-	drain(48000, &t);
+	tick(48000, t, 10, "ASIO Input Capture");
 	t += tick_ns;
-	tick(48000, t, 0, "-");
-	/* A source 136 ms behind real time: OBS's own dynamic increase above the floor (+3 ticks = 7 =
-	 * ceil(136 / tick), what stock OBS reaches alone), band broken. */
+	tick(48000, t, 30, "ASIO zvuk");
+
+	/* A source 136 ms behind real time at launch: ceil(136 / tick) = 7 ticks, what stock OBS adds. */
+	reset(48000, 0, false);
 	t += tick_ns;
 	tick(48000, t, 136, "mbc");
 
-	/* A source 10 ms behind real time is absorbed by the floor (the property the floor exists for);
-	 * 96 ms behind adds one tick (5 = ceil(96 / tick)), band still held. */
-	reset(48000, 0, false);
+	/* The frontend low-latency toggle (fixed 20 ms): overridden, dynamic from 0. */
+	reset(48000, 20, true);
 	t += tick_ns;
 	tick(48000, t, 0, "-");
-	drain(48000, &t);
 	t += tick_ns;
-	tick(48000, t, 10, "mbc");
-	t += tick_ns;
-	tick(48000, t, 96, "ASIO Input Capture");
+	tick(48000, t, 116, "NDI test");
 
-	/* A source already behind at the FIRST tick (the stream ASIO startup race): the floor is raised
-	 * first; OBS's dynamic check runs on the next, UNDRAINED ticks against the window the floor
-	 * moved back. 85 ms behind is absorbed by the floor; 100 ms behind adds one tick, so the total
-	 * is ceil(100 ms / tick) = 5 = what stock OBS reaches alone: max(floor, stock). */
+	/* 44.1 kHz. */
+	reset(44100, 0, false);
+	tick(44100, t, 0, "-");
+
+	/* A maximum of 85 ms: a source 136 ms behind is clamped there. */
+	reset(48000, 85, false);
+	t += tick_ns;
+	tick(48000, t, 136, "mbc");
+
+	/* A late source past the maximum: clamped, both loud lines. */
+	reset(48000, 150, false);
+	t += tick_ns;
+	tick(48000, t, 286, "sp-slow_video");
+
+	/* The floor mechanism itself, set by hand to 4 ticks (a box that ever needs a floor again): the
+	 * first tick raises it; OBS's dynamic check runs on the next, UNDRAINED ticks against the window
+	 * the floor moved back. 85 ms behind is absorbed; 100 ms behind adds one tick, so the total is
+	 * ceil(100 ms / tick) = 5 = what stock OBS reaches alone: max(floor, stock). */
 	reset(48000, 0, false);
+	core.floor_buffering_ticks = 4;
 	t += tick_ns;
 	tick(48000, t, 85, "ASIO Input Capture");
 	{{
@@ -442,34 +415,7 @@ int main(void)
 	tick(48000, t, 85, "ASIO Input Capture");
 	t += tick_ns;
 	tick(48000, t, 100, "ASIO Input Capture");
-
-	/* The frontend low-latency toggle (fixed 20 ms): overridden, still floor then dynamic. */
-	reset(48000, 20, true);
-	t += tick_ns;
-	tick(48000, t, 0, "-");
 	drain(48000, &t);
-	t += tick_ns;
-	tick(48000, t, 116, "NDI test");
-
-	/* 44.1 kHz. */
-	reset(44100, 0, false);
-	tick(44100, t, 0, "-");
-
-	/* A maximum at the floor: nothing grows above it, even for a source 136 ms behind. */
-	reset(48000, 85, false);
-	t += tick_ns;
-	tick(48000, t, 0, "-");
-	drain(48000, &t);
-	t += tick_ns;
-	tick(48000, t, 136, "mbc");
-
-	/* A late source past the maximum: clamped, both loud lines. */
-	reset(48000, 150, false);
-	t += tick_ns;
-	tick(48000, t, 0, "-");
-	drain(48000, &t);
-	t += tick_ns;
-	tick(48000, t, 286, "sp-slow_video");
 	return 0;
 }}
 "#,
@@ -546,9 +492,6 @@ fn build_and_run_lift() -> Vec<String> {
         .collect()
 }
 
-const BROKEN_TAIL: &str =
-    " -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering";
-
 fn expected_trace() -> Vec<String> {
     let floor_line = |ms: u32| {
         format!(
@@ -556,65 +499,55 @@ fn expected_trace() -> Vec<String> {
              milliseconds from the first audio tick, dynamically increasing above"
         )
     };
-    let above = |add: u32, total: u32, src: &str, band: &str, err: &str, tail: &str| {
+    let above = |add: u32, total: u32, src: &str| {
         format!(
             "L200 genlock audio buffering ABOVE the floor (issue 1367): adding {add} milliseconds of \
-             audio buffering, total audio buffering is now {total} milliseconds (source: {src}); \
-             ASRC level band {band}: buffering + 9 ms base lands {err} ms off the 100 ms level \
-             target (reach +/-35 ms){tail}"
+             audio buffering, total audio buffering is now {total} milliseconds (source: {src})"
         )
     };
     vec![
-        // a launch
-        "reset rate=48000 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
-        floor_line(85),
+        // a launch: 0, then the startup race adds one tick per late source (0-43 ms)
+        "reset rate=48000 max_ms=0 fixed=0 -> floor=0 max=45 fixed_buffer=0".into(),
+        "tick total=0 wait=0 pushes=0 window_back_ms=0".into(),
+        above(21, 21, "ASIO Input Capture"),
+        "tick total=1 wait=1 pushes=1 window_back_ms=21".into(),
+        above(21, 42, "ASIO zvuk"),
+        "tick total=2 wait=1 pushes=2 window_back_ms=42".into(),
+        // 136 ms behind at launch: 7 ticks, stock OBS
+        "reset rate=48000 max_ms=0 fixed=0 -> floor=0 max=45 fixed_buffer=0".into(),
+        above(149, 149, "mbc"),
+        "tick total=7 wait=7 pushes=7 window_back_ms=149".into(),
+        // the low-latency toggle
+        "reset rate=48000 max_ms=20 fixed=1 -> floor=0 max=45 fixed_buffer=0".into(),
+        "tick total=0 wait=0 pushes=0 window_back_ms=0".into(),
+        above(128, 128, "NDI test"),
+        "tick total=6 wait=6 pushes=6 window_back_ms=128".into(),
+        // 44.1 kHz
+        "reset rate=44100 max_ms=0 fixed=0 -> floor=0 max=45 fixed_buffer=0".into(),
+        "tick total=0 wait=0 pushes=0 window_back_ms=0".into(),
+        // a maximum of 85 ms
+        "reset rate=48000 max_ms=85 fixed=0 -> floor=0 max=4 fixed_buffer=0".into(),
+        "L200 Max audio buffering reached!".into(),
+        above(85, 85, "mbc"),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
-        "tick total=4 wait=3 pushes=4 window_back_ms=85".into(),
-        "tick total=4 wait=0 pushes=4 window_back_ms=85".into(),
-        above(64, 149, "mbc", "BROKEN", "-58.3", BROKEN_TAIL),
-        "tick total=7 wait=3 pushes=7 window_back_ms=149".into(),
-        // 10 ms behind real time absorbed, 96 ms adds one tick
-        "reset rate=48000 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
-        floor_line(85),
-        "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
-        "tick total=4 wait=0 pushes=4 window_back_ms=85".into(),
-        above(21, 106, "ASIO Input Capture", "ok", "-15.7", ""),
-        "tick total=5 wait=1 pushes=5 window_back_ms=106".into(),
-        // late at the first tick, then undrained: 85 ms absorbed, 100 ms adds one tick
-        "reset rate=48000 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
+        // past the maximum
+        "reset rate=48000 max_ms=150 fixed=0 -> floor=0 max=8 fixed_buffer=0".into(),
+        "L200 Max audio buffering reached!".into(),
+        above(170, 170, "sp-slow_video"),
+        "tick total=8 wait=8 pushes=8 window_back_ms=170".into(),
+        // a 4-tick floor set by hand: raised first, 85 ms absorbed, 100 ms adds one tick
+        "reset rate=48000 max_ms=0 fixed=0 -> floor=0 max=45 fixed_buffer=0".into(),
         floor_line(85),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
         "raise-noop ms=85 total=4 wait=3 pushes=4 ts_moved=0".into(),
         "tick total=4 wait=3 pushes=4 window_back_ms=85".into(),
-        above(21, 106, "ASIO Input Capture", "ok", "-15.7", ""),
+        above(21, 106, "ASIO Input Capture"),
         "tick total=5 wait=3 pushes=5 window_back_ms=106".into(),
-        // the low-latency toggle
-        "reset rate=48000 max_ms=20 fixed=1 -> floor=4 max=45 fixed_buffer=0".into(),
-        floor_line(85),
-        "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
-        above(42, 128, "NDI test", "BROKEN", "-37.0", BROKEN_TAIL),
-        "tick total=6 wait=2 pushes=6 window_back_ms=127".into(),
-        // 44.1 kHz
-        "reset rate=44100 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
-        floor_line(92),
-        "tick total=4 wait=4 pushes=4 window_back_ms=92".into(),
-        // a maximum at the floor
-        "reset rate=48000 max_ms=85 fixed=0 -> floor=4 max=4 fixed_buffer=0".into(),
-        floor_line(85),
-        "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
-        "tick total=4 wait=0 pushes=4 window_back_ms=85".into(),
-        // past the maximum
-        "reset rate=48000 max_ms=150 fixed=0 -> floor=4 max=8 fixed_buffer=0".into(),
-        floor_line(85),
-        "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
-        "L200 Max audio buffering reached!".into(),
-        above(85, 170, "sp-slow_video", "BROKEN", "-79.7", BROKEN_TAIL),
-        "tick total=8 wait=4 pushes=8 window_back_ms=170".into(),
     ]
 }
 
 #[test]
-fn the_shipped_c_starts_every_launch_at_the_floor_and_grows_above_it_1367() {
+fn the_shipped_c_starts_at_its_floor_and_grows_above_it_1367() {
     let c = c_trace();
     let e = expected_trace();
     for (i, (cl, el)) in c.iter().zip(&e).enumerate() {
@@ -634,9 +567,9 @@ fn the_shipped_c_starts_every_launch_at_the_floor_and_grows_above_it_1367() {
 }
 
 #[test]
-fn the_786_launch_gate_reads_the_floor_as_clean_1367() {
-    // The #786 gates' own regex over the trace: the floor alone (85 / 92 ms) stays under their
-    // 100 ms bound, and a real late-source increase above it still trips them.
+fn the_786_launch_gate_reads_a_clean_launch_as_clean_1367() {
+    // The #786 gates' own regex over the trace (issue 1425: no floor): a launch's own startup race
+    // (21 / 42 ms) stays under their 100 ms bound, and a real late-source increase still trips them.
     let c = c_trace();
     let totals: Vec<u32> = c
         .iter()
@@ -645,10 +578,10 @@ fn the_786_launch_gate_reads_the_floor_as_clean_1367() {
             rest.split(' ').next()?.parse().ok()
         })
         .collect();
-    assert!(totals.contains(&85) && totals.contains(&92));
+    assert!(totals.contains(&21) && totals.contains(&42));
     assert!(totals
         .iter()
-        .filter(|&&t| t == 85 || t == 92)
+        .filter(|&&t| t == 21 || t == 42)
         .all(|&t| t <= 100));
     assert!(
         totals.iter().any(|&t| t > 100),

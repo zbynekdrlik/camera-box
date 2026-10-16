@@ -1,33 +1,30 @@
-/* camera-box issue 1367: the genlock audio-buffering FLOOR. Every OBS launch starts with the SAME
- * global audio buffering, so the stream `mbc` ASRC level (and the audio position against the video)
- * no longer depends on a startup race.
+/* camera-box issue 1367: the genlock audio-buffering FLOOR, and since issue 1425 the FREEZE.
  *
  * Stock libobs grows the mix-window buffering DYNAMICALLY, only when a source is behind the window
- * at startup (obs-audio.c add_audio_buffering). The stream box drew both outcomes on 27.9.2026:
- * 85 ms (`mbc` held its #1355 absolute target all session) and 0 ms (`mbc` sat 91 ms below it,
- * the #1355 fallback re-latched at a random depth, the release A/V gate read -28 ms). A
- * direct-timestamp source's natural depth is buffering + base (~9 ms) + sync offset, and its
- * absolute target is 100 ms + sync offset, so the offset cancels. The level servo can bridge the
- * gap only while the source timeline stays inside TS_SMOOTHING_THRESHOLD (70 ms, obs-source.c),
- * because past it the packet is re-placed at its raw stamp. The band held here is half of that,
- * with a lower AND an upper edge.
+ * (obs-audio.c add_audio_buffering). Issue 1367 raised every launch to an 85 ms floor so the stream
+ * `mbc` could reach its #1355 absolute ASRC level target (100 ms + the sync offset) inside OBS's 70 ms
+ * TS-smoothing reach. Issue 1425 retired that: since E2 slice 1 a directly stamped mixed source is
+ * judged by its own stamp, so its A/V no longer depends on the buffering; since slice 2 the buffering
+ * cannot grow while an audio encoder runs; and slice 3 (design 6220191978) deleted the absolute target
+ * and set the floor to 0. A launch now starts at 0 like stock OBS, its own startup race grows it to
+ * 0-43 ms (one tick for a late ASIO block, two for a PulseAudio packet), and nothing moves it after an
+ * encoder starts.
  *
  * - genlock_audio_buffering_make_plan() (obs_reset_audio2): the floor is GENLOCK_AUDIO_BUFFERING_FLOOR_MS
- *   rounded up to whole ticks the way OBS rounds its own maximum. Fixed buffering is never used, so
- *   the frontend low-latency toggle is overridden. The maximum stays the caller's, or 45 ticks.
- * - genlock_audio_buffering_action() (every mixer tick): below the floor raise to the floor (the
- *   first tick of a launch); above it OBS's dynamic increase for a late source stays active, since
- *   the resolume cg OBS legitimately grows 128-362 ms (ROZHODNUTE 5857354949: a floor, never a cap).
- * - genlock_audio_buffering_band_error_ns() / _band_ok(): the gap the servo must bridge and whether
- *   it fits; obs-audio.c names a dynamic increase that leaves the band.
+ *   rounded up to whole ticks the way OBS rounds its own maximum (0 ticks today). Fixed buffering is
+ *   never used, so the frontend low-latency toggle is overridden. The maximum stays the caller's, or
+ *   45 ticks.
+ * - genlock_audio_buffering_action() (every mixer tick): below the floor raise to the floor (never,
+ *   at 0); above it OBS's dynamic increase for a late source stays active, since the resolume cg OBS
+ *   legitimately grows 128-362 ms (ROZHODNUTE 5857354949: a floor, never a cap).
  * - genlock_audio_buffering_frozen() (issue 1425, E2 slice 2, design 6216736061 + ROZHODNUTE
  *   6217557472): the FREEZE. A buffering increase while an encoder runs makes that encoder's audio
  *   permanently later (obs-encoder.c counts audio pts in samples after the start), so the dynamic
  *   increase is OFF while an output with an audio encoder is active -- and only then: with no
  *   encoder a growth moves no live output's A/V, so such a box (the resolume cg OBS) keeps stock
  *   growth. A mixed source that falls behind a frozen window is re-anchored instead
- *   (obs-genlock-mix-guard.h MIXED_LATE). The floor is never frozen, and nothing ever steps down
- *   mid-run: the buffering starts over at the next launch.
+ *   (obs-genlock-mix-guard.h MIXED_LATE). Nothing ever steps down mid-run: the buffering starts over
+ *   at the next launch.
  *
  * Pure: stdint/stdbool only, no libobs types -- tests/genlock_audio_buffering_parity_1367.rs
  * compiles this header as-is and requires byte-identical results from the Tier-0 Rust authority
@@ -37,18 +34,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* The floor, ms, before tick rounding: 4 ticks = 85.33 ms at 48 kHz, 92.88 ms at 44.1 kHz (the
- * live-proven 01-33-25 configuration). Mirror of src/genlock_audio_buffering.rs FLOOR_MS. */
-#define GENLOCK_AUDIO_BUFFERING_FLOOR_MS 85u
+/* The floor, ms, before tick rounding: 0 since issue 1425 E2 slice 3 (it was 85 = 4 ticks for the
+ * retired absolute ASRC level target). Mirror of src/genlock_audio_buffering.rs FLOOR_MS. */
+#define GENLOCK_AUDIO_BUFFERING_FLOOR_MS 0u
 /* OBS's own maximum when the caller asks for none (obs_reset_audio2), and the maximum of an
  * overridden request. Mirror of DEFAULT_MAX_TICKS. */
 #define GENLOCK_AUDIO_BUFFERING_DEFAULT_MAX_TICKS 45u
-/* Half of obs-source.c TS_SMOOTHING_THRESHOLD (70 ms): how far the level target may sit from the
- * natural depth, ns. Mirror of LEVEL_REACH_NS. */
-#define GENLOCK_AUDIO_LEVEL_REACH_NS 35000000LL
-/* The measured `mbc` base (its offset-free depth at zero buffering: 8.4 / 8.9 ms), ns, for the log
- * note. Mirror of LEVEL_BASE_NOMINAL_NS. */
-#define GENLOCK_AUDIO_LEVEL_BASE_NOMINAL_NS 9000000ULL
 
 /* genlock_audio_buffering_action() results. Mirror of src/genlock_audio_buffering.rs BufferingAction. */
 #define GENLOCK_AUDIO_BUFFERING_ACTION_NONE 0
@@ -120,17 +111,4 @@ static inline int genlock_audio_buffering_action(int total_ticks, int floor_tick
 static inline bool genlock_audio_buffering_frozen(bool encoder_active)
 {
 	return encoder_active;
-}
-
-/* The gap the level servo must bridge, ns: target - (buffering + base). The sync offset moves both
- * sides and is not an input. Wrapping two's complement. Mirror of band_error_ns. */
-static inline int64_t genlock_audio_buffering_band_error_ns(uint64_t buffering_ns, uint64_t base_ns, int64_t target_ns)
-{
-	return (int64_t)((uint64_t)target_ns - (buffering_ns + base_ns));
-}
-
-/* Whether the gap is inside +/-GENLOCK_AUDIO_LEVEL_REACH_NS. Mirror of band_ok. */
-static inline bool genlock_audio_buffering_band_ok(int64_t error_ns)
-{
-	return error_ns >= -GENLOCK_AUDIO_LEVEL_REACH_NS && error_ns <= GENLOCK_AUDIO_LEVEL_REACH_NS;
 }

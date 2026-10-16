@@ -1,7 +1,8 @@
 //! Issue 1425 (E2 slice 1, design 6205974120) — the two-clock bench of the STAMP basis of the
 //! per-source ASRC: a directly stamped, non-genlock, mixed source (the stream `mbc` ASIO input, a
 //! PulseAudio program input, a media clip) is judged by where each packet lands against its OWN
-//! stamp, setpoint 0, never by its buffer depth against the issue-1355 absolute 100 ms target.
+//! stamp, setpoint 0, never by its buffer depth (the issue-1355 absolute 100 ms target it replaced
+//! is gone since slice 3).
 //!
 //! ## Why
 //!
@@ -30,7 +31,7 @@
 //!   ([`audio_place_measured`] / [`audio_actual_place_ns`] against [`audio_intended_raw_ns`]) feeding
 //!   `asrc_timecode_ingest` (booking + the stamp advance as the master block). `asrc_process_audio`
 //!   runs first on the RAW packet: the arrival servo against the mixer clock and the buffer depth
-//!   (absolute target, offset 0), or only reading the servo for a placement-judged source. The
+//!   (the depth at lock), or only reading the servo for a placement-judged source. The
 //!   resampler output of each packet is `frames·(1 − (applied + recover)/1e6)` with the fractional
 //!   part carried.
 //! - **Mixer.** 1024-sample ticks. Each tick renders the window ending `lag` behind it and moves the
@@ -47,7 +48,8 @@
 //! ## Variants
 //!
 //! - `Production`: the basis the ingest decides ([`audio_asrc_placement`]): `Stamp` here.
-//! - `Arrival` (anti-tautology): today's arrival servo on the same feed (the absolute 100 ms target).
+//! - `Arrival`: the arrival servo on the same feed. Since slice 3 it holds the depth it locked at
+//!   (`the_arrival_servo_keeps_the_av_it_locked_at_1425`); before, the absolute 100 ms target walked it.
 //! - `Unservoed` (anti-tautology): no ASRC at all; the A/V walks with the source rate.
 //!
 //! ## Acceptance (design 6205974120, consult section 5)
@@ -56,7 +58,8 @@
 //! launch phase and −20 / 0 / +20 ppm, for 128- and 1024-sample packets; the spread across B and the
 //! launch phase ≤ 1 ms; over 8 h with a ±1 ppm wander the A/V moves < 2 ms; no placement jump is ever
 //! booked (no phantom jump from the 1–2 ms delivery jitter on 128-sample packets) and nothing
-//! underruns. `Arrival` must spread A/V across B and the phase; `Unservoed` must drift with the rate.
+//! underruns. `Arrival` keeps the A/V it locked at on `mbc` and carries the PulseAudio launch phase
+//! into the A/V; `Unservoed` must drift with the rate.
 //!
 //! **A delivery STALL, a real loss and equal-stamp bursts are the rows of `asrc_stamp_bench_stall.rs`**
 //! (round 2, design 6206822792). The jitter here is a fifth of the compensator's 10 ms jump band, so
@@ -72,10 +75,12 @@
 //!   spread of the steady means 0.34 / 0.19 ms, 0 jumps, 0 underruns, one placement (the first).
 //! - Production at −20 / 0 / +20 ppm: max |A/V| ≤ 0.72 ms.
 //! - Production over 8 h, +20 ppm ± 1 ppm wander: minute A/V moved 0.53 ms (`mbc`) / 0.60 ms (pulse),
-//!   max |A/V| 0.43 ms, 0 jumps, 0 fallbacks.
-//! - `Arrival`, same feed: steady A/V +33.7 / +58.4 / +38.7 / +0.9 / −36.8 ms (`mbc`) at
-//!   B = 0 / 1 / 2 / 4 / 6 ticks; for pulse the launch phase alone moves it 2.1 … 15 ms at one B.
-//!   The absolute 100 ms target only fits B = 4 extra ticks of this plant, the floor's own design.
+//!   max |A/V| 0.43 ms, 0 jumps.
+//! - `Arrival` with the absolute target (before slice 3), same feed: steady A/V +33.7 / +58.4 /
+//!   +38.7 / +0.9 / −36.8 ms (`mbc`) at B = 0 / 1 / 2 / 4 / 6 ticks, walked there from the 0.4–2.4 ms
+//!   it locked at; the target only fit B = 4 extra ticks of this plant, the floor's own design.
+//! - `Arrival` since slice 3 (the depth at lock): `mbc` stays within 0.5 ms of the A/V it locked at
+//!   (0.2–2.4 ms) at every B; pulse keeps its launch phase, −6.5 … +9.8 ms over the four phases.
 //! - `Unservoed` at ±20 ppm: ±12 ms more A/V over the 600 s steady window.
 //!
 //! ## Measured (round 2, design 6206822792; the rows above unchanged to the printed digit)
@@ -316,9 +321,6 @@ impl Obs {
             let master_s = (mono_now - self.last_mono) as f64 / 1e9;
             self.last_mono = mono_now;
             let buffered_ms = self.buffered_ns() as f64 / 1e6;
-            // a mixed, non-genlock source: the issue-1355 absolute capture rule, sync offset 0
-            self.c.set_level_absolute(true);
-            self.c.set_level_offset_ms(0.0);
             self.c.set_step_recover_hold(false);
             let (applied, recover) = if self.c.timecode() {
                 (self.c.applied_ppm(), self.c.take_step_recover_ppm())
@@ -438,7 +440,6 @@ struct Run {
     underruns: u32,
     backstops: u32,
     placements: u32,
-    fallbacks: u32,
     basis: Option<AsrcBasis>,
     /// Issue 1425 round 2: arrival time (s) of the packet that made the first booked jump.
     first_jump_s: Option<f64>,
@@ -537,7 +538,6 @@ fn run(case: &Case) -> Run {
     r.underruns = obs.underruns;
     r.backstops = obs.backstops;
     r.placements = obs.placements;
-    r.fallbacks = obs.c.level_fallback_count();
     r.basis = obs.basis_seen;
     r
 }
@@ -614,13 +614,12 @@ fn a_stamped_source_holds_av_at_every_source_rate_1425() {
         for ppm in RATES_PPM {
             let r = run(&Case::new(src, ppm, 4, 1, Servo::Production));
             assert!(
-                r.steady_max_abs_ms() <= AV_BOUND_MS && r.place_jumps == 0 && r.fallbacks == 0,
-                "issue 1425: {} at {ppm:+} ppm: |A/V| <= {AV_BOUND_MS} ms, no booked jump, no \
-                 fallback: max {:.3} ms, jumps {}, fallbacks {}",
+                r.steady_max_abs_ms() <= AV_BOUND_MS && r.place_jumps == 0,
+                "issue 1425: {} at {ppm:+} ppm: |A/V| <= {AV_BOUND_MS} ms, no booked jump: max \
+                 {:.3} ms, jumps {}",
                 src.name,
                 r.steady_max_abs_ms(),
-                r.place_jumps,
-                r.fallbacks
+                r.place_jumps
             );
         }
     }
@@ -642,33 +641,22 @@ fn a_stamped_source_does_not_drift_over_eight_hours_1425() {
             r.steady_max_abs_ms()
         );
         assert!(
-            r.place_jumps == 0 && r.underruns == 0 && r.fallbacks == 0,
-            "issue 1425: {} over 8 h: no booked jump, no underrun, no fallback: {} / {} / {}",
+            r.place_jumps == 0 && r.underruns == 0,
+            "issue 1425: {} over 8 h: no booked jump, no underrun: {} / {}",
             src.name,
             r.place_jumps,
-            r.underruns,
-            r.fallbacks
+            r.underruns
         );
     }
 }
 
 #[test]
-fn the_arrival_servo_moves_av_with_the_buffering_and_the_phase_1425() {
-    // anti-tautology: today's arrival servo on the same feed. Its depth target is absolute, so the
-    // A/V follows the buffering (and, for a tick-long packet, the launch phase): the bench would pass
-    // vacuously if this did not fail the production bounds.
-    for src in SOURCES {
-        let runs = sweep(src, Servo::Arrival);
-        let spread = spread_ms(&runs);
-        assert!(
-            spread > 10.0 * SPREAD_BOUND_MS,
-            "issue 1425: {}: the arrival servo must spread the A/V over the buffering, else the \
-             bench proves nothing: spread {spread:.3} ms",
-            src.name
-        );
-    }
-    // the tick-long packet: at EVERY buffering the launch phase alone moves the arrival servo's A/V
-    // (the per-callback depth reading is taken at one packet-vs-tick phase per launch; consult F2)
+fn the_arrival_servo_carries_the_pulse_launch_phase_into_the_av_1425() {
+    // anti-tautology: the arrival servo on the PulseAudio feed. (Before slice 3 its absolute target
+    // also spread the A/V over the buffering; the depth at lock does not, see
+    // `the_arrival_servo_keeps_the_av_it_locked_at_1425`.) The tick-long packet: at EVERY
+    // buffering the launch phase alone moves the arrival servo's A/V (the per-callback depth reading
+    // is taken at one packet-vs-tick phase per launch; consult F2)
     let pulse = sweep(PULSE, Servo::Arrival);
     for b in BUFFERINGS {
         let at_b: Vec<_> = pulse.iter().filter(|(rb, _, _)| *rb == b).collect();

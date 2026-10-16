@@ -73,7 +73,6 @@ static void st_scenario(void)
 	const double pattern[4] = {-1.5, 0.5, 1.0, -0.5};
 	struct asrc_compensator c;
 	asrc_compensator_init(&c);
-	asrc_compensator_set_level_absolute(&c, false);
 	asrc_compensator_set_basis(&c, ASRC_BASIS_STAMP);
 	double place_ms = 0.0;
 	double burst_ms = 0.0;
@@ -197,7 +196,6 @@ static void stx_scenario(void)
 	st_lock(&c, p);
 	for (long k = 0; k < 150; k++)
 		asrc_compensator_observe_placement(&c, -44.0, pm, false);
-	asrc_compensator_set_level_absolute(&c, false);
 	for (long k = 0; k < 900; k++) {
 		asrc_compensator_observe_placement(&c, -44.0, pm, false);
 		asrc_compensator_compensate(&c, p, p, 0.0, &applied);
@@ -289,7 +287,6 @@ fn rust_trace() -> Vec<String> {
         let packet_ms = packet_s * 1000.0;
         let pattern = [-1.5, 0.5, 1.0, -0.5];
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         c.set_basis(AsrcBasis::Stamp);
         let mut place_ms = 0.0_f64;
         let mut burst_ms = 0.0_f64;
@@ -417,7 +414,6 @@ fn rust_trace() -> Vec<String> {
         for _ in 0..150 {
             c.observe_placement(-44.0, pm, false);
         }
-        c.set_level_absolute(false);
         for k in 0..900_i64 {
             feed(&mut c, -44.0, 0.0);
             if k % 25 == 24 {

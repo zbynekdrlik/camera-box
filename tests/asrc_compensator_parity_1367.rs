@@ -16,12 +16,12 @@
 //!   buffer the mixer drains in 1024-sample (21.33 ms) ticks, 1 ms bursty delivery from a shared
 //!   LCG — so every call reads a different point of the tick sawtooth and the per-window level
 //!   MEAN (#1367) is exercised at full resolution, 2 h.
-//! - `shift`: a non-absolute source, four 0.25 s callbacks per window over a ±6 ms per-callback
+//! - `shift`: an arrival source, four 0.25 s callbacks per window over a ±6 ms per-callback
 //!   pattern, a +12 ms shift landing mid-window in the CAPTURE window (the depth-at-lock mean must
 //!   be the new frame), a second one landing mid-window after capture (the open window sum and the
 //!   `level_avg` telemetry must move with it — traced right after the call), then a 40 ms sample
 //!   loss with no residual step (the sustained arm → restore burst).
-//! - `step`: an absolute source with a 50 ms input sample loss on the window-closing callback (the
+//! - `step`: an arrival source with a 50 ms input sample loss on the window-closing callback (the
 //!   re-base corroboration must read that live reading, not the window mean; issue 1372: the
 //!   confirmed loss is booked and paid back at `STEP_RECOVER_PPM`, traced as `rec=` / `recp=`), a starved window (rejected, flushed — the window level sum must reset; the mixer
 //!   pads, so the depth holds), and a duplicate wall read (a zero master block, flushed, the next
@@ -32,8 +32,8 @@
 //!   placement at the stamp with an amount still owed (dropped), a no-op setpoint shift, a mode flip,
 //!   a skipped slot before the capture (inert) and a 12 ms stamp jump that re-bases the rate but sits
 //!   under the half-packet band (never booked, by the placement or by the residual). 12/12 scratch C
-//!   mutants of the mode diverge. `tce` (review round 1): the timecode edges, open loop -- no
-//!   unreachable fallback in the mode, and a jump at the owed cap counted once. The three
+//!   mutants of the mode diverge. `tce` (review round 1): the timecode edges, open loop -- the
+//!   setpoint stays 0 under an error it cannot pull in, and a jump at the owed cap counted once. The three
 //!   scenarios above never enter the mode, so they stay byte-identical to the pre-1367 trace.
 //! - `tcs` (issue 1381, design 5882391108): 12 s of a 682 ms wall step read as placement error (the
 //!   owed cap re-booked, the smoothed error and the restore armed), the follow PLACED at its stamp
@@ -67,10 +67,10 @@ const HARNESS_C: &str = r##"#include <stdint.h>
 
 static void line(const char *tag, long k, const struct asrc_compensator *c)
 {
-	printf("%s k=%ld est=%.9f app=%.9f lvl=%.9f avg=%.9f tgt=%.9f int=%.9f ema=%.9f rst=%d steps=%u fb=%u rec=%.9f recp=%.9f\n", tag,
+	printf("%s k=%ld est=%.9f app=%.9f lvl=%.9f avg=%.9f tgt=%.9f int=%.9f ema=%.9f rst=%d steps=%u rec=%.9f recp=%.9f\n", tag,
 	       k, c->estimated_ppm, c->applied_ppm, c->level_last_ms, c->level_avg_ms, c->level_target_ms,
 	       c->level_integral_ppm, c->level_err_ema_ms, c->level_restore ? 1 : 0, c->step_count,
-	       c->level_fallback_count, c->step_recover_ms, c->step_recover_ppm);
+	       c->step_recover_ms, c->step_recover_ppm);
 }
 
 static void tick_scenario(void)
@@ -115,7 +115,6 @@ static void shift_scenario(void)
 	const double pattern[4] = {-6.0, -2.0, 2.0, 6.0};
 	struct asrc_compensator c;
 	asrc_compensator_init(&c);
-	asrc_compensator_set_level_absolute(&c, false);
 	double buffer_ms = 90.0;
 	double applied = 0.0;
 	for (long w = 0; w < 3600; w++) {
@@ -146,7 +145,6 @@ static void step_scenario(void)
 	const double raw_s = master_s * (1.0 + -5.0 / 1000000.0);
 	struct asrc_compensator c;
 	asrc_compensator_init(&c);
-	asrc_compensator_set_level_offset_ms(&c, 24.0);
 	double buffer_ms = 110.0;
 	double applied = 0.0;
 	for (long w = 0; w < 3000; w++) {
@@ -196,7 +194,6 @@ static void tc_scenario(void)
 	const double pattern[4] = {-1.5, 0.5, 1.0, -0.5};
 	struct asrc_compensator c;
 	asrc_compensator_init(&c);
-	asrc_compensator_set_level_absolute(&c, false);
 	asrc_compensator_set_timecode(&c, true);
 	double place_ms = 0.0;
 	double applied = 0.0;
@@ -239,7 +236,7 @@ static void tc_scenario(void)
 }
 
 /* issue 1367 review round 1: the timecode edges, open loop. A locked servo whose placement error
- * sits at -8 ms beyond the #1355 unreachable bound (no fallback in timecode mode), then two jumps that
+ * sits at -8 ms longer than the retired #1355 unreachable bound (the setpoint stays 0), then two jumps that
  * reach the 100 ms owed cap and 30 packets still beyond it (counted once, not per packet). */
 static void tc_edges_scenario(void)
 {
@@ -247,7 +244,6 @@ static void tc_edges_scenario(void)
 	const double packet_ms = packet_s * 1000.0;
 	struct asrc_compensator c;
 	asrc_compensator_init(&c);
-	asrc_compensator_set_level_absolute(&c, false);
 	asrc_compensator_set_timecode(&c, true);
 	double applied = 0.0;
 	for (long k = 0; k < 82000; k++) {
@@ -258,7 +254,7 @@ static void tc_edges_scenario(void)
 		if (k % 9000 == 8999)
 			tcline("tce", k, &c, 0.0);
 	}
-	printf("tce fallbacks=%u target=%.9f\n", c.level_fallback_count, c.level_target_ms);
+	printf("tce target=%.9f\n", c.level_target_ms);
 	asrc_compensator_observe_placement(&c, -60.0 - 8.0, packet_ms, false);
 	asrc_compensator_observe_placement(&c, -120.0 - 8.0, packet_ms, false);
 	tcline("tcecap", 0, &c, 0.0);
@@ -280,7 +276,6 @@ static void tc_step_scenario(void)
 	const double packet_ms = packet_s * 1000.0;
 	struct asrc_compensator c;
 	asrc_compensator_init(&c);
-	asrc_compensator_set_level_absolute(&c, false);
 	asrc_compensator_set_timecode(&c, true);
 	double applied = 0.0;
 	double recp = 0.0;
@@ -319,7 +314,6 @@ static void tc_step_scenario(void)
 	 * armed), the placement, then 8 s of a 15 ms error arm nothing (a carried count would arm at ~5 s) */
 	struct asrc_compensator w;
 	asrc_compensator_init(&w);
-	asrc_compensator_set_level_absolute(&w, false);
 	asrc_compensator_set_timecode(&w, true);
 	for (long k = 0; k < 4890; k++) {
 		double err = k >= 4500 && k < 4650 ? 682.0 : 0.4;
@@ -349,7 +343,7 @@ int main(void)
 
 fn line(tag: &str, k: i64, c: &RealtimeAsrcCompensator) -> String {
     format!(
-        "{tag} k={k} est={:.9} app={:.9} lvl={:.9} avg={:.9} tgt={:.9} int={:.9} ema={:.9} rst={} steps={} fb={} rec={:.9} recp={:.9}",
+        "{tag} k={k} est={:.9} app={:.9} lvl={:.9} avg={:.9} tgt={:.9} int={:.9} ema={:.9} rst={} steps={} rec={:.9} recp={:.9}",
         c.estimated_ppm(),
         c.applied_ppm(),
         c.level_last_ms(),
@@ -359,7 +353,6 @@ fn line(tag: &str, k: i64, c: &RealtimeAsrcCompensator) -> String {
         c.level_err_ema_ms(),
         u8::from(c.level_restore()),
         c.step_count(),
-        c.level_fallback_count(),
         c.step_recover_ms(),
         c.step_recover_ppm()
     )
@@ -430,7 +423,6 @@ fn rust_trace() -> Vec<String> {
         let raw_s = master_s * (1.0 + -5.0 / 1000000.0);
         let pattern = [-6.0, -2.0, 2.0, 6.0];
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         let mut buffer_ms = 90.0_f64;
         for w in 0..3600_i64 {
             for (i, p) in pattern.iter().enumerate() {
@@ -460,7 +452,6 @@ fn rust_trace() -> Vec<String> {
         let master_s = 0.25;
         let raw_s = master_s * (1.0 + -5.0 / 1000000.0);
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_offset_ms(24.0);
         let mut buffer_ms = 110.0_f64;
         for w in 0..3000_i64 {
             // issue 1372: the #1367 placement slew holds the recovery payment for three windows.
@@ -502,7 +493,6 @@ fn rust_trace() -> Vec<String> {
         let packet_ms = packet_s * 1000.0;
         let pattern = [-1.5, 0.5, 1.0, -0.5];
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         c.set_timecode(true);
         let mut place_ms = 0.0_f64;
         let mut applied = 0.0_f64;
@@ -561,7 +551,6 @@ fn rust_trace() -> Vec<String> {
         let packet_s = 1600.0 / 48000.0;
         let packet_ms = packet_s * 1000.0;
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         c.set_timecode(true);
         for k in 0..82000_i64 {
             let err = if k < 3600 { 0.0 } else { -8.0 };
@@ -572,11 +561,7 @@ fn rust_trace() -> Vec<String> {
                 out.push(tcline("tce", k, &c, 0.0));
             }
         }
-        out.push(format!(
-            "tce fallbacks={} target={:.9}",
-            c.level_fallback_count(),
-            c.level_target_ms()
-        ));
+        out.push(format!("tce target={:.9}", c.level_target_ms()));
         c.observe_placement(-60.0 - 8.0, packet_ms, false);
         c.observe_placement(-120.0 - 8.0, packet_ms, false);
         out.push(tcline("tcecap", 0, &c, 0.0));
@@ -591,7 +576,6 @@ fn rust_trace() -> Vec<String> {
         let packet_s = 1600.0 / 48000.0;
         let packet_ms = packet_s * 1000.0;
         let mut c = RealtimeAsrcCompensator::new();
-        c.set_level_absolute(false);
         c.set_timecode(true);
         for k in 0..9000_i64 {
             let mut err = if (3600..3960).contains(&k) {
@@ -651,7 +635,6 @@ fn rust_trace() -> Vec<String> {
             arrival.level_target_ms()
         ));
         let mut w = RealtimeAsrcCompensator::new();
-        w.set_level_absolute(false);
         w.set_timecode(true);
         for k in 0..4890_i64 {
             let mut err = if (4500..4650).contains(&k) {
@@ -789,8 +772,8 @@ fn c_asrc_compensator_matches_the_rust_authority_1367() {
             && r.iter().any(|l| l.starts_with("tc") && l.contains(" recp=1000.000000000"))
             // and leaves the mode (the flip at 27000).
             && r.iter().any(|l| l.starts_with("tc") && l.contains(" tc=0 "))
-            // review round 1: no unreachable fallback in timecode mode (the setpoint stays 0) ...
-            && r.iter().any(|l| l == "tce fallbacks=0 target=0.000000000")
+            // review round 1: the timecode setpoint stays 0 under an error it cannot pull in ...
+            && r.iter().any(|l| l == "tce target=0.000000000")
             // ... and a jump at the owed cap counts once (two jumps, then 30 packets beyond the cap).
             && r.iter().any(|l| l.starts_with("tcecap k=30 ") && l.contains(" jumps=2 "))
             // issue 1381: the step fills the smoothed error and arms the restore before the placement ...
@@ -807,8 +790,9 @@ fn c_asrc_compensator_matches_the_rust_authority_1367() {
             && r.iter().any(|l| l.starts_with("tcs cap=-60.0 due=0 "))
             && r.iter().any(|l| l.starts_with("tcs owed=") && l.contains(" due=1 "))
             && r.iter().any(|l| l == "tcs arrival_due=0")
-            // ... inert on a locked, captured arrival-mode servo too ...
-            && r.iter().any(|l| l.starts_with("tcs arrival_locked_due=0 tgt=100.0"))
+            // ... inert on a locked, captured arrival-mode servo too (issue 1425: captured at the
+            // 50 ms depth it locked at) ...
+            && r.iter().any(|l| l.starts_with("tcs arrival_locked_due=0 tgt=50.0"))
             // ... and the sustained arm counts afresh from the placement (armed before it? no; after
             // 8 s of a 15 ms error? still no).
             && r.iter().any(|l| l.starts_with("tcw k=4620 ") && l.contains(" rst=0 "))
