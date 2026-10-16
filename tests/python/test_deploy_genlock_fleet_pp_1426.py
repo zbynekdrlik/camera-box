@@ -332,6 +332,7 @@ def test_a_fact_file_that_does_not_parse_is_named_as_such_by_the_tree_check(tmp_
               "systemd/strih-obs.service"):
         (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / f).write_text("x")
+    (tmp_path / "scripts/strih-boxes").mkdir(parents=True)
     (tmp_path / "scripts/strih-boxes/strih-pp.env").write_text(
         "STRIH_HOSTNAME=strih-pp\nSTRIH_INTERCOM_CONFIG=intercom/x.toml\nBOGUS_KEY=1\n")
     r = _sourced('rc=0; strih_lx_tree_check %s strih-pp || rc=$?; echo "rc=$rc"' % tmp_path)
