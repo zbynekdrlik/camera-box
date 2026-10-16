@@ -1835,6 +1835,13 @@ a high-entropy secret. Do not bypass it; hold the sets in locals and build the b
 (`avsync_venue_name_ok` in `scripts/lib/avsync-venues.sh`). Each literal stays under the threshold,
 and the regex is still ASCII-only under any locale.
 
+**Scope that range lint to the regex itself, not the whole `=~` line (issue 1446).** A line such as
+`if [ -n "$x" ] || ! [[ $id =~ ^[$hex]{4}$ ]]` also holds test brackets: `[ -n "$x" ]` reads as a
+bracket body with a `-` in it, so a whole-line lint fails a clean lib. Lint only the text between
+`=~` and the closing `]]` (`test_no_bracket_range_on_any_regex_line_of_the_lib` in
+`tests/python/test_display_gpu_1446.py`). That lint also covers a runner with no en_US.UTF-8 locale,
+where a runtime test under that locale falls back to C and cannot catch a range.
+
 ## A mutation harness that runs the replica with a MINIMAL env reports every mutant "killed" (issue 1404)
 
 A python mutation driver that runs each scratch tree through `subprocess.run([...], env={"PATH": ..., "HOME": ...})`
