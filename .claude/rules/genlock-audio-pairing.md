@@ -392,9 +392,10 @@ timeline.** The rate servo stretches the samples to follow the wall-vs-QPC drift
 `70 ms / drift` — ~2 h at resolume's ~10 ppm). The slew books its own steps out of that timeline;
 the servo's correction does not. Reported to the supervisor as a follow-up candidate.
 
-**The global audio buffering is a FLOOR (issue 1367).** Every genlock OBS launch now starts the mix
-window 85 ms behind real time (4 ticks at 48 kHz, `obs-genlock-audio-buffering.h`), and OBS's own
-dynamic increase stays active above it. The genlock audio holds above ride on top of that, so a cg
+**The global audio buffering has no floor since issue 1425 slice 3.** Issue 1367 started every genlock
+OBS launch 85 ms behind real time; now a launch starts at 0 like stock OBS and its own startup race
+draws 0-43 ms (`obs-genlock-audio-buffering.h`, floor 0), and OBS's own dynamic increase stays
+active above it while no audio encoder runs. The genlock audio holds above ride on top of that, so a cg
 feed's audio on resolume still grows the buffering on a media start (a loud `ABOVE the floor` line,
 never dropped). Full rule: `genlock-audio-buffering-floor.md`.
 
@@ -893,7 +894,7 @@ every other source out of it.
   ` basis=arrival|timecode|stamp (issue 1425)` after the byte-identical issue-1367 suffix of the
   `asrc:` line. The compensator does not change.
 - **Reading the `asrc:` line.** `basis=stamp timecode=1`: `level=` / `level_avg=` are the placement
-  error against the source's own stamp (≈ 0 ± 2 ms healthy), `target=0`, `fallbacks=0`;
+  error against the source's own stamp (≈ 0 ± 2 ms healthy), `target=0` (no `fallbacks=` field since slice 3);
   `place_jumps=` flat (a real sample loss is booked and paid at 1000 ppm). The `#800 buffered_ms`
   of such a source drops to its natural depth (about B + its base + its sync offset; the `mbc` base is
   about 9 ms).
@@ -950,7 +951,8 @@ every other source out of it.
   a fact-file change outside this slice). Then ≥ 2 stream OBS restarts: the release E2E A/V gate green
   each time, per-camera A/V within ±5 ms across them, the `mbc` line `basis=stamp`, `level_avg` ±2 ms,
   `place_jumps=` flat across at least 1 h.
-  The 85 ms floor stays until slice 3 (`genlock-audio-buffering-floor.md`). Slice 2 (design
+  Slice 3 (design 6220191978) removed the 85 ms floor and the absolute ASRC target
+  (`genlock-audio-buffering-floor.md`, `asrc-bench-harness.md`). Slice 2 (design
   6216736061 + ROZHODNUTÉ 6217557472) freezes the buffering while an audio encoder runs, so a late
   mixed source is re-anchored (`MIXED_LATE`, one counted dropout) instead of growing the whole mix; a
   box with no audio encoder keeps stock growth. That section is in the floor rule.

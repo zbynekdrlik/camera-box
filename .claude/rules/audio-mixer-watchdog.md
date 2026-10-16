@@ -29,7 +29,7 @@ if a box sends VBAN again.
 |---|---|---|---|
 | `audio_mixer_ticks` / `_ticks_over` / `_tick_ms` / `_window_ms` / `_age_s` + `obs_log_head_age_s` | `audio-stall #1367: ... ticks=N ticks_over=M tick_ms=21.3` (obs-audio.c, one per dump) | MIXER | BEHIND: `abs(ticks - 2812.5) > 5`; OVERLOADED: `ticks_over > 30`; STALLED: dump age > 180 s AND log head age <= 60 s (issue 1385) |
 | `vban_pacer_loss_events` / `_loss_ms` / `_loss_dest` / `vban_pacer_age_s` | `[obs-vban] obs-vban pacing: ...` (every 10 s per output) | VBAN | VBAN_LOSS: any loss counter moved in the window |
-| `audio_buffering_ms` / `_start_ms` / `_source` / `_age_s` | `audio-telemetry #800: total_buffering=N ms` (every 60 s) + the genlock floor / `ABOVE the floor` lines (obs-audio.c) | BUFFERING | RAISED: at least one mixer tick above the session start (issue 1381, the section below) |
+| `audio_buffering_ms` / `_start_ms` / `_source` / `_age_s` | `audio-telemetry #800: total_buffering=N ms` (every 60 s) + the reset block's `buffering type:` line (obs.c) / the genlock floor line before issue 1425 / `ABOVE the floor` lines (obs-audio.c) | BUFFERING | RAISED: at least one mixer tick above the session start (issue 1381, the section below) |
 
 Both are parsed from the TAIL of the #1222 bounded read, in the server's one `obs_log_parse`
 tuple (appended at the END; the unpack is order-sensitive). Omit-when-empty: a box with no dump yet
@@ -180,19 +180,24 @@ nominal. The lasting, audible effect is the buffering, so this third arm pages i
 
 - **Gather** (`audio_buffering_from_log`, `bundle_state_audio.py`, the shared `tail=`):
   - `audio_buffering_ms` = the newest `#800` `total_buffering=` in the tail that comes AFTER the
-    tail's newest floor line (a total logged before an audio reset's floor line, or the session's
-    first line before the first tick, is not the current buffering); none = the whole facet absent
-    -> UNKNOWN;
-  - `audio_buffering_start_ms` = the NEWEST `genlock audio buffering floor ... is now N` line, in
-    the tail or else the head slice (printed at the first tick, so a long session keeps it in the
-    head; an audio reset prints a new one). Without one, only a WHOLE-FILE read (a build before the
-    floor) falls back to its first NON-ZERO `#800` total; a bounded read reports no start (UNKNOWN),
-    because its tail's first total can be an old raise (review round 1). **The first `#800` line of
-    a session can read `total_buffering=0 ms (ticks=0/45)`** (stream-snv 13.10 + 15.10: printed in
-    the same millisecond as the floor line, before the first tick; resolume 14.10 read 85 there), so
-    it is never a start value;
+    tail's newest SESSION MARKER (a floor line, or since issue 1425 slice 3 the reset block's
+    `buffering type:  dynamically increasing from 0 ms (genlock floor, issue 1425)` line): a total
+    logged before it, or the session's first line before the first tick, is not the current
+    buffering; none = the whole facet absent -> UNKNOWN;
+  - `audio_buffering_start_ms` (`_session_start_ms`) = for the NEWEST session marker, in the tail or
+    else the head slice (both print in a session's first minute, so a long session keeps them in the
+    head; an audio reset prints new ones): a floor line's value (an issue-1367 build), or for a
+    floorless build the first `#800` total at least `AUDIO_BUFFERING_SETTLE_S` (30 s) after the
+    `buffering type:` line, zero included: by then the launch's own startup race (0-43 ms) is done,
+    so the launch draw is the start and a later raise reads RAISED. A session younger than that
+    reports no start (UNKNOWN). With no marker at all, only a WHOLE-FILE read falls back to its first
+    NON-ZERO `#800` total; a bounded read reports no start, because its tail's first total can be an
+    old raise (review round 1). **The first `#800` line of a session can read
+    `total_buffering=0 ms (ticks=0/45)`** (printed before the first tick), so it is never a start
+    value; `tests/python/test_audio_buffering_start_1425.py` pins the floorless shapes;
   - `audio_buffering_source` = the newest `ABOVE the floor ... (source: <name>)` line in the bounded
-    read. **The `#800` `buffering_source=` reads `-` on every live line, also after a raise**, so it
+    read (the source ends the line since issue 1425 slice 3; the parser takes the old `; ASRC level
+    band` tail too). **The `#800` `buffering_source=` reads `-` on every live line, also after a raise**, so it
     is only a fallback when it names something. A raise whose ABOVE line left both slices of a long
     session has no source: the page says so, never a guess;
   - `audio_buffering_age_s` = the newest `#800` line's age behind the log head.
