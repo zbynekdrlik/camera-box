@@ -106,10 +106,12 @@ fn compile_and_run(c_src: &str, tag: &str) -> Vec<String> {
 /// VLC's clock "now" (us) and OBS's (ns) at the mapping, and the stamps (us) the vectors map.
 const VLC_NOW_US: i64 = 5_000_000_000;
 const OBS_NOW_NS: u64 = 86_400_000_000_000;
-const STAMPS_US: [i64; 8] = [
+const STAMPS_US: [i64; 10] = [
     VLC_NOW_US - 10_000, // 10 ms ago (a video frame displayed, an audio packet just played)
     VLC_NOW_US,          // now
     VLC_NOW_US + 5_000,  // 5 ms ahead (VLC hands audio over before its presentation date)
+    VLC_NOW_US + 1_990_000, // just under libobs's 2 s direct-stamp window (review round 1)
+    VLC_NOW_US + 2_010_000, // just over it: the mapping keeps the lead, libobs decides the basis
     VLC_NOW_US - 60_000_000, // the 60 s edge of the foreign-clock mapper
     VLC_NOW_US - 60_000_001, // past it: not on VLC's clock, passed through
     VLC_NOW_US + 60_000_001, // far ahead: passed through
@@ -127,8 +129,6 @@ fn mapping_lift(windows: bool) -> String {
     let mut c = String::from(
         "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n\
          static int64_t h_vlc_now_us;\nstatic uint64_t h_obs_now_ns;\n\
-         static int64_t h_vlc_clock(void) { return h_vlc_now_us; }\n\
-         static int64_t (*libvlc_clock_)(void) = h_vlc_clock;\n\
          static uint64_t os_gettime_ns(void) { return h_obs_now_ns; }\n",
     );
     if windows {
@@ -148,13 +148,13 @@ fn mapping_lift(windows: bool) -> String {
         &vlc,
         "static inline uint64_t vlcs_media_clock_ns(",
     ));
-    c.push_str("int main(void)\n{\n\t(void)os_gettime_ns;\n\t(void)libvlc_clock_;\n");
+    c.push_str("int main(void)\n{\n\t(void)os_gettime_ns;\n");
     c.push_str(&format!(
         "\th_vlc_now_us = {VLC_NOW_US}ll;\n\th_obs_now_ns = {OBS_NOW_NS}ull;\n"
     ));
     for s in STAMPS_US {
         c.push_str(&format!(
-            "\tprintf(\"%llu\\n\", (unsigned long long)vlcs_media_clock_ns({s}ll));\n"
+            "\tprintf(\"%llu\\n\", (unsigned long long)vlcs_media_clock_ns({s}ll, h_vlc_now_us));\n"
         ));
     }
     c.push_str("\treturn 0;\n}\n");
@@ -171,6 +171,8 @@ fn a_vlc_stamp_lands_on_the_obs_media_clock_by_its_age_1425() {
         n - 10_000_000,
         n,
         n + 5_000_000,
+        n + 1_990_000_000,
+        n + 2_010_000_000,
         n - 60_000_000_000,
         us(VLC_NOW_US - 60_000_001),
         us(VLC_NOW_US + 60_000_001),
@@ -297,4 +299,64 @@ fn the_full_deploy_backs_up_and_verifies_vlc_video_1425() {
             "issue 1425: a FAST (obs.dll-only) deploy never touches vlc-video:\n{fast}"
         );
     }
+}
+
+/// The audio lead log (`vlcs_audio_lead_log`, lifted VERBATIM): the first lead is printed at once, then
+/// the largest lead of each 60 s window, never more often (review round 1: the live acceptance reads how
+/// close VLC's audio presentation date comes to libobs's 2 s direct-stamp window).
+#[test]
+fn the_audio_lead_is_logged_once_a_minute_with_its_window_max_1425() {
+    let vlc = read(VLC_SOURCE);
+    let define = vlc
+        .lines()
+        .find(|l| l.starts_with("#define VLCS_AUDIO_LEAD_LOG_NS "))
+        .expect("issue 1425: vlc-video-source.c no longer defines VLCS_AUDIO_LEAD_LOG_NS");
+    let mut c = String::from(
+        "#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdarg.h>\n\
+         #define LOG_INFO 300\n\
+         typedef struct obs_source obs_source_t;\n\
+         struct vlc_source { obs_source_t *source; int64_t audio_lead_max_us; bool audio_lead_seen; uint64_t audio_lead_log_ns; };\n\
+         static const char *obs_source_get_name(const obs_source_t *s) { (void)s; return \"NL playlist\"; }\n\
+         __attribute__((format(printf, 2, 3))) static void blog(int level, const char *fmt, ...)\n\
+         { va_list ap; va_start(ap, fmt); printf(\"%d \", level); vprintf(fmt, ap); printf(\"\\n\"); va_end(ap); }\n",
+    );
+    c.push_str(define);
+    c.push('\n');
+    c.push_str(&lift_fn(&vlc, "static void vlcs_audio_lead_log("));
+    // (lead in us, OBS now in ns): first call at t = 5 s, more leads inside the minute, then 60 s later
+    let calls: [(i64, u64); 6] = [
+        (40_000, 5_000_000_000),
+        (1_990_000, 20_000_000_000),
+        (-3_000, 64_999_999_999),
+        (12_000, 65_000_000_000),
+        (8_000, 90_000_000_000),
+        (9_000, 125_000_000_000),
+    ];
+    c.push_str("int main(void)\n{\n\tstruct vlc_source v = {0};\n");
+    for (lead, now) in calls {
+        c.push_str(&format!(
+            "\tvlcs_audio_lead_log(&v, {lead}ll, {now}ull);\n\tprintf(\"-\\n\");\n"
+        ));
+    }
+    c.push_str("\treturn 0;\n}\n");
+    let line =
+        |ms: &str| format!("300 [vlc_source: 'NL playlist'] audio lead_max_ms={ms} (issue 1425)");
+    let want = vec![
+        line("40.0"),
+        "-".to_string(),
+        "-".to_string(),
+        "-".to_string(),
+        // 60 s after the first line: the window's largest lead (1.99 s), the current one included
+        line("1990.0"),
+        "-".to_string(),
+        "-".to_string(),
+        // the next window: 8 ms and 9 ms, printed 60 s after the previous line
+        line("9.0"),
+        "-".to_string(),
+    ];
+    assert_eq!(
+        compile_and_run(&c, "vlc_audio_lead_1425"),
+        want,
+        "issue 1425: the VLC audio lead is logged once a minute with the window's largest lead"
+    );
 }
