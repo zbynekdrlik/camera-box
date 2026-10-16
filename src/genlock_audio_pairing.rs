@@ -731,9 +731,11 @@ pub fn audio_arrival_rebase(
     level_captured: bool,
     diff_ns: u64,
 ) -> bool {
-    // RED (issue 1425 S4): the decision is not implemented yet
-    let _ = (basis, monitor_only, can_resample, level_captured, diff_ns);
-    false
+    basis == AsrcBasis::Arrival
+        && !monitor_only
+        && can_resample
+        && level_captured
+        && diff_ns >= AUDIO_TS_SMOOTHING_NS
 }
 
 /// Issue 1367 — the ASRC's error input for one packet, in ms: its placement error (actual − the

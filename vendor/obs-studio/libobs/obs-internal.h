@@ -1256,6 +1256,14 @@ struct obs_source {
 	int64_t genlock_audio_step_unmatched_ns;    /* issue 1381 (ROZHODNUTE 5903945145): the part of this box's last wall step the stamps never matched (a hold ended without them jumping); 0 = none */
 	uint64_t genlock_audio_step_unmatched_at_ns; /* issue 1381 (ROZHODNUTE 5903945145): when it was remembered (OBS monotonic); its follow is recognised for 600 s */
 	bool genlock_audio_step_relock_pending;     /* render thread: a latch relock landed inside a hold, replayed after it */
+	/* camera-box issue 1425 (E3 slice S4, design 6225701358): the ARRIVAL rebase -- a locked arrival-basis
+	 * source's packet 70 ms or more off its continuation appends instead of being placed. Audio thread
+	 * only (the ingest records, genlock_audio_arrival_rebase_log prints after audio_buf_mutex). */
+	uint32_t genlock_arrival_rebases;           /* cumulative packets a rebase let append (log rebases=) */
+	bool genlock_arrival_rebase_due;            /* a rebase was recorded since the last log call */
+	bool genlock_arrival_rebase_sys;            /* the recorded rebase was the system domain only */
+	int64_t genlock_arrival_rebase_drift_ns;    /* its timestamp minus the continuation it replaced */
+	uint64_t genlock_arrival_rebase_logged_ns;  /* the last line (OBS monotonic; 0 = never), 1 line/min */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
 	DARRAY(struct obs_source_frame *) async_frames;

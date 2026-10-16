@@ -3,6 +3,9 @@
 #include <util/threading.h>
 #include <util/platform.h>
 #include <util/dstr.h>
+#ifdef _WIN32
+#include <util/windows/qpc-timestamp.h>
+#endif
 
 #define do_log(level, format, ...) \
 	blog(level, "[vlc_source: '%s'] " format, obs_source_get_name(ss->source), ##__VA_ARGS__)
@@ -360,10 +363,28 @@ static void *vlcs_video_lock(void *data, void **planes)
 	return NULL;
 }
 
+/* camera-box issue 1425 (E3 slice S4v, design 6225701358): a libvlc_clock() value (us) on the OBS media
+ * clock, os_gettime_ns(), mapped by its AGE on VLC's own clock. Stock stamped libvlc_clock() relative to
+ * plugin load: not direct, so libobs latched a timing_adjust and the source drifted against the mixer at
+ * the dantesync discipline rate on Windows (~3.6 ms/h per ppm, issue 1372; VLC's clock is QPC there, the
+ * mixer the disciplined system-time rate), until its audio was re-placed 70 ms at a time. Mapped, the
+ * stamps are direct: the audio is judged by its own stamp (the issue-1425 STAMP basis) and the video is
+ * presented on the same clock. On Linux libvlc_clock() is CLOCK_MONOTONIC, the clock os_gettime_ns()
+ * reads, so the mapping is the identity. */
+static inline uint64_t vlcs_media_clock_ns(int64_t vlc_us)
+{
+	const uint64_t stamp_ns = vlc_us > 0 ? (uint64_t)vlc_us * 1000ULL : 0;
+#ifdef _WIN32
+	return os_foreign_clock_ns_to_gettime_ns(stamp_ns, (uint64_t)libvlc_clock_() * 1000ULL);
+#else
+	return stamp_ns;
+#endif
+}
+
 static void vlcs_video_display(void *data, void *picture)
 {
 	struct vlc_source *c = data;
-	c->frame.timestamp = (uint64_t)libvlc_clock_() * 1000ULL - time_start;
+	c->frame.timestamp = vlcs_media_clock_ns(libvlc_clock_());
 	obs_source_output_video(c->source, &c->frame);
 
 	UNUSED_PARAMETER(picture);
@@ -472,7 +493,7 @@ static void vlcs_audio_play(void *data, const void *samples, unsigned count, int
 	}
 
 	memcpy((void *)c->audio.data[0], samples, size);
-	c->audio.timestamp = (uint64_t)pts * 1000ULL - time_start;
+	c->audio.timestamp = vlcs_media_clock_ns(pts);
 	c->audio.frames = count;
 
 	obs_source_output_audio(c->source, &c->audio);
