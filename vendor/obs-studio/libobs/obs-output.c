@@ -2487,8 +2487,8 @@ static inline bool preserve_active(struct obs_output *output)
 
 /* camera-box issue 1425 (E2 slice 2, design 6216736061): how many outputs run an audio ENCODER. A growth
  * of the mix's audio buffering while one runs makes its audio permanently later (obs-encoder.c counts
- * audio pts in samples after the start), so obs-audio.c freezes the buffering while this is above 0
- * (obs-genlock-audio-buffering.h genlock_audio_buffering_frozen). Bumped where an encoded output's
+ * audio pts in samples after the start), so obs-audio.c freezes the buffering while this is above 0,
+ * and only then (obs-genlock-audio-buffering.h genlock_audio_buffering_frozen). Bumped where an encoded output's
  * audio encoders start (hook_data_capture) and stop (end_data_capture_thread): one start and one stop
  * per capture; a delayed output that keeps its encoders over a restart keeps its count. */
 static volatile long genlock_audio_encoder_outputs = 0;

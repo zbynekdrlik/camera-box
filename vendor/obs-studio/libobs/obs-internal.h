@@ -576,9 +576,8 @@ struct obs_core_audio {
 	int floor_buffering_ticks;
 	bool fixed_buffer;
 	/* camera-box issue 1425 (E2 slice 2): the buffering FREEZE (obs-genlock-audio-buffering.h), audio
-	 * thread only. The mixer tick of the last growth or member join (0 = none since this audio reset),
-	 * this tick's decision, and the mix-wide count of MIXED_LATE re-anchors for the #800 line. */
-	uint64_t genlock_settle_tick;
+	 * thread only. This tick's decision (an audio encoder runs) and the mix-wide count of MIXED_LATE
+	 * re-anchors for the #800 line. */
 	bool genlock_buffering_frozen;
 	uint64_t genlock_mixed_late_events;
 

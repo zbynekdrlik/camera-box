@@ -45,17 +45,17 @@
 //!   band. The shipped floor keeps it inside for a base of 0–25 ms at 44.1 and 48 kHz; the libobs
 //!   log names a dynamic increase that leaves it.
 //!
-//! ## Issue 1425 (E2 slice 2, design 6216736061): the FREEZE
+//! ## Issue 1425 (E2 slice 2, design 6216736061 + ROZHODNUTÉ 6217557472): the FREEZE
 //!
 //! A buffering increase while an encoder runs makes that encoder's audio permanently later
 //! (obs-encoder.c counts audio pts in samples after the output start). On stream-snv the E1 events
-//! grew the mix +85 / +128 / +192 ms (two ASIO outages, a 432 ms mixer stall), each an
-//! audio-after-picture step on every live output until a restart. So once the mix has settled the
-//! dynamic increase is OFF:
+//! grew the mix +85 / +128 / +192 ms (two ASIO outages, a 432 ms mixer stall) while it streamed,
+//! each an audio-after-picture step on every live output until a restart. So while an encoder runs
+//! the dynamic increase is OFF:
 //!
-//! - [`frozen`]: frozen while an output with an audio encoder is active, or once the mix has gone
-//!   [`SETTLE_NS`] without a growth and without a member joining ([`ns_since`] measures that in
-//!   mixer ticks).
+//! - [`frozen`]: frozen while an output with an audio encoder is active, and only then. With no
+//!   encoder a growth moves no live output's A/V, so such a box (the resolume cg OBS) keeps stock
+//!   growth.
 //! - [`action`] takes it: a frozen mix never grows dynamically. The floor is never frozen.
 //! - A mixed source that falls behind a frozen mix is re-anchored instead (obs-genlock-mix-guard.h
 //!   `MIXED_LATE`, pinned by the issue-1381 lift): one counted dropout of its late span on that
@@ -94,11 +94,6 @@ pub const LEVEL_BASE_NOMINAL_NS: u64 = 9_000_000;
 /// The base range the band invariant is proven over, ns: 0 up to the ~25 ms transport base a
 /// genlock source shows (asrc-compensator.h).
 pub const LEVEL_BASE_MAX_NS: u64 = 25_000_000;
-
-/// Issue 1425: how long the mix must go without a growth and without a member joining before its
-/// buffering freezes, ns (30 s: the launch-time joins and the startup race all happen in the first
-/// seconds, E2 consult §3).
-pub const SETTLE_NS: u64 = 30_000_000_000;
 
 /// What [`plan`] decides at `obs_reset_audio2`. Mirror of the C
 /// `struct genlock_audio_buffering_plan` (built by `genlock_audio_buffering_make_plan`).
@@ -197,21 +192,10 @@ pub fn action(
     }
 }
 
-/// Issue 1425: the time since the mix last grew or a member joined it, ns — the mixer ticks from
-/// `anchor_tick` to `cur_tick` times `tick_ns`, saturating at `u64::MAX`. 0 while there is no
-/// anchor yet (`anchor_tick` 0: an audio reset zeroed it, the first tick's floor raise sets it) or
-/// the anchor is this tick.
-pub fn ns_since(anchor_tick: u64, cur_tick: u64, tick_ns: u64) -> u64 {
-    if anchor_tick == 0 || cur_tick <= anchor_tick {
-        return 0;
-    }
-    (cur_tick - anchor_tick).saturating_mul(tick_ns)
-}
-
-/// Issue 1425: whether the mix's buffering is frozen on this tick — an output with an audio
-/// encoder is active, or the mix has gone `settle_ns` without a growth and without a member join.
-pub fn frozen(ns_since_last_growth_or_join: u64, encoder_active: bool, settle_ns: u64) -> bool {
-    encoder_active || ns_since_last_growth_or_join >= settle_ns
+/// Issue 1425 (ROZHODNUTÉ 6217557472): whether the mix's buffering is frozen on this tick — an
+/// output with an audio encoder is active. Nothing else freezes it.
+pub fn frozen(encoder_active: bool) -> bool {
+    encoder_active
 }
 
 /// The gap the level servo must bridge, ns: the absolute level target minus the natural depth
@@ -378,42 +362,16 @@ mod tests {
     }
 
     #[test]
-    fn the_mix_freezes_while_an_audio_encoder_runs_or_once_settled_1425() {
-        const S: u64 = SETTLE_NS;
-        // An audio encoder (a stream or a recording) freezes it at once, settled or not.
-        assert!(frozen(0, true, S));
-        assert!(frozen(S - 1, true, S));
-        // Without one: frozen exactly from SETTLE_NS on.
-        assert!(!frozen(0, false, S));
-        assert!(!frozen(S - 1, false, S));
-        assert!(frozen(S, false, S));
-        assert!(frozen(u64::MAX, false, S));
-        // The settle parameter is used, not the constant.
-        assert!(frozen(5, false, 5) && !frozen(4, false, 5));
-        assert_eq!(SETTLE_NS, 30_000_000_000);
-    }
-
-    #[test]
-    fn the_settle_is_counted_in_mixer_ticks_from_the_last_growth_or_join_1425() {
-        let tick = ticks_ns(1, AUDIO_OUTPUT_FRAMES, 48_000);
-        assert_eq!(tick, 21_333_333);
-        // No anchor yet (an audio reset): never settled.
-        assert_eq!(ns_since(0, 5_000, tick), 0);
-        // The anchor is this tick (or ahead of it after a wrap that cannot happen): 0.
-        assert_eq!(ns_since(7, 7, tick), 0);
-        assert_eq!(ns_since(9, 7, tick), 0);
-        assert_eq!(ns_since(7, 8, tick), tick);
-        // 30 s at 48 kHz is 1407 ticks (1406 fall 1 tick short).
-        assert!(!frozen(ns_since(1, 1 + 1406, tick), false, SETTLE_NS));
-        assert!(frozen(ns_since(1, 1 + 1407, tick), false, SETTLE_NS));
-        // A huge gap saturates instead of wrapping into a small number.
-        assert_eq!(ns_since(1, u64::MAX, tick), u64::MAX);
+    fn only_a_running_audio_encoder_freezes_the_mix_1425() {
+        // A stream or a recording freezes it; with no audio encoder (the resolume cg OBS) the mix
+        // keeps stock growth, however long it has been quiet.
+        assert!(frozen(true));
+        assert!(!frozen(false));
         assert_eq!(
-            ns_since(1, 1 + (u64::MAX / tick), tick),
-            (u64::MAX / tick) * tick
+            action(4, 4, 45, true, frozen(false)),
+            BufferingAction::Dynamic
         );
-        assert_eq!(ns_since(1, 2 + (u64::MAX / tick), tick), u64::MAX);
-        assert_eq!(ns_since(1, 100, 0), 0);
+        assert_eq!(action(4, 4, 45, true, frozen(true)), BufferingAction::None);
     }
 
     #[test]

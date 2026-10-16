@@ -16,9 +16,9 @@
  * behaviour: the dynamic increase above the 1367 floor, ignore_audio at the maximum. That includes a
  * source whose audio STARTS only after it joined the mix (a media start on program).
  *
- * Issue 1425 (E2 slice 2, design 6216736061): once the mix's buffering is FROZEN
+ * Issue 1425 (E2 slice 2, design 6216736061): while the mix's buffering is FROZEN
  * (obs-genlock-audio-buffering.h genlock_audio_buffering_frozen: an output with an audio encoder is
- * active, or the mix has settled), a MIXED source that falls behind the window -- a member, not
+ * active), a MIXED source that falls behind the window -- a member, not
  * entering -- is re-anchored the same way (MIXED_LATE) instead of growing the whole mix: one counted
  * dropout of its late span on that source, never a step in every output.
  *

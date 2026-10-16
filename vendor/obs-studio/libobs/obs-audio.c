@@ -514,7 +514,7 @@ static inline bool genlock_mix_source_is_member(const struct obs_source *source)
 
 /* audio_callback, right after the output mixes' active trees are in the render order and before the
  * catch-all loop adds every other audio source: advance the mixer tick and mark that render order as
- * the mix. A member that joins restarts the issue-1425 settle (the freeze waits for a quiet mix). */
+ * the mix. */
 static void genlock_mix_mark_members(struct obs_core_audio *audio)
 {
 	const uint64_t tick = ++genlock_mix_tick_now;
@@ -522,8 +522,6 @@ static void genlock_mix_mark_members(struct obs_core_audio *audio)
 	for (size_t i = 0; i < audio->render_order.num; i++) {
 		obs_source_t *source = audio->render_order.array[i];
 		source->genlock_mix_entered = genlock_mix_joined(source->genlock_mix_tick, tick);
-		if (source->genlock_mix_entered)
-			audio->genlock_settle_tick = tick;
 		source->genlock_mix_tick = tick;
 	}
 }
@@ -909,13 +907,10 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	 * tree reached. Mark it before the loop below adds every other audio source (rendered for meters
 	 * and monitoring, never mixed). */
 	genlock_mix_mark_members(audio);
-	/* camera-box issue 1425 (E2 slice 2): the buffering FREEZE for this tick -- an output with an audio
-	 * encoder is active, or the mix has gone 30 s without a growth or a member join. A member that
-	 * then falls behind the window is re-anchored (MIXED_LATE) and the dynamic increase is off. */
-	audio->genlock_buffering_frozen = genlock_audio_buffering_frozen(
-		genlock_audio_buffering_ns_since(audio->genlock_settle_tick, genlock_mix_tick_now,
-						 audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES)),
-		obs_output_genlock_audio_encoder_outputs() > 0, GENLOCK_AUDIO_BUFFERING_SETTLE_NS);
+	/* camera-box issue 1425 (E2 slice 2, ROZHODNUTE 6217557472): the buffering FREEZE for this tick --
+	 * an output with an audio encoder is active. A member that then falls behind the window is
+	 * re-anchored (MIXED_LATE) and the dynamic increase is off; with no encoder, stock growth. */
+	audio->genlock_buffering_frozen = genlock_audio_buffering_frozen(obs_output_genlock_audio_encoder_outputs() > 0);
 
 	pthread_mutex_lock(&data->audio_sources_mutex);
 
@@ -1054,9 +1049,6 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC) {
 		add_audio_buffering(audio, sample_rate, &ts, min_ts, buffering_name);
 	}
-	/* camera-box issue 1425: a growth restarts the settle (a member join does it in the mark) */
-	if (genlock_buffering != GENLOCK_AUDIO_BUFFERING_ACTION_NONE)
-		audio->genlock_settle_tick = genlock_mix_tick_now;
 
 	/* ------------------------------------------------ */
 	/* mix audio */
