@@ -29,12 +29,14 @@
 #   kernel <uname -r>
 #   <pci slot> <vendor>:<device> <driver name, or - when none is bound>   (one per class 0x03* device)
 #   end
-# The closing `end` row tells a complete read from a cut one. DISPLAY_GPU_PCI_ROOT (default
+# The closing `end` row tells a complete read from a cut one. A PCI root that is not a readable
+# directory prints `root-unreadable <path>` instead of the device rows. DISPLAY_GPU_PCI_ROOT (default
 # /sys/bus/pci/devices) points the gather at a test tree.
 display_gpu_gather_remote_snippet() {
   printf '_dg_root=%q\n' "${DISPLAY_GPU_PCI_ROOT:-/sys/bus/pci/devices}"
   cat <<'REMOTE'
 echo "kernel $(uname -r 2>/dev/null || true)"
+if [ ! -d "$_dg_root" ] || [ ! -r "$_dg_root" ] || [ ! -x "$_dg_root" ]; then echo "root-unreadable $_dg_root"; fi
 for _dg_d in "$_dg_root"/*; do
   [ -r "$_dg_d/class" ] || continue
   _dg_c=""; read -r _dg_c <"$_dg_d/class" || true
@@ -55,15 +57,22 @@ REMOTE
 
 # display_gpu_verdict BLOCK -> prints `OK: <slot> <id> <driver>[; ...] on kernel <k>` and returns 0,
 # or one `FAIL: ...` line per problem and returns 1. BLOCK is the gather's output (or a test
-# fixture). Fail-closed: a read without the `end` row, a missing kernel, a malformed row and a box
-# with no display controller at all are FAILs, never OK. Pure bash, ASCII-only under any locale (the
-# hex set is spelled out, never a bracket range: .claude/rules/ci-testing-gotchas.md, issue 1302).
+# fixture). Fail-closed: a read whose last row is not `end`, a missing kernel, an unreadable PCI
+# root, a malformed row and a box with no display controller at all are FAILs, never OK. Pure bash,
+# ASCII-only under any locale (the hex set is spelled out, never a bracket range:
+# .claude/rules/ci-testing-gotchas.md, issue 1302).
 display_gpu_verdict() {
   local block="${1:-}" line kernel="" have_kernel=0 complete=0 n=0 fails="" driven="" nl=$'\n'
+  local root_unreadable=""
   local slot id drv extra remedy
   local hex='0123456789abcdef'
   while IFS= read -r line; do
     [ -n "${line// /}" ] || continue
+    if [ "$complete" = 1 ]; then
+      # anything after `end` means the read is not what the gather prints
+      fails="${fails}FAIL: malformed display controller row '${line}' after the end row -- the PCI display state cannot be graded (issue 1446)${nl}"
+      continue
+    fi
     case "$line" in
       kernel | "kernel "*)
         have_kernel=1
@@ -71,6 +80,7 @@ display_gpu_verdict() {
         kernel="${kernel# }"
         ;;
       end) complete=1 ;;
+      "root-unreadable "*) root_unreadable="${line#root-unreadable }" ;;
       *)
         slot="" id="" drv="" extra=""
         read -r slot id drv extra <<<"$line"
@@ -95,6 +105,9 @@ display_gpu_verdict() {
   if [ "$have_kernel" != 1 ] || [ -z "$kernel" ]; then
     fails="FAIL: the running kernel could not be read (no kernel row) -- the display GPU cannot be graded (issue 1446)${nl}${fails}"
     kernel="<unread>"
+  fi
+  if [ -n "$root_unreadable" ]; then
+    fails="${fails}FAIL: the PCI device directory ${root_unreadable} is not readable -- the display GPU cannot be graded (issue 1446)${nl}"
   fi
   remedy="boot a kernel whose driver knows it: the Ubuntu 24.04 HWE kernel through scripts/rt-kernel-upgrade.sh (.claude/rules/realtime-isolation.md), then a PHYSICAL power cycle of the box (never a remote reboot of a cambox)"
   if [ "$n" -eq 0 ] && [ -z "$fails" ]; then

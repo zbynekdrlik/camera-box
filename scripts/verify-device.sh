@@ -1860,9 +1860,11 @@ else
   case "$GPU_VERDICT" in
     OK:*) ok "display GPU driven: ${GPU_VERDICT#OK: } -- a monitor plugged in at any time lights the HDMI preview (issue 1446)" ;;
     *)
+      _av_fails=0
       while IFS= read -r _reason; do
-        if [ -n "$_reason" ]; then fail "display GPU: ${_reason#FAIL: }"; fi
+        if [ -n "$_reason" ]; then fail "display GPU: ${_reason#FAIL: }"; _av_fails=$((_av_fails + 1)); fi
       done <<<"$GPU_VERDICT"
+      if [ "$_av_fails" -eq 0 ]; then fail "display GPU: the verdict was empty -- cannot certify the HDMI preview has a GPU driver (issue 1446)"; fi
       ;;
   esac
 fi
