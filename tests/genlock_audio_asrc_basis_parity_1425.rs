@@ -8,8 +8,8 @@
 //! at the line budget. FAILS LOUDLY (never skips) when the C toolchain is missing.
 
 use camera_box::genlock_audio_pairing::{
-    audio_asrc_placement, audio_asrc_rate_point, audio_place_measured, AsrcBasis, AsrcRatePending,
-    AudioHoldMode,
+    audio_arrival_rebase, audio_asrc_placement, audio_asrc_rate_point, audio_place_measured,
+    AsrcBasis, AsrcRatePending, AudioHoldMode, AUDIO_TS_SMOOTHING_NS,
 };
 // The lift / compile / run helpers are shared with the other audio-pairing parity gates; a directory
 // module, so cargo does not build it as a test target of its own.
@@ -178,5 +178,73 @@ fn c_asrc_rate_point_matches_the_rust_authority_1425() {
     assert!(
         emitted(&want[12]) && !emitted(&want[13]) && !emitted(&want[14]),
         "issue 1425: the timecode basis emits at once and drops a duplicated slot"
+    );
+}
+
+/// Issue 1425 (E3 slice S4, design 6225701358) — the ARRIVAL rebase decision
+/// (`genlock_audio_arrival_rebase`) must match the Rust authority on every basis x listen-only x
+/// resampler x captured level, at the 70 ms edge (one ns under, exactly, one over) and far past it, and
+/// the C threshold must be the Rust one AND OBS's `TS_SMOOTHING_THRESHOLD` (a `_Static_assert` after
+/// the lifted block holds the two C defines equal; its text is pinned here, the build checks it).
+#[test]
+fn c_arrival_rebase_matches_the_rust_authority_1425() {
+    let b = |v: bool| i32::from(v);
+    let flags = [false, true];
+    let diffs = [
+        0,
+        AUDIO_TS_SMOOTHING_NS - 1,
+        AUDIO_TS_SMOOTHING_NS,
+        AUDIO_TS_SMOOTHING_NS + 1,
+        3_000_000_000,
+        u64::MAX,
+    ];
+    let bases = [AsrcBasis::Arrival, AsrcBasis::Timecode, AsrcBasis::Stamp];
+    let mut body = String::from(
+        "    printf(\"%llu\\n\", (unsigned long long)GENLOCK_AUDIO_TS_SMOOTHING_NS);\n",
+    );
+    let mut want = vec![AUDIO_TS_SMOOTHING_NS.to_string()];
+    for basis in bases {
+        for mo in flags {
+            for rs in flags {
+                for cap in flags {
+                    for diff in diffs {
+                        body.push_str(&format!(
+                            "    printf(\"%d\\n\", genlock_audio_arrival_rebase({}, {}, {}, {}, {diff}ull) ? 1 : 0);\n",
+                            basis.code(),
+                            b(mo),
+                            b(rs),
+                            b(cap)
+                        ));
+                        want.push(b(audio_arrival_rebase(basis, mo, rs, cap, diff)).to_string());
+                    }
+                }
+            }
+        }
+    }
+    let out = run_c(&body, "arrival_rebase_1425");
+    assert_eq!(
+        out, want,
+        "issue 1425: the C arrival rebase decision diverged from the Rust authority"
+    );
+    // the decided design, not only C == Rust: only the locked, mixed, resampled arrival source rebases,
+    // from exactly 70 ms on (70 ms, 70 ms + 1, 3 s and the maximum)
+    let rebased = want.iter().skip(1).filter(|v| *v == "1").count();
+    assert_eq!(
+        rebased, 4,
+        "issue 1425: exactly one input combination rebases, at the four differences from 70 ms on"
+    );
+    let path = genlock_audio_pairing_lift::repo(genlock_audio_pairing_lift::SRC);
+    let src = std::fs::read_to_string(&path).expect("read obs-source.c");
+    let squished = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        squished.contains(
+            "_Static_assert(GENLOCK_AUDIO_TS_SMOOTHING_NS == TS_SMOOTHING_THRESHOLD, \"issue 1425: the arrival rebase threshold must be OBS's TS_SMOOTHING_THRESHOLD\");"
+        ),
+        "issue 1425: obs-source.c no longer holds GENLOCK_AUDIO_TS_SMOOTHING_NS equal to \
+         TS_SMOOTHING_THRESHOLD"
+    );
+    assert!(
+        squished.contains("#define TS_SMOOTHING_THRESHOLD 70000000ULL"),
+        "issue 1425: OBS's TS_SMOOTHING_THRESHOLD moved off 70 ms: re-check the arrival rebase"
     );
 }
