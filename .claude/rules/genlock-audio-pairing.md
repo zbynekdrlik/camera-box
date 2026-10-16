@@ -950,7 +950,10 @@ every other source out of it.
   a fact-file change outside this slice). Then ≥ 2 stream OBS restarts: the release E2E A/V gate green
   each time, per-camera A/V within ±5 ms across them, the `mbc` line `basis=stamp`, `level_avg` ±2 ms,
   `place_jumps=` flat across at least 1 h.
-  The 85 ms floor stays until slices 2 and 3 (`genlock-audio-buffering-floor.md`).
+  The 85 ms floor stays until slice 3 (`genlock-audio-buffering-floor.md`). Slice 2 (design
+  6216736061) freezes the buffering once the mix has settled, so a late mixed source is re-anchored
+  (`MIXED_LATE`, one counted dropout) instead of growing the whole mix; that section is in the floor
+  rule.
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 
