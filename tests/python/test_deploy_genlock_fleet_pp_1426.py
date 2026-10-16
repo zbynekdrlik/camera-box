@@ -144,6 +144,8 @@ SSH = r'''#!/usr/bin/env bash
 printf 'ssh %s\n' "$*" >> "$STUB_DIR/calls.log"
 cmd="${@: -1}"; dest="${@: -2:1}"; host="${dest#*@}"
 case " ${STUB_SSH_DOWN:-} " in *" $host "*) echo "ssh: Could not resolve hostname $host" >&2; exit 255 ;; esac
+case " ${STUB_SSH_HUNG:-} " in *" $host "*) exit 124 ;; esac
+case " ${STUB_SSH_DENIED:-} " in *" $host "*) echo "Permission denied" >&2; exit 5 ;; esac
 case "$cmd" in
   hostname) h="${host%.lan}"; [ "$h" = 10.77.9.202 ] && h=strih-snv; echo "$h"; exit 0 ;;
   *"acceptance gate did not pass"*) echo 1; exit 0 ;;
@@ -266,3 +268,64 @@ def test_a_failed_acceptance_stops_only_that_box_and_names_it(tmp_path):
     assert "ERROR: [strih-pp accept]" in r.stderr
     assert (tmp_path / "setup.stream-pp.lan.stdin").exists(), "the other box still deploys"
     assert [ln.split("\t")[3] for ln in log.splitlines()] == ["strih-pp:accept-failed", "stream-pp"], log
+
+
+# --- review round 1 ---------------------------------------------------------------------------------
+
+def test_a_traveling_box_bound_by_the_ssh_timeout_reads_away_too(tmp_path):
+    """rc 124 (the per-command bound) is a box that does not answer, like rc 255."""
+    r, calls, log = _execute(tmp_path, "strih-pp,stream-pp", {"STUB_SSH_HUNG": "stream-pp.lan"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert re.search(r"AWAY.*stream-pp", r.stdout + r.stderr)
+    assert not (tmp_path / "setup.stream-pp.lan.stdin").exists()
+    assert [ln.split("\t")[3] for ln in log.splitlines()] == ["strih-pp"], log
+
+
+def test_a_traveling_box_that_answers_but_refuses_the_login_is_a_failure_not_away(tmp_path):
+    """A wrong password (sshpass rc 5) means the box is there: a named exit 4, never AWAY."""
+    r, calls, log = _execute(tmp_path, "strih-pp", {"STUB_SSH_DENIED": "strih-pp.lan"})
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "ERROR: [strih-pp preflight]" in r.stderr
+    assert "AWAY" not in r.stdout + r.stderr
+    assert log == ""
+
+
+PP_IP_FLEET = ("strih-snv|10.77.9.202|linux-genlock|always\n"
+               "stream-snv|10.77.9.204|windows-genlock|always\n"
+               "imag|10.77.9.182|linux-genlock|retired\n"
+               "resolume-snv|resolume.lan|windows-genlock|traveling\n"
+               "strih-pp|10.77.8.202|linux-genlock|traveling\n"
+               "stream-pp|stream-pp.lan|linux-genlock|traveling\n"
+               "resolume-pp|resolume-pp.lan|windows-genlock|traveling")
+
+
+def test_a_traveling_row_that_holds_an_address_is_refused_before_any_box_is_touched(tmp_path):
+    """The venue STRIH_IP (10.77.8.x) is never dialled: a traveling row must carry the fleet NAME."""
+    r, calls, log = _execute(tmp_path, "strih-pp,stream-pp", {"OBS_FLEET": PP_IP_FLEET})
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "ERROR: [strih-pp resolve]" in r.stderr and "NAME" in r.stderr
+    assert "ssh " not in calls and "rsync " not in calls and "gh run download" not in calls
+
+
+def test_the_venue_guard_hosts_come_from_the_fact_files_and_the_venue_table():
+    r = _sourced('strih_lx_guard_hosts strih-snv 10.77.9.202; strih_lx_guard_hosts strih-pp strih-pp.lan; '
+                 'strih_lx_guard_hosts stream-pp stream-pp.lan; strih_lx_venue_strih_box pp')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["10.77.9.202 10.77.9.204", "strih-pp.lan stream-pp.lan",
+                                     "strih-pp.lan stream-pp.lan", "strih-pp"]
+
+
+def test_the_plan_and_execute_route_a_box_by_the_same_predicate():
+    s = FLEET.read_text()
+    plan = s[s.index("main() {"):s.index("# --- execute mode")]
+    assert 'if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan' in plan
+    r = _sourced("fleet_deploy_order")
+    order = r.stdout.split()
+    assert order == ["strih-snv", "strih-pp", "stream-pp", "stream-snv", "imag", "resolume-snv"]
+    assert len(order) == len(set(order))
+
+
+def test_an_unprepared_box_reaches_the_named_error_under_set_u(tmp_path):
+    r = _sourced('STRIH_LX_PREP_WORK=%s; STRIH_LX_PREP_STAGE=/tmp/genlock-stage-abc123; rc=0; strih_lx_apply abc123 strih-pp 2>&1 || rc=$?; echo "rc=$rc"' % tmp_path)
+    assert "rc=4" in r.stdout, r.stdout + r.stderr
+    assert "[strih-pp preflight]" in r.stdout and "not resolved" in r.stdout
