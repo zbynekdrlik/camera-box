@@ -325,6 +325,29 @@ def test_the_plan_and_execute_route_a_box_by_the_same_predicate():
     assert len(order) == len(set(order))
 
 
+# --- review round 2 ---------------------------------------------------------------------------------
+
+def test_a_fact_file_that_does_not_parse_is_named_as_such_by_the_tree_check(tmp_path):
+    for f in ("scripts/setup-strih.sh", "scripts/verify-strih.sh", "scripts/obs-backup-retention.sh",
+              "systemd/strih-obs.service"):
+        (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f).write_text("x")
+    (tmp_path / "scripts/strih-boxes/strih-pp.env").write_text(
+        "STRIH_HOSTNAME=strih-pp\nSTRIH_INTERCOM_CONFIG=intercom/x.toml\nBOGUS_KEY=1\n")
+    r = _sourced('rc=0; strih_lx_tree_check %s strih-pp || rc=$?; echo "rc=$rc"' % tmp_path)
+    assert "rc=1" in r.stdout, r.stdout + r.stderr
+    assert "strih-pp.env does not parse" in r.stderr, r.stderr
+    assert "has no STRIH_INTERCOM_CONFIG" not in r.stderr, r.stderr
+
+
+def test_the_venue_table_seams_never_retarget_the_deploy_guard():
+    """AVSYNC_VENUE_TABLE / STRIH_BOXES_DIR are watchdog test seams; the deploy's guard ignores them."""
+    r = _sourced("export AVSYNC_VENUE_TABLE='snv|stream-snv|10.9.9.9|k'; export STRIH_BOXES_DIR=/nonexistent; "
+                 "strih_lx_guard_hosts strih-snv 10.77.9.202; strih_lx_guard_hosts stream-pp stream-pp.lan")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == ["10.77.9.202 10.77.9.204", "strih-pp.lan stream-pp.lan"]
+
+
 def test_an_unprepared_box_reaches_the_named_error_under_set_u(tmp_path):
     r = _sourced('STRIH_LX_PREP_WORK=%s; STRIH_LX_PREP_STAGE=/tmp/genlock-stage-abc123; rc=0; strih_lx_apply abc123 strih-pp 2>&1 || rc=$?; echo "rc=$rc"' % tmp_path)
     assert "rc=4" in r.stdout, r.stdout + r.stderr
