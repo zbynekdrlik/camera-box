@@ -330,9 +330,11 @@ every live output until an OBS restart.
   settle until the first tick's floor raise anchors it again. The mixer tick itself is the
   never-reset file-scope `genlock_mix_tick_now` (1381).
 - **Only audio ENCODERS freeze it at once.** A raw-audio output (the DistroAV NDI main output,
-  obs-vban) freezes the mix only through the 30 s settle like everything else. On resolume a
-  media / `NDI test` start ON PROGRAM more than 30 s after the last cut no longer grows the mix:
-  it is one MIXED_LATE dropout (see the limit below).
+  obs-vban) freezes the mix only through the 30 s settle like everything else. A cut to a scene is
+  a member join, so a source cut to program is unfrozen for 30 s and may still grow the mix. On
+  resolume a media / `NDI test` start IN PLACE (no cut) more than 30 s after the last one no longer
+  grows the mix: a backlog-shaped lateness is one MIXED_LATE dropout, but a clip whose stamps stay
+  late is muted while it stays late (the limit below, pinned by `frozen-late-start-kept-stamp`).
 - **No step-down.** A mid-run decrease would skip a tick of every output and move every running
   encoder's audio a tick earlier. With the freeze nothing grows after settle, so nothing steps
   down; the buffering starts over at the next launch.
@@ -348,11 +350,17 @@ every live output until an OBS restart.
   - Per source `genlock_mixed_late_events` / `genlock_mixed_late_dropped_ns`; a MIXED_LATE also
     counts in the guard's `events=` / `dropped_total=`.
 - **Known limit (slice 2b, an owner product call).** A member that KEEPS its stamp and stays late
-  for good (a device whose buffer really grew) is re-anchored on every tick while frozen: its audio
-  is dropped, the mix never grows (pinned by the `settle-restarts` tail: 2823 events, a line a
-  minute). Delaying that one source instead is slice 2b, built only if a `mixed_late` storm is seen
-  live (the owner decides delay vs drop). The audio-mixer watchdog does not page on `mixed_late`
-  yet (follow-up).
+  for good (a device whose buffer really grew, a media clip whose stamps run late) is re-anchored on
+  every tick while frozen: its audio is dropped, the mix never grows (pinned by the `settle-restarts`
+  tail: 2823 events, a line a minute; and `frozen-late-start-kept-stamp`: a clip 128 ms late started
+  in place is never mixed). Delaying that one source instead is slice 2b, built only if a
+  `mixed_late` storm is seen live (the owner decides delay vs drop). Nothing pages on it yet: the
+  audio-mixer watchdog does not read `mixed_late`, and the per-source meters read the source before
+  the mix. Paging on a growing `#800 mix: mixed_late=` was reported to the supervisor as a follow-up
+  candidate in the slice-2 lane return.
+- **Log cadence.** The guard's "first event logs at once" flag is shared across reasons: a source
+  that logged a not-mixed or entered line in the last minute logs its first MIXED_LATE only with the
+  next minute's line (`+K since the last line` counts it). The counters and `#800` see it at once.
 
 **Tests and Tier-0.**
 - `src/genlock_audio_buffering.rs` unit tests + the 1367 parity gate (the action's `frozen`, the
@@ -376,5 +384,11 @@ every live output until an OBS restart.
 - **Live acceptance (supervisor):** FULL bundle on every OBS box; `#800 mix: frozen=1` once a
   stream / recording runs or 30 s after the last cut, `total_buffering=` flat after it; a forced
   member outage while streaming locally logs one `fell behind the mix (frozen at …)` line and no
-  `total audio buffering is now` growth; the release E2E A/V gate green.
+  `total audio buffering is now` growth, and `mixed_late=` rises by that one event and then stays
+  flat (a rising count = a storm, the 2b limit); on resolume a media / `NDI test` start in place
+  more than 30 s after the last cut: FOH hears it (a `mixed_late` storm there = the clip is muted);
+  the release E2E A/V gate green.
+- **Size.** `audio_callback` is about 268 lines and `obs-audio.c` about 1113 (already over 1000
+  upstream): the next audio-thread addition first moves the #800 telemetry block into a helper, as
+  `audio_stall_dump` already was.
 
