@@ -183,8 +183,9 @@ static inline const char *obs_source_get_name(const obs_source_t *s)
 }
 /* obs-output.c (issue 1425): the outputs running an audio encoder -- a stream or a recording */
 static long h_encoders;
-/* issue 1425 slice 3: the tick a replayed stream starts at, 2 s after launch (the startup race done) */
-#define H_STREAM_TICK 100
+/* issue 1425 slice 3: the tick a replayed stream starts at, 32 s after launch -- past the 30 s launch
+ * settle window (ROZHODNUTE 6221252305), so the freeze holds from its first tick */
+#define H_STREAM_TICK 1500
 static long obs_output_genlock_audio_encoder_outputs(void)
 {
 	return h_encoders;
@@ -648,18 +649,20 @@ int main(void)
 	 * (MIXED_LATE), one counted dropout of its late span, and the mic is heard on every tick. The
 	 * replays reproduce the LOGGED growth: a member that keeps its stamp delivers a backlog stamped at
 	 * capture, its oldest packet behind the window. Issue 1425 slice 3 (no floor): the stream starts
-	 * 2 s after launch (H_STREAM_TICK), once the startup race has drawn the buffering its members
-	 * need, as it does live; an output started before that is scenario (l). */
+	 * 32 s after launch (H_STREAM_TICK), past the launch settle window, as it does live; an output
+	 * started inside the window is scenario (l), one started after it (m). Every scenario launches at
+	 * H_T0, the first tick of the whole harness, so the never-reset settle static measures each
+	 * scenario from its own launch. */
 
 	/* (f) 15.10 04:00: `adding 128 ms ... now 213 ms (source: mbc)`, an ASIO outage on mbc while the
 	 * stream runs (an audio encoder is active). */
 	h_begin("e1-asio-outage-128", "mbc", true, 0, true);
-	for (int i = 0; i < 600; i++) {
+	for (int i = 0; i < 2000; i++) {
 		if (i == H_STREAM_TICK)
 			h_encoders = 1;
-		if (i == 200)
+		if (i == 1600)
 			h_other.h_running = false;
-		if (i == 211)
+		if (i == 1611)
 			h_burst(&h_other, h_t + h_tick_ns, 230000000);
 		h_step(true);
 	}
@@ -668,12 +671,12 @@ int main(void)
 
 	/* (g) 11.10 07:09: `adding 192 ms ... now 277 ms (source: mbc)`, a longer outage. */
 	h_begin("e1-asio-outage-192", "mbc", true, 0, true);
-	for (int i = 0; i < 600; i++) {
+	for (int i = 0; i < 2000; i++) {
 		if (i == H_STREAM_TICK)
 			h_encoders = 1;
-		if (i == 200)
+		if (i == 1600)
 			h_other.h_running = false;
-		if (i == 214)
+		if (i == 1614)
 			h_burst(&h_other, h_t + h_tick_ns, 290000000);
 		h_step(true);
 	}
@@ -710,18 +713,18 @@ int main(void)
 
 	/* (i) only a running encoder freezes the mix, read on every tick: no encoder, the member goes 150 ms
 	 * late (the mix grows); a stream starts, the member goes 300 ms late for good (frozen: re-anchored
-	 * on every tick, a line a minute, never a growth); the stream stops 38 s after launch, 32 s after the
-	 * last growth (past the retired 30 s settle, which kept it frozen), and the still-late member grows
-	 * the mix again and plays. */
+	 * on every tick, a line a minute, never a growth); the stream stops 49 s after launch, and the
+	 * still-late member grows the mix again and plays. The stream starts after the launch settle
+	 * window (ROZHODNUTE 6221252305), so it freezes at once. */
 	h_begin("encoder-on-off", "Media", true, 0, true);
-	for (int i = 0; i < 1800 + 300; i++) {
+	for (int i = 0; i < 2300 + 300; i++) {
 		if (i == 300)
 			h_other.h_lag_ns = 150000000;
-		if (i == 1000)
+		if (i == H_STREAM_TICK)
 			h_encoders = 1;
-		if (i == 1100)
+		if (i == 1600)
 			h_other.h_lag_ns = 300000000;
-		if (i == 1800)
+		if (i == 2300)
 			h_encoders = 0;
 		h_step(true);
 	}
@@ -762,9 +765,9 @@ int main(void)
 	/* (j) a stream runs; the ingest thread re-places a MIXED source 300 ms late between the render loop
 	 * and calc_min_ts: the frozen action never grows the mix for it, the next tick re-anchors it. */
 	h_begin("frozen-ingest-race", "NDI race", false, 0, false);
-	h_race_tick = 2 * H_STREAM_TICK;
+	h_race_tick = H_STREAM_TICK + 100;
 	h_race_behind_ns = 300000000;
-	for (int i = 0; i < 300; i++) {
+	for (int i = 0; i < H_STREAM_TICK + 200; i++) {
 		if (i == H_STREAM_TICK)
 			h_encoders = 1;
 		h_step(true);
@@ -772,16 +775,30 @@ int main(void)
 	h_summary("frozen-ingest-race");
 	h_freeze_summary("frozen-ingest-race");
 
-	/* (l) issue 1425 slice 3, the known limit of no floor: an output started BEFORE the launch's startup
-	 * race (an audio encoder from the first tick) freezes the mix at 0 ms, so every member that runs
-	 * even a little behind real time (the mic here) is re-anchored on every tick and muted until the
-	 * output stops. Live the stream / recording starts long after the first seconds of a launch. */
-	h_begin("encoder-at-launch", "mbc", true, 0, true);
+	/* (l) issue 1425 slice 3 (ROZHODNUTE 6221252305): an output started inside the launch's startup race
+	 * (an audio encoder from the first tick: --startstreaming, Companion, an operator right after a
+	 * launch) with `mbc` 2.7 ms late. The launch settle window keeps the mix unfrozen, so the startup
+	 * race grows it as without an encoder and both members play; the growth while the encoder runs is
+	 * logged once. Without the window the mix froze at 0 ms and both were muted for the whole output. */
+	h_begin("encoder-at-launch", "mbc", true, 2700000, true);
 	h_encoders = 1;
 	for (int i = 0; i < 300; i++)
 		h_step(true);
 	h_summary("encoder-at-launch");
 	h_freeze_summary("encoder-at-launch");
+
+	/* (m) the same `mbc` with the stream started after the window: the mix holds the launch's draw, and
+	 * `mbc` going 2.7 ms later than that is re-anchored (MIXED_LATE), the slice-2 freeze. */
+	h_begin("encoder-after-settle", "mbc", true, 0, true);
+	for (int i = 0; i < H_STREAM_TICK + 300; i++) {
+		if (i == H_STREAM_TICK)
+			h_encoders = 1;
+		if (i == H_STREAM_TICK + 100)
+			h_other.h_lag_ns = 2700000 + 42666666;
+		h_step(true);
+	}
+	h_summary("encoder-after-settle");
+	h_freeze_summary("encoder-after-settle");
 
 	/* The guard's exact-sample edges and its locked re-check, called directly. */
 	printf("== probes\n");

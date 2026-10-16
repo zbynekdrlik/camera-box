@@ -12,11 +12,14 @@
 //!   source adds at startup) must read as clean on every gate.
 //! - Issue 1425 (E2 slice 2, ROZHODNUTÉ 6217557472): the FREEZE rides the same gate -- the action's
 //!   `frozen` input and the decision (`frozen`: an audio encoder runs, nothing else). Slice 3
-//!   removed the band (the gap to the retired absolute ASRC level target) the floor was sized for.
+//!   removed the band (the gap to the retired absolute ASRC level target) the floor was sized for,
+//!   and (ROZHODNUTÉ 6221252305) the freeze waits out the launch settle window (`launch_settled`).
+//!   The plan is also driven at non-zero floors (`plan_with_floor` vs
+//!   `genlock_audio_buffering_make_plan_floor`), so the override and the max lift stay pinned.
 
 use camera_box::genlock_audio_buffering::{
-    action, frozen, plan, ticks_for_ms, ticks_ns, BufferingAction, AUDIO_OUTPUT_FRAMES,
-    DEFAULT_MAX_TICKS, FLOOR_MS,
+    action, frozen, launch_settled, plan, plan_with_floor, ticks_for_ms, ticks_ns, BufferingAction,
+    AUDIO_OUTPUT_FRAMES, DEFAULT_MAX_TICKS, FLOOR_MS, LAUNCH_SETTLE_NS,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -66,6 +69,45 @@ fn plan_vectors() -> Vec<(u32, bool, u32, u32)> {
     v
 }
 
+/// The plan at non-zero floors (ms): the override of a request below the floor and the lift of the
+/// maximum to a floor above the default maximum, which the shipped floor 0 never reaches.
+fn plan_floor_vectors() -> Vec<(u32, u32, bool, u32, u32)> {
+    let mut v = Vec::new();
+    for floor in [0_u32, 21, 85, 960, 1200] {
+        for (max, fixed, rate) in [
+            (0_u32, false, 48_000_u32),
+            (20, false, 48_000),
+            (50, false, 48_000),
+            (85, false, 48_000),
+            (500, false, 44_100),
+            (20, true, 48_000),
+            (0, false, 768_000),
+            (0, false, 0),
+        ] {
+            v.push((floor, max, fixed, rate, 1024));
+        }
+    }
+    v
+}
+
+/// Issue 1425 slice 3: the launch settle window over its edges (first tick, mix time).
+fn settled_vectors() -> Vec<(u64, u64)> {
+    let first = 1_000_000_000_u64;
+    vec![
+        (0, 0),
+        (0, first),
+        (0, u64::MAX),
+        (first, first),
+        (first, first + LAUNCH_SETTLE_NS - 1),
+        (first, first + LAUNCH_SETTLE_NS),
+        (first, first + 3_600_000_000_000),
+        (first, first - 1),
+        (u64::MAX - 1, u64::MAX),
+        (1, LAUNCH_SETTLE_NS),
+        (1, LAUNCH_SETTLE_NS + 1),
+    ]
+}
+
 fn action_vectors() -> Vec<(i32, i32, i32, bool, bool)> {
     let mut v = Vec::new();
     for total in [-1, 0, 1, 3, 4, 5, 44, 45, 46] {
@@ -80,9 +122,10 @@ fn action_vectors() -> Vec<(i32, i32, i32, bool, bool)> {
     v
 }
 
-/// Issue 1425: the freeze decision over its one input, an audio encoder running.
-fn frozen_vectors() -> Vec<bool> {
-    vec![false, true]
+/// Issue 1425: the freeze decision over its inputs, an audio encoder running and the launch
+/// settled.
+fn frozen_vectors() -> Vec<(bool, bool)> {
+    vec![(false, false), (false, true), (true, false), (true, true)]
 }
 
 fn action_token(a: BufferingAction) -> i32 {
@@ -118,6 +161,23 @@ fn rust_trace() -> Vec<String> {
             u8::from(p.overridden)
         ));
     }
+    for (floor, max, fixed, rate, frames) in plan_floor_vectors() {
+        let p = plan_with_floor(floor, max, fixed, rate, frames);
+        out.push(format!(
+            "planf {floor} {max} {} {rate} {frames} {} {} {} {}",
+            u8::from(fixed),
+            p.floor_ticks,
+            p.max_ticks,
+            u8::from(p.fixed),
+            u8::from(p.overridden)
+        ));
+    }
+    for (first, now) in settled_vectors() {
+        out.push(format!(
+            "settled {first} {now} {}",
+            u8::from(launch_settled(first, now))
+        ));
+    }
     for (total, floor, max, behind, fr) in action_vectors() {
         out.push(format!(
             "action {total} {floor} {max} {} {} {}",
@@ -126,11 +186,12 @@ fn rust_trace() -> Vec<String> {
             action_token(action(total, floor, max, behind, fr))
         ));
     }
-    for enc in frozen_vectors() {
+    for (enc, settled) in frozen_vectors() {
         out.push(format!(
-            "frozen {} {}",
+            "frozen {} {} {}",
             u8::from(enc),
-            u8::from(frozen(enc))
+            u8::from(settled),
+            u8::from(frozen(enc, settled))
         ));
     }
     out
@@ -154,6 +215,15 @@ fn c_harness() -> String {
             if fixed { "true" } else { "false" }
         ));
     }
+    for (floor, max, fixed, rate, frames) in plan_floor_vectors() {
+        body.push_str(&format!(
+            "\tplanf_line({floor}u, {max}u, {}, {rate}u, {frames}u);\n",
+            if fixed { "true" } else { "false" }
+        ));
+    }
+    for (first, now) in settled_vectors() {
+        body.push_str(&format!("\tsettled_line({first}ULL, {now}ULL);\n"));
+    }
     for (total, floor, max, behind, fr) in action_vectors() {
         body.push_str(&format!(
             "\taction_line({total}, {floor}, {max}, {}, {});\n",
@@ -161,10 +231,11 @@ fn c_harness() -> String {
             if fr { "true" } else { "false" }
         ));
     }
-    for enc in frozen_vectors() {
+    for (enc, settled) in frozen_vectors() {
         body.push_str(&format!(
-            "\tfrozen_line({});\n",
-            if enc { "true" } else { "false" }
+            "\tfrozen_line({}, {});\n",
+            if enc { "true" } else { "false" },
+            if settled { "true" } else { "false" }
         ));
     }
     format!(
@@ -191,15 +262,29 @@ static void plan_line(uint32_t max, bool fixed, uint32_t rate, uint32_t frames)
 	       frames, p.floor_ticks, p.max_ticks, p.fixed ? 1 : 0, p.overridden ? 1 : 0);
 }}
 
+static void planf_line(uint32_t floor, uint32_t max, bool fixed, uint32_t rate, uint32_t frames)
+{{
+	const struct genlock_audio_buffering_plan p =
+		genlock_audio_buffering_make_plan_floor(floor, max, fixed, rate, frames);
+	printf("planf %" PRIu32 " %" PRIu32 " %d %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 " %d %d\n", floor, max,
+	       fixed ? 1 : 0, rate, frames, p.floor_ticks, p.max_ticks, p.fixed ? 1 : 0, p.overridden ? 1 : 0);
+}}
+
+static void settled_line(uint64_t first, uint64_t now)
+{{
+	printf("settled %" PRIu64 " %" PRIu64 " %d\n", first, now,
+	       genlock_audio_buffering_launch_settled(first, now) ? 1 : 0);
+}}
+
 static void action_line(int total, int floor, int max, bool behind, bool frozen)
 {{
 	printf("action %d %d %d %d %d %d\n", total, floor, max, behind ? 1 : 0, frozen ? 1 : 0,
 	       genlock_audio_buffering_action(total, floor, max, behind, frozen));
 }}
 
-static void frozen_line(bool enc)
+static void frozen_line(bool enc, bool settled)
 {{
-	printf("frozen %d %d\n", enc ? 1 : 0, genlock_audio_buffering_frozen(enc) ? 1 : 0);
+	printf("frozen %d %d %d\n", enc ? 1 : 0, settled ? 1 : 0, genlock_audio_buffering_frozen(enc, settled) ? 1 : 0);
 }}
 
 int main(void)
@@ -293,10 +378,18 @@ fn c_audio_buffering_matches_the_rust_authority_1367() {
             && has("action 4 4 45 1 0 2")
             && has("action 4 4 45 1 1 0")
             && has("action 45 4 45 1 0 0")
-            && has("frozen 0 0")
-            && has("frozen 1 1"),
+            && has("planf 85 50 0 48000 1024 4 45 0 1")
+            && has("planf 85 0 0 768000 1024 64 64 0 1")
+            && has("planf 21 0 0 48000 1024 1 45 0 0")
+            && has("settled 1000000000 30999999999 0")
+            && has("settled 1000000000 31000000000 1")
+            && has("settled 1000000000 999999999 1")
+            && has("settled 0 1000000000 0")
+            && has("frozen 0 1 0")
+            && has("frozen 1 0 0")
+            && has("frozen 1 1 1"),
         "issue 1367: the parity vectors no longer reach the 0 floor's stock growth, a floor raise, \
-         the override, the maximum, the dynamic increase and the freeze"
+         the override, the maximum, the dynamic increase, the freeze and the launch settle window"
     );
 }
 
@@ -306,6 +399,10 @@ fn the_header_defines_are_the_rust_constants_1367() {
     assert_eq!(
         lift_define(&h, "GENLOCK_AUDIO_BUFFERING_FLOOR_MS"),
         FLOOR_MS.to_string()
+    );
+    assert_eq!(
+        lift_define(&h, "GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS"),
+        LAUNCH_SETTLE_NS.to_string()
     );
     assert_eq!(
         lift_define(&h, "GENLOCK_AUDIO_BUFFERING_DEFAULT_MAX_TICKS"),

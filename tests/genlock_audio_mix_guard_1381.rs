@@ -29,9 +29,9 @@
 //!   for good; frozen by the running audio encoder, the mix stays where the launch drew it (issue 1425
 //!   slice 3: no floor) and the late member is re-anchored once (`MIXED_LATE`). With no audio encoder
 //!   nothing freezes: the outage replay and a clip started late in place grow the mix as stock libobs
-//!   does. The encoder switching on and off, the frozen ingest race, an output started before the
-//!   launch's startup race (the known limit of no floor), and the reason's truth table with the
-//!   freeze input.
+//!   does. The encoder switching on and off, the frozen ingest race, an output started inside the
+//!   launch settle window (ROZHODNUTÉ 6221252305: it grows with the startup race and plays, logged
+//!   once) and one started after it (frozen), and the reason's truth table with the freeze input.
 
 use std::fs;
 use std::path::PathBuf;
@@ -503,12 +503,12 @@ const EXPECTED_TRACE: &[&str] = &[
     "== e1-asio-outage-128",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Mic/Aux)",
     "L200 buffering-guard: 'mbc' fell behind the mix (frozen at 42 ms): its audio ran 166.0 ms behind the mix window; re-anchored (dropped 166.0 ms) instead of adding 170 ms to the whole mix's 42 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=166.0 ms)",
-    "e1-asio-outage-128: waits=2 total_ms=42 mic_missed=2 'mbc' events=1 dropped_ms=166.0 mixed=586 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
+    "e1-asio-outage-128: waits=2 total_ms=42 mic_missed=2 'mbc' events=1 dropped_ms=166.0 mixed=1986 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
     "e1-asio-outage-128 freeze: frozen=1 encoders=1 'mbc' mixed_late=1 mixed_late_dropped_ms=166.0 mix_mixed_late=1",
     "== e1-asio-outage-192",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Mic/Aux)",
     "L200 buffering-guard: 'mbc' fell behind the mix (frozen at 42 ms): its audio ran 226.0 ms behind the mix window; re-anchored (dropped 226.0 ms) instead of adding 234 ms to the whole mix's 42 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=226.0 ms)",
-    "e1-asio-outage-192: waits=2 total_ms=42 mic_missed=2 'mbc' events=1 dropped_ms=226.0 mixed=583 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
+    "e1-asio-outage-192: waits=2 total_ms=42 mic_missed=2 'mbc' events=1 dropped_ms=226.0 mixed=1983 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
     "e1-asio-outage-192 freeze: frozen=1 encoders=1 'mbc' mixed_late=1 mixed_late_dropped_ms=226.0 mix_mixed_late=1",
     "== e1-media-stall-85",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Mic/Aux)",
@@ -523,9 +523,9 @@ const EXPECTED_TRACE: &[&str] = &[
     "== encoder-on-off",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Mic/Aux)",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 128 milliseconds of audio buffering, total audio buffering is now 170 milliseconds (source: Media)",
-    "L200 buffering-guard: 'Media' fell behind the mix (frozen at 170 ms): its audio ran 136.0 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 149 ms to the whole mix's 170 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
-    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 149 milliseconds of audio buffering, total audio buffering is now 320 milliseconds (source: Media)",
-    "encoder-on-off: waits=15 total_ms=320 mic_missed=2 'Media' events=700 dropped_ms=14930.0 mixed=1383 stale=0 guard_lines=1 above_lines=3 restart_lines=0",
+    "L200 buffering-guard: 'Media' fell behind the mix (frozen at 170 ms): its audio ran 132.7 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 149 ms to the whole mix's 170 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 170 milliseconds of audio buffering, total audio buffering is now 341 milliseconds (source: Media)",
+    "encoder-on-off: waits=16 total_ms=341 mic_missed=2 'Media' events=700 dropped_ms=14930.0 mixed=1881 stale=0 guard_lines=1 above_lines=3 restart_lines=0",
     "encoder-on-off freeze: frozen=0 encoders=0 'Media' mixed_late=700 mixed_late_dropped_ms=14930.0 mix_mixed_late=700",
     "== late-start-kept-stamp",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Mic/Aux)",
@@ -540,13 +540,19 @@ const EXPECTED_TRACE: &[&str] = &[
     "== frozen-ingest-race",
     "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Mic/Aux)",
     "L200 buffering-guard: 'NDI race' fell behind the mix (frozen at 42 ms): its audio ran 257.3 ms behind the mix window; re-anchored (dropped 257.3 ms) instead of adding 277 ms to the whole mix's 42 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=257.3 ms)",
-    "frozen-ingest-race: waits=2 total_ms=42 mic_missed=2 'NDI race' events=1 dropped_ms=257.3 mixed=296 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
+    "frozen-ingest-race: waits=2 total_ms=42 mic_missed=2 'NDI race' events=1 dropped_ms=257.3 mixed=1696 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
     "frozen-ingest-race freeze: frozen=1 encoders=1 'NDI race' mixed_late=1 mixed_late_dropped_ms=257.3 mix_mixed_late=1",
     "== encoder-at-launch",
-    "L200 buffering-guard: 'Mic/Aux' fell behind the mix (frozen at 0 ms): its audio ran 1.3 ms behind the mix window; re-anchored (dropped 1.3 ms) instead of adding 21 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=1.3 ms)",
-    "L200 buffering-guard: 'mbc' fell behind the mix (frozen at 0 ms): its audio ran 1.3 ms behind the mix window; re-anchored (dropped 1.3 ms) instead of adding 21 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=1.3 ms)",
-    "encoder-at-launch: waits=0 total_ms=0 mic_missed=300 'mbc' events=299 dropped_ms=1590.0 mixed=0 stale=0 guard_lines=2 above_lines=0 restart_lines=0",
-    "encoder-at-launch freeze: frozen=1 encoders=1 'mbc' mixed_late=299 mixed_late_dropped_ms=1590.0 mix_mixed_late=598",
+    "L200 buffering-guard: 'mbc' entered the mix late: its audio ran 2.7 ms behind the mix window; re-anchored (dropped 2.7 ms) instead of adding 21 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=2.7 ms)",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: mbc)",
+    "L200 genlock audio buffering: grew 42 ms while an encoder ran inside the launch settle window",
+    "encoder-at-launch: waits=2 total_ms=42 mic_missed=2 'mbc' events=1 dropped_ms=2.7 mixed=296 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
+    "encoder-at-launch freeze: frozen=0 encoders=1 'mbc' mixed_late=0 mixed_late_dropped_ms=0.0 mix_mixed_late=0",
+    "== encoder-after-settle",
+    "L200 genlock audio buffering ABOVE the floor (issue 1367): adding 42 milliseconds of audio buffering, total audio buffering is now 42 milliseconds (source: Mic/Aux)",
+    "L200 buffering-guard: 'mbc' fell behind the mix (frozen at 42 ms): its audio ran 6.0 ms behind the mix window; re-anchored (dropped 6.0 ms) instead of adding 21 ms to the whole mix's 42 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=6.0 ms)",
+    "encoder-after-settle: waits=2 total_ms=42 mic_missed=2 'mbc' events=200 dropped_ms=1611.7 mixed=1596 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
+    "encoder-after-settle freeze: frozen=1 encoders=1 'mbc' mixed_late=200 mixed_late_dropped_ms=1611.7 mix_mixed_late=200",
     "== probes",
     "probe 1ns-behind-is-rounding: reason=0 in_sync=-1 ts=start-1ns left=960 pending=0 timing_set=1 events=0 ignore_audio=n/a",
     "L200 buffering-guard: 'probe' is not mixed: its audio ran 0.0 ms behind the mix window; re-anchored (dropped 0.0 ms) instead of adding 0 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=0.0 ms)",
@@ -788,13 +794,12 @@ fn only_a_running_audio_encoder_freezes_the_mix_1425() {
         "issue 1425: nothing but an audio encoder may freeze the mix"
     );
     // The encoder is read on every tick: no encoder, a late member grows the mix (170 ms); a stream
-    // starts and the member goes 300 ms late for good: re-anchored on every tick (700 events, one
-    // line), never a growth; the stream stops 38 s after launch, 32 s after the last growth (past the
-    // retired 30 s settle, which kept it frozen), and the still-late member grows the mix again
-    // (320 ms) and plays.
+    // starts after the launch settle window and the member goes 300 ms late for good: re-anchored on
+    // every tick (700 events, one line), never a growth; the stream stops 49 s after launch, and the
+    // still-late member grows the mix again (341 ms) and plays.
     let s = summary(trace, "encoder-on-off");
     assert!(
-        s.contains(" waits=15 total_ms=320 mic_missed=2 ")
+        s.contains(" waits=16 total_ms=341 mic_missed=2 ")
             && s.contains("'Media' events=700 ")
             && s.contains(" guard_lines=1 above_lines=3 "),
         "issue 1425: the freeze must follow the encoder on and off:\n{s}\n\n{}",
@@ -850,24 +855,68 @@ fn a_frozen_mix_never_grows_for_an_ingest_race_1425() {
 }
 
 #[test]
-fn an_output_started_before_the_startup_race_mutes_the_late_members_1425() {
-    // Issue 1425 slice 3, the known limit of no floor (pinned so a change to it is visible): an audio
-    // encoder running from the very first tick freezes the mix at 0 ms, so every member that reaches
-    // the mixer even 1.3 ms behind real time is re-anchored on every tick and never heard while the
-    // output runs. Live a stream or recording starts long after the first seconds of a launch.
+fn an_output_started_inside_the_launch_settle_window_grows_once_and_plays_1425() {
+    // ROZHODNUTÉ 6221252305: an audio encoder running from the first tick (--startstreaming, Companion,
+    // an operator right after a launch) with `mbc` 2.7 ms late. Before the window the mix froze at
+    // 0 ms and `mbc` + the mic were re-anchored on every tick, muted for the whole output. Inside the
+    // 30 s launch settle window the startup race grows the mix as without an encoder: `mbc` is
+    // re-anchored once as it joins, then grows the mix 42 ms and plays; the mic only misses the
+    // launch's two hole ticks. The growth while the encoder runs is logged once.
     let trace = c_trace();
     let s = summary(trace, "encoder-at-launch");
     assert!(
-        s.contains(" waits=0 total_ms=0 mic_missed=300 ")
-            && s.contains("'mbc' events=299 ")
-            && s.contains(" mixed=0 ")
-            && s.contains(" above_lines=0 "),
-        "issue 1425: the encoder-at-launch limit changed:\n{s}\n\n{}",
+        s.contains(LAUNCH)
+            && s.contains("'mbc' events=1 dropped_ms=2.7 mixed=296 ")
+            && s.contains(" above_lines=1 "),
+        "issue 1425: an output started inside the launch settle window must not mute the late \
+         members:\n{s}\n\n{}",
         section(trace, "encoder-at-launch").join("\n")
     );
     assert!(
-        freeze(trace, "encoder-at-launch").contains(" frozen=1 encoders=1 'mbc' mixed_late=299 "),
-        "issue 1425: encoder-at-launch must stay frozen at 0 and count every re-anchor"
+        freeze(trace, "encoder-at-launch").contains(" frozen=0 encoders=1 'mbc' mixed_late=0 "),
+        "issue 1425: the mix must stay unfrozen inside the launch settle window"
+    );
+    let sec = section(trace, "encoder-at-launch");
+    assert_eq!(
+        sec.iter()
+            .filter(|l| l.contains("while an encoder ran inside the launch settle window"))
+            .count(),
+        1,
+        "issue 1425: a growth inside the launch settle window while an encoder runs is logged once"
+    );
+    assert!(
+        sec.contains(
+            &"L200 genlock audio buffering: grew 42 ms while an encoder ran inside the launch settle window"
+        ),
+        "issue 1425: the settle-window growth line names the growth"
+    );
+}
+
+#[test]
+fn an_output_started_after_the_launch_settle_window_freezes_the_mix_1425() {
+    // The slice-2 freeze is unchanged once the launch has settled: the stream starts 32 s after
+    // launch, and `mbc` going later than the launch's draw is re-anchored (MIXED_LATE) on every
+    // tick, the mix never grows, and no settle-window line is logged.
+    let trace = c_trace();
+    let s = summary(trace, "encoder-after-settle");
+    assert!(
+        s.contains(LAUNCH)
+            && s.contains("'mbc' events=200 ")
+            && only_the_launch_grew(trace, "encoder-after-settle"),
+        "issue 1425: an output started after the launch settle window must freeze the mix:\n{s}"
+    );
+    assert!(
+        freeze(trace, "encoder-after-settle")
+            .contains(" frozen=1 encoders=1 'mbc' mixed_late=200 "),
+        "issue 1425: the late member must be re-anchored as MIXED_LATE after the window"
+    );
+    assert!(
+        trace
+            .iter()
+            .filter(|l| l.contains("inside the launch settle window"))
+            .count()
+            == 1,
+        "issue 1425: only the encoder-at-launch scenario grows inside the settle window"
     );
 }
 
