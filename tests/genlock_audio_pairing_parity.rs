@@ -33,8 +33,8 @@ use camera_box::genlock_audio_pairing::{
     AudioHoldMode, AudioPairingFacets, VideoDelayTracker, VIDEO_DELAY_LOCK_PENDING,
 };
 use camera_box::genlock_audio_pairing::{
-    audio_asrc_error_ms, audio_asrc_timecode, audio_intended_raw_ns, audio_stamp_interval_s,
-    audio_stamp_mono_ns,
+    audio_asrc_error_ms, audio_asrc_placement, audio_intended_raw_ns, audio_place_measured,
+    audio_stamp_interval_s, audio_stamp_mono_ns, AsrcBasis,
 };
 // The lift / compile / run helpers are shared with the issue-1381 skew-hold gate
 // (tests/genlock_audio_step_hold_parity_1381.rs); a directory module, so cargo does not build it as a
@@ -837,7 +837,7 @@ fn c_audio_placement_measurement_matches_the_rust_authority_1367() {
 }
 
 /// Issue 1367 (design 5845361166) — the timecode ASRC's inputs: the RAW-stamp intended landing
-/// (`genlock_audio_intended_raw_ns`), the mode predicate (`genlock_audio_asrc_timecode`), the error
+/// (`genlock_audio_intended_raw_ns`), the error
 /// with the owed slew excluded (`genlock_audio_asrc_error_ms`), the stamp on the monotonic clock
 /// (`genlock_audio_stamp_mono_ns`) and its signed advance (`genlock_audio_stamp_interval_s`) must match
 /// the Rust authority on every mode, both signs and the wrap extremes.
@@ -879,7 +879,6 @@ fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
         (u64::MAX, 32),
         (0, u64::MAX),
     ];
-    let b = |v: bool| i32::from(v);
     let mut body = String::new();
     for (ts, ta, so, ro, term) in &intended {
         body.push_str(&format!(
@@ -887,15 +886,6 @@ fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
             i64_lit(*so),
             i64_lit(*term)
         ));
-    }
-    for m in 0..4_u8 {
-        for (mo, rs) in [(false, false), (false, true), (true, false), (true, true)] {
-            body.push_str(&format!(
-                "    printf(\"%d\\n\", genlock_audio_asrc_timecode({m}, {}, {}) ? 1 : 0);\n",
-                b(mo),
-                b(rs)
-            ));
-        }
     }
     for (e, r) in &err {
         body.push_str(&format!(
@@ -920,11 +910,6 @@ fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
     for (ts, ta, so, ro, term) in &intended {
         want.push(audio_intended_raw_ns(*ts, *ta, *so, *ro, *term).to_string());
     }
-    for m in 0..4_u8 {
-        for (mo, rs) in [(false, false), (false, true), (true, false), (true, true)] {
-            want.push(b(audio_asrc_timecode(mode_of(m), mo, rs)).to_string());
-        }
-    }
     for (e, r) in &err {
         want.push(format!("{:.9}", audio_asrc_error_ms(*e, *r)));
     }
@@ -941,6 +926,80 @@ fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
     // a skipped slot snapped contiguous: the raw stamp is one packet later than the snapped one, so the
     // placement read against the raw stamp is one packet EARLY; the owed slew is not the servo's error
     assert!(audio_asrc_error_ms(-33_333_333, 33_333_333).abs() < 1e-12);
-    assert!(audio_asrc_timecode(AudioHoldMode::Timecode, false, true));
-    assert!(!audio_asrc_timecode(AudioHoldMode::Latency, false, true));
+}
+
+/// Issue 1425 (E2 slice 1) — the ASRC basis (`genlock_audio_asrc_placement`: arrival / timecode /
+/// stamp), the measure rule (`genlock_audio_place_measured`) and the `asrc:` line token
+/// (`genlock_audio_asrc_basis_token`) must match the Rust authority on every hold mode x direct
+/// stamps x MONITOR_ONLY x resampler, and every mode x basis.
+#[test]
+fn c_asrc_placement_matches_the_rust_authority_1425() {
+    let b = |v: bool| i32::from(v);
+    let flags = [false, true];
+    let mut body = String::new();
+    let mut want: Vec<String> = Vec::new();
+    for m in 0..4_u8 {
+        for direct in flags {
+            for mo in flags {
+                for rs in flags {
+                    body.push_str(&format!(
+                        "    printf(\"%d\\n\", genlock_audio_asrc_placement({m}, {}, {}, {}));\n",
+                        b(direct),
+                        b(mo),
+                        b(rs)
+                    ));
+                    want.push(
+                        audio_asrc_placement(mode_of(m), direct, mo, rs)
+                            .code()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+    let bases = [AsrcBasis::Arrival, AsrcBasis::Timecode, AsrcBasis::Stamp];
+    for m in 0..4_u8 {
+        for basis in bases {
+            body.push_str(&format!(
+                "    printf(\"%d\\n\", genlock_audio_place_measured({m}, {}) ? 1 : 0);\n",
+                basis.code()
+            ));
+            want.push(b(audio_place_measured(mode_of(m), basis)).to_string());
+        }
+    }
+    for basis in bases {
+        body.push_str(&format!(
+            "    printf(\"%s\\n\", genlock_audio_asrc_basis_token({}));\n",
+            basis.code()
+        ));
+        want.push(basis.token().to_string());
+    }
+    let out = run_c(&body, "asrc_placement_1425");
+    assert_eq!(
+        out, want,
+        "issue 1425: the C ASRC basis / measure rule / token diverged from the Rust authority"
+    );
+    // the decided design, not only C == Rust: a directly stamped mixed source with a resampler is
+    // stamp-judged and measured; a timecode hold keeps its basis; everything else is arrival.
+    assert_eq!(
+        audio_asrc_placement(AudioHoldMode::Off, true, false, true),
+        AsrcBasis::Stamp
+    );
+    assert_eq!(
+        audio_asrc_placement(AudioHoldMode::Timecode, false, false, true),
+        AsrcBasis::Timecode
+    );
+    assert_eq!(
+        audio_asrc_placement(AudioHoldMode::Off, true, true, true),
+        AsrcBasis::Arrival
+    );
+    assert_eq!(
+        audio_asrc_placement(AudioHoldMode::Latency, true, false, true),
+        AsrcBasis::Arrival
+    );
+    assert!(audio_place_measured(AudioHoldMode::Off, AsrcBasis::Stamp));
+    assert!(!audio_place_measured(
+        AudioHoldMode::Off,
+        AsrcBasis::Arrival
+    ));
 }

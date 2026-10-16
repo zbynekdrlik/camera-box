@@ -752,3 +752,60 @@ fn the_pairing_offset_reads_the_samples_not_the_bookkeeping_1367() {
         audio_applied_delay_ns(133, 33_000_000)
     );
 }
+
+#[test]
+fn a_directly_stamped_mixed_source_is_judged_by_its_stamp_1425() {
+    use AudioHoldMode::*;
+    // the stream mbc / a PulseAudio input / a media clip: no genlock hold, direct stamps.
+    assert_eq!(
+        audio_asrc_placement(Off, true, false, true),
+        AsrcBasis::Stamp
+    );
+    // the issue-1367 timecode hold keeps its basis, direct stamps or not.
+    assert_eq!(
+        audio_asrc_placement(Timecode, false, false, true),
+        AsrcBasis::Timecode
+    );
+    assert_eq!(
+        audio_asrc_placement(Timecode, true, false, true),
+        AsrcBasis::Timecode
+    );
+    // stamps that are not direct (OBS timing_adjust in use), a latency hold or a withheld source:
+    // the arrival servo.
+    assert_eq!(
+        audio_asrc_placement(Off, false, false, true),
+        AsrcBasis::Arrival
+    );
+    assert_eq!(
+        audio_asrc_placement(Latency, true, false, true),
+        AsrcBasis::Arrival
+    );
+    assert_eq!(
+        audio_asrc_placement(Pending, true, false, true),
+        AsrcBasis::Arrival
+    );
+    // never a MONITOR_ONLY source or one with no resampler.
+    for mode in [Off, Latency, Timecode, Pending] {
+        for direct in [false, true] {
+            assert_eq!(
+                audio_asrc_placement(mode, direct, true, true),
+                AsrcBasis::Arrival
+            );
+            assert_eq!(
+                audio_asrc_placement(mode, direct, false, false),
+                AsrcBasis::Arrival
+            );
+        }
+    }
+    // a stamp-judged source is measured although no genlock hold is active; an arrival-judged one
+    // only under an active hold (the issue-1367 latency hold).
+    assert!(audio_place_measured(Off, AsrcBasis::Stamp));
+    assert!(audio_place_measured(Timecode, AsrcBasis::Timecode));
+    assert!(audio_place_measured(Latency, AsrcBasis::Arrival));
+    assert!(!audio_place_measured(Off, AsrcBasis::Arrival));
+    assert!(!audio_place_measured(Pending, AsrcBasis::Arrival));
+    assert_eq!(
+        [AsrcBasis::Arrival, AsrcBasis::Timecode, AsrcBasis::Stamp].map(|b| (b.code(), b.token())),
+        [(0, "arrival"), (1, "timecode"), (2, "stamp")]
+    );
+}

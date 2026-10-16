@@ -550,6 +550,14 @@ pub mod genlock_audio_pairing;
 #[cfg(test)]
 mod asrc_timecode_bench;
 
+// Issue 1425 (E2 slice 1) — the two-clock bench of the STAMP basis of the per-source ASRC: a directly
+// stamped, non-genlock, mixed source (`mbc`, a PulseAudio input, a media clip) is judged by where each
+// packet lands against its OWN stamp, so its A/V no longer depends on the launch-random global audio
+// buffering or packet-vs-tick phase. Drives `asrc_bench::RealtimeAsrcCompensator` through the
+// production ingest decisions of `genlock_audio_pairing`. Test-only.
+#[cfg(test)]
+mod asrc_stamp_bench;
+
 // #1303 part 4 — the report-only per-box-class certified-table AUDIO-parity audit (camera inputs
 // silent, sp-*/cg/program inputs audio). Deploy-time preflight logic (no runtime OBS path, no C
 // mirror); crate-root + std-only so it is Tier-0 verifiable and is the canonical table the bash

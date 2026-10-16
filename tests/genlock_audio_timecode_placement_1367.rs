@@ -342,8 +342,8 @@ fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
             "the placement error (audio_place_err_ms) must be measured against the raw-stamp intended landing",
         ),
         (
-            "genlock_audio_asrc_timecode(genlock_hold_mode, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY, source->asrc_enabled && source->resampler);",
-            "the ASRC must enter timecode mode exactly for audio placed at its timecode that reaches the mix",
+            "const int genlock_asrc_basis = genlock_audio_asrc_placement( genlock_hold_mode, using_direct_ts && source->timing_adjust == 0, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY, source->asrc_enabled && source->resampler);",
+            "the ASRC basis must be decided from the hold mode (issue 1425: and the direct stamps) for audio that reaches the mix",
         ),
         (
             "asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);",
@@ -440,7 +440,7 @@ fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
     }
     assert_has(
         &src,
-        "\" recover_ms=%.1f (issue 1372)\" \" timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)\",",
+        "\" recover_ms=%.1f (issue 1372)\" \" timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)\" \" basis=%s (issue 1425)\",",
         "the asrc: line must say whether the servo runs on the timecode placement",
     );
 }

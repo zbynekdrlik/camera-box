@@ -43,14 +43,14 @@
 
 use crate::asrc_bench::{RealtimeAsrcCompensator, STEP_RECOVER_PPM};
 use crate::genlock_audio_pairing::{
-    audio_actual_place_ns, audio_asrc_error_ms, audio_asrc_timecode, audio_hold_action,
+    audio_actual_place_ns, audio_asrc_error_ms, audio_asrc_placement, audio_hold_action,
     audio_intended_raw_ns, audio_level_shift_ns, audio_place_error_ns, audio_place_term_ns,
     audio_placed_slew_fold_ns, audio_push_back_allowed, audio_relabel, audio_relabel_book_ns,
     audio_slew_book_ts_ns, audio_slew_ppm, audio_slew_step_ns, audio_stamp_interval_s,
     audio_stamp_mono_ns, audio_step_hold, audio_step_relabel_jumps,
     audio_step_relabel_pending_starts, audio_step_release_places, audio_step_residual_ns,
-    audio_wall_to_mono_ns, genlock_audio_delay_ns, AudioHoldAction, AudioHoldMode, AudioStepHold,
-    AudioStepRelease,
+    audio_wall_to_mono_ns, genlock_audio_delay_ns, AsrcBasis, AudioHoldAction, AudioHoldMode,
+    AudioStepHold, AudioStepRelease,
 };
 use crate::genlock_wall_step::WALL_STEP_MIN_NS;
 
@@ -544,7 +544,8 @@ impl Obs {
             true,
             self.slew_remaining_ns != 0,
         );
-        let tc = self.timecode_path() && audio_asrc_timecode(mode, false, true);
+        let tc = self.timecode_path()
+            && audio_asrc_placement(mode, false, false, true) != AsrcBasis::Arrival;
         if self.c.timecode() != tc {
             self.have_prev = false;
         }

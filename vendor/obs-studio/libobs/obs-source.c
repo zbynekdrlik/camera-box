@@ -1973,6 +1973,30 @@ static inline bool genlock_audio_asrc_timecode(int mode, bool monitor_only, bool
 {
 	return mode == GENLOCK_AUDIO_HOLD_TIMECODE && !monitor_only && can_resample;
 }
+/* camera-box issue 1425 (E2 slice 1): what the per-source ASRC judges a packet by. Mirror of AsrcBasis.
+ * RED stub: today's predicate (a timecode hold only). */
+#define GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL 0
+#define GENLOCK_AUDIO_ASRC_BASIS_TIMECODE 1
+#define GENLOCK_AUDIO_ASRC_BASIS_STAMP 2
+static inline int genlock_audio_asrc_placement(int mode, bool direct_ts, bool monitor_only, bool can_resample)
+{
+	(void)direct_ts;
+	return genlock_audio_asrc_timecode(mode, monitor_only, can_resample) ? GENLOCK_AUDIO_ASRC_BASIS_TIMECODE
+									      : GENLOCK_AUDIO_ASRC_BASIS_ARRIVAL;
+}
+static inline bool genlock_audio_place_measured(int mode, int basis)
+{
+	(void)basis;
+	return genlock_audio_mode_active(mode);
+}
+static inline const char *genlock_audio_asrc_basis_token(int basis)
+{
+	if (basis == GENLOCK_AUDIO_ASRC_BASIS_TIMECODE)
+		return "timecode";
+	if (basis == GENLOCK_AUDIO_ASRC_BASIS_STAMP)
+		return "stamp";
+	return "arrival";
+}
 /* issue 1367: the ASRC's error input (ms): the placement error plus the placement slew still owed (a
  * hold slew is paid by its own 1000 ppm term, so until then the packet is early by exactly that). */
 static inline double genlock_audio_asrc_error_ms(int64_t place_err_ns, int64_t slew_remaining_ns)

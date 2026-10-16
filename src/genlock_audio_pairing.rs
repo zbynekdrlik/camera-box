@@ -644,6 +644,59 @@ pub fn audio_asrc_timecode(mode: AudioHoldMode, monitor_only: bool, can_resample
     mode == AudioHoldMode::Timecode && !monitor_only && can_resample
 }
 
+/// Issue 1425 (E2 slice 1) — what the per-source ASRC judges one packet by. Discriminants match the C
+/// `GENLOCK_AUDIO_ASRC_BASIS_*` defines.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsrcBasis {
+    /// The arrival servo: the buffer DEPTH against its setpoint.
+    Arrival = 0,
+    /// Issue 1367: a genlock source placed at its NDI timecode, judged by its landing against that
+    /// timecode, setpoint 0.
+    Timecode = 1,
+    /// Issue 1425: a directly stamped, non-genlock mixed source, judged by its landing against its
+    /// OWN stamp, setpoint 0.
+    Stamp = 2,
+}
+
+impl AsrcBasis {
+    /// The integer the C helpers use.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+    /// The `asrc:` line token (`basis=`).
+    pub fn token(self) -> &'static str {
+        match self {
+            AsrcBasis::Arrival => "arrival",
+            AsrcBasis::Timecode => "timecode",
+            AsrcBasis::Stamp => "stamp",
+        }
+    }
+}
+
+/// Issue 1425 — the basis the ASRC judges this packet by. RED stub: today's predicate (a timecode
+/// hold only). Mirror of `genlock_audio_asrc_placement`.
+pub fn audio_asrc_placement(
+    mode: AudioHoldMode,
+    direct_ts: bool,
+    monitor_only: bool,
+    can_resample: bool,
+) -> AsrcBasis {
+    let _ = direct_ts;
+    if audio_asrc_timecode(mode, monitor_only, can_resample) {
+        AsrcBasis::Timecode
+    } else {
+        AsrcBasis::Arrival
+    }
+}
+
+/// Issue 1425 — does the ingest measure this packet's placement error? RED stub: an active genlock
+/// hold only. Mirror of `genlock_audio_place_measured`.
+pub fn audio_place_measured(mode: AudioHoldMode, basis: AsrcBasis) -> bool {
+    let _ = basis;
+    mode.is_active()
+}
+
 /// Issue 1367 — the ASRC's error input for one packet, in ms: its placement error (actual − the
 /// raw-stamp intended) plus the placement slew still owed. A #1367 hold slew is a deliberate move
 /// paid by its own 1000 ppm term: until it is paid the packet is early by exactly what is owed, which
