@@ -149,7 +149,6 @@ struct obs_core_audio {
 	int floor_buffering_ticks;
 	bool fixed_buffer;
 	/* issue 1425 */
-	uint64_t genlock_settle_tick;
 	bool genlock_buffering_frozen;
 	uint64_t genlock_mixed_late_events;
 };
