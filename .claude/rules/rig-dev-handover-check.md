@@ -36,7 +36,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 
 | item | probe (read-only) | good → OK | forgot → FORGOT | else → UNKNOWN |
 |---|---|---|---|---|
-| mic | `measurement-audio-alert-watchdog.sh --dry-run` | `verdict=PRESENT` | `verdict=SILENT` (owner: odmutuj `mbc` v Abletone) | SKIP/UNKNOWN/cam2-down |
+| mic | `measurement-audio-alert-watchdog.sh --dry-run` + `program_audio_guard.py` (capture `mic_guard`, graded on its EXIT code, issue 1447) | `verdict=PRESENT` AND guard exit 0 | `verdict=SILENT` (owner: odmutuj `mbc` v Abletone); guard exit 1 = FOREIGN (owner: v Abletone na mbc nechaj do streamu len merací mikrofón — the peak alone reads a foreign flood as PRESENT) | SKIP/UNKNOWN/cam2-down; guard exit 2/timeout/missing (strih-snv :8891 down — the sampler is stopped in EVENT) |
 | mode | `lib/rig-mode-state.sh` (cam2 painter probe) | `TEST` | `EVENT` (supervisor: `rig-mode.sh test`) | cam2 down |
 | painter | `optical-chain-alert-watchdog.sh --dry-run` | `verdict=healthy`/`log-only:*` | `verdict=alert:*` | `nothing to decide` |
 | burns | `obs_burn_filter.py sweep-check` (strih+stream) | exit 1 (≥1 burn ON) | exit 0 (no burns) | exit 2 |

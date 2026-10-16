@@ -97,6 +97,8 @@ RDH_AVLATENCY_TIMEOUT="${RDH_AVLATENCY_TIMEOUT:-100}"
 RC_MISSING=127
 
 MIC_PROBE="${RDH_MIC_PROBE:-$HERE/measurement-audio-alert-watchdog.sh}"
+# issue 1447: the strih-snv program-audio guard (read-only GET of :8891, its own 5 s HTTP timeout)
+MIC_GUARD_PROBE="${RDH_MIC_GUARD_PROBE:-$HERE/program_audio_guard.py}"
 PAINTER_PROBE="${RDH_PAINTER_PROBE:-$HERE/optical-chain-alert-watchdog.sh}"
 CLOCK_PROBE="${RDH_CLOCK_PROBE:-$HERE/dantesync-clock-alert-watchdog.sh}"
 OBS_PROBE="${RDH_OBS_PROBE:-$HERE/obs-liveness-watchdog.sh}"
@@ -159,6 +161,9 @@ run_probe() {
 
 # --- item 1: mic (measurement-audio --dry-run; ssh cam2 + stream OBS-WS) ------------------------
 run_probe mic bash "$MIC_PROBE" --dry-run
+# issue 1447: the peak cannot tell music/room sound on top of the marker from the marker itself;
+# the program-audio guard can (exit 1 = FOREIGN). Its exit code is what the decision grades.
+run_probe mic_guard python3 "$MIC_GUARD_PROBE"
 
 # --- item 2: mode (rig-mode-state cam2 painter probe -> TEST/EVENT/UNKNOWN) ----------------------
 # Reuse the shared lib's remote snippet + pure classifier. A down/unreachable cam2 -> empty
