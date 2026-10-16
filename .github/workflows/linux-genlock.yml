@@ -188,7 +188,7 @@ jobs:
           '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF
-          -DENABLE_VLC=OFF
+          -DENABLE_VLC=ON
           -DENABLE_TEST_INPUT=OFF
           -DENABLE_BROWSER=OFF
 
@@ -239,6 +239,9 @@ jobs:
             exit 1
           fi
           cp "$distroav_so" "$plugin_lib_dir/"
+          # issue 1425: the vendored vlc-video plugin (stamps on the OBS media clock) is built by the OBS build
+          # (-DENABLE_VLC=ON, libvlc-dev headers); it loads libvlc from the installed VLC at runtime.
+          if [ ! -f "$plugin_lib_dir/vlc-video.so" ]; then echo "ERROR: vlc-video.so not built (issue 1425)"; exit 1; fi
 
           # Data resources: OBS_DATA_DESTINATION = share/obs (cmake/linux/defaults.cmake), so a
           # plugin's data lands at share/obs/obs-plugins/<name>/ — mirror the source data/ dir
@@ -282,7 +285,7 @@ jobs:
   # issue 1317: the strih-snv FULL build variant. The strih role needs the same full plugin set as
   # the imag-parity full build above (obs-websocket, obs-ffmpeg + NVENC, obs-x264, obs-outputs,
   # obs-filters, image-source, text-freetype2, linux-capture/v4l2, DistroAV) -- all ON in the
-  # ubuntu-ci preset default (AJA/decklink/VLC/whatsnew off), so this job copies the full build
+  # ubuntu-ci preset default (AJA/decklink/whatsnew off; VLC on since issue 1425), so this job copies the full build
   # byte-for-byte and differs ONLY by artifact name + a build-flags marker. The one plugin the strih
   # role additionally needs vs the imag artifact is obs-browser (the 4 browser sources: VDO.ninja
   # interkom, Ableset, camera crew, 1pixel). obs-browser needs CEF, which the vendored ubuntu-ci
@@ -369,7 +372,7 @@ jobs:
           '-DOBS_VERSION_OVERRIDE=32.2.0'
           -DENABLE_WHATSNEW=OFF
           -DENABLE_AJA=OFF
-          -DENABLE_VLC=OFF
+          -DENABLE_VLC=ON
           -DENABLE_TEST_INPUT=OFF
           -DENABLE_BROWSER=${{ env.STRIH_ENABLE_BROWSER }}
           -DCEF_ROOT_DIR=${{ env.CEF_ROOT_DIR }}
@@ -411,6 +414,9 @@ jobs:
             exit 1
           fi
           cp "$distroav_so" "$plugin_lib_dir/"
+          # issue 1425: the vendored vlc-video plugin (stamps on the OBS media clock) is built by the OBS build
+          # (-DENABLE_VLC=ON, libvlc-dev headers); it loads libvlc from the installed VLC at runtime.
+          if [ ! -f "$plugin_lib_dir/vlc-video.so" ]; then echo "ERROR: vlc-video.so not built (issue 1425)"; exit 1; fi
 
           data_root=$(find stage -type d -path '*/share/obs/obs-plugins' | head -1)
           if [ -z "$data_root" ]; then data_root="stage/share/obs/obs-plugins"; fi

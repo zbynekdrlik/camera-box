@@ -9,22 +9,27 @@
 # (steps 0, 3 and 6). A FAST (obs.dll-only) deploy carries neither plugin, so both print a no-op
 # comment for it.
 #
-#   genlock_plugin_backup_ps MODE  -- step (3b): keep the box's current obs-vban.dll for rollback,
-#                                     BEFORE the step-(4) robocopy of obs-plugins\64bit overwrites it.
+#   genlock_plugin_backup_ps MODE  -- step (3b): keep the box's current obs-vban.dll and (issue 1425)
+#                                     vlc-video.dll for rollback, BEFORE the step-(4) robocopy of
+#                                     obs-plugins\64bit overwrites them.
 #   genlock_plugin_deploy_ps MODE  -- step (6b) #1115: deploy + byte-verify distroav.dll at its
 #                                     ProgramData load path; step (6c) issue 1372: byte-verify the
-#                                     paced obs-vban.dll the robocopy put into Program Files.
+#                                     paced obs-vban.dll the robocopy put into Program Files; step (6d)
+#                                     issue 1425: byte-verify the media-clock vlc-video.dll the same way.
 
 # The obs-vban rollback copy (issue 1372). Program Files\obs-studio\obs-plugins\64bit is the one
 # path the boxes load obs-vban from (no ProgramData / AppData copy, verified on resolume 26.9.2026).
 genlock_plugin_backup_ps() {
   if [ "$1" != "full" ]; then
     echo "# (3b) issue 1372: no obs-vban backup on a FAST deploy (no obs-vban in the fast bundle)."
+    echo "# (3b) issue 1425: no vlc-video backup on a FAST deploy (no vlc-video in the fast bundle)."
     return 0
   fi
   cat <<'PSOBSVBANBACKUP'
 # (3b) issue 1372 -- keep the box's current obs-vban.dll (the stock 0.3.1 on the first deploy).
 Copy-Item -Force (Join-Path $obsDir 'obs-plugins\64bit\obs-vban.dll') (Join-Path $backupDir 'obs-vban.dll.pre-789') -ErrorAction SilentlyContinue
+# (3b) issue 1425 -- keep the box's current vlc-video.dll (the stock OBS one on the first deploy).
+Copy-Item -Force (Join-Path $obsDir 'obs-plugins\64bit\vlc-video.dll') (Join-Path $backupDir 'vlc-video.dll.pre-789') -ErrorAction SilentlyContinue
 PSOBSVBANBACKUP
 }
 
@@ -32,6 +37,7 @@ genlock_plugin_deploy_ps() {
   if [ "$1" != "full" ]; then
     echo '# (6b) #1115: distroav ProgramData deploy -- no-op on a FAST (obs.dll-only) deploy (no distroav in the fast bundle).'
     echo "# (6c) issue 1372: obs-vban verify -- no-op on a FAST (obs.dll-only) deploy (no obs-vban in the fast bundle)."
+    echo "# (6d) issue 1425: vlc-video verify -- no-op on a FAST (obs.dll-only) deploy (no vlc-video in the fast bundle)."
     return 0
   fi
   # #1115 (Option A): FULL mode ALSO deploys the bundle's genlock distroav.dll to the REAL OBS load
@@ -91,4 +97,26 @@ if (-not (Test-Path $srcVban)) {
   Write-Warning "no BUNDLE_MANIFEST.json in $stage -- cannot byte-verify obs-vban.dll (marker-only)."
 }
 PSOBSVBAN
+  echo
+  # issue 1425: the vendored vlc-video.dll (its stamps on the OBS media clock) rides the same robocopy.
+  cat <<'PSVLCVIDEO'
+# (6d) issue 1425 -- byte-verify the deployed vlc-video.dll (stamps mapped onto the OBS media clock) against
+#      the bundle manifest, fail-closed. The robocopy of obs-plugins\64bit put it into Program Files, where
+#      the stock OBS vlc-video.dll was installed; it still loads libvlc from the installed VLC. A bundle
+#      built before issue 1425 carries no vlc-video.dll: the box then keeps its current one.
+$pfVlc = Join-Path $obsDir 'obs-plugins\64bit\vlc-video.dll'
+$srcVlc = Join-Path $stage 'obs-plugins\64bit\vlc-video.dll'
+if (-not (Test-Path $srcVlc)) {
+  Write-Warning "the bundle carries no vlc-video.dll (built before issue 1425) -- the box keeps its current vlc-video."
+} elseif (Test-Path $manifest) {
+  $mvl = Get-Content $manifest -Raw | ConvertFrom-Json
+  $wantL = ($mvl.files | Where-Object { $_.path -match '(^|/)vlc-video\.dll$' } | Select-Object -First 1).sha256
+  $gotL  = (Get-FileHash -Algorithm SHA256 $pfVlc -ErrorAction Stop).Hash.ToLower()
+  $matchL = ($wantL -and $gotL -and ($gotL -eq $wantL.ToLower()))
+  Write-Host "VERIFY vlc-video.dll want=$wantL got=$gotL match=$matchL"
+  if (-not $matchL) { Write-Error "VERIFY FAIL: deployed vlc-video.dll bytes do not match the bundle manifest -- do NOT trust this box"; exit 4 }
+} else {
+  Write-Warning "no BUNDLE_MANIFEST.json in $stage -- cannot byte-verify vlc-video.dll (marker-only)."
+}
+PSVLCVIDEO
 }

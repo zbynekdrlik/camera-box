@@ -704,6 +704,40 @@ pub fn audio_place_measured(mode: AudioHoldMode, basis: AsrcBasis) -> bool {
     mode.is_active() || basis != AsrcBasis::Arrival
 }
 
+/// Issue 1425 (E3 slice S4, design 6225701358) — OBS's `TS_SMOOTHING_THRESHOLD` (obs-source.c): a
+/// packet whose stamp is this far or more from the source's own continuation is not snapped onto it.
+/// Mirror of `GENLOCK_AUDIO_TS_SMOOTHING_NS` (held equal to `TS_SMOOTHING_THRESHOLD` by a
+/// `_Static_assert`).
+pub const AUDIO_TS_SMOOTHING_NS: u64 = 70_000_000;
+
+/// Issue 1425 (E3 slice S4, design 6225701358) — does a LOCKED arrival-basis source continue its
+/// timeline instead of being re-placed by its stamps? The arrival servo's authority is the buffer
+/// depth it captured at the lock; its stamps (a source clock other than the mixer's, e.g. stock VLC's
+/// `libvlc_clock()`) drift from the resampled continuation, and at 70 ms OBS would place the packet at
+/// its stamp (a 70 ms gap or overwrite of its own audio) or past 2 s drop the whole buffer and re-latch
+/// `timing_adjust`. Once synced nothing may move a source's placement at runtime (owner, 16.10.2026),
+/// so such a packet rebases the timeline it was compared with and APPENDS.
+///
+/// Only a mixed (`monitor_only` false) source with a resampler (`can_resample`) whose arrival servo has
+/// captured its depth (`level_captured`): `basis` is [`AsrcBasis::Arrival`] for a listen-only or
+/// resampler-less source too ([`audio_asrc_placement`]), and those keep OBS's own path, as do timecode-
+/// and stamp-basis sources, an unlocked source (the launch alignment) and a difference under 70 ms
+/// (snapped anyway). `diff_ns` = |continuation − this packet's timestamp| in the domain being checked
+/// (raw stamps or system time). Mirror of `genlock_audio_arrival_rebase`.
+pub fn audio_arrival_rebase(
+    basis: AsrcBasis,
+    monitor_only: bool,
+    can_resample: bool,
+    level_captured: bool,
+    diff_ns: u64,
+) -> bool {
+    basis == AsrcBasis::Arrival
+        && !monitor_only
+        && can_resample
+        && level_captured
+        && diff_ns >= AUDIO_TS_SMOOTHING_NS
+}
+
 /// Issue 1367 — the ASRC's error input for one packet, in ms: its placement error (actual − the
 /// raw-stamp intended) plus the placement slew still owed. A #1367 hold slew is a deliberate move
 /// paid by its own 1000 ppm term: until it is paid the packet is early by exactly what is owed, which
@@ -909,3 +943,7 @@ mod step_tests;
 #[cfg(test)]
 #[path = "genlock_audio_pairing_pending_tests.rs"]
 mod pending_tests;
+
+#[cfg(test)]
+#[path = "genlock_audio_pairing_arrival_tests.rs"]
+mod arrival_tests;

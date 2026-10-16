@@ -63,10 +63,15 @@ struct audio_data {
 	uint64_t timestamp;
 };
 
-/* the timecode ASRC's level setpoint: only the slew booking touches it in this branch */
+/* the timecode ASRC's level setpoint: only the slew booking touches it in this branch. Issue 1425 (E3 slice
+ * S4): the branch reads whether the arrival servo captured its depth (level_captured) */
 struct h_asrc {
 	double shifted_ms;
+	bool level_captured;
 };
+
+/* issue 1425: the branch predicts the ASRC basis from the monitoring type and the resampler */
+#define OBS_MONITORING_TYPE_MONITOR_ONLY 1
 static void asrc_compensator_shift_level_target(struct h_asrc *a, double ms)
 {
 	a->shifted_ms += ms;
@@ -108,6 +113,15 @@ struct obs_source {
 	uint64_t genlock_audio_step_start_ns;
 	int64_t genlock_audio_step_step_ns;
 	uint32_t genlock_audio_step_holds;
+	/* issue 1425 (E3 slice S4): the arrival rebase reads the basis inputs and records a rebase here */
+	int monitoring_type;
+	bool asrc_enabled;
+	void *resampler;
+	uint32_t genlock_arrival_rebases;
+	bool genlock_arrival_rebase_due;
+	bool genlock_arrival_rebase_sys;
+	int64_t genlock_arrival_rebase_drift_ns;
+	uint64_t genlock_arrival_rebase_logged_ns;
 };
 
 @LIFTED_BLOCK@

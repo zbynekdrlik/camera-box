@@ -4,6 +4,7 @@ paths:
   - "vendor/obs-studio/libobs/util/windows/qpc-timestamp.h"
   - "vendor/obs-studio/plugins/win-wasapi/win-wasapi.cpp"
   - "vendor/obs-studio/plugins/obs-browser/browser-client.cpp"
+  - "vendor/obs-studio/plugins/vlc-video/vlc-video-source.c"
   - "src/os_clock_discipline.rs"
   - "tests/os_clock_discipline_parity_1372.rs"
 ---
@@ -197,7 +198,7 @@ every media-timestamped quantity (audio mixer, outputs, the ASRC master) would j
   - neither collection has a WASAPI or DirectShow source.
 
   With obs.dll alone, those browser stamps drift against the disciplined mixer.
-- stream's `vlc_source` ("NL playlist") stays on the stock `vlc-video.dll` (see Known limit).
+- stream's `vlc_source` ("NL playlist") gets the vendored `vlc-video.dll` since issue 1425 (S4v, below).
 - **Compile proof for obs-browser = a green `windows-genlock.yml` run at the lane's head.** The
   pre-merge fast gate configures with `-DENABLE_BROWSER=OFF`, so `browser-client.cpp` compiles only
   in the full build. The Rust test pins its text, not its compile. `windows-genlock.yml` is
@@ -220,17 +221,40 @@ OBS can read "now" on, so the age mapping does not apply. Such a source drifts v
 mixer at the discipline rate, like any capture device whose clock differs from OBS's. There is none
 on the rig.
 
-**vlc-video is not built on Windows** (`-DENABLE_VLC=OFF` in both windows-genlock workflows since
-issue 42), so the rig runs the stock `vlc-video.dll` (4/12/2026 on stream). Its stamps are
-`libvlc_clock()` relative to plugin load, and libobs latches an offset for them. Before issue 1372
-that clock and the raw-QPC mixer matched. Now stream's "NL playlist" drifts against the mixer at the
-discipline rate (≈ 72 ms/h at 20 ppm). The audio 70 ms smoothing check does not catch it: it
-compares the source's own sample continuation with its own stamps, both on VLC's clock.
+**vlc-video: resolved by issue 1425 S4v (design 6225701358).** The stock plugin stamped
+`libvlc_clock()` relative to plugin load, libobs latched an offset, and after issue 1372 stream's
+"NL playlist" drifted against the disciplined mixer at the discipline rate (≈ 72 ms/h at 20 ppm:
+VLC's clock is not the disciplined system-time rate; which Windows counter VLC 3 reads by default is not
+verified) until its audio was re-placed 70 ms at a time. Now:
 
-The mapping would be simple: `os_foreign_clock_ns_to_gettime_ns(stamp, libvlc_clock_() * 1000)` at
-both stamp sites, without the `- time_start`. But the plugin must be built into the bundle first
-(libvlc headers on the runner, `vlc-video.dll` in the package), and that is a CI/bundle change of
-its own.
+- Every genlock configure builds the plugin (`-DENABLE_VLC=ON` in `windows-genlock.yml`, both
+  `windows-genlock-fast.yml` configures and both `linux-genlock.yml` builds). The headers come from
+  the Windows prebuilt obs-deps (`include/vlc`, VLC 3.0.21, `VLC_PATH` = the prebuilt dir) and from
+  `libvlc-dev` on Linux; the plugin still dlopens libvlc from the installed VLC at runtime.
+- `vlcs_media_clock_ns` (`vlc-video-source.c`) maps both stamp sites, video
+  (`libvlc_clock_()` at display) and audio (`pts`), by their AGE on VLC's clock:
+  `os_foreign_clock_ns_to_gettime_ns(us * 1000, libvlc_clock_() * 1000)` on Windows; on Linux
+  `libvlc_clock()` is `CLOCK_MONOTONIC`, the clock `os_gettime_ns()` reads, so the identity. The
+  stamps are direct, so the audio runs on the issue-1425 STAMP basis and the video on the same clock.
+- Shipped and verified: the Windows stage step and both Linux stage steps fail without the plugin;
+  a FULL fleet deploy backs the box's `vlc-video.dll` up (step 3b) and byte-verifies the new one
+  against the manifest (step 6d, `scripts/lib/genlock-plugin-deploy.sh`); a FAST (obs.dll) deploy
+  never touches it. The FULL bundle replaces the stock `vlc-video.dll` on EVERY Windows OBS box.
+- Tests: `tests/vlc_video_media_clock_1425.rs` (the helper lifted with the mapper and run for both
+  branches, the configure flags, the stage steps, the deploy printers) and the `VLC_WIRING` needles of
+  `tests/genlock_audio_arrival_rebase_wiring_1425.rs` (also in both pwsh gates).
+- **The 2 s direct window (review round 1).** VLC's audio `pts` is its presentation date, and VLC 3
+  may hand audio over up to ~2 s before it (by the reviewer's reading of `DecoderPlayAudio`, not verified
+  live). The mapping keeps that lead (the stamp lands in the future, where VLC wants it played), but
+  libobs reads a stamp within 2 s (`MAX_TS_VAR`) of now as DIRECT: a lead near 2 s would flip the source
+  between the stamp and the arrival basis. The plugin logs the largest lead once a minute:
+  `[vlc_source: '<name>'] audio lead_max_ms=<ms> (issue 1425)` (`vlcs_audio_lead_log`, tested in
+  `tests/vlc_video_media_clock_1425.rs`; one short OBS-log line per minute per playing VLC source,
+  never a page). A lead that reaches ~2000 ms needs the sticky basis the
+  issue-1425 rule lists as not done.
+- Live (supervisor): after the FULL deploy, stream's `asrc: source 'NL playlist'` line reads
+  `basis=stamp` with `level_avg` within ±2 ms, the `audio lead_max_ms=` lines stay far under 2000, and
+  no `genlock-audio-arrival-rebase` line appears over ≥ 2 h of playback.
 
 Third-party plugins are not vendored: stream's `obs-asio.dll` (feeds `mbc`) and resolume's
 `obs-vban.dll`. Both import the `os_gettime_ns` symbol (checked 25.9.2026 by reading the DLL
