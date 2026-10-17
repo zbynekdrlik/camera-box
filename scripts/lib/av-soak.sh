@@ -248,6 +248,7 @@ av_soak_free_space_verdict() {
 # stdout goes to LOG, its WARNING stays on stderr. Prints the outcome, read from the durable save
 # (the lib always returns 0): `none` (nothing saved, nothing sent), `restored` (the save is gone =
 # put back), `kept` (the save is still there = not put back; the next E2E or soak restores it).
+# Needs scripts/lib/strih-transition.sh sourced (only av-soak.sh's cleanup calls it).
 av_soak_transition_restore() {
   local here="$1" obs_dir="$2" host="$3" timeout_s="$4" log="$5" save
   save="$(strih_transition_save_path)"
