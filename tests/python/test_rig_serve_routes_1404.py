@@ -257,6 +257,27 @@ def test_main_wires_the_serve_dir_flag():
 
 # Captured from scripts/rig-lease-server.py at 9e06ea0b3 (before issue 1404), free lease dir;
 # the Date header is dropped and the lease body's "now" is masked.
+#
+# issue 1450 changed the /rig-lease.json body ON PURPOSE: the box-scoped view APPENDS
+# `lease_model`, `resources` and `groups` after the v1 keys. The v1 part is the 9e06ea0b3 capture,
+# unchanged, and stays the body's prefix (test_the_v1_body_is_still_the_prefix_1450): restreamer's
+# reader keys on `schema == 1` and the v1 fields, and fails OPEN on anything else.
+_V1_FREE_BODY = (b'{"schema": 1, "now": "<now>", "held": false, "holder": null, "heartbeat_age_s": null, '
+                 b'"stale": null, "expected_release_at": null, "ttl_s": null}')
+_FREE_ATOM = (b'{"held": false, "via": null, "holder": null, "declared": null, "heartbeat_age_s": null, '
+              b'"stale": null, "expected_release_at": null, "ttl_s": null}')
+_ATOMS_1450 = (b"snv-cams", b"strih-snv", b"stream-snv", b"imag", b"resolume-snv", b"pp-cams", b"strih-pp",
+               b"stream-pp", b"resolume-pp")
+_FREE_BODY = (_V1_FREE_BODY[:-1]
+              + b', "lease_model": 2, "resources": {'
+              + b", ".join(b'"' + a + b'": ' + _FREE_ATOM for a in _ATOMS_1450)
+              + b'}, "groups": {'
+              b'"snv-video": ["snv-cams", "strih-snv", "stream-snv", "imag"], '
+              b'"snv": ["snv-cams", "strih-snv", "stream-snv", "imag", "resolume-snv"], '
+              b'"pp-video": ["pp-cams", "strih-pp", "stream-pp"], '
+              b'"pp": ["pp-cams", "strih-pp", "stream-pp", "resolume-pp"], '
+              b'"all": ["snv-cams", "strih-snv", "stream-snv", "imag", "resolume-snv", "pp-cams", "strih-pp", '
+              b'"stream-pp", "resolume-pp"]}}')
 _GOLDEN = {
     ("GET", "/healthz"): ("HTTP/1.0 200 OK", ["Server: rig-lease-server/1277 ", "Content-Type: text/plain",
                                               "Content-Length: 2"], b"ok"),
@@ -265,13 +286,12 @@ _GOLDEN = {
     ("GET", "/rig-lease.json"): (
         "HTTP/1.0 200 OK",
         ["Server: rig-lease-server/1277 ", "Content-Type: application/json", "Cache-Control: no-store",
-         "Content-Length: 159"],
-        b'{"schema": 1, "now": "<now>", "held": false, "holder": null, "heartbeat_age_s": null, '
-        b'"stale": null, "expected_release_at": null, "ttl_s": null}'),
+         "Content-Length: 2016"],
+        _FREE_BODY),
     ("HEAD", "/rig-lease.json"): (
         "HTTP/1.0 200 OK",
         ["Server: rig-lease-server/1277 ", "Content-Type: application/json", "Cache-Control: no-store",
-         "Content-Length: 159"], b""),
+         "Content-Length: 2016"], b""),
     ("GET", "/nope"): ("HTTP/1.0 404 Not Found", ["Server: rig-lease-server/1277 ", "Content-Type: text/plain",
                                                   "Content-Length: 0"], b""),
     ("HEAD", "/nope"): ("HTTP/1.0 404 Not Found", ["Server: rig-lease-server/1277 ", "Content-Type: text/plain",
@@ -299,6 +319,14 @@ def test_existing_routes_match_the_pre_change_golden_bytes(tmp_path):
                 assert got_status == status, (method, path)
                 assert got_headers == headers, (method, path)
                 assert _mask_now(path, got_body) == body, (method, path)
+
+
+def test_the_v1_body_is_still_the_prefix_1450(tmp_path):
+    """issue 1450: the box-scoped keys are APPENDED -- the served bytes up to the v1 `ttl_s` are
+    the pre-1404 capture, so a consumer reading the v1 keys sees exactly what it saw before."""
+    with _Server(tmp_path / "lease-absent") as s:
+        _status, _headers, body = s.raw("GET", "/rig-lease.json")
+    assert _mask_now("/rig-lease.json", body).startswith(_V1_FREE_BODY[:-1] + b", ")
 
 
 def test_the_markers_route_is_404_when_no_serve_dir_is_configured(tmp_path):
