@@ -104,10 +104,10 @@ set -euo pipefail
 # EXIT: 0 PASS / 1 FAIL / 2 UNKNOWN (the final report of a run that ended normally or by STOP / a
 #       low record volume / the rig leaving TEST mode), 3 usage error, 4 refused before any rig
 #       change (lease held, rig busy, not in TEST mode, painter dead, a burn unreadable, the Cut
-#       transition not selectable, missing credential/binary/bound,
-#       a run dir that already holds a run), 5 aborted after a rig change
-#       (lease lost, a broadcast went live, a setup mutation failed, a signal, a recording the soak
-#       started may still run -- then the lease is kept); the report is still written on 5.
+#       transition not selectable, missing credential/binary/bound, a run dir that
+#       already holds a run), 5 aborted after a rig change (lease lost, a broadcast went live, a
+#       setup mutation failed, a signal, a recording the soak started may still run -- then the
+#       lease is kept); the report is still written on 5.
 #       --stop-leftovers: 0 nothing left (lease released), 5 something kept (lease kept), 4 the
 #       soak still runs, 3 the plan could not be made.
 #
@@ -487,15 +487,6 @@ burn() {
     timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_burn_filter.py" "$@"
   fi
 }
-# transition_restore -> the operator's strih program transition back (scripts/lib/strih-transition.sh,
-# best effort: its WARNING names the manual step), in its own session like every cleanup OBS call.
-# The soak's OBS seam (AV_SOAK_OBS_DIR) is the lib's HERE, so the fakes answer it too.
-transition_restore() {
-  # shellcheck disable=SC2016  # expanded by the child bash
-  OBS_CLEANUP_TIMEOUT="$OBS_TIMEOUT_S" setsid -w bash -c \
-    '. "$1"; strih_transition_restore "$2" "$3" "${OBS_PASSWORD:-}"' \
-    _ "$HERE/lib/strih-transition.sh" "$OBS_DIR" "$STRIH_HOST"
-}
 cam2_read() {
   timeout "$SSH_TIMEOUT_S" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR -o ConnectTimeout=10 "root@$PAINTER_IP" "$1"
@@ -648,8 +639,11 @@ cleanup() {
     # after the program restore (that cut still runs on Cut), on every exit that reached the
     # selection, also during a broadcast: a transition is a setting, never a cut on air
     if [ "$TRANSITION_FORCED" = 1 ]; then
-      transition_restore >> "$RUN_DIR/cleanup.log"
-      log "strih program transition: the operator's choice put back (a failure is the WARNING above, its save kept)" 2>/dev/null
+      case "$(av_soak_transition_restore "$HERE" "$OBS_DIR" "$STRIH_HOST" "$OBS_TIMEOUT_S" "$RUN_DIR/cleanup.log")" in
+        restored) log "strih program transition: the operator's choice put back" 2>/dev/null ;;
+        none) log "strih program transition: nothing was saved, nothing to put back" 2>/dev/null ;;
+        *) log "WARNING: the operator's strih program transition was NOT put back -- its save stays in $(strih_transition_save_path) (the next E2E or soak cleanup restores it, or: python3 scripts/obs_phase2.py transition-restore --host $STRIH_HOST)" 2>/dev/null ;;
+      esac
     fi
     for t in "${BURNS_TURNED_ON[@]}"; do
       if burn remove --host "${t%%|*}" --input "${t#*|}" >> "$RUN_DIR/cleanup.log" 2>&1; then

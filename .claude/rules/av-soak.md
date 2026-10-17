@@ -10,6 +10,7 @@ paths:
   - "tests/python/test_av_soak_rig_state_1367.py"
   - "tests/python/test_av_soak_orchestrator_1367.py"
   - "tests/python/test_av_soak_lease_inherit_1367.py"
+  - "tests/python/test_av_soak_transition_1367.py"
   - "tests/soak_first_cut_burn_domain_1367.rs"
 ---
 
@@ -58,10 +59,11 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   camera). Right after the setup-mutation guard and before `MUTATED=1`, setup runs the E2E's
   `strih_transition_force_cut` (`scripts/lib/strih-transition.sh`, same durable save
   `~/.camera-box/strih-transition-saved.json`) in a subshell: a failure refuses with exit 4, nothing
-  recorded. The flag is set before the call, so cleanup's `strih_transition_restore` (under
-  `setsid -w`, after the strih program restore, before the burns and the lease) runs on every exit
-  that reached it, also during a broadcast (a setting, not a cut); a run refused earlier never
-  touches the transition. A SIGKILLed soak leaves Cut with the save kept: the next E2E or soak
+  recorded. The flag is set before the call, so cleanup's `av_soak_transition_restore` (the lib's
+  restore under `setsid -w`, after the strih program restore, before the burns and the lease) runs
+  on every exit that reached it, also during a broadcast (a setting, not a cut), and logs the
+  outcome from the durable save (gone = put back, still there = a WARNING, none = nothing sent);
+  a run refused earlier never touches the transition. A SIGKILLed soak leaves Cut with the save kept: the next E2E or soak
   cleanup puts the operator's choice back, or `python3 scripts/obs_phase2.py transition-restore
   --host <strih>` by hand. `--stop-leftovers` does not restore it.
 - **Recording flags are conservative.** A box's "started" flag is set BEFORE `record --action start`
