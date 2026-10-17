@@ -19,8 +19,11 @@ set -euo pipefail
 #       ALREADY be the development scene (`Development`, issue 1380 -- TEST mode is a precondition,
 #       `scripts/rig-mode.sh test`); the strih program scene (snapshot, restored at cleanup); the
 #       permanent cam2 painter active with a growing QPSK marker log; every burn state readable
-#     - the rig-busy guard again, then the mutation: the measurement burns ON (obs_burn_filter.py)
-#       only where they were OFF
+#     - the rig-busy guard again, then the mutations: the strih program transition -> Cut (the
+#       E2E's scripts/lib/strih-transition.sh: a Fade mixes the outgoing camera into the first
+#       ~0.5 s of every sweep window, issue 1367; the operator's transition is saved durably and put
+#       back at cleanup; a failed selection refuses, exit 4, nothing recorded), then the measurement
+#       burns ON (obs_burn_filter.py) only where they were OFF
 #   every slot (default every 1200 s, on a fixed grid from the first slot):
 #     - the lease still ours, both record volumes above RECORDINGS_FREE_MIN_GB (else the run STOPS),
 #       the stream program still the development scene and the painter service active (else the rig
@@ -46,7 +49,9 @@ set -euo pipefail
 #   cleanup, on EVERY exit (signals ignored, remote calls in their own session): stop this run's
 #   remote decodes; ONLY on a proven idle rig (no box streams, both readable) StopRecord what is
 #   still recording and restore the strih program scene when swept -- never while a broadcast is
-#   live; turn off the burns this run turned on (production state), stop the heartbeat, write +
+#   live; put the operator's strih program transition back when the run selected Cut (also during
+#   a broadcast: a setting, not a cut); turn off the burns this run turned on (production state),
+#   stop the heartbeat, write +
 #   print the report; release the lease -- unless a recording the soak started may still run: then
 #   exit 5 with the lease KEPT for --stop-leftovers.
 #
@@ -98,8 +103,9 @@ set -euo pipefail
 #
 # EXIT: 0 PASS / 1 FAIL / 2 UNKNOWN (the final report of a run that ended normally or by STOP / a
 #       low record volume / the rig leaving TEST mode), 3 usage error, 4 refused before any rig
-#       change (lease held, rig busy, not in TEST mode, painter dead, a burn unreadable, missing
-#       credential/binary/bound, a run dir that already holds a run), 5 aborted after a rig change
+#       change (lease held, rig busy, not in TEST mode, painter dead, a burn unreadable, the Cut
+#       transition not selectable, missing credential/binary/bound,
+#       a run dir that already holds a run), 5 aborted after a rig change
 #       (lease lost, a broadcast went live, a setup mutation failed, a signal, a recording the soak
 #       started may still run -- then the lease is kept); the report is still written on 5.
 #       --stop-leftovers: 0 nothing left (lease released), 5 something kept (lease kept), 4 the
@@ -126,6 +132,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/stream-dev-scene.sh"
 # shellcheck source=scripts/lib/recordings-free-line.sh
 . "$HERE/lib/recordings-free-line.sh"
+# shellcheck source=scripts/lib/strih-transition.sh
+. "$HERE/lib/strih-transition.sh"
 # shellcheck source=scripts/lib/av-soak.sh
 . "$HERE/lib/av-soak.sh"
 # shellcheck source=scripts/lib/av-soak-leftovers.sh
@@ -331,7 +339,10 @@ EOF
     plan_cmd python3 "$OBS_DIR/obs_burn_filter.py" check --host "$STRIH_HOST" --input "NDI $c"
   done
   plan_cmd python3 "$OBS_DIR/obs_burn_filter.py" check --host "$STREAM_HOST" --input "$STREAM_PROG_SOURCE"
-  echo "  6. the rig-busy guard again, then: obs_burn_filter.py add --host <ip> --input <input> for each burn that was OFF, then check it again"
+  echo "  6. the rig-busy guard again, then the strih program transition -> Cut (issue 1367, the E2E's strih-transition.sh;"
+  echo "     the operator's transition saved durably, a failure refuses with exit 4, nothing recorded):"
+  plan_cmd python3 "$OBS_DIR/obs_phase2.py" transition-cut --host "$STRIH_HOST" --save "$(strih_transition_save_path)"
+  echo "     then: obs_burn_filter.py add --host <ip> --input <input> for each burn that was OFF, then check it again"
   echo
   echo "EVERY SLOT k (slot start = run start + k x ${SLOT_S} s; files under ${RUN_DIR}/slot-NNN):"
   echo "  a. lease still ours; record volumes free >= ${RECORDINGS_FREE_MIN_GB} GB (curl http://<box>:${BUNDLE_STATE_PORT}/record-dir-stats.json -> bundle_state_gather.recordings_free_line; below = stop the soak)"
@@ -387,6 +398,8 @@ EOF
   echo "CLEANUP (every exit; signals ignored; remote calls under setsid -w): stop this run's remote decodes still running;"
   echo "  on a proven idle rig only (never while a broadcast is live): StopRecord what is still recording and the strih program back"
   echo "  to the snapshot (switch --prod-floor) when swept; a recording that may still run = exit 5 and the lease is KEPT for --stop-leftovers;"
+  echo "  the operator's strih program transition back (when Cut was selected, also during a broadcast -- a setting, not a cut):"
+  plan_cmd python3 "$OBS_DIR/obs_phase2.py" transition-restore --host "$STRIH_HOST" --save "$(strih_transition_save_path)"
   echo "  obs_burn_filter.py remove on the burns this run turned on; rig_heartbeat_stop;"
   echo "  rig_lease_release ${RIG_LEASE_OURS}; the final report:"
   plan_cmd python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" --json "$RUN_DIR/report.json" "${SPREAD_ARGS[@]}"
@@ -448,6 +461,7 @@ STRIH_REC_SINCE=""
 STREAM_REC_SINCE=""
 STRIH_SWEPT=0
 STRIH_PROGRAM_SNAPSHOT=""
+TRANSITION_FORCED=0
 BURNS_TURNED_ON=()
 BG_PIDS=()
 SLEEP_PID=""
@@ -472,6 +486,15 @@ burn() {
   else
     timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_burn_filter.py" "$@"
   fi
+}
+# transition_restore -> the operator's strih program transition back (scripts/lib/strih-transition.sh,
+# best effort: its WARNING names the manual step), in its own session like every cleanup OBS call.
+# The soak's OBS seam (AV_SOAK_OBS_DIR) is the lib's HERE, so the fakes answer it too.
+transition_restore() {
+  # shellcheck disable=SC2016  # expanded by the child bash
+  OBS_CLEANUP_TIMEOUT="$OBS_TIMEOUT_S" setsid -w bash -c \
+    '. "$1"; strih_transition_restore "$2" "$3" "${OBS_PASSWORD:-}"' \
+    _ "$HERE/lib/strih-transition.sh" "$OBS_DIR" "$STRIH_HOST"
 }
 cam2_read() {
   timeout "$SSH_TIMEOUT_S" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -622,6 +645,12 @@ cleanup() {
         fi
       fi
     fi
+    # after the program restore (that cut still runs on Cut), on every exit that reached the
+    # selection, also during a broadcast: a transition is a setting, never a cut on air
+    if [ "$TRANSITION_FORCED" = 1 ]; then
+      transition_restore >> "$RUN_DIR/cleanup.log"
+      log "strih program transition: the operator's choice put back (a failure is the WARNING above, its save kept)" 2>/dev/null
+    fi
     for t in "${BURNS_TURNED_ON[@]}"; do
       if burn remove --host "${t%%|*}" --input "${t#*|}" >> "$RUN_DIR/cleanup.log" 2>&1; then
         log "burn OFF again on ${t%%|*} '${t#*|}' (it was off before the soak)" 2>/dev/null
@@ -729,6 +758,14 @@ case "$(broadcast_settled)" in
   *) refuse "the rig state is unreadable (a box did not answer rig-busy-check) -- the soak never starts on a rig it cannot observe" ;;
 esac
 guard_ok "the av-soak setup mutations" || refuse "the rig became busy before the setup mutations"
+# issue 1367: the sweep cuts with Cut, as the E2E does (a Fade blends the outgoing camera into the
+# first ~0.5 s of every window). The lib exits 1 on a failure, so it runs in a subshell and a
+# failure refuses here (exit 4, nothing recorded); the flag is set BEFORE the call, so a selection
+# that saved the operator's transition and then failed is still put back by cleanup.
+TRANSITION_FORCED=1
+if ! ( strih_transition_force_cut "$OBS_DIR" "$STRIH_HOST" "${OBS_PASSWORD:-}" ); then
+  refuse "the strih program transition could not be set to Cut (a blending transition makes every window's loss meaningless) -- nothing was recorded"
+fi
 MUTATED=1
 for _t in "${BURNS_OFF[@]}"; do
   BURNS_TURNED_ON+=("$_t")
