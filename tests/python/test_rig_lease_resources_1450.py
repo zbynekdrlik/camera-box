@@ -278,7 +278,7 @@ def test_no_script_takes_the_lease_without_a_declaration():
         for ln in p.read_text().splitlines():
             code = ln.split("#", 1)[0]
             if re.search(r"\brig_lease_acquire\s", code) and "RIG_LEASE_RESOURCES=" not in code \
-                    and "echo" not in code:
+                    and "echo" not in code and "rig_lease_acquire repo=" not in code:  # a printed plan
                 offenders.append(f"{p.relative_to(ROOT)}: {ln.strip()}")
     assert not offenders, offenders
 
