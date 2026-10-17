@@ -480,6 +480,26 @@ if (\$ownSession -eq \$sessProc.SessionId) {
 } else {
   Write-Host "SESSION OK: obs64 PID \$(\$sessProc.Id) SessionId=\$activeSession (title check skipped -- this program is running cross-session, own SessionId=\$ownSession)"
 }
+
+# (3c) issue 1367: a started obs64 never runs below Normal CPU priority. OBS inherits its launcher's
+#      class, and the win-* MCP server runs as a priority-7 (BelowNormal) scheduled task, so every
+#      relaunch from its Shell left the stream OBS at BelowNormal -- equal to the on-box decode's own
+#      BelowNormal -- and on 17.10.2026 the soak's decode starved its audio thread for up to 34 s.
+#      Idle/BelowNormal is raised to Normal; Normal/AboveNormal/High (an operator choice) is kept.
+function Set-CbObsPriorityFloor(\$p) {
+  \$before = [string]\$p.PriorityClass
+  if (\$before -in @('Idle', 'BelowNormal')) { \$p.PriorityClass = 'Normal' }
+  \$after = [string]\$p.PriorityClass
+  if (\$after -in @('Idle', 'BelowNormal')) { throw "obs64 CPU priority is still \$after after raising it from \$before" }
+  return "\$before -> \$after"
+}
+try {
+  \$prioNote = Set-CbObsPriorityFloor (Get-Process -Id \$sessProc.Id)
+  Write-Host "PRIORITY OK: obs64 PID \$(\$sessProc.Id) CPU priority \$prioNote (issue 1367: never below Normal)"
+} catch {
+  Write-Error "#1367 FAIL: \$_ -- an OBS below Normal priority is starved by any Normal process (audio-thread stalls); set it by hand: (Get-Process obs64).PriorityClass = 'Normal'"
+  exit 8
+}
 ${ahk_session_ps}
 
 # (4) VERIFY the fresh OBS log shows the genlock render tick ENABLED (the #257 build-default proof --

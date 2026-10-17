@@ -10,6 +10,7 @@ paths:
   - "tests/python/test_av_soak_rig_state_1367.py"
   - "tests/python/test_av_soak_orchestrator_1367.py"
   - "tests/python/test_av_soak_lease_inherit_1367.py"
+  - "tests/python/test_av_soak_transition_1367.py"
   - "tests/soak_first_cut_burn_domain_1367.rs"
 ---
 
@@ -53,6 +54,18 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   state) before the first mutation; a refusal there is exit 4 and nothing changed. After the first
   mutation point (`MUTATED=1`, set right before the burns are turned on, even when none was off)
   every abort is exit 5 and cleanup restores.
+- **The sweep cuts with Cut, as the E2E does** (17.10.2026: strih on Fade 500 ms gave every camera
+  but the first a 21-22-slot gap ~1 s after its cut -- the blended frames decode as the outgoing
+  camera). Right after the setup-mutation guard and before `MUTATED=1`, setup runs the E2E's
+  `strih_transition_force_cut` (`scripts/lib/strih-transition.sh`, same durable save
+  `~/.camera-box/strih-transition-saved.json`) in a subshell: a failure refuses with exit 4, nothing
+  recorded. The flag is set before the call, so cleanup's `av_soak_transition_restore` (the lib's
+  restore under `setsid -w`, after the strih program restore, before the burns and the lease) runs
+  on every exit that reached it, also during a broadcast (a setting, not a cut), and logs the
+  outcome from the durable save (gone = put back, still there = a WARNING, none = nothing sent);
+  a run refused earlier never touches the transition. A SIGKILLed soak leaves Cut with the save kept: the next E2E or soak
+  cleanup puts the operator's choice back, or `python3 scripts/obs_phase2.py transition-restore
+  --host <strih>` by hand. `--stop-leftovers` does not restore it.
 - **Recording flags are conservative.** A box's "started" flag is set BEFORE `record --action start`
   (the start verifies the file grows AFTER StartRecord, so a failed or timed-out start can leave OBS
   recording); any start failure stops both boxes; a flag clears only when `record --action status`
@@ -255,8 +268,8 @@ Exit 5 with `RECORDING MAY STILL BE RUNNING` in the log = check that box before 
 the soak kept the rig lease, and `bash scripts/av-soak.sh --stop-leftovers "$D"` (run again
 once the box is idle) stops what is provably the soak's and releases it.
 **What it holds:** the rig lease for the whole run (a CI full-path E2E fails fast with
-`OUTCOME=RIG_LEASE_HELD`; restreamer waits a bounded time), the strih program (swept), the burns
-it turned on,
+`OUTCOME=RIG_LEASE_HELD`; restreamer waits a bounded time), the strih program (swept) and its
+transition (Cut, the operator's restored at cleanup), the burns it turned on,
 and a recording on strih + stream for ~4 min of every 10. Post the report (`$D/report.txt` +
 `report.json`) on issue 1367, then hand the owner `$D/cleanup-plan.txt` if the disk needs the space.
 

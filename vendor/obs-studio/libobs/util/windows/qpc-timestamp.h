@@ -8,8 +8,8 @@
  * until the 2 s jump detection snaps them. Such sources:
  *   - WASAPI: IAudioCaptureClient::GetBuffer's qpcPosition (100 ns units, raw QPC);
  *   - obs-browser: CEF's audio pts (base::TimeTicks ms, QPC-based on Windows).
- * (vlc-video stamps on libvlc_clock() and would map the same way with its own clock's now, but the
- * camera-box Windows bundle is built with ENABLE_VLC=OFF.)
+ *   - vlc-video: libvlc_clock() (us, QPC-based on Windows), mapped with its own clock's now since
+ *     camera-box issue 1425 (vlcs_media_clock_ns).
  *
  * The stamp's AGE is measured on its own clock and subtracted from the disciplined now. Over an age of
  * milliseconds the rate difference (<= 1000 ppm) is well below a microsecond. A stamp further than

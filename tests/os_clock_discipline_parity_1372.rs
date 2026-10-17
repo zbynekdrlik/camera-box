@@ -1125,8 +1125,8 @@ fn the_foreign_clock_mapper_matches_the_rust_authority() {
 #[test]
 fn browser_stamps_are_mapped_on_windows() {
     // CEF's audio pts is base::TimeTicks ms (QPC-based on Windows); it sat on the raw-QPC
-    // os_gettime_ns() timeline before issue 1372. (vlc-video would need the same mapping, but the
-    // Windows bundle is built with ENABLE_VLC=OFF, so it is a documented known limit instead.)
+    // os_gettime_ns() timeline before issue 1372. (vlc-video maps its libvlc_clock() stamps the same way
+    // since issue 1425: tests/vlc_video_media_clock_1425.rs.)
     let browser = fs::read_to_string(repo(
         "vendor/obs-studio/plugins/obs-browser/browser-client.cpp",
     ))

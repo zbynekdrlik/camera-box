@@ -16,6 +16,11 @@ contract for restreamer#349: `.claude/rules/rig-lease-http.md`.
                           rules: see scripts/rig_lease_state.py's own module doc (the pure decision
                           this handler is a thin transport wrapper around). A trailing query string
                           (e.g. a client cache-buster `?t=1`) is stripped before matching.
+                          issue 1450: the v1 keys stay first (schema 1), then `lease_model` 2, a
+                          per-resource `resources` map and the `groups` (scripts/rig-lease-resources.txt).
+  GET /rig-lease.json?resources=<csv> -> the same document for those resources (atoms / groups) only:
+                          held iff the holder covers any of them, + `scope`. An unknown or empty
+                          scope answers the WHOLE rig + `scope_error` (fail-closed, never a 400).
   GET /healthz          -> 200 "ok" liveness probe.
   HEAD /rig-lease.json, HEAD /healthz -> same routing/status as the GET form, headers only, no body
                           (a cheap liveness probe for an external checker).
@@ -63,6 +68,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 
@@ -87,6 +93,14 @@ def _default_stale_secs() -> int:
         return int(raw) if raw else rls.DEFAULT_STALE_SECS
     except ValueError:
         return rls.DEFAULT_STALE_SECS
+
+
+def _resources_scope(raw_path: str):
+    """issue 1450: the `resources=` query value(s) of a request path, comma-joined, or None when the
+    query does not name it (the whole-rig view)."""
+    query = urllib.parse.urlsplit(raw_path).query
+    values = urllib.parse.parse_qs(query, keep_blank_values=True).get("resources")
+    return None if values is None else ",".join(values)
 
 
 def log(msg: str) -> None:
@@ -124,11 +138,19 @@ class RigLeaseHandler(rsf.ReadOnlyHandler):
         path = self._request_path()
 
         if path == "/rig-lease.json":
+            # issue 1450: `?resources=<csv>` asks for those rig resources only (repeated = joined);
+            # absent = the whole rig. Every other query parameter (a cache-buster) is ignored.
+            scope = _resources_scope(self.path)
+            now = datetime.now(timezone.utc)
             try:
-                state = rls.lease_state(self.lease_dir, datetime.now(timezone.utc), self.stale_secs)
-            except Exception as exc:  # pragma: no cover -- lease_state() is designed never to raise
-                log(f"lease_state() raised {exc!r} -- serving fail-closed held=true")
-                state = rls.fail_closed_state(datetime.now(timezone.utc))
+                state = rls.lease_view(self.lease_dir, now, self.stale_secs, scope=scope)
+            except Exception as exc:  # an unreadable resource table (scripts/rig-lease-resources.txt)
+                log(f"lease_view() raised {exc!r} -- serving the v1 state, a scope fail-closed")
+                try:
+                    state = rls.degraded_view(self.lease_dir, now, self.stale_secs, scope)
+                except Exception as exc2:  # pragma: no cover -- lease_state() is designed never to raise
+                    log(f"degraded_view() raised {exc2!r} -- serving fail-closed held=true")
+                    state = rls.fail_closed_state(now)
             self._send(200, "application/json", json.dumps(state).encode("utf-8"), no_store=True)
             return
 

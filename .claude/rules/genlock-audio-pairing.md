@@ -385,12 +385,13 @@ measurement (the E2E settle-wait does not wait on it yet). The songplayer post-d
 (±40 ms, 0 dropouts) passes across two OBS restarts. The camera-box release E2E A/V gate stays
 green.
 
-**Known limit (not this slice): the ASRC servo's own stretch still drifts the TS-smoothing
-timeline.** The rate servo stretches the samples to follow the wall-vs-QPC drift, so
-`next_audio_ts_min` walks away from the source timestamps by the accumulated correction; at 70 ms
-(`TS_SMOOTHING_THRESHOLD`) the ingest re-places at the raw timestamp (a 70 ms snap, every
-`70 ms / drift` — ~2 h at resolume's ~10 ppm). The slew books its own steps out of that timeline;
-the servo's correction does not. Reported to the supervisor as a follow-up candidate.
+**The ASRC servo's own stretch drifts the TS-smoothing timeline (issue 1367 known limit, resolved
+for arrival sources by issue 1425 S4, below).** `next_audio_ts_min` advances by the RESAMPLED frames,
+so it walks away from a source's raw stamps by the accumulated correction; at 70 ms
+(`TS_SMOOTHING_THRESHOLD`) OBS re-placed the packet at its stamp. Since issue 1372 only an
+ARRIVAL-basis source whose stamps run on a clock other than the mixer's still drifts (a timecode
+source's drift is wall vs mono, flat since 1372; a stamp-basis source's servo matches its output to
+the stamp advance).
 
 **The global audio buffering has no floor since issue 1425 slice 3.** Issue 1367 started every genlock
 OBS launch 85 ms behind real time; now a launch starts at 0 like stock OBS and its own startup race
@@ -956,6 +957,76 @@ every other source out of it.
   6216736061 + ROZHODNUTÉ 6217557472) freezes the buffering while an audio encoder runs, so a late
   mixed source is re-anchored (`MIXED_LATE`, one counted dropout) instead of growing the whole mix; a
   box with no audio encoder keeps stock growth. That section is in the floor rule.
+
+## Issue 1425 (E3 slice S4, design 6225701358) — a LOCKED arrival source is never re-placed by its stamps
+
+**Why.** Stream's `NL playlist` (stock `vlc-video`, an ARRIVAL-basis source: its stamps are
+`libvlc_clock()` relative to plugin load, not direct) drifted from its resampled continuation at
+~3.6 ms/h per ppm. At 70 ms OBS placed the packet at its stamp (a 70 ms gap or overwrite of its own
+audio), the level loop then compressed that gap away, which is stretch again: the two-clock bench
+(`src/asrc_arrival_rebase_bench.rs`) measures 62 placements in 8 h at +20 ppm, the depth up to 575 ms
+off. Past 2 s `handle_ts_jump` dropped the buffer and re-latched `timing_adjust`; a 70 ms jump of the
+video-written `timing_adjust` (F3) placed the packet too. Owner rule (16.10.2026): once synced, nothing
+moves a placement at runtime.
+
+- **The decision** (`src/genlock_audio_pairing.rs` ↔ the lifted C block, parity-gated):
+  `audio_arrival_rebase(basis, monitor_only, can_resample, level_captured, diff_ns)` = basis Arrival
+  && mixed && a resampler && the arrival servo captured its depth && diff ≥ 70 ms
+  (`AUDIO_TS_SMOOTHING_NS` ↔ `GENLOCK_AUDIO_TS_SMOOTHING_NS`, `_Static_assert`-ed to
+  `TS_SMOOTHING_THRESHOLD`). The two extra inputs are an anchor correction of the design (comment
+  6225848114): `audio_asrc_placement` returns Arrival for a listen-only and a resampler-less source
+  too, and `level_captured` can be true on both.
+- **The wiring** (`source_output_audio_data`, through two helpers so the function does not grow):
+  `genlock_audio_arrival_rebase_source(source, hold_mode, direct_ts, cont_ns, ts_ns)` predicts the
+  basis from `genlock_hold_mode` + `using_direct_ts` (the verdict before the smoothing) + the same
+  monitoring / resampler inputs and decides. Right after the direct-stamp detection a rebase sets
+  `next_audio_ts_min = data->timestamp` (the packet snaps onto itself: no "exceeded" placement, no
+  `handle_ts_jump`). Under `audio_buf_mutex` the same decision on the system-domain diff joins the
+  issue-1381 relabel rebase (`… || genlock_arrival_rebase_sys) && source->next_audio_sys_ts_min`), so
+  the packet appends and never reaches the second `MAX_TS_VAR` reset.
+  `genlock_audio_arrival_rebase_record` (the branch's last statement) counts a rebased packet with a
+  live `audio_ts` (`genlock_arrival_rebases`, `_due`, `_sys`, `_drift_ns`); a later forced placement of
+  the same packet (a sync-offset change, a latency-hold placement) is still counted.
+  `genlock_audio_arrival_rebase_log` prints after the lock:
+  `genlock-audio-arrival-rebase '<src>': domain=stamp|system drift_ms=%+.1f rebases=%u (issue 1425)`,
+  at most once per 60 s per source (`rebases=` counts every one).
+- **Conservative on purpose:** a direct-stamped source in the decoupled unbuffered branch (OBS re-latches
+  its `timing_adjust` every packet) is predicted Stamp and never rebased; `cont_ns != 0` is an
+  equivalent guard (a zero continuation exists only before the first packet, when nothing is captured).
+- **Unchanged:** an unlocked source (the launch alignment), a stopped one (`audio_ts` 0: OBS still
+  places it, nothing counted), listen-only, resampler-less, stamp- and timecode-basis sources.
+- **A pause on an arrival source.** Within ~2 mixer ticks without data the mixer declares the source
+  stopped (`discard_if_stopped`, `audio_ts` 0), so a resume after a real pause is placed by OBS at
+  `stamp + timing_adjust`. A stamp discontinuity with CONTINUOUS arrival appends (the depth is the arrival
+  servo's authority).
+- **Known limit (review round 1, raised to the main as a design question): a rebase continues the
+  timelines but keeps `timing_adjust`.** After rebases that added up to a drift D, `stamp + timing_adjust`
+  sits D off where the samples really are, so a placement OBS still forces lands D off: the resume after
+  a stop, an operator's sync-offset change, a latency-hold placement (a latency-hold source's
+  `audio_place_err_ms` / pairing offset also read D). A real ≥ 2 s break is no longer re-latched either.
+  D stays near 0 only for a source whose stamps advance at the mixer's rate (NL playlist on the stamp
+  basis after S4v, an NDI genlock-off sender on a dantesync-disciplined wall clock: the bench's twin).
+  Any other locked arrival source accumulates D at its stamp-clock rate (≈ 72 ms/h at 20 ppm): a stock
+  VLC, a genlock-off NDI sender on an undisciplined machine, a latency-hold source whose timecode is
+  counted from its samples. The fix the
+  review proposes (carry the drift as a per-source offset added with `timing_adjust`, so forced placements
+  land on the continuation) is a change of the decided mechanism, so it was not made here.
+- **Tests:** unit `src/genlock_audio_pairing_arrival_tests.rs`; parity
+  `tests/genlock_audio_asrc_basis_parity_1425.rs` (`c_arrival_rebase_matches_the_rust_authority_1425`,
+  70 ms −1/0/+1); the ingest lift `tests/genlock_audio_arrival_rebase_1425.rs` (the issue-1381 harness,
+  built by the shared `tests/genlock_audio_ingest_lift/mod.rs`, its `main` replaced by
+  `tests/c/genlock_audio_arrival_rebase_1425_scenarios.c`; the log helper lifted with a no-op stand-in
+  before it shipped, so the RED failed on behaviour); the bench (VLC model RED 62 placements → GREEN 0
+  and 8 rebases, the depth as close to the lock as the NDI wall-clock twin, which reads 0 / 0 both
+  ways); the wiring `tests/genlock_audio_arrival_rebase_wiring_1425.rs` (`ARRIVAL_REBASE_WIRING`, also
+  in both pwsh gates; the issue-1381 `RELABEL_WIRING[2]` carries the extended condition). Mutation:
+  20/20 C mutants killed (19 by the ingest / parity behaviour, the dropped log call by the wiring
+  needles and the pwsh lines), 5/5 Rust mutants. Review round 1 (helpers, VLC lead log): 26/28 by
+  behaviour, the dropped log call by the wiring needles + pwsh, `cont_ns != 0` equivalent (above).
+- **Live acceptance (supervisor), with S4v below:** stream FULL bundle; `NL playlist` reads
+  `basis=stamp` once the VLC plugin ships (S4v), so 0 rebase lines in ≥ 2 h of playback. With S4 live
+  and a stock VLC (before S4v) expect one rebase line about every 58 min with `drift_ms` ≈ ±70 and
+  nothing audible.
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 

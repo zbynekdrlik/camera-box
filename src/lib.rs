@@ -770,6 +770,11 @@ pub mod window_gate;
 // `src/bin/recording-verdict.rs`'s `run_av_sync` (`--av-sync` mode) is the sole caller.
 pub mod lipsync_cross_check;
 
+// Issue 1430 -- the raw luma levels of the captured YUYV frame (p1 / p99 and the share outside
+// the limited 16-235 range), logged as `capture luma:` beside the `capture chroma:` line so a
+// full-range grabber read as limited range shows in the journal. Std-only.
+pub mod luma_levels;
+
 // #893 (2026-07-30) — the "at least one ACTIVE camera sits at the phase-sync floor" gate term.
 // No probe deps, so it unit-tests Tier-0; the `phase-sync-active-floor-gate` CLI binary
 // (src/bin/) reads live pins over OBS WS and hands them in.

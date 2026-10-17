@@ -157,7 +157,7 @@ strih_lx_remote_setup_gate_cmd() {
 
 # the real acceptance gate, run by the deploy once OBS is up (stdin = the sudo password line).
 strih_lx_remote_accept_cmd() {
-  printf "sudo -k -S -p '' '%s/repo/scripts/verify-strih.sh' --box %s\n" "$1" "$2"
+  printf "sudo -k -S -p '' env PYTHONDONTWRITEBYTECODE=1 '%s/repo/scripts/verify-strih.sh' --box %s\n" "$1" "$2"
 }
 
 strih_lx_remote_installer_cmd() {
@@ -257,6 +257,7 @@ strih_lx_setup_runner() {
 if [ "${1:-}" = "--child" ]; then
   if [ -f "$S/.runner.env" ]; then . "$S/.runner.env"; fi
   rm -f "$S/.runner.env"
+  export PYTHONDONTWRITEBYTECODE=1   # issue 1426: no root-owned __pycache__ in the stage
   "$S/repo/scripts/setup-strih.sh" --box "$BOX" > "$S/setup-strih.log" 2>&1
   echo "$?" > "$S/setup-strih.rc"
   exit 0

@@ -37,6 +37,8 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+import rig_lease_resources as rlr
+
 # Matches scripts/lib/rig-lease.sh::rig_lease_heartbeat_age_seconds's sentinel exactly (a missing
 # heartbeat file prints `999999999`) -- a huge, never-fresh age, never null.
 HEARTBEAT_MISSING_SENTINEL = 999999999
@@ -49,7 +51,15 @@ _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # The exact fields scripts/lib/rig-lease.sh::rig_lease_write_holder writes into holder.json.
 _HOLDER_FIELDS = ("repo", "run_id", "run_url", "job", "acquired_at", "expected_release_at")
 
+# NEVER bump this (issue 1450): restreamer's reader treats `schema != 1` as an unknown format and
+# PROCEEDS (scripts/ci/rig-lease-wait.ps1:88, Get-RigLeaseHolder in obs-ws.ps1:160), so a bump would
+# silently switch its guard off. The box-scoped view is APPENDED after the v1 keys instead and
+# announced by LEASE_MODEL.
 SCHEMA_VERSION = 1
+LEASE_MODEL = 2
+
+# issue 1450: the v1 keys, in their served order -- every view starts with exactly these.
+V1_KEYS = ("schema", "now", "held", "holder", "heartbeat_age_s", "stale", "expected_release_at", "ttl_s")
 
 # scripts/rig-busy-gate.sh:79 -- RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}". Kept as a
 # named constant (not a bare literal) so the lock-step test can assert equality without duplicating
@@ -176,6 +186,13 @@ def lease_state(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_S
     """The single pure decision this module exists for -- see the module doc for the full mirror
     contract. Never raises on a missing/corrupt lease dir; every failure degrades to the documented
     fail-closed shape (held=true, holder=null) rather than a crash or a false "not held"."""
+    return _dir_state(lease_dir, now, stale_secs)[0]
+
+
+def _dir_state(lease_dir: str, now: datetime, stale_secs: int):
+    """lease_state's decision + the holder.json it was made from (None when absent / unparseable):
+    issue 1450's view reads the declared resources from the SAME parse, so a release between two
+    reads can never pair one holder's state with another's declaration."""
     result = {
         "schema": SCHEMA_VERSION,
         "now": format_ts(now),
@@ -188,7 +205,7 @@ def lease_state(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_S
     }
 
     if not os.path.isdir(lease_dir):
-        return result
+        return result, None
 
     result["held"] = True
     age = _heartbeat_age_seconds(lease_dir, now)
@@ -199,19 +216,19 @@ def lease_state(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_S
     if not holder_exists and not _no_holder_grace_expired(lease_dir, now):
         # issue 1432: an acquire in progress -- held, holder not written yet, never reclaimable.
         result["stale"] = False
-        return result
+        return result, None
 
     if not holder_exists:
         # Mirrors `[ -f "$path" ] || return 0` -- an absent holder.json is unconditionally
         # stale/reclaimable, independent of the heartbeat (a crashed acquire leaves exactly this).
         result["stale"] = True
-        return result
+        return result, None
 
     result["stale"] = not _is_fresh(age, holder_stale_secs(holder_data, stale_secs))
 
     if holder_data is None:
         # Present but unparseable -- fail-closed (held=true) but nothing more can be reported.
-        return result
+        return result, None
 
     result["holder"] = {field: holder_data.get(field) for field in _HOLDER_FIELDS}
     expected = holder_data.get("expected_release_at")
@@ -221,4 +238,102 @@ def lease_state(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_S
     if expected_dt is not None:
         result["ttl_s"] = int((expected_dt - _aware(now)).total_seconds())
 
-    return result
+    return result, holder_data
+
+
+# ---------------------------------------------------------------------------------------------------
+# issue 1450 -- the box-scoped view. A holder declares the rig resources it touches (holder.json
+# `resources`, the atoms of scripts/rig-lease-resources.txt, written by rig_lease_acquire from
+# RIG_LEASE_RESOURCES); a holder.json without them -- every holder before issue 1450, every holder that
+# declares nothing, an unparseable one, an acquire in progress -- covers ALL atoms (fail-closed). The
+# v1 keys stay first and unchanged (SCHEMA_VERSION above); lease_model, resources and groups follow.
+# Slice A keeps ONE lockdir, so at most one holder covers any atom.
+# ---------------------------------------------------------------------------------------------------
+
+def _free_entry() -> dict:
+    return {"held": False, "via": None, "holder": None, "declared": None, "heartbeat_age_s": None,
+            "stale": None, "expected_release_at": None, "ttl_s": None}
+
+
+def _coverage(v1: dict, holder_data, table) -> tuple:
+    """-> (the atoms the current holder covers, "legacy" | "scoped" | None, its declared atoms)."""
+    if not v1["held"]:
+        return set(), None, None
+    declared = holder_data.get("resources") if isinstance(holder_data, dict) else None
+    if isinstance(declared, list) and declared and all(isinstance(n, str) for n in declared):
+        try:
+            atoms = rlr.resolve(declared, table)
+        except rlr.UnknownResources:
+            atoms = None  # a declaration this table cannot read covers everything
+        if atoms:
+            return set(atoms), "scoped", atoms
+    return set(table.atoms), "legacy", None
+
+
+def _entry(atom: str, v1: dict, covered: set, via, declared) -> dict:
+    if atom not in covered:
+        return _free_entry()
+    return {"held": True, "via": via, "holder": v1["holder"], "declared": declared,
+            "heartbeat_age_s": v1["heartbeat_age_s"], "stale": v1["stale"],
+            "expected_release_at": v1["expected_release_at"], "ttl_s": v1["ttl_s"]}
+
+
+def _not_held(now: datetime) -> dict:
+    return {"schema": SCHEMA_VERSION, "now": format_ts(now), "held": False, "holder": None,
+            "heartbeat_age_s": None, "stale": None, "expected_release_at": None, "ttl_s": None}
+
+
+def _scope_atoms(scope: str, table):
+    """A `?resources=` value -> (its atoms, None) or (None, the reason it is refused)."""
+    names = rlr.split_names(scope)
+    if not names:
+        return None, "empty resources= scope -- answering for the whole rig"
+    try:
+        return rlr.resolve(names, table), None
+    except rlr.UnknownResources as exc:
+        return None, (f"unknown rig resource(s) {rlr.printable(exc.names)} in the resources= scope "
+                      "(scripts/rig-lease-resources.txt) -- answering for the whole rig")
+
+
+def lease_view(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_SECS,
+               scope: Optional[str] = None, table=None) -> dict:
+    """The served GET /rig-lease.json document. scope None = the whole rig. A scope (the
+    `?resources=` CSV of atoms / groups) answers the v1 keys for those atoms only: held iff the holder
+    covers any of them, else the not-held shape. An unknown or empty scope answers the WHOLE rig +
+    `scope_error` (fail-closed: a 400 would make a consumer fail open). Raises only when the resource
+    table itself is unreadable; the server then serves fail_closed_view()."""
+    table = table if table is not None else rlr.load_table()
+    v1, holder_data = _dir_state(lease_dir, now, stale_secs)
+    covered, via, declared = _coverage(v1, holder_data, table)
+    atoms, scope_error = (list(table.atoms), None) if scope is None else _scope_atoms(scope, table)
+    if atoms is None:
+        atoms = list(table.atoms)
+    doc = dict(v1)
+    if scope is not None and scope_error is None and not covered.intersection(atoms):
+        doc = _not_held(now)
+    doc["lease_model"] = LEASE_MODEL
+    if scope is not None:
+        if scope_error is None:
+            doc["scope"] = atoms
+        else:
+            doc["scope_error"] = scope_error
+    doc["resources"] = {a: _entry(a, v1, covered, via, declared) for a in atoms}
+    doc["groups"] = {g: list(m) for g, m in table.groups.items()}
+    return doc
+
+
+def degraded_view(lease_dir: str, now: datetime, stale_secs: int, scope: Optional[str]) -> dict:
+    """What the server serves when lease_view() raises (an unreadable resource table). The whole-rig
+    answer never depends on the table, so it stays the lockdir's own v1 state (+ `resources_error`):
+    a broken table must not make restreamer wait on a free rig. A SCOPED answer cannot be computed
+    without the table, so it fails closed: held for the whole rig + `scope_error`. The served text is
+    fixed (the reason, with the checkout path, goes only to the server's own log)."""
+    if scope is None:
+        doc = lease_state(lease_dir, now, stale_secs)
+        doc["lease_model"] = LEASE_MODEL
+        doc["resources_error"] = "the rig resource table is unreadable -- per-resource view omitted"
+        return doc
+    doc = fail_closed_state(now)
+    doc["lease_model"] = LEASE_MODEL
+    doc["scope_error"] = "the rig resource table is unreadable -- answering held for the whole rig"
+    return doc

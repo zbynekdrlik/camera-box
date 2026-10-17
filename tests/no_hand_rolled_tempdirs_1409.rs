@@ -46,7 +46,7 @@ const ALLOWLIST: &[&str] = &[
     "drm_output_vk_two_displays_1424.rs: std-only, a {tag}-{pid}-{counter} dir the test removes",
     "genlock_audio_buffering_wiring_1367.rs: the lift removes its scratch dir",
     "genlock_audio_mix_guard_1381.rs: the lift removes its scratch dir",
-    "genlock_audio_relabel_ingest_1381.rs: c_trace() removes its scratch dir",
+    "genlock_audio_ingest_lift/mod.rs: compile_and_run() uses pid + counter and removes its scratch dir",
     "genlock_fifo_relabel_wiring_1372.rs: the test removes its dir at the end",
     "genlock_render_tick_pin_1357.rs: std-only lift: pid + counter, a Drop guard removes it",
     "harness_cam2_paint_signal_1148.rs: the test removes its scratch dir",
@@ -86,6 +86,7 @@ const ALLOWLIST: &[&str] = &[
     "strih_provision_pure_functions.rs: the one pid dir is removed by its test",
     "support/ndi_source_lift_1367.rs: std-only lift: pid + counter, the files are removed",
     "vban_pacing_parity_1372.rs: c_trace() removes its dir",
+    "vlc_video_media_clock_1425.rs: the lift uses pid + counter and removes its scratch dir",
 ];
 
 /// Split an allowlist entry into (file, reason).

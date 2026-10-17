@@ -37,7 +37,7 @@ EOF
 run dir: ${RUN_DIR}  (matrix.conf, matrix.tsv, w-NN-<kind>-rR/ = one soak run each, report.txt/json, restarted, lease, pid, STOP)
 
 SETUP:
-  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-restart-matrix expected_release_at=${LEASE_EXPECTED_AT}
+  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-restart-matrix expected_release_at=${LEASE_EXPECTED_AT} resources=${RIG_LEASE_DECLARED}
      a live foreign holder -> refuse (exit 4); kept alive with rig_lease_refresh_if_mine (issue 1383) every <= ${KEEPALIVE_S} s
      for the whole run under RIG_LEASE_MAX_HOLD_SECS=${EXPECTED_S} (exported: every window's own keep-alive beats this lease under it)
   2. before EVERY mutation (the baseline window, each restart), read-only:

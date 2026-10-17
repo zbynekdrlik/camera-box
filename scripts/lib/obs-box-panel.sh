@@ -28,6 +28,8 @@
 #       (panel-config) the config equals the declared text;
 #       (panel-launchers) every declared launcher .desktop file exists with the declared text;
 #       (panel-unit)   the unit file equals the checkout, enabled, active, its main process /usr/bin/tint2;
+#       (panel-discord) issue 1448: Discord installed on the stream role (setup installs the pinned
+#                      .deb); NOTE on the strih role (production-only);
 #       (panel-window) a tint2 window on :0 (`wmctrl -lx` class tint2.Tint2); NOTE when X has no
 #                      client list to read.
 #     A box the gate leaves out prints ONE note naming why.
@@ -36,12 +38,16 @@ OBS_BOX_PANEL_PACKAGE=tint2
 OBS_BOX_PANEL_UNIT=obs-box-panel.service
 OBS_BOX_PANEL_BIN=/usr/bin/tint2
 OBS_BOX_PANEL_WM_CLASS=tint2.Tint2
-OBS_BOX_PANEL_ROWS=5
+OBS_BOX_PANEL_ROWS=6
 # The system user-unit dir (a distro package's --user unit, e.g. restreamer.service) and the RustDesk
 # binary -- seams for the offline tests.
 OBS_BOX_PANEL_SYS_UNIT_DIR="${OBS_BOX_PANEL_SYS_UNIT_DIR:-/usr/lib/systemd/user}"
 OBS_BOX_PANEL_RUSTDESK_BIN="${OBS_BOX_PANEL_RUSTDESK_BIN:-/usr/bin/rustdesk}"
 OBS_BOX_PANEL_DISCORD_BIN="${OBS_BOX_PANEL_DISCORD_BIN:-/usr/bin/discord}"
+# issue 1448 part 2: the stream role installs Discord from the PINNED official .deb (read 17.10.2026);
+# Discord updates its own app host under ~/.config/discord, so the pin only sets the bootstrap.
+OBS_BOX_PANEL_DISCORD_URL="${OBS_BOX_PANEL_DISCORD_URL:-https://stable.dl2.discordapp.net/apps/linux/1.0.162/discord-1.0.162.deb}"
+OBS_BOX_PANEL_DISCORD_SHA256="${OBS_BOX_PANEL_DISCORD_SHA256:-e7f346569784ef47eaa530c058d810bef686c7c063efcee6493d56d138f139cc}"
 
 # obs_box_panel_launchers USER_HOME -> one `id|Name|Exec|Icon` line per app this box has, in panel order:
 #   obs        strih-obs.service in the user's unit dir (every Linux OBS box; on stream-pp it is the stream OBS)
@@ -187,6 +193,42 @@ _obs_box_panel_put_text() {
   printf 'written'
 }
 
+# obs_box_panel_discord_install -> issue 1448: on the stream role, install Discord from the pinned .deb
+# (sha256-verified before apt) when the package is not installed; the strih role is production-only and
+# never gets it. rc 1 + a reason on failure; nothing installed on a sha mismatch.
+obs_box_panel_discord_install() {
+  local deb got
+  [ "$(strih_box_role)" = stream ] || return 0
+  [ "$(dpkg-query -W -f='${Status}' discord 2>/dev/null || true)" = "install ok installed" ] && return 0
+  echo "  installing Discord from ${OBS_BOX_PANEL_DISCORD_URL}"
+  deb="$(mktemp --suffix=.deb)" || { echo "obs-box-panel: mktemp failed" >&2; return 1; }
+  if ! curl -fsSL -o "$deb" "$OBS_BOX_PANEL_DISCORD_URL"; then
+    rm -f "$deb"; echo "obs-box-panel: Discord download failed (${OBS_BOX_PANEL_DISCORD_URL})" >&2; return 1
+  fi
+  got="$(sha256sum "$deb" | awk '{print $1}')"
+  if [ "$got" != "$OBS_BOX_PANEL_DISCORD_SHA256" ]; then
+    rm -f "$deb"
+    echo "obs-box-panel: Discord .deb sha256 mismatch (want ${OBS_BOX_PANEL_DISCORD_SHA256}, got ${got}) from ${OBS_BOX_PANEL_DISCORD_URL} -- refusing to install" >&2
+    return 1
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "$deb"; then
+    rm -f "$deb"; echo "obs-box-panel: apt-get install of the Discord .deb failed" >&2; return 1
+  fi
+  rm -f "$deb"
+}
+
+# obs_box_panel_discord_row -> the (panel-discord) grade row: stream role OK installed / FAIL missing,
+# strih role NOTE (not wanted). Read-only.
+obs_box_panel_discord_row() {
+  if [ "$(strih_box_role)" != stream ]; then
+    printf 'NOTE|(panel-discord) not graded: Discord is installed on the stream role only (the strih role is production-only)\n'
+  elif [ "$(dpkg-query -W -f='${Status}' discord 2>/dev/null || true)" = "install ok installed" ]; then
+    printf 'OK|(panel-discord) discord installed\n'
+  else
+    printf 'FAIL|(panel-discord) discord not installed -- re-run setup-strih.sh step 16h (issue 1448)\n'
+  fi
+}
+
 # obs_box_panel_install REPO USER_HOME DESKTOP_USER -> setup-strih step 16h. rc 1 + a reason on failure.
 obs_box_panel_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
@@ -203,6 +245,7 @@ obs_box_panel_install() {
   strih_user_home_dir "$home" "$user" "$(dirname "$cfg")" \
     || { echo "obs-box-panel: cannot create $(dirname "$cfg")" >&2; return 1; }
   strih_user_home_dir "$home" "$user" "$unitdir" || { echo "obs-box-panel: cannot create ${unitdir}" >&2; return 1; }
+  obs_box_panel_discord_install || return 1
   local id name ex icon dst appdir icondir
   appdir="${home}/.local/share/applications"
   icondir="$(dirname "$(obs_box_panel_obs_icon_path "$home")")"
@@ -281,6 +324,7 @@ obs_box_panel_grade_rows() {
   else
     printf 'OK|(panel-unit) %s enabled + active, main process %s\n' "$OBS_BOX_PANEL_UNIT" "$exe"
   fi
+  obs_box_panel_discord_row
   wins="$(strih_session_apps_wmctrl "$user" "$home")"
   if [ -z "$wins" ]; then
     printf 'NOTE|(panel-window) not graded: wmctrl on :0 answered nothing (X down or no client list)\n'

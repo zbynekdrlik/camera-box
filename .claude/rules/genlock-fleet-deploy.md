@@ -12,7 +12,7 @@ paths:
 
 **Line budget (issue 1372):** `tests/deploy_genlock_fleet.rs` pins `deploy-genlock-fleet.sh` under
 1000 lines. The FULL-mode plugin PowerShell blocks (distroav to its ProgramData load path, the paced
-obs-vban backup + byte-verify) live in `scripts/lib/genlock-plugin-deploy.sh` as pure printers
+obs-vban and, since issue 1425, vlc-video backups + byte-verifies) live in `scripts/lib/genlock-plugin-deploy.sh` as pure printers
 (`genlock_plugin_backup_ps` / `genlock_plugin_deploy_ps MODE`); add a new plugin's block there,
 never inline in the main script. The stats-ABI blocks live in `scripts/lib/genlock-stats-abi.sh`
 for the same reason (issue 1302), and since issue 1426 the box list itself (`fleet_normalize_boxes`,

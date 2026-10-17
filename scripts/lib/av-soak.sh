@@ -17,6 +17,8 @@
 #     printout and the --run execution (plan == run by construction),
 #   - the ONE retried rig-busy read (av_soak_rig_busy_settled) the soak, its --stop-leftovers and
 #     the restart matrix (scripts/av-restart-matrix.sh) share,
+#   - the cleanup restore of the strih program transition the run set to Cut (issue 1367, over the
+#     E2E's scripts/lib/strih-transition.sh, which the soak sources),
 #   - the record-volume free-space read: the SAME `:8899/record-dir-stats.json` fetch and the SAME
 #     helper, `recordings_free_line_from_stats` (scripts/lib/recordings-free-line.sh, over
 #     `bundle_state_gather.recordings_free_line`), that recording-e2e.sh's
@@ -237,4 +239,26 @@ av_soak_free_space_verdict() {
   }
   out="$(recordings_free_line_from_stats "$stats" "$min_gb" "$here")" || out="UNKNOWN -1"
   printf '%s\n' "${out:-UNKNOWN -1}"
+}
+
+# av_soak_transition_restore HERE OBS_DIR STRIH_HOST TIMEOUT_S LOG -> put the operator's strih program
+# transition back after a run that set Cut (issue 1367): the E2E's `strih_transition_restore`
+# (scripts/lib/strih-transition.sh, sourced by the caller), with the soak's OBS seam as the lib's
+# HERE, in its own session (`setsid -w`: cleanup's second Ctrl-C cannot cut it short). The lib's
+# stdout goes to LOG, its WARNING stays on stderr. Prints the outcome, read from the durable save
+# (the lib always returns 0): `none` (nothing saved, nothing sent), `restored` (the save is gone =
+# put back), `kept` (the save is still there = not put back; the next E2E or soak restores it).
+# Needs scripts/lib/strih-transition.sh sourced (only av-soak.sh's cleanup calls it).
+av_soak_transition_restore() {
+  local here="$1" obs_dir="$2" host="$3" timeout_s="$4" log="$5" save
+  save="$(strih_transition_save_path)"
+  if [ ! -e "$save" ]; then
+    echo none
+    return 0
+  fi
+  # shellcheck disable=SC2016  # expanded by the child bash
+  OBS_CLEANUP_TIMEOUT="$timeout_s" setsid -w bash -c \
+    '. "$1"; strih_transition_restore "$2" "$3" "${OBS_PASSWORD:-}" "$4"' \
+    _ "$here/lib/strih-transition.sh" "$obs_dir" "$host" "$save" >> "$log" || true
+  if [ -e "$save" ]; then echo kept; else echo restored; fi
 }
