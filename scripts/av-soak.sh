@@ -268,9 +268,7 @@ RUN_DIR="${AV_SOAK_RUN_DIR:-$HOME/.camera-box/av-soak/$STAMP}"
 CSV="$RUN_DIR/soak.csv"
 RIG_LEASE_REPO_NAME="${AV_SOAK_LEASE_REPO:-camera-box-av-soak}"
 RIG_LEASE_OURS="av-soak-${STAMP}-$$"
-# issue 1450: the rig resources the soak touches (scripts/rig-lease-resources.txt): the SNV cameras,
-# the strih program it sweeps, the stream recording it reads; never win-resolume.
-RIG_LEASE_DECLARED="snv-video"
+RIG_LEASE_DECLARED="snv-video"  # issue 1450: its rig resources (scripts/rig-lease-resources.txt)
 LEASE_HOLD_S=$(( DURATION_S + SLOT_S + 1800 ))
 LEASE_EXPECTED_AT="$(date -u -d "+${LEASE_HOLD_S} seconds" +%Y-%m-%dT%H:%M:%SZ)"
 _CALLER_MAX_HOLD_S="${RIG_LEASE_MAX_HOLD_SECS:-}"

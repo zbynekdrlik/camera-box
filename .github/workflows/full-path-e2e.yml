@@ -215,7 +215,8 @@ jobs:
         # Distinct exit codes: 0 = free (proceed), 42 = still busy after the budget, 43 = rig
         # unreachable (fails CLOSED, never assumes "free"), 44 = the #830 shared cross-repo rig
         # lease is held by a LIVE foreign holder (e.g. restreamer's own CI) -- named explicitly
-        # instead of an ambiguous RIG_BUSY. See scripts/rig-busy-gate.sh + scripts/lib/rig-lease.sh.
+        # instead of an ambiguous RIG_BUSY, 45 = RIG_LEASE_RESOURCES below does not resolve (issue
+        # 1450). See scripts/rig-busy-gate.sh + scripts/lib/rig-lease.sh.
         # #646: SKIPPED (reported skipped, not silently absent) on a confirmed docs-only PR;
         # always runs for workflow_dispatch (manual soak) regardless.
         if: github.event_name == 'workflow_dispatch' || steps.docs-only.outputs.docs_only != 'true'
@@ -229,6 +230,9 @@ jobs:
           # issue 1450: the rig resources this run touches (scripts/rig-lease-resources.txt): the SNV
           # cameras, strih-snv, stream-snv and imag; plus RESOLUME-SNV (cg OBS + SongPlayer) only when
           # the CG chain profile is armed -- the SAME condition as the recording step's CG_CHAIN below.
+          # Accepted exception: every run's cg OBS burn backstop (cg_chain_backstop_sweep_off, issue
+          # 1302) may remove a LEFTOVER measurement burn on the cg OBS while it is home, outside the
+          # claim -- an idempotent cleanup, never a scene/program change and never SongPlayer itself.
           RIG_LEASE_RESOURCES: ${{ (github.event_name == 'pull_request' && vars.CG_CHAIN == '1') && 'snv-video,resolume-snv' || 'snv-video' }}
         run: bash scripts/rig-busy-gate.sh
 

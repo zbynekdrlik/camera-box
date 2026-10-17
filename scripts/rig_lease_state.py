@@ -322,11 +322,18 @@ def lease_view(lease_dir: str, now: datetime, stale_secs: int = DEFAULT_STALE_SE
     return doc
 
 
-def fail_closed_view(now: datetime, scope: Optional[str] = None) -> dict:
-    """What the server serves when lease_view() raises (an unreadable resource table): the v1
-    fail-closed shape for the whole rig, every scope included, plus the model marker."""
+def degraded_view(lease_dir: str, now: datetime, stale_secs: int, scope: Optional[str], reason: str) -> dict:
+    """What the server serves when lease_view() raises (an unreadable resource table). The whole-rig
+    answer never depends on the table, so it stays the lockdir's own v1 state (+ `resources_error`):
+    a broken table must not make restreamer wait on a free rig. A SCOPED answer cannot be computed
+    without the table, so it fails closed: held for the whole rig + `scope_error`."""
+    if scope is None:
+        doc = lease_state(lease_dir, now, stale_secs)
+        doc["lease_model"] = LEASE_MODEL
+        doc["resources_error"] = f"the rig resource table is unreadable ({reason}) -- per-resource view omitted"
+        return doc
     doc = fail_closed_state(now)
     doc["lease_model"] = LEASE_MODEL
-    if scope is not None:
-        doc["scope_error"] = "the rig lease view could not be computed -- answering held for the whole rig"
+    doc["scope_error"] = (f"the rig resource table is unreadable ({reason}) -- answering held for the "
+                          "whole rig")
     return doc

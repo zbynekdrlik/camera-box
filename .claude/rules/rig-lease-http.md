@@ -78,8 +78,9 @@ win-resolume: the lease was one rig-wide mutex. Since issue 1450:
   covers one of them, else the not-held shape) + `scope` + the per-atom map. An unknown or empty
   scope = the WHOLE-rig view + `scope_error` (fail-closed, never a 400: a consumer that gets an error
   fails open). A repeated `resources=` is joined; other parameters (`?t=1`) are ignored. An old server
-  ignores the query and answers the whole rig, so a consumer can switch first. An unreadable table =
-  the fail-closed whole-rig shape for every query.
+  ignores the query and answers the whole rig, so a consumer can switch first. An unreadable table:
+  the plain GET still answers the lockdir's own v1 state (+ `resources_error`, no per-atom map), so
+  restreamer never waits on a free rig; a scoped GET fails closed (held + `scope_error`).
 - **POST `/rig-lease/acquire`** takes an optional `resources`: a list or a CSV string (PowerShell
   5.1 turns a one-element array into a scalar). Absent/null = the whole rig; unknown, empty or not
   strings = 400 `field: resources`. The 200 reply carries `resources` (null when undeclared). The
@@ -87,17 +88,19 @@ win-resolume: the lease was one rig-wide mutex. Since issue 1450:
 
 | Holder | Declares |
 |---|---|
-| full-path E2E gate step (`full-path-e2e.yml`) | `snv-video`, + `resolume-snv` when the recording step's CG_CHAIN is `1` (the same `vars.CG_CHAIN == '1'` on a pull_request) |
+| full-path E2E gate step (`full-path-e2e.yml`) | `snv-video`, + `resolume-snv` when the recording step's CG_CHAIN is `1` (the same `vars.CG_CHAIN == '1'` on a pull_request). Accepted exception: the cg OBS burn backstop (`cg_chain_backstop_sweep_off`) may remove a leftover burn on the cg OBS on any run |
 | ci.yml "Take the shared rig lease" (SNV fleet deploy) | `snv-cams` (the other venues' deploy takes no lease) |
 | `scripts/av-soak.sh`, `scripts/av-restart-matrix.sh` | `snv-video` (`RIG_LEASE_DECLARED`; the matrix's windows run under its lease) |
-| `scripts/cambox-ro-units-apply.sh` | `snv-cams` (also for `--venue pp`: PP atoms are a later slice) |
+| `scripts/cambox-ro-units-apply.sh` | the `<venue>-cams` atom of each box it is given (`ro_units_lease_resources`, the venue via `remote_log_camera_venue` = the strih fact file of its log sink): `snv-cams`, `pp-cams` or both; `all` when a venue cannot be read |
 
-A NEW holder declares on its acquire (`RIG_LEASE_RESOURCES="$X" rig_lease_acquire …`); a sweep test
-refuses an undeclared acquire under `scripts/` (`tests/python/test_rig_lease_resources_1450.py`).
-**Adoption:** SongPlayer reads `?resources=resolume-snv` (its three gate `--url`s); restreamer
-(restreamer#349) sends `resources: "snv-video"` (its YouTube jobs need cam2 + strih, issue 1432) and
-reads `RIG_LEASE_URL=…?resources=snv-video`. The running server picks the view up only after a restart
-while `held=false`.
+A NEW holder declares on its acquire (`RIG_LEASE_RESOURCES="$X" rig_lease_acquire …`), and every
+workflow step that runs the gate sets `RIG_LEASE_RESOURCES`; sweep tests refuse both gaps
+(`tests/python/test_rig_lease_resources_1450.py`).
+**Adoption:** SongPlayer's ci.yml already reads `?resources=resolume-snv` at its three gates (an old
+server answers the whole rig there). restreamer is PENDING (restreamer#349): it should send
+`resources: "snv-video"` (its YouTube jobs need cam2 + strih, issue 1432) and read
+`RIG_LEASE_URL=…?resources=snv-video`; until then it reads and takes the whole rig. The running server
+picks the view up only after a restart while `held=false`.
 
 ## The ROLLING keep-alive — a live holder always reads live (issue 1383)
 

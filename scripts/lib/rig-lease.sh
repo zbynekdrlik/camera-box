@@ -428,6 +428,7 @@ rig_lease_acquire() {
   if [ -n "${declared//[[:space:],]/}" ]; then
     resolved="$(rig_lease_resources_resolve "$declared")" || resolve_rc=$?
     if [ "$resolve_rc" -ne 0 ] || [ -z "$resolved" ]; then
+      declared=${declared//[$'\r\n']/ }  # one log line, never a second one a CI log could parse
       echo "[rig-lease] refused -- RIG_LEASE_RESOURCES='${declared}' does not resolve (rc ${resolve_rc}): the names are the atoms and groups of scripts/rig-lease-resources.txt. Nothing was written." >&2
       printf 'RIG_LEASE_BAD_RESOURCES=%s\n' "${resolved:-unresolvable}"
       return 2

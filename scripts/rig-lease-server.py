@@ -141,11 +141,16 @@ class RigLeaseHandler(rsf.ReadOnlyHandler):
             # issue 1450: `?resources=<csv>` asks for those rig resources only (repeated = joined);
             # absent = the whole rig. Every other query parameter (a cache-buster) is ignored.
             scope = _resources_scope(self.path)
+            now = datetime.now(timezone.utc)
             try:
-                state = rls.lease_view(self.lease_dir, datetime.now(timezone.utc), self.stale_secs, scope=scope)
-            except Exception as exc:  # an unreadable resource table; lease_state() itself never raises
-                log(f"lease_view() raised {exc!r} -- serving fail-closed held=true")
-                state = rls.fail_closed_view(datetime.now(timezone.utc), scope)
+                state = rls.lease_view(self.lease_dir, now, self.stale_secs, scope=scope)
+            except Exception as exc:  # an unreadable resource table (scripts/rig-lease-resources.txt)
+                log(f"lease_view() raised {exc!r} -- serving the v1 state, a scope fail-closed")
+                try:
+                    state = rls.degraded_view(self.lease_dir, now, self.stale_secs, scope, str(exc))
+                except Exception as exc2:  # pragma: no cover -- lease_state() is designed never to raise
+                    log(f"degraded_view() raised {exc2!r} -- serving fail-closed held=true")
+                    state = rls.fail_closed_state(now)
             self._send(200, "application/json", json.dumps(state).encode("utf-8"), no_store=True)
             return
 

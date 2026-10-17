@@ -208,8 +208,20 @@ command -v sshpass >/dev/null 2>&1 || {
 # reclaimed (rig_lease_acquire). Its identity is this repo's apply + a per-run id.
 RIG_LEASE_REPO_NAME="camera-box-ro-units-apply"
 RIG_LEASE_OURS=""
-# issue 1450: the rig resources the apply touches (scripts/rig-lease-resources.txt): the camboxes.
-RIG_LEASE_DECLARED="snv-cams"
+# issue 1450: the rig resources the apply touches (scripts/rig-lease-resources.txt) = the
+# `<venue>-cams` atom of every box it is given, the venue read from the same strih fact file as the
+# box's log sink. A box whose venue (or its atom) cannot be read makes it `all`: never a narrower
+# claim than the boxes written to.
+ro_units_lease_resources() {
+  local name venue atoms=""
+  for name in "$@"; do
+    venue="$(remote_log_camera_venue "$name" 2>/dev/null)" || { printf 'all\n'; return 0; }
+    case ",${atoms}," in *",${venue}-cams,"*) ;; *) atoms="${atoms:+${atoms},}${venue}-cams" ;; esac
+  done
+  rig_lease_resources_resolve "${atoms:-all}" >/dev/null 2>&1 || { printf 'all\n'; return 0; }
+  printf '%s\n' "${atoms:-all}"
+}
+RIG_LEASE_DECLARED="$(ro_units_lease_resources "${NAMES[@]}")"
 
 # rig_refused BOX -> 0 and RIG_REFUSAL set when BOX must not be touched NOW: the shared rig-held read
 # (rig_held_reason: a fresh issue-281 heartbeat, which the lease does not cover -- rig-mode.sh TEST
