@@ -190,14 +190,14 @@ def test_a_broken_table_keeps_the_whole_rig_answer_true_and_fails_a_scope_closed
     rlr = pytest.importorskip("rig_lease_resources")
     with pytest.raises(rlr.TableError):
         _view(tmp_path / "rig-lease")
-    free = rls.degraded_view(str(tmp_path / "rig-lease"), NOW, 5400, None, "declared twice")
+    free = rls.degraded_view(str(tmp_path / "rig-lease"), NOW, 5400, None)
     assert {k: free[k] for k in V1_KEYS} == rls.lease_state(str(tmp_path / "rig-lease"), NOW, 5400)
-    assert free["held"] is False and free["lease_model"] == 2 and "declared twice" in free["resources_error"]
+    assert free["held"] is False and free["lease_model"] == 2 and free["resources_error"]
     lease = tmp_path / "rig-lease-held"
     _seed(lease, SNV_VIDEO)
-    held = rls.degraded_view(str(lease), NOW, 5400, None, "x")
+    held = rls.degraded_view(str(lease), NOW, 5400, None)
     assert held["held"] is True and held["holder"]["repo"] == "camera-box-av-soak"
-    scoped = rls.degraded_view(str(tmp_path / "rig-lease"), NOW, 5400, "resolume-snv", "x")
+    scoped = rls.degraded_view(str(tmp_path / "rig-lease"), NOW, 5400, "resolume-snv")
     assert scoped["schema"] == 1 and scoped["held"] is True and scoped["holder"] is None
     assert scoped["lease_model"] == 2 and scoped["scope_error"] and "scope" not in scoped
 
@@ -271,6 +271,9 @@ def test_the_server_on_a_broken_table_keeps_v1_true_and_fails_a_scope_closed(tmp
         _, scoped = s.call("GET", "/rig-lease.json?resources=resolume-snv")
     assert whole["schema"] == 1 and whole["held"] is False and whole["resources_error"]
     assert scoped["schema"] == 1 and scoped["held"] is True and scoped["scope_error"]
+    # an unauthenticated LAN reader never gets the checkout path or the table's text
+    for doc in (whole, scoped):
+        assert str(tmp_path) not in json.dumps(doc) and "nope" not in json.dumps(doc)
 
 
 # --- POST /rig-lease/acquire takes `resources` --------------------------------------------------------

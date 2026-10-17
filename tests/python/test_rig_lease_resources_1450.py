@@ -334,7 +334,10 @@ def test_every_workflow_step_running_the_gate_declares_its_resources():
     found = 0
     for wf in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
         text = wf.read_text()
-        for m in re.finditer(r"(?m)^\s+run: bash scripts/rig-busy-gate\.sh\s*$", text):
+        for m in re.finditer(r"scripts/rig-busy-gate\.sh", text):
+            line_start = text.rfind("\n", 0, m.start()) + 1
+            if text[line_start:m.start()].lstrip().startswith("#"):
+                continue  # a comment naming the gate, not a call
             step_start = text.rfind("\n      - name: ", 0, m.start())
             step = text[step_start:m.start()]
             found += 1
@@ -366,6 +369,24 @@ def test_the_ro_units_apply_holds_the_cams_of_the_venue_it_touches(tmp_path):
     assert _ro_units_declared(tmp_path / "snv", "--box", "cam3") == ["snv-cams"]
     assert _ro_units_declared(tmp_path / "pp", "--box", "cam1") == ["pp-cams"]
     assert _ro_units_declared(tmp_path / "both", "--box", "cam3", "--box", "cam4") == ["snv-cams", "pp-cams"]
+
+
+def test_the_ro_units_apply_claims_all_when_a_venue_has_no_atom(tmp_path):
+    """A venue the resource table does not know (a third venue added without its atom) must claim
+    the whole rig, never a narrower or a refused claim."""
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    for f in (ROOT / "scripts" / "strih-boxes").glob("*.env"):
+        (facts / f.name).write_text(f.read_text().replace("STRIH_VENUE=snv", "STRIH_VENUE=xyz"))
+    run = tmp_path / "run"
+    run.mkdir()
+    sys.path.insert(0, str(HERE))
+    import test_cambox_ro_units_1394 as ro  # noqa: E402
+    r, sshdir = ro._cli(run, "--apply", "--box", "cam3",
+                        env={"FAKE_RECORD_LEASE": "1", "STRIH_BOXES_DIR": str(facts)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    declared = json.loads((sshdir / "lease-0").read_text())["resources"]
+    assert declared == ATOMS
 
 
 def test_the_ro_units_apply_declares_by_the_fact_files_never_a_constant():
