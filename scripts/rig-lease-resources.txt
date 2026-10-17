@@ -1,0 +1,29 @@
+# issue 1450 -- the rig lease's named resources: the ONE table every reader and writer of the lease
+# uses (scripts/rig_lease_resources.py parses it for scripts/lib/rig-lease.sh, the :8890 server and
+# its write routes). A holder declares the resources it touches; a reader asks only for the ones it
+# needs, so a job on one box never waits for a job on another.
+#
+#   atom|<name>|<what it covers>
+#   group|<name>|<members: atoms, or groups defined ABOVE it>
+#
+# `all` is reserved: it is every atom, and it is what a holder that declares nothing holds.
+# Atom order is the canonical order: every resolved list (holder.json, the GET view) follows it.
+# A name is lower-case ASCII letters and digits in dash-separated words.
+#
+# The SNV camboxes are ONE atom: every SNV job that uses the cameras also needs strih-snv, so a
+# per-camera split would buy nothing (a later split needs no format change).
+
+atom|snv-cams|the SNV camboxes (STRIH_CAMERAS of scripts/strih-boxes/strih-snv.env) and the cam2 painter
+atom|strih-snv|strih-snv: the SNV strih OBS (10.77.9.202) and its session apps
+atom|stream-snv|stream-snv: the SNV stream OBS (10.77.9.204)
+atom|imag|imag-nb: the SNV projection OBS (summer only)
+atom|resolume-snv|RESOLUME-SNV: the cg OBS and SongPlayer (win-resolume)
+atom|pp-cams|the Poprad camboxes (STRIH_CAMERAS of scripts/strih-boxes/strih-pp.env)
+atom|strih-pp|strih-pp: the Poprad strih OBS
+atom|stream-pp|stream-pp: the Poprad stream OBS
+atom|resolume-pp|resolume-pp: the Poprad cg box
+
+group|snv-video|snv-cams strih-snv stream-snv imag
+group|snv|snv-video resolume-snv
+group|pp-video|pp-cams strih-pp stream-pp
+group|pp|pp-video resolume-pp

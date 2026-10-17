@@ -268,6 +268,7 @@ RUN_DIR="${AV_SOAK_RUN_DIR:-$HOME/.camera-box/av-soak/$STAMP}"
 CSV="$RUN_DIR/soak.csv"
 RIG_LEASE_REPO_NAME="${AV_SOAK_LEASE_REPO:-camera-box-av-soak}"
 RIG_LEASE_OURS="av-soak-${STAMP}-$$"
+RIG_LEASE_DECLARED="snv-video"  # issue 1450: its rig resources (scripts/rig-lease-resources.txt)
 LEASE_HOLD_S=$(( DURATION_S + SLOT_S + 1800 ))
 LEASE_EXPECTED_AT="$(date -u -d "+${LEASE_HOLD_S} seconds" +%Y-%m-%dT%H:%M:%SZ)"
 _CALLER_MAX_HOLD_S="${RIG_LEASE_MAX_HOLD_SECS:-}"
@@ -325,7 +326,7 @@ EOF
     echo "  1. rig lease (issue 830): the caller's rig lease ${LEASE_INHERITED} (repo ${RIG_LEASE_REPO_NAME}) -- verified + refreshed with rig_lease_refresh_if_mine (else refuse, exit 4), never acquired or released here"
     echo "     rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes the caller's lease under ${LEASE_CEILING_NOTE}, issue 1383)"
   else
-    echo "  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-soak expected_release_at=${LEASE_EXPECTED_AT}"
+    echo "  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-soak expected_release_at=${LEASE_EXPECTED_AT} resources=${RIG_LEASE_DECLARED}"
     echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes this lease, issue 1383)"
   fi
   echo "  2. rig-busy guard (issue 1271, read-only): stray_session_check_assert ${OBS_DIR} ${STRIH_HOST} ${STREAM_HOST} 'the av-soak setup'"
@@ -709,7 +710,7 @@ if [ -n "$LEASE_INHERITED" ]; then
   log "running under the caller's rig lease ${RIG_LEASE_REPO_NAME}#${LEASE_INHERITED} (verified; never acquired or released here; ${LEASE_CEILING_NOTE})"
 else
   set +e
-  lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" av-soak "$LEASE_EXPECTED_AT")"
+  lease_out="$(RIG_LEASE_RESOURCES="$RIG_LEASE_DECLARED" rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" av-soak "$LEASE_EXPECTED_AT")"
   lease_rc=$?
   set -e
   log "$lease_out"
