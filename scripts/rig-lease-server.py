@@ -147,7 +147,7 @@ class RigLeaseHandler(rsf.ReadOnlyHandler):
             except Exception as exc:  # an unreadable resource table (scripts/rig-lease-resources.txt)
                 log(f"lease_view() raised {exc!r} -- serving the v1 state, a scope fail-closed")
                 try:
-                    state = rls.degraded_view(self.lease_dir, now, self.stale_secs, scope, str(exc))
+                    state = rls.degraded_view(self.lease_dir, now, self.stale_secs, scope)
                 except Exception as exc2:  # pragma: no cover -- lease_state() is designed never to raise
                     log(f"degraded_view() raised {exc2!r} -- serving fail-closed held=true")
                     state = rls.fail_closed_state(now)
