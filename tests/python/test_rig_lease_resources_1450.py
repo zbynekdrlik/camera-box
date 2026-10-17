@@ -350,6 +350,7 @@ def test_every_declaration_resolves_against_the_table():
 
 
 def _ro_units_declared(tmp_path, *args):
+    tmp_path.mkdir()
     sys.path.insert(0, str(HERE))
     import test_cambox_ro_units_1394 as ro  # noqa: E402  (its CLI harness: fake boxes, fake OBS)
     r, sshdir = ro._cli(tmp_path, "--apply", *args, env={"FAKE_RECORD_LEASE": "1"})
