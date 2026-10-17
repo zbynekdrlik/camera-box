@@ -153,6 +153,31 @@ elif cmd == "switch":
     if os.environ.get("FAKE_RESTORE_FAIL") and "--prod-floor" in a:
         sys.exit("fake: the restored scene is dim (non-black check)")
     print(time.time_ns())
+elif cmd in ("transition-cut", "transition-restore"):
+    # issue 1367: the strih program transition (scripts/lib/strih-transition.sh's primitives)
+    # the real primitive's save semantics: the cut saves the operator's transition unless a save
+    # exists (FAKE_TRANSITION_CUT_FAIL=1 fails before saving, =after-save after it); the restore
+    # removes the save (FAKE_TRANSITION_RESTORE_FAIL keeps it)
+    bump(cmd)
+    save = arg("--save")
+    fail = os.environ.get("FAKE_TRANSITION_CUT_FAIL", "")
+    if cmd == "transition-cut":
+        if fail == "1":
+            sys.exit("[obs] fake: could not select the Cut transition (still 'Fade')")
+        if not os.path.exists(save):
+            with open(save, "w") as fh:
+                fh.write('{"name": "Fade", "duration_ms": 500, "fixed": false}')
+        if fail == "after-save":
+            sys.exit("[obs] fake: could not select the Cut transition (still 'Fade')")
+    else:
+        if os.environ.get("FAKE_TRANSITION_RESTORE_DELAY"):
+            time.sleep(float(os.environ["FAKE_TRANSITION_RESTORE_DELAY"]))
+        if os.environ.get("FAKE_TRANSITION_RESTORE_FAIL"):
+            sys.exit("[obs] fake: obs-websocket refused")
+        if os.path.exists(save):
+            os.remove(save)
+    open(os.path.join(state, "done-" + cmd), "w").close()
+    print(f"[obs] {host}: fake {cmd}")
 else:
     sys.exit(f"fake obs_phase2: unexpected {a}")
 '''
@@ -293,6 +318,7 @@ def rig(tmp_path):
         "STRIH_HOST": STRIH, "STREAM_HOST": STREAM,
         "E2E_ONBOX_DECODE_PRIORITY": "BelowNormal",
         "AV_SOAK_BROADCAST_RETRY_S": "0",
+        "STRIH_TRANSITION_SAVE": str(tmp_path / "strih-transition-saved.json"),
     })
     return env, {"log": log, "run": tmp_path / "run", "lease": tmp_path / "lease",
                  "hb": tmp_path / "heartbeat", "state": state}
