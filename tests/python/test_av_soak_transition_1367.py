@@ -42,12 +42,14 @@ def _transition_calls(p, which):
     return [c for c in _calls(p["log"], "obs") if c[:1] == [which]]
 
 
-def _restored_once(p):
+def _restored_once(p, env):
     restores = _transition_calls(p, "transition-restore")
     assert len(restores) == 1, restores
     c = restores[0]
     assert _host(c) == STRIH
+    assert c[c.index("--save") + 1] == env["STRIH_TRANSITION_SAVE"], "the save the selection wrote"
     assert (p["state"] / "done-transition-restore").exists(), "the restore ran to its end"
+    assert not os.path.exists(env["STRIH_TRANSITION_SAVE"]), "put back: the save is consumed"
     return c
 
 
@@ -74,7 +76,8 @@ def test_a_normal_end_restores_the_transition_after_the_strih_program(rig):
     env, p = rig
     r = _soak(env, "--run")
     assert r.returncode == 2, r.stdout + r.stderr
-    _restored_once(p)
+    _restored_once(p, env)
+    assert "the operator's choice put back" in r.stdout
     kinds = [c[1][0] if c[0] == "obs" else "burn " + c[1][0] for c in _obs_lines(p)]
     restore = kinds.index("transition-restore")
     last_switch = len(kinds) - 1 - kinds[::-1].index("switch")
@@ -85,17 +88,51 @@ def test_a_normal_end_restores_the_transition_after_the_strih_program(rig):
 
 def test_a_failed_cut_selection_refuses_before_anything_is_recorded(rig):
     env, p = rig
-    r = _soak(dict(env, FAKE_TRANSITION_CUT_FAIL="1"), "--run")
-    assert r.returncode == 4, r.stdout + r.stderr
+    for i, fail in enumerate(("1", "after-save")):
+        p["log"].write_text("")
+        r = _soak(dict(env, FAKE_TRANSITION_CUT_FAIL=fail,
+                       AV_SOAK_RUN_DIR=str(p["run"]) + f"-{i}"), "--run")
+        assert r.returncode == 4, (fail, r.stdout + r.stderr)
+        out = r.stdout + r.stderr
+        assert "could not set the strih program transition to Cut" in out, fail
+        obs = _calls(p["log"], "obs")
+        assert not [c for c in obs if c[0] in ("record", "switch")], "nothing recorded, no cut"
+        assert not [c for c in _calls(p["log"], "burn") if c[0] == "add"], "no burn turned on"
+        assert not os.path.exists(str(p["run"]) + f"-{i}/soak.csv")
+        restores = _transition_calls(p, "transition-restore")
+        if fail == "1":
+            # nothing was saved: nothing is sent
+            assert restores == [] and "nothing was saved, nothing to put back" in out
+        else:
+            # the selection saved the operator's transition and then failed: it is put back
+            assert len(restores) == 1 and "the operator's choice put back" in out
+            assert not os.path.exists(env["STRIH_TRANSITION_SAVE"])
+        _assert_rig_restored(p)
+
+
+def test_a_restore_that_fails_is_a_warning_and_keeps_the_save(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_TRANSITION_RESTORE_FAIL="1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
     out = r.stdout + r.stderr
-    assert "Cut" in out and "transition" in out
-    obs = _calls(p["log"], "obs")
-    assert not [c for c in obs if c[0] in ("record", "switch")], "nothing recorded, no cut"
-    assert not [c for c in _calls(p["log"], "burn") if c[0] == "add"], "no burn turned on"
-    assert not (p["run"] / "soak.csv").exists()
-    # the selection may have saved the operator's transition before it failed: put it back
-    assert len(_transition_calls(p, "transition-restore")) == 1
+    assert "transition was NOT put back" in out
+    assert "could not restore the operator's strih program transition" in r.stderr, \
+        "the lib's own WARNING (manual step) reaches the operator, not only cleanup.log"
+    assert "the operator's choice put back" not in out
+    assert os.path.exists(env["STRIH_TRANSITION_SAVE"]), "the save stays for the next run"
     _assert_rig_restored(p)
+
+
+def test_an_earlier_runs_save_is_kept_and_put_back(rig):
+    # an aborted E2E left the operator's real transition saved (strih now on Cut): the soak's
+    # selection keeps that save (operator-wins) and its cleanup puts the real choice back
+    env, p = rig
+    with open(env["STRIH_TRANSITION_SAVE"], "w") as fh:
+        fh.write('{"name": "Stinger", "duration_ms": null, "fixed": true}')
+    r = _soak(env, "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert len(_transition_calls(p, "transition-cut")) == 1
+    _restored_once(p, env)
 
 
 def test_a_run_refused_before_the_selection_never_touches_the_transition(rig):
@@ -115,7 +152,7 @@ def test_the_stop_file_restores_the_transition(rig):
     r = _soak(dict(env, AV_SOAK_HOURS="1", FAKE_TOUCH_STOP=str(stop)), "--run")
     assert r.returncode == 2, r.stdout + r.stderr
     assert "STOP file found" in r.stdout
-    _restored_once(p)
+    _restored_once(p, env)
     _assert_rig_restored(p)
 
 
@@ -127,7 +164,7 @@ def test_sigterm_mid_slot_restores_the_transition(rig):
     proc.send_signal(signal.SIGTERM)
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 5, out + err
-    _restored_once(p)
+    _restored_once(p, env)
     _assert_rig_restored(p)
 
 
@@ -139,7 +176,7 @@ def test_a_broadcast_between_slots_still_restores_the_transition(rig):
     assert r.returncode == 5, r.stdout + r.stderr
     assert "a broadcast went live" in r.stdout + r.stderr
     assert "strih program NOT restored" in r.stdout + r.stderr
-    _restored_once(p)
+    _restored_once(p, env)
 
 
 def test_a_broadcast_mid_sweep_still_restores_the_transition(rig):
@@ -147,7 +184,7 @@ def test_a_broadcast_mid_sweep_still_restores_the_transition(rig):
     r = _soak(dict(env, FAKE_LIVE_AFTER_SWITCHES="2"), "--run")
     assert r.returncode == 5, r.stdout + r.stderr
     assert "RECORDING MAY STILL BE RUNNING" in r.stdout + r.stderr
-    _restored_once(p)
+    _restored_once(p, env)
 
 
 def test_a_second_ctrl_c_cannot_cut_the_transition_restore_short(rig):
@@ -165,7 +202,7 @@ def test_a_second_ctrl_c_cannot_cut_the_transition_restore_short(rig):
     os.killpg(proc.pid, signal.SIGINT)  # the second Ctrl-C, while the restore runs
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 5, out + err
-    _restored_once(p)
+    _restored_once(p, env)
     _assert_rig_restored(p)
 
 
@@ -188,4 +225,7 @@ def test_the_soak_sources_the_e2e_transition_lib_once():
     line = '. "$HERE/lib/strih-transition.sh"'
     assert src.count(line) == 1
     assert src.index(line) < src.index("SETUP_STARTED=0"), "sourced with the soak's other libs"
-    assert "strih_transition_force_cut" in src and "strih_transition_restore" in src
+    assert "strih_transition_force_cut" in src, "the setup selection is the lib's own"
+    lib = open(os.path.join(os.path.dirname(SOAK), "lib", "av-soak.sh")).read()
+    assert "strih_transition_restore" in lib and "av_soak_transition_restore" in src, \
+        "the cleanup restore is the lib's own, through the soak lib's one helper"
