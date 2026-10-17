@@ -180,15 +180,26 @@ def test_an_unknown_or_empty_scope_answers_the_whole_rig_with_an_error(tmp_path,
     assert list(v["resources"]) == ATOMS
 
 
-def test_a_broken_table_fails_closed(tmp_path, monkeypatch):
+def test_a_broken_table_keeps_the_whole_rig_answer_true_and_fails_a_scope_closed(tmp_path, monkeypatch):
+    """The v1 answer never depends on the table: the whole-rig view still says what the lockdir says
+    (a broken table must not make restreamer wait on a free rig); a SCOPED answer cannot be computed,
+    so it fails closed (held)."""
     bad = tmp_path / "t.txt"
     bad.write_text("atom|a|x\natom|a|y\n")
     monkeypatch.setenv("RIG_LEASE_RESOURCES_TABLE", str(bad))
-    with pytest.raises(Exception):
+    rlr = pytest.importorskip("rig_lease_resources")
+    with pytest.raises(rlr.TableError):
         _view(tmp_path / "rig-lease")
-    v = rls.fail_closed_view(NOW, "resolume-snv")
-    assert v["schema"] == 1 and v["held"] is True and v["holder"] is None
-    assert v["lease_model"] == 2 and v["scope_error"]
+    free = rls.degraded_view(str(tmp_path / "rig-lease"), NOW, 5400, None, "declared twice")
+    assert {k: free[k] for k in V1_KEYS} == rls.lease_state(str(tmp_path / "rig-lease"), NOW, 5400)
+    assert free["held"] is False and free["lease_model"] == 2 and "declared twice" in free["resources_error"]
+    lease = tmp_path / "rig-lease-held"
+    _seed(lease, SNV_VIDEO)
+    held = rls.degraded_view(str(lease), NOW, 5400, None, "x")
+    assert held["held"] is True and held["holder"]["repo"] == "camera-box-av-soak"
+    scoped = rls.degraded_view(str(tmp_path / "rig-lease"), NOW, 5400, "resolume-snv", "x")
+    assert scoped["schema"] == 1 and scoped["held"] is True and scoped["holder"] is None
+    assert scoped["lease_model"] == 2 and scoped["scope_error"] and "scope" not in scoped
 
 
 # --- the server ---------------------------------------------------------------------------------------
@@ -251,15 +262,15 @@ def test_the_server_serves_the_scoped_view(tmp_path):
         assert s.call("HEAD", "/rig-lease.json?resources=resolume-snv") == (200, None)
 
 
-def test_the_server_serves_fail_closed_on_a_broken_table(tmp_path, monkeypatch):
+def test_the_server_on_a_broken_table_keeps_v1_true_and_fails_a_scope_closed(tmp_path, monkeypatch):
     bad = tmp_path / "t.txt"
     bad.write_text("group|g|nope\n")
     monkeypatch.setenv("RIG_LEASE_RESOURCES_TABLE", str(bad))
     with _Server(tmp_path / "rig-lease") as s:
         _, whole = s.call("GET", "/rig-lease.json")
         _, scoped = s.call("GET", "/rig-lease.json?resources=resolume-snv")
-    assert whole["schema"] == 1 and whole["held"] is True and whole["holder"] is None
-    assert scoped["held"] is True
+    assert whole["schema"] == 1 and whole["held"] is False and whole["resources_error"]
+    assert scoped["schema"] == 1 and scoped["held"] is True and scoped["scope_error"]
 
 
 # --- POST /rig-lease/acquire takes `resources` --------------------------------------------------------

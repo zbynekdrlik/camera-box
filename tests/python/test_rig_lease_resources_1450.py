@@ -147,6 +147,17 @@ def test_an_unknown_name_refuses_with_rc_2_and_writes_nothing(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
+def test_a_broken_table_refuses_the_acquire_and_writes_nothing(tmp_path):
+    bad = tmp_path / "table.txt"
+    bad.write_text("atom|a|x\natom|a|y\n")
+    lease = tmp_path / "rig-lease"
+    r = _bash(lease, 'rig_lease_acquire "$@"; echo "rc=$?"', "r", "1", "u", "j", "2099-01-01T00:00:00Z",
+              env={"RIG_LEASE_RESOURCES": "snv-cams", "RIG_LEASE_RESOURCES_TABLE": str(bad)})
+    assert r.stdout.splitlines() == ["RIG_LEASE_BAD_RESOURCES=unresolvable", "rc=2"], r.stdout + r.stderr
+    assert "declared twice" in r.stderr
+    assert not lease.exists()
+
+
 def test_an_unknown_name_never_reclaims_a_stale_holder(tmp_path):
     lease = tmp_path / "rig-lease"
     lease.mkdir()
@@ -200,7 +211,7 @@ if sys.argv[1:2] == ["rig-busy-check"]:
 '''
 
 
-def _gate(tmp_path, resources):
+def _gate(tmp_path, resources, extra=None):
     fake = tmp_path / "obs_phase2.py"
     fake.write_text(_FAKE_OBS)
     env = {k: v for k, v in os.environ.items()
@@ -210,6 +221,7 @@ def _gate(tmp_path, resources):
                 "RIG_LEASE_RUN_ID": "run-1450", "RIG_LEASE_JOB": "deploy-fleet",
                 "RIG_BUSY_GATE_ITERATIONS": "1", "RIG_BUSY_GATE_SLEEP_SECS": "0",
                 "RIG_BUSY_GATE_IDLE_HOLD_SECS": "0", "RIG_LEASE_RESOURCES": resources})
+    env.update(extra or {})
     return subprocess.run(["bash", str(GATE)], env=env, capture_output=True, text=True, timeout=120)
 
 
@@ -221,6 +233,41 @@ def test_the_gate_refuses_an_unknown_declaration_before_any_lease_or_obs_read(tm
     assert not (tmp_path / "lease").exists()
     assert not (tmp_path / "obs.log").exists(), "an OBS read ran before the refusal"
     assert out.count("RIG_LEASE_BAD_RESOURCES=") == 1, "a typo must never loop"
+
+
+def test_the_gate_refuses_an_unreadable_table_and_a_raw_newline_never_reaches_the_log(tmp_path):
+    bad = tmp_path / "table.txt"
+    bad.write_text("group|g|nope\n")
+    r = _gate(tmp_path, "snv-cams\n::error::forged", {"RIG_LEASE_RESOURCES_TABLE": str(bad)})
+    out = r.stdout + r.stderr
+    assert r.returncode == 45, out
+    assert "OUTCOME=RIG_LEASE_BAD_RESOURCES RIG_LEASE_BAD_RESOURCES=unresolvable" in r.stdout, out
+    assert not any(ln.startswith("::error::forged") for ln in out.splitlines()), out
+    assert not (tmp_path / "lease").exists()
+
+
+def test_the_gate_stops_at_45_when_the_table_breaks_after_its_check(tmp_path):
+    """The table is read again by every acquire; if it breaks after the up-front check, the wait loop
+    must stop at 45 (a configuration error), never wait out its budget as if the rig were held."""
+    table = tmp_path / "table.txt"
+    table.write_text((ROOT / "scripts" / "rig-lease-resources.txt").read_text())
+    wrapper = tmp_path / "bin" / "python3"
+    wrapper.parent.mkdir()
+    # the first resolve (the up-front check) reads the good table, every later one a broken file
+    wrapper.write_text("#!/bin/bash\n"
+                       'case "$*" in *rig_lease_resources.py*)\n'
+                       f'  if [ -e "{tmp_path}/checked" ]; then printf "atom|a|x\\natom|a|y\\n" > "{table}"; fi\n'
+                       f'  : > "{tmp_path}/checked" ;;\n'
+                       "esac\n"
+                       f'exec {sys.executable} "$@"\n')
+    wrapper.chmod(0o755)
+    r = _gate(tmp_path, "snv-cams", {"RIG_LEASE_RESOURCES_TABLE": str(table),
+                                     "PATH": f"{wrapper.parent}:{os.environ['PATH']}",
+                                     "RIG_BUSY_GATE_ITERATIONS": "30"})
+    out = r.stdout + r.stderr
+    assert r.returncode == 45, out
+    assert "OUTCOME=RIG_LEASE_BAD_RESOURCES" in r.stdout and "OUTCOME=RIG_LEASE_HELD" not in out, out
+    assert not (tmp_path / "lease").exists()
 
 
 def test_the_gate_takes_the_declared_resources(tmp_path):
@@ -257,7 +304,6 @@ def test_the_fleet_deploy_declares_the_snv_cams():
 @pytest.mark.parametrize("script, declared", [
     ("av-soak.sh", "snv-video"),
     ("av-restart-matrix.sh", "snv-video"),
-    ("cambox-ro-units-apply.sh", "snv-cams"),
 ])
 def test_each_holder_script_declares_its_resources_on_its_acquire(script, declared):
     text = (SCRIPTS / script).read_text()
@@ -277,10 +323,23 @@ def test_no_script_takes_the_lease_without_a_declaration():
             continue
         for ln in p.read_text().splitlines():
             code = ln.split("#", 1)[0]
+            printed = code.lstrip().startswith(("echo ", "printf ")) or "rig_lease_acquire repo=" in code
             if re.search(r"\brig_lease_acquire\s", code) and "RIG_LEASE_RESOURCES=" not in code \
-                    and "echo" not in code and "rig_lease_acquire repo=" not in code:  # a printed plan
+                    and not printed:
                 offenders.append(f"{p.relative_to(ROOT)}: {ln.strip()}")
     assert not offenders, offenders
+
+
+def test_every_workflow_step_running_the_gate_declares_its_resources():
+    found = 0
+    for wf in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+        text = wf.read_text()
+        for m in re.finditer(r"(?m)^\s+run: bash scripts/rig-busy-gate\.sh\s*$", text):
+            step_start = text.rfind("\n      - name: ", 0, m.start())
+            step = text[step_start:m.start()]
+            found += 1
+            assert re.search(r"(?m)^\s+RIG_LEASE_RESOURCES: \S", step), (wf.name, step)
+    assert found >= 2
 
 
 def test_every_declaration_resolves_against_the_table():
@@ -290,10 +349,25 @@ def test_every_declaration_resolves_against_the_table():
         assert rlr.resolve(rlr.split_names(value), t)
 
 
-def test_the_ro_units_apply_holds_only_the_snv_cams(tmp_path):
+def _ro_units_declared(tmp_path, *args):
     sys.path.insert(0, str(HERE))
     import test_cambox_ro_units_1394 as ro  # noqa: E402  (its CLI harness: fake boxes, fake OBS)
-    r, sshdir = ro._cli(tmp_path, "--apply", "--box", "cam3", env={"FAKE_RECORD_LEASE": "1"})
+    r, sshdir = ro._cli(tmp_path, "--apply", *args, env={"FAKE_RECORD_LEASE": "1"})
     assert r.returncode == 0, r.stdout + r.stderr
-    assert json.loads((sshdir / "lease-0").read_text())["resources"] == ["snv-cams"]
-    assert not (tmp_path / "rig-lease").exists()
+    assert not (tmp_path / "rig-lease").exists(), "the apply gave its lease back"
+    return json.loads((sshdir / "lease-0").read_text())["resources"]
+
+
+def test_the_ro_units_apply_holds_the_cams_of_the_venue_it_touches(tmp_path):
+    """The apply declares the `<venue>-cams` atom of every box it is given (the venue of the strih
+    fact file that lists the camera, the same lookup as its log sink): an SNV box holds snv-cams, a
+    Poprad box pp-cams, never a narrower claim than the boxes it writes to."""
+    assert _ro_units_declared(tmp_path / "snv", "--box", "cam3") == ["snv-cams"]
+    assert _ro_units_declared(tmp_path / "pp", "--box", "cam1") == ["pp-cams"]
+    assert _ro_units_declared(tmp_path / "both", "--box", "cam3", "--box", "cam4") == ["snv-cams", "pp-cams"]
+
+
+def test_the_ro_units_apply_declares_by_the_fact_files_never_a_constant():
+    text = (SCRIPTS / "cambox-ro-units-apply.sh").read_text()
+    assert 'RIG_LEASE_DECLARED="$(ro_units_lease_resources "${NAMES[@]}")"' in text
+    assert 'RIG_LEASE_RESOURCES="$RIG_LEASE_DECLARED" rig_lease_acquire ' in text
