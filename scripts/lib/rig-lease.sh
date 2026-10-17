@@ -73,6 +73,12 @@
 #   RIG_LEASE_KEEPALIVE_SEC    the gate keep-alive's beat period (default 30, issue 1383)
 #   RIG_LEASE_KEEPALIVE_MAX_ERRORS  consecutive filesystem errors that end the gate keep-alive
 #                              (default 10, issue 1383)
+#   RIG_LEASE_RESOURCES        issue 1450: the rig resources the holder touches, a CSV of the atoms /
+#                              groups of scripts/rig-lease-resources.txt (e.g. `snv-video`). Read by
+#                              rig_lease_acquire; the resolved atoms go into holder.json `resources`,
+#                              so the :8890 view tells a reader which boxes are held. Empty/unset =
+#                              the whole rig (no `resources` key, today's holder); an unknown name
+#                              refuses the acquire (rc 2) -- a typo never means "no protection".
 
 rig_lease_dir() {
   printf '%s\n' "${RIG_LEASE_DIR:-/var/tmp/rig-lease}"
@@ -271,10 +277,11 @@ rig_lease_write_holder() {
   # issue 1432: optional per-holder fields, from env (empty/unset = the key is absent, so every
   # existing caller writes the same six keys): RIG_LEASE_HOLDER_LEASE_ID (the HTTP holder's write
   # capability, never served on GET), RIG_LEASE_HOLDER_STALE_SECS and RIG_LEASE_HOLDER_MAX_HOLD_SECS
-  # (positive integers, written as JSON numbers; anything else is dropped).
+  # (positive integers, written as JSON numbers; anything else is dropped). issue 1450:
+  # RIG_LEASE_HOLDER_RESOURCES = the resolved atom CSV rig_lease_acquire hands over (a JSON list).
   python3 -c '
 import json, sys
-repo, run_id, run_url, job, acquired_at, expected_release_at, path, lease_id, stale, max_hold = sys.argv[1:11]
+repo, run_id, run_url, job, acquired_at, expected_release_at, path, lease_id, stale, max_hold, resources = sys.argv[1:12]
 data = {
     "repo": repo,
     "run_id": run_id,
@@ -288,10 +295,14 @@ if lease_id:
 for key, raw in (("stale_secs", stale), ("max_hold_s", max_hold)):
     if raw.isascii() and raw.isdigit() and int(raw) > 0:
         data[key] = int(raw)
+atoms = [a for a in resources.split(",") if a]
+if atoms:
+    data["resources"] = atoms
 with open(path, "w") as f:
     json.dump(data, f)
 ' "$repo" "$run_id" "$run_url" "$job" "$acquired_at" "$expected_release_at" "$(rig_lease_holder_path)" \
-    "${RIG_LEASE_HOLDER_LEASE_ID:-}" "${RIG_LEASE_HOLDER_STALE_SECS:-}" "${RIG_LEASE_HOLDER_MAX_HOLD_SECS:-}"
+    "${RIG_LEASE_HOLDER_LEASE_ID:-}" "${RIG_LEASE_HOLDER_STALE_SECS:-}" "${RIG_LEASE_HOLDER_MAX_HOLD_SECS:-}" \
+    "${RIG_LEASE_HOLDER_RESOURCES:-}"
   touch "$(rig_lease_heartbeat_path)"
 }
 
@@ -385,6 +396,15 @@ rig_lease_try_acquire() {
   mkdir "$(rig_lease_dir)" 2>/dev/null
 }
 
+# rig_lease_resources_resolve <csv> -> issue 1450: the atoms a declaration covers, as CSV in the
+# table's canonical order (scripts/rig-lease-resources.txt, parsed ONLY by
+# scripts/rig_lease_resources.py, so bash and python can never read it differently). rc 0 = resolved
+# (a blank declaration prints nothing: undeclared = the whole rig); rc 2 = unknown name(s), printed
+# as CSV; rc 3 = the table is unreadable (reason on stderr).
+rig_lease_resources_resolve() {
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../rig_lease_resources.py" resolve "${1:-}"
+}
+
 # rig_lease_acquire <repo> <run_id> <run_url> <job> <expected_release_at> [<stale_secs>] -> the
 # top-level entry point. Prints exactly one line to stdout:
 #   RIG_LEASE_ACQUIRED                                    (nobody held it -- now ours)
@@ -392,17 +412,35 @@ rig_lease_try_acquire() {
 #                                                           ALSO logs a loud ::warning citing #830)
 #   RIG_LEASE_HELD_BY=<repo>#<run_id> run_url=<url> job=<job> expected_release_at=<ts>
 #                                                          (a genuinely LIVE foreign holder)
-# Returns 0 for the first two (the lease is now OURS) and 1 for the third.
+#   RIG_LEASE_BAD_RESOURCES=<names>                        (issue 1450: RIG_LEASE_RESOURCES names a
+#                                                           resource the table does not know)
+# Returns 0 for the first two (the lease is now OURS), 1 for the third and 2 for the fourth, which
+# runs BEFORE anything else: nothing is swept, created or reclaimed.
+#
+# issue 1450: RIG_LEASE_RESOURCES (env, a CSV of atoms / groups) declares the boxes this holder
+# touches; the resolved atoms land in holder.json `resources`. Empty/unset = the whole rig, written
+# as today's holder (no `resources` key). One lockdir still serializes every holder (slice A).
 rig_lease_acquire() {
   local repo="$1" run_id="$2" run_url="$3" job="$4" expected_release_at="$5"
   local stale_secs="${6:-5400}"
+  local declared="${RIG_LEASE_RESOURCES:-}" resolved="" resolve_rc=0
+
+  if [ -n "${declared//[[:space:],]/}" ]; then
+    resolved="$(rig_lease_resources_resolve "$declared")" || resolve_rc=$?
+    if [ "$resolve_rc" -ne 0 ] || [ -z "$resolved" ]; then
+      echo "[rig-lease] refused -- RIG_LEASE_RESOURCES='${declared}' does not resolve (rc ${resolve_rc}): the names are the atoms and groups of scripts/rig-lease-resources.txt. Nothing was written." >&2
+      printf 'RIG_LEASE_BAD_RESOURCES=%s\n' "${resolved:-unresolvable}"
+      return 2
+    fi
+  fi
 
   # GC any lockdir aside-copies leaked by a release that crashed between its atomic rename and the
   # rm of the renamed copy (#857) -- acquire is the guaranteed GC point (every gate acquires).
   rig_lease_sweep_releasing
 
   if rig_lease_try_acquire; then
-    rig_lease_write_holder "$repo" "$run_id" "$run_url" "$job" "$expected_release_at"
+    RIG_LEASE_HOLDER_RESOURCES="$resolved" \
+      rig_lease_write_holder "$repo" "$run_id" "$run_url" "$job" "$expected_release_at"
     printf 'RIG_LEASE_ACQUIRED\n'
     return 0
   fi
@@ -410,7 +448,8 @@ rig_lease_acquire() {
   if rig_lease_is_stale "$stale_secs"; then
     local old_summary; old_summary="$(rig_lease_holder_summary)"
     echo "::warning title=RIG LEASE STALE RECLAIM (#830)::previous holder (${old_summary}) looks dead -- heartbeat stale and/or its run is no longer in progress. Reclaiming the rig lease now rather than deadlocking (mirrors the #657 self-heal principle: never a permanent deadlock)." >&2
-    rig_lease_write_holder "$repo" "$run_id" "$run_url" "$job" "$expected_release_at"
+    RIG_LEASE_HOLDER_RESOURCES="$resolved" \
+      rig_lease_write_holder "$repo" "$run_id" "$run_url" "$job" "$expected_release_at"
     printf 'RIG_LEASE_RECLAIMED\n'
     return 0
   fi

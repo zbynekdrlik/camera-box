@@ -208,6 +208,8 @@ command -v sshpass >/dev/null 2>&1 || {
 # reclaimed (rig_lease_acquire). Its identity is this repo's apply + a per-run id.
 RIG_LEASE_REPO_NAME="camera-box-ro-units-apply"
 RIG_LEASE_OURS=""
+# issue 1450: the rig resources the apply touches (scripts/rig-lease-resources.txt): the camboxes.
+RIG_LEASE_DECLARED="snv-cams"
 
 # rig_refused BOX -> 0 and RIG_REFUSAL set when BOX must not be touched NOW: the shared rig-held read
 # (rig_held_reason: a fresh issue-281 heartbeat, which the lease does not cover -- rig-mode.sh TEST
@@ -265,7 +267,7 @@ else
     "" | *[!0-9]*) _hold_s=900 ;;
     *) _hold_s="$RIG_LEASE_LOOKAHEAD_SECS" ;;
   esac
-  if _lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" ro-units-apply \
+  if _lease_out="$(RIG_LEASE_RESOURCES="$RIG_LEASE_DECLARED" rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" ro-units-apply \
     "$(date -u -d "+${_hold_s} seconds" +%Y-%m-%dT%H:%M:%SZ)" "$RIG_LEASE_STALE_SECS")"; then
     echo "[rig-lease] ${_lease_out} as ${RIG_LEASE_REPO_NAME}#${RIG_LEASE_OURS}, held until this run ends"
   else

@@ -94,6 +94,22 @@ RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 # mental model of "how long is this gate allowed to wait".
 RIG_LEASE_MAX_WAIT_SECS="${RIG_LEASE_MAX_WAIT_SECS:-$((MAX_ITERATIONS * SLEEP_SECS))}"
 
+# issue 1450: the boxes this run touches (RIG_LEASE_RESOURCES, a CSV of the atoms / groups of
+# scripts/rig-lease-resources.txt; each workflow step that runs this gate declares it). Every
+# rig_lease_acquire below reads it from the env. Checked ONCE here, before any lease or OBS read: a
+# typo is a configuration error that no wait can cure, so it fails fast (exit 45), never a retry
+# loop and never "no protection". Unset = the whole rig, as before (nothing printed).
+if [ -n "${RIG_LEASE_RESOURCES:-}" ]; then
+  _lease_resources_rc=0
+  _lease_resources="$(rig_lease_resources_resolve "$RIG_LEASE_RESOURCES")" || _lease_resources_rc=$?
+  if [ "$_lease_resources_rc" -ne 0 ] || [ -z "$_lease_resources" ]; then
+    echo "::error title=RIG LEASE BAD RESOURCES (issue 1450)::RIG_LEASE_RESOURCES='${RIG_LEASE_RESOURCES}' does not resolve (rc ${_lease_resources_rc}: ${_lease_resources:-the table is unreadable}) -- the names are the atoms and groups of scripts/rig-lease-resources.txt. Refusing before any lease or OBS read."
+    report_outcome "OUTCOME=RIG_LEASE_BAD_RESOURCES RIG_LEASE_BAD_RESOURCES=${_lease_resources:-unresolvable}"
+    exit 45
+  fi
+  echo "[rig-busy-gate] rig lease resources: ${RIG_LEASE_RESOURCES} -> ${_lease_resources}"
+fi
+
 # Release the lease on ANY exit path EXCEPT the "rig is free, proceeding" success path (which
 # leaves it held for the recording step that runs later in the SAME job -- that step, and
 # cancellation, are covered by the workflow's own separate `always()` release step, see

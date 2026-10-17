@@ -2,6 +2,10 @@
 paths:
   - "scripts/rig-lease-server.py"
   - "scripts/rig_lease_state.py"
+  - "scripts/rig_lease_resources.py"
+  - "scripts/rig-lease-resources.txt"
+  - "scripts/rig_lease_write.py"
+  - "tests/python/test_rig_lease_*_1450.py"
   - "scripts/lib/rig-lease.sh"
   - "systemd/rig-lease-server.*"
   - "tests/python/test_rig_lease_state_1277.py"
@@ -37,7 +41,7 @@ snapshot. Full mirror contract (which field is null under which condition) lives
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema` | int | always `1` today |
+| `schema` | int | always `1` -- never bumped (issue 1450 appends `lease_model`/`resources`/`groups` after these keys, below) |
 | `now` | string | server's own UTC time, `YYYY-MM-DDTHH:MM:SSZ` |
 | `held` | bool | `true` iff the lockdir (`/var/tmp/rig-lease/`) exists at all |
 | `holder` | object or `null` | `{repo, run_id, run_url, job, acquired_at, expected_release_at}` — `null` when `held=false`, OR when `holder.json` is absent/unparseable (fail-closed: `held` stays `true` even then) |
@@ -45,6 +49,55 @@ snapshot. Full mirror contract (which field is null under which condition) lives
 | `stale` | bool or `null` | `null` only when `held=false`. `true` when the heartbeat is too old (or missing), OR when `holder.json` itself is absent (unconditionally stale/reclaimable) |
 | `expected_release_at` | string or `null` | copied from `holder.expected_release_at`; `null` when `holder` is `null` |
 | `ttl_s` | int or `null` | `expected_release_at − now` in whole seconds — **may be negative** (an overdue holder that never released on time); `null` when `expected_release_at` is absent/unparseable/`holder` is `null`. A live holder rolls it to ≥ ~15 min on every beat (issue 1383), so it is a rolling look-ahead, not the run's end |
+
+## Box-scoped view: a holder declares its boxes, a reader asks for its own (issue 1450, slice A)
+
+On 17.10.2026 SongPlayer's win-resolume deploy waited for a camera-box soak that never touches
+win-resolume: the lease was one rig-wide mutex. Since issue 1450:
+- **ONE resource table**, `scripts/rig-lease-resources.txt`: atoms `snv-cams strih-snv stream-snv
+  imag resolume-snv pp-cams strih-pp stream-pp resolume-pp` (that order is canonical) and groups
+  `snv-video` (snv-cams strih-snv stream-snv imag), `snv` (+ resolume-snv), `pp-video`, `pp`, `all`
+  (reserved = every atom). It is parsed ONLY by `scripts/rig_lease_resources.py`; the bash lib calls
+  its CLI (`rig_lease_resources_resolve`), the server and the write route import it.
+- **A holder declares with `RIG_LEASE_RESOURCES`** (CSV of atoms/groups), read inside
+  `rig_lease_acquire`. The resolved atoms go into holder.json `resources`. Empty/unset = the whole
+  rig, written exactly as before (no `resources` key). An unknown name = rc 2 +
+  `RIG_LEASE_BAD_RESOURCES=<names>` and NOTHING is swept, created or reclaimed. `rig-busy-gate.sh`
+  checks it once up front: exit 45, `OUTCOME=RIG_LEASE_BAD_RESOURCES`, before any lease or OBS read.
+  Its `RIG_LEASE_HELD_BY=… expected_release_at=` line is unchanged. A refresh keeps the key.
+- **Slice A still has ONE lockdir**: two camera-box holders still exclude each other; only READERS
+  became box-aware. Per-atom lockdirs, the fence and the flock transaction are slice C (the consult
+  `~/.claude/work-products/camera-box-1450-lease-scoping-consult.md`).
+- **GET `/rig-lease.json`**: `schema` stays **1** (restreamer fails OPEN on any other value:
+  `rig-lease-wait.ps1:88`, `obs-ws.ps1:160`; pinned by a test) and every v1 key stays first and
+  unchanged. Appended: `lease_model: 2`, `resources` (per atom: `held`, `via` `scoped`|`legacy`,
+  `holder` (the v1 six fields), `declared`, `heartbeat_age_s`, `stale`, `expected_release_at`,
+  `ttl_s`) and `groups`. A holder.json without a readable `resources` (absent, unparseable, an
+  acquire in progress, a name this table does not know) covers ALL atoms (`via: legacy`).
+- **GET `/rig-lease.json?resources=<csv>`**: the v1 keys for those atoms only (held iff the holder
+  covers one of them, else the not-held shape) + `scope` + the per-atom map. An unknown or empty
+  scope = the WHOLE-rig view + `scope_error` (fail-closed, never a 400: a consumer that gets an error
+  fails open). A repeated `resources=` is joined; other parameters (`?t=1`) are ignored. An old server
+  ignores the query and answers the whole rig, so a consumer can switch first. An unreadable table =
+  the fail-closed whole-rig shape for every query.
+- **POST `/rig-lease/acquire`** takes an optional `resources`: a list or a CSV string (PowerShell
+  5.1 turns a one-element array into a scalar). Absent/null = the whole rig; unknown, empty or not
+  strings = 400 `field: resources`. The 200 reply carries `resources` (null when undeclared). The
+  server always sets `RIG_LEASE_RESOURCES` for the bash call, so its own env never declares.
+
+| Holder | Declares |
+|---|---|
+| full-path E2E gate step (`full-path-e2e.yml`) | `snv-video`, + `resolume-snv` when the recording step's CG_CHAIN is `1` (the same `vars.CG_CHAIN == '1'` on a pull_request) |
+| ci.yml "Take the shared rig lease" (SNV fleet deploy) | `snv-cams` (the other venues' deploy takes no lease) |
+| `scripts/av-soak.sh`, `scripts/av-restart-matrix.sh` | `snv-video` (`RIG_LEASE_DECLARED`; the matrix's windows run under its lease) |
+| `scripts/cambox-ro-units-apply.sh` | `snv-cams` (also for `--venue pp`: PP atoms are a later slice) |
+
+A NEW holder declares on its acquire (`RIG_LEASE_RESOURCES="$X" rig_lease_acquire …`); a sweep test
+refuses an undeclared acquire under `scripts/` (`tests/python/test_rig_lease_resources_1450.py`).
+**Adoption:** SongPlayer reads `?resources=resolume-snv` (its three gate `--url`s); restreamer
+(restreamer#349) sends `resources: "snv-video"` (its YouTube jobs need cam2 + strih, issue 1432) and
+reads `RIG_LEASE_URL=…?resources=snv-video`. The running server picks the view up only after a restart
+while `held=false`.
 
 ## The ROLLING keep-alive — a live holder always reads live (issue 1383)
 
