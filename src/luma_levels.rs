@@ -105,8 +105,8 @@ mod tests {
         let mut f = vec![128u8; width * 2 * height];
         let span = (hi - lo) as usize + 1;
         for (y, row) in f.chunks_exact_mut(width * 2).enumerate() {
-            for px in row.chunks_exact_mut(2) {
-                px[0] = lo + (y % span) as u8;
+            for luma in row.iter_mut().step_by(2) {
+                *luma = lo + (y % span) as u8;
             }
         }
         f
