@@ -40,6 +40,52 @@
 # STEP 1: the free official-archive low-latency meta (no Ubuntu Pro), matching the imag-nb precedent.
 rt_kernel_flavour() { printf 'linux-lowlatency-hwe-24.04'; }
 
+# rt_kernel_pkg_installed "WANT ERR STATUS" -> rc 0 iff a dpkg `${Status}` reads the package as
+# INSTALLED, whatever the want state: `install ok installed` AND `hold ok installed` (issue 1446: the
+# fleet apt-HOLDS its kernel metas -- cam2's linux-image-generic read `hold ok installed`, and a read
+# that took only `install ok installed` left the held meta out of the purge, which apt then refused).
+# A removed package with its config left (`deinstall ok config-files`) or a half install is not.
+rt_kernel_pkg_installed() {
+  case "${1:-}" in
+    "install ok installed" | "hold ok installed") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# rt_kernel_gather_remote_snippet -> the shell text scripts/rt-kernel-upgrade.sh sends to a box over
+# ONE ssh call; it prints `RUN INST GEN GRUB CAND STALE` (every read non-mutating):
+#   RUN   1 iff the running kernel booted with preempt=full
+#   INST  1 iff the lowlatency-kernel config package is installed
+#   GEN   1 iff the HWE generic meta (linux-image-generic-hwe-24.04) is NOT installed -> installing
+#         lowlatency-hwe pulls a new HWE image, superseding the running one
+#   GRUB  GRUB_DEFAULT (first word, default 0); CAND 1 iff apt has a lowlatency-hwe candidate
+#   STALE the OBSERVED superseded-generic set: every installed linux-image-<ver>-generic whose <ver>
+#         is not `uname -r`, plus the linux-image-generic meta; comma-joined, `-` = none. Only
+#         meaningful once rebooted; the planner reads it only in the run=1 branch.
+# Every installed-test goes through rt_kernel_pkg_installed (embedded by `declare -f`). No entry
+# holds a space, so the space-split of the facts downstream holds.
+rt_kernel_gather_remote_snippet() {
+  declare -f rt_kernel_pkg_installed
+  cat <<'RT_GATHER'
+_rt_st() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true; }
+run=0; grep -qw "preempt=full" /proc/cmdline && run=1
+inst=0; rt_kernel_pkg_installed "$(_rt_st lowlatency-kernel)" && inst=1
+gen=1; rt_kernel_pkg_installed "$(_rt_st linux-image-generic-hwe-24.04)" && gen=0
+cand=0; apt-cache policy linux-lowlatency-hwe-24.04 2>/dev/null | grep -qE "Candidate: [0-9]" && cand=1
+gd="$(sed -nE "s/^GRUB_DEFAULT=(.*)/\1/p" /etc/default/grub 2>/dev/null | tr -d "\"" | head -1)"
+gd="${gd:-0}"; gd="${gd%% *}"
+kr="$(uname -r)"; stale=""
+for p in $(dpkg-query -W -f='${Package}|${Status}\n' "linux-image-*-generic" 2>/dev/null |
+  while IFS='|' read -r n st; do rt_kernel_pkg_installed "$st" && printf '%s\n' "$n"; done); do
+  v="${p#linux-image-}"; [ "$v" = "$kr" ] && continue
+  stale="${stale:+$stale,}$v"
+done
+rt_kernel_pkg_installed "$(_rt_st linux-image-generic)" && stale="${stale:+$stale,}linux-image-generic"
+stale="${stale:--}"
+echo "$run $inst ${gen} ${gd} ${cand} ${stale}"
+RT_GATHER
+}
+
 # The ONE verified close of a read-only-root rw window (issue 1407), printed into every mutating
 # step's program below. Sourcing it only defines functions (it lazy-sources ro-root.sh the same way).
 # shellcheck source=scripts/lib/ro-window.sh
