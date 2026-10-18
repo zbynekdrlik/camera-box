@@ -203,3 +203,10 @@ def test_the_lib_sources_alone_under_strict_mode_from_any_cwd(tmp_path):
     r = subprocess.run(["bash", "-c", 'set -euo pipefail; cd "$2"; . "$1"; declare -F ro_window_close_cmds ro_root_mount_mode',
                         "h", str(LIB), str(tmp_path)], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0 and r.stdout.split() == ["ro_window_close_cmds", "ro_root_mount_mode"], r.stderr
+
+
+def test_setup_device_warns_a_hold_that_did_not_land():
+    src = (REPO / "scripts" / "setup-device.sh").read_text()
+    hold = src.index("apt-mark hold $(rt_kernel_line_held_metas)")
+    call = src.index('RT_UNHELD="$(rt_kernel_line_unheld_metas)"', hold)
+    assert "warn " in src[call:src.index("\n", src.index("\n", call) + 1)], src[call:call + 300]

@@ -768,7 +768,7 @@ def test_rt_kernel_runbook_step_whose_work_fails_still_puts_the_root_back_read_o
     assert fail and "rc=100" in fail[-1], proc.stderr
 
 
-_RT_LINE_METAS = "linux-lowlatency-hwe-24.04 linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 lowlatency-kernel"
+_RT_LINE_METAS = build(f'. "{_RT}"\nrt_kernel_line_held_metas').strip()  # the lib's own list
 
 
 def test_rt_kernel_install_step_holds_the_line_inside_the_window_after_the_install(tmp_path):
