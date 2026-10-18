@@ -718,7 +718,8 @@ _RT_STEPS = (
 
 def _rt_box(tmp_path):
     box = make_box(tmp_path, root="ro")
-    for tool in ("apt-get", "update-grub", "update-initramfs", "grub-set-default", "mkdir"):
+    # issue 1446: the install step also holds the fleet kernel line (apt-mark hold)
+    for tool in ("apt-get", "apt-mark", "update-grub", "update-initramfs", "grub-set-default", "mkdir"):
         p = box["stub"] / tool
         p.write_text(f"#!{sys.executable}\n{_RT_TOOL}")
         p.chmod(0o755)
