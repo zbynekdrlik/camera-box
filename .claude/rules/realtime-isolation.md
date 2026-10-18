@@ -7,6 +7,7 @@ paths:
   - "docs/runbooks/899-realtime-isolation.md"
   - "scripts/lib/display-gpu.sh"
   - "tests/python/test_display_gpu_1446.py"
+  - "tests/python/test_kernel_line_1446.py"
 ---
 
 # Realtime isolation on the cam fleet (issue 899)
