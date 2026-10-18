@@ -48,8 +48,10 @@ for that. Their default output is byte-identical, pinned by the issue-808 tests 
 
 **The sites** (`strih_https_sites`) have LOCAL upstreams.
 - interkom: `/` goes to the hub at `127.0.0.1:8790` (the box's intercom matrix `[http]` bind).
-  `location = /janus` goes to `<STRIH_IP>:8188`, because Janus binds `ws_ip` = the box IP and never
-  localhost.
+  `location = /janus` goes to the SAME hub (issue 1453): its `/janus` route relays the phone's Janus
+  WebSocket through the frame allowlist, and Janus's own WebSocket listens on `127.0.0.1:8188` only
+  (setup-strih step 14). Never proxy `/janus` to Janus directly again (the "The phone's Janus
+  WebSocket" section below).
 - shading: `/` goes to bkshading at `127.0.0.1:8770` (its `default_bind`).
 - Both ports are test-pinned to their sources. The SNV render keeps the live hot-fix routes.
 - The files are `/etc/nginx/sites-available/{interkom,shading}`, the hot-fix names, so the hand sites
@@ -96,7 +98,7 @@ for that. Their default output is byte-identical, pinned by the issue-808 tests 
 |---|---|
 | `(https-nginx)` | nginx active, :443 listening (`ss -ltnH`), every declared site equal to its render (same cert-pair choice) and enabled |
 | `(https-cert) <name>` | one per declared name: the cert nginx serves for that SNI on 127.0.0.1:443 (`openssl s_client -servername`) covers the name (exact or a one-label wildcard), is valid for more than 14 days (`-checkend`), and IS the `/etc/letsencrypt/live` one (its sha256 fingerprint = that of the live fullchain's first certificate; a mismatch = nginx was not reloaded); a hand copy is a NOTE until migrated |
-| `(https-upstream) interkom` | through nginx: the hub `/api/state` 200 and the `/janus` WebSocket upgrade 101 (read from curl's `-D -` status line: after a 101 curl holds the connection until `--max-time`) |
+| `(https-upstream) interkom` | through nginx: the hub `/api/state` 200 and the `/janus` WebSocket upgrade 101 (read from curl's `-D -` status line: after a 101 curl holds the connection until `--max-time`; the hub answers 101 only once it reached Janus), AND Janus's WebSocket `:8188` listening on loopback only (`ss -ltnH`: `127.*` / `[::1]`; the LAN IP, `0.0.0.0`, `[::]`, `*` or no listener FAIL, issue 1453) |
 | `(https-upstream) shading` | bkshading `/api/version` 200 |
 | `(https-renewal)` | `certbot.timer` enabled, the deploy hook equal to its render and executable, the ini present with mode 600 owner root (stat only) |
 
@@ -186,18 +188,14 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
 | `(https-tunnel)` | the token file (owner 600), the unit = its render, enabled + active, cloudflared's own `http://127.0.0.1:20241/ready` = 200 with `readyConnections` >= 1 |
 | `(https-turn)` | the key file (owner 600), the hub drop-in = its render, janus.jcfg's managed block (`--check`), the hub's `/api/turn-rest` = 200 carrying a `turn:` / `turns:` uri (a 404 names the hub's reason) |
 
-- **OPEN SECURITY DECISION -- do not route the public hostnames before it is made** (raised on the
-  ticket as a `Design-question:`): through the tunnel the WHOLE interkom site is public, `/api/state`,
-  `/api/ice` (short-lived TURN credentials) and the `/janus` WebSocket included. The audiobridge room has
-  no pin, so anyone with the URL can LISTEN to and TALK into the crew's headsets, and because the room
-  allows plain-RTP participants (the hub's own leg), an internet WebSocket client could join with
-  `rtp:{ip,port}` and make Janus stream to any host (a UDP reflection). The repo's own Cloudflare
-  precedent (bkshading, issue 808) requires Cloudflare Access and fails closed without its marker. The
-  options (Access on the hostnames + a fail-closed row, a room pin, refusing a plain-RTP join on the
-  public path) are the main's / owner's call; item 45 today grades a tunnel without access control OK.
+- **Access control: OPEN, but no plain-RTP join (ROZHODNUTÉ issuecomment-6251103415, owner 18.10.2026:
+  "normalne verejne nech to je nevadi mi ze sa tam niekto pripoji").** No Cloudflare Access, no room
+  pin, no link token: anyone with the URL may join, listen and talk. The UDP-reflection vector is
+  closed by "The phone's Janus WebSocket" below (the hub's allowlist relay + Janus on loopback), and
+  must be live before the public DNS switch.
 
 **The supervisor live runbook (issue 1453, after the merge):**
-1. FIRST settle the open security decision above. Then Cloudflare: create one tunnel per strih box, route its public hostnames (the box's intercom names ->
+1. FIRST deploy the hub + setup-strih with the `/janus` relay (the section below) and read its item-45 row. Then Cloudflare: create one tunnel per strih box, route its public hostnames (the box's intercom names ->
    `https://127.0.0.1:443`, originServerName = the first name, HTTP/1.1 upgrade allowed for `/janus`),
    and a Realtime TURN key.
 2. Place the token: pipe it from the secret store over ssh stdin into
@@ -210,6 +208,52 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
    the private address (slice 3, the netcfg baseline).
 6. Acceptance: a phone on mobile data joins and talks both ways; a phone on the venue WiFi still
    connects with the internet unplugged.
+
+## The phone's Janus WebSocket goes through the hub's allowlist relay (issue 1453)
+
+The audiobridge room keeps `allow_rtp_participants = true` for the hub's own leg (`janus_rtp`, over
+Janus's loopback HTTP API), and Janus checks that per ROOM, never per transport
+(`janus_audiobridge.c`: a `join` carrying `rtp` is refused only when the room's `allow_plainrtp` is
+off). So any client of Janus's WebSocket could join with `"rtp": {"ip", "port"}` and make Janus stream
+the room to a host it names. The same plugin, with no `admin_key` configured, also lets any client
+`create` a room of its own with `allow_rtp_participants`, `rtp_forward` (behind the room secret),
+`play_file` and record to a path, and the box's Janus loads other plugins too.
+
+- **The relay (`intercom/hub/src/janus_relay.rs`, `GET /janus` on the hub).** nginx's `location =
+  /janus` points at the hub (127.0.0.1:8790). The hub opens its own WebSocket to Janus first
+  (`[janus].ws_url`, default `ws://127.0.0.1:8188/janus`, subprotocol `janus-protocol`, 5 s bound) and
+  answers the phone's upgrade only then: a 101 means Janus is reachable, 502 = it is not, 503 = the hub
+  has no Janus room. Janus's frames go to the phone unchanged.
+- **The allowlist (`intercom/hub/src/janus_ws_guard.rs`, pure).** A client text frame is forwarded as
+  the SAME string only when it is what janus.js 1.1.2 + the page send: a janus request in `create
+  attach message trickle keepalive detach destroy hangup info`; `attach` only to
+  `janus.plugin.audiobridge`; a `message` whose body is `join` (keys `request room display muted`, the
+  hub's own room only) or `configure` (`request muted display`), `display` a string, `muted` a bool.
+  Anything else gets a Janus-shaped `{"janus":"error","transaction":..,"session_id":..,"error":{"code":
+  403|454|455,"reason":"interkom: ..."}}` and never reaches Janus. 8 refusals or a binary frame close
+  the connection. The log names the phone by `CF-Connecting-IP` / `X-Forwarded-For`, cut and quoted.
+- **Janus's WebSocket listens on loopback only** (`strih_janus_ws_jcfg_text`, `ws_ip = "127.0.0.1"`
+  whatever it is passed), so a LAN client cannot go around the relay. The dev1 renderer's `/janus`
+  points at `strih.lan:8790` too (the dev1 front is retired for these names).
+- **The contract between the page and the allowlist:** `intercom/tests/fixtures/janus-ws-pwa-frames.json`
+  holds the raw text of one frame of every shape the page sends (captured from the phone suite; the
+  keepalive / hangup / detach / info samples are built from janus.js's own request literals). The
+  hub's `janus_relay_1453.rs` forwards each of them byte-identically through the real relay, and
+  `phone.spec.js` FAILs any test in which the page sent a frame of another shape (the fake Janus
+  reports every frame through `window.__janusFrameSent`). A new frame in `app.js` therefore needs a
+  real sample and, if the guard refuses it, a guard change.
+- **Deploy order (supervisor).** setup-strih installs the hub binary only when none exists, so the
+  relay arrives with the hub's own deploy: (1) deploy the new hub binary and restart intercom-hub (its
+  `/janus` answers 502 until Janus moves, but nginx still proxies `/janus` to Janus directly, so the
+  phones keep working); (2) run setup-strih (step 14 rewrites the WS jcfg and restarts the running
+  Janus onto loopback, step 16i rewrites the interkom site and reloads nginx; between the two the
+  phones' `/janus` is down for the run's duration); (3) read item 45's `(https-upstream) interkom`
+  row; (4) phones on the venue WiFi reconnect by themselves (the page retries).
+- **Tests:** `intercom/hub/tests/janus_ws_guard_1453.rs` (the pure policy; runs in a plain-rustc
+  replica with serde_json rlibs built from the registry), `intercom/hub/tests/janus_relay_1453.rs` (the
+  real router against a fake Janus WebSocket, CI first compile), the jcfg / site / item-45 rows in
+  `tests/strih_provision_pure_functions.rs`, `tests/strih_box_facts_1361.rs` (golden),
+  `tests/python/test_strih_https_1399.py`, `tests/python/test_shading_https_install_808.py`.
 
 Tests: `tests/python/test_strih_interkom_public_1453.py` (the fakes on PATH, the real python3 + sha256sum;
 a 12-mutant pass over the lib + the jcfg tool kills all), `intercom/hub/tests/turn_ice_1453.rs` (a fake
