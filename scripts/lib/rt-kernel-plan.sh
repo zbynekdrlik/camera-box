@@ -47,12 +47,31 @@ rt_kernel_flavour() { printf 'linux-lowlatency-hwe-24.04'; }
 # INSTALLED, whatever the want state: `install ok installed` AND `hold ok installed` (issue 1446: the
 # fleet apt-HOLDS its kernel metas -- cam2's linux-image-generic read `hold ok installed`, and a read
 # that took only `install ok installed` left the held meta out of the purge, which apt then refused).
+# A package whose only open work is a trigger (`triggers-pending` / `triggers-awaited`, e.g. an
+# image whose initramfs trigger has not run yet) is unpacked and configured, so it is installed too.
 # A removed package with its config left (`deinstall ok config-files`) or a half install is not.
 rt_kernel_pkg_installed() {
   case "${1:-}" in
     "install ok installed" | "hold ok installed") return 0 ;;
+    "install ok triggers-pending" | "hold ok triggers-pending") return 0 ;;
+    "install ok triggers-awaited" | "hold ok triggers-awaited") return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# rt_kernel_line_unheld_metas -> one line per fleet-kernel-line meta (rt_kernel_line_held_metas)
+# that dpkg reads as INSTALLED but whose want state is not `hold` (issue 1446 review: setup-device's
+# `apt-mark hold ... || true` must not hide a hold that did not land). A meta that is not installed
+# is not listed. Reads dpkg on the box it runs on; always rc 0.
+rt_kernel_line_unheld_metas() {
+  local m st
+  for m in $(rt_kernel_line_held_metas); do
+    st="$(dpkg-query -W -f='${Status}' "$m" 2>/dev/null || true)"
+    if rt_kernel_pkg_installed "$st" && [ "${st%% *}" != hold ]; then
+      printf '%s\n' "$m"
+    fi
+  done
+  return 0
 }
 
 # rt_kernel_gather_remote_snippet -> the shell text scripts/rt-kernel-upgrade.sh sends to a box over
@@ -79,7 +98,9 @@ gd="$(sed -nE "s/^GRUB_DEFAULT=(.*)/\1/p" /etc/default/grub 2>/dev/null | tr -d 
 gd="${gd:-0}"; gd="${gd%% *}"
 kr="$(uname -r)"; stale=""
 for p in $(dpkg-query -W -f='${Package}|${Status}\n' "linux-image-*-generic" 2>/dev/null |
-  while IFS='|' read -r n st; do rt_kernel_pkg_installed "$st" && printf '%s\n' "$n"; done); do
+  while IFS='|' read -r n st; do
+    case "$n" in linux-image-[0-9]*) rt_kernel_pkg_installed "$st" && printf '%s\n' "$n" ;; esac
+  done); do
   v="${p#linux-image-}"; [ "$v" = "$kr" ] && continue
   stale="${stale:+$stale,}$v"
 done
@@ -395,7 +416,9 @@ rt_kernel_step_command() {
       # --allow-change-held-packages: the cam boxes hold their kernel packages (issue 295/487),
       # and the lowlatency meta depends on the HWE packages, so the install must be allowed to move
       # the hold -- exactly as setup-imag.sh step 7 does (#820). This ADDS the lowlatency config
-      # (preempt=full) and, on a box without the HWE generic meta, a new generic HWE image.
+      # (preempt=full) and, on a box without the HWE generic meta, a new generic HWE image. Then
+      # it re-holds the whole fleet kernel line (rt_kernel_line_held_metas, issue 1446). A box
+      # already past this step (inst=1) is never re-held by the planner: setup-device's hold covers it.
       _rt_window_program install-lowlatency \
         'mkdir -p /root/apt-tmp /root/tmpbig && export TMPDIR=/root/tmpbig && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -o Dir::Cache::archives=/root/apt-tmp -y --allow-change-held-packages linux-lowlatency-hwe-24.04 && apt-mark hold '"$(rt_kernel_line_held_metas)" \
         '/var/cache+/tmp are tmpfs (512M/100M) -> cache .debs + build initrd on the rootfs (issue 899 supervisor finding 2026-08-22)' ;;

@@ -141,8 +141,11 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   `$(rt_kernel_line_held_metas)` (flavour, HWE image + headers metas, `lowlatency-kernel`) and FAILs
   the build when the flavour is missing or grub.cfg lacks `preempt=full` (lowlatency-kernel's
   `/etc/default/grub.d/99-lowlatency.cfg` appends it; `update-grub` runs after the
-  `/etc/default/grub` rewrite, so it survives). setup-device.sh is unchanged: a live box moves only
-  through the planner. **verify-device `(aw)` "fleet kernel line"** (HARD) grades it with
+  `/etc/default/grub` rewrite, so it survives). A live box still moves only through the planner;
+  setup-device.sh only HOLDS the line (`apt-mark hold $(rt_kernel_line_held_metas)`, then
+  `rt_kernel_line_unheld_metas` WARNs a hold that did not land), and the planner's
+  `install-lowlatency` step re-holds it right after the install, inside its window. The live fleet
+  was held by hand through the same window on 19.10.2026. **verify-device `(aw)` "fleet kernel line"** (HARD) grades it with
   `rt_kernel_line_verdict` over one `rt_kernel_line_gather_remote_snippet` read: the flavour
   `install|hold ok installed`, `preempt=full` a whole word of `/proc/cmdline`, and `uname -r` = the
   ONE `linux-image-<digit>...` entry of the installed `linux-image-generic-hwe-24.04` meta's

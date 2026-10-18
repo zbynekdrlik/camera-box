@@ -1328,6 +1328,8 @@ systemctl mask "${RO_ROOT_APT_UNITS[@]}" \
 # issue 1446: hold the fleet kernel line (the set the base image holds), never the GA 6.8 metas.
 # shellcheck disable=SC2046  # the meta list is a deliberate word split
 apt-mark hold $(rt_kernel_line_held_metas) 2>/dev/null || true
+RT_UNHELD="$(rt_kernel_line_unheld_metas)"
+[ -z "$RT_UNHELD" ] || warn "issue 1446: kernel meta(s) installed but NOT held: ${RT_UNHELD//$'\n'/ } -- run: apt-mark hold ${RT_UNHELD//$'\n'/ }"
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
 // Camera-box appliance: never auto-update (#295 — kernels are pinned with apt-mark hold).
 APT::Periodic::Update-Package-Lists "0";
