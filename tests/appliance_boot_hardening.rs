@@ -307,7 +307,8 @@ fn extract_shell_function(script: &str, name: &str) -> Option<String> {
 #[test]
 fn base_image_builder_holds_the_appliance_kernel() {
     const HOLD_CMD: &str = "apt-mark hold $(rt_kernel_line_held_metas)";
-    const GA_HOLD_CMD: &str = "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
+    const GA_HOLD_CMD: &str =
+        "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
     let body = read(BASE_IMAGE_BUILDER);
     assert!(
         body.contains(HOLD_CMD),
