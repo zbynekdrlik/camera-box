@@ -59,7 +59,7 @@ def test_the_config_lists_discord_on_the_left_with_the_other_launchers(tmp_path)
     home, env = _home(tmp_path)
     r = _bash('obs_box_panel_tint2rc "$1"', str(home), env=env)
     cfg = [ln for ln in r.stdout.splitlines() if not ln.startswith("#")]
-    assert "panel_items = LTSC" in cfg               # launchers (L) left of the taskbar (T)
+    assert "panel_items = LTSEC" in cfg              # launchers (L) left of the taskbar (T); E = layout, issue 1441
     apps = [ln.split(" = ", 1)[1] for ln in cfg if ln.startswith("launcher_item_app = ")]
     assert apps == [str(home / (".local/share/applications/obs-box-panel-%s.desktop" % i))
                     for i in ("obs", "discord")]
