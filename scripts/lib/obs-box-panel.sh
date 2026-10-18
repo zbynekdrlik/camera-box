@@ -30,6 +30,8 @@
 #       (panel-unit)   the unit file equals the checkout, enabled, active, its main process /usr/bin/tint2;
 #       (panel-discord) issue 1448: Discord installed on the stream role (setup installs the pinned
 #                      .deb); NOTE on the strih role (production-only);
+#       (panel-kbd)    issue 1441: the keyboard layout helper installed = the checkout, and its live
+#                      `print` on :0 names a layout (NOTE when X answers nothing);
 #       (panel-window) a tint2 window on :0 (`wmctrl -lx` class tint2.Tint2); NOTE when X has no
 #                      client list to read.
 #     A box the gate leaves out prints ONE note naming why.
@@ -38,7 +40,13 @@ OBS_BOX_PANEL_PACKAGE=tint2
 OBS_BOX_PANEL_UNIT=obs-box-panel.service
 OBS_BOX_PANEL_BIN=/usr/bin/tint2
 OBS_BOX_PANEL_WM_CLASS=tint2.Tint2
-OBS_BOX_PANEL_ROWS=6
+OBS_BOX_PANEL_ROWS=7
+# issue 1441 (owner 18.10.2026: "da sa v liste prepinat??"): the keyboard layout item. tint2 runs the
+# helper as an executor (`watch` prints US / SK on every change, a left click runs `next`); it reads and
+# locks the XKB group through libX11 (Ubuntu 26.04 ships no xkb-switch). The panel always runs it with
+# /usr/bin/python3; OBS_BOX_PANEL_KBD_PYTHON is only the verify row's interpreter seam for the tests.
+OBS_BOX_PANEL_KBD_HELPER="${OBS_BOX_PANEL_KBD_HELPER:-/usr/local/lib/camera-box/obs_box_kbd_layout.py}"
+OBS_BOX_PANEL_KBD_PYTHON="${OBS_BOX_PANEL_KBD_PYTHON:-/usr/bin/python3}"
 # The system user-unit dir (a distro package's --user unit, e.g. restreamer.service) and the RustDesk
 # binary -- seams for the offline tests.
 OBS_BOX_PANEL_SYS_UNIT_DIR="${OBS_BOX_PANEL_SYS_UNIT_DIR:-/usr/lib/systemd/user}"
@@ -91,17 +99,19 @@ obs_box_panel_desktop_text() {
 
 # obs_box_panel_tint2rc [USER_HOME] -> the declared tint2 config: one bottom panel 30 px high over every
 # monitor, launchers (L, one per app obs_box_panel_launchers finds for USER_HOME) + taskbar (T) + system
-# tray (S) + clock (C), no window closing from the panel. No USER_HOME (or no app): no launcher.
+# tray (S) + the keyboard layout item (E, issue 1441) + clock (C), no window closing from the panel. No
+# USER_HOME (or no app): no launcher.
 obs_box_panel_tint2rc() {
-  local home="${1:-}" items=TSC launchers="" id rest
+  local home="${1:-}" items=TSEC launchers="" id rest
   if [ -n "$home" ]; then
     while IFS='|' read -r id rest; do
       [ -n "$id" ] || continue
       launchers="${launchers}launcher_item_app = $(obs_box_panel_desktop_path "$home" "$id")"$'\n'
     done < <(obs_box_panel_launchers "$home")
   fi
-  [ -n "$launchers" ] && items=LTSC
+  [ -n "$launchers" ] && items=LTSEC
   _obs_box_panel_tint2rc_base | sed "s/^panel_items = TSC\$/panel_items = ${items}/"
+  _obs_box_panel_tint2rc_kbd
   if [ -n "$launchers" ]; then
     printf '\nlauncher_padding = 4 2 6\nlauncher_background_id = 0\nlauncher_icon_background_id = 0\n'
     printf 'launcher_icon_size = 22\nlauncher_tooltip = 1\nstartup_notifications = 0\n'
@@ -175,6 +185,41 @@ clock_font_color = #ffffff 100
 clock_padding = 8 0
 clock_background_id = 0
 TINT2RC
+}
+
+# _obs_box_panel_tint2rc_kbd -> the executor block of the keyboard layout item (issue 1441): the
+# continuous `watch` shows the active layout, a left click locks the next one.
+_obs_box_panel_tint2rc_kbd() {
+  printf '\n# the keyboard layout item (issue 1441): US / SK, a click switches (Alt+Shift still works)\n'
+  printf 'execp = new\n'
+  printf 'execp_command = /usr/bin/python3 %s watch\n' "$OBS_BOX_PANEL_KBD_HELPER"
+  printf 'execp_interval = 2\nexecp_continuous = 1\nexecp_has_icon = 0\nexecp_centered = 1\n'
+  printf 'execp_lclick_command = /usr/bin/python3 %s next\n' "$OBS_BOX_PANEL_KBD_HELPER"
+  printf 'execp_tooltip = Klavesnica US / SK -- klik prepne (aj Alt+Shift)\n'
+  printf 'execp_font = Sans Bold 10\nexecp_font_color = #ffffff 100\nexecp_padding = 8 0\nexecp_background_id = 0\n'
+}
+
+# obs_box_panel_kbd_row REPO USER_HOME DESKTOP_USER -> the (panel-kbd) row: the installed helper equals the
+# checkout, and its `print` as DESKTOP_USER on :0 names a layout. Read-only; always rc 0.
+obs_box_panel_kbd_row() {
+  local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
+  local state label
+  state="$(strih_session_app_file_state "$OBS_BOX_PANEL_KBD_HELPER" "${repo}/scripts/obs_box_kbd_layout.py")"
+  if [ "$state" != ok ]; then
+    printf 'FAIL|(panel-kbd) %s %s -- re-run setup-strih.sh step 16h (issue 1441)\n' "$OBS_BOX_PANEL_KBD_HELPER" \
+      "$([ "$state" = absent ] && echo missing || echo 'differs from the checkout')"
+    return 0
+  fi
+  label="$(strih_kiosk_x_run "${STRIH_SESSION_APPS_EUID:-$(id -u)}" "$user" "$home" 10 \
+    "$OBS_BOX_PANEL_KBD_PYTHON" "$OBS_BOX_PANEL_KBD_HELPER" print 2>/dev/null || true)"
+  label="${label%%$'\n'*}"
+  if [ -z "$label" ]; then
+    printf 'NOTE|(panel-kbd) helper installed; the live layout not read: X on :0 answered nothing\n'
+  elif [ "$label" = "?" ]; then
+    printf 'FAIL|(panel-kbd) the helper reads a layout group with no name (?) -- check setxkbmap -query on :0 (issue 1441)\n'
+  else
+    printf 'OK|(panel-kbd) helper installed, the panel shows layout %s\n' "$label"
+  fi
 }
 
 # obs_box_panel_config_path USER_HOME -> the config path the unit reads.
@@ -254,6 +299,11 @@ obs_box_panel_install() {
   w="$(strih_session_apps_put "${repo}/scripts/lib/obs-box-panel-obs.png" "$(obs_box_panel_obs_icon_path "$home")" 0644)" || return 1
   chown "$user:$user" "$(obs_box_panel_obs_icon_path "$home")" 2>/dev/null || true
   [ "$w" = written ] && changed=1
+  install -d -m 0755 "$(dirname "$OBS_BOX_PANEL_KBD_HELPER")" \
+    || { echo "obs-box-panel: cannot create $(dirname "$OBS_BOX_PANEL_KBD_HELPER")" >&2; return 1; }
+  w="$(strih_session_apps_put "${repo}/scripts/obs_box_kbd_layout.py" "$OBS_BOX_PANEL_KBD_HELPER" 0755)" || return 1
+  echo "  ${OBS_BOX_PANEL_KBD_HELPER} ${w} (the keyboard layout item, issue 1441)"
+  [ "$w" = written ] && changed=1
   while IFS='|' read -r id name ex icon; do
     [ -n "$id" ] || continue
     dst="$(obs_box_panel_desktop_path "$home" "$id")"
@@ -325,6 +375,7 @@ obs_box_panel_grade_rows() {
     printf 'OK|(panel-unit) %s enabled + active, main process %s\n' "$OBS_BOX_PANEL_UNIT" "$exe"
   fi
   obs_box_panel_discord_row
+  obs_box_panel_kbd_row "$repo" "$home" "$user"
   wins="$(strih_session_apps_wmctrl "$user" "$home")"
   if [ -z "$wins" ]; then
     printf 'NOTE|(panel-window) not graded: wmctrl on :0 answered nothing (X down or no client list)\n'
