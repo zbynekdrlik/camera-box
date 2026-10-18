@@ -1738,6 +1738,13 @@ to every `git add` / `git commit` call that stages that file. Never "hide" the s
 at runtime or splitting the literal. A synthetic sha the test only needs to be well-formed can be
 `"b" * 40`, which the scan never sees.
 
+The same holds for the sha256 PIN of a public download (issue 1453: `STRIH_PUBLIC_KEY_PIN` of
+Cloudflare's apt signing key in `scripts/lib/strih-interkom-public.sh`): `# airuleset:secret-ok
+<sha256 pin of a PUBLIC key>` on every `git add` / `git commit` of the lib. Every LATER commit
+that touches the lib needs it too, since the scan reads the whole staged file. A test-only fake
+credential never needs the bypass: keep it low-entropy words (`fake-turn-api-token-of-the-test`),
+never a 32+ char hex run, which the scan blocks just like a real key.
+
 ## `mapfile < <(cmd; printf 'rc\0%s\0' "$?")` loses `cmd`'s exit code under `set -e` (issue 808)
 
 A process substitution INHERITS the caller's errexit. Under `set -euo pipefail`, a failing `cmd`
