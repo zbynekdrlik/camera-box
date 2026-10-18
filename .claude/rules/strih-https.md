@@ -133,7 +133,10 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
     read 18.10.2026) BEFORE it is trusted; a rotated key fails loud until the pin is moved on purpose.
     Installed only when missing, `--no-upgrade`.
   - The unit runs `cloudflared tunnel --no-autoupdate --metrics 127.0.0.1:20241 run --token-file
-    %d/tunnel.token` as a DynamicUser. The connector token (`/etc/cloudflared/interkom-tunnel.token`,
+    %d/tunnel.token` as a DynamicUser, `Type=simple`, `Restart=on-failure`, never giving up. NEVER
+    `Type=notify`: cloudflared sends READY only once it reaches Cloudflare, so with the venue uplink
+    down a notify unit stays "starting", a blocking start hangs setup, and multi-user.target (which
+    the kiosk session waits for) never finishes. Setup starts / restarts it with `--no-block`. The connector token (`/etc/cloudflared/interkom-tunnel.token`,
     0600 root) reaches it as the systemd credential `tunnel.token`, so it is never in argv, in the unit or
     in a log. `ConditionPathExists=` keeps a box without a token from failing the unit.
   - The token is written by `strih_interkom_public_token_store` (one line on STDIN, base64/base64url,
@@ -150,8 +153,10 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
     error, an empty list without TURN, because Chromium logs every 4xx/5xx as a console error), `GET
     /api/turn-rest` for Janus (draft-uberti, turn/turns uris only; 404 with the reason without a key, 502
     when the mint failed). Every mint sends `User-Agent: camera-box-intercom/1` (Cloudflare answers 403
-    without one, the supervisor's live finding), asks a 24 h ttl, is reused until 2/3 of it, and a failed
-    mint serves a not-yet-expired cached set.
+    without one, the supervisor's live finding) and asks a 24 h ttl. The hub warms the cache at start
+    and renews it just past the 2/3 point (`spawn_refresher`), so a request does not normally wait on
+    Cloudflare. A failed mint serves a not-yet-expired cached set (margin `min(60 s, ttl/10)`) and is
+    remembered for 15 s, so an outage costs one mint attempt per 15 s, not one per page load.
   - The hub runs as the operator and cannot read the root 0600 file, so step 16i writes the drop-in
     `intercom-hub.service.d/30-turn-credential.conf` (`LoadCredential=turn.toml:<file>`) ONLY while the
     file exists (a credential of a missing file fails the hub start, the issue-1412 stream-pp incident),
@@ -164,11 +169,16 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
     the file untouched; libconfig would refuse a duplicate). A changed jcfg restarts a running Janus
     (step 14 restarts it on every run anyway).
   - The PWA (`intercom/web/app.js` `fetchIceServers`) fetches `/api/ice` before `new Janus(...)`, bounded
-    by 3 s, and passes `iceServers` only for a non-empty `turn: "on"` list: janus.js reads
-    `iceServers || default`, so an empty list would drop even its default STUN server.
+    by 6 s (longer than the hub's 5 s mint bound, so a cold cache still yields the relay), and passes
+    `iceServers` only for a non-empty `turn: "on"` list: janus.js reads `iceServers || default`, so an
+    empty list would drop even its default STUN server. A hung `/api/ice` with the service worker in
+    control still joins with a clean console (tested), so `sw.js` passes it through unchanged.
   - A missing key = ONE WARN; the drop-in and the Janus block are then removed.
 - **A box with `STRIH_HTTPS_PUBLIC=no`** installs nothing, removes a leftover TURN drop-in / Janus block,
-  and names (never removes) a leftover tunnel unit.
+  and names (never removes) a leftover tunnel unit; item 45 FAILs that unit while it is enabled or active
+  (it still publishes the box).
+- **Known limit of the conditional drop-in:** a key file removed by hand later fails the next hub start
+  (`LoadCredential=` of a missing file) until step 16i runs again; remove it only through step 16i.
 - **Item 45's two rows** (`strih_interkom_public_grade_rows`, NOTE on a `no` box):
 
 | Row | Grades |
@@ -176,13 +186,18 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
 | `(https-tunnel)` | the token file (owner 600), the unit = its render, enabled + active, cloudflared's own `http://127.0.0.1:20241/ready` = 200 with `readyConnections` >= 1 |
 | `(https-turn)` | the key file (owner 600), the hub drop-in = its render, janus.jcfg's managed block (`--check`), the hub's `/api/turn-rest` = 200 carrying a `turn:` / `turns:` uri (a 404 names the hub's reason) |
 
-- **Security notes for the supervisor** (outside this lane): through the tunnel the WHOLE interkom
-  site is public, `/api/state` and `/api/ice` (short-lived TURN credentials, inherent to browser TURN)
-  included. The Janus audiobridge room has no pin, so anyone with the URL can listen; a pin / an Access
-  policy is an owner decision.
+- **OPEN SECURITY DECISION -- do not route the public hostnames before it is made** (raised on the
+  ticket as a `Design-question:`): through the tunnel the WHOLE interkom site is public, `/api/state`,
+  `/api/ice` (short-lived TURN credentials) and the `/janus` WebSocket included. The audiobridge room has
+  no pin, so anyone with the URL can LISTEN to and TALK into the crew's headsets, and because the room
+  allows plain-RTP participants (the hub's own leg), an internet WebSocket client could join with
+  `rtp:{ip,port}` and make Janus stream to any host (a UDP reflection). The repo's own Cloudflare
+  precedent (bkshading, issue 808) requires Cloudflare Access and fails closed without its marker. The
+  options (Access on the hostnames + a fail-closed row, a room pin, refusing a plain-RTP join on the
+  public path) are the main's / owner's call; item 45 today grades a tunnel without access control OK.
 
 **The supervisor live runbook (issue 1453, after the merge):**
-1. Cloudflare: create one tunnel per strih box, route its public hostnames (the box's intercom names ->
+1. FIRST settle the open security decision above. Then Cloudflare: create one tunnel per strih box, route its public hostnames (the box's intercom names ->
    `https://127.0.0.1:443`, originServerName = the first name, HTTP/1.1 upgrade allowed for `/janus`),
    and a Realtime TURN key.
 2. Place the token: pipe it from the secret store over ssh stdin into
