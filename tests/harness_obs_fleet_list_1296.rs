@@ -179,9 +179,10 @@ fn fleet_boxes_genlock_lock_excludes_retired_imag_1316() {
     // issue 1317: strih-snv (the Linux strih notebook) also joins genlock-lock (a linux-genlock box
     // that locks every input to the fleet clock), appended after resolume.
     // issue 1317 (M4): the Windows strih row is retired; strih-snv takes the strih slot at .202.
+    // issue 1441: the PP Linux OBS boxes (traveling, paged only while home) follow resolume.
     assert_eq!(
         boxes("genlock-lock"),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
     // A retired imag must not appear in ANY facet roster.
     for facet in [

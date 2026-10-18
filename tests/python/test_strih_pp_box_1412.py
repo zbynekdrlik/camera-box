@@ -174,9 +174,23 @@ def test_the_pp_boxes_are_traveling_linux_name_rows(name):
     assert r.stdout.strip() == "%s.lan|linux-genlock|traveling" % name
 
 
-def test_the_pp_boxes_are_in_no_facet():
-    facets = ("audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze "
-              "ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles")
+# issue 1441 (owner 15.10.2026, one solution for PP and SNV): the PP boxes join the four content
+# watchdogs whose :8899 facets they serve; every other facet stays SNV-only for now.
+PP_WATCHED_FACETS = ("genlock-lock", "render-freeze", "audio-mixer", "obs-handles")
+
+
+@pytest.mark.parametrize("facet", PP_WATCHED_FACETS)
+def test_the_pp_boxes_are_in_the_content_watchdog_facets(facet):
+    r = _bash('obs_fleet_facet_members %s; echo; obs_fleet_boxes %s' % (facet, facet), sources=(FLEET,))
+    assert r.returncode == 0, r.stderr
+    members, boxes = r.stdout.splitlines()
+    assert members.split()[-2:] == ["strih-pp", "stream-pp"], members
+    assert boxes.endswith(" strih-pp|strih-pp.lan stream-pp|stream-pp.lan"), boxes
+
+
+def test_the_pp_boxes_are_in_no_other_facet():
+    facets = ("audio-lag av-step vb-matrix bundle-state network-reach obs-liveness "
+              "ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline")
     r = _bash('for f in %s; do printf "%%s=%%s\\n" "$f" "$(obs_fleet_facet_members "$f")"; done' % facets,
               sources=(FLEET,))
     assert r.returncode == 0, r.stderr
