@@ -204,10 +204,14 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
 3. Place `/etc/intercom-hub/turn.toml` (0600 root) the same way.
 4. Run step 16i (`setup-strih.sh --box <box>` or the next genlock deploy), then `systemctl restart
    intercom-hub`, and read item 45's `(https-tunnel)` + `(https-turn)` rows.
-5. DNS split horizon: public DNS for the intercom names = the tunnel CNAME; the venue MikroTik answers
-   the private address (slice 3, the netcfg baseline).
-6. Acceptance: a phone on mobile data joins and talks both ways; a phone on the venue WiFi still
-   connects with the internet unplugged.
+5. Public DNS for the intercom names = the box's tunnel CNAME (proxied). NO venue-router setting, ever
+   (owner 18.10.2026: "strih pc ma fungovat hocikde ma to byt plug and play zariadenie nechcem nic na
+   routry nastavovat"): every phone loads the page and the `/janus` socket through the tunnel; a phone on
+   the venue LAN still gets its AUDIO directly (Janus's LAN host candidate wins ICE before TURN). The
+   phone intercom therefore needs the venue's internet for the page/signalling; the cambox VBAN legs,
+   the cutters and the vestibule stay LAN-only.
+6. Acceptance: a phone on mobile data joins and talks both ways; a phone on the venue WiFi joins and its
+   audio pair is the direct LAN pair (not relay).
 
 ## The phone's Janus WebSocket goes through the hub's allowlist relay (issue 1453)
 
