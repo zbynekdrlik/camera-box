@@ -1506,6 +1506,11 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # (obs_burn_filter.py sweep-off — GetInputList over WS) on strih AND stream so no leaked burn
   # survives regardless of which input carries it, on strih/stream/imag (guard class issue 246/844).
   for _nsip in "$STRIH" "$STREAM" "$IMAG_IP"; do
+    # issue 1013: an acked-offline imag is never dialed (it printed a traceback every run, 18.10.2026)
+    if [ "$_nsip" = "$IMAG_IP" ] && [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
+      imag_leg_skip_note "[0/8] normalize burn sweep" "$IMAG_OFFLINE_ACK_REASON"
+      continue
+    fi
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_nsip" 2>&1 \
       | sed "s/^/    [normalize sweep] /" || true
   done
