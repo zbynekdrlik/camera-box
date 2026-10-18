@@ -55,14 +55,11 @@ const MIN_VAR_CACHE_MIB: u32 = 512;
 ///    kernel — the strongest guarantee that the box keeps booting the kernel it was provisioned with.
 #[test]
 fn provisioning_holds_the_appliance_kernel() {
-    // Assert the EXACT hold command (all three meta-packages in one line), not a bare
-    // `apt-mark hold` substring — the latter also matches the explanatory `// ... apt-mark hold`
-    // comment, so it would false-pass even if the real command were deleted.
-    // issue 1446: the held metas are the fleet kernel line's (rt_kernel_line_held_metas), the same
-    // set the base image holds; the GA 6.8 metas are no longer the appliance kernel.
+    // Assert the EXACT hold command (the lib call that names the fleet kernel line's metas), not a
+    // bare `apt-mark hold` substring, which an explanatory comment would also satisfy. issue 1446:
+    // the held metas are rt_kernel_line_held_metas, the set the base image holds; no `apt-mark hold`
+    // line may name the GA 6.8 meta `linux-image-generic` (a whole word, so `-hwe-24.04` is fine).
     const HOLD_CMD: &str = "apt-mark hold $(rt_kernel_line_held_metas)";
-    const GA_HOLD_CMD: &str =
-        "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
     for script in SETUP_SCRIPTS {
         let body = read(script);
         assert!(
@@ -70,9 +67,13 @@ fn provisioning_holds_the_appliance_kernel() {
             "{script} must run `{HOLD_CMD}` so a surprise kernel can never be installed on the \
              appliance (the auto-installed 6.8.0-124 kernel bricked CAM3/CAM4, #295)"
         );
+        let ga_hold = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && l.contains("apt-mark hold"))
+            .any(|l| l.split_whitespace().any(|w| w == "linux-image-generic"));
         assert!(
-            !body.contains(GA_HOLD_CMD),
-            "{script} must no longer hold the GA 6.8 metas (issue 1446)"
+            !ga_hold,
+            "{script} must no longer hold the GA 6.8 meta linux-image-generic (issue 1446)"
         );
     }
 }

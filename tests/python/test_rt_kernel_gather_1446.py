@@ -150,11 +150,56 @@ def _held_metas():
 def test_the_planner_install_step_holds_the_line_it_installs():
     cmd = _step_command("install-lowlatency")
     metas = _held_metas()
-    assert "apt-mark hold %s" % " ".join(metas) in cmd, cmd
-    assert cmd.index("apt-get install") < cmd.index("apt-mark hold"), cmd
+    work = cmd[cmd.index("_rt_work() {"):cmd.index("\n}", cmd.index("_rt_work() {"))]
+    assert "linux-lowlatency-hwe-24.04 && apt-mark hold %s" % " ".join(metas) in work, work
 
 
-def test_setup_device_holds_the_line_from_the_lib():
-    src = (REPO / "scripts" / "setup-device.sh").read_text()
-    assert '. "$HERE/lib/rt-kernel-plan.sh"' in src
-    assert "apt-mark hold $(rt_kernel_line_held_metas)" in src
+def test_a_glob_that_matches_no_image_reads_no_stale(tmp_path):
+    db = {"linux-image-generic-hwe-24.04": "install ok installed", "lowlatency-kernel": "install ok installed"}
+    f = _gather(tmp_path, db)
+    assert f["stale"] == "-", f
+
+
+def test_an_unsigned_image_never_enters_the_stale_set(tmp_path):
+    # review: the glob also matches linux-image-unsigned-<ver>-generic; as a stale entry it named
+    # linux-modules-unsigned-... packages that do not exist, and apt refused the purge
+    db = dict(CAM2, **{"linux-image-unsigned-6.8.0-142-generic": "install ok installed"})
+    f = _gather(tmp_path, db)
+    assert f["stale"].split(",") == ["6.8.0-142-generic", "linux-image-generic"], f
+
+
+@pytest.mark.parametrize("status", ["install ok triggers-pending", "install ok triggers-awaited",
+                                    "hold ok triggers-pending"])
+def test_a_package_with_pending_triggers_is_installed(status):
+    # its files are unpacked and configured; only a trigger (initramfs) has not run yet
+    r = subprocess.run(["bash", "-c", 'set -euo pipefail; . "$1"; rt_kernel_pkg_installed "$2" && echo yes || echo no',
+                        "h", str(LIB), status], capture_output=True, text=True, timeout=30)
+    assert r.stdout.strip() == "yes", (status, r.stdout, r.stderr)
+
+
+def _unheld(tmp_path, db):
+    d = _stub_dir(tmp_path, db)
+    env = dict(os.environ, PATH="%s:%s" % (d, os.environ["PATH"]), FAKE_DPKG_DB=str(tmp_path / "db.json"))
+    r = subprocess.run(["bash", "-c", 'set -euo pipefail; . "$1"; rt_kernel_line_unheld_metas', "h", str(LIB)],
+                       capture_output=True, text=True, env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.split()
+
+
+def test_unheld_metas_names_an_installed_line_meta_that_is_not_held(tmp_path):
+    db = {"linux-lowlatency-hwe-24.04": "install ok installed", "linux-image-generic-hwe-24.04": "hold ok installed",
+          "linux-headers-generic-hwe-24.04": "hold ok installed", "lowlatency-kernel": "install ok installed"}
+    assert _unheld(tmp_path, db) == ["linux-lowlatency-hwe-24.04", "lowlatency-kernel"]
+
+
+def test_unheld_metas_is_empty_when_every_installed_meta_is_held_or_absent(tmp_path):
+    db = {"linux-lowlatency-hwe-24.04": "hold ok installed", "linux-image-generic-hwe-24.04": "hold ok installed",
+          "linux-headers-generic-hwe-24.04": "hold ok not-installed", "lowlatency-kernel": "hold ok installed"}
+    assert _unheld(tmp_path, db) == []
+
+
+def test_the_lib_sources_alone_under_strict_mode_from_any_cwd(tmp_path):
+    # setup-device sources it under set -euo pipefail; its lazy sibling loads must resolve by path
+    r = subprocess.run(["bash", "-c", 'set -euo pipefail; cd "$2"; . "$1"; declare -F ro_window_close_cmds ro_root_mount_mode',
+                        "h", str(LIB), str(tmp_path)], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stdout.split() == ["ro_window_close_cmds", "ro_root_mount_mode"], r.stderr

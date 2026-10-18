@@ -768,6 +768,36 @@ def test_rt_kernel_runbook_step_whose_work_fails_still_puts_the_root_back_read_o
     assert fail and "rc=100" in fail[-1], proc.stderr
 
 
+_RT_LINE_METAS = "linux-lowlatency-hwe-24.04 linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 lowlatency-kernel"
+
+
+def test_rt_kernel_install_step_holds_the_line_inside_the_window_after_the_install(tmp_path):
+    # issue 1446: the install step re-holds the fleet kernel line, after the install, before the close
+    box = _rt_box(tmp_path)
+    proc = run_text(box, _rt_text("install-lowlatency"))
+    calls = log(box)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    hold = index(calls, "apt-mark hold " + _RT_LINE_METAS, index(calls, "apt-get install"))
+    assert calls[hold].endswith("root=rw"), "\n".join(calls)
+    index(calls, "mount -o remount,ro / root=rw", hold)
+    assert root(box) == "ro"
+
+
+def test_rt_kernel_install_step_holds_nothing_when_the_install_fails(tmp_path):
+    box = _rt_box(tmp_path)
+    proc = run_text(box, _rt_text("install-lowlatency"), FAKE_APT_GET_RC="100")
+    assert proc.returncode != 0
+    assert not [c for c in log(box) if c.startswith("apt-mark")], "\n".join(log(box))
+
+
+def test_rt_kernel_install_step_whose_hold_fails_fails_the_step_and_closes(tmp_path):
+    box = _rt_box(tmp_path)
+    proc = run_text(box, _rt_text("install-lowlatency"), FAKE_APT_MARK_RC="1")
+    assert proc.returncode != 0 and root(box) == "ro", proc.stdout + proc.stderr
+    fail = [ln for ln in proc.stderr.splitlines() if ln.startswith("FAIL") and "install-lowlatency" in ln]
+    assert fail and "rc=1" in fail[-1], proc.stderr
+
+
 def test_rt_kernel_runbook_step_on_a_busy_root_fails_loud_naming_the_writer(tmp_path):
     box = _rt_box(tmp_path)
     proc = run_text(box, _rt_text("safe-grub-regen"), FAKE_RO_FAIL="1")
