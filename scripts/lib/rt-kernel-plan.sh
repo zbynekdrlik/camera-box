@@ -99,7 +99,7 @@ gd="${gd:-0}"; gd="${gd%% *}"
 kr="$(uname -r)"; stale=""
 for p in $(dpkg-query -W -f='${Package}|${Status}\n' "linux-image-*-generic" 2>/dev/null |
   while IFS='|' read -r n st; do
-    case "$n" in linux-image-[0-9]*) rt_kernel_pkg_installed "$st" && printf '%s\n' "$n" ;; esac
+    case "$n" in linux-image-[0123456789]*) rt_kernel_pkg_installed "$st" && printf '%s\n' "$n" ;; esac
   done); do
   v="${p#linux-image-}"; [ "$v" = "$kr" ] && continue
   stale="${stale:+$stale,}$v"
