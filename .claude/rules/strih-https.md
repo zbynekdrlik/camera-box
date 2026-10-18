@@ -210,8 +210,17 @@ venue can accept an inbound connection. Design issuecomment-6250479059, Approach
    the venue LAN still gets its AUDIO directly (Janus's LAN host candidate wins ICE before TURN). The
    phone intercom therefore needs the venue's internet for the page/signalling; the cambox VBAN legs,
    the cutters and the vestibule stay LAN-only.
+   **Before the switch, list the zone's Redirect Rules / Page Rules for the intercom names**: the
+   VDO.Ninja era left two dynamic redirects (`interkom*` -> vdo.ninja) that run BEFORE the tunnel, so a
+   switched name still bounced to VDO.Ninja (18.10.2026). They were DISABLED (never deleted, backup in
+   dev1 `~/.config/camera-box/interkom-public/redirect-rules-backup.json`); the DNS rollback lives next
+   to it in `dns-rollback.json`.
 6. Acceptance: a phone on mobile data joins and talks both ways; a phone on the venue WiFi joins and its
-   audio pair is the direct LAN pair (not relay).
+   audio pair is the direct LAN pair (not relay). Pre-check from dev1 without a phone: Playwright
+   with an init script that forces `iceTransportPolicy: 'relay'` on every `RTCPeerConnection`, open the
+   name, read `bridge.webrtcStuff.pc.getStats()` (the page's script-level `bridge`, not `window.bridge`):
+   the nominated pair must be `relay` local + inbound audio packets rising (18.10.2026: all three names
+   relay-connected, 698-1023 packets, <= 2 lost).
 
 ## The phone's Janus WebSocket goes through the hub's allowlist relay (issue 1453)
 
