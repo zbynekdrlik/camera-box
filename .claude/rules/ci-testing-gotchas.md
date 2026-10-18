@@ -2,6 +2,7 @@
 paths:
   - ".github/workflows/*.yml"
   - "tests/*.rs"
+  - "intercom/hub/tests/*.rs"
   - "tests/python/*.py"
   - "scripts/version-integrity-gate.sh"
   - "scripts/drift-guard.sh"
@@ -1927,3 +1928,27 @@ on a RED commit that precedes the C change. That failure is the harness, not the
 Prove the behavioural RED on a scratch tree before committing: `git archive HEAD scripts` + the NEW
 C files + the new test, run there, and require assertion failures on the parser's output (issue
 1425: 8 failed / 1 passed). State that run on the ticket, since the RED commit alone cannot show it.
+
+## A test that pins a JSON `\u` escape must ASSERT the escape is in the frame text (issue 1453)
+
+The first escaped-key pin of the hub's Janus allowlist (`r\u0074p` must be read as `rtp`) landed in
+the file as a plain `"rtp"`: the escape was decoded somewhere on the way through a Python patch
+script, and the test still passed, proving nothing (a fresh-context review caught it with `cat -A`).
+Write the escape with an escaped backslash in a normal Rust string (`"\"r\\u0074p\""`), and assert
+it survives: `assert!(frame.contains("r\\u0074p"))`. Then a decoded write fails loudly. The same holds
+for any fixture whose point is an escape sequence (`\t`, `\n`, `\u`): check it with `grep -n 'u0074'`
+after writing, never trust the patch script.
+
+## A pure hub module that uses serde_json runs under plain rustc: build serde_json from the registry (issue 1453)
+
+`intercom/hub/src/janus_ws_guard.rs` needs only serde_json, so its real test file runs locally with
+no cargo. serde_json 1.0.15x depends on `serde_core`, `itoa`, `memchr` and `zmij`, and both
+`serde_core` and `serde_json` (and `zmij`) have build scripts. Per crate: compile its `build.rs` with
+rustc, run it with `OUT_DIR`, `CARGO_PKG_VERSION_PATCH`, `TARGET`, `RUSTC`, `CARGO_CFG_TARGET_ARCH`,
+`CARGO_CFG_TARGET_POINTER_WIDTH` and `CARGO_MANIFEST_DIR` set, turn its `cargo:rustc-cfg=` lines into
+`--cfg` args, and build the lib as an rlib with `OUT_DIR` still set (serde_core `include!`s a
+generated `private.rs`). Features: `std` + `result` + `alloc` on serde_core, `std` on serde_json and
+memchr. Then a root with `extern crate self as intercom_hub;` + `#[path]` the module and the test
+file, `rustc --test --extern serde_json=...` and `clippy-driver --test -D warnings` on it. Keep the
+builder in a script FILE (the worktree guard refuses the inline shape).
+
