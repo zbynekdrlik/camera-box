@@ -169,6 +169,17 @@ def test_preempt_full_is_a_whole_word_never_a_substring():
     assert rc == 0, out
 
 
+def test_the_last_preempt_token_wins_like_the_kernel_reads_it():
+    rc, out = _verdict(_block(cmdline=CMDLINE_LL + " preempt=none"))
+    assert rc != 0, out
+    assert any("preempt=full" in f and "'none'" in f for f in _fails(out)), out
+    rc, out = _verdict(_block(cmdline="ro preempt=none preempt=full quiet"))
+    assert rc == 0, out
+    # a glob-like token is read as text, never expanded against the working directory
+    rc, out = _verdict(_block(cmdline="ro * /* preempt=full"))
+    assert rc == 0, out
+
+
 def test_a_removed_or_half_installed_meta_is_not_installed():
     for status in ("deinstall ok config-files", "install ok unpacked", "hold ok half-configured",
                    "unknown ok not-installed", "hold ok not-installed", ""):
@@ -181,7 +192,8 @@ def test_a_removed_or_half_installed_meta_is_not_installed():
 def test_the_image_dependency_is_read_through_version_constraints_and_alternatives():
     for deps in ("linux-image-7.0.0-38-generic (= 7.0.0-38.38~24.04.4), linux-firmware",
                  "linux-firmware, linux-image-7.0.0-38-generic | linux-image-unsigned-7.0.0-38-generic",
-                 "linux-image-7.0.0-38-generic"):
+                 "linux-image-7.0.0-38-generic",
+                 "linux-image-7.0.0-38-generic, linux-image-7.0.0-38-generic, linux-firmware"):
         rc, out = _verdict(_block(deps=deps))
         assert rc == 0, (deps, out)
 
@@ -203,9 +215,11 @@ def test_an_empty_cut_or_unreadable_read_fails_never_ok():
 
 
 def test_a_missing_fact_row_fails():
-    for missing in ("cmdline", "flavour", "hwe", "deps"):
+    for missing, row in (("cmdline", "cmdline"), ("flavour", "flavour"), ("hwe", "hwe"),
+                         ("deps", "hwe_depends")):
         rc, out = _verdict(_block(**{missing: None}))
-        assert rc != 0 and _fails(out), (missing, out)
+        assert rc != 0, (missing, out)
+        assert any(f"the {row} fact could not be read" in f for f in _fails(out)), (missing, out)
 
 
 # --- the gather (run locally against fake box tools) -------------------------------------------
@@ -371,6 +385,14 @@ def test_verify_device_aw_passes_the_line_and_fails_68_mismatch_and_unreadable()
     assert out.startswith("FAIL ") and "rc=255" in out, out
     out = _run_aw(_block(end=False))
     assert out.startswith("FAIL ") and "OK " not in out, out
+    # an unreadable read is not a reason to move the box: no rt-kernel-upgrade hint there
+    assert "rt-kernel-upgrade" not in out, out
+    out = _run_aw(_block(deps="linux-firmware"))
+    assert out.startswith("FAIL ") and "rt-kernel-upgrade" not in out, out
+    out = _run_aw(_block(cmdline=None))
+    lines = out.splitlines()
+    assert any("could not be read" in ln and "rt-kernel-upgrade" not in ln for ln in lines), out
+    assert any("preempt=full" in ln and "rt-kernel-upgrade" in ln for ln in lines), out
 
 
 def test_verify_device_aw_fails_an_empty_verdict_never_silently_passes():
@@ -416,6 +438,9 @@ def test_create_usb_verifies_the_line_inside_the_chroot():
     tail = setup[setup.find('echo "Verifying installation..."'):]
     assert 'rt_kernel_pkg_installed "$(dpkg-query -W -f=\'${Status}\' "$KERNEL_FLAVOUR"' in tail
     assert "preempt=full" in tail and "/boot/grub/grub.cfg" in tail
+    # the best-effort hold is CHECKED: every held meta must read `hold ok installed`
+    assert "for _m in $(rt_kernel_line_held_metas); do" in tail
+    assert '!= "hold ok installed" ]' in tail
 
 
 def test_create_usb_copies_the_lib_and_its_two_sourced_libs_and_checks_them_first():

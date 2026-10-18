@@ -156,13 +156,15 @@ _rt_line_image_from_depends() {
 
 # rt_kernel_line_verdict BLOCK -> grade one rt_kernel_line_gather_remote_snippet read. Prints ONE
 # `OK: ...` line (rc 0) when the flavour is installed (install|hold ok installed, through
-# rt_kernel_pkg_installed), the running kernel booted with preempt=full (a whole word of the
+# rt_kernel_pkg_installed), the running kernel booted with preempt=full (the LAST preempt= token of
+# the command line, the one the kernel takes; a whole word of the
 # command line) and `uname -r` is the image the installed HWE image meta depends on. Otherwise one
 # `FAIL: ...` line per broken fact (rc 1). Fail-closed: an empty, cut (no `end`) or kernel-less read
 # is one FAIL, never graded further; a missing fact row FAILs as unreadable. Pure.
 rt_kernel_line_verdict() {
   local block="${1:-}" line key val kernel="" cmdline="" flavour="" hwe="" deps="" fails="" target
-  local have_end=0 seen=" " flv hwem
+  local have_end=0 seen=" " flv hwem preempt="" tok
+  local -a toks=()
   flv="$(rt_kernel_flavour)"
   hwem="$(rt_kernel_hwe_image_meta)"
   while IFS= read -r line; do
@@ -194,10 +196,17 @@ rt_kernel_line_verdict() {
   if ! rt_kernel_pkg_installed "$flavour"; then
     fails="${fails}FAIL: $flv is not installed (dpkg Status '${flavour:-<none>}') -- this box is off the fleet kernel line (HWE + lowlatency-kernel)"$'\n'
   fi
-  case " $cmdline " in
-    *" preempt=full "*) ;;
-    *) fails="${fails}FAIL: the running kernel $kernel did not boot with preempt=full (the lowlatency-kernel boot mode)"$'\n' ;;
-  esac
+  # The kernel takes the LAST preempt= on its command line, so a later preempt=none overrides an
+  # earlier preempt=full. read -a splits without pathname expansion of a token.
+  IFS=$' \t' read -r -a toks <<<"$cmdline"
+  for tok in ${toks[@]+"${toks[@]}"}; do
+    case "$tok" in
+      preempt=*) preempt="${tok#preempt=}" ;;
+    esac
+  done
+  if [ "$preempt" != "full" ]; then
+    fails="${fails}FAIL: the running kernel $kernel did not boot with preempt=full (the lowlatency-kernel boot mode; last preempt= on the command line: '${preempt:-<none>}')"$'\n'
+  fi
   if ! rt_kernel_pkg_installed "$hwe"; then
     fails="${fails}FAIL: $hwem is not installed (dpkg Status '${hwe:-<none>}'), so no image depends on it -- this box is off the fleet kernel line"$'\n'
   elif ! target="$(_rt_line_image_from_depends "$deps")"; then

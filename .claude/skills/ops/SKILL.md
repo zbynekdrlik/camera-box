@@ -875,6 +875,8 @@ root → unbootable. Recovery was a dev1 chroot: `update-initramfs -c -k <ver>` 
 
 **Durable fix (PR #306, in provisioning `setup.sh` + `setup-device.sh`):**
 - `apt-mark hold linux-image-generic linux-headers-generic linux-generic` — **BEFORE** `apt-get upgrade`.
+  (Issue 1446: a create-usb-linux.sh image now runs the HWE lowlatency line and holds
+  `rt_kernel_line_held_metas` instead; verify-device `(aw)` grades the line.)
 - unattended upgrades OFF (`/etc/apt/apt.conf.d/20auto-upgrades` periodic=0 + kernel blacklist + masked).
 - every kernel gets an initrd BEFORE `update-grub` (loop + `/etc/kernel/postinst.d/zz-camera-box-initrd-guarantee`).
 - `GRUB_DEFAULT=saved` + validate the default grub.cfg menuentry has BOTH a kernel image AND an initrd

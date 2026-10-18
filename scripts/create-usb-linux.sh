@@ -10,8 +10,11 @@ set -euo pipefail
 # on cam5 + cam6, 2026-07-03):
 #   * FAIL-LOUD dep check (check_required_files) BEFORE any disk write — the script copies sibling
 #     files (lib/install-grub-efi.sh, lib/camera-box-grow-root.sh, ../systemd/…grow-root.service,
-#     lib/grub-fast-boot.sh) into the target; a MISSING sibling once broke the install mid-way AFTER
-#     partitioning (cam6).
+#     lib/grub-fast-boot.sh, and the issue-1446 kernel-line libs lib/rt-kernel-plan.sh +
+#     lib/ro-window.sh + lib/ro-root.sh) into the target; a MISSING sibling once broke the install
+#     mid-way AFTER partitioning (cam6).
+#   * The fleet kernel LINE (issue 1446): the chroot installs rt_kernel_flavour (HWE image +
+#     lowlatency-kernel, preempt=full) and holds its metas -- never the GA 6.8 line.
 #   * NO GRUB menu and NO countdown (#1394): timeout 0, style hidden, recordfail timeout 0 from
 #     lib/grub-fast-boot.sh, and the generated grub.cfg is graded before the image is accepted.
 #   * MASK systemd-networkd-wait-online in the chroot — unbounded, it stalled boot before
@@ -667,6 +670,13 @@ if ! grep -qw 'preempt=full' /boot/grub/grub.cfg 2>/dev/null; then
     echo "ERROR: issue 1446: /boot/grub/grub.cfg does not boot preempt=full (lowlatency-kernel missing?)"
     ERRORS=$((ERRORS+1))
 fi
+# ...and every meta of that line is HELD (the apt-mark hold above is best-effort; this is the check).
+for _m in $(rt_kernel_line_held_metas); do
+    if [ "$(dpkg-query -W -f='${Status}' "$_m" 2>/dev/null || true)" != "hold ok installed" ]; then
+        echo "ERROR: issue 1446: $_m is not held + installed -- apt could move the image's kernel"
+        ERRORS=$((ERRORS+1))
+    fi
+done
 
 # Check GRUB
 if [ ! -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]; then

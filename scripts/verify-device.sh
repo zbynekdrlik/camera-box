@@ -1877,7 +1877,10 @@ else
       _aw_fails=0
       while IFS= read -r _reason; do
         if [ -n "$_reason" ]; then
-          fail "fleet kernel line: ${_reason#FAIL: } -- move the box with scripts/rt-kernel-upgrade.sh --box $IP (reboot-class, owner-approved per box), never setup-device.sh (issue 1446)"
+          case "$_reason" in
+            *"could not be read"* | *"cannot read"*) fail "fleet kernel line: ${_reason#FAIL: } (issue 1446)" ;;
+            *) fail "fleet kernel line: ${_reason#FAIL: } -- move the box with scripts/rt-kernel-upgrade.sh --box $IP (reboot-class, owner-approved per box), never setup-device.sh (issue 1446)" ;;
+          esac
           _aw_fails=$((_aw_fails + 1))
         fi
       done <<<"$KLINE_VERDICT"
