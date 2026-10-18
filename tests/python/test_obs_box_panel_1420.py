@@ -35,7 +35,7 @@ def _bash(body, *args, env=None, box="stream-pp"):
 def test_the_config_is_one_bottom_panel_with_taskbar_tray_and_clock():
     r = _bash("obs_box_panel_tint2rc")
     cfg = dict(ln.split(" = ", 1) for ln in r.stdout.splitlines() if " = " in ln and not ln.startswith("#"))
-    assert cfg["panel_items"] == "TSC"            # a box with no known app: no launcher at all
+    assert cfg["panel_items"] == "TSEC"           # a box with no known app: no launcher; E = the layout item (issue 1441)
     assert cfg["panel_position"].startswith("bottom")
     assert cfg["panel_size"] == "100% 30"
     assert cfg["strut_policy"] == "follow_size"
@@ -84,7 +84,7 @@ def test_the_config_puts_the_launchers_in_front_of_the_taskbar(tmp_path):
     home, env = _apps_home(tmp_path)
     r = _bash('obs_box_panel_tint2rc "$1"', str(home), env=env)
     cfg = [ln for ln in r.stdout.splitlines() if not ln.startswith("#")]
-    assert "panel_items = LTSC" in cfg
+    assert "panel_items = LTSEC" in cfg
     apps = [ln.split(" = ", 1)[1] for ln in cfg if ln.startswith("launcher_item_app = ")]
     assert apps == [str(home / (".local/share/applications/obs-box-panel-%s.desktop" % i))
                     for i in ("obs", "shading", "restreamer", "rustdesk")]
@@ -136,6 +136,9 @@ class Box:
               ' *MainPID*) cat %s/pid 2>/dev/null;; esac\nexit 0\n' % (self.log, self.state, self.state, self.state))
         _exec(self.bin / "wmctrl", '#!/bin/bash\ncat %s/wm 2>/dev/null\nexit 0\n' % self.state)
         _exec(self.bin / "chown", '#!/bin/bash\nexit 0\n')
+        # issue 1441: the keyboard layout helper's installed path + a stand-in for its live `print` on :0
+        self.kbd_helper = tmp / "lib" / "camera-box" / "obs_box_kbd_layout.py"
+        _exec(self.bin / "kbdpy", '#!/bin/bash\ncat %s/kbd 2>/dev/null\nexit 0\n' % self.state)
         self.proc = tmp / "proc"
         (self.proc / "4242").mkdir(parents=True)
         os.symlink("/usr/bin/tint2", self.proc / "4242" / "exe")
@@ -144,7 +147,8 @@ class Box:
         return {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "STRIH_SESSION_APPS_EUID": "1000",
                 "OBS_BOX_PANEL_PROC": str(self.proc),
                 "OBS_BOX_PANEL_SYS_UNIT_DIR": str(self.tmp / "no-sys-units"),
-                "OBS_BOX_PANEL_RUSTDESK_BIN": str(self.tmp / "no-rustdesk")}
+                "OBS_BOX_PANEL_RUSTDESK_BIN": str(self.tmp / "no-rustdesk"),
+                "OBS_BOX_PANEL_KBD_HELPER": str(self.kbd_helper), "OBS_BOX_PANEL_KBD_PYTHON": str(self.bin / "kbdpy")}
 
     def with_obs(self):
         ud = self.home / ".config" / "systemd" / "user"
@@ -194,13 +198,15 @@ def _healthy(box):
     (box.state / "act").write_text("active\n")
     (box.state / "pid").write_text("4242\n")
     (box.state / "wm").write_text("0x01 -1 tint2.Tint2 strih-pp tint2\n0x02 0 obs.obs strih-pp OBS\n")
+    (box.state / "kbd").write_text("US\n")
 
 
-def test_a_healthy_panel_passes_six_rows(box):
+def test_a_healthy_panel_passes_seven_rows(box):
     _healthy(box)
     rows = _rows(box)
-    assert [st for st, _ in rows] == ["OK"] * 6, rows      # issue 1448: + (panel-discord) on the stream role
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "6"
+    # issue 1448: + (panel-discord) on the stream role; issue 1441: + (panel-kbd)
+    assert [st for st, _ in rows] == ["OK"] * 7, rows
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "7"
 
 
 def test_install_writes_the_obs_launcher_and_its_icon(box):
@@ -234,9 +240,11 @@ def test_each_broken_piece_fails_its_row(box):
     (box.state / "act").write_text("failed\n")
     (box.state / "wm").write_text("0x02 0 obs.obs strih-pp OBS\n")
     (box.state / "installed").unlink()
+    box.kbd_helper.write_text("# old\n")
     rows = dict((d.split(")", 1)[0][1:], st) for st, d in _rows(box))
     assert rows == {"panel-pkg": "FAIL", "panel-config": "FAIL", "panel-launchers": "OK", "panel-unit": "FAIL",
-                    "panel-discord": "FAIL", "panel-window": "FAIL"}   # the stub's dpkg state covers discord too
+                    "panel-discord": "FAIL", "panel-kbd": "FAIL",
+                    "panel-window": "FAIL"}   # the stub's dpkg state covers discord too
 
 
 def test_no_window_list_is_a_note_not_a_failure(box):
