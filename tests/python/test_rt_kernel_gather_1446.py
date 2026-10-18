@@ -129,3 +129,32 @@ def test_the_driver_sends_the_lib_snippet_not_an_inline_copy():
     src = DRIVER.read_text()
     assert '"$(rt_kernel_gather_remote_snippet)"' in src
     assert "install ok installed" not in src
+
+
+# --- the fleet kernel line is HELD wherever it is installed (issue 1446 follow-up) ---------------
+
+def _step_command(token):
+    r = subprocess.run(["bash", "-c", 'set -euo pipefail; . "$1"; rt_kernel_step_command "$2"', "h", str(LIB), token],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def _held_metas():
+    r = subprocess.run(["bash", "-c", 'set -euo pipefail; . "$1"; rt_kernel_line_held_metas', "h", str(LIB)],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.split()
+
+
+def test_the_planner_install_step_holds_the_line_it_installs():
+    cmd = _step_command("install-lowlatency")
+    metas = _held_metas()
+    assert "apt-mark hold %s" % " ".join(metas) in cmd, cmd
+    assert cmd.index("apt-get install") < cmd.index("apt-mark hold"), cmd
+
+
+def test_setup_device_holds_the_line_from_the_lib():
+    src = (REPO / "scripts" / "setup-device.sh").read_text()
+    assert '. "$HERE/lib/rt-kernel-plan.sh"' in src
+    assert "apt-mark hold $(rt_kernel_line_held_metas)" in src

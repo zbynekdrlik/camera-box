@@ -58,13 +58,21 @@ fn provisioning_holds_the_appliance_kernel() {
     // Assert the EXACT hold command (all three meta-packages in one line), not a bare
     // `apt-mark hold` substring — the latter also matches the explanatory `// ... apt-mark hold`
     // comment, so it would false-pass even if the real command were deleted.
-    const HOLD_CMD: &str = "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
+    // issue 1446: the held metas are the fleet kernel line's (rt_kernel_line_held_metas), the same
+    // set the base image holds; the GA 6.8 metas are no longer the appliance kernel.
+    const HOLD_CMD: &str = "apt-mark hold $(rt_kernel_line_held_metas)";
+    const GA_HOLD_CMD: &str =
+        "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
     for script in SETUP_SCRIPTS {
         let body = read(script);
         assert!(
             body.contains(HOLD_CMD),
             "{script} must run `{HOLD_CMD}` so a surprise kernel can never be installed on the \
              appliance (the auto-installed 6.8.0-124 kernel bricked CAM3/CAM4, #295)"
+        );
+        assert!(
+            !body.contains(GA_HOLD_CMD),
+            "{script} must no longer hold the GA 6.8 metas (issue 1446)"
         );
     }
 }
