@@ -140,9 +140,12 @@
 # strih, scripts/strih-boxes/strih-pp.env) and stream-pp (the PP stream box). They dial their NAMES:
 # dev1 reaches the PP LAN as 10.76.8.x through the companion-pp subnet router while the boxes carry
 # 10.77.8.x, so an IP row would never match the box's own STRIH_IP. `traveling` (polled only while
-# their OBS-WS answers) and in NO facet yet: no dev1 watchdog polls or pages them until a facet adds them.
+# their OBS-WS answers).
 # issue 1426: resolume-pp (the PP CG PC, Windows, its own cg OBS) joins as a traveling NAME row, and
-# the three PP boxes are members of the `build-parity` facet only (the fleet version-parity pass).
+# the three PP boxes are members of the `build-parity` facet (the fleet version-parity pass).
+# issue 1441 (owner 15.10.2026, one solution for PP and SNV): strih-pp + stream-pp also join the four
+# content watchdogs whose :8899 facets they serve -- genlock-lock, render-freeze, audio-mixer,
+# obs-handles -- each polled/paged only while home (obs_fleet_is_home / obs_fleet_poll_now).
 OBS_FLEET="${OBS_FLEET:-strih-snv|10.77.9.202|linux-genlock|always
 stream-snv|10.77.9.204|windows-genlock|always
 imag|10.77.9.182|linux-genlock|retired
@@ -243,16 +246,16 @@ obs_fleet_facet_members() {
     bundle-state)  printf 'strih-snv stream-snv resolume-snv' ;;
     network-reach) printf 'strih-snv stream-snv resolume-snv' ;;
     obs-liveness)  printf 'strih-snv stream-snv resolume-snv' ;;
-    genlock-lock)  printf 'strih-snv stream-snv imag resolume-snv' ;;
-    render-freeze) printf 'strih-snv stream-snv resolume-snv' ;;
+    genlock-lock)  printf 'strih-snv stream-snv imag resolume-snv strih-pp stream-pp' ;;   # issue 1441: + the PP Linux boxes
+    render-freeze) printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;
     ndi-portmap)   printf 'strih-snv' ;;
     obs-session)   printf 'stream-snv resolume-snv' ;;
     burn-reconcile) printf 'strih-snv stream-snv' ;;
     rig-restore)   printf 'strih-snv stream-snv' ;;
     ndi-sender)    printf 'strih-snv stream-snv resolume-snv' ;;
     win-baseline)  printf 'stream-snv resolume-snv' ;;   # issue 1357: the Windows OBS-box baseline (win-baseline-check.sh)
-    audio-mixer)   printf 'strih-snv stream-snv resolume-snv' ;;   # issue 1381: mixer real time + VBAN pacer loss
-    obs-handles)   printf 'strih-snv stream-snv resolume-snv' ;;   # issue 1406: the OBS process handle / fd count
+    audio-mixer)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1381: mixer real time + VBAN pacer loss
+    obs-handles)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1406: the OBS process handle / fd count
     build-parity)  printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp' ;;   # issue 1426: one OBS genlock build across both venues
     *)
       echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles build-parity)" >&2
