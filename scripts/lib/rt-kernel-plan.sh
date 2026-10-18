@@ -35,6 +35,9 @@
 #   rt_kernel_readiness_verdict RUN CAND
 #   rt_kernel_upgrade_plan RUN INST GEN GRUBDEF [CAND] [STALE]
 #   rt_kernel_step_command TOKEN [STALE]
+#   rt_kernel_hwe_image_meta / rt_kernel_line_held_metas / rt_kernel_line_gather_remote_snippet /
+#   rt_kernel_line_verdict BLOCK  -> the fleet kernel LINE create-usb-linux.sh installs + holds and
+#                                    verify-device.sh (aw) grades (issue 1446; tests/python/test_kernel_line_1446.py)
 
 # The one decided kernel flavour -- referenced by every other function + the driver + the runbook.
 # STEP 1: the free official-archive low-latency meta (no Ubuntu Pro), matching the imag-nb precedent.
@@ -84,6 +87,130 @@ rt_kernel_pkg_installed "$(_rt_st linux-image-generic)" && stale="${stale:+$stal
 stale="${stale:--}"
 echo "$run $inst ${gen} ${gd} ${cand} ${stale}"
 RT_GATHER
+}
+
+# --- the fleet kernel LINE (issue 1446): what create-usb-linux.sh installs + holds, what
+# verify-device.sh (aw) grades. One kernel decision (rt_kernel_flavour above) for the planner, the
+# base image and the acceptance gate.
+
+# rt_kernel_hwe_image_meta -> the HWE generic image meta the flavour depends on; its Depends names
+# the ONE kernel image the fleet line runs (linux-image-<ver>-generic).
+rt_kernel_hwe_image_meta() { printf 'linux-image-generic-hwe-24.04'; }
+
+# rt_kernel_line_held_metas -> the metas of the fleet kernel line create-usb-linux.sh apt-HOLDs
+# (space-separated): the flavour, the HWE image + headers metas it depends on, and the
+# lowlatency-kernel config package (preempt=full). Held so no apt run moves the kernel unasked.
+rt_kernel_line_held_metas() {
+  printf '%s %s linux-headers-generic-hwe-24.04 lowlatency-kernel' \
+    "$(rt_kernel_flavour)" "$(rt_kernel_hwe_image_meta)"
+}
+
+# rt_kernel_line_gather_remote_snippet [CMDLINE_PATH] -> the read-only shell text verify-device.sh
+# (aw) sends to a cambox over ONE ssh call. It prints RAW facts, one `key=value` row each, graded on
+# dev1 by rt_kernel_line_verdict:
+#   kernel=<uname -r>   cmdline=<the boot command line>
+#   flavour=<dpkg Status of the flavour>   hwe=<dpkg Status of the HWE image meta>
+#   hwe_depends=<Depends of the HWE image meta>   end
+# An unknown package reads an empty value. CMDLINE_PATH (default /proc/cmdline) lets a test plant a
+# command line. Nothing here writes.
+rt_kernel_line_gather_remote_snippet() {
+  printf '_rtl_cmdline=%q\n_rtl_flavour=%q\n_rtl_hwe=%q\n' \
+    "${1:-/proc/cmdline}" "$(rt_kernel_flavour)" "$(rt_kernel_hwe_image_meta)"
+  cat <<'RT_LINE_GATHER'
+_rtl() { dpkg-query -W -f="\${$1}" "$2" 2>/dev/null || true; }
+printf 'kernel=%s\n' "$(uname -r 2>/dev/null)"
+printf 'cmdline=%s\n' "$(cat "$_rtl_cmdline" 2>/dev/null || true)"
+printf 'flavour=%s\n' "$(_rtl Status "$_rtl_flavour")"
+printf 'hwe=%s\n' "$(_rtl Status "$_rtl_hwe")"
+printf 'hwe_depends=%s\n' "$(_rtl Depends "$_rtl_hwe")"
+echo end
+RT_LINE_GATHER
+}
+
+# _rt_line_image_from_depends DEPENDS -> the kernel version (uname -r form) of the ONE
+# linux-image-<digit>... entry in a dpkg Depends value, read through `(= ver)` constraints and
+# `a | b` alternatives; rc 1 (nothing printed) when there is none or more than one. Pure.
+_rt_line_image_from_depends() {
+  local deps="${1:-}" item alt found="" n=0 IFS
+  local LC_ALL=C
+  IFS=','
+  for item in $deps; do
+    IFS='|'
+    for alt in $item; do
+      alt="${alt%%(*}"
+      alt="${alt//[[:space:]]/}"
+      if [[ $alt =~ ^linux-image-([0123456789][^[:space:]]*)$ ]]; then
+        if [ "${BASH_REMATCH[1]}" != "$found" ]; then
+          found="${BASH_REMATCH[1]}"
+          n=$((n + 1))
+        fi
+      fi
+    done
+    IFS=','
+  done
+  if [ "$n" -ne 1 ]; then
+    return 1
+  fi
+  printf '%s' "$found"
+}
+
+# rt_kernel_line_verdict BLOCK -> grade one rt_kernel_line_gather_remote_snippet read. Prints ONE
+# `OK: ...` line (rc 0) when the flavour is installed (install|hold ok installed, through
+# rt_kernel_pkg_installed), the running kernel booted with preempt=full (a whole word of the
+# command line) and `uname -r` is the image the installed HWE image meta depends on. Otherwise one
+# `FAIL: ...` line per broken fact (rc 1). Fail-closed: an empty, cut (no `end`) or kernel-less read
+# is one FAIL, never graded further; a missing fact row FAILs as unreadable. Pure.
+rt_kernel_line_verdict() {
+  local block="${1:-}" line key val kernel="" cmdline="" flavour="" hwe="" deps="" fails="" target
+  local have_end=0 seen=" " flv hwem
+  flv="$(rt_kernel_flavour)"
+  hwem="$(rt_kernel_hwe_image_meta)"
+  while IFS= read -r line; do
+    case "$line" in
+      end) have_end=1; continue ;;
+      *=*) key="${line%%=*}"; val="${line#*=}" ;;
+      *) continue ;;
+    esac
+    case "$key" in
+      kernel) kernel="$val" ;;
+      cmdline) cmdline="$val" ;;
+      flavour) flavour="$val" ;;
+      hwe) hwe="$val" ;;
+      hwe_depends) deps="$val" ;;
+      *) continue ;;
+    esac
+    seen="$seen$key "
+  done <<<"$block"
+  if [ "$have_end" -ne 1 ] || [ -z "$kernel" ]; then
+    printf 'FAIL: the kernel-line read was cut or could not be read (no end row or no running kernel) -- cannot certify this box runs the fleet kernel line\n'
+    return 1
+  fi
+  for key in cmdline flavour hwe hwe_depends; do
+    case "$seen" in
+      *" $key "*) ;;
+      *) fails="${fails}FAIL: the $key fact could not be read -- cannot certify the fleet kernel line on $kernel"$'\n' ;;
+    esac
+  done
+  if ! rt_kernel_pkg_installed "$flavour"; then
+    fails="${fails}FAIL: $flv is not installed (dpkg Status '${flavour:-<none>}') -- this box is off the fleet kernel line (HWE + lowlatency-kernel)"$'\n'
+  fi
+  case " $cmdline " in
+    *" preempt=full "*) ;;
+    *) fails="${fails}FAIL: the running kernel $kernel did not boot with preempt=full (the lowlatency-kernel boot mode)"$'\n' ;;
+  esac
+  if ! rt_kernel_pkg_installed "$hwe"; then
+    fails="${fails}FAIL: $hwem is not installed (dpkg Status '${hwe:-<none>}'), so no image depends on it -- this box is off the fleet kernel line"$'\n'
+  elif ! target="$(_rt_line_image_from_depends "$deps")"; then
+    fails="${fails}FAIL: cannot read the ONE kernel image $hwem depends on (Depends '${deps:-<none>}')"$'\n'
+  elif [ "$kernel" != "$target" ]; then
+    fails="${fails}FAIL: the running kernel $kernel is not $target, the image $hwem depends on (a newer HWE image installed but not booted, or another kernel running)"$'\n'
+  fi
+  if [ -n "$fails" ]; then
+    printf '%s' "$fails"
+    return 1
+  fi
+  printf 'OK: %s booted with preempt=full = the image %s depends on; %s %s\n' \
+    "$kernel" "$hwem" "$flv" "$flavour"
 }
 
 # The ONE verified close of a read-only-root rw window (issue 1407), printed into every mutating

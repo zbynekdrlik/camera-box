@@ -172,8 +172,10 @@ therefore sits after `(ak)`, BEFORE `(ar)`. `(at)` (issue 1428, the zram swap) s
 before `(as)` (`test_rig_timezone_1415.py` EXECUTES `(as)..(ar)`). `(au)` (issue 1367, the housekeeping
 cpus) sits after `(ak)`, before `(at)` (`test_cambox_zram_1428.py` takes `(at)..(as)` as its block).
 `(av)` (issue 1446, display GPU driven) sits after `(ak)`, before `(au)`
-(`tests/python/test_display_gpu_1446.py` executes the `(av)..(au)` block); the next free letter is
-`(aw)`.
+(`tests/python/test_display_gpu_1446.py` executes the `(av)..(au)` block). `(aw)` (issue 1446, the
+fleet kernel line) sits after `(ak)`, before `(av)` (`tests/python/test_kernel_line_1446.py`
+executes `(aw)` up to the next `\n# (` marker, and `(ak)`'s own pytest slice still ends at the next
+marker, now `(aw)`); the next free letter is `(ax)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 

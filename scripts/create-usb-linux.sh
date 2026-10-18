@@ -118,6 +118,9 @@ check_requirements() {
 #   $SCRIPT_DIR/lib/camera-box-grow-root.sh          (installed to /usr/local/sbin, #369)
 #   $SCRIPT_DIR/../systemd/camera-box-grow-root.service (installed as a systemd unit, #369)
 #   $SCRIPT_DIR/lib/grub-fast-boot.sh                (sourced in the chroot, #1394)
+#   $SCRIPT_DIR/lib/rt-kernel-plan.sh                (sourced in the chroot, issue 1446: the kernel
+#   $SCRIPT_DIR/lib/ro-window.sh                      line; it sources these two from its own dir)
+#   $SCRIPT_DIR/lib/ro-root.sh
 check_required_files() {
     log "Checking required sibling files..."
     local f
@@ -125,7 +128,10 @@ check_required_files() {
         "$SCRIPT_DIR/lib/install-grub-efi.sh" \
         "$SCRIPT_DIR/lib/camera-box-grow-root.sh" \
         "$SCRIPT_DIR/../systemd/camera-box-grow-root.service" \
-        "$SCRIPT_DIR/lib/grub-fast-boot.sh"; do
+        "$SCRIPT_DIR/lib/grub-fast-boot.sh" \
+        "$SCRIPT_DIR/lib/rt-kernel-plan.sh" \
+        "$SCRIPT_DIR/lib/ro-window.sh" \
+        "$SCRIPT_DIR/lib/ro-root.sh"; do
         [[ -f "$f" ]] || error "Missing required file: $f — refusing to partition. Run \
 create-usb-linux.sh from a full repo checkout (its lib/ and systemd/ siblings MUST be present)."
     done
@@ -385,10 +391,21 @@ APT_CONF_EOF
 # Update package list
 apt-get update
 
+# Issue 1446: the image boots the fleet kernel LINE, never the GA 6.8 one: the HWE image +
+# lowlatency-kernel (preempt=full), installed through the ONE kernel decision rt_kernel_flavour in
+# scripts/lib/rt-kernel-plan.sh (the same flavour scripts/rt-kernel-upgrade.sh moves a live box to and
+# verify-device.sh (aw) grades). An N150 GPU (8086:46d4) has no i915 driver on 6.8.
+source /tmp/rt-kernel-plan.sh
+KERNEL_FLAVOUR="$(rt_kernel_flavour)"
+if [ -z "$KERNEL_FLAVOUR" ]; then
+    echo "ERROR: issue 1446: rt_kernel_flavour named no kernel package"
+    exit 1
+fi
+
 # Install essential packages
 # Note: systemd-networkd has built-in DHCP, dhcpcd is backup
 apt-get install -y \
-    linux-image-generic \
+    "$KERNEL_FLAVOUR" \
     grub-efi-amd64 \
     efibootmgr \
     openssh-server \
@@ -443,7 +460,10 @@ systemctl enable avahi-daemon
 # kernel can never be installed, and disable unattended upgrades — an active unattended-upgrades
 # auto-installed the initrd-less kernel that bricked CAM3/CAM4. (Same idiom as setup-device.sh's
 # kernel-pin step; scripts/setup.sh, which used to carry this too, was retired in #563.)
-apt-mark hold linux-image-generic linux-headers-generic linux-generic 2>/dev/null || true
+# Issue 1446: hold the metas of the kernel line installed above (the HWE image + headers metas, the
+# lowlatency meta and lowlatency-kernel), from the same lib -- never the GA metas this image no
+# longer carries.
+apt-mark hold $(rt_kernel_line_held_metas) 2>/dev/null || true
 
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'AUTOUPG_EOF'
 // Camera-box appliance: never auto-update. An unattended kernel install without an initrd bricked
@@ -637,6 +657,17 @@ if [ ! -f /boot/vmlinuz-* ]; then
     ERRORS=$((ERRORS+1))
 fi
 
+# Check the fleet kernel line (issue 1446): the flavour installed, and the generated grub.cfg boots
+# preempt=full (lowlatency-kernel's /etc/default/grub.d drop-in, read by update-grub above).
+if ! rt_kernel_pkg_installed "$(dpkg-query -W -f='${Status}' "$KERNEL_FLAVOUR" 2>/dev/null || true)"; then
+    echo "ERROR: issue 1446: $KERNEL_FLAVOUR is not installed -- the image is off the fleet kernel line"
+    ERRORS=$((ERRORS+1))
+fi
+if ! grep -qw 'preempt=full' /boot/grub/grub.cfg 2>/dev/null; then
+    echo "ERROR: issue 1446: /boot/grub/grub.cfg does not boot preempt=full (lowlatency-kernel missing?)"
+    ERRORS=$((ERRORS+1))
+fi
+
 # Check GRUB
 if [ ! -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]; then
     echo "ERROR: GRUB EFI not installed!"
@@ -674,12 +705,17 @@ SETUP_EOF
     cp "$SCRIPT_DIR/lib/install-grub-efi.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh"
     # #1394: the fast-boot GRUB settings + the grub.cfg verdict (setup.sh sources it the same way).
     cp "$SCRIPT_DIR/lib/grub-fast-boot.sh" "$MOUNT_ROOT/tmp/grub-fast-boot.sh"
+    # Issue 1446: the kernel line (rt_kernel_flavour + the held metas); it sources ro-window.sh and
+    # ro-root.sh from its own directory, so both go next to it.
+    cp "$SCRIPT_DIR/lib/rt-kernel-plan.sh" "$MOUNT_ROOT/tmp/rt-kernel-plan.sh"
+    cp "$SCRIPT_DIR/lib/ro-window.sh" "$MOUNT_ROOT/tmp/ro-window.sh"
+    cp "$SCRIPT_DIR/lib/ro-root.sh" "$MOUNT_ROOT/tmp/ro-root.sh"
 
     log "Running configuration inside chroot..."
     chroot "$MOUNT_ROOT" /tmp/setup.sh
 
     # Clean up setup script
-    rm -f "$MOUNT_ROOT/tmp/setup.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh" "$MOUNT_ROOT/tmp/grub-fast-boot.sh"
+    rm -f "$MOUNT_ROOT/tmp/setup.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh" "$MOUNT_ROOT/tmp/grub-fast-boot.sh" "$MOUNT_ROOT/tmp/rt-kernel-plan.sh" "$MOUNT_ROOT/tmp/ro-window.sh" "$MOUNT_ROOT/tmp/ro-root.sh"
 
     # issue 1415: the rig time zone into the image (the chroot installed tzdata above): the
     # /etc/localtime symlink + /etc/timezone, written into the target root by the shared lib.

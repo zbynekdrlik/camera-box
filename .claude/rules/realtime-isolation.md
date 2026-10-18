@@ -133,6 +133,20 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   libc mapped, so the step's verified ro close FAILs by name (`.claude/rules/ro-window.md`), and
   dbus cannot be restarted safely. So install right before a planned PHYSICAL power cycle: a short
   power-button press (a clean ACPI poweroff), then power on. Never a remote reboot of a cambox.
+- **A reflashed box starts ON the line (issue 1446, provisioning half).** create-usb-linux.sh's
+  chroot sources `rt-kernel-plan.sh` (copied to `/tmp` with `ro-window.sh` + `ro-root.sh`, which it
+  lazy-sources from its own dir; all three are in `check_required_files`), installs
+  `"$(rt_kernel_flavour)"` instead of the GA `linux-image-generic`, holds
+  `$(rt_kernel_line_held_metas)` (flavour, HWE image + headers metas, `lowlatency-kernel`) and FAILs
+  the build when the flavour is missing or grub.cfg lacks `preempt=full` (lowlatency-kernel's
+  `/etc/default/grub.d/99-lowlatency.cfg` appends it; `update-grub` runs after the
+  `/etc/default/grub` rewrite, so it survives). setup-device.sh is unchanged: a live box moves only
+  through the planner. **verify-device `(aw)` "fleet kernel line"** (HARD) grades it with
+  `rt_kernel_line_verdict` over one `rt_kernel_line_gather_remote_snippet` read: the flavour
+  `install|hold ok installed`, `preempt=full` a whole word of `/proc/cmdline`, and `uname -r` = the
+  ONE `linux-image-<digit>...` entry of the installed `linux-image-generic-hwe-24.04` meta's
+  `Depends` (the 7.0 meta also lists `linux-modules-*` / `linux-main-modules-*`, skipped). Its FAIL
+  names `scripts/rt-kernel-upgrade.sh --box <ip>`.
 - **verify-device `(av)` "display GPU driven" is the gate** (`scripts/lib/display-gpu.sh`): it
   FAILs every PCI display controller (class `0x03*`) with no driver bound, naming its
   vendor:device id and the running kernel. `/dev/fb0` is not the signal: a driven box with no
