@@ -868,6 +868,9 @@ jobs:
           RIG_LEASE_RUN_ID: ${{ github.run_id }}
           RIG_LEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RIG_LEASE_JOB: ${{ github.job }}
+          # issue 1450: this deploy restarts camera-box on the SNV camboxes only
+          # (scripts/rig-lease-resources.txt); the other venues' deploy below takes no lease.
+          RIG_LEASE_RESOURCES: snv-cams
         run: bash scripts/rig-busy-gate.sh
 
       - name: Deploy to the active cam fleet (acked-offline boxes skipped)

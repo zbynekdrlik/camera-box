@@ -791,6 +791,8 @@ async fn run_capture_loop(
         // unstructured) that the colour/grayscale label alone misses. `None` until the
         // first sample lands (in lockstep with `last_chroma`).
         let mut last_roughness: Option<f32> = None;
+        // Issue 1430 -- the raw luma levels sampled on the same frame as `last_chroma`.
+        let mut last_luma: Option<camera_box::luma_levels::LumaLevels> = None;
         let mut chroma_frame_ctr: u32 = 0;
 
         // #656 — capture-delivery-rate health: consecutive-breach counter for the pure
@@ -1129,6 +1131,13 @@ async fn run_capture_loop(
                         info.height as usize,
                         info.stride as usize,
                     ));
+                    // Issue 1430 -- the raw luma levels on the SAME frame.
+                    last_luma = camera_box::luma_levels::luma_levels(
+                        data,
+                        info.width as usize,
+                        info.height as usize,
+                        info.stride as usize,
+                    );
                 }
 
                 // #707 — did THIS frame's blocking V4L2 dequeue itself stall? Checked on EVERY
@@ -2031,6 +2040,12 @@ async fn run_capture_loop(
                                 rough,
                                 colour_label
                             );
+                        }
+                        // Issue 1430 -- a SEPARATE line, so the `capture chroma:` consumers
+                        // (verify-device, splitter-health, the splitter-port watchdog, the optical
+                        // preflight) keep their exact line.
+                        if let Some(levels) = last_luma {
+                            tracing::info!("capture luma: {} (issue 1430)", levels.describe());
                         }
 
                         frame_count = 0;

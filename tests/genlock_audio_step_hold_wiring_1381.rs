@@ -62,7 +62,7 @@ const STEP_HOLD_ABSENT: [&str; 2] = [
 const RELABEL_WIRING: [&str; 6] = [
     "const bool genlock_relabel = source->timing_set && source->next_audio_ts_min != 0 && genlock_audio_relabel_source(source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp, genlock_step_packet_ns, &genlock_relabel_off_jump_ns, &genlock_relabel_move_ns);",
     "if (genlock_relabel) { source->next_audio_ts_min = data->timestamp; source->genlock_audio_relabels++; }",
-    "if ((genlock_relabel || genlock_relabel_pending) && source->next_audio_sys_ts_min) source->next_audio_sys_ts_min = in.timestamp; if (source->next_audio_sys_ts_min == in.timestamp) { push_back = true;",
+    "if ((genlock_relabel || genlock_relabel_pending || genlock_arrival_rebase_sys) && source->next_audio_sys_ts_min) source->next_audio_sys_ts_min = in.timestamp; if (source->next_audio_sys_ts_min == in.timestamp) { push_back = true;",
     "if (!genlock_audio_step_relabel_jumps(source->genlock_audio_step_active, source->genlock_audio_step_prev_off_ns, source->genlock_audio_step_prev_raw_ns, source->genlock_audio_step_prev_packet_ns, source->genlock_audio_step_held_off_ns, timecode, off_live_ns, raw_ts_ns, &stamp_jump_ns, &off_jump_ns) || !genlock_audio_relabel(stamp_jump_ns, off_jump_ns, packet_ns, GENLOCK_WALL_STEP_MIN_NS)) return false;",
     "const uint64_t genlock_step_packet_ns = conv_frames_to_time(sample_rate, in.frames);",
     "\"holds=%u relabels=%u pending=%d (issue 1381)\"",

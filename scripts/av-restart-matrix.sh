@@ -319,6 +319,9 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${AV_MATRIX_RUN_DIR:-$HOME/.camera-box/av-restart-matrix/$STAMP}"
 RIG_LEASE_REPO_NAME="${AV_MATRIX_LEASE_REPO:-camera-box-av-restart-matrix}"
 RIG_LEASE_OURS="av-matrix-${STAMP}-$$"
+# issue 1450: the rig resources the matrix touches (scripts/rig-lease-resources.txt): the soak's
+# windows (which run under this lease) plus the strih/stream OBS, camera and dantesync restarts.
+RIG_LEASE_DECLARED="snv-video"
 # one window's upper bound: the soak's own slot (read from av-soak.sh, the single source, whatever
 # AV_MATRIX_SOAK points at) + 600 s for its setup and cleanup
 SOAK_SLOT_S="$(av_matrix_soak_slot_s "$HERE/av-soak.sh")" || die 3 "cannot read the soak's slot from $HERE/av-soak.sh"
@@ -755,7 +758,7 @@ trap 'ABORT_REASON="SIGHUP"; exit 5' HUP
 # ---- setup ----
 log "run dir $RUN_DIR; kinds: $KINDS x $REPEATS; cameras: $SOAK_CAMS"
 set +e
-lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" av-restart-matrix "$LEASE_EXPECTED_AT")"
+lease_out="$(RIG_LEASE_RESOURCES="$RIG_LEASE_DECLARED" rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" av-restart-matrix "$LEASE_EXPECTED_AT")"
 lease_rc=$?
 set -e
 log "$lease_out"

@@ -112,6 +112,52 @@ def test_a_second_cut_after_an_aborted_run_keeps_the_operators_original(monkeypa
     assert json.loads(save.read_text())["name"] == "Fade"
 
 
+def test_cut_waits_for_obs_to_apply_the_transition_before_reading_it_back(monkeypatch, tmp_path):
+    # 18.10.2026, release E2E run 39066977175 attempt 4: OBS applies SetCurrentSceneTransition on
+    # its UI thread, so the read straight after the set still said "Fade" (live on strih: Fade at
+    # 0 ms, Cut from 50 ms on) and the run aborted although the Cut did land.
+    save = tmp_path / "strih-transition-saved.json"
+    state = {"current": dict(FADE), "lag": 0}
+    sleeps = []
+
+    def rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        if rtype == "GetCurrentSceneTransition":
+            if state["lag"] > 0:
+                state["lag"] -= 1
+                return dict(FADE)
+            return dict(state["current"])
+        if rtype == "SetCurrentSceneTransition":
+            state["current"] = dict(CUT if rdata["transitionName"] == "Cut" else FADE)
+            state["lag"] = 3   # the next three reads still see the old transition
+        return {}
+
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="", port=None: object())
+    monkeypatch.setattr(obs_phase2, "_rpc", rpc)
+    monkeypatch.setattr(obs_phase2.time, "sleep", lambda s: sleeps.append(s))
+    obs_phase2.transition_cut(_args(save))
+    assert sleeps, "the read-back must poll, not read once"
+
+
+def test_cut_that_never_lands_still_fails_loud(monkeypatch, tmp_path):
+    save = tmp_path / "strih-transition-saved.json"
+
+    def rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        return dict(FADE) if rtype == "GetCurrentSceneTransition" else {}
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="", port=None: object())
+    monkeypatch.setattr(obs_phase2, "_rpc", rpc)
+    monkeypatch.setattr(obs_phase2.time, "sleep", lambda s: clock.__setitem__("t", clock["t"] + s))
+    monkeypatch.setattr(obs_phase2.time, "monotonic", lambda: clock["t"])
+    try:
+        obs_phase2.transition_cut(_args(save))
+    except SystemExit as exc:
+        assert "could not select the Cut transition" in str(exc)
+    else:
+        raise AssertionError("a Cut that never lands must abort the run")
+    assert clock["t"] <= obs_phase2.TRANSITION_SETTLE_S + 0.5
+
+
 def test_restore_without_a_save_sends_nothing(monkeypatch, tmp_path):
     calls = _fake(monkeypatch, CUT)
     obs_phase2.transition_restore(_args(tmp_path / "absent.json"))

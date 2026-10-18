@@ -737,6 +737,12 @@ impl RealtimeAsrcCompensator {
         self.level_avg_ms
     }
 
+    /// Issue 1425 (E3 slice S4): the level setpoint is captured (the regression locked since the last
+    /// flush) — the C `level_captured` the ingest's arrival rebase reads.
+    pub fn level_captured(&self) -> bool {
+        self.level_captured
+    }
+
     /// issue #1335 follow-up 2: cumulative count of STEP re-base events — exposed for tests/telemetry
     /// (the C mirror prints it as the `asrc:` line's `steps=` field).
     pub fn step_count(&self) -> u32 {

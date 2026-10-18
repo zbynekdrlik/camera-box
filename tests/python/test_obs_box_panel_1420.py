@@ -196,11 +196,11 @@ def _healthy(box):
     (box.state / "wm").write_text("0x01 -1 tint2.Tint2 strih-pp tint2\n0x02 0 obs.obs strih-pp OBS\n")
 
 
-def test_a_healthy_panel_passes_five_rows(box):
+def test_a_healthy_panel_passes_six_rows(box):
     _healthy(box)
     rows = _rows(box)
-    assert [st for st, _ in rows] == ["OK"] * 5, rows
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "5"
+    assert [st for st, _ in rows] == ["OK"] * 6, rows      # issue 1448: + (panel-discord) on the stream role
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "6"
 
 
 def test_install_writes_the_obs_launcher_and_its_icon(box):
@@ -236,7 +236,7 @@ def test_each_broken_piece_fails_its_row(box):
     (box.state / "installed").unlink()
     rows = dict((d.split(")", 1)[0][1:], st) for st, d in _rows(box))
     assert rows == {"panel-pkg": "FAIL", "panel-config": "FAIL", "panel-launchers": "OK", "panel-unit": "FAIL",
-                    "panel-window": "FAIL"}
+                    "panel-discord": "FAIL", "panel-window": "FAIL"}   # the stub's dpkg state covers discord too
 
 
 def test_no_window_list_is_a_note_not_a_failure(box):

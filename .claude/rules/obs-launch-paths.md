@@ -166,3 +166,14 @@ ALSO the genuine #978 session-visibility FAILURE, so it would hide a real recove
 honest residual stays: a pass that STARTS with AHK already dead legitimately `exit 8`s
 ("watcher missing") and reads `verified=False`, then the outer backstop restores AHK — expected, not
 a false-negative.
+
+## A launched OBS never runs below Normal CPU priority (issue 1367, 17.10.2026)
+
+OBS inherits its launcher's priority class. The win-* MCP server runs as a priority-7 (BelowNormal)
+scheduled task, so every relaunch from its Shell (every deploy) left the stream OBS at BelowNormal,
+equal to the on-box decode's own BelowNormal: the soak's decode then starved its audio thread for up
+to 34 s (`audio-stall #1367 wake_late_max_ms=33970`, `#800 'mbc' ts_lag_ms=30475`). Step (3c) of the
+Windows launch program (`Set-CbObsPriorityFloor`) raises Idle/BelowNormal to Normal, keeps
+Normal/AboveNormal/High (the resolume cg OBS runs High), prints `PRIORITY OK: ... <before> -> <after>`
+and exits 8 when it stays below Normal. Check a running box with
+`(Get-Process obs64).PriorityClass`; a logon start (explorer) already gets Normal.

@@ -7,8 +7,12 @@ stream on 14.10.2026 23:33 was invisible to camera-box as a holder: the release 
 anonymous `outputActive=true` and died after its 30-min busy budget. This module is the logic behind
 three POST routes on scripts/rig-lease-server.py:
 
-  POST /rig-lease/acquire    {repo, run_id, run_url, job, expected_secs 60..5400}
-       200 {acquired: true, lease_id, holder, expected_release_at}
+  POST /rig-lease/acquire    {repo, run_id, run_url, job, expected_secs 60..5400[, resources]}
+       200 {acquired: true, lease_id, holder, expected_release_at, reclaimed, resources}
+       resources (issue 1450): the rig resources the holder touches, a list or a CSV string of the
+       atoms / groups of scripts/rig-lease-resources.txt (a CSV string avoids PowerShell 5.1 turning
+       a one-element array into a scalar). Absent / null = the whole rig (no `resources` in
+       holder.json, `resources: null` in the reply); an unknown, empty or non-string value = 400.
        409 {acquired: false, holder, heartbeat_age_s}      (someone else holds a live lease)
   POST /rig-lease/heartbeat  {lease_id}    every 30 s
        200 {refreshed: true, expected_release_at}  -- rolls the release to now + 15 min
@@ -46,6 +50,7 @@ import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+import rig_lease_resources as rlr
 import rig_lease_state as rls
 
 LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib", "rig-lease.sh")
@@ -128,6 +133,29 @@ def _expected_secs(body: dict) -> int:
     return value
 
 
+def _resources(body: dict) -> str:
+    """issue 1450: the declared `resources` as the CSV RIG_LEASE_RESOURCES carries to the bash lib;
+    "" = undeclared (the whole rig). 400 on anything the table cannot resolve."""
+    value = body.get("resources")
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        names = rlr.split_names(value)
+    elif isinstance(value, list) and all(isinstance(v, str) for v in value):
+        names = [n for v in value for n in rlr.split_names(v)]
+    else:
+        raise Reply(400, {"error": "bad_field", "field": "resources"})
+    if not names:
+        raise Reply(400, {"error": "bad_field", "field": "resources"})
+    try:
+        rlr.resolve(names, rlr.load_table())
+    except rlr.UnknownResources as exc:
+        raise Reply(400, {"error": "bad_field", "field": "resources", "unknown": exc.names})
+    except rlr.TableError as exc:
+        raise Reply(503, {"error": "lease_io", "detail": "resource table: %s" % exc})
+    return ",".join(names)
+
+
 def _bash(lease_dir: str, script: str, args: list, extra_env: dict | None = None):
     env = dict(os.environ, RIG_LEASE_DIR=lease_dir)
     env.update(extra_env or {})
@@ -161,6 +189,7 @@ def acquire(lease_dir: str, body: dict, stale_secs: int, now: datetime | None = 
     run_url = _field(body, "run_url", _RUN_URL)
     job = _field(body, "job", _JOB)
     expected = _expected_secs(body)
+    resources = _resources(body)
     now = now or datetime.now(timezone.utc)
     release_at = rls.format_ts(now + timedelta(seconds=min(expected, LOOKAHEAD_S)))
     lease_id = secrets.token_hex(16)
@@ -171,6 +200,8 @@ def acquire(lease_dir: str, body: dict, stale_secs: int, now: datetime | None = 
             "RIG_LEASE_HOLDER_LEASE_ID": lease_id,
             "RIG_LEASE_HOLDER_STALE_SECS": str(REMOTE_STALE_SECS),
             "RIG_LEASE_HOLDER_MAX_HOLD_SECS": str(expected),
+            # always set: the server's own env must never declare for a remote holder
+            "RIG_LEASE_RESOURCES": resources,
         },
     )
     holder = _read_holder(lease_dir)
@@ -181,6 +212,7 @@ def acquire(lease_dir: str, body: dict, stale_secs: int, now: datetime | None = 
             "holder": _public_holder(holder),
             "expected_release_at": holder.get("expected_release_at"),
             "reclaimed": "RIG_LEASE_RECLAIMED" in r.stdout,
+            "resources": holder.get("resources"),
         })
     if r.returncode == 1 and "RIG_LEASE_HELD_BY=" in r.stdout:
         state = rls.lease_state(lease_dir, datetime.now(timezone.utc), stale_secs)

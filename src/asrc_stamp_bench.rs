@@ -547,6 +547,11 @@ fn run(case: &Case) -> Run {
 #[path = "asrc_stamp_bench_stall.rs"]
 mod stall;
 
+/// Issue 1425 (E3 slice S4): the ARRIVAL rebase of a non-direct source (the stock VLC model and its NDI
+/// twin), on the same plant.
+#[path = "asrc_arrival_rebase_bench.rs"]
+mod arrival_rebase;
+
 /// Every buffering x launch phase at +20 ppm (the live mbc residual), for one source.
 fn sweep(src: Source, servo: Servo) -> Vec<(u64, u64, Run)> {
     let mut out = Vec::new();
