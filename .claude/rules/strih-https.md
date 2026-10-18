@@ -249,6 +249,12 @@ the room to a host it names. The same plugin, with no `admin_key` configured, al
   Janus onto loopback, step 16i rewrites the interkom site and reloads nginx; between the two the
   phones' `/janus` is down for the run's duration); (3) read item 45's `(https-upstream) interkom`
   row; (4) phones on the venue WiFi reconnect by themselves (the page retries).
+- **A hub restart now drops every phone's Janus session** (every hub deploy, and a mix-thread panic,
+  which exits the daemon): the relay's socket to Janus closes, Janus destroys the sessions it carried,
+  and each page reconnects in 1-15 s. Before issue 1453 the phones' sessions survived a hub restart.
+- **The relay is capped:** at most `MAX_CONCURRENT_RELAYS` (64) at once; a phone over the cap gets 503
+  before the hub opens anything towards Janus (the path is public, and each relay holds two sockets in
+  the audio daemon). Frames are capped at 256 KiB (message and frame size).
 - **Tests:** `intercom/hub/tests/janus_ws_guard_1453.rs` (the pure policy; runs in a plain-rustc
   replica with serde_json rlibs built from the registry), `intercom/hub/tests/janus_relay_1453.rs` (the
   real router against a fake Janus WebSocket, CI first compile), the jcfg / site / item-45 rows in
