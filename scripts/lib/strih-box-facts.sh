@@ -40,7 +40,7 @@ strih_box_fact_keys() {
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
-    STRIH_HDMI_OUTPUTS
+    STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -294,6 +294,17 @@ strih_box_validate() {
       fi
     done
   done
+  # issue 1453: whether the intercom page is published off the LAN (the outbound Cloudflare Tunnel +
+  # TURN, scripts/lib/strih-interkom-public.sh). `yes` needs an intercom site to publish, so never on
+  # the stream role.
+  case "${f[STRIH_HTTPS_PUBLIC]}" in
+    no) ;;
+    yes)
+      if [ "${f[STRIH_HTTPS_INTERKOM_HOSTS]}" = none ]; then
+        echo "strih-box ${name}: STRIH_HTTPS_PUBLIC=yes needs an intercom site (STRIH_HTTPS_INTERKOM_HOSTS is none)" >&2; bad=1
+      fi ;;
+    *) echo "strih-box ${name}: STRIH_HTTPS_PUBLIC '${f[STRIH_HTTPS_PUBLIC]}' must be yes or no" >&2; bad=1 ;;
+  esac
   [ "$bad" = 0 ]
 }
 
@@ -516,6 +527,9 @@ strih_box_venue() { strih_box_fact STRIH_VENUE; }
 # = no such site; issue 1399, scripts/lib/strih-https.sh).
 strih_lx_https_interkom_hosts() { strih_box_fact STRIH_HTTPS_INTERKOM_HOSTS; }
 strih_lx_https_shading_host() { strih_box_fact STRIH_HTTPS_SHADING_HOST; }
+# strih_lx_https_public -> yes | no: whether the box publishes its intercom page to phones on mobile data
+# (fact STRIH_HTTPS_PUBLIC; issue 1453, scripts/lib/strih-interkom-public.sh).
+strih_lx_https_public() { strih_box_fact STRIH_HTTPS_PUBLIC; }
 
 # strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
 # item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).

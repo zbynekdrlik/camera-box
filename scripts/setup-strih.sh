@@ -969,8 +969,8 @@ if WHY="$(obs_box_step_applies 16h-panel)"; then obs_box_panel_install "${HERE}/
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-step "16i" "HTTPS front end (issue 1399): nginx + the intercom/shading sites, certs issued + renewed ON this box (never dev1)"
-if WHY="$(obs_box_step_applies 16i)"; then strih_https_install || fail "issue 1399: the HTTPS front end could not be provisioned (above)"
+step "16i" "HTTPS front end (issue 1399): nginx + the intercom/shading sites, certs issued + renewed ON this box (never dev1); issue 1453: the outbound interkom tunnel + TURN"
+if WHY="$(obs_box_step_applies 16i)"; then strih_https_install || fail "issue 1399: the HTTPS front end could not be provisioned (above)"; strih_interkom_public_install || fail "issue 1453: the intercom tunnel / TURN could not be provisioned (above)"
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------

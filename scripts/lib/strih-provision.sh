@@ -57,6 +57,11 @@ if ! declare -F strih_https_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-https.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-https.sh"
 fi
+# issue 1453: the intercom's public path -- the outbound tunnel + TURN (also step 16i / item 45).
+if ! declare -F strih_interkom_public_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-interkom-public.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-interkom-public.sh"
+fi
 # issue 1394: the cambox log sink's own source-only lib (setup-strih step 16k, verify-strih item 46).
 if ! declare -F strih_cambox_log_sink_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-cambox-log-sink.sh

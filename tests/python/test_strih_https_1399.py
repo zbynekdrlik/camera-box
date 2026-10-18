@@ -308,8 +308,9 @@ def _facts(box):
 
 def test_the_https_keys_close_the_fact_list():
     r = _bash("strih_box_fact_keys", sources=(FACTS,))
-    # issue 1424 part 2 appended the HDMI output list after them.
-    assert r.stdout.split()[-3:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS"]
+    # issue 1424 part 2 appended the HDMI output list after them, issue 1453 the public-intercom switch.
+    assert r.stdout.split()[-4:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
+                                     "STRIH_HTTPS_PUBLIC"]
 
 
 def test_strih_snv_declares_the_three_interkom_names_and_shading():
@@ -708,6 +709,8 @@ def test_a_box_that_declares_no_sites_installs_nothing(tmp_path):
     body = f.read_text()
     body = body.replace("STRIH_HTTPS_INTERKOM_HOSTS=interkom-pp.newlevel.media\n", "STRIH_HTTPS_INTERKOM_HOSTS=none\n")
     body = body.replace("STRIH_HTTPS_SHADING_HOST=shadingpp.newlevel.media\n", "STRIH_HTTPS_SHADING_HOST=none\n")
+    # issue 1453: a box with no intercom site publishes nothing (the loader refuses STRIH_HTTPS_PUBLIC=yes).
+    body = body.replace("STRIH_HTTPS_PUBLIC=yes\n", "STRIH_HTTPS_PUBLIC=no\n")
     f.write_text(body)
     r = _install(rig, box="strih-pp", STRIH_BOXES_DIR=str(d))
     assert r.returncode == 0, r.stdout + r.stderr
@@ -843,6 +846,8 @@ def test_a_box_that_declares_no_sites_gets_one_note(tmp_path):
     body = f.read_text()
     body = body.replace("STRIH_HTTPS_INTERKOM_HOSTS=interkom-pp.newlevel.media\n", "STRIH_HTTPS_INTERKOM_HOSTS=none\n")
     body = body.replace("STRIH_HTTPS_SHADING_HOST=shadingpp.newlevel.media\n", "STRIH_HTTPS_SHADING_HOST=none\n")
+    # issue 1453: a box with no intercom site publishes nothing (the loader refuses STRIH_HTTPS_PUBLIC=yes).
+    body = body.replace("STRIH_HTTPS_PUBLIC=yes\n", "STRIH_HTTPS_PUBLIC=no\n")
     f.write_text(body)
     rows = _rows(rig, box="strih-pp", STRIH_BOXES_DIR=str(d))
     assert len(rows) == 1 and rows[0][0] == "NOTE", rows

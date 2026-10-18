@@ -126,6 +126,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_HTTPS_SHADING_HOST",
     // issue 1424 part 2: the connectors the fixed HDMI output drives + their default views.
     "STRIH_HDMI_OUTPUTS",
+    // issue 1453: whether the intercom page is published to phones on mobile data (tunnel + TURN).
+    "STRIH_HTTPS_PUBLIC",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -180,6 +182,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_HTTPS_SHADING_HOST=shading.newlevel.media",
         // issue 1424 part 2: one output on the first connected HDMI (the issue-1346 behaviour).
         "STRIH_HDMI_OUTPUTS=auto",
+        // issue 1453: strih-snv publishes its intercom page to mobile data (tunnel + TURN).
+        "STRIH_HTTPS_PUBLIC=yes",
         "LOADED=strih-snv",
     ] {
         assert!(
