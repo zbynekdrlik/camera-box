@@ -168,7 +168,8 @@ def test_install_writes_config_and_unit_enables_and_never_starts(box):
     r = _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=box.env())
     assert r.returncode == 0, r.stderr
     cfg = box.home / ".config" / "tint2" / "tint2rc"
-    assert cfg.read_text() == _bash("obs_box_panel_tint2rc").stdout
+    # issue 1441: the config names the keyboard helper's installed path, so render it with the box's seams
+    assert cfg.read_text() == _bash("obs_box_panel_tint2rc", env=box.env()).stdout
     unit = box.home / ".config" / "systemd" / "user" / "obs-box-panel.service"
     assert unit.read_bytes() == (REPO / "systemd" / "obs-box-panel.service").read_bytes()
     calls = box.calls()
