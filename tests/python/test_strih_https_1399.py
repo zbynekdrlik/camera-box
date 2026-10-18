@@ -7,7 +7,8 @@ them and nothing renews them. Pinned here:
   * the per-box facts STRIH_HTTPS_INTERKOM_HOSTS / STRIH_HTTPS_SHADING_HOST (the loader validates a DNS
     name list or `none`; the stream role declares none) with the values the design lists;
   * the SNV render keeps the routes of the live strih-snv hot-fix sites (issue body, 1.10.2026):
-    interkom `/` -> 127.0.0.1:8790 (hub) + `/janus` -> <STRIH_IP>:8188 (Janus binds ws_ip = the box IP),
+    interkom `/` -> 127.0.0.1:8790 (hub) + `/janus` -> the same hub (issue 1453: its relay forwards only the
+    page's own frames to Janus, whose WebSocket listens on loopback only),
     shading `/` -> 127.0.0.1:8770 (bkshading);
   * the cert decision (missing -> issue, SAN set differs -> reissue, current -> nothing) and the
     certbot argv (DNS-01 through /etc/letsencrypt/cloudflare.ini, --cert-name <first host>);
@@ -55,7 +56,8 @@ PP_SHADING = "shadingpp.newlevel.media"
 # The routes of the live strih-snv hot-fix sites (issue 1399 body, 1.10.2026: written by hand on the box
 # with the same routes as dev1's): location -> proxy_pass.
 HOTFIX_ROUTES = {
-    "interkom": {"/": "http://127.0.0.1:8790", "= /janus": "http://10.77.9.202:8188"},
+    # issue 1453: /janus goes to the hub's frame-allowlist relay, never to Janus's WebSocket.
+    "interkom": {"/": "http://127.0.0.1:8790", "= /janus": "http://127.0.0.1:8790"},
     "shading": {"/": "http://127.0.0.1:8770"},
 }
 
@@ -192,9 +194,17 @@ if "-w" in a:
 sys.exit(0 if code else 7)
 """)
 
+# ss: `sport = :443` answers when $FAKE_STATE/listen-443 exists; `sport = :8188` prints one LISTEN
+# line per local address in $FAKE_STATE/listen-8188 (issue 1453: where Janus's WebSocket listens).
 _FAKE_SS = _py("""import os, sys
 st = os.environ["FAKE_STATE"]
-if os.path.exists(os.path.join(st, "listen-443")):
+args = " ".join(sys.argv[1:])
+if ":8188" in args:
+    p = os.path.join(st, "listen-8188")
+    if os.path.exists(p):
+        for local in open(p).read().split():
+            print("LISTEN 0 4096 %s 0.0.0.0:*" % local)
+elif os.path.exists(os.path.join(st, "listen-443")):
     print("LISTEN 0 511 0.0.0.0:443 0.0.0.0:*")
 """)
 
@@ -383,14 +393,14 @@ def _sites(box="strih-snv"):
 def test_strih_snv_sites_carry_local_upstreams():
     assert _sites("strih-snv") == [
         ["interkom", "interkom-lx.newlevel.media", "interkom.newlevel.media interkom-snv.newlevel.media",
-         "http://127.0.0.1:8790", "http://10.77.9.202:8188"],
+         "http://127.0.0.1:8790", "http://127.0.0.1:8790"],
         ["shading", "shading.newlevel.media", "", "http://127.0.0.1:8770", ""],
     ]
 
 
 def test_strih_pp_sites_follow_the_pp_facts():
     assert _sites("strih-pp") == [
-        ["interkom", "interkom-pp.newlevel.media", "", "http://127.0.0.1:8790", "http://10.77.8.202:8188"],
+        ["interkom", "interkom-pp.newlevel.media", "", "http://127.0.0.1:8790", "http://127.0.0.1:8790"],
         ["shading", "shadingpp.newlevel.media", "", "http://127.0.0.1:8770", ""],
     ]
 
@@ -443,7 +453,7 @@ def test_the_upstream_ports_are_the_services_own_binds(box):
 
 def test_the_pp_render_follows_the_pp_box():
     text = _render("interkom", box="strih-pp")
-    assert _routes(text) == {"/": "http://127.0.0.1:8790", "= /janus": "http://10.77.8.202:8188"}
+    assert _routes(text) == {"/": "http://127.0.0.1:8790", "= /janus": "http://127.0.0.1:8790"}
     assert "10.77.9.202" not in text and "strih-snv" not in text
 
 
@@ -592,7 +602,7 @@ def test_a_missing_ini_is_one_warn_naming_the_supervisor_step_and_keeps_the_hand
     text = (rig.nginx / "sites-available" / "interkom").read_text()
     assert "ssl_certificate     %s/interkom.crt;" % ssl in text
     assert "ssl_certificate_key %s/interkom.key;" % ssl in text
-    assert _routes(text) == {"/": "http://127.0.0.1:8790", "= /janus": "http://10.77.9.202:8188"}
+    assert _routes(text) == {"/": "http://127.0.0.1:8790", "= /janus": "http://127.0.0.1:8790"}
 
 
 def test_a_hand_copy_outside_nginx_ssl_is_never_used(tmp_path):
@@ -745,6 +755,7 @@ def _healthy(rig):
     rig.http(SNV_INTERKOM[0], "/api/state", "200")
     rig.http(SNV_INTERKOM[0], "/janus", "101")
     rig.http(SNV_SHADING, "/api/version", "200")
+    (rig.state / "listen-8188").write_text("127.0.0.1:8188\n")
 
 
 def test_a_healthy_box_passes_every_row(tmp_path):
@@ -756,6 +767,25 @@ def test_a_healthy_box_passes_every_row(tmp_path):
     joined = "\n".join(t for _, t in rows)
     for h in SNV_INTERKOM + [SNV_SHADING]:
         assert h in joined
+
+
+def test_the_interkom_upstream_row_names_the_relay_and_the_loopback_janus_1453(tmp_path):
+    """issue 1453: the phones' /janus goes through the hub's frame allowlist, so the row proves BOTH
+    the upgrade through nginx (the hub answers 101 only after it reached Janus) and that Janus's own
+    WebSocket listens on loopback only (no LAN client can go around the relay). An IPv6 loopback
+    listener next to the IPv4 one is fine; the row count is unchanged."""
+    rig = Rig(tmp_path)
+    _healthy(rig)
+    (rig.state / "listen-8188").write_text("127.0.0.1:8188 [::1]:8188\n")
+    rows = _rows(rig)
+    assert all(st == "OK" for st, _ in rows), rows
+    row = [t for _, t in rows if t.startswith("(https-upstream) interkom")]
+    assert len(row) == 1, rows
+    assert "relay" in row[0] and "loopback" in row[0], row
+    # a non-loopback listener is named in the FAIL text
+    (rig.state / "listen-8188").write_text("10.77.9.202:8188\n")
+    bad = [t for st, t in _rows(rig) if st == "FAIL"]
+    assert len(bad) == 1 and "10.77.9.202:8188" in bad[0] and "step 14" in bad[0], bad
 
 
 def test_the_row_count_matches_the_declared_sites(tmp_path):
@@ -776,6 +806,12 @@ def test_the_row_count_matches_the_declared_sites(tmp_path):
     (lambda rig: (rig.state / "served" / SNV_SHADING).unlink(), "(https-cert) shading"),
     (lambda rig: rig.http(SNV_INTERKOM[0], "/api/state", "502"), "(https-upstream) interkom"),
     (lambda rig: rig.http(SNV_INTERKOM[0], "/janus", "400"), "(https-upstream) interkom"),
+    # issue 1453: Janus's WebSocket reachable on a non-loopback address bypasses the hub's relay.
+    (lambda rig: (rig.state / "listen-8188").write_text("10.77.9.202:8188\n"), "(https-upstream) interkom"),
+    (lambda rig: (rig.state / "listen-8188").write_text("127.0.0.1:8188 0.0.0.0:8188\n"), "(https-upstream) interkom"),
+    (lambda rig: (rig.state / "listen-8188").write_text("127.0.0.1:8188 [::]:8188\n"), "(https-upstream) interkom"),
+    (lambda rig: (rig.state / "listen-8188").write_text("*:8188\n"), "(https-upstream) interkom"),
+    (lambda rig: (rig.state / "listen-8188").unlink(), "(https-upstream) interkom"),
     (lambda rig: rig.http(SNV_SHADING, "/api/version", "000"), "(https-upstream) shading"),
     (lambda rig: (rig.state / "enabled-certbot.timer").unlink(), "(https-renewal)"),
     (lambda rig: (rig.le / "cloudflare.ini").unlink(), "(https-renewal)"),

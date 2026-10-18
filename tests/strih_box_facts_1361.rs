@@ -894,7 +894,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "{\"sender\": \"CAM3 (usb)\", \"input\": \"NDI cam3\", \"scene\": \"Cam 3\"}",
         "ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan\n",
         "local_ip = \"10.0.0.5\"",
-        "ws_ip = \"10.0.0.5\"",
+        "ws_ip = \"127.0.0.1\"",
         "# strih-zz OBS kiosk boot",
         "label=\"strih-zz\"",
         "TARGET_IP=\"${STRIH_LX_TARGET_IP:-10.0.0.5}\"",

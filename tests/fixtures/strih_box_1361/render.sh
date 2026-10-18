@@ -52,7 +52,7 @@ strih_dantesync_unit_text "$DS_R" "$DS_A"
 section janus-audiobridge
 strih_janus_audiobridge_jcfg_text 1000 /etc/intercom-hub/janus-room.secret "$(strih_lx_ip)"
 section janus-ws
-strih_janus_ws_jcfg_text "$(strih_lx_ip)"
+strih_janus_ws_jcfg_text
 section openbox-autostart
 strih_openbox_autostart_text
 section openbox-menu
