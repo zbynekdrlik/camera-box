@@ -2833,6 +2833,8 @@ def open_multiview(a):
 # operator's transition, sets Cut for its own switches and puts the original back in cleanup().
 # The save file is durable: an aborted run never loses the operator's original to a later run's Cut.
 TRANSITION_CUT_NAME = "Cut"
+TRANSITION_SETTLE_S = 3.0   # how long the read-back waits for OBS's UI thread to apply the set
+TRANSITION_POLL_S = 0.05
 
 
 def transition_cut_plan(current, saved):
@@ -2878,7 +2880,13 @@ def transition_cut(a):
         os.replace(tmp, a.save)
     if plan["set"]:
         _rpc(ws, "SetCurrentSceneTransition", {"transitionName": plan["set"]})
+    # OBS applies the set on its UI thread, so the read straight after it can still name the old
+    # transition (live on strih 18.10.2026: Fade at 0 ms, Cut from 50 ms on). Poll, bounded.
+    deadline = time.monotonic() + TRANSITION_SETTLE_S
     after = _rpc(ws, "GetCurrentSceneTransition").get("transitionName")
+    while after != TRANSITION_CUT_NAME and time.monotonic() < deadline:
+        time.sleep(TRANSITION_POLL_S)
+        after = _rpc(ws, "GetCurrentSceneTransition").get("transitionName")
     print(f"[obs] {a.host}: transition {current.get('transitionName')} -> {after} "
           f"(saved operator transition in {a.save}, issue 1367)")
     if after != TRANSITION_CUT_NAME:
