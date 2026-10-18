@@ -16,8 +16,9 @@
 #     STRIH_HTTPS_INTERKOM_HOSTS = the intercom certificate's first name + its SANs, STRIH_HTTPS_SHADING_HOST
 #     = the bkshading panel's name, `none` = no such site (the stream role declares none).
 #   * The sites (`strih_https_sites`), with LOCAL upstreams: interkom `/` -> the hub on 127.0.0.1:8790
-#     (the box's intercom matrix [http] bind) + `/janus` -> <STRIH_IP>:8188 (Janus binds ws_ip = the box
-#     IP, never localhost); shading `/` -> bkshading on 127.0.0.1:8770 (its default_bind). Written to
+#     (the box's intercom matrix [http] bind) + `/janus` -> the same hub (issue 1453: its /janus relay
+#     forwards only the phone page's own frames to Janus, whose WebSocket listens on loopback only, so no
+#     client can send Janus a plain-RTP join); shading `/` -> bkshading on 127.0.0.1:8770. Written to
 #     /etc/nginx/sites-available/{interkom,shading} (the hot-fix names, so the hand sites are replaced
 #     in place) and enabled by a sites-enabled symlink.
 #   * The certificate per site: /etc/letsencrypt/live/<first name>/, issued by `certbot certonly
@@ -44,7 +45,8 @@
 #                        127.0.0.1:443 covers the name, is valid for more than 14 days, and is the
 #                        /etc/letsencrypt/live one (a hand copy is a NOTE until migrated);
 #       (https-upstream) one row per site, through nginx: the hub /api/state = 200 and the /janus
-#                        WebSocket upgrade = 101; bkshading /api/version = 200;
+#                        WebSocket upgrade = 101 (the hub answers it only once it reached Janus), and
+#                        Janus's WebSocket (:8188) listening on loopback only; bkshading /api/version = 200;
 #       (https-renewal)  certbot.timer enabled, the deploy hook in place, the ini present (stat only:
 #                        mode 600, owner root);
 #     a box that declares no site prints ONE NOTE row.
@@ -82,15 +84,16 @@ strih_https_hook_text() {
 
 # strih_https_sites -> one line per declared site of the loaded box, `site|first|aliases|upstream|janus`
 # (interkom first, then shading); nothing when the box declares none. rc 1 when a fact is unreadable.
+# The interkom `janus` upstream is the hub itself (issue 1453): its /janus route relays the phone's
+# Janus WebSocket through the frame allowlist, and Janus's own WebSocket is never proxied to.
 strih_https_sites() {
-  local hosts shading ip first aliases=""
+  local hosts shading first aliases=""
   hosts="$(strih_lx_https_interkom_hosts)" || return 1
   shading="$(strih_lx_https_shading_host)" || return 1
   if [ "$hosts" != none ]; then
-    ip="$(strih_lx_ip)" || return 1
     first="${hosts%% *}"
     [ "$hosts" = "$first" ] || aliases="${hosts#* }"
-    printf 'interkom|%s|%s|%s|http://%s:%s\n' "$first" "$aliases" "$STRIH_HTTPS_HUB_UPSTREAM" "$ip" "$STRIH_HTTPS_JANUS_PORT"
+    printf 'interkom|%s|%s|%s|%s\n' "$first" "$aliases" "$STRIH_HTTPS_HUB_UPSTREAM" "$STRIH_HTTPS_HUB_UPSTREAM"
   fi
   if [ "$shading" != none ]; then
     printf 'shading|%s||%s|\n' "$shading" "$STRIH_HTTPS_SHADING_UPSTREAM"
@@ -439,6 +442,31 @@ strih_https_status() {
   printf '%s' "${code:-000}"
 }
 
+# strih_https_janus_ws_listeners -> where Janus's WebSocket (:STRIH_HTTPS_JANUS_PORT) listens, read
+# from `ss -ltnH`: `loopback <addrs>` when every listener is on 127.0.0.0/8 or [::1], `exposed <addrs>`
+# when any is not (the LAN IP, 0.0.0.0, [::], *), `not listening at all` when nothing does. Issue 1453:
+# Janus on loopback is what makes the hub's /janus relay the only way to Janus. Always rc 0.
+strih_https_janus_ws_listeners() {
+  local listen addr all="" exposed=0 _s _r _q
+  listen="$(ss -ltnH "sport = :${STRIH_HTTPS_JANUS_PORT}" 2>/dev/null || true)"
+  while read -r _s _r _q addr _; do
+    [ -n "${addr:-}" ] || continue
+    all="${all:+${all},}${addr}"
+    case "$addr" in
+      127.*:"${STRIH_HTTPS_JANUS_PORT}" | "[::1]"*":${STRIH_HTTPS_JANUS_PORT}") ;;
+      *) exposed=1 ;;
+    esac
+  done <<<"$listen"
+  if [ -z "$all" ]; then
+    printf 'not listening at all\n'
+  elif [ "$exposed" = 1 ]; then
+    printf 'exposed on %s\n' "$all"
+  else
+    printf 'loopback %s\n' "$all"
+  fi
+  return 0
+}
+
 strih_https_row_count() {
   local sites n=0 site first aliases up janus
   local -a names
@@ -455,7 +483,7 @@ strih_https_row_count() {
 # (strih_https_row_count of them). Always rc 0.
 strih_https_grade_rows() {
   local sites nginx avail enabled tmp site first aliases up janus paths cert key origin st act listen
-  local problems="" names_ok="" pem sans end name h1 h2 te ini hook stat_line owner live fp_s fp_l
+  local problems="" names_ok="" pem sans end name h1 h2 jl te ini hook stat_line owner live fp_s fp_l
   local -a names
   sites="$(strih_https_sites 2>/dev/null)" || { printf 'FAIL|(https) the box facts are unreadable\n'; return 0; }
   if [ -z "$sites" ]; then
@@ -539,10 +567,13 @@ strih_https_grade_rows() {
       h2="$(strih_https_status "$first" /janus --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
         -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
         -H 'Sec-WebSocket-Protocol: janus-protocol')"
-      if [ "$h1" = 200 ] && [ "$h2" = 101 ]; then
-        printf 'OK|(https-upstream) interkom through nginx: the hub /api/state 200, the Janus /janus WebSocket upgrade 101\n'
+      jl="$(strih_https_janus_ws_listeners)"
+      if [ "$h1" != 200 ] || [ "$h2" != 101 ]; then
+        printf 'FAIL|(https-upstream) interkom through nginx: the hub /api/state %s (want 200), the /janus upgrade through the hub relay %s (want 101) -- systemctl status intercom-hub janus\n' "$h1" "$h2"
+      elif [ "${jl%% *}" = loopback ]; then
+        printf 'OK|(https-upstream) interkom through nginx: the hub /api/state 200, the /janus upgrade 101 through the hub relay (Janus reached), the Janus WebSocket on loopback only (%s)\n' "${jl#* }"
       else
-        printf 'FAIL|(https-upstream) interkom through nginx: the hub /api/state %s (want 200), the Janus /janus upgrade %s (want 101) -- systemctl status intercom-hub janus\n' "$h1" "$h2"
+        printf 'FAIL|(https-upstream) interkom: the Janus WebSocket :%s is %s, not loopback only -- a client could go around the hub /janus relay (the plain-RTP join); re-run setup-strih.sh step 14 and restart janus (issue 1453)\n' "$STRIH_HTTPS_JANUS_PORT" "$jl"
       fi
     else
       h1="$(strih_https_status "$first" /api/version)"
