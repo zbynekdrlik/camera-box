@@ -500,7 +500,7 @@ if [ -f /etc/systemd/system/intercom-hub.service ]; then
   elif [ "${IH_EN}/${IH_ACT}" = enabled/active ]; then ok "intercom-hub.service enabled + active"
   elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service enabled=${IH_EN:-unknown} active=${IH_ACT:-unknown} -- the interkom is down (issue 1418): systemctl enable --now intercom-hub; journalctl -u intercom-hub"
   else note "intercom-hub.service installed (enabled=${IH_EN:-unknown}, active=${IH_ACT:-unknown}) -- ${WHY}"; fi
-  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d   # issue 1412: the role drop-in
+  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d; strih_intercom_hub_memlock_grade "http://${WS_HOST}:8790/api/state"   # issue 1412 role drop-in; issue 1401 memory lock
 elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1418: the interkom runs on it)"
 else note "intercom-hub.service not installed -- ${WHY}"; fi
 
