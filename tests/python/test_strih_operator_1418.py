@@ -938,7 +938,8 @@ def _item16(tmp_path, box, enabled, active, installed=True):
           '#!/bin/bash\ncase "$1" in\n  is-enabled) echo %s; [ %s = enabled ] ;;\n'
           '  is-active) echo %s; [ %s = active ] ;;\nesac\n' % (enabled, enabled, active, active))
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
-            'strih_intercom_hub_crash_loop() { return 1; }\nstrih_intercom_hub_cred_grade() { :; }\n' + item)
+            'strih_intercom_hub_crash_loop() { return 1; }\nstrih_intercom_hub_cred_grade() { :; }\n'
+            'strih_intercom_hub_memlock_grade() { :; }\nWS_HOST=192.0.2.1\n' + item)
     r = _bash(body, box=box, env={"PATH": "%s:%s" % (stub, os.environ["PATH"])})
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
