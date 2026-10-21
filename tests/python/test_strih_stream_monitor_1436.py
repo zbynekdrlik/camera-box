@@ -8,10 +8,9 @@ Linux stream box, writing the card directly (never PipeWire). Main design: issue
 
 What this pins:
   * scripts/strih_stream_monitor.py -- the pure parts (the /proc/asound PCM walk, the card resolved by
-    its playback PCM NAME, never an index; the PCM owner; the pipe-ceiling relay decision; the ffmpeg /
-    aplay argv) and the REAL loop driven with fake ffmpeg / aplay executables: play + end, nothing
-    published (silent, logged once), a busy card (never connects), an aplay that fails the open, the
-    latency ceiling (drops instead of pausing the RTMP subscriber), a stalled stream; `--check-state`;
+    its playback PCM NAME, never an index; the PCM owner) and `--check-state`. Since issue 1456 the player
+    is VLC: its loop is pinned in tests/python/test_strih_stream_monitor_vlc_1456.py, and the issue-1436
+    ffmpeg -> aplay relay tests went away with the relay;
   * systemd/strih-stream-monitor.service -- the unit (Restart=always, the kiosk start path, the URL =
     the profile's server + /%l, the state file verify reads);
   * scripts/lib/strih-session-apps.sh + scripts/lib/strih-stream-monitor.sh -- the stream role runs it
@@ -147,261 +146,12 @@ def test_the_pcm_owner(tmp_path):
     assert m.pcm_owner(str(root), str(proc), 5, 0)["state"] == "unreadable"
 
 
-@pytest.mark.parametrize("pending,n,ceiling,want", [
-    (0, 3840, 38400, "write"), (34560, 3840, 38400, "write"), (34561, 3840, 38400, "drop"),
-    (38400, 1, 38400, "drop"), (None, 3840, 38400, "write")])
-def test_the_relay_drops_only_what_would_pass_the_ceiling(pending, n, ceiling, want):
-    assert _mod().relay_action(pending, n, ceiling) == want
-
-
-def test_the_ceiling_is_below_one_pipe_buffer_so_a_write_never_blocks():
-    m = _mod()
-    assert m.ceiling_bytes(m.DEFAULT_CEILING_MS) + m.CHUNK_BYTES <= 65536
-    assert m.ceiling_bytes(200) == 38400
-
-
-def test_the_argv_plays_only_the_audio_straight_to_alsa():
-    m = _mod()
-    ff = m.ffmpeg_argv("ffmpeg", "rtmp://127.0.0.1:1234/live/stream-pp")
-    assert ff[ff.index("-i") + 1] == "rtmp://127.0.0.1:1234/live/stream-pp"
-    assert ff.index("-rw_timeout") < ff.index("-i"), "a socket read timeout is an input option"
-    for a in ("-vn", "-nostdin"):
-        assert a in ff
-    assert ff[ff.index("-map") + 1] == "0:a:0"
-    assert ff[ff.index("-f") + 1] == "s16le" and ff[ff.index("-ar") + 1] == "48000" and ff[ff.index("-ac") + 1] == "2"
-    assert ff[-1] == "pipe:1"
-    ap = m.aplay_argv("aplay", "plughw:CARD=Generic_1,DEV=0")
-    assert ap[:2] == ["aplay", "-N"], "a busy PCM must fail the open at once (the hub's AplaySink pattern)"
-    assert ap[ap.index("-D") + 1] == "plughw:CARD=Generic_1,DEV=0"
-    assert ap[ap.index("-f") + 1] == "S16_LE" and ap[ap.index("-r") + 1] == "48000" and ap[ap.index("-c") + 1] == "2"
-    assert "pipewire" not in " ".join(ff + ap) and "pulse" not in " ".join(ff + ap)
-
-
 def test_the_default_url_is_the_local_restreamer_and_the_short_hostname():
     m = _mod()
     assert m.default_url() == "rtmp://127.0.0.1:1234/live/" + socket.gethostname().split(".")[0]
 
 
 # --- the loop, with fake ffmpeg / aplay ---------------------------------------------------------------------------
-
-FAKE_FF = r'''
-import os, sys, time
-log = os.environ["FAKE_LOG"]
-with open(log, "a") as f:
-    f.write("ffmpeg " + " ".join(sys.argv[1:]) + "\n")
-with open(log + ".env", "a") as f:
-    f.write("ffmpeg pid=%d LC_ALL=%s\n" % (os.getpid(), os.environ.get("LC_ALL")))
-with open(log + ".times", "a") as f:
-    f.write("%.3f\n" % time.time())
-mode = os.environ.get("FAKE_FF_MODE", "play:19200")
-kind, _, rest = mode.partition(":")
-n, _, chunk = rest.partition(":")
-chunk = int(chunk or 3840)
-if kind == "none":
-    sys.stderr.write("rtmp://127.0.0.1:1234/live/x: Input/output error\n")
-    sys.exit(1)
-if kind == "noaudio":
-    # the five lines the real ffmpeg 6.1 prints for a video-only input (read on dev1, review round 2)
-    sys.stderr.write("Stream map '0:a:0' matches no streams.\n"
-                     "To ignore this, add a trailing '?' to the map.\n"
-                     "Failed to set value '0:a:0' for option 'map': Invalid argument\n"
-                     "Error parsing options for output file pipe:1.\n"
-                     "Error opening output files: Invalid argument\n")
-    sys.exit(1)
-out = sys.stdout.buffer
-left = int(n)
-while left > 0:
-    k = min(chunk, left)
-    try:
-        out.write(b"\x01" * k)
-        out.flush()
-    except BrokenPipeError:
-        sys.exit(1)
-    left -= k
-    time.sleep(0.002)
-if kind == "stall":
-    time.sleep(30)
-if kind == "eofwait":
-    out.flush()
-    os.close(1)  # EOF first (sys.stdout never closes fd 1 itself), the process exits a moment later
-    time.sleep(1.5)
-'''
-
-FAKE_AP = r'''
-import os, sys, time
-log = os.environ["FAKE_LOG"]
-with open(log, "a") as f:
-    f.write("aplay " + " ".join(sys.argv[1:]) + "\n")
-with open(log + ".env", "a") as f:
-    f.write("aplay pid=%d LC_ALL=%s\n" % (os.getpid(), os.environ.get("LC_ALL")))
-mode = os.environ.get("FAKE_AP_MODE", "read")
-if mode == "busy":
-    sys.stderr.write("aplay: main:850: audio open error: Device or resource busy\n")
-    sys.exit(1)
-if mode == "fail":
-    sys.stderr.write("aplay: set_params:1387: Channels count non available\n")
-    sys.exit(1)
-if mode == "slow":
-    time.sleep(float(os.environ.get("FAKE_AP_SLEEP", "1.5")))
-if mode == "fail_then_kill":
-    # fail the first connect; the second aplay dies by a signal before it reads anything (an OOM kill)
-    cnt = os.environ["FAKE_AP_OUT"] + ".count"
-    k = int(open(cnt).read()) if os.path.exists(cnt) else 0
-    open(cnt, "w").write(str(k + 1))
-    if k < 1:
-        sys.stderr.write("aplay: set_params:1387: Channels count non available\n")
-        sys.exit(1)
-    import signal
-    os.kill(os.getpid(), signal.SIGKILL)
-if mode == "fail2":
-    # fail the first two connects, then play
-    cnt = os.environ["FAKE_AP_OUT"] + ".count"
-    k = int(open(cnt).read()) if os.path.exists(cnt) else 0
-    open(cnt, "w").write(str(k + 1))
-    if k < 2:
-        sys.stderr.write("aplay: set_params:1387: Channels count non available\n")
-        sys.exit(1)
-ff_pid = None
-n = 0
-while True:
-    b = sys.stdin.buffer.read(4096)
-    if not b:
-        break
-    n += len(b)
-if mode == "check_ff":
-    # at our EOF: is the ffmpeg (the RTMP subscriber) still running? The player must stop it first.
-    for w in open(log + ".env").read().split():
-        if w.startswith("pid="):
-            ff_pid = int(w.split("=")[1])
-            break
-    try:
-        os.kill(ff_pid, 0)
-        alive = 1
-    except ProcessLookupError:
-        alive = 0
-    with open(os.environ["FAKE_AP_OUT"] + ".ff", "a") as f:
-        f.write("ffalive=%d\n" % alive)
-with open(os.environ["FAKE_AP_OUT"], "a") as f:
-    f.write("%d\n" % n)
-if mode == "sigself":
-    import signal
-    os.kill(os.getpid(), signal.SIGTERM)  # a SIGTERM during the drain (a shutdown), never an aplay fault
-'''
-
-
-FAKE_AMIXER = r'''
-import os, sys
-with open(os.environ["FAKE_LOG"], "a") as f:
-    f.write("amixer " + " ".join(sys.argv[1:]) + "\n")
-if os.environ.get("FAKE_AMIXER_MODE") == "missing":
-    sys.stderr.write("amixer: Unable to find simple control 'Speaker',0\n")
-    sys.exit(1)
-'''
-
-
-def _fakes(tmp_path):
-    b = tmp_path / "fakebin"
-    b.mkdir(exist_ok=True)
-    for name, body in (("ffmpeg", FAKE_FF), ("aplay", FAKE_AP), ("amixer", FAKE_AMIXER)):
-        (b / name).write_text("#!%s\n%s" % (sys.executable, body))
-        (b / name).chmod(0o755)
-    return b
-
-
-def _monitor_cmd(tmp_path, cycles=1, ff="play:19200", ap="read", owner=None, analog=True, extra=(), env_extra=None):
-    root, proc = asound(tmp_path, analog=analog, owner=owner)
-    b = _fakes(tmp_path)
-    state = tmp_path / "run" / "strih-stream-monitor.json"
-    log = tmp_path / "fake.log"
-    apout = tmp_path / "aplay.out"
-    env = {k: v for k, v in os.environ.items() if k not in LEAKY}
-    env.update({"FAKE_LOG": str(log), "FAKE_FF_MODE": ff, "FAKE_AP_MODE": ap, "FAKE_AP_OUT": str(apout)})
-    env.update(env_extra or {})
-    argv = [sys.executable, str(PROG), "--url", "rtmp://127.0.0.1:1234/live/stream-pp", "--state-file", str(state),
-            "--ffmpeg", str(b / "ffmpeg"), "--aplay", str(b / "aplay"), "--amixer", str(b / "amixer"),
-            "--asound-root", str(root), "--proc-root", str(proc), "--retry-s", "0.05"]
-    if cycles is not None:
-        argv += ["--cycles", str(cycles)]
-    return argv + list(extra), env, log, apout, state
-
-
-def run_monitor(tmp_path, cycles=1, ff="play:19200", ap="read", owner=None, analog=True, extra=(), timeout=60,
-                env_extra=None):
-    argv, env, log, apout, state = _monitor_cmd(tmp_path, cycles, ff, ap, owner, analog, extra, env_extra)
-    t0 = time.monotonic()
-    r = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=timeout)
-    elapsed = time.monotonic() - t0
-    calls = log.read_text() if log.exists() else ""
-    played = [int(x) for x in apout.read_text().split()] if apout.exists() else []
-    st = json.loads(state.read_text()) if state.exists() else None
-    return r, calls, played, st, elapsed
-
-
-def test_a_published_stream_plays_to_the_resolved_card_and_ends_cleanly(tmp_path):
-    r, calls, played, st, _e = run_monitor(tmp_path, ff="play:19200")
-    assert r.returncode == 0, r.stderr
-    assert played == [19200], "every byte reached aplay (under the ceiling nothing is dropped)"
-    assert "aplay -N" in calls and "-D plughw:CARD=Generic_1,DEV=0" in calls
-    assert calls.index("ffmpeg ") < calls.index("aplay "), "the card is opened only once audio arrived"
-    lines = r.stdout.splitlines()
-    assert any(ln.startswith("playing rtmp://127.0.0.1:1234/live/stream-pp -> plughw:CARD=Generic_1,DEV=0")
-               for ln in lines), lines
-    assert any(ln.startswith("stream ended after") and "; 0 ms dropped" in ln for ln in lines), lines
-    assert st["connects"] == 1 and st["url"] == "rtmp://127.0.0.1:1234/live/stream-pp"
-    assert st["device"] == "plughw:CARD=Generic_1,DEV=0" and st["card"] == 1 and st["pcm_device"] == 0
-
-
-def test_nothing_published_is_silent_and_logged_once(tmp_path):
-    r, calls, played, st, _e = run_monitor(tmp_path, cycles=3, ff="none")
-    assert r.returncode == 0, r.stderr
-    assert calls.count("ffmpeg ") == 3 and "aplay " not in calls, "no stream = the card is never opened"
-    assert played == []
-    waits = [ln for ln in r.stdout.splitlines() if ln.startswith("waiting")]
-    assert len(waits) == 1, r.stdout
-    assert "Input/output error" in waits[0]
-    assert st["state"] == "waiting"
-
-
-def test_a_card_held_by_another_process_is_never_played_and_never_connected(tmp_path):
-    r, calls, played, st, _e = run_monitor(tmp_path, cycles=2, owner=(4321, "pipewire"))
-    assert r.returncode == 0, r.stderr
-    assert calls == "", "a busy card: no RTMP connection at all (never a paused subscriber)"
-    busy = [ln for ln in r.stdout.splitlines() if ln.startswith("busy")]
-    assert len(busy) == 1 and "pipewire" in busy[0] and "4321" in busy[0], r.stdout
-    assert st["state"] == "busy" and st["owner"] == "pipewire"
-
-
-def test_an_aplay_that_fails_the_open_ends_the_connection(tmp_path):
-    r, calls, played, st, _e = run_monitor(tmp_path, ap="busy", ff="play:400000")
-    assert r.returncode == 0, r.stderr
-    assert "ffmpeg " in calls and "aplay " in calls
-    assert st["state"] == "busy"
-    assert any("Device or resource busy" in ln for ln in r.stdout.splitlines()), r.stdout
-
-
-def test_no_headphone_pcm_is_named_and_never_connects(tmp_path):
-    r, calls, played, st, _e = run_monitor(tmp_path, cycles=2, analog=False)
-    assert r.returncode == 0, r.stderr
-    assert calls == "" and st["state"] == "no-card"
-    assert len([ln for ln in r.stdout.splitlines() if ln.startswith("no-card")]) == 1
-
-
-def test_a_card_slower_than_the_stream_drops_over_the_ceiling_instead_of_pausing(tmp_path):
-    # aplay sleeps 1.5 s before it reads: the relay must keep reading ffmpeg and drop past the ceiling
-    r, calls, played, st, _e = run_monitor(tmp_path, ff="play:192000", ap="slow", extra=("--ceiling-ms", "40"))
-    assert r.returncode == 0, r.stderr
-    assert st["dropped_bytes"] > 0
-    assert played and played[0] + st["dropped_bytes"] == 192000, (played, st["dropped_bytes"])
-    assert played[0] <= 7680, "the 40 ms ceiling bounds the pipe, not the 64 KiB pipe buffer"
-    ended = [ln for ln in r.stdout.splitlines() if ln.startswith("stream ended")]
-    assert ended and "dropped" in ended[0] and "; 0 ms dropped" not in ended[0], ended
-
-
-def test_a_stalled_stream_is_dropped_not_held(tmp_path):
-    r, calls, played, st, elapsed = run_monitor(tmp_path, ff="stall:7680", extra=("--stall-s", "1"))
-    assert r.returncode == 0, r.stderr
-    assert elapsed < 20, "the stalled ffmpeg (sleeping 30 s) was killed"
-    assert any(ln.startswith("stream ended") and "stalled" in ln for ln in r.stdout.splitlines()), r.stdout
 
 
 # --- --check-state (verify-strih's stream-monitor pass row) ----------------------------------------------------------
@@ -422,13 +172,6 @@ def test_check_state_ok_while_waiting_with_the_card_free(tmp_path):
     ok, line = m.check_state(str(_state(tmp_path)), time.time(), str(root), str(proc))
     assert ok, line
     assert "rtmp://127.0.0.1:1234/live/stream-pp" in line and "free" in line
-
-
-def test_check_state_ok_while_playing_with_aplay_on_the_card(tmp_path):
-    m = _mod()
-    root, proc = asound(tmp_path, owner=(77, "aplay"))
-    ok, line = m.check_state(str(_state(tmp_path, state="playing", connects=2)), time.time(), str(root), str(proc))
-    assert ok and "playing" in line and "aplay" in line, line
 
 
 def test_check_state_fails_pipewire_on_the_headphone_card(tmp_path):
@@ -514,7 +257,7 @@ def test_the_stream_role_runs_the_monitor_between_the_keeper_and_the_tray(boxes)
     assert a["UNITS"] == "strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service"
     assert a["ROWS"] == "7", "three unit rows + the keeper's last pass + the monitor's three rows"
     assert "systemctl --user start strih-stream-monitor.service || true" in a["AUTOSTART"]
-    assert "ffmpeg" in a["PKGS"].split() and "alsa-utils" in a["PKGS"].split()
+    assert "vlc" in a["PKGS"].split() and "alsa-utils" in a["PKGS"].split()  # issue 1456: VLC
 
 
 def test_the_strih_role_never_runs_the_monitor(boxes):
@@ -651,122 +394,6 @@ def test_a_realtek_alt_analog_pcm_is_never_the_jack(tmp_path):
     assert why is None and (pcm["card_id"], pcm["device"]) == ("Generic_1", 0), why
 
 
-def test_the_children_run_in_the_c_locale(tmp_path):
-    # the busy / underrun text the player matches is English: never a translated message
-    _r, _calls, _played, _st, _e = run_monitor(tmp_path)
-    env = (tmp_path / "fake.log.env").read_text()
-    assert "ffmpeg pid=" in env and "aplay pid=" in env
-    assert "LC_ALL=None" not in env and env.count("LC_ALL=C\n") == 2, env
-
-
-def test_the_speaker_is_muted_by_name_before_the_card_plays(tmp_path):
-    r, calls, played, _st, _e = run_monitor(tmp_path)
-    assert played == [19200]
-    assert "amixer -q -c Generic_1 sset Speaker mute" in calls
-    assert calls.index("amixer ") < calls.index("aplay "), "the speaker is off before the stream sounds"
-
-
-def test_a_card_without_a_speaker_control_still_plays_and_says_so_once(tmp_path):
-    r, calls, played, _st, _e = run_monitor(tmp_path, cycles=2, env_extra={"FAKE_AMIXER_MODE": "missing"})
-    assert played == [19200, 19200]
-    notes = [ln for ln in r.stdout.splitlines() if "Speaker" in ln]
-    assert len(notes) == 1 and "Unable to find simple control" in notes[0], r.stdout
-
-
-def test_an_unreadable_pipe_level_never_blocks_the_rtmp_reader(tmp_path):
-    # FIONREAD unknown + an aplay that does not read for 3 s: a blocking write would hold ffmpeg (the RTMP
-    # subscriber) paused for 3 s and drop nothing; the relay must drop instead
-    m = _mod()
-    argv, env, log, apout, state = _monitor_cmd(tmp_path, ff="play:400000", ap="slow",
-                                                env_extra={"FAKE_AP_SLEEP": "3"})
-    os.environ.update({k: env[k] for k in ("FAKE_LOG", "FAKE_FF_MODE", "FAKE_AP_MODE", "FAKE_AP_OUT", "FAKE_AP_SLEEP")})
-    try:
-        m.fionread = lambda fd: None
-        mon = m.Monitor(argv[argv.index("--url") + 1], str(state), ffmpeg=argv[argv.index("--ffmpeg") + 1],
-                        aplay=argv[argv.index("--aplay") + 1], amixer=argv[argv.index("--amixer") + 1],
-                        asound_root=argv[argv.index("--asound-root") + 1],
-                        proc_root=argv[argv.index("--proc-root") + 1], retry_s=0.05, log=lambda s: None)
-        t0 = time.monotonic()
-        mon.cycle()
-        st = mon.st
-    finally:
-        for k in ("FAKE_LOG", "FAKE_FF_MODE", "FAKE_AP_MODE", "FAKE_AP_OUT", "FAKE_AP_SLEEP"):
-            os.environ.pop(k, None)
-    played = [int(x) for x in apout.read_text().split()] if apout.exists() else []
-    assert st["dropped_bytes"] > 0, "a full pipe drops, never blocks"
-    assert played and played[0] + st["dropped_bytes"] == 400000
-    assert time.monotonic() - t0 < 10
-
-
-def test_every_relayed_and_dropped_chunk_is_whole_frames(tmp_path):
-    # ffmpeg's pipe reads can end mid-frame; a dropped odd chunk would swap the channels / shift the samples
-    r, calls, played, st, _e = run_monitor(tmp_path, ff="play:192192:1001", ap="slow", extra=("--ceiling-ms", "40"))
-    assert r.returncode == 0, r.stderr
-    assert st["dropped_bytes"] > 0 and st["dropped_bytes"] % 4 == 0, st["dropped_bytes"]
-    assert played and played[0] % 4 == 0 and played[0] + st["dropped_bytes"] == 192192
-
-
-def test_an_aplay_that_keeps_failing_is_a_fault_logged_once_and_backed_off(tmp_path):
-    r, calls, played, st, elapsed = run_monitor(tmp_path, cycles=3, ap="fail")
-    assert r.returncode == 0, r.stderr
-    assert st["state"] == "aplay-failing"
-    fails = [ln for ln in r.stdout.splitlines() if ln.startswith("aplay-failing")]
-    assert len(fails) == 1 and "Channels count non available" in fails[0], r.stdout
-    assert elapsed >= 0.05 * (2 + 4), "the retry backs off after each aplay failure"
-    m = _mod()
-    root, proc = asound(tmp_path / "chk")
-    p = _state(tmp_path, state="aplay-failing", reason=st["reason"])
-    ok, line = m.check_state(str(p), time.time(), str(root), str(proc))
-    assert not ok and "aplay-failing" in line
-
-
-def test_a_stream_without_audio_is_a_fault_not_waiting(tmp_path):
-    r, calls, played, st, _e = run_monitor(tmp_path, cycles=2, ff="noaudio")
-    assert st["state"] == "no-audio" and "aplay " not in calls
-    assert len([ln for ln in r.stdout.splitlines() if ln.startswith("no-audio")]) == 1
-    m = _mod()
-    root, proc = asound(tmp_path / "chk")
-    ok, line = m.check_state(str(_state(tmp_path, state="no-audio", reason=st["reason"])), time.time(), str(root),
-                             str(proc))
-    assert not ok and "no-audio" in line
-
-
-def _alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def test_sigterm_stops_the_player_and_both_children(tmp_path):
-    argv, env, log, _apout, _state_ = _monitor_cmd(tmp_path, cycles=None, ff="play:400000000")
-    envlog = Path(str(log) + ".env")
-    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-    out, leaked = "", []
-    try:
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and "aplay pid=" not in (envlog.read_text() if envlog.exists() else ""):
-            time.sleep(0.05)
-        p.send_signal(15)
-        out, _err = p.communicate(timeout=15)
-        time.sleep(0.2)
-        pids = [int(w.split("=")[1]) for w in envlog.read_text().split() if w.startswith("pid=")]
-        assert len(pids) == 2, envlog.read_text()
-        leaked = [pid for pid in pids if _alive(pid)]
-    finally:
-        # a failed run must never leave the player or a fake child holding pytest's output pipe
-        if p.poll() is None:
-            p.kill()
-            p.communicate(timeout=5)
-        for w in (envlog.read_text().split() if envlog.exists() else []):
-            if w.startswith("pid=") and _alive(int(w.split("=")[1])):
-                os.kill(int(w.split("=")[1]), 9)
-    assert p.returncode == 0
-    assert leaked == [], "the player left its children running"
-    assert any(ln.startswith("stream ended") and "stopping" in ln for ln in out.splitlines()), out
-
-
 def test_the_player_server_is_the_profile_and_role_server(boxes):
     m = _mod()
     import importlib.util
@@ -814,88 +441,7 @@ def test_the_stream_role_grade_report_prints_every_row(tmp_path, boxes):
     assert any("(stream-monitor) strih-stream-monitor.service" in ln for ln in lines)
 
 
-def test_the_subscriber_is_stopped_before_aplay_drains(tmp_path):
-    # a stalled stream: ffmpeg still runs (sleeping) when the relay ends; it must be gone by aplay's EOF
-    r, _calls, played, _st, _e = run_monitor(tmp_path, ff="stall:7680", ap="check_ff", extra=("--stall-s", "1"))
-    assert r.returncode == 0, r.stderr
-    assert played == [7680]
-    assert (tmp_path / "aplay.out.ff").read_text() == "ffalive=0\n"
-
-
-def test_an_eof_before_ffmpeg_exits_is_a_stream_end_not_a_stall(tmp_path):
-    # found by the real-ffmpeg RTMP smoke: ffmpeg closes stdout a moment before it exits at a stream end
-    r, _calls, played, _st, _e = run_monitor(tmp_path, ff="eofwait:7680")
-    assert r.returncode == 0, r.stderr
-    assert played == [7680]
-    ended = [ln for ln in r.stdout.splitlines() if ln.startswith("stream ended")]
-    assert ended and "ended (ffmpeg rc 0" in ended[0] and "stalled" not in ended[0], ended
-
-
 # --- review round 2 ------------------------------------------------------------------------------------------------
-
-def _ff_gaps(tmp_path):
-    t = [float(x) for x in (tmp_path / "fake.log.times").read_text().split()]
-    return [b - a for a, b in zip(t, t[1:])]
-
-
-def test_the_aplay_failure_backoff_doubles(tmp_path):
-    # retry 0.3 s: the pauses are 0.6 then 1.2 s; without the backoff both are 0.3 s
-    r, _calls, _played, st, _e = run_monitor(tmp_path, cycles=3, ap="fail", extra=("--retry-s", "0.5"))
-    assert st["state"] == "aplay-failing", r.stdout
-    g = _ff_gaps(tmp_path)
-    assert len(g) == 2 and g[1] - g[0] >= 0.5, g  # expected growth 1.0 s; none without the backoff
-
-
-def test_a_play_after_failures_resets_the_backoff_and_the_fault(tmp_path):
-    # two failed connects, then a stream plays: the third gap is the plain retry again
-    r, _calls, played, st, _e = run_monitor(tmp_path, cycles=4, ap="fail2", extra=("--retry-s", "0.5"))
-    assert played == [19200, 19200], r.stdout
-    g = _ff_gaps(tmp_path)
-    assert len(g) == 3 and g[2] < g[1] - 0.8, g  # 2.0 s backoff pause vs the plain 0.5 s one
-    assert st["state"] == "ended" and not st.get("last_play_failed"), st
-
-
-def test_a_non_aplay_outcome_resets_the_backoff():
-    m = _mod()
-    mon = m.Monitor("rtmp://x/live/y", None, log=lambda s: None)
-    mon.fail_streak = 3
-    mon.set_idle("waiting", "nothing published")
-    assert mon.fail_streak == 0
-
-
-def test_the_real_ffmpeg_no_audio_text_is_no_audio(tmp_path):
-    r, calls, _played, st, _e = run_monitor(tmp_path, ff="noaudio")
-    assert st["state"] == "no-audio", r.stdout
-    assert "matches no streams" in st["reason"]
-
-
-def test_a_failed_connect_stays_a_fault_while_nothing_is_published(tmp_path):
-    m = _mod()
-    root, proc = asound(tmp_path)
-    p = _state(tmp_path, state="waiting", last_play_failed="aplay exited 1: Channels count non available")
-    ok, line = m.check_state(str(p), time.time(), str(root), str(proc))
-    assert not ok and "Channels count non available" in line, line
-
-
-def test_the_failed_play_mark_is_written_and_kept_into_waiting(tmp_path):
-    # aplay fails on a short stream, then nothing is published: the state reads waiting + the failure
-    import shutil
-    r, _c, _p, st, _e = run_monitor(tmp_path, cycles=1, ap="fail")
-    assert st["last_play_failed"], st
-    m = _mod()
-    root, proc = asound(tmp_path / "chk")
-    st["state"] = "waiting"
-    p = tmp_path / "st2.json"
-    p.write_text(json.dumps(st))
-    ok, _line = m.check_state(str(p), time.time(), str(root), str(proc))
-    assert not ok
-    shutil.rmtree(tmp_path / "chk")
-
-
-def test_a_sigterm_during_the_drain_is_not_an_aplay_fault(tmp_path):
-    r, _calls, played, st, _e = run_monitor(tmp_path, ap="sigself")
-    assert played == [19200]
-    assert st["state"] == "ended", (st, r.stdout)
 
 
 def test_the_obs_row_reads_the_last_line_only(tmp_path, boxes):
@@ -917,7 +463,3 @@ def test_key_note_survives_settings_that_are_not_an_object(tmp_path):
 
 # --- review round 3 ------------------------------------------------------------------------------------------------
 
-def test_a_signal_killed_aplay_that_played_nothing_keeps_the_failed_play_mark(tmp_path):
-    r, _calls, played, st, _e = run_monitor(tmp_path, cycles=2, ap="fail_then_kill", ff="play:400000")
-    assert played == [], r.stdout
-    assert st["last_play_failed"] and "Channels count non available" in st["last_play_failed"], st
