@@ -170,7 +170,10 @@ class Box:
                 "OBS_BOX_PANEL_KBD_HELPER": str(self.helper), "OBS_BOX_PANEL_KBD_PYTHON": str(self.bin / "kbdpy"),
                 "OBS_BOX_PANEL_SYS_UNIT_DIR": str(self.tmp / "none"),
                 "OBS_BOX_PANEL_RUSTDESK_BIN": str(self.tmp / "none"),
-                "OBS_BOX_PANEL_DISCORD_BIN": str(self.tmp / "none")}
+                "OBS_BOX_PANEL_DISCORD_BIN": str(self.tmp / "none"),
+                # issue 1458: the recordings helper's installed path (never the real /usr/local/lib)
+                "OBS_BOX_PANEL_FILES_HELPER": str(self.tmp / "lib" / "obs_box_recordings.py"),
+                "OBS_BOX_PANEL_FILES_BIN": str(self.tmp / "none")}
 
     def install(self):
         return _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(self.home), env=self.env())

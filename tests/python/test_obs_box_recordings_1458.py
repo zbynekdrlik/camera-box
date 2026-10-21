@@ -146,7 +146,7 @@ def test_check_libfm_fails_a_trash_conf_and_a_missing_one(tmp_path):
 # --- the panel: launcher, install, row -----------------------------------------------------------------
 
 def _files_env(b, present=True):
-    fm = b.tmp / "pcmanfm"
+    fm = b.tmp / ("pcmanfm" if present else "no-pcmanfm-here")
     if present:
         _exec(fm, "#!/bin/sh\n")
     return {**b.env(), "OBS_BOX_PANEL_FILES_BIN": str(fm)}
@@ -175,10 +175,22 @@ def test_install_adds_pcmanfm_the_helper_and_the_no_trash_conf(box):
 
 
 def test_install_asks_apt_for_pcmanfm_when_it_is_missing(box):
-    # the stub dpkg-query answers "installed" for every package once anything was installed, so start empty
-    r = _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=_files_env(box))
+    # per-package stubs (the shared Box stub reads one "installed" flag for every package): tint2 and
+    # discord are already there, pcmanfm is not, so exactly pcmanfm is installed
+    pk = box.tmp / "pkgbin"
+    pk.mkdir()
+    st = box.tmp / "pkgs"
+    st.mkdir()
+    for have in ("tint2", "discord"):   # discord: the stream role's pinned .deb, already there
+        (st / have).write_text("")
+    _exec(pk / "dpkg-query", '#!/bin/bash\n[ -e %s/"${@: -1}" ] && printf "install ok installed"\nexit 0\n' % st)
+    _exec(pk / "apt-get", '#!/bin/bash\necho "apt-get $*" >> %s\ntouch %s/"${@: -1}"\n' % (box.log, st))
+    env = _files_env(box)
+    env["PATH"] = "%s:%s" % (pk, env["PATH"])
+    r = _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=env)
     assert r.returncode == 0, r.stderr
-    assert "pcmanfm" in box.calls(), box.calls()
+    apt = [ln for ln in box.calls().splitlines() if ln.startswith("apt-get")]
+    assert "apt-get install -y pcmanfm" in apt and "apt-get install -y tint2" not in apt, apt
 
 
 def test_the_files_row_passes_healthy_and_fails_a_trash_conf(box):
