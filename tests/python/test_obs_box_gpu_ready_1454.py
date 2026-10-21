@@ -155,6 +155,20 @@ def test_a_gpu_that_never_comes_is_bounded_and_never_fatal(tmp_path):
     assert took < 4
 
 
+def test_a_wedged_udevadm_never_holds_lightdm_past_the_bound(tmp_path):
+    """Review finding: `udevadm info` against a wedged udevd blocks; the waiter must still end near its
+    budget, well inside systemd's 90 s start timeout, or lightdm never starts at all."""
+    root = tmp_path / "sys"
+    _pci(root, "0000:64:00.0", "0x030000", "card2")
+    hang = tmp_path / "udevadm-hang"
+    hang.write_text('#!/bin/bash\n[ "$1" = info ] && exec sleep 100\nexit 0\n')
+    hang.chmod(0o755)
+    r, took = _run_waiter(tmp_path, root, hang, budget="1")
+    assert r.returncode == 0
+    assert "starting the display manager anyway" in r.stdout
+    assert took < 15, took
+
+
 def test_non_display_devices_are_ignored(tmp_path):
     """The NPU (0x118000), a NIC (0x020000) and a bridge carry no DRM card and must not hold X."""
     root = tmp_path / "sys"
@@ -269,6 +283,25 @@ def test_the_gather_reads_the_installed_wait_and_the_xorg_core_dumps(tmp_path):
 def test_a_clean_boot_reads_no_xorg_core(tmp_path):
     _, _, text = _gather_facts(tmp_path, "Process 491103 (companion-satellite) of user 1000 dumped core.\n")
     assert _run_gather(text)["x_core"] == "0"
+
+
+def test_an_unreadable_journal_is_never_a_clean_boot(tmp_path):
+    """Review finding: a journal the gather cannot read (a user outside adm/systemd-journal sees no system
+    journal) must read as unknown, never `x_core=0`."""
+    _, _, text = _gather_facts(tmp_path, "")
+    assert _run_gather(text)["x_core"] == ""
+
+
+def test_an_xorg_core_logged_only_as_dumped_core_counts_once(tmp_path):
+    """An older systemd-coredump logs only `... dumped core.`; the newer one logs both lines for ONE
+    crash. Each crashed Xorg counts once."""
+    _, _, text = _gather_facts(tmp_path, "Process 2461 (Xorg) of user 0 dumped core.\n")
+    assert _run_gather(text)["x_core"] == "1"
+    _, _, text = _gather_facts(tmp_path, "systemd[1]: Started session-c1.scope\n"
+                               "Process 2461 (Xorg) of user 0 terminated abnormally with signal 6/ABRT, processing...\n"
+                               "Process 2461 (Xorg) of user 0 dumped core.\n"
+                               "Process 3364 (Xorg) of user 0 dumped core.\n")
+    assert _run_gather(text)["x_core"] == "2"
 
 
 def _kiosk_row(gpu_wait, x_core):
