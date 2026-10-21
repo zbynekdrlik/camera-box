@@ -323,7 +323,8 @@ pending() {
             echo "${dev##*/} (no DRM card yet)"
             continue
         fi
-        props="$("$udevadm" info --query=property --name="/dev/dri/${card}" 2>/dev/null)"
+        # bounded: a wedged udevd must never hold lightdm past systemd's start timeout
+        props="$(timeout 3 "$udevadm" info --query=property --name="/dev/dri/${card}" 2>/dev/null)"
         case "$props" in
             *USEC_INITIALIZED=*) ;;
             *) echo "${dev##*/} (${card} not finished by udev yet)" ;;
@@ -339,7 +340,7 @@ while :; do
     mapfile -t waiting < <(pending)
     elapsed_ms=$((($(now_us) - start) / 1000))
     if [ "${#waiting[@]}" = 0 ]; then
-        "$udevadm" settle --timeout=5 >/dev/null 2>&1 || true
+        timeout 10 "$udevadm" settle --timeout=5 >/dev/null 2>&1 || true
         echo "obs-box-gpu-ready: every display GPU is registered with udev after ${elapsed_ms} ms -- starting the display manager"
         exit 0
     fi

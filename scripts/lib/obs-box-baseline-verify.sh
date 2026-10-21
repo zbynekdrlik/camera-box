@@ -237,7 +237,14 @@ echo "autologin=$(if grep -qxF "autologin-user=${U}" "$_al" 2>/dev/null && grep 
 # Xorg core dumps (an Xorg abort made lightdm fall back to the login screen).
 _gw="$(obs_box_gpu_ready_wait_path)"; _gd="$(obs_box_gpu_ready_dropin_path)"
 echo "gpu_wait=$(if [ -x "$_gw" ] && cmp -s "$_gw" <(obs_box_gpu_ready_wait_text) && cmp -s "$_gd" <(obs_box_gpu_ready_dropin_text); then echo 1; else echo 0; fi)"
-echo "x_core=$(journalctl -b -q --no-pager -o cat -t systemd-coredump 2>/dev/null | grep -c '(Xorg) of user .* terminated abnormally')"
+# One per crashed Xorg (systemd-coredump logs "terminated abnormally" and/or "dumped core" per crash). An
+# unreadable system journal (no PID 1 line this boot: a user outside adm/systemd-journal) prints empty,
+# never 0.
+echo "x_core=$(if [ -n "$(journalctl -b -q --no-pager -o cat -n 1 _PID=1 2>/dev/null)" ]; then
+    journalctl -b -q --no-pager -o cat -t systemd-coredump 2>/dev/null \
+        | grep -oE 'Process [0-9]+ \(Xorg\) of user [0-9]+ (terminated abnormally|dumped core)' \
+        | grep -oE '^Process [0-9]+' | sort -u | wc -l
+fi)"
 echo "gdm3=$(pkg gdm3)"
 echo "gnome_shell=$(pkg gnome-shell)"
 echo "pyws=$(pkg python3-websocket)"

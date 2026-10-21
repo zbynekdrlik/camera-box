@@ -161,11 +161,16 @@ any dGPU + iGPU notebook has it.
   database), then one `udevadm settle`. Bounded in microseconds (`EPOCHREALTIME`; `SECONDS` ended a
   1 s budget early), never fatal: past the bound one WARNING names the pending GPU and lightdm starts.
   Its journal line (`journalctl -b -u lightdm`) says how long it waited.
+  Every `udevadm` call is under `timeout` (a wedged udevd must never hold lightdm past systemd's 90 s
+  start timeout). A display device that never gets a driver costs the full 30 s + a WARNING each boot;
+  devices without a bound driver are NOT skipped, because the late iGPU binds its driver late too.
 - Rejected: `AutoAddGPU false` alone (no abort, but a late iGPU never joins and the panel stays
   black); amdgpu in the initramfs (narrows the race, does not close it).
 - Grader row `kiosk` also needs `gpu_wait=1` (both files byte-identical to the renderers, embedded by
-  `declare -f`) and `x_core=0` (no `(Xorg) ... terminated abnormally` from systemd-coredump in this
-  boot's journal). The boot of 21.10.2026 FAILs the row until the box boots again with the wait.
+  `declare -f`) and `x_core=0`: the crashed Xorg PIDs (`terminated abnormally` or `dumped core`, each
+  PID once) in this boot's systemd-coredump lines. A journal the gather cannot read (no PID 1 line this
+  boot) prints `x_core=` empty and FAILs, never 0. The boot of 21.10.2026 FAILs the row until the box
+  boots again with the wait.
 - Tests: `tests/python/test_obs_box_gpu_ready_1454.py` (the waiter against a fake sysfs + udevadm:
   ready, late card, card udev has not finished, never-ready bound, non-display devices, bad budget;
   the install; the real gather with its paths moved; the row), the `gpu_wait` / `x_core` rows in
