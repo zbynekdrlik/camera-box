@@ -227,8 +227,8 @@ def _gather_facts(tmp_path, journal_text):
          str(VERIFY_LIB)], capture_output=True, text=True, timeout=30)
     assert snippet.returncode == 0, snippet.stderr
     text = snippet.stdout
-    assert text.count(WAIT_PATH) == 0 and text.count(DROPIN_PATH) == 0, \
-        "the gather must read the paths through the embedded path functions, never retype them"
+    assert text.count(WAIT_PATH) == 1 and text.count(DROPIN_PATH) == 1, \
+        "the gather must read the paths through the ONE embedded path function each, never retype them"
     w = tmp_path / "wait"
     d = tmp_path / "dropin"
     jfile = tmp_path / "journal.txt"
