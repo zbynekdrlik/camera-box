@@ -836,6 +836,20 @@ with an old inline block that ran its tail unconditionally.
 - **Launching setup-strih over ssh needs the sudo password on stdin.** A bare `sudo … nohup … &` over
   ssh has no tty → the log holds only `sudo: A terminal is required to authenticate`. Use
   `echo "$PW" | sudo -S -p "" bash -c "nohup … &"`.
+- **verify-strih from a staged tree also needs `vendor/av-sync-dock/src`.** Item 41's
+  `(program-audio-files)` row compares the installed sampler headers with the checkout's
+  `vendor/av-sync-dock/src/camera-box-{audio,marker-scan}.hpp`; a `scripts/ systemd/ intercom/`-only
+  stage reads them as `differs` (a false FAIL, 21.10.2026: the installed files matched the repo's
+  sha256). Stage that dir too, or check the two hashes before believing the row.
+- **A few steps on a live box, without the whole run:** a small driver does `set -- --box <box>;
+  . scripts/setup-strih.sh` (the source-guard stops after the box facts and libs load, with `HERE`,
+  `DESKTOP_USER`, `USER_HOME`, `OBS_CFG` set), then `obs_box_apt_lock_timeout` and the step calls
+  exactly as setup-strih writes them (`strih_session_apps_install "${HERE}/.." ...`,
+  `strih_operator_install ...`, `obs_box_panel_install ...`, `obs_box_gpu_ready_install`). Step 13
+  never restarts a running hub, so a matrix change also needs `systemctl restart intercom-hub`. Used
+  for the post-production deploy of 21.10.2026 (issues 1441/1454/1456/1457/1458); it never touches
+  OBS. A full run without `STRIH_LX_BUNDLE_SRC` does not install OBS either (step 4 only warns), but
+  several steps refuse or skip while OBS runs.
 - **Poll with `pgrep -x setup-strih.sh`, never `pgrep -f`.** `pgrep -f setup-strih.sh` matches its OWN
   command line and reports RUNNING forever (run 1 on 18.9. "ran" for 20 min this way while setup had
   actually never started).
