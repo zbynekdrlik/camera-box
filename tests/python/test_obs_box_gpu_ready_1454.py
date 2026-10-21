@@ -258,7 +258,8 @@ def test_the_gather_reads_the_installed_wait_and_the_xorg_core_dumps(tmp_path):
     assert facts["x_core"] == "1"
     w.write_text(_render("obs_box_gpu_ready_wait_text"))
     w.chmod(0o755)
-    d.write_text(_render("obs_box_gpu_ready_dropin_text"))
+    # the gather renders the drop-in through its (moved) waiter path, so the fixture names that path
+    d.write_text(_render("obs_box_gpu_ready_dropin_text").replace(WAIT_PATH, str(w)))
     facts = _run_gather(text)
     assert facts["gpu_wait"] == "1"
     w.write_text(_render("obs_box_gpu_ready_wait_text") + "# edited by hand\n")
