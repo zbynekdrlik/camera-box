@@ -315,7 +315,9 @@ def test_install_runs_the_seed_and_the_isolation(tmp_path):
                    "STRIH_OPERATOR_IP_ADDR_CMD": "cat %s" % nm.addrs, "STRIH_NIC_IFACE": "enp7s0",
                    "STRIH_OPERATOR_OBS_RUNNING_CMD": str(_obs(tmp_path, False)),
                    # 14.10.2026: the keyboard step writes a scratch file and never touches this box's X.
-                   "STRIH_OPERATOR_KEYBOARD_FILE": str(tmp_path / "keyboard"), "STRIH_OPERATOR_SETXKBMAP": "true"})
+                   "STRIH_OPERATOR_KEYBOARD_FILE": str(tmp_path / "keyboard"), "STRIH_OPERATOR_SETXKBMAP": "true",
+                   # issue 1441: and never this box's own ibus setting.
+                   "STRIH_OPERATOR_GSETTINGS": "true"})
     assert r.returncode == 0, r.stderr
     assert 'XKBLAYOUT="us,sk"' in (tmp_path / "keyboard").read_text()
     assert _ini(ini).get("BasicWindow", "MultiviewMouseSwitch") == "true"
@@ -407,6 +409,16 @@ class _Surfaces(http.server.BaseHTTPRequestHandler):
 # The operator keyboard (owner 14.10.2026): the file X reads at its start and `setxkbmap -query` on :0.
 KEYBOARD_OK = 'XKBMODEL="pc105"\nXKBLAYOUT="us,sk"\nXKBVARIANT=""\nXKBOPTIONS="grp:alt_shift_toggle"\n\nBACKSPACE="guess"\n'
 XKB_LIVE_OK = "rules:      evdev\nmodel:      pc105\nlayout:     us,sk\noptions:    grp:alt_shift_toggle\n"
+# issue 1441: the operator's ibus. No ibus-schemas file = ibus not installed; ibus-value = its setting.
+_FAKE_GSETTINGS = r'''#!/bin/bash
+echo "gsettings $*" >> "$FAKE_OP/kbd-log"
+printf '%s\n' "${DBUS_SESSION_BUS_ADDRESS-none}" >> "$FAKE_OP/gsettings-bus"
+case "${1-}" in
+  list-schemas) [ -e "$FAKE_OP/gsettings-fails" ] && exit 1; cat "$FAKE_OP/ibus-schemas" 2>/dev/null || true ;;
+  get) [ -e "$FAKE_OP/gsettings-fails" ] && exit 1; cat "$FAKE_OP/ibus-value" 2>/dev/null || true ;;
+  set) [ -e "$FAKE_OP/gsettings-set-fails" ] && exit 1; printf '%s\n' "$4" > "$FAKE_OP/ibus-value" ;;
+esac
+'''
 
 
 class Op:
@@ -424,7 +436,11 @@ class Op:
         _exec(self.bin / "journalctl", _FAKE_TOOL % ("journalctl", "klog", "klog"))
         _exec(self.bin / "wmctrl", _FAKE_CAT % "wmctrl")
         # 14.10.2026 the operator keyboard: log the args, print the live `-query` text.
-        _exec(self.bin / "setxkbmap", '#!/bin/bash\necho "$*" >> "$FAKE_OP/xkb-calls"\ncat "$FAKE_OP/xkb" 2>/dev/null || true\n')
+        _exec(self.bin / "setxkbmap", '#!/bin/bash\necho "$*" >> "$FAKE_OP/xkb-calls"\n'
+              'echo "setxkbmap $*" >> "$FAKE_OP/kbd-log"\ncat "$FAKE_OP/xkb" 2>/dev/null || true\n')
+        # issue 1441 (21.10.2026): the operator's ibus over gsettings, never this box's own dconf.
+        _exec(self.bin / "gsettings", _FAKE_GSETTINGS)
+        _exec(self.bin / "dbus-run-session", '#!/bin/bash\n[ "${1-}" = "--" ] && shift\nexport DBUS_SESSION_BUS_ADDRESS=private\nexec "$@"\n')
         self.seams = True  # STRIH_OPERATOR_XRANDR / _KLOG point at the fixture files
         self.xinput = _exec(tmp_path / "fake-xinput", _FAKE_XINPUT)
         self.hci = _exec(tmp_path / "fake-hciconfig", _FAKE_CAT % "hci")
