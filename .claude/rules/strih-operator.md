@@ -4,6 +4,8 @@ paths:
   - "scripts/setup-strih.sh"
   - "scripts/verify-strih.sh"
   - "tests/python/test_strih_operator_1418.py"
+  - "scripts/lib/strih-keyboard.sh"
+  - "tests/python/test_strih_keyboard_ibus_1441.py"
 ---
 
 # strih operator surface: what the operator touches is provisioned AND graded (issue 1418)

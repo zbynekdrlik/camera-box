@@ -6,9 +6,16 @@ paths:
   - "scripts/obs_box_stream_profile.py"
   - "tests/python/test_strih_stream_monitor_1436.py"
   - "tests/python/test_stream_monitor_provision_1436.py"
+  - "tests/python/test_strih_stream_monitor_vlc_1456.py"
 ---
 
 # The stream box's headphones play the REAL outgoing stream (issue 1436)
+
+> **Issue 1456 (owner 21.10.2026) replaced the player with VLC** ("tak chcem to mat rovnako cize to tiez z
+> implementuj aby na stream-pp tiez bolo vlc, a neviem si v stream-pp nastavovat hlasitost vystuput
+> sluchatkoveho a je to potichu"). The ffmpeg -> aplay relay described under "The player" below is
+> HISTORY. The unit, the PCM-by-name resolve, busy / no-card, the state file, `--check-state` and the
+> three verify rows stay; see "The VLC player (issue 1456)" at the end for what changed.
 
 Owner, 15.10.2026, on stream-pp: "nestreamujem ziaden zvuk do vystupu a do sluchatiek nieco raje" ->
 "a spomen si ako to mame riesene v snv ze sa pocuva cez vlc ktore ma nacitany stream rtmp z obs alebo z
@@ -127,3 +134,36 @@ smoke with the REAL ffmpeg against `ffmpeg -re -i clip -c copy -f flv -listen 1 
    `muted the Speaker switch of Generic_1` line is the player's own mute.
 8. Stop the stream: `stream ended after ...`, then `waiting:` again. `sudo ./scripts/verify-strih.sh
    --box stream-pp`: the `(stream-monitor)` unit row and the three rows PASS.
+
+## The VLC player (issue 1456)
+
+- `strih_stream_monitor.py` supervises VLC (`vlc_argv`): `--aout=alsa --alsa-audio-device=<plughw>`
+  (never PipeWire), `--zoom=0.25` (the picture in a small window, as on SNV the window shows it),
+  `--network-caching=1000` (SNV's), `--no-qt-error-dialogs --no-qt-privacy-ask`, `--extraintf=http` on
+  127.0.0.1:8090 with a per-run random password, the URL last. No `--repeat`: a failed open with repeat
+  would loop VLC.
+- Before EVERY VLC start, `mixer_unity_cmds`: the card's `Master` / `Headphone` 0 dB unmute, `PCM` 0 dB,
+  `Speaker` mute (`amixer -q -c <card id> sset ...`, the C locale). stream-pp read Master -23.25 dB on
+  21.10.2026, a value PipeWire left. A control the card lacks is logged once and VLC starts anyway. The
+  operator's level is VLC's own slider (`--volume-save` is VLC's default, so it survives a restart).
+- The http status drives the loop, polled every second:
+  - `stopped` -> `pl_play` every 3 s (nothing published, or the stream ended);
+  - `paused` for more than 10 s -> `pl_stop`. The restreamer's per-subscriber channel is unbounded, so
+    a paused player must never hold a subscriber (the reason the issue-1436 relay never paused);
+  - VLC exits (the operator closed it) -> it starts again after 3 s. An exit before its http answered
+    within 15 s is `vlc-failing`. An http that never answers within 15 s is `vlc-failing` and VLC is
+    restarted.
+- `--check-state`: healthy states `starting` / `waiting` / `playing` / `paused`; faults `no-card` / `busy`
+  / `vlc-failing`; the only allowed PCM owner is `vlc` (aplay is now a FAIL, PipeWire always was).
+- Packages: `STRIH_STREAM_MONITOR_PACKAGES=(vlc alsa-utils)`.
+- Tests: `tests/python/test_strih_stream_monitor_vlc_1456.py` runs the real supervisor against a fake
+  `vlc` that serves the http status interface (Basic auth) and a fake `amixer`, on a free local port.
+- **Live apply (supervisor, after a production):**
+  1. setup-strih step 16d on the stream box installs `vlc` (plus Qt) and the new program, then
+     try-restarts the running unit.
+  2. Read back:
+     - the journal shows `watching ... in VLC` and `playing rtmp://127.0.0.1:1234/live/<box> -> plughw:...`;
+     - `/proc/asound/card<N>/pcm0p/sub0/status` names a `vlc` owner;
+     - `amixer -c <card id> sget Master` reads 0 dB;
+     - the VLC window sits on the panel's screen.
+
