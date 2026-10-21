@@ -176,3 +176,25 @@ strih-pp, stream-pp) types `us,sk` (Slovak QWERTZ) and switches with **Alt+Shift
   `strih_operator_install` MUST set both, or it writes this box's real file and changes the
   keyboard of dev1's own display.
 - Applied live on 14.10.2026 to strih-pp, stream-pp and strih-snv before the code landed.
+
+**ibus overwrote it at every login (issue 1441, owner 21.10.2026 on stream-pp: the panel item showed
+US and a click never switched to SK).** im-config starts `ibus-daemon --xim` in the openbox session.
+With `org.freedesktop.ibus.general use-system-keyboard-layout false` (the default), ibus applies its
+own engine layout (`xkb:us::eng`) to X at login. :0 then carries ONE group, so the panel's
+`obs_box_kbd_layout.py next` locks US again (journal `layout US -> US`). The file and `localectl` still
+read `us,sk`, so only a LIVE read shows it. All three boxes had it on 21.10.2026.
+- The keyboard code lives in its own lib `scripts/lib/strih-keyboard.sh` (moved verbatim from
+  strih-operator.sh for its line budget; strih-operator.sh sources it, same function names).
+- Setup: `strih_operator_ibus_keep_layout` sets the key `true` for the operator BEFORE the live
+  `setxkbmap` (skipped without ibus, already-true is a no-op, a failed set is a WARN). gsettings runs
+  as the operator over their session bus `/run/user/<uid>/bus` when it exists, so the live ibus takes
+  it at once, else over a private `dbus-run-session` bus.
+- Verify: the `keyboard` row takes the ibus state as a third input. `false` FAILs naming the key
+  (checked before the live layout, it is the cause), an unreadable or non-boolean value FAILs, a box
+  without the ibus schema or without gsettings is graded on the file + live layout only.
+- Live fix by hand on stream-pp 21.10.2026 17:40 (gsettings + setxkbmap); strih-pp and strih-snv
+  get it at their next setup-strih run.
+- Seams: `STRIH_OPERATOR_GSETTINGS`, `STRIH_OPERATOR_RUN_USER_DIR`. A test that runs the install must
+  also set `STRIH_OPERATOR_GSETTINGS`, or it changes dev1's own ibus setting. Tests:
+  `tests/python/test_strih_keyboard_ibus_1441.py` (the issue-1418 fixture with fake gsettings and
+  dbus-run-session).
