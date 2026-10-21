@@ -32,6 +32,8 @@
 #                      .deb); NOTE on the strih role (production-only);
 #       (panel-kbd)    issue 1441: the keyboard layout helper installed = the checkout, and its live
 #                      `print` on :0 names a layout (NOTE when X answers nothing);
+#       (panel-files)  issue 1458: pcmanfm installed, the recordings helper = the checkout, and
+#                      pcmanfm's libfm.conf use_trash=0 (a delete frees the disk, after a confirmation);
 #       (panel-window) a tint2 window on :0 (`wmctrl -lx` class tint2.Tint2); NOTE when X has no
 #                      client list to read.
 #     A box the gate leaves out prints ONE note naming why.
@@ -40,13 +42,19 @@ OBS_BOX_PANEL_PACKAGE=tint2
 OBS_BOX_PANEL_UNIT=obs-box-panel.service
 OBS_BOX_PANEL_BIN=/usr/bin/tint2
 OBS_BOX_PANEL_WM_CLASS=tint2.Tint2
-OBS_BOX_PANEL_ROWS=7
+OBS_BOX_PANEL_ROWS=8
 # issue 1441 (owner 18.10.2026: "da sa v liste prepinat??"): the keyboard layout item. tint2 runs the
 # helper as an executor (`watch` prints US / SK on every change, a left click runs `next`); it reads and
 # locks the XKB group through libX11 (Ubuntu 26.04 ships no xkb-switch). The panel always runs it with
 # /usr/bin/python3; OBS_BOX_PANEL_KBD_PYTHON is only the verify row's interpreter seam for the tests.
 OBS_BOX_PANEL_KBD_HELPER="${OBS_BOX_PANEL_KBD_HELPER:-/usr/local/lib/camera-box/obs_box_kbd_layout.py}"
 OBS_BOX_PANEL_KBD_PYTHON="${OBS_BOX_PANEL_KBD_PYTHON:-/usr/bin/python3}"
+# issue 1458 (owner 21.10.2026: "file explorer aby vedeli vymazat nahravky ktore robi obs"): the
+# `Nahrávky` launcher runs the recordings helper, which opens pcmanfm in the ACTIVE OBS profile's record
+# folder at click time. The binary path is the launcher's presence seam for the tests.
+OBS_BOX_PANEL_FILES_PACKAGE=pcmanfm
+OBS_BOX_PANEL_FILES_BIN="${OBS_BOX_PANEL_FILES_BIN:-/usr/bin/pcmanfm}"
+OBS_BOX_PANEL_FILES_HELPER="${OBS_BOX_PANEL_FILES_HELPER:-/usr/local/lib/camera-box/obs_box_recordings.py}"
 # The system user-unit dir (a distro package's --user unit, e.g. restreamer.service) and the RustDesk
 # binary -- seams for the offline tests.
 OBS_BOX_PANEL_SYS_UNIT_DIR="${OBS_BOX_PANEL_SYS_UNIT_DIR:-/usr/lib/systemd/user}"
@@ -59,6 +67,7 @@ OBS_BOX_PANEL_DISCORD_SHA256="${OBS_BOX_PANEL_DISCORD_SHA256:-e7f346569784ef47ea
 
 # obs_box_panel_launchers USER_HOME -> one `id|Name|Exec|Icon` line per app this box has, in panel order:
 #   obs        strih-obs.service in the user's unit dir (every Linux OBS box; on stream-pp it is the stream OBS)
+#   files      pcmanfm in the OBS record folder, through the recordings helper (issue 1458)
 #   shading    bkshading-panel-app.service in the user's unit dir (the strih role)
 #   restreamer restreamer.service (the restreamer package's --user unit) in the user's or the system unit dir
 #   rustdesk   the RustDesk binary
@@ -70,6 +79,8 @@ obs_box_panel_launchers() {
   ud="${home}/.config/systemd/user"
   [ -f "${ud}/strih-obs.service" ] \
     && printf 'obs|OBS Studio|systemctl --user start strih-obs.service|%s\n' "$(obs_box_panel_obs_icon_path "$home")"
+  [ -x "$OBS_BOX_PANEL_FILES_BIN" ] \
+    && printf 'files|Nahrávky|/usr/bin/python3 %s open|system-file-manager\n' "$OBS_BOX_PANEL_FILES_HELPER"
   [ -f "${ud}/bkshading-panel-app.service" ] \
     && printf 'shading|Shading|systemctl --user start bkshading-panel-app.service|video-display\n'
   if [ -f "${ud}/restreamer.service" ] || [ -f "${OBS_BOX_PANEL_SYS_UNIT_DIR}/restreamer.service" ]; then
@@ -85,6 +96,9 @@ obs_box_panel_launchers() {
 # obs_box_panel_obs_icon_path USER_HOME -> where step 16h puts the OBS logo (the vendored OBS tree's
 # obs-logo-128.png, copied into this lib's dir so the staged checkout carries it).
 obs_box_panel_obs_icon_path() { printf '%s/.local/share/icons/obs-box-panel/obs.png' "${1:?user home required}"; }
+
+# obs_box_panel_libfm_conf USER_HOME -> pcmanfm's libfm.conf (issue 1458: use_trash=0, confirm_del=1).
+obs_box_panel_libfm_conf() { printf '%s/.config/libfm/libfm.conf' "${1:?user home required}"; }
 
 # obs_box_panel_desktop_path USER_HOME ID -> the launcher's .desktop file.
 obs_box_panel_desktop_path() {
@@ -280,11 +294,14 @@ obs_box_panel_install() {
   local cfg unitdir w changed=0
   [ -f "${repo}/systemd/${OBS_BOX_PANEL_UNIT}" ] \
     || { echo "obs-box-panel: systemd/${OBS_BOX_PANEL_UNIT} not found under ${repo}" >&2; return 1; }
-  if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
-    echo "  installing ${OBS_BOX_PANEL_PACKAGE}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$OBS_BOX_PANEL_PACKAGE" \
-      || { echo "obs-box-panel: apt-get install ${OBS_BOX_PANEL_PACKAGE} failed" >&2; return 1; }
-  fi
+  local pkg
+  for pkg in "$OBS_BOX_PANEL_PACKAGE" "$OBS_BOX_PANEL_FILES_PACKAGE"; do
+    if [ "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)" != "install ok installed" ]; then
+      echo "  installing ${pkg}"
+      DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" \
+        || { echo "obs-box-panel: apt-get install ${pkg} failed" >&2; return 1; }
+    fi
+  done
   cfg="$(obs_box_panel_config_path "$home")"
   unitdir="${home}/.config/systemd/user"
   strih_user_home_dir "$home" "$user" "$(dirname "$cfg")" \
@@ -304,6 +321,19 @@ obs_box_panel_install() {
   w="$(strih_session_apps_put "${repo}/scripts/obs_box_kbd_layout.py" "$OBS_BOX_PANEL_KBD_HELPER" 0755)" || return 1
   echo "  ${OBS_BOX_PANEL_KBD_HELPER} ${w} (the keyboard layout item, issue 1441)"
   [ "$w" = written ] && changed=1
+  install -d -m 0755 "$(dirname "$OBS_BOX_PANEL_FILES_HELPER")" \
+    || { echo "obs-box-panel: cannot create $(dirname "$OBS_BOX_PANEL_FILES_HELPER")" >&2; return 1; }
+  w="$(strih_session_apps_put "${repo}/scripts/obs_box_recordings.py" "$OBS_BOX_PANEL_FILES_HELPER" 0755)" || return 1
+  echo "  ${OBS_BOX_PANEL_FILES_HELPER} ${w} (the recordings item, issue 1458)"
+  [ "$w" = written ] && changed=1
+  local libfm
+  libfm="$(obs_box_panel_libfm_conf "$home")"
+  strih_user_home_dir "$home" "$user" "$(dirname "$libfm")" \
+    || { echo "obs-box-panel: cannot create $(dirname "$libfm")" >&2; return 1; }
+  w="$(python3 "${repo}/scripts/obs_box_recordings.py" seed-libfm "$libfm")" \
+    || { echo "obs-box-panel: cannot write ${libfm}" >&2; return 1; }
+  chown "$user:$user" "$libfm" 2>/dev/null || true
+  echo "  ${libfm} ${w} (pcmanfm: a delete frees the disk, after a confirmation)"
   while IFS='|' read -r id name ex icon; do
     [ -n "$id" ] || continue
     dst="$(obs_box_panel_desktop_path "$home" "$id")"
@@ -376,6 +406,7 @@ obs_box_panel_grade_rows() {
   fi
   obs_box_panel_discord_row
   obs_box_panel_kbd_row "$repo" "$home" "$user"
+  obs_box_panel_files_row "$repo" "$home"
   wins="$(strih_session_apps_wmctrl "$user" "$home")"
   if [ -z "$wins" ]; then
     printf 'NOTE|(panel-window) not graded: wmctrl on :0 answered nothing (X down or no client list)\n'
@@ -385,6 +416,21 @@ obs_box_panel_grade_rows() {
     printf 'FAIL|(panel-window) no %s window on :0 -- the panel is not shown\n' "$OBS_BOX_PANEL_WM_CLASS"
   fi
   return 0
+}
+
+# obs_box_panel_files_row REPO USER_HOME -> the (panel-files) row (issue 1458): pcmanfm installed, the
+# recordings helper = the checkout, libfm.conf use_trash=0.
+obs_box_panel_files_row() {
+  local repo="$1" home="$2" why
+  if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_FILES_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
+    printf 'FAIL|(panel-files) %s not installed -- re-run setup-strih.sh step 16h (issue 1458)\n' "$OBS_BOX_PANEL_FILES_PACKAGE"
+  elif ! cmp -s "${repo}/scripts/obs_box_recordings.py" "$OBS_BOX_PANEL_FILES_HELPER" 2>/dev/null; then
+    printf 'FAIL|(panel-files) %s missing or differs from the checkout -- re-run setup-strih.sh step 16h\n' "$OBS_BOX_PANEL_FILES_HELPER"
+  elif ! why="$(python3 "${repo}/scripts/obs_box_recordings.py" check-libfm "$(obs_box_panel_libfm_conf "$home")" 2>&1)"; then
+    printf 'FAIL|(panel-files) %s -- re-run setup-strih.sh step 16h\n' "$why"
+  else
+    printf 'OK|(panel-files) pcmanfm + the recordings launcher, %s\n' "$why"
+  fi
 }
 
 # obs_box_panel_grade_report REPO USER_HOME DESKTOP_USER -> verify-strih item 44 through the caller's ok /
