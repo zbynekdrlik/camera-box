@@ -92,8 +92,8 @@ d = os.environ["FAKE_VLC_DIR"]
 with open(os.path.join(d, "amixer"), "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\n")
 missing = os.environ.get("FAKE_AMIXER_MISSING", "").split(",")
-if len(sys.argv) > 4 and sys.argv[4] in missing:
-    sys.stderr.write("amixer: Unable to find simple control '%s',0\n" % sys.argv[4])
+if len(sys.argv) > 5 and sys.argv[5] in missing:  # amixer -q -c CARD sset NAME ...
+    sys.stderr.write("amixer: Unable to find simple control '%s',0\n" % sys.argv[5])
     sys.exit(1)
 '''
 
