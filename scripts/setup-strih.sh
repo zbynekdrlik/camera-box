@@ -659,7 +659,8 @@ fi
 strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d" || fail "cannot create ~/.config/pipewire/pipewire.conf.d (above)"
 strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
-# (c2, issue 1344) the loopback republishing strih-program's monitor as a pulse-visible Audio/Source.
+# (c2, issue 1344 follow-up) the loopback that republishes strih-program's monitor as a real
+# pulse-visible Audio/Source (strih-program.monitor itself is NOT pulse-visible to OBS on this box).
 strih_pipewire_program_loopback_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
 # the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
@@ -694,7 +695,6 @@ install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/int
 [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
   || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
 install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
-strih_intercom_hub_pw_unity_apply "$DESKTOP_USER" /etc/intercom-hub/intercom.toml   # issue 1457: the hub's PipeWire nodes at 0 dB
 strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
 systemctl daemon-reload
 systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"

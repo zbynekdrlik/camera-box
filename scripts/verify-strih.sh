@@ -344,8 +344,10 @@ case "$_rm_verdict" in
 esac
 
 # 9) PipeWire program audio (issue 1344): the DERIVED verdict — the strih-program null sink + the OBS
-#    `ASIO zvuk` pulse_input_capture + (hub active) the program-feed rx. FOH-live level = a SUPERVISOR
-#    step (FOH=unknown, never a level FAIL); a FAIL = a provisioning gap (sink/input absent) or no rx.
+#    `ASIO zvuk` pulse_input_capture + (when the hub is active) the program-feed rx. The FOH-live
+#    level is a SUPERVISOR live-acceptance step, so verify passes FOH=unknown here (never a level
+#    FAIL); a FAIL means a structural provisioning gap (sink/input absent) or, once the hub is
+#    active, no program rx.
 AUDIO_SINK=0
 # 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's
 # PipeWire session (the null sink lives there) -> a false "sink missing" FAIL on a healthy box. Probe
@@ -379,7 +381,6 @@ case "$AUDIO_VERDICT" in
   *)     bad  "program audio: $AUDIO_VERDICT" ;;
 esac
 strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs; then the MiniFuse talkback (report-only)
-strih_intercom_hub_pw_unity_grade "${STRIH_LX_USER:-newlevel}" /etc/intercom-hub/intercom.toml   # issue 1457: the hub's PipeWire nodes at 0 dB
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 
 # 9b) MiniFuse period + graph quantum (issue 1345, owner accepted 25.9.2026): both operator-session
