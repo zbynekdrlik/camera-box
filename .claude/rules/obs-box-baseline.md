@@ -144,6 +144,33 @@ Rules for the facet:
 - **`obs_box_write_if_changed` details:** an exclusive `mktemp` sibling (never a predictable root
   temp inside a user-writable config dir); content, mode AND owner are all part of the unchanged check.
 
+## lightdm waits for every display GPU (kiosk facet, issue 1454)
+
+strih-snv booted to the lightdm LOGIN SCREEN on 21.10.2026 (owner: no login prompt, ever, on any
+Linux rig). lightdm's autologin X server started 0.5 s after the amdgpu iGPU finished its DRM init,
+before udev had finished that card; X added it later as a hotplugged GPU screen and Xorg 21.1 aborted
+in `glamor_init` (`dixRegisterPrivateKey: Assertion '!global_keys[type].created' failed`, an Xorg core
+dump), so lightdm fell back to the greeter. The autologin config was correct; it is a boot race, and
+any dGPU + iGPU notebook has it.
+
+- `obs_box_kiosk` runs `obs_box_gpu_ready_install`: `/usr/local/sbin/obs-box-gpu-ready-wait` (0755)
+  and `/etc/systemd/system/lightdm.service.d/50-obs-box-gpu-ready.conf` (`ExecStartPre=<waiter> 30`),
+  both through `obs_box_write_if_changed`, then a daemon-reload (never a lightdm restart).
+- The waiter: every PCI display-class device (sysfs class `0x03*`) needs a DRM card whose udev record
+  is finished (`USEC_INITIALIZED`; the card directory alone is not enough, X enumerates from the udev
+  database), then one `udevadm settle`. Bounded in microseconds (`EPOCHREALTIME`; `SECONDS` ended a
+  1 s budget early), never fatal: past the bound one WARNING names the pending GPU and lightdm starts.
+  Its journal line (`journalctl -b -u lightdm`) says how long it waited.
+- Rejected: `AutoAddGPU false` alone (no abort, but a late iGPU never joins and the panel stays
+  black); amdgpu in the initramfs (narrows the race, does not close it).
+- Grader row `kiosk` also needs `gpu_wait=1` (both files byte-identical to the renderers, embedded by
+  `declare -f`) and `x_core=0` (no `(Xorg) ... terminated abnormally` from systemd-coredump in this
+  boot's journal). The boot of 21.10.2026 FAILs the row until the box boots again with the wait.
+- Tests: `tests/python/test_obs_box_gpu_ready_1454.py` (the waiter against a fake sysfs + udevadm:
+  ready, late card, card udev has not finished, never-ready bound, non-display devices, bad budget;
+  the install; the real gather with its paths moved; the row), the `gpu_wait` / `x_core` rows in
+  `tests/obs_box_baseline_1357.rs`.
+
 ## The iGPU panel sink on the modesetting DDX (item `obs_box_igpu_sink_modesetting`, grader row `igpu-sink`, issue 1418)
 
 On an NVIDIA-primary notebook (PRIME nvidia-primary) NVIDIA renders the X screen and the iGPU scans
