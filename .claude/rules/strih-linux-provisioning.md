@@ -845,11 +845,13 @@ with an old inline block that ran its tail unconditionally.
   . scripts/setup-strih.sh` (the source-guard stops after the box facts and libs load, with `HERE`,
   `DESKTOP_USER`, `USER_HOME`, `OBS_CFG` set), then `obs_box_apt_lock_timeout` and the step calls
   exactly as setup-strih writes them (`strih_session_apps_install "${HERE}/.." ...`,
-  `strih_operator_install ...`, `obs_box_panel_install ...`, `obs_box_gpu_ready_install`). Step 13
-  never restarts a running hub, so a matrix change also needs `systemctl restart intercom-hub`. Used
-  for the post-production deploy of 21.10.2026 (issues 1441/1454/1456/1457/1458); it never touches
-  OBS. A full run without `STRIH_LX_BUNDLE_SRC` does not install OBS either (step 4 only warns), but
-  several steps refuse or skip while OBS runs.
+  `strih_operator_install ...`, `obs_box_panel_install ...`). One kiosk item alone is its own
+  function from the step-11 lib (`obs_box_gpu_ready_install`, which `obs_box_kiosk` calls), never the
+  whole `obs_box_kiosk`. Step 13 never restarts a running hub, so a matrix change also needs
+  `systemctl restart intercom-hub`. Used for the post-production deploy of 21.10.2026 (issues
+  1441/1454/1456/1457/1458); it never touches OBS. A full run without `STRIH_LX_BUNDLE_SRC` does not
+  install OBS either (step 4 only warns), and while OBS runs some steps skip their OBS-file part with
+  a WARN (step 16g's [BasicWindow] and projector seeding) and do the rest.
 - **Poll with `pgrep -x setup-strih.sh`, never `pgrep -f`.** `pgrep -f setup-strih.sh` matches its OWN
   command line and reports RUNNING forever (run 1 on 18.9. "ran" for 20 min this way while setup had
   actually never started).
