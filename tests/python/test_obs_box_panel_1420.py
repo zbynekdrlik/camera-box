@@ -148,7 +148,10 @@ class Box:
                 "OBS_BOX_PANEL_PROC": str(self.proc),
                 "OBS_BOX_PANEL_SYS_UNIT_DIR": str(self.tmp / "no-sys-units"),
                 "OBS_BOX_PANEL_RUSTDESK_BIN": str(self.tmp / "no-rustdesk"),
-                "OBS_BOX_PANEL_KBD_HELPER": str(self.kbd_helper), "OBS_BOX_PANEL_KBD_PYTHON": str(self.bin / "kbdpy")}
+                "OBS_BOX_PANEL_KBD_HELPER": str(self.kbd_helper), "OBS_BOX_PANEL_KBD_PYTHON": str(self.bin / "kbdpy"),
+                # issue 1458: the recordings helper's installed path; no pcmanfm binary = no launcher here
+                "OBS_BOX_PANEL_FILES_HELPER": str(self.tmp / "lib" / "camera-box" / "obs_box_recordings.py"),
+                "OBS_BOX_PANEL_FILES_BIN": str(self.tmp / "no-pcmanfm")}
 
     def with_obs(self):
         ud = self.home / ".config" / "systemd" / "user"
@@ -202,12 +205,12 @@ def _healthy(box):
     (box.state / "kbd").write_text("US\n")
 
 
-def test_a_healthy_panel_passes_seven_rows(box):
+def test_a_healthy_panel_passes_eight_rows(box):
     _healthy(box)
     rows = _rows(box)
-    # issue 1448: + (panel-discord) on the stream role; issue 1441: + (panel-kbd)
-    assert [st for st, _ in rows] == ["OK"] * 7, rows
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "7"
+    # issue 1448: + (panel-discord) on the stream role; issue 1441: + (panel-kbd); issue 1458: + (panel-files)
+    assert [st for st, _ in rows] == ["OK"] * 8, rows
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "8"
 
 
 def test_install_writes_the_obs_launcher_and_its_icon(box):
@@ -244,8 +247,8 @@ def test_each_broken_piece_fails_its_row(box):
     box.kbd_helper.write_text("# old\n")
     rows = dict((d.split(")", 1)[0][1:], st) for st, d in _rows(box))
     assert rows == {"panel-pkg": "FAIL", "panel-config": "FAIL", "panel-launchers": "OK", "panel-unit": "FAIL",
-                    "panel-discord": "FAIL", "panel-kbd": "FAIL",
-                    "panel-window": "FAIL"}   # the stub's dpkg state covers discord too
+                    "panel-discord": "FAIL", "panel-kbd": "FAIL", "panel-files": "FAIL",
+                    "panel-window": "FAIL"}   # the stub's dpkg state covers discord and pcmanfm too
 
 
 def test_no_window_list_is_a_note_not_a_failure(box):
