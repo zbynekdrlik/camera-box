@@ -1,12 +1,13 @@
 [Unit]
 # issue 1436 -- the stream box's headphones play the REAL outgoing stream (owner 15.10.2026: the SNV way,
-# one unified PP/SNV design). scripts/strih_stream_monitor.py plays the AUDIO of the restreamer's local
-# RTMP (the key setup-strih step 3 writes into the stream OBS profile = the box name = %l) straight to
-# the headphone jack's ALSA PCM (resolved by its PCM name), never through PipeWire (issue 1437). Silent
-# while nothing is published, a reconnect after every stream. Installed by setup-strih.sh step 16d on
+# one unified PP/SNV design). scripts/strih_stream_monitor.py runs VLC on the restreamer's local RTMP
+# (the key setup-strih step 3 writes into the stream OBS profile = the box name = %l), straight to the
+# headphone jack's ALSA PCM (resolved by its PCM name), never through PipeWire (issue 1437); issue 1456:
+# VLC as on stream-snv, its volume slider the operator's control, the card at 0 dB. Silent while nothing
+# is published, retried every 3 s. Installed by setup-strih.sh step 16d on
 # the stream role (scripts/lib/strih-session-apps.sh), started at login by the kiosk autostart, graded by
 # verify-strih's (stream-monitor) rows.
-Description=Stream box headphone monitor -- play the outgoing RTMP stream's audio to the headphone jack (issue 1436)
+Description=Stream box headphone monitor -- VLC plays the outgoing RTMP stream to the headphone jack (issues 1436, 1456)
 Documentation=https://github.com/zbynekdrlik/camera-box
 After=strih-obs.service
 # Never give up: the operator must hear the stream whenever the session runs.
