@@ -51,7 +51,7 @@ static long long g_buffer = 40;
  * the low byte */
 static int g_low24 = 0;
 /* the plugin's log lines so far (each `out` line carries the count: the tests order a log line against an
- * output, review of ROZHODNUTE 6352253147) */
+ * output, review of ROZHODNUTE 6352253147); both the receive side and the worker log, so it is atomic */
 static unsigned long g_blogs;
 
 uint64_t os_gettime_ns(void)
@@ -159,7 +159,7 @@ void blog(int level, const char *format, ...)
 {
 	va_list args;
 	va_start(args, format);
-	g_blogs++;
+	__atomic_fetch_add(&g_blogs, 1UL, __ATOMIC_SEQ_CST);
 	fprintf(stderr, "blog %d: ", level);
 	vfprintf(stderr, format, args);
 	fputc('\n', stderr);
@@ -331,7 +331,7 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 	       " at=%" PRIu64 " mid=%ld last=%ld logs=%lu\n",
 	       audio->timestamp, audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first,
 	       (int)audio->format, first24, os_gettime_ns(), sample16(audio, audio->frames / 2),
-	       sample16(audio, audio->frames - 1), g_blogs);
+	       sample16(audio, audio->frames - 1), __atomic_load_n(&g_blogs, __ATOMIC_SEQ_CST));
 }
 
 static int g_udp_dummy;
