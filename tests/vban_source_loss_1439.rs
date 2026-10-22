@@ -412,6 +412,11 @@ fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, String) {
 /// `name=S`, `host=H`, `buffer=MS`, each one followed by the source's `update()`). Returns (stdout,
 /// the log).
 fn run_tokens(tokens: &[String], bitfmt: u8) -> (String, String) {
+    run_tokens_frames(tokens, FRAMES, bitfmt)
+}
+
+/// [`run_tokens`] with packets of `frames` frames.
+fn run_tokens_frames(tokens: &[String], frames: u32, bitfmt: u8) -> (String, String) {
     let source = repo(SOURCE);
     assert!(source.is_file(), "issue 1439: {SOURCE} is missing");
     let n = COMPILES.fetch_add(1, Ordering::SeqCst);
@@ -466,7 +471,7 @@ fn run_tokens(tokens: &[String], bitfmt: u8) -> (String, String) {
         String::from_utf8_lossy(&out.stderr)
     );
     let mut cmd = Command::new(&bin);
-    cmd.arg(format!("{FRAMES},{bitfmt}"));
+    cmd.arg(format!("{frames},{bitfmt}"));
     cmd.args(tokens);
     let run = cmd
         .output()
@@ -827,4 +832,61 @@ fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
         .and_then(|v| v.parse::<u64>().ok())
         .expect("an output");
     assert_eq!(first, 100 * ms + 10 * ms, "issue 1439: `{stdout}`");
+}
+
+/// Issue 1462 + 1439: mbc.lan sends the SNV program to stream-snv as VBAN `stream` in 24-bit PCM
+/// (format byte 0x02: `VBAN_BITFMT_24_INT`, PCM codec), 48 kHz stereo, 239 frames per packet. The
+/// shipped source decodes it (sign-extended) into float planar, stamps it on the timeline, and a
+/// lost packet is 239 frames of silence in the same format.
+#[test]
+fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439() {
+    let frames = 239u64;
+    let t0 = 1_000_000_000u64;
+    let values: [i16; 5] = [1234, -1234, 32767, -32768, 0];
+    let tokens: Vec<String> = [0u64, 1, 3, 4, 5]
+        .iter()
+        .zip(values)
+        .map(|(&k, v)| format!("{}:{}:{}", 700 + k, t0 + ns(k * frames), v as u16))
+        .collect();
+    let (stdout, log) = run_tokens_frames(&tokens, frames as u32, VBAN_BITFMT_24_INT);
+    let outs: Vec<(u64, u64, bool, i64, i32)> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("out "))
+        .map(|l| {
+            let f = |k: &str| -> &str {
+                l.split_whitespace()
+                    .find_map(|x| x.strip_prefix(k))
+                    .unwrap_or_else(|| panic!("no `{k}` in `{l}`"))
+            };
+            (
+                f("ts=").parse().unwrap(),
+                f("frames=").parse().unwrap(),
+                f("zero=") == "1",
+                f("first=").parse().unwrap(),
+                f("fmt=").parse().unwrap(),
+            )
+        })
+        .collect();
+    assert!(!log.contains("Unsupported format"), "issue 1462: {log}");
+    assert_eq!(outs.len(), 6, "five packets + one silent slot: {outs:?}");
+    // AUDIO_FORMAT_FLOAT_PLANAR (libobs enum audio_format) for every output, the silence included
+    assert!(outs.iter().all(|o| o.4 == 8), "issue 1462: {outs:?}");
+    assert!(outs.iter().all(|o| o.1 == frames), "issue 1462: {outs:?}");
+    let firsts: Vec<i64> = outs.iter().filter(|o| !o.2).map(|o| o.3).collect();
+    assert_eq!(
+        firsts,
+        vec![1234, -1234, 32767, -32768],
+        "issue 1462: the 24-bit samples (sign-extended) reach OBS unchanged: {outs:?}"
+    );
+    assert!(
+        outs[2].2,
+        "issue 1462: the lost packet is one slot of silence: {outs:?}"
+    );
+    for w in outs.windows(2) {
+        let expect = w[0].0 + ns(w[0].1);
+        assert!(
+            w[1].0.abs_diff(expect) <= 2,
+            "issue 1462: the stamps are contiguous: {outs:?}"
+        );
+    }
 }
