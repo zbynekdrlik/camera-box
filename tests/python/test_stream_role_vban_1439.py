@@ -790,6 +790,27 @@ def test_lost_or_re_anchored_audio_is_named(tmp_path):
     assert any(r.startswith("NOTE") and "lost=3 late=0 re_anchors=1" in r for r in rows), rows
 
 
+def _line_with(received, lost=0, concealed=0, reordered=0, stale=0, **kw):
+    # the status line since ROZHODNUTE 6352253147: stale=, reordered= and concealed= sit before silence_ms=
+    return _line(received, lost=lost, **kw).replace(
+        " silence_ms=", f" stale={stale} reordered={reordered} concealed={concealed} silence_ms=")
+
+
+def test_concealed_slots_are_named_with_the_silence_they_left(tmp_path):
+    # ROZHODNUTE 6352253147 (b): `lost` counts every slot whose packet was missing at its deadline,
+    # `concealed` the ones concealed -- the note says how many of the lost slots went out as silence
+    rows = _grade(tmp_path, _line_with(100), append=_line_with(200, lost=3, concealed=2))
+    notes = _rows(rows, "NOTE")
+    assert any("lost=3 late=0 re_anchors=0" in r and "2 concealed" in r and "1 silence" in r for r in notes), rows
+
+
+def test_reordered_packets_are_named_on_the_live_row(tmp_path):
+    # ROZHODNUTE 6352253147 (a): a reorder in time plays in its slot -- named on the live row, no note
+    rows = _grade(tmp_path, _line_with(100), append=_line_with(2000, reordered=5))
+    assert not _rows(rows, "FAIL") and not _rows(rows, "NOTE"), rows
+    assert any(r.startswith("PASS") and "reordered=5" in r and "received 100 -> 2000" in r for r in rows), rows
+
+
 def test_a_slot_handed_after_its_stamp_fails_naming_the_count(tmp_path):
     # issue 1439 review round 5: emit_missed counts the slots the playout worker handed to OBS after
     # their own stamp (it woke later than its 2 ms margin): each one can move the program audio by a
