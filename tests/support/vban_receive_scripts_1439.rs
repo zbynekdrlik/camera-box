@@ -483,6 +483,30 @@ fn frozen_script() -> Vec<Pkt> {
     b.pkts
 }
 
+/// Review round 6 re-review: the hold on the grid, then the first packet past it 60 ms late, the next
+/// four lost, and the one after them handed over right behind the late one -- just in time: the
+/// stretch's first output, the four lost slots before it NOT filled (nothing is filled before the
+/// first output). Then a clean stretch.
+fn late_then_loss_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    let at = |k: u64| 2_000_000_000 + samples_to_ns((k + 1) * 256, 48_000);
+    for k in 0..300u64 {
+        if (188..192).contains(&k) {
+            continue;
+        }
+        b.send(Pkt {
+            now: at(k) + if k == 187 { 60 * MS } else { 0 },
+            nu: k as u32,
+            frames: 256,
+            rate: 48_000,
+            channels: 2,
+            reserve_ns: 40 * MS,
+            reset: false,
+        });
+    }
+    b.pkts
+}
+
 /// Review round 5: a starve on the FIRST packet after an anchor (it comes 1.5 s after it), then a
 /// starve inside the new anchor's hold (100 packets in, a 1.5 s gap), then a clean stretch.
 fn hold_starve_script() -> Vec<Pkt> {
@@ -576,6 +600,7 @@ pub(crate) fn scripts() -> Vec<Vec<Pkt>> {
         out_of_order_script(),
         frozen_script(),
         hold_starve_script(),
+        late_then_loss_script(),
     ];
     let configs: [(f64, u32, u32, u32, u64, u64); 6] = [
         (50.0, 256, 48_000, 2, 40, 60),

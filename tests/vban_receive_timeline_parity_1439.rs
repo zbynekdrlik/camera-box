@@ -423,8 +423,9 @@ fn the_scripts_reach_every_boundary_1439() {
         "starve re-anchors during the hold",
         "a starve on the first packet after an anchor",
         "starve re-anchors carrying their span (since the last in-time arrival)",
+        "a loss between a late packet and the stretch's first output (not filled)",
     ];
-    let mut hits = [0usize; 43];
+    let mut hits = [0usize; 44];
     for sc in scripts() {
         let mut t = Timeline::new();
         // the last arrival that was in time (an anchor, a held or an emitted packet), harness-side
@@ -551,8 +552,12 @@ fn the_scripts_reach_every_boundary_1439() {
             hits[33] += usize::from(
                 d.event == Event::Reanchor && anchored && next_before <= u64::from(p.rate),
             );
-            let first_output =
-                !emitted_before && (d.event == Event::Packet || d.silence_samples > 0);
+            // nothing is filled before a stretch's first output, which is always an in-time packet
+            assert!(
+                emitted_before || d.silence_samples == 0,
+                "a fill before the stretch's first output: {d:?}"
+            );
+            let first_output = !emitted_before && d.event == Event::Packet;
             hits[35] += usize::from(first_output && d.lead_in_samples > 0);
             hits[36] += usize::from(
                 d.event == Event::Late
@@ -572,6 +577,7 @@ fn the_scripts_reach_every_boundary_1439() {
                 hits[41] += usize::from(matches!(prev_event, Event::Anchor | Event::Reanchor));
                 hits[42] += usize::from(d.starve_ns == since_in);
             }
+            hits[43] += usize::from(first_output && same && delta > 1 && prev_event == Event::Late);
             prev_event = d.event;
             if matches!(
                 d.event,
