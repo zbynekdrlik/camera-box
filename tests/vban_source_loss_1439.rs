@@ -53,6 +53,10 @@ const DRIVER: &str = r##"
 #undef blog
 
 static uint64_t g_now;
+/* the source's settings, changed by `port=` / `name=` / `host=` tokens (each one runs update()) */
+static long long g_port = 6980;
+static char g_name[32] = "stream";
+static char g_host[64] = "";
 
 uint64_t os_gettime_ns(void)
 {
@@ -107,7 +111,7 @@ long long obs_data_get_int(obs_data_t *data, const char *name)
 {
 	(void)data;
 	if (strcmp(name, "port") == 0)
-		return 6980;
+		return g_port;
 	if (strcmp(name, "receive_buffer_ms") == 0)
 		return 40;
 	return 0;
@@ -117,7 +121,9 @@ const char *obs_data_get_string(obs_data_t *data, const char *name)
 {
 	(void)data;
 	if (strcmp(name, "stream_name") == 0)
-		return "stream";
+		return g_name;
+	if (strcmp(name, "ip_from") == 0)
+		return g_host;
 	return "";
 }
 
@@ -221,11 +227,19 @@ void vban_udp_release(vban_udp_t *dev)
 	(void)dev;
 }
 
+/* Whether the source had already asked for a new timeline when it let a new port / stream / host in:
+ * from that call on, the receive thread may deliver the new source's packets. */
+static void udp_report(const char *op, void *data)
+{
+	const struct vban_src_s *s = data;
+	printf("udp %s reset=%d\n", op, os_atomic_load_bool(&s->timeline_reset) ? 1 : 0);
+}
+
 void vban_udp_add_callback(vban_udp_t *dev, vban_udp_cb_t cb, void *data)
 {
 	(void)dev;
 	(void)cb;
-	(void)data;
+	udp_report("add", data);
 }
 
 void vban_udp_remove_callback(vban_udp_t *dev, vban_udp_cb_t cb, void *data)
@@ -239,16 +253,16 @@ void vban_udp_set_name(vban_udp_t *dev, vban_udp_cb_t cb, void *data, const char
 {
 	(void)dev;
 	(void)cb;
-	(void)data;
 	(void)name;
+	udp_report("name", data);
 }
 
 void vban_udp_set_host(vban_udp_t *dev, vban_udp_cb_t cb, void *data, const char *host)
 {
 	(void)dev;
 	(void)cb;
-	(void)data;
 	(void)host;
+	udp_report("host", data);
 }
 
 /* One stereo 16-bit 48 kHz packet of FRAMES frames, every sample = VALUE. */
@@ -306,6 +320,18 @@ int main(int argc, char **argv)
 	int bitfmt = (rest && *rest == ',') ? atoi(rest + 1) : VBAN_BITFMT_16_INT;
 	void *src = vban_source_info.create(NULL, (obs_source_t *)&g_udp_dummy);
 	for (int i = 2; i < argc; i++) {
+		if (strncmp(argv[i], "port=", 5) == 0 || strncmp(argv[i], "name=", 5) == 0 ||
+		    strncmp(argv[i], "host=", 5) == 0) {
+			if (argv[i][0] == 'p')
+				g_port = atoll(argv[i] + 5);
+			else if (argv[i][0] == 'n')
+				snprintf(g_name, sizeof(g_name), "%s", argv[i] + 5);
+			else
+				snprintf(g_host, sizeof(g_host), "%s", argv[i] + 5);
+			printf("update %s\n", argv[i]);
+			vban_source_info.update(src, NULL);
+			continue;
+		}
 		unsigned long nu = 0, value = 0;
 		unsigned long long now = 0;
 		if (sscanf(argv[i], "%lu:%llu:%lu", &nu, &now, &value) != 3)
@@ -352,6 +378,35 @@ fn run_with_log(packets: &[(u32, u64, i16)]) -> (Vec<Out>, String) {
 
 /// The packets sent in the VBAN sample format `bitfmt` (the header's `VBAN_BITFMT_*` value).
 fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, String) {
+    let tokens: Vec<String> = packets
+        .iter()
+        .map(|(nu, now, value)| format!("{nu}:{now}:{value}"))
+        .collect();
+    let (stdout, log) = run_tokens(&tokens, bitfmt);
+    let outs = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("out "))
+        .map(|l| {
+            let field = |k: &str| -> &str {
+                l.split_whitespace()
+                    .find_map(|f| f.strip_prefix(k))
+                    .unwrap_or_else(|| panic!("no `{k}` in `{l}`"))
+            };
+            Out {
+                ts: field("ts=").parse().unwrap(),
+                frames: field("frames=").parse().unwrap(),
+                zero: field("zero=") == "1",
+                first: field("first=").parse().unwrap(),
+                format: field("fmt=").parse().unwrap(),
+            }
+        })
+        .collect();
+    (outs, log)
+}
+
+/// Runs the driver over free tokens: packets (`nu:now_ns:value`) and setting changes (`port=N`,
+/// `name=S`, `host=H`, each one followed by the source's `update()`). Returns (stdout, the log).
+fn run_tokens(tokens: &[String], bitfmt: u8) -> (String, String) {
     let source = repo(SOURCE);
     assert!(source.is_file(), "issue 1439: {SOURCE} is missing");
     let n = COMPILES.fetch_add(1, Ordering::SeqCst);
@@ -407,9 +462,7 @@ fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, String) {
     );
     let mut cmd = Command::new(&bin);
     cmd.arg(format!("{FRAMES},{bitfmt}"));
-    for (nu, now, value) in packets {
-        cmd.arg(format!("{nu}:{now}:{value}"));
-    }
+    cmd.args(tokens);
     let run = cmd
         .output()
         .expect("issue 1439: the compiled driver failed to execute");
@@ -419,26 +472,10 @@ fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, String) {
         String::from_utf8_lossy(&run.stderr)
     );
     let log = String::from_utf8(run.stderr).expect("driver stderr is utf-8");
-    let outs = String::from_utf8(run.stdout)
-        .expect("driver stdout is utf-8")
-        .lines()
-        .filter_map(|l| l.strip_prefix("out "))
-        .map(|l| {
-            let field = |k: &str| -> &str {
-                l.split_whitespace()
-                    .find_map(|f| f.strip_prefix(k))
-                    .unwrap_or_else(|| panic!("no `{k}` in `{l}`"))
-            };
-            Out {
-                ts: field("ts=").parse().unwrap(),
-                frames: field("frames=").parse().unwrap(),
-                zero: field("zero=") == "1",
-                first: field("first=").parse().unwrap(),
-                format: field("fmt=").parse().unwrap(),
-            }
-        })
-        .collect();
-    (outs, log)
+    (
+        String::from_utf8(run.stdout).expect("driver stdout is utf-8"),
+        log,
+    )
 }
 
 /// floor(samples * 1e9 / RATE).
@@ -612,4 +649,68 @@ fn the_silence_keeps_the_streams_sample_format_1439() {
         );
         assert_contiguous(&outs);
     }
+}
+
+/// Review round 1: `update()` registered the new port / stream / host with the UDP thread first and
+/// asked for a new timeline only after it, so the new source's first packet could land on the OLD
+/// timeline (a gap read as lost slots, or a counted re-anchor). From the moment the source lets the
+/// new sender in, the reset must already be pending.
+#[test]
+fn a_reconfiguration_asks_for_a_new_timeline_before_the_new_source_can_deliver_1439() {
+    let ms = 1_000_000u64;
+    let mut tokens: Vec<String> = (0..4)
+        .map(|k| format!("{}:{}:100", 10 + k, 100 * ms + k * 6 * ms))
+        .collect();
+    // a packet after each change, so every change has to ask for its own new timeline
+    for (k, change) in ["port=6981", "name=program", "host=10.77.8.110"]
+        .iter()
+        .enumerate()
+    {
+        tokens.push(change.to_string());
+        tokens.push(format!(
+            "{}:{}:100",
+            500 + 100 * k as u64,
+            (200 + 100 * k as u64) * ms
+        ));
+    }
+    let (stdout, log) = run_tokens(&tokens, VBAN_BITFMT_16_INT);
+    let after = |change: &str| -> Vec<&str> {
+        let a = stdout
+            .find(&format!("update {change}\n"))
+            .unwrap_or_else(|| panic!("no `update {change}` in:\n{stdout}"));
+        stdout[a..]
+            .lines()
+            .skip(1)
+            .take_while(|l| l.starts_with("udp "))
+            .collect()
+    };
+    for (change, op) in [
+        ("port=6981", "udp add"),
+        ("port=6981", "udp name"),
+        ("port=6981", "udp host"),
+        ("name=program", "udp name"),
+        ("host=10.77.8.110", "udp host"),
+    ] {
+        let lines = after(change);
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with(op))
+            .unwrap_or_else(|| panic!("{change}: no `{op}` call ({lines:?})"));
+        assert_eq!(
+            *line,
+            format!("{op} reset=1"),
+            "issue 1439: after `{change}` the source let the new sender in before it asked for a \
+             new timeline:\n{stdout}"
+        );
+    }
+    // The packet after each change starts a new timeline: a fresh anchor, never a counted re-anchor.
+    assert_eq!(
+        log.matches("obs-vban receive anchored:").count(),
+        4,
+        "issue 1439: the packet after a reconfiguration must anchor a new timeline:\n{log}"
+    );
+    assert!(
+        !log.contains("obs-vban receive re-anchor:"),
+        "issue 1439: a reconfiguration is a new timeline, never a counted re-anchor:\n{log}"
+    );
 }
