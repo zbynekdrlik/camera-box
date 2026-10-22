@@ -101,13 +101,26 @@ def test_every_box_fact_file_loads(box):
     assert r.returncode == 0, r.stderr
 
 
-@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|40"),
+@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|80"),
                                       ("strih-snv", "none|none|none"), ("strih-pp", "none|none|none")])
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
               '"$(strih_lx_program_vban_port)" "$(strih_lx_program_vban_reserve_ms)"', box)
     assert r.returncode == 0, r.stderr
     assert r.stdout == want
+
+
+# issue 1439 round 5 (finding 6348583939): a packet is in time with up to R - one packet - the playout
+# deadline margin of network delay over the earliest arrival. R sits above each sender's worst observed
+# gap with margin: mbc (stream-snv, 239-frame packets) showed gaps up to 52 ms under the 22.10.2026 SNV
+# production load, lv1 (stream-pp, 256-frame packets) 26-29 ms.
+@pytest.mark.parametrize("box,frames,worst_gap_ms", [("stream-snv", 239, 52), ("stream-pp", 256, 29)])
+def test_each_stream_box_r_sits_above_its_senders_worst_gap(box, frames, worst_gap_ms):
+    r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_vban_reserve_ms)"', box)
+    assert r.returncode == 0, r.stderr
+    reserve_ms = int(r.stdout)
+    budget_ms = reserve_ms - frames * 1000.0 / 48_000 - _header_define("VBAN_RECV_DEADLINE_MARGIN_MS")
+    assert budget_ms > worst_gap_ms, (box, reserve_ms, budget_ms)
 
 
 @pytest.mark.parametrize("box,old,new,word", [
