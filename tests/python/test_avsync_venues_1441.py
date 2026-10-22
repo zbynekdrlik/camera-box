@@ -4,8 +4,9 @@ venue's A/V is measured on, the RTMP URL dev2 pulls and the OBS-WS host dev1 rea
 `scripts/lib/avsync-venues.sh` derives it from the declared fleet, never from a hand-typed address:
 - a Linux stream box = a fact file `scripts/strih-boxes/<box>.env` with STRIH_ROLE=stream (venue =
   STRIH_VENUE, stream key = the box name, the issue-1436 convention);
-- the hand-built Windows SNV stream box = the one declared row `snv|stream-snv|obs-e2e-test` (it has
-  no fact file until it moves to the Linux stream role, owner ROZHODNUTÉ 15.10.2026);
+- a declared Windows stream box with no fact file (`AVSYNC_DECLARED_STREAM_VENUES`, `venue|box|key`):
+  none since issue 1462 (22.10.2026), when stream-snv moved to the Linux stream role with its own
+  fact file; the mechanism tests below declare the old `snv|stream-snv|obs-e2e-test` row themselves;
 - the dial address = the box's obs-fleet row host (the address dev1/dev2 reach the box by; the PP
   boxes' own STRIH_IP 10.77.8.x is not reachable from dev1/dev2, measured on issue 1441).
 
@@ -41,25 +42,34 @@ def _write_box(d, name, role, venue):
     )
 
 
-# ── the real repo: SNV from the declared Windows row, PP from stream-pp.env ──────────────────────
+# ── the real repo: both venues from their stream-role fact files (issue 1462) ───────────────────
+
+# The old SNV declared row, for the tests of the declared-row mechanism itself.
+DECLARED_SNV = {"AVSYNC_DECLARED_STREAM_VENUES": "snv|stream-snv|obs-e2e-test"}
 
 
-def test_default_table_has_snv_then_pp_from_the_declared_fleet():
-    out = _run("avsync_venue_table").stdout.splitlines()
-    assert out == [
-        "snv|stream-snv|10.77.9.204|obs-e2e-test",
+def test_default_table_has_both_venues_from_their_fact_files():
+    p = _run("avsync_venue_table")
+    assert p.stdout.splitlines() == [
         "pp|stream-pp|stream-pp.lan|stream-pp",
+        "snv|stream-snv|10.77.9.204|stream-snv",
     ]
+    assert p.stderr == ""
 
 
 def test_venue_names_in_table_order():
-    assert _run("avsync_venue_names").stdout.split() == ["snv", "pp"]
+    assert _run("avsync_venue_names").stdout.split() == ["pp", "snv"]
 
 
-def test_snv_rtmp_url_is_byte_identical_to_the_old_fixed_grab_url():
-    # the URL scripts/avsync-measure-dev2.sh used to hard-code -- the SNV behaviour is unchanged.
+def test_snv_rtmp_url_uses_the_linux_stream_box_key_1462():
+    # the Linux stream-snv OBS publishes rtmp://127.0.0.1:1234/live/stream-snv (setup-strih writes the
+    # box name as the stream key); the Windows box published obs-e2e-test.
     out = _run("avsync_venue_rtmp_url snv").stdout
-    assert out == "rtmp://10.77.9.204:1234/live/obs-e2e-test"
+    assert out == "rtmp://10.77.9.204:1234/live/stream-snv"
+
+
+def test_no_declared_row_is_left_in_the_lib():
+    assert _run('printf "%s" "$AVSYNC_DECLARED_STREAM_VENUES"').stdout == ""
 
 
 def test_pp_rtmp_url_uses_the_fleet_row_host_and_the_box_name_key():
@@ -115,6 +125,7 @@ def test_a_new_linux_stream_box_joins_from_its_fact_file(tmp_path):
         {
             "STRIH_BOXES_DIR": str(tmp_path),
             "OBS_FLEET": _fleet("stream-ke|stream-ke.lan|linux-genlock|traveling"),
+            **DECLARED_SNV,
         },
     ).stdout.splitlines()
     assert out == [
@@ -127,7 +138,7 @@ def test_a_stream_box_without_a_fleet_row_is_skipped_loudly(tmp_path):
     _write_box(tmp_path, "stream-ke", "stream", "ke")
     p = _run(
         "avsync_venue_table",
-        {"STRIH_BOXES_DIR": str(tmp_path), "OBS_FLEET": _fleet("")},
+        {"STRIH_BOXES_DIR": str(tmp_path), "OBS_FLEET": _fleet(""), **DECLARED_SNV},
     )
     assert p.stdout.splitlines() == ["snv|stream-snv|10.77.9.204|obs-e2e-test"]
     assert "stream-ke" in p.stderr and "fleet" in p.stderr
@@ -137,14 +148,14 @@ def test_a_fact_file_venue_wins_over_the_declared_windows_row(tmp_path):
     # when stream-snv moves to the Linux stream role it gets a fact file: that row wins (key = box
     # name), and the stale declared row is named on stderr.
     _write_box(tmp_path, "stream-snv", "stream", "snv")
-    p = _run("avsync_venue_table", {"STRIH_BOXES_DIR": str(tmp_path)})
+    p = _run("avsync_venue_table", {"STRIH_BOXES_DIR": str(tmp_path), **DECLARED_SNV})
     assert p.stdout.splitlines() == ["snv|stream-snv|10.77.9.204|stream-snv"]
     assert "declared" in p.stderr
 
 
 def test_an_unparseable_fact_file_is_skipped_never_executed(tmp_path):
     (tmp_path / "stream-xx.env").write_text("STRIH_ROLE=stream\n$(touch INJECTED)\n")
-    p = _run("avsync_venue_table", {"STRIH_BOXES_DIR": str(tmp_path)}, check=False)
+    p = _run("avsync_venue_table", {"STRIH_BOXES_DIR": str(tmp_path), **DECLARED_SNV}, check=False)
     assert p.returncode == 0
     assert p.stdout.splitlines() == ["snv|stream-snv|10.77.9.204|obs-e2e-test"]
     assert "stream-xx" in p.stderr
@@ -159,6 +170,7 @@ def test_a_bad_venue_name_in_a_fact_file_is_refused(tmp_path):
         {
             "STRIH_BOXES_DIR": str(tmp_path),
             "OBS_FLEET": _fleet("stream-ke|stream-ke.lan|linux-genlock|traveling"),
+            **DECLARED_SNV,
         },
     )
     assert p.stdout.splitlines() == ["snv|stream-snv|10.77.9.204|obs-e2e-test"]
@@ -194,11 +206,11 @@ def test_rtmp_port_and_app_are_the_restreamer_convention_constants():
 
 
 def test_selected_venues_default_is_every_table_venue():
-    assert _run("avsync_selected_venues").stdout.split() == ["snv", "pp"]
+    assert _run("avsync_selected_venues").stdout.split() == ["pp", "snv"]
 
 
 def test_selected_venues_env_narrows_in_table_order():
-    assert _run("avsync_selected_venues", {"AVSYNC_VENUES": "pp snv"}).stdout.split() == ["snv", "pp"]
+    assert _run("avsync_selected_venues", {"AVSYNC_VENUES": "snv pp"}).stdout.split() == ["pp", "snv"]
     assert _run("avsync_selected_venues", {"AVSYNC_VENUES": "pp"}).stdout.split() == ["pp"]
 
 

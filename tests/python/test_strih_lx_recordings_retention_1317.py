@@ -314,13 +314,14 @@ def test_box_strih_lx_passes_policy_record_dir_and_execute_through():
         assert "--execute" in calls, calls
 
 
-def test_box_stream_uses_the_windows_ps1_driver():
+def test_box_resolume_uses_the_windows_ps1_driver():
+    # stream-snv runs the Linux stream role since issue 1462; resolume-snv is a Windows fleet box.
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(["--box", "stream-snv", "--record-dir", "C:\\Users\\newlevel\\Videos"], env=env)
+        r = _run(["--box", "resolume-snv", "--record-dir", "C:\\Users\\newlevel\\Videos"], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
-        assert "scp -O" in calls and "newlevel@10.77.9.204:" in calls, calls
+        assert "scp -O" in calls and "newlevel@resolume.lan:" in calls, calls
         assert "powershell -NoProfile -ExecutionPolicy Bypass -File" in calls, calls
         assert "bash -s" not in calls, calls
 

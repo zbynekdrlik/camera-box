@@ -114,7 +114,7 @@ def test_an_unknown_box_still_refuses():
 
 SNV_ROWS = {
     "strih-snv": ("10.77.9.202", "linux-genlock", "always"),
-    "stream-snv": ("10.77.9.204", "windows-genlock", "always"),
+    "stream-snv": ("10.77.9.204", "linux-genlock", "always"),  # Linux since issue 1462
     "resolume-snv": ("resolume.lan", "windows-genlock", "traveling"),
 }
 

@@ -202,7 +202,7 @@ def test_lineup_reads_each_venues_stream_state_from_the_table_host(tmp_path):
     rig = Rig(tmp_path)
     p = rig.run(_LINEUP_WATCHDOG, ["--dry-run"])
     assert p.returncode == 0, p.stderr
-    assert rig.lines(rig.obs_log) == ["10.77.9.204", "stream-pp.lan"]
+    assert rig.lines(rig.obs_log) == ["stream-pp.lan", "10.77.9.204"]
     cmds = rig.lines(rig.ssh_log)
     assert any("heartbeat-snv" in c for c in cmds) and any("heartbeat-pp" in c for c in cmds)
 

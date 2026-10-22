@@ -130,6 +130,10 @@ def preflight_reasons(f):
         r.append("a recording is running")
     if not f.get("program_scene"):
         r.append("the program scene is unreadable")
+    elif f.get("program_scene") in (f.get("never_program") or ()):
+        # issue 1380: the setup re-programs the CURRENT program scene; a production scene our tooling
+        # never programs is refused here, before the input is created in it.
+        r.append("the program scene %r is a production scene our tooling never programs" % f["program_scene"])
     for name in f.get("port_users") or []:
         r.append("the vban input %r already listens on port %s" % (name, f.get("port")))
     if f.get("name_taken"):
@@ -192,6 +196,7 @@ def preflight(rpc, input_name, port, stream_name, track):
         "stream_track": _int_or_none(_param(rpc, "AdvOut", "TrackIndex")),
         "recording": bool(rec.get("outputActive", True)),
         "studio_mode": studio, "program_scene": prog, "preview_scene": prev,
+        "never_program": _never_program_scenes(),
         "port_users": port_users, "track_feeders": feeders,
         "name_taken": name_taken, "leftover_input": leftover,
     }
@@ -329,6 +334,13 @@ def teardown(rpc, state):
         elif cur != prev:
             actions.append("the preview reads %r, staged since the setup: the operator's, not touched" % cur)
     return {"ok": not left, "actions": actions, "left": left}
+
+
+def _never_program_scenes():
+    """obs_phase2's ONE list of the scenes our tooling never programs (issue 1380), lazily imported."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import obs_phase2  # noqa: E402
+    return sorted(obs_phase2.NEVER_PROGRAM_SCENES)
 
 
 def _rpc_for(host, password):

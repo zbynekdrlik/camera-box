@@ -172,6 +172,16 @@ def test_an_unsafe_obs_is_refused(over, expect):
     assert any(expect in r for r in f["reasons"]), f["reasons"]
 
 
+def test_a_production_program_scene_is_refused_before_any_change():
+    # issue 1380: the setup re-programs the current program scene; the stream box's production
+    # scene is never programmed by our tooling, so the bench refuses it in the read-only preflight.
+    obs = FakeObs()
+    obs.program = "PRO"
+    f = vo.preflight(obs.rpc, NAME, 6995, "bench1460", 6)
+    assert any("never programs" in r for r in f["reasons"]), f["reasons"]
+    assert not [c for c in obs.calls if c[0].startswith(("Set", "Create", "Remove"))]
+
+
 @pytest.mark.parametrize("port", [6980, 6981, 6990, 80])
 def test_a_real_receiver_port_is_refused_by_the_preflight_and_the_setup(tmp_path, port):
     obs = FakeObs()

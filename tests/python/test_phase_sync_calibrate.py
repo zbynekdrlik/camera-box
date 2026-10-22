@@ -441,8 +441,8 @@ class TestDefaultLastJsonPath:
 # ---------------------------------------------------------------------------
 
 class TestMcpNameForHost:
-    def test_stream_host_resolves_to_win_stream_snv(self):
-        assert phase_sync_calibrate.mcp_name_for_host("10.77.9.204") == "win-stream-snv"
+    def test_stream_host_resolves_to_linux_stream_snv_1462(self):
+        assert phase_sync_calibrate.mcp_name_for_host("10.77.9.204") == "linux-stream-snv"
 
     def test_strih_host_resolves_to_linux_strih_lx_1317(self):
         # issue 1317 part 4: 10.77.9.202 is the Linux strih-snv since the M4 cut-over (the Windows
@@ -460,10 +460,10 @@ class TestRemotePushPlan:
                          "applied_latency_ms": 3}],
             "ts": 1720000000.0,
         }
-        plan = phase_sync_calibrate.remote_push_plan("10.77.9.204", payload)
+        # a windows-genlock fleet box (stream-snv runs Linux since issue 1462)
+        plan = phase_sync_calibrate.remote_push_plan("resolume.lan", payload)
         assert r"C:\ProgramData\camera-box\phase-sync-last.json" in plan
-        assert "win-stream-snv" in plan
-        assert "10.77.9.204" in plan
+        assert "resolume.lan" in plan
         assert "FileWrite" in plan
 
     def test_plan_for_the_linux_strih_names_the_linux_destination_1317(self):
