@@ -634,14 +634,16 @@ fn the_index_wraps_without_a_re_anchor() {
 
 #[test]
 fn a_jump_over_two_seconds_re_anchors_and_two_seconds_does_not() {
+    // the index jumps while the packets keep arriving (a sender that skips its counter); a 2 s gap
+    // in ARRIVALS is a starve instead (no packet in time for a second, review round 4)
     let mut t = Timeline::new();
     through_the_hold(&mut t, 0);
     t.packet(on_time(H), H as u32, 256, RATE, 2, R40);
-    // 375 lost packets = exactly 2 s of audio: still a loss.
-    let d = t.packet(on_time(H + 376), (H + 376) as u32, 256, RATE, 2, R40);
+    // 375 skipped indexes = exactly 2 s of audio: still a loss.
+    let d = t.packet(on_time(H + 1), (H + 376) as u32, 256, RATE, 2, R40);
     assert_eq!((d.event, d.silence_samples), (Event::Packet, 375 * 256));
-    // 376 lost packets = more than 2 s: a sender restart.
-    let d = t.packet(on_time(H + 753), (H + 753) as u32, 256, RATE, 2, R40);
+    // 376 skipped indexes = more than 2 s: a sender restart.
+    let d = t.packet(on_time(H + 2), (H + 753) as u32, 256, RATE, 2, R40);
     assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Jump));
 }
 
