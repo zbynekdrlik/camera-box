@@ -3,6 +3,7 @@
 //! decision (review round 3: the file had grown past its line budget with the tests inline).
 
 use super::*;
+use std::collections::VecDeque;
 
 pub(super) const RATE: u32 = 48_000;
 pub(super) const R40: u64 = 40 * NS_PER_MS;
@@ -24,38 +25,119 @@ pub(super) fn through_the_hold(t: &mut Timeline, nu0: u32) {
     }
 }
 
+/// The timeline driven like the shipped source drives it (ROZHODNUTÉ 6347872706): the playout
+/// worker at every deadline between arrivals (each slot at its own deadline), the store of in-time
+/// packets, and every emission with the instant it went out. At an arrival that falls exactly on a
+/// deadline the packet is handled first.
+pub(super) struct Rig {
+    pub(super) t: Timeline,
+    pub(super) store: VecDeque<u64>,
+    pub(super) outs: Vec<(u64, DueDecision)>,
+    clock: u64,
+}
+
+impl Rig {
+    pub(super) fn new() -> Self {
+        Rig {
+            t: Timeline::new(),
+            store: VecDeque::new(),
+            outs: Vec::new(),
+            clock: 0,
+        }
+    }
+
+    /// The worker at every deadline before `until` (and at `until` itself when `inclusive`).
+    pub(super) fn run_until(&mut self, until: u64, inclusive: bool) {
+        loop {
+            let d = self.t.due(self.clock, self.store.front().copied());
+            match d.kind {
+                Due::None => {
+                    let due =
+                        d.next_ns != 0 && (d.next_ns < until || (inclusive && d.next_ns == until));
+                    if !due {
+                        break;
+                    }
+                    self.clock = self.clock.max(d.next_ns);
+                }
+                Due::Packet => {
+                    self.store.pop_front();
+                    self.outs.push((self.clock, d));
+                }
+                _ => self.outs.push((self.clock, d)),
+            }
+        }
+        self.clock = self.clock.max(until);
+    }
+
+    /// One 256-frame stereo 48 kHz packet at R = 40 ms.
+    pub(super) fn packet(&mut self, now: u64, nu: u32) -> Decision {
+        self.packet_as(now, nu, 256, RATE, 2, R40)
+    }
+
+    pub(super) fn packet_as(
+        &mut self,
+        now: u64,
+        nu: u32,
+        frames: u32,
+        rate: u32,
+        channels: u32,
+        r: u64,
+    ) -> Decision {
+        self.run_until(now, false);
+        let d = self.t.packet(now, nu, frames, rate, channels, r);
+        match d.event {
+            Event::Anchor | Event::Reanchor => self.store.clear(),
+            Event::Packet => self.store.push_back(d.pos),
+            _ => {}
+        }
+        self.run_until(now, true);
+        d
+    }
+
+    /// The emissions of one kind, with their instants.
+    pub(super) fn of(&self, kind: Due) -> Vec<(u64, DueDecision)> {
+        self.outs
+            .iter()
+            .copied()
+            .filter(|(_, d)| d.kind == kind)
+            .collect()
+    }
+}
+
+/// The anchor + the held first second through a [`Rig`], on time: packets 0..H, indexes `nu0 + k`.
+pub(super) fn rig_through_the_hold(r: &mut Rig, nu0: u32) {
+    for k in 0..H {
+        r.packet(on_time(k), nu0.wrapping_add(k as u32));
+    }
+}
+
 /// ROZHODNUTÉ 6345255813 (1): after every anchor the source emits NOTHING while the packet's end
 /// is within the first second (the earliest-arrival window): the anchor and those packets are HELD.
-/// The first packet past it is the first emitted one, on the final (earliest-arrival) line, so
-/// libobs never sees a stamp step. A loss inside the hold is never filled; neither are the slots
-/// lost right before the first emitted packet (libobs has nothing from the source to keep
-/// contiguous yet). A full re-anchor holds again for its own first second.
+/// The first in-time packet past it starts the output on the final (earliest-arrival) line, so
+/// libobs never sees a stamp step; a loss inside the hold, or just before that packet, is never
+/// filled. From then on (ROZHODNUTÉ 6347872706) the worker hands every slot to libobs at its
+/// deadline: the packet, or one slot of silence. A full re-anchor holds again.
 #[test]
 fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
-    let mut t = Timeline::new();
+    let mut r = Rig::new();
     let line = |k: u64| on_time(k) - samples_to_ns(256, RATE) + R40;
     // the first packet ends a 20 ms gap, packet 2 is lost
-    let d = t.packet(on_time(0) + 20 * NS_PER_MS, 0, 256, RATE, 2, R40);
+    let d = r.packet(on_time(0) + 20 * NS_PER_MS, 0);
     assert_eq!(d.event, Event::Anchor);
     let mut prev = on_time(0) + 20 * NS_PER_MS;
     for k in (1..H).filter(|&k| k != 2) {
         let at = on_time(k).max(prev + 1_000);
         prev = at;
-        let d = t.packet(at, k as u32, 256, RATE, 2, R40);
+        let d = r.packet(at, k as u32);
         assert_eq!(
             d.event,
             Event::Hold,
             "packet {k} ends within the first second: {d:?}"
         );
-        assert_eq!(
-            d.silence_samples, 0,
-            "packet {k}: nothing is emitted in the hold"
-        );
     }
-    assert_eq!(t.lost, 0, "a slot lost inside the hold is never filled");
-    // packet H is lost too: H + 1 is the first emitted packet, on the earliest-arrival line, and the
-    // slot lost right before it is not filled (the stream starts there)
-    let d = t.packet(on_time(H + 1), (H + 1) as u32, 256, RATE, 2, R40);
+    assert!(r.outs.is_empty(), "nothing is emitted in the hold");
+    // packet H is lost too: H + 1 starts the output, on the earliest-arrival line, with its lead-in
+    let d = r.packet(on_time(H + 1), (H + 1) as u32);
     assert_eq!(d.event, Event::Packet, "{d:?}");
     assert!(
         d.stamp_ns.abs_diff(line(H + 1)) <= 2,
@@ -63,18 +145,44 @@ fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
         d.stamp_ns,
         line(H + 1)
     );
-    assert_eq!(d.silence_samples, 0, "{d:?}");
-    // from there on the stream is emitted, losses are silence
-    let d = t.packet(on_time(H + 3), (H + 3) as u32, 256, RATE, 2, R40);
-    assert_eq!((d.event, d.silence_samples), (Event::Packet, 256));
+    assert_eq!(r.of(Due::LeadIn).len(), 1, "{:?}", r.outs);
+    // H + 2 is lost, H + 3 comes: each slot goes out at its deadline, the slot before H + 1 never
+    r.packet(on_time(H + 3), (H + 3) as u32);
+    r.run_until(r.t.deadline_at((H + 3) * 256), true);
+    let slots: Vec<(u64, DueDecision)> = r
+        .outs
+        .iter()
+        .copied()
+        .filter(|(_, d)| d.kind != Due::LeadIn)
+        .collect();
+    assert_eq!(
+        slots
+            .iter()
+            .map(|(_, d)| (d.kind, d.pos, d.frames))
+            .collect::<Vec<_>>(),
+        vec![
+            (Due::Packet, (H + 1) * 256, 256),
+            (Due::Silence, (H + 2) * 256, 256),
+            (Due::Packet, (H + 3) * 256, 256),
+        ],
+        "{:?}",
+        r.outs
+    );
+    for (at, d) in &slots {
+        assert_eq!(*at, d.deadline_ns, "each slot at its deadline: {d:?}");
+        assert_eq!(d.deadline_ns + DEADLINE_MARGIN_MS * NS_PER_MS, d.stamp_ns);
+    }
+    assert_eq!((r.t.lost, r.t.silence_samples), (1, 256));
     // a full re-anchor (another channel count) holds again for its own first second
-    let d = t.packet(on_time(H + 4), (H + 4) as u32, 256, RATE, 1, R40);
+    let d = r.packet_as(on_time(H + 4), (H + 4) as u32, 256, RATE, 1, R40);
     assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Format));
+    let n = r.outs.len();
     for k in 1..H {
-        let d = t.packet(on_time(H + 4 + k), (H + 4 + k) as u32, 256, RATE, 1, R40);
+        let d = r.packet_as(on_time(H + 4 + k), (H + 4 + k) as u32, 256, RATE, 1, R40);
         assert_eq!(d.event, Event::Hold, "re-anchored packet {k}: {d:?}");
     }
-    let d = t.packet(on_time(2 * H + 4), (2 * H + 4) as u32, 256, RATE, 1, R40);
+    assert_eq!(r.outs.len(), n, "nothing goes out in the new hold");
+    let d = r.packet_as(on_time(2 * H + 4), (2 * H + 4) as u32, 256, RATE, 1, R40);
     assert_eq!(d.event, Event::Packet, "{d:?}");
 }
 
@@ -245,11 +353,12 @@ fn the_receive_buffer_is_at_least_one_packet_plus_10_ms() {
     );
     assert_eq!(d.lateness_ns, -(10 * NS_PER_MS as i64));
     for k in 1..400u64 {
-        let d = t.packet(on_time(k) + 9 * NS_PER_MS, 1 + k as u32, 256, RATE, 2, r10);
+        // the margin a packet has is R - one packet (10 ms) - the deadline margin (2 ms)
+        let d = t.packet(on_time(k) + 7 * NS_PER_MS, 1 + k as u32, 256, RATE, 2, r10);
         assert_eq!(
             d.event,
             if k < H { Event::Hold } else { Event::Packet },
-            "packet {k}: 9 ms late is inside the margin: {d:?}"
+            "packet {k}: 7 ms late is inside the margin: {d:?}"
         );
     }
     assert_eq!(t.re_anchors, 0);
@@ -291,28 +400,31 @@ fn contiguous_packets_get_contiguous_stamps() {
         let d = t.packet(on_time(k), 1 + k as u32, 256, RATE, 2, R40);
         assert_eq!(d.event, Event::Packet);
         assert_eq!(d.stamp_ns, first + samples_to_ns(k * 256, RATE));
-        assert_eq!(d.silence_samples, 0);
+        assert_eq!(d.pos, k * 256);
     }
 }
 
+/// ROZHODNUTÉ 6347872706: a lost packet's slot goes out at its deadline as silence of exactly one
+/// slot, stamped on the same line; the packets around it go out as themselves.
 #[test]
 fn a_loss_is_silence_for_exactly_the_lost_slots() {
-    let mut t = Timeline::new();
-    through_the_hold(&mut t, 10);
+    let mut r = Rig::new();
+    rig_through_the_hold(&mut r, 10);
     let first = on_time(0) - samples_to_ns(256, RATE) + R40;
-    t.packet(on_time(H), 10 + H as u32, 256, RATE, 2, R40);
-    let d = t.packet(on_time(H + 3), 13 + H as u32, 256, RATE, 2, R40);
-    assert_eq!(d.event, Event::Packet);
-    assert_eq!(d.silence_samples, 2 * 256);
-    assert_eq!(d.silence_pos, (H + 1) * 256);
-    assert_eq!(
-        t.stamp_at(d.silence_pos),
-        first + samples_to_ns((H + 1) * 256, RATE)
-    );
+    r.packet(on_time(H), 10 + H as u32);
+    let d = r.packet(on_time(H + 3), 13 + H as u32);
+    assert_eq!((d.event, d.pos), (Event::Packet, (H + 3) * 256));
     assert_eq!(d.stamp_ns, first + samples_to_ns((H + 3) * 256, RATE));
-    assert_eq!(t.lost, 2);
-    assert_eq!(t.silence_samples, 512);
-    assert_eq!(t.re_anchors, 0);
+    r.run_until(r.t.deadline_at((H + 3) * 256), true);
+    let silence = r.of(Due::Silence);
+    assert_eq!(silence.len(), 2, "{:?}", r.outs);
+    for (j, (_, d)) in silence.iter().enumerate() {
+        let pos = (H + 1 + j as u64) * 256;
+        assert_eq!((d.pos, d.frames), (pos, 256), "{d:?}");
+        assert_eq!(d.stamp_ns, first + samples_to_ns(pos, RATE));
+    }
+    assert_eq!(r.of(Due::Packet).len(), 2);
+    assert_eq!((r.t.lost, r.t.silence_samples, r.t.re_anchors), (2, 512, 0));
 }
 
 /// An index far behind the last one (more than a reorder could be: 65 packets) is a sender
@@ -328,56 +440,52 @@ fn an_index_far_behind_re_anchors_as_backward() {
 }
 
 /// Review round 1: one reordered or duplicated packet (a UDP network effect) restarted the
-/// timeline and reported a loss that never happened. A packet whose slot has already passed is
-/// dropped: its slot stays the silence it already was, the line runs on.
+/// timeline and reported a loss that never happened. A packet behind the last one is dropped as
+/// STALE (never a re-anchor), and its slot goes out at its deadline as the silence it is.
 #[test]
 fn a_reordered_or_duplicated_packet_is_dropped_never_a_re_anchor() {
-    let mut t = Timeline::new();
-    // the held first second, then packets 100 + H .. 100 + H + 11 (the index below names their offset)
-    through_the_hold(&mut t, 100u32.wrapping_sub(H as u32));
+    let mut r = Rig::new();
+    // the held first second, then packets 100 .. 111 (the index below names their offset)
+    rig_through_the_hold(&mut r, 100u32.wrapping_sub(H as u32));
     for k in H..H + 12 {
-        t.packet(on_time(k), (100 + k - H) as u32, 256, RATE, 2, R40);
+        r.packet(on_time(k), (100 + k - H) as u32);
     }
     let on_time = |k: u64| on_time(H + k);
-    // 112 overtaken by 113 on the way: one silent slot
-    let d = t.packet(on_time(13), 113, 256, RATE, 2, R40);
-    assert_eq!((d.event, d.silence_samples), (Event::Packet, 256));
-    // then 112 arrives: its slot has passed
-    let d = t.packet(on_time(13) + 100_000, 112, 256, RATE, 2, R40);
-    assert_ne!(
-        d.event,
-        Event::Reanchor,
-        "a reordered packet must not restart the timeline"
+    // 112 overtaken by 113 on the way
+    let d = r.packet(on_time(13), 113);
+    assert_eq!(d.event, Event::Packet);
+    // then 112 arrives
+    let d = r.packet(on_time(13) + 100_000, 112);
+    assert_eq!(
+        (d.event, d.stamp_ns, d.pos),
+        (Event::Stale, 0, 0),
+        "a reordered packet must not restart the timeline, and is not stored"
+    );
+    // a network duplicate of 113, and one exactly STALE_PACKETS behind: still a reorder
+    assert_eq!(r.packet(on_time(13) + 200_000, 113).event, Event::Stale);
+    assert_eq!(
+        r.packet(on_time(13) + 300_000, 113 - STALE_PACKETS).event,
+        Event::Stale
     );
     assert_eq!(
-        (d.stamp_ns, d.silence_samples),
-        (0, 0),
-        "a dropped packet is not output"
-    );
-    // a network duplicate of 113
-    let d = t.packet(on_time(13) + 200_000, 113, 256, RATE, 2, R40);
-    assert_ne!(d.event, Event::Reanchor);
-    assert_eq!(d.event, Event::Stale);
-    // a packet exactly STALE_PACKETS behind is still a reorder
-    let d = t.packet(
-        on_time(13) + 300_000,
-        113 - STALE_PACKETS,
-        256,
-        RATE,
-        2,
-        R40,
-    );
-    assert_eq!(d.event, Event::Stale);
-    assert_eq!(
-        t.stale, 3,
+        r.t.stale, 3,
         "the reordered 112, the duplicate 113, the one 64 behind"
     );
-    assert_eq!(t.re_anchors, 0);
-    assert_eq!(t.lost, 1, "only the slot that was really silent counts");
-    // the stream continues on the same line, nothing silent
-    let d = t.packet(on_time(14), 114, 256, RATE, 2, R40);
-    assert_eq!((d.event, d.silence_samples), (Event::Packet, 0));
+    // the stream continues on the same line
+    let d = r.packet(on_time(14), 114);
+    assert_eq!(d.event, Event::Packet);
     assert_eq!(d.stamp_ns, on_time(14) - samples_to_ns(256, RATE) + R40);
+    r.run_until(r.t.deadline_at(d.pos), true);
+    assert_eq!(r.t.re_anchors, 0);
+    assert_eq!(
+        r.of(Due::Silence)
+            .iter()
+            .map(|(_, d)| d.pos)
+            .collect::<Vec<_>>(),
+        vec![(H + 12) * 256],
+        "only the slot of 112 is silent"
+    );
+    assert_eq!(r.t.lost, 1);
 }
 
 #[test]
@@ -392,7 +500,7 @@ fn the_index_wraps_without_a_re_anchor() {
     let d = t.packet(on_time(2), 0, 256, RATE, 2, R40);
     assert_eq!(d.event, Event::Packet);
     let d = t.packet(on_time(4), 2, 256, RATE, 2, R40);
-    assert_eq!((d.event, d.silence_samples), (Event::Packet, 256));
+    assert_eq!((d.event, d.pos), (Event::Packet, (H + 4) * 256), "{d:?}");
     assert_eq!(t.re_anchors, 0);
 }
 
@@ -405,7 +513,7 @@ fn a_jump_over_two_seconds_re_anchors_and_two_seconds_does_not() {
     t.packet(on_time(H), H as u32, 256, RATE, 2, R40);
     // 375 skipped indexes = exactly 2 s of audio: still a loss.
     let d = t.packet(on_time(H + 1), (H + 376) as u32, 256, RATE, 2, R40);
-    assert_eq!((d.event, d.silence_samples), (Event::Packet, 375 * 256));
+    assert_eq!((d.event, d.pos), (Event::Packet, (H + 376) * 256));
     // 376 skipped indexes = more than 2 s: a sender restart.
     let d = t.packet(on_time(H + 2), (H + 753) as u32, 256, RATE, 2, R40);
     assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Jump));
@@ -421,7 +529,10 @@ fn another_format_or_reserve_re_anchors() {
     assert_eq!(d.reason, Reason::Format);
     let d = t.packet(on_time(3), 4, 256, 44_100, 1, 2 * R40);
     assert_eq!(d.reason, Reason::Config);
-    assert_eq!(t.re_anchors, 3);
+    // a slot is one packet: another packet size is another format (round 5)
+    let d = t.packet(on_time(4), 5, 128, 44_100, 1, 2 * R40);
+    assert_eq!(d.reason, Reason::Format);
+    assert_eq!(t.re_anchors, 4);
 }
 
 #[test]

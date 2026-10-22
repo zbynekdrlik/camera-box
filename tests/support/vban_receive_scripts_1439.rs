@@ -106,15 +106,15 @@ fn steered_script(
             match ev {
                 // a loss of 1..3 packets
                 0..=79 => lost = 1 + rng.below(3),
-                // exactly on its stamp, and (rarely) one ns past it
-                80..=99 => forced = Some(b.t.stamp_at(pos_next)),
-                100..=104 if rare => forced = Some(b.t.stamp_at(pos_next) + 1),
+                // exactly on its deadline, and (rarely) one ns past it (round 5: the slot went out)
+                80..=99 => forced = Some(b.t.deadline_at(pos_next)),
+                100..=104 if rare => forced = Some(b.t.deadline_at(pos_next) + 1),
                 // on the outlier line and one ns either side
                 105..=164 => {
                     let end = pos_next + u64::from(frames);
                     let line = b.t.reference(end) + (OUTLIER_MS * MS) as f64;
                     let y = (line.ceil() as u64 + rng.below(3)).saturating_sub(1);
-                    forced = Some((b.t.anchor_ns + y).min(b.t.stamp_at(pos_next)));
+                    forced = Some((b.t.anchor_ns + y).min(b.t.deadline_at(pos_next)));
                 }
                 // a network duplicate or a reorder within the stale window: an EXTRA packet whose
                 // slot has passed (dropped); the sender's own counter and schedule are untouched
@@ -223,8 +223,8 @@ fn boundary_script() -> Vec<Pkt> {
         reserve,
         &mut reset,
     );
-    // on its stamp, then one ns past it
-    let at = b.t.stamp_at(b.t.next_pos);
+    // on its deadline, then one ns past it
+    let at = b.t.deadline_at(b.t.next_pos);
     b.send(Pkt {
         now: at,
         nu,
@@ -236,7 +236,7 @@ fn boundary_script() -> Vec<Pkt> {
     });
     k += 1;
     nu = nu.wrapping_add(1);
-    let late = b.t.stamp_at(b.t.next_pos) + 1;
+    let late = b.t.deadline_at(b.t.next_pos) + 1;
     b.send(Pkt {
         now: late,
         nu,
@@ -483,7 +483,8 @@ fn frozen_script() -> Vec<Pkt> {
     b.pkts
 }
 
-/// Review round 6 re-review: the hold on the grid, then the first packet past it 60 ms late, the next
+/// Review round 6 re-review: the hold on the grid, then the first packet past it late (round 5: one
+/// ns past its deadline), the next
 /// four lost, and the one after them handed over right behind the late one -- just in time: the
 /// stretch's first output, the four lost slots before it NOT filled (nothing is filled before the
 /// first output). Then a clean stretch.
@@ -494,10 +495,37 @@ fn late_then_loss_script() -> Vec<Pkt> {
         if (188..192).contains(&k) {
             continue;
         }
+        // round 5: the first packet past the hold one ns past its deadline
+        let now = if k == 187 {
+            b.t.deadline_at(b.t.next_pos) + 1
+        } else {
+            at(k)
+        };
         b.send(Pkt {
-            now: at(k) + if k == 187 { 60 * MS } else { 0 },
+            now,
             nu: k as u32,
             frames: 256,
+            rate: 48_000,
+            channels: 2,
+            reserve_ns: 40 * MS,
+            reset: false,
+        });
+    }
+    b.pkts
+}
+
+/// Round 5: a slot is one packet, so another packet size is another format: 5 s of 256-frame
+/// packets, then 128-frame ones (a format re-anchor), then on.
+fn packet_size_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    let mut now = 2_000_000_000u64;
+    for k in 0..(5 * 48_000 / 256 + 600u64) {
+        let frames = if k < 5 * 48_000 / 256 { 256 } else { 128 };
+        now += samples_to_ns(u64::from(frames), 48_000);
+        b.send(Pkt {
+            now,
+            nu: k as u32,
+            frames,
             rate: 48_000,
             channels: 2,
             reserve_ns: 40 * MS,
@@ -601,6 +629,7 @@ pub(crate) fn scripts() -> Vec<Vec<Pkt>> {
         frozen_script(),
         hold_starve_script(),
         late_then_loss_script(),
+        packet_size_script(),
     ];
     let configs: [(f64, u32, u32, u32, u64, u64); 6] = [
         (50.0, 256, 48_000, 2, 40, 60),

@@ -107,6 +107,8 @@ pub const PHASE_PPB_MAX: i64 = 100_000;
 pub const LOG_INTERVAL_NS: u64 = 10_000_000_000;
 /// Silence for lost slots goes to OBS in pieces of at most this many frames.
 pub const SILENCE_CHUNK_FRAMES: u32 = 1024;
+/// Round 5 (ROZHODNUTÉ 6347872706, RED stub): a slot's deadline is its stamp minus this.
+pub const DEADLINE_MARGIN_MS: u64 = 2;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 const NS_PER_MS: u64 = 1_000_000;
@@ -203,6 +205,8 @@ impl Default for Bucket {
 pub struct Decision {
     pub event: Event,
     pub reason: Reason,
+    /// Round 5 (RED stub): the packet's slot position.
+    pub pos: u64,
     pub silence_samples: u64,
     /// The first silent sample's position ([`Timeline::stamp_at`]).
     pub silence_pos: u64,
@@ -225,6 +229,28 @@ pub struct Decision {
     /// The lead-in's stamp: the first output's stamp − the lead-in's length, so it ends exactly
     /// where that output starts.
     pub lead_in_stamp_ns: u64,
+}
+
+/// Round 5 (ROZHODNUTÉ 6347872706, RED stub): what the playout worker hands to libobs now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Due {
+    #[default]
+    None = 0,
+    LeadIn = 1,
+    Packet = 2,
+    Silence = 3,
+}
+
+/// Round 5 (RED stub): one playout decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DueDecision {
+    pub kind: Due,
+    pub pos: u64,
+    pub frames: u64,
+    pub stamp_ns: u64,
+    pub deadline_ns: u64,
+    pub late_ns: i64,
+    pub next_ns: u64,
 }
 
 /// The receive timeline of one source (the C `struct vban_recv_timeline`).
@@ -257,8 +283,14 @@ pub struct Timeline {
     pub last_intime_ns: u64,
     /// The end position of the last packet folded into the fit.
     pub last_fold_end: u64,
+    /// Round 5 (RED stub): the slot length.
+    pub frames: u32,
     /// Whether this anchored stretch has sent any output yet (its lead-in goes before the first).
     pub emitted: bool,
+    /// Round 5 (RED stub): the next slot to hand out.
+    pub emit_pos: u64,
+    /// Round 5 (RED stub): the lead-in is still to go out.
+    pub lead_in_pending: bool,
     pub buckets: [Bucket; FIT_WINDOW_S],
     pub fit_valid: bool,
     /// The fitted step deviation (positive = the sender's clock is slow).
@@ -371,7 +403,10 @@ impl Timeline {
             last_k: 0,
             last_intime_ns: 0,
             last_fold_end: 0,
+            frames: 0,
             emitted: false,
+            emit_pos: 0,
+            lead_in_pending: false,
             buckets: [Bucket::default(); FIT_WINDOW_S],
             fit_valid: false,
             fit_ppb: 0,
@@ -394,6 +429,17 @@ impl Timeline {
         let ns = samples_to_ns(span, self.rate);
         self.base_stamp_ns
             .wrapping_add((ns as i64 + scale_ppb(ns, self.step_ppb)) as u64)
+    }
+
+    /// Round 5 (RED stub): the deadline of the slot at `pos`.
+    pub fn deadline_at(&self, pos: u64) -> u64 {
+        self.stamp_at(pos)
+            .saturating_sub(DEADLINE_MARGIN_MS * NS_PER_MS)
+    }
+
+    /// Round 5 (RED stub): what the playout worker hands to libobs now -- nothing yet.
+    pub fn due(&mut self, _now_ns: u64, _head_pos: Option<u64>) -> DueDecision {
+        DueDecision::default()
     }
 
     fn fold(&mut self, k: i64, x: u64, y: u64) {

@@ -108,6 +108,8 @@
 #define VBAN_RECV_LOG_INTERVAL_NS 10000000000ULL
 /* Silence for lost slots goes to OBS in pieces of at most this many frames. */
 #define VBAN_RECV_SILENCE_CHUNK_FRAMES 1024
+/* round 5 (ROZHODNUTE 6347872706, RED stub): a slot's deadline is its stamp minus this */
+#define VBAN_RECV_DEADLINE_MARGIN_MS 2
 #define VBAN_RECV_NS_PER_SEC 1000000000ULL
 #define VBAN_RECV_NS_PER_MS 1000000ULL
 
@@ -157,7 +159,10 @@ struct vban_recv_timeline {
 	int64_t last_k;         /* the bucket of the last packet's end position */
 	uint64_t last_intime_ns; /* the arrival of the last packet that came in time */
 	uint64_t last_fold_end;  /* the end position of the last packet folded into the fit */
+	uint32_t frames;         /* round 5 (RED stub): the slot length */
 	bool emitted;            /* this anchored stretch has sent output (its lead-in goes before the first) */
+	uint64_t emit_pos;       /* round 5 (RED stub): the next slot to hand out */
+	bool lead_in_pending;    /* round 5 (RED stub): the lead-in is still to go out */
 	struct vban_recv_bucket buckets[VBAN_RECV_FIT_WINDOW_S];
 	bool fit_valid;
 	int64_t fit_ppb; /* the fitted step deviation (positive = the sender's clock is slow) */
@@ -177,6 +182,7 @@ struct vban_recv_timeline {
 struct vban_recv_decision {
 	int event;  /* enum vban_recv_event */
 	int reason; /* enum vban_recv_reason, for a REANCHOR */
+	uint64_t pos; /* round 5 (RED stub): the packet's slot position */
 	uint64_t silence_samples;
 	uint64_t silence_pos; /* the first silent sample's position (vban_recv_stamp_at) */
 	uint64_t stamp_ns;    /* the packet's stamp */
@@ -259,6 +265,14 @@ static inline uint64_t vban_recv_stamp_at(const struct vban_recv_timeline *t, ui
 	const uint64_t span = pos > t->base_pos ? pos - t->base_pos : 0;
 	const uint64_t ns = vban_recv_samples_to_ns(span, t->rate);
 	return t->base_stamp_ns + (uint64_t)((int64_t)ns + vban_recv_scale_ppb(ns, t->step_ppb));
+}
+
+/* round 5 (RED stub): the deadline of the slot at POS */
+static inline uint64_t vban_recv_deadline_at(const struct vban_recv_timeline *t, uint64_t pos)
+{
+	const uint64_t stamp = vban_recv_stamp_at(t, pos);
+	const uint64_t margin = (uint64_t)VBAN_RECV_DEADLINE_MARGIN_MS * VBAN_RECV_NS_PER_MS;
+	return stamp > margin ? stamp - margin : 0;
 }
 
 static inline void vban_recv_fold(struct vban_recv_timeline *t, int64_t k, uint64_t x, uint64_t y)
@@ -417,7 +431,7 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 							  uint32_t frames, uint32_t rate, uint32_t channels,
 							  uint64_t reserve_ns)
 {
-	struct vban_recv_decision d = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	struct vban_recv_decision d = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 	if (frames == 0)
 		frames = 1;
 	if (rate == 0)
@@ -537,5 +551,34 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 	d.reason = reason;
 	d.stamp_ns = t->base_stamp_ns;
 	d.lateness_ns = (int64_t)now_ns - (int64_t)d.stamp_ns;
+	return d;
+}
+
+/* round 5 (ROZHODNUTE 6347872706, RED stub): what the playout worker hands to libobs now -- nothing yet */
+enum vban_recv_due_kind {
+	VBAN_RECV_DUE_NONE = 0,
+	VBAN_RECV_DUE_LEAD_IN = 1,
+	VBAN_RECV_DUE_PACKET = 2,
+	VBAN_RECV_DUE_SILENCE = 3,
+};
+
+struct vban_recv_due {
+	int kind;
+	uint64_t pos;
+	uint64_t frames;
+	uint64_t stamp_ns;
+	uint64_t deadline_ns;
+	int64_t late_ns;
+	uint64_t next_ns;
+};
+
+static inline struct vban_recv_due vban_recv_due(struct vban_recv_timeline *t, uint64_t now_ns, bool has_head,
+						 uint64_t head_pos)
+{
+	(void)t;
+	(void)now_ns;
+	(void)has_head;
+	(void)head_pos;
+	struct vban_recv_due d = {0, 0, 0, 0, 0, 0, 0};
 	return d;
 }

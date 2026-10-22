@@ -30,10 +30,11 @@
 //! The replay emits what the source emits: a PACKET (with the silence of the slots lost before it)
 //! and a LATE packet's silence; the anchor, a re-anchor and their held first second emit nothing.
 //!
-//! Known limit (review rounds 4-6, pinned by the hiccup and the loss tests): a late packet's silence
-//! reaches libobs after its window was mixed, so the realized latency steps up by a whole number of
-//! mix windows and walks back; a starve (no packet in time for a second: an outage, a pause, a
-//! delay step) re-anchors instead.
+//! The source emits on its own DEADLINE (ROZHODNUTÉ 6347872706): the replay runs the playout
+//! worker at every slot's deadline between arrivals, so libobs gets every slot ahead of the window
+//! that mixes it -- the packet, or one slot of silence -- and the late fill of rounds 4-6 (a step of
+//! one or two mix windows, or with no encoder a mix buffering that grows) is gone. Every grade runs
+//! with the encoder running and not running.
 //!
 //! Known limit: before the fit (10 s) the line runs at the nominal rate and then slews to the fit at
 //! 5 ppm per bucket, so the latency moves about the sender's ppm x 20 s: ±1 ms holds to about
@@ -140,14 +141,16 @@ fn schedule_from(seed: u64, ppm: f64, n: u64, loss: f64, first_gap_ms: f64) -> V
 ///   data for two more windows after the first one it cannot cover is CLEARED and the label reset
 ///   (`audio_ts = 0`), so the next chunk is PLACED at its stamp even when it would append (`if
 ///   (push_back && source->audio_ts)`). A placement behind the mix window is dropped up to the
-///   window by the frozen-mix guard (an encoder runs: the production case, issue 1425), so the
-///   stream plays from its stamps on. Not modelled: with no encoder running (or inside the 30 s
-///   launch settle window) the cleared fill placed in the past grows the whole mix's audio
-///   buffering by about the outage instead, for good (`add_audio_buffering`); the clear one window
-///   earlier when an earlier episode left `pending_stop` set; no clear at all when the data ended
-///   exactly on a window boundary (`discard_if_stopped` returns early on an empty buffer, about 1
-///   in 1024); a buffering above 0 ms (a launch can draw 64 or 85 ms, issue 1425), under which a
-///   fill that late does not underrun at all;
+///   window by the frozen-mix guard while an encoder runs (the production case, issue 1425), so the
+///   stream plays from its stamps on;
+/// - round 5 (ROZHODNUTÉ 6347872706), with NO encoder running (`no_encoder`; also OBS's 30 s
+///   launch settle window): a chunk placed behind the mix window grows the WHOLE mix's audio
+///   buffering by the whole windows it needs (`add_audio_buffering`), for good: the mixer runs that
+///   much behind our clock and everything after it plays that much later;
+/// - not modelled: the clear one window earlier when an earlier episode left `pending_stop` set; no
+///   clear at all when the data ended exactly on a window boundary (`discard_if_stopped` returns
+///   early on an empty buffer, about 1 in 1024); a buffering above 0 ms at launch (64 or 85 ms,
+///   issue 1425), under which a late chunk does not underrun at all;
 /// - the stamp-basis ASRC pulls the placement error out at most 300 ppm (`ASRC_MAX_PPM`) of the audio.
 #[derive(Debug, Default)]
 struct Obs {
@@ -157,6 +160,10 @@ struct Obs {
     next_sys: Option<f64>,
     /// Where the buffered data ends on the mix clock.
     next_play: f64,
+    /// No encoder runs: a chunk behind the mix window grows the mix's buffering.
+    no_encoder: bool,
+    /// The mix's audio buffering (it only grows), ns.
+    buffering_ns: f64,
 }
 
 /// libobs' `MAX_TS_VAR`, ns.
@@ -169,8 +176,9 @@ impl Obs {
     /// One chunk of `dur` ns stamped `stamp`, handed over at `arrival`: the instant libobs plays
     /// its first sample.
     fn chunk(&mut self, stamp: f64, dur: f64, arrival: f64) -> f64 {
-        // the label the mixer left at the last window it processed before the chunk arrived
-        let label = (arrival / OBS_TICK_NS).floor() * OBS_TICK_NS;
+        // the label the mixer left at the last window it processed before the chunk arrived (the
+        // mix runs `buffering_ns` behind our clock)
+        let label = ((arrival - self.buffering_ns) / OBS_TICK_NS).floor() * OBS_TICK_NS;
         let ts = match self.next_ts {
             Some(n) if (stamp - n).abs() < 70.0 * MS => n,
             _ => stamp,
@@ -192,12 +200,17 @@ impl Obs {
             Some(n) if (ts - n).abs() > OBS_MAX_TS_VAR_NS => (arrival, arrival - stamp),
             _ => (ts, 0.0),
         };
+        // a chunk placed behind the mix window: with no encoder running the whole mix's buffering
+        // grows by the windows it needs (with one, the frozen-mix guard drops the part behind it)
+        if self.no_encoder && start < label {
+            self.buffering_ns += ((label - start) / OBS_TICK_NS).ceil() * OBS_TICK_NS;
+        }
         let err = start - stamp;
         let pull = err.clamp(-300e-6 * dur, 300e-6 * dur);
         self.next_ts = Some(ts + dur);
         self.next_sys = Some(ts + dur + adjust);
         self.next_play = start + dur - pull;
-        start
+        start + self.buffering_ns
     }
 }
 
@@ -258,91 +271,162 @@ struct Run {
     max_step_dev_ppm: f64,
     /// Lead-ins sent (one before each stretch's first output).
     lead_ins: u64,
+    /// Silence chunks of a missing slot that were NOT exactly one slot long (must stay 0).
+    odd_silence: u64,
+    /// The mix's audio buffering at the end of the run (grown only with no encoder running), ns.
+    mix_buffering_ns: f64,
     sender_ppm: f64,
 }
 
 fn replay(sched: &[Sent], reserve_ms: u64) -> Run {
-    let mut t = Timeline::new();
+    replay_with(sched, reserve_ms, false)
+}
+
+/// What the replay keeps of one stored (in-time) packet until its slot goes out.
+struct Stored {
+    pos: u64,
+    k: u64,
+    first_sample_ns: f64,
+}
+
+/// The source as the replay runs it (ROZHODNUTÉ 6347872706): the receive side decides and stores,
+/// the playout worker emits at its deadlines into libobs ([`Obs`]).
+struct Replay {
+    t: Timeline,
+    obs: Obs,
+    run: Run,
+    store: std::collections::VecDeque<Stored>,
+    clock: u64,
+    prev_stamp: Option<(u64, u64)>,
+}
+
+impl Replay {
+    /// The worker at every deadline before `until` (and at it when `inclusive`), each slot at its
+    /// own deadline.
+    fn worker(&mut self, until: u64, inclusive: bool) {
+        loop {
+            let head = self.store.front().map(|s| s.pos);
+            let d = self.t.due(self.clock, head);
+            let at = self.clock as f64;
+            match d.kind {
+                Due::None => {
+                    let due =
+                        d.next_ns != 0 && (d.next_ns < until || (inclusive && d.next_ns == until));
+                    if !due {
+                        break;
+                    }
+                    self.clock = self.clock.max(d.next_ns);
+                }
+                Due::LeadIn => {
+                    let dur = samples_to_ns(d.frames, 48_000) as f64;
+                    self.obs.chunk(d.stamp_ns as f64, dur, at);
+                    self.run.lead_ins += 1;
+                }
+                Due::Silence => {
+                    let dur = samples_to_ns(d.frames, 48_000) as f64;
+                    self.obs.chunk(d.stamp_ns as f64, dur, at);
+                    self.run.odd_silence += u64::from(d.frames != u64::from(F));
+                }
+                Due::Packet => {
+                    let s = self.store.pop_front().expect("the head packet");
+                    assert_eq!(s.pos, d.pos, "the slot is the store's head");
+                    let dur = samples_to_ns(u64::from(F), 48_000) as f64;
+                    let play = self.obs.chunk(d.stamp_ns as f64, dur, at);
+                    let anchor_k = *self
+                        .run
+                        .anchors
+                        .last()
+                        .expect("an anchor before any packet");
+                    if (s.k - anchor_k + 1) * u64::from(F) <= 48_000 {
+                        self.run.emitted_in_first_second += 1;
+                    }
+                    if let Some((ps, pk)) = self.prev_stamp {
+                        let nominal = samples_to_ns((s.k - pk) * u64::from(F), 48_000) as f64;
+                        let dev = (d.stamp_ns as f64 - ps as f64 - nominal).abs() / nominal * 1e6;
+                        self.run.max_step_dev_ppm = self.run.max_step_dev_ppm.max(dev);
+                    }
+                    self.prev_stamp = Some((d.stamp_ns, s.k));
+                    self.run.records.push(Rec {
+                        seg: self.run.anchors.len() - 1,
+                        k: s.k,
+                        lat: d.stamp_ns as f64 - s.first_sample_ns,
+                        real: play - s.first_sample_ns,
+                    });
+                }
+            }
+        }
+        self.clock = self.clock.max(until);
+    }
+}
+
+/// [`replay`] with the encoder running or not (`no_encoder`: libobs grows the mix's buffering for a
+/// chunk behind the window).
+fn replay_with(sched: &[Sent], reserve_ms: u64, no_encoder: bool) -> Run {
     let reserve = reserve_ms * NS_PER_MS;
-    let mut run = Run {
-        min_margin_ns: i64::MAX,
-        ..Run::default()
+    let mut r = Replay {
+        t: Timeline::new(),
+        obs: Obs {
+            no_encoder,
+            ..Obs::default()
+        },
+        run: Run {
+            min_margin_ns: i64::MAX,
+            ..Run::default()
+        },
+        store: std::collections::VecDeque::new(),
+        clock: 0,
+        prev_stamp: None,
     };
-    let mut obs = Obs::default();
     let mut prev_arrival: Option<u64> = None;
-    let mut prev_stamp: Option<(u64, u64)> = None;
     for s in sched {
-        run.sent += 1;
+        r.run.sent += 1;
         let Some(a) = s.arrival_ns else {
-            run.dropped += 1;
+            r.run.dropped += 1;
             continue;
         };
         if let Some(p) = prev_arrival {
-            run.max_gap_ns = run.max_gap_ns.max(a - p);
+            r.run.max_gap_ns = r.run.max_gap_ns.max(a - p);
         }
         prev_arrival = Some(a);
-        let d = t.packet(a, s.k as u32, F, 48_000, 2, reserve);
-        if d.event == Event::Anchor || d.event == Event::Reanchor {
-            run.anchors.push(s.k);
-            prev_stamp = None;
+        // the worker first (every deadline before this arrival), then the packet, then a lead-in
+        r.worker(a, false);
+        let d = r.t.packet(a, s.k as u32, F, 48_000, 2, reserve);
+        match d.event {
+            Event::Anchor | Event::Reanchor => {
+                r.run.anchors.push(s.k);
+                r.store.clear();
+                r.prev_stamp = None;
+            }
+            Event::Packet => {
+                r.run.min_margin_ns = r.run.min_margin_ns.min(-d.lateness_ns);
+                r.store.push_back(Stored {
+                    pos: d.pos,
+                    k: s.k,
+                    first_sample_ns: s.first_sample_ns,
+                });
+            }
+            _ => {}
         }
-        // the source emits a PACKET (the silence of the slots lost before it first) and a LATE
-        // packet's silence; nothing else. A stretch's first output has its lead-in before it.
-        if d.event != Event::Packet && d.event != Event::Late {
-            continue;
-        }
-        if d.lead_in_samples > 0 {
-            obs.chunk(
-                d.lead_in_stamp_ns as f64,
-                samples_to_ns(d.lead_in_samples, 48_000) as f64,
-                a as f64,
-            );
-            run.lead_ins += 1;
-        }
-        if d.silence_samples > 0 {
-            obs.chunk(
-                t.stamp_at(d.silence_pos) as f64,
-                samples_to_ns(d.silence_samples, 48_000) as f64,
-                a as f64,
-            );
-        }
-        if d.event == Event::Late {
-            continue;
-        }
-        run.min_margin_ns = run.min_margin_ns.min(-d.lateness_ns);
-        let at = obs.chunk(
-            d.stamp_ns as f64,
-            samples_to_ns(u64::from(F), 48_000) as f64,
-            a as f64,
-        );
-        let anchor_k = *run.anchors.last().expect("an anchor before any packet");
-        if (s.k - anchor_k + 1) * u64::from(F) <= 48_000 {
-            run.emitted_in_first_second += 1;
-        }
-        if let Some((ps, pk)) = prev_stamp {
-            let nominal = samples_to_ns((s.k - pk) * u64::from(F), 48_000) as f64;
-            let dev = (d.stamp_ns as f64 - ps as f64 - nominal).abs() / nominal * 1e6;
-            run.max_step_dev_ppm = run.max_step_dev_ppm.max(dev);
-        }
-        prev_stamp = Some((d.stamp_ns, s.k));
-        run.records.push(Rec {
-            seg: run.anchors.len() - 1,
-            k: s.k,
-            lat: d.stamp_ns as f64 - s.first_sample_ns,
-            real: at - s.first_sample_ns,
-        });
+        r.worker(a, true);
     }
+    // the slots still stored go out (the end of the run: nothing past the last packet's slot)
+    if let Some(last) = r.store.back().map(|s| s.pos) {
+        let end = r.t.deadline_at(last);
+        r.worker(end, true);
+    }
+    let mut run = r.run;
     (
         run.anchored_latency_ns,
         run.latency_dev_max_ns,
         run.anchored_realized_ns,
         run.realized_dev_max_ns,
     ) = held(&run, 0, 0..u64::MAX);
-    run.late = t.late;
-    run.re_anchors = t.re_anchors;
-    run.lost = t.lost;
-    run.silence_samples = t.silence_samples;
-    run.sender_ppm = t.sender_ppm();
+    run.late = r.t.late;
+    run.re_anchors = r.t.re_anchors;
+    run.lost = r.t.lost;
+    run.silence_samples = r.t.silence_samples;
+    run.sender_ppm = r.t.sender_ppm();
+    run.mix_buffering_ns = r.obs.buffering_ns;
     run
 }
 
@@ -363,8 +447,8 @@ fn a_jittered_sender_at_50_ppm_with_30_ms_gaps_has_no_late_slot_at_40_ms_1439() 
             assert_eq!(run.re_anchors, 0, "a re-anchor: {tag}");
             assert_eq!((run.dropped, run.lost), (0, 0), "{tag}");
             assert!(
-                run.min_margin_ns > 0,
-                "a packet arrived after its stamp: {tag}"
+                run.min_margin_ns > (DEADLINE_MARGIN_MS * NS_PER_MS) as i64,
+                "a packet arrived after its deadline: {tag}"
             );
             // the timeline follows the sender's clock: the fit reads its offset, the latency holds
             // its anchored value over the whole run, and no stamp step ever jumps
@@ -379,11 +463,16 @@ fn a_jittered_sender_at_50_ppm_with_30_ms_gaps_has_no_late_slot_at_40_ms_1439() 
     }
 }
 
-/// ROZHODNUTÉ 6343922049 + 6345255813: after the first second both the stamp latency and the
-/// latency libobs REALIZES stay within ±1 ms of their anchored value for the WHOLE run (the owner's
-/// rule: OBS never changes its latency after sync), and nothing is emitted inside the first second
-/// (the hold), so libobs never sees a stamp step.
+/// ROZHODNUTÉ 6343922049 + 6345255813 + 6347872706: after the first second both the stamp latency
+/// and the latency libobs REALIZES stay within ±1 ms of their anchored value for the WHOLE run (the
+/// owner's rule: OBS never changes its latency after sync), nothing is emitted inside the first
+/// second (the hold), the mix's buffering never grows and a missing slot's silence is one slot.
 fn assert_latency_held(run: &Run, tag: &str) {
+    assert_eq!(
+        run.mix_buffering_ns, 0.0,
+        "the mix's audio buffering grew: {tag}"
+    );
+    assert_eq!(run.odd_silence, 0, "a silent slot was not one slot: {tag}");
     assert!(
         !run.anchored_latency_ns.is_nan(),
         "the run never got past its first second: {tag}"
@@ -476,55 +565,58 @@ fn k_at(sched: &[Sent], t_ns: u64) -> u64 {
         .map_or(u64::MAX, |s| s.k)
 }
 
-/// ROZHODNUTÉ 6345255813 (2): a fixed latency is a fixed jitter buffer. A one-off 90 ms hiccup
-/// (everything sent in it arrives together at its end, more than R late) costs late DROPS -- their
-/// slots silence -- and ZERO re-anchors; the stamps never move.
-///
-/// Known limit (review round 4): at 0 ms OBS buffering the late slots' silence reaches libobs
-/// after their windows were mixed, so libobs underruns and appends it behind its label -- the
-/// latency OBS REALIZES steps up by about the lateness and the stamp-basis ASRC walks it back at
-/// <= 300 ppm: two mix windows (42.5-43.2 ms) on these seeds. Phase-dependent (review round 6): a
-/// burst that arrives about three mix windows after the data ran out finds the source cleared and is
-/// placed at its stamps instead (no step). Pinned here so a cure (a deadline timer) shows; it is a
-/// question for the main.
+/// ROZHODNUTÉ 6345255813 (2) + 6347872706: a fixed latency is a fixed jitter buffer. A one-off
+/// 90 ms hiccup (everything sent in it arrives together at its end, more than R late) costs late
+/// DROPS and ZERO re-anchors: their slots went out at their deadlines as one slot of silence each,
+/// so libobs never underran, and the latency OBS REALIZES holds within ±1 ms (rounds 4-6 stepped it
+/// two mix windows, 42.5-43.2 ms), with the encoder running and not running.
 #[test]
 fn a_90_ms_hiccup_is_late_drops_and_zero_re_anchors_1439() {
-    for (ppm, seed) in [(0.0, 1u64), (30.0, 2), (-30.0, 3)] {
-        let sched = with_network_event(schedule(seed, ppm, TEN_MIN_PACKETS, 0.0), 90, false);
-        let event_k = k_at(&sched, S0 + 120_000_000_000) - 20;
-        let run = replay(&sched, 40);
-        let (_, dl, _, before) = held(&run, 0, 0..event_k);
-        let (_, _, _, overall) = held(&run, 0, 0..u64::MAX);
-        let tag = format!(
-            "hiccup 90 ms, ppm {ppm} seed {seed}: realized moved {:.3} ms before it, {:.3} ms over the \
-             run (the known limit): {run:?}",
-            before / MS,
-            overall / MS
-        );
-        println!("{tag}");
-        assert!(
-            run.late > 0,
-            "the hiccup must really drop late packets: {tag}"
-        );
-        assert_eq!(run.re_anchors, 0, "{tag}");
-        assert_eq!(
-            run.silence_samples,
-            run.late * u64::from(F),
-            "a late slot is silence: {tag}"
-        );
-        assert_eq!(run.emitted_in_first_second, 0, "{tag}");
-        assert!(
-            run.latency_dev_max_ns <= 1.0 * MS && dl <= 1.0 * MS,
-            "the stamps never move: {tag}"
-        );
-        assert!(
-            before <= 1.0 * MS,
-            "before the hiccup the realized latency is held: {tag}"
-        );
-        assert!(
-            overall > 30.0 * MS && overall < 90.0 * MS,
-            "the known limit moved (a cure would bring it under 1 ms): {tag}"
-        );
+    for no_encoder in [false, true] {
+        for (ppm, seed) in [(0.0, 1u64), (30.0, 2), (-30.0, 3)] {
+            let sched = with_network_event(schedule(seed, ppm, TEN_MIN_PACKETS, 0.0), 90, false);
+            let run = replay_with(&sched, 40, no_encoder);
+            let tag =
+                format!("hiccup 90 ms, no encoder {no_encoder}, ppm {ppm} seed {seed}: {run:?}");
+            println!("{tag}");
+            assert!(
+                run.late > 0,
+                "the hiccup must really drop late packets: {tag}"
+            );
+            assert_eq!(run.re_anchors, 0, "{tag}");
+            assert_eq!(
+                run.silence_samples,
+                run.lost * u64::from(F),
+                "a silent slot is one slot: {tag}"
+            );
+            assert_latency_held(&run, &tag);
+        }
+    }
+}
+
+/// ROZHODNUTÉ 6347872706, the acceptance: every loss row of the late-fill table (comment
+/// 6347409033) -- 40, 60, 80, 90, 500 and 900 ms, all under the 1 s starve -- holds the latency OBS
+/// realizes within ±1 ms after the first second, with the encoder running and not running: the
+/// missing slots go out at their deadlines as one slot of silence each, so libobs never underruns,
+/// never clears the source and never grows the mix's buffering (rounds 4-6: +1 or +2 mix windows
+/// for 40-80 ms, and with no encoder +455 / +861 ms of mix buffering for 500 / 900 ms).
+#[test]
+fn a_loss_of_40_to_900_ms_holds_the_realized_latency_with_and_without_an_encoder_1439() {
+    for no_encoder in [false, true] {
+        for (ms, seed) in [(40u64, 1u64), (60, 2), (80, 3), (90, 4), (500, 5), (900, 6)] {
+            let base = schedule(seed, 0.0, TEN_MIN_PACKETS / 2, 0.0);
+            let run = replay_with(&with_outage(base, ms), 40, no_encoder);
+            let tag = format!("loss {ms} ms, no encoder {no_encoder}, seed {seed}: {run:?}");
+            println!("{tag}");
+            assert_eq!((run.re_anchors, run.late), (0, 0), "{tag}");
+            assert_eq!(
+                run.lost, run.dropped,
+                "every lost slot went out as silence: {tag}"
+            );
+            assert!(run.lost > 0, "the outage is a loss: {tag}");
+            assert_eq!(run.lead_ins, 1, "{tag}");
+            assert_latency_held(&run, &tag);
+        }
     }
 }
 
@@ -534,11 +626,19 @@ fn a_90_ms_hiccup_is_late_drops_and_zero_re_anchors_1439() {
 /// The old stretch is graded up to the step.
 #[test]
 fn a_90_ms_persistent_delay_step_is_one_re_anchor_1439() {
-    for (ppm, seed) in [(0.0, 1u64), (30.0, 2), (-30.0, 3)] {
+    for (no_encoder, ppm, seed) in [
+        (false, 0.0, 1u64),
+        (false, 30.0, 2),
+        (false, -30.0, 3),
+        (true, 0.0, 1),
+        (true, 30.0, 2),
+        (true, -30.0, 3),
+    ] {
         let sched = with_network_event(schedule(seed, ppm, TEN_MIN_PACKETS, 0.0), 90, true);
         let event_k = k_at(&sched, S0 + 120_000_000_000) - 20;
-        let run = replay(&sched, 40);
-        let tag = format!("delay step 90 ms, ppm {ppm} seed {seed}: {run:?}");
+        let run = replay_with(&sched, 40, no_encoder);
+        let tag =
+            format!("delay step 90 ms, no encoder {no_encoder}, ppm {ppm} seed {seed}: {run:?}");
         println!("{tag}");
         assert_eq!(run.re_anchors, 1, "one delay step, one re-anchor: {tag}");
         assert_eq!(run.anchors.len(), 2, "{tag}");
@@ -558,6 +658,13 @@ fn a_90_ms_persistent_delay_step_is_one_re_anchor_1439() {
             (85.0..=95.0).contains(&added),
             "the new latency is the old one + the network's 90 ms, got +{added:.2} ms: {tag}"
         );
+        let (b_lat, _, _, _) = held(&run, 1, 0..u64::MAX);
+        assert!(
+            (b_real - b_lat).abs() <= 1.0 * MS,
+            "OBS realizes the new stretch's stamp latency: {tag}"
+        );
+        assert_eq!(run.mix_buffering_ns, 0.0, "the mix's buffering grew: {tag}");
+        assert_eq!(run.odd_silence, 0, "{tag}");
     }
 }
 
@@ -617,11 +724,11 @@ fn with_pause(mut sched: Vec<Sent>, ms: u64) -> Vec<Sent> {
 /// OBS realize the new anchored latency exactly (±1 ms of the stamp latency).
 #[test]
 fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_1439() {
-    for (what, ppm, seed) in [
-        ("outage", 0.0, 1u64),
-        ("pause", 30.0, 2),
-        ("outage", -30.0, 3),
-        ("pause", 0.0, 4),
+    for (no_encoder, what, ppm, seed) in [
+        (false, "outage", 0.0, 1u64),
+        (false, "pause", 30.0, 2),
+        (true, "outage", -30.0, 3),
+        (true, "pause", 0.0, 4),
     ] {
         let base = schedule(seed, ppm, TEN_MIN_PACKETS, 0.0);
         let event_k = k_at(&base, S0 + 120_000_000_000) - 20;
@@ -630,15 +737,18 @@ fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_143
         } else {
             with_pause(base, 1_500)
         };
-        let run = replay(&sched, 40);
-        let tag = format!("{what} 1.5 s, ppm {ppm} seed {seed}: {run:?}");
+        let run = replay_with(&sched, 40, no_encoder);
+        let tag = format!("{what} 1.5 s, no encoder {no_encoder}, ppm {ppm} seed {seed}: {run:?}");
         println!("{tag}");
         assert_eq!(run.re_anchors, 1, "one starve, one re-anchor: {tag}");
-        assert_eq!(
-            (run.late, run.lost),
-            (0, 0),
-            "no drop, nothing filled: {tag}"
+        // the worker keeps the line for a second (silence), then stops: the next packet re-anchors
+        let second = 48_000 / u64::from(F);
+        assert_eq!(run.late, 0, "no drop: {tag}");
+        assert!(
+            run.lost > second * 9 / 10 && run.lost <= second,
+            "about a second of silent slots, then nothing: {tag}"
         );
+        assert_eq!(run.mix_buffering_ns, 0.0, "{tag}");
         assert_eq!(run.emitted_in_first_second, 0, "{tag}");
         let (_, al, a_real, ar) = held(&run, 0, 0..event_k);
         let (b_lat, bl, b_real, br) = held(&run, 1, 0..u64::MAX);
@@ -665,59 +775,6 @@ fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_143
     }
 }
 
-/// Known limit (review rounds 5 + 6), the same late fill as the hiccup's, for a plain LOSS: an
-/// outage shorter than the starve is filled when the next packet arrives, on the unchanged line. A
-/// loss inside the margin (R − one packet, ~35 ms at R 40) is filled in time. A little longer, the
-/// source has underrun when the fill arrives and libobs APPENDS it behind the kept remainder: the
-/// realized latency steps up by a whole number of 21.33 ms mix windows (one for a 40-50 ms loss, two
-/// for 60-80 ms in the bench, phase-dependent) and the stamp-basis ASRC walks it back at <= 300 ppm
-/// (~71 s / ~142 s). Longer
-/// still (about three mix windows past the data's end) libobs has CLEARED the source
-/// (`discard_if_stopped`): the fill is placed at its stamp and the frozen-mix guard drops what is
-/// behind the window, so the stream plays from its stamps again (500 / 900 ms: held). The stamps
-/// never move and nothing re-anchors. Pinned so a cure (a deadline timer) shows; a question for
-/// the main. The model's assumptions are on [`Obs`] (with no encoder running the 500 / 900 ms loss
-/// grows the whole mix's buffering instead -- not modelled).
-#[test]
-fn known_limit_a_loss_just_past_the_margin_steps_the_realized_latency_1439() {
-    let window_ms = OBS_TICK_NS / MS;
-    // (loss, seed, the step in whole mix windows; None = held)
-    for (ms, seed, windows) in [
-        (45u64, 1u64, Some(1.0)),
-        (60, 1, Some(2.0)),
-        (60, 2, Some(2.0)),
-        (500, 3, None),
-        (900, 4, None),
-    ] {
-        let base = schedule(seed, 0.0, TEN_MIN_PACKETS / 2, 0.0);
-        let event_k = k_at(&base, S0 + 120_000_000_000) - 20;
-        let run = replay(&with_outage(base, ms), 40);
-        let (_, dl_before, _, dr_before) = held(&run, 0, 0..event_k);
-        let (_, dl, _, dr) = held(&run, 0, 0..u64::MAX);
-        let tag = format!(
-            "loss {ms} ms, seed {seed}: realized moved {:.3} ms over the run: {run:?}",
-            dr / MS
-        );
-        println!("{tag}");
-        assert_eq!((run.re_anchors, run.late), (0, 0), "{tag}");
-        assert!(run.lost > 0, "the outage is a loss: {tag}");
-        assert!(
-            dl_before <= 1.0 * MS && dr_before <= 1.0 * MS && dl <= 1.0 * MS,
-            "held before it, the stamps never move: {tag}"
-        );
-        match windows {
-            Some(k) => assert!(
-                (dr / MS - k * window_ms).abs() <= 1.5,
-                "the known limit moved (a cure would bring it under 1 ms): {tag}"
-            ),
-            None => assert!(
-                dr <= 1.0 * MS,
-                "libobs cleared the source: the stream plays from its stamps: {tag}"
-            ),
-        }
-    }
-}
-
 /// Review round 6 (the reviewer's repro): a 90 ms hiccup that ends a re-anchored stretch's hold
 /// (after a 1.5 s outage) makes the first packets past the hold late. Their silence must not be the
 /// stretch's first output -- its stamps have passed, so it would carry no lead-in, and libobs, which
@@ -728,14 +785,24 @@ fn known_limit_a_loss_just_past_the_margin_steps_the_realized_latency_1439() {
 fn a_hiccup_at_the_end_of_a_re_anchor_s_hold_still_lands_the_stretch_on_its_stamp_1439() {
     // hiccups that end inside or right at the end of the hold (one starting at 1000 ms falls after the
     // first output: the ordinary late-fill limit, pinned by the hiccup test)
-    for off_ms in [950u64, 965, 980] {
+    for (no_encoder, off_ms) in [
+        (false, 950u64),
+        (false, 965),
+        (false, 980),
+        (true, 950),
+        (true, 980),
+    ] {
         let sched = with_outage(schedule(1, 0.0, TEN_MIN_PACKETS / 2, 0.0), 1_500);
         let a0 = sched
             .iter()
             .find(|s| s.first_sample_ns >= (S0 + 121_500_000_000) as f64)
             .and_then(|s| s.arrival_ns)
             .expect("a packet after the outage");
-        let run = replay(&hiccup_at(sched, a0 + off_ms * NS_PER_MS, 90), 40);
+        let run = replay_with(
+            &hiccup_at(sched, a0 + off_ms * NS_PER_MS, 90),
+            40,
+            no_encoder,
+        );
         let (b_lat, bl, b_real, br) = held(&run, 1, 0..u64::MAX);
         let tag = format!(
             "hiccup {off_ms} ms after the re-anchor: stamp {:.3} ms (moved {:.3}), realized {:.3} ms \
