@@ -860,6 +860,25 @@ mod tests {
         assert_eq!(d.stamp_ns, on_time(0) + 10 * NS_PER_MS);
     }
 
+    /// Review round 3: the C twin computes the arrival offset and the bucket sums in unsigned
+    /// arithmetic that wraps; the Rust twin panicked there in a debug build (CI's profile) on an
+    /// arrival before the anchor or before its bucket's first packet. The real source never sees one
+    /// (`os_gettime_ns` is monotonic and the receive thread is serial), but the twins must agree on
+    /// every input and the Rust must never panic: it wraps exactly like the C.
+    #[test]
+    fn an_arrival_out_of_order_wraps_like_the_c_twin_and_never_panics() {
+        let mut t = Timeline::new();
+        t.packet(on_time(0), 0, 256, RATE, 2, R40);
+        let d = t.packet(on_time(0) - NS_PER_MS, 1, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Packet, "{d:?}");
+        // the first packet of bucket 1 (packet 187 ends at 48 128), then one that came before it
+        for k in 2..=187u64 {
+            t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+        }
+        let d = t.packet(on_time(187) - 1_000, 188, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Packet, "{d:?}");
+    }
+
     #[test]
     fn contiguous_packets_get_contiguous_stamps() {
         let mut t = Timeline::new();
