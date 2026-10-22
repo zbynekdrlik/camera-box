@@ -46,6 +46,9 @@ OBS_BOX_STREAM_SCENE="PRO"
 # real outgoing stream (strih-stream-monitor.service), never one monitored source.
 OBS_BOX_STREAM_AUDIO_MONITOR=off
 OBS_BOX_STREAM_OUTPUT_NAME="stream"
+# The stream role's session apps, in start order (obs_box_role_apply below; the genlock deploy's start
+# step reads the same list for a stream-role box, issue 1462).
+OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service)
 # issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
 # video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
 # The scene name equals STREAM_DEV_SCENE_DEFAULT (scripts/lib/stream-dev-scene.sh, pinned by a pytest).
@@ -156,7 +159,7 @@ obs_box_role_apply() {
   venue="$(strih_box_venue)" || return 1
   if [ "$role" = stream ]; then
     # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh
-    STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service)
+    STRIH_SESSION_APP_UNITS=("${OBS_BOX_STREAM_SESSION_APP_UNITS[@]}")
   fi
   if [ "$venue" != snv ]; then
     NDI_DISCOVERY_SENDER_HOSTS="$(obs_box_venue_sender_ips "$venue")" || return 1

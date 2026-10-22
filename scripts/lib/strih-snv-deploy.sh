@@ -91,6 +91,11 @@ if ! declare -F strih_session_apps_autostart_lines >/dev/null; then
   # shellcheck source=scripts/lib/strih-session-apps.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
 fi
+# issue 1462: a stream-role box starts the stream role's session apps (OBS_BOX_STREAM_SESSION_APP_UNITS).
+if [ -z "${OBS_BOX_STREAM_SESSION_APP_UNITS+x}" ]; then
+  # shellcheck source=scripts/lib/obs-box-role.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-role.sh"
+fi
 # issue 1404: setup-strih step 16e installs the program-audio sampler from STRIH_PROGRAM_AUDIO_FILES,
 # which names two vendored dock headers outside scripts/ -- the staged tree must carry them.
 # issue 1426: the ONE fact-file parser (strih_box_parse_file, never executes the file) and the ONE
@@ -220,9 +225,21 @@ strih_lx_remote_setup_notes_cmd() {
 # code is OBS's: a session app that does not start is a WARNING here, and verify-strih items 37-40 (the
 # deploy's acceptance step) name it.
 strih_lx_remote_start_cmd() {
+  local units
+  units="$(strih_lx_session_units "${2:-strih-snv}")"
   # shellcheck disable=SC2016  # expanded on the box, not here
   printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); touch %s; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service; obs_rc=$?; systemctl --user start %s || echo "WARNING: [%s start] the session apps (%s) did not start -- verify-strih items 37-40 name why" >&2; exit "$obs_rc"\n' \
-    "'$1/obs-start.marker'" "${STRIH_SESSION_APP_UNITS[*]}" "${2:-strih-snv}" "${STRIH_SESSION_APP_UNITS[*]}"
+    "'$1/obs-start.marker'" "$units" "${2:-strih-snv}" "$units"
+}
+
+# strih_lx_session_units BOX -> the session apps BOX's role runs, space-separated: the stream role's list
+# for a box whose fact file says STRIH_ROLE=stream (issue 1462), else STRIH_SESSION_APP_UNITS.
+strih_lx_session_units() {
+  if [ "$(strih_lx_fact "$1" STRIH_ROLE 2>/dev/null)" = stream ]; then
+    printf '%s' "${OBS_BOX_STREAM_SESSION_APP_UNITS[*]}"
+  else
+    printf '%s' "${STRIH_SESSION_APP_UNITS[*]}"
+  fi
 }
 
 # one line `installed=<marker sha> active=<unit state> pid=<MainPID> restarts=<NRestarts>
