@@ -12,6 +12,7 @@ paths:
   - "tests/vban_receive_wiring_1439.rs"
   - "tests/support/vban_c_1439.rs"
   - "tests/support/vban_source_driver_1439.c"
+  - "tests/support/vban_source_harness_1439.rs"
   - "scripts/program_audio_vban.py"
   - "scripts/lib/strih-program-vban.sh"
   - "tests/python/test_stream_role_vban_1439.py"
