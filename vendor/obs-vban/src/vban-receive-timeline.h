@@ -9,7 +9,10 @@
  * This decision gives every packet a stamp on a FIXED timeline that follows the sender's clock:
  *
  *  - Anchor: the first packet is stamped at its arrival - its length + R, R being the fixed
- *    "Receive Buffer" (default 40 ms, read at create/update only, never adapted at runtime). Within
+ *    "Receive Buffer" (default 40 ms, read at create/update only, never adapted at runtime). R is
+ *    measured from the packet's START, so the timeline uses max(R, one packet +
+ *    VBAN_RECV_RESERVE_MARGIN_MS) (reserve_eff_ns, fixed at the anchor; the source warns once when it
+ *    lifts R). Within
  *    the first VBAN_RECV_ACQUIRE_S s of the sender's audio (the packet's END position) a packet that
  *    arrived earlier against the line moves the line to it, so the anchor is the EARLIEST arrival of
  *    that second (ROZHODNUTE 6343922049): later packets are never early against it. After that
@@ -70,6 +73,9 @@
 /* A duplicate, or a nuFrame at most this many packets behind the last one, is a stale packet (a
  * network reorder or duplicate): dropped and counted, never a re-anchor. Further behind = a restart. */
 #define VBAN_RECV_STALE_PACKETS 64u
+/* The effective Receive Buffer is at least one packet + this (ROZHODNUTE 6343922049): R is measured
+ * from the packet's start, its arrival is its end. */
+#define VBAN_RECV_RESERVE_MARGIN_MS 10
 /* The anchor is the earliest arrival among the packets that end within this many seconds of the anchor
  * packet's start (ROZHODNUTE 6343922049). */
 #define VBAN_RECV_ACQUIRE_S 1
@@ -121,7 +127,8 @@ struct vban_recv_timeline {
 	bool anchored;
 	uint32_t rate;
 	uint32_t channels;
-	uint64_t reserve_ns;
+	uint64_t reserve_ns;     /* the Receive Buffer as configured (another value re-anchors) */
+	uint64_t reserve_eff_ns; /* max(reserve_ns, the anchor packet's length + the margin), fixed at the anchor */
 	uint64_t anchor_ns;     /* the anchor packet's arrival */
 	uint64_t anchor_end;    /* the anchor packet's end position (its frame count) */
 	uint32_t last_nu;       /* the last packet's nuFrame */
@@ -250,7 +257,7 @@ static inline double vban_recv_reference(const struct vban_recv_timeline *t, uin
 {
 	if (t->fit_valid)
 		return t->fit_ybar + t->fit_b * ((double)x - t->fit_xbar);
-	return (double)((int64_t)vban_recv_stamp_at(t, x) - (int64_t)t->reserve_ns - (int64_t)t->anchor_ns);
+	return (double)((int64_t)vban_recv_stamp_at(t, x) - (int64_t)t->reserve_eff_ns - (int64_t)t->anchor_ns);
 }
 
 /* Start (or restart) the timeline at this packet. */
@@ -261,12 +268,14 @@ static inline void vban_recv_anchor(struct vban_recv_timeline *t, uint64_t now_n
 	t->rate = rate;
 	t->channels = channels;
 	t->reserve_ns = reserve_ns;
+	const uint64_t len = vban_recv_samples_to_ns(frames, rate);
+	const uint64_t floor_ns = len + (uint64_t)VBAN_RECV_RESERVE_MARGIN_MS * VBAN_RECV_NS_PER_MS;
+	t->reserve_eff_ns = reserve_ns > floor_ns ? reserve_ns : floor_ns;
 	t->anchor_ns = now_ns;
 	t->anchor_end = frames;
 	t->last_nu = nu;
 	t->next_pos = frames;
-	const uint64_t len = vban_recv_samples_to_ns(frames, rate);
-	t->base_stamp_ns = (now_ns > len ? now_ns - len : 0) + reserve_ns;
+	t->base_stamp_ns = (now_ns > len ? now_ns - len : 0) + t->reserve_eff_ns;
 	t->base_pos = 0;
 	t->step_ppb = 0;
 	for (size_t i = 0; i < VBAN_RECV_FIT_WINDOW_S; i++)
@@ -339,11 +348,11 @@ static inline bool vban_recv_update(struct vban_recv_timeline *t, uint64_t pos)
 	t->fit_xbar = xbar;
 	t->fit_ybar = ybar;
 	const int64_t target = (int64_t)t->anchor_ns + vban_recv_round(ybar + slope * ((double)pos - xbar)) +
-			       (int64_t)t->reserve_ns + t->shift_ns;
+			       (int64_t)t->reserve_eff_ns + t->shift_ns;
 	const uint64_t stamp = vban_recv_stamp_at(t, pos);
 	const int64_t phase = target - (int64_t)stamp;
 	t->phase_ns = phase;
-	const int64_t hold = (int64_t)t->reserve_ns;
+	const int64_t hold = (int64_t)t->reserve_eff_ns;
 	if (phase > hold || phase < -hold)
 		return false;
 	/* the dead band: inside it the latency is held and only the rate is followed */
@@ -422,7 +431,7 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 	if (reason == VBAN_RECV_REASON_NONE && end <= (uint64_t)VBAN_RECV_ACQUIRE_S * rate && t->base_pos == 0 &&
 	    t->step_ppb == 0) {
 		const uint64_t back = vban_recv_samples_to_ns(frames, rate) + vban_recv_samples_to_ns(pos, rate);
-		const uint64_t cand = (now_ns > back ? now_ns - back : 0) + t->reserve_ns;
+		const uint64_t cand = (now_ns > back ? now_ns - back : 0) + t->reserve_eff_ns;
 		if (cand < t->base_stamp_ns)
 			t->base_stamp_ns = cand;
 	}
@@ -437,10 +446,10 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 				 * would anchor, rebased at the first lost slot (silence on the new line), the fit
 				 * kept; the excess over the fit becomes the held shift */
 				const uint64_t len = vban_recv_samples_to_ns(frames, rate);
-				const uint64_t want = (now_ns > len ? now_ns - len : 0) + t->reserve_ns;
+				const uint64_t want = (now_ns > len ? now_ns - len : 0) + t->reserve_eff_ns;
 				const int64_t fitted = (int64_t)t->anchor_ns +
 						       vban_recv_round(t->fit_ybar + t->fit_b * ((double)pos - t->fit_xbar)) +
-						       (int64_t)t->reserve_ns;
+						       (int64_t)t->reserve_eff_ns;
 				t->shift_ns = (int64_t)want - fitted;
 				const uint64_t span = vban_recv_samples_to_ns(pos - t->next_pos, rate);
 				t->base_stamp_ns = want - (uint64_t)((int64_t)span + vban_recv_scale_ppb(span, t->step_ppb));

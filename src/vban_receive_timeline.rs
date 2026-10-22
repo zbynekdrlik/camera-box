@@ -10,7 +10,9 @@
 //!
 //! * **Anchor.** The first packet is stamped at its arrival − its length + R, R being the fixed
 //!   "Receive Buffer" (default [`RESERVE_MS_DEFAULT`] = 40 ms, read at create/update only, never
-//!   adapted at runtime). Within the first [`ACQUIRE_S`] s of the sender's audio (the packet's END
+//!   adapted at runtime). R is measured from the packet's START, so the timeline uses
+//!   max(R, one packet + [`RESERVE_MARGIN_MS`]) (`reserve_eff_ns`, fixed at the anchor; the source
+//!   warns once when it lifts R). Within the first [`ACQUIRE_S`] s of the sender's audio (the packet's END
 //!   position) a packet that arrived earlier against the line moves the line to it, so the anchor
 //!   is the EARLIEST arrival of that second (ROZHODNUTÉ 6343922049): later packets are never early
 //!   against it. After that second the line's phase is fixed.
@@ -67,6 +69,9 @@ pub const JUMP_S: u64 = 2;
 /// A duplicate, or an index at most this many packets behind the last one, is a STALE packet (a
 /// network reorder or duplicate): dropped and counted, never a re-anchor. Further behind = a restart.
 pub const STALE_PACKETS: u32 = 64;
+/// The effective Receive Buffer is at least one packet + this (ROZHODNUTÉ 6343922049): R is
+/// measured from the packet's start, its arrival is its end.
+pub const RESERVE_MARGIN_MS: u64 = 10;
 /// The anchor is the earliest arrival among the packets that end within this many seconds of the
 /// anchor packet's start (ROZHODNUTÉ 6343922049).
 pub const ACQUIRE_S: u64 = 1;
@@ -192,7 +197,11 @@ pub struct Timeline {
     pub anchored: bool,
     pub rate: u32,
     pub channels: u32,
+    /// The Receive Buffer as configured (another value re-anchors).
     pub reserve_ns: u64,
+    /// The Receive Buffer the line uses: max(`reserve_ns`, the anchor packet's length +
+    /// [`RESERVE_MARGIN_MS`]), fixed at the anchor.
+    pub reserve_eff_ns: u64,
     /// The anchor packet's arrival.
     pub anchor_ns: u64,
     /// The anchor packet's end position (its frame count).
@@ -308,6 +317,7 @@ impl Timeline {
             rate: 0,
             channels: 0,
             reserve_ns: 0,
+            reserve_eff_ns: 0,
             anchor_ns: 0,
             anchor_end: 0,
             last_nu: 0,
@@ -373,7 +383,7 @@ impl Timeline {
         if self.fit_valid {
             return self.fit_ybar + self.fit_b * (x as f64 - self.fit_xbar);
         }
-        (self.stamp_at(x) as i64 - self.reserve_ns as i64 - self.anchor_ns as i64) as f64
+        (self.stamp_at(x) as i64 - self.reserve_eff_ns as i64 - self.anchor_ns as i64) as f64
     }
 
     /// The sender's clock offset in ppm from the fit (positive = the sender runs fast), 0 before
@@ -399,12 +409,13 @@ impl Timeline {
         self.rate = rate;
         self.channels = channels;
         self.reserve_ns = reserve_ns;
+        let len = samples_to_ns(u64::from(frames), rate);
+        self.reserve_eff_ns = reserve_ns.max(len + RESERVE_MARGIN_MS * NS_PER_MS);
         self.anchor_ns = now_ns;
         self.anchor_end = u64::from(frames);
         self.last_nu = nu;
         self.next_pos = u64::from(frames);
-        let len = samples_to_ns(u64::from(frames), rate);
-        self.base_stamp_ns = now_ns.saturating_sub(len) + reserve_ns;
+        self.base_stamp_ns = now_ns.saturating_sub(len) + self.reserve_eff_ns;
         self.base_pos = 0;
         self.step_ppb = 0;
         for b in self.buckets.iter_mut() {
@@ -481,12 +492,12 @@ impl Timeline {
         self.fit_ybar = ybar;
         let target = self.anchor_ns as i64
             + round_half_away(ybar + slope * (pos as f64 - xbar))
-            + self.reserve_ns as i64
+            + self.reserve_eff_ns as i64
             + self.shift_ns;
         let stamp = self.stamp_at(pos);
         let phase = target - stamp as i64;
         self.phase_ns = phase;
-        let hold = self.reserve_ns as i64;
+        let hold = self.reserve_eff_ns as i64;
         if !(-hold..=hold).contains(&phase) {
             return false;
         }
@@ -579,7 +590,7 @@ impl Timeline {
             && self.step_ppb == 0
         {
             let back = samples_to_ns(u64::from(frames), rate) + samples_to_ns(pos, rate);
-            let cand = now_ns.saturating_sub(back) + self.reserve_ns;
+            let cand = now_ns.saturating_sub(back) + self.reserve_eff_ns;
             if cand < self.base_stamp_ns {
                 self.base_stamp_ns = cand;
             }
@@ -595,12 +606,12 @@ impl Timeline {
                     // packet would anchor, rebased at the first lost slot (silence on the new
                     // line), the fit kept; the excess over the fit becomes the held shift
                     let want = now_ns.saturating_sub(samples_to_ns(u64::from(frames), rate))
-                        + self.reserve_ns;
+                        + self.reserve_eff_ns;
                     let fitted = self.anchor_ns as i64
                         + round_half_away(
                             self.fit_ybar + self.fit_b * (pos as f64 - self.fit_xbar),
                         )
-                        + self.reserve_ns as i64;
+                        + self.reserve_eff_ns as i64;
                     self.shift_ns = want as i64 - fitted;
                     let span = samples_to_ns(pos - self.next_pos, rate);
                     self.base_stamp_ns =

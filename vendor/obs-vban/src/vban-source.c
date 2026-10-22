@@ -50,6 +50,10 @@ struct vban_src_s
 	uint64_t status_ns;        /* the last status line, 0 = none yet */
 	int64_t window_late_max_ns; /* the largest arrival - stamp since the last status line */
 	bool window_late_seen;
+	/* camera-box issue 1439 (ROZHODNUTE 6343922049): the (R, effective R) pair last warned about, so a
+	 * Receive Buffer lifted to one packet + 10 ms is named once, not at every re-anchor */
+	uint64_t warned_reserve_ns;
+	uint64_t warned_reserve_eff_ns;
 };
 
 static const char *vban_src_get_name(void *type_data)
@@ -247,6 +251,19 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 			    uint32_t frames)
 {
 	const struct vban_recv_timeline *t = &s->timeline;
+	/* a new line: is R lifted to one packet + the margin (R is measured from the packet's start)? */
+	if ((d->event == VBAN_RECV_ANCHOR || (d->event == VBAN_RECV_REANCHOR && !d->shifted)) &&
+	    t->reserve_eff_ns != t->reserve_ns &&
+	    (t->reserve_ns != s->warned_reserve_ns || t->reserve_eff_ns != s->warned_reserve_eff_ns)) {
+		s->warned_reserve_ns = t->reserve_ns;
+		s->warned_reserve_eff_ns = t->reserve_eff_ns;
+		blog(LOG_WARNING,
+		     "obs-vban receive buffer: source '%s' receive_buffer_ms=%" PRIu64
+		     " is not above one packet (%.2f ms) + %d ms: using %.2f ms",
+		     obs_source_get_name(s->context), (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS),
+		     (double)vban_recv_samples_to_ns(frames, t->rate) / 1e6, VBAN_RECV_RESERVE_MARGIN_MS,
+		     (double)t->reserve_eff_ns / 1e6);
+	}
 	if (d->event == VBAN_RECV_ANCHOR) {
 		blog(LOG_INFO,
 		     "obs-vban receive anchored: source '%s' frame=%u rate=%u ch=%u receive_buffer_ms=%" PRIu64,
