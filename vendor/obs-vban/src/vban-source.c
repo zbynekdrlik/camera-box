@@ -52,6 +52,8 @@ struct vban_src_s
 	bool window_late_seen;
 	/* camera-box issue 1439 (ROZHODNUTE 6345255813): the source emits since its anchor's first second */
 	bool emitting;
+	/* camera-box issue 1439 (ROZHODNUTE 6345255813 item 2): a run of late (dropped) packets is logged once */
+	bool late_run;
 	/* camera-box issue 1439 (ROZHODNUTE 6343922049): the (R, effective R) pair last warned about, so a
 	 * Receive Buffer lifted to one packet + 10 ms is named once, not at every re-anchor */
 	uint64_t warned_reserve_ns;
@@ -254,8 +256,7 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 {
 	const struct vban_recv_timeline *t = &s->timeline;
 	/* a new line: is R lifted to one packet + the margin (R is measured from the packet's start)? */
-	if ((d->event == VBAN_RECV_ANCHOR || (d->event == VBAN_RECV_REANCHOR && !d->shifted)) &&
-	    t->reserve_eff_ns != t->reserve_ns &&
+	if ((d->event == VBAN_RECV_ANCHOR || d->event == VBAN_RECV_REANCHOR) && t->reserve_eff_ns != t->reserve_ns &&
 	    (t->reserve_ns != s->warned_reserve_ns || t->reserve_eff_ns != s->warned_reserve_eff_ns)) {
 		s->warned_reserve_ns = t->reserve_ns;
 		s->warned_reserve_eff_ns = t->reserve_eff_ns;
@@ -266,8 +267,10 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     (double)vban_recv_samples_to_ns(frames, t->rate) / 1e6, VBAN_RECV_RESERVE_MARGIN_MS,
 		     (double)t->reserve_eff_ns / 1e6);
 	}
-	if (d->event == VBAN_RECV_ANCHOR || (d->event == VBAN_RECV_REANCHOR && !d->shifted))
+	if (d->event == VBAN_RECV_ANCHOR || d->event == VBAN_RECV_REANCHOR) {
 		s->emitting = false;
+		s->late_run = false;
+	}
 	if (d->event == VBAN_RECV_PACKET && !s->emitting) {
 		/* the hold is over: the first emitted packet, on the anchor's final (earliest-arrival) line */
 		s->emitting = true;
@@ -282,18 +285,28 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     obs_source_get_name(s->context), nu_frame, t->rate, t->channels,
 		     (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS));
 	} else if (d->event == VBAN_RECV_REANCHOR) {
-		/* fit=kept: a late shift (the line moved once, the fit and the timeline run on, the shift is
-		 * held); fit=restarted: a new timeline from this packet */
+		/* a new timeline from this packet (reason=late: no packet in time for a second), then the hold */
 		blog(LOG_WARNING,
 		     "obs-vban receive re-anchor: source '%s' reason=%s frame=%u late_ms=%.1f re_anchors=%" PRIu64
-		     " late=%" PRIu64 " fit=%s shift_ms=%.1f",
+		     " late=%" PRIu64 " -- holding its first second",
 		     obs_source_get_name(s->context), vban_recv_reason_name(d->reason), nu_frame,
-		     (double)d->late_ns / 1e6, t->re_anchors, t->late, d->shifted ? "kept" : "restarted",
-		     (double)t->shift_ns / 1e6);
+		     (double)d->late_ns / 1e6, t->re_anchors, t->late);
 	}
-	if (d->silence_samples > 0)
+	if (d->event == VBAN_RECV_LATE && !s->late_run) {
+		/* ROZHODNUTE 6345255813 item 2: a late packet is lost, never re-timed; one line per late run */
+		s->late_run = true;
+		blog(LOG_WARNING,
+		     "obs-vban receive late: source '%s' frame=%u late_ms=%.1f -- dropped, its slot is silence on the "
+		     "anchored line (late=%" PRIu64 ")",
+		     obs_source_get_name(s->context), nu_frame, (double)d->late_ns / 1e6, t->late);
+	} else if (d->event == VBAN_RECV_PACKET) {
+		s->late_run = false;
+	}
+	/* the lost slots (a LATE packet's own slot is in the silence too, logged above) */
+	const uint64_t lost_slots = d->silence_samples / (frames ? frames : 1u) - (d->event == VBAN_RECV_LATE ? 1u : 0u);
+	if (d->silence_samples > 0 && lost_slots > 0)
 		blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) at frame %u -- silence for those slots",
-		     obs_source_get_name(s->context), d->silence_samples / (frames ? frames : 1u), nu_frame);
+		     obs_source_get_name(s->context), lost_slots, nu_frame);
 	if (d->event == VBAN_RECV_PACKET && (!s->window_late_seen || d->lateness_ns > s->window_late_max_ns)) {
 		s->window_late_max_ns = d->lateness_ns;
 		s->window_late_seen = true;
@@ -348,12 +361,12 @@ static void vban_src_log_status(struct vban_src_s *s, const struct VBanHeader *h
 	const double rate = t->rate ? (double)t->rate : 1.0;
 	blog(LOG_INFO,
 	     "obs-vban receive: received=%" PRIu64 " lost=%" PRIu64 " late=%" PRIu64 " re_anchors=%" PRIu64
-	     " stale=%" PRIu64 " silence_ms=%.1f max_late_ms=%.1f sender_ppm=%+.3f phase_ms=%+.2f shift_ms=%+.1f fit=%s"
+	     " stale=%" PRIu64 " silence_ms=%.1f max_late_ms=%.1f sender_ppm=%+.3f phase_ms=%+.2f fit=%s"
 	     " receive_buffer_ms=%" PRIu64
 	     " rate=%u ch=%u port=%ld stream='%.*s' source='%s'",
 	     t->received, t->lost, t->late, t->re_anchors, t->stale, (double)t->silence_samples * 1000.0 / rate,
 	     s->window_late_seen ? (double)s->window_late_max_ns / 1e6 : 0.0,
-	     t->fit_valid ? -(double)t->fit_ppb / 1000.0 : 0.0, (double)t->phase_ns / 1e6, (double)t->shift_ns / 1e6,
+	     t->fit_valid ? -(double)t->fit_ppb / 1000.0 : 0.0, (double)t->phase_ns / 1e6,
 	     t->fit_valid ? "locked" : "acquiring", (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS), t->rate, t->channels,
 	     os_atomic_load_long(&s->log_port), (int)VBAN_STREAM_NAME_SIZE, header->streamname,
 	     obs_source_get_name(s->context));
@@ -430,13 +443,16 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 		return;
 	}
 	vban_src_report(s, &d, header->nuFrame, audio.frames);
-	/* ROZHODNUTE 6345255813 item 1: an anchor, a full re-anchor and every packet of their first second
-	 * are HELD (never output), so libobs never sees the earliest-arrival refinement as a stamp step */
-	if (d.event == VBAN_RECV_PACKET || (d.event == VBAN_RECV_REANCHOR && d.shifted)) {
+	/* ROZHODNUTE 6345255813: an anchor, a re-anchor and every packet of their first second are HELD
+	 * (never output), so libobs never sees the earliest-arrival refinement as a stamp step (item 1); a
+	 * LATE packet's audio is dropped and its slot goes out as silence on the unchanged line (item 2) */
+	if (d.event == VBAN_RECV_PACKET || d.event == VBAN_RECV_LATE) {
 		if (d.silence_samples > 0)
 			vban_src_output_silence(s, &d, &audio);
-		audio.timestamp = d.stamp_ns;
-		obs_source_output_audio(s->context, &audio);
+		if (d.event == VBAN_RECV_PACKET) {
+			audio.timestamp = d.stamp_ns;
+			obs_source_output_audio(s->context, &audio);
+		}
 	}
 	vban_src_log_status(s, header, now);
 }

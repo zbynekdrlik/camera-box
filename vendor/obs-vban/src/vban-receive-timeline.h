@@ -38,17 +38,16 @@
  *  - Loss: a nuFrame gap is silence for exactly the lost slots, stamped on the same line.
  *  - Stale: a duplicate, or a nuFrame at most VBAN_RECV_STALE_PACKETS behind the last one (a network
  *    reorder), is dropped and counted: its slot has passed (it went out as silence), the line runs on.
- *  - Late shift (counted as one re-anchor, ROZHODNUTE 6343922049): a packet arriving after its stamp
- *    while the fit is valid shifts the line ONCE to the stamp it would anchor (arrival - length + R =
- *    fit + R + its excess over the fit). The fit and its buckets are kept, the slots lost before it
- *    are silence on the shifted line, and the excess becomes the line's held shift_ns: the dead band
- *    and the hold below are centred on fit + R + shift, so the shifted latency is held and the next
- *    fit does not re-anchor again.
- *  - Re-anchor (counted, one per event): a packet arriving after its stamp before the fit is valid
- *    (late), a nuFrame further behind (a sender restart), a forward jump of more than VBAN_RECV_JUMP_S
- *    of audio (a sender restart), another rate or channel count, another R, or a fit that cannot
- *    hold: the fitted rate beyond +-500 ppm, the stamps more than R off fit + R + shift, or no packet
- *    folded for VBAN_RECV_STARVE_S of the sender's audio. The packet that re-anchors is the new anchor.
+ *  - Late = lost (ROZHODNUTE 6345255813 item 2; the round-3 late shift is withdrawn): a fixed latency
+ *    is a fixed jitter buffer. A packet arriving after its stamp (once the hold is over) is LATE:
+ *    dropped and counted, its slot (with the slots lost right before it) silence at once on the
+ *    unchanged line. The line, the fit and the latency stay where the anchor put them.
+ *  - Re-anchor (counted, one per event, then the hold): no packet in time for VBAN_RECV_PERSIST_S of
+ *    the sender's audio (a late packet ending more than that past the last in-time packet's end: a
+ *    delay step on the network), a nuFrame further behind (a sender restart), a forward jump of more
+ *    than VBAN_RECV_JUMP_S of audio (a sender restart), another rate or channel count, another R, or a
+ *    fit that cannot hold: the fitted rate beyond +-500 ppm or the stamps more than R off fit + R. The
+ *    packet that re-anchors is the new anchor. Packets still in time never re-anchor.
  *
  * Pure: no OBS dependency, no libm, no 128-bit integers (MSVC builds it). The Tier-0 authority is
  * src/vban_receive_timeline.rs in camera-box; tests/vban_receive_timeline_parity_1439.rs compiles
@@ -71,8 +70,9 @@
 #define VBAN_RECV_FIT_MIN_BUCKETS 10
 /* A packet later than the reference line by more than this is not folded into the fit. */
 #define VBAN_RECV_OUTLIER_MS 10
-/* No packet folded for this much of the sender's audio = the fit cannot hold. */
-#define VBAN_RECV_STARVE_S 3
+/* No packet in time for this much of the sender's audio (every packet late: a delay step on the
+ * network) = one full re-anchor (ROZHODNUTE 6345255813 item 2). */
+#define VBAN_RECV_PERSIST_S 1
 /* A forward nuFrame jump over this much audio is a sender restart. */
 #define VBAN_RECV_JUMP_S 2
 /* A duplicate, or a nuFrame at most this many packets behind the last one, is a stale packet (a
@@ -106,11 +106,12 @@ enum vban_recv_event {
 	VBAN_RECV_REANCHOR = 2, /* the timeline restarts at this packet (counted) */
 	VBAN_RECV_STALE = 3,    /* a duplicate / reordered packet whose slot has passed: dropped, counted */
 	VBAN_RECV_HOLD = 4,     /* inside an anchor's first second: refines + folds, never output */
+	VBAN_RECV_LATE = 5,     /* past its stamp: dropped, counted, its slot silence on the unchanged line */
 };
 
 enum vban_recv_reason {
 	VBAN_RECV_REASON_NONE = 0,
-	VBAN_RECV_REASON_LATE = 1,     /* the packet arrived after its stamp */
+	VBAN_RECV_REASON_LATE = 1,     /* no packet in time for VBAN_RECV_PERSIST_S (every packet late) */
 	VBAN_RECV_REASON_BACKWARD = 2, /* a nuFrame more than VBAN_RECV_STALE_PACKETS behind */
 	VBAN_RECV_REASON_JUMP = 3,     /* a forward nuFrame jump over VBAN_RECV_JUMP_S */
 	VBAN_RECV_REASON_FORMAT = 4,   /* another sample rate or channel count */
@@ -143,19 +144,18 @@ struct vban_recv_timeline {
 	uint64_t base_pos;
 	int64_t step_ppb;       /* the stamp step's deviation from nominal */
 	int64_t last_k;         /* the bucket of the last packet's end position */
-	uint64_t last_fold_pos; /* the end position of the last folded packet */
+	uint64_t last_intime_end; /* the end position of the last packet that came in time */
 	struct vban_recv_bucket buckets[VBAN_RECV_FIT_WINDOW_S];
 	bool fit_valid;
 	int64_t fit_ppb; /* the fitted step deviation (positive = the sender's clock is slow) */
 	double fit_b;    /* ns per sample */
 	double fit_xbar;
 	double fit_ybar;
-	int64_t phase_ns; /* fit + R + shift - stamp at the last update */
-	int64_t shift_ns; /* the line's held offset from fit + R, set by a late shift; 0 at an anchor */
+	int64_t phase_ns; /* fit + R - stamp at the last update */
 	uint64_t received;
 	uint64_t lost;            /* lost packets (silence slots) */
 	uint64_t silence_samples; /* the silence those slots carried */
-	uint64_t late;            /* packets that arrived after their stamp (each a re-anchor) */
+	uint64_t late;            /* packets that arrived after their stamp (each dropped, its slot silence) */
 	uint64_t re_anchors;
 	uint64_t stale; /* duplicate / reordered packets dropped (their slot had passed) */
 };
@@ -168,8 +168,7 @@ struct vban_recv_decision {
 	uint64_t silence_pos; /* the first silent sample's position (vban_recv_stamp_at) */
 	uint64_t stamp_ns;    /* the packet's stamp */
 	int64_t lateness_ns;  /* arrival - stamp (negative = the margin left) */
-	int64_t late_ns;      /* a LATE re-anchor: how far after its old stamp the packet came */
-	bool shifted;         /* a LATE re-anchor that shifted the line and kept the fit */
+	int64_t late_ns;      /* a LATE packet (or a persistent-late re-anchor): how far after its stamp */
 };
 
 /* The Receive Buffer in ms for a source setting value: 0 or less = the default. */
@@ -253,7 +252,6 @@ static inline void vban_recv_fold(struct vban_recv_timeline *t, int64_t k, uint6
 	b->sv += v;
 	b->suu += u * u;
 	b->suv += u * v;
-	t->last_fold_pos = x;
 }
 
 /* The arrival (ns since the anchor's arrival) the reference line expects at end position X: the
@@ -292,7 +290,7 @@ static inline void vban_recv_anchor(struct vban_recv_timeline *t, uint64_t now_n
 	t->fit_xbar = 0.0;
 	t->fit_ybar = 0.0;
 	t->phase_ns = 0;
-	t->shift_ns = 0;
+	t->last_intime_end = frames;
 	t->last_k = (int64_t)(frames / rate);
 	vban_recv_fold(t, t->last_k, frames, 0);
 }
@@ -354,7 +352,7 @@ static inline bool vban_recv_update(struct vban_recv_timeline *t, uint64_t pos)
 	t->fit_xbar = xbar;
 	t->fit_ybar = ybar;
 	const int64_t target = (int64_t)t->anchor_ns + vban_recv_round(ybar + slope * ((double)pos - xbar)) +
-			       (int64_t)t->reserve_eff_ns + t->shift_ns;
+			       (int64_t)t->reserve_eff_ns;
 	const uint64_t stamp = vban_recv_stamp_at(t, pos);
 	const int64_t phase = target - (int64_t)stamp;
 	t->phase_ns = phase;
@@ -381,7 +379,7 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 							  uint32_t frames, uint32_t rate, uint32_t channels,
 							  uint64_t reserve_ns)
 {
-	struct vban_recv_decision d = {0, 0, 0, 0, 0, 0, 0, false};
+	struct vban_recv_decision d = {0, 0, 0, 0, 0, 0, 0};
 	if (frames == 0)
 		frames = 1;
 	if (rate == 0)
@@ -427,8 +425,6 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 			if (!vban_recv_update(t, at))
 				reason = VBAN_RECV_REASON_FIT;
 		}
-		if (reason == VBAN_RECV_REASON_NONE && end - t->last_fold_pos > (uint64_t)VBAN_RECV_STARVE_S * rate)
-			reason = VBAN_RECV_REASON_FIT;
 	}
 	/* the first second: a packet that arrived earlier against the line moves the line to it. The line
 	 * is still base + T(pos) there (no fit has moved it), so the candidate is the anchor this packet
@@ -442,54 +438,40 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 			t->base_stamp_ns = cand;
 	}
 	if (reason == VBAN_RECV_REASON_NONE) {
-		uint64_t stamp = vban_recv_stamp_at(t, pos);
-		bool shifted = false;
+		const uint64_t stamp = vban_recv_stamp_at(t, pos);
 		/* the hold (ROZHODNUTE 6345255813 item 1): nothing is emitted while the packet ends within the
 		 * first second; a slot is filled only once the previous packet was emitted */
 		const uint64_t window = (uint64_t)VBAN_RECV_ACQUIRE_S * rate;
 		const bool held = end <= window;
 		const bool emitting = t->next_pos > window;
-		if (!held && now_ns > stamp) {
+		const bool late = !held && now_ns > stamp;
+		if (late) {
 			d.late_ns = (int64_t)(now_ns - stamp);
 			t->late++;
-			if (t->fit_valid) {
-				/* one network event = one re-anchor: the line shifts once to the stamp this packet
-				 * would anchor, rebased at the first lost slot (silence on the new line), the fit
-				 * kept; the excess over the fit becomes the held shift */
-				const uint64_t len = vban_recv_samples_to_ns(frames, rate);
-				const uint64_t want = (now_ns > len ? now_ns - len : 0) + t->reserve_eff_ns;
-				const int64_t fitted = (int64_t)t->anchor_ns +
-						       vban_recv_round(t->fit_ybar + t->fit_b * ((double)pos - t->fit_xbar)) +
-						       (int64_t)t->reserve_eff_ns;
-				t->shift_ns = (int64_t)want - fitted;
-				const uint64_t span = vban_recv_samples_to_ns(pos - t->next_pos, rate);
-				t->base_stamp_ns = want - (uint64_t)((int64_t)span + vban_recv_scale_ppb(span, t->step_ppb));
-				t->base_pos = t->next_pos;
-				t->re_anchors++;
-				stamp = vban_recv_stamp_at(t, pos);
-				shifted = true;
-			} else {
+			/* no packet in time for VBAN_RECV_PERSIST_S of audio: a delay step, ONE full re-anchor */
+			if (end - t->last_intime_end > (uint64_t)VBAN_RECV_PERSIST_S * rate)
 				reason = VBAN_RECV_REASON_LATE;
-			}
 		}
 		if (reason == VBAN_RECV_REASON_NONE) {
-			if (shifted) {
-				d.event = VBAN_RECV_REANCHOR;
-				d.reason = VBAN_RECV_REASON_LATE;
-				d.shifted = true;
-			} else if (held) {
+			/* a late packet is LOST (item 2): its audio dropped, its slot silence on the unchanged line
+			 * together with the slots lost before it */
+			if (late)
+				d.event = VBAN_RECV_LATE;
+			else if (held)
 				d.event = VBAN_RECV_HOLD;
-			} else {
+			else
 				d.event = VBAN_RECV_PACKET;
-			}
 			d.stamp_ns = stamp;
 			d.lateness_ns = (int64_t)now_ns - (int64_t)stamp;
-			if (lost > 0 && emitting) {
-				d.silence_samples = lost_samples;
+			const uint64_t filled = lost_samples + (late ? (uint64_t)frames : 0);
+			if (filled > 0 && emitting) {
+				d.silence_samples = filled;
 				d.silence_pos = t->next_pos;
 				t->lost += lost;
-				t->silence_samples += lost_samples;
+				t->silence_samples += filled;
 			}
+			if (!late)
+				t->last_intime_end = end;
 			/* fold the packet into the fit unless it came late against the reference line */
 			const uint64_t y = now_ns - t->anchor_ns;
 			if ((double)y - vban_recv_reference(t, end) <= (double)(VBAN_RECV_OUTLIER_MS * VBAN_RECV_NS_PER_MS))

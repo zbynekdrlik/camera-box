@@ -11,7 +11,8 @@
 //!    clock offsets with burst jitter, losses, late packets exactly at and one ns past their stamp,
 //!    backwards and duplicate indexes, jumps of exactly two seconds and one packet more, an index
 //!    wrap, Receive Buffer and format changes, resets, packets on the outlier line and one ns either
-//!    side, a sender beyond the ±500 ppm clamp, a stale anchor beyond R and a starved fit.
+//!    side, a sender beyond the ±500 ppm clamp, a stale anchor beyond R, packets in time but off the
+//!    line, the held first second, late drops and a persistent delay step.
 //! 3. It requires the C decision and state after every packet to equal the Tier-0 authority
 //!    `src/vban_receive_timeline.rs` exactly, the doubles compared bit for bit.
 //!
@@ -379,7 +380,27 @@ fn delay_drop_script() -> Vec<Pkt> {
     b.pkts
 }
 
-/// Every packet after the anchor 20 ms late: within R, but an outlier, so the fit starves.
+/// A clean sender whose network delay steps up by 90 ms after 15 s and stays: one second of late
+/// drops, then ONE persistent-late re-anchor through the hold onto the new delay + R.
+fn delay_step_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    for k in 0..(25 * 48_000 / 256u64) {
+        let delay = if k * 256 >= 15 * 48_000 { 90 * MS } else { 0 };
+        b.send(Pkt {
+            now: 2_000_000_000 + samples_to_ns((k + 1) * 256, 48_000) + delay,
+            nu: k as u32,
+            frames: 256,
+            rate: 48_000,
+            channels: 2,
+            reserve_ns: 40 * MS,
+            reset: false,
+        });
+    }
+    b.pkts
+}
+
+/// Every packet after the anchor 20 ms late: in time (within R), but more than the outlier limit
+/// off the line, so nothing folds -- and nothing re-anchors (ROZHODNUTÉ 6345255813 item 2).
 fn starve_script() -> Vec<Pkt> {
     let mut b = Builder::new();
     for k in 0..800u64 {
@@ -453,6 +474,7 @@ fn scripts() -> Vec<Vec<Pkt>> {
         clean_script(-499.0, 30, 0, 40),
         clean_script(0.0, 16, 60 * MS, 40),
         delay_drop_script(),
+        delay_step_script(),
         starve_script(),
         wrap_script(),
         out_of_order_script(),
@@ -528,7 +550,7 @@ fn bits(x: f64) -> u64 {
 fn line(t: &Timeline, d: Decision) -> String {
     let b = &t.buckets[(t.last_k.rem_euclid(FIT_WINDOW_S as i64)) as usize];
     format!(
-        "{} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} | {} {} {} {} {} {} {} {} | {}",
+        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} | {} {} {} {} {} {} {} {} | {}",
         d.event as i32,
         d.reason as i32,
         d.silence_samples,
@@ -536,7 +558,6 @@ fn line(t: &Timeline, d: Decision) -> String {
         d.stamp_ns,
         d.lateness_ns,
         d.late_ns,
-        u8::from(d.shifted),
         u8::from(t.anchored),
         t.rate,
         t.channels,
@@ -550,7 +571,7 @@ fn line(t: &Timeline, d: Decision) -> String {
         t.base_pos,
         t.step_ppb,
         t.last_k,
-        t.last_fold_pos,
+        t.last_intime_end,
         u8::from(t.fit_valid),
         t.fit_ppb,
         bits(t.fit_b),
@@ -563,7 +584,6 @@ fn line(t: &Timeline, d: Decision) -> String {
         t.late,
         t.re_anchors,
         t.stale,
-        t.shift_ns,
         b.k,
         b.n,
         b.x0,
@@ -647,17 +667,17 @@ static uint64_t bits(double x)
 static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d)
 {
 	const struct vban_recv_bucket *b = &t->buckets[(size_t)(((t->last_k % VBAN_RECV_FIT_WINDOW_S) + VBAN_RECV_FIT_WINDOW_S) % VBAN_RECV_FIT_WINDOW_S)];
-	printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " %d | ", d.event, d.reason,
-	       d.silence_samples, d.silence_pos, d.stamp_ns, d.lateness_ns, d.late_ns, d.shifted ? 1 : 0);
+	printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " | ", d.event, d.reason,
+	       d.silence_samples, d.silence_pos, d.stamp_ns, d.lateness_ns, d.late_ns);
 	printf("%d %" PRIu32 " %" PRIu32 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu32 " %" PRIu64 " %" PRIu64 " %" PRIu64
 	       " %" PRId64 " %" PRId64 " %" PRIu64 " %d %" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64
 	       " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | ",
 	       t->anchored ? 1 : 0, t->rate, t->channels, t->reserve_ns, t->reserve_eff_ns, t->anchor_ns, t->anchor_end,
 	       t->last_nu,
-	       t->next_pos, t->base_stamp_ns, t->base_pos, t->step_ppb, t->last_k, t->last_fold_pos,
+	       t->next_pos, t->base_stamp_ns, t->base_pos, t->step_ppb, t->last_k, t->last_intime_end,
 	       t->fit_valid ? 1 : 0, t->fit_ppb, bits(t->fit_b), bits(t->fit_xbar), bits(t->fit_ybar), t->phase_ns,
 	       t->received, t->lost, t->silence_samples, t->late, t->re_anchors);
-	printf("%" PRIu64 " %" PRId64 " | ", t->stale, t->shift_ns);
+	printf("%" PRIu64 " | ", t->stale);
 	printf("%" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | %" PRIu64 "\n",
 	       b->k, b->n, b->x0, b->y0, bits(b->su), bits(b->sv), bits(b->suu), bits(b->suv),
 	       vban_recv_stamp_at(t, t->next_pos + 1000));
@@ -786,7 +806,7 @@ fn the_scripts_reach_every_boundary_1439() {
     let names = [
         "anchors",
         "losses (silence)",
-        "late re-anchors",
+        "persistent-late re-anchors (no packet in time for a second)",
         "packets exactly on their stamp",
         "backward re-anchors",
         "jump re-anchors",
@@ -794,7 +814,7 @@ fn the_scripts_reach_every_boundary_1439() {
         "config re-anchors",
         "fit re-anchors: rate beyond the clamp",
         "fit re-anchors: phase beyond R",
-        "fit re-anchors: starved",
+        "late drops one packet short of a second (still a drop)",
         "fits becoming valid",
         "stamp step changes",
         "outlier exclusions",
@@ -808,8 +828,8 @@ fn the_scripts_reach_every_boundary_1439() {
         "earlier arrivals past the first second (the line kept)",
         "phase term acting outside the dead band",
         "rate-only step changes inside the dead band",
-        "late shifts with a valid fit (the fit kept)",
-        "late shifts with lost slots before them",
+        "late drops (their slot silence)",
+        "late drops with lost slots before them",
         "anchors with R lifted to one packet + 10 ms",
         "anchors with R above that floor",
         "held packets (an anchor's first second, never output)",
@@ -826,6 +846,7 @@ fn the_scripts_reach_every_boundary_1439() {
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
             let (base_before, base_pos_before, next_before) =
                 (t.base_stamp_ns, t.base_pos, t.next_pos);
+            let intime_before = t.last_intime_end;
             let folds = t.buckets.iter().map(|b| b.n).sum::<u64>();
             // which fit check would fail: the model's update run on a copy, exactly when the packet
             // takes the timeline into a new bucket (the only time the real decision refits)
@@ -868,9 +889,12 @@ fn the_scripts_reach_every_boundary_1439() {
                     hits[19] += 1;
                 }
                 (Event::Anchor, _) => hits[0] += 1,
-                (Event::Reanchor, Reason::Late) if d.shifted => {
-                    hits[24] += 1;
-                    hits[25] += usize::from(d.silence_samples > 0);
+                (Event::Late, _) => {
+                    hits[24] += usize::from(d.silence_samples > 0);
+                    hits[25] += usize::from(same && delta > 1 && d.silence_samples > 0);
+                    hits[10] += usize::from(
+                        same && end - intime_before + u64::from(p.frames) > u64::from(p.rate),
+                    );
                 }
                 (Event::Reanchor, Reason::Late) => hits[2] += 1,
                 (Event::Reanchor, Reason::Backward) => hits[4] += 1,
@@ -880,10 +904,12 @@ fn the_scripts_reach_every_boundary_1439() {
                 (Event::Reanchor, Reason::Fit) => {
                     if clamp_fail {
                         hits[8] += 1;
-                    } else if phase_fail {
-                        hits[9] += 1;
                     } else {
-                        hits[10] += 1;
+                        assert!(
+                            phase_fail,
+                            "a fit re-anchor is the rate clamp or the R hold: {d:?}"
+                        );
+                        hits[9] += 1;
                     }
                 }
                 _ => {}
@@ -923,7 +949,7 @@ fn the_scripts_reach_every_boundary_1439() {
                     && next_before <= u64::from(p.rate)
                     && end > u64::from(p.rate),
             );
-            if d.event == Event::Anchor || (d.event == Event::Reanchor && !d.shifted) {
+            if d.event == Event::Anchor || d.event == Event::Reanchor {
                 hits[26] += usize::from(t.reserve_eff_ns != t.reserve_ns);
                 hits[27] += usize::from(t.reserve_eff_ns == t.reserve_ns);
             }
