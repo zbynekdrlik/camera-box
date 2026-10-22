@@ -74,6 +74,7 @@ set -euo pipefail
 #   --run-dir D          [VBAN_BENCH_RUN_DIR, ~/.camera-box/vban-bench/<UTC stamp>]
 # Other env: STRIH_HOST / STREAM_HOST (default from scripts/lib/obs-fleet.sh), PAINTER_IP (cam2),
 #   VBAN_BENCH_POLL_S (20), VBAN_BENCH_OBS_TIMEOUT_S (30), VBAN_BENCH_SSH_TIMEOUT_S (60),
+#   VBAN_BENCH_MODE_RETRY_S (10, the pause before an unreadable TEST-mode read is retried once),
 #   AV_SOAK_BROADCAST_READS (3) / AV_SOAK_BROADCAST_RETRY_S (20) (the soak's retried idle proof),
 #   RECORDINGS_FREE_MIN_GB (50), WIN_BUNDLE_STATE_PORT (8899, strih-snv's record-dir-stats).
 #   Test seams: VBAN_BENCH_OBS_DIR (obs_phase2.py + vban_bench_obs.py), VBAN_BENCH_EMULATOR,
@@ -164,6 +165,7 @@ OBS_TIMEOUT_S="${VBAN_BENCH_OBS_TIMEOUT_S:-30}"
 SSH_TIMEOUT_S="${VBAN_BENCH_SSH_TIMEOUT_S:-60}"
 BROADCAST_READS="${AV_SOAK_BROADCAST_READS:-3}"
 BROADCAST_RETRY_S="${AV_SOAK_BROADCAST_RETRY_S:-20}"
+MODE_RETRY_S="${VBAN_BENCH_MODE_RETRY_S:-10}"
 RECORDINGS_FREE_MIN_GB="${RECORDINGS_FREE_MIN_GB:-50}"
 BUNDLE_STATE_PORT="${WIN_BUNDLE_STATE_PORT:-8899}"
 LEAD_S=3
@@ -203,7 +205,7 @@ for _x in "${EXTRA[@]}"; do
     port | stream_name | ip_from) die 3 "--extra-setting may not set the bench's own '${_x%%=*}' (use --port / --stream-name)" ;;
   esac
 done
-for _n in "$POLL_S" "$OBS_TIMEOUT_S" "$SSH_TIMEOUT_S" "$BROADCAST_READS" "$BROADCAST_RETRY_S" "$RECORDINGS_FREE_MIN_GB"; do
+for _n in "$POLL_S" "$OBS_TIMEOUT_S" "$SSH_TIMEOUT_S" "$BROADCAST_READS" "$BROADCAST_RETRY_S" "$RECORDINGS_FREE_MIN_GB" "$MODE_RETRY_S"; do
   is_uint "$_n" || die 3 "the VBAN_BENCH_* / AV_SOAK_* timings must be integers (got '$_n')"
 done
 [[ "$EMU_LATE_BOUND_MS" =~ ^[0123456789]+(\.[0123456789]+)?$ ]] || die 3 "--emulator-late-bound-ms must be a number"
@@ -325,10 +327,14 @@ if [ "$MODE" = cleanup ]; then
   # an idle rig, the stop verified by its status read; the lease released only when nothing is left
   _keep=0
   [ "$rc" = 0 ] || _keep=1
+  log "cleanup: the recording check below is the soak's shared leftovers path (its lines read [av-soak] / 'the soak')"
   _lrc=0
   av_soak_stop_leftovers "$RUN_DIR" "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$OBS_TIMEOUT_S" "$RIG_STATE" \
     'vban-receiver-bench\.sh' "$_keep" || _lrc=$?
   [ "$_lrc" = 0 ] || rc="$_lrc"
+  if [ "$_keep" = 1 ]; then
+    log "cleanup: the rig lease stays held because the TEST INPUT is still on strih-snv (its teardown failed) -- rerun --cleanup once OBS answers"
+  fi
   exit "$rc"
 fi
 
@@ -518,6 +524,11 @@ for _p in $PROFILES; do
   keepalive
   if [ "$_i" -gt 1 ]; then
     _mode="$(test_mode_now)"
+    if [ "$_mode" = UNKNOWN ]; then  # an ssh / systemctl hiccup is a transient: read once more
+      log "the cam2 painter read is unreadable -- reading it again in ${MODE_RETRY_S} s"
+      sleep "$MODE_RETRY_S"
+      _mode="$(test_mode_now)"
+    fi
     if [ "$_mode" != TEST ]; then log "the rig left TEST mode (cam2 painter reads $_mode) -- ending before profile $_p"; break; fi
     if ! free_space_ok; then log "ending before profile $_p: the record volume is low on space"; break; fi
   fi

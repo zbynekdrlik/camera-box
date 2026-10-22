@@ -113,8 +113,10 @@ def grade(r, expected_lost=None, expect_ppm=None, ppm_bound=PPM_BOUND, level_bou
         if last.get("basis") != "stamp":
             reasons.append("asrc basis=%s, not stamp: the test input is not a directly stamped source"
                            % last.get("basis"))
-        settled = r["asrc"][1:] or r["asrc"]
-        for i, a in enumerate(settled):
+        settled = r["asrc"][1:]
+        if not settled:
+            notes.append("only the first (settle) asrc line: level_avg is not graded")
+        for a in settled:
             if "level_avg" not in a or "target" not in a:
                 reasons.append("an asrc line carries no level_avg= / target= value")
                 break

@@ -231,7 +231,7 @@ def rig(tmp_path):
         "RIG_LEASE_DIR": str(tmp_path / "lease"),
         "STRIH_HOST": "192.0.2.10", "STREAM_HOST": "192.0.2.11", "PAINTER_IP": "192.0.2.12",
         "STRIH_PLATFORM": "linux", "CAM_PW": CAM_PW, "STRIH_USER": "newlevel", "STRIH_PW": STRIH_PW,
-        "AV_SOAK_BROADCAST_RETRY_S": "0", "VBAN_BENCH_POLL_S": "1",
+        "AV_SOAK_BROADCAST_RETRY_S": "0", "VBAN_BENCH_POLL_S": "1", "VBAN_BENCH_MODE_RETRY_S": "0",
     })
     (tmp_path / "home").mkdir()
 
@@ -463,6 +463,13 @@ def test_a_rig_that_left_test_mode_ends_the_run_incomplete(rig):
     assert "left TEST mode" in out and "INCOMPLETE (1 of 2 profiles ran)" in out
     assert rig.calls().count("vban_bench_obs setup") == 1
     assert not (rig.fake_dir / "input").exists() and not rig.lease.exists()
+
+
+def test_one_unreadable_painter_read_is_retried_not_the_end_of_the_run(rig):
+    p = _two_profiles(rig, FAKE_MODE="TEST,NOANSWER,TEST")   # the reads, a hiccup, the retry
+    out, _ = p.communicate(timeout=180)
+    assert p.returncode == 0, out
+    assert "reading it again" in out and rig.calls().count("vban_bench_obs setup") == 2
 
 
 def test_the_next_profile_needs_a_proven_idle_rig_before_its_setup(rig):

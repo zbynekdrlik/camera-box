@@ -351,6 +351,27 @@ def test_teardown_puts_the_preview_back_after_a_setup_that_died_after_the_reprog
     assert obs.preview == "Cam 3" and NAME not in obs.inputs
 
 
+def test_teardown_never_undoes_a_preview_the_operator_staged_after_a_failed_setup(tmp_path):
+    obs = FakeObs()
+    real = obs.rpc
+    clock = [0.0]
+
+    def never_active(rtype, rdata=None, ignore_err=False):
+        if rtype == "GetSourceActive":
+            return {"videoActive": False}
+        return real(rtype, rdata, ignore_err)
+
+    def sleep(s):
+        clock[0] += s
+    with pytest.raises(vo.BenchError):
+        vo.setup(never_active, str(tmp_path / "state.json"), NAME, 6995, "bench1460", 6,
+                 sleep=sleep, monotonic=lambda: clock[0])
+    obs.preview = "Cam 5"                               # staged by the cutter later (a show)
+    res = vo.teardown(obs.rpc, json.loads((tmp_path / "state.json").read_text()))
+    assert res["ok"], res
+    assert obs.preview == "Cam 5" and NAME not in obs.inputs
+
+
 def test_teardown_after_a_completed_setup_never_touches_the_preview(tmp_path):
     obs = FakeObs()
     st = _setup(obs, tmp_path)
@@ -457,6 +478,8 @@ def test_a_basis_other_than_stamp_fails():
 def test_level_avg_off_target_fails_but_the_first_line_is_the_settle():
     off = ASRC_OK.replace("level_avg=0.10ms", "level_avg=7.50ms")
     assert vl.grade(vl.rows([off, ASRC_OK], NAME))["verdict"] == "PASS"
+    only = vl.grade(vl.rows([off], NAME))
+    assert only["verdict"] == "PASS" and any("not graded" in x for x in only["notes"])
     g = vl.grade(vl.rows([ASRC_OK, off], NAME))
     assert any("level_avg=7.50" in x for x in g["reasons"])
 

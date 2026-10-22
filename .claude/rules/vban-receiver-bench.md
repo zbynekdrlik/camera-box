@@ -57,7 +57,8 @@ designs 6338127636 and 6338457001.
   rig (the settled broadcast read, `idle`), then the shared issue-1271 rig-busy guard
   (`stray_session_check_assert`, run in a subshell; it fails open on a fully unreadable rig, which
   the idle read refuses). Between, every poll checks the broadcast read: a live broadcast aborts.
-- **Before every profile after the first** TEST mode and the free space are read again. A rig that
+- **Before every profile after the first** TEST mode and the free space are read again (an
+  unreadable painter read is retried once after `VBAN_BENCH_MODE_RETRY_S`, 10 s). A rig that
   left TEST mode (the owner going to production), or a low volume, ends the run: full cleanup, the
   verdict `INCOMPLETE (N of M profiles ran)`, exit 1. A STOP file does the same. Only a run where
   every requested profile ran and passed is exit 0.
@@ -75,7 +76,9 @@ designs 6338127636 and 6338457001.
   non-program track is safe to remove. `teardown` removes only an input whose kind, port and stream
   name are the bench's, and restores RecTracks only while it still holds the value setup wrote.
   After a setup that died between its re-program and its own preview restore, teardown puts the
-  operator's preview back (after a completed setup the preview is never touched).
+  operator's preview back, but only while the preview still shows OBS's swap (the re-programmed
+  scene). A scene staged since (maybe hours later, during a show, when `--cleanup` runs) is never
+  touched, and after a completed setup the preview is never touched either.
 - **An earlier run's input still there while RecTracks already holds the track is refused**: that
   run's original RecTracks is unknown, so it is never adopted as "the original". Finish that run
   with `--cleanup <its run dir>`, or remove the input and restore RecTracks by hand.

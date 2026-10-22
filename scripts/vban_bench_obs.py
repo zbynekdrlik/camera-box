@@ -29,7 +29,8 @@ production-scene guard); this file owns only what the bench does with it:
   teardown   removes the input (only one whose kind, port and stream name are the bench's),
              restores RecTracks (only while it still holds the value setup wrote) and, after a setup
              that failed between the re-program and its own preview restore, the operator's preview
-             scene. Idempotent.
+             scene -- only while the preview still shows OBS's swap (a scene staged since is never
+             touched). Idempotent.
 
 The pilot this input receives must never be heard: track 1 (OBS mix 0: the program, the NDI
 output, the HDMI output audio) and the stream track are refused, and monitoring is off.
@@ -316,15 +317,17 @@ def teardown(rpc, state):
     steps = state.get("steps") or []
     prev = state.get("preview_scene")
     if "reprogram" in steps and "active" not in steps and state.get("studio_mode") and prev:
-        # setup died between its re-program (OBS's swap may have moved the preview) and its own
-        # preview restore: put the operator's preview back (after a completed setup the preview is
-        # the operator's again and never touched)
+        # setup died between its re-program and its own preview restore. Undo only OBS's swap (the
+        # re-programmed scene moved into the preview); a preview the operator staged since -- maybe
+        # hours later, during a show, when --cleanup runs -- is theirs and never touched.
         cur = (rpc("GetCurrentPreviewScene", ignore_err=True) or {}).get("currentPreviewSceneName")
-        if cur != prev:
+        if cur != prev and cur == state.get("program_scene"):
             rpc("SetCurrentPreviewScene", {"sceneName": prev}, ignore_err=True)
             back = (rpc("GetCurrentPreviewScene", ignore_err=True) or {}).get("currentPreviewSceneName")
             (actions if back == prev else left).append(
                 "preview restored to %r" % prev if back == prev else "the preview reads %r, not %r" % (back, prev))
+        elif cur != prev:
+            actions.append("the preview reads %r, staged since the setup: the operator's, not touched" % cur)
     return {"ok": not left, "actions": actions, "left": left}
 
 
