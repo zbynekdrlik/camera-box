@@ -227,12 +227,13 @@ void vban_udp_release(vban_udp_t *dev)
 	(void)dev;
 }
 
-/* Whether the source had already asked for a new timeline when it let a new port / stream / host in:
- * from that call on, the receive thread may deliver the new source's packets. */
+/* Whether the source had already asked for a new timeline, and which Receive Buffer it holds, when it
+ * let a new port / stream / host in: from that call on, the receive thread may deliver packets. */
 static void udp_report(const char *op, void *data)
 {
 	const struct vban_src_s *s = data;
-	printf("udp %s reset=%d\n", op, os_atomic_load_bool(&s->timeline_reset) ? 1 : 0);
+	printf("udp %s reset=%d r=%ld\n", op, os_atomic_load_bool(&s->timeline_reset) ? 1 : 0,
+	       os_atomic_load_long(&s->receive_buffer_ms));
 }
 
 void vban_udp_add_callback(vban_udp_t *dev, vban_udp_cb_t cb, void *data)
@@ -696,9 +697,8 @@ fn a_reconfiguration_asks_for_a_new_timeline_before_the_new_source_can_deliver_1
             .iter()
             .find(|l| l.starts_with(op))
             .unwrap_or_else(|| panic!("{change}: no `{op}` call ({lines:?})"));
-        assert_eq!(
-            *line,
-            format!("{op} reset=1"),
+        assert!(
+            line.starts_with(&format!("{op} reset=1 ")),
             "issue 1439: after `{change}` the source let the new sender in before it asked for a \
              new timeline:\n{stdout}"
         );
@@ -713,4 +713,26 @@ fn a_reconfiguration_asks_for_a_new_timeline_before_the_new_source_can_deliver_1
         !log.contains("obs-vban receive re-anchor:"),
         "issue 1439: a reconfiguration is a new timeline, never a counted re-anchor:\n{log}"
     );
+}
+
+/// Review round 2: on create, `update()` registered the callback (`update_port`) before it read the
+/// Receive Buffer, so a packet in that window anchored with R = 0 and the next one logged a counted
+/// `reason=config` re-anchor. The source must hold its R before any sender can reach it.
+#[test]
+fn the_receive_buffer_is_in_place_before_the_first_sender_can_deliver_1439() {
+    let (stdout, _log) = run_tokens(&[], VBAN_BITFMT_16_INT);
+    let first = stdout
+        .lines()
+        .find(|l| l.starts_with("udp "))
+        .unwrap_or_else(|| panic!("no UDP registration on create:\n{stdout}"));
+    assert!(
+        first.ends_with(" r=40"),
+        "issue 1439: the source let a sender in before it held its Receive Buffer: `{first}`"
+    );
+    for line in stdout.lines().filter(|l| l.starts_with("udp ")) {
+        assert!(
+            line.ends_with(" r=40"),
+            "issue 1439: a UDP registration without the Receive Buffer in place: `{line}`"
+        );
+    }
 }
