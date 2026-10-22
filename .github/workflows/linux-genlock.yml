@@ -399,9 +399,9 @@ jobs:
         working-directory: vendor/distroav
         run: cmake --build --preset ubuntu-ci-x86_64
 
-      # issue 1439: the Linux OBS boxes take program audio from the hub / the console as a VBAN
-      # stream into the vendored obs-vban SOURCE (receive timeline + fixed reserve, stamped for the
-      # genlock ASRC), never through PipeWire. Built against the genlocked SDK like DistroAV; the
+      # issue 1439: a Linux stream box takes the console's VBAN program stream straight into the
+      # vendored obs-vban SOURCE (receive timeline + fixed reserve, stamped for the genlock ASRC):
+      # no intercom hub, never PipeWire. Built against the genlocked SDK like DistroAV; the
       # imag-parity bundle consumes no VBAN and stays without it.
       - name: Configure obs-vban against the genlocked OBS SDK (issue 1439)
         working-directory: vendor/obs-vban

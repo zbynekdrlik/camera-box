@@ -105,6 +105,12 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   sender restart), a jump of more than 2 s of audio, another rate/channel count/R, or a fit that cannot
   hold (rate beyond ±500 ppm, stamps more than R off `fit + R`, nothing folded for 3 s).
 
+**Every Windows OBS gets it too.** Both Windows genlock builds compile this `vban-source.c`, and a
+FULL bundle deploy replaces `obs-vban.dll` on every Windows OBS box (the pacing section's note). A
+Windows VBAN SOURCE then stamps on the timeline: R (40 ms by default) more latency, a lost packet is
+silence, the status line is logged. Before the first FULL deploy that carries it, read each Windows
+box's scene collections for `net.nagater.obs-vban.source` (read-only); no box was read for this.
+
 Log lines:
 
 ```

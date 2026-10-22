@@ -105,6 +105,9 @@ is the window's largest arrival - stamp of an on-time packet: about -R + jitter 
   `strih_program_vban_grade` (the kind, the bind, port + stream vs the facts, `received` advancing over
   12 s, R vs the fact as a NOTE, loss counters as a NOTE); the hub-only rows of item 9 (the program
   rx, the hub's HDMI leg, the MiniFuse talkback) run only in its hub branch.
+- **Windows (review round 1):** both Windows genlock builds compile the same `vban-source.c`, so a
+  FULL deploy changes every Windows OBS's VBAN SOURCE too (R more latency, loss = silence). Read
+  each Windows box's collections for `net.nagater.obs-vban.source` before that deploy (not read yet).
 - **Rollout (supervisor):** the strih bundle with obs-vban (linux-genlock.yml strih variant stages
   `obs-vban.so`), then setup-strih on stream-pp with OBS stopped (the genlock deploy stops it), then
   start OBS: the seed switches `Zvuk z mixu`. A setup re-run with OBS RUNNING removes the hub under a
