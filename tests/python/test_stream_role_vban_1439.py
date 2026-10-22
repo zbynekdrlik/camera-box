@@ -644,6 +644,24 @@ def test_no_status_line_fails_naming_the_port(tmp_path):
                and "'stream'" in r for r in rows), rows
 
 
+ANCHORED = ("12:00:00.000: [obs-vban] obs-vban receive anchored: source 'Zvuk z mixu' frame=10 rate=48000 "
+            "ch=2 receive_buffer_ms=40\n")
+
+
+def test_a_source_anchored_within_its_first_status_period_is_waited_for(tmp_path):
+    # review round 2: the status line comes 10 s after the first packet, so for the first 10 s after
+    # an OBS start a sending console read "no VBAN packet since OBS started"; the anchored line proves
+    # packets arrive, and the grader waits one period for the status line
+    rows = _grade(tmp_path, ANCHORED, append=_line(100))
+    assert not _rows(rows, "FAIL"), rows
+    assert any("packets received since OBS started" in r or "receiving stream" in r for r in rows), rows
+
+
+def test_an_anchored_source_that_never_logs_its_status_still_fails(tmp_path):
+    rows = _grade(tmp_path, ANCHORED)
+    assert any(r.startswith("FAIL") and "no obs-vban receive status line" in r for r in rows), rows
+
+
 def test_a_bind_failure_fails_naming_the_hub(tmp_path):
     rows = _grade(tmp_path, "12:00:00.000: [obs-vban] Failed to bind port 6980\n")
     assert any(r.startswith("FAIL") and "could not bind UDP 6980" in r and "step 13" in r for r in rows), rows
