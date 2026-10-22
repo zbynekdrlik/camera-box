@@ -23,14 +23,17 @@
 //! second), and every later packet must stay within ±1 ms of it -- both the STAMP latency (the
 //! stamp against the true production instant) and the latency libobs REALIZES ([`Obs`], at 0 ms OBS
 //! buffering: 1024-frame mix windows on our clock, an underrun moves the source's label and keeps
-//! its data, a chunk within 70 ms of the previous one's end is appended no earlier than that label,
-//! a chunk further off is placed at its stamp, the stamp-basis ASRC pulls the error out at 300 ppm).
+//! its partial remainder, a chunk within 70 ms of the previous one's end is appended behind it, a
+//! chunk further off is placed at its stamp, a chunk over 2 s off at its arrival, a source stopped
+//! for about three windows is cleared and placed at its stamp, the stamp-basis ASRC pulls the error
+//! out at 300 ppm).
 //! The replay emits what the source emits: a PACKET (with the silence of the slots lost before it)
 //! and a LATE packet's silence; the anchor, a re-anchor and their held first second emit nothing.
 //!
-//! Known limit (review round 4, pinned by the hiccup test): a late packet's silence reaches libobs
-//! after its window was mixed, so the realized latency steps up by about the lateness and walks back;
-//! a starve (no packet in time for a second: an outage, a pause, a delay step) re-anchors instead.
+//! Known limit (review rounds 4-6, pinned by the hiccup and the loss tests): a late packet's silence
+//! reaches libobs after its window was mixed, so the realized latency steps up by a whole number of
+//! mix windows and walks back; a starve (no packet in time for a second: an outage, a pause, a
+//! delay step) re-anchors instead.
 //!
 //! Known limit: before the fit (10 s) the line runs at the nominal rate and then slews to the fit at
 //! 5 ppm per bucket, so the latency moves about the sender's ppm x 20 s: ±1 ms holds to about
@@ -129,17 +132,22 @@ fn schedule_from(seed: u64, ppm: f64, n: u64, loss: f64, first_gap_ms: f64) -> V
 ///   its arrival − its stamp, so it is PLACED at the instant it arrived, whatever its stamp; anything
 ///   between is PLACED at its stamp;
 /// - the mixer pulls one `AUDIO_OUTPUT_FRAMES` (1024-frame) window at a time on our clock; a source
-///   whose data does not cover the window UNDERRUNS: `discard_audio` moves its label to the window's
-///   end and KEEPS the data, so whatever comes after plays that much later;
+///   whose data does not cover the window UNDERRUNS: that window is not mixed from it
+///   (`audio_buffer_insufficient`), `discard_audio` moves its label to the window's end and KEEPS
+///   the partial remainder, which then plays from the label on, so whatever comes after plays a
+///   whole number of windows later;
 /// - review round 6, `discard_if_stopped` (`obs-audio.c`): a partial remainder that gets no new
 ///   data for two more windows after the first one it cannot cover is CLEARED and the label reset
 ///   (`audio_ts = 0`), so the next chunk is PLACED at its stamp even when it would append (`if
 ///   (push_back && source->audio_ts)`). A placement behind the mix window is dropped up to the
 ///   window by the frozen-mix guard (an encoder runs: the production case, issue 1425), so the
-///   stream plays from its stamps on. Not modelled: with no encoder running libobs grows the whole
-///   mix's audio buffering instead; the clear one window earlier when an earlier episode left
-///   `pending_stop` set; a buffering above 0 ms (a launch can draw 64 or 85 ms, issue 1425), under
-///   which a fill that late does not underrun at all;
+///   stream plays from its stamps on. Not modelled: with no encoder running (or inside the 30 s
+///   launch settle window) the cleared fill placed in the past grows the whole mix's audio
+///   buffering by about the outage instead, for good (`add_audio_buffering`); the clear one window
+///   earlier when an earlier episode left `pending_stop` set; no clear at all when the data ended
+///   exactly on a window boundary (`discard_if_stopped` returns early on an empty buffer, about 1
+///   in 1024); a buffering above 0 ms (a launch can draw 64 or 85 ms, issue 1425), under which a
+///   fill that late does not underrun at all;
 /// - the stamp-basis ASRC pulls the placement error out at most 300 ppm (`ASRC_MAX_PPM`) of the audio.
 #[derive(Debug, Default)]
 struct Obs {
@@ -168,11 +176,19 @@ impl Obs {
             _ => stamp,
         };
         // the first window end the buffered data cannot reach, and the clear two windows later
-        let first_short = ((self.next_play / OBS_TICK_NS).floor() + 1.0) * OBS_TICK_NS;
+        let window_start = (self.next_play / OBS_TICK_NS).floor() * OBS_TICK_NS;
+        let first_short = window_start + OBS_TICK_NS;
         let cleared = arrival > first_short + 2.0 * OBS_TICK_NS;
+        // an append after an underrun: the window the data could not fill was never mixed, its
+        // partial remainder is KEPT and plays from the label on, and the chunk goes behind it, so
+        // the step is a whole number of windows (review round 6 re-review)
+        let behind_remainder = label + (self.next_play - window_start);
         let (start, adjust) = match self.next_sys {
             Some(n) if (ts - n).abs() < 70.0 * MS && cleared => (ts, 0.0),
-            Some(n) if (ts - n).abs() < 70.0 * MS => (self.next_play.max(label), 0.0),
+            Some(n) if (ts - n).abs() < 70.0 * MS && self.next_play <= label => {
+                (behind_remainder, 0.0)
+            }
+            Some(n) if (ts - n).abs() < 70.0 * MS => (self.next_play, 0.0),
             Some(n) if (ts - n).abs() > OBS_MAX_TS_VAR_NS => (arrival, arrival - stamp),
             _ => (ts, 0.0),
         };
@@ -467,9 +483,10 @@ fn k_at(sched: &[Sent], t_ns: u64) -> u64 {
 /// Known limit (review round 4): at 0 ms OBS buffering the late slots' silence reaches libobs
 /// after their windows were mixed, so libobs underruns and appends it behind its label -- the
 /// latency OBS REALIZES steps up by about the lateness and the stamp-basis ASRC walks it back at
-/// <= 300 ppm. Phase-dependent (review round 6): a burst that arrives about three mix windows after
-/// the data ran out finds the source cleared and is placed at its stamps instead (no step). Pinned
-/// here so a cure (a deadline timer) shows; it is a question for the main.
+/// <= 300 ppm: two mix windows (42.5-43.2 ms) on these seeds. Phase-dependent (review round 6): a
+/// burst that arrives about three mix windows after the data ran out finds the source cleared and is
+/// placed at its stamps instead (no step). Pinned here so a cure (a deadline timer) shows; it is a
+/// question for the main.
 #[test]
 fn a_90_ms_hiccup_is_late_drops_and_zero_re_anchors_1439() {
     for (ppm, seed) in [(0.0, 1u64), (30.0, 2), (-30.0, 3)] {
@@ -651,19 +668,24 @@ fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_143
 /// Known limit (review rounds 5 + 6), the same late fill as the hiccup's, for a plain LOSS: an
 /// outage shorter than the starve is filled when the next packet arrives, on the unchanged line. A
 /// loss inside the margin (R − one packet, ~35 ms at R 40) is filled in time. A little longer, the
-/// source has underrun when the fill arrives and libobs APPENDS it behind its label: the realized
-/// latency steps up (7.5 ms for a 40-50 ms loss, 28.8 ms for 60-80 ms in the bench, quantized by
-/// the mix windows and phase-dependent) and the stamp-basis ASRC walks it back at <= 300 ppm. Longer
+/// source has underrun when the fill arrives and libobs APPENDS it behind the kept remainder: the
+/// realized latency steps up by a whole number of 21.33 ms mix windows (one for a 40-50 ms loss, two
+/// for 60-80 ms in the bench, phase-dependent) and the stamp-basis ASRC walks it back at <= 300 ppm
+/// (~71 s / ~142 s). Longer
 /// still (about three mix windows past the data's end) libobs has CLEARED the source
 /// (`discard_if_stopped`): the fill is placed at its stamp and the frozen-mix guard drops what is
 /// behind the window, so the stream plays from its stamps again (500 / 900 ms: held). The stamps
 /// never move and nothing re-anchors. Pinned so a cure (a deadline timer) shows; a question for
-/// the main. The model's assumptions are on [`Obs`].
+/// the main. The model's assumptions are on [`Obs`] (with no encoder running the 500 / 900 ms loss
+/// grows the whole mix's buffering instead -- not modelled).
 #[test]
 fn known_limit_a_loss_just_past_the_margin_steps_the_realized_latency_1439() {
-    for (ms, seed, step_ms) in [
-        (60u64, 1u64, Some(5.0..45.0)),
-        (60, 2, Some(5.0..45.0)),
+    let window_ms = OBS_TICK_NS / MS;
+    // (loss, seed, the step in whole mix windows; None = held)
+    for (ms, seed, windows) in [
+        (45u64, 1u64, Some(1.0)),
+        (60, 1, Some(2.0)),
+        (60, 2, Some(2.0)),
         (500, 3, None),
         (900, 4, None),
     ] {
@@ -683,9 +705,9 @@ fn known_limit_a_loss_just_past_the_margin_steps_the_realized_latency_1439() {
             dl_before <= 1.0 * MS && dr_before <= 1.0 * MS && dl <= 1.0 * MS,
             "held before it, the stamps never move: {tag}"
         );
-        match step_ms {
-            Some(range) => assert!(
-                range.contains(&(dr / MS)),
+        match windows {
+            Some(k) => assert!(
+                (dr / MS - k * window_ms).abs() <= 1.5,
                 "the known limit moved (a cure would bring it under 1 ms): {tag}"
             ),
             None => assert!(
