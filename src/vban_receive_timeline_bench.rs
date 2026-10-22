@@ -265,6 +265,54 @@ fn a_first_packet_at_the_end_of_a_25_ms_gap_never_walks_the_latency_1439() {
     }
 }
 
+/// ROZHODNUTÉ 6343922049 (2): one network event = one re-anchor. A 90 ms hiccup two minutes in
+/// (everything sent in it arrives together at its end, more than R late) shifts the line once; the
+/// next fit does not re-anchor again, nothing else in the 10 min is late, and the shifted latency is
+/// held to ±1 ms for the rest of the run.
+#[test]
+fn one_network_hiccup_is_one_re_anchor_1439() {
+    for (ppm, seed) in [(0.0, 1u64), (30.0, 2), (-30.0, 3)] {
+        let mut sched = schedule(seed, ppm, TEN_MIN_PACKETS, 0.0);
+        let h0 = S0 + 120_000_000_000;
+        let h1 = h0 + 90_000_000;
+        for s in sched.iter_mut() {
+            if let Some(a) = s.arrival_ns.as_mut() {
+                if (h0..h1).contains(a) {
+                    *a = h1 + s.k % 1000;
+                }
+            }
+        }
+        let mut t = Timeline::new();
+        let mut shift_k = None;
+        let (mut held, mut dev_max) = (f64::NAN, 0.0f64);
+        for s in &sched {
+            let a = s.arrival_ns.unwrap();
+            let d = t.packet(a, s.k as u32, F, 48_000, 2, 40 * NS_PER_MS);
+            if d.event == Event::Reanchor && shift_k.is_none() {
+                shift_k = Some(s.k);
+            }
+            let lat = d.stamp_ns as f64 - s.first_sample_ns;
+            if shift_k.is_some() && d.event == Event::Packet {
+                if held.is_nan() {
+                    held = lat;
+                }
+                dev_max = dev_max.max((lat - held).abs());
+            }
+        }
+        let tag = format!(
+            "ppm {ppm} seed {seed}: late={} re_anchors={} shift at packet {shift_k:?}, held latency \
+             {:.3} ms, moved {:.3} ms after it",
+            t.late,
+            t.re_anchors,
+            held / MS,
+            dev_max / MS
+        );
+        println!("{tag}");
+        assert_eq!((t.late, t.re_anchors), (1, 1), "{tag}");
+        assert!(dev_max <= 1.0 * MS, "{tag}");
+    }
+}
+
 /// The bench can fail: the same sender with a 20 ms Receive Buffer, below its 30 ms gaps, re-anchors
 /// on late packets.
 #[test]

@@ -816,6 +816,78 @@ mod tests {
         );
     }
 
+    /// ROZHODNUTÉ 6343922049 (2): one network event = one re-anchor. A packet past its stamp while
+    /// the fit is valid shifts the line ONCE, to the stamp that packet would anchor (fit + R + its
+    /// excess over the fit), counted as one re-anchor; the fit is kept, and no second re-anchor
+    /// follows when the next fit lands, even for a packet more than R late. The shifted latency is
+    /// then held.
+    #[test]
+    fn a_late_packet_with_a_valid_fit_shifts_the_line_once() {
+        let mut t = Timeline::new();
+        let n_fit = 15 * 48_000 / 256u64;
+        for k in 0..n_fit {
+            t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+        }
+        assert!(t.fit_valid);
+        // 60 ms late: more than R after its own slot
+        let late_at = on_time(n_fit) + 60 * NS_PER_MS;
+        let d = t.packet(late_at, n_fit as u32, 256, RATE, 2, R40);
+        assert_eq!(
+            (d.event, d.reason),
+            (Event::Reanchor, Reason::Late),
+            "{d:?}"
+        );
+        assert_eq!((t.late, t.re_anchors), (1, 1));
+        assert!(
+            t.fit_valid,
+            "the fit is kept: the line shifts, the timeline does not restart"
+        );
+        let shifted = late_at - samples_to_ns(256, RATE) + R40;
+        assert!(
+            d.stamp_ns.abs_diff(shifted) <= 2,
+            "the late packet is stamped where it would anchor: {} vs {shifted}",
+            d.stamp_ns
+        );
+        // the stream goes on on time for 30 s: one event, one re-anchor, the shift held
+        for k in n_fit + 1..n_fit + 30 * 48_000 / 256 {
+            let d = t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+            assert_eq!(d.event, Event::Packet, "packet {k}: {d:?}");
+            let want = shifted + samples_to_ns((k - n_fit) * 256, RATE);
+            assert!(
+                d.stamp_ns.abs_diff(want) <= samples_to_ns(1, RATE),
+                "packet {k}: the shifted latency must be held: {} vs {want}",
+                d.stamp_ns
+            );
+        }
+        assert_eq!((t.late, t.re_anchors), (1, 1));
+    }
+
+    /// ROZHODNUTÉ 6343922049 (2): the slots lost right before a late packet are silence on the
+    /// shifted line, contiguous with the late packet (the timeline runs on, so nothing is dropped).
+    #[test]
+    fn the_slots_lost_before_a_late_packet_are_silence_on_the_shifted_line() {
+        let mut t = Timeline::new();
+        let n_fit = 15 * 48_000 / 256u64;
+        for k in 0..n_fit {
+            t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+        }
+        // packets n_fit and n_fit + 1 lost, n_fit + 2 arrives 50 ms late
+        let k = n_fit + 2;
+        let d = t.packet(on_time(k) + 50 * NS_PER_MS, k as u32, 256, RATE, 2, R40);
+        assert_eq!(
+            (d.event, d.reason),
+            (Event::Reanchor, Reason::Late),
+            "{d:?}"
+        );
+        assert_eq!(d.silence_samples, 512, "the two lost slots are silence");
+        assert_eq!(t.lost, 2);
+        assert_eq!(
+            t.stamp_at(d.silence_pos) + samples_to_ns(512, RATE),
+            d.stamp_ns,
+            "the silence ends where the late packet starts"
+        );
+    }
+
     /// An index far behind the last one (more than a reorder could be: 65 packets) is a sender
     /// restart: one counted re-anchor.
     #[test]
