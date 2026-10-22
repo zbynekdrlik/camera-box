@@ -10,18 +10,23 @@
 //!
 //! * **Anchor.** The first packet is stamped at its arrival − its length + R, R being the fixed
 //!   "Receive Buffer" (default [`RESERVE_MS_DEFAULT`] = 40 ms, read at create/update only, never
-//!   adapted at runtime).
+//!   adapted at runtime). Within the first [`ACQUIRE_S`] s of the sender's audio (the packet's END
+//!   position) a packet that arrived earlier against the line moves the line to it, so the anchor
+//!   is the EARLIEST arrival of that second (ROZHODNUTÉ 6343922049): later packets are never early
+//!   against it. After that second the line's phase is fixed.
 //! * **Fit.** A least-squares line of arrival time over the packet's END position in the sender's
 //!   samples (its `nuFrame` order), over the last [`FIT_WINDOW_S`] one-second buckets of the
 //!   sender's audio. A packet later than the reference line by more than [`OUTLIER_MS`] is not
-//!   folded into it, so a gap's delayed packets never pull the line late. The fit is used once its
-//!   window holds [`FIT_MIN_BUCKETS`] buckets.
+//!   folded into it, so a gap's delayed packets never pull the line late. Until the fit is used
+//!   (once its window holds [`FIT_MIN_BUCKETS`] buckets) the reference is the anchored line − R.
 //! * **Stamps.** `stamp(pos) = base + T(pos − base_pos)`, where `T(s)` is the duration of `s`
 //!   samples times `1 + step_ppb / 1e9`. Once per fitted bucket the step moves toward the fitted
-//!   rate plus a phase correction that walks the stamps to `fit + R` (phase error /
-//!   [`PHASE_TAU_S`] s, at most [`PHASE_PPB_MAX`]), by at most [`PPB_SLEW`] per update, clamped
-//!   to ±[`PPB_CLAMP`]. The line is rebased on every change, so the stamps never jump. The genlock
-//!   ASRC (`basis=stamp`) then resamples the sender's rate to the mix clock.
+//!   RATE by at most [`PPB_SLEW`] per update, clamped to ±[`PPB_CLAMP`]: the latency set at the
+//!   anchor is held, only the rate is followed. A phase term (phase error / [`PHASE_TAU_S`] s, at
+//!   most [`PHASE_PPB_MAX`]) joins the target ONLY while the stamps are more than R /
+//!   [`PHASE_BAND_DIV`] off `fit + R` (a real sender-clock event, never the arrival jitter), until
+//!   they are back inside that dead band. The line is rebased on every change, so the stamps never
+//!   jump. The genlock ASRC (`basis=stamp`) then resamples the sender's rate to the mix clock.
 //! * **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
 //! * **Stale.** A duplicate, or a `nuFrame` at most [`STALE_PACKETS`] behind the last one (a
 //!   network reorder), is dropped and counted: its slot has passed (it went out as silence).
@@ -55,11 +60,16 @@ pub const JUMP_S: u64 = 2;
 /// A duplicate, or an index at most this many packets behind the last one, is a STALE packet (a
 /// network reorder or duplicate): dropped and counted, never a re-anchor. Further behind = a restart.
 pub const STALE_PACKETS: u32 = 64;
+/// The anchor is the earliest arrival among the packets that end within this many seconds of the
+/// anchor packet's start (ROZHODNUTÉ 6343922049).
+pub const ACQUIRE_S: u64 = 1;
+/// The phase term acts only while the stamps are more than R / this off `fit + R`.
+pub const PHASE_BAND_DIV: i64 = 4;
 /// The stamp step stays within ±500 ppm of nominal.
 pub const PPB_CLAMP: i64 = 500_000;
 /// The stamp step moves by at most 5 ppm per fit update (about one a second).
 pub const PPB_SLEW: i64 = 5_000;
-/// A phase error is walked out at error / 20 s ...
+/// Outside the dead band a phase error is walked out at error / 20 s ...
 pub const PHASE_TAU_S: i64 = 20;
 /// ... with at most 100 ppm of the step spent on it.
 pub const PHASE_PPB_MAX: i64 = 100_000;
@@ -344,12 +354,13 @@ impl Timeline {
     }
 
     /// The arrival (ns since the anchor's arrival) the reference line expects at end position
-    /// `x`: the fit once it is valid, else the anchor at the nominal rate.
+    /// `x`: the fit once it is valid, else the anchored line − R (the earliest arrival of the
+    /// first second at the nominal rate; the first packet itself may have come late).
     pub fn reference(&self, x: u64) -> f64 {
         if self.fit_valid {
             return self.fit_ybar + self.fit_b * (x as f64 - self.fit_xbar);
         }
-        samples_to_ns(x - self.anchor_end, self.rate) as f64
+        (self.stamp_at(x) as i64 - self.reserve_ns as i64 - self.anchor_ns as i64) as f64
     }
 
     /// The sender's clock offset in ppm from the fit (positive = the sender runs fast), 0 before
@@ -464,7 +475,13 @@ impl Timeline {
         if !(-hold..=hold).contains(&phase) {
             return false;
         }
-        let corr = clamp_i64(phase / PHASE_TAU_S, PHASE_PPB_MAX);
+        // the dead band: inside it the latency is held and only the rate is followed
+        let band = hold / PHASE_BAND_DIV;
+        let corr = if (-band..=band).contains(&phase) {
+            0
+        } else {
+            clamp_i64(phase / PHASE_TAU_S, PHASE_PPB_MAX)
+        };
         let want = clamp_i64(fit_ppb + corr, PPB_CLAMP);
         let delta = clamp_i64(want - self.step_ppb, PPB_SLEW);
         if delta != 0 {
@@ -535,6 +552,21 @@ impl Timeline {
             }
             if reason == Reason::None && end - self.last_fold_pos > STARVE_S * u64::from(rate) {
                 reason = Reason::Fit;
+            }
+        }
+        // the first second: a packet that arrived earlier against the line moves the line to it.
+        // The line is still `base + T(pos)` there (no fit has moved it), so the candidate is the
+        // anchor this packet would give (arrival − length + R) carried back to position 0 by the
+        // line's own arithmetic: a packet exactly on the line never moves it by a rounding ns.
+        if reason == Reason::None
+            && end <= ACQUIRE_S * u64::from(rate)
+            && self.base_pos == 0
+            && self.step_ppb == 0
+        {
+            let back = samples_to_ns(u64::from(frames), rate) + samples_to_ns(pos, rate);
+            let cand = now_ns.saturating_sub(back) + self.reserve_ns;
+            if cand < self.base_stamp_ns {
+                self.base_stamp_ns = cand;
             }
         }
         if reason == Reason::None {

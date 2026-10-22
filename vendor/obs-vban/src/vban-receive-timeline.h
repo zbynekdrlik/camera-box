@@ -9,17 +9,24 @@
  * This decision gives every packet a stamp on a FIXED timeline that follows the sender's clock:
  *
  *  - Anchor: the first packet is stamped at its arrival - its length + R, R being the fixed
- *    "Receive Buffer" (default 40 ms, read at create/update only, never adapted at runtime).
+ *    "Receive Buffer" (default 40 ms, read at create/update only, never adapted at runtime). Within
+ *    the first VBAN_RECV_ACQUIRE_S s of the sender's audio (the packet's END position) a packet that
+ *    arrived earlier against the line moves the line to it, so the anchor is the EARLIEST arrival of
+ *    that second (ROZHODNUTE 6343922049): later packets are never early against it. After that
+ *    second the line's phase is fixed.
  *  - Fit: a least-squares line of arrival time over the packet's END position in the sender's
  *    samples (its nuFrame order), over the last VBAN_RECV_FIT_WINDOW_S one-second buckets of the
  *    sender's audio. A packet later than the reference line by more than VBAN_RECV_OUTLIER_MS is
- *    not folded into it (a gap's delayed packets never pull the line late).
+ *    not folded into it (a gap's delayed packets never pull the line late). Until the fit is used,
+ *    the reference is the anchored line - R.
  *  - Stamps: each packet is stamped on a line of its own, stamp(pos) = base + the position's
- *    duration x (1 + step_ppb / 1e9). Once per fitted bucket the step moves toward the fitted rate
- *    plus a phase correction that walks the stamps to fit + R (phase error / 20 s, at most
- *    100 ppm), by at most 5 ppm per update, clamped to +-500 ppm. The line is rebased on every
- *    change, so the stamps never jump. The genlock ASRC (basis=stamp) then resamples the sender's
- *    rate to the mix clock.
+ *    duration x (1 + step_ppb / 1e9). Once per fitted bucket the step moves toward the fitted RATE
+ *    by at most 5 ppm per update, clamped to +-500 ppm: the latency set at the anchor is held, only
+ *    the rate is followed. A phase term (phase error / 20 s, at most 100 ppm) joins the target ONLY
+ *    while the stamps are more than R / VBAN_RECV_PHASE_BAND_DIV off fit + R (a real sender-clock
+ *    event, never the arrival jitter), until they are back inside that dead band. The line is rebased
+ *    on every change, so the stamps never jump. The genlock ASRC (basis=stamp) then resamples the
+ *    sender's rate to the mix clock.
  *  - Loss: a nuFrame gap is silence for exactly the lost slots, stamped on the same line.
  *  - Stale: a duplicate, or a nuFrame at most VBAN_RECV_STALE_PACKETS behind the last one (a network
  *    reorder), is dropped and counted: its slot has passed (it went out as silence), the line runs on.
@@ -57,11 +64,16 @@
 /* A duplicate, or a nuFrame at most this many packets behind the last one, is a stale packet (a
  * network reorder or duplicate): dropped and counted, never a re-anchor. Further behind = a restart. */
 #define VBAN_RECV_STALE_PACKETS 64u
+/* The anchor is the earliest arrival among the packets that end within this many seconds of the anchor
+ * packet's start (ROZHODNUTE 6343922049). */
+#define VBAN_RECV_ACQUIRE_S 1
+/* The phase term acts only while the stamps are more than R / this off fit + R. */
+#define VBAN_RECV_PHASE_BAND_DIV 4
 /* The stamp step stays within +-500 ppm of nominal. */
 #define VBAN_RECV_PPB_CLAMP 500000
 /* The stamp step moves by at most 5 ppm per fit update (about one a second). */
 #define VBAN_RECV_PPB_SLEW 5000
-/* A phase error is walked out at error / 20 s ... */
+/* Outside the dead band a phase error is walked out at error / 20 s ... */
 #define VBAN_RECV_PHASE_TAU_S 20
 /* ... with at most 100 ppm of the step spent on it. */
 #define VBAN_RECV_PHASE_PPB_MAX 100000
@@ -224,12 +236,13 @@ static inline void vban_recv_fold(struct vban_recv_timeline *t, int64_t k, uint6
 }
 
 /* The arrival (ns since the anchor's arrival) the reference line expects at end position X: the
- * fit once it is valid, else the anchor at the nominal rate. */
+ * fit once it is valid, else the anchored line - R (the earliest arrival of the first second at the
+ * nominal rate; the first packet itself may have come late). */
 static inline double vban_recv_reference(const struct vban_recv_timeline *t, uint64_t x)
 {
 	if (t->fit_valid)
 		return t->fit_ybar + t->fit_b * ((double)x - t->fit_xbar);
-	return (double)vban_recv_samples_to_ns(x - t->anchor_end, t->rate);
+	return (double)((int64_t)vban_recv_stamp_at(t, x) - (int64_t)t->reserve_ns - (int64_t)t->anchor_ns);
 }
 
 /* Start (or restart) the timeline at this packet. */
@@ -321,9 +334,14 @@ static inline bool vban_recv_update(struct vban_recv_timeline *t, uint64_t pos)
 	const uint64_t stamp = vban_recv_stamp_at(t, pos);
 	const int64_t phase = target - (int64_t)stamp;
 	t->phase_ns = phase;
-	if (phase > (int64_t)t->reserve_ns || phase < -(int64_t)t->reserve_ns)
+	const int64_t hold = (int64_t)t->reserve_ns;
+	if (phase > hold || phase < -hold)
 		return false;
-	const int64_t corr = vban_recv_clamp_i64(phase / VBAN_RECV_PHASE_TAU_S, VBAN_RECV_PHASE_PPB_MAX);
+	/* the dead band: inside it the latency is held and only the rate is followed */
+	const int64_t band = hold / VBAN_RECV_PHASE_BAND_DIV;
+	const int64_t corr = (phase >= -band && phase <= band)
+				     ? 0
+				     : vban_recv_clamp_i64(phase / VBAN_RECV_PHASE_TAU_S, VBAN_RECV_PHASE_PPB_MAX);
 	const int64_t want = vban_recv_clamp_i64(fit_ppb + corr, VBAN_RECV_PPB_CLAMP);
 	const int64_t delta = vban_recv_clamp_i64(want - t->step_ppb, VBAN_RECV_PPB_SLEW);
 	if (delta != 0) {
@@ -387,6 +405,17 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 		}
 		if (reason == VBAN_RECV_REASON_NONE && end - t->last_fold_pos > (uint64_t)VBAN_RECV_STARVE_S * rate)
 			reason = VBAN_RECV_REASON_FIT;
+	}
+	/* the first second: a packet that arrived earlier against the line moves the line to it. The line
+	 * is still base + T(pos) there (no fit has moved it), so the candidate is the anchor this packet
+	 * would give (arrival - length + R) carried back to position 0 by the line's own arithmetic: a
+	 * packet exactly on the line never moves it by a rounding ns. */
+	if (reason == VBAN_RECV_REASON_NONE && end <= (uint64_t)VBAN_RECV_ACQUIRE_S * rate && t->base_pos == 0 &&
+	    t->step_ppb == 0) {
+		const uint64_t back = vban_recv_samples_to_ns(frames, rate) + vban_recv_samples_to_ns(pos, rate);
+		const uint64_t cand = (now_ns > back ? now_ns - back : 0) + t->reserve_ns;
+		if (cand < t->base_stamp_ns)
+			t->base_stamp_ns = cand;
 	}
 	if (reason == VBAN_RECV_REASON_NONE) {
 		const uint64_t stamp = vban_recv_stamp_at(t, pos);

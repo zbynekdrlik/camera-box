@@ -340,6 +340,28 @@ fn clean_script(ppm: f64, seconds: u64, anchor_late_ns: u64, reserve_ms: u64) ->
     b.pkts
 }
 
+/// A clean sender whose network delay drops by 25 ms after 70 s (the queue drains: those packets
+/// arrive back to back until they are on time). The fit follows the earlier arrivals, the stamps
+/// leave the dead band (the phase term acts) and then the hold of R = 20 ms (a fit re-anchor:
+/// phase beyond R). The anchor itself came ~25 ms late against nothing (every packet of its first
+/// second is delayed alike), so the first second keeps it.
+fn delay_drop_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    for k in 0..(90 * 48_000 / 256u64) {
+        let delay = if k * 256 < 70 * 48_000 { 25 * MS } else { 0 };
+        b.send(Pkt {
+            now: 2_000_000_000 + samples_to_ns((k + 1) * 256, 48_000) + delay,
+            nu: k as u32,
+            frames: 256,
+            rate: 48_000,
+            channels: 2,
+            reserve_ns: 20 * MS,
+            reset: false,
+        });
+    }
+    b.pkts
+}
+
 /// Every packet after the anchor 20 ms late: within R, but an outlier, so the fit starves.
 fn starve_script() -> Vec<Pkt> {
     let mut b = Builder::new();
@@ -387,6 +409,7 @@ fn scripts() -> Vec<Vec<Pkt>> {
         clean_script(600.0, 16, 0, 40),
         clean_script(-499.0, 30, 0, 40),
         clean_script(0.0, 16, 60 * MS, 40),
+        delay_drop_script(),
         starve_script(),
         wrap_script(),
     ];
@@ -733,8 +756,12 @@ fn the_scripts_reach_every_boundary_1439() {
         "stale duplicates (dropped)",
         "stale reorders at the window's edge (dropped)",
         "backward re-anchors one past the stale window",
+        "anchor moves to an earlier arrival in the first second",
+        "earlier arrivals past the first second (the line kept)",
+        "phase term acting outside the dead band",
+        "rate-only step changes inside the dead band",
     ];
-    let mut hits = [0usize; 20];
+    let mut hits = [0usize; 24];
     for sc in scripts() {
         let mut t = Timeline::new();
         for p in &sc {
@@ -742,6 +769,7 @@ fn the_scripts_reach_every_boundary_1439() {
                 t = Timeline::new();
             }
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
+            let (base_before, base_pos_before) = (t.base_stamp_ns, t.base_pos);
             let folds = t.buckets.iter().map(|b| b.n).sum::<u64>();
             // which fit check would fail: the model's update run on a copy, exactly when the packet
             // takes the timeline into a new bucket (the only time the real decision refits)
@@ -753,10 +781,15 @@ fn the_scripts_reach_every_boundary_1439() {
                 && delta != 0
                 && delta < 0x8000_0000;
             let (mut stamp, mut clamp_fail, mut phase_fail, mut line_y) = (0, false, false, 0.0);
+            // the anchor this packet would give, carried back to position 0 (the first-second rule)
+            let (mut end, mut cand) = (0u64, 0u64);
             if same {
                 let lost = u64::from(delta - 1);
                 let pos = t.next_pos + lost * u64::from(p.frames);
-                let end = pos + u64::from(p.frames);
+                end = pos + u64::from(p.frames);
+                cand = p.now.saturating_sub(
+                    samples_to_ns(u64::from(p.frames), p.rate) + samples_to_ns(pos, p.rate),
+                ) + t.reserve_ns;
                 if (end / u64::from(p.rate)) as i64 > t.last_k {
                     let mut probe = t.clone();
                     if !probe.update(t.next_pos) {
@@ -813,6 +846,17 @@ fn the_scripts_reach_every_boundary_1439() {
                 hits[14] += usize::from((y - line_y).abs() <= 1.0);
             }
             hits[15] += usize::from(d.event == Event::Packet && same && p.nu < last_nu);
+            let initial_line = base_pos_before == 0 && step == 0;
+            let in_first_second = end <= u64::from(p.rate);
+            if d.event == Event::Packet && same && initial_line {
+                hits[20] += usize::from(in_first_second && t.base_stamp_ns < base_before);
+                hits[21] += usize::from(!in_first_second && cand < base_before);
+            }
+            if d.event == Event::Packet && t.step_ppb != step {
+                let band = (t.reserve_ns / 4) as i64;
+                hits[22] += usize::from(t.phase_ns.abs() > band);
+                hits[23] += usize::from(t.phase_ns.abs() <= band);
+            }
         }
     }
     for (name, n) in names.iter().zip(hits) {
