@@ -320,6 +320,74 @@ def test_an_absent_input_is_created_as_the_vban_source():
                                              "inputKind": VBAN_KIND, "inputSettings": VBAN})]
 
 
+def _no_sleep(monkeypatch):
+    slept = []
+    monkeypatch.setattr("time.sleep", slept.append)
+    return slept
+
+
+def _restored(obs):
+    return [t for t, _ in obs.calls if t in ("SetInputVolume", "SetInputMute", "SetInputAudioSyncOffset",
+                                             "CreateSourceFilter", "CreateSceneItem")]
+
+
+def test_a_name_obs_still_holds_after_remove_is_waited_for(monkeypatch):
+    # review round 1: CreateInput right after RemoveInput can meet the old name still taken
+    s = _scenes()
+    slept = _no_sleep(monkeypatch)
+    obs = FakeObs(removal_lag=3)
+    res = s.seed_program_audio_input(obs, "Zvuk z mixu", VBAN)
+    assert res == "replaced (was pulse_input_capture; kept in 2 scene(s))"
+    assert obs.present and obs.kind == VBAN_KIND
+    assert [t for t, _ in obs.calls].count("CreateInput") == 1, "created once, after the name was free"
+    assert slept and sum(slept) <= 3.0
+    assert "SetInputVolume" in _restored(obs)
+
+
+def test_a_refused_create_is_tried_once_more(monkeypatch):
+    s = _scenes()
+    _no_sleep(monkeypatch)
+    obs = FakeObs(refuse_create=1)
+    res = s.seed_program_audio_input(obs, "Zvuk z mixu", VBAN)
+    assert res == "replaced (was pulse_input_capture; kept in 2 scene(s))"
+    assert obs.present and obs.kind == VBAN_KIND
+    assert [t for t, _ in obs.calls].count("CreateInput") == 2
+
+
+def test_a_create_obs_keeps_refusing_is_a_loud_failure_never_replaced(monkeypatch):
+    s = _scenes()
+    _no_sleep(monkeypatch)
+    obs = FakeObs(refuse_create=9)
+    res = s.seed_program_audio_input(obs, "Zvuk z mixu", VBAN)
+    assert res.startswith("replace FAILED (was pulse_input_capture)"), res
+    assert "no 'Zvuk z mixu' input" in res and "restart OBS" in res
+    assert [t for t, _ in obs.calls].count("CreateInput") == 2, "one retry, never a loop"
+    assert _restored(obs) == [], "nothing is put back onto an input that does not exist"
+
+
+def test_a_removal_obs_never_applies_is_bounded_and_named(monkeypatch):
+    s = _scenes()
+    slept = _no_sleep(monkeypatch)
+    obs = FakeObs(removal_lag=10_000)
+    res = s.seed_program_audio_input(obs, "Zvuk z mixu", VBAN)
+    assert res.startswith("replace FAILED (was pulse_input_capture)"), res
+    assert "still lists 'Zvuk z mixu' as pulse_input_capture" in res
+    assert sum(slept) <= 6.5, "two bounded waits for the name, never an endless one"
+    assert [t for t, _ in obs.calls].count("RemoveInput") == 2, "the retry removes the old input again"
+    assert _restored(obs) == []
+
+
+def test_an_absent_input_obs_refuses_to_create_is_named(monkeypatch):
+    s = _scenes()
+    _no_sleep(monkeypatch)
+    obs = FakeObs(present=False, refuse_create=9)
+    res = s.seed_program_audio_input(obs, "Zvuk z mixu", VBAN)
+    assert res.startswith("create FAILED"), res
+    assert "no 'Zvuk z mixu' input" in res
+    assert [t for t, _ in obs.calls].count("CreateInput") == 2
+    assert "RemoveInput" not in [t for t, _ in obs.calls], "a create never removes anything"
+
+
 def test_without_vban_the_seed_stays_the_pulse_capture():
     s = _scenes()
     obs = FakeObs(kind="pulse_input_capture")
