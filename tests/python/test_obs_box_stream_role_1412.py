@@ -230,11 +230,16 @@ def test_the_program_audio_input_name_reaches_the_seeder():
     class FakeObs:
         def __init__(self):
             self.calls = []
+            self.kind = "asio_input_capture"   # RemoveInput / CreateInput change it, like OBS
 
         def req(self, t, d=None, ignore_err=False):
             self.calls.append((t, d))
             if t == "GetInputList":
-                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": "asio_input_capture"}]}
+                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.kind else []}
+            if t == "RemoveInput":
+                self.kind = None
+            if t == "CreateInput":
+                self.kind = d["inputKind"]
             if t == "GetSceneList":
                 return {"currentProgramSceneName": "PRO", "scenes": [{"sceneName": "PRO"}]}
             if t == "GetSceneItemList":
@@ -416,11 +421,16 @@ def test_a_replace_keeps_the_audio_input_in_every_scene_and_its_sync_offset():
     class FakeObs:
         def __init__(self):
             self.calls = []
+            self.kind = "wasapi_input_capture"   # RemoveInput / CreateInput change it, like OBS
 
         def req(self, t, d=None, ignore_err=False):
             self.calls.append((t, d))
             if t == "GetInputList":
-                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": "wasapi_input_capture"}]}
+                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.kind else []}
+            if t == "RemoveInput":
+                self.kind = None
+            if t == "CreateInput":
+                self.kind = d["inputKind"]
             if t == "GetSceneList":
                 return {"currentProgramSceneName": "PRO",
                         "scenes": [{"sceneName": "POST"}, {"sceneName": "PRO"}, {"sceneName": "PRE"}]}

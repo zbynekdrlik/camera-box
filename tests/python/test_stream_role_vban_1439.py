@@ -185,16 +185,37 @@ def test_a_malformed_vban_block_raises_never_reads_as_pulse(text):
 # --- the seeder ------------------------------------------------------------------------------------------
 
 class FakeObs:
-    """An OBS with one program-audio input of KIND in scenes PRO (visible) and POST (hidden)."""
+    """An OBS with one program-audio input of KIND in scenes PRO (visible) and POST (hidden).
 
-    def __init__(self, kind="pulse_input_capture", kinds=(VBAN_KIND,), settings=None, present=True):
+    RemoveInput and CreateInput change what GetInputList lists, like OBS: after a RemoveInput the name
+    stays listed (and taken: CreateInput refuses it) for REMOVAL_LAG more GetInputList reads, and the
+    first REFUSE_CREATE CreateInput calls are refused (an error answer, nothing created)."""
+
+    def __init__(self, kind="pulse_input_capture", kinds=(VBAN_KIND,), settings=None, present=True,
+                 removal_lag=0, refuse_create=0):
         self.calls = []
         self.kind, self.kinds, self.settings, self.present = kind, list(kinds), settings or {}, present
+        self.removal_lag, self.refuse_create, self.still_listed = removal_lag, refuse_create, 0
 
     def req(self, t, d=None, ignore_err=False):
         self.calls.append((t, d))
         if t == "GetInputList":
-            return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.present else []}
+            listed = self.present
+            if self.still_listed:
+                self.still_listed -= 1
+                self.present = self.still_listed > 0
+            return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if listed else []}
+        if t == "RemoveInput":
+            if self.present:
+                self.still_listed = self.removal_lag
+                self.present = self.still_listed > 0
+            return {}
+        if t == "CreateInput":
+            if self.present or self.refuse_create:
+                self.refuse_create = max(0, self.refuse_create - 1)
+                return {}
+            self.present, self.kind = True, d["inputKind"]
+            return {"sceneItemId": 7}
         if t == "GetInputKindList":
             return {"inputKinds": self.kinds}
         if t == "GetSceneList":
@@ -217,7 +238,7 @@ class FakeObs:
                         "filterEnabled": False, "filterSettings": {"threshold": -6.0}},
                        {"filterName": "Gain", "filterKind": "gain_filter", "filterIndex": 0,
                         "filterEnabled": True, "filterSettings": {"db": 3.0}}]},
-                   "CreateInput": {"sceneItemId": 7}, "CreateSceneItem": {"sceneItemId": 9}}
+                   "CreateSceneItem": {"sceneItemId": 9}}
         return answers.get(t, {})
 
     def writes(self):
