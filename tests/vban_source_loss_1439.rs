@@ -58,6 +58,9 @@ static long long g_port = 6980;
 static char g_name[32] = "stream";
 static char g_host[64] = "";
 static long long g_buffer = 40;
+/* added to every 24-bit sample after the 16-bit value is scaled up (`low24=N`): the decoder must keep
+ * the low byte */
+static int g_low24 = 0;
 
 uint64_t os_gettime_ns(void)
 {
@@ -210,9 +213,13 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 	} else {
 		zero = -1;
 	}
-	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d\n",
+	/* the first sample on the 24-bit scale (exact in a float up to 2^24), float planar only */
+	long first24 = audio->format == AUDIO_FORMAT_FLOAT_PLANAR
+			       ? (long)(((const float *)audio->data[0])[0] * 8388608.0f)
+			       : 0;
+	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d first24=%ld\n",
 	       audio->timestamp, audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first,
-	       (int)audio->format);
+	       (int)audio->format, first24);
 }
 
 static int g_udp_dummy;
@@ -294,7 +301,7 @@ static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int bitfm
 			memcpy(pcm + bytes, &v, 2);
 			bytes += 2;
 		} else if (bitfmt == VBAN_BITFMT_24_INT) {
-			int32_t v = (int32_t)value * 256;
+			int32_t v = (int32_t)value * 256 + g_low24;
 			pcm[bytes++] = (uint8_t)(v & 0xff);
 			pcm[bytes++] = (uint8_t)((v >> 8) & 0xff);
 			pcm[bytes++] = (uint8_t)((v >> 16) & 0xff);
@@ -322,6 +329,10 @@ int main(int argc, char **argv)
 	int bitfmt = (rest && *rest == ',') ? atoi(rest + 1) : VBAN_BITFMT_16_INT;
 	void *src = vban_source_info.create(NULL, (obs_source_t *)&g_udp_dummy);
 	for (int i = 2; i < argc; i++) {
+		if (strncmp(argv[i], "low24=", 6) == 0) {
+			g_low24 = atoi(argv[i] + 6);
+			continue;
+		}
 		if (strncmp(argv[i], "port=", 5) == 0 || strncmp(argv[i], "name=", 5) == 0 ||
 		    strncmp(argv[i], "host=", 5) == 0 || strncmp(argv[i], "buffer=", 7) == 0) {
 			if (argv[i][0] == 'b')
@@ -843,13 +854,18 @@ fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439()
     let frames = 239u64;
     let t0 = 1_000_000_000u64;
     let values: [i16; 5] = [1234, -1234, 32767, -32768, 0];
-    let tokens: Vec<String> = [0u64, 1, 3, 4, 5]
-        .iter()
-        .zip(values)
-        .map(|(&k, v)| format!("{}:{}:{}", 700 + k, t0 + ns(k * frames), v as u16))
-        .collect();
+    // a non-zero low byte on every sample: a decoder that drops it must fail
+    let low = 0x5A;
+    let mut tokens = vec![format!("low24={low}")];
+    tokens.extend(
+        [0u64, 1, 3, 4, 5]
+            .iter()
+            .zip(values)
+            .map(|(&k, v)| format!("{}:{}:{}", 700 + k, t0 + ns(k * frames), v as u16)),
+    );
     let (stdout, log) = run_tokens_frames(&tokens, frames as u32, VBAN_BITFMT_24_INT);
-    let outs: Vec<(u64, u64, bool, i64, i32)> = stdout
+    #[allow(clippy::type_complexity)]
+    let outs: Vec<(u64, u64, bool, i64, i32, i64)> = stdout
         .lines()
         .filter_map(|l| l.strip_prefix("out "))
         .map(|l| {
@@ -864,6 +880,7 @@ fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439()
                 f("zero=") == "1",
                 f("first=").parse().unwrap(),
                 f("fmt=").parse().unwrap(),
+                f("first24=").parse().unwrap(),
             )
         })
         .collect();
@@ -872,15 +889,24 @@ fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439()
     // AUDIO_FORMAT_FLOAT_PLANAR (libobs enum audio_format) for every output, the silence included
     assert!(outs.iter().all(|o| o.4 == 8), "issue 1462: {outs:?}");
     assert!(outs.iter().all(|o| o.1 == frames), "issue 1462: {outs:?}");
-    let firsts: Vec<i64> = outs.iter().filter(|o| !o.2).map(|o| o.3).collect();
-    assert_eq!(
-        firsts,
-        vec![1234, -1234, 32767, -32768],
-        "issue 1462: the 24-bit samples (sign-extended) reach OBS unchanged: {outs:?}"
-    );
     assert!(
         outs[2].2,
         "issue 1462: the lost packet is one slot of silence: {outs:?}"
+    );
+    // every packet's samples on the 24-bit scale, sign-extended, the low byte kept
+    let raw: Vec<i64> = outs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 2)
+        .map(|(_, o)| o.5)
+        .collect();
+    assert_eq!(
+        raw,
+        values
+            .iter()
+            .map(|&v| i64::from(v) * 256 + low)
+            .collect::<Vec<_>>(),
+        "issue 1462: every 24-bit sample reaches OBS whole, low byte included: {outs:?}"
     );
     for w in outs.windows(2) {
         let expect = w[0].0 + ns(w[0].1);
