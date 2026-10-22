@@ -275,11 +275,15 @@ fn one_network_hiccup_is_one_re_anchor_1439() {
         let mut sched = schedule(seed, ppm, TEN_MIN_PACKETS, 0.0);
         let h0 = S0 + 120_000_000_000;
         let h1 = h0 + 90_000_000;
+        // the receive thread hands packets over in order: arrivals never go back
+        let mut prev = 0u64;
         for s in sched.iter_mut() {
             if let Some(a) = s.arrival_ns.as_mut() {
                 if (h0..h1).contains(a) {
-                    *a = h1 + s.k % 1000;
+                    *a = h1;
                 }
+                *a = (*a).max(prev + 1_000);
+                prev = *a;
             }
         }
         let mut t = Timeline::new();

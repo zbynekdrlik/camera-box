@@ -713,23 +713,31 @@ mod tests {
     fn the_anchor_is_the_earliest_arrival_of_the_first_second() {
         let mut t = Timeline::new();
         let line = |k: u64| on_time(k) - samples_to_ns(256, RATE) + R40;
-        let d = t.packet(on_time(0) + 25 * NS_PER_MS, 0, 256, RATE, 2, R40);
+        // the first packet ends a 25 ms gap: the packets held with it arrive right behind it (the
+        // receive thread hands them over in order, never before the first), then the stream is on time
+        let first = on_time(0) + 25 * NS_PER_MS;
+        let d = t.packet(first, 0, 256, RATE, 2, R40);
         assert_eq!(d.event, Event::Anchor);
         assert_eq!(
             d.stamp_ns,
             line(0) + 25 * NS_PER_MS,
             "the first packet anchors where it came"
         );
+        let mut prev = first;
         // packet k ends at (k + 1) x 256: packets 1..=186 end within the first second (48 000)
         for k in 1..=186u64 {
-            let d = t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+            let at = on_time(k).max(prev + 1_000);
+            prev = at;
+            let d = t.packet(at, k as u32, 256, RATE, 2, R40);
             assert_eq!(d.event, Event::Packet, "packet {k}: {d:?}");
-            assert!(
-                d.stamp_ns.abs_diff(line(k)) <= 2,
-                "packet {k}: the line moves to the earliest arrival: {} vs {}",
-                d.stamp_ns,
-                line(k)
-            );
+            if on_time(k) >= at {
+                assert!(
+                    d.stamp_ns.abs_diff(line(k)) <= 2,
+                    "packet {k}: the line moved to the earliest arrival: {} vs {}",
+                    d.stamp_ns,
+                    line(k)
+                );
+            }
         }
         for k in 187..600u64 {
             let early = if k == 187 || k == 400 {
