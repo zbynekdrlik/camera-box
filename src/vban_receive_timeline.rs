@@ -6,7 +6,8 @@
 //! then carried the sender's network jitter straight into OBS, which mixes at 0 ms audio
 //! buffering: a late packet was re-anchored by OBS, and that was a click.
 //!
-//! This module is the pure decision the source's receive callback asks for every packet:
+//! This module is the pure decision the source asks for every packet (its receive callback) and
+//! for every slot it hands to libobs (its playout worker, ROZHODNUTÉ 6347872706):
 //!
 //! * **Anchor.** The first packet is stamped at its arrival − its length + R, R being the fixed
 //!   "Receive Buffer" (default [`RESERVE_MS_DEFAULT`] = 40 ms, read at create/update only, never
@@ -18,16 +19,23 @@
 //!   against it. After that second the line's phase is fixed.
 //! * **Hold** (ROZHODNUTÉ 6345255813 item 1). Nothing is emitted for that first second: the anchor
 //!   and every packet ending within it are [`Event::Hold`] (they refine the anchor and fold, no
-//!   slot is filled). The first packet past it is the first [`Event::Packet`], on the final line,
-//!   so libobs never sees a stamp step and its stamp-basis ASRC never walks; the slots lost just
+//!   slot is filled). The first in-time packet past it starts the stretch's output, on the final
+//!   line, so libobs never sees a stamp step and its stamp-basis ASRC never walks; the slots lost
 //!   before it are not filled (libobs has nothing from the source to keep contiguous yet). Every
 //!   full re-anchor holds again: ~1 s of silence after it.
-//! * **Lead-in** (review round 5). A stretch's first output is always an in-time packet (review
-//!   round 6: nothing is filled before it, so a late packet before it is dropped with no fill) and
-//!   carries silence from its arrival up to its stamp ([`Decision::lead_in_samples`]), ending
-//!   exactly there: libobs RESETS a source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`)
-//!   off where its previous one ended and puts that chunk at the instant it arrived, which a starve
-//!   and its hold always cause; the lead-in starts there, so the packet still lands on its stamp.
+//! * **Deadline** (ROZHODNUTÉ 6347872706, review round 5). The source emits on its own deadline,
+//!   never on a packet's arrival: every slot (one packet's length) is handed to libobs by
+//!   [`Timeline::due`] at its deadline, its stamp − [`DEADLINE_MARGIN_MS`] (ahead of the mix window
+//!   that takes it), as the stored packet when it arrived in time, else as silence of exactly that
+//!   slot. The deadlines run on the stamp line (the fitted SENDER rate), so libobs sees one
+//!   continuous stamp sequence and never underruns while the stretch lives. A stretch STARVES once
+//!   a slot's deadline is more than [`PERSIST_S`] after the last in-time arrival: nothing more is
+//!   emitted, and the next packet re-anchors.
+//! * **Lead-in** (review round 5). Before a stretch's first slot the worker sends silence from its
+//!   own now up to that slot's stamp ([`Due::LeadIn`]), ending exactly there: libobs RESETS a
+//!   source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`) off where its previous one
+//!   ended and puts that chunk at the instant it arrived; the lead-in starts there, so the slots
+//!   still land on their stamps.
 //! * **Fit.** A least-squares line of arrival time over the packet's END position in the sender's
 //!   samples (its `nuFrame` order), over the last [`FIT_WINDOW_S`] one-second buckets of the
 //!   sender's audio. A packet later than the reference line by more than [`OUTLIER_MS`] is not
@@ -41,20 +49,21 @@
 //!   [`PHASE_BAND_DIV`] off `fit + R` (a real sender-clock event, never the arrival jitter), until
 //!   they are back inside that dead band. The line is rebased on every change, so the stamps never
 //!   jump. The genlock ASRC (`basis=stamp`) then resamples the sender's rate to the mix clock.
-//! * **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
+//! * **Loss.** A slot whose packet is not there at its deadline is silence for exactly that slot,
+//!   stamped on the same line.
 //! * **Stale.** A duplicate, or a `nuFrame` at most [`STALE_PACKETS`] behind the last one (a
-//!   network reorder), is dropped and counted: its slot has passed (it went out as silence).
+//!   network reorder), is dropped and counted.
 //! * **Late = lost** (ROZHODNUTÉ 6345255813 item 2; the round-3 late shift is withdrawn). A fixed
-//!   latency is a fixed jitter buffer: a packet arriving after its stamp (once the hold is over) is
-//!   [`Event::Late`] -- dropped and counted, its slot (with the slots lost right before it) silence
-//!   at once on the unchanged line, once the stretch has output its first packet. The line, the
-//!   fit and the latency stay where the anchor put them; the fold rule is unchanged.
+//!   latency is a fixed jitter buffer: a packet whose slot was already handed to libobs (as
+//!   silence) is [`Event::Late`] -- dropped and counted; before a stretch's first output, a packet
+//!   past its deadline is. The line, the fit and the latency stay where the anchor put them; the
+//!   fold rule is unchanged.
 //! * **Re-anchor** (counted, one per event, then the hold): a STARVE -- no packet in time for
 //!   [`PERSIST_S`] on OUR clock: any packet arriving more than that after the last in-time packet
 //!   did (an outage, a sender pause, every packet late on a delay step; review round 4), late or
 //!   not, with nothing filled after the fact -- a `nuFrame` further behind (a sender
-//!   restart), a forward jump of more than [`JUMP_S`] of audio (a sender restart), another rate or
-//!   channel count, another R, or a fit that cannot hold: the fitted rate beyond ±[`PPB_CLAMP`] or
+//!   restart), a forward jump of more than [`JUMP_S`] of audio (a sender restart), another rate,
+//!   channel count or packet size, another R, or a fit that cannot hold: the fitted rate beyond ±[`PPB_CLAMP`] or
 //!   the stamps more than R off `fit + R`. The packet that re-anchors is the new anchor. Packets
 //!   still in time never re-anchor, even when none of them folds (the fit then learns nothing from
 //!   them).
@@ -105,9 +114,12 @@ pub const PHASE_TAU_S: i64 = 20;
 pub const PHASE_PPB_MAX: i64 = 100_000;
 /// The `obs-vban receive:` status line cadence.
 pub const LOG_INTERVAL_NS: u64 = 10_000_000_000;
-/// Silence for lost slots goes to OBS in pieces of at most this many frames.
+/// Silence (the lead-in) goes to OBS in pieces of at most this many frames.
 pub const SILENCE_CHUNK_FRAMES: u32 = 1024;
-/// Round 5 (ROZHODNUTÉ 6347872706, RED stub): a slot's deadline is its stamp minus this.
+/// A slot's deadline is its stamp minus this (ROZHODNUTÉ 6347872706): it reaches libobs ahead of
+/// the mix window that takes it (that window is mixed at its end, after the stamp), with room for
+/// the worker's wake jitter. Taken from R's jitter budget: a packet is in time with up to
+/// R − one packet − this of network delay over the earliest arrival.
 pub const DEADLINE_MARGIN_MS: u64 = 2;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
@@ -116,7 +128,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// What happened to a packet (the C `enum vban_recv_event`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Event {
-    /// Stamped on the running timeline.
+    /// In time: stored for its slot, which the worker hands to libobs at its deadline.
     #[default]
     Packet = 0,
     /// The first packet: the timeline starts here.
@@ -128,8 +140,9 @@ pub enum Event {
     /// Inside the first second after an anchor (ROZHODNUTÉ 6345255813 item 1): it refines the
     /// anchor and folds into the fit, but is never output, and no slot is filled for it.
     Hold = 4,
-    /// A packet past its stamp once the hold is over (ROZHODNUTÉ 6345255813 item 2): dropped and
-    /// counted, its slot (with the slots lost before it) silence on the unchanged line.
+    /// Too late for its slot once the hold is over (ROZHODNUTÉ 6345255813 item 2): its slot was
+    /// already handed to libobs (as silence), or -- before the stretch's first output -- its
+    /// deadline had passed. Dropped and counted.
     Late = 5,
 }
 
@@ -145,7 +158,7 @@ pub enum Reason {
     Backward = 2,
     /// A forward `nuFrame` jump over [`JUMP_S`].
     Jump = 3,
-    /// Another sample rate or channel count.
+    /// Another sample rate, channel count or packet size (a slot is one packet).
     Format = 4,
     /// Another Receive Buffer.
     Config = 5,
@@ -200,56 +213,54 @@ impl Default for Bucket {
     }
 }
 
-/// What the source does with one packet: silence first (when any), then the packet.
+/// What one packet is (the receive side never outputs anything: the worker does, at deadlines).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Decision {
     pub event: Event,
     pub reason: Reason,
-    /// Round 5 (RED stub): the packet's slot position.
+    /// The packet's slot (its first sample's position, samples since the anchor): where a PACKET
+    /// is stored for the worker.
     pub pos: u64,
-    pub silence_samples: u64,
-    /// The first silent sample's position ([`Timeline::stamp_at`]).
-    pub silence_pos: u64,
     /// The packet's stamp.
     pub stamp_ns: u64,
     /// Arrival − stamp (negative = the margin left).
     pub lateness_ns: i64,
-    /// A LATE packet: how far after its stamp it came.
+    /// A LATE packet: how far after its deadline it came.
     pub late_ns: i64,
     /// A STARVE re-anchor: how long no packet came in time (its arrival − the last in-time
     /// arrival), the span the source logs (`starve_ms=`). 0 on every other decision.
     pub starve_ns: i64,
-    /// The LEAD-IN (review round 5), on the first output of an anchored stretch only (always an
-    /// in-time packet): this many frames of silence go out BEFORE it, from its arrival up to its
-    /// stamp, so libobs starts the stream at that arrival and the packet lands on its stamp
-    /// whatever libobs makes of the gap before it (one over `MAX_TS_VAR` = 2 s, after a starve,
-    /// is a timing reset that puts the first chunk at the instant it arrives). 0 on every other
-    /// output, and when less than one frame is left to the stamp.
-    pub lead_in_samples: u64,
-    /// The lead-in's stamp: the first output's stamp − the lead-in's length, so it ends exactly
-    /// where that output starts.
-    pub lead_in_stamp_ns: u64,
 }
 
-/// Round 5 (ROZHODNUTÉ 6347872706, RED stub): what the playout worker hands to libobs now.
+/// What the playout worker hands to libobs now (the C `enum vban_recv_due_kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Due {
+    /// Nothing is due: sleep until [`DueDecision::next_ns`] (0 = idle until a packet gives work).
     #[default]
     None = 0,
+    /// A stretch's lead-in: silence of [`DueDecision::frames`] stamped [`DueDecision::stamp_ns`].
     LeadIn = 1,
+    /// The slot at [`DueDecision::pos`] is the store's head packet: output it at that stamp.
     Packet = 2,
+    /// The slot's packet is missing: silence of exactly one slot at that stamp.
     Silence = 3,
 }
 
-/// Round 5 (RED stub): one playout decision.
+/// One playout decision (the C `struct vban_recv_due`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DueDecision {
     pub kind: Due,
+    /// The slot's position (Packet / Silence).
     pub pos: u64,
+    /// Frames: the slot's length, or the lead-in's.
     pub frames: u64,
+    /// The chunk's stamp.
     pub stamp_ns: u64,
+    /// The slot's deadline (Packet / Silence).
     pub deadline_ns: u64,
+    /// How far past its deadline the slot went out (the worker's wake jitter; Packet / Silence).
     pub late_ns: i64,
+    /// [`Due::None`]: the next deadline, 0 = none (no stretch is emitting, or it starved).
     pub next_ns: u64,
 }
 
@@ -283,13 +294,14 @@ pub struct Timeline {
     pub last_intime_ns: u64,
     /// The end position of the last packet folded into the fit.
     pub last_fold_end: u64,
-    /// Round 5 (RED stub): the slot length.
+    /// The stretch's slot length: the anchor packet's frames (another size re-anchors).
     pub frames: u32,
-    /// Whether this anchored stretch has sent any output yet (its lead-in goes before the first).
+    /// Whether this anchored stretch has started its output: its first in-time packet past the hold
+    /// came (the deadlines run from it on).
     pub emitted: bool,
-    /// Round 5 (RED stub): the next slot to hand out.
+    /// The next slot the worker hands to libobs (samples since the anchor).
     pub emit_pos: u64,
-    /// Round 5 (RED stub): the lead-in is still to go out.
+    /// The stretch's lead-in is still to go out (before its first slot).
     pub lead_in_pending: bool,
     pub buckets: [Bucket; FIT_WINDOW_S],
     pub fit_valid: bool,
@@ -302,11 +314,11 @@ pub struct Timeline {
     /// `fit + R − stamp` at the last update.
     pub phase_ns: i64,
     pub received: u64,
-    /// Lost packets (silence slots).
+    /// Slots handed to libobs as silence (their packet was not there at the deadline).
     pub lost: u64,
     /// The silence those slots carried.
     pub silence_samples: u64,
-    /// Packets that arrived after their stamp (each dropped, its slot silence).
+    /// Packets that came too late for their slot (each dropped).
     pub late: u64,
     pub re_anchors: u64,
     /// Duplicate / reordered packets dropped (their slot had passed).
@@ -423,23 +435,26 @@ impl Timeline {
         }
     }
 
-    /// The stamp of the sample at `pos` (samples since the anchor, never before the line's base).
+    /// The stamp of the sample at `pos` (samples since the anchor). A position before the line's
+    /// base -- a slot still to go out when the line was rebased at the next packet's start -- is
+    /// read back along the same line (round 5: within one update that differs from the line before
+    /// it by at most the 5 ppm slew over R, ~0.2 us, far under a sample).
     pub fn stamp_at(&self, pos: u64) -> u64 {
-        let span = pos.saturating_sub(self.base_pos);
-        let ns = samples_to_ns(span, self.rate);
+        if pos >= self.base_pos {
+            let ns = samples_to_ns(pos - self.base_pos, self.rate);
+            return self
+                .base_stamp_ns
+                .wrapping_add((ns as i64 + scale_ppb(ns, self.step_ppb)) as u64);
+        }
+        let ns = samples_to_ns(self.base_pos - pos, self.rate);
         self.base_stamp_ns
-            .wrapping_add((ns as i64 + scale_ppb(ns, self.step_ppb)) as u64)
+            .wrapping_sub((ns as i64 + scale_ppb(ns, self.step_ppb)) as u64)
     }
 
-    /// Round 5 (RED stub): the deadline of the slot at `pos`.
+    /// The deadline of the slot at `pos`: its stamp − [`DEADLINE_MARGIN_MS`].
     pub fn deadline_at(&self, pos: u64) -> u64 {
         self.stamp_at(pos)
             .saturating_sub(DEADLINE_MARGIN_MS * NS_PER_MS)
-    }
-
-    /// Round 5 (RED stub): what the playout worker hands to libobs now -- nothing yet.
-    pub fn due(&mut self, _now_ns: u64, _head_pos: Option<u64>) -> DueDecision {
-        DueDecision::default()
     }
 
     fn fold(&mut self, k: i64, x: u64, y: u64) {
@@ -526,7 +541,10 @@ impl Timeline {
         self.fit_ybar = 0.0;
         self.phase_ns = 0;
         self.last_intime_ns = now_ns;
+        self.frames = frames;
         self.emitted = false;
+        self.emit_pos = 0;
+        self.lead_in_pending = false;
         self.last_k = i64::from(frames / rate);
         self.fold(self.last_k, u64::from(frames), 0);
     }
@@ -638,9 +656,8 @@ impl Timeline {
             return d;
         }
         let mut reason = Reason::None;
-        let mut lost: u64 = 0;
         let mut lost_samples: u64 = 0;
-        if rate != self.rate || channels != self.channels {
+        if rate != self.rate || channels != self.channels || frames != self.frames {
             reason = Reason::Format;
         } else if reserve_ns != self.reserve_ns {
             reason = Reason::Config;
@@ -654,8 +671,7 @@ impl Timeline {
                 }
                 reason = Reason::Backward;
             } else {
-                lost = u64::from(delta - 1);
-                lost_samples = lost * u64::from(frames);
+                lost_samples = u64::from(delta - 1) * u64::from(frames);
                 if lost_samples > JUMP_S * u64::from(rate) {
                     reason = Reason::Jump;
                 }
@@ -699,20 +715,19 @@ impl Timeline {
         }
         if reason == Reason::None {
             let stamp = self.stamp_at(pos);
+            let deadline = self.deadline_at(pos);
             // the hold (ROZHODNUTÉ 6345255813 item 1): nothing is emitted while the packet ends
-            // within the first second, so libobs never sees the refinement's stamp steps; a slot is
-            // filled only once the stretch has output its first packet (review round 6: a fill
-            // before it would be a first output whose stamp has passed, with no lead-in)
+            // within the first second, so libobs never sees the refinement's stamp steps
             let window = ACQUIRE_S * u64::from(rate);
             let held = end <= window;
-            let emitting = self.emitted;
-            let late = !held && now_ns > stamp;
-            if late {
-                d.late_ns = (now_ns - stamp) as i64;
-                self.late += 1;
-            }
-            // a late packet is LOST (item 2): its audio dropped, its slot silence on the
-            // unchanged line together with the slots lost before it
+            // ROZHODNUTÉ 6347872706: a packet is late when its slot was already handed to libobs;
+            // before the stretch's first output, when its deadline has passed
+            let late = !held
+                && if self.emitted {
+                    pos < self.emit_pos
+                } else {
+                    now_ns > deadline
+                };
             d.event = if late {
                 Event::Late
             } else if held {
@@ -720,24 +735,21 @@ impl Timeline {
             } else {
                 Event::Packet
             };
+            d.pos = pos;
             d.stamp_ns = stamp;
             d.lateness_ns = now_ns as i64 - stamp as i64;
-            let filled = lost_samples + if late { u64::from(frames) } else { 0 };
-            if filled > 0 && emitting {
-                d.silence_samples = filled;
-                d.silence_pos = self.next_pos;
-                self.lost += lost;
-                self.silence_samples += filled;
-            }
-            // the stretch's first output -- always an in-time packet, nothing is filled before it --
-            // gets its lead-in: silence from this arrival up to its stamp (review round 5)
-            if !self.emitted && d.event == Event::Packet {
-                self.emitted = true;
-                d.lead_in_samples = ns_to_samples(stamp - now_ns, rate);
-                d.lead_in_stamp_ns = stamp - samples_to_ns(d.lead_in_samples, rate);
-            }
-            if !late {
+            if late {
+                d.late_ns = now_ns as i64 - deadline as i64;
+                self.late += 1;
+            } else {
                 self.last_intime_ns = now_ns;
+            }
+            // the stretch's first in-time packet past the hold starts its output: the deadlines run
+            // from its slot on, its lead-in first (review round 5)
+            if d.event == Event::Packet && !self.emitted {
+                self.emitted = true;
+                self.emit_pos = pos;
+                self.lead_in_pending = true;
             }
             // fold the packet into the fit unless it came late against the reference line
             // wrapping like the C twin (the real clock never delivers an arrival before the anchor)
@@ -761,6 +773,59 @@ impl Timeline {
         d.reason = reason;
         d.stamp_ns = self.base_stamp_ns;
         d.lateness_ns = now_ns as i64 - d.stamp_ns as i64;
+        d
+    }
+
+    /// What the playout worker hands to libobs at `now_ns` (ROZHODNUTÉ 6347872706). `head_pos`
+    /// is the position of the oldest packet in the caller's store (the in-time packets, stored in
+    /// increasing position), `None` when it is empty. Call it until it returns [`Due::None`]:
+    ///
+    /// * nothing while no stretch emits ([`Due::None`], `next_ns` 0);
+    /// * the stretch's lead-in once, first: silence from `now_ns` up to its first slot's stamp;
+    /// * then each slot whose deadline has come, in order: the head packet when it is that slot
+    ///   (the caller pops it), else silence of exactly one slot (counted lost);
+    /// * a slot whose deadline is more than [`PERSIST_S`] after the last in-time arrival is never
+    ///   emitted: the stretch starved, nothing more goes out until a packet re-anchors.
+    pub fn due(&mut self, now_ns: u64, head_pos: Option<u64>) -> DueDecision {
+        let mut d = DueDecision::default();
+        if !self.emitted {
+            return d;
+        }
+        if self.lead_in_pending {
+            self.lead_in_pending = false;
+            let first = self.stamp_at(self.emit_pos);
+            if first > now_ns {
+                let frames = ns_to_samples(first - now_ns, self.rate);
+                if frames > 0 {
+                    d.kind = Due::LeadIn;
+                    d.frames = frames;
+                    d.stamp_ns = first - samples_to_ns(frames, self.rate);
+                    return d;
+                }
+            }
+        }
+        let deadline = self.deadline_at(self.emit_pos);
+        if deadline > self.last_intime_ns.saturating_add(PERSIST_S * NS_PER_SEC) {
+            return d;
+        }
+        if now_ns < deadline {
+            d.next_ns = deadline;
+            return d;
+        }
+        let frames = u64::from(self.frames);
+        d.pos = self.emit_pos;
+        d.frames = frames;
+        d.stamp_ns = self.stamp_at(self.emit_pos);
+        d.deadline_ns = deadline;
+        d.late_ns = now_ns as i64 - deadline as i64;
+        if head_pos == Some(self.emit_pos) {
+            d.kind = Due::Packet;
+        } else {
+            d.kind = Due::Silence;
+            self.lost += 1;
+            self.silence_samples += frames;
+        }
+        self.emit_pos += frames;
         d
     }
 }
