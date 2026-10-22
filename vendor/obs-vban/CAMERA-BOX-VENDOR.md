@@ -110,6 +110,9 @@ FULL bundle deploy replaces `obs-vban.dll` on every Windows OBS box (the pacing 
 Windows VBAN SOURCE then stamps on the timeline: R (40 ms by default) more latency, a lost packet is
 silence, the status line is logged. Before the first FULL deploy that carries it, read each Windows
 box's scene collections for `net.nagater.obs-vban.source` (read-only); no box was read for this.
+The same holds for the Linux strih-role boxes (strih-snv, strih-pp): their strih bundle loads
+`obs-vban.so` from now on, and a VBAN source dormant in a collection ported from Windows would come
+alive and could take the intercom hub's UDP port. Read their collections the same way first.
 
 Log lines:
 
@@ -121,8 +124,10 @@ obs-vban receive re-anchor: source '…' reason=late|backward|jump|format|config
 
 The status line comes every 10 s; its counters are cumulative since the source was created.
 `max_late_ms` is the largest arrival − stamp of an on-time packet in that 10 s window, so it is
-negative while packets arrive with margin (about −R plus jitter); a packet past its stamp
-re-anchors instead and is counted in `late`.
+negative while packets arrive with margin (about −(R − one packet) plus jitter: the stamp is the
+packet's start, its arrival its end, −34.7 ms at R 40 / 256 frames / 48 kHz); a packet past its
+stamp re-anchors instead and is counted in `late`. So R must exceed one packet's length, or every
+packet re-anchors (5.3 ms at 48 kHz against the 10 ms minimum).
 
 ## Re-basing onto a newer upstream
 

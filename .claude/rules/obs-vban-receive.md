@@ -63,7 +63,14 @@ obs-vban receive re-anchor: source '<input>' reason=late|backward|jump|format|co
 
 The status line is written by the receive callback, so it stops when packets stop. Counters are
 cumulative since the source was created (a port / stream / host change re-inits them). `max_late_ms`
-is the window's largest arrival - stamp of an on-time packet: about -R + jitter when healthy.
+is the window's largest arrival - stamp of an on-time packet: about -(R - one packet) + jitter when
+healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40, 256 frames, 48 kHz).
+- **R must exceed one packet** (review round 2): the real margin is R minus the packet's length, so
+  with R no longer than a packet every packet re-anchors as late. The rig's 48 kHz 256-frame packets
+  are 5.3 ms against the 10 ms minimum; a sender at 8 kHz / 22.05 kHz with a small R would loop.
+- **A hostname `ip_from`** is resolved asynchronously by `vban_udp_set_host`, after the update's
+  last reset, so the new host's first packets can land on the old timeline. The stream role uses
+  `ip_from ""` (any host); give a host as an IP if one is ever set.
 - **Thread safety:** the callback runs on the per-port `vban-r-<port>` thread under `dev->mutex`; the
   timeline is touched only there. The status line takes the stream name from the PACKET header
   (`%.*s`, 16 bytes), never `s->stream_name` (the UI thread's, which `update()` frees), and the port
@@ -111,6 +118,9 @@ is the window's largest arrival - stamp of an on-time packet: about -R + jitter 
 - **Windows (review round 1):** both Windows genlock builds compile the same `vban-source.c`, so a
   FULL deploy changes every Windows OBS's VBAN SOURCE too (R more latency, loss = silence). Read
   each Windows box's collections for `net.nagater.obs-vban.source` before that deploy (not read yet).
+  The same for strih-snv / strih-pp (review round 2): their bundle loads `obs-vban.so` now, and a
+  dormant VBAN source in a ported collection would come alive and could take the hub's UDP port
+  (`grep -l net.nagater.obs-vban ~/.config/obs-studio/basic/scenes/*.json` on the box, read-only).
 - **Rollout (supervisor):** the strih bundle with obs-vban (linux-genlock.yml strih variant stages
   `obs-vban.so`), then setup-strih on stream-pp with OBS stopped (the genlock deploy stops it), then
   start OBS: the seed switches `Zvuk z mixu`. A setup re-run with OBS RUNNING removes the hub under a

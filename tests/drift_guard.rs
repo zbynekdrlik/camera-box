@@ -3230,7 +3230,7 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
     );
     // issue 1439: the strih-variant Linux job builds the VBAN receive source, so linux-genlock.yml
     // triggers on vendor/obs-vban/** and a Linux strih consumes it; the imag-parity job does not
-    // build it (pinned by tests/vban_receive_timeline_parity_1439.rs), so imag's set stays the pair.
+    // build it (pinned by tests/vban_receive_wiring_1439.rs), so imag's set stays the pair.
     assert!(
         linux_wf.contains("vendor/obs-vban/**"),
         "linux-genlock.yml must trigger on vendor/obs-vban/** (the strih variant builds the VBAN \
