@@ -23,19 +23,21 @@
 //!   line, so libobs never sees a stamp step and its stamp-basis ASRC never walks; the slots lost
 //!   before it are not filled (libobs has nothing from the source to keep contiguous yet). Every
 //!   full re-anchor holds again: ~1 s of silence after it.
-//! * **Deadline** (ROZHODNUTÉ 6347872706, review round 5). The source emits on its own deadline,
-//!   never on a packet's arrival: every slot (one packet's length) is handed to libobs by
-//!   [`Timeline::due`] at its deadline, its stamp − [`DEADLINE_MARGIN_MS`] (ahead of the mix window
-//!   that takes it), as the stored packet when it arrived in time, else as silence of exactly that
-//!   slot. The deadlines run on the stamp line (the fitted SENDER rate), so libobs sees one
-//!   continuous stamp sequence and never underruns while the stretch lives. A stretch STARVES once
-//!   a slot's deadline is more than [`PERSIST_S`] after the last in-time arrival: nothing more is
-//!   emitted, and the next packet re-anchors.
+//! * **Deadline** (ROZHODNUTÉ 6347872706, review round 5). The source emits on its own clock, never
+//!   on a packet's arrival: [`Timeline::due`] hands every slot (one packet's length) to libobs by its
+//!   deadline, its stamp − [`DEADLINE_MARGIN_MS`] (ahead of the mix window that takes it). The
+//!   deadline is the DECISION point: the stored packet goes out at the worker's next look (at most
+//!   [`POLL_MS`] after it arrived), however early; a slot still missing at its deadline is silence of
+//!   exactly that slot. The deadlines run on the stamp line (the fitted SENDER rate), so libobs sees
+//!   one continuous stamp sequence and, while the worker wakes within the margin, never underruns; a
+//!   slot handed after its own stamp is counted (`missed`). A stretch STARVES once a slot's deadline
+//!   is more than [`PERSIST_S`] after the last in-time arrival: nothing more is emitted, and the next
+//!   packet re-anchors.
 //! * **Lead-in** (review round 5). Before a stretch's first slot the worker sends silence from its
-//!   own now up to that slot's stamp ([`Due::LeadIn`]), ending exactly there: libobs RESETS a
-//!   source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`) off where its previous one
-//!   ended and puts that chunk at the instant it arrived; the lead-in starts there, so the slots
-//!   still land on their stamps.
+//!   own now + the margin up to that slot's stamp ([`Due::LeadIn`]), ending exactly there: a
+//!   stretch's first chunk lands far from the source's previous audio (past 2 s, `MAX_TS_VAR`,
+//!   libobs puts it at the instant it arrived; under 2 s the cleared source places it at its stamp),
+//!   and with the lead-in the slots land on their stamps either way.
 //! * **Fit.** A least-squares line of arrival time over the packet's END position in the sender's
 //!   samples (its `nuFrame` order), over the last [`FIT_WINDOW_S`] one-second buckets of the
 //!   sender's audio. A packet later than the reference line by more than [`OUTLIER_MS`] is not
@@ -132,7 +134,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// What happened to a packet (the C `enum vban_recv_event`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Event {
-    /// In time: stored for its slot, which the worker hands to libobs at its deadline.
+    /// In time: stored for its slot, which the worker hands to libobs by its deadline.
     #[default]
     Packet = 0,
     /// The first packet: the timeline starts here.

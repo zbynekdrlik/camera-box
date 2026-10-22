@@ -6,6 +6,8 @@ paths:
   - "src/vban_receive_timeline_bench.rs"
   - "src/vban_receive_timeline_tests.rs"
   - "src/vban_receive_timeline_late_tests.rs"
+  - "src/vban_receive_timeline_worker_model.rs"
+  - "src/vban_receive_timeline_bench_wake.rs"
   - "tests/vban_receive_timeline_parity_1439.rs"
   - "tests/support/vban_receive_scripts_1439.rs"
   - "tests/vban_source_loss_1439.rs"
@@ -53,14 +55,17 @@ lost packets landed on audio already delivered).
     round 6: a late packet before it is dropped and counted with nothing sent -- a fill there was a
     first output whose stamp had passed, and a hiccup ending a re-anchor's hold started the stretch
     6-36 ms late). Before its slot the worker sends `Due::LeadIn`: silence from the worker's own now
-    up to that slot's stamp, stamped to end exactly there (none when less than a frame is left). Why:
-    libobs RESETS
-    a source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`) off where its previous one ended
-    in the system domain (`reset_audio_timing`, `source_output_audio_data`) and puts that chunk at
-    the instant it ARRIVED, whatever its stamp. A starve + its 1 s hold always leaves such a gap, so
-    the new stretch started one R early (bench: 10.0 ms realized against a 40.4 ms stamp latency
-    after a 1.5 s outage, then a 30.5 ms walk). The lead-in starts at the arrival, so the output lands
-    on its stamp, reset or not;
+    + the 2 ms margin (review round 5: a mix tick between the worker's clock read and the handover
+    must never find the lead-in behind its window -- with no encoder running that grows the whole
+    mix's buffering) up to that slot's stamp, stamped to end exactly there (none when less than one
+    frame is left). Why: a stretch's first chunk lands far from where the source's previous audio
+    ended. Past 2 s (`MAX_TS_VAR`) libobs RESETS the source's timing (`reset_audio_timing`,
+    `source_output_audio_data`) and puts that chunk at the instant it ARRIVED, whatever its stamp;
+    under 2 s (a starve after a ~1 s outage or delay step: the gap is about the outage, the worker's
+    second of silence covered the rest) the source was cleared and the chunk is placed at its stamp.
+    Without a lead-in the new stretch once started one R early (bench: 10.0 ms realized against a
+    40.4 ms stamp latency after a 1.5 s outage, then a 30.5 ms walk). With it the output lands on its
+    stamp either way;
   - only the RATE is followed: the phase term joins the step only while `|stamp - (fit + R)|` is over
     R/4 (the dead band), then at the old 5 ppm per bucket until back inside;
   - before the fit the outlier reference is the anchored line - R (no longer the first packet's
@@ -68,23 +73,41 @@ lost packets landed on audio already delivered).
   - effective R = max(R, one packet + 10 ms), fixed at the anchor; the source logs ONE `obs-vban
     receive buffer:` warning per (R, effective R) pair.
 - **The playout deadline (round 5, ROZHODNUTÉ 6347872706, Option B):** the source emits on its OWN
-  deadline, never on a packet's arrival.
+  clock, by every slot's deadline, never on a packet's arrival.
   - The receive callback only decides (`vban_recv_packet`: HOLD / PACKET / LATE / STALE / a new anchor)
-    and stores an in-time PACKET for its slot (`d.pos`).
+    and stores an in-time PACKET for its slot (`d.pos`). It never outputs; it only wakes an IDLE worker.
   - A playout WORKER thread per source (`vban-src-out`) calls `vban_recv_due(now, store head)` until it
-    says NONE. Every slot -- one packet's length -- goes to libobs at its deadline,
-    `stamp - VBAN_RECV_DEADLINE_MARGIN_MS` (2 ms): the stored packet when its position is the store's
-    head, else silence of exactly that slot (counted `lost`).
+    says NONE. Every slot is one packet's length; its deadline is `stamp - VBAN_RECV_DEADLINE_MARGIN_MS`
+    (2 ms).
+  - **The deadline is the DECISION point, never the handover time (fresh-context review of round 5,
+    finding 1).** Handing every slot over exactly at its deadline made the 2 ms margin the worker's
+    whole wake-jitter budget: a SCHED_OTHER thread (rtprio stays off on the OBS boxes) waking later
+    handed the slot after its window was mixed, libobs marked the source pending and played everything
+    after it one window (21.3 ms) later, uncounted. Now a slot whose packet is the store's head goes out
+    at the worker's look, however early (`late_ns` negative); while the slot's packet is missing the
+    worker looks again after at most `VBAN_RECV_POLL_MS` (5 ms), its deadline being the last look,
+    where the slot goes out as silence of exactly one slot (counted `lost`). An in-time packet reaches
+    libobs at most 5 ms after it arrived, about R before its stamp; only a lost slot's silence, and a
+    packet arriving within one look of its deadline, depend on the worker waking within the margin.
   - The deadlines run on the stamp line, i.e. the fitted SENDER rate, so libobs gets one continuous
-    stamp sequence ahead of the mix window that takes it: it never underruns, never clears the source,
-    and never grows the mix's buffering. The window holding a stamp is mixed at its end, after the
-    stamp; the margin covers the worker's wake jitter.
+    stamp sequence: while the worker wakes within the margin it never underruns, never clears the
+    source and never grows the mix's buffering (the window holding a stamp is mixed at its end).
+  - `missed` (the status line's `emit_missed`) counts the slots handed to libobs after their own stamp:
+    the worker woke later than the margin. Conservative: a slot 1 ms after its stamp usually still makes
+    its window (libobs mixes it at its end). Verify item 9 FAILs on it. The known limit is pinned in
+    the bench: a worker 25 ms late moves the realized latency 32 ms, every such slot counted.
   - The margin comes out of R's budget: a packet is in time with up to R - one packet - 2 ms of delay
-    over the earliest arrival. `emit_late_ms` on the status line is the window's latest slot past its
-    deadline: read it on the box before blaming the network.
+    over the earliest arrival. It stays 2 ms: stream-pp's budget is R 40 - 5.3 - lv1's worst 29 ms gap
+    = 5.7 ms, no room for more without raising its R. Size it from `emit_late_ms` / `emit_missed` read
+    on the box under load (the OBS log's status lines). `emit_late_ms` is the window's latest slot
+    against its deadline: negative while stored packets go out ahead (about -28 ms on a clean stream
+    at R 40), a positive value is a lost slot's silence late by the worker's wake jitter.
   - A stretch STARVES once a slot's deadline is more than `PERSIST_S` (1 s) after the last in-time
     arrival: the worker emits nothing more, and the next packet re-anchors.
-  - Another packet size re-anchors as `format` (a slot is one packet).
+  - Another packet size re-anchors as `format` (a slot is one packet, and a lost slot's length and
+    the slot positions come from that one size): a sender whose packet size VARIES is not supported.
+    Its re-anchor line names the change (`frames 256 -> 128, rate .., ch ..`) and is written at most
+    once per status period with the count it did not write (review round 5, finding 3).
   - A slot still to go out when the fit rebases the line at the next packet's start is read back along
     the line (`stamp_at` before `base_pos`: within ~0.2 us of the old line, far under a sample).
 - **The worker in the source (`vban-source.c`):**
@@ -93,12 +116,18 @@ lost packets landed on audio already delivered).
     `obs-vban receive store:`), the stream's sample format (the silence's) and the idle flag.
   - The lock is held only for a decision and a copy: the worker calls `obs_source_output_audio` after
     it, and the receive side logs from a snapshot after it.
-  - The worker sleeps to its next deadline with `os_sleepto_ns` (absolute on the OBS clock, at most
-    20 ms at a time so a stop is prompt). While idle it waits on `worker_wake` (100 ms), which a packet
-    that gives it work signals.
+  - The worker sleeps to its next look with `os_sleepto_ns` (absolute on the OBS clock: the earlier of
+    the slot's deadline and 5 ms on, never more than 20 ms at a time so a stop is prompt). While idle
+    (no stretch emitting) it waits on `worker_wake` (100 ms), which a stored packet signals. On Linux it
+    sets its timer slack to 1 ns (`prctl(PR_SET_TIMERSLACK)`), so the kernel does not batch its looks by
+    the default 50 us. Windows `os_sleepto_ns` spins the last 1-2 ms of every sleep: no Windows box runs
+    the receive source; if one ever does, give the worker the sender's high-resolution waitable timer
+    (the obs-vban pacing rule).
   - It is spawned at the END of `update()`, and stopped and JOINED at its start and in `destroy()`:
     after the UDP callback is removed, before the summary reads the timeline and before anything is
     freed. Each stop logs `obs-vban receive worker: source '<input>' stopped (update|destroy)`.
+    `update()` runs whole under its own `update_mutex` (review round 5, finding 5): the UI thread and
+    the obs-websocket thread can both call it, and two calls must never join one worker twice.
   - `VBAN_SRC_SPAWN_WORKER` / `VBAN_SRC_JOIN_WORKER` are the test seam: the lift-and-run driver runs
     `vban_src_worker_step` on simulated time, or the real thread with `thread`.
   - The real-thread driver run is clean under ThreadSanitizer (`cc -fsanitize=thread -pthread`, run
@@ -150,7 +179,10 @@ lost packets landed on audio already delivered).
 - **Bench** (`src/vban_receive_timeline_bench.rs`): a two-clock sender at +-50 ppm, 5..7 ms bursts, gaps
   of 5..30 ms every ~400 ms, receive-thread wake jitter.
   - **What it runs:** the replay runs the source as shipped. The receive decision, then the playout
-    worker at every slot's deadline between arrivals (`Replay::worker`), into the libobs model `Obs`.
+    worker of `src/vban_receive_timeline_worker_model.rs` -- ONE model shared with the unit tests' `Rig`
+    (review round 5): it wakes only at the times it scheduled itself, or idle when a packet is stored,
+    and the bench can make every wake late (`WakeLate`: a fixed part + a u^4 tail) -- into the libobs
+    model `Obs`. The parity test keeps its own driver: it mirrors the C test driver line for line.
   - **What `Obs` models:** the stamp-domain 70 ms snap, the system-domain 70 ms append, the
     `MAX_TS_VAR` (2 s) reset that places a chunk at its arrival, the kept partial remainder of an
     underrun, the clear of a stopped source, the 300 ppm stamp-basis ASRC, and (round 5) the
@@ -177,6 +209,14 @@ lost packets landed on audio already delivered).
     the starve; ONE re-anchor; the lead-in puts the new stretch on its stamp; held within 0.51 ms.
   - At R = 20 ms the same sender drops late packets (never a re-anchor): the test that the bench can
     fail.
+  - **A late worker (`src/vban_receive_timeline_bench_wake.rs`, review round 5):** every acceptance row
+    above (loss 40-900 ms, the hiccup, the step) and the 50 ppm sender with 30 ms gaps, with EVERY wake
+    up to 1.9 ms late (inside the margin), encoder running and not: the same numbers, nothing missed.
+    stream-snv's R 80 against the same sender with every wake up to 15 ms late: held within 0.81 ms,
+    nothing missed (a worker that held each packet to its deadline put every one behind its window).
+    The known limit: every wake 3 ms late on a 60 ms loss = 14 slots after their stamps (the 12 lost
+    slots + 2 packets that arrived within one look of their own stamps), all counted, the latency
+    held; 25 ms late = 464 counted, the realized latency moved 32 ms.
 - **Known limit, pinned:** before the fit the line runs at the nominal rate, then slews to it at 5 ppm
   per bucket, so the held latency moves ~ the sender's ppm x 20 s: within 1 ms to ~+-55 ppm, 1.9-2.0 ms
   at +-100 ppm (`known_limit_a_100_ppm_sender_moves_the_held_stamp_latency_about_2_ms_1439`).
@@ -189,10 +229,11 @@ lost packets landed on audio already delivered).
 
 ```
 obs-vban receive anchored: source '<input>' frame=N rate=48000 ch=2 receive_buffer_ms=R -- holding its first second
-obs-vban receive emitting: source '<input>' frame=N margin_ms=X after the first second's hold -- every slot goes out 2 ms before its stamp
-obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
+obs-vban receive emitting: source '<input>' frame=N margin_ms=X after the first second's hold -- every slot goes out by 2 ms before its stamp
+obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X emit_missed=N receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
 obs-vban receive late: source '<input>' frame=N late_ms=X -- dropped, its slot is silence on the anchored line (late=N)
 obs-vban receive re-anchor: source '<input>' reason=starve|backward|jump|format|config|fit frame=N starve_ms=X re_anchors=N late=N -- holding its first second
+obs-vban receive re-anchor: ... reason=format ... -- holding its first second (frames 256 -> 128, rate 48000 -> 48000, ch 2 -> 2: a varying packet size is not supported; N more not logged in the last period)
 obs-vban receive buffer: source '<input>' receive_buffer_ms=R is not above one packet (X ms) + 10 ms: using X ms
 obs-vban receive worker: source '<input>' stopped (update|destroy)
 obs-vban receive store: source '<input>' frame=N -- full (4096 packets): the playout worker is not emitting, the packet is dropped
@@ -203,8 +244,11 @@ another prefix (`anchored:`, `emitting:`, `late:`, `re-anchor:`, `buffer:`). `la
 per run of late packets (the counter counts each one); `reason=starve` on a re-anchor means no packet
 came in time for a second, and `starve_ms` says how long (0 for every other reason). `fit=frozen` on the
 status line: nothing folded for 3 s while the fit is valid. `max_late_ms` includes the dropped late
-packets. `emit_late_ms` (round 5) is the window's latest slot handed to libobs past its deadline: the
-worker's wake jitter on the box, which must stay well under the 2 ms margin.
+packets. `emit_late_ms` (round 5) is the window's latest slot against its deadline (negative while
+stored packets go out ahead of it; positive = a lost slot's silence late by the worker's wake jitter,
+which must stay under the 2 ms margin). `emit_missed` counts the slots handed after their own stamp
+since the source started (verify item 9 FAILs on it). A `format` re-anchor line is written at most
+once per status period.
 
 The status line is written by the receive callback, so it stops when packets stop. Counters are
 cumulative since the source was created (a port / stream / host change re-inits them). `max_late_ms`
@@ -273,7 +317,9 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   only, so the stream role gets none. Verify item 16 = `strih_intercom_hub_absent_grade`
   (FAIL while a hub file or a running unit is left), item 34 NOTEs the absent hub drop-in, item 9 =
   `strih_program_vban_grade` (the kind, the bind, port + stream vs the facts, `received` advancing over
-  12 s, R vs the fact as a NOTE, loss counters as a NOTE); the hub-only rows of item 9 (the program
+  12 s, R vs the fact as a NOTE, loss counters as a NOTE, `emit_missed` > 0 as a FAIL naming the
+  vban-src-out thread; a status line without the token, from an older build, is not graded on it);
+  the hub-only rows of item 9 (the program
   rx, the hub's HDMI leg, the MiniFuse talkback) run only in its hub branch.
 - **Windows (review round 1):** both Windows genlock builds compile the same `vban-source.c`, so a
   FULL deploy changes every Windows OBS's VBAN SOURCE too (R more latency, loss = silence). Read
@@ -285,6 +331,11 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   `obs-vban.so`), then setup-strih on stream-pp with OBS stopped (the genlock deploy stops it), then
   start OBS: the seed switches `Zvuk z mixu`. A setup re-run with OBS RUNNING removes the hub under a
   live pulse input: restart OBS right after. lv1 must be sending `stream` to stream-pp:6980.
+- **stream-snv's 80 ms (supervisor):** an `mbc` that is already an obs-vban input keeps its operator R:
+  set `receive_buffer_ms` to 80 in its properties (one counted `reason=config` re-anchor, then the
+  hold), read `receive_buffer_ms=80` back on the next status line, then re-measure the program A/V
+  offset -- R 80 plays the program audio ~40 ms later than R 40 did. After the deploy read
+  `emit_missed=0` and `emit_late_ms` on the status lines (verify item 9 grades the first).
 
 ## Verify locally (Tier-0, no cargo)
 

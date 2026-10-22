@@ -47,9 +47,9 @@ struct vban_src_s
 	vban_udp_t *vban;
 
 	DARRAY(float) buffer;
-	/* camera-box issue 1439 (ROZHODNUTE 6347872706): the source emits on its own deadline, never on a
+	/* camera-box issue 1439 (ROZHODNUTE 6347872706): the source emits on its own clock, never on a
 	 * packet's arrival. The receive thread decides and stores; the playout worker hands every slot to
-	 * libobs at its deadline. MUTEX guards everything both touch and is held only for a decision and a
+	 * libobs by its deadline. MUTEX guards everything both touch and is held only for a decision and a
 	 * copy: no output, no log line, no wait under it. */
 	pthread_mutex_t mutex;
 	struct vban_recv_timeline timeline; /* under MUTEX */
@@ -371,10 +371,10 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		s->late_run = false;
 	if (a->first_output) {
 		/* the hold is over: the stretch's first in-time packet; the worker sends its lead-in now and
-		 * every slot at its deadline, on the anchor's final (earliest-arrival) line */
+		 * every slot by its deadline, on the anchor's final (earliest-arrival) line */
 		blog(LOG_INFO,
 		     "obs-vban receive emitting: source '%s' frame=%u margin_ms=%.1f after the first second's hold "
-		     "-- every slot goes out %d ms before its stamp",
+		     "-- every slot goes out by %d ms before its stamp",
 		     obs_source_get_name(s->context), nu_frame, (double)-d->lateness_ns / 1e6,
 		     VBAN_RECV_DEADLINE_MARGIN_MS);
 	}
@@ -743,7 +743,7 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 
 	/* camera-box issue 1439: the receive timeline (vban-receive-timeline.h) decides what the packet is --
 	 * held, in time (stored for its slot), late, stale or a new anchor -- and never outputs anything: the
-	 * playout worker hands every slot to libobs at its deadline (ROZHODNUTE 6347872706), on a FIXED line
+	 * playout worker hands every slot to libobs by its deadline (ROZHODNUTE 6347872706), on a FIXED line
 	 * that follows the sender's clock, R ahead of its fitted arrival. Only the decision and the copy are
 	 * under the lock; the lines are logged after it. */
 	const uint64_t now = os_gettime_ns();

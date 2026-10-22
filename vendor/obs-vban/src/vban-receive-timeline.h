@@ -23,19 +23,20 @@
  *    first in-time packet past it starts the stretch's output, on the final line, so libobs never
  *    sees a stamp step and its stamp-basis ASRC never walks; the slots lost before it are not filled.
  *    Every full re-anchor holds again.
- *  - Deadline (ROZHODNUTE 6347872706, review round 5): the source emits on its own deadline, never on
- *    a packet's arrival. vban_recv_due hands every slot (one packet's length) to libobs at its
- *    deadline, its stamp - VBAN_RECV_DEADLINE_MARGIN_MS (ahead of the mix window that takes it): the
- *    stored packet when it arrived in time, else silence of exactly that slot. The deadlines run on
- *    the stamp line (the fitted SENDER rate), so libobs sees one continuous stamp sequence and never
- *    underruns while the stretch lives. A stretch STARVES once a slot's deadline is more than
- *    VBAN_RECV_PERSIST_S after the last in-time arrival: nothing more is emitted, the next packet
- *    re-anchors.
+ *  - Deadline (ROZHODNUTE 6347872706, review round 5): the source emits on its own clock, never on a
+ *    packet's arrival. vban_recv_due hands every slot (one packet's length) to libobs by its deadline,
+ *    its stamp - VBAN_RECV_DEADLINE_MARGIN_MS (ahead of the mix window that takes it): the deadline is
+ *    the DECISION point -- the stored packet goes out at the worker's next look, however early, a slot
+ *    still missing at its deadline is silence of exactly that slot. The deadlines run on the stamp line
+ *    (the fitted SENDER rate), so libobs sees one continuous stamp sequence and, while the worker wakes
+ *    within the margin, never underruns; a slot handed after its stamp is counted (missed). A stretch
+ *    STARVES once a slot's deadline is more than VBAN_RECV_PERSIST_S after the last in-time arrival:
+ *    nothing more is emitted, the next packet re-anchors.
  *  - Lead-in (review round 5): before a stretch's first slot the worker sends silence from its own
- *    now up to that slot's stamp (VBAN_RECV_DUE_LEAD_IN), ending exactly there: libobs RESETS a
- *    source's timing when a chunk lands more than 2 s (MAX_TS_VAR) off where its previous one ended
- *    and puts that chunk at the instant it arrived; the lead-in starts there, so the slots still land
- *    on their stamps.
+ *    now + the margin up to that slot's stamp (VBAN_RECV_DUE_LEAD_IN), ending exactly there: a
+ *    stretch's first chunk lands far from the source's previous audio (past 2 s, MAX_TS_VAR, libobs
+ *    puts it at the instant it arrived; under 2 s the cleared source places it at its stamp), and with
+ *    the lead-in the slots land on their stamps either way.
  *  - Fit: a least-squares line of arrival time over the packet's END position in the sender's
  *    samples (its nuFrame order), over the last VBAN_RECV_FIT_WINDOW_S one-second buckets of the
  *    sender's audio. A packet later than the reference line by more than VBAN_RECV_OUTLIER_MS is
@@ -129,7 +130,7 @@
 #define VBAN_RECV_NS_PER_MS 1000000ULL
 
 enum vban_recv_event {
-	VBAN_RECV_PACKET = 0,   /* in time: stored for its slot, handed to libobs at its deadline */
+	VBAN_RECV_PACKET = 0,   /* in time: stored for its slot, handed to libobs by its deadline */
 	VBAN_RECV_ANCHOR = 1,   /* the first packet: the timeline starts here */
 	VBAN_RECV_REANCHOR = 2, /* the timeline restarts at this packet (counted) */
 	VBAN_RECV_STALE = 3,    /* a duplicate / reordered packet whose slot has passed: dropped, counted */
