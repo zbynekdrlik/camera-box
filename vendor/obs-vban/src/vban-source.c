@@ -276,8 +276,10 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		 * final (earliest-arrival) line */
 		s->emitting = true;
 		blog(LOG_INFO,
-		     "obs-vban receive emitting: source '%s' frame=%u margin_ms=%.1f after the first second's hold",
-		     obs_source_get_name(s->context), nu_frame, (double)-d->lateness_ns / 1e6);
+		     "obs-vban receive emitting: source '%s' frame=%u margin_ms=%.1f lead_in_ms=%.1f after the first "
+		     "second's hold",
+		     obs_source_get_name(s->context), nu_frame, (double)-d->lateness_ns / 1e6,
+		     (double)vban_recv_samples_to_ns(d->lead_in_samples, t->rate) / 1e6);
 	}
 	if (d->event == VBAN_RECV_ANCHOR) {
 		blog(LOG_INFO,
@@ -317,12 +319,14 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 	}
 }
 
-/* camera-box issue 1439: the lost slots as silence on the timeline, in pieces of at most
- * VBAN_RECV_SILENCE_CHUNK_FRAMES frames, in the SAME sample format and layout as the stream's packets
- * (LIKE): libobs resets the source's resampler, and with it the genlock ASRC, whenever the format of
- * the audio it is handed changes. Unsigned 8-bit silence is 0x80, every other format's is 0. */
-static void vban_src_output_silence(struct vban_src_s *s, const struct vban_recv_decision *d,
-				    const struct obs_source_audio *like)
+/* camera-box issue 1439: FRAMES of silence in pieces of at most VBAN_RECV_SILENCE_CHUNK_FRAMES frames,
+ * in the SAME sample format and layout as the stream's packets (LIKE): libobs resets the source's
+ * resampler, and with it the genlock ASRC, whenever the format of the audio it is handed changes.
+ * Unsigned 8-bit silence is 0x80, every other format's is 0. ON_LINE: the piece DONE frames in is
+ * stamped on the timeline at position FROM + DONE (the lost slots); otherwise at the stamp FROM + its
+ * nominal duration (the lead-in, which ends exactly at the first output's stamp). */
+static void vban_src_output_silence(struct vban_src_s *s, const struct obs_source_audio *like, uint64_t frames,
+				    bool on_line, uint64_t from)
 {
 	const bool planar = is_audio_planar(like->format);
 	const size_t channels = (size_t)like->speakers;
@@ -337,12 +341,13 @@ static void vban_src_output_silence(struct vban_src_s *s, const struct vban_recv
 	};
 	for (size_t ch = 0; ch < (planar ? channels : 1) && ch < MAX_AV_PLANES; ch++)
 		silence.data[ch] = s->silence.array;
-	for (uint64_t done = 0; done < d->silence_samples;) {
-		uint64_t n = d->silence_samples - done;
+	for (uint64_t done = 0; done < frames;) {
+		uint64_t n = frames - done;
 		if (n > VBAN_RECV_SILENCE_CHUNK_FRAMES)
 			n = VBAN_RECV_SILENCE_CHUNK_FRAMES;
 		silence.frames = (uint32_t)n;
-		silence.timestamp = vban_recv_stamp_at(&s->timeline, d->silence_pos + done);
+		silence.timestamp = on_line ? vban_recv_stamp_at(&s->timeline, from + done)
+					    : from + vban_recv_samples_to_ns(done, like->samples_per_sec);
 		obs_source_output_audio(s->context, &silence);
 		done += n;
 	}
@@ -449,10 +454,15 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 	vban_src_report(s, &d, header->nuFrame, audio.frames);
 	/* ROZHODNUTE 6345255813: an anchor, a re-anchor and every packet of their first second are HELD
 	 * (never output), so libobs never sees the earliest-arrival refinement as a stamp step (item 1); a
-	 * LATE packet's audio is dropped and its slot goes out as silence on the unchanged line (item 2) */
+	 * LATE packet's audio is dropped and its slot goes out as silence on the unchanged line (item 2).
+	 * Review round 5: a stretch's first output has its LEAD-IN before it, silence from now up to its
+	 * stamp, so libobs starts the stream here and the output lands on its stamp even when libobs reset
+	 * its timing (a gap over MAX_TS_VAR, after a starve, puts the first chunk at its arrival). */
 	if (d.event == VBAN_RECV_PACKET || d.event == VBAN_RECV_LATE) {
+		if (d.lead_in_samples > 0)
+			vban_src_output_silence(s, &audio, d.lead_in_samples, false, d.lead_in_stamp_ns);
 		if (d.silence_samples > 0)
-			vban_src_output_silence(s, &d, &audio);
+			vban_src_output_silence(s, &audio, d.silence_samples, true, d.silence_pos);
 		if (d.event == VBAN_RECV_PACKET) {
 			audio.timestamp = d.stamp_ns;
 			obs_source_output_audio(s->context, &audio);

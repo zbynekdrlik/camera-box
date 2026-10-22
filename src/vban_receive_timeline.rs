@@ -22,6 +22,11 @@
 //!   so libobs never sees a stamp step and its stamp-basis ASRC never walks; the slots lost just
 //!   before it are not filled (libobs has nothing from the source to keep contiguous yet). Every
 //!   full re-anchor holds again: ~1 s of silence after it.
+//! * **Lead-in** (review round 5). A stretch's first output carries silence from the packet's
+//!   arrival up to that output's stamp ([`Decision::lead_in_samples`]), ending exactly there:
+//!   libobs RESETS a source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`) off where its
+//!   previous one ended and puts that chunk at the instant it arrived, which a starve + its hold
+//!   always cause; the lead-in starts there, so the output still lands on its stamp.
 //! * **Fit.** A least-squares line of arrival time over the packet's END position in the sender's
 //!   samples (its `nuFrame` order), over the last [`FIT_WINDOW_S`] one-second buckets of the
 //!   sender's audio. A packet later than the reference line by more than [`OUTLIER_MS`] is not
@@ -472,6 +477,7 @@ impl Timeline {
         self.fit_ybar = 0.0;
         self.phase_ns = 0;
         self.last_intime_ns = now_ns;
+        self.emitted = false;
         self.last_k = i64::from(frames / rate);
         self.fold(self.last_k, u64::from(frames), 0);
     }
@@ -672,6 +678,20 @@ impl Timeline {
                 d.silence_pos = self.next_pos;
                 self.lost += lost;
                 self.silence_samples += filled;
+            }
+            // the stretch's first output gets its lead-in: silence from this arrival up to that
+            // output's stamp (review round 5)
+            if !self.emitted && (d.event == Event::Packet || d.silence_samples > 0) {
+                self.emitted = true;
+                let first = if d.silence_samples > 0 {
+                    self.stamp_at(d.silence_pos)
+                } else {
+                    stamp
+                };
+                if first > now_ns {
+                    d.lead_in_samples = ns_to_samples(first - now_ns, rate);
+                    d.lead_in_stamp_ns = first - samples_to_ns(d.lead_in_samples, rate);
+                }
             }
             if !late {
                 self.last_intime_ns = now_ns;

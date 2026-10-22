@@ -22,6 +22,11 @@
  *    first packet past it is the first PACKET, on the final line, so libobs never sees a stamp step
  *    and its stamp-basis ASRC never walks; the slots lost just before it are not filled. Every full
  *    re-anchor holds again.
+ *  - Lead-in (review round 5): a stretch's first output carries silence from the packet's arrival up
+ *    to that output's stamp (lead_in_samples), ending exactly there: libobs RESETS a source's timing
+ *    when a chunk lands more than 2 s (MAX_TS_VAR) off where its previous one ended and puts that
+ *    chunk at the instant it arrived, which a starve + its hold always cause; the lead-in starts
+ *    there, so the output still lands on its stamp.
  *  - Fit: a least-squares line of arrival time over the packet's END position in the sender's
  *    samples (its nuFrame order), over the last VBAN_RECV_FIT_WINDOW_S one-second buckets of the
  *    sender's audio. A packet later than the reference line by more than VBAN_RECV_OUTLIER_MS is
@@ -319,6 +324,7 @@ static inline void vban_recv_anchor(struct vban_recv_timeline *t, uint64_t now_n
 	t->fit_ybar = 0.0;
 	t->phase_ns = 0;
 	t->last_intime_ns = now_ns;
+	t->emitted = false;
 	t->last_k = (int64_t)(frames / rate);
 	vban_recv_fold(t, t->last_k, frames, 0);
 }
@@ -498,6 +504,16 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 			d.silence_pos = t->next_pos;
 			t->lost += lost;
 			t->silence_samples += filled;
+		}
+		/* the stretch's first output gets its lead-in: silence from this arrival up to that output's
+		 * stamp (review round 5) */
+		if (!t->emitted && (d.event == VBAN_RECV_PACKET || d.silence_samples > 0)) {
+			t->emitted = true;
+			const uint64_t first = d.silence_samples > 0 ? vban_recv_stamp_at(t, d.silence_pos) : stamp;
+			if (first > now_ns) {
+				d.lead_in_samples = vban_recv_ns_to_samples(first - now_ns, rate);
+				d.lead_in_stamp_ns = first - vban_recv_samples_to_ns(d.lead_in_samples, rate);
+			}
 		}
 		if (!late)
 			t->last_intime_ns = now_ns;
