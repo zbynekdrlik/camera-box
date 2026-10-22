@@ -256,7 +256,9 @@ void vban_udp_set_host(vban_udp_t *dev, vban_udp_cb_t cb, void *data, const char
  * 16-bit scale. */
 static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int bitfmt, int16_t value, uint64_t now)
 {
-	char buf[VBAN_PROTOCOL_MAX_SIZE];
+	/* room for 256 stereo 32-bit frames: the test keeps one packet size for every format (a real
+	 * 32-bit sender sends smaller packets, VBAN_PROTOCOL_MAX_SIZE; the source never checks that) */
+	char buf[VBAN_HEADER_SIZE + 256 * 2 * 4];
 	memset(buf, 0, sizeof(buf));
 	struct VBanHeader *h = (struct VBanHeader *)buf;
 	memcpy(&h->vban, "VBAN", 4);
