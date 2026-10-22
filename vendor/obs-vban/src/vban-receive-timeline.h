@@ -585,9 +585,14 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
  * the oldest packet in the caller's store (the in-time packets, stored in increasing position); HAS_HEAD
  * is false when the store is empty. Call it until it returns VBAN_RECV_DUE_NONE:
  *  - nothing while no stretch emits (NONE, next_ns 0);
- *  - the stretch's lead-in once, first: silence from NOW_NS up to its first slot's stamp;
- *  - then each slot whose deadline has come, in order: the head packet when it is that slot (the caller
- *    pops it), else silence of exactly one slot (counted lost);
+ *  - the stretch's lead-in once, first: silence from NOW_NS + VBAN_RECV_DEADLINE_MARGIN_MS up to its first
+ *    slot's stamp (none when less than one frame is left);
+ *  - then the slots in order. The deadline is the DECISION point, never the handover time (review round
+ *    5): a slot whose packet is the head goes out now, however early (its late_ns negative); while it is
+ *    missing the worker looks again at next_ns = the earlier of its deadline and NOW_NS +
+ *    VBAN_RECV_POLL_MS; at its deadline it is silence of exactly one slot (counted lost);
+ *  - a slot handed out after its own stamp is counted missed (the worker woke later than the margin: the
+ *    mix may already have taken that window);
  *  - a slot whose deadline is more than VBAN_RECV_PERSIST_S after the last in-time arrival is never
  *    emitted: the stretch starved, nothing more goes out until a packet re-anchors. */
 static inline struct vban_recv_due vban_recv_due(struct vban_recv_timeline *t, uint64_t now_ns, bool has_head,
@@ -599,8 +604,10 @@ static inline struct vban_recv_due vban_recv_due(struct vban_recv_timeline *t, u
 	if (t->lead_in_pending) {
 		t->lead_in_pending = false;
 		const uint64_t first = vban_recv_stamp_at(t, t->emit_pos);
-		if (first > now_ns) {
-			const uint64_t frames = vban_recv_ns_to_samples(first - now_ns, t->rate);
+		const uint64_t margin = (uint64_t)VBAN_RECV_DEADLINE_MARGIN_MS * VBAN_RECV_NS_PER_MS;
+		const uint64_t start = now_ns > UINT64_MAX - margin ? UINT64_MAX : now_ns + margin;
+		if (first > start) {
+			const uint64_t frames = vban_recv_ns_to_samples(first - start, t->rate);
 			if (frames > 0) {
 				d.kind = VBAN_RECV_DUE_LEAD_IN;
 				d.frames = frames;
@@ -615,8 +622,11 @@ static inline struct vban_recv_due vban_recv_due(struct vban_recv_timeline *t, u
 		t->last_intime_ns > UINT64_MAX - persist ? UINT64_MAX : t->last_intime_ns + persist;
 	if (deadline > alive_until)
 		return d;
-	if (now_ns < deadline) {
-		d.next_ns = deadline;
+	const bool stored = has_head && head_pos == t->emit_pos;
+	if (!stored && now_ns < deadline) {
+		const uint64_t poll = (uint64_t)VBAN_RECV_POLL_MS * VBAN_RECV_NS_PER_MS;
+		const uint64_t look = now_ns > UINT64_MAX - poll ? UINT64_MAX : now_ns + poll;
+		d.next_ns = deadline < look ? deadline : look;
 		return d;
 	}
 	d.pos = t->emit_pos;
@@ -624,13 +634,15 @@ static inline struct vban_recv_due vban_recv_due(struct vban_recv_timeline *t, u
 	d.stamp_ns = vban_recv_stamp_at(t, t->emit_pos);
 	d.deadline_ns = deadline;
 	d.late_ns = (int64_t)now_ns - (int64_t)deadline;
-	if (has_head && head_pos == t->emit_pos) {
+	if (stored) {
 		d.kind = VBAN_RECV_DUE_PACKET;
 	} else {
 		d.kind = VBAN_RECV_DUE_SILENCE;
 		t->lost++;
 		t->silence_samples += t->frames;
 	}
+	if (now_ns > d.stamp_ns)
+		t->missed++;
 	t->emit_pos += t->frames;
 	return d;
 }

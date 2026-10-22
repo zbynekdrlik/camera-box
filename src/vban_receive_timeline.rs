@@ -789,9 +789,15 @@ impl Timeline {
     /// increasing position), `None` when it is empty. Call it until it returns [`Due::None`]:
     ///
     /// * nothing while no stretch emits ([`Due::None`], `next_ns` 0);
-    /// * the stretch's lead-in once, first: silence from `now_ns` up to its first slot's stamp;
-    /// * then each slot whose deadline has come, in order: the head packet when it is that slot
-    ///   (the caller pops it), else silence of exactly one slot (counted lost);
+    /// * the stretch's lead-in once, first: silence from `now_ns` + [`DEADLINE_MARGIN_MS`] up to
+    ///   its first slot's stamp (none when less than one frame is left);
+    /// * then the slots in order. The deadline is the DECISION point, never the handover time
+    ///   (review round 5): a slot whose packet is the head goes out now, however early (its
+    ///   `late_ns` negative); while it is missing the worker looks again at `next_ns` = the
+    ///   earlier of its deadline and `now_ns` + [`POLL_MS`]; at its deadline it is silence of
+    ///   exactly one slot (counted lost);
+    /// * a slot handed out after its own stamp is counted `missed` (the worker woke later than the
+    ///   margin: the mix may already have taken that window);
     /// * a slot whose deadline is more than [`PERSIST_S`] after the last in-time arrival is never
     ///   emitted: the stretch starved, nothing more goes out until a packet re-anchors.
     pub fn due(&mut self, now_ns: u64, head_pos: Option<u64>) -> DueDecision {
@@ -802,8 +808,9 @@ impl Timeline {
         if self.lead_in_pending {
             self.lead_in_pending = false;
             let first = self.stamp_at(self.emit_pos);
-            if first > now_ns {
-                let frames = ns_to_samples(first - now_ns, self.rate);
+            let start = now_ns.saturating_add(DEADLINE_MARGIN_MS * NS_PER_MS);
+            if first > start {
+                let frames = ns_to_samples(first - start, self.rate);
                 if frames > 0 {
                     d.kind = Due::LeadIn;
                     d.frames = frames;
@@ -816,8 +823,9 @@ impl Timeline {
         if deadline > self.last_intime_ns.saturating_add(PERSIST_S * NS_PER_SEC) {
             return d;
         }
-        if now_ns < deadline {
-            d.next_ns = deadline;
+        let stored = head_pos == Some(self.emit_pos);
+        if !stored && now_ns < deadline {
+            d.next_ns = deadline.min(now_ns.saturating_add(POLL_MS * NS_PER_MS));
             return d;
         }
         let frames = u64::from(self.frames);
@@ -826,12 +834,15 @@ impl Timeline {
         d.stamp_ns = self.stamp_at(self.emit_pos);
         d.deadline_ns = deadline;
         d.late_ns = now_ns as i64 - deadline as i64;
-        if head_pos == Some(self.emit_pos) {
+        if stored {
             d.kind = Due::Packet;
         } else {
             d.kind = Due::Silence;
             self.lost += 1;
             self.silence_samples += frames;
+        }
+        if now_ns > d.stamp_ns {
+            self.missed += 1;
         }
         self.emit_pos += frames;
         d
