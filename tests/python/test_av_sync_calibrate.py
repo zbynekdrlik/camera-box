@@ -319,8 +319,8 @@ class TestDefaultLastJsonPath:
 # ---------------------------------------------------------------------------
 
 class TestMcpNameForHost:
-    def test_stream_host_resolves_to_win_stream_snv(self):
-        assert av_sync_calibrate.mcp_name_for_host("10.77.9.204") == "win-stream-snv"
+    def test_stream_host_resolves_to_linux_stream_snv_1462(self):
+        assert av_sync_calibrate.mcp_name_for_host("10.77.9.204") == "linux-stream-snv"
 
     def test_strih_host_resolves_to_linux_strih_lx_1317(self):
         # issue 1317 part 4: 10.77.9.202 is the Linux strih-snv (the Windows strih PC is retired).
@@ -343,11 +343,18 @@ class TestRemotePushPlan:
             "source": "NDI 2ME PGM", "offset_ms": 123.4, "applied_latency_ms": 926,
             "ts": 1720000000.0,
         }
-        plan = av_sync_calibrate.remote_push_plan("10.77.9.204", payload)
+        # a windows-genlock fleet box (stream-snv runs Linux since issue 1462)
+        plan = av_sync_calibrate.remote_push_plan("resolume.lan", payload)
         assert r"C:\ProgramData\camera-box\av-sync-last.json" in plan
-        assert "win-stream-snv" in plan
-        assert "10.77.9.204" in plan
+        assert "resolume.lan" in plan
         assert "FileWrite" in plan
+
+    def test_plan_for_the_linux_stream_box_names_the_linux_destination_1462(self):
+        payload = {"source": "NDI 2ME PGM", "offset_ms": 1.0, "applied_latency_ms": 1108, "ts": 1.0}
+        plan = av_sync_calibrate.remote_push_plan("10.77.9.204", payload)
+        assert "/home/newlevel/.camera-box/av-sync-last.json" in plan
+        assert "linux-stream-snv" in plan
+        assert "ProgramData" not in plan
 
     def test_plan_includes_the_exact_json_content(self):
         payload = {
@@ -447,8 +454,8 @@ class TestCLI:
         av_sync_calibrate.main()
         out = capsys.readouterr().out
         assert "REMOTE PUSH REQUIRED" in out
-        assert r"C:\ProgramData\camera-box\av-sync-last.json" in out
-        assert "win-stream-snv" in out
+        assert "/home/newlevel/.camera-box/av-sync-last.json" in out  # Linux stream-snv, issue 1462
+        assert "linux-stream-snv" in out
 
     def test_printed_plan_json_matches_what_was_actually_persisted(
         self, monkeypatch, tmp_path, capsys,

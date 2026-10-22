@@ -111,7 +111,7 @@ REMOTE_LINUX_JSON_PATH = "/home/newlevel/.camera-box/av-sync-last.json"
 # push DESTINATION follows the host's fleet class (remote_dest_for_host below).
 _KNOWN_MCP_HOSTS = {
     "10.77.9.202": "linux-strih-snv",
-    "10.77.9.204": "win-stream-snv",
+    "10.77.9.204": "linux-stream-snv",  # the Linux stream-snv since issue 1462
 }
 
 
