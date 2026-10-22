@@ -513,8 +513,7 @@ def test_a_failed_stop_moves_nothing(tmp_path):
 def test_setup_step_13_removes_the_hub_on_the_stream_role(tmp_path):
     s = SETUP.read_text()
     a = s.index('if WHY="$(obs_box_step_applies 13)"; then')
-    end = s.index("\nelse echo \"  SKIP: ${WHY}\"; strih_intercom_hub_remove", a)
-    block = s[a:s.index("fi\n", end) + 3]
+    block = s[a:s.index("\nfi\n", s.index("strih_intercom_hub_remove ||", a)) + 4]
     e = _plant_hub(tmp_path)
     stub, log = _fake_systemctl(tmp_path, "active", "enabled")
     body = ('fail() { echo "FAIL $*"; exit 1; }\nwarn() { echo "WARN $*"; }\nstrih_box_load stream-pp\n'
@@ -526,17 +525,21 @@ def test_setup_step_13_removes_the_hub_on_the_stream_role(tmp_path):
     assert "enable intercom-hub" not in log.read_text()
 
 
-def test_setup_writes_no_hub_dropin_on_the_stream_role():
+def test_every_hub_dropin_is_written_in_step_13s_hub_branch_only():
+    # review round 1: the hub's two drop-ins are written by the hub's own step, inside its ONE role gate,
+    # so the stream role writes none and no other step carries a crammed one-line gate of its own
     s = SETUP.read_text()
     assert len(s.splitlines()) <= 1000
+    step13 = s[s.index('step 13 "'):s.index('step 14 "')]
+    gate = step13.index('if WHY="$(obs_box_step_applies 13)"; then')
+    other = step13.index("\nelse\n", gate)
     for write in ('ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"',
                   '> /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf'):
-        line = next(ln for ln in s.splitlines() if write in ln)
-        assert line.startswith("if obs_box_step_applies 13 >/dev/null; then mkdir -p "), line
-    step13 = s[s.index('step 13 "'):s.index('step 14 "')]
-    assert step13.index('if WHY="$(obs_box_step_applies 13)"; then') \
-        < step13.index('install -Dm644 "${HERE}/../systemd/intercom-hub.service"') \
-        < step13.index("strih_intercom_hub_binary_install") < step13.index("strih_intercom_hub_remove ||")
+        assert s.count(write) == 1, write
+        assert gate < step13.index(write) < other, write
+    assert "if obs_box_step_applies 13 >/dev/null; then" not in s
+    assert gate < step13.index('install -Dm644 "${HERE}/../systemd/intercom-hub.service"') \
+        < step13.index("strih_intercom_hub_binary_install") < other < step13.index("strih_intercom_hub_remove ||")
 
 
 def test_setup_installs_the_vban_module_next_to_the_seeder():
@@ -642,10 +645,13 @@ def test_lost_or_re_anchored_audio_is_named(tmp_path):
 def test_verify_wiring_and_budget():
     v = VERIFY.read_text()
     assert len(v.splitlines()) <= 1000
-    item9 = v[v.index("# 9) PipeWire program audio"):v.index("# 9b)")]
-    assert 'if ! WHY="$(obs_box_step_applies 13)"; then strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"; else' \
+    item9 = v[v.index("# 9) program audio"):v.index("# 9b)")]
+    assert 'if ! WHY="$(obs_box_step_applies 13)"; then\n  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"\nelse\n' \
         in item9
-    assert item9.index("strih_program_vban_grade") < item9.index("AUDIO_SINK=0") < item9.index("esac; fi")
+    # the hub-only rows (program rx, the HDMI leg, the MiniFuse talkback) sit in the hub branch
+    assert item9.index("strih_program_vban_grade") < item9.index("\nelse\n") < item9.index("AUDIO_SINK=0") \
+        < item9.index("strih_intercom_hub_hdmi_leg_grade") < item9.index("talkback: MiniFuse") \
+        < item9.rindex("\nfi\n")
     item16 = v[v.index("# 16) intercom hub unit"):v.index("# 17)")]
     assert item16.index('if ! WHY="$(obs_box_step_applies 13)"; then strih_intercom_hub_absent_grade "$WHY"') \
         < item16.index("elif [ -f /etc/systemd/system/intercom-hub.service ]; then")

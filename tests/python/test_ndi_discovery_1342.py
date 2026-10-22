@@ -684,7 +684,7 @@ class VerifyStrihItem34Behaviour(unittest.TestCase):
             self.assertEqual(r.stdout.count("PASS (ndi-discovery)"), 3, r.stdout)
 
     def test_a_box_without_a_hub_grades_no_hub_dropin_1439(self):
-        # issue 1439: the stream role runs no intercom hub, so setup-strih step 4b writes no hub drop-in
+        # issue 1439: the stream role runs no intercom hub, so setup-strih step 13 writes no hub drop-in
         # and item 34 grades only the two receiver configs (a NOTE names why), never a missing drop-in.
         with tempfile.TemporaryDirectory() as tmp:
             self._configure(tmp)

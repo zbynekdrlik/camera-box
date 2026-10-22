@@ -203,7 +203,7 @@ The CLI, for boxes this repo does not provision and for the issue-1389 runbook:
 |---|---|---|---|
 | cambox camera-box.service (receives `STRIH-SNV (interkom)` for the cameraman preview; root, `ProtectHome=yes`) | NONE: mDNS only. The issue-1342 `/etc/ndi/ndi-config.v1.json` + `camera-box.service.d/ndi-discovery.conf` are removed | setup-device STEP 7 strips them; on a live box `--cambox-apply` | verify-device `(an)`: no `networks.ips` |
 | strih-snv OBS + bkshading-service (User=newlevel) | `~newlevel/.ndi/ndi-config.v1.json` | setup-strih step 4b | verify-strih item 34 |
-| strih-snv intercom-hub (`ProtectHome=true`) | `/etc/ndi/ndi-config.v1.json` + `intercom-hub.service.d/ndi-discovery.conf` | setup-strih step 4b | verify-strih item 34 |
+| strih-snv intercom-hub (`ProtectHome=true`) | `/etc/ndi/ndi-config.v1.json` + `intercom-hub.service.d/ndi-discovery.conf` | setup-strih step 4b (the config) + step 13 (the drop-in, with the hub; none on the stream role, issue 1439) | verify-strih item 34 |
 | Windows stream / resolume / any Windows laptop | `%ProgramData%\NDI\ndi-config.v1.json` | `scripts/ndi-discovery-laptop.ps1` (supervisor / owner) | the script's own read-back |
 | Linux laptop / dev1 probes | `~/.ndi/ndi-config.v1.json` | copy `scripts/ndi-discovery/ndi-config.v1.json` | -- |
 

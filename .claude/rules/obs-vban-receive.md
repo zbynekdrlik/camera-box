@@ -93,10 +93,12 @@ is the window's largest arrival - stamp of an on-time packet: about -R + jitter 
 - **No hub on the stream role:** `obs_box_step_applies 13` skips step 13 there and calls
   `strih_intercom_hub_remove` (stop + disable, then unit, drop-in dir, binary and `/etc/intercom-hub`
   MOVED to `/var/lib/camera-box/intercom-hub-removed/<UTC stamp>/<abs path>`, daemon-reload;
-  idempotent). Steps 4b and 12 write no hub drop-in there. Verify item 16 = `strih_intercom_hub_absent_grade`
+  idempotent). The hub's two drop-ins (NDI_CONFIG_DIR, local audio) are written by step 13's hub branch
+  only, so the stream role gets none. Verify item 16 = `strih_intercom_hub_absent_grade`
   (FAIL while a hub file or a running unit is left), item 34 NOTEs the absent hub drop-in, item 9 =
   `strih_program_vban_grade` (the kind, the bind, port + stream vs the facts, `received` advancing over
-  12 s, R vs the fact as a NOTE, loss counters as a NOTE).
+  12 s, R vs the fact as a NOTE, loss counters as a NOTE); the hub-only rows of item 9 (the program
+  rx, the hub's HDMI leg, the MiniFuse talkback) run only in its hub branch.
 - **Rollout (supervisor):** the strih bundle with obs-vban (linux-genlock.yml strih variant stages
   `obs-vban.so`), then setup-strih on stream-pp with OBS stopped (the genlock deploy stops it), then
   start OBS: the seed switches `Zvuk z mixu`. A setup re-run with OBS RUNNING removes the hub under a

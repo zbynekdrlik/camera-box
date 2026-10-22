@@ -343,44 +343,45 @@ case "$_rm_verdict" in
   *) bad "remoteos-mcp ${_rm_verdict#FAIL: } -- re-run setup-strih.sh step 10 (issue 1361)" ;;
 esac
 
-# 9) PipeWire program audio (issue 1344): the DERIVED verdict — the strih-program null sink + the OBS
-#    `ASIO zvuk` pulse_input_capture + (when the hub is active) the program-feed rx (FOH level = a
-#    supervisor step). Issue 1439: a box with no hub (stream role) grades its obs-vban source instead.
-if ! WHY="$(obs_box_step_applies 13)"; then strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"; else
-AUDIO_SINK=0
-# 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's
-# PipeWire session (the null sink lives there) -> a false "sink missing" FAIL on a healthy box. Probe
-# the operator session explicitly when running as root (sudo -u + its XDG_RUNTIME_DIR), else inline.
-if command -v pw-cli >/dev/null 2>&1; then
-  if [ "$(id -u)" = 0 ]; then
-    PW_LS="$(sudo -u "${STRIH_LX_USER:-newlevel}" XDG_RUNTIME_DIR="/run/user/$(id -u "${STRIH_LX_USER:-newlevel}")" pw-cli ls Node 2>/dev/null || true)"
-  else
-    PW_LS="$(pw-cli ls Node 2>/dev/null || true)"
-  fi
-  printf '%s\n' "$PW_LS" | grep -q '"strih-program"' && AUDIO_SINK=1
-fi
-AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
-if systemctl is-active intercom-hub >/dev/null 2>&1; then
-  # hub active (M4+): grade the real program-feed rx off the hub /api/state.
-  if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
-       | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
-    AUDIO_RX=1
-  else
-    AUDIO_RX=0
-  fi
+# 9) program audio. A hub box (issue 1344): strih-program sink + the OBS pulse capture + the hub's program
+#    rx (FOH level = a supervisor step). A box with no hub (the stream role, issue 1439): its obs-vban source.
+if ! WHY="$(obs_box_step_applies 13)"; then
+  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"
 else
-  # enable-only phase (hub enabled-not-started until the M4 cut-over): grade only the structural
-  # sink + OBS input; the rx is verified once the hub runs.
-  AUDIO_RX=1
+  AUDIO_SINK=0
+  # 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's PipeWire
+  # session (the null sink) -> a false "sink missing" FAIL. Probe that session (sudo -u + its XDG_RUNTIME_DIR).
+  if command -v pw-cli >/dev/null 2>&1; then
+    if [ "$(id -u)" = 0 ]; then
+      PW_LS="$(sudo -u "${STRIH_LX_USER:-newlevel}" XDG_RUNTIME_DIR="/run/user/$(id -u "${STRIH_LX_USER:-newlevel}")" pw-cli ls Node 2>/dev/null || true)"
+    else
+      PW_LS="$(pw-cli ls Node 2>/dev/null || true)"
+    fi
+    printf '%s\n' "$PW_LS" | grep -q '"strih-program"' && AUDIO_SINK=1
+  fi
+  AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
+  if systemctl is-active intercom-hub >/dev/null 2>&1; then
+    # hub active (M4+): grade the real program-feed rx off the hub /api/state.
+    if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
+         | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
+      AUDIO_RX=1
+    else
+      AUDIO_RX=0
+    fi
+  else
+    # enable-only phase (hub enabled-not-started until the M4 cut-over): grade only the structural
+    # sink + OBS input; the rx is verified once the hub runs.
+    AUDIO_RX=1
+  fi
+  AUDIO_VERDICT="$(strih_lx_program_audio_verdict "$AUDIO_SINK" "$AUDIO_RX" "$AUDIO_KIND" unknown na || true)"
+  case "$AUDIO_VERDICT" in
+    PASS*) ok   "program audio: $AUDIO_VERDICT" ;;
+    NOTE*) note "program audio: $AUDIO_VERDICT" ;;
+    *)     bad  "program audio: $AUDIO_VERDICT" ;;
+  esac
+  strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs
+  if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 fi
-AUDIO_VERDICT="$(strih_lx_program_audio_verdict "$AUDIO_SINK" "$AUDIO_RX" "$AUDIO_KIND" unknown na || true)"
-case "$AUDIO_VERDICT" in
-  PASS*) ok   "program audio: $AUDIO_VERDICT" ;;
-  NOTE*) note "program audio: $AUDIO_VERDICT" ;;
-  *)     bad  "program audio: $AUDIO_VERDICT" ;;
-esac; fi
-strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs; then the MiniFuse talkback (report-only)
-if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 
 # 9b) MiniFuse period + graph quantum (issue 1345, owner accepted 25.9.2026): both operator-session
 #     drop-ins present with the rendered content (FAIL when missing or drifted -- the buzz / robotic
@@ -964,7 +965,7 @@ if ! WHY="$(obs_box_step_applies 13)"; then note "(ndi-discovery) no intercom hu
 elif [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
   ok "(ndi-discovery) intercom-hub NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in present"
 else
-  bad "(ndi-discovery) ${NDI_DISCOVERY_INTERCOM_DROPIN} missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 4b (issue 1342)"
+  bad "(ndi-discovery) ${NDI_DISCOVERY_INTERCOM_DROPIN} missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 13, which writes the hub's drop-ins (issue 1342)"
 fi
 
 # 32) the shared OBS-box appliance baseline (issue 1357) -- the ONE grader verify-imag.sh runs too

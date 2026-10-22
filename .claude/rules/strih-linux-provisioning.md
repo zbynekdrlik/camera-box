@@ -881,8 +881,8 @@ MiniFuse capture as the operator talkback into the N-1 mix. Full design + the Dy
 
 `setup-strih.sh` step 12 now **INSTALLS** the graph (no more fail-loud TODO / `STRIH_LX_AUDIO_WIRED`):
 the operator-session `strih-program` null sink + a WirePlumber rule pinning the MiniFuse to its
-pro-audio profile @48 kHz + the intercom-hub audio drop-in (runs the hub as the operator so its
-pw-cat children reach the operator PipeWire session). The OBS `ASIO zvuk` input is seeded by
+pro-audio profile @48 kHz. The intercom-hub audio drop-in (runs the hub as the operator so its
+pw-cat children reach the operator PipeWire session) is written by step 13 with the hub (issue 1439). The OBS `ASIO zvuk` input is seeded by
 `strih_scenes.py --bootstrap` (the ONE allowed create in update-only mode). `verify-strih.sh` derives
 the audio verdict (`strih_lx_program_audio_verdict`: sink present + OBS input pulse_input_capture +
 hub program-rx; FOH-live level is a supervisor NOTE). **Supervisor live steps:** confirm the MiniFuse

@@ -337,19 +337,16 @@ fi
 # traveling resolume hostname resolved now, skipped when away), NEVER a cambox -- issue 1389: a finder's
 # discovery connection into a cambox aborts camera-box when this OBS exits or restarts, so the camboxes
 # are found by mDNS alone. libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
-# list, so strih-snv's own STRIH-SNV outputs keep announcing over mDNS -- no gate. THREE receivers on
-# this box: OBS (strih-obs.service) and bkshading-service, both User=${DESKTOP_USER}, read the desktop
-# user's ~/.ndi; intercom-hub's ProtectHome hides ~/.ndi, so it reads the system dir /etc/ndi via its
-# NDI_CONFIG_DIR drop-in. Written here, before the OBS/intercom units start (steps 8/13); the next
-# start reads it. Every strih-snv genlock deploy re-runs this script, so a renumber converges there.
+# list, so strih-snv's own STRIH-SNV outputs keep announcing over mDNS -- no gate. OBS and bkshading-service
+# (User=${DESKTOP_USER}) read ~/.ndi; intercom-hub (ProtectHome) reads /etc/ndi through the NDI_CONFIG_DIR
+# drop-in the hub's own step (13) writes. Written before the units start; every deploy re-runs it.
 NDI_IPS="$(ndi_discovery_sender_ips)" \
   || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
 ndi_discovery_write_config "${USER_HOME}/.ndi" "$NDI_IPS" "$DESKTOP_USER" \
   || fail "NDI receiver config write to ${USER_HOME}/.ndi failed (issue 1342)"
 ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
   || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
-if obs_box_step_applies 13 >/dev/null; then mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")"; ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"; fi   # issue 1439: no hub on the stream role
-echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (networks.ips=${NDI_IPS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
+echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (networks.ips=${NDI_IPS}) (issue 1342; the hub's drop-in: step 13)"
 
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
@@ -671,36 +668,38 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplum
 # on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
 strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
 strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
-# the intercom-hub systemd drop-in that runs the hub AS THE OPERATOR (reach the PipeWire session).
-if obs_box_step_applies 13 >/dev/null; then mkdir -p /etc/systemd/system/intercom-hub.service.d; strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf; fi   # issue 1439
-# Linger the operator so its user@.service + PipeWire come up at boot even before an interactive
-# login — otherwise a headless start finds no /run/user/<uid>/pipewire-0 (the hub self-heals via the
-# pw-cat restart backoff once the session appears, but linger removes the startup gap).
+# Linger the operator so its user@.service + PipeWire come up at boot before any login: a headless start
+# finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session) + intercom-hub local-audio drop-in (User=${DESKTOP_USER})"
+echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session)"
 echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source; on the stream role the obs-vban source, issue 1439) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
 echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
 step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped, never restarted)"
-# The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since the strih
-# notebook took over from the Windows VB-Matrix (20.9.2026). Install the unit + the routing TOML, enable
-# it; on the strih role it is STARTED once Janus is provisioned (verify item 16 FAILs a stopped hub there). A running
-# hub is never restarted here. The binary (intercom-hub-linux-amd64 from CI) is placed below.
+# The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since 20.9.2026:
+# unit + routing TOML + drop-ins, enabled; STARTED on the strih role after step 14, never restarted here.
 if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs no hub (lib: strih_intercom_hub_remove)
-install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
-# issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
-[ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
-  || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
-install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
-strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
-systemctl daemon-reload
-systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
-# issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.
-strih_intercom_hub_binary_install /usr/local/bin/intercom-hub || fail "intercom-hub binary install failed (above)"
-echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml in place"
-else echo "  SKIP: ${WHY}"; strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"; fi
+  install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
+  # its drop-ins: NDI_CONFIG_DIR = /etc/ndi (step 4b, issue 1342) + run AS THE OPERATOR (step 12's PipeWire)
+  mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")" /etc/systemd/system/intercom-hub.service.d
+  ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
+  strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf
+  # issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
+  [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
+    || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
+  install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
+  strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
+  systemctl daemon-reload
+  systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
+  # issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.
+  strih_intercom_hub_binary_install /usr/local/bin/intercom-hub || fail "intercom-hub binary install failed (above)"
+  echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml + its NDI_CONFIG_DIR and local-audio (User=${DESKTOP_USER}) drop-ins in place"
+else
+  echo "  SKIP: ${WHY}"
+  strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
