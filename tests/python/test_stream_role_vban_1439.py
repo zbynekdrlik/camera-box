@@ -670,12 +670,12 @@ def test_the_role_table_skips_the_hub_on_the_stream_role_only():
 # --- verify-strih item 9 on the stream role: the obs-vban source ---------------------------------------------
 
 LINE = ("12:00:00.000: [obs-vban] obs-vban receive: received=%d lost=%d late=0 re_anchors=%d silence_ms=0.0 "
-        "max_late_ms=-34.7 sender_ppm=+1.400 phase_ms=+0.01 fit=locked receive_buffer_ms=%d rate=48000 ch=2 "
-        "port=%d stream='%s' source='%s'\n")
+        "max_late_ms=-34.7 sender_ppm=+1.400 phase_ms=+0.01 fit=locked emit_late_ms=-28.0 emit_missed=%d "
+        "receive_buffer_ms=%d rate=48000 ch=2 port=%d stream='%s' source='%s'\n")
 
 
-def _line(received, port=6980, stream="stream", r=40, lost=0, re_anchors=0, source="Zvuk z mixu"):
-    return LINE % (received, lost, re_anchors, r, port, stream, source)
+def _line(received, port=6980, stream="stream", r=40, lost=0, re_anchors=0, source="Zvuk z mixu", missed=0):
+    return LINE % (received, lost, re_anchors, missed, r, port, stream, source)
 
 
 def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None, box="stream-pp"):
@@ -788,6 +788,22 @@ def test_an_operator_r_is_a_note(tmp_path):
 def test_lost_or_re_anchored_audio_is_named(tmp_path):
     rows = _grade(tmp_path, _line(100), append=_line(200, lost=3, re_anchors=1))
     assert any(r.startswith("NOTE") and "lost=3 late=0 re_anchors=1" in r for r in rows), rows
+
+
+def test_a_slot_handed_after_its_stamp_fails_naming_the_count(tmp_path):
+    # issue 1439 review round 5: emit_missed counts the slots the playout worker handed to OBS after
+    # their own stamp (it woke later than its 2 ms margin): each one can move the program audio by a
+    # whole mix window, the owner's rule -- a FAIL naming the count and where to look
+    rows = _grade(tmp_path, _line(100), append=_line(200, missed=3))
+    fails = _rows(rows, "FAIL")
+    assert any("emit_missed=3" in r and "vban-src-out" in r for r in fails), rows
+
+
+def test_a_status_line_without_emit_missed_is_not_graded_on_it(tmp_path):
+    # a build from before review round 5 writes no emit_missed: nothing to grade, never a FAIL
+    old = _line(100).replace(" emit_missed=0", "")
+    rows = _grade(tmp_path, old, append=_line(200).replace(" emit_missed=0", ""))
+    assert not _rows(rows, "FAIL"), rows
 
 
 def test_verify_wiring_and_budget():
