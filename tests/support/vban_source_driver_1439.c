@@ -29,6 +29,9 @@ static uint64_t g_now;
  * receive thread signals it -- never at a packet's arrival otherwise, exactly like the shipped thread. */
 static bool g_idle = true;
 static uint64_t g_wake;
+/* `stall` (review round 5): the worker takes no look before the next packet's arrival (a scheduling
+ * stall), so every slot it owes by then goes out at that arrival */
+static int g_stall = 0;
 /* `thread`: the real worker thread on the real clock; packet times are offsets from the start */
 static int g_real_thread = 0;
 static uint64_t g_real_start;
@@ -449,6 +452,11 @@ static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int bitfm
 	/* simulated time: the worker's wakes before the packet, the packet, then a wake at it -- the idle
 	 * worker the receive thread signalled, or one it had scheduled for exactly then -- as the shipped
 	 * worker thread would */
+	if (g_stall) {
+		g_stall = 0;
+		if (!g_idle && g_wake < now)
+			g_wake = now;
+	}
 	run_worker(src, now, 0);
 	g_now = now;
 	printf("in nu=%" PRIu32 " now=%" PRIu64 " value=%d\n", nu_frame, now, (int)value);
@@ -497,11 +505,18 @@ int main(int argc, char **argv)
 			vban_source_info.update(src, NULL);
 			continue;
 		}
-		unsigned long nu = 0, value = 0;
+		if (strcmp(argv[i], "stall") == 0) {
+			g_stall = 1;
+			continue;
+		}
+		/* NU:NOW:VALUE, or NU:NOW:VALUE:FRAMES for a packet of another size */
+		unsigned long nu = 0, value = 0, size = 0;
 		unsigned long long now = 0;
-		if (sscanf(argv[i], "%lu:%llu:%lu", &nu, &now, &value) != 3)
+		const int got = sscanf(argv[i], "%lu:%llu:%lu:%lu", &nu, &now, &value, &size);
+		if (got != 3 && got != 4)
 			return 3;
-		send_packet(src, (uint32_t)nu, frames, bitfmt, (int16_t)value, (uint64_t)now);
+		send_packet(src, (uint32_t)nu, got == 4 ? (uint32_t)size : frames, bitfmt, (int16_t)value,
+			    (uint64_t)now);
 	}
 	if (g_real_thread) {
 		/* the worker sends the last stored slots by their deadlines (R ahead) */

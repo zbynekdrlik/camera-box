@@ -115,6 +115,7 @@ fn the_status_line_reports_the_counters_r_port_and_stream_1439() {
         ("lost=", "0"),
         ("late=", "0"),
         ("re_anchors=", "0"),
+        ("emit_missed=", "0"),
         ("receive_buffer_ms=", "40"),
         ("rate=", "48000"),
         ("ch=", "2"),
@@ -786,5 +787,75 @@ fn max_late_ms_counts_the_dropped_late_packets_1439() {
     assert!(
         max_late > 10.0,
         "issue 1439: max_late_ms must show the dropped packet (~15 ms past its stamp): {lines:?}"
+    );
+}
+
+/// Review round 5: a slot the worker hands to libobs after its own stamp (it woke too late for the
+/// margin, here a stall until the packet after a 53 ms loss) shows on the status line as
+/// `emit_missed`, the count verify item 9 grades.
+#[test]
+fn a_slot_handed_after_its_stamp_shows_on_the_status_line_as_emit_missed_1439() {
+    let mut tokens = Vec::new();
+    for k in 0..2_100u64 {
+        if (400..410).contains(&k) {
+            continue;
+        }
+        if k == 410 {
+            tokens.push("stall".to_string());
+        }
+        tokens.push(format!("{}:{}:100", 1000 + k, 1_000_000_000 + ns(k * 256)));
+    }
+    let (_stdout, log) = run_tokens(&tokens, VBAN_BITFMT_16_INT);
+    let lines = status_lines(&log);
+    assert_eq!(lines.len(), 1, "issue 1439: one status line:\n{log}");
+    let missed: u64 = lines[0]["emit_missed"].parse().expect("emit_missed=");
+    assert_eq!(lines[0]["lost"], "10", "issue 1439: {log}");
+    assert!(
+        (1..=10).contains(&missed),
+        "issue 1439: the slots the stalled worker handed after their stamps: emit_missed={missed}\n{log}"
+    );
+}
+
+/// Review round 5, finding 3: a slot is one packet, so another packet size re-anchors (`format`).
+/// A sender whose size varies would re-anchor on EVERY packet: the line names the sizes and says a
+/// varying size is not supported, and is written at most once per status period, carrying how many
+/// it did not write.
+#[test]
+fn a_packet_size_change_names_the_sizes_and_logs_once_per_period_1439() {
+    let mut tokens = Vec::new();
+    let mut now = 1_000_000_000u64;
+    for k in 0..3_000u64 {
+        let frames = if k % 2 == 0 { 256 } else { 128 };
+        now += ns(frames);
+        tokens.push(format!("{}:{now}:100:{frames}", 1000 + k));
+    }
+    let (_stdout, log) = run_tokens(&tokens, VBAN_BITFMT_16_INT);
+    let lines: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("obs-vban receive re-anchor:"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "issue 1439: one format re-anchor line per 10 s over 12 s:\n{}",
+        lines.join("\n")
+    );
+    assert!(
+        lines[0].contains("reason=format")
+            && lines[0].contains("frames 256 -> 128")
+            && lines[0].contains("0 more not logged"),
+        "issue 1439: the first line names the sizes: {}",
+        lines[0]
+    );
+    let more: u64 = lines[1]
+        .split(" more not logged")
+        .next()
+        .and_then(|h| h.rsplit(' ').next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("issue 1439: no count in `{}`", lines[1]));
+    assert!(
+        more > 1_000,
+        "issue 1439: the second line counts the re-anchors it did not write: {}",
+        lines[1]
     );
 }

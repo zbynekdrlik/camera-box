@@ -205,16 +205,7 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
     }
     // ROZHODNUTÉ 6347872706: the receive callback never outputs (the source emits on its own
     // deadline, never on a packet's arrival); the worker step does, and only after the lock
-    let body = |sig: &str| {
-        let a = squished
-            .find(sig)
-            .unwrap_or_else(|| panic!("issue 1439: `{sig}` missing"));
-        let b = squished[a..]
-            .find(" } static ")
-            .map(|b| a + b)
-            .unwrap_or(squished.len());
-        squished[a..b].to_string()
-    };
+    let body = |sig: &str| c_body(&squished, sig);
     let callback =
         body("static void vban_src_callback(const char *buf, size_t buf_len, void *data) {");
     assert!(
@@ -241,7 +232,8 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
         update.find("vban_src_worker_stop(s, \"update\");")
             < update.find("os_atomic_set_long(&s->receive_buffer_ms,")
             && update.ends_with(
-                "os_atomic_set_bool(&s->timeline_reset, true); vban_src_worker_start(s);"
+                "os_atomic_set_bool(&s->timeline_reset, true); vban_src_worker_start(s); \
+                 pthread_mutex_unlock(&s->update_mutex);"
             ),
         "issue 1439: update must stop the worker first and start it last"
     );
@@ -293,6 +285,68 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
     assert!(
         locale.contains("VBAN.src.prop.receive_buffer_ms="),
         "issue 1439: the Receive Buffer property has no label"
+    );
+}
+
+/// The body of the C function whose signature (whitespace-squished) is `sig`, up to the next
+/// top-level `static`.
+fn c_body(squished: &str, sig: &str) -> String {
+    let a = squished
+        .find(sig)
+        .unwrap_or_else(|| panic!("issue 1439: `{sig}` missing"));
+    let b = squished[a..]
+        .find(" } static ")
+        .map(|b| a + b)
+        .unwrap_or(squished.len());
+    squished[a..b].to_string()
+}
+
+/// Review round 5 (findings 1 and 5): on Linux the worker asks the kernel for a 1 ns timer slack,
+/// so its deadline sleeps are not batched by the default 50 us; and update() -- the UI thread and
+/// the obs-websocket thread can both call it -- runs whole under its own lifecycle mutex, so two
+/// calls can never join the same worker twice. The status line carries `emit_missed`.
+#[test]
+fn the_worker_wakes_without_timer_slack_and_updates_never_race_1439() {
+    let src = read(SOURCE);
+    let squished = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        squished.contains("#ifdef __linux__ #include <sys/prctl.h> #endif"),
+        "issue 1439: the source must include sys/prctl.h on Linux"
+    );
+    let main = c_body(&squished, "static void *vban_src_worker_main(void *data) {");
+    assert!(
+        main.contains("#ifdef __linux__ prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL); #endif"),
+        "issue 1439: the worker must drop its timer slack on Linux: {main}"
+    );
+    let update = c_body(
+        &squished,
+        "static void vban_src_update(void *data, obs_data_t *settings) {",
+    );
+    let lock = update
+        .find("pthread_mutex_lock(&s->update_mutex);")
+        .expect("issue 1439: update() must take its lifecycle mutex");
+    assert!(
+        lock < update.find("vban_src_worker_stop(s, \"update\");").unwrap()
+            && update.ends_with("pthread_mutex_unlock(&s->update_mutex);"),
+        "issue 1439: update() runs whole under its lifecycle mutex: {update}"
+    );
+    let create = c_body(
+        &squished,
+        "static void *vban_src_create(obs_data_t *settings, obs_source_t *source) {",
+    );
+    assert!(
+        create.find("pthread_mutex_init(&s->update_mutex, NULL);")
+            < create.find("vban_src_update(s, settings);"),
+        "issue 1439: the lifecycle mutex exists before create's update: {create}"
+    );
+    let destroy = c_body(&squished, "static void vban_src_destroy(void *data) {");
+    assert!(
+        destroy.contains("pthread_mutex_destroy(&s->update_mutex);"),
+        "issue 1439: destroy frees the lifecycle mutex: {destroy}"
+    );
+    assert!(
+        squished.contains("\" emit_late_ms=%.1f emit_missed=%\" PRIu64"),
+        "issue 1439: the status line must carry emit_missed"
     );
 }
 
