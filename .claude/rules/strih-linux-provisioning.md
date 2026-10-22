@@ -226,9 +226,14 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   a BOM) and parses every input before writing anything. verify item 10 grades the written encoder.
 - **Step 6 manifest** (`obs_box_seed_manifest_json`): one entry `NDI 2ME PGM` <- the program sender
   in scene `PRO`, class `program` (genlock_fifo + ndi_sync 2, the latency pin NEVER written: it is
-  the operator's stream A/V knob), `program_audio_input` = `Zvuk z mixu` (pulse on
-  `strih-program.monitor`). A wrong-kind audio input is replaced in every scene it was in, its sync
-  offset kept.
+  the operator's stream A/V knob), `program_audio_input` = `Zvuk z mixu`, since issue 1439 the
+  obs-vban receive source on lv1's VBAN (`program_audio_vban` from the facts STRIH_PROGRAM_VBAN_*;
+  `.claude/rules/obs-vban-receive.md`). A wrong-kind audio input is replaced in every scene it was in,
+  keeping its sync offset and (issue 1439) its whole mixer state and filters.
+- **No intercom hub on the stream role (issue 1439, owner 22.10.2026):** `obs_box_step_applies 13`
+  skips step 13 and moves a present hub aside (`strih_intercom_hub_remove`); steps 4b / 12 write no hub
+  drop-in; verify item 16 grades "no hub", item 9 the obs-vban source, item 34 NOTEs the absent drop-in.
+  The two bullets below are the pre-1439 stream-role hub history (the strih role keeps both rules).
 - **Step 7:** one NDI output, `MainOutputName=stream` (DistroAV announces `STREAM-PP (stream)`),
   preview off. The strih printer text is byte-identical.
 - **verify item 9** grades `fohabl` when the hub has it (strih-snv), else every `program_ref`
