@@ -19,6 +19,9 @@ pub(crate) struct Pkt {
     pub(crate) channels: u32,
     pub(crate) reserve_ns: u64,
     pub(crate) reset: bool,
+    /// Review round 5: the playout worker was stalled until this arrival -- it took no look before
+    /// it (a scheduling stall), so every slot it owes goes out at this arrival, after its stamp.
+    pub(crate) stall: bool,
 }
 
 struct Rng(u64);
@@ -133,6 +136,7 @@ fn steered_script(
                         channels,
                         reserve_ns: reserve,
                         reset: false,
+                        stall: false,
                     });
                 }
                 // an index far behind the stale window: a sender restart from there
@@ -167,6 +171,7 @@ fn steered_script(
             channels,
             reserve_ns: reserve,
             reset,
+            stall: false,
         });
         nu = this_nu;
         k += 1;
@@ -196,6 +201,7 @@ fn boundary_script() -> Vec<Pkt> {
                     channels: ch,
                     reserve_ns: r,
                     reset: *reset,
+                    stall: false,
                 });
                 *reset = false;
                 *k += 1;
@@ -233,6 +239,7 @@ fn boundary_script() -> Vec<Pkt> {
         channels,
         reserve_ns: reserve,
         reset: false,
+        stall: false,
     });
     k += 1;
     nu = nu.wrapping_add(1);
@@ -245,6 +252,7 @@ fn boundary_script() -> Vec<Pkt> {
         channels,
         reserve_ns: reserve,
         reset: false,
+        stall: false,
     });
     k += 1;
     nu = nu.wrapping_add(1);
@@ -261,6 +269,7 @@ fn boundary_script() -> Vec<Pkt> {
         channels,
         reserve_ns: reserve,
         reset: false,
+        stall: false,
     });
     k += 1;
     nu = nu.wrapping_add(1);
@@ -277,6 +286,7 @@ fn boundary_script() -> Vec<Pkt> {
             channels,
             reserve_ns: reserve,
             reset: false,
+            stall: false,
         });
     }
     clean(&mut b, &mut k, &mut nu, 375, channels, reserve, &mut reset);
@@ -311,6 +321,7 @@ fn clean_script(ppm: f64, seconds: u64, anchor_late_ns: u64, reserve_ms: u64) ->
             channels: 2,
             reserve_ns: reserve_ms * MS,
             reset: false,
+            stall: false,
         });
     }
     b.pkts
@@ -333,6 +344,7 @@ fn delay_drop_script() -> Vec<Pkt> {
             channels: 2,
             reserve_ns: 20 * MS,
             reset: false,
+            stall: false,
         });
     }
     b.pkts
@@ -362,6 +374,7 @@ fn grid_script(
             channels: 2,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
     }
 }
@@ -397,6 +410,7 @@ fn starve_edges_script() -> Vec<Pkt> {
             channels: 2,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
     }
     // the re-anchored line's first second, a channel change inside it, then the new hold
@@ -413,6 +427,7 @@ fn starve_edges_script() -> Vec<Pkt> {
             channels,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
     }
     b.pkts
@@ -432,6 +447,7 @@ fn delay_step_script() -> Vec<Pkt> {
             channels: 2,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
     }
     b.pkts
@@ -451,6 +467,7 @@ fn starve_script() -> Vec<Pkt> {
             channels: 2,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
     }
     b.pkts
@@ -478,6 +495,7 @@ fn frozen_script() -> Vec<Pkt> {
             channels: 2,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
     }
     b.pkts
@@ -509,6 +527,7 @@ fn late_then_loss_script() -> Vec<Pkt> {
             channels: 2,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
     }
     b.pkts
@@ -530,6 +549,7 @@ fn packet_size_script() -> Vec<Pkt> {
             channels: 2,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
     }
     b.pkts
@@ -547,6 +567,7 @@ fn hold_starve_script() -> Vec<Pkt> {
         channels: 2,
         reserve_ns: 40 * MS,
         reset: false,
+        stall: false,
     };
     let at = |k: u64| 2_000_000_000 + samples_to_ns((k + 1) * 256, 48_000);
     b.send(pkt(at(0), 0));
@@ -576,6 +597,7 @@ fn out_of_order_script() -> Vec<Pkt> {
         channels: 2,
         reserve_ns: 40 * MS,
         reset: false,
+        stall: false,
     };
     let mut v = vec![pkt(at(0), 0), pkt(at(0) - MS, 1)];
     for k in 2..=187u64 {
@@ -605,8 +627,46 @@ fn wrap_script() -> Vec<Pkt> {
             channels: 2,
             reserve_ns: 40 * MS,
             reset: false,
+            stall: false,
         });
         nu = nu.wrapping_add(1);
+    }
+    b.pkts
+}
+
+/// Review round 5: a stalled worker and a stretch with no room for a lead-in. On the grid past the
+/// hold, packets 300 and 301 lost and 302 arriving 40 ms late on a worker stalled until then: the
+/// silence of 300 and 301 and the packet 302 all go out after their stamps (missed). Then a 1.5 s
+/// outage (a starve re-anchor), its hold, and the first packet past it exactly at its deadline:
+/// nothing is left before its stamp for a lead-in that starts the margin after the worker's now.
+fn stall_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    let at = |k: u64| 2_000_000_000 + samples_to_ns((k + 1) * 256, 48_000);
+    let pkt = |now: u64, k: u64, stall: bool| Pkt {
+        now,
+        nu: k as u32,
+        frames: 256,
+        rate: 48_000,
+        channels: 2,
+        reserve_ns: 40 * MS,
+        reset: false,
+        stall,
+    };
+    for k in 0..320u64 {
+        match k {
+            300 | 301 => continue,
+            302 => b.send(pkt(at(k) + 40 * MS, k, true)),
+            _ => b.send(pkt(at(k), k, false)),
+        };
+    }
+    let k0 = 320 + 1_500 * 48 / 256;
+    for k in k0..k0 + 187 {
+        b.send(pkt(at(k), k, false));
+    }
+    let deadline = b.t.deadline_at(b.t.next_pos);
+    b.send(pkt(deadline, k0 + 187, false));
+    for k in k0 + 188..k0 + 220 {
+        b.send(pkt(at(k), k, false));
     }
     b.pkts
 }
@@ -630,6 +690,7 @@ pub(crate) fn scripts() -> Vec<Vec<Pkt>> {
         hold_starve_script(),
         late_then_loss_script(),
         packet_size_script(),
+        stall_script(),
     ];
     let configs: [(f64, u32, u32, u32, u64, u64); 6] = [
         (50.0, 256, 48_000, 2, 40, 60),

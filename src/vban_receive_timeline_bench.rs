@@ -30,16 +30,19 @@
 //! The replay emits what the source emits: a PACKET (with the silence of the slots lost before it)
 //! and a LATE packet's silence; the anchor, a re-anchor and their held first second emit nothing.
 //!
-//! The source emits on its own DEADLINE (ROZHODNUTÉ 6347872706): the replay runs the playout
-//! worker at every slot's deadline between arrivals, so libobs gets every slot ahead of the window
-//! that mixes it -- the packet, or one slot of silence -- and the late fill of rounds 4-6 (a step of
-//! one or two mix windows, or with no encoder a mix buffering that grows) is gone. Every grade runs
-//! with the encoder running and not running.
+//! The source emits on its own clock, by every slot's DEADLINE (ROZHODNUTÉ 6347872706): the replay
+//! runs the playout worker of [`super::worker_model`] -- it wakes when it scheduled itself, a stored
+//! slot goes out at its next wake, a missing one at its deadline as one slot of silence -- so libobs
+//! gets every slot ahead of the window that mixes it, and the late fill of rounds 4-6 (a step of one
+//! or two mix windows, or with no encoder a mix buffering that grows) is gone. Every grade runs with
+//! the encoder running and not running; the `wake` child grades a worker that wakes late
+//! ([`WakeLate`], review round 5).
 //!
 //! Known limit: before the fit (10 s) the line runs at the nominal rate and then slews to the fit at
 //! 5 ppm per bucket, so the latency moves about the sender's ppm x 20 s: ±1 ms holds to about
 //! ±55 ppm (lv1 measured ~1.4 ppm), ~2 ms at ±100 ppm (pinned below).
 
+use super::worker_model::{Sink, Worker};
 use super::*;
 
 const F: u32 = 256;
@@ -275,6 +278,8 @@ struct Run {
     odd_silence: u64,
     /// The mix's audio buffering at the end of the run (grown only with no encoder running), ns.
     mix_buffering_ns: f64,
+    /// Slots handed to libobs after their own stamp (the timeline's `missed`, review round 5).
+    missed: u64,
     sender_ppm: f64,
 }
 
@@ -289,82 +294,96 @@ struct Stored {
     first_sample_ns: f64,
 }
 
-/// The source as the replay runs it (ROZHODNUTÉ 6347872706): the receive side decides and stores,
-/// the playout worker emits at its deadlines into libobs ([`Obs`]).
-struct Replay {
-    t: Timeline,
+/// How late the playout worker wakes (review round 5): `min_ns` + (`max_ns` − `min_ns`) x u^4 for u
+/// uniform in [0, 1), so most wakes are within a few percent of the range of `min_ns` and about one
+/// in six is past its middle -- a scheduling latency with a tail, on every wake (the store's signal
+/// to an idle worker too). `min_ns` = `max_ns` is a fixed lateness.
+struct WakeLate {
+    rng: Rng,
+    min_ns: u64,
+    max_ns: u64,
+}
+
+/// The source's output side as the replay runs it: its store of in-time packets, libobs ([`Obs`])
+/// and what the run records.
+struct Out {
     obs: Obs,
     run: Run,
     store: std::collections::VecDeque<Stored>,
-    clock: u64,
     prev_stamp: Option<(u64, u64)>,
+    late: Option<WakeLate>,
 }
 
-impl Replay {
-    /// The worker at every deadline before `until` (and at it when `inclusive`), each slot at its
-    /// own deadline.
-    fn worker(&mut self, until: u64, inclusive: bool) {
-        loop {
-            let head = self.store.front().map(|s| s.pos);
-            let d = self.t.due(self.clock, head);
-            let at = self.clock as f64;
-            match d.kind {
-                Due::None => {
-                    let due =
-                        d.next_ns != 0 && (d.next_ns < until || (inclusive && d.next_ns == until));
-                    if !due {
-                        break;
-                    }
-                    self.clock = self.clock.max(d.next_ns);
+impl Sink for Out {
+    fn head(&self) -> Option<u64> {
+        self.store.front().map(|s| s.pos)
+    }
+
+    fn emit(&mut self, at: u64, d: DueDecision) {
+        let at_f = at as f64;
+        match d.kind {
+            Due::None => {}
+            Due::LeadIn => {
+                let dur = samples_to_ns(d.frames, 48_000) as f64;
+                self.obs.chunk(d.stamp_ns as f64, dur, at_f);
+                self.run.lead_ins += 1;
+            }
+            Due::Silence => {
+                let dur = samples_to_ns(d.frames, 48_000) as f64;
+                self.obs.chunk(d.stamp_ns as f64, dur, at_f);
+                self.run.odd_silence += u64::from(d.frames != u64::from(F));
+            }
+            Due::Packet => {
+                let s = self.store.pop_front().expect("the head packet");
+                assert_eq!(s.pos, d.pos, "the slot is the store's head");
+                let dur = samples_to_ns(u64::from(F), 48_000) as f64;
+                let play = self.obs.chunk(d.stamp_ns as f64, dur, at_f);
+                let anchor_k = *self
+                    .run
+                    .anchors
+                    .last()
+                    .expect("an anchor before any packet");
+                if (s.k - anchor_k + 1) * u64::from(F) <= 48_000 {
+                    self.run.emitted_in_first_second += 1;
                 }
-                Due::LeadIn => {
-                    let dur = samples_to_ns(d.frames, 48_000) as f64;
-                    self.obs.chunk(d.stamp_ns as f64, dur, at);
-                    self.run.lead_ins += 1;
+                if let Some((ps, pk)) = self.prev_stamp {
+                    let nominal = samples_to_ns((s.k - pk) * u64::from(F), 48_000) as f64;
+                    let dev = (d.stamp_ns as f64 - ps as f64 - nominal).abs() / nominal * 1e6;
+                    self.run.max_step_dev_ppm = self.run.max_step_dev_ppm.max(dev);
                 }
-                Due::Silence => {
-                    let dur = samples_to_ns(d.frames, 48_000) as f64;
-                    self.obs.chunk(d.stamp_ns as f64, dur, at);
-                    self.run.odd_silence += u64::from(d.frames != u64::from(F));
-                }
-                Due::Packet => {
-                    let s = self.store.pop_front().expect("the head packet");
-                    assert_eq!(s.pos, d.pos, "the slot is the store's head");
-                    let dur = samples_to_ns(u64::from(F), 48_000) as f64;
-                    let play = self.obs.chunk(d.stamp_ns as f64, dur, at);
-                    let anchor_k = *self
-                        .run
-                        .anchors
-                        .last()
-                        .expect("an anchor before any packet");
-                    if (s.k - anchor_k + 1) * u64::from(F) <= 48_000 {
-                        self.run.emitted_in_first_second += 1;
-                    }
-                    if let Some((ps, pk)) = self.prev_stamp {
-                        let nominal = samples_to_ns((s.k - pk) * u64::from(F), 48_000) as f64;
-                        let dev = (d.stamp_ns as f64 - ps as f64 - nominal).abs() / nominal * 1e6;
-                        self.run.max_step_dev_ppm = self.run.max_step_dev_ppm.max(dev);
-                    }
-                    self.prev_stamp = Some((d.stamp_ns, s.k));
-                    self.run.records.push(Rec {
-                        seg: self.run.anchors.len() - 1,
-                        k: s.k,
-                        lat: d.stamp_ns as f64 - s.first_sample_ns,
-                        real: play - s.first_sample_ns,
-                    });
-                }
+                self.prev_stamp = Some((d.stamp_ns, s.k));
+                self.run.records.push(Rec {
+                    seg: self.run.anchors.len() - 1,
+                    k: s.k,
+                    lat: d.stamp_ns as f64 - s.first_sample_ns,
+                    real: play - s.first_sample_ns,
+                });
             }
         }
-        self.clock = self.clock.max(until);
+    }
+
+    fn wake_late(&mut self, _at: u64) -> u64 {
+        match &mut self.late {
+            Some(l) => l.min_ns + ((l.max_ns - l.min_ns) as f64 * l.rng.unit().powi(4)) as u64,
+            None => 0,
+        }
     }
 }
 
 /// [`replay`] with the encoder running or not (`no_encoder`: libobs grows the mix's buffering for a
 /// chunk behind the window).
 fn replay_with(sched: &[Sent], reserve_ms: u64, no_encoder: bool) -> Run {
+    replay_late(sched, reserve_ms, no_encoder, None)
+}
+
+/// [`replay_with`] with the playout worker waking late (`late`, review round 5): the source as it
+/// runs ([`super::worker_model`]) -- the receive side decides and stores, the worker emits into
+/// libobs at the times it scheduled itself (late by `late`) or, idle, when a packet is stored.
+fn replay_late(sched: &[Sent], reserve_ms: u64, no_encoder: bool, late: Option<WakeLate>) -> Run {
     let reserve = reserve_ms * NS_PER_MS;
-    let mut r = Replay {
-        t: Timeline::new(),
+    let mut t = Timeline::new();
+    let mut w = Worker::default();
+    let mut r = Out {
         obs: Obs {
             no_encoder,
             ..Obs::default()
@@ -374,8 +393,8 @@ fn replay_with(sched: &[Sent], reserve_ms: u64, no_encoder: bool) -> Run {
             ..Run::default()
         },
         store: std::collections::VecDeque::new(),
-        clock: 0,
         prev_stamp: None,
+        late,
     };
     let mut prev_arrival: Option<u64> = None;
     for s in sched {
@@ -388,9 +407,10 @@ fn replay_with(sched: &[Sent], reserve_ms: u64, no_encoder: bool) -> Run {
             r.run.max_gap_ns = r.run.max_gap_ns.max(a - p);
         }
         prev_arrival = Some(a);
-        // the worker first (every deadline before this arrival), then the packet, then a lead-in
-        r.worker(a, false);
-        let d = r.t.packet(a, s.k as u32, F, 48_000, 2, reserve);
+        // the worker's wakes before this arrival, then the packet, then a wake at it (an idle
+        // worker the store signalled, or one due exactly then)
+        w.run_until(&mut t, &mut r, a, false);
+        let d = t.packet(a, s.k as u32, F, 48_000, 2, reserve);
         match d.event {
             Event::Anchor | Event::Reanchor => {
                 r.run.anchors.push(s.k);
@@ -404,28 +424,31 @@ fn replay_with(sched: &[Sent], reserve_ms: u64, no_encoder: bool) -> Run {
                     k: s.k,
                     first_sample_ns: s.first_sample_ns,
                 });
+                w.stored(&mut r, a);
             }
             _ => {}
         }
-        r.worker(a, true);
+        w.run_until(&mut t, &mut r, a, true);
     }
     // the slots still stored go out (the end of the run: nothing past the last packet's slot)
-    if let Some(last) = r.store.back().map(|s| s.pos) {
-        let end = r.t.deadline_at(last);
-        r.worker(end, true);
+    while !r.store.is_empty() {
+        let Some(at) = w.next_wake() else { break };
+        w.run_until(&mut t, &mut r, at, true);
     }
+    let missed = t.missed;
     let mut run = r.run;
+    run.missed = missed;
     (
         run.anchored_latency_ns,
         run.latency_dev_max_ns,
         run.anchored_realized_ns,
         run.realized_dev_max_ns,
     ) = held(&run, 0, 0..u64::MAX);
-    run.late = r.t.late;
-    run.re_anchors = r.t.re_anchors;
-    run.lost = r.t.lost;
-    run.silence_samples = r.t.silence_samples;
-    run.sender_ppm = r.t.sender_ppm();
+    run.late = t.late;
+    run.re_anchors = t.re_anchors;
+    run.lost = t.lost;
+    run.silence_samples = t.silence_samples;
+    run.sender_ppm = t.sender_ppm();
     run.mix_buffering_ns = r.obs.buffering_ns;
     run
 }
@@ -872,3 +895,6 @@ fn network_loss_is_silence_and_never_a_re_anchor_1439() {
         assert_eq!((run.late, run.re_anchors), (0, 0), "{tag}");
     }
 }
+
+#[path = "vban_receive_timeline_bench_wake.rs"]
+mod wake;

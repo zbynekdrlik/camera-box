@@ -4,7 +4,7 @@
 //! `#[path]` child like the others; the shared helpers (the [`Rig`] that drives the worker at its
 //! deadlines) live in that file.
 
-use super::tests::{on_time, rig_through_the_hold, Rig, H, R40, RATE, T0};
+use super::tests::{on_time, rig_through_the_hold, through_the_hold, Rig, H, R40, RATE, T0};
 use super::*;
 
 /// The packets of the first 15 s on the grid through a [`Rig`]: the fit is valid after them.
@@ -297,10 +297,10 @@ fn a_starve_re_anchor_carries_how_long_no_packet_came_in_time() {
 const MS_256: u64 = 5_333_333;
 
 /// Review round 5 + ROZHODNUTÉ 6347872706: every stretch's output starts with its LEAD-IN, once:
-/// the worker, at the instant the stretch's first in-time packet arrives, sends silence from its own
-/// now up to that packet's slot's stamp, ending exactly there; the slots follow at their deadlines.
-/// After a starve the re-anchored stretch gets its own: libobs resets its timing after a gap over
-/// 2 s and puts the first chunk at the instant it arrives.
+/// the worker, at the instant the stretch's first in-time packet arrives (the store wakes it),
+/// sends silence from its own now + the margin (so a mix tick between its clock read and the
+/// handover never finds the lead-in behind the window) up to that packet's slot's stamp, ending
+/// exactly there; the slots follow. After a starve the re-anchored stretch gets its own.
 #[test]
 fn every_stretch_starts_with_one_lead_in_up_to_its_first_stamp() {
     let mut r = Rig::new();
@@ -309,16 +309,18 @@ fn every_stretch_starts_with_one_lead_in_up_to_its_first_stamp() {
         let leads = r.of(Due::LeadIn);
         let (at, l) = leads[i];
         assert_eq!(at, now, "the lead-in goes out at the arrival: {l:?}");
-        // on the grid the stamp is R − one packet after the arrival: 34.67 ms = 1664 whole frames
-        assert_eq!(l.frames, 1664, "{l:?}");
+        // on the grid the stamp is R − one packet after the arrival, 34.67 ms; the lead-in starts
+        // the 2 ms margin after the worker's now: 32.67 ms = 1568 whole frames
+        assert_eq!(l.frames, 1568, "{l:?}");
         assert_eq!(
             l.stamp_ns + samples_to_ns(l.frames, RATE),
             first,
             "the lead-in ends where the first slot starts: {l:?}"
         );
+        let start = now + DEADLINE_MARGIN_MS * NS_PER_MS;
         assert!(
-            l.stamp_ns >= now && l.stamp_ns - now < samples_to_ns(1, RATE),
-            "{l:?}"
+            l.stamp_ns >= start && l.stamp_ns - start < samples_to_ns(1, RATE),
+            "the lead-in starts the margin after the worker's now: {l:?}"
         );
     };
     let d = r.packet(on_time(H), H as u32);
@@ -401,11 +403,12 @@ fn a_late_packet_exactly_one_second_after_the_last_in_time_one_is_still_a_drop()
 }
 
 /// ROZHODNUTÉ 6347872706: the deadlines run on the fitted SENDER rate. A sender 100 ppm slow for a
-/// minute: every slot goes out as its packet (no silence, nothing late) exactly at its deadline, and
-/// the emitted stamps are one continuous sequence -- each slot's stamp follows the previous one by
+/// minute: every slot goes out as its packet (no silence, nothing late) by its deadline -- at the
+/// worker's first wake after the packet arrived, at most [`POLL_MS`] later (review round 5) -- and
+/// the emitted stamps are one continuous sequence: each slot's stamp follows the previous one by
 /// one packet at the line's rate, never a step.
 #[test]
-fn the_worker_emits_every_slot_at_its_deadline_on_the_fitted_rate() {
+fn the_worker_emits_every_slot_by_its_deadline_on_the_fitted_rate() {
     let mut r = Rig::new();
     let span = |k: u64| (samples_to_ns((k + 1) * 256, RATE) as f64 * 1.0001) as u64;
     for k in 0..(60 * 48_000 / 256) {
@@ -422,7 +425,12 @@ fn the_worker_emits_every_slot_at_its_deadline_on_the_fitted_rate() {
     let nominal = samples_to_ns(256, RATE) as i64;
     for w in slots.windows(2) {
         let ((at, a), (_, b)) = (w[0], w[1]);
-        assert_eq!(at, a.deadline_ns, "each slot at its deadline: {a:?}");
+        let arrival = T0 + span(a.pos / 256);
+        assert!(
+            at >= arrival && at <= arrival + POLL_MS * NS_PER_MS && at < a.deadline_ns,
+            "each slot at the worker's next wake after its arrival {arrival}, long before its \
+             deadline: {at} {a:?}"
+        );
         assert_eq!(b.pos, a.pos + 256, "every slot in order");
         let step = b.stamp_ns as i64 - a.stamp_ns as i64;
         assert!(
@@ -510,4 +518,90 @@ fn a_starve_on_the_first_packet_after_an_anchor_or_inside_the_hold_re_anchors() 
     assert_eq!(d.event, Event::Packet, "{d:?}");
     assert_eq!(r.of(Due::LeadIn).len(), 1, "its own lead-in");
     assert_eq!((r.t.re_anchors, r.t.late, r.t.lost), (2, 0, 0));
+}
+
+/// Review round 5: the deadline is the DECISION point, not the handover time. A slot whose packet
+/// is stored goes to libobs whenever the worker looks (its `late_ns` negative: that far ahead of its
+/// deadline); while the slot's packet is missing the worker looks again after at most [`POLL_MS`],
+/// the last look being the deadline itself, where the slot is one slot of silence.
+#[test]
+fn a_stored_slot_goes_out_when_the_worker_looks_a_missing_one_at_its_deadline() {
+    let mut t = Timeline::new();
+    through_the_hold(&mut t, 0);
+    let now = on_time(H);
+    let d = t.packet(now, H as u32, 256, RATE, 2, R40);
+    assert_eq!(d.event, Event::Packet, "{d:?}");
+    assert_eq!(t.due(now, Some(d.pos)).kind, Due::LeadIn);
+    let p = t.due(now, Some(d.pos));
+    assert_eq!(
+        (p.kind, p.pos, p.late_ns),
+        (Due::Packet, d.pos, now as i64 - t.deadline_at(d.pos) as i64),
+        "the stored slot goes out at once: {p:?}"
+    );
+    assert!(p.late_ns < -30 * NS_PER_MS as i64, "{p:?}");
+    let next = d.pos + 256;
+    let deadline = t.deadline_at(next);
+    let w = t.due(now + 1, None);
+    assert_eq!(
+        (w.kind, w.next_ns),
+        (Due::None, now + 1 + POLL_MS * NS_PER_MS),
+        "no packet yet: look again after the poll"
+    );
+    let w = t.due(deadline - NS_PER_MS, None);
+    assert_eq!(
+        (w.kind, w.next_ns),
+        (Due::None, deadline),
+        "the last look is the deadline itself"
+    );
+    let s = t.due(deadline, None);
+    assert_eq!(
+        (s.kind, s.pos, s.frames, s.late_ns),
+        (Due::Silence, next, 256, 0)
+    );
+    assert_eq!((t.lost, t.missed), (1, 0));
+}
+
+/// Review round 5: a slot handed to libobs AFTER its own stamp (the worker woke later than the
+/// margin) may have missed the window that mixes it: counted `missed`, silence or packet. One
+/// handed exactly at its stamp is not.
+#[test]
+fn a_slot_handed_after_its_stamp_is_counted_missed() {
+    let mut t = Timeline::new();
+    through_the_hold(&mut t, 0);
+    let d = t.packet(on_time(H), H as u32, 256, RATE, 2, R40);
+    assert_eq!(t.due(on_time(H), Some(d.pos)).kind, Due::LeadIn);
+    // at its stamp exactly: not missed
+    let p = t.due(d.stamp_ns, Some(d.pos));
+    assert_eq!((p.kind, t.missed), (Due::Packet, 0), "{p:?}");
+    // the next packet never comes: its silence one ns after its stamp is missed
+    let pos = d.pos + 256;
+    let s = t.due(t.stamp_at(pos) + 1, None);
+    assert_eq!((s.kind, s.pos, t.missed), (Due::Silence, pos, 1), "{s:?}");
+    // the one after it arrives after its deadline yet before its slot went out (in time), and goes
+    // out after its stamp
+    let pos = pos + 256;
+    let stamp = t.stamp_at(pos);
+    let d = t.packet(stamp - NS_PER_MS, (H + 2) as u32, 256, RATE, 2, R40);
+    assert_eq!((d.event, d.pos), (Event::Packet, pos), "{d:?}");
+    let p = t.due(stamp + 5, Some(pos));
+    assert_eq!((p.kind, t.missed, t.lost), (Due::Packet, 2, 1), "{p:?}");
+}
+
+/// Review round 5: a stretch whose first packet arrives at its deadline has no time left before
+/// its stamp for a lead-in that starts the margin after the worker's now: none is sent, the slot
+/// goes straight out.
+#[test]
+fn no_lead_in_when_the_first_packet_leaves_no_room_before_its_stamp() {
+    let mut t = Timeline::new();
+    through_the_hold(&mut t, 0);
+    let deadline = t.deadline_at(H * 256);
+    let d = t.packet(deadline, H as u32, 256, RATE, 2, R40);
+    assert_eq!(
+        d.event,
+        Event::Packet,
+        "arriving at its deadline is in time: {d:?}"
+    );
+    let p = t.due(deadline, Some(d.pos));
+    assert_eq!((p.kind, p.pos, p.late_ns), (Due::Packet, d.pos, 0), "{p:?}");
+    assert!(!t.lead_in_pending);
 }

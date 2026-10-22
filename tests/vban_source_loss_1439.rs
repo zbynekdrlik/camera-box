@@ -587,13 +587,16 @@ fn an_outage_of_1_5_s_is_one_starve_re_anchor_and_no_late_fill_1439() {
     );
 }
 
-/// ROZHODNUTÉ 6347872706: the source emits on its own deadline, never on a packet's arrival: every
-/// slot -- a packet, or one slot of silence for a missing one -- goes out exactly at its stamp minus
-/// the 2 ms margin, and the lead-in at the first in-time packet's arrival.
+/// ROZHODNUTÉ 6347872706 + review round 5: the source emits on its own clock, by every slot's
+/// deadline, never in the receive callback. The idle worker the first in-time packet wakes sends the
+/// lead-in and that packet at its arrival; from then on a stored packet goes out at the worker's
+/// next look (at most 5 ms after it arrived, long before its deadline), and a missing slot's silence
+/// exactly at its deadline (its stamp − the 2 ms margin), the packet behind it at the same wake.
 #[test]
-fn every_slot_goes_out_at_its_deadline_never_on_arrival_1439() {
+fn a_stored_slot_goes_out_at_the_workers_next_look_a_missing_one_at_its_deadline_1439() {
     let pkts = after_hold(&[300, 301, 303, 304, 305]);
     let first_arrival = pkts[HELD as usize].1;
+    let arrival = |v: i64| pkts.iter().find(|p| i64::from(p.2) == v).expect("sent").1;
     let (outs, _log) = run_with_log(&pkts);
     let (leads, body) = split_lead_ins(&outs);
     assert_eq!(leads, vec![LEAD_IN], "issue 1439: {outs:?}");
@@ -602,33 +605,54 @@ fn every_slot_goes_out_at_its_deadline_never_on_arrival_1439() {
         lead.at, first_arrival,
         "issue 1439: the lead-in goes out at the first in-time packet's arrival: {outs:?}"
     );
-    let margin = 2_000_000u64;
-    for o in &body {
-        assert_eq!(
-            o.at + margin,
-            o.ts,
-            "issue 1439: a slot must go out at its deadline (its stamp - 2 ms): {o:?} in {outs:?}"
-        );
-    }
     assert_eq!(
         audio_values(&body),
         vec![1, 2, 4, 5, 6],
         "issue 1439: {outs:?}"
     );
+    let margin = 2_000_000u64;
+    let silence: Vec<&Out> = body.iter().filter(|o| o.zero).collect();
     assert_eq!(
-        body.iter()
-            .filter(|o| o.zero)
-            .map(|o| o.frames)
-            .collect::<Vec<_>>(),
+        silence.iter().map(|o| o.frames).collect::<Vec<_>>(),
         vec![u64::from(FRAMES)],
         "issue 1439: the lost packet's slot is one slot of silence: {outs:?}"
     );
+    assert_eq!(
+        silence[0].at + margin,
+        silence[0].ts,
+        "issue 1439: the missing slot's silence goes out at its deadline: {outs:?}"
+    );
+    for o in body.iter().filter(|o| !o.zero) {
+        let a = arrival(o.first);
+        assert!(
+            o.at >= a && o.at + margin < o.ts,
+            "issue 1439: a packet goes out after its arrival, before its deadline: {o:?} in {outs:?}"
+        );
+        if o.first == 4 {
+            assert_eq!(
+                o.at, silence[0].at,
+                "issue 1439: the packet behind a missing slot goes out right after its silence: {outs:?}"
+            );
+        } else {
+            assert!(
+                o.at <= a + 5_000_000,
+                "issue 1439: a stored packet goes out at the worker's next look: {o:?} in {outs:?}"
+            );
+        }
+        if o.first != 1 {
+            assert!(
+                o.at > a,
+                "issue 1439: never in the receive callback (at its arrival): {o:?} in {outs:?}"
+            );
+        }
+    }
 }
 
 /// ROZHODNUTÉ 6347872706: the playout worker is a REAL thread, one per source. Run on the real
 /// clock: it is spawned with the source and again after an update, it hands the slots to OBS by
-/// itself (never early: at or after their deadline), and it is stopped and JOINED in the update and in
-/// destroy -- in destroy before the source reads its timeline for the summary and frees it.
+/// itself (a stored packet at its next look, ahead of its deadline: review round 5), and it is
+/// stopped and JOINED in the update and in destroy -- in destroy before the source reads its
+/// timeline for the summary and frees it.
 #[test]
 fn the_worker_thread_runs_and_is_joined_before_the_source_frees_its_timeline_1439() {
     let mut tokens = vec!["thread".to_string()];
@@ -675,9 +699,15 @@ fn the_worker_thread_runs_and_is_joined_before_the_source_frees_its_timeline_143
         audio.len() > 20,
         "issue 1439: the worker thread handed the stored packets to OBS: {stdout}"
     );
+    // a stored packet goes out at the worker's next look, ~30 ms ahead of its deadline: even a
+    // loaded runner leaves nine in ten of them ahead of it
+    let ahead = audio
+        .iter()
+        .filter(|&&(ts, at)| at + 2_000_000 < ts)
+        .count();
     assert!(
-        audio.iter().all(|&(ts, at)| at + 2_000_000 >= ts),
-        "issue 1439: a slot went out before its deadline: {audio:?}"
+        ahead * 10 >= audio.len() * 9,
+        "issue 1439: the worker thread held the stored packets to their deadlines: {audio:?}"
     );
 }
 

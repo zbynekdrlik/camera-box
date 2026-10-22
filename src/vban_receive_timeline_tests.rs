@@ -2,6 +2,7 @@
 //! receive timeline), a test-only `#[path]` child like the bench, so the module itself stays the
 //! decision (review round 3: the file had grown past its line budget with the tests inline).
 
+use super::worker_model::{Sink, Worker};
 use super::*;
 use std::collections::VecDeque;
 
@@ -25,15 +26,45 @@ pub(super) fn through_the_hold(t: &mut Timeline, nu0: u32) {
     }
 }
 
-/// The timeline driven like the shipped source drives it (ROZHODNUTÉ 6347872706): the playout
-/// worker at every deadline between arrivals (each slot at its own deadline), the store of in-time
-/// packets, and every emission with the instant it went out. At an arrival that falls exactly on a
-/// deadline the packet is handled first.
+/// The timeline driven like the shipped source drives it (ROZHODNUTÉ 6347872706): the store of
+/// in-time packets, the playout worker of [`super::worker_model`] (it wakes only when it scheduled
+/// itself, or idle when a packet is stored), and every emission with the instant it went out. At an
+/// arrival that falls exactly on a wake the packet is handled first.
 pub(super) struct Rig {
     pub(super) t: Timeline,
     pub(super) store: VecDeque<u64>,
     pub(super) outs: Vec<(u64, DueDecision)>,
-    clock: u64,
+    worker: Worker,
+    /// Every wake runs this much late (the worker's scheduling latency), 0 = on time.
+    pub(super) wake_late_ns: u64,
+}
+
+/// The [`Rig`]'s store and emission record as the worker sees them.
+struct RigSink<'a> {
+    store: &'a mut VecDeque<u64>,
+    outs: &'a mut Vec<(u64, DueDecision)>,
+    wake_late_ns: u64,
+}
+
+impl Sink for RigSink<'_> {
+    fn head(&self) -> Option<u64> {
+        self.store.front().copied()
+    }
+
+    fn emit(&mut self, at: u64, d: DueDecision) {
+        if d.kind == Due::Packet {
+            assert_eq!(
+                self.store.pop_front(),
+                Some(d.pos),
+                "the slot is the store's head"
+            );
+        }
+        self.outs.push((at, d));
+    }
+
+    fn wake_late(&mut self, _at: u64) -> u64 {
+        self.wake_late_ns
+    }
 }
 
 impl Rig {
@@ -42,31 +73,20 @@ impl Rig {
             t: Timeline::new(),
             store: VecDeque::new(),
             outs: Vec::new(),
-            clock: 0,
+            worker: Worker::default(),
+            wake_late_ns: 0,
         }
     }
 
-    /// The worker at every deadline before `until` (and at `until` itself when `inclusive`).
+    /// The worker's wakes before `until` (and at `until` itself when `inclusive`).
     pub(super) fn run_until(&mut self, until: u64, inclusive: bool) {
-        loop {
-            let d = self.t.due(self.clock, self.store.front().copied());
-            match d.kind {
-                Due::None => {
-                    let due =
-                        d.next_ns != 0 && (d.next_ns < until || (inclusive && d.next_ns == until));
-                    if !due {
-                        break;
-                    }
-                    self.clock = self.clock.max(d.next_ns);
-                }
-                Due::Packet => {
-                    self.store.pop_front();
-                    self.outs.push((self.clock, d));
-                }
-                _ => self.outs.push((self.clock, d)),
-            }
-        }
-        self.clock = self.clock.max(until);
+        let mut sink = RigSink {
+            store: &mut self.store,
+            outs: &mut self.outs,
+            wake_late_ns: self.wake_late_ns,
+        };
+        self.worker
+            .run_until(&mut self.t, &mut sink, until, inclusive);
     }
 
     /// One 256-frame stereo 48 kHz packet at R = 40 ms.
@@ -87,7 +107,15 @@ impl Rig {
         let d = self.t.packet(now, nu, frames, rate, channels, r);
         match d.event {
             Event::Anchor | Event::Reanchor => self.store.clear(),
-            Event::Packet => self.store.push_back(d.pos),
+            Event::Packet => {
+                self.store.push_back(d.pos);
+                let mut sink = RigSink {
+                    store: &mut self.store,
+                    outs: &mut self.outs,
+                    wake_late_ns: self.wake_late_ns,
+                };
+                self.worker.stored(&mut sink, now);
+            }
             _ => {}
         }
         self.run_until(now, true);
@@ -115,8 +143,9 @@ pub(super) fn rig_through_the_hold(r: &mut Rig, nu0: u32) {
 /// is within the first second (the earliest-arrival window): the anchor and those packets are HELD.
 /// The first in-time packet past it starts the output on the final (earliest-arrival) line, so
 /// libobs never sees a stamp step; a loss inside the hold, or just before that packet, is never
-/// filled. From then on (ROZHODNUTÉ 6347872706) the worker hands every slot to libobs at its
-/// deadline: the packet, or one slot of silence. A full re-anchor holds again.
+/// filled. From then on (ROZHODNUTÉ 6347872706) the worker hands every slot to libobs by its
+/// deadline: the packet at its next wake once stored, or one slot of silence at the deadline. A
+/// full re-anchor holds again.
 #[test]
 fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
     let mut r = Rig::new();
@@ -168,9 +197,22 @@ fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
         "{:?}",
         r.outs
     );
+    // review round 5: a stored packet goes to libobs at the worker's next wake (the store woke the
+    // idle worker for H + 1), never held to its deadline; the missing slot's silence goes out
+    // exactly at its deadline, and H + 3, stored by then, right behind it at the same wake
+    let silence_at = r.t.deadline_at((H + 2) * 256);
+    assert_eq!(
+        slots.iter().map(|(at, d)| (*at, d.pos)).collect::<Vec<_>>(),
+        vec![
+            (on_time(H + 1), (H + 1) * 256),
+            (silence_at, (H + 2) * 256),
+            (silence_at, (H + 3) * 256),
+        ],
+        "{slots:?}"
+    );
     for (at, d) in &slots {
-        assert_eq!(*at, d.deadline_ns, "each slot at its deadline: {d:?}");
         assert_eq!(d.deadline_ns + DEADLINE_MARGIN_MS * NS_PER_MS, d.stamp_ns);
+        assert!(*at <= d.deadline_ns, "nothing after its deadline: {d:?}");
     }
     assert_eq!((r.t.lost, r.t.silence_samples), (1, 256));
     // a full re-anchor (another channel count) holds again for its own first second

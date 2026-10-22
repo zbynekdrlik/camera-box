@@ -24,6 +24,11 @@ static void driver_join_worker(void *s);
 #undef blog
 
 static uint64_t g_now;
+/* simulated time (review round 5): when the worker wakes next. It wakes ONLY at a time it scheduled
+ * itself (its step's next deadline or look, capped like the shipped thread's sleep) or, idle, when the
+ * receive thread signals it -- never at a packet's arrival otherwise, exactly like the shipped thread. */
+static bool g_idle = true;
+static uint64_t g_wake;
 /* `thread`: the real worker thread on the real clock; packet times are offsets from the start */
 static int g_real_thread = 0;
 static uint64_t g_real_start;
@@ -123,8 +128,14 @@ int os_event_timedwait(os_event_t *event, unsigned long milliseconds)
 static bool driver_spawn_worker(void *s)
 {
 	struct vban_src_s *src = s;
-	if (!g_real_thread)
-		return true; /* the step runs on simulated time below; no thread to join */
+	if (!g_real_thread) {
+		/* the step runs on simulated time below; no thread to join. A started worker steps at once,
+		 * and a stop's signal is not a packet's */
+		src->worker_wake->signalled = false;
+		g_idle = false;
+		g_wake = g_now;
+		return true;
+	}
 	printf("worker spawn\n");
 	return pthread_create(&src->worker, NULL, vban_src_worker_main, src) == 0;
 }
@@ -346,33 +357,38 @@ void vban_udp_set_host(vban_udp_t *dev, vban_udp_cb_t cb, void *data, const char
 	udp_report("host", data);
 }
 
-/* Simulated time: the worker's step at every deadline before UNTIL (and at UNTIL when INCLUSIVE). */
+/* Simulated time: one wake of the worker at AT -- its step, then its next wake (the shipped thread's
+ * sleep: the step's next time, at most VBAN_SRC_WORKER_SLEEP_MAX_NS ahead; 0 = idle). */
+static void sim_wake(struct vban_src_s *s, uint64_t at)
+{
+	if (at > g_now)
+		g_now = at;
+	const uint64_t next = vban_src_worker_step(s, g_now);
+	if (next == 0) {
+		g_idle = true;
+		return;
+	}
+	const uint64_t cap = g_now + VBAN_SRC_WORKER_SLEEP_MAX_NS;
+	g_wake = next < cap ? next : cap;
+}
+
+/* Simulated time: the worker's wakes before UNTIL (and at UNTIL when INCLUSIVE). */
 static void run_worker(void *src, uint64_t until, int inclusive)
 {
 	struct vban_src_s *s = src;
-	for (;;) {
-		const uint64_t next = vban_src_worker_step(s, g_now);
-		const int due = next != 0 && (next < until || (inclusive && next == until));
-		if (!due)
-			break;
-		if (next > g_now)
-			g_now = next;
-	}
+	while (!g_idle && (g_wake < until || (inclusive && g_wake == until)))
+		sim_wake(s, g_wake);
 	if (until > g_now)
 		g_now = until;
 }
 
-/* Simulated time, at the end: the worker until every stored packet went out (nothing past the last). */
+/* Simulated time, at the end: the worker's wakes until every stored packet went out (nothing past the
+ * last). */
 static void flush_worker(void *src)
 {
 	struct vban_src_s *s = src;
-	while (s->store_count > 0) {
-		const uint64_t next = vban_src_worker_step(s, g_now);
-		if (s->store_count == 0 || next == 0)
-			break;
-		if (next > g_now)
-			g_now = next;
-	}
+	while (s->store_count > 0 && !g_idle)
+		sim_wake(s, g_wake);
 }
 
 /* One stereo 16-bit 48 kHz packet of FRAMES frames, every sample = VALUE. */
@@ -430,12 +446,21 @@ static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int bitfm
 		vban_src_callback(buf, VBAN_HEADER_SIZE + bytes, src);
 		return;
 	}
-	/* simulated time: the worker at every deadline before the packet, the packet, the worker at it
-	 * (a lead-in), as the shipped worker thread would */
+	/* simulated time: the worker's wakes before the packet, the packet, then a wake at it -- the idle
+	 * worker the receive thread signalled, or one it had scheduled for exactly then -- as the shipped
+	 * worker thread would */
 	run_worker(src, now, 0);
 	g_now = now;
 	printf("in nu=%" PRIu32 " now=%" PRIu64 " value=%d\n", nu_frame, now, (int)value);
 	vban_src_callback(buf, VBAN_HEADER_SIZE + bytes, src);
+	struct vban_src_s *s = src;
+	if (s->worker_wake->signalled) {
+		s->worker_wake->signalled = false;
+		if (g_idle) {
+			g_idle = false;
+			g_wake = now;
+		}
+	}
 	run_worker(src, now, 1);
 }
 

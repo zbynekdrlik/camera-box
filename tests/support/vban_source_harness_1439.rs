@@ -238,8 +238,9 @@ pub(crate) fn assert_contiguous(outs: &[Out]) {
 }
 
 /// Review round 5: on the grid a stretch's first output's stamp is R − one packet (34.67 ms)
-/// after its arrival, so its LEAD-IN is 1664 whole frames of silence.
-pub(crate) const LEAD_IN: u64 = 1664;
+/// after its arrival, and its LEAD-IN starts the 2 ms margin after the worker's now: 1568 whole
+/// frames of silence.
+pub(crate) const LEAD_IN: u64 = 1568;
 
 /// Splits off the LEAD-INs (review round 5): the run of silent outputs that opens a stretch (the
 /// first output, or one that does not continue the previous output's stamps), which must end

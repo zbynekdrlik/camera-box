@@ -121,6 +121,10 @@
  * window that takes it (mixed at its end, after the stamp), with room for the worker's wake jitter.
  * Taken from R's jitter budget: a packet is in time with up to R - one packet - this of delay. */
 #define VBAN_RECV_DEADLINE_MARGIN_MS 2
+/* While the slot due next has no packet yet, the worker looks again after at most this long (an absolute
+ * sleep on its own clock, review round 5): a packet stored in time goes to libobs at the worker's next
+ * wake, never held to its deadline, so only a lost slot's silence waits for that. */
+#define VBAN_RECV_POLL_MS 5
 #define VBAN_RECV_NS_PER_SEC 1000000000ULL
 #define VBAN_RECV_NS_PER_MS 1000000ULL
 
@@ -185,6 +189,8 @@ struct vban_recv_timeline {
 	uint64_t received;
 	uint64_t lost;            /* slots handed to libobs as silence (no packet at the deadline) */
 	uint64_t silence_samples; /* the silence those slots carried */
+	uint64_t missed;          /* slots handed to libobs after their own stamp (the worker woke too late
+				   * for the margin; the status line's emit_missed, review round 5) */
 	uint64_t late;            /* packets too late for their slot (each dropped) */
 	uint64_t re_anchors;
 	uint64_t stale; /* duplicate / reordered packets dropped (their slot had passed) */

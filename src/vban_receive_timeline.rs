@@ -121,6 +121,10 @@ pub const SILENCE_CHUNK_FRAMES: u32 = 1024;
 /// the worker's wake jitter. Taken from R's jitter budget: a packet is in time with up to
 /// R − one packet − this of network delay over the earliest arrival.
 pub const DEADLINE_MARGIN_MS: u64 = 2;
+/// While the slot due next has no packet yet, the worker looks again after at most this long (an
+/// absolute sleep on its own clock, review round 5): a packet stored in time goes to libobs at the
+/// worker's next wake, never held to its deadline, so only a lost slot's silence waits for that.
+pub const POLL_MS: u64 = 5;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 const NS_PER_MS: u64 = 1_000_000;
@@ -318,6 +322,9 @@ pub struct Timeline {
     pub lost: u64,
     /// The silence those slots carried.
     pub silence_samples: u64,
+    /// Slots handed to libobs after their own stamp: the worker woke too late for the margin, and
+    /// the mix may already have taken that window (review round 5; the status line's `emit_missed`).
+    pub missed: u64,
     /// Packets that came too late for their slot (each dropped).
     pub late: u64,
     pub re_anchors: u64,
@@ -429,6 +436,7 @@ impl Timeline {
             received: 0,
             lost: 0,
             silence_samples: 0,
+            missed: 0,
             late: 0,
             re_anchors: 0,
             stale: 0,
@@ -841,3 +849,7 @@ mod tests;
 #[cfg(test)]
 #[path = "vban_receive_timeline_late_tests.rs"]
 mod late_tests;
+
+#[cfg(test)]
+#[path = "vban_receive_timeline_worker_model.rs"]
+mod worker_model;

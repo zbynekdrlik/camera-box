@@ -45,8 +45,8 @@ use std::fmt::Write as _;
 use vban_c::{compile_and_run, repo};
 use vban_receive_timeline::{
     clamp_reserve_ms, ns_to_samples, round_half_away, samples_to_ns, scale_ppb, Decision, Due,
-    DueDecision, Event, Reason, Timeline, FIT_WINDOW_S, FROZEN_S, JUMP_S, OUTLIER_MS,
-    STALE_PACKETS,
+    DueDecision, Event, Reason, Timeline, DEADLINE_MARGIN_MS, FIT_WINDOW_S, FROZEN_S, JUMP_S,
+    OUTLIER_MS, STALE_PACKETS,
 };
 
 const HEADER: &str = "vendor/obs-vban/src/vban-receive-timeline.h";
@@ -166,7 +166,7 @@ fn line(t: &Timeline, d: Decision) -> String {
 /// One playout decision and the emission state after it.
 fn due_line(t: &Timeline, d: DueDecision) -> String {
     format!(
-        "due {} {} {} {} {} {} {} | {} {} {} {}",
+        "due {} {} {} {} {} {} {} | {} {} {} {} {}",
         d.kind as i32,
         d.pos,
         d.frames,
@@ -177,13 +177,16 @@ fn due_line(t: &Timeline, d: DueDecision) -> String {
         t.emit_pos,
         u8::from(t.lead_in_pending),
         t.lost,
-        t.silence_samples
+        t.silence_samples,
+        t.missed
     )
 }
 
 /// The source's two sides around one timeline, the same in both twins' drivers (ROZHODNUTÉ
-/// 6347872706): the playout worker at every deadline before an arrival, the packet, the worker at
-/// the arrival (a lead-in); a PACKET is stored, an anchor clears the store.
+/// 6347872706): the playout worker at every look the timeline asks for before an arrival (none
+/// when the packet says the worker was stalled until it), the packet, the worker at the arrival; a
+/// PACKET is stored, an anchor clears the store. A parity driver, not a timing model: the shipped
+/// worker's wake schedule is modelled in src/vban_receive_timeline_worker_model.rs.
 #[derive(Default)]
 struct Drive {
     store: VecDeque<u64>,
@@ -232,7 +235,11 @@ impl Drive {
             *t = Timeline::new();
             self.store.clear();
         }
-        self.worker(t, p.now, false, seen);
+        if p.stall {
+            self.clock = self.clock.max(p.now);
+        } else {
+            self.worker(t, p.now, false, seen);
+        }
         let d = t.packet(p.now, p.nu, p.frames, p.rate, p.channels, p.reserve_ns);
         match d.event {
             Event::Anchor | Event::Reanchor => self.store.clear(),
@@ -338,9 +345,9 @@ static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d
 
 static void due_line(const struct vban_recv_timeline *t, struct vban_recv_due d)
 {
-	printf("due %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64 " | %" PRIu64 " %d %" PRIu64 " %" PRIu64 "\n",
+	printf("due %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64 " | %" PRIu64 " %d %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
 	       d.kind, d.pos, d.frames, d.stamp_ns, d.deadline_ns, d.late_ns, d.next_ns, t->emit_pos,
-	       t->lead_in_pending ? 1 : 0, t->lost, t->silence_samples);
+	       t->lead_in_pending ? 1 : 0, t->lost, t->silence_samples, t->missed);
 }
 
 /* the store of in-time packets and the worker's clock (the Rust Drive) */
@@ -385,6 +392,7 @@ struct pkt {
 	uint32_t nu, frames, rate, channels;
 	uint64_t reserve_ns;
 	int reset;
+	int stall;
 };
 "#,
     );
@@ -393,14 +401,15 @@ struct pkt {
         for p in sc {
             writeln!(
                 c,
-                "\t{{{}ULL, {}U, {}U, {}U, {}U, {}ULL, {}}},",
+                "\t{{{}ULL, {}U, {}U, {}U, {}U, {}ULL, {}, {}}},",
                 p.now,
                 p.nu,
                 p.frames,
                 p.rate,
                 p.channels,
                 p.reserve_ns,
-                i32::from(p.reset)
+                i32::from(p.reset),
+                i32::from(p.stall)
             )
             .unwrap();
         }
@@ -456,7 +465,12 @@ struct pkt {
              \t\t\tvban_recv_init(&t);\n\
              \t\t\tstore_head = store_tail;\n\
              \t\t}}\n\
-             \t\tworker(&t, p->now, 0);\n\
+             \t\tif (p->stall) {{\n\
+             \t\t\tif (p->now > clk)\n\
+             \t\t\t\tclk = p->now;\n\
+             \t\t}} else {{\n\
+             \t\t\tworker(&t, p->now, 0);\n\
+             \t\t}}\n\
              \t\tconst struct vban_recv_decision d = vban_recv_packet(&t, p->now, p->nu, p->frames, p->rate, p->channels, p->reserve_ns);\n\
              \t\tif (d.event == VBAN_RECV_ANCHOR || d.event == VBAN_RECV_REANCHOR)\n\
              \t\t\tstore_head = store_tail;\n\
@@ -557,20 +571,33 @@ fn the_scripts_reach_every_boundary_1439() {
         "a stretch starved (the worker idle while it emits)",
         "a slot read back before the line's base (rebased while it waited)",
         "another packet size (a format re-anchor)",
+        "slots out as their packet ahead of their deadline (round 5: at the worker's look)",
+        "a look again after the poll (the slot's packet not there yet)",
+        "slots out after their stamp (missed: a stalled worker)",
+        "a stretch with no room for a lead-in (its first packet at its deadline)",
     ];
-    let mut hits = [0usize; 50];
-    // what the worker hands out (both twins' drivers do the same): every slot one slot, never
-    // before its deadline
-    fn tally(hits: &mut [usize; 50], t: &Timeline, d: DueDecision) {
+    let mut hits = [0usize; 54];
+    // what the worker hands out (both twins' drivers do the same): every slot one slot, its silence
+    // never before its deadline (a stored packet may go out ahead of it, review round 5)
+    fn tally(hits: &mut [usize; 54], t: &Timeline, d: DueDecision) {
         match d.kind {
             Due::Silence | Due::Packet => {
                 assert_eq!(d.frames, u64::from(t.frames), "one slot: {d:?}");
-                assert!(d.late_ns >= 0, "a slot before its deadline: {d:?}");
+                if d.kind == Due::Silence {
+                    assert!(d.late_ns >= 0, "a silence before its deadline: {d:?}");
+                }
                 hits[if d.kind == Due::Silence { 1 } else { 44 }] += 1;
                 hits[48] += usize::from(d.pos < t.base_pos);
+                hits[50] += usize::from(d.kind == Due::Packet && d.late_ns < 0);
+                hits[52] += usize::from(d.late_ns > (DEADLINE_MARGIN_MS * MS) as i64);
             }
             Due::LeadIn => hits[35] += 1,
-            Due::None => hits[47] += usize::from(d.next_ns == 0 && t.emitted),
+            Due::None => {
+                hits[47] += usize::from(d.next_ns == 0 && t.emitted);
+                hits[51] += usize::from(
+                    t.emitted && d.next_ns != 0 && d.next_ns < t.deadline_at(t.emit_pos),
+                );
+            }
         }
     }
     for sc in scripts() {
@@ -585,7 +612,11 @@ fn the_scripts_reach_every_boundary_1439() {
                 t = Timeline::new();
                 drive.store.clear();
             }
-            drive.worker(&mut t, p.now, false, &mut |t, d| tally(&mut hits, t, d));
+            if p.stall {
+                drive.clock = drive.clock.max(p.now);
+            } else {
+                drive.worker(&mut t, p.now, false, &mut |t, d| tally(&mut hits, t, d));
+            }
             let frames_before = t.frames;
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
             let emitted_before = t.emitted;
@@ -709,6 +740,10 @@ fn the_scripts_reach_every_boundary_1439() {
                 d.event == Event::Reanchor && anchored && next_before <= u64::from(p.rate),
             );
             let first_output = !emitted_before && d.event == Event::Packet;
+            hits[53] += usize::from(
+                first_output
+                    && d.stamp_ns < p.now + DEADLINE_MARGIN_MS * MS + samples_to_ns(1, p.rate),
+            );
             hits[36] += usize::from(
                 d.event == Event::Late && !emitted_before && next_before > u64::from(p.rate),
             );
