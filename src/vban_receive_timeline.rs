@@ -934,7 +934,10 @@ mod tests {
         assert!(t.fit_valid);
         assert!((t.fit_ppb - 100_000).abs() < 200, "fit {}", t.fit_ppb);
         assert!((t.step_ppb - 100_000).abs() < 2_000, "step {}", t.step_ppb);
-        assert!(t.phase_ns.abs() < 1_000_000, "phase {}", t.phase_ns);
+        // ROZHODNUTÉ 6343922049: the phase left by the anchor (here ~2 ms: 10 s at the nominal
+        // rate before the fit, then the 5 ppm/bucket slew to it) is HELD inside the dead band of
+        // R / 4, never walked to fit + R
+        assert!(t.phase_ns.abs() <= 10_000_000, "phase {}", t.phase_ns);
     }
 
     #[test]
