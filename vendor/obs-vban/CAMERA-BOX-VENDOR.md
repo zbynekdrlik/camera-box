@@ -145,7 +145,8 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   not come and whose slot has not gone out (in an emitting, not starved stretch) is stored for its
   slot and played in it (`reordered=`); it never moves the line or the fit. A duplicate, a packet
   whose slot went out, one 64 behind, one in the hold or a starved stretch is dropped and counted
-  (`stale=`). The loss line is logged by the worker when a run of missing slots ends, never at gap
+  (`stale=`). The loss line is logged by the worker when a run of missing slots ends -- written only
+  once nothing more is due at that look, so a log write never delays a slot -- never at gap
   detection.
 - **Reconfiguration.** Another port, stream name or host starts a new timeline. `update()` asks for
   the reset BEFORE it lets the new sender in (`vban_src_string_changes`, the predicate
@@ -177,7 +178,7 @@ Log lines:
 obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receive_buffer_ms=40 -- holding its first second
 obs-vban receive emitting: source 'Zvuk z mixu' frame=… margin_ms=… after the first second's hold -- every slot goes out by 2 ms before its stamp
 obs-vban receive: received=… lost=… late=… re_anchors=… stale=… reordered=… concealed=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… emit_late_ms=… emit_missed=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
-obs-vban receive late: source '…' frame=… late_ms=… -- dropped, its slot is silence on the anchored line (late=…)
+obs-vban receive late: source '…' frame=… late_ms=… -- dropped, its slot went out without it, on the anchored line (late=…)
 obs-vban receive re-anchor: source '…' reason=starve|backward|jump|format|config|fit frame=… starve_ms=… re_anchors=… late=… -- holding its first second
 obs-vban receive re-anchor: … reason=format … -- holding its first second (frames 256 -> 128, rate … -> …, ch … -> …: a varying packet size is not supported; N more not logged in the last period)
 obs-vban receive buffer: source '…' receive_buffer_ms=10 is not above one packet (5.33 ms) + 10 ms: using 15.33 ms

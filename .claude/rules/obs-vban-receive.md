@@ -235,6 +235,16 @@ lost packets landed on audio already delivered).
   run of slots that went out without their packet, at the slot of the packet that ends it (or `before
   the stretch ended` when the stretch starves). Never at gap detection: a gap a reorder fills is no
   loss. A run is concealed or silent as a whole (the timeline decides it at its first slot).
+  - The worker WRITES the lines only once `vban_recv_due` says nothing more is due at that look (up
+    to 4 runs per look, then a count): the packet that ends a run is decided about one slot + the
+    2 ms margin before its stamp, and a log write can stall (the OBS log's lock, a flush, journald).
+    `emit_missed` is computed before any write, so it could not show such a stall (the fresh-context
+    review of this change; pinned with the lift driver's `logs=` count on each `out` line).
+  - Known limits (review): a reorder dropped on a FULL store (4096 packets: only a worker stalled
+    for ~20 s) is still counted `reordered` -- its slot is counted `lost` at its deadline; and each
+    reorder turns the whole store through the deque under the lock -- ~16 entries at R 80, up to the
+    4096-packet cap with a stalled worker (a slot ring by position would make it O(1) if that ever
+    matters).
 - **Bench** (`src/vban_receive_timeline_bench.rs`): a two-clock sender at +-50 ppm, 5..7 ms bursts, gaps
   of 5..30 ms every ~400 ms, receive-thread wake jitter.
   - **What it runs:** the replay runs the source as shipped. The receive decision, then the playout
@@ -290,7 +300,7 @@ lost packets landed on audio already delivered).
 obs-vban receive anchored: source '<input>' frame=N rate=48000 ch=2 receive_buffer_ms=R -- holding its first second
 obs-vban receive emitting: source '<input>' frame=N margin_ms=X after the first second's hold -- every slot goes out by 2 ms before its stamp
 obs-vban receive: received=N lost=N late=N re_anchors=N stale=N reordered=N concealed=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X emit_missed=N receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
-obs-vban receive late: source '<input>' frame=N late_ms=X -- dropped, its slot is silence on the anchored line (late=N)
+obs-vban receive late: source '<input>' frame=N late_ms=X -- dropped, its slot went out without it, on the anchored line (late=N)
 obs-vban receive re-anchor: source '<input>' reason=starve|backward|jump|format|config|fit frame=N starve_ms=X re_anchors=N late=N -- holding its first second
 obs-vban receive re-anchor: ... reason=format ... -- holding its first second (frames 256 -> 128, rate 48000 -> 48000, ch 2 -> 2: a varying packet size is not supported; N more not logged in the last period)
 obs-vban receive buffer: source '<input>' receive_buffer_ms=R is not above one packet (X ms) + 10 ms: using X ms
@@ -421,10 +431,12 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
 - ROZHODNUTÉ 6352253147: `rustc --test --edition 2021 src/vban_conceal.rs` (the math), the same with
   `CARGO_MANIFEST_DIR` for `tests/vban_conceal_parity_1439.rs`, `tests/vban_source_reorder_1439.rs`
   and `tests/vban_source_conceal_1439.rs` (the shipped source through the lift driver, whose `out`
-  line carries each output's `mid=` and `last=` sample). The real-thread driver with a reorder and
+  line carries each output's `mid=` and `last=` sample and `logs=`, the plugin's log lines written
+  before it, atomic: both threads log). The real-thread driver with a reorder and
   short losses in it runs clean under ThreadSanitizer.
-- The mutation pass of the reorder + concealment change (28 hand mutants on a scratch copy, the
-  decisions edited identically in C and Rust): 27 killed. The survivor -- not updating `tail[]` after a
+- The mutation pass of the reorder + concealment change (29 hand mutants on a scratch copy, the
+  decisions edited identically in C and Rust; the store's insert-at-front mutant came from the
+  review): 28 killed. The survivor -- not updating `tail[]` after a
   concealed slot -- is equivalent for every packet of 2+ frames (such a slot ends on the repeat
   itself unless it fades toward the packet that ends the run); kept for 1-frame packets.
 - `pytest tests/python/test_stream_role_vban_1439.py` (facts, seed, port, hub removal, item 9/16).
