@@ -416,8 +416,9 @@ fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
          restarted timelines hold: `{stdout}`"
     );
     assert!(
-        silent[0].contains(" frames=480 "),
-        "issue 1439: the lead-in is 10 ms: `{stdout}`"
+        silent[0].contains(" frames=384 "),
+        "issue 1439: the lead-in is 10 ms less the 2 ms margin it starts after the worker's now: \
+         `{stdout}`"
     );
     // round 5: the sender then pauses, so the worker keeps the line with one slot of silence per
     // missing packet until no packet came in time for a second
@@ -481,11 +482,12 @@ fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439()
             "issue 1462: the stamps are contiguous, the lead-in included: {outs:?}"
         );
     }
-    // review round 5: the lead-in first, R − one 239-frame packet = 35.02 ms = 1681 frames
+    // review round 5: the lead-in first, R − one 239-frame packet − the 2 ms margin it starts after
+    // the worker's now = 33.02 ms = 1585 frames
     let n = outs.iter().position(|o| !o.2).expect("an audio output");
     assert_eq!(
         outs[..n].iter().map(|o| o.1).sum::<u64>(),
-        1681,
+        1585,
         "issue 1439: the lead-in: {outs:?}"
     );
     let outs = outs[n..].to_vec();
@@ -628,10 +630,11 @@ fn a_stored_slot_goes_out_at_the_workers_next_look_a_missing_one_at_its_deadline
             o.at >= a && o.at + margin < o.ts,
             "issue 1439: a packet goes out after its arrival, before its deadline: {o:?} in {outs:?}"
         );
-        if o.first == 4 {
+        if o.first > 3 && a < silence[0].at {
             assert_eq!(
                 o.at, silence[0].at,
-                "issue 1439: the packet behind a missing slot goes out right after its silence: {outs:?}"
+                "issue 1439: a packet stored behind a missing slot goes out right after its silence: \
+                 {outs:?}"
             );
         } else {
             assert!(
