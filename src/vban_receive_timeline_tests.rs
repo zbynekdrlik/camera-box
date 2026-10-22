@@ -13,6 +13,71 @@ fn on_time(k: u64) -> u64 {
     T0 + samples_to_ns(k * 256, RATE)
 }
 
+/// The first packet past the first second of an anchor (256 frames at 48 kHz): packet k ends at
+/// (k + 1) x 256, so packets 0..=186 end within 48 000 and are HELD (ROZHODNUTÉ 6345255813 item 1).
+const H: u64 = 187;
+
+/// The anchor + the held first second, on time: packets 0..H with indexes `nu0 + k`.
+fn through_the_hold(t: &mut Timeline, nu0: u32) {
+    for k in 0..H {
+        t.packet(on_time(k), nu0.wrapping_add(k as u32), 256, RATE, 2, R40);
+    }
+}
+
+/// ROZHODNUTÉ 6345255813 (1): after every anchor the source emits NOTHING while the packet's end
+/// is within the first second (the earliest-arrival window): the anchor and those packets are HELD.
+/// The first packet past it is the first emitted one, on the final (earliest-arrival) line, so
+/// libobs never sees a stamp step. A loss inside the hold is never filled; neither are the slots
+/// lost right before the first emitted packet (libobs has nothing from the source to keep
+/// contiguous yet). A full re-anchor holds again for its own first second.
+#[test]
+fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
+    let mut t = Timeline::new();
+    let line = |k: u64| on_time(k) - samples_to_ns(256, RATE) + R40;
+    // the first packet ends a 20 ms gap, packet 2 is lost
+    let d = t.packet(on_time(0) + 20 * NS_PER_MS, 0, 256, RATE, 2, R40);
+    assert_eq!(d.event, Event::Anchor);
+    let mut prev = on_time(0) + 20 * NS_PER_MS;
+    for k in (1..H).filter(|&k| k != 2) {
+        let at = on_time(k).max(prev + 1_000);
+        prev = at;
+        let d = t.packet(at, k as u32, 256, RATE, 2, R40);
+        assert_eq!(
+            d.event,
+            Event::Hold,
+            "packet {k} ends within the first second: {d:?}"
+        );
+        assert_eq!(
+            d.silence_samples, 0,
+            "packet {k}: nothing is emitted in the hold"
+        );
+    }
+    assert_eq!(t.lost, 0, "a slot lost inside the hold is never filled");
+    // packet H is lost too: H + 1 is the first emitted packet, on the earliest-arrival line, and the
+    // slot lost right before it is not filled (the stream starts there)
+    let d = t.packet(on_time(H + 1), (H + 1) as u32, 256, RATE, 2, R40);
+    assert_eq!(d.event, Event::Packet, "{d:?}");
+    assert!(
+        d.stamp_ns.abs_diff(line(H + 1)) <= 2,
+        "{} vs {}",
+        d.stamp_ns,
+        line(H + 1)
+    );
+    assert_eq!(d.silence_samples, 0, "{d:?}");
+    // from there on the stream is emitted, losses are silence
+    let d = t.packet(on_time(H + 3), (H + 3) as u32, 256, RATE, 2, R40);
+    assert_eq!((d.event, d.silence_samples), (Event::Packet, 256));
+    // a full re-anchor (another channel count) holds again for its own first second
+    let d = t.packet(on_time(H + 4), (H + 4) as u32, 256, RATE, 1, R40);
+    assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Format));
+    for k in 1..H {
+        let d = t.packet(on_time(H + 4 + k), (H + 4 + k) as u32, 256, RATE, 1, R40);
+        assert_eq!(d.event, Event::Hold, "re-anchored packet {k}: {d:?}");
+    }
+    let d = t.packet(on_time(2 * H + 4), (2 * H + 4) as u32, 256, RATE, 1, R40);
+    assert_eq!(d.event, Event::Packet, "{d:?}");
+}
+
 #[test]
 fn the_reserve_clamps_like_the_source_setting() {
     assert_eq!(clamp_reserve_ms(0), 40);
@@ -62,7 +127,7 @@ fn the_anchor_is_the_earliest_arrival_of_the_first_second() {
         let at = on_time(k).max(prev + 1_000);
         prev = at;
         let d = t.packet(at, k as u32, 256, RATE, 2, R40);
-        assert_eq!(d.event, Event::Packet, "packet {k}: {d:?}");
+        assert_eq!(d.event, Event::Hold, "packet {k}: {d:?}");
         if on_time(k) >= at {
             assert!(
                 d.stamp_ns.abs_diff(line(k)) <= 2,
@@ -144,7 +209,12 @@ fn a_steady_delay_inside_the_band_never_moves_the_stamps() {
     for k in 0..(120 * 48_000 / 256) {
         let late = if k == 0 { 0 } else { 6 * NS_PER_MS };
         let d = t.packet(on_time(k) + late, k as u32, 256, RATE, 2, R40);
-        assert_eq!(d.event, if k == 0 { Event::Anchor } else { Event::Packet });
+        let want = match k {
+            0 => Event::Anchor,
+            k if k < H => Event::Hold,
+            _ => Event::Packet,
+        };
+        assert_eq!(d.event, want, "packet {k}");
         assert!(
             d.stamp_ns.abs_diff(line(k)) <= samples_to_ns(1, RATE),
             "packet {k}: the stamp left the anchored line by {} ns",
@@ -178,7 +248,7 @@ fn the_receive_buffer_is_at_least_one_packet_plus_10_ms() {
         let d = t.packet(on_time(k) + 9 * NS_PER_MS, 1 + k as u32, 256, RATE, 2, r10);
         assert_eq!(
             d.event,
-            Event::Packet,
+            if k < H { Event::Hold } else { Event::Packet },
             "packet {k}: 9 ms late is inside the margin: {d:?}"
         );
     }
@@ -203,7 +273,7 @@ fn an_arrival_out_of_order_wraps_like_the_c_twin_and_never_panics() {
     let mut t = Timeline::new();
     t.packet(on_time(0), 0, 256, RATE, 2, R40);
     let d = t.packet(on_time(0) - NS_PER_MS, 1, 256, RATE, 2, R40);
-    assert_eq!(d.event, Event::Packet, "{d:?}");
+    assert_eq!(d.event, Event::Hold, "{d:?}");
     // the first packet of bucket 1 (packet 187 ends at 48 128), then one that came before it
     for k in 2..=187u64 {
         t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
@@ -215,8 +285,9 @@ fn an_arrival_out_of_order_wraps_like_the_c_twin_and_never_panics() {
 #[test]
 fn contiguous_packets_get_contiguous_stamps() {
     let mut t = Timeline::new();
-    let first = t.packet(on_time(0), 1, 256, RATE, 2, R40).stamp_ns;
-    for k in 1..20u64 {
+    through_the_hold(&mut t, 1);
+    let first = on_time(0) - samples_to_ns(256, RATE) + R40;
+    for k in H..H + 20 {
         let d = t.packet(on_time(k), 1 + k as u32, 256, RATE, 2, R40);
         assert_eq!(d.event, Event::Packet);
         assert_eq!(d.stamp_ns, first + samples_to_ns(k * 256, RATE));
@@ -227,14 +298,18 @@ fn contiguous_packets_get_contiguous_stamps() {
 #[test]
 fn a_loss_is_silence_for_exactly_the_lost_slots() {
     let mut t = Timeline::new();
-    let first = t.packet(on_time(0), 10, 256, RATE, 2, R40).stamp_ns;
-    t.packet(on_time(1), 11, 256, RATE, 2, R40);
-    let d = t.packet(on_time(4), 14, 256, RATE, 2, R40);
+    through_the_hold(&mut t, 10);
+    let first = on_time(0) - samples_to_ns(256, RATE) + R40;
+    t.packet(on_time(H), 10 + H as u32, 256, RATE, 2, R40);
+    let d = t.packet(on_time(H + 3), 13 + H as u32, 256, RATE, 2, R40);
     assert_eq!(d.event, Event::Packet);
     assert_eq!(d.silence_samples, 2 * 256);
-    assert_eq!(d.silence_pos, 2 * 256);
-    assert_eq!(t.stamp_at(d.silence_pos), first + samples_to_ns(512, RATE));
-    assert_eq!(d.stamp_ns, first + samples_to_ns(4 * 256, RATE));
+    assert_eq!(d.silence_pos, (H + 1) * 256);
+    assert_eq!(
+        t.stamp_at(d.silence_pos),
+        first + samples_to_ns((H + 1) * 256, RATE)
+    );
+    assert_eq!(d.stamp_ns, first + samples_to_ns((H + 3) * 256, RATE));
     assert_eq!(t.lost, 2);
     assert_eq!(t.silence_samples, 512);
     assert_eq!(t.re_anchors, 0);
@@ -243,17 +318,17 @@ fn a_loss_is_silence_for_exactly_the_lost_slots() {
 #[test]
 fn a_packet_after_its_stamp_re_anchors_and_one_on_it_does_not() {
     let mut t = Timeline::new();
-    let first = t.packet(on_time(0), 1, 256, RATE, 2, R40).stamp_ns;
-    let stamp1 = first + samples_to_ns(256, RATE);
-    let d = t.packet(stamp1, 2, 256, RATE, 2, R40);
+    through_the_hold(&mut t, 1);
+    let stamp1 = t.stamp_at(t.next_pos);
+    let d = t.packet(stamp1, 1 + H as u32, 256, RATE, 2, R40);
     assert_eq!(
         d.event,
         Event::Packet,
         "arriving exactly at its stamp is on time"
     );
     assert_eq!(d.lateness_ns, 0);
-    let stamp2 = first + samples_to_ns(512, RATE);
-    let d = t.packet(stamp2 + 1, 3, 256, RATE, 2, R40);
+    let stamp2 = t.stamp_at(t.next_pos);
+    let d = t.packet(stamp2 + 1, 2 + H as u32, 256, RATE, 2, R40);
     assert_eq!(d.event, Event::Reanchor);
     assert_eq!(d.reason, Reason::Late);
     assert_eq!(d.late_ns, 1, "late by exactly the one ns past its stamp");
@@ -355,9 +430,12 @@ fn an_index_far_behind_re_anchors_as_backward() {
 #[test]
 fn a_reordered_or_duplicated_packet_is_dropped_never_a_re_anchor() {
     let mut t = Timeline::new();
-    for k in 0..12u64 {
-        t.packet(on_time(k), 100 + k as u32, 256, RATE, 2, R40);
+    // the held first second, then packets 100 + H .. 100 + H + 11 (the index below names their offset)
+    through_the_hold(&mut t, 100u32.wrapping_sub(H as u32));
+    for k in H..H + 12 {
+        t.packet(on_time(k), (100 + k - H) as u32, 256, RATE, 2, R40);
     }
+    let on_time = |k: u64| on_time(H + k);
     // 112 overtaken by 113 on the way: one silent slot
     let d = t.packet(on_time(13), 113, 256, RATE, 2, R40);
     assert_eq!((d.event, d.silence_samples), (Event::Packet, 256));
@@ -402,6 +480,9 @@ fn a_reordered_or_duplicated_packet_is_dropped_never_a_re_anchor() {
 #[test]
 fn the_index_wraps_without_a_re_anchor() {
     let mut t = Timeline::new();
+    // the held first second ends at index u32::MAX - 2, then the emitted stream wraps
+    through_the_hold(&mut t, (u32::MAX - 1).wrapping_sub(H as u32));
+    let on_time = |k: u64| on_time(H + k);
     t.packet(on_time(0), u32::MAX - 1, 256, RATE, 2, R40);
     let d = t.packet(on_time(1), u32::MAX, 256, RATE, 2, R40);
     assert_eq!(d.event, Event::Packet);
@@ -415,12 +496,13 @@ fn the_index_wraps_without_a_re_anchor() {
 #[test]
 fn a_jump_over_two_seconds_re_anchors_and_two_seconds_does_not() {
     let mut t = Timeline::new();
-    t.packet(on_time(0), 0, 256, RATE, 2, R40);
+    through_the_hold(&mut t, 0);
+    t.packet(on_time(H), H as u32, 256, RATE, 2, R40);
     // 375 lost packets = exactly 2 s of audio: still a loss.
-    let d = t.packet(on_time(376), 376, 256, RATE, 2, R40);
+    let d = t.packet(on_time(H + 376), (H + 376) as u32, 256, RATE, 2, R40);
     assert_eq!((d.event, d.silence_samples), (Event::Packet, 375 * 256));
     // 376 lost packets = more than 2 s: a sender restart.
-    let d = t.packet(on_time(753), 753, 256, RATE, 2, R40);
+    let d = t.packet(on_time(H + 753), (H + 753) as u32, 256, RATE, 2, R40);
     assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Jump));
 }
 

@@ -105,6 +105,9 @@ pub enum Event {
     Reanchor = 2,
     /// A duplicate or reordered packet whose slot has passed: dropped (never output), counted.
     Stale = 3,
+    /// Inside the first second after an anchor (ROZHODNUTÉ 6345255813): folded and anchoring,
+    /// never output.
+    Hold = 4,
 }
 
 /// Why a timeline restarted (the C `enum vban_recv_reason`).

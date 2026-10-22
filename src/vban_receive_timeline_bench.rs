@@ -115,6 +115,47 @@ fn schedule_from(seed: u64, ppm: f64, n: u64, loss: f64, first_gap_ms: f64) -> V
     out
 }
 
+/// libobs as the source's output meets it (review round 3, ROZHODNUTÉ 6345255813 item 1): a
+/// chunk stamped within 70 ms of where the source's previous chunk ended is APPENDED there
+/// (`TS_SMOOTHING_THRESHOLD`); further off it is PLACED at its stamp. The genlock ASRC on the stamp
+/// basis then pulls the placement error (where the audio sits − its raw stamp) out at most 300 ppm
+/// (`ASRC_MAX_PPM`) of the audio it plays.
+#[derive(Debug, Default)]
+struct Obs {
+    next: Option<f64>,
+    err: f64,
+}
+
+impl Obs {
+    /// One chunk of `dur` ns stamped `stamp`: the instant libobs plays its first sample.
+    fn chunk(&mut self, stamp: f64, dur: f64) -> f64 {
+        self.err = match self.next {
+            Some(n) if (stamp - n).abs() < 70.0 * MS => n - stamp,
+            _ => 0.0,
+        };
+        let at = stamp + self.err;
+        let pull = self.err.clamp(-300e-6 * dur, 300e-6 * dur);
+        self.next = Some(at + dur - pull);
+        at
+    }
+}
+
+/// One anchor's stretch of the run: from an anchor (the first packet or a full re-anchor) to the
+/// next one.
+#[derive(Debug, Clone)]
+struct Segment {
+    /// The packet index of the anchor.
+    anchor_k: u64,
+    /// The STAMP latency (stamp − the true instant its first sample was produced) of the first
+    /// emitted packet past the anchor's first second, ns; NaN until there is one.
+    anchored_latency_ns: f64,
+    /// The largest |stamp latency − anchored| after it, ns.
+    latency_dev_max_ns: f64,
+    /// The same for the latency libobs REALIZES (where it plays the sample, [`Obs`]), ns.
+    anchored_realized_ns: f64,
+    realized_dev_max_ns: f64,
+}
+
 #[derive(Debug, Default)]
 struct Run {
     sent: u64,
@@ -123,18 +164,20 @@ struct Run {
     re_anchors: u64,
     lost: u64,
     silence_samples: u64,
-    /// The smallest stamp − arrival over the run, ns.
+    /// The smallest stamp − arrival of an emitted packet over the run, ns.
     min_margin_ns: i64,
     /// The largest arrival − previous arrival the run contained, ns.
     max_gap_ns: u64,
-    /// stamp − first-sample instant of the first packet past the first second (the anchored
-    /// latency), ns; NaN when the run never got there.
+    /// The first anchor's stretch: the latency it anchored and how far it moved, ns.
     anchored_latency_ns: f64,
-    /// The largest |latency − anchored| of every packet after it, over the whole run, ns.
     latency_dev_max_ns: f64,
-    /// The largest latency inside the first second (the anchor only moves earlier there), ns.
-    first_second_latency_max_ns: f64,
-    /// The largest deviation of a stamp step from its nominal span, ppm.
+    anchored_realized_ns: f64,
+    realized_dev_max_ns: f64,
+    /// Every anchor's stretch.
+    segments: Vec<Segment>,
+    /// Packets emitted before their anchor's first second was over (the hold forbids any).
+    emitted_in_first_second: u64,
+    /// The largest deviation of an emitted stamp step from its nominal span, ppm.
     max_step_dev_ppm: f64,
     sender_ppm: f64,
 }
@@ -144,10 +187,9 @@ fn replay(sched: &[Sent], reserve_ms: u64) -> Run {
     let reserve = reserve_ms * NS_PER_MS;
     let mut run = Run {
         min_margin_ns: i64::MAX,
-        anchored_latency_ns: f64::NAN,
-        first_second_latency_max_ns: f64::MIN,
         ..Run::default()
     };
+    let mut obs = Obs::default();
     let mut prev_arrival: Option<u64> = None;
     let mut prev_stamp: Option<(u64, u64)> = None;
     for s in sched {
@@ -161,29 +203,66 @@ fn replay(sched: &[Sent], reserve_ms: u64) -> Run {
         }
         prev_arrival = Some(a);
         let d = t.packet(a, s.k as u32, F, 48_000, 2, reserve);
-        run.min_margin_ns = run.min_margin_ns.min(-d.lateness_ns);
-        if d.event == Event::Reanchor {
+        if d.event == Event::Anchor || d.event == Event::Reanchor {
+            run.segments.push(Segment {
+                anchor_k: s.k,
+                anchored_latency_ns: f64::NAN,
+                latency_dev_max_ns: 0.0,
+                anchored_realized_ns: f64::NAN,
+                realized_dev_max_ns: 0.0,
+            });
             prev_stamp = None;
+        }
+        // the source emits only a PACKET (the silence of the slots lost before it first)
+        if d.event != Event::Packet {
             continue;
         }
-        // the first second may move the line earlier (the anchor is its earliest arrival); after
-        // it no stamp step may jump
-        let first_second = (s.k + 1) * u64::from(F) <= 48_000;
-        if let Some((ps, pk)) = prev_stamp.filter(|_| !first_second) {
+        run.min_margin_ns = run.min_margin_ns.min(-d.lateness_ns);
+        if d.silence_samples > 0 {
+            obs.chunk(
+                t.stamp_at(d.silence_pos) as f64,
+                samples_to_ns(d.silence_samples, 48_000) as f64,
+            );
+        }
+        let at = obs.chunk(
+            d.stamp_ns as f64,
+            samples_to_ns(u64::from(F), 48_000) as f64,
+        );
+        let seg = run
+            .segments
+            .last_mut()
+            .expect("an anchor before any packet");
+        let first_second = (s.k - seg.anchor_k + 1) * u64::from(F) <= 48_000;
+        if first_second {
+            run.emitted_in_first_second += 1;
+            prev_stamp = Some((d.stamp_ns, s.k));
+            continue;
+        }
+        if let Some((ps, pk)) = prev_stamp {
             let nominal = samples_to_ns((s.k - pk) * u64::from(F), 48_000) as f64;
             let dev = (d.stamp_ns as f64 - ps as f64 - nominal).abs() / nominal * 1e6;
             run.max_step_dev_ppm = run.max_step_dev_ppm.max(dev);
         }
         prev_stamp = Some((d.stamp_ns, s.k));
         let lat = d.stamp_ns as f64 - s.first_sample_ns;
-        if first_second {
-            run.first_second_latency_max_ns = run.first_second_latency_max_ns.max(lat);
-        } else if run.anchored_latency_ns.is_nan() {
-            run.anchored_latency_ns = lat;
+        let real = at - s.first_sample_ns;
+        if seg.anchored_latency_ns.is_nan() {
+            seg.anchored_latency_ns = lat;
+            seg.anchored_realized_ns = real;
         } else {
-            let dev = (lat - run.anchored_latency_ns).abs();
-            run.latency_dev_max_ns = run.latency_dev_max_ns.max(dev);
+            seg.latency_dev_max_ns = seg
+                .latency_dev_max_ns
+                .max((lat - seg.anchored_latency_ns).abs());
+            seg.realized_dev_max_ns = seg
+                .realized_dev_max_ns
+                .max((real - seg.anchored_realized_ns).abs());
         }
+    }
+    if let Some(seg) = run.segments.first() {
+        run.anchored_latency_ns = seg.anchored_latency_ns;
+        run.latency_dev_max_ns = seg.latency_dev_max_ns;
+        run.anchored_realized_ns = seg.anchored_realized_ns;
+        run.realized_dev_max_ns = seg.realized_dev_max_ns;
     }
     run.late = t.late;
     run.re_anchors = t.re_anchors;
@@ -226,22 +305,31 @@ fn a_jittered_sender_at_50_ppm_with_30_ms_gaps_has_no_late_slot_at_40_ms_1439() 
     }
 }
 
-/// ROZHODNUTÉ 6343922049: after the first second the realized latency stays within ±1 ms of its
-/// anchored value for the WHOLE run (the owner's rule: no latency change after sync).
+/// ROZHODNUTÉ 6343922049 + 6345255813: after the first second both the stamp latency and the
+/// latency libobs REALIZES stay within ±1 ms of their anchored value for the WHOLE run (the owner's
+/// rule: OBS never changes its latency after sync), and nothing is emitted inside the first second
+/// (the hold), so libobs never sees a stamp step.
 fn assert_latency_held(run: &Run, tag: &str) {
     assert!(
         !run.anchored_latency_ns.is_nan(),
         "the run never got past its first second: {tag}"
     );
+    assert_eq!(
+        run.emitted_in_first_second, 0,
+        "emitted inside an anchor's first second (the hold): {tag}"
+    );
     assert!(
         run.latency_dev_max_ns <= 1.0 * MS,
-        "the latency moved {:.3} ms from its anchored {:.3} ms after the first second: {tag}",
+        "the stamp latency moved {:.3} ms from its anchored {:.3} ms after the first second: {tag}",
         run.latency_dev_max_ns / MS,
         run.anchored_latency_ns / MS
     );
     assert!(
-        run.first_second_latency_max_ns <= run.anchored_latency_ns + 30.0 * MS,
-        "{tag}"
+        run.realized_dev_max_ns <= 1.0 * MS,
+        "the latency OBS realizes moved {:.3} ms from its anchored {:.3} ms after the first second: \
+         {tag}",
+        run.realized_dev_max_ns / MS,
+        run.anchored_realized_ns / MS
     );
 }
 
