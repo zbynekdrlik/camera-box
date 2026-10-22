@@ -415,7 +415,7 @@ fn the_scripts_reach_every_boundary_1439() {
         "re-anchors during the hold",
         "a late first packet past the hold (dropped, nothing filled)",
         "a lead-in before a stretch's first output",
-        "a stretch's first output whose stamp had passed (no lead-in)",
+        "a second late packet before a stretch's first output (dropped, nothing filled)",
         "frozen fits (valid, nothing folded for over FROZEN_S of audio)",
         "a fit exactly FROZEN_S of audio past its last fold (not frozen yet)",
         "a frozen fit thawing (a packet folds again)",
@@ -553,7 +553,12 @@ fn the_scripts_reach_every_boundary_1439() {
             let first_output =
                 !emitted_before && (d.event == Event::Packet || d.silence_samples > 0);
             hits[35] += usize::from(first_output && d.lead_in_samples > 0);
-            hits[36] += usize::from(first_output && d.lead_in_samples == 0);
+            hits[36] += usize::from(
+                d.event == Event::Late
+                    && !emitted_before
+                    && next_before > u64::from(p.rate)
+                    && d.silence_samples == 0,
+            );
             hits[37] += usize::from(t.fit_frozen());
             hits[38] += usize::from(
                 t.fit_valid

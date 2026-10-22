@@ -616,34 +616,38 @@ fn the_first_output_of_a_stretch_carries_a_lead_in_up_to_its_stamp() {
     );
 }
 
-/// Review round 5: when a stretch's first output is a late packet's silence (its stamp has passed)
-/// there is no lead-in, and no later output carries one.
+/// Review round 6: a stretch's first output is always an in-time PACKET with its lead-in. Late
+/// packets past the hold but before it are dropped and counted with NOTHING filled: a fill whose
+/// stamp had passed would be the first output with no lead-in, and libobs, which resets its timing
+/// after a starve's gap, would start the stretch at that late fill's arrival. The slots before the
+/// first packet are not filled either; from it on a late slot is silence.
 #[test]
-fn a_first_output_whose_stamp_has_passed_carries_no_lead_in() {
+fn late_packets_before_a_stretch_s_first_output_are_dropped_without_a_fill() {
     let mut t = Timeline::new();
     through_the_hold(&mut t, 0);
     let late = 60 * NS_PER_MS;
-    // packet H late: dropped, nothing filled (nothing was emitted yet)
-    let d = t.packet(on_time(H) + late, H as u32, 256, RATE, 2, R40);
-    assert_eq!(
-        (d.event, d.silence_samples, d.lead_in_samples),
-        (Event::Late, 0, 0),
-        "{d:?}"
-    );
-    assert!(!t.emitted);
-    // packet H + 1 late too: its slot is the first output, silence, its stamp already passed
-    let d = t.packet(on_time(H + 1) + late, (H + 1) as u32, 256, RATE, 2, R40);
-    assert_eq!(
-        (d.event, d.silence_samples, d.lead_in_samples),
-        (Event::Late, 256, 0),
-        "{d:?}"
-    );
-    assert!(t.emitted);
+    for k in H..H + 2 {
+        let d = t.packet(on_time(k) + late, k as u32, 256, RATE, 2, R40);
+        assert_eq!(
+            (d.event, d.silence_samples, d.lead_in_samples),
+            (Event::Late, 0, 0),
+            "packet {k}: {d:?}"
+        );
+        assert!(!t.emitted, "packet {k}: nothing is output yet");
+    }
     let d = t.packet(on_time(H + 20), (H + 20) as u32, 256, RATE, 2, R40);
     assert_eq!(
         (d.event, d.silence_samples, d.lead_in_samples),
-        (Event::Packet, 18 * 256, 0),
-        "{d:?}"
+        (Event::Packet, 0, 1664),
+        "the first output: an in-time packet with its lead-in, nothing filled before it: {d:?}"
+    );
+    assert!(t.emitted);
+    assert_eq!((t.late, t.lost, t.silence_samples), (2, 0, 0));
+    let d = t.packet(on_time(H + 21) + late, (H + 21) as u32, 256, RATE, 2, R40);
+    assert_eq!(
+        (d.event, d.silence_samples, d.lead_in_samples),
+        (Event::Late, 256, 0),
+        "after the first output a late slot is silence: {d:?}"
     );
 }
 

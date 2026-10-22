@@ -530,6 +530,23 @@ fn a_90_ms_persistent_delay_step_is_one_re_anchor_1439() {
     }
 }
 
+/// The schedule with a one-off hiccup at `h0`: every arrival in the next `hold_ms` is held back to
+/// its end; the receive thread hands packets over in order.
+fn hiccup_at(mut sched: Vec<Sent>, h0: u64, hold_ms: u64) -> Vec<Sent> {
+    let h1 = h0 + hold_ms * NS_PER_MS;
+    let mut prev = 0u64;
+    for s in sched.iter_mut() {
+        if let Some(a) = s.arrival_ns.as_mut() {
+            if (h0..h1).contains(a) {
+                *a = h1;
+            }
+            *a = (*a).max(prev + 1_000);
+            prev = *a;
+        }
+    }
+    sched
+}
+
 /// The schedule with a network OUTAGE two minutes in: every packet sent in the next `ms` is lost.
 fn with_outage(mut sched: Vec<Sent>, ms: u64) -> Vec<Sent> {
     let h0 = (S0 + 120_000_000_000) as f64;
@@ -647,6 +664,46 @@ fn known_limit_an_outage_under_a_second_moves_the_realized_latency_by_about_its_
         assert!(
             step > ms as f64 - 60.0 && step < ms as f64,
             "the known limit moved (a cure would bring it under 1 ms): {tag}"
+        );
+    }
+}
+
+/// Review round 6 (the reviewer's repro): a 90 ms hiccup that ends a re-anchored stretch's hold
+/// (after a 1.5 s outage) makes the first packets past the hold late. Their silence must not be the
+/// stretch's first output -- its stamps have passed, so it would carry no lead-in, and libobs, which
+/// reset its timing after the gap, would start the stretch at that late fill's arrival (it realized
+/// 6.4 and 36.4 ms off its stamp latency at 950 and 980 ms). The stretch realizes its own stamp
+/// latency ±1 ms, one lead-in per stretch.
+#[test]
+fn a_hiccup_at_the_end_of_a_re_anchor_s_hold_still_lands_the_stretch_on_its_stamp_1439() {
+    for off_ms in [950u64, 980, 1000] {
+        let sched = with_outage(schedule(1, 0.0, TEN_MIN_PACKETS / 2, 0.0), 1_500);
+        let a0 = sched
+            .iter()
+            .find(|s| s.first_sample_ns >= (S0 + 121_500_000_000) as f64)
+            .and_then(|s| s.arrival_ns)
+            .expect("a packet after the outage");
+        let run = replay(&hiccup_at(sched, a0 + off_ms * NS_PER_MS, 90), 40);
+        let (b_lat, bl, b_real, br) = held(&run, 1, 0..u64::MAX);
+        let tag = format!(
+            "hiccup {off_ms} ms after the re-anchor: stamp {:.3} ms (moved {:.3}), realized {:.3} ms \
+             (moved {:.3}): {run:?}",
+            b_lat / MS,
+            bl / MS,
+            b_real / MS,
+            br / MS
+        );
+        println!("{tag}");
+        assert_eq!(run.re_anchors, 1, "{tag}");
+        assert!(run.late > 0, "the hiccup must make packets late: {tag}");
+        assert_eq!(run.lead_ins, 2, "one lead-in per stretch: {tag}");
+        assert!(
+            bl <= 1.0 * MS && br <= 1.0 * MS,
+            "the new stretch held: {tag}"
+        );
+        assert!(
+            (b_real - b_lat).abs() <= 1.0 * MS,
+            "OBS realizes the stretch's stamp latency: {tag}"
         );
     }
 }
