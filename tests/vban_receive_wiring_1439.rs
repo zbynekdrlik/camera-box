@@ -4,8 +4,10 @@
 //!
 //! 1. the source stays a directly stamped source on the genlock ASRC's STAMP basis (the libobs
 //!    decision lifted from `obs-source.c` and run) and never moves itself off the ASRC path;
-//! 2. the receive callback stamps from the timeline, outputs a lost slot as silence in the
-//!    packet's own sample format, and logs the 10 s status line;
+//! 2. the receive callback only decides and stores (ROZHODNUTÉ 6347872706): the playout worker
+//!    thread hands every slot to libobs at its deadline -- the packet, or a slot of silence in the
+//!    packet's own sample format -- and is stopped and joined in update and destroy; the 10 s status
+//!    line;
 //! 3. the Linux strih bundle builds and stages the plugin, and both Windows builds assert it.
 //!
 //! Std-only, like the parity file:
@@ -136,9 +138,11 @@ fn the_vban_source_is_a_directly_stamped_source_on_the_asrc_stamp_basis_1439() {
     let squished = src.split_whitespace().collect::<Vec<_>>().join(" ");
     for needle in [
         ".output_flags = OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE,",
-        "audio.timestamp = d.stamp_ns; obs_source_output_audio(s->context, &audio);",
-        // the lost slots on the line, the lead-in (review round 5) from its own stamp
-        "silence.timestamp = on_line ? vban_recv_stamp_at(&s->timeline, from + done) : from + vban_recv_samples_to_ns(done, like->samples_per_sec);",
+        // round 5: the worker outputs a slot's packet at the deadline decision's stamp
+        ".timestamp = d.stamp_ns, };",
+        "obs_source_output_audio(s->context, &audio);",
+        // a lead-in or a slot of silence from its own stamp
+        "silence.timestamp = stamp_ns + vban_recv_samples_to_ns(done, rate);",
     ] {
         assert!(
             squished.contains(needle),
@@ -176,18 +180,20 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
     for needle in [
         "#include \"vban-receive-timeline.h\"",
         "vban_recv_packet(&s->timeline, now, header->nuFrame, audio.frames,",
-        "if (os_atomic_exchange_bool(&s->timeline_reset, false)) vban_recv_init(&s->timeline);",
+        "if (os_atomic_exchange_bool(&s->timeline_reset, false)) vban_src_reset_locked(s);",
         "(uint64_t)os_atomic_load_long(&s->receive_buffer_ms) * VBAN_RECV_NS_PER_MS;",
         "vban_recv_clamp_reserve_ms((int64_t)obs_data_get_int(settings, \"receive_buffer_ms\"))",
         "obs_data_set_default_int(data, \"receive_buffer_ms\", VBAN_RECV_RESERVE_MS_DEFAULT);",
         "obs_properties_add_int(props, \"receive_buffer_ms\",",
-        // the silence keeps the packet's own sample format (review round 1: a format change resets
+        // round 5: the worker's deadline decision, with the store's head
+        "const struct vban_recv_due d = vban_recv_due(&s->timeline, now, has_head, head.pos);",
+        "os_sleepto_ns(next < cap ? next : cap);",
+        // the silence keeps the stream's own sample format (review round 1: a format change resets
         // libobs's resampler and the genlock ASRC), U8 silence is 0x80
-        "if (d.silence_samples > 0) vban_src_output_silence(s, &audio, d.silence_samples, true, d.silence_pos);",
-        // review round 5: a stretch's first output has its lead-in before it
-        "if (d.lead_in_samples > 0) vban_src_output_silence(s, &audio, d.lead_in_samples, false, d.lead_in_stamp_ns);",
-        ".format = like->format,",
-        "memset(s->silence.array, like->format == AUDIO_FORMAT_U8BIT ? 0x80 : 0, plane_bytes);",
+        "vban_src_output_silence(s, format, speakers, rate, d.frames, d.stamp_ns);",
+        "s->out_format = audio.format;",
+        ".format = format,",
+        "memset(s->silence.array, format == AUDIO_FORMAT_U8BIT ? 0x80 : 0, plane_bytes);",
         "\"obs-vban receive: received=%\" PRIu64 \" lost=%\" PRIu64 \" late=%\" PRIu64 \" re_anchors=%\" PRIu64",
         "\"obs-vban receive re-anchor: source '%s' reason=%s",
         "\"obs-vban receive anchored: source '%s'",
@@ -197,19 +203,68 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
             "issue 1439: vban-source.c lost `{needle}`"
         );
     }
-    // The order inside the callback: the decision, then the silence, then the packet.
-    let at = |n: &str| {
-        squished
-            .find(n)
-            .unwrap_or_else(|| panic!("issue 1439: `{n}` missing"))
+    // ROZHODNUTÉ 6347872706: the receive callback never outputs (the source emits on its own
+    // deadline, never on a packet's arrival); the worker step does, and only after the lock
+    let body = |sig: &str| {
+        let a = squished
+            .find(sig)
+            .unwrap_or_else(|| panic!("issue 1439: `{sig}` missing"));
+        let b = squished[a..]
+            .find(" } static ")
+            .map(|b| a + b)
+            .unwrap_or(squished.len());
+        squished[a..b].to_string()
     };
-    let lead_in = "vban_src_output_silence(s, &audio, d.lead_in_samples,";
-    let lost = "vban_src_output_silence(s, &audio, d.silence_samples,";
+    let callback =
+        body("static void vban_src_callback(const char *buf, size_t buf_len, void *data) {");
     assert!(
-        at("vban_recv_packet(&s->timeline") < at(lead_in)
-            && at(lead_in) < at(lost)
-            && at(lost) < at("audio.timestamp = d.stamp_ns;"),
-        "issue 1439: the callback must decide, then output the lead-in, the silence, the packet"
+        !callback.contains("obs_source_output_audio")
+            && !callback.contains("vban_src_output_silence"),
+        "issue 1439: the receive callback outputs on a packet's arrival"
+    );
+    let step = body("static uint64_t vban_src_worker_step(struct vban_src_s *s, uint64_t now) {");
+    let at = |n: &str| {
+        step.find(n)
+            .unwrap_or_else(|| panic!("issue 1439: the worker step lost `{n}`"))
+    };
+    assert!(
+        at("vban_recv_due(&s->timeline") < at("pthread_mutex_unlock(&s->mutex);")
+            && at("pthread_mutex_unlock(&s->mutex);")
+                < at("obs_source_output_audio(s->context, &audio);")
+            && at("pthread_mutex_unlock(&s->mutex);") < at("vban_src_output_silence("),
+        "issue 1439: the worker decides under the lock and outputs only after it"
+    );
+    // the lifecycle: stopped + joined first in update and started at its end; in destroy after the
+    // UDP callback is gone and before the timeline is read or freed
+    let update = body("static void vban_src_update(void *data, obs_data_t *settings) {");
+    assert!(
+        update.find("vban_src_worker_stop(s, \"update\");")
+            < update.find("os_atomic_set_long(&s->receive_buffer_ms,")
+            && update.ends_with(
+                "os_atomic_set_bool(&s->timeline_reset, true); vban_src_worker_start(s);"
+            ),
+        "issue 1439: update must stop the worker first and start it last"
+    );
+    let destroy = body("static void vban_src_destroy(void *data) {");
+    let d = |n: &str| {
+        destroy
+            .find(n)
+            .unwrap_or_else(|| panic!("issue 1439: destroy lost `{n}`"))
+    };
+    assert!(
+        d("vban_udp_remove_callback(s->vban, vban_src_callback, s);")
+            < d("vban_src_worker_stop(s, \"destroy\");")
+            && d("vban_src_worker_stop(s, \"destroy\");") < d("const struct vban_recv_timeline *t = &s->timeline;")
+            && d("vban_src_worker_stop(s, \"destroy\");") < d("deque_free(&s->store);")
+            && d("deque_free(&s->store);") < d("bfree(s);"),
+        "issue 1439: destroy must join the worker after the UDP callback is gone, before the timeline \
+         is read or freed"
+    );
+    let stop = body("static void vban_src_worker_stop(struct vban_src_s *s, const char *why) {");
+    assert!(
+        stop.find("os_atomic_set_bool(&s->worker_stop, true);")
+            < stop.find("VBAN_SRC_JOIN_WORKER(s);"),
+        "issue 1439: the stop asks the worker to stop, then joins it"
     );
     // The stock arrival stamping and the copy-padding are gone for good.
     for gone in [

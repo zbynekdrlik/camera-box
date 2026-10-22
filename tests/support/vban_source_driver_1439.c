@@ -10,10 +10,30 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <time.h>
+#include <errno.h>
+#include <stdbool.h>
+/* round 5 (ROZHODNUTE 6347872706): the source's playout worker. By default the driver runs its step on
+ * simulated time (deterministic); `thread` runs the real thread on the real clock (the lifecycle). */
+static bool driver_spawn_worker(void *s);
+static void driver_join_worker(void *s);
+#define VBAN_SRC_SPAWN_WORKER(s) driver_spawn_worker(s)
+#define VBAN_SRC_JOIN_WORKER(s) driver_join_worker(s)
 #include "@SOURCE@"
 #undef blog
 
 static uint64_t g_now;
+/* `thread`: the real worker thread on the real clock; packet times are offsets from the start */
+static int g_real_thread = 0;
+static uint64_t g_real_start;
+
+static uint64_t real_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
 /* the source's settings, changed by `port=` / `name=` / `host=` tokens (each one runs update()) */
 static long long g_port = 6980;
 static char g_name[32] = "stream";
@@ -25,7 +45,97 @@ static int g_low24 = 0;
 
 uint64_t os_gettime_ns(void)
 {
-	return g_now;
+	return g_real_thread ? real_ns() : g_now;
+}
+
+bool os_sleepto_ns(uint64_t time_target)
+{
+	const uint64_t now = os_gettime_ns();
+	if (time_target <= now)
+		return false;
+	const uint64_t d = time_target - now;
+	struct timespec req = {(time_t)(d / 1000000000ULL), (long)(d % 1000000000ULL)};
+	while (nanosleep(&req, &req) != 0 && errno == EINTR) {
+	}
+	return true;
+}
+
+void os_set_thread_name(const char *name)
+{
+	(void)name;
+}
+
+/* os_event on a mutex + condition variable (auto-reset) */
+struct os_event_data {
+	pthread_mutex_t m;
+	pthread_cond_t c;
+	bool signalled;
+};
+
+int os_event_init(os_event_t **event, enum os_event_type type)
+{
+	(void)type;
+	struct os_event_data *e = calloc(1, sizeof(*e));
+	if (!e)
+		abort();
+	pthread_mutex_init(&e->m, NULL);
+	pthread_cond_init(&e->c, NULL);
+	*event = e;
+	return 0;
+}
+
+void os_event_destroy(os_event_t *event)
+{
+	pthread_cond_destroy(&event->c);
+	pthread_mutex_destroy(&event->m);
+	free(event);
+}
+
+int os_event_signal(os_event_t *event)
+{
+	pthread_mutex_lock(&event->m);
+	event->signalled = true;
+	pthread_cond_signal(&event->c);
+	pthread_mutex_unlock(&event->m);
+	return 0;
+}
+
+int os_event_timedwait(os_event_t *event, unsigned long milliseconds)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_REALTIME, &ts);
+	ts.tv_sec += (time_t)(milliseconds / 1000);
+	ts.tv_nsec += (long)(milliseconds % 1000) * 1000000L;
+	if (ts.tv_nsec >= 1000000000L) {
+		ts.tv_sec++;
+		ts.tv_nsec -= 1000000000L;
+	}
+	int r = 0;
+	pthread_mutex_lock(&event->m);
+	while (!event->signalled && r == 0)
+		r = pthread_cond_timedwait(&event->c, &event->m, &ts);
+	const bool got = event->signalled;
+	event->signalled = false;
+	pthread_mutex_unlock(&event->m);
+	return got ? 0 : ETIMEDOUT;
+}
+
+static bool driver_spawn_worker(void *s)
+{
+	struct vban_src_s *src = s;
+	if (!g_real_thread)
+		return true; /* the step runs on simulated time below; no thread to join */
+	printf("worker spawn\n");
+	return pthread_create(&src->worker, NULL, vban_src_worker_main, src) == 0;
+}
+
+static void driver_join_worker(void *s)
+{
+	struct vban_src_s *src = s;
+	if (!g_real_thread)
+		return;
+	pthread_join(src->worker, NULL);
+	printf("worker joined\n");
 }
 
 void blog(int level, const char *format, ...)
@@ -178,9 +288,10 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 	long first24 = audio->format == AUDIO_FORMAT_FLOAT_PLANAR
 			       ? (long)(((const float *)audio->data[0])[0] * 8388608.0f)
 			       : 0;
-	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d first24=%ld\n",
+	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d first24=%ld at=%" PRIu64
+	       "\n",
 	       audio->timestamp, audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first,
-	       (int)audio->format, first24);
+	       (int)audio->format, first24, os_gettime_ns());
 }
 
 static int g_udp_dummy;
@@ -235,6 +346,35 @@ void vban_udp_set_host(vban_udp_t *dev, vban_udp_cb_t cb, void *data, const char
 	udp_report("host", data);
 }
 
+/* Simulated time: the worker's step at every deadline before UNTIL (and at UNTIL when INCLUSIVE). */
+static void run_worker(void *src, uint64_t until, int inclusive)
+{
+	struct vban_src_s *s = src;
+	for (;;) {
+		const uint64_t next = vban_src_worker_step(s, g_now);
+		const int due = next != 0 && (next < until || (inclusive && next == until));
+		if (!due)
+			break;
+		if (next > g_now)
+			g_now = next;
+	}
+	if (until > g_now)
+		g_now = until;
+}
+
+/* Simulated time, at the end: the worker until every stored packet went out (nothing past the last). */
+static void flush_worker(void *src)
+{
+	struct vban_src_s *s = src;
+	while (s->store_count > 0) {
+		const uint64_t next = vban_src_worker_step(s, g_now);
+		if (s->store_count == 0 || next == 0)
+			break;
+		if (next > g_now)
+			g_now = next;
+	}
+}
+
 /* One stereo 16-bit 48 kHz packet of FRAMES frames, every sample = VALUE. */
 /* One stereo 48 kHz packet of FRAMES frames in BITFMT (a VBAN_BITFMT_*), every sample = VALUE on the
  * 16-bit scale. */
@@ -276,9 +416,27 @@ static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int bitfm
 			bytes += 4;
 		}
 	}
+	if (g_real_thread) {
+		/* the real clock: send at the start + NOW */
+		const uint64_t at = g_real_start + now;
+		const uint64_t cur = real_ns();
+		if (at > cur) {
+			const uint64_t d = at - cur;
+			struct timespec req = {(time_t)(d / 1000000000ULL), (long)(d % 1000000000ULL)};
+			while (nanosleep(&req, &req) != 0 && errno == EINTR) {
+			}
+		}
+		printf("in nu=%" PRIu32 " now=%" PRIu64 " value=%d\n", nu_frame, now, (int)value);
+		vban_src_callback(buf, VBAN_HEADER_SIZE + bytes, src);
+		return;
+	}
+	/* simulated time: the worker at every deadline before the packet, the packet, the worker at it
+	 * (a lead-in), as the shipped worker thread would */
+	run_worker(src, now, 0);
 	g_now = now;
 	printf("in nu=%" PRIu32 " now=%" PRIu64 " value=%d\n", nu_frame, now, (int)value);
 	vban_src_callback(buf, VBAN_HEADER_SIZE + bytes, src);
+	run_worker(src, now, 1);
 }
 
 int main(int argc, char **argv)
@@ -288,8 +446,14 @@ int main(int argc, char **argv)
 	char *rest = NULL;
 	uint32_t frames = (uint32_t)strtoul(argv[1], &rest, 10);
 	int bitfmt = (rest && *rest == ',') ? atoi(rest + 1) : VBAN_BITFMT_16_INT;
+	int first = 2;
+	if (argc > 2 && strcmp(argv[2], "thread") == 0) {
+		g_real_thread = 1;
+		g_real_start = real_ns();
+		first = 3;
+	}
 	void *src = vban_source_info.create(NULL, (obs_source_t *)&g_udp_dummy);
-	for (int i = 2; i < argc; i++) {
+	for (int i = first; i < argc; i++) {
 		if (strncmp(argv[i], "low24=", 6) == 0) {
 			g_low24 = atoi(argv[i] + 6);
 			continue;
@@ -313,6 +477,13 @@ int main(int argc, char **argv)
 		if (sscanf(argv[i], "%lu:%llu:%lu", &nu, &now, &value) != 3)
 			return 3;
 		send_packet(src, (uint32_t)nu, frames, bitfmt, (int16_t)value, (uint64_t)now);
+	}
+	if (g_real_thread) {
+		/* the worker sends the last stored slots by their deadlines (R ahead) */
+		const struct timespec settle = {0, 100000000L};
+		nanosleep(&settle, NULL);
+	} else {
+		flush_worker(src);
 	}
 	vban_source_info.destroy(src);
 	return 0;

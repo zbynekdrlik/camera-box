@@ -54,6 +54,8 @@ struct Out {
     first: i64,
     /// The libobs `enum audio_format` value OBS received.
     format: i32,
+    /// When it went out (the driver's clock: round 5, the playout worker's deadline).
+    at: u64,
 }
 
 static COMPILES: AtomicUsize = AtomicUsize::new(0);
@@ -100,6 +102,7 @@ fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, String) {
                 zero: field("zero=") == "1",
                 first: field("first=").parse().unwrap(),
                 format: field("fmt=").parse().unwrap(),
+                at: field("at=").parse().unwrap(),
             }
         })
         .collect();
@@ -144,7 +147,14 @@ fn run_tokens_frames(tokens: &[String], frames: u32, bitfmt: u8) -> (String, Str
     .expect("write the driver");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let out = Command::new(&cc)
-        .args(["-std=gnu11", "-Wall", "-Wextra", "-Werror", "-O1"])
+        .args([
+            "-std=gnu11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-O1",
+            "-pthread",
+        ])
         .arg("-I")
         .arg(&inc)
         .arg("-I")
@@ -624,7 +634,7 @@ fn a_late_packet_before_the_first_output_logs_that_nothing_was_filled_1439() {
     assert!(body.iter().all(|o| !o.zero), "issue 1439: {outs:?}");
     assert_eq!(
         audio_values(&outs),
-        vec![6, 7, 8, 9, 10, 11],
+        vec![7, 8, 9, 10, 11],
         "issue 1439: {outs:?}"
     );
 }
@@ -684,14 +694,20 @@ fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
         "issue 1439: `{stdout}`"
     );
     assert_eq!(
-        (audio.len(), silent.len()),
-        (1, 1),
+        audio.len(),
+        1,
         "issue 1439: only the packet past the first second is output (after its lead-in), the \
          restarted timelines hold: `{stdout}`"
     );
     assert!(
         silent[0].contains(" frames=480 "),
         "issue 1439: the lead-in is 10 ms: `{stdout}`"
+    );
+    // round 5: the sender then pauses, so the worker keeps the line with one slot of silence per
+    // missing packet until no packet came in time for a second
+    assert!(
+        silent[1..].iter().all(|l| l.contains(" frames=256 ")),
+        "issue 1439: `{stdout}`"
     );
 }
 
@@ -827,22 +843,125 @@ fn an_outage_of_1_5_s_is_one_starve_re_anchor_and_no_late_fill_1439() {
         reanchors[0]
     );
     // review round 5: each stretch opens with its lead-in (the new one too: libobs resets its timing
-    // after the gap and puts the first chunk at its arrival), and nothing else is silence
+    // after the gap and puts the first chunk at its arrival)
     let (leads, rest) = split_lead_ins(&outs);
     assert_eq!(
         leads,
         vec![LEAD_IN, LEAD_IN],
         "issue 1439: one lead-in per stretch: {outs:?}"
     );
+    // ROZHODNUTÉ 6347872706: the worker keeps the line through the outage -- one slot of silence per
+    // missing packet, at its deadline -- until no packet came in time for a second (the slots whose
+    // deadline is at most a second after the last in-time arrival: 181 on this grid), then stops;
+    // nothing is filled after the fact
+    let silent: Vec<&Out> = rest.iter().filter(|o| o.zero).collect();
     assert!(
-        rest.iter().all(|o| !o.zero),
-        "issue 1439: nothing is filled after the fact: {:?}",
-        rest.iter().filter(|o| o.zero).collect::<Vec<_>>()
+        silent.iter().all(|o| o.frames == u64::from(FRAMES)),
+        "issue 1439: one slot each: {silent:?}"
     );
     assert_eq!(
-        rest.len() as u64,
+        silent.len(),
+        181,
+        "issue 1439: a second of silent slots, then nothing: {silent:?}"
+    );
+    assert_eq!(
+        rest.iter().filter(|o| !o.zero).count() as u64,
         (n - u64::from(HELD)) + (after - u64::from(HELD)),
         "issue 1439: both anchors hold their first second"
+    );
+}
+
+/// ROZHODNUTÉ 6347872706: the source emits on its own deadline, never on a packet's arrival: every
+/// slot -- a packet, or one slot of silence for a missing one -- goes out exactly at its stamp minus
+/// the 2 ms margin, and the lead-in at the first in-time packet's arrival.
+#[test]
+fn every_slot_goes_out_at_its_deadline_never_on_arrival_1439() {
+    let pkts = after_hold(&[300, 301, 303, 304, 305]);
+    let first_arrival = pkts[HELD as usize].1;
+    let (outs, _log) = run_with_log(&pkts);
+    let (leads, body) = split_lead_ins(&outs);
+    assert_eq!(leads, vec![LEAD_IN], "issue 1439: {outs:?}");
+    let lead = outs.iter().find(|o| o.zero).expect("the lead-in");
+    assert_eq!(
+        lead.at, first_arrival,
+        "issue 1439: the lead-in goes out at the first in-time packet's arrival: {outs:?}"
+    );
+    let margin = 2_000_000u64;
+    for o in &body {
+        assert_eq!(
+            o.at + margin,
+            o.ts,
+            "issue 1439: a slot must go out at its deadline (its stamp - 2 ms): {o:?} in {outs:?}"
+        );
+    }
+    assert_eq!(
+        audio_values(&body),
+        vec![1, 2, 4, 5, 6],
+        "issue 1439: {outs:?}"
+    );
+    assert_eq!(
+        body.iter()
+            .filter(|o| o.zero)
+            .map(|o| o.frames)
+            .collect::<Vec<_>>(),
+        vec![u64::from(FRAMES)],
+        "issue 1439: the lost packet's slot is one slot of silence: {outs:?}"
+    );
+}
+
+/// ROZHODNUTÉ 6347872706: the playout worker is a REAL thread, one per source. Run on the real
+/// clock: it is spawned with the source and again after an update, it hands the slots to OBS by
+/// itself (never early: at or after their deadline), and it is stopped and JOINED in the update and in
+/// destroy -- in destroy before the source reads its timeline for the summary and frees it.
+#[test]
+fn the_worker_thread_runs_and_is_joined_before_the_source_frees_its_timeline_1439() {
+    let mut tokens = vec!["thread".to_string()];
+    // 1.4 s of a clean sender (the hold, then output), a port change, 0.5 s more
+    tokens.extend((0..264u64).map(|k| format!("{}:{}:100", 1000 + k, ns((k + 1) * 256))));
+    tokens.push("port=6981".to_string());
+    tokens.extend((264..364u64).map(|k| format!("{}:{}:100", 1000 + k, ns((k + 1) * 256))));
+    let (stdout, log) = run_tokens(&tokens, VBAN_BITFMT_16_INT);
+    assert_eq!(
+        (
+            stdout.matches("worker spawn").count(),
+            stdout.matches("worker joined").count()
+        ),
+        (2, 2),
+        "issue 1439: spawned at create and after the update, joined in the update and in destroy: \
+         {stdout}"
+    );
+    let line_of = |needle: &str| {
+        log.lines()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("issue 1439: no `{needle}` in the log:\n{log}"))
+    };
+    let update = line_of("receive worker: source 'Zvuk z mixu' stopped (update)");
+    let destroy = line_of("receive worker: source 'Zvuk z mixu' stopped (destroy)");
+    let summary = line_of("source 'Zvuk z mixu': received ");
+    assert!(
+        update < destroy && destroy < summary,
+        "issue 1439: the worker is joined in destroy before the timeline is read and freed:\n{log}"
+    );
+    let audio: Vec<(u64, u64)> = stdout
+        .lines()
+        .filter(|l| l.starts_with("out ts=") && l.contains(" zero=0"))
+        .map(|l| {
+            let f = |k: &str| -> u64 {
+                l.split_whitespace()
+                    .find_map(|x| x.strip_prefix(k))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(|| panic!("no `{k}` in `{l}`"))
+            };
+            (f("ts="), f("at="))
+        })
+        .collect();
+    assert!(
+        audio.len() > 20,
+        "issue 1439: the worker thread handed the stored packets to OBS: {stdout}"
+    );
+    assert!(
+        audio.iter().all(|&(ts, at)| at + 2_000_000 >= ts),
+        "issue 1439: a slot went out before its deadline: {audio:?}"
     );
 }
 
