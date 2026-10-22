@@ -280,6 +280,8 @@ struct Run {
     mix_buffering_ns: f64,
     /// Slots handed to libobs after their own stamp (the timeline's `missed`, review round 5).
     missed: u64,
+    /// The slots the replay itself saw handed to libobs after their stamp.
+    after_stamp: u64,
     sender_ppm: f64,
 }
 
@@ -321,6 +323,9 @@ impl Sink for Out {
 
     fn emit(&mut self, at: u64, d: DueDecision) {
         let at_f = at as f64;
+        if matches!(d.kind, Due::Packet | Due::Silence) && at > d.stamp_ns {
+            self.run.after_stamp += 1;
+        }
         match d.kind {
             Due::None => {}
             Due::LeadIn => {

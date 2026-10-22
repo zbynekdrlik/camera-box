@@ -97,22 +97,29 @@ fn a_stored_packet_reaches_libobs_long_before_its_stamp_with_the_worker_15_ms_la
 }
 
 /// Known limit (review round 5), pinned: a lost slot's silence waits for its deadline, so a worker
-/// that wakes later than the 2 ms margin hands it after its stamp -- here every wake is exactly
-/// 3 ms late on a 60 ms loss. Each such slot is COUNTED (`missed` = every lost slot; the stored
-/// packets around the loss, handed long before their stamps, are not), and the window it missed
-/// moves the latency OBS realizes, which is why the status line and verify item 9 carry the count.
+/// that wakes later than the 2 ms margin hands it after its stamp, and a packet that arrives within
+/// one look of its stamp goes out after it too. Each slot handed after its stamp is COUNTED
+/// (`missed` = exactly the slots the replay itself saw go out after their stamps). The count is
+/// conservative: libobs takes a window at its END, so a slot 1 ms past its stamp usually still makes
+/// its window (3 ms late: every lost slot counted, the realized latency holds); a wake later than a
+/// window really misses it and moves the latency OBS realizes (25 ms late), which is why the status
+/// line and verify item 9 carry the count.
 #[test]
-fn known_limit_a_lost_slot_handed_after_its_stamp_is_counted_missed_1439() {
-    let base = schedule(4, 0.0, TEN_MIN_PACKETS / 4, 0.0);
-    let run = replay_late(&with_outage(base, 60), 40, false, late(4, 3.0, 3.0));
-    let tag = format!("wake 3 ms late, loss 60 ms: {run:?}");
-    assert!(run.lost > 0, "the outage is a loss: {tag}");
-    assert_eq!(
-        run.missed, run.lost,
-        "every lost slot, and only those: {tag}"
-    );
-    assert!(
-        run.realized_dev_max_ns > 1.0 * MS,
-        "a slot after its window moves the realized latency: {tag}"
-    );
+fn known_limit_a_slot_handed_after_its_stamp_is_counted_missed_1439() {
+    for (late_ms, moves) in [(3.0, false), (25.0, true)] {
+        let base = schedule(4, 0.0, TEN_MIN_PACKETS / 4, 0.0);
+        let run = replay_late(&with_outage(base, 60), 40, false, late(4, late_ms, late_ms));
+        let tag = format!("wake {late_ms} ms late, loss 60 ms: {run:?}");
+        assert!(run.lost > 0, "the outage is a loss: {tag}");
+        assert_eq!(
+            run.missed, run.after_stamp,
+            "every slot after its stamp, counted: {tag}"
+        );
+        assert!(run.missed >= run.lost, "every lost slot's silence: {tag}");
+        assert_eq!(
+            run.realized_dev_max_ns > 1.0 * MS,
+            moves,
+            "a slot after its window moves the realized latency, one just after its stamp not: {tag}"
+        );
+    }
 }
