@@ -425,6 +425,38 @@ def test_the_stream_pp_preset_is_the_stream_pp_box_facts():
     assert "program_audio_vban" not in _port().PRESETS["strih-pp"], "the strih role is not switched (issue 1439)"
 
 
+def _vban_coll(audio_name):
+    item = lambda n: {"name": n, "visible": True}  # noqa: E731
+    return {"name": "x", "scene_order": [{"name": "PRO"}], "sources": [
+        {"name": "PRO", "id": "scene", "versioned_id": "scene",
+         "settings": {"items": [item(audio_name), item("Old VBAN")]}},
+        {"name": audio_name, "id": "wasapi_input_capture", "versioned_id": "wasapi_input_capture", "settings": {}},
+        {"name": "Old VBAN", "id": VBAN_KIND, "versioned_id": VBAN_KIND,
+         "settings": {"port": 6980, "stream_name": "fohabl"}}]}
+
+
+@pytest.mark.parametrize("preset,audio", [("stream-pp", "Zvuk z mixu"), ("strih-pp", "ASIO zvuk")])
+def test_a_ported_vban_source_other_than_the_program_input_is_dropped(preset, audio):
+    # review round 2: the Linux strih bundle loads obs-vban now, so a dormant Windows VBAN source would
+    # come alive on the Linux box and bind a UDP port the intercom hub (6980 on a strih box) or the
+    # program source needs; only the program input the preset converts may be a VBAN source
+    m = _port()
+    out, rep = m.port(_vban_coll(audio), m.preset_options(preset))
+    names = {s["name"]: s["id"] for s in out["sources"]}
+    assert "Old VBAN" not in names, rep
+    assert any(r.startswith('DROP source "Old VBAN"') and "UDP port" in r for r in rep), rep
+    want = VBAN_KIND if preset == "stream-pp" else "pulse_input_capture"
+    assert names[audio] == want, names
+
+
+def test_keep_kind_keeps_a_ported_vban_source():
+    m = _port()
+    o = m.preset_options("strih-pp")
+    o["keep_kinds"] = [VBAN_KIND]
+    out, rep = m.port(_vban_coll("ASIO zvuk"), o)
+    assert "Old VBAN" in {s["name"] for s in out["sources"]}, rep
+
+
 @pytest.mark.parametrize("arg", ["6980:stream", "x:stream:40", "6980:stream:9"])
 def test_a_malformed_program_audio_vban_refuses(tmp_path, arg):
     inp = tmp_path / "in.json"
