@@ -24,6 +24,9 @@
 #include "vban-udp.h"
 #include "vban.h"
 #include "vban-receive-timeline.h"
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 struct vban_src_s
 {
@@ -59,6 +62,9 @@ struct vban_src_s
 	bool worker_idle;                   /* under MUTEX: nothing to emit until a packet gives work */
 	int64_t emit_late_max_ns;           /* under MUTEX: the window's latest emission past a deadline */
 	bool emit_late_seen;                /* under MUTEX */
+	/* camera-box issue 1439 (review round 5): update() runs whole under it -- the UI thread and the
+	 * obs-websocket thread can both call it, and two calls must never join one worker twice */
+	pthread_mutex_t update_mutex;
 	pthread_t worker;                   /* create / update / destroy only */
 	bool worker_running;                /* create / update / destroy only */
 	volatile bool worker_stop;
@@ -74,6 +80,10 @@ struct vban_src_s
 	 * Receive Buffer lifted to one packet + 10 ms is named once, not at every re-anchor */
 	uint64_t warned_reserve_ns;
 	uint64_t warned_reserve_eff_ns;
+	/* camera-box issue 1439 (review round 5): a `format` re-anchor line is written at most once per status
+	 * period (a sender whose packet size varies re-anchors on every packet); the count not written */
+	uint64_t format_line_ns;
+	uint64_t format_unlogged;
 };
 
 static const char *vban_src_get_name(void *type_data)
@@ -124,6 +134,7 @@ static void vban_src_update(void *data, obs_data_t *settings)
 {
 	struct vban_src_s *s = data;
 
+	pthread_mutex_lock(&s->update_mutex);
 	/* camera-box issue 1439 (ROZHODNUTE 6347872706): the playout worker is stopped and joined before
 	 * anything here changes, and started again at the end */
 	vban_src_worker_stop(s, "update");
@@ -169,6 +180,7 @@ static void vban_src_update(void *data, obs_data_t *settings)
 		os_atomic_set_bool(&s->timeline_reset, true);
 
 	vban_src_worker_start(s);
+	pthread_mutex_unlock(&s->update_mutex);
 }
 
 static obs_properties_t *vban_src_get_properties(void *data)
@@ -197,6 +209,7 @@ static void *vban_src_create(obs_data_t *settings, obs_source_t *source)
 	struct vban_src_s *s = bzalloc(sizeof(struct vban_src_s));
 	s->context = source;
 	pthread_mutex_init(&s->mutex, NULL);
+	pthread_mutex_init(&s->update_mutex, NULL);
 	os_event_init(&s->worker_wake, OS_EVENT_TYPE_AUTO);
 	vban_recv_init(&s->timeline);
 
@@ -227,6 +240,7 @@ static void vban_src_destroy(void *data)
 	deque_free(&s->store);
 	os_event_destroy(s->worker_wake);
 	pthread_mutex_destroy(&s->mutex);
+	pthread_mutex_destroy(&s->update_mutex);
 	bfree(s->stream_name);
 	bfree(s->ip_from);
 	da_free(s->buffer);
@@ -287,7 +301,7 @@ static const char *vban_recv_reason_name(int reason)
 /* camera-box issue 1439: what the receive thread logs, copied from the timeline under the lock (the worker
  * moves the counters too). */
 struct vban_src_snapshot {
-	uint64_t received, lost, late, re_anchors, stale, silence_samples;
+	uint64_t received, lost, late, re_anchors, stale, silence_samples, missed;
 	uint64_t reserve_ns, reserve_eff_ns;
 	uint32_t rate, channels;
 	bool fit_valid, fit_frozen;
@@ -306,6 +320,7 @@ static struct vban_src_snapshot vban_src_snapshot_locked(const struct vban_src_s
 		.re_anchors = t->re_anchors,
 		.stale = t->stale,
 		.silence_samples = t->silence_samples,
+		.missed = t->missed,
 		.reserve_ns = t->reserve_ns,
 		.reserve_eff_ns = t->reserve_eff_ns,
 		.rate = t->rate,
@@ -320,14 +335,26 @@ static struct vban_src_snapshot vban_src_snapshot_locked(const struct vban_src_s
 	return n;
 }
 
+/* camera-box issue 1439: one packet as the receive thread reports it. */
+struct vban_src_arrival {
+	uint32_t nu_frame;
+	uint32_t frames;
+	uint64_t now;
+	bool first_output;   /* this packet started the stretch's output */
+	bool emitted_before; /* the stretch was already emitting */
+	uint64_t lost_slots; /* the packets missing right before this one (their slots go out as silence) */
+	/* the stretch's format before this packet (a `format` re-anchor names the change) */
+	uint32_t frames_before, rate_before, channels_before;
+};
+
 /* camera-box issue 1439: the anchor / re-anchor / late / loss lines, and the lateness record of the
- * window. FIRST_OUTPUT: this packet started the stretch's output; EMITTED_BEFORE: the stretch was
- * already emitting; LOST_SLOTS: the packets missing right before this one (their slots go out as
- * silence at their deadlines). */
+ * window. */
 static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decision *d,
-			    const struct vban_src_snapshot *n, uint32_t nu_frame, uint32_t frames, bool first_output,
-			    bool emitted_before, uint64_t lost_slots)
+			    const struct vban_src_snapshot *n, const struct vban_src_arrival *a)
 {
+	const uint32_t nu_frame = a->nu_frame;
+	const uint32_t frames = a->frames;
+	const bool emitted_before = a->emitted_before;
 	/* a new line: is R lifted to one packet + the margin (R is measured from the packet's start)? */
 	if ((d->event == VBAN_RECV_ANCHOR || d->event == VBAN_RECV_REANCHOR) && n->reserve_eff_ns != n->reserve_ns &&
 	    (n->reserve_ns != s->warned_reserve_ns || n->reserve_eff_ns != s->warned_reserve_eff_ns)) {
@@ -342,7 +369,7 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 	}
 	if (d->event == VBAN_RECV_ANCHOR || d->event == VBAN_RECV_REANCHOR)
 		s->late_run = false;
-	if (first_output) {
+	if (a->first_output) {
 		/* the hold is over: the stretch's first in-time packet; the worker sends its lead-in now and
 		 * every slot at its deadline, on the anchor's final (earliest-arrival) line */
 		blog(LOG_INFO,
@@ -359,12 +386,29 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     (uint64_t)(n->reserve_ns / VBAN_RECV_NS_PER_MS));
 	} else if (d->event == VBAN_RECV_REANCHOR) {
 		/* a new timeline from this packet, then the hold; a starve (no packet in time for a second)
-		 * names how long that was */
-		blog(LOG_WARNING,
-		     "obs-vban receive re-anchor: source '%s' reason=%s frame=%u starve_ms=%.1f re_anchors=%" PRIu64
-		     " late=%" PRIu64 " -- holding its first second",
-		     obs_source_get_name(s->context), vban_recv_reason_name(d->reason), nu_frame,
-		     (double)d->starve_ns / 1e6, n->re_anchors, n->late);
+		 * names how long that was. A `format` one names the change and is written at most once per
+		 * status period (review round 5: a sender whose packet size varies re-anchors on every
+		 * packet; a slot is one packet, so a varying size is not supported). */
+		const bool format = d->reason == VBAN_RECV_REASON_FORMAT;
+		char what[192] = "";
+		if (format && s->format_line_ns && a->now - s->format_line_ns < VBAN_RECV_LOG_INTERVAL_NS) {
+			s->format_unlogged++;
+		} else {
+			if (format) {
+				snprintf(what, sizeof(what),
+					 " (frames %u -> %u, rate %u -> %u, ch %u -> %u: a varying packet size is not "
+					 "supported; %" PRIu64 " more not logged in the last period)",
+					 a->frames_before, frames, a->rate_before, n->rate, a->channels_before,
+					 n->channels, s->format_unlogged);
+				s->format_line_ns = a->now ? a->now : 1;
+				s->format_unlogged = 0;
+			}
+			blog(LOG_WARNING,
+			     "obs-vban receive re-anchor: source '%s' reason=%s frame=%u starve_ms=%.1f"
+			     " re_anchors=%" PRIu64 " late=%" PRIu64 " -- holding its first second%s",
+			     obs_source_get_name(s->context), vban_recv_reason_name(d->reason), nu_frame,
+			     (double)d->starve_ns / 1e6, n->re_anchors, n->late, what);
+		}
 	}
 	if (d->event == VBAN_RECV_LATE && !s->late_run) {
 		/* ROZHODNUTE 6345255813 item 2: a late packet is lost, never re-timed; one line per late run.
@@ -379,10 +423,10 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 	} else if (d->event == VBAN_RECV_PACKET) {
 		s->late_run = false;
 	}
-	if (lost_slots > 0 && emitted_before)
+	if (a->lost_slots > 0 && emitted_before)
 		blog(LOG_WARNING,
 		     "source '%s': missing %" PRIu64 " packet(s) before frame %u -- silence for those slots",
-		     obs_source_get_name(s->context), lost_slots, nu_frame);
+		     obs_source_get_name(s->context), a->lost_slots, nu_frame);
 	/* the lateness record includes the late packets that were dropped (the measure R is chosen by) */
 	if ((d->event == VBAN_RECV_PACKET || d->event == VBAN_RECV_LATE) &&
 	    (!s->window_late_seen || d->lateness_ns > s->window_late_max_ns)) {
@@ -426,8 +470,11 @@ static void vban_src_output_silence(struct vban_src_s *s, enum audio_format form
 /* camera-box issue 1439: one status line every VBAN_RECV_LOG_INTERVAL_NS while packets arrive. The
  * counters are cumulative since the source started (or was reconfigured); max_late_ms is the window's
  * lateness record (arrival - stamp; negative = the margin R left), the measure R is chosen by;
- * emit_late_ms is the window's latest slot past its deadline (the worker's wake jitter, round 5). The
- * stream name is the packet's own: s->stream_name is the UI thread's, and update() may free it. */
+ * emit_late_ms is the window's latest slot against its deadline (negative = that far ahead of it: a stored
+ * packet goes out at the worker's next look; a lost slot's silence at its deadline plus the worker's wake
+ * jitter); emit_missed counts the slots handed to libobs after their own stamp (the worker woke later
+ * than the margin, review round 5). The stream name is the packet's own: s->stream_name is the UI
+ * thread's, and update() may free it. */
 static bool vban_src_status_due(struct vban_src_s *s, uint64_t now)
 {
 	if (s->status_ns == 0) {
@@ -447,13 +494,13 @@ static void vban_src_log_status(struct vban_src_s *s, const struct VBanHeader *h
 	blog(LOG_INFO,
 	     "obs-vban receive: received=%" PRIu64 " lost=%" PRIu64 " late=%" PRIu64 " re_anchors=%" PRIu64
 	     " stale=%" PRIu64 " silence_ms=%.1f max_late_ms=%.1f sender_ppm=%+.3f phase_ms=%+.2f fit=%s"
-	     " emit_late_ms=%.1f receive_buffer_ms=%" PRIu64
+	     " emit_late_ms=%.1f emit_missed=%" PRIu64 " receive_buffer_ms=%" PRIu64
 	     " rate=%u ch=%u port=%ld stream='%.*s' source='%s'",
 	     n->received, n->lost, n->late, n->re_anchors, n->stale, (double)n->silence_samples * 1000.0 / rate,
 	     s->window_late_seen ? (double)s->window_late_max_ns / 1e6 : 0.0,
 	     n->fit_valid ? -(double)n->fit_ppb / 1000.0 : 0.0, (double)n->phase_ns / 1e6,
 	     n->fit_frozen ? "frozen" : (n->fit_valid ? "locked" : "acquiring"),
-	     n->emit_late_seen ? (double)n->emit_late_max_ns / 1e6 : 0.0,
+	     n->emit_late_seen ? (double)n->emit_late_max_ns / 1e6 : 0.0, n->missed,
 	     (uint64_t)(n->reserve_ns / VBAN_RECV_NS_PER_MS), n->rate, n->channels,
 	     os_atomic_load_long(&s->log_port), (int)VBAN_STREAM_NAME_SIZE, header->streamname,
 	     obs_source_get_name(s->context));
@@ -597,6 +644,11 @@ static void *vban_src_worker_main(void *data)
 {
 	struct vban_src_s *s = data;
 	os_set_thread_name("vban-src-out");
+	/* camera-box issue 1439 (review round 5): wake on time -- the kernel's default 50 us timer slack would
+	 * batch every look of this thread */
+#ifdef __linux__
+	prctl(PR_SET_TIMERSLACK, 1UL, 0UL, 0UL, 0UL);
+#endif
 	while (!os_atomic_load_bool(&s->worker_stop)) {
 		const uint64_t next = vban_src_worker_step(s, os_gettime_ns());
 		if (os_atomic_load_bool(&s->worker_stop))
@@ -701,6 +753,9 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 		vban_src_reset_locked(s);
 	const bool emitted_before = s->timeline.emitted;
 	const uint64_t next_before = s->timeline.next_pos;
+	const uint32_t frames_before = s->timeline.frames;
+	const uint32_t rate_before = s->timeline.rate;
+	const uint32_t channels_before = s->timeline.channels;
 	const struct vban_recv_decision d = vban_recv_packet(&s->timeline, now, header->nuFrame, audio.frames,
 							     audio.samples_per_sec, (uint32_t)audio.speakers,
 							     reserve_ns);
@@ -742,7 +797,18 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 						    d.pos > next_before && audio.frames
 					    ? (d.pos - next_before) / audio.frames
 					    : 0;
-		vban_src_report(s, &d, &n, header->nuFrame, audio.frames, first_output, emitted_before, lost_slots);
+		const struct vban_src_arrival a = {
+			.nu_frame = header->nuFrame,
+			.frames = audio.frames,
+			.now = now,
+			.first_output = first_output,
+			.emitted_before = emitted_before,
+			.lost_slots = lost_slots,
+			.frames_before = frames_before,
+			.rate_before = rate_before,
+			.channels_before = channels_before,
+		};
+		vban_src_report(s, &d, &n, &a);
 	}
 	if (status)
 		vban_src_log_status(s, header, &n);

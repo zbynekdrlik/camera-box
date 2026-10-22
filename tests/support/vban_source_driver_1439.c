@@ -302,8 +302,8 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 	long first24 = audio->format == AUDIO_FORMAT_FLOAT_PLANAR
 			       ? (long)(((const float *)audio->data[0])[0] * 8388608.0f)
 			       : 0;
-	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d first24=%ld at=%" PRIu64
-	       "\n",
+	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d first24=%ld"
+	       " at=%" PRIu64 "\n",
 	       audio->timestamp, audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first,
 	       (int)audio->format, first24, os_gettime_ns());
 }
