@@ -502,6 +502,31 @@ def test_remove_is_a_no_op_on_a_box_without_a_hub(tmp_path):
     assert not (tmp_path / "aside").exists()
 
 
+@pytest.mark.parametrize("state", ["activating", "reloading", "deactivating"])
+def test_a_hub_in_transition_is_stopped_before_its_files_move(tmp_path, state):
+    # review round 1: `is-active --quiet` is true for "active" only, so a crash-looping hub
+    # (activating, auto-restart: stream-pp's 243/CREDENTIALS loop of 11.10.2026) or one still shutting
+    # down kept its unit loaded while its files moved away; a dying one can still hold UDP 6980
+    e = _plant_hub(tmp_path)
+    stub, log = _fake_systemctl(tmp_path, state, "enabled")
+    r = _bash("strih_intercom_hub_remove", env=e, path_prefix=stub)
+    assert r.returncode == 0, r.stderr
+    calls = log.read_text().splitlines()
+    assert "stop intercom-hub" in calls, calls
+    assert calls.index("stop intercom-hub") < calls.index("daemon-reload")
+    assert ("stopped intercom-hub.service (%s" % state) in r.stdout, r.stdout
+
+
+@pytest.mark.parametrize("state", ["inactive", "failed"])
+def test_a_hub_that_is_not_running_is_never_stopped(tmp_path, state):
+    e = _plant_hub(tmp_path)
+    stub, log = _fake_systemctl(tmp_path, state, "enabled")
+    r = _bash("strih_intercom_hub_remove", env=e, path_prefix=stub)
+    assert r.returncode == 0, r.stderr
+    assert "stop intercom-hub" not in log.read_text().splitlines()
+    assert not os.path.lexists(e["STRIH_HUB_UNIT_FILE"])
+
+
 def test_a_failed_stop_moves_nothing(tmp_path):
     e = _plant_hub(tmp_path)
     stub, _log = _fake_systemctl(tmp_path, "active", "enabled", fail="stop")
