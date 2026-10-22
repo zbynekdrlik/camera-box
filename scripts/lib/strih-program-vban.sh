@@ -8,8 +8,8 @@
 # timeline and writes one status line every 10 s while packets arrive (vendor/obs-vban/src/vban-source.c):
 #
 #   [obs-vban] obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X
-#     sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X receive_buffer_ms=R rate=N ch=N
-#     port=P stream='S' source='<OBS input>'
+#     sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X emit_missed=N receive_buffer_ms=R
+#     rate=N ch=N port=P stream='S' source='<OBS input>'
 #
 # The rows (through the caller's ok / bad / note; each grade is rc 0):
 #   (program-vban) kind       the program-audio input is the obs-vban source (the seed switches it)
@@ -22,6 +22,10 @@
 #   (program-vban) counters   lost / late / re_anchors since the source started: a NOTE when any is > 0
 #   (program-vban) fit        `fit=frozen` (nothing folded for 3 s while the fit is valid: an on-time
 #                             delay level step the fit no longer follows): a NOTE (issue 1439 round 4)
+#   (program-vban) missed     `emit_missed` > 0: the playout worker handed a slot to OBS after its own
+#                             stamp (it woke later than its 2 ms margin), which can move the program
+#                             audio by a mix window: a FAIL (issue 1439 review round 5); a line without
+#                             the token (an older build) is not graded on it
 #
 # Seams: STRIH_PROGRAM_VBAN_WAIT_S (the live window), STRIH_PROGRAM_VBAN_KIND_FILE (a file holding the
 # input kind, read instead of the strih_scenes.py websocket read).
@@ -99,6 +103,10 @@ strih_program_vban_grade() {
   counters="lost=$(strih_program_vban_field "${l2:-$l1}" lost) late=$(strih_program_vban_field "${l2:-$l1}" late) re_anchors=$(strih_program_vban_field "${l2:-$l1}" re_anchors)"
   if [ "$(strih_program_vban_field "${l2:-$l1}" fit)" = frozen ]; then
     note "(program-vban) the receive fit is FROZEN: every packet sits more than 10 ms off its line (an on-time network delay step), so the source holds its last rate and latency without following the console's clock -- an OBS restart re-anchors it (issue 1439)"
+  fi
+  v="$(strih_program_vban_field "${l2:-$l1}" emit_missed)"
+  if [[ "$v" =~ ^[0123456789]+$ ]] && [ "$v" -gt 0 ]; then
+    bad "(program-vban) emit_missed=${v}: the playout worker handed ${v} slot(s) to OBS after their own stamp since the source started -- each one can move the program audio by a whole mix window (21 ms); the worker woke later than its 2 ms margin: look at the box's CPU load and the vban-src-out thread (top -H) (issue 1439)"
   fi
   case "$counters" in
     "lost=0 late=0 re_anchors=0") ;;
