@@ -700,6 +700,15 @@ def test_stream_snv_grades_its_mbc_input(tmp_path):
     assert any("receiving stream 'stream' on UDP 6980: received 100 -> 2000" in r for r in rows), rows
 
 
+def test_a_frozen_fit_is_a_note(tmp_path):
+    # issue 1439 round 4: packets in time but off the line no longer re-anchor; the fit then holds
+    # its last rate + level and the status line says fit=frozen -- verify names it
+    frozen = _line(100).replace(" fit=locked ", " fit=frozen ")
+    rows = _grade(tmp_path, frozen, append=frozen.replace("received=100", "received=2000"))
+    assert not _rows(rows, "FAIL"), rows
+    assert any(r.startswith("NOTE") and "FROZEN" in r for r in rows), rows
+
+
 def test_no_new_packet_is_a_note_never_a_pass(tmp_path):
     rows = _grade(tmp_path, _line(100))
     assert not _rows(rows, "FAIL"), rows
