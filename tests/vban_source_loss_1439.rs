@@ -614,8 +614,13 @@ fn a_late_packet_before_the_first_output_logs_that_nothing_was_filled_1439() {
         "issue 1439: a late packet before the first output fills nothing: `{}`",
         late[0]
     );
-    // the stream starts at the first in-time packet, after its lead-in, nothing filled before it
-    let body = after_lead_in(&outs);
+    // the stream starts at the first in-time packet, after its lead-in (shorter than R − one packet:
+    // that packet came in just in time behind the late ones), nothing filled before it
+    let (leads, body) = split_lead_ins(&outs);
+    assert!(
+        leads.len() == 1 && leads[0] > 0 && leads[0] < LEAD_IN,
+        "issue 1439: one lead-in: {outs:?}"
+    );
     assert!(body.iter().all(|o| !o.zero), "issue 1439: {outs:?}");
     assert_eq!(
         audio_values(&outs),
