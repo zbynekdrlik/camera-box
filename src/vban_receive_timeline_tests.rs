@@ -546,10 +546,17 @@ fn a_starve_re_anchor_carries_how_long_no_packet_came_in_time() {
         (Event::Reanchor, Reason::Starve),
         "{d:?}"
     );
-    assert_eq!(d.late_ns, (1_500 * NS_PER_MS) as i64, "the starve span: {d:?}");
+    assert_eq!(
+        d.late_ns,
+        (1_500 * NS_PER_MS) as i64,
+        "the starve span: {d:?}"
+    );
     // another re-anchor (a channel change) carries no span
     let d = t.packet(at + MS_256, (H + 2) as u32, 256, RATE, 1, R40);
-    assert_eq!((d.event, d.reason, d.late_ns), (Event::Reanchor, Reason::Format, 0));
+    assert_eq!(
+        (d.event, d.reason, d.late_ns),
+        (Event::Reanchor, Reason::Format, 0)
+    );
 }
 
 /// One 256-frame packet at 48 kHz, ns.
