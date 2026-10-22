@@ -172,6 +172,25 @@ def test_an_unsafe_obs_is_refused(over, expect):
     assert any(expect in r for r in f["reasons"]), f["reasons"]
 
 
+@pytest.mark.parametrize("port", [6980, 6981, 6990, 80])
+def test_a_real_receiver_port_is_refused_by_the_preflight_and_the_setup(tmp_path, port):
+    obs = FakeObs()
+    assert any(str(port) in r for r in vo.preflight(obs.rpc, NAME, port, "bench1460", 6)["reasons"])
+    with pytest.raises(ValueError):
+        _setup(obs, tmp_path, port=port)
+    assert NAME not in obs.inputs and not (tmp_path / "state.json").exists()
+
+
+def test_a_leftover_while_rectracks_holds_the_track_is_refused():
+    # the leftover's run ORed the track in; its original RecTracks is unknown, so never adopt it
+    obs = FakeObs()
+    obs.inputs[NAME] = {"kind": vo.VBAN_INPUT_KIND, "settings": {"port": 6995, "stream_name": "bench1460"},
+                        "tracks": {}}
+    obs.params[("AdvOut", "RecTracks")] = "33"
+    f = vo.preflight(obs.rpc, NAME, 6995, "bench1460", 6)
+    assert any("original value is unknown" in r for r in f["reasons"])
+
+
 def test_a_port_another_vban_input_listens_on_is_refused():
     obs = FakeObs()
     obs.inputs["FOH"] = {"kind": vo.VBAN_INPUT_KIND, "settings": {"port": 6995, "stream_name": "foh"}, "tracks": {}}
@@ -311,6 +330,35 @@ def test_an_input_that_never_turns_active_fails(tmp_path):
 
 # --- teardown -------------------------------------------------------------------------------------
 
+def test_teardown_puts_the_preview_back_after_a_setup_that_died_after_the_reprogram(tmp_path):
+    obs = FakeObs()
+    real = obs.rpc
+    clock = [0.0]
+
+    def never_active(rtype, rdata=None, ignore_err=False):
+        if rtype == "GetSourceActive":
+            return {"videoActive": False}
+        return real(rtype, rdata, ignore_err)
+
+    def sleep(s):
+        clock[0] += s
+    with pytest.raises(vo.BenchError):
+        vo.setup(never_active, str(tmp_path / "state.json"), NAME, 6995, "bench1460", 6,
+                 sleep=sleep, monotonic=lambda: clock[0])
+    assert obs.preview == "Cam 1"                       # OBS's swap moved the preview
+    res = vo.teardown(obs.rpc, json.loads((tmp_path / "state.json").read_text()))
+    assert res["ok"], res
+    assert obs.preview == "Cam 3" and NAME not in obs.inputs
+
+
+def test_teardown_after_a_completed_setup_never_touches_the_preview(tmp_path):
+    obs = FakeObs()
+    st = _setup(obs, tmp_path)
+    obs.preview = "Cam 5"                               # the operator's own choice since
+    vo.teardown(obs.rpc, st)
+    assert obs.preview == "Cam 5"
+
+
 def test_teardown_removes_the_input_and_restores_rectracks(tmp_path):
     obs = FakeObs()
     st = _setup(obs, tmp_path)
@@ -399,6 +447,46 @@ def test_a_line_without_numbers_never_hides_the_status_row():
     removed = "13:05:00.000: User Removed source '%s' (net.nagater.obs-vban.source)" % NAME
     g = vl.grade(vl.rows([ASRC_OK, st, removed], NAME), expected_lost=5)
     assert any("lost=6, the emulator dropped 5" in x for x in g["reasons"])
+
+
+def test_a_basis_other_than_stamp_fails():
+    g = vl.grade(vl.rows([ASRC_OK.replace("basis=stamp", "basis=arrival")], NAME))
+    assert any("basis=arrival" in x for x in g["reasons"])
+
+
+def test_level_avg_off_target_fails_but_the_first_line_is_the_settle():
+    off = ASRC_OK.replace("level_avg=0.10ms", "level_avg=7.50ms")
+    assert vl.grade(vl.rows([off, ASRC_OK], NAME))["verdict"] == "PASS"
+    g = vl.grade(vl.rows([ASRC_OK, off], NAME))
+    assert any("level_avg=7.50" in x for x in g["reasons"])
+
+
+def test_steps_on_an_earlier_asrc_line_fail():
+    g = vl.grade(vl.rows([ASRC_OK.replace("steps=0", "steps=1"), ASRC_OK], NAME))
+    assert any("steps=1" in x for x in g["reasons"])
+
+
+TEL = ("13:02:00.000: audio-telemetry #800 '%s': ts_lag_ms=12 buffered_ms=85 pending=0 "
+       "timing_adjust_ms=0 mixed_late=%d")
+
+
+def test_mixed_late_on_the_test_input_fails():
+    assert vl.grade(vl.rows([ASRC_OK, TEL % (NAME, 0)], NAME))["verdict"] == "PASS"
+    g = vl.grade(vl.rows([ASRC_OK, TEL % (NAME, 3)], NAME))
+    assert any("mixed_late=3" in x for x in g["reasons"])
+
+
+def test_a_telemetry_row_never_hides_a_failing_status_row():
+    st = "13:01:10.000: vban-source '%s': received=11250 lost=0 late=2 reanchors=1" % NAME
+    g = vl.grade(vl.rows([ASRC_OK, st, TEL % (NAME, 0)], NAME), expected_lost=0)
+    assert any("late=2" in x for x in g["reasons"]) and any("reanchors=1" in x for x in g["reasons"])
+
+
+def test_a_late_slot_on_an_earlier_status_row_fails():
+    bad = "13:01:10.000: vban-source '%s': received=1000 lost=0 late=1 reanchors=0" % NAME
+    good = "13:01:20.000: vban-source '%s': received=2000 lost=0 late=0 reanchors=0" % NAME
+    g = vl.grade(vl.rows([ASRC_OK, bad, good], NAME), expected_lost=0)
+    assert any("late=1" in x for x in g["reasons"])
 
 
 def test_the_log_cli(tmp_path):

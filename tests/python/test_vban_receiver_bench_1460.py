@@ -64,7 +64,12 @@ d = os.environ["FAKE_DIR"]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write("ssh %s %s\n" % (host, cmd.replace("\n", " | ")))
 if "RIG_MODE_PROBE_OK" in cmd:
-    mode = os.environ.get("FAKE_MODE", "TEST")
+    seq = os.environ.get("FAKE_MODE", "TEST").split(",")
+    counter = os.path.join(d, "mode-probes")
+    n = int(open(counter).read()) if os.path.exists(counter) else 0
+    with open(counter, "w") as f:
+        f.write(str(n + 1))
+    mode = seq[min(n, len(seq) - 1)]
     if mode == "NOANSWER":
         sys.exit(255)
     on = "1" if mode == "TEST" else "0"
@@ -80,7 +85,7 @@ elif "wc -l" in cmd:
 elif "tail -n +" in cmd:
     with open(os.path.join(d, "obs.log")) as f:
         sys.stdout.write(f.read())
-elif ("ffmpeg" in cmd and "-map 0:a:" in cmd) or cmd.startswith("cat -- "):
+elif "ffmpeg" in cmd and "-map 0:a:" in cmd:
     with open(os.path.join(d, "audio.wav"), "rb") as f:
         sys.stdout.buffer.write(f.read())
 else:
@@ -104,6 +109,8 @@ if sub == "rig-busy-check":
     mode = os.environ.get("FAKE_BUSY", "idle")
     if os.path.exists(os.path.join(d, "live")):
         mode = "streaming"
+    if os.path.exists(os.path.join(d, "unreadable")):
+        mode = "unreadable"
     if mode == "unreadable":
         print(json.dumps({"busy": None, "diagnostics": []}))
         sys.exit(3)
@@ -143,8 +150,8 @@ if sub == "preflight":
     sys.exit(rc)
 if sub == "setup":
     rc = int(os.environ.get("FAKE_SETUP_RC", "0"))
-    if rc == 4:
-        sys.exit(4)
+    if rc in (2, 4):          # unreachable / refused: nothing created (vban_bench_obs.py's contract)
+        sys.exit(rc)
     with open(state, "w") as f:
         json.dump({"created": True, "input_name": "x"}, f)
     open(marker, "w").close()
@@ -155,11 +162,20 @@ elif sub == "teardown":
     rc = int(os.environ.get("FAKE_TEARDOWN_RC", "0"))
     if not rc and os.path.exists(marker):
         os.remove(marker)
+    if os.environ.get("FAKE_UNREADABLE_AFTER_TEARDOWN"):
+        open(os.path.join(d, "unreadable"), "w").close()
     sys.exit(rc)
 """
 
+FAKE_CURL = r"""#!@PY@
+import os, sys
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write("curl " + " ".join(sys.argv[1:]) + "\n")
+print('{"free_bytes": %s}' % os.environ.get("FAKE_FREE_BYTES", "500000000000"))
+"""
+
 FAKE_EMULATOR = r"""#!@PY@
-import os, signal, subprocess, sys, time
+import json, os, signal, subprocess, sys, time
 d = os.environ["FAKE_DIR"]
 with open(os.path.join(d, "emulator.pid"), "w") as f:
     f.write(str(os.getpid()))
@@ -167,6 +183,10 @@ rc = subprocess.run([sys.executable, os.environ["REAL_EMULATOR"], *sys.argv[1:],
                     stdout=subprocess.DEVNULL).returncode
 if rc:
     sys.exit(rc)
+# the real sender's stats file (--dry-run writes none): its send lateness
+stats = sys.argv[sys.argv.index("--stats-out") + 1]
+with open(stats, "w") as f:
+    json.dump({"sent": 1, "lost": 0, "max_late_ms": float(os.environ.get("FAKE_EMU_LATE_MS", "0.3"))}, f)
 if os.environ.get("FAKE_EMU_HANG"):
     def stop(signum, frame):
         open(os.path.join(d, "emulator.terminated"), "w").close()
@@ -191,6 +211,7 @@ def rig(tmp_path):
         p.mkdir()
     _write_exe(stub / "sshpass", FAKE_SSHPASS)
     _write_exe(stub / "ssh", FAKE_SSH)
+    _write_exe(stub / "curl", FAKE_CURL)
     _write_exe(obsdir / "obs_phase2.py", FAKE_OBS_PHASE2)
     _write_exe(obsdir / "vban_bench_obs.py", FAKE_BENCH_OBS)
     _write_exe(tmp_path / "emulator.py", FAKE_EMULATOR)
@@ -259,8 +280,9 @@ def _synth_recording(path, duration_s, losses=(), lead_s=3.0, tail_s=2.0, pilot_
         w.writeframes(bytes(int(4 * vp.SAMPLE_RATE * tail_s)))
 
 
-ASRC_LINE = ("13:01:02.345: asrc: source '%s' estimated=%s applied=0.10ppm starved_blocks=0 steps=0 "
-             "last_step_ms=0.0 timecode=1 place_jumps=0 last_jump_ms=0.0 basis=stamp (issue 1425)\n")
+ASRC_LINE = ("13:01:02.345: asrc: source '%s' estimated=%s applied=0.10ppm starved_blocks=0 level=0.3ms "
+             "target=0.0ms steps=0 last_step_ms=0.0 level_avg=0.20ms (#1367) timecode=1 place_jumps=0 "
+             "last_jump_ms=0.0 basis=stamp (issue 1425)\n")
 
 
 # --- usage + plan ---------------------------------------------------------------------------------
@@ -317,12 +339,16 @@ def _assert_untouched(rig, setup_asked=False):
     ({"FAKE_PREFLIGHT_RC": "4"}, "OBS preflight refused"),
     ({"FAKE_PORT_BOUND": "1"}, "already bound"),
     ({"FAKE_SETUP_RC": "4"}, "refused before creating"),
+    ({"FAKE_SETUP_RC": "2"}, "unreachable for the setup"),
+    ({"FAKE_HAS_FFMPEG": "0"}, "ffmpeg is not on strih-snv"),
+    ({"FAKE_FREE_BYTES": "20000000000"}, "low on space"),
 ])
 def test_an_unsafe_rig_is_refused_before_any_change(rig, extra, why):
     r = rig.run("--run", "--profiles", "clean", "--minutes", "2", "--run-dir", str(rig.run_dir), **extra)
     assert r.returncode == 4, r.stdout + r.stderr
     assert why in r.stdout + r.stderr
     _assert_untouched(rig, setup_asked="FAKE_SETUP_RC" in extra)
+    assert "cat -- " not in rig.calls(), "the whole program recording is never pulled"
     assert not rig.lease.exists(), "the lease must be released on a refusal"
 
 
@@ -376,7 +402,7 @@ def test_a_clean_profile_passes_end_to_end(rig):
     out = r.stdout + r.stderr
     assert r.returncode == 0, out
     row = (rig.run_dir / "bench.tsv").read_text().splitlines()[1].split("\t")
-    assert row[:5] == ["clean", "0.0", "PASS", "PASS", "PASS"] and row[5] == REC_PATH
+    assert row[:6] == ["clean", "0.0", "PASS", "PASS", "0.30", "PASS"] and row[6] == REC_PATH
     analysis = json.loads((rig.run_dir / "p1-analysis.json").read_text())
     assert analysis["verdict"] == "PASS"
     calls = rig.calls()
@@ -400,23 +426,54 @@ def test_a_buffering_guard_on_the_test_input_fails_the_profile(rig):
                          "13:02:00.000: buffering-guard: '%s' mixed late: its audio ran 40.0 ms behind\n" % INPUT])
     assert r.returncode == 1, r.stdout + r.stderr
     row = (rig.run_dir / "bench.tsv").read_text().splitlines()[1].split("\t")
-    assert row[2:5] == ["PASS", "FAIL", "FAIL"]
+    assert row[2:6] == ["PASS", "FAIL", "0.30", "FAIL"]
     assert not (rig.fake_dir / "input").exists() and not rig.lease.exists()
 
 
-def test_a_box_without_ffmpeg_pulls_the_whole_file_and_reads_the_track(rig):
-    # the whole recording: audio stream 0 = the program track (a different tone), stream 1 = the
-    # test track; the analysis must read stream 1
-    _synth_recording(rig.dir / "pilot.wav", 120.0)
-    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-f", "lavfi", "-i",
-                    "sine=frequency=440:sample_rate=48000:duration=125", "-i", str(rig.dir / "pilot.wav"),
-                    "-map", "0:a", "-map", "1:a", "-c:a", "pcm_s16le", "-f", "matroska",
-                    str(rig.fake_dir / "audio.wav")], check=True)
+def test_a_late_emulator_makes_the_profile_invalid_never_a_receiver_pass(rig):
+    r = _clean_run(rig, [ASRC_LINE % (INPUT, "0.12ppm")], FAKE_EMU_LATE_MS="9.5")
+    assert r.returncode == 1, r.stdout + r.stderr
+    row = (rig.run_dir / "bench.tsv").read_text().splitlines()[1].split("\t")
+    assert row[2:6] == ["PASS", "PASS", "9.50", "INVALID"]
+    assert not (rig.fake_dir / "input").exists() and not rig.lease.exists()
+
+
+def _two_profiles(rig, **extra):
+    _synth_recording(rig.fake_dir / "audio.wav", 120.0)
     (rig.fake_dir / "obs.log").write_text(ASRC_LINE % (INPUT, "0.12ppm"))
-    r = rig.run("--run", "--profiles", "clean", "--minutes", "2", "--run-dir", str(rig.run_dir),
-                FAKE_HAS_FFMPEG="0")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "cat -- '%s'" % REC_PATH in rig.calls() and "-map 0:a:" not in rig.calls()
+    return rig.popen("--run", "--profiles", "clean clean", "--minutes", "2", "--run-dir", str(rig.run_dir),
+                     **extra)
+
+
+def test_a_stop_before_every_profile_ran_is_incomplete_never_pass(rig):
+    p = _two_profiles(rig)
+    _wait_for(rig.fake_dir / "emulator.pid", p)      # profile 1 runs (and will pass)
+    (rig.run_dir / "STOP").write_text("")
+    out, _ = p.communicate(timeout=180)
+    assert p.returncode == 1, out
+    assert "verdict: INCOMPLETE (1 of 2 profiles ran)" in out
+    assert rig.calls().count("vban_bench_obs setup") == 1
+    assert not rig.lease.exists()
+
+
+def test_a_rig_that_left_test_mode_ends_the_run_incomplete(rig):
+    p = _two_profiles(rig, FAKE_MODE="TEST,EVENT")      # the reads, then before profile 2
+    out, _ = p.communicate(timeout=180)
+    assert p.returncode == 1, out
+    assert "left TEST mode" in out and "INCOMPLETE (1 of 2 profiles ran)" in out
+    assert rig.calls().count("vban_bench_obs setup") == 1
+    assert not (rig.fake_dir / "input").exists() and not rig.lease.exists()
+
+
+def test_the_next_profile_needs_a_proven_idle_rig_before_its_setup(rig):
+    # after profile 1 the rig turns unreadable: the guard alone would fail open, the idle read refuses
+    _synth_recording(rig.fake_dir / "audio.wav", 120.0)
+    (rig.fake_dir / "obs.log").write_text(ASRC_LINE % (INPUT, "0.12ppm"))
+    r = rig.run("--run", "--profiles", "clean clean", "--minutes", "2", "--run-dir", str(rig.run_dir),
+                FAKE_UNREADABLE_AFTER_TEARDOWN="1")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "not provably idle before the VBAN bench test input setup" in r.stdout + r.stderr
+    assert rig.calls().count("vban_bench_obs setup") == 1
 
 
 # --- aborts after a change ------------------------------------------------------------------------
@@ -466,6 +523,19 @@ def test_a_broadcast_going_live_keeps_the_recording_and_the_lease_then_cleanup_f
     r = rig.run("--cleanup", str(rig.run_dir))
     assert r.returncode == 0, r.stdout + r.stderr
     assert not (rig.fake_dir / "recording").exists() and not rig.lease.exists()
+
+
+def test_cleanup_keeps_the_lease_when_the_recording_does_not_stop(rig):
+    p = rig.popen("--run", "--profiles", "clean", "--minutes", "2", "--run-dir", str(rig.run_dir),
+                  FAKE_EMU_HANG="1")
+    _wait_for(rig.fake_dir / "emulator.running", p)
+    (rig.fake_dir / "live").write_text("")
+    p.communicate(timeout=120)
+    (rig.fake_dir / "live").unlink()
+    r = rig.run("--cleanup", str(rig.run_dir), FAKE_STOP_FAILS="1")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert (rig.fake_dir / "recording").exists() and rig.lease.exists()
+    assert "strih=1" in (rig.run_dir / "recording.state").read_text()
 
 
 def test_a_teardown_that_fails_keeps_the_lease(rig):

@@ -4,9 +4,12 @@
 Every OBS request goes through obs_phase2.py's ONE websocket client (`_conn` / `_rpc`, with its
 production-scene guard); this file owns only what the bench does with it:
 
-  preflight  READ-ONLY. Refuses (exit 4) when the bench cannot run safely: the obs-vban input kind
-             is not loaded; the track is the program track 1, the stream track (AdvOut TrackIndex)
-             or outside 2..6; the output mode is not Advanced / the recording is not Standard / it
+  preflight  READ-ONLY. Refuses (exit 4) when the bench cannot run safely: the port is one a real
+             receiver listens on (vban_emulator_plan.port_refusal, the ONE list); the obs-vban input
+             kind is not loaded; the track is the program track 1, the stream track (AdvOut
+             TrackIndex) or outside 2..6; an earlier run's input is still there while RecTracks
+             already holds the track (its original value is unknown: finish that run with
+             --cleanup); the output mode is not Advanced / the recording is not Standard / it
              records FLV (one track only); a recording runs; another vban input already listens on
              the port; the input name is taken by an input that is not an earlier bench run's; the
              program scene or RecTracks cannot be read. Reports (never refuses) every input that
@@ -23,8 +26,10 @@ production-scene guard); this file owns only what the bench does with it:
              BEFORE it runs, so `teardown` undoes exactly what happened. The input is silent until
              the emulator sends to its port, so nothing reaches a track before the routing is read
              back.
-  teardown   removes the input (only one whose kind, port and stream name are the bench's) and
-             restores RecTracks (only while it still holds the value setup wrote). Idempotent.
+  teardown   removes the input (only one whose kind, port and stream name are the bench's),
+             restores RecTracks (only while it still holds the value setup wrote) and, after a setup
+             that failed between the re-program and its own preview restore, the operator's preview
+             scene. Idempotent.
 
 The pilot this input receives must never be heard: track 1 (OBS mix 0: the program, the NDI
 output, the HDMI output audio) and the stream track are refused, and monitoring is off.
@@ -46,6 +51,9 @@ import json
 import os
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vban_emulator_plan as vp  # noqa: E402  (the ONE refused-port list)
 
 VBAN_INPUT_KIND = "net.nagater.obs-vban.source"
 MONITOR_OFF = "OBS_MONITORING_TYPE_NONE"
@@ -81,7 +89,8 @@ BENCH_KEYS = ("port", "stream_name", "ip_from")
 
 def input_settings(port, stream_name, extra=None):
     """The test input's settings. An extra setting may add a key (the issue-1439 receive reserve),
-    never override the bench's own: the refused ports are checked on `port` alone."""
+    never override the bench's own: the refused ports (`preflight`, which `setup` always runs first)
+    are checked on `port` alone."""
     clash = sorted(set(extra or {}) & set(BENCH_KEYS))
     if clash:
         raise ValueError("--extra-setting may not set %s (the bench's own keys)" % ", ".join(clash))
@@ -99,6 +108,8 @@ def matches_bench_input(entry_kind, settings, port, stream_name):
 def preflight_reasons(f):
     """The refusals of one preflight read (`f` = the facts dict `preflight` builds). Pure."""
     r = []
+    if f.get("port_refusal"):
+        r.append(f["port_refusal"])
     if not f.get("kind_available"):
         r.append("the obs-vban input kind %s is not loaded in this OBS" % VBAN_INPUT_KIND)
     t = f.get("track")
@@ -122,6 +133,12 @@ def preflight_reasons(f):
         r.append("the vban input %r already listens on port %s" % (name, f.get("port")))
     if f.get("name_taken"):
         r.append("an input named %r exists and is not an earlier bench run's" % f.get("input_name"))
+    rt = f.get("rectracks")
+    if f.get("leftover_input") and isinstance(rt, int) and isinstance(t, int) and t in TRACKS \
+            and rt & (1 << (t - 1)):
+        r.append("an earlier bench run's input is still there and RecTracks (%d) already holds track %d: "
+                 "its original value is unknown -- finish that run with `vban-receiver-bench.sh --cleanup "
+                 "<its run dir>` (or remove the input and restore RecTracks by hand)" % (rt, t))
     return r
 
 
@@ -165,6 +182,7 @@ def preflight(rpc, input_name, port, stream_name, track):
     rec = rpc("GetRecordStatus", ignore_err=True) or {}
     facts = {
         "input_name": input_name, "port": int(port), "stream_name": stream_name, "track": track,
+        "port_refusal": vp.port_refusal(int(port)),
         "kind_available": VBAN_INPUT_KIND in kinds,
         "output_mode": _param(rpc, "Output", "Mode"),
         "rec_type": _param(rpc, "AdvOut", "RecType"),
@@ -295,6 +313,18 @@ def teardown(rpc, state):
                 "RecTracks restored to %d" % orig if back == orig else "RecTracks reads %r after restoring %d" % (back, orig))
         elif cur != orig:
             left.append("RecTracks is %r, neither the bench's %d nor the original %d -- left alone" % (cur, setv, orig))
+    steps = state.get("steps") or []
+    prev = state.get("preview_scene")
+    if "reprogram" in steps and "active" not in steps and state.get("studio_mode") and prev:
+        # setup died between its re-program (OBS's swap may have moved the preview) and its own
+        # preview restore: put the operator's preview back (after a completed setup the preview is
+        # the operator's again and never touched)
+        cur = (rpc("GetCurrentPreviewScene", ignore_err=True) or {}).get("currentPreviewSceneName")
+        if cur != prev:
+            rpc("SetCurrentPreviewScene", {"sceneName": prev}, ignore_err=True)
+            back = (rpc("GetCurrentPreviewScene", ignore_err=True) or {}).get("currentPreviewSceneName")
+            (actions if back == prev else left).append(
+                "preview restored to %r" % prev if back == prev else "the preview reads %r, not %r" % (back, prev))
     return {"ok": not left, "actions": actions, "left": left}
 
 

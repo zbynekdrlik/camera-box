@@ -29,9 +29,14 @@
 
 _av_soak_leftovers_log() { printf '%s [av-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-# av_soak_stop_leftovers RUN_DIR OBS_DIR STRIH_HOST STREAM_HOST OBS_TIMEOUT_S RIG_STATE_PY
+# av_soak_stop_leftovers RUN_DIR OBS_DIR STRIH_HOST STREAM_HOST OBS_TIMEOUT_S RIG_STATE_PY [PROC_RE] [KEEP_LEASE]
+#   PROC_RE (default `av-soak\.sh`): the grep pattern of the run's own process in /proc/<pid>/cmdline
+#   (issue 1460: the VBAN receiver bench passes its own); KEEP_LEASE=1: never release the lease (the
+#   caller still has something else on the rig, e.g. a test input its teardown could not remove).
 av_soak_stop_leftovers() {
   local run_dir="$1" obs_dir="$2" strih_host="$3" stream_host="$4" obs_timeout="$5" rig_state="$6"
+  local default_re='av-soak\.sh'
+  local proc_re="${7:-$default_re}" keep_lease="${8:-0}"
   local state="$run_dir/recording.state" pid busy plan rc=0 box action reason host lease
   local reads="${AV_SOAK_BROADCAST_READS:-3}" gap="${AV_SOAK_BROADCAST_RETRY_S:-20}"
   if [ ! -f "$state" ]; then
@@ -42,7 +47,7 @@ av_soak_stop_leftovers() {
   case "$pid" in
     '' | *[!0-9]*) ;;
     *)
-      if kill -0 "$pid" 2>/dev/null && grep -qa 'av-soak\.sh' "/proc/$pid/cmdline" 2>/dev/null; then
+      if kill -0 "$pid" 2>/dev/null && grep -qa "$proc_re" "/proc/$pid/cmdline" 2>/dev/null; then
         echo "av-soak: ERROR: the soak (pid $pid) is still running -- stop it first (touch $run_dir/STOP); --stop-leftovers only cleans up after it" >&2
         return 4
       fi
@@ -83,7 +88,7 @@ av_soak_stop_leftovers() {
     esac
   done <<<"$plan"
   lease="$(sed -n '/^lease=/{s/^lease=//p;q;}' "$state")"
-  if [ "$rc" = 0 ] && ! grep -q '^\(strih\|stream\)=1$' "$state"; then
+  if [ "$rc" = 0 ] && [ "$keep_lease" != 1 ] && ! grep -q '^\(strih\|stream\)=1$' "$state"; then
     if [ -n "$lease" ]; then
       rig_lease_release "$lease" >/dev/null 2>&1 || true
       _av_soak_leftovers_log "stop-leftovers: rig lease released ($lease; a lease another run holds is never touched)"

@@ -21,14 +21,18 @@ set -euo pipefail
 #     a PROVEN idle rig (obs_phase2.py rig-busy-check busy=false, an unreadable read retried), the
 #     OBS preflight (vban_bench_obs.py: the vban kind loaded, the track free of the program / stream
 #     track, Advanced output, no recording, the port and the input name free), the UDP port free on
-#     strih-snv and whether strih-snv has ffmpeg;
-#   - the shared issue-1271 rig-busy guard before EVERY mutation (the setup, each StartRecord);
+#     strih-snv, ffmpeg on strih-snv (only the test track is pulled, never the program recording),
+#     the record volume's free space (>= RECORDINGS_FREE_MIN_GB, the soak's reader);
+#   - before EVERY setup and EVERY StartRecord: a proven idle rig (the soak's settled broadcast read)
+#     AND the shared issue-1271 rig-busy guard; before every profile TEST mode again (a rig that
+#     left TEST mode ends the run) and the free space again;
 #   - setup: the temporary input in the strih program scene, routed to the dedicated track only,
 #     monitoring off, the track ORed into the recording's RecTracks, active (vban_bench_obs.py);
 #   - per profile (`clean`, `lv1`, `stress:+50`, `stress:-50` by default): mark the OBS log,
 #     StartRecord, LEAD_S of silence, the emulator for --minutes, TAIL_S, StopRecord on a PROVEN idle
 #     rig, the log rows since the mark, the test track pulled from strih-snv (ffmpeg stream copy on
-#     the box, else the whole file), the sine analysis + the log grade -> one bench.tsv row;
+#     the box), the sine analysis + the log grade + the emulator's own send lateness -> one bench.tsv
+#     row (a sender wake later than --emulator-late-bound-ms = INVALID, never blamed on the receiver);
 #   - cleanup on EVERY exit (signals ignored): the emulator stopped, a recording the bench started
 #     stopped only on a proven idle rig (else KEPT, exit 5, the lease kept for --cleanup), the test
 #     input removed and RecTracks restored (vban_bench_obs.py teardown -- a silent input on a non-
@@ -64,19 +68,24 @@ set -euo pipefail
 #   --pilot-hz F         [VBAN_BENCH_PILOT_HZ, 997]
 #   --seed N             [VBAN_BENCH_SEED, 1460]
 #   --ppm-bound P        [VBAN_BENCH_PPM_BOUND, 5]
+#   --emulator-late-bound-ms M [VBAN_BENCH_EMU_LATE_BOUND_MS, 5]  a sender wake later than this
+#                        makes the profile INVALID (the profile's shape was not what was sent)
 #   --extra-setting K=V  (repeatable) an extra input setting, e.g. the issue-1439 receive reserve
 #   --run-dir D          [VBAN_BENCH_RUN_DIR, ~/.camera-box/vban-bench/<UTC stamp>]
 # Other env: STRIH_HOST / STREAM_HOST (default from scripts/lib/obs-fleet.sh), PAINTER_IP (cam2),
 #   VBAN_BENCH_POLL_S (20), VBAN_BENCH_OBS_TIMEOUT_S (30), VBAN_BENCH_SSH_TIMEOUT_S (60),
-#   AV_SOAK_BROADCAST_READS (3) / AV_SOAK_BROADCAST_RETRY_S (20) (the soak's retried idle proof).
+#   AV_SOAK_BROADCAST_READS (3) / AV_SOAK_BROADCAST_RETRY_S (20) (the soak's retried idle proof),
+#   RECORDINGS_FREE_MIN_GB (50), WIN_BUNDLE_STATE_PORT (8899, strih-snv's record-dir-stats).
 #   Test seams: VBAN_BENCH_OBS_DIR (obs_phase2.py + vban_bench_obs.py), VBAN_BENCH_EMULATOR,
 #   RIG_LEASE_DIR.
 #
 # STOP: `touch <run-dir>/STOP` (ends after the running profile's emulator, with cleanup) or SIGTERM.
 #
-# EXIT: 0 PASS (every profile), 1 FAIL, 3 usage error, 4 refused before any rig change, 5 aborted
-#       after a change (a broadcast went live, a step failed, a signal; a recording the bench may have
-#       left keeps the lease -- run --cleanup).
+# EXIT: 0 PASS (every requested profile ran and passed), 1 FAIL (a profile failed or was INVALID, or
+#       the run ended early: STOP file / the rig left TEST mode), 3 usage error, 4 refused before any
+#       rig change (also an unexpected error before one), 5 aborted after a change (a broadcast went
+#       live, a step failed, a signal; a recording the bench may have left keeps the lease -- run
+#       --cleanup).
 #
 # Runbook + the rule: .claude/rules/vban-receiver-bench.md.
 
@@ -97,6 +106,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/rig-mode-state.sh"
 # shellcheck source=scripts/lib/av-soak.sh
 . "$HERE/lib/av-soak.sh"
+# shellcheck source=scripts/lib/av-soak-leftovers.sh
+. "$HERE/lib/av-soak-leftovers.sh"
+# shellcheck source=scripts/lib/recordings-free-line.sh
+. "$HERE/lib/recordings-free-line.sh"
 
 log() { printf '%s [vban-bench] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { local rc="$1"; shift; log "ERROR: $*" >&2; exit "$rc"; }
@@ -113,6 +126,7 @@ INPUT_NAME="${VBAN_BENCH_INPUT:-VBAN bench (issue 1460)}"
 PILOT_HZ="${VBAN_BENCH_PILOT_HZ:-997}"
 SEED="${VBAN_BENCH_SEED:-1460}"
 PPM_BOUND="${VBAN_BENCH_PPM_BOUND:-5}"
+EMU_LATE_BOUND_MS="${VBAN_BENCH_EMU_LATE_BOUND_MS:-5}"
 RUN_DIR="${VBAN_BENCH_RUN_DIR:-}"
 EXTRA=()
 while [ $# -gt 0 ]; do
@@ -129,6 +143,7 @@ while [ $# -gt 0 ]; do
     --pilot-hz) PILOT_HZ="${2:-}"; shift ;;
     --seed) SEED="${2:-}"; shift ;;
     --ppm-bound) PPM_BOUND="${2:-}"; shift ;;
+    --emulator-late-bound-ms) EMU_LATE_BOUND_MS="${2:-}"; shift ;;
     --extra-setting) EXTRA+=(--extra-setting "${2:-}"); shift ;;
     --run-dir) RUN_DIR="${2:-}"; shift ;;
     -h | --help) sed -n '2,/^# Runbook/p' "$0"; exit 0 ;;
@@ -149,6 +164,8 @@ OBS_TIMEOUT_S="${VBAN_BENCH_OBS_TIMEOUT_S:-30}"
 SSH_TIMEOUT_S="${VBAN_BENCH_SSH_TIMEOUT_S:-60}"
 BROADCAST_READS="${AV_SOAK_BROADCAST_READS:-3}"
 BROADCAST_RETRY_S="${AV_SOAK_BROADCAST_RETRY_S:-20}"
+RECORDINGS_FREE_MIN_GB="${RECORDINGS_FREE_MIN_GB:-50}"
+BUNDLE_STATE_PORT="${WIN_BUNDLE_STATE_PORT:-8899}"
 LEAD_S=3
 TAIL_S=2
 ANALYSIS_LEAD_S=2
@@ -171,8 +188,10 @@ done
 is_uint "$MINUTES" && [ "$MINUTES" -ge 2 ] && [ "$MINUTES" -le 14 ] \
   || die 3 "--minutes must be 2..14 (got '$MINUTES'; the strih recording splits at 15 min)"
 is_uint "$PORT" || die 3 "--port must be a number"
-case "$PORT" in 6980 | 6981 | 6990) die 3 "--port $PORT belongs to a real receiver on the rig (6980 hub/stream program, 6981 strih program, 6990 Janus) -- the pilot must never reach it" ;; esac
-[ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] || die 3 "--port must be 1024..65535"
+# the ONE refused-port list (vban_emulator_plan.port_refusal: the receiver ports, 1024..65535)
+_port_why="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import vban_emulator_plan as v; print(v.port_refusal(int(sys.argv[2])) or "")' "$HERE" "$PORT")" \
+  || die 3 "--port could not be checked (scripts/vban_emulator_plan.py)"
+[ -z "$_port_why" ] || die 3 "--port: $_port_why"
 is_uint "$TRACK" && [ "$TRACK" -ge 2 ] && [ "$TRACK" -le 6 ] || die 3 "--track must be 2..6 (track 1 is the program mix)"
 stream_name_ok() { local LC_ALL=C; [[ "$1" =~ ^[[:graph:]]{1,16}$ ]]; }  # C locale: [:graph:] = ASCII only
 stream_name_ok "$STREAM_NAME" || die 3 "--stream-name must be 1..16 printable ASCII characters"
@@ -184,9 +203,10 @@ for _x in "${EXTRA[@]}"; do
     port | stream_name | ip_from) die 3 "--extra-setting may not set the bench's own '${_x%%=*}' (use --port / --stream-name)" ;;
   esac
 done
-for _n in "$POLL_S" "$OBS_TIMEOUT_S" "$SSH_TIMEOUT_S" "$BROADCAST_READS" "$BROADCAST_RETRY_S"; do
+for _n in "$POLL_S" "$OBS_TIMEOUT_S" "$SSH_TIMEOUT_S" "$BROADCAST_READS" "$BROADCAST_RETRY_S" "$RECORDINGS_FREE_MIN_GB"; do
   is_uint "$_n" || die 3 "the VBAN_BENCH_* / AV_SOAK_* timings must be integers (got '$_n')"
 done
+[[ "$EMU_LATE_BOUND_MS" =~ ^[0123456789]+(\.[0123456789]+)?$ ]] || die 3 "--emulator-late-bound-ms must be a number"
 [ -n "$STRIH_HOST" ] || die 3 "no strih-snv host (obs-fleet)"
 camera_resolve cam2
 PAINTER_IP="${PAINTER_IP:-$CAMERA_IP}"
@@ -204,7 +224,7 @@ emulator_argv() {  # INDEX TOKEN -> EMU_ARGV: the emulator command of one profil
     --schedule-out "$RUN_DIR/p$i-schedule.json" --stats-out "$RUN_DIR/p$i-emulator.json")
 }
 obs_tool() {  # OP -> vban_bench_obs.py OP with the bench's identity
-  python3 "$OBS_DIR/vban_bench_obs.py" "$1" --host "$STRIH_HOST" --password "${OBS_PASSWORD:-}" \
+  python3 "$OBS_DIR/vban_bench_obs.py" "$1" --host "$STRIH_HOST" \
     --state "$RUN_DIR/obs-state.json" --input-name "$INPUT_NAME" --port "$PORT" \
     --stream-name "$STREAM_NAME" --track "$TRACK" "${EXTRA[@]}"
 }
@@ -221,15 +241,17 @@ if [ "$MODE" = plan ]; then
   echo "   - TEST mode: ssh root@${PAINTER_IP} <rig_mode_state_probe_remote_snippet> -> must read TEST"
   echo "   - idle rig: python3 ${OBS_DIR}/obs_phase2.py rig-busy-check --strih-host ${STRIH_HOST} --stream-host ${STREAM_HOST} -> busy=false"
   echo "   - OBS: $(printf '%q ' python3 "$OBS_DIR/vban_bench_obs.py" preflight --host "$STRIH_HOST" --state "$RUN_DIR/obs-state.json" --port "$PORT" --track "$TRACK")"
-  echo "   - strih-snv: ss -Hlun 'sport = :${PORT}' empty; command -v ffmpeg (on-box track extract, else the whole file is pulled)"
+  echo "   - strih-snv: ss -Hlun 'sport = :${PORT}' empty; command -v ffmpeg (only the test track is pulled)"
+  echo "   - record volume: curl http://${STRIH_HOST}:${BUNDLE_STATE_PORT}/record-dir-stats.json -> free >= ${RECORDINGS_FREE_MIN_GB} GB"
   _i=0
   for _p in $PROFILES; do
     _i=$((_i + 1))
     echo "2.${_i} profile ${_p} (a FRESH test input per profile: its counters and its receiver start clean):"
-    echo "     the rig-busy guard, then setup (the input in the program scene, track ${TRACK} only, monitor off,"
+    echo "     TEST mode + free space again; a proven idle rig + the rig-busy guard, then setup (the input in"
+    echo "     the program scene, track ${TRACK} only, monitor off,"
     echo "     RecTracks |= track, active -- the program scene re-programmed once in Studio Mode):"
     echo "     $(printf '%q ' python3 "$OBS_DIR/vban_bench_obs.py" setup --host "$STRIH_HOST" --state "$RUN_DIR/obs-state.json" --input-name "$INPUT_NAME" --port "$PORT" --stream-name "$STREAM_NAME" --track "$TRACK" "${EXTRA[@]}")"
-    echo "     the guard; mark the OBS log; StartRecord; ${LEAD_S} s of silence; then the emulator:"
+    echo "     a proven idle rig + the guard; mark the OBS log; StartRecord; ${LEAD_S} s of silence; then the emulator:"
     emulator_argv "$_i" "$_p"
     echo "     $(printf '%q ' "${EMU_ARGV[@]}")"
     echo "     (every ${POLL_S} s: the lease kept alive, a live broadcast aborts); ${TAIL_S} s tail; a proven idle"
@@ -237,10 +259,11 @@ if [ "$MODE" = plan ]; then
     echo "     the test track pulled to $RUN_DIR/p${_i}-audio.mkv; then"
     echo "     $(printf '%q ' python3 "$ANALYZE" "$RUN_DIR/p${_i}-audio.mkv" --schedule "$RUN_DIR/p${_i}-schedule.json" --lead-s "$ANALYSIS_LEAD_S" --ppm-bound "$PPM_BOUND" --json)"
     echo "     $(printf '%q ' python3 "$LOG_GRADE" --log "$RUN_DIR/p${_i}-obs.log" --input-name "$INPUT_NAME" --ppm-bound "$PPM_BOUND" --json)"
+    echo "     the emulator's max send lateness <= ${EMU_LATE_BOUND_MS} ms (else the profile is INVALID)"
   done
   echo "3. cleanup (always): the emulator stopped; StopRecord only on a proven idle rig; teardown; the lease released"
   echo "   $(printf '%q ' python3 "$OBS_DIR/vban_bench_obs.py" teardown --host "$STRIH_HOST" --state "$RUN_DIR/obs-state.json")"
-  echo "verdict: PASS only when every profile's sine analysis AND log grade pass"
+  echo "verdict: PASS only when every requested profile ran and its sine analysis AND log grade pass"
   exit 0
 fi
 
@@ -288,23 +311,24 @@ if [ "$MODE" = cleanup ]; then
   fi
   IN_CLEANUP=1
   rc=0
-  LEASE_ID="$(sed -n 's/^lease=//p' "$RUN_DIR/recording.state" 2>/dev/null | head -n 1)"
-  if grep -qx 'strih=1' "$RUN_DIR/recording.state" 2>/dev/null; then
-    _raw="$(av_soak_rig_busy_settled "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$OBS_TIMEOUT_S" "$RIG_STATE" "$BROADCAST_READS" "$BROADCAST_RETRY_S" 1)"
-    _plan="$(printf '%s' "$_raw" | python3 "$RIG_STATE" leftovers --state "$RUN_DIR/recording.state" --now "$(date +%s)" --start-window-s 60 2>/dev/null || true)"
-    case "$_plan" in
-      strih$'\t'stop*) record stop >> "$RUN_DIR/recordings.txt" 2>/dev/null || true; write_recording_state 0; log "cleanup: stopped the bench's strih recording" ;;
-      strih$'\t'clear*) write_recording_state 0; log "cleanup: the strih recording already stopped" ;;
-      *) log "cleanup: strih recording KEPT (${_plan:-the plan could not be made})"; rc=5 ;;
-    esac
-  fi
+  # the test input first (a silent input on a non-program track: safe to remove during a broadcast)
   if [ -s "$RUN_DIR/obs-state.json" ]; then
-    obs_tool teardown || rc=5
+    if obs_tool teardown >> "$RUN_DIR/bench.log" 2>&1; then
+      rm -f "$RUN_DIR/obs-state.json"
+      log "cleanup: the test input is removed and RecTracks restored"
+    else
+      log "cleanup: the teardown left something on strih-snv OBS (see $RUN_DIR/bench.log)"
+      rc=5
+    fi
   fi
-  if [ "$rc" = 0 ] && [ -n "$LEASE_ID" ]; then
-    rig_lease_release "$LEASE_ID" >/dev/null 2>&1 || true
-    log "cleanup: lease released ($LEASE_ID; a lease another run holds is never touched)"
-  fi
+  # then the soak's ONE leftovers path: a flagged recording stopped only when provably the bench's on
+  # an idle rig, the stop verified by its status read; the lease released only when nothing is left
+  _keep=0
+  [ "$rc" = 0 ] || _keep=1
+  _lrc=0
+  av_soak_stop_leftovers "$RUN_DIR" "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$OBS_TIMEOUT_S" "$RIG_STATE" \
+    'vban-receiver-bench\.sh' "$_keep" || _lrc=$?
+  [ "$_lrc" = 0 ] || rc="$_lrc"
   exit "$rc"
 fi
 
@@ -323,7 +347,7 @@ done
 mkdir -p "$RUN_DIR"
 printf '%s\n' "$$" > "$RUN_DIR/pid"
 rm -f "$RUN_DIR/STOP"
-printf 'profile\tppm\tsine\tlog\tverdict\trecording\n' > "$RUN_DIR/bench.tsv"
+printf 'profile\tppm\tsine\tlog\temulator_late_ms\tverdict\trecording\n' > "$RUN_DIR/bench.tsv"
 export RIG_LEASE_MAX_HOLD_SECS="$EXPECTED_S"
 
 LEASE_ID="vban-bench-${STAMP}-$$"  # set BEFORE the acquire: a TERM inside it still releases (holder-checked)
@@ -332,6 +356,7 @@ RECORDING=0
 EMU_PID=""
 ABORT_REASON=""
 OVERALL=PASS
+N_DONE=0
 IN_CLEANUP=0
 
 cleanup() {
@@ -347,7 +372,7 @@ cleanup() {
     if stop_recording_if_idle; then RECORDING=0; else kept=1; fi
   fi
   if [ "$MUTATED" = 1 ]; then
-    setsid -w python3 "$OBS_DIR/vban_bench_obs.py" teardown --host "$STRIH_HOST" --password "${OBS_PASSWORD:-}" \
+    setsid -w python3 "$OBS_DIR/vban_bench_obs.py" teardown --host "$STRIH_HOST" \
       --state "$RUN_DIR/obs-state.json" >> "$RUN_DIR/bench.log" 2>&1 || {
       log "teardown left something on strih-snv OBS (see $RUN_DIR/bench.log) -- run: bash $0 --cleanup $RUN_DIR" 2>/dev/null
       kept=1
@@ -363,7 +388,17 @@ cleanup() {
   if [ -n "$ABORT_REASON" ]; then
     case "$rc" in 4 | 5) exit "$rc" ;; *) exit 5 ;; esac
   fi
-  case "$rc" in 0) ;; *) exit "$rc" ;; esac
+  case "$rc" in
+    0) ;;
+    *)  # an unexpected error (set -e), never a FAIL verdict: 5 after a change, else 4 (nothing changed)
+      log "ABORTED: unexpected error (rc $rc)" 2>/dev/null
+      [ "$MUTATED" = 1 ] && exit 5
+      exit 4 ;;
+  esac
+  if [ "$N_DONE" -lt "$N_PROFILES" ]; then  # a STOP file or the rig leaving TEST mode: never a PASS
+    [ "$OVERALL" = PASS ] && OVERALL=INCOMPLETE
+    OVERALL="$OVERALL ($N_DONE of $N_PROFILES profiles ran)"
+  fi
   log "verdict: $OVERALL" 2>/dev/null
   [ "$OVERALL" = PASS ] && exit 0
   exit 1
@@ -380,6 +415,27 @@ refuse() {  # REASON -> exit 4 while nothing changed, else 5
 }
 guard() {  # WHAT -> the shared issue-1271 guard; a busy rig refuses
   ( stray_session_check_assert "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$1" ) || refuse "the rig-busy guard refused $1"
+}
+idle_or_refuse() {  # WHAT -> a proven idle rig (the soak's settled broadcast read), else refuse
+  local b
+  b="$(broadcast_now)"
+  [ "$b" = idle ] || refuse "the rig is not provably idle before $1 (broadcast read: $b)"
+}
+test_mode_now() {  # -> TEST | EVENT | UNKNOWN (the cam2 painter state, read-only)
+  rig_mode_from_painter_snapshot "$(remote root "$CAM_PW" "$PAINTER_IP" "$(rig_mode_state_probe_remote_snippet)" 2>/dev/null || true)"
+}
+free_space_ok() {  # -> 0 enough or unreadable (logged once), 1 below RECORDINGS_FREE_MIN_GB (logged)
+  local fs
+  fs="$(av_soak_free_space_verdict "$STRIH_HOST" "$BUNDLE_STATE_PORT" "$RECORDINGS_FREE_MIN_GB" "$HERE")"
+  case "$fs" in
+    WARN*) log "the strih-snv record volume has only ${fs#* } GB free (< ${RECORDINGS_FREE_MIN_GB} GB)"; return 1 ;;
+    OK*) return 0 ;;
+  esac
+  if [ "${FREE_UNREADABLE_LOGGED:-0}" = 0 ]; then
+    log "WARNING: the strih-snv record volume free space is unreadable (:${BUNDLE_STATE_PORT}/record-dir-stats.json) -- the low-disk check cannot fire"
+    FREE_UNREADABLE_LOGGED=1
+  fi
+  return 0
 }
 keepalive() {
   local out="" r=0
@@ -402,7 +458,7 @@ log "$lease_out"
 [ "$lease_rc" -eq 0 ] || refuse "the rig lease is held (${lease_out#RIG_LEASE_HELD_BY=}) -- rerun when it is free"
 
 # ---- reads (exit 4, nothing changed) ----
-_mode="$(rig_mode_from_painter_snapshot "$(remote root "$CAM_PW" "$PAINTER_IP" "$(rig_mode_state_probe_remote_snippet)" 2>/dev/null || true)")"
+_mode="$(test_mode_now)"
 [ "$_mode" = TEST ] || refuse "the rig is not in TEST mode (cam2 painter reads $_mode) -- run scripts/rig-mode.sh test first"
 _raw="$(av_soak_rig_busy_settled "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$OBS_TIMEOUT_S" "$RIG_STATE" "$BROADCAST_READS" "$BROADCAST_RETRY_S")"
 _busy="$(printf '%s' "$_raw" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("busy"))' 2>/dev/null || true)"
@@ -420,11 +476,13 @@ case "$_ports" in
   *SS_RC=0*) refuse "UDP port $PORT is already bound on strih-snv: ${_ports%SS_RC=*}" ;;
   *) refuse "could not read the UDP ports of strih-snv (${_ports:-no answer})" ;;
 esac
-HAS_FFMPEG=0
-if remote "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" 'command -v ffmpeg >/dev/null' 2>/dev/null; then HAS_FFMPEG=1; fi
+remote "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" 'command -v ffmpeg >/dev/null' 2>/dev/null \
+  || refuse "ffmpeg is not on strih-snv (setup-strih installs it): only the test track is ever pulled, never the program recording"
+free_space_ok || refuse "the strih-snv record volume is low on space"
 
 # ---- the profiles: a FRESH test input each (its receiver and its ASRC counters start clean) ----
-setup_input() {  # LABEL -> the guard, then vban_bench_obs.py setup; sets STREAM_INDEX
+setup_input() {  # LABEL -> a proven idle rig + the guard, then vban_bench_obs.py setup; sets STREAM_INDEX
+  idle_or_refuse "the VBAN bench test input setup ($1)"
   guard "the VBAN bench test input setup ($1)"
   local was="$MUTATED" rc=0
   MUTATED=1
@@ -432,6 +490,7 @@ setup_input() {  # LABEL -> the guard, then vban_bench_obs.py setup; sets STREAM
   case "$rc" in
     0) ;;
     4) MUTATED="$was"; refuse "the OBS setup refused before creating the input (see $RUN_DIR/bench.log)" ;;
+    2) MUTATED="$was"; refuse "strih-snv OBS was unreachable for the setup (nothing created; see $RUN_DIR/bench.log)" ;;
     *) refuse "the OBS setup failed after a change (rc $rc, see $RUN_DIR/bench.log)" ;;
   esac
   STREAM_INDEX="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["audio_stream_index"])' "$RUN_DIR/setup.json")"
@@ -441,16 +500,12 @@ teardown_input() {  # -> the input removed + RecTracks restored, else abort (the
   obs_tool teardown >> "$RUN_DIR/bench.log" 2>&1 || refuse "the teardown left something on strih-snv OBS (see $RUN_DIR/bench.log)"
   rm -f "$RUN_DIR/obs-state.json"
 }
-pull_audio() {  # PATH OUT -> the test track (on-box stream copy) or the whole file; 0 when OUT is non-empty
+pull_audio() {  # PATH OUT -> the test track only (an on-box stream copy); 0 when OUT is non-empty
   local path="$1" out="$2" q i
   q="'${path//\'/\'\\\'\'}'"
   for i in 1 2 3 4 5; do
-    if [ "$HAS_FFMPEG" = 1 ]; then
-      remote "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" \
-        "nice -n 19 ffmpeg -v error -nostdin -i $q -map 0:a:${STREAM_INDEX} -c copy -f matroska -" > "$out" 2>> "$RUN_DIR/bench.log"
-    else
-      remote "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" "cat -- $q" > "$out" 2>> "$RUN_DIR/bench.log"
-    fi
+    remote "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" \
+      "nice -n 19 ffmpeg -v error -nostdin -i $q -map 0:a:${STREAM_INDEX} -c copy -f matroska -" > "$out" 2>> "$RUN_DIR/bench.log"
     if [ -s "$out" ]; then return 0; fi
     sleep 3
   done
@@ -461,7 +516,13 @@ for _p in $PROFILES; do
   _i=$((_i + 1))
   if [ -e "$RUN_DIR/STOP" ]; then log "STOP file -- ending before profile $_p"; break; fi
   keepalive
+  if [ "$_i" -gt 1 ]; then
+    _mode="$(test_mode_now)"
+    if [ "$_mode" != TEST ]; then log "the rig left TEST mode (cam2 painter reads $_mode) -- ending before profile $_p"; break; fi
+    if ! free_space_ok; then log "ending before profile $_p: the record volume is low on space"; break; fi
+  fi
   setup_input "profile $_p"
+  idle_or_refuse "the profile ${_p} StartRecord"
   guard "the profile ${_p} StartRecord"
   _mark="$(strih_log_line_count "$STRIH_HOST" "$STRIH_USER" "$STRIH_PW")"
   is_uint "$_mark" || refuse "the strih OBS log cannot be read (line count '${_mark}')"
@@ -491,15 +552,13 @@ for _p in $PROFILES; do
   strih_log_since_line "$STRIH_HOST" "$STRIH_USER" "$STRIH_PW" "$_mark" > "$RUN_DIR/p$_i-obs.log"
   if [ -n "$_rec" ]; then strih_lx_recording_cleanup_note "" "$STRIH_HOST" "$_rec" "$STRIH_USER" >> "$RUN_DIR/cleanup-plan.txt"; fi
   _sine=FAIL
-  _stream=0
-  if [ "$HAS_FFMPEG" != 1 ]; then _stream="$STREAM_INDEX"; fi
   if [ "$_erc" != 0 ]; then
     log "profile $_p: the emulator exited $_erc"
   elif [ -z "$_rec" ] || ! pull_audio "$_rec" "$RUN_DIR/p$_i-audio.mkv"; then
     log "profile $_p: the recording could not be pulled from strih-snv (path '${_rec}')"
   else
     _arc=0
-    python3 "$ANALYZE" "$RUN_DIR/p$_i-audio.mkv" --schedule "$RUN_DIR/p$_i-schedule.json" --stream "$_stream" \
+    python3 "$ANALYZE" "$RUN_DIR/p$_i-audio.mkv" --schedule "$RUN_DIR/p$_i-schedule.json" --stream 0 \
       --lead-s "$ANALYSIS_LEAD_S" --ppm-bound "$PPM_BOUND" --json > "$RUN_DIR/p$_i-analysis.json" || _arc=$?
     if [ "$_arc" = 0 ]; then _sine=PASS; fi
   fi
@@ -510,10 +569,18 @@ for _p in $PROFILES; do
     --expect-ppm "$_ppm" --ppm-bound "$PPM_BOUND" --json > "$RUN_DIR/p$_i-log.json" || _lrc=$?
   _logv=FAIL
   if [ "$_lrc" = 0 ]; then _logv=PASS; fi
+  # the emulator's own send lateness: a late sender wake changes the profile's shape, so it is
+  # never graded as the receiver's (an unreadable stats file is INVALID too)
+  _late="$(python3 -c 'import json,sys; print("%.2f" % float(json.load(open(sys.argv[1]))["max_late_ms"]))' "$RUN_DIR/p$_i-emulator.json" 2>/dev/null || echo unread)"
   _v=FAIL
   if [ "$_sine" = PASS ] && [ "$_logv" = PASS ]; then _v=PASS; fi
+  if [ "$_late" = unread ] || ! python3 -c 'import sys; sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)' "$_late" "$EMU_LATE_BOUND_MS"; then
+    _v=INVALID
+    log "profile $_p: INVALID -- the emulator's send lateness ${_late} ms is over ${EMU_LATE_BOUND_MS} ms (dev1 load?); rerun it"
+  fi
   if [ "$_v" != PASS ]; then OVERALL=FAIL; fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_p" "$_ppm" "$_sine" "$_logv" "$_v" "$_rec" >> "$RUN_DIR/bench.tsv"
-  log "profile $_p: sine $_sine, log $_logv -> $_v"
+  N_DONE=$((N_DONE + 1))
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$_p" "$_ppm" "$_sine" "$_logv" "$_late" "$_v" "$_rec" >> "$RUN_DIR/bench.tsv"
+  log "profile $_p: sine $_sine, log $_logv, emulator late ${_late} ms -> $_v"
 done
 exit 0
