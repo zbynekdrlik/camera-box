@@ -29,6 +29,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 const SOURCE: &str = "vendor/obs-vban/src/vban-source.c";
 const FRAMES: u32 = 256;
+/// `VBAN_BITFMT_*` (vendor/obs-vban/vban/vban.h): 8-bit, 16-bit, 24-bit, 32-bit int, 32-bit float.
+const VBAN_BITFMT_8_INT: u8 = 0;
+const VBAN_BITFMT_16_INT: u8 = 1;
+const VBAN_BITFMT_24_INT: u8 = 2;
+const VBAN_BITFMT_32_INT: u8 = 3;
+const VBAN_BITFMT_32_FLOAT: u8 = 4;
 const RATE: u64 = 48_000;
 
 fn repo(rel: &str) -> PathBuf {
@@ -167,6 +173,18 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 		for (size_t i = 0; i < n; i++)
 			if (d[i] != 0)
 				zero = 0;
+	} else if (audio->format == AUDIO_FORMAT_U8BIT) {
+		const uint8_t *d = (const uint8_t *)audio->data[0];
+		first = (long)d[0] - 128;
+		for (size_t i = 0; i < n; i++)
+			if (d[i] != 128)
+				zero = 0;
+	} else if (audio->format == AUDIO_FORMAT_32BIT) {
+		const int32_t *d = (const int32_t *)audio->data[0];
+		first = (long)(d[0] / 65536);
+		for (size_t i = 0; i < n; i++)
+			if (d[i] != 0)
+				zero = 0;
 	} else if (audio->format == AUDIO_FORMAT_FLOAT_PLANAR) {
 		const float *d0 = (const float *)audio->data[0];
 		first = (long)(d0[0] * 32768.0f);
@@ -185,8 +203,9 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 	} else {
 		zero = -1;
 	}
-	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld\n", audio->timestamp,
-	       audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first);
+	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d\n",
+	       audio->timestamp, audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first,
+	       (int)audio->format);
 }
 
 static int g_udp_dummy;
@@ -233,7 +252,9 @@ void vban_udp_set_host(vban_udp_t *dev, vban_udp_cb_t cb, void *data, const char
 }
 
 /* One stereo 16-bit 48 kHz packet of FRAMES frames, every sample = VALUE. */
-static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int16_t value, uint64_t now)
+/* One stereo 48 kHz packet of FRAMES frames in BITFMT (a VBAN_BITFMT_*), every sample = VALUE on the
+ * 16-bit scale. */
+static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int bitfmt, int16_t value, uint64_t now)
 {
 	char buf[VBAN_PROTOCOL_MAX_SIZE];
 	memset(buf, 0, sizeof(buf));
@@ -242,29 +263,52 @@ static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int16_t v
 	h->format_SR = 3;
 	h->format_nbs = (uint8_t)(frames - 1);
 	h->format_nbc = 1;
-	h->format_bit = VBAN_BITFMT_16_INT;
+	h->format_bit = (uint8_t)bitfmt;
 	strncpy(h->streamname, "stream", VBAN_STREAM_NAME_SIZE);
 	h->nuFrame = nu_frame;
-	int16_t *pcm = (int16_t *)(buf + VBAN_HEADER_SIZE);
-	for (uint32_t i = 0; i < frames * 2; i++)
-		pcm[i] = value;
+	uint8_t *pcm = (uint8_t *)(buf + VBAN_HEADER_SIZE);
+	size_t bytes = 0;
+	for (uint32_t i = 0; i < frames * 2; i++) {
+		if (bitfmt == VBAN_BITFMT_8_INT) {
+			pcm[bytes++] = (uint8_t)(value + 128);
+		} else if (bitfmt == VBAN_BITFMT_16_INT) {
+			int16_t v = value;
+			memcpy(pcm + bytes, &v, 2);
+			bytes += 2;
+		} else if (bitfmt == VBAN_BITFMT_24_INT) {
+			int32_t v = (int32_t)value * 256;
+			pcm[bytes++] = (uint8_t)(v & 0xff);
+			pcm[bytes++] = (uint8_t)((v >> 8) & 0xff);
+			pcm[bytes++] = (uint8_t)((v >> 16) & 0xff);
+		} else if (bitfmt == VBAN_BITFMT_32_INT) {
+			int32_t v = (int32_t)value * 65536;
+			memcpy(pcm + bytes, &v, 4);
+			bytes += 4;
+		} else {
+			float v = (float)value / 32768.0f;
+			memcpy(pcm + bytes, &v, 4);
+			bytes += 4;
+		}
+	}
 	g_now = now;
 	printf("in nu=%" PRIu32 " now=%" PRIu64 " value=%d\n", nu_frame, now, (int)value);
-	vban_src_callback(buf, VBAN_HEADER_SIZE + (size_t)frames * 4, src);
+	vban_src_callback(buf, VBAN_HEADER_SIZE + bytes, src);
 }
 
 int main(int argc, char **argv)
 {
 	if (argc < 2)
 		return 2;
-	uint32_t frames = (uint32_t)strtoul(argv[1], NULL, 10);
+	char *rest = NULL;
+	uint32_t frames = (uint32_t)strtoul(argv[1], &rest, 10);
+	int bitfmt = (rest && *rest == ',') ? atoi(rest + 1) : VBAN_BITFMT_16_INT;
 	void *src = vban_source_info.create(NULL, (obs_source_t *)&g_udp_dummy);
 	for (int i = 2; i < argc; i++) {
 		unsigned long nu = 0, value = 0;
 		unsigned long long now = 0;
 		if (sscanf(argv[i], "%lu:%llu:%lu", &nu, &now, &value) != 3)
 			return 3;
-		send_packet(src, (uint32_t)nu, frames, (int16_t)value, (uint64_t)now);
+		send_packet(src, (uint32_t)nu, frames, bitfmt, (int16_t)value, (uint64_t)now);
 	}
 	vban_source_info.destroy(src);
 	return 0;
@@ -278,6 +322,8 @@ struct Out {
     frames: u64,
     zero: bool,
     first: i64,
+    /// The libobs `enum audio_format` value OBS received.
+    format: i32,
 }
 
 static COMPILES: AtomicUsize = AtomicUsize::new(0);
@@ -299,6 +345,11 @@ fn run(packets: &[(u32, u64, i16)]) -> Vec<Out> {
 
 /// [`run`], plus the plugin's log lines (`blog <level>: <text>`).
 fn run_with_log(packets: &[(u32, u64, i16)]) -> (Vec<Out>, String) {
+    run_as(packets, VBAN_BITFMT_16_INT)
+}
+
+/// The packets sent in the VBAN sample format `bitfmt` (the header's `VBAN_BITFMT_*` value).
+fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, String) {
     let source = repo(SOURCE);
     assert!(source.is_file(), "issue 1439: {SOURCE} is missing");
     let n = COMPILES.fetch_add(1, Ordering::SeqCst);
@@ -353,7 +404,7 @@ fn run_with_log(packets: &[(u32, u64, i16)]) -> (Vec<Out>, String) {
         String::from_utf8_lossy(&out.stderr)
     );
     let mut cmd = Command::new(&bin);
-    cmd.arg(FRAMES.to_string());
+    cmd.arg(format!("{FRAMES},{bitfmt}"));
     for (nu, now, value) in packets {
         cmd.arg(format!("{nu}:{now}:{value}"));
     }
@@ -381,6 +432,7 @@ fn run_with_log(packets: &[(u32, u64, i16)]) -> (Vec<Out>, String) {
                 frames: field("frames=").parse().unwrap(),
                 zero: field("zero=") == "1",
                 first: field("first=").parse().unwrap(),
+                format: field("fmt=").parse().unwrap(),
             }
         })
         .collect();
@@ -517,4 +569,45 @@ fn the_status_line_reports_the_counters_r_port_and_stream_1439() {
         line.ends_with("source='Zvuk z mixu'"),
         "issue 1439: the line names its OBS source last: `{line}`"
     );
+}
+
+/// A lost packet's silence must reach OBS in the SAME sample format as the stream's packets. libobs
+/// `process_audio` resets the source's resampler, and with it the genlock ASRC, whenever the format
+/// changes, so silence in another format reset the ASRC twice per loss (review round 1).
+#[test]
+fn the_silence_keeps_the_streams_sample_format_1439() {
+    for (bitfmt, name) in [
+        (VBAN_BITFMT_8_INT, "8-bit"),
+        (VBAN_BITFMT_16_INT, "16-bit"),
+        (VBAN_BITFMT_24_INT, "24-bit"),
+        (VBAN_BITFMT_32_INT, "32-bit int"),
+        (VBAN_BITFMT_32_FLOAT, "32-bit float"),
+    ] {
+        let (outs, _log) = run_as(&on_grid(&[300, 301, 303, 304]), bitfmt);
+        assert_eq!(
+            outs.len(),
+            5,
+            "{name}: four packets + one silent slot: {outs:?}"
+        );
+        let formats: Vec<i32> = outs.iter().map(|o| o.format).collect();
+        assert!(
+            formats.iter().all(|f| *f == formats[0]),
+            "issue 1439: {name} -- every output of one stream must keep one sample format, else libobs \
+             resets the resampler + the genlock ASRC at each change: {formats:?}"
+        );
+        assert_eq!(
+            audio_values(&outs),
+            vec![1, 2, 4, 5],
+            "{name}: the audio itself is unchanged: {outs:?}"
+        );
+        assert_eq!(
+            outs.iter()
+                .filter(|o| o.zero)
+                .map(|o| o.frames)
+                .sum::<u64>(),
+            u64::from(FRAMES),
+            "{name}: one lost packet = one packet of silence: {outs:?}"
+        );
+        assert_contiguous(&outs);
+    }
 }
