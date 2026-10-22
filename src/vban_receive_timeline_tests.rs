@@ -530,6 +530,31 @@ fn a_sender_pause_of_more_than_a_second_is_one_re_anchor_with_no_drops() {
     );
 }
 
+/// Review round 5: a STARVE re-anchor carries how long no packet came in time (its arrival − the
+/// last in-time arrival) in `late_ns`, so the source logs the starve span (it logged
+/// `late_ms=0.0`). Every other re-anchor carries none.
+#[test]
+fn a_starve_re_anchor_carries_how_long_no_packet_came_in_time() {
+    let mut t = Timeline::new();
+    through_the_hold(&mut t, 0);
+    let d = t.packet(on_time(H), H as u32, 256, RATE, 2, R40);
+    assert_eq!(d.event, Event::Packet, "{d:?}");
+    let at = on_time(H) + 1_500 * NS_PER_MS;
+    let d = t.packet(at, (H + 1) as u32, 256, RATE, 2, R40);
+    assert_eq!(
+        (d.event, d.reason),
+        (Event::Reanchor, Reason::Starve),
+        "{d:?}"
+    );
+    assert_eq!(d.late_ns, (1_500 * NS_PER_MS) as i64, "the starve span: {d:?}");
+    // another re-anchor (a channel change) carries no span
+    let d = t.packet(at + MS_256, (H + 2) as u32, 256, RATE, 1, R40);
+    assert_eq!((d.event, d.reason, d.late_ns), (Event::Reanchor, Reason::Format, 0));
+}
+
+/// One 256-frame packet at 48 kHz, ns.
+const MS_256: u64 = 5_333_333;
+
 /// Review round 4: the starve boundary on our clock. A late packet arriving exactly one second
 /// after the last in-time packet did is still a drop; one ns more is the re-anchor.
 #[test]
