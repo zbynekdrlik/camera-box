@@ -256,6 +256,27 @@ const char *obs_source_get_name(const obs_source_t *source)
 	return "Zvuk z mixu";
 }
 
+/* Channel 0's sample at FRAME on the 16-bit scale (ROZHODNUTE 6352253147 b: the tests read a concealed slot's
+ * middle and last frame), truncated like `first`. */
+static long sample16(const struct obs_source_audio *audio, uint32_t frame)
+{
+	const size_t i = (size_t)frame * (size_t)audio->speakers;
+	switch (audio->format) {
+	case AUDIO_FORMAT_16BIT:
+		return ((const int16_t *)audio->data[0])[i];
+	case AUDIO_FORMAT_U8BIT:
+		return (long)((const uint8_t *)audio->data[0])[i] - 128;
+	case AUDIO_FORMAT_32BIT:
+		return (long)(((const int32_t *)audio->data[0])[i] / 65536);
+	case AUDIO_FORMAT_FLOAT_PLANAR:
+		return (long)(((const float *)audio->data[0])[frame] * 32768.0f);
+	case AUDIO_FORMAT_FLOAT:
+		return (long)(((const float *)audio->data[0])[i] * 32768.0f);
+	default:
+		return 0;
+	}
+}
+
 void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio *audio)
 {
 	(void)source;
@@ -303,9 +324,10 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 			       ? (long)(((const float *)audio->data[0])[0] * 8388608.0f)
 			       : 0;
 	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d first24=%ld"
-	       " at=%" PRIu64 "\n",
+	       " at=%" PRIu64 " mid=%ld last=%ld\n",
 	       audio->timestamp, audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first,
-	       (int)audio->format, first24, os_gettime_ns());
+	       (int)audio->format, first24, os_gettime_ns(), sample16(audio, audio->frames / 2),
+	       sample16(audio, audio->frames - 1));
 }
 
 static int g_udp_dummy;

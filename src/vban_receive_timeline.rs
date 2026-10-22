@@ -133,6 +133,9 @@ pub const DEADLINE_MARGIN_MS: u64 = 2;
 /// absolute sleep on its own clock, review round 5): a packet stored in time goes to libobs at the
 /// worker's next wake, never held to its deadline, so only a lost slot's silence waits for that.
 pub const POLL_MS: u64 = 5;
+/// ROZHODNUTÉ 6352253147 (b), the limit raised to 3 on 23.10.2026, RED stub: a run of at most this
+/// many missing slots between two received packets is concealed.
+pub const CONCEAL_MAX_SLOTS: u64 = 3;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 const NS_PER_MS: u64 = 1_000_000;
@@ -259,6 +262,8 @@ pub enum Due {
     Packet = 2,
     /// The slot's packet is missing: silence of exactly one slot at that stamp.
     Silence = 3,
+    /// ROZHODNUTÉ 6352253147 (b), RED stub: a missing slot concealed.
+    Conceal = 4,
 }
 
 /// One playout decision (the C `struct vban_recv_due`).
@@ -277,6 +282,8 @@ pub struct DueDecision {
     pub late_ns: i64,
     /// [`Due::None`]: the next deadline, 0 = none (no stretch is emitting, or it starved).
     pub next_ns: u64,
+    /// [`Due::Conceal`], RED stub: the next slot is the store's head packet.
+    pub toward_next: bool,
 }
 
 /// The receive timeline of one source (the C `struct vban_recv_timeline`).
@@ -346,6 +353,12 @@ pub struct Timeline {
     pub recv_mask: u64,
     /// Reordered packets stored for their slot (played in it).
     pub reordered: u64,
+    /// ROZHODNUTÉ 6352253147 (b), RED stub: the slot before `emit_pos` went out with audio.
+    pub prev_audio: bool,
+    /// The concealed slots right before `emit_pos`.
+    pub conceal_run: u32,
+    /// Missing slots handed out concealed.
+    pub concealed: u64,
 }
 
 impl Default for Timeline {
@@ -458,6 +471,9 @@ impl Timeline {
             stale: 0,
             recv_mask: 0,
             reordered: 0,
+            prev_audio: false,
+            conceal_run: 0,
+            concealed: 0,
         }
     }
 
@@ -929,3 +945,7 @@ mod worker_model;
 #[cfg(test)]
 #[path = "vban_receive_timeline_reorder_tests.rs"]
 mod reorder_tests;
+
+#[cfg(test)]
+#[path = "vban_receive_timeline_conceal_tests.rs"]
+mod conceal_tests;

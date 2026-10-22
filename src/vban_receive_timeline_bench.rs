@@ -257,6 +257,8 @@ struct Run {
     /// Reordered packets stored for their slot, and stale ones dropped (ROZHODNUTÉ 6352253147 (a)).
     reordered: u64,
     stale: u64,
+    /// Missing slots handed out concealed (ROZHODNUTÉ 6352253147 (b)).
+    concealed: u64,
     /// The smallest stamp − arrival of an emitted packet over the run, ns.
     min_margin_ns: i64,
     /// The largest arrival − previous arrival the run contained, ns.
@@ -326,7 +328,7 @@ impl Sink for Out {
 
     fn emit(&mut self, at: u64, d: DueDecision) {
         let at_f = at as f64;
-        if matches!(d.kind, Due::Packet | Due::Silence) && at > d.stamp_ns {
+        if matches!(d.kind, Due::Packet | Due::Silence | Due::Conceal) && at > d.stamp_ns {
             self.run.after_stamp += 1;
         }
         match d.kind {
@@ -336,7 +338,8 @@ impl Sink for Out {
                 self.obs.chunk(d.stamp_ns as f64, dur, at_f);
                 self.run.lead_ins += 1;
             }
-            Due::Silence => {
+            // a concealed slot is a chunk of exactly one slot at its stamp, like a silent one
+            Due::Silence | Due::Conceal => {
                 let dur = samples_to_ns(d.frames, 48_000) as f64;
                 self.obs.chunk(d.stamp_ns as f64, dur, at_f);
                 self.run.odd_silence += u64::from(d.frames != u64::from(F));
@@ -462,6 +465,7 @@ fn replay_late(sched: &[Sent], reserve_ms: u64, no_encoder: bool, late: Option<W
     run.re_anchors = t.re_anchors;
     run.reordered = t.reordered;
     run.stale = t.stale;
+    run.concealed = t.concealed;
     run.lost = t.lost;
     run.silence_samples = t.silence_samples;
     run.sender_ppm = t.sender_ppm();
@@ -894,10 +898,11 @@ fn the_same_sender_at_a_20_ms_buffer_goes_late_1439() {
     assert_eq!(run.re_anchors, 0, "{run:?}");
 }
 
-/// Network loss: every lost packet is exactly one packet of silence, and a loss is never a
-/// re-anchor or a late slot.
+/// Network loss: every lost packet is exactly one slot -- concealed when its run of missing slots is at
+/// most `CONCEAL_MAX_SLOTS` between two received packets (random 0.2 % loss: nearly every one,
+/// ROZHODNUTÉ 6352253147 (b)), else silence -- and a loss is never a re-anchor or a late slot.
 #[test]
-fn network_loss_is_silence_and_never_a_re_anchor_1439() {
+fn network_loss_is_one_slot_each_concealed_or_silence_and_never_a_re_anchor_1439() {
     for seed in 1..=3u64 {
         let run = replay(&schedule(seed, -50.0, TEN_MIN_PACKETS / 2, 0.002), 40);
         let tag = format!("seed {seed}: {run:?}");
@@ -907,7 +912,15 @@ fn network_loss_is_silence_and_never_a_re_anchor_1439() {
             run.lost <= run.dropped && run.lost + 3 >= run.dropped,
             "{tag}"
         );
-        assert_eq!(run.silence_samples, run.lost * u64::from(F), "{tag}");
+        assert_eq!(
+            run.silence_samples,
+            (run.lost - run.concealed) * u64::from(F),
+            "{tag}"
+        );
+        assert!(
+            run.concealed * 100 >= run.lost * 99,
+            "isolated losses are concealed: {tag}"
+        );
         assert_eq!((run.late, run.re_anchors), (0, 0), "{tag}");
     }
 }

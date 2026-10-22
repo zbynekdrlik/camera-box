@@ -168,7 +168,7 @@ fn line(t: &Timeline, d: Decision) -> String {
 /// One playout decision and the emission state after it.
 fn due_line(t: &Timeline, d: DueDecision) -> String {
     format!(
-        "due {} {} {} {} {} {} {} | {} {} {} {} {}",
+        "due {} {} {} {} {} {} {} {} | {} {} {} {} {} | {} {} {}",
         d.kind as i32,
         d.pos,
         d.frames,
@@ -176,12 +176,25 @@ fn due_line(t: &Timeline, d: DueDecision) -> String {
         d.deadline_ns,
         d.late_ns,
         d.next_ns,
+        u8::from(d.toward_next),
         t.emit_pos,
         u8::from(t.lead_in_pending),
         t.lost,
         t.silence_samples,
-        t.missed
+        t.missed,
+        u8::from(t.prev_audio),
+        t.conceal_run,
+        t.concealed
     )
+}
+
+/// What the worker saw before one decision (the coverage counters read it): the store's head, and
+/// whether the slot before went out with audio and how many concealed slots ran right before it.
+#[derive(Clone, Copy)]
+struct Look {
+    head: Option<u64>,
+    prev_audio: bool,
+    run: u32,
 }
 
 /// The source's two sides around one timeline, the same in both twins' drivers (ROZHODNUTÉ
@@ -203,11 +216,16 @@ impl Drive {
         t: &mut Timeline,
         until: u64,
         inclusive: bool,
-        seen: &mut dyn FnMut(&Timeline, DueDecision),
+        seen: &mut dyn FnMut(&Timeline, DueDecision, Look),
     ) {
         loop {
-            let d = t.due(self.clock, self.store.front().copied());
-            seen(t, d);
+            let look = Look {
+                head: self.store.front().copied(),
+                prev_audio: t.prev_audio,
+                run: t.conceal_run,
+            };
+            let d = t.due(self.clock, look.head);
+            seen(t, d, look);
             match d.kind {
                 Due::None => {
                     let due =
@@ -231,7 +249,7 @@ impl Drive {
         &mut self,
         t: &mut Timeline,
         p: &Pkt,
-        seen: &mut dyn FnMut(&Timeline, DueDecision),
+        seen: &mut dyn FnMut(&Timeline, DueDecision, Look),
     ) -> Decision {
         if p.reset {
             *t = Timeline::new();
@@ -301,10 +319,10 @@ fn rust_trace(scripts: &[Vec<Pkt>]) -> Vec<String> {
         let mut drive = Drive::default();
         for (i, p) in sc.iter().enumerate() {
             let mut dues = Vec::new();
-            let d = drive.packet(&mut t, p, &mut |t, d| dues.push(due_line(t, d)));
+            let d = drive.packet(&mut t, p, &mut |t, d, _| dues.push(due_line(t, d)));
             out.append(&mut dues);
             out.push(line(&t, d));
-            drive.worker(&mut t, p.now, true, &mut |t, d| out.push(due_line(t, d)));
+            drive.worker(&mut t, p.now, true, &mut |t, d, _| out.push(due_line(t, d)));
             if i % 97 == 96 {
                 out.push(bucket_dump(&t));
             }
@@ -355,9 +373,10 @@ static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d
 
 static void due_line(const struct vban_recv_timeline *t, struct vban_recv_due d)
 {
-	printf("due %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64 " | %" PRIu64 " %d %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
-	       d.kind, d.pos, d.frames, d.stamp_ns, d.deadline_ns, d.late_ns, d.next_ns, t->emit_pos,
-	       t->lead_in_pending ? 1 : 0, t->lost, t->silence_samples, t->missed);
+	printf("due %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64 " %d | %" PRIu64 " %d %" PRIu64 " %" PRIu64 " %" PRIu64 " | %d %" PRIu32 " %" PRIu64 "\n",
+	       d.kind, d.pos, d.frames, d.stamp_ns, d.deadline_ns, d.late_ns, d.next_ns, d.toward_next ? 1 : 0,
+	       t->emit_pos, t->lead_in_pending ? 1 : 0, t->lost, t->silence_samples, t->missed, t->prev_audio ? 1 : 0,
+	       t->conceal_run, t->concealed);
 }
 
 /* the store of in-time packets and the worker's clock (the Rust Drive) */
@@ -602,18 +621,43 @@ fn the_scripts_reach_every_boundary_1439() {
         "a reorder whose slot already went out (stale)",
         "a reorder in a starved stretch (stale)",
         "a reorder before the stretch's first output (stale)",
+        "concealed slots fading toward the next packet (ROZHODNUTÉ 6352253147 (b))",
+        "concealed slots with the next one missing too",
+        "the third slot of a concealed run (the run limit)",
+        "a run of four missing slots (silence)",
+        "a missing slot with nothing stored at its deadline (silence)",
+        "a run that started as silence with a packet stored behind it (stays silence)",
     ];
-    let mut hits = [0usize; 59];
+    let mut hits = [0usize; 65];
     // what the worker hands out (both twins' drivers do the same): every slot one slot, its silence
     // never before its deadline (a stored packet may go out ahead of it, review round 5)
-    fn tally(hits: &mut [usize; 59], t: &Timeline, d: DueDecision) {
+    fn tally(hits: &mut [usize; 65], t: &Timeline, d: DueDecision, look: Look) {
+        // how many slots on the next stored packet sits (0 = nothing stored)
+        let next = look
+            .head
+            .map_or(0, |h| h.saturating_sub(d.pos) / u64::from(t.frames.max(1)));
         match d.kind {
+            Due::Conceal => {
+                assert_eq!(d.frames, u64::from(t.frames), "one slot: {d:?}");
+                assert!(d.late_ns >= 0, "a concealment before its deadline: {d:?}");
+                assert!(
+                    look.prev_audio && next >= 1,
+                    "concealed between packets: {d:?}"
+                );
+                hits[if d.toward_next { 59 } else { 60 }] += 1;
+                hits[61] += usize::from(look.run == 2);
+            }
             Due::Silence | Due::Packet => {
                 assert_eq!(d.frames, u64::from(t.frames), "one slot: {d:?}");
                 if d.kind == Due::Silence {
                     assert!(d.late_ns >= 0, "a silence before its deadline: {d:?}");
                 }
                 hits[if d.kind == Due::Silence { 1 } else { 44 }] += 1;
+                if d.kind == Due::Silence {
+                    hits[62] += usize::from(look.prev_audio && next == 4);
+                    hits[63] += usize::from(look.prev_audio && look.head.is_none());
+                    hits[64] += usize::from(!look.prev_audio && (1..=3).contains(&next));
+                }
                 hits[48] += usize::from(d.pos < t.base_pos);
                 hits[50] += usize::from(d.kind == Due::Packet && d.late_ns < 0);
                 hits[52] += usize::from(d.late_ns > (DEADLINE_MARGIN_MS * MS) as i64);
@@ -642,7 +686,9 @@ fn the_scripts_reach_every_boundary_1439() {
             if p.stall {
                 drive.clock = drive.clock.max(p.now);
             } else {
-                drive.worker(&mut t, p.now, false, &mut |t, d| tally(&mut hits, t, d));
+                drive.worker(&mut t, p.now, false, &mut |t, d, l| {
+                    tally(&mut hits, t, d, l)
+                });
             }
             let frames_before = t.frames;
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
@@ -831,7 +877,9 @@ fn the_scripts_reach_every_boundary_1439() {
                 hits[22] += usize::from(t.phase_ns.abs() > band);
                 hits[23] += usize::from(t.phase_ns.abs() <= band);
             }
-            drive.worker(&mut t, p.now, true, &mut |t, d| tally(&mut hits, t, d));
+            drive.worker(&mut t, p.now, true, &mut |t, d, l| {
+                tally(&mut hits, t, d, l)
+            });
         }
     }
     for (name, n) in names.iter().zip(hits) {

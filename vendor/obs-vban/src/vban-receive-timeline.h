@@ -132,6 +132,9 @@
  * sleep on its own clock, review round 5): a packet stored in time goes to libobs at the worker's next
  * wake, never held to its deadline, so only a lost slot's silence waits for that. */
 #define VBAN_RECV_POLL_MS 5
+/* ROZHODNUTE 6352253147 (b), the limit raised to 3 on 23.10.2026, RED stub: a run of at most this many missing
+ * slots between two received packets is concealed (the previous packet's samples, crossfaded) */
+#define VBAN_RECV_CONCEAL_MAX_SLOTS 3u
 #define VBAN_RECV_NS_PER_SEC 1000000000ULL
 #define VBAN_RECV_NS_PER_MS 1000000ULL
 
@@ -206,6 +209,11 @@ struct vban_recv_timeline {
 	/* ROZHODNUTE 6352253147 (a): bit j = the packet j indexes behind last_nu came (in order or reordered) */
 	uint64_t recv_mask;
 	uint64_t reordered; /* reordered packets stored for their slot (played in it) */
+	/* ROZHODNUTE 6352253147 (b), RED stub: the slot before emit_pos went out with audio, the concealed slots
+	 * right before emit_pos, and the missing slots handed out concealed */
+	bool prev_audio;
+	uint32_t conceal_run;
+	uint64_t concealed;
 };
 
 /* What one packet is (the receive side never outputs anything: the worker does, at deadlines). */
@@ -226,6 +234,7 @@ enum vban_recv_due_kind {
 	VBAN_RECV_DUE_LEAD_IN = 1, /* the stretch's lead-in: silence of FRAMES stamped STAMP_NS */
 	VBAN_RECV_DUE_PACKET = 2,  /* the slot at POS is the store's head packet: output it at STAMP_NS */
 	VBAN_RECV_DUE_SILENCE = 3, /* the slot's packet is missing: silence of exactly one slot at STAMP_NS */
+	VBAN_RECV_DUE_CONCEAL = 4, /* ROZHODNUTE 6352253147 (b), RED stub: a missing slot concealed */
 };
 
 struct vban_recv_due {
@@ -236,6 +245,7 @@ struct vban_recv_due {
 	uint64_t deadline_ns; /* the slot's deadline (PACKET / SILENCE) */
 	int64_t late_ns;      /* how far past its deadline the slot went out (PACKET / SILENCE) */
 	uint64_t next_ns;     /* NONE: the next deadline, 0 = none (no stretch emitting, or it starved) */
+	int toward_next;      /* CONCEAL, RED stub: the next slot is the store's head packet */
 };
 
 /* The Receive Buffer in ms for a source setting value: 0 or less = the default. */
@@ -642,7 +652,7 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 static inline struct vban_recv_due vban_recv_due(struct vban_recv_timeline *t, uint64_t now_ns, bool has_head,
 						 uint64_t head_pos)
 {
-	struct vban_recv_due d = {0, 0, 0, 0, 0, 0, 0};
+	struct vban_recv_due d = {0, 0, 0, 0, 0, 0, 0, 0};
 	if (!t->emitted)
 		return d;
 	if (t->lead_in_pending) {

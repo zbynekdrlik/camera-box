@@ -178,7 +178,8 @@ fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
         line(H + 1)
     );
     assert_eq!(r.of(Due::LeadIn).len(), 1, "{:?}", r.outs);
-    // H + 2 is lost, H + 3 comes: each slot goes out at its deadline, the slot before H + 1 never
+    // H + 2 is lost, H + 3 comes: each slot goes out at its deadline, the slot before H + 1 never;
+    // H + 2 between two received packets is concealed (ROZHODNUTÉ 6352253147 (b))
     r.packet(on_time(H + 3), (H + 3) as u32);
     r.run_until(r.t.deadline_at((H + 3) * 256), true);
     let slots: Vec<(u64, DueDecision)> = r
@@ -194,15 +195,15 @@ fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
             .collect::<Vec<_>>(),
         vec![
             (Due::Packet, (H + 1) * 256, 256),
-            (Due::Silence, (H + 2) * 256, 256),
+            (Due::Conceal, (H + 2) * 256, 256),
             (Due::Packet, (H + 3) * 256, 256),
         ],
         "{:?}",
         r.outs
     );
     // review round 5: a stored packet goes to libobs at the worker's next wake (the store woke the
-    // idle worker for H + 1), never held to its deadline; the missing slot's silence goes out
-    // exactly at its deadline, and H + 3, stored by then, right behind it at the same wake
+    // idle worker for H + 1), never held to its deadline; the missing slot goes out exactly at its
+    // deadline, and H + 3, stored by then, right behind it at the same wake
     let silence_at = r.t.deadline_at((H + 2) * 256);
     assert_eq!(
         slots.iter().map(|(at, d)| (*at, d.pos)).collect::<Vec<_>>(),
@@ -217,7 +218,7 @@ fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
         assert_eq!(d.deadline_ns + DEADLINE_MARGIN_MS * NS_PER_MS, d.stamp_ns);
         assert!(*at <= d.deadline_ns, "nothing after its deadline: {d:?}");
     }
-    assert_eq!((r.t.lost, r.t.silence_samples), (1, 256));
+    assert_eq!((r.t.lost, r.t.concealed, r.t.silence_samples), (1, 1, 0));
     // a full re-anchor (another channel count) holds again for its own first second
     let d = r.packet_as(on_time(H + 4), (H + 4) as u32, 256, RATE, 1, R40);
     assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Format));
@@ -453,23 +454,27 @@ fn contiguous_packets_get_contiguous_stamps() {
 /// slot, stamped on the same line; the packets around it go out as themselves.
 #[test]
 fn a_loss_is_silence_for_exactly_the_lost_slots() {
+    // four lost: longer than a concealed run (ROZHODNUTÉ 6352253147 (b), `CONCEAL_MAX_SLOTS`)
     let mut r = Rig::new();
     rig_through_the_hold(&mut r, 10);
     let first = on_time(0) - samples_to_ns(256, RATE) + R40;
     r.packet(on_time(H), 10 + H as u32);
-    let d = r.packet(on_time(H + 3), 13 + H as u32);
-    assert_eq!((d.event, d.pos), (Event::Packet, (H + 3) * 256));
-    assert_eq!(d.stamp_ns, first + samples_to_ns((H + 3) * 256, RATE));
-    r.run_until(r.t.deadline_at((H + 3) * 256), true);
+    let d = r.packet(on_time(H + 5), 15 + H as u32);
+    assert_eq!((d.event, d.pos), (Event::Packet, (H + 5) * 256));
+    assert_eq!(d.stamp_ns, first + samples_to_ns((H + 5) * 256, RATE));
+    r.run_until(r.t.deadline_at((H + 5) * 256), true);
     let silence = r.of(Due::Silence);
-    assert_eq!(silence.len(), 2, "{:?}", r.outs);
+    assert_eq!(silence.len(), 4, "{:?}", r.outs);
     for (j, (_, d)) in silence.iter().enumerate() {
         let pos = (H + 1 + j as u64) * 256;
         assert_eq!((d.pos, d.frames), (pos, 256), "{d:?}");
         assert_eq!(d.stamp_ns, first + samples_to_ns(pos, RATE));
     }
     assert_eq!(r.of(Due::Packet).len(), 2);
-    assert_eq!((r.t.lost, r.t.silence_samples, r.t.re_anchors), (2, 512, 0));
+    assert_eq!(
+        (r.t.lost, r.t.silence_samples, r.t.concealed, r.t.re_anchors),
+        (4, 1024, 0, 0)
+    );
 }
 
 /// An index far behind the last one (more than a reorder could be: 65 packets) is a sender
