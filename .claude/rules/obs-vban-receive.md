@@ -79,6 +79,21 @@ lost packets landed on audio already delivered).
   anchors at 40.4-40.6 ms (65.4 ms before round 3, then walked 21.8 ms) and holds within 0.72 ms. A 90
   ms hiccup is one late shift, the shifted latency held within 0.05 ms. At R = 20 ms the same sender
   goes late (the test that the bench can fail).
+- **The bench grades STAMP latency, not what OBS realizes (review round 3).** libobs appends a stamp
+  that steps by less than 70 ms (`TS_SMOOTHING_THRESHOLD`) and the stamp-basis ASRC then pulls the
+  placement onto the RAW stamps at most `ASRC_MAX_PPM` = 300 ppm (`media-io/asrc-compensator.h`; the
+  error is measured before the smoothing, obs-source.c `genlock_intended_ns`). So a first-second
+  refinement of X ms (a first packet that came X ms late) or a late shift under 70 ms reaches OBS's
+  real latency over ~X / 300 ppm (25 ms: ~83 s). Read it on the rig as the input's `asrc:` placement
+  error right after an anchor. Raised to the main as a design question (hold the output for the first
+  second, or accept the ASRC's walk).
+- **Known limit, pinned:** before the fit the line runs at the nominal rate, then slews to it at 5 ppm
+  per bucket, so the held stamp latency moves ~ the sender's ppm x 20 s: within 1 ms to ~+-55 ppm,
+  1.9-2.0 ms at +-100 ppm (`known_limit_a_100_ppm_sender_moves_the_held_stamp_latency_about_2_ms_1439`).
+- **The pre-fit outlier reference is the anchored line - R (kept despite review round 3):** on a
+  bufferbloat sawtooth (delay ramping 0 -> 30 ms every 5 s) it starves the fit more often than the old
+  first-packet reference (24 vs 12 fit re-anchors in 120 s; both are unusable at R 40), but with the old
+  reference the 25 ms first-gap case breaks the +-1 ms bound (the gap's packets fold into the first fit).
 
 ## The status lines (OBS log, prefixed `[obs-vban] ` by the plugin's blog macro)
 

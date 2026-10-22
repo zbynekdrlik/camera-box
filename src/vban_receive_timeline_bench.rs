@@ -21,6 +21,18 @@
 //! The latency is graded over the WHOLE run (ROZHODNUTÉ 6343922049): the anchored value is the
 //! latency of the first packet past the first second of the sender's audio (the anchor is the
 //! earliest arrival of that second), and every later packet must stay within ±1 ms of it.
+//!
+//! What it grades is the STAMP latency (the stamp against the true production instant). libobs
+//! realizes stamps through two more steps the bench does not model (review round 3): a stamp that
+//! steps by less than 70 ms is APPENDED to the previous packet (`TS_SMOOTHING_THRESHOLD`), and the
+//! genlock ASRC on the stamp basis then pulls the placement onto the raw stamps at most
+//! `ASRC_MAX_PPM` (300 ppm). So a first-second refinement of X ms, or a late shift under 70 ms, is
+//! realized in OBS over about X / 300 ppm (25 ms: ~83 s); the rig reads it as the `asrc:` placement
+//! error of the input right after an anchor.
+//!
+//! Known limit: before the fit (10 s) the line runs at the nominal rate and then slews to the fit at
+//! 5 ppm per bucket, so the stamp latency moves about the sender's ppm x 20 s: ±1 ms holds to about
+//! ±55 ppm (lv1 measured ~1.4 ppm), ~2 ms at ±100 ppm (pinned below).
 
 use super::*;
 
@@ -237,7 +249,7 @@ fn assert_latency_held(run: &Run, tag: &str) {
 /// last one of a 25 ms network gap. Anchored on it and walked onto fit + R, the latency fell from
 /// 66 to 44 ms over minutes. Anchored on the earliest arrival of the first second, it is set once.
 #[test]
-fn a_first_packet_at_the_end_of_a_25_ms_gap_never_walks_the_latency_1439() {
+fn a_first_packet_at_the_end_of_a_25_ms_gap_never_walks_the_stamp_latency_1439() {
     for ppm in [0.0, 50.0, -50.0] {
         for seed in 1..=3u64 {
             let sched = schedule_from(seed, ppm, TEN_MIN_PACKETS / 2, 0.0, 25.0);
@@ -314,6 +326,24 @@ fn one_network_hiccup_is_one_re_anchor_1439() {
         println!("{tag}");
         assert_eq!((t.late, t.re_anchors), (1, 1), "{tag}");
         assert!(dev_max <= 1.0 * MS, "{tag}");
+    }
+}
+
+/// The documented limit of the held latency: before the fit the line runs at the nominal rate, then
+/// slews to the fit at 5 ppm per bucket, so a sender far off our clock moves the stamp latency by
+/// about its ppm x 20 s. At ±100 ppm that is more than the ±1 ms bound (the bound holds to ~±55 ppm)
+/// and stays under 2.5 ms; no late slot, no re-anchor.
+#[test]
+fn known_limit_a_100_ppm_sender_moves_the_held_stamp_latency_about_2_ms_1439() {
+    for ppm in [100.0, -100.0] {
+        let run = replay(&schedule(1, ppm, TEN_MIN_PACKETS / 2, 0.0), 40);
+        let tag = format!("ppm {ppm}: {run:?}");
+        println!("{tag}");
+        assert_eq!((run.late, run.re_anchors), (0, 0), "{tag}");
+        assert!(
+            run.latency_dev_max_ns > 1.0 * MS && run.latency_dev_max_ns < 2.5 * MS,
+            "the documented limit moved: {tag}"
+        );
     }
 }
 
