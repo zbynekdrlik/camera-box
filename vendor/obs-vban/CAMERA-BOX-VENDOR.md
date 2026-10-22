@@ -28,7 +28,9 @@ grandmaster within 0.2 ppm (finding in issue 1372, comment 5845239583).
 | `src/vban-output-internal.h` | Adds `pacing_target_ms` to `struct vban_out_s`. |
 | `data/locale/en-US.ini` | Adds `VBAN.out.prop.pacing_target_ms="Send Buffer"` and (issue 1439) `VBAN.src.prop.receive_buffer_ms="Receive Buffer (ms)"`. |
 | `src/vban-receive-timeline.h` | NEW (issue 1439). The pure receive-timeline decision of the VBAN SOURCE (see below). No OBS dependency; `tests/vban_receive_timeline_parity_1439.rs` compiles it and pins it to `src/vban_receive_timeline.rs`. |
-| `src/vban-source.c` | Issue 1439. The receive callback stamps every packet from the receive timeline instead of `arrival − length`, outputs a lost packet as silence for exactly its slot (0.3.1 padded it with copies of the next packet), adds the `receive_buffer_ms` setting ("Receive Buffer (ms)", 10–500, default 40, read at create/update only) and logs the 10 s `obs-vban receive:` status line. |
+| `src/vban-source.c` | Issue 1439. The receive callback stamps every packet from the receive timeline instead of `arrival − length`, outputs a lost packet as exactly its slot -- concealed or silence (0.3.1 padded it with copies of the next packet) -- plays a reordered packet in its slot (the store kept in slot order), adds the `receive_buffer_ms` setting ("Receive Buffer (ms)", 10–500, default 40, read at create/update only) and logs the 10 s `obs-vban receive:` status line. |
+| `src/vban-conceal.h` | NEW (issue 1439, ROZHODNUTÉ 6352253147 b). The pure sample math of a concealed slot: the previous packet's samples with raised-cosine fades in from the last sample handed out and out toward the next packet. No OBS dependency, no libm; `tests/vban_conceal_parity_1439.rs` pins it to `src/vban_conceal.rs`. |
+| `src/vban-sample-io.h` | NEW (issue 1439). One sample read and written in a packet's own libobs sample format (the five the callback hands over), for the concealed slot. |
 
 How the paced `vban_out_loop` works:
 
@@ -134,10 +136,17 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   than R/4 off it (a real sender-clock event), until they are back inside that dead band; inside it the
   latency is constant to the sample. The genlock ASRC (`basis=stamp`, libobs
   `genlock_audio_asrc_placement`) resamples the sender's rate to the mix.
-- **Loss.** A slot whose packet is not there at its deadline is one slot of silence, stamped on the
-  same line.
-- **Stale.** A duplicate, or a `nuFrame` at most 64 packets behind the last one (a network
-  reorder), is dropped and counted (`stale=`): its slot goes out as silence.
+- **Loss.** A slot whose packet is not there at its deadline is one slot, stamped on the same line,
+  counted `lost`: CONCEALED (ROZHODNUTÉ 6352253147 b) when its run is at most 3 slots between two
+  received packets -- decided at the deadline from what is stored then, the previous packet's samples
+  faded in from the last sample and out toward the next packet (`vban-conceal.h`), counted
+  `concealed` -- else silence.
+- **Reorder (ROZHODNUTÉ 6352253147 a).** A packet up to 63 indexes behind the last one whose index has
+  not come and whose slot has not gone out (in an emitting, not starved stretch) is stored for its
+  slot and played in it (`reordered=`); it never moves the line or the fit. A duplicate, a packet
+  whose slot went out, one 64 behind, one in the hold or a starved stretch is dropped and counted
+  (`stale=`). The loss line is logged by the worker when a run of missing slots ends, never at gap
+  detection.
 - **Reconfiguration.** Another port, stream name or host starts a new timeline. `update()` asks for
   the reset BEFORE it lets the new sender in (`vban_src_string_changes`, the predicate
   `update_string()` uses), and again after.
@@ -167,12 +176,15 @@ Log lines:
 ```
 obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receive_buffer_ms=40 -- holding its first second
 obs-vban receive emitting: source 'Zvuk z mixu' frame=… margin_ms=… after the first second's hold -- every slot goes out by 2 ms before its stamp
-obs-vban receive: received=… lost=… late=… re_anchors=… stale=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… emit_late_ms=… emit_missed=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
+obs-vban receive: received=… lost=… late=… re_anchors=… stale=… reordered=… concealed=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… emit_late_ms=… emit_missed=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
 obs-vban receive late: source '…' frame=… late_ms=… -- dropped, its slot is silence on the anchored line (late=…)
 obs-vban receive re-anchor: source '…' reason=starve|backward|jump|format|config|fit frame=… starve_ms=… re_anchors=… late=… -- holding its first second
 obs-vban receive re-anchor: … reason=format … -- holding its first second (frames 256 -> 128, rate … -> …, ch … -> …: a varying packet size is not supported; N more not logged in the last period)
 obs-vban receive buffer: source '…' receive_buffer_ms=10 is not above one packet (5.33 ms) + 10 ms: using 15.33 ms
 obs-vban receive worker: source '…' stopped (update|destroy)
+source '…': missing N packet(s) before frame F -- concealed: the previous packet repeated, crossfaded
+source '…': missing N packet(s) before frame F -- silence for those slots
+source '…': received N packets, lost N (N concealed), late N, reordered N, stale N, N re-anchor(s)
 ```
 
 The status line comes every 10 s; its counters are cumulative since the source was created.
@@ -190,4 +202,5 @@ one packet + 10 ms is lifted to that floor (ROZHODNUTÉ 6343922049), so the marg
 3. `tests/vban_pacing_parity_1372.rs` and the pwsh assert step in both `windows-genlock*.yml`
    files fail if the pacing is lost. `tests/vban_receive_timeline_parity_1439.rs`,
    `tests/vban_receive_wiring_1439.rs`, `tests/vban_source_loss_1439.rs` and the same pwsh step fail if
-   the receive timeline is lost.
+   the receive timeline is lost; `tests/vban_conceal_parity_1439.rs`, `tests/vban_source_reorder_1439.rs`
+   and `tests/vban_source_conceal_1439.rs` if the reorder or the concealment is.
