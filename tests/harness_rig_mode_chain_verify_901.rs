@@ -282,8 +282,12 @@ fn do_test_checks_measurement_audio_arrives_end_to_end() {
     // Must actually make a probe recording on stream + read it back with ffmpeg volumedetect —
     // the SAME proven mechanism recording-e2e.sh's real gate uses, applied here on a shorter timer.
     assert!(fn_body.contains("obs_phase2.py") && fn_body.contains("record"));
-    assert!(fn_body.contains("win_ssh_run"));
+    // issue 1462: the stream box is reached through the platform-resolved transport (bash over
+    // plain ssh on the Linux stream-snv, the unchanged PowerShell through win_ssh_run on Windows),
+    // so the body hands it BOTH command texts.
+    assert!(fn_body.contains("stream_box_exec"));
     assert!(fn_body.contains("audio_preflight_volumedetect_ps"));
+    assert!(fn_body.contains("audio_preflight_volumedetect_sh"));
     assert!(fn_body.contains("audio_preflight_parse_max_db"));
     // Hard fail on a genuinely DEAD chain, never a bare warning.
     assert!(

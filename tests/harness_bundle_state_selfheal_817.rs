@@ -381,14 +381,45 @@ fn selfheal_class_is_linux_only_for_the_linux_strih_host_1317() {
 
 #[test]
 fn selfheal_class_never_routes_the_stream_box_to_linux_1317() {
-    // STRIH_PLATFORM describes the STRIH only: even when it forces `linux`, the stream box (any host
-    // that is not the strih) keeps the Windows restart path.
+    // STRIH_PLATFORM describes the STRIH only: even when it forces `linux`, a WINDOWS stream box
+    // (any host that is not the strih) keeps the Windows restart path. Issue 1462 made the real
+    // stream box (stream-snv) Linux, so the Windows case is pinned with a fleet that says so.
+    let win_stream =
+        "strih-snv|10.77.9.202|linux-genlock|always\nstream-snv|10.77.9.204|windows-genlock|always";
     assert_eq!(
-        selfheal_class("10.77.9.204", "10.77.9.202", &[("STRIH_PLATFORM", "linux")]),
+        selfheal_class(
+            "10.77.9.204",
+            "10.77.9.202",
+            &[("STRIH_PLATFORM", "linux"), ("OBS_FLEET", win_stream)]
+        ),
         "windows-genlock"
     );
     assert_eq!(
-        selfheal_class("10.77.9.204", "10.77.9.202", &[]),
+        selfheal_class("10.77.9.204", "10.77.9.202", &[("OBS_FLEET", win_stream)]),
         "windows-genlock"
+    );
+    // A host the fleet does not know keeps the Windows restart (the pre-1462 default).
+    assert_eq!(
+        selfheal_class("192.0.2.9", "10.77.9.202", &[]),
+        "windows-genlock"
+    );
+}
+
+/// issue 1462: the stream box is the Linux stream-snv since 22.10.2026; its :8899 server is the
+/// systemd --user unit, so its self-heal is the class-resolved systemctl restart -- read from the
+/// box's OWN obs-fleet class, never from STRIH_PLATFORM.
+#[test]
+fn selfheal_class_reads_the_linux_stream_box_from_its_fleet_class_1462() {
+    assert_eq!(
+        selfheal_class("10.77.9.204", "10.77.9.202", &[]),
+        "linux-genlock"
+    );
+    assert_eq!(
+        selfheal_class(
+            "10.77.9.204",
+            "10.77.9.202",
+            &[("STRIH_PLATFORM", "windows")]
+        ),
+        "linux-genlock"
     );
 }
