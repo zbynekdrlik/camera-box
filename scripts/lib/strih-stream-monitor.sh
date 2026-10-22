@@ -69,7 +69,8 @@ strih_stream_monitor_key_row() {
 # strih_stream_monitor_obs_row REPO -> the (stream-monitor-obs) row. Always rc 0.
 strih_stream_monitor_obs_row() {
   local repo="$1" name out rc=0
-  name="${OBS_BOX_STREAM_AUDIO_INPUT:-Zvuk z mixu}"
+  # issue 1462: the box names its program-audio input (stream-pp `Zvuk z mixu`, stream-snv `mbc`)
+  name="$(strih_lx_program_audio_input 2>/dev/null)" || name="the program-audio input"
   out="$(timeout 20 python3 "${STRIH_STREAM_MONITOR_SCENES:-${repo}/scripts/strih_scenes.py}" --audio-monitor-type \
     --host "${OBS_WS_HOST:-127.0.0.1}" --manifest "${STRIH_STREAM_MONITOR_MANIFEST:-/opt/camera-box/strih-seed.json}" 2>&1)" || rc=$?
   if [ "$rc" = 2 ] || [ "$rc" = 124 ]; then

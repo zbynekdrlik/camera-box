@@ -44,7 +44,8 @@ class DevSafeError(Exception):
 def parse_dev_scene(manifest_text):
     """The manifest's `dev_scene` spec as a dict of the four SPEC_FIELDS, or None without the key.
     Raises DevSafeError on a malformed spec (a field missing or empty, the production scene named as
-    the development scene, the program audio input named as an item)."""
+    the development scene, the program audio input named as an item: PROGRAM_AUDIO_INPUT, and the
+    manifest's own `program_audio_input`, the box fact -- issue 1462: stream-snv's is `mbc`)."""
     d = json.loads(manifest_text)
     spec = d.get(DEV_SCENE_KEY) if isinstance(d, dict) else None
     if spec is None:
@@ -59,8 +60,13 @@ def parse_dev_scene(manifest_text):
         out[field] = value
     if out["scene"] == PRODUCTION_SCENE:
         raise DevSafeError(f"the development scene must differ from the production scene '{PRODUCTION_SCENE}'")
-    if PROGRAM_AUDIO_INPUT in (out["video_input"], out["audio_input"]):
-        raise DevSafeError(f"the program audio input '{PROGRAM_AUDIO_INPUT}' is never a development item")
+    program_inputs = [PROGRAM_AUDIO_INPUT]
+    declared = d.get("program_audio_input")
+    if isinstance(declared, str) and declared:
+        program_inputs.append(declared)
+    for program in program_inputs:
+        if program in (out["video_input"], out["audio_input"]):
+            raise DevSafeError(f"the program audio input '{program}' is never a development item")
     if out["video_input"] == out["audio_input"]:
         raise DevSafeError("the video input and the clip input must differ")
     return out

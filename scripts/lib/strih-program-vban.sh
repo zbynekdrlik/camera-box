@@ -43,12 +43,14 @@ strih_program_vban_field() {
 }
 
 # strih_program_vban_grade SCN_BIN WS_HOST LOG [NAME] -> the item-9 rows above for the program-audio input
-# NAME (default the stream role's `Zvuk z mixu`), graded against the loaded box's facts.
+# NAME (default the loaded box's STRIH_PROGRAM_AUDIO_INPUT: stream-pp `Zvuk z mixu`, stream-snv `mbc`,
+# issue 1462), graded against the loaded box's facts.
 strih_program_vban_grade() {
-  local scn="${1-}" ws="${2-}" log="${3-}" name="${4:-Zvuk z mixu}" wait="${STRIH_PROGRAM_VBAN_WAIT_S:-12}"
+  local scn="${1-}" ws="${2-}" log="${3-}" name="${4-}" wait="${STRIH_PROGRAM_VBAN_WAIT_S:-12}"
   local port stream r kind l1 l2 n1 n2 v counters
   if ! port="$(strih_lx_program_vban_port)" || ! stream="$(strih_lx_program_vban_streams)" \
-     || ! r="$(strih_lx_program_vban_reserve_ms)" || [ "$port" = none ]; then
+     || ! r="$(strih_lx_program_vban_reserve_ms)" || [ "$port" = none ] \
+     || { [ -z "$name" ] && ! name="$(strih_lx_program_audio_input)"; }; then
     bad "(program-vban) the box declares no program VBAN stream (STRIH_PROGRAM_VBAN_*) -- this box's program audio is not graded"
     return 0
   fi

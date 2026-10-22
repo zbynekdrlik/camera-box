@@ -39,6 +39,7 @@ strih_box_fact_keys() {
     STRIH_HDMI_OUTPUT_BACKEND \
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
     STRIH_PROGRAM_VBAN_STREAMS STRIH_PROGRAM_VBAN_PORT STRIH_PROGRAM_VBAN_RESERVE_MS \
+    STRIH_PROGRAM_AUDIO_INPUT \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC
@@ -156,6 +157,15 @@ _strih_box_vban_stream_name() {
   [[ "${1-}" =~ ^[${up}${lo}${dg}._-]{1,16}$ ]]
 }
 
+# _strih_box_obs_input_name NAME -> 0 iff NAME is a plain OBS input name: 1..64 characters, letters,
+# digits, space, `.` `_` `-` `(` `)`, no space first or last, and not the `none` sentinel. The sets are
+# spelled out (a bracket RANGE follows the locale in bash).
+_strih_box_obs_input_name() {
+  local up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789' v="${1-}"
+  [ "$v" != none ] || return 1
+  [[ "$v" =~ ^[${up}${lo}${dg}._()-]([${up}${lo}${dg}\ ._()-]{0,62}[${up}${lo}${dg}._()-])?$ ]]
+}
+
 # strih_box_validate NAME  (stdin: the parsed KEY=value lines) -> rc 0 iff the facts are complete and
 # coherent for box NAME; else one `strih-box <NAME>: ...` stderr line per problem, rc 1. Order: a
 # missing key, then every TODO_OWNER value (all named, then stop -- a template is not "malformed"),
@@ -254,14 +264,21 @@ strih_box_validate() {
   esac
   # issue 1439: the program audio a box takes as VBAN straight from the console into the obs-vban source
   # (no intercom hub, no PipeWire): the stream name(s), the UDP port OBS binds and the fixed Receive
-  # Buffer R (ms). The stream role takes exactly ONE stream (its `Zvuk z mixu` input, the hub is gone);
-  # the strih role keeps its hub-fed program until its own slice, so it declares none of the three.
+  # Buffer R (ms). The stream role takes exactly ONE stream (into its program-audio input, the hub is
+  # gone); the strih role keeps its hub-fed program until its own slice, so it declares none of the
+  # three. issue 1462: the name of that OBS input is a fact too (stream-pp `Zvuk z mixu`, stream-snv
+  # `mbc`: the SNV stream tooling keys on it), `none` on the strih role.
   local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
+  local ai="${f[STRIH_PROGRAM_AUDIO_INPUT]}"
   if [ "${f[STRIH_ROLE]}" = strih ]; then
     if [ "${vs}:${vp}:${vr}" != none:none:none ]; then
       echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS must be none on the strih role (its VBAN program input is not provisioned yet, issue 1439)" >&2; bad=1
     fi
+    [ "$ai" = none ] \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be none on the strih role (its program input is not provisioned by this fact yet, issue 1439)" >&2; bad=1; }
   else
+    _strih_box_obs_input_name "$ai" \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be the OBS program-audio input's name on the stream role (1..64 letters, digits, space, . _ - ( ), no space first or last)" >&2; bad=1; }
     [ "$vs" != none ] && _strih_box_vban_stream_name "$vs" \
       || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS '${vs}' must be ONE VBAN stream name (1..16 letters, digits, . _ -) on the stream role (the console's program stream)" >&2; bad=1; }
     if [[ ! "$vp" =~ ^[123456789][0123456789]{3,4}$ ]] || [ "$vp" -lt 1024 ] || [ "$vp" -gt 65535 ]; then
@@ -558,6 +575,8 @@ strih_lx_program_sender() {
 strih_lx_program_vban_streams() { strih_box_fact STRIH_PROGRAM_VBAN_STREAMS; }
 strih_lx_program_vban_port() { strih_box_fact STRIH_PROGRAM_VBAN_PORT; }
 strih_lx_program_vban_reserve_ms() { strih_box_fact STRIH_PROGRAM_VBAN_RESERVE_MS; }
+# issue 1462: the stream role's OBS program-audio input name (`none` on the strih role).
+strih_lx_program_audio_input() { strih_box_fact STRIH_PROGRAM_AUDIO_INPUT; }
 
 # strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
 strih_box_venue() { strih_box_fact STRIH_VENUE; }
