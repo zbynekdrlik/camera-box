@@ -131,6 +131,15 @@ fn schedule_from(seed: u64, ppm: f64, n: u64, loss: f64, first_gap_ms: f64) -> V
 /// - the mixer pulls one `AUDIO_OUTPUT_FRAMES` (1024-frame) window at a time on our clock; a source
 ///   whose data does not cover the window UNDERRUNS: `discard_audio` moves its label to the window's
 ///   end and KEEPS the data, so whatever comes after plays that much later;
+/// - review round 6, `discard_if_stopped` (`obs-audio.c`): a partial remainder that gets no new
+///   data for two more windows after the first one it cannot cover is CLEARED and the label reset
+///   (`audio_ts = 0`), so the next chunk is PLACED at its stamp even when it would append (`if
+///   (push_back && source->audio_ts)`). A placement behind the mix window is dropped up to the
+///   window by the frozen-mix guard (an encoder runs: the production case, issue 1425), so the
+///   stream plays from its stamps on. Not modelled: with no encoder running libobs grows the whole
+///   mix's audio buffering instead; the clear one window earlier when an earlier episode left
+///   `pending_stop` set; a buffering above 0 ms (a launch can draw 64 or 85 ms, issue 1425), under
+///   which a fill that late does not underrun at all;
 /// - the stamp-basis ASRC pulls the placement error out at most 300 ppm (`ASRC_MAX_PPM`) of the audio.
 #[derive(Debug, Default)]
 struct Obs {
@@ -158,7 +167,11 @@ impl Obs {
             Some(n) if (stamp - n).abs() < 70.0 * MS => n,
             _ => stamp,
         };
+        // the first window end the buffered data cannot reach, and the clear two windows later
+        let first_short = ((self.next_play / OBS_TICK_NS).floor() + 1.0) * OBS_TICK_NS;
+        let cleared = arrival > first_short + 2.0 * OBS_TICK_NS;
         let (start, adjust) = match self.next_sys {
+            Some(n) if (ts - n).abs() < 70.0 * MS && cleared => (ts, 0.0),
             Some(n) if (ts - n).abs() < 70.0 * MS => (self.next_play.max(label), 0.0),
             Some(n) if (ts - n).abs() > OBS_MAX_TS_VAR_NS => (arrival, arrival - stamp),
             _ => (ts, 0.0),
@@ -454,8 +467,9 @@ fn k_at(sched: &[Sent], t_ns: u64) -> u64 {
 /// Known limit (review round 4): at 0 ms OBS buffering the late slots' silence reaches libobs
 /// after their windows were mixed, so libobs underruns and appends it behind its label -- the
 /// latency OBS REALIZES steps up by about the lateness and the stamp-basis ASRC walks it back at
-/// <= 300 ppm. Pinned here so a cure (a deadline timer, or no fill past the deadline) shows; it is
-/// a question for the main.
+/// <= 300 ppm. Phase-dependent (review round 6): a burst that arrives about three mix windows after
+/// the data ran out finds the source cleared and is placed at its stamps instead (no step). Pinned
+/// here so a cure (a deadline timer) shows; it is a question for the main.
 #[test]
 fn a_90_ms_hiccup_is_late_drops_and_zero_re_anchors_1439() {
     for (ppm, seed) in [(0.0, 1u64), (30.0, 2), (-30.0, 3)] {
@@ -634,23 +648,32 @@ fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_143
     }
 }
 
-/// Known limit (review round 5), the same late fill as the hiccup's: an outage SHORTER than the
-/// starve (no packet for under a second) is a loss -- its slots' silence goes out when the next
-/// packet arrives, on the unchanged line -- but at 0 ms OBS buffering libobs has underrun by then and
-/// APPENDS that silence behind its label, so the latency OBS REALIZES steps up by about the outage
-/// (+72 / +455 / +861 ms for 100 / 500 / 900 ms) and the stamp-basis ASRC walks it back at <= 300 ppm
-/// (25 min for 455 ms). The stamps never move and nothing re-anchors. Pinned so a cure (a deadline
-/// timer that sends a slot's silence before its window is mixed) shows; a question for the main.
+/// Known limit (review rounds 5 + 6), the same late fill as the hiccup's, for a plain LOSS: an
+/// outage shorter than the starve is filled when the next packet arrives, on the unchanged line. A
+/// loss inside the margin (R − one packet, ~35 ms at R 40) is filled in time. A little longer, the
+/// source has underrun when the fill arrives and libobs APPENDS it behind its label: the realized
+/// latency steps up (7.5 ms for a 40-50 ms loss, 28.8 ms for 60-80 ms in the bench, quantized by
+/// the mix windows and phase-dependent) and the stamp-basis ASRC walks it back at <= 300 ppm. Longer
+/// still (about three mix windows past the data's end) libobs has CLEARED the source
+/// (`discard_if_stopped`): the fill is placed at its stamp and the frozen-mix guard drops what is
+/// behind the window, so the stream plays from its stamps again (500 / 900 ms: held). The stamps
+/// never move and nothing re-anchors. Pinned so a cure (a deadline timer) shows; a question for
+/// the main. The model's assumptions are on [`Obs`].
 #[test]
-fn known_limit_an_outage_under_a_second_moves_the_realized_latency_by_about_its_length_1439() {
-    for (ms, seed) in [(100u64, 1u64), (500, 2), (900, 3)] {
+fn known_limit_a_loss_just_past_the_margin_steps_the_realized_latency_1439() {
+    for (ms, seed, step_ms) in [
+        (60u64, 1u64, Some(5.0..45.0)),
+        (60, 2, Some(5.0..45.0)),
+        (500, 3, None),
+        (900, 4, None),
+    ] {
         let base = schedule(seed, 0.0, TEN_MIN_PACKETS / 2, 0.0);
         let event_k = k_at(&base, S0 + 120_000_000_000) - 20;
         let run = replay(&with_outage(base, ms), 40);
         let (_, dl_before, _, dr_before) = held(&run, 0, 0..event_k);
         let (_, dl, _, dr) = held(&run, 0, 0..u64::MAX);
         let tag = format!(
-            "outage {ms} ms, seed {seed}: realized moved {:.3} ms over the run: {run:?}",
+            "loss {ms} ms, seed {seed}: realized moved {:.3} ms over the run: {run:?}",
             dr / MS
         );
         println!("{tag}");
@@ -660,11 +683,16 @@ fn known_limit_an_outage_under_a_second_moves_the_realized_latency_by_about_its_
             dl_before <= 1.0 * MS && dr_before <= 1.0 * MS && dl <= 1.0 * MS,
             "held before it, the stamps never move: {tag}"
         );
-        let step = dr / MS;
-        assert!(
-            step > ms as f64 - 60.0 && step < ms as f64,
-            "the known limit moved (a cure would bring it under 1 ms): {tag}"
-        );
+        match step_ms {
+            Some(range) => assert!(
+                range.contains(&(dr / MS)),
+                "the known limit moved (a cure would bring it under 1 ms): {tag}"
+            ),
+            None => assert!(
+                dr <= 1.0 * MS,
+                "libobs cleared the source: the stream plays from its stamps: {tag}"
+            ),
+        }
     }
 }
 
