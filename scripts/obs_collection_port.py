@@ -508,6 +508,13 @@ def port(collection, options):
     # 3. the program audio input, then the kind conversions, then the kinds Linux does not have.
     if o.get("program_audio_input"):
         _convert_program_audio(coll, o["program_audio_input"], rep, o.get("program_audio_vban"))
+    # issue 1439: the Linux strih bundle loads obs-vban, so a ported VBAN receive source would come alive
+    # and bind a UDP port; only the program input converted above may be one (--keep-kind keeps others).
+    if VBAN_SOURCE_KIND not in set(o.get("keep_kinds") or []):
+        program = o.get("program_audio_input") if o.get("program_audio_vban") else None
+        _drop_names(coll, {s["name"] for s in _all(coll) if s.get("id") == VBAN_SOURCE_KIND and s["name"] != program},
+                    rep, lambda s: "a VBAN receive source other than the program audio input would bind a UDP "
+                                   "port the intercom hub or the program source needs (issue 1439)")
     _convert_kinds(coll, rep)
     _drop_names(coll, {s["name"] for s in _all(coll) if s.get("id") not in keep_kinds},
                 rep, lambda s: "kind not in the Linux bundle")

@@ -96,6 +96,9 @@ is the window's largest arrival - stamp of an on-time packet: about -R + jitter 
   restart OBS and the launch seed runs again. verify item 9 FAILs the kind too.
 - **Collection port:** the `stream-pp` preset converts the program input to the same source
   (`--program-audio-vban PORT:STREAM:MS` / `none`); the collection keeps the mixer keys on the object.
+  Every OTHER VBAN receive source is dropped with a DROP line on every preset (review round 2: the
+  strih bundle loads obs-vban, so a dormant Windows one would come alive and bind a UDP port the hub
+  or the program source needs); `--keep-kind net.nagater.obs-vban.source` keeps them.
 - **No hub on the stream role:** `obs_box_step_applies 13` skips step 13 there and calls
   `strih_intercom_hub_remove` (stop + disable, then unit, drop-in dir, binary and `/etc/intercom-hub`
   MOVED to `/var/lib/camera-box/intercom-hub-removed/<UTC stamp>/<abs path>`, daemon-reload;
