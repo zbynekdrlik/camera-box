@@ -590,6 +590,40 @@ fn a_late_packet_is_dropped_and_its_slot_is_silence_on_the_same_line_1439() {
     assert_contiguous(&outs[at..]);
 }
 
+/// Review round 6: a late packet before a stretch's first output is dropped with NOTHING filled (the
+/// first output is always an in-time packet with its lead-in), so its `late:` line must say so -- it
+/// said "its slot is silence". The first packet past the hold comes 60 ms late; the four after it are
+/// late too (the receive thread hands them over in order), the sixth is in time and is the first
+/// output.
+#[test]
+fn a_late_packet_before_the_first_output_logs_that_nothing_was_filled_1439() {
+    let mut pkts = after_hold(&(400..411).collect::<Vec<u32>>());
+    let i = HELD as usize;
+    pkts[i].1 += 60_000_000;
+    for j in i + 1..pkts.len() {
+        pkts[j].1 = pkts[j].1.max(pkts[j - 1].1 + 1_000);
+    }
+    let (outs, log) = run_with_log(&pkts);
+    let late: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("obs-vban receive late:"))
+        .collect();
+    assert_eq!(late.len(), 1, "issue 1439: one late run, one line:\n{log}");
+    assert!(
+        late[0].contains("nothing filled") && !late[0].contains("its slot is silence"),
+        "issue 1439: a late packet before the first output fills nothing: `{}`",
+        late[0]
+    );
+    // the stream starts at the first in-time packet, after its lead-in, nothing filled before it
+    let body = after_lead_in(&outs);
+    assert!(body.iter().all(|o| !o.zero), "issue 1439: {outs:?}");
+    assert_eq!(
+        audio_values(&outs),
+        vec![6, 7, 8, 9, 10, 11],
+        "issue 1439: {outs:?}"
+    );
+}
+
 /// ROZHODNUTÉ 6343922049 (3): a Receive Buffer no longer than one packet + 10 ms is lifted to that
 /// floor, and the source names both in ONE warning: not on every re-anchor, not again after a
 /// reconfiguration with the same values.
