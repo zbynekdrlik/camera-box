@@ -166,9 +166,20 @@ static inline int64_t vban_recv_scale_ppb(uint64_t ns, int64_t ppb)
 	return ppb < 0 ? -(int64_t)v : (int64_t)v;
 }
 
-/* Round half away from zero (no libm). */
+/* Round half away from zero (no libm). A value at or beyond +-2^62 saturates there and NaN reads 0:
+ * casting an out-of-range double to int64_t is undefined in C (Rust `as` saturates), and 2^62 is far
+ * beyond any sane fit yet clear of overflow when the anchor and R are added. */
+#define VBAN_RECV_ROUND_LIMIT INT64_C(4611686018427387904)
+
 static inline int64_t vban_recv_round(double x)
 {
+	const double lim = (double)VBAN_RECV_ROUND_LIMIT;
+	if (x != x)
+		return 0;
+	if (x >= lim)
+		return VBAN_RECV_ROUND_LIMIT;
+	if (x <= -lim)
+		return -VBAN_RECV_ROUND_LIMIT;
 	return x >= 0.0 ? (int64_t)(x + 0.5) : -(int64_t)(-x + 0.5);
 }
 

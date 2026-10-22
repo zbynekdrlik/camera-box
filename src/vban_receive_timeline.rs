@@ -250,8 +250,23 @@ pub fn scale_ppb(ns: u64, ppb: i64) -> i64 {
     }
 }
 
-/// Round half away from zero (the C header uses no libm).
+/// `VBAN_RECV_ROUND_LIMIT`: the rounding saturates at +-2^62 (a C cast of an out-of-range double is
+/// undefined; 2^62 is far beyond any sane fit, yet clear of overflow when the anchor and R are added).
+pub const ROUND_LIMIT: i64 = 1 << 62;
+
+/// Round half away from zero (the C header uses no libm). At or beyond +-[`ROUND_LIMIT`] it
+/// saturates there, and NaN reads 0, exactly like the C twin.
 pub fn round_half_away(x: f64) -> i64 {
+    let lim = ROUND_LIMIT as f64;
+    if x.is_nan() {
+        return 0;
+    }
+    if x >= lim {
+        return ROUND_LIMIT;
+    }
+    if x <= -lim {
+        return -ROUND_LIMIT;
+    }
     if x >= 0.0 {
         (x + 0.5) as i64
     } else {
