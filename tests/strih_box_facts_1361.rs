@@ -123,6 +123,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_PROGRAM_VBAN_STREAMS",
     "STRIH_PROGRAM_VBAN_PORT",
     "STRIH_PROGRAM_VBAN_RESERVE_MS",
+    // issue 1462: the OBS program-audio input's name (stream-pp `Zvuk z mixu`, stream-snv `mbc`).
+    "STRIH_PROGRAM_AUDIO_INPUT",
     "STRIH_PROGRAM_SENDER",
     "STRIH_VENUE",
     "STRIH_CAMERA_DEV1_NET",
@@ -182,6 +184,7 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_PROGRAM_VBAN_STREAMS=none",
         "STRIH_PROGRAM_VBAN_PORT=none",
         "STRIH_PROGRAM_VBAN_RESERVE_MS=none",
+        "STRIH_PROGRAM_AUDIO_INPUT=none",
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
         "STRIH_CAMERA_DEV1_NET=direct",

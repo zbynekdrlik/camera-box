@@ -84,16 +84,25 @@ def _boxes_with(tmp_path, box, old, new):
 
 # --- the facts ---------------------------------------------------------------------------------------------
 
-def test_the_three_vban_facts_sit_before_the_program_sender():
+def test_the_three_vban_facts_and_the_input_name_sit_before_the_program_sender():
     r = _bash("strih_box_fact_keys")
     keys = r.stdout.split()
     i = keys.index("STRIH_PROGRAM_AUDIO_SAMPLER")
-    assert keys[i + 1:i + 5] == ["STRIH_PROGRAM_VBAN_STREAMS", "STRIH_PROGRAM_VBAN_PORT",
-                                 "STRIH_PROGRAM_VBAN_RESERVE_MS", "STRIH_PROGRAM_SENDER"]
+    assert keys[i + 1:i + 6] == ["STRIH_PROGRAM_VBAN_STREAMS", "STRIH_PROGRAM_VBAN_PORT",
+                                 "STRIH_PROGRAM_VBAN_RESERVE_MS", "STRIH_PROGRAM_AUDIO_INPUT",
+                                 "STRIH_PROGRAM_SENDER"]
 
 
-@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("strih-snv", "none|none|none"),
-                                      ("strih-pp", "none|none|none")])
+@pytest.mark.parametrize("box", sorted(p.stem for p in BOXES.glob("*.env")))
+def test_every_box_fact_file_loads(box):
+    # issue 1462: stream-snv became a Linux stream box after the stream-role facts were added; a fact
+    # file the loader refuses stops setup-strih / verify-strih for that box before their first step
+    r = _bash('strih_box_load "$1"', box)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|40"),
+                                      ("strih-snv", "none|none|none"), ("strih-pp", "none|none|none")])
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
               '"$(strih_lx_program_vban_port)" "$(strih_lx_program_vban_reserve_ms)"', box)
@@ -119,6 +128,30 @@ def test_the_loader_refuses_a_wrong_program_vban(tmp_path, box, old, new, word):
     r = _bash('strih_box_load "$1"', box, env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode != 0
     assert "STRIH_PROGRAM_VBAN" in r.stderr and word in r.stderr, r.stderr
+
+
+# issue 1462: the OBS program-audio input is named per box (the SNV stream tooling keys on `mbc`, the
+# ported PP collection calls it `Zvuk z mixu`), so the name is a box fact, never a role constant.
+@pytest.mark.parametrize("box,want", [("stream-pp", "Zvuk z mixu"), ("stream-snv", "mbc"),
+                                      ("strih-snv", "none"), ("strih-pp", "none")])
+def test_each_box_names_its_program_audio_input(box, want):
+    r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_audio_input)"', box)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == want
+
+
+@pytest.mark.parametrize("box,old,new", [
+    ("stream-pp", "STRIH_PROGRAM_AUDIO_INPUT=Zvuk z mixu\n", "STRIH_PROGRAM_AUDIO_INPUT=none\n"),
+    ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT= mbc\n"),
+    ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT=mbc/x\n"),
+    ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT=%s\n" % ("m" * 65)),
+    ("strih-snv", "STRIH_PROGRAM_AUDIO_INPUT=none\n", "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n"),
+])
+def test_the_loader_refuses_a_wrong_program_audio_input(tmp_path, box, old, new):
+    d = _boxes_with(tmp_path, box, old, new)
+    r = _bash('strih_box_load "$1"', box, env={"STRIH_BOXES_DIR": str(d)})
+    assert r.returncode != 0
+    assert "STRIH_PROGRAM_AUDIO_INPUT" in r.stderr, r.stderr
 
 
 def _header_define(name):
@@ -167,6 +200,12 @@ def test_the_stream_manifest_carries_the_vban_source_settings():
     assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 40}
     assert d["program_audio_input"] == "Zvuk z mixu"
     assert PAV.parse_program_audio_vban(text) == PAV.vban_source_settings(6980, "stream", 40)
+
+
+def test_the_stream_snv_manifest_names_mbc_on_the_same_vban_source():
+    d = json.loads(_manifest("stream-snv"))
+    assert d["program_audio_input"] == "mbc"
+    assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 40}
 
 
 def test_a_strih_manifest_carries_no_vban_block():
@@ -420,6 +459,8 @@ def test_the_stream_pp_preset_is_the_stream_pp_box_facts():
     r = _bash('strih_box_load stream-pp\nprintf "%s %s %s" "$(strih_lx_program_vban_port)" '
               '"$(strih_lx_program_vban_streams)" "$(strih_lx_program_vban_reserve_ms)"')
     port, stream, ms = r.stdout.split()
+    n = _bash('strih_box_load stream-pp\nprintf "%s" "$(strih_lx_program_audio_input)"')
+    assert n.returncode == 0 and _port().PRESETS["stream-pp"]["program_audio_input"] == n.stdout
     assert _port().PRESETS["stream-pp"]["program_audio_vban"] == {
         "port": int(port), "stream_name": stream, "receive_buffer_ms": int(ms)}
     assert "program_audio_vban" not in _port().PRESETS["strih-pp"], "the strih role is not switched (issue 1439)"
@@ -623,7 +664,7 @@ def _line(received, port=6980, stream="stream", r=40, lost=0, re_anchors=0, sour
     return LINE % (received, lost, re_anchors, r, port, stream, source)
 
 
-def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None):
+def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None, box="stream-pp"):
     log = tmp_path / "obs.txt"
     log.write_text(log_text)
     kf = tmp_path / "kind"
@@ -633,8 +674,8 @@ def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None):
         (tmp_path / "later.txt").write_text(append)
         later = '( sleep 0.3; cat "$2" >> "$1" ) &\n'
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
-            'strih_box_load stream-pp\n' + later + 'strih_program_vban_grade /nonexistent 127.0.0.1 "$1"\nwait')
-    r = _bash(body, log, tmp_path / "later.txt",
+            'strih_box_load "$3"\n' + later + 'strih_program_vban_grade /nonexistent 127.0.0.1 "$1"\nwait')
+    r = _bash(body, log, tmp_path / "later.txt", box,
               env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0"})
     assert r.returncode == 0, r.stderr
     return r.stdout.splitlines()
@@ -648,6 +689,14 @@ def test_a_live_vban_source_passes(tmp_path):
     rows = _grade(tmp_path, _line(100), append=_line(2000))
     assert not _rows(rows, "FAIL") and not _rows(rows, "NOTE"), rows
     assert any("is the obs-vban receive source" in r for r in rows)
+    assert any("receiving stream 'stream' on UDP 6980: received 100 -> 2000" in r for r in rows), rows
+
+
+def test_stream_snv_grades_its_mbc_input(tmp_path):
+    # issue 1462: the grader reads the input the box names (stream-snv: `mbc`), never the PP name
+    rows = _grade(tmp_path, _line(100, source="mbc"), append=_line(2000, source="mbc"), box="stream-snv")
+    assert not _rows(rows, "FAIL") and not _rows(rows, "NOTE"), rows
+    assert any("OBS 'mbc' is the obs-vban receive source" in r for r in rows), rows
     assert any("receiving stream 'stream' on UDP 6980: received 100 -> 2000" in r for r in rows), rows
 
 
@@ -730,3 +779,26 @@ def test_verify_wiring_and_budget():
     item16 = v[v.index("# 16) intercom hub unit"):v.index("# 17)")]
     assert item16.index('if ! WHY="$(obs_box_step_applies 13)"; then strih_intercom_hub_absent_grade "$WHY"') \
         < item16.index("elif [ -f /etc/systemd/system/intercom-hub.service ]; then")
+
+
+# --- the program-audio input name beyond the seed (issue 1462) ---------------------------------------------
+
+def test_the_stream_monitor_row_names_the_boxs_program_input(tmp_path):
+    fake = tmp_path / "fake_scenes.py"
+    fake.write_text("print('OBS_MONITORING_TYPE_NONE')\n")
+    e = {k: v for k, v in os.environ.items() if k not in LEAKY + ("OBS_BOX_STREAM_AUDIO_INPUT",)}
+    e.update({"STRIH_STREAM_MONITOR_SCENES": str(fake), "STRIH_STREAM_MONITOR_MANIFEST": str(tmp_path / "m.json")})
+    script = ('set -euo pipefail\n. "%s"\n. "%s"\nstrih_box_load stream-snv\nstrih_stream_monitor_obs_row "%s"'
+              % (PROVISION, SCRIPTS / "lib" / "strih-stream-monitor.sh", REPO))
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=e, cwd=str(REPO), timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("OK|(stream-monitor-obs) mbc is on Monitor Off"), r.stdout
+
+
+def test_the_development_scene_never_takes_the_manifests_program_input():
+    m = _load("stream_dev_safe_1462", SCRIPTS / "stream_dev_safe.py")
+    manifest = {"program_audio_input": "mbc",
+                "dev_scene": {"scene": "Development", "video_input": "NDI 2ME PGM", "audio_input": "mbc",
+                              "audio_file": "/opt/camera-box/measurement-clip-v1.mp4"}}
+    with pytest.raises(m.DevSafeError, match="mbc"):
+        m.parse_dev_scene(json.dumps(manifest))
