@@ -618,6 +618,117 @@ mod tests {
         assert_eq!(t.re_anchors, 0);
     }
 
+    /// ROZHODNUTÉ 6343922049 (1): the anchor is the EARLIEST arrival of the first second of the
+    /// sender's audio (the least-delayed packet, so later packets are never early against it). A
+    /// first packet that came at the end of a 25 ms gap must not set the line for the whole run, and
+    /// past the first second an earlier packet no longer moves it.
+    #[test]
+    fn the_anchor_is_the_earliest_arrival_of_the_first_second() {
+        let mut t = Timeline::new();
+        let line = |k: u64| on_time(k) - samples_to_ns(256, RATE) + R40;
+        let d = t.packet(on_time(0) + 25 * NS_PER_MS, 0, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Anchor);
+        assert_eq!(
+            d.stamp_ns,
+            line(0) + 25 * NS_PER_MS,
+            "the first packet anchors where it came"
+        );
+        // packet k ends at (k + 1) x 256: packets 1..=186 end within the first second (48 000)
+        for k in 1..=186u64 {
+            let d = t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+            assert_eq!(d.event, Event::Packet, "packet {k}: {d:?}");
+            assert!(
+                d.stamp_ns.abs_diff(line(k)) <= 2,
+                "packet {k}: the line moves to the earliest arrival: {} vs {}",
+                d.stamp_ns,
+                line(k)
+            );
+        }
+        for k in 187..600u64 {
+            let early = if k == 187 || k == 400 {
+                3 * NS_PER_MS
+            } else {
+                0
+            };
+            let d = t.packet(on_time(k) - early, k as u32, 256, RATE, 2, R40);
+            assert_eq!(d.event, Event::Packet, "packet {k}: {d:?}");
+            assert!(
+                d.stamp_ns.abs_diff(line(k)) <= 2,
+                "packet {k}: past the first second the line is fixed: {} vs {}",
+                d.stamp_ns,
+                line(k)
+            );
+        }
+        assert_eq!(t.re_anchors, 0);
+    }
+
+    /// ROZHODNUTÉ 6343922049 (1): inside the dead band (|stamp − (fit + R)| <= R/4) the stamp step
+    /// is the fitted RATE only; outside it the phase term moves the step by at most 5 ppm per fitted
+    /// bucket, toward the side that brings the stamps back into the band.
+    #[test]
+    fn the_phase_term_acts_only_outside_the_dead_band() {
+        let mut t = Timeline::new();
+        for k in 0..(15 * 48_000 / 256) {
+            t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+        }
+        assert!(t.fit_valid);
+        assert_eq!(
+            (t.fit_ppb, t.step_ppb),
+            (0, 0),
+            "an ideal sender: rate 0, no phase"
+        );
+        let at = t.next_pos;
+        // the line moved earlier by `ms` = the stamps that much before fit + R (phase +ms)
+        let probe = |ms: i64| {
+            let mut p = t.clone();
+            p.base_stamp_ns = (p.base_stamp_ns as i64 - ms * NS_PER_MS as i64) as u64;
+            assert!(p.update(at), "{ms} ms is within the hold");
+            p
+        };
+        for ms in [-9, -5, 5, 9] {
+            let p = probe(ms);
+            assert_eq!(
+                p.step_ppb, p.fit_ppb,
+                "a phase of {ms} ms is inside the band: the step is the rate only"
+            );
+        }
+        assert_eq!(
+            probe(11).step_ppb,
+            PPB_SLEW,
+            "11 ms early: the phase term speeds the stamps up, 5 ppm per bucket"
+        );
+        assert_eq!(
+            probe(-11).step_ppb,
+            -PPB_SLEW,
+            "11 ms late: the phase term slows the stamps down, 5 ppm per bucket"
+        );
+    }
+
+    /// ROZHODNUTÉ 6343922049 (1): a steady delay inside the band (every packet after the anchor
+    /// 6 ms later than it) is arrival jitter, never a sender-clock event: the stamps stay on the
+    /// anchored line to the sample for two minutes (the old phase term walked them 6 ms later).
+    #[test]
+    fn a_steady_delay_inside_the_band_never_moves_the_stamps() {
+        let mut t = Timeline::new();
+        let line = |k: u64| on_time(k) - samples_to_ns(256, RATE) + R40;
+        for k in 0..(120 * 48_000 / 256) {
+            let late = if k == 0 { 0 } else { 6 * NS_PER_MS };
+            let d = t.packet(on_time(k) + late, k as u32, 256, RATE, 2, R40);
+            assert_eq!(d.event, if k == 0 { Event::Anchor } else { Event::Packet });
+            assert!(
+                d.stamp_ns.abs_diff(line(k)) <= 1_000,
+                "packet {k}: the stamp left the anchored line by {} ns",
+                d.stamp_ns as i64 - line(k) as i64
+            );
+        }
+        assert!(t.fit_valid);
+        assert!(
+            (5 * NS_PER_MS as i64..=7 * NS_PER_MS as i64).contains(&t.phase_ns),
+            "the stamps sit ~6 ms before fit + R, inside the band: {}",
+            t.phase_ns
+        );
+    }
+
     #[test]
     fn contiguous_packets_get_contiguous_stamps() {
         let mut t = Timeline::new();
