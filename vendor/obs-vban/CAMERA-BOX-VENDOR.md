@@ -88,22 +88,33 @@ every packet at its arrival minus its length, so the sender's network jitter rea
 mixes at 0 ms audio buffering) and a late packet was a click. The timeline instead:
 
 - **Anchor.** The first packet is stamped at arrival − length + R. R is the fixed Receive Buffer
-  (default 40 ms, clamped 10–500), read at create/update only, never adapted at runtime.
+  (default 40 ms, clamped 10–500), read at create/update only, never adapted at runtime. R is
+  measured from the packet's start, so the line uses max(R, one packet + 10 ms), fixed at the anchor
+  (one `obs-vban receive buffer:` warning names both when it lifts R). Within the first second of the
+  sender's audio a packet that arrived earlier against the line moves the line to it: the anchor is
+  the EARLIEST arrival of that second (ROZHODNUTÉ 6343922049), and after it the latency is held.
 - **Fit.** A least-squares line of arrival over the sender's sample position, over the last 64
   one-second buckets, used from 10 buckets. A packet more than 10 ms late against the line is not
   folded, so a gap's delayed packets never pull the line late.
-- **Stamps.** Slewed toward the fitted rate plus a phase term toward `fit + R` (at most 5 ppm per
-  update, clamped ±500 ppm), rebased on every change, so they never jump. The genlock ASRC
-  (`basis=stamp`, libobs `genlock_audio_asrc_placement`) resamples the sender's rate to the mix.
+- **Stamps.** Slewed toward the fitted RATE (at most 5 ppm per update, clamped ±500 ppm), rebased on
+  every change, so they never jump. A phase term toward `fit + R` joins only while the stamps are more
+  than R/4 off it (a real sender-clock event), until they are back inside that dead band; inside it the
+  latency is constant to the sample. The genlock ASRC (`basis=stamp`, libobs
+  `genlock_audio_asrc_placement`) resamples the sender's rate to the mix.
 - **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
 - **Stale.** A duplicate, or a `nuFrame` at most 64 packets behind the last one (a network
   reorder), is dropped and counted (`stale=`): its slot already went out as silence.
 - **Reconfiguration.** Another port, stream name or host starts a new timeline. `update()` asks for
   the reset BEFORE it lets the new sender in (`vban_src_string_changes`, the predicate
   `update_string()` uses), and again after.
-- **Re-anchor (one counted event).** A packet after its stamp, a `nuFrame` further behind (a
-  sender restart), a jump of more than 2 s of audio, another rate/channel count/R, or a fit that cannot
-  hold (rate beyond ±500 ppm, stamps more than R off `fit + R`, nothing folded for 3 s).
+- **Late shift (one counted re-anchor).** A packet after its stamp while the fit is valid shifts the
+  line once to the stamp it would anchor (`fit + R` + its excess over the fit), the fit kept, the slots
+  lost before it silence on the new line; the excess is held (`shift_ms`), so the next fit never
+  re-anchors again (one network event = one re-anchor).
+- **Re-anchor (one counted event).** A packet after its stamp before the fit is valid, a `nuFrame`
+  further behind (a sender restart), a jump of more than 2 s of audio, another rate/channel count/R,
+  or a fit that cannot hold (rate beyond ±500 ppm, stamps more than R off `fit + R + shift`, nothing
+  folded for 3 s).
 
 **Every Windows OBS gets it too.** Both Windows genlock builds compile this `vban-source.c`, and a
 FULL bundle deploy replaces `obs-vban.dll` on every Windows OBS box (the pacing section's note). A
@@ -118,16 +129,18 @@ Log lines:
 
 ```
 obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receive_buffer_ms=40
-obs-vban receive: received=… lost=… late=… re_anchors=… stale=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
-obs-vban receive re-anchor: source '…' reason=late|backward|jump|format|config|fit frame=… late_ms=… re_anchors=… late=…
+obs-vban receive: received=… lost=… late=… re_anchors=… stale=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… shift_ms=… fit=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
+obs-vban receive re-anchor: source '…' reason=late|backward|jump|format|config|fit frame=… late_ms=… re_anchors=… late=… fit=kept|restarted shift_ms=…
+obs-vban receive buffer: source '…' receive_buffer_ms=10 is not above one packet (5.33 ms) + 10 ms: using 15.33 ms
 ```
 
 The status line comes every 10 s; its counters are cumulative since the source was created.
 `max_late_ms` is the largest arrival − stamp of an on-time packet in that 10 s window, so it is
 negative while packets arrive with margin (about −(R − one packet) plus jitter: the stamp is the
 packet's start, its arrival its end, −34.7 ms at R 40 / 256 frames / 48 kHz); a packet past its
-stamp re-anchors instead and is counted in `late`. So R must exceed one packet's length, or every
-packet re-anchors (5.3 ms at 48 kHz against the 10 ms minimum).
+stamp shifts the line (or re-anchors before the fit) and is counted in `late`. An R no longer than
+one packet + 10 ms is lifted to that floor (ROZHODNUTÉ 6343922049), so the margin is never below
+10 ms.
 
 ## Re-basing onto a newer upstream
 

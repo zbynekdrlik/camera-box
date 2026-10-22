@@ -226,9 +226,10 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   a BOM) and parses every input before writing anything. verify item 10 grades the written encoder.
 - **Step 6 manifest** (`obs_box_seed_manifest_json`): one entry `NDI 2ME PGM` <- the program sender
   in scene `PRO`, class `program` (genlock_fifo + ndi_sync 2, the latency pin NEVER written: it is
-  the operator's stream A/V knob), `program_audio_input` = `Zvuk z mixu`, since issue 1439 the
-  obs-vban receive source on lv1's VBAN (`program_audio_vban` from the facts STRIH_PROGRAM_VBAN_*;
-  `.claude/rules/obs-vban-receive.md`). A wrong-kind audio input is replaced in every scene it was in,
+  the operator's stream A/V knob), `program_audio_input` = the box fact STRIH_PROGRAM_AUDIO_INPUT
+  (stream-pp `Zvuk z mixu`, stream-snv `mbc`, issue 1462), since issue 1439 the obs-vban receive
+  source on the console's VBAN (`program_audio_vban` from the facts STRIH_PROGRAM_VBAN_*: lv1 at PP,
+  mbc.lan at SNV; `.claude/rules/obs-vban-receive.md`). A wrong-kind audio input is replaced in every scene it was in,
   keeping its sync offset and (issue 1439) its whole mixer state and filters.
 - **No intercom hub on the stream role (issue 1439, owner 22.10.2026):** `obs_box_step_applies 13`
   skips step 13 and moves a present hub aside (`strih_intercom_hub_remove`); steps 4b / 12 write no hub

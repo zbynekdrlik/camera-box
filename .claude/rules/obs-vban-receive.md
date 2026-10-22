@@ -31,43 +31,73 @@ lost packets landed on audio already delivered).
 - **Anchor:** the first packet's stamp = arrival - length + R. R = the fixed "Receive Buffer (ms)"
   setting (`receive_buffer_ms`, default 40, clamped 10..500), read at create/update only, NEVER adapted
   at runtime (the owner's rule). A different R re-anchors once (counted, `reason=config`).
+- **The latency is set ONCE per anchor, then held (ROZHODNUTÉ 6343922049, round 3):**
+  - the anchor is the EARLIEST arrival of the first second: a packet whose END position is within one
+    second of the anchor packet's start and that arrived earlier against the line moves the line to
+    the anchor it would give (carried back by the line's own arithmetic, so a packet ON the line never
+    moves it by a rounding ns). After that second the phase is fixed; stamps may step BACK inside the
+    first second (libobs' 70 ms smoothing appends them, the stamp-basis ASRC reads the placement error);
+  - only the RATE is followed: the phase term joins the step only while `|stamp - (fit + R + shift)|`
+    is over R/4 (the dead band), then at the old 5 ppm per bucket until back inside;
+  - before the fit the outlier reference is the anchored line - R (no longer the first packet's
+    arrival, which may itself have come at the end of a gap);
+  - effective R = max(R, one packet + 10 ms), fixed at the anchor; the source logs ONE `obs-vban
+    receive buffer:` warning per (R, effective R) pair.
 - **Fit:** least squares of arrival over the packet's END sample position, in one-second buckets,
   64 s window, used from 10 buckets. A packet more than 10 ms late against the reference line is not
   folded (a gap's delayed packets never pull the line late).
 - **Stamps:** `stamp(pos) = base + T(pos - base_pos)`, T scaled by `1 + step_ppb/1e9`. Per fitted
-  bucket the step moves toward `fit_ppb + clamp(phase / 20 s, +-100 ppm)` by at most 5 ppm, clamped
-  +-500 ppm, rebased on every change: stamps never jump. The genlock ASRC (`basis=stamp`) resamples
+  bucket the step moves toward `fit_ppb` (+ `clamp(phase / 20 s, +-100 ppm)` only outside the dead band)
+  by at most 5 ppm, clamped +-500 ppm, rebased on every change: stamps never jump after the first second. The genlock ASRC (`basis=stamp`) resamples
   the sender's rate to the mix (pinned: the lifted `genlock_audio_asrc_placement` returns STAMP for
   the source's direct stamps; nothing in obs-vban touches asrc / genlock_fifo / monitoring).
 - **Loss:** a `nuFrame` gap = silence for exactly the lost slots, stamped on the same line.
 - **Stale (review round 1):** a duplicate, or an index at most `STALE_PACKETS` (64) behind the last
   one (a UDP reorder), is dropped and counted (`stale=` on the status line), never output: its slot
   already went out as silence. Before, one swapped pair restarted the timeline and read `lost=2`.
-- **Re-anchor (one counted event):** a packet past its stamp (`late`), an index further behind (a
-  sender restart), a jump > 2 s of audio (a sender restart), another rate / channel count / R, or a fit that cannot
-  hold (rate beyond +-500 ppm, stamps more than R off `fit + R`, nothing folded for 3 s of audio).
-  The re-anchoring packet is the new anchor. A late re-anchor anchors on a late packet: if its
-  lateness exceeds R the phase hold re-anchors once more (~10 s later). Known, documented, not a bug.
+- **Late shift = one network event, one re-anchor (round 3):** a packet past its stamp while the fit
+  is valid shifts the line ONCE to the stamp it would anchor (arrival - length + R = `fit + R` + its
+  excess over the fit), rebased at the first lost slot (those slots are silence on the new line), the
+  fit + buckets kept, counted as a `reason=late` re-anchor with `fit=kept`. The excess is the held
+  `shift_ns`: the band and the R hold are centred on `fit + R + shift`, so the shifted latency is HELD
+  (a 90 ms hiccup at R 40 leaves the program ~130 ms late until the next full anchor -- an A/V offset
+  the operator sees; the main's interpretation call, raised on the ticket) and no second re-anchor
+  follows. Before the fit is valid a late packet still restarts the timeline.
+- **Re-anchor (one counted event, `fit=restarted`):** a late packet before the fit, an index further
+  behind (a sender restart), a jump > 2 s of audio (a sender restart), another rate / channel count /
+  R, or a fit that cannot hold (rate beyond +-500 ppm, stamps more than R off `fit + R + shift`,
+  nothing folded for 3 s of audio). The re-anchoring packet is the new anchor. Known limit: a
+  PERSISTENT delay step of more than 10 ms over the fit stops the folding, so the starve rule restarts
+  3 s after the late shift (two re-anchors for one step).
 - **Bench** (`src/vban_receive_timeline_bench.rs`, a two-clock sender at +-50 ppm, 5..7 ms bursts,
   gaps of 5..30 ms every ~400 ms, receive-thread wake jitter): zero late slots and zero re-anchors at
-  R = 40 ms over 10 min (min margin 5.3-8.6 ms), the fitted rate within ~1.5 ppm, latency steady
-  within ~100 us; at R = 20 ms the same sender goes late (the test that the bench can fail).
+  R = 40 ms over 10 min (min margin 3.8-6.0 ms since the earliest-arrival anchor), the fitted rate
+  within ~1.5 ppm, the latency graded over the WHOLE run after the first second: within 0.87 ms of its
+  anchored value at +-50 ppm (the 10 s at the nominal rate before the fit + the 5 ppm/bucket slew to
+  it), 0.29 ms at 0 ppm. The round-2 reviewer's case (the first packet at the end of a 25 ms gap)
+  anchors at 40.4-40.6 ms (65.4 ms before round 3, then walked 21.8 ms) and holds within 0.72 ms. A 90
+  ms hiccup is one late shift, the shifted latency held within 0.05 ms. At R = 20 ms the same sender
+  goes late (the test that the bench can fail).
 
 ## The status lines (OBS log, prefixed `[obs-vban] ` by the plugin's blog macro)
 
 ```
 obs-vban receive anchored: source '<input>' frame=N rate=48000 ch=2 receive_buffer_ms=R
-obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
-obs-vban receive re-anchor: source '<input>' reason=late|backward|jump|format|config|fit frame=N late_ms=X re_anchors=N late=N
+obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X shift_ms=X fit=locked|acquiring receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
+obs-vban receive re-anchor: source '<input>' reason=late|backward|jump|format|config|fit frame=N late_ms=X re_anchors=N late=N fit=kept|restarted shift_ms=X
+obs-vban receive buffer: source '<input>' receive_buffer_ms=R is not above one packet (X ms) + 10 ms: using X ms
 ```
+
+`obs-vban receive: ` stays on exactly ONE log line (the wiring test pins it): every other line uses
+another prefix (`anchored:`, `re-anchor:`, `buffer:`).
 
 The status line is written by the receive callback, so it stops when packets stop. Counters are
 cumulative since the source was created (a port / stream / host change re-inits them). `max_late_ms`
 is the window's largest arrival - stamp of an on-time packet: about -(R - one packet) + jitter when
 healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40, 256 frames, 48 kHz).
-- **R must exceed one packet** (review round 2): the real margin is R minus the packet's length, so
-  with R no longer than a packet every packet re-anchors as late. The rig's 48 kHz 256-frame packets
-  are 5.3 ms against the 10 ms minimum; a sender at 8 kHz / 22.05 kHz with a small R would loop.
+- **R is lifted to one packet + 10 ms** (round 3; review round 2 found that the real margin is R minus
+  the packet's length, so R no longer than a packet re-anchored every packet). The rig's 48 kHz 256-frame
+  packets with R = 40 are unaffected; mbc's 239-frame packets (4.98 ms) too.
 - **A hostname `ip_from`** is resolved asynchronously by `vban_udp_set_host`, after the update's
   last reset, so the new host's first packets can land on the old timeline. The stream role uses
   `ip_from ""` (any host); give a host as an IP if one is ever set.
@@ -85,9 +115,19 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
 
 ## The stream role (setup / seed / verify)
 
-- **Facts:** `STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `_RESERVE_MS` (stream-pp `stream` / `6980` /
-  `40`; strih boxes `none` x 3 until their slice; the loader refuses a strih role with values and a
-  stream role without exactly ONE stream). `none` is a sentinel, never a stream name.
+- **Facts:** `STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `_RESERVE_MS` (stream-pp and stream-snv `stream`
+  / `6980` / `40`; strih boxes `none` x 3 until their slice; the loader refuses a strih role with values
+  and a stream role without exactly ONE stream). `none` is a sentinel, never a stream name.
+  `STRIH_PROGRAM_AUDIO_INPUT` (issue 1462) names the OBS program-audio input per box: stream-pp
+  `Zvuk z mixu`, stream-snv `mbc` (the SNV stream tooling keys on it), strih boxes `none`. The seed
+  manifest, verify item 9 (`strih_program_vban_grade`'s default NAME), the stream-monitor row and the
+  Development-scene guard read it; never a role constant.
+- **stream-snv (issue 1462):** a Linux stream box like stream-pp since 22.10.2026. mbc.lan sends the SNV
+  program as VBAN `stream`, 24-bit PCM (format byte 0x02), 48 kHz stereo, 239 frames per packet, to
+  UDP 6980: the source decodes it (pinned by `tests/vban_source_loss_1439.rs`). Its OBS input `mbc` is
+  today a hub-fed capture: the stream role's setup step 13 moves the hub aside, and mbc must keep
+  sending to 6980 (OBS binds it once the hub is gone). The collection port has no `stream-snv` preset
+  (the box's collection already exists; the launch seed switches `mbc`).
 - **Seed:** the stream manifest carries `program_audio_vban`; `strih_scenes.py` switches `Zvuk z mixu`
   through `scripts/program_audio_vban.py` (installed next to it by setup step 6; the launch preflight
   imports it). A replace reads the operator state BEFORE `RemoveInput` and puts back scenes (hidden
