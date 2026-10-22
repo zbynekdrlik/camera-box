@@ -57,6 +57,7 @@ static uint64_t g_now;
 static long long g_port = 6980;
 static char g_name[32] = "stream";
 static char g_host[64] = "";
+static long long g_buffer = 40;
 
 uint64_t os_gettime_ns(void)
 {
@@ -113,7 +114,7 @@ long long obs_data_get_int(obs_data_t *data, const char *name)
 	if (strcmp(name, "port") == 0)
 		return g_port;
 	if (strcmp(name, "receive_buffer_ms") == 0)
-		return 40;
+		return g_buffer;
 	return 0;
 }
 
@@ -322,8 +323,10 @@ int main(int argc, char **argv)
 	void *src = vban_source_info.create(NULL, (obs_source_t *)&g_udp_dummy);
 	for (int i = 2; i < argc; i++) {
 		if (strncmp(argv[i], "port=", 5) == 0 || strncmp(argv[i], "name=", 5) == 0 ||
-		    strncmp(argv[i], "host=", 5) == 0) {
-			if (argv[i][0] == 'p')
+		    strncmp(argv[i], "host=", 5) == 0 || strncmp(argv[i], "buffer=", 7) == 0) {
+			if (argv[i][0] == 'b')
+				g_buffer = atoll(argv[i] + 7);
+			else if (argv[i][0] == 'p')
 				g_port = atoll(argv[i] + 5);
 			else if (argv[i][0] == 'n')
 				snprintf(g_name, sizeof(g_name), "%s", argv[i] + 5);
@@ -406,7 +409,8 @@ fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, String) {
 }
 
 /// Runs the driver over free tokens: packets (`nu:now_ns:value`) and setting changes (`port=N`,
-/// `name=S`, `host=H`, each one followed by the source's `update()`). Returns (stdout, the log).
+/// `name=S`, `host=H`, `buffer=MS`, each one followed by the source's `update()`). Returns (stdout,
+/// the log).
 fn run_tokens(tokens: &[String], bitfmt: u8) -> (String, String) {
     let source = repo(SOURCE);
     assert!(source.is_file(), "issue 1439: {SOURCE} is missing");
@@ -783,4 +787,44 @@ fn a_late_shift_outputs_the_lost_slots_and_the_packet_on_the_new_line_1439() {
         n + 1,
         "issue 1439: every packet's audio reaches OBS once"
     );
+}
+
+/// ROZHODNUTÉ 6343922049 (3): a Receive Buffer no longer than one packet + 10 ms is lifted to that
+/// floor, and the source names both in ONE warning: not on every re-anchor, not again after a
+/// reconfiguration with the same values.
+#[test]
+fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
+    let ms = 1_000_000u64;
+    let mut tokens = vec!["buffer=10".to_string()];
+    // a first timeline, a sender restart (a counted re-anchor), then a reconfiguration
+    tokens.extend((0..5u64).map(|k| format!("{}:{}:100", 10 + k, 100 * ms + k * 6 * ms)));
+    tokens.extend((0..5u64).map(|k| format!("{}:{}:100", 5000 + k, 300 * ms + k * 6 * ms)));
+    tokens.push("port=6981".to_string());
+    tokens.extend((0..5u64).map(|k| format!("{}:{}:100", 20 + k, 500 * ms + k * 6 * ms)));
+    let (stdout, log) = run_tokens(&tokens, VBAN_BITFMT_16_INT);
+    let warnings: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("obs-vban receive buffer:"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "issue 1439: one warning for one (R, packet) pair:\n{log}"
+    );
+    let w = warnings[0];
+    assert!(
+        w.starts_with("blog 200: ")
+            && w.contains("receive_buffer_ms=10 ")
+            && w.contains("5.33 ms")
+            && w.contains("15.33 ms"),
+        "issue 1439: the warning names R and one packet + 10 ms: `{w}`"
+    );
+    // the first packet is stamped with the effective R: arrival - one packet + 15.33 ms
+    let first = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("out ts="))
+        .and_then(|l| l.split_whitespace().next())
+        .and_then(|v| v.parse::<u64>().ok())
+        .expect("an output");
+    assert_eq!(first, 100 * ms + 10 * ms, "issue 1439: `{stdout}`");
 }

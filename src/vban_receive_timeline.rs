@@ -807,6 +807,40 @@ mod tests {
         );
     }
 
+    /// ROZHODNUTÉ 6343922049 (3): the effective Receive Buffer is max(R, one packet + 10 ms). R is
+    /// measured from the packet's START (its arrival is its END), so R no longer than a packet left no
+    /// margin at all and re-anchored every packet. The setting keeps its meaning above that floor.
+    #[test]
+    fn the_receive_buffer_is_at_least_one_packet_plus_10_ms() {
+        let len = samples_to_ns(256, RATE);
+        let r10 = 10 * NS_PER_MS;
+        let mut t = Timeline::new();
+        let d = t.packet(on_time(0), 1, 256, RATE, 2, r10);
+        assert_eq!(
+            d.stamp_ns,
+            on_time(0) + 10 * NS_PER_MS,
+            "R = 10 ms with 5.33 ms packets: the effective R is 15.33 ms, a 10 ms margin"
+        );
+        assert_eq!(d.lateness_ns, -(10 * NS_PER_MS as i64));
+        for k in 1..400u64 {
+            let d = t.packet(on_time(k) + 9 * NS_PER_MS, 1 + k as u32, 256, RATE, 2, r10);
+            assert_eq!(
+                d.event,
+                Event::Packet,
+                "packet {k}: 9 ms late is inside the margin: {d:?}"
+            );
+        }
+        assert_eq!(t.re_anchors, 0);
+        // above the floor the setting is the reserve: R = 40 ms with the same packets
+        let mut t = Timeline::new();
+        let d = t.packet(on_time(0), 1, 256, RATE, 2, R40);
+        assert_eq!(d.stamp_ns, on_time(0) - len + R40);
+        // a long packet (2048 frames = 42.7 ms) lifts even R = 40 ms
+        let mut t = Timeline::new();
+        let d = t.packet(on_time(0), 1, 2048, RATE, 2, R40);
+        assert_eq!(d.stamp_ns, on_time(0) + 10 * NS_PER_MS);
+    }
+
     #[test]
     fn contiguous_packets_get_contiguous_stamps() {
         let mut t = Timeline::new();
