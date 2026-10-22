@@ -366,8 +366,9 @@ impl Timeline {
                 suv: 0.0,
             };
         }
-        let u = (x - b.x0) as f64;
-        let v = (y - b.y0) as f64;
+        // unsigned and wrapping like the C twin (an out-of-order arrival never panics)
+        let u = x.wrapping_sub(b.x0) as f64;
+        let v = y.wrapping_sub(b.y0) as f64;
         b.n += 1;
         b.su += u;
         b.sv += v;
@@ -615,7 +616,7 @@ impl Timeline {
                     self.shift_ns = want as i64 - fitted;
                     let span = samples_to_ns(pos - self.next_pos, rate);
                     self.base_stamp_ns =
-                        want - (span as i64 + scale_ppb(span, self.step_ppb)) as u64;
+                        want.wrapping_sub((span as i64 + scale_ppb(span, self.step_ppb)) as u64);
                     self.base_pos = self.next_pos;
                     self.re_anchors += 1;
                     stamp = self.stamp_at(pos);
@@ -641,7 +642,8 @@ impl Timeline {
                     self.silence_samples += lost_samples;
                 }
                 // fold the packet into the fit unless it came late against the reference line
-                let y = now_ns - self.anchor_ns;
+                // wrapping like the C twin (the real clock never delivers an arrival before the anchor)
+                let y = now_ns.wrapping_sub(self.anchor_ns);
                 if y as f64 - self.reference(end) <= (OUTLIER_MS * NS_PER_MS) as f64 {
                     self.fold(k, end, y);
                 }

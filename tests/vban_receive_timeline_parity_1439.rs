@@ -397,6 +397,31 @@ fn starve_script() -> Vec<Pkt> {
     b.pkts
 }
 
+/// Arrivals OUT of order (never from the real monotonic clock, built without the Builder's clamp):
+/// one before the anchor, one before its bucket's first packet. The C wraps the unsigned offsets;
+/// the Rust twin must wrap identically (review round 3: it panicked in a debug build).
+fn out_of_order_script() -> Vec<Pkt> {
+    let at = |k: u64| 2_000_000_000 + samples_to_ns((k + 1) * 256, 48_000);
+    let pkt = |now: u64, k: u64| Pkt {
+        now,
+        nu: k as u32,
+        frames: 256,
+        rate: 48_000,
+        channels: 2,
+        reserve_ns: 40 * MS,
+        reset: false,
+    };
+    let mut v = vec![pkt(at(0), 0), pkt(at(0) - MS, 1)];
+    for k in 2..=187u64 {
+        v.push(pkt(at(k), k));
+    }
+    v.push(pkt(at(187) - 1_000, 188));
+    for k in 189..400u64 {
+        v.push(pkt(at(k), k));
+    }
+    v
+}
+
 /// The index wraps through u32::MAX, with a loss across the wrap.
 fn wrap_script() -> Vec<Pkt> {
     let mut b = Builder::new();
@@ -429,6 +454,7 @@ fn scripts() -> Vec<Vec<Pkt>> {
         delay_drop_script(),
         starve_script(),
         wrap_script(),
+        out_of_order_script(),
     ];
     let configs: [(f64, u32, u32, u32, u64, u64); 6] = [
         (50.0, 256, 48_000, 2, 40, 60),
@@ -814,7 +840,7 @@ fn the_scripts_reach_every_boundary_1439() {
                 end = pos + u64::from(p.frames);
                 cand = p.now.saturating_sub(
                     samples_to_ns(u64::from(p.frames), p.rate) + samples_to_ns(pos, p.rate),
-                ) + t.reserve_ns;
+                ) + t.reserve_eff_ns;
                 if (end / u64::from(p.rate)) as i64 > t.last_k {
                     let mut probe = t.clone();
                     if !probe.update(t.next_pos) {
@@ -870,7 +896,7 @@ fn the_scripts_reach_every_boundary_1439() {
             hits[12] += usize::from(d.event == Event::Packet && t.step_ppb != step);
             let folded = t.buckets.iter().map(|b| b.n).sum::<u64>();
             if d.event == Event::Packet && same {
-                let y = (p.now - t.anchor_ns) as f64;
+                let y = p.now.wrapping_sub(t.anchor_ns) as f64;
                 hits[13] += usize::from(folded == folds && y > line_y);
                 hits[14] += usize::from((y - line_y).abs() <= 1.0);
             }
