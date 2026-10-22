@@ -218,7 +218,8 @@ def test_the_stream_manifest_carries_the_vban_source_settings():
 def test_the_stream_snv_manifest_names_mbc_on_the_same_vban_source():
     d = json.loads(_manifest("stream-snv"))
     assert d["program_audio_input"] == "mbc"
-    assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 40}
+    # R 80 ms: mbc's gaps reached 52 ms under production load (issue 1439 finding 6348583939)
+    assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 80}
 
 
 def test_a_strih_manifest_carries_no_vban_block():
@@ -707,7 +708,8 @@ def test_a_live_vban_source_passes(tmp_path):
 
 def test_stream_snv_grades_its_mbc_input(tmp_path):
     # issue 1462: the grader reads the input the box names (stream-snv: `mbc`), never the PP name
-    rows = _grade(tmp_path, _line(100, source="mbc"), append=_line(2000, source="mbc"), box="stream-snv")
+    rows = _grade(tmp_path, _line(100, source="mbc", r=80), append=_line(2000, source="mbc", r=80),
+                  box="stream-snv")
     assert not _rows(rows, "FAIL") and not _rows(rows, "NOTE"), rows
     assert any("OBS 'mbc' is the obs-vban receive source" in r for r in rows), rows
     assert any("receiving stream 'stream' on UDP 6980: received 100 -> 2000" in r for r in rows), rows
