@@ -95,13 +95,26 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   the EARLIEST arrival of that second (ROZHODNUTÉ 6343922049), and after it the latency is held.
 - **Hold (ROZHODNUTÉ 6345255813).** That first second is never output: the anchor, every full
   re-anchor and the packets ending within the window refine and fold but reach OBS as nothing. The
-  first packet past it is output on the final line, so libobs never sees a stamp step (it would
-  append one under 70 ms and walk it out at the stamp-basis ASRC's 300 ppm). ~1 s of silence at OBS
-  start and after a full re-anchor.
-- **Lead-in (review round 5).** A stretch's first output is always an in-time packet (a slot is filled
-  only once the stretch has output its first packet; a late packet before it is dropped with no fill)
-  and carries silence from its arrival up to its stamp, ending exactly there (`lead_in_ms=` on the
-  `emitting:` line). libobs resets a
+  first in-time packet past it starts the output on the final line, so libobs never sees a stamp
+  step (it would append one under 70 ms and walk it out at the stamp-basis ASRC's 300 ppm). ~1 s of
+  silence at OBS start and after a full re-anchor.
+- **Playout deadline (ROZHODNUTÉ 6347872706).** The source emits on its own deadline, never on a
+  packet's arrival.
+  - The receive callback only decides and stores an in-time packet for its slot.
+  - A worker thread per source (`vban-src-out`) hands every slot to libobs at its stamp − 2 ms, on the
+    line that runs at the fitted sender rate: the stored packet, or silence of exactly that slot. So
+    libobs never underruns, never clears the source and never grows the mix's buffering.
+  - A packet that comes after its slot went out is dropped (`late`). A packet is in time with up to
+    R − one packet − 2 ms of delay. The status line's `emit_late_ms=` is the worker's wake jitter.
+  - The worker sleeps to its next deadline (`os_sleepto_ns`), waits on an event while idle, holds the
+    lock only for a decision and a copy, and outputs after it.
+  - It is spawned at the end of `update()`, and stopped and joined at its start and in `destroy()`,
+    before the timeline is read or freed.
+  - A stretch starves once a slot's deadline is more than 1 s after the last in-time arrival: nothing
+    more goes out and the next packet re-anchors.
+- **Lead-in (review round 5).** A stretch's output always starts with an in-time packet (a late packet
+  before it is dropped, nothing sent). Before its slot the worker sends silence from its own now up to
+  that slot's stamp, ending exactly there. libobs resets a
   source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`) off where its previous one ended and
   puts it at the instant it arrived, which a starve + its hold always cause; the lead-in starts there,
   so the output still lands on its stamp (without it the new stretch started one R early).
@@ -113,21 +126,17 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   than R/4 off it (a real sender-clock event), until they are back inside that dead band; inside it the
   latency is constant to the sample. The genlock ASRC (`basis=stamp`, libobs
   `genlock_audio_asrc_placement`) resamples the sender's rate to the mix.
-- **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
+- **Loss.** A slot whose packet is not there at its deadline is one slot of silence, stamped on the
+  same line.
 - **Stale.** A duplicate, or a `nuFrame` at most 64 packets behind the last one (a network
-  reorder), is dropped and counted (`stale=`): its slot already went out as silence.
+  reorder), is dropped and counted (`stale=`): its slot goes out as silence.
 - **Reconfiguration.** Another port, stream name or host starts a new timeline. `update()` asks for
   the reset BEFORE it lets the new sender in (`vban_src_string_changes`, the predicate
   `update_string()` uses), and again after.
-- **Late = lost.** A packet after its stamp (once the hold is over) is dropped and counted (`late`);
-  its slot, with the slots lost right before it, goes out as silence at once on the unchanged line.
-  The latency never moves (the round-3 late shift is withdrawn).
-  At 0 ms OBS buffering that silence lands after its window was mixed, so OBS's realized latency
-  steps up by whole 21.33 ms mix windows and walks back at 300 ppm: two windows (~43 ms) for a 90 ms
-  hiccup, one or two for a loss a little longer than R minus one packet. A longer outage finds the
-  source cleared by libobs: with an encoder running the fill is placed at its stamp (no step); with
-  none the whole mix's audio buffering grows by about the outage, for good. A known limit, the open
-  design question on the ticket.
+- **Late = lost.** A packet whose slot already went out (as silence, at its deadline) is dropped and
+  counted (`late`); the latency never moves (the round-3 late shift is withdrawn). The late fill of
+  rounds 4-6 (a step of one or two mix windows, or with no encoder a mix buffering that grew by the
+  outage) is gone with the deadline: every loss and hiccup holds the realized latency.
 - **Re-anchor (one counted event, then the hold).** A starve -- no packet in time for 1 s on our clock
   (an outage, a sender pause, every packet late on a delay step), `reason=starve`, nothing filled
   after the fact -- a `nuFrame` further behind (a sender restart), an index jump of more than 2 s of
@@ -148,11 +157,12 @@ Log lines:
 
 ```
 obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receive_buffer_ms=40 -- holding its first second
-obs-vban receive emitting: source 'Zvuk z mixu' frame=… margin_ms=… lead_in_ms=… after the first second's hold
-obs-vban receive: received=… lost=… late=… re_anchors=… stale=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
+obs-vban receive emitting: source 'Zvuk z mixu' frame=… margin_ms=… after the first second's hold -- every slot goes out 2 ms before its stamp
+obs-vban receive: received=… lost=… late=… re_anchors=… stale=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… emit_late_ms=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
 obs-vban receive late: source '…' frame=… late_ms=… -- dropped, its slot is silence on the anchored line (late=…)
 obs-vban receive re-anchor: source '…' reason=starve|backward|jump|format|config|fit frame=… starve_ms=… re_anchors=… late=… -- holding its first second
 obs-vban receive buffer: source '…' receive_buffer_ms=10 is not above one packet (5.33 ms) + 10 ms: using 15.33 ms
+obs-vban receive worker: source '…' stopped (update|destroy)
 ```
 
 The status line comes every 10 s; its counters are cumulative since the source was created.
