@@ -121,4 +121,5 @@ re-anchors instead and is counted in `late`.
 2. Re-apply the files in the table above.
 3. `tests/vban_pacing_parity_1372.rs` and the pwsh assert step in both `windows-genlock*.yml`
    files fail if the pacing is lost. `tests/vban_receive_timeline_parity_1439.rs`,
-   `tests/vban_source_loss_1439.rs` and the same pwsh step fail if the receive timeline is lost.
+   `tests/vban_receive_wiring_1439.rs`, `tests/vban_source_loss_1439.rs` and the same pwsh step fail if
+   the receive timeline is lost.

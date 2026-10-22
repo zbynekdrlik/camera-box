@@ -6,6 +6,8 @@ paths:
   - "src/vban_receive_timeline_bench.rs"
   - "tests/vban_receive_timeline_parity_1439.rs"
   - "tests/vban_source_loss_1439.rs"
+  - "tests/vban_receive_wiring_1439.rs"
+  - "tests/support/vban_c_1439.rs"
   - "scripts/program_audio_vban.py"
   - "scripts/lib/strih-program-vban.sh"
   - "tests/python/test_stream_role_vban_1439.py"
@@ -109,9 +111,11 @@ is the window's largest arrival - stamp of an on-time packet: about -R + jitter 
 - `rustc --test --edition 2021 src/vban_receive_timeline.rs` (unit tests + the bench) and
   `clippy-driver --edition 2021 --test -D warnings` on the same file.
 - `CARGO_MANIFEST_DIR=<wt> rustc --test --edition 2021 tests/vban_receive_timeline_parity_1439.rs`
-  (the C-vs-Rust trace, bit-for-bit doubles under `-ffp-contract=off`, the ASRC lift, the wiring and
-  the workflow pins) and `tests/vban_source_loss_1439.rs` (the SHIPPED `vban-source.c` lifted into a
-  C driver with libobs stubs: loss = silence, contiguous stamps, the status line's fields).
+  (the C-vs-Rust trace, bit-for-bit doubles under `-ffp-contract=off`), the same for
+  `tests/vban_receive_wiring_1439.rs` (the ASRC lift, the source wiring and the workflow pins; split
+  out in review round 1, both share `tests/support/vban_c_1439.rs`) and `tests/vban_source_loss_1439.rs`
+  (the SHIPPED `vban-source.c` lifted into a C driver with libobs stubs: loss = silence, contiguous
+  stamps, the status line's fields).
 - The plugin sources: `gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wformat=2 -Werror` with a generated
   `plugin-macros.generated.h` + a two-define `obsconfig.h` (the pacing rule's recipe).
 - `pytest tests/python/test_stream_role_vban_1439.py` (facts, seed, port, hub removal, item 9/16).
