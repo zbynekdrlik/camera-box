@@ -115,10 +115,14 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
 - **Late = lost.** A packet after its stamp (once the hold is over) is dropped and counted (`late`);
   its slot, with the slots lost right before it, goes out as silence at once on the unchanged line.
   The latency never moves (the round-3 late shift is withdrawn).
-- **Re-anchor (one counted event, then the hold).** No packet in time for 1 s of the sender's audio
-  (every packet late: a delay step on the network, `reason=late`), a `nuFrame` further behind (a sender
-  restart), a jump of more than 2 s of audio, another rate/channel count/R, or a fit that cannot hold
-  (rate beyond ±500 ppm, stamps more than R off `fit + R`). Packets still in time never re-anchor.
+  At 0 ms OBS buffering that silence lands after its window was mixed, so OBS's realized latency
+  steps up by about the lateness and walks back (a known limit, a design question on the ticket).
+- **Re-anchor (one counted event, then the hold).** A starve -- no packet in time for 1 s on our clock
+  (an outage, a sender pause, every packet late on a delay step), `reason=starve`, nothing filled
+  after the fact -- a `nuFrame` further behind (a sender restart), an index jump of more than 2 s of
+  audio, another rate/channel count/R, or a fit that cannot hold (rate beyond ±500 ppm, stamps more
+  than R off `fit + R`). Packets still in time never re-anchor; when none of them folds for 3 s the
+  status line says `fit=frozen`.
 
 **Every Windows OBS gets it too.** Both Windows genlock builds compile this `vban-source.c`, and a
 FULL bundle deploy replaces `obs-vban.dll` on every Windows OBS box (the pacing section's note). A
@@ -136,7 +140,7 @@ obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receiv
 obs-vban receive emitting: source 'Zvuk z mixu' frame=… margin_ms=… after the first second's hold
 obs-vban receive: received=… lost=… late=… re_anchors=… stale=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
 obs-vban receive late: source '…' frame=… late_ms=… -- dropped, its slot is silence on the anchored line (late=…)
-obs-vban receive re-anchor: source '…' reason=late|backward|jump|format|config|fit frame=… late_ms=… re_anchors=… late=… -- holding its first second
+obs-vban receive re-anchor: source '…' reason=starve|backward|jump|format|config|fit frame=… late_ms=… re_anchors=… late=… -- holding its first second
 obs-vban receive buffer: source '…' receive_buffer_ms=10 is not above one packet (5.33 ms) + 10 ms: using 15.33 ms
 ```
 

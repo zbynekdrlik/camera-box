@@ -21,11 +21,16 @@
 //! The latency is graded over the WHOLE run (ROZHODNUTÉ 6343922049 + 6345255813): per anchor, the
 //! anchored value is the latency of the first EMITTED packet (the first one past the held first
 //! second), and every later packet must stay within ±1 ms of it -- both the STAMP latency (the
-//! stamp against the true production instant) and the latency libobs REALIZES ([`Obs`]: a chunk
-//! within 70 ms of the previous one's end is appended, `TS_SMOOTHING_THRESHOLD`, and the stamp-basis
-//! ASRC pulls the placement error out at most 300 ppm, `ASRC_MAX_PPM`). The replay emits what the
-//! source emits: a PACKET (with the silence of the slots lost before it) and a LATE packet's silence;
-//! the anchor, a re-anchor and their held first second emit nothing, so libobs never sees a step.
+//! stamp against the true production instant) and the latency libobs REALIZES ([`Obs`], at 0 ms OBS
+//! buffering: 1024-frame mix windows on our clock, an underrun moves the source's label and keeps
+//! its data, a chunk within 70 ms of the previous one's end is appended no earlier than that label,
+//! a chunk further off is placed at its stamp, the stamp-basis ASRC pulls the error out at 300 ppm).
+//! The replay emits what the source emits: a PACKET (with the silence of the slots lost before it)
+//! and a LATE packet's silence; the anchor, a re-anchor and their held first second emit nothing.
+//!
+//! Known limit (review round 4, pinned by the hiccup test): a late packet's silence reaches libobs
+//! after its window was mixed, so the realized latency steps up by about the lateness and walks back;
+//! a starve (no packet in time for a second: an outage, a pause, a delay step) re-anchors instead.
 //!
 //! Known limit: before the fit (10 s) the line runs at the nominal rate and then slews to the fit at
 //! 5 ppm per bucket, so the latency moves about the sender's ppm x 20 s: ±1 ms holds to about
