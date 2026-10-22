@@ -874,3 +874,103 @@ fn packets_in_time_but_off_the_line_never_re_anchor() {
     }
     assert_eq!((t.re_anchors, t.late), (0, 0));
 }
+
+/// Review round 5: the FROZEN fit (display only) and its boundary. 240-frame packets, 200 a
+/// second: after 12 s on the grid the fit is valid; packets then 20 ms later stay in time but are
+/// not folded -- the 600th of them sits exactly `FROZEN_S` of audio past the last fold (not frozen),
+/// the 601st is frozen; back on the grid, the next folded packet thaws it. Nothing re-anchors.
+#[test]
+fn a_fit_with_nothing_folded_for_three_seconds_is_frozen_and_thaws_on_a_fold() {
+    let mut t = Timeline::new();
+    let per_s = 48_000 / 240u64;
+    let at = |k: u64| T0 + samples_to_ns((k + 1) * 240, RATE);
+    for k in 0..12 * per_s {
+        t.packet(at(k), k as u32, 240, RATE, 2, R40);
+    }
+    assert!(t.fit_valid && !t.fit_frozen());
+    let off = 20 * NS_PER_MS;
+    let k0 = 12 * per_s;
+    for j in 0..600 {
+        let d = t.packet(at(k0 + j) + off, (k0 + j) as u32, 240, RATE, 2, R40);
+        assert_eq!(d.event, Event::Packet, "{d:?}");
+        assert!(!t.fit_frozen(), "packet {j}: not yet past three seconds");
+    }
+    assert_eq!(t.next_pos - t.last_fold_end, FROZEN_S * u64::from(RATE));
+    let d = t.packet(at(k0 + 600) + off, (k0 + 600) as u32, 240, RATE, 2, R40);
+    assert_eq!(d.event, Event::Packet, "{d:?}");
+    assert!(t.fit_frozen(), "one packet past three seconds: frozen");
+    // back on the grid (after the 20 ms the arrivals catch up): a fold thaws it
+    let mut k = k0 + 601;
+    let mut prev = at(k0 + 600) + off;
+    while t.fit_frozen() {
+        let now = at(k).max(prev + 1_000);
+        prev = now;
+        t.packet(now, k as u32, 240, RATE, 2, R40);
+        k += 1;
+        assert!(k < k0 + 700, "the fit never thawed");
+    }
+    assert!(t.fit_valid);
+    assert_eq!((t.re_anchors, t.late), (0, 0));
+}
+
+/// Review round 5: a starve can come on the FIRST packet after an anchor (it arrives more than a
+/// second after the anchor did) and INSIDE a hold (a gap of more than a second in the first
+/// second): each is one re-anchor that holds again; nothing was ever output.
+#[test]
+fn a_starve_on_the_first_packet_after_an_anchor_or_inside_the_hold_re_anchors() {
+    let mut t = Timeline::new();
+    let d = t.packet(on_time(0), 0, 256, RATE, 2, R40);
+    assert_eq!(d.event, Event::Anchor);
+    let t1 = on_time(1) + 1_500 * NS_PER_MS;
+    let d = t.packet(t1, 1, 256, RATE, 2, R40);
+    assert_eq!(
+        (d.event, d.reason, d.late_ns),
+        (
+            Event::Reanchor,
+            Reason::Starve,
+            (on_time(1) + 1_500 * NS_PER_MS - on_time(0)) as i64
+        ),
+        "{d:?}"
+    );
+    for k in 2..101u64 {
+        let d = t.packet(
+            t1 + samples_to_ns((k - 1) * 256, RATE),
+            k as u32,
+            256,
+            RATE,
+            2,
+            R40,
+        );
+        assert_eq!(d.event, Event::Hold, "{d:?}");
+    }
+    let last = t1 + samples_to_ns(99 * 256, RATE);
+    let t2 = last + 1_500 * NS_PER_MS;
+    let d = t.packet(t2, 101, 256, RATE, 2, R40);
+    assert_eq!(
+        (d.event, d.reason, d.late_ns),
+        (Event::Reanchor, Reason::Starve, (1_500 * NS_PER_MS) as i64),
+        "a starve inside the hold: {d:?}"
+    );
+    for k in 102..101 + H {
+        let d = t.packet(
+            t2 + samples_to_ns((k - 101) * 256, RATE),
+            k as u32,
+            256,
+            RATE,
+            2,
+            R40,
+        );
+        assert_eq!(d.event, Event::Hold, "the new anchor holds: {d:?}");
+    }
+    let d = t.packet(
+        t2 + samples_to_ns(H * 256, RATE),
+        (101 + H) as u32,
+        256,
+        RATE,
+        2,
+        R40,
+    );
+    assert_eq!(d.event, Event::Packet, "{d:?}");
+    assert!(d.lead_in_samples > 0, "its own lead-in: {d:?}");
+    assert_eq!((t.re_anchors, t.late, t.lost), (2, 0, 0));
+}

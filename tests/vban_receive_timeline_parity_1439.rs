@@ -40,7 +40,7 @@ use std::fmt::Write as _;
 use vban_c::{compile_and_run, repo};
 use vban_receive_timeline::{
     clamp_reserve_ms, ns_to_samples, round_half_away, samples_to_ns, scale_ppb, Decision, Event,
-    Reason, Timeline, FIT_WINDOW_S, JUMP_S, OUTLIER_MS, STALE_PACKETS,
+    Reason, Timeline, FIT_WINDOW_S, FROZEN_S, JUMP_S, OUTLIER_MS, STALE_PACKETS,
 };
 
 const HEADER: &str = "vendor/obs-vban/src/vban-receive-timeline.h";
@@ -497,6 +497,61 @@ fn starve_script() -> Vec<Pkt> {
     b.pkts
 }
 
+/// Review round 5: a FROZEN fit and its 3 s boundary. 240-frame packets (200 a second, so three
+/// seconds of audio is exactly 600 packets): 12 s on the grid (the fit is valid), then 4 s of
+/// packets 20 ms later -- in time, but more than the outlier limit off the line, so nothing folds:
+/// the 600th of them sits exactly `FROZEN_S` past the last fold (not frozen yet), the 601st is
+/// frozen -- then back on the grid, where the fit folds again (thawed).
+fn frozen_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    let per_s = 48_000 / 240u64;
+    for k in 0..18 * per_s {
+        let off = if (12 * per_s..16 * per_s).contains(&k) {
+            20 * MS
+        } else {
+            0
+        };
+        b.send(Pkt {
+            now: 2_000_000_000 + samples_to_ns((k + 1) * 240, 48_000) + off,
+            nu: k as u32,
+            frames: 240,
+            rate: 48_000,
+            channels: 2,
+            reserve_ns: 40 * MS,
+            reset: false,
+        });
+    }
+    b.pkts
+}
+
+/// Review round 5: a starve on the FIRST packet after an anchor (it comes 1.5 s after it), then a
+/// starve inside the new anchor's hold (100 packets in, a 1.5 s gap), then a clean stretch.
+fn hold_starve_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    let pkt = |now: u64, nu: u64| Pkt {
+        now,
+        nu: nu as u32,
+        frames: 256,
+        rate: 48_000,
+        channels: 2,
+        reserve_ns: 40 * MS,
+        reset: false,
+    };
+    let at = |k: u64| 2_000_000_000 + samples_to_ns((k + 1) * 256, 48_000);
+    b.send(pkt(at(0), 0));
+    // the first packet after the anchor, 1.5 s later (its index runs on: a pause)
+    let t1 = at(1) + 1_500 * MS;
+    for k in 1..101u64 {
+        b.send(pkt(t1 + samples_to_ns((k - 1) * 256, 48_000), k));
+    }
+    // 1.5 s of nothing inside the new anchor's hold, then a clean stretch
+    let t2 = b.now + 1_500 * MS;
+    for k in 101..600u64 {
+        b.send(pkt(t2 + samples_to_ns((k - 101) * 256, 48_000), k));
+    }
+    b.pkts
+}
+
 /// Arrivals OUT of order (never from the real monotonic clock, built without the Builder's clamp):
 /// one before the anchor, one before its bucket's first packet. The C wraps the unsigned offsets;
 /// the Rust twin must wrap identically (review round 3: it panicked in a debug build).
@@ -559,6 +614,8 @@ fn scripts() -> Vec<Vec<Pkt>> {
         starve_script(),
         wrap_script(),
         out_of_order_script(),
+        frozen_script(),
+        hold_starve_script(),
     ];
     let configs: [(f64, u32, u32, u32, u64, u64); 6] = [
         (50.0, 256, 48_000, 2, 40, 60),
@@ -949,18 +1006,27 @@ fn the_scripts_reach_every_boundary_1439() {
         "a late first packet past the hold (dropped, nothing filled)",
         "a lead-in before a stretch's first output",
         "a stretch's first output whose stamp had passed (no lead-in)",
+        "frozen fits (valid, nothing folded for over FROZEN_S of audio)",
+        "a fit exactly FROZEN_S of audio past its last fold (not frozen yet)",
+        "a frozen fit thawing (a packet folds again)",
+        "starve re-anchors during the hold",
+        "a starve on the first packet after an anchor",
+        "starve re-anchors carrying their span (since the last in-time arrival)",
     ];
-    let mut hits = [0usize; 37];
+    let mut hits = [0usize; 43];
     for sc in scripts() {
         let mut t = Timeline::new();
         // the last arrival that was in time (an anchor, a held or an emitted packet), harness-side
         let mut last_in = 0u64;
+        // the previous decision's event
+        let mut prev_event = Event::Stale;
         for p in &sc {
             if p.reset {
                 t = Timeline::new();
             }
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
             let emitted_before = t.emitted;
+            let frozen_before = t.fit_frozen();
             let (base_before, base_pos_before, next_before) =
                 (t.base_stamp_ns, t.base_pos, t.next_pos);
             let since_in = p.now as i64 - last_in as i64;
@@ -1078,6 +1144,19 @@ fn the_scripts_reach_every_boundary_1439() {
                 !emitted_before && (d.event == Event::Packet || d.silence_samples > 0);
             hits[35] += usize::from(first_output && d.lead_in_samples > 0);
             hits[36] += usize::from(first_output && d.lead_in_samples == 0);
+            hits[37] += usize::from(t.fit_frozen());
+            hits[38] += usize::from(
+                t.fit_valid
+                    && t.next_pos.saturating_sub(t.last_fold_end) == FROZEN_S * u64::from(t.rate)
+                    && !t.fit_frozen(),
+            );
+            hits[39] += usize::from(frozen_before && t.fit_valid && !t.fit_frozen());
+            if (d.event, d.reason) == (Event::Reanchor, Reason::Starve) {
+                hits[40] += usize::from(anchored && next_before <= u64::from(p.rate));
+                hits[41] += usize::from(matches!(prev_event, Event::Anchor | Event::Reanchor));
+                hits[42] += usize::from(d.late_ns == since_in);
+            }
+            prev_event = d.event;
             if matches!(
                 d.event,
                 Event::Anchor | Event::Reanchor | Event::Hold | Event::Packet
