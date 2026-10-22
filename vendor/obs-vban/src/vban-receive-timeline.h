@@ -74,6 +74,9 @@
 /* No packet in time for this long on our clock (an outage, a sender pause, every packet late on a
  * network delay step) = one full re-anchor, a starve (ROZHODNUTE 6345255813 item 2). */
 #define VBAN_RECV_PERSIST_S 1
+/* Nothing folded for this much of the sender's audio while the fit is valid = the fit is FROZEN (it holds
+ * its last rate and level; the status line says so, review round 4). Never a re-anchor. */
+#define VBAN_RECV_FROZEN_S 3
 /* A forward nuFrame jump over this much audio is a sender restart. */
 #define VBAN_RECV_JUMP_S 2
 /* A duplicate, or a nuFrame at most this many packets behind the last one, is a stale packet (a
@@ -146,6 +149,7 @@ struct vban_recv_timeline {
 	int64_t step_ppb;       /* the stamp step's deviation from nominal */
 	int64_t last_k;         /* the bucket of the last packet's end position */
 	uint64_t last_intime_ns; /* the arrival of the last packet that came in time */
+	uint64_t last_fold_end;  /* the end position of the last packet folded into the fit */
 	struct vban_recv_bucket buckets[VBAN_RECV_FIT_WINDOW_S];
 	bool fit_valid;
 	int64_t fit_ppb; /* the fitted step deviation (positive = the sender's clock is slow) */
@@ -253,6 +257,7 @@ static inline void vban_recv_fold(struct vban_recv_timeline *t, int64_t k, uint6
 	b->sv += v;
 	b->suu += u * u;
 	b->suv += u * v;
+	t->last_fold_end = x;
 }
 
 /* The arrival (ns since the anchor's arrival) the reference line expects at end position X: the
@@ -263,6 +268,13 @@ static inline double vban_recv_reference(const struct vban_recv_timeline *t, uin
 	if (t->fit_valid)
 		return t->fit_ybar + t->fit_b * ((double)x - t->fit_xbar);
 	return (double)((int64_t)vban_recv_stamp_at(t, x) - (int64_t)t->reserve_eff_ns - (int64_t)t->anchor_ns);
+}
+
+/* Whether the fit is FROZEN: valid, but nothing folded for VBAN_RECV_FROZEN_S of the sender's audio. */
+static inline bool vban_recv_fit_frozen(const struct vban_recv_timeline *t)
+{
+	return t->fit_valid && t->next_pos > t->last_fold_end &&
+	       t->next_pos - t->last_fold_end > (uint64_t)VBAN_RECV_FROZEN_S * t->rate;
 }
 
 /* Start (or restart) the timeline at this packet. */

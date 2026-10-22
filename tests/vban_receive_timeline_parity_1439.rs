@@ -631,7 +631,7 @@ fn bits(x: f64) -> u64 {
 fn line(t: &Timeline, d: Decision) -> String {
     let b = &t.buckets[(t.last_k.rem_euclid(FIT_WINDOW_S as i64)) as usize];
     format!(
-        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} | {} {} {} {} {} {} {} {} | {}",
+        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} {} | {} {} {} {} {} {} {} {} | {}",
         d.event as i32,
         d.reason as i32,
         d.silence_samples,
@@ -665,6 +665,8 @@ fn line(t: &Timeline, d: Decision) -> String {
         t.late,
         t.re_anchors,
         t.stale,
+        t.last_fold_end,
+        u8::from(t.fit_frozen()),
         b.k,
         b.n,
         b.x0,
@@ -758,7 +760,7 @@ static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d
 	       t->next_pos, t->base_stamp_ns, t->base_pos, t->step_ppb, t->last_k, t->last_intime_ns,
 	       t->fit_valid ? 1 : 0, t->fit_ppb, bits(t->fit_b), bits(t->fit_xbar), bits(t->fit_ybar), t->phase_ns,
 	       t->received, t->lost, t->silence_samples, t->late, t->re_anchors);
-	printf("%" PRIu64 " | ", t->stale);
+	printf("%" PRIu64 " %" PRIu64 " %d | ", t->stale, t->last_fold_end, vban_recv_fit_frozen(t) ? 1 : 0);
 	printf("%" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | %" PRIu64 "\n",
 	       b->k, b->n, b->x0, b->y0, bits(b->su), bits(b->sv), bits(b->suu), bits(b->suv),
 	       vban_recv_stamp_at(t, t->next_pos + 1000));

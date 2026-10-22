@@ -73,6 +73,9 @@ pub const OUTLIER_MS: u64 = 10;
 /// No packet in time for this long on our clock (an outage, a sender pause, every packet late on a
 /// network delay step) = one full re-anchor, a starve (ROZHODNUTÉ 6345255813 item 2).
 pub const PERSIST_S: u64 = 1;
+/// Nothing folded for this much of the sender's audio while the fit is valid = the fit is FROZEN
+/// (it holds its last rate and level; the status line says so, review round 4). Never a re-anchor.
+pub const FROZEN_S: u64 = 3;
 /// A forward `nuFrame` jump over this much audio is a sender restart.
 pub const JUMP_S: u64 = 2;
 /// A duplicate, or an index at most this many packets behind the last one, is a STALE packet (a
@@ -233,6 +236,8 @@ pub struct Timeline {
     pub last_k: i64,
     /// The arrival of the last packet that came in time (an anchor, a held or an emitted packet).
     pub last_intime_ns: u64,
+    /// The end position of the last packet folded into the fit.
+    pub last_fold_end: u64,
     pub buckets: [Bucket; FIT_WINDOW_S],
     pub fit_valid: bool,
     /// The fitted step deviation (positive = the sender's clock is slow).
@@ -338,6 +343,7 @@ impl Timeline {
             step_ppb: 0,
             last_k: 0,
             last_intime_ns: 0,
+            last_fold_end: 0,
             buckets: [Bucket::default(); FIT_WINDOW_S],
             fit_valid: false,
             fit_ppb: 0,
@@ -384,6 +390,7 @@ impl Timeline {
         b.sv += v;
         b.suu += u * u;
         b.suv += u * v;
+        self.last_fold_end = x;
     }
 
     /// The arrival (ns since the anchor's arrival) the reference line expects at end position
@@ -394,6 +401,13 @@ impl Timeline {
             return self.fit_ybar + self.fit_b * (x as f64 - self.fit_xbar);
         }
         (self.stamp_at(x) as i64 - self.reserve_eff_ns as i64 - self.anchor_ns as i64) as f64
+    }
+
+    /// Whether the fit is FROZEN: valid, but nothing folded for [`FROZEN_S`] of the sender's audio
+    /// (every packet more than the outlier limit off the line). Display only.
+    pub fn fit_frozen(&self) -> bool {
+        self.fit_valid
+            && self.next_pos.saturating_sub(self.last_fold_end) > FROZEN_S * u64::from(self.rate)
     }
 
     /// The sender's clock offset in ppm from the fit (positive = the sender runs fast), 0 before
