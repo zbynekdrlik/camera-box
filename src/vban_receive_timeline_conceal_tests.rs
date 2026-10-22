@@ -187,3 +187,30 @@ fn a_packet_ends_a_concealed_run_and_a_reorder_plays_inside_one() {
         "the reorder came before the deadline of k - 1: the run is one slot"
     );
 }
+
+/// The run limit is the decision's own, never only the caller's store: whatever head the caller
+/// hands in, a run never reaches `CONCEAL_MAX_SLOTS` + 1 concealed slots (in the source the head
+/// only ever comes closer, so `run so far + next` never grows; a head that moved away -- a store
+/// that lost a packet -- still ends the run in silence).
+#[test]
+fn a_run_never_passes_the_limit_whatever_head_the_caller_hands_in() {
+    let mut t = Timeline::new();
+    super::tests::through_the_hold(&mut t, 0);
+    let now = on_time(H);
+    let d = t.packet(now, H as u32, 256, 48_000, 2, 40 * NS_PER_MS);
+    assert_eq!(t.due(now, Some(d.pos)).kind, Due::LeadIn);
+    assert_eq!(t.due(now, Some(d.pos)).kind, Due::Packet);
+    // slot H + 1 missing, the next stored packet three slots on: concealed
+    let s1 = (H + 1) * 256;
+    let a = t.due(t.deadline_at(s1), Some(s1 + 3 * 256));
+    assert_eq!((a.kind, a.toward_next), (Due::Conceal, false), "{a:?}");
+    // the head moved away by a slot (a store that lost a packet): one slot so far + three on = four
+    let s2 = s1 + 256;
+    let b = t.due(t.deadline_at(s2), Some(s2 + 3 * 256));
+    assert_eq!(
+        b.kind,
+        Due::Silence,
+        "a fourth concealed slot would pass the limit: {b:?}"
+    );
+    assert_eq!((t.lost, t.concealed), (2, 1));
+}

@@ -46,15 +46,30 @@ fn conceal_run(prev: &[f64], next: f64, run: u32) -> Vec<f64> {
 }
 
 #[test]
-fn the_taylor_cosine_matches_cos_within_1e_10() {
-    for k in 0..=10_000u32 {
-        let u = f64::from(k) / 10_000.0;
+fn the_taylor_cosine_matches_cos_within_1e_14() {
+    // the documented bound (the series: 1.2e-15 measured); a series one term short is 4e-13 off
+    for k in 0..=100_000u32 {
+        let u = f64::from(k) / 100_000.0;
         let d = (cospi(u) - (PI * u).cos()).abs();
-        assert!(d < 1e-10, "cos(pi {u}): off by {d:e}");
+        assert!(d < 1e-14, "cos(pi {u}): off by {d:e}");
     }
     assert_eq!(cospi(0.0), 1.0);
     assert_eq!(cospi(1.0), -1.0);
     assert!(cospi(0.5).abs() < 1e-15);
+}
+
+/// The crossfade is RAISED-COSINE (ROZHODNUTÉ 6352253147 (b)), not merely some rising curve: a
+/// linear ramp passes every other weight test but leaves the slot's last sample 2 % of the bridged
+/// gap short of the next packet.
+#[test]
+fn the_weights_are_the_raised_cosine() {
+    for n in [1u32, 2, 3, 12, 48, 59] {
+        for i in 0..n {
+            let want = 0.5 - 0.5 * (PI * f64::from(i + 1) / f64::from(n + 1)).cos();
+            let d = (weight(i, n) - want).abs();
+            assert!(d < 1e-14, "weight({i}, {n}) off the raised cosine by {d:e}");
+        }
+    }
 }
 
 #[test]
