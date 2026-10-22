@@ -98,8 +98,10 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   first packet past it is output on the final line, so libobs never sees a stamp step (it would
   append one under 70 ms and walk it out at the stamp-basis ASRC's 300 ppm). ~1 s of silence at OBS
   start and after a full re-anchor.
-- **Lead-in (review round 5).** A stretch's first output carries silence from the packet's arrival up
-  to that output's stamp, ending exactly there (`lead_in_ms=` on the `emitting:` line). libobs resets a
+- **Lead-in (review round 5).** A stretch's first output is always an in-time packet (a slot is filled
+  only once the stretch has output its first packet; a late packet before it is dropped with no fill)
+  and carries silence from its arrival up to its stamp, ending exactly there (`lead_in_ms=` on the
+  `emitting:` line). libobs resets a
   source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`) off where its previous one ended and
   puts it at the instant it arrived, which a starve + its hold always cause; the lead-in starts there,
   so the output still lands on its stamp (without it the new stretch started one R early).
@@ -121,9 +123,10 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   its slot, with the slots lost right before it, goes out as silence at once on the unchanged line.
   The latency never moves (the round-3 late shift is withdrawn).
   At 0 ms OBS buffering that silence lands after its window was mixed, so OBS's realized latency
-  steps up by about the lateness and walks back at 300 ppm: 34-38 ms for a 90 ms hiccup, and up to
-  the outage's length for an outage under a second (+455 ms for 500 ms, ~25 min to walk back). A
-  known limit, the open design question on the ticket.
+  steps up and walks back at 300 ppm: 34-38 ms for a 90 ms hiccup, 7.5-28.8 ms for a loss a little
+  longer than R minus one packet. A longer outage finds the source cleared by libobs and the fill is
+  placed at its stamp (no step, while an encoder runs). A known limit, the open design question on
+  the ticket.
 - **Re-anchor (one counted event, then the hold).** A starve -- no packet in time for 1 s on our clock
   (an outage, a sender pause, every packet late on a delay step), `reason=starve`, nothing filled
   after the fact -- a `nuFrame` further behind (a sender restart), an index jump of more than 2 s of
