@@ -692,6 +692,19 @@ fn an_outage_of_1_5_s_is_one_starve_re_anchor_and_no_late_fill_1439() {
         "issue 1439: `{}`",
         reanchors[0]
     );
+    // review round 5: the line names the starve span (283 packet slots since the last in-time one)
+    let span: f64 = reanchors[0]
+        .split("starve_ms=")
+        .nth(1)
+        .and_then(|r| r.split(' ').next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(f64::NAN);
+    let want = (gap + 1) as f64 * f64::from(FRAMES) * 1000.0 / RATE as f64;
+    assert!(
+        (span - want).abs() < 0.1,
+        "issue 1439: starve_ms={span} (want {want:.1}): `{}`",
+        reanchors[0]
+    );
     assert!(
         outs.iter().all(|o| !o.zero),
         "issue 1439: nothing is filled after the fact: {:?}",
