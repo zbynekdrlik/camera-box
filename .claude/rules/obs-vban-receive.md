@@ -4,6 +4,7 @@ paths:
   - "vendor/obs-vban/src/vban-receive-timeline.h"
   - "src/vban_receive_timeline.rs"
   - "src/vban_receive_timeline_bench.rs"
+  - "src/vban_receive_timeline_tests.rs"
   - "tests/vban_receive_timeline_parity_1439.rs"
   - "tests/vban_source_loss_1439.rs"
   - "tests/vban_receive_wiring_1439.rs"
