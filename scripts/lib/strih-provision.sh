@@ -97,6 +97,11 @@ if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-hub-unit.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-hub-unit.sh"
 fi
+# issue 1439: verify item 9 on a box whose program audio is the console's VBAN into the obs-vban source.
+if ! declare -F strih_program_vban_grade >/dev/null; then
+  # shellcheck source=scripts/lib/strih-program-vban.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-program-vban.sh"
+fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4

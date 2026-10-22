@@ -119,6 +119,10 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_ROLE",
     "STRIH_DANTE_GM",
     "STRIH_PROGRAM_AUDIO_SAMPLER",
+    // issue 1439: the console's VBAN program straight into the OBS obs-vban source (stream role).
+    "STRIH_PROGRAM_VBAN_STREAMS",
+    "STRIH_PROGRAM_VBAN_PORT",
+    "STRIH_PROGRAM_VBAN_RESERVE_MS",
     "STRIH_PROGRAM_SENDER",
     "STRIH_VENUE",
     "STRIH_CAMERA_DEV1_NET",
@@ -174,6 +178,10 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_ROLE=strih",
         "STRIH_DANTE_GM=video-clock.lan",
         "STRIH_PROGRAM_AUDIO_SAMPLER=on",
+        // issue 1439: the strih role keeps its hub-fed program until its own slice.
+        "STRIH_PROGRAM_VBAN_STREAMS=none",
+        "STRIH_PROGRAM_VBAN_PORT=none",
+        "STRIH_PROGRAM_VBAN_RESERVE_MS=none",
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
         "STRIH_CAMERA_DEV1_NET=direct",

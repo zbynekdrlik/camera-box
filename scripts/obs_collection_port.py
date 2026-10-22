@@ -10,8 +10,10 @@ Three uses, as presets (every preset value can be overridden on the command line
 
 * `--preset stream-pp`: the Windows stream-pp collection -> the Linux stream box.
   - keeps the scenes PRO / Development / PRE / POST and every scene and source they nest; drops the rest;
-  - the program ASIO input `Zvuk z mixu` becomes `pulse_input_capture` on `strih-program-source`
-    (the same binding `strih_scenes.py` seeds);
+  - the program ASIO input `Zvuk z mixu` becomes the obs-vban receive source on lv1's VBAN `stream`
+    (UDP 6980, the fixed 40 ms Receive Buffer; issue 1439: no hub, no PipeWire on the stream role),
+    the same source `strih_scenes.py` seeds (`--program-audio-vban PORT:STREAM:MS`, or `none` for
+    the PipeWire capture); its volume, mute, tracks, monitoring, sync offset and filters stay;
   - `NDI® 2ME PGM` (also spelled `NDIAr` / `NDIÂ®` / `NDI(R)`) <- `OBS-PP (2ME PGM)` becomes `NDI 2ME PGM` <- `STRIH-PP (2ME PGM)` (the input the
     stream seed manifest declares);
   - drops the YouTube player (`ytfast*`) and every input / filter / module the Linux bundle does not
@@ -49,6 +51,10 @@ import re
 import sys
 from urllib.parse import urlsplit, urlunsplit
 
+# issue 1439: the obs-vban source definition, shared with strih_scenes.py (a pure module next to this one).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from program_audio_vban import VBAN_SOURCE_KIND, vban_source_settings  # noqa: E402
+
 # The program-audio binding, pinned equal to scripts/strih_scenes.py by the pytest (strih_scenes
 # imports websocket at load, so this pure tool does not import it).
 PROGRAM_AUDIO_KIND = "pulse_input_capture"
@@ -60,6 +66,7 @@ LINUX_INPUT_KINDS = frozenset({
     "ffmpeg_source", "text_ft2_source", "pulse_input_capture", "pulse_output_capture",
     "alsa_input_capture", "jack_output_capture", "v4l2_input", "xshm_input", "xcomposite_input",
     "pipewire-desktop-capture-source", "pipewire-window-capture-source", "pipewire-screen-capture-source",
+    VBAN_SOURCE_KIND,  # issue 1439: the strih bundle stages the vendored obs-vban
 })
 
 # Filter kinds the Linux bundle provides: OBS's own obs-filters + the vendored DistroAV's filters (the NDI
@@ -101,6 +108,9 @@ PRESETS = {
         "name": "stream-pp",
         "keep_scenes": ["PRO", "Development", "PRE", "POST"],
         "program_audio_input": "Zvuk z mixu",
+        # issue 1439: lv1's VBAN `stream` into the obs-vban source, pinned equal to the stream-pp box facts
+        # (STRIH_PROGRAM_VBAN_PORT / _STREAMS / _RESERVE_MS) by the pytest.
+        "program_audio_vban": {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 40},
         # The Windows collection spells it with a real U+00AE (the recon report printed it "NDIAr");
         # source_name_spellings matches the other spellings of the same name too.
         "source_renames": {"NDI\u00ae 2ME PGM": "NDI 2ME PGM"},
@@ -212,16 +222,30 @@ def _reachable(coll, roots):
     return seen
 
 
-def _convert_program_audio(coll, name, rep):
+def _convert_program_audio(coll, name, rep, vban=None):
+    """The program audio input NAME becomes the PipeWire capture, or with VBAN (issue 1439: a
+    {port, stream_name, receive_buffer_ms} dict) the obs-vban receive source. Only the kind and the
+    settings change: the source object keeps its volume, mute, mixers, balance, sync offset,
+    monitoring and filters (they are keys of the same object in the collection)."""
     src = next((s for s in _all(coll) if s.get("name") == name), None)
     if src is None:
         raise PortError('the program audio input "%s" is not in the collection' % name)
+    if vban:
+        try:
+            kind, settings = VBAN_SOURCE_KIND, vban_source_settings(
+                vban.get("port"), vban.get("stream_name"), vban.get("receive_buffer_ms"))
+        except ValueError as e:
+            raise PortError("the program audio VBAN settings are invalid: %s" % e)
+        where = "VBAN stream '%s' on UDP %d (Receive Buffer %d ms)" % (
+            settings["stream_name"], settings["port"], settings["receive_buffer_ms"])
+    else:
+        kind, settings = PROGRAM_AUDIO_KIND, dict(PROGRAM_AUDIO_SETTINGS)
+        where = PROGRAM_AUDIO_SETTINGS["device_id"]
     old = (src.get("id"), src.get("settings"))
-    src["id"] = src["versioned_id"] = PROGRAM_AUDIO_KIND
-    src["settings"] = dict(PROGRAM_AUDIO_SETTINGS)
-    if old != (PROGRAM_AUDIO_KIND, PROGRAM_AUDIO_SETTINGS):
-        rep.append('CONVERT source "%s" %s -> %s on %s' % (name, old[0], PROGRAM_AUDIO_KIND,
-                                                          PROGRAM_AUDIO_SETTINGS["device_id"]))
+    src["id"] = src["versioned_id"] = kind
+    src["settings"] = settings
+    if old != (kind, settings):
+        rep.append('CONVERT source "%s" %s -> %s on %s' % (name, old[0], kind, where))
 
 
 def gdiplus_to_ft2(settings):
@@ -483,7 +507,7 @@ def port(collection, options):
 
     # 3. the program audio input, then the kind conversions, then the kinds Linux does not have.
     if o.get("program_audio_input"):
-        _convert_program_audio(coll, o["program_audio_input"], rep)
+        _convert_program_audio(coll, o["program_audio_input"], rep, o.get("program_audio_vban"))
     _convert_kinds(coll, rep)
     _drop_names(coll, {s["name"] for s in _all(coll) if s.get("id") not in keep_kinds},
                 rep, lambda s: "kind not in the Linux bundle")
@@ -542,6 +566,17 @@ def _pairs(values, flag):
     return out
 
 
+def _vban_arg(text):
+    """`--program-audio-vban PORT:STREAM:MS` -> the preset's dict; `none` -> None (the PipeWire
+    capture). A malformed value refuses."""
+    if text == "none":
+        return None
+    parts = text.split(":")
+    if len(parts) != 3 or not parts[0].isdigit() or not parts[2].isdigit():
+        raise PortError("--program-audio-vban %r: expected PORT:STREAM:MS or none" % text)
+    return {"port": int(parts[0]), "stream_name": parts[1], "receive_buffer_ms": int(parts[2])}
+
+
 def options_from_args(a):
     o = preset_options(a.preset)
     if a.name:
@@ -552,6 +587,8 @@ def options_from_args(a):
         o["keep_scenes"] = None
     if a.program_audio_input is not None:
         o["program_audio_input"] = a.program_audio_input or None
+    if a.program_audio_vban is not None:
+        o["program_audio_vban"] = _vban_arg(a.program_audio_vban)
     if a.media_dir is not None:
         o["media_dir"] = a.media_dir or None
     o["source_renames"].update(_pairs(a.rename_source, "--rename-source"))
@@ -579,6 +616,7 @@ def _parser():
     p.add_argument("--keep-scene", action="append")
     p.add_argument("--all-scenes", action="store_true")
     p.add_argument("--program-audio-input")
+    p.add_argument("--program-audio-vban", help="PORT:STREAM:MS, or none (issue 1439)")
     p.add_argument("--media-dir")
     p.add_argument("--rename-source", action="append")
     p.add_argument("--sender-prefix", action="append")

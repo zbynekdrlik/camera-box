@@ -941,7 +941,7 @@ def test_the_hub_is_graded_live_on_the_strih_role_only():
     assert _applies("stream-pp", "13-hub-live").startswith("SKIP ")
 
 
-def _item16(tmp_path, box, enabled, active, installed=True):
+def _item16(tmp_path, box, enabled, active, installed=True, env=None):
     v = VERIFY.read_text()
     item = v[v.index("# 16) intercom hub unit"):v.index("# 17)")]
     unit = tmp_path / "intercom-hub.service"
@@ -956,7 +956,7 @@ def _item16(tmp_path, box, enabled, active, installed=True):
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
             'strih_intercom_hub_crash_loop() { return 1; }\nstrih_intercom_hub_cred_grade() { :; }\n'
             'strih_intercom_hub_memlock_grade() { :; }\nWS_HOST=192.0.2.1\n' + item)
-    r = _bash(body, box=box, env={"PATH": "%s:%s" % (stub, os.environ["PATH"])})
+    r = _bash(body, box=box, env=dict(env or {}, PATH="%s:%s" % (stub, os.environ["PATH"])))
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
 
@@ -972,8 +972,28 @@ def test_item_16_passes_an_enabled_active_hub(tmp_path):
     assert _item16(tmp_path, "strih-snv", "enabled", "active").startswith("PASS")
 
 
-def test_item_16_only_reports_an_inactive_hub_on_the_stream_role(tmp_path):
-    assert _item16(tmp_path, "stream-pp", "enabled", "inactive").startswith("NOTE")
+def _no_hub_env(tmp_path):
+    """issue 1439: the hub paths of the stream role's "no hub" grade, moved into the test dir."""
+    return {"STRIH_HUB_UNIT_FILE": str(tmp_path / "intercom-hub.service"),
+            "STRIH_HUB_DROPIN_DIR": str(tmp_path / "intercom-hub.service.d"),
+            "STRIH_HUB_BIN": str(tmp_path / "intercom-hub"), "STRIH_HUB_CONFIG_DIR": str(tmp_path / "etc-intercom-hub")}
+
+
+def test_item_16_fails_a_hub_left_on_the_stream_role_1439(tmp_path):
+    # issue 1439 (design 6338127636): the stream role runs NO hub (it was a report-only NOTE before);
+    # an installed one -- even inactive -- FAILs, naming what is left.
+    out = _item16(tmp_path, "stream-pp", "enabled", "inactive", env=_no_hub_env(tmp_path))
+    assert out.startswith("FAIL") and "intercom-hub.service" in out and "step 13" in out, out
+
+
+def test_item_16_passes_no_hub_on_the_stream_role_1439(tmp_path):
+    out = _item16(tmp_path, "stream-pp", "disabled", "inactive", installed=False, env=_no_hub_env(tmp_path))
+    assert out.startswith("PASS") and "no intercom hub on this box" in out, out
+
+
+def test_item_16_fails_a_running_hub_on_the_stream_role_1439(tmp_path):
+    out = _item16(tmp_path, "stream-pp", "disabled", "active", installed=False, env=_no_hub_env(tmp_path))
+    assert out.startswith("FAIL") and "intercom-hub.service active" in out, out
 
 
 def test_item_16_fails_a_missing_hub_on_the_strih_role(tmp_path):

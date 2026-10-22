@@ -91,6 +91,17 @@ from drm_output_config import (  # noqa: E402,F401
     write_drm_outputs,
     write_drm_view,
 )
+# issue 1439: the stream role's program-audio input is the obs-vban receive source (installed next to
+# this file); its settings and the keep-the-operator-state re-create live in ONE module the collection
+# port shares.
+from program_audio_vban import (  # noqa: E402,F401
+    VBAN_SOURCE_KIND,
+    input_recreate,
+    input_state_read,
+    kind_available,
+    parse_program_audio_vban,
+    settings_differences,
+)
 
 
 def certified_genlock_settings(latency):
@@ -210,15 +221,16 @@ def program_audio_input_kind_from_inputs(inputs, name=AUDIO_INPUT_NAME):
     return None
 
 
-def audio_input_action(exists, current_kind):
-    """Pure: the ONE allowed action for the `ASIO zvuk` program-audio input.
-    - absent -> 'create' (CreateInput pulse_input_capture on strih-program-source)
+def audio_input_action(exists, current_kind, want_kind=AUDIO_INPUT_KIND):
+    """Pure: the ONE allowed action for the program-audio input (WANT_KIND: the pulse capture, or on the
+    stream role the obs-vban source, issue 1439).
+    - absent -> 'create' (CreateInput WANT_KIND)
     - present but asio_input_capture (the un-creatable Windows kind) -> 'replace' (Remove + Create)
-    - present as pulse_input_capture -> 'ok' (nothing to do)
-    - present as some OTHER kind -> 'replace' (heal it to the pulse capture)."""
+    - present as WANT_KIND -> 'ok' (nothing to do)
+    - present as some OTHER kind -> 'replace' (heal it to WANT_KIND)."""
     if not exists:
         return "create"
-    if current_kind == AUDIO_INPUT_KIND:
+    if current_kind == want_kind:
         return "ok"
     return "replace"
 
@@ -558,43 +570,45 @@ def _current_scene_name(obs):
     return scenes[0].get("sceneName") if scenes else None
 
 
-def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME):
-    """The ONE allowed create/replace (issue 1344): ensure the `ASIO zvuk` program-audio input exists
-    as pulse_input_capture on strih-program-source (the OBS program capture). A missing input is
-    CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED + recreated;
-    a correct pulse_input_capture is left alone. Returns a short status string for the log."""
+def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
+    """The ONE allowed create/replace (issue 1344): ensure the program-audio input NAME exists as
+    pulse_input_capture on strih-program-source (the OBS program capture), or, given VBAN (the obs-vban
+    source settings of the stream role's manifest, issue 1439), as the obs-vban receive source. A missing
+    input is CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED +
+    recreated keeping the operator's state (every scene and the item's visibility, volume, mute,
+    monitoring, tracks, balance, sync offset, filters); an input of the right kind is left alone (its
+    settings are the operator's; a difference from the box facts is named in the status). An obs-vban
+    kind OBS has not loaded (a bundle without the plugin) never removes anything. Returns a short status
+    string for the log."""
+    want_kind = VBAN_SOURCE_KIND if vban else AUDIO_INPUT_KIND
+    want_settings = dict(vban) if vban else program_audio_input_settings()
     inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
     exists = any(i.get("inputName") == name for i in inputs)
     kind = program_audio_input_kind_from_inputs(inputs, name)
-    action = audio_input_action(exists, kind)
+    action = audio_input_action(exists, kind, want_kind)
     if action == "ok":
-        return "matched"
+        if not vban:
+            return "matched"
+        current = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True) or {}).get("inputSettings")
+        diff = settings_differences(current, want_settings)
+        return "matched" if not diff else "matched (the operator's settings differ from the box facts: %s)" % (
+            "; ".join(diff))
+    if vban and not kind_available(obs, want_kind):
+        return "kept %s: OBS has no %s source loaded (deploy the strih bundle with obs-vban, issue 1439)" % (
+            kind or "absent", want_kind)
     scene = _current_scene_name(obs)
     if scene is None:
         return "no-scene (deferred)"
-    keep_scenes, offset = [], None
-    if action == "replace":
-        # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
-        # collection carries it in scenes the seed plan does not name).
-        keep_scenes = _scenes_holding(obs, name)
-        offset = (obs.req("GetInputAudioSyncOffset", {"inputName": name}, ignore_err=True) or {}).get(
-            "inputAudioSyncOffset")
-        obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
-    if keep_scenes:
-        scene = keep_scenes[0]
-    obs.req("CreateInput", {
-        "sceneName": scene,
-        "inputName": name,
-        "inputKind": AUDIO_INPUT_KIND,
-        "inputSettings": program_audio_input_settings(),
-    }, ignore_err=True)
-    for other in keep_scenes[1:]:
-        obs.req("CreateSceneItem", {"sceneName": other, "sourceName": name}, ignore_err=True)
-    if isinstance(offset, int) and offset:
-        obs.req("SetInputAudioSyncOffset", {"inputName": name, "inputAudioSyncOffset": offset}, ignore_err=True)
     if action == "create":
+        obs.req("CreateInput", {"sceneName": scene, "inputName": name, "inputKind": want_kind,
+                                "inputSettings": want_settings}, ignore_err=True)
         return "created"
-    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", len(keep_scenes))
+    # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
+    # collection carries it in scenes the seed plan does not name); issue 1439: and its mixer state.
+    state = input_state_read(obs, name)
+    kept = len(state.get("scenes") or [])
+    input_recreate(obs, name, want_kind, want_settings, state, scene)
+    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", kept)
 
 
 def audio_monitor_type_of(obs, name=AUDIO_INPUT_NAME):
@@ -623,17 +637,6 @@ def ensure_audio_monitor_off(obs, name=AUDIO_INPUT_NAME):
     return "monitor still %s (SetInputAudioMonitorType refused)" % (back or cur)
 
 
-def _scenes_holding(obs, name):
-    """issue 1412: the scenes whose items include the source NAME, in the scene list's order."""
-    out = []
-    for sc in (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes", []) or []:
-        sn = sc.get("sceneName")
-        items = (obs.req("GetSceneItemList", {"sceneName": sn}, ignore_err=True) or {}).get("sceneItems", [])
-        if any(i.get("sourceName") == name for i in items or []):
-            out.append(sn)
-    return out
-
-
 def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
     """issue 1344 item 3 (20.9.2026 live diagnosis): the `ASIO zvuk` program-audio input must be a
     scene item in EVERY declared operator scene, not just the one it happened to be created in --
@@ -658,7 +661,8 @@ def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
     return added
 
 
-def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME, audio_monitor=None):
+def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME, audio_monitor=None,
+              audio_vban=None):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
     CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
@@ -677,6 +681,11 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
     issue 1436: AUDIO_MONITOR "off" (the stream manifest's `program_audio_monitor`) then sets the
     program-audio input to Monitor Off when OBS monitors it (`ensure_audio_monitor_off`, named in its
     status); None never touches monitoring.
+
+    issue 1439: AUDIO_VBAN (the stream manifest's `program_audio_vban`, obs-vban source settings) makes
+    the program-audio input the obs-vban receive source instead of the pulse capture; a STRING is the
+    reason the manifest's block could not be read, and the input is then left untouched (never turned
+    back into the pulse capture).
 
     Then SetStudioModeEnabled. Returns {input: status} for the log."""
     op = _obs_phase2_module()
@@ -728,7 +737,10 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
             result[inp] = "matched"
     # issue 1344: the ONE allowed create/replace — the `ASIO zvuk` program-audio input on the
     # strih-program-source loopback node (the OBS program capture that Failed to create on Linux).
-    audio_status = seed_program_audio_input(obs, audio_name)
+    if isinstance(audio_vban, str):
+        audio_status = "untouched: the manifest's program_audio_vban is unreadable (%s), issue 1439" % audio_vban
+    else:
+        audio_status = seed_program_audio_input(obs, audio_name, audio_vban)
     # issue 1344 item 3: once the input exists, make sure it is a scene item in EVERY declared
     # scene (never only the one it happened to be created/matched in) -- skip when the input itself
     # could not be resolved (no scene existed at all: "no-scene (deferred)"), nothing to attach to.
@@ -860,9 +872,13 @@ def main():
     inputs, _outputs, latency = parse_seed_manifest(manifest_text)
     mode = parse_seed_mode(manifest_text)
     plan = seed_inputs(inputs, latency)
+    try:
+        audio_vban = parse_program_audio_vban(manifest_text)   # issue 1439: None on the strih role
+    except ValueError as e:
+        audio_vban = str(e)
     statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"),
                          audio_name=parse_program_audio_input(manifest_text),
-                         audio_monitor=parse_program_audio_monitor(manifest_text))
+                         audio_monitor=parse_program_audio_monitor(manifest_text), audio_vban=audio_vban)
     print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
           % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))

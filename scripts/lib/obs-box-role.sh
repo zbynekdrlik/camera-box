@@ -16,8 +16,11 @@
 #   step    strih            stream
 #   3       NVENC precheck   the stream encoder by GPU (VAAPI without an NVIDIA dGPU) + the profile
 #   6       strih manifest   one genlocked `NDI 2ME PGM` <- STRIH_PROGRAM_SENDER (class "program"),
-#                            program_audio_input `Zvuk z mixu`; no HDMI output (backend none)
+#                            program_audio_input `Zvuk z mixu` = the obs-vban source on the console's
+#                            VBAN stream (program_audio_vban, issue 1439); no HDMI output (backend none)
 #   7       2ME PGM + PVW    one NDI output `<prefix> (stream)`, no preview output
+#   13      intercom hub     skipped, and a hub left on the box is moved aside (issue 1439: the console's
+#                            VBAN goes straight into OBS; 4b / 12 write no hub drop-in, verify 16 = no hub)
 #   14      Janus            skipped (no phones leg on a stream box)
 #   16      Satellite        skipped (no Stream Deck)
 #   16c     bkshading        skipped (no shading panel)
@@ -64,9 +67,9 @@ obs_box_stream_key() { strih_lx_hostname; }
 #          would fail the unit at every boot (gap G7).
 #   16e -- the YouTube-guard stream program-audio sampler (issue 1404) reads the SNV stream output, so
 #          only a box with STRIH_PROGRAM_AUDIO_SAMPLER=on runs it (gap G11).
-#   3-nvenc / 14 / 16 / 16c / 16f / 16i / 13-hub-live -- the strih role only (the table above; 16f = the
-#          camera tally, issue 1417; 16i = the box's own HTTPS front, issue 1399; 13-hub-live = verify item 16
-#          FAILs an inactive or disabled intercom hub, issue 1418).
+#   3-nvenc / 13 / 14 / 16 / 16c / 16f / 16i / 13-hub-live -- the strih role only (the table above; 13 = the
+#          intercom hub itself, issue 1439; 16f = the camera tally, issue 1417; 16i = the box's own HTTPS
+#          front, issue 1399; 13-hub-live = verify item 16 FAILs an inactive or disabled hub, issue 1418).
 #   6-hdmi -- only a box with a fixed HDMI output (STRIH_HDMI_OUTPUT_BACKEND != none).
 obs_box_step_applies() {
   local step="${1:?step required}" v
@@ -83,11 +86,12 @@ obs_box_step_applies() {
         printf 'STRIH_PROGRAM_AUDIO_SAMPLER=%s -- this box runs no stream program-audio sampler' "$v"
         return 1
       fi ;;
-    3-nvenc | 14 | 16 | 16c | 16f | 16i | 16k | 13-hub-live)
+    3-nvenc | 13 | 14 | 16 | 16c | 16f | 16i | 16k | 13-hub-live)
       v="$(strih_box_role)" || return 0
       if [ "$v" = stream ]; then
         case "$step" in
           3-nvenc) printf 'the stream role encodes with the GPU it has (VAAPI without an NVIDIA dGPU), not the strih NVENC' ;;
+          13) printf 'the stream role runs no intercom hub: the console VBAN goes straight into the OBS obs-vban source (issue 1439)' ;;
           14) printf 'the stream role runs no Janus phones leg' ;;
           16) printf 'the stream role runs no Companion Satellite (no Stream Deck)' ;;
           16c) printf 'the stream role runs no bkshading shading service' ;;
@@ -166,11 +170,16 @@ obs_box_role_apply() {
 # ROLE path strih_scenes.py reads on every Linux OBS box): update-only (the ported collection is
 # authoritative), ONE genlocked program input of class "program" (genlock_fifo + SOURCE_TIMECODE, the
 # latency pin never written: the stream A/V delay is the operator's knob), the NDI output
-# `<prefix> (stream)`, and the program audio input name of the ported collection.
+# `<prefix> (stream)`, the program audio input name of the ported collection, and (issue 1439) the
+# console's VBAN stream that input receives: "program_audio_vban" = the obs-vban source's settings
+# from the box facts (strih_scenes.py switches `Zvuk z mixu` to that source, keeping its mixer state).
 obs_box_stream_seed_manifest_json() {
-  local sender prefix
+  local sender prefix vs vp vr
   sender="$(strih_lx_program_sender)" || return 1
   prefix="$(strih_lx_ndi_prefix)" || return 1
+  vs="$(strih_lx_program_vban_streams)" || return 1
+  vp="$(strih_lx_program_vban_port)" || return 1
+  vr="$(strih_lx_program_vban_reserve_ms)" || return 1
   [ -n "$sender" ] || { echo "obs-box-role: STRIH_PROGRAM_SENDER is none -- not a stream box" >&2; return 1; }
   printf '{\n  "mode": "update-only",\n  "inputs": [\n'
   printf '    {"sender": "%s", "input": "%s", "scene": "%s", "class": "program"}\n' \
@@ -178,6 +187,9 @@ obs_box_stream_seed_manifest_json() {
   printf '  ],\n  "outputs": [\n    "%s (%s)"\n  ],\n' "$prefix" "$OBS_BOX_STREAM_OUTPUT_NAME"
   printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s",\n  "program_audio_monitor": "%s",\n' \
     "$(strih_lx_camera_latency_ms)" "$OBS_BOX_STREAM_AUDIO_INPUT" "$OBS_BOX_STREAM_AUDIO_MONITOR"
+  # The loader validated the three facts (one stream name of plain characters, two integers).
+  printf '  "program_audio_vban": {"port": %s, "stream_name": "%s", "receive_buffer_ms": %s},\n' \
+    "$vp" "$vs" "$vr"
   printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
     "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP"
 }

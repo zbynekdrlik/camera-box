@@ -344,10 +344,9 @@ case "$_rm_verdict" in
 esac
 
 # 9) PipeWire program audio (issue 1344): the DERIVED verdict — the strih-program null sink + the OBS
-#    `ASIO zvuk` pulse_input_capture + (when the hub is active) the program-feed rx. The FOH-live
-#    level is a SUPERVISOR live-acceptance step, so verify passes FOH=unknown here (never a level
-#    FAIL); a FAIL means a structural provisioning gap (sink/input absent) or, once the hub is
-#    active, no program rx.
+#    `ASIO zvuk` pulse_input_capture + (when the hub is active) the program-feed rx (FOH level = a
+#    supervisor step). Issue 1439: a box with no hub (stream role) grades its obs-vban source instead.
+if ! WHY="$(obs_box_step_applies 13)"; then strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"; else
 AUDIO_SINK=0
 # 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's
 # PipeWire session (the null sink lives there) -> a false "sink missing" FAIL on a healthy box. Probe
@@ -379,7 +378,7 @@ case "$AUDIO_VERDICT" in
   PASS*) ok   "program audio: $AUDIO_VERDICT" ;;
   NOTE*) note "program audio: $AUDIO_VERDICT" ;;
   *)     bad  "program audio: $AUDIO_VERDICT" ;;
-esac
+esac; fi
 strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs; then the MiniFuse talkback (report-only)
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 
@@ -493,7 +492,8 @@ else
 fi
 
 # 16) intercom hub unit (issue 1345): inactive/disabled FAILs on the strih role (issue 1418), a crash loop on every role (issue 1412).
-if [ -f /etc/systemd/system/intercom-hub.service ]; then
+if ! WHY="$(obs_box_step_applies 13)"; then strih_intercom_hub_absent_grade "$WHY"   # issue 1439: the stream role = no hub
+elif [ -f /etc/systemd/system/intercom-hub.service ]; then
   IH_EN="$(systemctl is-enabled intercom-hub 2>/dev/null || true)"
   IH_ACT="$(systemctl is-active intercom-hub 2>/dev/null || true)"
   if IH_LOOP="$(strih_intercom_hub_crash_loop)"; then bad "intercom-hub.service ${IH_LOOP} -- journalctl -u intercom-hub names the cause (issue 1412)"
@@ -930,12 +930,10 @@ fi
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
 #     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with --
-#     strih-snv/stream; the traveling resolume hostname is best-effort, never required), lists NO cambox
-#     IP (issue 1389: this OBS's discovery connection into a cambox aborts camera-box when OBS exits)
-#     and carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
-#     bkshading-service) and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) --
-#     plus the intercom-hub NDI_CONFIG_DIR drop-in. Read-only; FAIL on any miss (a renumbered sender
-#     FAILs until the box is re-provisioned). Placed BEFORE item 32, which closes the list.
+#     strih-snv/stream; resolume best-effort), lists NO cambox IP (issue 1389) and no networks.discovery,
+#     in BOTH readers' config (~/.ndi: OBS + bkshading; /etc/ndi: intercom-hub, whose ProtectHome hides
+#     ~/.ndi) + the hub's NDI_CONFIG_DIR drop-in (none without a hub, issue 1439). Read-only; FAIL on any
+#     miss (a renumbered sender FAILs until re-provisioned). Placed BEFORE item 32, which closes the list.
 _ndi_required="$(ndi_discovery_sender_ips pinned)" || _ndi_required=""
 _ndi_dropin_dir="$(ndi_discovery_dropin_config_dir "$(cat "$NDI_DISCOVERY_INTERCOM_DROPIN" 2>/dev/null || true)")"
 if [ -z "$_ndi_required" ]; then
@@ -962,7 +960,8 @@ else
     note "(ndi-discovery) a traveling NDI sender resolves now to ${_ndi_drift}, which ${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME} does not list -- re-run setup-strih.sh step 4b to add it (issue 1342)"
   fi
 fi
-if [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
+if ! WHY="$(obs_box_step_applies 13)"; then note "(ndi-discovery) no intercom hub on this box, so no hub NDI_CONFIG_DIR drop-in to grade -- ${WHY}"
+elif [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
   ok "(ndi-discovery) intercom-hub NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in present"
 else
   bad "(ndi-discovery) ${NDI_DISCOVERY_INTERCOM_DROPIN} missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 4b (issue 1342)"

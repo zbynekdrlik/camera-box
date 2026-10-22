@@ -348,8 +348,7 @@ ndi_discovery_write_config "${USER_HOME}/.ndi" "$NDI_IPS" "$DESKTOP_USER" \
   || fail "NDI receiver config write to ${USER_HOME}/.ndi failed (issue 1342)"
 ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
   || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
-mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")"
-ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
+if obs_box_step_applies 13 >/dev/null; then mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")"; ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"; fi   # issue 1439: no hub on the stream role
 echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (networks.ips=${NDI_IPS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
 
 # ---------------------------------------------------------------------------------------------
@@ -404,7 +403,7 @@ fi
 # ticket; the seeder never touches outputs.
 [ -f "${HERE}/strih_scenes.py" ] && [ -f "${HERE}/drm_output_config.py" ] || fail "scripts/strih_scenes.py or drm_output_config.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py && install -m 0644 "${HERE}/drm_output_config.py" /usr/local/bin/drm_output_config.py   # issue 1424: strih_scenes imports the HDMI-output grammar
-install -m 0755 "${HERE}/stream_dev_safe.py" /usr/local/bin/stream_dev_safe.py   # issue 1380: the stream role's safe Development
+install -m 0755 "${HERE}/stream_dev_safe.py" /usr/local/bin/stream_dev_safe.py && install -m 0644 "${HERE}/program_audio_vban.py" /usr/local/bin/program_audio_vban.py || fail "stream_dev_safe.py / program_audio_vban.py (issue 1380 / 1439: strih_scenes imports the latter) not installed"
 rm -f /opt/camera-box/strih-lx-seed.json   # issue 1414: the pre-rename seed, now the new seeder is in
 echo "  installed strih_scenes.py + drm_output_config.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
 if WHY="$(obs_box_step_applies 6-devclip)"; then obs_box_stream_dev_clip_provision "$HERE" || fail "issue 1380: the measurement clip for the safe Development scene could not be provisioned (above)"
@@ -673,15 +672,14 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplum
 strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
 strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
 # the intercom-hub systemd drop-in that runs the hub AS THE OPERATOR (reach the PipeWire session).
-mkdir -p /etc/systemd/system/intercom-hub.service.d
-strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf
+if obs_box_step_applies 13 >/dev/null; then mkdir -p /etc/systemd/system/intercom-hub.service.d; strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf; fi   # issue 1439
 # Linger the operator so its user@.service + PipeWire come up at boot even before an interactive
 # login — otherwise a headless start finds no /run/user/<uid>/pipewire-0 (the hub self-heals via the
 # pw-cat restart backoff once the session appears, but linger removes the startup gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
 echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session) + intercom-hub local-audio drop-in (User=${DESKTOP_USER})"
-echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
+echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source; on the stream role the obs-vban source, issue 1439) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
 echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
@@ -690,6 +688,7 @@ step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the stri
 # notebook took over from the Windows VB-Matrix (20.9.2026). Install the unit + the routing TOML, enable
 # it; on the strih role it is STARTED once Janus is provisioned (verify item 16 FAILs a stopped hub there). A running
 # hub is never restarted here. The binary (intercom-hub-linux-amd64 from CI) is placed below.
+if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs no hub (lib: strih_intercom_hub_remove)
 install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
 # issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
 [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
@@ -701,6 +700,7 @@ systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-h
 # issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.
 strih_intercom_hub_binary_install /usr/local/bin/intercom-hub || fail "intercom-hub binary install failed (above)"
 echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml in place"
+else echo "  SKIP: ${WHY}"; strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"; fi
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"

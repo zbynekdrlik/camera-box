@@ -38,6 +38,7 @@ strih_box_fact_keys() {
     STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
     STRIH_HDMI_OUTPUT_BACKEND \
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
+    STRIH_PROGRAM_VBAN_STREAMS STRIH_PROGRAM_VBAN_PORT STRIH_PROGRAM_VBAN_RESERVE_MS \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC
@@ -142,6 +143,19 @@ strih_box_hdmi_outputs_ok() {
   [ "$n" -ge 1 ] && [ "$n" -le 2 ]
 }
 
+# Issue 1439: the bounds of the obs-vban source's fixed "Receive Buffer" (R, ms), the same clamp as
+# VBAN_RECV_RESERVE_MS_MIN / _MAX in vendor/obs-vban/src/vban-receive-timeline.h (test-pinned).
+STRIH_BOX_VBAN_RESERVE_MS_MIN=10
+STRIH_BOX_VBAN_RESERVE_MS_MAX=500
+
+# _strih_box_vban_stream_name NAME -> 0 iff NAME is a VBAN stream name: 1..16 characters (the VBAN
+# header's streamname field), letters, digits, `.` `_` `-`. The sets are spelled out (a bracket RANGE
+# follows the locale in bash).
+_strih_box_vban_stream_name() {
+  local up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789'
+  [[ "${1-}" =~ ^[${up}${lo}${dg}._-]{1,16}$ ]]
+}
+
 # strih_box_validate NAME  (stdin: the parsed KEY=value lines) -> rc 0 iff the facts are complete and
 # coherent for box NAME; else one `strih-box <NAME>: ...` stderr line per problem, rc 1. Order: a
 # missing key, then every TODO_OWNER value (all named, then stop -- a template is not "malformed"),
@@ -238,6 +252,25 @@ strih_box_validate() {
     on | off) ;;
     *) echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_SAMPLER '${f[STRIH_PROGRAM_AUDIO_SAMPLER]}' must be on or off" >&2; bad=1 ;;
   esac
+  # issue 1439: the program audio a box takes as VBAN straight from the console into the obs-vban source
+  # (no intercom hub, no PipeWire): the stream name(s), the UDP port OBS binds and the fixed Receive
+  # Buffer R (ms). The stream role takes exactly ONE stream (its `Zvuk z mixu` input, the hub is gone);
+  # the strih role keeps its hub-fed program until its own slice, so it declares none of the three.
+  local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
+  if [ "${f[STRIH_ROLE]}" = strih ]; then
+    if [ "${vs}:${vp}:${vr}" != none:none:none ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS must be none on the strih role (its VBAN program input is not provisioned yet, issue 1439)" >&2; bad=1
+    fi
+  else
+    [ "$vs" != none ] && _strih_box_vban_stream_name "$vs" \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS '${vs}' must be ONE VBAN stream name (1..16 letters, digits, . _ -) on the stream role (the console's program stream)" >&2; bad=1; }
+    if [[ ! "$vp" =~ ^[123456789][0123456789]{3,4}$ ]] || [ "$vp" -lt 1024 ] || [ "$vp" -gt 65535 ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_PORT '${vp}' must be the UDP port OBS receives on (1024..65535)" >&2; bad=1
+    fi
+    if [[ ! "$vr" =~ ^[123456789][0123456789]{0,2}$ ]] || [ "$vr" -lt "$STRIH_BOX_VBAN_RESERVE_MS_MIN" ] || [ "$vr" -gt "$STRIH_BOX_VBAN_RESERVE_MS_MAX" ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_RESERVE_MS '${vr}' must be the fixed Receive Buffer in ms (${STRIH_BOX_VBAN_RESERVE_MS_MIN}..${STRIH_BOX_VBAN_RESERVE_MS_MAX})" >&2; bad=1
+    fi
+  fi
   # issue 1412 slice B: the NDI program a stream box receives (`none` on a strih), and the venue whose
   # boxes list each other as NDI senders (snv = the obs-fleet ndi-sender facet; any other venue = the
   # STRIH_IP of every fact file of that venue, scripts/lib/obs-box-role.sh).
@@ -518,6 +551,13 @@ strih_lx_program_sender() {
   s="$(strih_box_fact STRIH_PROGRAM_SENDER)" || return 1
   [ "$s" = none ] || printf '%s' "$s"
 }
+
+# strih_lx_program_vban_streams / _port / _reserve_ms -> issue 1439: the console's program VBAN stream
+# name(s) the box receives straight into its obs-vban source, the UDP port OBS binds and the fixed
+# Receive Buffer R in ms (facts STRIH_PROGRAM_VBAN_*; all `none` on the strih role).
+strih_lx_program_vban_streams() { strih_box_fact STRIH_PROGRAM_VBAN_STREAMS; }
+strih_lx_program_vban_port() { strih_box_fact STRIH_PROGRAM_VBAN_PORT; }
+strih_lx_program_vban_reserve_ms() { strih_box_fact STRIH_PROGRAM_VBAN_RESERVE_MS; }
 
 # strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
 strih_box_venue() { strih_box_fact STRIH_VENUE; }
