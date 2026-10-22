@@ -695,6 +695,21 @@ mod tests {
         // a network duplicate of 113
         let d = t.packet(on_time(13) + 200_000, 113, 256, RATE, 2, R40);
         assert_ne!(d.event, Event::Reanchor);
+        assert_eq!(d.event, Event::Stale);
+        // a packet exactly STALE_PACKETS behind is still a reorder
+        let d = t.packet(
+            on_time(13) + 300_000,
+            113 - STALE_PACKETS,
+            256,
+            RATE,
+            2,
+            R40,
+        );
+        assert_eq!(d.event, Event::Stale);
+        assert_eq!(
+            t.stale, 3,
+            "the reordered 112, the duplicate 113, the one 64 behind"
+        );
         assert_eq!(t.re_anchors, 0);
         assert_eq!(t.lost, 1, "only the slot that was really silent counts");
         // the stream continues on the same line, nothing silent
