@@ -516,7 +516,7 @@ def test_warm_cam_scenes_never_restores_a_production_preview(monkeypatch, capsys
 # ---- the rule lives in obs_phase2 only; every scene-selecting client is covered -----------------
 
 _CLIENTS = ("glk_wire.py", "frozen-camera-gate.py", "imag_scenes.py", "cg_chain_scene.py",
-            "warm_cam_scenes.py")
+            "warm_cam_scenes.py", "vban_bench_obs.py")
 
 
 @pytest.mark.parametrize("name", _CLIENTS)
