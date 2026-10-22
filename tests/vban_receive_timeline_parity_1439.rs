@@ -40,7 +40,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use vban_receive_timeline::{
     clamp_reserve_ms, round_half_away, samples_to_ns, scale_ppb, Decision, Event, Reason, Timeline,
-    FIT_WINDOW_S, JUMP_S, OUTLIER_MS, RESERVE_MS_MAX,
+    FIT_WINDOW_S, JUMP_S, OUTLIER_MS, RESERVE_MS_MAX, STALE_PACKETS,
 };
 
 const HEADER: &str = "vendor/obs-vban/src/vban-receive-timeline.h";
@@ -237,9 +237,27 @@ fn steered_script(
                     let y = (line.ceil() as u64 + rng.below(3)).saturating_sub(1);
                     forced = Some((b.t.anchor_ns + y).min(b.t.stamp_at(pos_next)));
                 }
-                // a duplicate, a backwards index
-                165 if rare => this_nu = nu,
-                166 if rare => this_nu = nu.wrapping_sub(5),
+                // a network duplicate or a reorder within the stale window: an EXTRA packet whose
+                // slot has passed (dropped); the sender's own counter and schedule are untouched
+                165 | 166 => {
+                    let back = if ev == 165 {
+                        0
+                    } else {
+                        1 + rng.below(u64::from(STALE_PACKETS)) as u32
+                    };
+                    let now = b.now + 1 + rng.below(500_000);
+                    b.send(Pkt {
+                        now,
+                        nu: nu.wrapping_sub(back),
+                        frames,
+                        rate,
+                        channels,
+                        reserve_ns: reserve,
+                        reset: false,
+                    });
+                }
+                // an index far behind the stale window: a sender restart from there
+                172 if rare => this_nu = nu.wrapping_sub(STALE_PACKETS + 1 + rng.below(9) as u32),
                 // a loss of exactly two seconds of audio, or one packet more
                 167 | 168 if rare => {
                     lost = JUMP_S * u64::from(rate) / u64::from(frames) + u64::from(ev == 168)
@@ -351,10 +369,22 @@ fn boundary_script() -> Vec<Pkt> {
     k += 1;
     nu = nu.wrapping_add(1);
     clean(&mut b, &mut k, &mut nu, 375, channels, reserve, &mut reset);
-    // a duplicate, then a backwards index
-    nu = nu.wrapping_sub(1);
+    // a duplicate and a packet exactly STALE_PACKETS behind (both dropped), then one more behind (a
+    // restart); a dropped packet takes no slot, so the next clean packet follows the last real one
+    let last = nu.wrapping_sub(1);
+    for back in [0, STALE_PACKETS] {
+        b.send(Pkt {
+            now: 2_000_000_000 + samples_to_ns(k * 256, 48_000) + 1_000_000,
+            nu: last.wrapping_sub(back),
+            frames: 256,
+            rate: 48_000,
+            channels,
+            reserve_ns: reserve,
+            reset: false,
+        });
+    }
     clean(&mut b, &mut k, &mut nu, 375, channels, reserve, &mut reset);
-    nu = nu.wrapping_sub(5);
+    nu = nu.wrapping_sub(STALE_PACKETS + 2);
     clean(&mut b, &mut k, &mut nu, 375, channels, reserve, &mut reset);
     // two seconds and one packet lost: a sender restart
     k += 376;
@@ -494,7 +524,7 @@ fn bits(x: f64) -> u64 {
 fn line(t: &Timeline, d: Decision) -> String {
     let b = &t.buckets[(t.last_k.rem_euclid(FIT_WINDOW_S as i64)) as usize];
     format!(
-        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} | {}",
+        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} | {} {} {} {} {} {} {} {} | {}",
         d.event as i32,
         d.reason as i32,
         d.silence_samples,
@@ -526,6 +556,7 @@ fn line(t: &Timeline, d: Decision) -> String {
         t.silence_samples,
         t.late,
         t.re_anchors,
+        t.stale,
         b.k,
         b.n,
         b.x0,
@@ -618,6 +649,7 @@ static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d
 	       t->next_pos, t->base_stamp_ns, t->base_pos, t->step_ppb, t->last_k, t->last_fold_pos,
 	       t->fit_valid ? 1 : 0, t->fit_ppb, bits(t->fit_b), bits(t->fit_xbar), bits(t->fit_ybar), t->phase_ns,
 	       t->received, t->lost, t->silence_samples, t->late, t->re_anchors);
+	printf("%" PRIu64 " | ", t->stale);
 	printf("%" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | %" PRIu64 "\n",
 	       b->k, b->n, b->x0, b->y0, bits(b->su), bits(b->sv), bits(b->suu), bits(b->suv),
 	       vban_recv_stamp_at(t, t->next_pos + 1000));
@@ -760,8 +792,11 @@ fn the_scripts_reach_every_boundary_1439() {
         "packets within 1 ns of the outlier line",
         "index wraps",
         "losses of exactly two seconds",
+        "stale duplicates (dropped)",
+        "stale reorders at the window's edge (dropped)",
+        "backward re-anchors one past the stale window",
     ];
-    let mut hits = [0usize; 17];
+    let mut hits = [0usize; 20];
     for sc in scripts() {
         let mut t = Timeline::new();
         for p in &sc {
@@ -797,7 +832,14 @@ fn the_scripts_reach_every_boundary_1439() {
                 line_y = t.reference(end) + (OUTLIER_MS * MS) as f64;
             }
             let d = t.packet(p.now, p.nu, p.frames, p.rate, p.channels, p.reserve_ns);
+            let back = last_nu.wrapping_sub(p.nu);
             match (d.event, d.reason) {
+                (Event::Stale, _) if back == 0 => hits[17] += 1,
+                (Event::Stale, _) if back == STALE_PACKETS => hits[18] += 1,
+                (Event::Reanchor, Reason::Backward) if back == STALE_PACKETS + 1 => {
+                    hits[4] += 1;
+                    hits[19] += 1;
+                }
                 (Event::Anchor, _) => hits[0] += 1,
                 (Event::Reanchor, Reason::Late) => hits[2] += 1,
                 (Event::Reanchor, Reason::Backward) => hits[4] += 1,

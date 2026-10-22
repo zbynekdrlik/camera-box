@@ -299,9 +299,9 @@ static void vban_src_log_status(struct vban_src_s *s, const struct VBanHeader *h
 	const double rate = t->rate ? (double)t->rate : 1.0;
 	blog(LOG_INFO,
 	     "obs-vban receive: received=%" PRIu64 " lost=%" PRIu64 " late=%" PRIu64 " re_anchors=%" PRIu64
-	     " silence_ms=%.1f max_late_ms=%.1f sender_ppm=%+.3f phase_ms=%+.2f fit=%s receive_buffer_ms=%" PRIu64
+	     " stale=%" PRIu64 " silence_ms=%.1f max_late_ms=%.1f sender_ppm=%+.3f phase_ms=%+.2f fit=%s receive_buffer_ms=%" PRIu64
 	     " rate=%u ch=%u port=%ld stream='%.*s' source='%s'",
-	     t->received, t->lost, t->late, t->re_anchors, (double)t->silence_samples * 1000.0 / rate,
+	     t->received, t->lost, t->late, t->re_anchors, t->stale, (double)t->silence_samples * 1000.0 / rate,
 	     s->window_late_seen ? (double)s->window_late_max_ns / 1e6 : 0.0,
 	     t->fit_valid ? -(double)t->fit_ppb / 1000.0 : 0.0, (double)t->phase_ns / 1e6,
 	     t->fit_valid ? "locked" : "acquiring", (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS), t->rate, t->channels,
@@ -374,6 +374,11 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 	const uint64_t reserve_ns = (uint64_t)os_atomic_load_long(&s->receive_buffer_ms) * VBAN_RECV_NS_PER_MS;
 	const struct vban_recv_decision d = vban_recv_packet(&s->timeline, now, header->nuFrame, audio.frames,
 							     audio.samples_per_sec, (uint32_t)audio.speakers, reserve_ns);
+	if (d.event == VBAN_RECV_STALE) {
+		/* a duplicate / reordered packet whose slot already went out (as silence): dropped */
+		vban_src_log_status(s, header, now);
+		return;
+	}
 	vban_src_report(s, &d, header->nuFrame, audio.frames);
 	if (d.silence_samples > 0)
 		vban_src_output_silence(s, &d, &audio);

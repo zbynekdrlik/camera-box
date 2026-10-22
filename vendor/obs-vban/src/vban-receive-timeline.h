@@ -21,8 +21,10 @@
  *    change, so the stamps never jump. The genlock ASRC (basis=stamp) then resamples the sender's
  *    rate to the mix clock.
  *  - Loss: a nuFrame gap is silence for exactly the lost slots, stamped on the same line.
- *  - Re-anchor (counted, one per event): a packet arriving after its stamp (late), a backwards or
- *    duplicate nuFrame, a forward jump of more than VBAN_RECV_JUMP_S of audio (a sender restart),
+ *  - Stale: a duplicate, or a nuFrame at most VBAN_RECV_STALE_PACKETS behind the last one (a network
+ *    reorder), is dropped and counted: its slot has passed (it went out as silence), the line runs on.
+ *  - Re-anchor (counted, one per event): a packet arriving after its stamp (late), a nuFrame further
+ *    behind (a sender restart), a forward jump of more than VBAN_RECV_JUMP_S of audio (a sender restart),
  *    another rate or channel count, another R, or a fit that cannot hold: the fitted rate beyond
  *    +-500 ppm, the stamps more than R off fit + R, or no packet folded for VBAN_RECV_STARVE_S of
  *    the sender's audio. The packet that re-anchors is the new anchor.
@@ -52,6 +54,9 @@
 #define VBAN_RECV_STARVE_S 3
 /* A forward nuFrame jump over this much audio is a sender restart. */
 #define VBAN_RECV_JUMP_S 2
+/* A duplicate, or a nuFrame at most this many packets behind the last one, is a stale packet (a
+ * network reorder or duplicate): dropped and counted, never a re-anchor. Further behind = a restart. */
+#define VBAN_RECV_STALE_PACKETS 64u
 /* The stamp step stays within +-500 ppm of nominal. */
 #define VBAN_RECV_PPB_CLAMP 500000
 /* The stamp step moves by at most 5 ppm per fit update (about one a second). */
@@ -70,12 +75,13 @@ enum vban_recv_event {
 	VBAN_RECV_PACKET = 0,   /* stamped on the running timeline */
 	VBAN_RECV_ANCHOR = 1,   /* the first packet: the timeline starts here */
 	VBAN_RECV_REANCHOR = 2, /* the timeline restarts at this packet (counted) */
+	VBAN_RECV_STALE = 3,    /* a duplicate / reordered packet whose slot has passed: dropped, counted */
 };
 
 enum vban_recv_reason {
 	VBAN_RECV_REASON_NONE = 0,
 	VBAN_RECV_REASON_LATE = 1,     /* the packet arrived after its stamp */
-	VBAN_RECV_REASON_BACKWARD = 2, /* a duplicate or backwards nuFrame */
+	VBAN_RECV_REASON_BACKWARD = 2, /* a nuFrame more than VBAN_RECV_STALE_PACKETS behind */
 	VBAN_RECV_REASON_JUMP = 3,     /* a forward nuFrame jump over VBAN_RECV_JUMP_S */
 	VBAN_RECV_REASON_FORMAT = 4,   /* another sample rate or channel count */
 	VBAN_RECV_REASON_CONFIG = 5,   /* another Receive Buffer */
@@ -119,6 +125,7 @@ struct vban_recv_timeline {
 	uint64_t silence_samples; /* the silence those slots carried */
 	uint64_t late;            /* packets that arrived after their stamp (each a re-anchor) */
 	uint64_t re_anchors;
+	uint64_t stale; /* duplicate / reordered packets dropped (their slot had passed) */
 };
 
 /* What the source does with one packet: silence first (when any), then the packet. */
@@ -343,6 +350,11 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 	} else {
 		const uint32_t delta = nu - t->last_nu;
 		if (delta == 0 || delta >= 0x80000000u) {
+			if (t->last_nu - nu <= VBAN_RECV_STALE_PACKETS) {
+				t->stale++;
+				d.event = VBAN_RECV_STALE;
+				return d;
+			}
 			reason = VBAN_RECV_REASON_BACKWARD;
 		} else {
 			lost = (uint64_t)(delta - 1u);

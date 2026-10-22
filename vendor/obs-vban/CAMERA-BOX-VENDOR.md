@@ -96,15 +96,17 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   update, clamped ±500 ppm), rebased on every change, so they never jump. The genlock ASRC
   (`basis=stamp`, libobs `genlock_audio_asrc_placement`) resamples the sender's rate to the mix.
 - **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
-- **Re-anchor (one counted event).** A packet after its stamp, a duplicate or backwards
-  `nuFrame`, a jump of more than 2 s of audio, another rate/channel count/R, or a fit that cannot
+- **Stale.** A duplicate, or a `nuFrame` at most 64 packets behind the last one (a network
+  reorder), is dropped and counted (`stale=`): its slot already went out as silence.
+- **Re-anchor (one counted event).** A packet after its stamp, a `nuFrame` further behind (a
+  sender restart), a jump of more than 2 s of audio, another rate/channel count/R, or a fit that cannot
   hold (rate beyond ±500 ppm, stamps more than R off `fit + R`, nothing folded for 3 s).
 
 Log lines:
 
 ```
 obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receive_buffer_ms=40
-obs-vban receive: received=… lost=… late=… re_anchors=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
+obs-vban receive: received=… lost=… late=… re_anchors=… stale=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
 obs-vban receive re-anchor: source '…' reason=late|backward|jump|format|config|fit frame=… late_ms=… re_anchors=… late=…
 ```
 

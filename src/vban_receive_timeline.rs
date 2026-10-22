@@ -23,8 +23,10 @@
 //!   to ±[`PPB_CLAMP`]. The line is rebased on every change, so the stamps never jump. The genlock
 //!   ASRC (`basis=stamp`) then resamples the sender's rate to the mix clock.
 //! * **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
-//! * **Re-anchor** (counted, one per event): a packet arriving after its stamp (late), a duplicate
-//!   or backwards `nuFrame`, a forward jump of more than [`JUMP_S`] of audio (a sender restart),
+//! * **Stale.** A duplicate, or a `nuFrame` at most [`STALE_PACKETS`] behind the last one (a
+//!   network reorder), is dropped and counted: its slot has passed (it went out as silence).
+//! * **Re-anchor** (counted, one per event): a packet arriving after its stamp (late), a `nuFrame`
+//!   further behind (a sender restart), a forward jump of more than [`JUMP_S`] of audio (a sender restart),
 //!   another rate or channel count, another R, or a fit that cannot hold: the fitted rate beyond
 //!   ±[`PPB_CLAMP`], the stamps more than R off `fit + R`, or no packet folded for [`STARVE_S`] of
 //!   the sender's audio. The packet that re-anchors is the new anchor.
@@ -50,6 +52,9 @@ pub const OUTLIER_MS: u64 = 10;
 pub const STARVE_S: u64 = 3;
 /// A forward `nuFrame` jump over this much audio is a sender restart.
 pub const JUMP_S: u64 = 2;
+/// A duplicate, or an index at most this many packets behind the last one, is a STALE packet (a
+/// network reorder or duplicate): dropped and counted, never a re-anchor. Further behind = a restart.
+pub const STALE_PACKETS: u32 = 64;
 /// The stamp step stays within ±500 ppm of nominal.
 pub const PPB_CLAMP: i64 = 500_000;
 /// The stamp step moves by at most 5 ppm per fit update (about one a second).
@@ -76,6 +81,8 @@ pub enum Event {
     Anchor = 1,
     /// The timeline restarts at this packet (counted).
     Reanchor = 2,
+    /// A duplicate or reordered packet whose slot has passed: dropped (never output), counted.
+    Stale = 3,
 }
 
 /// Why a timeline restarted (the C `enum vban_recv_reason`).
@@ -85,7 +92,7 @@ pub enum Reason {
     None = 0,
     /// The packet arrived after its stamp.
     Late = 1,
-    /// A duplicate or backwards `nuFrame`.
+    /// A `nuFrame` more than [`STALE_PACKETS`] behind the last one (a sender restart).
     Backward = 2,
     /// A forward `nuFrame` jump over [`JUMP_S`].
     Jump = 3,
@@ -202,6 +209,8 @@ pub struct Timeline {
     /// Packets that arrived after their stamp (each a re-anchor).
     pub late: u64,
     pub re_anchors: u64,
+    /// Duplicate / reordered packets dropped (their slot had passed).
+    pub stale: u64,
 }
 
 impl Default for Timeline {
@@ -283,6 +292,7 @@ impl Timeline {
             silence_samples: 0,
             late: 0,
             re_anchors: 0,
+            stale: 0,
         }
     }
 
@@ -481,6 +491,11 @@ impl Timeline {
         } else {
             let delta = nu.wrapping_sub(self.last_nu);
             if delta == 0 || delta >= 0x8000_0000 {
+                if self.last_nu.wrapping_sub(nu) <= STALE_PACKETS {
+                    self.stale += 1;
+                    d.event = Event::Stale;
+                    return d;
+                }
                 reason = Reason::Backward;
             } else {
                 lost = u64::from(delta - 1);

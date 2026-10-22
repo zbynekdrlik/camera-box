@@ -7,7 +7,7 @@
 # revision 6338127636: no intercom hub, no PipeWire). The source stamps every packet on its receive
 # timeline and writes one status line every 10 s while packets arrive (vendor/obs-vban/src/vban-source.c):
 #
-#   [obs-vban] obs-vban receive: received=N lost=N late=N re_anchors=N silence_ms=X max_late_ms=X
+#   [obs-vban] obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X
 #     sender_ppm=X phase_ms=X fit=locked|acquiring receive_buffer_ms=R rate=N ch=N port=P stream='S'
 #     source='<OBS input>'
 #

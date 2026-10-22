@@ -38,8 +38,11 @@ lost packets landed on audio already delivered).
   the sender's rate to the mix (pinned: the lifted `genlock_audio_asrc_placement` returns STAMP for
   the source's direct stamps; nothing in obs-vban touches asrc / genlock_fifo / monitoring).
 - **Loss:** a `nuFrame` gap = silence for exactly the lost slots, stamped on the same line.
-- **Re-anchor (one counted event):** a packet past its stamp (`late`), a duplicate / backwards index,
-  a jump > 2 s of audio (a sender restart), another rate / channel count / R, or a fit that cannot
+- **Stale (review round 1):** a duplicate, or an index at most `STALE_PACKETS` (64) behind the last
+  one (a UDP reorder), is dropped and counted (`stale=` on the status line), never output: its slot
+  already went out as silence. Before, one swapped pair restarted the timeline and read `lost=2`.
+- **Re-anchor (one counted event):** a packet past its stamp (`late`), an index further behind (a
+  sender restart), a jump > 2 s of audio (a sender restart), another rate / channel count / R, or a fit that cannot
   hold (rate beyond +-500 ppm, stamps more than R off `fit + R`, nothing folded for 3 s of audio).
   The re-anchoring packet is the new anchor. A late re-anchor anchors on a late packet: if its
   lateness exceeds R the phase hold re-anchors once more (~10 s later). Known, documented, not a bug.
@@ -52,7 +55,7 @@ lost packets landed on audio already delivered).
 
 ```
 obs-vban receive anchored: source '<input>' frame=N rate=48000 ch=2 receive_buffer_ms=R
-obs-vban receive: received=N lost=N late=N re_anchors=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
+obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
 obs-vban receive re-anchor: source '<input>' reason=late|backward|jump|format|config|fit frame=N late_ms=X re_anchors=N late=N
 ```
 
