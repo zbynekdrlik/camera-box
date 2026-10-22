@@ -117,21 +117,33 @@ fn schedule_from(seed: u64, ppm: f64, n: u64, loss: f64, first_gap_ms: f64) -> V
     out
 }
 
-/// libobs at 0 ms audio buffering (the genlock OBS) as the source's output meets it (review round 4):
+/// libobs at 0 ms audio buffering (the genlock OBS) as the source's output meets it (review rounds
+/// 4 + 5, `obs-source.c` `source_output_audio_data`):
+/// - every stamp the source sends is DIRECT (within `MAX_TS_VAR` = 2 s of the OBS clock), so
+///   `timing_adjust` is 0 and the stamp-domain jump reset never applies;
+/// - in stamps, a chunk within 70 ms (`TS_SMOOTHING_THRESHOLD`) of where the previous one ended
+///   (`next_audio_ts_min`) is snapped onto that end;
+/// - in the system domain (`next_audio_sys_ts_min`) a chunk within 70 ms of where the previous one
+///   ended is APPENDED behind the buffered data, never before the label the mixer reached when it
+///   arrived; more than 2 s off it RESETS the timing (`reset_audio_timing`): `timing_adjust` becomes
+///   its arrival − its stamp, so it is PLACED at the instant it arrived, whatever its stamp; anything
+///   between is PLACED at its stamp;
 /// - the mixer pulls one `AUDIO_OUTPUT_FRAMES` (1024-frame) window at a time on our clock; a source
 ///   whose data does not cover the window UNDERRUNS: `discard_audio` moves its label to the window's
 ///   end and KEEPS the data, so whatever comes after plays that much later;
-/// - a chunk stamped within 70 ms of where the source's previous chunk ended in STAMPS
-///   (`next_audio_ts_min`, `TS_SMOOTHING_THRESHOLD`) is APPENDED behind the buffered data, and never
-///   before the label the mixer reached when it arrived; further off it is PLACED at its stamp;
 /// - the stamp-basis ASRC pulls the placement error out at most 300 ppm (`ASRC_MAX_PPM`) of the audio.
 #[derive(Debug, Default)]
 struct Obs {
     /// `next_audio_ts_min`: where the source's pushed data ends, in stamps.
     next_ts: Option<f64>,
+    /// `next_audio_sys_ts_min`: the same in the system domain (`+ timing_adjust`).
+    next_sys: Option<f64>,
     /// Where the buffered data ends on the mix clock.
     next_play: f64,
 }
+
+/// libobs' `MAX_TS_VAR`, ns.
+const OBS_MAX_TS_VAR_NS: f64 = 2e9;
 
 /// One libobs audio window (1024 frames at 48 kHz), ns.
 const OBS_TICK_NS: f64 = 1024.0 * 1e9 / 48_000.0;
@@ -142,13 +154,19 @@ impl Obs {
     fn chunk(&mut self, stamp: f64, dur: f64, arrival: f64) -> f64 {
         // the label the mixer left at the last window it processed before the chunk arrived
         let label = (arrival / OBS_TICK_NS).floor() * OBS_TICK_NS;
-        let (ts_used, start) = match self.next_ts {
-            Some(n) if (stamp - n).abs() < 70.0 * MS => (n, self.next_play.max(label)),
-            _ => (stamp, stamp),
+        let ts = match self.next_ts {
+            Some(n) if (stamp - n).abs() < 70.0 * MS => n,
+            _ => stamp,
+        };
+        let (start, adjust) = match self.next_sys {
+            Some(n) if (ts - n).abs() < 70.0 * MS => (self.next_play.max(label), 0.0),
+            Some(n) if (ts - n).abs() > OBS_MAX_TS_VAR_NS => (arrival, arrival - stamp),
+            _ => (ts, 0.0),
         };
         let err = start - stamp;
         let pull = err.clamp(-300e-6 * dur, 300e-6 * dur);
-        self.next_ts = Some(ts_used + dur);
+        self.next_ts = Some(ts + dur);
+        self.next_sys = Some(ts + dur + adjust);
         self.next_play = start + dur - pull;
         start
     }
@@ -209,6 +227,8 @@ struct Run {
     emitted_in_first_second: u64,
     /// The largest deviation of an emitted stamp step from its nominal span, ppm.
     max_step_dev_ppm: f64,
+    /// Lead-ins sent (one before each stretch's first output).
+    lead_ins: u64,
     sender_ppm: f64,
 }
 
@@ -238,9 +258,17 @@ fn replay(sched: &[Sent], reserve_ms: u64) -> Run {
             prev_stamp = None;
         }
         // the source emits a PACKET (the silence of the slots lost before it first) and a LATE
-        // packet's silence; nothing else
+        // packet's silence; nothing else. A stretch's first output has its lead-in before it.
         if d.event != Event::Packet && d.event != Event::Late {
             continue;
+        }
+        if d.lead_in_samples > 0 {
+            obs.chunk(
+                d.lead_in_stamp_ns as f64,
+                samples_to_ns(d.lead_in_samples, 48_000) as f64,
+                a as f64,
+            );
+            run.lead_ins += 1;
         }
         if d.silence_samples > 0 {
             obs.chunk(
@@ -346,6 +374,12 @@ fn assert_latency_held(run: &Run, tag: &str) {
         "the latency OBS realizes moved {:.3} ms from its anchored {:.3} ms after the first second: \
          {tag}",
         run.realized_dev_max_ns / MS,
+        run.anchored_realized_ns / MS
+    );
+    assert!(
+        (run.anchored_realized_ns - run.anchored_latency_ns).abs() <= 1.0 * MS,
+        "OBS must realize the anchored stamp latency {:.3} ms, it realized {:.3} ms: {tag}",
+        run.anchored_latency_ns / MS,
         run.anchored_realized_ns / MS
     );
 }
@@ -528,6 +562,11 @@ fn with_pause(mut sched: Vec<Sent>, ms: u64) -> Vec<Sent> {
 /// late drop, nothing filled after the fact, and both stretches hold their latency (stamp and
 /// realized); after the pause the latency is the old one (the production paused too), after the
 /// outage too (the same network).
+///
+/// Review round 5: the gap the starve + the hold leave is over libobs' 2 s `MAX_TS_VAR`, so libobs
+/// RESETS its timing and puts the new stretch's first chunk at the instant it arrives -- one R
+/// early. The stretch's lead-in (silence from that arrival up to the first output's stamp) makes
+/// OBS realize the new anchored latency exactly (±1 ms of the stamp latency).
 #[test]
 fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_1439() {
     for (what, ppm, seed) in [
@@ -554,7 +593,7 @@ fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_143
         );
         assert_eq!(run.emitted_in_first_second, 0, "{tag}");
         let (_, al, a_real, ar) = held(&run, 0, 0..event_k);
-        let (_, bl, b_real, br) = held(&run, 1, 0..u64::MAX);
+        let (b_lat, bl, b_real, br) = held(&run, 1, 0..u64::MAX);
         assert!(
             al <= 1.0 * MS && ar <= 1.0 * MS,
             "the old stretch held: {tag}"
@@ -564,9 +603,17 @@ fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_143
             "the new stretch held: {tag}"
         );
         assert!(
+            (b_real - b_lat).abs() <= 1.0 * MS,
+            "OBS realizes the new stretch's anchored stamp latency {:.3} ms, it realized {:.3} ms: \
+             {tag}",
+            b_lat / MS,
+            b_real / MS
+        );
+        assert!(
             ((b_real - a_real) / MS).abs() < 5.0,
             "the latency comes back to the anchored one: {tag}"
         );
+        assert_eq!(run.lead_ins, 2, "one lead-in per stretch: {tag}");
     }
 }
 

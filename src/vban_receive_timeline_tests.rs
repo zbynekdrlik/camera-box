@@ -562,6 +562,91 @@ fn a_starve_re_anchor_carries_how_long_no_packet_came_in_time() {
 /// One 256-frame packet at 48 kHz, ns.
 const MS_256: u64 = 5_333_333;
 
+/// Review round 5: the first output of every anchored stretch carries its LEAD-IN -- silence from
+/// the packet's arrival up to that output's stamp, ending exactly there -- and no later output does.
+/// After a starve the re-anchored stretch's first output carries its own: libobs resets its timing
+/// after a gap over 2 s and puts the first chunk at the instant it arrives, so without the lead-in
+/// the new stretch would start one R early.
+#[test]
+fn the_first_output_of_a_stretch_carries_a_lead_in_up_to_its_stamp() {
+    let mut t = Timeline::new();
+    through_the_hold(&mut t, 0);
+    let check = |d: Decision, now: u64| {
+        assert_eq!(d.event, Event::Packet, "{d:?}");
+        // on the grid the stamp is R − one packet after the arrival: 34.67 ms = 1664 whole frames
+        assert_eq!(d.lead_in_samples, 1664, "{d:?}");
+        assert_eq!(
+            d.lead_in_stamp_ns + samples_to_ns(d.lead_in_samples, RATE),
+            d.stamp_ns,
+            "the lead-in ends where the output starts: {d:?}"
+        );
+        assert!(
+            d.lead_in_stamp_ns >= now && d.lead_in_stamp_ns - now < samples_to_ns(1, RATE),
+            "the lead-in starts at the arrival (within a frame): {d:?}"
+        );
+    };
+    check(
+        t.packet(on_time(H), H as u32, 256, RATE, 2, R40),
+        on_time(H),
+    );
+    assert!(t.emitted);
+    for k in H + 1..H + 50 {
+        let d = t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.lead_in_samples), (Event::Packet, 0), "{d:?}");
+    }
+    // a 1.6 s outage: a starve re-anchor, the hold, then the new stretch's own lead-in
+    let k0 = H + 50 + 300;
+    let d = t.packet(on_time(k0), k0 as u32, 256, RATE, 2, R40);
+    assert_eq!(
+        (d.event, d.reason),
+        (Event::Reanchor, Reason::Starve),
+        "{d:?}"
+    );
+    assert!(
+        !t.emitted,
+        "a re-anchor starts a stretch that has sent nothing"
+    );
+    for j in 1..H {
+        let d = t.packet(on_time(k0 + j), (k0 + j) as u32, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.lead_in_samples), (Event::Hold, 0), "{d:?}");
+    }
+    check(
+        t.packet(on_time(k0 + H), (k0 + H) as u32, 256, RATE, 2, R40),
+        on_time(k0 + H),
+    );
+}
+
+/// Review round 5: when a stretch's first output is a late packet's silence (its stamp has passed)
+/// there is no lead-in, and no later output carries one.
+#[test]
+fn a_first_output_whose_stamp_has_passed_carries_no_lead_in() {
+    let mut t = Timeline::new();
+    through_the_hold(&mut t, 0);
+    let late = 60 * NS_PER_MS;
+    // packet H late: dropped, nothing filled (nothing was emitted yet)
+    let d = t.packet(on_time(H) + late, H as u32, 256, RATE, 2, R40);
+    assert_eq!(
+        (d.event, d.silence_samples, d.lead_in_samples),
+        (Event::Late, 0, 0),
+        "{d:?}"
+    );
+    assert!(!t.emitted);
+    // packet H + 1 late too: its slot is the first output, silence, its stamp already passed
+    let d = t.packet(on_time(H + 1) + late, (H + 1) as u32, 256, RATE, 2, R40);
+    assert_eq!(
+        (d.event, d.silence_samples, d.lead_in_samples),
+        (Event::Late, 256, 0),
+        "{d:?}"
+    );
+    assert!(t.emitted);
+    let d = t.packet(on_time(H + 20), (H + 20) as u32, 256, RATE, 2, R40);
+    assert_eq!(
+        (d.event, d.silence_samples, d.lead_in_samples),
+        (Event::Packet, 18 * 256, 0),
+        "{d:?}"
+    );
+}
+
 /// Review round 4: the starve boundary on our clock. A late packet arriving exactly one second
 /// after the last in-time packet did is still a drop; one ns more is the re-anchor.
 #[test]

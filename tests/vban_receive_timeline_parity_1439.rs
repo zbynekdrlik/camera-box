@@ -39,8 +39,8 @@ mod vban_c;
 use std::fmt::Write as _;
 use vban_c::{compile_and_run, repo};
 use vban_receive_timeline::{
-    clamp_reserve_ms, round_half_away, samples_to_ns, scale_ppb, Decision, Event, Reason, Timeline,
-    FIT_WINDOW_S, JUMP_S, OUTLIER_MS, STALE_PACKETS,
+    clamp_reserve_ms, ns_to_samples, round_half_away, samples_to_ns, scale_ppb, Decision, Event,
+    Reason, Timeline, FIT_WINDOW_S, JUMP_S, OUTLIER_MS, STALE_PACKETS,
 };
 
 const HEADER: &str = "vendor/obs-vban/src/vban-receive-timeline.h";
@@ -595,6 +595,16 @@ const NS_INPUTS: [(u64, u32); 6] = [
     (5, 0),
     (123_456_789_012, 192_000),
 ];
+/// `ns_to_samples` (the lead-in's length): a whole second, an exact frame, one ns short of one,
+/// R − one packet on the grid, and a value far past any lead-in.
+const SAMPLES_INPUTS: [(u64, u32); 6] = [
+    (0, 48_000),
+    (1_000_000_000, 48_000),
+    (20_833, 48_000),
+    (20_834, 48_000),
+    (34_666_667, 48_000),
+    (123_456_789_012, 192_000),
+];
 const SCALE_INPUTS: [(u64, i64); 7] = [
     (0, 50_000),
     (1_000_000_000, 50_000),
@@ -631,7 +641,7 @@ fn bits(x: f64) -> u64 {
 fn line(t: &Timeline, d: Decision) -> String {
     let b = &t.buckets[(t.last_k.rem_euclid(FIT_WINDOW_S as i64)) as usize];
     format!(
-        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} {} | {} {} {} {} {} {} {} {} | {}",
+        "{} {} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} {} {} | {} {} {} {} {} {} {} {} | {}",
         d.event as i32,
         d.reason as i32,
         d.silence_samples,
@@ -639,6 +649,8 @@ fn line(t: &Timeline, d: Decision) -> String {
         d.stamp_ns,
         d.lateness_ns,
         d.late_ns,
+        d.lead_in_samples,
+        d.lead_in_stamp_ns,
         u8::from(t.anchored),
         t.rate,
         t.channels,
@@ -667,6 +679,7 @@ fn line(t: &Timeline, d: Decision) -> String {
         t.stale,
         t.last_fold_end,
         u8::from(t.fit_frozen()),
+        u8::from(t.emitted),
         b.k,
         b.n,
         b.x0,
@@ -706,6 +719,9 @@ fn rust_trace(scripts: &[Vec<Pkt>]) -> Vec<String> {
     }
     for &(s, r) in &NS_INPUTS {
         out.push(format!("ns {}", samples_to_ns(s, r)));
+    }
+    for &(ns, r) in &SAMPLES_INPUTS {
+        out.push(format!("samples {}", ns_to_samples(ns, r)));
     }
     for &(ns, ppb) in &SCALE_INPUTS {
         out.push(format!("scale {}", scale_ppb(ns, ppb)));
@@ -750,8 +766,9 @@ static uint64_t bits(double x)
 static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d)
 {
 	const struct vban_recv_bucket *b = &t->buckets[(size_t)(((t->last_k % VBAN_RECV_FIT_WINDOW_S) + VBAN_RECV_FIT_WINDOW_S) % VBAN_RECV_FIT_WINDOW_S)];
-	printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " | ", d.event, d.reason,
-	       d.silence_samples, d.silence_pos, d.stamp_ns, d.lateness_ns, d.late_ns);
+	printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " %" PRIu64 " %" PRIu64 " | ", d.event,
+	       d.reason, d.silence_samples, d.silence_pos, d.stamp_ns, d.lateness_ns, d.late_ns, d.lead_in_samples,
+	       d.lead_in_stamp_ns);
 	printf("%d %" PRIu32 " %" PRIu32 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu32 " %" PRIu64 " %" PRIu64 " %" PRIu64
 	       " %" PRId64 " %" PRId64 " %" PRIu64 " %d %" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64
 	       " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | ",
@@ -760,7 +777,8 @@ static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d
 	       t->next_pos, t->base_stamp_ns, t->base_pos, t->step_ppb, t->last_k, t->last_intime_ns,
 	       t->fit_valid ? 1 : 0, t->fit_ppb, bits(t->fit_b), bits(t->fit_xbar), bits(t->fit_ybar), t->phase_ns,
 	       t->received, t->lost, t->silence_samples, t->late, t->re_anchors);
-	printf("%" PRIu64 " %" PRIu64 " %d | ", t->stale, t->last_fold_end, vban_recv_fit_frozen(t) ? 1 : 0);
+	printf("%" PRIu64 " %" PRIu64 " %d %d | ", t->stale, t->last_fold_end, vban_recv_fit_frozen(t) ? 1 : 0,
+	       t->emitted ? 1 : 0);
 	printf("%" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | %" PRIu64 "\n",
 	       b->k, b->n, b->x0, b->y0, bits(b->su), bits(b->sv), bits(b->suu), bits(b->suv),
 	       vban_recv_stamp_at(t, t->next_pos + 1000));
@@ -815,6 +833,13 @@ struct pkt {
         writeln!(
             c,
             "\tprintf(\"ns %\" PRIu64 \"\\n\", vban_recv_samples_to_ns({s}ULL, {r}U));"
+        )
+        .unwrap();
+    }
+    for (ns, r) in SAMPLES_INPUTS {
+        writeln!(
+            c,
+            "\tprintf(\"samples %\" PRIu64 \"\\n\", vban_recv_ns_to_samples({ns}ULL, {r}U));"
         )
         .unwrap();
     }
@@ -922,8 +947,10 @@ fn the_scripts_reach_every_boundary_1439() {
         "starve re-anchors one ns past the second",
         "re-anchors during the hold",
         "a late first packet past the hold (dropped, nothing filled)",
+        "a lead-in before a stretch's first output",
+        "a stretch's first output whose stamp had passed (no lead-in)",
     ];
-    let mut hits = [0usize; 35];
+    let mut hits = [0usize; 37];
     for sc in scripts() {
         let mut t = Timeline::new();
         // the last arrival that was in time (an anchor, a held or an emitted packet), harness-side
@@ -933,6 +960,7 @@ fn the_scripts_reach_every_boundary_1439() {
                 t = Timeline::new();
             }
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
+            let emitted_before = t.emitted;
             let (base_before, base_pos_before, next_before) =
                 (t.base_stamp_ns, t.base_pos, t.next_pos);
             let since_in = p.now as i64 - last_in as i64;
@@ -1046,6 +1074,10 @@ fn the_scripts_reach_every_boundary_1439() {
             hits[33] += usize::from(
                 d.event == Event::Reanchor && anchored && next_before <= u64::from(p.rate),
             );
+            let first_output =
+                !emitted_before && (d.event == Event::Packet || d.silence_samples > 0);
+            hits[35] += usize::from(first_output && d.lead_in_samples > 0);
+            hits[36] += usize::from(first_output && d.lead_in_samples == 0);
             if matches!(
                 d.event,
                 Event::Anchor | Event::Reanchor | Event::Hold | Event::Packet

@@ -247,6 +247,55 @@ fn assert_contiguous(outs: &[Out]) {
     }
 }
 
+/// Review round 5: on the grid a stretch's first output's stamp is R − one packet (34.67 ms)
+/// after its arrival, so its LEAD-IN is 1664 whole frames of silence.
+const LEAD_IN: u64 = 1664;
+
+/// Splits off the LEAD-INs (review round 5): the run of silent outputs that opens a stretch (the
+/// first output, or one that does not continue the previous output's stamps), which must end
+/// exactly where the stretch's next output starts. Returns (each lead-in's frames, the other
+/// outputs in order).
+fn split_lead_ins(outs: &[Out]) -> (Vec<u64>, Vec<Out>) {
+    let (mut leads, mut rest) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < outs.len() {
+        let opens = i == 0 || outs[i].ts.abs_diff(outs[i - 1].ts + ns(outs[i - 1].frames)) > 2;
+        if !(opens && outs[i].zero) {
+            rest.push(outs[i]);
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        let mut frames = 0;
+        while j < outs.len() && outs[j].zero {
+            frames += outs[j].frames;
+            j += 1;
+        }
+        if j < outs.len() {
+            let end = outs[j - 1].ts + ns(outs[j - 1].frames);
+            assert!(
+                end.abs_diff(outs[j].ts) <= 2,
+                "issue 1439: a lead-in ends where its stretch's output starts: {outs:?}"
+            );
+        }
+        leads.push(frames);
+        i = j;
+    }
+    (leads, rest)
+}
+
+/// The outputs of ONE stretch on the grid after its lead-in, which must be exactly [`LEAD_IN`]
+/// frames.
+fn after_lead_in(outs: &[Out]) -> Vec<Out> {
+    let (leads, rest) = split_lead_ins(outs);
+    assert_eq!(
+        leads,
+        vec![LEAD_IN],
+        "issue 1439: one stretch, one lead-in of R − one packet: {outs:?}"
+    );
+    rest
+}
+
 /// The non-silent outputs' sample values, in order.
 fn audio_values(outs: &[Out]) -> Vec<i64> {
     outs.iter().filter(|o| !o.zero).map(|o| o.first).collect()
@@ -280,7 +329,11 @@ fn two_lost_packets_are_silence_for_exactly_their_slots_1439() {
 fn one_lost_packet_is_one_silent_slot_1439() {
     let outs = run(&after_hold(&[400, 401, 403, 404]));
     assert_eq!(audio_values(&outs), vec![1, 2, 4, 5], "{outs:?}");
-    let silent: u64 = outs.iter().filter(|o| o.zero).map(|o| o.frames).sum();
+    let silent: u64 = after_lead_in(&outs)
+        .iter()
+        .filter(|o| o.zero)
+        .map(|o| o.frames)
+        .sum();
     assert_eq!(
         silent,
         u64::from(FRAMES),
@@ -293,7 +346,7 @@ fn one_lost_packet_is_one_silent_slot_1439() {
 fn a_stream_without_loss_has_no_silence_1439() {
     let outs = run(&after_hold(&[207, 208, 209, 210, 211, 212]));
     assert_eq!(audio_values(&outs), vec![1, 2, 3, 4, 5, 6], "{outs:?}");
-    assert!(outs.iter().all(|o| !o.zero), "{outs:?}");
+    assert!(after_lead_in(&outs).iter().all(|o| !o.zero), "{outs:?}");
     assert_contiguous(&outs);
 }
 
@@ -363,10 +416,11 @@ fn the_silence_keeps_the_streams_sample_format_1439() {
         (VBAN_BITFMT_32_FLOAT, "32-bit float"),
     ] {
         let (outs, _log) = run_as(&after_hold(&[300, 301, 303, 304]), bitfmt);
+        let body = after_lead_in(&outs);
         assert_eq!(
-            outs.len(),
+            body.len(),
             5,
-            "{name}: four packets + one silent slot: {outs:?}"
+            "{name}: the lead-in, then four packets + one silent slot: {outs:?}"
         );
         let formats: Vec<i32> = outs.iter().map(|o| o.format).collect();
         assert!(
@@ -380,7 +434,7 @@ fn the_silence_keeps_the_streams_sample_format_1439() {
             "{name}: the audio itself is unchanged: {outs:?}"
         );
         assert_eq!(
-            outs.iter()
+            body.iter()
                 .filter(|o| o.zero)
                 .map(|o| o.frames)
                 .sum::<u64>(),
@@ -705,13 +759,21 @@ fn an_outage_of_1_5_s_is_one_starve_re_anchor_and_no_late_fill_1439() {
         "issue 1439: starve_ms={span} (want {want:.1}): `{}`",
         reanchors[0]
     );
+    // review round 5: each stretch opens with its lead-in (the new one too: libobs resets its timing
+    // after the gap and puts the first chunk at its arrival), and nothing else is silence
+    let (leads, rest) = split_lead_ins(&outs);
+    assert_eq!(
+        leads,
+        vec![LEAD_IN, LEAD_IN],
+        "issue 1439: one lead-in per stretch: {outs:?}"
+    );
     assert!(
-        outs.iter().all(|o| !o.zero),
+        rest.iter().all(|o| !o.zero),
         "issue 1439: nothing is filled after the fact: {:?}",
-        outs.iter().filter(|o| o.zero).collect::<Vec<_>>()
+        rest.iter().filter(|o| o.zero).collect::<Vec<_>>()
     );
     assert_eq!(
-        outs.len() as u64,
+        rest.len() as u64,
         (n - u64::from(HELD)) + (after - u64::from(HELD)),
         "issue 1439: both anchors hold their first second"
     );

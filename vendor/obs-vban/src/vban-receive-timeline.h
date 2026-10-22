@@ -150,6 +150,7 @@ struct vban_recv_timeline {
 	int64_t last_k;         /* the bucket of the last packet's end position */
 	uint64_t last_intime_ns; /* the arrival of the last packet that came in time */
 	uint64_t last_fold_end;  /* the end position of the last packet folded into the fit */
+	bool emitted;            /* this anchored stretch has sent output (its lead-in goes before the first) */
 	struct vban_recv_bucket buckets[VBAN_RECV_FIT_WINDOW_S];
 	bool fit_valid;
 	int64_t fit_ppb; /* the fitted step deviation (positive = the sender's clock is slow) */
@@ -175,6 +176,13 @@ struct vban_recv_decision {
 	int64_t lateness_ns;  /* arrival - stamp (negative = the margin left) */
 	int64_t late_ns;      /* a LATE packet: how far after its stamp; a STARVE re-anchor: how long no
 			       * packet came in time (its arrival - the last in-time arrival) */
+	/* the LEAD-IN (review round 5), on the first output of an anchored stretch only: this many frames
+	 * of silence go out BEFORE that output, from the packet's arrival up to the output's stamp, so
+	 * libobs starts the stream at that arrival and the output lands on its stamp whatever libobs makes
+	 * of the gap before it (one over MAX_TS_VAR = 2 s, after a starve, is a timing reset that puts the
+	 * first chunk at the instant it arrives); 0 otherwise, and when that stamp has already passed */
+	uint64_t lead_in_samples;
+	uint64_t lead_in_stamp_ns; /* the first output's stamp - the lead-in's length: it ends there */
 };
 
 /* The Receive Buffer in ms for a source setting value: 0 or less = the default. */
@@ -194,6 +202,12 @@ static inline uint64_t vban_recv_samples_to_ns(uint64_t samples, uint32_t rate)
 {
 	const uint64_t r = rate ? (uint64_t)rate : 1;
 	return (samples / r) * VBAN_RECV_NS_PER_SEC + (samples % r) * VBAN_RECV_NS_PER_SEC / r;
+}
+
+/* floor(ns * rate / 1e9), the whole frames that fit in NS, without overflowing 64 bits. */
+static inline uint64_t vban_recv_ns_to_samples(uint64_t ns, uint32_t rate)
+{
+	return (ns / VBAN_RECV_NS_PER_SEC) * rate + (ns % VBAN_RECV_NS_PER_SEC) * rate / VBAN_RECV_NS_PER_SEC;
 }
 
 /* ns x ppb / 1e9, truncated toward zero, without overflowing 64 bits. */
@@ -393,7 +407,7 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 							  uint32_t frames, uint32_t rate, uint32_t channels,
 							  uint64_t reserve_ns)
 {
-	struct vban_recv_decision d = {0, 0, 0, 0, 0, 0, 0};
+	struct vban_recv_decision d = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 	if (frames == 0)
 		frames = 1;
 	if (rate == 0)

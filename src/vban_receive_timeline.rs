@@ -207,6 +207,16 @@ pub struct Decision {
     /// A LATE packet: how far after its stamp it came. A STARVE re-anchor: how long no packet
     /// came in time (its arrival − the last in-time arrival), the span the source logs.
     pub late_ns: i64,
+    /// The LEAD-IN (review round 5), on the first output of an anchored stretch only: this many
+    /// frames of silence go out BEFORE that output, from the packet's arrival up to the output's
+    /// stamp, so libobs starts the stream at that arrival and the output lands on its stamp
+    /// whatever libobs makes of the gap before it (one over `MAX_TS_VAR` = 2 s, after a starve,
+    /// is a timing reset that puts the first chunk at the instant it arrives). 0 otherwise, and
+    /// when that stamp has already passed.
+    pub lead_in_samples: u64,
+    /// The lead-in's stamp: the first output's stamp − the lead-in's length, so it ends exactly
+    /// where that output starts.
+    pub lead_in_stamp_ns: u64,
 }
 
 /// The receive timeline of one source (the C `struct vban_recv_timeline`).
@@ -239,6 +249,8 @@ pub struct Timeline {
     pub last_intime_ns: u64,
     /// The end position of the last packet folded into the fit.
     pub last_fold_end: u64,
+    /// Whether this anchored stretch has sent any output yet (its lead-in goes before the first).
+    pub emitted: bool,
     pub buckets: [Bucket; FIT_WINDOW_S],
     pub fit_valid: bool,
     /// The fitted step deviation (positive = the sender's clock is slow).
@@ -285,6 +297,12 @@ pub fn clamp_reserve_ms(ms: i64) -> u32 {
 pub fn samples_to_ns(samples: u64, rate: u32) -> u64 {
     let r = u64::from(rate.max(1));
     (samples / r) * NS_PER_SEC + (samples % r) * NS_PER_SEC / r
+}
+
+/// `floor(ns × rate / 1e9)`, the whole frames that fit in `ns`, without overflowing 64 bits.
+pub fn ns_to_samples(ns: u64, rate: u32) -> u64 {
+    let r = u64::from(rate);
+    (ns / NS_PER_SEC) * r + (ns % NS_PER_SEC) * r / NS_PER_SEC
 }
 
 /// `ns × ppb / 1e9`, truncated toward zero, without overflowing 64 bits.
@@ -345,6 +363,7 @@ impl Timeline {
             last_k: 0,
             last_intime_ns: 0,
             last_fold_end: 0,
+            emitted: false,
             buckets: [Bucket::default(); FIT_WINDOW_S],
             fit_valid: false,
             fit_ppb: 0,
