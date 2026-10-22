@@ -47,8 +47,8 @@
 //! * **Late = lost** (ROZHODNUTÉ 6345255813 item 2; the round-3 late shift is withdrawn). A fixed
 //!   latency is a fixed jitter buffer: a packet arriving after its stamp (once the hold is over) is
 //!   [`Event::Late`] -- dropped and counted, its slot (with the slots lost right before it) silence
-//!   at once on the unchanged line, once the stretch has output its first packet. The line, the fit and the latency stay where the anchor put
-//!   them; the fold rule is unchanged.
+//!   at once on the unchanged line, once the stretch has output its first packet. The line, the
+//!   fit and the latency stay where the anchor put them; the fold rule is unchanged.
 //! * **Re-anchor** (counted, one per event, then the hold): a STARVE -- no packet in time for
 //!   [`PERSIST_S`] on OUR clock: any packet arriving more than that after the last in-time packet
 //!   did (an outage, a sender pause, every packet late on a delay step; review round 4), late or

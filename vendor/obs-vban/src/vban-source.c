@@ -378,7 +378,8 @@ static void vban_src_log_status(struct vban_src_s *s, const struct VBanHeader *h
 	     t->received, t->lost, t->late, t->re_anchors, t->stale, (double)t->silence_samples * 1000.0 / rate,
 	     s->window_late_seen ? (double)s->window_late_max_ns / 1e6 : 0.0,
 	     t->fit_valid ? -(double)t->fit_ppb / 1000.0 : 0.0, (double)t->phase_ns / 1e6,
-	     vban_recv_fit_frozen(t) ? "frozen" : (t->fit_valid ? "locked" : "acquiring"), (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS), t->rate, t->channels,
+	     vban_recv_fit_frozen(t) ? "frozen" : (t->fit_valid ? "locked" : "acquiring"),
+	     (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS), t->rate, t->channels,
 	     os_atomic_load_long(&s->log_port), (int)VBAN_STREAM_NAME_SIZE, header->streamname,
 	     obs_source_get_name(s->context));
 	s->window_late_seen = false;

@@ -47,7 +47,8 @@
  *  - Late = lost (ROZHODNUTE 6345255813 item 2; the round-3 late shift is withdrawn): a fixed latency
  *    is a fixed jitter buffer. A packet arriving after its stamp (once the hold is over) is LATE:
  *    dropped and counted, its slot (with the slots lost right before it) silence at once on the
- *    unchanged line, once the stretch has output its first packet. The line, the fit and the latency stay where the anchor put them.
+ *    unchanged line, once the stretch has output its first packet. The line, the fit and the latency
+ *    stay where the anchor put them.
  *  - Re-anchor (counted, one per event, then the hold): a STARVE -- no packet in time for
  *    VBAN_RECV_PERSIST_S on OUR clock: any packet arriving more than that after the last in-time
  *    packet did (an outage, a sender pause, every packet late on a delay step), late or not, with
