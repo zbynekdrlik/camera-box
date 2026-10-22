@@ -137,6 +137,8 @@ enum vban_recv_event {
 	VBAN_RECV_HOLD = 4,     /* inside an anchor's first second: refines + folds, never output */
 	VBAN_RECV_LATE = 5,     /* too late for its slot (already handed out, or past its deadline before the
 				 * stretch's first output): dropped, counted */
+	VBAN_RECV_REORDER = 6,  /* ROZHODNUTE 6352253147 (a), RED stub: a packet behind the last one whose slot is
+				 * still to go out: stored for its slot, counted */
 };
 
 enum vban_recv_reason {
@@ -195,6 +197,9 @@ struct vban_recv_timeline {
 	uint64_t late;            /* packets too late for their slot (each dropped) */
 	uint64_t re_anchors;
 	uint64_t stale; /* duplicate / reordered packets dropped (their slot had passed) */
+	/* ROZHODNUTE 6352253147 (a), RED stub: bit j = the packet j indexes behind last_nu came */
+	uint64_t recv_mask;
+	uint64_t reordered; /* reordered packets stored for their slot */
 };
 
 /* What one packet is (the receive side never outputs anything: the worker does, at deadlines). */

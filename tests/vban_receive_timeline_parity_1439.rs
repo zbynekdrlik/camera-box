@@ -110,7 +110,7 @@ fn bits(x: f64) -> u64 {
 fn line(t: &Timeline, d: Decision) -> String {
     let b = &t.buckets[(t.last_k.rem_euclid(FIT_WINDOW_S as i64)) as usize];
     format!(
-        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} | {} {}",
+        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} | {} {} | {} {}",
         d.event as i32,
         d.reason as i32,
         d.pos,
@@ -160,6 +160,8 @@ fn line(t: &Timeline, d: Decision) -> String {
         bits(b.suv),
         t.stamp_at(t.next_pos + 1000),
         t.stamp_at(t.base_pos.saturating_sub(1000)),
+        t.recv_mask,
+        t.reordered,
     )
 }
 
@@ -243,10 +245,17 @@ impl Drive {
         let d = t.packet(p.now, p.nu, p.frames, p.rate, p.channels, p.reserve_ns);
         match d.event {
             Event::Anchor | Event::Reanchor => self.store.clear(),
-            Event::Packet => self.store.push_back(d.pos),
+            Event::Packet | Event::Reorder => self.store_insert(d.pos),
             _ => {}
         }
         d
+    }
+
+    /// The store stays in slot order: a reordered packet goes in before the later slots
+    /// (ROZHODNUTÉ 6352253147 (a)), exactly like the C driver's `store_insert`.
+    fn store_insert(&mut self, pos: u64) {
+        let at = self.store.partition_point(|&p| p < pos);
+        self.store.insert(at, pos);
     }
 }
 
@@ -337,10 +346,11 @@ static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d
 	       t->received, t->lost, t->silence_samples, t->late, t->re_anchors);
 	printf("%" PRIu64 " %" PRIu64 " %d %" PRIu32 " %d %" PRIu64 " %d | ", t->stale, t->last_fold_end,
 	       vban_recv_fit_frozen(t) ? 1 : 0, t->frames, t->emitted ? 1 : 0, t->emit_pos, t->lead_in_pending ? 1 : 0);
-	printf("%" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | %" PRIu64 " %" PRIu64 "\n",
+	printf("%" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | %" PRIu64 " %" PRIu64,
 	       b->k, b->n, b->x0, b->y0, bits(b->su), bits(b->sv), bits(b->suu), bits(b->suv),
 	       vban_recv_stamp_at(t, t->next_pos + 1000),
 	       vban_recv_stamp_at(t, t->base_pos > 1000 ? t->base_pos - 1000 : 0));
+	printf(" | %" PRIu64 " %" PRIu64 "\n", t->recv_mask, t->reordered);
 }
 
 static void due_line(const struct vban_recv_timeline *t, struct vban_recv_due d)
@@ -374,6 +384,18 @@ static void worker(struct vban_recv_timeline *t, uint64_t until, int inclusive)
 	}
 	if (until > clk)
 		clk = until;
+}
+
+/* the store stays in slot order: a reordered packet goes in before the later slots (the Rust Drive) */
+static void store_insert(uint64_t pos)
+{
+	size_t i = store_tail;
+	while (i > store_head && store[(i - 1) % STORE_CAP] > pos) {
+		store[i % STORE_CAP] = store[(i - 1) % STORE_CAP];
+		i--;
+	}
+	store[i % STORE_CAP] = pos;
+	store_tail++;
 }
 
 static void bucket_dump(const struct vban_recv_timeline *t)
@@ -474,8 +496,8 @@ struct pkt {
              \t\tconst struct vban_recv_decision d = vban_recv_packet(&t, p->now, p->nu, p->frames, p->rate, p->channels, p->reserve_ns);\n\
              \t\tif (d.event == VBAN_RECV_ANCHOR || d.event == VBAN_RECV_REANCHOR)\n\
              \t\t\tstore_head = store_tail;\n\
-             \t\telse if (d.event == VBAN_RECV_PACKET)\n\
-             \t\t\tstore[store_tail++ % STORE_CAP] = d.pos;\n\
+             \t\telse if (d.event == VBAN_RECV_PACKET || d.event == VBAN_RECV_REORDER)\n\
+             \t\t\tstore_insert(d.pos);\n\
              \t\tline(&t, d);\n\
              \t\tworker(&t, p->now, 1);\n\
              \t\tif (i % 97 == 96)\n\
@@ -575,11 +597,16 @@ fn the_scripts_reach_every_boundary_1439() {
         "a look again after the poll (the slot's packet not there yet)",
         "slots out after their stamp (missed: a stalled worker)",
         "a stretch with no room for a lead-in (its first packet at its deadline)",
+        "reorders stored for their slot (ROZHODNUTÉ 6352253147 (a))",
+        "a duplicate of a packet that came (stale)",
+        "a reorder whose slot already went out (stale)",
+        "a reorder in a starved stretch (stale)",
+        "a reorder before the stretch's first output (stale)",
     ];
-    let mut hits = [0usize; 54];
+    let mut hits = [0usize; 59];
     // what the worker hands out (both twins' drivers do the same): every slot one slot, its silence
     // never before its deadline (a stored packet may go out ahead of it, review round 5)
-    fn tally(hits: &mut [usize; 54], t: &Timeline, d: DueDecision) {
+    fn tally(hits: &mut [usize; 59], t: &Timeline, d: DueDecision) {
         match d.kind {
             Due::Silence | Due::Packet => {
                 assert_eq!(d.frames, u64::from(t.frames), "one slot: {d:?}");
@@ -620,6 +647,21 @@ fn the_scripts_reach_every_boundary_1439() {
             let frames_before = t.frames;
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
             let emitted_before = t.emitted;
+            // a packet up to 63 behind the last one (ROZHODNUTÉ 6352253147 (a)): did its index come,
+            // did its slot go out, did the stretch starve
+            let back_by = t.last_nu.wrapping_sub(p.nu);
+            let behind = anchored
+                && p.rate == t.rate
+                && p.channels == t.channels
+                && p.frames == t.frames
+                && p.reserve_ns == t.reserve_ns
+                && (1..64).contains(&back_by);
+            let came = behind && (t.recv_mask >> back_by) & 1 == 1;
+            let slot_out = behind
+                && t.next_pos
+                    .checked_sub(u64::from(back_by + 1) * u64::from(p.frames))
+                    .is_none_or(|pos| pos < t.emit_pos);
+            let starved = p.now as i64 - t.last_intime_ns as i64 > 1_000_000_000;
             let frozen_before = t.fit_frozen();
             let (base_before, base_pos_before, next_before) =
                 (t.base_stamp_ns, t.base_pos, t.next_pos);
@@ -661,7 +703,7 @@ fn the_scripts_reach_every_boundary_1439() {
             let d = t.packet(p.now, p.nu, p.frames, p.rate, p.channels, p.reserve_ns);
             match d.event {
                 Event::Anchor | Event::Reanchor => drive.store.clear(),
-                Event::Packet => drive.store.push_back(d.pos),
+                Event::Packet | Event::Reorder => drive.store_insert(d.pos),
                 _ => {}
             }
             let back = last_nu.wrapping_sub(p.nu);
@@ -703,6 +745,13 @@ fn the_scripts_reach_every_boundary_1439() {
                     }
                 }
                 _ => {}
+            }
+            hits[54] += usize::from(d.event == Event::Reorder);
+            if d.event == Event::Stale && behind {
+                hits[55] += usize::from(emitted_before && came);
+                hits[56] += usize::from(emitted_before && !came && !starved && slot_out);
+                hits[57] += usize::from(emitted_before && !came && starved);
+                hits[58] += usize::from(!emitted_before);
             }
             hits[16] += usize::from(
                 same && d.event == Event::Packet

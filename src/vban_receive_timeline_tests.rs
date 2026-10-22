@@ -107,8 +107,11 @@ impl Rig {
         let d = self.t.packet(now, nu, frames, rate, channels, r);
         match d.event {
             Event::Anchor | Event::Reanchor => self.store.clear(),
-            Event::Packet => {
-                self.store.push_back(d.pos);
+            // the store stays in slot order: a reordered packet goes in before the later slots
+            // (ROZHODNUTÉ 6352253147 (a))
+            Event::Packet | Event::Reorder => {
+                let at = self.store.partition_point(|&p| p < d.pos);
+                self.store.insert(at, d.pos);
                 let mut sink = RigSink {
                     store: &mut self.store,
                     outs: &mut self.outs,
@@ -479,55 +482,6 @@ fn an_index_far_behind_re_anchors_as_backward() {
     assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Backward));
     assert_eq!(t.re_anchors, 1);
     assert_eq!(t.late, 0);
-}
-
-/// Review round 1: one reordered or duplicated packet (a UDP network effect) restarted the
-/// timeline and reported a loss that never happened. A packet behind the last one is dropped as
-/// STALE (never a re-anchor), and its slot goes out at its deadline as the silence it is.
-#[test]
-fn a_reordered_or_duplicated_packet_is_dropped_never_a_re_anchor() {
-    let mut r = Rig::new();
-    // the held first second, then packets 100 .. 111 (the index below names their offset)
-    rig_through_the_hold(&mut r, 100u32.wrapping_sub(H as u32));
-    for k in H..H + 12 {
-        r.packet(on_time(k), (100 + k - H) as u32);
-    }
-    let on_time = |k: u64| on_time(H + k);
-    // 112 overtaken by 113 on the way
-    let d = r.packet(on_time(13), 113);
-    assert_eq!(d.event, Event::Packet);
-    // then 112 arrives
-    let d = r.packet(on_time(13) + 100_000, 112);
-    assert_eq!(
-        (d.event, d.stamp_ns, d.pos),
-        (Event::Stale, 0, 0),
-        "a reordered packet must not restart the timeline, and is not stored"
-    );
-    // a network duplicate of 113, and one exactly STALE_PACKETS behind: still a reorder
-    assert_eq!(r.packet(on_time(13) + 200_000, 113).event, Event::Stale);
-    assert_eq!(
-        r.packet(on_time(13) + 300_000, 113 - STALE_PACKETS).event,
-        Event::Stale
-    );
-    assert_eq!(
-        r.t.stale, 3,
-        "the reordered 112, the duplicate 113, the one 64 behind"
-    );
-    // the stream continues on the same line
-    let d = r.packet(on_time(14), 114);
-    assert_eq!(d.event, Event::Packet);
-    assert_eq!(d.stamp_ns, on_time(14) - samples_to_ns(256, RATE) + R40);
-    r.run_until(r.t.deadline_at(d.pos), true);
-    assert_eq!(r.t.re_anchors, 0);
-    assert_eq!(
-        r.of(Due::Silence)
-            .iter()
-            .map(|(_, d)| d.pos)
-            .collect::<Vec<_>>(),
-        vec![(H + 12) * 256],
-        "only the slot of 112 is silent"
-    );
-    assert_eq!(r.t.lost, 1);
 }
 
 #[test]

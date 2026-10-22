@@ -254,6 +254,9 @@ struct Run {
     re_anchors: u64,
     lost: u64,
     silence_samples: u64,
+    /// Reordered packets stored for their slot, and stale ones dropped (ROZHODNUTÉ 6352253147 (a)).
+    reordered: u64,
+    stale: u64,
     /// The smallest stamp − arrival of an emitted packet over the run, ns.
     min_margin_ns: i64,
     /// The largest arrival − previous arrival the run contained, ns.
@@ -422,13 +425,19 @@ fn replay_late(sched: &[Sent], reserve_ms: u64, no_encoder: bool, late: Option<W
                 r.store.clear();
                 r.prev_stamp = None;
             }
-            Event::Packet => {
+            // the store stays in slot order: a reordered packet goes in before the later slots
+            // (ROZHODNUTÉ 6352253147 (a))
+            Event::Packet | Event::Reorder => {
                 r.run.min_margin_ns = r.run.min_margin_ns.min(-d.lateness_ns);
-                r.store.push_back(Stored {
-                    pos: d.pos,
-                    k: s.k,
-                    first_sample_ns: s.first_sample_ns,
-                });
+                let at = r.store.partition_point(|x| x.pos < d.pos);
+                r.store.insert(
+                    at,
+                    Stored {
+                        pos: d.pos,
+                        k: s.k,
+                        first_sample_ns: s.first_sample_ns,
+                    },
+                );
                 w.stored(&mut r, a);
             }
             _ => {}
@@ -451,6 +460,8 @@ fn replay_late(sched: &[Sent], reserve_ms: u64, no_encoder: bool, late: Option<W
     ) = held(&run, 0, 0..u64::MAX);
     run.late = t.late;
     run.re_anchors = t.re_anchors;
+    run.reordered = t.reordered;
+    run.stale = t.stale;
     run.lost = t.lost;
     run.silence_samples = t.silence_samples;
     run.sender_ppm = t.sender_ppm();
@@ -903,3 +914,6 @@ fn network_loss_is_silence_and_never_a_re_anchor_1439() {
 
 #[path = "vban_receive_timeline_bench_wake.rs"]
 mod wake;
+
+#[path = "vban_receive_timeline_bench_reorder.rs"]
+mod reorder;

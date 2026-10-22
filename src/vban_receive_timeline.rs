@@ -150,6 +150,9 @@ pub enum Event {
     /// already handed to libobs (as silence), or -- before the stretch's first output -- its
     /// deadline had passed. Dropped and counted.
     Late = 5,
+    /// ROZHODNUTÉ 6352253147 (a), RED stub: a packet behind the last one whose slot is still to go
+    /// out: stored for its slot, counted `reordered`.
+    Reorder = 6,
 }
 
 /// Why a timeline restarted (the C `enum vban_recv_reason`).
@@ -332,6 +335,10 @@ pub struct Timeline {
     pub re_anchors: u64,
     /// Duplicate / reordered packets dropped (their slot had passed).
     pub stale: u64,
+    /// ROZHODNUTÉ 6352253147 (a), RED stub: bit j = the packet j indexes behind `last_nu` came.
+    pub recv_mask: u64,
+    /// Reordered packets stored for their slot.
+    pub reordered: u64,
 }
 
 impl Default for Timeline {
@@ -442,6 +449,8 @@ impl Timeline {
             late: 0,
             re_anchors: 0,
             stale: 0,
+            recv_mask: 0,
+            reordered: 0,
         }
     }
 
@@ -866,3 +875,7 @@ mod late_tests;
 #[cfg(test)]
 #[path = "vban_receive_timeline_worker_model.rs"]
 mod worker_model;
+
+#[cfg(test)]
+#[path = "vban_receive_timeline_reorder_tests.rs"]
+mod reorder_tests;
