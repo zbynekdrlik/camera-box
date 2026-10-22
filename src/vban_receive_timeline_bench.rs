@@ -617,6 +617,40 @@ fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_143
     }
 }
 
+/// Known limit (review round 5), the same late fill as the hiccup's: an outage SHORTER than the
+/// starve (no packet for under a second) is a loss -- its slots' silence goes out when the next
+/// packet arrives, on the unchanged line -- but at 0 ms OBS buffering libobs has underrun by then and
+/// APPENDS that silence behind its label, so the latency OBS REALIZES steps up by about the outage
+/// (+72 / +455 / +861 ms for 100 / 500 / 900 ms) and the stamp-basis ASRC walks it back at <= 300 ppm
+/// (25 min for 455 ms). The stamps never move and nothing re-anchors. Pinned so a cure (a deadline
+/// timer that sends a slot's silence before its window is mixed) shows; a question for the main.
+#[test]
+fn known_limit_an_outage_under_a_second_moves_the_realized_latency_by_about_its_length_1439() {
+    for (ms, seed) in [(100u64, 1u64), (500, 2), (900, 3)] {
+        let base = schedule(seed, 0.0, TEN_MIN_PACKETS / 2, 0.0);
+        let event_k = k_at(&base, S0 + 120_000_000_000) - 20;
+        let run = replay(&with_outage(base, ms), 40);
+        let (_, dl_before, _, dr_before) = held(&run, 0, 0..event_k);
+        let (_, dl, _, dr) = held(&run, 0, 0..u64::MAX);
+        let tag = format!(
+            "outage {ms} ms, seed {seed}: realized moved {:.3} ms over the run: {run:?}",
+            dr / MS
+        );
+        println!("{tag}");
+        assert_eq!((run.re_anchors, run.late), (0, 0), "{tag}");
+        assert!(run.lost > 0, "the outage is a loss: {tag}");
+        assert!(
+            dl_before <= 1.0 * MS && dr_before <= 1.0 * MS && dl <= 1.0 * MS,
+            "held before it, the stamps never move: {tag}"
+        );
+        let step = dr / MS;
+        assert!(
+            step > ms as f64 - 60.0 && step < ms as f64,
+            "the known limit moved (a cure would bring it under 1 ms): {tag}"
+        );
+    }
+}
+
 /// The documented limit of the held latency: before the fit the line runs at the nominal rate, then
 /// slews to the fit at 5 ppm per bucket, so a sender far off our clock moves the stamp latency by
 /// about its ppm x 20 s. At ±100 ppm that is more than the ±1 ms bound (the bound holds to ~±55 ppm)
