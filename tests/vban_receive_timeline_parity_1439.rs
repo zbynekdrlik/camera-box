@@ -981,9 +981,11 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
         "vban_recv_clamp_reserve_ms((int64_t)obs_data_get_int(settings, \"receive_buffer_ms\"))",
         "obs_data_set_default_int(data, \"receive_buffer_ms\", VBAN_RECV_RESERVE_MS_DEFAULT);",
         "obs_properties_add_int(props, \"receive_buffer_ms\",",
-        "if (d.silence_samples > 0) vban_src_output_silence(s, &d, audio.speakers, audio.samples_per_sec);",
-        ".format = AUDIO_FORMAT_FLOAT_PLANAR,",
-        "static const float zeros[VBAN_RECV_SILENCE_CHUNK_FRAMES];",
+        // the silence keeps the packet's own sample format (review round 1: a format change resets
+        // libobs's resampler and the genlock ASRC), U8 silence is 0x80
+        "if (d.silence_samples > 0) vban_src_output_silence(s, &d, &audio);",
+        ".format = like->format,",
+        "memset(s->silence.array, like->format == AUDIO_FORMAT_U8BIT ? 0x80 : 0, plane_bytes);",
         "\"obs-vban receive: received=%\" PRIu64 \" lost=%\" PRIu64 \" late=%\" PRIu64 \" re_anchors=%\" PRIu64",
         "\"obs-vban receive re-anchor: source '%s' reason=%s",
         "\"obs-vban receive anchored: source '%s'",
@@ -1009,6 +1011,7 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
         "Padding packet",
         "lost_ns",
         "os_gettime_ns() - (uint64_t)audio.frames",
+        ".format = AUDIO_FORMAT_FLOAT_PLANAR,",
     ] {
         assert!(
             !src.contains(gone),

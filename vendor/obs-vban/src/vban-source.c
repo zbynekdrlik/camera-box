@@ -43,6 +43,8 @@ struct vban_src_s
 	vban_udp_t *vban;
 
 	DARRAY(float) buffer;
+	/* camera-box issue 1439: one chunk of silence in the stream's own sample format (receive thread) */
+	DARRAY(uint8_t) silence;
 	/* camera-box issue 1439: the receive timeline; touched only by the receive callback */
 	struct vban_recv_timeline timeline;
 	uint64_t status_ns;        /* the last status line, 0 = none yet */
@@ -170,6 +172,7 @@ static void vban_src_destroy(void *data)
 	bfree(s->stream_name);
 	bfree(s->ip_from);
 	da_free(s->buffer);
+	da_free(s->silence);
 	bfree(s);
 }
 
@@ -249,18 +252,25 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 }
 
 /* camera-box issue 1439: the lost slots as silence on the timeline, in pieces of at most
- * VBAN_RECV_SILENCE_CHUNK_FRAMES frames. */
+ * VBAN_RECV_SILENCE_CHUNK_FRAMES frames, in the SAME sample format and layout as the stream's packets
+ * (LIKE): libobs resets the source's resampler, and with it the genlock ASRC, whenever the format of
+ * the audio it is handed changes. Unsigned 8-bit silence is 0x80, every other format's is 0. */
 static void vban_src_output_silence(struct vban_src_s *s, const struct vban_recv_decision *d,
-				    enum speaker_layout speakers, uint32_t rate)
+				    const struct obs_source_audio *like)
 {
-	static const float zeros[VBAN_RECV_SILENCE_CHUNK_FRAMES];
+	const bool planar = is_audio_planar(like->format);
+	const size_t channels = (size_t)like->speakers;
+	const size_t plane_bytes = VBAN_RECV_SILENCE_CHUNK_FRAMES * get_audio_bytes_per_channel(like->format) *
+				   (planar ? 1 : channels);
+	da_resize(s->silence, plane_bytes);
+	memset(s->silence.array, like->format == AUDIO_FORMAT_U8BIT ? 0x80 : 0, plane_bytes);
 	struct obs_source_audio silence = {
-		.speakers = speakers,
-		.format = AUDIO_FORMAT_FLOAT_PLANAR,
-		.samples_per_sec = rate,
+		.speakers = like->speakers,
+		.format = like->format,
+		.samples_per_sec = like->samples_per_sec,
 	};
-	for (int ch = 0; ch < (int)speakers && ch < MAX_AV_PLANES; ch++)
-		silence.data[ch] = (const uint8_t *)zeros;
+	for (size_t ch = 0; ch < (planar ? channels : 1) && ch < MAX_AV_PLANES; ch++)
+		silence.data[ch] = s->silence.array;
 	for (uint64_t done = 0; done < d->silence_samples;) {
 		uint64_t n = d->silence_samples - done;
 		if (n > VBAN_RECV_SILENCE_CHUNK_FRAMES)
@@ -366,7 +376,7 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 							     audio.samples_per_sec, (uint32_t)audio.speakers, reserve_ns);
 	vban_src_report(s, &d, header->nuFrame, audio.frames);
 	if (d.silence_samples > 0)
-		vban_src_output_silence(s, &d, audio.speakers, audio.samples_per_sec);
+		vban_src_output_silence(s, &d, &audio);
 
 	audio.timestamp = d.stamp_ns;
 	obs_source_output_audio(s->context, &audio);
