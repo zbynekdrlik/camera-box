@@ -141,3 +141,24 @@ fn an_outage_logs_its_missing_slots_once_when_the_stretch_ends_1439() {
         "issue 1439: the outage's silent slots (a second of them) on one line:\n{log}"
     );
 }
+
+/// The fresh-context review of this change: the store must put a reordered packet BETWEEN the stored
+/// slots around it, not only in front of later ones. 305 is lost and 309 overtaken by 310: when 309
+/// arrives the store holds 306, 307, 308 and 310 (the worker is still R behind), and 309 must go in
+/// between 308 and 310 -- an insert at the front shipped green before this test.
+#[test]
+fn a_reorder_goes_in_between_the_stored_slots_around_it_1439() {
+    let nus: Vec<u32> = (300..=315).filter(|&n| n != 305).collect();
+    let (outs, log) = run_with_log(&overtaken(&nus, 309));
+    assert_eq!(
+        audio_values(&outs),
+        vec![1, 2, 3, 4, 5, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        "issue 1439: 309 plays between 308 and 310 (the slot of 305 repeats 304): {outs:?}"
+    );
+    assert!(
+        after_lead_in(&outs).iter().all(|o| !o.zero),
+        "issue 1439: no slot goes out empty: {outs:?}"
+    );
+    assert_contiguous(&outs);
+    assert!(log.contains(", reordered 1,"), "issue 1439:\n{log}");
+}
