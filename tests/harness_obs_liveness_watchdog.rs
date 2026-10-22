@@ -315,7 +315,8 @@ fn watchdog_embeds_the_agent_driven_recovery_command() {
 fn gpu_device_removed_verdict_gets_correct_reboot_guidance_not_the_generic_restart() {
     // #89: an OBS-only restart (launch-obs-genlock.sh --force) typically does NOT clear a DXGI
     // device-removed GPU — embedding that suggestion for THIS verdict is actively misleading.
-    let text = run_recovery_plan_for("stream", "GPU-DEVICE-REMOVED");
+    // a Windows fleet box: resolume-snv (stream-snv runs the Linux stream role since issue 1462)
+    let text = run_recovery_plan_for("resolume", "GPU-DEVICE-REMOVED");
     assert!(
         text.to_lowercase().contains("reboot"),
         "#89: GPU-DEVICE-REMOVED guidance must mention a reboot. got: {text}"
@@ -337,11 +338,28 @@ fn other_verdicts_still_get_the_generic_obs_restart_command() {
         "FPS-ZERO",
         "OBS-COUNT-WRONG",
     ] {
-        let text = run_recovery_plan_for("stream", label);
+        let text = run_recovery_plan_for("resolume", label);
         assert!(
             text.contains("launch-obs-genlock.sh") && text.contains("--force"),
             "#89: verdict {label} must still get the generic OBS-restart recovery command. \
              got: {text}"
+        );
+    }
+}
+
+#[test]
+fn linux_stream_snv_gets_the_systemd_obs_restart_1462() {
+    // issue 1462: stream-snv runs the Linux stream role; its OBS is the supervised strih-obs.service
+    // user unit (setup-strih's stream role), never the Windows launch program.
+    for label in ["WEDGED-RENDER-LAG", "GPU-DEVICE-REMOVED"] {
+        let text = run_recovery_plan_for("stream", label);
+        assert!(
+            text.contains("ssh newlevel@10.77.9.204") && text.contains("systemctl --user restart"),
+            "{label}: the Linux stream-snv gets the systemd restart. got: {text}"
+        );
+        assert!(
+            !text.contains("launch-obs-genlock.sh"),
+            "{label}: no Windows plan. got: {text}"
         );
     }
 }
