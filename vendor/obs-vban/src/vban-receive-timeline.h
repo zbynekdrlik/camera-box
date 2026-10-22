@@ -173,7 +173,8 @@ struct vban_recv_decision {
 	uint64_t silence_pos; /* the first silent sample's position (vban_recv_stamp_at) */
 	uint64_t stamp_ns;    /* the packet's stamp */
 	int64_t lateness_ns;  /* arrival - stamp (negative = the margin left) */
-	int64_t late_ns;      /* a LATE packet (or a persistent-late re-anchor): how far after its stamp */
+	int64_t late_ns;      /* a LATE packet: how far after its stamp; a STARVE re-anchor: how long no
+			       * packet came in time (its arrival - the last in-time arrival) */
 };
 
 /* The Receive Buffer in ms for a source setting value: 0 or less = the default. */
@@ -496,6 +497,8 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 		t->next_pos = end;
 		return d;
 	}
+	if (reason == VBAN_RECV_REASON_STARVE)
+		d.late_ns = (int64_t)now_ns - (int64_t)t->last_intime_ns;
 	t->re_anchors++;
 	vban_recv_anchor(t, now_ns, nu, frames, rate, channels, reserve_ns);
 	d.event = VBAN_RECV_REANCHOR;

@@ -140,7 +140,7 @@ obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receiv
 obs-vban receive emitting: source 'Zvuk z mixu' frame=… margin_ms=… after the first second's hold
 obs-vban receive: received=… lost=… late=… re_anchors=… stale=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
 obs-vban receive late: source '…' frame=… late_ms=… -- dropped, its slot is silence on the anchored line (late=…)
-obs-vban receive re-anchor: source '…' reason=starve|backward|jump|format|config|fit frame=… late_ms=… re_anchors=… late=… -- holding its first second
+obs-vban receive re-anchor: source '…' reason=starve|backward|jump|format|config|fit frame=… starve_ms=… re_anchors=… late=… -- holding its first second
 obs-vban receive buffer: source '…' receive_buffer_ms=10 is not above one packet (5.33 ms) + 10 ms: using 15.33 ms
 ```
 

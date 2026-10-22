@@ -123,7 +123,7 @@ obs-vban receive anchored: source '<input>' frame=N rate=48000 ch=2 receive_buff
 obs-vban receive emitting: source '<input>' frame=N margin_ms=X after the first second's hold
 obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
 obs-vban receive late: source '<input>' frame=N late_ms=X -- dropped, its slot is silence on the anchored line (late=N)
-obs-vban receive re-anchor: source '<input>' reason=starve|backward|jump|format|config|fit frame=N late_ms=X re_anchors=N late=N -- holding its first second
+obs-vban receive re-anchor: source '<input>' reason=starve|backward|jump|format|config|fit frame=N starve_ms=X re_anchors=N late=N -- holding its first second
 obs-vban receive buffer: source '<input>' receive_buffer_ms=R is not above one packet (X ms) + 10 ms: using X ms
 ```
 

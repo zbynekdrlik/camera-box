@@ -286,9 +286,10 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     obs_source_get_name(s->context), nu_frame, t->rate, t->channels,
 		     (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS));
 	} else if (d->event == VBAN_RECV_REANCHOR) {
-		/* a new timeline from this packet (reason=starve: no packet in time for a second), then the hold */
+		/* a new timeline from this packet, then the hold; a starve (no packet in time for a second)
+		 * names how long that was */
 		blog(LOG_WARNING,
-		     "obs-vban receive re-anchor: source '%s' reason=%s frame=%u late_ms=%.1f re_anchors=%" PRIu64
+		     "obs-vban receive re-anchor: source '%s' reason=%s frame=%u starve_ms=%.1f re_anchors=%" PRIu64
 		     " late=%" PRIu64 " -- holding its first second",
 		     obs_source_get_name(s->context), vban_recv_reason_name(d->reason), nu_frame,
 		     (double)d->late_ns / 1e6, t->re_anchors, t->late);

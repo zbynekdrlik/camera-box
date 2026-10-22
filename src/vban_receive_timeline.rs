@@ -204,7 +204,8 @@ pub struct Decision {
     pub stamp_ns: u64,
     /// Arrival − stamp (negative = the margin left).
     pub lateness_ns: i64,
-    /// A LATE packet (or a persistent-late re-anchor): how far after its stamp it came.
+    /// A LATE packet: how far after its stamp it came. A STARVE re-anchor: how long no packet
+    /// came in time (its arrival − the last in-time arrival), the span the source logs.
     pub late_ns: i64,
 }
 
@@ -668,6 +669,9 @@ impl Timeline {
             self.last_nu = nu;
             self.next_pos = end;
             return d;
+        }
+        if reason == Reason::Starve {
+            d.late_ns = now_ns as i64 - self.last_intime_ns as i64;
         }
         self.re_anchors += 1;
         self.anchor(now_ns, nu, frames, rate, channels, reserve_ns);
