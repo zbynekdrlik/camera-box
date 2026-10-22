@@ -46,6 +46,15 @@ lost packets landed on audio already delivered).
     stamp-basis ASRC would walk the error out at <= 300 ppm, `ASRC_MAX_PPM`). Slots lost just before
     the first emitted packet are not filled (libobs has nothing from the source yet). Cost: ~1 s of
     silence at OBS start and after each full re-anchor;
+  - **the lead-in (review round 5):** a stretch's first output (the first packet past the hold, or a
+    late packet's silence) carries `lead_in_samples` of silence from the packet's arrival up to that
+    output's stamp, stamped to end exactly there (none when the stamp has passed). Why: libobs RESETS
+    a source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`) off where its previous one ended
+    in the system domain (`reset_audio_timing`, `source_output_audio_data`) and puts that chunk at
+    the instant it ARRIVED, whatever its stamp. A starve + its 1 s hold always leaves such a gap, so
+    the new stretch started one R early (bench: 10.0 ms realized against a 40.4 ms stamp latency
+    after a 1.5 s outage, then a 30.5 ms walk). The lead-in starts at the arrival, so the output lands
+    on its stamp, reset or not;
   - only the RATE is followed: the phase term joins the step only while `|stamp - (fit + R)|` is over
     R/4 (the dead band), then at the old 5 ppm per bucket until back inside;
   - before the fit the outlier reference is the anchored line - R (no longer the first packet's
@@ -70,12 +79,16 @@ lost packets landed on audio already delivered).
   latency is a fixed jitter buffer. A packet past its stamp (after the hold) is a `LATE` event:
   dropped, counted in `late`, its slot (with the slots lost right before it) silence AT ONCE on the
   unchanged line; the stamps, the fit and the line stay where the anchor put them. **Known limit
-  (review round 4):** at 0 ms OBS buffering that silence reaches libobs after its window was mixed:
-  the source underran, `discard_audio` moved its label to the window's end and kept the data, so the
-  latency OBS REALIZES steps up by about the lateness (34-38 ms for a 90 ms hiccup in the bench) and
-  the stamp-basis ASRC walks it back. The cures (a deadline timer that sends a slot's silence before
-  its window is mixed, or no fill past the deadline so libobs places the next packet at its stamp)
-  are a design question for the main, not in the code.
+  (review rounds 4 + 5), the LATE FILL:** at 0 ms OBS buffering that silence reaches libobs after its
+  window was mixed: the source underran, `discard_audio` moved its label to the window's end and kept
+  the data, so the latency OBS REALIZES steps up by about the lateness of the earliest filled slot and
+  the stamp-basis ASRC walks it back at <= 300 ppm. The same holds for a plain LOSS longer than the
+  margin (R - one packet): an outage under the 1 s starve is filled when the next packet arrives. Bench:
+  34-38 ms for a 90 ms hiccup; +72 / +455 / +861 ms for a 100 / 500 / 900 ms outage (455 ms takes ~25
+  min to walk back). The cures (a deadline timer that sends a slot's silence before its window is
+  mixed -- the only one that covers every gap -- or no fill past the deadline, so libobs places the
+  next packet at its stamp for a gap of 70 ms or more) are the open design question on the ticket,
+  not in the code.
 - **Re-anchor (one counted event, then the hold):** a STARVE -- no packet in time for `PERSIST_S` (1 s)
   on OUR clock: any packet arriving more than that after the last in-time packet did (`last_intime_ns`;
   an outage, a sender pause, every packet late on a delay step), late or not, with nothing filled
@@ -95,17 +108,23 @@ lost packets landed on audio already delivered).
 - **Bench** (`src/vban_receive_timeline_bench.rs`, a two-clock sender at +-50 ppm, 5..7 ms bursts,
   gaps of 5..30 ms every ~400 ms, receive-thread wake jitter): the replay emits what the source emits
   and models libobs (`Obs`: the 70 ms append + the 300 ppm stamp-basis ASRC), and grades BOTH the
-  stamp and the REALIZED latency per anchor over the whole run after the hold.
+  stamp and the REALIZED latency per anchor over the whole run after the hold. Since review round 5
+  the model has both libobs domains: the stamp-domain 70 ms snap, the system-domain 70 ms append, and
+  the system-domain `MAX_TS_VAR` (2 s) RESET that places a chunk at its arrival; every anchor must
+  realize its own stamp latency (+-1 ms).
   - Main runs: zero late, zero re-anchors at R = 40 ms over 10 min (min margin 3.8-6.0 ms), the fitted
     rate within ~1.5 ppm, held within 0.87 ms at +-50 ppm, 0.29 ms at 0 ppm.
   - The round-2 reviewer's 25 ms first-gap case: realized 40.4-40.6 ms, held within 0.13 ms at 0 ppm
     and 0.72 ms at +-50 ppm (round 3 emitted the first second: 59.9 ms realized, then 19.3 ms of walk).
   - A 90 ms one-off hiccup: 11 late drops, ZERO re-anchors, the stamps held, the realized latency
-    held up to it and then stepped 34-38 ms (the known limit above, pinned).
+    held up to it and then stepped 34-38 ms (the late-fill limit above, pinned).
+  - An outage under a second (100 / 500 / 900 ms): a loss, zero re-anchors, the stamps held, the
+    realized latency stepped by about the outage (the late-fill limit, pinned).
   - A 90 ms persistent delay step: 170 late drops (one second on our clock), exactly ONE re-anchor,
     the new stretch at the old latency + 90.0 ms, held within 0.40 ms.
-  - A 1.5 s outage or a 1.5 s sender pause: ONE starve re-anchor each, no drop, nothing filled, both
-    stretches held and the latency back where it was.
+  - A 1.5 s outage or a 1.5 s sender pause: ONE starve re-anchor each, no drop, nothing filled; libobs
+    resets its timing after the gap, the lead-in puts the new stretch on its stamp: realized = stamp
+    latency within 9 us, held within 0.43 ms, the latency back where it was.
   - At R = 20 ms the same sender drops late packets (never a re-anchor): the test that the bench can
     fail.
 - **Known limit, pinned:** before the fit the line runs at the nominal rate, then slews to it at 5 ppm
@@ -120,8 +139,8 @@ lost packets landed on audio already delivered).
 
 ```
 obs-vban receive anchored: source '<input>' frame=N rate=48000 ch=2 receive_buffer_ms=R -- holding its first second
-obs-vban receive emitting: source '<input>' frame=N margin_ms=X after the first second's hold
-obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
+obs-vban receive emitting: source '<input>' frame=N margin_ms=X lead_in_ms=X after the first second's hold
+obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring|frozen receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
 obs-vban receive late: source '<input>' frame=N late_ms=X -- dropped, its slot is silence on the anchored line (late=N)
 obs-vban receive re-anchor: source '<input>' reason=starve|backward|jump|format|config|fit frame=N starve_ms=X re_anchors=N late=N -- holding its first second
 obs-vban receive buffer: source '<input>' receive_buffer_ms=R is not above one packet (X ms) + 10 ms: using X ms
@@ -130,7 +149,8 @@ obs-vban receive buffer: source '<input>' receive_buffer_ms=R is not above one p
 `obs-vban receive: ` stays on exactly ONE log line (the wiring test pins it): every other line uses
 another prefix (`anchored:`, `emitting:`, `late:`, `re-anchor:`, `buffer:`). `late:` is logged once
 per run of late packets (the counter counts each one); `reason=starve` on a re-anchor means no packet
-came in time for a second. `fit=frozen` on the status line: nothing folded for 3 s while the fit is
+came in time for a second, and `starve_ms` says how long (0 for every other reason). `lead_in_ms` on
+`emitting:` is the stretch's lead-in. `fit=frozen` on the status line: nothing folded for 3 s while the fit is
 valid. `max_late_ms` includes the dropped late packets.
 
 The status line is written by the receive callback, so it stops when packets stop. Counters are
