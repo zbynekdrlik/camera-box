@@ -14,7 +14,8 @@
 # The rows (through the caller's ok / bad / note; each grade is rc 0):
 #   (program-vban) kind       the program-audio input is the obs-vban source (the seed switches it)
 #   (program-vban) bind       OBS bound the fact port (a hub left running holds it: the bind fails)
-#   (program-vban) status     a status line exists, its port + stream = the box facts
+#   (program-vban) status     a status line exists, its port + stream = the box facts (a source that
+#                             logged `anchored` but no status line yet gets one period's wait first)
 #   (program-vban) live       `received` advanced over STRIH_PROGRAM_VBAN_WAIT_S (12 s, > one status
 #                             period); not advancing = NOTE (the console is not sending now)
 #   (program-vban) R          receive_buffer_ms = the fact, else a NOTE (the operator's setting is kept)
@@ -65,6 +66,13 @@ strih_program_vban_grade() {
     bad "(program-vban) OBS could not bind UDP ${port} (newest OBS log): another process holds it, the intercom hub? -- re-run setup-strih.sh step 13, then restart OBS"
   fi
   l1="$(strih_program_vban_status_line "$log" "$name")"
+  # The first status line comes 10 s after the first packet; the anchored line proves packets arrive,
+  # so a source that anchored is given one status period before "nothing arrived" is graded.
+  if [ -z "$l1" ] && [ -r "$log" ] \
+     && grep -a -q -F -- "obs-vban receive anchored: source '${name}'" "$log"; then
+    sleep "$wait"
+    l1="$(strih_program_vban_status_line "$log" "$name")"
+  fi
   if [ -z "$l1" ]; then
     bad "(program-vban) no obs-vban receive status line for '${name}' in ${log:-<no OBS log>}: no VBAN packet reached OBS since it started -- is the console sending stream '${stream}' to $(strih_lx_ip 2>/dev/null || echo this box):${port}?"
     return 0
