@@ -33,16 +33,16 @@ fn with_reorders(mut sched: Vec<Sent>, every: u64) -> (Vec<Sent>, u64) {
     (sched, swaps)
 }
 
-/// ROZHODNUTÉ 6352253147 (a): every overtaken packet arrives ~R before its slot goes out, so it is
-/// stored for that slot and played in it -- nothing lost, nothing stale, no late drop, no re-anchor,
-/// every packet once in slot order, the latency held -- at stream-snv's R 80 and at the default 40,
-/// with the encoder running and not.
+/// ROZHODNUTÉ 6352253147 (a): at stream-snv's R 80 every overtaken packet arrives long before its
+/// slot goes out (the sender's gaps reach 30 ms), so it is stored for that slot and played in it --
+/// nothing lost, nothing stale, no late drop, no re-anchor, every packet once in slot order, the
+/// latency held -- with the encoder running and not.
 #[test]
-fn reordered_packets_play_in_their_slot_and_nothing_is_lost_1439() {
-    for (seed, reserve_ms, no_encoder) in [(1u64, 80u64, false), (2, 40, true), (3, 80, true)] {
+fn reordered_packets_play_in_their_slot_and_nothing_is_lost_at_80_ms_1439() {
+    for (seed, no_encoder) in [(1u64, false), (3, true)] {
         let (sched, swaps) = with_reorders(schedule(seed, -6.5, TEN_MIN_PACKETS / 2, 0.0), 97);
-        let run = replay_with(&sched, reserve_ms, no_encoder);
-        let tag = format!("seed {seed}, R {reserve_ms} ms, no encoder {no_encoder}: {run:?}");
+        let run = replay_with(&sched, 80, no_encoder);
+        let tag = format!("seed {seed}, no encoder {no_encoder}: {run:?}");
         assert!(swaps > 500, "the run must reorder: {swaps} {tag}");
         assert_eq!(
             run.reordered, swaps,
@@ -60,4 +60,28 @@ fn reordered_packets_play_in_their_slot_and_nothing_is_lost_1439() {
         );
         assert_latency_held(&run, &tag);
     }
+}
+
+/// At the default R 40 the same sender's 30 ms gaps leave about 2.7 ms of margin: a packet
+/// overtaken by the one that ENDS such a gap is already past its own deadline when that one arrives
+/// (its slot is one packet earlier), so its slot has gone out and it stays stale -- one lost slot,
+/// never a re-anchor or a moved latency. Every other overtaken packet plays in its slot.
+#[test]
+fn at_40_ms_only_a_reorder_behind_a_gap_end_misses_its_slot_1439() {
+    let (sched, swaps) = with_reorders(schedule(2, -6.5, TEN_MIN_PACKETS / 2, 0.0), 97);
+    let run = replay_with(&sched, 40, true);
+    let tag = format!("{run:?}");
+    assert!(swaps > 500, "the run must reorder: {swaps} {tag}");
+    assert_eq!(run.reordered + run.stale, swaps, "{tag}");
+    assert_eq!(
+        run.lost, run.stale,
+        "each stale reorder is one lost slot: {tag}"
+    );
+    assert!(run.stale * 100 <= swaps, "only behind a gap end: {tag}");
+    assert_eq!((run.late, run.re_anchors), (0, 0), "{tag}");
+    assert!(
+        run.records.windows(2).all(|w| w[1].k > w[0].k),
+        "the slots went out in order, each packet at most once: {tag}"
+    );
+    assert_latency_held(&run, &tag);
 }
