@@ -22,11 +22,12 @@
  *    first packet past it is the first PACKET, on the final line, so libobs never sees a stamp step
  *    and its stamp-basis ASRC never walks; the slots lost just before it are not filled. Every full
  *    re-anchor holds again.
- *  - Lead-in (review round 5): a stretch's first output carries silence from the packet's arrival up
- *    to that output's stamp (lead_in_samples), ending exactly there: libobs RESETS a source's timing
- *    when a chunk lands more than 2 s (MAX_TS_VAR) off where its previous one ended and puts that
- *    chunk at the instant it arrived, which a starve + its hold always cause; the lead-in starts
- *    there, so the output still lands on its stamp.
+ *  - Lead-in (review round 5): a stretch's first output is always an in-time packet (review round 6:
+ *    nothing is filled before it, so a late packet before it is dropped with no fill) and carries
+ *    silence from its arrival up to its stamp (lead_in_samples), ending exactly there: libobs RESETS
+ *    a source's timing when a chunk lands more than 2 s (MAX_TS_VAR) off where its previous one ended
+ *    and puts that chunk at the instant it arrived, which a starve + its hold always cause; the
+ *    lead-in starts there, so the packet still lands on its stamp.
  *  - Fit: a least-squares line of arrival time over the packet's END position in the sender's
  *    samples (its nuFrame order), over the last VBAN_RECV_FIT_WINDOW_S one-second buckets of the
  *    sender's audio. A packet later than the reference line by more than VBAN_RECV_OUTLIER_MS is
@@ -46,7 +47,7 @@
  *  - Late = lost (ROZHODNUTE 6345255813 item 2; the round-3 late shift is withdrawn): a fixed latency
  *    is a fixed jitter buffer. A packet arriving after its stamp (once the hold is over) is LATE:
  *    dropped and counted, its slot (with the slots lost right before it) silence at once on the
- *    unchanged line. The line, the fit and the latency stay where the anchor put them.
+ *    unchanged line, once the stretch has output its first packet. The line, the fit and the latency stay where the anchor put them.
  *  - Re-anchor (counted, one per event, then the hold): a STARVE -- no packet in time for
  *    VBAN_RECV_PERSIST_S on OUR clock: any packet arriving more than that after the last in-time
  *    packet did (an outage, a sender pause, every packet late on a delay step), late or not, with
@@ -181,11 +182,12 @@ struct vban_recv_decision {
 	int64_t lateness_ns;  /* arrival - stamp (negative = the margin left) */
 	int64_t late_ns;      /* a LATE packet: how far after its stamp; a STARVE re-anchor: how long no
 			       * packet came in time (its arrival - the last in-time arrival) */
-	/* the LEAD-IN (review round 5), on the first output of an anchored stretch only: this many frames
-	 * of silence go out BEFORE that output, from the packet's arrival up to the output's stamp, so
-	 * libobs starts the stream at that arrival and the output lands on its stamp whatever libobs makes
+	/* the LEAD-IN (review round 5), on the first output of an anchored stretch only (always an in-time
+	 * packet): this many frames of silence go out BEFORE it, from its arrival up to its stamp, so
+	 * libobs starts the stream at that arrival and the packet lands on its stamp whatever libobs makes
 	 * of the gap before it (one over MAX_TS_VAR = 2 s, after a starve, is a timing reset that puts the
-	 * first chunk at the instant it arrives); 0 otherwise, and when that stamp has already passed */
+	 * first chunk at the instant it arrives); 0 on every other output, and when less than one frame
+	 * is left to the stamp */
 	uint64_t lead_in_samples;
 	uint64_t lead_in_stamp_ns; /* the first output's stamp - the lead-in's length: it ends there */
 };
@@ -479,10 +481,11 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 	if (reason == VBAN_RECV_REASON_NONE) {
 		const uint64_t stamp = vban_recv_stamp_at(t, pos);
 		/* the hold (ROZHODNUTE 6345255813 item 1): nothing is emitted while the packet ends within the
-		 * first second; a slot is filled only once the previous packet was emitted */
+		 * first second; a slot is filled only once the stretch has output its first packet (review
+		 * round 6: a fill before it would be a first output whose stamp has passed, with no lead-in) */
 		const uint64_t window = (uint64_t)VBAN_RECV_ACQUIRE_S * rate;
 		const bool held = end <= window;
-		const bool emitting = t->next_pos > window;
+		const bool emitting = t->emitted;
 		const bool late = !held && now_ns > stamp;
 		if (late) {
 			d.late_ns = (int64_t)(now_ns - stamp);
@@ -505,15 +508,12 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 			t->lost += lost;
 			t->silence_samples += filled;
 		}
-		/* the stretch's first output gets its lead-in: silence from this arrival up to that output's
-		 * stamp (review round 5) */
-		if (!t->emitted && (d.event == VBAN_RECV_PACKET || d.silence_samples > 0)) {
+		/* the stretch's first output -- always an in-time packet, nothing is filled before it -- gets
+		 * its lead-in: silence from this arrival up to its stamp (review round 5) */
+		if (!t->emitted && d.event == VBAN_RECV_PACKET) {
 			t->emitted = true;
-			const uint64_t first = d.silence_samples > 0 ? vban_recv_stamp_at(t, d.silence_pos) : stamp;
-			if (first > now_ns) {
-				d.lead_in_samples = vban_recv_ns_to_samples(first - now_ns, rate);
-				d.lead_in_stamp_ns = first - vban_recv_samples_to_ns(d.lead_in_samples, rate);
-			}
+			d.lead_in_samples = vban_recv_ns_to_samples(stamp - now_ns, rate);
+			d.lead_in_stamp_ns = stamp - vban_recv_samples_to_ns(d.lead_in_samples, rate);
 		}
 		if (!late)
 			t->last_intime_ns = now_ns;

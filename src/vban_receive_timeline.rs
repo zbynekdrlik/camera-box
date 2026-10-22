@@ -22,11 +22,12 @@
 //!   so libobs never sees a stamp step and its stamp-basis ASRC never walks; the slots lost just
 //!   before it are not filled (libobs has nothing from the source to keep contiguous yet). Every
 //!   full re-anchor holds again: ~1 s of silence after it.
-//! * **Lead-in** (review round 5). A stretch's first output carries silence from the packet's
-//!   arrival up to that output's stamp ([`Decision::lead_in_samples`]), ending exactly there:
-//!   libobs RESETS a source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`) off where its
-//!   previous one ended and puts that chunk at the instant it arrived, which a starve + its hold
-//!   always cause; the lead-in starts there, so the output still lands on its stamp.
+//! * **Lead-in** (review round 5). A stretch's first output is always an in-time packet (review
+//!   round 6: nothing is filled before it, so a late packet before it is dropped with no fill) and
+//!   carries silence from its arrival up to its stamp ([`Decision::lead_in_samples`]), ending
+//!   exactly there: libobs RESETS a source's timing when a chunk lands more than 2 s (`MAX_TS_VAR`)
+//!   off where its previous one ended and puts that chunk at the instant it arrived, which a starve
+//!   and its hold always cause; the lead-in starts there, so the packet still lands on its stamp.
 //! * **Fit.** A least-squares line of arrival time over the packet's END position in the sender's
 //!   samples (its `nuFrame` order), over the last [`FIT_WINDOW_S`] one-second buckets of the
 //!   sender's audio. A packet later than the reference line by more than [`OUTLIER_MS`] is not
@@ -46,7 +47,7 @@
 //! * **Late = lost** (ROZHODNUTÉ 6345255813 item 2; the round-3 late shift is withdrawn). A fixed
 //!   latency is a fixed jitter buffer: a packet arriving after its stamp (once the hold is over) is
 //!   [`Event::Late`] -- dropped and counted, its slot (with the slots lost right before it) silence
-//!   at once on the unchanged line. The line, the fit and the latency stay where the anchor put
+//!   at once on the unchanged line, once the stretch has output its first packet. The line, the fit and the latency stay where the anchor put
 //!   them; the fold rule is unchanged.
 //! * **Re-anchor** (counted, one per event, then the hold): a STARVE -- no packet in time for
 //!   [`PERSIST_S`] on OUR clock: any packet arriving more than that after the last in-time packet
@@ -212,12 +213,12 @@ pub struct Decision {
     /// A LATE packet: how far after its stamp it came. A STARVE re-anchor: how long no packet
     /// came in time (its arrival − the last in-time arrival), the span the source logs.
     pub late_ns: i64,
-    /// The LEAD-IN (review round 5), on the first output of an anchored stretch only: this many
-    /// frames of silence go out BEFORE that output, from the packet's arrival up to the output's
-    /// stamp, so libobs starts the stream at that arrival and the output lands on its stamp
+    /// The LEAD-IN (review round 5), on the first output of an anchored stretch only (always an
+    /// in-time packet): this many frames of silence go out BEFORE it, from its arrival up to its
+    /// stamp, so libobs starts the stream at that arrival and the packet lands on its stamp
     /// whatever libobs makes of the gap before it (one over `MAX_TS_VAR` = 2 s, after a starve,
-    /// is a timing reset that puts the first chunk at the instant it arrives). 0 otherwise, and
-    /// when that stamp has already passed.
+    /// is a timing reset that puts the first chunk at the instant it arrives). 0 on every other
+    /// output, and when less than one frame is left to the stamp.
     pub lead_in_samples: u64,
     /// The lead-in's stamp: the first output's stamp − the lead-in's length, so it ends exactly
     /// where that output starts.
@@ -652,10 +653,11 @@ impl Timeline {
             let stamp = self.stamp_at(pos);
             // the hold (ROZHODNUTÉ 6345255813 item 1): nothing is emitted while the packet ends
             // within the first second, so libobs never sees the refinement's stamp steps; a slot is
-            // filled only once the previous packet was emitted
+            // filled only once the stretch has output its first packet (review round 6: a fill
+            // before it would be a first output whose stamp has passed, with no lead-in)
             let window = ACQUIRE_S * u64::from(rate);
             let held = end <= window;
-            let emitting = self.next_pos > window;
+            let emitting = self.emitted;
             let late = !held && now_ns > stamp;
             if late {
                 d.late_ns = (now_ns - stamp) as i64;
@@ -679,19 +681,12 @@ impl Timeline {
                 self.lost += lost;
                 self.silence_samples += filled;
             }
-            // the stretch's first output gets its lead-in: silence from this arrival up to that
-            // output's stamp (review round 5)
-            if !self.emitted && (d.event == Event::Packet || d.silence_samples > 0) {
+            // the stretch's first output -- always an in-time packet, nothing is filled before it --
+            // gets its lead-in: silence from this arrival up to its stamp (review round 5)
+            if !self.emitted && d.event == Event::Packet {
                 self.emitted = true;
-                let first = if d.silence_samples > 0 {
-                    self.stamp_at(d.silence_pos)
-                } else {
-                    stamp
-                };
-                if first > now_ns {
-                    d.lead_in_samples = ns_to_samples(first - now_ns, rate);
-                    d.lead_in_stamp_ns = first - samples_to_ns(d.lead_in_samples, rate);
-                }
+                d.lead_in_samples = ns_to_samples(stamp - now_ns, rate);
+                d.lead_in_stamp_ns = stamp - samples_to_ns(d.lead_in_samples, rate);
             }
             if !late {
                 self.last_intime_ns = now_ns;

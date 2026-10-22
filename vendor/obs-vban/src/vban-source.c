@@ -50,8 +50,6 @@ struct vban_src_s
 	uint64_t status_ns;        /* the last status line, 0 = none yet */
 	int64_t window_late_max_ns; /* the largest arrival - stamp since the last status line */
 	bool window_late_seen;
-	/* camera-box issue 1439 (ROZHODNUTE 6345255813): the source emits since its anchor's first second */
-	bool emitting;
 	/* camera-box issue 1439 (ROZHODNUTE 6345255813 item 2): a run of late (dropped) packets is logged once */
 	bool late_run;
 	/* camera-box issue 1439 (ROZHODNUTE 6343922049): the (R, effective R) pair last warned about, so a
@@ -250,9 +248,11 @@ static const char *vban_recv_reason_name(int reason)
 	}
 }
 
-/* camera-box issue 1439: the anchor / re-anchor / loss lines, and the lateness record of the window. */
+/* camera-box issue 1439: the anchor / re-anchor / loss lines, and the lateness record of the window.
+ * FIRST_OUTPUT: this decision is the stretch's first output (the timeline's own `emitted` flag turned
+ * on, review round 6: no second copy of that state here). */
 static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decision *d, uint32_t nu_frame,
-			    uint32_t frames)
+			    uint32_t frames, bool first_output)
 {
 	const struct vban_recv_timeline *t = &s->timeline;
 	/* a new line: is R lifted to one packet + the margin (R is measured from the packet's start)? */
@@ -267,14 +267,11 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     (double)vban_recv_samples_to_ns(frames, t->rate) / 1e6, VBAN_RECV_RESERVE_MARGIN_MS,
 		     (double)t->reserve_eff_ns / 1e6);
 	}
-	if (d->event == VBAN_RECV_ANCHOR || d->event == VBAN_RECV_REANCHOR) {
-		s->emitting = false;
+	if (d->event == VBAN_RECV_ANCHOR || d->event == VBAN_RECV_REANCHOR)
 		s->late_run = false;
-	}
-	if ((d->event == VBAN_RECV_PACKET || (d->event == VBAN_RECV_LATE && d->silence_samples > 0)) && !s->emitting) {
-		/* the hold is over: the first output (a packet, or a late packet's silence), on the anchor's
-		 * final (earliest-arrival) line */
-		s->emitting = true;
+	if (first_output) {
+		/* the hold is over: the stretch's first output (an in-time packet, after its lead-in), on the
+		 * anchor's final (earliest-arrival) line */
 		blog(LOG_INFO,
 		     "obs-vban receive emitting: source '%s' frame=%u margin_ms=%.1f lead_in_ms=%.1f after the first "
 		     "second's hold",
@@ -444,6 +441,7 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 		vban_recv_init(&s->timeline);
 	const uint64_t now = os_gettime_ns();
 	const uint64_t reserve_ns = (uint64_t)os_atomic_load_long(&s->receive_buffer_ms) * VBAN_RECV_NS_PER_MS;
+	const bool was_emitted = s->timeline.emitted;
 	const struct vban_recv_decision d = vban_recv_packet(&s->timeline, now, header->nuFrame, audio.frames,
 							     audio.samples_per_sec, (uint32_t)audio.speakers, reserve_ns);
 	if (d.event == VBAN_RECV_STALE) {
@@ -451,7 +449,7 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 		vban_src_log_status(s, header, now);
 		return;
 	}
-	vban_src_report(s, &d, header->nuFrame, audio.frames);
+	vban_src_report(s, &d, header->nuFrame, audio.frames, !was_emitted && s->timeline.emitted);
 	/* ROZHODNUTE 6345255813: an anchor, a re-anchor and every packet of their first second are HELD
 	 * (never output), so libobs never sees the earliest-arrival refinement as a stamp step (item 1); a
 	 * LATE packet's audio is dropped and its slot goes out as silence on the unchanged line (item 2).
