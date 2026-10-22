@@ -82,7 +82,12 @@ is the window's largest arrival - stamp of an on-time packet: about -R + jitter 
   disabled ones stay disabled). An input already of the vban kind is never rewritten (a difference
   from the facts is only named). `GetInputKindList` without the vban kind (a bundle without the
   plugin) = nothing removed. An unreadable manifest block = the input untouched, never turned back
-  into the pulse capture.
+  into the pulse capture. Every create and re-create (`input_create_verified`) first waits, bounded
+  (30 x 0.1 s), for the name to be free (a removed source can hold it for a moment and CreateInput
+  then refuses), reads the result back from `GetInputList`, and tries once more (a re-create removes
+  an old input still listed first). An input OBS never lists as the wanted kind is a loud
+  `replace FAILED (was ...)` / `create FAILED` naming what OBS lists, with nothing put back onto it:
+  restart OBS and the launch seed runs again. verify item 9 FAILs the kind too.
 - **Collection port:** the `stream-pp` preset converts the program input to the same source
   (`--program-audio-vban PORT:STREAM:MS` / `none`); the collection keeps the mixer keys on the object.
 - **No hub on the stream role:** `obs_box_step_applies 13` skips step 13 there and calls

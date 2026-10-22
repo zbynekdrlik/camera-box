@@ -96,9 +96,11 @@ from drm_output_config import (  # noqa: E402,F401
 # port shares.
 from program_audio_vban import (  # noqa: E402,F401
     VBAN_SOURCE_KIND,
+    input_create_verified,
     input_recreate,
     input_state_read,
     kind_available,
+    listed_text,
     parse_program_audio_vban,
     settings_differences,
 )
@@ -599,16 +601,22 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
     scene = _current_scene_name(obs)
     if scene is None:
         return "no-scene (deferred)"
+    # issue 1439 review: every create is read back from GetInputList (one retry); a create or re-create
+    # OBS never lists as the wanted kind is a loud FAILED, never "created" / "replaced".
     if action == "create":
-        obs.req("CreateInput", {"sceneName": scene, "inputName": name, "inputKind": want_kind,
-                                "inputSettings": want_settings}, ignore_err=True)
+        _resp, listed = input_create_verified(obs, scene, name, want_kind, want_settings)
+        if listed != want_kind:
+            return "create FAILED: %s after two CreateInput -- restart OBS (the launch seed runs again)" % (
+                listed_text(name, listed))
         return "created"
     # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
     # collection carries it in scenes the seed plan does not name); issue 1439: and its mixer state.
     state = input_state_read(obs, name)
-    kept = len(state.get("scenes") or [])
-    input_recreate(obs, name, want_kind, want_settings, state, scene)
-    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", kept)
+    ok, info = input_recreate(obs, name, want_kind, want_settings, state, scene)
+    if not ok:
+        return ("replace FAILED (was %s): %s after RemoveInput + two CreateInput -- restart OBS (the launch "
+                "seed runs again)" % (kind or "absent", listed_text(name, info)))
+    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", info)
 
 
 def audio_monitor_type_of(obs, name=AUDIO_INPUT_NAME):

@@ -20,6 +20,7 @@ removed and re-created with the same name, and that state is put back.
 
 import json
 import string
+import time
 
 # The obs-vban source id (vendor/obs-vban: ID_PREFIX "net.nagater.obs-vban." + "source"), pinned by
 # tests/python/test_stream_role_vban_1439.py against the vendored source and CMakeLists.
@@ -31,6 +32,11 @@ RESERVE_MS_MAX = 500
 RESERVE_MS_DEFAULT = 40   # VBAN_RECV_RESERVE_MS_DEFAULT, the source's own default
 STREAM_NAME_MAX = 16
 _STREAM_NAME_CHARS = frozenset(string.ascii_letters + string.digits + "._-")
+# A removed input's name can stay taken for a moment (OBS frees it when the last reference to the old
+# source goes) and obs-websocket's CreateInput then refuses it. Every create first waits, bounded, for
+# the name to be free: CREATE_POLLS reads CREATE_POLL_S apart (3 s), at most twice (one retry).
+CREATE_POLL_S = 0.1
+CREATE_POLLS = 30
 
 
 def vban_source_settings(port, stream_name, receive_buffer_ms):
@@ -112,6 +118,54 @@ def input_state_read(obs, name):
     }
 
 
+def input_kind_listed(obs, name):
+    """The inputKind GetInputList lists for input NAME: '' when OBS lists no such input, None when OBS
+    does not answer, '?' for an input listed without a kind."""
+    inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs")
+    if not isinstance(inputs, list):
+        return None
+    for i in inputs:
+        if isinstance(i, dict) and i.get("inputName") == name:
+            return i.get("inputKind") or "?"
+    return ""
+
+
+def listed_text(name, listed):
+    """Pure: what INPUT_KIND_LISTED's answer means, for a status line."""
+    if listed is None:
+        return "OBS does not answer GetInputList"
+    if listed == "":
+        return "OBS has no '%s' input" % name
+    return "OBS still lists '%s' as %s" % (name, listed)
+
+
+def _await_free(obs, name, sleep):
+    for _ in range(CREATE_POLLS):
+        if input_kind_listed(obs, name) == "":
+            return
+        sleep(CREATE_POLL_S)
+
+
+def input_create_verified(obs, scene, name, kind, settings, remove_on_retry=False, sleep=None):
+    """Create input NAME as KIND with SETTINGS in SCENE once the name is free (a bounded wait) and read
+    it back from GetInputList. When OBS does not list it as KIND, try once more: wait for the name again
+    (REMOVE_ON_RETRY first removes an input still listed under it, the old one of a re-create) and
+    create again. Returns (the last CreateInput answer, the kind GetInputList lists afterwards: KIND on
+    success, otherwise input_kind_listed's answer)."""
+    sleep = sleep or time.sleep
+    resp, listed = None, None
+    for attempt in range(2):
+        if attempt and remove_on_retry and listed not in ("", None):
+            obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
+        _await_free(obs, name, sleep)
+        resp = obs.req("CreateInput", {"sceneName": scene, "inputName": name, "inputKind": kind,
+                                       "inputSettings": settings}, ignore_err=True)
+        listed = input_kind_listed(obs, name)
+        if listed == kind:
+            break
+    return resp, listed
+
+
 def _hide_item(obs, scene, resp):
     item_id = (resp or {}).get("sceneItemId")
     if isinstance(item_id, int):
@@ -119,15 +173,18 @@ def _hide_item(obs, scene, resp):
                 ignore_err=True)
 
 
-def input_recreate(obs, name, kind, settings, state, fallback_scene):
-    """Remove input NAME and create it again as KIND with SETTINGS, then put STATE (input_state_read,
-    read BEFORE the call) back. The first scene that held it gets the new input (else FALLBACK_SCENE);
-    every other one gets a scene item. Returns the number of scenes it was put back in."""
+def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None):
+    """Remove input NAME and create it again as KIND with SETTINGS (input_create_verified: a bounded
+    wait for the name, read back, one retry), then put STATE (input_state_read, read BEFORE the call)
+    back. The first scene that held it gets the new input (else FALLBACK_SCENE); every other one gets a
+    scene item. Returns (True, the number of scenes it was put back in), or (False, the kind
+    GetInputList lists for NAME) when OBS never listed it as KIND: nothing is put back then."""
     scenes = state.get("scenes") or [(fallback_scene, True)]
     obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
     first, enabled = scenes[0]
-    resp = obs.req("CreateInput", {"sceneName": first, "inputName": name, "inputKind": kind,
-                                   "inputSettings": settings}, ignore_err=True)
+    resp, listed = input_create_verified(obs, first, name, kind, settings, remove_on_retry=True, sleep=sleep)
+    if listed != kind:
+        return False, listed
     if not enabled:
         _hide_item(obs, first, resp)
     for scene, enabled in scenes[1:]:
@@ -155,4 +212,4 @@ def input_recreate(obs, name, kind, settings, state, fallback_scene):
         if f.get("filterEnabled") is False:
             obs.req("SetSourceFilterEnabled", {"sourceName": name, "filterName": f["filterName"],
                                                "filterEnabled": False}, ignore_err=True)
-    return len(scenes)
+    return True, len(scenes)
