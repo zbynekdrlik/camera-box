@@ -53,8 +53,14 @@
 //!   jump. The genlock ASRC (`basis=stamp`) then resamples the sender's rate to the mix clock.
 //! * **Loss.** A slot whose packet is not there at its deadline is silence for exactly that slot,
 //!   stamped on the same line.
-//! * **Stale.** A duplicate, or a `nuFrame` at most [`STALE_PACKETS`] behind the last one (a
-//!   network reorder), is dropped and counted.
+//! * **Reorder** (ROZHODNUTÉ 6352253147 (a)). A packet up to 63 indexes behind the last one (a
+//!   network reorder) whose index has not come yet and whose slot the worker has not handed out, in
+//!   an emitting stretch that has not starved, is stored for that slot and played in it
+//!   ([`Event::Reorder`], counted). It never moves the line, the fit, `last_nu`, `next_pos` or
+//!   `last_intime_ns`: its arrival is out of order, so it is never folded.
+//! * **Stale.** A duplicate (an index that came), a packet behind the last one whose slot already
+//!   went out, one exactly [`STALE_PACKETS`] behind, one in the hold or in a starved stretch is
+//!   dropped and counted.
 //! * **Late = lost** (ROZHODNUTÉ 6345255813 item 2; the round-3 late shift is withdrawn). A fixed
 //!   latency is a fixed jitter buffer: a packet whose slot was already handed to libobs (as
 //!   silence) is [`Event::Late`] -- dropped and counted; before a stretch's first output, a packet
@@ -150,8 +156,8 @@ pub enum Event {
     /// already handed to libobs (as silence), or -- before the stretch's first output -- its
     /// deadline had passed. Dropped and counted.
     Late = 5,
-    /// ROZHODNUTÉ 6352253147 (a), RED stub: a packet behind the last one whose slot is still to go
-    /// out: stored for its slot, counted `reordered`.
+    /// ROZHODNUTÉ 6352253147 (a): a packet behind the last one whose slot is still to go out
+    /// (a network reorder): stored for its slot and played in it, counted `reordered`.
     Reorder = 6,
 }
 
@@ -335,9 +341,10 @@ pub struct Timeline {
     pub re_anchors: u64,
     /// Duplicate / reordered packets dropped (their slot had passed).
     pub stale: u64,
-    /// ROZHODNUTÉ 6352253147 (a), RED stub: bit j = the packet j indexes behind `last_nu` came.
+    /// ROZHODNUTÉ 6352253147 (a): bit j = the packet j indexes behind `last_nu` came (in order or
+    /// reordered).
     pub recv_mask: u64,
-    /// Reordered packets stored for their slot.
+    /// Reordered packets stored for their slot (played in it).
     pub reordered: u64,
 }
 
@@ -565,6 +572,7 @@ impl Timeline {
         self.emit_pos = 0;
         self.lead_in_pending = false;
         self.last_k = i64::from(frames / rate);
+        self.recv_mask = 1;
         self.fold(self.last_k, u64::from(frames), 0);
     }
 
@@ -653,6 +661,36 @@ impl Timeline {
         true
     }
 
+    /// ROZHODNUTÉ 6352253147 (a), `vban_recv_reorder`: a packet `back` (1..63) indexes behind the
+    /// last one -- a network reorder -- whose index has not come yet, whose slot the worker has not
+    /// handed out, in an emitting stretch that has not starved (no packet in time for
+    /// [`PERSIST_S`]): stored for its slot ([`Event::Reorder`], counted). It never moves the line,
+    /// the fit, `last_nu`, `next_pos` or `last_intime_ns`: its arrival is out of order (a fold would
+    /// also wrap the bucket's unsigned offsets). `None` for everything that stays stale.
+    fn reorder(&mut self, now_ns: u64, back: u32) -> Option<Decision> {
+        if back == 0 || back >= 64 || (self.recv_mask >> back) & 1 == 1 || !self.emitted {
+            return None;
+        }
+        if now_ns as i64 - self.last_intime_ns as i64 > (PERSIST_S * NS_PER_SEC) as i64 {
+            return None;
+        }
+        let back_samples = u64::from(back + 1) * u64::from(self.frames);
+        if back_samples > self.next_pos || self.next_pos - back_samples < self.emit_pos {
+            return None;
+        }
+        let pos = self.next_pos - back_samples;
+        self.recv_mask |= 1 << back;
+        self.reordered += 1;
+        let stamp_ns = self.stamp_at(pos);
+        Some(Decision {
+            event: Event::Reorder,
+            pos,
+            stamp_ns,
+            lateness_ns: now_ns as i64 - stamp_ns as i64,
+            ..Decision::default()
+        })
+    }
+
     /// The decision for a packet arriving at `now_ns` (`vban_recv_packet`).
     pub fn packet(
         &mut self,
@@ -684,6 +722,11 @@ impl Timeline {
             let delta = nu.wrapping_sub(self.last_nu);
             if delta == 0 || delta >= 0x8000_0000 {
                 if self.last_nu.wrapping_sub(nu) <= STALE_PACKETS {
+                    // ROZHODNUTÉ 6352253147 (a): a reordered packet whose slot is still ahead
+                    // plays in it
+                    if let Some(r) = self.reorder(now_ns, self.last_nu.wrapping_sub(nu)) {
+                        return r;
+                    }
                     self.stale += 1;
                     d.event = Event::Stale;
                     return d;
@@ -779,6 +822,13 @@ impl Timeline {
             if k > self.last_k {
                 self.last_k = k;
             }
+            // the indexes that came: this one, and none of the ones it skipped
+            let step = nu.wrapping_sub(self.last_nu);
+            self.recv_mask = if step >= 64 {
+                1
+            } else {
+                (self.recv_mask << step) | 1
+            };
             self.last_nu = nu;
             self.next_pos = end;
             return d;

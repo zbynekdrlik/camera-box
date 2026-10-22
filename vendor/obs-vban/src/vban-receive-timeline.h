@@ -52,8 +52,14 @@
  *    sender's rate to the mix clock.
  *  - Loss: a slot whose packet is not there at its deadline is silence for exactly that slot, stamped
  *    on the same line.
- *  - Stale: a duplicate, or a nuFrame at most VBAN_RECV_STALE_PACKETS behind the last one (a network
- *    reorder), is dropped and counted, the line runs on.
+ *  - Reorder (ROZHODNUTE 6352253147 a): a packet up to 63 indexes behind the last one (a network
+ *    reorder) whose index has not come yet and whose slot the worker has not handed out, in an
+ *    emitting stretch that has not starved, is stored for that slot and played in it (REORDER,
+ *    counted). It never moves the line, the fit, last_nu, next_pos or last_intime_ns: its arrival is
+ *    out of order, so it is never folded.
+ *  - Stale: a duplicate (an index that came), a packet behind the last one whose slot already went
+ *    out, one exactly VBAN_RECV_STALE_PACKETS behind, one in the hold or in a starved stretch is
+ *    dropped and counted, the line runs on.
  *  - Late = lost (ROZHODNUTE 6345255813 item 2; the round-3 late shift is withdrawn): a fixed latency
  *    is a fixed jitter buffer. A packet whose slot was already handed to libobs (as silence) is LATE:
  *    dropped and counted; before a stretch's first output, a packet past its deadline is. The line,
@@ -137,8 +143,8 @@ enum vban_recv_event {
 	VBAN_RECV_HOLD = 4,     /* inside an anchor's first second: refines + folds, never output */
 	VBAN_RECV_LATE = 5,     /* too late for its slot (already handed out, or past its deadline before the
 				 * stretch's first output): dropped, counted */
-	VBAN_RECV_REORDER = 6,  /* ROZHODNUTE 6352253147 (a), RED stub: a packet behind the last one whose slot is
-				 * still to go out: stored for its slot, counted */
+	VBAN_RECV_REORDER = 6,  /* ROZHODNUTE 6352253147 (a): a packet behind the last one whose slot is still to
+				 * go out: stored for its slot, counted */
 };
 
 enum vban_recv_reason {
@@ -197,9 +203,9 @@ struct vban_recv_timeline {
 	uint64_t late;            /* packets too late for their slot (each dropped) */
 	uint64_t re_anchors;
 	uint64_t stale; /* duplicate / reordered packets dropped (their slot had passed) */
-	/* ROZHODNUTE 6352253147 (a), RED stub: bit j = the packet j indexes behind last_nu came */
+	/* ROZHODNUTE 6352253147 (a): bit j = the packet j indexes behind last_nu came (in order or reordered) */
 	uint64_t recv_mask;
-	uint64_t reordered; /* reordered packets stored for their slot */
+	uint64_t reordered; /* reordered packets stored for their slot (played in it) */
 };
 
 /* What one packet is (the receive side never outputs anything: the worker does, at deadlines). */
@@ -385,6 +391,7 @@ static inline void vban_recv_anchor(struct vban_recv_timeline *t, uint64_t now_n
 	t->emit_pos = 0;
 	t->lead_in_pending = false;
 	t->last_k = (int64_t)(frames / rate);
+	t->recv_mask = 1u;
 	vban_recv_fold(t, t->last_k, frames, 0);
 }
 
@@ -467,6 +474,31 @@ static inline bool vban_recv_update(struct vban_recv_timeline *t, uint64_t pos)
 	return true;
 }
 
+/* ROZHODNUTE 6352253147 (a): a packet BACK (1..63) indexes behind the last one -- a network reorder -- whose
+ * index has not come yet, whose slot the worker has not handed out, in an emitting stretch that has not
+ * starved (no packet in time for VBAN_RECV_PERSIST_S): stored for its slot (REORDER, counted). It never moves
+ * the line, the fit, last_nu, next_pos or last_intime_ns: its arrival is out of order (a fold would also
+ * wrap the bucket's unsigned offsets). Returns false for everything that stays stale. */
+static inline bool vban_recv_reorder(struct vban_recv_timeline *t, uint64_t now_ns, uint32_t back,
+				     struct vban_recv_decision *d)
+{
+	if (back == 0 || back >= 64u || ((t->recv_mask >> back) & 1u) || !t->emitted)
+		return false;
+	if ((int64_t)now_ns - (int64_t)t->last_intime_ns > (int64_t)(VBAN_RECV_PERSIST_S * VBAN_RECV_NS_PER_SEC))
+		return false;
+	const uint64_t back_samples = (uint64_t)(back + 1u) * t->frames;
+	if (back_samples > t->next_pos || t->next_pos - back_samples < t->emit_pos)
+		return false;
+	const uint64_t pos = t->next_pos - back_samples;
+	t->recv_mask |= (uint64_t)1 << back;
+	t->reordered++;
+	d->event = VBAN_RECV_REORDER;
+	d->pos = pos;
+	d->stamp_ns = vban_recv_stamp_at(t, pos);
+	d->lateness_ns = (int64_t)now_ns - (int64_t)d->stamp_ns;
+	return true;
+}
+
 /* The decision for a packet arriving at NOW_NS. */
 static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeline *t, uint64_t now_ns, uint32_t nu,
 							  uint32_t frames, uint32_t rate, uint32_t channels,
@@ -495,6 +527,9 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 		const uint32_t delta = nu - t->last_nu;
 		if (delta == 0 || delta >= 0x80000000u) {
 			if (t->last_nu - nu <= VBAN_RECV_STALE_PACKETS) {
+				/* ROZHODNUTE 6352253147 (a): a reordered packet whose slot is still ahead plays in it */
+				if (vban_recv_reorder(t, now_ns, t->last_nu - nu, &d))
+					return d;
 				t->stale++;
 				d.event = VBAN_RECV_STALE;
 				return d;
@@ -572,6 +607,9 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 			vban_recv_fold(t, k, end, y);
 		if (k > t->last_k)
 			t->last_k = k;
+		/* the indexes that came: this one, and none of the ones it skipped */
+		const uint32_t step = nu - t->last_nu;
+		t->recv_mask = step >= 64u ? 1u : (t->recv_mask << step) | 1u;
 		t->last_nu = nu;
 		t->next_pos = end;
 		return d;
