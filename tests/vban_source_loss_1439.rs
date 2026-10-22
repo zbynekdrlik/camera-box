@@ -517,6 +517,34 @@ fn on_grid(nu_frames: &[u32]) -> Vec<(u32, u64, i16)> {
         .collect()
 }
 
+/// The packets of an anchor's first second at 256 frames / 48 kHz (packet k ends at (k + 1) x 256):
+/// HELD, never output (ROZHODNUTÉ 6345255813 item 1).
+const HELD: u32 = 187;
+
+/// [`on_grid`] behind a held first second: the `HELD` packets just before `nu_frames[0]`, on the
+/// same grid, carrying the value 999 (they never reach OBS), then `nu_frames` as [`on_grid`] gives
+/// them (their values unchanged).
+fn after_hold(nu_frames: &[u32]) -> Vec<(u32, u64, i16)> {
+    let first = nu_frames[0] - HELD;
+    let mut all: Vec<u32> = (first..nu_frames[0]).collect();
+    all.extend_from_slice(nu_frames);
+    let shown = nu_frames[0];
+    on_grid(&all)
+        .into_iter()
+        .map(|(nu, at, _)| {
+            (
+                nu,
+                at,
+                if nu < shown {
+                    999
+                } else {
+                    (nu - shown + 1) as i16
+                },
+            )
+        })
+        .collect()
+}
+
 fn assert_contiguous(outs: &[Out]) {
     for w in outs.windows(2) {
         let expect = w[0].ts + ns(w[0].frames);
@@ -539,7 +567,7 @@ fn audio_values(outs: &[Out]) -> Vec<i64> {
 
 #[test]
 fn two_lost_packets_are_silence_for_exactly_their_slots_1439() {
-    let outs = run(&on_grid(&[100, 101, 102, 105, 106]));
+    let outs = run(&after_hold(&[300, 301, 302, 305, 306]));
     assert_eq!(
         audio_values(&outs),
         vec![1, 2, 3, 6, 7],
@@ -563,7 +591,7 @@ fn two_lost_packets_are_silence_for_exactly_their_slots_1439() {
 
 #[test]
 fn one_lost_packet_is_one_silent_slot_1439() {
-    let outs = run(&on_grid(&[200, 201, 203, 204]));
+    let outs = run(&after_hold(&[400, 401, 403, 404]));
     assert_eq!(audio_values(&outs), vec![1, 2, 4, 5], "{outs:?}");
     let silent: u64 = outs.iter().filter(|o| o.zero).map(|o| o.frames).sum();
     assert_eq!(
@@ -576,7 +604,7 @@ fn one_lost_packet_is_one_silent_slot_1439() {
 
 #[test]
 fn a_stream_without_loss_has_no_silence_1439() {
-    let outs = run(&on_grid(&[7, 8, 9, 10, 11, 12]));
+    let outs = run(&after_hold(&[207, 208, 209, 210, 211, 212]));
     assert_eq!(audio_values(&outs), vec![1, 2, 3, 4, 5, 6], "{outs:?}");
     assert!(outs.iter().all(|o| !o.zero), "{outs:?}");
     assert_contiguous(&outs);
@@ -589,7 +617,11 @@ fn the_status_line_reports_the_counters_r_port_and_stream_1439() {
     // 11 s of an ideal sender: the first packet arms the status clock, the line comes 10 s later.
     let nus: Vec<u32> = (1000..1000 + 2063).collect();
     let (outs, log) = run_with_log(&on_grid(&nus));
-    assert_eq!(outs.len(), nus.len(), "no packet may be lost or padded");
+    assert_eq!(
+        outs.len(),
+        nus.len() - HELD as usize,
+        "every packet past the held first second, none lost or padded"
+    );
     let lines: Vec<&str> = log
         .lines()
         // the plugin's blog macro prefixes every line with `[obs-vban] `
@@ -643,7 +675,7 @@ fn the_silence_keeps_the_streams_sample_format_1439() {
         (VBAN_BITFMT_32_INT, "32-bit int"),
         (VBAN_BITFMT_32_FLOAT, "32-bit float"),
     ] {
-        let (outs, _log) = run_as(&on_grid(&[300, 301, 303, 304]), bitfmt);
+        let (outs, _log) = run_as(&after_hold(&[300, 301, 303, 304]), bitfmt);
         assert_eq!(
             outs.len(),
             5,
@@ -800,7 +832,7 @@ fn a_late_shift_outputs_the_lost_slots_and_the_packet_on_the_new_line_1439() {
     assert_contiguous(tail);
     assert_eq!(
         outs.iter().filter(|o| !o.zero).count() as u64,
-        n + 1,
+        n + 1 - u64::from(HELD),
         "issue 1439: every packet's audio reaches OBS once"
     );
 }
@@ -813,10 +845,12 @@ fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
     let ms = 1_000_000u64;
     let mut tokens = vec!["buffer=10".to_string()];
     // a first timeline, a sender restart (a counted re-anchor), then a reconfiguration
-    tokens.extend((0..5u64).map(|k| format!("{}:{}:100", 10 + k, 100 * ms + k * 6 * ms)));
-    tokens.extend((0..5u64).map(|k| format!("{}:{}:100", 5000 + k, 300 * ms + k * 6 * ms)));
+    // on the grid, one packet past the held first second
+    let n = u64::from(HELD) + 1;
+    tokens.extend((0..n).map(|k| format!("{}:{}:100", 10 + k, 100 * ms + ns(k * 256))));
+    tokens.extend((0..5u64).map(|k| format!("{}:{}:100", 5000 + k, 2000 * ms + ns(k * 256))));
     tokens.push("port=6981".to_string());
-    tokens.extend((0..5u64).map(|k| format!("{}:{}:100", 20 + k, 500 * ms + k * 6 * ms)));
+    tokens.extend((0..5u64).map(|k| format!("{}:{}:100", 20 + k, 3000 * ms + ns(k * 256))));
     let (stdout, log) = run_tokens(&tokens, VBAN_BITFMT_16_INT);
     let warnings: Vec<&str> = log
         .lines()
@@ -835,14 +869,25 @@ fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
             && w.contains("15.33 ms"),
         "issue 1439: the warning names R and one packet + 10 ms: `{w}`"
     );
-    // the first packet is stamped with the effective R: arrival - one packet + 15.33 ms
+    // the line is anchored with the effective R (arrival - one packet + 15.33 ms); its first emitted
+    // packet is the one past the held first second
     let first = stdout
         .lines()
         .find_map(|l| l.strip_prefix("out ts="))
         .and_then(|l| l.split_whitespace().next())
         .and_then(|v| v.parse::<u64>().ok())
         .expect("an output");
-    assert_eq!(first, 100 * ms + 10 * ms, "issue 1439: `{stdout}`");
+    assert_eq!(
+        first,
+        100 * ms + 10 * ms + ns(u64::from(HELD) * 256),
+        "issue 1439: `{stdout}`"
+    );
+    assert_eq!(
+        stdout.lines().filter(|l| l.starts_with("out ")).count(),
+        1,
+        "issue 1439: only the packet past the first second is output, the restarted timelines hold: \
+         `{stdout}`"
+    );
 }
 
 /// Issue 1462 + 1439: mbc.lan sends the SNV program to stream-snv as VBAN `stream` in 24-bit PCM
@@ -857,12 +902,17 @@ fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439()
     // a non-zero low byte on every sample: a decoder that drops it must fail
     let low = 0x5A;
     let mut tokens = vec![format!("low24={low}")];
-    tokens.extend(
-        [0u64, 1, 3, 4, 5]
-            .iter()
-            .zip(values)
-            .map(|(&k, v)| format!("{}:{}:{}", 700 + k, t0 + ns(k * frames), v as u16)),
-    );
+    // the anchor's first second is held: packet k ends at (k + 1) x 239, so 0..=199 never reach OBS
+    let held = 48_000 / frames;
+    tokens.extend((0..held).map(|k| format!("{}:{}:999", 500 + k, t0 + ns(k * frames))));
+    tokens.extend([0u64, 1, 3, 4, 5].iter().zip(values).map(|(&k, v)| {
+        format!(
+            "{}:{}:{}",
+            500 + held + k,
+            t0 + ns((held + k) * frames),
+            v as u16
+        )
+    }));
     let (stdout, log) = run_tokens_frames(&tokens, frames as u32, VBAN_BITFMT_24_INT);
     #[allow(clippy::type_complexity)]
     let outs: Vec<(u64, u64, bool, i64, i32, i64)> = stdout

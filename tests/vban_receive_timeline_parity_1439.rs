@@ -811,8 +811,11 @@ fn the_scripts_reach_every_boundary_1439() {
         "late shifts with lost slots before them",
         "anchors with R lifted to one packet + 10 ms",
         "anchors with R above that floor",
+        "held packets (an anchor's first second, never output)",
+        "a loss inside the hold (never filled)",
+        "the first emitted packet after a hold",
     ];
-    let mut hits = [0usize; 28];
+    let mut hits = [0usize; 31];
     for sc in scripts() {
         let mut t = Timeline::new();
         for p in &sc {
@@ -820,7 +823,8 @@ fn the_scripts_reach_every_boundary_1439() {
                 t = Timeline::new();
             }
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
-            let (base_before, base_pos_before) = (t.base_stamp_ns, t.base_pos);
+            let (base_before, base_pos_before, next_before) =
+                (t.base_stamp_ns, t.base_pos, t.next_pos);
             let folds = t.buckets.iter().map(|b| b.n).sum::<u64>();
             // which fit check would fail: the model's update run on a copy, exactly when the packet
             // takes the timeline into a new bucket (the only time the real decision refits)
@@ -903,10 +907,21 @@ fn the_scripts_reach_every_boundary_1439() {
             hits[15] += usize::from(d.event == Event::Packet && same && p.nu < last_nu);
             let initial_line = base_pos_before == 0 && step == 0;
             let in_first_second = end <= u64::from(p.rate);
-            if d.event == Event::Packet && same && initial_line {
+            if d.event == Event::Hold && same && initial_line {
                 hits[20] += usize::from(in_first_second && t.base_stamp_ns < base_before);
+            }
+            if d.event == Event::Packet && same && initial_line {
                 hits[21] += usize::from(!in_first_second && cand < base_before);
             }
+            hits[28] += usize::from(d.event == Event::Hold);
+            hits[29] +=
+                usize::from(d.event == Event::Hold && same && delta > 1 && d.silence_samples == 0);
+            hits[30] += usize::from(
+                d.event == Event::Packet
+                    && same
+                    && next_before <= u64::from(p.rate)
+                    && end > u64::from(p.rate),
+            );
             if d.event == Event::Anchor || (d.event == Event::Reanchor && !d.shifted) {
                 hits[26] += usize::from(t.reserve_eff_ns != t.reserve_ns);
                 hits[27] += usize::from(t.reserve_eff_ns == t.reserve_ns);
