@@ -824,20 +824,29 @@ fn a_late_packet_is_dropped_and_its_slot_is_silence_on_the_same_line_1439() {
         outs.iter().all(|o| o.zero || o.first != 99),
         "issue 1439: the late packet's audio is dropped: {outs:?}"
     );
-    // the late packet's arrival: its slot + the two lost before it; n + 10's: the seven lost
-    let tail = &outs[outs.len() - 7..];
+    // after the last packet before the loss (value n): silence for the two lost slots, the late one
+    // and the seven lost after it (in pieces of at most 1024 frames), then n + 10 .. n + 14
+    let at = outs
+        .iter()
+        .rposition(|o| !o.zero && o.first == n as i64)
+        .expect("the last packet before the loss reaches OBS");
+    let after = &outs[at + 1..];
+    let silent: Vec<&Out> = after.iter().take_while(|o| o.zero).collect();
     assert_eq!(
-        (tail[0].zero, tail[0].frames, tail[1].zero, tail[1].frames),
-        (true, 3 * u64::from(FRAMES), true, 7 * u64::from(FRAMES)),
-        "issue 1439: the lost and late slots are silence: {tail:?}"
+        silent.iter().map(|o| o.frames).sum::<u64>(),
+        10 * u64::from(FRAMES),
+        "issue 1439: the lost and late slots are silence: {after:?}"
     );
     assert_eq!(
-        tail[2..].iter().map(|o| o.first).collect::<Vec<_>>(),
+        after[silent.len()..]
+            .iter()
+            .map(|o| o.first)
+            .collect::<Vec<_>>(),
         vec![10, 11, 12, 13, 14],
-        "issue 1439: the stream goes on: {tail:?}"
+        "issue 1439: the stream goes on: {after:?}"
     );
     // contiguous across the silence: the line never moved
-    assert_contiguous(&outs[outs.len() - 8..]);
+    assert_contiguous(&outs[at..]);
 }
 
 /// ROZHODNUTÉ 6343922049 (3): a Receive Buffer no longer than one packet + 10 ms is lifted to that
