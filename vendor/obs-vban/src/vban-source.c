@@ -294,18 +294,23 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     (double)d->starve_ns / 1e6, t->re_anchors, t->late);
 	}
 	if (d->event == VBAN_RECV_LATE && !s->late_run) {
-		/* ROZHODNUTE 6345255813 item 2: a late packet is lost, never re-timed; one line per late run */
+		/* ROZHODNUTE 6345255813 item 2: a late packet is lost, never re-timed; one line per late run.
+		 * Before the stretch's first output nothing is filled (review round 6): the line says so. */
 		s->late_run = true;
 		blog(LOG_WARNING,
-		     "obs-vban receive late: source '%s' frame=%u late_ms=%.1f -- dropped, its slot is silence on the "
-		     "anchored line (late=%" PRIu64 ")",
-		     obs_source_get_name(s->context), nu_frame, (double)d->late_ns / 1e6, t->late);
+		     "obs-vban receive late: source '%s' frame=%u late_ms=%.1f -- dropped, %s (late=%" PRIu64 ")",
+		     obs_source_get_name(s->context), nu_frame, (double)d->late_ns / 1e6,
+		     d->silence_samples > 0 ? "its slot is silence on the anchored line"
+					    : "before the stretch's first output: nothing filled",
+		     t->late);
 	} else if (d->event == VBAN_RECV_PACKET) {
 		s->late_run = false;
 	}
 	/* the lost slots (a LATE packet's own slot is in the silence too, logged above) */
-	const uint64_t lost_slots = d->silence_samples / (frames ? frames : 1u) - (d->event == VBAN_RECV_LATE ? 1u : 0u);
-	if (d->silence_samples > 0 && lost_slots > 0)
+	const uint64_t lost_slots = d->silence_samples > 0 ? d->silence_samples / (frames ? frames : 1u) -
+								     (d->event == VBAN_RECV_LATE ? 1u : 0u)
+							   : 0;
+	if (lost_slots > 0)
 		blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) at frame %u -- silence for those slots",
 		     obs_source_get_name(s->context), lost_slots, nu_frame);
 	/* the lateness record includes the late packets that were dropped (the measure R is chosen by) */
