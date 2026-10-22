@@ -137,7 +137,8 @@ fn the_vban_source_is_a_directly_stamped_source_on_the_asrc_stamp_basis_1439() {
     for needle in [
         ".output_flags = OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE,",
         "audio.timestamp = d.stamp_ns; obs_source_output_audio(s->context, &audio);",
-        "silence.timestamp = vban_recv_stamp_at(&s->timeline, d->silence_pos + done);",
+        // the lost slots on the line, the lead-in (review round 5) from its own stamp
+        "silence.timestamp = on_line ? vban_recv_stamp_at(&s->timeline, from + done) : from + vban_recv_samples_to_ns(done, like->samples_per_sec);",
     ] {
         assert!(
             squished.contains(needle),
@@ -182,7 +183,9 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
         "obs_properties_add_int(props, \"receive_buffer_ms\",",
         // the silence keeps the packet's own sample format (review round 1: a format change resets
         // libobs's resampler and the genlock ASRC), U8 silence is 0x80
-        "if (d.silence_samples > 0) vban_src_output_silence(s, &d, &audio);",
+        "if (d.silence_samples > 0) vban_src_output_silence(s, &audio, d.silence_samples, true, d.silence_pos);",
+        // review round 5: a stretch's first output has its lead-in before it
+        "if (d.lead_in_samples > 0) vban_src_output_silence(s, &audio, d.lead_in_samples, false, d.lead_in_stamp_ns);",
         ".format = like->format,",
         "memset(s->silence.array, like->format == AUDIO_FORMAT_U8BIT ? 0x80 : 0, plane_bytes);",
         "\"obs-vban receive: received=%\" PRIu64 \" lost=%\" PRIu64 \" late=%\" PRIu64 \" re_anchors=%\" PRIu64",
@@ -200,10 +203,13 @@ fn the_receive_timeline_is_wired_into_the_source_1439() {
             .find(n)
             .unwrap_or_else(|| panic!("issue 1439: `{n}` missing"))
     };
+    let lead_in = "vban_src_output_silence(s, &audio, d.lead_in_samples,";
+    let lost = "vban_src_output_silence(s, &audio, d.silence_samples,";
     assert!(
-        at("vban_recv_packet(&s->timeline") < at("vban_src_output_silence(s, &d,")
-            && at("vban_src_output_silence(s, &d,") < at("audio.timestamp = d.stamp_ns;"),
-        "issue 1439: the callback must decide, then output the silence, then the packet"
+        at("vban_recv_packet(&s->timeline") < at(lead_in)
+            && at(lead_in) < at(lost)
+            && at(lost) < at("audio.timestamp = d.stamp_ns;"),
+        "issue 1439: the callback must decide, then output the lead-in, the silence, the packet"
     );
     // The stock arrival stamping and the copy-padding are gone for good.
     for gone in [

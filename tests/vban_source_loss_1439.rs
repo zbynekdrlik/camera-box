@@ -358,7 +358,7 @@ fn the_status_line_reports_the_counters_r_port_and_stream_1439() {
     let nus: Vec<u32> = (1000..1000 + 2063).collect();
     let (outs, log) = run_with_log(&on_grid(&nus));
     assert_eq!(
-        outs.len(),
+        after_lead_in(&outs).len(),
         nus.len() - HELD as usize,
         "every packet past the held first second, none lost or padded"
     );
@@ -623,10 +623,19 @@ fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
         "issue 1439: the warning names R and one packet + 10 ms: `{w}`"
     );
     // the line is anchored with the effective R (arrival - one packet + 15.33 ms); its first emitted
-    // packet is the one past the held first second
-    let first = stdout
+    // packet is the one past the held first second, after its lead-in (review round 5: 10 ms from
+    // its arrival to its stamp = 480 frames of silence)
+    let audio: Vec<&str> = stdout
         .lines()
-        .find_map(|l| l.strip_prefix("out ts="))
+        .filter(|l| l.starts_with("out ts=") && l.contains(" zero=0"))
+        .collect();
+    let silent: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with("out ts=") && l.contains(" zero=1"))
+        .collect();
+    let first = audio
+        .first()
+        .and_then(|l| l.strip_prefix("out ts="))
         .and_then(|l| l.split_whitespace().next())
         .and_then(|v| v.parse::<u64>().ok())
         .expect("an output");
@@ -636,10 +645,14 @@ fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
         "issue 1439: `{stdout}`"
     );
     assert_eq!(
-        stdout.lines().filter(|l| l.starts_with("out ")).count(),
-        1,
-        "issue 1439: only the packet past the first second is output, the restarted timelines hold: \
-         `{stdout}`"
+        (audio.len(), silent.len()),
+        (1, 1),
+        "issue 1439: only the packet past the first second is output (after its lead-in), the \
+         restarted timelines hold: `{stdout}`"
+    );
+    assert!(
+        silent[0].contains(" frames=480 "),
+        "issue 1439: the lead-in is 10 ms: `{stdout}`"
     );
 }
 
@@ -688,9 +701,24 @@ fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439()
         })
         .collect();
     assert!(!log.contains("Unsupported format"), "issue 1462: {log}");
-    assert_eq!(outs.len(), 6, "five packets + one silent slot: {outs:?}");
     // AUDIO_FORMAT_FLOAT_PLANAR (libobs enum audio_format) for every output, the silence included
     assert!(outs.iter().all(|o| o.4 == 8), "issue 1462: {outs:?}");
+    for w in outs.windows(2) {
+        let expect = w[0].0 + ns(w[0].1);
+        assert!(
+            w[1].0.abs_diff(expect) <= 2,
+            "issue 1462: the stamps are contiguous, the lead-in included: {outs:?}"
+        );
+    }
+    // review round 5: the lead-in first, R − one 239-frame packet = 35.02 ms = 1681 frames
+    let n = outs.iter().position(|o| !o.2).expect("an audio output");
+    assert_eq!(
+        outs[..n].iter().map(|o| o.1).sum::<u64>(),
+        1681,
+        "issue 1439: the lead-in: {outs:?}"
+    );
+    let outs = outs[n..].to_vec();
+    assert_eq!(outs.len(), 6, "five packets + one silent slot: {outs:?}");
     assert!(outs.iter().all(|o| o.1 == frames), "issue 1462: {outs:?}");
     assert!(
         outs[2].2,
