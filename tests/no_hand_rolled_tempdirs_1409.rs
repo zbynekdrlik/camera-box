@@ -86,8 +86,8 @@ const ALLOWLIST: &[&str] = &[
     "strih_provision_pure_functions.rs: the one pid dir is removed by its test",
     "support/ndi_source_lift_1367.rs: std-only lift: pid + counter, the files are removed",
     "support/vban_c_1439.rs: pid + counter, a Drop guard removes the dir",
+    "support/vban_source_harness_1439.rs: pid + counter, a Drop guard removes the dir",
     "vban_pacing_parity_1372.rs: c_trace() removes its dir",
-    "vban_source_loss_1439.rs: pid + counter, a Drop guard removes the dir",
     "vlc_video_media_clock_1425.rs: the lift uses pid + counter and removes its scratch dir",
 ];
 
