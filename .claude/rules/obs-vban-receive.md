@@ -85,21 +85,30 @@ lost packets landed on audio already delivered).
   dropped, counted in `late`, its slot (with the slots lost right before it) silence AT ONCE on the
   unchanged line (once the stretch has output its first packet); the stamps, the fit and the line stay
   where the anchor put them. **Known limit (review rounds 4-6), the LATE FILL:** at 0 ms OBS
-  buffering that silence reaches libobs after its window was mixed: the source underran,
-  `discard_audio` moved its label to the window's end and kept the data, so the latency OBS REALIZES
-  steps up and the stamp-basis ASRC walks it back at <= 300 ppm (~100 s for 30 ms). The same holds for
-  a plain LOSS a little longer than the margin (R - one packet, ~35 ms at R 40): an outage under the
-  1 s starve is filled when the next packet arrives. Bench: 34-38 ms for a 90 ms hiccup, 7.5 ms for a
-  40-50 ms loss, 28.8 ms for a 60-80 ms loss (quantized by the mix windows, phase-dependent). Longer
-  outages do NOT step it: about three windows after the data ran out libobs CLEARS the source
-  (`discard_if_stopped`, `audio_ts = 0`), the fill is placed at its stamp (`if (push_back &&
-  source->audio_ts)`) and the frozen-mix guard drops what is behind the window (`MIXED_LATE`), so the
-  stream plays from its stamps again (500 / 900 ms: held). Round 5 published +455 / +861 ms for those:
-  a model artifact (the bench had no clear). The model assumes an encoder runs (the frozen mix, the
-  production case; with none libobs grows the whole mix's buffering instead) and 0 ms OBS buffering
-  (a launch can draw 64 or 85 ms, issue 1425, and a fill that late then never underruns). The cure (a
-  deadline timer that sends a slot's silence before its window is mixed, the only one that covers
-  every gap) is the open design question on the ticket, not in the code.
+  buffering that silence reaches libobs after its window was mixed. The source underran: libobs did
+  not mix the window it could not fill (`audio_buffer_insufficient`), `discard_audio` moved its label
+  to the window's end and kept the partial remainder, which plays from the label on; the fill goes
+  behind it. So the latency OBS REALIZES steps up by a WHOLE NUMBER of 21.33 ms mix windows and the
+  stamp-basis ASRC walks it back at <= 300 ppm (~71 s per window). The same holds for a plain LOSS a
+  little longer than the margin (R - one packet, ~35 ms at R 40): an outage under the 1 s starve is
+  filled when the next packet arrives. What happens by case (bench, R 40, 0 ms OBS buffering):
+
+  | event | realized latency |
+  |---|---|
+  | loss up to the margin (~35 ms) | held |
+  | loss 40-50 ms | +1 window (21.3-21.6 ms) |
+  | loss 60-80 ms | +2 windows (42.6-42.9 ms) |
+  | one-off 90 ms hiccup | +2 windows (42.5-43.2 ms) |
+  | loss of ~90 ms or more, an encoder running (the frozen mix, issue 1425) | held: about three windows after the data ran out libobs CLEARS the source (`discard_if_stopped`, `audio_ts = 0`), the fill is placed at its stamp (`if (push_back && source->audio_ts)`) and the frozen-mix guard drops what is behind the window (`MIXED_LATE`) |
+  | loss of ~90 ms or more, NO encoder running (or inside OBS's 30 s launch settle window) | the cleared fill placed in the past grows the WHOLE MIX's audio buffering by about the outage, for good (`add_audio_buffering`): +455 / +861 ms for a 500 / 900 ms outage, every source in the mix, and the freeze keeps it once a stream starts |
+
+  The steps are phase-dependent (a burst ~3 windows after the data ran out finds the source cleared).
+  Not modelled: the clear one window earlier when an earlier episode left `pending_stop` set; no
+  clear at all when the data ended exactly on a window boundary (`discard_if_stopped` returns early on
+  an empty buffer, ~1 in 1024); a buffering above 0 ms (a launch can draw 64 or 85 ms, issue 1425,
+  and a fill that late then never underruns). The cure (a deadline timer that sends a slot's silence
+  before its window is mixed, the only one that covers every row) is the open design question on the
+  ticket, not in the code.
 - **Re-anchor (one counted event, then the hold):** a STARVE -- no packet in time for `PERSIST_S` (1 s)
   on OUR clock: any packet arriving more than that after the last in-time packet did (`last_intime_ns`;
   an outage, a sender pause, every packet late on a delay step), late or not, with nothing filled
@@ -114,26 +123,29 @@ lost packets landed on audio already delivered).
   delay level step of ~10-30 ms at R 40) stop folding, so the fit holds its last rate and level
   instead of following; nothing walks and nothing re-anchors. The status line then says
   `fit=frozen` (nothing folded for `FROZEN_S` = 3 s while the fit is valid) and verify item 9 NOTEs it.
-- **`lost` counts filled slots only:** a slot lost inside the hold (or just before the first emitted
-  packet) is never filled and never counted; `silence_ms` is what went out as silence.
+- **`lost` counts filled slots only:** a slot lost inside the hold, or anywhere before the stretch's
+  first output (round 6: nothing is filled before it), is never filled and never counted, and no
+  `missing N packet(s)` line is logged for it; `silence_ms` is what went out as silence. A late packet
+  before the first output is counted in `late` (its `late:` line says nothing was filled).
 - **Bench** (`src/vban_receive_timeline_bench.rs`, a two-clock sender at +-50 ppm, 5..7 ms bursts,
   gaps of 5..30 ms every ~400 ms, receive-thread wake jitter): the replay emits what the source emits
   and models libobs (`Obs`: the 70 ms append + the 300 ppm stamp-basis ASRC), and grades BOTH the
   stamp and the REALIZED latency per anchor over the whole run after the hold. Since review round 5
   the model has both libobs domains: the stamp-domain 70 ms snap, the system-domain 70 ms append, and
   the system-domain `MAX_TS_VAR` (2 s) RESET that places a chunk at its arrival; every anchor must
-  realize its own stamp latency (+-1 ms). Since round 6 it also clears a source whose partial
-  remainder got no data for two more windows (`discard_if_stopped`) and then places at the stamp (the
-  frozen-mix guard drops the past part). Not modelled: no encoder running (libobs grows the mix's
-  buffering), the one-window-earlier clear when `pending_stop` is left set, a buffering above 0 ms.
+  realize its own stamp latency (+-1 ms). Since round 6 it keeps an underrun's partial remainder
+  (an append goes behind it: whole-window steps) and clears a source whose remainder got no data for
+  two more windows (`discard_if_stopped`), then places at the stamp (the frozen-mix guard drops the
+  past part). Not modelled: see the late-fill table above.
   - Main runs: zero late, zero re-anchors at R = 40 ms over 10 min (min margin 3.8-6.0 ms), the fitted
     rate within ~1.5 ppm, held within 0.87 ms at +-50 ppm, 0.29 ms at 0 ppm.
   - The round-2 reviewer's 25 ms first-gap case: realized 40.4-40.6 ms, held within 0.13 ms at 0 ppm
     and 0.72 ms at +-50 ppm (round 3 emitted the first second: 59.9 ms realized, then 19.3 ms of walk).
   - A 90 ms one-off hiccup: 11 late drops, ZERO re-anchors, the stamps held, the realized latency
-    held up to it and then stepped 34-38 ms (the late-fill limit above, pinned).
-  - A loss just past the margin (60 ms): zero re-anchors, the stamps held, the realized latency stepped
-    28.9 ms (the late-fill limit, pinned); a 500 / 900 ms loss: libobs cleared the source, held.
+    held up to it and then stepped two windows, 42.5-43.2 ms (the late-fill limit above, pinned).
+  - A loss just past the margin: zero re-anchors, the stamps held, the realized latency stepped one
+    window for 45 ms (21.6 ms), two for 60 ms (42.8-42.9 ms), pinned to +-1.5 ms of whole windows; a
+    500 / 900 ms loss: libobs cleared the source, held (an encoder running).
   - A 90 ms hiccup that ends a re-anchor's hold (950 / 965 / 980 ms after it): the stretch realizes
     its stamp latency within 0.02 ms, held within 0.15 ms (it was 6-36 ms off before round 6).
   - A 90 ms persistent delay step: 170 late drops (one second on our clock), exactly ONE re-anchor,

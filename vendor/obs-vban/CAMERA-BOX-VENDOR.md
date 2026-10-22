@@ -123,10 +123,11 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
   its slot, with the slots lost right before it, goes out as silence at once on the unchanged line.
   The latency never moves (the round-3 late shift is withdrawn).
   At 0 ms OBS buffering that silence lands after its window was mixed, so OBS's realized latency
-  steps up and walks back at 300 ppm: 34-38 ms for a 90 ms hiccup, 7.5-28.8 ms for a loss a little
-  longer than R minus one packet. A longer outage finds the source cleared by libobs and the fill is
-  placed at its stamp (no step, while an encoder runs). A known limit, the open design question on
-  the ticket.
+  steps up by whole 21.33 ms mix windows and walks back at 300 ppm: two windows (~43 ms) for a 90 ms
+  hiccup, one or two for a loss a little longer than R minus one packet. A longer outage finds the
+  source cleared by libobs: with an encoder running the fill is placed at its stamp (no step); with
+  none the whole mix's audio buffering grows by about the outage, for good. A known limit, the open
+  design question on the ticket.
 - **Re-anchor (one counted event, then the hold).** A starve -- no packet in time for 1 s on our clock
   (an outage, a sender pause, every packet late on a delay step), `reason=starve`, nothing filled
   after the fact -- a `nuFrame` further behind (a sender restart), an index jump of more than 2 s of
