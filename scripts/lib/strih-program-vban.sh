@@ -7,9 +7,9 @@
 # revision 6338127636: no intercom hub, no PipeWire). The source stamps every packet on its receive
 # timeline and writes one status line every 10 s while packets arrive (vendor/obs-vban/src/vban-source.c):
 #
-#   [obs-vban] obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X
-#     sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X emit_missed=N receive_buffer_ms=R
-#     rate=N ch=N port=P stream='S' source='<OBS input>'
+#   [obs-vban] obs-vban receive: received=N lost=N late=N re_anchors=N stale=N reordered=N concealed=N
+#     silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X
+#     emit_missed=N receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<OBS input>'
 #
 # The rows (through the caller's ok / bad / note; each grade is rc 0):
 #   (program-vban) kind       the program-audio input is the obs-vban source (the seed switches it)
@@ -17,15 +17,22 @@
 #   (program-vban) status     a status line exists, its port + stream = the box facts (a source that
 #                             logged `anchored` but no status line yet gets one period's wait first)
 #   (program-vban) live       `received` advanced over STRIH_PROGRAM_VBAN_WAIT_S (12 s, > one status
-#                             period); not advancing = NOTE (the console is not sending now)
+#                             period); not advancing = NOTE (the console is not sending now). The row
+#                             names `reordered` (reordered packets played in their slot, ROZHODNUTE
+#                             6352253147 a: not audible, never a note)
 #   (program-vban) R          receive_buffer_ms = the fact, else a NOTE (the operator's setting is kept)
-#   (program-vban) counters   lost / late / re_anchors since the source started: a NOTE when any is > 0
+#   (program-vban) counters   lost / late / re_anchors since the source started: a NOTE when any is > 0;
+#                             `lost` counts every slot missing at its deadline, and the note says how many
+#                             of them were concealed (the previous packet repeated, crossfaded: a run of
+#                             up to 3 between two packets, ROZHODNUTE 6352253147 b) and how many went
+#                             out as silence
 #   (program-vban) fit        `fit=frozen` (nothing folded for 3 s while the fit is valid: an on-time
 #                             delay level step the fit no longer follows): a NOTE (issue 1439 round 4)
 #   (program-vban) missed     `emit_missed` > 0: the playout worker handed a slot to OBS after its own
 #                             stamp (it woke later than its 2 ms margin), which can move the program
 #                             audio by a mix window: a FAIL (issue 1439 review round 5); a line without
 #                             the token (an older build) is not graded on it
+#   An older build's line carries no `reordered` / `concealed`: nothing is named for them.
 #
 # Seams: STRIH_PROGRAM_VBAN_WAIT_S (the live window), STRIH_PROGRAM_VBAN_KIND_FILE (a file holding the
 # input kind, read instead of the strih_scenes.py websocket read).
@@ -53,7 +60,7 @@ strih_program_vban_field() {
 # issue 1462), graded against the loaded box's facts.
 strih_program_vban_grade() {
   local scn="${1-}" ws="${2-}" log="${3-}" name="${4-}" wait="${STRIH_PROGRAM_VBAN_WAIT_S:-12}"
-  local port stream r kind l1 l2 n1 n2 v counters
+  local port stream r kind l1 l2 n1 n2 v counters lost concealed reordered extra
   if ! port="$(strih_lx_program_vban_port)" || ! stream="$(strih_lx_program_vban_streams)" \
      || ! r="$(strih_lx_program_vban_reserve_ms)" || [ "$port" = none ] \
      || { [ -z "$name" ] && ! name="$(strih_lx_program_audio_input)"; }; then
@@ -95,12 +102,20 @@ strih_program_vban_grade() {
   sleep "$wait"
   l2="$(strih_program_vban_status_line "$log" "$name")"
   n2="$(strih_program_vban_field "$l2" received)"
+  reordered="$(strih_program_vban_field "$l2" reordered)"
   if [[ "$n1" =~ ^[0123456789]+$ ]] && [[ "$n2" =~ ^[0123456789]+$ ]] && [ "$n2" -gt "$n1" ]; then
-    ok "(program-vban) receiving stream '${stream}' on UDP ${port}: received ${n1} -> ${n2} in ${wait} s, sender_ppm=$(strih_program_vban_field "$l2" sender_ppm) fit=$(strih_program_vban_field "$l2" fit) R=$(strih_program_vban_field "$l2" receive_buffer_ms) ms"
+    ok "(program-vban) receiving stream '${stream}' on UDP ${port}: received ${n1} -> ${n2} in ${wait} s, sender_ppm=$(strih_program_vban_field "$l2" sender_ppm) fit=$(strih_program_vban_field "$l2" fit) R=$(strih_program_vban_field "$l2" receive_buffer_ms) ms${reordered:+, reordered=${reordered} (played in their slot)}"
   else
     note "(program-vban) ${n1:-?} packets received since OBS started, none in the last ${wait} s -- the console is not sending now (graded live while it sends)"
   fi
-  counters="lost=$(strih_program_vban_field "${l2:-$l1}" lost) late=$(strih_program_vban_field "${l2:-$l1}" late) re_anchors=$(strih_program_vban_field "${l2:-$l1}" re_anchors)"
+  lost="$(strih_program_vban_field "${l2:-$l1}" lost)"
+  counters="lost=${lost} late=$(strih_program_vban_field "${l2:-$l1}" late) re_anchors=$(strih_program_vban_field "${l2:-$l1}" re_anchors)"
+  # ROZHODNUTE 6352253147 (b): how many of the lost slots were concealed, how many went out as silence
+  concealed="$(strih_program_vban_field "${l2:-$l1}" concealed)"
+  extra=""
+  if [[ "$concealed" =~ ^[0123456789]+$ ]] && [[ "$lost" =~ ^[0123456789]+$ ]] && [ "$lost" -gt 0 ]; then
+    extra=" -- of the ${lost} lost slot(s) ${concealed} concealed (the previous packet repeated, crossfaded), $((lost - concealed)) silence"
+  fi
   if [ "$(strih_program_vban_field "${l2:-$l1}" fit)" = frozen ]; then
     note "(program-vban) the receive fit is FROZEN: every packet sits more than 10 ms off its line (an on-time network delay step), so the source holds its last rate and latency without following the console's clock -- an OBS restart re-anchors it (issue 1439)"
   fi
@@ -110,7 +125,7 @@ strih_program_vban_grade() {
   fi
   case "$counters" in
     "lost=0 late=0 re_anchors=0") ;;
-    *) note "(program-vban) since the source started: ${counters} (each one is audible; the acceptance is zero over 8 h, issue 1439)" ;;
+    *) note "(program-vban) since the source started: ${counters}${extra} (each one is audible; the acceptance is zero over 8 h, issue 1439)" ;;
   esac
   return 0
 }
