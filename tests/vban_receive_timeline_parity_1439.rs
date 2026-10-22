@@ -422,12 +422,13 @@ fn out_of_order_script() -> Vec<Pkt> {
     v
 }
 
-/// The index wraps through u32::MAX, with a loss across the wrap.
+/// The index wraps through u32::MAX, with a loss across the wrap (after the held first second).
 fn wrap_script() -> Vec<Pkt> {
     let mut b = Builder::new();
-    let mut nu = u32::MAX - 20;
-    for k in 0..60u64 {
-        if k == 30 {
+    // the first 187 packets are the held first second: the wrap comes after it, in the emitted stream
+    let mut nu = u32::MAX - 20 - 187;
+    for k in 0..(187 + 60u64) {
+        if k == 187 + 30 {
             nu = nu.wrapping_add(2);
         }
         b.send(Pkt {

@@ -17,6 +17,11 @@
  *    arrived earlier against the line moves the line to it, so the anchor is the EARLIEST arrival of
  *    that second (ROZHODNUTE 6343922049): later packets are never early against it. After that
  *    second the line's phase is fixed.
+ *  - Hold (ROZHODNUTE 6345255813 item 1): nothing is emitted for that first second: the anchor and
+ *    every packet ending within it are HOLD (they refine the anchor and fold, no slot is filled). The
+ *    first packet past it is the first PACKET, on the final line, so libobs never sees a stamp step
+ *    and its stamp-basis ASRC never walks; the slots lost just before it are not filled. Every full
+ *    re-anchor holds again.
  *  - Fit: a least-squares line of arrival time over the packet's END position in the sender's
  *    samples (its nuFrame order), over the last VBAN_RECV_FIT_WINDOW_S one-second buckets of the
  *    sender's audio. A packet later than the reference line by more than VBAN_RECV_OUTLIER_MS is
@@ -100,6 +105,7 @@ enum vban_recv_event {
 	VBAN_RECV_ANCHOR = 1,   /* the first packet: the timeline starts here */
 	VBAN_RECV_REANCHOR = 2, /* the timeline restarts at this packet (counted) */
 	VBAN_RECV_STALE = 3,    /* a duplicate / reordered packet whose slot has passed: dropped, counted */
+	VBAN_RECV_HOLD = 4,     /* inside an anchor's first second: refines + folds, never output */
 };
 
 enum vban_recv_reason {
@@ -438,7 +444,12 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 	if (reason == VBAN_RECV_REASON_NONE) {
 		uint64_t stamp = vban_recv_stamp_at(t, pos);
 		bool shifted = false;
-		if (now_ns > stamp) {
+		/* the hold (ROZHODNUTE 6345255813 item 1): nothing is emitted while the packet ends within the
+		 * first second; a slot is filled only once the previous packet was emitted */
+		const uint64_t window = (uint64_t)VBAN_RECV_ACQUIRE_S * rate;
+		const bool held = end <= window;
+		const bool emitting = t->next_pos > window;
+		if (!held && now_ns > stamp) {
 			d.late_ns = (int64_t)(now_ns - stamp);
 			t->late++;
 			if (t->fit_valid) {
@@ -466,12 +477,14 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 				d.event = VBAN_RECV_REANCHOR;
 				d.reason = VBAN_RECV_REASON_LATE;
 				d.shifted = true;
+			} else if (held) {
+				d.event = VBAN_RECV_HOLD;
 			} else {
 				d.event = VBAN_RECV_PACKET;
 			}
 			d.stamp_ns = stamp;
 			d.lateness_ns = (int64_t)now_ns - (int64_t)stamp;
-			if (lost > 0) {
+			if (lost > 0 && emitting) {
 				d.silence_samples = lost_samples;
 				d.silence_pos = t->next_pos;
 				t->lost += lost;

@@ -50,6 +50,8 @@ struct vban_src_s
 	uint64_t status_ns;        /* the last status line, 0 = none yet */
 	int64_t window_late_max_ns; /* the largest arrival - stamp since the last status line */
 	bool window_late_seen;
+	/* camera-box issue 1439 (ROZHODNUTE 6345255813): the source emits since its anchor's first second */
+	bool emitting;
 	/* camera-box issue 1439 (ROZHODNUTE 6343922049): the (R, effective R) pair last warned about, so a
 	 * Receive Buffer lifted to one packet + 10 ms is named once, not at every re-anchor */
 	uint64_t warned_reserve_ns;
@@ -264,9 +266,19 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     (double)vban_recv_samples_to_ns(frames, t->rate) / 1e6, VBAN_RECV_RESERVE_MARGIN_MS,
 		     (double)t->reserve_eff_ns / 1e6);
 	}
+	if (d->event == VBAN_RECV_ANCHOR || (d->event == VBAN_RECV_REANCHOR && !d->shifted))
+		s->emitting = false;
+	if (d->event == VBAN_RECV_PACKET && !s->emitting) {
+		/* the hold is over: the first emitted packet, on the anchor's final (earliest-arrival) line */
+		s->emitting = true;
+		blog(LOG_INFO,
+		     "obs-vban receive emitting: source '%s' frame=%u margin_ms=%.1f after the first second's hold",
+		     obs_source_get_name(s->context), nu_frame, (double)-d->lateness_ns / 1e6);
+	}
 	if (d->event == VBAN_RECV_ANCHOR) {
 		blog(LOG_INFO,
-		     "obs-vban receive anchored: source '%s' frame=%u rate=%u ch=%u receive_buffer_ms=%" PRIu64,
+		     "obs-vban receive anchored: source '%s' frame=%u rate=%u ch=%u receive_buffer_ms=%" PRIu64
+		     " -- holding its first second",
 		     obs_source_get_name(s->context), nu_frame, t->rate, t->channels,
 		     (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS));
 	} else if (d->event == VBAN_RECV_REANCHOR) {
@@ -418,10 +430,13 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 		return;
 	}
 	vban_src_report(s, &d, header->nuFrame, audio.frames);
-	if (d.silence_samples > 0)
-		vban_src_output_silence(s, &d, &audio);
-
-	audio.timestamp = d.stamp_ns;
-	obs_source_output_audio(s->context, &audio);
+	/* ROZHODNUTE 6345255813 item 1: an anchor, a full re-anchor and every packet of their first second
+	 * are HELD (never output), so libobs never sees the earliest-arrival refinement as a stamp step */
+	if (d.event == VBAN_RECV_PACKET || (d.event == VBAN_RECV_REANCHOR && d.shifted)) {
+		if (d.silence_samples > 0)
+			vban_src_output_silence(s, &d, &audio);
+		audio.timestamp = d.stamp_ns;
+		obs_source_output_audio(s->context, &audio);
+	}
 	vban_src_log_status(s, header, now);
 }

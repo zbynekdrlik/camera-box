@@ -16,6 +16,12 @@
 //!   position) a packet that arrived earlier against the line moves the line to it, so the anchor
 //!   is the EARLIEST arrival of that second (ROZHODNUTÉ 6343922049): later packets are never early
 //!   against it. After that second the line's phase is fixed.
+//! * **Hold** (ROZHODNUTÉ 6345255813 item 1). Nothing is emitted for that first second: the anchor
+//!   and every packet ending within it are [`Event::Hold`] (they refine the anchor and fold, no
+//!   slot is filled). The first packet past it is the first [`Event::Packet`], on the final line,
+//!   so libobs never sees a stamp step and its stamp-basis ASRC never walks; the slots lost just
+//!   before it are not filled (libobs has nothing from the source to keep contiguous yet). Every
+//!   full re-anchor holds again: ~1 s of silence after it.
 //! * **Fit.** A least-squares line of arrival time over the packet's END position in the sender's
 //!   samples (its `nuFrame` order), over the last [`FIT_WINDOW_S`] one-second buckets of the
 //!   sender's audio. A packet later than the reference line by more than [`OUTLIER_MS`] is not
@@ -105,8 +111,8 @@ pub enum Event {
     Reanchor = 2,
     /// A duplicate or reordered packet whose slot has passed: dropped (never output), counted.
     Stale = 3,
-    /// Inside the first second after an anchor (ROZHODNUTÉ 6345255813): folded and anchoring,
-    /// never output.
+    /// Inside the first second after an anchor (ROZHODNUTÉ 6345255813 item 1): it refines the
+    /// anchor and folds into the fit, but is never output, and no slot is filled for it.
     Hold = 4,
 }
 
@@ -602,7 +608,13 @@ impl Timeline {
         if reason == Reason::None {
             let mut stamp = self.stamp_at(pos);
             let mut shifted = false;
-            if now_ns > stamp {
+            // the hold (ROZHODNUTÉ 6345255813 item 1): nothing is emitted while the packet ends
+            // within the first second, so libobs never sees the refinement's stamp steps; a slot is
+            // filled only once the previous packet was emitted
+            let window = ACQUIRE_S * u64::from(rate);
+            let held = end <= window;
+            let emitting = self.next_pos > window;
+            if !held && now_ns > stamp {
                 d.late_ns = (now_ns - stamp) as i64;
                 self.late += 1;
                 if self.fit_valid {
@@ -633,12 +645,14 @@ impl Timeline {
                     d.event = Event::Reanchor;
                     d.reason = Reason::Late;
                     d.shifted = true;
+                } else if held {
+                    d.event = Event::Hold;
                 } else {
                     d.event = Event::Packet;
                 }
                 d.stamp_ns = stamp;
                 d.lateness_ns = now_ns as i64 - stamp as i64;
-                if lost > 0 {
+                if lost > 0 && emitting {
                     d.silence_samples = lost_samples;
                     d.silence_pos = self.next_pos;
                     self.lost += lost;
