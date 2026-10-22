@@ -287,7 +287,10 @@ def test_an_inherited_cache_is_never_trusted():
     )
     assert p.returncode == 0, p.stderr
     assert "evil" not in p.stdout
-    assert p.stdout.splitlines()[0] == "snv|stream-snv|10.77.9.204|obs-e2e-test"
+    assert p.stdout.splitlines() == [
+        "pp|stream-pp|stream-pp.lan|stream-pp",
+        "snv|stream-snv|10.77.9.204|stream-snv",
+    ]
 
 
 def test_assert_is_no_go_when_the_table_lost_the_legacy_venue(tmp_path):

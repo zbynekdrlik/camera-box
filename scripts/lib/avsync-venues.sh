@@ -21,10 +21,10 @@
 #      setup-strih --box <box>): venue = STRIH_VENUE, key = the box name (the issue-1436 convention:
 #      stream-pp publishes rtmp://127.0.0.1:1234/live/stream-pp). Parsed with the loader's own parser
 #      (strih_box_parse_file -- never sourced or executed).
-#   2. the declared Windows stream box(es) below that have no fact file yet: today only stream-snv
-#      (hand-built, key obs-e2e-test). Owner ROZHODNUTÉ 15.10.2026 on issue 1441: stream-snv moves to
-#      the Linux stream role once its program audio runs over Dante; its fact file then wins over this
-#      row (a stale declared row is named on stderr) and the row is deleted.
+#   2. the declared Windows stream box(es) below that have no fact file yet: none since issue 1462
+#      (22.10.2026: stream-snv runs the Linux stream role, `scripts/strih-boxes/stream-snv.env`, key =
+#      the box name; it was the declared row `snv|stream-snv|obs-e2e-test` before). A fact file wins
+#      over a declared row of the same venue (a stale declared row is named on stderr).
 # A new venue's stream box is therefore a fact file + an obs-fleet row -- no edit here.
 #
 # AVSYNC_VENUE_TABLE (whole-table override, `venue|box|host|key` rows) replaces the derivation -- the
@@ -50,8 +50,9 @@ AVSYNC_RTMP_APP="${AVSYNC_RTMP_APP:-live}"
 # environment is dropped here, so an unvalidated row can never pose as a cached one.
 unset _AVSYNC_VENUE_ROWS _AVSYNC_VENUE_ROWS_KEY
 
-# The declared Windows stream boxes with no fact file (`venue|box|key`, one per line).
-AVSYNC_DECLARED_STREAM_VENUES="snv|stream-snv|obs-e2e-test"
+# The declared Windows stream boxes with no fact file (`venue|box|key`, one per line). Empty since
+# issue 1462; the environment may name one (the tests of the mechanism do).
+AVSYNC_DECLARED_STREAM_VENUES="${AVSYNC_DECLARED_STREAM_VENUES-}"
 
 # The venue whose OLD single dev2 heartbeat path (~/.camera-box/avsync-watchdog-heartbeat.txt) the
 # measurer keeps as a compatibility symlink to its per-venue file, so a dev1 watchdog that predates

@@ -961,18 +961,18 @@ fn plan_mode_emits_all_box_programs_without_network() {
         "--stage",
         stage.to_str().unwrap(),
         "--boxes",
-        "stream-snv,imag",
+        "resolume-snv,imag",
         "--full",
     ]);
     assert_eq!(code, 0, "--plan must succeed.\nstdout={out}\nstderr={err}");
-    // Windows (stream) program present
+    // Windows program present (resolume-snv; stream-snv runs the Linux stream role since issue 1462)
     assert!(
         out.contains("$ErrorActionPreference = 'Stop'"),
-        "emits the stream-snv PS program:\n{out}"
+        "emits the resolume-snv PS program:\n{out}"
     );
     assert!(
-        out.contains("win-stream-snv"),
-        "names the stream-snv MCP for the paste step:\n{out}"
+        out.contains("win-resolume"),
+        "names the resolume-snv MCP for the paste step:\n{out}"
     );
     // imag program present
     assert!(
@@ -984,10 +984,10 @@ fn plan_mode_emits_all_box_programs_without_network() {
         out.contains("RUN123") && out.contains("abcdef1234"),
         "emits the fleet log line with run id + sha:\n{out}"
     );
-    // resolume was NOT requested -> its MCP must not appear
+    // stream-snv was NOT requested -> no stream-snv plan at all
     assert!(
-        !out.contains("win-resolume"),
-        "resolume-snv not selected -> not in the plan:\n{out}"
+        !out.contains("box=stream-snv") && !out.contains("win-stream-snv"),
+        "stream-snv not selected -> not in the plan:\n{out}"
     );
 }
 
@@ -997,7 +997,7 @@ fn plan_mode_emits_all_box_programs_without_network() {
 fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let stage = tmp.path();
-    for boxes in ["resolume-snv", "stream-snv,imag"] {
+    for boxes in ["resolume-snv", "resolume-snv,imag"] {
         let (code, out, err) = run_script(&[
             "--plan",
             "--run-id",
@@ -1049,7 +1049,7 @@ fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
         "--stage",
         stage.to_str().unwrap(),
         "--boxes",
-        "stream-snv,imag",
+        "resolume-snv,imag",
         "--full",
     ]);
     assert_eq!(
@@ -1537,18 +1537,18 @@ fn default_plan_is_strih_lx_and_stream_never_a_windows_strih_1317() {
         "the strih plan dials strih-snv at its fleet address:\n{out}"
     );
     assert!(
-        out.contains("FLEET PLAN: box=stream-snv (win-stream-snv, 10.77.9.204)"),
-        "stream-snv keeps its Windows plan:\n{out}"
+        out.contains("FLEET PLAN: box=stream-snv (ssh newlevel@10.77.9.204, linux-genlock)"),
+        "stream-snv takes the Linux plan since issue 1462:\n{out}"
     );
     assert!(
         !out.contains("win-strih") && !out.contains("box=strih ("),
         "no Windows strih plan in the default deploy:\n{out}"
     );
-    // exactly ONE Windows deploy program (stream's) -- strih-snv gets none.
+    // no Windows deploy program: both default boxes run Linux (stream-snv since issue 1462).
     assert_eq!(
         out.matches("$ErrorActionPreference = 'Stop'").count(),
-        1,
-        "only stream-snv carries a Windows deploy program:\n{out}"
+        0,
+        "the default deploy carries no Windows deploy program:\n{out}"
     );
 }
 
