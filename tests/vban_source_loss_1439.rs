@@ -24,6 +24,8 @@
 //! `cc` is required. Per the project's test-strictness rule this FAILS LOUDLY rather than skipping
 //! when the toolchain is missing.
 
+// the harness serves three test crates; not every one reads every field (the reorder/conceal ones: `logs`)
+#[allow(dead_code)]
 #[path = "support/vban_source_harness_1439.rs"]
 mod harness;
 
