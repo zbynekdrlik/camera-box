@@ -491,6 +491,80 @@ fn a_90_ms_persistent_delay_step_is_one_re_anchor_1439() {
     }
 }
 
+/// The schedule with a network OUTAGE two minutes in: every packet sent in the next `ms` is lost.
+fn with_outage(mut sched: Vec<Sent>, ms: u64) -> Vec<Sent> {
+    let h0 = (S0 + 120_000_000_000) as f64;
+    let h1 = h0 + (ms * NS_PER_MS) as f64;
+    for s in sched.iter_mut() {
+        if (h0..h1).contains(&s.first_sample_ns) {
+            s.arrival_ns = None;
+        }
+    }
+    sched
+}
+
+/// The schedule with a sender PAUSE two minutes in: the sender stops for `ms` and its index runs
+/// on from where it stopped, so every later packet is produced -- and arrives -- `ms` later.
+fn with_pause(mut sched: Vec<Sent>, ms: u64) -> Vec<Sent> {
+    let h0 = (S0 + 120_000_000_000) as f64;
+    for s in sched.iter_mut() {
+        if s.first_sample_ns >= h0 {
+            s.first_sample_ns += (ms * NS_PER_MS) as f64;
+            if let Some(a) = s.arrival_ns.as_mut() {
+                *a += ms * NS_PER_MS;
+            }
+        }
+    }
+    sched
+}
+
+/// Review round 4 (the starve of ROZHODNUTÉ 6345255813 item 2): a 1.5 s network OUTAGE and a 1.5 s
+/// sender PAUSE are each no packet in time for a second: exactly ONE re-anchor through the hold, no
+/// late drop, nothing filled after the fact, and both stretches hold their latency (stamp and
+/// realized); after the pause the latency is the old one (the production paused too), after the
+/// outage too (the same network).
+#[test]
+fn an_outage_or_a_pause_of_1_5_s_is_one_re_anchor_and_the_latency_comes_back_1439() {
+    for (what, ppm, seed) in [
+        ("outage", 0.0, 1u64),
+        ("pause", 30.0, 2),
+        ("outage", -30.0, 3),
+        ("pause", 0.0, 4),
+    ] {
+        let base = schedule(seed, ppm, TEN_MIN_PACKETS, 0.0);
+        let event_k = k_at(&base, S0 + 120_000_000_000) - 20;
+        let sched = if what == "outage" {
+            with_outage(base, 1_500)
+        } else {
+            with_pause(base, 1_500)
+        };
+        let run = replay(&sched, 40);
+        let tag = format!("{what} 1.5 s, ppm {ppm} seed {seed}: {run:?}");
+        println!("{tag}");
+        assert_eq!(run.re_anchors, 1, "one starve, one re-anchor: {tag}");
+        assert_eq!(
+            (run.late, run.lost),
+            (0, 0),
+            "no drop, nothing filled: {tag}"
+        );
+        assert_eq!(run.emitted_in_first_second, 0, "{tag}");
+        let (_, al, a_real, ar) = held(&run, 0, 0..event_k);
+        let (_, bl, b_real, br) = held(&run, 1, 0..u64::MAX);
+        assert!(
+            al <= 1.0 * MS && ar <= 1.0 * MS,
+            "the old stretch held: {tag}"
+        );
+        assert!(
+            bl <= 1.0 * MS && br <= 1.0 * MS,
+            "the new stretch held: {tag}"
+        );
+        assert!(
+            ((b_real - a_real) / MS).abs() < 5.0,
+            "the latency comes back to the anchored one: {tag}"
+        );
+    }
+}
+
 /// The documented limit of the held latency: before the fit the line runs at the nominal rate, then
 /// slews to the fit at 5 ppm per bucket, so a sender far off our clock moves the stamp latency by
 /// about its ppm x 20 s. At ±100 ppm that is more than the ±1 ms bound (the bound holds to ~±55 ppm)

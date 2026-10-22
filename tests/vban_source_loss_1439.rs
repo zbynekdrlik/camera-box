@@ -665,3 +665,41 @@ fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439()
         );
     }
 }
+
+/// Review round 4 (the starve of ROZHODNUTÉ 6345255813 item 2): after a 1.5 s network outage the
+/// first packet is no packet in time for a second: the source logs ONE `reason=starve` re-anchor,
+/// fills nothing after the fact, holds the new anchor's first second and then goes on.
+#[test]
+fn an_outage_of_1_5_s_is_one_starve_re_anchor_and_no_late_fill_1439() {
+    let n = 15 * RATE / u64::from(FRAMES);
+    let gap = 282u64;
+    let after = 300u64;
+    let nus: Vec<u32> = (0..n as u32)
+        .chain((n + gap) as u32..(n + gap + after) as u32)
+        .collect();
+    let (outs, log) = run_with_log(&on_grid(&nus));
+    let reanchors: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("obs-vban receive re-anchor:"))
+        .collect();
+    assert_eq!(
+        reanchors.len(),
+        1,
+        "issue 1439: one starve, one re-anchor:\n{log}"
+    );
+    assert!(
+        reanchors[0].contains("reason=starve"),
+        "issue 1439: `{}`",
+        reanchors[0]
+    );
+    assert!(
+        outs.iter().all(|o| !o.zero),
+        "issue 1439: nothing is filled after the fact: {:?}",
+        outs.iter().filter(|o| o.zero).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        outs.len() as u64,
+        (n - u64::from(HELD)) + (after - u64::from(HELD)),
+        "issue 1439: both anchors hold their first second"
+    );
+}

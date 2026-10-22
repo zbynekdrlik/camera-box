@@ -380,6 +380,86 @@ fn delay_drop_script() -> Vec<Pkt> {
     b.pkts
 }
 
+/// A clean 48 kHz sender for `secs` seconds from packet `k0` on (index = packet), at the grid plus
+/// `delay` from packet `from` on; packets in `lost` never arrive.
+fn grid_script(
+    b: &mut Builder,
+    k0: u64,
+    secs: u64,
+    from: u64,
+    delay: u64,
+    lost: std::ops::Range<u64>,
+) {
+    for k in k0..k0 + secs * 48_000 / 256 {
+        if lost.contains(&k) {
+            continue;
+        }
+        b.send(Pkt {
+            now: 2_000_000_000
+                + samples_to_ns((k + 1) * 256, 48_000)
+                + if k >= from { delay } else { 0 },
+            nu: k as u32,
+            frames: 256,
+            rate: 48_000,
+            channels: 2,
+            reserve_ns: 40 * MS,
+            reset: false,
+        });
+    }
+}
+
+/// Review round 4 (the starve on our clock): a 1.5 s network outage after 15 s (the first packet
+/// after it is on time: a starve re-anchor), then a 1.5 s sender pause (every later packet 1.5 s
+/// late against the line: a starve re-anchor at once, no drops).
+fn outage_and_pause_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    let gap = 15 * 48_000 / 256..15 * 48_000 / 256 + 282;
+    grid_script(&mut b, 0, 40, 30 * 48_000 / 256, 1_500 * MS, gap);
+    b.pkts
+}
+
+/// Review round 4: the starve boundary on our clock (a late packet exactly one second after the last
+/// in-time arrival is a drop, one ns more re-anchors), then a re-anchor DURING the hold (another
+/// channel count inside the new anchor's first second), and a first packet past the hold that comes
+/// late (dropped, nothing filled).
+fn starve_edges_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    let n = 15 * 48_000 / 256u64;
+    grid_script(&mut b, 0, 15, u64::MAX, 0, 0..0);
+    let last = b.now;
+    for (i, now) in [last + 1_000_000_000, last + 1_000_000_001]
+        .iter()
+        .enumerate()
+    {
+        b.send(Pkt {
+            now: *now,
+            nu: (n + i as u64) as u32,
+            frames: 256,
+            rate: 48_000,
+            channels: 2,
+            reserve_ns: 40 * MS,
+            reset: false,
+        });
+    }
+    // the re-anchored line's first second, a channel change inside it, then the new hold
+    let t0 = b.now;
+    for k in 1..400u64 {
+        let channels = if k >= 50 { 1 } else { 2 };
+        // the first packet past the second hold comes 60 ms late
+        let late = if k == 50 + 187 { 60 * MS } else { 0 };
+        b.send(Pkt {
+            now: t0 + samples_to_ns(k * 256, 48_000) + late,
+            nu: (n + 1 + k) as u32,
+            frames: 256,
+            rate: 48_000,
+            channels,
+            reserve_ns: 40 * MS,
+            reset: false,
+        });
+    }
+    b.pkts
+}
+
 /// A clean sender whose network delay steps up by 90 ms after 15 s and stays: one second of late
 /// drops, then ONE persistent-late re-anchor through the hold onto the new delay + R.
 fn delay_step_script() -> Vec<Pkt> {
@@ -475,6 +555,8 @@ fn scripts() -> Vec<Vec<Pkt>> {
         clean_script(0.0, 16, 60 * MS, 40),
         delay_drop_script(),
         delay_step_script(),
+        outage_and_pause_script(),
+        starve_edges_script(),
         starve_script(),
         wrap_script(),
         out_of_order_script(),
@@ -806,7 +888,7 @@ fn the_scripts_reach_every_boundary_1439() {
     let names = [
         "anchors",
         "losses (silence)",
-        "persistent-late re-anchors (no packet in time for a second)",
+        "starve re-anchors on a late packet (a delay step or a pause)",
         "packets exactly on their stamp",
         "backward re-anchors",
         "jump re-anchors",
@@ -814,7 +896,7 @@ fn the_scripts_reach_every_boundary_1439() {
         "config re-anchors",
         "fit re-anchors: rate beyond the clamp",
         "fit re-anchors: phase beyond R",
-        "late drops one packet short of a second (still a drop)",
+        "late drops exactly one second after the last in-time arrival (still a drop)",
         "fits becoming valid",
         "stamp step changes",
         "outlier exclusions",
@@ -835,10 +917,16 @@ fn the_scripts_reach_every_boundary_1439() {
         "held packets (an anchor's first second, never output)",
         "a loss inside the hold (never filled)",
         "the first emitted packet after a hold",
+        "starve re-anchors on an on-time packet (after an outage)",
+        "starve re-anchors one ns past the second",
+        "re-anchors during the hold",
+        "a late first packet past the hold (dropped, nothing filled)",
     ];
-    let mut hits = [0usize; 31];
+    let mut hits = [0usize; 35];
     for sc in scripts() {
         let mut t = Timeline::new();
+        // the last arrival that was in time (an anchor, a held or an emitted packet), harness-side
+        let mut last_in = 0u64;
         for p in &sc {
             if p.reset {
                 t = Timeline::new();
@@ -846,7 +934,7 @@ fn the_scripts_reach_every_boundary_1439() {
             let (anchored, valid, step, last_nu) = (t.anchored, t.fit_valid, t.step_ppb, t.last_nu);
             let (base_before, base_pos_before, next_before) =
                 (t.base_stamp_ns, t.base_pos, t.next_pos);
-            let intime_before = t.last_intime_end;
+            let since_in = p.now as i64 - last_in as i64;
             let folds = t.buckets.iter().map(|b| b.n).sum::<u64>();
             // which fit check would fail: the model's update run on a copy, exactly when the packet
             // takes the timeline into a new bucket (the only time the real decision refits)
@@ -892,11 +980,16 @@ fn the_scripts_reach_every_boundary_1439() {
                 (Event::Late, _) => {
                     hits[24] += usize::from(d.silence_samples > 0);
                     hits[25] += usize::from(same && delta > 1 && d.silence_samples > 0);
-                    hits[10] += usize::from(
-                        same && end - intime_before + u64::from(p.frames) > u64::from(p.rate),
+                    hits[10] += usize::from(since_in == 1_000_000_000);
+                    hits[34] += usize::from(
+                        same && next_before <= u64::from(p.rate) && d.silence_samples == 0,
                     );
                 }
-                (Event::Reanchor, Reason::Late) => hits[2] += 1,
+                (Event::Reanchor, Reason::Starve) => {
+                    hits[2] += usize::from(same && p.now > stamp);
+                    hits[31] += usize::from(same && p.now <= stamp);
+                    hits[32] += usize::from(since_in == 1_000_000_001);
+                }
                 (Event::Reanchor, Reason::Backward) => hits[4] += 1,
                 (Event::Reanchor, Reason::Jump) => hits[5] += 1,
                 (Event::Reanchor, Reason::Format) => hits[6] += 1,
@@ -949,6 +1042,15 @@ fn the_scripts_reach_every_boundary_1439() {
                     && next_before <= u64::from(p.rate)
                     && end > u64::from(p.rate),
             );
+            hits[33] += usize::from(
+                d.event == Event::Reanchor && anchored && next_before <= u64::from(p.rate),
+            );
+            if matches!(
+                d.event,
+                Event::Anchor | Event::Reanchor | Event::Hold | Event::Packet
+            ) {
+                last_in = p.now;
+            }
             if d.event == Event::Anchor || d.event == Event::Reanchor {
                 hits[26] += usize::from(t.reserve_eff_ns != t.reserve_ns);
                 hits[27] += usize::from(t.reserve_eff_ns == t.reserve_ns);

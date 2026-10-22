@@ -126,8 +126,9 @@ pub enum Event {
 pub enum Reason {
     #[default]
     None = 0,
-    /// No packet in time for [`PERSIST_S`] of the sender's audio (every packet late).
-    Late = 1,
+    /// No packet in time for [`PERSIST_S`] (a starve: an outage, a sender pause, or every packet
+    /// late on a network delay step).
+    Starve = 1,
     /// A `nuFrame` more than [`STALE_PACKETS`] behind the last one (a sender restart).
     Backward = 2,
     /// A forward `nuFrame` jump over [`JUMP_S`].
@@ -145,7 +146,7 @@ impl Reason {
     pub fn name(self) -> &'static str {
         match self {
             Reason::None => "none",
-            Reason::Late => "late",
+            Reason::Starve => "starve",
             Reason::Backward => "backward",
             Reason::Jump => "jump",
             Reason::Format => "format",
@@ -613,7 +614,7 @@ impl Timeline {
                 self.late += 1;
                 // no packet in time for PERSIST_S of audio: a delay step, ONE full re-anchor
                 if end - self.last_intime_end > PERSIST_S * u64::from(rate) {
-                    reason = Reason::Late;
+                    reason = Reason::Starve;
                 }
             }
             if reason == Reason::None {
