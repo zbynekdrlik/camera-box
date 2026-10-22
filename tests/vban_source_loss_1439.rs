@@ -294,6 +294,11 @@ impl Drop for Scratch {
 /// Compiles the driver against the shipped source (once per call, in a dir of its own) and runs it
 /// over the packets `(nuFrame, arrival ns, sample value)`.
 fn run(packets: &[(u32, u64, i16)]) -> Vec<Out> {
+    run_with_log(packets).0
+}
+
+/// [`run`], plus the plugin's log lines (`blog <level>: <text>`).
+fn run_with_log(packets: &[(u32, u64, i16)]) -> (Vec<Out>, String) {
     let source = repo(SOURCE);
     assert!(source.is_file(), "issue 1439: {SOURCE} is missing");
     let n = COMPILES.fetch_add(1, Ordering::SeqCst);
@@ -360,7 +365,8 @@ fn run(packets: &[(u32, u64, i16)]) -> Vec<Out> {
         "issue 1439: the driver exited non-zero:\n{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    String::from_utf8(run.stdout)
+    let log = String::from_utf8(run.stderr).expect("driver stderr is utf-8");
+    let outs = String::from_utf8(run.stdout)
         .expect("driver stdout is utf-8")
         .lines()
         .filter_map(|l| l.strip_prefix("out "))
@@ -377,7 +383,8 @@ fn run(packets: &[(u32, u64, i16)]) -> Vec<Out> {
                 first: field("first=").parse().unwrap(),
             }
         })
-        .collect()
+        .collect();
+    (outs, log)
 }
 
 /// floor(samples * 1e9 / RATE).
@@ -461,4 +468,53 @@ fn a_stream_without_loss_has_no_silence_1439() {
     assert_eq!(audio_values(&outs), vec![1, 2, 3, 4, 5, 6], "{outs:?}");
     assert!(outs.iter().all(|o| !o.zero), "{outs:?}");
     assert_contiguous(&outs);
+}
+
+/// The 10 s status line the stream-role verify reads (`verify-strih.sh`): the received counter, the
+/// fixed R, the port, the packet's own stream name and the OBS source name.
+#[test]
+fn the_status_line_reports_the_counters_r_port_and_stream_1439() {
+    // 11 s of an ideal sender: the first packet arms the status clock, the line comes 10 s later.
+    let nus: Vec<u32> = (1000..1000 + 2063).collect();
+    let (outs, log) = run_with_log(&on_grid(&nus));
+    assert_eq!(outs.len(), nus.len(), "no packet may be lost or padded");
+    let lines: Vec<&str> = log
+        .lines()
+        // the plugin's blog macro prefixes every line with `[obs-vban] `
+        .filter_map(|l| l.strip_prefix("blog 300: [obs-vban] obs-vban receive: "))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "issue 1439: one status line in 11 s:\n{log}"
+    );
+    let line = lines[0];
+    let field = |k: &str| -> &str {
+        line.split_whitespace()
+            .find_map(|f| f.strip_prefix(k))
+            .unwrap_or_else(|| panic!("issue 1439: no `{k}` in the status line `{line}`"))
+    };
+    let received: u64 = field("received=").parse().unwrap();
+    // 10 s of 256-frame packets at 48 kHz is 1875 packets; the line is written by the packet that
+    // crosses the 10 s mark, which it has already counted.
+    assert!(
+        (1875..=1877).contains(&received),
+        "issue 1439: received={received} after 10 s: `{line}`"
+    );
+    for (k, want) in [
+        ("lost=", "0"),
+        ("late=", "0"),
+        ("re_anchors=", "0"),
+        ("receive_buffer_ms=", "40"),
+        ("rate=", "48000"),
+        ("ch=", "2"),
+        ("port=", "6980"),
+        ("stream=", "'stream'"),
+    ] {
+        assert_eq!(field(k), want, "issue 1439: `{k}` in `{line}`");
+    }
+    assert!(
+        line.ends_with("source='Zvuk z mixu'"),
+        "issue 1439: the line names its OBS source last: `{line}`"
+    );
 }
