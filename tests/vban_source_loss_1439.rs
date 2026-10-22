@@ -10,7 +10,9 @@
 //! scripted packets, and requires:
 //!
 //! - every packet's audio reaches OBS exactly once;
-//! - the slots of the lost packets reach OBS as silence, exactly as many frames as were lost;
+//! - the slots of the lost packets reach OBS as silence, exactly as many frames as were lost (a run
+//!   of up to three between two received packets is concealed instead, ROZHODNUTÉ 6352253147 (b):
+//!   `tests/vban_source_conceal_1439.rs`);
 //! - the stamps are contiguous: each output starts where the previous one ended.
 //!
 //! It runs under `cargo test` in CI and standalone with no cargo:
@@ -22,48 +24,61 @@
 //! `cc` is required. Per the project's test-strictness rule this FAILS LOUDLY rather than skipping
 //! when the toolchain is missing.
 
+// the harness serves three test crates; not every one reads every field (the reorder/conceal ones: `logs`)
+#[allow(dead_code)]
 #[path = "support/vban_source_harness_1439.rs"]
 mod harness;
 
 use harness::*;
 
+/// ROZHODNUTÉ 6352253147 (b): a run of up to three missing slots between two received packets is
+/// concealed, so a run of FOUR is the shortest that is silence.
 #[test]
-fn two_lost_packets_are_silence_for_exactly_their_slots_1439() {
-    let outs = run(&after_hold(&[300, 301, 302, 305, 306]));
+fn four_lost_packets_are_silence_for_exactly_their_slots_1439() {
+    let outs = run(&after_hold(&[300, 301, 302, 307, 308]));
     assert_eq!(
         audio_values(&outs),
-        vec![1, 2, 3, 6, 7],
+        vec![1, 2, 3, 8, 9],
         "issue 1439: every packet's audio must reach OBS exactly once, in order (a lost packet was \
          padded with copies of the next one): {outs:?}"
     );
     let at3 = outs.iter().position(|o| !o.zero && o.first == 3).unwrap();
-    let at6 = outs.iter().position(|o| !o.zero && o.first == 6).unwrap();
-    let gap = &outs[at3 + 1..at6];
+    let at8 = outs.iter().position(|o| !o.zero && o.first == 8).unwrap();
+    let gap = &outs[at3 + 1..at8];
     assert!(
         gap.iter().all(|o| o.zero),
         "issue 1439: the lost slots must be silence: {outs:?}"
     );
     assert_eq!(
         gap.iter().map(|o| o.frames).sum::<u64>(),
-        2 * u64::from(FRAMES),
-        "issue 1439: exactly the two lost packets' frames must be silence: {outs:?}"
+        4 * u64::from(FRAMES),
+        "issue 1439: exactly the four lost packets' frames must be silence: {outs:?}"
     );
     assert_contiguous(&outs);
 }
 
+/// ROZHODNUTÉ 6352253147 (b): one lost packet between two received ones is one CONCEALED slot -- the
+/// previous packet again (value 2), its end faded to the next packet (value 4) -- never silence.
 #[test]
-fn one_lost_packet_is_one_silent_slot_1439() {
+fn one_lost_packet_is_one_concealed_slot_1439() {
     let outs = run(&after_hold(&[400, 401, 403, 404]));
-    assert_eq!(audio_values(&outs), vec![1, 2, 4, 5], "{outs:?}");
-    let silent: u64 = after_lead_in(&outs)
-        .iter()
-        .filter(|o| o.zero)
-        .map(|o| o.frames)
-        .sum();
+    let body = after_lead_in(&outs);
+    assert!(
+        body.iter().all(|o| !o.zero),
+        "issue 1439: no slot goes out silent: {outs:?}"
+    );
     assert_eq!(
-        silent,
-        u64::from(FRAMES),
-        "issue 1439: one lost packet = one packet of silence: {outs:?}"
+        body.iter()
+            .map(|o| (o.frames, o.first, o.mid, o.last))
+            .collect::<Vec<_>>(),
+        vec![
+            (256, 1, 1, 1),
+            (256, 2, 2, 2),
+            (256, 2, 2, 4),
+            (256, 4, 4, 4),
+            (256, 5, 5, 5)
+        ],
+        "issue 1439: one lost packet = one slot of the previous packet, faded to the next: {outs:?}"
     );
     assert_contiguous(&outs);
 }
@@ -142,12 +157,13 @@ fn the_silence_keeps_the_streams_sample_format_1439() {
         (VBAN_BITFMT_32_INT, "32-bit int"),
         (VBAN_BITFMT_32_FLOAT, "32-bit float"),
     ] {
-        let (outs, _log) = run_as(&after_hold(&[300, 301, 303, 304]), bitfmt);
+        // four lost: a shorter run is concealed (ROZHODNUTÉ 6352253147 (b))
+        let (outs, _log) = run_as(&after_hold(&[300, 301, 306, 307]), bitfmt);
         let body = after_lead_in(&outs);
         assert_eq!(
             body.len(),
-            5,
-            "{name}: the lead-in, then four packets + one silent slot: {outs:?}"
+            8,
+            "{name}: the lead-in, then four packets + four silent slots: {outs:?}"
         );
         let formats: Vec<i32> = outs.iter().map(|o| o.format).collect();
         assert!(
@@ -157,7 +173,7 @@ fn the_silence_keeps_the_streams_sample_format_1439() {
         );
         assert_eq!(
             audio_values(&outs),
-            vec![1, 2, 4, 5],
+            vec![1, 2, 7, 8],
             "{name}: the audio itself is unchanged: {outs:?}"
         );
         assert_eq!(
@@ -165,8 +181,8 @@ fn the_silence_keeps_the_streams_sample_format_1439() {
                 .filter(|o| o.zero)
                 .map(|o| o.frames)
                 .sum::<u64>(),
-            u64::from(FRAMES),
-            "{name}: one lost packet = one packet of silence: {outs:?}"
+            4 * u64::from(FRAMES),
+            "{name}: four lost packets = four packets of silence: {outs:?}"
         );
         assert_contiguous(&outs);
     }
@@ -432,9 +448,10 @@ fn a_receive_buffer_under_one_packet_plus_10_ms_warns_once_naming_both_1439() {
 /// Issue 1462 + 1439: mbc.lan sends the SNV program to stream-snv as VBAN `stream` in 24-bit PCM
 /// (format byte 0x02: `VBAN_BITFMT_24_INT`, PCM codec), 48 kHz stereo, 239 frames per packet. The
 /// shipped source decodes it (sign-extended) into float planar, stamps it on the timeline, and a
-/// lost packet is 239 frames of silence in the same format.
+/// lost packet between two received ones is 239 frames of the previous packet, concealed in the same
+/// format (ROZHODNUTÉ 6352253147 (b)).
 #[test]
-fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439() {
+fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_concealed_slot_1439() {
     let frames = 239u64;
     let t0 = 1_000_000_000u64;
     let values: [i16; 5] = [1234, -1234, 32767, -32768, 0];
@@ -492,11 +509,12 @@ fn mbcs_24_bit_239_frame_packets_decode_and_a_loss_is_one_slot_of_silence_1439()
         "issue 1439: the lead-in: {outs:?}"
     );
     let outs = outs[n..].to_vec();
-    assert_eq!(outs.len(), 6, "five packets + one silent slot: {outs:?}");
+    assert_eq!(outs.len(), 6, "five packets + one concealed slot: {outs:?}");
     assert!(outs.iter().all(|o| o.1 == frames), "issue 1462: {outs:?}");
     assert!(
-        outs[2].2,
-        "issue 1462: the lost packet is one slot of silence: {outs:?}"
+        !outs[2].2 && outs[2].5 == outs[1].5,
+        "issue 1439: the lost packet is one slot of the previous packet (its first sample whole, \
+         the fade in from an equal sample): {outs:?}"
     );
     // every packet's samples on the 24-bit scale, sign-extended, the low byte kept
     let raw: Vec<i64> = outs
@@ -597,7 +615,8 @@ fn an_outage_of_1_5_s_is_one_starve_re_anchor_and_no_late_fill_1439() {
 /// exactly at its deadline (its stamp − the 2 ms margin), the packet behind it at the same wake.
 #[test]
 fn a_stored_slot_goes_out_at_the_workers_next_look_a_missing_one_at_its_deadline_1439() {
-    let pkts = after_hold(&[300, 301, 303, 304, 305]);
+    // four lost: a shorter run is concealed (ROZHODNUTÉ 6352253147 (b)), at the same deadlines
+    let pkts = after_hold(&[300, 301, 306, 307, 308]);
     let first_arrival = pkts[HELD as usize].1;
     let arrival = |v: i64| pkts.iter().find(|p| i64::from(p.2) == v).expect("sent").1;
     let (outs, _log) = run_with_log(&pkts);
@@ -610,31 +629,34 @@ fn a_stored_slot_goes_out_at_the_workers_next_look_a_missing_one_at_its_deadline
     );
     assert_eq!(
         audio_values(&body),
-        vec![1, 2, 4, 5, 6],
+        vec![1, 2, 7, 8, 9],
         "issue 1439: {outs:?}"
     );
     let margin = 2_000_000u64;
     let silence: Vec<&Out> = body.iter().filter(|o| o.zero).collect();
     assert_eq!(
         silence.iter().map(|o| o.frames).collect::<Vec<_>>(),
-        vec![u64::from(FRAMES)],
-        "issue 1439: the lost packet's slot is one slot of silence: {outs:?}"
+        vec![u64::from(FRAMES); 4],
+        "issue 1439: each lost packet's slot is one slot of silence: {outs:?}"
     );
-    assert_eq!(
-        silence[0].at + margin,
-        silence[0].ts,
-        "issue 1439: the missing slot's silence goes out at its deadline: {outs:?}"
-    );
+    for s in &silence {
+        assert_eq!(
+            s.at + margin,
+            s.ts,
+            "issue 1439: a missing slot's silence goes out at its deadline: {outs:?}"
+        );
+    }
+    let last_silence = silence[3];
     for o in body.iter().filter(|o| !o.zero) {
         let a = arrival(o.first);
         assert!(
             o.at >= a && o.at + margin < o.ts,
             "issue 1439: a packet goes out after its arrival, before its deadline: {o:?} in {outs:?}"
         );
-        if o.first > 3 && a < silence[0].at {
+        if o.first > 2 && a < last_silence.at {
             assert_eq!(
-                o.at, silence[0].at,
-                "issue 1439: a packet stored behind a missing slot goes out right after its silence: \
+                o.at, last_silence.at,
+                "issue 1439: a packet stored behind missing slots goes out right after their silence: \
                  {outs:?}"
             );
         } else {

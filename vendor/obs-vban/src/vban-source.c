@@ -24,9 +24,37 @@
 #include "vban-udp.h"
 #include "vban.h"
 #include "vban-receive-timeline.h"
+#include "vban-conceal.h"
+#include "vban-sample-io.h"
 #ifdef __linux__
 #include <sys/prctl.h>
 #endif
+
+/* camera-box issue 1439 (ROZHODNUTE 6347872706): one in-time packet stored for its slot until the worker
+ * hands it to libobs; its audio planes follow this header in the store */
+struct vban_src_slot {
+	uint64_t pos;
+	uint32_t nu;  /* its nuFrame (the loss line names the packet that ends a run) */
+	uint32_t frames;
+	uint32_t samples_per_sec;
+	int format;   /* enum audio_format */
+	int speakers; /* enum speaker_layout */
+	uint32_t planes;
+	uint32_t plane_bytes;
+	/* ROZHODNUTE 6352253147 (b): its first frame per channel on the [-1, 1) scale -- a concealed slot right
+	 * before it fades toward it */
+	double first[MAX_AV_PLANES];
+};
+
+/* camera-box issue 1439 (ROZHODNUTE 6352253147 a): a run of slots that went out without their packet, written
+ * only once the worker has handed out everything due at its look (a log write must never delay a slot) */
+struct vban_src_loss_line {
+	uint64_t slots;
+	uint32_t nu;      /* the packet that ended the run */
+	bool concealed;
+	bool stretch_end; /* the stretch stopped emitting (a starve, a re-anchor, a reset) */
+};
+#define VBAN_SRC_LOSS_LINES 4
 
 struct vban_src_s
 {
@@ -53,8 +81,12 @@ struct vban_src_s
 	 * copy: no output, no log line, no wait under it. */
 	pthread_mutex_t mutex;
 	struct vban_recv_timeline timeline; /* under MUTEX */
-	struct deque store;                 /* under MUTEX: the in-time packets, struct vban_src_slot + planes */
+	struct deque store;                 /* under MUTEX: the in-time packets, struct vban_src_slot + planes, in
+					     * slot order (ROZHODNUTE 6352253147 a: a reordered packet goes in
+					     * before the later slots) */
 	size_t store_count;                 /* under MUTEX */
+	uint64_t store_back_pos;            /* under MUTEX: the last stored packet's slot */
+	DARRAY(uint8_t) rot;                /* under MUTEX: one stored packet while a reorder is put in place */
 	bool store_full;                    /* under MUTEX: a packet was dropped on a full store (logged once) */
 	enum audio_format out_format;       /* under MUTEX: the stream's sample format (the silence's) */
 	enum speaker_layout out_speakers;   /* under MUTEX */
@@ -71,6 +103,21 @@ struct vban_src_s
 	os_event_t *worker_wake;
 	DARRAY(uint8_t) out;     /* worker only: the packet copied out of the store */
 	DARRAY(uint8_t) silence; /* worker only: one chunk of silence in the stream's own sample format */
+	/* worker only (ROZHODNUTE 6352253147 a): the slots of the current run handed to libobs without their
+	 * packet, logged once when the run ends; whether the run was concealed */
+	uint64_t run_slots;
+	bool run_concealed;
+	struct vban_src_loss_line loss_done[VBAN_SRC_LOSS_LINES]; /* the runs that ended at this look */
+	size_t loss_done_n;
+	uint64_t loss_done_over; /* more runs than loss_done holds ended at this look */
+	/* worker only (ROZHODNUTE 6352253147 b): the last packet handed to libobs (what a concealment repeats),
+	 * its header, the last frame handed to libobs per channel (where a concealment fades in from), and the
+	 * concealed slot being built */
+	DARRAY(uint8_t) prev;
+	struct vban_src_slot prev_slot;
+	bool prev_valid;
+	double tail[MAX_AV_PLANES];
+	DARRAY(uint8_t) conceal;
 	uint64_t status_ns;      /* the last status line, 0 = none yet */
 	int64_t window_late_max_ns; /* the largest arrival - stamp since the last status line */
 	bool window_late_seen;
@@ -233,9 +280,10 @@ static void vban_src_destroy(void *data)
 
 	const struct vban_recv_timeline *t = &s->timeline;
 	blog(t->lost || t->re_anchors ? LOG_ERROR : LOG_INFO,
-	     "source '%s': received %" PRIu64 " packets, lost %" PRIu64 ", late %" PRIu64 ", %" PRIu64
-	     " re-anchor(s)",
-	     obs_source_get_name(s->context), t->received, t->lost, t->late, t->re_anchors);
+	     "source '%s': received %" PRIu64 " packets, lost %" PRIu64 " (%" PRIu64 " concealed), late %" PRIu64
+	     ", reordered %" PRIu64 ", stale %" PRIu64 ", %" PRIu64 " re-anchor(s)",
+	     obs_source_get_name(s->context), t->received, t->lost, t->concealed, t->late, t->reordered, t->stale,
+	     t->re_anchors);
 
 	deque_free(&s->store);
 	os_event_destroy(s->worker_wake);
@@ -246,6 +294,9 @@ static void vban_src_destroy(void *data)
 	da_free(s->buffer);
 	da_free(s->out);
 	da_free(s->silence);
+	da_free(s->rot);
+	da_free(s->prev);
+	da_free(s->conceal);
 	bfree(s);
 }
 
@@ -301,7 +352,7 @@ static const char *vban_recv_reason_name(int reason)
 /* camera-box issue 1439: what the receive thread logs, copied from the timeline under the lock (the worker
  * moves the counters too). */
 struct vban_src_snapshot {
-	uint64_t received, lost, late, re_anchors, stale, silence_samples, missed;
+	uint64_t received, lost, late, re_anchors, stale, silence_samples, missed, reordered, concealed;
 	uint64_t reserve_ns, reserve_eff_ns;
 	uint32_t rate, channels;
 	bool fit_valid, fit_frozen;
@@ -321,6 +372,8 @@ static struct vban_src_snapshot vban_src_snapshot_locked(const struct vban_src_s
 		.stale = t->stale,
 		.silence_samples = t->silence_samples,
 		.missed = t->missed,
+		.reordered = t->reordered,
+		.concealed = t->concealed,
 		.reserve_ns = t->reserve_ns,
 		.reserve_eff_ns = t->reserve_eff_ns,
 		.rate = t->rate,
@@ -342,7 +395,6 @@ struct vban_src_arrival {
 	uint64_t now;
 	bool first_output;   /* this packet started the stretch's output */
 	bool emitted_before; /* the stretch was already emitting */
-	uint64_t lost_slots; /* the packets missing right before this one (their slots go out as silence) */
 	/* the stretch's format before this packet (a `format` re-anchor names the change) */
 	uint32_t frames_before, rate_before, channels_before;
 };
@@ -417,18 +469,15 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		blog(LOG_WARNING,
 		     "obs-vban receive late: source '%s' frame=%u late_ms=%.1f -- dropped, %s (late=%" PRIu64 ")",
 		     obs_source_get_name(s->context), nu_frame, (double)d->late_ns / 1e6,
-		     emitted_before ? "its slot is silence on the anchored line"
+		     emitted_before ? "its slot went out without it, on the anchored line"
 				    : "before the stretch's first output: nothing filled",
 		     n->late);
 	} else if (d->event == VBAN_RECV_PACKET) {
 		s->late_run = false;
 	}
-	if (a->lost_slots > 0 && emitted_before)
-		blog(LOG_WARNING,
-		     "source '%s': missing %" PRIu64 " packet(s) before frame %u -- silence for those slots",
-		     obs_source_get_name(s->context), a->lost_slots, nu_frame);
-	/* the lateness record includes the late packets that were dropped (the measure R is chosen by) */
-	if ((d->event == VBAN_RECV_PACKET || d->event == VBAN_RECV_LATE) &&
+	/* the lateness record includes the late packets that were dropped and the reorders (the measure R is
+	 * chosen by) */
+	if ((d->event == VBAN_RECV_PACKET || d->event == VBAN_RECV_LATE || d->event == VBAN_RECV_REORDER) &&
 	    (!s->window_late_seen || d->lateness_ns > s->window_late_max_ns)) {
 		s->window_late_max_ns = d->lateness_ns;
 		s->window_late_seen = true;
@@ -493,10 +542,13 @@ static void vban_src_log_status(struct vban_src_s *s, const struct VBanHeader *h
 	const double rate = n->rate ? (double)n->rate : 1.0;
 	blog(LOG_INFO,
 	     "obs-vban receive: received=%" PRIu64 " lost=%" PRIu64 " late=%" PRIu64 " re_anchors=%" PRIu64
-	     " stale=%" PRIu64 " silence_ms=%.1f max_late_ms=%.1f sender_ppm=%+.3f phase_ms=%+.2f fit=%s"
+	     " stale=%" PRIu64 " reordered=%" PRIu64 " concealed=%" PRIu64 " silence_ms=%.1f max_late_ms=%.1f"
+	     " sender_ppm=%+.3f"
+	     " phase_ms=%+.2f fit=%s"
 	     " emit_late_ms=%.1f emit_missed=%" PRIu64 " receive_buffer_ms=%" PRIu64
 	     " rate=%u ch=%u port=%ld stream='%.*s' source='%s'",
-	     n->received, n->lost, n->late, n->re_anchors, n->stale, (double)n->silence_samples * 1000.0 / rate,
+	     n->received, n->lost, n->late, n->re_anchors, n->stale, n->reordered, n->concealed,
+	     (double)n->silence_samples * 1000.0 / rate,
 	     s->window_late_seen ? (double)s->window_late_max_ns / 1e6 : 0.0,
 	     n->fit_valid ? -(double)n->fit_ppb / 1000.0 : 0.0, (double)n->phase_ns / 1e6,
 	     n->fit_frozen ? "frozen" : (n->fit_valid ? "locked" : "acquiring"),
@@ -507,18 +559,6 @@ static void vban_src_log_status(struct vban_src_s *s, const struct VBanHeader *h
 	s->window_late_seen = false;
 	s->window_late_max_ns = 0;
 }
-
-/* camera-box issue 1439 (ROZHODNUTE 6347872706): one in-time packet stored for its slot until the worker
- * hands it to libobs; its audio planes follow this header in the store */
-struct vban_src_slot {
-	uint64_t pos;
-	uint32_t frames;
-	uint32_t samples_per_sec;
-	int format;   /* enum audio_format */
-	int speakers; /* enum speaker_layout */
-	uint32_t planes;
-	uint32_t plane_bytes;
-};
 
 /* The store holds at most this many packets (21 s of 256-frame packets): one that does not fit is
  * dropped and logged once, the worker has stalled. */
@@ -544,8 +584,13 @@ static void vban_src_store_clear_locked(struct vban_src_s *s)
 	s->store_count = 0;
 }
 
-/* Under the lock: store AUDIO for the slot at POS. Returns false when the store is full. */
-static bool vban_src_store_push_locked(struct vban_src_s *s, uint64_t pos, const struct obs_source_audio *audio)
+/* Under the lock: store AUDIO (the packet NU) for the slot at POS, keeping the store in slot order. A packet
+ * after every stored one is appended; a REORDERED one (ROZHODNUTE 6352253147 a: its slot is before the last
+ * stored one) goes in by turning every stored packet once through the deque, putting it in before the first
+ * later slot -- a rare event, at most about R / one packet entries, no allocation once the rotation buffer
+ * has grown. Returns false when the store is full. */
+static bool vban_src_store_push_locked(struct vban_src_s *s, uint64_t pos, uint32_t nu,
+				       const struct obs_source_audio *audio)
 {
 	if (s->store_count >= VBAN_SRC_STORE_MAX)
 		return false;
@@ -554,6 +599,7 @@ static bool vban_src_store_push_locked(struct vban_src_s *s, uint64_t pos, const
 	const size_t plane_bytes = audio->frames * get_audio_bytes_per_channel(audio->format) * (planar ? 1 : channels);
 	struct vban_src_slot slot = {
 		.pos = pos,
+		.nu = nu,
 		.frames = audio->frames,
 		.samples_per_sec = audio->samples_per_sec,
 		.format = (int)audio->format,
@@ -561,10 +607,133 @@ static bool vban_src_store_push_locked(struct vban_src_s *s, uint64_t pos, const
 		.planes = (uint32_t)(planar ? channels : 1),
 		.plane_bytes = (uint32_t)plane_bytes,
 	};
-	deque_push_back(&s->store, &slot, sizeof(slot));
-	for (uint32_t i = 0; i < slot.planes; i++)
-		deque_push_back(&s->store, audio->data[i], slot.plane_bytes);
+	for (size_t ch = 0; ch < channels && ch < MAX_AV_PLANES; ch++)
+		slot.first[ch] = vban_src_sample_get(audio, ch, 0);
+	const size_t n = s->store_count;
+	const bool append = n == 0 || pos > s->store_back_pos;
+	bool placed = false;
+	for (size_t k = 0; k < (append ? 0 : n); k++) {
+		struct vban_src_slot e;
+		deque_pop_front(&s->store, &e, sizeof(e));
+		const size_t bytes = (size_t)e.planes * e.plane_bytes;
+		da_resize(s->rot, bytes);
+		deque_pop_front(&s->store, s->rot.array, bytes);
+		if (!placed && e.pos > pos) {
+			deque_push_back(&s->store, &slot, sizeof(slot));
+			for (uint32_t i = 0; i < slot.planes; i++)
+				deque_push_back(&s->store, audio->data[i], slot.plane_bytes);
+			placed = true;
+		}
+		deque_push_back(&s->store, &e, sizeof(e));
+		deque_push_back(&s->store, s->rot.array, bytes);
+	}
+	if (append || !placed) {
+		deque_push_back(&s->store, &slot, sizeof(slot));
+		for (uint32_t i = 0; i < slot.planes; i++)
+			deque_push_back(&s->store, audio->data[i], slot.plane_bytes);
+		s->store_back_pos = pos;
+	}
 	s->store_count++;
+	return true;
+}
+
+/* camera-box issue 1439 (ROZHODNUTE 6352253147 a): the run of slots handed to libobs without their packet,
+ * counted at their deadline (the timeline's lost) and logged ONCE when the run ends -- at the next packet's
+ * slot, or when the stretch stops emitting -- never when the receive side first sees a gap, which a reorder
+ * may still fill. Worker thread only, after the lock. */
+static void vban_src_loss_run(struct vban_src_s *s, const struct vban_recv_due *d, uint32_t next_nu)
+{
+	if (d->kind == VBAN_RECV_DUE_SILENCE || d->kind == VBAN_RECV_DUE_CONCEAL) {
+		/* a run is concealed or silent as a whole: the timeline decides it at its first slot */
+		if (!s->run_slots)
+			s->run_concealed = d->kind == VBAN_RECV_DUE_CONCEAL;
+		s->run_slots++;
+		return;
+	}
+	if (!s->run_slots || (d->kind == VBAN_RECV_DUE_NONE && d->next_ns != 0))
+		return;
+	if (s->loss_done_n < VBAN_SRC_LOSS_LINES) {
+		const struct vban_src_loss_line l = {s->run_slots, next_nu, s->run_concealed,
+						     d->kind != VBAN_RECV_DUE_PACKET};
+		s->loss_done[s->loss_done_n++] = l;
+	} else {
+		s->loss_done_over++;
+	}
+	s->run_slots = 0;
+}
+
+/* camera-box issue 1439 (review of ROZHODNUTE 6352253147): the runs that ended at this look, written when the
+ * worker has nothing more due -- the packet that ends a run is decided about one slot + the margin before its
+ * stamp, and a log write can stall (the OBS log's lock, a flush). Worker thread only, after the lock. */
+static void vban_src_loss_flush(struct vban_src_s *s)
+{
+	for (size_t i = 0; i < s->loss_done_n; i++) {
+		const struct vban_src_loss_line *l = &s->loss_done[i];
+		const char *what = l->concealed ? "concealed: the previous packet repeated, crossfaded"
+						: "silence for those slots";
+		if (l->stretch_end)
+			blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) before the stretch ended -- %s",
+			     obs_source_get_name(s->context), l->slots, what);
+		else
+			blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) before frame %u -- %s",
+			     obs_source_get_name(s->context), l->slots, l->nu, what);
+	}
+	if (s->loss_done_over)
+		blog(LOG_WARNING, "source '%s': %" PRIu64 " more run(s) of missing packets ended at one look, not logged",
+		     obs_source_get_name(s->context), s->loss_done_over);
+	s->loss_done_n = 0;
+	s->loss_done_over = 0;
+}
+
+/* camera-box issue 1439 (ROZHODNUTE 6352253147 b): the packet AUDIO (HEAD's) just handed to libobs is kept as
+ * the previous packet a concealment repeats -- the output buffer and the kept one swap, no copy -- and its
+ * last frame as where the next concealment fades in from. Worker thread only. */
+static void vban_src_keep_prev(struct vban_src_s *s, const struct vban_src_slot *head,
+			       const struct obs_source_audio *audio)
+{
+	for (size_t ch = 0; ch < (size_t)audio->speakers && ch < MAX_AV_PLANES; ch++)
+		s->tail[ch] = vban_src_sample_get(audio, ch, audio->frames - 1);
+	const struct darray kept = s->prev.da;
+	s->prev.da = s->out.da;
+	s->out.da = kept;
+	s->prev_slot = *head;
+	s->prev_valid = true;
+}
+
+/* camera-box issue 1439 (ROZHODNUTE 6352253147 b): a CONCEAL slot -- the previous packet's samples, faded in
+ * from the last frame handed to libobs and (TOWARD_NEXT) out toward NEXT_FIRST, the first frame of the packet
+ * that ends the run (vban-conceal.h) -- in the previous packet's own format, at the slot's stamp. Returns false
+ * when there is no previous packet of the slot's length (the timeline conceals only right after one of this
+ * stretch's packets went out, so never): the caller sends silence. Worker thread only, after the lock. */
+static bool vban_src_output_conceal(struct vban_src_s *s, const struct vban_recv_due *d, const double *next_first)
+{
+	const struct vban_src_slot *p = &s->prev_slot;
+	if (!s->prev_valid || (uint64_t)p->frames != d->frames)
+		return false;
+	struct obs_source_audio prev = {
+		.frames = p->frames,
+		.speakers = (enum speaker_layout)p->speakers,
+		.format = (enum audio_format)p->format,
+		.samples_per_sec = p->samples_per_sec,
+		.timestamp = d->stamp_ns,
+	};
+	struct obs_source_audio audio = prev;
+	da_resize(s->conceal, (size_t)p->planes * p->plane_bytes);
+	for (uint32_t k = 0; k < p->planes && k < MAX_AV_PLANES; k++) {
+		prev.data[k] = s->prev.array + (size_t)k * p->plane_bytes;
+		audio.data[k] = s->conceal.array + (size_t)k * p->plane_bytes;
+	}
+	const uint32_t fade = vban_conceal_fade_frames(p->frames, p->samples_per_sec);
+	const size_t channels = (size_t)p->speakers;
+	for (size_t ch = 0; ch < channels && ch < MAX_AV_PLANES; ch++) {
+		for (uint32_t i = 0; i < p->frames; i++) {
+			const double v = vban_conceal_sample(vban_src_sample_get(&prev, ch, i), s->tail[ch],
+							     next_first[ch], d->toward_next != 0, i, p->frames, fade);
+			vban_src_sample_put(prev.format, channels, s->conceal.array, p->plane_bytes, ch, i, v);
+		}
+		s->tail[ch] = vban_src_sample_get(&audio, ch, p->frames - 1);
+	}
+	obs_source_output_audio(s->context, &audio);
 	return true;
 }
 
@@ -599,7 +768,8 @@ static uint64_t vban_src_worker_step(struct vban_src_s *s, uint64_t now)
 			deque_pop_front(&s->store, s->out.array, bytes);
 			s->store_count--;
 		}
-		if ((d.kind == VBAN_RECV_DUE_PACKET || d.kind == VBAN_RECV_DUE_SILENCE) &&
+		if ((d.kind == VBAN_RECV_DUE_PACKET || d.kind == VBAN_RECV_DUE_SILENCE ||
+		     d.kind == VBAN_RECV_DUE_CONCEAL) &&
 		    (!s->emit_late_seen || d.late_ns > s->emit_late_max_ns)) {
 			s->emit_late_max_ns = d.late_ns;
 			s->emit_late_seen = true;
@@ -610,8 +780,12 @@ static uint64_t vban_src_worker_step(struct vban_src_s *s, uint64_t now)
 		s->worker_idle = d.kind == VBAN_RECV_DUE_NONE && d.next_ns == 0;
 		pthread_mutex_unlock(&s->mutex);
 
-		if (d.kind == VBAN_RECV_DUE_NONE)
+		vban_src_loss_run(s, &d, head.nu);
+		if (d.kind == VBAN_RECV_DUE_NONE) {
+			/* nothing more is due at this look: only now the loss lines (never ahead of a slot) */
+			vban_src_loss_flush(s);
 			return d.next_ns;
+		}
 		if (d.kind == VBAN_RECV_DUE_PACKET) {
 			struct obs_source_audio audio = {
 				.frames = head.frames,
@@ -623,8 +797,12 @@ static uint64_t vban_src_worker_step(struct vban_src_s *s, uint64_t now)
 			for (uint32_t i = 0; i < head.planes && i < MAX_AV_PLANES; i++)
 				audio.data[i] = s->out.array + (size_t)i * head.plane_bytes;
 			obs_source_output_audio(s->context, &audio);
-		} else {
-			/* the lead-in, or a slot whose packet is missing: silence of exactly that length */
+			vban_src_keep_prev(s, &head, &audio);
+		} else if (d.kind != VBAN_RECV_DUE_CONCEAL || !vban_src_output_conceal(s, &d, head.first)) {
+			/* the lead-in, or a slot whose packet is missing and not concealed (a run of more than
+			 * VBAN_RECV_CONCEAL_MAX_SLOTS, or nothing stored behind it at its deadline): silence of
+			 * exactly that length. A concealment fades toward the store's head, the packet that ends
+			 * its run (ROZHODNUTE 6352253147 b). */
 			vban_src_output_silence(s, format, speakers, rate, d.frames, d.stamp_ns);
 		}
 	}
@@ -752,7 +930,6 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 	if (os_atomic_exchange_bool(&s->timeline_reset, false))
 		vban_src_reset_locked(s);
 	const bool emitted_before = s->timeline.emitted;
-	const uint64_t next_before = s->timeline.next_pos;
 	const uint32_t frames_before = s->timeline.frames;
 	const uint32_t rate_before = s->timeline.rate;
 	const uint32_t channels_before = s->timeline.channels;
@@ -767,8 +944,9 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 		s->out_speakers = audio.speakers;
 		s->out_rate = audio.samples_per_sec;
 	}
-	if (d.event == VBAN_RECV_PACKET) {
-		if (vban_src_store_push_locked(s, d.pos, &audio)) {
+	/* an in-time packet, or a reordered one whose slot is still ahead (ROZHODNUTE 6352253147 a) */
+	if (d.event == VBAN_RECV_PACKET || d.event == VBAN_RECV_REORDER) {
+		if (vban_src_store_push_locked(s, d.pos, header->nuFrame, &audio)) {
 			wake = s->worker_idle;
 			s->store_full = false;
 		} else {
@@ -793,17 +971,12 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 		     "emitting, the packet is dropped",
 		     obs_source_get_name(s->context), header->nuFrame, VBAN_SRC_STORE_MAX);
 	if (d.event != VBAN_RECV_STALE) {
-		const uint64_t lost_slots = (d.event == VBAN_RECV_PACKET || d.event == VBAN_RECV_LATE) &&
-						    d.pos > next_before && audio.frames
-					    ? (d.pos - next_before) / audio.frames
-					    : 0;
 		const struct vban_src_arrival a = {
 			.nu_frame = header->nuFrame,
 			.frames = audio.frames,
 			.now = now,
 			.first_output = first_output,
 			.emitted_before = emitted_before,
-			.lost_slots = lost_slots,
 			.frames_before = frames_before,
 			.rate_before = rate_before,
 			.channels_before = channels_before,

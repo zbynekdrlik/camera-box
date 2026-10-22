@@ -51,10 +51,21 @@
 //!   [`PHASE_BAND_DIV`] off `fit + R` (a real sender-clock event, never the arrival jitter), until
 //!   they are back inside that dead band. The line is rebased on every change, so the stamps never
 //!   jump. The genlock ASRC (`basis=stamp`) then resamples the sender's rate to the mix clock.
-//! * **Loss.** A slot whose packet is not there at its deadline is silence for exactly that slot,
-//!   stamped on the same line.
-//! * **Stale.** A duplicate, or a `nuFrame` at most [`STALE_PACKETS`] behind the last one (a
-//!   network reorder), is dropped and counted.
+//! * **Loss.** A slot whose packet is not there at its deadline is counted lost and goes out as
+//!   exactly one slot, stamped on the same line: CONCEALED ([`Due::Conceal`], ROZHODNUTÉ 6352253147
+//!   (b), the limit 3 since 23.10.2026) when the slot before it went out with audio (its packet, or
+//!   a concealment of this same run) and the next stored packet is at most [`CONCEAL_MAX_SLOTS`] −
+//!   (the run so far) slots on -- the previous packet's samples, crossfaded
+//!   ([`crate::vban_conceal`]) -- else silence. Decided at the slot's deadline from what is stored
+//!   then, never waiting for a later packet; a run that starts as silence stays silence.
+//! * **Reorder** (ROZHODNUTÉ 6352253147 (a)). A packet up to 63 indexes behind the last one (a
+//!   network reorder) whose index has not come yet and whose slot the worker has not handed out, in
+//!   an emitting stretch that has not starved, is stored for that slot and played in it
+//!   ([`Event::Reorder`], counted). It never moves the line, the fit, `last_nu`, `next_pos` or
+//!   `last_intime_ns`: its arrival is out of order, so it is never folded.
+//! * **Stale.** A duplicate (an index that came), a packet behind the last one whose slot already
+//!   went out, one exactly [`STALE_PACKETS`] behind, one in the hold or in a starved stretch is
+//!   dropped and counted.
 //! * **Late = lost** (ROZHODNUTÉ 6345255813 item 2; the round-3 late shift is withdrawn). A fixed
 //!   latency is a fixed jitter buffer: a packet whose slot was already handed to libobs (as
 //!   silence) is [`Event::Late`] -- dropped and counted; before a stretch's first output, a packet
@@ -127,6 +138,10 @@ pub const DEADLINE_MARGIN_MS: u64 = 2;
 /// absolute sleep on its own clock, review round 5): a packet stored in time goes to libobs at the
 /// worker's next wake, never held to its deadline, so only a lost slot's silence waits for that.
 pub const POLL_MS: u64 = 5;
+/// ROZHODNUTÉ 6352253147 (b), the limit raised to 3 on 23.10.2026: a run of at most this many
+/// missing slots between two received packets is concealed (the previous packet's samples,
+/// crossfaded), a longer one is silence.
+pub const CONCEAL_MAX_SLOTS: u64 = 3;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 const NS_PER_MS: u64 = 1_000_000;
@@ -150,6 +165,9 @@ pub enum Event {
     /// already handed to libobs (as silence), or -- before the stretch's first output -- its
     /// deadline had passed. Dropped and counted.
     Late = 5,
+    /// ROZHODNUTÉ 6352253147 (a): a packet behind the last one whose slot is still to go out
+    /// (a network reorder): stored for its slot and played in it, counted `reordered`.
+    Reorder = 6,
 }
 
 /// Why a timeline restarted (the C `enum vban_recv_reason`).
@@ -250,6 +268,10 @@ pub enum Due {
     Packet = 2,
     /// The slot's packet is missing: silence of exactly one slot at that stamp.
     Silence = 3,
+    /// ROZHODNUTÉ 6352253147 (b): the slot's packet is missing in a short run between two received
+    /// packets: one slot of the previous packet's samples, crossfaded, at that stamp
+    /// ([`DueDecision::toward_next`]: the next slot is the store's head).
+    Conceal = 4,
 }
 
 /// One playout decision (the C `struct vban_recv_due`).
@@ -268,6 +290,8 @@ pub struct DueDecision {
     pub late_ns: i64,
     /// [`Due::None`]: the next deadline, 0 = none (no stretch is emitting, or it starved).
     pub next_ns: u64,
+    /// [`Due::Conceal`]: the next slot is the store's head packet -- fade toward its first frame.
+    pub toward_next: bool,
 }
 
 /// The receive timeline of one source (the C `struct vban_recv_timeline`).
@@ -332,6 +356,18 @@ pub struct Timeline {
     pub re_anchors: u64,
     /// Duplicate / reordered packets dropped (their slot had passed).
     pub stale: u64,
+    /// ROZHODNUTÉ 6352253147 (a): bit j = the packet j indexes behind `last_nu` came (in order or
+    /// reordered).
+    pub recv_mask: u64,
+    /// Reordered packets stored for their slot (played in it).
+    pub reordered: u64,
+    /// ROZHODNUTÉ 6352253147 (b): the slot before `emit_pos` went out with audio (its packet or a
+    /// concealment).
+    pub prev_audio: bool,
+    /// The concealed slots right before `emit_pos`.
+    pub conceal_run: u32,
+    /// Missing slots handed out concealed (counted in `lost` too).
+    pub concealed: u64,
 }
 
 impl Default for Timeline {
@@ -442,6 +478,11 @@ impl Timeline {
             late: 0,
             re_anchors: 0,
             stale: 0,
+            recv_mask: 0,
+            reordered: 0,
+            prev_audio: false,
+            conceal_run: 0,
+            concealed: 0,
         }
     }
 
@@ -555,7 +596,10 @@ impl Timeline {
         self.emitted = false;
         self.emit_pos = 0;
         self.lead_in_pending = false;
+        self.prev_audio = false;
+        self.conceal_run = 0;
         self.last_k = i64::from(frames / rate);
+        self.recv_mask = 1;
         self.fold(self.last_k, u64::from(frames), 0);
     }
 
@@ -644,6 +688,36 @@ impl Timeline {
         true
     }
 
+    /// ROZHODNUTÉ 6352253147 (a), `vban_recv_reorder`: a packet `back` (1..63) indexes behind the
+    /// last one -- a network reorder -- whose index has not come yet, whose slot the worker has not
+    /// handed out, in an emitting stretch that has not starved (no packet in time for
+    /// [`PERSIST_S`]): stored for its slot ([`Event::Reorder`], counted). It never moves the line,
+    /// the fit, `last_nu`, `next_pos` or `last_intime_ns`: its arrival is out of order (a fold would
+    /// also wrap the bucket's unsigned offsets). `None` for everything that stays stale.
+    fn reorder(&mut self, now_ns: u64, back: u32) -> Option<Decision> {
+        if back == 0 || back >= 64 || (self.recv_mask >> back) & 1 == 1 || !self.emitted {
+            return None;
+        }
+        if now_ns as i64 - self.last_intime_ns as i64 > (PERSIST_S * NS_PER_SEC) as i64 {
+            return None;
+        }
+        let back_samples = u64::from(back + 1) * u64::from(self.frames);
+        if back_samples > self.next_pos || self.next_pos - back_samples < self.emit_pos {
+            return None;
+        }
+        let pos = self.next_pos - back_samples;
+        self.recv_mask |= 1 << back;
+        self.reordered += 1;
+        let stamp_ns = self.stamp_at(pos);
+        Some(Decision {
+            event: Event::Reorder,
+            pos,
+            stamp_ns,
+            lateness_ns: now_ns as i64 - stamp_ns as i64,
+            ..Decision::default()
+        })
+    }
+
     /// The decision for a packet arriving at `now_ns` (`vban_recv_packet`).
     pub fn packet(
         &mut self,
@@ -675,6 +749,11 @@ impl Timeline {
             let delta = nu.wrapping_sub(self.last_nu);
             if delta == 0 || delta >= 0x8000_0000 {
                 if self.last_nu.wrapping_sub(nu) <= STALE_PACKETS {
+                    // ROZHODNUTÉ 6352253147 (a): a reordered packet whose slot is still ahead
+                    // plays in it
+                    if let Some(r) = self.reorder(now_ns, self.last_nu.wrapping_sub(nu)) {
+                        return r;
+                    }
                     self.stale += 1;
                     d.event = Event::Stale;
                     return d;
@@ -770,6 +849,13 @@ impl Timeline {
             if k > self.last_k {
                 self.last_k = k;
             }
+            // the indexes that came: this one, and none of the ones it skipped
+            let step = nu.wrapping_sub(self.last_nu);
+            self.recv_mask = if step >= 64 {
+                1
+            } else {
+                (self.recv_mask << step) | 1
+            };
             self.last_nu = nu;
             self.next_pos = end;
             return d;
@@ -796,8 +882,11 @@ impl Timeline {
     /// * then the slots in order. The deadline is the DECISION point, never the handover time
     ///   (review round 5): a slot whose packet is the head goes out now, however early (its
     ///   `late_ns` negative); while it is missing the worker looks again at `next_ns` = the
-    ///   earlier of its deadline and `now_ns` + [`POLL_MS`]; at its deadline it is silence of
-    ///   exactly one slot (counted lost);
+    ///   earlier of its deadline and `now_ns` + [`POLL_MS`]; at its deadline it is exactly one
+    ///   slot (counted lost):
+    ///   [`Due::Conceal`] when the slot before went out with audio and the head (the next stored
+    ///   packet: everything stored is at or after `emit_pos`) is at most [`CONCEAL_MAX_SLOTS`] − the
+    ///   run so far slots on, else [`Due::Silence`] (ROZHODNUTÉ 6352253147 (b));
     /// * a slot handed out after its own stamp is counted `missed` (the worker woke later than the
     ///   margin: the mix may already have taken that window);
     /// * a slot whose deadline is more than [`PERSIST_S`] after the last in-time arrival is never
@@ -838,10 +927,32 @@ impl Timeline {
         d.late_ns = now_ns as i64 - deadline as i64;
         if stored {
             d.kind = Due::Packet;
+            self.prev_audio = true;
+            self.conceal_run = 0;
         } else {
-            d.kind = Due::Silence;
+            // ROZHODNUTÉ 6352253147 (b): decided now, from what is stored now -- the store's head is
+            // the next stored slot, `next` slots on (0 = nothing stored)
+            let next = match head_pos {
+                Some(h) if h > self.emit_pos && (h - self.emit_pos).is_multiple_of(frames) => {
+                    (h - self.emit_pos) / frames
+                }
+                _ => 0,
+            };
             self.lost += 1;
-            self.silence_samples += frames;
+            if self.prev_audio
+                && next != 0
+                && u64::from(self.conceal_run) + next <= CONCEAL_MAX_SLOTS
+            {
+                d.kind = Due::Conceal;
+                d.toward_next = next == 1;
+                self.conceal_run += 1;
+                self.concealed += 1;
+            } else {
+                d.kind = Due::Silence;
+                self.prev_audio = false;
+                self.conceal_run = 0;
+                self.silence_samples += frames;
+            }
         }
         if now_ns > d.stamp_ns {
             self.missed += 1;
@@ -866,3 +977,11 @@ mod late_tests;
 #[cfg(test)]
 #[path = "vban_receive_timeline_worker_model.rs"]
 mod worker_model;
+
+#[cfg(test)]
+#[path = "vban_receive_timeline_reorder_tests.rs"]
+mod reorder_tests;
+
+#[cfg(test)]
+#[path = "vban_receive_timeline_conceal_tests.rs"]
+mod conceal_tests;

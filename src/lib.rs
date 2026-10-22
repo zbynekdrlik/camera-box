@@ -537,6 +537,14 @@ pub mod vban_pacing;
 // `tests/vban_receive_timeline_parity_1439.rs`.
 pub mod vban_receive_timeline;
 
+// Issue 1439 (ROZHODNUTÉ 6352253147 item (b)) — the concealment of a short run of lost VBAN packets
+// in the obs-vban receive source: the previous packet's samples played again in the missing slot,
+// with raised-cosine crossfades in from the last sample handed out and out toward the packet that
+// ends the run (the timeline decides WHICH slot is concealed). Crate-root + std-only (Tier-0
+// verifiable); the C twin `vendor/obs-vban/src/vban-conceal.h` is held identical by
+// `tests/vban_conceal_parity_1439.rs`.
+pub mod vban_conceal;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the

@@ -50,6 +50,9 @@ static long long g_buffer = 40;
 /* added to every 24-bit sample after the 16-bit value is scaled up (`low24=N`): the decoder must keep
  * the low byte */
 static int g_low24 = 0;
+/* the plugin's log lines so far (each `out` line carries the count: the tests order a log line against an
+ * output, review of ROZHODNUTE 6352253147); both the receive side and the worker log, so it is atomic */
+static unsigned long g_blogs;
 
 uint64_t os_gettime_ns(void)
 {
@@ -156,6 +159,7 @@ void blog(int level, const char *format, ...)
 {
 	va_list args;
 	va_start(args, format);
+	__atomic_fetch_add(&g_blogs, 1UL, __ATOMIC_SEQ_CST);
 	fprintf(stderr, "blog %d: ", level);
 	vfprintf(stderr, format, args);
 	fputc('\n', stderr);
@@ -256,6 +260,27 @@ const char *obs_source_get_name(const obs_source_t *source)
 	return "Zvuk z mixu";
 }
 
+/* Channel 0's sample at FRAME on the 16-bit scale (ROZHODNUTE 6352253147 b: the tests read a concealed slot's
+ * middle and last frame), truncated like `first`. */
+static long sample16(const struct obs_source_audio *audio, uint32_t frame)
+{
+	const size_t i = (size_t)frame * (size_t)audio->speakers;
+	switch (audio->format) {
+	case AUDIO_FORMAT_16BIT:
+		return ((const int16_t *)audio->data[0])[i];
+	case AUDIO_FORMAT_U8BIT:
+		return (long)((const uint8_t *)audio->data[0])[i] - 128;
+	case AUDIO_FORMAT_32BIT:
+		return (long)(((const int32_t *)audio->data[0])[i] / 65536);
+	case AUDIO_FORMAT_FLOAT_PLANAR:
+		return (long)(((const float *)audio->data[0])[frame] * 32768.0f);
+	case AUDIO_FORMAT_FLOAT:
+		return (long)(((const float *)audio->data[0])[i] * 32768.0f);
+	default:
+		return 0;
+	}
+}
+
 void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio *audio)
 {
 	(void)source;
@@ -303,9 +328,10 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 			       ? (long)(((const float *)audio->data[0])[0] * 8388608.0f)
 			       : 0;
 	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d first24=%ld"
-	       " at=%" PRIu64 "\n",
+	       " at=%" PRIu64 " mid=%ld last=%ld logs=%lu\n",
 	       audio->timestamp, audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first,
-	       (int)audio->format, first24, os_gettime_ns());
+	       (int)audio->format, first24, os_gettime_ns(), sample16(audio, audio->frames / 2),
+	       sample16(audio, audio->frames - 1), __atomic_load_n(&g_blogs, __ATOMIC_SEQ_CST));
 }
 
 static int g_udp_dummy;

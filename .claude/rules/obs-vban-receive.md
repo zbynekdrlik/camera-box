@@ -8,6 +8,16 @@ paths:
   - "src/vban_receive_timeline_late_tests.rs"
   - "src/vban_receive_timeline_worker_model.rs"
   - "src/vban_receive_timeline_bench_wake.rs"
+  - "src/vban_receive_timeline_bench_reorder.rs"
+  - "src/vban_receive_timeline_reorder_tests.rs"
+  - "src/vban_receive_timeline_conceal_tests.rs"
+  - "src/vban_conceal.rs"
+  - "src/vban_conceal_tests.rs"
+  - "vendor/obs-vban/src/vban-conceal.h"
+  - "vendor/obs-vban/src/vban-sample-io.h"
+  - "tests/vban_conceal_parity_1439.rs"
+  - "tests/vban_source_reorder_1439.rs"
+  - "tests/vban_source_conceal_1439.rs"
   - "tests/vban_receive_timeline_parity_1439.rs"
   - "tests/support/vban_receive_scripts_1439.rs"
   - "tests/vban_source_loss_1439.rs"
@@ -114,6 +124,10 @@ lost packets landed on audio already delivered).
   - One `pthread_mutex` guards the timeline, the store (a `util/deque.h` of `struct vban_src_slot`
     headers + planes, at most 4096 packets: a packet that does not fit is dropped and logged once,
     `obs-vban receive store:`), the stream's sample format (the silence's) and the idle flag.
+  - The store is in SLOT order (ROZHODNUTÉ 6352253147 (a)): an in-order packet is appended; a
+    reordered one goes in by turning every stored packet once through the deque (`s->rot`, rare, at
+    most ~R / one packet entries, no allocation once grown), so the worker's head is always the next
+    stored slot and `vban_recv_due` keeps its `(has_head, head_pos)` API.
   - The lock is held only for a decision and a copy: the worker calls `obs_source_output_audio` after
     it, and the receive side logs from a snapshot after it.
   - The worker sleeps to its next look with `os_sleepto_ns` (absolute on the OBS clock: the earlier of
@@ -141,12 +155,52 @@ lost packets landed on audio already delivered).
   ASRC (`basis=stamp`) resamples the sender's rate to the mix (pinned: the lifted
   `genlock_audio_asrc_placement` returns STAMP for the source's direct stamps; nothing in obs-vban
   touches asrc / genlock_fifo / monitoring).
-- **Loss:** a slot whose packet is not stored at its deadline = one slot of silence at that deadline,
-  stamped on the same line (once the stretch emits).
-- **Stale (review round 1):** a duplicate, or an index at most `STALE_PACKETS` (64) behind the last
-  one (a UDP reorder), is dropped and counted (`stale=` on the status line), never output: its slot
-  goes out as silence (even when the reordered packet came before its deadline: a follow-up could
-  store it). Before, one swapped pair restarted the timeline and read `lost=2`.
+- **Loss:** a slot whose packet is not stored at its deadline = one slot at that deadline, stamped on
+  the same line (once the stretch emits), counted `lost`: CONCEALED or silence (below).
+- **Reorder (ROZHODNUTÉ 6352253147 item (a), 23.10.2026).** Live on stream-snv (R 80) `lost=107
+  stale=40` in 55 min: a router reorder delivered packet n right behind n + 1, the timeline dropped
+  n as stale while its slot was ~80 ms ahead, and the slot went out as silence.
+  - The timeline keeps `recv_mask`: bit j = the packet j indexes behind `last_nu` came (the
+    anchor sets bit 0, every in-order packet shifts it by its index step and sets bit 0).
+  - A packet 1..63 behind `last_nu` whose bit is clear, whose slot `next_pos - (back + 1) x frames`
+    is still `>= emit_pos` (the worker has not handed it out), in an emitting stretch that has not
+    starved (no packet in time for `PERSIST_S`), is `VBAN_RECV_REORDER` / `Event::Reorder`: stored
+    for that slot and played in it, counted `reordered`.
+  - A reorder never moves the line, the fit, `last_nu`, `next_pos` or `last_intime_ns`: it is never
+    folded (its arrival is out of order; a fold before a bucket's first packet would also wrap the
+    bucket's unsigned offsets). Pinned: a stream with reorders leaves the timeline bit-identical to
+    the same stream without them.
+  - STALE stays for a duplicate (its bit is set), a packet whose slot already went out, one exactly
+    `STALE_PACKETS` (64) behind (beyond the mask), one in the hold (nothing emitted yet) and one in a
+    starved stretch; never a re-anchor. Before round 1 one swapped pair restarted the timeline.
+  - The bench (`..._bench_reorder.rs`): adjacent packets swapped every 97 on the jittered sender at
+    -6.5 ppm. R 80: every overtaken packet played, 0 lost, 0 stale, the latency held. R 40: 2 of 575
+    reorders stale -- the overtaken packet of the one that ENDS a 30 ms gap is past its own deadline
+    when that one arrives (R 40 leaves ~2.7 ms there) -- each one lost slot, never a re-anchor.
+- **Concealment (ROZHODNUTÉ 6352253147 item (b); the run limit raised from 2 to 3 on 23.10.2026 from a
+  5-min wire capture on stream-snv: the network loses packets in bursts of 1-3).**
+  - The decision (`vban_recv_due` / `Timeline::due`): a slot missing at its deadline is `CONCEAL`
+    when the slot before it went out with audio (`prev_audio`: its packet, or a concealment of this
+    same run) and the store's head -- the next stored packet; the store is in slot order and holds
+    only slots at or after `emit_pos` -- is `next` slots on with `conceal_run + next <=
+    VBAN_RECV_CONCEAL_MAX_SLOTS` (3); `toward_next` when it is the very next slot. Else `SILENCE`.
+  - Decided from what is stored AT the deadline, never waiting for a later packet. With R 80 the next
+    packet is normally stored ~75 ms ahead, so both fades are known. A run that starts as silence stays
+    silence (`prev_audio` false), and the limit holds whatever head the caller hands in (the run so far
+    is counted, not only the distance).
+  - The math (`vban-conceal.h` <-> `src/vban_conceal.rs`, C-vs-Rust bit for bit in
+    `tests/vban_conceal_parity_1439.rs`): the previous packet's samples, faded IN over 1 ms (at most a
+    quarter slot, at least one frame) from the last sample handed to libobs on that channel (held), and
+    -- `toward_next` -- OUT over the last 1 ms toward the next packet's first sample. Raised cosine
+    `0.5 - 0.5 cos(pi (i + 1) / (n + 1))`, no libm (a Taylor cos on [0, pi/4] and sin on [pi/4, pi/2],
+    8 terms each, 1.2e-15 off). A concealed run never steps more than the signal's own step plus the
+    fade slope `pi / (2 (n + 1))` over the gap it bridges (pinned on sines of 100 Hz-6 kHz).
+  - Timing is untouched: a concealed slot has the slot's frames and stamp; only its CONTENT differs.
+  - The source: each stored packet caches its first frame per channel (`first[]` in the slot header);
+    the worker keeps the last packet it handed out (`s->out` and `s->prev` swap, no copy) and its last
+    frame per channel (`tail[]`), and builds the slot in that packet's OWN sample format through
+    `vban-sample-io.h` (the five formats the callback hands over, rounded half away from zero and
+    clamped) -- libobs resets the resampler and the genlock ASRC at every format change.
 - **Late = lost (round 4; the round-3 late shift is withdrawn as a runtime latency change):** a fixed
   latency is a fixed jitter buffer. A packet whose slot already went out (as silence, at its deadline)
   is a `LATE` event: dropped and counted in `late`; before the stretch's first output, a packet past
@@ -171,11 +225,26 @@ lost packets landed on audio already delivered).
   delay level step of ~10-30 ms at R 40) stop folding, so the fit holds its last rate and level
   instead of following; nothing walks and nothing re-anchors. The status line then says
   `fit=frozen` (nothing folded for `FROZEN_S` = 3 s while the fit is valid) and verify item 9 NOTEs it.
-- **`lost` counts the slots handed to libobs as silence** (round 5): a packet missing at its deadline,
-  whether it never came or came `late` afterwards; `silence_ms` is that silence. A slot lost inside
-  the hold, or before the stretch's first output, is never sent and never counted, and no `missing N
-  packet(s)` line is logged for it. A late packet before the first output is counted in `late` (its
-  `late:` line says nothing was filled).
+- **`lost` counts every slot whose packet was missing at its deadline** (round 5; ROZHODNUTÉ
+  6352253147): whether it never came or came `late` afterwards, concealed or silent. `concealed` counts
+  the concealed ones, `silence_ms` only the real silence. A slot lost inside the hold, or before the
+  stretch's first output, is never sent and never counted. A late packet before the first output is
+  counted in `late` (its `late:` line says nothing was filled).
+- **The loss line is logged by the playout worker when the run ends** (ROZHODNUTÉ 6352253147 (a)):
+  one `missing N packet(s) before frame F -- concealed: ...` / `-- silence for those slots` line per
+  run of slots that went out without their packet, at the slot of the packet that ends it (or `before
+  the stretch ended` when the stretch starves). Never at gap detection: a gap a reorder fills is no
+  loss. A run is concealed or silent as a whole (the timeline decides it at its first slot).
+  - The worker WRITES the lines only once `vban_recv_due` says nothing more is due at that look (up
+    to 4 runs per look, then a count): the packet that ends a run is decided about one slot + the
+    2 ms margin before its stamp, and a log write can stall (the OBS log's lock, a flush, journald).
+    `emit_missed` is computed before any write, so it could not show such a stall (the fresh-context
+    review of this change; pinned with the lift driver's `logs=` count on each `out` line).
+  - Known limits (review): a reorder dropped on a FULL store (4096 packets: only a worker stalled
+    for ~20 s) is still counted `reordered` -- its slot is counted `lost` at its deadline; and each
+    reorder turns the whole store through the deque under the lock -- ~16 entries at R 80, up to the
+    4096-packet cap with a stalled worker (a slot ring by position would make it O(1) if that ever
+    matters).
 - **Bench** (`src/vban_receive_timeline_bench.rs`): a two-clock sender at +-50 ppm, 5..7 ms bursts, gaps
   of 5..30 ms every ~400 ms, receive-thread wake jitter.
   - **What it runs:** the replay runs the source as shipped. The receive decision, then the playout
@@ -230,13 +299,17 @@ lost packets landed on audio already delivered).
 ```
 obs-vban receive anchored: source '<input>' frame=N rate=48000 ch=2 receive_buffer_ms=R -- holding its first second
 obs-vban receive emitting: source '<input>' frame=N margin_ms=X after the first second's hold -- every slot goes out by 2 ms before its stamp
-obs-vban receive: received=N lost=N late=N re_anchors=N stale=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X emit_missed=N receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
-obs-vban receive late: source '<input>' frame=N late_ms=X -- dropped, its slot is silence on the anchored line (late=N)
+obs-vban receive: received=N lost=N late=N re_anchors=N stale=N reordered=N concealed=N silence_ms=X max_late_ms=X sender_ppm=X phase_ms=X fit=locked|acquiring|frozen emit_late_ms=X emit_missed=N receive_buffer_ms=R rate=N ch=N port=P stream='S' source='<input>'
+obs-vban receive late: source '<input>' frame=N late_ms=X -- dropped, its slot went out without it, on the anchored line (late=N)
 obs-vban receive re-anchor: source '<input>' reason=starve|backward|jump|format|config|fit frame=N starve_ms=X re_anchors=N late=N -- holding its first second
 obs-vban receive re-anchor: ... reason=format ... -- holding its first second (frames 256 -> 128, rate 48000 -> 48000, ch 2 -> 2: a varying packet size is not supported; N more not logged in the last period)
 obs-vban receive buffer: source '<input>' receive_buffer_ms=R is not above one packet (X ms) + 10 ms: using X ms
 obs-vban receive worker: source '<input>' stopped (update|destroy)
 obs-vban receive store: source '<input>' frame=N -- full (4096 packets): the playout worker is not emitting, the packet is dropped
+source '<input>': missing N packet(s) before frame F -- concealed: the previous packet repeated, crossfaded
+source '<input>': missing N packet(s) before frame F -- silence for those slots
+source '<input>': missing N packet(s) before the stretch ended -- silence for those slots
+source '<input>': received N packets, lost N (N concealed), late N, reordered N, stale N, N re-anchor(s)
 ```
 
 `obs-vban receive: ` stays on exactly ONE log line (the wiring test pins it): every other line uses
@@ -244,7 +317,8 @@ another prefix (`anchored:`, `emitting:`, `late:`, `re-anchor:`, `buffer:`). `la
 per run of late packets (the counter counts each one); `reason=starve` on a re-anchor means no packet
 came in time for a second, and `starve_ms` says how long (0 for every other reason). `fit=frozen` on the
 status line: nothing folded for 3 s while the fit is valid. `max_late_ms` includes the dropped late
-packets. `emit_late_ms` (round 5) is the window's latest slot against its deadline (negative while
+packets and the reorders. `reordered` counts the reorders played in their slot, `concealed` the lost
+slots that went out concealed (a subset of `lost`; `silence_ms` is the silence only). `emit_late_ms` (round 5) is the window's latest slot against its deadline (negative while
 stored packets go out ahead of it; positive = a lost slot's silence late by the worker's wake jitter,
 which must stay under the 2 ms margin). `emit_missed` counts the slots handed after their own stamp
 since the source started (verify item 9 FAILs on it). A `format` re-anchor line is written at most
@@ -318,7 +392,9 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   (FAIL while a hub file or a running unit is left), item 34 NOTEs the absent hub drop-in, item 9 =
   `strih_program_vban_grade` (the kind, the bind, port + stream vs the facts, `received` advancing over
   12 s, R vs the fact as a NOTE, loss counters as a NOTE, `emit_missed` > 0 as a FAIL naming the
-  vban-src-out thread; a status line without the token, from an older build, is not graded on it);
+  vban-src-out thread; a status line without the token, from an older build, is not graded on it; the
+  counters note says how many of the lost slots were concealed and how many went out as silence, the
+  live row names `reordered=`; an older line without those tokens names nothing for them);
   the hub-only rows of item 9 (the program
   rx, the hub's HDMI leg, the MiniFuse talkback) run only in its hub branch.
 - **Windows (review round 1):** both Windows genlock builds compile the same `vban-source.c`, so a
@@ -352,6 +428,17 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   stamps, the status line's fields).
 - The plugin sources: `gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wformat=2 -Werror` with a generated
   `plugin-macros.generated.h` + a two-define `obsconfig.h` (the pacing rule's recipe).
+- ROZHODNUTÉ 6352253147: `rustc --test --edition 2021 src/vban_conceal.rs` (the math), the same with
+  `CARGO_MANIFEST_DIR` for `tests/vban_conceal_parity_1439.rs`, `tests/vban_source_reorder_1439.rs`
+  and `tests/vban_source_conceal_1439.rs` (the shipped source through the lift driver, whose `out`
+  line carries each output's `mid=` and `last=` sample and `logs=`, the plugin's log lines written
+  before it, atomic: both threads log). The real-thread driver with a reorder and
+  short losses in it runs clean under ThreadSanitizer.
+- The mutation pass of the reorder + concealment change (29 hand mutants on a scratch copy, the
+  decisions edited identically in C and Rust; the store's insert-at-front mutant came from the
+  review): 28 killed. The survivor -- not updating `tail[]` after a
+  concealed slot -- is equivalent for every packet of 2+ frames (such a slot ends on the repeat
+  itself unless it fades toward the packet that ends the run); kept for 1-frame packets.
 - `pytest tests/python/test_stream_role_vban_1439.py` (facts, seed, port, hub removal, item 9/16).
 
 ## Traps met building it

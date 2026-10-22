@@ -671,6 +671,85 @@ fn stall_script() -> Vec<Pkt> {
     b.pkts
 }
 
+/// ROZHODNUTÉ 6352253147 (a) + (b): reorders and short loss runs on a clean 48 kHz sender (R 40,
+/// index = packet), every event far from the others:
+/// - inside the hold 51 overtakes 50 (a reorder before the first output: stale);
+/// - 301 overtakes 300 by 0.1 ms (in time: stored and played in its slot), then a duplicate of 300;
+/// - 400 arrives 1 ms past its deadline, behind 401 .. 406 (its slot already went out: stale);
+/// - 1000 never comes in time, 1001 does, then 1.5 s of nothing (a pause: the index runs on); 1000
+///   shows up first (a starved stretch: stale), the next in-order packet re-anchors, its hold;
+/// - loss runs of one, two, three and four slots (1500; 1600-1601; 1700-1702; 1750-1753);
+/// - 1800 lost and 1801 .. 1806 held back to 0.1 ms past 1800's deadline (nothing stored at it);
+/// - 1900, 1901 lost and 1902 .. 1906 held back past 1900's deadline (a run that starts empty);
+/// - 2000, 2001 lost on the wire, 2001 then arrives right behind 2002 (a run a reorder fills in part).
+fn reorder_and_loss_script() -> Vec<Pkt> {
+    let mut b = Builder::new();
+    let pkt = |now: u64, k: u64| Pkt {
+        now,
+        nu: k as u32,
+        frames: 256,
+        rate: 48_000,
+        channels: 2,
+        reserve_ns: 40 * MS,
+        reset: false,
+        stall: false,
+    };
+    // the sender pauses 1.5 s after packet 1001: every later packet comes that much later
+    let at = |k: u64| {
+        2_000_000_000
+            + samples_to_ns((k + 1) * 256, 48_000)
+            + if k >= 1002 { 1_500 * MS } else { 0 }
+    };
+    let mut k = 0u64;
+    while k < 2_100 {
+        match k {
+            50 | 300 | 2000 => {
+                // the next packet overtakes this one (2000 itself is lost on the wire)
+                b.send(pkt(at(k + 1), k + 1));
+                let late = if k == 2000 { k + 1 } else { k };
+                if k == 2000 {
+                    b.send(pkt(at(k + 2), k + 2));
+                    b.send(pkt(at(k + 2) + 100_000, late));
+                    k += 3;
+                    continue;
+                }
+                b.send(pkt(at(k + 1) + 100_000, late));
+                if k == 300 {
+                    b.send(pkt(at(k + 1) + 200_000, k));
+                }
+                k += 2;
+            }
+            400 => {
+                let deadline = b.t.deadline_at(b.t.next_pos);
+                for j in 401..=406 {
+                    b.send(pkt(at(j), j));
+                }
+                b.send(pkt(deadline + MS, 400));
+                k = 407;
+            }
+            1000 => {
+                b.send(pkt(at(1001), 1001));
+                b.send(pkt(at(1001) + 1_500 * MS, 1000));
+                k = 1002;
+            }
+            1500 | 1600 | 1601 | 1700..=1702 | 1750..=1753 => k += 1,
+            1800 | 1900 => {
+                let deadline = b.t.deadline_at(b.t.next_pos);
+                let first = if k == 1800 { 1801 } else { 1902 };
+                for j in first..first + 5 {
+                    b.send(pkt(deadline + 100_000 + (j - first) * 1_000, j));
+                }
+                k = first + 5;
+            }
+            _ => {
+                b.send(pkt(at(k), k));
+                k += 1;
+            }
+        }
+    }
+    b.pkts
+}
+
 /// Every script the gate replays.
 pub(crate) fn scripts() -> Vec<Vec<Pkt>> {
     let mut v = vec![
@@ -691,6 +770,7 @@ pub(crate) fn scripts() -> Vec<Vec<Pkt>> {
         late_then_loss_script(),
         packet_size_script(),
         stall_script(),
+        reorder_and_loss_script(),
     ];
     let configs: [(f64, u32, u32, u32, u64, u64); 6] = [
         (50.0, 256, 48_000, 2, 40, 60),

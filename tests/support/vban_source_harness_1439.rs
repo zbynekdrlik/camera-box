@@ -36,6 +36,12 @@ pub(crate) struct Out {
     pub(crate) format: i32,
     /// When it went out (the driver's clock: round 5, the playout worker's deadline).
     pub(crate) at: u64,
+    /// Channel 0's middle and last frame on the 16-bit scale (ROZHODNUTÉ 6352253147 (b): what a
+    /// concealed slot carries between and at the end of its fades).
+    pub(crate) mid: i64,
+    pub(crate) last: i64,
+    /// The plugin's log lines written before it went out.
+    pub(crate) logs: u64,
 }
 
 static COMPILES: AtomicUsize = AtomicUsize::new(0);
@@ -83,6 +89,9 @@ pub(crate) fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, Stri
                 first: field("first=").parse().unwrap(),
                 format: field("fmt=").parse().unwrap(),
                 at: field("at=").parse().unwrap(),
+                mid: field("mid=").parse().unwrap(),
+                last: field("last=").parse().unwrap(),
+                logs: field("logs=").parse().unwrap(),
             }
         })
         .collect();

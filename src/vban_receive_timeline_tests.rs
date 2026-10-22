@@ -107,8 +107,11 @@ impl Rig {
         let d = self.t.packet(now, nu, frames, rate, channels, r);
         match d.event {
             Event::Anchor | Event::Reanchor => self.store.clear(),
-            Event::Packet => {
-                self.store.push_back(d.pos);
+            // the store stays in slot order: a reordered packet goes in before the later slots
+            // (ROZHODNUTÉ 6352253147 (a))
+            Event::Packet | Event::Reorder => {
+                let at = self.store.partition_point(|&p| p < d.pos);
+                self.store.insert(at, d.pos);
                 let mut sink = RigSink {
                     store: &mut self.store,
                     outs: &mut self.outs,
@@ -175,7 +178,8 @@ fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
         line(H + 1)
     );
     assert_eq!(r.of(Due::LeadIn).len(), 1, "{:?}", r.outs);
-    // H + 2 is lost, H + 3 comes: each slot goes out at its deadline, the slot before H + 1 never
+    // H + 2 is lost, H + 3 comes: each slot goes out at its deadline, the slot before H + 1 never;
+    // H + 2 between two received packets is concealed (ROZHODNUTÉ 6352253147 (b))
     r.packet(on_time(H + 3), (H + 3) as u32);
     r.run_until(r.t.deadline_at((H + 3) * 256), true);
     let slots: Vec<(u64, DueDecision)> = r
@@ -191,15 +195,15 @@ fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
             .collect::<Vec<_>>(),
         vec![
             (Due::Packet, (H + 1) * 256, 256),
-            (Due::Silence, (H + 2) * 256, 256),
+            (Due::Conceal, (H + 2) * 256, 256),
             (Due::Packet, (H + 3) * 256, 256),
         ],
         "{:?}",
         r.outs
     );
     // review round 5: a stored packet goes to libobs at the worker's next wake (the store woke the
-    // idle worker for H + 1), never held to its deadline; the missing slot's silence goes out
-    // exactly at its deadline, and H + 3, stored by then, right behind it at the same wake
+    // idle worker for H + 1), never held to its deadline; the missing slot goes out exactly at its
+    // deadline, and H + 3, stored by then, right behind it at the same wake
     let silence_at = r.t.deadline_at((H + 2) * 256);
     assert_eq!(
         slots.iter().map(|(at, d)| (*at, d.pos)).collect::<Vec<_>>(),
@@ -214,7 +218,7 @@ fn the_source_emits_nothing_until_the_first_second_after_an_anchor_is_over() {
         assert_eq!(d.deadline_ns + DEADLINE_MARGIN_MS * NS_PER_MS, d.stamp_ns);
         assert!(*at <= d.deadline_ns, "nothing after its deadline: {d:?}");
     }
-    assert_eq!((r.t.lost, r.t.silence_samples), (1, 256));
+    assert_eq!((r.t.lost, r.t.concealed, r.t.silence_samples), (1, 1, 0));
     // a full re-anchor (another channel count) holds again for its own first second
     let d = r.packet_as(on_time(H + 4), (H + 4) as u32, 256, RATE, 1, R40);
     assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Format));
@@ -450,23 +454,27 @@ fn contiguous_packets_get_contiguous_stamps() {
 /// slot, stamped on the same line; the packets around it go out as themselves.
 #[test]
 fn a_loss_is_silence_for_exactly_the_lost_slots() {
+    // four lost: longer than a concealed run (ROZHODNUTÉ 6352253147 (b), `CONCEAL_MAX_SLOTS`)
     let mut r = Rig::new();
     rig_through_the_hold(&mut r, 10);
     let first = on_time(0) - samples_to_ns(256, RATE) + R40;
     r.packet(on_time(H), 10 + H as u32);
-    let d = r.packet(on_time(H + 3), 13 + H as u32);
-    assert_eq!((d.event, d.pos), (Event::Packet, (H + 3) * 256));
-    assert_eq!(d.stamp_ns, first + samples_to_ns((H + 3) * 256, RATE));
-    r.run_until(r.t.deadline_at((H + 3) * 256), true);
+    let d = r.packet(on_time(H + 5), 15 + H as u32);
+    assert_eq!((d.event, d.pos), (Event::Packet, (H + 5) * 256));
+    assert_eq!(d.stamp_ns, first + samples_to_ns((H + 5) * 256, RATE));
+    r.run_until(r.t.deadline_at((H + 5) * 256), true);
     let silence = r.of(Due::Silence);
-    assert_eq!(silence.len(), 2, "{:?}", r.outs);
+    assert_eq!(silence.len(), 4, "{:?}", r.outs);
     for (j, (_, d)) in silence.iter().enumerate() {
         let pos = (H + 1 + j as u64) * 256;
         assert_eq!((d.pos, d.frames), (pos, 256), "{d:?}");
         assert_eq!(d.stamp_ns, first + samples_to_ns(pos, RATE));
     }
     assert_eq!(r.of(Due::Packet).len(), 2);
-    assert_eq!((r.t.lost, r.t.silence_samples, r.t.re_anchors), (2, 512, 0));
+    assert_eq!(
+        (r.t.lost, r.t.silence_samples, r.t.concealed, r.t.re_anchors),
+        (4, 1024, 0, 0)
+    );
 }
 
 /// An index far behind the last one (more than a reorder could be: 65 packets) is a sender
@@ -479,55 +487,6 @@ fn an_index_far_behind_re_anchors_as_backward() {
     assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Backward));
     assert_eq!(t.re_anchors, 1);
     assert_eq!(t.late, 0);
-}
-
-/// Review round 1: one reordered or duplicated packet (a UDP network effect) restarted the
-/// timeline and reported a loss that never happened. A packet behind the last one is dropped as
-/// STALE (never a re-anchor), and its slot goes out at its deadline as the silence it is.
-#[test]
-fn a_reordered_or_duplicated_packet_is_dropped_never_a_re_anchor() {
-    let mut r = Rig::new();
-    // the held first second, then packets 100 .. 111 (the index below names their offset)
-    rig_through_the_hold(&mut r, 100u32.wrapping_sub(H as u32));
-    for k in H..H + 12 {
-        r.packet(on_time(k), (100 + k - H) as u32);
-    }
-    let on_time = |k: u64| on_time(H + k);
-    // 112 overtaken by 113 on the way
-    let d = r.packet(on_time(13), 113);
-    assert_eq!(d.event, Event::Packet);
-    // then 112 arrives
-    let d = r.packet(on_time(13) + 100_000, 112);
-    assert_eq!(
-        (d.event, d.stamp_ns, d.pos),
-        (Event::Stale, 0, 0),
-        "a reordered packet must not restart the timeline, and is not stored"
-    );
-    // a network duplicate of 113, and one exactly STALE_PACKETS behind: still a reorder
-    assert_eq!(r.packet(on_time(13) + 200_000, 113).event, Event::Stale);
-    assert_eq!(
-        r.packet(on_time(13) + 300_000, 113 - STALE_PACKETS).event,
-        Event::Stale
-    );
-    assert_eq!(
-        r.t.stale, 3,
-        "the reordered 112, the duplicate 113, the one 64 behind"
-    );
-    // the stream continues on the same line
-    let d = r.packet(on_time(14), 114);
-    assert_eq!(d.event, Event::Packet);
-    assert_eq!(d.stamp_ns, on_time(14) - samples_to_ns(256, RATE) + R40);
-    r.run_until(r.t.deadline_at(d.pos), true);
-    assert_eq!(r.t.re_anchors, 0);
-    assert_eq!(
-        r.of(Due::Silence)
-            .iter()
-            .map(|(_, d)| d.pos)
-            .collect::<Vec<_>>(),
-        vec![(H + 12) * 256],
-        "only the slot of 112 is silent"
-    );
-    assert_eq!(r.t.lost, 1);
 }
 
 #[test]
