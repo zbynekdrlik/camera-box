@@ -215,8 +215,9 @@ fn steered_script(
 }
 
 /// Each re-anchoring event once, on a clean 48 kHz sender whose fit is already valid: a loss of
-/// exactly two seconds (silence), a packet on its stamp and one ns past it, a duplicate, a
-/// backwards index, a jump of two seconds and one packet, another R, another channel count, a reset.
+/// exactly two seconds (silence), a packet on its stamp and one ns past it (a late shift), two lost
+/// slots before a late packet, a duplicate, a backwards index, a jump of two seconds and one
+/// packet, another R, another channel count, a reset.
 fn boundary_script() -> Vec<Pkt> {
     let mut b = Builder::new();
     let mut k: u64 = 0;
@@ -278,6 +279,22 @@ fn boundary_script() -> Vec<Pkt> {
     let late = b.t.stamp_at(b.t.next_pos) + 1;
     b.send(Pkt {
         now: late,
+        nu,
+        frames: 256,
+        rate: 48_000,
+        channels,
+        reserve_ns: reserve,
+        reset: false,
+    });
+    k += 1;
+    nu = nu.wrapping_add(1);
+    clean(&mut b, &mut k, &mut nu, 375, channels, reserve, &mut reset);
+    // two slots lost, then a packet 100 ms late (the shift above already moved the line ~35 ms
+    // later): one more shift, the lost slots silence on the new line
+    k += 2;
+    nu = nu.wrapping_add(2);
+    b.send(Pkt {
+        now: 2_000_000_000 + samples_to_ns((k + 1) * 256, 48_000) + 100 * MS,
         nu,
         frames: 256,
         rate: 48_000,
@@ -484,7 +501,7 @@ fn bits(x: f64) -> u64 {
 fn line(t: &Timeline, d: Decision) -> String {
     let b = &t.buckets[(t.last_k.rem_euclid(FIT_WINDOW_S as i64)) as usize];
     format!(
-        "{} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} | {} {} {} {} {} {} {} {} | {}",
+        "{} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} | {} {} {} {} {} {} {} {} | {}",
         d.event as i32,
         d.reason as i32,
         d.silence_samples,
@@ -492,6 +509,7 @@ fn line(t: &Timeline, d: Decision) -> String {
         d.stamp_ns,
         d.lateness_ns,
         d.late_ns,
+        u8::from(d.shifted),
         u8::from(t.anchored),
         t.rate,
         t.channels,
@@ -517,6 +535,7 @@ fn line(t: &Timeline, d: Decision) -> String {
         t.late,
         t.re_anchors,
         t.stale,
+        t.shift_ns,
         b.k,
         b.n,
         b.x0,
@@ -600,8 +619,8 @@ static uint64_t bits(double x)
 static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d)
 {
 	const struct vban_recv_bucket *b = &t->buckets[(size_t)(((t->last_k % VBAN_RECV_FIT_WINDOW_S) + VBAN_RECV_FIT_WINDOW_S) % VBAN_RECV_FIT_WINDOW_S)];
-	printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " | ", d.event, d.reason, d.silence_samples,
-	       d.silence_pos, d.stamp_ns, d.lateness_ns, d.late_ns);
+	printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " %d | ", d.event, d.reason,
+	       d.silence_samples, d.silence_pos, d.stamp_ns, d.lateness_ns, d.late_ns, d.shifted ? 1 : 0);
 	printf("%d %" PRIu32 " %" PRIu32 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu32 " %" PRIu64 " %" PRIu64 " %" PRIu64
 	       " %" PRId64 " %" PRId64 " %" PRIu64 " %d %" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64
 	       " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | ",
@@ -609,7 +628,7 @@ static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d
 	       t->next_pos, t->base_stamp_ns, t->base_pos, t->step_ppb, t->last_k, t->last_fold_pos,
 	       t->fit_valid ? 1 : 0, t->fit_ppb, bits(t->fit_b), bits(t->fit_xbar), bits(t->fit_ybar), t->phase_ns,
 	       t->received, t->lost, t->silence_samples, t->late, t->re_anchors);
-	printf("%" PRIu64 " | ", t->stale);
+	printf("%" PRIu64 " %" PRId64 " | ", t->stale, t->shift_ns);
 	printf("%" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | %" PRIu64 "\n",
 	       b->k, b->n, b->x0, b->y0, bits(b->su), bits(b->sv), bits(b->suu), bits(b->suv),
 	       vban_recv_stamp_at(t, t->next_pos + 1000));
@@ -760,8 +779,10 @@ fn the_scripts_reach_every_boundary_1439() {
         "earlier arrivals past the first second (the line kept)",
         "phase term acting outside the dead band",
         "rate-only step changes inside the dead band",
+        "late shifts with a valid fit (the fit kept)",
+        "late shifts with lost slots before them",
     ];
-    let mut hits = [0usize; 24];
+    let mut hits = [0usize; 26];
     for sc in scripts() {
         let mut t = Timeline::new();
         for p in &sc {
@@ -812,6 +833,10 @@ fn the_scripts_reach_every_boundary_1439() {
                     hits[19] += 1;
                 }
                 (Event::Anchor, _) => hits[0] += 1,
+                (Event::Reanchor, Reason::Late) if d.shifted => {
+                    hits[24] += 1;
+                    hits[25] += usize::from(d.silence_samples > 0);
+                }
                 (Event::Reanchor, Reason::Late) => hits[2] += 1,
                 (Event::Reanchor, Reason::Backward) => hits[4] += 1,
                 (Event::Reanchor, Reason::Jump) => hits[5] += 1,

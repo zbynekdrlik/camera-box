@@ -736,3 +736,51 @@ fn the_receive_buffer_is_in_place_before_the_first_sender_can_deliver_1439() {
         );
     }
 }
+
+/// ROZHODNUTÉ 6343922049 (2): a packet past its stamp once the fit is valid shifts the line ONCE.
+/// The source logs one re-anchor with `fit=kept`, outputs the slots lost before the late packet as
+/// silence and then the packet, contiguous on the shifted line, and keeps receiving.
+#[test]
+fn a_late_shift_outputs_the_lost_slots_and_the_packet_on_the_new_line_1439() {
+    // 15 s on the grid: the fit is valid
+    let n = 15 * RATE / u64::from(FRAMES);
+    let nus: Vec<u32> = (0..n as u32).collect();
+    let mut pkts = on_grid(&nus);
+    // packets n and n + 1 lost, n + 2 arrives 100 ms after its grid instant (more than R late)
+    let k = n + 2;
+    pkts.push((
+        k as u32,
+        1_000_000_000 + ns(k * u64::from(FRAMES)) + 100_000_000,
+        99,
+    ));
+    let (outs, log) = run_with_log(&pkts);
+    let reanchors: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("obs-vban receive re-anchor:"))
+        .collect();
+    assert_eq!(
+        reanchors.len(),
+        1,
+        "issue 1439: one event, one re-anchor:\n{log}"
+    );
+    assert!(
+        reanchors[0].contains("reason=late") && reanchors[0].contains(" fit=kept shift_ms="),
+        "issue 1439: a late packet with a valid fit shifts the line, the fit kept: `{}`",
+        reanchors[0]
+    );
+    let tail = &outs[outs.len() - 2..];
+    assert!(
+        tail[0].zero && tail[0].frames == 2 * u64::from(FRAMES),
+        "issue 1439: the two lost slots are silence: {tail:?}"
+    );
+    assert!(
+        !tail[1].zero && tail[1].first == 99,
+        "issue 1439: the late packet itself reaches OBS: {tail:?}"
+    );
+    assert_contiguous(tail);
+    assert_eq!(
+        outs.iter().filter(|o| !o.zero).count() as u64,
+        n + 1,
+        "issue 1439: every packet's audio reaches OBS once"
+    );
+}

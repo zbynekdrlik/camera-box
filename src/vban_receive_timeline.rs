@@ -30,11 +30,18 @@
 //! * **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
 //! * **Stale.** A duplicate, or a `nuFrame` at most [`STALE_PACKETS`] behind the last one (a
 //!   network reorder), is dropped and counted: its slot has passed (it went out as silence).
-//! * **Re-anchor** (counted, one per event): a packet arriving after its stamp (late), a `nuFrame`
-//!   further behind (a sender restart), a forward jump of more than [`JUMP_S`] of audio (a sender restart),
-//!   another rate or channel count, another R, or a fit that cannot hold: the fitted rate beyond
-//!   ±[`PPB_CLAMP`], the stamps more than R off `fit + R`, or no packet folded for [`STARVE_S`] of
-//!   the sender's audio. The packet that re-anchors is the new anchor.
+//! * **Late shift** (counted as one re-anchor, ROZHODNUTÉ 6343922049): a packet arriving after its
+//!   stamp while the fit is valid shifts the line ONCE to the stamp it would anchor (arrival −
+//!   length + R = `fit + R` + its excess over the fit). The fit and its buckets are kept, the slots
+//!   lost before it are silence on the shifted line, and the excess becomes the line's held
+//!   `shift_ns`: the dead band and the hold below are centred on `fit + R + shift`, so the shifted
+//!   latency is held and the next fit does not re-anchor again.
+//! * **Re-anchor** (counted, one per event): a packet arriving after its stamp before the fit is
+//!   valid (late), a `nuFrame` further behind (a sender restart), a forward jump of more than
+//!   [`JUMP_S`] of audio (a sender restart), another rate or channel count, another R, or a fit
+//!   that cannot hold: the fitted rate beyond ±[`PPB_CLAMP`], the stamps more than R off
+//!   `fit + R + shift`, or no packet folded for [`STARVE_S`] of the sender's audio. The packet that
+//!   re-anchors is the new anchor.
 //!
 //! The C twin is `vendor/obs-vban/src/vban-receive-timeline.h`;
 //! `tests/vban_receive_timeline_parity_1439.rs` compiles the shipped header and requires identical
@@ -175,6 +182,8 @@ pub struct Decision {
     pub lateness_ns: i64,
     /// A LATE re-anchor: how far after its old stamp the packet came.
     pub late_ns: i64,
+    /// A LATE re-anchor that shifted the line and kept the fit (the timeline runs on).
+    pub shifted: bool,
 }
 
 /// The receive timeline of one source (the C `struct vban_recv_timeline`).
@@ -209,8 +218,11 @@ pub struct Timeline {
     pub fit_b: f64,
     pub fit_xbar: f64,
     pub fit_ybar: f64,
-    /// `fit + R − stamp` at the last update.
+    /// `fit + R + shift − stamp` at the last update.
     pub phase_ns: i64,
+    /// The line's held offset from `fit + R`, set by a late shift (its excess over the fit); 0 at
+    /// an anchor.
+    pub shift_ns: i64,
     pub received: u64,
     /// Lost packets (silence slots).
     pub lost: u64,
@@ -312,6 +324,7 @@ impl Timeline {
             fit_xbar: 0.0,
             fit_ybar: 0.0,
             phase_ns: 0,
+            shift_ns: 0,
             received: 0,
             lost: 0,
             silence_samples: 0,
@@ -403,6 +416,7 @@ impl Timeline {
         self.fit_xbar = 0.0;
         self.fit_ybar = 0.0;
         self.phase_ns = 0;
+        self.shift_ns = 0;
         self.last_k = i64::from(frames / rate);
         self.fold(self.last_k, u64::from(frames), 0);
     }
@@ -467,7 +481,8 @@ impl Timeline {
         self.fit_ybar = ybar;
         let target = self.anchor_ns as i64
             + round_half_away(ybar + slope * (pos as f64 - xbar))
-            + self.reserve_ns as i64;
+            + self.reserve_ns as i64
+            + self.shift_ns;
         let stamp = self.stamp_at(pos);
         let phase = target - stamp as i64;
         self.phase_ns = phase;
@@ -570,13 +585,42 @@ impl Timeline {
             }
         }
         if reason == Reason::None {
-            let stamp = self.stamp_at(pos);
+            let mut stamp = self.stamp_at(pos);
+            let mut shifted = false;
             if now_ns > stamp {
-                reason = Reason::Late;
                 d.late_ns = (now_ns - stamp) as i64;
                 self.late += 1;
-            } else {
-                d.event = Event::Packet;
+                if self.fit_valid {
+                    // one network event = one re-anchor: the line shifts once to the stamp this
+                    // packet would anchor, rebased at the first lost slot (silence on the new
+                    // line), the fit kept; the excess over the fit becomes the held shift
+                    let want = now_ns.saturating_sub(samples_to_ns(u64::from(frames), rate))
+                        + self.reserve_ns;
+                    let fitted = self.anchor_ns as i64
+                        + round_half_away(
+                            self.fit_ybar + self.fit_b * (pos as f64 - self.fit_xbar),
+                        )
+                        + self.reserve_ns as i64;
+                    self.shift_ns = want as i64 - fitted;
+                    let span = samples_to_ns(pos - self.next_pos, rate);
+                    self.base_stamp_ns =
+                        want - (span as i64 + scale_ppb(span, self.step_ppb)) as u64;
+                    self.base_pos = self.next_pos;
+                    self.re_anchors += 1;
+                    stamp = self.stamp_at(pos);
+                    shifted = true;
+                } else {
+                    reason = Reason::Late;
+                }
+            }
+            if reason == Reason::None {
+                if shifted {
+                    d.event = Event::Reanchor;
+                    d.reason = Reason::Late;
+                    d.shifted = true;
+                } else {
+                    d.event = Event::Packet;
+                }
                 d.stamp_ns = stamp;
                 d.lateness_ns = now_ns as i64 - stamp as i64;
                 if lost > 0 {
