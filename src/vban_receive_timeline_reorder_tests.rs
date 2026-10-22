@@ -107,7 +107,7 @@ fn a_reorder_never_moves_the_line_the_fit_or_the_index() {
     let mut k = 0u64;
     while k < n {
         // every 50th packet comes 0.1 ms behind the next one (after the hold, the fit then valid)
-        if k > H && k % 50 == 0 && k + 1 < n {
+        if k > H && k.is_multiple_of(50) && k + 1 < n {
             for t in [&mut with, &mut without] {
                 t.packet(on_time(k + 1), (k + 1) as u32, 256, RATE, 2, R40);
             }

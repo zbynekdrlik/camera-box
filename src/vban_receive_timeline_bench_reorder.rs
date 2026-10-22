@@ -19,7 +19,7 @@ fn with_reorders(mut sched: Vec<Sent>, every: u64) -> (Vec<Sent>, u64) {
     let mut i = 0;
     while i + 1 < sched.len() {
         let k = sched[i].k;
-        if k >= 400 && k % every == 0 {
+        if k >= 400 && k.is_multiple_of(every) {
             if let (Some(_), Some(b)) = (sched[i].arrival_ns, sched[i + 1].arrival_ns) {
                 sched[i].arrival_ns = Some(b + 500);
                 sched.swap(i, i + 1);
