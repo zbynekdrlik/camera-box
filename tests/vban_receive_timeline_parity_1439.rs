@@ -434,7 +434,25 @@ const SCALE_INPUTS: [(u64, i64); 7] = [
     (28_800_000_000_000, 500_000),
     (5_333_333, -123_457),
 ];
-const ROUND_INPUTS: [f64; 8] = [0.0, 0.49, 0.5, 2.5, -0.5, -2.5, -2.4, 123_456.499_999];
+/// Beyond the round limit (+-2^62), at it, NaN and a large in-range value (review round 1: a C cast of
+/// an out-of-range double is undefined, Rust `as` saturates).
+const ROUND_INPUTS: [f64; 15] = [
+    0.0,
+    0.49,
+    0.5,
+    2.5,
+    -0.5,
+    -2.5,
+    -2.4,
+    123_456.499_999,
+    1e300,
+    -1e300,
+    1e19,
+    4_611_686_018_427_387_904.0,
+    -4_611_686_018_427_387_904.0,
+    f64::NAN,
+    4.0e18,
+];
 
 fn bits(x: f64) -> u64 {
     x.to_bits()
@@ -636,7 +654,8 @@ struct pkt {
     for x in ROUND_INPUTS {
         writeln!(
             c,
-            "\t{{ uint64_t u = {}ULL; double x; memcpy(&x, &u, sizeof(x)); printf(\"round %\" PRId64 \"\\n\", vban_recv_round(x)); }}",
+            // read through a volatile, so the compiler cannot fold the conversion at build time
+            "\t{{ static volatile uint64_t vu; vu = {}ULL; uint64_t u = vu; double x; memcpy(&x, &u, sizeof(x)); printf(\"round %\" PRId64 \"\\n\", vban_recv_round(x)); }}",
             x.to_bits()
         )
         .unwrap();

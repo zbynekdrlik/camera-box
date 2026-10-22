@@ -769,6 +769,23 @@ mod tests {
         assert_eq!(round_half_away(-2.4), -2);
     }
 
+    /// Review round 1: a double out of the int64 range (or NaN) cast to int64_t is undefined in C,
+    /// while Rust `as` saturates, so the twins could disagree on a degenerate fit. Both saturate at
+    /// +-2^62 (far beyond any sane fit, still clear of overflow when the anchor and R are added) and
+    /// read NaN as 0.
+    #[test]
+    fn rounding_saturates_at_two_to_the_62_and_reads_nan_as_zero() {
+        let lim = 1i64 << 62;
+        assert_eq!(round_half_away(1e300), lim);
+        assert_eq!(round_half_away(-1e300), -lim);
+        assert_eq!(round_half_away(1e19), lim);
+        assert_eq!(round_half_away(lim as f64), lim);
+        assert_eq!(round_half_away(-(lim as f64)), -lim);
+        assert_eq!(round_half_away(f64::NAN), 0);
+        assert_eq!(round_half_away(4.0e18), 4_000_000_000_000_000_000);
+        assert_eq!(round_half_away(-4.0e18), -4_000_000_000_000_000_000);
+    }
+
     #[test]
     fn the_fit_follows_a_slow_sender_and_the_stamps_never_jump() {
         // A sender 100 ppm slow: each 256-frame packet spans 5.333 ms x 1.0001 of our time.
