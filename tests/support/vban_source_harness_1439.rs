@@ -40,6 +40,8 @@ pub(crate) struct Out {
     /// concealed slot carries between and at the end of its fades).
     pub(crate) mid: i64,
     pub(crate) last: i64,
+    /// The plugin's log lines written before it went out.
+    pub(crate) logs: u64,
 }
 
 static COMPILES: AtomicUsize = AtomicUsize::new(0);
@@ -89,6 +91,7 @@ pub(crate) fn run_as(packets: &[(u32, u64, i16)], bitfmt: u8) -> (Vec<Out>, Stri
                 at: field("at=").parse().unwrap(),
                 mid: field("mid=").parse().unwrap(),
                 last: field("last=").parse().unwrap(),
+                logs: field("logs=").parse().unwrap(),
             }
         })
         .collect();

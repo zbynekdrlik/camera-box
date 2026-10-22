@@ -50,6 +50,9 @@ static long long g_buffer = 40;
 /* added to every 24-bit sample after the 16-bit value is scaled up (`low24=N`): the decoder must keep
  * the low byte */
 static int g_low24 = 0;
+/* the plugin's log lines so far (each `out` line carries the count: the tests order a log line against an
+ * output, review of ROZHODNUTE 6352253147) */
+static unsigned long g_blogs;
 
 uint64_t os_gettime_ns(void)
 {
@@ -156,6 +159,7 @@ void blog(int level, const char *format, ...)
 {
 	va_list args;
 	va_start(args, format);
+	g_blogs++;
 	fprintf(stderr, "blog %d: ", level);
 	vfprintf(stderr, format, args);
 	fputc('\n', stderr);
@@ -324,10 +328,10 @@ void obs_source_output_audio(obs_source_t *source, const struct obs_source_audio
 			       ? (long)(((const float *)audio->data[0])[0] * 8388608.0f)
 			       : 0;
 	printf("out ts=%" PRIu64 " frames=%" PRIu32 " ch=%d rate=%" PRIu32 " zero=%d first=%ld fmt=%d first24=%ld"
-	       " at=%" PRIu64 " mid=%ld last=%ld\n",
+	       " at=%" PRIu64 " mid=%ld last=%ld logs=%lu\n",
 	       audio->timestamp, audio->frames, (int)audio->speakers, audio->samples_per_sec, zero, first,
 	       (int)audio->format, first24, os_gettime_ns(), sample16(audio, audio->frames / 2),
-	       sample16(audio, audio->frames - 1));
+	       sample16(audio, audio->frames - 1), g_blogs);
 }
 
 static int g_udp_dummy;

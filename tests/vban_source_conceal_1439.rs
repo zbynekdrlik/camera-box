@@ -156,3 +156,27 @@ fn the_status_line_counts_the_concealed_slots_1439() {
         "issue 1439: the summary names the concealed slots:\n{log}"
     );
 }
+
+/// The fresh-context review of this change: the loss line must never delay audio. The packet that
+/// ends a run is decided right after the run's last slot, about one slot + the 2 ms margin before its
+/// stamp, and a log write can stall (the OBS log's lock, a flush, journald). So the worker writes a
+/// run's line only once it has handed out everything due at that look.
+#[test]
+fn the_loss_line_is_written_after_the_packet_that_ends_the_run_went_out_1439() {
+    let (outs, log) = run_with_log(&around_a_gap(&[305]));
+    let blogs: Vec<&str> = log.lines().filter(|l| l.starts_with("blog ")).collect();
+    let k = blogs
+        .iter()
+        .position(|l| l.contains(": missing 1 packet(s) before frame 306"))
+        .unwrap_or_else(|| panic!("issue 1439: no loss line:\n{log}"));
+    let ending = outs
+        .iter()
+        .find(|o| !o.zero && o.first == 3000)
+        .expect("the packet that ends the run");
+    assert!(
+        ending.logs <= k as u64,
+        "issue 1439: the loss line (log line {k}) was written before the packet that ends the run \
+         went out (after {} log lines): {outs:?}",
+        ending.logs
+    );
+}
