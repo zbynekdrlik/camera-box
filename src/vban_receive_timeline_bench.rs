@@ -673,10 +673,12 @@ fn known_limit_an_outage_under_a_second_moves_the_realized_latency_by_about_its_
 /// stretch's first output -- its stamps have passed, so it would carry no lead-in, and libobs, which
 /// reset its timing after the gap, would start the stretch at that late fill's arrival (it realized
 /// 6.4 and 36.4 ms off its stamp latency at 950 and 980 ms). The stretch realizes its own stamp
-/// latency ±1 ms, one lead-in per stretch.
+/// latency ±1 ms and holds it, one lead-in per stretch.
 #[test]
 fn a_hiccup_at_the_end_of_a_re_anchor_s_hold_still_lands_the_stretch_on_its_stamp_1439() {
-    for off_ms in [950u64, 980, 1000] {
+    // hiccups that end inside or right at the end of the hold (one starting at 1000 ms falls after the
+    // first output: the ordinary late-fill limit, pinned by the hiccup test)
+    for off_ms in [950u64, 965, 980] {
         let sched = with_outage(schedule(1, 0.0, TEN_MIN_PACKETS / 2, 0.0), 1_500);
         let a0 = sched
             .iter()
