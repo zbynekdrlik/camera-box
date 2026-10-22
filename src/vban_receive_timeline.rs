@@ -706,7 +706,9 @@ mod tests {
 
     /// ROZHODNUTÉ 6343922049 (1): a steady delay inside the band (every packet after the anchor
     /// 6 ms later than it) is arrival jitter, never a sender-clock event: the stamps stay on the
-    /// anchored line to the sample for two minutes (the old phase term walked them 6 ms later).
+    /// anchored line to the sample (one sample = 20.8 us at 48 kHz) for two minutes (the old phase
+    /// term walked them 6 ms later). What is left is the RATE the fit reads while its window still
+    /// holds the anchor's own bucket.
     #[test]
     fn a_steady_delay_inside_the_band_never_moves_the_stamps() {
         let mut t = Timeline::new();
@@ -716,7 +718,7 @@ mod tests {
             let d = t.packet(on_time(k) + late, k as u32, 256, RATE, 2, R40);
             assert_eq!(d.event, if k == 0 { Event::Anchor } else { Event::Packet });
             assert!(
-                d.stamp_ns.abs_diff(line(k)) <= 1_000,
+                d.stamp_ns.abs_diff(line(k)) <= samples_to_ns(1, RATE),
                 "packet {k}: the stamp left the anchored line by {} ns",
                 d.stamp_ns as i64 - line(k) as i64
             );
