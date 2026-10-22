@@ -233,8 +233,8 @@ static void convert_24le_to_fltp(struct vban_src_s *s, struct obs_source_audio *
 static const char *vban_recv_reason_name(int reason)
 {
 	switch (reason) {
-	case VBAN_RECV_REASON_LATE:
-		return "late";
+	case VBAN_RECV_REASON_STARVE:
+		return "starve";
 	case VBAN_RECV_REASON_BACKWARD:
 		return "backward";
 	case VBAN_RECV_REASON_JUMP:
@@ -285,7 +285,7 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     obs_source_get_name(s->context), nu_frame, t->rate, t->channels,
 		     (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS));
 	} else if (d->event == VBAN_RECV_REANCHOR) {
-		/* a new timeline from this packet (reason=late: no packet in time for a second), then the hold */
+		/* a new timeline from this packet (reason=starve: no packet in time for a second), then the hold */
 		blog(LOG_WARNING,
 		     "obs-vban receive re-anchor: source '%s' reason=%s frame=%u late_ms=%.1f re_anchors=%" PRIu64
 		     " late=%" PRIu64 " -- holding its first second",

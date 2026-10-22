@@ -43,9 +43,10 @@
 //!   [`Event::Late`] -- dropped and counted, its slot (with the slots lost right before it) silence
 //!   at once on the unchanged line. The line, the fit and the latency stay where the anchor put
 //!   them; the fold rule is unchanged.
-//! * **Re-anchor** (counted, one per event, then the hold): no packet in time for [`PERSIST_S`] of
-//!   the sender's audio -- a late packet ending more than that past the last in-time packet's end
-//!   (every packet late: a delay step on the network) -- a `nuFrame` further behind (a sender
+//! * **Re-anchor** (counted, one per event, then the hold): a STARVE -- no packet in time for
+//!   [`PERSIST_S`] on OUR clock: any packet arriving more than that after the last in-time packet
+//!   did (an outage, a sender pause, every packet late on a delay step; review round 4), late or
+//!   not, with nothing filled after the fact -- a `nuFrame` further behind (a sender
 //!   restart), a forward jump of more than [`JUMP_S`] of audio (a sender restart), another rate or
 //!   channel count, another R, or a fit that cannot hold: the fitted rate beyond ±[`PPB_CLAMP`] or
 //!   the stamps more than R off `fit + R`. The packet that re-anchors is the new anchor. Packets
@@ -69,8 +70,8 @@ pub const FIT_WINDOW_S: usize = 64;
 pub const FIT_MIN_BUCKETS: usize = 10;
 /// A packet later than the reference line by more than this is not folded into the fit.
 pub const OUTLIER_MS: u64 = 10;
-/// No packet in time for this much of the sender's audio (every packet late: a delay step on the
-/// network) = one full re-anchor (ROZHODNUTÉ 6345255813 item 2).
+/// No packet in time for this long on our clock (an outage, a sender pause, every packet late on a
+/// network delay step) = one full re-anchor, a starve (ROZHODNUTÉ 6345255813 item 2).
 pub const PERSIST_S: u64 = 1;
 /// A forward `nuFrame` jump over this much audio is a sender restart.
 pub const JUMP_S: u64 = 2;
@@ -230,8 +231,8 @@ pub struct Timeline {
     pub step_ppb: i64,
     /// The bucket of the last packet's end position.
     pub last_k: i64,
-    /// The end position of the last packet that came in time (the anchor's own at an anchor).
-    pub last_intime_end: u64,
+    /// The arrival of the last packet that came in time (an anchor, a held or an emitted packet).
+    pub last_intime_ns: u64,
     pub buckets: [Bucket; FIT_WINDOW_S],
     pub fit_valid: bool,
     /// The fitted step deviation (positive = the sender's clock is slow).
@@ -336,7 +337,7 @@ impl Timeline {
             base_pos: 0,
             step_ppb: 0,
             last_k: 0,
-            last_intime_end: 0,
+            last_intime_ns: 0,
             buckets: [Bucket::default(); FIT_WINDOW_S],
             fit_valid: false,
             fit_ppb: 0,
@@ -436,7 +437,7 @@ impl Timeline {
         self.fit_xbar = 0.0;
         self.fit_ybar = 0.0;
         self.phase_ns = 0;
-        self.last_intime_end = u64::from(frames);
+        self.last_intime_ns = now_ns;
         self.last_k = i64::from(frames / rate);
         self.fold(self.last_k, u64::from(frames), 0);
     }
@@ -571,6 +572,13 @@ impl Timeline {
                 }
             }
         }
+        // a starve: no packet in time for PERSIST_S on our clock (signed: an out-of-order arrival
+        // before the last in-time one is never a starve)
+        if reason == Reason::None
+            && now_ns as i64 - self.last_intime_ns as i64 > (PERSIST_S * NS_PER_SEC) as i64
+        {
+            reason = Reason::Starve;
+        }
         let mut pos = 0u64;
         let mut end = 0u64;
         let mut k = 0i64;
@@ -612,46 +620,40 @@ impl Timeline {
             if late {
                 d.late_ns = (now_ns - stamp) as i64;
                 self.late += 1;
-                // no packet in time for PERSIST_S of audio: a delay step, ONE full re-anchor
-                if end - self.last_intime_end > PERSIST_S * u64::from(rate) {
-                    reason = Reason::Starve;
-                }
             }
-            if reason == Reason::None {
-                // a late packet is LOST (item 2): its audio dropped, its slot silence on the
-                // unchanged line together with the slots lost before it
-                d.event = if late {
-                    Event::Late
-                } else if held {
-                    Event::Hold
-                } else {
-                    Event::Packet
-                };
-                d.stamp_ns = stamp;
-                d.lateness_ns = now_ns as i64 - stamp as i64;
-                let filled = lost_samples + if late { u64::from(frames) } else { 0 };
-                if filled > 0 && emitting {
-                    d.silence_samples = filled;
-                    d.silence_pos = self.next_pos;
-                    self.lost += lost;
-                    self.silence_samples += filled;
-                }
-                if !late {
-                    self.last_intime_end = end;
-                }
-                // fold the packet into the fit unless it came late against the reference line
-                // wrapping like the C twin (the real clock never delivers an arrival before the anchor)
-                let y = now_ns.wrapping_sub(self.anchor_ns);
-                if y as f64 - self.reference(end) <= (OUTLIER_MS * NS_PER_MS) as f64 {
-                    self.fold(k, end, y);
-                }
-                if k > self.last_k {
-                    self.last_k = k;
-                }
-                self.last_nu = nu;
-                self.next_pos = end;
-                return d;
+            // a late packet is LOST (item 2): its audio dropped, its slot silence on the
+            // unchanged line together with the slots lost before it
+            d.event = if late {
+                Event::Late
+            } else if held {
+                Event::Hold
+            } else {
+                Event::Packet
+            };
+            d.stamp_ns = stamp;
+            d.lateness_ns = now_ns as i64 - stamp as i64;
+            let filled = lost_samples + if late { u64::from(frames) } else { 0 };
+            if filled > 0 && emitting {
+                d.silence_samples = filled;
+                d.silence_pos = self.next_pos;
+                self.lost += lost;
+                self.silence_samples += filled;
             }
+            if !late {
+                self.last_intime_ns = now_ns;
+            }
+            // fold the packet into the fit unless it came late against the reference line
+            // wrapping like the C twin (the real clock never delivers an arrival before the anchor)
+            let y = now_ns.wrapping_sub(self.anchor_ns);
+            if y as f64 - self.reference(end) <= (OUTLIER_MS * NS_PER_MS) as f64 {
+                self.fold(k, end, y);
+            }
+            if k > self.last_k {
+                self.last_k = k;
+            }
+            self.last_nu = nu;
+            self.next_pos = end;
+            return d;
         }
         self.re_anchors += 1;
         self.anchor(now_ns, nu, frames, rate, channels, reserve_ns);

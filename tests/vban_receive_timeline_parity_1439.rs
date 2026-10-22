@@ -252,8 +252,8 @@ fn boundary_script() -> Vec<Pkt> {
         reserve,
         &mut reset,
     );
-    // exactly two seconds lost: silence, the timeline runs on
-    k += 375;
+    // exactly two seconds of indexes skipped while the packets keep arriving: silence, the timeline
+    // runs on (a 2 s gap in ARRIVALS is a starve, round 4)
     nu = nu.wrapping_add(375);
     clean(
         &mut b,
@@ -323,8 +323,7 @@ fn boundary_script() -> Vec<Pkt> {
     clean(&mut b, &mut k, &mut nu, 375, channels, reserve, &mut reset);
     nu = nu.wrapping_sub(STALE_PACKETS + 2);
     clean(&mut b, &mut k, &mut nu, 375, channels, reserve, &mut reset);
-    // two seconds and one packet lost: a sender restart
-    k += 376;
+    // two seconds and one packet of indexes skipped: a sender restart
     nu = nu.wrapping_add(376);
     clean(&mut b, &mut k, &mut nu, 375, channels, reserve, &mut reset);
     reserve = 25 * MS;
@@ -653,7 +652,7 @@ fn line(t: &Timeline, d: Decision) -> String {
         t.base_pos,
         t.step_ppb,
         t.last_k,
-        t.last_intime_end,
+        t.last_intime_ns,
         u8::from(t.fit_valid),
         t.fit_ppb,
         bits(t.fit_b),
@@ -756,7 +755,7 @@ static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d
 	       " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | ",
 	       t->anchored ? 1 : 0, t->rate, t->channels, t->reserve_ns, t->reserve_eff_ns, t->anchor_ns, t->anchor_end,
 	       t->last_nu,
-	       t->next_pos, t->base_stamp_ns, t->base_pos, t->step_ppb, t->last_k, t->last_intime_end,
+	       t->next_pos, t->base_stamp_ns, t->base_pos, t->step_ppb, t->last_k, t->last_intime_ns,
 	       t->fit_valid ? 1 : 0, t->fit_ppb, bits(t->fit_b), bits(t->fit_xbar), bits(t->fit_ybar), t->phase_ns,
 	       t->received, t->lost, t->silence_samples, t->late, t->re_anchors);
 	printf("%" PRIu64 " | ", t->stale);
