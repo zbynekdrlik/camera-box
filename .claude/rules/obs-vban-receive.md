@@ -363,3 +363,18 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   `git add`: build it from `string.ascii_letters + string.digits` (python) or short bash locals.
 - Parity coverage: random event scripts that re-anchor too often never reach a valid fit; a
   boundary-hit counter test (17 counters, every one >= 1) keeps the gate from going blind.
+- The source driver (`tests/support/vban_source_driver_1439.c`) is baked into the Rust test binary at
+  COMPILE time (`include_str!`): after editing it, recompile the test binary, or the old driver runs.
+  The shipped `vban-source.c` and the header are read at RUN time, so a RED can be checked against
+  the committed twins with `git stash push -- <twin files>`, the same compiled binary, `git stash pop`.
+- Driver tokens (review round 5): `NU:NOW:VALUE` a packet, `NU:NOW:VALUE:FRAMES` one of another size,
+  `stall` = the worker takes no look before the next packet (every slot it owes goes out at that
+  arrival), `port=` / `name=` / `host=` / `buffer=` an update, `thread` (2nd argument) the real thread
+  on the real clock. Simulated time wakes the worker ONLY at its own scheduled times or on the idle
+  signal, like the shipped thread: a driver that ran the worker at every arrival would hand stored
+  packets "on arrival" and hide a regression.
+- Never `println!` a bench `Run` with `--nocapture`: its Debug prints every emitted record (MBs per
+  run). For numbers, copy `src/vban_receive_timeline*.rs` to a scratch dir, append a test that prints
+  the compact fields, and run that copy.
+- `rustfmt src/vban_receive_timeline.rs` formats every `#[path]` child too (the bench, its `wake`
+  child, the tests, the worker model).
