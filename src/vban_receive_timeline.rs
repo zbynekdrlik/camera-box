@@ -114,6 +114,8 @@ pub enum Event {
     /// Inside the first second after an anchor (ROZHODNUTÉ 6345255813 item 1): it refines the
     /// anchor and folds into the fit, but is never output, and no slot is filled for it.
     Hold = 4,
+    /// A packet past its stamp (ROZHODNUTÉ 6345255813 item 2): dropped, counted, its slot silence.
+    Late = 5,
 }
 
 /// Why a timeline restarted (the C `enum vban_recv_reason`).

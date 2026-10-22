@@ -315,8 +315,12 @@ fn a_loss_is_silence_for_exactly_the_lost_slots() {
     assert_eq!(t.re_anchors, 0);
 }
 
+/// ROZHODNUTÉ 6345255813 (2): a fixed latency is a fixed jitter buffer. A packet past its stamp
+/// is LOST, never re-timed: it is dropped and counted `late`, its slot goes out as silence at once
+/// on the unchanged line, and the next packet is stamped on that same line. Arriving exactly at its
+/// stamp is in time.
 #[test]
-fn a_packet_after_its_stamp_re_anchors_and_one_on_it_does_not() {
+fn a_packet_past_its_stamp_is_dropped_and_its_slot_is_silence_on_the_same_line() {
     let mut t = Timeline::new();
     through_the_hold(&mut t, 1);
     let stamp1 = t.stamp_at(t.next_pos);
@@ -327,89 +331,133 @@ fn a_packet_after_its_stamp_re_anchors_and_one_on_it_does_not() {
         "arriving exactly at its stamp is on time"
     );
     assert_eq!(d.lateness_ns, 0);
-    let stamp2 = t.stamp_at(t.next_pos);
+    let pos2 = t.next_pos;
+    let stamp2 = t.stamp_at(pos2);
     let d = t.packet(stamp2 + 1, 2 + H as u32, 256, RATE, 2, R40);
-    assert_eq!(d.event, Event::Reanchor);
-    assert_eq!(d.reason, Reason::Late);
+    assert_eq!((d.event, d.reason), (Event::Late, Reason::None), "{d:?}");
     assert_eq!(d.late_ns, 1, "late by exactly the one ns past its stamp");
-    assert_eq!((t.late, t.re_anchors), (1, 1));
     assert_eq!(
-        d.stamp_ns,
-        stamp2 + 1 - samples_to_ns(256, RATE) + R40,
-        "the late packet is the new anchor"
+        (d.silence_samples, d.silence_pos),
+        (256, pos2),
+        "its own slot is silence"
+    );
+    assert_eq!(t.stamp_at(d.silence_pos), stamp2, "on the unchanged line");
+    assert_eq!((t.late, t.re_anchors, t.lost), (1, 0, 0));
+    // the next packet: the same line, nothing more to fill
+    let stamp3 = stamp2 + samples_to_ns(256, RATE);
+    let d = t.packet(stamp3 - NS_PER_MS, 3 + H as u32, 256, RATE, 2, R40);
+    assert_eq!((d.event, d.silence_samples), (Event::Packet, 0), "{d:?}");
+    assert!(
+        d.stamp_ns.abs_diff(stamp3) <= 1,
+        "{} vs {stamp3}",
+        d.stamp_ns
     );
 }
 
-/// ROZHODNUTÉ 6343922049 (2): one network event = one re-anchor. A packet past its stamp while
-/// the fit is valid shifts the line ONCE, to the stamp that packet would anchor (fit + R + its
-/// excess over the fit), counted as one re-anchor; the fit is kept, and no second re-anchor
-/// follows when the next fit lands, even for a packet more than R late. The shifted latency is
-/// then held.
+/// ROZHODNUTÉ 6345255813 (2): the late shift of 6343922049 item 2 is withdrawn (a runtime latency
+/// change). A packet even 60 ms late (more than R) once the fit is valid is dropped; the line, the
+/// fit and the latency stay where the anchor put them, and nothing re-anchors.
 #[test]
-fn a_late_packet_with_a_valid_fit_shifts_the_line_once() {
+fn a_late_packet_never_moves_the_line_even_more_than_r_late() {
     let mut t = Timeline::new();
+    let line = |k: u64| on_time(k) - samples_to_ns(256, RATE) + R40;
     let n_fit = 15 * 48_000 / 256u64;
     for k in 0..n_fit {
         t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
     }
     assert!(t.fit_valid);
-    // 60 ms late: more than R after its own slot
-    let late_at = on_time(n_fit) + 60 * NS_PER_MS;
-    let d = t.packet(late_at, n_fit as u32, 256, RATE, 2, R40);
-    assert_eq!(
-        (d.event, d.reason),
-        (Event::Reanchor, Reason::Late),
-        "{d:?}"
+    let d = t.packet(
+        on_time(n_fit) + 60 * NS_PER_MS,
+        n_fit as u32,
+        256,
+        RATE,
+        2,
+        R40,
     );
-    assert_eq!((t.late, t.re_anchors), (1, 1));
-    assert!(
-        t.fit_valid,
-        "the fit is kept: the line shifts, the timeline does not restart"
-    );
-    let shifted = late_at - samples_to_ns(256, RATE) + R40;
-    assert!(
-        d.stamp_ns.abs_diff(shifted) <= 2,
-        "the late packet is stamped where it would anchor: {} vs {shifted}",
-        d.stamp_ns
-    );
-    // the stream goes on on time for 30 s: one event, one re-anchor, the shift held
+    assert_eq!(d.event, Event::Late, "{d:?}");
+    assert_eq!(d.silence_samples, 256);
+    assert!(t.fit_valid, "the fit is kept");
     for k in n_fit + 1..n_fit + 30 * 48_000 / 256 {
         let d = t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
         assert_eq!(d.event, Event::Packet, "packet {k}: {d:?}");
-        let want = shifted + samples_to_ns((k - n_fit) * 256, RATE);
         assert!(
-            d.stamp_ns.abs_diff(want) <= samples_to_ns(1, RATE),
-            "packet {k}: the shifted latency must be held: {} vs {want}",
-            d.stamp_ns
+            d.stamp_ns.abs_diff(line(k)) <= samples_to_ns(1, RATE),
+            "packet {k}: the anchored line must be held: {} vs {}",
+            d.stamp_ns,
+            line(k)
         );
     }
-    assert_eq!((t.late, t.re_anchors), (1, 1));
+    assert_eq!((t.late, t.re_anchors), (1, 0));
 }
 
-/// ROZHODNUTÉ 6343922049 (2): the slots lost right before a late packet are silence on the
-/// shifted line, contiguous with the late packet (the timeline runs on, so nothing is dropped).
+/// ROZHODNUTÉ 6345255813 (2): the slots lost right before a late packet are silence together with
+/// its own slot, contiguous on the unchanged line; the lost ones count `lost`, it counts `late`.
 #[test]
-fn the_slots_lost_before_a_late_packet_are_silence_on_the_shifted_line() {
+fn the_slots_lost_before_a_late_packet_are_silence_with_its_own() {
     let mut t = Timeline::new();
     let n_fit = 15 * 48_000 / 256u64;
     for k in 0..n_fit {
         t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
     }
+    let pos = t.next_pos;
     // packets n_fit and n_fit + 1 lost, n_fit + 2 arrives 50 ms late
     let k = n_fit + 2;
     let d = t.packet(on_time(k) + 50 * NS_PER_MS, k as u32, 256, RATE, 2, R40);
+    assert_eq!(d.event, Event::Late, "{d:?}");
     assert_eq!(
-        (d.event, d.reason),
-        (Event::Reanchor, Reason::Late),
-        "{d:?}"
+        (d.silence_samples, d.silence_pos),
+        (3 * 256, pos),
+        "two lost slots + its own"
     );
-    assert_eq!(d.silence_samples, 512, "the two lost slots are silence");
-    assert_eq!(t.lost, 2);
-    assert_eq!(
-        t.stamp_at(d.silence_pos) + samples_to_ns(512, RATE),
-        d.stamp_ns,
-        "the silence ends where the late packet starts"
-    );
+    assert_eq!((t.lost, t.late, t.re_anchors), (2, 1, 0));
+    assert_eq!(t.next_pos, pos + 3 * 256, "the line runs on past its slot");
+}
+
+/// ROZHODNUTÉ 6345255813 (2): only a PERSISTENT condition re-anchors: no packet in time for one
+/// second of the sender's audio (every packet late: a delay step on the network). A late packet
+/// ending more than one second past the last in-time packet's end is ONE full re-anchor (reason
+/// late); one ending exactly one second past it is still a drop. The re-anchor holds its first
+/// second, then emits on the new line: the new network delay + R.
+#[test]
+fn every_packet_late_for_one_second_is_one_re_anchor_through_the_hold() {
+    let mut t = Timeline::new();
+    let n_fit = 15 * 48_000 / 256u64;
+    for k in 0..n_fit {
+        t.packet(on_time(k), k as u32, 256, RATE, 2, R40);
+    }
+    // from packet n_fit on, every packet 90 ms late (a delay step on the network)
+    let step = 90 * NS_PER_MS;
+    let last_in_time = n_fit - 1;
+    let mut k = n_fit;
+    loop {
+        let d = t.packet(on_time(k) + step, k as u32, 256, RATE, 2, R40);
+        // packet k ends (k - last_in_time) x 256 past the last in-time end: 187 x 256 = 47 872
+        // is within one second (48 000), 188 x 256 = 48 128 is past it
+        if k - last_in_time <= 187 {
+            assert_eq!(d.event, Event::Late, "packet {k}: {d:?}");
+        } else {
+            assert_eq!(
+                (d.event, d.reason),
+                (Event::Reanchor, Reason::Late),
+                "{d:?}"
+            );
+            break;
+        }
+        k += 1;
+    }
+    assert_eq!((t.re_anchors, t.late), (1, 188));
+    // the re-anchor holds its first second, then the new line: arrival + 90 ms - one packet + R
+    for j in 1..H {
+        let d = t.packet(on_time(k + j) + step, (k + j) as u32, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Hold, "{d:?}");
+    }
+    for j in H..H + 400 {
+        let d = t.packet(on_time(k + j) + step, (k + j) as u32, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Packet, "{d:?}");
+        let want = on_time(k + j) + step - samples_to_ns(256, RATE) + R40;
+        assert!(d.stamp_ns.abs_diff(want) <= 2, "{} vs {want}", d.stamp_ns);
+    }
+    assert_eq!(t.re_anchors, 1, "one delay step, one re-anchor");
 }
 
 /// An index far behind the last one (more than a reorder could be: 65 packets) is a sender
@@ -596,22 +644,23 @@ fn a_sender_beyond_the_clamp_cannot_hold() {
     );
 }
 
+/// ROZHODNUTÉ 6345255813 (2): packets that stay IN TIME are never a re-anchor, even when none of
+/// them folds into the fit (every one 20 ms after the anchored line: within the margin, but more
+/// than the 10 ms outlier limit). The 3-s fold-starve re-anchor is gone; the fit just learns nothing
+/// from them and the line stays where the anchor put it.
 #[test]
-fn packets_late_against_the_line_are_not_folded_and_starve_the_fit() {
+fn packets_in_time_but_off_the_line_never_re_anchor() {
     let mut t = Timeline::new();
+    let line = |k: u64| on_time(k) - samples_to_ns(256, RATE) + R40;
     t.packet(on_time(0), 0, 256, RATE, 2, R40);
-    // Every later packet 20 ms late (within R, never 'late', but an outlier): after 3 s of
-    // audio with nothing folded the fit cannot hold.
-    let mut reason = Reason::None;
-    for k in 1..1000u64 {
+    for k in 1..(30 * 48_000 / 256u64) {
         let d = t.packet(on_time(k) + 20 * NS_PER_MS, k as u32, 256, RATE, 2, R40);
-        if d.event == Event::Reanchor {
-            reason = d.reason;
-            // the anchor folded end position 256; packet k ends at (k + 1) x 256, so the first
-            // end more than 3 s (144 000 samples) past it is packet 563
-            assert_eq!(k, 563, "the starvation re-anchor came at packet {k}");
-            break;
-        }
+        assert_eq!(
+            d.event,
+            if k < H { Event::Hold } else { Event::Packet },
+            "packet {k}: {d:?}"
+        );
+        assert!(d.stamp_ns.abs_diff(line(k)) <= 2, "packet {k}");
     }
-    assert_eq!(reason, Reason::Fit);
+    assert_eq!((t.re_anchors, t.late), (0, 0));
 }

@@ -213,7 +213,17 @@ fn replay(sched: &[Sent], reserve_ms: u64) -> Run {
             });
             prev_stamp = None;
         }
-        // the source emits only a PACKET (the silence of the slots lost before it first)
+        // a LATE packet: dropped, its slot (and the lost ones before it) silence on the line
+        if d.event == Event::Late {
+            if d.silence_samples > 0 {
+                obs.chunk(
+                    t.stamp_at(d.silence_pos) as f64,
+                    samples_to_ns(d.silence_samples, 48_000) as f64,
+                );
+            }
+            continue;
+        }
+        // otherwise the source emits only a PACKET (the silence of the slots lost before it first)
         if d.event != Event::Packet {
             continue;
         }
@@ -365,55 +375,81 @@ fn a_first_packet_at_the_end_of_a_25_ms_gap_never_walks_the_stamp_latency_1439()
     }
 }
 
-/// ROZHODNUTÉ 6343922049 (2): one network event = one re-anchor. A 90 ms hiccup two minutes in
-/// (everything sent in it arrives together at its end, more than R late) shifts the line once; the
-/// next fit does not re-anchor again, nothing else in the 10 min is late, and the shifted latency is
-/// held to ±1 ms for the rest of the run.
+/// The schedule with a network event two minutes in: from 120 s every arrival that falls within
+/// `hold_ms` is held back to its end (a one-off hiccup), or, when `persistent`, every later arrival
+/// is `hold_ms` later (a delay step). The receive thread hands packets over in order.
+fn with_network_event(mut sched: Vec<Sent>, hold_ms: u64, persistent: bool) -> Vec<Sent> {
+    let h0 = S0 + 120_000_000_000;
+    let h1 = h0 + hold_ms * NS_PER_MS;
+    let mut prev = 0u64;
+    for s in sched.iter_mut() {
+        if let Some(a) = s.arrival_ns.as_mut() {
+            if persistent && *a >= h0 {
+                *a += hold_ms * NS_PER_MS;
+            } else if !persistent && (h0..h1).contains(a) {
+                *a = h1;
+            }
+            *a = (*a).max(prev + 1_000);
+            prev = *a;
+        }
+    }
+    sched
+}
+
+/// ROZHODNUTÉ 6345255813 (2): a fixed latency is a fixed jitter buffer. A one-off 90 ms hiccup
+/// (everything sent in it arrives together at its end, more than R late) costs late DROPS -- their
+/// slots silence -- and ZERO re-anchors; the latency (stamp and realized) holds its anchored value
+/// over the whole run.
 #[test]
-fn one_network_hiccup_is_one_re_anchor_1439() {
+fn a_90_ms_hiccup_is_late_drops_and_zero_re_anchors_1439() {
     for (ppm, seed) in [(0.0, 1u64), (30.0, 2), (-30.0, 3)] {
-        let mut sched = schedule(seed, ppm, TEN_MIN_PACKETS, 0.0);
-        let h0 = S0 + 120_000_000_000;
-        let h1 = h0 + 90_000_000;
-        // the receive thread hands packets over in order: arrivals never go back
-        let mut prev = 0u64;
-        for s in sched.iter_mut() {
-            if let Some(a) = s.arrival_ns.as_mut() {
-                if (h0..h1).contains(a) {
-                    *a = h1;
-                }
-                *a = (*a).max(prev + 1_000);
-                prev = *a;
-            }
-        }
-        let mut t = Timeline::new();
-        let mut shift_k = None;
-        let (mut held, mut dev_max) = (f64::NAN, 0.0f64);
-        for s in &sched {
-            let a = s.arrival_ns.unwrap();
-            let d = t.packet(a, s.k as u32, F, 48_000, 2, 40 * NS_PER_MS);
-            if d.event == Event::Reanchor && shift_k.is_none() {
-                shift_k = Some(s.k);
-            }
-            let lat = d.stamp_ns as f64 - s.first_sample_ns;
-            if shift_k.is_some() && d.event == Event::Packet {
-                if held.is_nan() {
-                    held = lat;
-                }
-                dev_max = dev_max.max((lat - held).abs());
-            }
-        }
-        let tag = format!(
-            "ppm {ppm} seed {seed}: late={} re_anchors={} shift at packet {shift_k:?}, held latency \
-             {:.3} ms, moved {:.3} ms after it",
-            t.late,
-            t.re_anchors,
-            held / MS,
-            dev_max / MS
+        let run = replay(
+            &with_network_event(schedule(seed, ppm, TEN_MIN_PACKETS, 0.0), 90, false),
+            40,
         );
+        let tag = format!("hiccup 90 ms, ppm {ppm} seed {seed}: {run:?}");
         println!("{tag}");
-        assert_eq!((t.late, t.re_anchors), (1, 1), "{tag}");
-        assert!(dev_max <= 1.0 * MS, "{tag}");
+        assert!(
+            run.late > 0,
+            "the hiccup must really drop late packets: {tag}"
+        );
+        assert_eq!(run.re_anchors, 0, "{tag}");
+        assert_eq!(
+            run.silence_samples,
+            run.late * u64::from(F),
+            "a late slot is silence: {tag}"
+        );
+        assert_latency_held(&run, &tag);
+    }
+}
+
+/// ROZHODNUTÉ 6345255813 (2 + 3): a PERSISTENT 90 ms delay step two minutes in: one second of late
+/// drops, then exactly ONE re-anchor through the hold, and the new stretch holds its own anchored
+/// latency -- the old one + the 90 ms the network added -- to ±1 ms (stamp and realized) for the
+/// rest of the run.
+#[test]
+fn a_90_ms_persistent_delay_step_is_one_re_anchor_1439() {
+    for (ppm, seed) in [(0.0, 1u64), (30.0, 2), (-30.0, 3)] {
+        let run = replay(
+            &with_network_event(schedule(seed, ppm, TEN_MIN_PACKETS, 0.0), 90, true),
+            40,
+        );
+        let tag = format!("delay step 90 ms, ppm {ppm} seed {seed}: {run:?}");
+        println!("{tag}");
+        assert_eq!(run.re_anchors, 1, "one delay step, one re-anchor: {tag}");
+        assert_eq!(run.segments.len(), 2, "{tag}");
+        assert_latency_held(&run, &tag);
+        let (a, b) = (&run.segments[0], &run.segments[1]);
+        assert_eq!(run.emitted_in_first_second, 0, "the re-anchor held: {tag}");
+        assert!(
+            b.latency_dev_max_ns <= 1.0 * MS && b.realized_dev_max_ns <= 1.0 * MS,
+            "the new stretch must hold its anchored latency: {tag}"
+        );
+        let added = (b.anchored_realized_ns - a.anchored_realized_ns) / MS;
+        assert!(
+            (85.0..=95.0).contains(&added),
+            "the new latency is the old one + the network's 90 ms, got +{added:.2} ms: {tag}"
+        );
     }
 }
 
@@ -441,7 +477,8 @@ fn known_limit_a_100_ppm_sender_moves_the_held_stamp_latency_about_2_ms_1439() {
 fn the_same_sender_at_a_20_ms_buffer_goes_late_1439() {
     let run = replay(&schedule(1, 50.0, TEN_MIN_PACKETS / 4, 0.0), 20);
     assert!(run.late > 0, "R below the gaps must read late: {run:?}");
-    assert!(run.re_anchors >= run.late, "{run:?}");
+    // its late runs are far shorter than a second: drops, never a re-anchor (ROZHODNUTÉ 6345255813)
+    assert_eq!(run.re_anchors, 0, "{run:?}");
 }
 
 /// Network loss: every lost packet is exactly one packet of silence, and a loss is never a

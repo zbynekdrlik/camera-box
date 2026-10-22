@@ -789,52 +789,55 @@ fn the_receive_buffer_is_in_place_before_the_first_sender_can_deliver_1439() {
     }
 }
 
-/// ROZHODNUTÉ 6343922049 (2): a packet past its stamp once the fit is valid shifts the line ONCE.
-/// The source logs one re-anchor with `fit=kept`, outputs the slots lost before the late packet as
-/// silence and then the packet, contiguous on the shifted line, and keeps receiving.
+/// ROZHODNUTÉ 6345255813 (2): a packet past its stamp is LOST, never re-timed. The source drops its
+/// audio, outputs its slot -- with the slots lost right before it -- as silence at once on the
+/// unchanged line, logs ONE `obs-vban receive late:` line for the late run (never a re-anchor), and
+/// the next packets go on contiguously on that same line.
 #[test]
-fn a_late_shift_outputs_the_lost_slots_and_the_packet_on_the_new_line_1439() {
+fn a_late_packet_is_dropped_and_its_slot_is_silence_on_the_same_line_1439() {
     // 15 s on the grid: the fit is valid
     let n = 15 * RATE / u64::from(FRAMES);
     let nus: Vec<u32> = (0..n as u32).collect();
     let mut pkts = on_grid(&nus);
-    // packets n and n + 1 lost, n + 2 arrives 100 ms after its grid instant (more than R late)
-    let k = n + 2;
-    pkts.push((
-        k as u32,
-        1_000_000_000 + ns(k * u64::from(FRAMES)) + 100_000_000,
-        99,
-    ));
+    // packets n and n + 1 lost, n + 2 arrives 40 ms after its grid instant (5.3 ms past its stamp),
+    // n + 3 .. n + 9 lost, then n + 10 .. n + 14 on the grid (in time again)
+    let t_late = 1_000_000_000 + ns((n + 2) * u64::from(FRAMES)) + 40_000_000;
+    pkts.push(((n + 2) as u32, t_late, 99));
+    for k in n + 10..n + 15 {
+        pkts.push((
+            k as u32,
+            1_000_000_000 + ns(k * u64::from(FRAMES)),
+            (k - n) as i16,
+        ));
+    }
     let (outs, log) = run_with_log(&pkts);
-    let reanchors: Vec<&str> = log
-        .lines()
-        .filter(|l| l.contains("obs-vban receive re-anchor:"))
-        .collect();
+    assert!(
+        !log.contains("obs-vban receive re-anchor:"),
+        "issue 1439: a late packet is never a re-anchor:\n{log}"
+    );
     assert_eq!(
-        reanchors.len(),
+        log.matches("obs-vban receive late:").count(),
         1,
-        "issue 1439: one event, one re-anchor:\n{log}"
+        "issue 1439: one line for the late run:\n{log}"
     );
     assert!(
-        reanchors[0].contains("reason=late") && reanchors[0].contains(" fit=kept shift_ms="),
-        "issue 1439: a late packet with a valid fit shifts the line, the fit kept: `{}`",
-        reanchors[0]
+        outs.iter().all(|o| o.zero || o.first != 99),
+        "issue 1439: the late packet's audio is dropped: {outs:?}"
     );
-    let tail = &outs[outs.len() - 2..];
-    assert!(
-        tail[0].zero && tail[0].frames == 2 * u64::from(FRAMES),
-        "issue 1439: the two lost slots are silence: {tail:?}"
-    );
-    assert!(
-        !tail[1].zero && tail[1].first == 99,
-        "issue 1439: the late packet itself reaches OBS: {tail:?}"
-    );
-    assert_contiguous(tail);
+    // the late packet's arrival: its slot + the two lost before it; n + 10's: the seven lost
+    let tail = &outs[outs.len() - 7..];
     assert_eq!(
-        outs.iter().filter(|o| !o.zero).count() as u64,
-        n + 1 - u64::from(HELD),
-        "issue 1439: every packet's audio reaches OBS once"
+        (tail[0].zero, tail[0].frames, tail[1].zero, tail[1].frames),
+        (true, 3 * u64::from(FRAMES), true, 7 * u64::from(FRAMES)),
+        "issue 1439: the lost and late slots are silence: {tail:?}"
     );
+    assert_eq!(
+        tail[2..].iter().map(|o| o.first).collect::<Vec<_>>(),
+        vec![10, 11, 12, 13, 14],
+        "issue 1439: the stream goes on: {tail:?}"
+    );
+    // contiguous across the silence: the line never moved
+    assert_contiguous(&outs[outs.len() - 8..]);
 }
 
 /// ROZHODNUTÉ 6343922049 (3): a Receive Buffer no longer than one packet + 10 ms is lifted to that
