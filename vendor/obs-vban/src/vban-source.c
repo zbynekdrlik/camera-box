@@ -104,6 +104,12 @@ static void vban_src_update(void *data, obs_data_t *settings)
 
 	int port = (int)obs_data_get_int(settings, "port");
 
+	/* camera-box issue 1439: R is fixed from create/update; another value re-anchors the timeline at
+	 * its next packet (a counted, logged config re-anchor), never a runtime adaptation. It is in place
+	 * before any sender is let in below (on create, a packet could otherwise anchor with R = 0). */
+	os_atomic_set_long(&s->receive_buffer_ms,
+			   (long)vban_recv_clamp_reserve_ms((int64_t)obs_data_get_int(settings, "receive_buffer_ms")));
+
 	/* camera-box issue 1439: another port / stream / host starts a new timeline. The reset is asked for
 	 * BEFORE the new sender is let in below, so its first packet already finds it (asked only after,
 	 * that packet could land on the old timeline: a gap read as lost slots, or a counted re-anchor). It
@@ -129,10 +135,6 @@ static void vban_src_update(void *data, obs_data_t *settings)
 	if (port_changed || ip_changed)
 		vban_udp_set_host(s->vban, vban_src_callback, s, s->ip_from);
 
-	/* camera-box issue 1439: R is fixed from create/update; another value re-anchors the timeline at
-	 * its next packet (a counted, logged config re-anchor), never a runtime adaptation. */
-	os_atomic_set_long(&s->receive_buffer_ms,
-			   (long)vban_recv_clamp_reserve_ms((int64_t)obs_data_get_int(settings, "receive_buffer_ms")));
 	if (port_changed || name_changed || ip_changed)
 		os_atomic_set_bool(&s->timeline_reset, true);
 }
