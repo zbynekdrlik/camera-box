@@ -68,6 +68,10 @@ is the window's largest arrival - stamp of an on-time packet: about -R + jitter 
   timeline is touched only there. The status line takes the stream name from the PACKET header
   (`%.*s`, 16 bytes), never `s->stream_name` (the UI thread's, which `update()` frees), and the port
   from an atomic copy.
+- **A reconfiguration (another port / stream / host) asks for the new timeline BEFORE the new sender
+  is let in** (review round 1; set after only, its first packet could land on the old timeline as lost
+  slots), and again after. `tests/vban_source_loss_1439.rs` reads the pending reset at each UDP
+  registration call.
 - **A failed bind is final:** `vban-udp-thread.c` logs `[obs-vban] Failed to bind port P` and its
   thread exits, no retry. A hub still holding 6980 when OBS starts = no program audio until OBS
   restarts with the port free. verify item 9 names it.

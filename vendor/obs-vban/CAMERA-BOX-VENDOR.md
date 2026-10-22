@@ -98,6 +98,9 @@ mixes at 0 ms audio buffering) and a late packet was a click. The timeline inste
 - **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
 - **Stale.** A duplicate, or a `nuFrame` at most 64 packets behind the last one (a network
   reorder), is dropped and counted (`stale=`): its slot already went out as silence.
+- **Reconfiguration.** Another port, stream name or host starts a new timeline. `update()` asks for
+  the reset BEFORE it lets the new sender in (`vban_src_string_changes`, the predicate
+  `update_string()` uses), and again after.
 - **Re-anchor (one counted event).** A packet after its stamp, a `nuFrame` further behind (a
   sender restart), a jump of more than 2 s of audio, another rate/channel count/R, or a fit that cannot
   hold (rate beyond ±500 ppm, stamps more than R off `fit + R`, nothing folded for 3 s).

@@ -77,10 +77,16 @@ static void update_port(struct vban_src_s *s, int port)
 	vban_udp_add_callback(s->vban, vban_src_callback, s);
 }
 
+/* camera-box issue 1439: whether update_string() would replace CUR with VAL */
+static bool vban_src_string_changes(const char *cur, const char *val)
+{
+	return !cur || (val && strcmp(val, cur) != 0);
+}
+
 bool update_string(char **opt, obs_data_t *settings, const char *name)
 {
 	const char *val = obs_data_get_string(settings, name);
-	if (!*opt || (val && strcmp(val, *opt) != 0)) {
+	if (vban_src_string_changes(*opt, val)) {
 		bfree(*opt);
 		*opt = bstrdup(val);
 		return true;
@@ -97,6 +103,15 @@ static void vban_src_update(void *data, obs_data_t *settings)
 	bool name_changed = false;
 
 	int port = (int)obs_data_get_int(settings, "port");
+
+	/* camera-box issue 1439: another port / stream / host starts a new timeline. The reset is asked for
+	 * BEFORE the new sender is let in below, so its first packet already finds it (asked only after,
+	 * that packet could land on the old timeline: a gap read as lost slots, or a counted re-anchor). It
+	 * is asked again at the end, in case the old sender's last packet took this one in between. */
+	if (port != s->port || vban_src_string_changes(s->stream_name, obs_data_get_string(settings, "stream_name")) ||
+	    vban_src_string_changes(s->ip_from, obs_data_get_string(settings, "ip_from")))
+		os_atomic_set_bool(&s->timeline_reset, true);
+
 	if (port != s->port) {
 		update_port(s, port);
 		port_changed = true;
