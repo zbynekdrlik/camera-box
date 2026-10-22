@@ -154,14 +154,17 @@ fn replay(sched: &[Sent], reserve_ms: u64) -> Run {
             prev_stamp = None;
             continue;
         }
-        if let Some((ps, pk)) = prev_stamp {
+        // the first second may move the line earlier (the anchor is its earliest arrival); after
+        // it no stamp step may jump
+        let first_second = (s.k + 1) * u64::from(F) <= 48_000;
+        if let Some((ps, pk)) = prev_stamp.filter(|_| !first_second) {
             let nominal = samples_to_ns((s.k - pk) * u64::from(F), 48_000) as f64;
-            let dev = ((d.stamp_ns - ps) as f64 - nominal).abs() / nominal * 1e6;
+            let dev = (d.stamp_ns as f64 - ps as f64 - nominal).abs() / nominal * 1e6;
             run.max_step_dev_ppm = run.max_step_dev_ppm.max(dev);
         }
         prev_stamp = Some((d.stamp_ns, s.k));
         let lat = d.stamp_ns as f64 - s.first_sample_ns;
-        if (s.k + 1) * u64::from(F) <= 48_000 {
+        if first_second {
             run.first_second_latency_max_ns = run.first_second_latency_max_ns.max(lat);
         } else if run.anchored_latency_ns.is_nan() {
             run.anchored_latency_ns = lat;
