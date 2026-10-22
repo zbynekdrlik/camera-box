@@ -185,7 +185,10 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
 ## Verify locally (Tier-0, no cargo)
 
 - `rustc --test --edition 2021 src/vban_receive_timeline.rs` (unit tests + the bench) and
-  `clippy-driver --edition 2021 --test -D warnings` on the same file.
+  `clippy-driver --edition 2021 --test -D warnings` on the same file. Compile WITHOUT `-O`: CI runs
+  the debug profile, where an unsigned underflow panics; an `-O` build wraps it silently (round 3
+  shipped two GREEN commits that only passed under `-O`). Where the C header wraps, the Rust twin
+  uses `wrapping_sub`, and test arrivals are monotonic like the real receive thread.
 - `CARGO_MANIFEST_DIR=<wt> rustc --test --edition 2021 tests/vban_receive_timeline_parity_1439.rs`
   (the C-vs-Rust trace, bit-for-bit doubles under `-ffp-contract=off`), the same for
   `tests/vban_receive_wiring_1439.rs` (the ASRC lift, the source wiring and the workflow pins; split
