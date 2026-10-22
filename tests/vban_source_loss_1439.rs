@@ -703,3 +703,78 @@ fn an_outage_of_1_5_s_is_one_starve_re_anchor_and_no_late_fill_1439() {
         "issue 1439: both anchors hold their first second"
     );
 }
+
+/// The `obs-vban receive:` status lines of a run, as `key=value` maps (`[obs-vban] ` prefixed).
+fn status_lines(log: &str) -> Vec<std::collections::HashMap<String, String>> {
+    log.lines()
+        .filter_map(|l| l.strip_prefix("blog 300: [obs-vban] obs-vban receive: "))
+        .map(|l| {
+            l.split_whitespace()
+                .filter_map(|f| f.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        })
+        .collect()
+}
+
+/// Review round 4: packets that stay in time but sit more than the outlier limit off the line (an
+/// on-time delay level step) never re-anchor, and the fit learns nothing from them -- the status
+/// line must SAY so (`fit=frozen`) instead of `fit=locked`.
+#[test]
+fn a_fit_that_folds_nothing_reads_frozen_on_the_status_line_1439() {
+    // 12 s on the grid (the fit is valid at ~10 s), then 10 s 15 ms later: in time, not folded
+    let n = 12 * RATE / u64::from(FRAMES);
+    let m = 10 * RATE / u64::from(FRAMES);
+    let pkts: Vec<(u32, u64, i16)> = (0..n + m)
+        .map(|k| {
+            let late = if k >= n { 15_000_000 } else { 0 };
+            (
+                k as u32,
+                1_000_000_000 + ns(k * u64::from(FRAMES)) + late,
+                1,
+            )
+        })
+        .collect();
+    let (_outs, log) = run_with_log(&pkts);
+    let lines = status_lines(&log);
+    assert_eq!(
+        lines.len(),
+        2,
+        "issue 1439: two status lines in 22 s:\n{log}"
+    );
+    assert_eq!(lines[0]["fit"], "locked", "issue 1439: {lines:?}");
+    assert_eq!(
+        lines[1]["fit"], "frozen",
+        "issue 1439: nothing folded for 10 s while the fit is valid: {lines:?}"
+    );
+    assert_eq!(lines[1]["re_anchors"], "0", "{lines:?}");
+}
+
+/// Review round 4: the status line's `max_late_ms` (the measure R is chosen by) includes the late
+/// packets that were dropped, not only the ones that came in time.
+#[test]
+fn max_late_ms_counts_the_dropped_late_packets_1439() {
+    // 22 s on the grid: the status lines come at ~10 s and ~20 s
+    let n = 22 * RATE / u64::from(FRAMES);
+    let mut pkts = on_grid(&(0..n as u32).collect::<Vec<_>>());
+    // at 15 s one packet 50 ms after its grid instant (past its stamp: R 40 - one packet = 34.7 ms
+    // margin); the ones right behind it arrive with it
+    let at = (15 * RATE / u64::from(FRAMES)) as usize;
+    pkts[at].1 += 50_000_000;
+    // the receive thread hands packets over in order
+    for i in at + 1..n as usize {
+        pkts[i].1 = pkts[i].1.max(pkts[i - 1].1 + 1_000);
+    }
+    let (_outs, log) = run_with_log(&pkts);
+    let lines = status_lines(&log);
+    let last = lines.last().expect("a status line");
+    assert!(
+        last["late"].parse::<u64>().unwrap() >= 1,
+        "issue 1439: the late packet was dropped: {lines:?}"
+    );
+    let max_late: f64 = last["max_late_ms"].parse().unwrap();
+    assert!(
+        max_late > 10.0,
+        "issue 1439: max_late_ms must show the dropped packet (~15 ms past its stamp): {lines:?}"
+    );
+}
