@@ -14,6 +14,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// A two-Windows-box fleet fixture for the probe MECHANISM tests. Since issue 1462 the real fleet
+/// has ONE Windows OBS box (resolume-snv; stream-snv runs the Linux stream role), so the
+/// alert / throttle / recovery mechanics are pinned on this fixture, where stream-snv keeps its
+/// pre-1462 Windows row. `targets_on_the_real_fleet_are_resolume_only_1462` pins the real roster.
+const WIN_FLEET: &str = "strih-snv|10.77.9.202|linux-genlock|always\n\
+stream-snv|10.77.9.204|windows-genlock|always\n\
+resolume-snv|resolume.lan|windows-genlock|traveling";
+const WIN_BOXES: &str = "stream-snv|10.77.9.204 resolume-snv|resolume.lan";
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -103,10 +112,10 @@ fn targets(env: &[(&str, &str)]) -> String {
     cmd.arg("-c")
         .arg(". \"$SCRIPT\"\nobs_session_targets")
         .env("SCRIPT", script())
-        .env_remove("OBS_SESSION_WATCHDOG_BOXES")
+        .env("OBS_SESSION_WATCHDOG_BOXES", WIN_BOXES)
         .env_remove("STREAM_SNV_HOST")
         .env_remove("RESOLUME_SNV_HOST")
-        .env_remove("OBS_FLEET");
+        .env("OBS_FLEET", WIN_FLEET);
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -127,6 +136,20 @@ fn targets_are_windows_genlock_only_with_per_box_ahk_1317() {
     assert_eq!(
         targets(&[("OBS_FLEET_HOME", "stream-snv resolume-snv")]),
         "stream-snv 10.77.9.204 0\nresolume-snv resolume.lan guard"
+    );
+}
+
+#[test]
+fn targets_on_the_real_fleet_are_resolume_only_1462() {
+    // The real obs-session facet is resolume-snv alone: stream-snv runs the Linux stream role since
+    // issue 1462, and even named in an override the class gate keeps the PowerShell probe off it.
+    assert_eq!(
+        targets(&[
+            ("OBS_FLEET_HOME", "stream-snv resolume-snv"),
+            ("OBS_FLEET", ""),
+            ("OBS_SESSION_WATCHDOG_BOXES", ""),
+        ]),
+        "resolume-snv resolume.lan guard"
     );
 }
 
@@ -195,6 +218,8 @@ fn main_never_ssh_probes_the_linux_strih_1317() {
         .env("SCRIPT", script())
         .env("OBS_SESSION_WATCHDOG_STATE_FILE", tmp.path().join("state"))
         .env("OBS_FLEET_HOME", "stream-snv resolume-snv")
+        .env_remove("OBS_FLEET")
+        .env_remove("OBS_SESSION_WATCHDOG_BOXES")
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
         .env("PATH", path)
         .output()
@@ -203,8 +228,8 @@ fn main_never_ssh_probes_the_linux_strih_1317() {
     assert_eq!(out.status.code(), Some(0), "stderr={err}");
     let log = fs::read_to_string(&calls).unwrap_or_default();
     assert!(
-        log.contains("10.77.9.204"),
-        "stream-snv must be probed: {log}"
+        !log.contains("10.77.9.204"),
+        "the Linux stream-snv (issue 1462) must NEVER get the Windows PowerShell probe: {log}"
     );
     assert!(
         log.contains("resolume.lan"),
@@ -286,9 +311,11 @@ impl Harness {
             .arg(". \"$SCRIPT\"\nmain")
             .env("SCRIPT", script())
             .env("OBS_SESSION_WATCHDOG_STATE_FILE", &self.state_file)
-            // issue 1317: the roster is the fleet `obs-session` facet (stream + resolume when
-            // home) -- force both home so the pass never depends on live resolume.lan I/O.
+            // issue 1317: force both home so the pass never depends on live resolume.lan I/O;
+            // issue 1462: the two-Windows-box fixture (the real fleet has one Windows box).
             .env("OBS_FLEET_HOME", "stream-snv resolume-snv")
+            .env("OBS_FLEET", WIN_FLEET)
+            .env("OBS_SESSION_WATCHDOG_BOXES", WIN_BOXES)
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
             .env("PATH", path)
             .output()
@@ -410,6 +437,8 @@ fn dry_run_never_calls_notify() {
             .env("SCRIPT", script())
             .env("OBS_SESSION_WATCHDOG_STATE_FILE", &h.state_file)
             .env("OBS_FLEET_HOME", "stream-snv resolume-snv")
+            .env("OBS_FLEET", WIN_FLEET)
+            .env("OBS_SESSION_WATCHDOG_BOXES", WIN_BOXES)
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
             .env("PATH", &path)
             .output()

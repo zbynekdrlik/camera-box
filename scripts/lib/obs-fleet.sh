@@ -249,7 +249,7 @@ obs_fleet_facet_members() {
     genlock-lock)  printf 'strih-snv stream-snv imag resolume-snv strih-pp stream-pp' ;;   # issue 1441: + the PP Linux boxes
     render-freeze) printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;
     ndi-portmap)   printf 'strih-snv' ;;
-    obs-session)   printf 'stream-snv resolume-snv' ;;
+    obs-session)   printf 'resolume-snv' ;;   # Windows-only; stream-snv runs Linux since issue 1462
     burn-reconcile) printf 'strih-snv stream-snv' ;;
     rig-restore)   printf 'strih-snv stream-snv' ;;
     ndi-sender)    printf 'strih-snv stream-snv resolume-snv' ;;

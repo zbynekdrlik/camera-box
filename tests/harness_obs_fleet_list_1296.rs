@@ -90,7 +90,7 @@ fn fleet_host_resolves_each_declared_box_1296() {
 fn fleet_class_distinguishes_windows_from_linux_genlock_1296() {
     assert_eq!(
         fleet_stdout("obs_fleet_class stream-snv"),
-        "windows-genlock"
+        "linux-genlock" // the Linux stream role since issue 1462
     );
     assert_eq!(
         fleet_stdout("obs_fleet_class resolume-snv"),
@@ -327,11 +327,8 @@ const ALL_FACETS: [&str; 16] = [
 fn fleet_obs_session_facet_is_windows_genlock_only_1317() {
     // obs-session = the Windows session-0 / AHK visibility probe (a PowerShell probe over
     // win_ssh_run). It has no meaning on a Linux box, so the facet carries ONLY windows-genlock
-    // boxes: stream + resolume (the latter gated on is_home by the consumer).
-    assert_eq!(
-        boxes("obs-session"),
-        "stream-snv|10.77.9.204 resolume-snv|resolume.lan"
-    );
+    // boxes: resolume (gated on is_home by the consumer); stream-snv runs Linux since issue 1462.
+    assert_eq!(boxes("obs-session"), "resolume-snv|resolume.lan");
     for m in fleet_stdout("obs_fleet_facet_members obs-session").split_whitespace() {
         assert_eq!(
             fleet_stdout(&format!("obs_fleet_class {m}")),
@@ -749,7 +746,7 @@ fn fleet_class_for_host_and_the_linux_refusal_gate_1317() {
     for (host, want) in [
         ("10.77.9.202", "linux-genlock"),
         ("strih-snv", "linux-genlock"),
-        ("10.77.9.204", "windows-genlock"),
+        ("10.77.9.204", "linux-genlock"),
         ("resolume.lan", "windows-genlock"),
         ("resolume-snv", "windows-genlock"),
     ] {
@@ -776,7 +773,10 @@ fn fleet_class_for_host_and_the_linux_refusal_gate_1317() {
             && err.contains("10.77.9.202"),
         "the refusal names the tool, the class and the address: {err:?}"
     );
-    for ok_host in ["10.77.9.204", "resolume.lan", "10.1.2.3"] {
+    // the Linux stream-snv (issue 1462) is refused like the strih
+    let (rc, _o, err) = run_fleet("obs_fleet_refuse_linux_target 10.77.9.204 t", &[]);
+    assert_eq!(rc, 1, "the Linux stream-snv is refused too: {err:?}");
+    for ok_host in ["resolume.lan", "10.1.2.3"] {
         let (rc, _o, err) = run_fleet(&format!("obs_fleet_refuse_linux_target {ok_host} t"), &[]);
         assert_eq!(rc, 0, "{ok_host} is not a Linux fleet box: {err:?}");
         assert!(err.is_empty(), "silent pass for {ok_host}: {err:?}");
