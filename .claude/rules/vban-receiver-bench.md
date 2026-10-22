@@ -137,6 +137,13 @@ designs 6338127636 and 6338457001.
 - **FAIL** on the last status row's `lost` (or the stock source's `missing N packet(s)` sum)
   different from what the emulator dropped.
 
+**Gotcha for any grader keyed on an input name:** libobs itself prints a line quoting EVERY audio
+source once a minute (`audio-telemetry #800 '<src>': ... mixed_late=N`, plus the `asrc: source
+'<src>'` line). "The last row that quotes the input and carries numbers" is therefore usually a
+telemetry row, not the receiver's status row. The first draft of this grader did exactly that and
+let a `late=2 reanchors=1` status row pass. Parse those two families separately, and select status
+rows by their own keys.
+
 The issue-1439 receiver's 10 s status line has no fixed text yet. A status row is a row naming the
 input that carries a receive key (`received`, `lost`, `late`, `reanchors` / `re_anchors` /
 `re-anchors`); the counters are read as cumulative. When issue 1439 ships, pin its exact keys here
