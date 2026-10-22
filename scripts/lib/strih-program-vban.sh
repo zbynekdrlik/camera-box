@@ -20,6 +20,8 @@
 #                             period); not advancing = NOTE (the console is not sending now)
 #   (program-vban) R          receive_buffer_ms = the fact, else a NOTE (the operator's setting is kept)
 #   (program-vban) counters   lost / late / re_anchors since the source started: a NOTE when any is > 0
+#   (program-vban) fit        `fit=frozen` (nothing folded for 3 s while the fit is valid: an on-time
+#                             delay level step the fit no longer follows): a NOTE (issue 1439 round 4)
 #
 # Seams: STRIH_PROGRAM_VBAN_WAIT_S (the live window), STRIH_PROGRAM_VBAN_KIND_FILE (a file holding the
 # input kind, read instead of the strih_scenes.py websocket read).
@@ -95,6 +97,9 @@ strih_program_vban_grade() {
     note "(program-vban) ${n1:-?} packets received since OBS started, none in the last ${wait} s -- the console is not sending now (graded live while it sends)"
   fi
   counters="lost=$(strih_program_vban_field "${l2:-$l1}" lost) late=$(strih_program_vban_field "${l2:-$l1}" late) re_anchors=$(strih_program_vban_field "${l2:-$l1}" re_anchors)"
+  if [ "$(strih_program_vban_field "${l2:-$l1}" fit)" = frozen ]; then
+    note "(program-vban) the receive fit is FROZEN: every packet sits more than 10 ms off its line (an on-time network delay step), so the source holds its last rate and latency without following the console's clock -- an OBS restart re-anchors it (issue 1439)"
+  fi
   case "$counters" in
     "lost=0 late=0 re_anchors=0") ;;
     *) note "(program-vban) since the source started: ${counters} (each one is audible; the acceptance is zero over 8 h, issue 1439)" ;;
