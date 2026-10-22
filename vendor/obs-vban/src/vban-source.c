@@ -46,6 +46,16 @@ struct vban_src_slot {
 	double first[MAX_AV_PLANES];
 };
 
+/* camera-box issue 1439 (ROZHODNUTE 6352253147 a): a run of slots that went out without their packet, written
+ * only once the worker has handed out everything due at its look (a log write must never delay a slot) */
+struct vban_src_loss_line {
+	uint64_t slots;
+	uint32_t nu;      /* the packet that ended the run */
+	bool concealed;
+	bool stretch_end; /* the stretch stopped emitting (a starve, a re-anchor, a reset) */
+};
+#define VBAN_SRC_LOSS_LINES 4
+
 struct vban_src_s
 {
 	obs_source_t *context;
@@ -97,6 +107,9 @@ struct vban_src_s
 	 * packet, logged once when the run ends; whether the run was concealed */
 	uint64_t run_slots;
 	bool run_concealed;
+	struct vban_src_loss_line loss_done[VBAN_SRC_LOSS_LINES]; /* the runs that ended at this look */
+	size_t loss_done_n;
+	uint64_t loss_done_over; /* more runs than loss_done holds ended at this look */
 	/* worker only (ROZHODNUTE 6352253147 b): the last packet handed to libobs (what a concealment repeats),
 	 * its header, the last frame handed to libobs per channel (where a concealment fades in from), and the
 	 * concealed slot being built */
@@ -456,7 +469,7 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		blog(LOG_WARNING,
 		     "obs-vban receive late: source '%s' frame=%u late_ms=%.1f -- dropped, %s (late=%" PRIu64 ")",
 		     obs_source_get_name(s->context), nu_frame, (double)d->late_ns / 1e6,
-		     emitted_before ? "its slot is silence on the anchored line"
+		     emitted_before ? "its slot went out without it, on the anchored line"
 				    : "before the stretch's first output: nothing filled",
 		     n->late);
 	} else if (d->event == VBAN_RECV_PACKET) {
@@ -639,15 +652,37 @@ static void vban_src_loss_run(struct vban_src_s *s, const struct vban_recv_due *
 	}
 	if (!s->run_slots || (d->kind == VBAN_RECV_DUE_NONE && d->next_ns != 0))
 		return;
-	const char *what = s->run_concealed ? "concealed: the previous packet repeated, crossfaded"
-					    : "silence for those slots";
-	if (d->kind == VBAN_RECV_DUE_PACKET)
-		blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) before frame %u -- %s",
-		     obs_source_get_name(s->context), s->run_slots, next_nu, what);
-	else
-		blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) before the stretch ended -- %s",
-		     obs_source_get_name(s->context), s->run_slots, what);
+	if (s->loss_done_n < VBAN_SRC_LOSS_LINES) {
+		const struct vban_src_loss_line l = {s->run_slots, next_nu, s->run_concealed,
+						     d->kind != VBAN_RECV_DUE_PACKET};
+		s->loss_done[s->loss_done_n++] = l;
+	} else {
+		s->loss_done_over++;
+	}
 	s->run_slots = 0;
+}
+
+/* camera-box issue 1439 (review of ROZHODNUTE 6352253147): the runs that ended at this look, written when the
+ * worker has nothing more due -- the packet that ends a run is decided about one slot + the margin before its
+ * stamp, and a log write can stall (the OBS log's lock, a flush). Worker thread only, after the lock. */
+static void vban_src_loss_flush(struct vban_src_s *s)
+{
+	for (size_t i = 0; i < s->loss_done_n; i++) {
+		const struct vban_src_loss_line *l = &s->loss_done[i];
+		const char *what = l->concealed ? "concealed: the previous packet repeated, crossfaded"
+						: "silence for those slots";
+		if (l->stretch_end)
+			blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) before the stretch ended -- %s",
+			     obs_source_get_name(s->context), l->slots, what);
+		else
+			blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) before frame %u -- %s",
+			     obs_source_get_name(s->context), l->slots, l->nu, what);
+	}
+	if (s->loss_done_over)
+		blog(LOG_WARNING, "source '%s': %" PRIu64 " more run(s) of missing packets ended at one look, not logged",
+		     obs_source_get_name(s->context), s->loss_done_over);
+	s->loss_done_n = 0;
+	s->loss_done_over = 0;
 }
 
 /* camera-box issue 1439 (ROZHODNUTE 6352253147 b): the packet AUDIO (HEAD's) just handed to libobs is kept as
@@ -746,8 +781,11 @@ static uint64_t vban_src_worker_step(struct vban_src_s *s, uint64_t now)
 		pthread_mutex_unlock(&s->mutex);
 
 		vban_src_loss_run(s, &d, head.nu);
-		if (d.kind == VBAN_RECV_DUE_NONE)
+		if (d.kind == VBAN_RECV_DUE_NONE) {
+			/* nothing more is due at this look: only now the loss lines (never ahead of a slot) */
+			vban_src_loss_flush(s);
 			return d.next_ns;
+		}
 		if (d.kind == VBAN_RECV_DUE_PACKET) {
 			struct obs_source_audio audio = {
 				.frames = head.frames,
