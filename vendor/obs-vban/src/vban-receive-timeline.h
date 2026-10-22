@@ -180,8 +180,9 @@ struct vban_recv_decision {
 	uint64_t silence_pos; /* the first silent sample's position (vban_recv_stamp_at) */
 	uint64_t stamp_ns;    /* the packet's stamp */
 	int64_t lateness_ns;  /* arrival - stamp (negative = the margin left) */
-	int64_t late_ns;      /* a LATE packet: how far after its stamp; a STARVE re-anchor: how long no
-			       * packet came in time (its arrival - the last in-time arrival) */
+	int64_t late_ns;      /* a LATE packet: how far after its stamp */
+	int64_t starve_ns;    /* a STARVE re-anchor: how long no packet came in time (its arrival - the last
+			       * in-time arrival), the span the source logs; 0 on every other decision */
 	/* the LEAD-IN (review round 5), on the first output of an anchored stretch only (always an in-time
 	 * packet): this many frames of silence go out BEFORE it, from its arrival up to its stamp, so
 	 * libobs starts the stream at that arrival and the packet lands on its stamp whatever libobs makes
@@ -415,7 +416,7 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 							  uint32_t frames, uint32_t rate, uint32_t channels,
 							  uint64_t reserve_ns)
 {
-	struct vban_recv_decision d = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+	struct vban_recv_decision d = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 	if (frames == 0)
 		frames = 1;
 	if (rate == 0)
@@ -528,7 +529,7 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
 		return d;
 	}
 	if (reason == VBAN_RECV_REASON_STARVE)
-		d.late_ns = (int64_t)now_ns - (int64_t)t->last_intime_ns;
+		d.starve_ns = (int64_t)now_ns - (int64_t)t->last_intime_ns;
 	t->re_anchors++;
 	vban_recv_anchor(t, now_ns, nu, frames, rate, channels, reserve_ns);
 	d.event = VBAN_RECV_REANCHOR;

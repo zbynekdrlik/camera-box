@@ -291,7 +291,7 @@ static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decisio
 		     "obs-vban receive re-anchor: source '%s' reason=%s frame=%u starve_ms=%.1f re_anchors=%" PRIu64
 		     " late=%" PRIu64 " -- holding its first second",
 		     obs_source_get_name(s->context), vban_recv_reason_name(d->reason), nu_frame,
-		     (double)d->late_ns / 1e6, t->re_anchors, t->late);
+		     (double)d->starve_ns / 1e6, t->re_anchors, t->late);
 	}
 	if (d->event == VBAN_RECV_LATE && !s->late_run) {
 		/* ROZHODNUTE 6345255813 item 2: a late packet is lost, never re-timed; one line per late run */

@@ -210,9 +210,11 @@ pub struct Decision {
     pub stamp_ns: u64,
     /// Arrival − stamp (negative = the margin left).
     pub lateness_ns: i64,
-    /// A LATE packet: how far after its stamp it came. A STARVE re-anchor: how long no packet
-    /// came in time (its arrival − the last in-time arrival), the span the source logs.
+    /// A LATE packet: how far after its stamp it came.
     pub late_ns: i64,
+    /// A STARVE re-anchor: how long no packet came in time (its arrival − the last in-time
+    /// arrival), the span the source logs (`starve_ms=`). 0 on every other decision.
+    pub starve_ns: i64,
     /// The LEAD-IN (review round 5), on the first output of an anchored stretch only (always an
     /// in-time packet): this many frames of silence go out BEFORE it, from its arrival up to its
     /// stamp, so libobs starts the stream at that arrival and the packet lands on its stamp
@@ -705,7 +707,7 @@ impl Timeline {
             return d;
         }
         if reason == Reason::Starve {
-            d.late_ns = now_ns as i64 - self.last_intime_ns as i64;
+            d.starve_ns = now_ns as i64 - self.last_intime_ns as i64;
         }
         self.re_anchors += 1;
         self.anchor(now_ns, nu, frames, rate, channels, reserve_ns);

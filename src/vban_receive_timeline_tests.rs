@@ -531,8 +531,9 @@ fn a_sender_pause_of_more_than_a_second_is_one_re_anchor_with_no_drops() {
 }
 
 /// Review round 5: a STARVE re-anchor carries how long no packet came in time (its arrival − the
-/// last in-time arrival) in `late_ns`, so the source logs the starve span (it logged
-/// `late_ms=0.0`). Every other re-anchor carries none.
+/// last in-time arrival) in `starve_ns` (review round 6: its own field, `late_ns` stays the
+/// lateness of a LATE packet), so the source logs the starve span (it logged `late_ms=0.0`). Every
+/// other re-anchor carries none.
 #[test]
 fn a_starve_re_anchor_carries_how_long_no_packet_came_in_time() {
     let mut t = Timeline::new();
@@ -547,14 +548,14 @@ fn a_starve_re_anchor_carries_how_long_no_packet_came_in_time() {
         "{d:?}"
     );
     assert_eq!(
-        d.late_ns,
-        (1_500 * NS_PER_MS) as i64,
+        (d.starve_ns, d.late_ns),
+        ((1_500 * NS_PER_MS) as i64, 0),
         "the starve span: {d:?}"
     );
     // another re-anchor (a channel change) carries no span
     let d = t.packet(at + MS_256, (H + 2) as u32, 256, RATE, 1, R40);
     assert_eq!(
-        (d.event, d.reason, d.late_ns),
+        (d.event, d.reason, d.starve_ns),
         (Event::Reanchor, Reason::Format, 0)
     );
 }
@@ -928,7 +929,7 @@ fn a_starve_on_the_first_packet_after_an_anchor_or_inside_the_hold_re_anchors() 
     let t1 = on_time(1) + 1_500 * NS_PER_MS;
     let d = t.packet(t1, 1, 256, RATE, 2, R40);
     assert_eq!(
-        (d.event, d.reason, d.late_ns),
+        (d.event, d.reason, d.starve_ns),
         (
             Event::Reanchor,
             Reason::Starve,
@@ -951,7 +952,7 @@ fn a_starve_on_the_first_packet_after_an_anchor_or_inside_the_hold_re_anchors() 
     let t2 = last + 1_500 * NS_PER_MS;
     let d = t.packet(t2, 101, 256, RATE, 2, R40);
     assert_eq!(
-        (d.event, d.reason, d.late_ns),
+        (d.event, d.reason, d.starve_ns),
         (Event::Reanchor, Reason::Starve, (1_500 * NS_PER_MS) as i64),
         "a starve inside the hold: {d:?}"
     );

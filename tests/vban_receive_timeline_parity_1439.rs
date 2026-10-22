@@ -108,7 +108,7 @@ fn bits(x: f64) -> u64 {
 fn line(t: &Timeline, d: Decision) -> String {
     let b = &t.buckets[(t.last_k.rem_euclid(FIT_WINDOW_S as i64)) as usize];
     format!(
-        "{} {} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} {} {} | {} {} {} {} {} {} {} {} | {}",
+        "{} {} {} {} {} {} {} {} {} {} | {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} | {} {} {} {} | {} {} {} {} {} {} {} {} | {}",
         d.event as i32,
         d.reason as i32,
         d.silence_samples,
@@ -116,6 +116,7 @@ fn line(t: &Timeline, d: Decision) -> String {
         d.stamp_ns,
         d.lateness_ns,
         d.late_ns,
+        d.starve_ns,
         d.lead_in_samples,
         d.lead_in_stamp_ns,
         u8::from(t.anchored),
@@ -233,9 +234,9 @@ static uint64_t bits(double x)
 static void line(const struct vban_recv_timeline *t, struct vban_recv_decision d)
 {
 	const struct vban_recv_bucket *b = &t->buckets[(size_t)(((t->last_k % VBAN_RECV_FIT_WINDOW_S) + VBAN_RECV_FIT_WINDOW_S) % VBAN_RECV_FIT_WINDOW_S)];
-	printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " %" PRIu64 " %" PRIu64 " | ", d.event,
-	       d.reason, d.silence_samples, d.silence_pos, d.stamp_ns, d.lateness_ns, d.late_ns, d.lead_in_samples,
-	       d.lead_in_stamp_ns);
+	printf("%d %d %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRIu64 " %" PRIu64 " | ",
+	       d.event, d.reason, d.silence_samples, d.silence_pos, d.stamp_ns, d.lateness_ns, d.late_ns, d.starve_ns,
+	       d.lead_in_samples, d.lead_in_stamp_ns);
 	printf("%d %" PRIu32 " %" PRIu32 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu32 " %" PRIu64 " %" PRIu64 " %" PRIu64
 	       " %" PRId64 " %" PRId64 " %" PRIu64 " %d %" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRIu64
 	       " %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 " | ",
@@ -569,7 +570,7 @@ fn the_scripts_reach_every_boundary_1439() {
             if (d.event, d.reason) == (Event::Reanchor, Reason::Starve) {
                 hits[40] += usize::from(anchored && next_before <= u64::from(p.rate));
                 hits[41] += usize::from(matches!(prev_event, Event::Anchor | Event::Reanchor));
-                hits[42] += usize::from(d.late_ns == since_in);
+                hits[42] += usize::from(d.starve_ns == since_in);
             }
             prev_event = d.event;
             if matches!(
