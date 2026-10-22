@@ -641,16 +641,51 @@ mod tests {
         );
     }
 
+    /// An index far behind the last one (more than a reorder could be: 65 packets) is a sender
+    /// restart: one counted re-anchor.
     #[test]
-    fn a_backwards_or_duplicate_index_re_anchors() {
+    fn an_index_far_behind_re_anchors_as_backward() {
         let mut t = Timeline::new();
-        t.packet(on_time(0), 100, 256, RATE, 2, R40);
-        let d = t.packet(on_time(1), 100, 256, RATE, 2, R40);
+        t.packet(on_time(0), 1000, 256, RATE, 2, R40);
+        let d = t.packet(on_time(1), 1000 - 65, 256, RATE, 2, R40);
         assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Backward));
-        let d = t.packet(on_time(2), 99, 256, RATE, 2, R40);
-        assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Backward));
-        assert_eq!(t.re_anchors, 2);
+        assert_eq!(t.re_anchors, 1);
         assert_eq!(t.late, 0);
+    }
+
+    /// Review round 1: one reordered or duplicated packet (a UDP network effect) restarted the
+    /// timeline and reported a loss that never happened. A packet whose slot has already passed is
+    /// dropped: its slot stays the silence it already was, the line runs on.
+    #[test]
+    fn a_reordered_or_duplicated_packet_is_dropped_never_a_re_anchor() {
+        let mut t = Timeline::new();
+        for k in 0..12u64 {
+            t.packet(on_time(k), 100 + k as u32, 256, RATE, 2, R40);
+        }
+        // 112 overtaken by 113 on the way: one silent slot
+        let d = t.packet(on_time(13), 113, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.silence_samples), (Event::Packet, 256));
+        // then 112 arrives: its slot has passed
+        let d = t.packet(on_time(13) + 100_000, 112, 256, RATE, 2, R40);
+        assert_ne!(
+            d.event,
+            Event::Reanchor,
+            "a reordered packet must not restart the timeline"
+        );
+        assert_eq!(
+            (d.stamp_ns, d.silence_samples),
+            (0, 0),
+            "a dropped packet is not output"
+        );
+        // a network duplicate of 113
+        let d = t.packet(on_time(13) + 200_000, 113, 256, RATE, 2, R40);
+        assert_ne!(d.event, Event::Reanchor);
+        assert_eq!(t.re_anchors, 0);
+        assert_eq!(t.lost, 1, "only the slot that was really silent counts");
+        // the stream continues on the same line, nothing silent
+        let d = t.packet(on_time(14), 114, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.silence_samples), (Event::Packet, 0));
+        assert_eq!(d.stamp_ns, on_time(14) - samples_to_ns(256, RATE) + R40);
     }
 
     #[test]
