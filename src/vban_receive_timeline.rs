@@ -51,8 +51,13 @@
 //!   [`PHASE_BAND_DIV`] off `fit + R` (a real sender-clock event, never the arrival jitter), until
 //!   they are back inside that dead band. The line is rebased on every change, so the stamps never
 //!   jump. The genlock ASRC (`basis=stamp`) then resamples the sender's rate to the mix clock.
-//! * **Loss.** A slot whose packet is not there at its deadline is silence for exactly that slot,
-//!   stamped on the same line.
+//! * **Loss.** A slot whose packet is not there at its deadline is counted lost and goes out as
+//!   exactly one slot, stamped on the same line: CONCEALED ([`Due::Conceal`], ROZHODNUTÉ 6352253147
+//!   (b), the limit 3 since 23.10.2026) when the slot before it went out with audio (its packet, or
+//!   a concealment of this same run) and the next stored packet is at most [`CONCEAL_MAX_SLOTS`] −
+//!   (the run so far) slots on -- the previous packet's samples, crossfaded
+//!   ([`crate::vban_conceal`]) -- else silence. Decided at the slot's deadline from what is stored
+//!   then, never waiting for a later packet; a run that starts as silence stays silence.
 //! * **Reorder** (ROZHODNUTÉ 6352253147 (a)). A packet up to 63 indexes behind the last one (a
 //!   network reorder) whose index has not come yet and whose slot the worker has not handed out, in
 //!   an emitting stretch that has not starved, is stored for that slot and played in it
@@ -133,8 +138,9 @@ pub const DEADLINE_MARGIN_MS: u64 = 2;
 /// absolute sleep on its own clock, review round 5): a packet stored in time goes to libobs at the
 /// worker's next wake, never held to its deadline, so only a lost slot's silence waits for that.
 pub const POLL_MS: u64 = 5;
-/// ROZHODNUTÉ 6352253147 (b), the limit raised to 3 on 23.10.2026, RED stub: a run of at most this
-/// many missing slots between two received packets is concealed.
+/// ROZHODNUTÉ 6352253147 (b), the limit raised to 3 on 23.10.2026: a run of at most this many
+/// missing slots between two received packets is concealed (the previous packet's samples,
+/// crossfaded), a longer one is silence.
 pub const CONCEAL_MAX_SLOTS: u64 = 3;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
@@ -262,7 +268,9 @@ pub enum Due {
     Packet = 2,
     /// The slot's packet is missing: silence of exactly one slot at that stamp.
     Silence = 3,
-    /// ROZHODNUTÉ 6352253147 (b), RED stub: a missing slot concealed.
+    /// ROZHODNUTÉ 6352253147 (b): the slot's packet is missing in a short run between two received
+    /// packets: one slot of the previous packet's samples, crossfaded, at that stamp
+    /// ([`DueDecision::toward_next`]: the next slot is the store's head).
     Conceal = 4,
 }
 
@@ -282,7 +290,7 @@ pub struct DueDecision {
     pub late_ns: i64,
     /// [`Due::None`]: the next deadline, 0 = none (no stretch is emitting, or it starved).
     pub next_ns: u64,
-    /// [`Due::Conceal`], RED stub: the next slot is the store's head packet.
+    /// [`Due::Conceal`]: the next slot is the store's head packet -- fade toward its first frame.
     pub toward_next: bool,
 }
 
@@ -353,11 +361,12 @@ pub struct Timeline {
     pub recv_mask: u64,
     /// Reordered packets stored for their slot (played in it).
     pub reordered: u64,
-    /// ROZHODNUTÉ 6352253147 (b), RED stub: the slot before `emit_pos` went out with audio.
+    /// ROZHODNUTÉ 6352253147 (b): the slot before `emit_pos` went out with audio (its packet or a
+    /// concealment).
     pub prev_audio: bool,
     /// The concealed slots right before `emit_pos`.
     pub conceal_run: u32,
-    /// Missing slots handed out concealed.
+    /// Missing slots handed out concealed (counted in `lost` too).
     pub concealed: u64,
 }
 
@@ -587,6 +596,8 @@ impl Timeline {
         self.emitted = false;
         self.emit_pos = 0;
         self.lead_in_pending = false;
+        self.prev_audio = false;
+        self.conceal_run = 0;
         self.last_k = i64::from(frames / rate);
         self.recv_mask = 1;
         self.fold(self.last_k, u64::from(frames), 0);
@@ -871,8 +882,11 @@ impl Timeline {
     /// * then the slots in order. The deadline is the DECISION point, never the handover time
     ///   (review round 5): a slot whose packet is the head goes out now, however early (its
     ///   `late_ns` negative); while it is missing the worker looks again at `next_ns` = the
-    ///   earlier of its deadline and `now_ns` + [`POLL_MS`]; at its deadline it is silence of
-    ///   exactly one slot (counted lost);
+    ///   earlier of its deadline and `now_ns` + [`POLL_MS`]; at its deadline it is exactly one
+    ///   slot (counted lost):
+    ///   [`Due::Conceal`] when the slot before went out with audio and the head (the next stored
+    ///   packet: everything stored is at or after `emit_pos`) is at most [`CONCEAL_MAX_SLOTS`] − the
+    ///   run so far slots on, else [`Due::Silence`] (ROZHODNUTÉ 6352253147 (b));
     /// * a slot handed out after its own stamp is counted `missed` (the worker woke later than the
     ///   margin: the mix may already have taken that window);
     /// * a slot whose deadline is more than [`PERSIST_S`] after the last in-time arrival is never
@@ -913,10 +927,32 @@ impl Timeline {
         d.late_ns = now_ns as i64 - deadline as i64;
         if stored {
             d.kind = Due::Packet;
+            self.prev_audio = true;
+            self.conceal_run = 0;
         } else {
-            d.kind = Due::Silence;
+            // ROZHODNUTÉ 6352253147 (b): decided now, from what is stored now -- the store's head is
+            // the next stored slot, `next` slots on (0 = nothing stored)
+            let next = match head_pos {
+                Some(h) if h > self.emit_pos && (h - self.emit_pos).is_multiple_of(frames) => {
+                    (h - self.emit_pos) / frames
+                }
+                _ => 0,
+            };
             self.lost += 1;
-            self.silence_samples += frames;
+            if self.prev_audio
+                && next != 0
+                && u64::from(self.conceal_run) + next <= CONCEAL_MAX_SLOTS
+            {
+                d.kind = Due::Conceal;
+                d.toward_next = next == 1;
+                self.conceal_run += 1;
+                self.concealed += 1;
+            } else {
+                d.kind = Due::Silence;
+                self.prev_audio = false;
+                self.conceal_run = 0;
+                self.silence_samples += frames;
+            }
         }
         if now_ns > d.stamp_ns {
             self.missed += 1;

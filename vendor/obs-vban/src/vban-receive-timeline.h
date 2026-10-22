@@ -50,8 +50,13 @@
  *    event, never the arrival jitter), until they are back inside that dead band. The line is rebased
  *    on every change, so the stamps never jump. The genlock ASRC (basis=stamp) then resamples the
  *    sender's rate to the mix clock.
- *  - Loss: a slot whose packet is not there at its deadline is silence for exactly that slot, stamped
- *    on the same line.
+ *  - Loss: a slot whose packet is not there at its deadline is counted lost and goes out as exactly one
+ *    slot, stamped on the same line: CONCEALED (ROZHODNUTE 6352253147 b, the limit 3 since 23.10.2026)
+ *    when the slot before it went out with audio (its packet, or a concealment of this same run) and the
+ *    next stored packet is at most VBAN_RECV_CONCEAL_MAX_SLOTS - (the run so far) slots on -- the
+ *    previous packet's samples, crossfaded (vban-conceal.h) -- else silence. Decided at the slot's
+ *    deadline from what is stored then, never waiting for a later packet; a run that starts as silence
+ *    stays silence.
  *  - Reorder (ROZHODNUTE 6352253147 a): a packet up to 63 indexes behind the last one (a network
  *    reorder) whose index has not come yet and whose slot the worker has not handed out, in an
  *    emitting stretch that has not starved, is stored for that slot and played in it (REORDER,
@@ -132,8 +137,9 @@
  * sleep on its own clock, review round 5): a packet stored in time goes to libobs at the worker's next
  * wake, never held to its deadline, so only a lost slot's silence waits for that. */
 #define VBAN_RECV_POLL_MS 5
-/* ROZHODNUTE 6352253147 (b), the limit raised to 3 on 23.10.2026, RED stub: a run of at most this many missing
- * slots between two received packets is concealed (the previous packet's samples, crossfaded) */
+/* ROZHODNUTE 6352253147 (b), the limit raised to 3 on 23.10.2026: a run of at most this many missing slots
+ * between two received packets is concealed (the previous packet's samples, crossfaded), a longer one is
+ * silence */
 #define VBAN_RECV_CONCEAL_MAX_SLOTS 3u
 #define VBAN_RECV_NS_PER_SEC 1000000000ULL
 #define VBAN_RECV_NS_PER_MS 1000000ULL
@@ -209,8 +215,8 @@ struct vban_recv_timeline {
 	/* ROZHODNUTE 6352253147 (a): bit j = the packet j indexes behind last_nu came (in order or reordered) */
 	uint64_t recv_mask;
 	uint64_t reordered; /* reordered packets stored for their slot (played in it) */
-	/* ROZHODNUTE 6352253147 (b), RED stub: the slot before emit_pos went out with audio, the concealed slots
-	 * right before emit_pos, and the missing slots handed out concealed */
+	/* ROZHODNUTE 6352253147 (b): the slot before emit_pos went out with audio (its packet or a concealment),
+	 * the concealed slots right before emit_pos, and the missing slots handed out concealed (in lost too) */
 	bool prev_audio;
 	uint32_t conceal_run;
 	uint64_t concealed;
@@ -234,7 +240,9 @@ enum vban_recv_due_kind {
 	VBAN_RECV_DUE_LEAD_IN = 1, /* the stretch's lead-in: silence of FRAMES stamped STAMP_NS */
 	VBAN_RECV_DUE_PACKET = 2,  /* the slot at POS is the store's head packet: output it at STAMP_NS */
 	VBAN_RECV_DUE_SILENCE = 3, /* the slot's packet is missing: silence of exactly one slot at STAMP_NS */
-	VBAN_RECV_DUE_CONCEAL = 4, /* ROZHODNUTE 6352253147 (b), RED stub: a missing slot concealed */
+	VBAN_RECV_DUE_CONCEAL = 4, /* ROZHODNUTE 6352253147 (b): the slot's packet is missing in a short run
+				    * between two received packets: one slot of the previous packet's samples,
+				    * crossfaded, at STAMP_NS (TOWARD_NEXT: the next slot is the store's head) */
 };
 
 struct vban_recv_due {
@@ -245,7 +253,7 @@ struct vban_recv_due {
 	uint64_t deadline_ns; /* the slot's deadline (PACKET / SILENCE) */
 	int64_t late_ns;      /* how far past its deadline the slot went out (PACKET / SILENCE) */
 	uint64_t next_ns;     /* NONE: the next deadline, 0 = none (no stretch emitting, or it starved) */
-	int toward_next;      /* CONCEAL, RED stub: the next slot is the store's head packet */
+	int toward_next;      /* CONCEAL: the next slot is the store's head packet -- fade toward its first frame */
 };
 
 /* The Receive Buffer in ms for a source setting value: 0 or less = the default. */
@@ -400,6 +408,8 @@ static inline void vban_recv_anchor(struct vban_recv_timeline *t, uint64_t now_n
 	t->emitted = false;
 	t->emit_pos = 0;
 	t->lead_in_pending = false;
+	t->prev_audio = false;
+	t->conceal_run = 0;
 	t->last_k = (int64_t)(frames / rate);
 	t->recv_mask = 1u;
 	vban_recv_fold(t, t->last_k, frames, 0);
@@ -644,7 +654,9 @@ static inline struct vban_recv_decision vban_recv_packet(struct vban_recv_timeli
  *  - then the slots in order. The deadline is the DECISION point, never the handover time (review round
  *    5): a slot whose packet is the head goes out now, however early (its late_ns negative); while it is
  *    missing the worker looks again at next_ns = the earlier of its deadline and NOW_NS +
- *    VBAN_RECV_POLL_MS; at its deadline it is silence of exactly one slot (counted lost);
+ *    VBAN_RECV_POLL_MS; at its deadline it is one slot (counted lost): CONCEAL when the slot before went
+ *    out with audio and the head (the next stored packet: everything stored is at or after emit_pos) is
+ *    at most VBAN_RECV_CONCEAL_MAX_SLOTS - the run so far slots on, else SILENCE (ROZHODNUTE 6352253147 b);
  *  - a slot handed out after its own stamp is counted missed (the worker woke later than the margin: the
  *    mix may already have taken that window);
  *  - a slot whose deadline is more than VBAN_RECV_PERSIST_S after the last in-time arrival is never
@@ -690,10 +702,26 @@ static inline struct vban_recv_due vban_recv_due(struct vban_recv_timeline *t, u
 	d.late_ns = (int64_t)now_ns - (int64_t)deadline;
 	if (stored) {
 		d.kind = VBAN_RECV_DUE_PACKET;
+		t->prev_audio = true;
+		t->conceal_run = 0;
 	} else {
-		d.kind = VBAN_RECV_DUE_SILENCE;
+		/* ROZHODNUTE 6352253147 (b): decided now, from what is stored now -- the store's head is the next
+		 * stored slot, NEXT slots on (0 = nothing stored) */
+		uint64_t next = 0;
+		if (has_head && head_pos > t->emit_pos && (head_pos - t->emit_pos) % t->frames == 0)
+			next = (head_pos - t->emit_pos) / t->frames;
 		t->lost++;
-		t->silence_samples += t->frames;
+		if (t->prev_audio && next != 0 && t->conceal_run + next <= VBAN_RECV_CONCEAL_MAX_SLOTS) {
+			d.kind = VBAN_RECV_DUE_CONCEAL;
+			d.toward_next = next == 1;
+			t->conceal_run++;
+			t->concealed++;
+		} else {
+			d.kind = VBAN_RECV_DUE_SILENCE;
+			t->prev_audio = false;
+			t->conceal_run = 0;
+			t->silence_samples += t->frames;
+		}
 	}
 	if (now_ns > d.stamp_ns)
 		t->missed++;
