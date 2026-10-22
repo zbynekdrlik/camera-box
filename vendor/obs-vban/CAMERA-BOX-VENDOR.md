@@ -26,7 +26,9 @@ grandmaster within 0.2 ppm (finding in issue 1372, comment 5845239583).
 | `src/vban-output-thread.c` | `vban_out_loop` is paced (details below). `send_packet` and `packet_samples_for` are the 0.3.1 packet code, moved into helpers without changing it. `send_silence` sends a zero-filled packet of the same size (issue 1381). `pacing_sleep_until` waits on a Windows high-resolution timer and spins only the last 0.2 ms. The unused `buf_ts_ns` field is removed. |
 | `src/vban-output.c` | Adds the `pacing_target_ms` setting: the "Send Buffer" property (20–200 ms), with a default of 64. |
 | `src/vban-output-internal.h` | Adds `pacing_target_ms` to `struct vban_out_s`. |
-| `data/locale/en-US.ini` | Adds `VBAN.out.prop.pacing_target_ms="Send Buffer"`. |
+| `data/locale/en-US.ini` | Adds `VBAN.out.prop.pacing_target_ms="Send Buffer"` and (issue 1439) `VBAN.src.prop.receive_buffer_ms="Receive Buffer (ms)"`. |
+| `src/vban-receive-timeline.h` | NEW (issue 1439). The pure receive-timeline decision of the VBAN SOURCE (see below). No OBS dependency; `tests/vban_receive_timeline_parity_1439.rs` compiles it and pins it to `src/vban_receive_timeline.rs`. |
+| `src/vban-source.c` | Issue 1439. The receive callback stamps every packet from the receive timeline instead of `arrival − length`, outputs a lost packet as silence for exactly its slot (0.3.1 padded it with copies of the next packet), adds the `receive_buffer_ms` setting ("Receive Buffer (ms)", 10–500, default 40, read at create/update only) and logs the 10 s `obs-vban receive:` status line. |
 
 How the paced `vban_out_loop` works:
 
@@ -79,9 +81,42 @@ The second line comes every 10 s. The counters are cumulative since the thread s
 (`counters=reset`); a Send Buffer change logs `counters=kept`. `late_max_ms` is the largest
 lateness of an audio packet in the window. `dest=` is the resolved receiver address and port.
 
+### The receive timeline (`vban-receive-timeline.h`, issue 1439)
+
+The Linux OBS boxes take program audio as a VBAN stream into this plugin's SOURCE. 0.3.1 stamped
+every packet at its arrival minus its length, so the sender's network jitter reached OBS (which
+mixes at 0 ms audio buffering) and a late packet was a click. The timeline instead:
+
+- **Anchor.** The first packet is stamped at arrival − length + R. R is the fixed Receive Buffer
+  (default 40 ms, clamped 10–500), read at create/update only, never adapted at runtime.
+- **Fit.** A least-squares line of arrival over the sender's sample position, over the last 64
+  one-second buckets, used from 10 buckets. A packet more than 10 ms late against the line is not
+  folded, so a gap's delayed packets never pull the line late.
+- **Stamps.** Slewed toward the fitted rate plus a phase term toward `fit + R` (at most 5 ppm per
+  update, clamped ±500 ppm), rebased on every change, so they never jump. The genlock ASRC
+  (`basis=stamp`, libobs `genlock_audio_asrc_placement`) resamples the sender's rate to the mix.
+- **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
+- **Re-anchor (one counted event).** A packet after its stamp, a duplicate or backwards
+  `nuFrame`, a jump of more than 2 s of audio, another rate/channel count/R, or a fit that cannot
+  hold (rate beyond ±500 ppm, stamps more than R off `fit + R`, nothing folded for 3 s).
+
+Log lines:
+
+```
+obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receive_buffer_ms=40
+obs-vban receive: received=… lost=… late=… re_anchors=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
+obs-vban receive re-anchor: source '…' reason=late|backward|jump|format|config|fit frame=… late_ms=… re_anchors=… late=…
+```
+
+The status line comes every 10 s; its counters are cumulative since the source was created.
+`max_late_ms` is the largest arrival − stamp of an on-time packet in that 10 s window, so it is
+negative while packets arrive with margin (about −R plus jitter); a packet past its stamp
+re-anchors instead and is counted in `late`.
+
 ## Re-basing onto a newer upstream
 
 1. Import the new tag verbatim in its own commit, and update the pin in `vendor/README.md`.
 2. Re-apply the files in the table above.
 3. `tests/vban_pacing_parity_1372.rs` and the pwsh assert step in both `windows-genlock*.yml`
-   files fail if the pacing is lost.
+   files fail if the pacing is lost. `tests/vban_receive_timeline_parity_1439.rs`,
+   `tests/vban_source_loss_1439.rs` and the same pwsh step fail if the receive timeline is lost.

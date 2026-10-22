@@ -32,6 +32,8 @@ on:
     paths:
       - 'vendor/obs-studio/**'
       - 'vendor/distroav/**'
+      # issue 1439: the strih variant builds the vendored obs-vban (the VBAN receive source).
+      - 'vendor/obs-vban/**'
       - 'scripts/genlock-manifest.sh'
       - '.github/workflows/linux-genlock.yml'
 
@@ -397,6 +399,21 @@ jobs:
         working-directory: vendor/distroav
         run: cmake --build --preset ubuntu-ci-x86_64
 
+      # issue 1439: the Linux OBS boxes take program audio from the hub / the console as a VBAN
+      # stream into the vendored obs-vban SOURCE (receive timeline + fixed reserve, stamped for the
+      # genlock ASRC), never through PipeWire. Built against the genlocked SDK like DistroAV; the
+      # imag-parity bundle consumes no VBAN and stays without it.
+      - name: Configure obs-vban against the genlocked OBS SDK (issue 1439)
+        working-directory: vendor/obs-vban
+        run: >
+          cmake -B build_ubuntu
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build obs-vban (issue 1439)
+        working-directory: vendor/obs-vban
+        run: cmake --build build_ubuntu --parallel
+
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |
           set -euo pipefail
@@ -414,6 +431,10 @@ jobs:
             exit 1
           fi
           cp "$distroav_so" "$plugin_lib_dir/"
+          # issue 1439: the vendored obs-vban (the VBAN receive source) next to DistroAV.
+          vban_so=$(find vendor/obs-vban/build_ubuntu -name 'obs-vban.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$vban_so" ]; then echo "ERROR: obs-vban.so not found after the obs-vban build (issue 1439)"; exit 1; fi
+          cp "$vban_so" "$plugin_lib_dir/"
           # issue 1425: the vendored vlc-video plugin (stamps on the OBS media clock) is built by the OBS build
           # (-DENABLE_VLC=ON, libvlc-dev headers); it loads libvlc from the installed VLC at runtime.
           if [ ! -f "$plugin_lib_dir/vlc-video.so" ]; then echo "ERROR: vlc-video.so not built (issue 1425)"; exit 1; fi
@@ -424,6 +445,9 @@ jobs:
             mkdir -p "$data_root/distroav"
             cp -a vendor/distroav/data/. "$data_root/distroav/"
           fi
+          mkdir -p "$data_root/obs-vban"
+          cp -a vendor/obs-vban/data/. "$data_root/obs-vban/"
+          echo "staged obs-vban.so from: $vban_so -> $plugin_lib_dir/"
 
           git rev-parse HEAD > stage/GENLOCK_BUILD_SHA.txt
           # issue 1317: the strih variant's build-flags marker -- written INTO the stage BEFORE the

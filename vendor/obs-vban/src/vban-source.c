@@ -18,9 +18,11 @@
 
 #include <obs-module.h>
 #include <util/platform.h>
+#include <util/threading.h>
 #include "plugin-macros.generated.h"
 #include "vban-udp.h"
 #include "vban.h"
+#include "vban-receive-timeline.h"
 
 struct vban_src_s
 {
@@ -28,16 +30,24 @@ struct vban_src_s
 
 	// properties
 	int port;
+	/* camera-box issue 1439: the port for the receive thread's status line (s->port and s->stream_name
+	 * belong to the UI thread; update() frees the old stream name) */
+	volatile long log_port;
 	char *stream_name;
 	char *ip_from;
+	/* camera-box issue 1439: the fixed "Receive Buffer" (R, ms), read at create/update only */
+	volatile long receive_buffer_ms;
+	/* camera-box issue 1439: the next packet starts a new timeline (another port / stream / host) */
+	volatile bool timeline_reset;
 
 	vban_udp_t *vban;
 
 	DARRAY(float) buffer;
-	uint32_t lastframe;
-	uint32_t cnt_missing_packets;
-	uint64_t cnt_packets;
-	uint64_t cnt_frames;
+	/* camera-box issue 1439: the receive timeline; touched only by the receive callback */
+	struct vban_recv_timeline timeline;
+	uint64_t status_ns;        /* the last status line, 0 = none yet */
+	int64_t window_late_max_ns; /* the largest arrival - stamp since the last status line */
+	bool window_late_seen;
 };
 
 static const char *vban_src_get_name(void *type_data)
@@ -55,6 +65,7 @@ static void update_port(struct vban_src_s *s, int port)
 	s->vban = vban_udp_find_or_create(port);
 
 	s->port = port;
+	os_atomic_set_long(&s->log_port, port);
 
 	if (old_vban) {
 		vban_udp_remove_callback(old_vban, vban_src_callback, s);
@@ -100,6 +111,13 @@ static void vban_src_update(void *data, obs_data_t *settings)
 
 	if (port_changed || ip_changed)
 		vban_udp_set_host(s->vban, vban_src_callback, s, s->ip_from);
+
+	/* camera-box issue 1439: R is fixed from create/update; another value re-anchors the timeline at
+	 * its next packet (a counted, logged config re-anchor), never a runtime adaptation. */
+	os_atomic_set_long(&s->receive_buffer_ms,
+			   (long)vban_recv_clamp_reserve_ms((int64_t)obs_data_get_int(settings, "receive_buffer_ms")));
+	if (port_changed || name_changed || ip_changed)
+		os_atomic_set_bool(&s->timeline_reset, true);
 }
 
 static obs_properties_t *vban_src_get_properties(void *data)
@@ -111,6 +129,8 @@ static obs_properties_t *vban_src_get_properties(void *data)
 	obs_properties_add_int(props, "port", obs_module_text("VBAN.src.prop.port"), 1, 65535, 1);
 	obs_properties_add_text(props, "stream_name", obs_module_text("VBAN.src.prop.stream_name"), OBS_TEXT_DEFAULT);
 	obs_properties_add_text(props, "ip_from", obs_module_text("VBAN.src.prop.ip_from"), OBS_TEXT_DEFAULT);
+	obs_properties_add_int(props, "receive_buffer_ms", obs_module_text("VBAN.src.prop.receive_buffer_ms"),
+			       VBAN_RECV_RESERVE_MS_MIN, VBAN_RECV_RESERVE_MS_MAX, 1);
 
 	return props;
 }
@@ -118,12 +138,14 @@ static obs_properties_t *vban_src_get_properties(void *data)
 static void vban_src_get_defaults(obs_data_t *data)
 {
 	obs_data_set_default_int(data, "port", 6980);
+	obs_data_set_default_int(data, "receive_buffer_ms", VBAN_RECV_RESERVE_MS_DEFAULT);
 }
 
 static void *vban_src_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct vban_src_s *s = bzalloc(sizeof(struct vban_src_s));
 	s->context = source;
+	vban_recv_init(&s->timeline);
 
 	vban_src_update(s, settings);
 
@@ -139,9 +161,11 @@ static void vban_src_destroy(void *data)
 		vban_udp_release(s->vban);
 	}
 
-	blog(s->cnt_missing_packets ? LOG_ERROR : LOG_INFO,
-	     "source '%s': received %" PRIu64 " packets, %" PRIu64 " frames, %d time(s) missed packets",
-	     obs_source_get_name(s->context), s->cnt_packets, s->cnt_frames, s->cnt_missing_packets);
+	const struct vban_recv_timeline *t = &s->timeline;
+	blog(t->lost || t->re_anchors ? LOG_ERROR : LOG_INFO,
+	     "source '%s': received %" PRIu64 " packets, lost %" PRIu64 ", late %" PRIu64 ", %" PRIu64
+	     " re-anchor(s)",
+	     obs_source_get_name(s->context), t->received, t->lost, t->late, t->re_anchors);
 
 	bfree(s->stream_name);
 	bfree(s->ip_from);
@@ -176,6 +200,105 @@ static void convert_24le_to_fltp(struct vban_src_s *s, struct obs_source_audio *
 			src += 3 * audio->speakers;
 		}
 	}
+}
+
+static const char *vban_recv_reason_name(int reason)
+{
+	switch (reason) {
+	case VBAN_RECV_REASON_LATE:
+		return "late";
+	case VBAN_RECV_REASON_BACKWARD:
+		return "backward";
+	case VBAN_RECV_REASON_JUMP:
+		return "jump";
+	case VBAN_RECV_REASON_FORMAT:
+		return "format";
+	case VBAN_RECV_REASON_CONFIG:
+		return "config";
+	case VBAN_RECV_REASON_FIT:
+		return "fit";
+	default:
+		return "none";
+	}
+}
+
+/* camera-box issue 1439: the anchor / re-anchor / loss lines, and the lateness record of the window. */
+static void vban_src_report(struct vban_src_s *s, const struct vban_recv_decision *d, uint32_t nu_frame,
+			    uint32_t frames)
+{
+	const struct vban_recv_timeline *t = &s->timeline;
+	if (d->event == VBAN_RECV_ANCHOR) {
+		blog(LOG_INFO,
+		     "obs-vban receive anchored: source '%s' frame=%u rate=%u ch=%u receive_buffer_ms=%" PRIu64,
+		     obs_source_get_name(s->context), nu_frame, t->rate, t->channels,
+		     (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS));
+	} else if (d->event == VBAN_RECV_REANCHOR) {
+		blog(LOG_WARNING,
+		     "obs-vban receive re-anchor: source '%s' reason=%s frame=%u late_ms=%.1f re_anchors=%" PRIu64
+		     " late=%" PRIu64,
+		     obs_source_get_name(s->context), vban_recv_reason_name(d->reason), nu_frame,
+		     (double)d->late_ns / 1e6, t->re_anchors, t->late);
+	}
+	if (d->silence_samples > 0)
+		blog(LOG_WARNING, "source '%s': missing %" PRIu64 " packet(s) at frame %u -- silence for those slots",
+		     obs_source_get_name(s->context), d->silence_samples / (frames ? frames : 1u), nu_frame);
+	if (d->event == VBAN_RECV_PACKET && (!s->window_late_seen || d->lateness_ns > s->window_late_max_ns)) {
+		s->window_late_max_ns = d->lateness_ns;
+		s->window_late_seen = true;
+	}
+}
+
+/* camera-box issue 1439: the lost slots as silence on the timeline, in pieces of at most
+ * VBAN_RECV_SILENCE_CHUNK_FRAMES frames. */
+static void vban_src_output_silence(struct vban_src_s *s, const struct vban_recv_decision *d,
+				    enum speaker_layout speakers, uint32_t rate)
+{
+	static const float zeros[VBAN_RECV_SILENCE_CHUNK_FRAMES];
+	struct obs_source_audio silence = {
+		.speakers = speakers,
+		.format = AUDIO_FORMAT_FLOAT_PLANAR,
+		.samples_per_sec = rate,
+	};
+	for (int ch = 0; ch < (int)speakers && ch < MAX_AV_PLANES; ch++)
+		silence.data[ch] = (const uint8_t *)zeros;
+	for (uint64_t done = 0; done < d->silence_samples;) {
+		uint64_t n = d->silence_samples - done;
+		if (n > VBAN_RECV_SILENCE_CHUNK_FRAMES)
+			n = VBAN_RECV_SILENCE_CHUNK_FRAMES;
+		silence.frames = (uint32_t)n;
+		silence.timestamp = vban_recv_stamp_at(&s->timeline, d->silence_pos + done);
+		obs_source_output_audio(s->context, &silence);
+		done += n;
+	}
+}
+
+/* camera-box issue 1439: one status line every VBAN_RECV_LOG_INTERVAL_NS while packets arrive. The
+ * counters are cumulative since the source started (or was reconfigured); max_late_ms is the window's
+ * lateness record (arrival - stamp; negative = the margin R left), the measure R is chosen by. The
+ * stream name is the packet's own: s->stream_name is the UI thread's, and update() may free it. */
+static void vban_src_log_status(struct vban_src_s *s, const struct VBanHeader *header, uint64_t now)
+{
+	if (s->status_ns == 0) {
+		s->status_ns = now;
+		return;
+	}
+	if (now - s->status_ns < VBAN_RECV_LOG_INTERVAL_NS)
+		return;
+	s->status_ns = now;
+	const struct vban_recv_timeline *t = &s->timeline;
+	const double rate = t->rate ? (double)t->rate : 1.0;
+	blog(LOG_INFO,
+	     "obs-vban receive: received=%" PRIu64 " lost=%" PRIu64 " late=%" PRIu64 " re_anchors=%" PRIu64
+	     " silence_ms=%.1f max_late_ms=%.1f sender_ppm=%+.3f phase_ms=%+.2f fit=%s receive_buffer_ms=%" PRIu64
+	     " rate=%u ch=%u port=%ld stream='%.*s' source='%s'",
+	     t->received, t->lost, t->late, t->re_anchors, (double)t->silence_samples * 1000.0 / rate,
+	     s->window_late_seen ? (double)s->window_late_max_ns / 1e6 : 0.0,
+	     t->fit_valid ? -(double)t->fit_ppb / 1000.0 : 0.0, (double)t->phase_ns / 1e6,
+	     t->fit_valid ? "locked" : "acquiring", (uint64_t)(t->reserve_ns / VBAN_RECV_NS_PER_MS), t->rate, t->channels,
+	     os_atomic_load_long(&s->log_port), (int)VBAN_STREAM_NAME_SIZE, header->streamname,
+	     obs_source_get_name(s->context));
+	s->window_late_seen = false;
+	s->window_late_max_ns = 0;
 }
 
 static void vban_src_callback(const char *buf, size_t buf_len, void *data)
@@ -232,30 +355,20 @@ static void vban_src_callback(const char *buf, size_t buf_len, void *data)
 		return;
 	}
 
-	audio.timestamp = os_gettime_ns() - (uint64_t)audio.frames * 1000000000 / audio.samples_per_sec;
+	/* camera-box issue 1439: the stamp comes from the receive timeline (vban-receive-timeline.h), never
+	 * from the arrival: a fixed timeline that follows the sender's clock, R ahead of its fitted
+	 * arrival, so the audio is in OBS's buffer before the mix needs it. A lost slot is silence. */
+	if (os_atomic_exchange_bool(&s->timeline_reset, false))
+		vban_recv_init(&s->timeline);
+	const uint64_t now = os_gettime_ns();
+	const uint64_t reserve_ns = (uint64_t)os_atomic_load_long(&s->receive_buffer_ms) * VBAN_RECV_NS_PER_MS;
+	const struct vban_recv_decision d = vban_recv_packet(&s->timeline, now, header->nuFrame, audio.frames,
+							     audio.samples_per_sec, (uint32_t)audio.speakers, reserve_ns);
+	vban_src_report(s, &d, header->nuFrame, audio.frames);
+	if (d.silence_samples > 0)
+		vban_src_output_silence(s, &d, audio.speakers, audio.samples_per_sec);
 
-	if (s->cnt_packets > 0 && s->lastframe + 1 != header->nuFrame) {
-		uint32_t n_packets = header->nuFrame - s->lastframe - 1;
-		blog(LOG_ERROR, "source '%s': missing %d packet(s) at frame %u", obs_source_get_name(s->context),
-		     n_packets, header->nuFrame);
-		s->cnt_missing_packets++;
-
-		uint64_t lost_ns = (uint64_t)n_packets * audio.frames * 1000000000 / audio.samples_per_sec;
-
-		if (lost_ns < 70 * 1000000) {
-			uint64_t ts_backup = audio.timestamp;
-			for (uint32_t i = 0; i < n_packets; i++) {
-				audio.timestamp = ts_backup - lost_ns * (n_packets - i);
-				blog(LOG_DEBUG, "vban-source: Padding packet ts=%" PRIu64, audio.timestamp);
-				obs_source_output_audio(s->context, &audio);
-			}
-			audio.timestamp = ts_backup;
-		}
-	}
-	s->lastframe = header->nuFrame;
-
-	s->cnt_packets++;
-	s->cnt_frames += audio.frames;
-
+	audio.timestamp = d.stamp_ns;
 	obs_source_output_audio(s->context, &audio);
+	vban_src_log_status(s, header, now);
 }

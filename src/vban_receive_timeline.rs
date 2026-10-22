@@ -1,0 +1,770 @@
+//! Issue 1439 — the receive timeline of the vendored obs-vban source, the Tier-0 authority.
+//!
+//! Stock obs-vban 0.3.1 (`vendor/obs-vban/src/vban-source.c`) stamped every packet at its arrival
+//! minus its length, and padded a lost packet with copies of the next one. A program feed from a
+//! network sender (lv1's VBAN `stream` into the Linux stream box, design revision 6338127636)
+//! then carried the sender's network jitter straight into OBS, which mixes at 0 ms audio
+//! buffering: a late packet was re-anchored by OBS, and that was a click.
+//!
+//! This module is the pure decision the source's receive callback asks for every packet:
+//!
+//! * **Anchor.** The first packet is stamped at its arrival − its length + R, R being the fixed
+//!   "Receive Buffer" (default [`RESERVE_MS_DEFAULT`] = 40 ms, read at create/update only, never
+//!   adapted at runtime).
+//! * **Fit.** A least-squares line of arrival time over the packet's END position in the sender's
+//!   samples (its `nuFrame` order), over the last [`FIT_WINDOW_S`] one-second buckets of the
+//!   sender's audio. A packet later than the reference line by more than [`OUTLIER_MS`] is not
+//!   folded into it, so a gap's delayed packets never pull the line late. The fit is used once its
+//!   window holds [`FIT_MIN_BUCKETS`] buckets.
+//! * **Stamps.** `stamp(pos) = base + T(pos − base_pos)`, where `T(s)` is the duration of `s`
+//!   samples times `1 + step_ppb / 1e9`. Once per fitted bucket the step moves toward the fitted
+//!   rate plus a phase correction that walks the stamps to `fit + R` (phase error /
+//!   [`PHASE_TAU_S`] s, at most [`PHASE_PPB_MAX`]), by at most [`PPB_SLEW`] per update, clamped
+//!   to ±[`PPB_CLAMP`]. The line is rebased on every change, so the stamps never jump. The genlock
+//!   ASRC (`basis=stamp`) then resamples the sender's rate to the mix clock.
+//! * **Loss.** A `nuFrame` gap is silence for exactly the lost slots, stamped on the same line.
+//! * **Re-anchor** (counted, one per event): a packet arriving after its stamp (late), a duplicate
+//!   or backwards `nuFrame`, a forward jump of more than [`JUMP_S`] of audio (a sender restart),
+//!   another rate or channel count, another R, or a fit that cannot hold: the fitted rate beyond
+//!   ±[`PPB_CLAMP`], the stamps more than R off `fit + R`, or no packet folded for [`STARVE_S`] of
+//!   the sender's audio. The packet that re-anchors is the new anchor.
+//!
+//! The C twin is `vendor/obs-vban/src/vban-receive-timeline.h`;
+//! `tests/vban_receive_timeline_parity_1439.rs` compiles the shipped header and requires identical
+//! decisions and state (the doubles compared bit for bit). Every floating-point expression here is
+//! written in the C header's operation order. Packet contents are the caller's.
+
+/// The Receive Buffer when the source setting is unset (0) or negative.
+pub const RESERVE_MS_DEFAULT: i64 = 40;
+/// The smallest accepted Receive Buffer.
+pub const RESERVE_MS_MIN: i64 = 10;
+/// The largest accepted Receive Buffer.
+pub const RESERVE_MS_MAX: i64 = 500;
+/// The fit window, in one-second buckets of the sender's audio.
+pub const FIT_WINDOW_S: usize = 64;
+/// The fit is used once its window holds this many non-empty buckets.
+pub const FIT_MIN_BUCKETS: usize = 10;
+/// A packet later than the reference line by more than this is not folded into the fit.
+pub const OUTLIER_MS: u64 = 10;
+/// No packet folded for this much of the sender's audio = the fit cannot hold.
+pub const STARVE_S: u64 = 3;
+/// A forward `nuFrame` jump over this much audio is a sender restart.
+pub const JUMP_S: u64 = 2;
+/// The stamp step stays within ±500 ppm of nominal.
+pub const PPB_CLAMP: i64 = 500_000;
+/// The stamp step moves by at most 5 ppm per fit update (about one a second).
+pub const PPB_SLEW: i64 = 5_000;
+/// A phase error is walked out at error / 20 s ...
+pub const PHASE_TAU_S: i64 = 20;
+/// ... with at most 100 ppm of the step spent on it.
+pub const PHASE_PPB_MAX: i64 = 100_000;
+/// The `obs-vban receive:` status line cadence.
+pub const LOG_INTERVAL_NS: u64 = 10_000_000_000;
+/// Silence for lost slots goes to OBS in pieces of at most this many frames.
+pub const SILENCE_CHUNK_FRAMES: u32 = 1024;
+
+const NS_PER_SEC: u64 = 1_000_000_000;
+const NS_PER_MS: u64 = 1_000_000;
+
+/// What happened to a packet (the C `enum vban_recv_event`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Event {
+    /// Stamped on the running timeline.
+    #[default]
+    Packet = 0,
+    /// The first packet: the timeline starts here.
+    Anchor = 1,
+    /// The timeline restarts at this packet (counted).
+    Reanchor = 2,
+}
+
+/// Why a timeline restarted (the C `enum vban_recv_reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Reason {
+    #[default]
+    None = 0,
+    /// The packet arrived after its stamp.
+    Late = 1,
+    /// A duplicate or backwards `nuFrame`.
+    Backward = 2,
+    /// A forward `nuFrame` jump over [`JUMP_S`].
+    Jump = 3,
+    /// Another sample rate or channel count.
+    Format = 4,
+    /// Another Receive Buffer.
+    Config = 5,
+    /// The fit cannot hold.
+    Fit = 6,
+}
+
+impl Reason {
+    /// The name the C source logs.
+    pub fn name(self) -> &'static str {
+        match self {
+            Reason::None => "none",
+            Reason::Late => "late",
+            Reason::Backward => "backward",
+            Reason::Jump => "jump",
+            Reason::Format => "format",
+            Reason::Config => "config",
+            Reason::Fit => "fit",
+        }
+    }
+}
+
+/// One second of the sender's audio in the fit (the C `struct vban_recv_bucket`).
+#[derive(Debug, Clone, Copy)]
+pub struct Bucket {
+    /// The bucket index (the end position / rate), −1 = empty.
+    pub k: i64,
+    /// Folded packets.
+    pub n: u64,
+    /// The first folded end position (samples since the anchor).
+    pub x0: u64,
+    /// Its arrival (ns since the anchor's arrival).
+    pub y0: u64,
+    pub su: f64,
+    pub sv: f64,
+    pub suu: f64,
+    pub suv: f64,
+}
+
+impl Default for Bucket {
+    fn default() -> Self {
+        Bucket {
+            k: -1,
+            n: 0,
+            x0: 0,
+            y0: 0,
+            su: 0.0,
+            sv: 0.0,
+            suu: 0.0,
+            suv: 0.0,
+        }
+    }
+}
+
+/// What the source does with one packet: silence first (when any), then the packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Decision {
+    pub event: Event,
+    pub reason: Reason,
+    pub silence_samples: u64,
+    /// The first silent sample's position ([`Timeline::stamp_at`]).
+    pub silence_pos: u64,
+    /// The packet's stamp.
+    pub stamp_ns: u64,
+    /// Arrival − stamp (negative = the margin left).
+    pub lateness_ns: i64,
+    /// A LATE re-anchor: how far after its old stamp the packet came.
+    pub late_ns: i64,
+}
+
+/// The receive timeline of one source (the C `struct vban_recv_timeline`).
+#[derive(Debug, Clone)]
+pub struct Timeline {
+    pub anchored: bool,
+    pub rate: u32,
+    pub channels: u32,
+    pub reserve_ns: u64,
+    /// The anchor packet's arrival.
+    pub anchor_ns: u64,
+    /// The anchor packet's end position (its frame count).
+    pub anchor_end: u64,
+    /// The last packet's `nuFrame`.
+    pub last_nu: u32,
+    /// The next packet's start, in samples since the anchor.
+    pub next_pos: u64,
+    /// The stamp line: `stamp(pos) = base + T(pos − base_pos)`.
+    pub base_stamp_ns: u64,
+    pub base_pos: u64,
+    /// The stamp step's deviation from nominal.
+    pub step_ppb: i64,
+    /// The bucket of the last packet's end position.
+    pub last_k: i64,
+    /// The end position of the last folded packet.
+    pub last_fold_pos: u64,
+    pub buckets: [Bucket; FIT_WINDOW_S],
+    pub fit_valid: bool,
+    /// The fitted step deviation (positive = the sender's clock is slow).
+    pub fit_ppb: i64,
+    /// ns per sample.
+    pub fit_b: f64,
+    pub fit_xbar: f64,
+    pub fit_ybar: f64,
+    /// `fit + R − stamp` at the last update.
+    pub phase_ns: i64,
+    pub received: u64,
+    /// Lost packets (silence slots).
+    pub lost: u64,
+    /// The silence those slots carried.
+    pub silence_samples: u64,
+    /// Packets that arrived after their stamp (each a re-anchor).
+    pub late: u64,
+    pub re_anchors: u64,
+}
+
+impl Default for Timeline {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The Receive Buffer in ms for a source setting value: 0 or less = the default.
+pub fn clamp_reserve_ms(ms: i64) -> u32 {
+    if ms <= 0 {
+        return RESERVE_MS_DEFAULT as u32;
+    }
+    if ms < RESERVE_MS_MIN {
+        return RESERVE_MS_MIN as u32;
+    }
+    if ms > RESERVE_MS_MAX {
+        return RESERVE_MS_MAX as u32;
+    }
+    ms as u32
+}
+
+/// `floor(samples × 1e9 / rate)` without overflowing 64 bits for any realistic sample count.
+pub fn samples_to_ns(samples: u64, rate: u32) -> u64 {
+    let r = u64::from(rate.max(1));
+    (samples / r) * NS_PER_SEC + (samples % r) * NS_PER_SEC / r
+}
+
+/// `ns × ppb / 1e9`, truncated toward zero, without overflowing 64 bits.
+pub fn scale_ppb(ns: u64, ppb: i64) -> i64 {
+    let mag = ppb.unsigned_abs();
+    let v = (ns / NS_PER_SEC) * mag + (ns % NS_PER_SEC) * mag / NS_PER_SEC;
+    if ppb < 0 {
+        -(v as i64)
+    } else {
+        v as i64
+    }
+}
+
+/// Round half away from zero (the C header uses no libm).
+pub fn round_half_away(x: f64) -> i64 {
+    if x >= 0.0 {
+        (x + 0.5) as i64
+    } else {
+        -((-x + 0.5) as i64)
+    }
+}
+
+fn clamp_i64(v: i64, lim: i64) -> i64 {
+    v.clamp(-lim, lim)
+}
+
+impl Timeline {
+    /// An empty, not yet anchored timeline (`vban_recv_init`).
+    pub fn new() -> Self {
+        Timeline {
+            anchored: false,
+            rate: 0,
+            channels: 0,
+            reserve_ns: 0,
+            anchor_ns: 0,
+            anchor_end: 0,
+            last_nu: 0,
+            next_pos: 0,
+            base_stamp_ns: 0,
+            base_pos: 0,
+            step_ppb: 0,
+            last_k: 0,
+            last_fold_pos: 0,
+            buckets: [Bucket::default(); FIT_WINDOW_S],
+            fit_valid: false,
+            fit_ppb: 0,
+            fit_b: 0.0,
+            fit_xbar: 0.0,
+            fit_ybar: 0.0,
+            phase_ns: 0,
+            received: 0,
+            lost: 0,
+            silence_samples: 0,
+            late: 0,
+            re_anchors: 0,
+        }
+    }
+
+    /// The stamp of the sample at `pos` (samples since the anchor, never before the line's base).
+    pub fn stamp_at(&self, pos: u64) -> u64 {
+        let span = pos.saturating_sub(self.base_pos);
+        let ns = samples_to_ns(span, self.rate);
+        self.base_stamp_ns
+            .wrapping_add((ns as i64 + scale_ppb(ns, self.step_ppb)) as u64)
+    }
+
+    fn fold(&mut self, k: i64, x: u64, y: u64) {
+        let b = &mut self.buckets[(k % FIT_WINDOW_S as i64) as usize];
+        if b.k != k {
+            *b = Bucket {
+                k,
+                n: 0,
+                x0: x,
+                y0: y,
+                su: 0.0,
+                sv: 0.0,
+                suu: 0.0,
+                suv: 0.0,
+            };
+        }
+        let u = (x - b.x0) as f64;
+        let v = (y - b.y0) as f64;
+        b.n += 1;
+        b.su += u;
+        b.sv += v;
+        b.suu += u * u;
+        b.suv += u * v;
+        self.last_fold_pos = x;
+    }
+
+    /// The arrival (ns since the anchor's arrival) the reference line expects at end position
+    /// `x`: the fit once it is valid, else the anchor at the nominal rate.
+    pub fn reference(&self, x: u64) -> f64 {
+        if self.fit_valid {
+            return self.fit_ybar + self.fit_b * (x as f64 - self.fit_xbar);
+        }
+        samples_to_ns(x - self.anchor_end, self.rate) as f64
+    }
+
+    /// The sender's clock offset in ppm from the fit (positive = the sender runs fast), 0 before
+    /// the fit is valid. Display only.
+    pub fn sender_ppm(&self) -> f64 {
+        if self.fit_valid {
+            -(self.fit_ppb as f64) / 1000.0
+        } else {
+            0.0
+        }
+    }
+
+    fn anchor(
+        &mut self,
+        now_ns: u64,
+        nu: u32,
+        frames: u32,
+        rate: u32,
+        channels: u32,
+        reserve_ns: u64,
+    ) {
+        self.anchored = true;
+        self.rate = rate;
+        self.channels = channels;
+        self.reserve_ns = reserve_ns;
+        self.anchor_ns = now_ns;
+        self.anchor_end = u64::from(frames);
+        self.last_nu = nu;
+        self.next_pos = u64::from(frames);
+        let len = samples_to_ns(u64::from(frames), rate);
+        self.base_stamp_ns = now_ns.saturating_sub(len) + reserve_ns;
+        self.base_pos = 0;
+        self.step_ppb = 0;
+        for b in self.buckets.iter_mut() {
+            b.k = -1;
+        }
+        self.fit_valid = false;
+        self.fit_ppb = 0;
+        self.fit_b = 0.0;
+        self.fit_xbar = 0.0;
+        self.fit_ybar = 0.0;
+        self.phase_ns = 0;
+        self.last_k = i64::from(frames / rate);
+        self.fold(self.last_k, u64::from(frames), 0);
+    }
+
+    /// Refit over the completed buckets and move the stamp step, rebasing the line at `pos`.
+    /// Returns false when the fit cannot hold.
+    pub fn update(&mut self, pos: u64) -> bool {
+        let lo = self.last_k - FIT_WINDOW_S as i64 + 1;
+        let mut total: u64 = 0;
+        let mut buckets = 0usize;
+        let mut sx = 0.0f64;
+        let mut sy = 0.0f64;
+        for k in lo..=self.last_k {
+            if k < 0 {
+                continue;
+            }
+            let b = &self.buckets[(k % FIT_WINDOW_S as i64) as usize];
+            if b.k != k || b.n == 0 {
+                continue;
+            }
+            let n = b.n as f64;
+            total += b.n;
+            buckets += 1;
+            sx += n * (b.x0 as f64 + b.su / n);
+            sy += n * (b.y0 as f64 + b.sv / n);
+        }
+        if buckets < FIT_MIN_BUCKETS {
+            return true;
+        }
+        let nt = total as f64;
+        let xbar = sx / nt;
+        let ybar = sy / nt;
+        let mut sxx = 0.0f64;
+        let mut sxy = 0.0f64;
+        for k in lo..=self.last_k {
+            if k < 0 {
+                continue;
+            }
+            let b = &self.buckets[(k % FIT_WINDOW_S as i64) as usize];
+            if b.k != k || b.n == 0 {
+                continue;
+            }
+            let n = b.n as f64;
+            let dx = b.x0 as f64 + b.su / n - xbar;
+            let dy = b.y0 as f64 + b.sv / n - ybar;
+            sxx += (b.suu - b.su * b.su / n) + n * dx * dx;
+            sxy += (b.suv - b.su * b.sv / n) + n * dx * dy;
+        }
+        // The C reads `!(sxx > 0.0)`: a NaN must not pass either.
+        if sxx.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+            return true;
+        }
+        let slope = sxy / sxx;
+        let fit_ppb = round_half_away(slope * f64::from(self.rate) - NS_PER_SEC as f64);
+        if !(-PPB_CLAMP..=PPB_CLAMP).contains(&fit_ppb) {
+            return false;
+        }
+        self.fit_valid = true;
+        self.fit_ppb = fit_ppb;
+        self.fit_b = slope;
+        self.fit_xbar = xbar;
+        self.fit_ybar = ybar;
+        let target = self.anchor_ns as i64
+            + round_half_away(ybar + slope * (pos as f64 - xbar))
+            + self.reserve_ns as i64;
+        let stamp = self.stamp_at(pos);
+        let phase = target - stamp as i64;
+        self.phase_ns = phase;
+        let hold = self.reserve_ns as i64;
+        if !(-hold..=hold).contains(&phase) {
+            return false;
+        }
+        let corr = clamp_i64(phase / PHASE_TAU_S, PHASE_PPB_MAX);
+        let want = clamp_i64(fit_ppb + corr, PPB_CLAMP);
+        let delta = clamp_i64(want - self.step_ppb, PPB_SLEW);
+        if delta != 0 {
+            self.base_stamp_ns = stamp;
+            self.base_pos = pos;
+            self.step_ppb += delta;
+        }
+        true
+    }
+
+    /// The decision for a packet arriving at `now_ns` (`vban_recv_packet`).
+    pub fn packet(
+        &mut self,
+        now_ns: u64,
+        nu: u32,
+        frames: u32,
+        rate: u32,
+        channels: u32,
+        reserve_ns: u64,
+    ) -> Decision {
+        let mut d = Decision::default();
+        let frames = frames.max(1);
+        let rate = rate.max(1);
+        self.received += 1;
+        if !self.anchored {
+            self.anchor(now_ns, nu, frames, rate, channels, reserve_ns);
+            d.event = Event::Anchor;
+            d.stamp_ns = self.base_stamp_ns;
+            d.lateness_ns = now_ns as i64 - d.stamp_ns as i64;
+            return d;
+        }
+        let mut reason = Reason::None;
+        let mut lost: u64 = 0;
+        let mut lost_samples: u64 = 0;
+        if rate != self.rate || channels != self.channels {
+            reason = Reason::Format;
+        } else if reserve_ns != self.reserve_ns {
+            reason = Reason::Config;
+        } else {
+            let delta = nu.wrapping_sub(self.last_nu);
+            if delta == 0 || delta >= 0x8000_0000 {
+                reason = Reason::Backward;
+            } else {
+                lost = u64::from(delta - 1);
+                lost_samples = lost * u64::from(frames);
+                if lost_samples > JUMP_S * u64::from(rate) {
+                    reason = Reason::Jump;
+                }
+            }
+        }
+        let mut pos = 0u64;
+        let mut end = 0u64;
+        let mut k = 0i64;
+        if reason == Reason::None {
+            pos = self.next_pos + lost_samples;
+            end = pos + u64::from(frames);
+            k = (end / u64::from(rate)) as i64;
+            if k > self.last_k {
+                let at = self.next_pos;
+                if !self.update(at) {
+                    reason = Reason::Fit;
+                }
+            }
+            if reason == Reason::None && end - self.last_fold_pos > STARVE_S * u64::from(rate) {
+                reason = Reason::Fit;
+            }
+        }
+        if reason == Reason::None {
+            let stamp = self.stamp_at(pos);
+            if now_ns > stamp {
+                reason = Reason::Late;
+                d.late_ns = (now_ns - stamp) as i64;
+                self.late += 1;
+            } else {
+                d.event = Event::Packet;
+                d.stamp_ns = stamp;
+                d.lateness_ns = now_ns as i64 - stamp as i64;
+                if lost > 0 {
+                    d.silence_samples = lost_samples;
+                    d.silence_pos = self.next_pos;
+                    self.lost += lost;
+                    self.silence_samples += lost_samples;
+                }
+                // fold the packet into the fit unless it came late against the reference line
+                let y = now_ns - self.anchor_ns;
+                if y as f64 - self.reference(end) <= (OUTLIER_MS * NS_PER_MS) as f64 {
+                    self.fold(k, end, y);
+                }
+                if k > self.last_k {
+                    self.last_k = k;
+                }
+                self.last_nu = nu;
+                self.next_pos = end;
+                return d;
+            }
+        }
+        self.re_anchors += 1;
+        self.anchor(now_ns, nu, frames, rate, channels, reserve_ns);
+        d.event = Event::Reanchor;
+        d.reason = reason;
+        d.stamp_ns = self.base_stamp_ns;
+        d.lateness_ns = now_ns as i64 - d.stamp_ns as i64;
+        d
+    }
+}
+
+#[cfg(test)]
+#[path = "vban_receive_timeline_bench.rs"]
+mod bench;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RATE: u32 = 48_000;
+    const R40: u64 = 40 * NS_PER_MS;
+    const T0: u64 = 5_000_000_000;
+
+    /// The ideal arrival of the packet `k` packets after the first one (256 frames, nominal rate).
+    fn on_time(k: u64) -> u64 {
+        T0 + samples_to_ns(k * 256, RATE)
+    }
+
+    #[test]
+    fn the_reserve_clamps_like_the_source_setting() {
+        assert_eq!(clamp_reserve_ms(0), 40);
+        assert_eq!(clamp_reserve_ms(-3), 40);
+        assert_eq!(clamp_reserve_ms(9), 10);
+        assert_eq!(clamp_reserve_ms(10), 10);
+        assert_eq!(clamp_reserve_ms(40), 40);
+        assert_eq!(clamp_reserve_ms(500), 500);
+        assert_eq!(clamp_reserve_ms(501), 500);
+    }
+
+    #[test]
+    fn the_anchor_is_its_arrival_minus_its_length_plus_r() {
+        let mut t = Timeline::new();
+        let d = t.packet(on_time(0), 7, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Anchor);
+        assert_eq!(d.stamp_ns, on_time(0) - samples_to_ns(256, RATE) + R40);
+        assert_eq!(
+            d.lateness_ns,
+            -(R40 as i64 - samples_to_ns(256, RATE) as i64)
+        );
+        assert_eq!(t.received, 1);
+        assert_eq!(t.re_anchors, 0);
+    }
+
+    #[test]
+    fn contiguous_packets_get_contiguous_stamps() {
+        let mut t = Timeline::new();
+        let first = t.packet(on_time(0), 1, 256, RATE, 2, R40).stamp_ns;
+        for k in 1..20u64 {
+            let d = t.packet(on_time(k), 1 + k as u32, 256, RATE, 2, R40);
+            assert_eq!(d.event, Event::Packet);
+            assert_eq!(d.stamp_ns, first + samples_to_ns(k * 256, RATE));
+            assert_eq!(d.silence_samples, 0);
+        }
+    }
+
+    #[test]
+    fn a_loss_is_silence_for_exactly_the_lost_slots() {
+        let mut t = Timeline::new();
+        let first = t.packet(on_time(0), 10, 256, RATE, 2, R40).stamp_ns;
+        t.packet(on_time(1), 11, 256, RATE, 2, R40);
+        let d = t.packet(on_time(4), 14, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Packet);
+        assert_eq!(d.silence_samples, 2 * 256);
+        assert_eq!(d.silence_pos, 2 * 256);
+        assert_eq!(t.stamp_at(d.silence_pos), first + samples_to_ns(512, RATE));
+        assert_eq!(d.stamp_ns, first + samples_to_ns(4 * 256, RATE));
+        assert_eq!(t.lost, 2);
+        assert_eq!(t.silence_samples, 512);
+        assert_eq!(t.re_anchors, 0);
+    }
+
+    #[test]
+    fn a_packet_after_its_stamp_re_anchors_and_one_on_it_does_not() {
+        let mut t = Timeline::new();
+        let first = t.packet(on_time(0), 1, 256, RATE, 2, R40).stamp_ns;
+        let stamp1 = first + samples_to_ns(256, RATE);
+        let d = t.packet(stamp1, 2, 256, RATE, 2, R40);
+        assert_eq!(
+            d.event,
+            Event::Packet,
+            "arriving exactly at its stamp is on time"
+        );
+        assert_eq!(d.lateness_ns, 0);
+        let stamp2 = first + samples_to_ns(512, RATE);
+        let d = t.packet(stamp2 + 1, 3, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Reanchor);
+        assert_eq!(d.reason, Reason::Late);
+        assert_eq!(d.late_ns, 1, "late by exactly the one ns past its stamp");
+        assert_eq!((t.late, t.re_anchors), (1, 1));
+        assert_eq!(
+            d.stamp_ns,
+            stamp2 + 1 - samples_to_ns(256, RATE) + R40,
+            "the late packet is the new anchor"
+        );
+    }
+
+    #[test]
+    fn a_backwards_or_duplicate_index_re_anchors() {
+        let mut t = Timeline::new();
+        t.packet(on_time(0), 100, 256, RATE, 2, R40);
+        let d = t.packet(on_time(1), 100, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Backward));
+        let d = t.packet(on_time(2), 99, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Backward));
+        assert_eq!(t.re_anchors, 2);
+        assert_eq!(t.late, 0);
+    }
+
+    #[test]
+    fn the_index_wraps_without_a_re_anchor() {
+        let mut t = Timeline::new();
+        t.packet(on_time(0), u32::MAX - 1, 256, RATE, 2, R40);
+        let d = t.packet(on_time(1), u32::MAX, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Packet);
+        let d = t.packet(on_time(2), 0, 256, RATE, 2, R40);
+        assert_eq!(d.event, Event::Packet);
+        let d = t.packet(on_time(4), 2, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.silence_samples), (Event::Packet, 256));
+        assert_eq!(t.re_anchors, 0);
+    }
+
+    #[test]
+    fn a_jump_over_two_seconds_re_anchors_and_two_seconds_does_not() {
+        let mut t = Timeline::new();
+        t.packet(on_time(0), 0, 256, RATE, 2, R40);
+        // 375 lost packets = exactly 2 s of audio: still a loss.
+        let d = t.packet(on_time(376), 376, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.silence_samples), (Event::Packet, 375 * 256));
+        // 376 lost packets = more than 2 s: a sender restart.
+        let d = t.packet(on_time(753), 753, 256, RATE, 2, R40);
+        assert_eq!((d.event, d.reason), (Event::Reanchor, Reason::Jump));
+    }
+
+    #[test]
+    fn another_format_or_reserve_re_anchors() {
+        let mut t = Timeline::new();
+        t.packet(on_time(0), 1, 256, RATE, 2, R40);
+        let d = t.packet(on_time(1), 2, 256, RATE, 1, R40);
+        assert_eq!(d.reason, Reason::Format);
+        let d = t.packet(on_time(2), 3, 256, 44_100, 1, R40);
+        assert_eq!(d.reason, Reason::Format);
+        let d = t.packet(on_time(3), 4, 256, 44_100, 1, 2 * R40);
+        assert_eq!(d.reason, Reason::Config);
+        assert_eq!(t.re_anchors, 3);
+    }
+
+    #[test]
+    fn scale_ppb_truncates_toward_zero_and_never_overflows() {
+        assert_eq!(scale_ppb(1_000_000_000, 50_000), 50_000);
+        assert_eq!(scale_ppb(1_000_000_000, -50_000), -50_000);
+        assert_eq!(scale_ppb(999, 1_000), 0);
+        assert_eq!(scale_ppb(999, -1_000), 0);
+        let eight_hours = 8 * 3600 * NS_PER_SEC;
+        assert_eq!(scale_ppb(eight_hours, PPB_CLAMP), 14_400_000_000);
+        assert_eq!(round_half_away(2.5), 3);
+        assert_eq!(round_half_away(-2.5), -3);
+        assert_eq!(round_half_away(-2.4), -2);
+    }
+
+    #[test]
+    fn the_fit_follows_a_slow_sender_and_the_stamps_never_jump() {
+        // A sender 100 ppm slow: each 256-frame packet spans 5.333 ms x 1.0001 of our time.
+        let mut t = Timeline::new();
+        let span = |k: u64| (samples_to_ns(k * 256, RATE) as f64 * 1.0001) as u64;
+        let mut prev: Option<(u64, u64)> = None;
+        for k in 0..(120 * 48_000 / 256) {
+            let d = t.packet(T0 + span(k), k as u32, 256, RATE, 2, R40);
+            assert_ne!(d.event, Event::Reanchor, "packet {k}: {d:?}");
+            if let Some((ps, pk)) = prev {
+                let step = d.stamp_ns as i64 - ps as i64;
+                let nominal = samples_to_ns((k - pk) * 256, RATE) as i64;
+                assert!(
+                    (step - nominal).abs() <= nominal / 1000,
+                    "packet {k}: a stamp step of {step} ns against {nominal} nominal"
+                );
+            }
+            prev = Some((d.stamp_ns, k));
+        }
+        assert!(t.fit_valid);
+        assert!((t.fit_ppb - 100_000).abs() < 200, "fit {}", t.fit_ppb);
+        assert!((t.step_ppb - 100_000).abs() < 2_000, "step {}", t.step_ppb);
+        assert!(t.phase_ns.abs() < 1_000_000, "phase {}", t.phase_ns);
+    }
+
+    #[test]
+    fn a_sender_beyond_the_clamp_cannot_hold() {
+        // 600 ppm fast: the first valid fit reads beyond +-500 ppm.
+        let mut t = Timeline::new();
+        let span = |k: u64| (samples_to_ns(k * 256, RATE) as f64 / 1.0006) as u64;
+        let mut fit_reanchor = false;
+        for k in 0..(20 * 48_000 / 256) {
+            let d = t.packet(T0 + span(k), k as u32, 256, RATE, 2, R40);
+            if d.reason == Reason::Fit {
+                fit_reanchor = true;
+                break;
+            }
+        }
+        assert!(
+            fit_reanchor,
+            "a 600 ppm sender must read as a fit that cannot hold"
+        );
+    }
+
+    #[test]
+    fn packets_late_against_the_line_are_not_folded_and_starve_the_fit() {
+        let mut t = Timeline::new();
+        t.packet(on_time(0), 0, 256, RATE, 2, R40);
+        // Every later packet 20 ms late (within R, never 'late', but an outlier): after 3 s of
+        // audio with nothing folded the fit cannot hold.
+        let mut reason = Reason::None;
+        for k in 1..1000u64 {
+            let d = t.packet(on_time(k) + 20 * NS_PER_MS, k as u32, 256, RATE, 2, R40);
+            if d.event == Event::Reanchor {
+                reason = d.reason;
+                // the anchor folded end position 256; packet k ends at (k + 1) x 256, so the first
+                // end more than 3 s (144 000 samples) past it is packet 563
+                assert_eq!(k, 563, "the starvation re-anchor came at packet {k}");
+                break;
+            }
+        }
+        assert_eq!(reason, Reason::Fit);
+    }
+}

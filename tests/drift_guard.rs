@@ -3228,11 +3228,13 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
         "windows-genlock-fast.yml must still trigger on all four vendor dirs (issue 1372 added \
          vendor/obs-vban) — genlock_parity_consumed_paths(<a Windows box>) mirrors exactly this set"
     );
+    // issue 1439: the strih-variant Linux job builds the VBAN receive source, so linux-genlock.yml
+    // triggers on vendor/obs-vban/** and a Linux strih consumes it; the imag-parity job does not
+    // build it (pinned by tests/vban_receive_timeline_parity_1439.rs), so imag's set stays the pair.
     assert!(
-        !linux_wf.contains("vendor/obs-vban/**"),
-        "linux-genlock.yml must NOT trigger on vendor/obs-vban/** (the paced VBAN sender ships only \
-         in the Windows bundle, issue 1372); if it ever does, genlock_parity_consumed_paths(imag) \
-         must gain it too"
+        linux_wf.contains("vendor/obs-vban/**"),
+        "linux-genlock.yml must trigger on vendor/obs-vban/** (the strih variant builds the VBAN \
+         receive source, issue 1439) — genlock_parity_consumed_paths(strih, 1) carries it"
     );
 
     let body = r#"
@@ -3255,11 +3257,12 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
         "imag's consumed set must be exactly the linux-genlock.yml pair, no av-sync-dock: {out:?}"
     );
     // issue 1372 review: a Linux strih (version-integrity-gate --strih-linux) ships the Linux
-    // build, so its consumed set is the Linux pair; the flag never changes a Windows box's set.
+    // build, so its consumed set is the Linux pair plus the strih variant's obs-vban (issue 1439),
+    // never the Windows-only dock; the flag never changes a Windows box's set.
     assert_eq!(
         sections[3].trim(),
-        "vendor/obs-studio\nvendor/distroav",
-        "a Linux strih consumes the linux-genlock.yml pair, not the Windows-only dirs: {out:?}"
+        "vendor/obs-studio\nvendor/distroav\nvendor/obs-vban",
+        "a Linux strih consumes the strih-variant set, not the Windows-only dock: {out:?}"
     );
     let gate = std::fs::read_to_string(manifest_dir().join("scripts/version-integrity-gate.sh"))
         .expect("read version-integrity-gate.sh");

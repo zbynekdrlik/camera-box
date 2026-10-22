@@ -1530,6 +1530,13 @@ jobs:
           if ($thread -notmatch [regex]::Escape('send_silence(&t, vban_buf, nbs, sample_size, &addr);')) { Write-Error "vban-output-thread.c no longer fills a late slot with silence (issue 1381)"; exit 1 }
           if ($thread -notmatch [regex]::Escape('" repays=%"')) { Write-Error "the obs-vban status line lost its repays counter (issue 1381)"; exit 1 }
           Write-Output "issue 1372 obs-vban send pacing present - OK"
+          if (-not (Test-Path "vendor/obs-vban/src/vban-receive-timeline.h")) { Write-Error "vendor/obs-vban/src/vban-receive-timeline.h is gone (issue 1439) - the VBAN source would stamp packets on arrival again"; exit 1 }
+          $source = (Get-Content "vendor/obs-vban/src/vban-source.c" -Raw) -replace '\s+', ' '
+          if ($source -notmatch [regex]::Escape('#include "vban-receive-timeline.h"')) { Write-Error "vban-source.c no longer includes vban-receive-timeline.h (issue 1439)"; exit 1 }
+          if ($source -notmatch [regex]::Escape('vban_recv_packet(&s->timeline, now, header->nuFrame,')) { Write-Error "vban-source.c no longer stamps packets on the receive timeline (issue 1439)"; exit 1 }
+          if ($source -notmatch [regex]::Escape('"obs-vban receive: received=%"')) { Write-Error "the obs-vban receive status line is gone (issue 1439)"; exit 1 }
+          if ($source -match [regex]::Escape('Padding packet')) { Write-Error "vban-source.c pads a lost packet with copies again (issue 1439) - a lost packet must be silence"; exit 1 }
+          Write-Output "issue 1439 obs-vban receive timeline present - OK"
 
       - name: Configure obs-vban against the genlocked OBS (issue 1372)
         working-directory: vendor/obs-vban
