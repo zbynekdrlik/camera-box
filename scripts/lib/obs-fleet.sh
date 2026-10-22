@@ -147,7 +147,7 @@
 # content watchdogs whose :8899 facets they serve -- genlock-lock, render-freeze, audio-mixer,
 # obs-handles -- each polled/paged only while home (obs_fleet_is_home / obs_fleet_poll_now).
 OBS_FLEET="${OBS_FLEET:-strih-snv|10.77.9.202|linux-genlock|always
-stream-snv|10.77.9.204|windows-genlock|always
+stream-snv|10.77.9.204|linux-genlock|always
 imag|10.77.9.182|linux-genlock|retired
 resolume-snv|resolume.lan|windows-genlock|traveling
 strih-pp|strih-pp.lan|linux-genlock|traveling
