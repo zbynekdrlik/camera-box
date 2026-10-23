@@ -192,7 +192,9 @@ def test_a_hub_fed_strih_manifest_carries_no_program_keys():
 
 def test_the_stream_and_strih_manifests_render_the_vban_block_through_one_function():
     s = PROVISION.read_text() + (SCRIPTS / "lib" / "obs-box-role.sh").read_text()
-    assert s.count('"program_audio_vban": {"port": %s') == 1, "one renderer of the block"
+    # the block's settings are rendered by ONE printf format, never a second copy in either manifest
+    assert s.count('{"port": %s, "stream_name": "%s", "receive_buffer_ms": %s}') == 1, "one renderer"
+    assert '"program_audio_vban": {"port"' not in s, "no manifest renders the block inline"
 
 
 # --- verify item 9 -----------------------------------------------------------------------------------------
