@@ -111,7 +111,7 @@ def test_the_grade_row_is_a_note_on_the_strih_role(tmp_path):
     assert r.stdout.startswith("NOTE|(panel-discord) "), r.stdout + r.stderr
 
 
-def test_the_panel_grader_now_prints_eight_rows():
+def test_the_panel_grader_now_prints_nine_rows():
     # six since issue 1448 (+ panel-discord), seven since issue 1441 (+ panel-kbd), eight since issue 1458
-    # (+ panel-files)
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "8"
+    # (+ panel-files), nine since issue 1464 (+ panel-power)
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "9"

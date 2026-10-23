@@ -6,9 +6,11 @@
 //! A reimage would therefore silently drop tap-to-click, exactly the "provisioning gap hidden by a
 //! hand patch" class (issue 840) the ticket's "Zostáva" section calls out.
 //!
-//! These content-asserts pin that `setup-imag.sh` bakes the file in, with the four `Option`s at the
-//! values live-verified on the box (`Tapping`/`TappingDrag`/`NaturalScrolling` on, `ScrollPixel
-//! Distance` 50 — the user's final tuning). Style follows `tests/setup_imag_guards.rs`: read the
+//! These content-asserts pin that `setup-imag.sh` bakes the file in, with the five `Option`s at their
+//! values (`Tapping`/`TappingDrag`/`NaturalScrolling` on, `ScrollPixelDistance` 15 and `AccelSpeed`
+//! 0.3 — the 23.10.2026 operator finding of issue 1465 item 5, which replaced the July value 50 that
+//! made two-finger scrolling far too slow on the stream boxes). Style follows
+//! `tests/setup_imag_guards.rs`: read the
 //! REAL script and assert on the REAL contract via `contains()` (each needle is unique in the
 //! script, so no static-anchor collision — verified before writing this file).
 
@@ -43,7 +45,7 @@ fn setup_imag_generates_the_touchpad_xorg_conf_779() {
     );
 }
 
-/// The generated InputClass must carry EXACTLY the four options at the live-verified values, plus
+/// The generated InputClass must carry EXACTLY the five options at their values, plus
 /// the `MatchIsTouchpad`/`Driver "libinput"` selector — a reprovisioned box must reproduce what is
 /// live on the box today, not a partial subset.
 #[test]
@@ -55,16 +57,21 @@ fn setup_imag_touchpad_conf_has_all_four_options_779() {
         "Option \"Tapping\" \"on\"",
         "Option \"TappingDrag\" \"on\"",
         "Option \"NaturalScrolling\" \"on\"",
-        "Option \"ScrollPixelDistance\" \"50\"",
+        "Option \"ScrollPixelDistance\" \"15\"",
+        "Option \"AccelSpeed\" \"0.3\"",
     ] {
         assert!(
             body.contains(needle),
             "scripts/setup-imag.sh's touchpad InputClass (#779) must contain `{needle}` — the \
-             bake-in must reproduce the live-verified 30-touchpad-tap.conf byte-for-byte \
-             (Tapping/TappingDrag/NaturalScrolling on, ScrollPixelDistance 50 — the user's final \
-             live value, not the stale '40' in the comment thread)."
+             bake-in must reproduce the 30-touchpad-tap.conf byte-for-byte \
+             (Tapping/TappingDrag/NaturalScrolling on, ScrollPixelDistance 15 + AccelSpeed 0.3 — \
+             the 23.10.2026 operator finding, issue 1465 item 5)."
         );
     }
+    assert!(
+        !body.contains("Option \"ScrollPixelDistance\" \"50\""),
+        "the July ScrollPixelDistance 50 is gone (issue 1465 item 5: far too slow on the stream boxes)"
+    );
 }
 
 /// The bake-in must be a real numbered provisioning step (not a stray untracked block) so the

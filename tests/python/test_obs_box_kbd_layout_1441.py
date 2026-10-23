@@ -173,7 +173,10 @@ class Box:
                 "OBS_BOX_PANEL_DISCORD_BIN": str(self.tmp / "none"),
                 # issue 1458: the recordings helper's installed path (never the real /usr/local/lib)
                 "OBS_BOX_PANEL_FILES_HELPER": str(self.tmp / "lib" / "obs_box_recordings.py"),
-                "OBS_BOX_PANEL_FILES_BIN": str(self.tmp / "none")}
+                "OBS_BOX_PANEL_FILES_BIN": str(self.tmp / "none"),
+                # issue 1464: the power program's installed path (never the real /usr/local/bin); no Chrome
+                "OBS_BOX_PANEL_POWER_HELPER": str(self.tmp / "lib" / "obs-box-power"),
+                "OBS_BOX_PANEL_CHROME_BIN": str(self.tmp / "none")}
 
     def install(self):
         return _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(self.home), env=self.env())

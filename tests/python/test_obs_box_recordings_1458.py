@@ -156,7 +156,7 @@ def test_the_recordings_launcher_is_listed_where_pcmanfm_exists(box):
     box.with_obs()
     r = _bash('obs_box_panel_launchers "$1"', str(box.home), env=_files_env(box))
     rows = [ln.split("|") for ln in r.stdout.splitlines()]
-    assert [x[0] for x in rows][:2] == ["obs", "files"], r.stdout + r.stderr
+    assert [x[0] for x in rows][:3] == ["power", "obs", "files"], r.stdout + r.stderr   # issue 1464: power first
     files = dict((x[0], x) for x in rows)["files"]
     assert files[1] == "Nahrávky"
     assert files[2] == "/usr/bin/python3 %s open" % (box.tmp / "lib" / "camera-box" / "obs_box_recordings.py")
@@ -209,8 +209,8 @@ def test_the_files_row_fails_a_helper_that_differs(box):
     assert rows["panel-files"] == "FAIL"
 
 
-def test_the_row_count_is_eight():
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "8"
+def test_the_row_count_is_nine():   # issue 1464: + (panel-power)
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "9"
 
 
 def test_the_helper_is_std_only():
