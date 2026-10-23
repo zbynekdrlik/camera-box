@@ -58,9 +58,10 @@ def test_fixtures_are_the_real_crlf_wrapped_output():
     assert raw.rstrip().endswith("=== end")
 
 
-def test_gather_cmd_reads_the_four_tables_with_an_end_marker():
+def test_gather_cmd_reads_the_five_tables_with_an_end_marker():
     cmd = nbq.GATHER_CMD
     for part in (
+        "/interface bridge print detail",
         "/interface bridge vlan print detail",
         "/interface bridge port print detail",
         "/interface ethernet switch qos profile print detail",
@@ -84,8 +85,14 @@ def test_parse_static_vlan_entries_only_with_sorted_members():
 def test_parse_bridge_ports_pvid_and_frame_types():
     ports = _facet("foh2_video")["bridge_port"]
     assert set(ports) == {f"ether{i}" for i in range(1, 9)} | {"sfp-sfpplus1", "sfp-sfpplus2"}
-    assert ports["sfp-sfpplus2"] == {"pvid": "89", "frame-types": "admit-all", "disabled": "no"}
+    assert ports["sfp-sfpplus2"] == {
+        "pvid": "89", "frame-types": "admit-all", "ingress-filtering": "yes",
+        "mvrp-applicant-state": "non-participant", "mvrp-registrar-state": "normal",
+        "disabled": "no",
+    }
     assert ports["sfp-sfpplus1"]["frame-types"] == "admit-only-vlan-tagged"
+    # the trunk joins MVRP (it carries VLAN 70/89 only through MVRP-dynamic entries)
+    assert ports["sfp-sfpplus1"]["mvrp-applicant-state"] == "normal-participant"
     assert ports["ether7"]["pvid"] == "70"
     # an INACTIVE (no link) port is still a configured bridge port
     assert ports["ether5"]["pvid"] == "89"
@@ -109,6 +116,67 @@ def test_parse_static_switch_rule_keyed_by_its_wrapped_comment():
     assert r["dst-port"] == "6980"
     assert r["new-qos-profile"] == "dante-audio"
     assert r["disabled"] == "no"
+    assert r["invalid"] == "no"
+
+
+def test_parse_the_bridge_vlan_filtering_and_mvrp_switches():
+    for node in SWITCHES:
+        assert _facet(node)["bridge"] == {
+            "bridge": {
+                "vlan-filtering": "yes", "mvrp": "yes", "pvid": "1",
+                "frame-types": "admit-only-vlan-tagged", "ingress-filtering": "yes",
+                "disabled": "no",
+            }
+        }, node
+
+
+def test_a_wrapped_flags_legend_does_not_drop_entry_zero():
+    raw = _raw("foh2_video")
+    legend = "Flags: X - DISABLED, I - INACTIVE; D - DYNAMIC; H - HW-OFFLOAD; Y - MANAGED \r\n"
+    assert raw.count(legend) == 1
+    wrapped = raw.replace(legend, "Flags: X - DISABLED, I - INACTIVE; D - DYNAMIC; H - HW-OFFLOAD; Y - MANAGED; \r\nZ - SOMETHING-NEW \r\n")
+    assert nbq.facet_from_raw(wrapped) == _facet("foh2_video")
+
+
+def test_an_unparseable_read_is_none_never_a_removed_entry():
+    raw = _raw("foh2_video")
+    # a block that does not start with an index header
+    i = raw.index(" 1   H  interface=ether2")
+    assert nbq.facet_from_raw(raw[:i] + "something RouterOS printed\r\n\r\n" + raw[i:]) is None
+    # an entry without its key property
+    assert nbq.facet_from_raw(raw.replace("interface=ether1 ", "", 1)) is None
+    # an unbalanced quote
+    assert nbq.facet_from_raw(raw.replace('name="dante-low"', 'name="dante-low', 1)) is None
+
+
+def test_two_rules_with_the_same_comment_are_both_kept():
+    raw = _raw("foh2_video")
+    rule = raw[raw.index(" 1    ;;; camera-box issue 1439"): raw.index("=== end")]
+    second = rule.replace(" 1    ;;;", " 2    ;;;", 1).replace("ports=ether7", "ports=ether8")
+    rules = nbq.facet_from_raw(raw.replace("=== end", second + "=== end"))["switch_rule"]
+    assert len(rules) == 2
+    assert sorted(r["ports"] for r in rules.values()) == ["ether7", "ether8"]
+
+
+def test_regrouped_vlan_ids_compare_per_vlan():
+    base = _facet("foh2_video")
+    live = json.loads(json.dumps(base))
+    live["bridge_vlan"] = {
+        "70": {"tagged": ["bridge", "sfp-sfpplus2"], "untagged": [], "disabled": "no"},
+        "89": {"tagged": ["bridge"], "untagged": [], "disabled": "no"},
+    }
+    grouped = json.loads(json.dumps(base))
+    grouped["bridge_vlan"] = {
+        "70,89": {"tagged": ["bridge"], "untagged": [], "disabled": "no"},
+        "70": {"tagged": ["sfp-sfpplus2"], "untagged": [], "disabled": "no"},
+    }
+    assert nbq.check_node("foh2_video", grouped, live) == []
+    ranged = json.loads(json.dumps(base))
+    ranged["bridge_vlan"] = {
+        "69-71": {"tagged": ["bridge"], "untagged": [], "disabled": "no"},
+    }
+    msgs = [m for _, h, m in nbq.check_node("foh2_video", ranged, live) if h]
+    assert any("VLAN 69" in m for m in msgs) and any("VLAN 71" in m for m in msgs)
 
 
 def test_a_switch_with_no_static_rule_has_an_empty_rule_table():
@@ -186,6 +254,30 @@ def test_changed_pvid_and_frame_types_are_drift():
     assert any("frame-types" in m and "'admit-all'" in m for m in msgs)
 
 
+def test_bridge_mvrp_or_vlan_filtering_off_is_drift():
+    raw = _raw("foh2_video")
+    hard = _hard(_check("foh2_video", raw.replace("mvrp=yes", "mvrp=no", 1)))
+    assert len(hard) == 1 and "foh2_video bridge: bridge mvrp" in hard[0][2]
+    hard = _hard(_check("foh2_video", raw.replace("vlan-filtering=yes", "vlan-filtering=no", 1)))
+    assert len(hard) == 1 and "vlan-filtering" in hard[0][2]
+
+
+def test_trunk_leaving_mvrp_is_drift():
+    raw = _raw("foh2_video")
+    i = raw.index("interface=sfp-sfpplus1")
+    tail = raw[i:].replace("mvrp-applicant-state=normal-participant",
+                           "mvrp-applicant-state=non-participant", 1)
+    hard = _hard(_check("foh2_video", raw[:i] + tail))
+    assert len(hard) == 1
+    assert "foh2_video sfp-sfpplus1" in hard[0][2] and "mvrp-applicant-state" in hard[0][2]
+
+
+def test_a_rule_the_hardware_rejected_is_drift():
+    raw = _raw("foh2_video")
+    hard = _hard(_check("foh2_video", raw.replace(" 1    ;;; camera-box", " 1 I  ;;; camera-box", 1)))
+    assert len(hard) == 1 and "foh2_video ether7" in hard[0][2] and "invalid" in hard[0][2]
+
+
 def test_removed_bridge_port_is_drift():
     raw = _raw("foh2_video")
     i = raw.index(" 9   H  interface=sfp-sfpplus2")
@@ -248,11 +340,12 @@ def test_checked_in_baseline_carries_the_23_10_switch_changes():
         assert nodes[node]["qos_profile"]["dante-audio"]["traffic-class"] == "5"
         assert nodes[node]["bridge_port"], node
         assert nodes[node]["bridge_vlan"], node
+        assert nodes[node]["bridge"]["bridge"]["mvrp"] == "yes", node
+        assert nodes[node]["bridge"]["bridge"]["vlan-filtering"] == "yes", node
     foh2 = nodes["foh2_video"]
     assert foh2["bridge_vlan"]["70"]["tagged"] == ["bridge", "sfp-sfpplus2"]
-    assert foh2["bridge_port"]["sfp-sfpplus2"] == {
-        "pvid": "89", "frame-types": "admit-all", "disabled": "no",
-    }
+    assert foh2["bridge_port"]["sfp-sfpplus2"]["pvid"] == "89"
+    assert foh2["bridge_port"]["sfp-sfpplus2"]["frame-types"] == "admit-all"
     (rule,) = foh2["switch_rule"].values()
     assert rule["new-qos-profile"] == "dante-audio" and rule["ports"] == "ether7"
     assert "router_snv" in nodes and "bridge_vlan" not in nodes["router_snv"]
@@ -274,7 +367,7 @@ if node is None:
     sys.exit(255)
 v = nodes[node]
 if "=== bridge-vlan" in cmd:
-    sys.stdout.write(open(os.path.join(os.environ["FAKE_RAW_DIR"], node + ".txt")).read())
+    sys.stdout.write(open(os.path.join(os.environ["FAKE_RAW_DIR"], node + ".txt"), newline="").read())
 elif cmd.startswith("/system identity"):
     print("  name: %s" % v["identity"])
     print("  version: %s (stable)" % v["ros"])
@@ -300,7 +393,7 @@ def orch(tmp_path):
     raw_dir = tmp_path / "raw"
     raw_dir.mkdir()
     for node in SWITCHES:
-        (raw_dir / f"{node}.txt").write_text(_raw(node))
+        (raw_dir / f"{node}.txt").write_bytes(_raw(node).encode("ascii"))
     baseline = tmp_path / "baseline.json"
     baseline.write_text((_SCRIPTS / "netcfg-baseline.json").read_text())
     env = dict(os.environ)
@@ -379,6 +472,27 @@ def test_orchestrator_capture_refuses_an_incomplete_switch_read(orch, tmp_path):
     assert r.returncode == 2
     assert not out.exists()
     assert "stage_av" in r.stderr
+
+
+def test_orchestrator_json_names_an_incomplete_switch_and_fails(orch):
+    f = orch.raw_dir / "stage_av.txt"
+    f.write_text(f.read_text().replace("=== end", ""))
+    r = subprocess.run(
+        ["bash", str(_SCRIPTS / "netcfg-audit.sh"), "--json"],
+        env=_orch_env(orch), capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 2
+    assert "stage_av" in r.stderr
+    nodes = json.loads(r.stdout)["nodes"]
+    assert "bridge_vlan" in nodes["foh2_video"] and "bridge_vlan" not in nodes["stage_av"]
+
+
+def test_watchdog_unit_ceiling_covers_the_extra_switch_call():
+    unit = (_ROOT / "systemd" / "netcfg-drift-alert-watchdog.service").read_text()
+    ceiling = int(unit.split("TimeoutStartSec=", 1)[1].split()[0])
+    # worst case with every read hanging to its 8 s bound: router 1 call + 4 switches x 4 calls,
+    # plus the designated two-read drop probe (2 x 8 s + the 6 s window) = 158 s, with headroom
+    assert ceiling >= 240
 
 
 def _orch_env(orch):
