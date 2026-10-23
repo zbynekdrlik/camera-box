@@ -10,8 +10,8 @@ set -euo pipefail
 # 23.10.2026) through the real CLI, restores each with Qt and checks where the dock lands:
 #   1. stream-pp as captured  -> the dock hidden + floating (the issue: OBS's add-time default);
 #   2. stream-pp seeded       -> `seeded`, the dock visible + docked right, every other dock unchanged;
-#   3. stream-snv as captured -> `present` (its ported layout already holds the dock), file unchanged,
-#                                the dock visible + docked right;
+#   3. stream-snv as captured -> `present` (its ported layout already holds the dock), the layout
+#                                unchanged + the first-seed marker added, the dock visible + docked right;
 #   4. the state an OBS saves after running case 1 (Qt's own saveState) -> `default-hidden`, seed =
 #      `redocked`, the dock visible + docked right, every other dock unchanged;
 #   5. a probe dock seeded into stream-snv, whose right area already exists -> the probe joins that
@@ -102,7 +102,8 @@ same_others "$PP0" "$PP1" "stream-pp seeded: every other dock unchanged"
 cp "${FIX}/stream-snv.user.ini" "${WORK}/snv.ini"
 got="$(seed_cli seed "${WORK}/snv.ini")"
 if [ "$got" = present ]; then echo "ok:   stream-snv: seed = present"; else fail "stream-snv seed printed '${got}', want present"; fi
-if cmp -s "${FIX}/stream-snv.user.ini" "${WORK}/snv.ini"; then echo "ok:   stream-snv: user.ini unchanged"; else fail "stream-snv: the seed changed user.ini"; fi
+if [ "$(grep '^DockState=' "${FIX}/stream-snv.user.ini")" = "$(grep '^DockState=' "${WORK}/snv.ini")" ]; then echo "ok:   stream-snv: the saved layout unchanged"; else fail "stream-snv: the seed changed the saved layout"; fi
+if grep -qx 'AvsyncDockSeeded=true' "${WORK}/snv.ini"; then echo "ok:   stream-snv: the first-seed marker is in user.ini"; else fail "stream-snv: no first-seed marker in user.ini"; fi
 SNV="$(restore "${WORK}/snv.ini")"
 expect "$SNV" "restore=ok" "stream-snv: Qt restores the captured state"
 expect "$SNV" "$DOCKED" "stream-snv: the dock is visible + docked right"

@@ -18,9 +18,9 @@
 #   [BasicWindow] DockState, restored after the plugin load, decides. scripts/obs_dock_state.py seeds the
 #   dock visible + docked right when that state has no entry for it, or -- before the first seed only --
 #   holds it in OBS's own hidden + floating default; an operator's placement (visible, or closed) is kept.
-#   The first seed decision leaves the stamp OBS_BOX_AVSYNC_DOCK_STAMP next to user.ini: OBS saves the
-#   same hidden + floating state when the operator floats the dock and closes it, which every later run
-#   must keep. Never while OBS runs (OBS rewrites user.ini from memory on exit; the ONE probe
+#   The first seed decision writes `[CameraBox] AvsyncDockSeeded=true` into the same user.ini: OBS saves
+#   the same hidden + floating state when the operator floats the dock and closes it, which every later
+#   run must keep, and a replaced user.ini loses the marker with its layout. Never while OBS runs (OBS rewrites user.ini from memory on exit; the ONE probe
 #   strih_operator_obs_running), never over an unreadable file. WARN-only, rc 0.
 # verify-strih item 47: obs_box_avsync_dock_grade_report LIBDIR SHAREDIR LOG USER_INI -> 3 rows:
 #   (avsync-dock)         the plugin .so + its locale in the /usr prefix OBS loads;
@@ -38,19 +38,15 @@
 OBS_BOX_AVSYNC_DOCK_MODULE="obs-audio-video-sync-dock"
 OBS_BOX_AVSYNC_DOCK_ID="net.nagater.obs-audio-video-sync-dock..main"
 OBS_BOX_AVSYNC_DOCK_ROWS=3
-# The first-seed stamp, next to user.ini (the desktop user's OBS config dir).
-OBS_BOX_AVSYNC_DOCK_STAMP=".camera-box-avsync-dock-seeded"
 
 _obs_box_avsync_dock_py() {
   printf '%s' "${OBS_BOX_AVSYNC_DOCK_PY:-$(dirname "${BASH_SOURCE[0]}")/../obs_dock_state.py}"
 }
 
-# _obs_box_avsync_dock_stamp USER_INI -> the first-seed stamp path next to USER_INI.
-_obs_box_avsync_dock_stamp() { printf '%s/%s' "$(dirname "$1")" "$OBS_BOX_AVSYNC_DOCK_STAMP"; }
 
 # obs_box_avsync_dock_seed USER_INI DESKTOP_USER -> setup-strih step 16g on the stream role. Always rc 0.
 obs_box_avsync_dock_seed() {
-  local ini="${1:?user.ini path required}" user="${2:?desktop user required}" why out rc=0 stamp tok
+  local ini="${1:?user.ini path required}" user="${2:?desktop user required}" why out rc=0 tok
   if ! why="$(obs_box_step_applies avsync-dock)"; then
     echo "  A/V-sync dock layout: SKIP -- ${why}"
     return 0
@@ -59,20 +55,21 @@ obs_box_avsync_dock_seed() {
     echo "  WARN: OBS is running -- it rewrites ${ini} from memory on exit, so the A/V-sync dock was NOT seeded into its saved layout; stop strih-obs.service and re-run setup-strih.sh (issue 1470)"
     return 0
   fi
-  stamp="$(_obs_box_avsync_dock_stamp "$ini")"
-  out="$(python3 "$(_obs_box_avsync_dock_py)" seed --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" --stamp "$stamp" 2>&1)" || rc=$?
+  out="$(python3 "$(_obs_box_avsync_dock_py)" seed --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "  WARN: the A/V-sync dock could not be seeded into ${ini} (left untouched): ${out} (issue 1470)"
     return 0
   fi
-  # The token is the last line; anything before it is the tool's own WARN (a stamp it could not write).
+  # The token is the last line; anything before it is the tool's own output, shown as it is.
   tok="${out##*$'\n'}"
   [ "$tok" = "$out" ] || echo "  ${out%$'\n'*}"
-  # the stamp is root's when setup wrote it: hand it to the desktop user (never through a link)
-  if [ -f "$stamp" ] && [ ! -L "$stamp" ]; then chown -h "$user":"$user" "$stamp" 2>/dev/null || true; fi
+  case "$tok" in
+    seeded | redocked | present)
+      # the tool rewrote user.ini (a seed, or only the first-seed marker): the desktop user's file again
+      chown -h "$user":"$user" "$ini" 2>/dev/null || true ;;
+  esac
   case "$tok" in
     seeded | redocked)
-      chown -h "$user":"$user" "$ini" 2>/dev/null || true
       echo "  A/V-sync dock ${tok} visible + docked right in the saved OBS layout (${ini}, issue 1470)" ;;
     present) echo "  A/V-sync dock: the saved OBS layout already places it (the operator's layout, kept)" ;;
     no-state | no-ini) echo "  WARN: ${ini} has no saved OBS dock layout yet -- start OBS once, stop it, re-run setup-strih.sh step 16g (issue 1470)" ;;
@@ -118,7 +115,7 @@ obs_box_avsync_dock_grade_rows() {
     printf 'NOTE|(avsync-dock-layout) not graded: %s\n' "$why"
     return 0
   fi
-  v="$(python3 "$(_obs_box_avsync_dock_py)" check --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" --stamp "$(_obs_box_avsync_dock_stamp "$ini")" 2>/dev/null)" || v=unreadable
+  v="$(python3 "$(_obs_box_avsync_dock_py)" check --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" 2>/dev/null)" || v=unreadable
   case "$v" in
     visible) printf 'OK|(avsync-dock-layout) the saved OBS layout (%s) shows the A/V-sync dock\n' "$ini" ;;
     hidden) printf 'NOTE|(avsync-dock-layout) the operator closed the A/V-sync dock (hidden in %s) -- kept; Docks menu to show it\n' "$ini" ;;

@@ -14,18 +14,19 @@ DockState is base64 of `QMainWindow::saveState()`. This module parses the dock-a
 - an entry in OBS's own add-time default (hidden AND floating: what an OBS that ran with the plugin
   before any seed saves on exit) -> that entry is re-docked visible in place, same byte length -- but
   ONLY before the first seed: OBS saves the same state when the operator floats the dock and closes it,
-  so `--stamp FILE` marks the first seed decision (written then, never through a symlink), and once it
-  exists a hidden + floating entry is the operator's;
+  so the first seed decision writes `[CameraBox] AvsyncDockSeeded=true` into the same user.ini (the same
+  atomic rewrite), and once it is there a hidden + floating entry is the operator's. A replaced or
+  restored user.ini loses the marker together with the layout, so its next seed re-docks the dock;
 - any other entry (visible, or closed while docked) is the operator's choice and is kept.
 Anything the parser does not recognise is refused: the blob is never guessed at. A dock added to a
 TABBED right area becomes a tab behind the current one (visible in the state, not on top): Qt's own
 behaviour, never seen in a captured layout.
 
-  python3 scripts/obs_dock_state.py check --ini ~/.config/obs-studio/user.ini --dock <object name> [--stamp F]
-  python3 scripts/obs_dock_state.py seed  --ini ~/.config/obs-studio/user.ini --dock <object name> [--stamp F]
+  python3 scripts/obs_dock_state.py check --ini ~/.config/obs-studio/user.ini --dock <object name>
+  python3 scripts/obs_dock_state.py seed  --ini ~/.config/obs-studio/user.ini --dock <object name>
 
 `check` prints one token: visible | hidden | default-hidden | absent | no-state | no-ini | unreadable
-(hidden = closed by the operator; default-hidden = OBS's hidden + floating default, no stamp yet).
+(hidden = closed by the operator; default-hidden = OBS's hidden + floating default, before the first seed).
 `seed` prints seeded | redocked | present | no-state | no-ini, exit 0; exit 3 = an unreadable user.ini or
 DockState (nothing written); exit 4 = a symlinked user.ini (nothing written). Run `seed` only while OBS
 is stopped: OBS rewrites user.ini from memory on exit.
@@ -300,44 +301,79 @@ def _read_lines(path):
         return fh.readlines()
 
 
-def _seeded_before(stamp):
-    # lexists: a symlink planted there counts as present, and is never followed or written.
-    return stamp is not None and os.path.lexists(stamp)
+# The first-seed marker: a key of OUR section in the same user.ini, so a replaced or restored user.ini
+# loses it together with the layout. OBS's config save keeps a section it does not know.
+MARKER_SECTION = "CameraBox"
+MARKER_KEY = "AvsyncDockSeeded"
 
 
-def _write_stamp(stamp):
-    """Create the first-seed stamp; never through a symlink, never over an existing name."""
-    if stamp is None or os.path.lexists(stamp):
-        return
-    try:
-        fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    except OSError as e:
-        # the seed itself stands; without the stamp the next run may re-dock OBS's default once more
-        print("WARN: the first-seed stamp %s could not be written (%s)" % (stamp, e), file=sys.stderr)
-        return
-    with os.fdopen(fd, "w") as fh:
-        fh.write("issue 1470: the A/V-sync dock layout was seeded once; OBS's hidden + floating default is the operator's now\n")
+def _section_of(lines):
+    """[(section name or None)] per line."""
+    out, section = [], None
+    for line in lines:
+        m = _SECTION_RE.match(line.rstrip("\r\n"))
+        if m:
+            section = m.group("name")
+        out.append(section)
+    return out
 
 
-def check_ini(path, name, stamp=None):
+def _marked(lines):
+    sections = _section_of(lines)
+    for line, section in zip(lines, sections):
+        if section == MARKER_SECTION and line.rstrip("\r\n").strip() == MARKER_KEY + "=true":
+            return True
+    return False
+
+
+def _with_marker(lines, ending):
+    """LINES with `[CameraBox] AvsyncDockSeeded=true` added (in the section when it exists, else a new
+    section at the end), every line ending ENDING."""
+    sections = _section_of(lines)
+    for i, (line, section) in enumerate(zip(lines, sections)):
+        if section == MARKER_SECTION and _SECTION_RE.match(line.rstrip("\r\n")):
+            return lines[:i + 1] + [MARKER_KEY + "=true" + ending] + lines[i + 1:]
+    out = list(lines)
+    if out and not out[-1].endswith(("\n", "\r")):
+        out[-1] += ending
+    return out + [ending, "[" + MARKER_SECTION + "]" + ending, MARKER_KEY + "=true" + ending]
+
+
+def check_ini(path, name):
     if not os.path.exists(path):
         return "no-ini"
     try:
-        _, value = _dockstate_line(_read_lines(path))
+        lines = _read_lines(path)
+        _, value = _dockstate_line(lines)
         if value is None:
             return "no-state"
         state = dock_state(_decode(value), name)
     except (DockStateError, OSError, UnicodeDecodeError):
         return "unreadable"
-    if state == "default-hidden" and _seeded_before(stamp):
+    if state == "default-hidden" and _marked(lines):
         return "hidden"
     return state
 
 
-def seed_ini(path, name, stamp=None):
+def _replace(path, lines):
+    """Write LINES over PATH: a temp file in the same directory renamed over the name (a reader never sees
+    half a file; a link is replaced, never written through), the mode kept."""
+    mode = os.stat(path).st_mode & 0o777
+    fd, tmp = tempfile.mkstemp(prefix=".user.ini.", dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.writelines(lines)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def seed_ini(path, name):
     """seeded | redocked | present | no-state | no-ini. Raises DockStateError (unreadable) or PermissionError
-    (a symlinked user.ini). With STAMP: a seed decision (seeded / redocked / present) writes it when it is
-    not there yet, and once it is there OBS's hidden + floating default is kept as the operator's."""
+    (a symlinked user.ini). Every seed decision (seeded / redocked / present) leaves the first-seed marker
+    in user.ini; once it is there, OBS's hidden + floating default is kept as the operator's."""
     if os.path.islink(path):
         raise PermissionError("%s is a symlink -- refusing to write it" % path)
     if not os.path.exists(path):
@@ -350,25 +386,15 @@ def seed_ini(path, name, stamp=None):
     if value is None:
         return "no-state"
     blob = _decode(value)
-    action = seed_action(blob, name, _seeded_before(stamp))
-    if action == "keep":
-        _write_stamp(stamp)
+    marked = _marked(lines)
+    action = seed_action(blob, name, marked)
+    ending = lines[idx][len(lines[idx].rstrip("\r\n")):] or "\n"
+    if action != "keep":
+        lines[idx] = "DockState=" + base64.b64encode(seed(blob, name)).decode("ascii") + ending
+    if action == "keep" and marked:
         return "present"
-    new = base64.b64encode(seed(blob, name)).decode("ascii")
-    ending = lines[idx][len(lines[idx].rstrip("\r\n")):]
-    lines[idx] = "DockState=" + new + ending
-    mode = os.stat(path).st_mode & 0o777
-    fd, tmp = tempfile.mkstemp(prefix=".user.ini.", dir=os.path.dirname(os.path.abspath(path)))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.writelines(lines)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        os.unlink(tmp)
-        raise
-    _write_stamp(stamp)
-    return "seeded" if action == "insert" else "redocked"
+    _replace(path, lines if marked else _with_marker(lines, ending))
+    return {"insert": "seeded", "redock": "redocked"}.get(action, "present")
 
 
 def main(argv=None):
@@ -376,13 +402,12 @@ def main(argv=None):
     ap.add_argument("action", choices=("check", "seed"))
     ap.add_argument("--ini", required=True, help="the OBS user.ini")
     ap.add_argument("--dock", required=True, help="the dock's object name")
-    ap.add_argument("--stamp", help="the first-seed stamp file (see above)")
     a = ap.parse_args(argv)
     if a.action == "check":
-        print(check_ini(a.ini, a.dock, a.stamp))
+        print(check_ini(a.ini, a.dock))
         return 0
     try:
-        print(seed_ini(a.ini, a.dock, a.stamp))
+        print(seed_ini(a.ini, a.dock))
         return 0
     except PermissionError as e:
         print("refused: %s" % e, file=sys.stderr)
