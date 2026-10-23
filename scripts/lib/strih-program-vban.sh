@@ -25,7 +25,9 @@
 #                             `lost` counts every slot missing at its deadline, and the note says how many
 #                             of them were concealed (the previous packet repeated, crossfaded: a run of
 #                             up to 3 between two packets, ROZHODNUTE 6352253147 b) and how many went
-#                             out as silence
+#                             out as silence -- every one of them LOST: concealment only keeps a loss
+#                             from clicking, it never makes it healthy (ROZHODNUTE 6359382787; the E2E's
+#                             blocking gate over a recording window is scripts/lib/program-audio-continuity.sh)
 #   (program-vban) fit        `fit=frozen` (nothing folded for 3 s while the fit is valid: an on-time
 #                             delay level step the fit no longer follows): a NOTE (issue 1439 round 4)
 #   (program-vban) missed     `emit_missed` > 0: the playout worker handed a slot to OBS after its own
@@ -110,11 +112,12 @@ strih_program_vban_grade() {
   fi
   lost="$(strih_program_vban_field "${l2:-$l1}" lost)"
   counters="lost=${lost} late=$(strih_program_vban_field "${l2:-$l1}" late) re_anchors=$(strih_program_vban_field "${l2:-$l1}" re_anchors)"
-  # ROZHODNUTE 6352253147 (b): how many of the lost slots were concealed, how many went out as silence
+  # ROZHODNUTE 6352253147 (b): how many of the lost slots were concealed, how many went out as silence;
+  # ROZHODNUTE 6359382787: a concealed slot is a LOST slot, never a healthy one -- the note says so
   concealed="$(strih_program_vban_field "${l2:-$l1}" concealed)"
   extra=""
   if [[ "$concealed" =~ ^[0123456789]+$ ]] && [[ "$lost" =~ ^[0123456789]+$ ]] && [ "$lost" -gt 0 ]; then
-    extra=" -- of the ${lost} lost slot(s) ${concealed} concealed (the previous packet repeated, crossfaded), $((lost - concealed)) silence"
+    extra=" -- ${lost} slot(s) LOST: ${concealed} concealed (a concealed slot is still lost: the previous packet repeated, crossfaded), $((lost - concealed)) silence"
   fi
   if [ "$(strih_program_vban_field "${l2:-$l1}" fit)" = frozen ]; then
     note "(program-vban) the receive fit is FROZEN: every packet sits more than 10 ms off its line (an on-time network delay step), so the source holds its last rate and latency without following the console's clock -- an OBS restart re-anchors it (issue 1439)"

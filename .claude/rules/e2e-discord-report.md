@@ -4,6 +4,7 @@ paths:
   - "scripts/cambox_segments.py"
   - "scripts/lib/e2e-discord-report.sh"
   - "tests/python/test_e2e_discord_report*.py"
+  - "scripts/e2e_report_program_audio.py"
 ---
 
 # E2E Discord report — two renderings + derived blocking-vs-report-only (#711, #1127)
@@ -96,6 +97,16 @@ lists the report-only ones for the `ℹ️` line.
   or `gates_overall_pass=false` — on the respective block); each `_report_only_tripped` branch is
   guarded `gates_overall_pass is not True` so a post-flip verdict
   routes it to blocking instead (no double-count).
+
+**A gate the E2E folds AFTER the merge (issue 1439, the program-audio continuity gate).** Its block
+`program_audio_continuity` is merged into the verdict JSON by the bash gate, NOT by
+recording-verdict.rs, so `overall_pass` stays the merge's own. The report reads the run's verdict as
+`_run_passed(verdict)` = `overall_pass` AND not `e2e_report_program_audio.blocks(verdict)` (the block
+carries `gates_overall_pass=true`; FAIL and UNKNOWN both block). The summary adds ONE `•` line (lost
+slots with the concealed ones called `zamaskované = STRATENÉ`, or `NEOVERENÁ = ZLYHANIE` + the reason),
+the full report a `🔊 Kontinuita zvuku programu` section and a `_section_overall` blocker. A PASS block
+renders byte-identical to no block. The rendering lives in `scripts/e2e_report_program_audio.py`
+(this file is past its size budget); a future post-merge gate follows the same shape.
 
 **When you add a NEW gate to recording-verdict.rs:** if it folds into `all_pass`, add it to
 `_blocking_failures`; if report-only, add it to `_report_only_tripped`. The summary has a safety net
