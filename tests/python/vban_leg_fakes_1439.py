@@ -80,6 +80,12 @@ if cmd == ["connection", "modify"]:
     x = prof(a[2]); kv = a[3:]
     for i in range(0, len(kv), 2):
         x["props"][kv[i]] = kv[i + 1]
+    # NetworkManager autoconnects an inactive profile the moment it is armed, when its device can come up
+    # (a VLAN: its parent has carrier) -- on atlantic that is the unannounced rig-link reset
+    d = x["props"].get("connection.interface-name", "")
+    can = s["carrier"].get(x["props"].get("vlan.parent", d), True)
+    if x["props"].get("connection.autoconnect") == "yes" and x["uuid"] not in s["active"].values() and d and can:
+        s["active"][d] = x["uuid"]; s["applied"][d] = dict(x["props"]); s["log"].append(["nm-autoconnect", d])
 elif cmd == ["connection", "add"]:
     kv = a[2:]; new = {"uuid": str(_uuid.uuid4()), "type": "802-3-ethernet", "props": {
         "ipv4.method": "auto", "connection.autoconnect": "yes", "ipv6.method": "auto"}}
@@ -100,7 +106,11 @@ elif cmd == ["device", "reapply"]:
     d = a[2]
     if d not in s["active"] or s.get("reapply_fails"):
         sys.stderr.write("Error: Reapplying connection failed: Can't reapply changes\n"); save(); sys.exit(10)
-    s["applied"][d] = dict(prof(s["active"][d])["props"])
+    new = prof(s["active"][d])["props"]
+    if any(new.get(k) != s["applied"][d].get(k) for k in ("connection.interface-name", "vlan.parent", "vlan.id")):
+        sys.stderr.write("Error: Reapplying connection failed: Can't reapply changes to the device identity\n")
+        save(); sys.exit(10)
+    s["applied"][d] = dict(new)
 elif cmd == ["connection", "up"]:
     x = prof(a[2]); d = a[a.index("ifname") + 1] if "ifname" in a else x["props"]["connection.interface-name"]
     if not s["carrier"].get(d, True):

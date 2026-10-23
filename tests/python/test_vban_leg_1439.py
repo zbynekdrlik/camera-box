@@ -170,7 +170,9 @@ def test_the_ruleset_file_is_the_real_nft_render():
 def test_the_ruleset_reproduces_the_live_hand_fix_plus_the_off_leg_counter():
     want = _norm((FIX / "nft-list-table-netns.txt").read_text())
     live = _norm((FIX / "nft-list-table-live-23-10.txt").read_text())
-    off = 'iifname != "%s" iifname != "lo" udp dport 6980 counter' % LEG_IF
+    # the off-leg counter counts only the SENDER's packets (a routed packet keeps its source address), so
+    # its FAIL never blames the console for another box's VBAN to the same port
+    off = 'iifname != "%s" iifname != "lo" ip saddr %s udp dport 6980 counter' % (LEG_IF, SENDER)
     assert [line for line in want if line != off] == live
     assert off in want
 
@@ -236,6 +238,7 @@ class Box:
         d = self.sysfs / "class" / "net" / name
         d.mkdir(parents=True, exist_ok=True)
         (d / "address").write_text(mac + "\n")
+        (d / "carrier").write_text("1\n")
         if physical:
             dev = self.tmp / "devices" / name
             (dev / "driver").parent.mkdir(parents=True, exist_ok=True)
@@ -490,11 +493,34 @@ def test_vlan_first_creation_warns_of_the_link_reset_and_activates_once(tmp_path
     assert a[a.index("type") + 1] == "vlan" and a[a.index("ifname") + 1] == STRIH_VLAN_IF
     assert a[a.index("vlan.parent") + 1] == STRIH_RIG and a[a.index("vlan.id") + 1] == "70"
     assert a[a.index("connection.autoconnect") + 1] == "no", "created down: exactly one activation, ours"
-    assert len(fk.calls(s, "nmcli", "connection", "up")) == 1
+    ups = fk.calls(s, "nmcli", "connection", "up")
+    assert len(ups) == 1 and "ifname" not in ups[0], "the VLAN profile names its device; no ifname for a device not yet there"
+    assert not [c for c in s["log"] if c[0] == "nm-autoconnect"], "no second activation"
     made = [p for p in s["profiles"] if p["props"].get("connection.id") == "vban-dante70"][0]
     assert made["props"]["connection.autoconnect"] == "yes"
     assert s["applied"][STRIH_VLAN_IF]["ipv4.addresses"] == "10.77.7.202/32"
     assert not fk.calls(s, "nmcli", "connection", "delete")
+
+
+def test_vlan_first_creation_waits_for_the_rig_link_and_warns_when_it_stays_down(tmp_path):
+    b = _strih_box(tmp_path, None, units={})
+    (b.sysfs / "class" / "net" / STRIH_RIG / "carrier").write_text("0\n")
+    b.env["STRIH_VBAN_LEG_LINK_WAIT_S"] = "1"
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "rig link" in r.stdout and STRIH_RIG in r.stdout and "not back" in r.stdout, r.stdout
+
+
+def test_vlan_an_inactive_profile_is_never_armed(tmp_path):
+    # a run killed after `add ... autoconnect no`, or a profile an operator left down: arming autoconnect would
+    # make NetworkManager activate it at once -- the unannounced atlantic link reset
+    b = _strih_box(tmp_path, dict(VLAN_PROPS, **{"connection.autoconnect": "no", "ipv4.routing-rules": ""}),
+                   vlan_active=False)
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode != 0
+    assert "maintenance window" in r.stderr, r.stderr
+    s = b.st()
+    assert _mutations(s) == [] and STRIH_VLAN_IF not in s["active"]
 
 
 def test_vlan_route_change_is_reapplied_never_recreated(tmp_path):
