@@ -22,6 +22,11 @@ WHAT this module declares (everything else is denied):
     renamed SINK_NAME: 2 ch FL/FR, 48 kHz, period 256 + headroom 256, never suspended (PipeWire always holds
     the PCM); device/stream restore off;
   * the PipeWire drop-in (render_pipewire): rate 48000 only, quantum = min = max = 256 (5.3 ms);
+  * WirePlumber 0.5 picks a card's profile by priority (find-preferred-profile), so the drop-in also lists
+    `pro-audio` first in `device.profile.priority.rules` for the headphone device (review round 1), next to
+    `device.profile`;
+  * the jack's speaker path + mixer (mixer_row, review round 1): Speaker off, Master / Headphone at 0 dB
+    unmuted -- the monitor's own act before every VLC start, read back; a USB box keeps its own mixer (NOTE);
   * the grader (grade): what a live session reads back -- exactly ONE Audio/Sink = SINK_NAME on the headphone
     device, no other ALSA device, no bluetooth device, no capture source, the sink at 100 % and unmuted, the
     clock, the restore settings.
@@ -57,6 +62,9 @@ PIPEWIRE_DROPIN = "60-stream-operator-clock.conf"
 WIREPLUMBER_DROPIN = "60-stream-operator-headphones.conf"
 SYS_ROOT = os.environ.get("STREAM_OPERATOR_AUDIO_SYS", "/sys")
 UDEVADM = os.environ.get("STREAM_OPERATOR_AUDIO_UDEVADM", "udevadm")
+AMIXER = os.environ.get("STREAM_OPERATOR_AUDIO_AMIXER", "amixer")
+# the jack's controls the monitor sets to 0 dB unmuted before every VLC start (mon.UNITY_CONTROLS, switch ones)
+MIXER_UNITY = tuple(name for name, has_switch in mon.UNITY_CONTROLS if has_switch)
 DEVICE_PREFIX = "alsa_card."
 # the rows grade() prints, in order (scripts/lib/stream-operator-audio.sh counts them)
 GRADE_ROWS = ("operator-audio-sink", "operator-audio-cards", "operator-audio-capture", "operator-audio-volume",
@@ -206,6 +214,14 @@ monitor.alsa.rules = [
     }
   }
 ]
+
+# WirePlumber 0.5 chooses the profile by priority (find-preferred-profile): pro-audio for the headphone device
+device.profile.priority.rules = [
+  {
+    matches = [ { device.name = "%(dev)s" } ]
+    actions = { update-props = { priorities = [ "pro-audio" ] } }
+  }
+]
 """ % {"dev": device_name, "stem": stem, "pcm": pcm_device, "sink": SINK_NAME, "desc": SINK_DESCRIPTION,
        "rate": RATE, "ch": CHANNELS, "pos": POSITION, "period": PERIOD_SIZE, "headroom": HEADROOM,
        "restore": restore}
@@ -301,6 +317,56 @@ def grade(objs, settings_text, sm_text, expect_device):
     return rows
 
 
+def _amixer_sget(amixer, card_id, name):
+    """(rc, text) of `amixer -c CARD sget NAME` in the C locale; rc None when amixer cannot run."""
+    try:
+        r = subprocess.run([amixer, "-c", card_id, "sget", name], capture_output=True, text=True, timeout=10,
+                           env=dict(os.environ, LC_ALL="C"))
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, str(e)
+    return r.returncode, r.stdout
+
+
+def mixer_row(info, amixer=AMIXER):
+    """(OK|FAIL|NOTE, '(operator-audio-mixer) ...'): on the jack, Speaker off and MIXER_UNITY at 0 dB unmuted
+    (a control the card lacks is named, never failed); a USB box keeps its own mixer (a NOTE)."""
+    tag = "(operator-audio-mixer)"
+    card = info.get("card_id") or "?"
+    if info.get("usb"):
+        return "NOTE", ("%s %s is a USB audio interface: its own mixer (the box's knob) is left as it is"
+                        % (tag, card))
+    ok, bad = [], []
+    rc, out = _amixer_sget(amixer, card, "Speaker")
+    if rc is None:
+        return "FAIL", "%s amixer could not run on %s (%s) -- the speaker path is unread" % (tag, card, out)
+    if rc != 0:
+        ok.append("no Speaker control")
+    else:
+        sw = re.findall(r"\[(on|off)\]", out)
+        if sw and "on" not in sw:
+            ok.append("Speaker off")
+        else:
+            bad.append("Speaker %s" % ("on" if sw else "switch unreadable"))
+    for name in MIXER_UNITY:
+        rc, out = _amixer_sget(amixer, card, name)
+        if rc != 0:
+            ok.append("no %s control" % name)
+            continue
+        dbs = [float(v) for v in re.findall(r"\[(-?\d+(?:\.\d+)?)dB\]", out)]
+        sw = re.findall(r"\[(on|off)\]", out)
+        if not dbs or any(abs(v) > 0.01 for v in dbs):
+            bad.append("%s at %s" % (name, ", ".join("%.2f dB" % v for v in dbs) or "an unread level"))
+        elif "off" in sw:
+            bad.append("%s muted" % name)
+        else:
+            ok.append("%s 0 dB" % name)
+    if bad:
+        return "FAIL", ("%s %s on %s (the monitor sets Speaker off and %s to 0 dB before every VLC start: "
+                        "systemctl --user restart strih-stream-monitor)" % (tag, ", ".join(bad), card,
+                                                                            " / ".join(MIXER_UNITY)))
+    return "OK", "%s the jack %s: %s" % (tag, card, ", ".join(ok))
+
+
 def _read_objs(path):
     if not path:
         return None
@@ -339,7 +405,7 @@ def main(argv=None):
     if info is None:
         print("stream-operator-audio: no headphone device: %s" % why, file=sys.stderr)
         if a.cmd == "grade":
-            for k in GRADE_ROWS:
+            for k in GRADE_ROWS + ("operator-audio-mixer",):
                 print("FAIL|(%s) no headphone device to grade against: %s" % (k, why))
             return 0
         return 1
@@ -352,6 +418,7 @@ def main(argv=None):
         return 0
     for st, text in grade(objs, _read_text(a.settings), _read_text(a.sm_settings), info["device_name"]):
         print("%s|%s" % (st, text))
+    print("%s|%s" % mixer_row(info))
     return 0
 
 

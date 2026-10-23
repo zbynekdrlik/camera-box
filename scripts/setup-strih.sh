@@ -647,27 +647,27 @@ DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || echo 1000)"
 if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then   # issue 1465 item 3: scripts/lib/stream-operator-audio.sh
   echo "  ${WHY}"; stream_operator_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1465: the locked operator PipeWire (above)"
 else
-if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
-  echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"
-else
-  warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"
-fi
-strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d" || fail "cannot create ~/.config/pipewire/pipewire.conf.d (above)"
-strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
-chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
-# (c2, issue 1344) the loopback republishing strih-program's monitor as a pulse-visible Audio/Source.
-strih_pipewire_program_loopback_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
-chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
-# the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
-strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d" || fail "cannot create ~/.config/wireplumber/wireplumber.conf.d (above)"
-strih_wireplumber_minifuse_rule > "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
-chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
-# issue 1345 (owner accepted 25.9.2026): the MiniFuse PLAYBACK period (1024 x 3, headroom 256 -- the
-# buzz fix) and the graph's min-quantum floor 1024 (the robotic-cameraman fix). Compared, rewritten only
-# on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
-strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
-strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
-echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session)"
+  if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
+    echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"
+  else
+    warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"
+  fi
+  strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d" || fail "cannot create ~/.config/pipewire/pipewire.conf.d (above)"
+  strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
+  chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
+  # (c2, issue 1344) the loopback republishing strih-program's monitor as a pulse-visible Audio/Source.
+  strih_pipewire_program_loopback_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
+  chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
+  # the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
+  strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d" || fail "cannot create ~/.config/wireplumber/wireplumber.conf.d (above)"
+  strih_wireplumber_minifuse_rule > "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
+  chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
+  # issue 1345 (owner accepted 25.9.2026): the MiniFuse PLAYBACK period (1024 x 3, headroom 256 -- the
+  # buzz fix) and the graph's min-quantum floor 1024 (the robotic-cameraman fix). Compared, rewritten only
+  # on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
+  strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
+  strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
+  echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session)"
 fi
 # Linger the operator so its user@.service + PipeWire come up at boot before any login: a headless start
 # finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).

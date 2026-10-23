@@ -36,9 +36,9 @@ STREAM_OPERATOR_AUDIO_LEFTOVERS=(
   wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf
   wireplumber/wireplumber.conf.d/51-strih-minifuse.conf
 )
-# How many rows stream_operator_audio_grade_rows prints (files + the module's six + OBS).
+# How many rows stream_operator_audio_grade_rows prints (files + the module's six + the jack mixer + OBS).
 # shellcheck disable=SC2034  # read by the report below and the tests
-STREAM_OPERATOR_AUDIO_ROWS=8
+STREAM_OPERATOR_AUDIO_ROWS=9
 
 # _stream_operator_audio_session USER SECONDS CMD... -> CMD in USER's session (the operator PipeWire), bounded.
 _stream_operator_audio_session() {
@@ -52,10 +52,26 @@ _stream_operator_audio_dump() {
   _stream_operator_audio_session "$1" 15 pw-dump > "$2" 2>/dev/null || : > "$2"
 }
 
+# _stream_operator_audio_pcm_match_dropins USER_HOME -> the monitor drop-ins carrying --pcm-match, one per line.
+# Review round 1: the player honours --pcm-match, the locked PipeWire follows the default card rule; with such a
+# drop-in the two could pick different cards (the player would sit in no-sink forever). Always rc 0.
+_stream_operator_audio_pcm_match_dropins() {
+  local f
+  for f in "${1}/.config/systemd/user/${STRIH_STREAM_MONITOR_UNIT}.d"/*.conf; do
+    if [ -f "$f" ] && grep -q -e '--pcm-match' "$f"; then printf '%s\n' "$f"; fi
+  done
+  return 0
+}
+
 # stream_operator_audio_install REPO USER_HOME DESKTOP_USER -> see the header. rc 0 / 1.
 stream_operator_audio_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local mod="${1}/scripts/stream_operator_audio.py" owner dump wp rel f
+  local mod="${1}/scripts/stream_operator_audio.py" owner dump wp rel f pm
+  pm="$(_stream_operator_audio_pcm_match_dropins "$home")"
+  if [ -n "$pm" ]; then
+    echo "stream-operator-audio: ${pm//$'\n'/ } gives strih-stream-monitor a --pcm-match; the locked PipeWire follows the default rule (the ONE USB audio interface, else the jack) -- remove that drop-in (systemctl --user daemon-reload) and re-run" >&2
+    return 1
+  fi
   owner="${user}:$(id -gn "$user" 2>/dev/null)" || { echo "stream-operator-audio: unknown user ${user}" >&2; return 1; }
   dump="$(mktemp)" || { echo "stream-operator-audio: mktemp failed" >&2; return 1; }
   _stream_operator_audio_dump "$user" "$dump"
@@ -96,6 +112,9 @@ _stream_operator_audio_files_row() {
       bad="${bad} the strih-role ${rel##*/} is back;"
     fi
   done
+  while IFS= read -r rel; do
+    [ -n "$rel" ] && bad="${bad} ${rel##*/} gives the monitor a --pcm-match (remove it);"
+  done < <(_stream_operator_audio_pcm_match_dropins "$home")
   if [ -n "$bad" ]; then
     printf 'FAIL|(operator-audio-files)%s -- re-run setup-strih.sh step 12, then restart the operator PipeWire\n' "$bad"
   else
@@ -126,9 +145,12 @@ _stream_operator_audio_obs_row() {
 # stream_operator_audio_grade_rows REPO USER_HOME DESKTOP_USER -> STREAM_OPERATOR_AUDIO_ROWS rows. Always rc 0.
 stream_operator_audio_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local dump settings sm
-  dump="$(mktemp)" && settings="$(mktemp)" && sm="$(mktemp)" || {
-    printf 'FAIL|(operator-audio-files) mktemp failed -- nothing graded\n'; return 0; }
+  local dump="" settings="" sm=""
+  if ! dump="$(mktemp)" || ! settings="$(mktemp)" || ! sm="$(mktemp)"; then
+    rm -f ${dump:+"$dump"} ${settings:+"$settings"}
+    printf 'FAIL|(operator-audio-files) mktemp failed -- nothing graded\n'
+    return 0
+  fi
   _stream_operator_audio_dump "$user" "$dump"
   _stream_operator_audio_session "$user" 10 pw-metadata -n settings > "$settings" 2>/dev/null || : > "$settings"
   _stream_operator_audio_session "$user" 10 pw-metadata -n sm-settings > "$sm" 2>/dev/null || : > "$sm"

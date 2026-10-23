@@ -94,6 +94,7 @@ DEFAULT_SPEAKER_CONTROL = "Speaker"
 PULSE_SINK_DEFAULT = "stream-operator-headphones"
 OUTPUTS = ("alsa", "pulse")
 OWNER_PULSE = ("pipewire",)
+PW_DUMP_TIMEOUT_S = 10.0
 DEFAULT_HTTP_PORT = 8090  # stream-snv's VLC http port (avsync-vlc-monitor.ps1)
 NETWORK_CACHING_MS = 1000
 VIDEO_ZOOM = "0.25"
@@ -349,6 +350,29 @@ def default_url():
 
 
 
+def pulse_sink_present(pw_dump, name, timeout=PW_DUMP_TIMEOUT_S):
+    """(True | False | None, detail): does the operator session list the Audio/Sink NAME (`pw-dump`)? None =
+    the session is unreadable. Review round 1 (issue 1465): an unlocked PipeWire holds the headphone card too
+    while something plays, and a PULSE_SINK naming a missing sink falls back to the default sink -- maybe the
+    notebook speakers -- so VLC starts only once this sink exists."""
+    try:
+        r = subprocess.run([pw_dump], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, "pw-dump failed: %s" % e
+    if r.returncode != 0:
+        return None, "pw-dump failed (rc %d)" % r.returncode
+    try:
+        objs = json.loads(r.stdout)
+    except ValueError:
+        return None, "pw-dump printed no JSON"
+    for o in objs if isinstance(objs, list) else []:
+        props = ((o.get("info") or {}).get("props") or {}) if isinstance(o, dict) else {}
+        if (o.get("type") == "PipeWire:Interface:Node" and props.get("node.name") == name
+                and props.get("media.class") == "Audio/Sink"):
+            return True, "pw-dump lists the Audio/Sink '%s'" % name
+    return False, "pw-dump lists no Audio/Sink '%s'" % name
+
+
 def vlc_argv(vlc, device, url, http_port, password, output="alsa"):
     """VLC on URL, ALSA straight to DEVICE (issue 1456) or, OUTPUT "pulse" (issue 1465), through pulse to the
     sink the caller names in PULSE_SINK; its http status interface on loopback. No --repeat: the supervisor
@@ -395,7 +419,7 @@ class Monitor:
                  asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, http_port=DEFAULT_HTTP_PORT, retry_s=RETRY_S,
                  poll_s=POLL_S, pause_max_s=PAUSE_MAX_S, startup_s=STARTUP_S,
                  speaker_control=DEFAULT_SPEAKER_CONTROL, log=None, obs_process=DEFAULT_OBS_PROCESS,
-                 output="alsa", pulse_sink=PULSE_SINK_DEFAULT):
+                 output="alsa", pulse_sink=PULSE_SINK_DEFAULT, pw_dump="pw-dump"):
         self.url = url
         self.state_file = state_file
         self.pcm_match = pcm_match
@@ -412,6 +436,7 @@ class Monitor:
         self.obs_process = obs_process
         self.output = output
         self.pulse_sink = pulse_sink
+        self.pw_dump = pw_dump
         self.log = log or (lambda s: print(s, flush=True))
         self.stopping = False
         self.proc = None
@@ -504,6 +529,12 @@ class Monitor:
             self.set_state("busy", "the headphone PCM %s is held by %s (pid %s) -- VLC not started, retrying every %g s"
                            % (hw, owner["comm"] or "?", owner["pid"], self.retry_s))
             return False
+        if self.output == "pulse":
+            present, detail = pulse_sink_present(self.pw_dump, self.pulse_sink)
+            if not present:
+                self.set_state("no-sink", "the operator sink '%s' is not in the operator PipeWire (%s) -- VLC not "
+                               "started, retrying every %g s" % (self.pulse_sink, detail, self.retry_s))
+                return False
         if pcm.get("usb"):
             key = ("usb", pcm["card_id"])
             if key not in self._mixer_logged:
@@ -672,6 +703,8 @@ def main(argv=None):
                          "through pulse to --pulse-sink, the PCM held by the locked PipeWire (issue 1465)")
     ap.add_argument("--pulse-sink", default=PULSE_SINK_DEFAULT,
                     help="the pulse sink the pulse output plays to (default %s)" % PULSE_SINK_DEFAULT)
+    ap.add_argument("--pw-dump", default="pw-dump",
+                    help="the pw-dump the pulse output lists the operator session's sinks with")
     ap.add_argument("--vlc", default="vlc")
     ap.add_argument("--amixer", default="amixer")
     ap.add_argument("--speaker-control", default=DEFAULT_SPEAKER_CONTROL,
@@ -696,7 +729,7 @@ def main(argv=None):
         return 0 if ok else 1
     mon = Monitor(a.url or default_url(), a.state_file, a.pcm_match, a.vlc, a.amixer, a.asound_root, a.proc_root,
                   a.http_port, a.retry_s, a.poll_s, a.pause_max_s, a.startup_s, a.speaker_control,
-                  obs_process=a.obs_process_name, output=a.output, pulse_sink=a.pulse_sink)
+                  obs_process=a.obs_process_name, output=a.output, pulse_sink=a.pulse_sink, pw_dump=a.pw_dump)
 
     def _stop_signal(_sig, _frm):
         mon.stopping = True
