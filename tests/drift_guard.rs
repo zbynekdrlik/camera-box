@@ -3214,11 +3214,13 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
         "linux-genlock.yml must still trigger on vendor/obs-studio/** + vendor/distroav/** — \
          genlock_parity_consumed_paths(imag) mirrors exactly this set"
     );
+    // issue 1470: the strih-variant Linux job builds the A/V-sync dock too, so linux-genlock.yml
+    // triggers on vendor/av-sync-dock/** and a Linux strih consumes it; the imag-parity job does not
+    // build it, so imag's set stays the pair (the #949 root cause stays covered for imag).
     assert!(
-        !linux_wf.contains("vendor/av-sync-dock/**"),
-        "linux-genlock.yml must still NOT trigger on vendor/av-sync-dock/** (a Windows-only OBS \
-         dock DLL) — this is the #949 root cause; if this ever starts triggering on it, \
-         genlock_parity_consumed_paths(imag) must gain it too"
+        linux_wf.contains("vendor/av-sync-dock/**"),
+        "linux-genlock.yml must trigger on vendor/av-sync-dock/** (the strih variant builds the \
+         A/V-sync dock, issue 1470) — genlock_parity_consumed_paths(strih, 1) carries it"
     );
     assert!(
         windows_wf.contains("vendor/obs-studio/**")
@@ -3257,12 +3259,12 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
         "imag's consumed set must be exactly the linux-genlock.yml pair, no av-sync-dock: {out:?}"
     );
     // issue 1372 review: a Linux strih (version-integrity-gate --strih-linux) ships the Linux
-    // build, so its consumed set is the Linux pair plus the strih variant's obs-vban (issue 1439),
-    // never the Windows-only dock; the flag never changes a Windows box's set.
+    // build, so its consumed set is the Linux pair plus the strih variant's obs-vban (issue 1439)
+    // and the A/V-sync dock (issue 1470); the flag never changes a Windows box's set.
     assert_eq!(
         sections[3].trim(),
-        "vendor/obs-studio\nvendor/distroav\nvendor/obs-vban",
-        "a Linux strih consumes the strih-variant set, not the Windows-only dock: {out:?}"
+        "vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock\nvendor/obs-vban",
+        "a Linux strih consumes the strih-variant set (the dock since issue 1470): {out:?}"
     );
     let gate = std::fs::read_to_string(manifest_dir().join("scripts/version-integrity-gate.sh"))
         .expect("read version-integrity-gate.sh");
