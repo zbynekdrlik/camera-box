@@ -149,6 +149,31 @@ def test_an_unparseable_read_is_none_never_a_removed_entry():
     assert nbq.facet_from_raw(raw.replace('name="dante-low"', 'name="dante-low', 1)) is None
 
 
+def test_a_table_without_index_headers_is_none_never_an_empty_table():
+    raw = _raw("foh2_video")
+    start = raw.index("=== bridge-port")
+    end = raw.index("=== qos-profile")
+    section = raw[start:end]
+    # a print-format change: the entry numbers are gone
+    stripped = "\r\n".join(
+        ln[3:] if ln[:3].strip().isdigit() else ln for ln in section.split("\r\n")
+    )
+    assert stripped != section
+    assert nbq.facet_from_raw(raw[:start] + stripped + raw[end:]) is None
+    # the table replaced by a message RouterOS printed instead of it
+    msg = "=== bridge-port\r\nno such command prefix\r\n\r\n"
+    assert nbq.facet_from_raw(raw[:start] + msg + raw[end:]) is None
+
+
+def test_an_empty_table_with_only_its_legend_is_empty():
+    raw = _raw("foh1_audio")
+    start = raw.index("=== switch-rule")
+    empty = "=== switch-rule\r\nFlags: X - DISABLED, I - INVALID; D - DYNAMIC \r\n\r\n=== end\r\n"
+    assert nbq.facet_from_raw(raw[:start] + empty)["switch_rule"] == {}
+    bare = "=== switch-rule\r\n=== end\r\n"
+    assert nbq.facet_from_raw(raw[:start] + bare)["switch_rule"] == {}
+
+
 def test_two_rules_with_the_same_comment_are_both_kept():
     raw = _raw("foh2_video")
     rule = raw[raw.index(" 1    ;;; camera-box issue 1439"): raw.index("=== end")]
@@ -512,6 +537,7 @@ def _orch_env(orch):
 def test_baseline_flat_walk_skips_the_facet_sections():
     src = (_SCRIPTS / "netcfg-audit.sh").read_text()
     body = src.split("_nc_baseline_flat() {", 1)[1].split("\n}\n", 1)[0]
-    for sec in ("bridge_vlan", "bridge_port", "qos_profile", "switch_rule"):
-        assert sec in body
+    facet = body.split("FACET = {", 1)[1].split("}", 1)[0]
+    for sec in nbq.FACET_KEYS:
+        assert '"%s"' % sec in facet, sec
     assert "if len(prefix) == 1 and k in FACET:" in body
