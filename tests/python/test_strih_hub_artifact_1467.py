@@ -224,7 +224,7 @@ def _grade(tmp_path, running=None, recorded=None, checkout="1.7.0-dev.822", stat
     sj.write_text(json.dumps(state) if state is not None else "")
     env["STRIH_HUB_DECODE_STATE_FILE"] = str(sj)
     script = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
-              '. "$1"\n. "$2"\nstrih_intercom_hub_version_grade http://h:8790 "$3" strih-snv "$4"\necho END')
+              '. "$1"\n. "$2"\nstrih_intercom_hub_version_grade http://h:8790 strih-snv "$3" "$4"\necho END')
     return _run(script, CI_ART, HUB_UNIT, root, binp, env=env)
 
 
@@ -292,8 +292,23 @@ def test_setup_step_13_installs_the_hub_of_its_checkout():
     assert 'strih_intercom_hub_binary_install /usr/local/bin/intercom-hub "${HERE}/.."' in SETUP.read_text()
 
 
+def test_the_grade_defaults_to_the_checkout_it_lives_in(tmp_path):
+    # verify item 16 passes no root: the grade reads the checkout its lib sits in (a staged tree
+    # carries Cargo.toml since issue 1467), so the item's text needs no HERE (the item-16 harnesses
+    # run it under set -u without one).
+    vj = tmp_path / "v.json"
+    vj.write_text(json.dumps({"version": "0.0.1"}))
+    script = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
+              '. "$1"\n. "$2"\nstrih_intercom_hub_version_grade http://h:8790 strih-snv\necho END')
+    r = _run(script, CI_ART, HUB_UNIT, env={"STRIH_HUB_VERSION_JSON_FILE": str(vj),
+                                             "STRIH_HUB_DECODE_STATE_FILE": str(tmp_path / "none")})
+    assert r.returncode == 0, r.stderr
+    want = _run('. "$1"\nstrih_checkout_version "$2"', CI_ART, REPO).stdout.strip()
+    assert want and any(ln.startswith("NOTE ") and "OLDER" in ln and want in ln for ln in r.stdout.splitlines()), r.stdout
+
+
 def test_verify_item_16_grades_the_hub_version():
     v = VERIFY.read_text()
     i16 = v.index("# 16) intercom hub unit")
     block = v[i16:v.index("\n# ", i16 + 10)]
-    assert 'strih_intercom_hub_version_grade "http://${WS_HOST}:8790" "${HERE}/.."' in block
+    assert 'strih_intercom_hub_version_grade "http://${WS_HOST}:8790" "$(strih_box_loaded_name)"' in block
