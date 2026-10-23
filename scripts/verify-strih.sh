@@ -346,7 +346,7 @@ esac
 # 9) program audio. A hub box (issue 1344): strih-program sink + the OBS pulse capture + the hub's program
 #    rx (FOH level = a supervisor step). A box with no hub (the stream role, issue 1439): its obs-vban source.
 if ! WHY="$(obs_box_step_applies 13)"; then
-  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"; strih_vban_leg_grade   # + the VBAN-only leg (issue 1439)
+  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"
 else
   AUDIO_SINK=0
   # 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's PipeWire
@@ -382,7 +382,7 @@ else
   strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs
   if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 fi
-
+strih_vban_leg_grade   # the VBAN-only leg, every role (issue 1439, scripts/lib/strih-vban-leg.sh)
 # 9b) MiniFuse period + graph quantum (issue 1345, owner accepted 25.9.2026): both operator-session
 #     drop-ins present with the rendered content (FAIL when missing or drifted -- the buzz / robotic
 #     cameraman fixes a reprovision must keep), and the LIVE graph held at quantum 1024
