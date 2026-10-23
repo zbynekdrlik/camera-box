@@ -17,5 +17,7 @@ EnvironmentFile=-%h/.config/camera-box/netcfg-drift.env
 ExecStart=%h/devel/camera-box/scripts/netcfg-drift-alert-watchdog.sh
 # Read-only ssh to 5 nodes + a 6 s twin-read drop-rate probe per port whose drops GREW since baseline
 # (usually none). Every ssh is individually `timeout`-bounded (NETCFG_SSH_TIMEOUT, default 8 s), so a
-# hung switch cannot stall the pass; this ceiling is the whole-unit backstop.
-TimeoutStartSec=180
+# hung switch cannot stall the pass; this ceiling is the whole-unit backstop. Worst case with every
+# read hanging to its bound: router 1 call + 4 switches x 4 calls (issue 1439 added the bridge/VLAN/QoS
+# call) = 136 s, + the designated drop probe (2 x 8 s + 6 s) = 158 s, + any growth-gated probe.
+TimeoutStartSec=240
