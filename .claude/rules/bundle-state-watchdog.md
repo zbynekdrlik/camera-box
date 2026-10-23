@@ -64,11 +64,12 @@ watchdog reads via `box_fleet_class` → `obs_fleet_class`:
 - **The E2E `[0/8]` self-heal uses the same resolution:** `bundle_state_selfheal_fetch … [class]`
   (`scripts/lib/bundle-state-selfheal.sh`) forwards the class to the restart command and to
   `bundle_state_down_message`, and `recording-e2e.sh`'s `fetch_box_state` takes the class from the
-  lib's pure `bundle_state_selfheal_class <host> <strih_host>`: `linux-genlock` ONLY when the host IS
-  the strih AND `strih_platform` (the ONE strih platform resolver) says Linux. The host check comes
-  first because the `STRIH_PLATFORM` override describes the strih only — without it a forced
-  `STRIH_PLATFORM=linux` would send the Windows stream box a systemctl restart (review round 2).
-  Omitted class = the Windows form, so the stream box is unchanged.
+  lib's pure `bundle_state_selfheal_class <host> <strih_host>`: for the strih host, `linux-genlock`
+  when `strih_platform` (the ONE strih platform resolver) says Linux; for any other host (the stream
+  box), its OWN obs-fleet class (issue 1462: the stream box is the Linux stream-snv since 22.10.2026),
+  `windows-genlock` when the fleet list does not know it. The host check comes first because the
+  `STRIH_PLATFORM` override describes the strih only — a forced `STRIH_PLATFORM=linux` must never send
+  a Windows stream box a systemctl restart (review round 2). Omitted class = the Windows form.
 
 The Linux unit ALSO has `Restart=on-failure`, so the dev1 restart matters for the two cases systemd
 cannot see: a clean exit (`Restart=on-failure` ignores exit 0) and a wedged-but-listening server.

@@ -42,16 +42,20 @@ bundle_state_down_message() {
 
 # bundle_state_selfheal_class <host> <strih_host> -> stdout: the obs-fleet class to restart HOST as
 #   (issue 1317). `linux-genlock` ONLY when HOST is the strih AND the ONE strih platform resolver
-#   (scripts/lib/strih-platform.sh `strih_platform`) says that strih is Linux; everything else
-#   (the stream box, a Windows strih) is `windows-genlock`. The host check comes FIRST because the
-#   `STRIH_PLATFORM` override describes the STRIH only -- without it, `STRIH_PLATFORM=linux` would
-#   route the Windows stream box to a systemctl restart and silently break its self-heal. Pure
-#   (lazy-sources strih-platform.sh when the caller has not); always exits 0.
+#   (scripts/lib/strih-platform.sh `strih_platform`) says that strih is Linux; a Windows strih is
+#   `windows-genlock`. Any OTHER host (the stream box) is its OWN obs-fleet class (issue 1462: the
+#   stream box is the Linux stream-snv since 22.10.2026, its :8899 server a systemd --user unit), and
+#   `windows-genlock` when the fleet list does not know it. The host check comes FIRST because the
+#   `STRIH_PLATFORM` override describes the STRIH only -- it must never route a Windows stream box to
+#   a systemctl restart. Pure (lazy-sources strih-platform.sh, which brings obs-fleet.sh, when the
+#   caller has not); always exits 0.
 bundle_state_selfheal_class() {
   local host="${1:-}" strih_host="${2:-}"
   command -v strih_platform >/dev/null 2>&1 \
     || . "${BASH_SOURCE[0]%/*}/strih-platform.sh"
-  if [ -n "$host" ] && [ "$host" = "$strih_host" ] && [ "$(strih_platform "$host")" = "linux" ]; then
+  if [ -n "$host" ] && [ "$host" = "$strih_host" ]; then
+    if [ "$(strih_platform "$host")" = "linux" ]; then printf 'linux-genlock'; else printf 'windows-genlock'; fi
+  elif [ -n "$host" ] && [ "$(obs_fleet_class_for_host "$host" 2>/dev/null || true)" = "linux-genlock" ]; then
     printf 'linux-genlock'
   else
     printf 'windows-genlock'

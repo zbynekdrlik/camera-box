@@ -186,6 +186,11 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # own [4b2/8] preflight call shape exactly.
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$RIG_MODE_DIR/lib/win-ssh-exec.sh"
+# issue 1462: the stream box's platform (its obs-fleet class) + the ONE transport to it -- the bash
+# text over plain ssh on the Linux stream-snv, the unchanged PowerShell through win_ssh_run on a
+# Windows box; and the mbc VBAN stream + port a Linux box's facts declare.
+# shellcheck source=scripts/lib/stream-box.sh
+. "$RIG_MODE_DIR/lib/stream-box.sh"
 # issue 1171: the SAME offline-ack mechanism recording-e2e.sh's [0/8] uses (#758/#827/#1013) — the
 # #789 imag-genlock TEST-entry gate consults cambox_offline_ack_reason "imag" so a legitimately
 # acked-offline imag SKIPS the gate instead of fail-closing. Pure functions, no side effects at
@@ -655,12 +660,13 @@ IMAG_OFFLINE_ACK_REASON="${IMAG_OFFLINE_ACK_REASON:-}"
 
 # #901: whole-chain TEST-mode verification constants (issue 901). STREAM_USER/STREAM_PW mirror
 # recording-e2e.sh's own defaults exactly (same box, same creds) — needed here because
-# verify_measurement_audio_arrives (below) drives a plain-ssh PowerShell call (win_ssh_run) on
-# stream to run ffmpeg volumedetect on a short probe recording, the SAME mechanism recording-
-# e2e.sh's [4b2/8] preflight already uses for the identical measurement.
+# verify_measurement_audio_arrives (below) runs ffmpeg volumedetect on stream over plain ssh
+# (stream_box_exec: bash on the Linux stream-snv since issue 1462, PowerShell through win_ssh_run on a
+# Windows box) on a short probe recording, the SAME mechanism recording-e2e.sh's [4b2/8] preflight
+# already uses for the identical measurement.
 STREAM_USER="${STREAM_USER:-newlevel}"
 STREAM_PW="${STREAM_PW:-newlevel}"
-MBC_INPUT_NAME="${MBC_INPUT_NAME:-mbc}"                 # stream OBS input carrying the Dante mic
+MBC_INPUT_NAME="${MBC_INPUT_NAME:-mbc}"                 # stream OBS input carrying the mbc measurement mic
 # AUDIO_CHAIN_PROBE_SECS: a SHORT probe (default 5s) — rig-mode.sh test is a quick switch, not a
 # full preflight (recording-e2e.sh's own [4b2/8] uses 15s). AUDIO_CHAIN_DEAD_DB/_WARN_DB feed
 # audio_preflight_tier (scripts/lib/audio-presence-preflight.sh): below DEAD = hard FAIL (a
@@ -1124,13 +1130,27 @@ verify_optical_qr_visible() {
 # audio probe below, when the mbc Dante transport is unambiguously wrong (muted, or bound to
 # something other than the Dante Virtual Soundcard device) — a one-call OBS-WS read
 # (device_id + mute), no probe recording needed. "A muted/rerouted/renamed input is exactly as
-# fatal as a dead card" (issue 901).
+# fatal as a dead card" (issue 901). On a Linux stream box (issue 1462) the same one-call read
+# grades the obs-vban receive source against the box facts' VBAN stream + port instead.
 verify_mbc_dante_transport() {
-  local here
+  local here expect
+  local -a vban_args=()
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
-  echo "[obs stream ${STREAM_IP}] #901 mbc Dante-transport check (device bound + unmuted): input='${MBC_INPUT_NAME}'"
+  # issue 1462: a Linux stream box (stream-snv) has no Dante card -- its mbc input is the obs-vban
+  # receive source on the VBAN stream + port of its box facts, so the check grades that instead. A
+  # Linux box without those facts refuses here, before any read.
+  if ! expect="$(stream_mbc_vban_expect "$STREAM_IP")"; then
+    echo "ERROR: [#901] the stream box ${STREAM_IP} is Linux but its mbc VBAN stream is not declared -- see the line above (issue 1462)" >&2
+    exit 1
+  fi
+  if [ -n "$expect" ]; then
+    vban_args=(--vban-stream "${expect%% *}" --vban-port "${expect##* }")
+    echo "[obs stream ${STREAM_IP}] #901 mbc VBAN-transport check (obs-vban source on stream '${expect%% *}' UDP ${expect##* }, unmuted): input='${MBC_INPUT_NAME}' (issue 1462)"
+  else
+    echo "[obs stream ${STREAM_IP}] #901 mbc Dante-transport check (device bound + unmuted): input='${MBC_INPUT_NAME}'"
+  fi
   python3 "$here/obs_phase2.py" mbc-input-check --host "$STREAM_IP" --input "$MBC_INPUT_NAME" \
-    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream mbc] /'
+    ${vban_args[@]+"${vban_args[@]}"} --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream mbc] /'
 }
 
 # verify_measurement_audio_arrives -> #901 original item 1, THE HEADLINE FIX: proves the
@@ -1164,7 +1184,10 @@ verify_measurement_audio_arrives() {
   # parse yields a number or the attempts run out.
   db=""
   for attempt in $(seq 1 "$AUDIO_CHAIN_PARSE_RETRIES"); do
-    out="$(win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_volumedetect_ps "$path")" 2>&1 || true)"
+    # issue 1462: the platform's text -- bash over plain ssh on the Linux stream-snv, the unchanged
+    # PowerShell through win_ssh_run on a Windows stream box (scripts/lib/stream-box.sh)
+    out="$(stream_box_exec "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_volumedetect_ps "$path")" \
+      "$(audio_preflight_volumedetect_sh "$path")" 2>&1 || true)"
     db="$(audio_preflight_parse_max_db "$out" || true)"
     if [ -n "$db" ]; then
       break
@@ -1174,7 +1197,8 @@ verify_measurement_audio_arrives() {
       sleep "$AUDIO_CHAIN_PARSE_RETRY_DELAY_S"
     fi
   done
-  win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_delete_ps "$path")" >/dev/null 2>&1 || true
+  stream_box_exec "$STREAM_USER" "$STREAM_PW" "$STREAM_IP" "$(audio_preflight_delete_ps "$path")" \
+    "$(audio_preflight_delete_sh "$path")" >/dev/null 2>&1 || true
   if [ -z "$db" ]; then
     echo "ERROR: $(audio_preflight_unreadable_message)" >&2
     exit 1

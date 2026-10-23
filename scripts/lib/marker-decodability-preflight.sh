@@ -74,6 +74,22 @@ marker_decodability_delete_ps() {
   printf 'Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "%s"' "$1"
 }
 
+# marker_decodability_extract_wav_sh REC WAV TRACK -> the bash twin of the PowerShell extract above
+# for a LINUX stream box (issue 1462: stream-snv; sent by scripts/lib/stream-box.sh `stream_box_exec`
+# as ONE ssh argument). The same ffmpeg arguments, every channel kept; REC and WAV single-quoted (an
+# embedded ' becomes '\'') so the OBS recording name's space stays one argument.
+marker_decodability_extract_wav_sh() {
+  local rec="$1" wav="$2" track="$3"
+  printf "ffmpeg -hide_banner -nostats -y -i '%s' -map 0:a:%s -ar 48000 -c:a pcm_f32le '%s' 2>&1" \
+    "${rec//\'/\'\\\'\'}" "$track" "${wav//\'/\'\\\'\'}"
+}
+
+# marker_decodability_delete_sh PATH -> the exact-path `rm -f --` of the throwaway WAV on a Linux
+# stream box (issue 1462); a missing file is rc 0.
+marker_decodability_delete_sh() {
+  printf "rm -f -- '%s'" "${1//\'/\'\\\'\'}"
+}
+
 # marker_decodability_parse_num JSON KEY -> the numeric value of KEY in the one-line probe JSON
 # (integer or signed decimal, e.g. cluster_samples / preamble_screens / peak_dbfs). Empty + non-zero
 # exit when absent (an unparseable probe output is NEVER treated as a pass — the caller routes an

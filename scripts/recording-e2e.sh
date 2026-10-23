@@ -125,6 +125,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # [8/8] E2E_EXECUTE_VERDICT=1 path — #701 proved ssh/scp works on this rig for these boxes).
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$HERE/lib/win-ssh-exec.sh"
+# issue 1462: the stream box's platform (its obs-fleet class) + the ONE transport to it -- bash over
+# plain ssh on the Linux stream-snv, the unchanged PowerShell through win_ssh_run on a Windows box.
+# shellcheck source=scripts/lib/stream-box.sh
+. "$HERE/lib/stream-box.sh"
 # #977/#978/#979: obs64/AHK Windows-session-visibility probe + pure message parser (issue 958) --
 # shared with the #979 dev1 watchdog, never a second detector for the same signal.
 # shellcheck source=scripts/lib/obs-session-visibility.sh
@@ -896,6 +900,9 @@ if [ -n "$_svg_strih_msg" ]; then
   exit 1
 fi
 echo "    ok: strih obs64/AHK visible on the console (SessionId=1, window present)"
+if [ "$(stream_box_platform "$STREAM")" = linux ]; then  # issue 1462: the strih-obs unit check
+  _svg_stream_out=""; stream_box_visibility_gate_linux "$STREAM" "$STREAM_USER" "$STREAM_PW" "$SVG_SSH_TIMEOUT" "$HERE" || exit 1
+else
 _svg_stream_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
   "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(obs_session_visibility_probe_ps 0)" 2>/dev/null || true)"
 _svg_stream_msg="$(obs_session_visibility_message "$_svg_stream_out" 0)"
@@ -905,6 +912,7 @@ if [ -n "$_svg_stream_msg" ]; then
   exit 1
 fi
 echo "    ok: stream obs64 visible on the console (SessionId=1, window present)"
+fi
 # #1295: report-only -- name any DEAD obs64 handle the probe ignored (a stale zombie object, NOT a
 # live instance: HasExited/0-threads/~45 KB, the 2026-09-12 RESOLUME-SNV pid-58560 case) so an
 # operator can reap it; this NEVER gates the preflight above (a zombie is not an invisibility).
@@ -1207,6 +1215,12 @@ DV_WIN_NODES="strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newl
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX strih=${WIN_SSH_USER:-newlevel}@$STRIH"
   DV_WIN_NODES="stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+fi
+# issue 1462: the Linux stream box (stream-snv) answers the bare `dantesync --version` too -- the same
+# move to the --linux arm, so it is never in both lists (the --win read would be UNKNOWN there).
+if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+  DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+  DV_WIN_NODES="${DV_WIN_NODES/"stream=${WIN_SSH_USER:-newlevel}@$STREAM"/}"
 fi
 ${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-version-gate.sh" \
   --linux "$DANTESYNC_VERSION_LINUX" \
@@ -3325,10 +3339,11 @@ echo "[4b2/8] #748 audio-presence preflight — the mbc measurement chain MUST b
 # The A/V-sync leg reads the mbc measurement audio (speaker -> church PA mic -> mbc -> Dante ->
 # stream OBS); a silent chain makes every A/V number meaningless. Make a SHORT probe recording on
 # the stream box (the mbc audio rides the stream program recording), run ffmpeg volumedetect on the
-# box via win_ssh_run, and FAIL LOUD if the track is silent — so a dead measurement chain never
-# again burns a full cycle reported only as a quiet av_sync "unknown, candidates: 0" (#748). Every
-# knob is env-overridable like the sibling gates; a short probe guarding the whole run is the
-# sanctioned exception to the one-full-test rule (a preflight, not a partial measurement).
+# box (stream_box_exec, issue 1462: bash on Linux, PowerShell on Windows), and FAIL LOUD if the track
+# is silent — so a dead measurement chain never again burns a full cycle reported only as a quiet
+# av_sync "unknown, candidates: 0" (#748). Every knob is env-overridable like the sibling gates; a
+# short probe guarding the whole run is the sanctioned exception to the one-full-test rule (a
+# preflight, not a partial measurement).
 AUDIO_PREFLIGHT_ENABLE="${AUDIO_PREFLIGHT_ENABLE:-1}"
 AUDIO_PREFLIGHT_THRESHOLD_DB="${AUDIO_PREFLIGHT_THRESHOLD_DB:--60}"
 AUDIO_PREFLIGHT_PROBE_SECS="${AUDIO_PREFLIGHT_PROBE_SECS:-15}"
@@ -3359,8 +3374,11 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
     # run 29281776692). Route through `bash -c`, re-sourcing the lib inside that subshell, so bash
     # (not execvp) resolves win_ssh_run as a function -- same fix as every other sibling win_ssh_run
     # call that needs an outer timeout bound.
-    _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-      "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_volumedetect_ps "$_ap_path")" 2>&1 || true)"
+    # issue 1462: stream_box_exec picks the platform's text (bash over plain ssh on the Linux
+    # stream-snv, the unchanged PowerShell through win_ssh_run on a Windows box), both libs re-sourced.
+    _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" bash -c '. "$1"; . "$2"; stream_box_exec "$3" "$4" "$5" "$6" "$7"' _ \
+      "$HERE/lib/win-ssh-exec.sh" "$HERE/lib/stream-box.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
+      "$(audio_preflight_volumedetect_ps "$_ap_path")" "$(audio_preflight_volumedetect_sh "$_ap_path")" 2>&1 || true)"
     _ap_db="$(audio_preflight_parse_max_db "$_ap_out" || true)"
     if [ -n "$_ap_db" ]; then
       break
@@ -3370,7 +3388,8 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
       sleep "$AUDIO_PREFLIGHT_READ_RETRY_SLEEP"
     fi
   done
-  win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_path")" >/dev/null 2>&1 || true
+  stream_box_exec "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_path")" \
+    "$(audio_preflight_delete_sh "$_ap_path")" >/dev/null 2>&1 || true
   if [ -z "$_ap_db" ]; then
     echo "ERROR: $(audio_preflight_unreadable_message)" >&2
     echo "       raw volumedetect output (last attempt): $_ap_out" >&2
@@ -3417,6 +3436,7 @@ elif [ ! -x "$_md_probe_bin" ]; then
 else
   mkdir -p "$OUTDIR"
   _md_wav_win='C:\camera-box\mbc-decodability.wav'
+  _md_wav_lx="${AUDIO_DECODABILITY_WAV_LX:-/tmp/camera-box-mbc-decodability.wav}"  # issue 1462: on a Linux stream box
   _md_wav_local="$OUTDIR/mbc-decodability-${RUN_ID}.wav"
   rm -f "$_md_wav_local"
   # Short throwaway probe recording on stream (an orphan from an abort self-heals on the next run's
@@ -3431,12 +3451,15 @@ else
   # Extract the mbc a:0 track to a WAV on the box, then pull it back. Bounded retry absorbs the mp4
   # moov-atom finalize race (same transient the [4b2/8] read hits) without masking a real failure.
   for _md_attempt in $(seq 1 "$AUDIO_DECODABILITY_READ_ATTEMPTS"); do
-    # `timeout` execvp()s directly and cannot run the win_ssh_run shell FUNCTION — route through
-    # `bash -c` re-sourcing the lib, the SAME fix every other timeout-bounded win_ssh_run uses.
-    timeout "$AUDIO_DECODABILITY_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-      "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
-      "$(marker_decodability_extract_wav_ps "$_md_rec" "$_md_wav_win" 0)" >/dev/null 2>&1 || true
-    win_ssh_download "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_md_wav_win" "$_md_wav_local" >/dev/null 2>&1 || true
+    # `timeout` execvp()s directly and cannot run a shell FUNCTION — route through `bash -c`
+    # re-sourcing the libs, the SAME fix every other timeout-bounded win_ssh_run uses. issue 1462:
+    # stream_box_exec / stream_box_download pick the platform (bash + scp on the Linux stream-snv, the
+    # unchanged PowerShell + win_ssh_download on a Windows box).
+    timeout "$AUDIO_DECODABILITY_SSH_TIMEOUT" bash -c '. "$1"; . "$2"; stream_box_exec "$3" "$4" "$5" "$6" "$7"' _ \
+      "$HERE/lib/win-ssh-exec.sh" "$HERE/lib/stream-box.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
+      "$(marker_decodability_extract_wav_ps "$_md_rec" "$_md_wav_win" 0)" \
+      "$(marker_decodability_extract_wav_sh "$_md_rec" "$_md_wav_lx" 0)" >/dev/null 2>&1 || true
+    stream_box_download "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_md_wav_win" "$_md_wav_lx" "$_md_wav_local" >/dev/null 2>&1 || true
     if [ -s "$_md_wav_local" ]; then
       break
     fi
@@ -3445,7 +3468,8 @@ else
       sleep "$AUDIO_DECODABILITY_READ_RETRY_SLEEP"
     fi
   done
-  win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(marker_decodability_delete_ps "$_md_wav_win")" >/dev/null 2>&1 || true
+  stream_box_exec "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(marker_decodability_delete_ps "$_md_wav_win")" \
+    "$(marker_decodability_delete_sh "$_md_wav_lx")" >/dev/null 2>&1 || true
   if [ ! -s "$_md_wav_local" ]; then
     echo "ERROR: $(marker_decodability_probe_unreadable_message 'mbc WAV never arrived on dev1')" >&2
     exit 1

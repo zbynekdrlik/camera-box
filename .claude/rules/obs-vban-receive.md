@@ -365,7 +365,9 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   sending to 6980 (OBS binds it once the hub is gone). The collection port has no `stream-snv` preset
   (the box's collection already exists; the launch seed switches `mbc` with the 80 ms fact). An `mbc`
   that is ALREADY an obs-vban input keeps its operator R (verify item 9 NOTEs the difference): set
-  `receive_buffer_ms` to 80 in its properties.
+  `receive_buffer_ms` to 80 in its properties. rig-mode TEST's `#901 item 2` grades this source there
+  (kind + the facts' stream and port, unmuted; `obs_phase2.py mbc-input-check --vban-stream --vban-port`),
+  never the Dante device (`stream-box-linux.md`).
 - **Seed:** the stream manifest carries `program_audio_vban`; `strih_scenes.py` switches `Zvuk z mixu`
   through `scripts/program_audio_vban.py` (installed next to it by setup step 6; the launch preflight
   imports it). A replace reads the operator state BEFORE `RemoveInput` and puts back scenes (hidden

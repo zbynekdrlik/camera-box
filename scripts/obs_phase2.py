@@ -3128,10 +3128,75 @@ def _mbc_transport_problem(device_id, muted, expected_device_id):
     return None
 
 
+def _program_audio_vban_module():
+    """issue 1462: lazy import of the PURE scripts/program_audio_vban.py (the ONE definition of the
+    obs-vban receive source: its kind + the source's own setting defaults) -- SAME lazy + own sys.path
+    insert pattern as _measurement_pins_module(), so obs_phase2's module-level import graph stays
+    unchanged (setup-strih/setup-imag install obs_phase2.py ALONE on the boxes)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import program_audio_vban  # noqa: E402
+    return program_audio_vban
+
+
+def _mbc_vban_transport_problem(kind, settings, muted, want_stream, want_port):
+    """issue 1462 (pure, testable -- no I/O): the #901 item-2 decision for a LINUX stream box, whose
+    `mbc` input is the vendored obs-vban RECEIVE source fed by mbc.lan's VBAN stream (no Dante card
+    there). Return a short problem string, or None when the input is that source, on the box facts'
+    STREAM name and UDP PORT, unmuted. Mute is named FIRST and alone, like _mbc_transport_problem.
+    The settings are compared through program_audio_vban.settings_differences, so a key obs-websocket
+    leaves out reads as the source's own default (port 6980, an empty stream name). The Receive Buffer
+    is the operator's setting (verify-strih item 9 grades it) and is not this check's business."""
+    if muted:
+        return "input is MUTED (mute must be OFF for the measurement chain to be usable)"
+    pav = _program_audio_vban_module()
+    if kind != pav.VBAN_SOURCE_KIND:
+        return (f"input kind is {kind!r}, expected the obs-vban receive source {pav.VBAN_SOURCE_KIND!r} "
+                f"(the stream role's mbc input, issue 1439)")
+    diffs = pav.settings_differences(settings or {}, {"stream_name": want_stream, "port": want_port})
+    if diffs:
+        return "the obs-vban source does not carry the box facts' stream: " + "; ".join(diffs)
+    return None
+
+
+def _mbc_vban_input_check(a, want_stream, want_port):
+    """issue 1462: the item-2 read for a Linux stream box -- the SAME two read-only requests as the
+    Dante check (GetInputSettings carries the input KIND too), graded by _mbc_vban_transport_problem."""
+    ws = _conn(a.host, a.password)
+    try:
+        resp = _rpc(ws, "GetInputSettings", {"inputName": a.input})
+        kind = resp.get("inputKind", "")
+        settings = resp.get("inputSettings", {})
+        muted = bool(_rpc(ws, "GetInputMute", {"inputName": a.input}).get("inputMuted"))
+    finally:
+        ws.close()
+    problem = _mbc_vban_transport_problem(kind, settings, muted, want_stream, want_port)
+    if problem:
+        raise SystemExit(
+            f"[obs] {a.host}: mbc VBAN-transport check FAIL on '{a.input}' — {problem}. The Linux stream "
+            f"box receives the mbc measurement audio as VBAN stream '{want_stream}' on UDP {want_port} "
+            f"(mbc.lan sends it; the OBS launch seed strih_scenes.py --bootstrap makes '{a.input}' the "
+            f"obs-vban source, issue 1439 / issue 1462). This must be fixed before the measurement audio "
+            f"can ever arrive (issue 901)."
+        )
+    print(f"PASS: {a.host} '{a.input}' VBAN transport OK (kind={kind!r}, stream={want_stream!r}, "
+          f"port={want_port}, muted=False)")
+
+
 def mbc_input_check(a):
     """#901 original item 2: hard-fail loud, BEFORE any measurement-audio probe, when the mbc
     Dante transport is unambiguously wrong (muted, or bound to something other than the Dante
-    Virtual Soundcard device) — one cheap OBS-WS read, no probe recording needed."""
+    Virtual Soundcard device) — one cheap OBS-WS read, no probe recording needed.
+    issue 1462: with --vban-stream + --vban-port (a Linux stream box, rig-mode.sh passes the box
+    facts) the input must be the obs-vban receive source instead; without them this is unchanged."""
+    want_stream = getattr(a, "vban_stream", None)
+    want_port = getattr(a, "vban_port", None)
+    if (want_stream is None) != (want_port is None):
+        raise SystemExit("[obs] mbc-input-check: --vban-stream and --vban-port go together (issue 1462)")
+    if want_stream is not None:
+        _mbc_vban_input_check(a, want_stream, want_port)
+        return
     ws = _conn(a.host, a.password)
     try:
         settings = _rpc(ws, "GetInputSettings", {"inputName": a.input}).get("inputSettings", {})
@@ -3251,6 +3316,10 @@ def main():
             # device_id it must be bound to.
             p.add_argument("--input", default="mbc")
             p.add_argument("--expected-device-id", default=DANTE_MBC_DEVICE_ID)
+            # issue 1462: a Linux stream box -- the VBAN stream + UDP port of its obs-vban mbc input
+            # (the box facts); both or neither.
+            p.add_argument("--vban-stream", default=None)
+            p.add_argument("--vban-port", type=int, default=None)
         if name == "record":
             p.add_argument(
                 "--action", required=True,
