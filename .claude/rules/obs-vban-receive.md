@@ -544,8 +544,13 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
   So setup creates the VLAN connection ONLY when absent, prints a loud `WARNING ... ~8 s` first,
   creates it DOWN (`connection.autoconnect no`, so no autoconnect races a second activation), brings it
   up exactly once (no `ifname`: the device does not exist before that activation), sets autoconnect
-  yes, then waits (bounded, `STRIH_VBAN_LEG_LINK_WAIT_S` 30 s) for the rig NIC's carrier + default route
-  and WARNs when it stays down. It NEVER deletes, re-creates, brings down or up again an
+  yes, then waits for the reset to COME AND GO: `carrier_changes` of the rig NIC read before the up must
+  rise by 2+ (down + up) with carrier and the default route back (atlantic reports the drop up to ~1 s
+  late and NetworkManager holds the route a moment longer, so the first read can look healthy);
+  bounded by `STRIH_VBAN_LEG_LINK_WAIT_S` (30 s, WARN), a NIC whose counter never moves within
+  `STRIH_VBAN_LEG_RESET_SEEN_S` (10 s) with its link up gets one NOTE. A failed first up is NEVER armed
+  (autoconnect stays off: NetworkManager would activate it later, mid-setup) and fails by name; an
+  unreadable active-connection list fails by name, never read as "not active". It NEVER deletes, re-creates, brings down or up again an
   existing VLAN profile: a refused reapply FAILS by name, an inactive existing VLAN profile FAILS before
   anything is modified ("up it in a maintenance window": merely arming its autoconnect makes
   NetworkManager activate it at once, the unannounced reset), an identity change (`vlan.parent`, `vlan.id`, the interface name) is
