@@ -231,7 +231,7 @@ try:
     data = json.load(open(sys.argv[1]))
 except Exception as e:
     sys.stderr.write("netcfg-audit: cannot read baseline: %s\n" % e); sys.exit(1)
-FACET = {"bridge_vlan", "bridge_port", "qos_profile", "switch_rule"}  # issue 1439: diffed in python
+FACET = {"bridge", "bridge_vlan", "bridge_port", "qos_profile", "switch_rule"}  # issue 1439: diffed in python
 def walk(prefix, obj):
     if isinstance(obj, dict):
         for k, v in obj.items():

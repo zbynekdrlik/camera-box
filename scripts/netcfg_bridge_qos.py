@@ -32,7 +32,9 @@ What is baselined (verbatim RouterOS property names):
                `mvrp-applicant-state`, `mvrp-registrar-state`, `disabled` (static ports only).
   qos_profile  per name: `pcp`, `dscp`, `traffic-class`, `automap`, `disabled` (no `hw-id`).
   switch_rule  STATIC rules keyed by their comment (else `#<n>`, n = position among the static
-               rules; a repeated comment gets ` (2)`, ` (3)`): every property + `disabled` +
+               rules; a repeated comment gets ` (2)`, ` (3)` in table order, so deleting the first
+               of two same-comment rules reports the survivor under the first one's key -- it still
+               pages, but give each rule its own comment): every property + `disabled` +
                `invalid` (the I flag: the hardware rejected the rule).
 
 DRIFT (hard): a baseline membership missing or changed (tagged <-> untagged), a bridge or bridge
@@ -69,6 +71,7 @@ BRIDGE_FIELDS = ("vlan-filtering", "mvrp", "pvid", "frame-types", "ingress-filte
 PORT_FIELDS = ("pvid", "frame-types", "ingress-filtering", "mvrp-applicant-state",
                "mvrp-registrar-state")
 PROFILE_FIELDS = ("pcp", "dscp", "traffic-class", "automap")
+LEGEND_LINES = 3  # the `Flags:` legend line + at most two wrapped continuation lines
 
 
 class ParseError(ValueError):
@@ -100,11 +103,13 @@ def _split_sections(raw):
 def _entry_blocks(lines):
     """Blank-line separated entry blocks of one `print detail` section.
 
-    The `Flags:` legend (which may itself wrap onto a second line) sits directly above entry 0 in
-    the same block: everything before the section's first `N ...` header line is dropped. A later
-    block that does not start with a header is a shape the parser does not know (ParseError).
+    The `Flags:` legend (which may itself wrap, at most LEGEND_LINES lines in all) sits directly
+    above entry 0 in the same block and is dropped. Any OTHER text before the first `N ...` header
+    -- a table printed without index numbers, a message printed instead of the table -- is a shape
+    the parser does not know (ParseError), never an empty table; so is a later block that does not
+    start with a header. A table with only its legend, or nothing, is empty.
     """
-    blocks, cur, started = [], [], False
+    blocks, cur, pre, started = [], [], [], False
     for ln in lines:
         if not ln.strip():
             if cur:
@@ -113,7 +118,10 @@ def _entry_blocks(lines):
             continue
         if not started:
             if not _HEADER.match(ln):
-                continue  # legend, or its wrapped continuation
+                pre.append(ln)
+                if not pre[0].startswith("Flags:") or len(pre) > LEGEND_LINES:
+                    raise ParseError("text before the first entry: %r" % pre[-1][:60])
+                continue  # the legend, or its wrapped continuation
             started = True
         cur.append(ln)
     if cur:
