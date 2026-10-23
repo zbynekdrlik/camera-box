@@ -163,6 +163,14 @@ def test_a_table_without_index_headers_is_none_never_an_empty_table():
     # the table replaced by a message RouterOS printed instead of it
     msg = "=== bridge-port\r\nno such command prefix\r\n\r\n"
     assert nbq.facet_from_raw(raw[:start] + msg + raw[end:]) is None
+    # a short message right under a real legend is not a legend continuation either
+    q0 = raw.index("=== qos-profile")
+    q1 = raw.index("=== switch-rule")
+    legend = raw[q0:q1].split("\r\n")[1]
+    assert legend.startswith("Flags:")
+    for tail in ("no such item", 'name="dante-audio" hw-id=2 pcp=5 dscp=46 traffic-class=5'):
+        bad = "=== qos-profile\r\n" + legend + "\r\n" + tail + "\r\n\r\n"
+        assert nbq.facet_from_raw(raw[:q0] + bad + raw[q1:]) is None, tail
 
 
 def test_an_empty_table_with_only_its_legend_is_empty():
