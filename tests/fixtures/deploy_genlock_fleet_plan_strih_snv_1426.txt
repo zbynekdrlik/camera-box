@@ -23,8 +23,9 @@
 #          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30. The planner adds
 #          bundle/GENLOCK_STATS_ABI.txt = the stats + output-stats versions of obs.h at abc123def4567890 (removed
 #          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
-# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 + the program-audio sampler's vendored
-#          dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
+# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 Cargo.toml + the program-audio sampler's
+#          vendored dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + its
+#          commit in CAMERA_BOX_SOURCE_SHA (the hub artifact of that commit, issue 1467) + the
 #          generated run-setup.sh -> /stage/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('hostname' == STRIH_HOSTNAME),
 #          and no previous install may run:  if pgrep -x setup-strih.sh >/dev/null; then echo alive; else echo idle; fi

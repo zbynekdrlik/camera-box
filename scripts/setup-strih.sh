@@ -693,8 +693,8 @@ if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs n
   strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
   systemctl daemon-reload
   systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
-  # issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.
-  strih_intercom_hub_binary_install /usr/local/bin/intercom-hub || fail "intercom-hub binary install failed (above)"
+  # issue 1412 (G6) + 1467: a fresh box gets the hub CI binary of this checkout's commit; an installed one is kept.
+  strih_intercom_hub_binary_install /usr/local/bin/intercom-hub "${HERE}/.." || fail "intercom-hub binary install failed (above)"
   echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml + its NDI_CONFIG_DIR and local-audio (User=${DESKTOP_USER}) drop-ins in place"
 else
   echo "  SKIP: ${WHY}"

@@ -1967,3 +1967,23 @@ memchr. Then a root with `extern crate self as intercom_hub;` + `#[path]` the mo
 file, `rustc --test --extern serde_json=...` and `clippy-driver --test -D warnings` on it. Keep the
 builder in a script FILE (the worktree guard refuses the inline shape).
 
+
+## A git ownership check in a root-run script is testable as non-root: `GIT_TEST_ASSUME_DIFFERENT_OWNER=1` (issue 1467)
+
+setup-strih runs as root, often from the operator's clone, and git then refuses to read the repo
+("detected dubious ownership"), so a `git rev-parse HEAD` in a provisioning lib silently reads as "no
+checkout". A non-root test cannot chown a fixture repo, but git honours its own test hook: with
+`GIT_TEST_ASSUME_DIFFERENT_OWNER=1` in the env every repo reads as foreign-owned. Prove the fixture
+really is refused (a plain `git rev-parse` must fail under the env), then that the code under test
+still reads it (`git -c safe.directory=<realpath of the tree> -C <tree> ...`; name exactly the tree,
+so a parent repo stays unread). Worked example: `tests/python/test_strih_hub_artifact_1467.py`.
+
+## A new call in a verify-strih item must not expand `HERE` (or another orchestrator-only variable)
+
+Several pytests run one verify item's REAL text, sliced from verify-strih.sh, under
+`set -euo pipefail` with only the libs sourced and the item's other graders stubbed (item 16:
+`_item16` in `tests/python/test_strih_operator_1418.py`). `HERE`, `STRIH_FACT_BOX` and the other
+variables verify-strih sets at its top are unset there, so an argument like `"${HERE}/.."` aborts the
+slice with "unbound variable" before any stub runs. Let the lib derive what it needs (a checkout root
+from `${BASH_SOURCE[0]}`, the box from `strih_box_loaded_name`) and add the new grader to the
+harness's stub list next to its siblings.
