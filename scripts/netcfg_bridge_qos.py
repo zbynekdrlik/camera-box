@@ -66,6 +66,9 @@ GATHER_CMD = (
 _HEADER = re.compile(r"^\s*(\d+)\s(.*)$")
 _KEY = re.compile(r"^[a-z][a-z0-9-]*=")
 _FLAG = re.compile(r"^[A-Z*]+$")
+# a wrapped `Flags:` legend line holds only `X - NAME;` text: upper case, digits, `* ; , -` and
+# spaces (a wrap may cut a name in two); a message or an unnumbered entry has lower case or `=`
+_LEGEND_CONT = re.compile(r"^[A-Z0-9 *;,\-]+$")
 
 BRIDGE_FIELDS = ("vlan-filtering", "mvrp", "pvid", "frame-types", "ingress-filtering")
 PORT_FIELDS = ("pvid", "frame-types", "ingress-filtering", "mvrp-applicant-state",
@@ -119,7 +122,8 @@ def _entry_blocks(lines):
         if not started:
             if not _HEADER.match(ln):
                 pre.append(ln)
-                if not pre[0].startswith("Flags:") or len(pre) > LEGEND_LINES:
+                if (not pre[0].startswith("Flags:") or len(pre) > LEGEND_LINES
+                        or (len(pre) > 1 and not _LEGEND_CONT.match(ln.strip()))):
                     raise ParseError("text before the first entry: %r" % pre[-1][:60])
                 continue  # the legend, or its wrapped continuation
             started = True

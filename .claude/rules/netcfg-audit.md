@@ -90,9 +90,9 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
   - Report-only: anything present live but not in the baseline (`vlan-added`,
     `bridge-port-added`, ...) and `[report-only UNKNOWN]` for a read the parser does not know: no
     end marker, a missing table, an entry block with no `N flags` header, any text before the
-    first entry other than the `Flags:` legend and at most two wrapped lines of it (a table
-    printed without index numbers, or a message printed instead of the table, is NOT an empty
-    table), an entry without its key property, an unbalanced quote. A misread never pages as a removed config; `--capture` and `--json` exit 2
+    first entry other than the `Flags:` legend and at most two wrapped lines of it, each of
+    legend text only (upper case, digits, `* ; , -`; a table printed without index numbers, or a
+    message printed instead of or under the table's legend, is NOT an empty table), an entry without its key property, an unbalanced quote. A misread never pages as a removed config; `--capture` and `--json` exit 2
     on it (capture writes nothing; json prints the other switches).
   - Rules are keyed by their comment (else `#<n>` among the static rules; a repeated comment gets
     ` (2)` in table order), so give each switch rule its OWN comment: deleting the first of two
