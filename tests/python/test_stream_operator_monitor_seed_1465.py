@@ -68,22 +68,28 @@ import json, os, sys
 mode = os.environ.get("FAKE_PW_DUMP_MODE", "sink")
 if mode == "fail":
     sys.stderr.write("pw-dump: failed to connect\n"); sys.exit(1)
-objs = [{"id": 30, "type": "PipeWire:Interface:Node",
+# review round 2: the sink must sit on the resolved headphone card (its device's api.alsa.card)
+card = os.environ.get("FAKE_PW_CARD", "1")
+objs = [7, {"id": 40, "type": "PipeWire:Interface:Device",
+            "info": {"props": {"device.api": "alsa", "api.alsa.card": int(card), "device.name": "alsa_card.x"}}},
+        {"id": 30, "type": "PipeWire:Interface:Node",
          "info": {"props": {"node.name": "alsa_output.pci-x.analog-stereo", "media.class": "Audio/Sink"}}}]
 if mode == "sink":
     objs.append({"id": 41, "type": "PipeWire:Interface:Node",
-                 "info": {"props": {"node.name": "stream-operator-headphones", "media.class": "Audio/Sink"}}})
+                 "info": {"props": {"node.name": "stream-operator-headphones", "media.class": "Audio/Sink",
+                                    "device.id": 40}}})
 print(json.dumps(objs))
 '''
 
 
-def _run_pulse(rig, run_s=2.0, pw="sink"):
+def _run_pulse(rig, run_s=2.0, pw="sink", card="1"):
     # FAKE_PCM_STATUS empty: in the pulse output VLC never opens the PCM, PipeWire holds it throughout.
     # review round 1: the operator sink must exist in the session (pw-dump) before VLC starts.
     fake = rig.bin / "pw-dump"
     fake.write_text("#!%s\n%s" % (sys.executable, FAKE_PW_DUMP))
     fake.chmod(0o755)
-    return rig.run(run_s, "--output", "pulse", "--pw-dump", str(fake), FAKE_PCM_STATUS="", FAKE_PW_DUMP_MODE=pw)
+    return rig.run(run_s, "--output", "pulse", "--pw-dump", str(fake), FAKE_PCM_STATUS="", FAKE_PW_DUMP_MODE=pw,
+                   FAKE_PW_CARD=card)
 
 
 def test_pulse_plays_to_the_operator_sink_while_pipewire_holds_the_jack(tmp_path):
@@ -106,7 +112,7 @@ def test_pulse_plays_to_the_operator_sink_while_pipewire_holds_the_jack(tmp_path
 def test_pulse_on_a_usb_box_leaves_its_mixer_alone(tmp_path):
     rig = _pulse_rig(tmp_path, usb=True)
     rig.publish()
-    r = _run_pulse(rig)
+    r = _run_pulse(rig, card="2")
     assert r.returncode == 0, r.stderr
     assert rig.amixer() == [], rig.amixer()
     assert rig.st()["card"] == 2 and rig.st()["state"] == "playing", rig.st()
@@ -312,3 +318,14 @@ def test_main_wires_the_rule_and_the_reader():
     assert "pulse_capture=parse_pulse_capture_rule(manifest_text)," in src
     assert "audio_vban=audio_vban)" in src
     assert '"--pulse-capture-inputs"' in src and "pulse_capture_report(" in src
+
+
+def test_pulse_with_the_operator_sink_on_another_card_never_starts_vlc(tmp_path):
+    # review round 2: a stale drop-in could rename a node of another card; the sink must sit on the headphone card
+    rig = _pulse_rig(tmp_path)
+    rig.publish()
+    r = _run_pulse(rig, 1.5, card="7")
+    assert r.returncode == 0, r.stderr
+    assert rig.vlc_argv() == [], rig.log()
+    st = rig.st()
+    assert st["state"] == "no-sink" and "card 1" in st["reason"], st

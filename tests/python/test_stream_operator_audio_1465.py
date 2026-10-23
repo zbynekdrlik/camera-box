@@ -613,3 +613,18 @@ def test_a_control_the_jack_does_not_have_is_named_not_failed(tmp_path):
 def test_a_usb_headphone_box_keeps_its_own_mixer():
     st, text = _soa().mixer_row({"card_id": "Gen", "usb": True}, "/nonexistent/amixer")
     assert st == "NOTE" and "USB" in text, text
+
+
+def test_an_amixer_error_that_is_not_a_missing_control_fails(tmp_path):
+    # review round 2: only "Unable to find simple control" reads as a control the jack does not have
+    fb = _fakebin(tmp_path, amixer="#!/bin/sh\necho 'amixer: Invalid card number.' >&2\nexit 1\n")
+    st, text = _soa().mixer_row({"card_id": "Generic_9", "usb": False}, str(fb / "amixer"))
+    assert st == "FAIL" and "Invalid card" in text, text
+
+
+def test_the_lib_stands_alone_under_set_u(tmp_path):
+    # review round 2: the drop-in scan needs the monitor's unit name even when only this lib is sourced
+    e = {k: v for k, v in os.environ.items() if k not in LEAKY + ("STRIH_STREAM_MONITOR_UNIT",)}
+    script = 'set -euo pipefail\n. "%s"\n_stream_operator_audio_pcm_match_dropins "$1"\necho DONE' % LIB
+    r = subprocess.run(["bash", "-c", script, "h", str(tmp_path)], capture_output=True, text=True, env=e, timeout=30)
+    assert r.returncode == 0 and "DONE" in r.stdout, r.stderr
