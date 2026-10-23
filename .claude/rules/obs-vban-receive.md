@@ -33,6 +33,10 @@ paths:
   - "scripts/e2e_report_program_audio.py"
   - "tests/python/test_program_audio_continuity*.py"
   - "tests/python/test_e2e_discord_report_program_audio_1439.py"
+  - "scripts/lib/strih-vban-leg.sh"
+  - "tests/python/test_vban_leg_1439.py"
+  - "tests/python/vban_leg_fakes_1439.py"
+  - "scripts/strih-boxes/*.env"
 ---
 
 # obs-vban receive side: the VBAN program straight into OBS (issue 1439)
@@ -487,6 +491,81 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   hold), read `receive_buffer_ms=80` back on the next status line, then re-measure the program A/V
   offset -- R 80 plays the program audio ~40 ms later than R 40 did. After the deploy read
   `emit_missed=0` and `emit_late_ms` on the status lines (verify item 9 grades the first).
+
+## The VBAN-only leg: a second NIC or a tagged VLAN on the audio VLAN (ROZHODNUTÉ 6360417876)
+
+Owner 23.10.2026 ~10:00, verbatim: "na stream-snv je druha sietovka usb-c 2.5gbits a ta je pripojena do
+vlan 70 audio siete, vies nastavit aby na stream bola ta sietovka na 10.77.7.204 a islo cez nu iba ten
+vbani nic ine aby cez nu ani nic ine neodchadazlo, vsetko ostatne streamy ndi video internet naech ide
+ce tu sietovku klasicku"; ping allowed "aby sme mali aspon nejake info ze to bezi". mbc's VBAN used to
+cross the venue router (VLAN 70 -> 89), which delivered it late and reordered (finding 6352601026: mbc
+sent every frame, the ROUTED copy lost them). The owner then pointed mbc's `stream` at 10.77.7.204
+himself: **the mbc retarget is owner-side, never provisioning.** At 10:31 the supervisor added the
+same leg on strih-snv as VLAN 70 TAGGED on the rig NIC (foh2 `sfp-sfpplus2`: VLAN 89 untagged PVID,
+VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, never provisioning).
+
+- **Facts** (`scripts/lib/strih-box-facts.sh`): `STRIH_PROGRAM_VBAN_LEG` = `mac:<MAC>` (a second NIC;
+  stream-snv `mac:00:e0:4c:68:01:85`, the USB-C r8152 `enx00e04c680185`) | `vlan:<id>` (a tagged VLAN
+  on the rig NIC; strih-snv `vlan:70` = `enp7s0.70`) | `none`; `STRIH_PROGRAM_VBAN_LEG_ADDR` = the box's
+  /32 on it (stream-snv .204, strih-snv .202); `STRIH_PROGRAM_VBAN_SENDER` = the console (stream-snv
+  mbc.lan 10.77.7.232) or `none` = the leg passes only ping (strih-snv until the phase-2 senders exist).
+  The loader refuses a malformed MAC / VLAN id (1..4094), an address that is not IPv4 or is STRIH_IP, a
+  sender outside the address's /24, and a sender without `STRIH_PROGRAM_VBAN_PORT`. Every role.
+- **Why a /32 + a policy route.** A /24 on the leg would put a connected 10.77.7.0/24 route in main,
+  and anything to the audio VLAN (dantesync, mDNS, a ping from the box) would leave through it. The /32
+  has no connected route; one route `10.77.7.0/24 table=70` + rule `priority 100 from <addr> table 70`
+  sends only replies FROM the leg's address (the echo replies) back through it. No gateway,
+  never-default, ignore auto routes/DNS, IPv6 off: the rig NIC keeps the only default route.
+- **The filter** `table inet vban_dante70` (`/etc/nftables.d/vban-dante70.nft`, loaded by its own
+  oneshot `vban-dante70-filter.service` before network-pre, never the distro nftables.service, never
+  `flush ruleset`; the `table` / `delete table` atomic replace of `dscp-nft.sh`): in on the leg only the
+  sender's VBAN to the port + echo requests, out only echo replies, everything else dropped and
+  counted. ARP is not IP and still answers (the owner's ARP check from Ableton-FOH). With a sender, one
+  more input rule only COUNTS packets to the VBAN port arriving on any OTHER interface (`iifname !=
+  leg iifname != lo`): verify's proof that nothing comes through the router any more. dantesync stays
+  on video-clock.lan (gm_allowlist) and never sees audio-VLAN PTP (the input drop); avahi is never
+  touched (the output drop keeps mDNS off the leg; an avahi restart risks the NDI sender announcement).
+- **ARP sysctls** `arp_ignore=1` / `arp_announce=2` in `/etc/sysctl.d/60-vban-dante70.conf`, in the
+  SLASH form (`net/ipv4/conf/enp7s0.70/arp_ignore`): a VLAN name carries a dot, which the dotted form
+  would read as a path separator. systemd's `99-systemd.rules` re-runs `systemd-sysctl
+  --prefix=/net/ipv4/conf/$name` on every net-device add, so the file applies at boot, on a USB re-plug
+  and when NM creates the VLAN.
+- **The NM profile** `vban-dante70` (`ethernet` pinned by interface name, or `vlan` with `vlan.parent`
+  = the rig NIC from `strih_lx_rig_nic` + `vlan.id`). A changed profile is `nmcli connection modify` +
+  `nmcli device reapply` (in place, no link bounce); only `connection.id` / `connection.autoconnect`
+  changes skip the reapply. The mac kind adopts the profile already on the NIC (a fresh install brings
+  it up by DHCP with a SECOND default route) and deletes every other one on it; a refused reapply
+  falls back to `connection up` (the leg is not the ssh link). The interface is resolved by the MAC of
+  a PHYSICAL NIC (one with a `device` link), so a VLAN twin sharing the MAC is never taken for it.
+- **HARD trap, the vlan kind (supervisor 23.10.2026): the Aquantia `atlantic` driver RESETS the rig
+  link for ~8 s** (`link change old 10000 new 0`, carrier lost) the FIRST time a VLAN enters its HW
+  filter (`8021q: adding VLAN 0 to HW filter`): NDI, PTP and the ssh session on a production box drop.
+  So setup creates the VLAN connection ONLY when absent, prints a loud `WARNING ... ~8 s` first,
+  creates it DOWN (`connection.autoconnect no`, so no autoconnect races a second activation), brings it
+  up exactly once, then sets autoconnect yes. It NEVER deletes, re-creates, brings down or up again an
+  existing VLAN profile: a refused reapply FAILS by name, an inactive existing VLAN profile FAILS ("up
+  it in a maintenance window"), an identity change (`vlan.parent`, `vlan.id`, the interface name) is
+  refused untouched, and a second ACTIVE VLAN profile is only named. The ACTIVE profile is always the
+  kept one, whatever its name. Verify is read-only and never touches the link.
+- **Verify** (`strih_vban_leg_grade`, item 9, after the role branch, every role): `(vban-leg)`
+  interface (the MAC's NIC / the VLAN on the rig NIC exists), profile (every property, one profile),
+  routes (exactly the /32, no default or main-table route through the leg, the rule, the table-70
+  route), arp, filter (the live table = the file, unit enabled + active), then over 3 s
+  (`STRIH_VBAN_LEG_WAIT_S`) the accept counter MUST grow ("is the console sending stream ... to
+  <addr>:<port>?") and the off-leg counter must NOT; no sender = one NOTE, ping only. Run it as root
+  (nft).
+- **setup** (`strih_vban_leg_install`, step 13 after the role branch): filter, sysctl, then the
+  profile, so the leg never holds its address unfiltered; then the live read-back (address, routes).
+  An absent NIC fails by its MAC with nothing changed; an uncabled one is a WARN.
+- **Tests:** `tests/python/test_vban_leg_1439.py` with the fakes of `vban_leg_fakes_1439.py`
+  (nmcli keeps saved vs APPLIED profiles; `ip` derives from the applied one; `nft -f` lists the loaded
+  file in the nft 1.0.9 shape, pinned byte for byte to a netns render and to the live strih-snv
+  table). The fixtures under `tests/fixtures/vban_leg_1439/` are a throwaway-netns render and the two
+  live tables read on 23.10.2026.
+- **Live state when codified (23.10.2026):** both boxes match the profile; their tables and sysctls are
+  NOT persistent until setup-strih runs (no `/etc/nftables.d`, no drop-in); stream-snv's live table
+  lacks the off-leg counter, so verify FAILs `(vban-leg) filter` there until then. On stream-snv the
+  run touches no NM state; on strih-snv neither (the VLAN exists): no link reset on either.
 
 ## Verify locally (Tier-0, no cargo)
 
