@@ -4,6 +4,74 @@
   "nodes": {
     "foh1_audio": {
       "board": "CRS310-8G+2S+",
+      "bridge_port": {
+        "ether1": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether2": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "pvid": "1"
+        },
+        "ether3": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "70"
+        },
+        "ether4": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether5": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether6": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether7": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "70"
+        },
+        "ether8": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "70"
+        },
+        "sfp-sfpplus1": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "pvid": "1"
+        },
+        "sfp-sfpplus2": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "pvid": "1"
+        }
+      },
+      "bridge_vlan": {
+        "70": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        },
+        "89": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        }
+      },
       "identity": "foh1_audio_switch",
       "ip": "10.77.9.2",
       "port": {
@@ -88,13 +156,112 @@
           "running": "true"
         }
       },
+      "qos_profile": {
+        "dante-audio": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "46",
+          "pcp": "5",
+          "traffic-class": "5"
+        },
+        "dante-low": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "8",
+          "pcp": "1",
+          "traffic-class": "0"
+        },
+        "dante-ptp": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "56",
+          "pcp": "7",
+          "traffic-class": "7"
+        },
+        "default": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "0",
+          "pcp": "0",
+          "traffic-class": "1"
+        }
+      },
       "reachable": "true",
       "role": "switch",
       "ros": "7.23.3",
-      "shared_buffers": "80%"
+      "shared_buffers": "80%",
+      "switch_rule": {}
     },
     "foh1_video": {
       "board": "CRS310-8G+2S+",
+      "bridge_port": {
+        "ether1": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether2": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether3": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether4": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether5": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether6": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether7": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether8": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "sfp-sfpplus1": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "pvid": "1"
+        },
+        "sfp-sfpplus2": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "pvid": "1"
+        }
+      },
+      "bridge_vlan": {
+        "70": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        },
+        "89": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        }
+      },
       "identity": "foh1_video_switch",
       "ip": "10.77.9.4",
       "port": {
@@ -179,13 +346,113 @@
           "running": "true"
         }
       },
+      "qos_profile": {
+        "dante-audio": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "46",
+          "pcp": "5",
+          "traffic-class": "5"
+        },
+        "dante-low": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "8",
+          "pcp": "1",
+          "traffic-class": "0"
+        },
+        "dante-ptp": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "56",
+          "pcp": "7",
+          "traffic-class": "7"
+        },
+        "default": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "0",
+          "pcp": "0",
+          "traffic-class": "1"
+        }
+      },
       "reachable": "true",
       "role": "switch",
       "ros": "7.23.3",
-      "shared_buffers": "80%"
+      "shared_buffers": "80%",
+      "switch_rule": {}
     },
     "foh2_video": {
       "board": "CRS310-8G+2S+",
+      "bridge_port": {
+        "ether1": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether2": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether3": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether4": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether5": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether6": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether7": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "70"
+        },
+        "ether8": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "70"
+        },
+        "sfp-sfpplus1": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "pvid": "1"
+        },
+        "sfp-sfpplus2": {
+          "disabled": "no",
+          "frame-types": "admit-all",
+          "pvid": "89"
+        }
+      },
+      "bridge_vlan": {
+        "70": {
+          "disabled": "no",
+          "tagged": [
+            "bridge",
+            "sfp-sfpplus2"
+          ],
+          "untagged": []
+        },
+        "89": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        }
+      },
       "identity": "foh2_video_switch",
       "ip": "10.77.9.5",
       "port": {
@@ -270,10 +537,55 @@
           "running": "true"
         }
       },
+      "qos_profile": {
+        "dante-audio": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "46",
+          "pcp": "5",
+          "traffic-class": "5"
+        },
+        "dante-low": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "8",
+          "pcp": "1",
+          "traffic-class": "0"
+        },
+        "dante-ptp": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "56",
+          "pcp": "7",
+          "traffic-class": "7"
+        },
+        "default": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "0",
+          "pcp": "0",
+          "traffic-class": "1"
+        }
+      },
       "reachable": "true",
       "role": "switch",
       "ros": "7.23.3",
-      "shared_buffers": "80%"
+      "shared_buffers": "80%",
+      "switch_rule": {
+        "camera-box issue 1439: VBAN from mbc -> strict-priority TC5 (dante-audio)": {
+          "copy-to-cpu": "no",
+          "disabled": "no",
+          "dst-port": "6980",
+          "keep-qos-fields": "no",
+          "mac-protocol": "ip",
+          "mirror": "no",
+          "new-qos-profile": "dante-audio",
+          "ports": "ether7",
+          "protocol": "udp",
+          "redirect-to-cpu": "no",
+          "switch": "switch1"
+        }
+      }
     },
     "router_snv": {
       "board": "RB4011iGS+",
@@ -285,6 +597,74 @@
     },
     "stage_av": {
       "board": "CRS310-8G+2S+",
+      "bridge_port": {
+        "ether1": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether2": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether3": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether4": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether5": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether6": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether7": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        },
+        "ether8": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "70"
+        },
+        "sfp-sfpplus1": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "pvid": "1"
+        },
+        "sfp-sfpplus2": {
+          "disabled": "no",
+          "frame-types": "admit-only-untagged-and-priority-tagged",
+          "pvid": "89"
+        }
+      },
+      "bridge_vlan": {
+        "70": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        },
+        "89": {
+          "disabled": "no",
+          "tagged": [
+            "bridge"
+          ],
+          "untagged": []
+        }
+      },
       "identity": "stage_av_switch",
       "ip": "10.77.9.3",
       "port": {
@@ -369,10 +749,41 @@
           "running": "false"
         }
       },
+      "qos_profile": {
+        "dante-audio": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "46",
+          "pcp": "5",
+          "traffic-class": "5"
+        },
+        "dante-low": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "8",
+          "pcp": "1",
+          "traffic-class": "0"
+        },
+        "dante-ptp": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "56",
+          "pcp": "7",
+          "traffic-class": "7"
+        },
+        "default": {
+          "automap": "yes",
+          "disabled": "no",
+          "dscp": "0",
+          "pcp": "0",
+          "traffic-class": "1"
+        }
+      },
       "reachable": "true",
       "role": "switch",
       "ros": "7.23.3",
-      "shared_buffers": "80%"
+      "shared_buffers": "80%",
+      "switch_rule": {}
     }
   }
 }

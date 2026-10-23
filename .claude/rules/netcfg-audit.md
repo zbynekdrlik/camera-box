@@ -4,6 +4,8 @@ paths:
   - "scripts/lib/netcfg-audit.sh"
   - "scripts/netcfg-drift-alert-watchdog.sh"
   - "scripts/netcfg-baseline.json"
+  - "scripts/netcfg_bridge_qos.py"
+  - "tests/python/test_netcfg_bridge_qos_1439.py"
   - "systemd/netcfg-drift-alert-watchdog.*"
   - "tests/harness_netcfg_*.rs"
 ---
@@ -68,6 +70,23 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
   `NETCFG_DROP_PROBE_PORTS=` (empty) to restore the pre-#1110 growth-gated-only behaviour. The
   designation lives in this ENV default (checked-in, PR-reviewed) — NOT in `netcfg-baseline.json`,
   which stays pure captured-state; the port itself is already in the baseline's per-port diff.
+- **Bridge VLAN / bridge port / QoS profile / switch rule facet (issue 1439, a hard-drift page):**
+  the switch side of the VBAN-only legs (23.10.2026: foh2_video `sfp-sfpplus2` VLAN 89 untagged via
+  PVID + VLAN 70 tagged with `frame-types=admit-all`; the QoS profile `dante-audio` DSCP 46 ->
+  traffic class 5 on every CRS310; the foh2_video switch rule `ports=ether7 ... dst-port=6980
+  new-qos-profile=dante-audio`). One more ssh call per CRS310 (never the router) runs the four
+  `print detail` tables of `scripts/netcfg_bridge_qos.py` `GATHER_CMD` between `=== <section>`
+  markers and a closing `=== end`; the pure parser turns them into the per-switch `bridge_vlan` /
+  `bridge_port` / `qos_profile` / `switch_rule` baseline sections. A missing or changed VLAN
+  membership (tagged <-> untagged), pvid, frame-types, QoS profile or switch rule pages `[DRIFT]`
+  with the switch + port in the line; something present live but not in the baseline is
+  report-only (`vlan-added`, `bridge-port-added`, ...); a read without the end marker or missing a
+  table is `[report-only UNKNOWN]` (never a removed config), and `--capture` refuses (exit 2) rather
+  than write a baseline without the facet. Only STATIC VLAN entries and switch rules are baselined:
+  the `added by pvid` / `added by mvrp` entries and the dynamic romon rule are runtime state (the
+  PVID side is the bridge port `pvid`). Rules are keyed by their comment (else `#<n>` among the
+  static rules), so give a new switch rule a comment. The facet sections are diffed in python, so
+  `_nc_baseline_flat` skips them.
 - **Report-only (surfaced, never pages):** `ABSENT` (a baselined port with no live link — a device
   unplugged between events must not page), `RESET` (drop counters went backwards = the switch rebooted),
   `UNKNOWN` (an unreadable field). The cumulative `dq1`/`fcs`/`running` fields in the baseline are a
@@ -115,6 +134,18 @@ WITHOUT paging, so a mis-provisioned dev1 never spams).
 - **Scope boundary:** this facet is switch/router config + counter drift ONLY. The still-open
   mDNS-discovery flakiness (CAM1 invisible to imag) and the #787 status-page relock/arrival charting
   are separate, out of this facet.
+
+- **RouterOS `print terse` is not parseable for this facet, and `print detail` wraps (issue 1439).**
+  `terse` prints a comment UNQUOTED with spaces (`comment=camera-box issue 1439: VBAN from mbc ->
+  ... switch=switch1 ...`), so a key=value split cannot find where it ends. `detail` quotes values
+  and puts the comment on its own `;;;` line, but wraps at 80 columns: an INDENTED line starts a new
+  run of tokens, a line with NO indent continues the previous one mid-token (the rule comment is cut
+  `(dante-audi` / `o)`), and entries are separated by blank lines. The output is CRLF. The fixtures
+  in `tests/python/fixtures/netcfg_bridge_qos_1439/` are the real output of `GATHER_CMD` on the four
+  switches (23.10.2026); read them as bytes in a test (`read_text()` turns CRLF into LF).
+- **The facet in the baseline was seeded without a full `--capture`** (issue 1439): it was parsed
+  from one read pass and merged into the existing baseline, so the other captured fields (rates,
+  counters, comments) were not silently re-accepted. A later `--capture` writes everything as usual.
 
 - **`_nc_ssh` carries `ssh -n` — NEVER remove it (#1110 hotfix, 2026-08-25):** `_nc_drop_rate_verdict` runs ssh INSIDE the `--check` drop-probe `while read` loop fed by a herestring; an ssh without `-n` consumes the loop's remaining stdin, so the loop silently dies after the FIRST probed port and later nodes (the designated strih-uplink included) are never probed. Live repro: bash -x showed exactly one probe call, then loop end. Pinned by `nc_ssh_is_stdin_safe_for_while_read_loops` in tests/harness_netcfg_audit_797.rs.
 
