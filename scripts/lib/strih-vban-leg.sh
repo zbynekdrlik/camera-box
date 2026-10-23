@@ -68,6 +68,23 @@ _strih_vban_leg_unit_file() { printf '%s' "${STRIH_VBAN_LEG_UNIT_FILE:-/etc/syst
 _strih_vban_leg_sysctl_file() { printf '%s' "${STRIH_VBAN_LEG_SYSCTL_FILE:-/etc/sysctl.d/60-vban-dante70.conf}"; }
 _strih_vban_leg_sysfs() { printf '%s' "${STRIH_VBAN_LEG_SYSFS:-/sys}"; }
 
+# _strih_vban_leg_sender -> `IP PORTS` of STRIH_PROGRAM_VBAN_SENDER: a bare `IP` sends to STRIH_PROGRAM_VBAN_PORT,
+# `IP:P1,P2` to its own UDP ports (strih-snv: one console feeds the intercom hub's 6980 AND the OBS program
+# 6981, owner 23.10.2026); `none -` without a sender.
+_strih_vban_leg_sender() {
+  local s
+  s="$(strih_lx_program_vban_sender)" || return 1
+  case "$s" in
+    none) printf 'none -\n' ;;
+    *:*) printf '%s %s\n' "${s%%:*}" "${s#*:}" ;;
+    *) printf '%s %s\n' "$s" "$(strih_lx_program_vban_port)" ;;
+  esac
+}
+
+# _strih_vban_leg_dport PORTS -> the nft dport match: one port as is, several as an anonymous set
+# (`{ 6980, 6981 }`, the form `nft list` prints back).
+_strih_vban_leg_dport() { case "$1" in *,*) printf '{ %s }' "${1//,/, }" ;; *) printf '%s' "$1" ;; esac; }
+
 # strih_vban_leg_kind -> mac | vlan | none (the loaded box's STRIH_PROGRAM_VBAN_LEG).
 strih_vban_leg_kind() {
   local v
@@ -130,8 +147,8 @@ strih_vban_leg_nft_text() {
   local ifc="${1:?interface required}" sender="${2:?sender required}" port="${3:?port required}"
   local vin="" voff="" what="only echo requests (no VBAN sender declared yet)"
   if [ "$sender" != none ]; then
-    vin="        iifname \"${ifc}\" ip saddr ${sender} udp dport ${port} counter accept"$'\n'
-    voff="        iifname != \"${ifc}\" iifname != \"lo\" ip saddr ${sender} udp dport ${port} counter"$'\n'
+    vin="        iifname \"${ifc}\" ip saddr ${sender} udp dport $(_strih_vban_leg_dport "$port") counter accept"$'\n'
+    voff="        iifname != \"${ifc}\" iifname != \"lo\" ip saddr ${sender} udp dport $(_strih_vban_leg_dport "$port") counter"$'\n'
     what="only ${sender}'s VBAN to UDP ${port} and echo requests"
   fi
   printf '%s\n' "#!/usr/sbin/nft -f" \
@@ -541,7 +558,7 @@ strih_vban_leg_install() {
     return 0
   fi
   leg="$(strih_lx_program_vban_leg)"; addr="$(strih_lx_program_vban_leg_addr)"
-  sender="$(strih_lx_program_vban_sender)"; port="$(strih_lx_program_vban_port)"
+  read -r sender port <<<"$(_strih_vban_leg_sender)"
   [ "${leg%%:*}" != mac ] || mac="${leg#mac:}"
   # an unplugged leg NIC never aborts setup (it runs inside a genlock deploy after OBS stopped): a WARN
   # naming the MAC, nothing changed; verify item 9 FAILs it.
@@ -589,7 +606,7 @@ strih_vban_leg_grade() {
     return 0
   fi
   leg="$(strih_lx_program_vban_leg)"; addr="$(strih_lx_program_vban_leg_addr)"
-  sender="$(strih_lx_program_vban_sender)"; port="$(strih_lx_program_vban_port)"
+  read -r sender port <<<"$(_strih_vban_leg_sender)"
   stream="$(strih_lx_program_vban_streams)"
   [ "${leg%%:*}" != mac ] || mac="${leg#mac:}"
   if ! res="$(strih_vban_leg_resolve 2>/dev/null)"; then
@@ -656,8 +673,8 @@ strih_vban_leg_grade() {
     note "(vban-leg) vban: no VBAN sender declared yet (STRIH_PROGRAM_VBAN_SENDER=none): the leg passes only ping"
     return 0
   fi
-  acc_rule="iifname \"${ifc}\" ip saddr ${sender} udp dport ${port} counter accept"
-  off_rule="iifname != \"${ifc}\" iifname != \"lo\" ip saddr ${sender} udp dport ${port} counter"
+  acc_rule="iifname \"${ifc}\" ip saddr ${sender} udp dport $(_strih_vban_leg_dport "$port") counter accept"
+  off_rule="iifname != \"${ifc}\" iifname != \"lo\" ip saddr ${sender} udp dport $(_strih_vban_leg_dport "$port") counter"
   a1="$(_strih_vban_leg_rule_packets "$l1" "$acc_rule")"; o1="$(_strih_vban_leg_rule_packets "$l1" "$off_rule")"
   sleep "$wait"
   l2="$(nft list table inet "$STRIH_VBAN_LEG_NFT_TABLE" 2>/dev/null || true)"

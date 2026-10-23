@@ -316,6 +316,18 @@ strih_box_validate() {
       echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' must not be the rig address STRIH_IP" >&2; bad=1
     fi
     if [ "$ls" != none ]; then
+      # `IP` sends to STRIH_PROGRAM_VBAN_PORT; `IP:P1,P2` names its own UDP ports (1024..65535, comma-joined)
+      local lsp="" p
+      if [ "${ls#*:}" != "$ls" ]; then
+        lsp="${ls#*:}"; ls="${ls%%:*}"
+        for p in ${lsp//,/ }; do
+          if [[ ! "$p" =~ ^${nz}${dg}{3,4}$ ]] || [ "$p" -gt 65535 ]; then
+            echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER port '${p}' must be a UDP port 1024..65535 (IP:P1,P2)" >&2; bad=1
+          fi
+        done
+        [[ "$lsp" =~ ^[0123456789]+(,[0123456789]+)*$ ]] \
+          || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER ports '${lsp}' must be comma-joined numbers (IP:P1,P2)" >&2; bad=1; }
+      fi
       if ! _strih_box_ipv4 "$ls"; then
         echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' must be the console's IPv4 address, or none (the leg passes only ping)" >&2; bad=1
       elif _strih_box_ipv4 "$la"; then
@@ -324,8 +336,8 @@ strih_box_validate() {
         [ "$la" != "$ls" ] \
           || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR and STRIH_PROGRAM_VBAN_SENDER must differ (both '${la}')" >&2; bad=1; }
       fi
-      [ "${f[STRIH_PROGRAM_VBAN_PORT]}" != none ] \
-        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' needs the UDP port it sends to (STRIH_PROGRAM_VBAN_PORT is none)" >&2; bad=1; }
+      [ -n "$lsp" ] || [ "${f[STRIH_PROGRAM_VBAN_PORT]}" != none ] \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' needs the UDP port it sends to (STRIH_PROGRAM_VBAN_PORT is none; or name it, IP:PORT)" >&2; bad=1; }
     fi
   fi
   # issue 1412 slice B: the NDI program a stream box receives (`none` on a strih), and the venue whose

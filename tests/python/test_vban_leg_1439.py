@@ -495,8 +495,12 @@ def _mutations(s):
     return [c for c in fk.calls(s, "nmcli") if c[:1] != ["-g"]]
 
 
-def test_vlan_install_on_the_live_strih_snv_never_touches_the_link(tmp_path):
+def test_vlan_install_without_a_sender_never_touches_the_link(tmp_path):
     b = _strih_box(tmp_path, VLAN_PROPS)
+    # the ping-only path (a VLAN leg with no sender declared), on a strih-snv fact copy: the live strih-snv has
+    # carried Ableton-FOH's VBAN on 6980 + 6981 since 23.10.2026
+    b.env["STRIH_BOXES_DIR"] = str(_boxes_with(tmp_path, "strih-snv",
+                                               [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=none")]))
     r = b.run("strih_vban_leg_install", box="strih-snv")
     assert r.returncode == 0, r.stdout + r.stderr
     s = b.st()
@@ -620,8 +624,12 @@ def test_vlan_needs_the_rig_nic(tmp_path):
     assert _mutations(b.st()) == [] and not b.nft_file.exists()
 
 
-def test_vlan_grade_passes_the_live_strih_snv_with_a_ping_only_note(tmp_path):
+def test_vlan_grade_passes_a_leg_without_a_sender_with_a_ping_only_note(tmp_path):
     b = _strih_box(tmp_path, VLAN_PROPS)
+    # the ping-only path (a VLAN leg with no sender declared), on a strih-snv fact copy: the live strih-snv has
+    # carried Ableton-FOH's VBAN on 6980 + 6981 since 23.10.2026
+    b.env["STRIH_BOXES_DIR"] = str(_boxes_with(tmp_path, "strih-snv",
+                                               [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=none")]))
     fk.write_proc(b.proc, STRIH_VLAN_IF, 1, 2)
     rows = _rows(b.run("strih_vban_leg_grade", box="strih-snv"))
     assert not [x for x in rows if x.startswith("BAD|")], rows
