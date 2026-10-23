@@ -327,9 +327,13 @@ def _marked(lines):
 
 
 def _with_marker(lines, ending):
-    """LINES with `[CameraBox] AvsyncDockSeeded=true` added (in the section when it exists, else a new
-    section at the end), every line ending ENDING."""
+    """LINES with `[CameraBox] AvsyncDockSeeded=true`: an existing key line of the section is replaced
+    (never a second copy: libobs and configparser read duplicates differently), else the key goes in
+    right after the section header, else a new section at the end; every new line ends ENDING."""
     sections = _section_of(lines)
+    for i, (line, section) in enumerate(zip(lines, sections)):
+        if section == MARKER_SECTION and line.split("=", 1)[0].strip() == MARKER_KEY:
+            return lines[:i] + [MARKER_KEY + "=true" + (line[len(line.rstrip("\r\n")):] or ending)] + lines[i + 1:]
     for i, (line, section) in enumerate(zip(lines, sections)):
         if section == MARKER_SECTION and _SECTION_RE.match(line.rstrip("\r\n")):
             return lines[:i + 1] + [MARKER_KEY + "=true" + ending] + lines[i + 1:]
@@ -357,13 +361,16 @@ def check_ini(path, name):
 
 def _replace(path, lines):
     """Write LINES over PATH: a temp file in the same directory renamed over the name (a reader never sees
-    half a file; a link is replaced, never written through), the mode kept."""
-    mode = os.stat(path).st_mode & 0o777
+    half a file; a link is replaced, never written through), the mode kept, and as root the file's owner
+    kept too (setup-strih runs as root; OBS must still save the desktop user's config)."""
+    st = os.stat(path)
     fd, tmp = tempfile.mkstemp(prefix=".user.ini.", dir=os.path.dirname(os.path.abspath(path)))
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.writelines(lines)
-        os.chmod(tmp, mode)
+        os.chmod(tmp, st.st_mode & 0o777)
+        if os.geteuid() == 0:
+            os.chown(tmp, st.st_uid, st.st_gid)
         os.replace(tmp, path)
     except BaseException:
         os.unlink(tmp)

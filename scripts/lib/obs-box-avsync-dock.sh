@@ -118,7 +118,7 @@ obs_box_avsync_dock_grade_rows() {
   v="$(python3 "$(_obs_box_avsync_dock_py)" check --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" 2>/dev/null)" || v=unreadable
   case "$v" in
     visible) printf 'OK|(avsync-dock-layout) the saved OBS layout (%s) shows the A/V-sync dock\n' "$ini" ;;
-    hidden) printf 'NOTE|(avsync-dock-layout) the operator closed the A/V-sync dock (hidden in %s) -- kept; Docks menu to show it\n' "$ini" ;;
+    hidden) printf 'NOTE|(avsync-dock-layout) the A/V-sync dock is hidden in %s (closed by the operator, or an OBS dock reset) -- kept; Docks menu to show it\n' "$ini" ;;
     absent | default-hidden) printf 'FAIL|(avsync-dock-layout) the saved OBS layout (%s) %s, so OBS opens it hidden -- stop strih-obs.service and re-run setup-strih.sh step 16g (issue 1470)\n' "$ini" "$([ "$v" = absent ] && echo 'has no A/V-sync dock' || echo 'holds the A/V-sync dock in its hidden + floating default')" ;;
     no-state | no-ini) printf 'FAIL|(avsync-dock-layout) OBS has saved no dock layout in %s yet -- start OBS once, stop it, re-run setup-strih.sh step 16g (issue 1470)\n' "$ini" ;;
     *) printf 'FAIL|(avsync-dock-layout) the saved OBS layout in %s could not be read (%s) -- fix the file, then re-run setup-strih.sh step 16g (issue 1470)\n' "$ini" "${v:-no answer}" ;;
