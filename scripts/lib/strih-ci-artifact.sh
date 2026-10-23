@@ -107,13 +107,16 @@ strih_ci_artifact_cleanup() {
 # rc 0; nothing + rc 1 when none is known. ROOT is a git checkout (its work tree's top level, never a
 # directory that merely sits inside some other checkout) -> its HEAD; else the CAMERA_BOX_SOURCE_SHA
 # file the strih-snv deploy writes into its staged tree (an archive of HEAD, no .git). Only a 40-hex
-# sha is printed.
+# sha is printed. setup-strih runs as root, often from the operator's clone: `safe.directory` names
+# exactly ROOT, so git's ownership check never turns that clone into "no commit known" (the root run
+# trusts the tree anyway, it executes its scripts), while a parent repo stays unread.
 strih_checkout_source_sha() {
-  local root="${1:-}" top sha=""
+  local root="${1:-}" real top sha=""
   [ -n "$root" ] && [ -d "$root" ] || return 1
-  top="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)"
-  if [ -n "$top" ] && [ "$(cd "$top" && pwd -P)" = "$(cd "$root" && pwd -P)" ]; then
-    sha="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+  real="$(cd "$root" && pwd -P)" || return 1
+  top="$(git -c safe.directory="$real" -C "$root" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$top" ] && [ "$(cd "$top" && pwd -P)" = "$real" ]; then
+    sha="$(git -c safe.directory="$real" -C "$root" rev-parse HEAD 2>/dev/null || true)"
   elif [ -f "$root/CAMERA_BOX_SOURCE_SHA" ]; then
     sha="$(head -n 1 "$root/CAMERA_BOX_SOURCE_SHA" 2>/dev/null | tr -d '[:space:]' || true)"
   fi
