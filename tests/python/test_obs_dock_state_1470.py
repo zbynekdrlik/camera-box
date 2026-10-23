@@ -349,6 +349,37 @@ def test_a_false_marker_value_is_not_a_marker(tmp_path):
     assert M.check_ini(str(p), name) == "default-hidden"
 
 
+def test_an_existing_marker_key_with_another_value_is_replaced_not_duplicated(tmp_path):
+    # round-2 review nit: a second copy of the key reads differently in libobs (a hash) and configparser
+    # (the last copy), so the one existing line is replaced.
+    p, name = _default_hidden_ini(tmp_path)
+    p.write_text(p.read_text() + "\n[CameraBox]\nAvsyncDockSeeded=false\nOther=1\n")
+    assert M.seed_ini(str(p), name) == "redocked"
+    lines = p.read_text().splitlines()
+    keys = [l for l in lines if l.startswith("AvsyncDockSeeded=")]
+    assert keys == [MARK] and "Other=1" in lines
+    assert M.check_ini(str(p), name) == "visible"
+
+
+def test_a_rewrite_as_root_keeps_the_files_owner(tmp_path, monkeypatch):
+    # round-2 review nit: the rewritten user.ini keeps its owner in the same rename, never only through a
+    # later chown. Non-root here, so the root branch is driven through the module's own os handle.
+    p = _copy(tmp_path, "stream-pp")
+    st = os.stat(p)
+    calls = []
+    monkeypatch.setattr(M.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(M.os, "chown", lambda path, uid, gid: calls.append((os.path.dirname(path), uid, gid)))
+    assert M.seed_ini(str(p), DOCK) == "seeded"
+    assert calls == [(str(tmp_path), st.st_uid, st.st_gid)]
+
+
+def test_a_rewrite_as_a_user_never_chowns(tmp_path, monkeypatch):
+    p = _copy(tmp_path, "stream-pp")
+    monkeypatch.setattr(M.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(M.os, "chown", lambda *a: (_ for _ in ()).throw(AssertionError("chown as a user")))
+    assert M.seed_ini(str(p), DOCK) == "seeded"
+
+
 # --- the names are the dock's own --------------------------------------------------------------------
 
 def test_the_dock_object_name_and_module_follow_the_vendored_plugin():

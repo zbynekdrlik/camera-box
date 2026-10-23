@@ -239,7 +239,9 @@ def test_after_the_first_seed_a_floated_and_closed_dock_is_the_operators(tmp_pat
     assert "already places it" in r.stdout and ini.read_bytes() == snap
     lib, share = _prefix(tmp_path)
     row = _rows(tmp_path, LOG_WITH, ini, lib, share)[2]
-    assert row.startswith("NOTE|(avsync-dock-layout) the operator closed the A/V-sync dock"), row
+    assert row.startswith("NOTE|(avsync-dock-layout) the A/V-sync dock is hidden in "), row
+    # an OBS Reset Docks leaves the same state, so the row names both causes
+    assert "(closed by the operator, or an OBS dock reset)" in row and "Docks menu to show it" in row
     # a restored user.ini without the marker: OBS's default again, a FAIL until setup re-docks it
     ini.write_text(snap.decode().replace("\n[CameraBox]\n" + MARK + "\n", ""))
     row = _rows(tmp_path, LOG_WITH, ini, lib, share)[2]
