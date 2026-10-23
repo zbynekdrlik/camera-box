@@ -287,6 +287,73 @@ def test_check_state_passes_a_monitor_waiting_for_obs(tmp_path):
     assert ok and line.startswith("waiting "), line
 
 
+# --- review round 1 -------------------------------------------------------------------------------------------
+
+def test_a_usb_headphone_box_keeps_its_own_mixer(tmp_path):
+    # snd-usb-audio names many headsets' / dongles' main output `Speaker`: the jack's speaker mute would
+    # silence the very box the operator listens on, and a 0 dB write on its own volume is full scale
+    rig = Rig(tmp_path)
+    add_usb_card(rig.root, 2, "Gen")
+    rig.publish()
+    r = rig.run(2.0)
+    assert r.returncode == 0, r.stderr
+    assert "--alsa-audio-device=plughw:CARD=Gen,DEV=0" in rig.vlc_argv()[0]
+    assert not [a for a in rig.amixer() if " Gen " in " %s " % a], rig.amixer()
+    named = [ln for ln in r.stdout.splitlines() if "mixer:" in ln and "Gen" in ln]
+    assert len(named) == 1 and "USB" in named[0], r.stdout
+
+
+def test_the_jack_still_gets_its_unity_mixer_and_speaker_mute(tmp_path):
+    rig = Rig(tmp_path)
+    rig.publish()
+    r = rig.run(1.5)
+    assert r.returncode == 0, r.stderr
+    assert ["-q", "-c", "Generic_1", "sset", "Speaker", "mute"] in [a.split() for a in rig.amixer()]
+
+
+def test_the_waiting_line_stays_one_line_while_other_clients_come_and_go(tmp_path):
+    # the not-published reason is constant; what holds the port (nothing / a non-obs client) is a state field
+    rig = Rig(tmp_path)
+    p = subprocess.Popen(rig.argv(3.0), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=rig.env())
+    time.sleep(1.2)
+    fake_proc_net(rig.proc, tcp_rows=[tcp_line(OBS_TO_RESTREAMER, OBS_INODE)])
+    fake_process(rig.proc, 8888, "ffmpeg", OBS_INODE)
+    out, err = p.communicate(timeout=30)
+    assert p.returncode == 0, err
+    waiting = [ln for ln in out.splitlines() if ln.startswith("waiting:")]
+    assert len(waiting) == 1, out
+    st = rig.st()
+    assert st["state"] == "waiting" and "no obs process holds" in st["publisher"], st
+
+
+def test_a_hostname_url_is_resolved_at_most_once_a_minute(tmp_path, monkeypatch):
+    m = _mod()
+    calls = []
+    real = m.socket.getaddrinfo
+
+    def counting(*a, **kw):
+        calls.append(a[0])
+        return real("127.0.0.1", *a[1:], **kw)
+
+    monkeypatch.setattr(m.socket, "getaddrinfo", counting)
+    mon = m.Monitor("rtmp://restreamer.example:1234/live/x", None, proc_root=str(tmp_path), log=lambda s: None)
+    for _ in range(5):
+        mon.publisher()
+    assert calls == ["restreamer.example"], calls
+
+
+def test_an_obs_process_name_the_kernel_cannot_report_is_refused(tmp_path):
+    rig = Rig(tmp_path)
+    r = rig.run(0.5, "--obs-process-name", "obs-with-a-long-name")
+    assert r.returncode == 2 and "15" in r.stderr, (r.returncode, r.stderr)
+
+
+def test_the_unit_says_where_the_audio_goes():
+    text = (REPO / "systemd" / "strih-stream-monitor.service").read_text()
+    desc = [ln for ln in text.splitlines() if ln.startswith("Description=")][0]
+    assert "headphone box" in desc and "1465" in desc, desc
+
+
 # --- 3. no login ordering cycle -------------------------------------------------------------------------------
 
 def _unit_name(path):
