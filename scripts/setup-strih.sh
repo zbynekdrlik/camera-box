@@ -673,7 +673,7 @@ fi
 # finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source; on the stream role the obs-vban source, issue 1439) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
+if strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
 echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------

@@ -343,9 +343,9 @@ case "$_rm_verdict" in
   *) bad "remoteos-mcp ${_rm_verdict#FAIL: } -- re-run setup-strih.sh step 10 (issue 1361)" ;;
 esac
 
-# 9) program audio. A hub box (issue 1344): strih-program sink + the OBS pulse capture + the hub's program
-#    rx (FOH level = a supervisor step). A box with no hub (the stream role, issue 1439): its obs-vban source.
-if ! WHY="$(obs_box_step_applies 13)"; then
+# 9) program audio by the FACTS (issue 1439): a box declaring the console's VBAN program -> its obs-vban source; a hub-fed one
+#    (issue 1344) -> strih-program sink + pulse capture + hub program rx (FOH level: supervisor). Hub boxes: HDMI legs + MiniFuse.
+if strih_program_vban_declared; then
   strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"
 else
   AUDIO_SINK=0
@@ -360,8 +360,7 @@ else
     printf '%s\n' "$PW_LS" | grep -q '"strih-program"' && AUDIO_SINK=1
   fi
   AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
-  if systemctl is-active intercom-hub >/dev/null 2>&1; then
-    # hub active (M4+): grade the real program-feed rx off the hub /api/state.
+  if systemctl is-active intercom-hub >/dev/null 2>&1; then   # hub active (M4+): the real program-feed rx off /api/state
     if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
          | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
       AUDIO_RX=1
@@ -369,8 +368,7 @@ else
       AUDIO_RX=0
     fi
   else
-    # enable-only phase (hub enabled-not-started until the M4 cut-over): grade only the structural
-    # sink + OBS input; the rx is verified once the hub runs.
+    # enable-only phase (hub enabled-not-started until the M4 cut-over): grade only the structural sink + OBS input.
     AUDIO_RX=1
   fi
   AUDIO_VERDICT="$(strih_lx_program_audio_verdict "$AUDIO_SINK" "$AUDIO_RX" "$AUDIO_KIND" unknown na || true)"
@@ -379,6 +377,8 @@ else
     NOTE*) note "program audio: $AUDIO_VERDICT" ;;
     *)     bad  "program audio: $AUDIO_VERDICT" ;;
   esac
+fi
+if WHY="$(obs_box_step_applies 13)"; then
   strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs
   if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 fi

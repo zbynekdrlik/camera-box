@@ -264,24 +264,23 @@ strih_box_validate() {
     *) echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_SAMPLER '${f[STRIH_PROGRAM_AUDIO_SAMPLER]}' must be on or off" >&2; bad=1 ;;
   esac
   # issue 1439: the program audio a box takes as VBAN straight from the console into the obs-vban source
-  # (no intercom hub, no PipeWire): the stream name(s), the UDP port OBS binds and the fixed Receive
-  # Buffer R (ms). The stream role takes exactly ONE stream (into its program-audio input, the hub is
-  # gone); the strih role keeps its hub-fed program until its own slice, so it declares none of the
-  # three. issue 1462: the name of that OBS input is a fact too (stream-pp `Zvuk z mixu`, stream-snv
-  # `mbc`: the SNV stream tooling keys on it), `none` on the strih role.
+  # (no intercom hub forwarding, no PipeWire): the stream name, the UDP port OBS binds, the fixed Receive
+  # Buffer R (ms) and (issue 1462) the name of that OBS input (stream-pp `Zvuk z mixu`, stream-snv `mbc`,
+  # strih-snv `ASIO zvuk`). The stream role takes exactly ONE stream (its hub is gone). The strih role
+  # (phase 2, addendum 6338457001) declares all four -- one stream on its own port, the hub keeps 6980 --
+  # or all four `none`: a hub-fed strih (strih-pp) until its console sends it a program stream.
   local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
   local ai="${f[STRIH_PROGRAM_AUDIO_INPUT]}"
-  if [ "${f[STRIH_ROLE]}" = strih ]; then
-    if [ "${vs}:${vp}:${vr}" != none:none:none ]; then
-      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS must be none on the strih role (its VBAN program input is not provisioned yet, issue 1439)" >&2; bad=1
-    fi
-    [ "$ai" = none ] \
-      || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be none on the strih role (its program input is not provisioned by this fact yet, issue 1439)" >&2; bad=1; }
+  if [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
+    :   # a hub-fed strih: its program is the hub's program_out (its STRIH_INTERCOM_CONFIG)
   else
+    if [ "${f[STRIH_ROLE]}" = strih ] && { [ "$vs" = none ] || [ "$vp" = none ] || [ "$vr" = none ] || [ "$ai" = none ]; }; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS / STRIH_PROGRAM_AUDIO_INPUT are all none (a hub-fed strih) or all set on the strih role (issue 1439)" >&2; bad=1
+    fi
     _strih_box_obs_input_name "$ai" \
-      || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be the OBS program-audio input's name on the stream role (1..64 letters, digits, space, . _ - ( ), no space first or last)" >&2; bad=1; }
+      || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be the OBS program-audio input's name (1..64 letters, digits, space, . _ - ( ), no space first or last)" >&2; bad=1; }
     [ "$vs" != none ] && _strih_box_vban_stream_name "$vs" \
-      || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS '${vs}' must be ONE VBAN stream name (1..16 letters, digits, . _ -) on the stream role (the console's program stream)" >&2; bad=1; }
+      || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS '${vs}' must be ONE VBAN stream name (1..16 letters, digits, . _ -) (the console's program stream)" >&2; bad=1; }
     if [[ ! "$vp" =~ ^[123456789][0123456789]{3,4}$ ]] || [ "$vp" -lt 1024 ] || [ "$vp" -gt 65535 ]; then
       echo "strih-box ${name}: STRIH_PROGRAM_VBAN_PORT '${vp}' must be the UDP port OBS receives on (1024..65535)" >&2; bad=1
     fi

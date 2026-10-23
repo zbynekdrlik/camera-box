@@ -128,7 +128,13 @@ def test_stream_snv_has_the_nic_leg_strih_snv_the_vlan_leg_every_other_box_none(
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:0")], "VLAN"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:4095")], "VLAN"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:070")], "VLAN"),
-    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.232")],
+    # a bare-IP sender on a box whose program port is none (issue 1439 phase 2: strih-snv now declares its
+    # program, so the case runs on a copy made hub-fed again: all four program facts none)
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.232"),
+                   ("STRIH_PROGRAM_VBAN_STREAMS=strih-obs", "STRIH_PROGRAM_VBAN_STREAMS=none"),
+                   ("STRIH_PROGRAM_VBAN_PORT=6981", "STRIH_PROGRAM_VBAN_PORT=none"),
+                   ("STRIH_PROGRAM_VBAN_RESERVE_MS=20", "STRIH_PROGRAM_VBAN_RESERVE_MS=none"),
+                   ("STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk", "STRIH_PROGRAM_AUDIO_INPUT=none")],
      "STRIH_PROGRAM_VBAN_PORT"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:80")], "port"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,")],
