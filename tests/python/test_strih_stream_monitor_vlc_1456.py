@@ -42,6 +42,7 @@ def log(s):
         f.write(s + "\n")
 log("argv " + json.dumps(args))
 log("pid %d" % os.getpid())
+log("env PULSE_SINK=%s" % os.environ.get("PULSE_SINK", ""))  # issue 1465: the pulse output's sink
 state = {"s": "stopped"}
 def published():
     return os.path.exists(os.path.join(d, "published"))
