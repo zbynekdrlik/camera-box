@@ -311,10 +311,11 @@ strih_lx_seed_manifest_json() {
   # issue 1439 phase 2: a strih box whose facts declare the console's VBAN program (strih-snv) carries
   # the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap switches
   # (keeping the operator's mixer state); a hub-fed strih (strih-pp) carries neither, byte-identical.
-  local vban
+  local vban ai
   if vban="$(strih_lx_program_audio_vban_json)"; then
+    ai="$(strih_lx_program_audio_input)" || return 1
     printf '  "camera_latency_ms": %s,\n' "$lat"
-    printf '  "program_audio_input": "%s",\n' "$(strih_lx_program_audio_input)"
+    printf '  "program_audio_input": "%s",\n' "$ai"
     printf '  "program_audio_vban": %s\n' "$vban"
   else
     printf '  "camera_latency_ms": %s\n' "$lat"

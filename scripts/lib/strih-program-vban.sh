@@ -73,7 +73,7 @@ strih_program_vban_field() {
 # issue 1462), graded against the loaded box's facts.
 strih_program_vban_grade() {
   local scn="${1-}" ws="${2-}" log="${3-}" name="${4-}" wait="${STRIH_PROGRAM_VBAN_WAIT_S:-12}"
-  local port stream r kind l1 l2 n1 n2 v counters lost concealed reordered extra
+  local port stream r kind l1 l2 n1 n2 v counters lost concealed reordered extra to
   if ! port="$(strih_lx_program_vban_port)" || ! stream="$(strih_lx_program_vban_streams)" \
      || ! r="$(strih_lx_program_vban_reserve_ms)" || [ "$port" = none ] \
      || { [ -z "$name" ] && ! name="$(strih_lx_program_audio_input)"; }; then
@@ -91,7 +91,7 @@ strih_program_vban_grade() {
     bad "(program-vban) OBS '${name}' is '${kind:-absent}', not the obs-vban receive source -- restart OBS so strih_scenes.py --bootstrap switches it (issue 1439; the bundle must carry obs-vban)"
   fi
   if [ -n "$log" ] && [ -r "$log" ] && grep -a -q -F -- "[obs-vban] Failed to bind port ${port}" "$log"; then
-    bad "(program-vban) OBS could not bind UDP ${port} (newest OBS log): another process holds it, the intercom hub? -- re-run setup-strih.sh step 13, then restart OBS"
+    bad "(program-vban) OBS could not bind UDP ${port} (newest OBS log): another process holds it (ss -lunp 'sport = :${port}' names it; on the stream role a hub left on the box: re-run setup-strih.sh step 13), then restart OBS"
   fi
   l1="$(strih_program_vban_status_line "$log" "$name")"
   # The first status line comes 10 s after the first packet; the anchored line proves packets arrive,
@@ -102,7 +102,10 @@ strih_program_vban_grade() {
     l1="$(strih_program_vban_status_line "$log" "$name")"
   fi
   if [ -z "$l1" ]; then
-    bad "(program-vban) no obs-vban receive status line for '${name}' in ${log:-<no OBS log>}: no VBAN packet reached OBS since it started -- is the console sending stream '${stream}' to $(strih_lx_ip 2>/dev/null || echo this box):${port}?"
+    # the console sends to the box's VBAN-only leg address when it declares one (issue 1439), else STRIH_IP
+    to="$(strih_lx_program_vban_leg_addr 2>/dev/null || true)"
+    case "$to" in "" | none) to="$(strih_lx_ip 2>/dev/null || echo this box)" ;; esac
+    bad "(program-vban) no obs-vban receive status line for '${name}' in ${log:-<no OBS log>}: no VBAN packet reached OBS since it started -- is the console sending stream '${stream}' to ${to}:${port}?"
     return 0
   fi
   v="$(strih_program_vban_field "$l1" port)"

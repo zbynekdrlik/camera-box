@@ -44,8 +44,9 @@ paths:
 Owner 22.10.2026, on the stream-pp pops: "Nesuhlasim s tym interkom hubom na stream nb - naco tam je
 dalsia vrstva?". Design revision 6338127636: on the STREAM role the console's VBAN program (lv1's
 `stream` to stream-pp UDP 6980) goes straight into the vendored obs-vban SOURCE. No intercom hub, no
-PipeWire. The strih role keeps its hub-fed program until its own slice (addendum 6338457001: one
-source per console stream on UDP 6981, the hub's `program_out` removed).
+PipeWire. Phase 2 (addendum 6338457001) does the same on the STRIH role by the same facts: strih-snv's
+`ASIO zvuk` takes the console's `strih-obs` on UDP 6981 and the hub's `program_out` is gone (section
+"The strih role (phase 2)" below).
 
 ## The receive timeline (`vban-receive-timeline.h` <-> `src/vban_receive_timeline.rs`)
 
@@ -427,10 +428,11 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
 - **Facts:** `STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `_RESERVE_MS`: stream-pp `stream` / `6980` /
   `40`, stream-snv `stream` / `6980` / `80` (finding 6348583939: mbc's gaps reached 52 ms under the
   22.10.2026 production load, lv1's are 26-29 ms; R - one packet - the 2 ms deadline margin must sit
-  above the sender's worst gap, pinned by the pytest); strih boxes `none` x 3 until their slice; the loader refuses a strih role with values
-  and a stream role without exactly ONE stream). `none` is a sentinel, never a stream name.
+  above the sender's worst gap, pinned by the pytest); strih-snv `strih-obs` / `6981` / `20` (phase 2), strih-pp `none` x 3 (hub-fed);
+  the loader takes on the strih role all four program facts or all four `none`, and refuses a stream
+  role without exactly ONE stream). `none` is a sentinel, never a stream name.
   `STRIH_PROGRAM_AUDIO_INPUT` (issue 1462) names the OBS program-audio input per box: stream-pp
-  `Zvuk z mixu`, stream-snv `mbc` (the SNV stream tooling keys on it), strih boxes `none`. The seed
+  `Zvuk z mixu`, stream-snv `mbc` (the SNV stream tooling keys on it), strih-snv `ASIO zvuk`, strih-pp `none`. The seed
   manifest, verify item 9 (`strih_program_vban_grade`'s default NAME), the stream-monitor row and the
   Development-scene guard read it; never a role constant.
 - **stream-snv (issue 1462):** a Linux stream box like stream-pp since 22.10.2026. mbc.lan sends the SNV
@@ -491,6 +493,46 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   hold), read `receive_buffer_ms=80` back on the next status line, then re-measure the program A/V
   offset -- R 80 plays the program audio ~40 ms later than R 40 did. After the deploy read
   `emit_missed=0` and `emit_late_ms` on the status lines (verify item 9 grades the first).
+
+## The strih role (phase 2, addendum 6338457001 + inputs 6361250274)
+
+Owner: "interkom-hub ma byt separatna vec, nema nic preposielat do strih obs". The FOH console (fohabl,
+10.77.7.30) sends the strih program as its OWN VBAN stream `strih-obs` (96 kHz, 239 frames per packet,
+2 ch, PCM24, ~400 packets/s) over the VLAN-70 leg to strih-snv UDP 6981; `fohabl-strih` stays on 6980
+for the hub (one UDP port has one receiver). The console-side setting is the owner's, never provisioning.
+
+- **One design, facts only.** The same four facts as the stream role. The loader takes, on the strih
+  role, all four set or all four `none` (a hub-fed strih: strih-pp until its console sends it a
+  program stream). Every consumer follows the facts, never the role:
+  - the seed: ONE renderer `strih_lx_program_audio_vban_json` (strih-provision.sh) for both manifests;
+    the strih manifest carries `program_audio_input` + `program_audio_vban` when the facts declare them
+    (a hub-fed strih's manifest is byte-identical), and the role-free seeder switches `ASIO zvuk` from
+    the pulse capture to the obs-vban source keeping the operator's mixer state (no monitoring change,
+    no pulse-capture forbid: those stay stream-role manifest keys);
+  - verify item 9: `strih_program_vban_declared` (strih-program-vban.sh) picks `strih_program_vban_grade`
+    on every box that declares the stream; the strih-program sink / pulse / hub-rx verdict only on a
+    hub-fed box; the hub's HDMI legs + the MiniFuse note on every hub box (`obs_box_step_applies 13`).
+- **The hub forwards nothing into OBS.** `scripts/vbmatrix_to_intercom_toml.py` drops VASIO8 (the
+  Windows OBS `ASIO zvuk` capture) and its 4 points: the strih-snv TOML has no `program_out` (14
+  participants, 212 points; fohabl/lv1 keep their cutters / speakers points and channel counts).
+  `tests/python/test_strih_role_vban_1439.py` pins it per box: a strih box that declares a program
+  VBAN stream has no `program_out` in its `STRIH_INTERCOM_CONFIG`, a hub-fed one still has one.
+- **R = 20 ms (low: the strih path's double-sound budget, issue-1437 item 4).** 20 - one 96 kHz
+  packet (2.49 ms) - the 2 ms margin = 15.5 ms over the console's worst gap on the leg, read from the
+  hub's `fohabl` `max_gap_ms_10min` 11.4-11.5 ms (23.10.2026 evening, no production load; no
+  passwordless sudo for a tcpdump of `strih-obs` itself). The pytest pins R <= 25 and the budget > 11.5.
+  The source's `max_late_ms` / `late` / `emit_missed` under production load decide a raise.
+- **96 kHz:** `tests/vban_source_96k_1439.rs` runs `strih-obs`'s exact shape through the shipped
+  source (the lift driver's `sr=N` token = the VBAN rate index): every output at 96 kHz, contiguous on
+  the 96 kHz clock, the lead-in = R on that clock, 24-bit samples whole, one loss one concealed slot.
+- **Left as it is (a follow-up candidate handed to the supervisor in the LANE-RETURN):** setup-strih step 12 still installs the `strih-program` null
+  sink + loopback on a box whose program is VBAN (no writer, no OBS input on it after the switch).
+- **Rollout (supervisor):** the strih bundle with obs-vban, setup-strih on strih-snv with OBS stopped
+  (step 13 installs the new hub TOML; a running hub is never restarted, so `systemctl restart
+  intercom-hub`), then start OBS. Read `obs-vban receive: ... rate=96000 ... receive_buffer_ms=20 ...
+  port=6981 stream='strih-obs' source='ASIO zvuk'` with `emit_missed=0`, verify item 9, and the hub's
+  `/api/state` without `program_out`. The OBS input must be live before the hub TOML loses
+  `program_out` (otherwise a gap in the program audio).
 
 ## The VBAN-only leg: a second NIC or a tagged VLAN on the audio VLAN (ROZHODNUTÉ 6360417876)
 
