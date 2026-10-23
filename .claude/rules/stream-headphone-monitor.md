@@ -12,6 +12,11 @@ paths:
 
 # The stream box's headphones play the REAL outgoing stream (issue 1436)
 
+> **Issue 1465 item 3 (owner 23.10.2026) moved the stream role onto a LOCKED PipeWire:** the unit runs
+> `--output pulse` (VLC through pulse to the one sink `stream-operator-headphones`, the headphone PCM held by
+> PipeWire, `--check-state` inverted). Every "never PipeWire" / "PipeWire on the PCM FAILs" below is the
+> `--output alsa` player, now the rollback. See `.claude/rules/stream-operator-audio.md`.
+
 > **Issue 1465 (owner 23.10.2026) changed two things in the VLC player:** the headphone box (a USB audio
 > interface) wins over the notebook jack, and VLC gets `pl_play` only while OBS publishes. See "The
 > headphone box and the blinking (issue 1465)" at the end.
