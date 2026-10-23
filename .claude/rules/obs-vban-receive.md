@@ -521,8 +521,9 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
   `flush ruleset`; the `table` / `delete table` atomic replace of `dscp-nft.sh`): in on the leg only the
   sender's VBAN to the port + echo requests, out only echo replies, everything else dropped and
   counted. ARP is not IP and still answers (the owner's ARP check from Ableton-FOH). With a sender, one
-  more input rule only COUNTS packets to the VBAN port arriving on any OTHER interface (`iifname !=
-  leg iifname != lo`): verify's proof that nothing comes through the router any more. dantesync stays
+  more input rule only COUNTS the sender's packets to the VBAN port arriving on any OTHER interface
+  (`iifname != leg iifname != lo ip saddr <sender>`; a routed packet keeps its source, so another box's
+  VBAN to the same port is never blamed on the console): verify's proof that nothing comes routed. dantesync stays
   on video-clock.lan (gm_allowlist) and never sees audio-VLAN PTP (the input drop); avahi is never
   touched (the output drop keeps mDNS off the leg; an avahi restart risks the NDI sender announcement).
 - **ARP sysctls** `arp_ignore=1` / `arp_announce=2` in `/etc/sysctl.d/60-vban-dante70.conf`, in the
@@ -542,9 +543,12 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
   filter (`8021q: adding VLAN 0 to HW filter`): NDI, PTP and the ssh session on a production box drop.
   So setup creates the VLAN connection ONLY when absent, prints a loud `WARNING ... ~8 s` first,
   creates it DOWN (`connection.autoconnect no`, so no autoconnect races a second activation), brings it
-  up exactly once, then sets autoconnect yes. It NEVER deletes, re-creates, brings down or up again an
-  existing VLAN profile: a refused reapply FAILS by name, an inactive existing VLAN profile FAILS ("up
-  it in a maintenance window"), an identity change (`vlan.parent`, `vlan.id`, the interface name) is
+  up exactly once (no `ifname`: the device does not exist before that activation), sets autoconnect
+  yes, then waits (bounded, `STRIH_VBAN_LEG_LINK_WAIT_S` 30 s) for the rig NIC's carrier + default route
+  and WARNs when it stays down. It NEVER deletes, re-creates, brings down or up again an
+  existing VLAN profile: a refused reapply FAILS by name, an inactive existing VLAN profile FAILS before
+  anything is modified ("up it in a maintenance window": merely arming its autoconnect makes
+  NetworkManager activate it at once, the unannounced reset), an identity change (`vlan.parent`, `vlan.id`, the interface name) is
   refused untouched, and a second ACTIVE VLAN profile is only named. The ACTIVE profile is always the
   kept one, whatever its name. Verify is read-only and never touches the link.
 - **Verify** (`strih_vban_leg_grade`, item 9, after the role branch, every role): `(vban-leg)`
