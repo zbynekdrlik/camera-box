@@ -479,6 +479,7 @@ obs_box_panel_logind_can() {
   local -a run=(systemd-run --user --wait --pipe --quiet --collect
     busctl --timeout=10 call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "Can${verb}")
   # stdin /dev/null: systemd-run --pipe hands its stdin to the transient unit, never verify's own
+  # (as root `timeout` runs inside sudo: it bounds the read, a root `sudo -u` does not block)
   out="$(strih_session_apps_user_run "$user" timeout "$OBS_BOX_PANEL_LOGIND_TIMEOUT" "${run[@]}" \
     </dev/null 2>/dev/null || true)"
   # busctl prints one line: s "yes"

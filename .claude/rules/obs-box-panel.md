@@ -70,10 +70,6 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
     still waiting after `timeout` killed systemd-run would keep the command substitution open. The read's
     stdin is `/dev/null` (`--pipe` hands stdin on as well). It runs through `strih_session_apps_user_run`,
     the one root-or-inline helper `strih_session_apps_user_systemctl` uses too.
-- **Known limit (not fixed, issue 1464 review):** a launcher tint2 starts lives in the panel unit's cgroup,
-  so a panel restart (a tint2 crash, step 16h's try-restart after a panel file changed) ends the apps it
-  started (RustDesk, Discord, pcmanfm, now Chrome). The fix is a launch through `systemd-run --user
-  --scope` for the binary launchers, which needs a live check on a box first.
   - A FAIL names `challenge` / `no` / `na` / `no answer`. If a box reads `challenge` while its seat0
     session is active + local, the fix is a polkit rule for `org.freedesktop.login1.power-off` /
     `reboot` (not shipped: graded first, never assumed).
@@ -81,6 +77,11 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
   (`OBS_BOX_PANEL_CHROME_BIN`) AND `strih_box_role` = stream. The strih role never gets it (owner
   24.9.2026: production-only). It sits after Restreamer. It never "disappeared" on stream-snv: the
   panel never had one.
+- **Known limit (not fixed, issue 1464 review):** a launcher tint2 starts lives in the panel unit's cgroup,
+  so a panel restart (a tint2 crash, step 16h's try-restart after a panel file changed) ends the apps it
+  started (RustDesk, Discord, pcmanfm, now Chrome). The fix is a launch through `systemd-run --user
+  --scope` for the binary launchers, which needs a live check on a box first (follow-up proposed to the supervisor by the issue-1464 lane;
+  cite its ticket here once filed).
 
 ## The keyboard item (issue 1441)
 
