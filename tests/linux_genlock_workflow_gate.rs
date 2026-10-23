@@ -172,13 +172,14 @@ fn distroav_configured_against_installed_obs_sdk() {
          SDK prefix and DistroAV's find_package(libobs REQUIRED) fails to resolve."
     );
     // issue 1439: the strih variant ALSO configures the vendored obs-vban against the same SDK
-    // prefix, so the prefix appears four times (three DistroAV configures + one obs-vban).
+    // prefix, and issue 1470 the A/V-sync dock, so the prefix appears five times (three DistroAV
+    // configures + obs-vban + av-sync-dock).
     assert_eq!(
         wf.matches("CMAKE_PREFIX_PATH").count(),
-        4,
-        "#460/1317/1439: all three DistroAV configure steps and the strih variant's obs-vban \
-         configure must set -DCMAKE_PREFIX_PATH=<installed OBS SDK> so the plugins link against \
-         the genlock-patched libobs, not a system OBS."
+        5,
+        "#460/1317/1439/1470: all three DistroAV configure steps and the strih variant's obs-vban \
+         and av-sync-dock configures must set -DCMAKE_PREFIX_PATH=<installed OBS SDK> so the \
+         plugins link against the genlock-patched libobs, not a system OBS."
     );
 }
 
