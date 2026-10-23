@@ -1,0 +1,146 @@
+=== bridge-vlan
+Flags: Y - MANAGED; X - DISABLED, D - DYNAMIC 
+ 0    bridge=bridge vlan-ids=89 tagged=bridge untagged="" mvrp-forbidden="" 
+      current-tagged=bridge current-untagged="" 
+
+ 1    bridge=bridge vlan-ids=70 tagged=bridge untagged="" mvrp-forbidden="" 
+      current-tagged=bridge current-untagged="" 
+
+ 2  D ;;; added by pvid
+      bridge=bridge vlan-ids=70 tagged="" untagged=ether8,ether3 
+      mvrp-forbidden="" current-tagged="" current-untagged=ether8,ether3 
+
+ 3  D ;;; added by pvid
+      bridge=bridge vlan-ids=89 tagged="" untagged=ether5,ether4 
+      mvrp-forbidden="" current-tagged="" current-untagged=ether5,ether4 
+
+ 4  D ;;; added by mvrp
+      bridge=bridge vlan-ids=70,89 tagged=sfp-sfpplus2 untagged="" 
+      mvrp-forbidden="" current-tagged=sfp-sfpplus2 current-untagged="" 
+
+ 5  D ;;; added by mvrp
+      bridge=bridge vlan-ids=70,89 tagged=ether2 untagged="" 
+      mvrp-forbidden="" current-tagged=ether2 current-untagged="" 
+
+ 6  D ;;; added by mvrp
+      bridge=bridge vlan-ids=70,89 tagged=sfp-sfpplus1 untagged="" 
+      mvrp-forbidden="" current-tagged=sfp-sfpplus1 current-untagged="" 
+
+=== bridge-port
+Flags: X - DISABLED, I - INACTIVE; D - DYNAMIC; H - HW-OFFLOAD; Y - MANAGED 
+ 0 I H  interface=ether1 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=89 
+        frame-types=admit-only-untagged-and-priority-tagged 
+        ingress-filtering=yes unknown-unicast-flood=yes 
+        unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no 
+        bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no 
+        mvrp-registrar-state=normal mvrp-applicant-state=non-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 1   H  interface=ether2 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=1 
+        frame-types=admit-only-vlan-tagged ingress-filtering=yes 
+        unknown-unicast-flood=yes unknown-multicast-flood=yes 
+        broadcast-flood=yes tag-stacking=no bpdu-guard=no trusted=no 
+        trusted-ra=no trusted-dhcpv6=no mvrp-registrar-state=normal 
+        mvrp-applicant-state=normal-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 2   H  interface=ether3 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=70 
+        frame-types=admit-only-untagged-and-priority-tagged 
+        ingress-filtering=yes unknown-unicast-flood=yes 
+        unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no 
+        bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no 
+        mvrp-registrar-state=normal mvrp-applicant-state=non-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 3   H  interface=ether4 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=89 
+        frame-types=admit-only-untagged-and-priority-tagged 
+        ingress-filtering=yes unknown-unicast-flood=yes 
+        unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no 
+        bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no 
+        mvrp-registrar-state=normal mvrp-applicant-state=non-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 4   H  interface=ether5 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=89 
+        frame-types=admit-only-untagged-and-priority-tagged 
+        ingress-filtering=yes unknown-unicast-flood=yes 
+        unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no 
+        bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no 
+        mvrp-registrar-state=normal mvrp-applicant-state=non-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 5 I H  interface=ether6 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=89 
+        frame-types=admit-only-untagged-and-priority-tagged 
+        ingress-filtering=yes unknown-unicast-flood=yes 
+        unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no 
+        bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no 
+        mvrp-registrar-state=normal mvrp-applicant-state=non-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 6 I H  interface=ether7 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=70 
+        frame-types=admit-only-untagged-and-priority-tagged 
+        ingress-filtering=yes unknown-unicast-flood=yes 
+        unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no 
+        bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no 
+        mvrp-registrar-state=normal mvrp-applicant-state=non-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 7   H  interface=ether8 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=70 
+        frame-types=admit-only-untagged-and-priority-tagged 
+        ingress-filtering=yes unknown-unicast-flood=yes 
+        unknown-multicast-flood=yes broadcast-flood=yes tag-stacking=no 
+        bpdu-guard=no trusted=no trusted-ra=no trusted-dhcpv6=no 
+        mvrp-registrar-state=normal mvrp-applicant-state=non-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 8   H  interface=sfp-sfpplus1 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=1 
+        frame-types=admit-only-vlan-tagged ingress-filtering=yes 
+        unknown-unicast-flood=yes unknown-multicast-flood=yes 
+        broadcast-flood=yes tag-stacking=no bpdu-guard=no trusted=no 
+        trusted-ra=no trusted-dhcpv6=no mvrp-registrar-state=normal 
+        mvrp-applicant-state=normal-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+ 9   H  interface=sfp-sfpplus2 bridge=bridge priority=0x80 edge=auto 
+        point-to-point=auto learn=auto horizon=none hw=yes auto-isolate=no 
+        restricted-role=no restricted-tcn=no pvid=1 
+        frame-types=admit-only-vlan-tagged ingress-filtering=yes 
+        unknown-unicast-flood=yes unknown-multicast-flood=yes 
+        broadcast-flood=yes tag-stacking=no bpdu-guard=no trusted=no 
+        trusted-ra=no trusted-dhcpv6=no mvrp-registrar-state=normal 
+        mvrp-applicant-state=normal-participant 
+        multicast-router=temporary-query fast-leave=yes 
+
+=== qos-profile
+Flags: * - DEFAULT, D - DYNAMIC; X - DISABLED, I - INACTIVE, H - HW-OFFLOADED 
+ 0 *H name="default" hw-id=0 pcp=0 dscp=0 traffic-class=1 automap=yes 
+
+ 1  H name="dante-ptp" hw-id=1 pcp=7 dscp=56 traffic-class=7 automap=yes 
+
+ 2  H name="dante-audio" hw-id=2 pcp=5 dscp=46 traffic-class=5 automap=yes 
+
+ 3  H name="dante-low" hw-id=3 pcp=1 dscp=8 traffic-class=0 automap=yes 
+
+=== switch-rule
+Flags: X - DISABLED, I - INVALID; D - DYNAMIC 
+ 0  D switch=switch1 mac-protocol=romon copy-to-cpu=no redirect-to-cpu=yes 
+      mirror=no 
+
+=== end
