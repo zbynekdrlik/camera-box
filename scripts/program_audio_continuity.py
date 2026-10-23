@@ -46,7 +46,8 @@ On a Windows stream box the program audio (`mbc`) is a Dante device, there is no
 No I/O in the decision (`decide`) -- pytest Tier-0 (tests/python/test_program_audio_continuity_1439.py).
 CLI: `program_audio_continuity.py --log FILE|- --input NAME --start-line S --end-line E
 [--first-line F] [--no-vban] [--merge-into VERDICT_JSON] [--out JSON]`; exit 0 PASS, 1 FAIL,
-2 UNKNOWN. `--unknown REASON` writes an UNKNOWN block without a log (a mark or the read failed).
+2 UNKNOWN. `--unknown REASON` writes an UNKNOWN block without a log (a mark or the read failed);
+`--from-block JSON` prints and merges a block an earlier call wrote (the E2E's final merge).
 """
 import argparse
 import json
@@ -385,12 +386,21 @@ def main(argv=None):
     ap.add_argument("--end-line", type=int, help="the log's line count at the window end")
     ap.add_argument("--no-vban", action="store_true", help="the program audio is no obs-vban source")
     ap.add_argument("--unknown", help="write an UNKNOWN block with this reason (no log read)")
+    ap.add_argument("--from-block", help="re-use a block JSON an earlier run wrote (print + merge it)")
     ap.add_argument("--merge-into", help="the verdict JSON to merge the block into")
     ap.add_argument("--out", help="write the block JSON here")
     args = ap.parse_args(argv)
     vban = not args.no_vban
     if args.unknown:
         res = unknown_block(args.unknown, args.input, vban)
+    elif args.from_block:
+        try:
+            with open(args.from_block, encoding="utf-8") as f:
+                res = json.load(f)
+            if not isinstance(res, dict) or "verdict" not in res:
+                raise ValueError("not a continuity block")
+        except (OSError, ValueError) as e:
+            res = unknown_block(f"the continuity block {args.from_block} is unreadable: {e}", args.input, vban)
     elif not args.log or args.start_line is None or args.end_line is None:
         ap.error("--log, --start-line and --end-line are required (or --unknown)")
     else:

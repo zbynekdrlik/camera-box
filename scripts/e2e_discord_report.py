@@ -63,6 +63,7 @@ _SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPTS not in sys.path:
     sys.path.insert(0, _SCRIPTS)
 import cambox_segments  # noqa: E402
+import e2e_report_program_audio as _program_audio  # noqa: E402  (issue 1439)
 
 CAMERA_ORDER = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
 
@@ -372,8 +373,14 @@ def _section_av_sync(verdict):
     return "\n".join(lines)
 
 
+def _run_passed(verdict):
+    """issue 1439: the run's own verdict -- the merge's overall_pass AND the BLOCKING program-audio
+    continuity gate, which the E2E folds into its exit after the merge (a FAIL or UNKNOWN block)."""
+    return bool(verdict.get("overall_pass")) and not _program_audio.blocks(verdict)
+
+
 def _section_overall(verdict, meta):
-    overall = verdict.get("overall_pass")
+    overall = _run_passed(verdict)
     lines = [f"**5️⃣ Celkový verdikt: {'✅ PASS' if overall else '❌ RED'}**"]
     blockers = []
 
@@ -399,6 +406,9 @@ def _section_overall(verdict, meta):
     chain_zero = _g(verdict, "full_chain", "zero_loss")
     if chain_zero is False:
         blockers.append("Reťazec do streamu (headline zero-loss): FAIL")
+    pa_label = _program_audio.summary_label(verdict)  # issue 1439
+    if pa_label:
+        blockers.append(pa_label)
 
     if blockers:
         lines.append("Blokujúce brány:")
@@ -1249,7 +1259,7 @@ def _report_only_tripped(verdict):
 
 
 def _verdict_line(verdict, meta):
-    passed = bool(verdict.get("overall_pass"))
+    passed = _run_passed(verdict)
     head = "✅ E2E TEST PREŠIEL" if passed else "❌ E2E TEST ZLYHAL"
     run_id = meta.get("run_id") or "?"
     tail = f" — beh {run_id}"
@@ -1276,7 +1286,7 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
     blocking line pointing at the CI log — a FAIL is never silently hidden."""
     meta = meta or {}
     lines = [_verdict_line(verdict, meta)]
-    if bool(verdict.get("overall_pass")):
+    if _run_passed(verdict):
         cams = _cameras_present(verdict)
         n = len(cams)
         drops = _stream_drop_total(verdict, cams)
@@ -1295,6 +1305,9 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
         return "\n".join(lines)
 
     failures = _blocking_failures(verdict)
+    pa_label = _program_audio.summary_label(verdict)  # issue 1439: the program-audio gate
+    if pa_label:
+        failures.append((pa_label, _OWN_CLAUDE))
     if not failures:
         # Safety net: overall_pass is false but no enumerated blocking gate matched (e.g. a
         # burn_hold-only fold, or a shape this summary doesn't itemize). Never look PASS-ish.
@@ -1359,6 +1372,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
     msp_section = _section_missing_slot_pixels(verdict)  # issue 1367
     if msp_section is not None:
         sections.append(msp_section)
+    pa_section = _program_audio.section(verdict)  # issue 1439
+    if pa_section is not None:
+        sections.append(pa_section)
     return "\n\n".join(sections)
 
 

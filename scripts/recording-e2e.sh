@@ -368,6 +368,9 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # issue 1421: the stream program must carry the measurement signal alone (preflight + in-run watch).
 # shellcheck source=scripts/lib/e2e-program-audio.sh
 . "$HERE/lib/e2e-program-audio.sh"
+# issue 1439: the BLOCKING program-audio continuity gate (a lost or concealed slot in the window = RED).
+# shellcheck source=scripts/lib/program-audio-continuity.sh
+. "$HERE/lib/program-audio-continuity.sh"
 # #882/#1232: restart-and-settle for the [1/8] imag render-health sweep -- the leading windows
 # (right after a fresh OBS start) can measure a real, transient warm-up dip that is not a
 # regression; a settle-adaptive PHASE (bounded by a wall budget) absorbs however many leading
@@ -4562,6 +4565,7 @@ fi
 # Placed here so the delta spans EXACTLY the recording window -- the [4i/8align] + [4j/8settle]
 # transients are already over (design Prístup 3 rejection).
 genlock_audit_snapshot_capture before "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" || true
+program_audio_continuity_mark start "$OUTDIR" "$STREAM" || true   # issue 1439: program-audio window START (stream OBS log line count)
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
 # raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
@@ -4840,6 +4844,7 @@ echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON ima
 # pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY
 # the recording. Report-only + fail-open (in this [7/8] `set +e` region + a trailing `|| true`).
 genlock_audit_snapshot_capture after "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" || true
+program_audio_continuity_mark stop "$OUTDIR" "$STREAM" || true   # issue 1439: program-audio window END (graded after the merge)
 
 # #1124 item 3 — POST-record stomp re-check (profile mode only, report-only). Runs HERE, right
 # after StopRecord while the measurement pins/hold are STILL in force (cleanup()'s teardown
@@ -5688,6 +5693,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "RUN-INTEGRITY: $BURN_UNIT_INTEGRITY_MSG" >&2
       [ "$GATE" -eq 0 ] && GATE=1
     fi
+    # issue 1439: a program-audio loss (concealed included) or an unprovable window is a blocking FAIL.
+    if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
     # #827: merge the fleet-preflight exclusion list into the verdict JSON so a run that excluded
     # boxes (ALL_CAMBOX only — PREFLIGHT_EXCLUDED_CAMS is otherwise unset/empty, and the merge
     # below is then a harmless no-op `excluded_cams: []`) can NEVER be read back as "full-fleet
@@ -5947,6 +5954,9 @@ if [ -s "$REPORT_JSON" ]; then
     echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
   fi
 fi
+
+# issue 1439: the program-audio continuity gate, the LEGACY decode path's twin of the execute branch's.
+if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
 
 # #758 item 3 — the in-run freeze watch's own verdict (same check as the E2E_EXECUTE_VERDICT=1
 # branch's own early exit above; this is the LEGACY/plan-print path's equivalent tail).
