@@ -532,12 +532,13 @@ class Monitor:
         device = "pulse:%s" % self.pulse_sink if self.output == "pulse" else hw
         self.st.update(device=device, card=pcm["card"], pcm_device=pcm["device"])
         owner = pcm_owner(self.asound_root, self.proc_root, pcm["card"], pcm["device"])
-        if self.output == "pulse" and owner["state"] != "open":
-            # issue 1465: the locked operator PipeWire holds the headphone PCM whenever its sink exists
-            self.set_state("no-sink", "PipeWire does not hold the headphone PCM %s (%s): the locked operator "
-                           "PipeWire with its sink '%s' is not running -- VLC not started, retrying every %g s"
-                           % (hw, owner["state"], self.pulse_sink, self.retry_s))
+        if self.output == "pulse" and owner["state"] == "unreadable":
+            self.set_state("no-sink", "the headphone PCM %s status is unreadable -- VLC not started, retrying "
+                           "every %g s" % (hw, self.retry_s))
             return False
+        # issue 1465: a CLOSED PCM in the pulse output is the operator sink suspended until its first client
+        # plays (live 23.10.2026: suspend-timeout 0 only keeps a running node open); the pw-dump check below
+        # proves the locked PipeWire and its sink are there. Only another process holding it is a fault.
         if owner["state"] == "open" and not (self.output == "pulse" and owner["comm"] in OWNER_PULSE):
             self.set_state("busy", "the headphone PCM %s is held by %s (pid %s) -- VLC not started, retrying every %g s"
                            % (hw, owner["comm"] or "?", owner["pid"], self.retry_s))
@@ -663,7 +664,8 @@ class Monitor:
 def check_state(path, now, asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, max_age=STATE_MAX_AGE_S):
     """verify-strih's (stream-monitor-pass) row: (ok, one line). OK = a pass within MAX_AGE seconds, the
     player starting, waiting, playing or paused, and the headphone PCM free or held by VLC -- never
-    PipeWire -- or, for the pulse output (issue 1465), held by PipeWire and nothing else."""
+    PipeWire -- or, for the pulse output (issue 1465), held by PipeWire or closed (the operator sink
+    suspended until its first sound), never by anything else."""
     try:
         st = json.loads(_read(path))
     except (OSError, ValueError) as e:
@@ -685,8 +687,9 @@ def check_state(path, now, asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, max_age
         return False, "the headphone PCM card%d/pcm%dp status is unreadable" % (card, dev)
     if st.get("output") == "pulse":
         if owner["state"] != "open":
-            return False, ("PipeWire does not hold the headphone PCM card%d/pcm%dp (closed): the locked operator "
-                           "PipeWire is not running or not provisioned" % (card, dev))
+            # the operator sink suspended until its first sound (item 9b's rows grade the sink itself)
+            return True, "%s %s -> %s (start %s), headphone PCM closed: the operator sink suspended" % (
+                state, st.get("url"), device, st.get("starts"))
         if owner["comm"] not in OWNER_PULSE:
             return False, ("%s (pid %s) holds the headphone PCM card%d/pcm%dp -- only PipeWire may (the pulse "
                            "output plays through its sink)" % (owner["comm"] or "?", owner["pid"], card, dev))

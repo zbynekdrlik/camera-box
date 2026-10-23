@@ -43,7 +43,8 @@ sink + loopback, the MiniFuse rules, the quantum-1024 floor) is never touched.
     next rule disables -- zero sinks);
   - every node of that card `node.disabled`, then its headphone playback PCM (`alsa_output.<stem>.pro-output-<dev>`)
     back on and RENAMED `stream-operator-headphones`: 2 ch `FL,FR`, 48 kHz, `api.alsa.period-size` 256 +
-    `api.alsa.headroom` 256, `session.suspend-timeout-seconds = 0` (PipeWire always holds the PCM).
+    `api.alsa.headroom` 256, `session.suspend-timeout-seconds = 0`. That only keeps a RUNNING node from
+    suspending: until the sink's first client plays, the PCM reads `closed` (live stream-snv 23.10.2026).
 - **`~/.config/pipewire/pipewire.conf.d/60-stream-operator-clock.conf`**: `default.clock.rate` 48000,
   `allowed-rates [ 48000 ]`, `quantum = min-quantum = max-quantum = 256` (5.3 ms). pipewire-pulse reports
   that latency to VLC and Chrome, which compensate for it.
@@ -78,8 +79,9 @@ sink + loopback, the MiniFuse rules, the quantum-1024 floor) is never touched.
 
 `systemd/strih-stream-monitor.service` runs `--output pulse`: VLC `--aout=pulse` with `PULSE_SINK=stream-operator-headphones`
 (libpulse's default sink for that client; it is also the box's only sink). Before every VLC start the headphone
-PCM must be held by PipeWire (`pcm_owner`, the thread's process by `Tgid`, comm `pipewire`): closed = the
-`no-sink` fault, any other holder = `busy`; and `pw-dump` (`--pw-dump`) must list the Audio/Sink
+PCM must be held by PipeWire (`pcm_owner`, the thread's process by `Tgid`, comm `pipewire`) or closed (the
+operator sink suspended until its first sound; the first live apply deadlocked on "closed = no-sink"), any other
+holder = `busy`; and `pw-dump` (`--pw-dump`) must list the Audio/Sink
 `stream-operator-headphones`, else `no-sink` too (review round 1: an UNLOCKED PipeWire also holds the card
 while something plays, and a PULSE_SINK naming a missing sink falls back to the default sink -- maybe the
 notebook speakers). `--check-state` reads the state file's `output` and inverts the
@@ -141,7 +143,7 @@ the rule order, not how WirePlumber reads it (dev1 has no PipeWire): the live re
    - `pw-metadata -n settings | grep clock` = rate 48000, allowed `[ 48000 ]`, quantum / min / max 256;
    - `pw-metadata -n sm-settings | grep restore` = the four keys `false`;
    - `wpctl get-volume @DEFAULT_AUDIO_SINK@` = `Volume: 1.00`;
-   - `cat /proc/asound/card<N>/pcm0p/sub0/status` names the `pipewire` owner;
+   - `cat /proc/asound/card<N>/pcm0p/sub0/status` reads `closed` until something plays, then names the `pipewire` owner;
    - `journalctl --user -u strih-stream-monitor -n 20`: `watching ... pulse output to the sink 'stream-operator-headphones' ...`;
    - play a YouTube video in Chrome and start a stream: both in the headphones, nothing on the notebook
      speakers, VLC's slider and the YouTube volume move only their own app;
