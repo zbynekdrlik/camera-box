@@ -9,65 +9,74 @@
 # bundle install puts it next to obs-vban.so -- no install path of its own.
 #
 # The dock reads the measurement audio on the STREAM box (CAMERA_BOX_MEASURE_SOURCE_NAME "mbc"), so the
-# items below run on the stream role only (`obs_box_step_applies avsync-dock`, scripts/lib/obs-box-role.sh);
-# the strih role loads the same plugin from the same bundle and grades nothing here.
+# layout seed and the layout row are the stream role's (`obs_box_step_applies avsync-dock`,
+# scripts/lib/obs-box-role.sh). The strih role installs the same bundle, so its OBS loads the plugin too:
+# the plugin rows are graded on every role.
 #
 # setup-strih step 16g: obs_box_avsync_dock_seed USER_INI DESKTOP_USER. OBS hides a dock a plugin adds
 #   (OBSStudioAPI.cpp obs_frontend_add_dock_by_id: setVisible(false) + setFloating(true)) and the saved
 #   [BasicWindow] DockState, restored after the plugin load, decides. scripts/obs_dock_state.py seeds the
-#   dock visible + docked right when that state has no entry for it, or holds it in OBS's own hidden +
-#   floating default; an operator's placement (visible, or closed while docked) is kept. Never while OBS
-#   runs (OBS rewrites user.ini from memory on exit), never over an unreadable file. WARN-only, rc 0.
+#   dock visible + docked right when that state has no entry for it, or -- before the first seed only --
+#   holds it in OBS's own hidden + floating default; an operator's placement (visible, or closed) is kept.
+#   The first seed decision leaves the stamp OBS_BOX_AVSYNC_DOCK_STAMP next to user.ini: OBS saves the
+#   same hidden + floating state when the operator floats the dock and closes it, which every later run
+#   must keep. Never while OBS runs (OBS rewrites user.ini from memory on exit; the ONE probe
+#   strih_operator_obs_running), never over an unreadable file. WARN-only, rc 0.
 # verify-strih item 47: obs_box_avsync_dock_grade_report LIBDIR SHAREDIR LOG USER_INI -> 3 rows:
 #   (avsync-dock)         the plugin .so + its locale in the /usr prefix OBS loads;
 #   (avsync-dock-loaded)  the newest OBS log's `Loaded Modules:` list names the .so (a running OBS keeps
 #                         the plugin set it started with); NOTE with no log / no list yet;
-#   (avsync-dock-layout)  the saved DockState holds the dock visible; FAIL absent or in OBS's hidden
-#                         default; NOTE when the operator closed it docked.
+#   (avsync-dock-layout)  stream role: the saved DockState holds the dock visible; FAIL absent or in
+#                         OBS's hidden default before the first seed; NOTE when the operator closed it.
+#                         Other roles: a NOTE naming why it is not graded.
 #
-# Test seams (tests/python/test_obs_box_avsync_dock_1470.py): OBS_BOX_AVSYNC_DOCK_OBS_RUNNING_CMD
-# (`pgrep -x obs`), OBS_BOX_AVSYNC_DOCK_PY (scripts/obs_dock_state.py).
+# Test seams (tests/python/test_obs_box_avsync_dock_1470.py): STRIH_OPERATOR_OBS_RUNNING_CMD (the
+# strih-operator.sh probe), OBS_BOX_AVSYNC_DOCK_PY (scripts/obs_dock_state.py).
 
 # The plugin's module name (vendor/av-sync-dock CMakeLists.txt `project(...)`, setup_plugin_target's
 # PREFIX "" -> <name>.so) and the dock's object name (ID_PREFIX + ".main", plugin-main.c), test-pinned.
 OBS_BOX_AVSYNC_DOCK_MODULE="obs-audio-video-sync-dock"
 OBS_BOX_AVSYNC_DOCK_ID="net.nagater.obs-audio-video-sync-dock..main"
 OBS_BOX_AVSYNC_DOCK_ROWS=3
+# The first-seed stamp, next to user.ini (the desktop user's OBS config dir).
+OBS_BOX_AVSYNC_DOCK_STAMP=".camera-box-avsync-dock-seeded"
 
 _obs_box_avsync_dock_py() {
   printf '%s' "${OBS_BOX_AVSYNC_DOCK_PY:-$(dirname "${BASH_SOURCE[0]}")/../obs_dock_state.py}"
 }
 
-# _obs_box_avsync_dock_obs_running -> rc 0 when an OBS process runs (the seam word-split, else pgrep).
-_obs_box_avsync_dock_obs_running() {
-  local -a cmd
-  read -r -a cmd <<<"${OBS_BOX_AVSYNC_DOCK_OBS_RUNNING_CMD:-pgrep -x obs}"
-  "${cmd[@]}" >/dev/null 2>&1
-}
+# _obs_box_avsync_dock_stamp USER_INI -> the first-seed stamp path next to USER_INI.
+_obs_box_avsync_dock_stamp() { printf '%s/%s' "$(dirname "$1")" "$OBS_BOX_AVSYNC_DOCK_STAMP"; }
 
 # obs_box_avsync_dock_seed USER_INI DESKTOP_USER -> setup-strih step 16g on the stream role. Always rc 0.
 obs_box_avsync_dock_seed() {
-  local ini="${1:?user.ini path required}" user="${2:?desktop user required}" why out rc=0
+  local ini="${1:?user.ini path required}" user="${2:?desktop user required}" why out rc=0 stamp tok
   if ! why="$(obs_box_step_applies avsync-dock)"; then
     echo "  A/V-sync dock layout: SKIP -- ${why}"
     return 0
   fi
-  if _obs_box_avsync_dock_obs_running; then
+  if strih_operator_obs_running; then
     echo "  WARN: OBS is running -- it rewrites ${ini} from memory on exit, so the A/V-sync dock was NOT seeded into its saved layout; stop strih-obs.service and re-run setup-strih.sh (issue 1470)"
     return 0
   fi
-  out="$(python3 "$(_obs_box_avsync_dock_py)" seed --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" 2>&1)" || rc=$?
+  stamp="$(_obs_box_avsync_dock_stamp "$ini")"
+  out="$(python3 "$(_obs_box_avsync_dock_py)" seed --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" --stamp "$stamp" 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "  WARN: the A/V-sync dock could not be seeded into ${ini} (left untouched): ${out} (issue 1470)"
     return 0
   fi
-  case "$out" in
+  # The token is the last line; anything before it is the tool's own WARN (a stamp it could not write).
+  tok="${out##*$'\n'}"
+  [ "$tok" = "$out" ] || echo "  ${out%$'\n'*}"
+  # the stamp is root's when setup wrote it: hand it to the desktop user (never through a link)
+  if [ -f "$stamp" ] && [ ! -L "$stamp" ]; then chown -h "$user":"$user" "$stamp" 2>/dev/null || true; fi
+  case "$tok" in
     seeded | redocked)
       chown -h "$user":"$user" "$ini" 2>/dev/null || true
-      echo "  A/V-sync dock ${out} visible + docked right in the saved OBS layout (${ini}, issue 1470)" ;;
+      echo "  A/V-sync dock ${tok} visible + docked right in the saved OBS layout (${ini}, issue 1470)" ;;
     present) echo "  A/V-sync dock: the saved OBS layout already places it (the operator's layout, kept)" ;;
     no-state | no-ini) echo "  WARN: ${ini} has no saved OBS dock layout yet -- start OBS once, stop it, re-run setup-strih.sh step 16g (issue 1470)" ;;
-    *) echo "  WARN: the A/V-sync dock seed printed '${out}' (issue 1470)" ;;
+    *) echo "  WARN: the A/V-sync dock seed printed '${tok}' (issue 1470)" ;;
   esac
   return 0
 }
@@ -85,7 +94,7 @@ obs_box_avsync_dock_loaded_verdict() {
 # obs_box_avsync_dock_grade_rows LIBDIR SHAREDIR LOG USER_INI -> the 3 `OK|`/`FAIL|`/`NOTE|` rows.
 obs_box_avsync_dock_grade_rows() {
   local libdir="${1:?libdir required}" sharedir="${2:?sharedir required}" log="${3-}" ini="${4:?user.ini required}"
-  local so loc missing="" v
+  local so loc missing="" v why
   so="${libdir%/}/obs-plugins/${OBS_BOX_AVSYNC_DOCK_MODULE}.so"
   loc="${sharedir%/}/obs/obs-plugins/${OBS_BOX_AVSYNC_DOCK_MODULE}/locale/en-US.ini"
   [ -f "$so" ] || missing="$so"
@@ -101,14 +110,18 @@ obs_box_avsync_dock_grade_rows() {
     v="$(obs_box_avsync_dock_loaded_verdict <"$log")"
     case "$v" in
       loaded) printf 'OK|(avsync-dock-loaded) the newest OBS log (%s) lists %s.so in its Loaded Modules\n' "$log" "$OBS_BOX_AVSYNC_DOCK_MODULE" ;;
-      not-loaded) printf 'FAIL|(avsync-dock-loaded) the newest OBS log (%s) does not list %s.so -- restart strih-obs.service after the bundle install (a running OBS keeps the plugins it started with)\n' "$log" "$OBS_BOX_AVSYNC_DOCK_MODULE" ;;
+      not-loaded) printf 'FAIL|(avsync-dock-loaded) the newest OBS log (%s) does not list %s.so -- restart strih-obs.service after the bundle install (a running OBS keeps the plugins it started with); if it still does not load, grep that log for %s / Failed to load\n' "$log" "$OBS_BOX_AVSYNC_DOCK_MODULE" "$OBS_BOX_AVSYNC_DOCK_MODULE" ;;
       *) printf 'NOTE|(avsync-dock-loaded) the newest OBS log (%s) has no Loaded Modules list yet (OBS still starting?) -- re-run verify-strih.sh\n' "$log" ;;
     esac
   fi
-  v="$(python3 "$(_obs_box_avsync_dock_py)" check --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" 2>/dev/null)" || v=unreadable
+  if ! why="$(obs_box_step_applies avsync-dock)"; then
+    printf 'NOTE|(avsync-dock-layout) not graded: %s\n' "$why"
+    return 0
+  fi
+  v="$(python3 "$(_obs_box_avsync_dock_py)" check --ini "$ini" --dock "$OBS_BOX_AVSYNC_DOCK_ID" --stamp "$(_obs_box_avsync_dock_stamp "$ini")" 2>/dev/null)" || v=unreadable
   case "$v" in
     visible) printf 'OK|(avsync-dock-layout) the saved OBS layout (%s) shows the A/V-sync dock\n' "$ini" ;;
-    hidden) printf 'NOTE|(avsync-dock-layout) the operator closed the A/V-sync dock (docked, hidden in %s) -- kept; Docks menu to show it\n' "$ini" ;;
+    hidden) printf 'NOTE|(avsync-dock-layout) the operator closed the A/V-sync dock (hidden in %s) -- kept; Docks menu to show it\n' "$ini" ;;
     absent | default-hidden) printf 'FAIL|(avsync-dock-layout) the saved OBS layout (%s) %s, so OBS opens it hidden -- stop strih-obs.service and re-run setup-strih.sh step 16g (issue 1470)\n' "$ini" "$([ "$v" = absent ] && echo 'has no A/V-sync dock' || echo 'holds the A/V-sync dock in its hidden + floating default')" ;;
     no-state | no-ini) printf 'FAIL|(avsync-dock-layout) OBS has saved no dock layout in %s yet -- start OBS once, stop it, re-run setup-strih.sh step 16g (issue 1470)\n' "$ini" ;;
     *) printf 'FAIL|(avsync-dock-layout) the saved OBS layout in %s could not be read (%s) -- fix the file, then re-run setup-strih.sh step 16g (issue 1470)\n' "$ini" "${v:-no answer}" ;;

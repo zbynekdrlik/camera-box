@@ -12,15 +12,20 @@ DockState is base64 of `QMainWindow::saveState()`. This module parses the dock-a
 - no entry of that object name at all -> a new item at the end of the right dock area (the area is
   created when the state has none);
 - an entry in OBS's own add-time default (hidden AND floating: what an OBS that ran with the plugin
-  before any seed saves on exit) -> that entry is re-docked visible in place, same byte length;
+  before any seed saves on exit) -> that entry is re-docked visible in place, same byte length -- but
+  ONLY before the first seed: OBS saves the same state when the operator floats the dock and closes it,
+  so `--stamp FILE` marks the first seed decision (written then, never through a symlink), and once it
+  exists a hidden + floating entry is the operator's;
 - any other entry (visible, or closed while docked) is the operator's choice and is kept.
-Anything the parser does not recognise is refused: the blob is never guessed at.
+Anything the parser does not recognise is refused: the blob is never guessed at. A dock added to a
+TABBED right area becomes a tab behind the current one (visible in the state, not on top): Qt's own
+behaviour, never seen in a captured layout.
 
-  python3 scripts/obs_dock_state.py check --ini ~/.config/obs-studio/user.ini --dock <object name>
-  python3 scripts/obs_dock_state.py seed  --ini ~/.config/obs-studio/user.ini --dock <object name>
+  python3 scripts/obs_dock_state.py check --ini ~/.config/obs-studio/user.ini --dock <object name> [--stamp F]
+  python3 scripts/obs_dock_state.py seed  --ini ~/.config/obs-studio/user.ini --dock <object name> [--stamp F]
 
 `check` prints one token: visible | hidden | default-hidden | absent | no-state | no-ini | unreadable
-(hidden = closed while docked, the operator's choice; default-hidden = OBS's hidden + floating default).
+(hidden = closed by the operator; default-hidden = OBS's hidden + floating default, no stamp yet).
 `seed` prints seeded | redocked | present | no-state | no-ini, exit 0; exit 3 = an unreadable user.ini or
 DockState (nothing written); exit 4 = a symlinked user.ini (nothing written). Run `seed` only while OBS
 is stopped: OBS rewrites user.ini from memory on exit.
@@ -208,9 +213,13 @@ def dock_state(blob, name):
     return _item_state(_find(blob, name)[1])
 
 
-def seed_action(blob, name):
-    """insert | redock | keep: what `seed` does to `name` in this blob (DockStateError: unreadable)."""
-    return {"absent": "insert", "default-hidden": "redock"}.get(dock_state(blob, name), "keep")
+def seed_action(blob, name, seeded_before=False):
+    """insert | redock | keep: what `seed` does to `name` in this blob (DockStateError: unreadable).
+    seeded_before: a first seed already ran, so OBS's hidden + floating default is the operator's."""
+    state = dock_state(blob, name)
+    if state == "default-hidden" and seeded_before:
+        return "keep"
+    return {"absent": "insert", "default-hidden": "redock"}.get(state, "keep")
 
 
 def _widget_item(name):
@@ -291,21 +300,44 @@ def _read_lines(path):
         return fh.readlines()
 
 
-def check_ini(path, name):
+def _seeded_before(stamp):
+    # lexists: a symlink planted there counts as present, and is never followed or written.
+    return stamp is not None and os.path.lexists(stamp)
+
+
+def _write_stamp(stamp):
+    """Create the first-seed stamp; never through a symlink, never over an existing name."""
+    if stamp is None or os.path.lexists(stamp):
+        return
+    try:
+        fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except OSError as e:
+        # the seed itself stands; without the stamp the next run may re-dock OBS's default once more
+        print("WARN: the first-seed stamp %s could not be written (%s)" % (stamp, e), file=sys.stderr)
+        return
+    with os.fdopen(fd, "w") as fh:
+        fh.write("issue 1470: the A/V-sync dock layout was seeded once; OBS's hidden + floating default is the operator's now\n")
+
+
+def check_ini(path, name, stamp=None):
     if not os.path.exists(path):
         return "no-ini"
     try:
         _, value = _dockstate_line(_read_lines(path))
         if value is None:
             return "no-state"
-        return dock_state(_decode(value), name)
+        state = dock_state(_decode(value), name)
     except (DockStateError, OSError, UnicodeDecodeError):
         return "unreadable"
+    if state == "default-hidden" and _seeded_before(stamp):
+        return "hidden"
+    return state
 
 
-def seed_ini(path, name):
+def seed_ini(path, name, stamp=None):
     """seeded | redocked | present | no-state | no-ini. Raises DockStateError (unreadable) or PermissionError
-    (a symlinked user.ini)."""
+    (a symlinked user.ini). With STAMP: a seed decision (seeded / redocked / present) writes it when it is
+    not there yet, and once it is there OBS's hidden + floating default is kept as the operator's."""
     if os.path.islink(path):
         raise PermissionError("%s is a symlink -- refusing to write it" % path)
     if not os.path.exists(path):
@@ -318,8 +350,9 @@ def seed_ini(path, name):
     if value is None:
         return "no-state"
     blob = _decode(value)
-    action = seed_action(blob, name)
+    action = seed_action(blob, name, _seeded_before(stamp))
     if action == "keep":
+        _write_stamp(stamp)
         return "present"
     new = base64.b64encode(seed(blob, name)).decode("ascii")
     ending = lines[idx][len(lines[idx].rstrip("\r\n")):]
@@ -334,6 +367,7 @@ def seed_ini(path, name):
     except BaseException:
         os.unlink(tmp)
         raise
+    _write_stamp(stamp)
     return "seeded" if action == "insert" else "redocked"
 
 
@@ -342,12 +376,13 @@ def main(argv=None):
     ap.add_argument("action", choices=("check", "seed"))
     ap.add_argument("--ini", required=True, help="the OBS user.ini")
     ap.add_argument("--dock", required=True, help="the dock's object name")
+    ap.add_argument("--stamp", help="the first-seed stamp file (see above)")
     a = ap.parse_args(argv)
     if a.action == "check":
-        print(check_ini(a.ini, a.dock))
+        print(check_ini(a.ini, a.dock, a.stamp))
         return 0
     try:
-        print(seed_ini(a.ini, a.dock))
+        print(seed_ini(a.ini, a.dock, a.stamp))
         return 0
     except PermissionError as e:
         print("refused: %s" % e, file=sys.stderr)
