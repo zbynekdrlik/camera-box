@@ -104,7 +104,7 @@ def test_every_box_fact_file_loads(box):
 
 
 @pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|80"),
-                                      ("strih-snv", "none|none|none"), ("strih-pp", "none|none|none")])
+                                      ("strih-snv", "strih-obs|6981|20"), ("strih-pp", "none|none|none")])
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
               '"$(strih_lx_program_vban_port)" "$(strih_lx_program_vban_reserve_ms)"', box)
@@ -135,7 +135,8 @@ def test_each_stream_box_r_sits_above_its_senders_worst_gap(box, frames, worst_g
     ("stream-pp", "STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=9\n", "10..500"),
     ("stream-pp", "STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=501\n", "10..500"),
     ("stream-pp", "STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=040\n", "10..500"),
-    ("strih-snv", "STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih\n", "strih role"),
+    # issue 1439 phase 2: a strih box declares all four program facts or none (strih-snv declares them)
+    ("strih-pp", "STRIH_PROGRAM_VBAN_STREAMS=none\n", "STRIH_PROGRAM_VBAN_STREAMS=strih\n", "strih role"),
     ("strih-pp", "STRIH_PROGRAM_VBAN_PORT=none\n", "STRIH_PROGRAM_VBAN_PORT=6981\n", "strih role"),
 ])
 def test_the_loader_refuses_a_wrong_program_vban(tmp_path, box, old, new, word):
@@ -148,7 +149,7 @@ def test_the_loader_refuses_a_wrong_program_vban(tmp_path, box, old, new, word):
 # issue 1462: the OBS program-audio input is named per box (the SNV stream tooling keys on `mbc`, the
 # ported PP collection calls it `Zvuk z mixu`), so the name is a box fact, never a role constant.
 @pytest.mark.parametrize("box,want", [("stream-pp", "Zvuk z mixu"), ("stream-snv", "mbc"),
-                                      ("strih-snv", "none"), ("strih-pp", "none")])
+                                      ("strih-snv", "ASIO zvuk"), ("strih-pp", "none")])
 def test_each_box_names_its_program_audio_input(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_audio_input)"', box)
     assert r.returncode == 0, r.stderr
@@ -160,7 +161,7 @@ def test_each_box_names_its_program_audio_input(box, want):
     ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT= mbc\n"),
     ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT=mbc/x\n"),
     ("stream-snv", "STRIH_PROGRAM_AUDIO_INPUT=mbc\n", "STRIH_PROGRAM_AUDIO_INPUT=%s\n" % ("m" * 65)),
-    ("strih-snv", "STRIH_PROGRAM_AUDIO_INPUT=none\n", "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n"),
+    ("strih-pp", "STRIH_PROGRAM_AUDIO_INPUT=none\n", "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n"),
 ])
 def test_the_loader_refuses_a_wrong_program_audio_input(tmp_path, box, old, new):
     d = _boxes_with(tmp_path, box, old, new)
@@ -224,8 +225,9 @@ def test_the_stream_snv_manifest_names_mbc_on_the_same_vban_source():
     assert d["program_audio_vban"] == {"port": 6980, "stream_name": "stream", "receive_buffer_ms": 80}
 
 
-def test_a_strih_manifest_carries_no_vban_block():
-    text = _manifest("strih-snv")
+def test_a_hub_fed_strih_manifest_carries_no_vban_block():
+    # issue 1439 phase 2: strih-snv takes its console's VBAN (tests/python/test_strih_role_vban_1439.py)
+    text = _manifest("strih-pp")
     assert "program_audio_vban" not in text
     assert PAV.parse_program_audio_vban(text) is None
 
@@ -841,9 +843,10 @@ def test_verify_wiring_and_budget():
     v = VERIFY.read_text()
     assert len(v.splitlines()) <= 1000
     item9 = v[v.index("# 9) program audio"):v.index("# 9b)")]
-    assert 'if ! WHY="$(obs_box_step_applies 13)"; then\n  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"\nelse\n' \
+    # issue 1439 phase 2: the obs-vban grade follows the facts (every role), the hub-fed program verdict a
+    # box that declares none, the hub-only rows (the HDMI leg, the MiniFuse talkback) every hub box
+    assert 'if strih_program_vban_declared; then\n  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"\nelse\n' \
         in item9
-    # the hub-only rows (program rx, the HDMI leg, the MiniFuse talkback) sit in the hub branch
     assert item9.index("strih_program_vban_grade") < item9.index("\nelse\n") < item9.index("AUDIO_SINK=0") \
         < item9.index("strih_intercom_hub_hdmi_leg_grade") < item9.index("talkback: MiniFuse") \
         < item9.rindex("\nfi\n")
