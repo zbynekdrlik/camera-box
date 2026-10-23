@@ -308,8 +308,31 @@ strih_lx_seed_manifest_json() {
   printf '  "outputs": [\n'
   { strih_lx_ndi_outputs; strih_lx_ndi_republishes; } | sed 's/.*/    "&",/' | sed '$ s/,$//'
   printf '  ],\n'
-  printf '  "camera_latency_ms": %s\n' "$lat"
+  # issue 1439 phase 2: a strih box whose facts declare the console's VBAN program (strih-snv) carries
+  # the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap switches
+  # (keeping the operator's mixer state); a hub-fed strih (strih-pp) carries neither, byte-identical.
+  local vban
+  if vban="$(strih_lx_program_audio_vban_json)"; then
+    printf '  "camera_latency_ms": %s,\n' "$lat"
+    printf '  "program_audio_input": "%s",\n' "$(strih_lx_program_audio_input)"
+    printf '  "program_audio_vban": %s\n' "$vban"
+  else
+    printf '  "camera_latency_ms": %s\n' "$lat"
+  fi
   printf '}\n'
+}
+
+# strih_lx_program_audio_vban_json -> the seed manifest's `program_audio_vban` object of the loaded box
+# (the obs-vban source settings from its facts STRIH_PROGRAM_VBAN_PORT / _STREAMS / _RESERVE_MS, which
+# the loader validated: one plain stream name, two integers), on one line. rc 1, nothing printed, on a
+# box that declares no program VBAN stream (a hub-fed strih). The ONE renderer for both roles' manifests.
+strih_lx_program_audio_vban_json() {
+  local vs vp vr
+  vp="$(strih_lx_program_vban_port)" || return 1
+  [ "$vp" != none ] || return 1
+  vs="$(strih_lx_program_vban_streams)" || return 1
+  vr="$(strih_lx_program_vban_reserve_ms)" || return 1
+  printf '{"port": %s, "stream_name": "%s", "receive_buffer_ms": %s}' "$vp" "$vs" "$vr"
 }
 
 # strih_lx_bundle_artifact -> the strih FULL-build CI artifact name (linux-genlock.yml strih job).

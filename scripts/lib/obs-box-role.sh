@@ -184,13 +184,11 @@ obs_box_role_apply() {
 # console's VBAN stream that input receives: "program_audio_vban" = the obs-vban source's settings
 # from the box facts (strih_scenes.py switches that input to the source, keeping its mixer state).
 obs_box_stream_seed_manifest_json() {
-  local sender prefix vs vp vr ai
+  local sender prefix vban ai
   sender="$(strih_lx_program_sender)" || return 1
   ai="$(strih_lx_program_audio_input)" || return 1
   prefix="$(strih_lx_ndi_prefix)" || return 1
-  vs="$(strih_lx_program_vban_streams)" || return 1
-  vp="$(strih_lx_program_vban_port)" || return 1
-  vr="$(strih_lx_program_vban_reserve_ms)" || return 1
+  vban="$(strih_lx_program_audio_vban_json)" || return 1
   [ -n "$sender" ] || { echo "obs-box-role: STRIH_PROGRAM_SENDER is none -- not a stream box" >&2; return 1; }
   printf '{\n  "mode": "update-only",\n  "inputs": [\n'
   printf '    {"sender": "%s", "input": "%s", "scene": "%s", "class": "program"}\n' \
@@ -199,9 +197,8 @@ obs_box_stream_seed_manifest_json() {
   printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s",\n  "program_audio_monitor": "%s",\n' \
     "$(strih_lx_camera_latency_ms)" "$ai" "$OBS_BOX_STREAM_AUDIO_MONITOR"
   # The loader validated the four facts (one stream name and one input name of plain characters, two
-  # integers).
-  printf '  "program_audio_vban": {"port": %s, "stream_name": "%s", "receive_buffer_ms": %s},\n' \
-    "$vp" "$vs" "$vr"
+  # integers); the block's one renderer is strih_lx_program_audio_vban_json (scripts/lib/strih-provision.sh).
+  printf '  "program_audio_vban": %s,\n' "$vban"
   # issue 1465 item 3: no pulse capture input may capture the operator's headphone mix into the program
   printf '  "pulse_capture": "forbid",\n'
   printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \

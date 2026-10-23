@@ -4,7 +4,8 @@
 #
 # scripts/lib/strih-program-vban.sh -- issue 1439: verify-strih item 9 on a box whose OBS program audio
 # is the console's VBAN stream straight into the vendored obs-vban SOURCE (the stream role since design
-# revision 6338127636: no intercom hub, no PipeWire). The source stamps every packet on its receive
+# revision 6338127636: no intercom hub, no PipeWire; the strih role since phase 2 whenever its facts
+# declare the stream: strih-snv's `ASIO zvuk` on UDP 6981, the hub forwarding nothing into OBS). The source stamps every packet on its receive
 # timeline and writes one status line every 10 s while packets arrive (vendor/obs-vban/src/vban-source.c):
 #
 #   [obs-vban] obs-vban receive: received=N lost=N late=N re_anchors=N stale=N reordered=N concealed=N
@@ -41,6 +42,16 @@
 
 # The obs-vban source id, pinned equal to scripts/program_audio_vban.py VBAN_SOURCE_KIND by the pytest.
 STRIH_PROGRAM_VBAN_KIND="net.nagater.obs-vban.source"
+
+# strih_program_vban_declared -> rc 0 when the loaded box's facts declare the console's VBAN program
+# (STRIH_PROGRAM_VBAN_PORT != none: the stream role always, the strih role since issue 1439 phase 2 when
+# its console sends it a program stream, strih-snv); rc 1 on a hub-fed strih (strih-pp) or an unread fact.
+# verify item 9 picks its grade by this, never by the role.
+strih_program_vban_declared() {
+  local port
+  port="$(strih_lx_program_vban_port 2>/dev/null)" || return 1
+  [ -n "$port" ] && [ "$port" != none ]
+}
 
 # strih_program_vban_status_line LOG NAME -> the newest `obs-vban receive:` status line of the OBS input
 # NAME in LOG ('' when there is none or LOG is unreadable). Streams the log through grep (never into a

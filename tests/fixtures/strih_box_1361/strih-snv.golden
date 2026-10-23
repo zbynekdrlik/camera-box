@@ -37,7 +37,9 @@ RESOLUME-SNV (SP-program)
     "STRIH-SNV (MULTIVIEW)",
     "STRIH-SNV (Grading)"
   ],
-  "camera_latency_ms": 3
+  "camera_latency_ms": 3,
+  "program_audio_input": "ASIO zvuk",
+  "program_audio_vban": {"port": 6981, "stream_name": "strih-obs", "receive_buffer_ms": 20}
 }
 === profile-facts ===
 base_res=1920x1080
@@ -251,7 +253,7 @@ for irq in $irqs; do
 done
 log "done: xhci NIC IRQ(s) [${irqs}] pinned to cpu ${target}"
 === intercom-toml ===
-5e971b7aabb08194714a2294964af5e3538cab7fef71b0f85e1dc3ac27ef0520
+17713c897875cb3d725e5664f01a232384652f2c89ad4fc4e19152639f9d4c11
 === ndi-runtime-peer ===
 10.77.9.65
 === companion-host-conf ===
