@@ -105,7 +105,8 @@ def test_a_clean_real_window_passes_with_every_check_named():
     res = _decide(42000, 42100)
     assert res["verdict"] == "PASS", res
     assert res["pass"] is True and res["gates_overall_pass"] is True
-    assert res["checks"] == {"obs_vban": "ran", "asrc": "ran", "buffering_guard": "ran"}
+    assert res["checks"] == {"obs_vban": "ran", "asrc": "ran", "mixed_late": "ran", "buffering_guard": "ran"}
+    assert res["telemetry"] == {"mixed_late": {"before": 0, "after": 0, "delta": 0}}
     assert all(c["delta"] == 0 for k, c in res["counters"].items() if k not in ("received", "reordered"))
     assert res["counters"]["received"]["delta"] > 0
     assert res["asrc"] == {"place_jumps": {"before": 0, "after": 0, "delta": 0},
