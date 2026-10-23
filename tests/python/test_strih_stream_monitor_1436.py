@@ -225,8 +225,9 @@ def test_the_unit(boxes):
               env={"STRIH_BOXES_DIR": str(boxes)})
     assert r.returncode == 0, r.stderr
     server, state_file = r.stdout.split("|")
+    # issue 1465 item 3: the stream role plays through the locked operator PipeWire (--output pulse)
     assert u["ExecStart"] == ("/usr/bin/python3 /usr/local/bin/strih_stream_monitor.py --url %s/%%l "
-                              "--state-file %%t/%s" % (server, state_file))
+                              "--state-file %%t/%s --output pulse" % (server, state_file))
     assert u["Restart"] == "always" and u["StartLimitIntervalSec"] == "0"
     assert u["WantedBy"] == "graphical-session.target"
     assert "DISPLAY" not in UNIT.read_text(), "it opens no window"
