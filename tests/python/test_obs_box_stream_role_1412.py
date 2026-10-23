@@ -216,7 +216,9 @@ def test_the_stream_manifest_is_one_genlocked_program_input(boxes):
 def test_a_strih_manifest_is_unchanged_by_the_class_key(boxes):
     s = _scenes()
     text = _manifest(boxes, "strih-snv")
-    assert '"class"' not in text and "program_audio_input" not in text
+    # issue 1439 phase 2: strih-snv's manifest names its program input (its console's VBAN source), the
+    # same `ASIO zvuk` the seeder's default reads; the class key stays off the strih manifest
+    assert '"class"' not in text
     inputs, _o, latency = s.parse_seed_manifest(text)
     assert s.parse_program_audio_input(text) == "ASIO zvuk"
     classes = [p["settings"].get("genlock_fifo") for p in s.seed_inputs(inputs, latency)]

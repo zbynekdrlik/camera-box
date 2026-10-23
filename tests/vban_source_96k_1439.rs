@@ -73,7 +73,10 @@ fn the_consoles_96_khz_239_frame_pcm24_stream_reaches_obs_at_96_khz_1439() {
     }));
     let (stdout, log) = run_tokens_frames(&tokens, frames as u32, VBAN_BITFMT_24_INT);
     let outs = outs(&stdout);
-    assert!(!outs.is_empty(), "issue 1439: nothing reached OBS: {stdout}\n{log}");
+    assert!(
+        !outs.is_empty(),
+        "issue 1439: nothing reached OBS: {stdout}\n{log}"
+    );
     assert!(
         log.contains("rate=96000"),
         "issue 1439: the source anchors the stream at 96 kHz: {log}"
