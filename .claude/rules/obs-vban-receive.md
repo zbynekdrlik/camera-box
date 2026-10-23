@@ -334,8 +334,8 @@ uplne zle! Vobec by taky stav nemal dat zelenu e2e na rigu v snv!!!"
   Any delta or guard line = FAIL. No status line on either side, a counter that went backwards (OBS
   restarted, the source reconfigured), a token on one side only, a missing ASRC / telemetry line =
   UNKNOWN, which fails the run. `retryable` = "the closing line is not in the log yet" (never when
-  the OPENING line is missing: waiting cannot bring it; `opening_missing` asks the gate to read the
-  whole log once instead).
+  the OPENING line is missing: waiting cannot bring it; `opening_missing` asks the gate to read once
+  more from 10 x the lookback, never the whole log: tens of MB on a multi-day session, review round 2).
   - **Line numbering = newlines only** (`text.split("\n")`), like `wc -l` / `tail -n +N` on the box.
     `str.splitlines()` also splits on `\f`, a lone `\r`, `\x1c`.. -- a form feed in one OBS line
     moved the marks a line early and read a 4-slot loss as PASS (review round 1).

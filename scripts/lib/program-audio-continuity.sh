@@ -15,7 +15,8 @@
 #       right after StopRecord). Fail-open, rc 0 on every path: a missing mark makes the gate UNKNOWN,
 #       which fails the run (fail-closed there, never here, so a mark never aborts the recording).
 #   program_audio_continuity_gate HERE HOST DIR [VERDICT_JSON]
-#       reads the log from (start mark - PROGRAM_AUDIO_CONTINUITY_LOOKBACK lines) to its end, runs the
+#       reads the log from (start mark - PROGRAM_AUDIO_CONTINUITY_LOOKBACK lines) to its end (once more
+#       from 10 x that when the opening line is older, never the whole log), runs the
 #       decision, waits (bounded) while the closing status / ASRC / telemetry line is not in the log yet, merges
 #       the block into VERDICT_JSON as `program_audio_continuity` (the Discord report names it) and
 #       prints it. rc 0 = PASS only; 1 = FAIL or UNKNOWN (the caller folds it into $GATE).
@@ -121,7 +122,7 @@ program_audio_continuity_gate() {
   local here="${1-}" host="${2-}" dir="${3-}" verdict="${4-}"
   local py="$here/program_audio_continuity.py" block="$dir/program-audio-continuity.json"
   local log="$dir/program-audio-continuity-log.txt" platform input="" expect="" reason="" rc=0
-  local sname="" scount="" ename="" ecount="" newest="" from tries step wmax back raw i
+  local sname="" scount="" ename="" ecount="" newest="" from tries step wmax back raw i widened=0
   local -a vban=()
   rm -f "$block" "$log" 2>/dev/null || true
   platform="$(_program_audio_continuity_platform "$host")"
@@ -173,12 +174,15 @@ program_audio_continuity_gate() {
         rc=0
         python3 "$py" --log "$log" --input "$input" "${vban[@]}" --first-line "$from" \
           --start-line "$scount" --end-line "$ecount" --out "$block" >/dev/null 2>&1 || rc=$?
-        # an opening line older than the lookback (a relock burst writes many lines): read the
-        # whole log once, never report UNKNOWN for a read that started too late (review round 1)
-        if [ "$rc" = 2 ] && [ "$from" -gt 1 ] \
+        # an opening line older than the lookback (a relock burst writes many lines): read ONCE more
+        # from 10 x the lookback (review round 1), never the whole log -- tens of MB on a multi-day
+        # session, and a timed-out full read would repeat on every try (review round 2)
+        if [ "$rc" = 2 ] && [ "$widened" = 0 ] && [ "$from" -gt 1 ] \
            && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("opening_missing") else 1)' "$block" 2>/dev/null; then
-          echo "    [program-audio] no opening line in the ${back} lines before the start mark -- reading the log again from the first line"
-          from=1
+          widened=1
+          from=$((scount - 10 * back))
+          [ "$from" -ge 1 ] || from=1
+          echo "    [program-audio] no opening line in the ${back} lines before the start mark -- reading again from line ${from} (10 x the lookback)"
           i=$((i - 1))
           continue
         fi
