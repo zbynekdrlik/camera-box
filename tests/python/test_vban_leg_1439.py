@@ -4,12 +4,16 @@ Owner, verbatim: "na stream-snv je druha sietovka usb-c 2.5gbits a ta je pripoje
 siete, vies nastavit aby na stream bola ta sietovka na 10.77.7.204 a islo cez nu iba ten vbani nic ine
 aby cez nu ani nic ine neodchadazlo, vsetko ostatne streamy ndi video internet naech ide ce tu sietovku
 klasicku". The hand fix of 23.10.2026 10:04 is codified into setup-strih / verify-strih the same day:
-  * the facts STRIH_PROGRAM_VBAN_LEG_MAC / _LEG_ADDR / STRIH_PROGRAM_VBAN_SENDER
-    (scripts/lib/strih-box-facts.sh): stream-snv's values, `none` elsewhere, the refusals;
+  * the facts STRIH_PROGRAM_VBAN_LEG (`mac:<MAC>` a second NIC, `vlan:<id>` a tagged VLAN on the rig NIC,
+    or none) / _LEG_ADDR / STRIH_PROGRAM_VBAN_SENDER (none = ping only) in scripts/lib/strih-box-facts.sh:
+    stream-snv's NIC, strih-snv's VLAN 70 (owner 23.10.2026 10:31, phase 2: no sender yet), the refusals;
   * scripts/lib/strih-vban-leg.sh: the NM profile (a /32, no gateway, the policy route for ping replies),
     the nft table (only the sender's VBAN + ping in, only echo replies out, plus a counter of VBAN
     arriving OFF the leg), its boot oneshot, the per-interface ARP sysctls;
-  * setup-strih step 13 (stream role) = strih_vban_leg_install, verify-strih item 9 = strih_vban_leg_grade.
+  * the VLAN kind's HARD trap (supervisor 23.10.2026): the atlantic driver RESETS the rig link (~8 s) the
+    first time a VLAN enters its HW filter, so the VLAN connection is created only when absent (a loud
+    WARNING first), never deleted or re-created, changed only by `device reapply`, and graded read-only;
+  * setup-strih step 13 = strih_vban_leg_install, verify-strih item 9 = strih_vban_leg_grade, every role.
 
 Tier-0: bash + pytest only; nmcli / ip / nft / systemctl / sysctl are the fakes of vban_leg_fakes_1439.py.
 The nft ruleset is pinned to the real nft 1.0.9 render (captured in a throwaway network namespace) and
@@ -42,6 +46,9 @@ LEG_ADDR = "10.77.7.204"
 SENDER = "10.77.7.232"
 RIG_IF = "enp56s0"
 RIG_UUID = "872cb3ca-c619-31f0-b224-66ef70bbeab0"
+STRIH_RIG = "enp7s0"
+STRIH_VLAN_IF = "enp7s0.70"
+STRIH_LEG_ADDR = "10.77.7.202"
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
          "STRIH_VBAN_LEG_SYSFS", "STRIH_VBAN_LEG_PROC_SYS", "STRIH_VBAN_LEG_NFT_FILE", "STRIH_VBAN_LEG_UNIT_FILE",
@@ -90,31 +97,38 @@ def test_the_three_leg_facts_follow_the_program_audio_input():
     r = _bash("strih_box_fact_keys")
     keys = r.stdout.split()
     i = keys.index("STRIH_PROGRAM_AUDIO_INPUT")
-    assert keys[i + 1:i + 5] == ["STRIH_PROGRAM_VBAN_LEG_MAC", "STRIH_PROGRAM_VBAN_LEG_ADDR",
+    assert keys[i + 1:i + 5] == ["STRIH_PROGRAM_VBAN_LEG", "STRIH_PROGRAM_VBAN_LEG_ADDR",
                                  "STRIH_PROGRAM_VBAN_SENDER", "STRIH_PROGRAM_SENDER"]
 
 
-def test_stream_snv_declares_the_live_leg_and_every_other_box_none():
-    body = ('strih_box_load "$1" || exit 9\n'
-            'printf "%s|%s|%s\\n" "$(strih_lx_program_vban_leg_mac)" "$(strih_lx_program_vban_leg_addr)" '
+LEG_BODY = ('strih_box_load "$1" || exit 9\n'
+            'printf "%s|%s|%s\\n" "$(strih_lx_program_vban_leg)" "$(strih_lx_program_vban_leg_addr)" '
             '"$(strih_lx_program_vban_sender)"')
-    assert _bash(body, "stream-snv").stdout.strip() == "%s|%s|%s" % (LEG_MAC, LEG_ADDR, SENDER)
+
+
+def test_stream_snv_has_the_nic_leg_strih_snv_the_vlan_leg_every_other_box_none():
+    assert _bash(LEG_BODY, "stream-snv").stdout.strip() == "mac:%s|%s|%s" % (LEG_MAC, LEG_ADDR, SENDER)
+    assert _bash(LEG_BODY, "strih-snv").stdout.strip() == "vlan:70|%s|none" % STRIH_LEG_ADDR
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
-        if box == "stream-snv":
+        if box in ("stream-snv", "strih-snv"):
             continue
-        r = _bash(body, box)
+        r = _bash(LEG_BODY, box)
         assert r.returncode == 0, (box, r.stderr)
         assert r.stdout.strip() == "none|none|none", box
 
 
 @pytest.mark.parametrize("box,edits,word", [
-    ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG_MAC=none", "STRIH_PROGRAM_VBAN_LEG_MAC=" + LEG_MAC),
-                   ("STRIH_PROGRAM_VBAN_LEG_ADDR=none", "STRIH_PROGRAM_VBAN_LEG_ADDR=" + LEG_ADDR),
-                   ("STRIH_PROGRAM_VBAN_SENDER=none", "STRIH_PROGRAM_VBAN_SENDER=" + SENDER)], "strih role"),
-    ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=none")], "all three"),
-    ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG_MAC=" + LEG_MAC, "STRIH_PROGRAM_VBAN_LEG_MAC=00:E0:4C:68:01:85")],
+    ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG_ADDR=" + LEG_ADDR, "STRIH_PROGRAM_VBAN_LEG_ADDR=none")], "address"),
+    ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG=mac:" + LEG_MAC, "STRIH_PROGRAM_VBAN_LEG=none")], "none"),
+    ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG=mac:" + LEG_MAC, "STRIH_PROGRAM_VBAN_LEG=mac:00:E0:4C:68:01:85")],
      "MAC"),
-    ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG_MAC=" + LEG_MAC, "STRIH_PROGRAM_VBAN_LEG_MAC=00:e0:4c:68:01")], "MAC"),
+    ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG=mac:" + LEG_MAC, "STRIH_PROGRAM_VBAN_LEG=mac:00:e0:4c:68:01")], "MAC"),
+    ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG=mac:" + LEG_MAC, "STRIH_PROGRAM_VBAN_LEG=" + LEG_MAC)], "mac:"),
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:0")], "VLAN"),
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:4095")], "VLAN"),
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:070")], "VLAN"),
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=none", "STRIH_PROGRAM_VBAN_SENDER=10.77.7.232")],
+     "STRIH_PROGRAM_VBAN_PORT"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG_ADDR=" + LEG_ADDR, "STRIH_PROGRAM_VBAN_LEG_ADDR=10.77.7.256")], "IPv4"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.8.232")], "/24"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=" + LEG_ADDR)], "differ"),
@@ -126,6 +140,14 @@ def test_the_loader_refuses_a_malformed_leg(tmp_path, box, edits, word):
     r = _bash('strih_box_load "$1"', box, env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode != 0
     assert "STRIH_PROGRAM_VBAN_" in r.stderr and word in r.stderr, r.stderr
+
+
+def test_the_strih_role_takes_a_leg_of_either_kind(tmp_path):
+    # phase 2 (owner 23.10.2026): the strih role gets its own VBAN leg; a NIC leg loads there too
+    d = _boxes_with(tmp_path, "strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=mac:" + LEG_MAC)])
+    r = _bash(LEG_BODY, "strih-snv", env={"STRIH_BOXES_DIR": str(d)})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "mac:%s|%s|none" % (LEG_MAC, STRIH_LEG_ADDR)
 
 
 # --- the rendered files ----------------------------------------------------------------------------------
@@ -151,6 +173,14 @@ def test_the_ruleset_reproduces_the_live_hand_fix_plus_the_off_leg_counter():
     off = 'iifname != "%s" iifname != "lo" udp dport 6980 counter' % LEG_IF
     assert [line for line in want if line != off] == live
     assert off in want
+
+
+def test_a_leg_without_a_sender_passes_only_ping_exactly_like_the_live_strih_snv_table():
+    text = _render("strih_vban_leg_nft_text", STRIH_VLAN_IF, "none", "none")
+    body = text.split("delete table inet vban_dante70\n", 1)[1]
+    live = _norm((FIX / "nft-list-table-strih-snv-live-23-10.txt").read_text())
+    assert _norm(re.sub(r"(?m)^\s*#.*$", "", body)) == live
+    assert "udp dport" not in body
 
 
 def test_the_expected_listing_is_derived_from_the_ruleset_file():
@@ -194,10 +224,20 @@ class Box:
                          "STRIH_VBAN_LEG_SYSCTL_FILE": str(self.sysctl_file), "STRIH_VBAN_LEG_WAIT_S": "0"})
         self.nic(RIG_IF, "a8:a1:59:00:00:01")
 
-    def nic(self, name, mac):
+    def nic(self, name, mac, driver=None, physical=True):
         d = self.sysfs / "class" / "net" / name
         d.mkdir(parents=True, exist_ok=True)
         (d / "address").write_text(mac + "\n")
+        if physical:
+            dev = self.tmp / "devices" / name
+            (dev / "driver").parent.mkdir(parents=True, exist_ok=True)
+            if driver:
+                drv = self.tmp / "drivers" / driver
+                drv.mkdir(parents=True, exist_ok=True)
+                if not (dev / "driver").exists():
+                    (dev / "driver").symlink_to(drv)
+            if not (d / "device").exists():
+                (d / "device").symlink_to(dev)
 
     def run(self, fn, box="stream-snv"):
         body = 'strih_box_load "$1" || exit 9\n%s%s' % (GRADE_FNS, fn)
@@ -357,12 +397,152 @@ def test_an_uncabled_leg_keeps_the_profile_and_warns(tmp_path):
     assert add and "ipv4.method" in add[0] and "manual" in add[0], "created already static: never a DHCP moment"
 
 
+def test_a_vlan_shaped_twin_of_the_nic_is_never_taken_for_the_leg(tmp_path):
+    # a VLAN on the USB NIC shares its MAC; only the physical NIC (a device link) is the leg
+    b, prof = _live_box(tmp_path)
+    b.nic(LEG_IF + ".9", LEG_MAC, physical=False)
+    r = b.run("strih_vban_leg_install")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not fk.calls(b.st(), "nmcli", "connection", "modify")
+
+
 def test_a_box_without_a_leg_skips(tmp_path):
     b = Box(tmp_path)
     r = b.run("strih_vban_leg_install", box="stream-pp")
     assert r.returncode == 0, r.stderr
     assert "SKIP" in r.stdout
     assert not fk.calls(b.st(), "nmcli") and not fk.calls(b.st(), "nft")
+
+
+# --- the VLAN kind on the rig NIC (strih-snv) ---------------------------------------------------------------
+
+STRIH_UUID = "43486881-5376-378d-a2b5-2fbc1407fe55"
+VLAN_UUID = "3d6275b8-0062-432c-b748-a6744032b4bd"
+VLAN_PROPS = {"connection.id": "vban-dante70", "connection.interface-name": STRIH_VLAN_IF,
+              "connection.autoconnect": "yes", "vlan.parent": STRIH_RIG, "vlan.id": "70",
+              "ipv4.method": "manual", "ipv4.addresses": "10.77.7.202/32", "ipv4.gateway": "",
+              "ipv4.never-default": "yes", "ipv4.ignore-auto-routes": "yes", "ipv4.ignore-auto-dns": "yes",
+              "ipv4.dns": "", "ipv4.routes": "10.77.7.0/24 table=70",
+              "ipv4.routing-rules": "priority 100 from 10.77.7.202 table 70", "ipv6.method": "disabled"}
+
+
+def _strih_rig():
+    return {"uuid": STRIH_UUID, "type": "802-3-ethernet",
+            "props": {"connection.id": "strih-lan", "connection.interface-name": STRIH_RIG,
+                      "ipv4.method": "manual", "ipv4.addresses": "10.77.9.202/23", "ipv4.gateway": "10.77.8.1"}}
+
+
+def _strih_box(tmp_path, vlan_props=None, vlan_active=True, **over):
+    """strih-snv: the atlantic rig NIC enp7s0, the VLAN 70 profile as applied by hand at 10:31 (or none)."""
+    profiles = [_strih_rig()]
+    active = {STRIH_RIG: STRIH_UUID}
+    applied = {STRIH_RIG: _strih_rig()["props"]}
+    if vlan_props is not None:
+        profiles.append({"uuid": VLAN_UUID, "type": "vlan", "props": dict(vlan_props)})
+        if vlan_active:
+            active[STRIH_VLAN_IF] = VLAN_UUID
+            applied[STRIH_VLAN_IF] = dict(vlan_props)
+    kw = dict(profiles=profiles, active=active, applied=applied,
+              nft_render=(FIX / "nft-list-table-strih-snv-live-23-10.txt").read_text(),
+              live_render_file=str(FIX / "nft-list-table-strih-snv-live-23-10.txt"),
+              units={"vban-dante70-filter.service": {"enabled": True, "active": True}})
+    kw.update(over)
+    b = Box(tmp_path, **kw)
+    b.nic(STRIH_RIG, "00:24:27:15:e4:da", driver="atlantic")
+    if vlan_props is not None and vlan_active:
+        b.nic(STRIH_VLAN_IF, "00:24:27:15:e4:da", physical=False)
+    return b
+
+
+def _mutations(s):
+    return [c for c in fk.calls(s, "nmcli") if c[:1] != ["-g"]]
+
+
+def test_vlan_install_on_the_live_strih_snv_never_touches_the_link(tmp_path):
+    b = _strih_box(tmp_path, VLAN_PROPS)
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    s = b.st()
+    assert _mutations(s) == [], _mutations(s)
+    assert "WARNING" not in r.stdout
+    assert b.nft_file.read_text() == _render("strih_vban_leg_nft_text", STRIH_VLAN_IF, "none", "none")
+    lines = [x for x in b.sysctl_file.read_text().splitlines() if not x.startswith("#")]
+    assert lines == ["net/ipv4/conf/enp7s0.70/arp_ignore = 1", "net/ipv4/conf/enp7s0.70/arp_announce = 2"]
+
+
+def test_vlan_first_creation_warns_of_the_link_reset_and_activates_once(tmp_path):
+    b = _strih_box(tmp_path, None, units={})
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARNING" in r.stdout and "atlantic" in r.stdout and "8 s" in r.stdout and STRIH_RIG in r.stdout
+    s = b.st()
+    add = fk.calls(s, "nmcli", "connection", "add")
+    assert len(add) == 1
+    a = add[0]
+    assert a[a.index("type") + 1] == "vlan" and a[a.index("ifname") + 1] == STRIH_VLAN_IF
+    assert a[a.index("vlan.parent") + 1] == STRIH_RIG and a[a.index("vlan.id") + 1] == "70"
+    assert a[a.index("connection.autoconnect") + 1] == "no", "created down: exactly one activation, ours"
+    assert len(fk.calls(s, "nmcli", "connection", "up")) == 1
+    made = [p for p in s["profiles"] if p["props"].get("connection.id") == "vban-dante70"][0]
+    assert made["props"]["connection.autoconnect"] == "yes"
+    assert s["applied"][STRIH_VLAN_IF]["ipv4.addresses"] == "10.77.7.202/32"
+    assert not fk.calls(s, "nmcli", "connection", "delete")
+
+
+def test_vlan_route_change_is_reapplied_never_recreated(tmp_path):
+    old = dict(VLAN_PROPS, **{"ipv4.routing-rules": "", "ipv4.routes": ""})
+    b = _strih_box(tmp_path, old)
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    s = b.st()
+    assert fk.calls(s, "nmcli", "connection", "modify", VLAN_UUID)
+    assert fk.calls(s, "nmcli", "device", "reapply", STRIH_VLAN_IF)
+    assert not fk.calls(s, "nmcli", "connection", "up") and not fk.calls(s, "nmcli", "connection", "delete")
+    assert not fk.calls(s, "nmcli", "connection", "add") and not fk.calls(s, "nmcli", "connection", "down")
+
+
+def test_vlan_refused_reapply_fails_without_bouncing_the_rig_link(tmp_path):
+    old = dict(VLAN_PROPS, **{"ipv4.routing-rules": ""})
+    b = _strih_box(tmp_path, old, reapply_fails=True)
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode != 0
+    assert "reapply" in r.stderr and "atlantic" in r.stderr
+    s = b.st()
+    assert not fk.calls(s, "nmcli", "connection", "up") and not fk.calls(s, "nmcli", "connection", "delete")
+
+
+def test_vlan_identity_change_is_refused_untouched(tmp_path):
+    b = _strih_box(tmp_path, dict(VLAN_PROPS, **{"vlan.id": "71"}))
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode != 0
+    assert "vlan.id" in r.stderr
+    assert _mutations(b.st()) == []
+
+
+def test_vlan_needs_the_rig_nic(tmp_path):
+    b = Box(tmp_path)
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode != 0
+    assert "rig NIC" in r.stderr
+    assert _mutations(b.st()) == [] and not b.nft_file.exists()
+
+
+def test_vlan_grade_passes_the_live_strih_snv_with_a_ping_only_note(tmp_path):
+    b = _strih_box(tmp_path, VLAN_PROPS)
+    fk.write_proc(b.proc, STRIH_VLAN_IF, 1, 2)
+    rows = _rows(b.run("strih_vban_leg_grade", box="strih-snv"))
+    assert not [x for x in rows if x.startswith("BAD|")], rows
+    notes = [x for x in rows if x.startswith("NOTE|")]
+    assert len(notes) == 1 and "sender" in notes[0], rows
+    assert any(STRIH_VLAN_IF in x and "VLAN 70" in x for x in rows if x.startswith("OK|")), rows
+    assert _mutations(b.st()) == [] and not fk.calls(b.st(), "systemctl", "restart")
+
+
+def test_vlan_grade_fails_a_missing_vlan_interface(tmp_path):
+    b = _strih_box(tmp_path, VLAN_PROPS, vlan_active=False)
+    fk.write_proc(b.proc, STRIH_VLAN_IF, 1, 2)
+    bad = [x for x in _rows(b.run("strih_vban_leg_grade", box="strih-snv")) if x.startswith("BAD|")]
+    assert bad and STRIH_VLAN_IF in bad[0] and "8 s" in bad[0], bad
 
 
 # --- verify: strih_vban_leg_grade --------------------------------------------------------------------------
@@ -442,18 +622,18 @@ def test_grade_notes_a_box_without_a_leg(tmp_path):
 
 # --- the wiring ---------------------------------------------------------------------------------------------
 
-def test_setup_step_13_installs_the_leg_on_the_stream_role():
+def test_setup_step_13_installs_the_leg_on_every_role():
     s = SETUP.read_text()
     i = s.index("strih_intercom_hub_remove ||")
     j = s.index("step 14 ")
-    assert "strih_vban_leg_install || fail" in s[i:j]
+    assert "\nfi\nstrih_vban_leg_install || fail" in s[i:j], "after the role branch: both roles"
     assert s.count("strih_vban_leg_install") == 1
 
 
-def test_verify_item_9_grades_the_leg_on_the_stream_role():
+def test_verify_item_9_grades_the_leg_on_every_role():
     v = VERIFY.read_text()
-    line = next(x for x in v.splitlines() if 'strih_program_vban_grade "$SCN_BIN"' in x)
-    assert "strih_vban_leg_grade" in line
+    item9 = v[v.index("# 9) program audio"):v.index("# 9b)")]
+    assert item9.rstrip("\n").splitlines()[-1].startswith("strih_vban_leg_grade"), "after the role branch"
     assert v.count("strih_vban_leg_grade") == 1
 
 

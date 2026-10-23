@@ -64,7 +64,7 @@ elif cmd == ["connection", "add"]:
     i = 0
     while i < len(kv):
         k, v = kv[i], kv[i + 1]
-        if k == "type": pass
+        if k == "type": new["type"] = "vlan" if v == "vlan" else "802-3-ethernet"
         elif k == "con-name": new["props"]["connection.id"] = v
         elif k == "ifname": new["props"]["connection.interface-name"] = v
         else: new["props"][k] = v
@@ -108,6 +108,11 @@ def addrs(d):
         return [x.strip() for x in pr.get("ipv4.addresses", "").split(",") if x.strip()]
     return []
 out = sys.stdout.write
+if a == ["-o", "-4", "addr", "show"]:
+    for d in s["applied"]:
+        for x in addrs(d):
+            out("5: %s    inet %s scope global %s\\       valid_lft forever preferred_lft forever\n" % (d, x, d))
+    sys.exit(0)
 if a[:4] == ["-4", "-o", "addr", "show"]:
     d = a[a.index("dev") + 1]
     for x in addrs(d):

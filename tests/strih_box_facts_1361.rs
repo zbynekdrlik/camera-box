@@ -125,8 +125,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_PROGRAM_VBAN_RESERVE_MS",
     // issue 1462: the OBS program-audio input's name (stream-pp `Zvuk z mixu`, stream-snv `mbc`).
     "STRIH_PROGRAM_AUDIO_INPUT",
-    // issue 1439 (ROZHODNUTÉ 6360417876): the VBAN-only leg on a stream box's second NIC.
-    "STRIH_PROGRAM_VBAN_LEG_MAC",
+    // issue 1439 (ROZHODNUTÉ 6360417876): the VBAN-only leg (a second NIC or a VLAN on the rig NIC).
+    "STRIH_PROGRAM_VBAN_LEG",
     "STRIH_PROGRAM_VBAN_LEG_ADDR",
     "STRIH_PROGRAM_VBAN_SENDER",
     "STRIH_PROGRAM_SENDER",
@@ -189,8 +189,9 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_PROGRAM_VBAN_PORT=none",
         "STRIH_PROGRAM_VBAN_RESERVE_MS=none",
         "STRIH_PROGRAM_AUDIO_INPUT=none",
-        "STRIH_PROGRAM_VBAN_LEG_MAC=none",
-        "STRIH_PROGRAM_VBAN_LEG_ADDR=none",
+        // issue 1439 (supervisor 23.10.2026 10:31): VLAN 70 tagged on the rig NIC, ping only so far.
+        "STRIH_PROGRAM_VBAN_LEG=vlan:70",
+        "STRIH_PROGRAM_VBAN_LEG_ADDR=10.77.7.202",
         "STRIH_PROGRAM_VBAN_SENDER=none",
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
