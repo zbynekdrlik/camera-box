@@ -66,7 +66,7 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     names = [ln.split("|")[0] for ln in r.stdout.split()]
     assert names == ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "dev1", "strih-snv",
                      "stream-snv", "resolume-snv", "mbc", "fohabl", "iem-snv", "companion-snv",
-                     "strih-pp", "stream-pp", "resolume-pp"]
+                     "strih-pp", "stream-pp", "resolume-pp", "alex-nb"]
     rows = {ln.split("|")[0]: ln for ln in r.stdout.split()}
     assert rows["mbc"] == "mbc|10.77.7.232|windows|audio|always|-|"
     assert rows["fohabl"] == "fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS"
@@ -79,6 +79,10 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     # table, so no roll ever reached them (1.8.28 / 1.8.20 against the 1.17.0 pin).
     assert rows["iem-snv"] == "iem-snv|iem-snv.lan|windows|video|always|-|"
     assert rows["companion-snv"] == "companion-snv|companion-snv.lan|linux|video|always|-|"
+    # issue 1468 (owner 23.10.2026: "zaradil ho medzi udrziavanu flotilu dantesyncov"): the Alex
+    # notebook on the audio VLAN, a `reach` node (read only while its ssh answers), login alexnb
+    # with the fleet default password (no credvar).
+    assert rows["alex-nb"] == "alex-nb|10.77.7.109|windows|audio|reach|alexnb|"
 
 
 def test_lv1_is_excluded_per_the_owner():
@@ -166,7 +170,7 @@ def test_version_gate_arms(tmp_path):
         "stream-pp=op@stream-pp.lan"]
     assert out["W"].split() == ["stream-snv=op@10.77.9.204", "resolume-snv=op@resolume.lan",
                                 "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30", "iem-snv=op@iem-snv.lan",
-                                "resolume-pp=op@resolume-pp.lan"]
+                                "resolume-pp=op@resolume-pp.lan", "alex-nb=alexnb@10.77.7.109"]
     assert out["D"] == "dev1"
 
 

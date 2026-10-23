@@ -252,7 +252,7 @@ def test_the_pp_nodes_are_never_fixed_or_obsfleet_nodes(tmp_path):
     assert out["F"] == "mbc fohabl iem-snv companion-snv"
     assert out["O"] == "strih-snv stream-snv resolume-snv"
     # issue 1413: the Poprad camboxes are `reach` rows too (test_dantesync_fleet_pp_cams_1413.py)
-    assert out["R"] == "cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp"
+    assert out["R"] == "cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp alex-nb"
     assert out["M"] == "strih-snv strih-pp"
 
 
@@ -403,12 +403,12 @@ def test_watchdog_reach_roster_default_is_the_pp_fleet():
     script = f'set -uo pipefail\n. "{_WATCHDOG}"\nprintf "%s" "$DANTE_CLOCK_REACH_NODES"\n'
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=_env())
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp"  # issue 1413: + the PP camboxes
+    assert r.stdout == "cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp alex-nb"  # issue 1413: + the PP camboxes
 
 
 def test_watchdog_grades_the_pp_nodes_against_the_pp_grandmaster(tmp_path):
     err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": PP_GM, "resolume-pp.lan": PP_GM}, PP_HOME)
-    assert "reach='cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp'" in err, err  # issue 1413
+    assert "reach='cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp alex-nb'" in err, err  # issue 1413
     for name in ("strih-pp", "stream-pp", "resolume-pp"):
         assert f"{name} ({name}.lan): reachable=1 verdict=OK" in err, err
     assert "WOULD alert" not in err, err
