@@ -24,10 +24,17 @@ import pytest
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from test_obs_box_panel_1420 import REPO, Box, _bash, _exec, _healthy, _rows, box  # noqa: E402,F401
+from test_obs_box_panel_1420 import REPO, _bash, _exec, _healthy, box  # noqa: E402,F401
 
 SCRIPTS = REPO / "scripts"
 POWER = SCRIPTS / "obs_box_power.py"
+POWER_ICON = SCRIPTS / "lib" / "obs-box-panel-power.svg"
+# The Gtk calls the program may make on a dialog: the stand-in refuses any other name, so a misspelled
+# or non-Gtk-3 call fails here instead of passing silently (the real wiring was also smoke-run under
+# xvfb-run on dev1 with real Gtk 3).
+DIALOG_CALLS = {"set_keep_above", "set_position", "set_resizable", "set_default_response", "show_all",
+                "destroy"}
+MESSAGE_CALLS = {"format_secondary_text", "set_keep_above", "run", "destroy"}
 
 
 def _load_power():
@@ -68,7 +75,7 @@ class _Gtk:
             def grab_focus(self):
                 gtk.calls.append(("grab_focus", self.label))
 
-        class Box:
+        class ContentBox:
             def set_spacing(self, n):
                 gtk.calls.append(("set_spacing", n))
 
@@ -86,6 +93,9 @@ class _Gtk:
                 self.buttons = []
 
             def __getattr__(self, name):
+                if name not in DIALOG_CALLS:
+                    raise AttributeError("not a Gtk.Dialog call the stand-in knows: %s" % name)
+
                 def rec(*a):
                     gtk.calls.append((name,) + a)
                 return rec
@@ -97,7 +107,7 @@ class _Gtk:
                 return b
 
             def get_content_area(self):
-                return Box()
+                return ContentBox()
 
             def run(self):
                 gtk.calls.append(("run",))
@@ -108,6 +118,9 @@ class _Gtk:
                 gtk.calls.append(("MessageDialog", kw))
 
             def __getattr__(self, name):
+                if name not in MESSAGE_CALLS:
+                    raise AttributeError("not a Gtk.MessageDialog call the stand-in knows: %s" % name)
+
                 def rec(*a):
                     gtk.calls.append(("msg." + name,) + a)
                 return rec
@@ -232,7 +245,9 @@ def _launchers(home, env, box):
 def test_the_power_launcher_is_first_on_every_box(tmp_path, box_name):
     home, env = _home(tmp_path)
     rows = _launchers(home, env, box_name)
-    assert rows[0] == ["power", "Vypnúť", "/usr/bin/python3 /opt/test/obs-box-power", "system-shutdown"]
+    # the icon ships with the panel (an absolute path), never a theme name the kiosk may not carry
+    icon = str(home / ".local/share/icons/obs-box-panel/power.svg")
+    assert rows[0] == ["power", "Vypnúť", "/usr/bin/python3 /opt/test/obs-box-power", icon]
 
 
 def test_chrome_is_a_launcher_on_the_stream_role_where_it_is_installed(tmp_path):
@@ -267,7 +282,9 @@ def test_install_puts_the_power_program_and_its_launcher(box):
     assert box.power.read_bytes() == POWER.read_bytes()
     assert oct(box.power.stat().st_mode & 0o777) == "0o755"
     desk = (box.home / ".local/share/applications/obs-box-panel-power.desktop").read_text()
-    assert "Name=Vypnúť" in desk and "Icon=system-shutdown" in desk
+    icon = box.home / ".local/share/icons/obs-box-panel/power.svg"
+    assert icon.read_bytes() == POWER_ICON.read_bytes()
+    assert "Name=Vypnúť" in desk and ("Icon=%s" % icon) in desk
     assert "Exec=/usr/bin/python3 %s" % box.power in desk
     second = _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=box.env())
     assert second.returncode == 0 and "written" not in second.stdout, second.stdout
@@ -330,7 +347,23 @@ def test_as_root_the_logind_read_runs_as_the_desktop_user(box):
     assert st == "OK", d
     me = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip()
     uid = os.getuid()
-    assert "sudo -u %s XDG_RUNTIME_DIR=/run/user/%s systemd-run --user" % (me, uid) in box.calls()
+    assert "sudo -u %s XDG_RUNTIME_DIR=/run/user/%s timeout 15 systemd-run --user" % (me, uid) in box.calls()
+
+
+def test_the_logind_read_never_hands_its_stdin_to_the_transient_unit(box):
+    # systemd-run --pipe passes the caller's stdin on; the read must give it /dev/null
+    _healthy(box)
+    _exec(box.bin / "systemd-run", '#!/bin/bash\nwhile [ "${1#--}" != "$1" ]; do shift; done\n'
+          'readlink /proc/self/fd/0 >> %s/stdin\nexec "$@"\n' % box.state)
+    env = {**box.env()}
+    r = subprocess.run(["bash", "-c", 'set -euo pipefail\n. "$1"\nstrih_box_load "$2"\n. "$3"\n'
+                        'obs_box_panel_power_row "$4" "$(id -un)"', "h",
+                        str(SCRIPTS / "lib" / "strih-box-facts.sh"), "stream-pp",
+                        str(SCRIPTS / "lib" / "strih-provision.sh"), str(REPO)],
+                       capture_output=True, text=True, env={**os.environ, **env}, timeout=60, input="operator tty\n")
+    assert r.returncode == 0, r.stderr
+    seen = (box.state / "stdin").read_text().split()
+    assert seen and all(s == "/dev/null" for s in seen), seen
 
 
 # --- the touchpad (issue 1465 item 5) -----------------------------------------------------------------

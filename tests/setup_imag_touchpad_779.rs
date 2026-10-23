@@ -49,7 +49,7 @@ fn setup_imag_generates_the_touchpad_xorg_conf_779() {
 /// the `MatchIsTouchpad`/`Driver "libinput"` selector — a reprovisioned box must reproduce what is
 /// live on the box today, not a partial subset.
 #[test]
-fn setup_imag_touchpad_conf_has_all_four_options_779() {
+fn setup_imag_touchpad_conf_has_all_five_options_779() {
     let body = setup_body();
     for needle in [
         "MatchIsTouchpad \"on\"",
