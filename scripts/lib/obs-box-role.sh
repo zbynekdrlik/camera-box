@@ -31,6 +31,9 @@
 #   16d     4 session apps   the browser-source keeper, the headphone monitor of the outgoing stream
 #                            (issue 1436) and the dantesync tray
 #   16f     tally            skipped
+#   avsync-dock  nothing     step 16g seeds the A/V-sync dock into the saved OBS layout, verify item 47
+#                            grades that layout (issue 1470, scripts/lib/obs-box-avsync-dock.sh; the
+#                            plugin rows of item 47 run on every role)
 #   16i     HTTPS front      skipped (no intercom / shading page; the facts declare none, issue 1399)
 #   13-hub-live  verify item 16: an inactive hub FAILs   report-only (issue 1418)
 #
@@ -80,6 +83,7 @@ obs_box_stream_key() { strih_lx_hostname; }
 #          12-strih-audio = setup step 12's strih-program graph + MiniFuse drop-ins and verify item 9b's
 #          grade of them, issue 1465 item 3: the stream role gets the locked operator PipeWire instead).
 #   6-hdmi -- only a box with a fixed HDMI output (STRIH_HDMI_OUTPUT_BACKEND != none).
+#   avsync-dock -- the stream role only: the A/V-sync dock reads the measurement audio there (issue 1470).
 obs_box_step_applies() {
   local step="${1:?step required}" v
   case "$step" in
@@ -110,6 +114,12 @@ obs_box_step_applies() {
           16k) printf 'the stream role receives no cambox logs: the venue strih is the sink (issue 1394)' ;;
           13-hub-live) printf 'the stream role grades its hub report-only (issue 1418 FAILs an inactive hub on the strih role)' ;;
         esac
+        return 1
+      fi ;;
+    avsync-dock)
+      v="$(strih_box_role)" || return 0
+      if [ "$v" != stream ]; then
+        printf 'the A/V-sync dock reads the measurement audio on the stream box (issue 1470: stream role only)'
         return 1
       fi ;;
     16j-restreamer)

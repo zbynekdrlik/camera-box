@@ -960,8 +960,8 @@ if WHY="$(obs_box_step_applies 16f)"; then strih_tally_install "${HERE}/.." "$DE
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-step "16g" "Operator surface (issue 1418): Multiview click + projector keys in user.ini, the second NIC off the rig subnet"
-strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" "${OBS_CFG}/basic/scenes/$(strih_lx_obs_collection).json" || fail "issue 1418: the operator surface could not be provisioned (above)"
+step "16g" "Operator surface (issue 1418): Multiview click + projector keys in user.ini, the second NIC off the rig subnet; issue 1470: the A/V-sync dock in the saved OBS layout (stream role)"
+strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" "${OBS_CFG}/basic/scenes/$(strih_lx_obs_collection).json" || fail "issue 1418: the operator surface could not be provisioned (above)"; obs_box_avsync_dock_seed "${OBS_CFG}/user.ini" "$DESKTOP_USER"
 
 # ---------------------------------------------------------------------------------------------
 step "16h" "Kiosk panel (issue 1420): tint2 taskbar + tray + clock -- --user unit, enable-only"

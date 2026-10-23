@@ -138,8 +138,7 @@ else
   bad "OBS not running under the strih-obs.service supervisor"
 fi
 
-# 2) render tick ENABLED + DistroAV loaded in the newest OBS log.
-LOG="$(newest_log)"
+LOG="$(newest_log)"   # 2) render tick ENABLED + DistroAV loaded in the newest OBS log (item 47 reads it too).
 if [ -n "$LOG" ] && [ -f "$LOG" ]; then
   strih_lx_render_tick_ok    < "$LOG" && ok "genlock render tick ENABLED (newest log)" || bad "genlock render tick not enabled in the newest log"
   strih_lx_distroav_loaded_ok < "$LOG" && ok "DistroAV/NDI loaded (newest log)" || bad "DistroAV not loaded in the newest log"
@@ -857,6 +856,7 @@ strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel
 # 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh: nginx + each name's cert + the upstreams + renewal) + issue 1453 tunnel + TURN (strih-interkom-public.sh).
 if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; strih_interkom_public_grade_report || bad "(https-public) the grader did not print both rows"; else note "(https) not graded: ${WHY}"; fi
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_grade_report || bad "(log-sink) the grader did not print all of its rows"; else note "(log-sink) not graded: ${WHY}"; fi   # 46) issue 1394 cambox log sink (scripts/lib/strih-cambox-log-sink.sh: files, units, listeners)
+obs_box_avsync_dock_grade_report "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}" "${STRIH_SHAREDIR:-/usr/share}" "${LOG:-}" "${USER_HOME}/.config/obs-studio/user.ini" || bad "(avsync-dock) the grader did not print all of its rows"   # 47) issue 1470 A/V-sync dock (scripts/lib/obs-box-avsync-dock.sh: installed + loaded on every role, the saved layout on the stream role)
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
