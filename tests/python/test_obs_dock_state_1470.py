@@ -166,7 +166,9 @@ def test_seeding_stream_pp_changes_only_the_dockstate_value_and_keeps_the_mode(t
     before = p.read_text().splitlines()
     assert M.seed_ini(str(p), DOCK) == "seeded"
     after = p.read_text().splitlines()
-    assert len(after) == len(before)
+    # the first-seed marker is appended as its own section (round 2); every other line kept in place
+    assert after[len(before):] == ["", "[CameraBox]", "AvsyncDockSeeded=true"]
+    after = after[:len(before)]
     diff = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
     assert len(diff) == 1 and after[diff[0]].startswith("DockState=")
     assert M.check_ini(str(p), DOCK) == "visible"
@@ -176,11 +178,13 @@ def test_seeding_stream_pp_changes_only_the_dockstate_value_and_keeps_the_mode(t
     assert M.seed_ini(str(p), DOCK) == "present" and p.read_bytes() == snap
 
 
-def test_seeding_stream_snv_leaves_the_file_byte_identical(tmp_path):
+def test_seeding_stream_snv_keeps_its_layout_and_only_adds_the_marker(tmp_path):
     p = _copy(tmp_path, "stream-snv")
-    snap = p.read_bytes()
+    before = p.read_text().splitlines()
     assert M.seed_ini(str(p), DOCK) == "present"
-    assert p.read_bytes() == snap
+    assert p.read_text().splitlines() == before + ["", "[CameraBox]", "AvsyncDockSeeded=true"]
+    snap = p.read_bytes()
+    assert M.seed_ini(str(p), DOCK) == "present" and p.read_bytes() == snap
 
 
 def test_crlf_line_endings_are_kept(tmp_path):
@@ -189,7 +193,8 @@ def test_crlf_line_endings_are_kept(tmp_path):
     p.write_bytes(text.encode())
     assert M.seed_ini(str(p), DOCK) == "seeded"
     raw = p.read_bytes()
-    assert raw.count(b"\r\n") == text.count("\r\n") and b"\n" not in raw.replace(b"\r\n", b"")
+    # the original lines + the marker section's blank line, header and key
+    assert raw.count(b"\r\n") == text.count("\r\n") + 3 and b"\n" not in raw.replace(b"\r\n", b"")
 
 
 def test_a_dockstate_outside_basicwindow_is_not_read(tmp_path):
@@ -295,9 +300,10 @@ def test_a_seed_decision_marks_user_ini_once(tmp_path, box, want):
     before = p.read_text().splitlines()
     assert M.seed_ini(str(p), DOCK) == want and _marked(p)
     after = p.read_text().splitlines()
-    # only the DockState value (seeded) and the two marker lines changed; every other line kept, in order
-    rest = [l for l in after if l not in ("[CameraBox]", MARK) and not l.startswith("DockState=")]
-    assert rest == [l for l in before if not l.startswith("DockState=")]
+    # only the DockState value (seeded) changed and the marker section was appended; the rest kept in order
+    assert after[len(before):] == ["", "[CameraBox]", MARK]
+    assert [l for l in after[:len(before)] if not l.startswith("DockState=")] == \
+        [l for l in before if not l.startswith("DockState=")]
     snap = p.read_bytes()
     assert M.seed_ini(str(p), DOCK) == "present" and p.read_bytes() == snap
 

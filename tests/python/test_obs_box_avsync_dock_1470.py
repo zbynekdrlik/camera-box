@@ -148,6 +148,11 @@ def test_the_seed_keeps_the_operators_layout(tmp_path):
     r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME),
               box="stream-snv")
     assert r.returncode == 0 and "already places it" in r.stdout
+    # the layout is kept; only the first-seed marker section is appended (round 2)
+    assert ini.read_text() == snap.decode() + "\n[CameraBox]\nAvsyncDockSeeded=true\n"
+    snap = ini.read_bytes()
+    _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME),
+          box="stream-snv")
     assert ini.read_bytes() == snap
 
 
@@ -214,7 +219,7 @@ def test_the_first_seed_marks_user_ini(tmp_path):
               box="stream-snv")
     assert "already places it" in r.stdout and _marked(ini2)
     # no side file next to user.ini (round 2: the marker lives and dies with user.ini)
-    assert sorted(x.name for x in tmp_path.iterdir() if x.is_file()) == ["user.ini"]
+    assert not [x.name for x in tmp_path.iterdir() if x.name.startswith(".camera-box")]
 
 
 def test_before_the_first_seed_the_obs_default_is_redocked(tmp_path):
