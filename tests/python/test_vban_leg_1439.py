@@ -49,6 +49,7 @@ RIG_UUID = "872cb3ca-c619-31f0-b224-66ef70bbeab0"
 STRIH_RIG = "enp7s0"
 STRIH_VLAN_IF = "enp7s0.70"
 STRIH_LEG_ADDR = "10.77.7.202"
+STRIH_SENDER = "10.77.7.30:6980,6981"  # Ableton-FOH: the hub's fohabl-strih + the OBS strih-obs (owner 23.10.2026)
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
          "STRIH_VBAN_LEG_SYSFS", "STRIH_VBAN_LEG_PROC_SYS", "STRIH_VBAN_LEG_NFT_FILE", "STRIH_VBAN_LEG_UNIT_FILE",
@@ -108,7 +109,7 @@ LEG_BODY = ('strih_box_load "$1" || exit 9\n'
 
 def test_stream_snv_has_the_nic_leg_strih_snv_the_vlan_leg_every_other_box_none():
     assert _bash(LEG_BODY, "stream-snv").stdout.strip() == "mac:%s|%s|%s" % (LEG_MAC, LEG_ADDR, SENDER)
-    assert _bash(LEG_BODY, "strih-snv").stdout.strip() == "vlan:70|%s|none" % STRIH_LEG_ADDR
+    assert _bash(LEG_BODY, "strih-snv").stdout.strip() == "vlan:70|%s|%s" % (STRIH_LEG_ADDR, STRIH_SENDER)
     for box in sorted(p.stem for p in BOXES.glob("*.env")):
         if box in ("stream-snv", "strih-snv"):
             continue
@@ -127,8 +128,12 @@ def test_stream_snv_has_the_nic_leg_strih_snv_the_vlan_leg_every_other_box_none(
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:0")], "VLAN"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:4095")], "VLAN"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=vlan:070")], "VLAN"),
-    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=none", "STRIH_PROGRAM_VBAN_SENDER=10.77.7.232")],
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.232")],
      "STRIH_PROGRAM_VBAN_PORT"),
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:80")], "port"),
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,")],
+     "ports"),
+    ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.8.30:6980")], "/24"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_LEG_ADDR=" + LEG_ADDR, "STRIH_PROGRAM_VBAN_LEG_ADDR=10.77.7.256")], "IPv4"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.8.232")], "/24"),
     ("stream-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + SENDER, "STRIH_PROGRAM_VBAN_SENDER=" + LEG_ADDR)], "differ"),
@@ -147,7 +152,23 @@ def test_the_strih_role_takes_a_leg_of_either_kind(tmp_path):
     d = _boxes_with(tmp_path, "strih-snv", [("STRIH_PROGRAM_VBAN_LEG=vlan:70", "STRIH_PROGRAM_VBAN_LEG=mac:" + LEG_MAC)])
     r = _bash(LEG_BODY, "strih-snv", env={"STRIH_BOXES_DIR": str(d)})
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "mac:%s|%s|none" % (LEG_MAC, STRIH_LEG_ADDR)
+    assert r.stdout.strip() == "mac:%s|%s|%s" % (LEG_MAC, STRIH_LEG_ADDR, STRIH_SENDER)
+
+
+def test_a_sender_may_name_its_own_ports_and_the_filter_matches_them_as_a_set():
+    # 23.10.2026: strih-snv's setup replaced the live table and dropped the hand rule for the intercom hub's
+    # fohabl-strih VBAN on 6980 (the hub lost FOH for ~2 min). One console feeds the hub (6980) AND the strih
+    # OBS (6981) on the leg, so the sender carries its own port list and both rules match the set.
+    sender = _bash('strih_box_load strih-snv || exit 9\n. "%s"\n_strih_vban_leg_sender' % LEG_LIB)
+    assert sender.returncode == 0, sender.stderr
+    assert sender.stdout.strip() == "10.77.7.30 6980,6981"
+    text = _render("strih_vban_leg_nft_text", STRIH_VLAN_IF, "10.77.7.30", "6980,6981")
+    assert 'iifname "%s" ip saddr 10.77.7.30 udp dport { 6980, 6981 } counter accept' % STRIH_VLAN_IF in text
+    assert ('iifname != "%s" iifname != "lo" ip saddr 10.77.7.30 udp dport { 6980, 6981 } counter'
+            % STRIH_VLAN_IF) in text
+    # a single port keeps the exact pre-change render (stream-snv's live table)
+    one = _render("strih_vban_leg_nft_text", LEG_IF, SENDER, "6980")
+    assert "udp dport 6980 counter accept" in one and "{ 6980" not in one
 
 
 # --- the rendered files ----------------------------------------------------------------------------------
