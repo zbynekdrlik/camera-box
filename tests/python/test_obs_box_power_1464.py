@@ -254,7 +254,10 @@ def test_chrome_is_a_launcher_on_the_stream_role_where_it_is_installed(tmp_path)
     home, env = _home(tmp_path)
     rows = _launchers(home, env, "stream-pp")
     assert [x[0] for x in rows] == ["power", "obs", "restreamer", "chrome"]
-    assert rows[3] == ["chrome", "Chrome", str(tmp_path / "google-chrome-stable"), "google-chrome"]
+    # issue 1469: the kiosk autologin never unlocks the GNOME login keyring, so Chrome uses its own
+    # basic password store and never pops "Unlock Login Keyring".
+    assert rows[3] == ["chrome", "Chrome", "%s --password-store=basic" % (tmp_path / "google-chrome-stable"),
+                       "google-chrome"]
 
 
 def test_chrome_is_never_a_launcher_on_the_strih_role(tmp_path):
