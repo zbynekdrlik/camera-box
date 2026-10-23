@@ -176,7 +176,12 @@ def test_an_unreadable_user_ini_is_a_warn_and_untouched(tmp_path):
     assert ini.read_text() == "[BasicWindow]\nDockState=AAAA\n"
 
 
-STAMP = ".camera-box-avsync-dock-seeded"
+MARK = "AvsyncDockSeeded=true"
+
+
+def _marked(ini):
+    lines = ini.read_text().splitlines()
+    return "[CameraBox]" in lines and MARK in lines[lines.index("[CameraBox]") + 1:]
 
 
 def _floated_and_closed(tmp_path):
@@ -197,52 +202,43 @@ def _floated_and_closed(tmp_path):
     return ini
 
 
-def test_the_first_seed_leaves_a_stamp_owned_by_the_desktop_user(tmp_path):
+def test_the_first_seed_marks_user_ini(tmp_path):
     ini = _ini(tmp_path)
     r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME))
-    assert r.returncode == 0 and "seeded" in r.stdout
-    stamp = tmp_path / STAMP
-    assert stamp.is_file() and not stamp.is_symlink()
-    # an operator layout already holding the dock stamps too (stream-snv)
+    assert r.returncode == 0 and "seeded" in r.stdout and _marked(ini)
+    # an operator layout already holding the dock is marked too (stream-snv)
     d2 = tmp_path / "snv"
     d2.mkdir()
     ini2 = _ini(d2, "stream-snv")
     r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini2), ME),
               box="stream-snv")
-    assert "already places it" in r.stdout and (d2 / STAMP).is_file()
+    assert "already places it" in r.stdout and _marked(ini2)
+    # no side file next to user.ini (round 2: the marker lives and dies with user.ini)
+    assert sorted(x.name for x in tmp_path.iterdir() if x.is_file()) == ["user.ini"]
 
 
 def test_before_the_first_seed_the_obs_default_is_redocked(tmp_path):
     ini = _floated_and_closed(tmp_path)
     r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME))
     assert "A/V-sync dock redocked visible + docked right" in r.stdout, r.stdout
-    assert (tmp_path / STAMP).is_file()
+    assert _marked(ini)
 
 
 def test_after_the_first_seed_a_floated_and_closed_dock_is_the_operators(tmp_path):
     # Review finding 2: once seeded, hidden + floating is the operator floating the dock and closing it;
     # every later setup run keeps it and verify only NOTEs it.
     ini = _floated_and_closed(tmp_path)
-    (tmp_path / STAMP).write_text("issue 1470\n")
+    ini.write_text(ini.read_text() + "\n[CameraBox]\n" + MARK + "\n")
     snap = ini.read_bytes()
     r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME))
     assert "already places it" in r.stdout and ini.read_bytes() == snap
     lib, share = _prefix(tmp_path)
     row = _rows(tmp_path, LOG_WITH, ini, lib, share)[2]
     assert row.startswith("NOTE|(avsync-dock-layout) the operator closed the A/V-sync dock"), row
-    (tmp_path / STAMP).unlink()
+    # a restored user.ini without the marker: OBS's default again, a FAIL until setup re-docks it
+    ini.write_text(snap.decode().replace("\n[CameraBox]\n" + MARK + "\n", ""))
     row = _rows(tmp_path, LOG_WITH, ini, lib, share)[2]
     assert row.startswith("FAIL|(avsync-dock-layout) ") and "hidden + floating default" in row, row
-
-
-def test_a_symlinked_stamp_is_never_written_through(tmp_path):
-    target = tmp_path / "elsewhere"
-    target.write_text("keep\n")
-    (tmp_path / STAMP).symlink_to(target)
-    ini = _ini(tmp_path)
-    r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME))
-    assert r.returncode == 0
-    assert target.read_text() == "keep\n"
 
 
 def test_a_user_ini_without_a_saved_layout_is_a_warn(tmp_path):

@@ -254,60 +254,93 @@ def test_the_cli_tokens_and_exit_codes(tmp_path):
     assert r.returncode == 4
 
 
-# --- the first-seed stamp (review finding 2) ---------------------------------------------------------
+# --- the first-seed marker (review rounds 1-2) ------------------------------------------------------
+# OBS saves the dock hidden + floating both before any seed AND when the operator floats it and closes
+# it. The first seed decision therefore writes `[CameraBox] AvsyncDockSeeded=true` INTO user.ini, in the
+# same atomic rewrite: a replaced / restored user.ini loses it together with the layout (round 2), and
+# OBS's own config save keeps an unknown section.
+
+MARK = "AvsyncDockSeeded=true"
+
 
 def _default_hidden_ini(tmp_path):
     # stream-snv's advss-status-dock is hidden + floating: use it as the dock under test
     return _copy(tmp_path, "stream-snv"), "advss-status-dock"
 
 
-def test_without_a_stamp_the_obs_default_is_redocked_and_a_stamp_is_written(tmp_path):
-    p, name = _default_hidden_ini(tmp_path)
-    stamp = tmp_path / ".stamp"
-    assert M.check_ini(str(p), name, str(stamp)) == "default-hidden"
-    assert M.seed_ini(str(p), name, str(stamp)) == "redocked"
-    assert stamp.is_file() and M.check_ini(str(p), name, str(stamp)) == "visible"
+def _marked(p):
+    lines = p.read_text().splitlines()
+    return "[CameraBox]" in lines and MARK in lines[lines.index("[CameraBox]") + 1:]
 
 
-def test_with_a_stamp_the_obs_default_is_the_operators_and_kept(tmp_path):
+def test_without_the_marker_the_obs_default_is_redocked_and_marked(tmp_path):
     p, name = _default_hidden_ini(tmp_path)
-    stamp = tmp_path / ".stamp"
-    stamp.write_text("issue 1470\n")
+    assert M.check_ini(str(p), name) == "default-hidden"
+    assert M.seed_ini(str(p), name) == "redocked"
+    assert _marked(p) and M.check_ini(str(p), name) == "visible"
+
+
+def test_with_the_marker_the_obs_default_is_the_operators_and_kept(tmp_path):
+    p, name = _default_hidden_ini(tmp_path)
+    p.write_text(p.read_text() + "\n[CameraBox]\n" + MARK + "\n")
     snap = p.read_bytes()
-    assert M.check_ini(str(p), name, str(stamp)) == "hidden"
-    assert M.seed_ini(str(p), name, str(stamp)) == "present"
+    assert M.check_ini(str(p), name) == "hidden"
+    assert M.seed_ini(str(p), name) == "present"
     assert p.read_bytes() == snap
 
 
 @pytest.mark.parametrize("box,want", [("stream-pp", "seeded"), ("stream-snv", "present")])
-def test_a_seed_decision_writes_the_stamp(tmp_path, box, want):
+def test_a_seed_decision_marks_user_ini_once(tmp_path, box, want):
     p = _copy(tmp_path, box)
-    stamp = tmp_path / ".stamp"
-    assert M.seed_ini(str(p), DOCK, str(stamp)) == want and stamp.is_file()
+    before = p.read_text().splitlines()
+    assert M.seed_ini(str(p), DOCK) == want and _marked(p)
+    after = p.read_text().splitlines()
+    # only the DockState value (seeded) and the two marker lines changed; every other line kept, in order
+    rest = [l for l in after if l not in ("[CameraBox]", MARK) and not l.startswith("DockState=")]
+    assert rest == [l for l in before if not l.startswith("DockState=")]
+    snap = p.read_bytes()
+    assert M.seed_ini(str(p), DOCK) == "present" and p.read_bytes() == snap
 
 
-def test_no_saved_layout_writes_no_stamp(tmp_path):
-    p = _copy(tmp_path, None, "[BasicWindow]\nSaveProjectors=true\n")
-    stamp = tmp_path / ".stamp"
-    assert M.seed_ini(str(p), DOCK, str(stamp)) == "no-state" and not stamp.exists()
-
-
-def test_a_dangling_symlink_stamp_is_never_followed(tmp_path):
-    p = _copy(tmp_path, "stream-pp")
-    stamp = tmp_path / ".stamp"
-    stamp.symlink_to(tmp_path / "victim")
-    assert M.seed_ini(str(p), DOCK, str(stamp)) == "seeded"
-    assert not (tmp_path / "victim").exists()
-
-
-def test_the_cli_takes_the_stamp(tmp_path):
+def test_a_replaced_user_ini_loses_the_marker_and_is_redocked(tmp_path):
+    # round 2: the stream box seeded once, then user.ini restored from a backup without the dock, then
+    # OBS ran once with the plugin and saved its hidden + floating default: the next seed re-docks it.
     p, name = _default_hidden_ini(tmp_path)
-    stamp = tmp_path / ".stamp"
-    stamp.write_text("x\n")
-    r = _cli("check", "--ini", str(p), "--dock", name, "--stamp", str(stamp))
-    assert r.stdout.strip() == "hidden"
-    r = _cli("check", "--ini", str(p), "--dock", name)
-    assert r.stdout.strip() == "default-hidden"
+    assert M.seed_ini(str(p), name) == "redocked" and _marked(p)
+    p.write_text((FIX / "stream-snv.user.ini").read_text())  # the restore: layout + marker both gone
+    assert M.check_ini(str(p), name) == "default-hidden"
+    assert M.seed_ini(str(p), name) == "redocked"
+
+
+def test_an_existing_camerabox_section_gains_the_key_in_place(tmp_path):
+    p = _copy(tmp_path, None, (FIX / "stream-pp.user.ini").read_text() + "\n[CameraBox]\nOther=1\n")
+    assert M.seed_ini(str(p), DOCK) == "seeded"
+    lines = p.read_text().splitlines()
+    assert lines.count("[CameraBox]") == 1
+    i = lines.index("[CameraBox]")
+    assert MARK in lines[i + 1:] and "Other=1" in lines[i + 1:]
+
+
+def test_the_marker_follows_the_files_line_endings(tmp_path):
+    text = (FIX / "stream-snv.user.ini").read_text().replace("\n", "\r\n")
+    p = tmp_path / "user.ini"
+    p.write_bytes(text.encode())
+    assert M.seed_ini(str(p), DOCK) == "present"
+    raw = p.read_bytes()
+    assert b"[CameraBox]\r\n" + MARK.encode() + b"\r\n" in raw
+    assert b"\n" not in raw.replace(b"\r\n", b"")
+
+
+def test_no_saved_layout_is_never_marked(tmp_path):
+    p = _copy(tmp_path, None, "[BasicWindow]\nSaveProjectors=true\n")
+    snap = p.read_bytes()
+    assert M.seed_ini(str(p), DOCK) == "no-state" and p.read_bytes() == snap
+
+
+def test_a_false_marker_value_is_not_a_marker(tmp_path):
+    p, name = _default_hidden_ini(tmp_path)
+    p.write_text(p.read_text() + "\n[CameraBox]\nAvsyncDockSeeded=false\n")
+    assert M.check_ini(str(p), name) == "default-hidden"
 
 
 # --- the names are the dock's own --------------------------------------------------------------------
