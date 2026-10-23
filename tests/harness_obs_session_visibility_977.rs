@@ -348,7 +348,7 @@ fn recording_e2e_sources_the_lib_and_gates_before_dantesync() {
 
 /// The byte window the gate tests read from the `obs64/AHK session-visibility gate` banner. Widened
 /// from 3200 to 3600 bytes in issue 1462 (the Linux stream-box branch before the Windows stream
-/// leg): the last anchor, `win-stream-snv MCP Shell`, ends at byte 3088 (measured 23.10.2026).
+/// leg): the last anchor, `win-stream-snv MCP Shell`, ends at byte 3092 (measured 23.10.2026).
 const GATE_WINDOW: usize = 3600;
 
 #[test]

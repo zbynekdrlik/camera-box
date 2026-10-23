@@ -291,6 +291,23 @@ def test_e2e_marker_decodability_never_pulls_back_a_stale_wav_after_a_failed_ext
     assert len(ffmpeg_calls(rig)) == 2
 
 
+def test_e2e_marker_decodability_pulls_nothing_back_when_the_extract_never_ran(tmp_path):
+    # the extract's ssh fails (so its `rm` of the box WAV never ran) while scp still connects: the
+    # leftover WAV of an aborted earlier run must not be pulled back and probed as this run's audio
+    rig = _rig(tmp_path)
+    pdir, plog = _probe(tmp_path, rig)
+    stale = rig["home"] / "mbc decodability.wav"
+    stale.write_bytes(b"RIFF-stale-wav-of-an-older-run")
+    region = _region('echo "[4b3/8]', 'echo "[4c/8]')
+    p = _e2e(tmp_path, rig, region, extra='PROBE_BIN_DIR="%s"\nOUTDIR="%s"\nRUN_ID=4242\n' % (pdir, tmp_path / "out"),
+             env={"FAKE_REC_PATH": REC_LX, "FAKE_PROBE_LOG": str(plog), "FAKE_SSH_DOWN": "1",
+                  "AUDIO_DECODABILITY_READ_ATTEMPTS": "2", "AUDIO_DECODABILITY_WAV_LX": str(stale)})
+    assert p.returncode == 1 and "never arrived" in p.stderr and "REGION-END" not in p.stdout
+    assert not plog.exists(), "the probe never ran on the stale WAV"
+    assert not [x for x in calls(rig) if x["tool"] == "scp"], "nothing is pulled back after a failed extract"
+    assert ffmpeg_calls(rig) == []
+
+
 def test_e2e_marker_decodability_keeps_the_windows_path(tmp_path):
     rig = _rig(tmp_path)
     pdir, plog = _probe(tmp_path, rig)
