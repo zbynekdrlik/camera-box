@@ -6,7 +6,7 @@ strih-snv 10.77.7.202:6981 over the VLAN-70 leg, 96 kHz, 239 frames per packet, 
 design: the program VBAN is a box FACT on every role, and every consumer follows the facts, never the role:
 
   * the loader takes the four program facts on the strih role too -- all `none` (a hub-fed strih, strih-pp)
-    or all set (strih-snv: `strih-obs` / 6981 / 20 / `ASIO zvuk`), never a mix;
+    or all set (strih-snv: `strih-obs` / 6981 / 30 / `ASIO zvuk`), never a mix;
   * the strih seed manifest then carries `program_audio_input` + `program_audio_vban`, which the role-free
     seeder (strih_scenes.py -> program_audio_vban.py) already switches, keeping the operator's mixer state;
   * verify item 9 grades the obs-vban source on every box that declares it;
@@ -93,7 +93,7 @@ def _header_define(name):
 
 # --- the facts ---------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("box,want", [("strih-snv", "strih-obs|6981|20|ASIO zvuk"),
+@pytest.mark.parametrize("box,want", [("strih-snv", "strih-obs|6981|30|ASIO zvuk"),
                                       ("strih-pp", "none|none|none|none")])
 def test_each_strih_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s|%s" "$(strih_lx_program_vban_streams)" '
@@ -157,7 +157,7 @@ def test_a_strih_box_with_all_four_program_facts_loads(tmp_path):
 
 
 @pytest.mark.parametrize("old,new,word", [
-    ("STRIH_PROGRAM_VBAN_RESERVE_MS=20\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=9\n", "10..500"),
+    ("STRIH_PROGRAM_VBAN_RESERVE_MS=30\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=9\n", "10..500"),
     ("STRIH_PROGRAM_VBAN_PORT=6981\n", "STRIH_PROGRAM_VBAN_PORT=80\n", "1024..65535"),
     ("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=strih-obs lv1-obs\n", "ONE VBAN stream"),
 ])
@@ -180,7 +180,7 @@ def test_the_strih_snv_manifest_switches_asio_zvuk_to_the_vban_source():
     text = _manifest("strih-snv")
     scn = _scenes()
     assert scn.parse_program_audio_input(text) == "ASIO zvuk"
-    assert PAV.parse_program_audio_vban(text) == PAV.vban_source_settings(6981, "strih-obs", 20)
+    assert PAV.parse_program_audio_vban(text) == PAV.vban_source_settings(6981, "strih-obs", 30)
     # the strih role keeps the operator's monitoring and its collection's other audio inputs
     assert scn.parse_program_audio_monitor(text) is None
     assert scn.parse_pulse_capture_rule(text) is None
@@ -215,7 +215,7 @@ def test_the_program_vban_declared_predicate_follows_the_facts(box, want):
 
 LINE = ("21:30:00.000: [obs-vban] obs-vban receive: received=%d lost=0 late=0 re_anchors=0 stale=0 reordered=0 "
         "concealed=0 silence_ms=0.0 max_late_ms=-13.1 sender_ppm=+0.300 phase_ms=+0.01 fit=locked "
-        "emit_late_ms=-12.0 emit_missed=0 receive_buffer_ms=20 rate=96000 ch=2 port=6981 stream='strih-obs' "
+        "emit_late_ms=-12.0 emit_missed=0 receive_buffer_ms=30 rate=96000 ch=2 port=6981 stream='strih-obs' "
         "source='ASIO zvuk'\n")
 
 

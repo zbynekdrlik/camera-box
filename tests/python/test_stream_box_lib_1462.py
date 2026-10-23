@@ -112,7 +112,7 @@ def test_a_linux_box_whose_facts_declare_no_program_vban_refuses_by_name(tmp_pat
     t = f.read_text()
     for old, new in (("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=none\n"),
                      ("STRIH_PROGRAM_VBAN_PORT=6981\n", "STRIH_PROGRAM_VBAN_PORT=none\n"),
-                     ("STRIH_PROGRAM_VBAN_RESERVE_MS=20\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=none\n"),
+                     ("STRIH_PROGRAM_VBAN_RESERVE_MS=30\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=none\n"),
                      ("STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n", "STRIH_PROGRAM_AUDIO_INPUT=none\n")):
         assert t.count(old) == 1, old
         t = t.replace(old, new)

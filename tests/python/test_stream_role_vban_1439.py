@@ -104,7 +104,7 @@ def test_every_box_fact_file_loads(box):
 
 
 @pytest.mark.parametrize("box,want", [("stream-pp", "stream|6980|40"), ("stream-snv", "stream|6980|80"),
-                                      ("strih-snv", "strih-obs|6981|20"), ("strih-pp", "none|none|none")])
+                                      ("strih-snv", "strih-obs|6981|30"), ("strih-pp", "none|none|none")])
 def test_each_box_declares_its_program_vban(box, want):
     r = _bash('strih_box_load "$1"\nprintf "%s|%s|%s" "$(strih_lx_program_vban_streams)" '
               '"$(strih_lx_program_vban_port)" "$(strih_lx_program_vban_reserve_ms)"', box)

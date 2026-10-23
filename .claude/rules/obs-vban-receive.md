@@ -428,7 +428,7 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
 - **Facts:** `STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `_RESERVE_MS`: stream-pp `stream` / `6980` /
   `40`, stream-snv `stream` / `6980` / `80` (finding 6348583939: mbc's gaps reached 52 ms under the
   22.10.2026 production load, lv1's are 26-29 ms; R - one packet - the 2 ms deadline margin must sit
-  above the sender's worst gap, pinned by the pytest); strih-snv `strih-obs` / `6981` / `20` (phase 2), strih-pp `none` x 3 (hub-fed);
+  above the sender's worst gap, pinned by the pytest); strih-snv `strih-obs` / `6981` / `30` (phase 2), strih-pp `none` x 3 (hub-fed);
   the loader takes on the strih role all four program facts or all four `none`, and refuses a stream
   role without exactly ONE stream). `none` is a sentinel, never a stream name.
   `STRIH_PROGRAM_AUDIO_INPUT` (issue 1462) names the OBS program-audio input per box: stream-pp
@@ -517,11 +517,11 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
   participants, 212 points; fohabl/lv1 keep their cutters / speakers points and channel counts).
   `tests/python/test_strih_role_vban_1439.py` pins it per box: a strih box that declares a program
   VBAN stream has no `program_out` in its `STRIH_INTERCOM_CONFIG`, a hub-fed one still has one.
-- **R = 20 ms (low: the strih path's double-sound budget, issue-1437 item 4).** 20 - one 96 kHz
-  packet (2.49 ms) - the 2 ms margin = 15.5 ms over the console's worst gap on the leg, read from the
-  hub's `fohabl` `max_gap_ms_10min` 11.4-11.5 ms (23.10.2026 evening, no production load; no
-  passwordless sudo for a tcpdump of `strih-obs` itself). The pytest pins R <= 25 and the budget > 11.5.
-  The source's `max_late_ms` / `late` / `emit_missed` under production load decide a raise.
+- **R = 30 ms (low: the strih path's latency against double sound, owner 22.10.2026).** First set
+  to 20 ms from the hub's `fohabl` `max_gap_ms_10min` 11.4-11.5 ms on the same leg. The first live run
+  at 20 ms (23.10.2026 22:59:48, 23 s after the OBS start) dropped one packet 1.5 ms past its deadline
+  (one 2.5 ms silence slot) and read `max_late_ms` -5 to -7 in the steady state, so R went to 30. The
+  pytest pins the in-time window (R - the 2 ms margin) >= 20 + 1.5 + 5 ms and R <= 30.
 - **96 kHz:** `tests/vban_source_96k_1439.rs` runs `strih-obs`'s exact shape through the shipped
   source (the lift driver's `sr=N` token = the VBAN rate index): every output at 96 kHz, contiguous on
   the 96 kHz clock, the lead-in = R on that clock, 24-bit samples whole, one loss one concealed slot.
@@ -529,7 +529,7 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
   sink + loopback on a box whose program is VBAN (no writer, no OBS input on it after the switch).
 - **Rollout (supervisor):** the strih bundle with obs-vban, setup-strih on strih-snv with OBS stopped
   (step 13 installs the new hub TOML; a running hub is never restarted, so `systemctl restart
-  intercom-hub`), then start OBS. Read `obs-vban receive: ... rate=96000 ... receive_buffer_ms=20 ...
+  intercom-hub`), then start OBS. Read `obs-vban receive: ... rate=96000 ... receive_buffer_ms=30 ...
   port=6981 stream='strih-obs' source='ASIO zvuk'` with `emit_missed=0`, verify item 9, and the hub's
   `/api/state` without `program_out`. The OBS input must be live before the hub TOML loses
   `program_out` (otherwise a gap in the program audio).

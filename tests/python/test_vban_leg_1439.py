@@ -133,7 +133,7 @@ def test_stream_snv_has_the_nic_leg_strih_snv_the_vlan_leg_every_other_box_none(
     ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.232"),
                    ("STRIH_PROGRAM_VBAN_STREAMS=strih-obs", "STRIH_PROGRAM_VBAN_STREAMS=none"),
                    ("STRIH_PROGRAM_VBAN_PORT=6981", "STRIH_PROGRAM_VBAN_PORT=none"),
-                   ("STRIH_PROGRAM_VBAN_RESERVE_MS=20", "STRIH_PROGRAM_VBAN_RESERVE_MS=none"),
+                   ("STRIH_PROGRAM_VBAN_RESERVE_MS=30", "STRIH_PROGRAM_VBAN_RESERVE_MS=none"),
                    ("STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk", "STRIH_PROGRAM_AUDIO_INPUT=none")],
      "STRIH_PROGRAM_VBAN_PORT"),
     ("strih-snv", [("STRIH_PROGRAM_VBAN_SENDER=" + STRIH_SENDER, "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:80")], "port"),

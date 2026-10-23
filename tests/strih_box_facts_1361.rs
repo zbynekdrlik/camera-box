@@ -188,7 +188,7 @@ fn loader_loads_strih_lx_facts() {
         // `ASIO zvuk` on UDP 6981 (the hub keeps 6980), a low fixed Receive Buffer.
         "STRIH_PROGRAM_VBAN_STREAMS=strih-obs",
         "STRIH_PROGRAM_VBAN_PORT=6981",
-        "STRIH_PROGRAM_VBAN_RESERVE_MS=20",
+        "STRIH_PROGRAM_VBAN_RESERVE_MS=30",
         "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk",
         // issue 1439 (supervisor 23.10.2026 10:31): VLAN 70 tagged on the rig NIC; Ableton-FOH sends the
         // hub's fohabl-strih (6980) and the strih OBS's strih-obs (6981) to it.
