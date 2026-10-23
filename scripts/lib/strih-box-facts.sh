@@ -40,6 +40,7 @@ strih_box_fact_keys() {
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
     STRIH_PROGRAM_VBAN_STREAMS STRIH_PROGRAM_VBAN_PORT STRIH_PROGRAM_VBAN_RESERVE_MS \
     STRIH_PROGRAM_AUDIO_INPUT \
+    STRIH_PROGRAM_VBAN_LEG STRIH_PROGRAM_VBAN_LEG_ADDR STRIH_PROGRAM_VBAN_SENDER \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC
@@ -286,6 +287,45 @@ strih_box_validate() {
     fi
     if [[ ! "$vr" =~ ^[123456789][0123456789]{0,2}$ ]] || [ "$vr" -lt "$STRIH_BOX_VBAN_RESERVE_MS_MIN" ] || [ "$vr" -gt "$STRIH_BOX_VBAN_RESERVE_MS_MAX" ]; then
       echo "strih-box ${name}: STRIH_PROGRAM_VBAN_RESERVE_MS '${vr}' must be the fixed Receive Buffer in ms (${STRIH_BOX_VBAN_RESERVE_MS_MIN}..${STRIH_BOX_VBAN_RESERVE_MS_MAX})" >&2; bad=1
+    fi
+  fi
+  # issue 1439 (ROZHODNUTÉ 6360417876, owner 23.10.2026): the VBAN-only leg on the console's audio VLAN
+  # (scripts/lib/strih-vban-leg.sh). STRIH_PROGRAM_VBAN_LEG = `mac:<MAC>` (a second NIC, its MAC lower-case
+  # as sysfs prints it; stream-snv) | `vlan:<id>` (a tagged VLAN 1..4094 on the rig NIC; strih-snv, the
+  # supervisor's 23.10.2026 10:31 scope) | none. _LEG_ADDR = the box's /32 on it. STRIH_PROGRAM_VBAN_SENDER =
+  # the console that sends (none = the leg passes only ping; a sender needs STRIH_PROGRAM_VBAN_PORT), in
+  # the address's /24 (the policy route for the ping replies covers that /24); neither is the rig address.
+  # Every role (the strih role's own VBAN program is phase 2).
+  local lg="${f[STRIH_PROGRAM_VBAN_LEG]}" la="${f[STRIH_PROGRAM_VBAN_LEG_ADDR]}" ls="${f[STRIH_PROGRAM_VBAN_SENDER]}"
+  local hx='[0123456789abcdef]' dg='[0123456789]' nz='[123456789]'
+  if [ "$lg" = none ]; then
+    [ "${la}:${ls}" = none:none ] \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' / STRIH_PROGRAM_VBAN_SENDER '${ls}' must be none while STRIH_PROGRAM_VBAN_LEG is none" >&2; bad=1; }
+  else
+    case "$lg" in
+      mac:*) [[ "${lg#mac:}" =~ ^${hx}${hx}(:${hx}${hx}){5}$ ]] \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG '${lg}': the MAC must be six lower-case hex pairs joined by : (as /sys/class/net/<if>/address prints it)" >&2; bad=1; } ;;
+      vlan:*) if [[ ! "${lg#vlan:}" =~ ^${nz}${dg}{0,3}$ ]] || [ "${lg#vlan:}" -gt 4094 ]; then
+          echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG '${lg}': the VLAN id must be 1..4094 (no leading zero)" >&2; bad=1
+        fi ;;
+      *) echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG '${lg}' must be mac:<MAC> (a second NIC), vlan:<id> (a tagged VLAN on the rig NIC) or none" >&2; bad=1 ;;
+    esac
+    if ! _strih_box_ipv4 "$la"; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' must be the box's IPv4 address on the leg" >&2; bad=1
+    elif [ "$la" = "${f[STRIH_IP]}" ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' must not be the rig address STRIH_IP" >&2; bad=1
+    fi
+    if [ "$ls" != none ]; then
+      if ! _strih_box_ipv4 "$ls"; then
+        echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' must be the console's IPv4 address, or none (the leg passes only ping)" >&2; bad=1
+      elif _strih_box_ipv4 "$la"; then
+        [ "${la%.*}" = "${ls%.*}" ] \
+          || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' must be in the leg's /24 (${la%.*}.0/24, STRIH_PROGRAM_VBAN_LEG_ADDR)" >&2; bad=1; }
+        [ "$la" != "$ls" ] \
+          || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR and STRIH_PROGRAM_VBAN_SENDER must differ (both '${la}')" >&2; bad=1; }
+      fi
+      [ "${f[STRIH_PROGRAM_VBAN_PORT]}" != none ] \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' needs the UDP port it sends to (STRIH_PROGRAM_VBAN_PORT is none)" >&2; bad=1; }
     fi
   fi
   # issue 1412 slice B: the NDI program a stream box receives (`none` on a strih), and the venue whose
@@ -577,6 +617,11 @@ strih_lx_program_vban_port() { strih_box_fact STRIH_PROGRAM_VBAN_PORT; }
 strih_lx_program_vban_reserve_ms() { strih_box_fact STRIH_PROGRAM_VBAN_RESERVE_MS; }
 # issue 1462: the stream role's OBS program-audio input name (`none` on the strih role).
 strih_lx_program_audio_input() { strih_box_fact STRIH_PROGRAM_AUDIO_INPUT; }
+# issue 1439 (ROZHODNUTÉ 6360417876): the VBAN-only leg -- `mac:<MAC>` | `vlan:<id>` | none, the box's /32
+# on it, the console that sends (none = ping only; scripts/lib/strih-vban-leg.sh).
+strih_lx_program_vban_leg() { strih_box_fact STRIH_PROGRAM_VBAN_LEG; }
+strih_lx_program_vban_leg_addr() { strih_box_fact STRIH_PROGRAM_VBAN_LEG_ADDR; }
+strih_lx_program_vban_sender() { strih_box_fact STRIH_PROGRAM_VBAN_SENDER; }
 
 # strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
 strih_box_venue() { strih_box_fact STRIH_VENUE; }

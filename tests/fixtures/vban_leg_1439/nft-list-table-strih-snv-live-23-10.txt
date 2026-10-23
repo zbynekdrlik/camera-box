@@ -1,0 +1,13 @@
+table inet vban_dante70 {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname "enp7s0.70" icmp type echo-request counter packets 3 bytes 180 accept
+		iifname "enp7s0.70" counter packets 524 bytes 55928 drop
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "enp7s0.70" icmp type echo-reply counter packets 3 bytes 180 accept
+		oifname "enp7s0.70" counter packets 19 bytes 5475 drop
+	}
+}
