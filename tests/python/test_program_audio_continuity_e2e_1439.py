@@ -228,14 +228,39 @@ def test_the_fold_never_lowers_a_red_gate_under_set_e(tmp_path):
 
 # --- review round 1 -------------------------------------------------------------------------------
 
-def test_a_lookback_too_short_for_the_opening_line_reads_the_whole_log_once(tmp_path):
+def _counting_box(tmp_path):
+    """The fake box, logging every slice's FROM line to tmp_path/froms."""
+    inner = _fake_box(tmp_path)
+    cmd = tmp_path / "counting.sh"
+    cmd.write_text(f"""#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = slice ] && echo "$4" >> '{tmp_path}/froms'
+exec '{inner}' "$@"
+""")
+    cmd.chmod(0o755)
+    return cmd
+
+
+def test_a_lookback_too_short_for_the_opening_line_reads_ten_times_further_once(tmp_path):
     # the opening status line sits more than LOOKBACK lines before the start mark (a relock burst):
-    # the gate reads again from the log's first line instead of reporting UNKNOWN
+    # the gate reads again from 10 x the lookback, once, instead of reporting UNKNOWN -- never the
+    # whole log (tens of MB on a multi-day session, review round 2)
     _verdict(tmp_path)
     _marks(tmp_path, 42000, 42100)
-    r = _run(tmp_path, _gate_body(), _fake_box(tmp_path), PROGRAM_AUDIO_CONTINUITY_LOOKBACK="3")
+    r = _run(tmp_path, _gate_body(), _counting_box(tmp_path), PROGRAM_AUDIO_CONTINUITY_LOOKBACK="3")
     assert "GATE=0" in r.stdout, r.stdout + r.stderr
-    assert "from the first line" in r.stdout
+    assert "reading again from line 41970 (10 x the lookback)" in r.stdout, r.stdout
+    assert (tmp_path / "froms").read_text().split() == ["41997", "41970"]
+
+
+def test_an_opening_line_beyond_the_wider_read_is_unknown_after_one_wider_read(tmp_path):
+    _verdict(tmp_path)
+    _marks(tmp_path, 42000, 42100)
+    r = _run(tmp_path, _gate_body(), _counting_box(tmp_path), PROGRAM_AUDIO_CONTINUITY_LOOKBACK="1",
+             PROGRAM_AUDIO_CONTINUITY_WAIT_S="5", PROGRAM_AUDIO_CONTINUITY_STEP_S="1")
+    assert "GATE=1" in r.stdout, r.stdout + r.stderr
+    assert (tmp_path / "froms").read_text().split() == ["41999", "41990"]
+    assert _block(tmp_path)["opening_missing"] is True
 
 
 def test_a_block_that_could_not_be_merged_is_named_loudly(tmp_path):
