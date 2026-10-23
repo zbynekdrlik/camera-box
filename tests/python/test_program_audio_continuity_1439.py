@@ -42,7 +42,8 @@ def _decide(start_count, end_count, lines=None, name="mbc", vban=True):
 
 def _c_format(path, head):
     """The C format string starting at `head`, its literals joined, PRIu64 / %ld / %.*s made python."""
-    src = re.sub(r'"\s*PRIu64\s*"', "d", path.read_text())
+    src = re.sub(r'"\s*PRI[ud]64\s*"', "d", path.read_text())
+    src = re.sub(r'"\s*PRI[ud]64\s*,', 'd",', src)  # a format that ENDS in a PRIu64
     start = src.index(head)
     end = src.index('",', start) + 1
     fmt = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', src[start:end]))
@@ -66,6 +67,12 @@ def _asrc_line(ts, steps=0, jumps=0, name="mbc"):
     fmt = _c_format(OBS_SOURCE, '"asrc: source \'%s\' estimated=')
     return f"{ts}: " + fmt % (name, 0.0, 0.7, 0.0, 0.04, 60.0, 0, 0.0, 0.0, 0.7, steps, 0.0, 0, 0.0,
                               0.0, 1, jumps, 0.0, "stamp")
+
+
+def _tele_line(ts, mixed_late=0, name="mbc"):
+    """The per-source `audio-telemetry #800 '<src>': ... mixed_late=N` line (obs-audio.c, every 60 s)."""
+    fmt = _c_format(OBS_AUDIO, '"audio-telemetry #800 \'%s\': ts_lag_ms=')
+    return f"{ts}: " + fmt % (name, 21, 126, 0, 0, mixed_late)
 
 
 # --- the real stream-snv log -------------------------------------------------------------------
@@ -134,10 +141,10 @@ def test_an_input_with_no_status_line_at_all_is_unknown():
 
 # --- rendered lines: OBS restarts, older builds, the other counters -------------------------------
 
-def _window(before, inside, after, asrc=True):
+def _window(before, inside, after, asrc=True, tele=None):
     """[before..] START [inside..] STOP [after..] -> (lines, start_count, end_count) with FIRST = 1."""
-    pre = ([_asrc_line("10:00:00.000")] if asrc else []) + before
-    post = after + ([_asrc_line("10:02:00.000")] if asrc else [])
+    pre = ([_asrc_line("10:00:00.000"), _tele_line("10:00:00.100")] if asrc else []) + before
+    post = after + ([_asrc_line("10:02:00.000"), _tele_line("10:02:00.100", **(tele or {}))] if asrc else [])
     lines = pre + inside + post
     return lines, len(pre), len(pre) + len(inside)
 
@@ -201,17 +208,18 @@ def test_a_buffering_guard_line_of_another_source_is_not_this_gate():
 
 def test_an_asrc_placement_jump_or_step_fails():
     for kw, name in (({"jumps": 1}, "place_jumps"), ({"steps": 2}, "steps")):
-        lines = [_asrc_line("10:00:00.000"), _status_line("10:00:01.000", 1000, 0),
-                 _status_line("10:00:30.000", 2000, 0), _asrc_line("10:01:00.000", **kw)]
-        res = pac.decide(lines, "mbc", 2, 2, True)
+        lines = [_asrc_line("10:00:00.000"), _tele_line("10:00:00.100"), _status_line("10:00:01.000", 1000, 0),
+                 _status_line("10:00:30.000", 2000, 0), _asrc_line("10:01:00.000", **kw),
+                 _tele_line("10:01:00.100")]
+        res = pac.decide(lines, "mbc", 3, 3, True)
         assert res["verdict"] == "FAIL" and any(f.startswith(f"asrc {name} +") for f in res["failures"]), res
 
 
 def test_no_asrc_line_after_the_stop_is_unknown_and_retryable():
     lines, s, e = _window([_status_line("10:00:01.000", 1000, 0)], [],
                           [_status_line("10:00:30.000", 2000, 0)], asrc=False)
-    lines = [_asrc_line("09:59:59.000")] + lines
-    res = _decide_rendered(lines, s + 1, e + 1)
+    lines = [_asrc_line("09:59:59.000"), _tele_line("09:59:59.100")] + lines + [_tele_line("10:01:00.000")]
+    res = _decide_rendered(lines, s + 2, e + 2)
     assert res["verdict"] == "UNKNOWN" and res["retryable"] is True, res
 
 
@@ -227,9 +235,11 @@ def test_a_windows_stream_box_grades_the_guard_and_asrc_only_and_says_so():
 
 def test_an_input_name_with_spaces_is_read():
     name = "Zvuk z mixu"
-    lines = [_asrc_line("10:00:00.000", name=name), _status_line("10:00:01.000", 1000, 0, name=name),
-             _status_line("10:00:30.000", 2000, 1, concealed=1, name=name), _asrc_line("10:01:00.000", name=name)]
-    res = pac.decide(lines, name, 2, 2, True)
+    lines = [_asrc_line("10:00:00.000", name=name), _tele_line("10:00:00.100", name=name),
+             _status_line("10:00:01.000", 1000, 0, name=name),
+             _status_line("10:00:30.000", 2000, 1, concealed=1, name=name), _asrc_line("10:01:00.000", name=name),
+             _tele_line("10:01:00.100", name=name)]
+    res = pac.decide(lines, name, 3, 3, True)
     assert res["verdict"] == "FAIL" and res["lost_concealed"] == 1, res
 
 
@@ -239,6 +249,66 @@ def test_the_status_format_of_the_shipped_c_is_parsed_whole():
     assert st["source"] == "mbc" and st["stream"] == "stream"
     assert (f["received"], f["lost"], f["late"], f["re_anchors"], f["stale"], f["reordered"],
             f["concealed"], f["emit_missed"]) == ("7", "6", "5", "4", "3", "2", "1", "8")
+
+
+# --- review round 1 (fresh-context review of the lane) ------------------------------------------
+
+def test_a_mixed_late_event_the_guard_did_not_log_in_the_window_fails():
+    # the guard logs a source's later MIXED_LATE events once a minute: a storm that began just before
+    # the window logged its line THERE, and its in-window events show only in the per-source counter
+    lines, s, e = _window([_guard_line("10:00:00.500"), _status_line("10:00:01.000", 1000, 0)], [],
+                          [_status_line("10:00:30.000", 2000, 0)], tele={"mixed_late": 3})
+    res = _decide_rendered(lines, s, e)
+    assert res["verdict"] == "FAIL" and "mixed_late +3" in res["failures"], res
+    assert res["guard_lines"] == [], res  # the guard line sits before the counter interval
+
+
+def test_no_per_source_telemetry_line_after_the_stop_is_unknown():
+    lines, s, e = _window([_status_line("10:00:01.000", 1000, 0)], [], [_status_line("10:00:30.000", 2000, 0)])
+    lines = [l for l in lines if "#800 'mbc'" not in l or l.startswith("10:00:00")]
+    res = _decide_rendered(lines, s, e)
+    assert res["verdict"] == "UNKNOWN" and any("audio-telemetry #800 'mbc'" in u for u in res["unknown_reasons"]), res
+    assert res["retryable"] is True
+
+
+def test_a_telemetry_line_without_mixed_late_is_named_not_graded():
+    lines, s, e = _window([_status_line("10:00:01.000", 1000, 0)], [], [_status_line("10:00:30.000", 2000, 0)])
+    lines = [l.replace(" mixed_late=0", "") for l in lines]
+    res = _decide_rendered(lines, s, e)
+    assert res["verdict"] == "PASS" and "mixed_late" in res["not_graded"], res
+    assert any("not graded" in l and "mixed_late" in l for l in pac.summary_lines(res))
+
+
+def test_a_source_re_init_inside_the_window_is_unknown():
+    # a port / stream / host change re-inits every counter: a young source then reads no backwards step
+    reinit = ["10:00:10.000: [obs-vban] obs-vban receive worker: source 'mbc' stopped (update)",
+              "10:00:11.000: [obs-vban] obs-vban receive anchored: source 'mbc' frame=1 rate=48000 ch=2 "
+              "receive_buffer_ms=80 -- holding its first second"]
+    lines, s, e = _window([_status_line("10:00:01.000", 500, 0)], reinit, [_status_line("10:00:30.000", 6000, 0)])
+    res = _decide_rendered(lines, s, e)
+    assert res["verdict"] == "UNKNOWN" and any("re-initialized" in u for u in res["unknown_reasons"]), res
+
+
+def test_a_form_feed_in_a_log_line_never_moves_the_window_marks(tmp_path):
+    # wc -l / tail -n +N count newlines only; str.splitlines() also splits on \f, \r, \x1c..: the marks
+    # would land one line early and a quiet 10 s before the stop picked a too-early closing line
+    rows = [_asrc_line("10:00:00.000"), _tele_line("10:00:00.100"),
+            _status_line("10:00:01.000", 1000, 0), "10:00:02.000: odd\x0cline",
+            _status_line("10:00:11.000", 1500, 0), _status_line("10:00:20.000", 2000, 0),
+            "10:00:31.000: the stop", _status_line("10:00:32.000", 2500, 0),
+            _status_line("10:00:42.000", 3000, 4), _asrc_line("10:01:00.000"), _tele_line("10:01:00.100")]
+    log = tmp_path / "log.txt"
+    log.write_bytes(("\n".join(rows) + "\n").encode())
+    r = _cli("--log", str(log), "--input", "mbc", "--start-line", "4", "--end-line", "7")
+    assert r.returncode == 1 and "lost +4" in r.stdout, r.stdout + r.stderr
+
+
+def test_a_missing_opening_line_is_not_retryable_but_asks_for_a_longer_read():
+    lines, s, e = _window([], [], [])
+    lines = [l for l in lines if "obs-vban receive:" not in l]
+    res = _decide_rendered(lines, s, e)
+    assert res["verdict"] == "UNKNOWN" and res["retryable"] is False, res
+    assert res["opening_missing"] is True
 
 
 def test_file_order_times_cross_midnight():

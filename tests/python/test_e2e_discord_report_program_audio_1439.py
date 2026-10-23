@@ -92,3 +92,10 @@ def test_the_full_report_has_the_program_audio_section():
     text = edr.compose_report(_with(_block(42000, 42100)), {"run_id": "42"})
     assert "Kontinuita zvuku programu" in text and "✅" in text
     assert "Kontinuita zvuku programu" not in edr.compose_report(_pass_verdict(), {"run_id": "42"})
+
+
+def test_the_full_report_names_what_an_older_build_did_not_grade():
+    blk = _block(42000, 42100)
+    blk["not_graded"] = ["stale", "emit_missed"]
+    text = edr.compose_report(_with(blk), {"run_id": "42"})
+    assert "neoverené (starší build): stale, emit_missed" in text, text

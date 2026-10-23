@@ -224,3 +224,23 @@ def test_the_fold_never_lowers_a_red_gate_under_set_e(tmp_path):
             'GATE=0; if ! f; then [ "$GATE" -ne 0 ] || GATE=1; fi; echo "G=$GATE"')
     r = _run(tmp_path, body, "/bin/false")
     assert "G=3\nG=1" in r.stdout and "HARNESS-END" in r.stdout
+
+
+# --- review round 1 -------------------------------------------------------------------------------
+
+def test_a_lookback_too_short_for_the_opening_line_reads_the_whole_log_once(tmp_path):
+    # the opening status line sits more than LOOKBACK lines before the start mark (a relock burst):
+    # the gate reads again from the log's first line instead of reporting UNKNOWN
+    _verdict(tmp_path)
+    _marks(tmp_path, 42000, 42100)
+    r = _run(tmp_path, _gate_body(), _fake_box(tmp_path), PROGRAM_AUDIO_CONTINUITY_LOOKBACK="3")
+    assert "GATE=0" in r.stdout, r.stdout + r.stderr
+    assert "from the first line" in r.stdout
+
+
+def test_a_block_that_could_not_be_merged_is_named_loudly(tmp_path):
+    (tmp_path / "verdict.json").write_text("{ not json")
+    _marks(tmp_path, 41620, 41710)
+    r = _run(tmp_path, _gate_body(), _fake_box(tmp_path))
+    assert "GATE=1" in r.stdout
+    assert "the E2E report will NOT show it" in r.stderr, r.stderr
