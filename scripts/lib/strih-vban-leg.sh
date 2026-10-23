@@ -26,16 +26,18 @@
 #        (`link change old 10000 new 0`, carrier lost) the FIRST time a VLAN enters its HW filter
 #        (`8021q: adding VLAN 0 to HW filter`) -- NDI, PTP and ssh on the production box go with it. So
 #        the VLAN connection is created ONLY when absent, after a loud WARNING, created down and brought
-#        up exactly once; it is NEVER deleted, re-created, brought down or up again: an address / route /
-#        rule change is modify + `device reapply`, a refused reapply FAILS by name, an identity change
-#        (vlan.parent, vlan.id, the interface name) is refused untouched (a maintenance-window job).
+#        up exactly once (then setup waits, bounded, for the rig link to come back); it is NEVER deleted,
+#        re-created, brought down or up again: an address / route / rule change is modify + `device
+#        reapply`, a refused reapply FAILS by name, an identity change (vlan.parent, vlan.id, the interface
+#        name) and an existing INACTIVE VLAN profile are refused untouched -- arming its autoconnect would
+#        make NetworkManager activate it at once (a maintenance-window job).
 #   2. nftables `table inet vban_dante70` (the house pattern of scripts/lib/dscp-nft.sh: a dedicated
 #      table, `table` / `delete table` atomic replace, never `flush ruleset`, applied by its own boot
 #      oneshot, never the distro nftables.service): IN on the leg only the sender's VBAN + echo
 #      requests, OUT on the leg only echo replies (owner: ping "aby sme mali aspon nejake info ze to
 #      bezi"), everything else dropped and counted; ARP is not IP and still answers. With a sender, one
-#      counter-only rule (no verdict) of VBAN arriving on any OTHER interface: verify's "VBAN no longer
-#      comes through the router" proof. Without one (STRIH_PROGRAM_VBAN_SENDER=none, strih-snv until
+#      counter-only rule (no verdict) of the SENDER's VBAN arriving on any OTHER interface (a routed packet
+#      keeps its source address): verify's "VBAN no longer comes through the router" proof. Without one (STRIH_PROGRAM_VBAN_SENDER=none, strih-snv until
 #      phase 2) the leg passes only ping. dantesync keeps video-clock.lan on the rig NIC and never sees
 #      audio-VLAN PTP (the input drop); avahi is never touched (the output drop keeps mDNS off the leg).
 #   3. the per-interface ARP sysctls (arp_ignore=1, arp_announce=2) in /etc/sysctl.d, slash form keyed
@@ -127,13 +129,13 @@ strih_vban_leg_nft_text() {
   local vin="" voff="" what="only echo requests (no VBAN sender declared yet)"
   if [ "$sender" != none ]; then
     vin="        iifname \"${ifc}\" ip saddr ${sender} udp dport ${port} counter accept"$'\n'
-    voff="        iifname != \"${ifc}\" iifname != \"lo\" udp dport ${port} counter"$'\n'
+    voff="        iifname != \"${ifc}\" iifname != \"lo\" ip saddr ${sender} udp dport ${port} counter"$'\n'
     what="only ${sender}'s VBAN to UDP ${port} and echo requests"
   fi
   printf '%s\n' "#!/usr/sbin/nft -f" \
     "# issue 1439 (ROZHODNUTE 6360417876): the VBAN-only leg ${ifc}. In: ${what};" \
     "# out: only echo replies; everything else dropped. A counter-only input rule (with a sender) counts" \
-    "# VBAN arriving on any other interface (verify-strih item 9: none may come through the router)." \
+    "# the sender's VBAN arriving on any other interface (verify-strih item 9: none may come routed)." \
     "# Written by setup-strih step 13 (scripts/lib/strih-vban-leg.sh), applied by ${STRIH_VBAN_LEG_UNIT}." \
     "table inet ${STRIH_VBAN_LEG_NFT_TABLE}" \
     "delete table inet ${STRIH_VBAN_LEG_NFT_TABLE}" \
@@ -255,15 +257,20 @@ _strih_vban_leg_nm_diff() {
 }
 
 # _strih_vban_leg_put PATH MODE TEXT -> `written` (temp file + rename in PATH's dir) or `unchanged` on
-# stdout; rc 1 on a write error. Content + mode compared (it runs as root on the box; the tests do not).
+# stdout; rc 1 on a write error. Content, mode and (as root) root:root ownership compared. Not
+# obs_box_write_if_changed: the caller needs the written/unchanged answer (a written ruleset reloads the
+# table) and its own named error, and that helper `fail`s the whole script (setup's fail is not defined
+# where this lib is tested).
 _strih_vban_leg_put() {
   local dest="$1" mode="$2" text="$3" tmp
   if [ -f "$dest" ] && [ "$(stat -c %a "$dest" 2>/dev/null)" = "${mode#0}" ] \
+     && { [ "$(id -u)" != 0 ] || [ "$(stat -c %U:%G "$dest" 2>/dev/null)" = root:root ]; } \
      && cmp -s "$dest" <(printf '%s\n' "$text"); then
     echo unchanged; return 0
   fi
   mkdir -p "${dest%/*}" || return 1
   tmp="$(mktemp "${dest%/*}/.${dest##*/}.XXXXXX")" || return 1
+  if [ "$(id -u)" = 0 ]; then chown root:root "$tmp" || { rm -f "$tmp"; return 1; }; fi
   if ! { printf '%s\n' "$text" >"$tmp" && chmod "$mode" "$tmp" && mv -f "$tmp" "$dest"; }; then
     rm -f "$tmp"; return 1
   fi
@@ -283,7 +290,9 @@ _strih_vban_leg_filter_apply() {
   w2="$(_strih_vban_leg_put "$uf" 0644 "$(strih_vban_leg_unit_text "$nf")")" \
     || { echo "strih-vban-leg: could not write ${uf}" >&2; return 1; }
   echo "  ${nf}: ${w1}; ${uf}: ${w2}"
-  if [ "$w2" = written ]; then systemctl daemon-reload || return 1; fi
+  if [ "$w2" = written ]; then
+    systemctl daemon-reload || { echo "strih-vban-leg: systemctl daemon-reload failed after writing ${uf}" >&2; return 1; }
+  fi
   if ! systemctl is-enabled -q "$STRIH_VBAN_LEG_UNIT" 2>/dev/null; then
     systemctl enable "$STRIH_VBAN_LEG_UNIT" || { echo "strih-vban-leg: could not enable ${STRIH_VBAN_LEG_UNIT}" >&2; return 1; }
   fi
@@ -350,9 +359,37 @@ _strih_vban_leg_live_problems() {
   [ "$n" = 1 ]
 }
 
+# _strih_vban_leg_rig_link_wait PARENT -> after a first VLAN activation: wait (bounded,
+# STRIH_VBAN_LEG_LINK_WAIT_S, 30 s) for the rig NIC's carrier and a default route through it again (the
+# atlantic reset takes ~8 s), so the next setup step does not meet a dead rig link. Always rc 0.
+_strih_vban_leg_rig_link_wait() {
+  local parent="$1" n=0 max="${STRIH_VBAN_LEG_LINK_WAIT_S:-30}" t
+  [[ "$max" =~ ^[0123456789]+$ ]] || max=30
+  while :; do
+    t="$(ip -4 route show default 2>/dev/null || true)"
+    if [ "$(cat "$(_strih_vban_leg_sysfs)/class/net/${parent}/carrier" 2>/dev/null || true)" = 1 ] \
+       && grep -F -- " dev ${parent} " <<<"$t" >/dev/null; then
+      echo "  the rig link ${parent} is up again (carrier + default route) after ${n} s"
+      return 0
+    fi
+    if [ "$n" -ge "$max" ]; then
+      echo "  WARNING: the rig link ${parent} is not back after ${max} s (carrier or default route missing) -- the next steps may fail on the network; re-run setup-strih when it is"
+      return 0
+    fi
+    sleep 1
+    n=$((n + 1))
+  done
+}
+
 # _strih_vban_leg_vlan_warning PARENT ID -> the loud line printed before a first VLAN creation.
 _strih_vban_leg_vlan_warning() {
   echo "  WARNING: creating VLAN ${2} on the rig NIC ${1} -- the atlantic driver resets the rig link for ~8 s the first time a VLAN enters its HW filter (issue 1439, 23.10.2026): NDI, PTP and ssh on this box drop for that time; done once, never again on a re-run"
+}
+
+# _strih_vban_leg_active_on IF -> the UUID of the profile active on IF ('' when none).
+_strih_vban_leg_active_on() {
+  nmcli -g UUID,DEVICE connection show --active </dev/null 2>/dev/null \
+    | while IFS=: read -r u p; do [ "$p" = "$1" ] && echo "$u"; done | head -n 1 || true
 }
 
 # _strih_vban_leg_nm_apply IF ADDR MAC PARENT VLAN_ID -> the profile adopted / created, the extra ones
@@ -361,7 +398,7 @@ _strih_vban_leg_vlan_warning() {
 _strih_vban_leg_nm_apply() {
   local ifc="$1" addr="$2" mac="$3" parent="$4" id="$5" scan u named on act keep="" adopt="" first=""
   local reapply=0 diff p
-  local -a extra=() kv=() addkv=()
+  local -a extra=() kv=() addkv=() upargs=()
   scan="$(_strih_vban_leg_nm_scan "$ifc" "$mac" "$parent" "$id")" \
     || { echo "strih-vban-leg: nmcli cannot list the NetworkManager connections" >&2; return 1; }
   while read -r u named on act; do
@@ -396,15 +433,24 @@ _strih_vban_leg_nm_apply() {
     keep="$(_strih_vban_leg_nm_scan "$ifc" "$mac" "$parent" "$id" | while read -r u named on act; do [ "$named" = 1 ] && echo "$u"; done | head -n 1 || true)"
     [ -n "$keep" ] || { echo "strih-vban-leg: the new profile ${STRIH_VBAN_LEG_PROFILE} is not listed after nmcli add" >&2; return 1; }
     echo "  NM profile ${STRIH_VBAN_LEG_PROFILE} created for ${ifc}"
-    if nmcli --wait 30 connection up "$keep" ifname "$ifc" </dev/null >/dev/null; then
+    # a VLAN's device does not exist before this activation: the profile names it, so no ifname
+    if [ "$parent" = - ]; then upargs=(ifname "$ifc"); else upargs=(); fi
+    if nmcli --wait 30 connection up "$keep" "${upargs[@]}" </dev/null >/dev/null; then
       echo "  ${ifc}: ${STRIH_VBAN_LEG_PROFILE} brought up"
     else
       echo "  WARN: ${ifc} did not come up with ${STRIH_VBAN_LEG_PROFILE} (is the leg cabled to the audio VLAN?) -- it comes up with the link (autoconnect); verify-strih item 9 grades it"
     fi
+    if [ "$parent" != - ]; then _strih_vban_leg_rig_link_wait "$parent"; fi
     nmcli connection modify "$keep" connection.autoconnect yes </dev/null \
       || { echo "strih-vban-leg: nmcli could not set connection.autoconnect yes on ${keep}" >&2; return 1; }
     [ -n "$(ip -4 -o addr show dev "$ifc" 2>/dev/null || true)" ] || return 0
   else
+    act="$(_strih_vban_leg_active_on "$ifc")"
+    if [ "$parent" != - ] && [ "$act" != "$keep" ]; then
+      # arming it (autoconnect yes) or any up would activate the VLAN NOW: the atlantic link reset
+      echo "strih-vban-leg: the VLAN profile ${keep} exists but ${ifc} is not active on it -- NOT touched (an activation can reset the atlantic rig link ~8 s): nmcli connection up ${keep} in a maintenance window" >&2
+      return 1
+    fi
     diff="$(_strih_vban_leg_nm_diff "$keep" "$ifc" "$addr" "$parent" "$id")"
     if [ "$parent" != - ] && grep -E '^(connection\.interface-name|vlan\.parent|vlan\.id):' <<<"$diff" >/dev/null; then
       echo "strih-vban-leg: the VLAN profile ${keep} has another identity ($(grep -E '^(connection\.interface-name|vlan\.parent|vlan\.id):' <<<"$diff" | tr '\n' ';')) -- NOT changed: re-creating the VLAN resets the atlantic rig link (~8 s); do it by hand in a maintenance window" >&2
@@ -428,7 +474,7 @@ _strih_vban_leg_nm_apply() {
       || { echo "strih-vban-leg: nmcli could not delete the second profile ${u} on ${ifc}" >&2; return 1; }
     echo "  NM profile ${u} on ${ifc} deleted (one profile on the leg)"
   done
-  act="$(nmcli -g UUID,DEVICE connection show --active </dev/null 2>/dev/null | while IFS=: read -r u p; do [ "$p" = "$ifc" ] && echo "$u"; done | head -n 1 || true)"
+  act="$(_strih_vban_leg_active_on "$ifc")"
   if [ "$act" = "$keep" ] && [ "$reapply" = 0 ]; then
     :
   elif [ "$act" = "$keep" ] && nmcli device reapply "$ifc" </dev/null >/dev/null 2>&1; then
@@ -465,11 +511,11 @@ strih_vban_leg_install() {
   leg="$(strih_lx_program_vban_leg)"; addr="$(strih_lx_program_vban_leg_addr)"
   sender="$(strih_lx_program_vban_sender)"; port="$(strih_lx_program_vban_port)"
   [ "${leg%%:*}" != mac ] || mac="${leg#mac:}"
-  if ! res="$(strih_vban_leg_resolve 2>&1)"; then
-    echo "strih-vban-leg: the leg ${leg}: ${res} -- nothing changed" >&2
+  if ! res="$(strih_vban_leg_resolve 2>/dev/null)"; then
+    echo "strih-vban-leg: the leg ${leg}: $(strih_vban_leg_resolve 2>&1 >/dev/null || true) -- nothing changed" >&2
     return 1
   fi
-  read -r ifc parent id <<<"$res"
+  read -r ifc parent id <<<"${res##*$'\n'}"
   echo "  the VBAN-only leg ${leg}: ${ifc} -> ${addr}/32, $([ "$sender" = none ] && echo 'only ping (no sender declared yet)' || echo "only ${sender}'s VBAN to UDP ${port} + ping")"
   _strih_vban_leg_filter_apply "$ifc" "$sender" "$port" || return 1
   _strih_vban_leg_sysctl_apply "$ifc" || return 1
@@ -504,11 +550,11 @@ strih_vban_leg_grade() {
   sender="$(strih_lx_program_vban_sender)"; port="$(strih_lx_program_vban_port)"
   stream="$(strih_lx_program_vban_streams)"
   [ "${leg%%:*}" != mac ] || mac="${leg#mac:}"
-  if ! res="$(strih_vban_leg_resolve 2>&1)"; then
-    bad "(vban-leg) ${leg}: ${res} -- the program VBAN cannot arrive"
+  if ! res="$(strih_vban_leg_resolve 2>/dev/null)"; then
+    bad "(vban-leg) ${leg}: $(strih_vban_leg_resolve 2>&1 >/dev/null || true) -- the program VBAN cannot arrive"
     return 0
   fi
-  read -r ifc parent id <<<"$res"
+  read -r ifc parent id <<<"${res##*$'\n'}"
   if [ "$parent" != - ]; then
     if [ ! -e "$(_strih_vban_leg_sysfs)/class/net/${ifc}" ]; then
       bad "(vban-leg) interface: ${ifc} (VLAN ${id} on the rig NIC ${parent}) does not exist -- setup-strih.sh step 13 creates it once: the first VLAN resets the atlantic rig link ~8 s, so run it in a quiet moment"
@@ -569,7 +615,7 @@ strih_vban_leg_grade() {
     return 0
   fi
   acc_rule="iifname \"${ifc}\" ip saddr ${sender} udp dport ${port} counter accept"
-  off_rule="iifname != \"${ifc}\" iifname != \"lo\" udp dport ${port} counter"
+  off_rule="iifname != \"${ifc}\" iifname != \"lo\" ip saddr ${sender} udp dport ${port} counter"
   a1="$(_strih_vban_leg_rule_packets "$l1" "$acc_rule")"; o1="$(_strih_vban_leg_rule_packets "$l1" "$off_rule")"
   sleep "$wait"
   l2="$(nft list table inet "$STRIH_VBAN_LEG_NFT_TABLE" 2>/dev/null || true)"
