@@ -107,6 +107,11 @@ if ! declare -F strih_vban_leg_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-vban-leg.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-vban-leg.sh"
 fi
+# issue 1465 item 3: the stream role's locked operator PipeWire (setup step 12 on the stream role, item 9b).
+if ! declare -F stream_operator_audio_install >/dev/null; then
+  # shellcheck source=scripts/lib/stream-operator-audio.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/stream-operator-audio.sh"
+fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4

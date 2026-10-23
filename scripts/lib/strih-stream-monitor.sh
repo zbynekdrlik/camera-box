@@ -11,8 +11,9 @@
 # (obs_box_role_apply). This lib holds what is specific to it:
 #
 #   * STRIH_STREAM_MONITOR_PACKAGES -- vlc (the player, issue 1456: the same as stream-snv, its volume slider
-#     the operator's control) + alsa-utils (amixer: the card at 0 dB, the speaker muted), added to step 16d's
-#     package install when the entry is in the list (strih_session_apps_packages);
+#     the operator's control) + alsa-utils (amixer: the card at 0 dB, the speaker muted) + the locked
+#     operator PipeWire's tools (issue 1465 item 3), added to step 16d's package install when the entry is
+#     in the list (strih_session_apps_packages);
 #   * strih_stream_monitor_grade_rows -- verify-strih's three extra rows of the entry, printed by
 #     strih_session_apps_grade_rows (STRIH_STREAM_MONITOR_ROWS of them):
 #       (stream-monitor-pass) the player's own --check-state: a pass within 30 s, waiting / playing /
@@ -32,7 +33,9 @@ STRIH_STREAM_MONITOR_UNIT=strih-stream-monitor.service
 # The player's state file, under the user's runtime dir (the unit passes --state-file %t/<this>).
 STRIH_STREAM_MONITOR_STATE_FILE=strih-stream-monitor.json
 # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh (strih_session_apps_packages)
-STRIH_STREAM_MONITOR_PACKAGES=(vlc alsa-utils)
+# issue 1465 item 3: the pulse output needs pipewire-pulse (VLC's and Chrome's server), and verify reads the
+# locked session back with pw-dump / pw-metadata (pipewire-bin) and wireplumber's own package.
+STRIH_STREAM_MONITOR_PACKAGES=(vlc alsa-utils pipewire-pulse pipewire-bin wireplumber)
 # How many rows strih_stream_monitor_grade_rows prints.
 # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh
 STRIH_STREAM_MONITOR_ROWS=3

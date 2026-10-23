@@ -16,6 +16,13 @@ zvuk do sluchatiek aby isiel z vlc tak vidi a pocuje co je na vystupe z obs a te
 audio vypadky!!!" -- the VLC window stays (the picture), its audio goes to the operator's headphone box, and
 the window no longer flickers while nothing is streamed.
 
+And (owner 23.10.2026, issue 1465 item 3, ROZHODNUTE): "na toto mozme pipewire vyskusat ale nesmie sa babrat
+do inych veci nez tych ktore mu jasne povolime a definujeme!" -- on the stream role the headphones are a
+LOCKED PipeWire's one sink (scripts/stream_operator_audio.py renders it), so VLC and Chrome share them. The
+unit runs `--output pulse`: VLC plays through pulse to that sink BY NAME (PULSE_SINK), and the headphone PCM
+must be held by PipeWire -- the busy / owner checks and --check-state invert. `--output alsa` (the default)
+is the ALSA-direct player of issues 1436 / 1456, kept as the rollback of this trial.
+
 WHAT, one supervised --user unit (strih-stream-monitor.service, Restart=always):
   * resolves the headphone card in /proc/asound, never by a card index (both stream-pp cards are called
     `HD-Audio Generic` and the id `Generic_1` is enumeration order), re-read before every VLC start and
@@ -82,6 +89,12 @@ RESOLVE_TTL_S = 60.0
 # The mixer: these to 0 dB (unmuted where they have a switch), Speaker muted (issue 1456).
 UNITY_CONTROLS = (("Master", True), ("Headphone", True), ("PCM", False))
 DEFAULT_SPEAKER_CONTROL = "Speaker"
+# issue 1465 item 3: the locked operator PipeWire's ONE sink (scripts/stream_operator_audio.py renames the
+# headphone PCM's node to it) and the process that must hold the headphone PCM in the pulse output.
+PULSE_SINK_DEFAULT = "stream-operator-headphones"
+OUTPUTS = ("alsa", "pulse")
+OWNER_PULSE = ("pipewire",)
+PW_DUMP_TIMEOUT_S = 10.0
 DEFAULT_HTTP_PORT = 8090  # stream-snv's VLC http port (avsync-vlc-monitor.ps1)
 NETWORK_CACHING_MS = 1000
 VIDEO_ZOOM = "0.25"
@@ -91,11 +104,11 @@ PAUSE_MAX_S = 10.0
 STARTUP_S = 15.0
 HEARTBEAT_S = 5.0
 STATE_MAX_AGE_S = 30.0
-STATE_VERSION = 2
+STATE_VERSION = 3
 
 # FAULT states verify FAILs; the rest (starting / waiting / playing / paused) are healthy
-FAULT_STATES = ("no-card", "busy", "vlc-failing")
-# the only process allowed to play to the headphone PCM
+FAULT_STATES = ("no-card", "busy", "vlc-failing", "no-sink")
+# the only process allowed to play to the headphone PCM (the alsa output; the pulse output: OWNER_PULSE)
 OWNER_OK = ("vlc",)
 ASOUND_ROOT = os.environ.get("STRIH_STREAM_MONITOR_ASOUND", "/proc/asound")
 PROC_ROOT = os.environ.get("STRIH_STREAM_MONITOR_PROC", "/proc")
@@ -199,6 +212,13 @@ def pcm_owner(asound_root, proc_root, card, device):
     pid = int(m.group(1)) if m else None
     comm = None
     if pid is not None:
+        # issue 1465: the kernel records the opening THREAD; its process (Tgid) is the owner by name
+        try:
+            tg = re.search(r"^Tgid:\s*(\d+)", _read(os.path.join(proc_root, str(pid), "status")), re.M)
+            if tg:
+                pid = int(tg.group(1))
+        except OSError:
+            pass
         try:
             comm = _read(os.path.join(proc_root, str(pid), "comm")).strip()
         except OSError:
@@ -330,11 +350,49 @@ def default_url():
 
 
 
-def vlc_argv(vlc, device, url, http_port, password):
-    """VLC on URL, ALSA straight to DEVICE, its http status interface on loopback (issue 1456). No
-    --repeat: the supervisor retries with pl_play, never a tight VLC reconnect loop."""
+def pulse_sink_present(pw_dump, name, card=None, timeout=PW_DUMP_TIMEOUT_S):
+    """(True | False | None, detail): does the operator session list the Audio/Sink NAME (`pw-dump`) -- on ALSA
+    card CARD when given (its device's `api.alsa.card`, review round 2: a stale drop-in could rename a node of
+    another card)? None = the session is unreadable. Review round 1 (issue 1465): an unlocked PipeWire holds the headphone card too
+    while something plays, and a PULSE_SINK naming a missing sink falls back to the default sink -- maybe the
+    notebook speakers -- so VLC starts only once this sink exists."""
+    try:
+        r = subprocess.run([pw_dump], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, "pw-dump failed: %s" % e
+    if r.returncode != 0:
+        return None, "pw-dump failed (rc %d)" % r.returncode
+    try:
+        objs = json.loads(r.stdout)
+    except ValueError:
+        return None, "pw-dump printed no JSON"
+    objs = [o for o in (objs if isinstance(objs, list) else []) if isinstance(o, dict)]
+
+    def props(o):
+        p = (o.get("info") or {}).get("props") if isinstance(o.get("info"), dict) else None
+        return p if isinstance(p, dict) else {}
+
+    devices = {o.get("id"): props(o) for o in objs if o.get("type") == "PipeWire:Interface:Device"}
+    for o in objs:
+        p = props(o)
+        if (o.get("type") == "PipeWire:Interface:Node" and p.get("node.name") == name
+                and p.get("media.class") == "Audio/Sink"):
+            if card is None:
+                return True, "pw-dump lists the Audio/Sink '%s'" % name
+            on = devices.get(p.get("device.id"), {}).get("api.alsa.card")
+            if str(on) == str(card):
+                return True, "pw-dump lists the Audio/Sink '%s' on card %s" % (name, card)
+            return False, "pw-dump lists '%s' on card %s, not the headphone card %s" % (name, on, card)
+    return False, "pw-dump lists no Audio/Sink '%s'" % name
+
+
+def vlc_argv(vlc, device, url, http_port, password, output="alsa"):
+    """VLC on URL, ALSA straight to DEVICE (issue 1456) or, OUTPUT "pulse" (issue 1465), through pulse to the
+    sink the caller names in PULSE_SINK; its http status interface on loopback. No --repeat: the supervisor
+    retries with pl_play, never a tight VLC reconnect loop."""
+    aout = ["--aout=pulse"] if output == "pulse" else ["--aout=alsa", "--alsa-audio-device=%s" % device]
     return [vlc, "--no-qt-error-dialogs", "--no-qt-privacy-ask", "--zoom=%s" % VIDEO_ZOOM,
-            "--network-caching=%d" % NETWORK_CACHING_MS, "--aout=alsa", "--alsa-audio-device=%s" % device,
+            "--network-caching=%d" % NETWORK_CACHING_MS] + aout + [
             "--extraintf=http", "--http-host=127.0.0.1", "--http-port=%d" % http_port,
             "--http-password=%s" % password, url]
 
@@ -373,7 +431,8 @@ class Monitor:
     def __init__(self, url, state_file, pcm_match=None, vlc="vlc", amixer="amixer",
                  asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, http_port=DEFAULT_HTTP_PORT, retry_s=RETRY_S,
                  poll_s=POLL_S, pause_max_s=PAUSE_MAX_S, startup_s=STARTUP_S,
-                 speaker_control=DEFAULT_SPEAKER_CONTROL, log=None, obs_process=DEFAULT_OBS_PROCESS):
+                 speaker_control=DEFAULT_SPEAKER_CONTROL, log=None, obs_process=DEFAULT_OBS_PROCESS,
+                 output="alsa", pulse_sink=PULSE_SINK_DEFAULT, pw_dump="pw-dump"):
         self.url = url
         self.state_file = state_file
         self.pcm_match = pcm_match
@@ -388,6 +447,9 @@ class Monitor:
         self.startup_s = startup_s
         self.speaker_control = speaker_control
         self.obs_process = obs_process
+        self.output = output
+        self.pulse_sink = pulse_sink
+        self.pw_dump = pw_dump
         self.log = log or (lambda s: print(s, flush=True))
         self.stopping = False
         self.proc = None
@@ -403,7 +465,8 @@ class Monitor:
         self._resolved_at = None
         self._logged = None
         self._last_write = 0.0
-        self.st = {"version": STATE_VERSION, "state": "starting", "url": url, "device": None, "card": None,
+        self.st = {"version": STATE_VERSION, "state": "starting", "url": url, "output": output, "device": None,
+                   "card": None,
                    "pcm_device": None, "starts": 0, "reason": "", "since_epoch_s": time.time(),
                    "updated_epoch_s": time.time()}
 
@@ -465,13 +528,26 @@ class Monitor:
         if pcm is None:
             self.set_state("no-card", why, device=None, card=None, pcm_device=None)
             return False
-        device = alsa_device(pcm)
+        hw = alsa_device(pcm)
+        device = "pulse:%s" % self.pulse_sink if self.output == "pulse" else hw
         self.st.update(device=device, card=pcm["card"], pcm_device=pcm["device"])
         owner = pcm_owner(self.asound_root, self.proc_root, pcm["card"], pcm["device"])
-        if owner["state"] == "open":
-            self.set_state("busy", "the headphone PCM %s is held by %s (pid %s) -- VLC not started, retrying every %g s"
-                           % (device, owner["comm"] or "?", owner["pid"], self.retry_s))
+        if self.output == "pulse" and owner["state"] != "open":
+            # issue 1465: the locked operator PipeWire holds the headphone PCM whenever its sink exists
+            self.set_state("no-sink", "PipeWire does not hold the headphone PCM %s (%s): the locked operator "
+                           "PipeWire with its sink '%s' is not running -- VLC not started, retrying every %g s"
+                           % (hw, owner["state"], self.pulse_sink, self.retry_s))
             return False
+        if owner["state"] == "open" and not (self.output == "pulse" and owner["comm"] in OWNER_PULSE):
+            self.set_state("busy", "the headphone PCM %s is held by %s (pid %s) -- VLC not started, retrying every %g s"
+                           % (hw, owner["comm"] or "?", owner["pid"], self.retry_s))
+            return False
+        if self.output == "pulse":
+            present, detail = pulse_sink_present(self.pw_dump, self.pulse_sink, pcm["card"])
+            if not present:
+                self.set_state("no-sink", "the operator sink '%s' is not in the operator PipeWire (%s) -- VLC not "
+                               "started, retrying every %g s" % (self.pulse_sink, detail, self.retry_s))
+                return False
         if pcm.get("usb"):
             key = ("usb", pcm["card_id"])
             if key not in self._mixer_logged:
@@ -481,10 +557,13 @@ class Monitor:
         else:
             self._mixer(pcm["card_id"])
         password = secrets.token_hex(16)
+        env = None
+        if self.output == "pulse":
+            env = dict(os.environ, PULSE_SINK=self.pulse_sink)  # libpulse's default sink for this client
         try:
-            self.proc = subprocess.Popen(vlc_argv(self.vlc, device, self.url, self.http_port, password),
+            self.proc = subprocess.Popen(vlc_argv(self.vlc, hw, self.url, self.http_port, password, self.output),
                                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL)
+                                         stderr=subprocess.DEVNULL, env=env)
         except OSError as e:
             self.set_state("vlc-failing", "cannot start %s: %s" % (self.vlc, e))
             return False
@@ -584,7 +663,7 @@ class Monitor:
 def check_state(path, now, asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, max_age=STATE_MAX_AGE_S):
     """verify-strih's (stream-monitor-pass) row: (ok, one line). OK = a pass within MAX_AGE seconds, the
     player starting, waiting, playing or paused, and the headphone PCM free or held by VLC -- never
-    PipeWire."""
+    PipeWire -- or, for the pulse output (issue 1465), held by PipeWire and nothing else."""
     try:
         st = json.loads(_read(path))
     except (OSError, ValueError) as e:
@@ -604,6 +683,15 @@ def check_state(path, now, asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, max_age
     owner = pcm_owner(asound_root, proc_root, card, dev)
     if owner["state"] == "unreadable":
         return False, "the headphone PCM card%d/pcm%dp status is unreadable" % (card, dev)
+    if st.get("output") == "pulse":
+        if owner["state"] != "open":
+            return False, ("PipeWire does not hold the headphone PCM card%d/pcm%dp (closed): the locked operator "
+                           "PipeWire is not running or not provisioned" % (card, dev))
+        if owner["comm"] not in OWNER_PULSE:
+            return False, ("%s (pid %s) holds the headphone PCM card%d/pcm%dp -- only PipeWire may (the pulse "
+                           "output plays through its sink)" % (owner["comm"] or "?", owner["pid"], card, dev))
+        return True, "%s %s -> %s (start %s), headphone PCM held by PipeWire pid %s" % (
+            state, st.get("url"), device, st.get("starts"), owner["pid"])
     if owner["state"] == "open" and owner["comm"] not in OWNER_OK:
         return False, ("%s (pid %s) holds the headphone PCM %s -- nothing but the monitor's VLC may play to it "
                        "(PipeWire must not)" % (owner["comm"] or "?", owner["pid"], device))
@@ -623,6 +711,13 @@ def main(argv=None):
                          "headphone jack %r)" % DEFAULT_PCM_MATCH)
     ap.add_argument("--obs-process-name", default=DEFAULT_OBS_PROCESS,
                     help="the /proc comm of the publishing OBS (pl_play only while it publishes)")
+    ap.add_argument("--output", choices=OUTPUTS, default="alsa",
+                    help="alsa = VLC straight to the headphone PCM (the default, the rollback); pulse = VLC "
+                         "through pulse to --pulse-sink, the PCM held by the locked PipeWire (issue 1465)")
+    ap.add_argument("--pulse-sink", default=PULSE_SINK_DEFAULT,
+                    help="the pulse sink the pulse output plays to (default %s)" % PULSE_SINK_DEFAULT)
+    ap.add_argument("--pw-dump", default="pw-dump",
+                    help="the pw-dump the pulse output lists the operator session's sinks with")
     ap.add_argument("--vlc", default="vlc")
     ap.add_argument("--amixer", default="amixer")
     ap.add_argument("--speaker-control", default=DEFAULT_SPEAKER_CONTROL,
@@ -647,15 +742,17 @@ def main(argv=None):
         return 0 if ok else 1
     mon = Monitor(a.url or default_url(), a.state_file, a.pcm_match, a.vlc, a.amixer, a.asound_root, a.proc_root,
                   a.http_port, a.retry_s, a.poll_s, a.pause_max_s, a.startup_s, a.speaker_control,
-                  obs_process=a.obs_process_name)
+                  obs_process=a.obs_process_name, output=a.output, pulse_sink=a.pulse_sink, pw_dump=a.pw_dump)
 
     def _stop_signal(_sig, _frm):
         mon.stopping = True
 
     signal.signal(signal.SIGTERM, _stop_signal)
     signal.signal(signal.SIGINT, _stop_signal)
-    mon.log("watching %s -> %s in VLC (http status on 127.0.0.1:%d; pl_play only while %s publishes)"
-            % (mon.url, headphone_rule(a.pcm_match), a.http_port, a.obs_process_name))
+    out = ("pulse output to the sink '%s', the headphone PCM held by PipeWire" % a.pulse_sink
+           if a.output == "pulse" else "alsa output straight to the headphone PCM")
+    mon.log("watching %s -> %s in VLC, %s (http status on 127.0.0.1:%d; pl_play only while %s publishes)"
+            % (mon.url, headphone_rule(a.pcm_match), out, a.http_port, a.obs_process_name))
     mon.run(a.run_s)
     return 0
 

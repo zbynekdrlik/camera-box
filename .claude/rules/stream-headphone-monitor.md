@@ -12,6 +12,11 @@ paths:
 
 # The stream box's headphones play the REAL outgoing stream (issue 1436)
 
+> **Issue 1465 item 3 (owner 23.10.2026) moved the stream role onto a LOCKED PipeWire:** the unit runs
+> `--output pulse` (VLC through pulse to the one sink `stream-operator-headphones`, the headphone PCM held by
+> PipeWire, `--check-state` inverted). Every "never PipeWire" / "PipeWire on the PCM FAILs" below is the
+> `--output alsa` player, now the rollback. See `.claude/rules/stream-operator-audio.md`.
+
 > **Issue 1465 (owner 23.10.2026) changed two things in the VLC player:** the headphone box (a USB audio
 > interface) wins over the notebook jack, and VLC gets `pl_play` only while OBS publishes. See "The
 > headphone box and the blinking (issue 1465)" at the end.
@@ -195,7 +200,8 @@ lipsync + audio dropouts by ear); the headphones carry VLC's audio. Owner decisi
   - The `watching ...` line names the rule (`the ONE USB audio interface's playback PCM, else the
     headphone jack matching ...` or `the playback PCM matching ... (--pcm-match)`).
   - Plugging a headphone box in switches at the next VLC start (the operator closing VLC, or a unit
-    restart); no re-provision.
+    restart); no re-provision -- for the `--output alsa` player only. On the stream role's locked PipeWire
+    (issue 1465 item 3) plugging one in or out needs setup step 12 again (`stream-operator-audio.md`).
   - **A USB headphone box keeps its own mixer** (review round 1): no unity writes and no `Speaker` mute
     on a USB card, one `mixer: <card> is a USB audio interface -- its own mixer is left as it is` line.
     snd-usb-audio names many headsets' and dongles' main output `Speaker`, so the jack's mute would

@@ -27,7 +27,9 @@ Modes:
   --audio-monitor-type   issue 1436, read-only: print the OBS monitoring type of the program-audio input
                          (`OBS_MONITORING_TYPE_NONE` ...), `absent`, or `unreachable: <why>` with rc 2
                          when the OBS websocket does not answer (verify-strih's stream-monitor row).
-  --projector T          issue 1346: set the HDMI output VIEW (program|multiview) in
+  --pulse-capture-inputs issue 1465, read-only: list every pulse capture input (`pulse capture inputs:
+                         none`), rc 2 when OBS does not answer (verify-strih's operator-audio row).
+  --projector T         issue 1346: set the HDMI output VIEW (program|multiview) in
                          ~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the
                          next OBS start. The operator's live switch is in OBS (Tools menu); this is
                          the scripted twin. Never opens a projector window and never talks to OBS.
@@ -96,12 +98,15 @@ from drm_output_config import (  # noqa: E402,F401
 # port shares.
 from program_audio_vban import (  # noqa: E402,F401
     VBAN_SOURCE_KIND,
+    drop_pulse_capture_inputs,
     input_create_verified,
     input_recreate,
     input_state_read,
     kind_available,
     listed_text,
     parse_program_audio_vban,
+    parse_pulse_capture_rule,
+    pulse_capture_report,
     settings_differences,
 )
 
@@ -670,7 +675,7 @@ def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
 
 
 def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME, audio_monitor=None,
-              audio_vban=None):
+              audio_vban=None, pulse_capture=None):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
     CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
@@ -694,6 +699,10 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
     the program-audio input the obs-vban receive source instead of the pulse capture; a STRING is the
     reason the manifest's block could not be read, and the input is then left untouched (never turned
     back into the pulse capture).
+
+    issue 1465 item 3: PULSE_CAPTURE "forbid" (the stream manifest's `pulse_capture`) removes every scene
+    pulse capture input except the program-audio input (`drop_pulse_capture_inputs`, status under the key
+    "pulse capture"); the stream operator's headphone mix must never reach the program.
 
     Then SetStudioModeEnabled. Returns {input: status} for the log."""
     op = _obs_phase2_module()
@@ -759,6 +768,8 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
         if audio_monitor == "off":
             audio_status += "; " + ensure_audio_monitor_off(obs, audio_name)
     result[audio_name] = audio_status
+    if pulse_capture == "forbid":
+        result["pulse capture"] = drop_pulse_capture_inputs(obs, keep=audio_name)
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
     return result
@@ -811,6 +822,9 @@ def main():
     ap.add_argument("--audio-monitor-type", action="store_true",
                     help="issue 1436: print the OBS monitoring type of the program-audio input (or "
                          "`absent`; `unreachable: <why>` + rc 2 when OBS does not answer) -- read-only")
+    ap.add_argument("--pulse-capture-inputs", action="store_true",
+                    help="issue 1465: print every pulse capture input OBS lists (`pulse capture inputs: none` "
+                         "when there is none; `unreachable: <why>` + rc 2 when OBS does not answer) -- read-only")
     ap.add_argument("--projector", choices=["program", "multiview"], default=None,
                     help="issue 1346: set the HDMI output view (program|multiview) in "
                          "~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the "
@@ -824,9 +838,9 @@ def main():
     # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only; --projector sets the HDMI
     # output view (issue 1346).
     if (not args.bootstrap and not args.verify_parity and args.projector is None
-            and not args.audio_input_kind and not args.audio_monitor_type):
+            and not args.audio_input_kind and not args.audio_monitor_type and not args.pulse_capture_inputs):
         ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), "
-                 "--audio-input-kind (read-only), or --projector program|multiview")
+                 "--audio-input-kind / --pulse-capture-inputs (read-only), or --projector program|multiview")
 
     # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
     # the seed manifest.
@@ -854,6 +868,16 @@ def main():
             print("unreachable: %s: %s" % (type(e).__name__, e))
             sys.exit(2)
         print(audio_monitor_type_of(obs, audio_name))
+        return
+
+    # --pulse-capture-inputs (issue 1465): read-only, for verify-strih's (operator-audio-obs) row.
+    if args.pulse_capture_inputs:
+        try:
+            obs = Obs(args.host, args.port, args.password)
+        except Exception as e:  # noqa: BLE001 -- refused / reset / handshake: any of them = OBS not answering
+            print("unreachable: %s: %s" % (type(e).__name__, e))
+            sys.exit(2)
+        print(pulse_capture_report(obs))
         return
 
     # --projector (issue 1346): persist the HDMI output view. Touches only drm-output.json -- never
@@ -886,7 +910,9 @@ def main():
         audio_vban = str(e)
     statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"),
                          audio_name=parse_program_audio_input(manifest_text),
-                         audio_monitor=parse_program_audio_monitor(manifest_text), audio_vban=audio_vban)
+                         audio_monitor=parse_program_audio_monitor(manifest_text),
+                         pulse_capture=parse_pulse_capture_rule(manifest_text),
+                         audio_vban=audio_vban)
     print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
           % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))

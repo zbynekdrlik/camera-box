@@ -42,6 +42,7 @@ def log(s):
         f.write(s + "\n")
 log("argv " + json.dumps(args))
 log("pid %d" % os.getpid())
+log("env PULSE_SINK=%s" % os.environ.get("PULSE_SINK", ""))  # issue 1465: the pulse output's sink
 state = {"s": "stopped"}
 def published():
     return os.path.exists(os.path.join(d, "published"))
@@ -376,4 +377,5 @@ def test_check_state_fails_a_failing_vlc(tmp_path):
 
 def test_the_packages_are_vlc_and_alsa_utils():
     text = (REPO / "scripts" / "lib" / "strih-stream-monitor.sh").read_text()
-    assert "STRIH_STREAM_MONITOR_PACKAGES=(vlc alsa-utils)" in text
+    # issue 1465 item 3: plus the locked operator PipeWire's pulse server and its read-back tools
+    assert "STRIH_STREAM_MONITOR_PACKAGES=(vlc alsa-utils pipewire-pulse pipewire-bin wireplumber)" in text
