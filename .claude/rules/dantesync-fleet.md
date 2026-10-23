@@ -126,6 +126,11 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
   - **The PP camboxes are in the list since issue 1413** (owner 12.10.2026: "chcem aby si sa staral
     ... aj o dantesync upgrady v pp sieti"), as `reach` camera rows (above). **Not in the list yet:**
     companion-pp (dantesync 1.8.10, client 10.77.8.2 in the recon; not part of this decision).
+- **alex-nb (10.77.7.109, issue 1468)** is the Alex notebook on the audio VLAN (Dante Virtual
+  Soundcard): `alex-nb|10.77.7.109|windows|audio|reach|alexnb|`, locked to the audio grandmaster,
+  login `alexnb` with the fleet default password. A notebook is often off, so it is a `reach` node:
+  skipped by every consumer while ssh :22 does not answer, never a page or a failed gate. Its W32Time
+  service + the two Time Synchronization tasks are disabled (dantesync is the only clock authority).
 - **lv1 (10.77.7.100) is deliberately absent** (owner ROZHODNUTÉ 25.9.2026: an operational PC, on the
   network temporarily).
 - **The audio grandmaster** is `DANTESYNC_AUDIO_GM_HOST` (default 10.77.7.104 since the leader moved

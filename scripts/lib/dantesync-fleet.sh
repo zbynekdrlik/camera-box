@@ -94,6 +94,10 @@ fi
 #                obs-fleet rows), and their homegate is `reach`: an unreachable PP box is skipped,
 #                never a page or a failed gate. Owner (11.10.2026): "a tiez tam nie je dantesync tam
 #                nie je updatnuty cize potrebujes zaradit tento pc do updatovania".
+#   alex-nb   -- issue 1468: the Alex notebook (Windows, Dante Virtual Soundcard) on the audio VLAN,
+#                locked to the audio grandmaster. A notebook comes and goes, so `reach`: read only
+#                while its ssh answers, never a page while it is away. Login alexnb with the fleet
+#                default password. Owner (23.10.2026): "zaradil ho medzi udrziavanu flotilu dantesyncov".
 # The /24 nets dev1 scans for a dantesync node OUTSIDE this table (scripts/dantesync_fleet_scan.py,
 # dantesync-version-gate.sh --fleet; owner 13.10.2026: the IEM PC sat outside it unseen). dev1's view:
 # the SNV rig LAN + the audio VLAN, the PP LAN as 10.76.x through companion-pp.
@@ -109,7 +113,8 @@ iem-snv|iem-snv.lan|windows|video|always|-|
 companion-snv|companion-snv.lan|linux|video|always|-|
 strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|
 stream-pp|obs:stream-pp|linux|video-pp|reach|-|
-resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|}"
+resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|
+alex-nb|10.77.7.109|windows|audio|reach|alexnb|}"
 
 # The audio-VLAN PTP grandmaster: an Audinate device, locked to the same clock as the video
 # grandmaster video-clock.lan (#1367 comment 5832526338). Since 25.9.2026 ~21:07 the leader is
