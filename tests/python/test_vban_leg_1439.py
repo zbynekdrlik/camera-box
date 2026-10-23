@@ -453,7 +453,7 @@ def _strih_box(tmp_path, vlan_props=None, vlan_active=True, **over):
         if vlan_active:
             active[STRIH_VLAN_IF] = VLAN_UUID
             applied[STRIH_VLAN_IF] = dict(vlan_props)
-    kw = dict(profiles=profiles, active=active, applied=applied,
+    kw = dict(profiles=profiles, active=active, applied=applied, rig_if=STRIH_RIG,
               nft_render=(FIX / "nft-list-table-strih-snv-live-23-10.txt").read_text(),
               live_render_file=str(FIX / "nft-list-table-strih-snv-live-23-10.txt"),
               units={"vban-dante70-filter.service": {"enabled": True, "active": True}})
@@ -496,6 +496,7 @@ def test_vlan_first_creation_warns_of_the_link_reset_and_activates_once(tmp_path
     ups = fk.calls(s, "nmcli", "connection", "up")
     assert len(ups) == 1 and "ifname" not in ups[0], "the VLAN profile names its device; no ifname for a device not yet there"
     assert not [c for c in s["log"] if c[0] == "nm-autoconnect"], "no second activation"
+    assert "the rig link %s is up again" % STRIH_RIG in r.stdout, r.stdout
     made = [p for p in s["profiles"] if p["props"].get("connection.id") == "vban-dante70"][0]
     assert made["props"]["connection.autoconnect"] == "yes"
     assert s["applied"][STRIH_VLAN_IF]["ipv4.addresses"] == "10.77.7.202/32"

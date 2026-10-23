@@ -150,7 +150,7 @@ if a[:4] == ["-4", "-o", "addr", "show"]:
     for x in addrs(d):
         out("5: %s    inet %s scope global noprefixroute %s\\       valid_lft forever preferred_lft forever\n" % (d, x, d))
 elif a == ["-4", "route", "show", "default"]:
-    out("default via 10.77.8.1 dev enp56s0 proto static metric 100 \n")
+    out("default via 10.77.8.1 dev %s proto static metric 100 \n" % s.get("rig_if", "enp56s0"))
     for d, pr in s["applied"].items():
         if pr.get("ipv4.method") == "auto" and pr.get("ipv4.never-default") != "yes":
             out("default via 10.77.7.1 dev %s proto dhcp src %s metric 101 \n" % (d, s["dhcp"][d].split("/")[0]))
