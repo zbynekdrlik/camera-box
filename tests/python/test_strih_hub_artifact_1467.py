@@ -119,6 +119,27 @@ def test_the_source_sha_of_a_git_checkout_is_its_head(tmp_path):
     assert r.stdout.strip() == head, "a git checkout's HEAD wins over a stray recorded file"
 
 
+def test_a_clone_owned_by_another_user_still_names_its_head(tmp_path):
+    # review: setup-strih runs as root from the operator's clone; git's ownership check would read
+    # it as "no commit known" and fall back to main. GIT_TEST_ASSUME_DIFFERENT_OWNER makes git treat
+    # the repo as foreign, exactly as root sees an operator-owned clone.
+    root = tmp_path / "co"
+    root.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@t"}
+    for cmd in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "x"]):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True, env={**os.environ, **env})
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    foreign = {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+    plain = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                           env={**os.environ, **foreign})
+    assert plain.returncode != 0, "the fixture really reads as a foreign-owned repo"
+    r = _run('. "$1"\nstrih_checkout_source_sha "$2"', CI_ART, root, env=foreign)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == head
+
+
 def test_a_tree_inside_another_repo_is_not_read_as_that_repos_head(tmp_path):
     # The staged tree under a dir that happens to be inside some other checkout must not take
     # that checkout's HEAD: only a tree that IS a work tree's top level counts.
@@ -276,6 +297,16 @@ def test_decode_rejects_on_a_known_stream_is_a_note_naming_the_leg(tmp_path):
     assert "fohabl=1234" in rows[0] and "cam1" not in rows[0]
     quiet = _grade(tmp_path / "q", running="1.7.0-dev.822", state={"participants": [{"name": "fohabl", "decode_rejects": 0}]})
     assert "decode_rejects" not in quiet.stdout, quiet.stdout
+
+
+def test_a_state_larger_than_one_environment_string_is_still_graded(tmp_path):
+    # review: one environment string is capped at 128 KB; the state reaches python as a file.
+    big = [{"name": "leg%d" % i, "adapter": "vban", "decode_rejects": 0, "pad": "x" * 200} for i in range(1000)]
+    big.append({"name": "fohabl", "adapter": "vban", "decode_rejects": 5})
+    r = _grade(tmp_path, running="1.7.0-dev.822", state={"participants": big})
+    assert r.returncode == 0, r.stderr
+    assert any(ln.startswith("NOTE ") and "fohabl=5" in ln for ln in r.stdout.splitlines()), r.stdout[-500:]
+    assert "failed" not in r.stdout
 
 
 # --- the wiring --------------------------------------------------------------------------------------
