@@ -118,13 +118,26 @@ def test_pulse_on_a_usb_box_leaves_its_mixer_alone(tmp_path):
     assert rig.st()["card"] == 2 and rig.st()["state"] == "playing", rig.st()
 
 
-def test_pulse_with_no_pipewire_on_the_headphone_pcm_is_a_fault_and_starts_nothing(tmp_path):
-    rig = Rig(tmp_path)  # the jack reads `closed`: the locked PipeWire does not hold it
-    r = _run_pulse(rig, 1.5)
+def test_pulse_starts_vlc_on_a_closed_pcm_when_the_operator_sink_exists(tmp_path):
+    # live stream-snv 23.10.2026: the locked PipeWire keeps the operator sink SUSPENDED (the PCM reads
+    # `closed`) until its first client plays -- `session.suspend-timeout-seconds = 0` only stops a running
+    # node from suspending. Requiring PipeWire to hold the PCM first was a deadlock: VLC never started.
+    rig = Rig(tmp_path)  # the jack reads `closed`
+    rig.publish()
+    r = _run_pulse(rig)
+    assert r.returncode == 0, r.stderr
+    assert len(rig.vlc_argv()) == 1, rig.log()
+    assert rig.st()["state"] == "playing", rig.st()
+
+
+def test_pulse_on_a_closed_pcm_without_the_operator_sink_starts_nothing(tmp_path):
+    rig = Rig(tmp_path)  # closed, and no operator sink in the session: the locked PipeWire is not running
+    rig.publish()
+    r = _run_pulse(rig, 1.5, pw="other")
     assert r.returncode == 0, r.stderr
     assert rig.vlc_argv() == [], rig.log()
     st = rig.st()
-    assert st["state"] == "no-sink" and "PipeWire" in st["reason"] and SINK in st["reason"], st
+    assert st["state"] == "no-sink" and SINK in st["reason"], st
 
 
 def test_pulse_without_the_operator_sink_never_starts_vlc(tmp_path):
@@ -171,9 +184,10 @@ def test_check_state_pulse_needs_pipewire_on_the_headphone_pcm(tmp_path):
         assert ok is ok_want, (comm, line)
         if not ok_want:
             assert comm in line and "PipeWire" in line, line
+    # a closed PCM is the operator sink suspended until its first sound (live 23.10.2026): healthy
     root, proc = asound(tmp_path / "closed")
     ok, line = m.check_state(str(_pulse_state(tmp_path / "closed")), time.time(), str(root), str(proc))
-    assert not ok and "PipeWire does not hold" in line, line
+    assert ok and "suspended" in line, line
 
 
 def test_check_state_fails_the_no_sink_fault(tmp_path):
