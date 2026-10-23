@@ -328,6 +328,11 @@ watch timer, dantesync tray).
   The target orders itself after every unit it Wants unless that unit is already after it, and strih-obs
   is after the target, so `After=strih-obs.service` alone is an ordering cycle at login (systemd drops a
   job to break it). Pinned for every `systemd/` unit by `tests/python/test_strih_stream_monitor_1465.py`.
+  Check a unit change with the real systemd on dev1, no box needed: copy the units into a scratch dir,
+  symlink each into `<dir>/graphical-session.target.wants/`, then
+  `SYSTEMD_UNIT_PATH="<dir>:" systemd-analyze --user verify <dir>/strih-obs.service` and grep for
+  `ordering cycle` (it also complains about the missing /usr/local/bin programs; ignore those). Put it in a
+  script file: a worktree lane's guard refuses the inline loop.
 
 ## Provisioning + grading (`scripts/lib/strih-session-apps.sh`)
 

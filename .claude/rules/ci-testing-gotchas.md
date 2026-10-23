@@ -1749,6 +1749,11 @@ that touches the lib needs it too, since the scan reads the whole staged file. A
 credential never needs the bypass: keep it low-entropy words (`fake-turn-api-token-of-the-test`),
 never a 32+ char hex run, which the scan blocks just like a real key.
 
+A `/proc/net/tcp6` address fixture is such a run too (issue 1465:
+`0000000000000000FFFF00000100007F` = `::ffff:127.0.0.1`, which is how the kernel prints it). It is the
+literal under test, so keep it and append `# airuleset:secret-ok <a /proc/net/tcp6 address fixture>`
+to every `git add` / `git commit` of the test file.
+
 ## `mapfile < <(cmd; printf 'rc\0%s\0' "$?")` loses `cmd`'s exit code under `set -e` (issue 808)
 
 A process substitution INHERITS the caller's errexit. Under `set -euo pipefail`, a failing `cmd`
