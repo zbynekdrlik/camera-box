@@ -76,7 +76,8 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
 - **`chrome` = `Chrome`** (`google-chrome-stable`, icon `google-chrome`) only where the binary exists
   (`OBS_BOX_PANEL_CHROME_BIN`) AND `strih_box_role` = stream. The strih role never gets it (owner
   24.9.2026: production-only). It sits after Restreamer. It never "disappeared" on stream-snv: the
-  panel never had one.
+  panel never had one. Its Exec carries `--password-store=basic` (issue 1469): the kiosk autologin
+  never unlocks the GNOME login keyring, so plain Chrome popped `Unlock Login Keyring`.
 - **Known limit (not fixed, issue 1464 review):** a launcher tint2 starts lives in the panel unit's cgroup,
   so a panel restart (a tint2 crash, step 16h's try-restart after a panel file changed) ends the apps it
   started (RustDesk, Discord, pcmanfm, now Chrome). The fix is a launch through `systemd-run --user

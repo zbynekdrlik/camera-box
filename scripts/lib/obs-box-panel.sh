@@ -106,7 +106,9 @@ obs_box_panel_launchers() {
     printf 'restreamer|Restreamer|systemctl --user start restreamer.service|Restreamer\n'
   fi
   if [ -x "$OBS_BOX_PANEL_CHROME_BIN" ] && [ "$(strih_box_role)" = stream ]; then
-    printf 'chrome|Chrome|%s|google-chrome\n' "$OBS_BOX_PANEL_CHROME_BIN"
+    # issue 1469: the kiosk autologin never unlocks the GNOME login keyring, so Chrome keeps its own
+    # basic password store and never pops "Unlock Login Keyring".
+    printf 'chrome|Chrome|%s --password-store=basic|google-chrome\n' "$OBS_BOX_PANEL_CHROME_BIN"
   fi
   [ -x "$OBS_BOX_PANEL_RUSTDESK_BIN" ] && printf 'rustdesk|RustDesk|%s|rustdesk\n' "$OBS_BOX_PANEL_RUSTDESK_BIN"
   # issue 1448 (owner 16.10.2026, "ma byt na lavo discord v liste"): Discord where it is installed. It

@@ -292,6 +292,12 @@ PY
 # WARN-only: a missing collection is named, never fatal.
 strih_operator_projector_seed() {
   local coll="${1:?collection path required}" user="${2:?desktop user required}" drm="${3-}"
+  # issue 1469 (owner 23.10.2026, stream-snv): the stream role has ONE screen carrying the stream OBS
+  # and the Restreamer dashboard; a fullscreen Multiview projector would cover them.
+  if [ "$(strih_box_role 2>/dev/null || echo strih)" = stream ]; then
+    echo "  SKIP: the stream role has no Multiview projector -- none seeded into ${coll} (issue 1469)"
+    return 0
+  fi
   if strih_operator_hdmi_shows_multiview "$drm"; then
     echo "  SKIP: the Multiview is on the HDMI output (${drm}: view multiview) -- no projector window seeded"
     return 0
@@ -875,9 +881,10 @@ strih_operator_grade_rows() {
   d2="$(strih_operator_grab "$user" "$home")"
   strih_operator_panel_verdict "$d1" "$d2" "$gap"
   # issue 1418 (16.10.2026): the stream role has one screen carrying the stream OBS and the Restreamer
-  # dashboard; a fullscreen Multiview projector would cover them, so the row is not graded there.
+  # dashboard; a fullscreen Multiview projector would cover them. Issue 1469: one open there FAILs.
   if [ "$(strih_box_role 2>/dev/null || echo strih)" = stream ]; then
-    printf 'NOTE|(mv-projector) not graded: the stream role has no Multiview projector (one screen, it would cover the stream OBS and the Restreamer dashboard)\n'
+    strih_operator_stream_projector_verdict "$(_strih_operator_on_x "$user" "$home" 10 \
+      "${STRIH_OPERATOR_WMCTRL:-wmctrl}" -lx 2>/dev/null || true)"
     return 0
   fi
   local hdmi_mv=0
@@ -905,6 +912,17 @@ strih_operator_projector_verdict() {
     printf 'OK|(mv-projector) the Multiview projector window is open on :0\n'
   else
     printf 'FAIL|(mv-projector) no "Projector - Multiview" window on :0 -- the operator has no Multiview; stop OBS and re-run setup-strih.sh step 16g (it seeds the saved projector, issue 1419)\n'
+  fi
+}
+
+# strih_operator_stream_projector_verdict WMCTRL_LX_TEXT -> the (mv-projector) row on the stream role
+# (issue 1469): OK with no Multiview projector window, FAIL with one (it covers the stream OBS and the
+# Restreamer dashboard on the role's one screen).
+strih_operator_stream_projector_verdict() {
+  if grep -q 'Projector - Multiview' <<<"${1-}"; then
+    printf 'FAIL|(mv-projector) a "Projector - Multiview" window is open on the stream role -- it covers the stream OBS and the Restreamer dashboard; close it in OBS (setup-strih seeds none on this role, issue 1469)\n'
+  else
+    printf 'OK|(mv-projector) no Multiview projector on the stream role (one screen: the stream OBS + the Restreamer dashboard)\n'
   fi
 }
 
