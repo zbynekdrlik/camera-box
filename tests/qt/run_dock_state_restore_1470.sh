@@ -13,7 +13,9 @@ set -euo pipefail
 #   3. stream-snv as captured -> `present` (its ported layout already holds the dock), file unchanged,
 #                                the dock visible + docked right;
 #   4. the state an OBS saves after running case 1 (Qt's own saveState) -> `default-hidden`, seed =
-#      `redocked`, the dock visible + docked right, every other dock unchanged.
+#      `redocked`, the dock visible + docked right, every other dock unchanged;
+#   5. a probe dock seeded into stream-snv, whose right area already exists -> the probe joins that
+#      area visible + docked, the A/V-sync dock and every other dock stay where they were.
 # Needs g++, pkg-config + Qt6 Widgets dev files and python3; a missing tool FAILS (never a skip).
 #
 #   bash tests/qt/run_dock_state_restore_1470.sh
@@ -23,6 +25,7 @@ ROOT="$(cd "${HERE}/../.." && pwd)"
 SEED="${ROOT}/scripts/obs_dock_state.py"
 FIX="${ROOT}/tests/python/fixtures/obs_dock_state_1470"
 DOCK="net.nagater.obs-audio-video-sync-dock..main"
+PROBE="camera-box.probe.dock"   # case 5: a plugin dock the layouts never held
 
 for tool in g++ pkg-config python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: ${tool} is not installed (issue 1470 Qt proof)" >&2; exit 1; }
@@ -37,10 +40,10 @@ g++ -std=c++17 -fPIC -Wall -Wextra -Werror -o "${WORK}/dsr" "${HERE}/dock_state_
 FAILS=0
 fail() { echo "FAIL: $*" >&2; FAILS=$((FAILS + 1)); }
 
-# names INI -> every dock object name in the INI's DockState, the plugin dock first (the harness adds
-# the first name the way obs_frontend_add_dock_by_id adds a plugin dock).
+# names INI [PLUGIN] -> every dock object name in the INI's DockState, PLUGIN (default the A/V-sync
+# dock) first (the harness adds the first name the way obs_frontend_add_dock_by_id adds a plugin dock).
 names() {
-  python3 -I - "$SEED" "$1" "$DOCK" <<'PY'
+  python3 -I - "$SEED" "$1" "${2:-$DOCK}" <<'PY'
 import base64, importlib.util, sys
 spec = importlib.util.spec_from_file_location("obs_dock_state", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
@@ -52,12 +55,12 @@ print("\n".join([sys.argv[3]] + others))
 PY
 }
 
-# restore INI -> the harness output for INI's DockState (restore=, one line per dock, state=).
+# restore INI [PLUGIN] -> the harness output for INI's DockState (restore=, one line per dock, state=).
 restore() {
-  local ini="$1" state
+  local ini="$1" plugin="${2:-$DOCK}" state
   local -a docks
   state="$(sed -n 's/^DockState=//p' "$ini")"
-  mapfile -t docks < <(names "$ini")
+  mapfile -t docks < <(names "$ini" "$plugin")
   # a refused restore prints restore=failed and exits 1: report it through expect, never abort here
   QT_QPA_PLATFORM=offscreen "${WORK}/dsr" "$state" "${docks[@]}" 2>/dev/null || true
 }
@@ -67,8 +70,8 @@ expect() {
   if grep -qxF -- "$2" <<<"$1"; then echo "ok:   $3"; else fail "$3 -- want '$2', got: $(grep -F "$DOCK" <<<"$1" || echo none)"; fi
 }
 
-# others OUTPUT -> the harness lines of every dock but the plugin dock.
-others() { grep -v -e "^${DOCK} " -e '^state=' <<<"$1" || true; }
+# others OUTPUT -> the harness lines of every dock but the A/V-sync dock and the probe.
+others() { grep -v -e "^${DOCK} " -e "^${PROBE} " -e '^state=' <<<"$1" || true; }
 
 # same_others BEFORE AFTER WHAT -> every dock but the plugin dock placed identically.
 same_others() {
@@ -114,6 +117,16 @@ RAN="$(restore "${WORK}/ran.ini")"
 expect "$RAN" "restore=ok" "OBS-saved default re-docked: Qt restores it"
 expect "$RAN" "$DOCKED" "OBS-saved default re-docked: the dock is visible + docked right"
 same_others "$PP0" "$RAN" "OBS-saved default re-docked: every other dock unchanged"
+
+# 5. a dock added to a right area the layout already has (stream-snv's): the append path.
+cp "${FIX}/stream-snv.user.ini" "${WORK}/probe.ini"
+got="$(python3 "$SEED" seed --ini "${WORK}/probe.ini" --dock "$PROBE" || true)"
+if [ "$got" = seeded ]; then echo "ok:   stream-snv probe: seed = seeded"; else fail "stream-snv probe seed printed '${got}', want seeded"; fi
+PRB="$(restore "${WORK}/probe.ini" "$PROBE")"
+expect "$PRB" "restore=ok" "stream-snv probe: Qt restores the seeded state"
+expect "$PRB" "${PROBE} visible=1 floating=0 area=2" "stream-snv probe: the probe joins the right area, visible"
+expect "$PRB" "$DOCKED" "stream-snv probe: the A/V-sync dock stays visible + docked right"
+same_others "$SNV" "$PRB" "stream-snv probe: every other dock unchanged"
 
 if [ "$FAILS" -ne 0 ]; then echo "issue 1470 Qt dock-state proof: ${FAILS} FAILED" >&2; exit 1; fi
 echo "issue 1470 Qt dock-state proof: all checks passed"

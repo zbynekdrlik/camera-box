@@ -48,7 +48,8 @@ def _obs_running(tmp_path, running):
     p = tmp_path / ("obs-up" if running else "obs-down")
     p.write_text("#!/bin/bash\nexit %d\n" % (0 if running else 1))
     p.chmod(0o755)
-    return {"OBS_BOX_AVSYNC_DOCK_OBS_RUNNING_CMD": str(p)}
+    # the ONE "is OBS running" probe of the provisioning libs (strih_operator_obs_running) and its seam
+    return {"STRIH_OPERATOR_OBS_RUNNING_CMD": str(p)}
 
 
 def _ini(tmp_path, box="stream-pp"):
@@ -175,6 +176,75 @@ def test_an_unreadable_user_ini_is_a_warn_and_untouched(tmp_path):
     assert ini.read_text() == "[BasicWindow]\nDockState=AAAA\n"
 
 
+STAMP = ".camera-box-avsync-dock-seeded"
+
+
+def _floated_and_closed(tmp_path):
+    """A user.ini holding the dock hidden + floating in the right area: what OBS saves both when it ran
+    with the plugin before any seed AND when the operator floated the dock and closed it."""
+    import base64
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ods", SCRIPTS / "obs_dock_state.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    ini = _ini(tmp_path)
+    text = ini.read_text()
+    line = [l for l in text.splitlines() if l.startswith("DockState=")][0]
+    blob = bytearray(m.seed(base64.b64decode(line.split("=", 1)[1]), DOCK))
+    item = [i for i in m.parse(bytes(blob))["items"] if i["name"] == DOCK][0]
+    blob[item["flags_offset"]] = 0x02
+    ini.write_text(text.replace(line, "DockState=" + base64.b64encode(bytes(blob)).decode()))
+    return ini
+
+
+def test_the_first_seed_leaves_a_stamp_owned_by_the_desktop_user(tmp_path):
+    ini = _ini(tmp_path)
+    r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME))
+    assert r.returncode == 0 and "seeded" in r.stdout
+    stamp = tmp_path / STAMP
+    assert stamp.is_file() and not stamp.is_symlink()
+    # an operator layout already holding the dock stamps too (stream-snv)
+    d2 = tmp_path / "snv"
+    d2.mkdir()
+    ini2 = _ini(d2, "stream-snv")
+    r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini2), ME),
+              box="stream-snv")
+    assert "already places it" in r.stdout and (d2 / STAMP).is_file()
+
+
+def test_before_the_first_seed_the_obs_default_is_redocked(tmp_path):
+    ini = _floated_and_closed(tmp_path)
+    r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME))
+    assert "A/V-sync dock redocked visible + docked right" in r.stdout, r.stdout
+    assert (tmp_path / STAMP).is_file()
+
+
+def test_after_the_first_seed_a_floated_and_closed_dock_is_the_operators(tmp_path):
+    # Review finding 2: once seeded, hidden + floating is the operator floating the dock and closing it;
+    # every later setup run keeps it and verify only NOTEs it.
+    ini = _floated_and_closed(tmp_path)
+    (tmp_path / STAMP).write_text("issue 1470\n")
+    snap = ini.read_bytes()
+    r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME))
+    assert "already places it" in r.stdout and ini.read_bytes() == snap
+    lib, share = _prefix(tmp_path)
+    row = _rows(tmp_path, LOG_WITH, ini, lib, share)[2]
+    assert row.startswith("NOTE|(avsync-dock-layout) the operator closed the A/V-sync dock"), row
+    (tmp_path / STAMP).unlink()
+    row = _rows(tmp_path, LOG_WITH, ini, lib, share)[2]
+    assert row.startswith("FAIL|(avsync-dock-layout) ") and "hidden + floating default" in row, row
+
+
+def test_a_symlinked_stamp_is_never_written_through(tmp_path):
+    target = tmp_path / "elsewhere"
+    target.write_text("keep\n")
+    (tmp_path / STAMP).symlink_to(target)
+    ini = _ini(tmp_path)
+    r = _bash('obs_box_avsync_dock_seed "$1" "$2"', env=_obs_running(tmp_path, False), args=(str(ini), ME))
+    assert r.returncode == 0
+    assert target.read_text() == "keep\n"
+
+
 def test_a_user_ini_without_a_saved_layout_is_a_warn(tmp_path):
     ini = tmp_path / "user.ini"
     ini.write_text("[BasicWindow]\nSaveProjectors=true\n")
@@ -207,16 +277,31 @@ def _prefix(tmp_path, so=True, locale=True):
     return lib, share
 
 
-def _rows(tmp_path, log_text, ini, lib, share):
+def _rows(tmp_path, log_text, ini, lib, share, box="stream-pp"):
     log = tmp_path / "obs.txt"
     if log_text is None:
         log_arg = ""
     else:
         log.write_text(log_text)
         log_arg = str(log)
-    r = _bash('obs_box_avsync_dock_grade_rows "$1" "$2" "$3" "$4"', args=(str(lib), str(share), log_arg, str(ini)))
+    r = _bash('obs_box_avsync_dock_grade_rows "$1" "$2" "$3" "$4"', args=(str(lib), str(share), log_arg, str(ini)),
+              box=box)
     assert r.returncode == 0, r.stderr
     return r.stdout.splitlines()
+
+
+def test_the_strih_role_grades_the_plugin_but_not_the_layout(tmp_path):
+    # Review finding 1: the strih role installs the same bundle, so OBS there loads the dock too; its
+    # plugin rows are graded on every role, only the layout (the stream operator's dock) is not.
+    lib, share = _prefix(tmp_path)
+    ini = _ini(tmp_path, "stream-pp")
+    for box in ("strih-snv", "strih-pp"):
+        rows = _rows(tmp_path, LOG_WITH, ini, lib, share, box=box)
+        assert rows[0].startswith("OK|(avsync-dock) ") and rows[1].startswith("OK|(avsync-dock-loaded) "), rows
+        assert rows[2].startswith("NOTE|(avsync-dock-layout) not graded: the A/V-sync dock reads the measurement audio"), rows
+    lib2, share2 = _prefix(tmp_path / "missing", so=False)
+    rows = _rows(tmp_path, LOG_WITHOUT, ini, lib2, share2, box="strih-snv")
+    assert rows[0].startswith("FAIL|(avsync-dock) ") and rows[1].startswith("FAIL|(avsync-dock-loaded) "), rows
 
 
 def test_a_healthy_stream_box_reads_three_ok_rows(tmp_path):
@@ -239,6 +324,8 @@ def test_a_log_without_the_module_fails_the_loaded_row(tmp_path):
     lib, share = _prefix(tmp_path)
     rows = _rows(tmp_path, LOG_WITHOUT, _ini(tmp_path, "stream-snv"), lib, share)
     assert rows[1].startswith("FAIL|(avsync-dock-loaded) ") and "restart strih-obs.service" in rows[1]
+    # a module that failed to load reads the same: the row names where to look
+    assert "Failed to load" in rows[1]
 
 
 @pytest.mark.parametrize("text", [None, "02:35:32.747: [distroav] plugin loaded\n"])
@@ -300,9 +387,11 @@ def test_verify_grades_item_47_on_one_line_after_item_46():
     v = VERIFY.read_text()
     j = v.index("# 47) issue 1470")
     line = v[v.rindex("\n", 0, j) + 1:v.index("\n", j)]
-    assert line.startswith('if WHY="$(obs_box_step_applies avsync-dock)"; then obs_box_avsync_dock_grade_report ')
+    # every role (review finding 1): the grader gates only its layout row by the role
+    assert line.startswith("obs_box_avsync_dock_grade_report ")
+    assert "obs_box_step_applies" not in line
     assert '"${LOG:-}" "${USER_HOME}/.config/obs-studio/user.ini"' in line
-    assert 'else note "(avsync-dock) not graded: ${WHY}"; fi' in line
+    assert '|| bad "(avsync-dock) the grader did not print all of its rows"' in line
     assert v.index("# 46) issue 1394") < j < v.index("\n# 16) NIC")
     # item 47 reads the newest log item 2 already resolved
     assert v.index('LOG="$(newest_log)"') < j

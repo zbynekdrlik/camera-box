@@ -254,6 +254,62 @@ def test_the_cli_tokens_and_exit_codes(tmp_path):
     assert r.returncode == 4
 
 
+# --- the first-seed stamp (review finding 2) ---------------------------------------------------------
+
+def _default_hidden_ini(tmp_path):
+    # stream-snv's advss-status-dock is hidden + floating: use it as the dock under test
+    return _copy(tmp_path, "stream-snv"), "advss-status-dock"
+
+
+def test_without_a_stamp_the_obs_default_is_redocked_and_a_stamp_is_written(tmp_path):
+    p, name = _default_hidden_ini(tmp_path)
+    stamp = tmp_path / ".stamp"
+    assert M.check_ini(str(p), name, str(stamp)) == "default-hidden"
+    assert M.seed_ini(str(p), name, str(stamp)) == "redocked"
+    assert stamp.is_file() and M.check_ini(str(p), name, str(stamp)) == "visible"
+
+
+def test_with_a_stamp_the_obs_default_is_the_operators_and_kept(tmp_path):
+    p, name = _default_hidden_ini(tmp_path)
+    stamp = tmp_path / ".stamp"
+    stamp.write_text("issue 1470\n")
+    snap = p.read_bytes()
+    assert M.check_ini(str(p), name, str(stamp)) == "hidden"
+    assert M.seed_ini(str(p), name, str(stamp)) == "present"
+    assert p.read_bytes() == snap
+
+
+@pytest.mark.parametrize("box,want", [("stream-pp", "seeded"), ("stream-snv", "present")])
+def test_a_seed_decision_writes_the_stamp(tmp_path, box, want):
+    p = _copy(tmp_path, box)
+    stamp = tmp_path / ".stamp"
+    assert M.seed_ini(str(p), DOCK, str(stamp)) == want and stamp.is_file()
+
+
+def test_no_saved_layout_writes_no_stamp(tmp_path):
+    p = _copy(tmp_path, None, "[BasicWindow]\nSaveProjectors=true\n")
+    stamp = tmp_path / ".stamp"
+    assert M.seed_ini(str(p), DOCK, str(stamp)) == "no-state" and not stamp.exists()
+
+
+def test_a_dangling_symlink_stamp_is_never_followed(tmp_path):
+    p = _copy(tmp_path, "stream-pp")
+    stamp = tmp_path / ".stamp"
+    stamp.symlink_to(tmp_path / "victim")
+    assert M.seed_ini(str(p), DOCK, str(stamp)) == "seeded"
+    assert not (tmp_path / "victim").exists()
+
+
+def test_the_cli_takes_the_stamp(tmp_path):
+    p, name = _default_hidden_ini(tmp_path)
+    stamp = tmp_path / ".stamp"
+    stamp.write_text("x\n")
+    r = _cli("check", "--ini", str(p), "--dock", name, "--stamp", str(stamp))
+    assert r.stdout.strip() == "hidden"
+    r = _cli("check", "--ini", str(p), "--dock", name)
+    assert r.stdout.strip() == "default-hidden"
+
+
 # --- the names are the dock's own --------------------------------------------------------------------
 
 def test_the_dock_object_name_and_module_follow_the_vendored_plugin():
