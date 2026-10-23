@@ -26,7 +26,8 @@
 #        (`link change old 10000 new 0`, carrier lost) the FIRST time a VLAN enters its HW filter
 #        (`8021q: adding VLAN 0 to HW filter`) -- NDI, PTP and ssh on the production box go with it. So
 #        the VLAN connection is created ONLY when absent, after a loud WARNING, created down and brought
-#        up exactly once (then setup waits, bounded, for the rig link to come back); it is NEVER deleted,
+#        up exactly once (then setup waits, bounded, for the reset to come and go: carrier_changes; a
+#        failed first up is never armed); it is NEVER deleted,
 #        re-created, brought down or up again: an address / route / rule change is modify + `device
 #        reapply`, a refused reapply FAILS by name, an identity change (vlan.parent, vlan.id, the interface
 #        name) and an existing INACTIVE VLAN profile are refused untouched -- arming its autoconnect would
@@ -52,7 +53,8 @@
 #
 # Seams (tests/python/test_vban_leg_1439.py): STRIH_VBAN_LEG_SYSFS (/sys), STRIH_VBAN_LEG_PROC_SYS
 # (/proc/sys), STRIH_VBAN_LEG_NFT_FILE, STRIH_VBAN_LEG_UNIT_FILE, STRIH_VBAN_LEG_SYSCTL_FILE,
-# STRIH_VBAN_LEG_WAIT_S (the counter window, 3 s); nmcli / ip / nft / systemctl / sysctl from PATH;
+# STRIH_VBAN_LEG_WAIT_S (the counter window, 3 s), STRIH_VBAN_LEG_LINK_WAIT_S (30 s) +
+# STRIH_VBAN_LEG_RESET_SEEN_S (10 s) (the rig-link wait); nmcli / ip / nft / systemctl / sysctl from PATH;
 # STRIH_NIC_IFACE overrides the rig NIC like everywhere else.
 
 STRIH_VBAN_LEG_PROFILE=vban-dante70
@@ -359,21 +361,40 @@ _strih_vban_leg_live_problems() {
   [ "$n" = 1 ]
 }
 
-# _strih_vban_leg_rig_link_wait PARENT -> after a first VLAN activation: wait (bounded,
-# STRIH_VBAN_LEG_LINK_WAIT_S, 30 s) for the rig NIC's carrier and a default route through it again (the
-# atlantic reset takes ~8 s), so the next setup step does not meet a dead rig link. Always rc 0.
+# _strih_vban_leg_carrier_changes PARENT -> the rig NIC's carrier_changes counter ('' when unreadable).
+_strih_vban_leg_carrier_changes() {
+  cat "$(_strih_vban_leg_sysfs)/class/net/${1}/carrier_changes" 2>/dev/null || true
+}
+
+# _strih_vban_leg_rig_link_wait PARENT CHANGES_BEFORE -> after a first VLAN activation, wait (bounded,
+# STRIH_VBAN_LEG_LINK_WAIT_S, 30 s) for the atlantic reset to COME AND GO: carrier_changes up by at least 2
+# since CHANGES_BEFORE (read before the activation: down + up), carrier 1 and a default route through the
+# rig NIC. atlantic reports the carrier drop from its link poll up to ~1 s late and NetworkManager holds
+# the route a moment longer, so the first read after the activation can look healthy (review round 2).
+# A NIC whose counter does not move within STRIH_VBAN_LEG_RESET_SEEN_S (10 s) while its link is up had no
+# reset: one note, return. A link that stays down: one WARNING at the bound. Always rc 0.
 _strih_vban_leg_rig_link_wait() {
-  local parent="$1" n=0 max="${STRIH_VBAN_LEG_LINK_WAIT_S:-30}" t
+  local parent="$1" before="${2-}" n=0 max="${STRIH_VBAN_LEG_LINK_WAIT_S:-30}" seen="${STRIH_VBAN_LEG_RESET_SEEN_S:-10}"
+  local t now up
   [[ "$max" =~ ^[0123456789]+$ ]] || max=30
+  [[ "$seen" =~ ^[0123456789]+$ ]] || seen=10
   while :; do
     t="$(ip -4 route show default 2>/dev/null || true)"
+    now="$(_strih_vban_leg_carrier_changes "$parent")"
+    up=0
     if [ "$(cat "$(_strih_vban_leg_sysfs)/class/net/${parent}/carrier" 2>/dev/null || true)" = 1 ] \
-       && grep -F -- " dev ${parent} " <<<"$t" >/dev/null; then
-      echo "  the rig link ${parent} is up again (carrier + default route) after ${n} s"
+       && grep -F -- " dev ${parent} " <<<"$t" >/dev/null; then up=1; fi
+    if [ "$up" = 1 ] && [[ "$before" =~ ^[0123456789]+$ ]] && [[ "$now" =~ ^[0123456789]+$ ]] \
+       && [ "$((now - before))" -ge 2 ]; then
+      echo "  the rig link ${parent} is up again (reset seen: carrier_changes ${before} -> ${now}, carrier + default route) after ${n} s"
+      return 0
+    fi
+    if [ "$up" = 1 ] && [ "$n" -ge "$seen" ] && { [ -z "$now" ] || [ "$now" = "$before" ]; }; then
+      echo "  NOTE: no carrier change on the rig link ${parent} in ${seen} s after the VLAN came up (carrier_changes ${before:-?}): no reset on this NIC, the link is up"
       return 0
     fi
     if [ "$n" -ge "$max" ]; then
-      echo "  WARNING: the rig link ${parent} is not back after ${max} s (carrier or default route missing) -- the next steps may fail on the network; re-run setup-strih when it is"
+      echo "  WARNING: the rig link ${parent} is not back after ${max} s (carrier_changes ${before:-?} -> ${now:-?}, carrier or default route missing) -- the next steps may fail on the network; re-run setup-strih when it is"
       return 0
     fi
     sleep 1
@@ -386,10 +407,16 @@ _strih_vban_leg_vlan_warning() {
   echo "  WARNING: creating VLAN ${2} on the rig NIC ${1} -- the atlantic driver resets the rig link for ~8 s the first time a VLAN enters its HW filter (issue 1439, 23.10.2026): NDI, PTP and ssh on this box drop for that time; done once, never again on a re-run"
 }
 
-# _strih_vban_leg_active_on IF -> the UUID of the profile active on IF ('' when none).
+# _strih_vban_leg_active_on IF -> the UUID of the profile active on IF ('' when none); rc 1 + a named
+# stderr line when nmcli cannot list the active connections (never read as "not active").
 _strih_vban_leg_active_on() {
-  nmcli -g UUID,DEVICE connection show --active </dev/null 2>/dev/null \
-    | while IFS=: read -r u p; do [ "$p" = "$1" ] && echo "$u"; done | head -n 1 || true
+  local rows u p
+  rows="$(nmcli -g UUID,DEVICE connection show --active </dev/null 2>/dev/null)" \
+    || { echo "strih-vban-leg: nmcli cannot list the active connections -- nothing touched" >&2; return 1; }
+  while IFS=: read -r u p; do
+    if [ "$p" = "$1" ]; then echo "$u"; return 0; fi
+  done <<<"$rows"
+  return 0
 }
 
 # _strih_vban_leg_nm_apply IF ADDR MAC PARENT VLAN_ID -> the profile adopted / created, the extra ones
@@ -397,7 +424,7 @@ _strih_vban_leg_active_on() {
 # or a wrong read-back; an uncabled leg (activation refused) is a WARN, rc 0.
 _strih_vban_leg_nm_apply() {
   local ifc="$1" addr="$2" mac="$3" parent="$4" id="$5" scan u named on act keep="" adopt="" first=""
-  local reapply=0 diff p
+  local reapply=0 diff p cc0
   local -a extra=() kv=() addkv=() upargs=()
   scan="$(_strih_vban_leg_nm_scan "$ifc" "$mac" "$parent" "$id")" \
     || { echo "strih-vban-leg: nmcli cannot list the NetworkManager connections" >&2; return 1; }
@@ -435,17 +462,22 @@ _strih_vban_leg_nm_apply() {
     echo "  NM profile ${STRIH_VBAN_LEG_PROFILE} created for ${ifc}"
     # a VLAN's device does not exist before this activation: the profile names it, so no ifname
     if [ "$parent" = - ]; then upargs=(ifname "$ifc"); else upargs=(); fi
+    cc0="$([ "$parent" = - ] || _strih_vban_leg_carrier_changes "$parent")"
     if nmcli --wait 30 connection up "$keep" "${upargs[@]}" </dev/null >/dev/null; then
       echo "  ${ifc}: ${STRIH_VBAN_LEG_PROFILE} brought up"
+    elif [ "$parent" != - ]; then
+      # never armed: NetworkManager would activate it later, in the middle of the next steps
+      echo "strih-vban-leg: the new VLAN profile ${keep} did not come up on ${ifc} -- left with autoconnect off (never armed: NetworkManager would activate it later, resetting the atlantic rig link ~8 s while nobody waits): nmcli connection up ${keep} in a maintenance window" >&2
+      return 1
     else
       echo "  WARN: ${ifc} did not come up with ${STRIH_VBAN_LEG_PROFILE} (is the leg cabled to the audio VLAN?) -- it comes up with the link (autoconnect); verify-strih item 9 grades it"
     fi
-    if [ "$parent" != - ]; then _strih_vban_leg_rig_link_wait "$parent"; fi
+    if [ "$parent" != - ]; then _strih_vban_leg_rig_link_wait "$parent" "$cc0"; fi
     nmcli connection modify "$keep" connection.autoconnect yes </dev/null \
       || { echo "strih-vban-leg: nmcli could not set connection.autoconnect yes on ${keep}" >&2; return 1; }
     [ -n "$(ip -4 -o addr show dev "$ifc" 2>/dev/null || true)" ] || return 0
   else
-    act="$(_strih_vban_leg_active_on "$ifc")"
+    act="$(_strih_vban_leg_active_on "$ifc")" || return 1
     if [ "$parent" != - ] && [ "$act" != "$keep" ]; then
       # arming it (autoconnect yes) or any up would activate the VLAN NOW: the atlantic link reset
       echo "strih-vban-leg: the VLAN profile ${keep} exists but ${ifc} is not active on it -- NOT touched (an activation can reset the atlantic rig link ~8 s): nmcli connection up ${keep} in a maintenance window" >&2
@@ -474,7 +506,7 @@ _strih_vban_leg_nm_apply() {
       || { echo "strih-vban-leg: nmcli could not delete the second profile ${u} on ${ifc}" >&2; return 1; }
     echo "  NM profile ${u} on ${ifc} deleted (one profile on the leg)"
   done
-  act="$(_strih_vban_leg_active_on "$ifc")"
+  act="$(_strih_vban_leg_active_on "$ifc")" || return 1
   if [ "$act" = "$keep" ] && [ "$reapply" = 0 ]; then
     :
   elif [ "$act" = "$keep" ] && nmcli device reapply "$ifc" </dev/null >/dev/null 2>&1; then
