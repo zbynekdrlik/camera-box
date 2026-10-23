@@ -122,6 +122,10 @@ def test_incomplete_read_is_none_never_an_empty_table():
     assert nbq.facet_from_raw("") is None
     # a RouterOS error aborts the script before the end marker
     assert nbq.facet_from_raw("bad command name detail (line 1 column 30)\r\n") is None
+    # the end marker alone is not enough: every one of the four tables must have been printed
+    raw = _raw("foh2_video")
+    no_rules = raw[: raw.index("=== switch-rule")] + "=== end\r\n"
+    assert nbq.facet_from_raw(no_rules) is None
 
 
 # --------------------------------------------------------------------------- check
@@ -396,3 +400,4 @@ def test_baseline_flat_walk_skips_the_facet_sections():
     body = src.split("_nc_baseline_flat() {", 1)[1].split("\n}\n", 1)[0]
     for sec in ("bridge_vlan", "bridge_port", "qos_profile", "switch_rule"):
         assert sec in body
+    assert "if len(prefix) == 1 and k in FACET:" in body
