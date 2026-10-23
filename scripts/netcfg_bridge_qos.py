@@ -5,7 +5,7 @@ venue netcfg audit (scripts/netcfg-audit.sh, .claude/rules/netcfg-audit.md).
 The VBAN-only legs need switch config that is otherwise recorded nowhere (23.10.2026): foh2_video
 `sfp-sfpplus2` VLAN 89 untagged via PVID + VLAN 70 tagged with `frame-types=admit-all`, the QoS
 profile `dante-audio` (DSCP 46 -> traffic class 5) and its `new-qos-profile` switch rule. This
-module parses one read-only `print detail` pass per CRS310 (GATHER_CMD), turns it into the
+module parses one read-only `print detail` pass per CRS310 (GATHER_CMD: five tables), turns it into the
 baseline facet, and diffs a live facet against the baseline.
 
 Pure functions plus a small CLI used by netcfg-audit.sh (no network, no switch writes):
@@ -15,24 +15,32 @@ Pure functions plus a small CLI used by netcfg-audit.sh (no network, no switch w
   netcfg_bridge_qos.py attach <flat-json-in> <raw-dir> <switch>...
       read the snapshot JSON (stdin-free: a file), attach each switch's facet parsed from
       <raw-dir>/<switch>.txt, print the result. A reachable switch whose read is incomplete
-      fails (exit 1, the switch named on stderr), so --capture never writes a baseline that
-      silently lacks the facet.
+      makes it exit 1 (the switch named on stderr; the JSON still printed without that switch's
+      facet), so --capture never writes a baseline that silently lacks the facet.
   netcfg_bridge_qos.py check <baseline.json> <raw-dir> <live-flat-file>
       one finding per line, `<STATUS>\t<1 hard|0 report-only>\t<message>`.
 
 What is baselined (verbatim RouterOS property names):
-  bridge_vlan  STATIC entries keyed by `vlan-ids`: sorted `tagged` / `untagged` members +
-               `disabled`. The `added by pvid` / `added by mvrp` DYNAMIC entries are runtime
-               state (the PVID side is already the bridge port `pvid`).
-  bridge_port  per interface: `pvid`, `frame-types`, `disabled` (static ports only).
+  bridge       per bridge name: `vlan-filtering`, `mvrp`, `pvid`, `frame-types`,
+               `ingress-filtering`, `disabled`. The trunks carry VLAN 70/89 only through MVRP, so
+               the bridge `mvrp` + `vlan-filtering` switches are what keeps those legs up.
+  bridge_vlan  STATIC entries keyed by `vlan-ids` as configured: sorted `tagged` / `untagged`
+               members + `disabled`; compared per expanded VLAN id (`70,89` / `100-102`). The
+               `added by pvid` / `added by mvrp` DYNAMIC entries are runtime state (their config is
+               the bridge port `pvid` and the port + bridge MVRP settings).
+  bridge_port  per interface: `pvid`, `frame-types`, `ingress-filtering`,
+               `mvrp-applicant-state`, `mvrp-registrar-state`, `disabled` (static ports only).
   qos_profile  per name: `pcp`, `dscp`, `traffic-class`, `automap`, `disabled` (no `hw-id`).
   switch_rule  STATIC rules keyed by their comment (else `#<n>`, n = position among the static
-               rules): every property + `disabled`.
+               rules; a repeated comment gets ` (2)`, ` (3)`): every property + `disabled` +
+               `invalid` (the I flag: the hardware rejected the rule).
 
-DRIFT (hard): a baseline membership missing or changed (tagged <-> untagged), a bridge port
-missing or with a changed pvid / frame-types / disabled, a QoS profile missing or changed, a
-switch rule missing or changed. Report-only: anything present live but not in the baseline, and
-an incomplete read (UNKNOWN) -- a failed read must never page as a removed config.
+DRIFT (hard): a baseline membership missing or changed (tagged <-> untagged), a bridge or bridge
+port missing or changed, a QoS profile missing or changed, a switch rule missing or changed.
+Report-only: anything present live but not in the baseline, and an unreadable read (UNKNOWN): no
+end marker, a missing table, an entry block with no `N flags` header, an entry without its key
+property, an unbalanced quote. A read the parser does not understand must never page as a
+removed config.
 """
 import json
 import os
@@ -40,11 +48,12 @@ import re
 import shlex
 import sys
 
-SECTIONS = ("bridge-vlan", "bridge-port", "qos-profile", "switch-rule")
-FACET_KEYS = ("bridge_vlan", "bridge_port", "qos_profile", "switch_rule")
+SECTIONS = ("bridge", "bridge-vlan", "bridge-port", "qos-profile", "switch-rule")
+FACET_KEYS = ("bridge", "bridge_vlan", "bridge_port", "qos_profile", "switch_rule")
 END_MARKER = "=== end"
 
 GATHER_CMD = (
+    ':put "=== bridge"; /interface bridge print detail; '
     ':put "=== bridge-vlan"; /interface bridge vlan print detail; '
     ':put "=== bridge-port"; /interface bridge port print detail; '
     ':put "=== qos-profile"; /interface ethernet switch qos profile print detail; '
@@ -56,8 +65,14 @@ _HEADER = re.compile(r"^\s*(\d+)\s(.*)$")
 _KEY = re.compile(r"^[a-z][a-z0-9-]*=")
 _FLAG = re.compile(r"^[A-Z*]+$")
 
-PORT_FIELDS = ("pvid", "frame-types")
+BRIDGE_FIELDS = ("vlan-filtering", "mvrp", "pvid", "frame-types", "ingress-filtering")
+PORT_FIELDS = ("pvid", "frame-types", "ingress-filtering", "mvrp-applicant-state",
+               "mvrp-registrar-state")
 PROFILE_FIELDS = ("pcp", "dscp", "traffic-class", "automap")
+
+
+class ParseError(ValueError):
+    """The read is not in the shape the parser knows -- report-only UNKNOWN, never DRIFT."""
 
 
 def _split_sections(raw):
@@ -83,19 +98,29 @@ def _split_sections(raw):
 
 
 def _entry_blocks(lines):
-    """Blank-line separated entry blocks of one `print detail` section (the Flags legend dropped)."""
-    blocks, cur = [], []
+    """Blank-line separated entry blocks of one `print detail` section.
+
+    The `Flags:` legend (which may itself wrap onto a second line) sits directly above entry 0 in
+    the same block: everything before the section's first `N ...` header line is dropped. A later
+    block that does not start with a header is a shape the parser does not know (ParseError).
+    """
+    blocks, cur, started = [], [], False
     for ln in lines:
         if not ln.strip():
             if cur:
                 blocks.append(cur)
             cur = []
             continue
-        if not cur and ln.startswith("Flags:"):
-            continue
+        if not started:
+            if not _HEADER.match(ln):
+                continue  # legend, or its wrapped continuation
+            started = True
         cur.append(ln)
     if cur:
         blocks.append(cur)
+    for b in blocks:
+        if not _HEADER.match(b[0]):
+            raise ParseError("entry block without an index header: %r" % b[0][:60])
     return blocks
 
 
@@ -109,8 +134,6 @@ def parse_detail(lines):
     entries = []
     for block in _entry_blocks(lines):
         m = _HEADER.match(block[0])
-        if not m:
-            continue
         joined = [m.group(2)]
         for ln in block[1:]:
             if ln[:1].isspace():
@@ -133,7 +156,11 @@ def parse_detail(lines):
         else:
             props_text = (rest + " " + props_text).strip()
         props = {}
-        for tok in shlex.split(props_text, posix=True):
+        try:
+            tokens = shlex.split(props_text, posix=True)
+        except ValueError as exc:
+            raise ParseError("unbalanced quote: %s" % exc) from exc
+        for tok in tokens:
             if "=" in tok:
                 k, _, v = tok.partition("=")
                 props[k] = v
@@ -153,50 +180,88 @@ def _static(entries):
     return [e for e in entries if "D" not in e["flags"]]
 
 
+def _key(entry, prop):
+    value = entry["props"].get(prop, "")
+    if not value:
+        raise ParseError("entry without %s: %r" % (prop, entry["props"]))
+    return value
+
+
 def facet_from_raw(raw):
-    """One switch's raw GATHER_CMD output -> its facet dict, or None when the read is incomplete."""
+    """One switch's raw GATHER_CMD output -> its facet dict, or None when the read is incomplete
+    or not in a shape the parser knows."""
     secs = _split_sections(raw or "")
     if secs is None:
         return None
+    try:
+        return _facet(secs)
+    except ParseError:
+        return None
+
+
+def _facet(secs):
+    bridges = {}
+    for e in _static(parse_detail(secs["bridge"])):
+        name = _key(e, "name")
+        bridges[name] = {f: e["props"].get(f, "") for f in BRIDGE_FIELDS}
+        bridges[name]["disabled"] = _disabled(e)
     vlan = {}
     for e in _static(parse_detail(secs["bridge-vlan"])):
-        vid = e["props"].get("vlan-ids", "")
-        if not vid:
-            continue
+        vid = _key(e, "vlan-ids")
         cur = vlan.setdefault(vid, {"tagged": [], "untagged": [], "disabled": _disabled(e)})
         cur["tagged"] = sorted(set(cur["tagged"]) | set(_members(e["props"].get("tagged"))))
         cur["untagged"] = sorted(set(cur["untagged"]) | set(_members(e["props"].get("untagged"))))
     ports = {}
     for e in _static(parse_detail(secs["bridge-port"])):
-        iface = e["props"].get("interface", "")
-        if iface:
-            ports[iface] = {f: e["props"].get(f, "") for f in PORT_FIELDS}
-            ports[iface]["disabled"] = _disabled(e)
+        iface = _key(e, "interface")
+        ports[iface] = {f: e["props"].get(f, "") for f in PORT_FIELDS}
+        ports[iface]["disabled"] = _disabled(e)
     profiles = {}
     for e in _static(parse_detail(secs["qos-profile"])):
-        name = e["props"].get("name", "")
-        if name:
-            profiles[name] = {f: e["props"].get(f, "") for f in PROFILE_FIELDS}
-            profiles[name]["disabled"] = _disabled(e)
+        name = _key(e, "name")
+        profiles[name] = {f: e["props"].get(f, "") for f in PROFILE_FIELDS}
+        profiles[name]["disabled"] = _disabled(e)
     rules = {}
     for n, e in enumerate(_static(parse_detail(secs["switch-rule"]))):
-        key = e["comment"] or "#%d" % n
+        base_key = e["comment"] or "#%d" % n
+        key, dup = base_key, 1
+        while key in rules:
+            dup += 1
+            key = "%s (%d)" % (base_key, dup)
         rule = dict(e["props"])
         rule["disabled"] = _disabled(e)
+        rule["invalid"] = "yes" if "I" in e["flags"] else "no"
         rules[key] = rule
-    return {"bridge_vlan": vlan, "bridge_port": ports, "qos_profile": profiles, "switch_rule": rules}
+    return {"bridge": bridges, "bridge_vlan": vlan, "bridge_port": ports,
+            "qos_profile": profiles, "switch_rule": rules}
+
+
+def _vlan_ids(text):
+    """`70,89` / `100-102` -> the VLAN ids as strings (anything else is kept verbatim)."""
+    out = []
+    for part in text.split(","):
+        part = part.strip()
+        lo, sep, hi = part.partition("-")
+        if sep and lo.isdigit() and hi.isdigit() and int(lo) <= int(hi):
+            out.extend(str(v) for v in range(int(lo), int(hi) + 1))
+        elif part:
+            out.append(part)
+    return out
 
 
 def _membership(vlan_table):
-    """{vlan-ids: entry} -> {(vlan-ids, port): "tagged" | "untagged"} (a disabled entry has none)."""
+    """{vlan-ids: entry} -> {(vlan id, port): "tagged" | "untagged"}, one key per VLAN id, so the
+    same membership grouped differently (`70,89` vs two entries) compares equal. A disabled entry
+    contributes none."""
     out = {}
-    for vid, e in vlan_table.items():
+    for ids, e in vlan_table.items():
         if e.get("disabled") == "yes":
             continue
-        for p in e.get("untagged", []):
-            out[(vid, p)] = "untagged"
-        for p in e.get("tagged", []):
-            out[(vid, p)] = "tagged"
+        for vid in _vlan_ids(ids):
+            for p in e.get("untagged", []):
+                out[(vid, p)] = "untagged"
+            for p in e.get("tagged", []):
+                out[(vid, p)] = "tagged"
     return out
 
 
@@ -229,6 +294,18 @@ def check_node(node, base, live):
 
     def note(kind, msg):
         out.append(("ADDED", False, "[report-only %s] %s" % (kind, msg)))
+
+    bb, lb = base.get("bridge", {}), live.get("bridge", {})
+    for name in sorted(set(bb) | set(lb)):
+        if name not in lb:
+            drift("%s %s: bridge missing (baseline vlan-filtering=%s mvrp=%s)"
+                  % (node, name, bb[name].get("vlan-filtering", ""), bb[name].get("mvrp", "")))
+        elif name not in bb:
+            note("bridge-added", "%s %s: bridge not in the baseline" % (node, name))
+        else:
+            for f in _diff_fields(bb[name], lb[name]):
+                drift("%s %s: bridge %s baseline='%s' live='%s'"
+                      % (node, name, f, bb[name].get(f, ""), lb[name].get(f, "")))
 
     bm = _membership(base.get("bridge_vlan", {}))
     lm = _membership(live.get("bridge_vlan", {}))
@@ -317,11 +394,11 @@ def cmd_attach(json_in, raw_dir, switches):
             failed.append(node)
             continue
         nodes[node].update(facet)
+    print(json.dumps(snap, indent=2, sort_keys=True))
     if failed:
         sys.stderr.write("netcfg-audit: bridge VLAN / port / QoS read incomplete on: %s\n"
                          % " ".join(failed))
         return 1
-    print(json.dumps(snap, indent=2, sort_keys=True))
     return 0
 
 

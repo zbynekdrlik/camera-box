@@ -15,9 +15,10 @@
 #   - a :foreach over /interface ethernet            -> per-port comment(role)/running/rate/duplex +
 #                                                       cumulative tx-drop-queue1 / tx-drop / rx-fcs
 #   - (--check only, per flagged port) print stats x2 -> a live drop-RATE probe (the microburst signal)
-#   - issue 1439: ONE more call per switch, the four `print detail` tables of
-#     scripts/netcfg_bridge_qos.py's GATHER_CMD (bridge vlan, bridge port, switch qos profile,
-#     switch rule) -> per-port VLAN membership, pvid, frame-types, QoS profiles, switch rules
+#   - issue 1439: ONE more call per switch, the five `print detail` tables of
+#     scripts/netcfg_bridge_qos.py's GATHER_CMD (bridge, bridge vlan, bridge port, switch qos
+#     profile, switch rule) -> VLAN filtering + MVRP, per-port VLAN membership, pvid, frame-types,
+#     QoS profiles, switch rules
 #
 # Modes:
 #   scripts/netcfg-audit.sh --check      # DEFAULT: gather live -> diff vs baseline -> drift report;
@@ -271,7 +272,8 @@ case "$MODE" in
     _nc_gather_all > "$tmp"
     _nc_flat_to_json "$(date '+%Y-%m-%d')" "$tmp" > "$ftmp" || exit 2
     # shellcheck disable=SC2046  # the switch names are one word each, split on purpose
-    python3 "$NC_BQ" attach "$ftmp" "$NC_RAW_DIR" $(_nc_switch_names) || cat "$ftmp"
+    # an incomplete switch read: the JSON still prints (without that switch's facet), exit 2
+    python3 "$NC_BQ" attach "$ftmp" "$NC_RAW_DIR" $(_nc_switch_names) || exit 2
     ;;
 
   check)

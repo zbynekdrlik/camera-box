@@ -4,55 +4,95 @@
   "nodes": {
     "foh1_audio": {
       "board": "CRS310-8G+2S+",
+      "bridge": {
+        "bridge": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp": "yes",
+          "pvid": "1",
+          "vlan-filtering": "yes"
+        }
+      },
       "bridge_port": {
         "ether1": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether2": {
           "disabled": "no",
           "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "1"
         },
         "ether3": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "70"
         },
         "ether4": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether5": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether6": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether7": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "70"
         },
         "ether8": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "70"
         },
         "sfp-sfpplus1": {
           "disabled": "no",
           "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "1"
         },
         "sfp-sfpplus2": {
           "disabled": "no",
           "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "1"
         }
       },
@@ -194,55 +234,95 @@
     },
     "foh1_video": {
       "board": "CRS310-8G+2S+",
+      "bridge": {
+        "bridge": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp": "yes",
+          "pvid": "1",
+          "vlan-filtering": "yes"
+        }
+      },
       "bridge_port": {
         "ether1": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether2": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether3": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether4": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether5": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether6": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether7": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether8": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "sfp-sfpplus1": {
           "disabled": "no",
           "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "1"
         },
         "sfp-sfpplus2": {
           "disabled": "no",
           "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "1"
         }
       },
@@ -384,55 +464,95 @@
     },
     "foh2_video": {
       "board": "CRS310-8G+2S+",
+      "bridge": {
+        "bridge": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp": "yes",
+          "pvid": "1",
+          "vlan-filtering": "yes"
+        }
+      },
       "bridge_port": {
         "ether1": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether2": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether3": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether4": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether5": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether6": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether7": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "70"
         },
         "ether8": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "70"
         },
         "sfp-sfpplus1": {
           "disabled": "no",
           "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "1"
         },
         "sfp-sfpplus2": {
           "disabled": "no",
           "frame-types": "admit-all",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         }
       },
@@ -576,6 +696,7 @@
           "copy-to-cpu": "no",
           "disabled": "no",
           "dst-port": "6980",
+          "invalid": "no",
           "keep-qos-fields": "no",
           "mac-protocol": "ip",
           "mirror": "no",
@@ -597,55 +718,95 @@
     },
     "stage_av": {
       "board": "CRS310-8G+2S+",
+      "bridge": {
+        "bridge": {
+          "disabled": "no",
+          "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp": "yes",
+          "pvid": "1",
+          "vlan-filtering": "yes"
+        }
+      },
       "bridge_port": {
         "ether1": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether2": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether3": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether4": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether5": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether6": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether7": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         },
         "ether8": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "70"
         },
         "sfp-sfpplus1": {
           "disabled": "no",
           "frame-types": "admit-only-vlan-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "normal-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "1"
         },
         "sfp-sfpplus2": {
           "disabled": "no",
           "frame-types": "admit-only-untagged-and-priority-tagged",
+          "ingress-filtering": "yes",
+          "mvrp-applicant-state": "non-participant",
+          "mvrp-registrar-state": "normal",
           "pvid": "89"
         }
       },

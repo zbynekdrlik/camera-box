@@ -74,19 +74,29 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
   the switch side of the VBAN-only legs (23.10.2026: foh2_video `sfp-sfpplus2` VLAN 89 untagged via
   PVID + VLAN 70 tagged with `frame-types=admit-all`; the QoS profile `dante-audio` DSCP 46 ->
   traffic class 5 on every CRS310; the foh2_video switch rule `ports=ether7 ... dst-port=6980
-  new-qos-profile=dante-audio`). One more ssh call per CRS310 (never the router) runs the four
+  new-qos-profile=dante-audio`). One more ssh call per CRS310 (never the router) runs the five
   `print detail` tables of `scripts/netcfg_bridge_qos.py` `GATHER_CMD` between `=== <section>`
-  markers and a closing `=== end`; the pure parser turns them into the per-switch `bridge_vlan` /
-  `bridge_port` / `qos_profile` / `switch_rule` baseline sections. A missing or changed VLAN
-  membership (tagged <-> untagged), pvid, frame-types, QoS profile or switch rule pages `[DRIFT]`
-  with the switch + port in the line; something present live but not in the baseline is
-  report-only (`vlan-added`, `bridge-port-added`, ...); a read without the end marker or missing a
-  table is `[report-only UNKNOWN]` (never a removed config), and `--capture` refuses (exit 2) rather
-  than write a baseline without the facet. Only STATIC VLAN entries and switch rules are baselined:
-  the `added by pvid` / `added by mvrp` entries and the dynamic romon rule are runtime state (the
-  PVID side is the bridge port `pvid`). Rules are keyed by their comment (else `#<n>` among the
-  static rules), so give a new switch rule a comment. The facet sections are diffed in python, so
-  `_nc_baseline_flat` skips them.
+  markers and a closing `=== end`; the pure parser turns them into the per-switch `bridge` /
+  `bridge_vlan` / `bridge_port` / `qos_profile` / `switch_rule` baseline sections.
+  - DRIFT (pages, the switch + port in the line): a missing or changed VLAN membership (tagged <->
+    untagged, compared per VLAN id so `70,89` vs two entries is equal), a bridge `vlan-filtering` /
+    `mvrp` / pvid / frame-types change, a bridge port's pvid / frame-types / ingress-filtering /
+    `mvrp-applicant-state` / `mvrp-registrar-state`, a QoS profile, a switch rule (incl. its `I`
+    flag = the hardware rejected it, read as `invalid`).
+  - The trunks carry VLAN 70/89 ONLY through MVRP-dynamic entries (`added by mvrp`), which are
+    runtime state and not baselined; their CONFIG is the bridge `mvrp=yes` + `vlan-filtering=yes`
+    and the trunk ports' `mvrp-applicant-state=normal-participant`, which are. Same for `added by
+    pvid` (config = the port pvid) and the dynamic romon rule.
+  - Report-only: anything present live but not in the baseline (`vlan-added`,
+    `bridge-port-added`, ...) and `[report-only UNKNOWN]` for a read the parser does not know: no
+    end marker, a missing table, an entry block with no `N flags` header (a wrapped `Flags:`
+    legend above entry 0 is skipped, not misread), an entry without its key property, an
+    unbalanced quote. A misread never pages as a removed config; `--capture` and `--json` exit 2
+    on it (capture writes nothing; json prints the other switches).
+  - Rules are keyed by their comment (else `#<n>` among the static rules; a repeated comment gets
+    ` (2)`), so give a new switch rule a comment. The facet sections are diffed in python, so
+    `_nc_baseline_flat` skips them. The hourly unit's `TimeoutStartSec` covers the extra call
+    (240 s, the worst case is in the unit).
 - **Report-only (surfaced, never pages):** `ABSENT` (a baselined port with no live link — a device
   unplugged between events must not page), `RESET` (drop counters went backwards = the switch rebooted),
   `UNKNOWN` (an unreadable field). The cumulative `dq1`/`fcs`/`running` fields in the baseline are a
@@ -142,7 +152,8 @@ WITHOUT paging, so a mis-provisioned dev1 never spams).
   run of tokens, a line with NO indent continues the previous one mid-token (the rule comment is cut
   `(dante-audi` / `o)`), and entries are separated by blank lines. The output is CRLF. The fixtures
   in `tests/python/fixtures/netcfg_bridge_qos_1439/` are the real output of `GATHER_CMD` on the four
-  switches (23.10.2026); read them as bytes in a test (`read_text()` turns CRLF into LF).
+  switches (23.10.2026); read them as bytes in a test (`read_text()` turns CRLF into LF), and open
+  them with `newline=""` in a fake `sshpass`.
 - **The facet in the baseline was seeded without a full `--capture`** (issue 1439): it was parsed
   from one read pass and merged into the existing baseline, so the other captured fields (rates,
   counters, comments) were not silently re-accepted. A later `--capture` writes everything as usual.
