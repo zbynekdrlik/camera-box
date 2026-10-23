@@ -80,8 +80,8 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
 - **Known limit (not fixed, issue 1464 review):** a launcher tint2 starts lives in the panel unit's cgroup,
   so a panel restart (a tint2 crash, step 16h's try-restart after a panel file changed) ends the apps it
   started (RustDesk, Discord, pcmanfm, now Chrome). The fix is a launch through `systemd-run --user
-  --scope` for the binary launchers, which needs a live check on a box first (follow-up proposed to the supervisor by the issue-1464 lane;
-  cite its ticket here once filed).
+  --scope` for the binary launchers, which needs a live check on a box first (tracked as issue 1465
+  item 7, comment 6363702188).
 
 ## The keyboard item (issue 1441)
 
