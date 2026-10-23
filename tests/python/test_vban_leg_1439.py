@@ -387,11 +387,13 @@ def test_a_second_profile_on_the_leg_is_deleted(tmp_path):
     assert [p["uuid"] for p in s["profiles"]] == [RIG_UUID, prof["uuid"]]
 
 
-def test_an_absent_adapter_fails_by_its_mac_and_changes_nothing(tmp_path):
+def test_an_absent_adapter_warns_by_its_mac_and_changes_nothing(tmp_path):
+    # supervisor decision 23.10.2026: an unplugged leg NIC must not fail the whole setup-strih run (it runs
+    # inside a genlock deploy after OBS stopped); setup WARNs naming the MAC, verify item 9 FAILs it.
     b = Box(tmp_path, profiles=[_rig_profile()], active={RIG_IF: RIG_UUID}, applied={RIG_IF: _rig_profile()["props"]})
     r = b.run("strih_vban_leg_install")
-    assert r.returncode != 0
-    assert LEG_MAC in r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARN" in r.stdout and LEG_MAC in r.stdout
     s = b.st()
     assert not fk.calls(s, "nmcli", "connection", "modify") and not fk.calls(s, "systemctl", "restart")
     assert not b.nft_file.exists() and not b.sysctl_file.exists()
