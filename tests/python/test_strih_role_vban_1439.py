@@ -265,14 +265,45 @@ def test_the_converter_emits_no_program_out():
     assert any(pt["src"] == "lv1" and pt["dst"] == "cutters" for pt in data["point"])
 
 
-@pytest.mark.parametrize("box", sorted(p.stem for p in BOXES.glob("*.env")))
+# the strih-role boxes only: the stream role runs no intercom hub (setup step 13 moves one aside)
+STRIH_ROLE_BOXES = sorted(p.stem for p in BOXES.glob("*.env") if _facts(p.stem)["STRIH_ROLE"] == "strih")
+
+
+def test_both_strih_boxes_are_checked():
+    assert STRIH_ROLE_BOXES == ["strih-pp", "strih-snv"]
+
+
+@pytest.mark.parametrize("box", STRIH_ROLE_BOXES)
 def test_a_box_that_takes_the_program_as_vban_has_no_hub_program_out(box):
     f = _facts(box)
-    if f["STRIH_ROLE"] != "strih":
-        pytest.skip("the stream role runs no intercom hub (setup step 13 moves one aside)")
     toml = tomllib.loads((REPO / f["STRIH_INTERCOM_CONFIG"]).read_text())
     has_out = any(p["role"] == "program_out" for p in toml["participant"])
     if f["STRIH_PROGRAM_VBAN_STREAMS"] == "none":
         assert has_out, "%s: a hub-fed strih keeps its program_out until its console sends a stream" % box
     else:
         assert not has_out, "%s: the program comes as VBAN into OBS; the hub forwards nothing into OBS" % box
+
+
+def _grade_once(tmp_path, log_text):
+    log = tmp_path / "obs.txt"
+    log.write_text(log_text)
+    kf = tmp_path / "kind"
+    kf.write_text(VBAN_KIND)
+    body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
+            'strih_box_load strih-snv\nstrih_program_vban_grade /nonexistent 127.0.0.1 "$1"')
+    r = _bash(body, log, env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_WAIT_S": "0"})
+    assert r.returncode == 0, r.stderr
+    return [x for x in r.stdout.splitlines() if x.startswith("FAIL")]
+
+
+def test_item_9_names_the_leg_address_when_nothing_arrived(tmp_path):
+    # review round 1: the console sends to the box's VBAN-only leg (STRIH_PROGRAM_VBAN_LEG_ADDR,
+    # 10.77.7.202), never to the rig address -- the "nothing arrived" hint names where it must send
+    fails = _grade_once(tmp_path, "21:30:00.000: info: nothing from obs-vban yet\n")
+    assert any("sending stream 'strih-obs' to 10.77.7.202:6981?" in x for x in fails), fails
+
+
+def test_item_9_bind_failure_names_the_port_not_the_hub_on_6981(tmp_path):
+    # review round 1: strih-snv's hub binds 6980, so a 6981 bind failure is "another process", named by ss
+    fails = _grade_once(tmp_path, "12:00:00.000: [obs-vban] Failed to bind port 6981\n")
+    assert any("could not bind UDP 6981" in x and "sport = :6981" in x for x in fails), fails
