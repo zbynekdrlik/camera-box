@@ -9,7 +9,11 @@
 # verify-strih's (stream-monitor) rows.
 Description=Stream box headphone monitor -- VLC plays the outgoing RTMP stream to the headphone jack (issues 1436, 1456)
 Documentation=https://github.com/zbynekdrlik/camera-box
-After=strih-obs.service
+# issue 1465: After= the target too. A target orders itself after every unit it Wants (the WantedBy link
+# below) unless that unit is already After= it; without this line systemd found the login cycle
+# "strih-stream-monitor after strih-obs after graphical-session.target after strih-stream-monitor" and
+# dropped a job to break it. strih-bundle-state-server.service has the same two-target shape.
+After=graphical-session.target strih-obs.service
 # Never give up: the operator must hear the stream whenever the session runs.
 StartLimitIntervalSec=0
 

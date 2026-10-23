@@ -11,11 +11,19 @@ the card's ALSA Master sat at the -23.25 dB PipeWire had left. So the player is 
 the operator's control (VLC saves it), and this supervisor runs it. Issue 1437: never through PipeWire --
 VLC writes the headphone card directly through ALSA.
 
+And (owner 23.10.2026, issue 1465): "operator si chce otovorit vlc aby videl obraz a chce si vediet prepnut
+zvuk do sluchatiek aby isiel z vlc tak vidi a pocuje co je na vystupe z obs a teda vie skontrolovat lipsync a
+audio vypadky!!!" -- the VLC window stays (the picture), its audio goes to the operator's headphone box, and
+the window no longer flickers while nothing is streamed.
+
 WHAT, one supervised --user unit (strih-stream-monitor.service, Restart=always):
-  * resolves the headphone card by its PLAYBACK PCM NAME in /proc/asound (default ` Analog` at the end:
-    stream-pp's `ALC257 Analog`), never a card index -- both stream-pp cards are called `HD-Audio
-    Generic` and the id `Generic_1` is enumeration order. Addressed as plughw:CARD=<id>,DEV=<n>, re-read
-    before every VLC start;
+  * resolves the headphone card in /proc/asound, never by a card index (both stream-pp cards are called
+    `HD-Audio Generic` and the id `Generic_1` is enumeration order), re-read before every VLC start and
+    addressed as plughw:CARD=<id>,DEV=<n>. With no --pcm-match (issue 1465): the playback PCM of the ONE
+    USB audio interface (a card with a `usbid` file: stream-snv's Scarlett Solo 4th Gen, card `Gen`, PCM
+    `USB Audio`); no USB interface = the jack, the PCM NAME ending in ` Analog` (stream-pp's `ALC257
+    Analog`); two or more USB playback PCMs = named once in the log, the jack. An explicit --pcm-match
+    is a regex on the PCM name and nothing else;
   * when another process holds that PCM (PipeWire, a second player) VLC is not started; it says who;
   * before each VLC start: the card's Master / Headphone / PCM to 0 dB unmuted (a unity baseline, the
     level is VLC's slider) and Speaker muted (PipeWire's ACP leaves the laptop speaker route on, Auto-Mute
@@ -26,7 +34,11 @@ WHAT, one supervised --user unit (strih-stream-monitor.service, Restart=always):
     (--zoom 0.25), 1 s network cache (SNV's), no error dialogs, its http status interface on 127.0.0.1
     with a per-run random password;
   * reads that status every POLL_S: `stopped` (nothing published, a stream end) -> `pl_play` every
-    RETRY_S; `paused` for more than PAUSE_MAX_S -> `pl_stop` (restreamer's per-subscriber channel is
+    RETRY_S, but ONLY while OBS publishes to the URL (issue 1465): an `obs` process holds an ESTABLISHED
+    TCP connection to the URL's host:port (/proc/net/tcp + tcp6 and the obs pids' socket fds). Each
+    pl_play on an unpublished URL is a failed RTMP open that flickered the VLC window all day; with
+    nothing published VLC idles with its window open and the state reads `waiting: OBS is not
+    publishing ...`; `paused` for more than PAUSE_MAX_S -> `pl_stop` (restreamer's per-subscriber channel is
     unbounded: a paused player must never hold a subscriber); a VLC that exits (the operator closed it)
     is started again after RETRY_S, one that exits within STARTUP_S of its start is `vlc-failing`; an
     http interface that never answers within STARTUP_S is `vlc-failing` and VLC is restarted.
@@ -38,6 +50,7 @@ owner: a PipeWire (or any non-VLC) stream on the headphone card FAILs. Std-only.
 """
 import argparse
 import base64
+import ipaddress
 import json
 import os
 import re
@@ -48,12 +61,19 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 DEFAULT_SERVER = "rtmp://127.0.0.1:1234/live"
 # The headphone jack's playback PCM: its name ENDS in ` Analog` (stream-pp: `ALC257 Analog`), but a Realtek
 # codec's second analog PCM (`ALC... Alt Analog`) is never the jack.
 DEFAULT_PCM_MATCH = r"(?<!\bAlt) Analog$"
+# RTMP's own port when the URL names none.
+RTMP_DEFAULT_PORT = 1935
+# /proc/net/tcp state 01 = TCP_ESTABLISHED.
+TCP_ESTABLISHED = "01"
+# The process that publishes the stream (its /proc comm).
+DEFAULT_OBS_PROCESS = "obs"
 # The mixer: these to 0 dB (unmuted where they have a switch), Speaker muted (issue 1456).
 UNITY_CONTROLS = (("Master", True), ("Headphone", True), ("PCM", False))
 DEFAULT_SPEAKER_CONTROL = "Speaker"
@@ -82,7 +102,8 @@ def _read(path):
 
 
 def list_playback_pcms(asound_root=ASOUND_ROOT):
-    """Every playback PCM in /proc/asound: [{card, card_id, device, name}], sorted by card + device."""
+    """Every playback PCM in /proc/asound: [{card, card_id, device, name, usb}], sorted by card + device.
+    usb = the card dir carries `usbid` (snd-usb-audio writes it for every USB audio interface)."""
     out = []
     try:
         cards = os.listdir(asound_root)
@@ -98,6 +119,7 @@ def list_playback_pcms(asound_root=ASOUND_ROOT):
             entries = os.listdir(cdir)
         except OSError:
             continue  # a card that vanished while it was read is no candidate
+        usb = "usbid" in entries
         for e in entries:
             pm = re.fullmatch(r"pcm(\d+)p", e)
             if not pm:
@@ -108,7 +130,7 @@ def list_playback_pcms(asound_root=ASOUND_ROOT):
                 continue
             nm = re.search(r"^name: (.*)$", info, re.M)
             out.append({"card": int(m.group(1)), "card_id": card_id, "device": int(pm.group(1)),
-                        "name": nm.group(1).strip() if nm else ""})
+                        "name": nm.group(1).strip() if nm else "", "usb": usb})
     return sorted(out, key=lambda p: (p["card"], p["device"]))
 
 
@@ -121,6 +143,38 @@ def resolve_pcm(pcms, pattern):
     if not hits:
         return None, "no playback PCM name matches %r (playback PCMs: %s)" % (pattern, names)
     return None, "%d playback PCMs match %r (%s) -- ambiguous" % (len(hits), pattern, names)
+
+
+def _pcm_names(pcms):
+    return ", ".join("%s:%d %s" % (p["card_id"], p["device"], p["name"]) for p in pcms) or "none"
+
+
+def resolve_headphone(pcms, pcm_match=None):
+    """The headphone PCM (issue 1465): (pcm, None, note) or (None, the reason, note). NOTE = a line to log
+    once (two or more USB playback PCMs), else None.
+      * PCM_MATCH given = the operator's regex on the PCM name, exactly resolve_pcm;
+      * else the ONE USB audio interface's playback PCM when exactly one exists;
+      * else the headphone jack (DEFAULT_PCM_MATCH)."""
+    if pcm_match is not None:
+        pcm, why = resolve_pcm(pcms, pcm_match)
+        return pcm, why, None
+    usb = [p for p in pcms if p.get("usb")]
+    if len(usb) == 1:
+        return usb[0], None, None
+    note = None
+    if usb:
+        note = ("%d USB audio playback PCMs (%s) -- ambiguous, playing to the headphone jack instead "
+                "(name one with --pcm-match)" % (len(usb), _pcm_names(usb)))
+    pcm, why = resolve_pcm(pcms, DEFAULT_PCM_MATCH)
+    return pcm, why, note
+
+
+def headphone_rule(pcm_match=None):
+    """How the headphone PCM is picked, for the `watching ...` line."""
+    if pcm_match is not None:
+        return "the playback PCM matching %r (--pcm-match)" % pcm_match
+    return ("the ONE USB audio interface's playback PCM, else the headphone jack matching %r"
+            % DEFAULT_PCM_MATCH)
 
 
 def alsa_device(pcm):
@@ -146,6 +200,118 @@ def pcm_owner(asound_root, proc_root, card, device):
             comm = None  # the owner exited between the two reads: named as "?"
     return {"state": "open", "pid": pid, "comm": comm}
 
+
+
+def rtmp_endpoint(url):
+    """(host, port) the URL connects to; port RTMP_DEFAULT_PORT when it names none."""
+    u = urllib.parse.urlsplit(url)
+    try:
+        port = u.port
+    except ValueError:
+        port = None
+    return u.hostname or "", port or RTMP_DEFAULT_PORT
+
+
+def _endpoint_ips(host):
+    """The IP addresses HOST stands for (a literal is itself; a name through getaddrinfo, may be empty)."""
+    try:
+        return {ipaddress.ip_address(host)}
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return set()
+    out = set()
+    for info in infos:
+        try:
+            out.add(ipaddress.ip_address(info[4][0].split("%")[0]))
+        except ValueError:
+            continue
+    return out
+
+
+def _proc_net_addr(hexaddr):
+    """A /proc/net/tcp[6] address field `HEX:PORT` -> (ip, port). The address is printed as 32-bit words
+    in host byte order, the port as a plain hex number. An IPv4-mapped IPv6 address reads as its IPv4."""
+    h, _, p = hexaddr.partition(":")
+    raw = bytes.fromhex(h)
+    if sys.byteorder == "little":
+        raw = b"".join(raw[i:i + 4][::-1] for i in range(0, len(raw), 4))
+    ip = ipaddress.ip_address(raw)
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip, int(p, 16)
+
+
+def established_inodes(proc_root, ips, port):
+    """The socket inodes of every ESTABLISHED TCP connection whose REMOTE end is one of IPS at PORT, read
+    from <proc_root>/net/tcp and tcp6 (a missing or unreadable table counts as empty)."""
+    out = set()
+    for table in ("tcp", "tcp6"):
+        try:
+            lines = _read(os.path.join(proc_root, "net", table)).splitlines()[1:]
+        except OSError:
+            continue
+        for ln in lines:
+            f = ln.split()
+            if len(f) < 10 or f[3] != TCP_ESTABLISHED:
+                continue
+            try:
+                ip, rport = _proc_net_addr(f[2])
+            except ValueError:
+                continue
+            if rport == port and ip in ips:
+                out.add(f[9])
+    return out
+
+
+def _socket_inodes(proc_root, pid):
+    """The socket inodes PID holds open (its fd links `socket:[N]`); a vanished or foreign pid = none."""
+    fd_dir = os.path.join(proc_root, pid, "fd")
+    out = set()
+    try:
+        fds = os.listdir(fd_dir)
+    except OSError:
+        return out
+    for fd in fds:
+        try:
+            target = os.readlink(os.path.join(fd_dir, fd))
+        except OSError:
+            continue
+        m = re.fullmatch(r"socket:\[(\d+)\]", target)
+        if m:
+            out.add(m.group(1))
+    return out
+
+
+def obs_publisher(proc_root, url, process_name=DEFAULT_OBS_PROCESS):
+    """(True, detail) when a process with comm PROCESS_NAME holds an ESTABLISHED TCP connection to the
+    URL's host:port (issue 1465: OBS publishes to the restreamer), else (False, why). Std-only from
+    /proc; only the fds of PROCESS_NAME pids are read, a vanished or unreadable pid is skipped."""
+    host, port = rtmp_endpoint(url)
+    ips = _endpoint_ips(host)
+    where = "%s:%d" % (host, port)
+    if not ips:
+        return False, "the stream host %r does not resolve" % host
+    inodes = established_inodes(proc_root, ips, port)
+    if not inodes:
+        return False, "nothing holds an ESTABLISHED TCP connection to %s" % where
+    try:
+        pids = [d for d in os.listdir(proc_root) if d.isdigit()]
+    except OSError:
+        return False, "%s is unreadable" % proc_root
+    for pid in pids:
+        try:
+            with open(os.path.join(proc_root, pid, "comm"), "rb") as fh:
+                comm = fh.read().decode("utf-8", "replace").strip()
+        except OSError:
+            continue
+        if comm != process_name:
+            continue
+        if inodes & _socket_inodes(proc_root, pid):
+            return True, "%s (pid %s) publishes to %s" % (process_name, pid, where)
+    return False, "no %s process holds the ESTABLISHED TCP connection to %s" % (process_name, where)
 
 
 def default_url():
@@ -194,10 +360,10 @@ class VlcHttp:
 
 
 class Monitor:
-    def __init__(self, url, state_file, pcm_match=DEFAULT_PCM_MATCH, vlc="vlc", amixer="amixer",
+    def __init__(self, url, state_file, pcm_match=None, vlc="vlc", amixer="amixer",
                  asound_root=ASOUND_ROOT, proc_root=PROC_ROOT, http_port=DEFAULT_HTTP_PORT, retry_s=RETRY_S,
                  poll_s=POLL_S, pause_max_s=PAUSE_MAX_S, startup_s=STARTUP_S,
-                 speaker_control=DEFAULT_SPEAKER_CONTROL, log=None):
+                 speaker_control=DEFAULT_SPEAKER_CONTROL, log=None, obs_process=DEFAULT_OBS_PROCESS):
         self.url = url
         self.state_file = state_file
         self.pcm_match = pcm_match
@@ -211,6 +377,7 @@ class Monitor:
         self.pause_max_s = pause_max_s
         self.startup_s = startup_s
         self.speaker_control = speaker_control
+        self.obs_process = obs_process
         self.log = log or (lambda s: print(s, flush=True))
         self.stopping = False
         self.proc = None
@@ -221,6 +388,7 @@ class Monitor:
         self.paused_since = None
         self.next_start = 0.0
         self._mixer_logged = set()
+        self._notes_logged = set()
         self._logged = None
         self._last_write = 0.0
         self.st = {"version": STATE_VERSION, "state": "starting", "url": url, "device": None, "card": None,
@@ -270,7 +438,10 @@ class Monitor:
                 self.log("mixer: %s of %s not set (%s) -- the stream plays anyway" % (name, card_id, err))
 
     def _start_vlc(self):
-        pcm, why = resolve_pcm(list_playback_pcms(self.asound_root), self.pcm_match)
+        pcm, why, note = resolve_headphone(list_playback_pcms(self.asound_root), self.pcm_match)
+        if note and note not in self._notes_logged:
+            self._notes_logged.add(note)
+            self.log(note)
         if pcm is None:
             self.set_state("no-card", why, device=None, card=None, pcm_device=None)
             return False
@@ -356,7 +527,15 @@ class Monitor:
                 self.set_state("paused", "paused in VLC")
         else:
             self.paused_since = None
-            self.set_state("waiting", "nothing playing on %s -- VLC retries every %g s" % (self.url, self.retry_s))
+            published, detail = obs_publisher(self.proc_root, self.url, self.obs_process)
+            if not published:
+                # issue 1465: no pl_play -- each one on an unpublished URL is a failed RTMP open that
+                # flickers the VLC window; VLC idles with its window open until OBS publishes
+                self.set_state("waiting", "OBS is not publishing to %s (%s) -- VLC idles until it does"
+                               % (self.url, detail))
+                return
+            self.set_state("waiting", "OBS publishes to %s, VLC not playing yet -- pl_play every %g s"
+                           % (self.url, self.retry_s))
             if now - self.last_play_cmd >= self.retry_s:
                 self.http.call("pl_play")
                 self.last_play_cmd = now
@@ -411,7 +590,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--url", default=None, help="the RTMP stream to play (default %s/<short hostname>)" % DEFAULT_SERVER)
     ap.add_argument("--state-file", default=None)
-    ap.add_argument("--pcm-match", default=DEFAULT_PCM_MATCH, help="regex on the playback PCM name")
+    ap.add_argument("--pcm-match", default=None,
+                    help="regex on the playback PCM name (default: the ONE USB audio interface, else the "
+                         "headphone jack %r)" % DEFAULT_PCM_MATCH)
+    ap.add_argument("--obs-process-name", default=DEFAULT_OBS_PROCESS,
+                    help="the /proc comm of the publishing OBS (pl_play only while it publishes)")
     ap.add_argument("--vlc", default="vlc")
     ap.add_argument("--amixer", default="amixer")
     ap.add_argument("--speaker-control", default=DEFAULT_SPEAKER_CONTROL,
@@ -432,15 +615,16 @@ def main(argv=None):
         print(line)
         return 0 if ok else 1
     mon = Monitor(a.url or default_url(), a.state_file, a.pcm_match, a.vlc, a.amixer, a.asound_root, a.proc_root,
-                  a.http_port, a.retry_s, a.poll_s, a.pause_max_s, a.startup_s, a.speaker_control)
+                  a.http_port, a.retry_s, a.poll_s, a.pause_max_s, a.startup_s, a.speaker_control,
+                  obs_process=a.obs_process_name)
 
     def _stop_signal(_sig, _frm):
         mon.stopping = True
 
     signal.signal(signal.SIGTERM, _stop_signal)
     signal.signal(signal.SIGINT, _stop_signal)
-    mon.log("watching %s -> the headphone PCM matching %r in VLC (http status on 127.0.0.1:%d)"
-            % (mon.url, a.pcm_match, a.http_port))
+    mon.log("watching %s -> %s in VLC (http status on 127.0.0.1:%d; pl_play only while %s publishes)"
+            % (mon.url, headphone_rule(a.pcm_match), a.http_port, a.obs_process_name))
     mon.run(a.run_s)
     return 0
 

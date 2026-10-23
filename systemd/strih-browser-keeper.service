@@ -8,7 +8,10 @@
 # kiosk autostart and after strih-obs by the strih-snv genlock deploy, graded by verify-strih.sh item 37.
 Description=OBS box browser-source keeper -- reload OBS browser sources when their page server answers (issue 1399)
 Documentation=https://github.com/zbynekdrlik/camera-box
-After=strih-obs.service
+# issue 1465: After= the target too. A target orders itself after every unit it Wants (the WantedBy link
+# below) unless that unit is already After= it; without this line the keeper closed the login cycle
+# "keeper after strih-obs after graphical-session.target after keeper".
+After=graphical-session.target strih-obs.service
 # Never give up: the keeper must run whenever the operator session does (owner 4.10.2026).
 StartLimitIntervalSec=0
 

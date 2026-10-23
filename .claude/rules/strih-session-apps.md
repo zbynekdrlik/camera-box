@@ -324,6 +324,10 @@ watch timer, dantesync tray).
   uses. The strih-snv genlock deploy also starts them after strih-obs, into the running session (below).
 - imag's autostart is a separate renderer and is untouched.
 - Every unit sets `StartLimitIntervalSec=0`: never give up.
+- A unit ordered `After=strih-obs.service` must ALSO be `After=graphical-session.target` (issue 1465).
+  The target orders itself after every unit it Wants unless that unit is already after it, and strih-obs
+  is after the target, so `After=strih-obs.service` alone is an ordering cycle at login (systemd drops a
+  job to break it). Pinned for every `systemd/` unit by `tests/python/test_strih_stream_monitor_1465.py`.
 
 ## Provisioning + grading (`scripts/lib/strih-session-apps.sh`)
 
