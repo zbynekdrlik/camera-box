@@ -39,7 +39,8 @@ SWITCHES = {
 
 
 def _raw(node):
-    return (FIX / f"{node}.txt").read_text()
+    # bytes -> str keeps the switch's CRLF (read_text() would translate it to LF)
+    return (FIX / f"{node}.txt").read_bytes().decode("ascii")
 
 
 def _facet(node, raw=None):
