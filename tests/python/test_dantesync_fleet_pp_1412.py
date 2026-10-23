@@ -242,7 +242,10 @@ def test_present_drops_an_unreachable_pp_node_from_every_arm(tmp_path):
     assert "strih-pp=op@strih-pp.lan" not in out["L"].split()
     assert "resolume-pp" not in out["W"]
     assert out["AL"].split()[-2:] == ["strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
-    assert out["AW"].split()[-1] == "resolume-pp=op@resolume-pp.lan"
+    assert "resolume-pp=op@resolume-pp.lan" in out["AW"].split()
+    # issue 1468: a switched-off alex-nb notebook drops out the same way, never dialled
+    assert "alex-nb" not in out["W"]
+    assert "alex-nb=alexnb@10.77.7.109" in out["AW"].split()
 
 
 def test_the_pp_nodes_are_never_fixed_or_obsfleet_nodes(tmp_path):
