@@ -190,7 +190,9 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   branch-filtered fetch walks the pages (`per_page=100`, at most `STRIH_CI_ARTIFACT_MAX_PAGES` = 10,
   stop on an empty page) in `_strih_ci_artifact_url`. A one-page read found no main hub on the new
   strih notebook (11.10.2026, 254 artifacts, main on page 2+). An unfiltered fetch (bkshading) still
-  reads page 1 only.
+  reads page 1 only. **Since issue 1467 the hub comes from the provisioning checkout's OWN commit**
+  (a SHA-filtered fetch, paged the same way; `main` only as a named fallback), see
+  `.claude/rules/strih-intercom.md` "The hub binary of the checkout's own commit".
 - **G7 + G11, the per-box step gate** (`scripts/lib/obs-box-role.sh` `obs_box_step_applies`): step
   11b (the xhci IRQ unit) runs only for a USB rig NIC (`STRIH_NIC_MIN_USB_MBPS != none`; a PCIe NIC
   has no xhci walk and the unit would fail every boot), step 16e only with

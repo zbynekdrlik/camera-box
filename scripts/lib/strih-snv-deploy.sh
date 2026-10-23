@@ -115,7 +115,7 @@ fi
 # plus every STRIH_PROGRAM_AUDIO_FILES entry outside them (issue 1404: the decoder shim's vendored
 # av-sync-dock headers). Live 8.10.2026: a tree without them failed setup-strih step 16e.
 strih_lx_tree_paths() {
-  local base=(scripts systemd intercom vendor/realtek-r8152) f d covered
+  local base=(scripts systemd intercom vendor/realtek-r8152 Cargo.toml) f d covered
   printf '%s\n' "${base[@]}"
   for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
     covered=0
@@ -577,6 +577,10 @@ strih_lx_prepare() {
   local -a tree_paths; mapfile -t tree_paths < <(strih_lx_tree_paths)
   git -C "$repo" archive --format=tar HEAD "${tree_paths[@]}" | tar -x -C "$w/repo"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving ${tree_paths[*]} at $tree_rev failed"; return; }
+  # issue 1467: the staged tree is no git checkout; record its commit so setup-strih step 13 installs
+  # the intercom hub CI artifact of THIS commit (strih_checkout_source_sha), never main's older one.
+  git -C "$repo" rev-parse HEAD > "$w/repo/CAMERA_BOX_SOURCE_SHA" \
+    || { _strih_lx_fail tree 1 3 "cannot record the source commit of $tree_rev"; return; }
   for b in "${box_list[@]}"; do
     STRIH_LX_BOX="$b"
     STRIH_LX_BOX_HOSTNAME[$b]="$(strih_lx_tree_check "$w/repo" "$b")" \
@@ -826,8 +830,9 @@ strih_lx_plan_steps() {
 #          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30. The planner adds
 #          bundle/GENLOCK_STATS_ABI.txt = the stats + output-stats versions of obs.h at ${sha} (removed
 #          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
-# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 + the program-audio sampler's vendored
-#          dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
+# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 Cargo.toml + the program-audio sampler's
+#          vendored dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + its
+#          commit in CAMERA_BOX_SOURCE_SHA (the hub artifact of that commit, issue 1467) + the
 #          generated run-setup.sh -> ${lstage}/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),
 #          and no previous install may run:  $(strih_lx_remote_installer_cmd)
