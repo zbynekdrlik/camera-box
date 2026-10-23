@@ -205,6 +205,9 @@ def test_the_wireplumber_dropin_allows_the_one_headphone_output_and_nothing_else
     for want in ('device.profile = "pro-audio"', "api.acp.auto-profile = false", "api.acp.auto-port = false",
                  "device.disabled = false"):
         assert want in text[on:], want
+    # review round 1: WirePlumber 0.5 picks the profile by priority (find-preferred-profile): pro-audio first
+    pri = text.index("device.profile.priority.rules")
+    assert 'device.name = "%s"' % SCARLETT in text[pri:] and 'priorities = [ "pro-audio" ]' in text[pri:]
     # every node of the card off, then the ONE playback PCM on as the operator sink
     all_nodes = text.index('node.name = "~^alsa_(input|output)[.]%s[.].*$"' % stem)
     hp = text.index('node.name = "alsa_output.%s.pro-output-0"' % stem)
@@ -249,6 +252,7 @@ def _grade(objects=None, settings=SETTINGS, sm=SM, expect=SCARLETT):
 
 ROWS = ("operator-audio-sink", "operator-audio-cards", "operator-audio-capture", "operator-audio-volume",
         "operator-audio-clock", "operator-audio-restore")
+MIXER = "operator-audio-mixer"
 
 
 def test_a_locked_session_passes_every_row():
@@ -439,8 +443,9 @@ def test_the_grade_rows_of_a_locked_box(tmp_path):
     root, _ = snv_asound(tmp_path)
     home = _installed(tmp_path, root)
     rows = _rows(tmp_path, home, _lib_env(tmp_path, root))
-    assert sorted(rows) == sorted(ROWS + ("operator-audio-files", "operator-audio-obs")), rows
-    assert all(st == "OK" for st, _ in rows.values()), rows
+    assert sorted(rows) == sorted(ROWS + (MIXER, "operator-audio-files", "operator-audio-obs")), rows
+    assert all(st == "OK" for k, (st, _) in rows.items() if k != MIXER), rows
+    assert rows[MIXER][0] == "NOTE" and "USB" in rows[MIXER][1], rows[MIXER]
     r = _bash(tmp_path, 'printf "%s" "$STREAM_OPERATOR_AUDIO_ROWS"', _lib_env(tmp_path, root))
     assert r.stdout == str(len(rows))
 
@@ -455,6 +460,20 @@ def test_a_leftover_or_a_drifted_dropin_fails_the_files_row(tmp_path):
     (home / ".config/pipewire/pipewire.conf.d/60-stream-operator-clock.conf").write_text("# drift\n")
     st, text = _rows(tmp_path, home, _lib_env(tmp_path, root))["operator-audio-files"]
     assert st == "FAIL" and "60-stream-operator-clock.conf" in text, text
+
+
+def test_a_pcm_match_dropin_is_refused_by_install_and_fails_the_files_row(tmp_path):
+    # review round 1: the player honours --pcm-match, the locked PipeWire the default rule: they must agree
+    root, _ = snv_asound(tmp_path)
+    home = _installed(tmp_path, root)
+    d = home / ".config/systemd/user/strih-stream-monitor.service.d"
+    d.mkdir(parents=True)
+    (d / "10-scarlett.conf").write_text('[Service]\nExecStart=\nExecStart=/usr/bin/python3 x --pcm-match "^USB Audio$"\n')
+    env = _lib_env(tmp_path, root, objects=False)
+    r = _bash(tmp_path, 'stream_operator_audio_install "$1" "$2" "$3" || echo RC=$?', env, REPO, home, ME)
+    assert "RC=1" in r.stdout and "10-scarlett.conf" in r.stderr and "--pcm-match" in r.stderr, (r.stdout, r.stderr)
+    st, text = _rows(tmp_path, home, _lib_env(tmp_path, root))["operator-audio-files"]
+    assert st == "FAIL" and "10-scarlett.conf" in text, text
 
 
 def test_an_unreadable_session_fails_and_a_down_obs_is_a_note(tmp_path):
@@ -531,3 +550,66 @@ def test_both_scripts_stay_within_their_line_budget():
     assert len(SETUP.read_text().splitlines()) <= 1000
     assert len(VERIFY.read_text().splitlines()) <= 1000
 
+
+
+# --- 5. review round 1: the jack's speaker path + mixer read back -------------------------------------------
+
+FAKE_AMIXER = r"""#!/bin/sh
+# amixer -c CARD sget NAME
+f="$FAKE_MIX_DIR/$4"
+if [ -f "$f" ]; then cat "$f"; else echo "amixer: Unable to find simple control '$4',0" >&2; exit 1; fi
+"""
+
+SPEAKER_OFF = """Simple mixer control 'Speaker',0
+  Capabilities: pvolume pswitch
+  Front Left: Playback 0 [0%] [-65.25dB] [off]
+  Front Right: Playback 0 [0%] [-65.25dB] [off]
+"""
+MASTER_0DB = """Simple mixer control 'Master',0
+  Capabilities: pvolume pvolume-joined pswitch pswitch-joined
+  Mono: Playback 87 [100%] [0.00dB] [on]
+"""
+HEADPHONE_0DB = """Simple mixer control 'Headphone',0
+  Front Left: Playback 87 [100%] [0.00dB] [on]
+  Front Right: Playback 87 [100%] [0.00dB] [on]
+"""
+
+
+def _mixer(tmp_path, files):
+    d = tmp_path / "mix"
+    d.mkdir(exist_ok=True)
+    for name, text in files.items():
+        (d / name).write_text(text)
+    fb = _fakebin(tmp_path, amixer=FAKE_AMIXER)
+    os.environ["FAKE_MIX_DIR"] = str(d)
+    try:
+        return _soa().mixer_row({"card_id": "Generic_1", "usb": False}, str(fb / "amixer"))
+    finally:
+        del os.environ["FAKE_MIX_DIR"]
+
+
+def test_the_jack_with_the_speaker_off_and_unity_passes(tmp_path):
+    st, text = _mixer(tmp_path, {"Speaker": SPEAKER_OFF, "Master": MASTER_0DB, "Headphone": HEADPHONE_0DB})
+    assert st == "OK" and "(%s)" % MIXER in text and "Speaker off" in text, text
+
+
+def test_a_speaker_left_on_fails(tmp_path):
+    st, text = _mixer(tmp_path, {"Speaker": SPEAKER_OFF.replace("[off]", "[on]", 1), "Master": MASTER_0DB,
+                                 "Headphone": HEADPHONE_0DB})
+    assert st == "FAIL" and "Speaker" in text, text
+
+
+def test_a_master_below_unity_or_muted_fails(tmp_path):
+    for master in (MASTER_0DB.replace("[0.00dB]", "[-23.25dB]"), MASTER_0DB.replace("[on]", "[off]")):
+        st, text = _mixer(tmp_path, {"Speaker": SPEAKER_OFF, "Master": master, "Headphone": HEADPHONE_0DB})
+        assert st == "FAIL" and "Master" in text, text
+
+
+def test_a_control_the_jack_does_not_have_is_named_not_failed(tmp_path):
+    st, text = _mixer(tmp_path, {"Master": MASTER_0DB})
+    assert st == "OK" and "no Speaker control" in text, text
+
+
+def test_a_usb_headphone_box_keeps_its_own_mixer():
+    st, text = _soa().mixer_row({"card_id": "Gen", "usb": True}, "/nonexistent/amixer")
+    assert st == "NOTE" and "USB" in text, text

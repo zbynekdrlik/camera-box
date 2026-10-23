@@ -63,9 +63,27 @@ def _pulse_rig(tmp_path, owner=(4242, "pipewire"), usb=False):
     return rig
 
 
-def _run_pulse(rig, run_s=2.0):
-    # FAKE_PCM_STATUS empty: in the pulse output VLC never opens the PCM, PipeWire holds it throughout
-    return rig.run(run_s, "--output", "pulse", FAKE_PCM_STATUS="")
+FAKE_PW_DUMP = r'''#!/usr/bin/env python3
+import json, os, sys
+mode = os.environ.get("FAKE_PW_DUMP_MODE", "sink")
+if mode == "fail":
+    sys.stderr.write("pw-dump: failed to connect\n"); sys.exit(1)
+objs = [{"id": 30, "type": "PipeWire:Interface:Node",
+         "info": {"props": {"node.name": "alsa_output.pci-x.analog-stereo", "media.class": "Audio/Sink"}}}]
+if mode == "sink":
+    objs.append({"id": 41, "type": "PipeWire:Interface:Node",
+                 "info": {"props": {"node.name": "stream-operator-headphones", "media.class": "Audio/Sink"}}})
+print(json.dumps(objs))
+'''
+
+
+def _run_pulse(rig, run_s=2.0, pw="sink"):
+    # FAKE_PCM_STATUS empty: in the pulse output VLC never opens the PCM, PipeWire holds it throughout.
+    # review round 1: the operator sink must exist in the session (pw-dump) before VLC starts.
+    fake = rig.bin / "pw-dump"
+    fake.write_text("#!%s\n%s" % (sys.executable, FAKE_PW_DUMP))
+    fake.chmod(0o755)
+    return rig.run(run_s, "--output", "pulse", "--pw-dump", str(fake), FAKE_PCM_STATUS="", FAKE_PW_DUMP_MODE=pw)
 
 
 def test_pulse_plays_to_the_operator_sink_while_pipewire_holds_the_jack(tmp_path):
@@ -101,6 +119,19 @@ def test_pulse_with_no_pipewire_on_the_headphone_pcm_is_a_fault_and_starts_nothi
     assert rig.vlc_argv() == [], rig.log()
     st = rig.st()
     assert st["state"] == "no-sink" and "PipeWire" in st["reason"] and SINK in st["reason"], st
+
+
+def test_pulse_without_the_operator_sink_never_starts_vlc(tmp_path):
+    # review round 1: an unlocked PipeWire also holds the card while something plays; PULSE_SINK naming a
+    # sink that does not exist would send VLC to the default sink -- maybe the notebook speakers
+    for pw in ("other", "fail"):
+        rig = _pulse_rig(tmp_path / pw)
+        rig.publish()
+        r = _run_pulse(rig, 1.5, pw=pw)
+        assert r.returncode == 0, r.stderr
+        assert rig.vlc_argv() == [], (pw, rig.log())
+        st = rig.st()
+        assert st["state"] == "no-sink" and SINK in st["reason"] and "pw-dump" in st["reason"], (pw, st)
 
 
 def test_pulse_with_another_process_on_the_headphone_pcm_is_busy(tmp_path):
