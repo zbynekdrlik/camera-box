@@ -5,18 +5,40 @@ on PATH, so what the lib does through one tool is what it reads back through ano
   * nmcli keeps the NetworkManager profiles and the profile APPLIED to each device (a `modify` changes
     only the saved profile; `device reapply` / `connection up` copy it onto the device, like NM);
   * ip derives the device's addresses, routes and rules from the APPLIED profile only;
-  * nft keeps the loaded table: `-f FILE` loads it, `list table` prints the real nft 1.0.9 render
-    (tests/fixtures/vban_leg_1439/nft-list-table-netns.txt) with the counters the test scripted;
+  * nft keeps the loaded table: `-f FILE` (or a restart of the filter unit) loads it, `list table`
+    prints it in the nft 1.0.9 listing shape (the netns render, pinned) with the scripted counters;
   * sysctl `-p FILE` writes the keys into the fake /proc/sys tree (env FAKE_PROC_SYS).
 Every call is logged as one argv line into state["log"].
 """
 import json
 import os
+import re  # noqa: F401 (nft_render)
 import sys
 from pathlib import Path
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "vban_leg_1439"
 NETNS_RENDER = FIXTURES / "nft-list-table-netns.txt"
+
+RENDER_SRC = r'''
+def nft_render(text):
+    """What `nft list table` prints after `nft -f` of TEXT: the table block after the `delete table`
+    line, comments gone, 4-space indents as tabs, every counter at 0, a blank line between chains (the
+    nft 1.0.9 shape, pinned against a real render by the pytest)."""
+    out = []
+    body = text.split("\n")
+    body = body[next(i for i, l in enumerate(body) if l.startswith("delete table")) + 1:]
+    for l in body:
+        if not l.strip() or l.strip().startswith("#"):
+            continue
+        n = (len(l) - len(l.lstrip(" "))) // 4
+        l = "\t" * n + l.strip()
+        l = re.sub(r"\bcounter\b", "counter packets 0 bytes 0", l)
+        if l.strip().startswith("chain ") and out and out[-1].strip() == "}":
+            out.append("")
+        out.append(l)
+    return "\n".join(out) + "\n"
+'''
+exec(RENDER_SRC)  # defines nft_render here too: the pytest pins it to real nft renders
 
 NMCLI = r'''
 import json, os, sys, uuid as _uuid
@@ -149,11 +171,12 @@ else:
 
 NFT = r'''
 import json, os, re, sys
-p = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
+
+%(render)sp = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
 s["log"].append(["nft"] + a)
 def save(): json.dump(s, open(p, "w"))
 if a[:1] == ["-f"]:
-    s["nft_loaded_file"] = open(a[1]).read(); s["nft_render"] = s["netns_render"]
+    s["nft_loaded_file"] = open(a[1]).read(); s["nft_render"] = nft_render(s["nft_loaded_file"])
     save(); sys.exit(0)
 if a == ["list", "table", "inet", "vban_dante70"]:
     if s.get("nft_unreadable"):
@@ -174,8 +197,9 @@ save(); sys.exit(2)
 '''
 
 SYSTEMCTL = r'''
-import json, os, sys
-p = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
+import json, os, re, sys
+
+%(render)sp = os.environ["FAKE_STATE"]; s = json.load(open(p)); a = sys.argv[1:]
 s["log"].append(["systemctl"] + a)
 def save(): json.dump(s, open(p, "w"))
 args = [x for x in a if not x.startswith("-")]
@@ -192,7 +216,7 @@ elif verb in ("restart", "start"):
     u["active"] = True
     if s.get("unit_runs_nft"):
         f = s["unit_runs_nft"]
-        s["nft_loaded_file"] = open(f).read(); s["nft_render"] = s["netns_render"]
+        s["nft_loaded_file"] = open(f).read(); s["nft_render"] = nft_render(s["nft_loaded_file"])
 elif verb == "daemon-reload": pass
 save()
 '''
@@ -219,7 +243,8 @@ def install(bin_dir, state_path, proc_sys):
     """Write the fakes into BIN_DIR; return the env additions."""
     bin_dir = Path(bin_dir)
     bin_dir.mkdir(parents=True, exist_ok=True)
-    for name, body in (("nmcli", NMCLI), ("ip", IP), ("nft", NFT), ("systemctl", SYSTEMCTL), ("sysctl", SYSCTL)):
+    for name, body in (("nmcli", NMCLI), ("ip", IP), ("nft", NFT.replace("%(render)s", RENDER_SRC)),
+                       ("systemctl", SYSTEMCTL.replace("%(render)s", RENDER_SRC)), ("sysctl", SYSCTL)):
         f = bin_dir / name
         f.write_text("#!%s\n%s" % (sys.executable, body))
         f.chmod(0o755)
@@ -229,7 +254,7 @@ def install(bin_dir, state_path, proc_sys):
 def new_state(path, **over):
     s = {"profiles": [], "active": {}, "applied": {}, "carrier": {}, "dhcp": {},
          "nft_render": None, "nft_counters": [[0, 0]], "nft_calls": 0, "units": {},
-         "netns_render": NETNS_RENDER.read_text(), "log": []}
+         "log": []}
     s.update(over)
     Path(path).write_text(json.dumps(s))
     return s

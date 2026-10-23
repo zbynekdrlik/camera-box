@@ -183,6 +183,14 @@ def test_a_leg_without_a_sender_passes_only_ping_exactly_like_the_live_strih_snv
     assert "udp dport" not in body
 
 
+def test_the_fake_nft_lists_a_loaded_file_exactly_like_the_real_nft():
+    # the fakes' `nft -f` + `list table` must be the real nft 1.0.9 render, byte for byte, for both shapes
+    for args, fixture in (((LEG_IF, SENDER, "6980"), "nft-list-table-netns.txt"),
+                          ((STRIH_VLAN_IF, "none", "none"), "nft-list-table-strih-snv-live-23-10.txt")):
+        real = re.sub(r"counter packets \d+ bytes \d+", "counter packets 0 bytes 0", (FIX / fixture).read_text())
+        assert fk.nft_render(_render("strih_vban_leg_nft_text", *args)).strip("\n") == real.strip("\n"), fixture
+
+
 def test_the_expected_listing_is_derived_from_the_ruleset_file():
     got = _render("strih_vban_leg_nft_expected", LEG_IF, SENDER, "6980").strip().split("\n")
     assert got == _norm((FIX / "nft-list-table-netns.txt").read_text())
