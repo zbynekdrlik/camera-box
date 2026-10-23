@@ -28,6 +28,11 @@ paths:
   - "scripts/program_audio_vban.py"
   - "scripts/lib/strih-program-vban.sh"
   - "tests/python/test_stream_role_vban_1439.py"
+  - "scripts/program_audio_continuity.py"
+  - "scripts/lib/program-audio-continuity.sh"
+  - "scripts/e2e_report_program_audio.py"
+  - "tests/python/test_program_audio_continuity*.py"
+  - "tests/python/test_e2e_discord_report_program_audio_1439.py"
 ---
 
 # obs-vban receive side: the VBAN program straight into OBS (issue 1439)
@@ -293,6 +298,52 @@ lost packets landed on audio already delivered).
   bufferbloat sawtooth (delay ramping 0 -> 30 ms every 5 s) it starves the fit more often than the old
   first-packet reference, but with the old reference the 25 ms first-gap case breaks the +-1 ms bound
   (the gap's packets fold into the first fit).
+
+## The E2E's BLOCKING program-audio continuity gate (ROZHODNUTÉ 6359382787)
+
+Owner 23.10.2026, verbatim: "A tiez tak ako pri obraze je poziadavka na zero loss tak aj pri zvuku je
+poziadavka na zero flrame loss v e2e, cize hovorit ze veci su ok ked rozne zamaskujes audio vypadky je
+uplne zle! Vobec by taky stav nemal dat zelenu e2e na rigu v snv!!!"
+
+- **A concealed slot is a LOST slot.** Concealment (above) stays only as the on-air safety net so a
+  loss is not a click; it never makes a run green, and every report names concealed slots as lost
+  (verify item 9's counters note: `N slot(s) LOST: K concealed (a concealed slot is still lost ...)`).
+- **The decision** is the pure `scripts/program_audio_continuity.py` (pytest
+  `tests/python/test_program_audio_continuity_1439.py`, over a REAL stream-snv log excerpt in
+  `tests/fixtures/program_audio_continuity_1439/` plus lines rendered from the shipped C format strings).
+  It reads the stream box's OBS log between two LINE MARKS (the log's line count at the window start and
+  stop):
+  - the status-line DELTA of `lost`, `late`, `re_anchors`, `stale`, `emit_missed` (the last status line
+    of the input at/before the start against the first one at least one status period, 10 s, after
+    the stop -- every slot up to the stop is decided by then). `concealed` is named as a subset of
+    `lost`. An older build is graded on the tokens it prints, the rest named `not_graded`;
+  - a `buffering-guard: '<input>' ...` line inside the counter interval (any reason: not mixed,
+    entered late, `MIXED_LATE`);
+  - the `asrc: source '<input>'` `place_jumps` / `steps` delta (60 s lines, the last at/before the
+    start against the first after the stop);
+  - the mix-wide `#800 mix: mixed_late=` delta is REPORTED only (it counts every mix member).
+  Any delta or guard line = FAIL. No status line on either side, a counter that went backwards (OBS
+  restarted, the source reconfigured), a token on one side only, a missing ASRC line = UNKNOWN, which
+  fails the run. `retryable` = "the closing line is not in the log yet".
+- **The E2E side** is `scripts/lib/program-audio-continuity.sh` (pytest
+  `tests/python/test_program_audio_continuity_e2e_1439.py`): `program_audio_continuity_mark start|stop`
+  right before the StartRecord banner and right after the StopRecord block (fail-open: a missing mark
+  makes the gate UNKNOWN, never aborts the recording), `program_audio_continuity_gate` after the merge
+  in both verdict paths, folded `if ! ...; then [ "$GATE" -ne 0 ] || GATE=1; fi` (never lowers a red
+  gate). It reads the log from 2000 lines before the start mark through `stream_box_exec` (bash over
+  plain ssh on Linux, PowerShell on Windows, `timeout`-bounded), waits up to 90 s for the closing lines,
+  merges the block into the verdict JSON as `program_audio_continuity` and prints it. The input comes
+  from the box facts (`stream_mbc_vban_expect`: stream-snv `mbc`); a Windows stream box (Dante `mbc`, no
+  obs-vban source) is graded on the guard + ASRC checks with `obs_vban: n/a ...` in the block.
+- **The report** (`scripts/e2e_report_program_audio.py`): a FAIL or UNKNOWN block turns the summary
+  and the full report RED even when the merge passed (`_run_passed`); see `e2e-discord-report.md`.
+- **Live proof so far:** the transport was run read-only against stream-snv on 23.10.2026 (a 25 s
+  window, PASS, `lost 242 -> 242`, the retry path waited for the ASRC line). The full SNV E2E still
+  refuses earlier at the `[0/8]` version-integrity gate on the Linux stream box (issue 1462 comment
+  6354889903), so the gate is unproven end to end until that run gets past `[0/8]`.
+- **Known limits:** the window spans the two status lines around it (up to ~10 s before the start and
+  10-20 s after the stop), so a loss there fails the run too -- conservative, never a miss. The STOP mark
+  is taken after the strih genlock-audit read (a few seconds after StopRecord): the window only grows.
 
 ## The status lines (OBS log, prefixed `[obs-vban] ` by the plugin's blog macro)
 
