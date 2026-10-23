@@ -518,6 +518,13 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
 
 ## Traps met building it
 
+- **Rendering a log line in a pytest from the shipped C format string** (the continuity gate's
+  `_c_format`): substitute `" PRIu64 "` / `" PRId64 "` on the WHOLE source before searching the
+  head and the closing `",` -- a format that ENDS in `PRIu64,` (the per-source `#800` line) needs its
+  own `"\s*PRI[ud]64\s*,` -> `d",` rule, or the search runs on into the next call. A head must not
+  end in a quote that the substitution removes (`received=%"` becomes `received=%d`).
+- **A log read against `wc -l` marks splits on `\n` only.** `str.splitlines()` also splits on `\f`,
+  a lone `\r`, `\x1c`-`\x1e`, `\x85`, ` /9` and moves every later index.
 - A C driver that `#include`s the shipped `.c` must stub `bmemdup` too (libobs `bstrdup` is an inline
   over it), and generate `plugin-macros.generated.h` from the `.h.in`.
 - The lift harness's log lines carry the `[obs-vban] ` macro prefix: match it.
