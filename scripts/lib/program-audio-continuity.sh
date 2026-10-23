@@ -16,7 +16,7 @@
 #       which fails the run (fail-closed there, never here, so a mark never aborts the recording).
 #   program_audio_continuity_gate HERE HOST DIR [VERDICT_JSON]
 #       reads the log from (start mark - PROGRAM_AUDIO_CONTINUITY_LOOKBACK lines) to its end, runs the
-#       decision, waits (bounded) while the closing status / ASRC line is not in the log yet, merges
+#       decision, waits (bounded) while the closing status / ASRC / telemetry line is not in the log yet, merges
 #       the block into VERDICT_JSON as `program_audio_continuity` (the Discord report names it) and
 #       prints it. rc 0 = PASS only; 1 = FAIL or UNKNOWN (the caller folds it into $GATE).
 #
@@ -173,9 +173,18 @@ program_audio_continuity_gate() {
         rc=0
         python3 "$py" --log "$log" --input "$input" "${vban[@]}" --first-line "$from" \
           --start-line "$scount" --end-line "$ecount" --out "$block" >/dev/null 2>&1 || rc=$?
+        # an opening line older than the lookback (a relock burst writes many lines): read the
+        # whole log once, never report UNKNOWN for a read that started too late (review round 1)
+        if [ "$rc" = 2 ] && [ "$from" -gt 1 ] \
+           && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("opening_missing") else 1)' "$block" 2>/dev/null; then
+          echo "    [program-audio] no opening line in the ${back} lines before the start mark -- reading the log again from the first line"
+          from=1
+          i=$((i - 1))
+          continue
+        fi
         if [ "$rc" = 2 ] && [ "$i" -lt "$tries" ] \
            && python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("retryable") else 1)' "$block" 2>/dev/null; then
-          echo "    [program-audio] the closing status / ASRC line is not in the log yet -- reading again in ${step} s (${i}/${tries})"
+          echo "    [program-audio] the closing status / ASRC / telemetry line is not in the log yet -- reading again in ${step} s (${i}/${tries})"
           sleep "$step"
           continue
         fi
@@ -196,6 +205,10 @@ program_audio_continuity_gate() {
   rc=0
   if [ -n "$verdict" ] && [ -f "$verdict" ]; then
     python3 "$py" --from-block "$block" --input "$input" --merge-into "$verdict" 2>&1 | sed 's/^/    /' || true
+    # review round 1: a block the verdict JSON does not carry is a red run the report would call green
+    python3 -c 'import json,sys; sys.exit(0 if "program_audio_continuity" in json.load(open(sys.argv[1])) else 1)' \
+      "$verdict" 2>/dev/null \
+      || echo "ERROR: [program-audio] issue 1439: the continuity block could not be merged into ${verdict} -- the E2E report will NOT show it; the verdict is in ${block}" >&2
   else
     python3 "$py" --from-block "$block" --input "$input" 2>&1 | sed 's/^/    /' || true
   fi

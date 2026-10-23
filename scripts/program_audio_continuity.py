@@ -27,6 +27,13 @@ Read in the window (formats from the shipped C):
     input in the window FAILS.
   * libobs's `asrc: source '<input>' ... steps=N ... place_jumps=N ...` line (obs-source.c, every
     60 s, cumulative): a placement jump or a STEP re-base moved the audio -- a delta FAILS.
+  * libobs's per-source `audio-telemetry #800 '<input>': ... mixed_late=N` line (obs-audio.c, every
+    60 s, cumulative): the guard logs a source's later MIXED_LATE events only once a minute, so an
+    in-window event can leave no guard line in the window -- this counter's delta FAILS it (review
+    round 1). The NOT_MIXED / entered-late guard reasons have no counter: their line is the gate.
+  * a re-init of the source inside the window (`obs-vban receive worker: source '<input>' stopped`,
+    `obs-vban receive anchored: source '<input>'`): every counter restarts, so a young source shows
+    no backwards step -- UNKNOWN.
   * `audio-telemetry #800 mix: frozen= mixed_late=` -- mix-wide (every member, not only the program
     input): its delta is REPORTED, never gated here (a named buffering-guard line is the gate).
 
@@ -63,6 +70,7 @@ VBAN_GATED = ("lost", "late", "re_anchors", "stale", "emit_missed")
 VBAN_ALWAYS = ("lost", "late", "re_anchors")
 VBAN_NAMED = ("concealed", "reordered", "received")
 ASRC_GATED = ("place_jumps", "steps")
+TELE_GATED = ("mixed_late",)
 
 _TS_RE = re.compile(r"^(\d\d):(\d\d):(\d\d)\.(\d\d\d): ")
 _FIELD_RE = re.compile(r"(?:^|\s)([a-z_]+)=([^\s']+)")
@@ -127,6 +135,52 @@ def parse_asrc(line, name):
         return None
     fields = dict(_FIELD_RE.findall(line[i + len(key):]))
     return {k: _int(fields.get(k)) for k in ASRC_GATED if _int(fields.get(k)) is not None}
+
+
+def parse_tele(line, name):
+    """The per-source `audio-telemetry #800 '<name>': ...` line -> {mixed_late} (absent token missing),
+    else None."""
+    key = f"audio-telemetry #800 '{name}': "
+    i = line.find(key)
+    if i < 0:
+        return None
+    fields = dict(_FIELD_RE.findall(line[i + len(key):]))
+    return {k: _int(fields.get(k)) for k in TELE_GATED if _int(fields.get(k)) is not None}
+
+
+def _bracket(lines, start_idx, end_idx, parse):
+    """The last parsed line at/before the start and the first at/after the stop: ((i, v)|None, ...)."""
+    before = after = None
+    for i, l in enumerate(lines):
+        v = parse(l)
+        if v is None:
+            continue
+        if i < start_idx:
+            before = (i, v)
+        elif i >= end_idx and after is None:
+            after = (i, v)
+    return before, after
+
+
+def _grade_bracket(res, unknown, failures, label, title, keys, before, after, prefix):
+    """Grade a 60 s cumulative line (ASRC, the per-source telemetry): a delta FAILS, a missing side is
+    UNKNOWN (the closing one retryable), a token absent on both sides is named not graded."""
+    if before is None:
+        unknown.append(f"no `{title}` line at or before the window start")
+        res["opening_missing"] = True
+    if after is None:
+        unknown.append(f"no `{title}` line after the stop (not in the log yet?)")
+        res["retryable"] = True
+    if not (before and after):
+        return {}
+    table = _delta_table({k: str(v) for k, v in before[1].items()}, {k: str(v) for k, v in after[1].items()},
+                         keys, unknown, label)
+    for k in keys:
+        if k in table and table[k]["delta"] > 0:
+            failures.append(f"{prefix}{k} +{table[k]['delta']}")
+        elif k not in table and k not in before[1] and k not in after[1]:
+            res.setdefault("not_graded", []).append(k)
+    return table
 
 
 def parse_mix(line):
@@ -221,6 +275,7 @@ def decide(lines, name, start_idx, end_idx, vban=True):
         if before is None:
             unknown.append(f"no obs-vban receive status line of '{name}' at or before the window start "
                            "(no VBAN packet reached OBS before the recording, or the log read starts too late)")
+            res["opening_missing"] = True
         if after is None:
             unknown.append(f"no obs-vban receive status line of '{name}' one status period after the stop "
                            "(the console stopped sending, or the line is not in the log yet)")
@@ -234,8 +289,9 @@ def decide(lines, name, start_idx, end_idx, vban=True):
                     unknown.append(f"the status line carries no `{k}=` token")
             counters = _delta_table(bf, af, VBAN_GATED + VBAN_NAMED, unknown, "obs-vban")
             res["counters"] = counters
-            res["not_graded"] = [k for k in VBAN_GATED + ("concealed",) if k not in counters
-                                 and _int(bf.get(k)) is None and _int(af.get(k)) is None]
+            res["not_graded"] = res.get("not_graded", []) + [
+                k for k in VBAN_GATED + ("concealed",) if k not in counters
+                and _int(bf.get(k)) is None and _int(af.get(k)) is None]
             for k in VBAN_GATED:
                 if k in counters and counters[k]["delta"] > 0:
                     failures.append(f"{k} +{counters[k]['delta']}")
@@ -254,31 +310,20 @@ def decide(lines, name, start_idx, end_idx, vban=True):
         checks["obs_vban"] = ("n/a: no obs-vban source on this stream box (its program audio is a Dante "
                               "device), the VBAN loss counters do not exist there")
 
-    # ASRC: the last line at/before the start against the first at/after the stop (60 s cadence)
-    a_before = a_after = None
-    for i, l in enumerate(lines):
-        a = parse_asrc(l, name)
-        if a is None:
-            continue
-        if i < start_idx:
-            a_before = (i, a)
-        elif i >= end_idx and a_after is None:
-            a_after = (i, a)
+    # ASRC + the per-source telemetry: the last line at/before the start against the first at/after
+    # the stop (60 s cadence each)
+    a_before, a_after = _bracket(lines, start_idx, end_idx, lambda l: parse_asrc(l, name))
     checks["asrc"] = "ran"
-    if a_before is None:
-        unknown.append(f"no `asrc: source '{name}'` line at or before the window start")
-    if a_after is None:
-        unknown.append(f"no `asrc: source '{name}'` line after the stop (not in the log yet?)")
-        res["retryable"] = True
-    if a_before and a_after:
-        res["asrc"] = _delta_table(
-            {k: str(v) for k, v in a_before[1].items()}, {k: str(v) for k, v in a_after[1].items()},
-            ASRC_GATED, unknown, "asrc")
-        for k in ASRC_GATED:
-            if k in res["asrc"] and res["asrc"][k]["delta"] > 0:
-                failures.append(f"asrc {k} +{res['asrc'][k]['delta']}")
-            elif k not in res["asrc"] and not any(f"`{k}" in u for u in unknown):
-                unknown.append(f"the `asrc: source '{name}'` line carries no `{k}=` token")
+    res["asrc"] = _grade_bracket(res, unknown, failures, "asrc", f"asrc: source '{name}'", ASRC_GATED,
+                                 a_before, a_after, "asrc ")
+    for k in ASRC_GATED:  # the ASRC line carries both tokens on every build that writes it
+        if k in res.get("not_graded", []):
+            res["not_graded"].remove(k)
+            unknown.append(f"the `asrc: source '{name}'` line carries no `{k}=` token")
+    t_before, t_after = _bracket(lines, start_idx, end_idx, lambda l: parse_tele(l, name))
+    checks["mixed_late"] = "ran"
+    res["telemetry"] = _grade_bracket(res, unknown, failures, "audio-telemetry",
+                                      f"audio-telemetry #800 '{name}'", TELE_GATED, t_before, t_after, "")
     if hi is None:
         hi = a_after[0] + 1 if a_after else end_idx
 
@@ -295,6 +340,12 @@ def decide(lines, name, start_idx, end_idx, vban=True):
             res["late_lines"].append(_strip_prefix(l))
         elif f"obs-vban receive re-anchor: source '{name}' " in l:
             res["reanchor_lines"].append(_strip_prefix(l))
+        elif (f"obs-vban receive anchored: source '{name}' " in l
+              or f"obs-vban receive worker: source '{name}' stopped" in l):
+            res.setdefault("reinit_lines", []).append(_strip_prefix(l))
+    if res.get("reinit_lines"):
+        unknown.append(f"the source '{name}' was re-initialized inside the window (its counters restarted: "
+                       f"{res['reinit_lines'][0]})")
     if res["guard_lines"]:
         failures.append(f"buffering-guard x{len(res['guard_lines'])}")
 
@@ -320,8 +371,9 @@ def decide(lines, name, start_idx, end_idx, vban=True):
         res["verdict"] = "PASS"
         res["retryable"] = False
     res["pass"] = res["verdict"] == "PASS"
-    if res["verdict"] != "UNKNOWN":
-        res["retryable"] = False
+    if res["verdict"] != "UNKNOWN" or res.get("opening_missing"):
+        res["retryable"] = False  # a missing opening line never appears by waiting
+    res.setdefault("opening_missing", False)
     return res
 
 
@@ -356,6 +408,11 @@ def summary_lines(res):
     for k, v in (res.get("checks") or {}).items():
         if v != "ran":
             out.append(f"  {k}: {v}")
+    if res.get("not_graded"):
+        out.append(f"  not graded (an older build prints no token): {', '.join(res['not_graded'])}")
+    t = res.get("telemetry") or {}
+    if t:
+        out.append("  mixed_late delta: " + " ".join(f"{k}={v['delta']}" for k, v in t.items()))
     for f in res.get("failures") or []:
         out.append(f"  FAIL: {f}")
     for u in res.get("unknown_reasons") or []:
@@ -413,7 +470,11 @@ def main(argv=None):
         except OSError as e:
             res = unknown_block(f"the log read failed: {e}", args.input, vban)
         else:
-            lines = text.splitlines()
+            # newlines only, like `wc -l` / `tail -n +N` on the box (str.splitlines() also splits on
+            # \f, \r, \x1c.. and would move the window marks, review round 1)
+            lines = text.split("\n")
+            if lines and lines[-1] == "":
+                lines.pop()
             res = decide(lines, args.input, args.start_line - args.first_line + 1,
                          args.end_line - args.first_line + 1, vban)
     if args.out:

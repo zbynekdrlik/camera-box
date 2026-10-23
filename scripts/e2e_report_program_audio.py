@@ -78,9 +78,14 @@ def section(verdict):
             lines.append(f"  • {item}")
         if len(items) > _EVIDENCE_MAX:
             lines.append(f"  • ... ďalších {len(items) - _EVIDENCE_MAX}")
+    t = b.get("telemetry") or {}
+    if t:
+        lines.append("MIXED_LATE prírastok (tento vstup): " + ", ".join(f"{k} +{x['delta']}" for k, x in t.items()))
     for k, x in (b.get("checks") or {}).items():
         if x != "ran":
             lines.append(f"{k}: {x}")
+    if b.get("not_graded"):
+        lines.append(f"neoverené (starší build): {', '.join(b['not_graded'])}")
     if b.get("failures"):
         lines.append("Zlyhalo: " + ", ".join(b["failures"]))
     for u in b.get("unknown_reasons") or []:

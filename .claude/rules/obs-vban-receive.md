@@ -321,10 +321,24 @@ uplne zle! Vobec by taky stav nemal dat zelenu e2e na rigu v snv!!!"
     entered late, `MIXED_LATE`);
   - the `asrc: source '<input>'` `place_jumps` / `steps` delta (60 s lines, the last at/before the
     start against the first after the stop);
+  - the per-source `audio-telemetry #800 '<input>': ... mixed_late=N` delta (60 s, same bracket).
+    **The guard line alone is not enough (review round 1):** `genlock_mix_guard_log_due` logs a
+    source's later events at most once a minute, so a MIXED_LATE storm that began just before the
+    window logged its line THERE and its in-window events never reach a line in the window. The
+    NOT_MIXED / entered-late reasons have no counter; their line stays the gate (an entry logs at
+    once);
+  - a re-init inside the window (`obs-vban receive worker: source '<input>' stopped`, `obs-vban
+    receive anchored:` -- the first anchor only, a re-anchor logs `re-anchor:`) is UNKNOWN: every
+    counter restarts, so a source younger than the window shows no backwards step;
   - the mix-wide `#800 mix: mixed_late=` delta is REPORTED only (it counts every mix member).
   Any delta or guard line = FAIL. No status line on either side, a counter that went backwards (OBS
-  restarted, the source reconfigured), a token on one side only, a missing ASRC line = UNKNOWN, which
-  fails the run. `retryable` = "the closing line is not in the log yet".
+  restarted, the source reconfigured), a token on one side only, a missing ASRC / telemetry line =
+  UNKNOWN, which fails the run. `retryable` = "the closing line is not in the log yet" (never when
+  the OPENING line is missing: waiting cannot bring it; `opening_missing` asks the gate to read the
+  whole log once instead).
+  - **Line numbering = newlines only** (`text.split("\n")`), like `wc -l` / `tail -n +N` on the box.
+    `str.splitlines()` also splits on `\f`, a lone `\r`, `\x1c`.. -- a form feed in one OBS line
+    moved the marks a line early and read a 4-slot loss as PASS (review round 1).
 - **The E2E side** is `scripts/lib/program-audio-continuity.sh` (pytest
   `tests/python/test_program_audio_continuity_e2e_1439.py`): `program_audio_continuity_mark start|stop`
   right before the StartRecord banner and right after the StopRecord block (fail-open: a missing mark
@@ -334,13 +348,19 @@ uplne zle! Vobec by taky stav nemal dat zelenu e2e na rigu v snv!!!"
   plain ssh on Linux, PowerShell on Windows, `timeout`-bounded), waits up to 90 s for the closing lines,
   merges the block into the verdict JSON as `program_audio_continuity` and prints it. The input comes
   from the box facts (`stream_mbc_vban_expect`: stream-snv `mbc`); a Windows stream box (Dante `mbc`, no
-  obs-vban source) is graded on the guard + ASRC checks with `obs_vban: n/a ...` in the block.
+  obs-vban source) is graded on the guard + ASRC + mixed_late checks with `obs_vban: n/a ...` in the
+  block. A block the merge could not write into the verdict JSON is a loud `ERROR ... the E2E report
+  will NOT show it` line (the run's exit is red either way).
 - **The report** (`scripts/e2e_report_program_audio.py`): a FAIL or UNKNOWN block turns the summary
   and the full report RED even when the merge passed (`_run_passed`); see `e2e-discord-report.md`.
 - **Live proof so far:** the transport was run read-only against stream-snv on 23.10.2026 (a 25 s
   window, PASS, `lost 242 -> 242`, the retry path waited for the ASRC line). The full SNV E2E still
   refuses earlier at the `[0/8]` version-integrity gate on the Linux stream box (issue 1462 comment
   6354889903), so the gate is unproven end to end until that run gets past `[0/8]`.
+- **Follow-up candidate (review round 1):** the "newest log + line mark + read from a line" texts
+  repeat what `strih_log_remote_cmd` (`strih-log-read.sh`) does for the strih box; a platform-
+  parametrized `mark` op in one shared reader would also give the genlock-audit BEFORE/AFTER window
+  its OBS-restart detection.
 - **Known limits:** the window spans the two status lines around it (up to ~10 s before the start and
   10-20 s after the stop), so a loss there fails the run too -- conservative, never a miss. The STOP mark
   is taken after the strih genlock-audit read (a few seconds after StopRecord): the window only grows.
