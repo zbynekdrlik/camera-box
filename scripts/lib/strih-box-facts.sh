@@ -40,6 +40,7 @@ strih_box_fact_keys() {
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
     STRIH_PROGRAM_VBAN_STREAMS STRIH_PROGRAM_VBAN_PORT STRIH_PROGRAM_VBAN_RESERVE_MS \
     STRIH_PROGRAM_AUDIO_INPUT \
+    STRIH_PROGRAM_VBAN_LEG_MAC STRIH_PROGRAM_VBAN_LEG_ADDR STRIH_PROGRAM_VBAN_SENDER \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC
@@ -286,6 +287,35 @@ strih_box_validate() {
     fi
     if [[ ! "$vr" =~ ^[123456789][0123456789]{0,2}$ ]] || [ "$vr" -lt "$STRIH_BOX_VBAN_RESERVE_MS_MIN" ] || [ "$vr" -gt "$STRIH_BOX_VBAN_RESERVE_MS_MAX" ]; then
       echo "strih-box ${name}: STRIH_PROGRAM_VBAN_RESERVE_MS '${vr}' must be the fixed Receive Buffer in ms (${STRIH_BOX_VBAN_RESERVE_MS_MIN}..${STRIH_BOX_VBAN_RESERVE_MS_MAX})" >&2; bad=1
+    fi
+  fi
+  # issue 1439 (ROZHODNUTÉ 6360417876, owner 23.10.2026): the VBAN-only leg -- a second NIC on the
+  # console's audio VLAN that carries ONLY the program VBAN (scripts/lib/strih-vban-leg.sh): the NIC's
+  # MAC (lower-case, as sysfs prints it), the box's /32 address on it, the console that sends. All three
+  # or none, the stream role only; the sender sits in the address's /24 (the policy route for the ping
+  # replies covers that /24), and neither is the rig address.
+  local lm="${f[STRIH_PROGRAM_VBAN_LEG_MAC]}" la="${f[STRIH_PROGRAM_VBAN_LEG_ADDR]}" ls="${f[STRIH_PROGRAM_VBAN_SENDER]}"
+  local hx='[0123456789abcdef]'
+  if [ "${lm}:${la}:${ls}" != none:none:none ]; then
+    if [ "${f[STRIH_ROLE]}" != stream ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_MAC / _LEG_ADDR / STRIH_PROGRAM_VBAN_SENDER must be none on the ${f[STRIH_ROLE]} role (the VBAN-only leg is the stream role's program input, issue 1439)" >&2; bad=1
+    elif [ "$lm" = none ] || [ "$la" = none ] || [ "$ls" = none ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_MAC / _LEG_ADDR / STRIH_PROGRAM_VBAN_SENDER: all three or none (MAC '${lm}', address '${la}', sender '${ls}')" >&2; bad=1
+    else
+      [[ "$lm" =~ ^${hx}${hx}(:${hx}${hx}){5}$ ]] \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_MAC '${lm}' must be the leg NIC's MAC, six lower-case hex pairs joined by : (as /sys/class/net/<if>/address prints it)" >&2; bad=1; }
+      _strih_box_ipv4 "$la" \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' must be the box's IPv4 address on the leg" >&2; bad=1; }
+      _strih_box_ipv4 "$ls" \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' must be the console's IPv4 address" >&2; bad=1; }
+      if _strih_box_ipv4 "$la" && _strih_box_ipv4 "$ls"; then
+        [ "${la%.*}" = "${ls%.*}" ] \
+          || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' must be in the leg's /24 (${la%.*}.0/24, STRIH_PROGRAM_VBAN_LEG_ADDR)" >&2; bad=1; }
+        [ "$la" != "$ls" ] \
+          || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR and STRIH_PROGRAM_VBAN_SENDER must differ (both '${la}')" >&2; bad=1; }
+      fi
+      [ "$la" != "${f[STRIH_IP]}" ] \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' must not be the rig address STRIH_IP" >&2; bad=1; }
     fi
   fi
   # issue 1412 slice B: the NDI program a stream box receives (`none` on a strih), and the venue whose
@@ -577,6 +607,11 @@ strih_lx_program_vban_port() { strih_box_fact STRIH_PROGRAM_VBAN_PORT; }
 strih_lx_program_vban_reserve_ms() { strih_box_fact STRIH_PROGRAM_VBAN_RESERVE_MS; }
 # issue 1462: the stream role's OBS program-audio input name (`none` on the strih role).
 strih_lx_program_audio_input() { strih_box_fact STRIH_PROGRAM_AUDIO_INPUT; }
+# issue 1439 (ROZHODNUTÉ 6360417876): the VBAN-only leg -- its NIC's MAC, the box's /32 on it, the console
+# that sends (all `none` on a box without one; scripts/lib/strih-vban-leg.sh).
+strih_lx_program_vban_leg_mac() { strih_box_fact STRIH_PROGRAM_VBAN_LEG_MAC; }
+strih_lx_program_vban_leg_addr() { strih_box_fact STRIH_PROGRAM_VBAN_LEG_ADDR; }
+strih_lx_program_vban_sender() { strih_box_fact STRIH_PROGRAM_VBAN_SENDER; }
 
 # strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
 strih_box_venue() { strih_box_fact STRIH_VENUE; }

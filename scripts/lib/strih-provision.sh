@@ -102,6 +102,11 @@ if ! declare -F strih_program_vban_grade >/dev/null; then
   # shellcheck source=scripts/lib/strih-program-vban.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-vban.sh"
 fi
+# issue 1439 (ROZHODNUTE 6360417876): the VBAN-only leg on a stream box's second NIC (setup step 13, item 9).
+if ! declare -F strih_vban_leg_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-vban-leg.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-vban-leg.sh"
+fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4

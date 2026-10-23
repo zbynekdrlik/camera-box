@@ -699,6 +699,7 @@ if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs n
 else
   echo "  SKIP: ${WHY}"
   strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"
+  strih_vban_leg_install || fail "issue 1439: the VBAN-only leg (the second NIC, ROZHODNUTE 6360417876) failed (above)"
 fi
 
 # ---------------------------------------------------------------------------------------------

@@ -346,7 +346,7 @@ esac
 # 9) program audio. A hub box (issue 1344): strih-program sink + the OBS pulse capture + the hub's program
 #    rx (FOH level = a supervisor step). A box with no hub (the stream role, issue 1439): its obs-vban source.
 if ! WHY="$(obs_box_step_applies 13)"; then
-  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"
+  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"; strih_vban_leg_grade   # + the VBAN-only leg (issue 1439)
 else
   AUDIO_SINK=0
   # 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's PipeWire
