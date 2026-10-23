@@ -2450,8 +2450,10 @@ explicitly: create-missing (always OK) vs enforce (must go behind `BOOTSTRAP or 
 class, never "self-healing".
 
 **imag touchpad (`#779`):** libinput `Scrolling Pixel Distance` hard-caps at **50** (BadValue
-above it) — 50 is the gentlest scroll possible; persisted in
-`/etc/X11/xorg.conf.d/30-touchpad-tap.conf` together with Tapping/TappingDrag/NaturalScrolling.
+above it). The baseline (every Linux OBS box) writes **15** (libinput's own step) + `AccelSpeed 0.3`
+since 23.10.2026 (issue 1465 item 5: the July 50 made two-finger scrolling far too slow on the stream
+boxes' touchpads), in `/etc/X11/xorg.conf.d/30-touchpad-tap.conf` together with
+Tapping/TappingDrag/NaturalScrolling; verify-imag (w) and the baseline `touchpad` row grade both.
 
 ## GOTCHA — latentná GRUB zmena sa aktivuje až REBOOTOM; isolcpus = single-core OBS (#784, 2026-07-15)
 
