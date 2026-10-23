@@ -190,7 +190,7 @@ def test_the_lib_is_sourced_once():
 def test_the_window_start_mark_is_taken_right_before_start_record():
     s = _e2e()
     mark = s.index('program_audio_continuity_mark start "$OUTDIR" "$STREAM"')
-    start_rec = s.index('record --host "$STREAM" --action start')
+    start_rec = s.index('record --host "$STREAM" --action start\nSTREAM_RECORDING_STARTED=1')  # the [5/8] one
     assert mark < start_rec
     assert s.count("program_audio_continuity_mark start") == 1
     between = s[mark:start_rec]
@@ -199,7 +199,7 @@ def test_the_window_start_mark_is_taken_right_before_start_record():
 
 def test_the_window_stop_mark_is_taken_right_after_stop_record():
     s = _e2e()
-    stop_rec = s.index('record --host "$STREAM" --action stop)')
+    stop_rec = s.index('STREAM_HOST_PATH=$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop)')
     mark = s.index('program_audio_continuity_mark stop "$OUTDIR" "$STREAM"')
     assert stop_rec < mark < s.index("cg_chain_after_stoprecord ")
     assert s.count("program_audio_continuity_mark stop") == 1
