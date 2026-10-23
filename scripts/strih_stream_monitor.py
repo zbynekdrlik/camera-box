@@ -350,9 +350,10 @@ def default_url():
 
 
 
-def pulse_sink_present(pw_dump, name, timeout=PW_DUMP_TIMEOUT_S):
-    """(True | False | None, detail): does the operator session list the Audio/Sink NAME (`pw-dump`)? None =
-    the session is unreadable. Review round 1 (issue 1465): an unlocked PipeWire holds the headphone card too
+def pulse_sink_present(pw_dump, name, card=None, timeout=PW_DUMP_TIMEOUT_S):
+    """(True | False | None, detail): does the operator session list the Audio/Sink NAME (`pw-dump`) -- on ALSA
+    card CARD when given (its device's `api.alsa.card`, review round 2: a stale drop-in could rename a node of
+    another card)? None = the session is unreadable. Review round 1 (issue 1465): an unlocked PipeWire holds the headphone card too
     while something plays, and a PULSE_SINK naming a missing sink falls back to the default sink -- maybe the
     notebook speakers -- so VLC starts only once this sink exists."""
     try:
@@ -365,11 +366,23 @@ def pulse_sink_present(pw_dump, name, timeout=PW_DUMP_TIMEOUT_S):
         objs = json.loads(r.stdout)
     except ValueError:
         return None, "pw-dump printed no JSON"
-    for o in objs if isinstance(objs, list) else []:
-        props = ((o.get("info") or {}).get("props") or {}) if isinstance(o, dict) else {}
-        if (o.get("type") == "PipeWire:Interface:Node" and props.get("node.name") == name
-                and props.get("media.class") == "Audio/Sink"):
-            return True, "pw-dump lists the Audio/Sink '%s'" % name
+    objs = [o for o in (objs if isinstance(objs, list) else []) if isinstance(o, dict)]
+
+    def props(o):
+        p = (o.get("info") or {}).get("props") if isinstance(o.get("info"), dict) else None
+        return p if isinstance(p, dict) else {}
+
+    devices = {o.get("id"): props(o) for o in objs if o.get("type") == "PipeWire:Interface:Device"}
+    for o in objs:
+        p = props(o)
+        if (o.get("type") == "PipeWire:Interface:Node" and p.get("node.name") == name
+                and p.get("media.class") == "Audio/Sink"):
+            if card is None:
+                return True, "pw-dump lists the Audio/Sink '%s'" % name
+            on = devices.get(p.get("device.id"), {}).get("api.alsa.card")
+            if str(on) == str(card):
+                return True, "pw-dump lists the Audio/Sink '%s' on card %s" % (name, card)
+            return False, "pw-dump lists '%s' on card %s, not the headphone card %s" % (name, on, card)
     return False, "pw-dump lists no Audio/Sink '%s'" % name
 
 
@@ -530,7 +543,7 @@ class Monitor:
                            % (hw, owner["comm"] or "?", owner["pid"], self.retry_s))
             return False
         if self.output == "pulse":
-            present, detail = pulse_sink_present(self.pw_dump, self.pulse_sink)
+            present, detail = pulse_sink_present(self.pw_dump, self.pulse_sink, pcm["card"])
             if not present:
                 self.set_state("no-sink", "the operator sink '%s' is not in the operator PipeWire (%s) -- VLC not "
                                "started, retrying every %g s" % (self.pulse_sink, detail, self.retry_s))

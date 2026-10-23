@@ -318,13 +318,20 @@ def grade(objs, settings_text, sm_text, expect_device):
 
 
 def _amixer_sget(amixer, card_id, name):
-    """(rc, text) of `amixer -c CARD sget NAME` in the C locale; rc None when amixer cannot run."""
+    """(rc, text) of `amixer -c CARD sget NAME` in the C locale: rc 0 + its output; rc "absent" when the card
+    has no such control (amixer's own "Unable to find simple control"); rc None + why for any other failure
+    (review round 2: a wrong card id or a broken amixer is never a control the jack lacks)."""
     try:
         r = subprocess.run([amixer, "-c", card_id, "sget", name], capture_output=True, text=True, timeout=10,
                            env=dict(os.environ, LC_ALL="C"))
     except (OSError, subprocess.TimeoutExpired) as e:
         return None, str(e)
-    return r.returncode, r.stdout
+    if r.returncode == 0:
+        return 0, r.stdout
+    err = (r.stderr or r.stdout or "").strip()
+    if "Unable to find simple control" in err:
+        return "absent", err
+    return None, "rc %d: %s" % (r.returncode, err or "no output")
 
 
 def mixer_row(info, amixer=AMIXER):
@@ -338,8 +345,8 @@ def mixer_row(info, amixer=AMIXER):
     ok, bad = [], []
     rc, out = _amixer_sget(amixer, card, "Speaker")
     if rc is None:
-        return "FAIL", "%s amixer could not run on %s (%s) -- the speaker path is unread" % (tag, card, out)
-    if rc != 0:
+        return "FAIL", "%s amixer failed on %s (%s) -- the speaker path is unread" % (tag, card, out)
+    if rc == "absent":
         ok.append("no Speaker control")
     else:
         sw = re.findall(r"\[(on|off)\]", out)
@@ -349,7 +356,9 @@ def mixer_row(info, amixer=AMIXER):
             bad.append("Speaker %s" % ("on" if sw else "switch unreadable"))
     for name in MIXER_UNITY:
         rc, out = _amixer_sget(amixer, card, name)
-        if rc != 0:
+        if rc is None:
+            return "FAIL", "%s amixer failed on %s (%s) -- %s is unread" % (tag, card, out, name)
+        if rc == "absent":
             ok.append("no %s control" % name)
             continue
         dbs = [float(v) for v in re.findall(r"\[(-?\d+(?:\.\d+)?)dB\]", out)]

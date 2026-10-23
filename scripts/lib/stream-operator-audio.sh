@@ -57,7 +57,7 @@ _stream_operator_audio_dump() {
 # drop-in the two could pick different cards (the player would sit in no-sink forever). Always rc 0.
 _stream_operator_audio_pcm_match_dropins() {
   local f
-  for f in "${1}/.config/systemd/user/${STRIH_STREAM_MONITOR_UNIT}.d"/*.conf; do
+  for f in "${1}/.config/systemd/user/${STRIH_STREAM_MONITOR_UNIT:-strih-stream-monitor.service}.d"/*.conf; do
     if [ -f "$f" ] && grep -q -e '--pcm-match' "$f"; then printf '%s\n' "$f"; fi
   done
   return 0
