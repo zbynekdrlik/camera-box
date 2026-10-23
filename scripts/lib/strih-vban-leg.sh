@@ -543,6 +543,16 @@ strih_vban_leg_install() {
   leg="$(strih_lx_program_vban_leg)"; addr="$(strih_lx_program_vban_leg_addr)"
   sender="$(strih_lx_program_vban_sender)"; port="$(strih_lx_program_vban_port)"
   [ "${leg%%:*}" != mac ] || mac="${leg#mac:}"
+  # an unplugged leg NIC never aborts setup (it runs inside a genlock deploy after OBS stopped): a WARN
+  # naming the MAC, nothing changed; verify item 9 FAILs it.
+  if [ "$mac" != - ]; then
+    local irc=0
+    strih_vban_leg_iface "$(_strih_vban_leg_sysfs)" "$mac" >/dev/null 2>&1 || irc=$?
+    if [ "$irc" = 1 ]; then
+      echo "  WARN: no network interface has the MAC ${mac} (the VBAN-only leg's NIC) -- plug it in and re-run setup; nothing changed, verify-strih item 9 FAILs it"
+      return 0
+    fi
+  fi
   if ! res="$(strih_vban_leg_resolve 2>/dev/null)"; then
     echo "strih-vban-leg: the leg ${leg}: $(strih_vban_leg_resolve 2>&1 >/dev/null || true) -- nothing changed" >&2
     return 1
