@@ -88,9 +88,11 @@ def test_the_three_vban_facts_and_the_input_name_sit_before_the_program_sender()
     r = _bash("strih_box_fact_keys")
     keys = r.stdout.split()
     i = keys.index("STRIH_PROGRAM_AUDIO_SAMPLER")
-    assert keys[i + 1:i + 6] == ["STRIH_PROGRAM_VBAN_STREAMS", "STRIH_PROGRAM_VBAN_PORT",
-                                 "STRIH_PROGRAM_VBAN_RESERVE_MS", "STRIH_PROGRAM_AUDIO_INPUT",
-                                 "STRIH_PROGRAM_SENDER"]
+    # ROZHODNUTÉ 6360417876 (23.10.2026): the VBAN-only leg's three facts follow the input name
+    # (tests/python/test_vban_leg_1439.py pins them).
+    assert keys[i + 1:i + 5] == ["STRIH_PROGRAM_VBAN_STREAMS", "STRIH_PROGRAM_VBAN_PORT",
+                                 "STRIH_PROGRAM_VBAN_RESERVE_MS", "STRIH_PROGRAM_AUDIO_INPUT"]
+    assert keys[i + 8] == "STRIH_PROGRAM_SENDER"
 
 
 @pytest.mark.parametrize("box", sorted(p.stem for p in BOXES.glob("*.env")))
