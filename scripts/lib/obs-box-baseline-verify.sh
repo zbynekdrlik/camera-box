@@ -274,7 +274,7 @@ echo "autostart_unit=$(if grep -qF "systemctl --user start ${UNIT}" "$_as" 2>/de
 echo "thermald=$(pkg thermald)"
 echo "pe_unit=$(systemctl is-enabled imag-power-envelope.service 2>/dev/null | first)"
 echo "pe_guard=$(systemctl is-enabled imag-power-envelope-guard.timer 2>/dev/null | first)"
-echo "touchpad=$(if grep -qF 'Option "Tapping" "on"' /etc/X11/xorg.conf.d/30-touchpad-tap.conf 2>/dev/null; then echo 1; else echo 0; fi)"
+echo "touchpad=$(_tp=/etc/X11/xorg.conf.d/30-touchpad-tap.conf; if grep -qF 'Option "Tapping" "on"' "$_tp" 2>/dev/null && grep -qF 'Option "ScrollPixelDistance" "15"' "$_tp" 2>/dev/null && grep -qF 'Option "AccelSpeed" "0.3"' "$_tp" 2>/dev/null; then echo 1; else echo 0; fi)"
 echo "swap_bytes=$(swapon --show=SIZE --bytes --noheadings 2>/dev/null | awk '{s += $1} END {print s + 0}')"
 echo "mem_bytes=$(awk '/^MemTotal:/{print $2 * 1024; exit}' /proc/meminfo 2>/dev/null)"
 echo "swap_fstab=$(grep -cE '^[^#[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+swap[[:space:]]' /etc/fstab 2>/dev/null)"
@@ -451,9 +451,10 @@ obs_box_baseline_verdict() {
     # power -- thermald purged + the PL1 envelope oneshot + its guard timer enabled
     ok=0; [ "$(_obs_box_f thermald)" != "install ok installed" ] && [ "$(_obs_box_f pe_unit)" = enabled ] && [ "$(_obs_box_f pe_guard)" = enabled ] && ok=1
     _obs_box_item power "$ok" "thermald='$(_obs_box_f thermald)' imag-power-envelope.service=$(_obs_box_f pe_unit) guard.timer=$(_obs_box_f pe_guard)"
-    # touchpad -- the libinput tap-to-click InputClass
+    # touchpad -- the libinput InputClass: tap-to-click + the 23.10.2026 scroll step 15 + AccelSpeed 0.3
+    # (issue 1465 item 5)
     ok=0; [ "$(_obs_box_f touchpad)" = 1 ] && ok=1
-    _obs_box_item touchpad "$ok" "30-touchpad-tap.conf tapping=$(_obs_box_f touchpad)"
+    _obs_box_item touchpad "$ok" "30-touchpad-tap.conf tapping+scroll15+accel0.3=$(_obs_box_f touchpad)"
     # swap -- issue 1428: active swap of at least 90 % of RAM AND an fstab entry (obs_box_swap); an
     # unreadable count is a FAIL, never a pass
     local sb mb

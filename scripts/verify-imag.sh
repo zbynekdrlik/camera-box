@@ -139,10 +139,11 @@ set -euo pipefail
 #       suspend.target/hibernate.target/hybrid-sleep.target are all masked. setup-imag.sh step 5
 #       persists this; a re-provision that silently lost it must FAIL here, not pass. Side-effect
 #       free (pure systemd/logind reads), so it is appended at the END of the flow.
-#   (w) touchpad usability (#779): /etc/X11/xorg.conf.d/30-touchpad-tap.conf carries the four
-#       live-verified libinput options -- Tapping/TappingDrag/NaturalScrolling on + ScrollPixel
-#       Distance 50 (tap-to-click + natural scroll + a gentler scroll step, the operator's touchpad
-#       config, set live 2026-07-15). setup-imag.sh step 25 provisions it; a re-provision that
+#   (w) touchpad usability (#779): /etc/X11/xorg.conf.d/30-touchpad-tap.conf carries the five
+#       libinput options -- Tapping/TappingDrag/NaturalScrolling on + ScrollPixelDistance 15 +
+#       AccelSpeed 0.3 (tap-to-click + natural scroll + libinput's scroll step + a faster pointer;
+#       the scroll/accel values are the 23.10.2026 operator finding, issue 1465 item 5, which
+#       replaced the July ScrollPixelDistance 50). setup-imag.sh step 25 provisions it; a re-provision that
 #       silently dropped it (or regenerated a partial/wrong file) must FAIL here. Pure static file
 #       read (side-effect free), so it runs BEFORE check (o)'s restart (#884 ordering).
 #   (x) Wake-on-LAN armed (#1103): the persisted NM setting 802-3-ethernet.wake-on-lan=magic on the
@@ -760,9 +761,10 @@ imag_powerkey_protection_ok() {
 # imag_touchpad_conf_ok CONF_TEXT -> 0 iff the touchpad InputClass (#779) carries BOTH the selector
 # (MatchIsTouchpad "on" + Driver "libinput" -- WITHOUT them libinput never binds the class and the
 # config is inert, so a file that dropped either selector but kept the options must still FAIL) AND
-# the four live-verified libinput options at their EXACT values: Tapping/TappingDrag/NaturalScrolling
-# "on" and ScrollPixelDistance "50" (the user's final tuning; the libinput default 15 is far too
-# sensitive). A reprovision that regenerated a PARTIAL file (a missing selector/option) or the WRONG
+# the five libinput options at their EXACT values: Tapping/TappingDrag/NaturalScrolling "on",
+# ScrollPixelDistance "15" and AccelSpeed "0.3" (the 23.10.2026 operator finding, issue 1465 item 5:
+# the July 50 made two-finger scrolling far too slow on the stream boxes' touchpads). A reprovision
+# that regenerated a PARTIAL file (a missing selector/option) or the WRONG
 # value must FAIL, not pass on mere presence -- the gate proves durability, not just existence.
 # Purely textual (unit-tested), whitespace-tolerant, here-string fed (no SIGPIPE-under-pipefail risk).
 imag_touchpad_conf_ok() {
@@ -773,7 +775,8 @@ imag_touchpad_conf_ok() {
     'Option[[:space:]]+"Tapping"[[:space:]]+"on"' \
     'Option[[:space:]]+"TappingDrag"[[:space:]]+"on"' \
     'Option[[:space:]]+"NaturalScrolling"[[:space:]]+"on"' \
-    'Option[[:space:]]+"ScrollPixelDistance"[[:space:]]+"50"'; do
+    'Option[[:space:]]+"ScrollPixelDistance"[[:space:]]+"15"' \
+    'Option[[:space:]]+"AccelSpeed"[[:space:]]+"0\.3"'; do
     grep -qE "$pat" <<<"$conf" || return 1
   done
   return 0
@@ -1495,9 +1498,9 @@ TOUCHPAD_CONF="$(ssh_box "cat /etc/X11/xorg.conf.d/30-touchpad-tap.conf 2>/dev/n
 if [ "$rc" -ne 0 ] || [ -z "$TOUCHPAD_CONF" ]; then
   fail "/etc/X11/xorg.conf.d/30-touchpad-tap.conf missing/unreadable over SSH (rc=$rc) -- the touchpad usability config (#779) is absent; a reprovision dropped tap-to-click/natural-scroll (setup-imag.sh step 25)"
 elif imag_touchpad_conf_ok "$TOUCHPAD_CONF"; then
-  ok "touchpad usability config present + correct (tap-to-click + natural scroll + ScrollPixelDistance 50, #779)"
+  ok "touchpad usability config present + correct (tap-to-click + natural scroll + ScrollPixelDistance 15 + AccelSpeed 0.3, #779)"
 else
-  fail "30-touchpad-tap.conf present but INCOMPLETE/WRONG (#779) -- must carry the selector (MatchIsTouchpad \"on\" + Driver \"libinput\") AND Tapping/TappingDrag/NaturalScrolling \"on\" + ScrollPixelDistance \"50\"; a reprovision regenerated a partial/wrong file"
+  fail "30-touchpad-tap.conf present but INCOMPLETE/WRONG (#779) -- must carry the selector (MatchIsTouchpad \"on\" + Driver \"libinput\") AND Tapping/TappingDrag/NaturalScrolling \"on\" + ScrollPixelDistance \"15\" + AccelSpeed \"0.3\"; a reprovision regenerated a partial/wrong file"
 fi
 
 # (x) Wake-on-LAN armed on the NDI NIC (#1103) -- a post-event powered-down/slept imag-nb must be
