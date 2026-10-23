@@ -59,11 +59,27 @@ def test_a_hub_from_before_the_flag_counts_as_a_refusal(tmp_path):
     dst = tmp_path / "etc" / "intercom.toml"
     dst.parent.mkdir(parents=True)
     dst.write_text("old\n")
-    # clap's answer to an unknown flag: exit 2
-    r, _src, dst, _log = _run(tmp_path, "echo \"error: unexpected argument '--check-config' found\" >&2\nexit 2\n")
+    # clap's real answer to an unknown flag (exit 2): the reason is the FIRST line, its last line is the
+    # --help hint, which must never be the line the WARNING quotes
+    clap = ("printf '%s\\n' \"error: unexpected argument '--check-config' found\" '' "
+            "\"  tip: to pass '--check-config' as a value, use '-- --check-config'\" '' "
+            "'Usage: intercom-hub [OPTIONS]' '' \"For more information, try '--help'.\" >&2\nexit 2\n")
+    r, _src, dst, _log = _run(tmp_path, clap)
     assert "RC=0" in r.stdout, r.stdout + r.stderr
     assert dst.read_text() == "old\n"
     assert "KEPT" in r.stderr
+    assert "unexpected argument '--check-config'" in r.stderr, r.stderr
+    assert "For more information" not in r.stderr, r.stderr
+
+
+def test_an_anyhow_refusal_quotes_its_cause(tmp_path):
+    dst = tmp_path / "etc" / "intercom.toml"
+    dst.parent.mkdir(parents=True)
+    dst.write_text("old\n")
+    anyhow = ("printf '%s\\n' 'Error: parse intercom config /x.toml' '' 'Caused by:' "
+              "\"    participant 'cutters': unknown adapter 'alsa'\" >&2\nexit 1\n")
+    r, _src, _dst, _log = _run(tmp_path, anyhow)
+    assert "unknown adapter 'alsa'" in r.stderr, r.stderr
 
 
 def test_a_fresh_box_without_a_hub_binary_gets_the_routing(tmp_path):
