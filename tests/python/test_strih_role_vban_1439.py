@@ -121,7 +121,13 @@ def test_strih_snvs_low_r_sits_above_the_consoles_measured_gap_on_the_leg():
     reserve_ms = int(r.stdout)
     budget_ms = reserve_ms - 239 * 1000.0 / 96_000 - _header_define("VBAN_RECV_DEADLINE_MARGIN_MS")
     assert budget_ms > 11.5, (reserve_ms, budget_ms)
-    assert reserve_ms <= 25
+    # Live 23.10.2026 22:59:48 on strih-snv at R = 20: one packet arrived 1.5 ms past its deadline
+    # (`obs-vban receive late: ... late_ms=1.5`, 23 s after the OBS start), so the in-time window must
+    # reach 20 ms + 1.5 ms with headroom; the steady state read max_late_ms -5 to -7 (13-15 ms used).
+    # The cap keeps R low for the strih path (owner 22.10.2026: low audio latency against double sound).
+    in_time_ms = reserve_ms - _header_define("VBAN_RECV_DEADLINE_MARGIN_MS")
+    assert in_time_ms >= 20 + 1.5 + 5, (reserve_ms, in_time_ms)
+    assert reserve_ms <= 30
 
 
 @pytest.mark.parametrize("pairs", [
