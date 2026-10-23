@@ -58,7 +58,8 @@ restore() {
   local -a docks
   state="$(sed -n 's/^DockState=//p' "$ini")"
   mapfile -t docks < <(names "$ini")
-  QT_QPA_PLATFORM=offscreen "${WORK}/dsr" "$state" "${docks[@]}" 2>/dev/null
+  # a refused restore prints restore=failed and exits 1: report it through expect, never abort here
+  QT_QPA_PLATFORM=offscreen "${WORK}/dsr" "$state" "${docks[@]}" 2>/dev/null || true
 }
 
 # expect OUTPUT LINE WHAT -> the harness OUTPUT must carry LINE exactly.
@@ -67,7 +68,16 @@ expect() {
 }
 
 # others OUTPUT -> the harness lines of every dock but the plugin dock.
-others() { grep -v -e "^${DOCK} " -e '^state=' <<<"$1"; }
+others() { grep -v -e "^${DOCK} " -e '^state=' <<<"$1" || true; }
+
+# same_others BEFORE AFTER WHAT -> every dock but the plugin dock placed identically.
+same_others() {
+  if [ "$(others "$1")" = "$(others "$2")" ]; then echo "ok:   $3"
+  else fail "$3 -- $(diff <(others "$1") <(others "$2") || true)"; fi
+}
+
+# seed_cli ACTION INI -> the CLI token (empty when the CLI failed: the check then names it).
+seed_cli() { python3 "$SEED" "$1" --ini "$2" --dock "$DOCK" || true; }
 
 DOCKED="${DOCK} visible=1 floating=0 area=2"
 
@@ -78,34 +88,32 @@ expect "$PP0" "restore=ok" "stream-pp: Qt restores the captured state"
 expect "$PP0" "${DOCK} visible=0 floating=1 area=2" "stream-pp as captured: the dock is hidden + floating (the issue)"
 
 # 2. stream-pp seeded.
-got="$(python3 "$SEED" seed --ini "${WORK}/pp.ini" --dock "$DOCK")"
-[ "$got" = seeded ] && echo "ok:   stream-pp: seed = seeded" || fail "stream-pp seed printed '${got}', want seeded"
+got="$(seed_cli seed "${WORK}/pp.ini")"
+if [ "$got" = seeded ]; then echo "ok:   stream-pp: seed = seeded"; else fail "stream-pp seed printed '${got}', want seeded"; fi
 PP1="$(restore "${WORK}/pp.ini")"
 expect "$PP1" "restore=ok" "stream-pp seeded: Qt restores the seeded state"
 expect "$PP1" "$DOCKED" "stream-pp seeded: the dock is visible + docked right"
-[ "$(others "$PP0")" = "$(others "$PP1")" ] && echo "ok:   stream-pp seeded: every other dock unchanged" \
-  || fail "stream-pp seeded moved another dock: $(diff <(others "$PP0") <(others "$PP1") || true)"
+same_others "$PP0" "$PP1" "stream-pp seeded: every other dock unchanged"
 
 # 3. stream-snv as captured.
 cp "${FIX}/stream-snv.user.ini" "${WORK}/snv.ini"
-got="$(python3 "$SEED" seed --ini "${WORK}/snv.ini" --dock "$DOCK")"
-[ "$got" = present ] && echo "ok:   stream-snv: seed = present" || fail "stream-snv seed printed '${got}', want present"
-cmp -s "${FIX}/stream-snv.user.ini" "${WORK}/snv.ini" && echo "ok:   stream-snv: user.ini unchanged" || fail "stream-snv: the seed changed user.ini"
+got="$(seed_cli seed "${WORK}/snv.ini")"
+if [ "$got" = present ]; then echo "ok:   stream-snv: seed = present"; else fail "stream-snv seed printed '${got}', want present"; fi
+if cmp -s "${FIX}/stream-snv.user.ini" "${WORK}/snv.ini"; then echo "ok:   stream-snv: user.ini unchanged"; else fail "stream-snv: the seed changed user.ini"; fi
 SNV="$(restore "${WORK}/snv.ini")"
 expect "$SNV" "restore=ok" "stream-snv: Qt restores the captured state"
 expect "$SNV" "$DOCKED" "stream-snv: the dock is visible + docked right"
 
 # 4. the state an OBS that ran case 1 saves on exit (Qt's own saveState of it).
 sed "s|^DockState=.*|DockState=$(sed -n 's/^state=//p' <<<"$PP0")|" "${FIX}/stream-pp.user.ini" > "${WORK}/ran.ini"
-got="$(python3 "$SEED" check --ini "${WORK}/ran.ini" --dock "$DOCK")"
-[ "$got" = default-hidden ] && echo "ok:   OBS-saved default: check = default-hidden" || fail "OBS-saved default: check printed '${got}'"
-got="$(python3 "$SEED" seed --ini "${WORK}/ran.ini" --dock "$DOCK")"
-[ "$got" = redocked ] && echo "ok:   OBS-saved default: seed = redocked" || fail "OBS-saved default: seed printed '${got}', want redocked"
+got="$(seed_cli check "${WORK}/ran.ini")"
+if [ "$got" = default-hidden ]; then echo "ok:   OBS-saved default: check = default-hidden"; else fail "OBS-saved default: check printed '${got}'"; fi
+got="$(seed_cli seed "${WORK}/ran.ini")"
+if [ "$got" = redocked ]; then echo "ok:   OBS-saved default: seed = redocked"; else fail "OBS-saved default: seed printed '${got}', want redocked"; fi
 RAN="$(restore "${WORK}/ran.ini")"
 expect "$RAN" "restore=ok" "OBS-saved default re-docked: Qt restores it"
 expect "$RAN" "$DOCKED" "OBS-saved default re-docked: the dock is visible + docked right"
-[ "$(others "$PP0")" = "$(others "$RAN")" ] && echo "ok:   OBS-saved default re-docked: every other dock unchanged" \
-  || fail "the re-dock moved another dock: $(diff <(others "$PP0") <(others "$RAN") || true)"
+same_others "$PP0" "$RAN" "OBS-saved default re-docked: every other dock unchanged"
 
 if [ "$FAILS" -ne 0 ]; then echo "issue 1470 Qt dock-state proof: ${FAILS} FAILED" >&2; exit 1; fi
 echo "issue 1470 Qt dock-state proof: all checks passed"
