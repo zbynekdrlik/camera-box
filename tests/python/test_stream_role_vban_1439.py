@@ -804,6 +804,14 @@ def test_concealed_slots_are_named_with_the_silence_they_left(tmp_path):
     assert any("lost=3 late=0 re_anchors=0" in r and "2 concealed" in r and "1 silence" in r for r in notes), rows
 
 
+def test_concealed_slots_are_called_lost_never_healthy(tmp_path):
+    # ROZHODNUTE 6359382787 (owner 23.10.2026): a concealed slot is a LOST slot -- the note may keep
+    # its since-start NOTE semantics, but its wording must say every one of them was lost
+    rows = _grade(tmp_path, _line_with(100), append=_line_with(200, lost=3, concealed=2))
+    note = next(r for r in _rows(rows, "NOTE") if "lost=3" in r)
+    assert "3 slot(s) LOST" in note and "a concealed slot is still lost" in note, note
+
+
 def test_reordered_packets_are_named_on_the_live_row(tmp_path):
     # ROZHODNUTE 6352253147 (a): a reorder in time plays in its slot -- named on the live row, no note
     rows = _grade(tmp_path, _line_with(100), append=_line_with(2000, reordered=5))
