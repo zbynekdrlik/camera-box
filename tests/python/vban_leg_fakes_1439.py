@@ -62,6 +62,8 @@ if a[:1] == ["-g"]:
             vals = {"UUID": x["uuid"], "TYPE": x["type"], "DEVICE": dev, "NAME": x["props"].get("connection.id", "")}
             out(":".join(vals[f] for f in fields.split(",")) + "\n")
     elif rest == ["connection", "show", "--active"]:
+        if s.get("active_list_fails"):
+            sys.stderr.write("Error: Could not create NMClient object\n"); save(); sys.exit(8)
         for d, u in s["active"].items():
             out(":".join({"UUID": u, "DEVICE": d}[f] for f in fields.split(",")) + "\n")
     elif rest[:2] == ["connection", "show"]:
@@ -150,7 +152,24 @@ if a[:4] == ["-4", "-o", "addr", "show"]:
     for x in addrs(d):
         out("5: %s    inet %s scope global noprefixroute %s\\       valid_lft forever preferred_lft forever\n" % (d, x, d))
 elif a == ["-4", "route", "show", "default"]:
-    out("default via 10.77.8.1 dev %s proto static metric 100 \n" % s.get("rig_if", "enp56s0"))
+    rig = s.get("rig_if", "enp56s0")
+    # the atlantic reset, one step per route read: "stale" (NetworkManager still holds the route, the driver
+    # has not reported the carrier yet), "down" (carrier lost: +1 carrier_changes on the transition),
+    # "back" (carrier again: +1); carrier + carrier_changes live in the fake sysfs
+    if s.get("reset_plan"):
+        step = s["reset_plan"].pop(0)
+        net = os.path.join(s["sysfs"], "class", "net", rig)
+        cc = int(open(os.path.join(net, "carrier_changes")).read().strip() or 0)
+        car = open(os.path.join(net, "carrier")).read().strip()
+        if step == "down" and car == "1":
+            open(os.path.join(net, "carrier"), "w").write("0\n"); cc += 1
+        if step == "back" and car != "1":
+            open(os.path.join(net, "carrier"), "w").write("1\n"); cc += 1
+        open(os.path.join(net, "carrier_changes"), "w").write("%d\n" % cc)
+        json.dump(s, open(p, "w"))
+    if open(os.path.join(s["sysfs"], "class", "net", rig, "carrier")).read().strip() == "1" \
+            or not os.path.isdir(os.path.join(s["sysfs"], "class", "net", rig)):
+        out("default via 10.77.8.1 dev %s proto static metric 100 \n" % rig)
     for d, pr in s["applied"].items():
         if pr.get("ipv4.method") == "auto" and pr.get("ipv4.never-default") != "yes":
             out("default via 10.77.7.1 dev %s proto dhcp src %s metric 101 \n" % (d, s["dhcp"][d].split("/")[0]))

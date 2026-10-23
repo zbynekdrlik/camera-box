@@ -226,12 +226,14 @@ class Box:
         self.unit_file = self.etc / "systemd" / "system" / "vban-dante70-filter.service"
         self.sysctl_file = self.etc / "sysctl.d" / "60-vban-dante70.conf"
         state.setdefault("unit_runs_nft", str(self.nft_file))
+        state.setdefault("sysfs", str(self.sysfs))
         fk.new_state(self.state, **state)
         self.env = fk.install(self.bin, self.state, self.proc)
         self.env.update({"STRIH_VBAN_LEG_SYSFS": str(self.sysfs), "STRIH_VBAN_LEG_PROC_SYS": str(self.proc),
                          "STRIH_VBAN_LEG_NFT_FILE": str(self.nft_file),
                          "STRIH_VBAN_LEG_UNIT_FILE": str(self.unit_file),
-                         "STRIH_VBAN_LEG_SYSCTL_FILE": str(self.sysctl_file), "STRIH_VBAN_LEG_WAIT_S": "0"})
+                         "STRIH_VBAN_LEG_SYSCTL_FILE": str(self.sysctl_file), "STRIH_VBAN_LEG_WAIT_S": "0",
+                         "STRIH_VBAN_LEG_RESET_SEEN_S": "2"})
         self.nic(RIG_IF, "a8:a1:59:00:00:01")
 
     def nic(self, name, mac, driver=None, physical=True):
@@ -239,6 +241,7 @@ class Box:
         d.mkdir(parents=True, exist_ok=True)
         (d / "address").write_text(mac + "\n")
         (d / "carrier").write_text("1\n")
+        (d / "carrier_changes").write_text("4\n")
         if physical:
             dev = self.tmp / "devices" / name
             (dev / "driver").parent.mkdir(parents=True, exist_ok=True)
@@ -482,7 +485,7 @@ def test_vlan_install_on_the_live_strih_snv_never_touches_the_link(tmp_path):
 
 
 def test_vlan_first_creation_warns_of_the_link_reset_and_activates_once(tmp_path):
-    b = _strih_box(tmp_path, None, units={})
+    b = _strih_box(tmp_path, None, units={}, reset_plan=["stale", "down", "down", "back"])
     r = b.run("strih_vban_leg_install", box="strih-snv")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "WARNING" in r.stdout and "atlantic" in r.stdout and "8 s" in r.stdout and STRIH_RIG in r.stdout
@@ -497,6 +500,11 @@ def test_vlan_first_creation_warns_of_the_link_reset_and_activates_once(tmp_path
     assert len(ups) == 1 and "ifname" not in ups[0], "the VLAN profile names its device; no ifname for a device not yet there"
     assert not [c for c in s["log"] if c[0] == "nm-autoconnect"], "no second activation"
     assert "the rig link %s is up again" % STRIH_RIG in r.stdout, r.stdout
+    # the driver reports the carrier drop a poll late: a wait that passed on the stale first read would
+    # send step 14 into the ~8 s outage
+    assert "after 0 s" not in r.stdout and s["reset_plan"] == [], r.stdout
+    cc = (b.sysfs / "class" / "net" / STRIH_RIG / "carrier_changes").read_text().strip()
+    assert cc == "6", cc
     made = [p for p in s["profiles"] if p["props"].get("connection.id") == "vban-dante70"][0]
     assert made["props"]["connection.autoconnect"] == "yes"
     assert s["applied"][STRIH_VLAN_IF]["ipv4.addresses"] == "10.77.7.202/32"
@@ -510,6 +518,33 @@ def test_vlan_first_creation_waits_for_the_rig_link_and_warns_when_it_stays_down
     r = b.run("strih_vban_leg_install", box="strih-snv")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "rig link" in r.stdout and STRIH_RIG in r.stdout and "not back" in r.stdout, r.stdout
+
+
+def test_vlan_first_creation_on_a_nic_that_never_resets_returns_with_a_note(tmp_path):
+    b = _strih_box(tmp_path, None, units={})
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no carrier change" in r.stdout and "WARNING: the rig link" not in r.stdout, r.stdout
+
+
+def test_vlan_a_failed_first_activation_is_never_armed(tmp_path):
+    # NetworkManager would activate an armed profile later, during step 14: the reset with nobody waiting
+    b = _strih_box(tmp_path, None, units={}, carrier={STRIH_VLAN_IF: False})
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode != 0
+    assert STRIH_VLAN_IF in r.stderr and "maintenance window" in r.stderr, r.stderr
+    s = b.st()
+    made = [p for p in s["profiles"] if p["props"].get("connection.id") == "vban-dante70"][0]
+    assert made["props"]["connection.autoconnect"] == "no"
+    assert not [c for c in s["log"] if c[0] == "nm-autoconnect"] and STRIH_VLAN_IF not in s["active"]
+
+
+def test_an_unreadable_active_list_is_named_never_read_as_inactive(tmp_path):
+    b = _strih_box(tmp_path, VLAN_PROPS, active_list_fails=True)
+    r = b.run("strih_vban_leg_install", box="strih-snv")
+    assert r.returncode != 0
+    assert "active connections" in r.stderr and "maintenance window" not in r.stderr, r.stderr
+    assert _mutations(b.st()) == []
 
 
 def test_vlan_an_inactive_profile_is_never_armed(tmp_path):
