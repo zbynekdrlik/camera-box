@@ -95,7 +95,7 @@ OBS_BOX_PANEL_DISCORD_SHA256="${OBS_BOX_PANEL_DISCORD_SHA256:-e7f346569784ef47ea
 obs_box_panel_launchers() {
   local home="${1:?user home required}" ud
   ud="${home}/.config/systemd/user"
-  printf 'power|Vypnúť|/usr/bin/python3 %s|system-shutdown\n' "$OBS_BOX_PANEL_POWER_HELPER"
+  printf 'power|Vypnúť|/usr/bin/python3 %s|%s\n' "$OBS_BOX_PANEL_POWER_HELPER" "$(obs_box_panel_power_icon_path "$home")"
   [ -f "${ud}/strih-obs.service" ] \
     && printf 'obs|OBS Studio|systemctl --user start strih-obs.service|%s\n' "$(obs_box_panel_obs_icon_path "$home")"
   [ -x "$OBS_BOX_PANEL_FILES_BIN" ] \
@@ -118,6 +118,11 @@ obs_box_panel_launchers() {
 # obs_box_panel_obs_icon_path USER_HOME -> where step 16h puts the OBS logo (the vendored OBS tree's
 # obs-logo-128.png, copied into this lib's dir so the staged checkout carries it).
 obs_box_panel_obs_icon_path() { printf '%s/.local/share/icons/obs-box-panel/obs.png' "${1:?user home required}"; }
+
+# obs_box_panel_power_icon_path USER_HOME -> where step 16h puts the power button's icon (issue 1464:
+# scripts/lib/obs-box-panel-power.svg, shipped with the panel because `system-shutdown` exists only in
+# some icon themes, so a minimal kiosk could show a blank button; tint2 renders SVG through librsvg).
+obs_box_panel_power_icon_path() { printf '%s/.local/share/icons/obs-box-panel/power.svg' "${1:?user home required}"; }
 
 # obs_box_panel_libfm_conf USER_HOME -> pcmanfm's libfm.conf (issue 1458: use_trash=0, confirm_del=1).
 obs_box_panel_libfm_conf() { printf '%s/.config/libfm/libfm.conf' "${1:?user home required}"; }
@@ -338,6 +343,9 @@ obs_box_panel_install() {
   w="$(strih_session_apps_put "${repo}/scripts/lib/obs-box-panel-obs.png" "$(obs_box_panel_obs_icon_path "$home")" 0644)" || return 1
   chown "$user:$user" "$(obs_box_panel_obs_icon_path "$home")" 2>/dev/null || true
   [ "$w" = written ] && changed=1
+  w="$(strih_session_apps_put "${repo}/scripts/lib/obs-box-panel-power.svg" "$(obs_box_panel_power_icon_path "$home")" 0644)" || return 1
+  chown "$user:$user" "$(obs_box_panel_power_icon_path "$home")" 2>/dev/null || true
+  [ "$w" = written ] && changed=1
   install -d -m 0755 "$(dirname "$OBS_BOX_PANEL_KBD_HELPER")" \
     || { echo "obs-box-panel: cannot create $(dirname "$OBS_BOX_PANEL_KBD_HELPER")" >&2; return 1; }
   w="$(strih_session_apps_put "${repo}/scripts/obs_box_kbd_layout.py" "$OBS_BOX_PANEL_KBD_HELPER" 0755)" || return 1
@@ -462,20 +470,17 @@ obs_box_panel_files_row() {
 
 # obs_box_panel_logind_can USER VERB -> logind's answer to Can<VERB> (PowerOff / Reboot) as USER inside
 # USER's user manager (`systemd-run --user`, the context tint2 starts the launcher in; as root through
-# `sudo -u USER XDG_RUNTIME_DIR=/run/user/<uid>`), bounded; prints the bare word (yes / no / challenge /
-# na) or nothing when it did not answer. Always rc 0.
+# strih_session_apps_user_run), bounded; prints the bare word (yes / no / challenge / na) or nothing when
+# it did not answer. Always rc 0.
 obs_box_panel_logind_can() {
-  local user="${1:?user required}" verb="${2:?verb required}" uid out=""
+  local user="${1:?user required}" verb="${2:?verb required}" out=""
   # busctl bounds its own call too: with --pipe the transient unit holds this read's stdout, so a busctl
   # still waiting after `timeout` killed systemd-run would keep the command substitution open
   local -a run=(systemd-run --user --wait --pipe --quiet --collect
     busctl --timeout=10 call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "Can${verb}")
-  if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then
-    uid="$(id -u "$user" 2>/dev/null)" || return 0
-    out="$(timeout "$OBS_BOX_PANEL_LOGIND_TIMEOUT" sudo -u "$user" XDG_RUNTIME_DIR="/run/user/${uid}" "${run[@]}" 2>/dev/null || true)"
-  else
-    out="$(timeout "$OBS_BOX_PANEL_LOGIND_TIMEOUT" "${run[@]}" 2>/dev/null || true)"
-  fi
+  # stdin /dev/null: systemd-run --pipe hands its stdin to the transient unit, never verify's own
+  out="$(strih_session_apps_user_run "$user" timeout "$OBS_BOX_PANEL_LOGIND_TIMEOUT" "${run[@]}" \
+    </dev/null 2>/dev/null || true)"
   # busctl prints one line: s "yes"
   out="${out%%$'\n'*}"
   case "$out" in

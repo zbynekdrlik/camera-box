@@ -143,7 +143,8 @@ set -euo pipefail
 #       libinput options -- Tapping/TappingDrag/NaturalScrolling on + ScrollPixelDistance 15 +
 #       AccelSpeed 0.3 (tap-to-click + natural scroll + libinput's scroll step + a faster pointer;
 #       the scroll/accel values are the 23.10.2026 operator finding, issue 1465 item 5, which
-#       replaced the July ScrollPixelDistance 50). setup-imag.sh step 25 provisions it; a re-provision that
+#       replaced the July ScrollPixelDistance 50). setup-imag.sh step 25 provisions it; a
+#       re-provision that
 #       silently dropped it (or regenerated a partial/wrong file) must FAIL here. Pure static file
 #       read (side-effect free), so it runs BEFORE check (o)'s restart (#884 ordering).
 #   (x) Wake-on-LAN armed (#1103): the persisted NM setting 802-3-ethernet.wake-on-lan=magic on the
