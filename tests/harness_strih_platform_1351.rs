@@ -371,13 +371,28 @@ fn zero_eight_gate_branches_on_strih_platform_before_the_windows_probe() {
     );
 }
 
-/// NEGATIVE ANCHOR: the Windows stream leg (never branched — stream stays Windows-only per the
-/// design) must be byte-identical to its pre-1351 text. Pinning this whole block verbatim proves
-/// the edit added new lines around the strih leg without touching the stream leg at all.
+/// NEGATIVE ANCHOR: the Windows stream leg must be byte-identical to its pre-1351 text. Issue 1462
+/// made the real stream box Linux (stream-snv), so that leg now sits in the `else` of a
+/// `stream_box_platform "$STREAM"` branch -- its own lines, from the probe to the ok line, are
+/// still pinned verbatim, and nothing but that branch line comes between the strih ok line and it.
 #[test]
 fn stream_leg_of_zero_eight_gate_is_byte_identical() {
     let body = read("scripts/recording-e2e.sh");
-    let expected = r#"echo "    ok: strih obs64/AHK visible on the console (SessionId=1, window present)"
+    let strih_ok =
+        "echo \"    ok: strih obs64/AHK visible on the console (SessionId=1, window present)\"\n";
+    let at = body.find(strih_ok).expect("the strih ok line") + strih_ok.len();
+    let end = at
+        + body[at..]
+            .find("\nelse\n")
+            .expect("the stream platform branch");
+    let branch = &body[at..end];
+    assert!(
+        branch.starts_with("if [ \"$(stream_box_platform \"$STREAM\")\" = linux ]; then")
+            && branch.contains("stream_box_visibility_gate_linux"),
+        "issue 1462: the stream leg must branch on the stream box's platform first. Branch:\n{branch}"
+    );
+    let expected = r#"
+else
 _svg_stream_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
   "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(obs_session_visibility_probe_ps 0)" 2>/dev/null || true)"
 _svg_stream_msg="$(obs_session_visibility_message "$_svg_stream_out" 0)"
@@ -387,11 +402,12 @@ if [ -n "$_svg_stream_msg" ]; then
   exit 1
 fi
 echo "    ok: stream obs64 visible on the console (SessionId=1, window present)"
+fi
 "#;
     assert!(
-        body.contains(expected),
-        "the stream leg of the [0/8] gate must be byte-identical (stream stays Windows-only per \
-         the issue-1351 design) — it was never touched by this change."
+        body[at..].starts_with(&format!("{branch}{expected}")),
+        "the Windows stream leg of the [0/8] gate must be byte-identical to its pre-1351 text, \
+         right after the issue-1462 platform branch (only the `else` / `fi` around it are new)."
     );
 }
 

@@ -57,6 +57,24 @@ audio_preflight_delete_ps() {
   printf 'Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath "%s"' "$win_path"
 }
 
+# audio_preflight_volumedetect_sh PATH -> the bash command text for a LINUX stream box (issue 1462:
+# stream-snv; scripts/lib/stream-box.sh `stream_box_exec` sends it over plain ssh as ONE argument the
+# box's shell parses once). The same ffmpeg volumedetect as the PowerShell text above, the null sink
+# `-f null -`. PATH is single-quoted by the shared scripts/lib/shell-quote.sh `shell_single_quote`,
+# so an OBS recording name with a space -- `YYYY-MM-DD HH-MM-SS.mkv` -- stays one argument and nothing
+# in it is expanded.
+audio_preflight_volumedetect_sh() {
+  command -v shell_single_quote >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/shell-quote.sh"
+  printf 'ffmpeg -hide_banner -nostats -i %s -af volumedetect -f null - 2>&1' "$(shell_single_quote "$1")"
+}
+
+# audio_preflight_delete_sh PATH -> the bash text that deletes the throwaway probe recording on a
+# Linux stream box (issue 1462): an exact-path `rm -f --`, never a glob; a missing file is rc 0.
+audio_preflight_delete_sh() {
+  command -v shell_single_quote >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/shell-quote.sh"
+  printf 'rm -f -- %s' "$(shell_single_quote "$1")"
+}
+
 # audio_preflight_parse_max_db FFMPEG_OUTPUT -> the parsed max_volume dB number (e.g. "-5.4" or
 # "-91.0") from ffmpeg volumedetect's output, or empty + non-zero exit when no max_volume line is
 # present (ffmpeg missing/errored, no audio stream, empty output). An unparseable value is NEVER

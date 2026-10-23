@@ -98,7 +98,8 @@ strih_lx_partial_pullback_note() {
 strih_lx_recording_cleanup_note() {
   local indent="${1:-}" host="${2:-}" path="${3:-<unknown>}" user="${4:-${STRIH_USER:-newlevel}}"
   local remote dq
-  remote="rm -f -- '${path//\'/\'\\\'\'}'"
+  command -v shell_single_quote >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/shell-quote.sh"
+  remote="rm -f -- $(shell_single_quote "$path")"
   dq="${remote//\\/\\\\}"
   dq="${dq//\"/\\\"}"
   dq="${dq//\$/\\\$}"
@@ -154,9 +155,11 @@ echo "SVC_ACTIVE=$SVC_ACTIVE"
 CMD
 }
 
-# strih_linux_visibility_message SYSTEMCTL_PROBE_OUT WS_OK(0|1) -> pure parser (no network, no
+# strih_linux_visibility_message SYSTEMCTL_PROBE_OUT WS_OK(0|1) [BOX] -> pure parser (no network, no
 # ssh). Empty string = fully visible (strih-obs.service active under the operator session AND
 # obs-websocket answering on :4455); any other case returns a non-empty, human-readable diagnosis.
+# BOX names the box in the unreachable diagnosis (default strih-snv; issue 1462: the Linux stream box
+# runs the same check and passes its own name).
 #
 # WS_OK is the CALLER's own empirical result of a real obs-websocket round-trip (recording-e2e.sh
 # already has one: `python3 obs_phase2.py record --host "$STRIH" --action status`, which performs
@@ -165,10 +168,10 @@ CMD
 # WS" rationale) -- this function stays a PURE classifier over that already-computed signal, same
 # split as obs_session_visibility_message (probe text in, diagnosis out, no I/O of its own).
 strih_linux_visibility_message() {
-  local probe_out="${1:-}" ws_ok="${2:-0}"
+  local probe_out="${1:-}" ws_ok="${2:-0}" box="${3:-strih-snv}"
   probe_out="${probe_out//$'\r'/}"
   if [ -z "$probe_out" ]; then
-    printf 'no probe output (ssh/connectivity failure -- strih-snv unreachable, or the command did not run) -- issue 1351'
+    printf 'no probe output (ssh/connectivity failure -- %s unreachable, or the command did not run) -- issue 1351' "$box"
     return 0
   fi
   local svc
@@ -184,14 +187,15 @@ strih_linux_visibility_message() {
   printf ''
 }
 
-# strih_linux_visibility_check HOST USER PW TIMEOUT HERE -> the LIVE orchestrator the [0/8] gate
+# strih_linux_visibility_check HOST USER PW TIMEOUT HERE [BOX] -> the LIVE orchestrator the [0/8] gate
 # calls directly (plain ssh -- NEVER win_ssh_run/CIM). Runs the systemd probe over ssh (bounded by
 # TIMEOUT, same discipline as the Windows win_ssh_run call it replaces) + a real obs-websocket
 # round-trip via the existing obs_phase2.py (record --action status, the SAME WS client
 # `record --action stop` already uses at [7/8]), then feeds both into the pure classifier above.
 # Kept OUT of recording-e2e.sh itself so the [0/8] call site stays a single line (#675 pattern).
+# BOX is handed to the message (the box an unreachable probe names; default strih-snv).
 strih_linux_visibility_check() {
-  local host="$1" user="$2" pw="$3" tmo="$4" here="$5"
+  local host="$1" user="$2" pw="$3" tmo="$4" here="$5" box="${6:-strih-snv}"
   local sysout ws_ok=0
   sysout="$(timeout "$tmo" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
     "${user}@${host}" "$(strih_linux_visibility_probe_cmd)" 2>/dev/null || true)"
@@ -200,5 +204,5 @@ strih_linux_visibility_check() {
   # only caps a single socket op, not a wedged handshake). Bound it so a wedge becomes ws_ok=0 -> the
   # existing "obs-websocket on :4455 did not answer" named diagnosis, never a silent [0/8] hang.
   timeout "${STRIH_LX_WS_TIMEOUT:-20}" python3 "$here/obs_phase2.py" record --host "$host" --action status >/dev/null 2>&1 && ws_ok=1
-  strih_linux_visibility_message "$sysout" "$ws_ok"
+  strih_linux_visibility_message "$sysout" "$ws_ok" "$box"
 }

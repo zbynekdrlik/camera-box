@@ -173,8 +173,11 @@ probe_http_bundle() {
 restart_bundle_state_task() {
   local box="$1" ip="$2" user pw
   user="$(box_ssh_user "$box")"; pw="$(box_ssh_pw "$box")"
-  timeout "$SSH_TIMEOUT" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
-    -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+  # UserKnownHostsFile=/dev/null (issue 1462): a box reinstalled at the same address (the stream box,
+  # Windows until 22.10.2026) leaves a stale known_hosts key, which with StrictHostKeyChecking=no makes
+  # OpenSSH disable password authentication.
+  timeout "$SSH_TIMEOUT" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR -o ConnectTimeout=10 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
     "${user}@${ip}" "$(bundle_state_restart_remote_cmd "$(box_fleet_class "$box")")" >/dev/null 2>&1
 }
 

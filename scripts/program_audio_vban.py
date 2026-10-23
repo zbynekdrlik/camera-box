@@ -8,7 +8,9 @@ fitted clock + the fixed "Receive Buffer" R) so the genlock ASRC resamples it to
 
 This module holds the one definition of that source for the two tools that write it:
   * scripts/strih_scenes.py (the OBS launch seed, over obs-websocket) and
-  * scripts/obs_collection_port.py (the offline collection port, OBS stopped).
+  * scripts/obs_collection_port.py (the offline collection port, OBS stopped),
+and for the one that only grades it, `obs_phase2.py mbc-input-check` (rig-mode TEST on a Linux stream
+box, issue 1462: mbc_vban_transport_problem).
 It is pure Python with no websocket dependency; the obs-websocket helpers take any object with a
 `req(request_type, data=None, ignore_err=False)` method (strih_scenes.Obs, or a test fake).
 
@@ -78,6 +80,25 @@ def settings_differences(current, want):
     cur = dict(defaults)
     cur.update(current or {})
     return ["%s %r != %r" % (k, cur.get(k), v) for k, v in want.items() if cur.get(k) != v]
+
+
+def mbc_vban_transport_problem(kind, settings, muted, want_stream, want_port):
+    """Pure (issue 1462): rig-mode TEST's #901 item-2 decision for a LINUX stream box, whose program-audio
+    input (`mbc` on stream-snv) is this obs-vban RECEIVE source fed by mbc.lan's VBAN stream (no Dante
+    card there). A short problem string, or None when the input is this source, on the box facts'
+    stream name WANT_STREAM and UDP port WANT_PORT, unmuted. Mute is named FIRST and alone, like the
+    Dante check (obs_phase2._mbc_transport_problem). The settings go through settings_differences, so
+    a key obs-websocket leaves out reads as the source's own default (port 6980, an empty stream name).
+    The Receive Buffer is the operator's setting (verify-strih item 9 grades it), not this check's."""
+    if muted:
+        return "input is MUTED (mute must be OFF for the measurement chain to be usable)"
+    if kind != VBAN_SOURCE_KIND:
+        return ("input kind is %r, expected the obs-vban receive source %r (the stream role's program-audio "
+                "input, issue 1439)" % (kind, VBAN_SOURCE_KIND))
+    diffs = settings_differences(settings or {}, {"stream_name": want_stream, "port": want_port})
+    if diffs:
+        return "the obs-vban source does not carry the box facts' stream: " + "; ".join(diffs)
+    return None
 
 
 def kind_available(obs, kind):

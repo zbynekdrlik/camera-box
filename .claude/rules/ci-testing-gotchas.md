@@ -99,6 +99,9 @@ then set the window above that with headroom + the file's own `// #NNNN: widened
 ... (measured distance N)` convention comment. `recording-e2e-cleanup-composition.md` documents the
 widening itself; THIS entry is the reason the count sweep won't remind you to. Last measured 25.9.2026
 (issue 1367 pixel-proof step): 11535 of the 12000-byte window — the NEXT step added there must widen it.
+**Measure in BYTES** (issue 1462): the Rust windows slice bytes, and recording-e2e.sh holds non-ASCII
+text, so a python `open(...).read()` offset is a CHARACTER count that reads short (the 977 window's last
+anchor: 3088 characters = byte 3092). Use `open(..., "rb").read()` and byte needles for the distance.
 
 **The general check for ANY edit, not only that one window (issue 1386).** Resolve every fixed
 window a recording-e2e-reading test slices (`&s[v..(v + N)` / `v.saturating_sub(N)`) to the
@@ -1792,7 +1795,7 @@ paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against th
     example, a stub turns a file the script will `rm -f` into a non-empty directory.
   - Prove each arm with a mutant (delete the `trap` line in a scratch copy, run the test).
 
-## Two fixture traps that let a mutant survive (issue 1399)
+## Fixture traps that let a mutant (or the old code) pass (issue 1399, issue 1462)
 
 - **A "not UTF-8" fixture must hold INVALID UTF-8.** `b"obs\xc4\x9b"` is valid UTF-8 (`obsě`), so a
   strict `.decode()` mutant of a bytes-safe /proc read still passed. Use a byte sequence that cannot
@@ -1800,6 +1803,13 @@ paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against th
 - **A fake server that logs a request BEFORE it decides to drop the connection** counts the dropped
   request as one that ran. If the test means "this request never reached the target", remove the
   logged entry when the fake drops (`DropOnPress` in `tests/python/test_strih_browser_keeper_obs_run_1399.py`).
+- **A "stale file is never reused" fixture must put the stale file where the PRE-fix code reads it**
+  (issue 1462). The first `[4b3/8]` stale-WAV test planted the WAV at the NEW default path; the old
+  code read another path, found nothing and aborted "never arrived", so the test passed on the old
+  code for the wrong reason. Set the path explicitly (here `AUDIO_DECODABILITY_WAV_LX`) to where both
+  versions read, and run the test on a scratch tree of the old scripts to see it fail for the reason
+  it names. The same lane found the second half: a guard that removes the stale file INSIDE the
+  remote command is no guard when that command's ssh fails; gate the pull-back on its rc.
 
 ## A test harness that runs bash must pass values as ARGUMENTS, never inside the script text (issue 1302)
 
