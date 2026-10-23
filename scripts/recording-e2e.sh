@@ -3436,7 +3436,7 @@ elif [ ! -x "$_md_probe_bin" ]; then
 else
   mkdir -p "$OUTDIR"
   _md_wav_win='C:\camera-box\mbc-decodability.wav'
-  _md_wav_lx="${AUDIO_DECODABILITY_WAV_LX:-/tmp/camera-box-mbc-decodability.wav}"  # issue 1462: on a Linux stream box
+  _md_wav_lx="${AUDIO_DECODABILITY_WAV_LX:-camera-box-mbc-decodability.wav}"  # issue 1462: Linux box, in the ssh user's home
   _md_wav_local="$OUTDIR/mbc-decodability-${RUN_ID}.wav"
   rm -f "$_md_wav_local"
   # Short throwaway probe recording on stream (an orphan from an abort self-heals on the next run's

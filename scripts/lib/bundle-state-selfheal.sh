@@ -91,7 +91,11 @@ bundle_state_selfheal_fetch() {
   how="$(bundle_state_restart_label "$class")"
   echo "    bundle-state-server on ${host}:${port} not answering -- issuing session-agnostic restart ($how, #817)" >&2
   if command -v sshpass >/dev/null 2>&1; then
-    timeout "$ssh_timeout" sshpass -p "$ssh_pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+    # UserKnownHostsFile=/dev/null (issue 1462): the stream box's address was the Windows PC until
+    # 22.10.2026, and a stale known_hosts key with StrictHostKeyChecking=no makes OpenSSH disable
+    # password authentication -- the restart would never authenticate.
+    timeout "$ssh_timeout" sshpass -p "$ssh_pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR -o ConnectTimeout=10 \
       "${ssh_user}@${host}" "$(bundle_state_restart_remote_cmd "$class")" >/dev/null 2>&1 \
       || echo "    NOTE: the $how restart call to ${host} did not return cleanly (ssh/creds/no unit?) -- still polling :${port}" >&2
   else

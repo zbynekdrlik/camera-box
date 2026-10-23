@@ -360,14 +360,16 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   Development-scene guard read it; never a role constant.
 - **stream-snv (issue 1462):** a Linux stream box like stream-pp since 22.10.2026. mbc.lan sends the SNV
   program as VBAN `stream`, 24-bit PCM (format byte 0x02), 48 kHz stereo, 239 frames per packet, to
-  UDP 6980: the source decodes it (pinned by `tests/vban_source_loss_1439.rs`). Its OBS input `mbc` is
-  today a hub-fed capture: the stream role's setup step 13 moves the hub aside, and mbc must keep
-  sending to 6980 (OBS binds it once the hub is gone). The collection port has no `stream-snv` preset
+  UDP 6980: the source decodes it (pinned by `tests/vban_source_loss_1439.rs`). Its OBS input `mbc`
+  read as the obs-vban source on 23.10.2026 (`stream_name` `stream`, port 6980, R 80; the setup step 13
+  hub removal and the launch seed's switch from the earlier hub-fed capture had run), and mbc.lan
+  must keep sending to 6980. The collection port has no `stream-snv` preset
   (the box's collection already exists; the launch seed switches `mbc` with the 80 ms fact). An `mbc`
   that is ALREADY an obs-vban input keeps its operator R (verify item 9 NOTEs the difference): set
   `receive_buffer_ms` to 80 in its properties. rig-mode TEST's `#901 item 2` grades this source there
-  (kind + the facts' stream and port, unmuted; `obs_phase2.py mbc-input-check --vban-stream --vban-port`),
-  never the Dante device (`stream-box-linux.md`).
+  (kind + the facts' stream and port, unmuted; `obs_phase2.py mbc-input-check --vban-stream --vban-port`,
+  the decision `program_audio_vban.mbc_vban_transport_problem`), never the Dante device
+  (`stream-box-linux.md`).
 - **Seed:** the stream manifest carries `program_audio_vban`; `strih_scenes.py` switches `Zvuk z mixu`
   through `scripts/program_audio_vban.py` (installed next to it by setup step 6; the launch preflight
   imports it). A replace reads the operator state BEFORE `RemoveInput` and puts back scenes (hidden

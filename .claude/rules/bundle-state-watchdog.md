@@ -70,6 +70,10 @@ watchdog reads via `box_fleet_class` → `obs_fleet_class`:
   `windows-genlock` when the fleet list does not know it. The host check comes first because the
   `STRIH_PLATFORM` override describes the strih only — a forced `STRIH_PLATFORM=linux` must never send
   a Windows stream box a systemctl restart (review round 2). Omitted class = the Windows form.
+- **Both restarts' ssh carries `-o UserKnownHostsFile=/dev/null`** (issue 1462): a box reinstalled at the
+  same address (the stream box, Windows until 22.10.2026) leaves a stale dev1 known_hosts key, and with
+  `StrictHostKeyChecking=no` OpenSSH then disables password authentication, so the restart could never
+  log in.
 
 The Linux unit ALSO has `Restart=on-failure`, so the dev1 restart matters for the two cases systemd
 cannot see: a clean exit (`Restart=on-failure` ignores exit 0) and a wedged-but-listening server.

@@ -15,7 +15,11 @@
 #   stream_box_exec ...           -> run the platform's command text on the box
 #   stream_box_download ...       -> scp one file from the box
 #   stream_box_visibility_gate_linux ...  -> the [0/8] operator-visibility gate on a Linux stream box
-#   stream_mbc_vban_expect HOST   -> `<stream> <port>` the Linux box's mbc VBAN input must carry
+#   stream_mbc_vban_expect HOST   -> `<stream> <port> <input>` the Linux box's mbc VBAN input carries
+#
+# Each function takes its arguments in the order of the function it wraps: exec / download that of
+# win_ssh_run (USER PW HOST ...), the visibility gate that of strih_linux_visibility_check (HOST USER PW
+# TIMEOUT HERE).
 #
 # Callers hand BOTH texts (the PowerShell one and the bash one); the Windows text is the same text as
 # before, byte for byte. The Linux transport is plain ssh with UserKnownHostsFile=/dev/null: the
@@ -46,13 +50,19 @@ stream_box_platform() {
 }
 
 # stream_box_exec USER PW HOST WIN_PS LINUX_SH -> run the command text for HOST's platform on HOST:
-# LINUX_SH over plain ssh (ONE remote argument, parsed once by the box's shell), WIN_PS through
-# win_ssh_run (-EncodedCommand). stdout/stderr pass through; the rc is the remote command's (ssh 255
-# / sshpass 5-6 on a transport failure). Blocks for the command's duration: the caller bounds it.
+# LINUX_SH over plain ssh (ONE remote argument, parsed once by the box's shell; stdin is /dev/null,
+# `-n`), WIN_PS through win_ssh_run (-EncodedCommand). stdout/stderr pass through; the rc is the
+# remote command's (ssh 255 / sshpass 5-6 on a transport failure). An EMPTY LINUX_SH for a Linux box
+# is refused (rc 2, named): `ssh host ""` would open an interactive remote shell. Blocks for the
+# command's duration: the caller bounds it.
 stream_box_exec() {
   local user="${1-}" pw="${2-}" host="${3-}" win_ps="${4-}" linux_sh="${5-}"
   if [ "$(stream_box_platform "$host")" = "linux" ]; then
-    sshpass -p "$pw" ssh "${STREAM_BOX_SSH_OPTS[@]}" -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
+    if [ -z "$linux_sh" ]; then
+      echo "stream-box: ${host} is a Linux stream box but the caller gave no bash command text (issue 1462)" >&2
+      return 2
+    fi
+    sshpass -p "$pw" ssh -n "${STREAM_BOX_SSH_OPTS[@]}" -o ServerAliveInterval=30 -o ServerAliveCountMax=20 \
       "${user}@${host}" "$linux_sh"
     return
   fi
@@ -81,14 +91,16 @@ stream_box_download() {
 # stream_box_visibility_gate_linux HOST USER PW TIMEOUT HERE -> the recording-e2e [0/8] operator-
 # visibility gate for a Linux stream box. The box is the same OBS appliance as strih-snv (setup-strih,
 # stream role): OBS runs under the operator's supervised `strih-obs.service`, so the check IS
-# strih_linux_visibility_check (the unit over plain ssh + a bounded obs-websocket round-trip). Prints
-# the ok line and returns 0, or the ERROR + the recovery command on stderr and returns 1 (the caller
-# exits). Never the Windows obs64/AHK probe.
+# strih_linux_visibility_check (the unit over plain ssh + a bounded obs-websocket round-trip), told the
+# box's fleet name so an unreachable box is named as itself. Prints the ok line and returns 0, or the
+# ERROR + the recovery command on stderr and returns 1 (the caller exits). Never the Windows obs64/AHK
+# probe.
 stream_box_visibility_gate_linux() {
-  local host="${1-}" user="${2-}" pw="${3-}" tmo="${4-}" here="${5-}" msg
+  local host="${1-}" user="${2-}" pw="${3-}" tmo="${4-}" here="${5-}" msg box
   command -v strih_linux_visibility_check >/dev/null 2>&1 \
     || . "${BASH_SOURCE[0]%/*}/strih-platform.sh"
-  msg="$(strih_linux_visibility_check "$host" "$user" "$pw" "$tmo" "$here")"
+  box="$(obs_fleet_name_for_host "$host" 2>/dev/null)" || box=""
+  msg="$(strih_linux_visibility_check "$host" "$user" "$pw" "$tmo" "$here" "the stream box ${box:-$host}")"
   if [ -n "$msg" ]; then
     echo "ERROR: [0/8] stream INVISIBLE: $msg" >&2
     echo "       Recovery: ssh ${user}@${host} 'systemctl --user restart strih-obs.service'   # the Linux stream box's supervised user unit (issue 1462)" >&2
@@ -97,30 +109,40 @@ stream_box_visibility_gate_linux() {
   echo "    ok: stream strih-obs.service active + obs-websocket answers on :4455 (the Linux stream box, issue 1462)"
 }
 
-# stream_mbc_vban_expect HOST -> on a Linux stream box, print `<stream> <port>`: the VBAN stream name
-# and UDP port its OBS input `mbc` (the vendored obs-vban receive source, issue 1439) must carry, from
-# the box's FACT file (scripts/strih-boxes/<fleet name>.env, STRIH_PROGRAM_VBAN_STREAMS / _PORT,
-# loaded by scripts/lib/strih-box-facts.sh in a SUBSHELL, so the caller's shell never gets a loaded
-# box). On a Windows stream box print nothing and return 0 (the Dante device check applies there).
-# A Linux box whose fleet name has no fact file, or whose facts declare no program VBAN stream,
-# refuses: rc 1 with the reason on stderr -- the mbc check cannot be graded without the facts.
+# stream_mbc_vban_expect HOST -> on a Linux stream box, print `<stream> <port> <input>`: the VBAN
+# stream name and UDP port the box's program-audio OBS input (the vendored obs-vban receive source,
+# issue 1439) must carry, then that input's NAME (which may hold spaces, so it comes last: read it with
+# `read -r stream port input`), all from the box's FACT file (scripts/strih-boxes/<fleet name>.env,
+# STRIH_PROGRAM_VBAN_STREAMS / _PORT / STRIH_PROGRAM_AUDIO_INPUT, loaded by scripts/lib/strih-box-facts.sh
+# in a SUBSHELL, so the caller's shell never gets a loaded box). On a Windows stream box print nothing
+# and return 0 (the Dante device check applies there). A Linux box refuses with rc 1 and the reason on
+# stderr when no fleet row names it or its facts do not load (the loader's own line says why), and
+# when its facts declare no program VBAN stream -- the mbc check cannot be graded without the facts.
 stream_mbc_vban_expect() {
-  local host="${1-}" dir="${BASH_SOURCE[0]%/*}" name out
+  local host="${1-}" dir="${BASH_SOURCE[0]%/*}" name out rc=0
   [ "$(stream_box_platform "$host")" = "linux" ] || return 0
   name="$(obs_fleet_name_for_host "$host" 2>/dev/null)" || name=""
   if [ -z "$name" ]; then
     echo "stream-box: ${host} is a linux-genlock box but no obs-fleet row names it -- cannot read its box facts (issue 1462)" >&2
     return 1
   fi
-  if ! out="$(
+  out="$(
     command -v strih_box_load >/dev/null 2>&1 || . "${dir}/strih-box-facts.sh"
-    strih_box_load "$name" >/dev/null || exit 1
-    s="$(strih_lx_program_vban_streams)" && p="$(strih_lx_program_vban_port)" || exit 1
-    [ "$s" != "none" ] && [ "$p" != "none" ] || exit 2
-    printf '%s %s' "$s" "$p"
-  )"; then
-    echo "stream-box: ${host} is the Linux stream box '${name}' but its box facts give no program VBAN stream (scripts/strih-boxes/${name}.env STRIH_PROGRAM_VBAN_STREAMS / STRIH_PROGRAM_VBAN_PORT) -- the mbc VBAN transport cannot be checked (issue 1462)" >&2
-    return 1
-  fi
-  printf '%s\n' "$out"
+    strih_box_load "$name" >/dev/null || exit 3
+    s="$(strih_lx_program_vban_streams)" && p="$(strih_lx_program_vban_port)" \
+      && i="$(strih_lx_program_audio_input)" || exit 3
+    [ "$s" != "none" ] && [ "$p" != "none" ] && [ "$i" != "none" ] || exit 2
+    printf '%s %s %s' "$s" "$p" "$i"
+  )" || rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$out" ;;
+    2)
+      echo "stream-box: ${host} is the Linux stream box '${name}' but its box facts declare no program VBAN stream (scripts/strih-boxes/${name}.env STRIH_PROGRAM_VBAN_STREAMS / STRIH_PROGRAM_VBAN_PORT / STRIH_PROGRAM_AUDIO_INPUT read none) -- the mbc VBAN transport cannot be checked (issue 1462)" >&2
+      return 1
+      ;;
+    *)
+      echo "stream-box: ${host} is the Linux stream box '${name}' but its box facts did not load (scripts/strih-boxes/${name}.env -- the loader's line above says why) -- the mbc VBAN transport cannot be checked (issue 1462)" >&2
+      return 1
+      ;;
+  esac
 }

@@ -1133,19 +1133,25 @@ verify_optical_qr_visible() {
 # fatal as a dead card" (issue 901). On a Linux stream box (issue 1462) the same one-call read
 # grades the obs-vban receive source against the box facts' VBAN stream + port instead.
 verify_mbc_dante_transport() {
-  local here expect
+  local here expect vban_stream vban_port vban_input
   local -a vban_args=()
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   # issue 1462: a Linux stream box (stream-snv) has no Dante card -- its mbc input is the obs-vban
   # receive source on the VBAN stream + port of its box facts, so the check grades that instead. A
-  # Linux box without those facts refuses here, before any read.
+  # Linux box without those facts refuses here, before any read, and so does an input name that is
+  # not the one its facts declare (STRIH_PROGRAM_AUDIO_INPUT) -- the check would grade another input.
   if ! expect="$(stream_mbc_vban_expect "$STREAM_IP")"; then
     echo "ERROR: [#901] the stream box ${STREAM_IP} is Linux but its mbc VBAN stream is not declared -- see the line above (issue 1462)" >&2
     exit 1
   fi
   if [ -n "$expect" ]; then
-    vban_args=(--vban-stream "${expect%% *}" --vban-port "${expect##* }")
-    echo "[obs stream ${STREAM_IP}] #901 mbc VBAN-transport check (obs-vban source on stream '${expect%% *}' UDP ${expect##* }, unmuted): input='${MBC_INPUT_NAME}' (issue 1462)"
+    read -r vban_stream vban_port vban_input <<<"$expect"
+    if [ "$MBC_INPUT_NAME" != "$vban_input" ]; then
+      echo "ERROR: [#901] MBC_INPUT_NAME='${MBC_INPUT_NAME}' but the stream box ${STREAM_IP}'s facts name its program-audio input '${vban_input}' (STRIH_PROGRAM_AUDIO_INPUT) -- set MBC_INPUT_NAME to that name or fix the facts (issue 1462)" >&2
+      exit 1
+    fi
+    vban_args=(--vban-stream "$vban_stream" --vban-port "$vban_port")
+    echo "[obs stream ${STREAM_IP}] #901 mbc VBAN-transport check (obs-vban source on stream '${vban_stream}' UDP ${vban_port}, unmuted): input='${MBC_INPUT_NAME}' (issue 1462)"
   else
     echo "[obs stream ${STREAM_IP}] #901 mbc Dante-transport check (device bound + unmuted): input='${MBC_INPUT_NAME}'"
   fi
@@ -1410,7 +1416,7 @@ do_test() {
   echo "[obs] #901 gap 1: optical proof — strih's live program scene must render NON-BLACK:"
   verify_optical_qr_visible
   echo
-  echo "[obs] #901 item 2: mbc Dante-transport check (device bound + unmuted):"
+  echo "[obs] #901 item 2: mbc transport check (the Dante device, or the obs-vban source on a Linux stream box; unmuted):"
   verify_mbc_dante_transport
   echo
   echo "[obs] #901 item 1 (the headline fix): measurement-audio ARRIVAL end to end:"
