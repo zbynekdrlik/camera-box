@@ -10,9 +10,11 @@ mixer on YouTube. This Development holds exactly two items:
   * the program video input (`NDI 2ME PGM`, muted by the operator) on top, covering the clip's
     picture. Its audio stays out because the input is muted; the verdict FAILs when it is not.
 
-The seeder is create-only and operator-wins (the issue-1380 seeder's rules): it creates the scene,
-the clip input and a missing item, never edits an existing item, never touches the production scene
-or any other scene, never mutes/unmutes, never selects a program or preview scene.
+The seeder is operator-wins (the issue-1380 seeder's rules): it creates the scene, the clip input and
+a missing item, never edits an existing item, never touches the production scene or any other scene,
+never mutes/unmutes, never selects a program or preview scene. The one removal (issue 1462): an item
+that is neither of the two (a nested production scene, a mixer capture) is removed from the
+development scene, since it would put that content on YouTube.
 
 The spec is the seed manifest's `dev_scene` object (scripts/lib/obs-box-role.sh writes it on a
 stream box). `strih_scenes.py --bootstrap` seeds it on every OBS launch; verify-strih runs
@@ -124,6 +126,16 @@ def dev_safe_plan(scene_names, input_names, dev_items, spec):
     return actions
 
 
+def dev_safe_foreign_items(dev_items, spec):
+    """[(sceneItemId, sourceName)] of every development-scene item that is neither the video input nor
+    the clip: exactly what the verdict FAILs as `holds` (issue 1462: stream-snv's ported collection kept
+    the nested production scene and a pulse capture there, on the program). YouTube safety wins over
+    operator-wins here; the seed line names each removal."""
+    allowed = {spec["video_input"], spec["audio_input"]}
+    return [(it["sceneItemId"], it.get("sourceName")) for it in dev_items or []
+            if it.get("sourceName") not in allowed and it.get("sceneItemId") is not None]
+
+
 def dev_safe_verdict(scene_names, dev_items, video_muted, clip_settings, spec):
     """Grade the development scene: a list of (level, text) with level PASS / FAIL / NOTE.
     *video_muted* = GetInputMute of the video input (None when unreadable: fails closed);
@@ -195,15 +207,22 @@ def _fit_canvas(obs, scene, item_id):
 
 def apply_dev_safe(obs, spec):
     """Apply dev_safe_plan over an obs-websocket client with `req(type, data=None, ignore_err=False)`
-    (strih_scenes.Obs). Writes only CreateScene / CreateInput / CreateSceneItem /
+    (strih_scenes.Obs). First removes every foreign item of the development scene
+    (dev_safe_foreign_items, issue 1462), then writes only CreateScene / CreateInput / CreateSceneItem /
     SetSceneItemTransform / SetSceneItemIndex on the development scene, never with ignore_err.
-    Returns the plan it applied."""
+    Returns the removals (`remove_item <name>`) and the plan it applied."""
     scene = spec["scene"]
     scenes = [s.get("sceneName") for s in obs.req("GetSceneList").get("scenes", [])]
     inputs = [i.get("inputName") for i in obs.req("GetInputList").get("inputs", [])]
     spec = resolve_spec(spec, inputs)
     items = None
     if scene in scenes:
+        items = obs.req("GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
+    removed = []
+    for item_id, name in dev_safe_foreign_items(items, spec):
+        obs.req("RemoveSceneItem", {"sceneName": scene, "sceneItemId": item_id})
+        removed.append("remove_item %s" % name)
+    if removed:
         items = obs.req("GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
     plan = dev_safe_plan(scenes, inputs, items, spec)
     for action in plan:
@@ -228,7 +247,7 @@ def apply_dev_safe(obs, spec):
             r = obs.req("CreateSceneItem", {"sceneName": scene, "sourceName": spec["video_input"],
                                             "sceneItemEnabled": True})
             _fit_canvas(obs, scene, r.get("sceneItemId"))
-    return plan
+    return removed + plan
 
 
 def read_verdict(obs, spec):

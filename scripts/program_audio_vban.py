@@ -284,6 +284,23 @@ def pulse_capture_report(obs):
     return "pulse capture inputs: " + "; ".join("'%s' (%s, %s)" % f for f in found)
 
 
+def _remove_scene_items_of(obs, name):
+    """Remove every scene item that shows input NAME, in every scene (issue 1462). libobs drops a
+    removed source's items only while their scene RENDERS, and in Studio Mode the program renders a
+    private duplicate: a scene that is never shown on its own keeps the item, the item keeps the input,
+    and RemoveInput alone changes nothing (stream-snv's `Development`, 24.10.2026)."""
+    scenes = (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes") or []
+    for sc in scenes:
+        scene = sc.get("sceneName") if isinstance(sc, dict) else None
+        if not scene:
+            continue
+        items = (obs.req("GetSceneItemList", {"sceneName": scene}, ignore_err=True) or {}).get("sceneItems") or []
+        for it in items:
+            if isinstance(it, dict) and it.get("sourceName") == name and it.get("sceneItemId") is not None:
+                obs.req("RemoveSceneItem", {"sceneName": scene, "sceneItemId": it["sceneItemId"]},
+                        ignore_err=True)
+
+
 def drop_pulse_capture_inputs(obs, keep=None, sleep=None):
     """Remove every scene pulse capture input except KEEP (the program-audio input), each read back from
     GetInputList (a bounded wait, the name can stay listed a moment); name every global channel of a pulse
@@ -299,6 +316,7 @@ def drop_pulse_capture_inputs(obs, keep=None, sleep=None):
             continue
         settings = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True) or {}).get("inputSettings")
         dev = settings.get("device_id") if isinstance(settings, dict) else None
+        _remove_scene_items_of(obs, name)
         obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
         _await_free(obs, name, sleep)
         listed = input_kind_listed(obs, name)

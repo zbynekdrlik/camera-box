@@ -203,9 +203,14 @@ with `STRIH_ROLE=stream`) Development holds exactly two items instead:
 
 Where it lives:
 
-- `scripts/stream_dev_safe.py`: the pure plan (create-only, operator-wins, never `PRO`, never the
-  mixer, never mutes or selects a scene), the verdict and the `--seed` / `--verify` CLI. It imports
+- `scripts/stream_dev_safe.py`: the pure plan (operator-wins, never `PRO`, never the mixer, never
+  mutes or selects a scene), the verdict and the `--seed` / `--verify` CLI. It imports
   `strih_scenes.Obs` and the manifest path from `strih_scenes.py` beside it.
+- **The one removal (issue 1462, 24.10.2026):** `dev_safe_foreign_items` = every item of the
+  development scene that is neither the video input nor the clip, exactly what the verdict FAILs as
+  `holds`; the seed removes them first (`remove_item <name>` in the seed line). stream-snv's
+  collection, ported from the Windows SNV box, still nested `PRO` and a pulse capture there while
+  `Development` was on the program. An operator-DISABLED allowed item is still left alone.
 - The stream seed manifest (`obs_box_stream_seed_manifest_json`) carries `dev_scene`, and
   `strih_scenes.py --bootstrap` seeds it on every OBS launch. A strih manifest never has the key.
 - setup-strih step `6-devclip` (stream role only) generates the clip ON the box with

@@ -98,6 +98,13 @@ names each removal with its device, so it can be rebuilt as another kind. A glob
 obs-websocket's RemoveInput would not release the frontend's channel -- and verify FAILs it (set it Disabled).
 The strih manifest has no such key (its `ASIO zvuk` IS the pulse program capture).
 
+**Every scene item of the input is removed FIRST, then `RemoveInput` (issue 1462).** libobs drops a removed
+source's items only while their scene RENDERS (`update_transforms_and_prune_sources` in `scene_video_render`),
+and in Studio Mode the program renders a private duplicate. A scene that is never shown on its own (stream-snv's
+`Development`, on the program) kept the item, the item kept the input, `RemoveInput` returned success and changed
+nothing, and a second call was a no-op (`removed` was already set). Live 24.10.2026: `pulse capture=remove
+FAILED: 'Zvuk z mixu'`. Any other OBS-WS removal of an input that scenes may reference needs the same order.
+
 ## Tests (Tier-0)
 
 `tests/python/test_stream_operator_audio_1465.py` (fake udevadm / pw-dump / pw-metadata, the real lib under
