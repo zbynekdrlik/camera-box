@@ -131,7 +131,11 @@ def test_a_clone_owned_by_another_user_still_names_its_head(tmp_path):
         subprocess.run(["git", "-C", str(root), *cmd], check=True, env={**os.environ, **env})
     head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
                           check=True).stdout.strip()
-    foreign = {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+    # The GitHub runner's global git config trusts every directory (safe.directory = *), which would
+    # hide the ownership check: read no global / system config, so the test sees what root sees on a box.
+    empty = tmp_path / "gitconfig-empty"
+    empty.write_text("")
+    foreign = {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": str(empty), "GIT_CONFIG_NOSYSTEM": "1"}
     plain = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
                            env={**os.environ, **foreign})
     assert plain.returncode != 0, "the fixture really reads as a foreign-owned repo"
