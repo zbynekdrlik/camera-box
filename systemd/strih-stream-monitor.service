@@ -3,11 +3,12 @@
 # one unified PP/SNV design). scripts/strih_stream_monitor.py runs VLC on the restreamer's local RTMP
 # (the key setup-strih step 3 writes into the stream OBS profile = the box name = %l), straight to the
 # headphone jack's ALSA PCM (resolved by its PCM name), never through PipeWire (issue 1437); issue 1456:
-# VLC as on stream-snv, its volume slider the operator's control, the card at 0 dB. Silent while nothing
-# is published, retried every 3 s. Installed by setup-strih.sh step 16d on
+# VLC as on stream-snv, its volume slider the operator's control, the card at 0 dB. Issue 1465: the ONE
+# USB headphone box (the stream-snv Scarlett) wins over the jack, and VLC is told to play only while OBS
+# publishes (no failed RTMP open flickers its window). Installed by setup-strih.sh step 16d on
 # the stream role (scripts/lib/strih-session-apps.sh), started at login by the kiosk autostart, graded by
 # verify-strih's (stream-monitor) rows.
-Description=Stream box headphone monitor -- VLC plays the outgoing RTMP stream to the headphone jack (issues 1436, 1456)
+Description=Stream box headphone monitor -- VLC plays the outgoing RTMP stream to the headphone box, else the jack (issues 1436, 1456, 1465)
 Documentation=https://github.com/zbynekdrlik/camera-box
 # issue 1465: After= the target too. A target orders itself after every unit it Wants (the WantedBy link
 # below) unless that unit is already After= it; without this line systemd found the login cycle

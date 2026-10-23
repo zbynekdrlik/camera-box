@@ -196,8 +196,12 @@ lipsync + audio dropouts by ear); the headphones carry VLC's audio. Owner decisi
     headphone jack matching ...` or `the playback PCM matching ... (--pcm-match)`).
   - Plugging a headphone box in switches at the next VLC start (the operator closing VLC, or a unit
     restart); no re-provision.
-  - The Scarlett has no `Master` / `Headphone` / `PCM` / `Speaker` controls: each is named once
-    (`mixer: ... not set`) and VLC plays anyway. No Scarlett mixer writes: its factory routing is unity.
+  - **A USB headphone box keeps its own mixer** (review round 1): no unity writes and no `Speaker` mute
+    on a USB card, one `mixer: <card> is a USB audio interface -- its own mixer is left as it is` line.
+    snd-usb-audio names many headsets' and dongles' main output `Speaker`, so the jack's mute would
+    silence the box the operator listens on, and a 0 dB write on its own volume is full scale. The
+    Scarlett has none of those controls anyway; its factory routing is unity. The jack keeps the 1456
+    unity + speaker mute.
 - **Why the window blinked.** With nothing published, VLC reads `stopped`, and the supervisor sent
   `pl_play` every 3 s. Each one opened and failed the RTMP input, so the window and its taskbar entry
   flickered all day.
@@ -208,9 +212,14 @@ lipsync + audio dropouts by ear); the headphones carry VLC's audio. Owner decisi
     IPv4-mapped tcp6 address read as IPv4), then the socket inodes in `<proc_root>/<pid>/fd` of the `obs`
     pids only. A vanished pid, a foreign pid's fd dir and a non-UTF-8 comm are skipped.
   - The comm filter matters: the monitor's own VLC holds an ESTABLISHED connection to the same port
-    while it plays.
-  - Nothing published -> state `waiting`, reason `OBS is not publishing to <url> (<detail>) -- VLC idles
-    until it does`, no `pl_play` at all. VLC stays open with its window (it is still launched with the
+    while it plays. `--obs-process-name` longer than 15 characters (the kernel's comm) is refused.
+  - A hostname URL is looked up at most once a minute (`RESOLVE_TTL_S`); the default literal
+    `127.0.0.1` never is. The stream KEY is not checked: OBS publishing under another key reads as
+    published (verify's `(stream-monitor-key)` row grades the key).
+  - Nothing published -> state `waiting`, reason `OBS is not publishing to <url> -- VLC idles until it
+    does`, no `pl_play` at all. The reason is CONSTANT, so it is one journal line however other clients
+    come and go on the port; what holds it (`nothing holds ...` / `no obs process holds ...`) is the state
+    file's `publisher` field. VLC stays open with its window (it is still launched with the
     URL, so its first open at launch fails once). The state is healthy for `--check-state` (unchanged).
   - OBS publishes and VLC is not playing yet -> `waiting: OBS publishes to <url>, VLC not playing yet`
     and `pl_play` every 3 s until `playing`.

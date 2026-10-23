@@ -25,10 +25,12 @@ WHAT, one supervised --user unit (strih-stream-monitor.service, Restart=always):
     Analog`); two or more USB playback PCMs = named once in the log, the jack. An explicit --pcm-match
     is a regex on the PCM name and nothing else;
   * when another process holds that PCM (PipeWire, a second player) VLC is not started; it says who;
-  * before each VLC start: the card's Master / Headphone / PCM to 0 dB unmuted (a unity baseline, the
-    level is VLC's slider) and Speaker muted (PipeWire's ACP leaves the laptop speaker route on, Auto-Mute
-    disabled: the stream must sound in the headphones only). A control the card does not have is named
-    once;
+  * before each VLC start on the jack: the card's Master / Headphone / PCM to 0 dB unmuted (a unity
+    baseline, the level is VLC's slider) and Speaker muted (PipeWire's ACP leaves the laptop speaker route
+    on, Auto-Mute disabled: the stream must sound in the headphones only). A control the card does not have
+    is named once. A USB headphone box keeps its own mixer (issue 1465): snd-usb-audio names many
+    headsets' main output `Speaker`, so that mute would silence the box itself, and a 0 dB write on its own
+    volume control is full scale in the headphones;
   * starts VLC on the restreamer's RTMP (default rtmp://127.0.0.1:1234/live/<short hostname>, the key
     setup-strih writes into the stream OBS profile): ALSA straight to the jack, video in a small window
     (--zoom 0.25), 1 s network cache (SNV's), no error dialogs, its http status interface on 127.0.0.1
@@ -72,8 +74,11 @@ DEFAULT_PCM_MATCH = r"(?<!\bAlt) Analog$"
 RTMP_DEFAULT_PORT = 1935
 # /proc/net/tcp state 01 = TCP_ESTABLISHED.
 TCP_ESTABLISHED = "01"
-# The process that publishes the stream (its /proc comm).
+# The process that publishes the stream (its /proc comm; the kernel keeps at most COMM_MAX characters).
 DEFAULT_OBS_PROCESS = "obs"
+COMM_MAX = 15
+# A hostname stream URL is looked up at most this often (the default URL is the literal 127.0.0.1).
+RESOLVE_TTL_S = 60.0
 # The mixer: these to 0 dB (unmuted where they have a switch), Speaker muted (issue 1456).
 UNITY_CONTROLS = (("Master", True), ("Headphone", True), ("PCM", False))
 DEFAULT_SPEAKER_CONTROL = "Speaker"
@@ -285,12 +290,17 @@ def _socket_inodes(proc_root, pid):
     return out
 
 
-def obs_publisher(proc_root, url, process_name=DEFAULT_OBS_PROCESS):
+def obs_publisher(proc_root, url, process_name=DEFAULT_OBS_PROCESS, ips=None):
     """(True, detail) when a process with comm PROCESS_NAME holds an ESTABLISHED TCP connection to the
     URL's host:port (issue 1465: OBS publishes to the restreamer), else (False, why). Std-only from
-    /proc; only the fds of PROCESS_NAME pids are read, a vanished or unreadable pid is skipped."""
+    /proc; only the fds of PROCESS_NAME pids are read, a vanished or unreadable pid is skipped. IPS = the
+    host's addresses already looked up (None = look them up now).
+
+    Limits: the stream KEY is not checked (OBS publishing under another key still reads True; verify's
+    (stream-monitor-key) row grades the key), and PROCESS_NAME must fit the kernel's 15-character comm."""
     host, port = rtmp_endpoint(url)
-    ips = _endpoint_ips(host)
+    if ips is None:
+        ips = _endpoint_ips(host)
     where = "%s:%d" % (host, port)
     if not ips:
         return False, "the stream host %r does not resolve" % host
@@ -389,6 +399,8 @@ class Monitor:
         self.next_start = 0.0
         self._mixer_logged = set()
         self._notes_logged = set()
+        self._ips = set()
+        self._resolved_at = None
         self._logged = None
         self._last_write = 0.0
         self.st = {"version": STATE_VERSION, "state": "starting", "url": url, "device": None, "card": None,
@@ -423,6 +435,14 @@ class Monitor:
             self.log(line or "%s: %s" % (state, reason))
         self._write_state()
 
+    def publisher(self):
+        """obs_publisher on this URL, the host looked up at most every RESOLVE_TTL_S (a literal IP never)."""
+        now = time.monotonic()
+        if self._resolved_at is None or now - self._resolved_at >= RESOLVE_TTL_S:
+            self._ips = _endpoint_ips(rtmp_endpoint(self.url)[0])
+            self._resolved_at = now
+        return obs_publisher(self.proc_root, self.url, self.obs_process, self._ips)
+
     # VLC -------------------------------------------------------------------------------------------------
     def _mixer(self, card_id):
         env = dict(os.environ, LC_ALL="C")
@@ -452,7 +472,14 @@ class Monitor:
             self.set_state("busy", "the headphone PCM %s is held by %s (pid %s) -- VLC not started, retrying every %g s"
                            % (device, owner["comm"] or "?", owner["pid"], self.retry_s))
             return False
-        self._mixer(pcm["card_id"])
+        if pcm.get("usb"):
+            key = ("usb", pcm["card_id"])
+            if key not in self._mixer_logged:
+                self._mixer_logged.add(key)
+                self.log("mixer: %s is a USB audio interface -- its own mixer is left as it is, the level is "
+                         "VLC's slider and the box's own knob" % pcm["card_id"])
+        else:
+            self._mixer(pcm["card_id"])
         password = secrets.token_hex(16)
         try:
             self.proc = subprocess.Popen(vlc_argv(self.vlc, device, self.url, self.http_port, password),
@@ -527,15 +554,16 @@ class Monitor:
                 self.set_state("paused", "paused in VLC")
         else:
             self.paused_since = None
-            published, detail = obs_publisher(self.proc_root, self.url, self.obs_process)
+            published, detail = self.publisher()
             if not published:
                 # issue 1465: no pl_play -- each one on an unpublished URL is a failed RTMP open that
-                # flickers the VLC window; VLC idles with its window open until OBS publishes
-                self.set_state("waiting", "OBS is not publishing to %s (%s) -- VLC idles until it does"
-                               % (self.url, detail))
+                # flickers the VLC window; VLC idles with its window open until OBS publishes. The reason
+                # stays constant (one journal line); what holds the port goes to the state file.
+                self.set_state("waiting", "OBS is not publishing to %s -- VLC idles until it does" % self.url,
+                               publisher=detail)
                 return
             self.set_state("waiting", "OBS publishes to %s, VLC not playing yet -- pl_play every %g s"
-                           % (self.url, self.retry_s))
+                           % (self.url, self.retry_s), publisher=detail)
             if now - self.last_play_cmd >= self.retry_s:
                 self.http.call("pl_play")
                 self.last_play_cmd = now
@@ -610,6 +638,9 @@ def main(argv=None):
     ap.add_argument("--check-state", metavar="FILE", default=None,
                     help="read-only: grade the state file + the headphone PCM owner (verify-strih), rc 0/1")
     a = ap.parse_args(argv)
+    if not a.obs_process_name or len(a.obs_process_name) > COMM_MAX:
+        ap.error("--obs-process-name %r: the kernel reports a process name in 1..%d characters"
+                 % (a.obs_process_name, COMM_MAX))
     if a.check_state:
         ok, line = check_state(a.check_state, time.time(), a.asound_root, a.proc_root)
         print(line)
