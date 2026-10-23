@@ -262,9 +262,10 @@ def test_install_on_a_fresh_box_adopts_the_dhcp_profile_and_leaves_one_vban_rout
             assert props.get(k) == v, (k, props.get(k))
     assert len(s["profiles"]) == 2 and not fk.calls(s, "nmcli", "connection", "add")
     assert s["applied"][LEG_IF]["ipv4.addresses"] == "10.77.7.204/32"
-    # the rig NIC's profile is never touched
+    # the rig NIC's profile is never CHANGED (reading every profile to find the leg's is expected)
     for c in fk.calls(s, "nmcli"):
-        assert RIG_UUID not in c and RIG_IF not in c and "stream-lan" not in c, c
+        if c[:1] != ["-g"]:
+            assert RIG_UUID not in c and RIG_IF not in c and "stream-lan" not in c, c
     # the filter: written, enabled, applied before the address moved
     assert b.nft_file.read_text() == _render("strih_vban_leg_nft_text", LEG_IF, SENDER, "6980")
     assert s["units"]["vban-dante70-filter.service"] == {"enabled": True, "active": True}

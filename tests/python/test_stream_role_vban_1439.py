@@ -841,8 +841,9 @@ def test_verify_wiring_and_budget():
     v = VERIFY.read_text()
     assert len(v.splitlines()) <= 1000
     item9 = v[v.index("# 9) program audio"):v.index("# 9b)")]
-    assert 'if ! WHY="$(obs_box_step_applies 13)"; then\n  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"\nelse\n' \
-        in item9
+    # ROZHODNUTE 6360417876: the same line also grades the VBAN-only leg (tests/python/test_vban_leg_1439.py)
+    assert ('if ! WHY="$(obs_box_step_applies 13)"; then\n  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG";'
+            ' strih_vban_leg_grade   # + the VBAN-only leg (issue 1439)\nelse\n') in item9
     # the hub-only rows (program rx, the HDMI leg, the MiniFuse talkback) sit in the hub branch
     assert item9.index("strih_program_vban_grade") < item9.index("\nelse\n") < item9.index("AUDIO_SINK=0") \
         < item9.index("strih_intercom_hub_hdmi_leg_grade") < item9.index("talkback: MiniFuse") \
