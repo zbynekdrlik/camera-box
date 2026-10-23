@@ -610,11 +610,12 @@ imag_build_drift_report() {
 # LABEL's genlock build, mirrored 1:1 off the REAL CI trigger path filters so this table can never
 # silently drift out of sync with what actually rebuilds each platform:
 #   - "imag" -> linux-genlock.yml's imag-parity job (vendor/obs-studio/**, vendor/distroav/** —
-#                        deliberately NOT vendor/av-sync-dock, a Windows-only OBS dock DLL imag never
-#                        links against, and NOT vendor/obs-vban, which only the strih variant builds)
+#                        deliberately NOT vendor/av-sync-dock, the dock imag's parity job never builds
+#                        (only the strih variant does, issue 1470), and NOT vendor/obs-vban, which only the strih variant builds)
 #   - "strih" when STRIH_LINUX=1 (the strih-snv notebook ships the Linux strih-variant build, issue
-#     1372 review) -> the same pair PLUS vendor/obs-vban (issue 1439: the strih-variant job builds
-#                        the VBAN receive source; linux-genlock.yml's `on.push.paths` carries all three)
+#     1372 review) -> the same pair PLUS vendor/av-sync-dock (issue 1470: the strih-variant job builds
+#                        the A/V-sync dock) and vendor/obs-vban (issue 1439: the VBAN receive source);
+#                        linux-genlock.yml's `on.push.paths` carries all four
 #   - anything else    -> windows-genlock-fast.yml's `on.push.paths` (adds vendor/av-sync-dock/** and
 #                        vendor/obs-vban/**, the paced VBAN sender + receive source, issues 1372/1439)
 # (see tests/drift_guard.rs's genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949
@@ -624,7 +625,7 @@ imag_build_drift_report() {
 genlock_parity_consumed_paths() {
   case "$1:${2:-0}" in
     imag:*)  printf 'vendor/obs-studio\nvendor/distroav\n' ;;
-    strih:1) printf 'vendor/obs-studio\nvendor/distroav\nvendor/obs-vban\n' ;;
+    strih:1) printf 'vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock\nvendor/obs-vban\n' ;;
     *)    printf 'vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock\nvendor/obs-vban\n' ;;
   esac
 }
