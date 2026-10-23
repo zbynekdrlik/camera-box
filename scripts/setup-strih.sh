@@ -689,7 +689,7 @@ if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs n
   # issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
   [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
     || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
-  install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
+  strih_intercom_hub_config_install "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml /usr/local/bin/intercom-hub || fail "intercom routing file install failed (above)"
   strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
   systemctl daemon-reload
   systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"

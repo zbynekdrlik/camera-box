@@ -844,11 +844,11 @@ def test_verify_wiring_and_budget():
     assert len(v.splitlines()) <= 1000
     item9 = v[v.index("# 9) program audio"):v.index("# 9b)")]
     # issue 1439 phase 2: the obs-vban grade follows the facts (every role), the hub-fed program verdict a
-    # box that declares none, the hub-only rows (the HDMI leg, the MiniFuse talkback) every hub box
+    # box that declares none, the hub-only rows (the HDMI leg, the cutters' card leg) every hub box
     assert 'if strih_program_vban_declared; then\n  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"\nelse\n' \
         in item9
     assert item9.index("strih_program_vban_grade") < item9.index("\nelse\n") < item9.index("AUDIO_SINK=0") \
-        < item9.index("strih_intercom_hub_hdmi_leg_grade") < item9.index("talkback: MiniFuse") \
+        < item9.index("strih_intercom_hub_hdmi_leg_grade") < item9.index("strih_intercom_hub_alsa_leg_grade") \
         < item9.rindex("\nfi\n")
     item16 = v[v.index("# 16) intercom hub unit"):v.index("# 17)")]
     assert item16.index('if ! WHY="$(obs_box_step_applies 13)"; then strih_intercom_hub_absent_grade "$WHY"') \

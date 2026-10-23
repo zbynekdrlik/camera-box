@@ -343,7 +343,7 @@ case "$_rm_verdict" in
 esac
 
 # 9) program audio by the FACTS (issue 1439): a box declaring the console's VBAN program -> its obs-vban source; a hub-fed one
-#    (issue 1344) -> strih-program sink + pulse capture + hub program rx (FOH level: supervisor). Hub boxes: HDMI legs + MiniFuse.
+#    (issue 1344) -> strih-program sink + pulse capture + hub program rx (FOH level: supervisor). Hub boxes: HDMI legs + the card leg.
 if strih_program_vban_declared; then
   strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"
 else
@@ -379,7 +379,7 @@ else
 fi
 if WHY="$(obs_box_step_applies 13)"; then
   strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs
-  if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
+  strih_intercom_hub_alsa_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1438: the cutters' card, opened through ALSA
 fi
 strih_vban_leg_grade   # the VBAN-only leg, every role (issue 1439, scripts/lib/strih-vban-leg.sh)
 # 9b) MiniFuse period + quantum drop-ins (issue 1345, FAIL) + the LIVE quantum 1024 (a NOTE until the next PipeWire

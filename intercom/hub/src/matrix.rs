@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 
+use crate::alsa_card::AlsaCardSpec;
+use crate::alsa_spec::check_alsa;
 use crate::janus_rtp::JanusCodec;
 
 /// Adapters a participant is reached through. `Vban` is live since M1; `Janus` (M3a) carries the
@@ -30,6 +32,12 @@ pub const ADAPTER_PIPEWIRE: &str = "pipewire";
 /// the ALSA hw PCM of a NAMED connector (`hdmi_connector`) by a supervised `aplay`, no PipeWire node
 /// (the strih-pp vestibule TV behind the HDMI-to-SDI converter on HDMI-1). An output only.
 pub const ADAPTER_ALSA_HDMI: &str = "alsa_hdmi";
+/// A USB sound card opened directly through ALSA (issue 1438): the participant's N-1 bus played by a
+/// supervised `aplay` and its input recorded by a supervised `arecord`, both on
+/// `hw:CARD=<alsa_card>,DEV=<alsa_device>`, the card named by its ALSA card ID, never an index. No
+/// PipeWire node, and a missing card is the leg down, never a fallback (the cutters' MiniFuse 4 /
+/// MG-XU).
+pub const ADAPTER_ALSA: &str = "alsa";
 
 /// The largest `hdmi_delay_ms` (issue 1424): a second of program audio is the most a picture path
 /// could ever need; a bigger value is a typo.
@@ -215,6 +223,32 @@ pub struct Participant {
     /// vestibule heard the program ~170-210 ms before the picture). Absent = 0. Only on `alsa_hdmi`.
     #[serde(default)]
     pub hdmi_delay_ms: Option<u32>,
+    /// The ALSA card ID an `alsa` participant opens (`/proc/asound/cards`: `M4` = the MiniFuse 4,
+    /// `MGXU` = the Yamaha MG-XU), never a card index (issue 1438). Only on `alsa`.
+    #[serde(default)]
+    pub alsa_card: Option<String>,
+    /// The PCM device on that card (default 0).
+    #[serde(default)]
+    pub alsa_device: Option<u32>,
+    /// The ALSA period of both sides in frames (default 256 = one hub block; 64..=512). The buffer is
+    /// four periods.
+    #[serde(default)]
+    pub alsa_period_frames: Option<usize>,
+    /// The card's playback channel count (the hw PCM opens with exactly this many; the MiniFuse
+    /// takes 6). Default = `out_channels`.
+    #[serde(default)]
+    pub alsa_out_channels: Option<usize>,
+    /// The card's capture channel count (MiniFuse: 6). Default = `in_channels`.
+    #[serde(default)]
+    pub alsa_in_channels: Option<usize>,
+    /// Which hw playback channel carries each output channel: comma-separated 1-based hw channel
+    /// numbers, one per `out_channels` (MiniFuse: `1,2,3,4`). Default = the first `out_channels`.
+    #[serde(default)]
+    pub alsa_channel_map: Option<String>,
+    /// Which hw capture channel feeds each input channel, 1-based, one per `in_channels`
+    /// (MiniFuse: `1,2`). Default = the first `in_channels`.
+    #[serde(default)]
+    pub alsa_in_channel_map: Option<String>,
     /// Number of input channels the matrix routes FROM this participant.
     pub in_channels: usize,
     /// Number of output channels the matrix routes TO this participant.
@@ -276,6 +310,8 @@ pub struct Matrix {
     pub participants: Vec<Participant>,
     index: HashMap<String, usize>,
     pub points: Vec<Point>,
+    /// The card legs' resolved specs (issue 1438), resolved once at load.
+    alsa_specs: Vec<AlsaCardSpec>,
 }
 
 /// Convert a dB gain to a linear amplitude factor (`10^(dB/20)`). `0 dB` → `1.0`, `-6 dB` ≈ `0.501`,
@@ -319,6 +355,7 @@ impl Matrix {
         let mut index: HashMap<String, usize> = HashMap::new();
         let mut janus_count = 0usize;
         let mut hdmi_connectors: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let (mut alsa_pcms, mut alsa_specs) = (std::collections::HashSet::new(), Vec::new());
         for (id, p) in raw.participants.iter().enumerate() {
             if !KNOWN_ROLES.contains(&p.role.as_str()) {
                 bail!("participant '{}': unknown role '{}'", p.name, p.role);
@@ -328,9 +365,12 @@ impl Matrix {
                 && p.adapter != ADAPTER_JANUS
                 && p.adapter != ADAPTER_PIPEWIRE
                 && p.adapter != ADAPTER_ALSA_HDMI
+                && p.adapter != ADAPTER_ALSA
             {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
             }
+            // The card leg (issue 1438): the alsa_* keys resolve and are checked in `alsa_spec`.
+            alsa_specs.extend(check_alsa(id, p, &mut alsa_pcms)?);
             // The HDMI leg (issue 1424 part 3): a named connector, an output only, one participant
             // per connector (one aplay per hw PCM).
             if p.adapter == ADAPTER_ALSA_HDMI {
@@ -581,6 +621,7 @@ impl Matrix {
             participants: raw.participants,
             index,
             points,
+            alsa_specs,
         })
     }
 
@@ -685,6 +726,17 @@ impl Matrix {
                     .map(|connector| (id, connector, p.out_channels))
             })
             .collect()
+    }
+
+    /// The card legs (issue 1438): every `alsa` participant's resolved card spec, fed from its OWN
+    /// N-1 output bus (playback) and feeding its own input buffer (capture).
+    pub fn alsa_cards(&self) -> Vec<AlsaCardSpec> {
+        self.alsa_specs.clone()
+    }
+
+    /// The card leg spec of participant `id`, if it is on the `alsa` adapter.
+    pub fn alsa_spec(&self, id: usize) -> Option<&AlsaCardSpec> {
+        self.alsa_specs.iter().find(|c| c.participant == id)
     }
 
     /// The lip-sync delay of the `alsa_hdmi` participant `id` in ms (0 when absent).
