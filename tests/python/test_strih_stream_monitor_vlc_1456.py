@@ -12,6 +12,10 @@ nastavovat hlasitost vystuput sluchatkoveho a je to potichu". Design comment 632
 
 The fake `vlc` below serves VLC's http status interface (Basic auth, empty user) on the --http-port it is
 given, logs every command and its argv, and plays when a "published" flag file exists.
+
+Issue 1465: the supervisor sends pl_play only while OBS really publishes to the URL (an `obs` process
+holding an ESTABLISHED TCP connection to its host:port, read from /proc). `Rig.publish()` therefore sets
+the fake VLC's flag AND puts that connection into the fake /proc (net/tcp + an obs pid's socket fd).
 """
 import json
 import os
@@ -98,6 +102,42 @@ if len(sys.argv) > 5 and sys.argv[5] in missing:  # amixer -q -c CARD sset NAME 
 '''
 
 
+# /proc/net/tcp as the kernel prints it (read on dev1 23.10.2026): addresses are the 32-bit words in host
+# order (x86: little-endian), the port big-endian hex. 127.0.0.1 = 0100007F, 1234 = 04D2.
+TCP_HEADER = ("  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout "
+              "inode\n")
+TCP6_HEADER = ("  sl  local_address                         remote_address                        st tx_queue "
+               "rx_queue tr tm->when retrnsmt   uid  timeout inode\n")
+RESTREAMER_LISTEN = "0: 00000000:04D2 00000000:0000 0A"  # restreamer's own :1234 listener: never a publisher
+OBS_TO_RESTREAMER = "1: 0100007F:B5A2 0100007F:04D2 01"  # 127.0.0.1:46498 -> 127.0.0.1:1234 ESTABLISHED
+OBS_PID = 7777
+OBS_INODE = 424242
+
+
+def tcp_line(head, inode):
+    """HEAD = `sl: local rem st` -> one full /proc/net/tcp row carrying INODE."""
+    return ("   %s 00000000:00000000 00:00000000 00000000  1000        0 %d 1 0000000000000000 20 4 30 10 -1\n"
+            % (head, inode))
+
+
+def fake_proc_net(proc, tcp_rows=(), tcp6_rows=()):
+    net = proc / "net"
+    net.mkdir(parents=True, exist_ok=True)
+    (net / "tcp").write_text(TCP_HEADER + tcp_line(RESTREAMER_LISTEN, 31337) + "".join(tcp_rows))
+    (net / "tcp6").write_text(TCP6_HEADER + "".join(tcp6_rows))
+
+
+def fake_process(proc, pid, comm, *inodes):
+    """A /proc/<pid> with COMM whose fd dir holds a socket link per INODE (plus a non-socket fd)."""
+    d = proc / str(pid)
+    (d / "fd").mkdir(parents=True, exist_ok=True)
+    (d / "comm").write_text(comm + "\n")
+    if not (d / "fd" / "0").is_symlink():
+        os.symlink("/dev/null", d / "fd" / "0")
+    for n, inode in enumerate(inodes, start=20):
+        os.symlink("socket:[%d]" % inode, d / "fd" / str(n))
+
+
 def _free_port():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -120,6 +160,13 @@ class Rig:
         self.state = tmp_path / "run" / "strih-stream-monitor.json"
         self.port = _free_port()
         self.pcm_status = self.root / "card1" / "pcm0p" / "sub0" / "status"
+        fake_proc_net(self.proc)
+
+    def publish(self):
+        """OBS publishes: the fake VLC plays, and /proc shows obs holding the ESTABLISHED connection."""
+        fake_proc_net(self.proc, tcp_rows=[tcp_line(OBS_TO_RESTREAMER, OBS_INODE)])
+        fake_process(self.proc, OBS_PID, "obs", OBS_INODE)
+        (self.dir / "published").write_text("")
 
     def env(self, **extra):
         e = {k: v for k, v in os.environ.items() if k not in LEAKY}
@@ -183,7 +230,7 @@ def test_the_mixer_goes_to_unity_and_the_speaker_is_muted():
 
 def test_a_published_stream_plays_in_vlc_and_reads_playing(tmp_path):
     rig = Rig(tmp_path)
-    (rig.dir / "published").write_text("")
+    rig.publish()
     r = rig.run(2.0)
     assert r.returncode == 0, r.stdout + r.stderr
     argv = rig.vlc_argv()
@@ -193,27 +240,32 @@ def test_a_published_stream_plays_in_vlc_and_reads_playing(tmp_path):
     assert ["-q", "-c", "Generic_1", "sset", "Master", "0dB", "unmute"] in [a.split() for a in rig.amixer()]
 
 
-def test_nothing_published_waits_and_retries_with_pl_play(tmp_path):
+def test_nothing_published_waits_without_a_single_pl_play(tmp_path):
+    # issue 1465: every pl_play on an unpublished URL is a failed RTMP open that flickers the VLC window
     rig = Rig(tmp_path)
     r = rig.run(2.0)
     assert r.returncode == 0, r.stderr
-    assert rig.cmds().count("pl_play") >= 3, rig.log()
-    assert len([ln for ln in r.stdout.splitlines() if ln.startswith("waiting:")]) == 1, r.stdout
+    assert rig.cmds().count("pl_play") == 0, rig.log()
+    waiting = [ln for ln in r.stdout.splitlines() if ln.startswith("waiting:")]
+    assert len(waiting) == 1 and "OBS is not publishing to rtmp://127.0.0.1:1234/live/stream-pp" in waiting[0], \
+        r.stdout
+    assert len(rig.vlc_argv()) == 1, "VLC stays open (idle), never restarted"
 
 
 def test_a_stream_that_starts_later_is_picked_up(tmp_path):
     rig = Rig(tmp_path)
     p = subprocess.Popen(rig.argv(4.0), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=rig.env())
     time.sleep(1.2)
-    (rig.dir / "published").write_text("")
+    rig.publish()
     out, err = p.communicate(timeout=30)
     assert p.returncode == 0, err
     assert any(ln.startswith("playing ") for ln in out.splitlines()), out
+    assert rig.cmds().count("pl_play") >= 1, rig.log()  # sent only once OBS published
 
 
 def test_a_paused_player_is_stopped_so_it_never_holds_a_subscriber(tmp_path):
     rig = Rig(tmp_path)
-    (rig.dir / "published").write_text("")
+    rig.publish()
     (rig.dir / "force-state").write_text("paused\n")
     r = rig.run(2.5)
     assert r.returncode == 0, r.stderr
@@ -224,7 +276,7 @@ def test_a_paused_player_is_stopped_so_it_never_holds_a_subscriber(tmp_path):
 def test_a_vlc_that_exits_is_started_again(tmp_path):
     rig = Rig(tmp_path)
     (rig.dir / "exit-at-start").write_text("")
-    (rig.dir / "published").write_text("")
+    rig.publish()
     r = rig.run(3.0)
     assert r.returncode == 0, r.stderr
     assert len(rig.vlc_argv()) == 2, rig.log()
@@ -250,7 +302,7 @@ def test_no_headphone_pcm_never_starts_vlc(tmp_path):
 def test_a_missing_mixer_control_is_named_once_and_vlc_still_plays(tmp_path):
     rig = Rig(tmp_path)
     (rig.dir / "exit-at-start").write_text("")
-    (rig.dir / "published").write_text("")
+    rig.publish()
     r = rig.run(3.0, FAKE_AMIXER_MISSING="Headphone")
     assert r.returncode == 0, r.stderr
     named = [ln for ln in r.stdout.splitlines() if "Headphone" in ln]
@@ -260,7 +312,7 @@ def test_a_missing_mixer_control_is_named_once_and_vlc_still_plays(tmp_path):
 
 def test_sigterm_stops_vlc(tmp_path):
     rig = Rig(tmp_path)
-    (rig.dir / "published").write_text("")
+    rig.publish()
     p = subprocess.Popen(rig.argv(60.0), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=rig.env())
     try:
         deadline = time.monotonic() + 15
@@ -279,7 +331,7 @@ def test_sigterm_stops_vlc(tmp_path):
 
 def test_the_state_file_names_the_card_while_playing(tmp_path):
     rig = Rig(tmp_path)
-    (rig.dir / "published").write_text("")
+    rig.publish()
     rig.run(1.5)
     st = rig.st()
     assert st["device"] == "plughw:CARD=Generic_1,DEV=0" and st["card"] == 1 and st["pcm_device"] == 0, st
