@@ -50,6 +50,9 @@ static long long g_buffer = 40;
 /* added to every 24-bit sample after the 16-bit value is scaled up (`low24=N`): the decoder must keep
  * the low byte */
 static int g_low24 = 0;
+/* the header's VBAN sample-rate index (`sr=N`, vban.h VBanSRList): 3 = 48 kHz by default, 4 = 96 kHz
+ * (issue 1439 phase 2: the FOH console's `strih-obs` stream) */
+static int g_sr = 3;
 /* the plugin's log lines so far (each `out` line carries the count: the tests order a log line against an
  * output, review of ROZHODNUTE 6352253147); both the receive side and the worker log, so it is atomic */
 static unsigned long g_blogs;
@@ -421,8 +424,8 @@ static void flush_worker(void *src)
 }
 
 /* One stereo 16-bit 48 kHz packet of FRAMES frames, every sample = VALUE. */
-/* One stereo 48 kHz packet of FRAMES frames in BITFMT (a VBAN_BITFMT_*), every sample = VALUE on the
- * 16-bit scale. */
+/* One stereo packet of FRAMES frames in BITFMT (a VBAN_BITFMT_*) at the rate index g_sr (48 kHz unless
+ * `sr=`), every sample = VALUE on the 16-bit scale. */
 static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int bitfmt, int16_t value, uint64_t now)
 {
 	/* room for 256 stereo 32-bit frames: the test keeps one packet size for every format (a real
@@ -431,7 +434,7 @@ static void send_packet(void *src, uint32_t nu_frame, uint32_t frames, int bitfm
 	memset(buf, 0, sizeof(buf));
 	struct VBanHeader *h = (struct VBanHeader *)buf;
 	memcpy(&h->vban, "VBAN", 4);
-	h->format_SR = 3;
+	h->format_SR = (uint8_t)g_sr;
 	h->format_nbs = (uint8_t)(frames - 1);
 	h->format_nbc = 1;
 	h->format_bit = (uint8_t)bitfmt;
@@ -515,6 +518,10 @@ int main(int argc, char **argv)
 	for (int i = first; i < argc; i++) {
 		if (strncmp(argv[i], "low24=", 6) == 0) {
 			g_low24 = atoi(argv[i] + 6);
+			continue;
+		}
+		if (strncmp(argv[i], "sr=", 3) == 0) {
+			g_sr = atoi(argv[i] + 3);
 			continue;
 		}
 		if (strncmp(argv[i], "port=", 5) == 0 || strncmp(argv[i], "name=", 5) == 0 ||
