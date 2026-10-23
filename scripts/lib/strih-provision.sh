@@ -77,6 +77,11 @@ if ! declare -F strih_ci_artifact_fetch >/dev/null; then
   # shellcheck source=scripts/lib/strih-ci-artifact.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-ci-artifact.sh"
 fi
+# issue 1470: the A/V-sync dock on the stream role (setup-strih step 16g's layout seed, verify-strih item 47).
+if ! declare -F obs_box_avsync_dock_seed >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-avsync-dock.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-avsync-dock.sh"
+fi
 # issue 1412: the per-box step gate (setup-strih / verify-strih skip a step by a box fact).
 if ! declare -F obs_box_step_applies >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-role.sh
