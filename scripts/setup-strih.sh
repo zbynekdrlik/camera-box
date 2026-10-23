@@ -639,24 +639,23 @@ fi
 
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
-step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344)"
-# Root cause (design 20.9., follow-up 20.9. live diagnosis issuecomment-5751113173): the OBS
-# program (${AUDIO_NAME}) is a NETWORK stream (fohabl-strih VBAN), NOT the MiniFuse. The hub writes
-# the program mix to a strih-program null sink; OBS captures it via a LOOPBACK republish node
-# strih-program-source (strih-program.monitor itself is NOT pulse-visible to OBS on this box --
-# proven live). The MiniFuse carries only the operator TALKBACK mic (the hub reads it).
+step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344); stream role: the locked operator PipeWire (issue 1465)"
+# Root cause (design 20.9., live diagnosis issuecomment-5751113173): the OBS program (${AUDIO_NAME}) is a NETWORK
+# stream (fohabl-strih VBAN), NOT the MiniFuse (the operator TALKBACK mic, the hub reads it). The hub writes the
+# program to a strih-program null sink; OBS captures its LOOPBACK republish strih-program-source (proven live).
 DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || echo 1000)"
+if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then   # issue 1465 item 3: scripts/lib/stream-operator-audio.sh
+  echo "  ${WHY}"; stream_operator_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1465: the locked operator PipeWire (above)"
+else
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
   echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"
 else
   warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"
 fi
-# (c) the operator-session PipeWire null sink OBS captures as strih-program.monitor.
 strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d" || fail "cannot create ~/.config/pipewire/pipewire.conf.d (above)"
 strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
-# (c2, issue 1344 follow-up) the loopback that republishes strih-program's monitor as a real
-# pulse-visible Audio/Source (strih-program.monitor itself is NOT pulse-visible to OBS on this box).
+# (c2, issue 1344) the loopback republishing strih-program's monitor as a pulse-visible Audio/Source.
 strih_pipewire_program_loopback_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
 # the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
@@ -668,11 +667,12 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplum
 # on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
 strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
 strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
+echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session)"
+fi
 # Linger the operator so its user@.service + PipeWire come up at boot before any login: a headless start
 # finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session)"
 echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source; on the stream role the obs-vban source, issue 1439) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
 echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 

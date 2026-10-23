@@ -22,7 +22,10 @@ StartLimitIntervalSec=0
 Type=simple
 # %l = the short hostname (setup step 1 sets it to the box name = the stream key); %t = the user runtime
 # dir: the state file verify-strih reads for "last pass recent" + the headphone PCM owner.
-ExecStart=/usr/bin/python3 /usr/local/bin/strih_stream_monitor.py --url rtmp://127.0.0.1:1234/live/%l --state-file %t/strih-stream-monitor.json
+# issue 1465 item 3: --output pulse = VLC through pulse to the locked operator PipeWire's one sink
+# (stream-operator-headphones, setup-strih step 12 on the stream role), the headphone PCM held by PipeWire.
+# Rollback of the trial: a drop-in with an ExecStart= reset and this line without --output pulse.
+ExecStart=/usr/bin/python3 /usr/local/bin/strih_stream_monitor.py --url rtmp://127.0.0.1:1234/live/%l --state-file %t/strih-stream-monitor.json --output pulse
 Restart=always
 RestartSec=5
 TimeoutStopSec=10

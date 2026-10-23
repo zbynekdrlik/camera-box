@@ -20,6 +20,9 @@
 #                            stream-snv `mbc`, issue 1462) = the obs-vban source on the console's VBAN
 #                            stream (program_audio_vban, issue 1439); no HDMI output (backend none)
 #   7       2ME PGM + PVW    one NDI output `<prefix> (stream)`, no preview output
+#   12      strih-program    the operator's headphones through a LOCKED PipeWire (issue 1465 item 3,
+#           graph, MiniFuse  scripts/lib/stream-operator-audio.sh: the strih-role drop-ins are removed);
+#                            the seed manifest forbids pulse capture inputs (`"pulse_capture": "forbid"`)
 #   13      intercom hub     skipped, and a hub left on the box is moved aside (issue 1439: the console's
 #                            VBAN goes straight into OBS; 4b / 12 write no hub drop-in, verify 16 = no hub)
 #   14      Janus            skipped (no phones leg on a stream box)
@@ -71,9 +74,11 @@ obs_box_stream_key() { strih_lx_hostname; }
 #          would fail the unit at every boot (gap G7).
 #   16e -- the YouTube-guard stream program-audio sampler (issue 1404) reads the SNV stream output, so
 #          only a box with STRIH_PROGRAM_AUDIO_SAMPLER=on runs it (gap G11).
-#   3-nvenc / 13 / 14 / 16 / 16c / 16f / 16i / 13-hub-live -- the strih role only (the table above; 13 = the
+#   3-nvenc / 12-strih-audio / 13 / 14 / 16 / 16c / 16f / 16i / 13-hub-live -- the strih role only (the table above; 13 = the
 #          intercom hub itself, issue 1439; 16f = the camera tally, issue 1417; 16i = the box's own HTTPS
-#          front, issue 1399; 13-hub-live = verify item 16 FAILs an inactive or disabled hub, issue 1418).
+#          front, issue 1399; 13-hub-live = verify item 16 FAILs an inactive or disabled hub, issue 1418;
+#          12-strih-audio = setup step 12's strih-program graph + MiniFuse drop-ins and verify item 9b's
+#          grade of them, issue 1465 item 3: the stream role gets the locked operator PipeWire instead).
 #   6-hdmi -- only a box with a fixed HDMI output (STRIH_HDMI_OUTPUT_BACKEND != none).
 obs_box_step_applies() {
   local step="${1:?step required}" v
@@ -90,11 +95,12 @@ obs_box_step_applies() {
         printf 'STRIH_PROGRAM_AUDIO_SAMPLER=%s -- this box runs no stream program-audio sampler' "$v"
         return 1
       fi ;;
-    3-nvenc | 13 | 14 | 16 | 16c | 16f | 16i | 16k | 13-hub-live)
+    3-nvenc | 12-strih-audio | 13 | 14 | 16 | 16c | 16f | 16i | 16k | 13-hub-live)
       v="$(strih_box_role)" || return 0
       if [ "$v" = stream ]; then
         case "$step" in
           3-nvenc) printf 'the stream role encodes with the GPU it has (VAAPI without an NVIDIA dGPU), not the strih NVENC' ;;
+          12-strih-audio) printf 'the stream role plays the operator headphones through a locked PipeWire (issue 1465 item 3), never the strih-program graph' ;;
           13) printf 'the stream role runs no intercom hub: the console VBAN goes straight into the OBS obs-vban source (issue 1439)' ;;
           14) printf 'the stream role runs no Janus phones leg' ;;
           16) printf 'the stream role runs no Companion Satellite (no Stream Deck)' ;;
@@ -196,6 +202,8 @@ obs_box_stream_seed_manifest_json() {
   # integers).
   printf '  "program_audio_vban": {"port": %s, "stream_name": "%s", "receive_buffer_ms": %s},\n' \
     "$vp" "$vs" "$vr"
+  # issue 1465 item 3: no pulse capture input may capture the operator's headphone mix into the program
+  printf '  "pulse_capture": "forbid",\n'
   printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
     "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP"
 }

@@ -234,3 +234,77 @@ def input_recreate(obs, name, kind, settings, state, fallback_scene, sleep=None)
             obs.req("SetSourceFilterEnabled", {"sourceName": name, "filterName": f["filterName"],
                                                "filterEnabled": False}, ignore_err=True)
     return True, len(scenes)
+
+
+# --- issue 1465 item 3: no pulse capture input on the stream role ----------------------------------------
+# The stream operator's headphones are the locked PipeWire's one sink (scripts/stream_operator_audio.py):
+# VLC, Chrome and YouTube play there. A pulse capture input in the stream OBS could capture that operator
+# mix (or the leftover strih-program-source, `Zvuk z mixu` on stream-snv) into the program, so on the
+# stream role (the seed manifest's `"pulse_capture": "forbid"`) the launch seed removes every SCENE pulse
+# capture input and names each one with the device it captured (the operator can rebuild it from the log).
+# The program-audio input is never touched here (its kind is the obs-vban seed's job, graded by verify item
+# 9), and a global audio channel (Settings > Audio: Desktop / Mic) is the frontend's: obs-websocket's
+# RemoveInput would not release the channel, so it is only NAMED, and verify FAILs it.
+PULSE_CAPTURE_KINDS = ("pulse_input_capture", "pulse_output_capture")
+SPECIAL_INPUT_KEYS = ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4")
+
+
+def parse_pulse_capture_rule(text):
+    """The manifest's `pulse_capture` rule: "forbid" (the stream role), else None. Lenient, never raises."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return None
+    v = d.get("pulse_capture") if isinstance(d, dict) else None
+    return "forbid" if v == "forbid" else None
+
+
+def _special_input_names(obs):
+    sp = obs.req("GetSpecialInputs", ignore_err=True) or {}
+    return {sp.get(k) for k in SPECIAL_INPUT_KEYS if isinstance(sp.get(k), str) and sp.get(k)}
+
+
+def pulse_capture_inputs(obs):
+    """[(name, kind, "scene" | "global channel")] of every pulse capture input OBS lists, by name."""
+    inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs") or []
+    special = _special_input_names(obs)
+    out = []
+    for i in inputs:
+        if isinstance(i, dict) and i.get("inputKind") in PULSE_CAPTURE_KINDS and i.get("inputName"):
+            name = i["inputName"]
+            out.append((name, i["inputKind"], "global channel" if name in special else "scene"))
+    return sorted(out)
+
+
+def pulse_capture_report(obs):
+    """verify's read-only line: `pulse capture inputs: none` or each one with its kind and place."""
+    found = pulse_capture_inputs(obs)
+    if not found:
+        return "pulse capture inputs: none"
+    return "pulse capture inputs: " + "; ".join("'%s' (%s, %s)" % f for f in found)
+
+
+def drop_pulse_capture_inputs(obs, keep=None, sleep=None):
+    """Remove every scene pulse capture input except KEEP (the program-audio input), each read back from
+    GetInputList (a bounded wait, the name can stay listed a moment); name every global channel of a pulse
+    kind instead of removing it. Returns the status for the seed line."""
+    sleep = sleep or time.sleep
+    parts = []
+    for name, kind, place in pulse_capture_inputs(obs):
+        if name == keep:
+            continue
+        if place != "scene":
+            parts.append("global channel '%s' (%s) NOT removed -- set it Disabled in OBS Settings > Audio"
+                         % (name, kind))
+            continue
+        settings = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True) or {}).get("inputSettings")
+        dev = settings.get("device_id") if isinstance(settings, dict) else None
+        obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
+        _await_free(obs, name, sleep)
+        listed = input_kind_listed(obs, name)
+        if listed == "":
+            parts.append("removed '%s' (%s on %s)" % (name, kind, dev or "the default device"))
+        else:
+            parts.append("remove FAILED: '%s' (%s) -- restart OBS, the launch seed runs again"
+                         % (name, listed_text(name, listed)))
+    return "; ".join(parts) or "no pulse capture input"
