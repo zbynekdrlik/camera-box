@@ -32,7 +32,8 @@
 #                            (issue 1436) and the dantesync tray
 #   16f     tally            skipped
 #   avsync-dock  nothing     step 16g seeds the A/V-sync dock into the saved OBS layout, verify item 47
-#                            grades it (issue 1470, scripts/lib/obs-box-avsync-dock.sh)
+#                            grades that layout (issue 1470, scripts/lib/obs-box-avsync-dock.sh; the
+#                            plugin rows of item 47 run on every role)
 #   16i     HTTPS front      skipped (no intercom / shading page; the facts declare none, issue 1399)
 #   13-hub-live  verify item 16: an inactive hub FAILs   report-only (issue 1418)
 #
