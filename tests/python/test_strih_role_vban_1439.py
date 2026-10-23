@@ -248,10 +248,10 @@ def test_verify_item_9_follows_the_facts_not_the_role():
     # the strih-program sink / pulse / hub-rx verdict only on a box that declares none
     assert item9.index("strih_program_vban_grade") < item9.index("AUDIO_SINK=0") \
         < item9.index('AUDIO_VERDICT="$(strih_lx_program_audio_verdict')
-    # the hub-only rows (the HDMI leg, the MiniFuse talkback) stay on every hub box
+    # the hub-only rows (the HDMI leg, the cutters' card leg) stay on every hub box
     gate = item9.index('if WHY="$(obs_box_step_applies 13)"; then')
     assert item9.index("AUDIO_VERDICT") < gate < item9.index("strih_intercom_hub_hdmi_leg_grade") \
-        < item9.index("talkback: MiniFuse")
+        < item9.index("strih_intercom_hub_alsa_leg_grade")
     assert item9.rstrip("\n").splitlines()[-1].startswith("strih_vban_leg_grade")
 
 
