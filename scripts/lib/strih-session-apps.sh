@@ -230,18 +230,26 @@ strih_session_apps_import_check() {
   printf '%s' 'import websocket, gi; gi.require_version("Gtk", "3.0"); gi.require_version("WebKit2", "4.1"); from gi.repository import GLib, Gtk, WebKit2'
 }
 
-# strih_session_apps_user_systemctl USER ARGS... -> `systemctl --user ARGS` in USER's session: as root
-# through `sudo -u USER XDG_RUNTIME_DIR=/run/user/<uid>` (setup-strih and the step-17 verify run as root,
-# whose own --user manager is not the operator's), else inline. Returns systemctl's rc.
-strih_session_apps_user_systemctl() {
+# strih_session_apps_user_run USER CMD... -> CMD as USER with USER's runtime dir: as root through
+# `sudo -u USER XDG_RUNTIME_DIR=/run/user/<uid>` (setup-strih and the step-17 verify run as root, whose
+# own --user manager is not the operator's), else inline. Returns CMD's rc (1 when USER has no uid).
+strih_session_apps_user_run() {
   local user="${1:?user required}" uid
   shift
   if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then
     uid="$(id -u "$user" 2>/dev/null)" || return 1
-    sudo -u "$user" XDG_RUNTIME_DIR="/run/user/${uid}" systemctl --user "$@"
+    sudo -u "$user" XDG_RUNTIME_DIR="/run/user/${uid}" "$@"
   else
-    systemctl --user "$@"
+    "$@"
   fi
+}
+
+# strih_session_apps_user_systemctl USER ARGS... -> `systemctl --user ARGS` in USER's session (through
+# strih_session_apps_user_run). Returns systemctl's rc.
+strih_session_apps_user_systemctl() {
+  local user="${1:?user required}"
+  shift
+  strih_session_apps_user_run "$user" systemctl --user "$@"
 }
 
 # strih_session_apps_runtime_dir USER -> the user's runtime dir (/run/user/<uid>); rc 1 when the uid

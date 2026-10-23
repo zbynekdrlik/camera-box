@@ -34,7 +34,8 @@ def _home(tmp_path, discord=True):
         dc.chmod(0o755)
     env = {"OBS_BOX_PANEL_SYS_UNIT_DIR": str(sysd),
            "OBS_BOX_PANEL_RUSTDESK_BIN": str(tmp_path / "no-rustdesk"),
-           "OBS_BOX_PANEL_DISCORD_BIN": str(dc)}
+           "OBS_BOX_PANEL_DISCORD_BIN": str(dc),
+           "OBS_BOX_PANEL_CHROME_BIN": str(tmp_path / "no-chrome")}   # issue 1464: no host Chrome leaks in
     return home, env
 
 
@@ -42,8 +43,8 @@ def test_a_box_with_discord_gets_a_discord_launcher_that_starts_the_binary(tmp_p
     home, env = _home(tmp_path)
     r = _bash('obs_box_panel_launchers "$1"', str(home), env=env)
     rows = [ln.split("|") for ln in r.stdout.splitlines()]
-    assert [x[0] for x in rows] == ["obs", "discord"], r.stdout + r.stderr
-    discord = rows[1]
+    assert [x[0] for x in rows] == ["power", "obs", "discord"], r.stdout + r.stderr   # issue 1464: power first
+    discord = rows[2]
     assert discord[1] == "Discord"
     assert discord[2] == str(tmp_path / "discord")   # single-instance: a click focuses a running one
     assert discord[3] == "discord"                   # the icon the Discord .deb installs
@@ -52,7 +53,7 @@ def test_a_box_with_discord_gets_a_discord_launcher_that_starts_the_binary(tmp_p
 def test_a_box_without_discord_gets_no_discord_launcher(tmp_path):
     home, env = _home(tmp_path, discord=False)
     r = _bash('obs_box_panel_launchers "$1"', str(home), env=env)
-    assert [ln.split("|")[0] for ln in r.stdout.splitlines()] == ["obs"], r.stdout + r.stderr
+    assert [ln.split("|")[0] for ln in r.stdout.splitlines()] == ["power", "obs"], r.stdout + r.stderr
 
 
 def test_the_config_lists_discord_on_the_left_with_the_other_launchers(tmp_path):
@@ -62,4 +63,4 @@ def test_the_config_lists_discord_on_the_left_with_the_other_launchers(tmp_path)
     assert "panel_items = LTSEC" in cfg              # launchers (L) left of the taskbar (T); E = layout, issue 1441
     apps = [ln.split(" = ", 1)[1] for ln in cfg if ln.startswith("launcher_item_app = ")]
     assert apps == [str(home / (".local/share/applications/obs-box-panel-%s.desktop" % i))
-                    for i in ("obs", "discord")]
+                    for i in ("power", "obs", "discord")]

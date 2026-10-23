@@ -1605,7 +1605,8 @@ const GOOD_TOUCHPAD_CONF: &str = r#"Section "InputClass"
     Option "Tapping" "on"
     Option "TappingDrag" "on"
     Option "NaturalScrolling" "on"
-    Option "ScrollPixelDistance" "50"
+    Option "ScrollPixelDistance" "15"
+    Option "AccelSpeed" "0.3"
 EndSection"#;
 
 #[test]
@@ -1642,11 +1643,12 @@ fn imag_touchpad_conf_ok_rejects_a_conf_missing_tap_to_click_779() {
 
 #[test]
 fn imag_touchpad_conf_ok_rejects_the_wrong_scroll_distance_value_779() {
-    // The sensitivity value MATTERS: the user tuned ScrollPixelDistance to 50; a reprovision that
-    // regenerated the libinput default (15) or any other value must FAIL, not pass on presence.
+    // The sensitivity value MATTERS: since 23.10.2026 (issue 1465 item 5) the scroll step is 15; the
+    // July 50 (far too slow on the stream boxes' touchpads) or any other value must FAIL, not pass on
+    // presence.
     let bad = GOOD_TOUCHPAD_CONF.replace(
-        "\"ScrollPixelDistance\" \"50\"",
         "\"ScrollPixelDistance\" \"15\"",
+        "\"ScrollPixelDistance\" \"50\"",
     );
     let harness = format!(
         "CONF={q}{bad}{q}\nimag_touchpad_conf_ok \"$CONF\" && echo ACCEPT || echo REJECT",

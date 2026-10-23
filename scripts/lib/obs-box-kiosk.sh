@@ -630,21 +630,26 @@ obs_box_igpu_sink_modesetting() {
 }
 
 # obs_box_touchpad BOX -- the imag step 25 (#779) touchpad usability: tap-to-click + natural scroll +
-# ScrollPixelDistance 50 as an Xorg libinput InputClass (the heredoc carries no `$`/backtick, so it is
-# expanded only for the BOX name in its comment).
+# ScrollPixelDistance 15 + AccelSpeed 0.3 as an Xorg libinput InputClass (the heredoc carries no
+# `$`/backtick, so it is expanded only for the BOX name in its comment).
 obs_box_touchpad() {
     local BOX="${1:?obs_box_touchpad: BOX required}"
 # imag-nb is a NOTEBOOK; the operator drives its touchpad directly. tap-to-click + natural scrolling
 # + a gentler scroll step were set LIVE (2026-07-15) as /etc/X11/xorg.conf.d/30-touchpad-tap.conf but
 # NEVER provisioned here -- so a reimage silently dropped them (the same "provisioning gap hidden by a
 # hand patch" class issue 840 documented for imag-obs-start.sh). Bake the file in so a reprovision
-# reproduces the live-verified libinput InputClass byte-for-byte. The four Option values match what
-# is live on the box; ScrollPixelDistance 50 is the user's final tuning (the libinput default 15 is
-# far too sensitive). verify-imag.sh check (w) reads this file back and fails loud if it is dropped.
+# reproduces the libinput InputClass byte-for-byte. The scroll step is the operator finding of
+# 23.10.2026 (issue 1465 item 5): the July value ScrollPixelDistance 50, tuned on imag-nb's touchpad,
+# made two-finger scrolling on the stream boxes' touchpads (ASUP1205 stream-snv, SYNA2BA6 stream-pp)
+# need 3.3x libinput's travel ("nefunguje normalne citlivo touchpad", the Restreamer windows scrolled
+# only by clicking the scrollbar), and the pointer ran at Accel Speed 0. ScrollPixelDistance 15
+# (libinput's default) + AccelSpeed 0.3 were applied live on both stream boxes with xinput set-prop
+# and are the shared baseline for every Linux OBS box. verify-imag.sh check (w) and the baseline
+# grader's touchpad row read this file back and fail loud if it is dropped or carries other values.
 mkdir -p /etc/X11/xorg.conf.d
 cat > /etc/X11/xorg.conf.d/30-touchpad-tap.conf <<EOF
-# ${BOX} touchpad usability (#779) -- tap-to-click + natural scroll + gentler scroll,
-# reprovision-durable (matches the live-verified 30-touchpad-tap.conf on the box).
+# ${BOX} touchpad usability (#779) -- tap-to-click + natural scroll + libinput's scroll step +
+# a faster pointer (issue 1465, 23.10.2026), reprovision-durable.
 Section "InputClass"
     Identifier "touchpad tap-to-click"
     MatchIsTouchpad "on"
@@ -652,10 +657,11 @@ Section "InputClass"
     Option "Tapping" "on"
     Option "TappingDrag" "on"
     Option "NaturalScrolling" "on"
-    Option "ScrollPixelDistance" "50"
+    Option "ScrollPixelDistance" "15"
+    Option "AccelSpeed" "0.3"
 EndSection
 EOF
-echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 50)"
+echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 15 + AccelSpeed 0.3)"
 }
 
 # --- issue 1357: panel-brightness keys (the kiosk brightness facet) -------------------------------

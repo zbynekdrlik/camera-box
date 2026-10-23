@@ -3,14 +3,16 @@ paths:
   - "scripts/lib/obs-box-panel.sh"
   - "scripts/obs_box_kbd_layout.py"
   - "scripts/obs_box_recordings.py"
+  - "scripts/obs_box_power.py"
   - "systemd/obs-box-panel.service"
   - "tests/python/test_obs_box_panel_1420.py"
   - "tests/python/test_obs_box_kbd_layout_1441.py"
   - "tests/python/test_obs_box_panel_discord_install_1448.py"
   - "tests/python/test_obs_box_recordings_1458.py"
+  - "tests/python/test_obs_box_power_1464.py"
 ---
 
-# The kiosk panel of the Linux OBS boxes (tint2, issues 1420 / 1441 / 1448 / 1458)
+# The kiosk panel of the Linux OBS boxes (tint2, issues 1420 / 1441 / 1448 / 1458 / 1464)
 
 One bottom tint2 panel on every Linux workstation box (strih-snv, strih-pp, stream-pp; gate `16h-panel`).
 Everything lives in `scripts/lib/obs-box-panel.sh`:
@@ -39,6 +41,48 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
 - The launcher list is computed at install AND at grade time; a launcher's presence seam is its binary
   path (`OBS_BOX_PANEL_FILES_BIN`, `_RUSTDESK_BIN`, `_DISCORD_BIN`).
 
+## The power button + Chrome (issue 1464, owner 23.10.2026)
+
+- **`power` = `Vypnúť`, ALWAYS the first launcher (the left end), on every box.** It runs
+  `/usr/bin/python3 /usr/local/bin/obs-box-power` = `scripts/obs_box_power.py`, installed by step 16h
+  with the other helpers (`OBS_BOX_PANEL_POWER_HELPER`). Its icon is `scripts/lib/obs-box-panel-power.svg`,
+  installed to `~/.local/share/icons/obs-box-panel/power.svg` and named by absolute path (tint2 renders
+  SVG through librsvg): the theme name `system-shutdown` exists only in some icon themes (on Ubuntu
+  Humanity / LoginIcons, not hicolor), so a minimal kiosk could show a blank button.
+  - One Gtk 3 dialog: `Zrušiť` / `Reštartovať` / `Vypnúť`. `Zrušiť` is the default response and gets
+    the focus AFTER `show_all` (show_all moves the focus otherwise), so Enter / Space / Escape / closing
+    the window all cancel. Only the two positive response ids run a command, exactly one of
+    `systemctl poweroff` / `systemctl reboot` (bounded 30 s). Keep-above, so a fullscreen projector
+    never hides it.
+  - A refused command (polkit, an inhibitor) opens a message dialog with systemctl's own error, exit 1.
+  - The toolkit is an argument of `PowerDialog`; a real-Gtk smoke under `xvfb-run` on dev1 is the way to
+    check the real wiring (respond through `GLib.timeout_add` + `dialog.response(...)`, a stub
+    `run_cmd`, NEVER the real systemctl).
+- **Row `(panel-power)`:** the program = the checkout, AND logind's `CanPowerOff` + `CanReboot` = `yes`
+  read as the desktop user through `systemd-run --user --wait --pipe ... busctl --timeout=10 call
+  org.freedesktop.login1 ... Can<Verb>` (as root via `sudo -u <user> XDG_RUNTIME_DIR=/run/user/<uid>`),
+  bounded by `OBS_BOX_PANEL_LOGIND_TIMEOUT` (15 s).
+  - WHY `systemd-run --user`: tint2 is the --user unit obs-box-panel.service, so the button's systemctl
+    runs in the user manager, outside any logind session; polkit attributes such a process to the user's
+    display session (the active local seat0 autologin). A busctl from verify's ssh session would be judged
+    as that ssh session (`challenge`), a false FAIL.
+  - busctl bounds its own call too: with `--pipe` the transient unit holds the read's stdout, so a busctl
+    still waiting after `timeout` killed systemd-run would keep the command substitution open. The read's
+    stdin is `/dev/null` (`--pipe` hands stdin on as well). It runs through `strih_session_apps_user_run`,
+    the one root-or-inline helper `strih_session_apps_user_systemctl` uses too.
+  - A FAIL names `challenge` / `no` / `na` / `no answer`. If a box reads `challenge` while its seat0
+    session is active + local, the fix is a polkit rule for `org.freedesktop.login1.power-off` /
+    `reboot` (not shipped: graded first, never assumed).
+- **`chrome` = `Chrome`** (`google-chrome-stable`, icon `google-chrome`) only where the binary exists
+  (`OBS_BOX_PANEL_CHROME_BIN`) AND `strih_box_role` = stream. The strih role never gets it (owner
+  24.9.2026: production-only). It sits after Restreamer. It never "disappeared" on stream-snv: the
+  panel never had one.
+- **Known limit (not fixed, issue 1464 review):** a launcher tint2 starts lives in the panel unit's cgroup,
+  so a panel restart (a tint2 crash, step 16h's try-restart after a panel file changed) ends the apps it
+  started (RustDesk, Discord, pcmanfm, now Chrome). The fix is a launch through `systemd-run --user
+  --scope` for the binary launchers, which needs a live check on a box first (follow-up proposed to the supervisor by the issue-1464 lane;
+  cite its ticket here once filed).
+
 ## The keyboard item (issue 1441)
 
 `obs_box_kbd_layout.py watch|next|print` (tint2 executor) shows and switches the XKB group. It only works
@@ -49,6 +93,11 @@ layout to `us` (`scripts/lib/strih-keyboard.sh`, `.claude/rules/strih-operator.m
 
 `OBS_BOX_PANEL_KBD_HELPER`, `OBS_BOX_PANEL_FILES_HELPER` (else the install writes the real
 `/usr/local/lib/camera-box`), `OBS_BOX_PANEL_FILES_BIN`, `OBS_BOX_PANEL_SYS_UNIT_DIR`,
-`OBS_BOX_PANEL_RUSTDESK_BIN`, `OBS_BOX_PANEL_DISCORD_BIN`, `OBS_BOX_PANEL_PROC`. The shared `Box` stub in
+`OBS_BOX_PANEL_RUSTDESK_BIN`, `OBS_BOX_PANEL_DISCORD_BIN`, `OBS_BOX_PANEL_PROC`, `OBS_BOX_PANEL_POWER_HELPER`
+(else the install writes the real `/usr/local/bin`), `OBS_BOX_PANEL_CHROME_BIN` (dev1 HAS
+`/usr/bin/google-chrome-stable`, so a test that leaves it unset gets a Chrome launcher on the stream role
+and a launcher-list assert fails on dev1 only), `OBS_BOX_PANEL_LOGIND_TIMEOUT`. The `Box` stub's
+`systemd-run` drops its options and runs the command; its `busctl` answers `s "yes"` unless
+`state/off` / `state/reb` holds another answer. The shared `Box` stub in
 `test_obs_box_panel_1420.py` answers "installed" for EVERY package once one install ran; a test about
 WHICH package apt installs needs per-package stubs (`test_install_asks_apt_for_pcmanfm_when_it_is_missing`).
