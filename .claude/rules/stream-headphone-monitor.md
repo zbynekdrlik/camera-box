@@ -200,7 +200,8 @@ lipsync + audio dropouts by ear); the headphones carry VLC's audio. Owner decisi
   - The `watching ...` line names the rule (`the ONE USB audio interface's playback PCM, else the
     headphone jack matching ...` or `the playback PCM matching ... (--pcm-match)`).
   - Plugging a headphone box in switches at the next VLC start (the operator closing VLC, or a unit
-    restart); no re-provision.
+    restart); no re-provision -- for the `--output alsa` player only. On the stream role's locked PipeWire
+    (issue 1465 item 3) plugging one in or out needs setup step 12 again (`stream-operator-audio.md`).
   - **A USB headphone box keeps its own mixer** (review round 1): no unity writes and no `Speaker` mute
     on a USB card, one `mixer: <card> is a USB audio interface -- its own mixer is left as it is` line.
     snd-usb-audio names many headsets' and dongles' main output `Speaker`, so the jack's mute would
