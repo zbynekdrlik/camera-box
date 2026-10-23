@@ -63,12 +63,14 @@ leg, the literal `harness_obs_session_visibility_977.rs` finds the Windows call'
   `stream_box_exec`. recording-e2e `[4b3/8]`: the WAV extract + scp pull-back + delete; the box-side WAV
   is `AUDIO_DECODABILITY_WAV_LX` (default `camera-box-mbc-decodability.wav`, a RELATIVE path = the ssh
   user's home for both ssh and scp, never a fixed name in the world-writable `/tmp`). The bash extract
-  removes that WAV before ffmpeg runs, so a failed extract leaves nothing for the scp to pull back:
-  an aborted earlier run's WAV can never read as DECODABLE.
+  removes that WAV before ffmpeg runs, and on a Linux box the WAV is pulled back only when the extract
+  returned 0 (its rc is ffmpeg's; an ssh that never ran it returns non-zero), so neither a failed
+  ffmpeg nor a failed ssh lets an aborted earlier run's WAV be probed as this run's audio. A Windows
+  box keeps the old unconditional pull-back (its PowerShell rc carries no such signal).
 - recording-e2e `[0/8]` session-visibility: a Linux stream box gets `stream_box_visibility_gate_linux`;
   the Windows leg stays byte-identical inside the `else` (pinned by `harness_strih_platform_1351.rs`).
   Mind the windows of `harness_obs_session_visibility_977.rs` from the gate banner (`GATE_WINDOW`,
-  3600 bytes since issue 1462; the last anchor ends at byte 3088): the Linux branch is two lines.
+  3600 bytes since issue 1462; the last anchor ends at byte 3092): the Linux branch is two lines.
 - recording-e2e `[0/8]` dantesync version gate: a Linux stream box moves from `--win` to `--linux`
   (`DV_WIN_NODES` loses its `stream=` word), never in both arms.
 - The bundle-state self-heal (`bundle_state_selfheal_class`): a non-strih host takes its OWN fleet
@@ -96,6 +98,9 @@ dantesync, `[4b2/8]` and `[4b3/8]` steps. Those steps are ported and tested, and
   a linux-genlock box by class, `obs_fleet_refuse_linux_target`), and `avsync-watchdog-install.sh`
   (a Windows scheduled task on the stream box). `scripts/lib/genlock-fleet-boxes.sh` still maps
   stream-snv to the `win-stream-snv` MCP; the deploy planner already sends it the setup-strih arm.
+- `scripts/lipsync-test-mode.sh`'s arrival verify (lines ~402-411: `win_ssh_download` of the probe
+  recording and a `win_ssh_run` PowerShell delete against `$STREAM`); its two Rust harnesses copy only
+  three libs into a temp dir, so a port must add `stream-box.sh` + `shell-quote.sh` to those copies.
 - The opt-in restart / zero-loss modes' stream decode plans; the legacy `VERDICT_ON_STREAM=0`
   `recording-fetch-windows.sh` path; the obs-fleet `win-baseline` facet still lists stream-snv
   (report-only rows that read unread); the obs-session watchdog's class gate now skips stream-snv

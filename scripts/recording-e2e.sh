@@ -3455,11 +3455,16 @@ else
     # re-sourcing the libs, the SAME fix every other timeout-bounded win_ssh_run uses. issue 1462:
     # stream_box_exec / stream_box_download pick the platform (bash + scp on the Linux stream-snv, the
     # unchanged PowerShell + win_ssh_download on a Windows box).
+    _md_x_rc=0
     timeout "$AUDIO_DECODABILITY_SSH_TIMEOUT" bash -c '. "$1"; . "$2"; stream_box_exec "$3" "$4" "$5" "$6" "$7"' _ \
       "$HERE/lib/win-ssh-exec.sh" "$HERE/lib/stream-box.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
       "$(marker_decodability_extract_wav_ps "$_md_rec" "$_md_wav_win" 0)" \
-      "$(marker_decodability_extract_wav_sh "$_md_rec" "$_md_wav_lx" 0)" >/dev/null 2>&1 || true
-    stream_box_download "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_md_wav_win" "$_md_wav_lx" "$_md_wav_local" >/dev/null 2>&1 || true
+      "$(marker_decodability_extract_wav_sh "$_md_rec" "$_md_wav_lx" 0)" >/dev/null 2>&1 || _md_x_rc=$?
+    # issue 1462: on a Linux box only a WAV this attempt wrote is pulled back (the rc is ffmpeg's; an ssh
+    # that never ran the extract leaves an older WAV in place); a Windows PowerShell rc carries no such signal.
+    if [ "$_md_x_rc" = 0 ] || [ "$(stream_box_platform "$STREAM")" != linux ]; then
+      stream_box_download "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_md_wav_win" "$_md_wav_lx" "$_md_wav_local" >/dev/null 2>&1 || true
+    fi
     if [ -s "$_md_wav_local" ]; then
       break
     fi
