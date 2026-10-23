@@ -5,8 +5,8 @@ linux-genlock). The ONE place that knows how to reach it is scripts/lib/stream-b
   * stream_box_exec ...          -> the bash text over plain ssh on Linux, the UNCHANGED PowerShell
                                     text through win_ssh_run on Windows;
   * stream_box_download ...      -> scp from the box (Linux path / Windows path);
-  * stream_mbc_vban_expect HOST  -> `<stream> <port>` from the Linux box's facts (the mbc VBAN
-                                    input the TEST check grades), nothing on Windows.
+  * stream_mbc_vban_expect HOST  -> `<stream> <port> <input>` from the Linux box's facts (the mbc
+                                    VBAN input the TEST check grades), nothing on Windows.
 
 plus the bash command builders next to the PowerShell ones (audio-presence + marker-decodability
 libs). Every remote text here is RUN on a fake box (tests/python/stream_box_fakes_1462.py), so the
@@ -65,7 +65,7 @@ def test_the_linux_stream_box_expects_its_fact_stream_and_port(tmp_path):
     p, _ = _run(tmp_path, 'out="$(stream_mbc_vban_expect 10.77.9.204)"; printf "[%s] loaded=[%s]\\n" "$out" "${STRIH_BOX_LOADED:-}"')
     assert p.returncode == 0, p.stderr
     # the facts are read in a subshell: the caller's shell never gets a loaded box
-    assert p.stdout.strip() == "[stream 6980] loaded=[]"
+    assert p.stdout.strip() == "[stream 6980 mbc] loaded=[]"
 
 
 def test_a_windows_stream_box_expects_nothing(tmp_path):
@@ -85,7 +85,14 @@ def test_the_expectation_follows_the_fact_file(tmp_path):
                   .replace("STRIH_PROGRAM_VBAN_PORT=6980\n", "STRIH_PROGRAM_VBAN_PORT=6981\n"))
     p, _ = _run(tmp_path, 'stream_mbc_vban_expect 10.77.9.204', env={"STRIH_BOXES_DIR": str(boxes)})
     assert p.returncode == 0, p.stderr
-    assert p.stdout.strip() == "prog.mix 6981"
+    assert p.stdout.strip() == "prog.mix 6981 mbc"
+
+
+def test_the_input_name_comes_last_whole_with_its_spaces(tmp_path):
+    p, _ = _run(tmp_path, 'read -r s port i <<<"$(stream_mbc_vban_expect 10.77.8.204)"; printf "[%s][%s][%s]\\n" "$s" "$port" "$i"',
+                env={"OBS_FLEET": "stream-pp|10.77.8.204|linux-genlock|always"})
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "[stream][6980][Zvuk z mixu]"
 
 
 def test_a_linux_box_with_no_fact_file_refuses_by_name(tmp_path):
@@ -102,6 +109,22 @@ def test_a_linux_box_whose_facts_declare_no_program_vban_refuses_by_name(tmp_pat
     assert p.returncode == 0, p.stderr
     assert p.stdout.strip() == "RC=1"
     assert "STRIH_PROGRAM_VBAN" in p.stderr and "strih-snv" in p.stderr
+    assert "declare no program VBAN stream" in p.stderr and "did not load" not in p.stderr
+
+
+def test_facts_that_do_not_load_are_named_apart_from_facts_that_declare_none(tmp_path):
+    boxes = tmp_path / "boxes"
+    shutil.copytree(REPO / "scripts" / "strih-boxes", boxes)
+    f = boxes / "stream-snv.env"
+    t = f.read_text()
+    assert t.count("STRIH_PROGRAM_VBAN_PORT=6980\n") == 1
+    f.write_text(t.replace("STRIH_PROGRAM_VBAN_PORT=6980\n", "STRIH_PROGRAM_VBAN_PORT=oops\n"))
+    p, _ = _run(tmp_path, 'if out="$(stream_mbc_vban_expect 10.77.9.204)"; then echo "OK[$out]"; else echo "RC=$?"; fi',
+                env={"STRIH_BOXES_DIR": str(boxes)})
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "RC=1"
+    assert "did not load" in p.stderr and "declare no program VBAN stream" not in p.stderr
+    assert "STRIH_PROGRAM_VBAN_PORT 'oops'" in p.stderr, "the loader's own line names the bad fact"
 
 
 # --- the bash builders, run as text on the fake box -----------------------------------------------
@@ -147,6 +170,19 @@ def test_the_wav_extract_keeps_every_channel_and_writes_the_wav(tmp_path):
     assert not wav.exists()
 
 
+def test_a_failed_wav_extract_leaves_no_older_wav_behind(tmp_path):
+    # the extract removes the WAV first: when ffmpeg then fails, the scp that follows finds nothing,
+    # never the WAV an aborted earlier run left there
+    wav = tmp_path / "box wav" / "mbc.wav"
+    wav.parent.mkdir()
+    wav.write_bytes(b"RIFF-stale")
+    p, rig = _run(tmp_path, 'stream_box_exec newlevel pw 10.77.9.204 "" "$(marker_decodability_extract_wav_sh "$1" "$2" 0)" || echo "RC=$?"',
+                  NASTY, wav, env={"FAKE_FFMPEG_RC": "1"})
+    assert p.returncode == 0, p.stderr
+    assert "RC=1" in p.stdout, "the extract's rc is ffmpeg's"
+    assert not wav.exists()
+
+
 def test_the_windows_powershell_texts_are_unchanged(tmp_path):
     p, _ = _run(tmp_path, 'printf "%s\\n" "$(audio_preflight_volumedetect_ps "$1")" "$(audio_preflight_delete_ps "$1")" "$(marker_decodability_extract_wav_ps "$1" "C:\\w.wav" 0)" "$(marker_decodability_delete_ps "C:\\w.wav")"',
                 "C:\\Users\\newlevel\\Videos\\2026-10-23 01-23-45.mkv")
@@ -173,7 +209,16 @@ def test_the_linux_transport_is_plain_ssh_with_no_stale_known_hosts_and_one_remo
     argv = " ".join(c[0]["argv"])
     for opt in ("StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null", "ConnectTimeout="):
         assert opt in argv, argv
+    assert "-n" in c[0]["argv"], "stdin is /dev/null: the remote command never reads the caller's terminal"
     assert "ps" not in c[0], "a Linux box never gets PowerShell"
+
+
+def test_an_empty_bash_text_for_a_linux_box_is_refused_before_any_ssh(tmp_path):
+    # `ssh host ""` would open an interactive remote shell on the caller's terminal
+    p, rig = _run(tmp_path, 'stream_box_exec newlevel pw 10.77.9.204 "Write-Output win" "" || echo "RC=$?"')
+    assert p.returncode == 0, p.stderr
+    assert "RC=2" in p.stdout and "no bash command text" in p.stderr
+    assert calls(rig) == []
 
 
 def test_the_windows_transport_sends_the_unchanged_powershell_through_win_ssh_run(tmp_path):
@@ -224,3 +269,31 @@ def test_the_lib_is_source_only_and_strict_mode_free():
     text = STREAM_BOX.read_text()
     code = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     assert not any(ln.startswith("set -") for ln in code), "a sourced lib must not change the caller's shell options"
+
+
+# --- the shared quoting helper (scripts/lib/shell-quote.sh) ------------------------------------------
+
+QUOTE = LIB / "shell-quote.sh"
+
+
+def test_shell_single_quote_is_one_word_the_shell_takes_byte_for_byte(tmp_path):
+    values = [NASTY, "", "'", "''", "a'b'c", "trailing newline\n", "tab\there", "$(touch INJECTED)", "*"]
+    for i, v in enumerate(values):
+        driver = tmp_path / ("q%d.sh" % i)
+        driver.write_text('set -euo pipefail\n. "%s"\neval "printf \'%%s\' $(shell_single_quote "$1")"\n' % QUOTE)
+        p = subprocess.run(["bash", str(driver), v], capture_output=True, text=True, cwd=str(tmp_path), timeout=30)
+        assert p.returncode == 0, p.stderr
+        assert p.stdout == v, (v, p.stdout)
+    assert not (tmp_path / "INJECTED").exists()
+
+
+def test_every_bash_builder_quotes_through_the_one_helper():
+    for lib in (AUDIO, MARKER, LIB / "strih-platform.sh"):
+        text = lib.read_text()
+        assert "shell_single_quote" in text, lib
+        assert "//\\'/\\'" not in text, "%s keeps its own copy of the escape" % lib
+
+
+def test_the_quote_lib_is_source_only():
+    code = [ln for ln in QUOTE.read_text().splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    assert not any(ln.startswith("set -") for ln in code)

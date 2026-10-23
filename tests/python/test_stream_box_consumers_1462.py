@@ -108,6 +108,27 @@ def test_rig_mode_a_failed_mbc_check_still_ends_test(tmp_path):
     assert p.returncode != 0 and "AFTER" not in p.stdout
 
 
+def test_rig_mode_refuses_an_input_name_the_box_facts_do_not_declare(tmp_path):
+    rig = _rig(tmp_path)
+    p = _rig_mode(tmp_path, rig, "verify_mbc_dante_transport; echo AFTER", env={"MBC_INPUT_NAME": "Zvuk z mixu"})
+    assert p.returncode != 0 and "AFTER" not in p.stdout
+    assert "'Zvuk z mixu'" in p.stderr and "'mbc'" in p.stderr and "STRIH_PROGRAM_AUDIO_INPUT" in p.stderr
+    assert not [c for c in _py_calls(rig) if c[:1] == ["mbc-input-check"]]
+
+
+def test_rig_mode_takes_an_input_name_with_spaces_from_the_facts(tmp_path):
+    # stream-pp's program-audio input is `Zvuk z mixu`: the name comes last in the expectation and
+    # reaches the check whole
+    rig = _rig(tmp_path)
+    env = {"OBS_FLEET": "stream-pp|10.77.8.204|linux-genlock|always", "STREAM_IP": "10.77.8.204",
+           "MBC_INPUT_NAME": "Zvuk z mixu"}
+    p = _rig_mode(tmp_path, rig, "verify_mbc_dante_transport; echo AFTER", env=env)
+    assert p.returncode == 0, p.stderr
+    (argv,) = [c for c in _py_calls(rig) if c[:1] == ["mbc-input-check"]]
+    assert argv[argv.index("--input") + 1] == "Zvuk z mixu"
+    assert argv[argv.index("--vban-stream") + 1] == "stream" and argv[argv.index("--vban-port") + 1] == "6980"
+
+
 def test_rig_mode_refuses_a_linux_stream_box_without_facts_before_any_read(tmp_path):
     rig = _rig(tmp_path)
     p = _rig_mode(tmp_path, rig, "verify_mbc_dante_transport; echo AFTER",
@@ -235,21 +256,39 @@ def _probe(tmp_path, rig):
 def test_e2e_marker_decodability_extracts_and_pulls_the_wav_from_the_linux_box(tmp_path):
     rig = _rig(tmp_path)
     pdir, plog = _probe(tmp_path, rig)
-    box_wav = tmp_path / "box-tmp" / "camera-box-mbc-decodability.wav"
-    box_wav.parent.mkdir()
+    box_wav = rig["home"] / "camera-box-mbc-decodability.wav"  # the default: the ssh user's home, never /tmp
     out = tmp_path / "out"
     region = _region('echo "[4b3/8]', 'echo "[4c/8]')
     p = _e2e(tmp_path, rig, region, extra='PROBE_BIN_DIR="%s"\nOUTDIR="%s"\nRUN_ID=4242\n' % (pdir, out),
-             env={"FAKE_REC_PATH": REC_LX, "FAKE_PROBE_LOG": str(plog), "AUDIO_DECODABILITY_WAV_LX": str(box_wav)})
+             env={"FAKE_REC_PATH": REC_LX, "FAKE_PROBE_LOG": str(plog)})
     assert p.returncode == 0, p.stderr
     assert "ok: mbc QPSK marker DECODABLE" in p.stdout and "REGION-END" in p.stdout
     (ff,) = ffmpeg_calls(rig)
-    assert ff[ff.index("-i") + 1] == REC_LX and ff[-1] == str(box_wav)
+    assert ff[ff.index("-i") + 1] == REC_LX and ff[-1] == "camera-box-mbc-decodability.wav"
+    c = calls(rig)
+    assert c[0]["remote"].startswith("rm -f -- 'camera-box-mbc-decodability.wav'; ffmpeg ")
+    assert c[1]["tool"] == "scp" and c[1]["src"] == "newlevel@10.77.9.204:camera-box-mbc-decodability.wav"
     (probe,) = [json.loads(x) for x in plog.read_text().splitlines()]
     assert probe["wav"] == "RIFF-fake-wav"  # the pulled-back bytes reached the probe
     assert probe["argv"][probe["argv"].index("--qpsk-probe") + 1] == str(out / "mbc-decodability-4242.wav")
     assert not box_wav.exists(), "the throwaway WAV on the box is removed"
-    assert all("ps" not in x for x in calls(rig))
+    assert all("ps" not in x for x in c)
+
+
+def test_e2e_marker_decodability_never_pulls_back_a_stale_wav_after_a_failed_extract(tmp_path):
+    # an aborted earlier run left its WAV on the box; this run's extract fails on every try: the stale
+    # bytes must never reach the probe (a false DECODABLE), the step aborts on "never arrived"
+    rig = _rig(tmp_path)
+    pdir, plog = _probe(tmp_path, rig)
+    stale = rig["home"] / "mbc decodability.wav"
+    stale.write_bytes(b"RIFF-stale-wav-of-an-older-run")
+    region = _region('echo "[4b3/8]', 'echo "[4c/8]')
+    p = _e2e(tmp_path, rig, region, extra='PROBE_BIN_DIR="%s"\nOUTDIR="%s"\nRUN_ID=4242\n' % (pdir, tmp_path / "out"),
+             env={"FAKE_REC_PATH": REC_LX, "FAKE_PROBE_LOG": str(plog), "FAKE_FFMPEG_RC": "1",
+                  "AUDIO_DECODABILITY_READ_ATTEMPTS": "2", "AUDIO_DECODABILITY_WAV_LX": str(stale)})
+    assert p.returncode == 1 and "never arrived" in p.stderr and "REGION-END" not in p.stdout
+    assert not plog.exists(), "the probe never ran on the stale WAV"
+    assert len(ffmpeg_calls(rig)) == 2
 
 
 def test_e2e_marker_decodability_keeps_the_windows_path(tmp_path):
@@ -295,6 +334,14 @@ def test_e2e_session_visibility_names_the_linux_recovery_on_a_dead_stream_unit(t
     assert p.returncode == 1 and "REGION-END" not in p.stdout
     assert "stream INVISIBLE" in p.stderr
     assert "systemctl --user restart strih-obs.service" in p.stderr and "launch-obs-genlock" not in p.stderr
+
+
+def test_e2e_session_visibility_names_the_stream_box_when_it_does_not_answer(tmp_path):
+    rig = _rig(tmp_path)
+    p = _e2e(tmp_path, rig, _svg_region(), env={"FAKE_SSH_DOWN": "1"})
+    assert p.returncode == 1 and "REGION-END" not in p.stdout
+    assert "stream INVISIBLE" in p.stderr and "the stream box stream-snv unreachable" in p.stderr
+    assert "strih-snv" not in p.stderr, "the stream box is never named as the strih"
 
 
 def test_e2e_session_visibility_keeps_the_obs64_probe_on_windows(tmp_path):
@@ -352,6 +399,40 @@ def test_selfheal_keeps_a_windows_stream_box_on_schtasks_even_with_a_forced_linu
     env = {"OBS_FLEET": WIN_STREAM_FLEET, "STRIH_PLATFORM": "linux"}
     assert _selfheal_class(tmp_path, "10.77.9.204", "10.77.9.202", env) == "windows-genlock"
     assert _selfheal_class(tmp_path, "192.0.2.9", "10.77.9.202") == "windows-genlock"
+
+
+_CURL_DOWN = "#!/bin/sh\nexit 7\n"  # dev1's curl: :8899 never answers
+
+
+def _ssh_opts(argv):
+    return [argv[i + 1] for i, a in enumerate(argv[:-1]) if a == "-o"]
+
+
+def test_selfheal_restart_ssh_ignores_the_stale_known_hosts_key(tmp_path):
+    # the stream box's address held the Windows PC's host key until 22.10.2026; with
+    # StrictHostKeyChecking=no a stale key disables password login, so the restart must not use it
+    rig = _rig(tmp_path)
+    (rig["dev1"] / "curl").write_text(_CURL_DOWN)
+    (rig["dev1"] / "curl").chmod(0o755)
+    body = ('set -euo pipefail\n. "%s"\nbundle_state_selfheal_fetch 10.77.9.204 "%s" 8899 newlevel pw linux-genlock'
+            ' || echo "RC=$?"\n' % (SCRIPTS / "lib" / "bundle-state-selfheal.sh", tmp_path / "state.json"))
+    p = _drive(tmp_path, rig, body, env={"BUNDLE_STATE_SELFHEAL_TRIES": "1", "BUNDLE_STATE_SELFHEAL_SLEEP_S": "0"})
+    assert "RC=1" in p.stdout, p.stderr
+    (c,) = calls(rig)
+    assert "UserKnownHostsFile=/dev/null" in _ssh_opts(c["argv"]) and "StrictHostKeyChecking=no" in _ssh_opts(c["argv"])
+    assert "systemctl --user restart" in c["remote"]
+
+
+def test_watchdog_restart_ssh_ignores_the_stale_known_hosts_key(tmp_path):
+    rig = _rig(tmp_path)
+    body = ('set --\n. "%s"\nset +e\nrestart_bundle_state_task stream-snv 10.77.9.204\necho "RC=$?"\n'
+            % (SCRIPTS / "bundle-state-alert-watchdog.sh"))
+    p = _drive(tmp_path, rig, body)
+    assert "RC=" in p.stdout, p.stderr
+    (c,) = calls(rig)
+    assert c["target"] == "newlevel@10.77.9.204"
+    assert "UserKnownHostsFile=/dev/null" in _ssh_opts(c["argv"])
+    assert "systemctl --user restart" in c["remote"], "stream-snv is a linux-genlock box"
 
 
 # --- the two scripts source the lib -----------------------------------------------------------------

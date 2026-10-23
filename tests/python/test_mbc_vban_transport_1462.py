@@ -5,7 +5,8 @@ stream-snv has no Dante soundcard: its OBS input `mbc` is the vendored obs-vban 
 mbc.lan's VBAN stream `stream` on UDP 6980 (the box facts STRIH_PROGRAM_VBAN_*). The #901 check used
 to demand `device_id == "Dante Virtual Soundcard (x64)"`, so TEST exited 1 there (live 22.10.2026).
 `obs_phase2.py mbc-input-check --vban-stream S --vban-port P` grades the obs-vban source instead:
-the right kind, the facts' stream and port, unmuted (mute named first, like the Dante check).
+the right kind, the facts' stream and port, unmuted (mute named first, like the Dante check). The pure
+decision is program_audio_vban.mbc_vban_transport_problem (next to the source's one definition).
 Without the two flags the Dante check is unchanged (tests/python/test_obs_phase2_mbc_input_check_901.py).
 """
 import argparse
@@ -29,7 +30,13 @@ LIVE = {"ip_from": "", "port": 6980, "receive_buffer_ms": 80, "stream_name": "st
 
 
 def problem(kind=KIND, settings=None, muted=False, stream="stream", port=6980):
-    return obs_phase2._mbc_vban_transport_problem(kind, LIVE if settings is None else settings, muted, stream, port)
+    return pav.mbc_vban_transport_problem(kind, LIVE if settings is None else settings, muted, stream, port)
+
+
+def test_obs_phase2_carries_no_second_copy_of_the_decision():
+    # the decision lives once, next to the source's definition; obs_phase2 only reads + reports
+    assert not hasattr(obs_phase2, "_mbc_vban_transport_problem")
+    assert "mbc_vban_transport_problem(" in (_SCRIPTS / "obs_phase2.py").read_text()
 
 
 # --- the pure decision ----------------------------------------------------------------------------
