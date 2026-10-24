@@ -123,7 +123,8 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
 - **Access:** plain key-auth ssh `newlevel@dev2` (`YOUTUBE_LEG_MEASURE_HOST`), the access the dev2
   avsync measurer already uses; no new credential. The stream box password the E2E holds
   (`AV_GATE_SSH_PASSWORD`) reaches dev2 on the ssh session's STDIN for `sshpass -e scp`, never in an
-  argv. `scripts/youtube_leg_host.py` owns every remote step.
+  argv. `scripts/youtube_leg_host.py` owns every remote step. The pull is Linux scp only: a
+  Windows-class stream box (`stream_box_platform`, passed as `--stream-platform`) is refused by name.
 - **Stage dir** `~/youtube-leg-1404/<dev1 run dir name>/` (`stage_key`, sanitized): `code/` (the
   tool's five modules, shipped from the E2E's own checkout every run, so dev2 needs no install of
   ours), `in/` (marker log + probe binary), `stream-recording.<ext>`, `verdict/` (the tool's out dir,
@@ -142,7 +143,12 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   newlevel@dev2 is unreachable (...)`, never a measurement on dev1.
 - **Bounds:** every long remote step runs as `timeout -k 30 <bound> nice -n 10 <cmd> &` with its pid
   in `<step>.pid` (timeout leads its own process group: the decode pool, yt-dlp's ffmpeg, the probe);
-  the local ssh is `run_bounded` at the bound + 60 s. The cleanup kills every recorded group, then
+  the local ssh is `run_bounded` at the bound + 60 s, its stdin a closed pipe. A step's OWN exit 255
+  (scp: the stream box unreachable from dev2) is returned as 254 with a stderr line, because 255 is
+  ssh's own exit and means "dev2 unreachable". Exit 124 (or 137 at the bound) = "ran over"; 137
+  inside the bound = "killed (exit 137)" (the OOM killer on a loaded dev2). `prefetch.pid` is removed
+  by the prefetch itself, and a reader acts on it only when `/proc/<pid>/cmdline` is this stage's
+  prefetch (a reused pid is never waited for or signalled). The cleanup kills every recorded group, then
   deletes the dir. 4 decode workers (`YOUTUBE_LEG_MEASURE_WORKERS`) at nice 10: dev2's other users
   (the SyncNet measurer, bakerion ffmpeg/nvenc jobs, node test runs) keep their share.
 - **dev2 setup (one-time, supervisor):** key-auth dev1 -> dev2 (exists); `python3` with cv2 4.13.0
@@ -157,9 +163,9 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
 | Step | Time |
 |---|---|
 | pull 747 MB 4K recording stream-snv -> dev2 | 7.7 s |
-| early decode of the recording (9316 frames, 4K) | 308-462 s (load dependent) |
+| early decode of the recording (9316 frames, 4K) | 308 s (load ~15), 355 s (~17), 462 s (20-36) |
 | VOD fetch (yt-dlp, 266 MB) | ~159 s |
-| VOD decode (13470 frames, 1080p) | 131-254 s |
+| VOD decode (13470 frames, 1080p) | 131 s (load ~13), 139 s (~13), 254 s (~36) |
 | A/V of ONE window, the recording clip (4K x264 cut + `--av-sync`) | 61.5 + 168.6 s |
 | A/V of ONE window, the VOD clip (1080p) | 24.7 + 45.3 s |
 

@@ -115,18 +115,26 @@ dev1 and the VOD decode never finished inside the tool's 1500 s.
   right half too (2196753 under 2196754). So `DECODER_VERSION` stays 2 (the committed maps and every
   decode test are unchanged); the tests pin the superset property, not row identity
   (`tests/python/test_youtube_leg_known_position_1404.py`, synthetic ground truth + the real crops).
-- Counted: known-position reads, fallbacks, full detections per decode, on stderr, through
+- Counted: known-position reads, `misses` (point reads with no painter payload), `fallback` (halves
+  whose stored points all missed, so the full detector ran: always <= `full`), full detections per
+  decode, on stderr, through
   `decode_raw(reads=...)` / `LAST_READS`, and next to each cached map as `<map>.reads.json` (the E2E
   block's `decode_reads`). A VOD's QR-less pre-roll costs full detections every frame (4 per frame,
   as before): yu1zFSHFdu8 has ~3490 such frames.
-- Speed on dev2 (4 workers, SyncNet + other users loading it, load 10-17, so the numbers move with
-  the load): VOD 13470 frames 213.6 s (63 frames/s) -> 131-139 s (97-103 frames/s); 4K recording 9316
-  frames 464 s (20.1 frames/s) -> 308-355 s (26-30 frames/s). On the 4K file the cost per frame is now
+- Speed on dev2 (4 workers at nice 10; SyncNet, bakerion ffmpeg/nvenc jobs and node test runs load
+  it, so the numbers move with the load): VOD 13470 frames 213.6 s (63 frames/s, load ~10) -> 131 s
+  (load ~13), 139 s (load ~13), 254 s (load ~36); 4K recording 9316 frames 464 s (20.1 frames/s, load
+  ~13) -> 308 s (load ~15), 355 s (load ~17), 462 s (load 20-36). Old vs new at the same load: ~1.6x
+  (VOD) and ~1.5x (4K). On the 4K file the cost per frame is now
   the 4K video decode + the plane resize + two ~27 ms point decodes of a ~600 px QR, no longer the
   finder search (33 full detections in the whole file).
 - `--prime-ticks <file> --out <dir>` (the E2E's early decode): `cached_ticks` into
   `<dir>/ticks-rec-1.tsv` under the normal cache key, so the verdict run with the same `--out` and the
-  same recording path finds it; exit 2 on a failed decode (the verdict run decodes again).
+  same recording path finds it; exit 2 on a failed decode (the verdict run decodes again). The real
+  handoff is pinned by `test_the_early_decode_primes_the_cache_the_verdict_run_reads`.
+- `DECODER_VERSION` stays 2 on purpose: a v2 map of either decoder is a valid map of the file (the
+  superset property). The map can depend on the chunk boundaries (each chunk starts with no stored
+  points) only by which extra halves it reads.
 
 ## Fail-closed rules the five review rounds found holes in (each has a test)
 
