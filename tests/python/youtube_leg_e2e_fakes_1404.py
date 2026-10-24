@@ -18,6 +18,9 @@ d = {d!r}
 argv = sys.argv[1:]
 with open(os.path.join(d, "calls.log"), "a") as f:
     f.write(json.dumps([kind] + argv) + "\n")
+marker = os.environ.get("YOUTUBE_LEG_MARKER")
+if kind == "obs" and marker and os.path.exists(marker):
+    open(os.path.join(d, "marker-at-" + argv[-1] + ".json"), "w").write(open(marker).read())
 sub = {{"session": lambda a: next((x for x in a if x in ("start", "status", "stop", "wait-ready", "wait-done")), "?"),
         "obs": lambda a: a[-1],
         "guard": lambda a: "guard",

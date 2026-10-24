@@ -64,6 +64,16 @@ def test_the_gate_folds_into_gate_in_both_tails_before_the_report_and_the_exit()
         assert '"$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"' in line
 
 
+def test_the_camera_box_dead_man_margin_covers_the_youtube_pre_record_wait():
+    # the dead-man's first fire must land after StopRecord; the stage adds up to ~15 min before it
+    # (session start + a recovered-session busy wait + StartStream + the live wait)
+    s = _e2e()
+    floor = int(re.search(r"^CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=(\d+)$", s, re.M).group(1))
+    default = int(re.search(r'^CAMERA_BOX_DEADMAN_OVERHEAD_MIN="\$\{CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-(\d+)\}"$',
+                            s, re.M).group(1))
+    assert floor >= 30 and default >= floor + 5, (floor, default)
+
+
 def test_the_workflow_posts_the_per_point_report_and_has_the_time():
     w = WF.read_text()
     step = w[w.index("- name: Per-point E2E report"):]

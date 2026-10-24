@@ -52,6 +52,13 @@ def test_a_live_stage_is_marked_and_a_clean_stop_clears_the_marker(fk, tmp_path)
     assert not fk.marker.exists()
 
 
+def test_the_marker_carries_a_provisional_publish_time_while_startstream_runs(fk, tmp_path):
+    # a cancel inside StartStream must still leave recover a publish time to prove the stream ours by
+    assert _run(fk, tmp_path / "yl", "start").returncode == 0
+    m = json.loads((fk.d / "marker-at-stream-start.json").read_text())
+    assert isinstance(m["publish_utc"], float) and m["session_id"] == "s1"
+
+
 def test_a_failed_stop_keeps_the_marker(fk, tmp_path):
     d = tmp_path / "yl"
     assert _run(fk, d, "start").returncode == 0

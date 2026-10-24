@@ -54,6 +54,10 @@ fn run_gate(fake_py: &str, iterations: &str, sleep_secs: &str) -> RunResult {
         .env("OBS_PHASE2_PY", fake_py)
         .env("RIG_BUSY_GATE_ITERATIONS", iterations)
         .env("RIG_BUSY_GATE_SLEEP_SECS", sleep_secs)
+        .env(
+            "YOUTUBE_LEG_MARKER",
+            lease_dir.join("no-youtube-leg-marker.json"),
+        )
         .env("RIG_LEASE_DIR", lease_dir)
         .env_remove("GITHUB_STEP_SUMMARY")
         .output()
