@@ -129,9 +129,9 @@ obs_box_step_applies() {
         return 1
       fi ;;
     6-devclip)
-      v="$(strih_box_role)" || return 0
-      if [ "$v" != stream ]; then
-        printf 'the strih role has no YouTube-safe stream Development scene (issue 1380: stream role only)'
+      v="$(strih_lx_stream_dev_scene)" || return 0
+      if [ "$v" != clip ]; then
+        printf 'STRIH_STREAM_DEV_SCENE=%s -- the measurement clip belongs to the clip design only (issue 1462)' "$v"
         return 1
       fi ;;
     6-hdmi)
@@ -211,8 +211,18 @@ obs_box_stream_seed_manifest_json() {
   printf '  "program_audio_vban": %s,\n' "$vban"
   # issue 1465 item 3: no pulse capture input may capture the operator's headphone mix into the program
   printf '  "pulse_capture": "forbid",\n'
-  printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
-    "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP"
+  # issue 1462: ONE Development design per box (fact STRIH_STREAM_DEV_SCENE). clip = the stream-pp
+  # YouTube-safe scene (stream_dev_safe.py); nested-pro = the issue-1380 SNV design the E2E seeds (its
+  # seed only removes a leftover measurement clip item, which would put a second QPSK marker on program).
+  case "$(strih_lx_stream_dev_scene)" in
+    clip)
+      printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
+        "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP" ;;
+    nested-pro)
+      printf '  "dev_scene_nested": {"scene": "%s", "production": "%s", "clip_input": "%s"}\n}\n' \
+        "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_SCENE" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" ;;
+    *) echo "obs-box-role: STRIH_STREAM_DEV_SCENE is not a stream design" >&2; return 1 ;;
+  esac
 }
 
 # obs_box_seed_manifest_json -> the loaded box's seed manifest: the stream one, or the strih one.
@@ -358,7 +368,9 @@ obs_box_stream_dev_clip_provision() {
 # stream_dev_safe.py --verify. Uses the caller's ok/bad/note; always rc 0.
 obs_box_stream_dev_grade() {
   local here="${1:?scripts dir required}" line level text
-  if obs_box_stream_dev_clip_ok; then
+  if [ "$(strih_lx_stream_dev_scene)" != clip ]; then
+    note "(dev-clip) not graded: STRIH_STREAM_DEV_SCENE=$(strih_lx_stream_dev_scene) carries no measurement clip (issue 1462)"
+  elif obs_box_stream_dev_clip_ok; then
     ok "(dev-clip) ${OBS_BOX_STREAM_DEV_CLIP}: ${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + marker log"
   else
     bad "(dev-clip) ${OBS_BOX_STREAM_DEV_CLIP} missing or not ${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + marker log -- re-run setup-strih.sh step 6"

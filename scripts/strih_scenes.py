@@ -922,6 +922,12 @@ def main():
         import stream_dev_safe
         spec = stream_dev_safe.parse_dev_scene(manifest_text)
         print("dev-scene seed: %s" % (", ".join(stream_dev_safe.apply_dev_safe(obs, spec)) or "present (no change)"))
+    # issue 1462: the nested-pro design (stream-snv) only keeps the measurement clip out of Development.
+    elif '"dev_scene_nested"' in manifest_text:
+        import stream_dev_safe
+        nested = stream_dev_safe.parse_dev_scene_nested(manifest_text)
+        print("dev-scene seed (nested-pro): %s"
+              % (", ".join(stream_dev_safe.apply_dev_nested(obs, nested)) or "present (no change)"))
 
 
 if __name__ == "__main__":

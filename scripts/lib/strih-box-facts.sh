@@ -43,7 +43,8 @@ strih_box_fact_keys() {
     STRIH_PROGRAM_VBAN_LEG STRIH_PROGRAM_VBAN_LEG_ADDR STRIH_PROGRAM_VBAN_SENDER \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
-    STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC
+    STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC \
+    STRIH_STREAM_DEV_SCENE
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -406,6 +407,15 @@ strih_box_validate() {
       fi ;;
     *) echo "strih-box ${name}: STRIH_HTTPS_PUBLIC '${f[STRIH_HTTPS_PUBLIC]}' must be yes or no" >&2; bad=1 ;;
   esac
+  # issue 1462 (design 6379124377): the stream box's Development design. nested-pro = the issue-1380 SNV
+  # design (the nested PRO carries the measurement audio the E2E reads), clip = the stream-pp YouTube-safe
+  # measurement clip; one box never runs both (two QPSK markers in one program).
+  case "${f[STRIH_STREAM_DEV_SCENE]}:${f[STRIH_ROLE]}" in
+    nested-pro:stream|clip:stream|none:strih) ;;
+    none:stream) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE=none on the stream role -- it needs nested-pro or clip" >&2; bad=1 ;;
+    nested-pro:strih|clip:strih) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE '${f[STRIH_STREAM_DEV_SCENE]}' on the strih role -- it has no stream Development (none)" >&2; bad=1 ;;
+    *) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE '${f[STRIH_STREAM_DEV_SCENE]}' must be one of nested-pro, clip, none" >&2; bad=1 ;;
+  esac
   [ "$bad" = 0 ]
 }
 
@@ -645,6 +655,10 @@ strih_lx_https_shading_host() { strih_box_fact STRIH_HTTPS_SHADING_HOST; }
 # strih_lx_https_public -> yes | no: whether the box publishes its intercom page to phones on mobile data
 # (fact STRIH_HTTPS_PUBLIC; issue 1453, scripts/lib/strih-interkom-public.sh).
 strih_lx_https_public() { strih_box_fact STRIH_HTTPS_PUBLIC; }
+
+# strih_lx_stream_dev_scene -> the stream Development design: nested-pro | clip | none (fact
+# STRIH_STREAM_DEV_SCENE, issue 1462).
+strih_lx_stream_dev_scene() { strih_box_fact STRIH_STREAM_DEV_SCENE; }
 
 # strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
 # item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).
