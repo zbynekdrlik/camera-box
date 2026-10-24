@@ -81,6 +81,7 @@ set -euo pipefail
 #   --keep-going               [AV_MATRIX_KEEP_GOING=1]  restart even after a non-PASS baseline
 # Other env: AV_SOAK_CAMS (the soak's camera set; acks removed), STRIH_HOST / STREAM_HOST,
 #   AV_MATRIX_POLL_S (5), AV_MATRIX_KEEPALIVE_S (10), AV_MATRIX_SSH_TIMEOUT_S (60),
+#   AV_MATRIX_CLEANUP_WS_WAIT_S (30: cleanup's wait for a Linux stream OBS its start just launched),
 #   AV_SOAK_BROADCAST_READS / AV_SOAK_BROADCAST_RETRY_S (the soak's retried idle proof). Test
 #   seams: AV_MATRIX_SOAK (the window script), AV_SOAK_OBS_DIR (obs_phase2.py), RIG_LEASE_DIR.
 #
@@ -198,17 +199,32 @@ isleep() {  # SECS -> a sleep a signal interrupts at once
 
 # ensure_running KIND -> leave the kind's component running (a no-op on a running one); always 0.
 ensure_running() {
-  local out scene
+  local out scene deadline
   case "$1" in
     strih-obs) out="$(remote "${STRIH_USER:-}" "${STRIH_PW:-}" "$STRIH_HOST" "$(av_matrix_ensure_running_remote_cmd strih-obs)" 2>&1 || true)" ;;
     cambox) out="$(remote root "${CAM_PW:-}" "$CAMBOX_IP" "$(av_matrix_ensure_running_remote_cmd cambox)" 2>&1 || true)" ;;
     dantesync) out="$(remote root "${CAM_PW:-}" "$DANTE_IP" "$(av_matrix_ensure_running_remote_cmd dantesync)" 2>&1 || true)" ;;
     stream-obs)
+      scene=""
       if [ "$STREAM_OBS_MODE" = restart ]; then
         out="$(remote "${STREAM_USER:-}" "${STREAM_PW:-}" "$STREAM_HOST" "$(av_matrix_ensure_running_remote_cmd stream-obs)" 2>&1 || true)"
-        log "leave running: the stream box's strih-obs.service (${out//$'\n'/ })"
+        case "$out" in
+          *active=active*) log "leave running: the stream box's strih-obs.service is active" ;;
+          *) log "WARNING: the stream box's strih-obs.service is NOT confirmed active after cleanup's start (${out//$'\n'/ }) -- check it by hand" ;;
+        esac
+        # the start may have just launched OBS: a bounded wait for its WebSocket, never an outage read
+        deadline="${AV_MATRIX_CLEANUP_WS_WAIT_S:-30}"
+        case "$deadline" in '' | *[!0-9]*) deadline=30 ;; esac
+        deadline=$(( $(date +%s) + deadline ))
+        while :; do
+          scene="$(stream_program_scene_read "$OBS_DIR" "$STREAM_HOST" "" 2>/dev/null || true)"
+          [ -n "$scene" ] && break
+          [ "$(date +%s)" -lt "$deadline" ] || break
+          sleep "$POLL_S"
+        done
+      else
+        scene="$(stream_program_scene_read "$OBS_DIR" "$STREAM_HOST" "" 2>/dev/null || true)"
       fi
-      scene="$(stream_program_scene_read "$OBS_DIR" "$STREAM_HOST" "" 2>/dev/null || true)"
       if [ "$scene" = "$STREAM_DEV_SCENE" ]; then
         log "leave running: the stream OBS answers (program '$scene')"
       elif [ -n "$scene" ]; then

@@ -94,8 +94,9 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
   graded with the strih-obs markers (`MV_REVERIFY_NO_UNIT` = not performed). The healthy wait is
   still the Development program scene, bounded by `--healthy-timeout-secs`. No supervisor step, no
   confirm file, and no supervisor wait in the lease's hold ceiling. Cleanup runs the unit's
-  `is-active || start` on the stream box, then reads the scene; an OBS that still does not answer
-  prints the Linux restart line (`stream_box_obs_restart_hint`), never the Windows planner, which
+  `is-active || start` on the stream box and grades its `active=` (not active = a named WARNING),
+  then waits up to `AV_MATRIX_CLEANUP_WS_WAIT_S` (30 s) for the WebSocket, since that start may have
+  just launched OBS; an OBS that still does not answer prints the Linux restart line (`stream_box_obs_restart_hint`), never the Windows planner, which
   refuses a Linux box (exit 2). On Linux a unit stop is a SIGTERM, which saves the collection, so
   the restart keeps the runtime writes.
 - **On a Windows stream box it is a SUPERVISOR step** (the text below is byte-identical; the
