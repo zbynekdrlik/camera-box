@@ -349,3 +349,48 @@ def test_the_panel_starts_tint2_only_once_x_has_a_screen():
          for ln in PANEL_UNIT.read_text().splitlines() if "=" in ln and not ln.startswith("#")}
     assert u["ExecStart"] == ("/usr/bin/python3 /usr/local/bin/strih_display_watch.py --exec-when-screen "
                               "/usr/bin/tint2 -c %h/.config/tint2/tint2rc")
+
+
+# --- the role's HDMI policy (independent review: the strih role never puts HDMI on the desktop) -----
+
+def test_on_the_strih_role_an_unarmed_hdmi_output_is_kept_out_like_a_fixed_one():
+    # the issue-1346 strih-role contract (the kiosk autostart turns every ^HDMI off): with the drm-output
+    # config absent or rolled back, the watch must not --auto HDMI back onto the desktop
+    screen, outs = W.parse_xrandr(PP_DARK)
+    eff = W.effective_fixed([], outs, hdmi_off=True)
+    assert sorted(eff) == ["HDMI-0", "HDMI-1"]
+    assert W.decide(screen, outs, eff) == ["--fb", "1920x1080"]
+    # an HDMI the X layout drives goes off, the screen kept
+    screen, outs = W.parse_xrandr(PP_DARK.replace(
+        "HDMI-0 connected primary (normal", "HDMI-0 connected primary 2560x1440+0+0 (normal"))
+    assert W.decide(screen, outs, W.effective_fixed([], outs, hdmi_off=True))[-3:] == [
+        "--output", "HDMI-0", "--off"]
+    # the stream role keeps HDMI to X; an unclassifiable config stays unclassifiable
+    assert W.effective_fixed([], outs, hdmi_off=False) == []
+    assert W.effective_fixed(None, outs, hdmi_off=True) is None
+    assert W.effective_fixed(["HDMI-0"], outs, hdmi_off=True).count("HDMI-0") == 1
+
+
+def test_the_policy_comes_from_the_environment_the_unit_reads():
+    assert W.hdmi_off_from_env({"STRIH_DISPLAY_WATCH_HDMI": "off"}) is True
+    assert W.hdmi_off_from_env({"STRIH_DISPLAY_WATCH_HDMI": "operator"}) is False
+    assert W.hdmi_off_from_env({}) is False
+    u = UNIT.read_text()
+    assert "EnvironmentFile=-%h/.config/strih-display-watch.env" in u.splitlines()
+
+
+def test_a_watch_on_the_strih_role_never_puts_hdmi_on_the_desktop(tmp_path):
+    rig = Rig(PP_DARK)
+    logs = []
+    w = W.Watch(state_file=str(tmp_path / "w.json"), run=rig.run, log=logs.append,
+                config_text=lambda: "", hdmi_off=True)
+    w.pass_once(now=100.0)
+    assert rig.applied == [["--fb", "1920x1080"]]
+    assert any("HDMI never on the desktop" in ln for ln in logs), logs
+
+
+def test_step_16d_writes_the_role_policy_and_restarts_a_running_watch_on_a_change():
+    lib = SESSION_LIB.read_text()
+    body = lib.split("strih_session_apps_install() {", 1)[1].split("\n}\n", 1)[0]
+    assert "strih_display_watch_env_put" in body
+    assert body.index("strih_display_watch_env_put") < body.index("try-restart")

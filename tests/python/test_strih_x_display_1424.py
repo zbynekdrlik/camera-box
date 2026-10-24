@@ -210,3 +210,48 @@ def test_the_row_is_ok_on_a_box_with_no_fixed_output(tmp_path):
     home = _home(tmp_path, config=None)
     row = _grade(tmp_path, home)
     assert row == "OK|(display-x-config) no fixed HDMI output armed -- no X config needed"
+
+
+# --- the role's HDMI policy (independent review) --------------------------------------------------------
+
+def test_an_unarmed_hdmi_is_never_an_operator_output_in_the_x_config(tmp_path):
+    # step 6 runs on the strih role only, where no HDMI is ever the desktop (issue 1346)
+    r = _run('strih_x_display_metamodes "HDMI-0" "DP-0 HDMI-0 HDMI-2 DP-1"', tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "DP-0: nvidia-auto-select, DP-1: nvidia-auto-select"
+
+
+def _policy(tmp_path, role_has_hdmi, envfile=None):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    home = _home(tmp_path, config=None)
+    if envfile is not None:
+        (home / ".config").mkdir(parents=True, exist_ok=True)
+        (home / ".config" / "strih-display-watch.env").write_text(envfile)
+    gate = "obs_box_step_applies() { return %d; }\n" % (0 if role_has_hdmi else 1)
+    return home, gate
+
+
+def test_the_policy_file_follows_the_role(tmp_path):
+    home, gate = _policy(tmp_path, True)
+    r = _run(gate + 'strih_display_watch_env_text; echo; strih_display_watch_env_put "%s"' % home, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[0] == "STRIH_DISPLAY_WATCH_HDMI=off"
+    assert "written" in r.stdout
+    assert (home / ".config" / "strih-display-watch.env").read_text() == "STRIH_DISPLAY_WATCH_HDMI=off\n"
+    r = _run(gate + 'strih_display_watch_env_put "%s"' % home, tmp_path)
+    assert r.stdout.strip() == "unchanged"
+    _home2, gate2 = _policy(tmp_path / "s", False)
+    r = _run(gate2 + 'strih_display_watch_env_text', tmp_path)
+    assert r.stdout == "STRIH_DISPLAY_WATCH_HDMI=operator"
+
+
+def test_the_row_fails_a_policy_file_the_role_does_not_want(tmp_path):
+    home, gate = _policy(tmp_path, True, envfile="STRIH_DISPLAY_WATCH_HDMI=operator\n")
+    r = _run(gate + 'strih_x_display_grade_row "%s" "%s" "$(whoami)"' % (REPO, home), tmp_path, xrandr=SNV,
+             sources=(XLIB, APPS_LIB))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("FAIL|(display-x-config)") and "strih-display-watch.env" in r.stdout, r.stdout
+    home, gate = _policy(tmp_path / "ok", True, envfile="STRIH_DISPLAY_WATCH_HDMI=off\n")
+    r = _run(gate + 'strih_x_display_grade_row "%s" "%s" "$(whoami)"' % (REPO, home), tmp_path, xrandr=SNV,
+             sources=(XLIB, APPS_LIB))
+    assert r.stdout.startswith("OK|(display-x-config)"), r.stdout
