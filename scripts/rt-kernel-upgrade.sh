@@ -77,30 +77,9 @@ gather_facts() {
   local ip="$1" raw
   require_tools
   # ONE ssh round-trip, all reads non-mutating, bounded by an overall session timeout.
-  raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "root@$ip" '
-    run=0; grep -qw "preempt=full" /proc/cmdline && run=1
-    inst=0; dpkg-query -W -f="\${Status}" lowlatency-kernel 2>/dev/null | grep -q "install ok installed" && inst=1
-    # GEN=1 iff the HWE generic meta is NOT installed -> installing lowlatency-hwe pulls a new HWE
-    # image, superseding the running one (today`s cam fleet). If the HWE meta IS installed the
-    # install is config-only (no new image) -> GEN=0, no purge.
-    gen=1; dpkg-query -W -f="\${Status}" linux-image-generic-hwe-24.04 2>/dev/null | grep -q "install ok installed" && gen=0
-    cand=0; apt-cache policy linux-lowlatency-hwe-24.04 2>/dev/null | grep -qE "Candidate: [0-9]" && cand=1
-    gd="$(sed -nE "s/^GRUB_DEFAULT=(.*)/\1/p" /etc/default/grub 2>/dev/null | tr -d "\"" | head -1)"
-    gd="${gd:-0}"; gd="${gd%% *}"
-    # STALE: OBSERVED superseded-generic set -- installed linux-image-<ver>-generic whose <ver> !=
-    # uname -r, plus the linux-image-generic meta. Only meaningful once rebooted (uname -r == the
-    # desired kernel); the planner consults it only in the run=1 branch. Comma-joined, "-" = none.
-    # No process substitution (portable to a /bin/sh remote); no entry has a space so the
-    # space-delimited fact split downstream holds.
-    kr="$(uname -r)"; stale=""
-    for p in $(dpkg-query -W -f="\${Package} \${Status}\n" "linux-image-*-generic" 2>/dev/null | grep "install ok installed" | cut -d" " -f1); do
-      v="${p#linux-image-}"; [ "$v" = "$kr" ] && continue
-      stale="${stale:+$stale,}$v"
-    done
-    dpkg-query -W -f="\${Status}" linux-image-generic 2>/dev/null | grep -q "install ok installed" && stale="${stale:+$stale,}linux-image-generic"
-    stale="${stale:--}"
-    echo "$run $inst ${gen} ${gd} ${cand} ${stale}"
-  ' 2>/dev/null)" || { echo "FATAL: could not read box $ip over ssh (rc=$?)" >&2; exit 4; }
+  # issue 1446: the remote read is the lib's rt_kernel_gather_remote_snippet (tested locally against a
+  # fake dpkg-query); its installed-test takes a HELD package too.
+  raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "root@$ip" "$(rt_kernel_gather_remote_snippet)" 2>/dev/null)" || { echo "FATAL: could not read box $ip over ssh (rc=$?)" >&2; exit 4; }
   raw="$(printf '%s' "$raw" | tr -s ' ' | tail -1)"
   [ -n "$raw" ] || { echo "FATAL: empty facts from box $ip" >&2; exit 4; }
   printf '%s' "$raw"

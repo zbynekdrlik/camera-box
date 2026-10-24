@@ -49,11 +49,14 @@ adding/regenerating the matrix, never hand-add a self-route — it will fail to 
 (the checked-in live matrix). Slot roles are DERIVED from the XML's own attributes, not hard-coded:
 an active `VBANStreamOut` (`status=1`) makes a slot a `cambox` (cam1..7), else a `program_ref`
 (fohabl/lv1/mbc = the stream name minus `-strih`); `AMDevice` type 256/4/1 → cutters/speakers/line34;
-online VAIO1 → phones, VASIO8 → **program_out** (issue 1344 — was `program_monitor` in M1).
+online VAIO1 → phones; VASIO8 → NOTHING since issue 1439 phase 2 (it was **program_out**, issue 1344,
+and `program_monitor` in M1: the strih OBS now takes the console's VBAN program itself, so the converter
+drops VASIO8 and its points, `.claude/rules/obs-vban-receive.md` "The strih role").
 Per-participant `in_channels`/`out_channels` = the max channel routed (this preserves cam2's 8-ch
-input + the cam3 ch-2 asymmetry). Adapters: VBAN legs are live; `phones` is `janus` (M3a); VASIO8 →
-`program_out` is a `pipewire` sink (the OBS `ASIO zvuk` capture) and `cutters` (MiniFuse) is a
-`pipewire` capture input (issue 1344); `speakers`/`line34` stay `adapter = "none"`.
+input + the cam3 ch-2 asymmetry). Adapters: VBAN legs are live; `phones` is `janus` (M3a); `cutters`
+(MiniFuse) is the `alsa` card leg since issue 1438 (card ID `M4`, aplay + arecord on the hw PCM, no
+PipeWire; `.claude/rules/strih-intercom-alsa-leg.md`; issue 1344 had it on `pipewire`);
+`speakers`/`line34` stay `adapter = "none"`.
 
 **PARITY IS PINNED:** `tests/python/test_vbmatrix_to_intercom_toml_1345.py` regenerates from the
 fixture (`intercom/tests/fixtures/vbmatrix-coconut-today.xml`) and asserts it reproduces the
@@ -150,8 +153,9 @@ strih, and a second hub sending VBAN back to them is double talkback.
   far below 187.5/s at 0 % CPU + an `overruns` storm = the block loop is BLOCKING on something
   (19.9.: a per-block DNS lookup — destinations are now resolved once, off the hot path).
 - The cambox headset ADC runs ~+540 ppm against the hub's timer (cam1 `capture 48026 samp/s`) —
-  without a per-stream rate servo that was one 128-frame overrun every ~5 s. Since issue 1401 the
-  VBAN-leg servo absorbs it (see "VBAN legs — target fill + drift servo" below).
+  without a per-stream rate handling that was one 128-frame overrun every ~5 s. Since issue 1461 the
+  VBAN leg's resampler follows it (its clamp is +-1000 ppm) (see "VBAN legs" below); past the clamp
+  the rest is counted as resyncs.
 - **Put cam1 BACK on main's release build the moment the test ends** (`CAMERA_SET=cam1
   scripts/deploy-fleet.sh` with no `--run` = main's latest artifact). The M1b test needs the DEV
   build on cam1 (the env override is not in the release yet), but a single box left on a dev build
@@ -161,6 +165,10 @@ strih, and a second hub sending VBAN back to them is double talkback.
   same as the drop-in `clear` and the hub `stop`.
 
 ## M2 — the local PipeWire audio bridge (issue 1344, DONE)
+
+> **Issue 1438:** the cutters left PipeWire: both TOMLs put them on the `alsa` card leg
+> (`.claude/rules/strih-intercom-alsa-leg.md`). The pw-cat paths below stay as the hub's `pipewire`
+> adapter (the strih-pp `program_out` sink, and the cutters' rollback).
 
 The last VB-Matrix function the strih-snv notebook lacked: local audio I/O. Two directions behind one
 `pw-cat` supervised-child shape (the bkshading gphoto2 rationale — no libpipewire FFI, so the whole
@@ -207,7 +215,7 @@ original migrated collection had it in all 7 program scenes).
   block loop feeds `output.interleaved(program_out)` to a supervised `pw-cat --playback --target
   strih-program` child (`PwCatSink`), through the pipe fill controller of issue 1401 (the stdin
   pipe is measured before every write and every ~1 ms between them, primed to 2 graph quanta,
-  held at the start until pw-cat reads, then servo-held at 1792 frames; see "VBAN legs", the
+  held at the start until pw-cat reads, then held at 1792 frames by the resampler (issue 1461); see "VBAN legs", the
   egress bullets).
 - **INGRESS — the talkback (`cutters` becomes a `pipewire` participant with `pipewire_source`):** a
   supervised `pw-cat --record --target <MiniFuse pro-input node>` child (`PwCatSource`) frames its
@@ -241,7 +249,7 @@ Step 12 installs the operator-session `strih-program` null sink
 (`~/.config/pipewire/pipewire.conf.d/strih-program.conf`) + the loopback republish source
 (`~/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf`, `strih_pipewire_program_loopback_conf`
 — see the follow-up above) + a WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz
-+ the **intercom-hub audio drop-in**. The old fail-loud
+(the **intercom-hub audio drop-in** is written by step 13 with the hub since issue 1439). The old fail-loud
 `STRIH_LX_AUDIO_WIRED` flag is REMOVED — `verify-strih.sh` derives the audio verdict
 (`strih_lx_program_audio_verdict`: sink present + OBS input pulse_input_capture + hub program-rx,
 FOH-live level is a supervisor NOTE).
@@ -279,9 +287,9 @@ What was wrong live, and how the code now handles it. Read this before touching 
 - **The capture ring.** The MiniFuse drives the graph at quantum 1024 (`clock.quantum 1024`, ALSA
   `period-size 1024`), so `pw-cat --record` delivers 1024-frame bursts. The generic 2048-frame,
   no-prefill `JitterBuffer` spliced ~8×/s.
-  - `JitterBuffer::local_capture(32 blocks, 2048)` prefills to the target. An underrun outputs
-    WHOLE silent blocks until refilled (never a partial zero-splice). An overrun drops back to the
-    TARGET, not the cap.
+  - The 24.9. fix was `JitterBuffer::local_capture(32 blocks, 2048)` (prefill, whole silent
+    blocks, overrun back to the target). Issue 1461 replaced it with the resampler leg (the card
+    capture in lane 1, the phones in lane 2) and deleted the ring.
 - **`pw-cat --latency` takes SAMPLES or a time unit, never `N/rate`.** `--latency 256/48000` is
   rejected (`bad latency value … (bad unit)`) and ignored. `--latency 256` with `--rate 48000`
   gives `node.latency = "256/48000"`.
@@ -321,137 +329,118 @@ What was wrong live, and how the code now handles it. Read this before touching 
     stripped.
   - Run it with `rustc --edition 2021 --test`.
 
-## VBAN legs — target fill + drift servo (issue 1401, 4.10.2026)
+## VBAN legs — fixed target fill + the resampler (issues 1401 + 1461)
 
 Owner: short dropouts in the strih program audio. The old VBAN buffer (`JitterBuffer::new`) had no
 target: it popped whatever was queued and zero-padded a short block, so a packet a little late
 against the 5.33 ms hub block wrote a zero-padded block into the mix (single underruns every
 2-15 min on `fohabl`, a clean network). Read this before touching `vban_jitter`, `vban_io`'s
-`JitterBuffer`, `inputs`, `adaptive_target`, `block_clock`, `mix_thread`, the block loop's late-tick
+`JitterBuffer`, `inputs`, `asrc`, `block_clock`, `mix_thread`, the block loop's late-tick
 handling, or the status line. The decisions are on issue 1401 (comments 5977982465 and, for the
-catch-up, the real-time thread and the adaptive program target, design 5980775411; for the gentle
-setpoint walk, the starvation-only pipe refill and the derived caps, design 5981457044).
+catch-up and the real-time thread, design 5980775411; for the starvation-only pipe refill and the
+derived caps, design 5981457044) and issue 1461 (design 6376769274: the resampler at every
+crossing, fixed targets; the map of every audio path is `.claude/rules/audio-clock-map.md`).
 
 - **Who gets which buffer (`inputs::input_buffers`, tested on the deployed TOML).**
-  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg`. A cambox: the FIXED target `VBAN_TARGET_BLOCKS` =
-    3 = 16 ms, cap 9 blocks. Every other VBAN leg (the program feeds fohabl / lv1 / mbc) also gets
-    `.with_adaptive_target(..)`: its target starts at the floor `VBAN_PROGRAM_TARGET_BLOCKS` = 6 =
-    32 ms (cap 12) and follows the sender's largest gap of the last 10 min up to 12 blocks = 64 ms
-    (`.claude/rules/strih-intercom-hub-mix.md`; the fixed 32 ms of design comment 5979008527
-    covered the morning's 19.4 ms gaps, not the afternoon's 27.6 ms).
-  - Every cap is DERIVED, never typed (design 5981457044): `vban_cap_blocks(target)` = target +
-    `CATCHUP_MAX_BLOCKS` (4) + 1 (the current tick) + `VBAN_CAP_HEADROOM_BLOCKS` (1). That is
-    `VBAN_CAP_BLOCKS` 9 and `VBAN_PROGRAM_CAP_BLOCKS` 12, and `set_target` keeps the 6 blocks of
-    headroom at every adaptive target. So what arrives while the block loop runs up to four ticks
-    late never trims a leg (with 5 blocks a cambox overran and then underran on 24 of 57 stalls of
-    26 ms).
-  - Local captures + Janus -> `local_capture` (unchanged).
+  - `ADAPTER_VBAN` -> `JitterBuffer::vban_leg_at` (a resampler leg, `BufferKind::VbanLeg`). Its
+    FIXED target is the participant's TOML `target_ms` (rounded up to whole hub blocks by
+    `vban_jitter::target_frames_from_ms`, read at start only), else the default: a cambox
+    `VBAN_TARGET_BLOCKS` = 3 = 16 ms, a program feed (fohabl / lv1 / mbc)
+    `VBAN_PROGRAM_TARGET_BLOCKS` = 7 = 37.3 ms (the FOH sender's 27.6 ms gap + a block + half a
+    burst). The issue-1401 adaptive target (6..12 blocks, following the gaps) is gone: it moved
+    the program latency while running.
+  - The cutters' local capture (the card's `arecord`, or a `pw-cat --record`) ->
+    `JitterBuffer::card_capture` (`BufferKind::CardCapture`): the SAME resampler leg, since the
+    card crystal is a foreign clock too. Target `target_ms` or `CARD_CAPTURE_TARGET_FRAMES` 2048,
+    cap the 32 blocks the capture ring had. The 2048 are two `pw-cat` bursts; the deployed
+    `arecord` delivers 256-frame periods, so a smaller `target_ms` (3-4 blocks) is likely enough
+    once its live jitter is read.
+  - Janus (phones) -> `JitterBuffer::janus_capture` (`BufferKind::JanusCapture`, issue 1461
+    lane 2): the same resampler leg, target `target_ms` or 2048 (42.7 ms), cap 32 blocks; the
+    room mix is stamped before the jitter lock (`push_room_mix`).
   - Everything else (no ingress) -> the plain `new`.
-  - `JitterBuffer::kind()` says which. It used to be a text anchor on `main.rs`, and two issues'
-    tests now check it behaviourally.
-- **The policy lives in the std-only `vban_jitter::NetworkFill`** (frame counts only; the buffer
-  moves the samples):
-  - prefill to the target. EVERY prime, the re-prime after an underrun included, starts exactly at
-    the target and drops the overshoot, the oldest audio, into the gap that is already there. This
-    is the `PacedRing` precedent. Review 2 rejected the first "keep every frame" re-prime: it left
-    a block that was then walked off at 47 corrections a second for ~10 s;
-  - an underrun = ONE whole silent block, then re-prime;
-  - the servo: every 1 s (48 000 output frames) the MEAN pre-pop fill vs the target.
-    `servo_corrections` turns the error into the next second's budget of single-frame
-    drops/repeats, evenly spaced and never closer than 1000 output frames (977 ppm max):
-    - 16-frame band;
-    - GENTLE up to the 128-frame knee (one per 16 frames of error, at most 7 a second);
-    - STEEP past it (one more per 2 frames);
-    - +-20 ppm runs at 1-2 corrections a second, gaps >= 0.5 s; the +540 ppm cambox ADC settles
-      ~166 frames (3.5 ms) high;
-    - a sender off by more than ~1000 ppm still underruns or overruns (the ASRC, design Approach
-      3, is the escalation);
-    - review 1 rejected a bang-bang that put 47 corrections into one second (~47 Hz flutter);
-    - the servo holds a SETPOINT (`NetworkFill::setpoint()`), which is the target except while a
-      `set_target` change is walked in: at most `SERVO_WALK_MAX_PER_WINDOW` (7, the gentle zone's
-      ceiling) corrections a second on top of the drift's own budget, so a one-block change takes
-      ~37 s, never the steep zone's 48 a second (design 5981457044; the mechanism and its pins are
-      in `.claude/rules/strih-intercom-hub-mix.md`, "Step 4");
-  - a correction is spread across the block by `stretch_block` (linear, both ends kept): a 0.4 %
-    time stretch for 5.33 ms, no click (a plain one-sample cut on a loud 10 kHz tone is a ~1.6x
-    step; the test pins both). The linear interpolation dips the highs about 2 dB inside that one
-    block, so corrections must stay rare, which is why the bursts above were findings;
-  - a LOST HUB TICK (since design 5980775411 only the part of a late wake beyond the four ticks
-    the block loop runs late, `.claude/rules/strih-intercom-hub-mix.md`): each VBAN leg's
-    `skip_missed` drops that block of its oldest audio at once (the outputs already lost it),
-    never more than half a block under its target, right before the current cycle's pop. The
-    floor is half a block, not the target, so a jitter dip of up to half a block leaves no
-    residue; a deeper dip leaves exactly the part beyond half a block, which the servo takes out
-    gently (or which offsets a slow sender's drift). The discard keeps the servo's window and
-    budget (review 3: resetting them starved the drift correction when the hub missed ticks
-    often, 13 overruns in 10 min at a tick missed every 0.5 s with the +540 ppm cambox). The
-    run's total is `lost_ticks` in `/api/state` and `lost=N` on the status line: each one is a
-    block lost on EVERY output;
-  - above the cap: drop the oldest down to the TARGET and restart the servo window (a walk in
-    progress ends there, like at a prime).
+  - Every cap is DERIVED, never typed (design 5981457044): `vban_cap_blocks(target)` = target +
+    `CATCHUP_MAX_BLOCKS` (4) + 1 (the current tick) + `VBAN_CAP_HEADROOM_BLOCKS` (1): a cambox 9,
+    a program feed 13. What arrives while the block loop runs up to four ticks late never trims a
+    leg.
+  - `JitterBuffer::kind()` says which; `network_stats()` is `Some` for both resampler kinds.
+- **The policy lives in the std-only `vban_jitter::NetworkFill`** over the std-only `asrc`
+  module (frame counts only; the buffer moves the samples):
+  - prefill to the target plus the resampler's 15-frame history (`ASRC_HISTORY`). EVERY prime,
+    the re-prime after an underrun included, starts exactly there and drops the overshoot, the
+    oldest audio (the `PacedRing` precedent);
+  - each pop renders ONE 256-frame block from a fractional read point (`asrc::ReadPoint`:
+    position + ratio) with `asrc::render`: a Kaiser-windowed sinc (the `fir.rs` taps, beta 10),
+    32 taps x 128 phases, linear interpolation between phases, every phase row DC gain 1, phase 0
+    the identity. It consumes `block x ratio` input frames; the fraction carries over. The 16-frame
+    look-ahead comes out of the underrun margin, not on top of the latency;
+  - the ratio (`asrc::RateControl`): every packet is reported with its arrival time on the hub's
+    clock (`NetworkFill::note_arrival`; `Instant` is `CLOCK_MONOTONIC`, the grid's clock) and the
+    frames arrived so far. 1 s bins of those points feed a least-squares slope over 64 s = the
+    sender's rate. Timing each packet itself (never sampling the arrival count at the pops) keeps
+    the packet granularity out: a cambox's 128-frame packet every half pop aliased into a ~50 s
+    sawtooth and a +-12 ppm wobble when the count was sampled at the pops (lane 1's first cut).
+    The ratio follows the fit at 5 ppm/s (250 ppm/s until it first arrives, the acquisition after
+    a start: at 5 ppm/s a 500 ppm sender walked ~1400 frames past the target). The first fit
+    comes 4 s after the first packet. A phase term acts only when the 1 s mean depth leaves +-1/4
+    of the target, then brings it back to +-1/8 (a Schmitt trigger: a depth a clock step pushed
+    out otherwise parked on the band's edge where the jitter poked it out again). Clamped to
+    +-1000 ppm (`ASRC_MAX_PPM`; the design said +-500, review round 1 raised it: cam1's headset ADC
+    measured +540 ppm and would have been cut every ~13 min);
+  - the arrival time is taken BEFORE the jitter lock (`push_at(&audio, arrived)` in the receive
+    task, the card leg and the pw-cat capture), so the time a push waits for the hub-mix thread
+    never enters the fit. The polyphase table is built when a leg is constructed
+    (`asrc::warm`), never on the real-time thread. A fanned mono packet renders ch1 once and copies
+    it; the coefficients are computed once per frame for all channels (`asrc::render_planar`);
+  - after the prime the depth is never trimmed or padded: an underrun = ONE whole silent block and
+    a re-prime to the SAME target; above the cap ONE counted resync to the target
+    (`NetworkFillStats::resyncs`, the buffer's `overruns` counts it too). Both also restart the
+    arrival series (whatever ran the leg dry, or overran it, is a step in it that would bend the
+    64 s fit for a minute); the ratio is kept. A stall (> 500 ms) restarts it the same way;
+  - a LOST HUB TICK (the part of a late wake beyond the four ticks the block loop runs late):
+    `skip_missed` reads past it exactly as its pop would have (the read point advances by
+    `missed x block x ratio`), so the latency stays; only a fill that would then sit more than half
+    a block under the target gives up just what lies above that floor;
+  - a lost packet shifts the arrival series by its frames; the fit's bias while that step crosses
+    the 64 s window integrates to those frames, so it gives them back (reasoned, not benched; a
+    loss long enough to run the leg dry restarts the series anyway, which the bench does cover).
 - **Underruns, mutes, stalls (`vban_io::JitterBuffer`).**
   - A VBAN leg's ran-dry pop is PENDING. It is counted as an underrun at the next packet only if
     that packet continues the stream (within `STALE_STREAM_MS`).
-  - A cambox sends only while unmuted (`src/intercom.rs`), so a mute is not an underrun (it would
-    name the cambox and hide a real `fohabl` dropout).
+  - A cambox sends only while unmuted (`src/intercom.rs`), so a mute is not an underrun.
   - A packet after a stale gap counts one STALL, drops the old tail (never replayed ahead of the
     fresh audio) and re-primes.
-  - A packet with a different channel count also restarts the leg, so a channel that stopped
-    arriving cannot hold the shortest-channel fill at zero forever.
-  - `local_capture` still counts its underruns at once.
-- **Expected settle.** Under jitter a prime can leave a start-up offset (a packet of granularity, a
-  late hub wake). The gentle zone takes it out at <= 7 a second; then a steady feed gets no
-  corrections (pinned for 51/52, 128 and 256-frame packets at 16 phases after 60 s). Over 8 h the
-  total corrections equal the drift within 5 %.
-  - A prime fires on the first pop whose fill reaches the target, a moment biased to early
-    arrivals. The mean after it sits about half a packet LOW, and the servo repeats ~14 frames
-    after each prime: a cambox muted every 20 s at +20 ppm showed 2600 repeats against 1167 drops
-    in an hour, net against its drift. That is inaudible and bounded (<= 7 a second). The
-    unbiased alternative, priming to the target + half a packet, needs the packet size in the
-    controller and was not taken.
+  - A packet with a different channel count also restarts the leg.
 - **Observability.**
-  - `/api/state` VBAN participants carry `jitter: {target_frames (live: a program feed's follows
-    its sender), setpoint_frames + servo_walk_steps (where a target change's gentle walk stands
-    and how many of the corrections walked it, hub step 4), depth_frames (1 s mean pre-pop fill,
-    following the setpoint), depth_min_frames (the 1 s low-water mark;
-    margin = this minus one block), servo_drops, servo_repeats, stalls, primed}`, and a program
-    feed also `max_gap_ms_10min` (the largest gap its target follows, 0.1 ms resolution; omitted
-    on a cambox).
-  - The hub-level `caught_up_ticks` (ticks run late: no loss) and `lost_ticks` (given up: a block
-    lost on every output) since start, and `mix_thread_sched` (the block loop thread's class).
-    `missed_ticks` is gone.
+  - `/api/state`, every resampler leg (VBAN and the card capture): `jitter: {target_frames (fixed),
+    depth_frames (1 s mean pre-pop depth ahead of the read point), depth_min_frames, rate_ppm (the
+    ratio, 0.1 ppm), rate_fit_ppm (the last fit; null before the first after a (re)start; past
+    the clamp it says how far), asrc_phase_frames (the last second's mean depth minus the target),
+    resyncs, stalls, primed}`. No servo or adaptive field is left. A ran-dry or restarted leg
+    clears its depth numbers, so no stale second shows.
+  - The 1 s mean depth rides the packet / pop phase by up to one packet (or one block for bursts
+    longer than a block), so `asrc_phase_frames` wanders by that much inside the band; the true
+    latency does not move.
+  - The hub-level `caught_up_ticks`, `lost_ticks`, `mix_thread_sched`.
   - The status line is `underruns=<sum>(<worst leg>) overruns=<sum>(<worst leg>)
     [stalls=<sum>(<worst program leg>)] [lost=<n>] [tx_dropped=<sum>(<worst leg>)]
-    [servo=<drops>/<repeats>]`. The total still leads, so a `underruns=(\d+)` parser keeps
-    working; a leg is named only when its sum > 0. A caught-up tick is no loss and stays off the
-    line.
-  - The stalls part counts only non-cambox VBAN legs (a cambox stalls on every mute).
-- **The program audio is later: the program-feed target plus a fixed pipe depth.** fohabl/lv1 feed
-  `program_out` (the strih OBS `ASIO zvuk`). The old depth was 0-5 ms and changed with every
-  restart. Now it is:
-  - the program-feed target: 32 ms, or up to 64 ms while the FOH sender's gaps of the last
-    10 min need it (each one-block step walked in over ~37 s at <= 7 corrections a second;
-    `.claude/rules/strih-intercom-hub-mix.md`);
-  - plus the pw-cat pipe, held at 1792 frames (37.3 ms) on average by the egress servo below.
-    A spawn starts within +-2.7 ms of it and is walked in within ~60 s; after that every restart
-    sits within about 1 ms of the same depth, whatever pw-cat's connect time.
-
-  Re-check any sync offset on that OBS input once after a hub deploy. The issue-1345 "10-20 ms"
-  acceptance (design comment 5813703805) was about the talkback ring, not the program feed; the
-  1401 designs accepted these delays knowingly.
-- **Supervisor live check after a hub deploy:**
+    [resyncs=<sum>(<worst leg>)] ... [asrc=<leg>:rate_ppm=+0.5:asrc_phase_frames=-3.0:underruns=0:resyncs=0]...`,
+    one `asrc=` group per resampler leg that is playing now (primed; a muted cambox is left
+    out). The total still leads, so a
+    `underruns=(\d+)` parser keeps working. Built off the real-time thread like the rest.
+- **The program audio delay is fixed** (computed, see `.claude/rules/audio-clock-map.md`): the
+  program-feed target 37.3 ms, plus on strih-pp the pw-cat pipe held at 1792 frames (37.3 ms) by
+  the egress resampler (+ its 16-frame look-ahead). Re-check any sync offset on that OBS input once after a hub deploy.
+- **Supervisor live check after a hub deploy (lane 1):**
   - `curl -s http://strih-snv:8790/api/state` -> the `fohabl` participant: `jitter.primed: true`,
-    `target_frames` 1536..3072 (a cambox: 768) matching `max_gap_ms_10min` by the adaptive rule,
-    `depth_frames` within +-16 of it once walked in, `depth_min_frames` well above 256,
-    `servo_drops - servo_repeats` growing at the sender's drift (+0.5 ppm = about one frame per
-    40 s) plus the walks after a target change (about 256 a block, at most ~7 a second).
-  - The journal status line: `underruns=` flat across a whole program (one count per gap under
-    500 ms inside a running stream, naming the leg), no `stalls=` unless a program sender really
-    stopped, no `lost=` (a lost tick is a block lost on every output: the hub-mix thread woke
-    more than four blocks late), `overruns=0`. `caught_up_ticks` on `/api/state` may grow: those
-    are hiccups that cost nothing.
-  - A cambox far off 48 kHz shows `servo_*` growing at its own rate and its depth sitting that far
-    off the target. Past ~1000 ppm it also shows underruns or overruns (the ASRC escalation).
+    `target_frames` 1792 (a cambox 768, the cutters 2048), `rate_ppm` settled within a minute at
+    the sender's rate (the FOH desk measured +0.5 ppm) and then moving by tenths only,
+    `asrc_phase_frames` inside +-448 (a quarter of the target), `resyncs` 0, `depth_min_frames`
+    well above 256 + 16.
+  - The status line: `underruns=` flat, no `resyncs=`, no `stalls=` unless a sender really
+    stopped, no `lost=`, one `asrc=` group per live leg.
+  - A sender past 1000 ppm reads `rate_ppm=+1000.0`, a larger `rate_fit_ppm`, and counted
+    `resyncs` (the clamp).
 - **The egress: a fill target on every pw-cat pipe, one non-blocking socket per VBAN destination
   (design comment 5979128757, live findings 5979008527 + 5979112926, 4.10.2026).** The "extreme"
   chopping after a production was the egress, not the ingress.
@@ -468,7 +457,7 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
     `PIPE_TARGET_FRAMES` (2 quanta = 2048 frames, 42.7 ms), then write the block. Above
     `PIPE_HIGH_FRAMES` (target + 2 quanta = 4096) -> drop the block (a trim). A drained pipe costs
     ONE short silent gap, not continuous chopping. Since step 2 neither fires in a healthy run (see
-    the servo below).
+    the resampler below).
   - **Starved = under one block for a whole hub period (hub step 4, design 5981457044).** The
     `starved` flag of `pipe_fill_plan` is set by `PipeFillControl`: for the prime, or when the fill
     read under one block on EVERY reading (the 1 ms samples and the pre-write readings) for at
@@ -482,64 +471,81 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
   - The first write after a spawn reads 0 and gets the same top-up, but it is the PRIME: logged at
     info, not counted as a refill. A refill (a pipe that drained under a running pw-cat) logs one
     warn line `pipe ran low — topped up with silence`; a trim is debug only. Both restart the
-    servo's window, like an underrun / overrun on a VBAN leg.
-  - **Egress step 2 (ROZHODNUTÉ 5979509439 + 5979627274, design question 5979620130): a fixed
-    start depth and a drift servo.** `pipe_fill::PipeFillControl` (pure, clocked in ns by the
-    caller) plans every write: the guards, then the start hold, then the servo.
+    rate fit's series, like an underrun / resync on a VBAN leg, and a refill re-primes (issue
+    1461): the start hold again until the reader's next read, so the catch-up blocks behind a stall
+    never leave the pipe a prime deeper.
+  - **Egress step 2 (ROZHODNUTÉ 5979509439 + 5979627274, design question 5979620130) + issue 1461
+    lane 2 (design 6376769274): a fixed start depth and the resampler.**
+    `pipe_fill::PipeFillControl` (pure, clocked in ns by the caller) plans every write: the guards,
+    the start hold, and what the resampler renders; `pipe_fill::EgressQueue` holds the samples.
     - **Start hold.** pw-cat reads nothing until its stream runs, and the hub kept writing on top
       of the prime (62-85 ms, different after every restart). Until the fill first DROPS after the
       spawn, a block that would take the fill above `PIPE_TARGET_FRAMES` is dropped (`StartHold`,
       counted in `pipe_start_holds`, a debug line). pw-cat's first read therefore always finds
-      exactly the prime: the target + the prime's own block, 2304.
-    - **Servo.** The cans' sink is clocked by the MiniFuse crystal, not the hub's timer. Before
-      step 2 a 50 ppm offset ended in a 5.3 ms trim every ~107 s or a refill gap of up to 43 ms
-      every ~14 min. Now the VBAN legs' own `NetworkFill` holds the pipe: `servo_step` (the
-      `plan_pop` tail, extracted, ingress identical), with the 1 s mean, the gentle-then-steep
-      budget and >= 1000 frames between corrections. A drop / repeat writes the block one frame
-      short / long, spread per channel by `stretch_interleaved` (`stretch_block`).
-    - **The servo reads the TIME-WEIGHTED fill, never the pre-write readings.** pw-cat takes four
+      exactly the prime: the target + the prime's own block, 2304 (the top-up's silence also
+      covers the 16 frames the first rendered block falls short of a block).
+    - **The crossing is the resampler (issue 1461).** The cans' sink is clocked by the card's
+      crystal, the HDMI leg by the GPU's audio clock, the strih-pp program sink by its PipeWire
+      driver. Issue 1401 held the pipe with single-frame drops / repeats (`pipe_drift_servo`,
+      `stretch_interleaved`, deleted). Now the hub blocks queue in hub frames and each write renders
+      as many reader-clock frames as the queue holds from a fractional read point
+      (`asrc::render_interleaved`, lane 1's 32-tap x 128-phase Kaiser sinc), so a write is 255,
+      256 or 257 frames because the ratio says so, never a frame cut or repeated. The ratio is an
+      egress `asrc::RateControl::egress`: every detected read (a fill drop between two readings,
+      timed at their middle) is a point of the reader's consumed frames (written minus the fill)
+      on the hub's clock; the 64 s least-squares slope is the reader's rate, the ratio its inverse,
+      followed at 5 ppm/s (250 ppm/s until first reached), +-1000 ppm. The reads that only fill
+      aplay's own buffer (the spawn's burst, an xrun's refill) are not points. A phase term acts
+      only while the 1 s time-weighted fill sits outside a quarter of the leg's fixed latency (the
+      setpoint plus aplay's own buffer: 448 for pw-cat, 480 for aplay, whose period reads ride
+      +-128 plus a spawn's +-128 phase) and then brings it back to an eighth.
+    - **The depth is the TIME-WEIGHTED fill, never the pre-write readings.** pw-cat takes four
       hub blocks at once. Between two read/write phase crossings the pre-write readings repeat the
       same four values, so a drift reached them only as a whole-block (256-frame) step at each
-      crossing (every ~107 s at 50 ppm). The servo answered those with bursts of up to 47
-      corrections a second (the model on design question 5979620130). So the sink thread waits
-      with `recv_timeout(PIPE_SAMPLE_INTERVAL)` (1 ms) and reads the pipe (`sample_fill`) when no
-      block came, about 1000 `FIONREAD`s a second per sink (accepted). Each block's servo input is
-      the trapezoid mean of the readings since the last block.
-    - **Setpoint = the depth the hold leaves.** `pipe_servo_setpoint(block)` = target + block -
-      quantum / 2 = 1792 frames (37.3 ms), derived in code. That is the prime minus half a quantum,
-      the time-average over a read cycle, in the middle over where pw-cat's first read falls inside
-      a hub block. One spawn starts at 1664..1920 (+-2.7 ms) depending on that phase; the gentle
-      servo walks it in (up to ~120 single-frame corrections, at most ~9 a second, settled within
-      ~60 s), and every restart then sits at the same depth.
+      crossing (design question 5979620130). So the sink thread waits with
+      `recv_timeout(PIPE_SAMPLE_INTERVAL)` (1 ms) and reads the pipe (`sample_fill`) when no block
+      came, about 1000 `FIONREAD`s a second per sink (accepted). Each block's depth is the
+      trapezoid mean of the readings since the last block; the same readings time the reads.
+    - **Setpoint = the depth the hold leaves.** `pipe_setpoint(block)` = target + block - quantum
+      / 2 = 1792 frames (37.3 ms), derived in code: the prime minus half a quantum, the
+      time-average over a read cycle. One spawn starts at 1664..1920 (+-2.7 ms) depending on where
+      pw-cat's first read falls inside a hub block, inside the dead band, and KEEPS that depth for
+      its run (the issue-1401 servo walked it in; the design's phase term acts only outside the
+      band). aplay (`pipe_setpoint_for(256, 256)` = 640): its prime adds the ALSA buffer + the
+      period it holds LESS the one read it keeps taking in step with the hub
+      (`prime_reader_frames`), so the pipe rides 512..768 around 640 from the start (with the
+      whole buffer added it started a read deeper, 896, and the servo walked it down). The
+      resampler's queue adds its 16-frame look-ahead (0.33 ms) to every egress.
     - **A dead pw-cat during the hold is noticed (review round 1).** The hold writes nothing, so no
       write gets the `EPIPE` that respawns a dead child, and `FIONREAD` keeps answering after the
       reader closed. Every reading therefore first asks `pipe_reader_gone` (a timeout-0 `poll` on
       the write end; Linux reports `POLLERR` once the pipe has no reader) and returns
-      `BrokenPipe`, so the sink thread respawns.
-    - **Never** go back to a setpoint of `PIPE_TARGET_FRAMES` on the pre-write fill: its mean sits
-      `(quantum + block) / 2` under the hold level, a +384-frame walk at 47 corrections a second
-      after every spawn.
-    - Measured on the two-clock bench (`tests/egress_servo_1401.rs`; pw-cat at quantum 1024 vs
-      256-frame hub writes on tokio's ms-rounded wakes, the true depth from exact event times):
-      - 0 ppm: no corrections after 60 s, true depth within 18 of 1792;
-      - +-50 ppm: <= 3 corrections a second, true depth within 53 (the servo's own view, i.e.
-        `pipe_depth_frames`, within 62: it runs ~10 further off, the 1 ms readings place each read
-        only within a millisecond);
-      - +-200 ppm: rate 9.6 a second (median 10; up to 15 in one second, the servo's own budget
-        while the 1 s error rides 128..146, just past the knee), true depth within 140, the
-        servo's view within 147;
-      - 0 trims, 0 refills, 0 starved reads in every 1 h run;
-      - 16 connect delays: first read = the prime every time, <= 9 corrections a second after the
-        spawn, settled (the servo's measured depth within 20, the true within 22) by 60 s, all 16
-        true depths 1775..1813;
-      - the residual is the 1 ms readings placing each read only within a millisecond, on top of
-        the servo's 16-frame band.
+      `BrokenPipe` naming the reader (`PipeFillWriter::with_reader`: `aplay` for the card and HDMI
+      legs, `pw-cat` otherwise), so the sink thread respawns.
+    - Measured on the two-clock benches (`tests/egress_servo_1401.rs`, frame counts, pw-cat at
+      quantum 1024 vs 256-frame hub writes on tokio's ms-rounded wakes, the true depth from exact
+      event times; `tests/hdmi_leg_bench_1424.rs`, aplay; dev1 24.10.2026):
+      - pw-cat: 0 trims, 0 refills, 0 starved reads in every 1 h run at 0 / +-50 / +-200 ppm; the
+        ratio within 0.5 ppm of the sink; the true depth within 133 of 1792 (the spawn's phase plus
+        the walk before the first fit), the measured within 140; 16 connect delays: first read =
+        the prime every time, each spawn's depth the same at 10 s and at the end (within 20);
+      - aplay (HDMI / card): the ratio within 4.6 ppm (the 1 ms readings place the period reads
+        with a bias that turns with the read/write phase), the depth within 183 of 640, no refill,
+        trim or xrun at 0 / +-50 / +-200 ppm, connect 0..200 ms, 15..26 ms stalls;
+      - a 997 Hz tone through the real `PipeFillControl` + `EgressQueue` (`egress_asrc_1461.rs`):
+        every 50 ms window under -80 dB THD+N at 0 / +-50 / +-200 ppm and a 100 ppm step, both
+        readers (the issue-1401 servo: 7..256 windows at -29 dB).
+      - CPU (dev1, `-C opt-level=3`, load ~7): the card leg's 6 hw channels 107 us per 5.33 ms
+        block (2.0 % of one core, on the `alsa-play` thread, not the mix thread), a 2-channel aplay
+        or pw-cat pipe 37 us (0.7 %), the Janus ring 12 us per 20 ms pop.
   - The `local_audio` facet adds `pipe_refills`, `pipe_refill_frames`, `pipe_trims`, the last
     `pipe_fill_frames` (measured before the last write; it rides pw-cat's quantum reads, from the
     held depth - 640 to the depth + 384, so never judge the depth from it), `pipe_start_holds`,
-    `pipe_servo_drops`,
-    `pipe_servo_repeats`, `pipe_depth_frames` (the servo's 1 s time-weighted mean) and
-    `pipe_setpoint_frames` (1792). `tx_blocks` counts written blocks only (a corrected block is one).
+    `pipe_rate_ppm` (the resampler's ratio, hub frames per written frame: a fast sink reads
+    negative), `pipe_rate_fit_ppm` (null before the first fit after a spawn or a guard),
+    `pipe_asrc_phase_frames` (the last second's depth minus the setpoint), `pipe_depth_frames` (the
+    1 s time-weighted mean) and `pipe_setpoint_frames` (1792 / 640). `tx_blocks` counts written
+    blocks only. The issue-1401 `pipe_servo_drops` / `pipe_servo_repeats` are gone.
   - **VBAN send: one `VbanSender` per output slot, each socket non-blocking.** Packets to a cambox
     that is off wait in its unresolved ARP neighbour queue, charged to the socket that sent them.
     With ONE shared socket the queues of several off camboxes together filled its send buffer and
@@ -563,20 +569,19 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
     - `pw-top -b` on strih-snv: the program-sink and cutters `pw-cat` rows keep ERR at 0; note each
       row's driver (the MiniFuse for the cans);
     - `/api/state` -> `program_out` and `cutters` `local_audio` (egress step 2):
-      `pipe_setpoint_frames` 1792; `pipe_depth_frames` within +-70 of it on the cans (a 50 ppm
-      MiniFuse reads ~62 off in the servo's own view, the true depth ~10 closer), and within +-20
-      on the program sink (it shares the hub's clock); `pipe_fill_frames` (one instantaneous pre-write
+      `pipe_setpoint_frames` 1792 (an aplay leg 640); `pipe_depth_frames` within the dead band
+      (+-448 / +-480; measured within ~140 / ~185 on the benches, fixed for a spawn's run);
+      `pipe_rate_ppm` settled at the sink's clock within a minute (a MiniFuse 50 ppm fast: about
+      -50) and then moving by tenths, `pipe_asrc_phase_frames` inside the band; `pipe_fill_frames` (one instantaneous pre-write
       reading) anywhere in depth - 640 .. depth + 384, ~1000..2350 (it rides pw-cat's 1024-frame
       reads); `pipe_refills` 0 and `pipe_trims` flat;
       `pipe_start_holds` grows only at a pw-cat (re)spawn, together with `spawns`: pw-cat's
       connect time / 5.33 ms blocks, plus after a respawn up to the 63 stale blocks the 64-block
       egress queue filled during the 1 s restart backoff (the first queued block is the prime);
       `pipe_depth_frames` reads 0 for the first second after each spawn's first read;
-    - over >= 1 h: `pipe_servo_drops - pipe_servo_repeats` grows at the sink's drift and no
-      faster (50 ppm = 2.4 a second = ~8640 an hour; the program sink about 0). The first minute
-      after each pw-cat (re)spawn adds the walk-in, up to ~120 corrections (see the setpoint
-      above); outside that, a jump of hundreds within a minute is a burst, a finding. Note each
-      `pw-cat` row's driver in `pw-top` (the MiniFuse for the cans);
+    - over >= 1 h: `pipe_rate_ppm` stays within a few ppm of where it settled, `pipe_refills` /
+      `pipe_trims` flat, `pipe_depth_frames` where the spawn put it (a drift of the depth means the
+      ratio is not following: a finding). Note each `pw-cat` row's driver in `pw-top`;
     - a `pipe_start_holds` that keeps climbing between spawns means pw-cat is not reading; the
       journal then shows `local-audio: ... pw-cat exited — respawning` once it dies (the hold
       notices a dead child, see above);
@@ -589,21 +594,20 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
     counters, `classify_send`, `tx_dropped` on the facet + status line, the `main.rs` anchor of one
     sender per output, the sink-thread anchor feeding `record_write`) and `vban_io`'s in-file
     `a_sender_socket_never_blocks` (a `recv_from` with a 2 s timeout must return `WouldBlock` at
-    once). Step 2: `tests/egress_servo_1401.rs`:
-    - the setpoint and its derivation, `servo_step` == the pop servo, `stretch_interleaved`, the
-      bytes per plan;
+    once). Step 2 + issue 1461 lane 2: `tests/egress_servo_1401.rs`:
+    - the setpoint and its derivation, each write = exactly its report's frames through
+      `EgressQueue` (a held or trimmed block still leaves the queue);
     - the start hold, pure and on a real pipe, and a reader closed during the hold (`BrokenPipe`);
     - the starvation-only refill (hub step 4): one low reading, a period short by 1 ns, a whole
       period, a good reading in between, a pw-cat blocked in its read, the prime / trim / top-up;
-    - a guard forgetting the servo's pending budget, the servo measuring from pw-cat's first read
-      (both ways the hold ends);
-    - the facet counters, the sink-thread `recv_timeout` / `sample_fill` anchor;
+    - a guard restarting the rate fit and keeping the ratio, the depth measured from pw-cat's
+      first read (both ways the hold ends);
+    - the facet fields (the servo keys gone), the sink-thread `recv_timeout` / `sample_fill` /
+      `record_asrc_stats` anchor;
     - the two-clock bench (the 16 spawns, 0 / +-50 / +-200 ppm for 1 h; < 1 s in a debug build).
-      It bounds the TRUE depth (from exact event times) and, separately, the depth the servo
-      itself measures (the trapezoids of the hub's own readings).
-
-    Its per-second correction counts are bench seconds, not the servo's windows. At 200 ppm the
-    peak of 15 is the servo's own budget past the knee, not a straddle.
+      It bounds the TRUE depth (from exact event times), separately the depth the controller
+      itself measures, and the ratio against the sink's clock.
+    - `tests/egress_asrc_1461.rs`: the tone through both readers and the Janus ring (above).
   - The block loop lives in `main.rs` `run_block_loop(BlockLoop)` (moved out of `main()` in the
     same change, which had grown past the ~300-line budget); `main()` only builds the
     `BlockLoop` and spawns it.
@@ -614,7 +618,7 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
     (`intercom_hub::` -> `crate::`) runs the real-pipe FIONREAD test under plain `rustc --test`,
     and `clippy-driver --test -D warnings` on the same root. `main.rs` still first compiles at CI:
     copy its changed send-loop lines into the replica to type-check them against the real
-    `vban_io`. Step 2 adds `pipe_fill.rs` to the `#[path]` root and the servo + ingress test
+    `vban_io`. Step 2 adds `pipe_fill.rs` to the `#[path]` root and the egress + ingress test
     files (`vban_jitter_1401.rs`, `vban_jitter_bench_1401.rs`) as modules, so one replica proves
     both the egress acceptance and the unchanged ingress behaviour after the `servo_step`
     extraction. Cut the tests' `serde_json` key checks (they compile at CI). For the RED, build
@@ -631,42 +635,38 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
     on dev1 (`ip -br addr` shows a `br-*` DOWN with 172.18.0.1/16) never leaves the box. One
     destination per socket vs two on one socket reproduces the per-slot vs shared-socket
     behaviour (review round 1 script: `dead_neigh.py`, comment 5979378075).
-- **The real-time block loop and the adaptive program target (design 5980775411)** live in their
-  own rule, `.claude/rules/strih-intercom-hub-mix.md` (auto-loads on `block_clock`, `mix_thread`,
-  `adaptive_target`, `main.rs`, `vban_io`, `inputs`, their tests and the unit): the `hub-mix`
-  SCHED_FIFO 10 thread, the catch-up of up to four late ticks, the measured stall-length table and
-  its residuals, the 32-64 ms program target, the live check and the three Tier-0 replicas.
-- **Tests + the bench.** `tests/vban_jitter_1401.rs` (policy; the cambox cap pinned at 9),
-  `tests/setpoint_walk_1401.rs` (the gentle setpoint walk, hub step 4),
-  `tests/vban_jitter_state_1401.rs` (facet, status line, `input_buffers` on the deployed TOML, the
-  block-loop wiring anchor), and `tests/vban_jitter_bench_1401.rs`:
-  - a two-clock + Gaussian-jitter (FIFO) bench on frame counts. 8 h of the FOH feed and of a mono
-    cambox at +-20 ppm with 1 ms sd run in ~6 s debug;
-  - realistic = 1 ms sd. The old buffer's live underrun rate is reproduced with only 0.2 ms sd
-    (issue 1401 STEP-0 comment), and the bench runs that old policy on the same arrivals to prove
-    it can tell them apart;
-  - with 1 ms sd over 8 h the worst pre-pop fill still kept >= 4 ms of margin (measured: 4.1 ms on
-    a mono cambox at -20 ppm, 5.1 ms on the FOH feed);
-  - the bench models the block loop's lost-tick discard (one every 30 s, and one every 0.5 s
-    with the +540 ppm cambox; since design 5980775411 a tick is lost only beyond the four the loop
-    runs late), a 60 ms stall (burst / lost) and a cambox muted every 20 s;
-  - it measures for itself (its own 1 s means, correction gaps and per-second counts, after the
-    settle) and never trusts the controller's numbers;
-  - its 1 s windows are not aligned with the servo's, so a per-second bound must allow a second
-    that straddles two servo seconds (6 for a slow drift, 14 after a prime). The first bound, 3,
-    was raised for that reason;
-  - the gap bound starts after the settle; a start-up gap is seed-dependent;
-  - re-pins that followed the gentle slope (time constant ~16 s), disclosed in the commit after
-    them: the steady-feed settle 30 -> 60 s (run 120 -> 150 s), the walk-down's final in-band
-    check 40 -> 120 s (its steep part still checked at 20 s).
-- **Not covered (follow-up candidate, outside this design; not filed yet, the lane hands it to
-  the supervisor):** the `local_capture` rings (the MiniFuse talkback and the Janus phones'
-  ingress) still have no drift servo and no missed-tick discard. A USB or phone clock tens of ppm
-  off eventually trims from the 32-block cap down to the target (a ~128 ms cut). `NetworkFill`
-  could back that policy too.
+- **The real-time block loop (design 5980775411)** lives in its own rule,
+  `.claude/rules/strih-intercom-hub-mix.md` (auto-loads on `block_clock`, `mix_thread`, `asrc`,
+  `main.rs`, `vban_io`, `inputs`, their tests and the unit): the `hub-mix` SCHED_FIFO 10 thread,
+  the catch-up of up to four late ticks, the measured stall-length table and its residuals, the
+  fixed program target, the live check and the Tier-0 replicas.
+- **Tests + the bench.**
+  - `tests/asrc_1461.rs`: the resampler (unity ratio at phase 0 = a delayed identity, DC gain 1 at
+    every phase and ratio, a 100 Hz / 1 kHz / 5 kHz sine read at -1000..+1000 ppm from four start
+    phases lands under -85 dB of the continuous sine, rendering block by block = one pass, the
+    interleaved render = the planar one, `frames_needed`, the least-squares fit, `target_ms`
+    rounding) and a two-clock bench on frame counts: a jittered cambox at +-50, +-500 and +540 ppm (cam1) for
+    2 h, a 0 -> +100 ppm step, the FOH burst pattern at its fixed target, a lost tick every 30 s,
+    an 1100 ppm sender (counted resyncs, the target never moves).
+  - `tests/asrc_leg_1461.rs` (black box through the real `JitterBuffer`): a 1 kHz sine from a
+    cambox at +-50 / +-500 ppm and across a 100 ppm step, every 50 ms window fitted with a
+    free-frequency sine: THD+N under -80 dB in every window (the issue-1401 servo failed 24 / 75
+    of 600 windows at -29 dB, the RED), and the grader's own control (one cut frame fails it).
+  - `tests/vban_jitter_1401.rs` (the policy re-pinned on the resampler leg),
+    `tests/vban_jitter_bench_1401.rs` (the issue-1401 scenarios: 8 h at +-20 ppm FOH and cambox,
+    the +540 ppm cam1 ADC, bursts, lost ticks every 30 s and every 0.5 s, mutes every 20 s, 60 ms
+    stalls, the old-policy control; graded on no silent block / skip / resync, the depth inside
+    the band, the ratio within 3 ppm of the sender), `tests/vban_jitter_state_1401.rs` (facet,
+    status line, `input_buffers` on the deployed TOML), `tests/vban_program_target_1401.rs`
+    (both strih TOMLs' `target_ms`).
+- **Issue 1461 lane 2 (the egress + the phones)** is in "The egress" above and in "25.9.2026
+  phone audio" below: no hub crossing is left that inserts or drops a frame.
 - **Tier-0 verify without cargo.**
-  - A rustc `--test` replica: `vban_jitter.rs` + the `JitterBuffer` section of `vban_io.rs` + the
-    test files with `intercom_hub::` -> `crate::`, then `clippy-driver --test -D warnings` on it.
+  - A rustc `--test` replica: `fir.rs` + `block_clock.rs` + `asrc.rs` + `vban_jitter.rs` (+
+    `pipe_fill.rs`, `janus_pacing.rs` for `hub_catchup_1401` and `egress_asrc_1461`) + the
+    `JitterBuffer` section of `vban_io.rs` (its `tracing::` calls pointed at a stub macro module)
+    and the test files under `extern crate self as intercom_hub;`, then
+    `clippy-driver --test -D warnings` on it.
     Extract the section by the doc-comment markers "/// One decoded VBAN packet" .. "/// Encode an
     interleaved" and "/// A stream whose last packet" .. "/// A UDP sender".
   - The whole real `vban_io.rs` type-checks with the rlib recipe in "VBAN rate" above (add
@@ -699,6 +699,50 @@ setpoint walk, the starvation-only pipe refill and the derived caps, design 5981
   block loop reads. The periodic status line appends `rate_rejects=N` when any packet was dropped (a
   rejected stream reads as silent -120 dBFS, so the line is what explains it). After a deploy,
   fohabl must read `sample_rate: 96000` with `overruns` ≈ 0.
+- **A known stream that does not decode is counted, never silent (issue 1467).** 23.10.2026 the
+  FOH console sent `fohabl-strih` as 24-bit PCM to a hub built before the PCM24 arm: the old
+  `route_packet` decoded BEFORE the name lookup, turned the error into `None`, and the cutters lost
+  FOH for ~90 min with no counter and no log.
+  - `classify_packet` (`intercom/hub/src/vban_classify.rs`, re-exported from `vban_io`) reads the
+    stream name from the raw header (`vban_stream_name`: magic + the 16-byte name, any sub-protocol),
+    looks it up, and only then decodes: `Audio` / `Undecodable { id, stream, reason }` / `Foreign`
+    (unknown name or not VBAN, silent). `route_packet` stays the audio-only wrapper.
+  - Undecodable = an unsupported codec (`unsupported VBAN codec 0x..`), a non-audio sub-protocol, or a
+    payload without one whole frame (`malformed VBAN payload`, no byte count in the reason so one
+    stream keeps one reason). A reserved rate index still decodes to rate 0 and stays a
+    `rate_rejects` count (the converter's).
+  - The receive task (`spawn_vban_receive` in main.rs, out of `main()` for its size) owns a
+    `DecodeRejects` per participant: a warn per transition (the first reject, a changed reason:
+    stream, sender, reason, count) and an info when the stream decodes again, at most one line per
+    stream every `DECODE_LOG_FLOOR` (10 s; the next line carries `suppressed_transitions`), so a
+    sender mixing good and bad packets never logs at packet rate. A suppressed transition stays
+    PENDING: the first packet after the floor logs the stream's CURRENT state, so the journal's last
+    line never says the opposite of what the hub does (review round 2). The count is published through
+    the same `VbanRateStats` slot (`publish_decode_rejects`, which `publish` never resets).
+  - `/api/state`: `decode_rejects` on every VBAN participant; the status line appends
+    `decode_rejects=N(<worst leg>)` only when > 0. verify-strih item 16 NOTEs a leg with a non-zero
+    count (`strih_intercom_hub_version_grade`, below).
+  - Tests: `intercom/hub/tests/vban_decode_rejects_1467.rs` (its `mod wiring` = the matrix + serde
+    half, CI only; the status line + snapshot are mirrored in a stub-matrix replica of state.rs).
+    Every plain-rustc replica that mounts `vban_io.rs` now mounts `vban_classify.rs` next to it.
+  - Open (review round 1, design-accepted): verify item 16 NOTEs a hub older than the checkout on
+    nearly every run, because the workspace version moves on every PR while an installed hub is
+    never replaced; grading by "the hub source changed since the hub's commit" needs git history the
+    staged tree does not carry.
+- **The hub binary of the checkout's own commit (issue 1467).** setup-strih step 13
+  (`strih_intercom_hub_binary_install BIN ROOT`, `scripts/lib/strih-ci-artifact.sh`) fetches the
+  `intercom-hub-linux-amd64` artifact of the provisioning tree's commit (`strih_checkout_source_sha`:
+  a git checkout's HEAD when ROOT is its top level, read with `-c safe.directory=<ROOT>` so a root run
+  from the operator's clone is not refused by git's ownership check, else the `CAMERA_BOX_SOURCE_SHA` file the
+  strih-snv deploy writes into its staged tree, which also carries `Cargo.toml` now), `main` only
+  when that commit has no artifact (a WARNING names it), `STRIH_LX_HUB_SRC` still first. The log
+  names the ref; `<bin>.version` records version / source_sha / artifact_ref. An installed binary is
+  still kept (its version is recorded when the file is missing or differs). verify-strih item 16
+  (`strih_intercom_hub_version_grade BASE_URL BOX [ROOT] [BIN]`, `strih-intercom-hub-unit.sh`) grades
+  the RUNNING hub's `/api/version` (else the recorded version) against the checkout's workspace
+  version: OLDER = a NOTE with the reinstall line (`sudo mv` the binary to `.pre-<version>`, re-run
+  setup-strih, restart the hub), the same or newer = PASS, nothing readable = NOTE. Tests:
+  `tests/python/test_strih_hub_artifact_1467.py`.
 - **Shared FIR.** The Kaiser taps + the stateful `FirDecimator` live in `intercom/hub/src/fir.rs`;
   the PCMU `mulaw::Decimator48kTo8k` wraps it with the same math (the PCMU tests are the
   bit-identity pin). A future non-integer source rate slots in as a new converter arm here, not as a
@@ -726,6 +770,7 @@ Interkom picture = M3c — both out of this lane).
 
 ```
 phone browser ── WSS interkom.newlevel.media ──▶ dev1 nginx ──▶ Janus WS :8188 (strih-snv)
+  (M3a history; since issue 1453: ──▶ the box's nginx ──▶ the hub's /janus allowlist relay ──▶ Janus WS 127.0.0.1:8188)
                                                                        │  audiobridge room "interkom" (id 1000)
                                                           plain RTP PCMU (8 kHz, PT 0)
                                                                        ▼
@@ -733,8 +778,9 @@ phone browser ── WSS interkom.newlevel.media ──▶ dev1 nginx ──▶ 
 ```
 
 The hub sends the phones' N-1 mix INTO the room as PCMU and receives the room mix minus itself (=
-the phones' mics), feeding the existing engine unchanged. Janus's HTTP API stays loopback (:8088);
-only the WS transport is LAN-reachable (TLS terminates on the dev1 front, no wss on the box).
+the phones' mics), feeding the existing engine unchanged. Janus's HTTP API stays loopback (:8088).
+Since issue 1453 the WS transport is loopback-only too: phones reach it through the hub's `/janus`
+allowlist relay behind the box's own nginx (`.claude/rules/strih-https.md`).
 
 ### The plain-RTP participant contract (pinned to the Janus AudioBridge docs)
 
@@ -777,7 +823,7 @@ the secret substituted from the file via a bash var — no argv exposure) + `jan
 (ws :8188, no wss), and `systemctl enable janus` — **NEVER start** it (the M4 cut-over starts it
 with the hub, same rule as `intercom-hub.service`). The pure jcfg renderers live in
 `scripts/lib/strih-provision.sh` (`strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH` —
-placeholder secret, never inlined — and `strih_janus_ws_jcfg_text LAN_IP`), pinned in
+placeholder secret, never inlined — and `strih_janus_ws_jcfg_text`, loopback-only since issue 1453), pinned in
 `tests/strih_provision_pure_functions.rs`. `verify-strih.sh` item 17 is REPORT-ONLY (janus
 installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_room_jcfg_ok`).
 
@@ -868,8 +914,8 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   - The block loop only `push`es the phones' N-1 mix (mono) into a `janus_pacing::PacedRing`.
   - The `janus_sender` OS thread ("janus-paced-tx") sleeps to absolute 20 ms deadlines
     (`PaceSchedule`). Each tick it pops exactly one 960-frame frame, encodes it and sends one packet.
-  - An underflow sends a whole silent frame and re-primes to the target (2 frames). An overflow
-    above 5 frames trims the oldest back to the target.
+  - An underflow sends a whole silent frame and re-primes to the target (2 frames + the
+    resampler's 15-frame history). An overflow above 5 frames resyncs the oldest back to it.
   - One packet per tick keeps the RTP timestamps contiguous (+960 Opus, +160 PCMU).
   - A stall over 100 ms restarts the grid instead of bursting the missed packets.
   - It is an OS thread, not a tokio task: the tokio timer wheel rounds to whole ms.
@@ -886,18 +932,28 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
   `256*1_000_000/48_000` = 5333 instead of 5333.33, so the loop ran 62.5 ppm fast. Every egress
   (the Janus ring, VBAN to the camboxes, the program/cutters pw-cat pipes) gained about 3 samples/s
   against its 48 kHz consumer. Never compute a period in truncated µs again.
-- **The ring's fill servo.** A lost mix tick (once `MissedTickBehavior::Skip`; since issue 1401
-  only a tick beyond the four the hub-mix thread runs late) or a rate offset drifts the fill. So after 50 pops in a row with the pre-pop fill above target+FRAME/2 the
-  ring drops 1 ms; after 50 below target-FRAME/4 it plays 1 ms twice (both mid-frame, crossfaded).
-  - "In a row" measures the extreme of the 256-sample ripple, so a steady exact feed never
-    triggers it. Priming ends EXACTLY at the target (the excess that piled up during the silent
-    priming ticks is the oldest audio, dropped inaudibly), otherwise a prime that overshot to
-    ~2940 made the servo drop ~8 ms right after every (re)prime. Pinned for 16 start phases.
-  - Both splices (1 ms skip / 1 ms repeat) are 48-sample linear crossfades at mid-frame, never a
-    hard cut (a click).
-  - The 60 ms trim and the silent underflow frame are the last resort only.
-  - 20-minute simulations at ±62.5 ppm and with a skipped block every 30 s pin 0 trims and
-    0 underflows.
+- **The ring is a resampler leg (issue 1461 lane 2; the 1 ms splice servo is gone).** A lost mix
+  tick (since issue 1401 only a tick beyond the four the hub-mix thread runs late) or a rate offset
+  between the block loop's grid and the sender's drifts the fill. `PacedRing` is now the VBAN legs'
+  `vban_jitter::NetworkFill` over a sample queue: every push is a point of its rate fit, timed
+  BEFORE the ring's lock (`PacedRing::push_at`, `main.rs` stamps the block), every pop renders
+  exactly one 960-frame frame from a fractional read point (`asrc::render`); target 1920 (40 ms),
+  dead band +-480. The sender plans the frame under the ring's lock (`PacedRing::take_frame`, a
+  ~1000-sample copy) and renders it after the lock (`PoppedFrame::render`), so the SCHED_FIFO
+  pusher never waits on a sinc render. The janus facet carries the ring's `tx_rate_ppm` and
+  `tx_asrc_phase_frames` next to `tx_underflows` / `tx_overflow_trims`.
+  - Priming ends EXACTLY at the target + the 15-frame history (the excess that piled up during
+    the silent priming ticks is the oldest audio, dropped inaudibly). Pinned for 16 start phases.
+  - The silent underflow frame and the resync above the cap are the last resort only (still the
+    facet's `tx_underflows` / `tx_overflow_trims`).
+  - 20-minute simulations at +-62.5 ppm (the ratio within 2 ppm of the feed) and with a lost
+    block every 30 s pin 0 resyncs and 0 underflows; a 997 Hz tone through the ring at +-62.5 /
+    +-500 ppm stays under -80 dB THD+N in every 50 ms window (`egress_asrc_1461.rs`; the old 1 ms
+    splices failed 16 of 600 at +500 ppm, and a 1 kHz tone hides a 1 ms splice: 48 samples = one
+    period).
+- **The phones' INGRESS** (the room mix Janus sends back) is the resampler leg too
+  (`JitterBuffer::janus_capture`, target 2048 or the phones' `target_ms`, which `matrix.rs`
+  accepts on the janus participant since lane 2), each packet stamped before the jitter lock.
 - **Receive-side safety (review round 1).**
   - Only the session's Janus endpoint is accepted (`is_session_peer`, port + ip unless Janus
     advertised 0.0.0.0). This keeps out stray hosts only: **Janus reuses the SAME rtp port
@@ -919,8 +975,8 @@ The owner heard the cutter's voice as "robotic" on the phone. Read this before t
     not write drains it for good, and once it holds less than a quantum every cycle blocks and
     xruns (ERR ~50/s live). The 40430 s ERR-0 reading was a run with no lost blocks. Since issue
     1401 every write measures the pipe and tops a drained one up to 2 quanta. Since its egress step
-    2 a drift servo holds the pipe at a fixed depth, because the cans' sink runs on the MiniFuse
-    crystal, not the hub's clock (see "VBAN legs" above, the egress bullets).
+    2 the pipe holds a fixed depth, since issue 1461 by the resampler, because the cans' sink runs
+    on the card's crystal, not the hub's clock (see "VBAN legs" above, the egress bullets).
 - **Opus.** `[janus].codec = "opus"` (default) | `"pcmu"`. Unknown values fail the load.
   - The join sends a top-level `codec`, `rtp.payload_type` 111 and `rtp.fec: true`. The receiver
     filters on the payload type Janus echoes in `joined` (fallback: ours).
@@ -1054,7 +1110,7 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
   `scripts/nginx/shading.newlevel.media.conf` is untouched. `interkom_https_site_content` = the same
   renderer with the interkom PRIMARY host (`interkom_https_hostname` = `interkom-lx.newlevel.media`,
   the cert-keyed name), the strih.lan upstream (`http://strih.lan:8790` = the hub) + the extra
-  `location = /janus { proxy_pass http://strih.lan:8188; … }` block from
+  `location = /janus { proxy_pass http://strih.lan:8188; … }` block (since issue 1453 `strih.lan:8790`, the hub's relay) from
   `interkom_https_janus_location` (HTTP/1.1 Upgrade passthrough + `proxy_read_timeout 3600s` for the
   persistent WS). The `/ws` upgrade for the hub is already carried by `location /`. The rendered
   site is committed at `scripts/nginx/interkom.newlevel.media.conf` and the python test
@@ -1327,7 +1383,7 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
   the 17-step flow already runs **Program audio (12) → Intercom hub (13) → Janus (14)** with nothing
   for Janus to precede, and this lane re-applies ONLY the Janus binds/restart/credential onto that
   layout. The Janus step (14) writes THREE jcfg: the audiobridge room, `janus.transport.websockets.jcfg`
-  (**`ws_ip` bound to the LAN IP** on :8188, not 0.0.0.0), and a new `janus.transport.http.jcfg`
+  (`ws_ip` bound to the LAN IP on :8188 at M3; **since issue 1453 bound to 127.0.0.1**, phones go through the hub's `/janus` relay), and a new `janus.transport.http.jcfg`
   (**HTTP API bound `ip = "127.0.0.1"` loopback-only** on :8088 — closes the design's loopback-HTTP
   intent). Ubuntu's `janus` package auto-STARTS the service on install (before the jcfg exists); the
   step now **`systemctl restart janus` ONLY IF it is already active** (`systemctl is-active --quiet

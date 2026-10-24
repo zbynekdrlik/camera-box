@@ -111,7 +111,7 @@ REMOTE_LINUX_JSON_PATH = "/home/newlevel/.camera-box/phase-sync-last.json"
 # (remote_dest_for_host below), so a strih at another address still gets the right path.
 _KNOWN_MCP_HOSTS = {
     "10.77.9.202": "linux-strih-snv",
-    "10.77.9.204": "win-stream-snv",
+    "10.77.9.204": "linux-stream-snv",  # the Linux stream-snv since issue 1462
 }
 
 

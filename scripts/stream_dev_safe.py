@@ -10,9 +10,11 @@ mixer on YouTube. This Development holds exactly two items:
   * the program video input (`NDI 2ME PGM`, muted by the operator) on top, covering the clip's
     picture. Its audio stays out because the input is muted; the verdict FAILs when it is not.
 
-The seeder is create-only and operator-wins (the issue-1380 seeder's rules): it creates the scene,
-the clip input and a missing item, never edits an existing item, never touches the production scene
-or any other scene, never mutes/unmutes, never selects a program or preview scene.
+The seeder is operator-wins (the issue-1380 seeder's rules): it creates the scene, the clip input and
+a missing item, never edits an existing item, never touches the production scene or any other scene,
+never mutes/unmutes, never selects a program or preview scene. The one removal (issue 1462): an item
+that is neither of the two (a nested production scene, a mixer capture) is removed from the
+development scene, since it would put that content on YouTube.
 
 The spec is the seed manifest's `dev_scene` object (scripts/lib/obs-box-role.sh writes it on a
 stream box). `strih_scenes.py --bootstrap` seeds it on every OBS launch; verify-strih runs
@@ -44,7 +46,8 @@ class DevSafeError(Exception):
 def parse_dev_scene(manifest_text):
     """The manifest's `dev_scene` spec as a dict of the four SPEC_FIELDS, or None without the key.
     Raises DevSafeError on a malformed spec (a field missing or empty, the production scene named as
-    the development scene, the program audio input named as an item)."""
+    the development scene, the program audio input named as an item: PROGRAM_AUDIO_INPUT, and the
+    manifest's own `program_audio_input`, the box fact -- issue 1462: stream-snv's is `mbc`)."""
     d = json.loads(manifest_text)
     spec = d.get(DEV_SCENE_KEY) if isinstance(d, dict) else None
     if spec is None:
@@ -59,8 +62,13 @@ def parse_dev_scene(manifest_text):
         out[field] = value
     if out["scene"] == PRODUCTION_SCENE:
         raise DevSafeError(f"the development scene must differ from the production scene '{PRODUCTION_SCENE}'")
-    if PROGRAM_AUDIO_INPUT in (out["video_input"], out["audio_input"]):
-        raise DevSafeError(f"the program audio input '{PROGRAM_AUDIO_INPUT}' is never a development item")
+    program_inputs = [PROGRAM_AUDIO_INPUT]
+    declared = d.get("program_audio_input")
+    if isinstance(declared, str) and declared:
+        program_inputs.append(declared)
+    for program in program_inputs:
+        if program in (out["video_input"], out["audio_input"]):
+            raise DevSafeError(f"the program audio input '{program}' is never a development item")
     if out["video_input"] == out["audio_input"]:
         raise DevSafeError("the video input and the clip input must differ")
     return out
@@ -116,6 +124,16 @@ def dev_safe_plan(scene_names, input_names, dev_items, spec):
     if not video_present:
         actions.append("add_video_item")
     return actions
+
+
+def dev_safe_foreign_items(dev_items, spec):
+    """[(sceneItemId, sourceName)] of every development-scene item that is neither the video input nor
+    the clip: exactly what the verdict FAILs as `holds` (issue 1462: stream-snv's ported collection kept
+    the nested production scene and a pulse capture there, on the program). YouTube safety wins over
+    operator-wins here; the seed line names each removal."""
+    allowed = {spec["video_input"], spec["audio_input"]}
+    return [(it["sceneItemId"], it.get("sourceName")) for it in dev_items or []
+            if it.get("sourceName") not in allowed and it.get("sceneItemId") is not None]
 
 
 def dev_safe_verdict(scene_names, dev_items, video_muted, clip_settings, spec):
@@ -189,15 +207,22 @@ def _fit_canvas(obs, scene, item_id):
 
 def apply_dev_safe(obs, spec):
     """Apply dev_safe_plan over an obs-websocket client with `req(type, data=None, ignore_err=False)`
-    (strih_scenes.Obs). Writes only CreateScene / CreateInput / CreateSceneItem /
+    (strih_scenes.Obs). First removes every foreign item of the development scene
+    (dev_safe_foreign_items, issue 1462), then writes only CreateScene / CreateInput / CreateSceneItem /
     SetSceneItemTransform / SetSceneItemIndex on the development scene, never with ignore_err.
-    Returns the plan it applied."""
+    Returns the removals (`remove_item <name>`) and the plan it applied."""
     scene = spec["scene"]
     scenes = [s.get("sceneName") for s in obs.req("GetSceneList").get("scenes", [])]
     inputs = [i.get("inputName") for i in obs.req("GetInputList").get("inputs", [])]
     spec = resolve_spec(spec, inputs)
     items = None
     if scene in scenes:
+        items = obs.req("GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
+    removed = []
+    for item_id, name in dev_safe_foreign_items(items, spec):
+        obs.req("RemoveSceneItem", {"sceneName": scene, "sceneItemId": item_id})
+        removed.append("remove_item %s" % name)
+    if removed:
         items = obs.req("GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
     plan = dev_safe_plan(scenes, inputs, items, spec)
     for action in plan:
@@ -222,7 +247,79 @@ def apply_dev_safe(obs, spec):
             r = obs.req("CreateSceneItem", {"sceneName": scene, "sourceName": spec["video_input"],
                                             "sceneItemEnabled": True})
             _fit_canvas(obs, scene, r.get("sceneItemId"))
-    return plan
+    return removed + plan
+
+
+# --- issue 1462: the nested-pro design (stream-snv) -------------------------------------------------------------
+# The issue-1380 SNV Development nests the production scene, whose program audio input carries the cam2 QPSK
+# marker the E2E measures; rig-mode TEST and the E2E (re)nest it (`obs_phase2.py dev-scene --nested`). The
+# measurement clip has its own marker, so a clip item in that Development puts two marker streams on program
+# (the PR 1472 `[4b3/8]` POLLUTED failure). This seed only removes such an item; it never adds the production
+# scene and never touches another scene.
+NESTED_KEY = "dev_scene_nested"
+NESTED_FIELDS = ("scene", "production", "clip_input")
+
+
+def parse_dev_scene_nested(manifest_text):
+    """The manifest's `dev_scene_nested` spec as a dict of NESTED_FIELDS, or None without the key."""
+    d = json.loads(manifest_text)
+    spec = d.get(NESTED_KEY) if isinstance(d, dict) else None
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise DevSafeError("manifest dev_scene_nested must be an object")
+    out = {}
+    for field in NESTED_FIELDS:
+        value = spec.get(field)
+        if not isinstance(value, str) or not value:
+            raise DevSafeError(f"manifest dev_scene_nested.{field} must be a non-empty string")
+        out[field] = value
+    if out["scene"] == out["production"]:
+        raise DevSafeError("manifest dev_scene_nested.scene names the production scene")
+    return out
+
+
+def apply_dev_nested(obs, spec):
+    """Remove every measurement-clip item from the nested Development scene; returns `remove_item <name>`
+    entries. Writes only RemoveSceneItem on that scene, never with ignore_err."""
+    scenes = [s.get("sceneName") for s in obs.req("GetSceneList").get("scenes", [])]
+    if spec["scene"] not in scenes:
+        return []
+    items = obs.req("GetSceneItemList", {"sceneName": spec["scene"]}).get("sceneItems", [])
+    done = []
+    for it in items:
+        if it.get("sourceName") == spec["clip_input"] and it.get("sceneItemId") is not None:
+            obs.req("RemoveSceneItem", {"sceneName": spec["scene"], "sceneItemId": it["sceneItemId"]})
+            done.append("remove_item %s" % spec["clip_input"])
+    return done
+
+
+def dev_nested_verdict(scene_names, dev_items, spec):
+    """Grade the nested Development: FAIL when the scene is missing or holds the measurement clip; NOTE when
+    the production scene is not nested yet (rig-mode TEST / the E2E nest it); else PASS."""
+    scene = spec["scene"]
+    if scene not in scene_names or dev_items is None:
+        return [("FAIL", f"(dev-scene) scene '{scene}' missing -- rig-mode TEST / the E2E create it")]
+    names = [it.get("sourceName") for it in dev_items]
+    if spec["clip_input"] in names:
+        return [("FAIL", f"(dev-scene) '{scene}' holds '{spec['clip_input']}' -- the nested-pro design never "
+                         f"carries the measurement clip: two QPSK markers on program (issue 1462)")]
+    if spec["production"] not in names:
+        return [("NOTE", f"(dev-scene) '{scene}' does not nest '{spec['production']}' yet -- rig-mode TEST / the "
+                         f"E2E nest it")]
+    return [("PASS", f"(dev-scene) '{scene}' nests '{spec['production']}' and carries no measurement clip "
+                     f"(nested-pro design)")]
+
+
+def read_nested_verdict(obs, spec):
+    """Read the live state over obs-websocket (read-only, ignore_err) and grade the nested design."""
+    scenes = [s.get("sceneName") for s in (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes", [])]
+    items = None
+    if spec["scene"] in scenes:
+        items = (obs.req("GetSceneItemList", {"sceneName": spec["scene"]}, ignore_err=True)
+                 or {}).get("sceneItems", [])
+    inputs = [i.get("inputName") for i in (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])]
+    return dev_nested_verdict(scenes, items, spec) + source_name_rows(inputs, scenes)
 
 
 def read_verdict(obs, spec):
@@ -254,15 +351,18 @@ def main():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import strih_scenes  # the shared seed-manifest path + minimal OBS-WS client, installed beside this file
     with open(args.manifest or strih_scenes.SEED_MANIFEST_PATH) as fh:
-        spec = parse_dev_scene(fh.read())
-    if spec is None:
+        text = fh.read()
+    spec = parse_dev_scene(text)
+    nested = parse_dev_scene_nested(text)
+    if spec is None and nested is None:
         print("NOTE (dev-scene) the seed manifest carries no dev_scene -- not a stream-role box")
         return 0
     obs = strih_scenes.Obs(args.host, args.port, args.password)
     if args.seed:
-        print("dev-scene seed: %s" % (", ".join(apply_dev_safe(obs, spec)) or "present (no change)"))
+        done = apply_dev_safe(obs, spec) if spec is not None else apply_dev_nested(obs, nested)
+        print("dev-scene seed: %s" % (", ".join(done) or "present (no change)"))
         return 0
-    rows = read_verdict(obs, spec)
+    rows = read_verdict(obs, spec) if spec is not None else read_nested_verdict(obs, nested)
     for level, text in rows:
         print(f"{level} {text}")
     return 1 if any(level == "FAIL" for level, _ in rows) else 0

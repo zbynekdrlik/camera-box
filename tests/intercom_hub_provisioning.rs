@@ -156,6 +156,44 @@ fn the_real_hub_unit_lets_the_hub_mix_thread_run_sched_fifo_10() {
     );
 }
 
+/// Issue 1401, design 6265012279: the hub locks its memory and is never the OOM victim. The base
+/// unit grants both (`LimitMEMLOCK=infinity`, `OOMScoreAdjust=-900`), and no drop-in a provisioning
+/// lib writes (the step-12 local audio, the issue-1412 credential reset, the NDI discovery, the
+/// public tunnel) may lower or reset either.
+#[test]
+fn the_real_hub_unit_grants_the_memory_lock_and_no_dropin_takes_it_back() {
+    let unit = read("systemd/intercom-hub.service");
+    let service = unit
+        .split("[Service]")
+        .nth(1)
+        .and_then(|s| s.split("[Install]").next())
+        .expect("the unit has a [Service] section");
+    for line in ["LimitMEMLOCK=infinity", "OOMScoreAdjust=-900"] {
+        assert!(
+            service.lines().any(|l| l.trim() == line),
+            "the base unit's [Service] must carry {line}"
+        );
+    }
+    let libs = std::fs::read_dir(root().join("scripts/lib")).expect("scripts/lib");
+    let mut paths: Vec<PathBuf> = libs.map(|e| e.expect("a lib entry").path()).collect();
+    // setup-strih.sh writes the hub's drop-ins (step 12 / 13 / 4b), so it is scanned too.
+    paths.push(root().join("scripts/setup-strih.sh"));
+    for path in paths {
+        if path.extension().and_then(|e| e.to_str()) != Some("sh") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read a lib");
+        // A drop-in directive starts its line; a grade message naming the key does not.
+        for key in ["LimitMEMLOCK=", "OOMScoreAdjust="] {
+            assert!(
+                !text.lines().any(|l| l.trim_start().starts_with(key)),
+                "{} must leave the hub's {key} alone",
+                path.display()
+            );
+        }
+    }
+}
+
 #[test]
 fn verify_strih_reports_janus_as_a_note_only() {
     let v = read("scripts/verify-strih.sh");

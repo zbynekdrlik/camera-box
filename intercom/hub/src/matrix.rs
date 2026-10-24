@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 
+use crate::alsa_card::AlsaCardSpec;
+use crate::alsa_spec::check_alsa;
 use crate::janus_rtp::JanusCodec;
 
 /// Adapters a participant is reached through. `Vban` is live since M1; `Janus` (M3a) carries the
@@ -30,6 +32,12 @@ pub const ADAPTER_PIPEWIRE: &str = "pipewire";
 /// the ALSA hw PCM of a NAMED connector (`hdmi_connector`) by a supervised `aplay`, no PipeWire node
 /// (the strih-pp vestibule TV behind the HDMI-to-SDI converter on HDMI-1). An output only.
 pub const ADAPTER_ALSA_HDMI: &str = "alsa_hdmi";
+/// A USB sound card opened directly through ALSA (issue 1438): the participant's N-1 bus played by a
+/// supervised `aplay` and its input recorded by a supervised `arecord`, both on
+/// `hw:CARD=<alsa_card>,DEV=<alsa_device>`, the card named by its ALSA card ID, never an index. No
+/// PipeWire node, and a missing card is the leg down, never a fallback (the cutters' MiniFuse 4 /
+/// MG-XU).
+pub const ADAPTER_ALSA: &str = "alsa";
 
 /// The largest `hdmi_delay_ms` (issue 1424): a second of program audio is the most a picture path
 /// could ever need; a bigger value is a typo.
@@ -77,6 +85,11 @@ pub struct JanusConfig {
     /// (G.711 µ-law). An unknown value fails the load (issue 1345, 25.9.2026).
     #[serde(default)]
     pub codec: JanusCodec,
+    /// Janus's WebSocket API, which the hub's `/janus` relay connects to (issue 1453). Janus binds it
+    /// to loopback (setup-strih step 14), so phones reach it only through the relay's frame
+    /// allowlist. Must be a `ws://` URL.
+    #[serde(default = "default_janus_ws_url")]
+    pub ws_url: String,
 }
 
 fn default_janus_api_url() -> String {
@@ -87,6 +100,9 @@ fn default_janus_room() -> u64 {
 }
 fn default_janus_rtp_bind() -> String {
     "0.0.0.0:6990".to_string()
+}
+fn default_janus_ws_url() -> String {
+    "ws://127.0.0.1:8188/janus".to_string()
 }
 
 /// The systemd credential name the production `intercom-hub.service` exposes the room secret under
@@ -207,6 +223,38 @@ pub struct Participant {
     /// vestibule heard the program ~170-210 ms before the picture). Absent = 0. Only on `alsa_hdmi`.
     #[serde(default)]
     pub hdmi_delay_ms: Option<u32>,
+    /// The ALSA card ID an `alsa` participant opens (`/proc/asound/cards`: `M4` = the MiniFuse 4,
+    /// `MGXU` = the Yamaha MG-XU), never a card index (issue 1438). Only on `alsa`.
+    #[serde(default)]
+    pub alsa_card: Option<String>,
+    /// The PCM device on that card (default 0).
+    #[serde(default)]
+    pub alsa_device: Option<u32>,
+    /// The ALSA period of both sides in frames (default 256 = one hub block; 64..=512). The buffer is
+    /// four periods.
+    #[serde(default)]
+    pub alsa_period_frames: Option<usize>,
+    /// The card's playback channel count (the hw PCM opens with exactly this many; the MiniFuse
+    /// takes 6). Default = `out_channels`.
+    #[serde(default)]
+    pub alsa_out_channels: Option<usize>,
+    /// The card's capture channel count (MiniFuse: 6). Default = `in_channels`.
+    #[serde(default)]
+    pub alsa_in_channels: Option<usize>,
+    /// Which hw playback channel carries each output channel: comma-separated 1-based hw channel
+    /// numbers, one per `out_channels` (MiniFuse: `1,2,3,4`). Default = the first `out_channels`.
+    #[serde(default)]
+    pub alsa_channel_map: Option<String>,
+    /// Which hw capture channel feeds each input channel, 1-based, one per `in_channels`
+    /// (MiniFuse: `1,2`). Default = the first `in_channels`.
+    #[serde(default)]
+    pub alsa_in_channel_map: Option<String>,
+    /// The fixed target depth of this participant's ingress resampler leg in ms (issue 1461): a
+    /// VBAN leg, the card / PipeWire capture or the phones' Janus room mix. Rounded up to whole hub
+    /// blocks, read at start only, never adapted. Absent = the kind's default (a cambox 16 ms, a
+    /// program feed 37.3 ms, the card capture and the phones 42.7 ms; [`crate::vban_jitter`]).
+    #[serde(default)]
+    pub target_ms: Option<f64>,
     /// Number of input channels the matrix routes FROM this participant.
     pub in_channels: usize,
     /// Number of output channels the matrix routes TO this participant.
@@ -268,6 +316,8 @@ pub struct Matrix {
     pub participants: Vec<Participant>,
     index: HashMap<String, usize>,
     pub points: Vec<Point>,
+    /// The card legs' resolved specs (issue 1438), resolved once at load.
+    alsa_specs: Vec<AlsaCardSpec>,
 }
 
 /// Convert a dB gain to a linear amplitude factor (`10^(dB/20)`). `0 dB` → `1.0`, `-6 dB` ≈ `0.501`,
@@ -301,10 +351,17 @@ impl Matrix {
                 bail!("video.jpeg_quality {} out of range 30..=95", v.jpeg_quality);
             }
         }
+        // The phone relay's Janus WebSocket (issue 1453): plain ws:// to Janus's loopback bind.
+        if let Some(j) = &raw.janus {
+            if !j.ws_url.starts_with("ws://") {
+                bail!("janus.ws_url '{}' must be a ws:// URL", j.ws_url);
+            }
+        }
 
         let mut index: HashMap<String, usize> = HashMap::new();
         let mut janus_count = 0usize;
         let mut hdmi_connectors: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let (mut alsa_pcms, mut alsa_specs) = (std::collections::HashSet::new(), Vec::new());
         for (id, p) in raw.participants.iter().enumerate() {
             if !KNOWN_ROLES.contains(&p.role.as_str()) {
                 bail!("participant '{}': unknown role '{}'", p.name, p.role);
@@ -314,9 +371,12 @@ impl Matrix {
                 && p.adapter != ADAPTER_JANUS
                 && p.adapter != ADAPTER_PIPEWIRE
                 && p.adapter != ADAPTER_ALSA_HDMI
+                && p.adapter != ADAPTER_ALSA
             {
                 bail!("participant '{}': unknown adapter '{}'", p.name, p.adapter);
             }
+            // The card leg (issue 1438): the alsa_* keys resolve and are checked in `alsa_spec`.
+            alsa_specs.extend(check_alsa(id, p, &mut alsa_pcms)?);
             // The HDMI leg (issue 1424 part 3): a named connector, an output only, one participant
             // per connector (one aplay per hw PCM).
             if p.adapter == ADAPTER_ALSA_HDMI {
@@ -370,6 +430,38 @@ impl Matrix {
                     p.name,
                     p.adapter
                 );
+            }
+            // The ingress resampler leg's fixed target (issue 1461): only where there is one (a
+            // VBAN leg, a card / PipeWire capture, the phones' Janus ingress), never on an
+            // output-only participant.
+            if let Some(ms) = p.target_ms {
+                let capture = (p.adapter == ADAPTER_ALSA
+                    || p.adapter == ADAPTER_PIPEWIRE
+                    || p.adapter == ADAPTER_JANUS)
+                    && p.in_channels > 0
+                    && p.role != PROGRAM_OUT_ROLE;
+                if p.adapter != ADAPTER_VBAN && !capture {
+                    bail!(
+                        "participant '{}': target_ms is only for a vban leg or a capture input (got adapter '{}' with {} in_channels)",
+                        p.name,
+                        p.adapter,
+                        p.in_channels
+                    );
+                }
+                if crate::vban_jitter::target_frames_from_ms(
+                    ms,
+                    raw.hub.sample_rate,
+                    raw.hub.block_frames,
+                )
+                .is_none()
+                {
+                    bail!(
+                        "participant '{}': target_ms must be > 0 and <= {}, got {}",
+                        p.name,
+                        crate::vban_jitter::TARGET_MS_MAX,
+                        ms
+                    );
+                }
             }
             if p.adapter == ADAPTER_VBAN && p.out_stream.is_some() && p.host.is_none() {
                 bail!(
@@ -567,6 +659,7 @@ impl Matrix {
             participants: raw.participants,
             index,
             points,
+            alsa_specs,
         })
     }
 
@@ -671,6 +764,17 @@ impl Matrix {
                     .map(|connector| (id, connector, p.out_channels))
             })
             .collect()
+    }
+
+    /// The card legs (issue 1438): every `alsa` participant's resolved card spec, fed from its OWN
+    /// N-1 output bus (playback) and feeding its own input buffer (capture).
+    pub fn alsa_cards(&self) -> Vec<AlsaCardSpec> {
+        self.alsa_specs.clone()
+    }
+
+    /// The card leg spec of participant `id`, if it is on the `alsa` adapter.
+    pub fn alsa_spec(&self, id: usize) -> Option<&AlsaCardSpec> {
+        self.alsa_specs.iter().find(|c| c.participant == id)
     }
 
     /// The lip-sync delay of the `alsa_hdmi` participant `id` in ms (0 when absent).

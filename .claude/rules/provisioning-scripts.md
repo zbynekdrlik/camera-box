@@ -172,8 +172,10 @@ therefore sits after `(ak)`, BEFORE `(ar)`. `(at)` (issue 1428, the zram swap) s
 before `(as)` (`test_rig_timezone_1415.py` EXECUTES `(as)..(ar)`). `(au)` (issue 1367, the housekeeping
 cpus) sits after `(ak)`, before `(at)` (`test_cambox_zram_1428.py` takes `(at)..(as)` as its block).
 `(av)` (issue 1446, display GPU driven) sits after `(ak)`, before `(au)`
-(`tests/python/test_display_gpu_1446.py` executes the `(av)..(au)` block); the next free letter is
-`(aw)`.
+(`tests/python/test_display_gpu_1446.py` executes the `(av)..(au)` block). `(aw)` (issue 1446, the
+fleet kernel line) sits after `(ak)`, before `(av)` (`tests/python/test_kernel_line_1446.py`
+executes `(aw)` up to the next `\n# (` marker, and `(ak)`'s own pytest slice still ends at the next
+marker, now `(aw)`); the next free letter is `(ax)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 
@@ -458,9 +460,14 @@ a script.
     `grub_fast_boot_cfg_verdict`, and a slow cfg fails the build.
   - `build-image.sh` does the same host-side, `error` on a slow cfg.
   - setup-device STEP 10 calls `grub_fast_boot_apply /etc/default/grub`.
-  - The lib is the LAST entry of `check_required_files`: the issue-448 behavioural test builds a
-    fixture with only `install-grub-efi.sh` present and expects the error to name
-    `camera-box-grow-root.sh` first.
+  - The lib follows the issue-448 entries in `check_required_files` (issue 1446 appended
+    `rt-kernel-plan.sh`, `ro-window.sh`, `ro-root.sh` after it): the issue-448 behavioural test
+    builds a fixture with only `install-grub-efi.sh` present and expects the error to name
+    `camera-box-grow-root.sh` first, so a new sibling always goes at the END of the list. A lib the
+    chroot sources that itself lazy-sources siblings from `${BASH_SOURCE[0]%/*}` needs those
+    siblings copied next to it in `/tmp` too (`rt-kernel-plan.sh` -> `ro-window.sh` -> `ro-root.sh`);
+    `test_the_copied_libs_alone_source_in_a_chroot_tmp_and_name_the_line` proves the copies alone
+    source under `set -e`.
 - **`grub_fast_boot_apply` is set-or-append.** Every active `KEY=` line (leading blanks / `export`
   allowed, comments never) is rewritten, and a missing key is appended. An already-correct file is
   not written at all (same bytes, same mtime), and a rewrite keeps the inode and mode.

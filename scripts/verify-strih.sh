@@ -138,8 +138,7 @@ else
   bad "OBS not running under the strih-obs.service supervisor"
 fi
 
-# 2) render tick ENABLED + DistroAV loaded in the newest OBS log.
-LOG="$(newest_log)"
+LOG="$(newest_log)"   # 2) render tick ENABLED + DistroAV loaded in the newest OBS log (item 47 reads it too).
 if [ -n "$LOG" ] && [ -f "$LOG" ]; then
   strih_lx_render_tick_ok    < "$LOG" && ok "genlock render tick ENABLED (newest log)" || bad "genlock render tick not enabled in the newest log"
   strih_lx_distroav_loaded_ok < "$LOG" && ok "DistroAV/NDI loaded (newest log)" || bad "DistroAV not loaded in the newest log"
@@ -343,51 +342,51 @@ case "$_rm_verdict" in
   *) bad "remoteos-mcp ${_rm_verdict#FAIL: } -- re-run setup-strih.sh step 10 (issue 1361)" ;;
 esac
 
-# 9) PipeWire program audio (issue 1344): the DERIVED verdict — the strih-program null sink + the OBS
-#    `ASIO zvuk` pulse_input_capture + (when the hub is active) the program-feed rx. The FOH-live
-#    level is a SUPERVISOR live-acceptance step, so verify passes FOH=unknown here (never a level
-#    FAIL); a FAIL means a structural provisioning gap (sink/input absent) or, once the hub is
-#    active, no program rx.
-AUDIO_SINK=0
-# 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's
-# PipeWire session (the null sink lives there) -> a false "sink missing" FAIL on a healthy box. Probe
-# the operator session explicitly when running as root (sudo -u + its XDG_RUNTIME_DIR), else inline.
-if command -v pw-cli >/dev/null 2>&1; then
-  if [ "$(id -u)" = 0 ]; then
-    PW_LS="$(sudo -u "${STRIH_LX_USER:-newlevel}" XDG_RUNTIME_DIR="/run/user/$(id -u "${STRIH_LX_USER:-newlevel}")" pw-cli ls Node 2>/dev/null || true)"
-  else
-    PW_LS="$(pw-cli ls Node 2>/dev/null || true)"
-  fi
-  printf '%s\n' "$PW_LS" | grep -q '"strih-program"' && AUDIO_SINK=1
-fi
-AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
-if systemctl is-active intercom-hub >/dev/null 2>&1; then
-  # hub active (M4+): grade the real program-feed rx off the hub /api/state.
-  if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
-       | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
-    AUDIO_RX=1
-  else
-    AUDIO_RX=0
-  fi
+# 9) program audio by the FACTS (issue 1439): a box declaring the console's VBAN program -> its obs-vban source; a hub-fed one
+#    (issue 1344) -> strih-program sink + pulse capture + hub program rx (FOH level: supervisor). Hub boxes: HDMI legs + the card leg.
+if strih_program_vban_declared; then
+  strih_program_vban_grade "$SCN_BIN" "$WS_HOST" "$LOG"
 else
-  # enable-only phase (hub enabled-not-started until the M4 cut-over): grade only the structural
-  # sink + OBS input; the rx is verified once the hub runs.
-  AUDIO_RX=1
+  AUDIO_SINK=0
+  # 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's PipeWire
+  # session (the null sink) -> a false "sink missing" FAIL. Probe that session (sudo -u + its XDG_RUNTIME_DIR).
+  if command -v pw-cli >/dev/null 2>&1; then
+    if [ "$(id -u)" = 0 ]; then
+      PW_LS="$(sudo -u "${STRIH_LX_USER:-newlevel}" XDG_RUNTIME_DIR="/run/user/$(id -u "${STRIH_LX_USER:-newlevel}")" pw-cli ls Node 2>/dev/null || true)"
+    else
+      PW_LS="$(pw-cli ls Node 2>/dev/null || true)"
+    fi
+    printf '%s\n' "$PW_LS" | grep -q '"strih-program"' && AUDIO_SINK=1
+  fi
+  AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
+  if systemctl is-active intercom-hub >/dev/null 2>&1; then   # hub active (M4+): the real program-feed rx off /api/state
+    if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
+         | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
+      AUDIO_RX=1
+    else
+      AUDIO_RX=0
+    fi
+  else
+    # enable-only phase (hub enabled-not-started until the M4 cut-over): grade only the structural sink + OBS input.
+    AUDIO_RX=1
+  fi
+  AUDIO_VERDICT="$(strih_lx_program_audio_verdict "$AUDIO_SINK" "$AUDIO_RX" "$AUDIO_KIND" unknown na || true)"
+  case "$AUDIO_VERDICT" in
+    PASS*) ok   "program audio: $AUDIO_VERDICT" ;;
+    NOTE*) note "program audio: $AUDIO_VERDICT" ;;
+    *)     bad  "program audio: $AUDIO_VERDICT" ;;
+  esac
 fi
-AUDIO_VERDICT="$(strih_lx_program_audio_verdict "$AUDIO_SINK" "$AUDIO_RX" "$AUDIO_KIND" unknown na || true)"
-case "$AUDIO_VERDICT" in
-  PASS*) ok   "program audio: $AUDIO_VERDICT" ;;
-  NOTE*) note "program audio: $AUDIO_VERDICT" ;;
-  *)     bad  "program audio: $AUDIO_VERDICT" ;;
-esac
-strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs; then the MiniFuse talkback (report-only)
-if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
-
-# 9b) MiniFuse period + graph quantum (issue 1345, owner accepted 25.9.2026): both operator-session
-#     drop-ins present with the rendered content (FAIL when missing or drifted -- the buzz / robotic
-#     cameraman fixes a reprovision must keep), and the LIVE graph held at quantum 1024
-#     (`pw-metadata -n settings`, read in the operator session as root like item 9). The live read is
-#     REPORTED: PASS when held, NOTE otherwise (the drop-in applies only at the next PipeWire start).
+if WHY="$(obs_box_step_applies 13)"; then
+  strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs
+  strih_intercom_hub_alsa_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1438: the cutters' card, opened through ALSA
+fi
+strih_vban_leg_grade   # the VBAN-only leg, every role (issue 1439, scripts/lib/strih-vban-leg.sh)
+# 9b) MiniFuse period + quantum drop-ins (issue 1345, FAIL) + the LIVE quantum 1024 (a NOTE until the next PipeWire
+#     start), strih role. Stream role (issue 1465 item 3): the locked operator PipeWire read back (its own lib).
+if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then
+  stream_operator_audio_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator-audio) the grader did not print all of its rows"
+else
 for _q_pair in \
   "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf|strih_wireplumber_minifuse_output_period_conf" \
   "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf|strih_pipewire_quantum_conf"; do
@@ -398,19 +397,19 @@ for _q_pair in \
     bad "(audio-quantum) ${_q_file} missing or drifted from ${_q_fn} -- re-run setup-strih.sh step 12 (issue 1345)"
   fi
 done
+PW_SETTINGS=""
 if command -v pw-metadata >/dev/null 2>&1; then
   if [ "$(id -u)" = 0 ]; then
     PW_SETTINGS="$(sudo -u "${STRIH_LX_USER:-newlevel}" XDG_RUNTIME_DIR="/run/user/$(id -u "${STRIH_LX_USER:-newlevel}")" timeout 5 pw-metadata -n settings 2>/dev/null || true)"
   else
     PW_SETTINGS="$(timeout 5 pw-metadata -n settings 2>/dev/null || true)"
   fi
-else
-  PW_SETTINGS=""
 fi
 if Q_DETAIL="$(strih_lx_graph_quantum_ok "$PW_SETTINGS")"; then
   ok "(audio-quantum) ${Q_DETAIL}"
 else
   note "(audio-quantum) ${Q_DETAIL} -- report-only; restart the operator PipeWire session (or reboot) so the min-quantum drop-in applies"
+fi
 fi
 
 strih_home_ownership_grade "$USER_HOME"   # issue 1412: a root-owned ~/.config level crash-loops the desktop apps
@@ -493,14 +492,15 @@ else
 fi
 
 # 16) intercom hub unit (issue 1345): inactive/disabled FAILs on the strih role (issue 1418), a crash loop on every role (issue 1412).
-if [ -f /etc/systemd/system/intercom-hub.service ]; then
+if ! WHY="$(obs_box_step_applies 13)"; then strih_intercom_hub_absent_grade "$WHY"   # issue 1439: the stream role = no hub
+elif [ -f /etc/systemd/system/intercom-hub.service ]; then
   IH_EN="$(systemctl is-enabled intercom-hub 2>/dev/null || true)"
   IH_ACT="$(systemctl is-active intercom-hub 2>/dev/null || true)"
   if IH_LOOP="$(strih_intercom_hub_crash_loop)"; then bad "intercom-hub.service ${IH_LOOP} -- journalctl -u intercom-hub names the cause (issue 1412)"
   elif [ "${IH_EN}/${IH_ACT}" = enabled/active ]; then ok "intercom-hub.service enabled + active"
   elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service enabled=${IH_EN:-unknown} active=${IH_ACT:-unknown} -- the interkom is down (issue 1418): systemctl enable --now intercom-hub; journalctl -u intercom-hub"
   else note "intercom-hub.service installed (enabled=${IH_EN:-unknown}, active=${IH_ACT:-unknown}) -- ${WHY}"; fi
-  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d   # issue 1412: the role drop-in
+  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d; strih_intercom_hub_memlock_grade "http://${WS_HOST}:8790/api/state"; strih_intercom_hub_version_grade "http://${WS_HOST}:8790" "$(strih_box_loaded_name)"   # issue 1412 role drop-in; issue 1401 memory lock; issue 1467 hub version
 elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1418: the interkom runs on it)"
 else note "intercom-hub.service not installed -- ${WHY}"; fi
 
@@ -853,9 +853,10 @@ if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.."
 else note "(tally) not graded: ${WHY}"; fi
 # 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 14 rows) + 44) issue 1420 kiosk panel (scripts/lib/obs-box-panel.sh).
 strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"
-# 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh, its header: nginx + each name's cert + the upstreams + renewal).
-if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; else note "(https) not graded: ${WHY}"; fi
+# 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh: nginx + each name's cert + the upstreams + renewal) + issue 1453 tunnel + TURN (strih-interkom-public.sh).
+if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; strih_interkom_public_grade_report || bad "(https-public) the grader did not print both rows"; else note "(https) not graded: ${WHY}"; fi
 if WHY="$(obs_box_step_applies 16k)"; then strih_cambox_log_sink_grade_report || bad "(log-sink) the grader did not print all of its rows"; else note "(log-sink) not graded: ${WHY}"; fi   # 46) issue 1394 cambox log sink (scripts/lib/strih-cambox-log-sink.sh: files, units, listeners)
+obs_box_avsync_dock_grade_report "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}" "${STRIH_SHAREDIR:-/usr/share}" "${LOG:-}" "${USER_HOME}/.config/obs-studio/user.ini" || bad "(avsync-dock) the grader did not print all of its rows"   # 47) issue 1470 A/V-sync dock (scripts/lib/obs-box-avsync-dock.sh: installed + loaded on every role, the saved layout on the stream role)
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
@@ -930,12 +931,10 @@ fi
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
 #     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with --
-#     strih-snv/stream; the traveling resolume hostname is best-effort, never required), lists NO cambox
-#     IP (issue 1389: this OBS's discovery connection into a cambox aborts camera-box when OBS exits)
-#     and carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
-#     bkshading-service) and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) --
-#     plus the intercom-hub NDI_CONFIG_DIR drop-in. Read-only; FAIL on any miss (a renumbered sender
-#     FAILs until the box is re-provisioned). Placed BEFORE item 32, which closes the list.
+#     strih-snv/stream; resolume best-effort), lists NO cambox IP (issue 1389) and no networks.discovery,
+#     in BOTH readers' config (~/.ndi: OBS + bkshading; /etc/ndi: intercom-hub, whose ProtectHome hides
+#     ~/.ndi) + the hub's NDI_CONFIG_DIR drop-in (none without a hub, issue 1439). Read-only; FAIL on any
+#     miss (a renumbered sender FAILs until re-provisioned). Placed BEFORE item 32, which closes the list.
 _ndi_required="$(ndi_discovery_sender_ips pinned)" || _ndi_required=""
 _ndi_dropin_dir="$(ndi_discovery_dropin_config_dir "$(cat "$NDI_DISCOVERY_INTERCOM_DROPIN" 2>/dev/null || true)")"
 if [ -z "$_ndi_required" ]; then
@@ -962,10 +961,11 @@ else
     note "(ndi-discovery) a traveling NDI sender resolves now to ${_ndi_drift}, which ${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME} does not list -- re-run setup-strih.sh step 4b to add it (issue 1342)"
   fi
 fi
-if [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
+if ! WHY="$(obs_box_step_applies 13)"; then note "(ndi-discovery) no intercom hub on this box, so no hub NDI_CONFIG_DIR drop-in to grade -- ${WHY}"
+elif [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
   ok "(ndi-discovery) intercom-hub NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in present"
 else
-  bad "(ndi-discovery) ${NDI_DISCOVERY_INTERCOM_DROPIN} missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 4b (issue 1342)"
+  bad "(ndi-discovery) ${NDI_DISCOVERY_INTERCOM_DROPIN} missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 13, which writes the hub's drop-ins (issue 1342)"
 fi
 
 # 32) the shared OBS-box appliance baseline (issue 1357) -- the ONE grader verify-imag.sh runs too

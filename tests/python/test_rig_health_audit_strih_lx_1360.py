@@ -92,9 +92,10 @@ def test_linux_log_tail_cmd_is_byte_identical_to_the_bash_reader_1360(monkeypatc
 
 def test_windows_log_tail_cmd_is_byte_identical_to_the_bash_reader_1360(monkeypatch):
     monkeypatch.delenv("STRIH_PLATFORM", raising=False)
-    py = _mod._obs_log_tail_cmd(_mod.STREAM, 500)
+    # a Windows fleet box: resolume-snv (stream-snv runs the Linux stream role since issue 1462)
+    py = _mod._obs_log_tail_cmd(_mod.RESOLUME, 500)
     assert py == _mod._windows_obs_log_tail_cmd(500), (
-        "issue 1360: a Windows box (stream) keeps the audit's existing head-600 + tail read")
+        "issue 1360: a Windows box (resolume) keeps the audit's existing head-600 + tail read")
     assert py == _bash_remote_cmd("windows", "headtail", "500"), (
         "issue 1360: the bash reader's Windows headtail op must be the audit's PowerShell verbatim")
 
@@ -109,7 +110,8 @@ def test_linux_obs_count_cmd_counts_live_obs_processes_1360(monkeypatch):
     monkeypatch.delenv("STRIH_PLATFORM", raising=False)
     cmd = _mod._obs_count_cmd(_mod.STRIH)
     assert "powershell" not in cmd and "obs64" not in cmd, cmd
-    assert _mod._obs_count_cmd(_mod.STREAM) == _mod._windows_obs_count_cmd()
+    assert _mod._obs_count_cmd(_mod.RESOLUME) == _mod._windows_obs_count_cmd()
+    assert "powershell" not in _mod._obs_count_cmd(_mod.STREAM)  # Linux stream-snv, issue 1462
 
 
 # --- the Linux commands run for real against a fixture HOME --------------------------------------

@@ -95,6 +95,11 @@ if ! declare -F strih_kiosk_x_run >/dev/null; then
   # shellcheck source=scripts/lib/strih-session-apps.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
 fi
+# The operator keyboard (step 16g + the keyboard row) lives in its own lib (issue 1441).
+if ! declare -F strih_operator_keyboard_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-keyboard.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-keyboard.sh"
+fi
 
 # issue 1419: + strih-snv's four [BasicWindow] keys (owner 13.10.2026, the full strih-snv OBS setup).
 STRIH_OPERATOR_INI_KEYS=(SaveProjectors=true ProjectorAlwaysOnTop=false MultiviewMouseSwitch=true
@@ -287,6 +292,12 @@ PY
 # WARN-only: a missing collection is named, never fatal.
 strih_operator_projector_seed() {
   local coll="${1:?collection path required}" user="${2:?desktop user required}" drm="${3-}"
+  # issue 1469 (owner 23.10.2026, stream-snv): the stream role has ONE screen carrying the stream OBS
+  # and the Restreamer dashboard; a fullscreen Multiview projector would cover them.
+  if [ "$(strih_box_role 2>/dev/null || echo strih)" = stream ]; then
+    echo "  SKIP: the stream role has no Multiview projector -- none seeded into ${coll} (issue 1469)"
+    return 0
+  fi
   if strih_operator_hdmi_shows_multiview "$drm"; then
     echo "  SKIP: the Multiview is on the HDMI output (${drm}: view multiview) -- no projector window seeded"
     return 0
@@ -315,58 +326,6 @@ strih_operator_install() {
   strih_operator_keyboard_install "$user" "$uhome" ||
     echo "  WARN: the keyboard file $(strih_operator_keyboard_file) could not be written -- verify-strih (keyboard) FAILs until it is"
   strih_operator_nic_isolate
-}
-
-# --- the operator keyboard (owner 14.10.2026: "potrebujeme slovensku klavesnicu vediet sa prepnut") ----
-# Every Linux workstation box types us + Slovak (QWERTZ), Alt+Shift switching between them.
-strih_operator_kb_layout() { printf 'us,sk'; }
-strih_operator_kb_options() { printf 'grp:alt_shift_toggle'; }
-strih_operator_keyboard_file() { printf '%s' "${STRIH_OPERATOR_KEYBOARD_FILE:-/etc/default/keyboard}"; }
-
-# strih_operator_keyboard_install USER HOME -> write XKBLAYOUT / XKBOPTIONS into the keyboard file (read
-# by X at its start) and apply them to the running :0 (WARN-only when X does not answer). rc 1 when the
-# file cannot be written.
-strih_operator_keyboard_install() {
-  local user="$1" home="$2" f
-  f="$(strih_operator_keyboard_file)"
-  [ -f "$f" ] || printf 'XKBMODEL="pc105"\nXKBVARIANT=""\nBACKSPACE="guess"\n' >"$f" || return 1
-  local k v
-  for k in XKBLAYOUT XKBOPTIONS; do
-    if [ "$k" = XKBLAYOUT ]; then v="$(strih_operator_kb_layout)"; else v="$(strih_operator_kb_options)"; fi
-    if grep -q "^${k}=" "$f"; then
-      sed -i "s|^${k}=.*|${k}=\"${v}\"|" "$f" || return 1
-    else
-      printf '%s="%s"\n' "$k" "$v" >>"$f" || return 1
-    fi
-  done
-  echo "  keyboard: $(strih_operator_kb_layout), switch with Alt+Shift ($f)"
-  if ! _strih_operator_on_x "$user" "$home" 10 "${STRIH_OPERATOR_SETXKBMAP:-setxkbmap}" \
-    -layout "$(strih_operator_kb_layout)" -option "" -option "$(strih_operator_kb_options)"; then
-    echo "  WARN: the keyboard layout could not be applied to the running :0 (X down?) -- it applies at the next X start"
-  fi
-  return 0
-}
-
-# strih_operator_keyboard_verdict FILE_TEXT LIVE_QUERY -> ONE row (keyboard): the keyboard file AND the
-# live :0 (`setxkbmap -query`) both carry the us,sk layout with the Alt+Shift switch.
-strih_operator_keyboard_verdict() {
-  local file="${1-}" live="${2-}" want_l want_o fl fo ll lo
-  want_l="$(strih_operator_kb_layout)"; want_o="$(strih_operator_kb_options)"
-  fl="$(sed -n 's/^XKBLAYOUT="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' <<<"$file" | head -n 1)"
-  fo="$(sed -n 's/^XKBOPTIONS="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' <<<"$file" | head -n 1)"
-  ll="$(awk '$1 == "layout:" {print $2}' <<<"$live" | head -n 1)"
-  lo="$(awk '$1 == "options:" {print $2}' <<<"$live" | head -n 1)"
-  if [ "$fl" != "$want_l" ] || [[ ",$fo," != *",$want_o,"* ]]; then
-    printf 'FAIL|(keyboard) %s has XKBLAYOUT="%s" XKBOPTIONS="%s", want "%s" + "%s" -- re-run setup-strih.sh step 16g\n' \
-      "$(strih_operator_keyboard_file)" "$fl" "$fo" "$want_l" "$want_o"
-  elif [ -z "$live" ]; then
-    printf 'FAIL|(keyboard) setxkbmap on :0 answered nothing -- X is down or does not answer clients\n'
-  elif [ "$ll" != "$want_l" ] || [[ ",$lo," != *",$want_o,"* ]]; then
-    printf 'FAIL|(keyboard) the running :0 types layout "%s" options "%s", want "%s" + "%s" -- re-run setup-strih.sh step 16g (it applies it live)\n' \
-      "$ll" "$lo" "$want_l" "$want_o"
-  else
-    printf 'OK|(keyboard) %s, Alt+Shift switches (the file and the running :0)\n' "$want_l"
-  fi
 }
 
 # --- verify-strih item 43 --------------------------------------------------------------------------
@@ -910,8 +869,7 @@ strih_operator_grade_rows() {
   strih_operator_panel_gpu_verdict "$xr" "$xr_rc"
   if kl="$(strih_operator_klog_read)"; then kl_rc=0; else kl_rc=$?; fi
   strih_operator_drm_hang_verdict "$kl" "$kl_rc"
-  strih_operator_keyboard_verdict "$(cat "$(strih_operator_keyboard_file)" 2>/dev/null || true)" \
-    "$(_strih_operator_on_x "$user" "$home" 10 "${STRIH_OPERATOR_SETXKBMAP:-setxkbmap}" -query 2>/dev/null || true)"
+  strih_operator_keyboard_row "$user" "$home"
   if [ "$obs_up" = 0 ]; then
     printf 'NOTE|(operator-panel) not graded: OBS is not running\n'
     printf 'NOTE|(mv-projector) not graded: OBS is not running\n'
@@ -923,9 +881,10 @@ strih_operator_grade_rows() {
   d2="$(strih_operator_grab "$user" "$home")"
   strih_operator_panel_verdict "$d1" "$d2" "$gap"
   # issue 1418 (16.10.2026): the stream role has one screen carrying the stream OBS and the Restreamer
-  # dashboard; a fullscreen Multiview projector would cover them, so the row is not graded there.
+  # dashboard; a fullscreen Multiview projector would cover them. Issue 1469: one open there FAILs.
   if [ "$(strih_box_role 2>/dev/null || echo strih)" = stream ]; then
-    printf 'NOTE|(mv-projector) not graded: the stream role has no Multiview projector (one screen, it would cover the stream OBS and the Restreamer dashboard)\n'
+    strih_operator_stream_projector_verdict "$(_strih_operator_on_x "$user" "$home" 10 \
+      "${STRIH_OPERATOR_WMCTRL:-wmctrl}" -lx 2>/dev/null || true)"
     return 0
   fi
   local hdmi_mv=0
@@ -953,6 +912,17 @@ strih_operator_projector_verdict() {
     printf 'OK|(mv-projector) the Multiview projector window is open on :0\n'
   else
     printf 'FAIL|(mv-projector) no "Projector - Multiview" window on :0 -- the operator has no Multiview; stop OBS and re-run setup-strih.sh step 16g (it seeds the saved projector, issue 1419)\n'
+  fi
+}
+
+# strih_operator_stream_projector_verdict WMCTRL_LX_TEXT -> the (mv-projector) row on the stream role
+# (issue 1469): OK with no Multiview projector window, FAIL with one (it covers the stream OBS and the
+# Restreamer dashboard on the role's one screen).
+strih_operator_stream_projector_verdict() {
+  if grep -q 'Projector - Multiview' <<<"${1-}"; then
+    printf 'FAIL|(mv-projector) a "Projector - Multiview" window is open on the stream role -- it covers the stream OBS and the Restreamer dashboard; close it in OBS (setup-strih seeds none on this role, issue 1469)\n'
+  else
+    printf 'OK|(mv-projector) no Multiview projector on the stream role (one screen: the stream OBS + the Restreamer dashboard)\n'
   fi
 }
 

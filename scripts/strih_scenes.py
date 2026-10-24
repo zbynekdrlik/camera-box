@@ -27,7 +27,9 @@ Modes:
   --audio-monitor-type   issue 1436, read-only: print the OBS monitoring type of the program-audio input
                          (`OBS_MONITORING_TYPE_NONE` ...), `absent`, or `unreachable: <why>` with rc 2
                          when the OBS websocket does not answer (verify-strih's stream-monitor row).
-  --projector T          issue 1346: set the HDMI output VIEW (program|multiview) in
+  --pulse-capture-inputs issue 1465, read-only: list every pulse capture input (`pulse capture inputs:
+                         none`), rc 2 when OBS does not answer (verify-strih's operator-audio row).
+  --projector T         issue 1346: set the HDMI output VIEW (program|multiview) in
                          ~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the
                          next OBS start. The operator's live switch is in OBS (Tools menu); this is
                          the scripted twin. Never opens a projector window and never talks to OBS.
@@ -90,6 +92,22 @@ from drm_output_config import (  # noqa: E402,F401
     write_drm_backend,
     write_drm_outputs,
     write_drm_view,
+)
+# issue 1439: the stream role's program-audio input is the obs-vban receive source (installed next to
+# this file); its settings and the keep-the-operator-state re-create live in ONE module the collection
+# port shares.
+from program_audio_vban import (  # noqa: E402,F401
+    VBAN_SOURCE_KIND,
+    drop_pulse_capture_inputs,
+    input_create_verified,
+    input_recreate,
+    input_state_read,
+    kind_available,
+    listed_text,
+    parse_program_audio_vban,
+    parse_pulse_capture_rule,
+    pulse_capture_report,
+    settings_differences,
 )
 
 
@@ -210,15 +228,16 @@ def program_audio_input_kind_from_inputs(inputs, name=AUDIO_INPUT_NAME):
     return None
 
 
-def audio_input_action(exists, current_kind):
-    """Pure: the ONE allowed action for the `ASIO zvuk` program-audio input.
-    - absent -> 'create' (CreateInput pulse_input_capture on strih-program-source)
+def audio_input_action(exists, current_kind, want_kind=AUDIO_INPUT_KIND):
+    """Pure: the ONE allowed action for the program-audio input (WANT_KIND: the pulse capture, or on the
+    stream role the obs-vban source, issue 1439).
+    - absent -> 'create' (CreateInput WANT_KIND)
     - present but asio_input_capture (the un-creatable Windows kind) -> 'replace' (Remove + Create)
-    - present as pulse_input_capture -> 'ok' (nothing to do)
-    - present as some OTHER kind -> 'replace' (heal it to the pulse capture)."""
+    - present as WANT_KIND -> 'ok' (nothing to do)
+    - present as some OTHER kind -> 'replace' (heal it to WANT_KIND)."""
     if not exists:
         return "create"
-    if current_kind == AUDIO_INPUT_KIND:
+    if current_kind == want_kind:
         return "ok"
     return "replace"
 
@@ -558,43 +577,51 @@ def _current_scene_name(obs):
     return scenes[0].get("sceneName") if scenes else None
 
 
-def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME):
-    """The ONE allowed create/replace (issue 1344): ensure the `ASIO zvuk` program-audio input exists
-    as pulse_input_capture on strih-program-source (the OBS program capture). A missing input is
-    CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED + recreated;
-    a correct pulse_input_capture is left alone. Returns a short status string for the log."""
+def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME, vban=None):
+    """The ONE allowed create/replace (issue 1344): ensure the program-audio input NAME exists as
+    pulse_input_capture on strih-program-source (the OBS program capture), or, given VBAN (the obs-vban
+    source settings of the stream role's manifest, issue 1439), as the obs-vban receive source. A missing
+    input is CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED +
+    recreated keeping the operator's state (every scene and the item's visibility, volume, mute,
+    monitoring, tracks, balance, sync offset, filters); an input of the right kind is left alone (its
+    settings are the operator's; a difference from the box facts is named in the status). An obs-vban
+    kind OBS has not loaded (a bundle without the plugin) never removes anything. Returns a short status
+    string for the log."""
+    want_kind = VBAN_SOURCE_KIND if vban else AUDIO_INPUT_KIND
+    want_settings = dict(vban) if vban else program_audio_input_settings()
     inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
     exists = any(i.get("inputName") == name for i in inputs)
     kind = program_audio_input_kind_from_inputs(inputs, name)
-    action = audio_input_action(exists, kind)
+    action = audio_input_action(exists, kind, want_kind)
     if action == "ok":
-        return "matched"
+        if not vban:
+            return "matched"
+        current = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True) or {}).get("inputSettings")
+        diff = settings_differences(current, want_settings)
+        return "matched" if not diff else "matched (the operator's settings differ from the box facts: %s)" % (
+            "; ".join(diff))
+    if vban and not kind_available(obs, want_kind):
+        return "kept %s: OBS has no %s source loaded (deploy the strih bundle with obs-vban, issue 1439)" % (
+            kind or "absent", want_kind)
     scene = _current_scene_name(obs)
     if scene is None:
         return "no-scene (deferred)"
-    keep_scenes, offset = [], None
-    if action == "replace":
-        # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
-        # collection carries it in scenes the seed plan does not name).
-        keep_scenes = _scenes_holding(obs, name)
-        offset = (obs.req("GetInputAudioSyncOffset", {"inputName": name}, ignore_err=True) or {}).get(
-            "inputAudioSyncOffset")
-        obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
-    if keep_scenes:
-        scene = keep_scenes[0]
-    obs.req("CreateInput", {
-        "sceneName": scene,
-        "inputName": name,
-        "inputKind": AUDIO_INPUT_KIND,
-        "inputSettings": program_audio_input_settings(),
-    }, ignore_err=True)
-    for other in keep_scenes[1:]:
-        obs.req("CreateSceneItem", {"sceneName": other, "sourceName": name}, ignore_err=True)
-    if isinstance(offset, int) and offset:
-        obs.req("SetInputAudioSyncOffset", {"inputName": name, "inputAudioSyncOffset": offset}, ignore_err=True)
+    # issue 1439 review: every create is read back from GetInputList (one retry); a create or re-create
+    # OBS never lists as the wanted kind is a loud FAILED, never "created" / "replaced".
     if action == "create":
+        _resp, listed = input_create_verified(obs, scene, name, want_kind, want_settings)
+        if listed != want_kind:
+            return "create FAILED: %s after two CreateInput -- restart OBS (the launch seed runs again)" % (
+                listed_text(name, listed))
         return "created"
-    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", len(keep_scenes))
+    # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
+    # collection carries it in scenes the seed plan does not name); issue 1439: and its mixer state.
+    state = input_state_read(obs, name)
+    ok, info = input_recreate(obs, name, want_kind, want_settings, state, scene)
+    if not ok:
+        return ("replace FAILED (was %s): %s after RemoveInput + two CreateInput -- restart OBS (the launch "
+                "seed runs again)" % (kind or "absent", listed_text(name, info)))
+    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", info)
 
 
 def audio_monitor_type_of(obs, name=AUDIO_INPUT_NAME):
@@ -623,17 +650,6 @@ def ensure_audio_monitor_off(obs, name=AUDIO_INPUT_NAME):
     return "monitor still %s (SetInputAudioMonitorType refused)" % (back or cur)
 
 
-def _scenes_holding(obs, name):
-    """issue 1412: the scenes whose items include the source NAME, in the scene list's order."""
-    out = []
-    for sc in (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes", []) or []:
-        sn = sc.get("sceneName")
-        items = (obs.req("GetSceneItemList", {"sceneName": sn}, ignore_err=True) or {}).get("sceneItems", [])
-        if any(i.get("sourceName") == name for i in items or []):
-            out.append(sn)
-    return out
-
-
 def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
     """issue 1344 item 3 (20.9.2026 live diagnosis): the `ASIO zvuk` program-audio input must be a
     scene item in EVERY declared operator scene, not just the one it happened to be created in --
@@ -658,7 +674,8 @@ def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
     return added
 
 
-def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME, audio_monitor=None):
+def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME, audio_monitor=None,
+              audio_vban=None, pulse_capture=None):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
     CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
@@ -677,6 +694,15 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
     issue 1436: AUDIO_MONITOR "off" (the stream manifest's `program_audio_monitor`) then sets the
     program-audio input to Monitor Off when OBS monitors it (`ensure_audio_monitor_off`, named in its
     status); None never touches monitoring.
+
+    issue 1439: AUDIO_VBAN (the stream manifest's `program_audio_vban`, obs-vban source settings) makes
+    the program-audio input the obs-vban receive source instead of the pulse capture; a STRING is the
+    reason the manifest's block could not be read, and the input is then left untouched (never turned
+    back into the pulse capture).
+
+    issue 1465 item 3: PULSE_CAPTURE "forbid" (the stream manifest's `pulse_capture`) removes every scene
+    pulse capture input except the program-audio input (`drop_pulse_capture_inputs`, status under the key
+    "pulse capture"); the stream operator's headphone mix must never reach the program.
 
     Then SetStudioModeEnabled. Returns {input: status} for the log."""
     op = _obs_phase2_module()
@@ -728,7 +754,10 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
             result[inp] = "matched"
     # issue 1344: the ONE allowed create/replace — the `ASIO zvuk` program-audio input on the
     # strih-program-source loopback node (the OBS program capture that Failed to create on Linux).
-    audio_status = seed_program_audio_input(obs, audio_name)
+    if isinstance(audio_vban, str):
+        audio_status = "untouched: the manifest's program_audio_vban is unreadable (%s), issue 1439" % audio_vban
+    else:
+        audio_status = seed_program_audio_input(obs, audio_name, audio_vban)
     # issue 1344 item 3: once the input exists, make sure it is a scene item in EVERY declared
     # scene (never only the one it happened to be created/matched in) -- skip when the input itself
     # could not be resolved (no scene existed at all: "no-scene (deferred)"), nothing to attach to.
@@ -739,6 +768,8 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
         if audio_monitor == "off":
             audio_status += "; " + ensure_audio_monitor_off(obs, audio_name)
     result[audio_name] = audio_status
+    if pulse_capture == "forbid":
+        result["pulse capture"] = drop_pulse_capture_inputs(obs, keep=audio_name)
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
     return result
@@ -791,6 +822,9 @@ def main():
     ap.add_argument("--audio-monitor-type", action="store_true",
                     help="issue 1436: print the OBS monitoring type of the program-audio input (or "
                          "`absent`; `unreachable: <why>` + rc 2 when OBS does not answer) -- read-only")
+    ap.add_argument("--pulse-capture-inputs", action="store_true",
+                    help="issue 1465: print every pulse capture input OBS lists (`pulse capture inputs: none` "
+                         "when there is none; `unreachable: <why>` + rc 2 when OBS does not answer) -- read-only")
     ap.add_argument("--projector", choices=["program", "multiview"], default=None,
                     help="issue 1346: set the HDMI output view (program|multiview) in "
                          "~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the "
@@ -804,9 +838,9 @@ def main():
     # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only; --projector sets the HDMI
     # output view (issue 1346).
     if (not args.bootstrap and not args.verify_parity and args.projector is None
-            and not args.audio_input_kind and not args.audio_monitor_type):
+            and not args.audio_input_kind and not args.audio_monitor_type and not args.pulse_capture_inputs):
         ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), "
-                 "--audio-input-kind (read-only), or --projector program|multiview")
+                 "--audio-input-kind / --pulse-capture-inputs (read-only), or --projector program|multiview")
 
     # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
     # the seed manifest.
@@ -836,6 +870,16 @@ def main():
         print(audio_monitor_type_of(obs, audio_name))
         return
 
+    # --pulse-capture-inputs (issue 1465): read-only, for verify-strih's (operator-audio-obs) row.
+    if args.pulse_capture_inputs:
+        try:
+            obs = Obs(args.host, args.port, args.password)
+        except Exception as e:  # noqa: BLE001 -- refused / reset / handshake: any of them = OBS not answering
+            print("unreachable: %s: %s" % (type(e).__name__, e))
+            sys.exit(2)
+        print(pulse_capture_report(obs))
+        return
+
     # --projector (issue 1346): persist the HDMI output view. Touches only drm-output.json -- never
     # the input seed manifest and never OBS (the running OBS switches live from its own Tools menu).
     if args.projector is not None:
@@ -860,9 +904,15 @@ def main():
     inputs, _outputs, latency = parse_seed_manifest(manifest_text)
     mode = parse_seed_mode(manifest_text)
     plan = seed_inputs(inputs, latency)
+    try:
+        audio_vban = parse_program_audio_vban(manifest_text)   # issue 1439: None on the strih role
+    except ValueError as e:
+        audio_vban = str(e)
     statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"),
                          audio_name=parse_program_audio_input(manifest_text),
-                         audio_monitor=parse_program_audio_monitor(manifest_text))
+                         audio_monitor=parse_program_audio_monitor(manifest_text),
+                         pulse_capture=parse_pulse_capture_rule(manifest_text),
+                         audio_vban=audio_vban)
     print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
           % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))
@@ -872,6 +922,12 @@ def main():
         import stream_dev_safe
         spec = stream_dev_safe.parse_dev_scene(manifest_text)
         print("dev-scene seed: %s" % (", ".join(stream_dev_safe.apply_dev_safe(obs, spec)) or "present (no change)"))
+    # issue 1462: the nested-pro design (stream-snv) only keeps the measurement clip out of Development.
+    elif '"dev_scene_nested"' in manifest_text:
+        import stream_dev_safe
+        nested = stream_dev_safe.parse_dev_scene_nested(manifest_text)
+        print("dev-scene seed (nested-pro): %s"
+              % (", ".join(stream_dev_safe.apply_dev_nested(obs, nested)) or "present (no change)"))
 
 
 if __name__ == "__main__":

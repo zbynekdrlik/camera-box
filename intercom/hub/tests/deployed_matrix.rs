@@ -5,7 +5,7 @@
 //! REJECTS at rig startup. This closes that Tier-0 gap: CI loads the real deployed matrix here.
 
 use intercom_hub::janus_rtp::JanusCodec;
-use intercom_hub::matrix::{Matrix, ADAPTER_PIPEWIRE, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
+use intercom_hub::matrix::{Matrix, ADAPTER_ALSA, ADAPTER_VBAN, PROGRAM_OUT_ROLE};
 
 const DEPLOYED_TOML: &str = include_str!("../../intercom.strih-snv.toml");
 
@@ -14,8 +14,13 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
     let m = Matrix::from_toml(DEPLOYED_TOML)
         .expect("the deployed intercom.strih-snv.toml must load through Matrix::from_toml");
 
-    assert_eq!(m.participants.len(), 15, "expected 15 participants");
-    assert_eq!(m.points.len(), 216, "expected the 216-point VB-Matrix grid");
+    // issue 1439 phase 2: the VB-Matrix grid minus VASIO8 (the old OBS program capture) and its 4 points.
+    assert_eq!(m.participants.len(), 14, "expected 14 participants");
+    assert_eq!(
+        m.points.len(),
+        212,
+        "expected the 216-point VB-Matrix grid minus VASIO8's 4"
+    );
 
     // 10 VBAN inputs (cam1..7 + fohabl/lv1/mbc), 7 active VBAN outputs (cam1..7).
     let vban_in = m
@@ -80,53 +85,63 @@ fn deployed_strih_lx_matrix_loads_and_has_the_expected_shape() {
     // Issue 1345 (25.9.2026): the deployed phones leg is Opus with in-band FEC, not PCMU.
     assert_eq!(j.codec, JanusCodec::Opus);
 
-    // issue 1344: the local PipeWire program-audio graph. VASIO8 is now the `program_out` sink OBS
-    // captures (not the old M1 `program_monitor`), fed by the fohabl-strih + lv1-strih program feeds;
-    // the MiniFuse (cutters) is the pipewire talkback capture input.
-    let (po_id, target, streams) = m
-        .program_out()
-        .expect("the deployed matrix declares a program_out sink");
-    assert_eq!(m.participants[po_id].name, "program_out");
-    assert_eq!(m.participants[po_id].role, PROGRAM_OUT_ROLE);
-    assert_eq!(m.participants[po_id].adapter, ADAPTER_PIPEWIRE);
-    assert_eq!(target, "strih-program");
-    assert_eq!(
-        streams,
-        vec!["fohabl-strih".to_string(), "lv1-strih".to_string()]
+    // issue 1439 phase 2 (owner ROZHODNUTE 22.10.2026): the hub is the intercom only and forwards nothing
+    // into the strih OBS, which receives the console's VBAN program itself (the obs-vban source).
+    assert!(
+        m.program_out().is_none(),
+        "the strih-snv hub must declare no program_out sink"
+    );
+    assert!(
+        !m.participants.iter().any(|p| p.role == PROGRAM_OUT_ROLE),
+        "no program_out participant"
     );
     assert!(
         m.id_of("program_monitor").is_none(),
-        "VASIO8 is the OBS program capture (program_out), not a monitor"
+        "VASIO8 is not carried into the hub at all"
     );
 
-    // The cutters carry the operator talkback mic as a pipewire capture input.
-    let inputs = m.local_inputs();
-    assert_eq!(
-        inputs.len(),
-        1,
-        "one pipewire capture input (cutters talkback)"
-    );
-    let (cid, node, chans) = &inputs[0];
-    assert_eq!(m.participants[*cid].name, "cutters");
+    // issue 1438: the cutters open the MiniFuse 4 directly through ALSA (card ID M4), no PipeWire
+    // capture or playback node is left in the matrix.
     assert!(
-        node.contains("MiniFuse"),
-        "the capture node is the MiniFuse: {node}"
+        m.local_inputs().is_empty(),
+        "no pipewire capture input is left (the cutters record through arecord)"
     );
-    assert_eq!(*chans, 2, "two cutter mics");
+    let cards = m.alsa_cards();
+    assert_eq!(cards.len(), 1, "one card leg (the cutters)");
+    let c = &cards[0];
+    assert_eq!(m.participants[c.participant].name, "cutters");
+    assert_eq!(m.participants[c.participant].adapter, ADAPTER_ALSA);
+    assert_eq!(
+        c.card, "M4",
+        "the MiniFuse 4 by its ALSA card ID, never an index"
+    );
+    assert_eq!(c.device, 0);
+    assert_eq!(c.in_channels, 2, "two cutter mics");
+    assert_eq!(c.hw_in_channels, 6, "the MiniFuse captures 6 channels");
+    assert_eq!(c.in_map, [0, 1], "the mics are hw inputs 1 and 2");
 }
 
 #[test]
 fn deployed_matrix_plays_the_cutters_mix_to_the_minifuse_with_talkback_gain() {
     // issue 1345 (24.9.2026): the operator heard nothing because the cutters were capture-only.
+    // issue 1438: the cutters' 4 outputs play on the MiniFuse's hw outputs 1-4 of 6 through aplay.
     let m = Matrix::from_toml(DEPLOYED_TOML).expect("the deployed matrix loads");
     let cutters = m.id_of("cutters").expect("cutters");
-    let outs = m.local_outputs();
-    assert_eq!(outs.len(), 1, "one local playback egress (the cutters)");
-    let (pid, target, chans, map) = &outs[0];
-    assert_eq!(*pid, cutters);
-    assert_eq!(target, "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0");
-    assert_eq!(*chans, 4, "the 4 MiniFuse outputs the VB-Matrix fed");
-    assert_eq!(map.as_deref(), Some("AUX0,AUX1,AUX2,AUX3"));
+    assert!(
+        m.local_outputs().is_empty(),
+        "no pipewire playback egress is left"
+    );
+    let cards = m.alsa_cards();
+    assert_eq!(cards.len(), 1);
+    let c = &cards[0];
+    assert_eq!(c.participant, cutters);
+    assert_eq!(
+        c.out_channels, 4,
+        "the 4 MiniFuse outputs the VB-Matrix fed"
+    );
+    assert_eq!(c.hw_out_channels, 6, "the MiniFuse plays 6 channels");
+    assert_eq!(c.out_map, [0, 1, 2, 3]);
+    assert_eq!(c.period_frames, 256, "one hub block");
 
     // Owner ruling 24.9.2026: no hub makeup gain on the talkback -- every cutters -> phones / camN
     // point is unity (the level is set on the MiniFuse preamp).

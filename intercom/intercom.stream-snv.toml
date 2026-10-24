@@ -1,0 +1,43 @@
+# stream-snv intercom hub routing (22.10.2026, the Linux reinstall of stream-snv) -- PROGRAM-ONLY.
+# The Linux stream box takes the program audio as the VBAN stream `stream` from mbc.lan (owner
+# 22.10.2026); the hub writes it to the `strih-program` PipeWire sink, which OBS captures as its
+# program audio input. Superseded by issue 1439: the stream role runs no hub, mbc's `stream` goes
+# straight into the OBS obs-vban source `mbc` on UDP 6980 (scripts/strih-boxes/stream-snv.env), and
+# setup-strih step 13 moves a present hub aside. Kept only as the fact the loader shape-checks.
+
+[hub]
+bind = "0.0.0.0:8790"
+vban_bind = "0.0.0.0:6980"
+sample_rate = 48000
+block_frames = 256
+
+[[participant]]
+name = "mbc"
+role = "program_ref"
+adapter = "vban"
+host = "mbc.lan"
+in_stream = "stream"
+in_channels = 2
+out_channels = 0
+
+[[participant]]
+name = "program_out"
+role = "program_out"
+adapter = "pipewire"
+pipewire_target = "strih-program"
+source_streams = ["stream"]
+in_channels = 0
+out_channels = 2
+
+# The program mix is summed through these points (source_streams only names the streams).
+[[point]]
+src = "mbc"
+in_ch = 1
+dst = "program_out"
+out_ch = 1
+
+[[point]]
+src = "mbc"
+in_ch = 2
+dst = "program_out"
+out_ch = 2

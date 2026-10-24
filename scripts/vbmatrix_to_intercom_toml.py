@@ -16,13 +16,23 @@ Slot → hub participant mapping (derived from the XML's own attributes, not a h
   VBAN in only — the stream name minus the `-strih` suffix).
 - `AMDevice` type 256 (the MiniFuse ASIO master) → `cutters`; type 4 (WDM out) → `speakers`; type 1
   (WDM in) → `line34`.
-- an online `VAIOSlot` (VAIO1) → `phones`; an online `VASIOSlot` (VASIO8) → `program_out`.
+- an online `VAIOSlot` (VAIO1) → `phones`.
+- an online `VASIOSlot` (VASIO8, the Windows OBS `ASIO zvuk` program capture) → NOTHING: issue 1439
+  phase 2 (owner ROZHODNUTE 22.10.2026, "interkom-hub ma byt separatna vec, nema nic preposielat do
+  strih obs") -- the strih OBS receives the console's VBAN program itself (the obs-vban source on UDP
+  6981), so the hub carries no `program_out` and every point into VASIO8 is dropped (issue 1344's
+  `program_out` pipewire sink is gone from this matrix; the hub still supports one for strih-pp).
 
-Adapters (issue 1344 wired the local PipeWire graph): VBAN legs are live; the `phones` participant is
-`janus` (M3a); VASIO8 → `program_out` is a `pipewire` sink (the OBS `ASIO zvuk` program capture, fed
-by the VBAN streams routed into it) and the `cutters` (MiniFuse) is a `pipewire` capture input (the
-operator talkback mic). The remaining interface participants (speakers/line34) stay `adapter = "none"`
-until a later local-monitor lane wires them.
+Adapters: VBAN legs are live; the `phones` participant is `janus` (M3a); the `cutters` (MiniFuse)
+open the card directly through ALSA (`alsa`, issue 1438: arecord for the operator talkback mic,
+aplay for their own N-1 bus to the cans, on `hw:CARD=M4,DEV=0`, no PipeWire node; issue 1344 had
+them on two `pw-cat` children). The remaining interface participants (speakers/line34) stay
+`adapter = "none"` until a later local-monitor lane wires them.
+
+Rollback of issue 1438 (by hand on the box, never here): the cutters back on `adapter = "pipewire"`
+with `pipewire_source = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"`, `pipewire_target =
+"alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"` and `pipewire_channel_map =
+"AUX0,AUX1,AUX2,AUX3"` (the hub keeps the pipewire adapter).
 
 Usage:
     python3 scripts/vbmatrix_to_intercom_toml.py <vbmatrix.xml> > intercom/intercom.strih-snv.toml
@@ -73,35 +83,36 @@ _ROLE_ORDER = {
     "phones": 3,
     "speakers": 4,
     "line34": 5,
-    "program_out": 6,
 }
 
 _STRIH_SUFFIX = "-strih"
 
-# issue 1344: the local PipeWire nodes the strih-snv audio graph binds.
-# - PROGRAM_SINK_NODE: the null sink the hub writes the program mix to; OBS captures the loopback
-#   republish node strih-program-source (issue 1344 follow-up, 20.9.2026 live diagnosis --
-#   strih-program.monitor itself is NOT pulse-visible to OBS on this box).
-# - MINIFUSE_CAPTURE_NODE: the MiniFuse 4 pro-audio capture node the hub reads the operator talkback
-#   from. UPPERCASE "ARTURIA" -- confirmed live against `wpctl status` (issue 1344 follow-up,
-#   20.9.2026): a lowercase/title-case node name is a case-sensitive PipeWire mismatch the hub reads
-#   as a missing device. The exact node name is pinned by the WirePlumber rule setup-strih installs
-#   (pro-audio profile); re-confirm against `wpctl status` at any future live audio bring-up.
-_PROGRAM_SINK_NODE = "strih-program"
-_MINIFUSE_CAPTURE_NODE = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
-
-# issue 1345 (24.9.2026): the MiniFuse 4 PLAYBACK node the cutters' N-1 mix is played to, so the
-# operator hears the cams + phones in the headphones (on Linux the cutters were capture-only).
-# Live-read on strih-snv: a pro-audio node with 6 ports `playback_AUX0..5`. The cutters' 4 output
-# channels map onto AUX0..AUX3 via an explicit pw-cat channel map (an unmapped 4-ch stream defaults
-# to FL/FR/RL/RR and never lands on the AUX ports).
-_MINIFUSE_PLAYBACK_NODE = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
+# issue 1438: the cutters' card, opened directly through ALSA by the hub (no PipeWire node). Read live
+# on strih-snv 23.10.2026 (`/proc/asound/cards`, `/proc/asound/M4/stream0`): the MiniFuse 4 is card ID
+# `M4`, device 0; its hw PCM opens with exactly 6 channels on both sides (playback S32_LE or S16_LE,
+# capture S32_LE only -- the hub picks the format from the card itself). The card ID, never the card
+# index, which moves when USB re-enumerates.
+_MINIFUSE_ALSA_CARD = "M4"
+_MINIFUSE_ALSA_DEVICE = 0
+_MINIFUSE_HW_CHANNELS = 6
+# One hub block (256 frames, 5.33 ms) per ALSA period, like the hub's HDMI leg.
+_MINIFUSE_ALSA_PERIOD_FRAMES = 256
 
 # issue 1345: the talkback makeup gain, in dB, on every cutters -> phones and cutters -> camN point.
 # ONE constant, added to the VB-Matrix point gain. Never hand-edit the generated TOML to tune it.
 # Owner ruling 24.9.2026 ("nemal si menit hlasitosti na kamerach"): 0 dB -- the +12 dB tried that
 # day put noise into the cameramen's headsets; the talkback level is set on the MiniFuse preamp.
 TALKBACK_MAKEUP_DB = 0.0
+
+# issue 1461: every ingress resampler leg's FIXED target depth in ms (the hub rounds it up to whole
+# 256-frame blocks and reads it at start only, never adapting it): a cambox 3 blocks (16 ms), a
+# program feed 7 blocks (37.33 ms: the FOH sender's largest measured gap 27.6 ms + a block + half
+# a burst), the cutters' card capture 8 blocks (42.67 ms: the issue-1345 capture ring's depth, two
+# pw-cat bursts; the alsa adapter's arecord delivers 256-frame periods, so it can likely go lower
+# once its live jitter is read).
+TARGET_MS_CAMBOX = "16.0"
+TARGET_MS_PROGRAM = "37.33"
+TARGET_MS_CARD = "42.67"
 
 _TALKBACK_DST_ROLES = ("cambox", "phones")
 
@@ -181,10 +192,11 @@ def build_model(xml_text):
         uniq = e.get("uniq")
         dtype = e.get("type")
         if dtype == "256":
-            # The MiniFuse ASIO master carries the operator TALKBACK mic — a pipewire capture input
-            # feeding the cutters participant into the N-1 mix (issue 1344).
-            add("cutters", "cutters", "pipewire", 0)
-            participants["cutters"]["pipewire_source"] = _MINIFUSE_CAPTURE_NODE
+            # The MiniFuse ASIO master carries the operator TALKBACK mic and the cans: the hub opens
+            # the card itself through ALSA (issue 1438; its maps are filled in below, from the
+            # channels the points use).
+            add("cutters", "cutters", "alsa", 0)
+            participants["cutters"]["alsa_card"] = _MINIFUSE_ALSA_CARD
             slot_to_part[uniq] = "cutters"
         elif dtype == "4":
             add("speakers", "speakers", "none", 0)
@@ -202,19 +214,20 @@ def build_model(xml_text):
             slot_to_part[e.get("uniq")] = "phones"
             break
 
-    # Program out (OBS `ASIO zvuk` program-audio capture, VASIO8) — the first online VASIOSlot.
-    # A pipewire sink: the hub writes the VBAN streams routed into VASIO8 (the program mix) to the
-    # `strih-program` null sink, which OBS captures as `strih-program.monitor` (issue 1344).
+    # VASIO8 (the Windows OBS `ASIO zvuk` program capture) -- the first online VASIOSlot -- is NOT
+    # carried into the hub (issue 1439 phase 2): the strih OBS takes the console's VBAN program itself,
+    # so its points are dropped below (`None` = a known slot with no hub participant).
     for e in root.iter("VASIOSlot"):
         if e.get("online") == "1":
-            add("program_out", "program_out", "pipewire", 0)
-            slot_to_part[e.get("uniq")] = "program_out"
+            slot_to_part[e.get("uniq")] = None
             break
 
     # Points (routing grid), in document order.
     points = []
     for e in root.iter("Point"):
         si, so = e.get("slotin"), e.get("slotout")
+        if slot_to_part.get(si, "") is None or slot_to_part.get(so, "") is None:
+            continue  # a point into / out of VASIO8 (issue 1439 phase 2)
         if si not in slot_to_part:
             raise ValueError(f"point slotin '{si}' has no participant")
         if so not in slot_to_part:
@@ -249,29 +262,32 @@ def build_model(xml_text):
         s["in_channels"] = max(s["in_channels"], pt["in_ch"])
         d["out_channels"] = max(d["out_channels"], pt["out_ch"])
 
-    # issue 1344: the program_out pipewire sink target + its source streams. The source streams are
-    # DERIVED from the routing — the in_stream of every VBAN participant that routes INTO program_out
-    # (preserving exactly what VB-Matrix fed VASIO8), never a hard-coded guess: on this fixture that
-    # is fohabl-strih (VBAN8) + lv1-strih (the VBAN64 slot = VBANStreamIn index 9), both unity ch1/2.
-    po = participants.get("program_out")
-    if po is not None:
-        po["pipewire_target"] = _PROGRAM_SINK_NODE
-        srcs = []
-        for pt in points:
-            if pt["dst"] == "program_out":
-                src_in = participants.get(pt["src"], {}).get("in_stream")
-                if src_in and src_in not in srcs:
-                    srcs.append(src_in)
-        po["source_streams"] = srcs
+    # issue 1461: the fixed target of every ingress resampler leg.
+    for p in participants.values():
+        if p["role"] == "cambox":
+            p["target_ms"] = TARGET_MS_CAMBOX
+        elif p["adapter"] == "vban":
+            p["target_ms"] = TARGET_MS_PROGRAM
+        elif p["name"] == "cutters" and p["in_channels"] > 0:
+            p["target_ms"] = TARGET_MS_CARD
 
-    # issue 1345: the cutters also PLAY their own N-1 output bus to the MiniFuse (the operator's
-    # headphones), one AUX port per output channel.
+    # issue 1438: the cutters' card leg. The mics are the MiniFuse's first hw inputs, the cans its
+    # first hw outputs (issue 1345: the operator hears the N-1 mix in the headphones), on the card's
+    # 6 channels each way.
     cutters = participants.get("cutters")
-    if cutters is not None and cutters["adapter"] == "pipewire" and cutters["out_channels"] > 0:
-        cutters["pipewire_target"] = _MINIFUSE_PLAYBACK_NODE
-        cutters["pipewire_channel_map"] = ",".join(
-            f"AUX{i}" for i in range(cutters["out_channels"])
-        )
+    if cutters is not None and cutters["adapter"] == "alsa":
+        cutters["alsa_device"] = _MINIFUSE_ALSA_DEVICE
+        cutters["alsa_period_frames"] = _MINIFUSE_ALSA_PERIOD_FRAMES
+        if cutters["out_channels"] > 0:
+            cutters["alsa_out_channels"] = _MINIFUSE_HW_CHANNELS
+            cutters["alsa_channel_map"] = ",".join(
+                str(i + 1) for i in range(cutters["out_channels"])
+            )
+        if cutters["in_channels"] > 0:
+            cutters["alsa_in_channels"] = _MINIFUSE_HW_CHANNELS
+            cutters["alsa_in_channel_map"] = ",".join(
+                str(i + 1) for i in range(cutters["in_channels"])
+            )
 
     ordered = sorted(participants.values(), key=lambda p: p["order"])
     for p in ordered:
@@ -341,9 +357,19 @@ def render(model):
             out.append(f'pipewire_source = "{p["pipewire_source"]}"')
         if "pipewire_channel_map" in p:
             out.append(f'pipewire_channel_map = "{p["pipewire_channel_map"]}"')
+        if "alsa_card" in p:
+            out.append(f'alsa_card = "{p["alsa_card"]}"')
+        for key in ("alsa_device", "alsa_period_frames", "alsa_out_channels", "alsa_in_channels"):
+            if key in p:
+                out.append(f"{key} = {p[key]}")
+        for key in ("alsa_channel_map", "alsa_in_channel_map"):
+            if key in p:
+                out.append(f'{key} = "{p[key]}"')
         if "source_streams" in p:
             joined = ", ".join(f'"{s}"' for s in p["source_streams"])
             out.append(f"source_streams = [{joined}]")
+        if "target_ms" in p:
+            out.append(f'target_ms = {p["target_ms"]}')
         out.append(f'in_channels = {p["in_channels"]}')
         out.append(f'out_channels = {p["out_channels"]}')
         out.append("")

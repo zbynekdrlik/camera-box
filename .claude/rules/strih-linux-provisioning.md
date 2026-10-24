@@ -190,7 +190,9 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   branch-filtered fetch walks the pages (`per_page=100`, at most `STRIH_CI_ARTIFACT_MAX_PAGES` = 10,
   stop on an empty page) in `_strih_ci_artifact_url`. A one-page read found no main hub on the new
   strih notebook (11.10.2026, 254 artifacts, main on page 2+). An unfiltered fetch (bkshading) still
-  reads page 1 only.
+  reads page 1 only. **Since issue 1467 the hub comes from the provisioning checkout's OWN commit**
+  (a SHA-filtered fetch, paged the same way; `main` only as a named fallback), see
+  `.claude/rules/strih-intercom.md` "The hub binary of the checkout's own commit".
 - **G7 + G11, the per-box step gate** (`scripts/lib/obs-box-role.sh` `obs_box_step_applies`): step
   11b (the xhci IRQ unit) runs only for a USB rig NIC (`STRIH_NIC_MIN_USB_MBPS != none`; a PCIe NIC
   has no xhci walk and the unit would fail every boot), step 16e only with
@@ -226,9 +228,15 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   a BOM) and parses every input before writing anything. verify item 10 grades the written encoder.
 - **Step 6 manifest** (`obs_box_seed_manifest_json`): one entry `NDI 2ME PGM` <- the program sender
   in scene `PRO`, class `program` (genlock_fifo + ndi_sync 2, the latency pin NEVER written: it is
-  the operator's stream A/V knob), `program_audio_input` = `Zvuk z mixu` (pulse on
-  `strih-program.monitor`). A wrong-kind audio input is replaced in every scene it was in, its sync
-  offset kept.
+  the operator's stream A/V knob), `program_audio_input` = the box fact STRIH_PROGRAM_AUDIO_INPUT
+  (stream-pp `Zvuk z mixu`, stream-snv `mbc`, issue 1462), since issue 1439 the obs-vban receive
+  source on the console's VBAN (`program_audio_vban` from the facts STRIH_PROGRAM_VBAN_*: lv1 at PP,
+  mbc.lan at SNV; `.claude/rules/obs-vban-receive.md`). A wrong-kind audio input is replaced in every scene it was in,
+  keeping its sync offset and (issue 1439) its whole mixer state and filters.
+- **No intercom hub on the stream role (issue 1439, owner 22.10.2026):** `obs_box_step_applies 13`
+  skips step 13 and moves a present hub aside (`strih_intercom_hub_remove`); steps 4b / 12 write no hub
+  drop-in; verify item 16 grades "no hub", item 9 the obs-vban source, item 34 NOTEs the absent drop-in.
+  The two bullets below are the pre-1439 stream-role hub history (the strih role keeps both rules).
 - **Step 7:** one NDI output, `MainOutputName=stream` (DistroAV announces `STREAM-PP (stream)`),
   preview off. The strih printer text is byte-identical.
 - **verify item 9** grades `fohabl` when the hub has it (strih-snv), else every `program_ref`
@@ -836,6 +844,22 @@ with an old inline block that ran its tail unconditionally.
 - **Launching setup-strih over ssh needs the sudo password on stdin.** A bare `sudo … nohup … &` over
   ssh has no tty → the log holds only `sudo: A terminal is required to authenticate`. Use
   `echo "$PW" | sudo -S -p "" bash -c "nohup … &"`.
+- **verify-strih from a staged tree also needs `vendor/av-sync-dock/src`.** Item 41's
+  `(program-audio-files)` row compares the installed sampler headers with the checkout's
+  `vendor/av-sync-dock/src/camera-box-{audio,marker-scan}.hpp`; a `scripts/ systemd/ intercom/`-only
+  stage reads them as `differs` (a false FAIL, 21.10.2026: the installed files matched the repo's
+  sha256). Stage that dir too, or check the two hashes before believing the row.
+- **A few steps on a live box, without the whole run:** a small driver does `set -- --box <box>;
+  . scripts/setup-strih.sh` (the source-guard stops after the box facts and libs load, with `HERE`,
+  `DESKTOP_USER`, `USER_HOME`, `OBS_CFG` set), then `obs_box_apt_lock_timeout` and the step calls
+  exactly as setup-strih writes them (`strih_session_apps_install "${HERE}/.." ...`,
+  `strih_operator_install ...`, `obs_box_panel_install ...`). One kiosk item alone is its own
+  function from the step-11 lib (`obs_box_gpu_ready_install`, which `obs_box_kiosk` calls), never the
+  whole `obs_box_kiosk`. Step 13 never restarts a running hub, so a matrix change also needs
+  `systemctl restart intercom-hub`. Used for the post-production deploy of 21.10.2026 (issues
+  1441/1454/1456/1457/1458); it never touches OBS. A full run without `STRIH_LX_BUNDLE_SRC` does not
+  install OBS either (step 4 only warns), and while OBS runs some steps skip their OBS-file part with
+  a WARN (step 16g's [BasicWindow] and projector seeding) and do the rest.
 - **Poll with `pgrep -x setup-strih.sh`, never `pgrep -f`.** `pgrep -f setup-strih.sh` matches its OWN
   command line and reports RUNNING forever (run 1 on 18.9. "ran" for 20 min this way while setup had
   actually never started).
@@ -860,8 +884,8 @@ MiniFuse capture as the operator talkback into the N-1 mix. Full design + the Dy
 
 `setup-strih.sh` step 12 now **INSTALLS** the graph (no more fail-loud TODO / `STRIH_LX_AUDIO_WIRED`):
 the operator-session `strih-program` null sink + a WirePlumber rule pinning the MiniFuse to its
-pro-audio profile @48 kHz + the intercom-hub audio drop-in (runs the hub as the operator so its
-pw-cat children reach the operator PipeWire session). The OBS `ASIO zvuk` input is seeded by
+pro-audio profile @48 kHz. The intercom-hub audio drop-in (runs the hub as the operator so its
+pw-cat children reach the operator PipeWire session) is written by step 13 with the hub (issue 1439). The OBS `ASIO zvuk` input is seeded by
 `strih_scenes.py --bootstrap` (the ONE allowed create in update-only mode). `verify-strih.sh` derives
 the audio verdict (`strih_lx_program_audio_verdict`: sink present + OBS input pulse_input_capture +
 hub program-rx; FOH-live level is a supervisor NOTE). **Supervisor live steps:** confirm the MiniFuse

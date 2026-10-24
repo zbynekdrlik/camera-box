@@ -528,6 +528,23 @@ pub mod os_clock_discipline;
 // `vendor/obs-vban/src/vban-pacing.h` is held identical by `tests/vban_pacing_parity_1372.rs`.
 pub mod vban_pacing;
 
+// Issue 1439 — the receive timeline of the vendored obs-vban VBAN SOURCE: packet n is stamped on a
+// line fitted to the sender's own clock (least squares over 64 s, late outliers not folded, rate
+// clamped to +/-500 ppm, slewed so stamps never jump) plus a FIXED reserve R (default 40 ms), so
+// the genlock ASRC resamples it on the stamp basis; a lost packet is silence for exactly its slot.
+// Crate-root + std-only (Tier-0 verifiable); the C twin
+// `vendor/obs-vban/src/vban-receive-timeline.h` is held identical by
+// `tests/vban_receive_timeline_parity_1439.rs`.
+pub mod vban_receive_timeline;
+
+// Issue 1439 (ROZHODNUTÉ 6352253147 item (b)) — the concealment of a short run of lost VBAN packets
+// in the obs-vban receive source: the previous packet's samples played again in the missing slot,
+// with raised-cosine crossfades in from the last sample handed out and out toward the packet that
+// ends the run (the timeline decides WHICH slot is concealed). Crate-root + std-only (Tier-0
+// verifiable); the C twin `vendor/obs-vban/src/vban-conceal.h` is held identical by
+// `tests/vban_conceal_parity_1439.rs`.
+pub mod vban_conceal;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the

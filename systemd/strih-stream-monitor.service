@@ -1,14 +1,20 @@
 [Unit]
 # issue 1436 -- the stream box's headphones play the REAL outgoing stream (owner 15.10.2026: the SNV way,
-# one unified PP/SNV design). scripts/strih_stream_monitor.py plays the AUDIO of the restreamer's local
-# RTMP (the key setup-strih step 3 writes into the stream OBS profile = the box name = %l) straight to
-# the headphone jack's ALSA PCM (resolved by its PCM name), never through PipeWire (issue 1437). Silent
-# while nothing is published, a reconnect after every stream. Installed by setup-strih.sh step 16d on
+# one unified PP/SNV design). scripts/strih_stream_monitor.py runs VLC on the restreamer's local RTMP
+# (the key setup-strih step 3 writes into the stream OBS profile = the box name = %l), straight to the
+# headphone jack's ALSA PCM (resolved by its PCM name), never through PipeWire (issue 1437); issue 1456:
+# VLC as on stream-snv, its volume slider the operator's control, the card at 0 dB. Issue 1465: the ONE
+# USB headphone box (the stream-snv Scarlett) wins over the jack, and VLC is told to play only while OBS
+# publishes (no failed RTMP open flickers its window). Installed by setup-strih.sh step 16d on
 # the stream role (scripts/lib/strih-session-apps.sh), started at login by the kiosk autostart, graded by
 # verify-strih's (stream-monitor) rows.
-Description=Stream box headphone monitor -- play the outgoing RTMP stream's audio to the headphone jack (issue 1436)
+Description=Stream box headphone monitor -- VLC plays the outgoing RTMP stream to the headphone box, else the jack (issues 1436, 1456, 1465)
 Documentation=https://github.com/zbynekdrlik/camera-box
-After=strih-obs.service
+# issue 1465: After= the target too. A target orders itself after every unit it Wants (the WantedBy link
+# below) unless that unit is already After= it; without this line systemd found the login cycle
+# "strih-stream-monitor after strih-obs after graphical-session.target after strih-stream-monitor" and
+# dropped a job to break it. strih-bundle-state-server.service has the same two-target shape.
+After=graphical-session.target strih-obs.service
 # Never give up: the operator must hear the stream whenever the session runs.
 StartLimitIntervalSec=0
 
@@ -16,7 +22,10 @@ StartLimitIntervalSec=0
 Type=simple
 # %l = the short hostname (setup step 1 sets it to the box name = the stream key); %t = the user runtime
 # dir: the state file verify-strih reads for "last pass recent" + the headphone PCM owner.
-ExecStart=/usr/bin/python3 /usr/local/bin/strih_stream_monitor.py --url rtmp://127.0.0.1:1234/live/%l --state-file %t/strih-stream-monitor.json
+# issue 1465 item 3: --output pulse = VLC through pulse to the locked operator PipeWire's one sink
+# (stream-operator-headphones, setup-strih step 12 on the stream role), the headphone PCM held by PipeWire.
+# Rollback of the trial: a drop-in with an ExecStart= reset and this line without --output pulse.
+ExecStart=/usr/bin/python3 /usr/local/bin/strih_stream_monitor.py --url rtmp://127.0.0.1:1234/live/%l --state-file %t/strih-stream-monitor.json --output pulse
 Restart=always
 RestartSec=5
 TimeoutStopSec=10

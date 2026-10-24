@@ -115,10 +115,10 @@ def test_venue_pp_grabs_the_pp_stream_and_writes_its_own_heartbeat(tmp_path):
     assert len(logs) == 1 and logs[0].startswith("measurements-pp-") and logs[0].endswith(".tsv")
 
 
-def test_default_venue_is_snv_with_the_old_grab_url(tmp_path):
+def test_default_venue_is_snv_with_the_linux_stream_box_url_1462(tmp_path):
     proc, home, argv = _pass(tmp_path, [])
     assert proc.returncode == 0, proc.stderr
-    assert _arg_after(argv, "-i") == "rtmp://10.77.9.204:1234/live/obs-e2e-test"
+    assert _arg_after(argv, "-i") == "rtmp://10.77.9.204:1234/live/stream-snv"
     assert (home / ".camera-box" / "avsync-watchdog-heartbeat-snv.txt").exists()
 
 
@@ -241,7 +241,7 @@ def test_installer_enables_one_timer_per_venue_and_retires_the_single_unit():
     out = _source(_DEV2_INSTALL, "dev2_enable_remote_cmd")
     assert "systemctl --user daemon-reload" in out
     assert "disable --now avsync-measure-dev2.timer" in out
-    assert "enable --now avsync-measure-dev2@snv.timer avsync-measure-dev2@pp.timer" in out
+    assert "enable --now avsync-measure-dev2@pp.timer avsync-measure-dev2@snv.timer" in out
     assert out.index("disable --now avsync-measure-dev2.timer") < out.index("enable --now")
 
 

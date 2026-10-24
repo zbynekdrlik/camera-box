@@ -80,7 +80,9 @@ def test_fohabl_program_ref_into_cutters_at_minus_8_never_to_cams():
 
 def test_model_shape_and_roles():
     _hub, parts, points = _model()
-    assert len(points) == 216
+    # issue 1439 phase 2: the 216-point grid minus VASIO8's 4 program points (fohabl/lv1 ch1/2): the hub
+    # forwards nothing into the strih OBS, which takes the console's VBAN itself
+    assert len(points) == 212
     names = {p["name"] for p in parts}
     for want in (
         "cam1",
@@ -92,7 +94,6 @@ def test_model_shape_and_roles():
         "phones",
         "speakers",
         "line34",
-        "program_out",
     ):
         assert want in names, f"missing participant {want}"
     # The cutters carry 2 mics in + two stereo cans out (4 ch); phones are 2-in / 2-out.
@@ -135,7 +136,7 @@ def test_generated_toml_parses_into_the_matrix_shape():
     assert data["hub"]["vban_bind"] == "0.0.0.0:6980"
     _hub, parts, points = _model()
     assert len(data["participant"]) == len(parts)
-    assert len(data["point"]) == len(points) == 216
+    assert len(data["point"]) == len(points) == 212
     # A spot-check that a −8 dB program-ref point survives the render→parse round-trip.
     fohabl_cutters = [
         pt
@@ -148,76 +149,60 @@ def test_generated_toml_parses_into_the_matrix_shape():
 # --- issue 1344: the local PipeWire program-audio graph (VB-Matrix replacement) -----------------
 
 
-def test_vasio8_becomes_a_pipewire_program_out_sink():
-    """VASIO8 is the OBS `ASIO zvuk` program capture — the converter maps it to a `program_out`
-    pipewire sink (not the old M1 `program_monitor`), targeting the `strih-program` null sink."""
-    _hub, parts, _points = _model()
+def test_vasio8_is_not_carried_into_the_hub():
+    """issue 1439 phase 2 (owner ROZHODNUTE 22.10.2026, addendum 6338457001: "interkom-hub ma byt separatna
+    vec, nema nic preposielat do strih obs"): VASIO8 was the OBS `ASIO zvuk` program capture. The strih OBS
+    now receives the console's VBAN itself (the obs-vban source on UDP 6981), so the converter emits no
+    `program_out` participant and drops every point into VASIO8."""
+    _hub, parts, points = _model()
     names = {p["name"] for p in parts}
-    assert "program_out" in names, "VASIO8 must map to a program_out participant"
-    assert "program_monitor" not in names, "VASIO8 is the OBS program capture, not a monitor"
-    po = next(p for p in parts if p["name"] == "program_out")
-    assert po["role"] == "program_out"
-    assert po["adapter"] == "pipewire"
-    assert po["pipewire_target"] == "strih-program"
+    assert "program_out" not in names and "program_monitor" not in names
+    assert not any(p["role"] == "program_out" for p in parts)
+    assert not any(pt["dst"] == "program_out" for pt in points)
+    # the program references keep their channel counts from their remaining (cutters / speakers) points
+    by_name = {p["name"]: p for p in parts}
+    assert (by_name["fohabl"]["in_channels"], by_name["lv1"]["in_channels"]) == (4, 2)
 
 
-def test_program_out_source_streams_are_the_vasio8_feeds():
-    """The program mix OBS captures = the VBAN streams routed into VASIO8 = fohabl-strih + lv1-strih
-    (the VBAN64 slot = VBANStreamIn index 9 = lv1-strih), both live named sources."""
-    _hub, parts, _points = _model()
-    po = next(p for p in parts if p["name"] == "program_out")
-    assert po["source_streams"] == ["fohabl-strih", "lv1-strih"], po["source_streams"]
-
-
-def test_cutters_becomes_a_pipewire_talkback_capture():
-    """The MiniFuse (AMDevice type 256) carries the operator TALKBACK mic — the converter maps the
-    cutters participant to a pipewire capture input, not the old adapter=none."""
+def test_cutters_open_the_minifuse_through_alsa_by_its_card_id_1438():
+    """issue 1438: the MiniFuse (AMDevice type 256) carries the operator talkback mic and the cans;
+    the hub opens the card itself through ALSA (`hw:CARD=M4,DEV=0`), no PipeWire node, so a missing
+    card is the leg down instead of a fallback into another device."""
     _hub, parts, _points = _model()
     cutters = next(p for p in parts if p["name"] == "cutters")
-    assert cutters["adapter"] == "pipewire"
-    assert cutters.get("pipewire_source"), "cutters needs a pipewire_source (the MiniFuse capture node)"
-    assert "MiniFuse" in cutters["pipewire_source"]
+    assert cutters["adapter"] == "alsa"
+    # the card ID read live on strih-snv (/proc/asound/cards), never a card index
+    assert cutters["alsa_card"] == "M4"
+    assert cutters["alsa_device"] == 0
+    assert cutters["alsa_period_frames"] == 256
+    assert not any(k.startswith("pipewire") for k in cutters), cutters
 
 
-def test_minifuse_capture_node_is_the_real_uppercase_arturia_alsa_name():
-    # issue 1344 follow-up (20.9.2026 live diagnosis, issuecomment-5751113173): the real ALSA node
-    # name on the box is uppercase "ARTURIA" (`wpctl status` / `pactl list sources`), NOT the
-    # title-case "Arturia" the converter used to emit — a case-sensitive PipeWire node-name mismatch
-    # the hub reads as a missing device.
+def test_the_minifuse_hw_channels_carry_the_mics_and_the_cans_1438():
+    """The MiniFuse hw PCM opens with exactly 6 channels both ways; the 2 mics are its hw inputs 1-2,
+    the cutters' 4 outputs (issue 1345: the operator's headphones) its hw outputs 1-4."""
     _hub, parts, _points = _model()
     cutters = next(p for p in parts if p["name"] == "cutters")
-    assert cutters["pipewire_source"] == "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0",         cutters["pipewire_source"]
+    assert (cutters["in_channels"], cutters["out_channels"]) == (2, 4)
+    assert (cutters["alsa_in_channels"], cutters["alsa_out_channels"]) == (6, 6)
+    assert cutters["alsa_in_channel_map"] == "1,2"
+    assert cutters["alsa_channel_map"] == "1,2,3,4"
 
 
-def test_generated_toml_emits_the_pipewire_fields():
+def test_generated_toml_emits_the_alsa_fields_1438():
     text = conv.convert(_xml())
-    assert 'adapter = "pipewire"' in text
-    assert 'pipewire_target = "strih-program"' in text
-    assert 'source_streams = ["fohabl-strih", "lv1-strih"]' in text
-    assert "pipewire_source = " in text
-    # No stale program_monitor participant survives.
+    assert 'adapter = "alsa"' in text
+    assert 'alsa_card = "M4"' in text
+    assert 'alsa_channel_map = "1,2,3,4"' in text
+    assert 'alsa_in_channel_map = "1,2"' in text
+    # no PipeWire node is left in the strih-snv matrix (issue 1439 phase 2 removed the program sink)
+    assert 'adapter = "pipewire"' not in text
+    assert "pipewire_" not in text
+    assert "source_streams" not in text
     data = tomllib.loads(text)
     assert not any(p["name"] == "program_monitor" for p in data["participant"])
-
-
-# --- 24.9.2026 production fix: the operator's headphones + the talkback level -------------------
-
-_MINIFUSE_PLAYBACK = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
-
-
-def test_cutters_play_their_n1_mix_to_the_minifuse_outputs():
-    """On Linux the cutters participant was capture-only, so the operator heard NOTHING. The converter
-    now gives it the MiniFuse playback node + an explicit AUX channel map for its 4 output channels
-    (the pro-audio node's ports are AUX0..AUX5; an unmapped 4-ch stream defaults to FL/FR/RL/RR)."""
-    _hub, parts, _points = _model()
-    cutters = next(p for p in parts if p["name"] == "cutters")
-    assert cutters["pipewire_source"] == "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
-    assert cutters["pipewire_target"] == _MINIFUSE_PLAYBACK
-    assert cutters["out_channels"] == 4
-    assert cutters["pipewire_channel_map"] == "AUX0,AUX1,AUX2,AUX3"
-    text = conv.convert(_xml())
-    assert f'pipewire_target = "{_MINIFUSE_PLAYBACK}"' in text
-    assert 'pipewire_channel_map = "AUX0,AUX1,AUX2,AUX3"' in text
+    cutters = next(p for p in data["participant"] if p["name"] == "cutters")
+    assert (cutters["alsa_out_channels"], cutters["alsa_in_channels"]) == (6, 6)
 
 
 def test_talkback_makeup_gain_is_one_named_constant_on_cutters_to_phones_and_cams():

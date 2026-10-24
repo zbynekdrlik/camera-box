@@ -655,7 +655,10 @@ class VerifyStrihItem34Behaviour(unittest.TestCase):
             "NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi"),
             "NDI_DISCOVERY_INTERCOM_DROPIN": os.path.join(tmp, "intercom-ndi-discovery.conf"),
         }
-        script = f'set -euo pipefail\n. "{LIB}"\n{pre}USER_HOME="{tmp}/home"\n{prelude}{block}\necho "FAILS=$FAILS"'
+        # issue 1439: the drop-in row follows the box's step-13 gate (scripts/lib/obs-box-role.sh); the
+        # default here is a box that runs the hub, PRE may redefine it.
+        hub = "obs_box_step_applies() { return 0; }\n"
+        script = f'set -euo pipefail\n. "{LIB}"\n{hub}{pre}USER_HOME="{tmp}/home"\n{prelude}{block}\necho "FAILS=$FAILS"'
         return _bash(script, env=env)
 
     def _configure(self, tmp, ips=None):
@@ -679,6 +682,20 @@ class VerifyStrihItem34Behaviour(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("FAILS=0", r.stdout, r.stdout)
             self.assertEqual(r.stdout.count("PASS (ndi-discovery)"), 3, r.stdout)
+
+    def test_a_box_without_a_hub_grades_no_hub_dropin_1439(self):
+        # issue 1439: the stream role runs no intercom hub, so setup-strih step 13 writes no hub drop-in
+        # and item 34 grades only the two receiver configs (a NOTE names why), never a missing drop-in.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._configure(tmp)
+            os.unlink(os.path.join(tmp, "intercom-ndi-discovery.conf"))
+            nohub = 'obs_box_step_applies() { printf "the stream role runs no intercom hub"; return 1; }\n'
+            r = self._run(tmp, pre=nohub)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("FAILS=0", r.stdout, r.stdout)
+            self.assertEqual(r.stdout.count("PASS (ndi-discovery)"), 2, r.stdout)
+            self.assertIn("NOTE (ndi-discovery) no intercom hub on this box", r.stdout)
+            self.assertIn("the stream role runs no intercom hub", r.stdout)
 
     def test_a_generator_failure_is_reported_once(self):
         with tempfile.TemporaryDirectory() as tmp:

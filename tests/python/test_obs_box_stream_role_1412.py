@@ -85,11 +85,13 @@ def _profile_mod():
 def test_the_program_sender_and_venue_close_the_fact_list():
     r = _bash("strih_box_fact_keys", sources=(FACTS,))
     # issue 1413 appended the dev1-side camera network after them, issue 1399 the two HTTPS facts,
-    # issue 1424 part 2 the HDMI output list.
+    # issue 1424 part 2 the HDMI output list, issue 1453 the public-intercom switch, issue 1462 the stream
+    # Development design.
     keys = r.stdout.split()
     i = keys.index("STRIH_PROGRAM_SENDER")
     assert keys[i:i + 3] == ["STRIH_PROGRAM_SENDER", "STRIH_VENUE", "STRIH_CAMERA_DEV1_NET"]
-    assert keys[i + 3:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS"]
+    assert keys[i + 3:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
+                            "STRIH_HTTPS_PUBLIC", "STRIH_STREAM_DEV_SCENE"]
 
 
 def test_stream_pp_loads_as_the_stream_role(boxes):
@@ -215,7 +217,9 @@ def test_the_stream_manifest_is_one_genlocked_program_input(boxes):
 def test_a_strih_manifest_is_unchanged_by_the_class_key(boxes):
     s = _scenes()
     text = _manifest(boxes, "strih-snv")
-    assert '"class"' not in text and "program_audio_input" not in text
+    # issue 1439 phase 2: strih-snv's manifest names its program input (its console's VBAN source), the
+    # same `ASIO zvuk` the seeder's default reads; the class key stays off the strih manifest
+    assert '"class"' not in text
     inputs, _o, latency = s.parse_seed_manifest(text)
     assert s.parse_program_audio_input(text) == "ASIO zvuk"
     classes = [p["settings"].get("genlock_fifo") for p in s.seed_inputs(inputs, latency)]
@@ -229,11 +233,16 @@ def test_the_program_audio_input_name_reaches_the_seeder():
     class FakeObs:
         def __init__(self):
             self.calls = []
+            self.kind = "asio_input_capture"   # RemoveInput / CreateInput change it, like OBS
 
         def req(self, t, d=None, ignore_err=False):
             self.calls.append((t, d))
             if t == "GetInputList":
-                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": "asio_input_capture"}]}
+                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.kind else []}
+            if t == "RemoveInput":
+                self.kind = None
+            if t == "CreateInput":
+                self.kind = d["inputKind"]
             if t == "GetSceneList":
                 return {"currentProgramSceneName": "PRO", "scenes": [{"sceneName": "PRO"}]}
             if t == "GetSceneItemList":
@@ -415,11 +424,16 @@ def test_a_replace_keeps_the_audio_input_in_every_scene_and_its_sync_offset():
     class FakeObs:
         def __init__(self):
             self.calls = []
+            self.kind = "wasapi_input_capture"   # RemoveInput / CreateInput change it, like OBS
 
         def req(self, t, d=None, ignore_err=False):
             self.calls.append((t, d))
             if t == "GetInputList":
-                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": "wasapi_input_capture"}]}
+                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": self.kind}] if self.kind else []}
+            if t == "RemoveInput":
+                self.kind = None
+            if t == "CreateInput":
+                self.kind = d["inputKind"]
             if t == "GetSceneList":
                 return {"currentProgramSceneName": "PRO",
                         "scenes": [{"sceneName": "POST"}, {"sceneName": "PRO"}, {"sceneName": "PRE"}]}

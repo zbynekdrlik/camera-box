@@ -337,20 +337,16 @@ fi
 # traveling resolume hostname resolved now, skipped when away), NEVER a cambox -- issue 1389: a finder's
 # discovery connection into a cambox aborts camera-box when this OBS exits or restarts, so the camboxes
 # are found by mDNS alone. libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
-# list, so strih-snv's own STRIH-SNV outputs keep announcing over mDNS -- no gate. THREE receivers on
-# this box: OBS (strih-obs.service) and bkshading-service, both User=${DESKTOP_USER}, read the desktop
-# user's ~/.ndi; intercom-hub's ProtectHome hides ~/.ndi, so it reads the system dir /etc/ndi via its
-# NDI_CONFIG_DIR drop-in. Written here, before the OBS/intercom units start (steps 8/13); the next
-# start reads it. Every strih-snv genlock deploy re-runs this script, so a renumber converges there.
+# list, so strih-snv's own STRIH-SNV outputs keep announcing over mDNS -- no gate. OBS and bkshading-service
+# (User=${DESKTOP_USER}) read ~/.ndi; intercom-hub (ProtectHome) reads /etc/ndi through the NDI_CONFIG_DIR
+# drop-in the hub's own step (13) writes. Written before the units start; every deploy re-runs it.
 NDI_IPS="$(ndi_discovery_sender_ips)" \
   || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
 ndi_discovery_write_config "${USER_HOME}/.ndi" "$NDI_IPS" "$DESKTOP_USER" \
   || fail "NDI receiver config write to ${USER_HOME}/.ndi failed (issue 1342)"
 ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
   || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
-mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")"
-ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
-echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (networks.ips=${NDI_IPS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
+echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (networks.ips=${NDI_IPS}) (issue 1342; the hub's drop-in: step 13)"
 
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
@@ -404,7 +400,7 @@ fi
 # ticket; the seeder never touches outputs.
 [ -f "${HERE}/strih_scenes.py" ] && [ -f "${HERE}/drm_output_config.py" ] || fail "scripts/strih_scenes.py or drm_output_config.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py && install -m 0644 "${HERE}/drm_output_config.py" /usr/local/bin/drm_output_config.py   # issue 1424: strih_scenes imports the HDMI-output grammar
-install -m 0755 "${HERE}/stream_dev_safe.py" /usr/local/bin/stream_dev_safe.py   # issue 1380: the stream role's safe Development
+install -m 0755 "${HERE}/stream_dev_safe.py" /usr/local/bin/stream_dev_safe.py && install -m 0644 "${HERE}/program_audio_vban.py" /usr/local/bin/program_audio_vban.py || fail "stream_dev_safe.py / program_audio_vban.py (issue 1380 / 1439: strih_scenes imports the latter) not installed"
 rm -f /opt/camera-box/strih-lx-seed.json   # issue 1414: the pre-rename seed, now the new seeder is in
 echo "  installed strih_scenes.py + drm_output_config.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
 if WHY="$(obs_box_step_applies 6-devclip)"; then obs_box_stream_dev_clip_provision "$HERE" || fail "issue 1380: the measurement clip for the safe Development scene could not be provisioned (above)"
@@ -643,64 +639,68 @@ fi
 
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
-step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344)"
-# Root cause (design 20.9., follow-up 20.9. live diagnosis issuecomment-5751113173): the OBS
-# program (${AUDIO_NAME}) is a NETWORK stream (fohabl-strih VBAN), NOT the MiniFuse. The hub writes
-# the program mix to a strih-program null sink; OBS captures it via a LOOPBACK republish node
-# strih-program-source (strih-program.monitor itself is NOT pulse-visible to OBS on this box --
-# proven live). The MiniFuse carries only the operator TALKBACK mic (the hub reads it).
+step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344); stream role: the locked operator PipeWire (issue 1465)"
+# Root cause (design 20.9., live diagnosis issuecomment-5751113173): the OBS program (${AUDIO_NAME}) is a NETWORK
+# stream (fohabl-strih VBAN), NOT the MiniFuse (the operator TALKBACK mic, the hub reads it). The hub writes the
+# program to a strih-program null sink; OBS captures its LOOPBACK republish strih-program-source (proven live).
 DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || echo 1000)"
-if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
-  echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"
+if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then   # issue 1465 item 3: scripts/lib/stream-operator-audio.sh
+  echo "  ${WHY}"; stream_operator_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1465: the locked operator PipeWire (above)"
 else
-  warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"
+  if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
+    echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"
+  else
+    warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"
+  fi
+  strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d" || fail "cannot create ~/.config/pipewire/pipewire.conf.d (above)"
+  strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
+  chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
+  # (c2, issue 1344) the loopback republishing strih-program's monitor as a pulse-visible Audio/Source.
+  strih_pipewire_program_loopback_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
+  chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
+  # the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
+  strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d" || fail "cannot create ~/.config/wireplumber/wireplumber.conf.d (above)"
+  strih_wireplumber_minifuse_rule > "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
+  chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
+  # issue 1345 (owner accepted 25.9.2026): the MiniFuse PLAYBACK period (1024 x 3, headroom 256 -- the
+  # buzz fix) and the graph's min-quantum floor 1024 (the robotic-cameraman fix). Compared, rewritten only
+  # on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
+  strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
+  strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
+  echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session)"
 fi
-# (c) the operator-session PipeWire null sink OBS captures as strih-program.monitor.
-strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d" || fail "cannot create ~/.config/pipewire/pipewire.conf.d (above)"
-strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
-chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
-# (c2, issue 1344 follow-up) the loopback that republishes strih-program's monitor as a real
-# pulse-visible Audio/Source (strih-program.monitor itself is NOT pulse-visible to OBS on this box).
-strih_pipewire_program_loopback_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
-chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
-# the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
-strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d" || fail "cannot create ~/.config/wireplumber/wireplumber.conf.d (above)"
-strih_wireplumber_minifuse_rule > "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
-chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
-# issue 1345 (owner accepted 25.9.2026): the MiniFuse PLAYBACK period (1024 x 3, headroom 256 -- the
-# buzz fix) and the graph's min-quantum floor 1024 (the robotic-cameraman fix). Compared, rewritten only
-# on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
-strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
-strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
-# the intercom-hub systemd drop-in that runs the hub AS THE OPERATOR (reach the PipeWire session).
-mkdir -p /etc/systemd/system/intercom-hub.service.d
-strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf
-# Linger the operator so its user@.service + PipeWire come up at boot even before an interactive
-# login — otherwise a headless start finds no /run/user/<uid>/pipewire-0 (the hub self-heals via the
-# pw-cat restart backoff once the session appears, but linger removes the startup gap).
+# Linger the operator so its user@.service + PipeWire come up at boot before any login: a headless start
+# finds no /run/user/<uid>/pipewire-0 otherwise (the hub's pw-cat backoff self-heals; linger removes the gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session) + intercom-hub local-audio drop-in (User=${DESKTOP_USER})"
-echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
+if strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
 echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
 step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped, never restarted)"
-# The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since the strih
-# notebook took over from the Windows VB-Matrix (20.9.2026). Install the unit + the routing TOML, enable
-# it; on the strih role it is STARTED once Janus is provisioned (verify item 16 FAILs a stopped hub there). A running
-# hub is never restarted here. The binary (intercom-hub-linux-amd64 from CI) is placed below.
-install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
-# issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
-[ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
-  || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
-install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
-strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
-systemctl daemon-reload
-systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
-# issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.
-strih_intercom_hub_binary_install /usr/local/bin/intercom-hub || fail "intercom-hub binary install failed (above)"
-echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml in place"
+# The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since 20.9.2026:
+# unit + routing TOML + drop-ins, enabled; STARTED on the strih role after step 14, never restarted here.
+if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs no hub (lib: strih_intercom_hub_remove)
+  install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
+  # its drop-ins: NDI_CONFIG_DIR = /etc/ndi (step 4b, issue 1342) + run AS THE OPERATOR (step 12's PipeWire)
+  mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")" /etc/systemd/system/intercom-hub.service.d
+  ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
+  strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf
+  # issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
+  [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
+    || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
+  strih_intercom_hub_config_install "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml /usr/local/bin/intercom-hub || fail "intercom routing file install failed (above)"
+  strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
+  systemctl daemon-reload
+  systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
+  # issue 1412 (G6) + 1467: a fresh box gets the hub CI binary of this checkout's commit; an installed one is kept.
+  strih_intercom_hub_binary_install /usr/local/bin/intercom-hub "${HERE}/.." || fail "intercom-hub binary install failed (above)"
+  echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml + its NDI_CONFIG_DIR and local-audio (User=${DESKTOP_USER}) drop-ins in place"
+else
+  echo "  SKIP: ${WHY}"
+  strih_intercom_hub_remove || fail "issue 1439: the intercom hub left on this box could not be moved aside (above)"
+fi
+strih_vban_leg_install || fail "issue 1439: the VBAN-only leg (a second NIC or a VLAN on the rig NIC, ROZHODNUTE 6360417876) failed (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
@@ -708,11 +708,11 @@ if WHY="$(obs_box_step_applies 14)"; then   # issue 1412: scripts/lib/obs-box-ro
 # The phones intercom leg (the VDO.Ninja replacement) runs over a Janus audiobridge room the hub
 # joins as a plain-RTP PCMU participant (issue 1345 M3a). Install Janus (apt), generate the 0600 room
 # secret if absent (NEVER printed), write the audiobridge room jcfg (the secret is injected via a bash
-# var -- no argv exposure) + the WebSocket transport jcfg (ws BOUND to the LAN IP :8188, NO wss -- TLS
-# terminates on the dev1 front) + the HTTP transport jcfg (bound loopback 127.0.0.1:8088 only), and
+# var -- no argv exposure) + the WebSocket transport jcfg (ws on LOOPBACK :8188 only, issue 1453: phones
+# go through the hub's /janus relay) + the HTTP transport jcfg (bound loopback 127.0.0.1:8088 only), and
 # ENABLE the janus unit. NEVER unconditionally start it (the M4 cut-over starts it with the intercom
 # hub); Ubuntu's package auto-starts janus on install, so if it is ALREADY running we restart it to
-# load the freshly written jcfg (issue 1345 M3 follow-up: the LAN-bound WS + loopback HTTP jcfg + the
+# load the freshly written jcfg (issue 1345 M3 follow-up: the WS bind + the loopback HTTP jcfg + the
 # is-active-guarded restart).
 DEBIAN_FRONTEND=noninteractive apt-get install -y janus \
   || warn "  apt-get install janus failed -- install it before the M4 cut-over (the phones leg needs the audiobridge)"
@@ -742,11 +742,11 @@ if [ -d /etc/janus ] || command -v janus >/dev/null 2>&1; then
   ( umask 027; printf '%s\n' "$JANUS_AB_JCFG" > /etc/janus/janus.plugin.audiobridge.jcfg )
   chmod 640 /etc/janus/janus.plugin.audiobridge.jcfg
   unset JANUS_SECRET_VALUE JANUS_AB_JCFG
-  strih_janus_ws_jcfg_text "$STATIC_IP" > /etc/janus/janus.transport.websockets.jcfg
+  strih_janus_ws_jcfg_text > /etc/janus/janus.transport.websockets.jcfg
   chmod 644 /etc/janus/janus.transport.websockets.jcfg
   strih_janus_http_jcfg_text > /etc/janus/janus.transport.http.jcfg
   chmod 644 /etc/janus/janus.transport.http.jcfg
-  echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188 LAN-bound, no wss) + janus.transport.http.jcfg (loopback 127.0.0.1:8088)"
+  echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188 loopback-only, no wss) + janus.transport.http.jcfg (loopback 127.0.0.1:8088)"
   systemctl enable janus 2>/dev/null || warn "  could not enable janus.service (install janus first)"
   # Ubuntu's janus package auto-STARTS the service on install (before these jcfg existed). If it is
   # already running, restart it to load the freshly written room/ws/http jcfg; otherwise leave it
@@ -960,8 +960,8 @@ if WHY="$(obs_box_step_applies 16f)"; then strih_tally_install "${HERE}/.." "$DE
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-step "16g" "Operator surface (issue 1418): Multiview click + projector keys in user.ini, the second NIC off the rig subnet"
-strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" "${OBS_CFG}/basic/scenes/$(strih_lx_obs_collection).json" || fail "issue 1418: the operator surface could not be provisioned (above)"
+step "16g" "Operator surface (issue 1418): Multiview click + projector keys in user.ini, the second NIC off the rig subnet; issue 1470: the A/V-sync dock in the saved OBS layout (stream role)"
+strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" "${OBS_CFG}/basic/scenes/$(strih_lx_obs_collection).json" || fail "issue 1418: the operator surface could not be provisioned (above)"; obs_box_avsync_dock_seed "${OBS_CFG}/user.ini" "$DESKTOP_USER"
 
 # ---------------------------------------------------------------------------------------------
 step "16h" "Kiosk panel (issue 1420): tint2 taskbar + tray + clock -- --user unit, enable-only"
@@ -969,8 +969,8 @@ if WHY="$(obs_box_step_applies 16h-panel)"; then obs_box_panel_install "${HERE}/
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-step "16i" "HTTPS front end (issue 1399): nginx + the intercom/shading sites, certs issued + renewed ON this box (never dev1)"
-if WHY="$(obs_box_step_applies 16i)"; then strih_https_install || fail "issue 1399: the HTTPS front end could not be provisioned (above)"
+step "16i" "HTTPS front end (issue 1399): nginx + the intercom/shading sites, certs issued + renewed ON this box (never dev1); issue 1453: the outbound interkom tunnel + TURN"
+if WHY="$(obs_box_step_applies 16i)"; then strih_https_install || fail "issue 1399: the HTTPS front end could not be provisioned (above)"; strih_interkom_public_install || fail "issue 1453: the intercom tunnel / TURN could not be provisioned (above)"
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------

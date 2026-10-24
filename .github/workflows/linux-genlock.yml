@@ -32,6 +32,14 @@ on:
     paths:
       - 'vendor/obs-studio/**'
       - 'vendor/distroav/**'
+      # issue 1439: the strih variant builds the vendored obs-vban (the VBAN receive source).
+      - 'vendor/obs-vban/**'
+      # issue 1470: the strih variant builds the camera-box A/V-sync dock and proves its layout seed
+      # against the real Qt.
+      - 'vendor/av-sync-dock/**'
+      - 'scripts/obs_dock_state.py'
+      - 'tests/qt/**'
+      - 'tests/python/fixtures/obs_dock_state_1470/**'
       - 'scripts/genlock-manifest.sh'
       - '.github/workflows/linux-genlock.yml'
 
@@ -397,6 +405,49 @@ jobs:
         working-directory: vendor/distroav
         run: cmake --build --preset ubuntu-ci-x86_64
 
+      # issue 1439: a Linux stream box takes the console's VBAN program stream straight into the
+      # vendored obs-vban SOURCE (receive timeline + fixed reserve, stamped for the genlock ASRC):
+      # no intercom hub, never PipeWire. Built against the genlocked SDK like DistroAV; the
+      # imag-parity bundle consumes no VBAN and stays without it.
+      - name: Configure obs-vban against the genlocked OBS SDK (issue 1439)
+        working-directory: vendor/obs-vban
+        run: >
+          cmake -B build_ubuntu
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build obs-vban (issue 1439)
+        working-directory: vendor/obs-vban
+        run: cmake --build build_ubuntu --parallel
+
+      # issue 1470: the camera-box A/V-sync dock (vendor/av-sync-dock: the lock / offset / latency
+      # display, the mbc ASRC readout, the diag + LOCK-CORRECT SUGGESTED lines the av-step watchdog
+      # reads) on the Linux stream box -- the Windows bundle always carried it (windows-genlock.yml
+      # "Configure/Build av-sync-dock (#188)"). Built against the SAME genlocked SDK: libobs +
+      # obs-frontend-api (the Development component installed above) + the system Qt6 Widgets OBS
+      # itself links. The dock's source anchors are OS-independent text checks that already run on
+      # every push in ci.yml (the tests/av_sync_dock_*.rs twins of the windows-genlock pwsh dock
+      # steps), so this job adds what they cannot prove: the dock COMPILES and LINKS with gcc on Linux
+      # (its CMakeLists links with -Wl,-z,defs, so an unresolved symbol fails here).
+      - name: Configure av-sync-dock against the genlocked OBS SDK (issue 1470)
+        working-directory: vendor/av-sync-dock
+        run: >
+          cmake -B build_ubuntu
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DQT_VERSION=6
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build av-sync-dock (issue 1470)
+        working-directory: vendor/av-sync-dock
+        run: cmake --build build_ubuntu --parallel
+
+      # issue 1470: setup-strih step 16g seeds the dock into the stream OBS's saved layout
+      # (scripts/obs_dock_state.py edits the Qt saveState blob in user.ini [BasicWindow] DockState). A blob
+      # Qt cannot read resets the operator's whole dock layout, so prove the seed with THIS Qt (the
+      # release the strih bundle ships for) on the live stream-snv / stream-pp captures.
+      - name: Prove the A/V-sync dock layout seed against the real Qt (issue 1470)
+        run: bash tests/qt/run_dock_state_restore_1470.sh
+
       - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
         run: |
           set -euo pipefail
@@ -414,6 +465,15 @@ jobs:
             exit 1
           fi
           cp "$distroav_so" "$plugin_lib_dir/"
+          # issue 1439: the vendored obs-vban (the VBAN receive source) next to DistroAV.
+          vban_so=$(find vendor/obs-vban/build_ubuntu -name 'obs-vban.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$vban_so" ]; then echo "ERROR: obs-vban.so not found after the obs-vban build (issue 1439)"; exit 1; fi
+          cp "$vban_so" "$plugin_lib_dir/"
+          # issue 1470: the camera-box A/V-sync dock next to obs-vban (the stream role's dock, verify-strih item 47).
+          dock_so=$(find vendor/av-sync-dock/build_ubuntu -name 'obs-audio-video-sync-dock.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$dock_so" ]; then echo "ERROR: obs-audio-video-sync-dock.so not found after the av-sync-dock build (issue 1470)"; exit 1; fi
+          if ! nm -D --defined-only "$dock_so" | grep -w obs_module_load >/dev/null; then echo "ERROR: $dock_so exports no obs_module_load -- OBS would not load it (issue 1470)"; exit 1; fi
+          cp "$dock_so" "$plugin_lib_dir/"
           # issue 1425: the vendored vlc-video plugin (stamps on the OBS media clock) is built by the OBS build
           # (-DENABLE_VLC=ON, libvlc-dev headers); it loads libvlc from the installed VLC at runtime.
           if [ ! -f "$plugin_lib_dir/vlc-video.so" ]; then echo "ERROR: vlc-video.so not built (issue 1425)"; exit 1; fi
@@ -424,6 +484,13 @@ jobs:
             mkdir -p "$data_root/distroav"
             cp -a vendor/distroav/data/. "$data_root/distroav/"
           fi
+          mkdir -p "$data_root/obs-vban"
+          cp -a vendor/obs-vban/data/. "$data_root/obs-vban/"
+          echo "staged obs-vban.so from: $vban_so -> $plugin_lib_dir/"
+          mkdir -p "$data_root/obs-audio-video-sync-dock"
+          cp -a vendor/av-sync-dock/data/. "$data_root/obs-audio-video-sync-dock/"
+          if [ ! -f "$data_root/obs-audio-video-sync-dock/locale/en-US.ini" ]; then echo "ERROR: the dock locale did not stage (issue 1470)"; exit 1; fi
+          echo "staged obs-audio-video-sync-dock.so from: $dock_so -> $plugin_lib_dir/"
 
           git rev-parse HEAD > stage/GENLOCK_BUILD_SHA.txt
           # issue 1317: the strih variant's build-flags marker -- written INTO the stage BEFORE the

@@ -174,9 +174,23 @@ def test_the_pp_boxes_are_traveling_linux_name_rows(name):
     assert r.stdout.strip() == "%s.lan|linux-genlock|traveling" % name
 
 
-def test_the_pp_boxes_are_in_no_facet():
-    facets = ("audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze "
-              "ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles")
+# issue 1441 (owner 15.10.2026, one solution for PP and SNV): the PP boxes join the four content
+# watchdogs whose :8899 facets they serve; every other facet stays SNV-only for now.
+PP_WATCHED_FACETS = ("genlock-lock", "render-freeze", "audio-mixer", "obs-handles")
+
+
+@pytest.mark.parametrize("facet", PP_WATCHED_FACETS)
+def test_the_pp_boxes_are_in_the_content_watchdog_facets(facet):
+    r = _bash('obs_fleet_facet_members %s; echo; obs_fleet_boxes %s' % (facet, facet), sources=(FLEET,))
+    assert r.returncode == 0, r.stderr
+    members, boxes = r.stdout.splitlines()
+    assert members.split()[-2:] == ["strih-pp", "stream-pp"], members
+    assert boxes.endswith(" strih-pp|strih-pp.lan stream-pp|stream-pp.lan"), boxes
+
+
+def test_the_pp_boxes_are_in_no_other_facet():
+    facets = ("audio-lag av-step vb-matrix bundle-state network-reach obs-liveness "
+              "ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline")
     r = _bash('for f in %s; do printf "%%s=%%s\\n" "$f" "$(obs_fleet_facet_members "$f")"; done' % facets,
               sources=(FLEET,))
     assert r.returncode == 0, r.stderr
@@ -540,7 +554,7 @@ def test_the_pp_matrix_satisfies_the_hub_load_rules():
     assert m["hub"]["sample_rate"] == 48000 and m["hub"]["block_frames"] > 0
     parts = m["participant"]
     assert len({p["name"] for p in parts}) == len(parts)
-    assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire", "alsa_hdmi"} for p in parts)
+    assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire", "alsa_hdmi", "alsa"} for p in parts)
     # the program path is exactly what it was: lv1 ch1/ch2 -> program_out ch1/ch2 at unity
     assert sorted((pt["src"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0))
                   for pt in m["point"] if pt["dst"] == "program_out") == [("lv1", 1, 1, 0.0), ("lv1", 2, 2, 0.0)]
@@ -618,13 +632,16 @@ def test_the_new_libs_are_source_only_and_sourced_by_strih_provision():
 
 def test_the_pp_cutters_hear_the_intercom_on_the_mg_xu_stereo_card_1412():
     # owner 13.10.2026: "v strih-pp uz som zapol zvukovu kartu kde ma pripojene sluchatka strihac" -- the
-    # Yamaha MG-XU USB card (2 in / 2 out, PipeWire analog-stereo), not the SNV MiniFuse 4 (4 outs)
+    # Yamaha MG-XU USB card (2 in / 2 out), not the SNV MiniFuse 4 (4 outs). Issue 1438: the hub opens it
+    # directly through ALSA by its card ID `MGXU` (strih-pp /var/lib/alsa/asound.state), no PipeWire
+    # node, so a card that leaves USB is the leg down, never a fallback into the program sink.
     m = tomllib.loads(PP_TOML.read_text())
     cut = {p["name"]: p for p in m["participant"]}["cutters"]
-    assert cut["adapter"] == "pipewire"
-    assert cut["pipewire_target"] == "alsa_output.usb-Yamaha_Corporation_MG-XU-00.analog-stereo"
-    assert cut["pipewire_source"] == "alsa_input.usb-Yamaha_Corporation_MG-XU-00.analog-stereo"
-    assert cut["pipewire_channel_map"] == "FL,FR"
+    assert cut["adapter"] == "alsa"
+    assert (cut["alsa_card"], cut["alsa_device"]) == ("MGXU", 0)
+    assert (cut["alsa_in_channels"], cut["alsa_out_channels"]) == (2, 2)
+    assert (cut["alsa_in_channel_map"], cut["alsa_channel_map"]) == ("1,2", "1,2")
+    assert not any(k.startswith("pipewire") for k in cut), cut
     assert (cut["in_channels"], cut["out_channels"]) == (2, 2)
     assert not [pt for pt in m["point"] if pt["dst"] == "cutters" and pt["out_ch"] > 2]
     # every talker still reaches both ears of the cutters

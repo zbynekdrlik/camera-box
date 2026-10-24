@@ -30,6 +30,13 @@
 #       (panel-unit)   the unit file equals the checkout, enabled, active, its main process /usr/bin/tint2;
 #       (panel-discord) issue 1448: Discord installed on the stream role (setup installs the pinned
 #                      .deb); NOTE on the strih role (production-only);
+#       (panel-kbd)    issue 1441: the keyboard layout helper installed = the checkout, and its live
+#                      `print` on :0 names a layout (NOTE when X answers nothing);
+#       (panel-files)  issue 1458: pcmanfm installed, the recordings helper = the checkout, and
+#                      pcmanfm's libfm.conf use_trash=0 (a delete frees the disk, after a confirmation);
+#       (panel-power)  issue 1464: the power program installed = the checkout, and logind answers
+#                      CanPowerOff + CanReboot = yes for the desktop user in the user manager (the
+#                      launcher's own context), so the button powers off without a password;
 #       (panel-window) a tint2 window on :0 (`wmctrl -lx` class tint2.Tint2); NOTE when X has no
 #                      client list to read.
 #     A box the gate leaves out prints ONE note naming why.
@@ -38,7 +45,32 @@ OBS_BOX_PANEL_PACKAGE=tint2
 OBS_BOX_PANEL_UNIT=obs-box-panel.service
 OBS_BOX_PANEL_BIN=/usr/bin/tint2
 OBS_BOX_PANEL_WM_CLASS=tint2.Tint2
-OBS_BOX_PANEL_ROWS=6
+OBS_BOX_PANEL_ROWS=9
+# issue 1441 (owner 18.10.2026: "da sa v liste prepinat??"): the keyboard layout item. tint2 runs the
+# helper as an executor (`watch` prints US / SK on every change, a left click runs `next`); it reads and
+# locks the XKB group through libX11 (Ubuntu 26.04 ships no xkb-switch). The panel always runs it with
+# /usr/bin/python3; OBS_BOX_PANEL_KBD_PYTHON is only the verify row's interpreter seam for the tests.
+OBS_BOX_PANEL_KBD_HELPER="${OBS_BOX_PANEL_KBD_HELPER:-/usr/local/lib/camera-box/obs_box_kbd_layout.py}"
+OBS_BOX_PANEL_KBD_PYTHON="${OBS_BOX_PANEL_KBD_PYTHON:-/usr/bin/python3}"
+# issue 1458 (owner 21.10.2026: "file explorer aby vedeli vymazat nahravky ktore robi obs"): the
+# `Nahrávky` launcher runs the recordings helper, which opens pcmanfm in the ACTIVE OBS profile's record
+# folder at click time. The binary path is the launcher's presence seam for the tests.
+OBS_BOX_PANEL_FILES_PACKAGE=pcmanfm
+OBS_BOX_PANEL_FILES_BIN="${OBS_BOX_PANEL_FILES_BIN:-/usr/bin/pcmanfm}"
+OBS_BOX_PANEL_FILES_HELPER="${OBS_BOX_PANEL_FILES_HELPER:-/usr/local/lib/camera-box/obs_box_recordings.py}"
+# issue 1464 (owner 23.10.2026: "ikonkna ka lavo dole v liste na vypnutie a restert pc ze si otvorim a
+# potvrdim co chcem"): the `Vypnúť` launcher at the LEFT end runs the power program, a Slovak confirm
+# dialog (Vypnúť / Reštartovať / Zrušiť) that runs `systemctl poweroff` / `reboot` only on a confirmed
+# choice. Installed by step 16h like the other panel helpers. The logind read of the (panel-power) row
+# runs as the desktop user inside the user manager (`systemd-run --user`), where tint2 starts the
+# launcher, so polkit judges it in the same context as the real button. OBS_BOX_PANEL_LOGIND_TIMEOUT
+# bounds that read (seconds).
+OBS_BOX_PANEL_POWER_HELPER="${OBS_BOX_PANEL_POWER_HELPER:-/usr/local/bin/obs-box-power}"
+OBS_BOX_PANEL_LOGIND_TIMEOUT="${OBS_BOX_PANEL_LOGIND_TIMEOUT:-15}"
+# issue 1464 part 2 (owner 23.10.2026: "na stream-snv nevidim v liste chrome"): Google Chrome is installed
+# on the stream role (OBS_BOX_RESTREAMER_HOST_PACKAGES) but never had a launcher. The binary path is the
+# presence seam; the strih role never gets it (owner 24.9.2026: strih is a production-only computer).
+OBS_BOX_PANEL_CHROME_BIN="${OBS_BOX_PANEL_CHROME_BIN:-/usr/bin/google-chrome-stable}"
 # The system user-unit dir (a distro package's --user unit, e.g. restreamer.service) and the RustDesk
 # binary -- seams for the offline tests.
 OBS_BOX_PANEL_SYS_UNIT_DIR="${OBS_BOX_PANEL_SYS_UNIT_DIR:-/usr/lib/systemd/user}"
@@ -50,9 +82,12 @@ OBS_BOX_PANEL_DISCORD_URL="${OBS_BOX_PANEL_DISCORD_URL:-https://stable.dl2.disco
 OBS_BOX_PANEL_DISCORD_SHA256="${OBS_BOX_PANEL_DISCORD_SHA256:-e7f346569784ef47eaa530c058d810bef686c7c063efcee6493d56d138f139cc}"
 
 # obs_box_panel_launchers USER_HOME -> one `id|Name|Exec|Icon` line per app this box has, in panel order:
+#   power      the power program, FIRST = the left end of the panel, on every box (issue 1464)
 #   obs        strih-obs.service in the user's unit dir (every Linux OBS box; on stream-pp it is the stream OBS)
+#   files      pcmanfm in the OBS record folder, through the recordings helper (issue 1458)
 #   shading    bkshading-panel-app.service in the user's unit dir (the strih role)
 #   restreamer restreamer.service (the restreamer package's --user unit) in the user's or the system unit dir
+#   chrome     Google Chrome, on the stream role only and only where the binary is installed (issue 1464)
 #   rustdesk   the RustDesk binary
 #   discord    the Discord binary (issue 1448)
 # A supervised app starts through its unit, never its binary: the unit runs the box's own wrapper
@@ -60,12 +95,20 @@ OBS_BOX_PANEL_DISCORD_SHA256="${OBS_BOX_PANEL_DISCORD_SHA256:-e7f346569784ef47ea
 obs_box_panel_launchers() {
   local home="${1:?user home required}" ud
   ud="${home}/.config/systemd/user"
+  printf 'power|Vypnúť|/usr/bin/python3 %s|%s\n' "$OBS_BOX_PANEL_POWER_HELPER" "$(obs_box_panel_power_icon_path "$home")"
   [ -f "${ud}/strih-obs.service" ] \
     && printf 'obs|OBS Studio|systemctl --user start strih-obs.service|%s\n' "$(obs_box_panel_obs_icon_path "$home")"
+  [ -x "$OBS_BOX_PANEL_FILES_BIN" ] \
+    && printf 'files|Nahrávky|/usr/bin/python3 %s open|system-file-manager\n' "$OBS_BOX_PANEL_FILES_HELPER"
   [ -f "${ud}/bkshading-panel-app.service" ] \
     && printf 'shading|Shading|systemctl --user start bkshading-panel-app.service|video-display\n'
   if [ -f "${ud}/restreamer.service" ] || [ -f "${OBS_BOX_PANEL_SYS_UNIT_DIR}/restreamer.service" ]; then
     printf 'restreamer|Restreamer|systemctl --user start restreamer.service|Restreamer\n'
+  fi
+  if [ -x "$OBS_BOX_PANEL_CHROME_BIN" ] && [ "$(strih_box_role)" = stream ]; then
+    # issue 1469: the kiosk autologin never unlocks the GNOME login keyring, so Chrome keeps its own
+    # basic password store and never pops "Unlock Login Keyring".
+    printf 'chrome|Chrome|%s --password-store=basic|google-chrome\n' "$OBS_BOX_PANEL_CHROME_BIN"
   fi
   [ -x "$OBS_BOX_PANEL_RUSTDESK_BIN" ] && printf 'rustdesk|RustDesk|%s|rustdesk\n' "$OBS_BOX_PANEL_RUSTDESK_BIN"
   # issue 1448 (owner 16.10.2026, "ma byt na lavo discord v liste"): Discord where it is installed. It
@@ -77,6 +120,14 @@ obs_box_panel_launchers() {
 # obs_box_panel_obs_icon_path USER_HOME -> where step 16h puts the OBS logo (the vendored OBS tree's
 # obs-logo-128.png, copied into this lib's dir so the staged checkout carries it).
 obs_box_panel_obs_icon_path() { printf '%s/.local/share/icons/obs-box-panel/obs.png' "${1:?user home required}"; }
+
+# obs_box_panel_power_icon_path USER_HOME -> where step 16h puts the power button's icon (issue 1464:
+# scripts/lib/obs-box-panel-power.svg, shipped with the panel because `system-shutdown` exists only in
+# some icon themes, so a minimal kiosk could show a blank button; tint2 renders SVG through librsvg).
+obs_box_panel_power_icon_path() { printf '%s/.local/share/icons/obs-box-panel/power.svg' "${1:?user home required}"; }
+
+# obs_box_panel_libfm_conf USER_HOME -> pcmanfm's libfm.conf (issue 1458: use_trash=0, confirm_del=1).
+obs_box_panel_libfm_conf() { printf '%s/.config/libfm/libfm.conf' "${1:?user home required}"; }
 
 # obs_box_panel_desktop_path USER_HOME ID -> the launcher's .desktop file.
 obs_box_panel_desktop_path() {
@@ -91,17 +142,19 @@ obs_box_panel_desktop_text() {
 
 # obs_box_panel_tint2rc [USER_HOME] -> the declared tint2 config: one bottom panel 30 px high over every
 # monitor, launchers (L, one per app obs_box_panel_launchers finds for USER_HOME) + taskbar (T) + system
-# tray (S) + clock (C), no window closing from the panel. No USER_HOME (or no app): no launcher.
+# tray (S) + the keyboard layout item (E, issue 1441) + clock (C), no window closing from the panel. No
+# USER_HOME (or no app): no launcher.
 obs_box_panel_tint2rc() {
-  local home="${1:-}" items=TSC launchers="" id rest
+  local home="${1:-}" items=TSEC launchers="" id rest
   if [ -n "$home" ]; then
     while IFS='|' read -r id rest; do
       [ -n "$id" ] || continue
       launchers="${launchers}launcher_item_app = $(obs_box_panel_desktop_path "$home" "$id")"$'\n'
     done < <(obs_box_panel_launchers "$home")
   fi
-  [ -n "$launchers" ] && items=LTSC
+  [ -n "$launchers" ] && items=LTSEC
   _obs_box_panel_tint2rc_base | sed "s/^panel_items = TSC\$/panel_items = ${items}/"
+  _obs_box_panel_tint2rc_kbd
   if [ -n "$launchers" ]; then
     printf '\nlauncher_padding = 4 2 6\nlauncher_background_id = 0\nlauncher_icon_background_id = 0\n'
     printf 'launcher_icon_size = 22\nlauncher_tooltip = 1\nstartup_notifications = 0\n'
@@ -177,6 +230,41 @@ clock_background_id = 0
 TINT2RC
 }
 
+# _obs_box_panel_tint2rc_kbd -> the executor block of the keyboard layout item (issue 1441): the
+# continuous `watch` shows the active layout, a left click locks the next one.
+_obs_box_panel_tint2rc_kbd() {
+  printf '\n# the keyboard layout item (issue 1441): US / SK, a click switches (Alt+Shift still works)\n'
+  printf 'execp = new\n'
+  printf 'execp_command = /usr/bin/python3 %s watch\n' "$OBS_BOX_PANEL_KBD_HELPER"
+  printf 'execp_interval = 2\nexecp_continuous = 1\nexecp_has_icon = 0\nexecp_centered = 1\n'
+  printf 'execp_lclick_command = /usr/bin/python3 %s next\n' "$OBS_BOX_PANEL_KBD_HELPER"
+  printf 'execp_tooltip = Klavesnica US / SK -- klik prepne (aj Alt+Shift)\n'
+  printf 'execp_font = Sans Bold 10\nexecp_font_color = #ffffff 100\nexecp_padding = 8 0\nexecp_background_id = 0\n'
+}
+
+# obs_box_panel_kbd_row REPO USER_HOME DESKTOP_USER -> the (panel-kbd) row: the installed helper equals the
+# checkout, and its `print` as DESKTOP_USER on :0 names a layout. Read-only; always rc 0.
+obs_box_panel_kbd_row() {
+  local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
+  local state label
+  state="$(strih_session_app_file_state "$OBS_BOX_PANEL_KBD_HELPER" "${repo}/scripts/obs_box_kbd_layout.py")"
+  if [ "$state" != ok ]; then
+    printf 'FAIL|(panel-kbd) %s %s -- re-run setup-strih.sh step 16h (issue 1441)\n' "$OBS_BOX_PANEL_KBD_HELPER" \
+      "$([ "$state" = absent ] && echo missing || echo 'differs from the checkout')"
+    return 0
+  fi
+  label="$(strih_kiosk_x_run "${STRIH_SESSION_APPS_EUID:-$(id -u)}" "$user" "$home" 10 \
+    "$OBS_BOX_PANEL_KBD_PYTHON" "$OBS_BOX_PANEL_KBD_HELPER" print 2>/dev/null || true)"
+  label="${label%%$'\n'*}"
+  if [ -z "$label" ]; then
+    printf 'NOTE|(panel-kbd) helper installed; the live layout not read: X on :0 answered nothing\n'
+  elif [ "$label" = "?" ]; then
+    printf 'FAIL|(panel-kbd) the helper reads a layout group with no name (?) -- check setxkbmap -query on :0 (issue 1441)\n'
+  else
+    printf 'OK|(panel-kbd) helper installed, the panel shows layout %s\n' "$label"
+  fi
+}
+
 # obs_box_panel_config_path USER_HOME -> the config path the unit reads.
 obs_box_panel_config_path() { printf '%s/.config/tint2/tint2rc' "${1:?user home required}"; }
 
@@ -235,11 +323,14 @@ obs_box_panel_install() {
   local cfg unitdir w changed=0
   [ -f "${repo}/systemd/${OBS_BOX_PANEL_UNIT}" ] \
     || { echo "obs-box-panel: systemd/${OBS_BOX_PANEL_UNIT} not found under ${repo}" >&2; return 1; }
-  if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
-    echo "  installing ${OBS_BOX_PANEL_PACKAGE}"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "$OBS_BOX_PANEL_PACKAGE" \
-      || { echo "obs-box-panel: apt-get install ${OBS_BOX_PANEL_PACKAGE} failed" >&2; return 1; }
-  fi
+  local pkg
+  for pkg in "$OBS_BOX_PANEL_PACKAGE" "$OBS_BOX_PANEL_FILES_PACKAGE"; do
+    if [ "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true)" != "install ok installed" ]; then
+      echo "  installing ${pkg}"
+      DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" \
+        || { echo "obs-box-panel: apt-get install ${pkg} failed" >&2; return 1; }
+    fi
+  done
   cfg="$(obs_box_panel_config_path "$home")"
   unitdir="${home}/.config/systemd/user"
   strih_user_home_dir "$home" "$user" "$(dirname "$cfg")" \
@@ -254,6 +345,31 @@ obs_box_panel_install() {
   w="$(strih_session_apps_put "${repo}/scripts/lib/obs-box-panel-obs.png" "$(obs_box_panel_obs_icon_path "$home")" 0644)" || return 1
   chown "$user:$user" "$(obs_box_panel_obs_icon_path "$home")" 2>/dev/null || true
   [ "$w" = written ] && changed=1
+  w="$(strih_session_apps_put "${repo}/scripts/lib/obs-box-panel-power.svg" "$(obs_box_panel_power_icon_path "$home")" 0644)" || return 1
+  chown "$user:$user" "$(obs_box_panel_power_icon_path "$home")" 2>/dev/null || true
+  [ "$w" = written ] && changed=1
+  install -d -m 0755 "$(dirname "$OBS_BOX_PANEL_KBD_HELPER")" \
+    || { echo "obs-box-panel: cannot create $(dirname "$OBS_BOX_PANEL_KBD_HELPER")" >&2; return 1; }
+  w="$(strih_session_apps_put "${repo}/scripts/obs_box_kbd_layout.py" "$OBS_BOX_PANEL_KBD_HELPER" 0755)" || return 1
+  echo "  ${OBS_BOX_PANEL_KBD_HELPER} ${w} (the keyboard layout item, issue 1441)"
+  [ "$w" = written ] && changed=1
+  install -d -m 0755 "$(dirname "$OBS_BOX_PANEL_FILES_HELPER")" \
+    || { echo "obs-box-panel: cannot create $(dirname "$OBS_BOX_PANEL_FILES_HELPER")" >&2; return 1; }
+  w="$(strih_session_apps_put "${repo}/scripts/obs_box_recordings.py" "$OBS_BOX_PANEL_FILES_HELPER" 0755)" || return 1
+  echo "  ${OBS_BOX_PANEL_FILES_HELPER} ${w} (the recordings item, issue 1458)"
+  [ "$w" = written ] && changed=1
+  install -d -m 0755 "$(dirname "$OBS_BOX_PANEL_POWER_HELPER")" \
+    || { echo "obs-box-panel: cannot create $(dirname "$OBS_BOX_PANEL_POWER_HELPER")" >&2; return 1; }
+  w="$(strih_session_apps_put "${repo}/scripts/obs_box_power.py" "$OBS_BOX_PANEL_POWER_HELPER" 0755)" || return 1
+  echo "  ${OBS_BOX_PANEL_POWER_HELPER} ${w} (the power button, issue 1464)"
+  local libfm
+  libfm="$(obs_box_panel_libfm_conf "$home")"
+  strih_user_home_dir "$home" "$user" "$(dirname "$libfm")" \
+    || { echo "obs-box-panel: cannot create $(dirname "$libfm")" >&2; return 1; }
+  w="$(python3 "${repo}/scripts/obs_box_recordings.py" seed-libfm "$libfm")" \
+    || { echo "obs-box-panel: cannot write ${libfm}" >&2; return 1; }
+  chown "$user:$user" "$libfm" 2>/dev/null || true
+  echo "  ${libfm} ${w} (pcmanfm: a delete frees the disk, after a confirmation)"
   while IFS='|' read -r id name ex icon; do
     [ -n "$id" ] || continue
     dst="$(obs_box_panel_desktop_path "$home" "$id")"
@@ -325,6 +441,9 @@ obs_box_panel_grade_rows() {
     printf 'OK|(panel-unit) %s enabled + active, main process %s\n' "$OBS_BOX_PANEL_UNIT" "$exe"
   fi
   obs_box_panel_discord_row
+  obs_box_panel_kbd_row "$repo" "$home" "$user"
+  obs_box_panel_files_row "$repo" "$home"
+  obs_box_panel_power_row "$repo" "$user"
   wins="$(strih_session_apps_wmctrl "$user" "$home")"
   if [ -z "$wins" ]; then
     printf 'NOTE|(panel-window) not graded: wmctrl on :0 answered nothing (X down or no client list)\n'
@@ -334,6 +453,62 @@ obs_box_panel_grade_rows() {
     printf 'FAIL|(panel-window) no %s window on :0 -- the panel is not shown\n' "$OBS_BOX_PANEL_WM_CLASS"
   fi
   return 0
+}
+
+# obs_box_panel_files_row REPO USER_HOME -> the (panel-files) row (issue 1458): pcmanfm installed, the
+# recordings helper = the checkout, libfm.conf use_trash=0.
+obs_box_panel_files_row() {
+  local repo="$1" home="$2" why
+  if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_FILES_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
+    printf 'FAIL|(panel-files) %s not installed -- re-run setup-strih.sh step 16h (issue 1458)\n' "$OBS_BOX_PANEL_FILES_PACKAGE"
+  elif ! cmp -s "${repo}/scripts/obs_box_recordings.py" "$OBS_BOX_PANEL_FILES_HELPER" 2>/dev/null; then
+    printf 'FAIL|(panel-files) %s missing or differs from the checkout -- re-run setup-strih.sh step 16h\n' "$OBS_BOX_PANEL_FILES_HELPER"
+  elif ! why="$(python3 "${repo}/scripts/obs_box_recordings.py" check-libfm "$(obs_box_panel_libfm_conf "$home")" 2>&1)"; then
+    printf 'FAIL|(panel-files) %s -- re-run setup-strih.sh step 16h\n' "$why"
+  else
+    printf 'OK|(panel-files) pcmanfm + the recordings launcher, %s\n' "$why"
+  fi
+}
+
+# obs_box_panel_logind_can USER VERB -> logind's answer to Can<VERB> (PowerOff / Reboot) as USER inside
+# USER's user manager (`systemd-run --user`, the context tint2 starts the launcher in; as root through
+# strih_session_apps_user_run), bounded; prints the bare word (yes / no / challenge / na) or nothing when
+# it did not answer. Always rc 0.
+obs_box_panel_logind_can() {
+  local user="${1:?user required}" verb="${2:?verb required}" out=""
+  # busctl bounds its own call too: with --pipe the transient unit holds this read's stdout, so a busctl
+  # still waiting after `timeout` killed systemd-run would keep the command substitution open
+  local -a run=(systemd-run --user --wait --pipe --quiet --collect
+    busctl --timeout=10 call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager "Can${verb}")
+  # stdin /dev/null: systemd-run --pipe hands its stdin to the transient unit, never verify's own
+  # (as root `timeout` runs inside sudo: it bounds the read, a root `sudo -u` does not block)
+  out="$(strih_session_apps_user_run "$user" timeout "$OBS_BOX_PANEL_LOGIND_TIMEOUT" "${run[@]}" \
+    </dev/null 2>/dev/null || true)"
+  # busctl prints one line: s "yes"
+  out="${out%%$'\n'*}"
+  case "$out" in
+    's "'*'"') out="${out#s \"}"; printf '%s' "${out%\"}" ;;
+  esac
+  return 0
+}
+
+# obs_box_panel_power_row REPO DESKTOP_USER -> the (panel-power) row (issue 1464): the power program =
+# the checkout, and logind lets DESKTOP_USER power off and reboot without a password (both `yes`).
+# Read-only; always rc 0.
+obs_box_panel_power_row() {
+  local repo="$1" user="$2" off reb
+  if ! cmp -s "${repo}/scripts/obs_box_power.py" "$OBS_BOX_PANEL_POWER_HELPER" 2>/dev/null; then
+    printf 'FAIL|(panel-power) %s missing or differs from the checkout -- re-run setup-strih.sh step 16h (issue 1464)\n' "$OBS_BOX_PANEL_POWER_HELPER"
+    return 0
+  fi
+  off="$(obs_box_panel_logind_can "$user" PowerOff)"
+  reb="$(obs_box_panel_logind_can "$user" Reboot)"
+  if [ "$off" = yes ] && [ "$reb" = yes ]; then
+    printf 'OK|(panel-power) power program installed; logind lets %s power off + reboot without a password\n' "$user"
+  else
+    printf 'FAIL|(panel-power) logind as %s in the user manager: CanPowerOff=%s CanReboot=%s (want yes, yes) -- the panel button would be refused; check that the seat0 session is active and local (loginctl), else a polkit rule for org.freedesktop.login1.power-off / reboot (issue 1464)\n' \
+      "$user" "${off:-no answer}" "${reb:-no answer}"
+  fi
 }
 
 # obs_box_panel_grade_report REPO USER_HOME DESKTOP_USER -> verify-strih item 44 through the caller's ok /

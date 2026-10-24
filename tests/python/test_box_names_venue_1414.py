@@ -114,7 +114,7 @@ def test_an_unknown_box_still_refuses():
 
 SNV_ROWS = {
     "strih-snv": ("10.77.9.202", "linux-genlock", "always"),
-    "stream-snv": ("10.77.9.204", "windows-genlock", "always"),
+    "stream-snv": ("10.77.9.204", "linux-genlock", "always"),  # Linux since issue 1462
     "resolume-snv": ("resolume.lan", "windows-genlock", "traveling"),
 }
 
@@ -147,7 +147,9 @@ def test_every_facet_names_the_renamed_boxes(facet):
     members = r.stdout.split()
     assert members, facet
     for m in members:
-        assert m in ("strih-snv", "stream-snv", "resolume-snv", "imag"), (facet, members)
+        # issue 1441: the PP Linux boxes joined four facets; every member still carries its venue
+        # (<role>-<venue>), never a pre-rename name.
+        assert m in ("strih-snv", "stream-snv", "resolume-snv", "imag", "strih-pp", "stream-pp"), (facet, members)
 
 
 def test_the_resolume_ahk_fact_follows_the_rename():

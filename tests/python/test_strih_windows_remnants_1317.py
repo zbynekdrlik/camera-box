@@ -78,7 +78,7 @@ def test_fleet_class_for_host_catches_every_alias_of_the_linux_strih(host):
         f"issue 1317: a Windows tool aimed at {host!r} (the Linux strih) must be refused: {r!r}")
 
 
-@pytest.mark.parametrize("host,want", [("10.77.9.204", "windows-genlock"),
+@pytest.mark.parametrize("host,want", [("resolume-pp.lan", "windows-genlock"),
                                        ("resolume.lan", "windows-genlock"),
                                        ("RESOLUME.lan", "windows-genlock")])
 def test_fleet_class_for_host_keeps_the_windows_boxes(host, want):
@@ -100,7 +100,8 @@ def test_unknown_names_still_pass_and_ip_literals_are_never_resolved(tmp_path):
 
 @pytest.mark.parametrize("host,want", [
     ("10.77.9.202", "linux"), ("strih-snv.lan", "linux"), ("STRIH-SNV", "linux"),
-    ("strih.lan", "linux"), ("10.77.9.204", "windows"), ("192.0.2.10", "windows"), ("", "windows"),
+    ("strih.lan", "linux"), ("10.77.9.204", "linux"), ("resolume.lan", "windows"),
+    ("192.0.2.10", "windows"), ("", "windows"),
 ])
 def test_strih_platform_delegates_to_the_fleet_list(host, want):
     r = _platform(f'strih_platform "{host}"')

@@ -315,7 +315,9 @@ def test_install_runs_the_seed_and_the_isolation(tmp_path):
                    "STRIH_OPERATOR_IP_ADDR_CMD": "cat %s" % nm.addrs, "STRIH_NIC_IFACE": "enp7s0",
                    "STRIH_OPERATOR_OBS_RUNNING_CMD": str(_obs(tmp_path, False)),
                    # 14.10.2026: the keyboard step writes a scratch file and never touches this box's X.
-                   "STRIH_OPERATOR_KEYBOARD_FILE": str(tmp_path / "keyboard"), "STRIH_OPERATOR_SETXKBMAP": "true"})
+                   "STRIH_OPERATOR_KEYBOARD_FILE": str(tmp_path / "keyboard"), "STRIH_OPERATOR_SETXKBMAP": "true",
+                   # issue 1441: and never this box's own ibus setting.
+                   "STRIH_OPERATOR_GSETTINGS": "true"})
     assert r.returncode == 0, r.stderr
     assert 'XKBLAYOUT="us,sk"' in (tmp_path / "keyboard").read_text()
     assert _ini(ini).get("BasicWindow", "MultiviewMouseSwitch") == "true"
@@ -407,6 +409,16 @@ class _Surfaces(http.server.BaseHTTPRequestHandler):
 # The operator keyboard (owner 14.10.2026): the file X reads at its start and `setxkbmap -query` on :0.
 KEYBOARD_OK = 'XKBMODEL="pc105"\nXKBLAYOUT="us,sk"\nXKBVARIANT=""\nXKBOPTIONS="grp:alt_shift_toggle"\n\nBACKSPACE="guess"\n'
 XKB_LIVE_OK = "rules:      evdev\nmodel:      pc105\nlayout:     us,sk\noptions:    grp:alt_shift_toggle\n"
+# issue 1441: the operator's ibus. No ibus-schemas file = ibus not installed; ibus-value = its setting.
+_FAKE_GSETTINGS = r'''#!/bin/bash
+echo "gsettings $*" >> "$FAKE_OP/kbd-log"
+printf '%s\n' "${DBUS_SESSION_BUS_ADDRESS-none}" >> "$FAKE_OP/gsettings-bus"
+case "${1-}" in
+  list-schemas) [ -e "$FAKE_OP/gsettings-fails" ] && exit 1; cat "$FAKE_OP/ibus-schemas" 2>/dev/null || true ;;
+  get) [ -e "$FAKE_OP/gsettings-fails" ] && exit 1; cat "$FAKE_OP/ibus-value" 2>/dev/null || true ;;
+  set) [ -e "$FAKE_OP/gsettings-set-fails" ] && exit 1; printf '%s\n' "$4" > "$FAKE_OP/ibus-value" ;;
+esac
+'''
 
 
 class Op:
@@ -424,7 +436,11 @@ class Op:
         _exec(self.bin / "journalctl", _FAKE_TOOL % ("journalctl", "klog", "klog"))
         _exec(self.bin / "wmctrl", _FAKE_CAT % "wmctrl")
         # 14.10.2026 the operator keyboard: log the args, print the live `-query` text.
-        _exec(self.bin / "setxkbmap", '#!/bin/bash\necho "$*" >> "$FAKE_OP/xkb-calls"\ncat "$FAKE_OP/xkb" 2>/dev/null || true\n')
+        _exec(self.bin / "setxkbmap", '#!/bin/bash\necho "$*" >> "$FAKE_OP/xkb-calls"\n'
+              'echo "setxkbmap $*" >> "$FAKE_OP/kbd-log"\ncat "$FAKE_OP/xkb" 2>/dev/null || true\n')
+        # issue 1441 (21.10.2026): the operator's ibus over gsettings, never this box's own dconf.
+        _exec(self.bin / "gsettings", _FAKE_GSETTINGS)
+        _exec(self.bin / "dbus-run-session", '#!/bin/bash\n[ "${1-}" = "--" ] && shift\nexport DBUS_SESSION_BUS_ADDRESS=private\nexec "$@"\n')
         self.seams = True  # STRIH_OPERATOR_XRANDR / _KLOG point at the fixture files
         self.xinput = _exec(tmp_path / "fake-xinput", _FAKE_XINPUT)
         self.hci = _exec(tmp_path / "fake-hciconfig", _FAKE_CAT % "hci")
@@ -925,7 +941,7 @@ def test_the_hub_is_graded_live_on_the_strih_role_only():
     assert _applies("stream-pp", "13-hub-live").startswith("SKIP ")
 
 
-def _item16(tmp_path, box, enabled, active, installed=True):
+def _item16(tmp_path, box, enabled, active, installed=True, env=None):
     v = VERIFY.read_text()
     item = v[v.index("# 16) intercom hub unit"):v.index("# 17)")]
     unit = tmp_path / "intercom-hub.service"
@@ -938,8 +954,10 @@ def _item16(tmp_path, box, enabled, active, installed=True):
           '#!/bin/bash\ncase "$1" in\n  is-enabled) echo %s; [ %s = enabled ] ;;\n'
           '  is-active) echo %s; [ %s = active ] ;;\nesac\n' % (enabled, enabled, active, active))
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
-            'strih_intercom_hub_crash_loop() { return 1; }\nstrih_intercom_hub_cred_grade() { :; }\n' + item)
-    r = _bash(body, box=box, env={"PATH": "%s:%s" % (stub, os.environ["PATH"])})
+            'strih_intercom_hub_crash_loop() { return 1; }\nstrih_intercom_hub_cred_grade() { :; }\n'
+            'strih_intercom_hub_memlock_grade() { :; }\nstrih_intercom_hub_version_grade() { :; }\n'
+            'WS_HOST=192.0.2.1\n' + item)
+    r = _bash(body, box=box, env=dict(env or {}, PATH="%s:%s" % (stub, os.environ["PATH"])))
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
 
@@ -955,8 +973,28 @@ def test_item_16_passes_an_enabled_active_hub(tmp_path):
     assert _item16(tmp_path, "strih-snv", "enabled", "active").startswith("PASS")
 
 
-def test_item_16_only_reports_an_inactive_hub_on_the_stream_role(tmp_path):
-    assert _item16(tmp_path, "stream-pp", "enabled", "inactive").startswith("NOTE")
+def _no_hub_env(tmp_path):
+    """issue 1439: the hub paths of the stream role's "no hub" grade, moved into the test dir."""
+    return {"STRIH_HUB_UNIT_FILE": str(tmp_path / "intercom-hub.service"),
+            "STRIH_HUB_DROPIN_DIR": str(tmp_path / "intercom-hub.service.d"),
+            "STRIH_HUB_BIN": str(tmp_path / "intercom-hub"), "STRIH_HUB_CONFIG_DIR": str(tmp_path / "etc-intercom-hub")}
+
+
+def test_item_16_fails_a_hub_left_on_the_stream_role_1439(tmp_path):
+    # issue 1439 (design 6338127636): the stream role runs NO hub (it was a report-only NOTE before);
+    # an installed one -- even inactive -- FAILs, naming what is left.
+    out = _item16(tmp_path, "stream-pp", "enabled", "inactive", env=_no_hub_env(tmp_path))
+    assert out.startswith("FAIL") and "intercom-hub.service" in out and "step 13" in out, out
+
+
+def test_item_16_passes_no_hub_on_the_stream_role_1439(tmp_path):
+    out = _item16(tmp_path, "stream-pp", "disabled", "inactive", installed=False, env=_no_hub_env(tmp_path))
+    assert out.startswith("PASS") and "no intercom hub on this box" in out, out
+
+
+def test_item_16_fails_a_running_hub_on_the_stream_role_1439(tmp_path):
+    out = _item16(tmp_path, "stream-pp", "disabled", "active", installed=False, env=_no_hub_env(tmp_path))
+    assert out.startswith("FAIL") and "intercom-hub.service active" in out, out
 
 
 def test_item_16_fails_a_missing_hub_on_the_strih_role(tmp_path):

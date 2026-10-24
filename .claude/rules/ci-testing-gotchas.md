@@ -2,6 +2,7 @@
 paths:
   - ".github/workflows/*.yml"
   - "tests/*.rs"
+  - "intercom/hub/tests/*.rs"
   - "tests/python/*.py"
   - "scripts/version-integrity-gate.sh"
   - "scripts/drift-guard.sh"
@@ -98,6 +99,9 @@ then set the window above that with headroom + the file's own `// #NNNN: widened
 ... (measured distance N)` convention comment. `recording-e2e-cleanup-composition.md` documents the
 widening itself; THIS entry is the reason the count sweep won't remind you to. Last measured 25.9.2026
 (issue 1367 pixel-proof step): 11535 of the 12000-byte window — the NEXT step added there must widen it.
+**Measure in BYTES** (issue 1462): the Rust windows slice bytes, and recording-e2e.sh holds non-ASCII
+text, so a python `open(...).read()` offset is a CHARACTER count that reads short (the 977 window's last
+anchor: 3088 characters = byte 3092). Use `open(..., "rb").read()` and byte needles for the distance.
 
 **The general check for ANY edit, not only that one window (issue 1386).** Resolve every fixed
 window a recording-e2e-reading test slices (`&s[v..(v + N)` / `v.saturating_sub(N)`) to the
@@ -1738,6 +1742,18 @@ to every `git add` / `git commit` call that stages that file. Never "hide" the s
 at runtime or splitting the literal. A synthetic sha the test only needs to be well-formed can be
 `"b" * 40`, which the scan never sees.
 
+The same holds for the sha256 PIN of a public download (issue 1453: `STRIH_PUBLIC_KEY_PIN` of
+Cloudflare's apt signing key in `scripts/lib/strih-interkom-public.sh`): `# airuleset:secret-ok
+<sha256 pin of a PUBLIC key>` on every `git add` / `git commit` of the lib. Every LATER commit
+that touches the lib needs it too, since the scan reads the whole staged file. A test-only fake
+credential never needs the bypass: keep it low-entropy words (`fake-turn-api-token-of-the-test`),
+never a 32+ char hex run, which the scan blocks just like a real key.
+
+A `/proc/net/tcp6` address fixture is such a run too (issue 1465:
+`0000000000000000FFFF00000100007F` = `::ffff:127.0.0.1`, which is how the kernel prints it). It is the
+literal under test, so keep it and append `# airuleset:secret-ok <a /proc/net/tcp6 address fixture>`
+to every `git add` / `git commit` of the test file.
+
 ## `mapfile < <(cmd; printf 'rc\0%s\0' "$?")` loses `cmd`'s exit code under `set -e` (issue 808)
 
 A process substitution INHERITS the caller's errexit. Under `set -euo pipefail`, a failing `cmd`
@@ -1784,7 +1800,7 @@ paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against th
     example, a stub turns a file the script will `rm -f` into a non-empty directory.
   - Prove each arm with a mutant (delete the `trap` line in a scratch copy, run the test).
 
-## Two fixture traps that let a mutant survive (issue 1399)
+## Fixture traps that let a mutant (or the old code) pass (issue 1399, issue 1462)
 
 - **A "not UTF-8" fixture must hold INVALID UTF-8.** `b"obs\xc4\x9b"` is valid UTF-8 (`obsě`), so a
   strict `.decode()` mutant of a bytes-safe /proc read still passed. Use a byte sequence that cannot
@@ -1792,6 +1808,13 @@ paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against th
 - **A fake server that logs a request BEFORE it decides to drop the connection** counts the dropped
   request as one that ran. If the test means "this request never reached the target", remove the
   logged entry when the fake drops (`DropOnPress` in `tests/python/test_strih_browser_keeper_obs_run_1399.py`).
+- **A "stale file is never reused" fixture must put the stale file where the PRE-fix code reads it**
+  (issue 1462). The first `[4b3/8]` stale-WAV test planted the WAV at the NEW default path; the old
+  code read another path, found nothing and aborted "never arrived", so the test passed on the old
+  code for the wrong reason. Set the path explicitly (here `AUDIO_DECODABILITY_WAV_LX`) to where both
+  versions read, and run the test on a scratch tree of the old scripts to see it fail for the reason
+  it names. The same lane found the second half: a guard that removes the stale file INSIDE the
+  remote command is no guard when that command's ssh fails; gate the pull-back on its rc.
 
 ## A test harness that runs bash must pass values as ARGUMENTS, never inside the script text (issue 1302)
 
@@ -1920,3 +1943,47 @@ on a RED commit that precedes the C change. That failure is the harness, not the
 Prove the behavioural RED on a scratch tree before committing: `git archive HEAD scripts` + the NEW
 C files + the new test, run there, and require assertion failures on the parser's output (issue
 1425: 8 failed / 1 passed). State that run on the ticket, since the RED commit alone cannot show it.
+
+## A test that pins a JSON `\u` escape must ASSERT the escape is in the frame text (issue 1453)
+
+The first escaped-key pin of the hub's Janus allowlist (`r\u0074p` must be read as `rtp`) landed in
+the file as a plain `"rtp"`: the escape was decoded somewhere on the way through a Python patch
+script, and the test still passed, proving nothing (a fresh-context review caught it with `cat -A`).
+Write the escape with an escaped backslash in a normal Rust string (`"\"r\\u0074p\""`), and assert
+it survives: `assert!(frame.contains("r\\u0074p"))`. Then a decoded write fails loudly. The same holds
+for any fixture whose point is an escape sequence (`\t`, `\n`, `\u`): check it with `grep -n 'u0074'`
+after writing, never trust the patch script.
+
+## A pure hub module that uses serde_json runs under plain rustc: build serde_json from the registry (issue 1453)
+
+`intercom/hub/src/janus_ws_guard.rs` needs only serde_json, so its real test file runs locally with
+no cargo. serde_json 1.0.15x depends on `serde_core`, `itoa`, `memchr` and `zmij`, and both
+`serde_core` and `serde_json` (and `zmij`) have build scripts. Per crate: compile its `build.rs` with
+rustc, run it with `OUT_DIR`, `CARGO_PKG_VERSION_PATCH`, `TARGET`, `RUSTC`, `CARGO_CFG_TARGET_ARCH`,
+`CARGO_CFG_TARGET_POINTER_WIDTH` and `CARGO_MANIFEST_DIR` set, turn its `cargo:rustc-cfg=` lines into
+`--cfg` args, and build the lib as an rlib with `OUT_DIR` still set (serde_core `include!`s a
+generated `private.rs`). Features: `std` + `result` + `alloc` on serde_core, `std` on serde_json and
+memchr. Then a root with `extern crate self as intercom_hub;` + `#[path]` the module and the test
+file, `rustc --test --extern serde_json=...` and `clippy-driver --test -D warnings` on it. Keep the
+builder in a script FILE (the worktree guard refuses the inline shape).
+
+
+## A git ownership check in a root-run script is testable as non-root: `GIT_TEST_ASSUME_DIFFERENT_OWNER=1` (issue 1467)
+
+setup-strih runs as root, often from the operator's clone, and git then refuses to read the repo
+("detected dubious ownership"), so a `git rev-parse HEAD` in a provisioning lib silently reads as "no
+checkout". A non-root test cannot chown a fixture repo, but git honours its own test hook: with
+`GIT_TEST_ASSUME_DIFFERENT_OWNER=1` in the env every repo reads as foreign-owned. Prove the fixture
+really is refused (a plain `git rev-parse` must fail under the env), then that the code under test
+still reads it (`git -c safe.directory=<realpath of the tree> -C <tree> ...`; name exactly the tree,
+so a parent repo stays unread). Worked example: `tests/python/test_strih_hub_artifact_1467.py`.
+
+## A new call in a verify-strih item must not expand `HERE` (or another orchestrator-only variable)
+
+Several pytests run one verify item's REAL text, sliced from verify-strih.sh, under
+`set -euo pipefail` with only the libs sourced and the item's other graders stubbed (item 16:
+`_item16` in `tests/python/test_strih_operator_1418.py`). `HERE`, `STRIH_FACT_BOX` and the other
+variables verify-strih sets at its top are unset there, so an argument like `"${HERE}/.."` aborts the
+slice with "unbound variable" before any stub runs. Let the lib derive what it needs (a checkout root
+from `${BASH_SOURCE[0]}`, the box from `strih_box_loaded_name`) and add the new grader to the
+harness's stub list next to its siblings.

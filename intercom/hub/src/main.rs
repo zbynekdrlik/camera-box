@@ -8,15 +8,19 @@
 //! NOTE: launching this against the live rig SENDS VBAN to the real camboxes. That is the M1b/M4
 //! supervisor step (via the cam1 env override first) — never run it from a dev lane.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 
 use std::sync::mpsc::SyncSender;
 
+use intercom_hub::alsa_card::AlsaLegStats;
+use intercom_hub::alsa_leg::{spawn_alsa_capture, spawn_alsa_playback, AlsaCaptureConfig};
 use intercom_hub::block_clock::{run_batch, BlockGrid};
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::hdmi_audio::HdmiLegStats;
@@ -24,16 +28,22 @@ use intercom_hub::hdmi_leg::{spawn_alsa_hdmi_sink, AlsaHdmiSinkConfig};
 use intercom_hub::http::{router, AppState};
 use intercom_hub::inputs::input_buffers;
 use intercom_hub::janus_pacing::{PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES};
+use intercom_hub::janus_relay::JanusWsRelay;
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
     LocalSourceConfig,
 };
 use intercom_hub::matrix::Matrix;
-use intercom_hub::mix_thread::{current_sched_class, spawn_mix_thread, MonoClock, MIX_THREAD_NAME};
+use intercom_hub::mix_thread::{
+    apply_memory_lock, current_sched_class, lock_all_memory, spawn_mix_thread, MonoClock,
+    MIX_THREAD_NAME,
+};
 use intercom_hub::mulaw::stereo_to_mono;
 use intercom_hub::state::{HubState, RuntimeStats};
+use intercom_hub::turn::{TurnMinter, CLOUDFLARE_TURN_API, TURN_CONFIG_DEFAULT};
 use intercom_hub::vban_io::{
-    resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, SendOutcome, VbanSender,
+    classify_packet, note_decoded, note_undecodable, resolve_vban_addr, to_hub_rate, DecodeRejects,
+    JitterBuffer, OutBlock, RoutedPacket, SendOutcome, VbanSender,
 };
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
@@ -59,6 +69,17 @@ struct Args {
     /// Override the HTTP bind address (host:port) from the config's `[hub].bind`.
     #[arg(long)]
     bind: Option<String>,
+
+    /// The Cloudflare TURN key file (issue 1453). The unit's `turn.toml` credential wins when loaded;
+    /// absent = TURN off (`/api/ice` answers turn=off, `/api/turn-rest` 404), the hub otherwise unchanged.
+    #[arg(long, default_value = TURN_CONFIG_DEFAULT)]
+    turn_config: PathBuf,
+
+    /// Only load and check the routing TOML (`--config`) and exit: 0 = this hub binary runs it,
+    /// non-zero names why not (issue 1438: setup-strih installs a new routing file only when the
+    /// installed hub loads it, so an older hub never crash-loops on an adapter it does not know).
+    #[arg(long)]
+    check_config: bool,
 }
 
 #[tokio::main]
@@ -76,6 +97,15 @@ async fn main() -> Result<()> {
         .with_context(|| format!("read intercom config {}", args.config.display()))?;
     let matrix = Matrix::from_toml(&text)
         .with_context(|| format!("parse intercom config {}", args.config.display()))?;
+    if args.check_config {
+        println!(
+            "intercom-hub {VERSION}: {} loads ({} participants, {} points)",
+            args.config.display(),
+            matrix.participants.len(),
+            matrix.points.len()
+        );
+        return Ok(());
+    }
 
     let http_bind = args.bind.clone().unwrap_or_else(|| matrix.hub.bind.clone());
     let http_addr: SocketAddr = http_bind
@@ -110,34 +140,10 @@ async fn main() -> Result<()> {
             })
             .collect(),
     ));
-    {
-        let out_addrs = out_addrs.clone();
-        let hosts: Vec<String> = outputs.iter().map(|(_, _, h)| h.clone()).collect();
-        tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(std::time::Duration::from_secs(OUTPUT_RESOLVE_REFRESH_S));
-            ticker.tick().await; // the first tick fires immediately; startup already resolved
-            loop {
-                ticker.tick().await;
-                let hosts = hosts.clone();
-                let fresh = tokio::task::spawn_blocking(move || {
-                    hosts
-                        .iter()
-                        .map(|h| resolve_vban_addr(h, intercom_vban::VBAN_PORT))
-                        .collect::<Vec<_>>()
-                })
-                .await;
-                if let (Ok(fresh), Ok(mut cur)) = (fresh, out_addrs.lock()) {
-                    for (slot, a) in cur.iter_mut().zip(fresh) {
-                        if a.is_some() && *slot != a {
-                            tracing::info!(old = ?*slot, new = ?a, "VBAN output address changed");
-                            *slot = a;
-                        }
-                    }
-                }
-            }
-        });
-    }
+    spawn_output_resolve_refresh(
+        out_addrs.clone(),
+        outputs.iter().map(|(_, _, h)| h.clone()).collect(),
+    );
     let engine = Arc::new(Engine::new(matrix.clone()));
     let jitter: Arc<Mutex<Vec<JitterBuffer>>> = Arc::new(Mutex::new(input_buffers(&matrix)));
 
@@ -237,13 +243,13 @@ async fn main() -> Result<()> {
         None => None,
     };
 
+    // Lock the memory in RAM before hub-mix exists, so it never stalls in a page fault (issue 1401).
+    let memory_lock = apply_memory_lock(lock_all_memory);
+    memory_lock.log();
     // Seed the live channel so a client connecting before the first tick sees current state.
-    let initial = Arc::new(HubState::snapshot(
-        &matrix,
-        VERSION,
-        &vec![RuntimeStats::default(); n],
-    ));
-    let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
+    let mut initial = HubState::snapshot(&matrix, VERSION, &vec![RuntimeStats::default(); n]);
+    initial.memory_locked = Some(memory_lock.locked);
+    let (live_tx, live_rx) = tokio::sync::watch::channel(Arc::new(initial));
     // The periodic status line is written here, on tokio, from every snapshot the block loop
     // publishes: a journal write can block, and the block loop runs on the real-time hub-mix
     // thread (issue 1401).
@@ -263,51 +269,19 @@ async fn main() -> Result<()> {
     // --- receive task: demux packets, bring each stream to the hub rate, push into its buffer --
     // Each VBAN input stream owns a rate converter (issue 1345: fohabl-strih arrives at 96 kHz). The
     // converters live in this task alone (no lock); their rate + reject count are published to the
-    // lock-free `rate_stats` slots the block loop reads for /api/state.
+    // lock-free `rate_stats` slots the block loop reads for /api/state. Issue 1467: the stream name
+    // is looked up BEFORE the payload is decoded, so a known stream the hub cannot decode is counted
+    // (`decode_rejects`, the same slot) and logged once per transition; unknown names stay silent.
     let rate_stats: Arc<Vec<VbanRateStats>> =
         Arc::new((0..n).map(|_| VbanRateStats::default()).collect());
-    {
-        let jitter = jitter.clone();
-        let rate_stats = rate_stats.clone();
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
-            let mut converters: Vec<VbanRateConverter> = (0..n)
-                .map(|_| VbanRateConverter::new(sample_rate))
-                .collect();
-            loop {
-                match vban_socket.recv_from(&mut buf).await {
-                    Ok((len, _from)) => {
-                        if let Some((id, audio, rate)) = route_packet(&input_streams, &buf[..len]) {
-                            let Some(conv) = converters.get_mut(id) else {
-                                continue;
-                            };
-                            let converted = to_hub_rate(conv, audio, rate);
-                            if let Some(slot) = rate_stats.get(id) {
-                                slot.publish(conv);
-                            }
-                            if let Some(audio) = converted {
-                                // A program feed's target change is logged after the lock is
-                                // released: the real-time hub-mix thread takes the same lock
-                                // every block (issue 1401).
-                                let change = jitter.lock().ok().and_then(|mut jb| {
-                                    jb.get_mut(id).and_then(|b| {
-                                        b.push(&audio);
-                                        b.take_target_change()
-                                    })
-                                });
-                                if let Some(change) = change {
-                                    change.log();
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "VBAN recv error");
-                    }
-                }
-            }
-        });
-    }
+    spawn_vban_receive(
+        vban_socket,
+        input_streams,
+        jitter.clone(),
+        rate_stats.clone(),
+        n,
+        sample_rate,
+    );
 
     // --- block/mix thread: pop a block from every buffer, mix N-1, send each cambox's stream --
     // One NON-BLOCKING send socket per output slot (issue 1401): one shared blocking socket let the
@@ -336,6 +310,7 @@ async fn main() -> Result<()> {
         local_audio,
         video_for_loop: video_state.clone(),
         live_tx,
+        memory_locked: memory_lock.locked,
     };
     let mix = spawn_mix_thread(move || run_block_loop(block_loop))
         .context("spawn the hub-mix block loop thread")?;
@@ -362,9 +337,17 @@ async fn main() -> Result<()> {
         "intercom-hub starting"
     );
 
+    let turn = Arc::new(TurnMinter::load(
+        std::env::var("CREDENTIALS_DIRECTORY").ok().as_deref(),
+        &args.turn_config,
+        CLOUDFLARE_TURN_API,
+    ));
+    turn.spawn_refresher(); // issue 1453: warm + renew the TURN cache off the request path
     let state = AppState {
         live: live_rx,
         video: video_state,
+        turn,
+        janus_ws: janus_ws_relay(&matrix),
     };
     let listener = tokio::net::TcpListener::bind(http_addr)
         .await
@@ -373,6 +356,123 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// The VBAN receive task (moved out of `main()` for its size, issue 1467): demux each datagram by its
+/// stream name ([`classify_packet`]), bring a known stream to the hub rate through its own converter
+/// (issue 1345) and push it into its jitter buffer; a known stream that does not decode is counted in
+/// its `decode_rejects` slot and logged (issue 1467); foreign traffic is ignored. The converters and
+/// the reject state live in this task alone (no lock); nothing is logged under the jitter lock, since
+/// the real-time hub-mix thread takes that lock every block (issue 1401).
+fn spawn_vban_receive(
+    vban_socket: tokio::net::UdpSocket,
+    input_streams: HashMap<String, usize>,
+    jitter: Arc<Mutex<Vec<JitterBuffer>>>,
+    rate_stats: Arc<Vec<VbanRateStats>>,
+    n: usize,
+    sample_rate: u32,
+) {
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        let mut converters: Vec<VbanRateConverter> = (0..n)
+            .map(|_| VbanRateConverter::new(sample_rate))
+            .collect();
+        let mut decode_rejects: Vec<DecodeRejects> =
+            (0..n).map(|_| DecodeRejects::default()).collect();
+        loop {
+            match vban_socket.recv_from(&mut buf).await {
+                Ok((len, from)) => match classify_packet(&input_streams, &buf[..len]) {
+                    RoutedPacket::Audio {
+                        id,
+                        audio,
+                        sample_rate: rate,
+                    } => {
+                        // The arrival time, before any lock: the resampler leg's rate fit times
+                        // every packet by it (issue 1461).
+                        let arrived = Instant::now();
+                        if let Some(rejects) = decode_rejects.get_mut(id) {
+                            note_decoded(rejects, &audio.stream_name, from, arrived);
+                        }
+                        let Some(conv) = converters.get_mut(id) else {
+                            continue;
+                        };
+                        let converted = to_hub_rate(conv, audio, rate);
+                        if let Some(slot) = rate_stats.get(id) {
+                            slot.publish(conv);
+                        }
+                        if let Some(audio) = converted {
+                            // Held only for the append: the real-time hub-mix thread takes the
+                            // same lock every block (issue 1401). Nothing is logged under it.
+                            if let Ok(mut jb) = jitter.lock() {
+                                if let Some(b) = jb.get_mut(id) {
+                                    b.push_at(&audio, arrived);
+                                }
+                            }
+                        }
+                    }
+                    RoutedPacket::Undecodable { id, stream, reason } => {
+                        if let Some(rejects) = decode_rejects.get_mut(id) {
+                            note_undecodable(rejects, &stream, from, &reason, Instant::now());
+                            if let Some(slot) = rate_stats.get(id) {
+                                slot.publish_decode_rejects(rejects.count());
+                            }
+                        }
+                    }
+                    RoutedPacket::Foreign => {}
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "VBAN recv error");
+                }
+            }
+        }
+    });
+}
+
+/// The phones' Janus WebSocket relay (issue 1453): `/janus` goes through the hub's frame allowlist.
+/// Only a hub with a Janus room (a `janus` participant + a `[janus]` table) relays it.
+fn janus_ws_relay(matrix: &Matrix) -> Option<Arc<JanusWsRelay>> {
+    let (Some(_), Some(jcfg)) = (matrix.janus_participant(), matrix.janus.as_ref()) else {
+        return None;
+    };
+    tracing::info!(
+        ws_url = %jcfg.ws_url,
+        room = jcfg.room,
+        max_relays = intercom_hub::janus_relay::MAX_CONCURRENT_RELAYS,
+        "janus relay: /janus relays the phones' WebSocket through the frame allowlist"
+    );
+    Some(Arc::new(JanusWsRelay::new(&jcfg.ws_url, jcfg.room)))
+}
+
+/// Re-resolve the VBAN output hosts every `OUTPUT_RESOLVE_REFRESH_S` off the hot path (a cambox on a
+/// new DHCP lease is picked up within a minute). A failed lookup keeps the last-known-good address.
+fn spawn_output_resolve_refresh(
+    out_addrs: Arc<Mutex<Vec<Option<SocketAddr>>>>,
+    hosts: Vec<String>,
+) {
+    tokio::spawn(async move {
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(OUTPUT_RESOLVE_REFRESH_S));
+        ticker.tick().await; // the first tick fires immediately; startup already resolved
+        loop {
+            ticker.tick().await;
+            let hosts = hosts.clone();
+            let fresh = tokio::task::spawn_blocking(move || {
+                hosts
+                    .iter()
+                    .map(|h| resolve_vban_addr(h, intercom_vban::VBAN_PORT))
+                    .collect::<Vec<_>>()
+            })
+            .await;
+            if let (Ok(fresh), Ok(mut cur)) = (fresh, out_addrs.lock()) {
+                for (slot, a) in cur.iter_mut().zip(fresh) {
+                    if a.is_some() && *slot != a {
+                        tracing::info!(old = ?*slot, new = ?a, "VBAN output address changed");
+                        *slot = a;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Everything the block loop owns; `main` builds it once and moves it onto the loop's thread.
@@ -393,6 +493,8 @@ struct BlockLoop {
     local_audio: LocalAudioWiring,
     video_for_loop: Option<Arc<intercom_hub::ndi_video::VideoState>>,
     live_tx: tokio::sync::watch::Sender<Arc<HubState>>,
+    /// Whether `main` locked the process memory before the spawn (`/api/state` `memory_locked`).
+    memory_locked: bool,
 }
 
 /// The block/mix loop, on the "hub-mix" thread: every hub tick, pop one block from every buffer,
@@ -418,6 +520,7 @@ fn run_block_loop(bl: BlockLoop) {
         local_audio,
         video_for_loop,
         live_tx,
+        memory_locked,
     } = bl;
     let LocalAudioWiring {
         program_sink_tx,
@@ -425,6 +528,7 @@ fn run_block_loop(bl: BlockLoop) {
         reports: local_audio_reports,
         local_sinks,
         hdmi_reports,
+        alsa_reports,
     } = local_audio;
     let n = matrix.participants.len();
     let sample_rate = matrix.hub.sample_rate;
@@ -486,11 +590,12 @@ fn run_block_loop(bl: BlockLoop) {
                     rx_stats[id].overruns = b.overruns;
                     rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
                     rx_stats[id].level_dbfs = b.last_level_dbfs();
-                    // The VBAN leg's target / depth / servo corrections (issue 1401).
+                    // The resampler leg's target / depth / rate / phase (issues 1401 + 1461).
                     rx_stats[id].jitter = b.network_stats().map(Into::into);
                     if let Some(slot) = rate_stats.get(id) {
                         rx_stats[id].sample_rate = slot.sample_rate();
                         rx_stats[id].rate_rejects = slot.rate_rejects();
+                        rx_stats[id].decode_rejects = slot.decode_rejects();
                     }
                 }
             }
@@ -504,9 +609,13 @@ fn run_block_loop(bl: BlockLoop) {
                 let interleaved = output.interleaved(*pid, block_frames);
                 if !interleaved.is_empty() {
                     let mono = stereo_to_mono(&interleaved);
-                    // A poisoned lock still holds a valid ring: keep feeding it, exactly as
-                    // the sender thread keeps popping it.
-                    ring.lock().unwrap_or_else(|e| e.into_inner()).push(&mono);
+                    // The time the block left the mix, before the lock (issue 1461: the ring's
+                    // rate fit times every push by it). A poisoned lock still holds a valid ring:
+                    // keep feeding it, exactly as the sender thread keeps popping it.
+                    let mixed = Instant::now();
+                    ring.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push_at(&mono, mixed);
                 }
             }
 
@@ -590,12 +699,19 @@ fn run_block_loop(bl: BlockLoop) {
                         s.hdmi = Some(hstats.snapshot());
                     }
                 }
+                // The card legs' per-side state, format, running and xruns (issue 1438).
+                for (pid, astats) in &alsa_reports {
+                    if let Some(s) = rx_stats.get_mut(*pid) {
+                        s.alsa = Some(astats.snapshot());
+                    }
+                }
                 let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
                 // The run's late ticks (issue 1401): a caught-up one is no loss, a lost one is a
                 // block lost on every output.
                 snapshot.caught_up_ticks = caught_up_total;
                 snapshot.lost_ticks = lost_total;
                 snapshot.mix_thread_sched = Some(mix_thread_sched.clone());
+                snapshot.memory_locked = Some(memory_locked);
                 // Attach the Interkom picture facet (M3c) when the video leg is running.
                 if let Some(vs) = &video_for_loop {
                     let now_wall = std::time::SystemTime::now()
@@ -625,6 +741,8 @@ struct LocalAudioWiring {
     local_sinks: Vec<(usize, SyncSender<Vec<i16>>)>,
     /// Every HDMI audio leg's resolve + aplay counters, by participant.
     hdmi_reports: Vec<(usize, Arc<HdmiLegStats>)>,
+    /// Every card leg's per-side counters (issue 1438), by participant.
+    alsa_reports: Vec<(usize, Arc<AlsaLegStats>)>,
 }
 
 /// Spawn every local PipeWire bridge the matrix declares (issues 1344 + 1345). None of them ever
@@ -753,6 +871,45 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
         local_sinks.push((pid, tx));
     }
 
+    // --- The card legs (issue 1438): an `alsa` participant (the cutters) opens its USB card
+    // directly, aplay for its N-1 bus and arecord for its talkback on hw:CARD=<id>,DEV=<n>, no
+    // PipeWire node. Each side looks at /proc/asound/<id> before every spawn: a missing card is the
+    // side down (one log line, a backoff retry), never a fallback. Both sides share one stats facet.
+    let mut alsa_reports: Vec<(usize, Arc<AlsaLegStats>)> = Vec::new();
+    for spec in matrix.alsa_cards() {
+        let pid = spec.participant;
+        let name = matrix.participants[pid].name.clone();
+        let stats = Arc::new(LocalAudioStats::default());
+        let leg = Arc::new(AlsaLegStats::default());
+        tracing::info!(
+            participant = pid,
+            card = %spec.card,
+            device = spec.device,
+            outputs = spec.out_channels,
+            inputs = spec.in_channels,
+            "local-audio: card leg (aplay/arecord on the card's hw PCM, no PipeWire) enabled"
+        );
+        if spec.in_channels > 0 {
+            spawn_alsa_capture(
+                AlsaCaptureConfig {
+                    spec: spec.clone(),
+                    name: name.clone(),
+                    rate: sample_rate,
+                    block_frames,
+                },
+                jitter.clone(),
+                stats.clone(),
+                leg.clone(),
+            );
+        }
+        if spec.out_channels > 0 {
+            let tx = spawn_alsa_playback(spec, name, sample_rate, stats.clone(), leg.clone());
+            local_sinks.push((pid, tx));
+        }
+        local_output_reports.push((pid, stats));
+        alsa_reports.push((pid, leg));
+    }
+
     let mut reports = local_input_reports;
     reports.extend(local_output_reports);
     LocalAudioWiring {
@@ -761,6 +918,7 @@ fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> 
         reports,
         local_sinks,
         hdmi_reports,
+        alsa_reports,
     }
 }
 

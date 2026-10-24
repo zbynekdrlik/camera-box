@@ -2,11 +2,13 @@
 //!
 //! Per participant: name/role/adapter/host plus the live counters a dev1 watchdog reads — rx/tx
 //! packets, jitter underruns/overruns, the age of the last received packet, and the input level in
-//! dBFS. A VBAN leg also carries its jitter-buffer facet (target, depth, servo corrections, issue
-//! 1401). The whole snapshot is rebuilt each block-status tick from the jitter buffers.
+//! dBFS. A resampler leg (a VBAN leg, the cutters' card capture) also carries its jitter-buffer
+//! facet (fixed target, depth, the resampler's rate and phase, resyncs; issues 1401 + 1461). The
+//! whole snapshot is rebuilt each block-status tick from the jitter buffers.
 
 use serde::Serialize;
 
+use crate::alsa_card::{AlsaDirFacet, AlsaLegFacet, ALSA_CARD_PERIODS};
 use crate::hdmi_audio::{HdmiLegFacet, ALSA_HDMI_BUFFER_FRAMES, ALSA_HDMI_PERIOD_FRAMES};
 use crate::janus_rtp::JanusStats;
 use crate::local_audio::LocalAudioFacet;
@@ -14,37 +16,34 @@ use crate::matrix::Matrix;
 use crate::ndi_video::VideoStats;
 use crate::vban_jitter::NetworkFillStats;
 
-/// A VBAN leg's jitter buffer as `/api/state` shows it (issue 1401): the target and the measured
-/// depth in frames (the hub `sample_rate` turns them into ms), and how often the drift servo
-/// dropped or repeated a single frame.
+/// A resampler leg's jitter buffer as `/api/state` shows it (issues 1401 + 1461): the fixed target
+/// and the measured depth in frames (the hub `sample_rate` turns them into ms), the resampler's
+/// ratio and phase, and the counted faults.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct JitterFacet {
-    /// The target pre-pop fill: live, a program feed's follows its sender's gaps.
+    /// The target pre-pop depth: fixed from the start (the TOML `target_ms` or the kind's default).
     pub target_frames: usize,
-    /// The mean pre-pop fill over the last 1 s window (0 before the first window).
+    /// The mean pre-pop depth over the last 1 s window (0 before the first window).
     pub depth_frames: usize,
-    /// The lowest pre-pop fill in that window (the underrun margin is this minus one block).
+    /// The lowest pre-pop depth in that window (the underrun margin is this minus one block and
+    /// the resampler's 16-frame look-ahead).
     pub depth_min_frames: usize,
-    /// Single frames dropped because the fill sat high (the sender runs fast).
-    pub servo_drops: u64,
-    /// Single frames repeated because the fill sat low (the sender runs slow).
-    pub servo_repeats: u64,
-    /// The fill the servo holds now: `target_frames`, or while a target change is walked in (about
-    /// 37 s a block), the point the walk has reached. `depth_frames` follows this, not the target.
-    pub setpoint_frames: usize,
-    /// How many of `servo_drops` + `servo_repeats` walked a target change in (at most 7 a second);
-    /// the rest corrected the sender's drift.
-    pub servo_walk_steps: u64,
+    /// The resampler's ratio in ppm off 1 (0.1 ppm resolution): the sender's clock against the
+    /// hub's, plus the phase term while the depth sits outside +-1/4 of the target.
+    pub rate_ppm: f64,
+    /// The last least-squares fit of the sender's rate in ppm (0.1 ppm), null before the first fit
+    /// after a (re)start. It differs from `rate_ppm` while the ratio follows it, or past the clamp.
+    pub rate_fit_ppm: Option<f64>,
+    /// The last second's mean depth minus the target, in frames (0.1 resolution).
+    pub asrc_phase_frames: f64,
+    /// Times the queue went above its cap and was resynced to the target (each also counts in
+    /// `overruns`).
+    pub resyncs: u64,
     /// Times the stream stopped for more than 500 ms and came back: a sender outage on a program
     /// feed, simply a mute on a cambox (it sends only while unmuted).
     pub stalls: u64,
     /// Audio is flowing (false while priming: before the first packet or after an underrun).
     pub primed: bool,
-    /// A program feed's largest gap between two packets in the last 10 min, in ms (0.1 ms
-    /// resolution): what its adaptive target follows. Omitted for a leg with a fixed target (the
-    /// camboxes).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_gap_ms_10min: Option<f64>,
 }
 
 /// The hub's HDMI audio leg as `/api/state` shows it (issue 1424 part 3): the connector the matrix
@@ -89,21 +88,89 @@ impl HdmiLegState {
     }
 }
 
+/// One side of a card leg as `/api/state` shows it (issue 1438).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AlsaSideState {
+    /// `ready`, `card not present`, the named reason the card cannot be opened, or `not started
+    /// yet`.
+    pub state: &'static str,
+    /// The hw sample format the child speaks with the card (`S16_LE` / `S32_LE` / `S24_3LE`) once
+    /// ready, else null.
+    pub format: Option<&'static str>,
+    /// The card's channel count on this side (the hw PCM opens with exactly this many).
+    pub hw_channels: usize,
+    /// The child is moving audio (aplay has read from its pipe / arecord delivered a block).
+    pub running: bool,
+    /// The child's xruns since the hub started (aplay `underrun!!!` / arecord `overrun!!!`).
+    pub xruns: u64,
+    /// Child spawns since the hub started.
+    pub spawns: u64,
+}
+
+impl AlsaSideState {
+    fn new(f: AlsaDirFacet, hw_channels: usize) -> Self {
+        AlsaSideState {
+            state: f.state.name(),
+            format: f.state.format().map(|f| f.alsa_name()),
+            hw_channels,
+            running: f.running,
+            xruns: f.xruns,
+            spawns: f.spawns,
+        }
+    }
+}
+
+/// The card leg as `/api/state` shows it (issue 1438): the card the matrix names, whether it was on
+/// the box at the last look, and each side the participant uses (`null` for an unused side). The
+/// playback pipe's fill and depth are in the participant's `local_audio` facet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AlsaLegState {
+    /// The ALSA card ID (`M4`, `MGXU`).
+    pub card: String,
+    /// `hw:CARD=<id>,DEV=<n>`.
+    pub pcm: String,
+    /// The card was on the box at the last look of either side.
+    pub present: bool,
+    pub playback: Option<AlsaSideState>,
+    pub capture: Option<AlsaSideState>,
+    /// The ALSA period and buffer both sides open with (frames at the hub rate).
+    pub alsa_period_frames: usize,
+    pub alsa_buffer_frames: usize,
+}
+
+impl AlsaLegState {
+    fn new(spec: &crate::alsa_card::AlsaCardSpec, f: AlsaLegFacet) -> Self {
+        AlsaLegState {
+            card: spec.card.clone(),
+            pcm: crate::alsa_card::pcm_name(&spec.card, spec.device),
+            present: f.card_present(),
+            playback: (spec.out_channels > 0)
+                .then(|| AlsaSideState::new(f.playback, spec.hw_out_channels)),
+            capture: (spec.in_channels > 0)
+                .then(|| AlsaSideState::new(f.capture, spec.hw_in_channels)),
+            alsa_period_frames: spec.period_frames,
+            alsa_buffer_frames: spec.period_frames * ALSA_CARD_PERIODS,
+        }
+    }
+
+    /// Every side the participant uses is moving audio.
+    pub fn up(&self) -> bool {
+        self.playback.iter().chain(&self.capture).all(|s| s.running)
+    }
+}
+
 impl From<NetworkFillStats> for JitterFacet {
     fn from(s: NetworkFillStats) -> Self {
         JitterFacet {
             target_frames: s.target_frames,
             depth_frames: s.depth_frames,
             depth_min_frames: s.depth_min_frames,
-            servo_drops: s.servo_drops,
-            servo_repeats: s.servo_repeats,
-            setpoint_frames: s.setpoint_frames,
-            servo_walk_steps: s.servo_walk_steps,
+            rate_ppm: s.rate_ppm,
+            rate_fit_ppm: s.rate_fit_ppm,
+            asrc_phase_frames: s.asrc_phase_frames,
+            resyncs: s.resyncs,
             stalls: s.stalls,
             primed: s.primed,
-            max_gap_ms_10min: s
-                .max_gap_us_10min
-                .map(|us| (us as f64 / 100.0).round() / 10.0),
         }
     }
 }
@@ -125,15 +192,21 @@ pub struct RuntimeStats {
     pub sample_rate: Option<u32>,
     /// VBAN packets dropped because their rate is not 1x / 2x / 4x the hub rate (issue 1345).
     pub rate_rejects: u64,
+    /// VBAN packets of this participant's stream that could not be decoded (issue 1467: an
+    /// unsupported codec, a non-audio sub-protocol, a payload without one whole frame).
+    pub decode_rejects: u64,
     /// The Janus audiobridge facet, present only for the `janus`-adapter participant (M3a).
     pub janus: Option<JanusStats>,
     /// The local PipeWire facet, present only for a `pipewire`-adapter participant — the
     /// `program_out` sink + the talkback capture (issue 1344).
     pub local_audio: Option<LocalAudioFacet>,
-    /// The VBAN leg's jitter-buffer facet (issue 1401), `None` for the other participants.
+    /// The resampler leg's jitter-buffer facet (issues 1401 + 1461), `None` for the other
+    /// participants.
     pub jitter: Option<JitterFacet>,
     /// The HDMI audio leg facet (issue 1424 part 3), `None` for every non-`alsa_hdmi` participant.
     pub hdmi: Option<HdmiLegFacet>,
+    /// The card leg facet (issue 1438), `None` for every non-`alsa` participant.
+    pub alsa: Option<AlsaLegFacet>,
 }
 
 /// One participant's serialized state.
@@ -161,6 +234,11 @@ pub struct ParticipantState {
     /// every VBAN participant, omitted for the others.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_rejects: Option<u64>,
+    /// VBAN packets of this participant's stream that could not be decoded (issue 1467): the name
+    /// is known but the codec / sub-protocol / payload is not, so the leg reads silent. Present for
+    /// every VBAN participant, omitted for the others.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_rejects: Option<u64>,
     /// The Janus audiobridge facet (joined / session age / rejoins / rtp packet counts), present
     /// only for the janus participant — omitted from the JSON for every other participant.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,13 +247,17 @@ pub struct ParticipantState {
     /// `pipewire`-adapter participant — omitted from the JSON for every other participant (issue 1344).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_audio: Option<LocalAudioFacet>,
-    /// The VBAN leg's jitter buffer (target / depth / servo drops + repeats, issue 1401), present
-    /// only for a VBAN participant — omitted from the JSON for every other participant.
+    /// The resampler leg's jitter buffer (target / depth / rate / phase / resyncs, issues 1401 +
+    /// 1461), present only for a VBAN participant and the cutters' card capture — omitted from the
+    /// JSON for every other participant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jitter: Option<JitterFacet>,
     /// The HDMI audio leg (issue 1424 part 3), present only for an `alsa_hdmi` participant.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hdmi: Option<HdmiLegState>,
+    /// The card leg (issue 1438), present only for an `alsa` participant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alsa: Option<AlsaLegState>,
 }
 
 /// The whole hub state (the `/api/state` body + each `/ws` push).
@@ -202,6 +284,12 @@ pub struct HubState {
     /// here without ssh. Set by the daemon; omitted from the pure snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mix_thread_sched: Option<String>,
+    /// Whether the hub locked its memory in RAM before it started the hub-mix thread (issue 1401,
+    /// design 6265012279: `mlockall`, granted by the unit's `LimitMEMLOCK=infinity`). `false` = the
+    /// hub runs unlocked and its real-time thread can stall in a page fault under memory pressure
+    /// (verify-strih item 16 FAILs it). Set by the daemon; omitted from the pure snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_locked: Option<bool>,
 }
 
 impl HubState {
@@ -229,15 +317,20 @@ impl HubState {
                     level_dbfs: s.level_dbfs,
                     sample_rate: s.sample_rate.filter(|_| vban),
                     rate_rejects: vban.then_some(s.rate_rejects),
+                    decode_rejects: vban.then_some(s.decode_rejects),
                     janus: s.janus,
                     local_audio: s.local_audio,
-                    jitter: s.jitter.filter(|_| vban),
+                    jitter: s.jitter,
                     hdmi: s
                         .hdmi
                         .filter(|_| p.adapter == crate::matrix::ADAPTER_ALSA_HDMI)
                         .map(|f| {
                             HdmiLegState::new(p.hdmi_connector.clone().unwrap_or_default(), f)
                         }),
+                    // the spec was resolved once at load: no parsing on the hub-mix thread
+                    alsa: matrix
+                        .alsa_spec(id)
+                        .map(|spec| AlsaLegState::new(spec, s.alsa.unwrap_or_default())),
                 }
             })
             .collect();
@@ -252,6 +345,7 @@ impl HubState {
             caught_up_ticks: 0,
             lost_ticks: 0,
             mix_thread_sched: None,
+            memory_locked: None,
         }
     }
 
@@ -263,10 +357,13 @@ impl HubState {
     /// stops on every mute, so it is left out), the block loop's lost ticks as `lost=N` (a block
     /// lost on every output; a tick it caught up is no loss and stays off the line), the VBAN
     /// packets dropped on a backed-up send socket as
-    /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the VBAN legs' drift-servo
-    /// corrections as `servo=<drops>/<repeats>`, and dropped wrong-rate VBAN packets as
+    /// `tx_dropped=N(<worst leg>)` (issue 1401: a NIC or queue stall), the resampler legs'
+    /// resyncs as `resyncs=N(<worst leg>)` and, for every leg that is playing now, its
+    /// resampler as `asrc=<leg>:rate_ppm=..:asrc_phase_frames=..:underruns=..:resyncs=..` (issue
+    /// 1461), and dropped wrong-rate VBAN packets as
     /// `rate_rejects=N` (issue 1345), so a rejected stream (which reads as silent) stays explained
-    /// after its one warn scrolls away.
+    /// after its one warn scrolls away, and a known stream's undecodable packets as
+    /// `decode_rejects=N(<worst leg>)` (issue 1467) for the same reason.
     pub fn status_line(&self) -> String {
         let total_rate_rejects: u64 = self
             .participants
@@ -284,18 +381,36 @@ impl HubState {
         } else {
             String::new()
         };
-        let (drops, repeats) = self
-            .participants
-            .iter()
-            .filter_map(|p| p.jitter)
-            .fold((0u64, 0u64), |(d, r), j| {
-                (d + j.servo_drops, r + j.servo_repeats)
-            });
-        let servo = if drops + repeats > 0 {
-            format!(" servo={drops}/{repeats}")
+        let decode_rejects = |p: &ParticipantState| p.decode_rejects.unwrap_or(0);
+        let undecodable = if self.participants.iter().map(decode_rejects).sum::<u64>() > 0 {
+            format!(
+                " decode_rejects={}",
+                self.total_naming_worst(decode_rejects)
+            )
         } else {
             String::new()
         };
+        let leg_resyncs = |p: &ParticipantState| p.jitter.map_or(0, |j| j.resyncs);
+        let resyncs = if self.participants.iter().map(leg_resyncs).sum::<u64>() > 0 {
+            format!(" resyncs={}", self.total_naming_worst(leg_resyncs))
+        } else {
+            String::new()
+        };
+        // Every resampler leg that is playing now (issue 1461): where its clock sits against the
+        // hub's and how far its depth is off the target. A muted cambox or a stopped feed is left
+        // out (its underruns and resyncs still lead the line as totals).
+        let asrc: String = self
+            .participants
+            .iter()
+            .filter(|p| p.rx_packets > 0)
+            .filter_map(|p| p.jitter.filter(|j| j.primed).map(|j| (p, j)))
+            .map(|(p, j)| {
+                format!(
+                    " asrc={}:rate_ppm={:+.1}:asrc_phase_frames={:+.1}:underruns={}:resyncs={}",
+                    p.name, j.rate_ppm, j.asrc_phase_frames, p.underruns, j.resyncs
+                )
+            })
+            .collect();
         let program_stalls = |p: &ParticipantState| {
             if p.role == crate::matrix::CAMBOX_ROLE {
                 0
@@ -334,17 +449,55 @@ impl HubState {
                 None => format!(" hdmi={}:silent", p.name),
             })
             .collect();
+        // The card legs (issue 1438): the card, the playback pipe depth and each side's xruns
+        // (playback/capture) while every side moves audio, else which side is down and why.
+        let alsa: String = self
+            .participants
+            .iter()
+            .filter_map(|p| p.alsa.as_ref().map(|a| (p, a)))
+            .map(|(p, a)| {
+                if a.up() {
+                    format!(
+                        " alsa={}:{}:depth={}:xruns={}/{}",
+                        p.name,
+                        a.card,
+                        p.local_audio.map_or(0, |l| l.pipe_depth_frames),
+                        a.playback.as_ref().map_or(0, |s| s.xruns),
+                        a.capture.as_ref().map_or(0, |s| s.xruns)
+                    )
+                } else {
+                    let why = a
+                        .playback
+                        .iter()
+                        .chain(&a.capture)
+                        .find(|s| !s.running)
+                        .map_or("down", |s| {
+                            // The card was found and the child spawned, but it moves no audio
+                            // (a PCM another process holds, or it never read yet).
+                            if s.state == "ready" {
+                                "not running"
+                            } else {
+                                s.state
+                            }
+                        });
+                    format!(" alsa={}:{}:down({why})", p.name, a.card)
+                }
+            })
+            .collect();
         format!(
-            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{} {}",
+            "intercom-hub: status participants={} underruns={} overruns={}{}{}{}{}{}{}{}{}{} {}",
             self.participants.len(),
             self.total_naming_worst(|p| p.underruns),
             self.total_naming_worst(|p| p.overruns),
             stalls,
             lost,
             tx_dropped,
-            servo,
+            resyncs,
             rejects,
+            undecodable,
             hdmi,
+            alsa,
+            asrc,
             levels.join(" ")
         )
     }
@@ -414,10 +567,12 @@ out_channels = 4
                 level_dbfs: -12.0,
                 sample_rate: Some(48000),
                 rate_rejects: 0,
+                decode_rejects: 0,
                 janus: None,
                 local_audio: None,
                 jitter: None,
                 hdmi: None,
+                alsa: None,
             },
             RuntimeStats::default(),
         ];

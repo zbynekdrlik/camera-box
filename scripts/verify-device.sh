@@ -226,6 +226,13 @@
 #        by display_gpu_verdict (scripts/lib/display-gpu.sh). An N150 GPU (8086:46d4) on 6.8.0-142
 #        has none, so its HDMI preview lights only when a monitor was on at power-on; the remedy is
 #        the HWE kernel through scripts/rt-kernel-upgrade.sh. No controller or a cut read FAILs.
+#   (aw) fleet kernel line (issue 1446) -- HARD FAIL: linux-lowlatency-hwe-24.04 installed (dpkg
+#        Status install|hold ok installed), the running kernel booted with preempt=full, and uname -r
+#        = the image the installed linux-image-generic-hwe-24.04 meta depends on. Read in one ssh
+#        gather and graded by rt_kernel_line_verdict (scripts/lib/rt-kernel-plan.sh, the ONE kernel
+#        decision create-usb-linux.sh installs). A box off the line is moved by
+#        scripts/rt-kernel-upgrade.sh --box <ip> (reboot-class, owner-approved per box), never by
+#        setup-device.sh. A cut or unreadable read FAILs.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -316,6 +323,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/display-gpu.sh
 . "$HERE/lib/display-gpu.sh"  # display_gpu_gather_remote_snippet / display_gpu_verdict -- the (av)
                               # display-GPU-driven check (issue 1446)
+# shellcheck source=scripts/lib/rt-kernel-plan.sh
+. "$HERE/lib/rt-kernel-plan.sh"  # rt_kernel_line_gather_remote_snippet / rt_kernel_line_verdict -- the (aw)
+                                 # fleet kernel line check (issue 1446; the ONE kernel decision
+                                 # create-usb-linux.sh installs and rt-kernel-upgrade.sh plans)
 # shellcheck source=scripts/lib/cambox-zram.sh
 . "$HERE/lib/cambox-zram.sh"  # cambox_zram_gather_remote_snippet / cambox_zram_verdict -- the (at) zram
                               # swap check (issue 1428; SAME lib setup-device.sh / create-usb-linux.sh write with)
@@ -962,6 +973,10 @@ Checks:
   (av) display GPU driven (issue 1446): every PCI display controller has a kernel driver bound (an
       N150 8086:46d4 on 6.8.0-142 has none: the HDMI preview then lights only when a monitor was on
       at power-on); the remedy is the HWE kernel via scripts/rt-kernel-upgrade.sh
+  (aw) fleet kernel line (issue 1446): linux-lowlatency-hwe-24.04 installed (held reads installed),
+      the running kernel booted with preempt=full, and uname -r = the image the installed
+      linux-image-generic-hwe-24.04 meta depends on; a box off the line is moved by
+      scripts/rt-kernel-upgrade.sh --box <ip> (reboot-class, owner-approved), never setup-device.sh
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1841,6 +1856,37 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
+fi
+
+# (aw) fleet kernel line (issue 1446) -- HARD FAIL -------------------------------------------------
+# Every cambox runs ONE kernel line: the HWE image + lowlatency-kernel (preempt=full), installed as
+# linux-lowlatency-hwe-24.04 (rt_kernel_flavour, the decision create-usb-linux.sh installs and
+# scripts/rt-kernel-upgrade.sh plans). A box built from an old stick boots the GA 6.8 line, which (k)
+# and (av) cannot see. One read-only ssh gather of the running kernel, the boot command line and the
+# two metas' dpkg facts, graded on dev1 by the lib's pure rt_kernel_line_verdict (fail-closed).
+# Inserted after (ak), before (av): outside every slice pytest executes, and before (q).
+awrc=0
+KLINE_BLOCK="$(ssh_box "$(rt_kernel_line_gather_remote_snippet)")" || awrc=$?
+if [ "$awrc" -ne 0 ] || [ -z "$KLINE_BLOCK" ]; then
+  fail "could not read the kernel line over SSH (rc=$awrc) -- cannot certify this box runs the fleet kernel line (issue 1446)"
+else
+  KLINE_VERDICT="$(rt_kernel_line_verdict "$KLINE_BLOCK")" || true
+  case "$KLINE_VERDICT" in
+    OK:*) ok "fleet kernel line: ${KLINE_VERDICT#OK: } (issue 1446)" ;;
+    *)
+      _aw_fails=0
+      while IFS= read -r _reason; do
+        if [ -n "$_reason" ]; then
+          case "$_reason" in
+            *"could not be read"* | *"cannot read"*) fail "fleet kernel line: ${_reason#FAIL: } (issue 1446)" ;;
+            *) fail "fleet kernel line: ${_reason#FAIL: } -- move the box with scripts/rt-kernel-upgrade.sh --box $IP (reboot-class, owner-approved per box), never setup-device.sh (issue 1446)" ;;
+          esac
+          _aw_fails=$((_aw_fails + 1))
+        fi
+      done <<<"$KLINE_VERDICT"
+      if [ "$_aw_fails" -eq 0 ]; then fail "fleet kernel line: the verdict was empty -- cannot certify this box runs the fleet kernel line (issue 1446)"; fi
+      ;;
+  esac
 fi
 
 # (av) display GPU driven (issue 1446) -- HARD FAIL ------------------------------------------------

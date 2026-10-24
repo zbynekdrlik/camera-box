@@ -225,8 +225,8 @@ def test_the_fleet_facet_and_the_watchdog_roster():
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     members, boxes = r.stdout.splitlines()
-    assert members == "strih-snv stream-snv resolume-snv"
-    assert boxes == "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
+    assert members == "strih-snv stream-snv resolume-snv strih-pp stream-pp"   # issue 1441: + the PP boxes
+    assert boxes == "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     r = subprocess.run(["bash", "-c", f'. "{_SCRIPTS}/lib/obs-fleet.sh"; '
                         "obs_fleet_facet_members nope"], capture_output=True, text=True)
     assert r.returncode != 0 and "obs-handles" in r.stderr

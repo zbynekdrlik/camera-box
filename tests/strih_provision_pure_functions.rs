@@ -1026,23 +1026,33 @@ fn janus_audiobridge_jcfg_renders_interkom_room_without_inlining_a_secret() {
     }
 }
 
-/// issue 1345 M3a: `strih_janus_ws_jcfg_text LAN_IP` renders the WebSocket transport jcfg on :8188
-/// with NO wss (TLS terminates on the dev1 front) and the admin API off; the LAN IP is documented.
+/// issue 1345 M3a: `strih_janus_ws_jcfg_text` renders the WebSocket transport jcfg on :8188 with NO
+/// wss (TLS terminates on the box's nginx front) and the admin API off. Issue 1453: the WS is bound
+/// to LOOPBACK only. Phones reach Janus only through the intercom hub's `/janus` relay (the frame
+/// allowlist that refuses a plain-RTP join), so no client on the LAN or through the tunnel can
+/// talk to Janus directly; an argument (the old LAN IP) changes nothing.
 #[test]
-fn janus_ws_jcfg_renders_ws_no_wss() {
-    let (code, out, err) = run_sourced(&[], "strih_janus_ws_jcfg_text 10.77.9.203");
-    assert_eq!(code, 0, "renderer must succeed; stderr={err}");
-    assert!(out.contains("ws = true"), "ws enabled; got:\n{out}");
-    assert!(out.contains("ws_port = 8188"), "ws on :8188");
-    assert!(out.contains("wss = false"), "no wss (TLS on the front)");
-    assert!(out.contains("admin_ws = false"), "admin API off");
-    assert!(out.contains("10.77.9.203"), "the LAN IP is documented");
-    // issue 1345 M3 follow-up (d): WS is BOUND to the LAN IP (not 0.0.0.0 / all interfaces). The
-    // dev1 front reaches it over the LAN; the loopback probe/hub session use the HTTP transport.
-    assert!(
-        out.contains("ws_ip = \"10.77.9.203\""),
-        "WS must bind the LAN IP (ws_ip), never all interfaces; got:\n{out}"
-    );
+fn janus_ws_jcfg_binds_the_websocket_to_loopback_only_1453() {
+    for call in [
+        "strih_janus_ws_jcfg_text",
+        "strih_janus_ws_jcfg_text 10.77.9.203",
+    ] {
+        let (code, out, err) = run_sourced(&[], call);
+        assert_eq!(code, 0, "renderer must succeed; stderr={err}");
+        assert!(out.contains("ws = true"), "ws enabled; got:\n{out}");
+        assert!(out.contains("ws_port = 8188"), "ws on :8188");
+        assert!(out.contains("wss = false"), "no wss (TLS on the front)");
+        assert!(out.contains("admin_ws = false"), "admin API off");
+        assert!(
+            out.contains("    ws_ip = \"127.0.0.1\"\n"),
+            "WS must bind loopback only (issue 1453); got:\n{out}"
+        );
+        assert!(
+            !out.contains("10.77.9.203"),
+            "never the LAN IP: a LAN client would bypass the hub's relay; got:\n{out}"
+        );
+        assert!(out.contains("/janus relay"), "the jcfg names why: {out}");
+    }
 }
 
 /// issue 1345 M3 follow-up (d): `strih_janus_http_jcfg_text` renders the Janus HTTP transport jcfg

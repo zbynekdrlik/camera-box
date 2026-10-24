@@ -198,6 +198,12 @@ something `verify-device.sh` should be loosened to tolerate.
 
 ## Known gotchas (found bringing up cam5/cam6 — all fixed IN THE SCRIPTS, never hand-patched)
 
+- **A stick built by create-usb-linux.sh now boots the fleet kernel line (issue 1446):** the chroot
+  installs `rt_kernel_flavour` (`linux-lowlatency-hwe-24.04` = HWE 7.0 + `lowlatency-kernel`,
+  preempt=full) and holds `rt_kernel_line_held_metas`, never the GA `linux-image-generic`.
+  verify-device `(aw)` FAILs a box off that line; a box built from an OLDER stick (GA 6.8) is moved
+  with `scripts/rt-kernel-upgrade.sh --box <ip>` (reboot-class, owner-approved), never setup-device.
+  The GA hold notes below describe boxes built before this change.
 - **An N150 box (`8086:46d4`: cam5, cam6, cam7) needs the Ubuntu 24.04 HWE kernel for a GPU driver
   (issue 1446).** The 6.8.0-142 i915 lists only `46D0-46D2`, so on 6.8 the HDMI preview lights only
   when a monitor was on at power-on, and a monitor plugged in later stays dark. The HWE 6.11

@@ -538,7 +538,7 @@ def test_the_marker_the_linux_writer_writes_passes_the_verdict_1302(tmp_path, wh
 
 # --- the planner ---------------------------------------------------------------------------------
 
-def _plan(tmp_path, mode, sha, boxes="stream-snv"):
+def _plan(tmp_path, mode, sha, boxes="resolume-snv"):
     return subprocess.run([str(FLEET), "--plan", "--run-id", "RUN1302", "--sha", sha, "--stage", str(tmp_path),
                            "--boxes", boxes, f"--{mode}"], capture_output=True, text=True, timeout=180, cwd=REPO)
 
@@ -564,14 +564,14 @@ def test_plan_fast_refuses_an_unreadable_abi_1302(tmp_path):
 def test_plan_full_records_the_abi_on_windows_and_imag_1302(tmp_path):
     sha = _head_sha()
     stats, out = _repo_pair().split(":")
-    r = _plan(tmp_path, "full", sha, "stream-snv,imag")
+    r = _plan(tmp_path, "full", sha, "resolume-snv,imag")
     assert r.returncode == 0, r.stderr
     assert f"Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt') @('{stats}', 'output_stats={out}')" in r.stdout
     assert f"genlock_write_markers \"$MARKER_DIR\" '{sha}' '{sha}' '' '{stats}:{out}'" in r.stdout
 
 
 def test_plan_full_with_an_unreadable_abi_removes_the_marker_1302(tmp_path):
-    r = _plan(tmp_path, "full", "deadbeefdeadbeef", "stream-snv,imag")
+    r = _plan(tmp_path, "full", "deadbeefdeadbeef", "resolume-snv,imag")
     assert r.returncode == 0, r.stderr
     assert "WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr
     assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" in r.stdout
@@ -600,16 +600,17 @@ def test_plan_reads_without_network_and_names_the_boxes_1302():
     assert 'want_win="$(fleet_boxes_swap_obs_dll "$boxes")"' in main
 
 
-@pytest.mark.parametrize("boxes", ["imag", "strih-snv", "strih-snv,imag"])
+@pytest.mark.parametrize("boxes", ["imag", "strih-snv", "strih-snv,imag", "stream-snv", "strih-snv,stream-snv"])
 def test_plan_fast_without_a_windows_box_never_refuses_an_unknown_abi_1302(tmp_path, boxes):
-    """--fast swaps an obs.dll only on stream-snv / resolume-snv; a Linux-only run deploys the full bundle."""
+    """--fast swaps an obs.dll only on resolume-snv (stream-snv is Linux since issue 1462); a Linux-only run
+    deploys the full bundle."""
     r = _plan(tmp_path, "fast", "deadbeefdeadbeef", boxes)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr
     assert "ERROR: cannot read" not in r.stderr
 
 
-@pytest.mark.parametrize("boxes", ["stream-snv", "resolume-snv", "strih-snv,stream-snv", "imag,resolume-snv"])
+@pytest.mark.parametrize("boxes", ["resolume-snv", "strih-snv,resolume-snv", "imag,resolume-snv"])
 def test_plan_fast_with_a_windows_box_refuses_an_unknown_abi_1302(tmp_path, boxes):
     r = _plan(tmp_path, "fast", "deadbeefdeadbeef", boxes)
     assert r.returncode == 3, r.stdout + r.stderr
@@ -705,8 +706,8 @@ def test_the_clear_before_the_copy_is_fail_closed_1302(tmp_path, state, rc):
         assert marker.exists()
 
 
-@pytest.mark.parametrize("boxes,want", [("stream-snv", "1"), ("resolume-snv", "1"), ("imag,resolume-snv", "1"),
-                                        ("strih-snv,stream-snv", "1"), ("strih-snv", "0"), ("imag", "0"),
+@pytest.mark.parametrize("boxes,want", [("stream-snv", "0"), ("resolume-snv", "1"), ("imag,resolume-snv", "1"),
+                                        ("strih-snv,stream-snv", "0"), ("strih-snv", "0"), ("imag", "0"),
                                         ("strih-snv,imag", "0"), ("", "0"), ("strih", "0")])
 def test_the_per_box_table_names_the_boxes_a_fast_deploy_swaps_obs_dll_on_1302(boxes, want):
     r = _bash('. "$1"; fleet_boxes_swap_obs_dll "$2"', SCRIPTS / "lib" / "genlock-fleet-boxes.sh", boxes)

@@ -7,6 +7,12 @@ paths:
   - "scripts/strih-boxes/*.env"
   - "tests/python/test_strih_https_1399.py"
   - "tests/python/test_shading_https_install_808.py"
+  - "scripts/lib/strih-interkom-public.sh"
+  - "scripts/janus_turn_rest_cfg.py"
+  - "tests/python/test_strih_interkom_public_1453.py"
+  - "intercom/hub/src/turn.rs"
+  - "intercom/hub/tests/turn_ice_1453.rs"
+  - "intercom/tests/e2e/ice.spec.js"
 ---
 
 # The strih box serves its OWN intercom + shading HTTPS front (issue 1399)
@@ -42,8 +48,10 @@ for that. Their default output is byte-identical, pinned by the issue-808 tests 
 
 **The sites** (`strih_https_sites`) have LOCAL upstreams.
 - interkom: `/` goes to the hub at `127.0.0.1:8790` (the box's intercom matrix `[http]` bind).
-  `location = /janus` goes to `<STRIH_IP>:8188`, because Janus binds `ws_ip` = the box IP and never
-  localhost.
+  `location = /janus` goes to the SAME hub (issue 1453): its `/janus` route relays the phone's Janus
+  WebSocket through the frame allowlist, and Janus's own WebSocket listens on `127.0.0.1:8188` only
+  (setup-strih step 14). Never proxy `/janus` to Janus directly again (the "The phone's Janus
+  WebSocket" section below).
 - shading: `/` goes to bkshading at `127.0.0.1:8770` (its `default_bind`).
 - Both ports are test-pinned to their sources. The SNV render keeps the live hot-fix routes.
 - The files are `/etc/nginx/sites-available/{interkom,shading}`, the hot-fix names, so the hand sites
@@ -90,7 +98,7 @@ for that. Their default output is byte-identical, pinned by the issue-808 tests 
 |---|---|
 | `(https-nginx)` | nginx active, :443 listening (`ss -ltnH`), every declared site equal to its render (same cert-pair choice) and enabled |
 | `(https-cert) <name>` | one per declared name: the cert nginx serves for that SNI on 127.0.0.1:443 (`openssl s_client -servername`) covers the name (exact or a one-label wildcard), is valid for more than 14 days (`-checkend`), and IS the `/etc/letsencrypt/live` one (its sha256 fingerprint = that of the live fullchain's first certificate; a mismatch = nginx was not reloaded); a hand copy is a NOTE until migrated |
-| `(https-upstream) interkom` | through nginx: the hub `/api/state` 200 and the `/janus` WebSocket upgrade 101 (read from curl's `-D -` status line: after a 101 curl holds the connection until `--max-time`) |
+| `(https-upstream) interkom` | through nginx: the hub `/api/state` 200 and the `/janus` WebSocket upgrade 101 (read from curl's `-D -` status line: after a 101 curl holds the connection until `--max-time`; the hub answers 101 only once it reached Janus), AND Janus's WebSocket `:8188` listening on loopback only (`ss -ltnH`: `127.*` / `[::1]`; the LAN IP, `0.0.0.0`, `[::]`, `*` or no listener FAIL, issue 1453) |
 | `(https-upstream) shading` | bkshading `/api/version` 200 |
 | `(https-renewal)` | `certbot.timer` enabled, the deploy hook equal to its render and executable, the ini present with mode 600 owner root (stat only) |
 
@@ -109,6 +117,167 @@ It is the issue-1399 comment that follows the LANE-RETURN of this slice. In shor
 3. Read the item 45 rows.
 4. Move `interkom-pp`'s DNS to 10.77.8.202.
 5. Remove dev1's now-unused `interkom` + `shading` sites once both boxes serve from their live certs.
+
+## Phones on MOBILE DATA: the outbound tunnel + TURN (issue 1453)
+
+Owner 18.10.2026: the cameramen on mobile data could not open `interkom-pp.newlevel.media` (public DNS
+answered the private venue address), and the intercom must be reachable from mobile data straight from
+the strih notebook, never through dev1. The venue uplink is mobile data behind CGNAT, so nothing at the
+venue can accept an inbound connection. Design issuecomment-6250479059, Approach 1:
+
+- **The fact `STRIH_HTTPS_PUBLIC`** (`yes` | `no`, the last key of the fact list): strih-snv + strih-pp
+  `yes`, stream-pp `no`. The loader refuses any other value, and `yes` without an intercom site.
+- **The page + the Janus WebSocket: `cloudflared-interkom.service`** (`scripts/lib/strih-interkom-public.sh`,
+  run by step 16i after `strih_https_install`, graded by item 45 after `strih_https_grade_report`, both
+  on the same line, so neither script grew):
+  - `cloudflared` from Cloudflare's own apt repo (`pkg.cloudflare.com/cloudflared any main`). The signing
+    key `cloudflare-public-v2.gpg` is downloaded and checked against `STRIH_PUBLIC_KEY_PIN` (its sha256,
+    read 18.10.2026) BEFORE it is trusted; a rotated key fails loud until the pin is moved on purpose.
+    Installed only when missing, `--no-upgrade`.
+  - The unit runs `cloudflared tunnel --no-autoupdate --metrics 127.0.0.1:20241 run --token-file
+    %d/tunnel.token` as a DynamicUser, `Type=simple`, `Restart=on-failure`, never giving up. NEVER
+    `Type=notify`: cloudflared sends READY only once it reaches Cloudflare, so with the venue uplink
+    down a notify unit stays "starting", a blocking start hangs setup, and multi-user.target (which
+    the kiosk session waits for) never finishes. Setup starts / restarts it with `--no-block`. The connector token (`/etc/cloudflared/interkom-tunnel.token`,
+    0600 root) reaches it as the systemd credential `tunnel.token`, so it is never in argv, in the unit or
+    in a log. `ConditionPathExists=` keeps a box without a token from failing the unit.
+  - The token is written by `strih_interkom_public_token_store` (one line on STDIN, base64/base64url,
+    20+ characters, compare-then-write, never printed), or from `CLOUDFLARE_TUNNEL_TOKEN` when the caller
+    exports it (piped into the same store). A missing token = ONE WARN; the rest of setup goes on.
+  - The unit is written only on a difference, enabled, started only with a token, restarted only when its
+    unit or token changed.
+  - The tunnel's public hostnames (the intercom names -> `https://127.0.0.1:443`, originServerName = the
+    first intercom name) live on the Cloudflare side, so the box needs only the token. nginx is unchanged:
+    the tunnel arrives at the same :443 site with the same SNI.
+- **The media: Cloudflare Realtime TURN.**
+  - The hub (`intercom/hub/src/turn.rs`) mints credentials from `/etc/intercom-hub/turn.toml`
+    (`key_id` + `key_api_token`, 0600 root): `GET /api/ice` for the PWA (ALWAYS 200: `turn` = on / off /
+    error, an empty list without TURN, because Chromium logs every 4xx/5xx as a console error), `GET
+    /api/turn-rest` for Janus (draft-uberti, turn/turns uris only; 404 with the reason without a key, 502
+    when the mint failed). Every mint sends `User-Agent: camera-box-intercom/1` (Cloudflare answers 403
+    without one, the supervisor's live finding) and asks a 24 h ttl. The hub warms the cache at start
+    and renews it just past the 2/3 point (`spawn_refresher`), so a request does not normally wait on
+    Cloudflare. A failed mint serves a not-yet-expired cached set (margin `min(60 s, ttl/10)`) and is
+    remembered for 15 s, so an outage costs one mint attempt per 15 s, not one per page load.
+  - The hub runs as the operator and cannot read the root 0600 file, so step 16i writes the drop-in
+    `intercom-hub.service.d/30-turn-credential.conf` (`LoadCredential=turn.toml:<file>`) ONLY while the
+    file exists (a credential of a missing file fails the hub start, the issue-1412 stream-pp incident),
+    and the hub prefers `$CREDENTIALS_DIRECTORY/turn.toml`. A running hub is never restarted: a changed
+    drop-in prints the `systemctl restart intercom-hub` the supervisor owes.
+  - Janus asks the hub per PeerConnection: `scripts/janus_turn_rest_cfg.py` writes ONE marker-delimited
+    block (`turn_rest_api = "http://127.0.0.1:8790/api/turn-rest"`, `turn_rest_api_method = "GET"`) into
+    the PACKAGE's `/etc/janus/janus.jcfg` `nat:` section. Every other line stays byte-identical, `--clear`
+    gives the package file back, and a hand-set `turn_rest_api` outside the block is a conflict (exit 2,
+    the file untouched; libconfig would refuse a duplicate). A changed jcfg restarts a running Janus
+    (step 14 restarts it on every run anyway).
+  - The PWA (`intercom/web/app.js` `fetchIceServers`) fetches `/api/ice` before `new Janus(...)`, bounded
+    by 6 s (longer than the hub's 5 s mint bound, so a cold cache still yields the relay), and passes
+    `iceServers` only for a non-empty `turn: "on"` list: janus.js reads `iceServers || default`, so an
+    empty list would drop even its default STUN server. A hung `/api/ice` with the service worker in
+    control still joins with a clean console (tested), so `sw.js` passes it through unchanged.
+  - A missing key = ONE WARN; the drop-in and the Janus block are then removed.
+- **A box with `STRIH_HTTPS_PUBLIC=no`** installs nothing, removes a leftover TURN drop-in / Janus block,
+  and names (never removes) a leftover tunnel unit; item 45 FAILs that unit while it is enabled or active
+  (it still publishes the box).
+- **Known limit of the conditional drop-in:** a key file removed by hand later fails the next hub start
+  (`LoadCredential=` of a missing file) until step 16i runs again; remove it only through step 16i.
+- **Item 45's two rows** (`strih_interkom_public_grade_rows`, NOTE on a `no` box):
+
+| Row | Grades |
+|---|---|
+| `(https-tunnel)` | the token file (owner 600), the unit = its render, enabled + active, cloudflared's own `http://127.0.0.1:20241/ready` = 200 with `readyConnections` >= 1 |
+| `(https-turn)` | the key file (owner 600), the hub drop-in = its render, janus.jcfg's managed block (`--check`), the hub's `/api/turn-rest` = 200 carrying a `turn:` / `turns:` uri (a 404 names the hub's reason) |
+
+- **Access control: OPEN, but no plain-RTP join (ROZHODNUTÉ issuecomment-6251103415, owner 18.10.2026:
+  "normalne verejne nech to je nevadi mi ze sa tam niekto pripoji").** No Cloudflare Access, no room
+  pin, no link token: anyone with the URL may join, listen and talk. The UDP-reflection vector is
+  closed by "The phone's Janus WebSocket" below (the hub's allowlist relay + Janus on loopback), and
+  must be live before the public DNS switch.
+
+**The supervisor live runbook (issue 1453, after the merge):**
+1. FIRST deploy the hub + setup-strih with the `/janus` relay (the section below) and read its item-45 row. Then Cloudflare: create one tunnel per strih box, route its public hostnames (the box's intercom names ->
+   `https://127.0.0.1:443`, originServerName = the first name, HTTP/1.1 upgrade allowed for `/janus`),
+   and a Realtime TURN key.
+2. Place the token: pipe it from the secret store over ssh stdin into
+   `bash -c '. scripts/lib/strih-box-facts.sh; . scripts/lib/strih-interkom-public.sh; strih_interkom_public_token_store'`
+   as root (or export `CLOUDFLARE_TUNNEL_TOKEN` for one setup run). Never argv, never chat.
+3. Place `/etc/intercom-hub/turn.toml` (0600 root) the same way.
+4. Run step 16i (`setup-strih.sh --box <box>` or the next genlock deploy), then `systemctl restart
+   intercom-hub`, and read item 45's `(https-tunnel)` + `(https-turn)` rows.
+5. Public DNS for the intercom names = the box's tunnel CNAME (proxied). NO venue-router setting, ever
+   (owner 18.10.2026: "strih pc ma fungovat hocikde ma to byt plug and play zariadenie nechcem nic na
+   routry nastavovat"): every phone loads the page and the `/janus` socket through the tunnel; a phone on
+   the venue LAN still gets its AUDIO directly (Janus's LAN host candidate wins ICE before TURN). The
+   phone intercom therefore needs the venue's internet for the page/signalling; the cambox VBAN legs,
+   the cutters and the vestibule stay LAN-only.
+   **Before the switch, list the zone's Redirect Rules / Page Rules for the intercom names**: the
+   VDO.Ninja era left two dynamic redirects (`interkom*` -> vdo.ninja) that run BEFORE the tunnel, so a
+   switched name still bounced to VDO.Ninja (18.10.2026). They were DISABLED (never deleted, backup in
+   dev1 `~/.config/camera-box/interkom-public/redirect-rules-backup.json`); the DNS rollback lives next
+   to it in `dns-rollback.json`.
+6. Acceptance: a phone on mobile data joins and talks both ways; a phone on the venue WiFi joins and its
+   audio pair is the direct LAN pair (not relay). Pre-check from dev1 without a phone: Playwright
+   with an init script that forces `iceTransportPolicy: 'relay'` on every `RTCPeerConnection`, open the
+   name, read `bridge.webrtcStuff.pc.getStats()` (the page's script-level `bridge`, not `window.bridge`):
+   the nominated pair must be `relay` local + inbound audio packets rising (18.10.2026: all three names
+   relay-connected, 698-1023 packets, <= 2 lost).
+
+## The phone's Janus WebSocket goes through the hub's allowlist relay (issue 1453)
+
+The audiobridge room keeps `allow_rtp_participants = true` for the hub's own leg (`janus_rtp`, over
+Janus's loopback HTTP API), and Janus checks that per ROOM, never per transport
+(`janus_audiobridge.c`: a `join` carrying `rtp` is refused only when the room's `allow_plainrtp` is
+off). So any client of Janus's WebSocket could join with `"rtp": {"ip", "port"}` and make Janus stream
+the room to a host it names. The same plugin, with no `admin_key` configured, also lets any client
+`create` a room of its own with `allow_rtp_participants`, `rtp_forward` (behind the room secret),
+`play_file` and record to a path, and the box's Janus loads other plugins too.
+
+- **The relay (`intercom/hub/src/janus_relay.rs`, `GET /janus` on the hub).** nginx's `location =
+  /janus` points at the hub (127.0.0.1:8790). The hub opens its own WebSocket to Janus first
+  (`[janus].ws_url`, default `ws://127.0.0.1:8188/janus`, subprotocol `janus-protocol`, 5 s bound) and
+  answers the phone's upgrade only then: a 101 means Janus is reachable, 502 = it is not, 503 = the hub
+  has no Janus room. Janus's frames go to the phone unchanged.
+- **The allowlist (`intercom/hub/src/janus_ws_guard.rs`, pure).** A client text frame is forwarded as
+  the SAME string only when it is what janus.js 1.1.2 + the page send: a janus request in `create
+  attach message trickle keepalive detach destroy hangup info`; `attach` only to
+  `janus.plugin.audiobridge`; a `message` whose body is `join` (keys `request room display muted`, the
+  hub's own room only) or `configure` (`request muted display`), `display` a string, `muted` a bool.
+  Anything else gets a Janus-shaped `{"janus":"error","transaction":..,"session_id":..,"error":{"code":
+  403|454|455,"reason":"interkom: ..."}}` and never reaches Janus. 8 refusals or a binary frame close
+  the connection. The log names the phone by `CF-Connecting-IP` / `X-Forwarded-For`, cut and quoted.
+- **Janus's WebSocket listens on loopback only** (`strih_janus_ws_jcfg_text`, `ws_ip = "127.0.0.1"`
+  whatever it is passed), so a LAN client cannot go around the relay. The dev1 renderer's `/janus`
+  points at `strih.lan:8790` too (the dev1 front is retired for these names).
+- **The contract between the page and the allowlist:** `intercom/tests/fixtures/janus-ws-pwa-frames.json`
+  holds the raw text of one frame of every shape the page sends (captured from the phone suite; the
+  keepalive / hangup / detach / info samples are built from janus.js's own request literals). The
+  hub's `janus_relay_1453.rs` forwards each of them byte-identically through the real relay, and
+  `phone.spec.js` FAILs any test in which the page sent a frame of another shape (the fake Janus
+  reports every frame through `window.__janusFrameSent`). A new frame in `app.js` therefore needs a
+  real sample and, if the guard refuses it, a guard change.
+- **Deploy order (supervisor).** setup-strih installs the hub binary only when none exists, so the
+  relay arrives with the hub's own deploy: (1) deploy the new hub binary and restart intercom-hub (its
+  `/janus` answers 502 until Janus moves, but nginx still proxies `/janus` to Janus directly, so the
+  phones keep working); (2) run setup-strih (step 14 rewrites the WS jcfg and restarts the running
+  Janus onto loopback, step 16i rewrites the interkom site and reloads nginx; between the two the
+  phones' `/janus` is down for the run's duration); (3) read item 45's `(https-upstream) interkom`
+  row; (4) phones on the venue WiFi reconnect by themselves (the page retries).
+- **A hub restart now drops every phone's Janus session** (every hub deploy, and a mix-thread panic,
+  which exits the daemon): the relay's socket to Janus closes, Janus destroys the sessions it carried,
+  and each page reconnects in 1-15 s. Before issue 1453 the phones' sessions survived a hub restart.
+- **The relay is capped:** at most `MAX_CONCURRENT_RELAYS` (64) at once; a phone over the cap gets 503
+  before the hub opens anything towards Janus (the path is public, and each relay holds two sockets in
+  the audio daemon). Frames are capped at 256 KiB (message and frame size).
+- **Tests:** `intercom/hub/tests/janus_ws_guard_1453.rs` (the pure policy; runs in a plain-rustc
+  replica with serde_json rlibs built from the registry), `intercom/hub/tests/janus_relay_1453.rs` (the
+  real router against a fake Janus WebSocket, CI first compile), the jcfg / site / item-45 rows in
+  `tests/strih_provision_pure_functions.rs`, `tests/strih_box_facts_1361.rs` (golden),
+  `tests/python/test_strih_https_1399.py`, `tests/python/test_shading_https_install_808.py`.
+
+Tests: `tests/python/test_strih_interkom_public_1453.py` (the fakes on PATH, the real python3 + sha256sum;
+a 12-mutant pass over the lib + the jcfg tool kills all), `intercom/hub/tests/turn_ice_1453.rs` (a fake
+Cloudflare that answers 403 without a User-Agent), `intercom/tests/e2e/ice.spec.js` (the page's
+RTCPeerConnection really gets the servers; off / garbage / a hung `/api/ice` join with the default).
 
 ## Tests (Tier-0)
 

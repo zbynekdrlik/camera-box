@@ -10,12 +10,14 @@
 # setup-strih step 16d like every session app (scripts/lib/strih-session-apps.sh), on the STREAM role only
 # (obs_box_role_apply). This lib holds what is specific to it:
 #
-#   * STRIH_STREAM_MONITOR_PACKAGES -- ffmpeg (the RTMP audio decode) + alsa-utils (aplay), added to step
-#     16d's package install when the entry is in the list (strih_session_apps_packages);
+#   * STRIH_STREAM_MONITOR_PACKAGES -- vlc (the player, issue 1456: the same as stream-snv, its volume slider
+#     the operator's control) + alsa-utils (amixer: the card at 0 dB, the speaker muted) + the locked
+#     operator PipeWire's tools (issue 1465 item 3), added to step 16d's package install when the entry is
+#     in the list (strih_session_apps_packages);
 #   * strih_stream_monitor_grade_rows -- verify-strih's three extra rows of the entry, printed by
 #     strih_session_apps_grade_rows (STRIH_STREAM_MONITOR_ROWS of them):
-#       (stream-monitor-pass) the player's own --check-state: a pass within 30 s, waiting or playing, and
-#                             the headphone PCM free or held by its aplay -- PipeWire on it FAILs;
+#       (stream-monitor-pass) the player's own --check-state: a pass within 30 s, waiting / playing /
+#                             paused, and the headphone PCM free or held by its VLC -- PipeWire on it FAILs;
 #       (stream-monitor-key)  the stream OBS profile's service.json = rtmp_custom to the local restreamer
 #                             with the box name as the key (setup step 3 writes it), and the short
 #                             hostname (the unit's %l) is that same name -- else the monitor plays a key
@@ -31,7 +33,9 @@ STRIH_STREAM_MONITOR_UNIT=strih-stream-monitor.service
 # The player's state file, under the user's runtime dir (the unit passes --state-file %t/<this>).
 STRIH_STREAM_MONITOR_STATE_FILE=strih-stream-monitor.json
 # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh (strih_session_apps_packages)
-STRIH_STREAM_MONITOR_PACKAGES=(ffmpeg alsa-utils)
+# issue 1465 item 3: the pulse output needs pipewire-pulse (VLC's and Chrome's server), and verify reads the
+# locked session back with pw-dump / pw-metadata (pipewire-bin) and wireplumber's own package.
+STRIH_STREAM_MONITOR_PACKAGES=(vlc alsa-utils pipewire-pulse pipewire-bin wireplumber)
 # How many rows strih_stream_monitor_grade_rows prints.
 # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh
 STRIH_STREAM_MONITOR_ROWS=3
@@ -68,7 +72,8 @@ strih_stream_monitor_key_row() {
 # strih_stream_monitor_obs_row REPO -> the (stream-monitor-obs) row. Always rc 0.
 strih_stream_monitor_obs_row() {
   local repo="$1" name out rc=0
-  name="${OBS_BOX_STREAM_AUDIO_INPUT:-Zvuk z mixu}"
+  # issue 1462: the box names its program-audio input (stream-pp `Zvuk z mixu`, stream-snv `mbc`)
+  name="$(strih_lx_program_audio_input 2>/dev/null)" || name="the program-audio input"
   out="$(timeout 20 python3 "${STRIH_STREAM_MONITOR_SCENES:-${repo}/scripts/strih_scenes.py}" --audio-monitor-type \
     --host "${OBS_WS_HOST:-127.0.0.1}" --manifest "${STRIH_STREAM_MONITOR_MANIFEST:-/opt/camera-box/strih-seed.json}" 2>&1)" || rc=$?
   if [ "$rc" = 2 ] || [ "$rc" = 124 ]; then

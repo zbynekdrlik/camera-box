@@ -1,0 +1,14 @@
+table inet vban_dante70 {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname "enx00e04c680185" ip saddr 10.77.7.232 udp dport 6980 counter packets 90309 bytes 134560410 accept
+		iifname "enx00e04c680185" icmp type echo-request counter packets 163 bytes 13620 accept
+		iifname "enx00e04c680185" counter packets 1165 bytes 130714 drop
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "enx00e04c680185" icmp type echo-reply counter packets 3 bytes 180 accept
+		oifname "enx00e04c680185" counter packets 10 bytes 4391 drop
+	}
+}

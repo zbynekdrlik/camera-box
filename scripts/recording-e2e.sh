@@ -125,6 +125,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # [8/8] E2E_EXECUTE_VERDICT=1 path — #701 proved ssh/scp works on this rig for these boxes).
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$HERE/lib/win-ssh-exec.sh"
+# issue 1462: the stream box's platform (its obs-fleet class) + the ONE transport to it -- bash over
+# plain ssh on the Linux stream-snv, the unchanged PowerShell through win_ssh_run on a Windows box.
+# shellcheck source=scripts/lib/stream-box.sh
+. "$HERE/lib/stream-box.sh"
+# issue 1462: the [8/8b] file moves to/from the Linux stream box around its on-box stream decode.
+# shellcheck source=scripts/lib/stream-lx-verdict.sh
+. "$HERE/lib/stream-lx-verdict.sh"
 # #977/#978/#979: obs64/AHK Windows-session-visibility probe + pure message parser (issue 958) --
 # shared with the #979 dev1 watchdog, never a second detector for the same signal.
 # shellcheck source=scripts/lib/obs-session-visibility.sh
@@ -364,6 +371,9 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # issue 1421: the stream program must carry the measurement signal alone (preflight + in-run watch).
 # shellcheck source=scripts/lib/e2e-program-audio.sh
 . "$HERE/lib/e2e-program-audio.sh"
+# issue 1439: the BLOCKING program-audio continuity gate (a lost or concealed slot in the window = RED).
+# shellcheck source=scripts/lib/program-audio-continuity.sh
+. "$HERE/lib/program-audio-continuity.sh"
 # #882/#1232: restart-and-settle for the [1/8] imag render-health sweep -- the leading windows
 # (right after a fresh OBS start) can measure a real, transient warm-up dip that is not a
 # regression; a settle-adaptive PHASE (bounded by a wall budget) absorbs however many leading
@@ -896,6 +906,9 @@ if [ -n "$_svg_strih_msg" ]; then
   exit 1
 fi
 echo "    ok: strih obs64/AHK visible on the console (SessionId=1, window present)"
+if [ "$(stream_box_platform "$STREAM")" = linux ]; then  # issue 1462: the strih-obs unit check
+  _svg_stream_out=""; stream_box_visibility_gate_linux "$STREAM" "$STREAM_USER" "$STREAM_PW" "$SVG_SSH_TIMEOUT" "$HERE" || exit 1
+else
 _svg_stream_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
   "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(obs_session_visibility_probe_ps 0)" 2>/dev/null || true)"
 _svg_stream_msg="$(obs_session_visibility_message "$_svg_stream_out" 0)"
@@ -905,6 +918,7 @@ if [ -n "$_svg_stream_msg" ]; then
   exit 1
 fi
 echo "    ok: stream obs64 visible on the console (SessionId=1, window present)"
+fi
 # #1295: report-only -- name any DEAD obs64 handle the probe ignored (a stale zombie object, NOT a
 # live instance: HasExited/0-threads/~45 KB, the 2026-09-12 RESOLUME-SNV pid-58560 case) so an
 # operator can reap it; this NEVER gates the preflight above (a zombie is not an invisibility).
@@ -1129,6 +1143,13 @@ STRIH_LINUX_GATE_ARG=""
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
   STRIH_LINUX_GATE_ARG="1"
 fi
+# issue 1462: the same Linux grading for the stream box once its obs-fleet class is linux-genlock
+# (stream-snv since 22.10.2026) -- `--linux stream`, so its Windows-only facets read SKIPPED instead
+# of UNKNOWN-refusing the whole E2E; a Windows stream box leaves the flag empty (byte-identical argv).
+STREAM_LINUX_GATE_ARG=""
+if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+  STREAM_LINUX_GATE_ARG="1"
+fi
 # issue 1357: the Windows OBS-box baseline (power plan, sleep, hibernate, USB selective suspend, WER)
 # of the obs-fleet `win-baseline` boxes (stream, resolume -- resolume SKIPPED while away), gathered
 # ONCE here and handed to the gate below as REPORT-ONLY rows that never change its verdict. The
@@ -1152,6 +1173,7 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     --win-state "stream=$VERSION_STREAM_STATE" \
     --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
     ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
+    ${STREAM_LINUX_GATE_ARG:+--linux stream} \
     ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 else
 "$HERE/version-integrity-gate.sh" \
@@ -1163,6 +1185,7 @@ else
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
   ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"} \
   ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
+  ${STREAM_LINUX_GATE_ARG:+--linux stream} \
   ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 fi
 
@@ -1207,6 +1230,12 @@ DV_WIN_NODES="strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newl
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX strih=${WIN_SSH_USER:-newlevel}@$STRIH"
   DV_WIN_NODES="stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+fi
+# issue 1462: the Linux stream box (stream-snv) answers the bare `dantesync --version` too -- the same
+# move to the --linux arm, so it is never in both lists (the --win read would be UNKNOWN there).
+if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+  DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+  DV_WIN_NODES="${DV_WIN_NODES/"stream=${WIN_SSH_USER:-newlevel}@$STREAM"/}"
 fi
 ${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-version-gate.sh" \
   --linux "$DANTESYNC_VERSION_LINUX" \
@@ -3325,10 +3354,11 @@ echo "[4b2/8] #748 audio-presence preflight — the mbc measurement chain MUST b
 # The A/V-sync leg reads the mbc measurement audio (speaker -> church PA mic -> mbc -> Dante ->
 # stream OBS); a silent chain makes every A/V number meaningless. Make a SHORT probe recording on
 # the stream box (the mbc audio rides the stream program recording), run ffmpeg volumedetect on the
-# box via win_ssh_run, and FAIL LOUD if the track is silent — so a dead measurement chain never
-# again burns a full cycle reported only as a quiet av_sync "unknown, candidates: 0" (#748). Every
-# knob is env-overridable like the sibling gates; a short probe guarding the whole run is the
-# sanctioned exception to the one-full-test rule (a preflight, not a partial measurement).
+# box (stream_box_exec, issue 1462: bash on Linux, PowerShell on Windows), and FAIL LOUD if the track
+# is silent — so a dead measurement chain never again burns a full cycle reported only as a quiet
+# av_sync "unknown, candidates: 0" (#748). Every knob is env-overridable like the sibling gates; a
+# short probe guarding the whole run is the sanctioned exception to the one-full-test rule (a
+# preflight, not a partial measurement).
 AUDIO_PREFLIGHT_ENABLE="${AUDIO_PREFLIGHT_ENABLE:-1}"
 AUDIO_PREFLIGHT_THRESHOLD_DB="${AUDIO_PREFLIGHT_THRESHOLD_DB:--60}"
 AUDIO_PREFLIGHT_PROBE_SECS="${AUDIO_PREFLIGHT_PROBE_SECS:-15}"
@@ -3359,8 +3389,11 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
     # run 29281776692). Route through `bash -c`, re-sourcing the lib inside that subshell, so bash
     # (not execvp) resolves win_ssh_run as a function -- same fix as every other sibling win_ssh_run
     # call that needs an outer timeout bound.
-    _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-      "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_volumedetect_ps "$_ap_path")" 2>&1 || true)"
+    # issue 1462: stream_box_exec picks the platform's text (bash over plain ssh on the Linux
+    # stream-snv, the unchanged PowerShell through win_ssh_run on a Windows box), both libs re-sourced.
+    _ap_out="$(timeout "$AUDIO_PREFLIGHT_SSH_TIMEOUT" bash -c '. "$1"; . "$2"; stream_box_exec "$3" "$4" "$5" "$6" "$7"' _ \
+      "$HERE/lib/win-ssh-exec.sh" "$HERE/lib/stream-box.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
+      "$(audio_preflight_volumedetect_ps "$_ap_path")" "$(audio_preflight_volumedetect_sh "$_ap_path")" 2>&1 || true)"
     _ap_db="$(audio_preflight_parse_max_db "$_ap_out" || true)"
     if [ -n "$_ap_db" ]; then
       break
@@ -3370,7 +3403,8 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
       sleep "$AUDIO_PREFLIGHT_READ_RETRY_SLEEP"
     fi
   done
-  win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_path")" >/dev/null 2>&1 || true
+  stream_box_exec "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_path")" \
+    "$(audio_preflight_delete_sh "$_ap_path")" >/dev/null 2>&1 || true
   if [ -z "$_ap_db" ]; then
     echo "ERROR: $(audio_preflight_unreadable_message)" >&2
     echo "       raw volumedetect output (last attempt): $_ap_out" >&2
@@ -3417,6 +3451,7 @@ elif [ ! -x "$_md_probe_bin" ]; then
 else
   mkdir -p "$OUTDIR"
   _md_wav_win='C:\camera-box\mbc-decodability.wav'
+  _md_wav_lx="${AUDIO_DECODABILITY_WAV_LX:-camera-box-mbc-decodability.wav}"  # issue 1462: Linux box, in the ssh user's home
   _md_wav_local="$OUTDIR/mbc-decodability-${RUN_ID}.wav"
   rm -f "$_md_wav_local"
   # Short throwaway probe recording on stream (an orphan from an abort self-heals on the next run's
@@ -3431,12 +3466,20 @@ else
   # Extract the mbc a:0 track to a WAV on the box, then pull it back. Bounded retry absorbs the mp4
   # moov-atom finalize race (same transient the [4b2/8] read hits) without masking a real failure.
   for _md_attempt in $(seq 1 "$AUDIO_DECODABILITY_READ_ATTEMPTS"); do
-    # `timeout` execvp()s directly and cannot run the win_ssh_run shell FUNCTION — route through
-    # `bash -c` re-sourcing the lib, the SAME fix every other timeout-bounded win_ssh_run uses.
-    timeout "$AUDIO_DECODABILITY_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-      "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
-      "$(marker_decodability_extract_wav_ps "$_md_rec" "$_md_wav_win" 0)" >/dev/null 2>&1 || true
-    win_ssh_download "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_md_wav_win" "$_md_wav_local" >/dev/null 2>&1 || true
+    # `timeout` execvp()s directly and cannot run a shell FUNCTION — route through `bash -c`
+    # re-sourcing the libs, the SAME fix every other timeout-bounded win_ssh_run uses. issue 1462:
+    # stream_box_exec / stream_box_download pick the platform (bash + scp on the Linux stream-snv, the
+    # unchanged PowerShell + win_ssh_download on a Windows box).
+    _md_x_rc=0
+    timeout "$AUDIO_DECODABILITY_SSH_TIMEOUT" bash -c '. "$1"; . "$2"; stream_box_exec "$3" "$4" "$5" "$6" "$7"' _ \
+      "$HERE/lib/win-ssh-exec.sh" "$HERE/lib/stream-box.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
+      "$(marker_decodability_extract_wav_ps "$_md_rec" "$_md_wav_win" 0)" \
+      "$(marker_decodability_extract_wav_sh "$_md_rec" "$_md_wav_lx" 0)" >/dev/null 2>&1 || _md_x_rc=$?
+    # issue 1462: on a Linux box only a WAV this attempt wrote is pulled back (the rc is ffmpeg's; an ssh
+    # that never ran the extract leaves an older WAV in place); a Windows PowerShell rc carries no such signal.
+    if [ "$_md_x_rc" = 0 ] || [ "$(stream_box_platform "$STREAM")" != linux ]; then
+      stream_box_download "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_md_wav_win" "$_md_wav_lx" "$_md_wav_local" >/dev/null 2>&1 || true
+    fi
     if [ -s "$_md_wav_local" ]; then
       break
     fi
@@ -3445,7 +3488,8 @@ else
       sleep "$AUDIO_DECODABILITY_READ_RETRY_SLEEP"
     fi
   done
-  win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(marker_decodability_delete_ps "$_md_wav_win")" >/dev/null 2>&1 || true
+  stream_box_exec "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(marker_decodability_delete_ps "$_md_wav_win")" \
+    "$(marker_decodability_delete_sh "$_md_wav_lx")" >/dev/null 2>&1 || true
   if [ ! -s "$_md_wav_local" ]; then
     echo "ERROR: $(marker_decodability_probe_unreadable_message 'mbc WAV never arrived on dev1')" >&2
     exit 1
@@ -4533,6 +4577,7 @@ fi
 # Placed here so the delta spans EXACTLY the recording window -- the [4i/8align] + [4j/8settle]
 # transients are already over (design Prístup 3 rejection).
 genlock_audit_snapshot_capture before "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" || true
+program_audio_continuity_mark start "$OUTDIR" "$STREAM" || true   # issue 1439: program-audio window START (stream OBS log line count)
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
 # raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
@@ -4811,6 +4856,7 @@ echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON ima
 # pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY
 # the recording. Report-only + fail-open (in this [7/8] `set +e` region + a trailing `|| true`).
 genlock_audit_snapshot_capture after "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" || true
+program_audio_continuity_mark stop "$OUTDIR" "$STREAM" || true   # issue 1439: program-audio window END (graded after the merge)
 
 # #1124 item 3 — POST-record stomp re-check (profile mode only, report-only). Runs HERE, right
 # after StopRecord while the measurement pins/hold are STILL in force (cleanup()'s teardown
@@ -5412,10 +5458,16 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # stream` then decodes it ON-BOX (alongside the burns) and carries the result through the small
   # partial JSON to the dev1 merge — never the recording itself.
   AV_MARKER_WIN="${AV_MARKER_WIN:-$OUT_DIR_WIN\\av-markers-${RUN_ID}.csv}"
+  # issue 1462: the Linux stream box's decode reads its pushed inputs from this dir (the box user's
+  # home), and on that box the pushes always run for real -- like its decode, never a plan.
+  STREAM_LX_REMOTE_OUT_DIR="${STREAM_LX_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}"
+  STREAM_LX_REMOTE_BIN="${STREAM_LX_REMOTE_BIN:-/home/newlevel/recording-verdict}"
   _av_marker_args=""
   if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
     echo "    --- [8/8b-pre] PUSH the cam2 A/V-sync marker log to the stream box ---"
-    if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      AV_MARKER_WIN="$(stream_lx_push_file "$STREAM_USER" "$STREAM_PW" "$STREAM" "$MARKER_CSV" "$STREAM_LX_REMOTE_OUT_DIR" "av-markers-${RUN_ID}.csv")" || exit 1
+    elif [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
       # #703 (live-CI-run finding, 2026-07-11): this push used to be PRINT-ONLY (the plan text
       # below) — never a problem before, because [8/8] never actually EXECUTED anything, so the
       # stream extract's --av-marker-log arg was never really READ. The FIRST real EXECUTE-mode
@@ -5439,7 +5491,9 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   _switch_schedule_args=""
   if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then
     echo "    --- [8/8b-pre] PUSH the #312 switch schedule to the stream box (#707 event-forensics) ---"
-    if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      SWITCH_SCHEDULE_WIN="$(stream_lx_push_file "$STREAM_USER" "$STREAM_PW" "$STREAM" "$SWITCH_SCHEDULE_JSON" "$STREAM_LX_REMOTE_OUT_DIR" "switch-schedule-${RUN_ID}.json")" || exit 1
+    elif [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
       echo "      win_ssh_upload $SWITCH_SCHEDULE_JSON -> stream:$SWITCH_SCHEDULE_WIN"
       win_ssh_upload "$STREAM_USER" "$STREAM_PW" "$STREAM" "$SWITCH_SCHEDULE_JSON" "$SWITCH_SCHEDULE_WIN"
     else
@@ -5448,13 +5502,32 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     _switch_schedule_args="--switch-schedule $SWITCH_SCHEDULE_WIN"
   fi
 
-  echo "    --- [8/8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
+  echo "    --- [8/8b] extract the STREAM partial ON the stream box ($(stream_access_label "$STREAM")), in place ---"
   # The stream recording carries all three burns; --extract-partial stream decodes it IN PLACE on
   # the stream box. It is passed ONLY its own --stream recording — NEVER the strih recording (the
   # strih recording is decoded on the strih box above), so no box-to-box copy is ever needed.
   # #703: same function-wrapped backgrounding as run_strih_extract above — launched right after
   # strih (so BOTH decodes run concurrently in EXECUTE mode), foreground/unchanged otherwise.
   run_stream_extract() {
+    # issue 1462: the Linux stream box (stream-snv) decodes over plain ssh/scp through
+    # recording-verdict-on-stream-snv.sh, always for real (the strih-snv shape); its partial carries the
+    # QR + audio-marker A/V term exactly as on Windows, and a failure here fails the stream leg.
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      STREAM_LX_BOX="$STREAM" STREAM_USER="$STREAM_USER" STREAM_PW="$STREAM_PW" "$HERE/recording-verdict-on-stream-snv.sh" \
+        --verdict-bin "$VERDICT_BIN" --remote-bin "$STREAM_LX_REMOTE_BIN" \
+        --out-dir "$STREAM_LX_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
+        --stream-rec "${STREAM_HOST_PATH:-}" \
+        -- --extract-partial stream --stream "${STREAM_HOST_PATH:-}" --capture-fps "$STREAM_CAPTURE_FPS" \
+           --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
+           --cam2-run-id "$RUN_ID" \
+           --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+           --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+           $_av_marker_args \
+           $_switch_schedule_args \
+           ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"} \
+           $CG --out "$STREAM_LX_REMOTE_OUT_DIR/stream-partial-${RUN_ID}.json"
+      return
+    fi
     "$HERE/recording-verdict-on-stream.sh" \
       --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --stream-rec "$STREAM_REC_WIN" \
       "${EXEC_STREAM_ARGS[@]}" \
@@ -5477,9 +5550,13 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   else
     run_stream_extract
   fi
+  if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+    stream_lx_partial_pullback_note "$STREAM_PARTIAL" "$STREAM_PIXELS"
+  else
   echo "    pull back to dev1: $STREAM_PARTIAL  AND the #186 pixel-proof dir $STREAM_PIXELS"
   echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"
   echo "       win-stream-snv FileDownload $STREAM_PIXELS_WIN -> $STREAM_PIXELS  [absent on a clean run])"
+  fi
 
   # Issue 1302: CG_CHAIN=1 only — decode the cg OBS recording IN PLACE on RESOLUME-SNV, in the
   # background, concurrently with the strih/stream (and imag) extracts; the recording is never
@@ -5659,6 +5736,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "RUN-INTEGRITY: $BURN_UNIT_INTEGRITY_MSG" >&2
       [ "$GATE" -eq 0 ] && GATE=1
     fi
+    # issue 1439: a program-audio loss (concealed included) or an unprovable window is a blocking FAIL.
+    if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
     # #827: merge the fleet-preflight exclusion list into the verdict JSON so a run that excluded
     # boxes (ALL_CAMBOX only — PREFLIGHT_EXCLUDED_CAMS is otherwise unset/empty, and the merge
     # below is then a harmless no-op `excluded_cams: []`) can NEVER be read back as "full-fleet
@@ -5918,6 +5997,9 @@ if [ -s "$REPORT_JSON" ]; then
     echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
   fi
 fi
+
+# issue 1439: the program-audio continuity gate, the LEGACY decode path's twin of the execute branch's.
+if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
 
 # #758 item 3 — the in-run freeze watch's own verdict (same check as the E2E_EXECUTE_VERDICT=1
 # branch's own early exit above; this is the LEGACY/plan-print path's equivalent tail).

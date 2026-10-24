@@ -617,10 +617,11 @@ fn strih_lx_preparation_failures_never_touch_the_box_1317() {
 }
 
 /// Every requested box's artifact is resolved BEFORE the production strih is changed: a default
-/// `strih-snv,stream` run with no Windows build at the SHA fails without touching strih-snv.
+/// strih-snv + Windows-box run with no Windows build at the SHA fails without touching strih-snv
+/// (the Windows box is resolume-snv: stream-snv runs the Linux stream role since issue 1462).
 #[test]
 fn strih_lx_is_not_changed_when_another_box_cannot_be_resolved_1317() {
-    let r = run_exec_boxes("strih-snv,stream", &[("STUB_NO_WIN_RUN", "1")]);
+    let r = run_exec_boxes("strih-snv,resolume-snv", &[("STUB_NO_WIN_RUN", "1")]);
     assert_eq!(r.code, 3, "err={}", r.err);
     assert!(
         !r.calls.contains("ssh ") && !r.calls.contains("rsync "),
@@ -910,13 +911,13 @@ fn strih_lx_readback_holds_stability_for_the_settle_time_1317() {
 /// verified, so a later imag failure never hides the strih deploy that happened.
 #[test]
 fn windows_programs_follow_the_verified_strih_and_strih_is_logged_at_once_1317() {
-    let r = run_exec_boxes("strih-snv,stream", &[]);
+    let r = run_exec_boxes("strih-snv,resolume-snv", &[]);
     assert_eq!(r.code, 0, "err={}\nout={}", r.err, r.out);
     let verified = r.out.find("VERIFIED").expect("strih-snv VERIFIED line");
     let program = r
         .out
         .find("$ErrorActionPreference = 'Stop'")
-        .expect("the stream program");
+        .expect("the resolume-snv program");
     assert!(verified < program, "{}", r.out);
     let log = r.fleet_log();
     let strih_line = log
@@ -925,7 +926,7 @@ fn windows_programs_follow_the_verified_strih_and_strih_is_logged_at_once_1317()
         .unwrap_or_else(|| panic!("a strih-snv fleet-log line:\n{log}"));
     assert!(strih_line.contains(SHA), "{log}");
     assert!(
-        log.lines().any(|l| l.contains("\tstream-snv\t")),
+        log.lines().any(|l| l.contains("\tresolume-snv\t")),
         "the rest of the fleet is logged too:\n{log}"
     );
 

@@ -15,6 +15,10 @@
 #   - a :foreach over /interface ethernet            -> per-port comment(role)/running/rate/duplex +
 #                                                       cumulative tx-drop-queue1 / tx-drop / rx-fcs
 #   - (--check only, per flagged port) print stats x2 -> a live drop-RATE probe (the microburst signal)
+#   - issue 1439: ONE more call per switch, the five `print detail` tables of
+#     scripts/netcfg_bridge_qos.py's GATHER_CMD (bridge, bridge vlan, bridge port, switch qos
+#     profile, switch rule) -> VLAN filtering + MVRP, per-port VLAN membership, pvid, frame-types,
+#     QoS profiles, switch rules
 #
 # Modes:
 #   scripts/netcfg-audit.sh --check      # DEFAULT: gather live -> diff vs baseline -> drift report;
@@ -37,7 +41,7 @@ case "${1:-}" in
   --check | "") MODE="check" ;;
   --capture) MODE="capture" ;;
   --json) MODE="json" ;;
-  --help | -h) sed -n '4,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --help | -h) sed -n '4,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "netcfg-audit: unknown arg '$1' (try --help)" >&2; exit 2 ;;
 esac
 
@@ -65,6 +69,12 @@ NETCFG_DROP_THRESHOLD="${NETCFG_DROP_THRESHOLD:-1}"
 NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh1_video|ether2}"
 
 log() { printf '%s [netcfg-audit] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
+
+# issue 1439: the bridge VLAN / bridge port / QoS profile / switch rule facet is parsed + diffed by
+# the pure scripts/netcfg_bridge_qos.py; the gather writes each switch's raw read into NC_RAW_DIR.
+NC_BQ="$HERE/netcfg_bridge_qos.py"
+NC_RAW_DIR=""
+_NC_BRIDGE_QOS_CMD="$(python3 "$NC_BQ" gather-cmd)" || { log "cannot read the bridge/QoS gather command"; exit 2; }
 
 if [ -z "$NETCFG_SWITCH_PW" ]; then
   log "NETCFG_SWITCH_PW is empty -- set it to the MikroTik admin password (never committed). Aborting."
@@ -142,6 +152,19 @@ _nc_gather_node() {
     printf '%s.port.%s.dq1=%s\n'        "$name" "$port" "$(_nc_kv dq1 "$line")"
     printf '%s.port.%s.fcs=%s\n'        "$name" "$port" "$(_nc_kv fcs "$line")"
   done <<< "$ports_out"
+
+  # issue 1439: the raw bridge VLAN / port / QoS read, parsed later by netcfg_bridge_qos.py (an
+  # incomplete read lacks its `=== end` marker and is UNKNOWN, never a removed config).
+  if [ -n "$NC_RAW_DIR" ]; then
+    _nc_ssh "$ip" "$_NC_BRIDGE_QOS_CMD" > "$NC_RAW_DIR/$name.txt" || true
+  fi
+}
+
+# _nc_switch_names -> the switch names of the inventory, space-separated.
+_nc_switch_names() {
+  local pair out=""
+  for pair in $NETCFG_SWITCHES; do out="$out ${pair%%|*}"; done
+  printf '%s' "${out# }"
 }
 
 # _nc_gather_all -> all nodes' flat lines on stdout.
@@ -208,9 +231,12 @@ try:
     data = json.load(open(sys.argv[1]))
 except Exception as e:
     sys.stderr.write("netcfg-audit: cannot read baseline: %s\n" % e); sys.exit(1)
+FACET = {"bridge", "bridge_vlan", "bridge_port", "qos_profile", "switch_rule"}  # issue 1439: diffed in python
 def walk(prefix, obj):
     if isinstance(obj, dict):
         for k, v in obj.items():
+            if len(prefix) == 1 and k in FACET:
+                continue
             walk(prefix + [k], v)
     else:
         print("%s=%s" % (".".join(prefix), obj))
@@ -222,27 +248,39 @@ PY
 case "$MODE" in
   capture)
     log "capturing live chain -> $NETCFG_BASELINE"
-    tmp="$(mktemp)"; jtmp="$(mktemp)"; trap 'rm -f "$tmp" "$jtmp"' EXIT
+    tmp="$(mktemp)"; ftmp="$(mktemp)"; jtmp="$(mktemp)"; NC_RAW_DIR="$(mktemp -d)"
+    trap 'rm -f "$tmp" "$ftmp" "$jtmp"; rm -rf "$NC_RAW_DIR"' EXIT
     _nc_gather_all > "$tmp"
     [ -s "$tmp" ] || { log "capture gathered nothing (all switches unreachable?)"; exit 2; }
     # Build JSON into a temp FIRST, then atomically move it over the committed baseline -- a python
     # failure must never leave the checked-in baseline truncated/corrupt (mirrors write_state_field).
-    _nc_flat_to_json "$(date '+%Y-%m-%d')" "$tmp" > "$jtmp" \
+    # issue 1439: a reachable switch whose bridge/QoS read is incomplete fails the capture, so the
+    # baseline never silently loses the VLAN/QoS facet.
+    _nc_flat_to_json "$(date '+%Y-%m-%d')" "$tmp" > "$ftmp" \
       || { log "capture failed (json build)"; exit 2; }
+    # shellcheck disable=SC2046  # the switch names are one word each, split on purpose
+    python3 "$NC_BQ" attach "$ftmp" "$NC_RAW_DIR" $(_nc_switch_names) > "$jtmp" \
+      || { log "capture failed (bridge VLAN / port / QoS facet)"; exit 2; }
     [ -s "$jtmp" ] || { log "capture failed (empty json)"; exit 2; }
     mv -f "$jtmp" "$NETCFG_BASELINE" || { log "capture failed (mv)"; exit 2; }
     log "wrote baseline for $(grep -c '\.reachable=true' "$tmp") reachable node(s) to $NETCFG_BASELINE"
     ;;
 
   json)
-    tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+    tmp="$(mktemp)"; ftmp="$(mktemp)"; NC_RAW_DIR="$(mktemp -d)"
+    trap 'rm -f "$tmp" "$ftmp"; rm -rf "$NC_RAW_DIR"' EXIT
     _nc_gather_all > "$tmp"
-    _nc_flat_to_json "$(date '+%Y-%m-%d')" "$tmp"
+    _nc_flat_to_json "$(date '+%Y-%m-%d')" "$tmp" > "$ftmp" || exit 2
+    # shellcheck disable=SC2046  # the switch names are one word each, split on purpose
+    # an incomplete switch read: the JSON still prints (without that switch's facet), exit 2
+    python3 "$NC_BQ" attach "$ftmp" "$NC_RAW_DIR" $(_nc_switch_names) || exit 2
     ;;
 
   check)
     log "checking live chain vs baseline $NETCFG_BASELINE"
     base="$(_nc_baseline_flat)" || { log "no readable baseline at $NETCFG_BASELINE -- run --capture first"; exit 2; }
+    ltmp="$(mktemp)"; NC_RAW_DIR="$(mktemp -d)"
+    trap 'rm -f "$ltmp"; rm -rf "$NC_RAW_DIR"' EXIT
     live="$(_nc_gather_all)"
     statuses=()
     report=()
@@ -336,6 +374,17 @@ case "$MODE" in
         OK)       [ "$designated" = 1 ] && report+=("  [report-only sampled] $node $port: designated drop-sampler probe clean (rate <=${NETCFG_DROP_THRESHOLD}/s over ${NETCFG_DROP_WINDOW}s; cumulative dq1 $bdq1->$dq1 since baseline -- the tail-drop is BURSTY, one clean window is not a clean uplink) -- strih uplink #1110") ;;
       esac
     done <<< "$live"
+
+    # issue 1439: bridge VLAN membership / pvid / frame-types / QoS profiles / switch rules, diffed
+    # by netcfg_bridge_qos.py: `<STATUS>\t<1 hard|0 report-only>\t<message naming switch + port>`.
+    printf '%s\n' "$live" > "$ltmp"
+    bq_out="$(python3 "$NC_BQ" check "$NETCFG_BASELINE" "$NC_RAW_DIR" "$ltmp")" \
+      || report+=("  [report-only UNKNOWN] bridge VLAN / port / QoS check failed to run")
+    while IFS=$'\t' read -r bq_status bq_hard bq_msg; do
+      [ -n "$bq_status" ] || continue
+      [ "$bq_hard" = "1" ] && statuses+=("$bq_status")
+      report+=("  $bq_msg")
+    done <<< "$bq_out"
 
     overall="$(netcfg_drift_verdict "${statuses[@]}")"
     if [ "$overall" = "DRIFT" ]; then

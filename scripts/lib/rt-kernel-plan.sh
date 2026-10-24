@@ -35,10 +35,213 @@
 #   rt_kernel_readiness_verdict RUN CAND
 #   rt_kernel_upgrade_plan RUN INST GEN GRUBDEF [CAND] [STALE]
 #   rt_kernel_step_command TOKEN [STALE]
+#   rt_kernel_hwe_image_meta / rt_kernel_line_held_metas / rt_kernel_line_gather_remote_snippet /
+#   rt_kernel_line_verdict BLOCK  -> the fleet kernel LINE create-usb-linux.sh installs + holds and
+#                                    verify-device.sh (aw) grades (issue 1446; tests/python/test_kernel_line_1446.py)
 
 # The one decided kernel flavour -- referenced by every other function + the driver + the runbook.
 # STEP 1: the free official-archive low-latency meta (no Ubuntu Pro), matching the imag-nb precedent.
 rt_kernel_flavour() { printf 'linux-lowlatency-hwe-24.04'; }
+
+# rt_kernel_pkg_installed "WANT ERR STATUS" -> rc 0 iff a dpkg `${Status}` reads the package as
+# INSTALLED, whatever the want state: `install ok installed` AND `hold ok installed` (issue 1446: the
+# fleet apt-HOLDS its kernel metas -- cam2's linux-image-generic read `hold ok installed`, and a read
+# that took only `install ok installed` left the held meta out of the purge, which apt then refused).
+# A package whose only open work is a trigger (`triggers-pending` / `triggers-awaited`, e.g. an
+# image whose initramfs trigger has not run yet) is unpacked and configured, so it is installed too.
+# A removed package with its config left (`deinstall ok config-files`) or a half install is not.
+rt_kernel_pkg_installed() {
+  case "${1:-}" in
+    "install ok installed" | "hold ok installed") return 0 ;;
+    "install ok triggers-pending" | "hold ok triggers-pending") return 0 ;;
+    "install ok triggers-awaited" | "hold ok triggers-awaited") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# rt_kernel_line_unheld_metas -> one line per fleet-kernel-line meta (rt_kernel_line_held_metas)
+# that dpkg reads as INSTALLED but whose want state is not `hold` (issue 1446 review: setup-device's
+# `apt-mark hold ... || true` must not hide a hold that did not land). A meta that is not installed
+# is not listed. Reads dpkg on the box it runs on; always rc 0.
+rt_kernel_line_unheld_metas() {
+  local m st
+  for m in $(rt_kernel_line_held_metas); do
+    st="$(dpkg-query -W -f='${Status}' "$m" 2>/dev/null || true)"
+    if rt_kernel_pkg_installed "$st" && [ "${st%% *}" != hold ]; then
+      printf '%s\n' "$m"
+    fi
+  done
+  return 0
+}
+
+# rt_kernel_gather_remote_snippet -> the shell text scripts/rt-kernel-upgrade.sh sends to a box over
+# ONE ssh call; it prints `RUN INST GEN GRUB CAND STALE` (every read non-mutating):
+#   RUN   1 iff the running kernel booted with preempt=full
+#   INST  1 iff the lowlatency-kernel config package is installed
+#   GEN   1 iff the HWE generic meta (linux-image-generic-hwe-24.04) is NOT installed -> installing
+#         lowlatency-hwe pulls a new HWE image, superseding the running one
+#   GRUB  GRUB_DEFAULT (first word, default 0); CAND 1 iff apt has a lowlatency-hwe candidate
+#   STALE the OBSERVED superseded-generic set: every installed linux-image-<ver>-generic whose <ver>
+#         is not `uname -r`, plus the linux-image-generic meta; comma-joined, `-` = none. Only
+#         meaningful once rebooted; the planner reads it only in the run=1 branch.
+# Every installed-test goes through rt_kernel_pkg_installed (embedded by `declare -f`). No entry
+# holds a space, so the space-split of the facts downstream holds.
+rt_kernel_gather_remote_snippet() {
+  declare -f rt_kernel_pkg_installed
+  cat <<'RT_GATHER'
+_rt_st() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true; }
+run=0; grep -qw "preempt=full" /proc/cmdline && run=1
+inst=0; rt_kernel_pkg_installed "$(_rt_st lowlatency-kernel)" && inst=1
+gen=1; rt_kernel_pkg_installed "$(_rt_st linux-image-generic-hwe-24.04)" && gen=0
+cand=0; apt-cache policy linux-lowlatency-hwe-24.04 2>/dev/null | grep -qE "Candidate: [0-9]" && cand=1
+gd="$(sed -nE "s/^GRUB_DEFAULT=(.*)/\1/p" /etc/default/grub 2>/dev/null | tr -d "\"" | head -1)"
+gd="${gd:-0}"; gd="${gd%% *}"
+kr="$(uname -r)"; stale=""
+for p in $(dpkg-query -W -f='${Package}|${Status}\n' "linux-image-*-generic" 2>/dev/null |
+  while IFS='|' read -r n st; do
+    case "$n" in linux-image-[0123456789]*) rt_kernel_pkg_installed "$st" && printf '%s\n' "$n" ;; esac
+  done); do
+  v="${p#linux-image-}"; [ "$v" = "$kr" ] && continue
+  stale="${stale:+$stale,}$v"
+done
+rt_kernel_pkg_installed "$(_rt_st linux-image-generic)" && stale="${stale:+$stale,}linux-image-generic"
+stale="${stale:--}"
+echo "$run $inst ${gen} ${gd} ${cand} ${stale}"
+RT_GATHER
+}
+
+# --- the fleet kernel LINE (issue 1446): what create-usb-linux.sh installs + holds, what
+# verify-device.sh (aw) grades. One kernel decision (rt_kernel_flavour above) for the planner, the
+# base image and the acceptance gate.
+
+# rt_kernel_hwe_image_meta -> the HWE generic image meta the flavour depends on; its Depends names
+# the ONE kernel image the fleet line runs (linux-image-<ver>-generic).
+rt_kernel_hwe_image_meta() { printf 'linux-image-generic-hwe-24.04'; }
+
+# rt_kernel_line_held_metas -> the metas of the fleet kernel line create-usb-linux.sh apt-HOLDs
+# (space-separated): the flavour, the HWE image + headers metas it depends on, and the
+# lowlatency-kernel config package (preempt=full). Held so no apt run moves the kernel unasked.
+rt_kernel_line_held_metas() {
+  printf '%s %s linux-headers-generic-hwe-24.04 lowlatency-kernel' \
+    "$(rt_kernel_flavour)" "$(rt_kernel_hwe_image_meta)"
+}
+
+# rt_kernel_line_gather_remote_snippet [CMDLINE_PATH] -> the read-only shell text verify-device.sh
+# (aw) sends to a cambox over ONE ssh call. It prints RAW facts, one `key=value` row each, graded on
+# dev1 by rt_kernel_line_verdict:
+#   kernel=<uname -r>   cmdline=<the boot command line>
+#   flavour=<dpkg Status of the flavour>   hwe=<dpkg Status of the HWE image meta>
+#   hwe_depends=<Depends of the HWE image meta>   end
+# An unknown package reads an empty value. CMDLINE_PATH (default /proc/cmdline) lets a test plant a
+# command line. Nothing here writes.
+rt_kernel_line_gather_remote_snippet() {
+  printf '_rtl_cmdline=%q\n_rtl_flavour=%q\n_rtl_hwe=%q\n' \
+    "${1:-/proc/cmdline}" "$(rt_kernel_flavour)" "$(rt_kernel_hwe_image_meta)"
+  cat <<'RT_LINE_GATHER'
+_rtl() { dpkg-query -W -f="\${$1}" "$2" 2>/dev/null || true; }
+printf 'kernel=%s\n' "$(uname -r 2>/dev/null)"
+printf 'cmdline=%s\n' "$(cat "$_rtl_cmdline" 2>/dev/null || true)"
+printf 'flavour=%s\n' "$(_rtl Status "$_rtl_flavour")"
+printf 'hwe=%s\n' "$(_rtl Status "$_rtl_hwe")"
+printf 'hwe_depends=%s\n' "$(_rtl Depends "$_rtl_hwe")"
+echo end
+RT_LINE_GATHER
+}
+
+# _rt_line_image_from_depends DEPENDS -> the kernel version (uname -r form) of the ONE
+# linux-image-<digit>... entry in a dpkg Depends value, read through `(= ver)` constraints and
+# `a | b` alternatives; rc 1 (nothing printed) when there is none or more than one. Pure.
+_rt_line_image_from_depends() {
+  local deps="${1:-}" item alt found="" n=0 IFS
+  local LC_ALL=C
+  IFS=','
+  for item in $deps; do
+    IFS='|'
+    for alt in $item; do
+      alt="${alt%%(*}"
+      alt="${alt//[[:space:]]/}"
+      if [[ $alt =~ ^linux-image-([0123456789][^[:space:]]*)$ ]]; then
+        if [ "${BASH_REMATCH[1]}" != "$found" ]; then
+          found="${BASH_REMATCH[1]}"
+          n=$((n + 1))
+        fi
+      fi
+    done
+    IFS=','
+  done
+  if [ "$n" -ne 1 ]; then
+    return 1
+  fi
+  printf '%s' "$found"
+}
+
+# rt_kernel_line_verdict BLOCK -> grade one rt_kernel_line_gather_remote_snippet read. Prints ONE
+# `OK: ...` line (rc 0) when the flavour is installed (install|hold ok installed, through
+# rt_kernel_pkg_installed), the running kernel booted with preempt=full (the LAST preempt= token of
+# the command line, the one the kernel takes; a whole word of the
+# command line) and `uname -r` is the image the installed HWE image meta depends on. Otherwise one
+# `FAIL: ...` line per broken fact (rc 1). Fail-closed: an empty, cut (no `end`) or kernel-less read
+# is one FAIL, never graded further; a missing fact row FAILs as unreadable. Pure.
+rt_kernel_line_verdict() {
+  local block="${1:-}" line key val kernel="" cmdline="" flavour="" hwe="" deps="" fails="" target
+  local have_end=0 seen=" " flv hwem preempt="" tok
+  local -a toks=()
+  flv="$(rt_kernel_flavour)"
+  hwem="$(rt_kernel_hwe_image_meta)"
+  while IFS= read -r line; do
+    case "$line" in
+      end) have_end=1; continue ;;
+      *=*) key="${line%%=*}"; val="${line#*=}" ;;
+      *) continue ;;
+    esac
+    case "$key" in
+      kernel) kernel="$val" ;;
+      cmdline) cmdline="$val" ;;
+      flavour) flavour="$val" ;;
+      hwe) hwe="$val" ;;
+      hwe_depends) deps="$val" ;;
+      *) continue ;;
+    esac
+    seen="$seen$key "
+  done <<<"$block"
+  if [ "$have_end" -ne 1 ] || [ -z "$kernel" ]; then
+    printf 'FAIL: the kernel-line read was cut or could not be read (no end row or no running kernel) -- cannot certify this box runs the fleet kernel line\n'
+    return 1
+  fi
+  for key in cmdline flavour hwe hwe_depends; do
+    case "$seen" in
+      *" $key "*) ;;
+      *) fails="${fails}FAIL: the $key fact could not be read -- cannot certify the fleet kernel line on $kernel"$'\n' ;;
+    esac
+  done
+  if ! rt_kernel_pkg_installed "$flavour"; then
+    fails="${fails}FAIL: $flv is not installed (dpkg Status '${flavour:-<none>}') -- this box is off the fleet kernel line (HWE + lowlatency-kernel)"$'\n'
+  fi
+  # The kernel takes the LAST preempt= on its command line, so a later preempt=none overrides an
+  # earlier preempt=full. read -a splits without pathname expansion of a token.
+  IFS=$' \t' read -r -a toks <<<"$cmdline"
+  for tok in ${toks[@]+"${toks[@]}"}; do
+    case "$tok" in
+      preempt=*) preempt="${tok#preempt=}" ;;
+    esac
+  done
+  if [ "$preempt" != "full" ]; then
+    fails="${fails}FAIL: the running kernel $kernel did not boot with preempt=full (the lowlatency-kernel boot mode; last preempt= on the command line: '${preempt:-<none>}')"$'\n'
+  fi
+  if ! rt_kernel_pkg_installed "$hwe"; then
+    fails="${fails}FAIL: $hwem is not installed (dpkg Status '${hwe:-<none>}'), so no image depends on it -- this box is off the fleet kernel line"$'\n'
+  elif ! target="$(_rt_line_image_from_depends "$deps")"; then
+    fails="${fails}FAIL: cannot read the ONE kernel image $hwem depends on (Depends '${deps:-<none>}')"$'\n'
+  elif [ "$kernel" != "$target" ]; then
+    fails="${fails}FAIL: the running kernel $kernel is not $target, the image $hwem depends on (a newer HWE image installed but not booted, or another kernel running)"$'\n'
+  fi
+  if [ -n "$fails" ]; then
+    printf '%s' "$fails"
+    return 1
+  fi
+  printf 'OK: %s booted with preempt=full = the image %s depends on; %s %s\n' \
+    "$kernel" "$hwem" "$flv" "$flavour"
+}
 
 # The ONE verified close of a read-only-root rw window (issue 1407), printed into every mutating
 # step's program below. Sourcing it only defines functions (it lazy-sources ro-root.sh the same way).
@@ -213,9 +416,11 @@ rt_kernel_step_command() {
       # --allow-change-held-packages: the cam boxes hold their kernel packages (issue 295/487),
       # and the lowlatency meta depends on the HWE packages, so the install must be allowed to move
       # the hold -- exactly as setup-imag.sh step 7 does (#820). This ADDS the lowlatency config
-      # (preempt=full) and, on a box without the HWE generic meta, a new generic HWE image.
+      # (preempt=full) and, on a box without the HWE generic meta, a new generic HWE image. Then
+      # it re-holds the whole fleet kernel line (rt_kernel_line_held_metas, issue 1446). A box
+      # already past this step (inst=1) is never re-held by the planner: setup-device's hold covers it.
       _rt_window_program install-lowlatency \
-        'mkdir -p /root/apt-tmp /root/tmpbig && export TMPDIR=/root/tmpbig && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -o Dir::Cache::archives=/root/apt-tmp -y --allow-change-held-packages linux-lowlatency-hwe-24.04' \
+        'mkdir -p /root/apt-tmp /root/tmpbig && export TMPDIR=/root/tmpbig && apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -o Dir::Cache::archives=/root/apt-tmp -y --allow-change-held-packages linux-lowlatency-hwe-24.04 && apt-mark hold '"$(rt_kernel_line_held_metas)" \
         '/var/cache+/tmp are tmpfs (512M/100M) -> cache .debs + build initrd on the rootfs (issue 899 supervisor finding 2026-08-22)' ;;
     verify-lowlatency-config)
       printf '# SUPERVISOR: assert the config package landed -- test -f /etc/default/grub.d/99-lowlatency.cfg AND grep -q preempt=full /etc/default/grub.d/99-lowlatency.cfg (refuse to trust it otherwise, mirrors setup-imag.sh step 7)' ;;

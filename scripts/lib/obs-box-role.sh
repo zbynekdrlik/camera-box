@@ -16,14 +16,24 @@
 #   step    strih            stream
 #   3       NVENC precheck   the stream encoder by GPU (VAAPI without an NVIDIA dGPU) + the profile
 #   6       strih manifest   one genlocked `NDI 2ME PGM` <- STRIH_PROGRAM_SENDER (class "program"),
-#                            program_audio_input `Zvuk z mixu`; no HDMI output (backend none)
+#                            program_audio_input STRIH_PROGRAM_AUDIO_INPUT (stream-pp `Zvuk z mixu`,
+#                            stream-snv `mbc`, issue 1462) = the obs-vban source on the console's VBAN
+#                            stream (program_audio_vban, issue 1439); no HDMI output (backend none)
 #   7       2ME PGM + PVW    one NDI output `<prefix> (stream)`, no preview output
+#   12      strih-program    the operator's headphones through a LOCKED PipeWire (issue 1465 item 3,
+#           graph, MiniFuse  scripts/lib/stream-operator-audio.sh: the strih-role drop-ins are removed);
+#                            the seed manifest forbids pulse capture inputs (`"pulse_capture": "forbid"`)
+#   13      intercom hub     skipped, and a hub left on the box is moved aside (issue 1439: the console's
+#                            VBAN goes straight into OBS; 4b / 12 write no hub drop-in, verify 16 = no hub)
 #   14      Janus            skipped (no phones leg on a stream box)
 #   16      Satellite        skipped (no Stream Deck)
 #   16c     bkshading        skipped (no shading panel)
 #   16d     4 session apps   the browser-source keeper, the headphone monitor of the outgoing stream
 #                            (issue 1436) and the dantesync tray
 #   16f     tally            skipped
+#   avsync-dock  nothing     step 16g seeds the A/V-sync dock into the saved OBS layout, verify item 47
+#                            grades that layout (issue 1470, scripts/lib/obs-box-avsync-dock.sh; the
+#                            plugin rows of item 47 run on every role)
 #   16i     HTTPS front      skipped (no intercom / shading page; the facts declare none, issue 1399)
 #   13-hub-live  verify item 16: an inactive hub FAILs   report-only (issue 1418)
 #
@@ -33,15 +43,18 @@
 # The facts come from scripts/strih-boxes/<box>.env through scripts/lib/strih-box-facts.sh.
 
 # The stream role's names: the NDI program input (the SNV stream box's input name), the scene it lives
-# in (the ported collection's program scene), the program audio input of the ported PP collection, and
-# the bare DistroAV main output name (DistroAV prepends the hostname -> `STREAM-PP (stream)`).
+# in (the ported collection's program scene), and the bare DistroAV main output name (DistroAV prepends
+# the hostname -> `STREAM-PP (stream)`). The program audio input's name is a box fact
+# (STRIH_PROGRAM_AUDIO_INPUT, issue 1462: the SNV and PP collections name it differently).
 OBS_BOX_STREAM_INPUT="NDI 2ME PGM"
 OBS_BOX_STREAM_SCENE="PRO"
-OBS_BOX_STREAM_AUDIO_INPUT="Zvuk z mixu"
-# issue 1436: the seeder keeps that input's OBS monitoring OFF -- the stream box's headphones play the
+# issue 1436: the seeder keeps the program audio input's OBS monitoring OFF -- the stream box's headphones play the
 # real outgoing stream (strih-stream-monitor.service), never one monitored source.
 OBS_BOX_STREAM_AUDIO_MONITOR=off
 OBS_BOX_STREAM_OUTPUT_NAME="stream"
+# The stream role's session apps, in start order (obs_box_role_apply below; the genlock deploy's start
+# step reads the same list for a stream-role box, issue 1462).
+OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service)
 # issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
 # video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
 # The scene name equals STREAM_DEV_SCENE_DEFAULT (scripts/lib/stream-dev-scene.sh, pinned by a pytest).
@@ -64,10 +77,13 @@ obs_box_stream_key() { strih_lx_hostname; }
 #          would fail the unit at every boot (gap G7).
 #   16e -- the YouTube-guard stream program-audio sampler (issue 1404) reads the SNV stream output, so
 #          only a box with STRIH_PROGRAM_AUDIO_SAMPLER=on runs it (gap G11).
-#   3-nvenc / 14 / 16 / 16c / 16f / 16i / 13-hub-live -- the strih role only (the table above; 16f = the
-#          camera tally, issue 1417; 16i = the box's own HTTPS front, issue 1399; 13-hub-live = verify item 16
-#          FAILs an inactive or disabled intercom hub, issue 1418).
+#   3-nvenc / 12-strih-audio / 13 / 14 / 16 / 16c / 16f / 16i / 13-hub-live -- the strih role only (the table above; 13 = the
+#          intercom hub itself, issue 1439; 16f = the camera tally, issue 1417; 16i = the box's own HTTPS
+#          front, issue 1399; 13-hub-live = verify item 16 FAILs an inactive or disabled hub, issue 1418;
+#          12-strih-audio = setup step 12's strih-program graph + MiniFuse drop-ins and verify item 9b's
+#          grade of them, issue 1465 item 3: the stream role gets the locked operator PipeWire instead).
 #   6-hdmi -- only a box with a fixed HDMI output (STRIH_HDMI_OUTPUT_BACKEND != none).
+#   avsync-dock -- the stream role only: the A/V-sync dock reads the measurement audio there (issue 1470).
 obs_box_step_applies() {
   local step="${1:?step required}" v
   case "$step" in
@@ -83,11 +99,13 @@ obs_box_step_applies() {
         printf 'STRIH_PROGRAM_AUDIO_SAMPLER=%s -- this box runs no stream program-audio sampler' "$v"
         return 1
       fi ;;
-    3-nvenc | 14 | 16 | 16c | 16f | 16i | 16k | 13-hub-live)
+    3-nvenc | 12-strih-audio | 13 | 14 | 16 | 16c | 16f | 16i | 16k | 13-hub-live)
       v="$(strih_box_role)" || return 0
       if [ "$v" = stream ]; then
         case "$step" in
           3-nvenc) printf 'the stream role encodes with the GPU it has (VAAPI without an NVIDIA dGPU), not the strih NVENC' ;;
+          12-strih-audio) printf 'the stream role plays the operator headphones through a locked PipeWire (issue 1465 item 3), never the strih-program graph' ;;
+          13) printf 'the stream role runs no intercom hub: the console VBAN goes straight into the OBS obs-vban source (issue 1439)' ;;
           14) printf 'the stream role runs no Janus phones leg' ;;
           16) printf 'the stream role runs no Companion Satellite (no Stream Deck)' ;;
           16c) printf 'the stream role runs no bkshading shading service' ;;
@@ -98,6 +116,12 @@ obs_box_step_applies() {
         esac
         return 1
       fi ;;
+    avsync-dock)
+      v="$(strih_box_role)" || return 0
+      if [ "$v" != stream ]; then
+        printf 'the A/V-sync dock reads the measurement audio on the stream box (issue 1470: stream role only)'
+        return 1
+      fi ;;
     16j-restreamer)
       v="$(strih_box_role)" || return 0
       if [ "$v" != stream ]; then
@@ -105,9 +129,9 @@ obs_box_step_applies() {
         return 1
       fi ;;
     6-devclip)
-      v="$(strih_box_role)" || return 0
-      if [ "$v" != stream ]; then
-        printf 'the strih role has no YouTube-safe stream Development scene (issue 1380: stream role only)'
+      v="$(strih_lx_stream_dev_scene)" || return 0
+      if [ "$v" != clip ]; then
+        printf 'STRIH_STREAM_DEV_SCENE=%s -- the measurement clip belongs to the clip design only (issue 1462)' "$v"
         return 1
       fi ;;
     6-hdmi)
@@ -151,7 +175,7 @@ obs_box_role_apply() {
   venue="$(strih_box_venue)" || return 1
   if [ "$role" = stream ]; then
     # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh
-    STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service)
+    STRIH_SESSION_APP_UNITS=("${OBS_BOX_STREAM_SESSION_APP_UNITS[@]}")
   fi
   if [ "$venue" != snv ]; then
     NDI_DISCOVERY_SENDER_HOSTS="$(obs_box_venue_sender_ips "$venue")" || return 1
@@ -166,20 +190,39 @@ obs_box_role_apply() {
 # ROLE path strih_scenes.py reads on every Linux OBS box): update-only (the ported collection is
 # authoritative), ONE genlocked program input of class "program" (genlock_fifo + SOURCE_TIMECODE, the
 # latency pin never written: the stream A/V delay is the operator's knob), the NDI output
-# `<prefix> (stream)`, and the program audio input name of the ported collection.
+# `<prefix> (stream)`, the program audio input name (the box fact, issue 1462), and (issue 1439) the
+# console's VBAN stream that input receives: "program_audio_vban" = the obs-vban source's settings
+# from the box facts (strih_scenes.py switches that input to the source, keeping its mixer state).
 obs_box_stream_seed_manifest_json() {
-  local sender prefix
+  local sender prefix vban ai
   sender="$(strih_lx_program_sender)" || return 1
+  ai="$(strih_lx_program_audio_input)" || return 1
   prefix="$(strih_lx_ndi_prefix)" || return 1
+  vban="$(strih_lx_program_audio_vban_json)" || return 1
   [ -n "$sender" ] || { echo "obs-box-role: STRIH_PROGRAM_SENDER is none -- not a stream box" >&2; return 1; }
   printf '{\n  "mode": "update-only",\n  "inputs": [\n'
   printf '    {"sender": "%s", "input": "%s", "scene": "%s", "class": "program"}\n' \
     "$sender" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_SCENE"
   printf '  ],\n  "outputs": [\n    "%s (%s)"\n  ],\n' "$prefix" "$OBS_BOX_STREAM_OUTPUT_NAME"
   printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s",\n  "program_audio_monitor": "%s",\n' \
-    "$(strih_lx_camera_latency_ms)" "$OBS_BOX_STREAM_AUDIO_INPUT" "$OBS_BOX_STREAM_AUDIO_MONITOR"
-  printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
-    "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP"
+    "$(strih_lx_camera_latency_ms)" "$ai" "$OBS_BOX_STREAM_AUDIO_MONITOR"
+  # The loader validated the four facts (one stream name and one input name of plain characters, two
+  # integers); the block's one renderer is strih_lx_program_audio_vban_json (scripts/lib/strih-provision.sh).
+  printf '  "program_audio_vban": %s,\n' "$vban"
+  # issue 1465 item 3: no pulse capture input may capture the operator's headphone mix into the program
+  printf '  "pulse_capture": "forbid",\n'
+  # issue 1462: ONE Development design per box (fact STRIH_STREAM_DEV_SCENE). clip = the stream-pp
+  # YouTube-safe scene (stream_dev_safe.py); nested-pro = the issue-1380 SNV design the E2E seeds (its
+  # seed only removes a leftover measurement clip item, which would put a second QPSK marker on program).
+  case "$(strih_lx_stream_dev_scene)" in
+    clip)
+      printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
+        "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP" ;;
+    nested-pro)
+      printf '  "dev_scene_nested": {"scene": "%s", "production": "%s", "clip_input": "%s"}\n}\n' \
+        "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_SCENE" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" ;;
+    *) echo "obs-box-role: STRIH_STREAM_DEV_SCENE is not a stream design" >&2; return 1 ;;
+  esac
 }
 
 # obs_box_seed_manifest_json -> the loaded box's seed manifest: the stream one, or the strih one.
@@ -325,7 +368,9 @@ obs_box_stream_dev_clip_provision() {
 # stream_dev_safe.py --verify. Uses the caller's ok/bad/note; always rc 0.
 obs_box_stream_dev_grade() {
   local here="${1:?scripts dir required}" line level text
-  if obs_box_stream_dev_clip_ok; then
+  if [ "$(strih_lx_stream_dev_scene)" != clip ]; then
+    note "(dev-clip) not graded: STRIH_STREAM_DEV_SCENE=$(strih_lx_stream_dev_scene) carries no measurement clip (issue 1462)"
+  elif obs_box_stream_dev_clip_ok; then
     ok "(dev-clip) ${OBS_BOX_STREAM_DEV_CLIP}: ${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + marker log"
   else
     bad "(dev-clip) ${OBS_BOX_STREAM_DEV_CLIP} missing or not ${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + marker log -- re-run setup-strih.sh step 6"

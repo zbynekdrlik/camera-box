@@ -76,7 +76,9 @@ decision is `src/qpsk_probe_decision.rs` (crate-root, default-feature, Tier-0): 
 - **`[4b3/8]` step** (`scripts/lib/marker-decodability-preflight.sh` + a thin block in `recording-e2e.sh`,
   after the #1323 ceiling, before StartRecord): make a ~25 s stream probe recording, ffmpeg-extract the
   mbc `a:0` track to an f32 WAV with EVERY channel kept (issue 1367 — never a mono downmix; the probe
-  decodes each channel and keeps the best, see `qpsk-marker-demod.md`) on the stream box (`win_ssh_run`), `win_ssh_download` to dev1, run
+  decodes each channel and keeps the best, see `qpsk-marker-demod.md`) on the stream box
+  (`stream_box_exec` / `stream_box_download`: bash + scp on the Linux stream-snv, PowerShell +
+  `win_ssh_download` on a Windows box, issue 1462, `stream-box-linux.md`) to dev1, run
   the probe from `$PROBE_BIN_DIR`, abort (`exit 1`) naming the class on any non-OK verdict. SKIP only
   when the probe binary is absent (a loud UNVERIFIED, never a silent pass). Every knob env-overridable
   (`AUDIO_DECODABILITY_*`); the −60/−20 bars are READ from `audio-presence-preflight.sh`, never retyped.

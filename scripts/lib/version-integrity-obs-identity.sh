@@ -168,12 +168,12 @@ vig_row_obs_identity() {
   obs_proc_count="$(state_json_value "$file" obs_process_count)"
   local frc=0
 
-  # issue 1351 follow-up: on a Linux strih (--strih-linux, box named "strih") every #826
+  # issue 1351 follow-up / issue 1462: on a Linux box (--linux NAME, --strih-linux for strih) every #826
   # OBS-identity facet below is a Windows-only machine check (install-path scan, :4455 owner
   # exe, process count via tasklist, NL_STARTUP.ahk) -- SKIP each one loudly (counted ok, never
   # UNKNOWN) instead of running it. Windows strih/stream are byte-identical (unaffected).
   if [ "$is_strih_linux" = 1 ]; then
-    printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "obs_installs"
+    printf '  %-22s SKIPPED  (%s is a Linux OBS box -- #826 Windows OBS-identity facet not applicable, issues 1351/1462)\n' "obs_installs" "$name"
     ok=$((ok + 1))
   else
     engine_out="$(obs_installs_verdict "$DEFAULT_OBS_INSTALL_EXE" "$obs_installs_csv")" || frc=$?
@@ -194,7 +194,7 @@ vig_row_obs_identity() {
   pinned_obs_ver="$(pinned_obs_version "$readme" 2>/dev/null)" || pinned_obs_ver=""
   frc=0
   if [ "$is_strih_linux" = 1 ]; then
-    printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "port4455_identity"
+    printf '  %-22s SKIPPED  (%s is a Linux OBS box -- #826 Windows OBS-identity facet not applicable, issues 1351/1462)\n' "port4455_identity" "$name"
     ok=$((ok + 1))
   else
     engine_out="$(port_identity_verdict "$DEFAULT_OBS_INSTALL_EXE" "$pinned_obs_ver" "$port4455_owner_path" "$port4455_owner_ver")" || frc=$?
@@ -208,7 +208,7 @@ vig_row_obs_identity() {
 
   frc=0
   if [ "$is_strih_linux" = 1 ]; then
-    printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "obs_process_count"
+    printf '  %-22s SKIPPED  (%s is a Linux OBS box -- #826 Windows OBS-identity facet not applicable, issues 1351/1462)\n' "obs_process_count" "$name"
     ok=$((ok + 1))
   else
     engine_out="$(obs_process_count_verdict "$obs_proc_count")" || frc=$?
@@ -228,7 +228,7 @@ vig_row_obs_identity() {
   # stays OK, not UNKNOWN.
   if [ "$name" = "strih" ]; then
     if [ "$is_strih_linux" = 1 ]; then
-      printf '  %-22s SKIPPED  (strih is the Linux notebook -- no NL_STARTUP.ahk startup chain, issue 1351)\n' "startup_chain"
+      printf '  %-22s SKIPPED  (%s is a Linux OBS box -- no NL_STARTUP.ahk startup chain, issue 1351)\n' "startup_chain" "$name"
       ok=$((ok + 1))
     else
       local ahk_shortcut ahk_run ahk_dead shortcut_target shortcut_workdir

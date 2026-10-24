@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- obs-box-panel power button icon (issue 1464): a white power symbol on a red disc, shipped with the
+     panel so the left-end launcher never depends on an icon theme the kiosk may not carry. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <circle cx="24" cy="24" r="22" fill="#c0392b"/>
+  <path d="M16.2 14.6 A13 13 0 1 0 31.8 14.6" fill="none" stroke="#ffffff" stroke-width="4"
+        stroke-linecap="round"/>
+  <line x1="24" y1="9" x2="24" y2="24" stroke="#ffffff" stroke-width="4" stroke-linecap="round"/>
+</svg>

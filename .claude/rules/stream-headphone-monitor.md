@@ -6,9 +6,26 @@ paths:
   - "scripts/obs_box_stream_profile.py"
   - "tests/python/test_strih_stream_monitor_1436.py"
   - "tests/python/test_stream_monitor_provision_1436.py"
+  - "tests/python/test_strih_stream_monitor_vlc_1456.py"
+  - "tests/python/test_strih_stream_monitor_1465.py"
 ---
 
 # The stream box's headphones play the REAL outgoing stream (issue 1436)
+
+> **Issue 1465 item 3 (owner 23.10.2026) moved the stream role onto a LOCKED PipeWire:** the unit runs
+> `--output pulse` (VLC through pulse to the one sink `stream-operator-headphones`, the headphone PCM held by
+> PipeWire, `--check-state` inverted). Every "never PipeWire" / "PipeWire on the PCM FAILs" below is the
+> `--output alsa` player, now the rollback. See `.claude/rules/stream-operator-audio.md`.
+
+> **Issue 1465 (owner 23.10.2026) changed two things in the VLC player:** the headphone box (a USB audio
+> interface) wins over the notebook jack, and VLC gets `pl_play` only while OBS publishes. See "The
+> headphone box and the blinking (issue 1465)" at the end.
+>
+> **Issue 1456 (owner 21.10.2026) replaced the player with VLC** ("tak chcem to mat rovnako cize to tiez z
+> implementuj aby na stream-pp tiez bolo vlc, a neviem si v stream-pp nastavovat hlasitost vystuput
+> sluchatkoveho a je to potichu"). The ffmpeg -> aplay relay described under "The player" below is
+> HISTORY. The unit, the PCM-by-name resolve, busy / no-card, the state file, `--check-state` and the
+> three verify rows stay; see "The VLC player (issue 1456)" at the end for what changed.
 
 Owner, 15.10.2026, on stream-pp: "nestreamujem ziaden zvuk do vystupu a do sluchatiek nieco raje" ->
 "a spomen si ako to mame riesene v snv ze sa pocuva cez vlc ktore ma nacitany stream rtmp z obs alebo z
@@ -127,3 +144,118 @@ smoke with the REAL ffmpeg against `ffmpeg -re -i clip -c copy -f flv -listen 1 
    `muted the Speaker switch of Generic_1` line is the player's own mute.
 8. Stop the stream: `stream ended after ...`, then `waiting:` again. `sudo ./scripts/verify-strih.sh
    --box stream-pp`: the `(stream-monitor)` unit row and the three rows PASS.
+
+## The VLC player (issue 1456)
+
+- `strih_stream_monitor.py` supervises VLC (`vlc_argv`): `--aout=alsa --alsa-audio-device=<plughw>`
+  (never PipeWire), `--zoom=0.25` (the picture in a small window, as on SNV the window shows it),
+  `--network-caching=1000` (SNV's), `--no-qt-error-dialogs --no-qt-privacy-ask`, `--extraintf=http` on
+  127.0.0.1:8090 with a per-run random password, the URL last. No `--repeat`: a failed open with repeat
+  would loop VLC.
+- Before EVERY VLC start, `mixer_unity_cmds`: the card's `Master` / `Headphone` 0 dB unmute, `PCM` 0 dB,
+  `Speaker` mute (`amixer -q -c <card id> sset ...`, the C locale). stream-pp read Master -23.25 dB on
+  21.10.2026, a value PipeWire left. A control the card lacks is logged once and VLC starts anyway. The
+  operator's level is VLC's own slider (`--volume-save` is VLC's default, so it survives a restart).
+- The http status drives the loop, polled every second:
+  - `stopped` -> `pl_play` every 3 s (nothing published, or the stream ended);
+  - `paused` for more than 10 s -> `pl_stop`. The restreamer's per-subscriber channel is unbounded, so
+    a paused player must never hold a subscriber (the reason the issue-1436 relay never paused);
+  - VLC exits (the operator closed it) -> it starts again after 3 s. An exit before its http answered
+    within 15 s is `vlc-failing`. An http that never answers within 15 s is `vlc-failing` and VLC is
+    restarted.
+- `--check-state`: healthy states `starting` / `waiting` / `playing` / `paused`; faults `no-card` / `busy`
+  / `vlc-failing`; the only allowed PCM owner is `vlc` (aplay is now a FAIL, PipeWire always was).
+- Packages: `STRIH_STREAM_MONITOR_PACKAGES=(vlc alsa-utils)`.
+- Tests: `tests/python/test_strih_stream_monitor_vlc_1456.py` runs the real supervisor against a fake
+  `vlc` that serves the http status interface (Basic auth) and a fake `amixer`, on a free local port.
+- **Live apply (supervisor, after a production):**
+  1. setup-strih step 16d on the stream box installs `vlc` (plus Qt) and the new program, then
+     try-restarts the running unit.
+  2. Read back:
+     - the journal shows `watching ... in VLC` and `playing rtmp://127.0.0.1:1234/live/<box> -> plughw:...`;
+     - `/proc/asound/card<N>/pcm0p/sub0/status` names a `vlc` owner;
+     - `amixer -c <card id> sget Master` reads 0 dB;
+     - the VLC window sits on the panel's screen.
+
+## The headphone box and the blinking (issue 1465)
+
+Owner, 23.10.2026, after the stream-snv operator's report ("Nefungovala mi skrinka na slúchadla"; "na stream
+snv vidim dokolecka nejako blikat vlc"): "operator si chce otovorit vlc aby videl obraz a chce si vediet
+prepnut zvuk do sluchatiek aby isiel z vlc tak vidi a pocuje co je na vystupe z obs a teda vie skontrolovat
+lipsync a audio vypadky!!!". The VLC window STAYS (the operator watches the outgoing picture and checks
+lipsync + audio dropouts by ear); the headphones carry VLC's audio. Owner decision: issue comment
+6362030709; design 6362045028 (Approach 1).
+
+- **Why the headphone box got nothing.** The stream-snv operator's headphones hang on a Focusrite Scarlett
+  Solo 4th Gen (USB, card id `Gen`, playback PCM `USB Audio`, device 0, factory routing: PCM 1/2 -> the
+  headphone out). The default ` Analog$` match picked the notebook jack `ALC256 Analog` on card `PCH`.
+- **The card rule (`resolve_headphone`), re-read before every VLC start:**
+  - an explicit `--pcm-match` = a regex on the PCM name, exactly the old meaning (argparse default `None`
+    tells "not given" apart);
+  - else the playback PCM of the ONE USB audio interface: a `/proc/asound/cardN` dir with a `usbid` file
+    (snd-usb-audio writes it; `list_playback_pcms` marks each PCM `usb`);
+  - no USB playback PCM -> the jack (` Analog$`, stream-pp's `ALC257 Analog`: stream-pp has no USB card);
+  - two or more USB playback PCMs (two interfaces, or one with two playback PCMs) -> one log line naming
+    them, then the jack. Name one with `--pcm-match` in a drop-in if that ever happens.
+  - The `watching ...` line names the rule (`the ONE USB audio interface's playback PCM, else the
+    headphone jack matching ...` or `the playback PCM matching ... (--pcm-match)`).
+  - Plugging a headphone box in switches at the next VLC start (the operator closing VLC, or a unit
+    restart); no re-provision -- for the `--output alsa` player only. On the stream role's locked PipeWire
+    (issue 1465 item 3) plugging one in or out needs setup step 12 again (`stream-operator-audio.md`).
+  - **A USB headphone box keeps its own mixer** (review round 1): no unity writes and no `Speaker` mute
+    on a USB card, one `mixer: <card> is a USB audio interface -- its own mixer is left as it is` line.
+    snd-usb-audio names many headsets' and dongles' main output `Speaker`, so the jack's mute would
+    silence the box the operator listens on, and a 0 dB write on its own volume is full scale. The
+    Scarlett has none of those controls anyway; its factory routing is unity. The jack keeps the 1456
+    unity + speaker mute.
+- **Why the window blinked.** With nothing published, VLC reads `stopped`, and the supervisor sent
+  `pl_play` every 3 s. Each one opened and failed the RTMP input, so the window and its taskbar entry
+  flickered all day.
+- **`pl_play` only while OBS publishes (`obs_publisher`).**
+  - True = a process whose `/proc/<pid>/comm` is `obs` (`--obs-process-name`) holds an ESTABLISHED
+    (`st` 01) TCP connection whose REMOTE end is the URL's host:port (port 1935 when the URL names none).
+  - Read std-only: `<proc_root>/net/tcp` + `tcp6` (the 32-bit address words in host order, an
+    IPv4-mapped tcp6 address read as IPv4), then the socket inodes in `<proc_root>/<pid>/fd` of the `obs`
+    pids only. A vanished pid, a foreign pid's fd dir and a non-UTF-8 comm are skipped.
+  - The comm filter matters: the monitor's own VLC holds an ESTABLISHED connection to the same port
+    while it plays. `--obs-process-name` longer than 15 characters (the kernel's comm) is refused.
+  - A hostname URL is looked up at most once a minute (`RESOLVE_TTL_S`); the default literal
+    `127.0.0.1` never is. The stream KEY is not checked: OBS publishing under another key reads as
+    published (verify's `(stream-monitor-key)` row grades the key).
+  - Nothing published -> state `waiting`, reason `OBS is not publishing to <url> -- VLC idles until it
+    does`, no `pl_play` at all. The reason is CONSTANT, so it is one journal line however other clients
+    come and go on the port; what holds it (`nothing holds ...` / `no obs process holds ...`) is the state
+    file's `publisher` field. VLC stays open with its window (it is still launched with the
+    URL, so its first open at launch fails once). The state is healthy for `--check-state` (unchanged).
+  - OBS publishes and VLC is not playing yet -> `waiting: OBS publishes to <url>, VLC not playing yet`
+    and `pl_play` every 3 s until `playing`.
+- **The login ordering cycle.** The journal read `Found ordering cycle: strih-stream-monitor.service/start
+  after strih-obs.service/start after graphical-session.target/start`. A target orders itself After= every
+  unit it Wants (the `WantedBy=` link) unless that unit is already After= the target (systemd's
+  `unit_add_default_target_dependency` loop guard). strih-obs is After= the target, so a unit that is only
+  `After=strih-obs.service` closes the cycle. `strih-stream-monitor.service` and
+  `strih-browser-keeper.service` now read `After=graphical-session.target strih-obs.service` (the
+  `strih-bundle-state-server.service` shape); `WantedBy=graphical-session.target` stays, so `enable` and
+  the session-apps grader are unchanged. Checked with the real `systemd-analyze --user verify` on dev1
+  (a scratch unit dir with the `graphical-session.target.wants` links): the old units report both cycles,
+  the new ones none.
+- **Tests:** `tests/python/test_strih_stream_monitor_1465.py`. The card rule; the publisher check over a
+  fake `/proc` (`net/tcp` rows + an obs pid fd symlink `socket:[N]`); the real loop (`Rig.publish()` in
+  the 1456 file also writes that fake publisher); a python model of the unit ordering graph over every
+  `systemd/` unit, which first finds the live cycle in a two-unit copy of the old shape.
+
+### Live apply (supervisor)
+
+1. On stream-snv the 23.10.2026 hand drop-in
+   `~/.config/systemd/user/strih-stream-monitor.service.d/10-scarlett.conf` (`--pcm-match "^USB Audio$"`)
+   stays until the new program is installed, then is removed: `rm` it, `systemctl --user daemon-reload`.
+2. setup-strih step 16d on stream-snv and stream-pp installs the program + both units and try-restarts the
+   running ones.
+3. Read back, as the box user:
+   - `journalctl --user -u strih-stream-monitor -n 20`: `watching ... the ONE USB audio interface's ...`,
+     then `waiting: OBS is not publishing ...`;
+   - with nothing streamed the VLC window stays still (no flicker), and the journal has no new lines;
+   - `systemctl --user show -p After strih-stream-monitor.service` lists `graphical-session.target`;
+     the next login's journal has no `Found ordering cycle` line;
+   - stream-snv: start a stream -> `playing ... -> plughw:CARD=Gen,DEV=0`, and the Scarlett's headphones
+     carry it. stream-pp -> `plughw:CARD=Generic_1,DEV=0` as before.

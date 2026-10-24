@@ -119,6 +119,16 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_ROLE",
     "STRIH_DANTE_GM",
     "STRIH_PROGRAM_AUDIO_SAMPLER",
+    // issue 1439: the console's VBAN program straight into the OBS obs-vban source (stream role).
+    "STRIH_PROGRAM_VBAN_STREAMS",
+    "STRIH_PROGRAM_VBAN_PORT",
+    "STRIH_PROGRAM_VBAN_RESERVE_MS",
+    // issue 1462: the OBS program-audio input's name (stream-pp `Zvuk z mixu`, stream-snv `mbc`).
+    "STRIH_PROGRAM_AUDIO_INPUT",
+    // issue 1439 (ROZHODNUTÉ 6360417876): the VBAN-only leg (a second NIC or a VLAN on the rig NIC).
+    "STRIH_PROGRAM_VBAN_LEG",
+    "STRIH_PROGRAM_VBAN_LEG_ADDR",
+    "STRIH_PROGRAM_VBAN_SENDER",
     "STRIH_PROGRAM_SENDER",
     "STRIH_VENUE",
     "STRIH_CAMERA_DEV1_NET",
@@ -126,6 +136,10 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_HTTPS_SHADING_HOST",
     // issue 1424 part 2: the connectors the fixed HDMI output drives + their default views.
     "STRIH_HDMI_OUTPUTS",
+    // issue 1453: whether the intercom page is published to phones on mobile data (tunnel + TURN).
+    "STRIH_HTTPS_PUBLIC",
+    // issue 1462: the stream box's Development design (nested-pro | clip | none).
+    "STRIH_STREAM_DEV_SCENE",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -172,6 +186,17 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_ROLE=strih",
         "STRIH_DANTE_GM=video-clock.lan",
         "STRIH_PROGRAM_AUDIO_SAMPLER=on",
+        // issue 1439 phase 2: the FOH console's `strih-obs` VBAN straight into the OBS obs-vban source
+        // `ASIO zvuk` on UDP 6981 (the hub keeps 6980), a low fixed Receive Buffer.
+        "STRIH_PROGRAM_VBAN_STREAMS=strih-obs",
+        "STRIH_PROGRAM_VBAN_PORT=6981",
+        "STRIH_PROGRAM_VBAN_RESERVE_MS=30",
+        "STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk",
+        // issue 1439 (supervisor 23.10.2026 10:31): VLAN 70 tagged on the rig NIC; Ableton-FOH sends the
+        // hub's fohabl-strih (6980) and the strih OBS's strih-obs (6981) to it.
+        "STRIH_PROGRAM_VBAN_LEG=vlan:70",
+        "STRIH_PROGRAM_VBAN_LEG_ADDR=10.77.7.202",
+        "STRIH_PROGRAM_VBAN_SENDER=10.77.7.30:6980,6981",
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
         "STRIH_CAMERA_DEV1_NET=direct",
@@ -180,6 +205,10 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_HTTPS_SHADING_HOST=shading.newlevel.media",
         // issue 1424 part 2: one output on the first connected HDMI (the issue-1346 behaviour).
         "STRIH_HDMI_OUTPUTS=auto",
+        // issue 1453: strih-snv publishes its intercom page to mobile data (tunnel + TURN).
+        "STRIH_HTTPS_PUBLIC=yes",
+        // issue 1462: the strih role has no stream Development scene.
+        "STRIH_STREAM_DEV_SCENE=none",
         "LOADED=strih-snv",
     ] {
         assert!(
@@ -890,7 +919,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "{\"sender\": \"CAM3 (usb)\", \"input\": \"NDI cam3\", \"scene\": \"Cam 3\"}",
         "ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan\n",
         "local_ip = \"10.0.0.5\"",
-        "ws_ip = \"10.0.0.5\"",
+        "ws_ip = \"127.0.0.1\"",
         "# strih-zz OBS kiosk boot",
         "label=\"strih-zz\"",
         "TARGET_IP=\"${STRIH_LX_TARGET_IP:-10.0.0.5}\"",

@@ -4,6 +4,8 @@ paths:
   - "scripts/setup-strih.sh"
   - "scripts/verify-strih.sh"
   - "tests/python/test_strih_operator_1418.py"
+  - "scripts/lib/strih-keyboard.sh"
+  - "tests/python/test_strih_keyboard_ibus_1441.py"
 ---
 
 # strih operator surface: what the operator touches is provisioned AND graded (issue 1418)
@@ -84,7 +86,7 @@ so a hung X server FAILs a row instead of hanging verify.
 | `(panel-gpu)` | `xrandr --listproviders` on :0 (bounded 10 s): every provider after Provider 0 that lists `Sink Output` (the reverse-PRIME panel sink) must be named `modesetting`; any other name is a vendor DDX and FAILs naming `xserver-xorg-video-amdgpu`, which the shared baseline removes (`STRIH_OPERATOR_AMDGPU_DDX_PKG`, pinned equal to `obs_box_amdgpu_ddx_package`); NOTE with one provider; a failed or timed-out read = a hung X; a missing `xrandr` (rc 127) is named |
 | `(drm-hang)` | `journalctl -k -b 0 --no-pager` (bounded 30 s): a `blocked for more than` hung task whose trace within 25 lines (before the next `INFO: task`) has a `commit_work+0x` or `drm_atomic_helper_wait_for_fences+0x` frame, or a DRM `*ERROR*` commit timeout (`flip_done` / `hw_done` / `commit wait` timed out, amdgpu_dm `Waiting for fences timed out`, nvidia-drm `Flip event timeout`), FAILs naming its first time stamp; an unreadable or empty log FAILs, and so does one with no kernel line (`-- No entries --` when run outside root / adm / systemd-journal) |
 | `(operator-panel)` | two `ffmpeg -f x11grab -i :0.0 -frames:v 1 -f md5 -` frames 4 s apart differ while OBS runs (the 12.10 hang signature); NOTE while OBS is not running |
-| `(mv-projector)` | a `Projector - Multiview` window in `wmctrl -lx` on :0 while OBS runs (issue 1419: strih-pp's operator had no Multiview; step 16g's `strih_operator_projector_seed` runs `scripts/strih_projector_seed.py`, which seeds `{"monitor": 0, "type": 4}` into an EMPTY `saved_projectors` of the box's collection only, with OBS stopped); NOTE while OBS is not running; NOTE on the stream role (16.10.2026: stream-pp has one screen carrying the stream OBS + the Restreamer dashboard, a fullscreen Multiview would cover them) |
+| `(mv-projector)` | a `Projector - Multiview` window in `wmctrl -lx` on :0 while OBS runs (issue 1419: strih-pp's operator had no Multiview; step 16g's `strih_operator_projector_seed` runs `scripts/strih_projector_seed.py`, which seeds `{"monitor": 0, "type": 4}` into an EMPTY `saved_projectors` of the box's collection only, with OBS stopped); NOTE while OBS is not running; on the stream role (one screen carrying the stream OBS + the Restreamer dashboard, 16.10.2026) step 16g seeds NO projector and the row FAILs an open `Projector - Multiview` window, OK without one (issue 1469: the stream-snv conversion had seeded one and verify only printed a NOTE) |
 
 **The 11/12.10.2026 X freeze (comments 6132168799, ROZHODNUTE 6132283178).** The panel's amdgpu
 `commit_work` blocked in `drm_atomic_helper_wait_for_fences` from 11.10 22:17, 18 h before the owner
@@ -176,3 +178,25 @@ strih-pp, stream-pp) types `us,sk` (Slovak QWERTZ) and switches with **Alt+Shift
   `strih_operator_install` MUST set both, or it writes this box's real file and changes the
   keyboard of dev1's own display.
 - Applied live on 14.10.2026 to strih-pp, stream-pp and strih-snv before the code landed.
+
+**ibus overwrote it at every login (issue 1441, owner 21.10.2026 on stream-pp: the panel item showed
+US and a click never switched to SK).** im-config starts `ibus-daemon --xim` in the openbox session.
+With `org.freedesktop.ibus.general use-system-keyboard-layout false` (the default), ibus applies its
+own engine layout (`xkb:us::eng`) to X at login. :0 then carries ONE group, so the panel's
+`obs_box_kbd_layout.py next` locks US again (journal `layout US -> US`). The file and `localectl` still
+read `us,sk`, so only a LIVE read shows it. All three boxes had it on 21.10.2026.
+- The keyboard code lives in its own lib `scripts/lib/strih-keyboard.sh` (moved verbatim from
+  strih-operator.sh for its line budget; strih-operator.sh sources it, same function names).
+- Setup: `strih_operator_ibus_keep_layout` sets the key `true` for the operator BEFORE the live
+  `setxkbmap` (skipped without ibus, already-true is a no-op, a failed set is a WARN). gsettings runs
+  as the operator over their session bus `/run/user/<uid>/bus` when it exists, so the live ibus takes
+  it at once, else over a private `dbus-run-session` bus.
+- Verify: the `keyboard` row takes the ibus state as a third input. `false` FAILs naming the key
+  (checked before the live layout, it is the cause), an unreadable or non-boolean value FAILs, a box
+  without the ibus schema or without gsettings is graded on the file + live layout only.
+- Live fix by hand on stream-pp 21.10.2026 17:40 (gsettings + setxkbmap); strih-pp and strih-snv
+  get it at their next setup-strih run.
+- Seams: `STRIH_OPERATOR_GSETTINGS`, `STRIH_OPERATOR_RUN_USER_DIR`. A test that runs the install must
+  also set `STRIH_OPERATOR_GSETTINGS`, or it changes dev1's own ibus setting. Tests:
+  `tests/python/test_strih_keyboard_ibus_1441.py` (the issue-1418 fixture with fake gsettings and
+  dbus-run-session).

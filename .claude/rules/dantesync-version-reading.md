@@ -130,7 +130,9 @@ version-parity call must ROUTE strih by `strih_platform "$STRIH"` (the resolver 
 (`strih=${WIN_SSH_USER:-newlevel}@$STRIH` — strih-snv ssh user `newlevel`, the gate's default
 `DANTESYNC_VERSION_GATE_SSH_PASS=newlevel` matches) and only stream goes via `--win`; a **windows**
 strih keeps strih+stream both under `--win`, byte-identical. NEVER leave a node in BOTH lists — the
-`--win` UNKNOWN read would still fail the gate even though `--linux` read it OK.
+`--win` UNKNOWN read would still fail the gate even though `--linux` read it OK. Issue 1462 did the
+same for the stream box: `stream_box_platform "$STREAM"` = linux (stream-snv since 22.10.2026) appends
+`stream=...` to the `--linux` list and removes that word from `DV_WIN_NODES` (`stream-box-linux.md`).
 
 **Anchor-safe implementation (recording-e2e.sh is the static-anchor minefield):** compute the
 `--win` argument into a `DV_WIN_NODES` variable so the SINGLE `"$HERE/dantesync-version-gate.sh"`

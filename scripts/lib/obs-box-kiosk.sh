@@ -276,6 +276,108 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
 echo "  de-jitter: oomd/tracker/evolution/apport(+coredump hook)/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
 }
 
+# --- issue 1454: lightdm starts X only once every display GPU is registered with udev ---------------------
+# strih-snv, 21.10.2026 11:45: lightdm's autologin X server started 0.5 s after the amdgpu iGPU finished its
+# DRM init, before udev had finished that card. X took it later as a HOTPLUGGED GPU screen and Xorg 21.1
+# aborted in glamor_init (`dixRegisterPrivateKey: Assertion '!global_keys[type].created' failed`);
+# lightdm then fell back to the greeter and the owner had to log in by hand. A lightdm.service drop-in
+# runs a bounded wait first: every PCI display-class device has a DRM card that udev finished
+# (USEC_INITIALIZED), then one `udevadm settle`. Never fatal: past the bound it warns and starts anyway.
+
+# obs_box_gpu_ready_wait_path / obs_box_gpu_ready_dropin_path -> where the waiter and the drop-in live
+# (the grader reads the same paths).
+obs_box_gpu_ready_wait_path() {
+    printf '%s' /usr/local/sbin/obs-box-gpu-ready-wait
+}
+obs_box_gpu_ready_dropin_path() {
+    printf '%s' /etc/systemd/system/lightdm.service.d/50-obs-box-gpu-ready.conf
+}
+
+# obs_box_gpu_ready_wait_text -> the waiter script. `obs-box-gpu-ready-wait [BUDGET_S]` (default 30);
+# OBS_BOX_GPU_READY_SYSFS / OBS_BOX_GPU_READY_UDEVADM override /sys and udevadm (tests). Always exit 0.
+obs_box_gpu_ready_wait_text() {
+    cat <<'EOF'
+#!/bin/bash
+# obs-box-gpu-ready-wait (issue 1454) -- camera-box shared OBS-box kiosk, run by lightdm.service's
+# ExecStartPre: wait until every PCI display GPU has a DRM card that udev finished, so the autologin X
+# server sees every GPU at start (a GPU X adds later as a hotplugged screen aborts Xorg in glamor_init
+# and lightdm falls back to the login screen). Bounded, never fatal: it always exits 0.
+set -uo pipefail
+budget="${1:-30}"
+case "$budget" in '' | *[!0123456789]*) budget=30 ;; esac
+root="${OBS_BOX_GPU_READY_SYSFS:-/sys}"
+udevadm="${OBS_BOX_GPU_READY_UDEVADM:-udevadm}"
+
+# pending -> one line per display GPU that is not ready yet (none = ready).
+pending() {
+    local dev cls card c props
+    for dev in "$root"/bus/pci/devices/*; do
+        [ -r "$dev/class" ] || continue
+        read -r cls < "$dev/class" || continue
+        case "$cls" in 0x03*) ;; *) continue ;; esac
+        card=""
+        for c in "$dev"/drm/card*; do
+            if [ -e "$c" ]; then card="${c##*/}"; break; fi
+        done
+        if [ -z "$card" ]; then
+            echo "${dev##*/} (no DRM card yet)"
+            continue
+        fi
+        # bounded: a wedged udevd must never hold lightdm past systemd's start timeout
+        props="$(timeout 3 "$udevadm" info --query=property --name="/dev/dri/${card}" 2>/dev/null)"
+        case "$props" in
+            *USEC_INITIALIZED=*) ;;
+            *) echo "${dev##*/} (${card} not finished by udev yet)" ;;
+        esac
+    done
+}
+
+# microseconds since the start (EPOCHREALTIME, bash 5): SECONDS ticks on whole seconds since the shell
+# began, so a budget read from it could end up to a second early
+now_us() { local t="${EPOCHREALTIME/./}"; printf '%s' "$((10#$t))"; }
+start="$(now_us)"
+while :; do
+    mapfile -t waiting < <(pending)
+    elapsed_ms=$((($(now_us) - start) / 1000))
+    if [ "${#waiting[@]}" = 0 ]; then
+        timeout 10 "$udevadm" settle --timeout=5 >/dev/null 2>&1 || true
+        echo "obs-box-gpu-ready: every display GPU is registered with udev after ${elapsed_ms} ms -- starting the display manager"
+        exit 0
+    fi
+    if [ "$elapsed_ms" -ge $((budget * 1000)) ]; then
+        echo "WARNING obs-box-gpu-ready: still waiting after ${budget} s for: ${waiting[*]} -- starting the display manager anyway (X may add that GPU later and abort, issue 1454)"
+        exit 0
+    fi
+    sleep 0.2
+done
+EOF
+}
+
+# obs_box_gpu_ready_dropin_text -> the lightdm.service drop-in that runs the waiter.
+obs_box_gpu_ready_dropin_text() {
+    cat <<EOF
+# camera-box shared OBS-box kiosk (issue 1454): start X only once every display GPU is registered with
+# udev, so the autologin session never falls back to the login screen on a boot race.
+[Service]
+ExecStartPre=$(obs_box_gpu_ready_wait_path) 30
+EOF
+}
+
+# obs_box_gpu_ready_install [WAIT_DEST [DROPIN_DEST [OWNER]]] -- the item: the waiter (0755) and the
+# drop-in (0644) through obs_box_write_if_changed, then a daemon-reload (never a lightdm restart: it takes
+# effect at the next display-manager start). Fails loud via the caller's fail().
+# shellcheck disable=SC2120  # the destination args are passed only by the tests (temp paths)
+obs_box_gpu_ready_install() {
+    local wait_dest="${1:-$(obs_box_gpu_ready_wait_path)}" dropin_dest="${2:-$(obs_box_gpu_ready_dropin_path)}"
+    local owner="${3:-root:root}"
+    mkdir -p "${wait_dest%/*}" "${dropin_dest%/*}" || fail "gpu-ready: could not create ${wait_dest%/*} / ${dropin_dest%/*}"
+    obs_box_gpu_ready_wait_text | obs_box_write_if_changed "$wait_dest" 0755 "$owner" "gpu-ready (waiter, issue 1454)"
+    obs_box_gpu_ready_dropin_text | obs_box_write_if_changed "$dropin_dest" 0644 "$owner" "gpu-ready (lightdm drop-in, issue 1454)"
+    if [ -z "${1:-}" ]; then
+        systemctl daemon-reload || fail "gpu-ready: systemctl daemon-reload failed -- lightdm would start without the GPU wait"
+    fi
+}
+
 # obs_box_kiosk DESKTOP_USER BOX -- the imag step 15 (#504) kiosk: lightdm autologin -> openbox on PLAIN
 # Xorg (no GNOME Shell, no Wayland/XWayland), display-manager.service -> lightdm BEFORE any purge, the
 # desktop-bloat services disabled, gdm3 disabled for the next boot, the owner's explicit GNOME purge list.
@@ -333,6 +435,9 @@ autologin-user-timeout=0
 autologin-session=openbox
 user-session=openbox
 EOF
+# issue 1454: lightdm starts X only once every display GPU is registered with udev (a GPU X adds later
+# as a hotplugged screen aborted Xorg and lightdm fell back to the login screen on strih-snv 21.10.2026).
+obs_box_gpu_ready_install
 
 # (c) Switch the display-manager to lightdm EXPLICITLY via the symlink — NOT `systemctl enable
 #     lightdm`, which fails "Failed to enable unit: Invalid unit name ... instance name specified"
@@ -525,21 +630,26 @@ obs_box_igpu_sink_modesetting() {
 }
 
 # obs_box_touchpad BOX -- the imag step 25 (#779) touchpad usability: tap-to-click + natural scroll +
-# ScrollPixelDistance 50 as an Xorg libinput InputClass (the heredoc carries no `$`/backtick, so it is
-# expanded only for the BOX name in its comment).
+# ScrollPixelDistance 15 + AccelSpeed 0.3 as an Xorg libinput InputClass (the heredoc carries no
+# `$`/backtick, so it is expanded only for the BOX name in its comment).
 obs_box_touchpad() {
     local BOX="${1:?obs_box_touchpad: BOX required}"
 # imag-nb is a NOTEBOOK; the operator drives its touchpad directly. tap-to-click + natural scrolling
 # + a gentler scroll step were set LIVE (2026-07-15) as /etc/X11/xorg.conf.d/30-touchpad-tap.conf but
 # NEVER provisioned here -- so a reimage silently dropped them (the same "provisioning gap hidden by a
 # hand patch" class issue 840 documented for imag-obs-start.sh). Bake the file in so a reprovision
-# reproduces the live-verified libinput InputClass byte-for-byte. The four Option values match what
-# is live on the box; ScrollPixelDistance 50 is the user's final tuning (the libinput default 15 is
-# far too sensitive). verify-imag.sh check (w) reads this file back and fails loud if it is dropped.
+# reproduces the libinput InputClass byte-for-byte. The scroll step is the operator finding of
+# 23.10.2026 (issue 1465 item 5): the July value ScrollPixelDistance 50, tuned on imag-nb's touchpad,
+# made two-finger scrolling on the stream boxes' touchpads (ASUP1205 stream-snv, SYNA2BA6 stream-pp)
+# need 3.3x libinput's travel ("nefunguje normalne citlivo touchpad", the Restreamer windows scrolled
+# only by clicking the scrollbar), and the pointer ran at Accel Speed 0. ScrollPixelDistance 15
+# (libinput's default) + AccelSpeed 0.3 were applied live on both stream boxes with xinput set-prop
+# and are the shared baseline for every Linux OBS box. verify-imag.sh check (w) and the baseline
+# grader's touchpad row read this file back and fail loud if it is dropped or carries other values.
 mkdir -p /etc/X11/xorg.conf.d
 cat > /etc/X11/xorg.conf.d/30-touchpad-tap.conf <<EOF
-# ${BOX} touchpad usability (#779) -- tap-to-click + natural scroll + gentler scroll,
-# reprovision-durable (matches the live-verified 30-touchpad-tap.conf on the box).
+# ${BOX} touchpad usability (#779) -- tap-to-click + natural scroll + libinput's scroll step +
+# a faster pointer (issue 1465, 23.10.2026), reprovision-durable.
 Section "InputClass"
     Identifier "touchpad tap-to-click"
     MatchIsTouchpad "on"
@@ -547,10 +657,11 @@ Section "InputClass"
     Option "Tapping" "on"
     Option "TappingDrag" "on"
     Option "NaturalScrolling" "on"
-    Option "ScrollPixelDistance" "50"
+    Option "ScrollPixelDistance" "15"
+    Option "AccelSpeed" "0.3"
 EndSection
 EOF
-echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 50)"
+echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 15 + AccelSpeed 0.3)"
 }
 
 # --- issue 1357: panel-brightness keys (the kiosk brightness facet) -------------------------------

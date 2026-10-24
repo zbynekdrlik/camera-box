@@ -3,7 +3,10 @@
 # the scripts/lib/*.sh convention: sourcing runs in the CALLER's shell, so strict mode here would leak.
 #
 # scripts/lib/strih-intercom-hub-unit.sh -- issue 1412: the intercom-hub unit per box ROLE, and verify
-# item 16's crash-loop grade; issue 1424: verify item 9's grade of the hub's HDMI audio legs.
+# item 16's crash-loop grade; issue 1424: verify item 9's grade of the hub's HDMI audio legs; issue
+# 1401: verify item 16's grade of the hub's memory lock; issue 1467: verify item 16's hub version vs the
+# checkout + the decode_rejects note; issue 1438: verify item 9's grade of the hub's card leg (the
+# cutters' USB card opened through ALSA).
 #
 # The base systemd/intercom-hub.service loads the Janus room secret with an unconditional
 #   LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret
@@ -178,5 +181,324 @@ for p in ps:
       *) bad "(hdmi-leg) grading the hub state failed: ${row}" ;;
     esac
   done <<<"$rows"
+  return 0
+}
+
+# strih_intercom_hub_refusal_line OUTPUT -> the line of a refusing hub's output that says why: clap's
+# `error:` line (a hub from before --check-config; clap's LAST line is only its --help hint), else the
+# last non-empty line (anyhow's `Caused by:` cause). Always rc 0.
+strih_intercom_hub_refusal_line() {
+  local out="${1-}" line
+  line="$(printf '%s\n' "$out" | grep -m1 '^error:' || true)"
+  if [ -z "$line" ]; then
+    line="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 || true)"
+  fi
+  printf '%s\n' "${line#"${line%%[![:space:]]*}"}"
+}
+
+# strih_intercom_hub_config_install SRC DST BIN -> setup-strih step 13's install of the routing TOML
+# (issue 1438). Step 13 installs the checkout's routing file but keeps an already-installed hub binary
+# (the hub is upgraded by its own deploy). A routing file that needs a newer hub (the issue-1438 `alsa`
+# adapter) would make the installed hub refuse it at its next restart and crash-loop, so the file is
+# installed only when the installed hub loads it (`BIN --check-config --config SRC`, bounded): a hub
+# that refuses it, or a binary from before the flag, keeps the installed DST and gets one WARNING that
+# names the reinstall. With no hub binary yet (a fresh box: the same step installs the checkout's own
+# build right after) the file is installed. Prints what it did; rc 0, or 1 when the copy itself fails.
+strih_intercom_hub_config_install() {
+  local src="${1:?routing file required}" dst="${2:?install path required}" bin="${3:?hub binary required}" why said
+  if [ -x "$bin" ] && ! why="$(timeout 15 "$bin" --check-config --config "$src" 2>&1)"; then
+    said="$(strih_intercom_hub_refusal_line "$why")"
+    if [ -f "$dst" ]; then
+      echo "  WARNING: the installed hub ${bin} cannot load ${src} -- KEPT the installed ${dst}. Reinstall the hub (sudo mv ${bin} ${bin}.pre-old; re-run setup-strih), then re-run step 13. Hub said: ${said}" >&2
+      return 0
+    fi
+    echo "  WARNING: the installed hub ${bin} cannot load ${src} and no routing file is installed yet -- installing it; reinstall the hub before starting it. Hub said: ${said}" >&2
+  fi
+  install -Dm644 "$src" "$dst" || return 1
+  echo "  routing file ${src} installed -> ${dst}"
+}
+
+# strih_intercom_hub_alsa_leg_grade STATE_URL -> verify item 9's rows for the hub's card legs (issue
+# 1438: the cutters' USB card -- strih-snv's MiniFuse 4, strih-pp's MG-XU -- opened by the hub itself
+# through ALSA, aplay for the cans and arecord for the talkback, no PipeWire) through the caller's
+# ok / bad / note: one row per `alsa` participant on the hub's /api/state. PASS = the card is on the box
+# and every side the participant uses moves audio (the format and the xruns named); FAIL = the card is
+# not on the box, a side is down (its named reason) or not moving audio, or the hub has no alsa facet
+# (a binary from before the card leg); a cutters participant still on `pipewire` (the rollback) is a
+# NOTE; an unreadable hub is a NOTE (item 16 FAILs a dead hub). STRIH_HUB_ALSA_STATE_FILE reads the JSON
+# from a file instead (the test seam). Always rc 0.
+strih_intercom_hub_alsa_leg_grade() {
+  local url="${1:?hub state url required}" json rows row
+  if [ -n "${STRIH_HUB_ALSA_STATE_FILE:-}" ]; then
+    json="$(cat -- "$STRIH_HUB_ALSA_STATE_FILE" 2>/dev/null || true)"
+  else
+    json="$(curl -fsS --max-time 3 "$url" 2>/dev/null || true)"
+  fi
+  if [ -z "$json" ]; then
+    note "(card-leg) the intercom hub state at ${url} is not readable -- the cutters' card leg is graded when the hub answers"
+    return 0
+  fi
+  rows="$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    ps = json.load(sys.stdin).get("participants", [])
+except Exception as e:
+    print("FAIL\tthe intercom hub state is not JSON (%s)" % e)
+    sys.exit(0)
+for p in ps:
+    name = p.get("name", "?")
+    if p.get("adapter") == "pipewire" and p.get("role") == "cutters":
+        print("NOTE\t%s are on the pipewire adapter (the issue-1438 rollback path) -- the card leg is not graded" % name)
+        continue
+    if p.get("adapter") != "alsa":
+        continue
+    a = p.get("alsa")
+    if not a:
+        print("FAIL\t%s: the hub reports no alsa facet (a hub binary from before issue 1438) -- reinstall the hub" % name)
+        continue
+    card, pcm = a.get("card", "?"), a.get("pcm", "?")
+    if not a.get("present"):
+        print("FAIL\t%s: card %s is not on the box -- plug it in; the hub opens it by itself within 30 s (issue 1438)" % (name, card))
+        continue
+    sides, bad = [], []
+    for side, tool in (("playback", "aplay"), ("capture", "arecord")):
+        s = a.get(side)
+        if s is None:
+            continue
+        if not s.get("running"):
+            why = s.get("state", "?")
+            if why == "ready":
+                why = "%s is not moving audio (a PCM another process holds, or it never read)" % tool
+            bad.append("%s %s: %s" % (side, tool, why))
+        else:
+            sides.append("%s %s %s, xruns %s" % (side, s.get("format"), s.get("hw_channels"), s.get("xruns", 0)))
+    if bad:
+        print("FAIL\t%s on %s: %s -- journalctl -u intercom-hub names it (issue 1438)" % (name, pcm, "; ".join(bad)))
+    else:
+        print("OK\t%s on %s: %s" % (name, pcm, "; ".join(sides)))
+' 2>&1 || true)"
+  # The leg runs aplay + arecord (alsa-utils, setup-strih step 4b): a box without them never plays.
+  if [ -n "$rows" ] && ! { command -v aplay && command -v arecord; } >/dev/null 2>&1; then
+    bad "(card-leg) aplay/arecord missing -- apt-get install alsa-utils (setup-strih.sh step 4b, issue 1438)"
+  fi
+  while IFS= read -r row; do
+    case "$row" in
+      OK$'\t'*) ok "(card-leg) ${row#*$'\t'}" ;;
+      FAIL$'\t'*) bad "(card-leg) ${row#*$'\t'}" ;;
+      NOTE$'\t'*) note "(card-leg) ${row#*$'\t'}" ;;
+      '') ;;
+      *) bad "(card-leg) grading the hub state failed: ${row}" ;;
+    esac
+  done <<<"$rows"
+  return 0
+}
+
+# strih_intercom_hub_memlock_grade STATE_URL -> verify item 16's memory-lock row (issue 1401, design
+# 6265012279) through the caller's ok / bad / note. On 14.10.2026 stream-pp ran out of memory and the
+# unlocked hub's SCHED_FIFO hub-mix thread stalled in page faults (711 lost ticks in 6 s). The hub locks
+# its memory before it starts hub-mix and publishes the outcome as `memory_locked` on /api/state: a JSON
+# true PASSes; false FAILs (the running hub's unit has no LimitMEMLOCK=infinity, or the hub was not
+# restarted since setup-strih step 13 installed it); a hub that does not report it FAILs (a binary from
+# before the lock); an unreadable hub is a NOTE (the item's unit rows grade a dead hub).
+# STRIH_HUB_MEMLOCK_STATE_FILE reads the JSON from a file instead (the test seam). Always rc 0.
+strih_intercom_hub_memlock_grade() {
+  local url="${1:?hub state url required}" json row
+  if [ -n "${STRIH_HUB_MEMLOCK_STATE_FILE:-}" ]; then
+    json="$(cat -- "$STRIH_HUB_MEMLOCK_STATE_FILE" 2>/dev/null || true)"
+  else
+    json="$(curl -fsS --max-time 3 "$url" 2>/dev/null || true)"
+  fi
+  if [ -z "$json" ]; then
+    note "(intercom-hub) the hub state at ${url} is not readable -- its memory lock is graded when the hub answers"
+    return 0
+  fi
+  row="$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    state = json.load(sys.stdin)
+except Exception as e:
+    print("FAIL\tthe intercom hub state is not JSON (%s)" % e)
+    sys.exit(0)
+if not isinstance(state, dict):
+    print("FAIL\tthe intercom hub state is not a JSON object")
+elif "memory_locked" not in state:
+    print("FAIL\tthe running hub does not report memory_locked (a binary from before issue 1401) -- deploy the current intercom-hub and restart it")
+elif state["memory_locked"] is True:
+    print("OK\tmemory locked (mlockall): the hub-mix thread never waits on a page fault")
+else:
+    print("FAIL\tmemory NOT locked (memory_locked=%s): under memory pressure hub-mix stalls in page faults (issue 1401) -- the unit needs LimitMEMLOCK=infinity, then systemctl restart intercom-hub; journalctl -u intercom-hub names the errno" % json.dumps(state["memory_locked"]))
+' 2>&1 || true)"
+  case "$row" in
+    OK$'\t'*) ok "(intercom-hub) ${row#*$'\t'}" ;;
+    FAIL$'\t'*) bad "(intercom-hub) ${row#*$'\t'}" ;;
+    *) bad "(intercom-hub) grading the hub memory lock failed: ${row:-no output}" ;;
+  esac
+  return 0
+}
+
+# strih_intercom_hub_version_grade BASE_URL BOX [ROOT] [BIN] -> verify item 16's version + decode rows
+# (issue 1467) through the caller's ok / note; never a FAIL, always rc 0. 23.10.2026 the FOH console's
+# 24-bit VBAN stream was dropped silently by a hub binary built before the 24-bit decode, and a fresh
+# strih installed main's hub, older than its checkout. So:
+#   * the RUNNING hub's version (BASE_URL/api/version), else the version setup-strih recorded next to
+#     the binary (BIN.version, default /usr/local/bin/intercom-hub), against the checkout's workspace
+#     version (strih_checkout_version ROOT, default the checkout this lib lives in): OLDER = a NOTE with the reinstall line (the old binary is
+#     moved aside, never deleted: setup never replaces an installed hub); the same or newer = a PASS;
+#     nothing readable = a NOTE;
+#   * a VBAN participant with decode_rejects > 0 on /api/state (a known stream the hub cannot decode)
+#     = a NOTE naming the legs; an unreadable state adds nothing (the memory-lock row reports it).
+# STRIH_HUB_VERSION_JSON_FILE / STRIH_HUB_DECODE_STATE_FILE read the JSON from files (the test seams).
+strih_intercom_hub_version_grade() {
+  local base="${1:?hub base url required}" box="${2:-<box>}"
+  local root="${3:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+  local bin="${4:-/usr/local/bin/intercom-hub}" want vjson recorded="" sjson rows row tmp
+  want="$(strih_checkout_version "$root" || true)"
+  if [ -n "${STRIH_HUB_VERSION_JSON_FILE:-}" ]; then
+    vjson="$(cat -- "$STRIH_HUB_VERSION_JSON_FILE" 2>/dev/null || true)"
+  else
+    vjson="$(curl -fsS --max-time 3 "${base}/api/version" 2>/dev/null || true)"
+  fi
+  [ -f "${bin}.version" ] && recorded="$(sed -n 's/^version=//p' "${bin}.version" 2>/dev/null | head -n 1 || true)"
+  if [ -n "${STRIH_HUB_DECODE_STATE_FILE:-}" ]; then
+    sjson="$(cat -- "$STRIH_HUB_DECODE_STATE_FILE" 2>/dev/null || true)"
+  else
+    sjson="$(curl -fsS --max-time 3 "${base}/api/state" 2>/dev/null || true)"
+  fi
+  # The two JSON answers go to python as FILES (an environment string is capped at 128 KB, issue 1467
+  # review); python reads its program from the heredoc.
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/strih-hub-version.XXXXXX" 2>/dev/null)" || {
+    note "(intercom-hub) the hub version is not graded: no temp dir"
+    return 0
+  }
+  printf '%s' "$vjson" > "$tmp/version.json" 2>/dev/null || true
+  printf '%s' "$sjson" > "$tmp/state.json" 2>/dev/null || true
+  rows="$(python3 - "$want" "$recorded" "$bin" "$root" "$box" "$tmp/version.json" "$tmp/state.json" <<'PYHUBV' 2>&1 || true
+import json, re, sys
+want, recorded, binp, root, box, vfile, sfile = sys.argv[1:8]
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def key(v):
+    m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?", v or "")
+    if not m:
+        return None
+    pre = m.group(4)
+    ids = []
+    for part in (pre.split(".") if pre else []):
+        ids.append((0, int(part), "") if part.isdigit() else (1, 0, part))
+    # a release sorts after every pre-release of the same triple (semver)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if pre else 1, ids)
+
+running = ""
+try:
+    running = str(load(vfile)["version"])
+except Exception:
+    running = ""
+have, source = (running, "runs") if running else (recorded if recorded not in ("", "unknown") else "", "recorded")
+if not have:
+    print("NOTE\tthe hub version is not readable (no /api/version answer, no recorded %s.version) -- not graded against this checkout's %s" % (binp, want or "unknown version"))
+elif key(want) is None or key(have) is None:
+    print("NOTE\tthe hub %s %s, this checkout is %s -- the versions cannot be compared" % (source, have, want or "unknown"))
+elif key(have) < key(want):
+    verb = "runs" if source == "runs" else "is installed (recorded version, the hub does not answer)"
+    print("NOTE\tthe hub %s %s, OLDER than this checkout's %s -- a VBAN format it cannot decode reads as a silent leg (issue 1467); reinstall: sudo mv %s %s.pre-%s && sudo GH_TOKEN=<token> %s/scripts/setup-strih.sh --box %s (step 13 installs the checkout's hub), then sudo systemctl restart intercom-hub"
+          % (verb, have, want, binp, binp, have, root, box))
+else:
+    print("OK\thub %s %s (this checkout %s)" % ("runs" if source == "runs" else "recorded", have, want))
+
+try:
+    state = load(sfile)
+    legs = [(p.get("name", "?"), int(p.get("decode_rejects") or 0)) for p in state.get("participants", [])
+            if isinstance(p, dict)]
+except Exception:
+    legs = []
+bad = ["%s=%d" % (n, c) for n, c in legs if c > 0]
+if bad:
+    print("NOTE\tdecode_rejects %s -- a known VBAN stream the hub cannot decode (its packets are dropped; journalctl -u intercom-hub names the stream, sender and reason, issue 1467)" % " ".join(bad))
+PYHUBV
+)"
+  rm -rf -- "$tmp" 2>/dev/null || true
+  while IFS= read -r row; do
+    case "$row" in
+      OK$'\t'*) ok "(intercom-hub) ${row#*$'\t'}" ;;
+      NOTE$'\t'*) note "(intercom-hub) ${row#*$'\t'}" ;;
+      '') ;;
+      *) note "(intercom-hub) grading the hub version failed: ${row}" ;;
+    esac
+  done <<<"$rows"
+  return 0
+}
+
+# --- issue 1439: the stream role runs no intercom hub ------------------------------------------------
+# Design revision 6338127636 (owner 22.10.2026: "naco tam je dalsia vrstva?"): on the stream role the
+# console's VBAN program goes straight into the OBS obs-vban source, so setup-strih step 13 installs no
+# hub there and moves a hub an earlier run left behind aside (never deleted: the files stay under
+# STRIH_HUB_ASIDE_DIR/<UTC stamp>/<their absolute path>), and verify item 16 grades "no hub". The paths
+# are seams for the tests (STRIH_HUB_UNIT_FILE / _DROPIN_DIR / _BIN / _CONFIG_DIR / _ASIDE_DIR).
+
+# strih_intercom_hub_leftovers -> the hub files present on this box, one path per line (nothing = none).
+strih_intercom_hub_leftovers() {
+  local p
+  for p in "${STRIH_HUB_UNIT_FILE:-/etc/systemd/system/intercom-hub.service}" \
+           "${STRIH_HUB_DROPIN_DIR:-/etc/systemd/system/intercom-hub.service.d}" \
+           "${STRIH_HUB_BIN:-/usr/local/bin/intercom-hub}" "${STRIH_HUB_CONFIG_DIR:-/etc/intercom-hub}"; do
+    if [ -e "$p" ] || [ -L "$p" ]; then printf '%s\n' "$p"; fi
+  done
+}
+
+# strih_intercom_hub_remove -> setup-strih step 13 on a box that runs no hub: stop + disable a running /
+# enabled hub (BEFORE its unit file moves, so the WantedBy link goes with it), then move every hub file
+# aside, then daemon-reload. Idempotent: a box without a hub prints one line and touches nothing. rc 1 +
+# a stderr line when a stop / disable / move fails (nothing after it is done).
+strih_intercom_hub_remove() {
+  local aside="${STRIH_HUB_ASIDE_DIR:-/var/lib/camera-box/intercom-hub-removed}" stamp p dest moved=0 state
+  # Every state with a job or a process is stopped, not only "active" (`is-active --quiet`): a restart
+  # loop reads activating, and a hub still shutting down can hold the console's UDP port.
+  state="$(systemctl is-active intercom-hub 2>/dev/null || true)"
+  case "$state" in
+    active|activating|reloading|deactivating)
+      systemctl stop intercom-hub || { echo "strih-intercom-hub-unit: could not stop intercom-hub.service" >&2; return 1; }
+      echo "  stopped intercom-hub.service (${state}; the stream role runs no hub, issue 1439)" ;;
+  esac
+  if systemctl is-enabled --quiet intercom-hub 2>/dev/null; then
+    systemctl disable intercom-hub || { echo "strih-intercom-hub-unit: could not disable intercom-hub.service" >&2; return 1; }
+    echo "  disabled intercom-hub.service"
+  fi
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    dest="${aside%/}/${stamp}${p}"
+    if ! { mkdir -p "$(dirname "$dest")" && mv -T -- "$p" "$dest"; }; then
+      echo "strih-intercom-hub-unit: could not move ${p} aside to ${dest}" >&2; return 1
+    fi
+    echo "  moved ${p} aside to ${dest}"
+    moved=1
+  done < <(strih_intercom_hub_leftovers)
+  if [ "$moved" = 1 ]; then
+    systemctl daemon-reload || { echo "strih-intercom-hub-unit: daemon-reload failed after moving the hub aside" >&2; return 1; }
+  else
+    echo "  no intercom hub on this box -- nothing to remove"
+  fi
+  return 0
+}
+
+# strih_intercom_hub_absent_grade WHY -> verify item 16 on a box that runs no hub (WHY = the step gate's
+# reason) through the caller's ok / bad: PASS when no hub file is left and the unit is not running, FAIL
+# naming what is left (a running hub keeps the console's UDP port from the OBS vban source). Always rc 0.
+strih_intercom_hub_absent_grade() {
+  local why="${1-}" left state
+  left="$(strih_intercom_hub_leftovers | tr '\n' ' ')"
+  state="$(systemctl is-active intercom-hub 2>/dev/null || true)"
+  case "$state" in active|activating|reloading|deactivating) left="${left}(intercom-hub.service ${state}) " ;; esac
+  if [ -z "$left" ]; then
+    ok "(intercom-hub) no intercom hub on this box (${why})"
+  else
+    bad "(intercom-hub) this box runs no hub (${why}), but ${left% } is still there -- re-run setup-strih.sh step 13, then restart OBS (issue 1439)"
+  fi
   return 0
 }

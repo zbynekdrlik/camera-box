@@ -271,18 +271,19 @@ fn a_failed_strih_lx_read_stays_empty_and_never_aborts_1360() {
 
 #[test]
 fn windows_boxes_keep_their_powershell_read_1360() {
+    // a Windows fleet box: resolume-snv (stream-snv runs the Linux stream role since issue 1462)
     for (script, call) in [
         (
             "scripts/cadence-alert-watchdog.sh",
-            "fetch_box_log 10.77.9.204",
+            "fetch_box_log resolume.lan",
         ),
         (
             "scripts/ndi-halving-watchdog.sh",
-            "fetch_box_log 10.77.9.204",
+            "fetch_box_log resolume.lan",
         ),
         (
             "scripts/asio-starve-alert-watchdog.sh",
-            "fetch_box_log 10.77.9.204",
+            "fetch_box_log resolume.lan",
         ),
     ] {
         let o = run_case(&format!(
@@ -293,7 +294,7 @@ fn windows_boxes_keep_their_powershell_read_1360() {
     let o = run_case(
         "export STUB_WIN_OUT=\"09:00:00.000: genlock-fifo audit 'NDI cam1': received=77 x WIN-TAIL-TEXT\"\n\
          set --\n. \"$R/scripts/frozen-input-alert-watchdog.sh\"\nset +e\necho 'OUT<<'\n\
-         probe_received 10.77.9.204 'NDI cam1'\necho '>>OUT'",
+         probe_received resolume.lan 'NDI cam1'\necho '>>OUT'",
     );
     assert_windows_read_kept(&o, "frozen-input probe_received (windows)", "77");
 }

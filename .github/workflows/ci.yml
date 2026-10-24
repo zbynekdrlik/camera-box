@@ -79,7 +79,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson; libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -145,7 +145,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs)
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
@@ -209,7 +209,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs)
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@cargo-mutants

@@ -2,7 +2,8 @@
 
 The tool rewrites OBS's own collection JSON once, before the import (OBS stopped). Two uses:
   * stream-pp: the Windows stream collection -> the Linux stream box (keep PRO/Development/PRE/POST,
-    the program ASIO input -> pulse on strih-program-source, the YouTube player and the Windows-only
+    the program ASIO input -> the obs-vban source on lv1's VBAN stream (issue 1439; it was the pulse
+    capture on strih-program-source before), the YouTube player and the Windows-only
     inputs/filters/modules dropped, text_gdiplus -> ft2, images under /srv/obs-media/stream-pp/);
   * strih-pp: the strih-snv collection -> strih-pp (STRIH-SNV -> STRIH-PP, the CG sender, the presenter
     and fohabl hosts of the browser URLs as parameters).
@@ -165,14 +166,25 @@ def test_the_youtube_player_and_the_windows_only_kinds_are_dropped_with_a_reason
     assert post == ["BG", "POST graphic"]
 
 
-def test_the_program_asio_input_becomes_pulse_on_the_program_source():
+def test_the_program_asio_input_becomes_the_vban_source_1439():
+    # issue 1439 (design 6338127636): on the stream role lv1's VBAN `stream` goes straight into the OBS
+    # obs-vban source -- no hub, no PipeWire. Before, this input became the pulse capture.
     m = _mod()
     out, rep = m.port(stream_collection(), _stream_opts(m))
     z = _by_name(out, "Zvuk z mixu")
-    assert z["id"] == z["versioned_id"] == "pulse_input_capture"
-    assert z["settings"] == {"device_id": "strih-program-source"}
+    assert z["id"] == z["versioned_id"] == "net.nagater.obs-vban.source"
+    assert z["settings"] == {"port": 6980, "stream_name": "stream", "ip_from": "", "receive_buffer_ms": 40}
     assert z["uuid"] == "u-Zvuk z mixu" and z["mixers"] == 255
-    assert any(ln.startswith("CONVERT") and "Zvuk z mixu" in ln for ln in rep)
+    assert any(ln.startswith("CONVERT") and "Zvuk z mixu" in ln and "UDP 6980" in ln for ln in rep)
+
+
+def test_program_audio_vban_none_keeps_the_pipewire_capture():
+    m = _mod()
+    a = m._parser().parse_args(["in.json", "out.json", "--preset", "stream-pp", "--presenter-host", "p",
+                                "--program-audio-vban", "none"])
+    out, _rep = m.port(stream_collection(), m.options_from_args(a))
+    z = _by_name(out, "Zvuk z mixu")
+    assert z["id"] == "pulse_input_capture" and z["settings"] == {"device_id": "strih-program-source"}
 
 
 def test_the_program_audio_device_matches_the_seeder():

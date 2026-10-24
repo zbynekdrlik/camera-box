@@ -55,16 +55,25 @@ const MIN_VAR_CACHE_MIB: u32 = 512;
 ///    kernel — the strongest guarantee that the box keeps booting the kernel it was provisioned with.
 #[test]
 fn provisioning_holds_the_appliance_kernel() {
-    // Assert the EXACT hold command (all three meta-packages in one line), not a bare
-    // `apt-mark hold` substring — the latter also matches the explanatory `// ... apt-mark hold`
-    // comment, so it would false-pass even if the real command were deleted.
-    const HOLD_CMD: &str = "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
+    // Assert the EXACT hold command (the lib call that names the fleet kernel line's metas), not a
+    // bare `apt-mark hold` substring, which an explanatory comment would also satisfy. issue 1446:
+    // the held metas are rt_kernel_line_held_metas, the set the base image holds; no `apt-mark hold`
+    // line may name the GA 6.8 meta `linux-image-generic` (a whole word, so `-hwe-24.04` is fine).
+    const HOLD_CMD: &str = "apt-mark hold $(rt_kernel_line_held_metas)";
     for script in SETUP_SCRIPTS {
         let body = read(script);
         assert!(
             body.contains(HOLD_CMD),
             "{script} must run `{HOLD_CMD}` so a surprise kernel can never be installed on the \
              appliance (the auto-installed 6.8.0-124 kernel bricked CAM3/CAM4, #295)"
+        );
+        let ga_hold = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && l.contains("apt-mark hold"))
+            .any(|l| l.split_whitespace().any(|w| w == "linux-image-generic"));
+        assert!(
+            !ga_hold,
+            "{script} must no longer hold the GA 6.8 meta linux-image-generic (issue 1446)"
         );
     }
 }
@@ -300,17 +309,25 @@ fn extract_shell_function(script: &str, name: &str) -> Option<String> {
     Some(out.join("\n"))
 }
 
-/// 6. The base-image builder must PIN the appliance kernel — the same `apt-mark hold` the setup
-///    script uses. Without it the base image can gain a surprise kernel in the window before
-///    setup-device.sh runs, recreating the #295 exposure at the source.
+/// 6. The base-image builder must PIN the appliance kernel. Without it the base image can gain a
+///    surprise kernel in the window before setup-device.sh runs, recreating the #295 exposure at the
+///    source. Issue 1446: the image installs the fleet kernel LINE (the HWE lowlatency meta from
+///    scripts/lib/rt-kernel-plan.sh), so it holds that line's metas, never the GA 6.8 ones.
 #[test]
 fn base_image_builder_holds_the_appliance_kernel() {
-    const HOLD_CMD: &str = "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
+    const HOLD_CMD: &str = "apt-mark hold $(rt_kernel_line_held_metas)";
+    const GA_HOLD_CMD: &str =
+        "apt-mark hold linux-image-generic linux-headers-generic linux-generic";
     let body = read(BASE_IMAGE_BUILDER);
     assert!(
         body.contains(HOLD_CMD),
         "{BASE_IMAGE_BUILDER} must run `{HOLD_CMD}` so the base image can never gain a surprise \
-         kernel before setup-device.sh hardens the box (#307, extends #295)"
+         kernel before setup-device.sh hardens the box (#307, extends #295; issue 1446)"
+    );
+    assert!(
+        !body.contains(GA_HOLD_CMD),
+        "{BASE_IMAGE_BUILDER} must not hold the GA 6.8 metas any more: the image runs the HWE line \
+         (issue 1446)"
     );
 }
 
@@ -722,15 +739,19 @@ fn run_in_sourced_create_usb(source_args: &str, snippet: &str) -> std::process::
         .expect("bash available")
 }
 
-/// The four sibling files create-usb-linux.sh copies into the target — every one MUST exist
+/// The sibling files create-usb-linux.sh copies into the target — every one MUST exist
 /// before the first destructive disk op or the install breaks mid-way (the cam6 failure).
-/// `lib/grub-fast-boot.sh` (#1394) is checked LAST, so the fixture in 17a (only
-/// install-grub-efi.sh present) still names camera-box-grow-root.sh as the first missing file.
-const REQUIRED_SIBLINGS: [&str; 4] = [
+/// `lib/grub-fast-boot.sh` (#1394) and the issue-1446 kernel-line libs are checked LAST, so the
+/// fixture in 17a (only install-grub-efi.sh present) still names camera-box-grow-root.sh as the
+/// first missing file.
+const REQUIRED_SIBLINGS: [&str; 7] = [
     "lib/install-grub-efi.sh",
     "lib/camera-box-grow-root.sh",
     "../systemd/camera-box-grow-root.service",
     "lib/grub-fast-boot.sh",
+    "lib/rt-kernel-plan.sh",
+    "lib/ro-window.sh",
+    "lib/ro-root.sh",
 ];
 
 /// 17a. Behavioural: with a SCRIPT_DIR whose `lib/camera-box-grow-root.sh` is MISSING (the exact
@@ -773,12 +794,12 @@ fn create_usb_dep_check_fails_loud_on_missing_sibling() {
     );
 }
 
-/// 17b. Behavioural: with the REAL scripts dir (all four siblings present), check_required_files
+/// 17b. Behavioural: with the REAL scripts dir (every sibling present), check_required_files
 ///      must succeed (exit 0). Proves the guard does not spuriously block a correct checkout.
 #[test]
 fn create_usb_dep_check_passes_when_all_siblings_present() {
     let scripts = manifest_dir().join("scripts");
-    // Sanity: the real repo genuinely has all four siblings.
+    // Sanity: the real repo genuinely has every sibling.
     for rel in REQUIRED_SIBLINGS {
         let p = scripts.join(rel);
         assert!(
@@ -805,7 +826,7 @@ fn create_usb_dep_check_passes_when_all_siblings_present() {
 fn create_usb_dep_check_runs_before_partitioning() {
     let body = read("scripts/create-usb-linux.sh");
 
-    // The check function exists, names all four siblings, and fails loud (error).
+    // The check function exists, names every sibling, and fails loud (error).
     let func = extract_shell_function(&body, "check_required_files")
         .expect("create-usb-linux.sh must define a check_required_files function (#448)");
     for rel in REQUIRED_SIBLINGS {

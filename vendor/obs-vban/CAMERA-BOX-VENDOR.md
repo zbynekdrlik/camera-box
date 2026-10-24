@@ -26,7 +26,11 @@ grandmaster within 0.2 ppm (finding in issue 1372, comment 5845239583).
 | `src/vban-output-thread.c` | `vban_out_loop` is paced (details below). `send_packet` and `packet_samples_for` are the 0.3.1 packet code, moved into helpers without changing it. `send_silence` sends a zero-filled packet of the same size (issue 1381). `pacing_sleep_until` waits on a Windows high-resolution timer and spins only the last 0.2 ms. The unused `buf_ts_ns` field is removed. |
 | `src/vban-output.c` | Adds the `pacing_target_ms` setting: the "Send Buffer" property (20–200 ms), with a default of 64. |
 | `src/vban-output-internal.h` | Adds `pacing_target_ms` to `struct vban_out_s`. |
-| `data/locale/en-US.ini` | Adds `VBAN.out.prop.pacing_target_ms="Send Buffer"`. |
+| `data/locale/en-US.ini` | Adds `VBAN.out.prop.pacing_target_ms="Send Buffer"` and (issue 1439) `VBAN.src.prop.receive_buffer_ms="Receive Buffer (ms)"`. |
+| `src/vban-receive-timeline.h` | NEW (issue 1439). The pure receive-timeline decision of the VBAN SOURCE (see below). No OBS dependency; `tests/vban_receive_timeline_parity_1439.rs` compiles it and pins it to `src/vban_receive_timeline.rs`. |
+| `src/vban-source.c` | Issue 1439. The receive callback stamps every packet from the receive timeline instead of `arrival − length`, outputs a lost packet as exactly its slot -- concealed or silence (0.3.1 padded it with copies of the next packet) -- plays a reordered packet in its slot (the store kept in slot order), adds the `receive_buffer_ms` setting ("Receive Buffer (ms)", 10–500, default 40, read at create/update only) and logs the 10 s `obs-vban receive:` status line. |
+| `src/vban-conceal.h` | NEW (issue 1439, ROZHODNUTÉ 6352253147 b). The pure sample math of a concealed slot: the previous packet's samples with raised-cosine fades in from the last sample handed out and out toward the next packet. No OBS dependency, no libm; `tests/vban_conceal_parity_1439.rs` pins it to `src/vban_conceal.rs`. |
+| `src/vban-sample-io.h` | NEW (issue 1439). One sample read and written in a packet's own libobs sample format (the five the callback hands over), for the concealed slot. |
 
 How the paced `vban_out_loop` works:
 
@@ -79,9 +83,125 @@ The second line comes every 10 s. The counters are cumulative since the thread s
 (`counters=reset`); a Send Buffer change logs `counters=kept`. `late_max_ms` is the largest
 lateness of an audio packet in the window. `dest=` is the resolved receiver address and port.
 
+### The receive timeline (`vban-receive-timeline.h`, issue 1439)
+
+The Linux OBS boxes take program audio as a VBAN stream into this plugin's SOURCE. 0.3.1 stamped
+every packet at its arrival minus its length, so the sender's network jitter reached OBS (which
+mixes at 0 ms audio buffering) and a late packet was a click. The timeline instead:
+
+- **Anchor.** The first packet is stamped at arrival − length + R. R is the fixed Receive Buffer
+  (default 40 ms, clamped 10–500), read at create/update only, never adapted at runtime. R is
+  measured from the packet's start, so the line uses max(R, one packet + 10 ms), fixed at the anchor
+  (one `obs-vban receive buffer:` warning names both when it lifts R). Within the first second of the
+  sender's audio a packet that arrived earlier against the line moves the line to it: the anchor is
+  the EARLIEST arrival of that second (ROZHODNUTÉ 6343922049), and after it the latency is held.
+- **Hold (ROZHODNUTÉ 6345255813).** That first second is never output: the anchor, every full
+  re-anchor and the packets ending within the window refine and fold but reach OBS as nothing. The
+  first in-time packet past it starts the output on the final line, so libobs never sees a stamp
+  step (it would append one under 70 ms and walk it out at the stamp-basis ASRC's 300 ppm). ~1 s of
+  silence at OBS start and after a full re-anchor.
+- **Playout deadline (ROZHODNUTÉ 6347872706).** The source emits on its own clock, by every slot's
+  deadline (its stamp − 2 ms), never on a packet's arrival.
+  - The receive callback only decides and stores an in-time packet for its slot; it only wakes an idle
+    worker.
+  - A worker thread per source (`vban-src-out`) hands the slots to libobs in order, on the line that
+    runs at the fitted sender rate. The deadline is the DECISION point (review round 5): a slot whose
+    packet is stored goes out at the worker's next look (at most 5 ms after it arrived, about R before
+    its stamp); a slot whose packet is missing at its deadline goes out then as silence of exactly that
+    slot. While the worker wakes within the 2 ms margin, libobs never underruns, never clears the source
+    and never grows the mix's buffering; a slot handed after its own stamp is counted (`emit_missed=`
+    on the status line, a FAIL in verify item 9).
+  - A packet that comes after its slot went out is dropped (`late`). A packet is in time with up to
+    R − one packet − 2 ms of delay. `emit_late_ms=` is the window's latest slot against its deadline
+    (negative while stored packets go out ahead of it).
+  - The worker sleeps to its next look (`os_sleepto_ns`: the earlier of the deadline and 5 ms on; on
+    Linux with a 1 ns timer slack), waits on an event while idle, holds the lock only for a decision
+    and a copy, and outputs after it.
+  - It is spawned at the end of `update()`, and stopped and joined at its start and in `destroy()`,
+    before the timeline is read or freed. `update()` runs whole under its own mutex.
+  - A stretch starves once a slot's deadline is more than 1 s after the last in-time arrival: nothing
+    more goes out and the next packet re-anchors.
+- **Lead-in (review round 5).** A stretch's output always starts with an in-time packet (a late packet
+  before it is dropped, nothing sent). Before its slot the worker sends silence from its own now + the
+  2 ms margin up to that slot's stamp, ending exactly there. A stretch's first chunk lands far from
+  where the source's previous audio ended: past 2 s (`MAX_TS_VAR`) libobs resets the source's timing
+  and puts the chunk at the instant it arrived, under 2 s (a starve after a ~1 s outage) the cleared
+  source places it at its stamp; with the lead-in the output lands on its stamp either way (without
+  it the new stretch once started one R early).
+- **Fit.** A least-squares line of arrival over the sender's sample position, over the last 64
+  one-second buckets, used from 10 buckets. A packet more than 10 ms late against the line is not
+  folded, so a gap's delayed packets never pull the line late.
+- **Stamps.** Slewed toward the fitted RATE (at most 5 ppm per update, clamped ±500 ppm), rebased on
+  every change, so they never jump. A phase term toward `fit + R` joins only while the stamps are more
+  than R/4 off it (a real sender-clock event), until they are back inside that dead band; inside it the
+  latency is constant to the sample. The genlock ASRC (`basis=stamp`, libobs
+  `genlock_audio_asrc_placement`) resamples the sender's rate to the mix.
+- **Loss.** A slot whose packet is not there at its deadline is one slot, stamped on the same line,
+  counted `lost`: CONCEALED (ROZHODNUTÉ 6352253147 b) when its run is at most 3 slots between two
+  received packets -- decided at the deadline from what is stored then, the previous packet's samples
+  faded in from the last sample and out toward the next packet (`vban-conceal.h`), counted
+  `concealed` -- else silence.
+- **Reorder (ROZHODNUTÉ 6352253147 a).** A packet up to 63 indexes behind the last one whose index has
+  not come and whose slot has not gone out (in an emitting, not starved stretch) is stored for its
+  slot and played in it (`reordered=`); it never moves the line or the fit. A duplicate, a packet
+  whose slot went out, one 64 behind, one in the hold or a starved stretch is dropped and counted
+  (`stale=`). The loss line is logged by the worker when a run of missing slots ends -- written only
+  once nothing more is due at that look, so a log write never delays a slot -- never at gap
+  detection.
+- **Reconfiguration.** Another port, stream name or host starts a new timeline. `update()` asks for
+  the reset BEFORE it lets the new sender in (`vban_src_string_changes`, the predicate
+  `update_string()` uses), and again after.
+- **Late = lost.** A packet whose slot already went out (as silence, at its deadline) is dropped and
+  counted (`late`); the latency never moves (the round-3 late shift is withdrawn). The late fill of
+  rounds 4-6 (a step of one or two mix windows, or with no encoder a mix buffering that grew by the
+  outage) is gone with the deadline: every loss and hiccup holds the realized latency.
+- **Re-anchor (one counted event, then the hold).** A starve -- no packet in time for 1 s on our clock
+  (an outage, a sender pause, every packet late on a delay step), `reason=starve`, nothing filled
+  after the fact -- a `nuFrame` further behind (a sender restart), an index jump of more than 2 s of
+  audio, another rate/channel count/R, or a fit that cannot hold (rate beyond ±500 ppm, stamps more
+  than R off `fit + R`). Packets still in time never re-anchor; when none of them folds for 3 s the
+  status line says `fit=frozen`. A slot is one packet, so a sender whose packet size VARIES is not
+  supported: every size change is a `format` re-anchor, logged at most once per status period.
+
+**Every Windows OBS gets it too.** Both Windows genlock builds compile this `vban-source.c`, and a
+FULL bundle deploy replaces `obs-vban.dll` on every Windows OBS box (the pacing section's note). A
+Windows VBAN SOURCE then stamps on the timeline: R (40 ms by default) more latency, a lost packet is
+silence, the status line is logged. Before the first FULL deploy that carries it, read each Windows
+box's scene collections for `net.nagater.obs-vban.source` (read-only); no box was read for this.
+The same holds for the Linux strih-role boxes (strih-snv, strih-pp): their strih bundle loads
+`obs-vban.so` from now on, and a VBAN source dormant in a collection ported from Windows would come
+alive and could take the intercom hub's UDP port. Read their collections the same way first.
+
+Log lines:
+
+```
+obs-vban receive anchored: source 'Zvuk z mixu' frame=… rate=48000 ch=2 receive_buffer_ms=40 -- holding its first second
+obs-vban receive emitting: source 'Zvuk z mixu' frame=… margin_ms=… after the first second's hold -- every slot goes out by 2 ms before its stamp
+obs-vban receive: received=… lost=… late=… re_anchors=… stale=… reordered=… concealed=… silence_ms=… max_late_ms=… sender_ppm=… phase_ms=… fit=… emit_late_ms=… emit_missed=… receive_buffer_ms=40 rate=48000 ch=2 port=6980 stream='stream' source='Zvuk z mixu'
+obs-vban receive late: source '…' frame=… late_ms=… -- dropped, its slot went out without it, on the anchored line (late=…)
+obs-vban receive re-anchor: source '…' reason=starve|backward|jump|format|config|fit frame=… starve_ms=… re_anchors=… late=… -- holding its first second
+obs-vban receive re-anchor: … reason=format … -- holding its first second (frames 256 -> 128, rate … -> …, ch … -> …: a varying packet size is not supported; N more not logged in the last period)
+obs-vban receive buffer: source '…' receive_buffer_ms=10 is not above one packet (5.33 ms) + 10 ms: using 15.33 ms
+obs-vban receive worker: source '…' stopped (update|destroy)
+source '…': missing N packet(s) before frame F -- concealed: the previous packet repeated, crossfaded
+source '…': missing N packet(s) before frame F -- silence for those slots
+source '…': received N packets, lost N (N concealed), late N, reordered N, stale N, N re-anchor(s)
+```
+
+The status line comes every 10 s; its counters are cumulative since the source was created.
+`max_late_ms` is the largest arrival − stamp of an on-time packet in that 10 s window, so it is
+negative while packets arrive with margin (about −(R − one packet) plus jitter: the stamp is the
+packet's start, its arrival its end, −34.7 ms at R 40 / 256 frames / 48 kHz); a packet past its
+stamp is dropped (its slot silence) and counted in `late`. An R no longer than
+one packet + 10 ms is lifted to that floor (ROZHODNUTÉ 6343922049), so the margin is never below
+10 ms.
+
 ## Re-basing onto a newer upstream
 
 1. Import the new tag verbatim in its own commit, and update the pin in `vendor/README.md`.
 2. Re-apply the files in the table above.
 3. `tests/vban_pacing_parity_1372.rs` and the pwsh assert step in both `windows-genlock*.yml`
-   files fail if the pacing is lost.
+   files fail if the pacing is lost. `tests/vban_receive_timeline_parity_1439.rs`,
+   `tests/vban_receive_wiring_1439.rs`, `tests/vban_source_loss_1439.rs` and the same pwsh step fail if
+   the receive timeline is lost; `tests/vban_conceal_parity_1439.rs`, `tests/vban_source_reorder_1439.rs`
+   and `tests/vban_source_conceal_1439.rs` if the reorder or the concealment is.

@@ -57,6 +57,11 @@ if ! declare -F strih_https_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-https.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-https.sh"
 fi
+# issue 1453: the intercom's public path -- the outbound tunnel + TURN (also step 16i / item 45).
+if ! declare -F strih_interkom_public_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-interkom-public.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-interkom-public.sh"
+fi
 # issue 1394: the cambox log sink's own source-only lib (setup-strih step 16k, verify-strih item 46).
 if ! declare -F strih_cambox_log_sink_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-cambox-log-sink.sh
@@ -71,6 +76,11 @@ fi
 if ! declare -F strih_ci_artifact_fetch >/dev/null; then
   # shellcheck source=scripts/lib/strih-ci-artifact.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-ci-artifact.sh"
+fi
+# issue 1470: the A/V-sync dock on the stream role (setup-strih step 16g's layout seed, verify-strih item 47).
+if ! declare -F obs_box_avsync_dock_seed >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-avsync-dock.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-avsync-dock.sh"
 fi
 # issue 1412: the per-box step gate (setup-strih / verify-strih skip a step by a box fact).
 if ! declare -F obs_box_step_applies >/dev/null; then
@@ -91,6 +101,21 @@ fi
 if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-hub-unit.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-hub-unit.sh"
+fi
+# issue 1439: verify item 9 on a box whose program audio is the console's VBAN into the obs-vban source.
+if ! declare -F strih_program_vban_grade >/dev/null; then
+  # shellcheck source=scripts/lib/strih-program-vban.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-program-vban.sh"
+fi
+# issue 1439 (ROZHODNUTE 6360417876): the VBAN-only leg on a stream box's second NIC (setup step 13, item 9).
+if ! declare -F strih_vban_leg_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-vban-leg.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-vban-leg.sh"
+fi
+# issue 1465 item 3: the stream role's locked operator PipeWire (setup step 12 on the stream role, item 9b).
+if ! declare -F stream_operator_audio_install >/dev/null; then
+  # shellcheck source=scripts/lib/stream-operator-audio.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/stream-operator-audio.sh"
 fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
@@ -288,8 +313,32 @@ strih_lx_seed_manifest_json() {
   printf '  "outputs": [\n'
   { strih_lx_ndi_outputs; strih_lx_ndi_republishes; } | sed 's/.*/    "&",/' | sed '$ s/,$//'
   printf '  ],\n'
-  printf '  "camera_latency_ms": %s\n' "$lat"
+  # issue 1439 phase 2: a strih box whose facts declare the console's VBAN program (strih-snv) carries
+  # the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap switches
+  # (keeping the operator's mixer state); a hub-fed strih (strih-pp) carries neither, byte-identical.
+  local vban ai
+  if vban="$(strih_lx_program_audio_vban_json)"; then
+    ai="$(strih_lx_program_audio_input)" || return 1
+    printf '  "camera_latency_ms": %s,\n' "$lat"
+    printf '  "program_audio_input": "%s",\n' "$ai"
+    printf '  "program_audio_vban": %s\n' "$vban"
+  else
+    printf '  "camera_latency_ms": %s\n' "$lat"
+  fi
   printf '}\n'
+}
+
+# strih_lx_program_audio_vban_json -> the seed manifest's `program_audio_vban` object of the loaded box
+# (the obs-vban source settings from its facts STRIH_PROGRAM_VBAN_PORT / _STREAMS / _RESERVE_MS, which
+# the loader validated: one plain stream name, two integers), on one line. rc 1, nothing printed, on a
+# box that declares no program VBAN stream (a hub-fed strih). The ONE renderer for both roles' manifests.
+strih_lx_program_audio_vban_json() {
+  local vs vp vr
+  vp="$(strih_lx_program_vban_port)" || return 1
+  [ "$vp" != none ] || return 1
+  vs="$(strih_lx_program_vban_streams)" || return 1
+  vr="$(strih_lx_program_vban_reserve_ms)" || return 1
+  printf '{"port": %s, "stream_name": "%s", "receive_buffer_ms": %s}' "$vp" "$vs" "$vr"
 }
 
 # strih_lx_bundle_artifact -> the strih FULL-build CI artifact name (linux-genlock.yml strih job).
@@ -1149,26 +1198,24 @@ room-${room}: {
 EOF
 }
 
-# strih_janus_ws_jcfg_text LAN_IP -> print the Janus WebSocket transport jcfg: ws BOUND to the LAN
-# address on :8188 (ws_ip), NO wss (TLS terminates on the dev1 front), admin API off. The dev1 nginx
-# front reaches the WS over the LAN; the loopback probe + the hub's plain-RTP session use the HTTP
-# transport (127.0.0.1:8088), so binding WS to the LAN IP (not 0.0.0.0/all interfaces) never removes a
-# needed path. A blank LAN_IP omits ws_ip (Janus default all-interfaces) -- the caller always passes it.
+# strih_janus_ws_jcfg_text -> print the Janus WebSocket transport jcfg: ws BOUND to LOOPBACK
+# 127.0.0.1 :8188 (ws_ip), NO wss (TLS terminates on the box's nginx front), admin API off. Issue
+# 1453: the phones reach Janus ONLY through the intercom hub's /janus relay (nginx `location = /janus`
+# -> 127.0.0.1:8790, the frame allowlist in intercom/hub/src/janus_ws_guard.rs that refuses a
+# plain-RTP join), so no client on the venue LAN or through the tunnel can talk to Janus directly.
+# The hub's own plain-RTP session uses the HTTP transport (127.0.0.1:8088). Any argument (the old
+# LAN IP) is ignored: the bind is never a box fact.
 strih_janus_ws_jcfg_text() {
-  local lan_ip="${1:-}"
-  local ws_ip_line="" box
+  local bind="127.0.0.1" box
   box="$(strih_lx_hostname)" || return 1
-  if [ -n "$lan_ip" ]; then
-    ws_ip_line="    ws_ip = \"${lan_ip}\""
-  fi
   cat <<EOF
-# ${box} intercom Janus WebSocket transport -- GENERATED by setup-strih.sh (issue 1345 M3a).
-# ws BOUND to ${lan_ip} :8188 (the dev1 front reaches it over the LAN), NO wss (TLS on the front); no admin API.
+# ${box} intercom Janus WebSocket transport -- GENERATED by setup-strih.sh (issue 1345 M3a, issue 1453).
+# ws BOUND to ${bind} :8188 (loopback only: phones reach Janus through the intercom hub's /janus relay), NO wss; no admin API.
 general: {
     json = "indented"
     ws = true
     ws_port = 8188
-${ws_ip_line}
+    ws_ip = "${bind}"
     wss = false
     admin_ws = false
     admin_wss = false

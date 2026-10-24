@@ -148,10 +148,10 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 | network-reach | strih-snv stream resolume | ping / OBS-WS :4455 / :8899 — platform-neutral |
 | bundle-state | strih-snv stream resolume | curl :8899 is neutral; the AUTO-RESTART is class-resolved (guarded `systemctl --user` on linux-genlock, `schtasks` on windows-genlock — the dev1 watchdog AND the E2E `[0/8]` self-heal, `.claude/rules/bundle-state-watchdog.md`) |
 | obs-liveness | strih-snv stream resolume | OBS-WS GetStats — neutral; the strih-snv arm keeps `STRIH_HOST`/`STRIH_TARGET_FPS`, and the alert's recovery is class-resolved (`recovery_plan_for`: plain-ssh `systemctl --user restart '*-obs.service'` = strih-obs.service on a linux-genlock box, the `launch-obs-genlock.sh` + win-* MCP plan only on windows-genlock — that planner refuses a Linux box name) |
-| genlock-lock | strih-snv stream imag resolume | the box's own :8899 `genlock_lock` facet; imag `retired` → dropped |
-| render-freeze | strih-snv stream resolume | :8899 `program_render_lagged` / `relock_bursts` |
-| audio-mixer | strih-snv stream resolume | issue 1381: :8899 `audio_mixer_*` (every OBS box's libobs mixer) + `vban_pacer_*` (resolume's obs-vban senders); the consumer polls resolume only while home (`obs_fleet_poll_now`) |
-| obs-handles | strih-snv stream resolume | issue 1406: :8899 `obs_handles*` -- the OBS process's handle count (Windows) or open-fd count (Linux `/proc`); every managed OBS can leak; resolume polled only while home (`obs_fleet_poll_now`) |
+| genlock-lock | strih-snv stream imag resolume strih-pp stream-pp | the box's own :8899 `genlock_lock` facet; imag `retired` → dropped; the PP boxes since issue 1441 |
+| render-freeze | strih-snv stream resolume strih-pp stream-pp | :8899 `program_render_lagged` / `relock_bursts`; PP since issue 1441 |
+| audio-mixer | strih-snv stream resolume strih-pp stream-pp | issue 1381 (PP since issue 1441): :8899 `audio_mixer_*` (every OBS box's libobs mixer) + `vban_pacer_*` (resolume's obs-vban senders); the consumer polls resolume only while home (`obs_fleet_poll_now`) |
+| obs-handles | strih-snv stream resolume strih-pp stream-pp | issue 1406 (PP since issue 1441): :8899 `obs_handles*` -- the OBS process's handle count (Windows) or open-fd count (Linux `/proc`); every managed OBS can leak; resolume polled only while home (`obs_fleet_poll_now`) |
 | audio-lag | strih-snv stream | :8899 `audio_ts_lag_*` from the vendored OBS `audio-telemetry #800` lines — the same on Linux (reads UNKNOWN while no source carries audio, never a page) |
 | vb-matrix | stream | a Windows VB-Audio Matrix process check; strih-snv has none (PipeWire replaced it, issue 1344) |
 | av-step | stream | the av-sync dock is on the stream box only |
@@ -261,10 +261,16 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 
 `strih-pp|strih-pp.lan|linux-genlock|traveling` and `stream-pp|stream-pp.lan|linux-genlock|traveling`:
 NAME rows (dev1 reaches the PP LAN as 10.76.8.x through the companion-pp subnet router, the boxes
-carry 10.77.8.x, so an IP row could never equal `STRIH_IP`), in NO facet but `build-parity`. issue
-1426 added `resolume-pp|resolume-pp.lan|windows-genlock|traveling` (the PP CG PC) the same way. They only make the class
-gate and `strih_platform` read the PP boxes as Linux; a watchdog starts polling one when a facet names
-it. `harness_obs_fleet_list_1296.rs` uses `strih-zz` as its "unknown override" name since strih-pp is
+carry 10.77.8.x, so an IP row could never equal `STRIH_IP`). issue 1426 added
+`resolume-pp|resolume-pp.lan|windows-genlock|traveling` (the PP CG PC) the same way, and all three
+are in `build-parity`. **issue 1441: strih-pp + stream-pp are also in genlock-lock, render-freeze,
+audio-mixer and obs-handles** (they serve every :8899 facet those read; read 18.10.2026). Each
+watchdog reads a traveling row only while it is home (`obs_fleet_is_home` / `obs_fleet_poll_now`;
+render-freeze reads an unfetchable :8899 as SKIP), so a PP box that is off or off the companion-pp
+link never pages. The nightly 04:00 date step's 5-min DEGRADED never pages either (5-min pass +
+2-pass confirm). bundle-state, network-reach and obs-liveness stay SNV-only: their premises
+(Windows schtasks restart, the SNV LAN reference anchors) were not reviewed for PP.
+`harness_obs_fleet_list_1296.rs` uses `strih-zz` as its "unknown override" name since strih-pp is
 a real row now.
 
 ## The last Windows-strih remnants — retired in issue 1317 part 4 (23.9.2026)

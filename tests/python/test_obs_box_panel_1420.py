@@ -35,7 +35,7 @@ def _bash(body, *args, env=None, box="stream-pp"):
 def test_the_config_is_one_bottom_panel_with_taskbar_tray_and_clock():
     r = _bash("obs_box_panel_tint2rc")
     cfg = dict(ln.split(" = ", 1) for ln in r.stdout.splitlines() if " = " in ln and not ln.startswith("#"))
-    assert cfg["panel_items"] == "TSC"            # a box with no known app: no launcher at all
+    assert cfg["panel_items"] == "TSEC"           # a box with no known app: no launcher; E = the layout item (issue 1441)
     assert cfg["panel_position"].startswith("bottom")
     assert cfg["panel_size"] == "100% 30"
     assert cfg["strut_policy"] == "follow_size"
@@ -59,14 +59,17 @@ def _apps_home(tmp_path, units=("strih-obs.service", "bkshading-panel-app.servic
     rd = tmp_path / "rustdesk"
     if rustdesk:
         _exec(rd, "#!/bin/sh\n")
-    return home, {"OBS_BOX_PANEL_SYS_UNIT_DIR": str(sysd), "OBS_BOX_PANEL_RUSTDESK_BIN": str(rd)}
+    # issue 1464: no Chrome of the test host leaks in (dev1 has google-chrome-stable installed)
+    return home, {"OBS_BOX_PANEL_SYS_UNIT_DIR": str(sysd), "OBS_BOX_PANEL_RUSTDESK_BIN": str(rd),
+                  "OBS_BOX_PANEL_CHROME_BIN": str(tmp_path / "no-chrome")}
 
 
 def test_every_app_the_box_has_gets_a_launcher_started_through_its_unit(tmp_path):
     home, env = _apps_home(tmp_path)
     r = _bash('obs_box_panel_launchers "$1"', str(home), env=env)
     rows = [ln.split("|") for ln in r.stdout.splitlines()]
-    assert [x[0] for x in rows] == ["obs", "shading", "restreamer", "rustdesk"], r.stdout + r.stderr
+    # issue 1464: the power button first (the left end) on every box
+    assert [x[0] for x in rows] == ["power", "obs", "shading", "restreamer", "rustdesk"], r.stdout + r.stderr
     ex = {x[0]: x[2] for x in rows}
     assert ex["obs"] == "systemctl --user start strih-obs.service"
     assert ex["shading"] == "systemctl --user start bkshading-panel-app.service"
@@ -77,17 +80,17 @@ def test_every_app_the_box_has_gets_a_launcher_started_through_its_unit(tmp_path
 def test_a_box_without_an_app_gets_no_launcher_for_it(tmp_path):
     home, env = _apps_home(tmp_path, units=("strih-obs.service",), restreamer=False, rustdesk=False)
     r = _bash('obs_box_panel_launchers "$1"', str(home), env=env)
-    assert [ln.split("|")[0] for ln in r.stdout.splitlines()] == ["obs"]
+    assert [ln.split("|")[0] for ln in r.stdout.splitlines()] == ["power", "obs"]
 
 
 def test_the_config_puts_the_launchers_in_front_of_the_taskbar(tmp_path):
     home, env = _apps_home(tmp_path)
     r = _bash('obs_box_panel_tint2rc "$1"', str(home), env=env)
     cfg = [ln for ln in r.stdout.splitlines() if not ln.startswith("#")]
-    assert "panel_items = LTSC" in cfg
+    assert "panel_items = LTSEC" in cfg
     apps = [ln.split(" = ", 1)[1] for ln in cfg if ln.startswith("launcher_item_app = ")]
     assert apps == [str(home / (".local/share/applications/obs-box-panel-%s.desktop" % i))
-                    for i in ("obs", "shading", "restreamer", "rustdesk")]
+                    for i in ("power", "obs", "shading", "restreamer", "rustdesk")]
 
 
 @pytest.mark.parametrize("box", ["stream-pp", "strih-pp", "strih-snv"])
@@ -136,6 +139,16 @@ class Box:
               ' *MainPID*) cat %s/pid 2>/dev/null;; esac\nexit 0\n' % (self.log, self.state, self.state, self.state))
         _exec(self.bin / "wmctrl", '#!/bin/bash\ncat %s/wm 2>/dev/null\nexit 0\n' % self.state)
         _exec(self.bin / "chown", '#!/bin/bash\nexit 0\n')
+        # issue 1464: logind as the desktop user, through systemd-run --user (the stub drops its options
+        # and runs the command); busctl answers `s "yes"` unless state/off or state/reb names another word
+        _exec(self.bin / "systemd-run", '#!/bin/bash\necho "systemd-run $*" >> %s\n'
+              'while [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n' % self.log)
+        _exec(self.bin / "busctl", '#!/bin/bash\ncase "$*" in *CanPowerOff*) f=off;; *CanReboot*) f=reb;; esac\n'
+              'if [ -e %s/$f ]; then cat %s/$f; else printf \'s "yes"\\n\'; fi\n' % (self.state, self.state))
+        self.power = tmp / "bin-local" / "obs-box-power"
+        # issue 1441: the keyboard layout helper's installed path + a stand-in for its live `print` on :0
+        self.kbd_helper = tmp / "lib" / "camera-box" / "obs_box_kbd_layout.py"
+        _exec(self.bin / "kbdpy", '#!/bin/bash\ncat %s/kbd 2>/dev/null\nexit 0\n' % self.state)
         self.proc = tmp / "proc"
         (self.proc / "4242").mkdir(parents=True)
         os.symlink("/usr/bin/tint2", self.proc / "4242" / "exe")
@@ -144,7 +157,14 @@ class Box:
         return {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "STRIH_SESSION_APPS_EUID": "1000",
                 "OBS_BOX_PANEL_PROC": str(self.proc),
                 "OBS_BOX_PANEL_SYS_UNIT_DIR": str(self.tmp / "no-sys-units"),
-                "OBS_BOX_PANEL_RUSTDESK_BIN": str(self.tmp / "no-rustdesk")}
+                "OBS_BOX_PANEL_RUSTDESK_BIN": str(self.tmp / "no-rustdesk"),
+                "OBS_BOX_PANEL_KBD_HELPER": str(self.kbd_helper), "OBS_BOX_PANEL_KBD_PYTHON": str(self.bin / "kbdpy"),
+                # issue 1458: the recordings helper's installed path; no pcmanfm binary = no launcher here
+                "OBS_BOX_PANEL_FILES_HELPER": str(self.tmp / "lib" / "camera-box" / "obs_box_recordings.py"),
+                "OBS_BOX_PANEL_FILES_BIN": str(self.tmp / "no-pcmanfm"),
+                # issue 1464: the power program's installed path (never the real /usr/local/bin); no Chrome
+                "OBS_BOX_PANEL_POWER_HELPER": str(self.power),
+                "OBS_BOX_PANEL_CHROME_BIN": str(self.tmp / "no-chrome")}
 
     def with_obs(self):
         ud = self.home / ".config" / "systemd" / "user"
@@ -164,7 +184,9 @@ def test_install_writes_config_and_unit_enables_and_never_starts(box):
     r = _bash('obs_box_panel_install "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=box.env())
     assert r.returncode == 0, r.stderr
     cfg = box.home / ".config" / "tint2" / "tint2rc"
-    assert cfg.read_text() == _bash("obs_box_panel_tint2rc").stdout
+    # issue 1441: the config names the keyboard helper's installed path, so render it with the box's seams
+    # issue 1464: every box has at least the power launcher, so render it for the box's home
+    assert cfg.read_text() == _bash('obs_box_panel_tint2rc "$1"', str(box.home), env=box.env()).stdout
     unit = box.home / ".config" / "systemd" / "user" / "obs-box-panel.service"
     assert unit.read_bytes() == (REPO / "systemd" / "obs-box-panel.service").read_bytes()
     calls = box.calls()
@@ -194,13 +216,16 @@ def _healthy(box):
     (box.state / "act").write_text("active\n")
     (box.state / "pid").write_text("4242\n")
     (box.state / "wm").write_text("0x01 -1 tint2.Tint2 strih-pp tint2\n0x02 0 obs.obs strih-pp OBS\n")
+    (box.state / "kbd").write_text("US\n")
 
 
-def test_a_healthy_panel_passes_six_rows(box):
+def test_a_healthy_panel_passes_nine_rows(box):
     _healthy(box)
     rows = _rows(box)
-    assert [st for st, _ in rows] == ["OK"] * 6, rows      # issue 1448: + (panel-discord) on the stream role
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "6"
+    # issue 1448: + (panel-discord) on the stream role; issue 1441: + (panel-kbd); issue 1458: + (panel-files);
+    # issue 1464: + (panel-power)
+    assert [st for st, _ in rows] == ["OK"] * 9, rows
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "9"
 
 
 def test_install_writes_the_obs_launcher_and_its_icon(box):
@@ -234,9 +259,13 @@ def test_each_broken_piece_fails_its_row(box):
     (box.state / "act").write_text("failed\n")
     (box.state / "wm").write_text("0x02 0 obs.obs strih-pp OBS\n")
     (box.state / "installed").unlink()
+    box.kbd_helper.write_text("# old\n")
+    box.power.write_text("# old\n")
     rows = dict((d.split(")", 1)[0][1:], st) for st, d in _rows(box))
     assert rows == {"panel-pkg": "FAIL", "panel-config": "FAIL", "panel-launchers": "OK", "panel-unit": "FAIL",
-                    "panel-discord": "FAIL", "panel-window": "FAIL"}   # the stub's dpkg state covers discord too
+                    "panel-discord": "FAIL", "panel-kbd": "FAIL", "panel-files": "FAIL",
+                    "panel-power": "FAIL",
+                    "panel-window": "FAIL"}   # the stub's dpkg state covers discord and pcmanfm too
 
 
 def test_no_window_list_is_a_note_not_a_failure(box):

@@ -91,9 +91,9 @@ def test_the_pp_plan_runs_the_setup_strih_arm_per_box_dialling_the_fleet_name():
 def test_a_pp_box_rides_along_the_snv_boxes_in_canonical_order():
     rc, out, err = _plan("resolume-snv,stream-pp,stream-snv,strih-snv,strih-pp")
     assert rc == 0, err
-    assert "boxes=strih-snv,strih-pp,stream-pp,stream-snv,resolume-snv" in out
+    assert "boxes=strih-snv,stream-snv,strih-pp,stream-pp,resolume-snv" in out
     order = [out.index("FLEET PLAN: box=%s " % b) for b in
-             ("strih-snv", "strih-pp", "stream-pp", "stream-snv", "resolume-snv")]
+             ("strih-snv", "stream-snv", "strih-pp", "stream-pp", "resolume-snv")]
     assert order == sorted(order)
 
 
@@ -321,7 +321,7 @@ def test_the_plan_and_execute_route_a_box_by_the_same_predicate():
     assert 'if fleet_box_runs_setup_strih "$b"; then emit_strih_lx_plan' in plan
     r = _sourced("fleet_deploy_order")
     order = r.stdout.split()
-    assert order == ["strih-snv", "strih-pp", "stream-pp", "stream-snv", "imag", "resolume-snv"]
+    assert order == ["strih-snv", "stream-snv", "strih-pp", "stream-pp", "imag", "resolume-snv"]
     assert len(order) == len(set(order))
 
 

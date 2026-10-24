@@ -38,9 +38,13 @@ strih_box_fact_keys() {
     STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
     STRIH_HDMI_OUTPUT_BACKEND \
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
+    STRIH_PROGRAM_VBAN_STREAMS STRIH_PROGRAM_VBAN_PORT STRIH_PROGRAM_VBAN_RESERVE_MS \
+    STRIH_PROGRAM_AUDIO_INPUT \
+    STRIH_PROGRAM_VBAN_LEG STRIH_PROGRAM_VBAN_LEG_ADDR STRIH_PROGRAM_VBAN_SENDER \
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
-    STRIH_HDMI_OUTPUTS
+    STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC \
+    STRIH_STREAM_DEV_SCENE
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -142,6 +146,28 @@ strih_box_hdmi_outputs_ok() {
   [ "$n" -ge 1 ] && [ "$n" -le 2 ]
 }
 
+# Issue 1439: the bounds of the obs-vban source's fixed "Receive Buffer" (R, ms), the same clamp as
+# VBAN_RECV_RESERVE_MS_MIN / _MAX in vendor/obs-vban/src/vban-receive-timeline.h (test-pinned).
+STRIH_BOX_VBAN_RESERVE_MS_MIN=10
+STRIH_BOX_VBAN_RESERVE_MS_MAX=500
+
+# _strih_box_vban_stream_name NAME -> 0 iff NAME is a VBAN stream name: 1..16 characters (the VBAN
+# header's streamname field), letters, digits, `.` `_` `-`. The sets are spelled out (a bracket RANGE
+# follows the locale in bash).
+_strih_box_vban_stream_name() {
+  local up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789'
+  [[ "${1-}" =~ ^[${up}${lo}${dg}._-]{1,16}$ ]]
+}
+
+# _strih_box_obs_input_name NAME -> 0 iff NAME is a plain OBS input name: 1..64 characters, letters,
+# digits, space, `.` `_` `-` `(` `)`, no space first or last, and not the `none` sentinel. The sets are
+# spelled out (a bracket RANGE follows the locale in bash).
+_strih_box_obs_input_name() {
+  local up='ABCDEFGHIJKLMNOPQRSTUVWXYZ' lo='abcdefghijklmnopqrstuvwxyz' dg='0123456789' v="${1-}"
+  [ "$v" != none ] || return 1
+  [[ "$v" =~ ^[${up}${lo}${dg}._()-]([${up}${lo}${dg}\ ._()-]{0,62}[${up}${lo}${dg}._()-])?$ ]]
+}
+
 # strih_box_validate NAME  (stdin: the parsed KEY=value lines) -> rc 0 iff the facts are complete and
 # coherent for box NAME; else one `strih-box <NAME>: ...` stderr line per problem, rc 1. Order: a
 # missing key, then every TODO_OWNER value (all named, then stop -- a template is not "malformed"),
@@ -238,6 +264,82 @@ strih_box_validate() {
     on | off) ;;
     *) echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_SAMPLER '${f[STRIH_PROGRAM_AUDIO_SAMPLER]}' must be on or off" >&2; bad=1 ;;
   esac
+  # issue 1439: the program audio a box takes as VBAN straight from the console into the obs-vban source
+  # (no intercom hub forwarding, no PipeWire): the stream name, the UDP port OBS binds, the fixed Receive
+  # Buffer R (ms) and (issue 1462) the name of that OBS input (stream-pp `Zvuk z mixu`, stream-snv `mbc`,
+  # strih-snv `ASIO zvuk`). The stream role takes exactly ONE stream (its hub is gone). The strih role
+  # (phase 2, addendum 6338457001) declares all four -- one stream on its own port, the hub keeps 6980 --
+  # or all four `none`: a hub-fed strih (strih-pp) until its console sends it a program stream.
+  local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
+  local ai="${f[STRIH_PROGRAM_AUDIO_INPUT]}"
+  if [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
+    :   # a hub-fed strih: its program is the hub's program_out (its STRIH_INTERCOM_CONFIG)
+  else
+    if [ "${f[STRIH_ROLE]}" = strih ] && { [ "$vs" = none ] || [ "$vp" = none ] || [ "$vr" = none ] || [ "$ai" = none ]; }; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS / _PORT / _RESERVE_MS / STRIH_PROGRAM_AUDIO_INPUT are all none (a hub-fed strih) or all set on the strih role (issue 1439)" >&2; bad=1
+    fi
+    _strih_box_obs_input_name "$ai" \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_INPUT '${ai}' must be the OBS program-audio input's name (1..64 letters, digits, space, . _ - ( ), no space first or last)" >&2; bad=1; }
+    [ "$vs" != none ] && _strih_box_vban_stream_name "$vs" \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_STREAMS '${vs}' must be ONE VBAN stream name (1..16 letters, digits, . _ -) (the console's program stream)" >&2; bad=1; }
+    if [[ ! "$vp" =~ ^[123456789][0123456789]{3,4}$ ]] || [ "$vp" -lt 1024 ] || [ "$vp" -gt 65535 ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_PORT '${vp}' must be the UDP port OBS receives on (1024..65535)" >&2; bad=1
+    fi
+    if [[ ! "$vr" =~ ^[123456789][0123456789]{0,2}$ ]] || [ "$vr" -lt "$STRIH_BOX_VBAN_RESERVE_MS_MIN" ] || [ "$vr" -gt "$STRIH_BOX_VBAN_RESERVE_MS_MAX" ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_RESERVE_MS '${vr}' must be the fixed Receive Buffer in ms (${STRIH_BOX_VBAN_RESERVE_MS_MIN}..${STRIH_BOX_VBAN_RESERVE_MS_MAX})" >&2; bad=1
+    fi
+  fi
+  # issue 1439 (ROZHODNUTÉ 6360417876, owner 23.10.2026): the VBAN-only leg on the console's audio VLAN
+  # (scripts/lib/strih-vban-leg.sh). STRIH_PROGRAM_VBAN_LEG = `mac:<MAC>` (a second NIC, its MAC lower-case
+  # as sysfs prints it; stream-snv) | `vlan:<id>` (a tagged VLAN 1..4094 on the rig NIC; strih-snv, the
+  # supervisor's 23.10.2026 10:31 scope) | none. _LEG_ADDR = the box's /32 on it. STRIH_PROGRAM_VBAN_SENDER =
+  # the console that sends (none = the leg passes only ping; a sender needs STRIH_PROGRAM_VBAN_PORT), in
+  # the address's /24 (the policy route for the ping replies covers that /24); neither is the rig address.
+  # Every role (the strih role's own VBAN program is phase 2).
+  local lg="${f[STRIH_PROGRAM_VBAN_LEG]}" la="${f[STRIH_PROGRAM_VBAN_LEG_ADDR]}" ls="${f[STRIH_PROGRAM_VBAN_SENDER]}"
+  local hx='[0123456789abcdef]' dg='[0123456789]' nz='[123456789]'
+  if [ "$lg" = none ]; then
+    [ "${la}:${ls}" = none:none ] \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' / STRIH_PROGRAM_VBAN_SENDER '${ls}' must be none while STRIH_PROGRAM_VBAN_LEG is none" >&2; bad=1; }
+  else
+    case "$lg" in
+      mac:*) [[ "${lg#mac:}" =~ ^${hx}${hx}(:${hx}${hx}){5}$ ]] \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG '${lg}': the MAC must be six lower-case hex pairs joined by : (as /sys/class/net/<if>/address prints it)" >&2; bad=1; } ;;
+      vlan:*) if [[ ! "${lg#vlan:}" =~ ^${nz}${dg}{0,3}$ ]] || [ "${lg#vlan:}" -gt 4094 ]; then
+          echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG '${lg}': the VLAN id must be 1..4094 (no leading zero)" >&2; bad=1
+        fi ;;
+      *) echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG '${lg}' must be mac:<MAC> (a second NIC), vlan:<id> (a tagged VLAN on the rig NIC) or none" >&2; bad=1 ;;
+    esac
+    if ! _strih_box_ipv4 "$la"; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' must be the box's IPv4 address on the leg" >&2; bad=1
+    elif [ "$la" = "${f[STRIH_IP]}" ]; then
+      echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR '${la}' must not be the rig address STRIH_IP" >&2; bad=1
+    fi
+    if [ "$ls" != none ]; then
+      # `IP` sends to STRIH_PROGRAM_VBAN_PORT; `IP:P1,P2` names its own UDP ports (1024..65535, comma-joined)
+      local lsp="" p
+      if [ "${ls#*:}" != "$ls" ]; then
+        lsp="${ls#*:}"; ls="${ls%%:*}"
+        for p in ${lsp//,/ }; do
+          if [[ ! "$p" =~ ^${nz}${dg}{3,4}$ ]] || [ "$p" -gt 65535 ]; then
+            echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER port '${p}' must be a UDP port 1024..65535 (IP:P1,P2)" >&2; bad=1
+          fi
+        done
+        [[ "$lsp" =~ ^[0123456789]+(,[0123456789]+)*$ ]] \
+          || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER ports '${lsp}' must be comma-joined numbers (IP:P1,P2)" >&2; bad=1; }
+      fi
+      if ! _strih_box_ipv4 "$ls"; then
+        echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' must be the console's IPv4 address, or none (the leg passes only ping)" >&2; bad=1
+      elif _strih_box_ipv4 "$la"; then
+        [ "${la%.*}" = "${ls%.*}" ] \
+          || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' must be in the leg's /24 (${la%.*}.0/24, STRIH_PROGRAM_VBAN_LEG_ADDR)" >&2; bad=1; }
+        [ "$la" != "$ls" ] \
+          || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_LEG_ADDR and STRIH_PROGRAM_VBAN_SENDER must differ (both '${la}')" >&2; bad=1; }
+      fi
+      [ -n "$lsp" ] || [ "${f[STRIH_PROGRAM_VBAN_PORT]}" != none ] \
+        || { echo "strih-box ${name}: STRIH_PROGRAM_VBAN_SENDER '${ls}' needs the UDP port it sends to (STRIH_PROGRAM_VBAN_PORT is none; or name it, IP:PORT)" >&2; bad=1; }
+    fi
+  fi
   # issue 1412 slice B: the NDI program a stream box receives (`none` on a strih), and the venue whose
   # boxes list each other as NDI senders (snv = the obs-fleet ndi-sender facet; any other venue = the
   # STRIH_IP of every fact file of that venue, scripts/lib/obs-box-role.sh).
@@ -294,6 +396,26 @@ strih_box_validate() {
       fi
     done
   done
+  # issue 1453: whether the intercom page is published off the LAN (the outbound Cloudflare Tunnel +
+  # TURN, scripts/lib/strih-interkom-public.sh). `yes` needs an intercom site to publish, so never on
+  # the stream role.
+  case "${f[STRIH_HTTPS_PUBLIC]}" in
+    no) ;;
+    yes)
+      if [ "${f[STRIH_HTTPS_INTERKOM_HOSTS]}" = none ]; then
+        echo "strih-box ${name}: STRIH_HTTPS_PUBLIC=yes needs an intercom site (STRIH_HTTPS_INTERKOM_HOSTS is none)" >&2; bad=1
+      fi ;;
+    *) echo "strih-box ${name}: STRIH_HTTPS_PUBLIC '${f[STRIH_HTTPS_PUBLIC]}' must be yes or no" >&2; bad=1 ;;
+  esac
+  # issue 1462 (design 6379124377): the stream box's Development design. nested-pro = the issue-1380 SNV
+  # design (the nested PRO carries the measurement audio the E2E reads), clip = the stream-pp YouTube-safe
+  # measurement clip; one box never runs both (two QPSK markers in one program).
+  case "${f[STRIH_STREAM_DEV_SCENE]}:${f[STRIH_ROLE]}" in
+    nested-pro:stream|clip:stream|none:strih) ;;
+    none:stream) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE=none on the stream role -- it needs nested-pro or clip" >&2; bad=1 ;;
+    nested-pro:strih|clip:strih) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE '${f[STRIH_STREAM_DEV_SCENE]}' on the strih role -- it has no stream Development (none)" >&2; bad=1 ;;
+    *) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE '${f[STRIH_STREAM_DEV_SCENE]}' must be one of nested-pro, clip, none" >&2; bad=1 ;;
+  esac
   [ "$bad" = 0 ]
 }
 
@@ -508,6 +630,20 @@ strih_lx_program_sender() {
   [ "$s" = none ] || printf '%s' "$s"
 }
 
+# strih_lx_program_vban_streams / _port / _reserve_ms -> issue 1439: the console's program VBAN stream
+# name(s) the box receives straight into its obs-vban source, the UDP port OBS binds and the fixed
+# Receive Buffer R in ms (facts STRIH_PROGRAM_VBAN_*; all `none` on the strih role).
+strih_lx_program_vban_streams() { strih_box_fact STRIH_PROGRAM_VBAN_STREAMS; }
+strih_lx_program_vban_port() { strih_box_fact STRIH_PROGRAM_VBAN_PORT; }
+strih_lx_program_vban_reserve_ms() { strih_box_fact STRIH_PROGRAM_VBAN_RESERVE_MS; }
+# issue 1462: the stream role's OBS program-audio input name (`none` on the strih role).
+strih_lx_program_audio_input() { strih_box_fact STRIH_PROGRAM_AUDIO_INPUT; }
+# issue 1439 (ROZHODNUTÉ 6360417876): the VBAN-only leg -- `mac:<MAC>` | `vlan:<id>` | none, the box's /32
+# on it, the console that sends (none = ping only; scripts/lib/strih-vban-leg.sh).
+strih_lx_program_vban_leg() { strih_box_fact STRIH_PROGRAM_VBAN_LEG; }
+strih_lx_program_vban_leg_addr() { strih_box_fact STRIH_PROGRAM_VBAN_LEG_ADDR; }
+strih_lx_program_vban_sender() { strih_box_fact STRIH_PROGRAM_VBAN_SENDER; }
+
 # strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
 strih_box_venue() { strih_box_fact STRIH_VENUE; }
 
@@ -516,6 +652,13 @@ strih_box_venue() { strih_box_fact STRIH_VENUE; }
 # = no such site; issue 1399, scripts/lib/strih-https.sh).
 strih_lx_https_interkom_hosts() { strih_box_fact STRIH_HTTPS_INTERKOM_HOSTS; }
 strih_lx_https_shading_host() { strih_box_fact STRIH_HTTPS_SHADING_HOST; }
+# strih_lx_https_public -> yes | no: whether the box publishes its intercom page to phones on mobile data
+# (fact STRIH_HTTPS_PUBLIC; issue 1453, scripts/lib/strih-interkom-public.sh).
+strih_lx_https_public() { strih_box_fact STRIH_HTTPS_PUBLIC; }
+
+# strih_lx_stream_dev_scene -> the stream Development design: nested-pro | clip | none (fact
+# STRIH_STREAM_DEV_SCENE, issue 1462).
+strih_lx_stream_dev_scene() { strih_box_fact STRIH_STREAM_DEV_SCENE; }
 
 # strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
 # item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).

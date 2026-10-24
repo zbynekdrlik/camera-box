@@ -37,6 +37,8 @@ fail() {
 . "$HERE/camera-set.sh"
 # shellcheck source=scripts/lib/rig-grandmaster.sh
 . "$HERE/lib/rig-grandmaster.sh"  # rig_grandmaster_ip() -- the DNS-named PTP grandmaster (#1307)   # camera_resolve() -- NAME -> IP / VBAN stream / genlock FPS (#450)
+# shellcheck source=scripts/lib/rt-kernel-plan.sh
+. "$HERE/lib/rt-kernel-plan.sh"  # rt_kernel_line_held_metas -- the fleet kernel line STEP 15 holds (issue 1446)
 
 # shellcheck source=scripts/lib/log-bound.sh
 . "$HERE/lib/log-bound.sh"  # log_bound_logrotate_config/log_bound_timer_dropin (#679) -- also
@@ -1323,7 +1325,11 @@ mapfile -t RO_ROOT_APT_UNITS < <(ro_root_masked_apt_units)
 systemctl disable --now "${RO_ROOT_APT_UNITS[@]}" 2>/dev/null || true
 systemctl mask "${RO_ROOT_APT_UNITS[@]}" \
     || fail "could not mask ${RO_ROOT_APT_UNITS[*]} -- they would fail on the read-only root and leave the box degraded (issue 1394)"
-apt-mark hold linux-image-generic linux-headers-generic linux-generic 2>/dev/null || true
+# issue 1446: hold the fleet kernel line (the set the base image holds), never the GA 6.8 metas.
+# shellcheck disable=SC2046  # the meta list is a deliberate word split
+apt-mark hold $(rt_kernel_line_held_metas) 2>/dev/null || true
+RT_UNHELD="$(rt_kernel_line_unheld_metas)"
+[ -z "$RT_UNHELD" ] || warn "issue 1446: kernel meta(s) installed but NOT held: ${RT_UNHELD//$'\n'/ } -- run: apt-mark hold ${RT_UNHELD//$'\n'/ }"
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
 // Camera-box appliance: never auto-update (#295 — kernels are pinned with apt-mark hold).
 APT::Periodic::Update-Package-Lists "0";

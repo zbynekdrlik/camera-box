@@ -748,6 +748,8 @@ openbox=install ok installed
 dm=/usr/lib/systemd/system/lightdm.service
 dm_lightdm=/usr/lib/systemd/system/lightdm.service
 autologin=1
+gpu_wait=1
+x_core=0
 gdm3=deinstall ok config-files
 gnome_shell=
 pyws=install ok installed
@@ -976,6 +978,11 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ),
         ("kiosk", "gnome_shell=", "gnome_shell=install ok installed"),
         ("kiosk", "lightdm=install ok installed", "lightdm="),
+        // issue 1454: lightdm waits for every display GPU, and a boot whose Xorg dumped core fell
+        // back to the login screen.
+        ("kiosk", "gpu_wait=1", "gpu_wait=0"),
+        ("kiosk", "x_core=0", "x_core=1"),
+        ("kiosk", "x_core=0", "x_core="),
         (
             "kiosk",
             "openbox=install ok installed",

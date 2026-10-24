@@ -78,10 +78,10 @@ def test_recordings_retention_refuses_the_linux_strih_lx():
 def test_recordings_retention_still_drives_an_explicit_windows_box():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(REC, ["--host", "10.77.9.204", "--record-dir", "C:\\Users\\newlevel\\Videos"], env)
+        r = _run(REC, ["--host", "resolume.lan", "--record-dir", "C:\\Users\\newlevel\\Videos"], env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
-        assert "scp -O" in calls and "newlevel@10.77.9.204:" in calls, calls
+        assert "scp -O" in calls and "newlevel@resolume.lan:" in calls, calls
         assert "powershell -NoProfile -ExecutionPolicy Bypass -File" in calls, calls
         assert "-Execute" not in calls, "dry-run by default"
 
@@ -119,13 +119,14 @@ def test_backup_retention_box_strih_lx_runs_the_bash_local_sweep_over_ssh():
         assert "powershell" not in calls and "scp" not in calls, "no Windows driver for Linux: " + calls
 
 
-def test_backup_retention_box_stream_uses_the_windows_driver():
+def test_backup_retention_box_resolume_uses_the_windows_driver():
+    # stream-snv runs the Linux stream role since issue 1462; resolume-snv is a Windows fleet box.
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(BAK, ["--box", "stream-snv"], env)
+        r = _run(BAK, ["--box", "resolume-snv"], env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
-        assert "scp -O" in calls and "newlevel@10.77.9.204:" in calls, calls
+        assert "scp -O" in calls and "newlevel@resolume.lan:" in calls, calls
         assert "powershell -NoProfile -ExecutionPolicy Bypass -File" in calls, calls
 
 
