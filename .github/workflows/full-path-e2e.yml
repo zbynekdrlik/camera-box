@@ -92,6 +92,7 @@ on:
 permissions:
   contents: read
   actions: read  # #703: the Windows-verdict-artifact fetch step queries ci.yml's runs (gh run list/download)
+  pull-requests: write  # issue 1404: the per-point E2E report is posted as a PR comment
 
 # Workflow-level: supersede a stale run on a re-push to the SAME PR (or the same ref for a
 # manual dispatch) so a fast follow-up push doesn't leave an old 30-min-busy-wait run burning
@@ -113,7 +114,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, camera-lan]
     # 30 min rig-busy-gate budget + up to 300s (PR)/1800s (manual soak) recording + decode headroom.
-    timeout-minutes: 75
+    # issue 1404: + the BLOCKING YouTube stage (the broadcast going live before the recording, the VOD
+    # wait after it, the tick decode of the stream recording and the VOD on dev1): 75 -> 105 min. The
+    # rig-lease hold ceiling (scripts/lib/rig-lease.sh RIG_LEASE_MAX_HOLD_SECS) moves with it, 6300 s.
+    timeout-minutes: 105
     # Job-level: never run this job concurrently with loopback-e2e.yml's job — they both drive
     # the same physical cam2/strih/stream hardware. Shares loopback-e2e.yml's exact group string.
     concurrency:
@@ -424,6 +428,26 @@ jobs:
           fi
           echo "#703 fail-closed guard PASSED: $VERDICT_JSON exists and overall_pass=true."
 
+      - name: Per-point E2E report — GitHub job summary + PR comment (issue 1404)
+        # Owner 24.10.2026: the report must be where he looks (the run summary and the PR), not only
+        # on Discord, and it states the END POINT of the measurement: cam -> strih -> stream recording ->
+        # YouTube, video / audio / A/V per point; never "full path" until the YouTube stage passed.
+        # A missing verdict JSON still posts a page saying nothing was verified.
+        if: always() && github.event_name == 'pull_request' && steps.docs-only.outputs.docs_only != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          RUN_ID="${RECORDING_E2E_RUN_ID:-}"
+          POINTS_MD="$(mktemp)"
+          python3 scripts/e2e_report_youtube.py --verdict "/tmp/recording-e2e-${RUN_ID}/verdict-${RUN_ID}.json" \
+            --run-url "$RUN_URL" --stage-dir "/tmp/recording-e2e-${RUN_ID}/youtube-leg" --out "$POINTS_MD"
+          cat "$POINTS_MD" >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$POINTS_MD"
+          rm -f "$POINTS_MD"
+
       - name: Upload verdict JSON + report PNG + pixel proof
         if: always() # keep the evidence even on a failing verdict
         uses: actions/upload-artifact@v4
@@ -441,6 +465,9 @@ jobs:
             /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/pixel-proof/**
             /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/*-missing/**
             /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/missing-slot-pixels-*.json
+            /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/youtube-leg/*.json
+            /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/youtube-leg/*.log
+            /tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/youtube-leg/verdict/*.json
           if-no-files-found: warn
 
       - name: Release the shared rig lease (#830 — cleanup, always, incl. cancellation)

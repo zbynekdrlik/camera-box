@@ -64,6 +64,7 @@ if _SCRIPTS not in sys.path:
     sys.path.insert(0, _SCRIPTS)
 import cambox_segments  # noqa: E402
 import e2e_report_program_audio as _program_audio  # noqa: E402  (issue 1439)
+import e2e_report_youtube as _youtube  # noqa: E402  (issue 1404)
 
 CAMERA_ORDER = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
 
@@ -375,8 +376,10 @@ def _section_av_sync(verdict):
 
 def _run_passed(verdict):
     """issue 1439: the run's own verdict -- the merge's overall_pass AND the BLOCKING program-audio
-    continuity gate, which the E2E folds into its exit after the merge (a FAIL or UNKNOWN block)."""
-    return bool(verdict.get("overall_pass")) and not _program_audio.blocks(verdict)
+    continuity gate, which the E2E folds into its exit after the merge (a FAIL or UNKNOWN block);
+    issue 1404: and the BLOCKING YouTube end point (the `youtube_leg` block), folded the same way."""
+    return (bool(verdict.get("overall_pass")) and not _program_audio.blocks(verdict)
+            and not _youtube.blocks(verdict))
 
 
 def _section_overall(verdict, meta):
@@ -409,6 +412,9 @@ def _section_overall(verdict, meta):
     pa_label = _program_audio.summary_label(verdict)  # issue 1439
     if pa_label:
         blockers.append(pa_label)
+    yt_label = _youtube.summary_label(verdict)  # issue 1404
+    if yt_label:
+        blockers.append(yt_label)
 
     if blockers:
         lines.append("Blokujúce brány:")
@@ -1294,7 +1300,8 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
         # allowance (still within tolerance, so the run PASSED) — say so rather than pair ✅ with a
         # bare loss count.
         loss_txt = "0 stratených snímok" if drops == 0 else f"{drops} stratených snímok (v rámci tolerancie)"
-        cams_line = f"📷 {n} {_camera_plural(n)} · {loss_txt} (celá cesta kamera → stream)"
+        # issue 1404: name where the measurement ended; "celá cesta" only once YouTube passed
+        cams_line = f"📷 {n} {_camera_plural(n)} · {loss_txt} ({_youtube.endpoint_text(verdict)})"
         # Issue 1367: a multi-source window passed on its node burn — say so on the SAME line so the
         # owner's 3-line PASS cap holds and the relaxation is never silent.
         ms_summary = _multi_source_summary(verdict)
@@ -1308,6 +1315,9 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
     pa_label = _program_audio.summary_label(verdict)  # issue 1439: the program-audio gate
     if pa_label:
         failures.append((pa_label, _OWN_CLAUDE))
+    yt_label = _youtube.summary_label(verdict)  # issue 1404: the YouTube end point
+    if yt_label:
+        failures.append((yt_label, _OWN_CLAUDE))
     if not failures:
         # Safety net: overall_pass is false but no enumerated blocking gate matched (e.g. a
         # burn_hold-only fold, or a shape this summary doesn't itemize). Never look PASS-ish.
@@ -1375,6 +1385,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
     pa_section = _program_audio.section(verdict)  # issue 1439
     if pa_section is not None:
         sections.append(pa_section)
+    yt_section = _youtube.section(verdict)  # issue 1404
+    if yt_section is not None:
+        sections.append(yt_section)
     return "\n\n".join(sections)
 
 

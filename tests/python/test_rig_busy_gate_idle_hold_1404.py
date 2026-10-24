@@ -84,6 +84,7 @@ def run_gate(seq, iterations=3, extra_env=None):
         "FAKE_SEQ": seq_path,
         "FAKE_LOG": log_path,
         "RIG_LEASE_DIR": lease_dir,
+        "YOUTUBE_LEG_MARKER": os.path.join(lease_dir, "no-youtube-leg-marker.json"),
         "RIG_LEASE_REPO": "zbynekdrlik/camera-box",
         "RIG_LEASE_RUN_ID": "run-1404",
         "RIG_LEASE_RUN_URL": "https://example/run/1404",

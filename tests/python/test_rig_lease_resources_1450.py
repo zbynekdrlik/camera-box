@@ -218,6 +218,7 @@ def _gate(tmp_path, resources, extra=None):
            if not k.startswith(("RIG_LEASE_", "RIG_BUSY_GATE_", "GITHUB_"))}
     env.update({"OBS_PHASE2_PY": str(fake), "FAKE_LOG": str(tmp_path / "obs.log"),
                 "RIG_LEASE_DIR": str(tmp_path / "lease"), "RIG_LEASE_REPO": "zbynekdrlik/camera-box",
+                "YOUTUBE_LEG_MARKER": str(tmp_path / "no-youtube-leg-marker.json"),
                 "RIG_LEASE_RUN_ID": "run-1450", "RIG_LEASE_JOB": "deploy-fleet",
                 "RIG_BUSY_GATE_ITERATIONS": "1", "RIG_BUSY_GATE_SLEEP_SECS": "0",
                 "RIG_BUSY_GATE_IDLE_HOLD_SECS": "0", "RIG_LEASE_RESOURCES": resources})

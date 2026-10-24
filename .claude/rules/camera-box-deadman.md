@@ -34,12 +34,12 @@ the runner SIGKILL, runs FOREVER). A process/unit-presence guard would therefore
 camera-box-style dead-man PERMANENTLY disarmed. So the pattern flips:
 
 - **DELAY the first fire past the whole run window** (`--on-active=<ceil(DURATION/60)+overhead>min`,
-  computed in recording-e2e.sh; `CAMERA_BOX_DEADMAN_OVERHEAD_MIN` default 20). This is the
+  computed in recording-e2e.sh; `CAMERA_BOX_DEADMAN_OVERHEAD_MIN` default 35 since issue 1404's YouTube stage, was 20). This is the
   SAFETY-CRITICAL invariant: the dead-man can then NEVER fire during a live measurement — worst case
   is a slower recovery (~run-length + overhead), never a corrupted verdict. Recovery timing is
   equivalent to cam2-painter's (which also only recovers at ~run-end, after frame-probe's
   --duration-secs). **The overhead margin is the ONE knob the invariant hangs on — VALIDATE + FLOOR
-  it** (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=15`, the ~12-15 min worst-case pre-record overhead by
+  it** (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=30` since issue 1404, was 15, the ~12-15 min worst-case pre-record overhead by
   the script's own retry accounting): a non-integer / negative / too-small env override is CLAMPED up
   to the floor, never trusted — a smaller margin silently moves the first fire INTO the recording.
 - **Re-fire periodically** (`--on-unit-active=5min`) so a run killed AFTER the first fire still
