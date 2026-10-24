@@ -251,11 +251,11 @@ fn output_start_and_stop_drive_the_audio_leg() {
     // leg opens only AFTER that start succeeded (the mode is driven, so the connector's ELD can appear).
     let o = squish(&file(OUTPUTS_C));
     let start = o
-        .split("static bool drm_output_inst_start_locked(struct drm_output_inst *inst)")
+        .split("bool drm_output_inst_start_locked(struct drm_output_inst *inst)")
         .nth(1)
         .expect("start");
     let start = start
-        .split("static void drm_output_inst_stop_locked(")
+        .split("void drm_output_inst_stop_locked(")
         .next()
         .unwrap();
     let edid = start
@@ -275,7 +275,7 @@ fn output_start_and_stop_drive_the_audio_leg() {
         "issue 1424 part 2: the backends never open a leg themselves (one leg per instance)"
     );
     let stop = o
-        .split("static void drm_output_inst_stop_locked(struct drm_output_inst *inst)")
+        .split("void drm_output_inst_stop_locked(struct drm_output_inst *inst)")
         .nth(1)
         .expect("stop");
     let stop = stop.split("bool obs_drm_output_start(").next().unwrap();

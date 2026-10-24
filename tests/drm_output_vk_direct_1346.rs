@@ -311,7 +311,7 @@ fn the_lease_module_routes_to_vk_direct_and_keeps_the_lease_default() {
     );
     let start = body_of(
         &o,
-        "static bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
+        "bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
         OUTPUTS_C,
     );
     assert!(
@@ -320,7 +320,7 @@ fn the_lease_module_routes_to_vk_direct_and_keeps_the_lease_default() {
     );
     let stop = body_of(
         &o,
-        "static void drm_output_inst_stop_locked(struct drm_output_inst *inst)",
+        "void drm_output_inst_stop_locked(struct drm_output_inst *inst)",
         OUTPUTS_C,
     );
     assert!(
