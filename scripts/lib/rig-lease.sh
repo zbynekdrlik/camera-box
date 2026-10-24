@@ -67,8 +67,8 @@
 #                              self-heal: never a permanent deadlock, just a bounded worst case).
 #   RIG_LEASE_LOOKAHEAD_SECS   how far past "now" rig_lease_refresh_if_mine rolls the holder's
 #                              expected_release_at (default 900 = 15 min, issue 1383)
-#   RIG_LEASE_MAX_HOLD_SECS    the hold CEILING: no beat past acquired_at + this (default 4500 =
-#                              full-path-e2e.yml's timeout-minutes 75; the av-soak sets its own
+#   RIG_LEASE_MAX_HOLD_SECS    the hold CEILING: no beat past acquired_at + this (default 6300 =
+#                              full-path-e2e.yml's timeout-minutes 105; the av-soak sets its own
 #                              declared run window, issue 1383)
 #   RIG_LEASE_KEEPALIVE_SEC    the gate keep-alive's beat period (default 30, issue 1383)
 #   RIG_LEASE_KEEPALIVE_MAX_ERRORS  consecutive filesystem errors that end the gate keep-alive
@@ -308,7 +308,7 @@ with open(path, "w") as f:
 
 # rig_lease_refresh_if_mine <repo> <run_id> [<lookahead_secs>] -> the HOLDER's own keep-alive
 # (issue 1383). ONLY when the current holder.json names exactly <repo> + <run_id> and the hold is
-# still under its ceiling (acquired_at + RIG_LEASE_MAX_HOLD_SECS, default 4500 s = the full-path
+# still under its ceiling (acquired_at + RIG_LEASE_MAX_HOLD_SECS, default 6300 s = the full-path
 # job's timeout-minutes): bump the heartbeat and roll expected_release_at forward to
 # max(current, now + lookahead) -- never backward, so a holder that declared a longer run up front
 # (the av-soak) keeps its declaration. lookahead defaults to RIG_LEASE_LOOKAHEAD_SECS, else 900 s.
@@ -327,7 +327,7 @@ with open(path, "w") as f:
 # lease may still be ours); 3 past the hold ceiling or no parseable acquired_at.
 rig_lease_refresh_if_mine() {
   local repo="${1:-}" run_id="${2:-}" lookahead="${3:-${RIG_LEASE_LOOKAHEAD_SECS:-900}}"
-  local max_hold="${RIG_LEASE_MAX_HOLD_SECS:-4500}"
+  local max_hold="${RIG_LEASE_MAX_HOLD_SECS:-6300}"
   if [ -z "$repo" ] || [ -z "$run_id" ]; then
     printf 'RIG_LEASE_REFRESH=no-identity\n'
     return 1
@@ -336,7 +336,7 @@ rig_lease_refresh_if_mine() {
     "" | *[!0-9]*) lookahead=900 ;;
   esac
   case "$max_hold" in
-    "" | *[!0-9]*) max_hold=4500 ;;
+    "" | *[!0-9]*) max_hold=6300 ;;
   esac
   python3 "$(dirname "${BASH_SOURCE[0]}")/../rig_lease_refresh.py" \
     "$(rig_lease_dir)" "$repo" "$run_id" "$lookahead" "$max_hold"

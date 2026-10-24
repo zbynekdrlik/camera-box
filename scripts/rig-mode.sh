@@ -1252,17 +1252,21 @@ park_stream_program_dev() {
 # OBS launch goes via the win-* MCP; #701 proved plain scp/ssh reaches stream, but that doesn't
 # drive/verify a GUI app; the Linux strih-snv restarts its supervised user unit, issue 1317). #257: env-free; the wrapper just verifies the genlock
 # render tick is ENABLED (build default). Only needed if OBS is not already running on a box.
+# issue 1474: the stream line is picked by the stream box's obs-fleet class (stream_box_obs_restart_hint,
+# scripts/lib/stream-box.sh): the Linux stream-snv restarts the same unit over plain ssh -- the Windows
+# relaunch planner refuses a Linux box -- and a Windows stream box keeps the planner line.
 print_genlock_relaunch_note() {
-  local mode="$1"
+  local mode="$1" stream_line
+  stream_line="$(stream_box_obs_restart_hint "$STREAM_USER" "$STREAM_IP" "scripts/launch-obs-genlock.sh --box stream --force")"
   cat <<EOF
 # ---- OBS genlock relaunch (only if OBS is not already running) ----
 # The measurement burn for ${mode} mode was just toggled over WebSocket above (no relaunch). The
 # genlock build is hard-locked (render tick + ts-align always ON, latency 3 ms — NO env), so a
-# relaunch is only needed to (re)start a stopped/wedged OBS. The strih is the Linux strih-snv
-# (issue 1317): restart its supervised user unit. The Windows stream box: paste the printed program
-# into its win-* MCP Shell:
+# relaunch is only needed to (re)start a stopped/wedged OBS. A Linux box (strih-snv, issue 1317; the
+# stream box when its fleet class is linux-genlock, issue 1474) restarts its supervised user unit
+# over plain ssh; a Windows stream box: paste the printed program into its win-* MCP Shell:
 #   strih-snv : ssh newlevel@${STRIH_IP} 'systemctl --user restart strih-obs.service'
-#   stream   : scripts/launch-obs-genlock.sh --box stream --force
+#   stream   : ${stream_line}
 # Then confirm (per the e2e / obs-ops playbook skills): the right stream scene (${STREAM_PROG_SCENE}
 # for test; EVENT leaves the stream program to the owner, issue 1380), recording NATIVE 1080p (#225), DanteSync locked. The wrapper EXITS 0 only when the OBS
 # log shows the genlock render tick ENABLED.

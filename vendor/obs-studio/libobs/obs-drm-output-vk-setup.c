@@ -229,6 +229,54 @@ static bool drm_output_vk_plane_taken(const struct drm_output_vk_disp *d, int pl
 	return false;
 }
 
+/* issue 1424 (hotplug): what a teardown does with a display's acquisition. NVIDIA refuses (-13) to
+ * re-acquire a display this process released while the shared VkInstance lives on for another display,
+ * so while another display is open the acquisition is PARKED on the device (a re-open reuses it) and
+ * released only with the device. A leaked (wedged) teardown touches nothing. Pure. */
+static int drm_output_vk_park_choice(bool acquired, bool leak, int others_open, bool park_free)
+{
+	if (!acquired)
+		return DRM_OUTPUT_VK_CHOICE_NONE;
+	if (leak)
+		return DRM_OUTPUT_VK_CHOICE_LEAK;
+	if (others_open > 0 && park_free)
+		return DRM_OUTPUT_VK_CHOICE_PARK;
+	return DRM_OUTPUT_VK_CHOICE_RELEASE;
+}
+
+/* A display a teardown parked on this device (dev->lock held): take it back instead of a new acquire. The
+ * handle may differ after a replug or another screen on the connector (not guaranteed stable): an entry of
+ * the SAME connector with another handle is released by name and freed (a new acquire follows; never a
+ * park slot held forever). */
+static bool drm_output_vk_unpark(struct drm_output_vk_disp *d)
+{
+	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {
+		if (d->dev->parked[i].display == VK_NULL_HANDLE)
+			continue;
+		if (d->dev->parked[i].display != d->display) {
+			if (strcmp(d->dev->parked[i].output_name, d->output_name) == 0) {
+				VkResult r = d->dev->vk.vkReleaseDisplayEXT(d->dev->pd, d->dev->parked[i].display);
+				/* INFO: a failed retry's captured cause is its first WARNING (the -13 that may follow) */
+				blog(LOG_INFO, "drm-output: vk-direct: '%s' has a new handle after a replug -- released the one kept "
+				     "since its close (VkResult %d); a new acquire follows",
+				     d->output_name, (int)r);
+				d->dev->parked[i].display = VK_NULL_HANDLE;
+				d->dev->parked[i].output_name[0] = '\0';
+			}
+			continue;
+		}
+		d->dev->parked[i].display = VK_NULL_HANDLE;
+		d->dev->parked[i].output_name[0] = '\0';
+		d->acquired = true;
+		blog(LOG_INFO,
+		     "drm-output: vk-direct display re-used output='%s' (kept acquired since its last close -- no "
+		     "new acquire)",
+		     d->output_name);
+		return true;
+	}
+	return false;
+}
+
 /* Acquire the output's display away from X; a later display must be on the first one's GPU (one VkDevice). */
 static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long output)
 {
@@ -263,9 +311,10 @@ static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long ou
 		return false;
 	}
 	d->dev->pd = pd;
+	const bool reused = drm_output_vk_unpark(d);
 	VkPhysicalDeviceProperties pr;
 	d->dev->vk.vkGetPhysicalDeviceProperties(pd, &pr);
-	VkResult r = d->dev->vk.vkAcquireXlibDisplayEXT(pd, d->dev->dpy, d->display);
+	VkResult r = reused ? VK_SUCCESS : d->dev->vk.vkAcquireXlibDisplayEXT(pd, d->dev->dpy, d->display);
 	if (r != VK_SUCCESS) {
 		blog(LOG_WARNING,
 		     "drm-output: vk-direct: vkAcquireXlibDisplayEXT('%s') FAILED VkResult %d on %s (-13 = NVIDIA "
@@ -276,8 +325,9 @@ static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long ou
 	}
 	d->acquired = true;
 	drm_output_vk_mark_disruption(d->dev);
-	blog(LOG_INFO, "drm-output: vk-direct display acquired output='%s' gpu='%s' (off the X desktop)",
-	     d->output_name, pr.deviceName);
+	if (!reused)
+		blog(LOG_INFO, "drm-output: vk-direct display acquired output='%s' gpu='%s' (off the X desktop)",
+		     d->output_name, pr.deviceName);
 	return true;
 }
 
@@ -769,6 +819,14 @@ static void drm_output_vk_destroy_device(struct drm_output_vk_device *dev)
 			dev->vk.vkDeviceWaitIdle(dev->device);
 			dev->vk.vkDestroyDevice(dev->device, NULL);
 		}
+		/* issue 1424 (hotplug): the displays kept acquired for a re-open go with the instance */
+		for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {
+			if (dev->parked[i].display == VK_NULL_HANDLE || !dev->pd)
+				continue;
+			VkResult r = dev->vk.vkReleaseDisplayEXT(dev->pd, dev->parked[i].display);
+			blog(LOG_INFO, "drm-output: vk-direct display released (VkResult %d) -- '%s' (kept since its close)",
+			     (int)r, dev->parked[i].output_name);
+		}
 		if (dev->instance)
 			dev->vk.vkDestroyInstance(dev->instance, NULL);
 		if (dev->dpy)
@@ -777,6 +835,7 @@ static void drm_output_vk_destroy_device(struct drm_output_vk_device *dev)
 			dlclose(dev->lib);
 	}
 	dev->wedged = false;
+	memset(dev->parked, 0, sizeof(dev->parked)); /* released above, or leaked with a wedged device */
 	dev->lib = NULL;
 	memset(&dev->vk, 0, sizeof(dev->vk));
 	memset(&dev->gl, 0, sizeof(dev->gl));
@@ -842,7 +901,23 @@ void drm_output_vk_destroy_display(struct drm_output_vk_disp *d)
 	}
 	if (!leak && d->surface && dev->instance)
 		dev->vk.vkDestroySurfaceKHR(dev->instance, d->surface, NULL);
-	if (d->acquired && !leak) {
+	/* issue 1424 (hotplug): beside another open display a release could never be undone by this process
+	 * (NVIDIA -13 on the re-acquire), so the acquisition is parked for a re-open of the same output */
+	int park_slot = -1;
+	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS && park_slot < 0; i++) {
+		if (dev->parked[i].display == VK_NULL_HANDLE)
+			park_slot = i;
+	}
+	const int choice = drm_output_vk_park_choice(d->acquired, leak, dev->refs - (d->open ? 1 : 0), park_slot >= 0);
+	if (choice == DRM_OUTPUT_VK_CHOICE_PARK) {
+		dev->parked[park_slot].display = d->display;
+		snprintf(dev->parked[park_slot].output_name, sizeof(dev->parked[park_slot].output_name), "%s",
+			 d->output_name);
+		blog(LOG_INFO,
+		     "drm-output: vk-direct display '%s' kept acquired (another output is open; a re-open reuses it, "
+		     "the last close releases it)",
+		     d->output_name);
+	} else if (choice == DRM_OUTPUT_VK_CHOICE_RELEASE) {
 		VkResult r = dev->vk.vkReleaseDisplayEXT(dev->pd, d->display);
 		blog(LOG_INFO,
 		     "drm-output: vk-direct display released (VkResult %d) -- '%s' stays OFF in X, never back on the "

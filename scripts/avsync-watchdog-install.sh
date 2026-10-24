@@ -213,6 +213,11 @@ PLAN
 
 main() {
   local interval_min=5 mode=install
+  # issue 1474: every plan here targets the stream box at 10.77.9.204 as a WINDOWS box (scheduled tasks,
+  # C:\avsync). Since issue 1462 that address is the Linux stream-snv, so both modes refuse it through
+  # the ONE class gate (the stream's SyncNet measurement runs on dev2, scripts/avsync-measure-dev2.sh).
+  # shellcheck source=scripts/lib/obs-fleet.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/lib/obs-fleet.sh"
   need_val() { [ "$#" -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; usage >&2; exit 2; }; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -222,6 +227,7 @@ main() {
       *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
     esac
   done
+  obs_fleet_refuse_linux_target 10.77.9.204 avsync-watchdog-install.sh || exit 2
   if [ "$mode" = "retire" ]; then retire_plan; return 0; fi
 
   local mcp="win-stream-snv" box_ip="10.77.9.204"

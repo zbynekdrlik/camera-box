@@ -59,11 +59,13 @@
 #                   audit refuses any other count. It consumes the member NAME only (the NDI machine
 #                   name = the uppercased hostname, the anchor IP = the anchor's own mDNS record), so
 #                   a strih swap (the Poprad strih-pp next) is this one policy edit.)
-#   obs-session   = stream resolume   (issue 1317 part 2: the #979 obs64/AHK Windows SESSION-0
-#                   visibility probe -- a PowerShell probe over win_ssh_run, meaningless on a Linux
-#                   box, so windows-genlock members ONLY. The consumer ALSO class-gates each box, so
-#                   even an override naming strih-snv never gets the PowerShell probe; resolume is
-#                   probed only while home, via obs_fleet_poll_now.)
+#   obs-session   = strih-snv stream resolume   (the #979 operator-visibility watchdog between E2E
+#                   runs. The consumer picks the probe by CLASS: a windows-genlock box gets the obs64/AHK
+#                   SESSION-0 PowerShell probe over win_ssh_run, a linux-genlock box (issue 1474) the
+#                   recording-e2e [0/8] Linux check -- strih-obs.service over plain ssh + a bounded
+#                   obs-websocket round-trip -- and never PowerShell; any other class is skipped.
+#                   resolume is probed only while home, via obs_fleet_poll_now. The PP boxes stay
+#                   out, like obs-liveness / network-reach.)
 #   burn-reconcile = strih-snv stream  (issue 1317 part 2: the #1060 fresh-OBS-start burn reconcile
 #                   -- OBS-WS GetStats renderTotalFrames + obs_burn_filter sweeps, platform-neutral.
 #                   The unattended-start premise holds on strih-snv too: a boot autostart or a
@@ -83,9 +85,12 @@
 #                   audio mixer whose `audio-stall` dump says whether it keeps real time; resolume
 #                   also carries the obs-vban FOH/lv1 senders whose pacer loss the same watchdog
 #                   pages. The consumer polls resolume only while home, via obs_fleet_poll_now.)
-#   win-baseline  = stream resolume   (issue 1357: the Windows OBS boxes graded against the ONE
-#                   Windows baseline -- power plan, sleep, USB suspend, WER -- by
-#                   scripts/win-baseline-check.sh, report-only; resolume SKIPPED when away.)
+#   win-baseline  = the windows-genlock rows of `stream resolume`   (issue 1357: the Windows OBS boxes
+#                   graded against the ONE Windows baseline -- power plan, sleep, USB suspend, WER -- by
+#                   scripts/win-baseline-check.sh, report-only; resolume SKIPPED when away. Issue
+#                   1474: a Windows baseline means nothing on a Linux box, so the facet takes only the
+#                   rows whose class is windows-genlock: resolume alone since stream-snv went Linux
+#                   (issue 1462), both again on a fleet whose stream box is Windows.)
 #   obs-handles   = strih-snv stream resolume   (issue 1406: every managed OBS process can leak
 #                   handles -- the 5.10.2026 stream obs64 held 4M after ~22 h -- and the :8899
 #                   `obs_handles*` facet reads its count on Windows AND Linux (strih-snv: /proc fds).
@@ -234,6 +239,16 @@ obs_fleet_home_check() {
   printf '%s' "${e##*|}"
 }
 
+# _obs_fleet_windows_rows NAMES -> the NAMES (space-separated, in order) whose fleet row class is
+# windows-genlock; a name with no row is left out. issue 1474: a Windows-only facet's members.
+_obs_fleet_windows_rows() {
+  local m out=""
+  for m in ${1:-}; do
+    [ "$(obs_fleet_class "$m" 2>/dev/null || true)" = "windows-genlock" ] && out="${out:+$out }$m"
+  done
+  printf '%s' "$out"
+}
+
 # obs_fleet_facet_members <facet> -> the space-separated box NAMES carrying FACET (stdout), decided
 # by the policy table documented in this file's header. Unknown facet -> error on stderr + return 1
 # (fail-closed: a caller must never silently derive an empty roster from a typo'd facet).
@@ -249,11 +264,11 @@ obs_fleet_facet_members() {
     genlock-lock)  printf 'strih-snv stream-snv imag resolume-snv strih-pp stream-pp' ;;   # issue 1441: + the PP Linux boxes
     render-freeze) printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;
     ndi-portmap)   printf 'strih-snv' ;;
-    obs-session)   printf 'resolume-snv' ;;   # Windows-only; stream-snv runs Linux since issue 1462
+    obs-session)   printf 'strih-snv stream-snv resolume-snv' ;;   # issue 1474: the probe is picked by class
     burn-reconcile) printf 'strih-snv stream-snv' ;;
     rig-restore)   printf 'strih-snv stream-snv' ;;
     ndi-sender)    printf 'strih-snv stream-snv resolume-snv' ;;
-    win-baseline)  printf 'stream-snv resolume-snv' ;;   # issue 1357: the Windows OBS-box baseline (win-baseline-check.sh)
+    win-baseline)  _obs_fleet_windows_rows 'stream-snv resolume-snv' ;;   # issue 1357/1474: the Windows OBS-box baseline, Windows rows only
     audio-mixer)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1381: mixer real time + VBAN pacer loss
     obs-handles)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1406: the OBS process handle / fd count
     build-parity)  printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp' ;;   # issue 1426: one OBS genlock build across both venues

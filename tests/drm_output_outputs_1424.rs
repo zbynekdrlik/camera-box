@@ -341,7 +341,7 @@ fn an_output_whose_config_turns_audio_off_opens_no_audio_leg_at_all() {
     let o = file(OUTPUTS_C);
     let start = body_of(
         &o,
-        "static bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
+        "bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
         "inst start",
     );
     let gate = start
@@ -419,7 +419,7 @@ fn the_autostart_is_all_or_none_and_one_output_never_stops_the_other() {
     );
     let stop = body_of(
         &o,
-        "static void drm_output_inst_stop_locked(struct drm_output_inst *inst)",
+        "void drm_output_inst_stop_locked(struct drm_output_inst *inst)",
         "stop",
     );
     let audio = stop
@@ -432,7 +432,7 @@ fn the_autostart_is_all_or_none_and_one_output_never_stops_the_other() {
     );
     let start = body_of(
         &o,
-        "static bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
+        "bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
         "start",
     );
     assert!(

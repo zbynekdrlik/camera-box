@@ -717,11 +717,18 @@ KEYS_EOF
 }
 
 # obs_box_openbox_rc_with_brightness_keys (stdin: an openbox rc.xml) -> the same rc.xml with every
-# MISSING keybind line (plus the comment, when absent) inserted right before the first </keyboard> line.
-# Pure filter, the kiosk's ONE rc.xml writer: an rc.xml that already carries both keybinds comes back
-# unchanged (idempotent), operator content is never replaced or reordered (the root-menu binding that
-# verify-imag checks stays as it is). No </keyboard> line -> rc 1 and NO output (never a partial file).
-obs_box_openbox_rc_with_brightness_keys() {
+# MISSING brightness keybind line merged in (obs_box_openbox_rc_with_keys).
+obs_box_openbox_rc_with_brightness_keys() { obs_box_openbox_rc_with_keys obs_box_brightness_keybinds_xml; }
+
+# obs_box_openbox_rc_with_keys KEYS_FN (stdin: an openbox rc.xml) -> the same rc.xml with every MISSING line
+# KEYS_FN prints (plus its comment, when a keybind is missing) inserted right before the first </keyboard>
+# line. Pure filter, the kiosk's ONE rc.xml merge (the brightness keys here; the stream role's headphone
+# volume keys, issue 1465, through scripts/lib/stream-operator-audio.sh): an rc.xml that already carries
+# every keybind comes back unchanged (idempotent), operator content is never replaced or reordered (the
+# root-menu binding that verify-imag checks stays as it is). No </keyboard> line -> rc 1 and NO output
+# (never a partial file).
+obs_box_openbox_rc_with_keys() {
+    local keys_fn="${1:?obs_box_openbox_rc_with_keys: KEYS_FN required}"
     local rc line trimmed comment="" block="" need=0
     rc="$(cat; printf x)"
     rc="${rc%x}"
@@ -732,7 +739,7 @@ obs_box_openbox_rc_with_brightness_keys() {
             '<!--'*) comment="${line}"$'\n' ;;
             *) block="${block}${line}"$'\n'; need=1 ;;
         esac
-    done < <(obs_box_brightness_keybinds_xml)
+    done < <("$keys_fn")
     if [ "$need" = 0 ]; then
         printf '%s' "$rc"
         return 0

@@ -5,6 +5,7 @@ paths:
   - "scripts/lib/e2e-discord-report.sh"
   - "tests/python/test_e2e_discord_report*.py"
   - "scripts/e2e_report_program_audio.py"
+  - "scripts/e2e_report_youtube.py"
 ---
 
 # E2E Discord report — two renderings + derived blocking-vs-report-only (#711, #1127)
@@ -107,6 +108,11 @@ slots with the concealed ones called `zamaskované = STRATENÉ`, or `NEOVERENÁ 
 the full report a `🔊 Kontinuita zvuku programu` section and a `_section_overall` blocker. A PASS block
 renders byte-identical to no block. The rendering lives in `scripts/e2e_report_program_audio.py`
 (this file is past its size budget); a future post-merge gate follows the same shape.
+
+**The YouTube end point (issue 1404) follows that shape:** the `youtube_leg` block (`scripts/e2e_report_youtube.py`:
+`blocks` / `summary_label` / `section` / `endpoint_text` / `points_markdown`) joins `_run_passed`, the
+FAIL summary and `_section_overall`; the PASS camera line names the END POINT (`celá cesta kamera → YouTube`
+only when the block passed). See `.claude/rules/youtube-leg-e2e-stage.md`.
 
 **When you add a NEW gate to recording-verdict.rs:** if it folds into `all_pass`, add it to
 `_blocking_failures`; if report-only, add it to `_report_only_tripped`. The summary has a safety net

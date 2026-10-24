@@ -123,6 +123,7 @@ systemctl --user start bkshading-panel-app.service || true
 systemctl --user start companion-satellite.service || true
 systemctl --user start strih-satellite-watch.timer || true
 systemctl --user start dantesync-tray.service || true
+systemctl --user start strih-display-watch.service || true
 systemctl --user start obs-box-panel.service || true
 === openbox-menu ===
 <?xml version="1.0" encoding="UTF-8"?>

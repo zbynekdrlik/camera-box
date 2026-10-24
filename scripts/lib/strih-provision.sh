@@ -321,9 +321,9 @@ strih_lx_seed_manifest_json() {
   printf '  "outputs": [\n'
   { strih_lx_ndi_outputs; strih_lx_ndi_republishes; } | sed 's/.*/    "&",/' | sed '$ s/,$//'
   printf '  ],\n'
-  # issue 1439 phase 2: a strih box whose facts declare the console's VBAN program (strih-snv) carries
-  # the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap switches
-  # (keeping the operator's mixer state); a hub-fed strih (strih-pp) carries neither, byte-identical.
+  # issue 1439 phase 2: a strih box whose facts declare the console's VBAN program (strih-snv, strih-pp)
+  # carries the program-audio input + its obs-vban source settings, which strih_scenes.py --bootstrap
+  # switches (keeping the operator's mixer state); a hub-fed strih carries neither, byte-identical.
   local vban ai
   if vban="$(strih_lx_program_audio_vban_json)"; then
     ai="$(strih_lx_program_audio_input)" || return 1

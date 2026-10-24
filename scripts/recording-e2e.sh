@@ -374,6 +374,9 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # issue 1439: the BLOCKING program-audio continuity gate (a lost or concealed slot in the window = RED).
 # shellcheck source=scripts/lib/program-audio-continuity.sh
 . "$HERE/lib/program-audio-continuity.sh"
+# issue 1404: the BLOCKING YouTube end point (restreamer's delivery to e2e rtmp, the VOD verdict).
+# shellcheck source=scripts/lib/youtube-leg.sh
+. "$HERE/lib/youtube-leg.sh"
 # #882/#1232: restart-and-settle for the [1/8] imag render-health sweep -- the leading windows
 # (right after a fresh OBS start) can measure a real, transient warm-up dip that is not a
 # regression; a settle-adaptive PHASE (bounded by a wall budget) absorbs however many leading
@@ -566,8 +569,11 @@ fi
 # too-small override is CLAMPED up to a hard floor (never trusted to be sane), never allowed to
 # silently re-enable a mid-run fire. FLOOR = the worst-case pre-record overhead itself; below it the
 # first fire could precede StopRecord.
-CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=15
-CAMERA_BOX_DEADMAN_OVERHEAD_MIN="${CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-20}"
+# issue 1404: the YouTube stage now runs before the recording too (the restreamer session start, a
+# busy wait on a recovered leftover session, StartStream, the wait for the live broadcast: ~15 min
+# worst case), so the floor and the default both grow by that: 15 -> 30, 20 -> 35.
+CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=30
+CAMERA_BOX_DEADMAN_OVERHEAD_MIN="${CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-35}"
 case "$CAMERA_BOX_DEADMAN_OVERHEAD_MIN" in
   ''|*[!0-9]*)
     echo "WARNING #772: CAMERA_BOX_DEADMAN_OVERHEAD_MIN='$CAMERA_BOX_DEADMAN_OVERHEAD_MIN' is not a non-negative integer -- clamping to the safe floor ${CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN}min so the dead-man cannot fire mid-recording" >&2
@@ -602,7 +608,9 @@ CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=$(( (DURATION + 59) / 60 + CAMERA_BOX_DEADMAN_
 # lengthens a normal run's tail -- only a genuinely slow/degraded pre-record phase consumes it.
 # (Comment deliberately avoids the bracketed phase labels + FROZEN_CAM_* identifiers other
 # tests string-anchor on -- the recording-e2e.sh static-anchor GOTCHA, project CLAUDE.md.)
-PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1200}"
+# issue 1404: the YouTube stage now waits for the live broadcast before the recording (up to its
+# ready deadline + the bound, ~9 min on a slow VPS boot), so the slack grows by that: 1200 -> 1800.
+PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1800}"
 QR_SIZE="${QR_SIZE:-700}"
 # Topology v2 (#459, EPIC #466, SUPERSEDES the #11 60fps-end-to-end framing below): the 60fps
 # low-latency IMAG role moved OFF strih onto the new imag-nb box (10.77.9.182, #458/#463); strih
@@ -2044,6 +2052,8 @@ cleanup() {
   # the same SIGKILL-grace reason (a cg OBS burn survives in its scene collection); cg_chain_cleanup
   # below waits for those jobs and retries. A no-op unless CG_CHAIN=1 and a burn is owed.
   cg_chain_cleanup_burns_first "${CG_HOST_IP:-}" "$HERE/obs_phase2.py"
+  # issue 1404: a live YouTube broadcast is stopped (StopStream + the restreamer session) in the background.
+  youtube_leg_cleanup_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"
   # #281 Fix#3: clear the rig-active heartbeat + stop its refresher — before the cam/OBS
   # restores (which may hang). Once the heartbeat lapses, the rig-restore watchdog is free to
   # recover prod if this run left the rig stranded (e.g. the trap itself is interrupted).
@@ -4586,6 +4596,9 @@ else
   echo "[5/8 pre] in-run freeze watch — SKIPPED (LIVE_FREEZE_WATCH=$LIVE_FREEZE_WATCH, ALL_CAMBOX=${ALL_CAMBOX:-0})"
 fi
 
+# issue 1404: the YouTube end point goes live BEFORE the recording (its VOD must hold every window).
+youtube_leg_start "$HERE" "$STRIH" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"
+
 # issue 1354 scope 3: BEFORE-window snapshot of strih's per-input genlock-fifo audit counters
 # (holds/relocks/converge_sheds), paired with the AFTER snapshot in [7/8]. Report-only + fail-open
 # (the helper returns 0 on every input; a trailing `|| true` is belt-and-suspenders): an
@@ -4867,6 +4880,7 @@ CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
+youtube_leg_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "${STREAM_HOST_PATH:-}"   # issue 1404: StopStream + the session stop + the early pull/decode on dev2
 
 # issue 1354 scope 3: AFTER-window snapshot of strih's per-input genlock-fifo audit counters --
 # pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY
@@ -5754,6 +5768,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     fi
     # issue 1439: a program-audio loss (concealed included) or an unprovable window is a blocking FAIL.
     if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
+    # issue 1404: the YouTube end point (the VOD against the stream recording) is BLOCKING too.
+    if ! youtube_leg_gate "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "$REPORT_JSON" "${STREAM_HOST_PATH:-}" "$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"; then [ "$GATE" -ne 0 ] || GATE=1; fi
     # #827: merge the fleet-preflight exclusion list into the verdict JSON so a run that excluded
     # boxes (ALL_CAMBOX only — PREFLIGHT_EXCLUDED_CAMS is otherwise unset/empty, and the merge
     # below is then a harmless no-op `excluded_cams: []`) can NEVER be read back as "full-fleet
@@ -6031,6 +6047,8 @@ fi
 
 # issue 1439: the program-audio continuity gate, the LEGACY decode path's twin of the execute branch's.
 if ! program_audio_continuity_gate "$HERE" "$STREAM" "$OUTDIR" "$REPORT_JSON"; then [ "$GATE" -ne 0 ] || GATE=1; fi
+# issue 1404: the YouTube end point, the legacy path's twin of the execute branch's.
+if ! youtube_leg_gate "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "$REPORT_JSON" "${STREAM_HOST_PATH:-}" "$MARKER_CSV" "$SWITCH_SCHEDULE_JSON" "$PROBE_BIN_DIR"; then [ "$GATE" -ne 0 ] || GATE=1; fi
 
 # #758 item 3 — the in-run freeze watch's own verdict (same check as the E2E_EXECUTE_VERDICT=1
 # branch's own early exit above; this is the LEGACY/plan-print path's equivalent tail).

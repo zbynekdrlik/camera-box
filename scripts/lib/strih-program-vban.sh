@@ -45,7 +45,7 @@ STRIH_PROGRAM_VBAN_KIND="net.nagater.obs-vban.source"
 
 # strih_program_vban_declared -> rc 0 when the loaded box's facts declare the console's VBAN program
 # (STRIH_PROGRAM_VBAN_PORT != none: the stream role always, the strih role since issue 1439 phase 2 when
-# its console sends it a program stream, strih-snv); rc 1 on a hub-fed strih (strih-pp) or an unread fact.
+# its console sends it a program stream, strih-snv + strih-pp); rc 1 on a hub-fed strih or an unread fact.
 # verify item 9 picks its grade by this, never by the role.
 strih_program_vban_declared() {
   local port

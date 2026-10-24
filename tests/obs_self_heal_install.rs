@@ -36,6 +36,14 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// issue 1474: the stream box is the Linux stream-snv on the real fleet, and this Windows-only
+/// planner refuses it by class (`obs_fleet_refuse_linux_target`). Its Windows program is pinned on a
+/// fleet whose stream box is Windows (the `test_av_soak_orchestrator_1367.py` override pattern); the
+/// refusal itself is pinned by `tests/python/test_windows_planners_refuse_linux_1474.py`.
+const WIN_STREAM_FLEET: &str = "strih-snv|10.77.9.202|linux-genlock|always\n\
+stream-snv|10.77.9.204|windows-genlock|always\n\
+resolume-snv|resolume.lan|windows-genlock|traveling";
+
 fn script() -> PathBuf {
     let s = manifest_dir().join("scripts/obs-self-heal-install.sh");
     assert!(s.exists(), "{} not found", s.display());
@@ -69,6 +77,7 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(script())
         .args(args)
         .current_dir(manifest_dir())
+        .env("OBS_FLEET", WIN_STREAM_FLEET)
         .output()
         .expect("failed to run obs-self-heal-install.sh");
     (

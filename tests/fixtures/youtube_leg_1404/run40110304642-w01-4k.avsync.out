@@ -1,0 +1,41 @@
+[2m2026-10-24T20:30:16.033169Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording native resolution probed [3mfile[0m[2m=[0mw01-4k.mp4 [3mwidth[0m[2m=[0m3840 [3mheight[0m[2m=[0m2160
+[2m2026-10-24T20:30:16.033958Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording analysis start (parallel decode, #187 memory-bounded worker pool, #207 fast-then-robust) [3mfile[0m[2m=[0mw01-4k.mp4 [3mwidth[0m[2m=[0m3840 [3mheight[0m[2m=[0m2160 [3mworkers[0m[2m=[0m8 [3mmandatory_burns[0m[2m=[0m[] [3many_of_burns[0m[2m=[0m[] [3mmin_distinct_optical[0m[2m=[0mNone [3mmax_frames[0m[2m=[0mSome(60) [3mavail_mb[0m[2m=[0m7420
+[2m2026-10-24T20:30:40.938492Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording analysis complete (#207 decode-path split, cumulative this run) [3mfile[0m[2m=[0mw01-4k.mp4 [3mtotal[0m[2m=[0m60 [3mwith_qr[0m[2m=[0m60 [3mworkers[0m[2m=[0m8 [3mfast_path_frames[0m[2m=[0m60 [3mrobust_fallback_frames[0m[2m=[0m0 [3mburn_region_recoveries[0m[2m=[0m0 [3mthis_analysis_fast[0m[2m=[0m60 [3mthis_analysis_robust[0m[2m=[0m0
+[2m2026-10-24T20:30:40.938544Z[0m [32m INFO[0m [2mcamera_box::probe::av_sync_recording[0m[2m:[0m av-sync painter head (issue 1404): a cam2 tick or a rig burn sends it to the full decode [3mfile[0m[2m=[0mw01-4k.mp4 [3mhead_frames[0m[2m=[0m60 [3mverdict[0m[2m=[0mFullDecode
+[2m2026-10-24T20:30:41.736670Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording native resolution probed [3mfile[0m[2m=[0mw01-4k.mp4 [3mwidth[0m[2m=[0m3840 [3mheight[0m[2m=[0m2160
+[2m2026-10-24T20:30:41.736915Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording analysis start (parallel decode, #187 memory-bounded worker pool, #207 fast-then-robust) [3mfile[0m[2m=[0mw01-4k.mp4 [3mwidth[0m[2m=[0m3840 [3mheight[0m[2m=[0m2160 [3mworkers[0m[2m=[0m8 [3mmandatory_burns[0m[2m=[0m[911002, 911004] [3many_of_burns[0m[2m=[0m[911001, 911009, 911008, 911007, 911010, 911011, 911012] [3mmin_distinct_optical[0m[2m=[0mNone [3mmax_frames[0m[2m=[0mNone [3mavail_mb[0m[2m=[0m6703
+[2m2026-10-24T20:35:58.278347Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording fully decoded via ffmpeg gray8 pipe [3mfile[0m[2m=[0mw01-4k.mp4 [3mframes[0m[2m=[0m750
+[2m2026-10-24T20:36:05.014036Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording analysis complete (#207 decode-path split, cumulative this run) [3mfile[0m[2m=[0mw01-4k.mp4 [3mtotal[0m[2m=[0m750 [3mwith_qr[0m[2m=[0m750 [3mworkers[0m[2m=[0m8 [3mfast_path_frames[0m[2m=[0m807 [3mrobust_fallback_frames[0m[2m=[0m3 [3mburn_region_recoveries[0m[2m=[0m0 [3mthis_analysis_fast[0m[2m=[0m747 [3mthis_analysis_robust[0m[2m=[0m3
+{
+  "audio_channel_pick": {
+    "chosen_channel": 0,
+    "per_channel": [
+      {
+        "channel": 0,
+        "cluster_samples": 50,
+        "crc_fail": 44,
+        "crc_ok": 50,
+        "peak_dbfs": -18.725324130031957,
+        "preamble_screens": 94
+      },
+      {
+        "channel": 1,
+        "cluster_samples": 50,
+        "crc_fail": 38,
+        "crc_ok": 50,
+        "peak_dbfs": -18.725324130031957,
+        "preamble_screens": 88
+      }
+    ]
+  },
+  "audio_markers_decoded": 50,
+  "av_offset_ms": 1.3124999999993836,
+  "candidates": 52,
+  "emit_rows": 1286,
+  "latency_adjust_ms": -1.3124999999993836,
+  "mad_ms": 4.937500000000483,
+  "matched": 50,
+  "video_fps": 30.0,
+  "video_ticks": 750
+}
+[2m2026-10-24T20:36:06.386027Z[0m [32m INFO[0m [2mrecording_verdict[0m[2m:[0m A/V-sync offset measured (video − audio; >0 = video lags audio) [3mav_offset_ms[0m[2m=[0m1.3124999999993836 [3mmad_ms[0m[2m=[0m4.937500000000483 [3mmatched[0m[2m=[0m50 [3maudio_markers[0m[2m=[0m50 [3mvideo_ticks[0m[2m=[0m750 [3maudio_channel[0m[2m=[0mmarker channel 0 of 2 (cluster ch0=50 ch1=50)

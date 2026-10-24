@@ -156,8 +156,8 @@ issue 1383 the holder keeps its own lease truthful from acquire to release:
     only then runs the trap, so an id set after it leaves a live lease nobody releases. Releasing an
     id that never became the holder is safe: `rig_lease_release` checks the run_id.
 - **The hold CEILING keeps the #830 "never a permanent deadlock" backstop:** no beat past
-  `acquired_at + RIG_LEASE_MAX_HOLD_SECS` (default 4500 s = `full-path-e2e.yml`'s `timeout-minutes:
-  75`, lock-stepped by a test; the soak sets its declared run window). An unparseable `acquired_at`
+  `acquired_at + RIG_LEASE_MAX_HOLD_SECS` (default 6300 s = `full-path-e2e.yml`'s `timeout-minutes:
+  105` since issue 1404's YouTube stage, lock-stepped by a test; the soak sets its declared run window). An unparseable `acquired_at`
   is refused. So "alive" means "within its declared hold", not merely "the process still exists": a
   stuck-but-alive holder stops being beaten and ages into the `RIG_LEASE_STALE_SECS` reclaim.
 - **How a beater knows the lease is its own:** holder.json `repo` + `run_id` must equal the identity

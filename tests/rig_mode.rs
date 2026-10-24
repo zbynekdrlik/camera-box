@@ -1061,9 +1061,15 @@ fn genlock_relaunch_note_is_env_free_no_mode() {
         let note = run_sourced(&format!("print_genlock_relaunch_note {mode}"));
         // issue 1317 part 3: the strih is the Linux strih-snv (its supervised user unit), never the
         // retired Windows `--box strih` planner arm (which now refuses).
+        // issue 1474: the stream box is the Linux stream-snv (obs-fleet class linux-genlock), so its
+        // line is the same unit restart over plain ssh -- never the Windows planner, which refuses a
+        // Linux box (exit 2).
         assert!(
-            note.contains("systemctl --user restart strih-obs.service")
-                && note.contains("--box stream")
+            note.contains("ssh newlevel@10.77.9.202 'systemctl --user restart strih-obs.service'")
+                && note.contains(
+                    "ssh newlevel@10.77.9.204 'systemctl --user restart strih-obs.service'"
+                )
+                && !note.contains("launch-obs-genlock.sh")
                 && !note.contains("--box strih"),
             "#257: the relaunch note must cover strih-snv AND stream. mode={mode} note=\n{note}"
         );
@@ -1077,6 +1083,32 @@ fn genlock_relaunch_note_is_env_free_no_mode() {
             "#257: the relaunch note must not reference any OBS_BURN_*/OBS_GENLOCK_* env. note=\n{note}"
         );
     }
+}
+
+/// issue 1474: the stream relaunch line is picked by the stream box's obs-fleet CLASS, never by a
+/// literal name. A Windows stream box (an `OBS_FLEET` override) keeps the Windows relaunch planner,
+/// byte for byte; the strih-snv line is the same on both.
+#[test]
+fn genlock_relaunch_note_stream_line_follows_the_fleet_class_1474() {
+    let win_fleet =
+        "strih-snv|10.77.9.202|linux-genlock|always\nstream-snv|10.77.9.204|windows-genlock|always";
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg("set -uo pipefail\n. \"$SCRIPT\"\nprint_genlock_relaunch_note test")
+        .env("SCRIPT", script())
+        .env("OBS_FLEET", win_fleet)
+        .env_remove("PAINTER_FPS")
+        .output()
+        .expect("failed to run bash harness");
+    assert!(out.status.success(), "harness failed: {out:?}");
+    let note = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        note.contains("#   stream   : scripts/launch-obs-genlock.sh --box stream --force\n")
+            && note
+                .contains("ssh newlevel@10.77.9.202 'systemctl --user restart strih-obs.service'")
+            && !note.contains("ssh newlevel@10.77.9.204"),
+        "issue 1474: a Windows stream box keeps the Windows relaunch planner line. note=\n{note}"
+    );
 }
 
 /// #524: EVENT mode must guard against a STRAY recording left running on strih/stream — a runaway

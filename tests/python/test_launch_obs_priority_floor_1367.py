@@ -18,11 +18,16 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 LAUNCH = REPO / "scripts" / "launch-obs-genlock.sh"
+# issue 1474: the stream box is the Linux stream-snv on the real fleet and the Windows planner
+# refuses it by class; the Windows program is pinned on a fleet whose stream box is Windows.
+WIN_STREAM_FLEET = ("strih-snv|10.77.9.202|linux-genlock|always\n"
+                    "stream-snv|10.77.9.204|windows-genlock|always\n"
+                    "resolume-snv|resolume.lan|windows-genlock|traveling")
 
 
 def _program(box="stream-snv"):
     r = subprocess.run(["bash", str(LAUNCH), "--box", box, "--force"], capture_output=True, text=True,
-                       cwd=str(REPO), timeout=120)
+                       cwd=str(REPO), timeout=120, env={**os.environ, "OBS_FLEET": WIN_STREAM_FLEET})
     assert r.returncode == 0, r.stderr
     parts = re.split(r"(?m)^# -{6,}.*$", r.stdout)
     assert len(parts) >= 3, r.stdout[:400]

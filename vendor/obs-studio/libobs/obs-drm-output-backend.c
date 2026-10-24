@@ -78,6 +78,9 @@ struct drm_output_vkd {
 	pthread_mutex_t lock; /* active/stopping transitions */
 	bool active;
 	bool stopping;
+	/* issue 1424: `active` mirrored for lock-free readers -- the frontend polls it on the UI thread and
+	 * a retried start holds `lock` across a whole open (seconds), so a read must never wait for it */
+	volatile bool active_pub;
 	volatile bool program;            /* bind + publish frames (false = the "program": false solid diagnostic) */
 	struct drm_output_vk_disp *disp;  /* the instance's display in the vk core (NULL before the first open) */
 	gs_texture_t *mid;                /* the intermediate render target (graphics context) */
@@ -126,6 +129,7 @@ static bool vkd_start(struct drm_output_inst *inst)
 	k->gl_ready = false;
 	k->want_w = k->want_h = k->want_mhz = 0; /* issue 1424: the output opened with today's rule */
 	k->active = true;
+	os_atomic_set_bool(&k->active_pub, true);
 	os_atomic_set_bool(&k->program, inst->program);
 	pthread_mutex_unlock(&k->lock);
 	blog(LOG_INFO, "drm-output: ACTIVE (vk-direct) — presenting solid 0x%06x on '%s' until the first %s",
@@ -166,6 +170,7 @@ static void vkd_stop(struct drm_output_inst *inst)
 	 * closed display (wants_frames false), never a NULL. */
 	pthread_mutex_lock(&k->lock);
 	k->active = false;
+	os_atomic_set_bool(&k->active_pub, false);
 	k->stopping = false;
 	pthread_mutex_unlock(&k->lock);
 	blog(LOG_INFO, "drm-output: stopped (vk-direct, '%s')", inst->connector);
@@ -173,11 +178,17 @@ static void vkd_stop(struct drm_output_inst *inst)
 
 static bool vkd_active(struct drm_output_inst *inst)
 {
+	return os_atomic_load_bool(&vkd_of(inst)->active_pub);
+}
+
+/* issue 1424: the output's scanout really runs -- open, not stopping, and its present loop still wants
+ * frames (cleared when the loop died: a lost device, a display that now offers another mode size, a
+ * lone display whose rebuild gave up). The retry supervisor releases an output that is active but not
+ * alive and retries it. */
+static bool vkd_alive(struct drm_output_inst *inst)
+{
 	struct drm_output_vkd *k = vkd_of(inst);
-	pthread_mutex_lock(&k->lock);
-	bool a = k->active;
-	pthread_mutex_unlock(&k->lock);
-	return a;
+	return os_atomic_load_bool(&k->active_pub) && k->disp && drm_output_vk_wants_frames(k->disp);
 }
 
 /* The lazy GL bind: the intermediate at the display mode size + the shared-image import. Graphics
@@ -311,6 +322,7 @@ const struct drm_output_backend_ops drm_output_vk_direct_backend = {
 	.publish = vkd_publish,
 	.texture = vkd_texture,
 	.mode_size = vkd_mode_size,
+	.alive = vkd_alive,
 };
 
 #endif /* defined(__linux__) */

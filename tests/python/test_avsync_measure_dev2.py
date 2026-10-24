@@ -12,6 +12,11 @@ import subprocess
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _HOME = str(pathlib.Path.home())
+# issue 1474: the stream box is the Linux stream-snv on the real fleet and the Windows planner
+# refuses it by class; the Windows program is pinned on a fleet whose stream box is Windows.
+WIN_STREAM_FLEET = ("strih-snv|10.77.9.202|linux-genlock|always\n"
+                    "stream-snv|10.77.9.204|windows-genlock|always\n"
+                    "resolume-snv|resolume.lan|windows-genlock|traveling")
 _MEASURE_LIB = _ROOT / "scripts" / "lib" / "avsync-measure.sh"
 _WATCHDOG_INSTALL = _ROOT / "scripts" / "avsync-watchdog-install.sh"
 _DEV2_INSTALL = _ROOT / "scripts" / "avsync-dev2-install.sh"
@@ -182,7 +187,8 @@ def test_disable_stream_tasks_cmds_lists_all_three():
 def test_retire_mode_prints_disable_plan():
     proc = subprocess.run(
         ["bash", str(_WATCHDOG_INSTALL), "--retire"],
-        env={"PATH": "/usr/bin:/bin", "HOME": _HOME}, capture_output=True, text=True,
+        env={"PATH": "/usr/bin:/bin", "HOME": _HOME, "OBS_FLEET": WIN_STREAM_FLEET},
+        capture_output=True, text=True,
     )
     assert proc.returncode == 0, proc.stderr
     assert "schtasks /Change /TN avsync-watchdog /DISABLE" in proc.stdout

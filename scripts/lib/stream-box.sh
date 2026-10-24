@@ -17,6 +17,7 @@
 #   stream_box_upload ...         -> scp one file to the box
 #   stream_box_visibility_gate_linux ...  -> the [0/8] operator-visibility gate on a Linux stream box
 #   stream_mbc_vban_expect HOST   -> `<stream> <port> <input>` the Linux box's mbc VBAN input carries
+#   stream_box_obs_restart_hint USER HOST WIN_HINT -> the operator's OBS restart line for the box
 #
 # Each function takes its arguments in the order of the function it wraps: exec / download that of
 # win_ssh_run (USER PW HOST ...), the visibility gate that of strih_linux_visibility_check (HOST USER PW
@@ -124,6 +125,21 @@ stream_box_visibility_gate_linux() {
     return 1
   fi
   echo "    ok: stream strih-obs.service active + obs-websocket answers on :4455 (the Linux stream box, issue 1462)"
+}
+
+# stream_box_obs_restart_hint USER HOST WIN_HINT -> the ONE line an operator / supervisor runs to
+# (re)start the OBS on HOST, picked by its obs-fleet class (issue 1474): on a Linux box the supervised
+# user unit over plain ssh, `ssh USER@HOST 'systemctl --user restart strih-obs.service'` (the strih-snv
+# and stream-snv appliance unit); on any other box WIN_HINT verbatim, so a caller's Windows text stays
+# byte-identical. The Windows relaunch planner refuses a Linux box (exit 2), so no hint may name it
+# there. Prints with no trailing newline (the callers embed it in a sentence); always rc 0.
+stream_box_obs_restart_hint() {
+  local user="${1-}" host="${2-}" win_hint="${3-}"
+  if [ "$(stream_box_platform "$host")" = "linux" ]; then
+    printf "ssh %s@%s 'systemctl --user restart strih-obs.service'" "$user" "$host"
+  else
+    printf '%s' "$win_hint"
+  fi
 }
 
 # stream_mbc_vban_expect HOST -> on a Linux stream box, print `<stream> <port> <input>`: the VBAN

@@ -67,6 +67,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/strih-log-read.sh
 # issue 1360: a Linux strih (strih-snv) is read through the ONE shared strih OBS-log reader.
 . "$HERE/lib/strih-log-read.sh"
+# shellcheck source=scripts/lib/stream-box.sh
+# issue 1474: the recovery line by the watched box's fleet class (stream_box_obs_restart_hint).
+. "$HERE/lib/stream-box.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -118,7 +121,10 @@ REPO_SLUG="${ASIO_STARVE_ALERT_REPO:-zbynekdrlik/camera-box}"
 # The OBS-reset cure the ticket confirms ("only reset OBS helps"). Alert-only: a dev1 timer has no
 # session-aware win-* MCP to restart the live stream OBS, and an unattended restart of the broadcast
 # output is not done -- the alert embeds the ready-to-run recovery plan instead (obs-liveness #391).
-RECOVERY_PLAN="${ASIO_STARVE_RECOVERY_PLAN:-scripts/launch-obs-genlock.sh --box $ASIO_STARVE_NAME --force}"
+# issue 1474: picked by the box's obs-fleet class -- the Linux stream-snv restarts its supervised
+# strih-obs.service over plain ssh (the Windows relaunch planner refuses a Linux box, exit 2); a
+# Windows box keeps the planner line.
+RECOVERY_PLAN="${ASIO_STARVE_RECOVERY_PLAN:-$(stream_box_obs_restart_hint "$SSH_USER" "$ASIO_STARVE_IP" "scripts/launch-obs-genlock.sh --box $ASIO_STARVE_NAME --force")}"
 
 STATE_DIR="${ASIO_STARVE_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-asio-starve-alert.state"
@@ -289,7 +295,7 @@ handle_source() {
   detail="$(asio_starve_alert_detail "$source" "$blocks" "$ASIO_STARVE_THRESHOLD")"
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD alert: '$source' CONFIRMED starved ($detail) alert_now=$alert_now"
+    log "[dry-run] WOULD alert: '$source' CONFIRMED starved ($detail) alert_now=$alert_now recovery=$RECOVERY_PLAN"
     return 0
   fi
   if [ "${alert_now:-0}" = "1" ]; then

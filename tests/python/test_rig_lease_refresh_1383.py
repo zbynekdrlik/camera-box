@@ -409,8 +409,8 @@ FULL_PATH_WORKFLOW = os.path.join(REPO, ".github", "workflows", "full-path-e2e.y
 
 def test_past_the_hold_ceiling_the_lease_is_no_longer_beaten(tmp_path, lease):
     # a still-running but stuck holder must age into the heartbeat-stale reclaim again: the keep-alive
-    # stops at acquired_at + RIG_LEASE_MAX_HOLD_SECS (default 4500 s = the full-path job timeout)
-    _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=4600)))
+    # stops at acquired_at + RIG_LEASE_MAX_HOLD_SECS (default 6300 s = the full-path job timeout)
+    _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=6400)))
     raw = (lease / "holder.json").read_bytes()
     stamp = _age_heartbeat(lease)
     r = _refresh(tmp_path, lease, REPO_ID, RUN_ID, "900")
@@ -421,7 +421,7 @@ def test_past_the_hold_ceiling_the_lease_is_no_longer_beaten(tmp_path, lease):
 
 
 def test_a_holder_may_declare_a_longer_hold_ceiling(tmp_path, lease):
-    _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=4600)))
+    _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=6400)))
     _age_heartbeat(lease)
     r = _refresh(tmp_path, lease, REPO_ID, RUN_ID, "900", RIG_LEASE_MAX_HOLD_SECS="30000")
     assert r.returncode == 0, r.stdout + r.stderr
@@ -529,7 +529,7 @@ def test_the_keepalive_ends_at_the_hold_ceiling(tmp_path, lease):
     _write_holder(lease)
     pid = _spawn_keepalive(tmp_path, lease, RIG_LEASE_KEEPALIVE_SEC="1")
     try:
-        _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=5000)))
+        _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=6400)))
         assert _wait_for(lambda: not _pid_alive(pid), 4)
     finally:
         if _pid_alive(pid):

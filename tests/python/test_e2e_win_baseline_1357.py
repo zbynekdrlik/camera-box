@@ -31,6 +31,12 @@ EXPANSION = '${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"}'
 CALL = 'e2e_win_baseline_gather "$OUTDIR/win-baseline"'
 HERMETIC_GATE_ENV = {**os.environ, "VERSION_INTEGRITY_GATE_VENDOR_NEWEST": "0000000hermetictest",
                      "VERSION_INTEGRITY_GATE_VENDOR_PENDING": ""}
+# issue 1474: stream-snv is linux-genlock on the real fleet, so the `win-baseline` facet there is
+# resolume-snv alone. The two-box mechanics below run on a fleet whose stream box is Windows; the
+# real fleet's one-box roster is pinned by its own test.
+WIN_STREAM_FLEET = ("strih-snv|10.77.9.202|linux-genlock|always\n"
+                    "stream-snv|10.77.9.204|windows-genlock|always\n"
+                    "resolume-snv|resolume.lan|windows-genlock|traveling")
 
 
 def _seam(tmp_path, mapping):
@@ -62,7 +68,7 @@ def _gather(tmp_path, env, out_dir=None, timeout=60):
         'echo "ARGC=$#"\n'
         'for a in "$@"; do echo "ARG=$a"; done\n'
     )
-    full_env = {**os.environ, **env}
+    full_env = {**os.environ, "OBS_FLEET": WIN_STREAM_FLEET, **env}
     t0 = time.monotonic()
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=full_env,
                        timeout=timeout)
@@ -274,7 +280,8 @@ def test_uncreatable_output_dir_is_skipped_never_fatal(tmp_path):
 
 def _timeout_s(env):
     r = subprocess.run(["bash", "-c", f'set -euo pipefail; . "{LIB}"; e2e_win_baseline_timeout_s'],
-                       capture_output=True, text=True, env={**os.environ, **env}, timeout=30)
+                       capture_output=True, text=True,
+                       env={**os.environ, "OBS_FLEET": WIN_STREAM_FLEET, **env}, timeout=30)
     assert r.returncode == 0, r.stderr
     return int(r.stdout.strip())
 
@@ -312,6 +319,22 @@ def test_timeout_is_sized_from_the_checks_own_per_box_bounds():
     assert _timeout_s({**clean, "E2E_WIN_BASELINE_TIMEOUT": "08"}) == 8
     assert _timeout_s({**clean, "E2E_WIN_BASELINE_TIMEOUT": "0"}) == 102
     assert _timeout_s({**clean, "E2E_WIN_BASELINE_TIMEOUT": "-5"}) == 102
+
+
+def test_on_the_real_fleet_only_resolume_is_read_and_the_bound_follows_1474(tmp_path):
+    # issue 1474: the Linux stream-snv is no Windows OBS box, so the E2E never reads a Windows
+    # baseline from it: the array names resolume-snv alone and the bound is sized for one box.
+    seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt",
+                            "resolume-snv": FIX / "resolume_balanced_all_drift.txt"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET": "",
+                              "OBS_FLEET_HOME": "resolume-snv"})
+    _assert_caller_survived(r)
+    out = tmp_path / "out"
+    assert _args(r) == ["--win-baseline", f"resolume-snv={out}/resolume-snv.txt"], r.stdout
+    assert not (out / "stream-snv.txt").exists()
+    clean = {k: "" for k in ("E2E_WIN_BASELINE_TIMEOUT", "WIN_BASELINE_SSH_TIMEOUT",
+                             "OBS_FLEET_RESOLVE_TIMEOUT", "OBS_FLEET_STATUS_TIMEOUT")}
+    assert _timeout_s({**clean, "OBS_FLEET": ""}) == 1 * (2 * 20 + 2 + 4) + 10
 
 
 def test_the_helper_feeds_the_gate_and_never_changes_its_exit(tmp_path):
