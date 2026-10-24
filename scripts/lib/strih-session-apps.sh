@@ -78,6 +78,11 @@ if ! declare -F strih_stream_monitor_grade_rows >/dev/null; then
   # shellcheck source=scripts/lib/strih-stream-monitor.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-stream-monitor.sh"
 fi
+# issue 1424: the display watch's X config row (the fixed HDMI outputs kept out of X).
+if ! declare -F strih_x_display_grade_row >/dev/null; then
+  # shellcheck source=scripts/lib/strih-x-display.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-x-display.sh"
+fi
 # issue 1429: the dantesync tray binary (install + its path, the pin).
 if ! declare -F dantesync_install_tray >/dev/null; then
   # shellcheck source=scripts/lib/dantesync-install.sh
@@ -710,6 +715,8 @@ strih_session_apps_grade_rows() {
   if _strih_session_apps_has "$STRIH_DISPLAY_WATCH_UNIT"; then
     strih_session_app_pass_row display-watch strih_display_watch.py "$STRIH_DISPLAY_WATCH_STATE_FILE" \
       "$STRIH_DISPLAY_WATCH_UNIT" "$repo" "$user"
+    # issue 1424 layer 1: the X config that keeps the fixed HDMI outputs out of X (setup-strih step 6)
+    strih_x_display_grade_row "$repo" "$home" "$user"
   fi
 
   # issue 1436: the stream role's headphone monitor -- its last pass + card owner, the OBS key, Monitor Off
@@ -731,13 +738,14 @@ _strih_session_apps_has() {
 
 # strih_session_apps_row_count -> how many rows strih_session_apps_grade_rows prints (one per unit +
 # the keeper's last pass + the panel window + the Satellite watch's last pass + the display watch's last
-# pass (issue 1424) + the stream monitor's
+# pass and its X config row (issue 1424) + the stream monitor's
 # STRIH_STREAM_MONITOR_ROWS).
 strih_session_apps_row_count() {
   local n="${#STRIH_SESSION_APP_UNITS[@]}" u
   for u in strih-browser-keeper.service bkshading-panel-app.service strih-satellite-watch.timer "$STRIH_DISPLAY_WATCH_UNIT"; do
     _strih_session_apps_has "$u" && n=$((n + 1))
   done
+  _strih_session_apps_has "$STRIH_DISPLAY_WATCH_UNIT" && n=$((n + 1))  # issue 1424: + its X config row
   _strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT" && n=$((n + STRIH_STREAM_MONITOR_ROWS))
   printf '%s' "$n"
 }

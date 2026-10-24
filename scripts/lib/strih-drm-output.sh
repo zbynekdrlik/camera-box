@@ -41,6 +41,11 @@
 # (written at the end of strih_drm_output_provision) and its verify grading.
 # shellcheck source=scripts/lib/drm-output-audio.sh
 . "$(dirname "${BASH_SOURCE[0]}")/drm-output-audio.sh"
+# issue 1424 (design 6386467303 layer 1): the X config that keeps the fixed HDMI outputs out of X.
+if ! declare -F strih_x_display_provision >/dev/null; then
+  # shellcheck source=scripts/lib/strih-x-display.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-x-display.sh"
+fi
 
 # The M1 dark-grey solid (0x202020): the image before the first rendered frame + the fail-open one.
 STRIH_DRM_OUTPUT_ARGB=2105376
@@ -532,6 +537,9 @@ except ValueError as e:
     fi
   fi
   rm -f "$LEGACY_PROJ"
+  # issue 1424 (design 6386467303 layer 1): X never sets a mode on a fixed HDMI output, at any monitor
+  # state (an xorg.conf.d MetaModes over the operator outputs only; applies at the next X start)
+  strih_x_display_provision "$user_home" "$desktop_user" "$scripts_dir" "$DRM_CONF"
   # issue 1424: the output writes the program mix straight into its connector's HDMI PCM, so
   # PipeWire must leave every HDMI/DP PCM alone (generic, no per-box fact)
   drm_output_audio_wp_provision
