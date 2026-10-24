@@ -132,8 +132,9 @@ def test_strih_pp_receives_lv1s_strih_obs_on_6981_with_no_leg():
 def test_strih_pps_r_sits_above_lv1s_worst_gap():
     # R = 40 ms, the value lv1 is proven at on stream-pp (lost 0, ~27 ms spare); lv1's worst gap there
     # read 26-29 ms -- measured on lv1's 256-frame `stream`, not on this 103-frame `strih-obs` (the live
-    # read after a production is a supervisor acceptance item, .claude/rules/obs-vban-receive.md). A packet is in time with up to R - one packet (103 frames at 48 kHz) - the 2 ms
-    # playout margin of delay over the earliest arrival.
+    # read after a production is a supervisor acceptance item, .claude/rules/obs-vban-receive.md).
+    # A packet is in time with up to R - one packet (103 frames at 48 kHz) - the 2 ms playout margin of
+    # delay over the earliest arrival.
     r = _bash('strih_box_load strih-pp\nprintf "%s" "$(strih_lx_program_vban_reserve_ms)"')
     reserve_ms = int(r.stdout)
     budget_ms = reserve_ms - 103 * 1000.0 / 48_000 - _header_define("VBAN_RECV_DEADLINE_MARGIN_MS")
