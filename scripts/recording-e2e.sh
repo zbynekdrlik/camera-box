@@ -569,8 +569,11 @@ fi
 # too-small override is CLAMPED up to a hard floor (never trusted to be sane), never allowed to
 # silently re-enable a mid-run fire. FLOOR = the worst-case pre-record overhead itself; below it the
 # first fire could precede StopRecord.
-CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=15
-CAMERA_BOX_DEADMAN_OVERHEAD_MIN="${CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-20}"
+# issue 1404: the YouTube stage now runs before the recording too (the restreamer session start, a
+# busy wait on a recovered leftover session, StartStream, the wait for the live broadcast: ~15 min
+# worst case), so the floor and the default both grow by that: 15 -> 30, 20 -> 35.
+CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN=30
+CAMERA_BOX_DEADMAN_OVERHEAD_MIN="${CAMERA_BOX_DEADMAN_OVERHEAD_MIN:-35}"
 case "$CAMERA_BOX_DEADMAN_OVERHEAD_MIN" in
   ''|*[!0-9]*)
     echo "WARNING #772: CAMERA_BOX_DEADMAN_OVERHEAD_MIN='$CAMERA_BOX_DEADMAN_OVERHEAD_MIN' is not a non-negative integer -- clamping to the safe floor ${CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN}min so the dead-man cannot fire mid-recording" >&2

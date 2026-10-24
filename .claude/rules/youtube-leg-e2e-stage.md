@@ -83,6 +83,12 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   only) before its busy loop when the marker exists, because a stream we left would make that loop
   refuse every later run; `start` runs it with the session half, then a 409 busy whose holder is the
   recovered session is waited out (`BUSY_WAIT_S` 300 s, `--busy-poll`) while restreamer tears it down.
+  The marker carries a provisional publish time before StartStream, overwritten after it.
+  Known limit: `outputDuration` counts output frames, so a leftover that streamed for hours with many
+  lagged frames can read older than 120 s off our publish; `recover` then refuses (the safe
+  direction: the rig stays busy, never a foreign stream stopped) and the stream needs a hand stop.
+- The camera-box dead-man's first-fire margin (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN` 30 /
+  default 35 min) and the painter slack (1800 s) both carry the stage's pre-record wait.
 - `youtube_leg_gate` in BOTH tails, right after the program-audio gate line (before the Discord report
   and `exit "$GATE"`): pulls the stream recording to dev1 (`stream_box_download` in `timeout bash -c`),
   `measure` (VOD wait, windows, the verdict tool with `--probe-bin $PROBE_BIN_DIR/recording-verdict`,

@@ -282,7 +282,9 @@ def do_start(ctx, stage):
     sid = d["session_id"]
     _set(stage, f"restreamer session {sid} (broadcast {d.get('broadcast_id')}) starting",
          session_id=sid, broadcast_id=d.get("broadcast_id"))
-    marker_write(ctx.marker, {"session_id": sid, "host": a.host, "dir": stage.dir, "publish_utc": None})
+    # a provisional publish time: a cancel inside StartStream still leaves recover a time to prove
+    # the stream ours by (the real start lands within the request's bound, inside OURS_TOLERANCE_S)
+    marker_write(ctx.marker, {"session_id": sid, "host": a.host, "dir": stage.dir, "publish_utc": time.time()})
     # stream_started is set BEFORE the request: a StartStream whose answer is lost must still be stopped
     if _set(stage, stream_started=True).get("phase") != "starting":  # cleanup() stopped the stage meanwhile
         return 1
