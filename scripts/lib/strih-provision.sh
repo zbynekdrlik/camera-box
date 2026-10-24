@@ -117,6 +117,11 @@ if ! declare -F stream_operator_audio_install >/dev/null; then
   # shellcheck source=scripts/lib/stream-operator-audio.sh
   . "$(dirname "${BASH_SOURCE[0]}")/stream-operator-audio.sh"
 fi
+# issue 1440: PipeWire out of the strih role on a box whose facts need none (setup step 12, item 9b).
+if ! declare -F strih_pipewire_purge_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-pipewire-purge.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-pipewire-purge.sh"
+fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4
@@ -307,6 +312,9 @@ strih_lx_seed_manifest_json() {
   fi
   printf '{\n'
   printf '  "mode": "update-only",\n'
+  # issue 1440: every OBS browser source reroutes its page audio into OBS and stays muted there, so no page
+  # sound reaches a device (strih_scenes.py --bootstrap, program_audio_vban.mute_browser_sources).
+  printf '  "browser_audio": "reroute-mute",\n'
   printf '  "inputs": [\n'
   printf '    %s,\n' "${rows[@]}" | sed '$ s/,$//'
   printf '  ],\n'
@@ -601,9 +609,17 @@ strih_lx_graph_quantum_ok() {
 # audio session. DynamicUser cannot traverse the operator's 0700 /run/user/<uid> to reach pipewire-0,
 # so the hub runs as the operator uid; the sidecar alternative adds a 2nd process + IPC socket. The
 # other hub resources (unprivileged UDP/TCP, world-readable config) are unaffected.
+# Issue 1440: MODE (3rd arg) `no-pipewire` = a box without PipeWire (strih_pipewire_purge_dropin_mode):
+# the operator user + audio + render only (strih_intercom_audio_dropin_no_pipewire, strih-pipewire-purge.sh);
+# `pipewire` (the default) renders the text below byte for byte.
 strih_intercom_audio_dropin() {
   local user="${1:?strih_intercom_audio_dropin needs the operator USER}"
   local uid="${2:?strih_intercom_audio_dropin needs the operator UID}"
+  case "${3:-pipewire}" in
+    pipewire) ;;
+    no-pipewire) strih_intercom_audio_dropin_no_pipewire "$user"; return ;;
+    *) echo "strih_intercom_audio_dropin: unknown mode '${3}' (pipewire | no-pipewire)" >&2; return 1 ;;
+  esac
   cat <<DROPIN
 # intercom-hub local-audio override (issue 1344) — installed by setup-strih step 12.
 # Run the hub as the operator so its pw-cat program-sink + talkback-capture children reach the

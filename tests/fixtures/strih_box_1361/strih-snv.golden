@@ -21,6 +21,7 @@ RESOLUME-SNV (SP-program)
 === seed-manifest ===
 {
   "mode": "update-only",
+  "browser_audio": "reroute-mute",
   "inputs": [
     {"sender": "CAM2 (usb)", "input": "NDI cam2", "scene": "Cam 2"},
     {"sender": "CAM3 (usb)", "input": "NDI cam3", "scene": "Cam 3"},

@@ -138,6 +138,8 @@ PRESETS = {
         "path_prefixes": {},
         "url_hosts": {},
         "keep_kinds": [],
+        # issue 1440: no sound server on the strih role -- every browser source's page audio goes into OBS, muted.
+        "browser_audio": "reroute-mute",
     },
     # issue 1414: the IN-PLACE rename of the SNV strih's own collection (the pre-1414 strih-lx one ->
     # strih-snv): the self-loop inputs follow the box's new NDI prefix, nothing else changes -- every
@@ -157,6 +159,7 @@ PRESETS = {
         "path_prefixes": {},
         "url_hosts": {},
         "keep_kinds": ["shader_filter"],
+        "browser_audio": "reroute-mute",  # issue 1440, as strih-pp
     },
 }
 
@@ -454,6 +457,24 @@ def _remap_paths(coll, media_dir, prefixes, rep):
             rep.append("WARN %d different source paths land on %s: copy the right file there" % (len(olds), new))
 
 
+def _browser_audio_reroute_mute(coll, rep):
+    """issue 1440: every browser source reroutes its page audio into OBS (`reroute_audio`) and is muted in the
+    mixer, so on a strih box without a sound server no page sound reaches a device (the launch seed sets the
+    same over obs-websocket, program_audio_vban.mute_browser_sources)."""
+    changed = []
+    for s in _all(coll):
+        if s.get("id") != "browser_source":
+            continue
+        st = s.setdefault("settings", {})
+        if st.get("reroute_audio") is not True or s.get("muted") is not True:
+            changed.append(s.get("name"))
+        st["reroute_audio"] = True
+        s["muted"] = True
+    if changed:
+        rep.append("AUDIO browser sources rerouted into OBS + muted (issue 1440): %s"
+                   % ", ".join('"%s"' % n for n in changed))
+
+
 def _port_modules(coll, drop_patterns, rep):
     mods = coll.get("modules")
     if not isinstance(mods, dict):
@@ -558,6 +579,8 @@ def port(collection, options):
     _map_urls(coll, o.get("url_hosts") or {}, rep)
     _remap_paths(coll, o.get("media_dir"), o.get("path_prefixes") or {}, rep)
     _port_modules(coll, patterns, rep)
+    if o.get("browser_audio") == "reroute-mute":
+        _browser_audio_reroute_mute(coll, rep)
     if o.get("name"):
         coll["name"] = o["name"]
     return coll, rep
