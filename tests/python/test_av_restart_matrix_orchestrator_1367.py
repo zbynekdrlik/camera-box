@@ -157,8 +157,16 @@ elif cmd == "program-scene":
         # issue 1474: on a Linux stream box the matrix restarts the unit itself (the fake sshpass
         # marks it), no supervisor confirm file
         confirmed = confirmed or os.path.exists(os.path.join(state, "stream-restarted"))
-        if os.path.exists(os.path.join(state, "stream-ws-dead")):
-            sys.exit("fake: stream OBS WebSocket is not answering")
+        dead = os.path.join(state, "stream-ws-dead")
+        if os.path.exists(dead):
+            # empty = dead for good; "N" = N more failed reads, then the OBS answers (booting)
+            left = open(dead).read().strip()
+            if left == "":
+                sys.exit("fake: stream OBS WebSocket is not answering")
+            if int(left) > 0:
+                open(dead, "w").write(str(int(left) - 1))
+                sys.exit("fake: stream OBS WebSocket is not answering yet")
+            os.remove(dead)
         if confirmed:
             n = bump("stream-reads-after-confirm")
             if n <= int(os.environ.get("FAKE_STREAM_WS_DOWN_AFTER_CONFIRM", "0") or 0):
@@ -201,7 +209,10 @@ case "$text" in
   *"start strih-obs.service"* | *"systemctl start camera-box"* | *"systemctl start dantesync"*)
     # issue 1474: a Linux stream box whose OBS stays dead after cleanup's start
     if [ "$host" = "${FAKE_STREAM_HOST:-}" ] && [ -n "${FAKE_STREAM_DEAD_AT_CLEANUP:-}" ]; then
-      : > "$FAKE_STATE/stream-ws-dead"
+      printf '%s' "${FAKE_STREAM_DEAD_READS:-}" > "$FAKE_STATE/stream-ws-dead"
+    fi
+    if [ "$host" = "${FAKE_STREAM_HOST:-}" ] && [ -n "${FAKE_STREAM_START_INACTIVE:-}" ]; then
+      echo "active=failed"; exit 0
     fi
     echo "active=active" ;;
   *"_SYSTEMD_INVOCATION_ID"*)

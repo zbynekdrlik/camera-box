@@ -31,6 +31,8 @@ def _linux(env, **extra):
     e = {k: v for k, v in env.items() if k != "OBS_FLEET"}
     # a supervisor wait, should one ever happen on Linux, must not hang the suite for 30 min
     e["AV_MATRIX_SUPERVISOR_TIMEOUT_S"] = "2"
+    # cleanup's bounded wait for a stream OBS its own start just launched (review round 1)
+    e["AV_MATRIX_CLEANUP_WS_WAIT_S"] = "3"
     e.update(extra)
     return e
 
@@ -92,6 +94,46 @@ def test_cleanup_on_a_linux_stream_box_starts_the_unit_and_names_the_linux_resta
     assert warn, out
     assert f"ssh u@{STREAM} '{LINUX_RESTART}'" in warn[0], warn
     assert "launch-obs-genlock" not in warn[0] and "win-stream-snv" not in warn[0], warn
+
+
+def test_cleanup_waits_for_a_stream_obs_its_start_just_launched(rig):
+    # review round 1: right after `is-active || start` the OBS is still booting; two failed reads
+    # inside the bounded wait are no outage, so no restart line is printed
+    env, p = rig
+    r = _matrix(_linux(env, AV_MATRIX_KINDS="stream-obs", AV_MATRIX_REPEATS="1",
+                       FAKE_STREAM_DEAD_AT_CLEANUP="1", FAKE_STREAM_DEAD_READS="2"), "--run")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "does NOT answer" not in out, out
+    assert "leave running: the stream OBS answers (program 'Development')" in out, out
+
+
+def test_cleanup_names_a_stream_unit_that_did_not_start(rig):
+    env, p = rig
+    r = _matrix(_linux(env, AV_MATRIX_KINDS="stream-obs", AV_MATRIX_REPEATS="1",
+                       FAKE_STREAM_START_INACTIVE="1"), "--run")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    warn = [ln for ln in out.splitlines() if "strih-obs.service is NOT confirmed active" in ln]
+    assert warn and "active=failed" in warn[0], out
+
+
+def test_the_shared_no_unit_line_names_the_box_it_ran_on(tmp_path):
+    # review round 1: the stream box sends the strih-snv restart text too, so its NO_UNIT line
+    # must name the box it ran on, never always strih-snv
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "systemctl").write_text("#!/bin/sh\nexit 0\n")
+    (stub / "hostname").write_text("#!/bin/sh\necho stream-snv\n")
+    for f in stub.iterdir():
+        f.chmod(0o755)
+    lib = os.path.join(REPO, "scripts", "lib", "mv-reverify-escalate.sh")
+    text = subprocess.run(["bash", "-c", '. "$1"; mv_reverify_obs_restart_linux_cmd', "h", lib],
+                          capture_output=True, text=True, timeout=30).stdout
+    r = subprocess.run(["bash", "-c", text], capture_output=True, text=True, timeout=30,
+                       env={"PATH": f"{stub}:/usr/bin:/bin"})
+    assert r.returncode == 2, r
+    assert "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on stream-snv" in r.stdout, r.stdout
 
 
 def test_the_linux_plan_prints_the_automatic_restart_and_no_supervisor_step(rig):
