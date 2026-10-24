@@ -62,9 +62,13 @@ time-weighted fill, plus the queue's 16-frame look-ahead, 0.33 ms):
 | pw-cat pipe (strih-pp `program_out`) | 1792 frames = **37.3 ms** | one graph quantum 1024 (21.3 ms) | +-448 | `pipe_setpoint(256)` |
 | Janus ring (phones egress) | 1920 frames = **40 ms** | the Janus audiobridge's own buffer | +-480 | `janus_pacing::RING_TARGET_FRAMES` |
 
-- A spawn keeps the depth its first read's phase gave it (+-128 frames pw-cat, +-128 aplay) for its
-  whole run, inside the dead band; nothing adapts it. A refill (a starved pw-cat) re-primes to the
-  same depth.
+- A spawn keeps the depth its first read's phase and the walk before its first fit gave it
+  (benches: within 133 frames of the setpoint for pw-cat, 183 for aplay) for its whole run, inside
+  the dead band; nothing adapts it. A refill (a starved pw-cat) re-primes to the same depth. The
+  dead band is a quarter of the leg's fixed latency (setpoint + reader buffer), not of the pipe
+  alone: for aplay the design's quarter of 640 (160) sat inside the +-128 its period reads ride
+  plus a spawn's +-128 phase, and the phase term chased the read phase (a deviation flagged for the
+  main on issue 1461).
 - Benches (computed on the models, dev1 24.10.2026): pw-cat depth within 133 of 1792, aplay within
   183 of 640, the ratio within 0.5 / 4.6 ppm of the reader's clock, no refill / trim / starved read
   at 0 / +-50 / +-200 ppm.
