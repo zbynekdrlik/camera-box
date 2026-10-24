@@ -355,6 +355,17 @@ def test_the_merge_always_carries_the_stream_leg():
     assert s.count('MERGE_ARGS=(--merge-partials "strih=$STRIH_PARTIAL" --merge-partials "stream=$STREAM_PARTIAL" \\') == 1
 
 
+def test_the_8_8b_banner_names_the_transport_the_box_really_takes(tmp_path):
+    s = _e2e()
+    line = [ln for ln in s.splitlines() if "--- [8/8b] extract the STREAM partial" in ln]
+    assert len(line) == 1 and 'stream_access_label "$STREAM"' in line[0], line
+    rig = _rig(tmp_path)
+    p = _lib(tmp_path, rig, 'echo "LX=$(stream_access_label 10.77.9.204)"')
+    assert "LX=stream-snv, plain ssh/scp" in p.stdout, p.stdout + p.stderr
+    p = _lib(tmp_path, rig, 'echo "WIN=$(stream_access_label 10.77.9.204)"', env={"OBS_FLEET": WIN_STREAM_FLEET})
+    assert "WIN=win-stream-snv" in p.stdout, p.stdout + p.stderr
+
+
 def test_the_linux_pull_back_note_replaces_the_mcp_download_text():
     s = _e2e()
     a = s.index("run_stream_extract\n  fi\n")
