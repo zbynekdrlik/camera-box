@@ -37,6 +37,16 @@ _youtube_leg_py() {
   printf '%s' "${YOUTUBE_LEG_E2E_PY:-$1/youtube_leg_e2e.py}"
 }
 
+# the stream box's class (scripts/lib/stream-box.sh, sourced by recording-e2e.sh): the measurement host
+# pulls the recording over scp from a Linux stream box only and refuses any other by name
+_youtube_leg_stream_platform() {
+  if declare -F stream_box_platform >/dev/null; then
+    stream_box_platform "$1"
+  else
+    printf 'linux'
+  fi
+}
+
 youtube_leg_start() {
   local here="$1" strih="$2" stream="$3" user="$4" pw="$5" outdir="$6"
   local d="$outdir/youtube-leg"
@@ -85,7 +95,7 @@ youtube_leg_stop() {
   # the gate waits for it, cleanup() purges it)
   if [ -n "$host_path" ]; then
     (AV_GATE_SSH_PASSWORD="$pw" exec python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" --user "$user" \
-      prefetch --stream-path "$host_path") >>"$d/prefetch.log" 2>&1 &
+      --stream-platform "$(_youtube_leg_stream_platform "$stream")" prefetch --stream-path "$host_path") >>"$d/prefetch.log" 2>&1 &
     echo "$!" >"$d/prefetch.pid"
     echo "    issue 1404: the stream recording goes to the measurement host now and is decoded there during the merge (log $d/prefetch.log)"
   fi
@@ -124,6 +134,7 @@ youtube_leg_gate() {
   # no video ever reaches dev1: the measurement host pulled the recording (the prefetch, or measure's
   # one retry), fetches the VOD, decodes, judges, sends back the verdict JSON + tick maps, deletes both
   AV_GATE_SSH_PASSWORD="$pw" python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" --user "$user" \
+    --stream-platform "$(_youtube_leg_stream_platform "$stream")" \
     measure --verdict-json "$report" --stream-path "$host_path" --markers "$markers" --schedule "$schedule" \
     --probe-bin "$probe_dir/recording-verdict" || rc=$?
   [ "$rc" = 0 ]

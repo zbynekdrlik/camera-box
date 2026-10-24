@@ -51,7 +51,10 @@ CLIP_RUNS = (MEASUREMENT_CLIP_RUN_ID,)
 QR_TOP_FRACTION = 0.62  # the painter's two big QRs sit in the top 62 % of the frame
 DECODE_SCALE = 0.5
 PHASE_RADIUS = 60  # frames: the local capture phase comes from both-halves frames this near
-DECODER_VERSION = 2  # part of the tick-cache key: a map from another decoder is never reused
+# Part of the tick-cache key. Still 2 with the known-position read (issue 1404, design 6387919956):
+# it reads every half the full detector reads, the same, and only adds halves the finder missed (a
+# superset, measured on the real files), so a v2 map of either decoder is a valid map of the file.
+DECODER_VERSION = 2
 PROBE_COUNT_TIMEOUT_S = 600
 # The worker pool's bound: about 4x the slowest measured decode (~0.27 s a frame per worker for the
 # 1080p session files on a loaded dev1), never under 10 min. A worker the OOM killer took leaves
@@ -103,8 +106,9 @@ class KnownPositionDetector:
     and `_half_read` reads the next frame's planes at those points first (`QRCodeDetector.decode`;
     gray, then blue), and runs the full detector (gray, then blue) only when neither gives a valid
     painter payload (a cut to another framing, a frame without the QR): the FALLBACK, which stores
-    the new points. Counted: `known` (planes read at the stored points), `fallback` (stored points
-    that read nothing), `full` (every full detection). A caller that passes a plain cv2 detector
+    the new points. Counted: `known` (planes read at the stored points), `misses` (point reads that
+    gave no painter payload), `fallback` (halves whose stored points all missed, so the full detector
+    ran), `full` (every full detection, fallbacks included). A caller that passes a plain cv2 detector
     keeps the full read on every plane.
 
     What it changes, measured on real files (issue 1404, 24.10.2026): the decode at the stored points
@@ -119,14 +123,14 @@ class KnownPositionDetector:
 
         self.det = cv2.QRCodeDetector()
         self.points = {}
-        self.known = self.fallback = self.full = 0
+        self.known = self.misses = self.fallback = self.full = 0
 
     def stats(self):
-        return {"known": self.known, "fallback": self.fallback, "full": self.full}
+        return {"known": self.known, "misses": self.misses, "fallback": self.fallback, "full": self.full}
 
     def read_known(self, plane, key, pick):
         """The pick of the QR read at the stored points of `key`, or None (no points, or no valid
-        painter payload there: counted as a fallback)."""
+        painter payload there: counted as a miss)."""
         import cv2
 
         pts = self.points.get(key)
@@ -138,7 +142,7 @@ class KnownPositionDetector:
             text = ""
         found = pick([text]) if text else None
         if found is None:
-            self.fallback += 1
+            self.misses += 1
             return None
         self.known += 1
         return found
@@ -209,11 +213,14 @@ def _half_read(det, img, scale, pick, side):
         return planes[k]
 
     gen = _half_planes(img)
+    tried = False
     for k in (0, 1):
         if (side, k) in det.points:
+            tried = True
             found = det.read_known(plane(k), (side, k), pick)
             if found is not None:
                 return found
+    det.fallback += tried  # the stored points read nothing: the full detector decides this half
     for k in (0, 1):
         det.full += 1
         texts, points = _qr_detect(det.det, plane(k))
@@ -449,13 +456,13 @@ def _run_jobs(path, jobs, workers, frames):
 
 def _report_reads(path, raw, parts, reads):
     """Sum the chunks' read counters, print them, fill `reads` and LAST_READS[path]."""
-    total = {"frames": len(raw), "known": 0, "fallback": 0, "full": 0}
+    total = {"frames": len(raw), "known": 0, "misses": 0, "fallback": 0, "full": 0}
     for part in parts:
         for k, v in (part[3] if len(part) > 3 else {}).items():
             total[k] = total.get(k, 0) + v
     print(f"youtube_leg_ticks: {path}: {total['frames']} frames, {total['known']} known-position reads, "
-          f"{total['full']} full detections ({total['fallback']} a fallback after a known-position read "
-          f"found no painter QR)", file=sys.stderr)
+          f"{total['full']} full detections ({total['fallback']} of them a fallback after the stored points "
+          f"read nothing; {total['misses']} point reads that missed)", file=sys.stderr)
     LAST_READS[os.path.abspath(str(path))] = dict(total)
     if reads is not None:
         reads.update(total)

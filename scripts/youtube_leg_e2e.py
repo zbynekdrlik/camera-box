@@ -458,9 +458,28 @@ def prefetch_bound(decode_timeout):
             + 3 * ylh.LOCAL_SLACK_S)
 
 
+def windows_stream_box_reason(a):
+    """Why the stream box cannot be pulled from, or None: the host pulls over scp from a Linux
+    stream box only (scripts/lib/stream-box.sh's class; a Windows box needs win_ssh_download)."""
+    if a.stream_platform == "linux":
+        return None
+    return (f"the stream box {a.host} is a {a.stream_platform.capitalize()}-class box: the measurement host "
+            "pulls the recording over scp from a Linux stream box only")
+
+
 def do_prefetch(ctx, stage):
     """Pull the stream recording to the measurement host and decode its tick map there, now (it
-    overlaps the merge and the VOD wait). Every outcome lands in the state; never raises."""
+    overlaps the merge and the VOD wait). Every outcome lands in the state; never raises. Removes its
+    own prefetch.pid when it ends (a later reader never meets a stale pid)."""
+    try:
+        return _prefetch(ctx, stage)
+    finally:
+        with contextlib.suppress(OSError):
+            if _read_pid(stage) == os.getpid():
+                os.remove(os.path.join(stage.dir, "prefetch.pid"))
+
+
+def _prefetch(ctx, stage):
     a = ctx.a
     st = stage.read()
     if st.get("phase") == "failed" or st.get("record_start_utc") is None:
@@ -468,6 +487,10 @@ def do_prefetch(ctx, stage):
     host = ctx.measure_host(stage)
     name = recording_name(a.stream_path)
     info = {"host": host.host, "recording": name}
+    refused = windows_stream_box_reason(a)
+    if refused:
+        _set(stage, f"no early measurement: {refused}", prefetch=dict(info, reason=refused))
+        return 0
     _set(stage, f"the stream recording goes to the measurement host {host.host} and is decoded there now",
          prefetch=dict(info), measure_host=host.host)
     try:
@@ -480,10 +503,11 @@ def do_prefetch(ctx, stage):
              prefetch=dict(info))
         t0 = time.monotonic()
         rc, out = host.prime(host.path(name), a.decode_timeout)
-        info.update(decode_rc=rc, decode_s=round(time.monotonic() - t0, 1))
+        elapsed = time.monotonic() - t0
+        info.update(decode_rc=rc, decode_s=round(elapsed, 1))
         if rc != 0:
-            info["reason"] = (f"ran over {a.decode_timeout:.0f} s" if rc in ylh.TIMED_OUT else
-                              " ".join(out.split())[-300:] or f"exit {rc}")
+            info["reason"] = (stopped_reason("the early decode", rc, elapsed, a.decode_timeout)
+                              or " ".join(out.split())[-300:] or f"exit {rc}")
     except ylh.HostError as e:
         info.update(reason=str(e), unreachable=e.unreachable)
     note = (f"the early decode on {host.host} finished in {info.get('decode_s')} s" if info.get("decode_rc") == 0
@@ -492,12 +516,39 @@ def do_prefetch(ctx, stage):
     return 0
 
 
-def _prefetch_pid(stage):
+def stopped_reason(what, rc, elapsed, bound):
+    """The reason of a remote step `timeout` stopped (124, or 137 at the bound) or something else
+    killed (137 inside the bound: the OOM killer on a loaded host), else None."""
+    if rc == 124 or (rc == 137 and elapsed >= bound):
+        return f"{what} ran over {bound:.0f} s"
+    if rc == 137:
+        return f"{what} was killed (exit 137) after {elapsed:.0f} s, inside its {bound:.0f} s bound"
+    return None
+
+
+def _read_pid(stage):
     try:
         with open(os.path.join(stage.dir, "prefetch.pid")) as f:
             return int(f.read().strip())
     except (OSError, ValueError):
         return None
+
+
+def _prefetch_pid(stage):
+    """The pid of THIS stage's prefetch while it runs, else None: a pid file left behind can name a
+    reused pid (an unrelated process), so the process must be this tool's prefetch of this stage dir."""
+    pid = _read_pid(stage)
+    if pid is None:
+        return None
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().split(b"\0")
+    except OSError:
+        return None
+    ours = (any(x.endswith(b"youtube_leg_e2e.py") for x in argv) and b"prefetch" in argv
+            and os.path.abspath(stage.dir).encode() in [os.path.abspath(x.decode("utf-8", "replace")).encode()
+                                                       for x in argv if x])
+    return pid if ours else None
 
 
 def _end_prefetch(stage, why):
@@ -543,16 +594,18 @@ def _measure_on_host(ctx, stage, host, windows, dropped):
     _set(stage, prefetch=pre)
     host.put_inputs(a.markers, a.probe_bin)
     st = stage.read()
+    t0 = time.monotonic()
     rc, out = host.run_tool(_verdict_args(a, st, windows, host, host.path(name)), a.tool_timeout)
+    stopped = stopped_reason("the YouTube-leg verdict tool", rc, time.monotonic() - t0, a.tool_timeout)
     print(out[-3000:], flush=True)
-    if rc in ylh.TIMED_OUT:
+    if stopped:
         # what the run finished (the tick maps, their read counters) still comes back for the diagnosis
         try:
             got = host.fetch(os.path.join(a.dir, "verdict"))
             _set(stage, f"from {host.host} after the bound ran out: {', '.join(got) or 'nothing'}")
         except ylh.HostError as e:
             _set(stage, f"nothing came back after the bound ran out: {e}")
-        return "UNKNOWN", [f"the YouTube-leg verdict tool ran over {a.tool_timeout:.0f} s"], None, None, windows, dropped
+        return "UNKNOWN", [stopped], None, None, windows, dropped
     got = host.fetch(os.path.join(a.dir, "verdict"))
     _set(stage, f"from {host.host}: {', '.join(got) or 'nothing'}")
     return _read_result(a, rc, windows, dropped)
@@ -602,6 +655,8 @@ def _measure(ctx, stage):
     if not a.stream_path:
         return "UNKNOWN", ["the stream recording's path on the stream box is unknown (its StopRecord returned none)"], \
             None, None, [], []
+    if windows_stream_box_reason(a):
+        return "UNKNOWN", [windows_stream_box_reason(a)], None, None, [], []
     if not a.markers or not os.path.isfile(a.markers):
         return "UNKNOWN", [f"the cam2 marker log is missing ({a.markers or 'no path'})"], None, None, [], []
     if not os.path.isfile(a.probe_bin):
@@ -689,6 +744,9 @@ def main(argv=None):
                     help="where the recording + VOD are pulled, decoded and judged (ssh, key auth)")
     ap.add_argument("--measure-workers", type=int,
                     default=int(os.environ.get("YOUTUBE_LEG_MEASURE_WORKERS", ylh.DEFAULT_WORKERS)))
+    ap.add_argument("--stream-platform", choices=("linux", "windows"),
+                    default=os.environ.get("YOUTUBE_LEG_STREAM_PLATFORM", "linux"),
+                    help="the stream box's class (scripts/lib/stream-box.sh): the host pulls from a Linux box only")
     tool_timeout = float(os.environ.get("YOUTUBE_LEG_TOOL_TIMEOUT_S", 1500))
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("start")

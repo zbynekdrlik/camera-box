@@ -106,8 +106,8 @@ class Host:
         root = f"R={shlex.quote(self.root)}; " if self.root else ""
         body = f"set -euo pipefail; {root}export PATH={REMOTE_PATH}; {script}"
         cmd = self.ssh + [self.host, "bash -c " + shlex.quote(body)]
-        try:
-            r = run_bounded(cmd, timeout, input=input)
+        try:  # stdin is always a pipe we close: ssh never reads the caller's terminal
+            r = run_bounded(cmd, timeout, input=input if input is not None else b"")
         except subprocess.TimeoutExpired:
             raise HostError(f"{what} on the measurement host {self.host} ran over {timeout:.0f} s") from None
         except OSError as e:
@@ -120,9 +120,13 @@ class Host:
     @staticmethod
     def _bounded(step, cmd, timeout, then=""):
         """A long remote step: `timeout` leads its own process group, its pid is recorded for
-        cleanup(), the script's exit code is the step's (124/137 = the bound ran out)."""
+        cleanup(), the script's exit code is the step's (124 = the bound ran out, 137 = killed). The
+        step's own 255 (scp's "the stream box is unreachable") is reported on stderr and returned as
+        254: 255 is ssh's own exit, which run() reads as "the measurement host is unreachable"."""
         return (f'timeout -k {KILL_AFTER_S} {int(timeout)} nice -n {NICE} {cmd} & echo "$!" > "$R/{step}.pid"; '
-                f'rc=0; wait "$!" || rc=$?; rm -f "$R/{step}.pid"; {then}exit "$rc"')
+                f'rc=0; wait "$!" || rc=$?; rm -f "$R/{step}.pid"; {then}'
+                f'if [ "$rc" = 255 ]; then echo "the step\'s own exit 255 (not ssh\'s)" >&2; rc=254; fi; '
+                f'exit "$rc"')
 
     def check(self):
         """The host answers a plain command; reads its $HOME (the stage dir's root)."""
