@@ -262,10 +262,12 @@ strih_pipewire_purge_shim_install() {
     return 0
   fi
   dir="$(mktemp -d)" || { echo "strih-pipewire-purge: mktemp failed" >&2; return 1; }
+  # 0755: apt's unprivileged _apt user reads a local .deb (a 0700 dir makes apt warn it ran unsandboxed)
+  chmod 0755 "$dir" || { rm -rf "$dir"; echo "strih-pipewire-purge: chmod ${dir} failed" >&2; return 1; }
   out="${dir}/${STRIH_PW_PURGE_SHIM}_${want}_all.deb"
   if ! { install -d -m 0755 "${dir}/pkg/DEBIAN" && install -m 0644 "$ctl" "${dir}/pkg/DEBIAN/control" \
       && dpkg-deb --build --root-owner-group "${dir}/pkg" "$out" >/dev/null \
-      && DEBIAN_FRONTEND=noninteractive apt-get install -y "$out" >/dev/null; }; then
+      && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-remove "$out" >/dev/null; }; then
     rm -rf "$dir"
     echo "strih-pipewire-purge: building / installing ${STRIH_PW_PURGE_SHIM} ${want} failed (above)" >&2
     return 1
@@ -274,10 +276,16 @@ strih_pipewire_purge_shim_install() {
   echo "  ${STRIH_PW_PURGE_SHIM} ${want}: built with dpkg-deb + installed (Provides: gstreamer1.0-pipewire, RustDesk's dependency)"
 }
 
+# _strih_pw_purge_qualified NAME NATIVE -> NAME:<arch>; a bare name (how apt prints a native-arch package) gets
+# NATIVE. dpkg-query prints `libpulse0:amd64`, apt-mark showmanual `libpulse0`: both read `libpulse0:amd64`.
+_strih_pw_purge_qualified() {
+  case "$1" in *:*) printf '%s' "$1" ;; *) printf '%s:%s' "$1" "$2" ;; esac
+}
+
 # strih_pipewire_purge_install REPO USER_HOME DESKTOP_USER -> see the header. rc 0 / 1 (+ a stderr line).
 strih_pipewire_purge_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local pref archs sim verdict rel f left kept_before kept_after manual
+  local pref archs sim verdict rel f m left kept_before kept_after manual found
   local -a arch targets keep_inst unmarked=()
   pref="$(_strih_pw_purge_pref)"
   archs="$(strih_pipewire_purge_archs)" || return 1
@@ -292,7 +300,11 @@ strih_pipewire_purge_install() {
   if [ "${#keep_inst[@]}" -gt 0 ] && [ -n "${keep_inst[0]}" ]; then
     manual="$(apt-mark showmanual "${keep_inst[@]}" 2>/dev/null)" || manual=""
     for f in "${keep_inst[@]}"; do
-      grep -qxF "${f%%:*}" < <(sed 's/:.*//' <<<"$manual") || unmarked+=("$f")
+      found=0
+      while IFS= read -r m; do
+        if [ -n "$m" ] && [ "$(_strih_pw_purge_qualified "$m" "${arch[0]}")" = "$(_strih_pw_purge_qualified "$f" "${arch[0]}")" ]; then found=1; fi
+      done <<<"$manual"
+      [ "$found" = 1 ] || unmarked+=("$f")
     done
     if [ "${#unmarked[@]}" -gt 0 ]; then
       apt-mark manual "${unmarked[@]}" >/dev/null || { echo "strih-pipewire-purge: apt-mark manual ${unmarked[*]} failed" >&2; return 1; }
