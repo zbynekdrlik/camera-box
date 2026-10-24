@@ -109,13 +109,16 @@ def test_pulse_plays_to_the_operator_sink_while_pipewire_holds_the_jack(tmp_path
     assert "pulse output" in r.stdout.splitlines()[0], r.stdout
 
 
-def test_pulse_on_a_usb_box_leaves_its_mixer_alone(tmp_path):
+def test_pulse_with_a_focusrite_plugged_in_still_plays_the_jack(tmp_path):
+    # ROZHODNUTE 6383739315 (owner 24.10.2026): the notebook jack, never a USB interface; the jack keeps its
+    # unity + Speaker mute, the Focusrite's mixer is never touched
     rig = _pulse_rig(tmp_path, usb=True)
     rig.publish()
-    r = _run_pulse(rig, card="2")
+    r = _run_pulse(rig, card="1")
     assert r.returncode == 0, r.stderr
-    assert rig.amixer() == [], rig.amixer()
-    assert rig.st()["card"] == 2 and rig.st()["state"] == "playing", rig.st()
+    assert ["-q", "-c", "Generic_1", "sset", "Speaker", "mute"] in [a.split() for a in rig.amixer()]
+    assert not [a for a in rig.amixer() if " Gen " in " %s " % a], rig.amixer()
+    assert rig.st()["card"] == 1 and rig.st()["state"] == "playing", rig.st()
 
 
 def test_pulse_starts_vlc_on_a_closed_pcm_when_the_operator_sink_exists(tmp_path):

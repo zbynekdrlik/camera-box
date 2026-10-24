@@ -6,8 +6,8 @@ chrome youtube ma v prehravani hlasitost a mute. cize mat dalsi ovladac na dalsi
 potrebne". Design: issue comment 6363778378 (Approach 1).
 
 What this pins (Tier-0: pytest + bash, fake udevadm / pw-dump / pw-metadata, no rig, no audio device):
-  * scripts/stream_operator_audio.py -- the ONE headphone device by the monitor's own rule (the ONE USB audio
-    interface, else the jack), its WirePlumber device name, the two rendered drop-ins (every other ALSA
+  * scripts/stream_operator_audio.py -- the ONE headphone device by the monitor's own rule (the notebook jack,
+    never a USB interface, ROZHODNUTE 6383739315), its WirePlumber device name, the two rendered drop-ins (every other ALSA
     card off, bluetooth off, the card's capture and other PCMs off, rate 48000, quantum = min = max = 256,
     the restore settings off) and the grader of what a live session reads back;
   * scripts/lib/stream-operator-audio.sh -- setup-strih step 12 on the STREAM role (the two drop-ins, the
@@ -93,9 +93,9 @@ def node(i, name, cls, dev_id, vol=1.0, mute=False):
                                           {"params": []}]}}}
 
 
-def healthy(device=SCARLETT):
+def healthy(device=JACK_PP, card=1):
     return [{"id": 0, "type": "PipeWire:Interface:Core", "info": {"props": {}}},
-            dev(40, device), node(41, SINK, "Audio/Sink", 40),
+            dev(40, device, card=card), node(41, SINK, "Audio/Sink", 40),
             node(50, "Chromium", "Stream/Output/Audio", None)]
 
 
@@ -120,7 +120,8 @@ update: id:0 key:'node.stream.default-playback-volume' value:'1.000000' type:'Sp
 
 
 def snv_asound(tmp_path):
-    """stream-snv: the notebook's PCH jack (ALC256 Analog) + the Scarlett Solo 4th Gen (USB, card `Gen`)."""
+    """A notebook jack (`ALC257 Analog` on Generic_1) + a plugged-in Scarlett Solo 4th Gen (USB, card `Gen`),
+    the stream-snv situation: since ROZHODNUTE 6383739315 the jack is the device, the Focusrite never."""
     root, proc = asound(tmp_path)
     add_usb_card(root, 2, "Gen")
     return root, proc
@@ -142,14 +143,15 @@ def test_the_udev_name_prefers_the_usb_id_then_the_path():
     assert m.device_name_from_udev({"DEVPATH": "/x"}) is None
 
 
-def test_the_scarlett_is_the_headphone_device_on_stream_snv(tmp_path):
+def test_a_plugged_in_focusrite_never_becomes_the_headphone_device(tmp_path):
     m = _soa()
     root, _ = snv_asound(tmp_path)
     fb = _fakebin(tmp_path, udevadm=FAKE_UDEVADM)
     info, why = m.resolve_device(str(root), None, str(tmp_path / "sys"), str(fb / "udevadm"))
     assert why is None, why
-    assert (info["card"], info["card_id"], info["device"], info["usb"]) == (2, "Gen", 0, True)
-    assert info["device_name"] == SCARLETT and info["source"] == "udev"
+    assert (info["card"], info["card_id"], info["device"], info["usb"]) == (1, "Generic_1", 0, False)
+    assert info["device_name"] == JACK_PP and info["source"] == "udev"
+    assert "Gen:0 USB Audio" in info["note"], info
 
 
 def test_the_jack_is_the_headphone_device_on_stream_pp(tmp_path):
@@ -165,9 +167,9 @@ def test_a_running_sessions_own_device_name_wins_over_udev(tmp_path):
     m = _soa()
     root, _ = snv_asound(tmp_path)
     fb = _fakebin(tmp_path, udevadm=FAKE_UDEVADM)
-    live = [dev(40, "alsa_card.usb-Focusrite_live-00", card=2), dev(41, "alsa_card.pci-x", card="1")]
+    live = [dev(40, "alsa_card.usb-Focusrite_live-00", card=2), dev(41, "alsa_card.pci-live_jack", card="1")]
     info, why = m.resolve_device(str(root), live, str(tmp_path / "sys"), str(fb / "udevadm"))
-    assert why is None and info["device_name"] == "alsa_card.usb-Focusrite_live-00" and info["source"] == "pw-dump"
+    assert why is None and info["device_name"] == "alsa_card.pci-live_jack" and info["source"] == "pw-dump"
 
 
 def test_no_headphone_device_is_a_reason_never_a_guess(tmp_path):
@@ -229,8 +231,9 @@ def test_the_cli_renders_the_dropin_for_the_resolved_device(tmp_path):
     r = subprocess.run([sys.executable, str(SOA), "render-wireplumber"], capture_output=True, text=True,
                        env=_env(tmp_path, root), timeout=30)
     assert r.returncode == 0, r.stderr
-    assert r.stdout == _soa().render_wireplumber(SCARLETT, 0)
-    assert "Gen:0" in r.stderr and SCARLETT in r.stderr and "udev" in r.stderr, r.stderr
+    assert r.stdout == _soa().render_wireplumber(JACK_PP, 0)
+    assert "Generic_1:0" in r.stderr and JACK_PP in r.stderr and "udev" in r.stderr, r.stderr
+    assert SCARLETT not in r.stdout
 
 
 def test_the_cli_refuses_without_a_headphone_device(tmp_path):
@@ -242,7 +245,7 @@ def test_the_cli_refuses_without_a_headphone_device(tmp_path):
 
 # --- 2. the grader -------------------------------------------------------------------------------------------
 
-def _grade(objects=None, settings=SETTINGS, sm=SM, expect=SCARLETT):
+def _grade(objects=None, settings=SETTINGS, sm=SM, expect=JACK_PP):
     rows = _soa().grade(healthy() if objects is None else objects, settings, sm, expect)
     out = {}
     for st, text in rows:
@@ -290,11 +293,15 @@ def test_a_capture_source_fails():
     assert st == "FAIL" and "alsa_input.x.pro-input-0" in text, text
 
 
-@pytest.mark.parametrize("vol,mute", [(0.4, False), (1.0, True)])
-def test_a_sink_not_at_unity_or_muted_fails(vol, mute):
+@pytest.mark.parametrize("vol,mute,want", [(0.343, False, "OK"), (1.0, True, "NOTE"), (1.2, False, "FAIL")])
+def test_the_sink_level_is_the_operators_never_forced(vol, mute, want):
+    # ROZHODNUTE 6383739315: the global headphone volume is the operator's (panel item + volume keys), capped
+    # at 100 %; verify reads it, never pins it back to 100 % (0.343 linear = 70 % on wpctl's cubic scale)
     objs = [o for o in healthy() if o["id"] != 41] + [node(41, SINK, "Audio/Sink", 40, vol=vol, mute=mute)]
     st, text = _grade(objs)["operator-audio-volume"]
-    assert st == "FAIL", text
+    assert st == want, text
+    if want == "OK":
+        assert "70 %" in text and "set-volume" not in text, text
 
 
 @pytest.mark.parametrize("key,value", [("clock.rate", "44100"), ("clock.quantum", "1024"),
@@ -314,7 +321,7 @@ def test_a_restore_setting_left_on_fails():
 
 
 def test_an_unreadable_session_fails_every_row_never_passes():
-    rows = _soa().grade(None, "", "", SCARLETT)
+    rows = _soa().grade(None, "", "", JACK_PP)
     assert len(rows) == len(ROWS) and all(st == "FAIL" for st, _ in rows), rows
 
 
@@ -341,7 +348,79 @@ print({"none": "pulse capture inputs: none",
 '''
 
 
+FAKE_AMIXER_RW = r'''#!/usr/bin/env python3
+# amixer [-q] -c CARD sget|sset NAME [VALUES...]: sget reads $FAKE_MIX_DIR/NAME, sset is logged
+import os, sys
+args = [a for a in sys.argv[1:] if a != "-q"]
+log = os.environ.get("FAKE_AMIXER_LOG")
+if log:
+    with open(log, "a") as fh:
+        fh.write(" ".join(sys.argv[1:]) + "\n")
+card, verb, name = args[1], args[2], args[3]
+if name == os.environ.get("FAKE_AMIXER_FAIL"):
+    sys.stderr.write("amixer: Invalid card number.\n"); sys.exit(1)
+missing = "amixer: Unable to find simple control '%s',0\n" % name
+if verb == "sget":
+    f = os.path.join(os.environ.get("FAKE_MIX_DIR", "/nonexistent"), name)
+    if os.path.isfile(f):
+        sys.stdout.write(open(f).read()); sys.exit(0)
+    sys.stderr.write(missing); sys.exit(1)
+if name in os.environ.get("FAKE_AMIXER_ABSENT", "").split(","):
+    sys.stderr.write(missing); sys.exit(1)
+'''
+FAKE_ALSACTL = '#!/bin/sh\necho "alsactl $*" >> "$FAKE_ALSACTL_LOG"\nexit "${FAKE_ALSACTL_RC:-0}"\n'
+
+MIX_HEALTHY = {
+    "Speaker": "Simple mixer control 'Speaker',0\n  Front Left: Playback 0 [0%] [-65.25dB] [off]\n"
+               "  Front Right: Playback 0 [0%] [-65.25dB] [off]\n",
+    "Master": "Simple mixer control 'Master',0\n  Mono: Playback 87 [100%] [0.00dB] [on]\n",
+    "Headphone": "Simple mixer control 'Headphone',0\n  Front Left: Playback 87 [100%] [0.00dB] [on]\n"
+                 "  Front Right: Playback 87 [100%] [0.00dB] [on]\n",
+    "PCM": "Simple mixer control 'PCM',0\n  Front Left: Playback 255 [100%] [0.00dB]\n"
+           "  Front Right: Playback 255 [100%] [0.00dB]\n",
+    "Auto-Mute Mode": "Simple mixer control 'Auto-Mute Mode',0\n  Items: 'Disabled' 'Enabled'\n"
+                      "  Item0: 'Enabled'\n",
+}
+
+
+def asound_state(card_id="Generic_1", speaker="false", automute="Enabled", headphone="true"):
+    """/var/lib/alsa/asound.state as `alsactl store` writes it (the controls the mixer row reads back); a
+    second card's Speaker on first, so the reader must keep to the headphone card's own block."""
+    return ("state.Generic {\n\tcontrol.1 {\n\t\tiface MIXER\n\t\tname 'Speaker Playback Switch'\n"
+            "\t\tvalue.0 true\n\t\tvalue.1 true\n\t}\n}\n"
+            "state.%s {\n"
+            "\tcontrol.12 {\n\t\tiface MIXER\n\t\tname 'Headphone Playback Switch'\n"
+            "\t\tvalue.0 %s\n\t\tvalue.1 %s\n\t\tcomment {\n\t\t\taccess 'read write'\n"
+            "\t\t\ttype BOOLEAN\n\t\t\tcount 2\n\t\t}\n\t}\n"
+            "\tcontrol.14 {\n\t\tiface MIXER\n\t\tname 'Speaker Playback Switch'\n"
+            "\t\tvalue.0 %s\n\t\tvalue.1 %s\n\t\tcomment {\n\t\t\taccess 'read write'\n"
+            "\t\t\ttype BOOLEAN\n\t\t\tcount 2\n\t\t}\n\t}\n"
+            "\tcontrol.20 {\n\t\tiface MIXER\n\t\tname 'Auto-Mute Mode'\n\t\tvalue %s\n"
+            "\t\tcomment {\n\t\t\taccess 'read write'\n\t\t\ttype ENUMERATED\n\t\t\tcount 1\n"
+            "\t\t\titem.0 Disabled\n\t\t\titem.1 Enabled\n\t\t}\n\t}\n}\n"
+            % (card_id, headphone, headphone, speaker, speaker, automute))
+
+
+STOCK_RC = """<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+<keyboard>
+  <keybind key="A-F4"><action name="Close"/></keybind>
+</keyboard>
+</openbox_config>
+"""
+
+
 def _lib_env(tmp_path, root, objects=None, settings=SETTINGS, sm=SM, scenes="none"):
+    mix = tmp_path / "mix"
+    mix.mkdir(exist_ok=True)
+    for name, text in MIX_HEALTHY.items():
+        if not (mix / name).exists():
+            (mix / name).write_text(text)
+    state = tmp_path / "asound.state"
+    if not state.exists():
+        state.write_text(asound_state())
+    rc_src = tmp_path / "stock-rc.xml"
+    rc_src.write_text(STOCK_RC)
     meta = tmp_path / "meta"
     meta.mkdir(exist_ok=True)
     (meta / "settings").write_text(settings)
@@ -354,8 +433,14 @@ def _lib_env(tmp_path, root, objects=None, settings=SETTINGS, sm=SM, scenes="non
     fs.chmod(0o755)
     return _env(tmp_path, root, {
         "FAKE_PW_DUMP_FILE": str(dump), "FAKE_PW_META_DIR": str(meta), "FAKE_SCENES_MODE": scenes,
-        "STREAM_OPERATOR_AUDIO_SCENES": str(fs), "STRIH_SESSION_APPS_EUID": "1000"},
-        **{"pw-dump": FAKE_PW_DUMP, "pw-metadata": FAKE_PW_METADATA})
+        "STREAM_OPERATOR_AUDIO_SCENES": str(fs), "STRIH_SESSION_APPS_EUID": "1000",
+        # ROZHODNUTE 6383739315: the declared jack mixer (amixer + alsactl store), the volume helper, the keys
+        "FAKE_MIX_DIR": str(mix), "FAKE_AMIXER_LOG": str(tmp_path / "amixer.log"),
+        "FAKE_ALSACTL_LOG": str(tmp_path / "alsactl.log"), "STREAM_OPERATOR_AUDIO_ASOUND_STATE": str(state),
+        "OBS_BOX_PANEL_HEADPHONES_HELPER": str(tmp_path / "usr-local-bin" / "obs-box-headphones"),
+        "STREAM_OPERATOR_AUDIO_OPENBOX_RC_SRC": str(rc_src)},
+        **{"pw-dump": FAKE_PW_DUMP, "pw-metadata": FAKE_PW_METADATA, "amixer": FAKE_AMIXER_RW,
+           "alsactl": FAKE_ALSACTL})
 
 
 LEFTOVERS = ("pipewire/pipewire.conf.d/51-strih-quantum-1024.conf", "pipewire/pipewire.conf.d/strih-program.conf",
@@ -385,7 +470,7 @@ def test_install_writes_the_two_dropins_and_removes_the_strih_leftovers(tmp_path
     pw = home / ".config/pipewire/pipewire.conf.d/60-stream-operator-clock.conf"
     wp = home / ".config/wireplumber/wireplumber.conf.d/60-stream-operator-headphones.conf"
     assert pw.read_text() == m.render_pipewire()
-    assert wp.read_text() == m.render_wireplumber(SCARLETT, 0)
+    assert wp.read_text() == m.render_wireplumber(JACK_PP, 0)
     for rel in LEFTOVERS:
         assert not (home / ".config" / rel).exists(), rel
         assert rel.rsplit("/", 1)[1] in r.stdout, r.stdout
@@ -399,17 +484,18 @@ def test_install_is_quiet_on_a_rerun(tmp_path):
     env = _lib_env(tmp_path, root, objects=False)
     assert _bash(tmp_path, 'stream_operator_audio_install "$1" "$2" "$3"', env, REPO, home, ME).returncode == 0
     r = _bash(tmp_path, 'stream_operator_audio_install "$1" "$2" "$3"', env, REPO, home, ME)
-    assert r.returncode == 0 and r.stdout.count("unchanged") == 2 and "written" not in r.stdout, r.stdout
+    # the two drop-ins, the volume helper and the rc.xml keys
+    assert r.returncode == 0 and r.stdout.count("unchanged") == 4 and "written" not in r.stdout, r.stdout
 
 
 def test_install_prefers_the_running_sessions_device_name(tmp_path):
     root, _ = snv_asound(tmp_path)
     home = tmp_path / "home"
-    env = _lib_env(tmp_path, root, objects=[dev(40, "alsa_card.usb-Focusrite_live-00", card=2)])
+    env = _lib_env(tmp_path, root, objects=[dev(40, "alsa_card.pci-live_jack", card=1)])
     r = _bash(tmp_path, 'stream_operator_audio_install "$1" "$2" "$3"', env, REPO, home, ME)
     assert r.returncode == 0, r.stderr
     wp = home / ".config/wireplumber/wireplumber.conf.d/60-stream-operator-headphones.conf"
-    assert 'device.name = "alsa_card.usb-Focusrite_live-00"' in wp.read_text()
+    assert 'device.name = "alsa_card.pci-live_jack"' in wp.read_text()
 
 
 def test_install_without_a_headphone_device_fails_and_writes_nothing(tmp_path):
@@ -435,7 +521,14 @@ def _rows(tmp_path, home, env):
 def _installed(tmp_path, root):
     home = tmp_path / "home"
     env = _lib_env(tmp_path, root, objects=False)
-    assert _bash(tmp_path, 'stream_operator_audio_install "$1" "$2" "$3"', env, REPO, home, ME).returncode == 0
+    r = _bash(tmp_path, 'stream_operator_audio_install "$1" "$2" "$3"', env, REPO, home, ME)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    # step 16h's panel config (the headphone item on the stream role), as setup writes it after step 12
+    cfg = home / ".config" / "tint2" / "tint2rc"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    r = _bash(tmp_path, 'strih_box_load stream-pp; obs_box_panel_tint2rc', env)
+    assert r.returncode == 0, r.stderr
+    cfg.write_text(r.stdout)
     return home
 
 
@@ -443,9 +536,10 @@ def test_the_grade_rows_of_a_locked_box(tmp_path):
     root, _ = snv_asound(tmp_path)
     home = _installed(tmp_path, root)
     rows = _rows(tmp_path, home, _lib_env(tmp_path, root))
-    assert sorted(rows) == sorted(ROWS + (MIXER, "operator-audio-files", "operator-audio-obs")), rows
-    assert all(st == "OK" for k, (st, _) in rows.items() if k != MIXER), rows
-    assert rows[MIXER][0] == "NOTE" and "USB" in rows[MIXER][1], rows[MIXER]
+    assert sorted(rows) == sorted(ROWS + (MIXER, "operator-audio-files", "operator-audio-obs",
+                                          "operator-audio-control")), rows
+    assert all(st == "OK" for st, _ in rows.values()), rows
+    assert "Generic_1" in rows[MIXER][1] and "stored" in rows[MIXER][1], rows[MIXER]
     r = _bash(tmp_path, 'printf "%s" "$STREAM_OPERATOR_AUDIO_ROWS"', _lib_env(tmp_path, root))
     assert r.stdout == str(len(rows))
 
@@ -575,15 +669,17 @@ HEADPHONE_0DB = """Simple mixer control 'Headphone',0
 """
 
 
-def _mixer(tmp_path, files):
+def _mixer(tmp_path, files, state=None):
     d = tmp_path / "mix"
     d.mkdir(exist_ok=True)
     for name, text in files.items():
         (d / name).write_text(text)
     fb = _fakebin(tmp_path, amixer=FAKE_AMIXER)
+    st = tmp_path / "asound.state"
+    st.write_text(asound_state() if state is None else state)
     os.environ["FAKE_MIX_DIR"] = str(d)
     try:
-        return _soa().mixer_row({"card_id": "Generic_1", "usb": False}, str(fb / "amixer"))
+        return _soa().mixer_row({"card_id": "Generic_1", "usb": False}, str(fb / "amixer"), str(st))
     finally:
         del os.environ["FAKE_MIX_DIR"]
 
@@ -610,15 +706,16 @@ def test_a_control_the_jack_does_not_have_is_named_not_failed(tmp_path):
     assert st == "OK" and "no Speaker control" in text, text
 
 
-def test_a_usb_headphone_box_keeps_its_own_mixer():
+def test_a_usb_interface_as_the_headphone_device_fails():
+    # ROZHODNUTE 6383739315: the headphones are the notebook jack, never a USB interface
     st, text = _soa().mixer_row({"card_id": "Gen", "usb": True}, "/nonexistent/amixer")
-    assert st == "NOTE" and "USB" in text, text
+    assert st == "FAIL" and "USB" in text and "jack" in text, text
 
 
 def test_an_amixer_error_that_is_not_a_missing_control_fails(tmp_path):
     # review round 2: only "Unable to find simple control" reads as a control the jack does not have
     fb = _fakebin(tmp_path, amixer="#!/bin/sh\necho 'amixer: Invalid card number.' >&2\nexit 1\n")
-    st, text = _soa().mixer_row({"card_id": "Generic_9", "usb": False}, str(fb / "amixer"))
+    st, text = _soa().mixer_row({"card_id": "Generic_9", "usb": False}, str(fb / "amixer"), "/nonexistent/state")
     assert st == "FAIL" and "Invalid card" in text, text
 
 

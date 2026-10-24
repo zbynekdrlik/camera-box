@@ -35,7 +35,9 @@ def _bash(body, *args, env=None, box="stream-pp"):
 def test_the_config_is_one_bottom_panel_with_taskbar_tray_and_clock():
     r = _bash("obs_box_panel_tint2rc")
     cfg = dict(ln.split(" = ", 1) for ln in r.stdout.splitlines() if " = " in ln and not ln.startswith("#"))
-    assert cfg["panel_items"] == "TSEC"           # a box with no known app: no launcher; E = the layout item (issue 1441)
+    # a box with no known app: no launcher; E = the layout item (issue 1441); on the stream role the first E is
+    # the headphone volume item (issue 1465 item 3 revision)
+    assert cfg["panel_items"] == "TSEEC"
     assert cfg["panel_position"].startswith("bottom")
     assert cfg["panel_size"] == "100% 30"
     assert cfg["strut_policy"] == "follow_size"
@@ -87,7 +89,7 @@ def test_the_config_puts_the_launchers_in_front_of_the_taskbar(tmp_path):
     home, env = _apps_home(tmp_path)
     r = _bash('obs_box_panel_tint2rc "$1"', str(home), env=env)
     cfg = [ln for ln in r.stdout.splitlines() if not ln.startswith("#")]
-    assert "panel_items = LTSEC" in cfg
+    assert "panel_items = LTSEEC" in cfg
     apps = [ln.split(" = ", 1)[1] for ln in cfg if ln.startswith("launcher_item_app = ")]
     assert apps == [str(home / (".local/share/applications/obs-box-panel-%s.desktop" % i))
                     for i in ("power", "obs", "shading", "restreamer", "rustdesk")]

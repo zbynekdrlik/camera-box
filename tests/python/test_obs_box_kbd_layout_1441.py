@@ -125,7 +125,7 @@ def _cfg(text):
 
 
 def test_the_panel_has_the_layout_item_before_the_clock():
-    cfg = _cfg(_bash("obs_box_panel_tint2rc").stdout)
+    cfg = _cfg(_bash("obs_box_panel_tint2rc", box="strih-pp").stdout)
     assert "panel_items = TSEC" in cfg
     helper = "/usr/local/lib/camera-box/obs_box_kbd_layout.py"
     assert "execp = new" in cfg
@@ -141,7 +141,7 @@ def test_launchers_keep_the_layout_item(tmp_path):
     (ud / "strih-obs.service").write_text("[Service]\n")
     env = {"OBS_BOX_PANEL_SYS_UNIT_DIR": str(tmp_path / "none"), "OBS_BOX_PANEL_RUSTDESK_BIN": str(tmp_path / "none"),
            "OBS_BOX_PANEL_DISCORD_BIN": str(tmp_path / "none")}
-    cfg = _cfg(_bash('obs_box_panel_tint2rc "$1"', str(home), env=env).stdout)
+    cfg = _cfg(_bash('obs_box_panel_tint2rc "$1"', str(home), env=env, box="strih-pp").stdout)
     assert "panel_items = LTSEC" in cfg and "execp = new" in cfg
 
 
