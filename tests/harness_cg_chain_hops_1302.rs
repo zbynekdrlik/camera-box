@@ -116,7 +116,7 @@ fn merge_args_carry_the_flag_and_the_run_window_when_it_exists() {
 }
 
 #[test]
-fn recording_e2e_threads_the_flag_into_all_three_extract_calls() {
+fn recording_e2e_threads_the_flag_into_all_four_extract_calls() {
     let s = recording_e2e_text();
     assert_eq!(
         s.matches("CG_CHAIN_BURN_FLAG=\"$(cg_chain_extract_burn_flag)\"")
@@ -127,8 +127,8 @@ fn recording_e2e_threads_the_flag_into_all_three_extract_calls() {
     assert_eq!(
         s.matches("${CG_CHAIN_BURN_FLAG:+\"$CG_CHAIN_BURN_FLAG\"}")
             .count(),
-        3,
-        "strih-snv, Windows strih and stream extract calls each carry the flag"
+        4,
+        "strih-snv, Windows strih, Linux stream-snv and Windows stream extract calls each carry the flag"
     );
     let set_at = s
         .find("CG_CHAIN_BURN_FLAG=\"$(cg_chain_extract_burn_flag)\"")
