@@ -118,6 +118,14 @@ fn a_reopen_reuses_the_parked_display_before_any_new_acquire() {
         "issue 1424: the reuse runs after the display lookup and before a new acquire: {body}"
     );
     let unpark_fn = squish(&body_of(&s, "static bool drm_output_vk_unpark("));
+    // review round 2: the handle may differ after a replug or a different screen -- an entry of the SAME
+    // connector with another handle is released by name and freed, never left holding a park slot
+    assert!(
+        unpark_fn.contains("strcmp(d->dev->parked[i].output_name, d->output_name) == 0")
+            && unpark_fn.contains("vkReleaseDisplayEXT(")
+            && unpark_fn.contains("new handle"),
+        "issue 1424: a stale parked entry of the same connector is released and freed by name: {unpark_fn}"
+    );
     assert!(
         unpark_fn.contains("d->acquired = true")
             && unpark_fn.contains("VK_NULL_HANDLE")

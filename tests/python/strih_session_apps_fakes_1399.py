@@ -50,7 +50,10 @@ WIN = "0x01  0 %s  strih-snv Shading\n" % PANEL_CLASS
 
 def bash(body, env=None, sources=(LIB,), path_prepend=None, stdin=""):
     """Source `sources` under the CALLERS' set -euo pipefail (setup-strih / verify-strih), run `body`."""
-    harness = "set -euo pipefail\n" + "".join('. "%s"\n' % s for s in sources) + body
+    # the role gate setup-strih / verify-strih always have (obs-box-role.sh): no fixed HDMI output here; a
+    # sourced obs-box-role.sh replaces it (issue 1424: the display watch's policy fails closed without it)
+    harness = ("set -euo pipefail\nobs_box_step_applies() { printf 'harness: no fixed HDMI output'; return 1; }\n"
+               + "".join('. "%s"\n' % s for s in sources) + body)
     full_env = {k: v for k, v in os.environ.items() if k not in LEAKY}
     full_env.update(HERMETIC)
     if path_prepend:

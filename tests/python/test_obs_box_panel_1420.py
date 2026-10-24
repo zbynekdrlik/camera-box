@@ -296,6 +296,11 @@ def test_the_unit_skips_cleanly_without_its_guard_program():
     assert "ConditionPathExists=/usr/local/bin/strih_display_watch.py" in u.splitlines()
 
 
+def test_the_unit_row_never_blames_the_guard_without_the_session_apps_lib():
+    body = (REPO / "scripts/lib/obs-box-panel.sh").read_text().split("obs_box_panel_grade_rows() {", 1)[1]
+    assert "declare -F strih_session_apps_bin_dir" in body.split("\n}\n", 1)[0]
+
+
 def test_the_unit_row_names_a_missing_guard_and_a_panel_waiting_for_a_monitor(box):
     _healthy(box)
     guard_dir = box.tmp / "guard-bin"

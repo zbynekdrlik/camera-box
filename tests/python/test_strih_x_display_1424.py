@@ -58,7 +58,9 @@ def _run(body, tmp_path, xrandr=None, env=None, sources=(XLIB,)):
     idp = b / "id"
     idp.write_text("#!/bin/bash\necho 1000\n")
     idp.chmod(0o755)
+    # the role gate setup-strih / verify-strih always have (obs-box-role.sh); a test overrides it after
     harness = ("set -euo pipefail\nwarn() { echo \"WARN $*\"; }\n"
+               "obs_box_step_applies() { printf 'harness: no fixed HDMI output'; return 1; }\n"
                + "".join('. "%s"\n' % s for s in sources) + body)
     e = dict(os.environ, PATH="%s:%s" % (b, os.environ["PATH"]),
              STRIH_X_CONF_DIR=str(tmp_path / "xorg.conf.d"), STRIH_X_XORG_LOG=str(tmp_path / "Xorg.0.log"),
@@ -246,6 +248,21 @@ def test_the_policy_file_follows_the_role(tmp_path):
     _home2, gate2 = _policy(tmp_path / "s", False)
     r = _run(gate2 + 'strih_display_watch_env_text', tmp_path)
     assert r.stdout == "STRIH_DISPLAY_WATCH_HDMI=operator"
+
+
+def test_the_policy_fails_closed_without_the_role_gate(tmp_path):
+    # review round 2: a missing role lib must never read as `operator` (setup and verify share the text)
+    r = _run('unset -f obs_box_step_applies; if strih_display_watch_env_text; then echo OK; else echo RC1; fi',
+             tmp_path)
+    assert r.stdout.strip() == "RC1", r.stdout
+
+
+def test_the_policy_file_belongs_to_the_desktop_user(tmp_path):
+    home, gate = _policy(tmp_path, True)
+    r = _run(gate + 'strih_display_watch_env_put "%s" "$(whoami)"' % home, tmp_path)
+    assert r.returncode == 0, r.stderr
+    body = (XLIB.read_text().split("strih_display_watch_env_put() {", 1)[1].split("\n}\n", 1)[0])
+    assert 'chown "${user}:"' in body, body
 
 
 def test_the_row_fails_a_policy_file_the_role_does_not_want(tmp_path):
