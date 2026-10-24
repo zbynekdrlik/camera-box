@@ -170,13 +170,31 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
 | A/V of ONE window, the VOD clip (1080p) | 24.7 + 45.3 s |
 
 The real run: job start 17:13:08Z, StopStream 17:32:59Z (+20 min), VOD done 17:44:55Z (+716 s).
-The prefetch (pull + early decode, at most ~8 min) finishes INSIDE that wait. After `done` the tool
-needs VOD fetch + decode (~5-7 min) plus the A/V step: 10 windows x ~5 min (~8 min at load 30) =
-50-80 min, sequential. **So the 1500 s tool bound still runs out, in the A/V step** (the live
-replay: UNKNOWN `ran over 1500 s` after 1.4 windows). The decode is no longer the cost; the A/V step's
-4K clip is. A 1080p cut of the same window measured the same offset (0.75 vs 1.31 ms, 50/50 markers,
-MAD 4.7 vs 4.9 ms) in 61 s instead of 230 s. The A/V step's shape is the main's next design step
-(issue 1404, Design-question of 24.10.2026).
+
+**With the 1080p A/V read on the pool (ROZHODNUTE 6389130309), the final replay of that run on dev2**
+(24.10.2026 20:57-21:22Z, dev2 load 11-34, the A/V pool sized 3):
+
+| Step | Time |
+|---|---|
+| prefetch: pull 7.6 s + early decode 277.0 s | 286 s, inside the 716 s StopStream -> `done` wait |
+| measure after `done`: VOD fetch | 133 s |
+| VOD decode | 134 s |
+| A/V of 10 windows, 1080p recording reads, pool 3 | ~925 s |
+| fetch-back + stage cleanup | ~10 s |
+| **the verdict tool, total** | **~1190 s of the 1500 s bound** (margin ~5 min) |
+
+So the block is folded ~20 min after `done`: ~52 min into that job, against the 105 min job timeout.
+The margin to the tool bound is load dependent. Each A/V slot ran ~277 s per window at load ~30, and
+the A/V step is the largest term.
+
+The verdict was a real one, not UNKNOWN:
+- A/V PASS on all 10 windows: VOD - recording -14.6 to -15.4 ms, 49-51 markers each, every recording
+  read "1080p of 2160p".
+- dup/skip 0 in every window.
+- FAIL on w10-CAM5, the last window before StopStream: "the VOD ends 8.7 s before the recording's
+  last decoded frame of the window" and "the VOD audio ends 8.8 s before the window end". That is the
+  existing fail-closed rule meeting a VOD that lacks the stream's last ~9 s. Whose tail that is
+  (restreamer's drain, YouTube's archive cut, or the window placement near StopStream) is for the main.
 
 ### Replaying the stage on dev2 without the rig (how the numbers above were taken)
 
