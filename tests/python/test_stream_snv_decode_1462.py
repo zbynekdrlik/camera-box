@@ -168,7 +168,8 @@ def test_a_missing_recording_path_is_refused_by_name(tmp_path):
             "--", "--extract-partial", "stream", "--out", "/x.json"]
     p = subprocess.run(args, capture_output=True, text=True, env=e, cwd=str(REPO), timeout=60)
     assert p.returncode == 2, p.stdout + p.stderr
-    assert "stream" in p.stderr and calls(rig) == []
+    # the wrapper's OWN refusal (the decode it would exec refuses an empty path too, differently)
+    assert "StopRecord returned no recording path" in p.stderr and calls(rig) == []
 
 
 def test_the_wrapper_reuses_the_one_linux_decode_never_a_copy():
@@ -373,3 +374,109 @@ def test_the_linux_pull_back_note_replaces_the_mcp_download_text():
     assert 'if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then' in region, region
     assert 'stream_lx_partial_pullback_note "$STREAM_PARTIAL" "$STREAM_PIXELS"' in region, region
     assert region.index("stream_lx_partial_pullback_note") < region.index("win-stream-snv FileDownload")
+
+
+# --- review round 1: the transport lives in stream-box.sh, the dir is checked, the decode RUNS ----
+
+def test_the_upload_transport_lives_in_the_stream_box_lib(tmp_path):
+    rig = _rig(tmp_path)
+    src = tmp_path / "f.txt"
+    src.write_text("payload")
+    dest = rig["home"] / "f.txt"
+    p = _lib(tmp_path, rig, 'stream_box_upload newlevel newlevel 10.77.9.204 "%s" "C:\\\\x\\\\f.txt" "%s"; echo RC=$?' % (src, dest))
+    assert "RC=0" in p.stdout and dest.read_text() == "payload", p.stdout + p.stderr
+    p = _lib(tmp_path, rig, 'win_ssh_upload() { echo "WIN_UPLOAD $*"; }\nstream_box_upload newlevel newlevel 10.77.9.204 "%s" "C:\\\\x\\\\f.txt" /nope' % src,
+             env={"OBS_FLEET": WIN_STREAM_FLEET})
+    assert "WIN_UPLOAD newlevel newlevel 10.77.9.204 %s C:\\x\\f.txt" % src in p.stdout, p.stdout + p.stderr
+    lib = LIB.read_text()
+    assert "sshpass" not in lib, "the push goes through stream-box.sh's transport, never its own ssh/scp"
+
+
+def test_a_push_refuses_a_remote_dir_the_remote_shell_would_split(tmp_path):
+    rig = _rig(tmp_path)
+    csv = tmp_path / "m.csv"
+    csv.write_text("x")
+    for bad in ("/home/a b", "/home/it's", ""):
+        p = _lib(tmp_path, rig, 'stream_lx_push_file newlevel newlevel 10.77.9.204 "%s" "%s" m.csv\necho AFTER' % (csv, bad))
+        assert p.returncode != 0 and "AFTER" not in p.stdout, (bad, p.stdout)
+    assert calls(rig) == []
+
+
+def test_run_stream_extract_really_decodes_on_the_linux_stream_box(tmp_path):
+    """The Linux branch cut out of recording-e2e.sh and RUN against the fake box: the recording path
+    (with a space) and the A/V marker log reach the box decode as single arguments, the partial is
+    back where the merge reads it."""
+    rig = _rig(tmp_path)
+    fn = _stream_extract_fn(_e2e())
+    rec = str(rig["home"] / "2026-10-24 02-58-45.mkv")
+    marker = str(rig["remote_out"] / "av-markers-7.csv")
+    out = tmp_path / "outdir"
+    out.mkdir()
+    text = (
+        "set -euo pipefail\n"
+        '. "%s/lib/win-ssh-exec.sh"\n. "%s/lib/stream-box.sh"\n. "%s"\n' % (SCRIPTS, SCRIPTS, LIB)
+        + 'HERE="%s" STREAM=10.77.9.204 STREAM_USER=newlevel STREAM_PW=newlevel\n' % SCRIPTS
+        + 'VERDICT_BIN="%s" OUTDIR="%s" STREAM_HOST_PATH="%s" RUN_ID=7\n' % (rig["verdict"], out, rec)
+        + 'STREAM_LX_REMOTE_OUT_DIR="%s" STREAM_LX_REMOTE_BIN="%s"\n' % (rig["remote_out"], rig["remote_bin"])
+        + 'STREAM_CAPTURE_FPS=30 STRIH_CAPTURE_FPS=30 BURN_CAM1_RUN_ID=1 BURN_STRIH_RUN_ID=2 BURN_STREAM_RUN_ID=3\n'
+        + '_av_marker_args="--av-marker-log %s" _switch_schedule_args="" CG_CHAIN_BURN_FLAG="" CG=""\n' % marker
+        + fn + "\nrun_stream_extract\necho EXTRACT-DONE\n"
+    )
+    drv = tmp_path / "extract-driver.sh"
+    drv.write_text(text)
+    p = subprocess.run(["bash", str(drv)], capture_output=True, text=True, env=rig["env"], cwd=str(REPO), timeout=120)
+    assert p.returncode == 0 and "EXTRACT-DONE" in p.stdout, p.stdout + p.stderr
+    (argv,) = _verdict_calls(rig)
+    assert argv[argv.index("--stream") + 1] == rec
+    assert argv[argv.index("--av-marker-log") + 1] == marker
+    assert argv[argv.index("--extract-partial") + 1] == "stream"
+    assert (out / "stream-partial-7.json").is_file()
+    assert rig["remote_bin"].is_file(), "the binary went to STREAM_LX_REMOTE_BIN"
+
+
+# --- review round 1: missing-slot pixel proofs of the stream recording on the Linux box ----------
+
+MSP = SCRIPTS / "lib" / "missing-slot-pixels.sh"
+
+
+def _msp(tmp_path, rig, env=None):
+    rec = rig["home"] / "stream rec.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=30", "-t", "1",
+                    "-pix_fmt", "yuv420p", str(rec)], check=True, timeout=60)
+    # the box runs the REAL ffmpeg/ffprobe (the stub ffmpeg of the fake rig is replaced)
+    (rig["box"] / "ffmpeg").unlink()
+    link_box_tools(rig, "ffmpeg", "ffprobe", "head", "rmdir")
+    out = tmp_path / "msp-out"
+    out.mkdir()
+    report = out / "verdict-77.json"
+    report.write_text('{"overall_pass": true, "full_chain": {"loss": {"stream": {"classified": '
+                      '[{"id": 1, "kind": "burn_unreadable", "frame_index": 12, "png": null}]}}}}')
+    text = ('set -euo pipefail\n. "%s"\n'
+            "missing_slot_pixels_run '%s' '%s' 77 strih.test windows '' 10.77.9.204 '%s' 'C:\\o' || true\n"
+            "echo MSP-DONE\n") % (MSP, report, out, rec)
+    drv = tmp_path / "msp-driver.sh"
+    drv.write_text(text)
+    e = dict(rig["env"], STREAM_LX_REMOTE_OUT_DIR=str(rig["home"] / "verdict-out"))
+    e.update(env or {})
+    p = subprocess.run(["bash", str(drv)], capture_output=True, text=True, env=e, cwd=str(REPO), timeout=180)
+    return p, out, report
+
+
+def test_the_stream_recording_pixel_proofs_are_exported_on_the_linux_stream_box(tmp_path):
+    rig = _rig(tmp_path)
+    p, out, report = _msp(tmp_path, rig)
+    assert p.returncode == 0 and "MSP-DONE" in p.stdout, p.stdout + p.stderr
+    for k in (11, 12, 13):
+        assert (out / "stream-missing" / ("frame-%d.png" % k)).is_file(), p.stdout + p.stderr
+    assert '"stream": "ok"' in report.read_text()
+    sshs = [c for c in calls(rig) if c["tool"] == "ssh"]
+    assert sshs and not any(c["remote"].startswith("powershell") for c in sshs)
+    assert all("verdict-out/missing-slot-pixels-stream-77" in c["remote"] for c in sshs), sshs
+
+
+def test_a_windows_stream_box_keeps_the_powershell_pixel_export(tmp_path):
+    rig = _rig(tmp_path)
+    p, _out, _report = _msp(tmp_path, rig, env={"OBS_FLEET": WIN_STREAM_FLEET})
+    assert p.returncode == 0, p.stdout + p.stderr
+    sshs = [c for c in calls(rig) if c["tool"] == "ssh"]
+    assert sshs and sshs[0]["remote"].startswith("powershell"), sshs

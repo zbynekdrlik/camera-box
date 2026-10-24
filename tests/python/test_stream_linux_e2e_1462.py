@@ -120,8 +120,8 @@ def test_linux_needs_a_name_of_a_gated_box(tmp_path):
 
 
 def test_a_windows_stream_box_is_graded_exactly_as_before(tmp_path):
-    """No --linux for stream: its Windows-only facets run (and read UNKNOWN on these Linux-shaped
-    keys), exactly the pre-1462 output."""
+    """No --linux for stream: its Windows-only facets still run (and read UNKNOWN on these
+    Linux-shaped keys) -- the flag is the only way a box gets the Linux grading."""
     rc, out, _err = _gate(tmp_path, "--strih-linux")
     block = _box_block(out, "stream")
     assert "SKIPPED" not in block, block

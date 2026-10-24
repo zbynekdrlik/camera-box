@@ -68,6 +68,11 @@ if tool == "scp":
         path = dst.split(":", 1)[1]
         if not os.path.isabs(path):
             path = os.path.join(box_home, path)
+        # the "box" filesystem is this host: never let a test upload land outside its own tmp dir
+        test_root = os.path.dirname(os.path.realpath(box_home))
+        if not os.path.realpath(path).startswith(test_root + os.sep):
+            sys.stderr.write("fake box: refusing an upload outside the test dir: %s\n" % path)
+            sys.exit(1)
         if not os.path.isdir(os.path.dirname(path) or "."):
             sys.stderr.write("scp: %s: No such file or directory\n" % path)
             sys.exit(1)
