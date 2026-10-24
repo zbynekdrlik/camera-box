@@ -112,7 +112,10 @@ Rules for the facet:
   (`obs_box_brightness_helper_text`, `obs_box_backlight_udev_rule`, sha256 checked 25.9.2026).
   Change them only together with the box.
 - **rc.xml is MERGED, never replaced.** `obs_box_openbox_rc_with_brightness_keys` is a pure stdin
-  filter and the kiosk's only rc.xml writer.
+  filter and the kiosk's only rc.xml writer. Since issue 1465 it is
+  `obs_box_openbox_rc_with_keys obs_box_brightness_keybinds_xml`: the same filter takes the keybind list as
+  an argument, and the stream role's headphone volume keys (`obs_box_panel_headphones_keybinds_xml`, merged
+  by setup-strih step 12) go through it too -- never a second rc.xml writer.
   - It inserts only the missing lines of `obs_box_brightness_keybinds_xml` (the comment only when a
     keybind is missing) right before the first `</keyboard>` line.
   - An rc.xml that already has both keybinds comes back unchanged. Without `</keyboard>` it returns 1

@@ -71,6 +71,13 @@ OBS_BOX_PANEL_LOGIND_TIMEOUT="${OBS_BOX_PANEL_LOGIND_TIMEOUT:-15}"
 # on the stream role (OBS_BOX_RESTREAMER_HOST_PACKAGES) but never had a launcher. The binary path is the
 # presence seam; the strih role never gets it (owner 24.9.2026: strih is a production-only computer).
 OBS_BOX_PANEL_CHROME_BIN="${OBS_BOX_PANEL_CHROME_BIN:-/usr/bin/google-chrome-stable}"
+# issue 1465 item 3 revision (owner 24.10.2026, ROZHODNUTE 6383739315: "musi byt zrozumitelne ako si ma operator
+# regulovat hlasitost sluchatiek ... aj tu globalnu"): the stream operator's GLOBAL headphone volume. The item
+# `Slúchadlá NN %` / `Slúchadlá stlmené` (wheel = +-5 %, left click = mute) and the notebook's volume keys run
+# the SAME helper (scripts/stream_operator_volume.py), which acts on the one sink stream-operator-headphones
+# only. Declared here (the item, the helper path, the keybind lines); setup-strih step 12 installs the helper
+# and merges the keys (scripts/lib/stream-operator-audio.sh), verify item 9b grades them. Stream role only.
+OBS_BOX_PANEL_HEADPHONES_HELPER="${OBS_BOX_PANEL_HEADPHONES_HELPER:-/usr/local/bin/obs-box-headphones}"
 # The system user-unit dir (a distro package's --user unit, e.g. restreamer.service) and the RustDesk
 # binary -- seams for the offline tests.
 OBS_BOX_PANEL_SYS_UNIT_DIR="${OBS_BOX_PANEL_SYS_UNIT_DIR:-/usr/lib/systemd/user}"
@@ -142,18 +149,21 @@ obs_box_panel_desktop_text() {
 
 # obs_box_panel_tint2rc [USER_HOME] -> the declared tint2 config: one bottom panel 30 px high over every
 # monitor, launchers (L, one per app obs_box_panel_launchers finds for USER_HOME) + taskbar (T) + system
-# tray (S) + the keyboard layout item (E, issue 1441) + clock (C), no window closing from the panel. No
-# USER_HOME (or no app): no launcher.
+# tray (S) + on the stream role the headphone volume item (E, issue 1465) + the keyboard layout item (E,
+# issue 1441) + clock (C), no window closing from the panel. No USER_HOME (or no app): no launcher. Each E
+# is the next `execp = new` block in order, so the headphone block is printed before the keyboard one.
 obs_box_panel_tint2rc() {
-  local home="${1:-}" items=TSEC launchers="" id rest
+  local home="${1:-}" items=TSEC launchers="" id rest headphones=0
   if [ -n "$home" ]; then
     while IFS='|' read -r id rest; do
       [ -n "$id" ] || continue
       launchers="${launchers}launcher_item_app = $(obs_box_panel_desktop_path "$home" "$id")"$'\n'
     done < <(obs_box_panel_launchers "$home")
   fi
-  [ -n "$launchers" ] && items=LTSEC
+  if [ "$(strih_box_role)" = stream ]; then headphones=1; items=TSEEC; fi
+  [ -n "$launchers" ] && items="L${items}"
   _obs_box_panel_tint2rc_base | sed "s/^panel_items = TSC\$/panel_items = ${items}/"
+  if [ "$headphones" = 1 ]; then _obs_box_panel_tint2rc_headphones; fi
   _obs_box_panel_tint2rc_kbd
   if [ -n "$launchers" ]; then
     printf '\nlauncher_padding = 4 2 6\nlauncher_background_id = 0\nlauncher_icon_background_id = 0\n'
@@ -240,6 +250,33 @@ _obs_box_panel_tint2rc_kbd() {
   printf 'execp_lclick_command = /usr/bin/python3 %s next\n' "$OBS_BOX_PANEL_KBD_HELPER"
   printf 'execp_tooltip = Klavesnica US / SK -- klik prepne (aj Alt+Shift)\n'
   printf 'execp_font = Sans Bold 10\nexecp_font_color = #ffffff 100\nexecp_padding = 8 0\nexecp_background_id = 0\n'
+}
+
+# _obs_box_panel_tint2rc_headphones -> the executor block of the stream operator's headphone volume item
+# (issue 1465 item 3 revision): the continuous `watch` shows the level (and puts the kept level back, unmuted,
+# when the sink appears), the wheel steps it, a left click mutes / unmutes.
+_obs_box_panel_tint2rc_headphones() {
+  local h="$OBS_BOX_PANEL_HEADPHONES_HELPER"
+  printf '\n# the headphone volume item (issue 1465): Slúchadlá NN %% -- wheel = louder / quieter, click = mute\n'
+  printf 'execp = new\n'
+  printf 'execp_command = /usr/bin/python3 %s watch\n' "$h"
+  printf 'execp_interval = 2\nexecp_continuous = 1\nexecp_has_icon = 0\nexecp_centered = 1\n'
+  printf 'execp_lclick_command = /usr/bin/python3 %s toggle\n' "$h"
+  printf 'execp_uwheel_command = /usr/bin/python3 %s up\n' "$h"
+  printf 'execp_dwheel_command = /usr/bin/python3 %s down\n' "$h"
+  printf 'execp_tooltip = Slúchadlá -- celková hlasitosť: koliesko myši hore / dole, klik = stlmiť / zapnúť (aj klávesy hlasitosti)\n'
+  printf 'execp_font = Sans Bold 10\nexecp_font_color = #ffffff 100\nexecp_padding = 8 0\nexecp_background_id = 0\n'
+}
+
+# obs_box_panel_headphones_keybinds_xml -> the openbox rc.xml lines of the notebook's volume keys (a comment
+# + three keybinds, indented as openbox's own <keyboard> entries), running the same helper as the panel item.
+# ONE source for the merge (setup-strih step 12, through the kiosk's rc.xml filter) AND the grader.
+obs_box_panel_headphones_keybinds_xml() {
+  local h="$OBS_BOX_PANEL_HEADPHONES_HELPER"
+  printf '  <!-- OBS-box kiosk: the stream operator headphone volume keys (issue 1465) -->\n'
+  printf '  <keybind key="XF86AudioRaiseVolume"><action name="Execute"><command>/usr/bin/python3 %s up</command></action></keybind>\n' "$h"
+  printf '  <keybind key="XF86AudioLowerVolume"><action name="Execute"><command>/usr/bin/python3 %s down</command></action></keybind>\n' "$h"
+  printf '  <keybind key="XF86AudioMute"><action name="Execute"><command>/usr/bin/python3 %s toggle</command></action></keybind>\n' "$h"
 }
 
 # obs_box_panel_kbd_row REPO USER_HOME DESKTOP_USER -> the (panel-kbd) row: the installed helper equals the
