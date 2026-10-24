@@ -286,3 +286,29 @@ def test_setup_and_verify_wire_the_panel():
     assert "obs_box_step_applies 16h-panel" in s
     assert 'obs_box_panel_grade_report "${HERE}/.." "$USER_HOME"' in v
     assert len(s.splitlines()) <= 1000 and len(v.splitlines()) <= 1000
+
+
+
+# --- issue 1424 (independent review): tint2 runs through the display watch's screen guard ------------
+
+def test_the_unit_skips_cleanly_without_its_guard_program():
+    u = (REPO / "systemd" / "obs-box-panel.service").read_text()
+    assert "ConditionPathExists=/usr/local/bin/strih_display_watch.py" in u.splitlines()
+
+
+def test_the_unit_row_names_a_missing_guard_and_a_panel_waiting_for_a_monitor(box):
+    _healthy(box)
+    guard_dir = box.tmp / "guard-bin"
+    guard_dir.mkdir()
+    env = dict(box.env(), STRIH_SESSION_APPS_BIN_DIR=str(guard_dir))
+    (box.state / "act").write_text("inactive\n")
+    r = _bash('obs_box_panel_grade_rows "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=env)
+    row = [ln for ln in r.stdout.splitlines() if "(panel-unit)" in ln][0]
+    assert row.startswith("FAIL|") and "strih_display_watch.py" in row and "16d" in row, row
+    (guard_dir / "strih_display_watch.py").write_text("#\n")
+    (box.state / "act").write_text("active\n")
+    os.unlink(box.proc / "4242" / "exe")
+    os.symlink("/usr/bin/python3.12", box.proc / "4242" / "exe")
+    r = _bash('obs_box_panel_grade_rows "$1" "$2" "$(id -un)"', str(REPO), str(box.home), env=env)
+    row = [ln for ln in r.stdout.splitlines() if "(panel-unit)" in ln][0]
+    assert row.startswith("FAIL|") and "waits for a monitor" in row, row
