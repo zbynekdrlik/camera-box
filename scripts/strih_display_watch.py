@@ -89,8 +89,11 @@ def parse_xrandr(text):
 def fixed_connectors(config_text, module=None):
     """The fixed HDMI outputs of the drm-output config: [] when there is no config or it is disabled,
     the armed connectors when it is valid (any backend: both take the connector away from X), None when
-    it cannot be classified (the watch then touches no output). `module` = drm_output_config (a seam)."""
-    if not (config_text or "").strip():
+    it cannot be classified (the watch then touches no output; also an unreadable file, `config_text` None).
+    `module` = drm_output_config (a seam)."""
+    if config_text is None:
+        return None
+    if not config_text.strip():
         return []
     if module is None:
         try:
@@ -179,11 +182,15 @@ def run_cmd(argv, timeout):
 
 
 def default_config_text():
+    """The drm-output config's text: "" when there is no file, None when it exists but cannot be read
+    (EACCES, EIO, a directory ...: cannot classify -- no output is touched, never read as "no config")."""
     try:
         with open(os.path.expanduser("~/.camera-box/drm-output.json"), encoding="utf-8-sig") as fh:
             return fh.read()
-    except OSError:
+    except FileNotFoundError:
         return ""
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def _outputs_summary(outputs, fixed):
