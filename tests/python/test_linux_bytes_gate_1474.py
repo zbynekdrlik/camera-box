@@ -57,8 +57,8 @@ def _manifest(tmp_path, name="bundle_linux_1474", hashes=None, drop=()):
     hashes = hashes or HASH
     rows = ['    { "path": "%s", "sha256": "%s", "size": 1 }' % (p, h) for p, h in hashes.items() if p not in drop]
     p = tmp_path / ("%s.json" % name)
-    p.write_text('{\n  "schema": "camera-box/genlock-bundle-manifest@1",\n  "build_sha": "%s",\n  "files": [\n%s\n  ]\n}\n'
-                 % (SHA, ",\n".join(rows)))
+    p.write_text('{\n  "schema": "camera-box/genlock-bundle-manifest@1",\n  "generated_at": "2026-10-24T00:00:00Z",\n'
+                 '  "build_sha": "%s",\n  "files": [\n%s\n  ]\n}\n' % (SHA, ",\n".join(rows)))
     return p
 
 
@@ -275,7 +275,7 @@ def _seam(tmp_path, ok=True):
     rec = tmp_path / "seam.log"
     src = _manifest(tmp_path, "bundle_seam_1474")
     seam = tmp_path / "seam.sh"
-    seam.write_text('#!/bin/bash\necho "$* timeout=${MANIFEST_AUTOSOURCE_TIMEOUT_S:-unset}" >> "%s"\n%s\n' % (
+    seam.write_text('#!/bin/bash\necho "$* timeout=${MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S:-unset}" >> "%s"\n%s\n' % (
         rec, ('cp "%s" "$5" && printf %%s "$5"' % src) if ok else "exit 1"))
     seam.chmod(0o755)
     return seam, rec
@@ -317,8 +317,10 @@ def test_the_helper_hands_the_gate_the_box_bytes_and_the_ci_manifest(tmp_path):
     seam_args = rec.read_text().split()
     assert seam_args[:4] == ["zbynekdrlik/camera-box", "linux-genlock.yml", "obs-genlock-linux-x86_64-strih", SHA], seam_args
     # the strih bundle is one ~600 MB zip (run 40031379800: 601430199 bytes) that GitHub serves only
-    # whole, so its first fetch per build needs more than the 300 s default gh bound
+    # whole, so its first DOWNLOAD per build needs more than the 300 s default gh bound (the run
+    # lookup keeps the 300 s bound, review round 1)
     assert seam_args[-1] == "timeout=900", seam_args
+    assert "manifest of build %s (generated 2026-10-24T00:00:00Z) fetched" % SHA in r.stdout, r.stdout
     ssh = [c for c in calls(rig) if c["tool"] == "ssh"]
     assert len(ssh) == 1 and ssh[0]["target"] == "newlevel@10.77.9.202", ssh
     assert "UserKnownHostsFile=/dev/null" in " ".join(ssh[0]["argv"]), ssh
@@ -336,6 +338,72 @@ def test_a_box_that_does_not_answer_passes_no_bytes_and_says_so(tmp_path):
     args, r, _rec = _helper(tmp_path, rig, down=True)
     assert "--linux-bytes" not in args, args
     assert "strih" in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+def _both_boxes(tmp_path, rig, ok_manifest):
+    """strih then stream of ONE build (the same marker sha) through the helper, in one shell."""
+    root = _fake_root(tmp_path)
+    link_box_tools(rig, "sha256sum", "awk")
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps(STRIH_LX))
+    seam, rec = _seam(tmp_path, ok_manifest)
+    out = tmp_path / "out"
+    out.mkdir()
+    env = dict(rig["env"], MANIFEST_AUTOSOURCE_CMD=str(seam), E2E_LINUX_BYTES_REMOTE_PREFIX=str(root))
+    script = (
+        'set -euo pipefail\n. "%s"\n. "%s"\nLINUX_BYTES_GATE_ARGS=()\n'
+        'e2e_linux_bytes_gather strih 10.77.9.202 newlevel pw "%s" "%s" r\n'
+        'e2e_linux_bytes_gather stream 10.77.9.204 newlevel pw "%s" "%s" r\n'
+        'printf "ARG=%%s\\n" ${LINUX_BYTES_GATE_ARGS[@]+"${LINUX_BYTES_GATE_ARGS[@]}"}\n'
+        % (LIB, HELPER, state, out, state, out))
+    r = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return [ln[4:] for ln in r.stdout.splitlines() if ln.startswith("ARG=")], r, rec
+
+
+def test_two_boxes_of_one_build_fetch_the_manifest_once(tmp_path):
+    rig = make_rig(tmp_path)
+    args, r, rec = _both_boxes(tmp_path, rig, True)
+    assert len(rec.read_text().splitlines()) == 1, rec.read_text()
+    ms = [args[i + 1] for i, a in enumerate(args) if a == "--linux-manifest"]
+    assert [m.split("=", 1)[0] for m in ms] == ["strih", "stream"], args
+    assert ms[0].split("=", 1)[1] == ms[1].split("=", 1)[1], args
+    assert "stream (10.77.9.204): linux bundle manifest of build %s" % SHA in r.stdout, r.stdout
+
+
+def test_a_failed_fetch_is_not_repeated_for_the_second_box_of_the_build(tmp_path):
+    """review round 1: a failed ~600 MB fetch must not run again for stream (it would double the
+    worst-case [0/8] wall time under the rig lease); both boxes go to the gate without a manifest."""
+    rig = make_rig(tmp_path)
+    args, r, rec = _both_boxes(tmp_path, rig, False)
+    assert len(rec.read_text().splitlines()) == 1, rec.read_text()
+    assert "--linux-manifest" not in args, args
+    assert r.stdout.count("could not fetch") == 2, r.stdout
+
+
+def test_only_the_download_gets_the_long_bound(tmp_path):
+    """The gh run lookup keeps MANIFEST_AUTOSOURCE_TIMEOUT_S (300); MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S
+    bounds the artifact download alone."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    (bin_dir / "timeout").write_text('#!/bin/bash\necho "timeout $1 $2 $3 $4" >> "%s"\nshift\nexec "$@"\n' % log)
+    (bin_dir / "gh").write_text(
+        '#!/bin/bash\ncase "$2" in\n  list) echo "123 2026-10-24T00:00:00Z" ;;\n'
+        '  download) d="${@: -1}"; mkdir -p "$d/x"; printf \'{"files": []}\\n\' > "$d/x/BUNDLE_MANIFEST.json" ;;\n'
+        'esac\n')
+    for f in ("timeout", "gh"):
+        (bin_dir / f).chmod(0o755)
+    env = dict(os.environ, PATH="%s:%s" % (bin_dir, os.environ["PATH"]), MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S="900",
+               MANIFEST_AUTOSOURCE_CACHE_DIR=str(tmp_path / "cache"))
+    env.pop("MANIFEST_AUTOSOURCE_TIMEOUT_S", None)
+    env.pop("MANIFEST_AUTOSOURCE_CMD", None)
+    r = subprocess.run(["bash", "-c", '. "%s"; manifest_autosource_fetch r linux-genlock.yml a %s "%s"'
+                        % (LIB, SHA, tmp_path / "m.json")], env=env, capture_output=True, text=True, timeout=30)
+    assert r.stdout == str(tmp_path / "m.json"), r.stdout + r.stderr
+    calls = log.read_text().splitlines()
+    assert calls[0] == "timeout 300 gh run list", calls
+    assert calls[-1] == "timeout 900 gh run download", calls
 
 
 def test_a_state_without_a_build_sha_fetches_no_manifest(tmp_path):
