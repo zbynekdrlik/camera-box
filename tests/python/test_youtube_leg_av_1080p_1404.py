@@ -28,22 +28,33 @@ from youtube_leg_fakes_1404 import FIX, ylv  # noqa: E402
 RUN_FIX = sorted(FIX.glob("run40110304642-*-4k.avsync.out"))
 
 
-def _probe_json(matched, off=10.0):
-    return {"av_offset_ms": off, "mad_ms": 4.0, "matched": matched}
+def _probe_json(matched, off=10.0, audio=50):
+    return {"av_offset_ms": off, "mad_ms": 4.0, "matched": matched, "audio_markers_decoded": audio}
+
+
+class _Cuts(list):
+    """The cuts av_window made [(source name, scale_to)], plus `clips` = the clip names probed."""
+
+    def __init__(self):
+        super().__init__()
+        self.clips = []
 
 
 def _fake_reads(monkeypatch, heights, matched=None):
     """av_window's outside steps faked: the source heights, the cuts (recorded), the probe."""
-    cuts = []
+    cuts = _Cuts()
     monkeypatch.setattr(ylv, "video_height", lambda path: heights[pathlib.Path(path).name])
 
     def cut(src, start_s, dur_s, out, scale_to=None):
         cuts.append((pathlib.Path(src).name, scale_to))
         pathlib.Path(out).write_bytes(b"clip")
 
+    def avsync(probe, clip, markers, av_run=None):
+        cuts.clips.append(pathlib.Path(clip).name)
+        return _probe_json((matched or {}).get("rec" if "av-rec-" in str(clip) else "vod", 50))
+
     monkeypatch.setattr(ylv, "_cut_clip", cut)
-    monkeypatch.setattr(ylv, "_avsync", lambda probe, clip, markers, av_run=None: _probe_json(
-        (matched or {}).get("rec" if "av-rec-" in str(clip) else "vod", 50)))
+    monkeypatch.setattr(ylv, "_avsync", avsync)
     return cuts
 
 
@@ -131,3 +142,70 @@ def test_the_windows_av_runs_concurrently_on_the_pool():
     assert peak[0] == 3
     assert [o.get("delta_ms") for o in out] == [0.0, 1.0, None, 3.0, 4.0, 5.0]  # in window order
     assert "probe failed" in out[2]["error"]  # a failed window is its own error, never the others'
+
+
+# ---------------------------------------------------------------- review round 3
+
+
+def test_the_guard_counts_against_the_reads_own_audio_markers_not_a_theoretical_number():
+    """A scale can only lose VIDEO ticks: the audio track is the same, so a scaled read must pair every
+    audio marker it decoded (one at the edge). A real 40 s recording read (base-rec-B: 79 audio markers,
+    78 paired, unscaled) holds a theoretical 80, so a count against 80 would fail it."""
+    b = ylv.parse_avsync_output((FIX / "base-rec-B.avsync.out").read_text())
+    assert (b["audio_markers_decoded"], b["matched"]) == (79, 78)
+    ylv.av_from_outputs(b, b, 40.0, scaled=("recording",), heights={"recording": 2160})
+    short = dict(b, matched=70)
+    with pytest.raises(ValueError, match="matched 70 of the 79 audio markers it decoded"):
+        ylv.av_from_outputs(short, b, 40.0, scaled=("recording",), heights={"recording": 2160})
+    # without the audio count (an older probe): the window's markers minus one at each edge
+    bare = {k: v for k, v in b.items() if k != "audio_markers_decoded"}
+    ylv.av_from_outputs(bare, b, 40.0, scaled=("recording",))
+    with pytest.raises(ValueError):
+        ylv.av_from_outputs(dict(bare, matched=77), b, 40.0, scaled=("recording",))
+
+
+def test_every_committed_real_read_passes_the_scaled_guard():
+    reads = sorted(FIX.glob("*-rec-*.avsync.out")) + sorted(FIX.glob("run40110304642-*.avsync.out"))
+    assert len(reads) == 15  # the 9 session recordings (40 s) + the run's 6 windows (25 s)
+    for path in reads:
+        j = ylv.parse_avsync_output(path.read_text())
+        dur = 25.0 if path.name.startswith("run40110304642-") else 40.0
+        ylv.av_from_outputs(j, j, dur, scaled=("recording",))
+
+
+def test_each_windows_clip_names_carry_the_window(tmp_path, monkeypatch):
+    cuts = _fake_reads(monkeypatch, {"rec.mp4": 2160, "vod.mp4": 1080})
+    ylv.av_window(tmp_path / "rec.mp4", tmp_path / "vod.mp4", 10.0, 20.0, tmp_path / "m.csv", "probe", 25.0,
+                  str(tmp_path), tag="w03-CAM3")
+    assert cuts.clips == ["av-rec-w03-CAM3-10.000.mp4", "av-vod-w03-CAM3-20.000.mp4"]
+
+
+def test_an_explicit_pool_of_one_is_honoured():
+    assert ylv.av_pool_size(0.0, 8, 1) == 1 and ylv.av_pool_size(40.0, 8, 1) == 1
+    assert ylv.av_pool_size(40.0, 8, 3) == 2
+
+
+def test_a_stop_cancels_the_queued_windows():
+    started, lock = [], threading.Lock()
+
+    def job(k):
+        def run():
+            with lock:
+                started.append(k)
+            if k == 0:
+                raise SystemExit(143)  # what the tool's SIGTERM handler raises
+            time.sleep(0.2)
+            return {"delta_ms": 0.0}
+        return run
+
+    with pytest.raises(SystemExit):
+        ylv.run_av_jobs([job(k) for k in range(8)], 2)
+    time.sleep(0.5)
+    assert len(started) <= 3, started  # the windows still queued never start
+
+
+def test_no_child_starts_once_the_tool_is_stopping(monkeypatch):
+    ylp = sys.modules["youtube_leg_proc"]
+    monkeypatch.setattr(ylp, "_STOPPING", True)
+    with pytest.raises(RuntimeError, match="stopping"):
+        ylp.run_bounded(["true"], 5)

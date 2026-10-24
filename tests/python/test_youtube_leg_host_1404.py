@@ -228,6 +228,9 @@ def test_purge_stops_a_running_prefetch_and_deletes_the_host_stage(fk, tmp_path)
     while _alive_under(fk.home / ".local" / "bin" / "python3") and time.monotonic() < deadline:
         time.sleep(0.2)
     assert _alive_under(fk.home / ".local" / "bin" / "python3") == []  # the remote decode group is gone
+    # the cleanup TERMs the group first, so the tool's own handler kills its children (yt-dlp, the
+    # probe: each in its own session, out of reach of the group KILL)
+    assert (fk.d / "remote-term").read_text() == "prime\n"
 
 
 def test_a_stage_without_the_stream_path_is_unknown_by_name(fk, tmp_path):

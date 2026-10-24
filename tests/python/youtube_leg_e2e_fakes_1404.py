@@ -78,6 +78,15 @@ import json, os, sys, time
 d = {d!r}
 argv = sys.argv[2:]  # [the tool's path, its arguments]
 kind = "prime" if "--prime-ticks" in argv else "verdict"
+import signal
+
+
+def _term(*_):  # the real tool's handler kills its children on SIGTERM: record that it got the TERM
+    open(os.path.join(d, "remote-term"), "a").write(kind + "\\n")
+    sys.exit(143)
+
+
+signal.signal(signal.SIGTERM, _term)
 with open(os.path.join(d, "calls.log"), "a") as f:
     f.write(json.dumps([kind, sys.argv[1]] + argv) + "\n")
 path = os.path.join(d, f"{{kind}}.{{kind}}.q")
