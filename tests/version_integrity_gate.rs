@@ -2477,6 +2477,44 @@ const STRIH_LX_PLATFORM_AGNOSTIC: &str = "{\
 \"ndi_input_latency\":\"NDI cam5=0,NDI cam1=0,NDI cam3=0\"\
 }";
 
+/// issue 1474: the six bundle files of a Linux OBS box the gate's `linux_so_bytes` row grades
+/// (`linux_obs_box_byte_paths` in scripts/lib/manifest-autosource.sh, pinned equal by
+/// tests/python/test_linux_bytes_gate_1474.py).
+const LINUX_BOX_BYTE_PATHS_1474: [&str; 6] = [
+    "lib/x86_64-linux-gnu/libobs.so.30",
+    "lib/x86_64-linux-gnu/libobs-frontend-api.so.30",
+    "lib/x86_64-linux-gnu/obs-plugins/distroav.so",
+    "lib/x86_64-linux-gnu/obs-plugins/obs-vban.so",
+    "lib/x86_64-linux-gnu/obs-plugins/obs-audio-video-sync-dock.so",
+    "bin/obs",
+];
+
+/// issue 1474: a matching `--linux-manifest` + `--linux-bytes` pair for the --linux box `boxname`
+/// (since the gate grades every Linux box's deployed bundle bytes, fail-closed, a PASSING Linux box
+/// must carry them). Returns the manifest (keep it alive for the run) and the four gate arguments.
+fn clean_linux_bytes_1474(tag: &str, boxname: &str) -> (TempPath, Vec<String>) {
+    const SO_SHA: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+    let rows: Vec<String> = LINUX_BOX_BYTE_PATHS_1474
+        .iter()
+        .map(|p| format!("    {{ \"path\": \"{p}\", \"sha256\": \"{SO_SHA}\", \"size\": 1 }}"))
+        .collect();
+    let manifest = write_state(
+        &format!("bundle_linux_1474_{tag}_{boxname}"),
+        &format!("{{\n  \"files\": [\n{}\n  ]\n}}\n", rows.join(",\n")),
+    );
+    let csv: Vec<String> = LINUX_BOX_BYTE_PATHS_1474
+        .iter()
+        .map(|p| format!("{p}={SO_SHA}"))
+        .collect();
+    let args = vec![
+        "--linux-manifest".to_string(),
+        format!("{boxname}={}", manifest.display()),
+        "--linux-bytes".to_string(),
+        format!("{boxname}={}", csv.join(",")),
+    ];
+    (manifest, args)
+}
+
 #[test]
 fn gate_passes_a_linux_strih_under_strih_linux_with_only_platform_agnostic_facets_1351() {
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
@@ -2507,17 +2545,22 @@ fn gate_passes_a_linux_strih_under_strih_linux_with_only_platform_agnostic_facet
             false,
         ),
     );
-    let (code, stdout, stderr) = run_gate(&[
+    let (_lx_manifest, lx_args) = clean_linux_bytes_1474("1351_pass", "strih");
+    let strih_arg = format!("strih={}", s.display());
+    let stream_arg = format!("stream={}", t.display());
+    let mut args = vec![
         "--manifest",
         manifest.to_str().unwrap(),
         "--win-state",
-        &format!("strih={}", s.display()),
+        strih_arg.as_str(),
         "--win-state",
-        &format!("stream={}", t.display()),
+        stream_arg.as_str(),
         "--strih-linux",
         "--imag-acked-offline",
         "issue-1351-no-imag-in-this-fixture",
-    ]);
+    ];
+    args.extend(lx_args.iter().map(String::as_str));
+    let (code, stdout, stderr) = run_gate(&args);
     assert_eq!(
         code, 0,
         "a Linux strih with only platform-agnostic facets must PASS under --strih-linux. \
@@ -2591,17 +2634,22 @@ fn gate_passes_a_linux_strih_without_dll_shas_under_a_full_manifest_1397() {
             false,
         ),
     );
-    let (code, stdout, stderr) = run_gate(&[
+    let (_lx_manifest, lx_args) = clean_linux_bytes_1474("1397_pass", "strih");
+    let strih_arg = format!("strih={}", s.display());
+    let stream_arg = format!("stream={}", t.display());
+    let mut args = vec![
         "--manifest",
         manifest.to_str().unwrap(),
         "--win-state",
-        &format!("strih={}", s.display()),
+        strih_arg.as_str(),
         "--win-state",
-        &format!("stream={}", t.display()),
+        stream_arg.as_str(),
         "--strih-linux",
         "--imag-acked-offline",
         "issue-1397-no-imag-in-this-fixture",
-    ]);
+    ];
+    args.extend(lx_args.iter().map(String::as_str));
+    let (code, stdout, stderr) = run_gate(&args);
     assert_eq!(
         code, 0,
         "a Linux strih without any .dll sha must PASS under --strih-linux with a full manifest. \
