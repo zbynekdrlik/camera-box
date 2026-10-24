@@ -168,6 +168,15 @@ static void test_take_rule()
 			CHECK(!back, "take rule: a source found again has no previous timeline yet");
 	}
 
+	/* No source held: never taken, whatever the other flags read. */
+	{
+		CbMeasureShareTracker t8;
+		t8.observe(steady(tick_ns(t0, 0), tick_ns(t0, 1)));
+		CbShareTick none = steady(tick_ns(t0, 1), tick_ns(t0, 2));
+		none.source_found = false;
+		CHECK(!t8.observe(none).take, "take rule: no source held is never taken");
+	}
+
 	/* A new source object: reset() forgets the old timeline. */
 	{
 		CbMeasureShareTracker t6;

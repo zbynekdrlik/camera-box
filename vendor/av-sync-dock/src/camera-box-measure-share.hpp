@@ -22,8 +22,8 @@
  *
  * So `CbMeasureShareTracker` takes a tick's share ONLY when it is provably the whole tick at offset 0:
  * the source is found, active (in the program), not pending (it was rendered this tick), its timeline
- * ended the PREVIOUS tick at this tick's start (within 1 ns, the tolerance discard_audio itself uses)
- * and ends this tick at its end. Every other tick is silence -- never the mix. A source that is not
+ * ended the PREVIOUS tick exactly at this tick's start (mix_audio skips one that is even 1 ns early)
+ * and ends this tick at its end (libobs's frame-counted end, 0-1 ns after the dock's). Every other tick is silence -- never the mix. A source that is not
  * taken for CB_SHARE_ABSENT_END_NS reads `absent_long`: the dock ends its decode session (STALE + one
  * log line) instead of measuring something else.
  *
@@ -70,14 +70,17 @@ public:
 	}
 
 	/* One tick, right after its mix: is the per-source mix buffer this whole tick's share? The
-	 * share sits at offset 0 only when the source's timeline already stood at this tick's start
+	 * share sits at offset 0 only when the source's timeline stood EXACTLY at this tick's start
 	 * before the mix -- which is where the previous tick's discard left it -- and the mix consumed
-	 * it to this tick's end. Both within 1 ns: libobs counts ticks in frames and rounds each tick
-	 * end to a nanosecond, and discard_audio itself treats ts.start - 1 as aligned. */
+	 * it to this tick's end:
+	 *   - the start is exact: mix_audio skips a timeline before the start even by 1 ns (while
+	 *     discard_audio pops it as aligned), and one just after it is left silent (conservative);
+	 *   - the end is the dock's floor-computed end or 1 ns later: libobs counts its tick ends from
+	 *     the frame total, so its end is never earlier. */
 	CbShareDecision observe(const CbShareTick &t)
 	{
-		const bool aligned = have_prev_ && within_1ns(prev_after_ns_, t.tick_start_ns) &&
-				     within_1ns(t.source_ts_after_ns, t.tick_end_ns);
+		const bool aligned = have_prev_ && prev_after_ns_ == t.tick_start_ns &&
+				     t.source_ts_after_ns >= t.tick_end_ns && t.source_ts_after_ns - t.tick_end_ns <= 1;
 		CbShareDecision d;
 		d.take = t.source_found && t.source_active && !t.source_pending && aligned;
 		/* A found source's timeline is the next tick's reference whether it was mixed or not: an
@@ -96,8 +99,6 @@ public:
 	}
 
 private:
-	static bool within_1ns(uint64_t a, uint64_t b) { return a >= b ? a - b <= 1 : b - a <= 1; }
-
 	bool have_prev_;
 	uint64_t prev_after_ns_;
 	bool absent_;
