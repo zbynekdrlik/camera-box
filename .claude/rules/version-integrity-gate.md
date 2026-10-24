@@ -15,6 +15,8 @@ paths:
   - "tests/python/test_bundle_state_server_port4455.py"
   - "scripts/lib/manifest-autosource.sh"
   - "tests/harness_manifest_autosource_1082.rs"
+  - "scripts/lib/e2e-linux-bytes.sh"
+  - "tests/python/test_linux_bytes_gate_1474.py"
 ---
 
 # version-integrity-gate.sh — the pre-rig-test Windows-stack drift gate (#123/#119)
@@ -448,6 +450,49 @@ caller.**
   `--strih-linux --linux stream` and refuse 11 without the stream flag. Tests:
   `tests/python/test_stream_linux_e2e_1462.py` (the real gate + drift-guard over live-shaped states,
   the vendor-pin seams keep it offline; a genlock-sha mismatch still refuses 20).
+
+## issue 1474 — the Linux boxes' deployed bundle BYTES: the fail-closed `linux_so_bytes` row
+
+Owner 24.10.2026: the Linux strih-snv + stream-snv must be tested at least as hard as the Windows
+boxes were. On a `--linux` box the obs.dll / distroav.dll byte rows are SKIPPED (no `.dll` there), so
+until issue 1474 nothing graded the deployed library bytes of either Linux box. Now:
+
+- **The ONE file list** `linux_obs_box_byte_paths` (`scripts/lib/manifest-autosource.sh`, which the
+  gate now sources): `lib/x86_64-linux-gnu/libobs.so.30`, `libobs-frontend-api.so.30`,
+  `obs-plugins/distroav.so`, `obs-plugins/obs-vban.so`, `obs-plugins/obs-audio-video-sync-dock.so`,
+  `bin/obs` -- manifest-relative, deployed under `/usr` by setup-strih.sh. Read live 24.10.2026 on
+  strih-snv: all six hash equal to their `BUNDLE_MANIFEST.json` entry of build cae5baf402.
+- **The gate:** `--linux-manifest NAME=PATH` + `--linux-bytes NAME=path=sha,...` per `--linux` box
+  (a byte arg for a box that is not `--linux` is a usage error, exit 1). Each `--linux` box gets a row
+  `-- <name> linux .so byte parity (issue 1474, enforced) --` right after its own box rows
+  (`vig_row_linux_bytes`, `scripts/lib/version-integrity-rows.sh`), graded by
+  `linux_box_bytes_verdict` (the gate file): the issue-1082 imag compare (`imag_bytes_verdict`, which
+  gained an optional row-name argument; imag's output is unchanged) plus a completeness check -- a
+  listed file the box did not hash is a named UNKNOWN. FAIL-CLOSED: no gather, no manifest or an
+  unreadable manifest is UNKNOWN (`<name>:so_bytes` in the roll-up); a mismatch is DRIFT naming the
+  file and the box; a DRIFT outranks an UNKNOWN.
+- **The E2E** (`scripts/lib/e2e-linux-bytes.sh` `e2e_linux_bytes_gather`, called in `[0/8]` for each
+  Linux box after `STRIH_LINUX_GATE_ARG` / `STREAM_LINUX_GATE_ARG` are resolved): the bytes over plain
+  ssh (`linux_obs_box_so_gather_cmd`, `UserKnownHostsFile=/dev/null`), the manifest by
+  `manifest_autosource_fetch linux-genlock.yml obs-genlock-linux-x86_64-strih` (=
+  `linux_obs_box_bundle_artifact`, pinned equal to the deploy's `fleet_linux_bundle_artifact_for`) at
+  the box's OWN `genlock_build_sha` from its bundle state. The helper only collects; whatever it could
+  not get is not handed over, and the gate refuses on it. It fills `LINUX_BYTES_GATE_ARGS`, expanded
+  nounset-safe in BOTH gate invocations right after the win-baseline array, BEFORE the
+  `--linux stream` / `--strih-linux` tail.
+- **The fetch is sized, not guessed:** the strih artifact is one ~600 MB zip (run 40031379800:
+  601430199 bytes) that GitHub serves only whole; at the measured ~1.9 MB/s that is ~320 s, over the
+  300 s default gh bound, so this fetch runs with `MANIFEST_AUTOSOURCE_TIMEOUT_S=900`
+  (`E2E_LINUX_BYTES_FETCH_TIMEOUT`). The per-run cache makes every later fetch of the build (the
+  second box, the next E2E) a few seconds.
+- **Supervisor check on the next E2E:** the `[0/8]` log shows `strih (10.77.9.202): bundle bytes
+  gathered (6 files)` + `linux bundle manifest of build <sha> fetched` for both boxes and six
+  `linux_so_bytes OK` rows per box, never a SKIPPED byte row for strih / stream.
+- **Tests:** `tests/python/test_linux_bytes_gate_1474.py` (the real gate over live-shaped states, the
+  REAL gather snippet on a fake box root, the helper through the issue-1462 fake sshpass and the
+  `MANIFEST_AUTOSOURCE_CMD` seam, the REAL gate block against a stub gate). Every PASSING Linux-box
+  gate test now carries a matching gather + manifest (`clean_linux_bytes_1474` in
+  `tests/version_integrity_gate.rs`, `_clean_linux_bytes` in `test_stream_linux_e2e_1462.py`).
 
 ## GOTCHA — a test's bundle manifest and a win-state sharing one `write_state` name silently clobber each other → `obs_dll_sha256 UNKNOWN` (exit 11)
 
