@@ -95,16 +95,12 @@ strih_lx_partial_pullback_note() {
 # the path is quoted for BOTH parses (review round 1): single-quoted for the remote shell (an embedded
 # ' becomes '\''), and that remote command is one double-quoted argument for the local shell (\ " $ `
 # escaped). An OBS default filename carries a space -- it stays exactly one argument remotely.
+# The line itself is the shared shell_ssh_rm_plan_line (issue 1474: the stream-snv twin prints
+# through it too).
 strih_lx_recording_cleanup_note() {
   local indent="${1:-}" host="${2:-}" path="${3:-<unknown>}" user="${4:-${STRIH_USER:-newlevel}}"
-  local remote dq
-  command -v shell_single_quote >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/shell-quote.sh"
-  remote="rm -f -- $(shell_single_quote "$path")"
-  dq="${remote//\\/\\\\}"
-  dq="${dq//\"/\\\"}"
-  dq="${dq//\$/\\\$}"
-  dq="${dq//\`/\\\`}"
-  printf '%sstrih-snv ssh:         ssh %s@%s "%s"\n' "$indent" "$user" "$host" "$dq"
+  command -v shell_ssh_rm_plan_line >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/shell-quote.sh"
+  shell_ssh_rm_plan_line "$indent" "strih-snv ssh:" "$user" "$host" "$path"
 }
 
 # strih_planner_holder_note HOST -> the first two lines of the per-box PLANNER hand-off note. On

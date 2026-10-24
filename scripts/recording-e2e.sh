@@ -5880,7 +5880,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       else
         echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
       fi
-      echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+      # issue 1474: the Linux stream box (stream-snv) gets the same exact-path rm over plain ssh.
+      if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+        stream_lx_recording_cleanup_note "      " "$STREAM" "${STREAM_HOST_PATH:-<unknown>}"
+      else
+        echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+      fi
       echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
     fi
     # #758 item 3 — the in-run freeze watch's own verdict: a mid-run freeze the decode-based
@@ -5921,7 +5926,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     else
       echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
     fi
-    echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    # issue 1474: the Linux stream box (stream-snv) gets the same exact-path rm over plain ssh.
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      stream_lx_recording_cleanup_note "      " "$STREAM" "${STREAM_HOST_PATH:-<unknown>}"
+    else
+      echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    fi
     echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
   fi
   exit 0
@@ -6009,7 +6019,12 @@ if [ -s "$REPORT_JSON" ]; then
     else
       echo "  win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
     fi
-    echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    # issue 1474: the Linux stream box (stream-snv) gets the same exact-path rm over plain ssh.
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      stream_lx_recording_cleanup_note "  " "$STREAM" "${STREAM_HOST_PATH:-<unknown>}"
+    else
+      echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    fi
   fi
 fi
 
