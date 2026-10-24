@@ -150,17 +150,18 @@ def _stopped(fk, tmp_path):
     return d
 
 
-def _inputs(tmp_path, schedule):
-    rec = tmp_path / "rec.mkv"
-    rec.write_bytes(b"x")
+def _inputs(tmp_path, schedule, fk):
+    fk.stream_file("/srv/rec/run.mkv")
+    probe = tmp_path / "recording-verdict"
+    probe.write_bytes(b"a probe binary")
     markers = tmp_path / "m.csv"
     markers.write_text("x\n")
     sched = tmp_path / "sched.json"
     sched.write_text(schedule if isinstance(schedule, str) else json.dumps(schedule))
     verdict = tmp_path / "verdict.json"
     verdict.write_text(json.dumps({"overall_pass": True}))
-    return ["measure", "--verdict-json", str(verdict), "--recording", str(rec), "--markers", str(markers),
-            "--schedule", str(sched)], verdict
+    return ["measure", "--verdict-json", str(verdict), "--stream-path", "/srv/rec/run.mkv", "--markers", str(markers),
+            "--schedule", str(sched), "--probe-bin", str(probe)], verdict
 
 
 PASS = {"overall": "PASS", "reasons": [], "criteria": {"status": {"av": "PASS"}}, "windows": []}
@@ -168,7 +169,7 @@ PASS = {"overall": "PASS", "reasons": [], "criteria": {"status": {"av": "PASS"}}
 
 def test_a_crash_in_the_measurement_folds_an_unknown_block(fk, tmp_path):
     d = _stopped(fk, tmp_path)
-    args, verdict = _inputs(tmp_path, "{not json")
+    args, verdict = _inputs(tmp_path, "{not json", fk)
     r = _run(fk, d, *args)
     assert r.returncode == 1
     b = json.loads(verdict.read_text())["youtube_leg"]
@@ -180,7 +181,7 @@ def test_a_window_left_unmeasured_turns_a_pass_into_unknown(fk, tmp_path):
     fk.script("verdict", "verdict", 0, PASS)
     sched = [{"cambox": "CAM5", "start_ns": int((T0 + 70) * 1e9), "end_ns": int((T0 + 100) * 1e9)},
              {"cambox": "CAM2", "start_ns": int((T0 + 100) * 1e9), "end_ns": int((T0 + 108) * 1e9)}]
-    args, verdict = _inputs(tmp_path, sched)
+    args, verdict = _inputs(tmp_path, sched, fk)
     assert _run(fk, d, *args).returncode == 1
     b = json.loads(verdict.read_text())["youtube_leg"]
     assert b["verdict"] == "UNKNOWN" and b["windows_dropped"] == ["w02-CAM2"]
@@ -190,7 +191,7 @@ def test_the_no_sweep_window_ends_at_the_recording_stop(fk, tmp_path):
     d = _stopped(fk, tmp_path)
     rec_stop = _state(d)["record_stop_utc"]
     fk.script("verdict", "verdict", 0, PASS)
-    args, _ = _inputs(tmp_path, [])
+    args, _ = _inputs(tmp_path, [], fk)
     assert _run(fk, d, *args).returncode == 0
     call = [c for c in fk.calls() if c[0] == "verdict"][0][1:]
     w = call[call.index("--windows") + 1]
