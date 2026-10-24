@@ -127,7 +127,8 @@ open(os.environ["FAKE_LOG"], "a").write("apt-get " + " ".join(sys.argv[1:]) + "\
 if "-s" in sys.argv:
     sys.stdout.write(open(os.environ["FAKE_SIM"]).read())
     sys.exit(int(os.environ.get("FAKE_SIM_RC", "0")))
-if sys.argv[1:3] == ["install", "-y"] and sys.argv[3].endswith(".deb"):
+if sys.argv[1:3] == ["install", "-y"] and sys.argv[-1].endswith(".deb"):
+    sys.argv[3] = sys.argv[-1]
     ctl = open(sys.argv[3]).read()
     ver = [l.split(":", 1)[1].strip() for l in ctl.splitlines() if l.startswith("Version:")][0]
     assert "Provides: gstreamer1.0-pipewire" in ctl and os.path.isabs(sys.argv[3]), (ctl, sys.argv)
@@ -147,11 +148,13 @@ import os, sys
 open(os.environ["FAKE_LOG"], "a").write("apt-mark " + " ".join(sys.argv[1:]) + "\n")
 path = os.environ["FAKE_PKGS"] + ".manual"
 have = set(open(path).read().split()) if os.path.exists(path) else set()
+def norm(a):
+    return a[:-len(":amd64")] if a.endswith(":amd64") else a
 if sys.argv[1] == "manual":
-    have |= {a.split(":")[0] for a in sys.argv[2:]}
+    have |= {norm(a) for a in sys.argv[2:]}
     open(path, "w").write("\n".join(sorted(have)) + "\n")
 elif sys.argv[1] == "showmanual":
-    want = {a.split(":")[0] for a in sys.argv[2:]}
+    want = {norm(a) for a in sys.argv[2:]}
     sys.stdout.write("".join("%s\n" % n for n in sorted(have) if not want or n in want))
 ''')
 FAKE_PGREP = _py_tool(r'''
@@ -353,7 +356,7 @@ def test_the_install_pins_builds_the_shim_reads_then_purges_and_removes_the_drop
     pin = Path(env["STRIH_PW_PURGE_PREF"]).read_text()
     assert "pulseaudio:i386" in pin and "pipewire-pulse:i386" in pin and "Pin-Priority: -1" in pin
     i_deb = next(i for i, ln in enumerate(log) if ln.startswith("dpkg-deb --build --root-owner-group"))
-    i_dpkg = next(i for i, ln in enumerate(log) if ln.startswith("apt-get install -y /") and ln.endswith(".deb"))
+    i_dpkg = next(i for i, ln in enumerate(log) if ln.startswith("apt-get install -y") and ln.endswith(".deb"))
     assert not any(ln.startswith("dpkg -i") for ln in log), "dpkg -i ignores apt's lock wait"
     i_mark = next(i for i, ln in enumerate(log) if ln.startswith("apt-mark manual"))
     i_sim = next(i for i, ln in enumerate(log) if ln.startswith("apt-get -s purge"))
@@ -844,3 +847,21 @@ def test_setup_step12_refuses_when_the_purge_cannot_be_decided(rc, want):
     if rc == "2":
         assert r.returncode == 9 and "cannot decide" in r.stdout and "why it says" in r.stdout, r.stdout
         assert "STRIH-GRAPH" not in r.stdout
+
+
+# --- 10. review round 2 (nits) ------------------------------------------------------------------------------
+
+def test_the_shim_install_never_lets_apt_remove_anything(tmp_path):
+    env = _fakes(tmp_path)
+    assert _install(tmp_path, env, _home_with_leftovers(tmp_path)).returncode == 0
+    line = next(ln for ln in _log(tmp_path) if ln.startswith("apt-get install") and ln.endswith(".deb"))
+    assert line.split()[1:4] == ["install", "-y", "--no-remove"], line
+
+
+def test_a_foreign_arch_copy_of_a_kept_library_is_marked_by_its_full_name(tmp_path):
+    pkgs = LIVE_PKGS + [("libpulse0:i386", "installed", "1:17.0+dfsg1-2ubuntu4")]
+    env = _fakes(tmp_path, pkgs=pkgs)
+    (tmp_path / "pkgs.manual").write_text("libpulse0\nlibpipewire-0.3-0t64\n")
+    assert _install(tmp_path, env, _home_with_leftovers(tmp_path)).returncode == 0, _log(tmp_path)
+    mark = [ln for ln in _log(tmp_path) if ln.startswith("apt-mark manual")]
+    assert mark == ["apt-mark manual libpulse0:i386"], mark
