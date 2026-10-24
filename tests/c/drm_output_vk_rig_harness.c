@@ -21,7 +21,9 @@
  * semaphore would wedge the copy fence and force the teardown's leak path).
  *
  * Build ON the box (never on dev1 — Tier-0), with the X11/xcb/EGL/GL/Vulkan headers staged in $INC and
- * the libobs tree in $LIBOBS (only the util headers and the five obs-drm-output-vk files are read):
+ * the libobs tree in $LIBOBS (only the util headers, the obs-drm-output-vk files and, since issue 1424's
+ * hotplug slice, obs-drm-output-retry.h + obs-drm-output-logcap.h are read; the internal header's
+ * `#define blog drm_output_blog` turns this file's blog() into the module's one log entry):
  *   gcc -O2 -std=gnu11 -Wall -Wextra -I$INC -I$LIBOBS tests/c/drm_output_vk_rig_harness.c \
  *       $LIBOBS/obs-drm-output-vk.c $LIBOBS/obs-drm-output-vk-setup.c $LIBOBS/obs-drm-output-vk-remode.c \
  *       -o vk-rig-harness \

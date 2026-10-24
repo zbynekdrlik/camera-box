@@ -23,11 +23,13 @@ REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "strih-session-apps.sh"
 UNITS = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-         "strih-satellite-watch.timer", "dantesync-tray.service")
+         "strih-satellite-watch.timer", "dantesync-tray.service", "strih-display-watch.service")
 # every unit FILE the install writes (the watch timer's oneshot service rides with the timer)
 UNIT_FILES = ("strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
-              "strih-satellite-watch.timer", "strih-satellite-watch.service", "dantesync-tray.service")
-PROGRAMS = ("strih_browser_keeper.py", "bkshading_panel_app.py", "strih_satellite_watch.py")
+              "strih-satellite-watch.timer", "strih-satellite-watch.service", "dantesync-tray.service",
+              "strih-display-watch.service")
+PROGRAMS = ("strih_browser_keeper.py", "bkshading_panel_app.py", "strih_satellite_watch.py",
+            "strih_display_watch.py")
 LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_SESSION_APPS_EUID",
          "STRIH_SESSION_APPS_PYTHON", "STRIH_SESSION_APPS_SATELLITE_BIN", "STRIH_LX_IP", "STRIH_BOXES_DIR",
          "DANTESYNC_VERSION_PIN", "DANTESYNC_RELEASE_BASE", "DANTESYNC_INSTALL_TRAY_BIN",
@@ -40,14 +42,18 @@ TRAY_PIN = "1.18.0"
 TRAY_ASSET = "dantesync-tray-linux-amd64"
 # the main processes /proc shows (the watch's oneshot service has none between its runs)
 PIDS = {"strih-browser-keeper.service": 4242, "bkshading-panel-app.service": 4343,
-        "companion-satellite.service": 4444, "strih-satellite-watch.service": 0, "dantesync-tray.service": 4545}
+        "companion-satellite.service": 4444, "strih-satellite-watch.service": 0, "dantesync-tray.service": 4545,
+        "strih-display-watch.service": 4646}
 PANEL_CLASS = "bkshading-panel-app.Bkshading-panel-app"
 WIN = "0x01  0 %s  strih-snv Shading\n" % PANEL_CLASS
 
 
 def bash(body, env=None, sources=(LIB,), path_prepend=None, stdin=""):
     """Source `sources` under the CALLERS' set -euo pipefail (setup-strih / verify-strih), run `body`."""
-    harness = "set -euo pipefail\n" + "".join('. "%s"\n' % s for s in sources) + body
+    # the role gate setup-strih / verify-strih always have (obs-box-role.sh): no fixed HDMI output here; a
+    # sourced obs-box-role.sh replaces it (issue 1424: the display watch's policy fails closed without it)
+    harness = ("set -euo pipefail\nobs_box_step_applies() { printf 'harness: no fixed HDMI output'; return 1; }\n"
+               + "".join('. "%s"\n' % s for s in sources) + body)
     full_env = {k: v for k, v in os.environ.items() if k not in LEAKY}
     full_env.update(HERMETIC)
     if path_prepend:
@@ -188,6 +194,9 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
     if autostart:
         lines += ["systemctl --user start %s || true" % u for u in UNITS]
     (home / ".config/openbox/autostart").write_text("\n".join(lines) + "\n")
+    # issue 1424: the display watch's role policy step 16d writes (`operator`: the harness defines no
+    # obs_box_step_applies, so no 6-hdmi role gate applies)
+    (home / ".config/strih-display-watch.env").write_text("STRIH_DISPLAY_WATCH_HDMI=operator\n")
     proc = tmp_path / "proc"
     argv = {
         "strih-browser-keeper.service": ["/usr/bin/python3", str(bindir / "strih_browser_keeper.py"),
@@ -196,6 +205,9 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         # Chromium rewrites the browser process title, so the Satellite's argv proves nothing: its exe does
         "companion-satellite.service": ["companion-satellite", "--rewritten-title"],
         "dantesync-tray.service": [str(tray_path)],
+        # issue 1424: the display watch
+        "strih-display-watch.service": ["/usr/bin/python3", str(bindir / "strih_display_watch.py"),
+                                        "--state-file", "/run/user/1000/strih-display-watch.json"],
     }
     for unit, words in argv.items():
         (proc / str(PIDS[unit])).mkdir(parents=True)
@@ -223,9 +235,19 @@ def watch_state(rundir, age=3.0):
                         "companion_up": True, "companion_error": None, "deck_on_usb": True}}))
 
 
+def display_state(rundir, age=2.0):
+    """issue 1424: the display watch's state file as a healthy pass leaves it (strih-snv's panel on)."""
+    rundir.mkdir(parents=True, exist_ok=True)
+    (rundir / "strih-display-watch.json").write_text(json.dumps({
+        "version": 1, "updated_epoch_s": time.time() - age, "screen": [2560, 1600],
+        "outputs": [["eDP-1-2", "connected", "on", "primary", ""], ["HDMI-0", "connected", "off", "", "fixed"]],
+        "fixed": ["HDMI-0"], "last_apply": None, "last_error": None, "pending": []}))
+
+
 def all_states(rundir):
     keeper_state(rundir)
     watch_state(rundir)
+    display_state(rundir)
 
 
 def grade_env(tmp_path, bindir, rundir, euid="1000"):
@@ -233,7 +255,9 @@ def grade_env(tmp_path, bindir, rundir, euid="1000"):
             "STRIH_SESSION_APPS_RUNTIME_DIR": str(rundir), "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc"),
             "STRIH_SESSION_APPS_SATELLITE_BIN": str(tmp_path / "opt" / "companion-satellite" / "companion-satellite"),
             "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path)), "DANTESYNC_VERSION_PIN": TRAY_PIN,
-            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(tray_record(tmp_path))}
+            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(tray_record(tmp_path)),
+            # issue 1424: the display watch's X config row never reads the real /etc/X11 or Xorg log
+            "STRIH_X_CONF_DIR": str(tmp_path / "xorg.conf.d"), "STRIH_X_XORG_LOG": str(tmp_path / "Xorg.0.log")}
 
 
 def grade(tmp_path, home, bindir, rundir, **fakes):

@@ -311,7 +311,7 @@ fn the_lease_module_routes_to_vk_direct_and_keeps_the_lease_default() {
     );
     let start = body_of(
         &o,
-        "static bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
+        "bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
         OUTPUTS_C,
     );
     assert!(
@@ -320,7 +320,7 @@ fn the_lease_module_routes_to_vk_direct_and_keeps_the_lease_default() {
     );
     let stop = body_of(
         &o,
-        "static void drm_output_inst_stop_locked(struct drm_output_inst *inst)",
+        "void drm_output_inst_stop_locked(struct drm_output_inst *inst)",
         OUTPUTS_C,
     );
     assert!(
@@ -884,8 +884,9 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         VK_C,
     );
     assert!(
-        policy.contains("DRM_OUTPUT_VK_REBUILD_TRIES") && policy.contains("giving up"),
-        "issue 1346: the rebuild is bounded and names its give-up"
+        policy.contains("drm_output_rebuild_next(") && policy.contains("giving up"),
+        "issue 1346: the rebuild is bounded and names its give-up (issue 1424: the pure backoff decision \
+         keeps the display acquired beside another open display, obs-drm-output-retry.h)"
     );
     let setup = file(VK_SETUP_C);
     assert!(
