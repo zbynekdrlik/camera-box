@@ -53,6 +53,10 @@ NodeSpec `source`. The cap (`MISSING_SLOT_PIXELS_CAP`, default 12) counts SLOTS,
   `$STRIH_LX_REMOTE_OUT_DIR/missing-slot-pixels-strih-<RUN_ID>`, scp -r back, then the remote PNGs
   and the dir are removed (never a sweep: our own run-keyed dir, `rm -f` of its `frame-*.png`, then
   `rmdir`).
+- **stream on Linux (stream-snv, issue 1462)**: the box's platform comes from its obs-fleet class
+  (`missing_slot_pixels_stream_os` -> `stream_box_platform`), so the Linux stream box takes the same
+  Linux script as strih-snv, under `$STREAM_LX_REMOTE_OUT_DIR/missing-slot-pixels-stream-<RUN_ID>`.
+  `tests/python/test_stream_snv_decode_1462.py` runs it with the real ffmpeg on the fake box.
 - **stream (Windows)**: Windows PowerShell 5.1 pipes between native programs are NOT binary-safe,
   so the PowerShell program (`missing_slot_pixels_windows_ps`, via `-EncodedCommand`) sets the
   shared `onbox_decode_priority_class` priority, writes the two-stage pipeline to an `extract.cmd`
