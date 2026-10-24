@@ -54,6 +54,11 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
 - restreamer's stop drains its event cache (~2.5 min) before completing the broadcast, then YouTube
   processes: `wait-done` (`YOUTUBE_LEG_DONE_DEADLINE_S`, 1800 s) runs after the merge, so most of that
   wait overlaps the on-box decodes. `vod_id` = the broadcast id.
+- **Done = YouTube `uploaded` (restreamer 0.29.57, agreed 24.10.2026).** YouTube keeps a live archive at
+  `processingStatus processing` for 30+ min while it is already fetchable, so restreamer reports done at
+  lifeCycle `complete` + `uploaded`/`processed`/`succeeded`. The 1080p + audio check stays here:
+  `fetch_vod` retries yt-dlp every `YTDLP_RETRY_S` (30 s) until `YTDLP_READY_S` (600 s, inside the
+  1500 s tool timeout), then fails (UNKNOWN).
 - Quota: one session of restreamer's rolling-24 h budget (~10 sessions/day across both gates) per run.
   There is no per-SHA cache (the spec's Review Focus 4): the stage runs on every run, and a cached FAIL
   could never pass on a rerun.

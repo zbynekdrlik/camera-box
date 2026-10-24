@@ -56,6 +56,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import traceback
 import urllib.request
 
@@ -102,6 +103,9 @@ AUDIO_MIN_SIGNAL = 0.25  # of the measured blocks must carry recording signal (t
 VOD_BLIND_MAX_S = 0.1  # more VOD-only undecodable runs (2+ frames, black / slate / a flash) is UNKNOWN
 STOP_MARGIN_S = 1.0  # a window must end this long before a StopStream (the VOD loops its last frames)
 CLIP_TIMEOUT_S, PROBE_TIMEOUT_S, YTDLP_TIMEOUT_S, URL_TIMEOUT_S = 600, 1800, 3600, 60
+# restreamer reports the VOD done at YouTube `uploaded` (0.29.57), which can come before the
+# 1080p + audio formats are listed: the fetch retries every YTDLP_RETRY_S until YTDLP_READY_S.
+YTDLP_RETRY_S, YTDLP_READY_S = 30, 600  # inside the 1500 s tool timeout
 
 
 def join_parts(parts):
@@ -317,17 +321,24 @@ def fmt_utc(x):
             .isoformat(timespec="milliseconds").replace("+00:00", "Z"))
 
 
-def fetch_vod(vod, out):
+def fetch_vod(vod, out, ready_deadline_s=YTDLP_READY_S, sleep=time.sleep, clock=time.monotonic):
     if os.path.isfile(vod):
         return vod
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vod):
         raise ValueError(f"--vod {vod!r} is neither a file nor a YouTube id")
     path = os.path.join(out, f"vod-{vod}.mp4")
-    if not os.path.isfile(path):
-        run_bounded(["yt-dlp", "-q", "--no-progress", "--socket-timeout", "30", "-f",
-                     "bv*[height<=1080][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080][fps<=30]+ba/b",
-                     "--merge-output-format", "mp4", "-o", path, f"https://www.youtube.com/watch?v={vod}"],
-                    YTDLP_TIMEOUT_S, check=True)
+    end = clock() + ready_deadline_s
+    while not os.path.isfile(path):
+        try:
+            run_bounded(["yt-dlp", "-q", "--no-progress", "--socket-timeout", "30", "-f",
+                         "bv*[height<=1080][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080][fps<=30]+ba/b",
+                         "--merge-output-format", "mp4", "-o", path, f"https://www.youtube.com/watch?v={vod}"],
+                        YTDLP_TIMEOUT_S, check=True)
+        except RuntimeError as e:
+            if clock() + YTDLP_RETRY_S > end:
+                raise
+            print(f"youtube_leg: VOD {vod} not fetchable yet, retry in {YTDLP_RETRY_S} s: {e}", file=sys.stderr)
+            sleep(YTDLP_RETRY_S)
     return path
 
 
