@@ -34,10 +34,22 @@
 # missing sha256sum must fail LOUD by name, never read as a measured zero -> prints
 # `TOOL_MISSING:sha256sum` (the parser yields "" -> facet dormant).
 imag_so_gather_cmd() {
-  cat <<'REMOTE'
+  _obs_box_so_gather_cmd /usr lib/x86_64-linux-gnu/libobs.so.30 lib/x86_64-linux-gnu/obs-plugins/distroav.so \
+    lib/x86_64-linux-gnu/libobs-opengl.so.30
+}
+
+# _obs_box_so_gather_cmd PREFIX PATH... -> the ONE remote gather snippet behind imag_so_gather_cmd and
+# linux_obs_box_so_gather_cmd (issue 1474): `<path> <sha256>` per readable PREFIX/PATH, nothing for an
+# unreadable one, `TOOL_MISSING:sha256sum` (#833) when the box has no sha256sum. imag's text is
+# byte-identical to the issue-1082 heredoc this replaced (pinned by tests/python/test_linux_bytes_gate_1474.py).
+# The replacement words are quoted (bash 5.2 patsub_replacement would expand an `&` in them).
+_obs_box_so_gather_cmd() {
+  local prefix="$1"; shift
+  local t
+  t="$(cat <<'REMOTE'
 if command -v sha256sum >/dev/null 2>&1; then
-  for _p in lib/x86_64-linux-gnu/libobs.so.30 lib/x86_64-linux-gnu/obs-plugins/distroav.so lib/x86_64-linux-gnu/libobs-opengl.so.30; do
-    _f="/usr/$_p"
+  for _p in __PATHS__; do
+    _f="__PREFIX__/$_p"
     if [ -r "$_f" ]; then
       _h="$(sha256sum "$_f" 2>/dev/null | awk '{print $1}')"
       [ -n "$_h" ] && printf '%s %s\n' "$_p" "$_h"
@@ -47,19 +59,61 @@ else
   echo TOOL_MISSING:sha256sum
 fi
 REMOTE
+)"
+  t="${t//__PATHS__/"$*"}"
+  t="${t//__PREFIX__/"$prefix"}"
+  printf '%s\n' "$t"
+}
+
+# linux_obs_box_byte_paths -> issue 1474: the files of the strih-variant linux bundle (the one
+# setup-strih.sh installs into /usr on strih-snv, stream-snv, strih-pp, stream-pp) whose bytes carry
+# our code, manifest-relative, one per line: libobs (the genlock core), the frontend API, DistroAV,
+# obs-vban, the A/V-sync dock, and the frontend itself (bin/obs). The ONE list: the gather hashes
+# exactly these and the gate's linux_so_bytes row requires every one of them.
+linux_obs_box_byte_paths() {
+  printf '%s\n' lib/x86_64-linux-gnu/libobs.so.30 lib/x86_64-linux-gnu/libobs-frontend-api.so.30 \
+    lib/x86_64-linux-gnu/obs-plugins/distroav.so lib/x86_64-linux-gnu/obs-plugins/obs-vban.so \
+    lib/x86_64-linux-gnu/obs-plugins/obs-audio-video-sync-dock.so bin/obs
+}
+
+# linux_obs_box_bundle_artifact -> the linux-genlock.yml artifact a setup-strih box is deployed from
+# (deploy-genlock-fleet.sh's fleet_linux_bundle_artifact_for, pinned equal by the issue-1474 test), so
+# the gate grades the box against the manifest of the bundle the deploy installed.
+linux_obs_box_bundle_artifact() {
+  echo obs-genlock-linux-x86_64-strih
+}
+
+# linux_obs_box_so_gather_cmd [PREFIX] -> the remote gather of linux_obs_box_byte_paths under PREFIX
+# (default /usr, the setup-strih install prefix; a test points it at a fake root).
+linux_obs_box_so_gather_cmd() {
+  local -a paths=()
+  local p
+  while IFS= read -r p; do paths+=("$p"); done < <(linux_obs_box_byte_paths)
+  _obs_box_so_gather_cmd "${1:-/usr}" "${paths[@]}"
 }
 
 # imag_so_bytes_csv PROBE_OUTPUT -> pure LOCAL parser (no ssh): turn the gather's `<path> <sha>` lines
 # into the `path=sha,path=sha,...` CSV the gate's --imag-bytes wants. A TOOL_MISSING line (#833) or
-# empty input -> "" (facet dormant). Only `lib/`-prefixed lines are accepted (defensive against a
-# stray login banner). Never a partial/false CSV -- a line missing its sha is skipped.
+# empty input -> "" (facet dormant). Only `lib/`- and `bin/`-prefixed lines are accepted (defensive
+# against a stray login banner; imag's gather prints only lib/ lines). Never a partial/false CSV -- a
+# line missing its sha is skipped.
 imag_so_bytes_csv() {
+  obs_box_so_bytes_csv "$@"
+}
+
+# linux_obs_box_so_bytes_csv PROBE_OUTPUT -> the same parser for a Linux OBS box's gather (issue 1474).
+linux_obs_box_so_bytes_csv() {
+  obs_box_so_bytes_csv "$@"
+}
+
+# obs_box_so_bytes_csv PROBE_OUTPUT -> the shared parser of both gathers.
+obs_box_so_bytes_csv() {
   local out="$1" path sha _rest csv=""
   grep -qi 'TOOL_MISSING' <<<"$out" && return 0
   while IFS=' ' read -r path sha _rest; do
     [ -z "$path" ] || [ -z "$sha" ] && continue
     case "$path" in
-      lib/*) : ;;
+      lib/*|bin/*) : ;;
       *) continue ;;
     esac
     csv="${csv:+$csv,}${path}=${sha}"
