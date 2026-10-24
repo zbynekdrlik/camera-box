@@ -167,6 +167,11 @@ design 6386467303 (Approach 1, three layers); finding 6386340389; validation 638
   `tests/drm_output_retry_supervisor_1424.rs` (the supervisor's own code lifted verbatim and RUN against
   stand-in registry steps: one line per cause, the cause = the first warning, the flush on success, the
   release of a dead loop), `tests/python/test_drm_output_retry_grade_1424.py` (item 4c).
+- **Count pins that bite a new path in the vk core:** `tests/drm_output_vk_deadline_1424.rs` pins exactly TWO
+  `drm_output_vk_mark_disruption(d->dev);` in vk-setup.c (before the settle wait, after the acquire), so a new
+  acquire path (the parked-display reuse) goes through the acquire's ONE mark, never a mark of its own; and a
+  new std-only lift test (`{tag}-{pid}-{counter}` temp dir) needs its line on the
+  `tests/no_hand_rolled_tempdirs_1409.rs` allowlist in the same commit, or CI's sweep fails.
 - **verify item 4c:** `strih_drm_vk_present_dead` keeps an output dead through the supervisor's release
   stop after `lost its present loop`, until `LIVE again`; the per-output grader reports a dormant output
   as `dark -- ... retried by OBS itself` with its last retry line.
