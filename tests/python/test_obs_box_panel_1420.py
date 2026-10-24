@@ -119,7 +119,9 @@ def test_the_autostart_starts_the_panel_after_the_display_import(box):
 
 def test_the_unit_runs_tint2_with_the_declared_config_and_restarts():
     u = (REPO / "systemd" / "obs-box-panel.service").read_text()
-    assert "ExecStart=/usr/bin/tint2 -c %h/.config/tint2/tint2rc" in u
+    # issue 1424: tint2 starts only once X has a screen with a monitor (the display watch's guard execs it)
+    assert ("ExecStart=/usr/bin/python3 /usr/local/bin/strih_display_watch.py --exec-when-screen "
+            "/usr/bin/tint2 -c %h/.config/tint2/tint2rc") in u
     assert "Restart=always" in u and "Environment=DISPLAY=:0" in u
 
 

@@ -52,7 +52,7 @@ UNITS = F.UNITS
 _bash = F.bash
 CLASS = F.PANEL_CLASS
 WIN = F.WIN
-ROWS = len(UNITS) + 3
+ROWS = len(UNITS) + 4  # + the keeper's pass, the panel window, the Satellite watch's pass, the display watch's pass
 
 
 def _install(tmp_path, home, bindir, **fakes):
@@ -116,6 +116,7 @@ def test_script_mapping_and_items():
         "companion-satellite.service [] companion-satellite",
         "strih-satellite-watch.timer [strih_satellite_watch.py] satellite-watch",
         "dantesync-tray.service [] dantesync-tray",
+        "strih-display-watch.service [strih_display_watch.py] display-watch",
         "REFUSED",
     ]
 

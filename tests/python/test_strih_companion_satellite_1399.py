@@ -213,7 +213,7 @@ def test_grade_rows_satellite_and_watch_ok(tmp_path):
         "kiosk autostart, active, last ran the watch after the files were installed" % (WATCH, bindir))
     wpass = F.row(rows, "satellite-watch-pass")
     assert wpass.startswith("OK|(satellite-watch-pass) last pass") and "Satellite connected" in wpass
-    assert len(rows) == len(F.UNITS) + 3
+    assert len(rows) == len(F.UNITS) + 4  # issue 1424: + the display watch's last pass
 
 
 def test_grade_rows_a_missing_satellite_binary_points_at_step_16(tmp_path):

@@ -274,7 +274,8 @@ def test_the_unit_runs_the_binary_the_install_writes():
 
 def test_the_tray_is_the_fifth_session_app_with_its_autostart_line():
     r = F.bash('printf "%s\\n" "${STRIH_SESSION_APP_UNITS[@]}"')
-    assert r.stdout.split() == list(F.UNITS) and r.stdout.split()[-1] == TRAY
+    # issue 1424: the display watch joined after the tray
+    assert r.stdout.split() == list(F.UNITS) and r.stdout.split()[4] == TRAY
     r = F.bash("strih_session_app_autostart_line %s" % TRAY)
     assert r.stdout == "systemctl --user start dantesync-tray.service || true"
     assert r.stdout in F.bash("strih_session_apps_autostart_lines").stdout.splitlines()
@@ -397,7 +398,7 @@ def test_grade_row_ok(tmp_path):
     assert F.row(rows, "dantesync-tray") == (
         "OK|(dantesync-tray) %s: unit matches the checkout, %s installed, enabled, started by the kiosk "
         "autostart, active, its process runs %s and started after the unit was installed" % (TRAY, b, b))
-    assert len(rows) == len(F.UNITS) + 3
+    assert len(rows) == len(F.UNITS) + 4  # issue 1424: + the display watch's last pass
 
 
 def test_grade_row_note_while_the_pin_has_no_linux_tray(tmp_path):
