@@ -54,7 +54,7 @@ OBS_BOX_STREAM_AUDIO_MONITOR=off
 OBS_BOX_STREAM_OUTPUT_NAME="stream"
 # The stream role's session apps, in start order (obs_box_role_apply below; the genlock deploy's start
 # step reads the same list for a stream-role box, issue 1462).
-OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service)
+OBS_BOX_STREAM_SESSION_APP_UNITS=(strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service strih-display-watch.service)
 # issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
 # video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
 # The scene name equals STREAM_DEV_SCENE_DEFAULT (scripts/lib/stream-dev-scene.sh, pinned by a pytest).

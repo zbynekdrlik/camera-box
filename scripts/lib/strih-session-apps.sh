@@ -29,6 +29,11 @@
 #     dantesync_install_tray (scripts/lib/dantesync-install.sh); the unit carries
 #     ConditionFileIsExecutable, so while the pin is below 1.18.0 (no binary) its start is a clean skip,
 #     never a restart loop.
+#   * strih-display-watch.service -> scripts/strih_display_watch.py, every role (issue 1424, owner
+#     24.10.2026: "to musi vediet fungovat aj bez monitora aj po zapojeni monitora aj po zapnuti!!!";
+#     design 6386467303 layer 2): an operator monitor that comes on joins the X layout, a fixed HDMI output
+#     of the drm-output config stays out of it, and with no operator monitor the screen stays usable
+#     (>= 1920x1080), so tint2 and OBS always have one. Its extra row is its last pass (--check-state).
 #   * strih-stream-monitor.service -> scripts/strih_stream_monitor.py, the STREAM role only (issue 1436,
 #     owner 15.10.2026): the headphones play the audio of the real outgoing RTMP stream straight to the
 #     jack's ALSA PCM, never through PipeWire. Its packages + three extra verify rows live in
@@ -80,7 +85,7 @@ if ! declare -F dantesync_install_tray >/dev/null; then
 fi
 
 # The session apps, in start order (the kiosk autostart and the deploy start them in this order).
-STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dantesync-tray.service)
+STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer dantesync-tray.service strih-display-watch.service)
 # issue 1429: libgtk-3-0t64 + libayatana-appindicator3-1 + libxdo3 = the dantesync tray's runtime.
 STRIH_SESSION_APP_PACKAGES=(python3-gi gir1.2-webkit2-4.1 python3-websocket libgtk-3-0t64 libayatana-appindicator3-1 libxdo3)
 STRIH_SESSION_APP_WANTS_TARGET=graphical-session.target
@@ -92,6 +97,9 @@ STRIH_PANEL_WM_CLASS=bkshading-panel-app.Bkshading-panel-app
 STRIH_BROWSER_KEEPER_STATE_FILE=strih-browser-keeper.json
 # The Satellite watch's state file, under the user's runtime dir (its service passes --state-file %t/<this>).
 STRIH_SATELLITE_WATCH_STATE_FILE=strih-satellite-watch.json
+# issue 1424: the display watch's state file, under the user's runtime dir (its unit passes --state-file %t/<this>).
+STRIH_DISPLAY_WATCH_STATE_FILE=strih-display-watch.json
+STRIH_DISPLAY_WATCH_UNIT=strih-display-watch.service
 # Companion Satellite: the ONE path of the Electron desktop build setup-strih step 16 installs with the
 # tarball's own install.sh --system (strih_companion_satellite_bin prints it), and its unit.
 STRIH_COMPANION_SATELLITE_BIN=/opt/companion-satellite/companion-satellite
@@ -117,6 +125,7 @@ strih_session_app_script() {
     companion-satellite.service) printf '' ;;
     strih-satellite-watch.timer) printf 'strih_satellite_watch.py' ;;
     dantesync-tray.service) printf '' ;;
+    strih-display-watch.service) printf 'strih_display_watch.py' ;;
     strih-stream-monitor.service) printf 'strih_stream_monitor.py' ;;
     *) return 1 ;;
   esac
@@ -130,6 +139,7 @@ strih_session_app_item() {
     companion-satellite.service) printf 'companion-satellite' ;;
     strih-satellite-watch.timer) printf 'satellite-watch' ;;
     dantesync-tray.service) printf 'dantesync-tray' ;;
+    strih-display-watch.service) printf 'display-watch' ;;
     strih-stream-monitor.service) printf 'stream-monitor' ;;
     *) return 1 ;;
   esac
@@ -696,6 +706,12 @@ strih_session_apps_grade_rows() {
       strih-satellite-watch.service "$repo" "$user"
   fi
 
+  # issue 1424: the display watch's last pass (screen, operator outputs, fixed outputs kept out of X)
+  if _strih_session_apps_has "$STRIH_DISPLAY_WATCH_UNIT"; then
+    strih_session_app_pass_row display-watch strih_display_watch.py "$STRIH_DISPLAY_WATCH_STATE_FILE" \
+      "$STRIH_DISPLAY_WATCH_UNIT" "$repo" "$user"
+  fi
+
   # issue 1436: the stream role's headphone monitor -- its last pass + card owner, the OBS key, Monitor Off
   if _strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT"; then
     strih_stream_monitor_grade_rows "$repo" "$home" "$user"
@@ -714,11 +730,12 @@ _strih_session_apps_has() {
 }
 
 # strih_session_apps_row_count -> how many rows strih_session_apps_grade_rows prints (one per unit +
-# the keeper's last pass + the panel window + the Satellite watch's last pass + the stream monitor's
+# the keeper's last pass + the panel window + the Satellite watch's last pass + the display watch's last
+# pass (issue 1424) + the stream monitor's
 # STRIH_STREAM_MONITOR_ROWS).
 strih_session_apps_row_count() {
   local n="${#STRIH_SESSION_APP_UNITS[@]}" u
-  for u in strih-browser-keeper.service bkshading-panel-app.service strih-satellite-watch.timer; do
+  for u in strih-browser-keeper.service bkshading-panel-app.service strih-satellite-watch.timer "$STRIH_DISPLAY_WATCH_UNIT"; do
     _strih_session_apps_has "$u" && n=$((n + 1))
   done
   _strih_session_apps_has "$STRIH_STREAM_MONITOR_UNIT" && n=$((n + STRIH_STREAM_MONITOR_ROWS))

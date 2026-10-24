@@ -13,7 +13,10 @@ StartLimitIntervalSec=0
 Type=simple
 # The kiosk's plain Xorg session; Xlib reads ~/.Xauthority.
 Environment=DISPLAY=:0
-ExecStart=/usr/bin/tint2 -c %h/.config/tint2/tint2rc
+# issue 1424 (owner 24.10.2026): tint2 segfaulted in a restart loop on the 8x8 screen of a box booted with
+# no monitor. The display watch's guard waits until X has a screen with a monitor on it, then execs tint2
+# in place (the main process is tint2 from then on).
+ExecStart=/usr/bin/python3 /usr/local/bin/strih_display_watch.py --exec-when-screen /usr/bin/tint2 -c %h/.config/tint2/tint2rc
 Restart=always
 RestartSec=3
 TimeoutStopSec=10
