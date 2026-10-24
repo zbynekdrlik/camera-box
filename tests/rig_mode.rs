@@ -1066,7 +1066,9 @@ fn genlock_relaunch_note_is_env_free_no_mode() {
         // Linux box (exit 2).
         assert!(
             note.contains("ssh newlevel@10.77.9.202 'systemctl --user restart strih-obs.service'")
-                && note.contains("ssh newlevel@10.77.9.204 'systemctl --user restart strih-obs.service'")
+                && note.contains(
+                    "ssh newlevel@10.77.9.204 'systemctl --user restart strih-obs.service'"
+                )
                 && !note.contains("launch-obs-genlock.sh")
                 && !note.contains("--box strih"),
             "#257: the relaunch note must cover strih-snv AND stream. mode={mode} note=\n{note}"
@@ -1102,7 +1104,8 @@ fn genlock_relaunch_note_stream_line_follows_the_fleet_class_1474() {
     let note = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
         note.contains("#   stream   : scripts/launch-obs-genlock.sh --box stream --force\n")
-            && note.contains("ssh newlevel@10.77.9.202 'systemctl --user restart strih-obs.service'")
+            && note
+                .contains("ssh newlevel@10.77.9.202 'systemctl --user restart strih-obs.service'")
             && !note.contains("ssh newlevel@10.77.9.204"),
         "issue 1474: a Windows stream box keeps the Windows relaunch planner line. note=\n{note}"
     );
