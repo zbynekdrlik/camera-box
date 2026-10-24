@@ -213,7 +213,12 @@ static bool st_start(void *data)
 	 * at each mix tick by the dock's own audio callback (the output's raw_audio is the whole mix). */
 	cb_measure_share_connect(st);
 
-	obs_output_begin_data_capture(st->context, OBS_OUTPUT_VIDEO | OBS_OUTPUT_AUDIO);
+	/* issue 1470 (review round 1): a start that never captures must not leave the dock's own audio
+	 * callback connected (it would hold the audio output active until st_destroy). */
+	if (!obs_output_begin_data_capture(st->context, OBS_OUTPUT_VIDEO | OBS_OUTPUT_AUDIO)) {
+		cb_measure_share_disconnect(st);
+		blog(LOG_WARNING, "av-sync-dock: data capture did not begin -- mix-tick callback disconnected");
+	}
 
 	return true;
 }
@@ -230,6 +235,10 @@ static void st_stop(void *data, uint64_t)
 	obs_output_end_data_capture(st->context);
 	st->cb_decode_mailbox.stop();
 	st->cb_audio_fifo.stop();
+	cb_measure_source_hold(st, nullptr);
+	st->cb_measure_source_checked = false;
+	/* issue 1470 (review round 1): both workers are joined, so the held measurement source is released
+	 * above (a stopped dock keeps no deleted source alive) and the next start looks it up at once. */
 	blog(LOG_INFO, "av-sync-dock: video decode worker stopped (decoded=%llu decode_dropped=%llu)",
 	     (unsigned long long)st->cb_decode_mailbox.taken(), (unsigned long long)st->cb_decode_mailbox.dropped());
 	blog(LOG_INFO, "av-sync-dock: audio decode worker stopped (blocks=%llu audio_dropped=%llu decode_resets=%llu)",

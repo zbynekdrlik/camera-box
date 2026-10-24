@@ -20,12 +20,24 @@
  *   - but discard_audio (obs-audio.c) has already set the source's `audio_ts = ts.end` by then, for
  *     an inactive or pending source too, so the share's start offset is gone.
  *
- * So `CbMeasureShareTracker` takes a tick's share ONLY when it is provably the whole tick at offset 0:
+ * So `CbMeasureShareTracker` takes a tick's share ONLY when, judged from what libobs left after the
+ * tick, it is the whole tick at offset 0:
  * the source is found, active (in the program), not pending (it was rendered this tick), its timeline
  * ended the PREVIOUS tick exactly at this tick's start (mix_audio skips one that is even 1 ns early)
  * and ends this tick at its end (libobs's frame-counted end, 0-1 ns after the dock's). Every other tick is silence -- never the mix. A source that is not
  * taken for CB_SHARE_ABSENT_END_NS reads `absent_long`: the dock ends its decode session (STALE + one
  * log line) instead of measuring something else.
+ *
+ * What "in the program" means here: rendered in this tick's audio tree and aligned. Known limits (the
+ * dock still reads only the measurement source's own marker, so none of them lets a foreign emitter
+ * in): (1) the residual -- a producer-side timeline reset (reset_audio_timing / reset_audio_data on the
+ * source's ingest thread) landing between the dock's read after one tick and the next tick's mix makes
+ * that one tick taken although it was mixed at an offset (up to one tick, 21.3 ms) or not at all;
+ * pinned by tests/av_sync_dock_measure_share_lift_1470.rs; (2) the share carries no scene-item fade and
+ * is also taken when the source is active only through a view whose audio is not mixed, or when a
+ * sibling drags its scene's timestamp out of the window; (3) a source that renders its own audio
+ * (info.audio_render) never reaches the tick-end rule, so it is never taken. The obs-vban `mbc` input
+ * is a push source and is taken on every steady tick.
  *
  * Dependency-free (STL + <cstdint>), C++11; pinned by the g++ self-test
  * `vendor/av-sync-dock/test/measure-share-selftest.cpp`, which tests/av_sync_dock_measure_share_1470.rs

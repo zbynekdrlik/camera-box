@@ -87,10 +87,14 @@ void cb_measure_source_hold(struct sync_test_output *st, obs_source_t *src)
 
 /* issue 1470: libobs's audio thread, right after the mix of one tick (`mix->timestamp` = its start).
  * In camera-box mode it builds the tick's block from the measurement source's own share and hands it
- * to the gate + FIFO copy. The mix samples this callback receives are never read. */
+ * to the gate + FIFO copy. The mix samples this callback receives are never read. Its whole cost (the
+ * lock, the source reads, the fill and the copy) is what audio_publish_max_us= reports. A new source
+ * object resets the tracker by pointer: a freed object's address reused by the next lookup would skip
+ * that reset, which costs at most one tick (the tracker's own start check still holds). */
 void st_cb_mix_tick(void *param, size_t mix_idx, struct audio_data *mix)
 {
 	auto *st = (struct sync_test_output *)param;
+	const uint64_t tick_cost_start_ns = os_gettime_ns();
 	if (!st->start_ts || mix_idx >= MAX_AUDIO_MIXES)
 		return;
 
@@ -138,6 +142,7 @@ void st_cb_mix_tick(void *param, size_t mix_idx, struct audio_data *mix)
 
 	if (decision.absent_long && st->cb_measure_source_present.load(std::memory_order_relaxed)) {
 		st->cb_audio_fifo.end_session((unsigned)camerabox::CbAudioGate::NotInProgram);
+		camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - tick_cost_start_ns);
 		return;
 	}
 	struct audio_data share_frames = {};
@@ -146,6 +151,7 @@ void st_cb_mix_tick(void *param, size_t mix_idx, struct audio_data *mix)
 	share_frames.frames = (uint32_t)frames;
 	share_frames.timestamp = mix->timestamp;
 	cb_audio_gate_and_publish(st, &share_frames, last_qr_ns);
+	camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - tick_cost_start_ns);
 }
 
 /* issue 1470: st_start, after the FIFO started and before data capture. The share planes are sized
