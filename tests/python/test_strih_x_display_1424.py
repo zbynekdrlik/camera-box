@@ -262,7 +262,8 @@ def test_the_policy_file_belongs_to_the_desktop_user(tmp_path):
     r = _run(gate + 'strih_display_watch_env_put "%s" "$(whoami)"' % home, tmp_path)
     assert r.returncode == 0, r.stderr
     body = (XLIB.read_text().split("strih_display_watch_env_put() {", 1)[1].split("\n}\n", 1)[0])
-    assert 'chown "${user}:"' in body, body
+    # review round 3: root never follows a link the user could swap in (chown -h, never the target)
+    assert 'chown -h "${user}:"' in body and body.count('chown "${user}:"') == 0, body
 
 
 def test_the_row_fails_a_policy_file_the_role_does_not_want(tmp_path):

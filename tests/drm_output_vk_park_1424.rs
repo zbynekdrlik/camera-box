@@ -123,7 +123,9 @@ fn a_reopen_reuses_the_parked_display_before_any_new_acquire() {
     assert!(
         unpark_fn.contains("strcmp(d->dev->parked[i].output_name, d->output_name) == 0")
             && unpark_fn.contains("vkReleaseDisplayEXT(")
-            && unpark_fn.contains("new handle"),
+            && unpark_fn.contains("new handle")
+            // review round 3: an INFO line, never the captured cause of a failed retry (the first warning)
+            && unpark_fn.contains("blog(LOG_INFO, \"drm-output: vk-direct: '%s' has a new handle"),
         "issue 1424: a stale parked entry of the same connector is released and freed by name: {unpark_fn}"
     );
     assert!(
