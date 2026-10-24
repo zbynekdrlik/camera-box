@@ -29,6 +29,9 @@ LIB = os.path.join(REPO, "scripts", "lib", "av-restart-matrix.sh")
 STRIH = "10.77.9.202"
 STREAM = "10.77.9.204"
 CAM1 = "10.77.9.61"
+# issue 1474: this suite pins a WINDOWS stream box (the stream-obs SUPERVISOR step, byte for byte);
+# the Linux stream-snv of the default fleet is tests/python/test_av_restart_matrix_stream_lx_1474.py.
+WIN_STREAM_FLEET = "strih-snv|10.77.9.202|linux-genlock|always\nstream-snv|10.77.9.204|windows-genlock|always"
 
 FAKE_SOAK_PY = r'''
 import json, os, signal, sys, time
@@ -151,6 +154,11 @@ elif cmd == "program-scene":
         mdir = os.environ["FAKE_MATRIX_DIR"]
         confirmed = os.path.isdir(mdir) and any(f.startswith("confirm-stream-obs-")
                                                 for f in os.listdir(mdir))
+        # issue 1474: on a Linux stream box the matrix restarts the unit itself (the fake sshpass
+        # marks it), no supervisor confirm file
+        confirmed = confirmed or os.path.exists(os.path.join(state, "stream-restarted"))
+        if os.path.exists(os.path.join(state, "stream-ws-dead")):
+            sys.exit("fake: stream OBS WebSocket is not answering")
         if confirmed:
             n = bump("stream-reads-after-confirm")
             if n <= int(os.environ.get("FAKE_STREAM_WS_DOWN_AFTER_CONFIRM", "0") or 0):
@@ -181,6 +189,7 @@ printf 'sshpass %s %s\n' "$host" "$(printf '%s' "$text" | base64 -w0)" >> "$FAKE
 windows="$(cat "$FAKE_STATE/windows" 2>/dev/null || echo 0)"
 case "$text" in
   *"restart strih-obs.service"*)
+    if [ "$host" = "${FAKE_STREAM_HOST:-}" ]; then : > "$FAKE_STATE/stream-restarted"; fi
     if [ -n "${FAKE_STRIH_NO_UNIT:-}" ]; then
       echo "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on strih-snv"; exit 2
     fi
@@ -190,6 +199,10 @@ case "$text" in
     if [ -n "${FAKE_RESTART_FAIL:-}" ]; then echo AV_MATRIX_RESTART_FAILED; exit 1; fi
     echo AV_MATRIX_RESTART_OK ;;
   *"start strih-obs.service"* | *"systemctl start camera-box"* | *"systemctl start dantesync"*)
+    # issue 1474: a Linux stream box whose OBS stays dead after cleanup's start
+    if [ "$host" = "${FAKE_STREAM_HOST:-}" ] && [ -n "${FAKE_STREAM_DEAD_AT_CLEANUP:-}" ]; then
+      : > "$FAKE_STATE/stream-ws-dead"
+    fi
     echo "active=active" ;;
   *"_SYSTEMD_INVOCATION_ID"*)
     inv=inv-new; [ -n "${FAKE_CAMBOX_SAME_INVOCATION:-}" ] && inv=inv-old
@@ -268,7 +281,7 @@ def rig(tmp_path):
         "RIG_GRANDMASTER_IP": "10.77.9.230",
         "RIG_FLEET_ACK_FILE": str(tmp_path / "no-acks.txt"),
         "CAM_PW": "x", "STREAM_USER": "u", "STREAM_PW": "y", "STRIH_USER": "su", "STRIH_PW": "sp",
-        "STRIH_HOST": STRIH, "STREAM_HOST": STREAM,
+        "STRIH_HOST": STRIH, "STREAM_HOST": STREAM, "OBS_FLEET": WIN_STREAM_FLEET,
     })
     return env, {"log": log, "run": run, "lease": tmp_path / "lease", "state": state}
 
