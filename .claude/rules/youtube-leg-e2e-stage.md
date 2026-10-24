@@ -178,6 +178,23 @@ replay: UNKNOWN `ran over 1500 s` after 1.4 windows). The decode is no longer th
 MAD 4.7 vs 4.9 ms) in 61 s instead of 230 s. The A/V step's shape is the main's next design step
 (issue 1404, Design-question of 24.10.2026).
 
+### Replaying the stage on dev2 without the rig (how the numbers above were taken)
+
+- The stream recordings stay on stream-snv (`/home/newlevel/<YYYY-MM-DD HH-MM-SS>.mp4`, local time =
+  UTC+2 in summer) after a run, and the run's `$OUTDIR` on dev1 keeps the marker log, the schedule and
+  `youtube-leg/state.json`. A replay = copy that state (drop `vod_id`), point
+  `YOUTUBE_LEG_SESSION_CMD` at a stub that prints `{"ok":true,"state":"done","vod_id":"<id>"}`, then
+  run `youtube_leg_e2e.py prefetch` and `measure` with the real `--stream-path`, markers, schedule and
+  a CI `recording-verdict` (any `probe-tools-linux-amd64` copy). It reads one file from stream-snv,
+  mutates nothing on the rig, and deletes its dev2 stage dir.
+- Detach a long dev2 benchmark with `ssh -f newlevel@dev2 'setsid nohup ... > log 2>&1 < /dev/null &'`;
+  without `-f` the local ssh stays attached until the remote job ends.
+- Copying a scratch script or a run's marker log to dev2 from a lane with uncommitted edits is
+  refused by the airuleset clean-tree deploy hook; a scratch copy that is not repo content takes
+  `# airuleset:deploy-dirty-ok <reason>` on the scp line.
+- Compare a decoder change on real files with `old vs new` tick maps row by row (changed / set /
+  cleared halves, decoded ticks, 'x' rows), not only by a count.
+
 ## Windows
 
 The switch schedule's `[{cambox, start_ns, end_ns}]`, each segment trimmed 3 s at the head (the cut
