@@ -16,6 +16,8 @@ StartLimitIntervalSec=0
 Type=simple
 # The kiosk's plain Xorg session; Xlib reads ~/.Xauthority.
 Environment=DISPLAY=:0
+# issue 1424: the role's HDMI policy (setup-strih step 16d): STRIH_DISPLAY_WATCH_HDMI=off on the strih role
+EnvironmentFile=-%h/.config/strih-display-watch.env
 ExecStart=/usr/bin/python3 /usr/local/bin/strih_display_watch.py --state-file %t/strih-display-watch.json
 Restart=always
 RestartSec=3

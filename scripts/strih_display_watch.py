@@ -108,6 +108,23 @@ def fixed_connectors(config_text, module=None):
     return None
 
 
+def hdmi_off_from_env(env=None):
+    """The role's HDMI policy from the unit's EnvironmentFile (setup-strih step 16d writes it): `off` on
+    the strih role, where no HDMI output is ever the desktop (issue 1346), else HDMI belongs to X."""
+    return (os.environ if env is None else env).get("STRIH_DISPLAY_WATCH_HDMI", "") == "off"
+
+
+def effective_fixed(fixed, outputs, hdmi_off):
+    """The outputs kept out of X: the config's fixed ones, plus every HDMI output when the role's policy
+    says HDMI is never the desktop. None (cannot classify) stays None: no output is touched then."""
+    if fixed is None:
+        return None
+    out = list(fixed)
+    if hdmi_off:
+        out += [o.name for o in outputs if o.name.startswith("HDMI") and o.name not in out]
+    return out
+
+
 def screen_ready(screen, outputs, min_screen=MIN_SCREEN):
     """X has a screen with a monitor on it (the panel's guard)."""
     return (screen is not None and screen[0] >= min_screen[0] and screen[1] >= min_screen[1]
@@ -181,8 +198,9 @@ def _outputs_summary(outputs, fixed):
 class Watch:
     """One pass every POLL_S: read X, decide, apply, keep the state file."""
 
-    def __init__(self, state_file, run=run_cmd, log=print, config_text=default_config_text):
+    def __init__(self, state_file, run=run_cmd, log=print, config_text=default_config_text, hdmi_off=False):
         self.state_file = state_file
+        self.hdmi_off = hdmi_off
         self.run = run
         self.log = log
         self.config_text = config_text
@@ -208,7 +226,7 @@ class Watch:
         if self.x_down_logged:
             self.log("X on %s answers again" % os.environ.get("DISPLAY", "?"))
             self.x_down_logged = False
-        fixed = fixed_connectors(self.config_text())
+        fixed = effective_fixed(fixed_connectors(self.config_text()), outputs, self.hdmi_off)
         summary = (screen, tuple(map(tuple, _outputs_summary(outputs, fixed))), tuple(fixed or ()), fixed is None)
         if summary != self.last_summary:
             self.log("watching %s: screen %dx%d; operator outputs %s; fixed outputs %s"
@@ -216,7 +234,8 @@ class Watch:
                         ", ".join("%s (%s, %s%s)" % (r[0], r[1], r[2], ", primary" if r[3] else "")
                                   for r in _outputs_summary(outputs, fixed) if not r[4]) or "none connected",
                         ("unknown (the drm-output config cannot be classified -- no output is touched)"
-                         if fixed is None else " ".join(fixed) or "none")))
+                         if fixed is None else " ".join(fixed) or "none"))
+                     + ("; HDMI never on the desktop (this role, issue 1346)" if self.hdmi_off else ""))
             self.last_summary = summary
         args = decide(screen, outputs, fixed)
         self.pending = args
@@ -332,7 +351,7 @@ def main(argv=None):
             ap.error("--exec-when-screen needs a command")
         exec_when_screen(a.exec_when_screen, log=log)
         return 1  # reached only when the exec itself failed (os.execv raises then)
-    w = Watch(a.state_file or default_state_file(), log=log)
+    w = Watch(a.state_file or default_state_file(), log=log, hdmi_off=hdmi_off_from_env())
     while True:
         w.pass_once(time.monotonic())
         if a.once:

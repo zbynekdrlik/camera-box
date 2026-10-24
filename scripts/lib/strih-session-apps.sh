@@ -362,6 +362,16 @@ strih_session_apps_install() {
       || echo "  WARN: ${program} not installed -- re-run $(strih_session_app_binary_installer "$u"); ${u} cannot run without it"
   done
 
+  # issue 1424 (independent review): the display watch's role policy (HDMI never on the desktop on the
+  # strih role); a changed policy restarts a running watch onto it
+  if _strih_session_apps_has "$STRIH_DISPLAY_WATCH_UNIT"; then
+    w2="$(strih_display_watch_env_put "$home")" || return 1
+    echo "  display watch policy ~/${STRIH_DISPLAY_WATCH_ENV_REL}: $(strih_display_watch_env_text) ($([ "$w2" = written ] && echo written || echo kept))"
+    if [ "$w2" = written ]; then
+      case " ${changed[*]-} " in *" ${STRIH_DISPLAY_WATCH_UNIT} "*) ;; *) changed+=("$STRIH_DISPLAY_WATCH_UNIT") ;; esac
+    fi
+  fi
+
   # A stopgap's WantedBy=default.target link would also start its app on a non-graphical login.
   for u in "${STRIH_SESSION_APP_UNITS[@]}"; do
     link="${home}/${STRIH_SESSION_APP_STOPGAP_WANTS_DIR}/${u}"

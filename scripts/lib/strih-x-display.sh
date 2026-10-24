@@ -69,6 +69,7 @@ strih_x_display_metamodes() {
   for o in ${2-}; do
     strih_x_display_name_ok "$o" || return 1
     case "$fixed" in *" $o "*) continue ;; esac
+    case "$o" in HDMI*) continue ;; esac  # the strih role: no HDMI is ever the desktop (issue 1346)
     out="${out:+$out, }${o}: nvidia-auto-select"
   done
   [ -n "$out" ] || return 1
@@ -157,15 +158,50 @@ strih_x_display_provision() {
   return 0
 }
 
+# The display watch's role policy (issue 1424, independent review): the session-app units install
+# verbatim on both roles, so the watch reads the role's HDMI policy from this file, written by step 16d.
+STRIH_DISPLAY_WATCH_ENV_REL=.config/strih-display-watch.env
+
+# strih_display_watch_env_text -> the policy line: `off` when the box's 6-hdmi step applies (a strih-role
+# box with a fixed HDMI output, whose kiosk autostart keeps every HDMI out of X), else `operator`.
+strih_display_watch_env_text() {
+  local p=operator
+  if declare -F obs_box_step_applies >/dev/null && obs_box_step_applies 6-hdmi >/dev/null 2>&1; then
+    p=off
+  fi
+  printf 'STRIH_DISPLAY_WATCH_HDMI=%s' "$p"
+}
+
+# strih_display_watch_env_put USER_HOME -> write the policy file when it differs; prints `written` /
+# `unchanged`. rc 1 + a stderr line on a failed write.
+strih_display_watch_env_put() {
+  local path="${1:?user home required}/${STRIH_DISPLAY_WATCH_ENV_REL}" text
+  text="$(strih_display_watch_env_text)"
+  if [ -f "$path" ] && [ ! -L "$path" ] && [ "$(cat "$path" 2>/dev/null || true)" = "$text" ]; then
+    echo unchanged
+    return 0
+  fi
+  install -d -m 0755 "$(dirname "$path")" && rm -f "$path" && printf '%s\n' "$text" | install -m 0644 /dev/stdin "$path" \
+    || { echo "strih-x-display: cannot write ${path}" >&2; return 1; }
+  echo written
+}
+
 # strih_x_display_grade_row REPO USER_HOME DESKTOP_USER -> ONE row `OK|text` / `FAIL|text` / `NOTE|text`
 # (display-x-config): the file matches what step 6 writes for the box's drm-output config and the X
 # outputs, the running X applied it (its log carries the MetaModes option, else a NOTE: it applies at the
 # next X start), and no fixed output has an X mode now. Reads X through strih_kiosk_x_run
 # (strih-session-apps.sh). Always rc 0.
 strih_x_display_grade_row() {
-  local repo="$1" home="$2" user="$3" conf path fixed xr outs want mm f inx=""
+  local repo="$1" home="$2" user="$3" conf path fixed xr outs want mm f inx="" envp envw
   conf="${home}/.camera-box/drm-output.json"
   path="$(strih_x_display_conf_path)"
+  envp="${home}/${STRIH_DISPLAY_WATCH_ENV_REL}"
+  envw="$(strih_display_watch_env_text)"
+  if [ "$(cat "$envp" 2>/dev/null || true)" != "$envw" ]; then
+    printf 'FAIL|(display-x-config) %s %s, this role wants %s -- re-run setup-strih.sh step 16d (then systemctl --user restart strih-display-watch)\n' \
+      "$envp" "$([ -f "$envp" ] && echo "reads $(head -c 80 "$envp" 2>/dev/null | tr '\n' ' ')" || echo "is missing")" "$envw"
+    return 0
+  fi
   if ! fixed="$(strih_x_display_fixed "${repo}/scripts" "$conf")"; then
     printf 'FAIL|(display-x-config) %s cannot be classified -- re-run setup-strih.sh step 6\n' "$conf"
     return 0
