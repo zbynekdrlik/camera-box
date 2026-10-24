@@ -136,6 +136,43 @@ dev1 and the VOD decode never finished inside the tool's 1500 s.
   superset property). The map can depend on the chunk boundaries (each chunk starts with no stored
   points) only by which extra halves it reads.
 
+## The A/V step: a 1080p read of each window, on a bounded pool (ROZHODNUTE 6389130309)
+
+- `av_window` cuts a source TALLER than `AV_READ_HEIGHT` (1080) at 1080 (`_cut_clip(scale_to=)`,
+  `scale=-2:1080`, a scale of the same frames: the frame count is unchanged), a 1080p VOD as before.
+  The A/V block names each read: `rec_read` "1080p of 2160p", `vod_read` "1080p".
+- **Guard:** a scaled read must pair every audio marker IT decoded (`audio_markers_decoded`, minus
+  `AV_SCALED_MARKER_SLACK` 1 at the clip's edge), else `ValueError` -> that window's A/V is UNKNOWN.
+  It is never re-read at the original size. A scale only loses VIDEO ticks, so the read's own audio
+  count is the right bar. A theoretical `dur / 0.5` is the wrong one (review round 3): markers that
+  straddle the cut are lost at both ends, e.g. the committed 40 s base-rec-B decoded 79 and paired 78,
+  unscaled. Without the audio count (an older probe) the bar is `dur / 0.5 - 2`. An unscaled read
+  keeps the old floor (half the markers). Every committed real read (9 session recordings, the run's
+  6 windows) passes the scaled guard (pinned).
+- The strict guard is on the RECORDING read only. A VOD above 1080 lines (yt-dlp's last fallback `/b`)
+  is cut at 1080 too but keeps the old floor: an unscaled VOD read already loses markers (s2-vod-A paired
+  79 of 81, base-vod-R 69 of 79).
+- Clip names carry the window, made safe for a file name (`av-rec-<window>-<start>.mp4`, anything
+  outside `[A-Za-z0-9._-]` -> `_`): the windows run at once in one dir.
+- On a stop the tool starts no child (`youtube_leg_proc._STOPPING`, set by the signal handler), the
+  pool cancels the windows still queued (`pool.map`'s iterator cancels pending futures), and the dev2
+  cleanup TERMs each remote step's group before the KILL (`TERM_GRACE_S` 5 s). The TERM lets the tool's
+  handler kill its own children: yt-dlp, the clip cuts and the probe each run in their own session, out
+  of reach of a group KILL.
+- **Evidence** (`tests/fixtures/youtube_leg_1404/run40110304642-w0{1,2,3}-{4k,1080p}.avsync.out`, the probe
+  on the same windows of E2E run 40110304642, dev2 24.10.2026): 50/50 markers at both sizes, offsets
+  1.31 vs 0.75 / 16.41 vs 16.41 / 1.82 vs 1.82 ms. `AV_SCALED_OFFSET_TOLERANCE_MS` 2.0 pins it (the
+  gate's own bar is 150 ms).
+- **Cost** (dev2, three windows at once, load 25-33): 4K cut 175 s + probe 351-697 s; 1080p cut 48-103 s +
+  probe 51-123 s. Alone at load ~19: 4K 61.5 + 168.6 s, 1080p 27.9 + 33.0 s.
+- **Pool:** `measure()` collects every window's A/V job and runs them on `run_av_jobs` (threads, the
+  work is subprocesses), in window order; one window's error stays its own. Size =
+  `av_pool_size(load1, cores, --av-pool)`: `--av-pool` (default `AV_POOL_MAX` 4) scaled by
+  cores / load when the load exceeds the cores, never under `AV_POOL_MIN` 2 (an explicit
+  `--av-pool 1` is honoured). dev2 (8 cores, load 13-36 from other users) mostly runs 2-3. Each slot
+  runs an x264 cut and the probe; the probe's 8 decode workers have no switch.
+- Tests: `tests/python/test_youtube_leg_av_1080p_1404.py`.
+
 ## Fail-closed rules the five review rounds found holes in (each has a test)
 
 - Dup/skip is judged twice: between ADJACENT decoded VOD frames (the session tool's rule, which
