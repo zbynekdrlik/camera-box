@@ -395,3 +395,20 @@ def test_step_16d_writes_the_role_policy_and_restarts_a_running_watch_on_a_chang
     body = lib.split("strih_session_apps_install() {", 1)[1].split("\n}\n", 1)[0]
     assert "strih_display_watch_env_put" in body
     assert body.index("strih_display_watch_env_put") < body.index('"$user" try-restart')
+
+
+# --- an unreadable config is "cannot classify", never "no config" (independent review) ----------------
+
+def test_an_unreadable_config_touches_no_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert W.default_config_text() == "", "no config file = no fixed output"
+    (tmp_path / ".camera-box" / "drm-output.json").mkdir(parents=True)  # read fails (EISDIR), not ENOENT
+    assert W.default_config_text() is None
+    assert W.fixed_connectors(None) is None
+    rig = Rig(PP_DARK)
+    logs = []
+    w = W.Watch(state_file=str(tmp_path / "w.json"), run=rig.run, log=logs.append,
+                config_text=W.default_config_text)
+    w.pass_once(now=100.0)
+    # the fixed HDMI outputs are never --auto'd onto the desktop while OBS may hold them
+    assert all("HDMI" not in " ".join(a) for a in rig.applied), rig.applied
