@@ -49,6 +49,8 @@ class Fakes:
         self.d = Path(tmp_path) / "fakes"
         self.d.mkdir(parents=True, exist_ok=True)
         self.env = dict(os.environ)
+        self.marker = self.d / "youtube-leg-live.json"  # never the real dev1 marker
+        self.env["YOUTUBE_LEG_MARKER"] = str(self.marker)
         for kind in ("session", "obs", "guard", "verdict"):
             exe = self.d / kind
             exe.write_text(FAKE.format(py=sys.executable, kind=kind, d=str(self.d)))

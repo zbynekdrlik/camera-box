@@ -90,6 +90,18 @@ def test_record_start_is_now_minus_the_output_duration():
         ylo.record_start(FakeObs(record={"outputActive": True}))
 
 
+def test_stream_status_reads_since_when_the_output_runs():
+    seen = []
+
+    def rpc(rtype, rdata=None, ignore_err=False):
+        seen.append(rtype)
+        return {"outputActive": True, "outputDuration": 90000}
+
+    assert ylo.stream_status(rpc, now=lambda: 1000.0) == {"active": True, "since_utc": 910.0}
+    assert seen == ["GetStreamStatus"]
+    assert ylo.stream_status(FakeObs(active=False)) == {"active": False, "since_utc": None}
+
+
 def test_the_tool_never_selects_a_scene():
     src = (Path(ylo.__file__)).read_text()
     for banned in ("SetCurrentProgramScene", "SetCurrentPreviewScene", "StartRecord\"", "StopRecord\""):

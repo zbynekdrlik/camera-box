@@ -141,3 +141,21 @@ def test_the_gate_is_red_on_a_failed_stage_and_folds_the_reason(tmp_path):
     assert r.returncode == 0 and "GATE-RED" in r.stdout, r.stdout + r.stderr
     b = json.loads(verdict.read_text())["youtube_leg"]
     assert b["pass"] is False and "channel guard refused" in b["reasons"][0]
+
+
+def test_the_rig_busy_gate_recovers_a_leftover_broadcast_only_with_a_marker():
+    g = (REPO / "scripts" / "rig-busy-gate.sh").read_text()
+    call = g.index('"$HERE/youtube_leg_e2e.py" --dir /nonexistent --host "$STREAM_HOST"')
+    guard = g.rindex('if [ -f "$YOUTUBE_LEG_MARKER" ]; then', 0, call)
+    assert guard < call < g.index("\nfor ((i = 1; i <= MAX_ITERATIONS; i++)); do")
+    assert "--with-session" not in g[guard:call + 200]  # the gate has no ssh password: the stream half only
+
+
+def test_cleanup_stops_the_stream_first_in_the_foreground_then_the_session(tmp_path):
+    lib = LIB.read_text()
+    fn = lib[lib.index("youtube_leg_cleanup_stop() {"):]
+    fn = fn[:fn.index("\n}\n")]
+    quick = fn.index("stop --stream-only")
+    bg = fn.index('stop --why "cleanup()") >>')
+    assert quick < bg and "timeout 10" in fn[:quick]
+    assert fn[bg:].lstrip().count("&") >= 1

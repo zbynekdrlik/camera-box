@@ -88,3 +88,20 @@ def test_a_verdict_without_the_block_renders_the_report_as_before_apart_from_the
     v = _pass_verdict()
     before = rep.compose_report(copy.deepcopy(v), {"run_id": "1"})
     assert "📺 YouTube" not in before
+
+
+def test_a_stage_that_started_but_never_folded_is_red_not_unmeasured(tmp_path):
+    v = _pass_verdict()
+    md = yt.points_markdown(v, stage_attempted=True)
+    row = [line for line in md.splitlines() if line.startswith("| YouTube VOD")][0]
+    assert "nemeraný" not in row and "✅" not in row
+    assert "no verdict was folded" in md and "NIE JE" in md
+    vj = tmp_path / "v.json"
+    vj.write_text(json.dumps(v))
+    stage = tmp_path / "youtube-leg"
+    stage.mkdir()
+    (stage / "state.json").write_text("{}")
+    out = tmp_path / "p.md"
+    subprocess.run([sys.executable, str(REPO / "scripts" / "e2e_report_youtube.py"), "--verdict", str(vj),
+                    "--stage-dir", str(stage), "--out", str(out)], check=True)
+    assert "no verdict was folded" in out.read_text()

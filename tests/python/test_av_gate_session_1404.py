@@ -50,6 +50,8 @@ class FakeApi:
                 api.calls.append(("POST", self.path, self.headers.get("Authorization"), body))
                 if self.path.endswith("/stop"):
                     self._send(api.stop_code, {"state": "processing"})
+                elif isinstance(api.start, list):  # a sequence of answers, the last repeats
+                    self._send(*(api.start.pop(0) if len(api.start) > 1 else api.start[0]))
                 else:
                     self._send(*api.start)
 
@@ -195,3 +197,19 @@ def test_a_quote_in_the_token_reaches_the_server_intact(tmp_path, api):
     rc, _, r = _run(env, api.url, tok, "status", "--id", "s1")
     assert rc == 0, r.stdout
     assert api.calls[0][2] == 'Bearer fake"bearer\\with-a-quote-and-a-backslash'
+
+
+def test_a_starting_up_restreamer_is_retried_then_started(tmp_path, api):
+    env, tok, _ = _box(tmp_path)
+    api.start = [(503, {"error": "starting_up"}), (503, {"error": "starting_up"}),
+                 (201, {"session_id": "s9", "broadcast_id": "b9"})]
+    rc, out, _ = _run(env, api.url, tok, "start", "--requester", "r")
+    assert rc == 0 and out["session_id"] == "s9"
+    assert sum(1 for c in api.calls if c[0] == "POST") == 3
+
+
+def test_a_busy_refusal_names_the_holders_session(tmp_path, api):
+    env, tok, _ = _box(tmp_path)
+    api.start = (409, {"error": "busy", "holder": {"session_id": "old1", "requester": "camera-box E2E"}})
+    rc, out, _ = _run(env, api.url, tok, "start", "--requester", "r")
+    assert rc == 2 and out["holder_session_id"] == "old1"
