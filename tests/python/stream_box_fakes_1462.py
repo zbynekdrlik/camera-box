@@ -8,7 +8,10 @@ A dev1-side fake `sshpass` that records every call and plays the stream box:
     the test checks what the text does, never only how it reads; FAKE_SSH_DOWN set = the box does
     not answer (exit 255, no output, nothing run);
   * `scp ... user@host:<path> <local>`: copies <path> (a file on this host, the box's fs; a relative
-    path is the box user's home, as for scp) to <local>.
+    path is the box user's home, as for scp) to <local>; with `-r` a directory is copied INTO <local>;
+  * `scp ... <local> user@host:<path>` (an upload, the [8/8b] verdict binary + pushes): copies
+    <local> to <path> (relative = the box home), failing like scp when its directory is missing;
+    FAKE_SSH_DOWN set fails every scp too.
 Every call is one JSON line in FAKE_SSH_LOG. The box tools (`ffmpeg`, `systemctl`) are python stubs
 with an absolute shebang (the box PATH holds no python); `rm` is the real one, linked in.
 """
@@ -57,6 +60,28 @@ if tool == "scp":
     entry["src"], entry["dst"] = src, dst
     with open(os.environ["FAKE_SSH_LOG"], "a") as f:
         f.write(json.dumps(entry) + "\n")
+    if os.environ.get("FAKE_SSH_DOWN"):
+        sys.stderr.write("ssh: connect to host: Connection refused\n")
+        sys.exit(255)
+    if "@" in dst.split(":", 1)[0] and ":" in dst:
+        # an UPLOAD (issue 1462 [8/8b]): the local src lands at the box path (relative = the box home)
+        path = dst.split(":", 1)[1]
+        if not os.path.isabs(path):
+            path = os.path.join(box_home, path)
+        if not os.path.isdir(os.path.dirname(path) or "."):
+            sys.stderr.write("scp: %s: No such file or directory\n" % path)
+            sys.exit(1)
+        shutil.copyfile(src, path)
+        sys.exit(0)
+    path = src.split(":", 1)[1]
+    if not os.path.isabs(path):
+        path = os.path.join(box_home, path)
+    if "-r" in rest and os.path.isdir(path):
+        target = dst.rstrip("/")
+        if os.path.isdir(target):
+            target = os.path.join(target, os.path.basename(path.rstrip("/")))
+        shutil.copytree(path, target, dirs_exist_ok=True)
+        sys.exit(0)
     path = src.split(":", 1)[1]
     if not os.path.isabs(path):
         path = os.path.join(box_home, path)
@@ -124,6 +149,17 @@ def make_rig(tmp_path):
                 "FAKE_FFMPEG_LOG": str(ff), "FAKE_BOX_BIN": str(box), "FAKE_BOX_HOME": str(home),
                 "HOME": str(tmp_path)})
     return {"dev1": dev1, "box": box, "home": home, "log": log, "ffmpeg_log": ff, "env": env}
+
+
+def link_box_tools(rig, *names):
+    """Link real host tools into the fake box's PATH (the box PATH holds only the stubs + rm)."""
+    import shutil
+    for name in names:
+        real = shutil.which(name, path="/usr/bin:/bin")
+        assert real, name
+        link = rig["box"] / name
+        if not link.exists():
+            os.symlink(real, link)
 
 
 def calls(rig):
