@@ -89,6 +89,9 @@ MIXER_ENUMS = (("Auto-Mute Mode", "Enabled"),)
 # What asound.state must hold for the jack's card after `alsactl store`: (control name, value) -- a reboot
 # restores exactly this (alsa-restore.service).
 STORED_SWITCHES = (("Speaker Playback Switch", "false"), ("Headphone Playback Switch", "true"))
+# ... and every level control at 0 dB: `alsactl store` records each value's dB in the control's comment as
+# `dbvalue.N` (0.01 dB units), so the stored hardware level is graded too (review round 1).
+STORED_LEVELS = tuple("%s Playback Volume" % name for name in MIXER_LEVELS)
 DEVICE_PREFIX = "alsa_card."
 # the rows grade() prints, in order (scripts/lib/stream-operator-audio.sh counts them)
 GRADE_ROWS = ("operator-audio-sink", "operator-audio-cards", "operator-audio-capture", "operator-audio-volume",
@@ -399,7 +402,8 @@ def apply_mixer(card_id, amixer=AMIXER, alsactl=ALSACTL, log=print, err=None):
 
 def stored_controls(text, card_id):
     """{control name: [values]} of CARD_ID's block in an `alsactl store` file (asound.state), or None when the
-    file holds no `state.<CARD_ID>` block."""
+    file holds no `state.<CARD_ID>` block; a level control's stored dB values (its comment's `dbvalue.N`, in
+    0.01 dB) under `<name> dB`."""
     lines = (text or "").splitlines()
     start = None
     for i, ln in enumerate(lines):
@@ -420,6 +424,11 @@ def stored_controls(text, card_id):
             depth -= 1
             if depth == 0:
                 break
+            continue
+        if depth == 3 and name is not None:
+            m = re.match(r"dbvalue\.\d+\s+(-?\d+)$", t)
+            if m:
+                out.setdefault(name + " dB", []).append(m.group(1))
             continue
         if depth != 2:
             continue
@@ -457,6 +466,13 @@ def _stored_problems(state_path, card_id, live_controls):
         vals = stored.get(name)
         if vals != [want]:
             bad.append("stored %s %s" % (name, ", ".join(vals) if vals else "missing"))
+    for name in STORED_LEVELS:
+        if name.split(" ")[0] not in live_controls:
+            continue
+        dbs = stored.get(name + " dB")
+        if not dbs or any(v != "0" for v in dbs):
+            bad.append("stored %s %s" % (name, ", ".join("%.2f dB" % (int(v) / 100.0) for v in dbs)
+                                         if dbs else "missing"))
     return bad
 
 
@@ -485,6 +501,8 @@ def mixer_row(info, amixer=AMIXER, state_path=ASOUND_STATE):
     tag = "(operator-audio-mixer)"
     card = info.get("card_id") or "?"
     if info.get("usb"):
+        # defence only: resolve_headphone never returns a USB card without an explicit --pcm-match, and step 12
+        # refuses a --pcm-match drop-in -- a FAIL, should either guard ever give way
         return "FAIL", ("%s %s is a USB audio interface -- the headphones are the notebook jack, never a USB "
                         "interface: unplug it or drop the --pcm-match drop-in, re-run setup-strih step 12"
                         % (tag, card))

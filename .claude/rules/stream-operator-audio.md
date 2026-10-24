@@ -108,10 +108,20 @@ notebook jack on EVERY stream box (never a USB interface), and the sink volume i
   through the kiosk's ONE rc.xml filter, now `obs_box_openbox_rc_with_keys KEYS_FN` (the brightness merge is
   `obs_box_openbox_rc_with_keys obs_box_brightness_keybinds_xml`). The running openbox reads them at the next
   login or `openbox --reconfigure`.
-- **Kept across restarts:** the helper keeps the level in `~/.local/state/camera-box/operator-headphones.json`
-  (every change, also one made elsewhere and seen by `watch`). When `watch` sees the sink under a NEW id
-  (login, an operator-audio restart, a reboot) it puts the kept level back and UNMUTES (every session starts
-  audible). Only this one sink's volume is restored; WirePlumber's own restore stays off.
+- **Kept across restarts:** the helper keeps `{volume, restored}` in
+  `~/.local/state/camera-box/operator-headphones.json` (every level change, also one made elsewhere and seen by
+  `watch`). A sink is identified by `<core cookie>:<node id>`: PipeWire hands node ids out again after a restart,
+  and the cookie is random per daemon start (review round 1: a restart between two looks reused the id, the
+  watcher skipped the restore and KEPT the 100 %). A sink this box never restored (a login after a reboot, an
+  operator-audio restart) gets the kept level back (at least 10 %, so it is audible) and is UNMUTED; the first
+  session ever adopts the sink's current level as the kept one. A sink already restored (a restarted watcher
+  after a panel restart) is adopted as it is, the operator's own mute included. The sink counts as gone only
+  after `GONE_AFTER` (3) missed looks, so a slow pw-dump never flashes the label or re-runs the restore. Only
+  this one sink's volume is restored; WirePlumber's own restore stays off.
+- **Cost:** one `pw-dump` per second (~11 ms on stream-pp, 24.10.2026), a client that creates no node.
+- **The stored mixer also covers the levels:** `alsactl store` writes each level control's dB as
+  `dbvalue.N` (0.01 dB) in its comment; the mixer row needs Master / Headphone / PCM Playback Volume at 0 there
+  too (stream-pp's file of 20.10.2026 held Master -23.25 dB: a reboot would have brought that back).
 - **Tests:** `tests/python/test_stream_operator_jack_volume_1465.py` (fake `pw-dump` / `wpctl` that applies
   its calls to the dump, fake `amixer` / `alsactl`, an `asound.state` fixture with a second card's Speaker on
   first, so the reader must keep to the headphone card's own block).
@@ -200,7 +210,8 @@ the rule order, not how WirePlumber reads it (dev1 has no PipeWire): the live re
      (step 6) at once, the operator hears nothing until then;
    - `pw-metadata -n settings | grep clock` = rate 48000, allowed `[ 48000 ]`, quantum / min / max 256;
    - `pw-metadata -n sm-settings | grep restore` = the four keys `false`;
-   - `wpctl get-volume @DEFAULT_AUDIO_SINK@` = `Volume: 1.00`;
+   - `wpctl get-volume @DEFAULT_AUDIO_SINK@` = `Volume: 1.00` (HISTORY: since the item 3 revision the level is
+     the operator's, see the next section);
    - `cat /proc/asound/card<N>/pcm0p/sub0/status` reads `closed` until something plays, then names the `pipewire` owner;
    - `journalctl --user -u strih-stream-monitor -n 20`: `watching ... pulse output to the sink 'stream-operator-headphones' ...`;
    - play a YouTube video in Chrome and start a stream: both in the headphones, nothing on the notebook

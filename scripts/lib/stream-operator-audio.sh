@@ -118,15 +118,20 @@ stream_operator_audio_install() {
 # stream_operator_audio_volume_install REPO USER_HOME DESKTOP_USER OWNER -> the operator's GLOBAL headphone volume
 # (ROZHODNUTE 6383739315): the helper to $OBS_BOX_PANEL_HEADPHONES_HELPER (0755, owned by whoever runs setup:
 # root) and the notebook's volume keys merged into the user's openbox rc.xml (seeded from the stock rc.xml when
-# the user has none; operator content kept). Both compare-then-write. rc 0 / 1.
+# the user has none; operator content kept). Both compare-then-write. A symlinked openbox dir or rc.xml is
+# refused (root never reads or writes through a link the desktop user placed). rc 0 / 1.
 stream_operator_audio_volume_install() {
   local repo="$1" home="$2" user="$3" owner="$4" rc_user rc_src merged
   install -d -m 0755 "$(dirname "$OBS_BOX_PANEL_HEADPHONES_HELPER")" \
     || { echo "stream-operator-audio: cannot create $(dirname "$OBS_BOX_PANEL_HEADPHONES_HELPER")" >&2; return 1; }
   obs_box_write_if_changed "$OBS_BOX_PANEL_HEADPHONES_HELPER" 0755 "$(id -un):$(id -gn)" "operator headphone volume helper" \
     < "${repo}/scripts/stream_operator_volume.py" || return 1
-  strih_user_home_dir "$home" "$user" "${home}/.config/openbox" || return 1
   rc_user="${home}/.config/openbox/rc.xml"
+  if [ -L "${home}/.config/openbox" ] || [ -L "$rc_user" ]; then
+    echo "stream-operator-audio: ${rc_user} (or its folder) is a symlink -- refusing to merge the volume keys through it; replace it with a plain file" >&2
+    return 1
+  fi
+  strih_user_home_dir "$home" "$user" "${home}/.config/openbox" || return 1
   if [ -f "$rc_user" ]; then rc_src="$rc_user"; else rc_src="$STREAM_OPERATOR_AUDIO_OPENBOX_RC_SRC"; fi
   [ -f "$rc_src" ] || { echo "stream-operator-audio: no openbox rc.xml to merge the volume keys into (${rc_src} missing)" >&2; return 1; }
   merged="$(obs_box_openbox_rc_with_keys obs_box_panel_headphones_keybinds_xml < "$rc_src")" \
@@ -141,7 +146,7 @@ stream_operator_audio_volume_install() {
 _stream_operator_audio_control_row() {
   local repo="$1" home="$2" rc cfg line bad=""
   rc="${home}/.config/openbox/rc.xml"
-  cfg="${home}/.config/tint2/tint2rc"
+  cfg="$(obs_box_panel_config_path "$home")"
   cmp -s "${repo}/scripts/stream_operator_volume.py" "$OBS_BOX_PANEL_HEADPHONES_HELPER" 2>/dev/null \
     || bad="${bad} ${OBS_BOX_PANEL_HEADPHONES_HELPER} missing or not the checkout (setup step 12);"
   while IFS= read -r line; do

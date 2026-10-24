@@ -12,17 +12,21 @@ scripts/stream_operator_audio.py), found BY NAME in pw-dump on every call (a nod
 restart, and wpctl takes only an id), never the default-sink alias, never another node. Volumes are wpctl's cubic
 scale (what `wpctl get-volume` prints), every change capped at 1.0 (`wpctl set-volume -l 1.0`: no boost).
   watch [--interval S] [--polls N]  the tint2 panel item (a continuous executor): one line per change,
-                                    `Slúchadlá NN %` / `Slúchadlá stlmené` / `Slúchadlá nedostupné`. When the
-                                    sink appears under a new id (login, an operator-audio restart, a reboot) it
-                                    puts the KEPT level back and unmutes (every session starts audible), and it
-                                    keeps any later change (a key press, another client) as the new level.
+                                    `Slúchadlá NN %` / `Slúchadlá stlmené` / `Slúchadlá nedostupné`. When a
+                                    sink this box never restored appears (core cookie + node id: a login after
+                                    a reboot, an operator-audio restart) it puts the KEPT level back (at least
+                                    10 %) and unmutes (every session starts audible); a restarted watcher adopts
+                                    a sink it already restored as it is; any later change (a key press, another
+                                    client) is kept as the new level. One look a second: one pw-dump (~11 ms on
+                                    stream-pp, 24.10.2026), a client that creates no node.
   up | down                         +-5 % (`up` also unmutes), the level kept; bound to the wheel and to
                                     XF86AudioRaiseVolume / XF86AudioLowerVolume in the kiosk's openbox rc.xml
   toggle                            mute / unmute; the left click and XF86AudioMute
   print                             the label, nothing written
-The kept level is one JSON file, $XDG_STATE_HOME/camera-box/operator-headphones.json (default
-~/.local/state/...): only this sink's volume is restored; WirePlumber's own restore stays off for everything.
-Exit 1 (label `Slúchadlá nedostupné`, nothing touched) when the sink is not there.
+The kept state is one JSON file, $XDG_STATE_HOME/camera-box/operator-headphones.json (default
+~/.local/state/...): `volume` (the kept level) + `restored` (the key of the sink last restored); only this sink's
+volume is restored; WirePlumber's own restore stays off for everything.
+Exit 1 when the sink is not there (label `Slúchadlá nedostupné`, nothing touched) or a wpctl call failed.
 
 Installed by setup-strih step 12 on the STREAM role as /usr/local/bin/obs-box-headphones
 (scripts/lib/stream-operator-audio.sh); the panel item + keys are declared in scripts/lib/obs-box-panel.sh.
@@ -41,6 +45,10 @@ STEP_PCT = 5
 LIMIT = "1.0"
 LABEL_GONE = "Slúchadlá nedostupné"
 LABEL_MUTED = "Slúchadlá stlmené"
+# a kept level is never restored below this: every session starts audible
+RESTORE_MIN = 0.10
+# the sink counts as gone only after this many missed looks in a row
+GONE_AFTER = 3
 PW_DUMP = os.environ.get("STREAM_OPERATOR_VOLUME_PW_DUMP", "pw-dump")
 WPCTL = os.environ.get("STREAM_OPERATOR_VOLUME_WPCTL", "wpctl")
 TOOL_TIMEOUT_S = 10
@@ -56,8 +64,16 @@ def state_path():
 
 
 def read_sink(objs):
-    """{id, volume (cubic), mute} of the Audio/Sink node named SINK_NAME in a pw-dump list, else None."""
-    for o in objs if isinstance(objs, list) else []:
+    """{id, key, volume (cubic), mute} of the Audio/Sink node named SINK_NAME in a pw-dump list, else None.
+    KEY = `<core cookie>:<node id>`: PipeWire hands node ids out again after a restart, and its core cookie is
+    random per daemon start, so the pair names ONE sink of ONE PipeWire run (review round 1)."""
+    objs = objs if isinstance(objs, list) else []
+    cookie = None
+    for o in objs:
+        if isinstance(o, dict) and o.get("type") == "PipeWire:Interface:Core":
+            cookie = (o.get("info") or {}).get("cookie")
+            break
+    for o in objs:
         if not isinstance(o, dict) or o.get("type") != "PipeWire:Interface:Node":
             continue
         info = o.get("info") or {}
@@ -65,13 +81,17 @@ def read_sink(objs):
         if props.get("node.name") != SINK_NAME or props.get("media.class") != "Audio/Sink":
             continue
         for p in ((info.get("params") or {}).get("Props") or []):
-            chans = [v for v in (p.get("channelVolumes") or []) if isinstance(v, (int, float))] \
-                if isinstance(p, dict) else []
+            chans = [v for v in (p.get("channelVolumes") or []) if _is_number(v)] if isinstance(p, dict) else []
             if chans:
                 linear = max(sum(chans) / len(chans), 0.0)
-                return {"id": o.get("id"), "volume": linear ** (1.0 / 3), "mute": p.get("mute") is True}
+                return {"id": o.get("id"), "key": "%s:%s" % (cookie if cookie is not None else "?", o.get("id")),
+                        "volume": linear ** (1.0 / 3), "mute": p.get("mute") is True}
         return None
     return None
+
+
+def _is_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def label(sink):
@@ -108,61 +128,87 @@ def wpctl(*args):
     return True
 
 
-def load_level(path):
-    """The kept level (0..1) or None."""
+def load_state(path):
+    """The kept state {volume, restored} (an unreadable file reads empty)."""
     try:
         with open(path) as fh:
-            v = json.load(fh).get("volume")
-    except (OSError, ValueError, AttributeError):
-        return None
-    return min(max(float(v), 0.0), 1.0) if isinstance(v, (int, float)) else None
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
 
 
-def save_level(path, volume):
-    """Keep VOLUME (rounded to 1 %) atomically; a write failure is logged, never fatal."""
-    v = round(min(max(volume, 0.0), 1.0), 2)
+def load_level(path):
+    """The kept level (0..1) or None."""
+    v = load_state(path).get("volume")
+    return min(max(float(v), 0.0), 1.0) if _is_number(v) else None
+
+
+def save_state(path, **updates):
+    """Merge UPDATES into the kept state atomically (a volume rounded to 1 %); a failure is logged, never fatal."""
+    d = load_state(path)
+    if "volume" in updates:
+        updates["volume"] = round(min(max(updates["volume"], 0.0), 1.0), 2)
+    d.update(updates)
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         tmp = "%s.tmp-%d" % (path, os.getpid())
         with open(tmp, "w") as fh:
-            json.dump({"volume": v}, fh)
+            json.dump(d, fh)
         os.replace(tmp, path)
     except OSError as e:
         print("obs-box-headphones: cannot keep the level in %s: %s" % (path, e), file=sys.stderr)
 
 
 def restore(call, sink, path):
-    """Put the kept level back on SINK (when one is kept) and unmute it: every session starts audible."""
+    """Put the kept level back on SINK (when one is kept; never below RESTORE_MIN, so the session is audible),
+    unmute it, and remember that THIS sink (its key) got its restore: a restarted watcher (a panel restart)
+    then adopts the sink as it is, the operator's own mute included."""
     kept = load_level(path)
     if kept is not None:
-        call("set-volume", "-l", LIMIT, str(sink["id"]), "%.2f" % kept)
+        call("set-volume", "-l", LIMIT, str(sink["id"]), "%.2f" % max(kept, RESTORE_MIN))
+        save_state(path, restored=sink["key"])
+    else:
+        # nothing kept yet (the first session on this box): the level the sink has now is the one kept
+        save_state(path, restored=sink["key"], volume=sink["volume"])
     call("set-mute", str(sink["id"]), "0")
 
 
 class Watcher:
-    """The panel item's loop body: READ() -> the sink or None, CALL(*wpctl args), PATH = the kept-level file."""
+    """The panel item's loop body: READ() -> the sink or None, CALL(*wpctl args), PATH = the kept-level file.
+
+    A sink whose key (core cookie + node id) this box never restored is NEW (a login after a reboot, an
+    operator-audio restart): its kept level goes back and it is unmuted. A sink seen again (the same key, also
+    after a panel restart) is adopted as it is, and a level change on it is kept. The sink counts as gone only
+    after GONE_AFTER missed looks in a row, so one slow pw-dump never flashes the label or re-runs the restore."""
 
     def __init__(self, read, call, path):
         self.read = read
         self.call = call
         self.path = path
-        self.last_id = None
+        self.key = None
         self.last_volume = None
+        self.misses = 0
         self.shown = None
 
     def poll(self):
         """One look; returns the label when it changed since the last one, else None."""
         s = self.read()
         if s is None:
-            self.last_id = None
+            self.misses += 1
+            if self.misses < GONE_AFTER:
+                return None
+            self.key = None
             return self._show(None)
-        if s["id"] != self.last_id:
-            self.last_id = s["id"]
-            restore(self.call, s, self.path)
-            s = self.read() or s
+        self.misses = 0
+        if s["key"] != self.key:
+            self.key = s["key"]
+            if load_state(self.path).get("restored") != s["key"]:
+                restore(self.call, s, self.path)
+                s = self.read() or s
             self.last_volume = s["volume"]
-        elif self.last_volume is None or abs(s["volume"] - self.last_volume) >= 0.005:
-            save_level(self.path, s["volume"])
+        elif abs(s["volume"] - self.last_volume) >= 0.005:
+            save_state(self.path, volume=s["volume"])
             self.last_volume = s["volume"]
         return self._show(s)
 
@@ -180,17 +226,18 @@ def _change(verb):
         print(LABEL_GONE)
         return 1
     sid = str(s["id"])
+    ok = True
     if verb in ("up", "down"):
-        wpctl("set-volume", "-l", LIMIT, sid, "%d%%%s" % (STEP_PCT, "+" if verb == "up" else "-"))
+        ok = wpctl("set-volume", "-l", LIMIT, sid, "%d%%%s" % (STEP_PCT, "+" if verb == "up" else "-"))
         if verb == "up" and s["mute"]:
-            wpctl("set-mute", sid, "0")
+            ok = wpctl("set-mute", sid, "0") and ok
     elif verb == "toggle":
-        wpctl("set-mute", sid, "toggle")
+        ok = wpctl("set-mute", sid, "toggle")
     after = pw_sink() or s
     if verb != "toggle":
-        save_level(state_path(), after["volume"])
+        save_state(state_path(), volume=after["volume"])
     print(label(after))
-    return 0
+    return 0 if ok else 1
 
 
 def main(argv=None):
