@@ -479,6 +479,28 @@ def input_classes_summary(inputs):
     return "%d camera, %d feedback (%s)" % (ncam, nfb, ", ".join(pairs))
 
 
+def program_retake(host, port, password):
+    """issue 1462: re-take the program scene (obs_phase2.retake_program_scene, behind the production-scene
+    guard) after a seed removed an item. Never fatal to the boot seed: no obs_phase2, an older one, or a
+    failed request prints one line."""
+    op = _obs_phase2_module()
+    if op is None or not hasattr(op, "retake_program_scene"):
+        print("program refresh: skipped (obs_phase2 without retake_program_scene on this host)")
+        return
+    try:
+        ws = op._conn(host, password or "", port)
+        try:
+            program = op._rpc(ws, "GetCurrentProgramScene", {}).get("currentProgramSceneName")
+            msg = op.retake_program_scene(ws, program)
+        finally:
+            ws.close()
+    except Exception as e:  # noqa: BLE001 -- a refresh failure must never kill the launch seed
+        print("program refresh: FAILED (%s) -- the program keeps the removed item until the next cut" % e)
+        return
+    if msg:
+        print("program refresh: %s" % msg)
+
+
 def _obs_phase2_module():
     """Lazy import of the sibling obs_phase2.py (the SHARED #795-safe reenforce_ndi_name policy).
     Returns the module, or None when it is not importable on this host -- an older box may lack it, so
@@ -918,16 +940,24 @@ def main():
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))
     print("scene order: " + " | ".join(scene_order(inputs)))
     # issue 1380: a stream-role manifest carries the YouTube-safe Development scene (stream_dev_safe.py).
+    removed = "removed '" in statuses.get("pulse capture", "")
     if '"dev_scene"' in manifest_text:
         import stream_dev_safe
         spec = stream_dev_safe.parse_dev_scene(manifest_text)
-        print("dev-scene seed: %s" % (", ".join(stream_dev_safe.apply_dev_safe(obs, spec)) or "present (no change)"))
+        done = stream_dev_safe.apply_dev_safe(obs, spec)
+        removed = removed or any(a.startswith("remove_item ") for a in done)
+        print("dev-scene seed: %s" % (", ".join(done) or "present (no change)"))
     # issue 1462: the nested-pro design (stream-snv) only keeps the measurement clip out of Development.
     elif '"dev_scene_nested"' in manifest_text:
         import stream_dev_safe
         nested = stream_dev_safe.parse_dev_scene_nested(manifest_text)
-        print("dev-scene seed (nested-pro): %s"
-              % (", ".join(stream_dev_safe.apply_dev_nested(obs, nested)) or "present (no change)"))
+        done = stream_dev_safe.apply_dev_nested(obs, nested)
+        removed = removed or bool(done)
+        print("dev-scene seed (nested-pro): %s" % (", ".join(done) or "present (no change)"))
+    # issue 1462: in Studio Mode the program is a duplicate made at load, so a removed item stays on program
+    # until the scene is taken again; obs_phase2 re-takes it behind the production-scene guard.
+    if removed:
+        program_retake(args.host, args.port, args.password)
 
 
 if __name__ == "__main__":
