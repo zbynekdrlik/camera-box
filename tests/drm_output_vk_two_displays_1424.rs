@@ -281,7 +281,7 @@ fn a_surface_rebuild_destroys_the_old_presentation_before_the_new_surface() {
     );
     let v = squish(&file(VK_C));
     assert!(
-        v.contains("while (os_atomic_load_bool(&d->running) && !d->queue_wedged && *rebuilds < DRM_OUTPUT_VK_REBUILD_TRIES)"),
+        v.contains("while (os_atomic_load_bool(&d->running) && !d->queue_wedged) {"),
         "issue 1424 review: the rebuild retries stop on a wedged queue"
     );
     let h = file(VK_INTERNAL_H);
