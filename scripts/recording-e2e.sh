@@ -5461,6 +5461,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # issue 1462: the Linux stream box's decode reads its pushed inputs from this dir (the box user's
   # home), and on that box the pushes always run for real -- like its decode, never a plan.
   STREAM_LX_REMOTE_OUT_DIR="${STREAM_LX_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}"
+  STREAM_LX_REMOTE_BIN="${STREAM_LX_REMOTE_BIN:-/home/newlevel/recording-verdict}"
   _av_marker_args=""
   if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
     echo "    --- [8/8b-pre] PUSH the cam2 A/V-sync marker log to the stream box ---"
@@ -5513,7 +5514,8 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     # QR + audio-marker A/V term exactly as on Windows, and a failure here fails the stream leg.
     if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
       STREAM_LX_BOX="$STREAM" STREAM_USER="$STREAM_USER" STREAM_PW="$STREAM_PW" "$HERE/recording-verdict-on-stream-snv.sh" \
-        --verdict-bin "$VERDICT_BIN" --out-dir "$STREAM_LX_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
+        --verdict-bin "$VERDICT_BIN" --remote-bin "$STREAM_LX_REMOTE_BIN" \
+        --out-dir "$STREAM_LX_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
         --stream-rec "${STREAM_HOST_PATH:-}" \
         -- --extract-partial stream --stream "${STREAM_HOST_PATH:-}" --capture-fps "$STREAM_CAPTURE_FPS" \
            --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \

@@ -10,16 +10,18 @@
 #   stream_lx_push_file USER PW HOST LOCAL REMOTE_DIR NAME
 #       -> `[8/8b-pre]`: put LOCAL (the cam2 A/V marker log, the #312 switch schedule) on the box as
 #          REMOTE_DIR/NAME and print that path (stdout, the ONE line the caller captures); progress on
-#          stderr. rc 1 + a named stderr line when LOCAL is missing (nothing contacted), when REMOTE_DIR
-#          cannot be made, or when the copy fails. The caller ENDS the run on rc != 0: the stream decode
+#          stderr. rc 1 + a named stderr line when HOST is not a Linux stream box, when LOCAL is missing,
+#          NAME is not a plain file name or REMOTE_DIR holds whitespace / a quote (all three before any
+#          contact), when REMOTE_DIR cannot be made, or when the copy fails. The caller ENDS the run on rc != 0: the stream decode
 #          reads these files, so a missing marker log would cost the run its A/V measurement.
 #   stream_lx_partial_pullback_note PARTIAL PIXELS
 #       -> the pull-back lines for the run log (the decode already pulled both back over scp).
 #
-# The transport is the stream-box lib's (plain ssh/scp with STREAM_BOX_SSH_OPTS: the address held the
-# Windows box's host keys until 22.10.2026, so UserKnownHostsFile=/dev/null). NAME must be a plain
-# file name and REMOTE_DIR a path without whitespace or quotes: both are E2E-generated
-# (`<dir>/av-markers-<RUN_ID>.csv`), and the remote shell parses the mkdir path once (single-quoted).
+# The transport is the stream-box lib's (stream_box_exec + stream_box_upload: plain ssh/scp with
+# STREAM_BOX_SSH_OPTS -- the address held the Windows box's host keys until 22.10.2026, so
+# UserKnownHostsFile=/dev/null); this lib never opens its own ssh. NAME and REMOTE_DIR are
+# E2E-generated (`<dir>/av-markers-<RUN_ID>.csv`); scp hands the destination to the remote shell, so
+# whitespace or a quote in either is refused instead of being split there.
 
 command -v stream_box_platform >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/stream-box.sh"
 command -v shell_single_quote >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/shell-quote.sh"
@@ -31,17 +33,26 @@ stream_lx_push_file() {
     echo "ERROR: [8/8b-pre] ${local_path} is missing on dev1 -- nothing to push to the stream box ${host} as ${dest} (issue 1462)" >&2
     return 1
   fi
+  if [ "$(stream_box_platform "$host")" != "linux" ]; then
+    echo "ERROR: [8/8b-pre] ${host} is not a Linux stream box -- a Windows stream box takes win_ssh_upload (issue 1462)" >&2
+    return 1
+  fi
   case "$name" in
     "" | */* | *[[:space:]\'\"]*)
       echo "ERROR: [8/8b-pre] '${name}' is not a plain file name for the stream box ${host} (issue 1462)" >&2
       return 1 ;;
   esac
-  if ! sshpass -p "$pw" ssh -n "${STREAM_BOX_SSH_OPTS[@]}" "${user}@${host}" "mkdir -p -- $(shell_single_quote "$dir")"; then
+  case "$dir" in
+    "" | *[[:space:]\'\"]*)
+      echo "ERROR: [8/8b-pre] '${dir}' is no usable remote dir for ${name} on the stream box ${host} (empty, whitespace or a quote; issue 1462)" >&2
+      return 1 ;;
+  esac
+  if ! stream_box_exec "$user" "$pw" "$host" "" "mkdir -p -- $(shell_single_quote "$dir")"; then
     echo "ERROR: [8/8b-pre] could not create ${dir} on the stream box ${host} for ${name} (issue 1462)" >&2
     return 1
   fi
   echo "      scp ${local_path} -> ${host}:${dest}" >&2
-  if ! sshpass -p "$pw" scp "${STREAM_BOX_SSH_OPTS[@]}" "$local_path" "${user}@${host}:${dest}" >&2; then
+  if ! stream_box_upload "$user" "$pw" "$host" "$local_path" "" "$dest" >&2; then
     echo "ERROR: [8/8b-pre] could not copy ${local_path} to the stream box ${host} as ${dest} (issue 1462)" >&2
     return 1
   fi
