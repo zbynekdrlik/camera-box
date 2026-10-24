@@ -129,6 +129,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # plain ssh on the Linux stream-snv, the unchanged PowerShell through win_ssh_run on a Windows box.
 # shellcheck source=scripts/lib/stream-box.sh
 . "$HERE/lib/stream-box.sh"
+# issue 1462: the [8/8b] file moves to/from the Linux stream box around its on-box stream decode.
+# shellcheck source=scripts/lib/stream-lx-verdict.sh
+. "$HERE/lib/stream-lx-verdict.sh"
 # #977/#978/#979: obs64/AHK Windows-session-visibility probe + pure message parser (issue 958) --
 # shared with the #979 dev1 watchdog, never a second detector for the same signal.
 # shellcheck source=scripts/lib/obs-session-visibility.sh
@@ -1140,6 +1143,13 @@ STRIH_LINUX_GATE_ARG=""
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
   STRIH_LINUX_GATE_ARG="1"
 fi
+# issue 1462: the same Linux grading for the stream box once its obs-fleet class is linux-genlock
+# (stream-snv since 22.10.2026) -- `--linux stream`, so its Windows-only facets read SKIPPED instead
+# of UNKNOWN-refusing the whole E2E; a Windows stream box leaves the flag empty (byte-identical argv).
+STREAM_LINUX_GATE_ARG=""
+if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+  STREAM_LINUX_GATE_ARG="1"
+fi
 # issue 1357: the Windows OBS-box baseline (power plan, sleep, hibernate, USB selective suspend, WER)
 # of the obs-fleet `win-baseline` boxes (stream, resolume -- resolume SKIPPED while away), gathered
 # ONCE here and handed to the gate below as REPORT-ONLY rows that never change its verdict. The
@@ -1163,6 +1173,7 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     --win-state "stream=$VERSION_STREAM_STATE" \
     --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
     ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
+    ${STREAM_LINUX_GATE_ARG:+--linux stream} \
     ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 else
 "$HERE/version-integrity-gate.sh" \
@@ -1174,6 +1185,7 @@ else
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
   ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"} \
   ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
+  ${STREAM_LINUX_GATE_ARG:+--linux stream} \
   ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 fi
 
@@ -5446,10 +5458,16 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # stream` then decodes it ON-BOX (alongside the burns) and carries the result through the small
   # partial JSON to the dev1 merge — never the recording itself.
   AV_MARKER_WIN="${AV_MARKER_WIN:-$OUT_DIR_WIN\\av-markers-${RUN_ID}.csv}"
+  # issue 1462: the Linux stream box's decode reads its pushed inputs from this dir (the box user's
+  # home), and on that box the pushes always run for real -- like its decode, never a plan.
+  STREAM_LX_REMOTE_OUT_DIR="${STREAM_LX_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}"
+  STREAM_LX_REMOTE_BIN="${STREAM_LX_REMOTE_BIN:-/home/newlevel/recording-verdict}"
   _av_marker_args=""
   if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$MARKER_CSV" ]; then
     echo "    --- [8/8b-pre] PUSH the cam2 A/V-sync marker log to the stream box ---"
-    if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      AV_MARKER_WIN="$(stream_lx_push_file "$STREAM_USER" "$STREAM_PW" "$STREAM" "$MARKER_CSV" "$STREAM_LX_REMOTE_OUT_DIR" "av-markers-${RUN_ID}.csv")" || exit 1
+    elif [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
       # #703 (live-CI-run finding, 2026-07-11): this push used to be PRINT-ONLY (the plan text
       # below) — never a problem before, because [8/8] never actually EXECUTED anything, so the
       # stream extract's --av-marker-log arg was never really READ. The FIRST real EXECUTE-mode
@@ -5473,7 +5491,9 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   _switch_schedule_args=""
   if [ "${ALL_CAMBOX:-0}" = "1" ] && [ -f "$SWITCH_SCHEDULE_JSON" ]; then
     echo "    --- [8/8b-pre] PUSH the #312 switch schedule to the stream box (#707 event-forensics) ---"
-    if [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      SWITCH_SCHEDULE_WIN="$(stream_lx_push_file "$STREAM_USER" "$STREAM_PW" "$STREAM" "$SWITCH_SCHEDULE_JSON" "$STREAM_LX_REMOTE_OUT_DIR" "switch-schedule-${RUN_ID}.json")" || exit 1
+    elif [ "$E2E_EXECUTE_VERDICT" = "1" ]; then
       echo "      win_ssh_upload $SWITCH_SCHEDULE_JSON -> stream:$SWITCH_SCHEDULE_WIN"
       win_ssh_upload "$STREAM_USER" "$STREAM_PW" "$STREAM" "$SWITCH_SCHEDULE_JSON" "$SWITCH_SCHEDULE_WIN"
     else
@@ -5482,13 +5502,32 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     _switch_schedule_args="--switch-schedule $SWITCH_SCHEDULE_WIN"
   fi
 
-  echo "    --- [8/8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
+  echo "    --- [8/8b] extract the STREAM partial ON the stream box ($(stream_access_label "$STREAM")), in place ---"
   # The stream recording carries all three burns; --extract-partial stream decodes it IN PLACE on
   # the stream box. It is passed ONLY its own --stream recording — NEVER the strih recording (the
   # strih recording is decoded on the strih box above), so no box-to-box copy is ever needed.
   # #703: same function-wrapped backgrounding as run_strih_extract above — launched right after
   # strih (so BOTH decodes run concurrently in EXECUTE mode), foreground/unchanged otherwise.
   run_stream_extract() {
+    # issue 1462: the Linux stream box (stream-snv) decodes over plain ssh/scp through
+    # recording-verdict-on-stream-snv.sh, always for real (the strih-snv shape); its partial carries the
+    # QR + audio-marker A/V term exactly as on Windows, and a failure here fails the stream leg.
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      STREAM_LX_BOX="$STREAM" STREAM_USER="$STREAM_USER" STREAM_PW="$STREAM_PW" "$HERE/recording-verdict-on-stream-snv.sh" \
+        --verdict-bin "$VERDICT_BIN" --remote-bin "$STREAM_LX_REMOTE_BIN" \
+        --out-dir "$STREAM_LX_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
+        --stream-rec "${STREAM_HOST_PATH:-}" \
+        -- --extract-partial stream --stream "${STREAM_HOST_PATH:-}" --capture-fps "$STREAM_CAPTURE_FPS" \
+           --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
+           --cam2-run-id "$RUN_ID" \
+           --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+           --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
+           $_av_marker_args \
+           $_switch_schedule_args \
+           ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"} \
+           $CG --out "$STREAM_LX_REMOTE_OUT_DIR/stream-partial-${RUN_ID}.json"
+      return
+    fi
     "$HERE/recording-verdict-on-stream.sh" \
       --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --stream-rec "$STREAM_REC_WIN" \
       "${EXEC_STREAM_ARGS[@]}" \
@@ -5511,9 +5550,13 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   else
     run_stream_extract
   fi
+  if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+    stream_lx_partial_pullback_note "$STREAM_PARTIAL" "$STREAM_PIXELS"
+  else
   echo "    pull back to dev1: $STREAM_PARTIAL  AND the #186 pixel-proof dir $STREAM_PIXELS"
   echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"
   echo "       win-stream-snv FileDownload $STREAM_PIXELS_WIN -> $STREAM_PIXELS  [absent on a clean run])"
+  fi
 
   # Issue 1302: CG_CHAIN=1 only — decode the cg OBS recording IN PLACE on RESOLUME-SNV, in the
   # background, concurrently with the strih/stream (and imag) extracts; the recording is never

@@ -14,6 +14,7 @@
 #   stream_box_platform HOST      -> linux | windows
 #   stream_box_exec ...           -> run the platform's command text on the box
 #   stream_box_download ...       -> scp one file from the box
+#   stream_box_upload ...         -> scp one file to the box
 #   stream_box_visibility_gate_linux ...  -> the [0/8] operator-visibility gate on a Linux stream box
 #   stream_mbc_vban_expect HOST   -> `<stream> <port> <input>` the Linux box's mbc VBAN input carries
 #
@@ -86,6 +87,22 @@ stream_box_download() {
     return 127
   fi
   win_ssh_download "$user" "$pw" "$host" "$win_remote" "$local_path"
+}
+
+# stream_box_upload USER PW HOST LOCAL WIN_REMOTE LINUX_REMOTE -> copy one file from LOCAL to HOST
+# (issue 1462, the [8/8b-pre] pushes): LINUX_REMOTE over plain scp on Linux, WIN_REMOTE through
+# win_ssh_upload on Windows. rc = scp's. The remote directory must exist (the caller makes it).
+stream_box_upload() {
+  local user="${1-}" pw="${2-}" host="${3-}" local_path="${4-}" win_remote="${5-}" linux_remote="${6-}"
+  if [ "$(stream_box_platform "$host")" = "linux" ]; then
+    sshpass -p "$pw" scp "${STREAM_BOX_SSH_OPTS[@]}" "$local_path" "${user}@${host}:${linux_remote}"
+    return
+  fi
+  if ! declare -F win_ssh_upload >/dev/null; then
+    echo "stream-box: ${host} is a Windows stream box but win_ssh_upload is not defined -- source scripts/lib/win-ssh-exec.sh first (issue 1462)" >&2
+    return 127
+  fi
+  win_ssh_upload "$user" "$pw" "$host" "$local_path" "$win_remote"
 }
 
 # stream_box_visibility_gate_linux HOST USER PW TIMEOUT HERE -> the recording-e2e [0/8] operator-

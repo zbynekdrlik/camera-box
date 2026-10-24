@@ -228,11 +228,19 @@ missing_slot_pixels_box_extract() {
   return 0
 }
 
+# missing_slot_pixels_stream_os HOST -> linux | windows: the stream box's platform by its obs-fleet
+# class (scripts/lib/stream-box.sh, lazy-sourced: this lib is also sourced alone by its tests).
+missing_slot_pixels_stream_os() {
+  command -v stream_box_platform >/dev/null 2>&1 || . "$(dirname "${BASH_SOURCE[0]}")/stream-box.sh"
+  stream_box_platform "${1:-}"
+}
+
 # The whole step. $1 = merged verdict JSON $2 = OUTDIR $3 = RUN_ID $4 = strih host $5 = strih os
 # (strih_platform) $6 = strih recording path on the box $7 = stream host $8 = stream recording path on
 # the box $9 = the Windows boxes' output dir (OUT_DIR_WIN). Credentials: STRIH_USER/STRIH_PW,
 # STREAM_USER/STREAM_PW (default newlevel). The strih-snv remote dir is under
-# STRIH_LX_REMOTE_OUT_DIR (default /home/newlevel/verdict-out). Writes
+# STRIH_LX_REMOTE_OUT_DIR, a Linux stream box's under STREAM_LX_REMOTE_OUT_DIR (both default
+# /home/newlevel/verdict-out; issue 1462). Writes
 # $OUTDIR/missing-slot-pixels-<RUN_ID>.json and merges it into the verdict JSON as
 # `missing_slot_pixels` (report-only — overall_pass untouched). ALWAYS returns 0.
 missing_slot_pixels_run() {
@@ -262,9 +270,13 @@ missing_slot_pixels_run() {
     if [ "$box" = strih ]; then
       host="$strih_host" os="$strih_os" user="${STRIH_USER:-newlevel}" pw="${STRIH_PW:-newlevel}" rec="$strih_rec"
     else
-      host="$stream_host" os=windows user="${STREAM_USER:-newlevel}" pw="${STREAM_PW:-newlevel}" rec="$stream_rec"
+      # issue 1462: the stream box takes the transport of its obs-fleet class (the Linux stream-snv
+      # since 22.10.2026; a Windows-class or unknown host keeps the PowerShell export).
+      host="$stream_host" os="$(missing_slot_pixels_stream_os "$stream_host")" user="${STREAM_USER:-newlevel}" pw="${STREAM_PW:-newlevel}" rec="$stream_rec"
     fi
-    if [ "$os" = linux ]; then
+    if [ "$os" = linux ] && [ "$box" = stream ]; then
+      rdir="${STREAM_LX_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}/missing-slot-pixels-$box-$run_id"
+    elif [ "$os" = linux ]; then
       rdir="${STRIH_LX_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}/missing-slot-pixels-$box-$run_id"
     else
       rdir="$win_out\\missing-slot-pixels-$box-$run_id"

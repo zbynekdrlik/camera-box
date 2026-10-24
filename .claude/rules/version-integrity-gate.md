@@ -426,6 +426,29 @@ own `main()` loop or are baked into `drift-guard.sh`'s `compare_observed()` — 
 additive, backward-compatible extension of the shared engine, not just a wrapper `if` in the
 caller.**
 
+## issue 1462 — `--linux NAME`: the Linux grading for ANY `--win-state` box (the Linux stream box)
+
+`--strih-linux` applied only to the box literally named `strih`, so the Linux stream box stream-snv
+(22.10.2026) read its Windows-only facets as UNKNOWN and the whole E2E refused (exit 11: `stream`,
+`stream:obs_installs`, `stream:port4455_identity`, `stream:obs_process_count`).
+
+- `--linux NAME` (repeatable) Linux-grades the `--win-state` box NAME; `--strih-linux` is now just
+  `--linux strih`. main() keeps a `linux_boxes` list; a box is Linux-graded iff its name is in it, and
+  `strih_linux` (the flag the parity row hands `genlock_parity_consumed_paths "$la" "$strih_linux"`,
+  pinned by tests/drift_guard.rs) is set iff `strih` is in it. A Linux `stream` takes the default
+  consumed-path set there, which equals the strih-variant set (same Linux build).
+- `--linux` with no name, or a name that no `--win-state` box carries (a typo would grade nothing),
+  is a usage error (exit 1) before any row is printed.
+- The SKIPPED rows name the box: `<name> is a Linux OBS box -- …` (OBS-identity lib) and drift-guard's
+  `skipped on a Linux strih/stream box -- issues 1351/1462 --linux` (the old `… on a Linux strih`
+  substring the 1351/1397 Rust tests read is kept as a prefix).
+- The caller decides by fleet CLASS (the gate is pure, its labels are role tokens, not fleet names):
+  recording-e2e.sh passes `${STREAM_LINUX_GATE_ARG:+--linux stream}` from `stream_box_platform`.
+- Live proof: the 24.10.2026 `:8899` states of strih-snv + stream-snv (both cae5baf402) PASS under
+  `--strih-linux --linux stream` and refuse 11 without the stream flag. Tests:
+  `tests/python/test_stream_linux_e2e_1462.py` (the real gate + drift-guard over live-shaped states,
+  the vendor-pin seams keep it offline; a genlock-sha mismatch still refuses 20).
+
 ## GOTCHA — a test's bundle manifest and a win-state sharing one `write_state` name silently clobber each other → `obs_dll_sha256 UNKNOWN` (exit 11)
 
 In `tests/version_integrity_gate.rs`, BOTH `write_state(name, json)` AND `write_manifest(name, …)`

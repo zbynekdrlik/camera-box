@@ -32,6 +32,12 @@
 #
 # Env: STRIH_LX_BOX / STRIH_USER / STRIH_PW — ssh target (default 10.77.9.202 / newlevel /
 #      newlevel, the SAME creds recording-e2e.sh's own $STRIH_USER/$STRIH_PW use for strih today).
+#
+# issue 1462: this is the ONE on-box decode for every Linux OBS box reached over plain ssh. The Linux
+# stream box stream-snv uses it through scripts/recording-verdict-on-stream-snv.sh, which sets
+# STRIH_LX_BOX / STRIH_USER / STRIH_PW to the stream box, ONBOX_LABEL=<its fleet name> (the log tag,
+# default strih-snv) and hands its recording as `--rec <path>` (an alias of --strih-rec). Nothing
+# else differs: the same sha256 upload gate, idle-priority launch and pull-back serve both boxes.
 set -euo pipefail
 
 # onstrihlx_upload_decision <force> <present> <local_sha> <remote_sha> — issue 1351 (review
@@ -105,6 +111,7 @@ main() {
   local OUT_DIR="/home/newlevel/verdict-out"           # box-local (strih-snv) out dir
   local LOCAL_OUT_DIR="."                              # dev1-side dir to pull results into
   local STRIH_REC=""
+  local LABEL="${ONBOX_LABEL:-strih-snv}"                # issue 1462: the box name in the log lines
   # Everything after `--` is passed verbatim to recording-verdict on strih-snv.
   local -a PASS_ARGS=()
   while [ "$#" -gt 0 ]; do
@@ -113,11 +120,12 @@ main() {
       # dev1 (durable state, #281), skip re-decode entirely so a re-dispatched worker is idempotent.
       --skip-if-exists)
         if [ -f "$2" ]; then
-          echo "SKIP: strih-snv partial already exists at $2 — skipping re-decode (#281)"
+          echo "SKIP: ${LABEL} partial already exists at $2 — skipping re-decode (#281)"
           return 0
         fi
         shift 2 ;;
       --strih-rec)     STRIH_REC="$2"; shift 2 ;;
+      --rec)           STRIH_REC="$2"; shift 2 ;;   # issue 1462: the box-neutral spelling
       --verdict-bin)   VERDICT_BIN="$2"; shift 2 ;;
       --remote-bin)    REMOTE_BIN="$2"; shift 2 ;;
       --out-dir)       OUT_DIR="$2"; shift 2 ;;
@@ -128,12 +136,12 @@ main() {
   done
 
   if [ -z "$STRIH_REC" ]; then
-    echo "ERROR: --strih-rec <recording path as it lives on strih-snv> is required" >&2
+    echo "ERROR: --strih-rec / --rec <recording path as it lives on ${LABEL}> is required" >&2
     exit 2
   fi
 
   command -v sshpass >/dev/null 2>&1 || {
-    echo "ERROR: sshpass not found — needed to ssh/scp into strih-snv (issue 1351)." >&2
+    echo "ERROR: sshpass not found — needed to ssh/scp into ${LABEL} (issue 1351)." >&2
     exit 1
   }
 
@@ -156,11 +164,11 @@ main() {
     local decision
     decision="$(onstrihlx_upload_decision 0 "$present" "$local_sha" "$remote_sha")"
     if [ "$decision" = "upload" ]; then
-      echo "[recording-verdict-on-strih-snv] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN} (present=$present local_sha=${local_sha:0:12} remote_sha=${remote_sha:0:12})"
+      echo "[recording-verdict-on-${LABEL}] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN} (present=$present local_sha=${local_sha:0:12} remote_sha=${remote_sha:0:12})"
       sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "$VERDICT_BIN" "${TARGET}:${REMOTE_BIN}"
       sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "chmod +x '$REMOTE_BIN'"
     else
-      echo "[recording-verdict-on-strih-snv] $REMOTE_BIN already present+executable AND identical sha256 on strih-snv — skipping upload (issue 1118 version gate)"
+      echo "[recording-verdict-on-${LABEL}] $REMOTE_BIN already present+executable AND identical sha256 on ${LABEL} — skipping upload (issue 1118 version gate)"
     fi
   fi
 
@@ -174,7 +182,7 @@ main() {
   local ONSTRIHLX_CMD LOWPRIO_SNIPPET
   ONSTRIHLX_CMD="$(build_onstrihlx_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
   LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi;'
-  echo "[recording-verdict-on-strih-snv] running on strih-snv (${STRIH_LX_BOX}) at idle priority (E-cores): $ONSTRIHLX_CMD"
+  echo "[recording-verdict-on-${LABEL}] running on ${LABEL} (${STRIH_LX_BOX}) at idle priority (E-cores): $ONSTRIHLX_CMD"
   # The brace group keeps the decode gated on `mkdir -p` (the && short-circuits the WHOLE group, not
   # just the LP assignment the snippet begins with) — same failure semantics as before this change.
   sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD; }"
@@ -204,15 +212,15 @@ main() {
   local partial_base local_partial
   partial_base="$(basename "$OUT_PARTIAL")"
   local_partial="$LOCAL_OUT_DIR/$partial_base"
-  echo "[recording-verdict-on-strih-snv] pulling back $OUT_PARTIAL -> $local_partial"
+  echo "[recording-verdict-on-${LABEL}] pulling back $OUT_PARTIAL -> $local_partial"
   sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "${TARGET}:${OUT_PARTIAL}" "$local_partial"
   if sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "[ -d '$PIXELS_DIR' ]" 2>/dev/null; then
-    echo "[recording-verdict-on-strih-snv] pulling back #186 pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
+    echo "[recording-verdict-on-${LABEL}] pulling back #186 pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
     sshpass -p "$STRIH_PW" scp -r "${SSH_OPTS[@]}" "${TARGET}:${PIXELS_DIR}" "$LOCAL_OUT_DIR/"
   else
-    echo "[recording-verdict-on-strih-snv] no pixel-proof dir on strih-snv — clean run, nothing flagged"
+    echo "[recording-verdict-on-${LABEL}] no pixel-proof dir on ${LABEL} — clean run, nothing flagged"
   fi
-  echo "[recording-verdict-on-strih-snv] done: partial at $local_partial"
+  echo "[recording-verdict-on-${LABEL}] done: partial at $local_partial"
 }
 
 # Run main only when EXECUTED, not when SOURCED (so a test can source + call

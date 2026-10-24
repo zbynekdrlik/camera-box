@@ -398,6 +398,11 @@ Options:
                     (obs_dll_sha256 / distroav_dll_sha256 / genlock_capability / genlock_build_sha
                     parity), so strih's actual genlock build stays verified. WITHOUT this flag
                     strih is graded exactly as before (Windows-shaped, byte-identical).
+  --linux NAME   issue 1462 -- the same Linux grading for the --win-state box NAME (repeatable): the
+                    caller resolved NAME to an obs-fleet linux-genlock box (the Linux stream box
+                    stream-snv: --linux stream). Every Windows-only facet of NAME is a loud SKIPPED
+                    row naming NAME, the platform-agnostic ones are graded. --strih-linux is the
+                    alias of --linux strih. A NAME that is no --win-state box is a usage error (1).
   --win-baseline N=FILE  issue 1357 -- REPORT-ONLY rows: box N's raw Windows baseline gather
                     (scripts/win-baseline-check.sh --out-dir), graded per item, NEVER counted.
 
@@ -432,7 +437,12 @@ main() {
   # Windows-only facets (the #826 OBS-identity set + distroav_dll_paths + ndi_runtime) as a loud
   # SKIPPED (counted ok), keep the platform-agnostic byte/capability/parity facets. Mirrors the
   # --imag-acked-offline shape above. WITHOUT this flag strih is graded byte-identical to before.
+  # issue 1462: --linux NAME (repeatable) is the same per-box grading for ANY --win-state box the
+  # caller resolved to an obs-fleet linux-genlock box (the Linux stream box stream-snv since
+  # 22.10.2026); --strih-linux is its alias for `--linux strih`. strih_linux stays the strih flag the
+  # parity row hands genlock_parity_consumed_paths.
   local strih_linux=0
+  local -a linux_boxes=()
   # #1296 -- REPORT-ONLY boxes (NAME=FILE, same state-JSON shape as --win-state): a box whose
   # observed stack is PRINTED as an informational row but NEVER enters the bad/unknown/ok roll-up,
   # so it can never block the run. RESOLUME-SNV uses this: it is a TRAVELING CG box, NOT a measured
@@ -454,7 +464,13 @@ main() {
       --imag-manifest)      shift; imag_manifest="${1:-}" ;;
       --imag-bytes)         shift; imag_bytes="${1:-}" ;;
       --imag-acked-offline) shift; imag_acked_offline="${1:-}" ;;
-      --strih-linux)        strih_linux=1 ;;
+      --strih-linux)        linux_boxes+=("strih") ;;
+      --linux)
+        shift
+        if [ -z "${1:-}" ]; then
+          echo "--linux needs the NAME of a --win-state box (issue 1462)" >&2; usage >&2; exit 1
+        fi
+        linux_boxes+=("$1") ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)            echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -472,6 +488,18 @@ main() {
     exit 1
   fi
 
+  # issue 1462: a --linux NAME that names no --win-state box would silently grade nothing (a typo) --
+  # refuse it as a usage error, before any row is printed.
+  local lb we found
+  for lb in "${linux_boxes[@]}"; do
+    found=0
+    for we in "${win_state[@]}"; do [ "${we%%=*}" = "$lb" ] && found=1; done
+    if [ "$found" -eq 0 ]; then
+      echo "--linux ${lb}: no --win-state box is named ${lb} (issue 1462)" >&2; exit 1
+    fi
+    [ "$lb" = "strih" ] && strih_linux=1
+  done
+
   echo "== version-integrity-gate (#123): pre-rig-test — live strih+stream stack MUST match the pinned set =="
   echo "   pins from ${readme}; engine = drift-guard.sh --compare; a drifted/unverified box REFUSES the run"
 
@@ -479,12 +507,12 @@ main() {
   local -a unknown_boxes=()
   for entry in "${win_state[@]}"; do
     name="${entry%%=*}"; file="${entry#*=}"
-    # issue 1351 follow-up: --strih-linux only ever applies to the box literally named "strih" --
-    # a future box also passed the flag by mistake stays Windows-graded (no other box is affected).
+    # issue 1351 follow-up / issue 1462: a box is Linux-graded only when the caller named it with
+    # --linux (or --strih-linux for strih); every other box stays Windows-graded, byte-identical.
     local is_strih_linux=0
-    if [ "$strih_linux" = 1 ] && [ "$name" = "strih" ]; then
-      is_strih_linux=1
-    fi
+    for lb in "${linux_boxes[@]}"; do
+      [ "$lb" = "$name" ] && is_strih_linux=1
+    done
     if [ -z "$file" ] || [ ! -s "$file" ]; then
       printf '  %-14s UNKNOWN  (no state file %s — win-* MCP fetch missing)\n' "$name" "${file:-<none>}"
       unknown=$((unknown + 1)); unknown_boxes+=("$name"); continue
