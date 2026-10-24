@@ -443,7 +443,7 @@ jobs:
           RUN_ID="${RECORDING_E2E_RUN_ID:-}"
           POINTS_MD="$(mktemp)"
           python3 scripts/e2e_report_youtube.py --verdict "/tmp/recording-e2e-${RUN_ID}/verdict-${RUN_ID}.json" \
-            --run-url "$RUN_URL" --out "$POINTS_MD"
+            --run-url "$RUN_URL" --stage-dir "/tmp/recording-e2e-${RUN_ID}/youtube-leg" --out "$POINTS_MD"
           cat "$POINTS_MD" >> "$GITHUB_STEP_SUMMARY"
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$POINTS_MD"
           rm -f "$POINTS_MD"

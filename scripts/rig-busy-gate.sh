@@ -276,6 +276,18 @@ rig_busy_idle_hold() {
   return 0
 }
 
+# issue 1404: a full-path E2E that was cancelled mid-broadcast can leave the stream OBS streaming to
+# YouTube (the job is killed seconds after its SIGINT). That stream is OURS, and the busy loop below
+# would refuse every later run on it. The YouTube stage's dev1 marker names it: `recover` stops the
+# stream only when the stream's own age matches our publish (never a foreign broadcast), and leaves
+# the restreamer session to the next run's stage start (which has the ssh password). No marker = no-op.
+YOUTUBE_LEG_MARKER="${YOUTUBE_LEG_MARKER:-$HOME/.camera-box/youtube-leg-live.json}"
+if [ -f "$YOUTUBE_LEG_MARKER" ]; then
+  timeout 120 python3 "$HERE/youtube_leg_e2e.py" --dir /nonexistent --host "$STREAM_HOST" \
+    --marker "$YOUTUBE_LEG_MARKER" recover \
+    || echo "[rig-busy-gate] WARNING: the YouTube-stage leftover recovery failed (issue 1404) -- continuing"
+fi
+
 LAST_OUTPUT=""
 LEASE_HELD=1   # rig_lease_acquire_or_wait above returned with the lease held
 for ((i = 1; i <= MAX_ITERATIONS; i++)); do

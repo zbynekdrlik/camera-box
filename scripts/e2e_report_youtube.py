@@ -13,11 +13,14 @@ faultless rig. Used by scripts/e2e_discord_report.py (kept apart: that file is p
   * `points_markdown(verdict, run_url)` -- the per-point table for the GitHub job summary and the PR
     comment: cam -> strih -> stream recording -> YouTube, video / audio / A/V each
 
-CLI: e2e_report_youtube.py --verdict <verdict.json> [--run-url URL] --out <points.md>
-(a missing or unreadable verdict JSON still writes a page that says so; exit 0 either way).
+CLI: e2e_report_youtube.py --verdict <verdict.json> [--run-url URL] [--stage-dir DIR] --out <points.md>
+(a missing or unreadable verdict JSON still writes a page that says so; a stage dir holding a
+state.json but a verdict with no block = the stage started and never finished: shown RED, never
+"not measured"; exit 0 either way).
 """
 import argparse
 import json
+import os
 import sys
 
 _KEY = "youtube_leg"
@@ -136,6 +139,12 @@ def _node_loss(verdict, node):
 def _yt_cells(b):
     if not b:
         return [(None, "nemeraný v tomto behu")] * 3
+    if b.get("pass") is not True:  # a red block never shows a green cell
+        return [(None if ok is True else ok, txt) for ok, txt in _yt_cells_raw(b)]
+    return _yt_cells_raw(b)
+
+
+def _yt_cells_raw(b):
     ws = b.get("windows") or []
     if not ws:
         return [(False, _first_reason(b))] * 3
@@ -167,11 +176,19 @@ def _both(a, b):
     return True if a is True and b is True else None
 
 
-def points_markdown(verdict, run_url=None):
-    """The per-point table (Markdown) for the job summary and the PR comment."""
+STAGE_UNFINISHED = ("the YouTube stage started, but no verdict was folded: the job ended or crashed "
+                    "before the measurement")
+
+
+def points_markdown(verdict, run_url=None, stage_attempted=False):
+    """The per-point table (Markdown) for the job summary and the PR comment. `stage_attempted`:
+    the stage's state exists, so a verdict without a block is an unfinished stage (RED)."""
     if not isinstance(verdict, dict):
         return ("## Full-path E2E — overenie po bodoch\n\n❌ Verdikt JSON neexistuje: beh skončil pred "
                 "výsledkom (pozri CI log). **Nič nie je overené, ani stream nahrávka, ani YouTube.**\n")
+    if _block(verdict) is None and stage_attempted:
+        verdict = dict(verdict, **{_KEY: {"verdict": "UNKNOWN", "pass": False, "gates_overall_pass": True,
+                                          "reasons": [STAGE_UNFINISHED]}})
     b = _block(verdict)
     yt_ok = passed(verdict)
     lines = ["## Full-path E2E — overenie po bodoch", ""]
@@ -205,6 +222,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="issue 1404: the per-point E2E table (Markdown)")
     ap.add_argument("--verdict", required=True)
     ap.add_argument("--run-url")
+    ap.add_argument("--stage-dir", help="the YouTube stage's state dir (<run dir>/youtube-leg)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     try:
@@ -213,7 +231,8 @@ def main(argv=None):
     except (OSError, ValueError):
         verdict = None
     with open(a.out, "w") as f:
-        f.write(points_markdown(verdict, a.run_url))
+        attempted = bool(a.stage_dir) and os.path.isfile(os.path.join(a.stage_dir, "state.json"))
+        f.write(points_markdown(verdict, a.run_url, attempted))
     return 0
 
 

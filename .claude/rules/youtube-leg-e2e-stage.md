@@ -69,12 +69,36 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   failed "to protect the channel"), the recording's start (`GetRecordStatus.outputDuration`, read on
   the first poll after StartRecord), and a dead harness (it stops everything itself).
 - `youtube_leg_stop` right after the stream StopRecord in `[7/8]` (StopStream, then the session stop).
-- `cleanup()`: `youtube_leg_cleanup_stop` right after the StopRecord-first block, in the background
-  (never delays the device restores; idempotent). restreamer's 45-min idle reaper is the backstop.
+- `cleanup()`: `youtube_leg_cleanup_stop` right after the StopRecord-first block: the StopStream half
+  FIRST, in the foreground, `timeout 10` (`stop --stream-only`; a cancelled job is SIGKILLed seconds
+  after its SIGINT), then the session stop in the background (never delays the device restores;
+  idempotent). restreamer's 45-min idle reaper is the session backstop.
+- **A cancelled run's leftover (review round 1).** A live stage writes the dev1 marker
+  `~/.camera-box/youtube-leg-live.json` (`YOUTUBE_LEG_MARKER`, `--marker`: session id, host, stage dir,
+  publish time) right before StartStream; a stop that finished both halves clears it (only when it
+  still names that session). `youtube_leg_e2e.py recover` (always exit 0, prints what it did) stops the
+  stream ONLY when `GetStreamStatus.outputDuration` puts the stream's own start within 120 s of our
+  publish (`youtube_leg_obs.py stream-status`; any other live stream is never touched), and the session
+  with `--with-session` (needs the ssh password). `scripts/rig-busy-gate.sh` runs it (stream half
+  only) before its busy loop when the marker exists, because a stream we left would make that loop
+  refuse every later run; `start` runs it with the session half, then a 409 busy whose holder is the
+  recovered session is waited out (`BUSY_WAIT_S` 300 s, `--busy-poll`) while restreamer tears it down.
 - `youtube_leg_gate` in BOTH tails, right after the program-audio gate line (before the Discord report
   and `exit "$GATE"`): pulls the stream recording to dev1 (`stream_box_download` in `timeout bash -c`),
   `measure` (VOD wait, windows, the verdict tool with `--probe-bin $PROBE_BIN_DIR/recording-verdict`,
-  the fold), then deletes the two video copies (tick maps + JSON stay).
+  the fold), then deletes the two video copies (tick maps + JSON stay); a failed download removes the
+  partial file first.
+- Every outside step runs through `youtube_leg_proc.run_bounded` (a timeout kills the whole process
+  group: yt-dlp, ffmpeg, the decode pool), and `install_cleanup()` kills them on SIGTERM / SIGINT.
+- **Deadlines:** wait-ready 420 s, wait-done `YOUTUBE_LEG_DONE_DEADLINE_S` 900 s (it starts after the
+  merge, ~10 min after the stop), the tool `YOUTUBE_LEG_TOOL_TIMEOUT_S` 1500 s. The painter's
+  pre-record slack (`PAINTER_PRE_RECORD_SLACK_SECS`) grew 1200 -> 1800 for the ready wait. A run that
+  still hits the job timeout leaves no block: the per-point page reads the stage dir (`--stage-dir`)
+  and shows that as RED ("no verdict was folded"), never as "not measured".
+- **Where the measurement runs:** dev1, as the main's design and the dispatch decided (never the
+  stream box). It pulls the stream recording + the VOD (~1-2 GB together) and runs the 4-worker
+  OpenCV decode there; both videos are deleted after the verdict. Moving it to a box that is not dev1
+  is a main-session decision (the owner's no-rig-data-on-dev1 rule).
 - The 703 byte window (merge -> `exit "$GATE"`): 12373 of 13000 bytes after this stage. The next step
   added there must widen it.
 
@@ -82,8 +106,9 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
 
 The switch schedule's `[{cambox, start_ns, end_ns}]`, each segment trimmed 3 s at the head (the cut
 + settle) and 2 s at the tail (the tool wants a window to end >= 1 s before the StopStream), named
-`wNN-<CAM>`; a segment under 10 s after the trim is left out and named in the reasons. No schedule
-(no sweep): one window from record start + 5 s to StopStream - 3 s. `--publish` = the StartStream time
+`wNN-<CAM>`; a segment under 10 s after the trim is left out and named in the reasons, and turns a
+PASS into UNKNOWN (part of the recording was never judged on YouTube). No schedule (no sweep): one
+window from record start + 5 s to the recording's stop - 3 s (`stop --record-stopped` notes it). `--publish` = the StartStream time
 (the opening publish is reported, not judged), `--unpublish` = the StopStream time.
 
 ## The block + the report
@@ -92,7 +117,10 @@ The switch schedule's `[{cambox, start_ns, end_ns}]`, each segment trimmed 3 s a
   true`, `reasons`, ids, publish / unpublish / record start, per-window digest, the tool's criteria
   status, the stage events. The merge's `overall_pass` is left alone (the program-audio block pattern);
   the E2E folds the stage into `$GATE`, and `_run_passed` reads the block. The block is also written to
-  `$OUTDIR/youtube-leg/youtube-leg-block.json` (uploaded) even without a verdict JSON.
+  `$OUTDIR/youtube-leg/youtube-leg-block.json` (uploaded) even without a verdict JSON. A crash anywhere
+  in `measure` folds an UNKNOWN block naming it (never a missing block that reads like a pass).
+- A red block never shows a green cell in the per-point table (a PASS criterion inside an UNKNOWN
+  block reads ❔).
 - PASS summary line: `(celá cesta kamera → YouTube)` only when the block passed; else `(kamera → stream
   nahrávka; YouTube ...)`. A red block = a `❌` run with one `YouTube (koncový bod)` line.
 - The workflow step "Per-point E2E report" (`always()`, pull_request) writes

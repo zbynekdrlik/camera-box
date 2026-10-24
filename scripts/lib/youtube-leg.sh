@@ -70,7 +70,7 @@ youtube_leg_stop() {
   local d="$outdir/youtube-leg"
   [ -f "$d/state.json" ] || return 0
   if ! AV_GATE_SSH_PASSWORD="$pw" timeout 240 python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" \
-      --user "$user" stop --why "the stream StopRecord"; then
+      --user "$user" stop --record-stopped --why "the stream StopRecord"; then
     echo "!! issue 1404: the YouTube stage stop did not complete -- cleanup() retries it, restreamer's idle reaper is the backstop" >&2
   fi
   _youtube_leg_watch_end "$d"
@@ -81,7 +81,12 @@ youtube_leg_cleanup_stop() {
   local here="$1" stream="$2" user="$3" pw="$4" outdir="$5"
   local d="$outdir/youtube-leg"
   [ -f "$d/state.json" ] || return 0
-  # in the background: never delays the device restores; idempotent, a no-op once both halves stopped
+  # the StopStream half FIRST and in the foreground, bounded: a cancelled job is killed seconds after
+  # its SIGINT, and a stream left running blocks every later run's rig-busy gate
+  timeout 10 python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" --user "$user" \
+    stop --stream-only --why "cleanup()" >>"$d/cleanup-stop.log" 2>&1 \
+    || echo "!! issue 1404: cleanup() could not stop the stream OBS output in 10 s -- the background stop, the next run's recover (dev1 marker) and restreamer's idle reaper retry" >&2
+  # the session half in the background: never delays the device restores; idempotent
   (AV_GATE_SSH_PASSWORD="$pw" timeout 120 python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" \
     --user "$user" stop --why "cleanup()") >>"$d/cleanup-stop.log" 2>&1 &
   return 0
@@ -102,7 +107,7 @@ youtube_leg_gate() {
   if [ -n "$host_path" ] && [ -f "$d/state.json" ]; then
     timeout 900 bash -c '. "$1"; . "$2"; stream_box_download "$3" "$4" "$5" "$6" "$6" "$7"' _ \
       "$here/lib/win-ssh-exec.sh" "$here/lib/stream-box.sh" "$user" "$pw" "$stream" "$host_path" "$rec" \
-      || echo "!! issue 1404: the stream recording did not reach dev1 (${host_path}) -- the YouTube end point is UNKNOWN" >&2
+      || { rm -f "$rec"; echo "!! issue 1404: the stream recording did not reach dev1 (${host_path}) -- the YouTube end point is UNKNOWN" >&2; }
   fi
   AV_GATE_SSH_PASSWORD="$pw" python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" --user "$user" \
     measure --verdict-json "$report" --recording "$rec" --markers "$markers" --schedule "$schedule" \

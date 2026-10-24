@@ -605,7 +605,9 @@ CAMERA_BOX_DEADMAN_FIRST_FIRE_MIN=$(( (DURATION + 59) / 60 + CAMERA_BOX_DEADMAN_
 # lengthens a normal run's tail -- only a genuinely slow/degraded pre-record phase consumes it.
 # (Comment deliberately avoids the bracketed phase labels + FROZEN_CAM_* identifiers other
 # tests string-anchor on -- the recording-e2e.sh static-anchor GOTCHA, project CLAUDE.md.)
-PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1200}"
+# issue 1404: the YouTube stage now waits for the live broadcast before the recording (up to its
+# ready deadline + the bound, ~9 min on a slow VPS boot), so the slack grows by that: 1200 -> 1800.
+PAINTER_PRE_RECORD_SLACK_SECS="${PAINTER_PRE_RECORD_SLACK_SECS:-1800}"
 QR_SIZE="${QR_SIZE:-700}"
 # Topology v2 (#459, EPIC #466, SUPERSEDES the #11 60fps-end-to-end framing below): the 60fps
 # low-latency IMAG role moved OFF strih onto the new imag-nb box (10.77.9.182, #458/#463); strih

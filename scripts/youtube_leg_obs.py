@@ -7,6 +7,7 @@ that to YouTube. This tool only starts / stops that output and reads when the re
 
   youtube_leg_obs.py --host H [--password P] stream-start   -> {"publish_utc": t}
   youtube_leg_obs.py --host H [--password P] stream-stop    -> {"unpublish_utc": t, "was_active": b}
+  youtube_leg_obs.py --host H [--password P] stream-status  -> {"active": b, "since_utc": t | null}
   youtube_leg_obs.py --host H [--password P] record-start   -> {"record_start_utc": t}
 
 exit 0 OK, 2 refused / failed / timed out (one JSON object on stdout either way, `reason` on a
@@ -65,6 +66,15 @@ def stream_stop(rpc, now=time.time, clock=time.monotonic, sleep=time.sleep):
     raise Refused(f"StopStream sent but the stream output is still active after {STOP_DEADLINE_S:.0f} s")
 
 
+def stream_status(rpc, now=time.time):
+    """Read-only: is the stream output active and since when (now - outputDuration)."""
+    st = rpc("GetStreamStatus") or {}
+    active = bool(st.get("outputActive", False))
+    dur = st.get("outputDuration")
+    since = now() - dur / 1000.0 if active and isinstance(dur, (int, float)) and dur >= 0 else None
+    return {"active": active, "since_utc": since}
+
+
 def record_start(rpc, now=time.time):
     st = rpc("GetRecordStatus") or {}
     if not st.get("outputActive", False):
@@ -75,7 +85,8 @@ def record_start(rpc, now=time.time):
     return {"record_start_utc": now() - dur / 1000.0}
 
 
-ACTIONS = {"stream-start": stream_start, "stream-stop": stream_stop, "record-start": record_start}
+ACTIONS = {"stream-start": stream_start, "stream-stop": stream_stop, "stream-status": stream_status,
+           "record-start": record_start}
 
 
 def main(argv=None):

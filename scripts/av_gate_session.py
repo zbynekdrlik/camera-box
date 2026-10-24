@@ -43,11 +43,17 @@ SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/nul
 REQUEST_TIMEOUT_S = 60       # one request, ssh included
 CURL_MAX_TIME_S = 30
 MAX_POLL_ERRORS = 3          # consecutive failed status reads before a wait gives up
+STARTING_UP_RETRY_S = 60.0   # restreamer answers 503 starting_up until its boot reconcile ran
 HTTP_MARK, NO_TOKEN_MARK, CURL_RC_MARK = "AVGATE-HTTP ", "AVGATE-NO-TOKEN", "AVGATE-CURL-RC "
 
 
 class Unknown(Exception):
-    """A refusal, failure or timeout: the caller's stage is UNKNOWN (red)."""
+    """A refusal, failure or timeout: the caller's stage is UNKNOWN (red). `extra` lands in the
+    JSON line (a busy refusal names the holder's session id)."""
+
+    def __init__(self, reason, **extra):
+        super().__init__(reason)
+        self.extra = extra
 
 
 def _remote_path(path):
@@ -122,11 +128,18 @@ class Client:
         body = {"requester": requester}
         if title:
             body["title"] = title
-        code, j = self.request("POST", SESSION_PATH, body)
-        j = j if isinstance(j, dict) else {}
-        if code == 201 and j.get("session_id"):
-            return {"session_id": j["session_id"], "broadcast_id": j.get("broadcast_id")}
-        raise Unknown("restreamer refused the YouTube session: " + refusal_text(code, j))
+        end = self.clock() + STARTING_UP_RETRY_S
+        while True:
+            code, j = self.request("POST", SESSION_PATH, body)
+            j = j if isinstance(j, dict) else {}
+            if code == 201 and j.get("session_id"):
+                return {"session_id": j["session_id"], "broadcast_id": j.get("broadcast_id")}
+            if code == 503 and j.get("error") == "starting_up" and self.clock() < end:
+                self.sleep(max(self.poll_s, 0.05))
+                continue
+            holder = (j.get("holder") or {}).get("session_id") if code == 409 else None
+            extra = {"holder_session_id": holder} if holder else {}
+            raise Unknown("restreamer refused the YouTube session: " + refusal_text(code, j), **extra)
 
     def status(self, sid):
         code, j = self.request("GET", f"{SESSION_PATH}/{sid}")
@@ -223,7 +236,7 @@ def main(argv=None):
         else:
             out = c.wait_done(a.id, a.deadline)
     except Unknown as e:
-        print(json.dumps({"ok": False, "reason": str(e)}))
+        print(json.dumps(dict(e.extra, ok=False, reason=str(e))))
         return EXIT_UNKNOWN
     print(json.dumps(dict(out, ok=True)))
     return EXIT_OK
