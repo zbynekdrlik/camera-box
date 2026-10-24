@@ -1157,6 +1157,7 @@ fi
 # shellcheck source=scripts/lib/e2e-linux-bytes.sh
 . "$HERE/lib/e2e-linux-bytes.sh"
 LINUX_BYTES_GATE_ARGS=()
+E2E_LINUX_BYTES_MEMO_SHA="" E2E_LINUX_BYTES_MEMO_PATH=""  # this run's own fetch memo, never inherited
 if [ -n "$STRIH_LINUX_GATE_ARG" ]; then
   e2e_linux_bytes_gather strih "$STRIH" "$STRIH_USER" "$STRIH_PW" "$VERSION_STRIH_STATE" "$OUTDIR" "$VERSION_GATE_REPO"
 fi
