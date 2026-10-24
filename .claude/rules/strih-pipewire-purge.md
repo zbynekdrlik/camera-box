@@ -46,7 +46,8 @@ The order, each step idempotent:
 2. **The shim** `camera-box-pipewire-shim` (`Provides: gstreamer1.0-pipewire`, Architecture all, no
    Depends): RustDesk 1.4.9 `Depends:` ends with an unversioned `gstreamer1.0-pipewire`. Built ON the box
    from the checked-in `scripts/strih-pipewire/camera-box-pipewire-shim.control` with `dpkg-deb --build
-   --root-owner-group`, installed with `apt-get install -y <abs path>.deb` (never a bare `dpkg -i`: dpkg
+   --root-owner-group` in a 0755 temp dir (apt's `_apt` user reads it), installed with `apt-get install -y
+   --no-remove <abs path>.deb` (an unexpected resolver removal aborts; never a bare `dpkg -i`: dpkg
    does not read apt's `DPkg::Lock::Timeout`, so a periodic apt run holding the lock failed the step at
    once, the 24.9.2026 deploy-failure class), only when not installed at the control's Version. **Not equivs:**
    `apt-get -s install equivs` on strih-snv pulls 22 build packages (autoconf, automake, libtool,
@@ -117,6 +118,10 @@ follow-up candidate, issue 1440 LANE-RETURN).
 
 A WirePlumber HDMI rule written before the purge stays in `/etc/wireplumber/` (dpkg purge leaves files it
 does not own): harmless, nothing reads it.
+
+**Simulating a pin on a live box, read-only:** write the candidate preferences into a `mktemp -d` dir and
+pass it as `LC_ALL=C apt-get -s -o Dir::Etc::PreferencesParts=<dir> purge ...`, then delete the dir. Nothing
+in `/etc/apt` changes; that is how the arch finding above was read on strih-snv.
 
 ## Tests (Tier-0)
 
