@@ -2,7 +2,16 @@
 paths:
   - "scripts/recording-verdict-on-strih-snv.sh"
   - "tests/recording_verdict_on_strih_lx_lowprio.rs"
+  - "scripts/recording-verdict-on-stream-snv.sh"
 ---
+
+**It is the ONE Linux on-box decode (issue 1462).** The Linux stream box stream-snv decodes its
+`[8/8b]` stream recording through it: `scripts/recording-verdict-on-stream-snv.sh` resolves + checks
+the box and `exec`s this script with `STRIH_LX_BOX`/`STRIH_USER`/`STRIH_PW` = the stream box,
+`ONBOX_LABEL=stream-snv` (every log line's box name; default `strih-snv`, so strih's output is
+unchanged) and `--rec <path>` (the box-neutral alias of `--strih-rec`). Never copy its sha256 gate,
+LOWPRIO_SNIPPET or pull-back into another per-box script: add an entry point the same way
+(`.claude/rules/stream-box-linux.md`).
 
 # strih-snv in-place decode runs at idle priority on the E-cores (issue 1351 item / issue 1354)
 

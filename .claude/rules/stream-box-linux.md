@@ -5,6 +5,8 @@ paths:
   - "scripts/lib/marker-decodability-preflight.sh"
   - "scripts/lib/bundle-state-selfheal.sh"
   - "scripts/lib/shell-quote.sh"
+  - "scripts/lib/stream-lx-verdict.sh"
+  - "scripts/recording-verdict-on-stream-snv.sh"
   - "tests/python/*1462*"
 ---
 
@@ -77,20 +79,63 @@ leg, the literal `harness_obs_session_visibility_977.rs` finds the Windows call'
   class, so the Linux stream box gets the `systemctl --user` restart; `STRIH_PLATFORM` never applies
   to it.
 
+## The full E2E on the Linux stream box -- the A/V measurement stays BLOCKING (issue 1462 lane 2)
+
+Owner ROZHODNUTÉ 6377910161 (24.10.2026): "nikdy to nesmie byt skipped" -- the QR + audio-marker A/V
+measurement (`recording-verdict --av-sync` data, carried in the stream partial) is part of every
+full E2E, on a Linux stream box exactly as on Windows.
+
+- **`[0/8]` version-integrity gate:** `version-integrity-gate.sh --linux NAME` (repeatable;
+  `--strih-linux` = `--linux strih`) Linux-grades a `--win-state` box: the Windows-only rows
+  (ndi_runtime, distroav_dll_paths, the obs.dll / distroav.dll byte rows, the #826 OBS-identity set)
+  are loud SKIPPED rows naming the box, the rest is graded, a drift still refuses. recording-e2e.sh
+  sets `STREAM_LINUX_GATE_ARG` from `stream_box_platform "$STREAM"` and passes
+  `${STREAM_LINUX_GATE_ARG:+--linux stream}` in BOTH gate invocations, BEFORE the
+  `${STRIH_LINUX_GATE_ARG:+--strih-linux}` tail (two tests pin that tail as the last argument).
+  Details: `.claude/rules/version-integrity-gate.md` (issue 1462 section).
+- **`[8/8b-pre]` pushes:** on a Linux stream box the marker log and the switch schedule go to
+  `STREAM_LX_REMOTE_OUT_DIR` (default `/home/newlevel/verdict-out`) through
+  `stream_lx_push_file USER PW HOST LOCAL DIR NAME` (`scripts/lib/stream-lx-verdict.sh`: mkdir + scp,
+  prints the box path, rc 1 + a named line on any failure), in BOTH modes (the decode always runs
+  for real there), and a failed push ENDS the run (`|| exit 1`): the decode reads them, a missing
+  marker log would cost the A/V term. The Windows `if [ "$E2E_EXECUTE_VERDICT" = "1" ]` arm became
+  an `elif` (its literal stays a substring, which the 703 test reads).
+- **`[8/8b]` decode:** `run_stream_extract` takes a Linux branch first: `STREAM_LX_BOX="$STREAM"
+  STREAM_USER=… STREAM_PW=… "$HERE/recording-verdict-on-stream-snv.sh"` with the same forwarded
+  verdict args as Windows (`--av-marker-log`, `--switch-schedule`, the burn ids, `--cam2-run-id`, the
+  CG flag, `$CG`) and `--out "$STREAM_LX_REMOTE_OUT_DIR/stream-partial-${RUN_ID}.json"`; the partial
+  comes back to `$OUTDIR/stream-partial-<RUN_ID>.json` (= `$STREAM_PARTIAL`, the merge's `stream=`
+  input, unchanged). The Windows call text below it is byte-identical.
+- **`recording-verdict-on-stream-snv.sh` is an ENTRY POINT, never a copy:** it resolves the box
+  (`STREAM_LX_BOX`, else `obs_fleet_host stream-snv`), refuses a non-linux-genlock box and an empty
+  `--stream-rec` (exit 2, before any contact), then `exec`s `recording-verdict-on-strih-snv.sh` (the
+  ONE Linux on-box decode: sha256 upload gate, `--skip-if-exists`, idle priority on the box's own
+  E-cores -- stream-snv has `cpu_atom` 12-19 --, the partial + pixel dir pulled back unchanged) with
+  `STRIH_LX_BOX`/`STRIH_USER`/`STRIH_PW` = the stream box, `ONBOX_LABEL=<fleet name>` (the log tag) and
+  `--rec` (the decode's box-neutral alias of `--strih-rec`). A pinned test refuses a LOWPRIO /
+  sha256 / scp copy in the wrapper.
+- **A missing stream leg FAILS the run by name, never a skip:** a failed decode / unreachable box
+  returns non-zero; in EXECUTE mode the #703 wait block exits 1 with `stream extract rc=N` or
+  `a partial JSON is missing (… stream=…)`; in plan mode the foreground call aborts under `set -e`.
+  The merge's `--merge-partials "stream=$STREAM_PARTIAL"` is unconditional, and the fused A/V gate
+  folds into `all_pass` inside recording-verdict exactly as on Windows (no Linux-specific flag exists).
+- The `[8/8b]` banner names the transport through `stream_access_label` (the `strih_access_label`
+  twin): `stream-snv, plain ssh/scp` or `win-stream-snv`.
+- Tests: `tests/python/test_stream_linux_e2e_1462.py` (the real gate over live-shaped states + the
+  real gate block), `tests/python/test_stream_snv_decode_1462.py` (the wrapper RUN against the fake
+  box, the lib, the push region and the #703 wait block cut out of recording-e2e.sh and run under
+  `set -euo pipefail`). The fake `sshpass` (`stream_box_fakes_1462.py`) now also plays scp uploads,
+  `scp -r` and a down box for scp; `link_box_tools` links real host tools into the box PATH.
+- **Live acceptance (supervisor):** a full-path E2E `pull_request` run with stream-snv reaching `[8/8]`
+  with a stream partial and a graded A/V term; the first run uploads `recording-verdict` to
+  `/home/newlevel/recording-verdict` on stream-snv (the issue-1118 gate then skips it).
+
 ## Still Windows-only (follow-up candidates handed to the supervisor in the LANE-RETURN, not ported)
 
-**The full E2E does not run on the Linux stream box yet.** The `[0/8]` version-integrity gate
-(`version-integrity-gate.sh`, whose `--strih-linux` applies to the box named `strih` only) reads the
-Windows-only facets of `--win-state stream=` as UNKNOWN and refuses (exit 11) BEFORE the ported
-dantesync, `[4b2/8]` and `[4b3/8]` steps. Those steps are ported and tested, and rig-mode TEST
-(items 1 + 2) works on stream-snv now, but the E2E reaches them only once the gate is ported.
-
-- The version-integrity gate: a per-box Linux flag for stream (`--strih-linux` generalized, plus
-  `version-integrity-obs-identity.sh` / `version-integrity-rows.sh` and the drift-guard
-  `genlock_parity_consumed_paths` key).
-- The stream recording decode at `[8/8b]` (`recording-verdict-on-stream.sh`, `win_ssh_upload` of the
-  marker CSV + switch schedule, the `C:\camera-box` paths, the `win-stream-snv` cleanup plan lines, the
-  missing-slot-pixels `.cmd` branch): needs a Linux sibling like `recording-verdict-on-strih-snv.sh`.
+- The `[8/8e]` #652 cleanup plan line for the stream recording (`win-stream-snv Shell: Remove-Item`,
+  three sites; plan text only, inside the 703 merge→exit window), and the missing-slot-pixels stream
+  `.cmd` branch (`missing_slot_pixels_run` is handed the Linux path as `STREAM_REC_WIN`; report-only,
+  `|| true`), and `strih_planner_holder_note`'s plan-mode text (it still says the MCP holder runs 8/8b).
 - `scripts/av-soak.sh` (the stream decode kill + upload, `win_ssh_run` / `win_ssh_upload` at lines
   ~515 and ~953-956) and so `av-restart-matrix.sh`, which runs its windows through the soak.
 - The Windows planners that still take `--box stream`: `launch-obs-genlock.sh` and
