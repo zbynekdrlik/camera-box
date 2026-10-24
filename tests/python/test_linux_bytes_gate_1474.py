@@ -439,6 +439,9 @@ def test_the_gather_runs_for_each_linux_box_before_the_gate():
     region = s[banner:gate_at]
     assert region.count('. "$HERE/lib/e2e-linux-bytes.sh"') == 1, region
     assert 'LINUX_BYTES_GATE_ARGS=()' in region, region
+    # review round 2: the fetch memo is this run's own, reset before the first gather
+    reset = 'E2E_LINUX_BYTES_MEMO_SHA="" E2E_LINUX_BYTES_MEMO_PATH=""'
+    assert region.count(reset) == 1 and region.index(reset) < region.index("e2e_linux_bytes_gather strih"), region
     strih = 'e2e_linux_bytes_gather strih "$STRIH" "$STRIH_USER" "$STRIH_PW" "$VERSION_STRIH_STATE" "$OUTDIR" "$VERSION_GATE_REPO"'
     stream = 'e2e_linux_bytes_gather stream "$STREAM" "$STREAM_USER" "$STREAM_PW" "$VERSION_STREAM_STATE" "$OUTDIR" "$VERSION_GATE_REPO"'
     assert region.count(strih) == 1 and region.count(stream) == 1, region

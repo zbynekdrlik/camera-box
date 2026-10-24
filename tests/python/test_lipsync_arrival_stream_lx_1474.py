@@ -96,8 +96,7 @@ def test_a_linux_stream_box_pulls_and_deletes_the_probe_over_plain_ssh(tmp_path)
     pulls = [ln for ln in stream if ln.split()[2:3] == ["scp"]]
     assert len(pulls) == 1 and "UserKnownHostsFile=/dev/null" in pulls[0], pulls
     # the pull's source is the box's StopRecord path (never the local temp file), review round 1
-    assert pulls[0].replace("\\ ", " ").split()[-2] == "op@%s:%s" % (STREAM, rec) or \
-        ("op@%s:%s" % (STREAM, str(rec).replace(" ", "\\ "))) in pulls[0], pulls
+    assert ("op@%s:%s" % (STREAM, str(rec).replace(" ", "\\ "))) in pulls[0], pulls
     assert not rec.exists(), "the probe recording is deleted on the box (the bash rm ran)"
 
 
