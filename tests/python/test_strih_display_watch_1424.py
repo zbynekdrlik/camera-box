@@ -19,13 +19,10 @@ an empty screen. Tier-0 pytest, the strih-pp / strih-snv xrandr texts read live 
 """
 import importlib.util
 import json
-import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-
-import pytest
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
