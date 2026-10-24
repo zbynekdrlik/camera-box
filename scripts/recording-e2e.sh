@@ -1140,6 +1140,13 @@ STRIH_LINUX_GATE_ARG=""
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
   STRIH_LINUX_GATE_ARG="1"
 fi
+# issue 1462: the same Linux grading for the stream box once its obs-fleet class is linux-genlock
+# (stream-snv since 22.10.2026) -- `--linux stream`, so its Windows-only facets read SKIPPED instead
+# of UNKNOWN-refusing the whole E2E; a Windows stream box leaves the flag empty (byte-identical argv).
+STREAM_LINUX_GATE_ARG=""
+if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+  STREAM_LINUX_GATE_ARG="1"
+fi
 # issue 1357: the Windows OBS-box baseline (power plan, sleep, hibernate, USB selective suspend, WER)
 # of the obs-fleet `win-baseline` boxes (stream, resolume -- resolume SKIPPED while away), gathered
 # ONCE here and handed to the gate below as REPORT-ONLY rows that never change its verdict. The
@@ -1163,6 +1170,7 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     --win-state "stream=$VERSION_STREAM_STATE" \
     --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
     ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
+    ${STREAM_LINUX_GATE_ARG:+--linux stream} \
     ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 else
 "$HERE/version-integrity-gate.sh" \
@@ -1174,6 +1182,7 @@ else
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
   ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"} \
   ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
+  ${STREAM_LINUX_GATE_ARG:+--linux stream} \
   ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 fi
 

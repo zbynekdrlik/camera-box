@@ -617,7 +617,9 @@ imag_build_drift_report() {
 #                        the A/V-sync dock) and vendor/obs-vban (issue 1439: the VBAN receive source);
 #                        linux-genlock.yml's `on.push.paths` carries all four
 #   - anything else    -> windows-genlock-fast.yml's `on.push.paths` (adds vendor/av-sync-dock/** and
-#                        vendor/obs-vban/**, the paced VBAN sender + receive source, issues 1372/1439)
+#                        vendor/obs-vban/**, the paced VBAN sender + receive source, issues 1372/1439).
+#                        The Linux stream box (issue 1462, label "stream") lands here too: it runs the
+#                        same Linux strih-variant build, whose four paths are this same set.
 # (see tests/drift_guard.rs's genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949
 # for the lock-step assertion against the two workflow files themselves.) PURE — a lookup table, no
 # I/O. An unrecognized label gets the WINDOWS (superset) set: the fail-closed default that can never
@@ -2101,7 +2103,8 @@ compare_observed() {
   local o_gl_build_sha="${26:-}" o_gl_build_rc="${27:-0}" o_gl_build_range="${28:-}"
   local o_gl_build_ahead="${29:-}" o_gl_build_on_dev="${30:-0}"
   # issue 1351 follow-up: strih_linux=1 (arg 31, opt-in — every historic --compare call omits it and
-  # is byte-identical) marks the box as a Linux strih (strih-snv). It ONLY gates the two mandatory
+  # is byte-identical) marks the box as a Linux OBS box: strih-snv, or since issue 1462 the Linux
+  # stream box stream-snv (version-integrity-gate.sh --linux NAME). It ONLY gates the two mandatory
   # facets below that are genuinely Windows-only (ndi_runtime — parsed off a Windows OBS log signature;
   # distroav_dll_paths — a C:\ path scan): both are SKIPPED (loud, counted ok) instead of UNKNOWN when
   # this box reports no value for them. Every other facet in this function (obs_version/
@@ -2134,7 +2137,7 @@ compare_observed() {
   for entry in "${checks[@]}"; do
     IFS='|' read -r label mode exp obs <<< "$entry"
     if [ "$label" = "ndi_runtime" ] && [ "$o_strih_linux" = "1" ]; then
-      printf '  %-20s SKIPPED  (Windows-only NDI-runtime facet skipped on a Linux strih -- issue 1351 --strih-linux)\n' "$label"
+      printf '  %-20s SKIPPED  (Windows-only NDI-runtime facet skipped on a Linux strih/stream box -- issues 1351/1462 --linux)\n' "$label"
       continue
     fi
     rc=0
@@ -2158,7 +2161,7 @@ compare_observed() {
   # issue 1351 follow-up: this is a WINDOWS filesystem path scan (C:\...) -- SKIP it (loud, counted
   # ok) on a Linux strih, where distroav is a .so, not a .dll, and no such path exists.
   if [ "$o_strih_linux" = "1" ]; then
-    printf '  %-20s SKIPPED  (Windows-only distroav DLL-path scan skipped on a Linux strih -- issue 1351 --strih-linux)\n' "distroav_dll_paths"
+    printf '  %-20s SKIPPED  (Windows-only distroav DLL-path scan skipped on a Linux strih/stream box -- issues 1351/1462 --linux)\n' "distroav_dll_paths"
   else
   rc=0
   drift_check_plugin_paths "$p_plugin" "$o_plugin" || rc=$?
@@ -2207,7 +2210,7 @@ compare_observed() {
         # its bundle is graded by the platform-agnostic genlock_build_sha parity + vendor-pin rows, so
         # the Windows obs.dll byte facet reads UNKNOWN there and refused a healthy rig. SKIP it, like
         # the other Windows-only facets, never UNKNOWN (an UNKNOWN box refuses the run).
-        printf '  %-20s SKIPPED  (Windows-only obs.dll byte facet skipped on a Linux strih -- genlock_build_sha parity covers the bundle -- issue 1351 --strih-linux)\n' "obs_dll_sha256"
+        printf '  %-20s SKIPPED  (Windows-only obs.dll byte facet skipped on a Linux strih/stream box -- genlock_build_sha parity covers the bundle -- issues 1351/1462 --linux)\n' "obs_dll_sha256"
       elif [ -n "$o_alt_manifest" ]; then
         # #1346: fast OR full bundle of the same build -- either obs.dll is the right one.
         rc=0
@@ -2238,7 +2241,7 @@ compare_observed() {
         # the check only engages when the pinned manifest lists distroav.dll (a FULL-bundle deploy),
         # so it hid behind the obs.dll-only fast manifest until then and read UNKNOWN on a healthy
         # rig. SKIP it exactly like the obs.dll facet above; the Windows boxes keep the check.
-        printf '  %-20s SKIPPED  (Windows-only distroav.dll byte facet skipped on a Linux strih -- genlock_build_sha parity covers the bundle -- #1397 --strih-linux)\n' "distroav_dll_sha256"
+        printf '  %-20s SKIPPED  (Windows-only distroav.dll byte facet skipped on a Linux strih/stream box -- genlock_build_sha parity covers the bundle -- #1397 --linux)\n' "distroav_dll_sha256"
       elif [ -n "$m_distroav_sha" ]; then
         rc=0
         if [ -n "$o_alt_manifest" ]; then
@@ -2493,7 +2496,8 @@ main() {
   local host="" o_obs="" o_distroav="" o_ndi="" o_fps="" o_genlock="" o_latency="" o_plugin="" pair k v
   local manifest="" o_obs_sha="" o_distroav_sha="" o_capability="" o_bundle_hashes="" o_burn="" o_src_latency=""
   local o_av_sync_calibrated_ms="" o_genlock_build_sha=""
-  # issue 1351 follow-up: strih_linux=1 marks the box as a Linux strih (strih-snv) -- compare_observed
+  # issue 1351 follow-up: strih_linux=1 marks the box as a Linux OBS box (strih-snv, or the Linux
+  # stream box stream-snv since issue 1462, the gate's --linux NAME) -- compare_observed
   # SKIPS its two Windows-only mandatory facets (ndi_runtime, distroav_dll_paths) below. Any other
   # observed key (incl. the manifest-gated obs_dll_sha256/distroav_dll_sha256/genlock_capability
   # byte facets) is unaffected -- this key ONLY gates those two.

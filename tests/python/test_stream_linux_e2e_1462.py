@@ -106,8 +106,9 @@ def test_a_linux_stream_box_still_refuses_a_real_drift(tmp_path):
 def test_a_linux_stream_box_still_refuses_a_genlock_build_mismatch(tmp_path):
     rc, out, err = _gate(tmp_path, "--strih-linux", "--linux", "stream",
                          stream=dict(STREAM_LX, genlock_build_sha="c" * 40))
-    assert rc in (20, 11), out + err
-    assert "genlock_parity" in out and "OK " not in [ln for ln in out.splitlines() if "genlock_parity" in ln][0], out
+    assert rc == 20, out + err
+    parity = [ln for ln in out.splitlines() if "genlock_parity" in ln]
+    assert len(parity) == 1 and "DRIFT" in parity[0] and "stream=" in parity[0], out
 
 
 def test_linux_needs_a_name_of_a_gated_box(tmp_path):
