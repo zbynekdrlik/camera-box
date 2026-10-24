@@ -410,16 +410,24 @@ def test_the_watcher_keeps_a_level_changed_elsewhere_and_restores_after_a_restar
            {"id": 41, "volume": 0.55, "mute": False}, None, {"id": 57, "volume": 1.0, "mute": False}]
     calls = []
     reads = iter(seq)
-    current = {}
+    box = {"cur": None, "changed": False}
 
     def read():
-        s = current.pop("next", None) or next(reads)
+        # after a wpctl call the next look sees its effect, else the next scripted state
+        if box["changed"]:
+            box["changed"] = False
+            return dict(box["cur"])
+        s = next(reads)
+        box["cur"] = None if s is None else dict(s)
         return None if s is None else dict(s)
 
     def wpctl(*args):
         calls.append(" ".join(args))
         if args[0] == "set-volume":
-            current["next"] = {"id": int(args[3]), "volume": float(args[4]), "mute": False}
+            box["cur"]["volume"] = float(args[4])
+        elif args[0] == "set-mute":
+            box["cur"]["mute"] = args[2] == "1"
+        box["changed"] = True
 
     w = v.Watcher(read, wpctl, str(state))
     out = [w.poll() for _ in range(5)]
