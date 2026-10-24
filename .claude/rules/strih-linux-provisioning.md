@@ -271,7 +271,8 @@ over an existing output file (an imported collection is never regenerated).
   `NDI 2ME PGM` <- `STRIH-PP (2ME PGM)` (the real Windows name carries U+00AE; `source_name_spellings`
   also matches `NDIAr` / `NDIÂ®` / `NDI(R)`, and two spellings in one collection refuse); ytfast dropped; Windows paths ->
   `/srv/obs-media/stream-pp/<folder>/<file>`) and `strih-pp` (the strih-snv collection: every scene;
-  `STRIH-SNV (...)` -> `STRIH-PP (...)`, the CG sender). Every value is overridable on the CLI.
+  `STRIH-SNV (...)` -> `STRIH-PP (...)`, the CG sender; since issue 1439, 24.10.2026, `ASIO zvuk` -> the
+  obs-vban source on lv1's `strih-obs` / 6981 / 40). Every value is overridable on the CLI.
 - **Kinds are an ALLOWLIST** of what the Linux strih bundle ships (`LINUX_INPUT_KINDS`,
   `LINUX_FILTER_KINDS`, unversioned OBS ids). Everything else is dropped with a `DROP` line;
   `--keep-kind` extends the list. `text_gdiplus` becomes `text_ft2_source` (alpha = opacity x 255 / 100,

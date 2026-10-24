@@ -543,6 +543,10 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
 - **Facts:** `strih-obs` / 6981 / R 40 / `ASIO zvuk`, no VBAN-only leg (`_LEG` / `_LEG_ADDR` /
   `_SENDER` = none, like stream-pp's lv1). R 40 is lv1's proven stream-pp value (lost 0, ~27 ms spare);
   the pytest pins R - one 103-frame packet - the 2 ms margin above lv1's worst gap (29 ms) and R <= 40.
+  That gap was read on lv1's 256-frame `stream` to stream-pp, NOT on the 103-frame `strih-obs`: the
+  first production read (below) is what proves it for this stream.
+- **The collection port** (`obs_collection_port.py --preset strih-pp`) converts `ASIO zvuk` to the same
+  obs-vban source (strih-obs / 6981 / 40), pinned to the facts by the pytest.
 - **The hub TOML** lost `program_out` (adapter pipewire, the `strih-program` sink) and its two lv1 points:
   8 participants, 74 points. So the issue-1440 condition reads PURGE for strih-pp too.
 - **Rollout (supervisor, the order matters):**
@@ -552,7 +556,10 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
      receive_buffer_ms=40 ... port=6981 stream='strih-obs' source='ASIO zvuk'` with `emit_missed=0`;
   3. only then `systemctl restart intercom-hub` onto the new TOML and drop-in;
   4. the host reboot clears the still-running PipeWire processes (owner approval first);
-  5. verify-strih items 9 (program-vban + the card and HDMI legs), 9b (six rows), 16.
+  5. verify-strih items 9 (program-vban + the card and HDMI legs), 9b (six rows), 16;
+  6. after the first production on it, read the `obs-vban receive:` status lines for `lost=`, `late=`,
+     `concealed=`, `emit_missed=` and `max_late_ms` (the in-time budget R - one packet - 2 ms = 35.9 ms):
+     a loss there means R 40 is too low for `strih-obs`, a finding for the main, never a silent raise.
 
 ## The VBAN-only leg: a second NIC or a tagged VLAN on the audio VLAN (ROZHODNUTÉ 6360417876)
 
