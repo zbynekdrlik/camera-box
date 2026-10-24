@@ -104,12 +104,19 @@ fn the_audio_callback_only_gates_and_copies() {
         &src,
         "void st_raw_audio(void *data, struct audio_data *frames)",
     );
+    // issue 1470: in camera-box mode the gate + FIFO copy runs in the mix-tick callback on the
+    // measurement source's own share of the mix; st_raw_audio (the whole, re-chunked mix) returns.
     assert!(
-        cb.contains(
-            "cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } \
-             if (cb_active) { cb_audio_gate_and_publish(st, frames, last_qr_ns); return; }"
-        ),
-        "{DOCK_OUTPUT}: st_raw_audio must hand camera-box mode to the gate + FIFO copy and return"
+        cb.contains("cb_active = st->cb_mode_active; } if (cb_active) { return; }"),
+        "{DOCK_OUTPUT}: st_raw_audio must return in camera-box mode (issue 1470)"
+    );
+    let tick = unique_body_of(
+        &src,
+        "void st_cb_mix_tick(void *param, size_t mix_idx, struct audio_data *mix)",
+    );
+    assert!(
+        tick.contains("cb_audio_gate_and_publish(st, &share_frames, last_qr_ns);"),
+        "{DOCK_OUTPUT}: the mix-tick callback must hand its block to the gate + FIFO copy"
     );
     let publish = unique_body_of(
         &src,
@@ -127,7 +134,11 @@ fn the_audio_callback_only_gates_and_copies() {
             "{DOCK_OUTPUT}: cb_audio_gate_and_publish no longer has `{need}` (issue 1381)"
         );
     }
-    for (name, body) in [("st_raw_audio", cb), ("cb_audio_gate_and_publish", publish)] {
+    for (name, body) in [
+        ("st_raw_audio", cb),
+        ("cb_audio_gate_and_publish", publish),
+        ("st_cb_mix_tick", tick),
+    ] {
         for banned in [
             "st_raw_audio_camera_box(",
             "->push(",

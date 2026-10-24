@@ -883,8 +883,14 @@ jobs:
             Write-Error "dock output sources: the measurement source name has one declaration, in camera-box-audio.hpp (issue 1381)"; exit 1
           }
           $cb = Get-DockBody $output 'void st_raw_audio(void *data, struct audio_data *frames)'
-          if (-not $cb.Contains('cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } if (cb_active) { cb_audio_gate_and_publish(st, frames, last_qr_ns); return; }')) {
-            Write-Error "dock output sources: st_raw_audio no longer hands camera-box mode to the gate + FIFO copy (issue 1381)"; exit 1
+          # issue 1470: in camera-box mode the gate + FIFO copy runs in the mix-tick callback on the
+          # measurement source's own share of the mix; st_raw_audio (the whole, re-chunked mix) returns.
+          if (-not $cb.Contains('cb_active = st->cb_mode_active; } if (cb_active) { return; }')) {
+            Write-Error "dock output sources: st_raw_audio must return in camera-box mode (issue 1470)"; exit 1
+          }
+          $tick = Get-DockBody $output 'void st_cb_mix_tick(void *param, size_t mix_idx, struct audio_data *mix)'
+          if (-not $tick.Contains('cb_audio_gate_and_publish(st, &share_frames, last_qr_ns);')) {
+            Write-Error "dock output sources: the mix-tick callback no longer hands its block to the gate + FIFO copy (issue 1470)"; exit 1
           }
           # Review round 1: camera-box mode and norihiro's phone params are read in ONE section under
           # st->mutex, so no block reads the mode before the decode worker latched it and the rig's
@@ -907,7 +913,7 @@ jobs:
               Write-Error "dock output sources: cb_audio_gate_and_publish no longer has '$need' (issue 1381)"; exit 1
             }
           }
-          foreach ($body in @($cb, $publish)) {
+          foreach ($body in @($cb, $publish, $tick)) {
             foreach ($banned in @('st_raw_audio_camera_box(', '->push(', 'cb_audio_diag_tick(', 'cb_ensure_audio_picker(', 'signal_handler_signal(', 'obs_get_source_by_name(', 'blog(')) {
               if ($body.Contains($banned)) {
                 Write-Error "dock output sources: the audio callback runs $banned on libobs's audio thread again (issue 1381) -- the mixer falls behind real time"; exit 1
@@ -966,6 +972,73 @@ jobs:
             Write-Error "dock output sources: the destructor no longer joins the audio worker before freeing the picker (issue 1381)"; exit 1
           }
           Write-Output "dock audio decode off the audio thread (issue 1381) - OK"
+
+      - name: Assert dock measures only the measurement source's share (issue 1470)
+        shell: pwsh
+        run: |
+          # issue 1470: on stream-snv the dock paired the measurement clip's digital marker (a second
+          # emitter in the program mix) with the painter's QR and read -900.9 ms while the stream was in
+          # sync (+24.5 ms). The camera-box decode reads only the measurement source's OWN share of the
+          # mix, at the mix tick, through obs_add_raw_audio_callback + the per-source mix buffer, taken
+          # only when camera-box-measure-share.hpp proves it is the whole tick; st_raw_audio publishes
+          # nothing in camera-box mode. Checks the same list as tests/av_sync_dock_measure_share_1470.rs
+          # (the Rust test strips comments, these slices keep them); the take rule and the two-emitter
+          # case are the g++ self-test that Rust test runs on Linux CI.
+          if (-not (Test-Path "vendor/av-sync-dock/src/camera-box-measure-share.hpp")) {
+            Write-Error "camera-box-measure-share.hpp is gone (issue 1470) -- the dock decodes the whole mix again"; exit 1
+          }
+          . ./vendor/av-sync-dock/test/dock-output-source.ps1
+          $output = Get-DockOutputSource
+          function Assert-InOrder($body, $name, $needles) {
+            $at = 0
+            foreach ($need in $needles) {
+              $i = $body.IndexOf($need, $at)
+              if ($i -lt 0) { Write-Error "dock output sources: $name no longer has '$need' after its previous step (issue 1470)"; exit 1 }
+              $at = $i + $need.Length
+            }
+          }
+          foreach ($need in @('#include "camera-box-measure-share.hpp"', 'std::mutex cb_measure_src_mutex;', 'obs_source_t *cb_measure_src = nullptr;', 'camerabox::CbMeasureShareTracker cb_share_tracker;', 'std::vector<float> cb_share_planes[MAX_AV_PLANES];')) {
+            if (-not $output.Contains($need)) { Write-Error "dock output sources: '$need' is gone (issue 1470)"; exit 1 }
+          }
+          $cb = Get-DockBody $output 'void st_raw_audio(void *data, struct audio_data *frames)'
+          foreach ($banned in @('cb_audio_gate_and_publish(', 'cb_audio_fifo.publish(', 'last_qr_ns')) {
+            if ($cb.Contains($banned)) { Write-Error "dock output sources: st_raw_audio still has $banned -- the whole program mix reaches the decode again (issue 1470)"; exit 1 }
+          }
+          if (([regex]::Matches($output, [regex]::Escape('cb_audio_gate_and_publish(st, '))).Count -ne 1 -or ([regex]::Matches($output, [regex]::Escape('cb_audio_fifo.publish('))).Count -ne 1) {
+            Write-Error "dock output sources: the FIFO copy must have ONE caller and ONE producer (issue 1470)"; exit 1
+          }
+          $tick = Get-DockBody $output 'void st_cb_mix_tick(void *param, size_t mix_idx, struct audio_data *mix)'
+          Assert-InOrder $tick 'st_cb_mix_tick' @('cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } if (!cb_active) return;', 'tick.tick_start_ns = mix->timestamp;', 'tick.tick_end_ns = mix->timestamp + util_mul_div64(frames, 1000000000ULL, st->audio_sample_rate);', 'std::lock_guard<std::mutex> lock(st->cb_measure_src_mutex);', 'obs_source_t *src = st->cb_measure_src;', 'if (src != st->cb_share_src_seen) { st->cb_share_tracker.reset(); st->cb_share_src_seen = src; }', 'tick.source_found = src != nullptr;', 'tick.source_active = src && obs_source_active(src);', 'tick.source_pending = !src || obs_source_audio_pending(src);', 'tick.source_ts_after_ns = src ? obs_source_get_audio_timestamp(src) : 0;', 'decision = st->cb_share_tracker.observe(tick);', 'if (decision.take) { struct obs_source_audio_mix m; obs_source_get_audio_mix(src, &m);', 'share[c] = m.output[mix_idx].data[c];', 'camerabox::cb_measure_share_fill(decision.take, share, nch, frames, out); }', 'if (decision.absent_long && st->cb_measure_source_present.load(std::memory_order_relaxed)) { st->cb_audio_fifo.end_session((unsigned)camerabox::CbAudioGate::NotInProgram); return; }', 'share_frames.data[c] = (uint8_t *)out[c];', 'share_frames.frames = (uint32_t)frames; share_frames.timestamp = mix->timestamp;', 'cb_audio_gate_and_publish(st, &share_frames, last_qr_ns);')
+          foreach ($banned in @('mix->data', 'obs_get_source_by_name(', 'obs_source_release(', 'blog(', '->push(', 'st_raw_audio_camera_box(', 'signal_handler_signal(', '.assign(', '.resize(')) {
+            if ($tick.Contains($banned)) { Write-Error "dock output sources: st_cb_mix_tick runs $banned on libobs's audio thread (issues 1381 / 1470)"; exit 1 }
+          }
+          $refresh = Get-DockBody $output 'static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t video_ts)'
+          Assert-InOrder $refresh 'cb_refresh_measure_source' @('obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_MEASURE_SOURCE_NAME);', 'const bool present = src != nullptr;', 'cb_measure_source_hold(st, src);', 'st->cb_measure_source_present.exchange(present);')
+          if ($refresh.Contains('obs_source_release(src);') -or ([regex]::Matches($output, [regex]::Escape('obs_get_source_by_name('))).Count -ne 1) {
+            Write-Error "dock output sources: the measurement source must be looked up once and held for the audio thread (issue 1470)"; exit 1
+          }
+          $hold = Get-DockBody $output 'void cb_measure_source_hold(struct sync_test_output *st, obs_source_t *src)'
+          if (-not $hold.Contains('obs_source_t *old; { std::lock_guard<std::mutex> lock(st->cb_measure_src_mutex); old = st->cb_measure_src; st->cb_measure_src = src; } obs_source_release(old);')) {
+            Write-Error "dock output sources: cb_measure_source_hold must swap under the lock and release after it (issue 1470)"; exit 1
+          }
+          $connect = Get-DockBody $output 'void cb_measure_share_connect(struct sync_test_output *st)'
+          Assert-InOrder $connect 'cb_measure_share_connect' @('st->cb_share_planes[c].assign(AUDIO_OUTPUT_FRAMES, 0.0f);', 'st->cb_share_tracker = camerabox::CbMeasureShareTracker();', 'st->cb_share_src_seen = nullptr;', 'st->cb_share_mix_idx = obs_output_get_mixer(st->context);', 'obs_add_raw_audio_callback(st->cb_share_mix_idx, nullptr, st_cb_mix_tick, st);', 'st->cb_share_connected = true;')
+          $disconnect = Get-DockBody $output 'void cb_measure_share_disconnect(struct sync_test_output *st)'
+          if (-not $disconnect.Contains('if (!st->cb_share_connected) return; obs_remove_raw_audio_callback(st->cb_share_mix_idx, st_cb_mix_tick, st); st->cb_share_connected = false;')) {
+            Write-Error "dock output sources: cb_measure_share_disconnect must remove the callback once (issue 1470)"; exit 1
+          }
+          $start = Get-DockBody $output 'static bool st_start(void *data)'
+          Assert-InOrder $start 'st_start' @('cb_measure_share_disconnect(st);', 'st->cb_decode_mailbox.stop();', 'st->cb_audio_fifo.start(', 'cb_measure_share_connect(st);', 'obs_output_begin_data_capture(')
+          if (-not $output.Contains('cb_measure_share_disconnect(st); obs_output_end_data_capture(st->context); st->cb_decode_mailbox.stop(); st->cb_audio_fifo.stop();')) {
+            Write-Error "dock output sources: st_stop must remove the mix-tick callback before it stops the FIFO (issue 1470)"; exit 1
+          }
+          $destroy = Get-DockBody $output 'static void st_destroy(void *data)'
+          Assert-InOrder $destroy 'st_destroy' @('cb_measure_share_disconnect(st);', 'st->cb_decode_mailbox.stop();', 'st->cb_audio_fifo.stop();', 'cb_measure_source_hold(st, nullptr);', 'delete st;')
+          $worker = (Get-Content "vendor/av-sync-dock/src/camera-box-audio-worker.hpp" -Raw) -replace '\s+', ' '
+          if (-not $worker.Contains('NotInProgram,') -or -not $worker.Contains('case CbAudioGate::NotInProgram: return "measurement source not in the program mix (issue 1470)";')) {
+            Write-Error "camera-box-audio-worker.hpp: CbAudioGate needs the NotInProgram reason naming the program mix (issue 1470)"; exit 1
+          }
+          Write-Output "dock measures only the measurement source's share (issue 1470) - OK"
 
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that
