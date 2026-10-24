@@ -132,8 +132,10 @@ process_box() {
   if [ "$probe_mode" = "linux" ]; then
     # issue 1474 review: obs-liveness (enabled, same Linux boxes) already pages a dead obs-websocket
     # with the same unit-restart recovery, so one outage must not page twice -- decide nothing here.
+    # The pass is not a stray-OBS reading either, so the consecutive confirm restarts.
     if [ "$(strih_linux_visibility_ws_ok "$host" "$OBS_PHASE2_DIR")" != "1" ]; then
       log "$box: obs-websocket on :4455 did not answer -- obs-liveness owns that page; nothing to decide this pass (probe='$probe_out')"
+      write_state_field "${box}_confirm" 0
       return 0
     fi
     msg="$(strih_linux_visibility_message "$probe_out" 1 "$box")"
@@ -190,7 +192,7 @@ process_box() {
     log "ALERT: firing Discord notification for $box"
     local body
     if [ "$probe_mode" = "linux" ]; then
-      body="🚨 #979 obs-session-watchdog: **$box** OBS answers on :4455 but is NOT its supervised strih-obs.service -- not the operator's kiosk instance ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (plain ssh, issue 1474): stop the stray OBS (\`pgrep -a obs\`), then \`ssh ${user}@${host} 'systemctl --user restart strih-obs.service'\`"
+      body="🚨 #979 obs-session-watchdog: **$box** OBS answers on :4455 but is NOT its supervised strih-obs.service -- not the operator's kiosk instance ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (plain ssh, issue 1474): list the OBS processes (\`ssh ${user}@${host} 'pgrep -a obs'\`), stop the one strih-obs.service did not start, then \`ssh ${user}@${host} 'systemctl --user restart strih-obs.service'\`"
     else
       body="🚨 #979 obs-session-watchdog: **$box** obs64/AHK is INVISIBLE to the operator ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (agent-driven, win-* MCP Shell): \`bash scripts/launch-obs-genlock.sh --box $box --force\`"
     fi
