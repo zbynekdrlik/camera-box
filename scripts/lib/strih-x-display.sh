@@ -187,11 +187,11 @@ strih_display_watch_env_put() {
   dir="$(dirname "$path")"
   if [ ! -d "$dir" ]; then
     install -d -m 0755 "$dir" || { echo "strih-x-display: cannot create ${dir}" >&2; return 1; }
-    [ -z "$user" ] || chown "${user}:" "$dir" || { echo "strih-x-display: cannot chown ${dir} to ${user}" >&2; return 1; }
+    [ -z "$user" ] || chown -h "${user}:" "$dir" || { echo "strih-x-display: cannot chown ${dir} to ${user}" >&2; return 1; }
   fi
   rm -f "$path" && printf '%s\n' "$text" | install -m 0644 /dev/stdin "$path" \
     || { echo "strih-x-display: cannot write ${path}" >&2; return 1; }
-  [ -z "$user" ] || chown "${user}:" "$path" || { echo "strih-x-display: cannot chown ${path} to ${user}" >&2; return 1; }
+  [ -z "$user" ] || chown -h "${user}:" "$path" || { echo "strih-x-display: cannot chown ${path} to ${user}" >&2; return 1; }
   echo written
 }
 

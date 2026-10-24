@@ -256,8 +256,8 @@ static bool drm_output_vk_unpark(struct drm_output_vk_disp *d)
 		if (d->dev->parked[i].display != d->display) {
 			if (strcmp(d->dev->parked[i].output_name, d->output_name) == 0) {
 				VkResult r = d->dev->vk.vkReleaseDisplayEXT(d->dev->pd, d->dev->parked[i].display);
-				blog(LOG_WARNING,
-				     "drm-output: vk-direct: '%s' has a new handle after a replug -- released the one kept "
+				/* INFO: a failed retry's captured cause is its first WARNING (the -13 that may follow) */
+				blog(LOG_INFO, "drm-output: vk-direct: '%s' has a new handle after a replug -- released the one kept "
 				     "since its close (VkResult %d); a new acquire follows",
 				     d->output_name, (int)r);
 				d->dev->parked[i].display = VK_NULL_HANDLE;
