@@ -138,6 +138,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_HDMI_OUTPUTS",
     // issue 1453: whether the intercom page is published to phones on mobile data (tunnel + TURN).
     "STRIH_HTTPS_PUBLIC",
+    // issue 1462: the stream box's Development design (nested-pro | clip | none).
+    "STRIH_STREAM_DEV_SCENE",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -205,6 +207,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_HDMI_OUTPUTS=auto",
         // issue 1453: strih-snv publishes its intercom page to mobile data (tunnel + TURN).
         "STRIH_HTTPS_PUBLIC=yes",
+        // issue 1462: the strih role has no stream Development scene.
+        "STRIH_STREAM_DEV_SCENE=none",
         "LOADED=strih-snv",
     ] {
         assert!(
