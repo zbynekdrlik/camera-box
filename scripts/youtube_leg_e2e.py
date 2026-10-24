@@ -546,6 +546,12 @@ def _measure_on_host(ctx, stage, host, windows, dropped):
     rc, out = host.run_tool(_verdict_args(a, st, windows, host, host.path(name)), a.tool_timeout)
     print(out[-3000:], flush=True)
     if rc in ylh.TIMED_OUT:
+        # what the run finished (the tick maps, their read counters) still comes back for the diagnosis
+        try:
+            got = host.fetch(os.path.join(a.dir, "verdict"))
+            _set(stage, f"from {host.host} after the bound ran out: {', '.join(got) or 'nothing'}")
+        except ylh.HostError as e:
+            _set(stage, f"nothing came back after the bound ran out: {e}")
         return "UNKNOWN", [f"the YouTube-leg verdict tool ran over {a.tool_timeout:.0f} s"], None, None, windows, dropped
     got = host.fetch(os.path.join(a.dir, "verdict"))
     _set(stage, f"from {host.host}: {', '.join(got) or 'nothing'}")
