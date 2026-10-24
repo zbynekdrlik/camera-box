@@ -359,7 +359,8 @@ def test_on_the_strih_role_an_unarmed_hdmi_output_is_kept_out_like_a_fixed_one()
     screen, outs = W.parse_xrandr(PP_DARK)
     eff = W.effective_fixed([], outs, hdmi_off=True)
     assert sorted(eff) == ["HDMI-0", "HDMI-1"]
-    assert W.decide(screen, outs, eff) == ["--fb", "1920x1080"]
+    # the same args as the armed dark boot (test_dark_boot_keeps_a_screen_and_never_puts_a_fixed_output_into_x)
+    assert W.decide(screen, outs, eff) == ["--fb", "1920x1080", "--noprimary"]
     # an HDMI the X layout drives goes off, the screen kept
     screen, outs = W.parse_xrandr(PP_DARK.replace(
         "HDMI-0 connected primary (normal", "HDMI-0 connected primary 2560x1440+0+0 (normal"))
@@ -385,7 +386,7 @@ def test_a_watch_on_the_strih_role_never_puts_hdmi_on_the_desktop(tmp_path):
     w = W.Watch(state_file=str(tmp_path / "w.json"), run=rig.run, log=logs.append,
                 config_text=lambda: "", hdmi_off=True)
     w.pass_once(now=100.0)
-    assert rig.applied == [["--fb", "1920x1080"]]
+    assert rig.applied == [["--fb", "1920x1080", "--noprimary"]]
     assert any("HDMI never on the desktop" in ln for ln in logs), logs
 
 
@@ -393,4 +394,4 @@ def test_step_16d_writes_the_role_policy_and_restarts_a_running_watch_on_a_chang
     lib = SESSION_LIB.read_text()
     body = lib.split("strih_session_apps_install() {", 1)[1].split("\n}\n", 1)[0]
     assert "strih_display_watch_env_put" in body
-    assert body.index("strih_display_watch_env_put") < body.index("try-restart")
+    assert body.index("strih_display_watch_env_put") < body.index('"$user" try-restart')

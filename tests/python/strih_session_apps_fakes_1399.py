@@ -191,6 +191,9 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
     if autostart:
         lines += ["systemctl --user start %s || true" % u for u in UNITS]
     (home / ".config/openbox/autostart").write_text("\n".join(lines) + "\n")
+    # issue 1424: the display watch's role policy step 16d writes (`operator`: the harness defines no
+    # obs_box_step_applies, so no 6-hdmi role gate applies)
+    (home / ".config/strih-display-watch.env").write_text("STRIH_DISPLAY_WATCH_HDMI=operator\n")
     proc = tmp_path / "proc"
     argv = {
         "strih-browser-keeper.service": ["/usr/bin/python3", str(bindir / "strih_browser_keeper.py"),

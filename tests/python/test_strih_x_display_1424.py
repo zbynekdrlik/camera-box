@@ -74,6 +74,9 @@ def _home(tmp_path, config=PP_CONFIG):
     (home / ".camera-box").mkdir(parents=True, exist_ok=True)
     if config is not None:
         (home / ".camera-box" / "drm-output.json").write_text(json.dumps(config, separators=(",", ":")) + "\n")
+    # the display watch's role policy step 16d writes (no obs_box_step_applies here: `operator`)
+    (home / ".config").mkdir(parents=True, exist_ok=True)
+    (home / ".config" / "strih-display-watch.env").write_text("STRIH_DISPLAY_WATCH_HDMI=operator\n")
     return home
 
 
