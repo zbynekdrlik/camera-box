@@ -86,17 +86,40 @@ static void test_take_rule()
 	d = tr.observe(steady(tick_ns(t0, 2), tick_ns(t0, 3)));
 	CHECK(d.take, "take rule: steady state takes every tick");
 
-	/* discard_audio's own tolerance: a timeline that ended 1 ns before this tick is aligned. */
+	/* The start must be EXACT. mix_audio (obs-audio.c) skips a source whose timeline is before the
+	 * tick start, even by 1 ns, while discard_audio still pops it as aligned: such a tick was NOT
+	 * mixed. discard_audio leaves the timeline exactly on the tick end, so the steady state is exact;
+	 * a timeline just after the start is left silent too (conservative, one tick). */
 	{
 		CbMeasureShareTracker t1;
-		CbShareTick a = steady(tick_ns(t0, 0), tick_ns(t0, 1) - 1);
-		t1.observe(a);
-		CHECK(t1.observe(steady(tick_ns(t0, 1), tick_ns(t0, 2))).take,
-		      "take rule: ts.start - 1 is aligned (discard_audio's tolerance)");
+		t1.observe(steady(tick_ns(t0, 0), tick_ns(t0, 1) - 1));
+		CHECK(!t1.observe(steady(tick_ns(t0, 1), tick_ns(t0, 2))).take,
+		      "take rule: a timeline 1 ns before the tick start was not mixed (mix_audio skips it)");
 		CbMeasureShareTracker t2;
-		t2.observe(steady(tick_ns(t0, 0), tick_ns(t0, 1) - 2));
+		CbShareTick late1 = steady(tick_ns(t0, 0), tick_ns(t0, 1));
+		late1.source_ts_after_ns = tick_ns(t0, 1) + 1;
+		t2.observe(late1);
 		CHECK(!t2.observe(steady(tick_ns(t0, 1), tick_ns(t0, 2))).take,
-		      "take rule: 2 ns off the tick start is not aligned");
+		      "take rule: a timeline off the tick start is silence (only the exact steady state is taken)");
+	}
+	/* The end: the dock computes it as start + floor(frames * 1e9 / rate); libobs counts its tick
+	 * ends from the frame total, so its end is the same or 1 ns later -- never earlier. */
+	{
+		CbMeasureShareTracker t3;
+		t3.observe(steady(tick_ns(t0, 0), tick_ns(t0, 1)));
+		CbShareTick plus1 = steady(tick_ns(t0, 1), tick_ns(t0, 2));
+		plus1.source_ts_after_ns = tick_ns(t0, 2) + 1;
+		CHECK(t3.observe(plus1).take, "take rule: libobs's tick end 1 ns after the dock's is the whole tick");
+		CbMeasureShareTracker t4;
+		t4.observe(steady(tick_ns(t0, 0), tick_ns(t0, 1)));
+		CbShareTick minus1 = steady(tick_ns(t0, 1), tick_ns(t0, 2));
+		minus1.source_ts_after_ns = tick_ns(t0, 2) - 1;
+		CHECK(!t4.observe(minus1).take, "take rule: a timeline that stops before the tick end is not whole");
+		CbShareTick plus2 = steady(tick_ns(t0, 2), tick_ns(t0, 3));
+		plus2.source_ts_after_ns = tick_ns(t0, 3) + 2;
+		CbMeasureShareTracker t5;
+		t5.observe(steady(tick_ns(t0, 1), tick_ns(t0, 2)));
+		CHECK(!t5.observe(plus2).take, "take rule: 2 ns past the tick end is not this tick's end");
 	}
 
 	/* A source that started mid-tick: libobs placed it at an offset the dock cannot see any more. */
