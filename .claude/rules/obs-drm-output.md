@@ -453,8 +453,9 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   USB). The vestibule TV path has no Cam Link, so never present that number as the TV's latency.
 - **Bounded, and a replug is not the end:** the present loop's acquire/fence waits are 1 s and
   re-checked. `VK_ERROR_OUT_OF_DATE_KHR` / `VK_ERROR_SURFACE_LOST_KHR` (an HDMI or grabber replug)
-  rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) with 10 tries
-  1 s apart, without any device wait: a swapchain-only rebuild RETIRES the replaced swapchain (handed
+  rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) 1 s apart for 10
+  tries, then (issue 1424 hotplug, `display-hotplug.md`) every 5 s while another display is open -- the
+  display stays acquired; alone it gives up and the retry supervisor reopens it -- without any device wait: a swapchain-only rebuild RETIRES the replaced swapchain (handed
   over as `oldSwapchain`, freed after 4 later signalled fences or at the teardown) and the per-image
   present semaphores live across rebuilds, so a still-queued present never waits a destroyed object.
   **A surface rebuild never retires the surface** (issue 1424, live strih-pp: the old display-plane
@@ -507,6 +508,16 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   green; the HDMI shows the chosen view and the Tools switch changes it live. Rollback: remove the
   config (or its `"backend"` key) and restart OBS; `xrandr --output HDMI-0 --auto` brings the port
   back to the desktop only if wanted.
+
+## Display hotplug: retry, X config, display watch (issue 1424, owner 24.10.2026)
+
+A vk-direct output never stays dark until the next OBS start: the retry supervisor
+(`obs-drm-output-retry.{c,h}`, pure decision parity-gated with `src/drm_output_retry.rs`) retries a dormant
+output's start and releases + retries one whose present loop died; the present loop keeps a display
+acquired through an unplug beside another open display; X never sets a mode on a fixed output (an
+xorg.conf.d MetaModes, `scripts/lib/strih-x-display.sh`); a session display watch keeps a usable screen
+and puts operator monitors into the layout (`scripts/strih_display_watch.py`); tint2 starts only on a real
+screen. Everything, incl. the runbook: `.claude/rules/display-hotplug.md`.
 
 ## Lifecycle invariants (locked by the #1152 review — keep them if you touch the module)
 
