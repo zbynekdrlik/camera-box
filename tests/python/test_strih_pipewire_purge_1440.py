@@ -3,7 +3,8 @@
 The owner blacklisted PipeWire on the strih role (comment 6337295922). What this pins (Tier-0: pytest + bash,
 fake apt-get / dpkg / dpkg-query / dpkg-deb / apt-mark / pgrep / systemctl on PATH, no box):
   * scripts/lib/strih-pipewire-purge.sh -- the DERIVED condition over the four real box fact files + hub
-    TOMLs (strih-snv purges, strih-pp keeps PipeWire for its pipewire program_out, the stream role keeps its
+    TOMLs (strih-snv purges, strih-pp purges since its lv1 sends `strih-obs` into OBS -- issue 1439, 24.10.2026,
+    a hub-fed strih keeps PipeWire for its pipewire program_out, the stream role keeps its
     locked operator PipeWire); the apt pin for every architecture; the `apt-get -s` read that REFUSES a
     purge removing anything outside the declared list; the install order (pin, shim, keep libraries,
     read, purge, drop-ins); the verify rows;
@@ -226,7 +227,7 @@ def _log(tmp_path):
 
 @pytest.mark.parametrize("box,verdict,words", [
     ("strih-snv", "purge", ("STRIH_PROGRAM_VBAN_STREAMS=strih-obs", "intercom.strih-snv.toml")),
-    ("strih-pp", "keep", ("pipewire", "program_out")),
+    ("strih-pp", "purge", ("STRIH_PROGRAM_VBAN_STREAMS=strih-obs", "intercom.strih-pp.toml")),
     ("stream-pp", "keep", ("stream role", "1465")),
     ("stream-snv", "keep", ("stream role", "1465")),
 ])
@@ -240,7 +241,7 @@ def test_the_condition_is_derived_from_each_boxs_own_facts(box, verdict, words):
 
 
 def test_applies_and_the_dropin_mode_follow_the_decision():
-    for box, rc, mode in (("strih-snv", "0", "no-pipewire"), ("strih-pp", "1", "pipewire"),
+    for box, rc, mode in (("strih-snv", "0", "no-pipewire"), ("strih-pp", "0", "no-pipewire"),
                           ("stream-pp", "1", "pipewire")):
         r = _bash('rc=0; strih_pipewire_purge_applies >/dev/null || rc=$?; echo "rc=$rc"; '
                   'echo "mode=$(strih_pipewire_purge_dropin_mode)"', _plain_env(), box=box)
@@ -454,8 +455,8 @@ def test_an_unknown_dropin_mode_refuses():
 
 # --- 5. verify item 9b's rows --------------------------------------------------------------------------------
 
-def _healthy_box(tmp_path, env):
-    """A purged strih-snv: pin + shim, no server package, the card held by the hub, the drop-ins right."""
+def _healthy_box(tmp_path, env, card="M4"):
+    """A purged strih box: pin + shim, no server package, the card held by the hub, the drop-ins right."""
     pkgs = [r for r in LIVE_PKGS if r[0].split(":")[0] not in SERVER] + [("camera-box-pipewire-shim", "installed", "1.0")]
     (tmp_path / "pkgs").write_text("".join("%s\t%s\t%s\n" % r for r in pkgs))
     pref = Path(env["STRIH_PW_PURGE_PREF"])
@@ -463,7 +464,7 @@ def _healthy_box(tmp_path, env):
     pref.write_text(_bash('strih_pipewire_purge_pin_text amd64 i386', _plain_env()).stdout)
     asound = tmp_path / "asound"
     for side, pid in (("p", 4242), ("c", 4243)):
-        d = asound / "M4" / ("pcm0%s" % side) / "sub0"
+        d = asound / card / ("pcm0%s" % side) / "sub0"
         d.mkdir(parents=True)
         (d / "status").write_text("state: RUNNING\nowner_pid   : %d\ntrigger_time: 1.0\n" % pid)
     proc = tmp_path / "proc"
@@ -568,12 +569,39 @@ def test_a_rustdesk_less_box_is_a_note(tmp_path):
     assert _rows(env, home)["(pipewire-rustdesk)"][0] == "NOTE"
 
 
-def test_strih_pp_gets_one_note_naming_why_plus_the_browser_row(tmp_path):
+def test_a_purged_strih_pp_passes_every_row_on_its_mg_xu(tmp_path):
+    # issue 1439 on strih-pp (24.10.2026): its facts now purge too, and its cans are the MG-XU (`MGXU`)
     env = _fakes(tmp_path)
+    home = _healthy_box(tmp_path, env, card="MGXU")
+    rows = _rows(env, home, box="strih-pp")
+    assert len(rows) == 6 and "(pipewire-purge)" not in rows, rows
+    assert all(st == "OK" for st, _t in rows.values()), rows
+    assert "MGXU pcm0p=aplay" in rows["(pipewire-cards)"][1] and "MGXU pcm0c=arecord" in rows["(pipewire-cards)"][1]
+
+
+def _hub_fed_strih_pp(tmp_path):
+    d = tmp_path / "hubfed"
+    d.mkdir()
+    for f in (REPO / "scripts" / "strih-boxes").glob("*.env"):
+        t = f.read_text()
+        if f.stem == "strih-pp":
+            for old, new in (("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=none\n"),
+                             ("STRIH_PROGRAM_VBAN_PORT=6981\n", "STRIH_PROGRAM_VBAN_PORT=none\n"),
+                             ("STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=none\n"),
+                             ("STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n", "STRIH_PROGRAM_AUDIO_INPUT=none\n")):
+                assert t.count(old) == 1, old
+                t = t.replace(old, new)
+        (d / f.name).write_text(t)
+    return d
+
+
+def test_a_hub_fed_strih_gets_one_note_naming_why_plus_the_browser_row(tmp_path):
+    # no deployed strih is hub-fed since 24.10.2026: strih-pp with its four program facts `none`
+    env = _fakes(tmp_path, extra={"STRIH_BOXES_DIR": str(_hub_fed_strih_pp(tmp_path))})
     rows = _rows(env, tmp_path, box="strih-pp")
     assert set(rows) == {"(pipewire-purge)", "(browser-audio)"}, rows
     st, text = rows["(pipewire-purge)"]
-    assert st == "NOTE" and "program_out" in text, text
+    assert st == "NOTE" and "STRIH_PROGRAM_VBAN_STREAMS=none" in text, text
     assert not any(ln.startswith(("dpkg-query", "pgrep")) for ln in _log(tmp_path)), _log(tmp_path)
 
 
