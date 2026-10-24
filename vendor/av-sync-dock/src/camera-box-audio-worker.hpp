@@ -63,6 +63,7 @@ enum class CbAudioGate {
 	NotCameraBoxMode,    // no camera-box QR has ever been decoded
 	NoMeasurementSource, // this box has no measurement source (resolume, strih)
 	TestSignalStale,     // no camera-box QR decoded within the freshness window
+	NotInProgram,        // issue 1470: the measurement source's own share is not in the program mix
 };
 
 /* Whether the camera-box audio decode runs for a block at `now_ns`, given the last camera-box QR
@@ -92,6 +93,8 @@ inline const char *cb_audio_gate_text(CbAudioGate gate)
 		return "no measurement source on this box";
 	case CbAudioGate::TestSignalStale:
 		return "test signal stale (no camera-box QR decoded within the freshness window)";
+	case CbAudioGate::NotInProgram:
+		return "measurement source not in the program mix (issue 1470)";
 	}
 	return "unknown";
 }

@@ -69,17 +69,35 @@ public:
 		absent_since_ns_ = 0;
 	}
 
-	/* issue 1470 RED: no per-source share yet -- the dock only knows the whole mix. */
+	/* One tick, right after its mix: is the per-source mix buffer this whole tick's share? The
+	 * share sits at offset 0 only when the source's timeline already stood at this tick's start
+	 * before the mix -- which is where the previous tick's discard left it -- and the mix consumed
+	 * it to this tick's end. Both within 1 ns: libobs counts ticks in frames and rounds each tick
+	 * end to a nanosecond, and discard_audio itself treats ts.start - 1 as aligned. */
 	CbShareDecision observe(const CbShareTick &t)
 	{
-		(void)t;
+		const bool aligned = have_prev_ && within_1ns(prev_after_ns_, t.tick_start_ns) &&
+				     within_1ns(t.source_ts_after_ns, t.tick_end_ns);
 		CbShareDecision d;
-		d.take = false;
-		d.absent_long = false;
+		d.take = t.source_found && t.source_active && !t.source_pending && aligned;
+		/* A found source's timeline is the next tick's reference whether it was mixed or not: an
+		 * inactive or pending source is discarded to the tick end all the same. */
+		have_prev_ = t.source_found;
+		prev_after_ns_ = t.source_ts_after_ns;
+		if (d.take) {
+			absent_ = false;
+		} else if (!absent_) {
+			absent_ = true;
+			absent_since_ns_ = t.tick_start_ns;
+		}
+		d.absent_long = absent_ && t.tick_end_ns >= absent_since_ns_ &&
+				t.tick_end_ns - absent_since_ns_ >= CB_SHARE_ABSENT_END_NS;
 		return d;
 	}
 
 private:
+	static bool within_1ns(uint64_t a, uint64_t b) { return a >= b ? a - b <= 1 : b - a <= 1; }
+
 	bool have_prev_;
 	uint64_t prev_after_ns_;
 	bool absent_;

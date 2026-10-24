@@ -41,6 +41,7 @@ set(PLUGIN_SOURCES
 	src/sync-test-output.cpp
 	src/sync-test-output-video.cpp
 	src/sync-test-output-audio.cpp
+	src/sync-test-output-measure.cpp
 	src/sync-test-dock.cpp
 	src/sync-test-monitor.c
 	src/dock-compat.cpp

@@ -61,10 +61,13 @@ static void *st_create(obs_data_t *, obs_output_t *output)
 static void st_destroy(void *data)
 {
 	auto *st = (struct sync_test_output *)data;
+	/* issue 1470: the mix-tick callback is the dock's own audio connection, not the output's. */
+	cb_measure_share_disconnect(st);
 	/* issue 1367: libobs has disconnected the raw callbacks by now (obs_output_destroy joins its
 	 * end-capture thread first); wait for an in-flight decode, then free. */
 	st->cb_decode_mailbox.stop();
 	st->cb_audio_fifo.stop();
+	cb_measure_source_hold(st, nullptr);
 	delete st;
 }
 
@@ -78,6 +81,8 @@ static bool st_start(void *data)
 {
 	auto *st = (struct sync_test_output *)data;
 
+	/* issue 1470: no mix-tick callback from a previous start may publish while the FIFO restarts. */
+	cb_measure_share_disconnect(st);
 	/* issue 1367: st_start rewrites state the decode worker reads (the quirc size, the video
 	 * geometry) -- join any worker left from a previous start first. A no-op when none runs. */
 	st->cb_decode_mailbox.stop();
@@ -204,6 +209,10 @@ static bool st_start(void *data)
 	}
 	blog(LOG_INFO, "av-sync-dock: audio decode worker started (off the audio thread, issue 1381)");
 
+	/* issue 1470: the camera-box decode reads the measurement source's own share of the mix, copied
+	 * at each mix tick by the dock's own audio callback (the output's raw_audio is the whole mix). */
+	cb_measure_share_connect(st);
+
 	obs_output_begin_data_capture(st->context, OBS_OUTPUT_VIDEO | OBS_OUTPUT_AUDIO);
 
 	return true;
@@ -215,7 +224,9 @@ static void st_stop(void *data, uint64_t)
 
 	/* issue 1367: libobs disconnects the raw callbacks on its own end-capture thread, so one last
 	 * raw_video can still arrive after this returns -- publishing into a stopped mailbox is a
-	 * no-op. */
+	 * no-op. issue 1470: the mix-tick callback goes first, so nothing publishes into the FIFO
+	 * while it stops. */
+	cb_measure_share_disconnect(st);
 	obs_output_end_data_capture(st->context);
 	st->cb_decode_mailbox.stop();
 	st->cb_audio_fifo.stop();

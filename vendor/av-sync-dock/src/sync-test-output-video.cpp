@@ -96,7 +96,9 @@ static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t vide
 	st->cb_measure_source_check_ts = video_ts;
 	obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_MEASURE_SOURCE_NAME);
 	const bool present = src != nullptr;
-	obs_source_release(src);
+	/* issue 1470: the reference is kept for the mix-tick callback, which reads this source's own
+	 * share of the program mix; the previous one is released after the swap. */
+	cb_measure_source_hold(st, src);
 	const bool was = st->cb_measure_source_present.exchange(present);
 	if (first || was != present)
 		blog(LOG_INFO, "av-sync-dock: measurement source '%s' %s (issue 1381)",
