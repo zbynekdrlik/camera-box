@@ -562,6 +562,7 @@ def test_the_watcher_keeps_a_level_changed_elsewhere_and_restores_after_a_restar
         elif args[0] == "set-mute":
             box["cur"]["mute"] = args[2] == "1"
         box["changed"] = True
+        return True  # the real wpctl() returns True on success
 
     w = v.Watcher(read, wpctl, str(state))
     out = [w.poll() for _ in range(len(seq))]

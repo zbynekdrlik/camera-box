@@ -82,7 +82,6 @@ ASOUND_STATE = os.environ.get("STREAM_OPERATOR_AUDIO_ASOUND_STATE", "/var/lib/al
 # output at a fixed hardware level). The level controls are the monitor's own unity set (mon.UNITY_CONTROLS,
 # 0 dB, unmuted where they switch), the speaker is muted, Auto-Mute is on (the codec itself mutes the speaker
 # while a plug is in). The operator's level is the sink's volume, never the mixer.
-MIXER_UNITY = tuple(name for name, has_switch in mon.UNITY_CONTROLS if has_switch)
 MIXER_LEVELS = tuple(name for name, _ in mon.UNITY_CONTROLS)
 MIXER_SPEAKER = mon.DEFAULT_SPEAKER_CONTROL
 MIXER_ENUMS = (("Auto-Mute Mode", "Enabled"),)
@@ -426,7 +425,7 @@ def stored_controls(text, card_id):
                 break
             continue
         if depth == 3 and name is not None:
-            m = re.match(r"dbvalue\.\d+\s+(-?\d+)$", t)
+            m = re.match(r"dbvalue(?:\.\d+)?\s+(-?\d+)$", t)
             if m:
                 out.setdefault(name + " dB", []).append(m.group(1))
             continue
@@ -495,8 +494,10 @@ def _amixer_sget(amixer, card_id, name):
 
 def mixer_row(info, amixer=AMIXER, state_path=ASOUND_STATE):
     """(OK|FAIL, '(operator-audio-mixer) ...'): the jack's declared mixer, live AND stored. Live: Speaker off,
-    Auto-Mute Mode Enabled, MIXER_UNITY at 0 dB unmuted (a control the card lacks is named, never failed);
-    stored (STATE_PATH, what alsa-restore puts back at boot): Speaker off, Headphone on, Auto-Mute Enabled.
+    Auto-Mute Mode Enabled, MIXER_LEVELS at 0 dB, the switching ones unmuted (a control the card lacks is
+    named, never failed);
+    stored (STATE_PATH, what alsa-restore puts back at boot): Speaker off, Headphone on, Auto-Mute Enabled,
+    every live MIXER_LEVELS control at 0 dB.
     A USB interface is never the headphone device (ROZHODNUTE 6383739315): a FAIL."""
     tag = "(operator-audio-mixer)"
     card = info.get("card_id") or "?"
@@ -532,7 +533,7 @@ def mixer_row(info, amixer=AMIXER, state_path=ASOUND_STATE):
             ok.append("%s %s" % (name, want))
         else:
             bad.append("%s %s" % (name, item[0] if item else "unreadable"))
-    for name in MIXER_UNITY:
+    for name in MIXER_LEVELS:  # every level apply-mixer writes; only the switching ones also unmuted
         rc, out = _amixer_sget(amixer, card, name)
         if rc is None:
             return "FAIL", "%s amixer failed on %s (%s) -- %s is unread" % (tag, card, out, name)
@@ -551,7 +552,7 @@ def mixer_row(info, amixer=AMIXER, state_path=ASOUND_STATE):
     if bad:
         return "FAIL", ("%s %s on %s (declared: Speaker off, Auto-Mute Enabled, %s at 0 dB) -- re-run setup-strih "
                         "step 12 (it writes and stores the mixer)"
-                        % (tag, ", ".join(bad), card, " / ".join(MIXER_UNITY)))
+                        % (tag, ", ".join(bad), card, " / ".join(MIXER_LEVELS)))
     stored = _stored_problems(state_path, card, live)
     if stored:
         return "FAIL", ("%s live OK on %s, but %s -- a reboot would bring that back; re-run setup-strih step 12 "

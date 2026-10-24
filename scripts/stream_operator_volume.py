@@ -65,8 +65,10 @@ def state_path():
 
 def read_sink(objs):
     """{id, key, volume (cubic), mute} of the Audio/Sink node named SINK_NAME in a pw-dump list, else None.
-    KEY = `<core cookie>:<node id>`: PipeWire hands node ids out again after a restart, and its core cookie is
-    random per daemon start, so the pair names ONE sink of ONE PipeWire run (review round 1)."""
+    KEY = `<core cookie>:<object.serial>`: PipeWire hands node ids out again (after a PipeWire restart, and when
+    only WirePlumber restarts and re-creates the node), its core cookie is random per daemon start, and a node's
+    object.serial is never handed out twice in one run -- so the pair names ONE sink (review rounds 1 + 2). No
+    Core object = cookie `?` (Watcher never records such a key); no serial = the node id."""
     objs = objs if isinstance(objs, list) else []
     cookie = None
     for o in objs:
@@ -84,7 +86,10 @@ def read_sink(objs):
             chans = [v for v in (p.get("channelVolumes") or []) if _is_number(v)] if isinstance(p, dict) else []
             if chans:
                 linear = max(sum(chans) / len(chans), 0.0)
-                return {"id": o.get("id"), "key": "%s:%s" % (cookie if cookie is not None else "?", o.get("id")),
+                serial = props.get("object.serial")
+                return {"id": o.get("id"),
+                        "key": "%s:%s" % (cookie if cookie is not None else "?",
+                                          serial if serial is not None else o.get("id")),
                         "volume": linear ** (1.0 / 3), "mute": p.get("mute") is True}
         return None
     return None
@@ -145,7 +150,9 @@ def load_level(path):
 
 
 def save_state(path, **updates):
-    """Merge UPDATES into the kept state atomically (a volume rounded to 1 %); a failure is logged, never fatal."""
+    """Merge UPDATES into the kept state atomically (a volume rounded to 1 %); a failure is logged, never fatal.
+    Read-modify-write without a lock: a key press at the very moment of a restore can drop the `restored` entry,
+    which costs one more restore at the next watcher start -- never a lost level (accepted, review round 2)."""
     d = load_state(path)
     if "volume" in updates:
         updates["volume"] = round(min(max(updates["volume"], 0.0), 1.0), 2)
@@ -161,23 +168,30 @@ def save_state(path, **updates):
 
 
 def restore(call, sink, path):
-    """Put the kept level back on SINK (when one is kept; never below RESTORE_MIN, so the session is audible),
-    unmute it, and remember that THIS sink (its key) got its restore: a restarted watcher (a panel restart)
-    then adopts the sink as it is, the operator's own mute included."""
+    """Put the kept level back on SINK (when one is kept; never below RESTORE_MIN, so the session is audible) and
+    unmute it. Only when every wpctl call succeeded is THIS sink (its key) recorded as restored -- a restarted
+    watcher (a panel restart) then adopts it as it is, the operator's own mute included; a key with no core
+    cookie (`?:`) is never recorded. Returns True when every call succeeded (False = try again)."""
     kept = load_level(path)
+    ok = True
     if kept is not None:
-        call("set-volume", "-l", LIMIT, str(sink["id"]), "%.2f" % max(kept, RESTORE_MIN))
-        save_state(path, restored=sink["key"])
-    else:
+        ok = call("set-volume", "-l", LIMIT, str(sink["id"]), "%.2f" % max(kept, RESTORE_MIN)) is True
+    ok = call("set-mute", str(sink["id"]), "0") is True and ok
+    if not ok:
+        return False
+    record = {} if str(sink["key"]).startswith("?:") else {"restored": sink["key"]}
+    if kept is None:
         # nothing kept yet (the first session on this box): the level the sink has now is the one kept
-        save_state(path, restored=sink["key"], volume=sink["volume"])
-    call("set-mute", str(sink["id"]), "0")
+        record["volume"] = sink["volume"]
+    if record:
+        save_state(path, **record)
+    return True
 
 
 class Watcher:
     """The panel item's loop body: READ() -> the sink or None, CALL(*wpctl args), PATH = the kept-level file.
 
-    A sink whose key (core cookie + node id) this box never restored is NEW (a login after a reboot, an
+    A sink whose key (core cookie + object.serial) this box never restored is NEW (a login after a reboot, an
     operator-audio restart): its kept level goes back and it is unmuted. A sink seen again (the same key, also
     after a panel restart) is adopted as it is, and a level change on it is kept. The sink counts as gone only
     after GONE_AFTER missed looks in a row, so one slow pw-dump never flashes the label or re-runs the restore."""
@@ -204,7 +218,8 @@ class Watcher:
         if s["key"] != self.key:
             self.key = s["key"]
             if load_state(self.path).get("restored") != s["key"]:
-                restore(self.call, s, self.path)
+                if not restore(self.call, s, self.path):
+                    self.key = None  # a failed restore (wpctl) is tried again at the next look
                 s = self.read() or s
             self.last_volume = s["volume"]
         elif abs(s["volume"] - self.last_volume) >= 0.005:
