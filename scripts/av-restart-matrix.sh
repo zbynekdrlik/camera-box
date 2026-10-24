@@ -98,6 +98,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-fleet.sh"
 # shellcheck source=scripts/lib/strih-platform.sh
 . "$HERE/lib/strih-platform.sh"
+# shellcheck source=scripts/lib/stream-box.sh
+. "$HERE/lib/stream-box.sh"
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh"
 # shellcheck source=scripts/lib/rig-lease.sh
@@ -353,8 +355,12 @@ done
 export CAM_PW STREAM_USER STREAM_PW STRIH_USER STRIH_PW
 [ -n "${PROBE_BIN_DIR:-}" ] && [ -x "$PROBE_BIN_DIR/recording-verdict" ] \
   || die 4 "PROBE_BIN_DIR must hold the CI-built Linux recording-verdict (every window needs it)"
-[ -n "${WIN_VERDICT_EXE_LOCAL:-}" ] && [ -f "$WIN_VERDICT_EXE_LOCAL" ] \
-  || die 4 "WIN_VERDICT_EXE_LOCAL must be the CI-built recording-verdict.exe (every window needs it)"
+# issue 1474: only a WINDOWS stream box decodes with the .exe; the Linux stream-snv decodes in place
+# with PROBE_BIN_DIR's recording-verdict (the soak picks the stream path by the box's fleet class).
+if [ "$(stream_box_platform "$STREAM_HOST")" != linux ]; then
+  [ -n "${WIN_VERDICT_EXE_LOCAL:-}" ] && [ -f "$WIN_VERDICT_EXE_LOCAL" ] \
+    || die 4 "WIN_VERDICT_EXE_LOCAL must be the CI-built recording-verdict.exe (every window on a Windows stream box needs it)"
+fi
 export PROBE_BIN_DIR WIN_VERDICT_EXE_LOCAL
 for _t in sshpass curl timeout setsid python3; do
   command -v "$_t" >/dev/null 2>&1 || die 4 "'$_t' not found on PATH"
