@@ -16,7 +16,8 @@ hlasitosti a aj chrome youtube ma v prehravani hlasitost a mute. cize mat dalsi 
 nie je uplne potrebne". Requirements (comment 6363676384): ONE fixed headphone device, everything the operator
 hears there and never on the notebook speakers, the apps' OWN volume controls (VLC slider, YouTube volume /
 mute; no mixer UI), nothing switches by itself, a fixed output latency so lipsync in VLC and Chrome is true.
-Design: comment 6363778378 (Approach 1). **Stream role only**; the strih role's PipeWire (the hub's program
+Design: comment 6363778378 (Approach 1). **Stream role only** (issue 1440 purges PipeWire on a strih box whose facts need none and never touches
+this one, `.claude/rules/strih-pipewire-purge.md`); the strih role's PipeWire (the hub's program
 sink + loopback, the MiniFuse rules, the quantum-1024 floor) is never touched.
 
 ## What is allowed (everything else is denied)

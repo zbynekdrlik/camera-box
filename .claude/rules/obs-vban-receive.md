@@ -525,8 +525,8 @@ for the hub (one UDP port has one receiver). The console-side setting is the own
 - **96 kHz:** `tests/vban_source_96k_1439.rs` runs `strih-obs`'s exact shape through the shipped
   source (the lift driver's `sr=N` token = the VBAN rate index): every output at 96 kHz, contiguous on
   the 96 kHz clock, the lead-in = R on that clock, 24-bit samples whole, one loss one concealed slot.
-- **Left as it is (a follow-up candidate handed to the supervisor in the LANE-RETURN):** setup-strih step 12 still installs the `strih-program` null
-  sink + loopback on a box whose program is VBAN (no writer, no OBS input on it after the switch).
+- **The leftover `strih-program` null sink + loopback** on a box whose program is VBAN: issue 1440
+  removes them (and PipeWire itself) on such a strih box, `.claude/rules/strih-pipewire-purge.md`.
 - **Rollout (supervisor):** the strih bundle with obs-vban, setup-strih on strih-snv with OBS stopped
   (step 13 installs the new hub TOML; a running hub is never restarted, so `systemctl restart
   intercom-hub`), then start OBS. Read `obs-vban receive: ... rate=96000 ... receive_buffer_ms=30 ...
