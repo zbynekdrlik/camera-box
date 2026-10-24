@@ -1106,6 +1106,27 @@ def _conn(host, password="", port=None):
 OBS_OP_TIMEOUT_S = float(os.environ.get("OBS_OP_TIMEOUT_S", "60"))
 
 
+def retake_program_scene(ws, scene, rpc=None):
+    """issue 1462: re-take SCENE onto program when it IS the program scene and Studio Mode is on (preview
+    = SCENE, one Studio Mode transition), so an item a seed just removed from it leaves the program too:
+    in Studio Mode OBS programs a private duplicate made when the scene was taken (and at load), and the
+    duplicate keeps a removed item until the scene is taken again (stream-snv 24.10.2026, the measurement
+    clip's QPSK marker stayed on program). Never a NEVER_PROGRAM_SCENES scene, never while streaming;
+    every request goes through `_rpc`'s production-scene guard. Returns what it did ("" = nothing)."""
+    rpc = rpc or _rpc
+    if not scene or scene in NEVER_PROGRAM_SCENES:
+        return ""
+    if not rpc(ws, "GetStudioModeEnabled", {}).get("studioModeEnabled"):
+        return ""
+    if rpc(ws, "GetCurrentProgramScene", {}).get("currentProgramSceneName") != scene:
+        return ""
+    if rpc(ws, "GetStreamStatus", {}).get("outputActive"):
+        return "not re-taken: streaming (the program keeps the removed item until the next cut)"
+    rpc(ws, "SetCurrentPreviewScene", {"sceneName": scene})
+    rpc(ws, "TriggerStudioModeTransition", {})
+    return "re-took '%s' onto program" % scene
+
+
 def _rpc_timed_out(elapsed_s, timeout_s):
     """#328 (pure, testable): True iff a single obs-websocket request has run longer than its hard
     wall-clock deadline and MUST fail loud rather than keep draining events. A non-positive

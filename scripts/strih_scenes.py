@@ -29,6 +29,9 @@ Modes:
                          when the OBS websocket does not answer (verify-strih's stream-monitor row).
   --pulse-capture-inputs issue 1465, read-only: list every pulse capture input (`pulse capture inputs:
                          none`), rc 2 when OBS does not answer (verify-strih's operator-audio row).
+  --browser-audio        issue 1440, read-only: `browser audio: OK (...)` when every browser source reroutes
+                         its audio into OBS and is muted, else the problems (rc 1); rc 2 when OBS does not
+                         answer (verify-strih's browser-audio row).
   --projector T         issue 1346: set the HDMI output VIEW (program|multiview) in
                          ~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the
                          next OBS start. The operator's live switch is in OBS (Tools menu); this is
@@ -98,12 +101,15 @@ from drm_output_config import (  # noqa: E402,F401
 # port shares.
 from program_audio_vban import (  # noqa: E402,F401
     VBAN_SOURCE_KIND,
+    browser_audio_report,
     drop_pulse_capture_inputs,
     input_create_verified,
     input_recreate,
     input_state_read,
     kind_available,
     listed_text,
+    mute_browser_sources,
+    parse_browser_audio_rule,
     parse_program_audio_vban,
     parse_pulse_capture_rule,
     pulse_capture_report,
@@ -479,6 +485,28 @@ def input_classes_summary(inputs):
     return "%d camera, %d feedback (%s)" % (ncam, nfb, ", ".join(pairs))
 
 
+def program_retake(host, port, password):
+    """issue 1462: re-take the program scene (obs_phase2.retake_program_scene, behind the production-scene
+    guard) after a seed removed an item. Never fatal to the boot seed: no obs_phase2, an older one, or a
+    failed request prints one line."""
+    op = _obs_phase2_module()
+    if op is None or not hasattr(op, "retake_program_scene"):
+        print("program refresh: skipped (obs_phase2 without retake_program_scene on this host)")
+        return
+    try:
+        ws = op._conn(host, password or "", port)
+        try:
+            program = op._rpc(ws, "GetCurrentProgramScene", {}).get("currentProgramSceneName")
+            msg = op.retake_program_scene(ws, program)
+        finally:
+            ws.close()
+    except Exception as e:  # noqa: BLE001 -- a refresh failure must never kill the launch seed
+        print("program refresh: FAILED (%s) -- the program keeps the removed item until the next cut" % e)
+        return
+    if msg:
+        print("program refresh: %s" % msg)
+
+
 def _obs_phase2_module():
     """Lazy import of the sibling obs_phase2.py (the SHARED #795-safe reenforce_ndi_name policy).
     Returns the module, or None when it is not importable on this host -- an older box may lack it, so
@@ -675,7 +703,7 @@ def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
 
 
 def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME, audio_monitor=None,
-              audio_vban=None, pulse_capture=None):
+              audio_vban=None, pulse_capture=None, browser_audio=None):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
     CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
@@ -703,6 +731,10 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
     issue 1465 item 3: PULSE_CAPTURE "forbid" (the stream manifest's `pulse_capture`) removes every scene
     pulse capture input except the program-audio input (`drop_pulse_capture_inputs`, status under the key
     "pulse capture"); the stream operator's headphone mix must never reach the program.
+
+    issue 1440: BROWSER_AUDIO "reroute-mute" (the strih manifest's `browser_audio`) sets reroute_audio + mute
+    on every browser source (`mute_browser_sources`, status key "browser audio"): no page sound reaches a
+    device on a box without a sound server.
 
     Then SetStudioModeEnabled. Returns {input: status} for the log."""
     op = _obs_phase2_module()
@@ -770,6 +802,8 @@ def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_
     result[audio_name] = audio_status
     if pulse_capture == "forbid":
         result["pulse capture"] = drop_pulse_capture_inputs(obs, keep=audio_name)
+    if browser_audio == "reroute-mute":
+        result["browser audio"] = mute_browser_sources(obs)
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
     return result
@@ -825,6 +859,9 @@ def main():
     ap.add_argument("--pulse-capture-inputs", action="store_true",
                     help="issue 1465: print every pulse capture input OBS lists (`pulse capture inputs: none` "
                          "when there is none; `unreachable: <why>` + rc 2 when OBS does not answer) -- read-only")
+    ap.add_argument("--browser-audio", action="store_true",
+                    help="issue 1440: print whether every browser source reroutes its audio into OBS and is "
+                         "muted (`unreachable: <why>` + rc 2 when OBS does not answer) -- read-only")
     ap.add_argument("--projector", choices=["program", "multiview"], default=None,
                     help="issue 1346: set the HDMI output view (program|multiview) in "
                          "~/.camera-box/drm-output.json -- the in-OBS DRM-lease output reads it at the "
@@ -838,9 +875,11 @@ def main():
     # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only; --projector sets the HDMI
     # output view (issue 1346).
     if (not args.bootstrap and not args.verify_parity and args.projector is None
-            and not args.audio_input_kind and not args.audio_monitor_type and not args.pulse_capture_inputs):
+            and not args.audio_input_kind and not args.audio_monitor_type and not args.pulse_capture_inputs
+            and not args.browser_audio):
         ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), "
-                 "--audio-input-kind / --pulse-capture-inputs (read-only), or --projector program|multiview")
+                 "--audio-input-kind / --pulse-capture-inputs / --browser-audio (read-only), "
+                 "or --projector program|multiview")
 
     # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
     # the seed manifest.
@@ -880,6 +919,19 @@ def main():
         print(pulse_capture_report(obs))
         return
 
+    # --browser-audio (issue 1440): read-only, for verify-strih's (browser-audio) row.
+    if args.browser_audio:
+        try:
+            obs = Obs(args.host, args.port, args.password)
+        except Exception as e:  # noqa: BLE001 -- refused / reset / handshake: any of them = OBS not answering
+            print("unreachable: %s: %s" % (type(e).__name__, e))
+            sys.exit(2)
+        line = browser_audio_report(obs)
+        print(line)
+        if not line.startswith("browser audio: OK"):
+            sys.exit(1)
+        return
+
     # --projector (issue 1346): persist the HDMI output view. Touches only drm-output.json -- never
     # the input seed manifest and never OBS (the running OBS switches live from its own Tools menu).
     if args.projector is not None:
@@ -912,22 +964,31 @@ def main():
                          audio_name=parse_program_audio_input(manifest_text),
                          audio_monitor=parse_program_audio_monitor(manifest_text),
                          pulse_capture=parse_pulse_capture_rule(manifest_text),
+                         browser_audio=parse_browser_audio_rule(manifest_text),
                          audio_vban=audio_vban)
     print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
           % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))
     print("scene order: " + " | ".join(scene_order(inputs)))
     # issue 1380: a stream-role manifest carries the YouTube-safe Development scene (stream_dev_safe.py).
+    removed = "removed '" in statuses.get("pulse capture", "")
     if '"dev_scene"' in manifest_text:
         import stream_dev_safe
         spec = stream_dev_safe.parse_dev_scene(manifest_text)
-        print("dev-scene seed: %s" % (", ".join(stream_dev_safe.apply_dev_safe(obs, spec)) or "present (no change)"))
+        done = stream_dev_safe.apply_dev_safe(obs, spec)
+        removed = removed or any(a.startswith("remove_item ") for a in done)
+        print("dev-scene seed: %s" % (", ".join(done) or "present (no change)"))
     # issue 1462: the nested-pro design (stream-snv) only keeps the measurement clip out of Development.
     elif '"dev_scene_nested"' in manifest_text:
         import stream_dev_safe
         nested = stream_dev_safe.parse_dev_scene_nested(manifest_text)
-        print("dev-scene seed (nested-pro): %s"
-              % (", ".join(stream_dev_safe.apply_dev_nested(obs, nested)) or "present (no change)"))
+        done = stream_dev_safe.apply_dev_nested(obs, nested)
+        removed = removed or bool(done)
+        print("dev-scene seed (nested-pro): %s" % (", ".join(done) or "present (no change)"))
+    # issue 1462: in Studio Mode the program is a duplicate made at load, so a removed item stays on program
+    # until the scene is taken again; obs_phase2 re-takes it behind the production-scene guard.
+    if removed:
+        program_retake(args.host, args.port, args.password)
 
 
 if __name__ == "__main__":

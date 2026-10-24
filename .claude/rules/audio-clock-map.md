@@ -92,6 +92,9 @@ time-weighted fill, plus the queue's 16-frame look-ahead, 0.33 ms):
 
 ## strih-snv (the SNV cutting box, `STRIH_ROLE=strih`)
 
+No sound server on this box (issue 1440): every path below is ALSA hw PCMs, VBAN or obs-vban; nothing
+between the hub, the cutters' card and OBS can add a buffer or a crossing (`.claude/rules/strih-pipewire-purge.md`).
+
 | Path | Source clock -> crossings -> listener | Fixed latency at the listener (computed) |
 |---|---|---|
 | Program into the strih OBS | FOH console `strih-obs` VBAN (port 6981, VLAN 70) -> obs-vban receive timeline (sender rate fitted, fixed R) -> OBS mix (FLEET) | R = **30 ms** (`STRIH_PROGRAM_VBAN_RESERVE_MS`) + the OBS genlock audio path (`.claude/rules/obs-vban-receive.md`) |

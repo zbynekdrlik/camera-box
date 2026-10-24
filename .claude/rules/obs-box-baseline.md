@@ -66,6 +66,7 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   - Never add a per-call `-o DPkg::Lock::Timeout`. A real apt failure must still fail loud after the wait, through a `|| fail` or the caller's `set -e`.
   - The file is written 0644 through a `.dpkg-tmp` sibling, a name apt ignores silently.
   - It covers the DPKG lock only (install/remove/purge). `apt-get update` takes the separate lists lock (`/var/lib/apt/lists/lock`), which this setting does not govern.
+  - It is an APT setting: a bare `dpkg -i` never reads it and fails at once on a held lock. Install a local `.deb` with `apt-get install -y <absolute path>.deb` (issue 1440's shim).
 - **Every list refresh is `obs_box_apt_update`, never a bare `apt-get update`** (main ruling 5821855428).
   - It retries ONLY while the lists lock is HELD (`Could not get lock /var/lib/apt/lists/lock`, the same text on apt 2.8 and 3.2), logs each wait, and gives up after `OBS_BOX_APT_UPDATE_BUDGET_S` (600 s) total.
   - apt runs under `LC_ALL=C`. The match reads apt's English text, and an ssh session forwards the operator's locale; apt ships translations.

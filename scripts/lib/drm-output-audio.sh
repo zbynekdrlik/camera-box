@@ -145,9 +145,21 @@ drm_output_audio_log_line() {
     END { print l }' || true
 }
 
+# drm_output_audio_no_sound_server -> rc 0 when the box has NO sound server at all (issue 1440: the strih
+# role purges PipeWire where its facts need none): neither `wireplumber` nor `pipewire` is a command, so
+# nothing can hold the HDMI PCM and no rule is needed. DRM_OUTPUT_AUDIO_SERVER_BINS (the test seam) names
+# the binaries looked up; default "wireplumber pipewire".
+drm_output_audio_no_sound_server() {
+  local b
+  for b in ${DRM_OUTPUT_AUDIO_SERVER_BINS:-wireplumber pipewire}; do
+    command -v "$b" >/dev/null 2>&1 && return 1
+  done
+  return 0
+}
+
 # drm_output_audio_verdict RULE NODES LOG -> ONE token; return 0 = PASS, 2 = NOTE, 1 = FAIL:
 #   RULE  ok | missing | drift (the rule file vs drm_output_audio_wp_rule) | unknown (no WirePlumber
-#         version read)
+#         version read) | none (no sound server on the box, issue 1440: no rule needed; NODES is 0)
 #   NODES the PipeWire HDMI node count, "?" = not read
 #   LOG   drm_output_audio_log_state of the newest OBS log
 #   wp-unknown (1)  no WirePlumber version could be read -- the rule cannot be checked
@@ -187,6 +199,10 @@ drm_output_audio_verdict() {
 # the path. A failed write is a WARNING (verify grades the missing rule by name). Always returns 0.
 drm_output_audio_wp_provision() {
   local root="${1:-${DRM_OUTPUT_AUDIO_WP_ROOT:-}}" flavour path want
+  if drm_output_audio_no_sound_server; then
+    echo "  no sound server on this box (issue 1440: no wireplumber / pipewire) -- nothing can hold the HDMI PCM, no WirePlumber rule needed"
+    return 0
+  fi
   flavour="$(drm_output_audio_wp_flavour "$(wireplumber --version 2>/dev/null || true)")"
   if ! path="$(drm_output_audio_wp_rule_path "$flavour" "$root")"; then
     echo "  WARNING issue 1424: no WirePlumber version could be read -- the HDMI audio rule is NOT written (the fixed HDMI output's PCM may stay held by PipeWire)" >&2
@@ -227,16 +243,20 @@ drm_output_audio_pw_dump() {
 drm_output_audio_verify_report() {
   local user="$2" log="${3:-}" root="${4:-}" conn="${5:-}" view="${6:-}" flavour path rule="missing" nodes dump state line verdict
   local text label="HDMI audio"
-  flavour="$(drm_output_audio_wp_flavour "$(wireplumber --version 2>/dev/null || true)")"
-  if ! path="$(drm_output_audio_wp_rule_path "$flavour" "$root")"; then
-    rule=unknown
-  elif [ -f "$path" ]; then
-    rule=drift
-    [ "$(cat "$path" 2>/dev/null || true)" = "$(drm_output_audio_wp_rule "$flavour")" ] && rule=ok
-  fi
-  dump="$(drm_output_audio_pw_dump "$user")"
   nodes="?"
-  [ -n "$dump" ] && nodes="$(printf '%s\n' "$dump" | drm_output_audio_hdmi_node_count)"
+  if drm_output_audio_no_sound_server; then
+    rule=none; nodes=0; path="no sound server on the box"   # issue 1440
+  else
+    flavour="$(drm_output_audio_wp_flavour "$(wireplumber --version 2>/dev/null || true)")"
+    if ! path="$(drm_output_audio_wp_rule_path "$flavour" "$root")"; then
+      rule=unknown
+    elif [ -f "$path" ]; then
+      rule=drift
+      [ "$(cat "$path" 2>/dev/null || true)" = "$(drm_output_audio_wp_rule "$flavour")" ] && rule=ok
+    fi
+    dump="$(drm_output_audio_pw_dump "$user")"
+    [ -n "$dump" ] && nodes="$(printf '%s\n' "$dump" | drm_output_audio_hdmi_node_count)"
+  fi
   state=none
   line=""
   if [ -n "$log" ] && [ -f "$log" ]; then

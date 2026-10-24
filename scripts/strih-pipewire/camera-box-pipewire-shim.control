@@ -1,0 +1,12 @@
+Package: camera-box-pipewire-shim
+Version: 1.0
+Section: misc
+Priority: optional
+Architecture: all
+Maintainer: camera-box provisioning <noreply@newlevel.media>
+Provides: gstreamer1.0-pipewire
+Description: stands in for gstreamer1.0-pipewire on a strih box without PipeWire (issue 1440)
+ RustDesk 1.4.9 depends on gstreamer1.0-pipewire. The strih role runs no
+ sound server (issue 1440), so setup-strih step 12 purges PipeWire and pins
+ it out; this empty package carries the dependency, so RustDesk stays
+ installed. Built on the box by setup-strih (dpkg-deb), never downloaded.

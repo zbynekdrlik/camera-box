@@ -382,10 +382,11 @@ if WHY="$(obs_box_step_applies 13)"; then
   strih_intercom_hub_alsa_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1438: the cutters' card, opened through ALSA
 fi
 strih_vban_leg_grade   # the VBAN-only leg, every role (issue 1439, scripts/lib/strih-vban-leg.sh)
-# 9b) MiniFuse period + quantum drop-ins (issue 1345, FAIL) + the LIVE quantum 1024 (a NOTE until the next PipeWire
-#     start), strih role. Stream role (issue 1465 item 3): the locked operator PipeWire read back (its own lib).
+# 9b) MiniFuse period + quantum drop-ins (issue 1345, FAIL) + the live quantum (a NOTE); stream role: the locked PipeWire (1465).
+strih_pipewire_purge_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(pipewire-purge) the grader did not print all of its rows"   # issue 1440: a box with no PipeWire
 if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then
   stream_operator_audio_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator-audio) the grader did not print all of its rows"
+elif strih_pipewire_purge_applies >/dev/null 2>&1; then :   # issue 1440: purged, graded by the line above
 else
 for _q_pair in \
   "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf|strih_wireplumber_minifuse_output_period_conf" \
@@ -731,9 +732,8 @@ else
   note "(collection-hygiene) active collection JSON / python3 absent -- report-only"
 fi
 
-# 29) RustDesk remote desktop (issue 1317, owner request 22.9.): the service is active + a connect ID
-#     is readable. FAIL loud when installed-but-broken; NOTE when not installed (the pw file was not
-#     placed, so setup-strih step 16b skipped it -- report-only until installed).
+# 29) RustDesk remote desktop (issue 1317, owner request 22.9.): the service is active + a connect ID is readable.
+#     FAIL loud when installed-but-broken; NOTE when not installed (no pw file placed, so step 16b skipped it).
 if command -v rustdesk >/dev/null 2>&1; then
   RD_ACTIVE="$(systemctl is-active rustdesk 2>/dev/null || true)"
   RD_ID="$(rustdesk --get-id 2>/dev/null | head -1 || true)"
