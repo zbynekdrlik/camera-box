@@ -8,7 +8,7 @@
  *
  * Two decisions:
  *
- *   1. the supervisor (obs-drm-output-retry.c, one thread, ~4 looks a second) per output:
+ *   1. the supervisor (obs-drm-output-retry.c, one thread, two looks a second) per output:
  *        started && alive  -> LIVE, nothing to do;
  *        started && !alive -> RELEASE: its present loop died (a lost device, a display that now offers
  *                             another mode size, a wedged queue, or a lone display whose rebuild gave

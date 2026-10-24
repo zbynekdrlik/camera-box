@@ -9,7 +9,7 @@
  * until OBS was restarted. And a LIVE output whose monitor went away gave up after ten 1 s rebuild tries
  * and stayed dark too.
  *
- * Now one thread looks at every vk-direct output ~4 times a second and runs the pure decision of
+ * Now one thread looks at every vk-direct output twice a second and runs the pure decision of
  * obs-drm-output-retry.h (parity-gated against src/drm_output_retry.rs):
  *   - a DORMANT output (never started, or released) retries its whole start -- the same
  *     drm_output_inst_start_locked the autostart runs (its EDID, the vk-direct open, its audio leg) --
@@ -166,6 +166,9 @@ static bool drm_output_retry_connected(xcb_connection_t **xc, const char *name)
 
 /* ---- the supervisor thread ---- */
 
+/* One look at every vk-direct output this often (the pure schedule's steps are 2 s and up). */
+#define DRM_OUTPUT_RETRY_LOOK_MS 500
+
 static pthread_t g_retry_thread;
 static bool g_retry_started; /* the obs_startup / obs_shutdown thread only (the autostart, the stop) */
 static volatile bool g_retry_run;
@@ -244,14 +247,16 @@ static void *drm_output_retry_thread(void *arg)
 	memset(slots, 0, sizeof(slots));
 	xcb_connection_t *xc = NULL;
 	while (os_atomic_load_bool(&g_retry_run)) {
-		if (os_event_timedwait(g_retry_stop, 250) == 0)
+		if (os_event_timedwait(g_retry_stop, DRM_OUTPUT_RETRY_LOOK_MS) == 0)
 			break;
 		const int count = drm_output_inst_count();
 		for (int i = 0; i < count && i < DRM_OUTPUT_MAX_OUTPUTS; i++) {
 			struct drm_output_inst *inst = drm_output_inst_at(i);
 			if (!inst || inst->backend != OBS_DRM_OUTPUT_BACKEND_VK_DIRECT || !inst->ops->alive)
 				continue;
-			const bool connected = drm_output_retry_connected(&xc, inst->connector);
+			/* X is asked only for a dormant output (`started` changes only on this thread or
+			 * before it starts / after it is joined); an open one counts as connected */
+			const bool connected = inst->started || drm_output_retry_connected(&xc, inst->connector);
 			drm_output_registry_lock();
 			if (os_atomic_load_bool(&g_retry_run))
 				drm_output_retry_look(&slots[i], inst, connected);
