@@ -95,7 +95,10 @@ fn the_retry_header_is_pure_std_only_c() {
 #[test]
 fn the_supervisor_tu_is_linux_only_and_built_by_libobs() {
     let c = file(RETRY_C);
-    assert!(c.contains("#if defined(__linux__)"), "issue 1424: Linux-only TU");
+    assert!(
+        c.contains("#if defined(__linux__)"),
+        "issue 1424: Linux-only TU"
+    );
     assert!(c.contains("#include \"obs-drm-output-retry.h\""));
     let cmake = squish(&file(LINUX_CMAKE));
     assert!(
@@ -137,7 +140,10 @@ fn the_registry_exposes_its_lock_and_the_start_stop_steps_to_the_supervisor() {
         "void drm_output_retry_start(void);",
         "void drm_output_retry_stop(void);",
     ] {
-        assert!(h.contains(decl), "issue 1424: internal header must declare `{decl}`");
+        assert!(
+            h.contains(decl),
+            "issue 1424: internal header must declare `{decl}`"
+        );
     }
     let o = file(OUTPUTS_C);
     assert!(!o.contains("static bool drm_output_inst_start_locked("));
@@ -155,7 +161,10 @@ fn the_vk_backend_reports_a_dead_present_loop_and_its_active_read_never_blocks()
     assert!(alive.contains("drm_output_vk_wants_frames("));
     // The frontend polls active() on the UI thread; a retry holds k->lock across a whole open
     // (seconds), so the read is a lock-free atomic.
-    let active = body_of_c(&b, "static bool vkd_active(struct drm_output_inst *inst)\n{");
+    let active = body_of_c(
+        &b,
+        "static bool vkd_active(struct drm_output_inst *inst)\n{",
+    );
     assert!(
         active.contains("os_atomic_load_bool(") && !active.contains("pthread_mutex_lock"),
         "issue 1424: vkd_active must not take k->lock"
@@ -192,7 +201,10 @@ fn the_supervisor_logs_one_line_per_state_change_and_quiets_the_attempts() {
         "drm-output: retry: '%s' LIVE again",
         "drm-output: retry: '%s' lost its present loop",
     ] {
-        assert!(c.contains(marker), "issue 1424: missing log line {marker:?}");
+        assert!(
+            c.contains(marker),
+            "issue 1424: missing log line {marker:?}"
+        );
     }
     // the failed attempt's own lines are captured, never printed every 2-5 s
     assert!(c.contains("drm_output_blog("));
@@ -304,10 +316,14 @@ fn the_rebuild_keeps_the_display_beside_another_open_display_and_gives_up_alone(
 /// supervisor then did -- 'a' attempted ok, 'f' attempted failed, 'r' released, '-' nothing.
 type Ev = (bool, bool, bool, u64, char);
 
-fn scenarios() -> Vec<(&'static str, Vec<Ev>)> {
+/// A scenario: its name, the state it starts from (state, fails, next_ns) and its events.
+type Scenario = (&'static str, (i32, u32, u64), Vec<Ev>);
+
+fn scenarios() -> Vec<Scenario> {
     vec![
         (
             "boot-dormant-then-monitor",
+            (0, 0, 0),
             vec![
                 (false, false, true, 0, '-'),
                 (false, false, true, 2 * S, 'f'),
@@ -322,8 +338,11 @@ fn scenarios() -> Vec<(&'static str, Vec<Ev>)> {
         ),
         (
             "unplugged-then-plug",
+            (0, 0, 0),
             vec![
                 (false, false, false, 0, '-'),
+                // still unplugged: never pulled in early (only a connected read pulls it in)
+                (false, false, false, 10 * S, '-'),
                 (false, false, false, 29 * S, '-'),
                 (false, false, false, 30 * S, 'f'),
                 (false, false, true, 31 * S, 'f'),
@@ -333,6 +352,7 @@ fn scenarios() -> Vec<(&'static str, Vec<Ev>)> {
         ),
         (
             "live-dies-released",
+            (0, 0, 0),
             vec![
                 (true, true, true, 0, '-'),
                 (true, false, true, S, 'r'),
@@ -343,10 +363,32 @@ fn scenarios() -> Vec<(&'static str, Vec<Ev>)> {
         ),
         (
             "boundary",
+            (0, 0, 0),
             vec![
                 (false, false, true, u64::MAX - 10 * S, '-'),
                 (false, false, true, u64::MAX - 8 * S, 'f'),
                 (false, false, true, u64::MAX - 7 * S, '-'),
+            ],
+        ),
+        (
+            // a dormant output whose fail count reached the top: it saturates, never wraps to 0 (which
+            // would read as the fast schedule again)
+            "saturated",
+            (1, u32::MAX, 0),
+            vec![
+                (false, false, true, S, 'f'),
+                (false, false, true, 3 * S, '-'),
+            ],
+        ),
+        (
+            // dormant and unplugged with a far next try: a connected read pulls it in, a later
+            // disconnected one keeps the pulled-in time
+            "far-next-unplugged",
+            (1, 7, 40 * S),
+            vec![
+                (false, false, false, 5 * S, '-'),
+                (false, false, true, 6 * S, 'f'),
+                (false, false, false, 7 * S, '-'),
             ],
         ),
     ]
@@ -369,8 +411,12 @@ fn rust_lines() -> Vec<String> {
         }
         out.push(format!("logkind:{t} {}", r::rebuild_log_kind(t)));
     }
-    for (name, evs) in scenarios() {
-        let mut st = r::Retry::default();
+    for (name, (state, fails, next_ns), evs) in scenarios() {
+        let mut st = r::Retry {
+            state,
+            fails,
+            next_ns,
+        };
         for (i, &(started, alive, conn, now, then)) in evs.iter().enumerate() {
             let act = r::step(&mut st, started, alive, conn, now);
             match then {
@@ -412,8 +458,10 @@ fn c_harness() -> String {
             " printf(\"logkind:{t} %d\\n\", drm_output_rebuild_log_kind({t}U));\n"
         ));
     }
-    for (name, evs) in scenarios() {
-        src.push_str(" st.state = 0; st.fails = 0; st.next_ns = 0;\n");
+    for (name, (state, fails, next_ns), evs) in scenarios() {
+        src.push_str(&format!(
+            " st.state = {state}; st.fails = {fails}U; st.next_ns = {next_ns}ULL;\n"
+        ));
         for (i, &(started, alive, conn, now, then)) in evs.iter().enumerate() {
             src.push_str(&format!(
                 " act = drm_output_retry_step(&st, {started}, {alive}, {conn}, {now}ULL);\n"

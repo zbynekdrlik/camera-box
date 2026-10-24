@@ -95,9 +95,8 @@ pub fn attempted(r: &mut Retry, ok: bool, connected: bool, now_ns: u64) {
         r.next_ns = 0;
         return;
     }
-    if r.fails < u32::MAX {
-        r.fails += 1;
-    }
+    // the C twin's `if (fails < UINT32_MAX) fails++`
+    r.fails = r.fails.saturating_add(1);
     r.next_ns = now_ns.wrapping_add(delay_ns(r.fails, connected));
 }
 
