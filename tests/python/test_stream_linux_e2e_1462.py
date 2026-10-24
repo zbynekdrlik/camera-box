@@ -61,8 +61,22 @@ def _box_block(stdout, name):
 
 # --- the gate --------------------------------------------------------------------------------------
 
+def _clean_linux_bytes(tmp_path):
+    """issue 1474: since the gate grades every --linux box's deployed bundle bytes (fail-closed), a
+    PASSING Linux fleet must carry a matching gather + manifest per box."""
+    paths = subprocess.run(["bash", "-c", '. "$1"; linux_obs_box_byte_paths', "t",
+                            str(SCRIPTS / "lib" / "manifest-autosource.sh")],
+                           capture_output=True, text=True, check=True).stdout.split()
+    rows = ['    { "path": "%s", "sha256": "%s", "size": 1 }' % (p, "a" * 64) for p in paths]
+    m = tmp_path / "bundle_linux_1462.json"
+    m.write_text('{\n  "files": [\n%s\n  ]\n}\n' % ",\n".join(rows))
+    csv = ",".join("%s=%s" % (p, "a" * 64) for p in paths)
+    return [a for box in ("strih", "stream")
+            for a in ("--linux-manifest", "%s=%s" % (box, m), "--linux-bytes", "%s=%s" % (box, csv))]
+
+
 def test_a_linux_stream_box_passes_under_linux_stream_with_every_windows_facet_skipped(tmp_path):
-    rc, out, err = _gate(tmp_path, "--strih-linux", "--linux", "stream")
+    rc, out, err = _gate(tmp_path, "--strih-linux", "--linux", "stream", *_clean_linux_bytes(tmp_path))
     assert rc == 0, out + err
     assert "GATE PASS" in out, out
     block = _box_block(out, "stream")

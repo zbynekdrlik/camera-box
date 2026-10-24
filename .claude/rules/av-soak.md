@@ -6,6 +6,8 @@ paths:
   - "scripts/cambox_segments.py"
   - "scripts/av_soak_rig_state.py"
   - "scripts/lib/av-soak-leftovers.sh"
+  - "scripts/lib/av-soak-plan.sh"
+  - "tests/python/test_av_soak_stream_lx_1474.py"
   - "tests/python/test_av_soak_decision_1367.py"
   - "tests/python/test_av_soak_rig_state_1367.py"
   - "tests/python/test_av_soak_orchestrator_1367.py"
@@ -26,6 +28,7 @@ align), so looping it would hide the drift. The soak only measures.
 | File | Role |
 |---|---|
 | `scripts/av-soak.sh` | the orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report RUN_DIR`, `--stop-leftovers RUN_DIR` (the unit's `ExecStopPost` safety net) |
+| `scripts/lib/av-soak-plan.sh` | the `--plan` printout (`print_plan`, moved out of the orchestrator for its file budget, issue 1474): a view of the soak's globals printed with the same builders `--run` executes |
 | `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the two read-only cam2 reads, the record-volume free-space read, the ONE retried rig-busy read (`av_soak_rig_busy_settled` / `av_soak_broadcast_of`, also used by `--stop-leftovers` and the restart matrix) |
 | `scripts/av_soak_decision.py` | pure decision: `bounds`, `row` (one CSV row per window from the merged verdict JSON), `report` (1 h partial + full, exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/lib/av-soak-leftovers.sh` | the `--stop-leftovers` mode (`av_soak_stop_leftovers`): runs the `leftovers` plan, stops/clears, releases the soak's lease when nothing is left. Also the VBAN receiver bench's `--cleanup` (issue 1460), through two optional arguments: the run's own process pattern and KEEP_LEASE=1 (the bench's test input is still on strih-snv) |
@@ -125,15 +128,23 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   THIS run's decode, matched by its own output name `av-soak-<stamp>-s...`
   (`pkill -f 'recording-verdic[t] --extract-partial strih .*av-soak-<stamp>-s'` on strih-snv --
   the bracket keeps pkill off its own shell, the issue-626 self-match; a `Win32_Process`
-  `CommandLine` match + `Stop-Process -Id` on the stream box, else the next slot's exe upload
-  meets a locked file).
+  `CommandLine` match + `Stop-Process -Id` on a Windows stream box, else the next slot's exe upload
+  meets a locked file; the same scoped pkill with `stream` on the Linux stream-snv).
+- **The stream box's path is its obs-fleet class (issue 1474).** `STREAM_PLATFORM` =
+  `stream_box_platform "$STREAM_HOST"`, resolved once. On the Linux stream-snv the window takes the
+  issue-1462 transport: `stream_lx_push_file` for the marker log + schedule (into
+  `AV_SOAK_STREAM_LX_OUT_DIR`, default `verdict-out`), `recording-verdict-on-stream-snv.sh` with the
+  Linux `recording-verdict` for the decode, the scoped pkill through `stream_box_exec`, exact-path
+  `rm` cleanup lines; no `WIN_VERDICT_EXE_LOCAL` (the matrix neither). A Windows stream box keeps
+  every PowerShell text byte for byte (`.claude/rules/stream-box-linux.md`, issue 1474 section).
 - **A run dir holds one run.** `--run` refuses (exit 4, before the lease) a dir that already has
   `pid`, `soak.csv` or `recording.state`: a second run there would reset the first one's flags
   and grade two runs as one series.
 - **Burns:** only the ones that were OFF are turned on, and exactly those are turned off again.
 - **Recordings are not deleted** (deletion is owner-only, `.claude/rules/recordings-retention.md`):
   the exact paths (incl. the ones cleanup stopped) go to `recordings.tsv` and `cleanup-plan.txt` (the
-  E2E's own exact-path plan lines, `strih_lx_recording_cleanup_note` + the stream `Remove-Item`).
+  E2E's own exact-path plan lines, `strih_lx_recording_cleanup_note` + the stream box's
+  `stream_lx_recording_cleanup_note` on Linux or the `Remove-Item` on Windows).
   Before every slot a record volume below `RECORDINGS_FREE_MIN_GB` (50) STOPS the run cleanly
   (UNKNOWN, never a false pass).
 - **The slot budget is checked up front:** window + decode + merge + overhead (90 s) must fit the

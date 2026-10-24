@@ -29,6 +29,10 @@ SOAK = os.path.join(REPO, "scripts", "av-soak.sh")
 LIB = os.path.join(REPO, "scripts", "lib", "av-soak.sh")
 STRIH = "10.77.9.202"
 STREAM = "10.77.9.204"
+# issue 1474: the stream box at 10.77.9.204 is the Linux stream-snv in the default obs-fleet list,
+# and the soak takes the Linux stream path there (tests/python/test_av_soak_stream_lx_1474.py). This
+# suite pins the Windows stream path byte for byte, so its rig marks the stream box windows-genlock.
+WIN_STREAM_FLEET = "strih-snv|10.77.9.202|linux-genlock|always\nstream-snv|10.77.9.204|windows-genlock|always"
 
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 import bundle_state_gather as bsg  # noqa: E402
@@ -315,7 +319,7 @@ def rig(tmp_path):
         "CAMERA_BOX_RIG_HEARTBEAT": str(tmp_path / "heartbeat"),
         "RIG_FLEET_ACK_FILE": str(tmp_path / "no-acks.txt"),
         "CAM_PW": "x", "STREAM_USER": "u", "STREAM_PW": "y", "STRIH_USER": "su", "STRIH_PW": "sp",
-        "STRIH_HOST": STRIH, "STREAM_HOST": STREAM,
+        "STRIH_HOST": STRIH, "STREAM_HOST": STREAM, "OBS_FLEET": WIN_STREAM_FLEET,
         "E2E_ONBOX_DECODE_PRIORITY": "BelowNormal",
         "AV_SOAK_BROADCAST_RETRY_S": "0",
         "STRIH_TRANSITION_SAVE": str(tmp_path / "strih-transition-saved.json"),

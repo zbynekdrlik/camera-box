@@ -110,11 +110,16 @@ REPO_ROOT="$(cd "$HERE/.." && pwd)"
 # mutate this script's shell options).
 . "$HERE/lib/rig-test-ledger.sh"
 # issue 1192: the speech-arrival VERIFY probes the STREAM OBS box (record + pull) and reuses the
-# throwaway-probe delete builder. win-ssh-exec.sh gives win_ssh_download/win_ssh_run (it sets
-# `set -euo pipefail`, harmless -- this script already does at the top); audio-presence-preflight.sh
-# gives audio_preflight_delete_ps (the same "delete a throwaway probe recording on the box" builder).
+# throwaway-probe delete builder. win-ssh-exec.sh gives win_ssh_download/win_ssh_run for a Windows
+# stream box (it sets `set -euo pipefail`, harmless -- this script already does at the top);
+# audio-presence-preflight.sh gives audio_preflight_delete_ps / _sh (the same "delete a throwaway
+# probe recording on the box" builder, PowerShell + bash twins).
 . "$HERE/lib/win-ssh-exec.sh"
 . "$HERE/lib/audio-presence-preflight.sh"
+# issue 1474: the stream box is reached through the ONE stream-box transport (stream_box_download /
+# stream_box_exec, scripts/lib/stream-box.sh): plain scp/ssh on the Linux stream-snv, win_ssh_* on a
+# Windows box, by the box's obs-fleet class.
+. "$HERE/lib/stream-box.sh"
 
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -399,16 +404,17 @@ cmd_start() {
       _ap_corr=""
       _ap_out=""
       for _ap_read in $(seq 1 "$LIPSYNC_ARRIVAL_READ_ATTEMPTS"); do
-        timeout "$LIPSYNC_ARRIVAL_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_download "$2" "$3" "$4" "$5" "$6"' _ \
-          "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_ap_win" "$_ap_local" >/dev/null 2>&1 || true
+        timeout "$LIPSYNC_ARRIVAL_SSH_TIMEOUT" bash -c '. "$1"; . "$2"; stream_box_download "$3" "$4" "$5" "$6" "$6" "$7"' _ \
+          "$HERE/lib/win-ssh-exec.sh" "$HERE/lib/stream-box.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_ap_win" "$_ap_local" >/dev/null 2>&1 || true
         _ap_out="$(python3 "$HERE/lipsync_envelope_corr.py" --probe "$_ap_local" --asset "$media" --audio-map 0:a:0 2>&1 || true)"
         _ap_corr="$(printf '%s\n' "$_ap_out" | sed -n 's/^corr=//p' | head -1 || true)"
         [ -n "$_ap_corr" ] && break
         [ "$_ap_read" -lt "$LIPSYNC_ARRIVAL_READ_ATTEMPTS" ] && sleep "$LIPSYNC_ARRIVAL_READ_RETRY_SLEEP"
       done
       # Best-effort cleanup: delete the throwaway probe on the box + locally (never abort the run).
-      timeout "$LIPSYNC_ARRIVAL_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-        "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(audio_preflight_delete_ps "$_ap_win")" >/dev/null 2>&1 || true
+      timeout "$LIPSYNC_ARRIVAL_SSH_TIMEOUT" bash -c '. "$1"; . "$2"; stream_box_exec "$3" "$4" "$5" "$6" "$7"' _ \
+        "$HERE/lib/win-ssh-exec.sh" "$HERE/lib/stream-box.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
+        "$(audio_preflight_delete_ps "$_ap_win")" "$(audio_preflight_delete_sh "$_ap_win")" >/dev/null 2>&1 || true
       rm -f "$_ap_local"
       if [ -z "$_ap_corr" ]; then
         echo "[lipsync-test-mode] FAIL: could not decode/correlate the arrival probe recording (ffmpeg/moov). Raw: ${_ap_out}" >&2

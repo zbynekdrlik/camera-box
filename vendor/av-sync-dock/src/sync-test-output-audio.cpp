@@ -931,30 +931,6 @@ void st_audio_worker_thread_setup()
 	os_set_thread_name("avsync-audio");
 }
 
-/* issue 1381: the audio thread's whole share of the camera-box audio decode -- the gate (a fresh
- * camera-box QR, the measurement source on this box) and a copy of every channel into the FIFO. The
- * worker decodes the copy; a closed gate ends the worker's session (decoders reset, dock STALE).
- * Bounded work: no decode, no log line, no source lookup, no signal here. */
-static void cb_audio_gate_and_publish(struct sync_test_output *st, const struct audio_data *frames, uint64_t last_qr_ns)
-{
-	const uint64_t publish_start_ns = os_gettime_ns();
-	const uint64_t start_ts = st->start_ts;
-	const uint64_t now = frames->timestamp > start_ts ? frames->timestamp - start_ts : 0;
-	const camerabox::CbAudioGate gate = camerabox::cb_audio_decode_gate(
-		true, st->cb_measure_source_present.load(std::memory_order_relaxed), now, last_qr_ns,
-		CAMERA_BOX_TEST_SIGNAL_FRESH_NS);
-	if (gate == camerabox::CbAudioGate::Open) {
-		const size_t nch = st->audio_channels < MAX_AV_PLANES ? st->audio_channels : MAX_AV_PLANES;
-		const float *planes[MAX_AV_PLANES];
-		for (size_t c = 0; c < nch; c++)
-			planes[c] = (const float *)frames->data[c];
-		st->cb_audio_fifo.publish(planes, nch, frames->frames, frames->timestamp);
-	} else {
-		st->cb_audio_fifo.end_session((unsigned)gate);
-	}
-	camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - publish_start_ns);
-}
-
 void st_raw_audio(void *data, struct audio_data *frames)
 {
 	auto *st = (struct sync_test_output *)data;
@@ -966,12 +942,14 @@ void st_raw_audio(void *data, struct audio_data *frames)
 	// proven demod (norihiro's is broken at c=1). Skip norihiro's audio path entirely then.
 	// issue 1381: that decode runs on the audio worker, and only while the test signal is fresh;
 	// this thread only runs the gate and copies the block.
+	// issue 1470: and it copies the measurement source's own share of the mix at the mix tick
+	// (st_cb_mix_tick), never this block: the whole program mix carried a second marker emitter (the
+	// measurement clip), and libobs re-chunks a raw output's audio off the mix ticks.
 	// issue 1381 review round 1: norihiro's phone params are read in the SAME locked section as the
 	// mode. The decode worker sets the mode together with the rig's fixed params, so a block can no
 	// longer see the mode still off but the params already set, which ran norihiro's inline demod
 	// (and grew its sample deque) on this thread once per output start.
 	bool cb_active;
-	uint64_t last_qr_ns;
 	uint32_t f, c, q_ms;
 	{
 		std::unique_lock<std::mutex> lock(st->mutex);
@@ -979,10 +957,8 @@ void st_raw_audio(void *data, struct audio_data *frames)
 		c = st->c;
 		q_ms = st->q_ms;
 		cb_active = st->cb_mode_active;
-		last_qr_ns = st->cb_video_last_decode_ts_ns;
 	}
 	if (cb_active) {
-		cb_audio_gate_and_publish(st, frames, last_qr_ns);
 		return;
 	}
 

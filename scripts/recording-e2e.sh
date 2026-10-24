@@ -1150,6 +1150,20 @@ STREAM_LINUX_GATE_ARG=""
 if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
   STREAM_LINUX_GATE_ARG="1"
 fi
+# issue 1474: each Linux OBS box's DEPLOYED bundle bytes (libobs, the frontend API, DistroAV, obs-vban,
+# the A/V-sync dock, bin/obs) + the linux-genlock manifest at its own marker sha, for the gate's
+# fail-closed linux_so_bytes row -- the Linux counterpart of the Windows obs.dll / distroav.dll byte
+# rows those boxes skip. The helper only collects (a miss is one line, the gate refuses on it).
+# shellcheck source=scripts/lib/e2e-linux-bytes.sh
+. "$HERE/lib/e2e-linux-bytes.sh"
+LINUX_BYTES_GATE_ARGS=()
+E2E_LINUX_BYTES_MEMO_SHA="" E2E_LINUX_BYTES_MEMO_PATH=""  # this run's own fetch memo, never inherited
+if [ -n "$STRIH_LINUX_GATE_ARG" ]; then
+  e2e_linux_bytes_gather strih "$STRIH" "$STRIH_USER" "$STRIH_PW" "$VERSION_STRIH_STATE" "$OUTDIR" "$VERSION_GATE_REPO"
+fi
+if [ -n "$STREAM_LINUX_GATE_ARG" ]; then
+  e2e_linux_bytes_gather stream "$STREAM" "$STREAM_USER" "$STREAM_PW" "$VERSION_STREAM_STATE" "$OUTDIR" "$VERSION_GATE_REPO"
+fi
 # issue 1357: the Windows OBS-box baseline (power plan, sleep, hibernate, USB selective suspend, WER)
 # of the obs-fleet `win-baseline` boxes (stream, resolume -- resolume SKIPPED while away), gathered
 # ONCE here and handed to the gate below as REPORT-ONLY rows that never change its verdict. The
@@ -1173,6 +1187,7 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     --win-state "stream=$VERSION_STREAM_STATE" \
     --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
     ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
+    ${LINUX_BYTES_GATE_ARGS[@]+"${LINUX_BYTES_GATE_ARGS[@]}"} \
     ${STREAM_LINUX_GATE_ARG:+--linux stream} \
     ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 else
@@ -1185,6 +1200,7 @@ else
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
   ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"} \
   ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
+  ${LINUX_BYTES_GATE_ARGS[@]+"${LINUX_BYTES_GATE_ARGS[@]}"} \
   ${STREAM_LINUX_GATE_ARG:+--linux stream} \
   ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 fi
@@ -5865,7 +5881,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       else
         echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
       fi
-      echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+      # issue 1474: the Linux stream box (stream-snv) gets the same exact-path rm over plain ssh.
+      if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+        stream_lx_recording_cleanup_note "      " "$STREAM" "${STREAM_HOST_PATH:-<unknown>}"
+      else
+        echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+      fi
       echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
     fi
     # #758 item 3 — the in-run freeze watch's own verdict: a mid-run freeze the decode-based
@@ -5906,7 +5927,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     else
       echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
     fi
-    echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    # issue 1474: the Linux stream box (stream-snv) gets the same exact-path rm over plain ssh.
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      stream_lx_recording_cleanup_note "      " "$STREAM" "${STREAM_HOST_PATH:-<unknown>}"
+    else
+      echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    fi
     echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
   fi
   exit 0
@@ -5994,7 +6020,12 @@ if [ -s "$REPORT_JSON" ]; then
     else
       echo "  win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
     fi
-    echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    # issue 1474: the Linux stream box (stream-snv) gets the same exact-path rm over plain ssh.
+    if [ "$(stream_box_platform "$STREAM")" = "linux" ]; then
+      stream_lx_recording_cleanup_note "  " "$STREAM" "${STREAM_HOST_PATH:-<unknown>}"
+    else
+      echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
+    fi
   fi
 fi
 

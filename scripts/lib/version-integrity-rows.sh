@@ -120,6 +120,36 @@ vig_row_imag_bytes() {
   return 0
 }
 
+# vig_named_value NAME ENTRY... -> the value of the LAST `NAME=value` ENTRY (the value keeps every
+# later `=`), or nothing. The lookup for the issue-1474 per-box --linux-manifest / --linux-bytes args.
+vig_named_value() {
+  local name="$1" e v=""
+  shift
+  for e in "$@"; do
+    [ "${e%%=*}" = "$name" ] && v="${e#*=}"
+  done
+  printf '%s' "$v"
+}
+
+# vig_row_linux_bytes NAME MANIFEST CSV -> issue 1474: the deployed-library BYTE parity row of a Linux
+# OBS box (a --linux box), the counterpart of the Windows obs.dll / distroav.dll byte rows it SKIPs.
+# Grades linux_box_bytes_verdict (the gate file); an absent gather or manifest is UNKNOWN, counted
+# as `NAME:so_bytes`. It follows the vig_row_* contract in the header of this file.
+vig_row_linux_bytes() {
+  local name="$1" manifest="$2" csv="$3"
+  echo "  -- ${name} linux .so byte parity (issue 1474, enforced) --"
+  local lb_out="" lbrc=0
+  lb_out="$(linux_box_bytes_verdict "$name" "$manifest" "$csv")" || lbrc=$?
+  printf '%s\n' "$lb_out" | sed 's/^/    /'
+  case "$lbrc" in
+    0)  ok=$((ok + 1)) ;;
+    20) bad=$((bad + 1)) ;;
+    11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:so_bytes") ;;
+    *)  echo "    !! linux_box_bytes_verdict exited ${lbrc} (unexpected)" >&2; bad=$((bad + 1)) ;;
+  esac
+  return 0
+}
+
 # vig_row_report_only_boxes NAME=FILE... -> the issue-1296 report-only box rows (RESOLUME-SNV):
 # one informational line per --win-state-report-only box, never counted. Moved verbatim out of
 # the gate's main() (issue 1384); prints nothing for no arguments and always returns 0.

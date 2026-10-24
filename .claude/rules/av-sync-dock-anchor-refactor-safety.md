@@ -11,6 +11,7 @@ paths:
   - "vendor/av-sync-dock/src/camera-box-qr.hpp"
   - "tests/av_sync_dock_reserved_origin_1404.rs"
   - "tests/genlock_preload.rs"
+  - "tests/av_sync_dock_measure_share_1470.rs"
   - ".github/workflows/windows-genlock.yml"
   - ".github/workflows/windows-genlock-fast.yml"
 ---
@@ -166,6 +167,7 @@ the self-test).
 | `sync-test-output-video.cpp` | the video path: `st_raw_video`, the decode worker (`st_video_decode_job_run`), the QR decodes, the marker search, `cb_video_qr_record` / `cb_refresh_measure_source`, norihiro's `sync_index_found` list |
 | `sync-test-output-audio.cpp` | the audio path: `st_raw_audio`, `cb_audio_gate_and_publish`, the audio worker handlers, `st_raw_audio_camera_box` (the pairing, the lock audit, the #942/#955 dock-lock chain), `cb_audio_diag_tick`, `cb_apply_pairing_recovery`, norihiro's demod |
 | `sync-test-output-internal.hpp` | the includes, the tunable `#define`s, `struct sync_test_output` and the other shared structs, and the declarations of the cross-TU functions |
+| `sync-test-output-measure.cpp` | issue 1470: the measurement source's own share of the mix -- `st_cb_mix_tick` (the dock's own audio callback), `cb_audio_gate_and_publish` (moved here unchanged), `cb_measure_source_hold`, `cb_measure_share_connect` / `_disconnect` |
 
 - **Linkage.** Every TU wraps its code in ONE namespace, `av_sync_output`. Only a function another
   TU calls has external linkage, and it is declared once, at the bottom of the internal header,
@@ -237,3 +239,25 @@ the self-test).
   path first moves norihiro's demod into its own TU: `operator-`, `int16_to_complex`,
   `identify_audio_index_max`, `crc4_check`, `st_raw_audio_decode_data`,
   `st_raw_audio_test_preamble` and the non-camera-box tail of `st_raw_audio`.
+  - Issue 1470 added no code to the audio TU: its audio-thread code is the new
+    `sync-test-output-measure.cpp`, and `cb_audio_gate_and_publish` moved there, so the audio TU went
+    DOWN to 999 lines. That instruction still stands for the next addition to the audio TU itself;
+    new audio-THREAD code goes to the measure TU.
+
+## The measurement-source share's anchors (issue 1470)
+
+`tests/av_sync_dock_measure_share_1470.rs` (comment-stripped) and the pwsh step "Assert dock measures
+only the measurement source's share (issue 1470)" in BOTH windows-genlock workflows (comments kept)
+pin the same list: `st_raw_audio` publishing nothing in camera-box mode, ONE caller of
+`cb_audio_gate_and_publish(st, ` and ONE `cb_audio_fifo.publish(`, the `st_cb_mix_tick` steps in order
+(its cost stamp, the tick bounds, the source lock, the four reads, the tracker, the per-source mix
+buffer of `mix_idx`, the fill, the NotInProgram end, the block hand-off, the cost max) and its banned
+list (`mix->data`, a lookup, a release, `blog(`, a decode, an allocation), the held source
+(`cb_measure_source_hold` swap + release after the lock, ONE `obs_get_source_by_name(
+CAMERA_BOX_MEASURE_SOURCE_NAME)`, no `"mbc"` literal), the connect / disconnect bodies and their
+places in `st_start` / `st_stop` / `st_destroy`, the release on stop, the `NotInProgram` reason. Each
+pwsh needle is a span with NO comment inside it: put an explanatory comment above or below the span.
+The step uses its own `Assert-InOrder` helper (an `IndexOf` from the previous match). Mutation proof
+recipe: `mutate_wiring`-style, a scratch copy of `vendor/av-sync-dock/{src,test}` + the CMakeLists, one
+mutant each, the Rust tests compiled with `CARGO_MANIFEST_DIR=<scratch>` and the extracted pwsh steps
+run with the scratch tree as cwd.

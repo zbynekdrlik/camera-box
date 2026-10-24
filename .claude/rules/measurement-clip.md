@@ -81,7 +81,13 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
   (`tests/av_sync_dock_reserved_origin_1404.rs`, `tests/python/test_reserved_origin_runs_1404.py`),
   behaviour by `camera-box-selftest.cpp`, the wiring also by the pwsh step "Assert dock never pairs
   a reserved origin QR (issue 1404)" in both windows-genlock workflows. Live after a FULL-bundle
-  deploy on the stream box. Camera-node burns (9110xx below 911013) are still paired, as decided;
+  deploy on the stream box.
+  **The clip's AUDIO marker reached the dock anyway (issue 1470).** Its QR was filtered, but the
+  clip's sound carries the painter's marker format with only an 8-bit index, and the stream
+  program's `Development` mixed it next to `mbc`: the dock paired the clip's digital markers with the
+  painter's QR and locked on -900.9 ms (scatter 0-1 ms, more readings than the room marker). The dock
+  now decodes only `mbc`'s own share of the mix (`av-sync-dock-decode-worker.md`, issue 1470), so
+  the clip is never decoded there, whatever plays next to it; a clip-only program reads STALE. Camera-node burns (9110xx below 911013) are still paired, as decided;
   see the ticket's follow-up note.
 - **The CG A/V is measured offline from the clip's own marker:** `recording-verdict --av-sync <rec>
   --av-marker-log <clip>.markers.csv --av-run 911016` (`src/av_run_pairing.rs`: the clip's own tick

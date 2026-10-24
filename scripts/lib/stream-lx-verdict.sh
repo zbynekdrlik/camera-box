@@ -72,6 +72,18 @@ stream_access_label() {
   fi
 }
 
+# stream_lx_recording_cleanup_note INDENT HOST PATH [USER] -> issue 1474: the `[8/8e]` #652 cleanup
+# PLAN line of the stream recording on a Linux stream box: `<fleet name> ssh:` + an exact-path
+# `rm -f --` over plain ssh (USER default STREAM_USER, else newlevel), quoted for the local paste AND
+# the remote shell by shell_ssh_rm_plan_line -- the strih_lx_recording_cleanup_note twin. The Windows
+# stream line stays INLINE in recording-e2e.sh's else-branch (a Rust anchor pins it there).
+stream_lx_recording_cleanup_note() {
+  local indent="${1:-}" host="${2:-}" path="${3:-<unknown>}" user="${4:-${STREAM_USER:-newlevel}}" name
+  command -v shell_ssh_rm_plan_line >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/shell-quote.sh"
+  name="$(obs_fleet_name_for_host "$host" 2>/dev/null || true)"
+  shell_ssh_rm_plan_line "$indent" "${name:-stream} ssh:" "$user" "$host" "$path"
+}
+
 stream_lx_partial_pullback_note() {
   printf '    pull back to dev1: %s  AND the #186 pixel-proof dir %s\n' "${1:-}" "${2:-}"
   printf '      (the Linux stream box: already pulled back over scp by recording-verdict-on-stream-snv.sh;\n'

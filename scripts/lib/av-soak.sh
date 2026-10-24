@@ -120,8 +120,21 @@ av_soak_unacked_cams() {
 # no other decode on the box is touched. The bracketed pattern never matches the remote shell's own
 # command line (the issue-626 pkill self-match gotcha). Ends with `;`.
 av_soak_strih_decode_kill_cmd() {
-  local stamp="$1"
-  printf '%s\n' "pkill -f 'recording-verdic[t] --extract-partial strih .*av-soak-${stamp}-s' || true;"
+  av_soak_lx_decode_kill_cmd strih "$1"
+}
+
+# av_soak_lx_decode_kill_cmd ROLE STAMP -> the same remote text for a Linux OBS box's ROLE extract
+# (strih on strih-snv, stream on the Linux stream box stream-snv, issue 1474). Ends with `;`.
+av_soak_lx_decode_kill_cmd() {
+  local role="$1" stamp="$2"
+  printf '%s\n' "pkill -f 'recording-verdic[t] --extract-partial ${role} .*av-soak-${stamp}-s' || true;"
+}
+
+# av_soak_stream_remote_path PLATFORM WIN_DIR LX_DIR NAME -> where the soak puts NAME on the stream
+# box: WIN_DIR\NAME on a Windows box, LX_DIR/NAME (relative = the ssh user's home) on the Linux
+# stream-snv (issue 1474, the dir recording-verdict-on-stream-snv.sh decodes into).
+av_soak_stream_remote_path() {
+  if [ "$1" = linux ]; then printf '%s/%s\n' "${3%/}" "$4"; else av_soak_win_join "$2" "$4"; fi
 }
 
 # av_soak_stream_decode_kill_ps STAMP -> PowerShell (stream box) stopping THIS run's
@@ -136,9 +149,16 @@ av_soak_stream_decode_kill_ps() {
 # av_soak_onbox_cleanup_lines STRIH_HOST STRIH_OUT_DIR OUT_DIR_WIN STAMP -> the plan lines (never run
 # by the soak) removing this run's own on-box decode artifacts (partials, pixel proofs, marker logs,
 # schedules), scoped to the run's stamp.
+# issue 1474: with STREAM_HOST + STREAM_LX_DIR (a Linux stream box) the stream line is the same
+# `rm -rf --` over ssh as strih's, under the box's fleet name; without them the Windows line is unchanged.
 av_soak_onbox_cleanup_lines() {
-  local host="$1" sdir="$2" wdir="$3" stamp="$4"
+  local host="$1" sdir="$2" wdir="$3" stamp="$4" shost="${5:-}" sldir="${6:-}" sname
   printf "strih-snv ssh:         ssh <STRIH_USER>@%s \"rm -rf -- %s/av-soak-%s-*\"\n" "$host" "$sdir" "$stamp"
+  if [ -n "$shost" ] && [ -n "$sldir" ]; then
+    sname="$(obs_fleet_name_for_host "$shost" 2>/dev/null || true)"
+    printf "%-22s ssh <STREAM_USER>@%s \"rm -rf -- %s/av-soak-%s-*\"\n" "${sname:-stream} ssh:" "$shost" "$sldir" "$stamp"
+    return 0
+  fi
   printf "win-stream-snv Shell: Remove-Item -Recurse -Force '%s'\n" \
     "$(av_soak_win_join "$wdir" "av-soak-${stamp}-*")"
 }
@@ -171,6 +191,20 @@ av_soak_stream_extract_argv() {
   local marker="${10}" sched="${11}" partial="${12}"
   _av_st=("$script" --out-dir "$odir" --stream-rec "$rec" --execute --verdict-exe-local "$exe"
     --local-out-dir "$ldir" -- --extract-partial stream --stream "$rec" --capture-fps "$tfps"
+    --strih-emit-fps "$sfps" --stream-capture-fps "$tfps" --cam2-run-id "$rid"
+    --av-marker-log "$marker" --switch-schedule "$sched" --out "$partial")
+}
+
+# av_soak_stream_lx_extract_argv OUTVAR DECODE_SCRIPT VERDICT_BIN REMOTE_OUT_DIR LOCAL_OUT_DIR REC
+#   STRIH_FPS STREAM_FPS CAM2_RUN_ID MARKER SCHEDULE PARTIAL -> issue 1474: the Linux stream box's
+# in-place extract (recording-verdict-on-stream-snv.sh, the strih-snv on-box decode), the SAME shape
+# recording-e2e.sh's run_stream_extract Linux branch passes, plus the window's marker log + schedule.
+av_soak_stream_lx_extract_argv() {
+  local -n _av_sl="$1"
+  local script="$2" bin="$3" rdir="$4" ldir="$5" rec="$6" sfps="$7" tfps="$8" rid="$9"
+  local marker="${10}" sched="${11}" partial="${12}"
+  _av_sl=("$script" --verdict-bin "$bin" --out-dir "$rdir" --local-out-dir "$ldir" --stream-rec "$rec"
+    -- --extract-partial stream --stream "$rec" --capture-fps "$tfps"
     --strih-emit-fps "$sfps" --stream-capture-fps "$tfps" --cam2-run-id "$rid"
     --av-marker-log "$marker" --switch-schedule "$sched" --out "$partial")
 }

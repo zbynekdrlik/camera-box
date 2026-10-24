@@ -127,7 +127,9 @@ EOF
   [ -n "${STRIH_USER:-}" ] || missing+=(STRIH_USER)
   [ -n "${STRIH_PW:-}" ] || missing+=(STRIH_PW)
   [ -n "${PROBE_BIN_DIR:-}" ] && [ -x "$PROBE_BIN_DIR/recording-verdict" ] || missing+=("PROBE_BIN_DIR (recording-verdict)")
-  [ -n "${WIN_VERDICT_EXE_LOCAL:-}" ] && [ -f "$WIN_VERDICT_EXE_LOCAL" ] || missing+=("WIN_VERDICT_EXE_LOCAL")
+  if [ "$(stream_box_platform "$STREAM_HOST")" != linux ]; then  # issue 1474: a Windows stream box only
+    [ -n "${WIN_VERDICT_EXE_LOCAL:-}" ] && [ -f "$WIN_VERDICT_EXE_LOCAL" ] || missing+=("WIN_VERDICT_EXE_LOCAL")
+  fi
   if [ "${#missing[@]}" -gt 0 ]; then
     echo "--run would need: ${missing[*]}"
   else

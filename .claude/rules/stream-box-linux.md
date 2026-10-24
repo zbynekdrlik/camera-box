@@ -8,6 +8,9 @@ paths:
   - "scripts/lib/stream-lx-verdict.sh"
   - "scripts/recording-verdict-on-stream-snv.sh"
   - "tests/python/*1462*"
+  - "tests/python/*1474*"
+  - "scripts/av-soak.sh"
+  - "scripts/lipsync-test-mode.sh"
 ---
 
 # The stream box is Linux (stream-snv) — every dev1 step that runs ON it picks the transport by fleet class (issue 1462)
@@ -89,7 +92,8 @@ full E2E, on a Linux stream box exactly as on Windows.
 - **`[0/8]` version-integrity gate:** `version-integrity-gate.sh --linux NAME` (repeatable;
   `--strih-linux` = `--linux strih`) Linux-grades a `--win-state` box: the Windows-only rows
   (ndi_runtime, distroav_dll_paths, the obs.dll / distroav.dll byte rows, the #826 OBS-identity set)
-  are loud SKIPPED rows naming the box, the rest is graded, a drift still refuses. recording-e2e.sh
+  are loud SKIPPED rows naming the box, the rest is graded, a drift still refuses; since issue 1474
+  the box's deployed bundle bytes are the fail-closed `linux_so_bytes` row instead. recording-e2e.sh
   sets `STREAM_LINUX_GATE_ARG` from `stream_box_platform "$STREAM"` and passes
   `${STREAM_LINUX_GATE_ARG:+--linux stream}` in BOTH gate invocations, BEFORE the
   `${STRIH_LINUX_GATE_ARG:+--strih-linux}` tail (two tests pin that tail as the last argument).
@@ -145,25 +149,49 @@ full E2E, on a Linux stream box exactly as on Windows.
   with a stream partial and a graded A/V term; the first run uploads `recording-verdict` to
   `/home/newlevel/recording-verdict` on stream-snv (the issue-1118 gate then skips it).
 
+## Ported in issue 1474 (owner 24.10.2026: Linux coverage at least the Windows level)
+
+- **The `[0/8]` byte rows:** the Linux boxes' deployed bundle bytes are graded again, the
+  `linux_so_bytes` row (`.claude/rules/version-integrity-gate.md`, issue 1474 section).
+- **The `[8/8e]` #652 cleanup plan** (all three sites): a `stream_box_platform` split whose Linux
+  branch is `stream_lx_recording_cleanup_note` (`stream-lx-verdict.sh`), an exact-path `rm -f --`
+  over plain ssh named by the box's fleet name; the Windows `Remove-Item` stays INLINE in the
+  else-branch (`harness_recording_e2e_cleanup_after_decode.rs` pins it). The line itself is
+  `shell_ssh_rm_plan_line` (`shell-quote.sh`), shared with `strih_lx_recording_cleanup_note`.
+- **`scripts/av-soak.sh` (and through it `av-restart-matrix.sh`):** the soak resolves
+  `STREAM_PLATFORM` once (`stream_box_platform`). On a Linux stream box: the marker log + schedule go
+  up with `stream_lx_push_file` (in `lx_bounded`, a timeout-bounded child sourcing
+  `stream-lx-verdict.sh`) into `STREAM_LX_OUT_DIR` (`AV_SOAK_STREAM_LX_OUT_DIR`, default
+  `verdict-out`, relative = the ssh user's home), the decode is `recording-verdict-on-stream-snv.sh`
+  with the `run_stream_extract` Linux shape (`av_soak_stream_lx_extract_argv`, the Linux
+  `recording-verdict` from PROBE_BIN_DIR), a timed-out decode is stopped with
+  `av_soak_lx_decode_kill_cmd stream` through `stream_box_exec`, and the cleanup plan's lines are the
+  exact-path rm ones. No `WIN_VERDICT_EXE_LOCAL` is needed there (neither by the matrix). A Windows
+  stream box keeps every PowerShell text: `tests/python/test_av_soak_orchestrator_1367.py` runs with
+  an `OBS_FLEET` override marking 10.77.9.204 windows-genlock; the Linux path is
+  `tests/python/test_av_soak_stream_lx_1474.py`. The `--plan` printout moved to
+  `scripts/lib/av-soak-plan.sh` (the file budget).
+- **`scripts/lipsync-test-mode.sh`'s arrival verify:** the probe pull is `stream_box_download` and the
+  delete `stream_box_exec` with both texts (`audio_preflight_delete_ps` / `_sh`), each in a
+  `timeout bash -c` that re-sources `win-ssh-exec.sh` + `stream-box.sh`. Its two Rust harnesses copy
+  `stream-box.sh`, `shell-quote.sh` and `obs-fleet.sh` too (their STREAM `1.2.3.4` is no fleet row,
+  so they keep exercising the Windows path); `tests/python/test_lipsync_arrival_stream_lx_1474.py`
+  runs the Linux path (the delete proven by the probe file being gone).
+
 ## Still Windows-only (follow-up candidates handed to the supervisor in the LANE-RETURN, not ported)
 
-- The `[8/8e]` #652 cleanup plan line for the stream recording (`win-stream-snv Shell: Remove-Item`,
-  three sites; plan text only, inside the 703 merge→exit window), and `strih_planner_holder_note`'s
-  plan-mode text (it still says the MCP holder runs 8/8b).
-- `scripts/av-soak.sh` (the stream decode kill + upload, `win_ssh_run` / `win_ssh_upload` at lines
-  ~515 and ~953-956) and so `av-restart-matrix.sh`, which runs its windows through the soak.
+- `strih_planner_holder_note`'s plan-mode text (it still says the MCP holder runs 8/8b).
 - The Windows planners that still take `--box stream`: `launch-obs-genlock.sh` and
   `obs-self-heal-install.sh` (stream-snv restarts through `strih-obs.service`; both should refuse
   a linux-genlock box by class, `obs_fleet_refuse_linux_target`), and `avsync-watchdog-install.sh`
   (a Windows scheduled task on the stream box). `scripts/lib/genlock-fleet-boxes.sh` still maps
   stream-snv to the `win-stream-snv` MCP; the deploy planner already sends it the setup-strih arm.
-- `scripts/lipsync-test-mode.sh`'s arrival verify (lines ~402-411: `win_ssh_download` of the probe
-  recording and a `win_ssh_run` PowerShell delete against `$STREAM`); its two Rust harnesses copy only
-  three libs into a temp dir, so a port must add `stream-box.sh` + `shell-quote.sh` to those copies.
+  Their Rust/pytest suites drive `--box stream` against the default fleet, so the refusal needs a
+  Windows `OBS_FLEET` override in each of them (issue 1474 follow-up).
 - The opt-in restart / zero-loss modes' stream decode plans; the legacy `VERDICT_ON_STREAM=0`
   `recording-fetch-windows.sh` path; the obs-fleet `win-baseline` facet still lists stream-snv
   (report-only rows that read unread); the obs-session watchdog's class gate now skips stream-snv
-  (its operator visibility is watched by nothing between E2E runs).
+  (its operator visibility is watched by nothing between E2E runs) (issue 1474 follow-up).
 
 ## Tests (Tier-0, no rig)
 
