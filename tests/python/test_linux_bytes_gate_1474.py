@@ -275,7 +275,7 @@ def _seam(tmp_path, ok=True):
     rec = tmp_path / "seam.log"
     src = _manifest(tmp_path, "bundle_seam_1474")
     seam = tmp_path / "seam.sh"
-    seam.write_text('#!/bin/bash\necho "$*" >> "%s"\n%s\n' % (
+    seam.write_text('#!/bin/bash\necho "$* timeout=${MANIFEST_AUTOSOURCE_TIMEOUT_S:-unset}" >> "%s"\n%s\n' % (
         rec, ('cp "%s" "$5" && printf %%s "$5"' % src) if ok else "exit 1"))
     seam.chmod(0o755)
     return seam, rec
@@ -316,6 +316,9 @@ def test_the_helper_hands_the_gate_the_box_bytes_and_the_ci_manifest(tmp_path):
     assert pathlib.Path(args[3].split("=", 1)[1]).read_text() == _manifest(tmp_path, "bundle_seam_1474").read_text()
     seam_args = rec.read_text().split()
     assert seam_args[:4] == ["zbynekdrlik/camera-box", "linux-genlock.yml", "obs-genlock-linux-x86_64-strih", SHA], seam_args
+    # the strih bundle is one ~600 MB zip (run 40031379800: 601430199 bytes) that GitHub serves only
+    # whole, so its first fetch per build needs more than the 300 s default gh bound
+    assert seam_args[-1] == "timeout=900", seam_args
     ssh = [c for c in calls(rig) if c["tool"] == "ssh"]
     assert len(ssh) == 1 and ssh[0]["target"] == "newlevel@10.77.9.202", ssh
     assert "UserKnownHostsFile=/dev/null" in " ".join(ssh[0]["argv"]), ssh
