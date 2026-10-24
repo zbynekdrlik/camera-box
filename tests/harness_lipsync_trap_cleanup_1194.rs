@@ -146,6 +146,11 @@ fn setup(dir: &Path) {
         "rig-test-ledger.sh",
         "win-ssh-exec.sh",
         "audio-presence-preflight.sh",
+        // issue 1474: the arrival verify reaches the stream box through the ONE stream-box transport
+        // (stream_box_download / stream_box_exec), which reads the box's obs-fleet class.
+        "stream-box.sh",
+        "shell-quote.sh",
+        "obs-fleet.sh",
     ] {
         fs::copy(src.join("scripts/lib").join(lib), dir.join("lib").join(lib)).unwrap();
     }
