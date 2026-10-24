@@ -58,6 +58,12 @@ PROBE_COUNT_TIMEOUT_S = 600
 # multiprocessing's map waiting forever; the bound turns that into an error (UNKNOWN), not a hang.
 DECODE_S_PER_FRAME = 1.0
 DECODE_TIMEOUT_FLOOR_S = 600
+# Read each frame at the painter QRs' known corner points first, the full detector only as the
+# fallback (KnownPositionDetector, design 6387919956 part a). Off = the full detector on every
+# plane, the reference the tests compare against (an in-process decode, workers=1).
+KNOWN_POSITION_READ = True
+_RANGE_READS = {}  # per process: the KnownPositionDetector counters of the last _decode_range
+LAST_READS = {}  # abspath -> the read counters of the last decode_raw of that file (cached_ticks)
 
 
 def painter_payload(text, runs=()):
@@ -87,23 +93,90 @@ def painter_tick_run(texts, runs=()):
     return min(found) if found else None
 
 
-def _qr_texts(det, plane, scale):
-    """The texts of the QRs decoded in one plane, or None (no QR found, or a detector error)."""
+class KnownPositionDetector:
+    """A cv2.QRCodeDetector that remembers where the painter's QRs are (issue 1404, design
+    6387919956 part a).
+
+    The painter's two QRs sit at fixed positions in a recording, and a full `detectAndDecodeMulti`
+    (finder-pattern search over the whole plane) is most of the decode's time. So per half and per
+    plane (gray / blue) this keeps the corner points of the painter QR the full detector last read,
+    and `_half_read` reads the next frame's planes at those points first (`QRCodeDetector.decode`;
+    gray, then blue), and runs the full detector (gray, then blue) only when neither gives a valid
+    painter payload (a cut to another framing, a frame without the QR): the FALLBACK, which stores
+    the new points. Counted: `known` (planes read at the stored points), `fallback` (stored points
+    that read nothing), `full` (every full detection). A caller that passes a plain cv2 detector
+    keeps the full read on every plane.
+
+    What it changes, measured on real files (issue 1404, 24.10.2026): the decode at the stored points
+    also reads a QR the finder search missed, so a few more halves read (the yu1zFSHFdu8 VOD: 309 of
+    26940 halves, 5 more frames with a tick; the run's 4K stream recording: 380 of 18632 halves, 6
+    frames; each added tick the +2 step of its neighbours); no tick the full detector read changes,
+    and no 'x' frame appears or goes. A committed real crop reads a half more, never a half
+    differently (tests/python/test_youtube_leg_known_position_1404.py)."""
+
+    def __init__(self):
+        import cv2
+
+        self.det = cv2.QRCodeDetector()
+        self.points = {}
+        self.known = self.fallback = self.full = 0
+
+    def stats(self):
+        return {"known": self.known, "fallback": self.fallback, "full": self.full}
+
+    def read_known(self, plane, key, pick):
+        """The pick of the QR read at the stored points of `key`, or None (no points, or no valid
+        painter payload there: counted as a fallback)."""
+        import cv2
+
+        pts = self.points.get(key)
+        if pts is None:
+            return None
+        try:
+            text, _ = self.det.decode(plane, pts)
+        except cv2.error:  # points that no longer fit this frame: the full detector decides
+            text = ""
+        found = pick([text]) if text else None
+        if found is None:
+            self.fallback += 1
+            return None
+        self.known += 1
+        return found
+
+    def remember(self, key, texts, points, pick, found):
+        """Store the corner points of the QR whose text gave `found`."""
+        for text, pts in zip(texts, points):
+            if text and pick([text]) == found:
+                self.points[key] = np.ascontiguousarray(pts, dtype=np.float32).reshape(1, 4, 2)
+                return
+
+
+def _qr_detect(det, plane):
+    """(texts, points) of the QRs the full detector reads in one plane, or (None, None)."""
     import cv2
 
-    if scale != 1.0:
-        plane = cv2.resize(plane, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     try:
-        ok, texts, _, _ = det.detectAndDecodeMulti(plane)
+        ok, texts, points, _ = det.detectAndDecodeMulti(plane)
     except cv2.error as e:  # one unreadable half is an undecodable half, never a crash
         print(f"youtube_leg_ticks: QR detector error on a frame half: {e}", file=sys.stderr)
-        return None
-    return texts if ok else None
+        return None, None
+    return (texts, points) if ok else (None, None)
+
+
+def _scaled(plane, scale):
+    import cv2
+
+    return cv2.resize(plane, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale != 1.0 else plane
+
+
+def _plane_read(det, plane, scale, pick):
+    """pick(texts) of one plane read by the full detector (a plain cv2 detector)."""
+    texts = _qr_detect(det, _scaled(plane, scale))[0]
+    return pick(texts) if texts is not None else None
 
 
 def _qr_tick(det, plane, scale, runs=()):
-    texts = _qr_texts(det, plane, scale)
-    return painter_tick(texts, runs) if texts is not None else None
+    return _plane_read(det, plane, scale, lambda texts: painter_tick(texts, runs))
 
 
 def _half_planes(img):
@@ -115,29 +188,57 @@ def _half_planes(img):
     yield np.ascontiguousarray(img[:, :, 0])
 
 
-def _half_tick(det, img, scale, runs=()):
-    """Painter tick of one QR half: gray first, then the blue channel (the mid-transition colour)."""
-    for plane in _half_planes(img):
-        tick = _qr_tick(det, plane, scale, runs)
-        if tick is not None:
-            return tick
-    return None
+def _half_read(det, img, scale, pick, side):
+    """pick(texts) of one QR half, gray first, then the blue channel (the mid-transition colour).
 
+    A KnownPositionDetector (`side` "L" / "R" keys its points) reads the planes at their stored
+    points first (gray, then blue), and only when neither gives a painter payload runs the full
+    detector (gray, then blue: the fallback, which stores the new points). Any other detector runs
+    the full detector on each plane, as before."""
+    if not isinstance(det, KnownPositionDetector) or side is None:
+        for plane in _half_planes(img):
+            found = _plane_read(det, plane, scale, pick)
+            if found is not None:
+                return found
+        return None
+    planes = []
 
-def _half_tick_run(det, img, scale, runs):
-    """(tick, run) of one QR half for a run-scoped decode (the planes of _half_tick), or None."""
-    for plane in _half_planes(img):
-        texts = _qr_texts(det, plane, scale)
-        found = painter_tick_run(texts, runs) if texts is not None else None
+    def plane(k):  # the scaled planes, made on first use
+        while len(planes) <= k:
+            planes.append(_scaled(next(gen), scale))
+        return planes[k]
+
+    gen = _half_planes(img)
+    for k in (0, 1):
+        if (side, k) in det.points:
+            found = det.read_known(plane(k), (side, k), pick)
+            if found is not None:
+                return found
+    for k in (0, 1):
+        det.full += 1
+        texts, points = _qr_detect(det.det, plane(k))
+        found = pick(texts) if texts is not None else None
         if found is not None:
+            det.remember((side, k), texts, points, pick, found)
             return found
     return None
+
+
+def _half_tick(det, img, scale, runs=(), side=None):
+    """Painter tick of one QR half (_half_read)."""
+    return _half_read(det, img, scale, lambda texts: painter_tick(texts, runs), side)
+
+
+def _half_tick_run(det, img, scale, runs, side=None):
+    """(tick, run) of one QR half for a run-scoped decode (_half_read), or None."""
+    return _half_read(det, img, scale, lambda texts: painter_tick_run(texts, runs), side)
 
 
 def band_ticks(band, det, scale=DECODE_SCALE, runs=()):
     """(left tick | None, right tick | None) of the QR band (the top 62 % of a frame)."""
     w = band.shape[1]
-    return _half_tick(det, band[:, : w // 2], scale, runs), _half_tick(det, band[:, w // 2:], scale, runs)
+    return (_half_tick(det, band[:, : w // 2], scale, runs, "L"),
+            _half_tick(det, band[:, w // 2:], scale, runs, "R"))
 
 
 def half_ticks(frame, det, scale=DECODE_SCALE, runs=()):
@@ -151,8 +252,8 @@ def half_ticks_run(frame, det, scale=DECODE_SCALE, runs=()):
     cut) read as nothing: one frame shows one run's tick line or no tick."""
     band = frame[0:int(frame.shape[0] * QR_TOP_FRACTION)]
     w = band.shape[1]
-    left = _half_tick_run(det, band[:, : w // 2], scale, runs)
-    right = _half_tick_run(det, band[:, w // 2:], scale, runs)
+    left = _half_tick_run(det, band[:, : w // 2], scale, runs, "L")
+    right = _half_tick_run(det, band[:, w // 2:], scale, runs, "R")
     if left is not None and right is not None and left[1] != right[1]:
         return None, None, None
     run = (left or right or (None, None))[1]
@@ -227,7 +328,7 @@ def _decode_range(job):
     if int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != start:
         cap.release()
         return [], False, False
-    det = cv2.QRCodeDetector()
+    det = KnownPositionDetector() if KNOWN_POSITION_READ else cv2.QRCodeDetector()
     out, hit_end = [], False
     i = start
     while end is None or i < end:
@@ -243,7 +344,17 @@ def _decode_range(job):
     if not hit_end and not cap.grab():  # the file ends exactly here (a frame count estimated too high)
         hit_end = True
     cap.release()
+    _RANGE_READS.clear()
+    if isinstance(det, KnownPositionDetector):
+        _RANGE_READS.update(det.stats())
     return out, True, hit_end
+
+
+def _decode_job(job):
+    """_decode_range + the read counters of its detector: (rows, seek_ok, hit_end, reads)."""
+    _RANGE_READS.clear()
+    rows, seek_ok, hit_end = _decode_range(job)
+    return rows, seek_ok, hit_end, dict(_RANGE_READS)
 
 
 def container_frames(path):
@@ -266,7 +377,7 @@ def _merge_chunks(parts):
     chunk's own frame numbers are never trusted, they are where the seek was aimed, not where it
     landed."""
     by_pts = {}
-    for rows, _, _ in parts:
+    for rows, *_ in parts:
         for r in rows:
             by_pts.setdefault(r[1], r)
     return [(k,) + r[1:] for k, r in enumerate(sorted(by_pts.values(), key=lambda r: r[1]))]
@@ -284,7 +395,7 @@ def _check_decode(path, jobs, parts):
     timeline module judges it. A single pass is taken in its own frame order (no pts merge)."""
     err = ChunkedDecodeError if len(parts) > 1 else RuntimeError
     ended = None  # the start of the first chunk that ran into the end of the file
-    for job, (rows, seek_ok, hit_end) in zip(jobs, parts):
+    for job, (rows, seek_ok, hit_end, *_) in zip(jobs, parts):
         if ended is not None:
             if rows:
                 raise err(f"{path}: frames decoded after the end of the file at chunk {job[1]}")
@@ -324,21 +435,37 @@ def _run_jobs(path, jobs, workers, frames):
     `if __name__ == "__main__":` (the tool's CLI does); without it every worker dies at start-up and
     the pool runs into its bound."""
     if workers == 1:
-        return [_decode_range(j) for j in jobs]
+        return [_decode_job(j) for j in jobs]
     import multiprocessing
 
     n = min(workers, len(jobs))
     limit = max(DECODE_TIMEOUT_FLOOR_S, DECODE_S_PER_FRAME * frames / n)
     with multiprocessing.get_context("spawn").Pool(n, initializer=_worker_init) as pool:
         try:
-            return pool.map_async(_decode_range, jobs).get(limit)
+            return pool.map_async(_decode_job, jobs).get(limit)
         except multiprocessing.TimeoutError:
             raise RuntimeError(f"{path}: the decode did not finish in {limit:.0f} s") from None
 
 
-def decode_raw(path, workers=4, scale=DECODE_SCALE, runs=()):
+def _report_reads(path, raw, parts, reads):
+    """Sum the chunks' read counters, print them, fill `reads` and LAST_READS[path]."""
+    total = {"frames": len(raw), "known": 0, "fallback": 0, "full": 0}
+    for part in parts:
+        for k, v in (part[3] if len(part) > 3 else {}).items():
+            total[k] = total.get(k, 0) + v
+    print(f"youtube_leg_ticks: {path}: {total['frames']} frames, {total['known']} known-position reads, "
+          f"{total['full']} full detections ({total['fallback']} a fallback after a known-position read "
+          f"found no painter QR)", file=sys.stderr)
+    LAST_READS[os.path.abspath(str(path))] = dict(total)
+    if reads is not None:
+        reads.update(total)
+    return raw
+
+
+def decode_raw(path, workers=4, scale=DECODE_SCALE, runs=(), reads=None):
     """Raw (index, pts, left, right) of EVERY frame of a video file, or RuntimeError. `runs`: the
-    reserved ids also read as a tick (CLIP_RUNS for a measurement-clip file; default none).
+    reserved ids also read as a tick (CLIP_RUNS for a measurement-clip file; default none). `reads`
+    (a dict) receives the read counters: frames, known, fallback, full (KnownPositionDetector).
 
     The file is cut into chunks by its frame count, the last chunk reads to the end of the file (a
     frame count is an estimate in some containers), and the chunks are merged by pts. When the
@@ -361,11 +488,13 @@ def decode_raw(path, workers=4, scale=DECODE_SCALE, runs=()):
     jobs = [(str(path), s, s + chunk if k + 1 < len(starts) else None, scale) + extra
             for k, s in enumerate(starts)]
     try:
-        return _check_decode(path, jobs, _run_jobs(path, jobs, workers, n))
+        parts = _run_jobs(path, jobs, workers, n)
+        return _report_reads(path, _check_decode(path, jobs, parts), parts, reads)
     except ChunkedDecodeError as e:
         print(f"youtube_leg_ticks: {e}; decoding again in one pass (no seek)", file=sys.stderr)
     one = [(str(path), 0, None, scale) + extra]
-    return _check_decode(path, one, _run_jobs(path, one, workers, n))
+    parts = _run_jobs(path, one, workers, n)
+    return _report_reads(path, _check_decode(path, one, parts), parts, reads)
 
 
 def decode_ticks(path, workers=4, scale=DECODE_SCALE, runs=()):
