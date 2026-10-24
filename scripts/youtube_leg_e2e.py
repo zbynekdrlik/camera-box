@@ -545,7 +545,8 @@ def _prefetch_pid(stage):
             argv = f.read().split(b"\0")
     except OSError:
         return None
-    ours = (any(x.endswith(b"youtube_leg_e2e.py") for x in argv) and b"prefetch" in argv
+    me = os.path.basename(sys.argv[0] or __file__).encode()  # the same script (also under the lib's override)
+    ours = (any(os.path.basename(x) == me for x in argv) and b"prefetch" in argv
             and os.path.abspath(stage.dir).encode() in [os.path.abspath(x.decode("utf-8", "replace")).encode()
                                                        for x in argv if x])
     return pid if ours else None
