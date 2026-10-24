@@ -59,8 +59,8 @@ constants named here. Never present a computed number as measured.
 - A lost hub tick is read past.
 - The card capture's 2048 frames are the issue-1345 ring's two `pw-cat` bursts, kept by lane 1. The
   deployed `alsa` adapter's `arecord` delivers 256-frame periods, so 3-4 blocks is likely enough
-  there: lower `target_ms` once the live capture jitter is read. That is 26-32 ms less on the
-  cutters -> cameramen path.
+  there: lower `target_ms` once the live capture jitter is read. That is 21-27 ms less on the
+  cutters -> cameramen path (42.7 ms down to 21.3 or 16.0 ms).
 - CPU, measured on dev1 (24.10.2026, `-C opt-level=3`): all 11 strih-snv legs playing, 17 rendered
   channels (a fanned mono cambox renders once), take 154 us of the 5.33 ms block = 2.9 % of one
   core. That runs on the hub-mix thread under the jitter lock; every push stamps its arrival
