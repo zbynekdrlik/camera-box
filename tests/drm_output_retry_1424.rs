@@ -397,7 +397,47 @@ fn scenarios() -> Vec<Scenario> {
                 (false, false, false, 7 * S, '-'),
             ],
         ),
+        (
+            // review finding: past 20 failed starts a connected output waits 30 s, yet a screen that
+            // leaves X and comes back is still tried at once (the unplug is a tracked transition, not
+            // read off the next-try distance)
+            "long-backoff-replug",
+            (1, 30, 100 * S),
+            vec![
+                (false, false, true, 71 * S, '-'),
+                (false, false, true, 100 * S, 'f'),
+                (false, false, true, 101 * S, '-'),
+                (false, false, false, 102 * S, '-'),
+                (false, false, true, 103 * S, 'f'),
+                (false, false, true, 104 * S, '-'),
+            ],
+        ),
     ]
+}
+
+#[test]
+fn a_reconnect_pulls_the_try_in_also_after_the_long_backoff() {
+    let mut st = r::Retry::default();
+    assert_eq!(r::step(&mut st, false, false, true, 0), r::NONE);
+    let mut now = 0;
+    for _ in 0..25 {
+        now = st.next_ns;
+        assert_eq!(r::step(&mut st, false, false, true, now), r::START);
+        r::attempted(&mut st, false, true, now);
+    }
+    assert_eq!(
+        st.next_ns,
+        now + 30 * S,
+        "25 failed starts on a connected screen: 30 s"
+    );
+    // still connected: the long backoff holds
+    assert_eq!(r::step(&mut st, false, false, true, now + S), r::NONE);
+    assert!(!st.unplugged);
+    // the screen leaves X, then comes back: tried at once
+    assert_eq!(r::step(&mut st, false, false, false, now + 2 * S), r::NONE);
+    assert!(st.unplugged);
+    assert_eq!(r::step(&mut st, false, false, true, now + 3 * S), r::START);
+    assert!(!st.unplugged);
 }
 
 fn rust_lines() -> Vec<String> {
@@ -422,6 +462,7 @@ fn rust_lines() -> Vec<String> {
             state,
             fails,
             next_ns,
+            unplugged: false,
         };
         for (i, &(started, alive, conn, now, then)) in evs.iter().enumerate() {
             let act = r::step(&mut st, started, alive, conn, now);
@@ -432,8 +473,8 @@ fn rust_lines() -> Vec<String> {
                 _ => {}
             }
             out.push(format!(
-                "sc:{name}:{i} act={act} state={} fails={} next={}",
-                st.state, st.fails, st.next_ns
+                "sc:{name}:{i} act={act} state={} fails={} next={} unplugged={}",
+                st.state, st.fails, st.next_ns, st.unplugged as i32
             ));
         }
     }
@@ -466,7 +507,7 @@ fn c_harness() -> String {
     }
     for (name, (state, fails, next_ns), evs) in scenarios() {
         src.push_str(&format!(
-            " st.state = {state}; st.fails = {fails}U; st.next_ns = {next_ns}ULL;\n"
+            " st.state = {state}; st.fails = {fails}U; st.next_ns = {next_ns}ULL; st.unplugged = false;\n"
         ));
         for (i, &(started, alive, conn, now, then)) in evs.iter().enumerate() {
             src.push_str(&format!(
@@ -485,7 +526,7 @@ fn c_harness() -> String {
                 _ => {}
             }
             src.push_str(&format!(
-                " printf(\"sc:{name}:{i} act=%d state=%d fails=%\" PRIu32 \" next=%\" PRIu64 \"\\n\", act, st.state, st.fails, st.next_ns);\n"
+                " printf(\"sc:{name}:{i} act=%d state=%d fails=%\" PRIu32 \" next=%\" PRIu64 \" unplugged=%d\\n\", act, st.state, st.fails, st.next_ns, st.unplugged ? 1 : 0);\n"
             ));
         }
     }
