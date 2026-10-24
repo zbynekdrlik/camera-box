@@ -114,8 +114,8 @@ notebook jack on EVERY stream box (never a USB interface), and the sink volume i
   PipeWire restart, and when only WirePlumber restarts and re-creates the node), the cookie is random per daemon
   start and a serial is never handed out twice in one run (review rounds 1 + 2: a restart between two looks
   reused the id, the watcher skipped the restore and KEPT the 100 %). A restore is recorded only when every
-  wpctl call succeeded (else it is tried again at the next look); a key with no core cookie is never recorded. A sink this box never restored (a login after a reboot, an
-  operator-audio restart) gets the kept level back (at least 10 %, so it is audible) and is UNMUTED; the first
+  wpctl call succeeded (else it is tried again at the next look); a key with no core cookie is never recorded.
+  A sink this box never restored (a login after a reboot, an operator-audio restart) gets the kept level back (at least 10 %, so it is audible) and is UNMUTED; the first
   session ever adopts the sink's current level as the kept one. A sink already restored (a restarted watcher
   after a panel restart) is adopted as it is, the operator's own mute included. The sink counts as gone only
   after `GONE_AFTER` (3) missed looks, so a slow pw-dump never flashes the label or re-runs the restore. Only
@@ -123,7 +123,8 @@ notebook jack on EVERY stream box (never a USB interface), and the sink volume i
 - **Cost:** one `pw-dump` per second (~11 ms on stream-pp, 24.10.2026), a client that creates no node.
 - **The stored mixer also covers the levels:** `alsactl store` writes each level control's dB as
   `dbvalue.N` (0.01 dB) in its comment; the mixer row reads Master / Headphone / PCM at 0 dB live (PCM has no
-  switch: its dB only) and needs each live one's Playback Volume at 0 there too (stream-pp's file of 20.10.2026 held Master -23.25 dB: a reboot would have brought that back).
+  switch: its dB only) and needs each live one's Playback Volume at 0 there too (stream-pp's file of 20.10.2026
+  held Master -23.25 dB: a reboot would have brought that back).
 - **Tests:** `tests/python/test_stream_operator_jack_volume_1465.py` (fake `pw-dump` / `wpctl` that applies
   its calls to the dump, fake `amixer` / `alsactl`, an `asound.state` fixture with a second card's Speaker on
   first, so the reader must keep to the headphone card's own block).
