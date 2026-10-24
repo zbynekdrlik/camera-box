@@ -3,8 +3,10 @@
 # sibling scripts/lib/*.sh convention of NOT setting `set -euo pipefail` here: sourcing runs this in
 # the CALLER's shell (scripts/av-soak.sh, which sets its own strict mode).
 #
-# scripts/lib/av-soak-plan.sh -- the 8 h soak's `--plan` printout (issue 1367), moved verbatim out of
-# scripts/av-soak.sh to keep the orchestrator under the file budget (issue 1474, the restart
+# scripts/lib/av-soak-plan.sh -- the 8 h soak's `--plan` printout (issue 1367), moved out of
+# scripts/av-soak.sh together with its issue-1474 Linux stream branches (the remote paths, the push
+# helper's name, the Linux extract, the Windows-only .exe prerequisite) to keep the orchestrator
+# under the file budget (issue 1474, the restart
 # matrix's av-restart-matrix-plan.sh shape). It is a VIEW of the soak's resolved configuration, so
 # print_plan reads the soak's globals and calls its plan_cmd -- set before it is called. Every command
 # it prints comes from the SAME builders --run executes (scripts/lib/av-soak.sh), so plan == run. It

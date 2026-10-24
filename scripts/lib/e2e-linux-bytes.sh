@@ -21,6 +21,8 @@
 # sha256sum, no marker sha, no manifest) is simply not handed over, and the gate reads a missing
 # gather or manifest for a --linux box as UNKNOWN and refuses the run. Each miss is ONE named line.
 #
+# State across calls: E2E_LINUX_BYTES_MEMO_SHA / _MEMO_PATH (the last build sha fetched and its
+# result, so the second box of one build reuses it).
 # Test seams (offline): manifest-autosource.sh's MANIFEST_AUTOSOURCE_CMD; E2E_LINUX_BYTES_REMOTE_PREFIX
 # (the remote install prefix, default /usr); E2E_LINUX_BYTES_SSH_TIMEOUT (default 30 s);
 # E2E_LINUX_BYTES_FETCH_TIMEOUT (the manifest fetch's gh bound, default 900 s, sized below).
@@ -56,15 +58,29 @@ e2e_linux_bytes_gather() {
     return 0
   fi
   # GitHub serves an artifact only as one zip, and the strih bundle is ~600 MB (run 40031379800:
-  # 601430199 bytes); the Windows full bundle (270 MB) took 145 s, so this one needs ~320 s on the
-  # first fetch of a build -- over the 300 s default gh bound. 900 s covers it with room; every later
-  # fetch of the same CI run is the per-run cache (3 s), so strih + stream of one build download once.
-  manifest="$(MANIFEST_AUTOSOURCE_TIMEOUT_S="${E2E_LINUX_BYTES_FETCH_TIMEOUT:-900}" \
-    manifest_autosource_fetch "$repo" linux-genlock.yml "$(linux_obs_box_bundle_artifact)" \
-    "$sha" "${outdir}/${role}-linux-manifest.json" || true)"
+  # 601430199 bytes); the Windows full bundle (270 MB) took 145 s, so this download needs ~320 s on
+  # the first fetch of a build -- over the 300 s default gh bound. 900 s covers it with room, for the
+  # DOWNLOAD only (the run lookup keeps 300 s). Every later fetch of the same CI run is the per-run
+  # cache (3 s). Two boxes of ONE build (strih + stream share a marker sha) fetch once per E2E: the
+  # result, a FAILURE included, is reused for the second box (review round 1: a repeated failed
+  # ~600 MB download would double the worst-case [0/8] wall time under the rig lease).
+  if [ "$sha" = "${E2E_LINUX_BYTES_MEMO_SHA:-}" ]; then
+    manifest="${E2E_LINUX_BYTES_MEMO_PATH:-}"
+  else
+    manifest="$(MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S="${E2E_LINUX_BYTES_FETCH_TIMEOUT:-900}" \
+      manifest_autosource_fetch "$repo" linux-genlock.yml "$(linux_obs_box_bundle_artifact)" \
+      "$sha" "${outdir}/${role}-linux-manifest.json" || true)"
+    E2E_LINUX_BYTES_MEMO_SHA="$sha"
+    E2E_LINUX_BYTES_MEMO_PATH="$manifest"
+  fi
   if [ -n "$manifest" ]; then
     LINUX_BYTES_GATE_ARGS+=(--linux-manifest "${role}=${manifest}")
-    echo "  ${role} (${host}): linux bundle manifest of build ${sha} fetched"
+    # the manifest's own build stamp: one sha can have two linux-genlock runs (a re-run, a tag
+    # dispatch) whose bytes differ, so a DRIFT is read against this stamp vs the box's own
+    # /opt/obs-genlock/BUNDLE_MANIFEST.json generated_at (.claude/rules/version-integrity-gate.md)
+    local gen=""
+    gen="$(sed -n 's/^[[:space:]]*"generated_at":[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null | sed -n 1p || true)"
+    echo "  ${role} (${host}): linux bundle manifest of build ${sha} (generated ${gen:-unknown}) fetched"
   else
     echo "  ${role} (${host}): could not fetch the $(linux_obs_box_bundle_artifact) manifest of build ${sha} -- the gate refuses (issue 1474)"
   fi

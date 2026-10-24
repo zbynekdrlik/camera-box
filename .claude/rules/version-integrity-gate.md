@@ -482,11 +482,19 @@ until issue 1474 nothing graded the deployed library bytes of either Linux box. 
   `--linux stream` / `--strih-linux` tail.
 - **The fetch is sized, not guessed:** the strih artifact is one ~600 MB zip (run 40031379800:
   601430199 bytes) that GitHub serves only whole; at the measured ~1.9 MB/s that is ~320 s, over the
-  300 s default gh bound, so this fetch runs with `MANIFEST_AUTOSOURCE_TIMEOUT_S=900`
-  (`E2E_LINUX_BYTES_FETCH_TIMEOUT`). The per-run cache makes every later fetch of the build (the
-  second box, the next E2E) a few seconds.
+  300 s default gh bound, so the DOWNLOAD alone runs under `MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S=900`
+  (`E2E_LINUX_BYTES_FETCH_TIMEOUT`; the run lookup keeps 300 s). Two boxes of one build fetch once
+  per E2E: the helper reuses the first box's result for a second box with the same marker sha, a
+  FAILURE included (review round 1: a repeated failed download would double the worst-case `[0/8]`
+  wall time under the rig lease). The per-run cache makes the next E2E's fetch a few seconds.
+- **One sha, two CI runs:** the fetch takes the NEWEST successful `linux-genlock.yml` run at the sha,
+  as the deploy planner does (`fleet_pick_run_at_sha`). A re-run or a tag dispatch at the same sha
+  builds DIFFERENT bytes, so a box deployed from the other run reads DRIFT (fail-closed, never a
+  pass; the issue-1346 class). The fetched line names the manifest's `generated_at`; compare it
+  with the box's own `/opt/obs-genlock/BUNDLE_MANIFEST.json` `generated_at` before calling a DRIFT a
+  wrong deploy.
 - **Supervisor check on the next E2E:** the `[0/8]` log shows `strih (10.77.9.202): bundle bytes
-  gathered (6 files)` + `linux bundle manifest of build <sha> fetched` for both boxes and six
+  gathered (6 files)` + `linux bundle manifest of build <sha> (generated <ts>) fetched` for both boxes and six
   `linux_so_bytes OK` rows per box, never a SKIPPED byte row for strih / stream.
 - **Tests:** `tests/python/test_linux_bytes_gate_1474.py` (the real gate over live-shaped states, the
   REAL gather snippet on a fake box root, the helper through the issue-1462 fake sshpass and the

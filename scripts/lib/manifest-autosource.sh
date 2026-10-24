@@ -16,10 +16,10 @@
 #   2. GATHER imag's deployed .so sha256s over ssh (imag is NOT a --win-state bundle-state box; its
 #      bytes have no other path into the gate) for the new --imag-bytes facet.
 #
-# ALL best-effort: a fetch/gather failure yields "" so the caller OMITS the arg and the gate facet
-# stays DORMANT (opt-in, #756-shape) -- never a spurious refuse. The ENFORCE flip (#758-shape) is
-# deferred to a follow-up (needs the live gather deployed + verified, a property no worktree worker
-# can check -- the #1067 port4455 class). `gh run download` + the imag ssh gather are isolated behind
+# ALL best-effort: a fetch/gather failure yields "" so the caller OMITS the arg. What an omitted arg
+# means is the GATE's call: the imag byte facet (ENFORCED since #1100) and the Linux boxes'
+# linux_so_bytes row (issue 1474) read it as UNKNOWN and refuse; the Windows fast pin treats a fetch
+# outage as dormant for that run. `gh run download` + the imag ssh gather are isolated behind
 # env-overridable command seams (MANIFEST_AUTOSOURCE_CMD, #836 executable-fixture) so the whole path
 # is offline-testable with no gh/ssh/network (tests/harness_manifest_autosource_1082.rs).
 
@@ -45,7 +45,7 @@ imag_so_gather_cmd() {
 # The replacement words are quoted (bash 5.2 patsub_replacement would expand an `&` in them).
 _obs_box_so_gather_cmd() {
   local prefix="$1"; shift
-  local t
+  local t IFS=' '   # "$*" joins with IFS's first character: always one space, whatever the caller set
   t="$(cat <<'REMOTE'
 if command -v sha256sum >/dev/null 2>&1; then
   for _p in __PATHS__; do
@@ -124,8 +124,12 @@ obs_box_so_bytes_csv() {
 # manifest_autosource_fetch REPO WORKFLOW ARTIFACT SHA DEST -> best-effort: fetch the
 # CI-authoritative BUNDLE_MANIFEST.json for the CI run of WORKFLOW at commit SHA, cache it at DEST,
 # and echo DEST. Echoes NOTHING (empty) and returns 0 on ANY failure (no marker SHA / unresolved run
-# / download error / no manifest inside) -- the caller treats "" as "facet dormant", so a fetch
-# failure never refuses a run.
+# / download error / no manifest inside). The CALLER decides what "" means: the Windows fast pin
+# treats it as a fetch outage (the pin omitted for that run), while the imag facet (issue 1100) and
+# the Linux boxes' linux_so_bytes row (issue 1474) refuse the run on it (fail-closed).
+# Bounds: every gh call is under MANIFEST_AUTOSOURCE_TIMEOUT_S (300 s); the artifact DOWNLOAD alone is
+# under MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S (default the same), so a caller fetching a big bundle
+# (the ~600 MB strih artifact) widens only the download, never the run lookup.
 #
 # #836 executable-fixture seam: if MANIFEST_AUTOSOURCE_CMD is set to an executable, it is invoked as
 # `$MANIFEST_AUTOSOURCE_CMD REPO WORKFLOW ARTIFACT SHA DEST` INSTEAD of gh (its contract: place a
@@ -173,7 +177,7 @@ manifest_autosource_fetch() {
   fi
   local tmp=""
   tmp="$(mktemp -d 2>/dev/null)" || return 0
-  if ! timeout "$tmo" gh run download "$run_id" --repo "$repo" -n "$artifact" --dir "$tmp" >/dev/null 2>&1; then
+  if ! timeout "${MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S:-$tmo}" gh run download "$run_id" --repo "$repo" -n "$artifact" --dir "$tmp" >/dev/null 2>&1; then
     rm -rf "$tmp" 2>/dev/null
     return 0
   fi
