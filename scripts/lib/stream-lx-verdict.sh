@@ -48,6 +48,19 @@ stream_lx_push_file() {
   printf '%s\n' "$dest"
 }
 
+# stream_access_label HOST -> how the [8/8b] banner names the stream box's decode transport: the box's
+# fleet name + plain ssh/scp on a Linux stream box, the win-* MCP name on a Windows one (the
+# strih_access_label twin, scripts/lib/strih-platform.sh).
+stream_access_label() {
+  local name
+  if [ "$(stream_box_platform "${1:-}")" = "linux" ]; then
+    name="$(obs_fleet_name_for_host "${1:-}" 2>/dev/null || true)"
+    printf '%s, plain ssh/scp' "${name:-${1:-}}"
+  else
+    printf 'win-stream-snv'
+  fi
+}
+
 stream_lx_partial_pullback_note() {
   printf '    pull back to dev1: %s  AND the #186 pixel-proof dir %s\n' "${1:-}" "${2:-}"
   printf '      (the Linux stream box: already pulled back over scp by recording-verdict-on-stream-snv.sh;\n'

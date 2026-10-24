@@ -5501,7 +5501,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
     _switch_schedule_args="--switch-schedule $SWITCH_SCHEDULE_WIN"
   fi
 
-  echo "    --- [8/8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
+  echo "    --- [8/8b] extract the STREAM partial ON the stream box ($(stream_access_label "$STREAM")), in place ---"
   # The stream recording carries all three burns; --extract-partial stream decodes it IN PLACE on
   # the stream box. It is passed ONLY its own --stream recording — NEVER the strih recording (the
   # strih recording is decoded on the strih box above), so no box-to-box copy is ever needed.
