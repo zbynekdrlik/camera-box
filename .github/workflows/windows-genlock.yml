@@ -1014,7 +1014,7 @@ jobs:
           }
           $refresh = Get-DockBody $output 'static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t video_ts)'
           Assert-InOrder $refresh 'cb_refresh_measure_source' @('obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_MEASURE_SOURCE_NAME);', 'const bool present = src != nullptr;', 'cb_measure_source_hold(st, src);', 'st->cb_measure_source_present.exchange(present);')
-          if ($refresh.Contains('obs_source_release(src);') -or ([regex]::Matches($output, [regex]::Escape('obs_get_source_by_name('))).Count -ne 1) {
+          if ($refresh.Contains('obs_source_release(src);') -or ([regex]::Matches($output, [regex]::Escape('obs_get_source_by_name(CAMERA_BOX_MEASURE_SOURCE_NAME)'))).Count -ne 1 -or $output.Contains('"mbc"')) {
             Write-Error "dock output sources: the measurement source must be looked up once and held for the audio thread (issue 1470)"; exit 1
           }
           $hold = Get-DockBody $output 'void cb_measure_source_hold(struct sync_test_output *st, obs_source_t *src)'

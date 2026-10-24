@@ -216,9 +216,15 @@ fn the_measurement_source_is_held_and_the_callback_follows_the_output() {
         "{DOCK_OUTPUT}: cb_refresh_measure_source releases the source it hands the audio thread"
     );
     assert_eq!(
-        src.matches("obs_get_source_by_name(").count(),
+        src.matches("obs_get_source_by_name(CAMERA_BOX_MEASURE_SOURCE_NAME)")
+            .count(),
         1,
-        "{DOCK_OUTPUT}: one lookup by CAMERA_BOX_MEASURE_SOURCE_NAME, never a second name (issue 1470)"
+        "{DOCK_OUTPUT}: one lookup by CAMERA_BOX_MEASURE_SOURCE_NAME (issue 1470)"
+    );
+    assert!(
+        !src.contains("\"mbc\""),
+        "{DOCK_OUTPUT}: the measurement source is named by CAMERA_BOX_MEASURE_SOURCE_NAME only, \
+         never a second hard-coded name (issue 1470)"
     );
     let hold = unique_body_of(&src, HOLD_SIG);
     assert!(
