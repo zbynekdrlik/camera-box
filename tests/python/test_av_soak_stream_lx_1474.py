@@ -53,7 +53,8 @@ def test_a_linux_stream_window_pushes_decodes_and_merges_with_no_powershell(rig)
     assert "--verdict-bin" in d and "--out-dir verdict-out" in d and "--stream-rec" in d, d
     assert "--extract-partial stream" in d and "--av-marker-log verdict-out/av-soak-" in d, d
     assert "--switch-schedule verdict-out/av-soak-" in d and "--out verdict-out/av-soak-" in d, d
-    assert "--verdict-exe-local" not in d and "C:" not in d and "\\\\" not in d, d
+    # (the fake OBS hands back a Windows-shaped recording path; the soak's OWN paths are Linux ones)
+    assert "--verdict-exe-local" not in d and "camera-box\\\\verdict-out" not in d and "--execute" not in d, d
     _assert_rig_restored(p)
 
 
