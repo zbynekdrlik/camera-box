@@ -88,8 +88,9 @@ RIG_LEASE_JOB="${RIG_LEASE_JOB:-${GITHUB_JOB:-full-path}}"
 # recording step that follows it in the same CI job) -- written into holder.json so a foreign
 # gate can decide whether to wait us out or fail fast.
 RIG_LEASE_HOLD_SECS="${RIG_LEASE_HOLD_SECS:-2700}"
-# Stale threshold comfortably ABOVE this job's own `timeout-minutes: 75` cap (full-path-e2e.yml)
-# so a genuinely-still-running holder is NEVER reclaimed on heartbeat age alone -- a dead/crashed
+# Stale threshold on the HEARTBEAT age: the keep-alive below beats it every 30 s for the whole hold
+# (issue 1383, up to the hold ceiling = full-path-e2e.yml's 105-min timeout since issue 1404), so a
+# genuinely-still-running holder is NEVER reclaimed on heartbeat age alone -- a dead/crashed
 # holder is still bounded-reclaimable, just not instantly (mirrors the #657 self-heal principle).
 RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 # How long WE are willing to wait for a live foreign holder to release before giving up. Defaults
