@@ -237,7 +237,13 @@ fn a_dormant_output_retries_fast_then_slow_and_slowest_while_unplugged() {
     assert_eq!(r::delay_ns(0, true), 2 * S);
     assert_eq!(r::delay_ns(4, true), 2 * S);
     assert_eq!(r::delay_ns(5, true), 5 * S);
-    assert_eq!(r::delay_ns(u32::MAX, true), 5 * S);
+    assert_eq!(r::delay_ns(19, true), 5 * S);
+    // review finding: a connected-but-off screen (a dark venue) is not retried on a fresh Vulkan
+    // instance every 5 s forever -- after 20 failed starts every 30 s (a plug-in / switch-on still
+    // pulls the next try in, the X reconnect rule)
+    assert_eq!(r::SLOW_TRIES, 20);
+    assert_eq!(r::delay_ns(20, true), 30 * S);
+    assert_eq!(r::delay_ns(u32::MAX, true), 30 * S);
     assert_eq!(r::delay_ns(0, false), 30 * S);
     assert_eq!(r::delay_ns(9, false), 30 * S);
 }
@@ -396,7 +402,7 @@ fn scenarios() -> Vec<Scenario> {
 
 fn rust_lines() -> Vec<String> {
     let mut out = Vec::new();
-    for f in [0u32, 1, 4, 5, 6, 100, u32::MAX] {
+    for f in [0u32, 1, 4, 5, 6, 19, 20, 21, 100, u32::MAX] {
         for c in [false, true] {
             out.push(format!("delay:{f}:{} {}", c as i32, r::delay_ns(f, c)));
         }
@@ -439,7 +445,7 @@ fn c_harness() -> String {
         "#include <stdio.h>\n#include <inttypes.h>\n#include \"obs-drm-output-retry.h\"\n\
          int main(void) {\n uint64_t w = 0; struct drm_output_retry st; int act = 0;\n (void)act;\n",
     );
-    for f in [0u32, 1, 4, 5, 6, 100, u32::MAX] {
+    for f in [0u32, 1, 4, 5, 6, 19, 20, 21, 100, u32::MAX] {
         for c in [false, true] {
             src.push_str(&format!(
                 " printf(\"delay:{f}:{} %\" PRIu64 \"\\n\", drm_output_retry_delay_ns({f}U, {}));\n",
