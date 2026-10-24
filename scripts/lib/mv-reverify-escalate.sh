@@ -210,7 +210,7 @@ PS
 mv_reverify_obs_restart_linux_cmd() {
   cat <<'CMD'
 if ! systemctl --user list-unit-files --no-legend strih-obs.service 2>/dev/null | grep -q .; then
-  echo "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on strih-snv -- NOT touching OBS (nothing would relaunch it)"
+  echo "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on $(hostname 2>/dev/null || echo this box) -- NOT touching OBS (nothing would relaunch it)"
   exit 2
 fi
 systemctl --user reset-failed strih-obs.service 2>/dev/null || true

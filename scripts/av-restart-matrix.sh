@@ -39,19 +39,23 @@ set -euo pipefail
 #                   NEW process (its systemd invocation, never the old process's last lines).
 #     dantesync  -- `systemctl restart dantesync` on ONE camera node; healthy = its :8898/status
 #                   graded OK by dantesync_clock_decision.py analyze (locked on the rig grandmaster).
-#     stream-obs -- a SUPERVISOR step: the stream box's canonical launch is its `OBS Studio.lnk` ->
+#     stream-obs -- picked by the stream box's obs-fleet class (av_matrix_stream_obs_mode, issue
+#                   1474). On the Linux stream-snv: AUTOMATIC, the strih-obs kind's blocking
+#                   `strih-obs.service` restart over plain ssh (the same appliance unit). On a Windows
+#                   stream box: a SUPERVISOR step -- its canonical launch is its `OBS Studio.lnk` ->
 #                   obs-guarded-launch.ps1; no session-agnostic path runs it (every interactive-token
 #                   OBS task there launches a bare obs64.exe), an ssh GUI launch is banned. The run
 #                   writes the exact program to <run-dir>/supervisor-step-stream-obs-rN.txt, waits
-#                   (bounded) for <run-dir>/confirm-stream-obs-rN, then grades it like the others;
-#                   healthy = the WebSocket answers on the development program scene (another scene
-#                   fails at once -- the matrix never switches a scene).
+#                   (bounded) for <run-dir>/confirm-stream-obs-rN, then grades it like the others.
+#                   Healthy either way = the WebSocket answers on the development program scene
+#                   (another scene fails at once -- the matrix never switches a scene).
 #   A component that never reports healthy, or whose restart fails, is a FAIL and stops the run; a
 #   window the soak itself stopped (no measurement) or refused stops it too; a baseline that is not
 #   PASS stops it before any restart (--keep-going runs the restarts anyway).
 #   cleanup, on EVERY exit (signals ignored): a running window gets SIGTERM and its own cleanup is
-#   waited for; every restarted component is left running (`is-active || start`; the stream OBS is
-#   read, and the supervisor step printed when it does not answer); the report; the lease released
+#   waited for; every restarted component is left running (`is-active || start`, on the Linux stream
+#   box too; the stream OBS is read, and its restart line printed when it does not answer); the
+#   report; the lease released
 #   -- KEPT when a window may have left a recording (then `--stop-leftovers <run-dir>`).
 #
 # MODES:
@@ -69,7 +73,7 @@ set -euo pipefail
 #   --repeats N                [AV_MATRIX_REPEATS, 3]
 #   --settle-secs S            [AV_MATRIX_SETTLE_SECS, 120]   after healthy, before the window
 #   --healthy-timeout-secs S   [AV_MATRIX_HEALTHY_TIMEOUT_S, 300]
-#   --supervisor-timeout-secs S [AV_MATRIX_SUPERVISOR_TIMEOUT_S, 1800]  the stream OBS step
+#   --supervisor-timeout-secs S [AV_MATRIX_SUPERVISOR_TIMEOUT_S, 1800]  the stream OBS step (Windows)
 #   --cambox camN              [AV_MATRIX_CAMBOX, the first soak camera that is not cam2]
 #   --dantesync-node camN      [AV_MATRIX_DANTESYNC_NODE, the --cambox camera]
 #   --run-dir D                [AV_MATRIX_RUN_DIR, ~/.camera-box/av-restart-matrix/<UTC stamp>]
@@ -161,6 +165,8 @@ OBS_DIR="${AV_SOAK_OBS_DIR:-$HERE}"
 STREAM_DEV_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}"
 STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-snv)}"
 STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream-snv)}"
+# issue 1474: restart (the Linux stream-snv: strih-obs.service, like strih-obs) | supervisor (Windows)
+STREAM_OBS_MODE="$(av_matrix_stream_obs_mode "$STREAM_HOST")"
 OBS_TIMEOUT_S="${AV_SOAK_OBS_TIMEOUT_S:-30}"
 SSH_TIMEOUT_S="${AV_MATRIX_SSH_TIMEOUT_S:-60}"
 POLL_S="${AV_MATRIX_POLL_S:-5}"
@@ -198,13 +204,17 @@ ensure_running() {
     cambox) out="$(remote root "${CAM_PW:-}" "$CAMBOX_IP" "$(av_matrix_ensure_running_remote_cmd cambox)" 2>&1 || true)" ;;
     dantesync) out="$(remote root "${CAM_PW:-}" "$DANTE_IP" "$(av_matrix_ensure_running_remote_cmd dantesync)" 2>&1 || true)" ;;
     stream-obs)
+      if [ "$STREAM_OBS_MODE" = restart ]; then
+        out="$(remote "${STREAM_USER:-}" "${STREAM_PW:-}" "$STREAM_HOST" "$(av_matrix_ensure_running_remote_cmd stream-obs)" 2>&1 || true)"
+        log "leave running: the stream box's strih-obs.service (${out//$'\n'/ })"
+      fi
       scene="$(stream_program_scene_read "$OBS_DIR" "$STREAM_HOST" "" 2>/dev/null || true)"
       if [ "$scene" = "$STREAM_DEV_SCENE" ]; then
         log "leave running: the stream OBS answers (program '$scene')"
       elif [ -n "$scene" ]; then
         log "WARNING: the stream OBS answers but its program is '$scene', not '$STREAM_DEV_SCENE' -- SUPERVISOR: set it back by hand (never PRO); the matrix never switches a scene"
       else
-        log "WARNING: the stream OBS does NOT answer on its WebSocket -- SUPERVISOR: relaunch it (bash $HERE/launch-obs-genlock.sh --box stream --force, pasted into the win-stream-snv MCP Shell)"
+        log "WARNING: the stream OBS does NOT answer on its WebSocket -- SUPERVISOR: relaunch it ($(stream_box_obs_restart_hint "${STREAM_USER:-}" "$STREAM_HOST" "bash $HERE/launch-obs-genlock.sh --box stream --force, pasted into the win-stream-snv MCP Shell"))"
       fi
       return 0
       ;;
@@ -314,7 +324,7 @@ N_RESTARTS=0
 N_STREAM=0
 for _k in $KINDS; do
   N_RESTARTS=$(( N_RESTARTS + REPEATS ))
-  if [ "$_k" = stream-obs ]; then N_STREAM="$REPEATS"; fi
+  if [ "$_k" = stream-obs ] && [ "$STREAM_OBS_MODE" = supervisor ]; then N_STREAM="$REPEATS"; fi
 done
 N_STEPS=$(( 1 + N_RESTARTS ))
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -644,11 +654,39 @@ RESTART_EPOCH=""
 RESTART_INV_BEFORE=""
 RESTART_NOTE=""
 note_restarted() { printf '%s\n' "$1" >> "$RUN_DIR/restarted"; }
+# supervisor_stream_restart REPEAT -> the WINDOWS stream box's stream-obs restart: the supervisor
+# step (written + logged), then a bounded wait for its confirm file. Sets RESTART_OUTCOME /
+# RESTART_EPOCH / RESTART_NOTE, like do_restart.
+supervisor_stream_restart() {
+  local rep="$1" confirm step_file deadline
+  confirm="$(av_matrix_confirm_path "$RUN_DIR" "$rep")"
+  step_file="$RUN_DIR/supervisor-step-stream-obs-r${rep}.txt"
+  av_matrix_stream_supervisor_step "$HERE" "$confirm" "$SUPERVISOR_TIMEOUT_S" > "$step_file"
+  while IFS= read -r _line; do log "$_line"; done < "$step_file"
+  deadline=$(( $(date +%s) + SUPERVISOR_TIMEOUT_S ))
+  while [ ! -e "$confirm" ]; do
+    if stop_requested; then
+      RESTART_OUTCOME=not_performed; RESTART_NOTE="the STOP file before the supervisor confirmed"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      RESTART_OUTCOME=not_performed
+      RESTART_NOTE="the supervisor did not confirm the stream OBS restart within ${SUPERVISOR_TIMEOUT_S} s"
+      return 0
+    fi
+    lease_keepalive || exit 5
+    isleep "$POLL_S"
+  done
+  RESTART_OUTCOME=ok
+  RESTART_EPOCH="$(av_matrix_confirm_epoch "$confirm")"
+  log "the supervisor confirmed the stream OBS restart (at $RESTART_EPOCH)"
+  return 0
+}
 # do_restart KIND REPEAT -> RESTART_OUTCOME (ok|failed|not_performed), RESTART_EPOCH (dev1, the
 # instant the restart was issued / the supervisor's confirmed instant), RESTART_INV_BEFORE (the
 # unit's InvocationID the restart replaced), RESTART_NOTE
 do_restart() {
-  local kind="$1" rep="$2" out="" confirm step_file deadline
+  local kind="$1" rep="$2" out=""
   RESTART_NOTE=""
   RESTART_INV_BEFORE=""
   MUTATED=1
@@ -659,28 +697,13 @@ do_restart() {
     cambox) out="$(remote root "$CAM_PW" "$CAMBOX_IP" "$(av_matrix_restart_remote_cmd cambox)" 2>&1 || true)" ;;
     dantesync) out="$(remote root "$CAM_PW" "$DANTE_IP" "$(av_matrix_restart_remote_cmd dantesync)" 2>&1 || true)" ;;
     stream-obs)
-      confirm="$(av_matrix_confirm_path "$RUN_DIR" "$rep")"
-      step_file="$RUN_DIR/supervisor-step-stream-obs-r${rep}.txt"
-      av_matrix_stream_supervisor_step "$HERE" "$confirm" "$SUPERVISOR_TIMEOUT_S" > "$step_file"
-      while IFS= read -r _line; do log "$_line"; done < "$step_file"
-      deadline=$(( $(date +%s) + SUPERVISOR_TIMEOUT_S ))
-      while [ ! -e "$confirm" ]; do
-        if stop_requested; then
-          RESTART_OUTCOME=not_performed; RESTART_NOTE="the STOP file before the supervisor confirmed"
-          return 0
-        fi
-        if [ "$(date +%s)" -ge "$deadline" ]; then
-          RESTART_OUTCOME=not_performed
-          RESTART_NOTE="the supervisor did not confirm the stream OBS restart within ${SUPERVISOR_TIMEOUT_S} s"
-          return 0
-        fi
-        lease_keepalive || exit 5
-        isleep "$POLL_S"
-      done
-      RESTART_OUTCOME=ok
-      RESTART_EPOCH="$(av_matrix_confirm_epoch "$confirm")"
-      log "the supervisor confirmed the stream OBS restart (at $RESTART_EPOCH)"
-      return 0
+      if [ "$STREAM_OBS_MODE" = supervisor ]; then
+        supervisor_stream_restart "$rep"
+        return 0
+      fi
+      # issue 1474: the Linux stream box runs the same unit as strih-snv -- the same blocking restart
+      log "stream-obs: the stream box ${STREAM_HOST} restarts its strih-obs.service (Linux, plain ssh)"
+      out="$(remote "$STREAM_USER" "$STREAM_PW" "$STREAM_HOST" "$(av_matrix_restart_remote_cmd stream-obs)" 2>&1 || true)"
       ;;
   esac
   printf '%s\n' "$out" | sed 's/^/    [restart] /'

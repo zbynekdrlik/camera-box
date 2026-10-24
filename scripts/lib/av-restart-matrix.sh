@@ -15,13 +15,16 @@
 #   - the pure "is it healthy" predicate over those reads,
 #   - the argv of ONE measurement window = the soak itself (`av-soak.sh --run --hours 0
 #     --lease-run-id <the matrix's lease>`), never a copy of its record/sweep/decode/merge step,
-#   - the stream OBS SUPERVISOR step (no session-agnostic path launches the canonical stream OBS).
+#   - the stream OBS kind's mode by the stream box's obs-fleet class (av_matrix_stream_obs_mode,
+#     issue 1474): on the Linux stream-snv the SAME unit restart as strih-snv, on a Windows stream box
+#     the SUPERVISOR step (no session-agnostic path launches the canonical Windows stream OBS).
 #
 # Each remote text is sent WHOLE as one ssh command, never spliced into a larger string, so the
 # newline-strip gotcha of a `$(...)`-embedded helper (CLAUDE.md) cannot glue it to anything; the
 # single-statement lines still end with `;`.
 #
-# Needs scripts/lib/mv-reverify-escalate.sh (the strih-snv restart) sourced by the caller.
+# Needs scripts/lib/mv-reverify-escalate.sh (the strih-snv restart) and scripts/lib/stream-box.sh
+# (the stream box's platform) sourced by the caller.
 
 # The restart kinds, in run order (the same four as av_restart_matrix_decision.KINDS).
 AV_MATRIX_KINDS_ALL="strih-obs cambox dantesync stream-obs"
@@ -52,11 +55,14 @@ av_matrix_default_cambox() {
 #   dantesync  -- `systemctl restart dantesync` on the camera (root); both first echo
 #                 `AV_MATRIX_INVOCATION_BEFORE=<the unit's systemd InvocationID>` so the health read
 #                 can require a NEW process, then the outcome marker.
-# The stream OBS has no remote text: it is a supervisor step (av_matrix_stream_supervisor_step).
+#   stream-obs -- ONLY on a Linux stream box (av_matrix_stream_obs_mode = restart, issue 1474): the
+#                 SAME strih-obs.service text as strih-obs (stream-snv runs the same appliance unit).
+#                 A Windows stream box has no remote text: it is a supervisor step
+#                 (av_matrix_stream_supervisor_step).
 av_matrix_restart_remote_cmd() {
   local unit
   case "${1:-}" in
-    strih-obs) mv_reverify_obs_restart_linux_cmd; return 0 ;;
+    strih-obs | stream-obs) mv_reverify_obs_restart_linux_cmd; return 0 ;;
     cambox) unit=camera-box ;;
     dantesync) unit=dantesync ;;
     *) echo "av-restart-matrix: no remote restart for kind '${1:-}'" >&2; return 1 ;;
@@ -72,7 +78,7 @@ av_matrix_restart_remote_cmd() {
 av_matrix_restart_outcome() {
   local kind="$1" out="${2:-}"
   case "$kind" in
-    strih-obs)
+    strih-obs | stream-obs)
       case "$out" in
         *MV_REVERIFY_NO_UNIT*) printf 'not_performed\n' ;;
         *MV_REVERIFY_RESTART_FAILED*) printf 'failed\n' ;;
@@ -151,7 +157,7 @@ av_matrix_health_ok() {
 av_matrix_ensure_running_remote_cmd() {
   local sc unit
   case "${1:-}" in
-    strih-obs) sc="systemctl --user"; unit=strih-obs.service ;;
+    strih-obs | stream-obs) sc="systemctl --user"; unit=strih-obs.service ;;  # stream-obs: Linux box only
     cambox) sc="systemctl"; unit=camera-box ;;
     dantesync) sc="systemctl"; unit=dantesync ;;
     *) echo "av-restart-matrix: no remote ensure-running for kind '${1:-}'" >&2; return 1 ;;
@@ -231,6 +237,14 @@ av_matrix_confirm_epoch() {
   v="$(head -n 1 "$1" 2>/dev/null | tr -d '[:space:]' || true)"
   case "$v" in '' | *[!0-9]*) v="$(stat -c %Y "$1" 2>/dev/null || date +%s)" ;; esac
   printf '%s\n' "$v"
+}
+
+# av_matrix_stream_obs_mode HOST -> how the stream OBS kind restarts on HOST, by its obs-fleet class
+# (stream_box_platform, scripts/lib/stream-box.sh; issue 1474): `restart` on a Linux stream box (the
+# matrix restarts strih-obs.service itself, the strih-obs kind's blocking restart) | `supervisor` on a
+# Windows (or unknown) box (av_matrix_stream_supervisor_step). --plan and --run both read it.
+av_matrix_stream_obs_mode() {
+  if [ "$(stream_box_platform "${1:-}")" = linux ]; then echo restart; else echo supervisor; fi
 }
 
 # av_matrix_stream_supervisor_step SCRIPTS_DIR CONFIRM_FILE TIMEOUT_S -> the SUPERVISOR step text
