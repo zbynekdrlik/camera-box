@@ -71,7 +71,7 @@ from youtube_leg_proc import install_cleanup, run_bounded  # noqa: E402
 from youtube_leg_ticks import (CLIP_RUNS, DECODE_SCALE, DECODER_VERSION, PHASE_RADIUS, _qr_tick,  # noqa: E402
                                band_ticks, container_frames, decode_raw, decode_ticks, half_ticks,
                                half_ticks_run, load_raw, load_run_ticks, load_ticks, painter_payload,
-                               painter_tick, resolve_ticks, write_ticks)
+                               painter_tick, resolve_ticks, write_ticks, LAST_READS)
 from youtube_leg_timeline import (DETAIL_LIMIT, END_SLACK_S, RunTimeline, TickClock,  # noqa: E402
                                   carries_runs, clamp_window, continuity, coverage, dupskip,
                                   join_part_rows, painter_restarts, publish_gaps, run_segments,
@@ -370,13 +370,34 @@ def cached_ticks(src, cache, workers, runs=()):
         with open(cache) as f:
             if f.readline().strip() == f"# {key}":
                 return load_run_ticks(cache) if runs else load_ticks(cache)
-    if runs:
-        rows = decode_ticks(src, workers, runs=tuple(runs))
-        write_ticks(cache, rows, header=key)
-        return [r[:3] + (r[6],) for r in rows]
-    rows = decode_ticks(src, workers)
+    rows = decode_ticks(src, workers, runs=tuple(runs)) if runs else decode_ticks(src, workers)
     write_ticks(cache, rows, header=key)
-    return [r[:3] for r in rows]
+    _write_reads(src, cache)
+    return [r[:3] + (r[6],) for r in rows] if runs else [r[:3] for r in rows]
+
+
+def _write_reads(src, cache):
+    """The decode's read counters (known-position reads, fallbacks, full detections: youtube_leg_ticks
+    KnownPositionDetector) next to its tick map, `<map>.reads.json`; nothing when none were counted."""
+    reads = LAST_READS.pop(os.path.abspath(str(src)), None)
+    if reads:
+        with open(f"{cache}.reads.json.tmp", "w") as f:
+            json.dump(reads, f)
+        os.replace(f"{cache}.reads.json.tmp", f"{cache}.reads.json")
+
+
+def prime_ticks(src, out, workers):
+    """The early decode of the E2E's YouTube stage (design 6387919956 part b): the recording's tick map
+    into the cache the verdict run reads (`ticks-rec-1.tsv`, keyed like any decode), so the run only
+    decodes the VOD after the VOD wait. Exit 0, or 2 with the error."""
+    os.makedirs(out, exist_ok=True)
+    try:
+        rows = cached_ticks(src, os.path.join(out, "ticks-rec-1.tsv"), workers)
+    except Exception as e:  # the verdict run decodes the recording again (the one retry)
+        print(f"youtube_leg_verdict: the early decode of {src} failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return EXIT_UNKNOWN
+    print(f"youtube_leg_verdict: the early decode of {src} cached {len(rows)} frames")
+    return EXIT_PASS
 
 
 def _cv2_version():
@@ -486,6 +507,8 @@ def write_result(out, result):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Issue 1404 YouTube-leg verdict (exit 0 PASS, 1 FAIL, 2 UNKNOWN)")
     ap.add_argument("--decode-ticks", help="diagnostic: print this file's tick map and exit")
+    ap.add_argument("--prime-ticks", help="the E2E's early decode: cache this recording's tick map in --out "
+                                          "(ticks-rec-1.tsv) for the verdict run, and exit")
     ap.add_argument("--vod")
     ap.add_argument("--recording", action="append", default=[])
     ap.add_argument("--markers")
@@ -501,6 +524,10 @@ def main(argv=None):
     ap.add_argument("--clip-markers", help="the measurement clip's own marker log (<clip>.markers.csv | http url): "
                                            "the A/V of a window of a --runs run")
     args = ap.parse_args(argv)
+    if args.prime_ticks:
+        if not args.out:
+            ap.error("--prime-ticks needs --out (the verdict run's out dir)")
+        return prime_ticks(args.prime_ticks, args.out, args.workers)
     if args.decode_ticks:
         rows = decode_ticks(args.decode_ticks, args.workers, runs=tuple(args.runs)) if args.runs else \
             decode_ticks(args.decode_ticks, args.workers)

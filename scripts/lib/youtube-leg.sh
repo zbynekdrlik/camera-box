@@ -7,12 +7,18 @@
 # viewer). The full-path E2E's BLOCKING YouTube stage, wired through this lib so recording-e2e.sh
 # gains only call lines (the issue-675 anchor-safe pattern). The work is scripts/youtube_leg_e2e.py
 # (restreamer's av-gate session through scripts/av_gate_session.py, the stream OBS output through
-# scripts/youtube_leg_obs.py, the verdict through scripts/youtube_leg_verdict.py on dev1).
+# scripts/youtube_leg_obs.py, the verdict through scripts/youtube_leg_verdict.py ON THE MEASUREMENT
+# HOST dev2, scripts/youtube_leg_host.py: design 6387919956 -- dev1 only orchestrates and folds).
 #
 #   youtube_leg_enabled                                   rc 0 iff this run executes its verdict
 #   youtube_leg_start HERE STRIH STREAM USER PW OUTDIR      before StartRecord; always rc 0
-#   youtube_leg_stop HERE STREAM USER PW OUTDIR             after the stream StopRecord; always rc 0
+#   youtube_leg_stop HERE STREAM USER PW OUTDIR [STREAM_HOST_PATH]
+#                                                         after the stream StopRecord; always rc 0;
+#                                                         with the recording's path it starts the
+#                                                         prefetch (pull to dev2 + its early decode)
+#                                                         in the background
 #   youtube_leg_cleanup_stop HERE STREAM USER PW OUTDIR     cleanup(): one bounded background stop
+#                                                         + the purge of dev2's stage dir
 #   youtube_leg_gate HERE STREAM USER PW OUTDIR REPORT_JSON STREAM_HOST_PATH MARKER_CSV SCHEDULE PROBE_BIN_DIR
 #                                                         after the merge: rc 0 = YouTube PASS (or a
 #                                                         mode that executes no verdict), 1 = RED
@@ -66,7 +72,7 @@ _youtube_leg_watch_end() {
 }
 
 youtube_leg_stop() {
-  local here="$1" stream="$2" user="$3" pw="$4" outdir="$5"
+  local here="$1" stream="$2" user="$3" pw="$4" outdir="$5" host_path="${6-}"
   local d="$outdir/youtube-leg"
   [ -f "$d/state.json" ] || return 0
   if ! AV_GATE_SSH_PASSWORD="$pw" timeout 240 python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" \
@@ -74,6 +80,15 @@ youtube_leg_stop() {
     echo "!! issue 1404: the YouTube stage stop did not complete -- cleanup() retries it, restreamer's idle reaper is the backstop" >&2
   fi
   _youtube_leg_watch_end "$d"
+  # design 6387919956 part b: the recording is complete now -- pull it to the measurement host and
+  # decode its tick map there while the E2E merges and YouTube processes the VOD (bounded inside;
+  # the gate waits for it, cleanup() purges it)
+  if [ -n "$host_path" ]; then
+    (AV_GATE_SSH_PASSWORD="$pw" exec python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" --user "$user" \
+      prefetch --stream-path "$host_path") >>"$d/prefetch.log" 2>&1 &
+    echo "$!" >"$d/prefetch.pid"
+    echo "    issue 1404: the stream recording goes to the measurement host now and is decoded there during the merge (log $d/prefetch.log)"
+  fi
   return 0
 }
 
@@ -89,30 +104,27 @@ youtube_leg_cleanup_stop() {
   # the session half in the background: never delays the device restores; idempotent
   (AV_GATE_SSH_PASSWORD="$pw" timeout 120 python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" \
     --user "$user" stop --why "cleanup()") >>"$d/cleanup-stop.log" 2>&1 &
+  # the measurement host: stop a prefetch still running, delete its stage dir (the videos with it);
+  # a no-op after a gate that measured (it deleted it already)
+  (timeout 120 python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" --user "$user" \
+    purge) >>"$d/cleanup-stop.log" 2>&1 &
   return 0
 }
 
 youtube_leg_gate() {
   local here="$1" stream="$2" user="$3" pw="$4" outdir="$5" report="$6" host_path="$7" markers="$8"
   local schedule="$9" probe_dir="${10}"
-  local d="$outdir/youtube-leg" rec="" ext="mkv" rc=0
+  local d="$outdir/youtube-leg" rc=0
   if ! youtube_leg_enabled; then
     echo "    issue 1404: the YouTube end point was NOT measured in this mode (E2E_EXECUTE_VERDICT!=1)"
     return 0
   fi
-  echo "    issue 1404: the YouTube end point (BLOCKING): the VOD against the stream recording"
+  echo "    issue 1404: the YouTube end point (BLOCKING): the VOD against the stream recording, measured on ${YOUTUBE_LEG_MEASURE_HOST:-newlevel@dev2}"
   mkdir -p "$d"
-  case "${host_path##*/}" in *.*) ext="${host_path##*.}" ;; esac
-  rec="$d/stream-recording.$ext"
-  if [ -n "$host_path" ] && [ -f "$d/state.json" ]; then
-    timeout 900 bash -c '. "$1"; . "$2"; stream_box_download "$3" "$4" "$5" "$6" "$6" "$7"' _ \
-      "$here/lib/win-ssh-exec.sh" "$here/lib/stream-box.sh" "$user" "$pw" "$stream" "$host_path" "$rec" \
-      || { rm -f "$rec"; echo "!! issue 1404: the stream recording did not reach dev1 (${host_path}) -- the YouTube end point is UNKNOWN" >&2; }
-  fi
+  # no video ever reaches dev1: the measurement host pulled the recording (the prefetch, or measure's
+  # one retry), fetches the VOD, decodes, judges, sends back the verdict JSON + tick maps, deletes both
   AV_GATE_SSH_PASSWORD="$pw" python3 "$(_youtube_leg_py "$here")" --dir "$d" --host "$stream" --user "$user" \
-    measure --verdict-json "$report" --recording "$rec" --markers "$markers" --schedule "$schedule" \
+    measure --verdict-json "$report" --stream-path "$host_path" --markers "$markers" --schedule "$schedule" \
     --probe-bin "$probe_dir/recording-verdict" || rc=$?
-  # disk: the stage keeps its tick maps + verdict JSON; the two video copies go
-  rm -f "$rec" "$d"/verdict/vod-*.mp4
   [ "$rc" = 0 ]
 }

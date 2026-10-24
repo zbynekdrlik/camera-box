@@ -4880,7 +4880,7 @@ CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
-youtube_leg_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"   # issue 1404: StopStream + the restreamer session stop
+youtube_leg_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "${STREAM_HOST_PATH:-}"   # issue 1404: StopStream + the session stop + the early pull/decode on dev2
 
 # issue 1354 scope 3: AFTER-window snapshot of strih's per-input genlock-fifo audit counters --
 # pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY

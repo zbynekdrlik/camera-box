@@ -23,14 +23,16 @@ def _kill_group(pgid):
     return True
 
 
-def run_bounded(cmd, timeout, text=False, check=False):
+def run_bounded(cmd, timeout, text=False, check=False, input=None):
     """subprocess.run with a whole-process-group timeout; check=True raises RuntimeError naming the
-    command, its exit code and the last 500 characters of its stderr."""
+    command, its exit code and the last 500 characters of its stderr. `input` is written to the
+    child's stdin (then closed); without it the child inherits stdin as before."""
     cmd = [str(c) for c in cmd]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True)
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True,
+                         stdin=subprocess.PIPE if input is not None else None)
     _ACTIVE.add(p.pid)
     try:
-        out, err = p.communicate(timeout=timeout)
+        out, err = p.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_group(p.pid)
         p.communicate()
