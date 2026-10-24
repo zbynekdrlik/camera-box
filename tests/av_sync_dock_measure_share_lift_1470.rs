@@ -7,8 +7,10 @@
 //! VERBATIM from `vendor/obs-studio/libobs/obs-audio.c`, compiles them with the real tracker
 //! (`tests/c/measure_share_lift_1470_harness.cpp`, a stub libobs with a render and a placement
 //! model) and asserts, over a steady source, a mid-tick start, a producer stall, a source out of
-//! the program, a lagging timeline and a tick without an output callback, that every tick the dock
-//! takes is byte-identical to what the mix carried and a tick it leaves silent never was.
+//! the program, a lagging timeline and a growth of the mix's buffering, that every tick the dock
+//! takes is byte-identical to what the mix carried and a tick it leaves silent never was. Scope: the
+//! measurement source is a ROOT node of the mix here; a nested one (stream-snv: Development > PRO >
+//! `mbc`) reaches the mix through `scene_audio_render`, whose aligned case is the same offset 0.
 //!
 //! The one residual is pinned: a producer-side timeline reset landing between the dock's read and
 //! the next mix costs one wrong tick per reset (`reset-race-*`).
@@ -146,10 +148,15 @@ const TABLE: &[(&str, &str)] = &[
         "lagging",
         "ticks=4 taken=0 mixed=0 mismatched=0 missed=0 absent_long=0",
     ),
-    // the tick after a missing callback is silent (its start offset is unknown)
+    // the mix's buffering grows (inserted wait windows: rendered + discarded, no mix, no callback);
+    // the source's timeline already stands past them, so nothing is lost
     (
-        "skipped-callback",
-        "ticks=11 taken=9 mixed=11 mismatched=0 missed=2 absent_long=0",
+        "buffering-growth-1",
+        "ticks=20 taken=19 mixed=20 mismatched=0 missed=1 absent_long=0",
+    ),
+    (
+        "buffering-growth-4",
+        "ticks=20 taken=19 mixed=20 mismatched=0 missed=1 absent_long=0",
     ),
     // KNOWN LIMIT: one wrong tick per producer reset between the dock's read and the next mix
     (

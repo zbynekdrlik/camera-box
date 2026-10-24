@@ -4,10 +4,13 @@
  * at-sign marker below (convert_time_to_frames + mix_audio, discard_if_stopped + discard_audio), then
  * compiles it with g++ next to the REAL dock tracker (camera-box-measure-share.hpp) and compares the
  * printed trace with its truth table. Everything else here is a stub libobs: the types, a byte deque,
- * a render model of obs_source_audio_render + process_audio_source_tick (an inactive source is not in
- * the audio tree and is not rendered; no timeline or too little data = pending; else the input is
- * peeked into the per-source mix buffer) and a placement model of source_output_audio_place (samples
- * appended to the input from the source's timeline). The mix and the discard are the shipped code.
+ * a render model of obs_source_audio_render + process_audio_source_tick (every audio source is rendered,
+ * as audio_callback's catch-all loop does, active or not; no timeline or too little data = pending; else
+ * the input is peeked into the per-source mix buffer), a mix loop that mixes only an ACTIVE source (the
+ * root nodes) and a placement model of source_output_audio_place (samples appended to the input from
+ * the source's timeline). The mix and the discard are the shipped code. Scope: the source is a ROOT
+ * node here; on stream-snv `mbc` is nested (Development > PRO) and reaches the mix through
+ * scene_audio_render, whose aligned case is the same offset 0 (its divergences are the header's limit 2).
  *
  * What it proves: every tick the dock TAKES, its block is byte-identical to what the mix carried from
  * the measurement source (the only source in this mix); a tick it does not take is silence. The one
@@ -140,8 +143,6 @@ static void h_reset_timeline(obs_source_t *s, uint64_t stamp)
 /* obs_source_audio_render + process_audio_source_tick, modelled (one track, volume 1). */
 static void h_render(obs_source_t *s)
 {
-	if (!s->h_active)
-		return;
 	const size_t size = AUDIO_OUTPUT_FRAMES * sizeof(float);
 	if (!s->audio_ts || s->audio_input_buf[0].size < size) {
 		s->audio_pending = true;
@@ -157,15 +158,17 @@ struct h_counts {
 	bool absent_long;
 };
 
-/* One tick: render, the shipped mix + discard, then (when `dock`) the dock's read and its block. */
+/* One tick: render, the shipped mix + discard, then (when `dock`) the dock's read and its block. A
+ * buffering WAIT tick (`mix` false: audio_callback returns false while buffering_wait_ticks > 0) renders
+ * and discards but neither mixes nor calls any output callback. */
 static void h_tick(obs_source_t *s, camerabox::CbMeasureShareTracker &tr, uint64_t start, uint64_t end, bool dock,
-		   struct h_counts *n)
+		   struct h_counts *n, bool mix = true)
 {
 	struct ts_info ts = {start, end};
 	std::memset(h_mix, 0, sizeof(h_mix));
 	h_render(s);
 	/* audio_callback's mix loop: the source is its own root node when active */
-	if (s->h_active && !s->audio_pending && s->audio_output_buf[0][0] && s->audio_ts) {
+	if (mix && s->h_active && !s->audio_pending && s->audio_output_buf[0][0] && s->audio_ts) {
 		struct audio_output_data one[MAX_AUDIO_MIXES];
 		std::memset(one, 0, sizeof(one));
 		for (size_t c = 0; c < CH; c++)
@@ -311,19 +314,27 @@ static void scenario_lagging()
 	h_print("lagging", n);
 }
 
-/* audio_callback returned false for one tick (no output callback ran), the mix and discard ran. */
-static void scenario_skipped_callback()
+/* the mix's buffering grows by `g` ticks before tick 10 (add_audio_buffering): libobs inserts g
+ * earlier windows that are rendered and discarded with no mix and no output callback (buffering wait
+ * ticks), then goes on with the window it would have processed. */
+static void scenario_buffering_growth(const char *name, uint64_t g)
 {
 	obs_source_t *s = &g_src;
 	h_reset(s);
 	camerabox::CbMeasureShareTracker tr;
 	struct h_counts n = {};
 	h_place(s, h_tick_ns(T0, 0), 3 * AUDIO_OUTPUT_FRAMES);
-	for (uint64_t k = 0; k < 12; k++) {
+	for (uint64_t k = 0; k < 20; k++) {
+		if (k == 10) {
+			for (uint64_t w = 0; w < g; w++) {
+				h_place(s, 0, AUDIO_OUTPUT_FRAMES);
+				h_tick(s, tr, h_tick_ns(T0, k - g + w), h_tick_ns(T0, k - g + w + 1), false, &n, false);
+			}
+		}
 		h_place(s, 0, AUDIO_OUTPUT_FRAMES);
-		h_tick(s, tr, h_tick_ns(T0, k), h_tick_ns(T0, k + 1), k != 5, &n);
+		h_tick(s, tr, h_tick_ns(T0, k), h_tick_ns(T0, k + 1), true, &n);
 	}
-	h_print("skipped-callback", n);
+	h_print(name, n);
 }
 
 /* KNOWN LIMIT: the producer resets its timeline between the dock's read and the next mix. A restart
@@ -357,7 +368,8 @@ int main()
 	scenario_inactive();
 	scenario_never_in_program();
 	scenario_lagging();
-	scenario_skipped_callback();
+	scenario_buffering_growth("buffering-growth-1", 1);
+	scenario_buffering_growth("buffering-growth-4", 4);
 	scenario_reset_race("reset-race-inside", 7000000);
 	scenario_reset_race("reset-race-1ns-early", -1);
 	/* a restart past the tick end is not mixed this tick: the end check leaves it silent */

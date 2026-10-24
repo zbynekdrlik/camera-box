@@ -326,8 +326,10 @@ audio TU was at 1023 lines):
   `discard_if_stopped` + `discard_audio` VERBATIM into `tests/c/measure_share_lift_1470_harness.cpp`
   (g++ C++11, `-Wno-register` for upstream's `register`) and drives the REAL tracker: every taken
   tick is byte-identical to what the mix carried (steady, a mid-tick start, a stall, out of the
-  program, lagging, a tick without a callback, a restart past the tick end); the residual rows are
-  pinned. 6/7 mutants die there; "take the first tick" is equivalent there and dies in the self-test.
+  program, lagging, a growth of the mix's buffering, a restart past the tick end); the residual rows
+  are pinned. Its source is a ROOT node; the nested stream-snv `mbc` goes through
+  `scene_audio_render` (same offset 0 when aligned; its divergences are limit 2). The render model
+  renders every audio source (libobs's catch-all loop) and mixes only an active one. 6/7 mutants die there; "take the first tick" is equivalent there and dies in the self-test.
 - `tests/av_sync_dock_measure_share_1470.rs` (comment-stripped) + the pwsh step "Assert dock measures
   only the measurement source's share (issue 1470)" in BOTH windows-genlock workflows (comments kept)
   pin the wiring: 11/11 wiring mutants died in both languages. The 1381 step's `st_raw_audio` needle
