@@ -19,6 +19,14 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// issue 1474: the stream box is the Linux stream-snv on the real fleet, and this Windows-only
+/// planner refuses it by class (`obs_fleet_refuse_linux_target`). Its Windows program is pinned on a
+/// fleet whose stream box is Windows (the `test_av_soak_orchestrator_1367.py` override pattern); the
+/// refusal itself is pinned by `tests/python/test_windows_planners_refuse_linux_1474.py`.
+const WIN_STREAM_FLEET: &str = "strih-snv|10.77.9.202|linux-genlock|always\n\
+stream-snv|10.77.9.204|windows-genlock|always\n\
+resolume-snv|resolume.lan|windows-genlock|traveling";
+
 fn read(rel: &str) -> String {
     let p = manifest_dir().join(rel);
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
@@ -326,6 +334,7 @@ fn install_plan_covers_all_three_files_and_both_new_tasks() {
     let script = manifest_dir().join(INSTALL_SH);
     let out = Command::new("bash")
         .arg(&script)
+        .env("OBS_FLEET", WIN_STREAM_FLEET)
         .output()
         .expect("run install script directly");
     assert!(
@@ -360,6 +369,7 @@ fn install_plan_produces_empty_stderr_968() {
     let script = manifest_dir().join(INSTALL_SH);
     let out = Command::new("bash")
         .arg(&script)
+        .env("OBS_FLEET", WIN_STREAM_FLEET)
         .output()
         .expect("run install script directly");
     assert!(out.status.success());
@@ -384,6 +394,7 @@ fn install_plan_keeps_the_bare_task_names_literally_968() {
     let script = manifest_dir().join(INSTALL_SH);
     let out = Command::new("bash")
         .arg(&script)
+        .env("OBS_FLEET", WIN_STREAM_FLEET)
         .output()
         .expect("run install script directly");
     assert!(out.status.success());

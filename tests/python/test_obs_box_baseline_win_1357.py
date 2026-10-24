@@ -30,6 +30,11 @@ SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "obs-box-baseline-win.sh"
 FIX = pathlib.Path(__file__).resolve().parent / "fixtures" / "win_baseline_1357"
 ITEMS = ["power_scheme", "sleep_ac", "hibernate_ac", "usb_selective_suspend", "wer_dontshowui"]
+# issue 1474: stream-snv is linux-genlock on the real fleet, so the `win-baseline` facet there is
+# resolume-snv alone. The two-box check mechanics run on a fleet whose stream box is Windows.
+WIN_STREAM_FLEET = ("strih-snv|10.77.9.202|linux-genlock|always\n"
+                    "stream-snv|10.77.9.204|windows-genlock|always\n"
+                    "resolume-snv|resolume.lan|windows-genlock|traveling")
 
 # powercfg / reg verbs that WRITE state. Only `/setactive` is allowed, and only in the deploy block.
 MUTATING = re.compile(
@@ -310,7 +315,8 @@ def test_check_reads_each_box_and_names_the_drift(tmp_path):
     seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt",
                             "resolume-snv": FIX / "resolume_balanced_all_drift.txt"})
     r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
-                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv resolume-snv"},
+                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET": WIN_STREAM_FLEET,
+                            "OBS_FLEET_HOME": "stream-snv resolume-snv"},
                        timeout=60)
     assert r.returncode == 20, r.stdout + r.stderr
     assert re.search(r"^box=stream-snv win_baseline=OK$", r.stdout, re.M), r.stdout
@@ -324,7 +330,8 @@ def test_check_over_the_live_captures_names_the_wer_drift(tmp_path):
     seam = _seam(tmp_path, {"stream-snv": FIX / "stream_live_2026-09-27.txt",
                             "resolume-snv": FIX / "resolume_gather_program_live_2026-09-27.txt"})
     r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
-                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv resolume-snv"},
+                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET": WIN_STREAM_FLEET,
+                            "OBS_FLEET_HOME": "stream-snv resolume-snv"},
                        timeout=60)
     assert r.returncode == 20, r.stdout + r.stderr
     for box in ("stream-snv", "resolume-snv"):
@@ -336,7 +343,8 @@ def test_check_over_the_live_captures_names_the_wer_drift(tmp_path):
 def test_check_skips_a_traveling_box_that_is_away(tmp_path):
     seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt"})
     r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
-                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream-snv"},
+                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET": WIN_STREAM_FLEET,
+                            "OBS_FLEET_HOME": "stream-snv"},
                        timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "box=resolume-snv win_baseline=SKIPPED" in r.stdout
@@ -372,9 +380,27 @@ def test_check_out_dir_keeps_the_raw_gather_for_the_gate(tmp_path):
 # --- the fleet roster + rig-health row ---------------------------------------------------------------
 
 def test_obs_fleet_win_baseline_facet_is_the_windows_obs_boxes():
-    r = _bash(f'. "{SCRIPTS}/lib/obs-fleet.sh"; obs_fleet_facet_members win-baseline')
-    assert r.returncode == 0, r.stderr
-    assert r.stdout.split() == ["stream-snv", "resolume-snv"]
+    # issue 1474: only the windows-genlock rows -- the Linux stream-snv is out on the real fleet.
+    real = _bash(f'. "{SCRIPTS}/lib/obs-fleet.sh"; obs_fleet_facet_members win-baseline', {"OBS_FLEET": ""})
+    assert real.returncode == 0, real.stderr
+    assert real.stdout.split() == ["resolume-snv"], real.stdout
+    win = _bash(f'. "{SCRIPTS}/lib/obs-fleet.sh"; obs_fleet_facet_members win-baseline',
+                {"OBS_FLEET": WIN_STREAM_FLEET})
+    assert win.returncode == 0, win.stderr
+    assert win.stdout.split() == ["stream-snv", "resolume-snv"], win.stdout
+
+
+def test_check_on_the_real_fleet_reads_resolume_only(tmp_path):
+    # issue 1474: the check never reads the Linux stream-snv for a Windows baseline.
+    seam = _seam(tmp_path, {"stream-snv": FIX / "dup_high_performance_all_ok.txt",
+                            "resolume-snv": FIX / "resolume_gather_program_live_2026-09-27.txt"})
+    env = {k: v for k, v in os.environ.items() if k != "OBS_FLEET"}
+    r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
+                       env={**env, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "resolume-snv"},
+                       timeout=60)
+    assert r.returncode == 20, r.stdout + r.stderr   # the live resolume capture drifts on wer_dontshowui
+    assert "box=stream-snv" not in r.stdout, r.stdout
+    assert re.search(r"^box=resolume-snv win_baseline=", r.stdout, re.M), r.stdout
 
 
 def _audit():

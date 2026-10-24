@@ -22,6 +22,11 @@ import subprocess
 import sys
 
 import pytest
+# issue 1474: the stream box is the Linux stream-snv on the real fleet and the Windows planner
+# refuses it by class; the Windows program is pinned on a fleet whose stream box is Windows.
+WIN_STREAM_FLEET = ("strih-snv|10.77.9.202|linux-genlock|always\n"
+                    "stream-snv|10.77.9.204|windows-genlock|always\n"
+                    "resolume-snv|resolume.lan|windows-genlock|traveling")
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
@@ -449,7 +454,8 @@ def test_the_launch_plan_hands_role_tokens_to_the_role_tools(box, role):
     """latency_pins_verify.py and mark-imag-restart.sh take a ROLE (strih|stream|imag|resolume),
     never a fleet name: the plan for `--box stream-snv` must print `--box stream`."""
     r = subprocess.run(["bash", str(SCRIPTS / "launch-obs-genlock.sh"), "--box", box],
-                       capture_output=True, text=True, timeout=60)
+                       capture_output=True, text=True, timeout=60,
+                       env={**os.environ, "OBS_FLEET": WIN_STREAM_FLEET})
     assert r.returncode == 0, r.stderr
     assert f"latency_pins_verify.py --box {role} " in r.stdout
     assert f"mark-imag-restart.sh --box {role} " in r.stdout

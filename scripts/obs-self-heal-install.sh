@@ -554,6 +554,9 @@ main() {
     strih) echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- strih-snv is a Linux box supervised by its strih-obs.service user unit, never this Windows Task-Scheduler installer" >&2; usage >&2; exit 2 ;;
     *) echo "ERROR: --box must be 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
   esac
+  # issue 1474: the ONE class gate -- stream-snv is linux-genlock since issue 1462 (supervised by its
+  # strih-obs.service user unit, Restart=on-failure), so this Windows Task-Scheduler installer refuses it.
+  obs_fleet_refuse_linux_target "$box" obs-self-heal-install.sh || exit 2
   mcp="$(fleet_box_mcp "$box")"; box_ip="$(fleet_box_ip "$box")"
 
   local task_name="camera-box-obs-self-heal-${box}"

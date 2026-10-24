@@ -178,20 +178,33 @@ full E2E, on a Linux stream box exactly as on Windows.
   so they keep exercising the Windows path); `tests/python/test_lipsync_arrival_stream_lx_1474.py`
   runs the Linux path (the delete proven by the probe file being gone).
 
+- **Between E2E runs (issue 1474 item 3):** the obs-session watchdog's facet is strih-snv +
+  stream-snv + resolume-snv and it picks the probe by class: a linux-genlock box gets the `[0/8]`
+  Linux check (`strih-obs.service` over plain ssh + the bounded obs-websocket round-trip, split into
+  `strih_linux_visibility_probe` / `strih_linux_visibility_ws_ok`), never PowerShell. A dead
+  obs-websocket stays obs-liveness's page (one outage, one page); this watchdog pages only OBS
+  answering while `strih-obs.service` is not active, with the `systemctl --user restart
+  strih-obs.service` recovery (`.claude/rules/obs-fleet-list.md`). The
+  `win-baseline` facet keeps only its windows-genlock rows, so stream-snv is out of the Windows
+  baseline (`tests/python/test_obs_session_linux_1474.py`).
+- **The Windows planners (issue 1474 item 4):** `launch-obs-genlock.sh`, `obs-self-heal-install.sh`
+  and `avsync-watchdog-install.sh` refuse a linux-genlock box through `obs_fleet_refuse_linux_target`
+  (exit 2), `fleet_box_mcp` names no win-* MCP for a linux-genlock row, and the fleet deploy's execute
+  arm prints no Windows paste-program for a box that took the setup-strih arm. Their suites run the
+  Windows programs on a Windows-stream `OBS_FLEET` override
+  (`tests/python/test_windows_planners_refuse_linux_1474.py`).
+
 ## Still Windows-only (follow-up candidates handed to the supervisor in the LANE-RETURN, not ported)
 
 - `strih_planner_holder_note`'s plan-mode text (it still says the MCP holder runs 8/8b).
-- The Windows planners that still take `--box stream`: `launch-obs-genlock.sh` and
-  `obs-self-heal-install.sh` (stream-snv restarts through `strih-obs.service`; both should refuse
-  a linux-genlock box by class, `obs_fleet_refuse_linux_target`), and `avsync-watchdog-install.sh`
-  (a Windows scheduled task on the stream box). `scripts/lib/genlock-fleet-boxes.sh` still maps
-  stream-snv to the `win-stream-snv` MCP; the deploy planner already sends it the setup-strih arm.
-  Their Rust/pytest suites drive `--box stream` against the default fleet, so the refusal needs a
-  Windows `OBS_FLEET` override in each of them (issue 1474 follow-up).
 - The opt-in restart / zero-loss modes' stream decode plans; the legacy `VERDICT_ON_STREAM=0`
-  `recording-fetch-windows.sh` path; the obs-fleet `win-baseline` facet still lists stream-snv
-  (report-only rows that read unread); the obs-session watchdog's class gate now skips stream-snv
-  (its operator visibility is watched by nothing between E2E runs) (issue 1474 follow-up).
+  `recording-fetch-windows.sh` path.
+- Text that still names the Windows relaunch for the stream box, which now refuses on stream-snv:
+  `rig-mode.sh`'s `print_genlock_relaunch_note` stream line (pinned by `tests/rig_mode.rs`
+  `genlock_relaunch_note_is_env_free_no_mode`), `av-restart-matrix.sh`'s stream-obs SUPERVISOR step
+  and its cleanup warning (on a Linux stream box that kind could restart `strih-obs.service` like
+  the strih-obs kind, a matrix design call), and the `asio-starve` watchdog's default recovery plan
+  (ships disabled; the VB-Matrix ASIO source is Windows-only).
 
 ## Tests (Tier-0, no rig)
 

@@ -192,13 +192,35 @@ strih_linux_visibility_message() {
 # BOX is handed to the message (the box an unreachable probe names; default strih-snv).
 strih_linux_visibility_check() {
   local host="$1" user="$2" pw="$3" tmo="$4" here="$5" box="${6:-strih-snv}"
-  local sysout ws_ok=0
-  sysout="$(timeout "$tmo" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
-    "${user}@${host}" "$(strih_linux_visibility_probe_cmd)" 2>/dev/null || true)"
+  local sysout ws_ok
+  sysout="$(strih_linux_visibility_probe "$host" "$user" "$pw" "$tmo")"
+  ws_ok="$(strih_linux_visibility_ws_ok "$host" "$here")"
+  strih_linux_visibility_message "$sysout" "$ws_ok" "$box"
+}
+
+# strih_linux_visibility_probe HOST USER PW TIMEOUT -> the unit probe's output over plain ssh
+# (strih_linux_visibility_probe_cmd), bounded by TIMEOUT; EMPTY when ssh could not run it. The first
+# of the two reads strih_linux_visibility_check makes; issue 1474: the dev1 obs-session watchdog makes
+# the same two reads itself, so it can read an empty probe as connectivity (its own rule) instead of a
+# fault, and never needs a second copy of the ssh line.
+strih_linux_visibility_probe() {
+  local host="$1" user="$2" pw="$3" tmo="$4"
+  timeout "$tmo" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+    "${user}@${host}" "$(strih_linux_visibility_probe_cmd)" 2>/dev/null || true
+}
+
+# strih_linux_visibility_ws_ok HOST HERE -> `1` when obs-websocket on HOST:4455 answered a real
+# round-trip (HERE/obs_phase2.py record --action status, the SAME client `record --action stop` uses at
+# [7/8]), else `0`. Always returns 0.
+strih_linux_visibility_ws_ok() {
+  local host="$1" here="$2"
   # issue 1351: the obs-websocket round-trip was the un-timeout-bounded strih-touching call on the
   # Linux path (the ssh probe above IS bounded; obs_phase2.py's own create_connection(timeout=10)
   # only caps a single socket op, not a wedged handshake). Bound it so a wedge becomes ws_ok=0 -> the
   # existing "obs-websocket on :4455 did not answer" named diagnosis, never a silent [0/8] hang.
-  timeout "${STRIH_LX_WS_TIMEOUT:-20}" python3 "$here/obs_phase2.py" record --host "$host" --action status >/dev/null 2>&1 && ws_ok=1
-  strih_linux_visibility_message "$sysout" "$ws_ok" "$box"
+  if timeout "${STRIH_LX_WS_TIMEOUT:-20}" python3 "$here/obs_phase2.py" record --host "$host" --action status >/dev/null 2>&1; then
+    printf '1'
+  else
+    printf '0'
+  fi
 }
