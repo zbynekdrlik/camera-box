@@ -326,3 +326,89 @@ def drop_pulse_capture_inputs(obs, keep=None, sleep=None):
             parts.append("remove FAILED: '%s' (%s) -- restart OBS, the launch seed runs again"
                          % (name, listed_text(name, listed)))
     return "; ".join(parts) or "no pulse capture input"
+
+
+# --- issue 1440: the browser sources' page audio, rerouted into OBS and muted -----------------------------
+# On a box without a sound server (the strih role, issue 1440) a browser source with `reroute_audio` off
+# plays its page sound to the default device (the cutters' cans on strih-snv, the program sink on
+# strih-pp). With `reroute_audio` on, obs-browser hands that sound to OBS as the source's own audio, and
+# the source muted in the mixer keeps it off every bus. The seed (strih_scenes.py --bootstrap, the strih
+# manifest's `browser_audio: reroute-mute`) sets both, verify-strih reads them back (--browser-audio).
+BROWSER_SOURCE_KIND = "browser_source"
+BROWSER_AUDIO_RULE = "reroute-mute"
+
+
+def parse_browser_audio_rule(text):
+    """The manifest's `browser_audio` rule: "reroute-mute" (the strih role), else None. Lenient, never raises."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return None
+    v = d.get("browser_audio") if isinstance(d, dict) else None
+    return BROWSER_AUDIO_RULE if v == BROWSER_AUDIO_RULE else None
+
+
+def browser_sources(obs):
+    """[(name, reroute_audio, muted)] of every browser source OBS lists; a value OBS did not answer is None."""
+    inputs = (obs.req("GetInputList", {"inputKind": BROWSER_SOURCE_KIND}, ignore_err=True) or {}).get("inputs") or []
+    out = []
+    for i in inputs:
+        if not isinstance(i, dict) or i.get("inputKind") != BROWSER_SOURCE_KIND or not i.get("inputName"):
+            continue
+        name = i["inputName"]
+        st = (obs.req("GetInputSettings", {"inputName": name}, ignore_err=True) or {}).get("inputSettings")
+        # obs-browser's default is reroute_audio off, and GetInputSettings lists only the keys set.
+        reroute = (st.get("reroute_audio") is True) if isinstance(st, dict) else None
+        muted = (obs.req("GetInputMute", {"inputName": name}, ignore_err=True) or {}).get("inputMuted")
+        out.append((name, reroute, muted if isinstance(muted, bool) else None))
+    return out
+
+
+def browser_audio_problems(entries):
+    """Pure: the problems of [(name, reroute_audio, muted)]: `'<name>' reroute_audio off` / `'<name>' not
+    muted` (`unreadable` when OBS did not answer)."""
+    problems = []
+    for name, reroute, muted in entries:
+        if reroute is not True:
+            problems.append("'%s' reroute_audio %s" % (name, "unreadable" if reroute is None else "off"))
+        if muted is not True:
+            problems.append("'%s' %s" % (name, "mute unreadable" if muted is None else "not muted"))
+    return problems
+
+
+def _browser_audio_ok_text(n):
+    return "%d browser source(s) reroute their audio into OBS, muted" % n
+
+
+def mute_browser_sources(obs):
+    """Set reroute_audio + mute on every browser source that lacks either (nothing else touched), read both
+    back. Returns the status for the seed line: the count, the sources changed, or `FAILED: <read-back>`."""
+    changed = []
+    for name, reroute, muted in browser_sources(obs):
+        what = []
+        if reroute is not True:
+            obs.req("SetInputSettings", {"inputName": name, "inputSettings": {"reroute_audio": True},
+                                         "overlay": True}, ignore_err=True)
+            what.append("reroute_audio on")
+        if muted is not True:
+            obs.req("SetInputMute", {"inputName": name, "inputMuted": True}, ignore_err=True)
+            what.append("muted")
+        if what:
+            changed.append("'%s' %s" % (name, " + ".join(what)))
+    after = browser_sources(obs)
+    problems = browser_audio_problems(after)
+    if problems:
+        return "FAILED: %s -- restart OBS, the launch seed runs again" % "; ".join(problems)
+    text = _browser_audio_ok_text(len(after))
+    return text + (" (set: %s)" % ", ".join(changed) if changed else "")
+
+
+def browser_audio_report(obs):
+    """verify's read-only line: `browser audio: OK (...)` or the problems."""
+    found = browser_sources(obs)
+    if not found:
+        return "browser audio: OK (no browser source)"
+    problems = browser_audio_problems(found)
+    if problems:
+        return "browser audio: " + "; ".join(problems)
+    return "browser audio: OK (%s)" % _browser_audio_ok_text(len(found))

@@ -639,19 +639,17 @@ fi
 
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
-step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344); stream role: the locked operator PipeWire (issue 1465)"
+step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344); stream role: the locked operator PipeWire (issue 1465); a strih box that needs none: PipeWire purged (issue 1440)"
 # Root cause (design 20.9., live diagnosis issuecomment-5751113173): the OBS program (${AUDIO_NAME}) is a NETWORK
 # stream (fohabl-strih VBAN), NOT the MiniFuse (the operator TALKBACK mic, the hub reads it). The hub writes the
 # program to a strih-program null sink; OBS captures its LOOPBACK republish strih-program-source (proven live).
 DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || echo 1000)"
 if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then   # issue 1465 item 3: scripts/lib/stream-operator-audio.sh
   echo "  ${WHY}"; stream_operator_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1465: the locked operator PipeWire (above)"
+elif PW_WHY="$(strih_pipewire_purge_applies)"; then   # issue 1440: the facts need no sound server (scripts/lib/strih-pipewire-purge.sh)
+  echo "  ${PW_WHY}"; STRIH_PW_PURGED=1; strih_pipewire_purge_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1440: PipeWire could not be purged from this strih box (above)"
 else
-  if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
-    echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"
-  else
-    warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"
-  fi
+  if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"; else warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"; fi
   strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d" || fail "cannot create ~/.config/pipewire/pipewire.conf.d (above)"
   strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
   chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
@@ -674,7 +672,7 @@ fi
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
 if strih_program_vban_declared; then echo "  the OBS program-audio input = the obs-vban source on the console's VBAN (the box facts, issue 1439), seeded by scripts/strih_scenes.py --bootstrap"; else echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap"; fi
-echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
+[ -n "${STRIH_PW_PURGED:-}" ] || echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
 step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped, never restarted)"
@@ -685,7 +683,7 @@ if WHY="$(obs_box_step_applies 13)"; then   # issue 1439: the stream role runs n
   # its drop-ins: NDI_CONFIG_DIR = /etc/ndi (step 4b, issue 1342) + run AS THE OPERATOR (step 12's PipeWire)
   mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")" /etc/systemd/system/intercom-hub.service.d
   ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
-  strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf
+  strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" "$(strih_pipewire_purge_dropin_mode)" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf   # issue 1440: no pipewire group on a purged box
   # issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
   [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
     || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
