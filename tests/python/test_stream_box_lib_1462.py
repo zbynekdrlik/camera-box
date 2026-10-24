@@ -303,7 +303,9 @@ def test_shell_single_quote_is_one_word_the_shell_takes_byte_for_byte(tmp_path):
 def test_every_bash_builder_quotes_through_the_one_helper():
     for lib in (AUDIO, MARKER, LIB / "strih-platform.sh"):
         text = lib.read_text()
-        assert "shell_single_quote" in text, lib
+        # issue 1474: strih-platform.sh prints its cleanup line through the quote lib's own
+        # shell_ssh_rm_plan_line (which quotes with shell_single_quote), never a copy
+        assert "shell_single_quote" in text or "shell_ssh_rm_plan_line" in text, lib
         assert "//\\'/\\'" not in text, "%s keeps its own copy of the escape" % lib
 
 
