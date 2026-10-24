@@ -3,10 +3,12 @@ paths:
   - "scripts/av_gate_session.py"
   - "scripts/youtube_leg_e2e.py"
   - "scripts/youtube_leg_obs.py"
+  - "scripts/youtube_leg_host.py"
   - "scripts/e2e_report_youtube.py"
   - "scripts/lib/youtube-leg.sh"
   - "tests/python/test_av_gate_session_1404.py"
   - "tests/python/test_youtube_leg_e2e_1404.py"
+  - "tests/python/test_youtube_leg_host_1404.py"
   - "tests/python/test_youtube_leg_obs_1404.py"
   - "tests/python/test_youtube_leg_wiring_1404.py"
   - "tests/python/test_e2e_report_youtube_1404.py"
@@ -27,7 +29,8 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
 |---|---|
 | `scripts/av_gate_session.py` | restreamer's session API client: `start` / `status` / `wait-ready` / `stop` / `wait-done`, exit 0 OK / 2 UNKNOWN, one JSON line |
 | `scripts/youtube_leg_obs.py` | StartStream / StopStream / record start on the stream OBS through `obs_phase2._conn` / `_rpc` |
-| `scripts/youtube_leg_e2e.py` | the orchestration: `start`, `watch`, `stop`, `measure`; the state in `$OUTDIR/youtube-leg/state.json` |
+| `scripts/youtube_leg_e2e.py` | the orchestration: `start`, `watch`, `stop`, `recover`, `prefetch`, `measure`, `purge`; the state in `$OUTDIR/youtube-leg/state.json` |
+| `scripts/youtube_leg_host.py` | the measurement host (dev2) over key-auth ssh: stage, pull from the stream box, early decode, the verdict tool, fetch-back, cleanup |
 | `scripts/lib/youtube-leg.sh` | the call surface for recording-e2e.sh (issue-675 pattern): `youtube_leg_start` / `_stop` / `_cleanup_stop` / `_gate` |
 | `scripts/e2e_report_youtube.py` | the `youtube_leg` block in the Discord report + the per-point table (job summary + PR comment) |
 
@@ -73,7 +76,10 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   (`program_audio_guard.py`; anything but exit 0 stops the stream + the session AT ONCE, the stage is
   failed "to protect the channel"), the recording's start (`GetRecordStatus.outputDuration`, read on
   the first poll after StartRecord), and a dead harness (it stops everything itself).
-- `youtube_leg_stop` right after the stream StopRecord in `[7/8]` (StopStream, then the session stop).
+- `youtube_leg_stop` right after the stream StopRecord in `[7/8]` (StopStream, then the session stop),
+  given `"${STREAM_HOST_PATH:-}"`: it then starts `prefetch` in the BACKGROUND (`prefetch.pid`,
+  `prefetch.log`): the recording goes to dev2 and its tick map is decoded there during the merge and
+  the VOD wait (design 6387919956 part b; next section).
 - `cleanup()`: `youtube_leg_cleanup_stop` right after the StopRecord-first block: the StopStream half
   FIRST, in the foreground, `timeout 10` (`stop --stream-only`; a cancelled job is SIGKILLed seconds
   after its SIGINT), then the session stop in the background (never delays the device restores;
@@ -95,23 +101,117 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
 - The camera-box dead-man's first-fire margin (`CAMERA_BOX_DEADMAN_OVERHEAD_FLOOR_MIN` 30 /
   default 35 min) and the painter slack (1800 s) both carry the stage's pre-record wait.
 - `youtube_leg_gate` in BOTH tails, right after the program-audio gate line (before the Discord report
-  and `exit "$GATE"`): pulls the stream recording to dev1 (`stream_box_download` in `timeout bash -c`),
-  `measure` (VOD wait, windows, the verdict tool with `--probe-bin $PROBE_BIN_DIR/recording-verdict`,
-  the fold), then deletes the two video copies (tick maps + JSON stay); a failed download removes the
-  partial file first.
+  and `exit "$GATE"`): `measure --stream-path` (VOD wait, windows, the verdict tool ON dev2 with the
+  probe binary + marker log shipped there, the fold). The recording never reaches dev1.
+- `cleanup()` also runs a bounded background `purge` (stop a prefetch still running, delete dev2's
+  stage dir); after a gate that measured it is a no-op.
 - Every outside step runs through `youtube_leg_proc.run_bounded` (a timeout kills the whole process
   group: yt-dlp, ffmpeg, the decode pool), and `install_cleanup()` kills them on SIGTERM / SIGINT.
 - **Deadlines:** wait-ready 420 s, wait-done `YOUTUBE_LEG_DONE_DEADLINE_S` 900 s (it starts after the
-  merge, ~10 min after the stop), the tool `YOUTUBE_LEG_TOOL_TIMEOUT_S` 1500 s. The painter's
+  merge, ~10 min after the stop), the tool `YOUTUBE_LEG_TOOL_TIMEOUT_S` 1500 s (on dev2, under the
+  host's own `timeout`; the early decode has the same bound, `--decode-timeout`). The painter's
   pre-record slack (`PAINTER_PRE_RECORD_SLACK_SECS`) grew 1200 -> 1800 for the ready wait. A run that
   still hits the job timeout leaves no block: the per-point page reads the stage dir (`--stage-dir`)
   and shows that as RED ("no verdict was folded"), never as "not measured".
-- **Where the measurement runs:** dev1, as the main's design and the dispatch decided (never the
-  stream box). It pulls the stream recording + the VOD (~1-2 GB together) and runs the 4-worker
-  OpenCV decode there; both videos are deleted after the verdict. Moving it to a box that is not dev1
-  is a main-session decision (the owner's no-rig-data-on-dev1 rule).
+- **Where the measurement runs: dev2** (design 6387919956 part c; the owner's no-rig-data-on-dev1
+  rule). dev1 orchestrates and folds the block; everything else is the next section.
 - The 703 byte window (merge -> `exit "$GATE"`): 12373 of 13000 bytes after this stage. The next step
   added there must widen it.
+
+## The measurement on dev2 (main design 6387919956, parts b + c, 24.10.2026)
+
+- **Access:** plain key-auth ssh `newlevel@dev2` (`YOUTUBE_LEG_MEASURE_HOST`), the access the dev2
+  avsync measurer already uses; no new credential. The stream box password the E2E holds
+  (`AV_GATE_SSH_PASSWORD`) reaches dev2 on the ssh session's STDIN for `sshpass -e scp`, never in an
+  argv. `scripts/youtube_leg_host.py` owns every remote step. The pull is Linux scp only: a
+  Windows-class stream box (`stream_box_platform`, passed as `--stream-platform`) is refused by name.
+- **Stage dir** `~/youtube-leg-1404/<dev1 run dir name>/` (`stage_key`, sanitized): `code/` (the
+  tool's five modules, shipped from the E2E's own checkout every run, so dev2 needs no install of
+  ours), `in/` (marker log + probe binary), `stream-recording.<ext>`, `verdict/` (the tool's out dir,
+  the VOD lands here), `<step>.pid`. A stage dir older than a day (a killed run) is swept at the next
+  run's start.
+- **prefetch** (background, right after the stop): check -> ship the code -> pull the recording from
+  the stream box straight to dev2 -> `--prime-ticks` (the early decode into the tool's cache). The
+  outcome is `state.prefetch` = the block's `early` (`pulled`, `pull_s`, `decode_rc`, `decode_s`,
+  `reason`, `unreachable`).
+- **measure** waits for a running prefetch (bounded by the prefetch's own bounds, then stops it),
+  pulls again ONCE when the early pull did not deliver (`early.retried_pull`), lets the verdict run
+  decode the recording again when the early decode failed (`early.retried_decode`), ships the probe +
+  marker log, runs the tool, fetches ONLY `youtube-leg-verdict.json`, `ticks-*.tsv` and their
+  `.reads.json` (also after the tool ran over its bound), then deletes the stage dir (videos included,
+  `measure_host` in the block). An unreachable dev2 (ssh exit 255) = UNKNOWN `the measurement host
+  newlevel@dev2 is unreachable (...)`, never a measurement on dev1.
+- **Bounds:** every long remote step runs as `timeout -k 30 <bound> nice -n 10 <cmd> &` with its pid
+  in `<step>.pid` (timeout leads its own process group: the decode pool, yt-dlp's ffmpeg, the probe);
+  the local ssh is `run_bounded` at the bound + 60 s, its stdin a closed pipe. A step's OWN exit 255
+  (scp: the stream box unreachable from dev2) is returned as 254 with a stderr line, because 255 is
+  ssh's own exit and means "dev2 unreachable". Exit 124 (or 137 at the bound) = "ran over"; 137
+  inside the bound = "killed (exit 137)" (the OOM killer on a loaded dev2). `prefetch.pid` is removed
+  by the prefetch itself, and a reader acts on it only when `/proc/<pid>/cmdline` is this stage's
+  prefetch (a reused pid is never waited for or signalled). The cleanup kills every recorded group, then
+  deletes the dir. 4 decode workers (`YOUTUBE_LEG_MEASURE_WORKERS`) at nice 10: dev2's other users
+  (the SyncNet measurer, bakerion ffmpeg/nvenc jobs, node test runs) keep their share.
+- **dev2 setup (one-time, supervisor):** key-auth dev1 -> dev2 (exists); `python3` with cv2 4.13.0
+  (`opencv-python 4.13.0.92` in `~/.local`, exists) + numpy; ffmpeg, ffprobe, sshpass (exist);
+  yt-dlp pinned to dev1's version: `pipx install "yt-dlp[default]==2026.8.19"` (installed
+  24.10.2026; the remote PATH puts `~/.local/bin` first). dev2 has node 22 but no deno, so yt-dlp warns
+  "No supported JavaScript runtime"; the 24.10 fetch still got 1080p + audio. If a fetch ever lacks
+  formats: `~/.config/yt-dlp/config` with `--js-runtimes node`.
+
+### Measured on dev2 (24.10.2026, the real files of E2E run 40110304642 attempt 3, dev2 load 13-36)
+
+| Step | Time |
+|---|---|
+| pull 747 MB 4K recording stream-snv -> dev2 | 7.7 s |
+| early decode of the recording (9316 frames, 4K) | 308 s (load ~15), 355 s (~17), 462 s (20-36) |
+| VOD fetch (yt-dlp, 266 MB) | ~159 s |
+| VOD decode (13470 frames, 1080p) | 131 s (load ~13), 139 s (~13), 254 s (~36) |
+| A/V of ONE window, the recording clip (4K x264 cut + `--av-sync`) | 61.5 + 168.6 s |
+| A/V of ONE window, the VOD clip (1080p) | 24.7 + 45.3 s |
+
+The real run: job start 17:13:08Z, StopStream 17:32:59Z (+20 min), VOD done 17:44:55Z (+716 s).
+
+**With the 1080p A/V read on the pool (ROZHODNUTE 6389130309), the final replay of that run on dev2**
+(24.10.2026 20:57-21:22Z, dev2 load 11-34, the A/V pool sized 3):
+
+| Step | Time |
+|---|---|
+| prefetch: pull 7.6 s + early decode 277.0 s | 286 s, inside the 716 s StopStream -> `done` wait |
+| measure after `done`: VOD fetch | 133 s |
+| VOD decode | 134 s |
+| A/V of 10 windows, 1080p recording reads, pool 3 | ~925 s |
+| fetch-back + stage cleanup | ~10 s |
+| **the verdict tool, total** | **~1190 s of the 1500 s bound** (margin ~5 min) |
+
+So the block is folded ~20 min after `done`: ~52 min into that job, against the 105 min job timeout.
+The margin to the tool bound is load dependent. Each A/V slot ran ~277 s per window at load ~30, and
+the A/V step is the largest term.
+
+The verdict was a real one, not UNKNOWN:
+- A/V PASS on all 10 windows: VOD - recording -14.6 to -15.4 ms, 49-51 markers each, every recording
+  read "1080p of 2160p".
+- dup/skip 0 in every window.
+- FAIL on w10-CAM5, the last window before StopStream: "the VOD ends 8.7 s before the recording's
+  last decoded frame of the window" and "the VOD audio ends 8.8 s before the window end". That is the
+  existing fail-closed rule meeting a VOD that lacks the stream's last ~9 s. Whose tail that is
+  (restreamer's drain, YouTube's archive cut, or the window placement near StopStream) is for the main.
+
+### Replaying the stage on dev2 without the rig (how the numbers above were taken)
+
+- The stream recordings stay on stream-snv (`/home/newlevel/<YYYY-MM-DD HH-MM-SS>.mp4`, local time =
+  UTC+2 in summer) after a run, and the run's `$OUTDIR` on dev1 keeps the marker log, the schedule and
+  `youtube-leg/state.json`. A replay = copy that state (drop `vod_id`), point
+  `YOUTUBE_LEG_SESSION_CMD` at a stub that prints `{"ok":true,"state":"done","vod_id":"<id>"}`, then
+  run `youtube_leg_e2e.py prefetch` and `measure` with the real `--stream-path`, markers, schedule and
+  a CI `recording-verdict` (any `probe-tools-linux-amd64` copy). It reads one file from stream-snv,
+  mutates nothing on the rig, and deletes its dev2 stage dir.
+- Detach a long dev2 benchmark with `ssh -f newlevel@dev2 'setsid nohup ... > log 2>&1 < /dev/null &'`;
+  without `-f` the local ssh stays attached until the remote job ends.
+- Copying a scratch script or a run's marker log to dev2 from a lane with uncommitted edits is
+  refused by the airuleset clean-tree deploy hook; a scratch copy that is not repo content takes
+  `# airuleset:deploy-dirty-ok <reason>` on the scp line.
+- Compare a decoder change on real files with `old vs new` tick maps row by row (changed / set /
+  cleared halves, decoded ticks, 'x' rows), not only by a count.
 
 ## Windows
 
@@ -150,7 +250,9 @@ window from record start + 5 s to the recording's stop - 3 s (`stop --record-sto
 
 `test_av_gate_session_1404.py` (a fake `sshpass` RUNS the remote bash with real curl against a fake
 API on 127.0.0.1: header delivered, token never in argv/output, every refusal), `test_youtube_leg_e2e_1404.py`
-(fakes for the four outside steps, `youtube_leg_e2e_fakes_1404.py`), `test_youtube_leg_obs_1404.py`
+(fakes for the outside steps, `youtube_leg_e2e_fakes_1404.py`: a fake ssh RUNS the remote bash under a
+fake dev2 home), `test_youtube_leg_host_1404.py` (the prefetch, the measure on the host, the one
+retry, an unreachable host, the bounds, purge, the stale sweep), `test_youtube_leg_obs_1404.py`
 (an injected rpc), `test_e2e_report_youtube_1404.py` (the real PASS fixture), `test_youtube_leg_wiring_1404.py`
 (the call sites + the lib RUN under `set -euo pipefail`). A test token must be low-entropy words
 (the secret scan blocks a hex/digit run).

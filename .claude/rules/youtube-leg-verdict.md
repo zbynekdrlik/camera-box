@@ -95,6 +95,84 @@ Why: the clip restarts its tick on every play beside the painter's line, and the
   `half_ticks(frame, det, scale)` call on the default path (the `runs` keyword only when non-empty),
   and a default job keeps its 4 fields. A 4th positional argument failed 5 of those tests.
 
+## The known-position read (design 6387919956 part a, 24.10.2026)
+
+Why: a full `detectAndDecodeMulti` per plane (finder-pattern search over the whole plane) was most
+of the decode. The E2E run 40110304642 attempt 3 recording (3840x2160, 9316 frames) took ~20 min on
+dev1 and the VOD decode never finished inside the tool's 1500 s.
+
+- `KnownPositionDetector` (`_decode_range` uses it per chunk; a caller passing a plain
+  `cv2.QRCodeDetector` keeps the full read on every plane): per half and plane (gray / blue) the
+  corner points of the painter QR the full detector last read. `_half_read` decodes the next frame
+  at those points first (`QRCodeDetector.decode`, gray then blue) and runs the full detector (gray
+  then blue) only when neither gives a valid painter payload: the FALLBACK, which stores the new
+  points (a cut to another framing, a frame without the QR, the run-scoped clip at another place).
+- **It reads a SUPERSET, never a different tick.** A decode at the stored points also reads a QR the
+  finder search missed. Measured on the run's real files (dev2, old vs new decoder, same workers):
+  the yu1zFSHFdu8 VOD gains 309 of 26940 halves and 5 frames with a tick, the 4K recording 380 of
+  18632 halves and 6 frames; every added tick is the +2 step of its neighbours; no tick the full
+  detector read changes; the 'x' frames stay 6 / 6. The committed crop of frame 2100 reads its settled
+  right half too (2196753 under 2196754). So `DECODER_VERSION` stays 2 (the committed maps and every
+  decode test are unchanged); the tests pin the superset property, not row identity
+  (`tests/python/test_youtube_leg_known_position_1404.py`, synthetic ground truth + the real crops).
+- Counted: known-position reads, `misses` (point reads with no painter payload), `fallback` (halves
+  whose stored points all missed, so the full detector ran: always <= `full`), full detections per
+  decode, on stderr, through
+  `decode_raw(reads=...)` / `LAST_READS`, and next to each cached map as `<map>.reads.json` (the E2E
+  block's `decode_reads`). A VOD's QR-less pre-roll costs full detections every frame (4 per frame,
+  as before): yu1zFSHFdu8 has ~3490 such frames.
+- Speed on dev2 (4 workers at nice 10; SyncNet, bakerion ffmpeg/nvenc jobs and node test runs load
+  it, so the numbers move with the load): VOD 13470 frames 213.6 s (63 frames/s, load ~10) -> 131 s
+  (load ~13), 139 s (load ~13), 254 s (load ~36); 4K recording 9316 frames 464 s (20.1 frames/s, load
+  ~13) -> 308 s (load ~15), 355 s (load ~17), 462 s (load 20-36). Old vs new at the same load: ~1.6x
+  (VOD) and ~1.5x (4K). On the 4K file the cost per frame is now
+  the 4K video decode + the plane resize + two ~27 ms point decodes of a ~600 px QR, no longer the
+  finder search (33 full detections in the whole file).
+- `--prime-ticks <file> --out <dir>` (the E2E's early decode): `cached_ticks` into
+  `<dir>/ticks-rec-1.tsv` under the normal cache key, so the verdict run with the same `--out` and the
+  same recording path finds it; exit 2 on a failed decode (the verdict run decodes again). The real
+  handoff is pinned by `test_the_early_decode_primes_the_cache_the_verdict_run_reads`.
+- `DECODER_VERSION` stays 2 on purpose: a v2 map of either decoder is a valid map of the file (the
+  superset property). The map can depend on the chunk boundaries (each chunk starts with no stored
+  points) only by which extra halves it reads.
+
+## The A/V step: a 1080p read of each window, on a bounded pool (ROZHODNUTE 6389130309)
+
+- `av_window` cuts a source TALLER than `AV_READ_HEIGHT` (1080) at 1080 (`_cut_clip(scale_to=)`,
+  `scale=-2:1080`, a scale of the same frames: the frame count is unchanged), a 1080p VOD as before.
+  The A/V block names each read: `rec_read` "1080p of 2160p", `vod_read` "1080p".
+- **Guard:** a scaled read must pair every audio marker IT decoded (`audio_markers_decoded`, minus
+  `AV_SCALED_MARKER_SLACK` 1 at the clip's edge), else `ValueError` -> that window's A/V is UNKNOWN.
+  It is never re-read at the original size. A scale only loses VIDEO ticks, so the read's own audio
+  count is the right bar. A theoretical `dur / 0.5` is the wrong one (review round 3): markers that
+  straddle the cut are lost at both ends, e.g. the committed 40 s base-rec-B decoded 79 and paired 78,
+  unscaled. Without the audio count (an older probe) the bar is `dur / 0.5 - 2`. An unscaled read
+  keeps the old floor (half the markers). Every committed real read (9 session recordings, the run's
+  6 windows) passes the scaled guard (pinned).
+- The strict guard is on the RECORDING read only. A VOD above 1080 lines (yt-dlp's last fallback `/b`)
+  is cut at 1080 too but keeps the old floor: an unscaled VOD read already loses markers (s2-vod-A paired
+  79 of 81, base-vod-R 69 of 79).
+- Clip names carry the window, made safe for a file name (`av-rec-<window>-<start>.mp4`, anything
+  outside `[A-Za-z0-9._-]` -> `_`): the windows run at once in one dir.
+- On a stop the tool starts no child (`youtube_leg_proc._STOPPING`, set by the signal handler), the
+  pool cancels the windows still queued (`pool.map`'s iterator cancels pending futures), and the dev2
+  cleanup TERMs each remote step's group before the KILL (`TERM_GRACE_S` 5 s). The TERM lets the tool's
+  handler kill its own children: yt-dlp, the clip cuts and the probe each run in their own session, out
+  of reach of a group KILL.
+- **Evidence** (`tests/fixtures/youtube_leg_1404/run40110304642-w0{1,2,3}-{4k,1080p}.avsync.out`, the probe
+  on the same windows of E2E run 40110304642, dev2 24.10.2026): 50/50 markers at both sizes, offsets
+  1.31 vs 0.75 / 16.41 vs 16.41 / 1.82 vs 1.82 ms. `AV_SCALED_OFFSET_TOLERANCE_MS` 2.0 pins it (the
+  gate's own bar is 150 ms).
+- **Cost** (dev2, three windows at once, load 25-33): 4K cut 175 s + probe 351-697 s; 1080p cut 48-103 s +
+  probe 51-123 s. Alone at load ~19: 4K 61.5 + 168.6 s, 1080p 27.9 + 33.0 s.
+- **Pool:** `measure()` collects every window's A/V job and runs them on `run_av_jobs` (threads, the
+  work is subprocesses), in window order; one window's error stays its own. Size =
+  `av_pool_size(load1, cores, --av-pool)`: `--av-pool` (default `AV_POOL_MAX` 4) scaled by
+  cores / load when the load exceeds the cores, never under `AV_POOL_MIN` 2 (an explicit
+  `--av-pool 1` is honoured). dev2 (8 cores, load 13-36 from other users) mostly runs 2-3. Each slot
+  runs an x264 cut and the probe; the probe's 8 decode workers have no switch.
+- Tests: `tests/python/test_youtube_leg_av_1080p_1404.py`.
+
 ## Fail-closed rules the five review rounds found holes in (each has a test)
 
 - Dup/skip is judged twice: between ADJACENT decoded VOD frames (the session tool's rule, which
@@ -164,9 +242,11 @@ Why: the clip restarts its tick on every play beside the painter's line, and the
   1 and the s3 VOD are this decoder's output with raw left/right columns (`load_raw` ->
   `resolve_ticks`).
 - Re-decode from the real files (stream box `C:/Users/newlevel/Documents/_NLMEDIA stream/RECORDINGS`,
-  VOD via `yt-dlp -f 137`) with `youtube_leg_verdict.py --decode-ticks`; ~20-40 min per 20 min
-  file with 4 workers on a loaded dev1. The cache key in the out dir carries the decoder version and
-  the OpenCV version; CI pins `opencv-python-headless==4.13.0.92`, dev1's.
+  VOD via `yt-dlp -f 137`) with `youtube_leg_verdict.py --decode-ticks`; with the known-position
+  read ~100 frames/s for a 1080p file and ~26-30 frames/s for a 4K file on dev2 with 4 workers (the
+  full-detector decoder: 20-40 min per 20 min file on a loaded dev1). Decode on dev2, never on dev1
+  (rig data stays off dev1). The cache key in the out dir carries the decoder version and
+  the OpenCV version; CI pins `opencv-python-headless==4.13.0.92`, dev1's and dev2's.
 - **The three VODs are gone** (`EK_cqSvsCKo`, `0q5ZdDMwRwQ`, `bsf_M-HdabY`: "Video unavailable",
   8.10.2026). Only the stream recordings are left, so a VOD fixture can no longer be re-made.
 - **The 5.10 session recordings are burns-OFF**: no node burn on any frame, only the painter run and

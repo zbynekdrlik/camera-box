@@ -71,7 +71,7 @@ from youtube_leg_proc import install_cleanup, run_bounded  # noqa: E402
 from youtube_leg_ticks import (CLIP_RUNS, DECODE_SCALE, DECODER_VERSION, PHASE_RADIUS, _qr_tick,  # noqa: E402
                                band_ticks, container_frames, decode_raw, decode_ticks, half_ticks,
                                half_ticks_run, load_raw, load_run_ticks, load_ticks, painter_payload,
-                               painter_tick, resolve_ticks, write_ticks)
+                               painter_tick, resolve_ticks, write_ticks, LAST_READS)
 from youtube_leg_timeline import (DETAIL_LIMIT, END_SLACK_S, RunTimeline, TickClock,  # noqa: E402
                                   carries_runs, clamp_window, continuity, coverage, dupskip,
                                   join_part_rows, painter_restarts, publish_gaps, run_segments,
@@ -84,7 +84,8 @@ __all__ = ["SR", "run_bounded", "audio_blocks", "audio_window", "dbfs", "drop_sa
            "DETAIL_LIMIT", "END_SLACK_S", "RunTimeline", "TickClock", "carries_runs", "clamp_window",
            "continuity", "coverage", "dupskip", "join_part_rows", "join_parts", "painter_restarts",
            "publish_gaps", "run_segments", "run_timeline", "vod_content_times", "vod_pts_for",
-           "parse_avsync_output", "av_from_outputs", "av_window", "verdict", "parse_utc", "parse_window",
+           "parse_avsync_output", "av_from_outputs", "av_window", "av_pool_size", "run_av_jobs", "video_height",
+           "verdict", "parse_utc", "parse_window",
            "parse_recording", "fmt_utc", "main"]
 
 SCHEMA = 1
@@ -93,6 +94,25 @@ EXIT_PASS, EXIT_FAIL, EXIT_UNKNOWN = 0, 1, 2
 AV_TOLERANCE_MS = 150.0
 AV_CLIP_S = 40.0
 AV_MIN_MARKER_FRACTION = 0.5  # of the clip's expected markers (one per 0.5 s)
+# ROZHODNUTE 6389130309 (issue 1404): a recording window taller than this is read at this height, a
+# scale of the same frames (scale=-2:H), never at its 4K original: one 4K window read cost ~230 s on
+# dev2, ten windows 50-80 min, past the tool's bound; the same window at 1080p read the same 50/50
+# markers 0.56 ms away in 61 s (run 40110304642, tests/fixtures/youtube_leg_1404/run40110304642-*).
+AV_READ_HEIGHT = 1080
+AV_MARKER_PERIOD_S = 0.5
+# A scaled read must pair every audio marker IT decoded (but one at the clip's edge), else that
+# window's A/V is UNKNOWN: a scale only loses VIDEO ticks (the audio is the same track), and it is never
+# re-read at 4K silently. A theoretical count (dur / 0.5) is the wrong bar: markers that straddle the
+# cut are lost at both ends (base-rec-B: 79 decoded, 78 paired, unscaled, 40 s). Without the audio
+# count (an older probe) the bar is the window's markers minus one at each edge.
+AV_SCALED_MARKER_SLACK = 1
+AV_SCALED_OFFSET_TOLERANCE_MS = 2.0  # 1080p vs 4K of the same window: measured <= 0.56 ms (fixtures)
+# The windows' A/V runs on a pool: AV_POOL_MAX at once, fewer when the host is loaded (load > cores),
+# never under AV_POOL_MIN (one at a time cannot fit ten windows in the tool's bound) unless the caller
+# asks for fewer (--av-pool). Each slot runs an x264 cut + the probe (8 decode workers, no switch), so
+# the size-down by load matters on a shared host.
+AV_POOL_MAX, AV_POOL_MIN = 4, 2
+HEIGHT_TIMEOUT_S = 60
 PUBLISH_GAP_MAX_S = 0.5
 CADENCE_MIN_PCT = 90.0
 MIN_WINDOW_COVERED = 0.5  # a window the VOD covers under half of is UNKNOWN
@@ -127,11 +147,45 @@ def parse_avsync_output(text):
     raise ValueError("no JSON block in the recording-verdict --av-sync output")
 
 
-def _cut_clip(src, start_s, dur_s, out):
+def _cut_clip(src, start_s, dur_s, out, scale_to=None):
+    """A clip of `src` for the A/V probe; `scale_to` = its height (a scale of the same frames)."""
+    vf = ["-vf", f"scale=-2:{int(scale_to)}"] if scale_to else []
     run_bounded(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start_s:.3f}",
-                 "-i", src, "-t", f"{dur_s:.3f}", "-map", "0:v:0", "-map", "0:a:0",
+                 "-i", src, "-t", f"{dur_s:.3f}", "-map", "0:v:0", "-map", "0:a:0", *vf,
                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k", out],
                 CLIP_TIMEOUT_S, check=True)
+
+
+def video_height(path):
+    """The video stream's height in lines (ffprobe)."""
+    r = run_bounded(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=height",
+                     "-of", "csv=p=0", path], HEIGHT_TIMEOUT_S, text=True, check=True)
+    return int(r.stdout.strip().split(",")[0])
+
+
+def av_pool_size(load, cores, cap=AV_POOL_MAX):
+    """How many windows' A/V run at once: `cap`, scaled down by load / cores when the host is busier
+    than its cores, never under AV_POOL_MIN; an unreadable load = `cap`."""
+    cap = max(1, int(cap))
+    if load is None or not cores:
+        return cap
+    return max(min(cap, AV_POOL_MIN), min(cap, round(cap * cores / max(load, cores))))
+
+
+def run_av_jobs(jobs, size):
+    """Run the windows' A/V jobs on a pool of `size` threads (each job's work is subprocesses);
+    the results in job order; a failed job is its own {"error": ...}, never another window's."""
+    import concurrent.futures
+
+    def one(job):
+        try:
+            return job()
+        except Exception as e:  # one window's A/V error is UNKNOWN for that window only
+            print(f"youtube_leg_verdict: av_window failed: {type(e).__name__}: {e}", file=sys.stderr)
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, int(size))) as pool:
+        return list(pool.map(one, jobs))
 
 
 def _avsync(probe_bin, clip, markers_csv, av_run=None):
@@ -149,13 +203,28 @@ def _avsync(probe_bin, clip, markers_csv, av_run=None):
     return parse_avsync_output(text)
 
 
-def av_from_outputs(rec_j, vod_j, dur_s=AV_CLIP_S):
-    """The window's A/V block from the two parsed --av-sync results (sign: video - audio)."""
-    floor = AV_MIN_MARKER_FRACTION * dur_s * 2
+def av_from_outputs(rec_j, vod_j, dur_s=AV_CLIP_S, scaled=(), heights=None):
+    """The window's A/V block from the two parsed --av-sync results (sign: video - audio). A read
+    named in `scaled` ("recording" / "VOD") was cut down to AV_READ_HEIGHT: it must hold every marker
+    of its window (AV_SCALED_MARKER_SLACK at the edge), else ValueError (that window's A/V UNKNOWN)."""
+    floor = AV_MIN_MARKER_FRACTION * dur_s / AV_MARKER_PERIOD_S
     for name, j in (("recording", rec_j), ("VOD", vod_j)):
         if j.get("av_offset_ms") is None:
             raise ValueError(f"{name}: no A/V offset measured")
-        if (j.get("matched") or 0) < floor:
+        matched = j.get("matched") or 0
+        if name in scaled:
+            src = f"{(heights or {}).get(name, '?')}p"
+            audio = j.get("audio_markers_decoded")
+            if audio is not None and matched < audio - AV_SCALED_MARKER_SLACK:
+                raise ValueError(f"the {AV_READ_HEIGHT}p read of the {src} {name} matched {matched} of the {audio} "
+                                 f"audio markers it decoded (a scaled read is never re-read at {src}: A/V not "
+                                 "measured)")
+            holds = int(dur_s / AV_MARKER_PERIOD_S) - 2 * AV_SCALED_MARKER_SLACK
+            if audio is None and matched < holds:
+                raise ValueError(f"the {AV_READ_HEIGHT}p read of the {src} {name} matched {matched} markers, the "
+                                 f"window holds {holds} (a scaled read is never re-read at {src}: A/V not "
+                                 "measured)")
+        if matched < floor:
             raise ValueError(f"{name}: only {j.get('matched')} markers matched (< {floor:.0f})")
     return {"rec_ms": round(rec_j["av_offset_ms"], 1), "vod_ms": round(vod_j["av_offset_ms"], 1),
             "delta_ms": round(vod_j["av_offset_ms"] - rec_j["av_offset_ms"], 1),
@@ -164,24 +233,37 @@ def av_from_outputs(rec_j, vod_j, dur_s=AV_CLIP_S):
 
 
 def av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s=AV_CLIP_S, workdir=None,
-              av_run=None):
+              av_run=None, tag=""):
     """Cut the same content from both files (tick-matched starts) and measure each clip's A/V. The
     clips are deleted afterwards; each clip's probe output stays next to it as *.avsync.out.
     `av_run`: a CG window's self-marked run (its clips are paired through their own tick + marker)."""
     if workdir is None:
         with tempfile.TemporaryDirectory(prefix="ylv-av-") as tmp:
             return av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s, tmp,
-                             av_run)
-    results = []
-    for kind, src, start in (("rec", rec_file, rec_start_s), ("vod", vod_file, vod_start_s)):
-        clip = os.path.join(workdir, f"av-{kind}-{start:.3f}.mp4")
+                             av_run, tag)
+    results, scaled, heights, reads = [], [], {}, {}
+    # the window's name in the clip's (made safe for a file name): windows run at once in one dir and
+    # two recording parts can share an offset
+    tag = re.sub(r"[^A-Za-z0-9._-]", "_", tag or "")
+    for kind, name, src, start in (("rec", "recording", rec_file, rec_start_s), ("vod", "VOD", vod_file, vod_start_s)):
+        clip = os.path.join(workdir, f"av-{kind}-{tag + '-' if tag else ''}{start:.3f}.mp4")
+        heights[name] = video_height(str(src))
+        scale = AV_READ_HEIGHT if heights[name] > AV_READ_HEIGHT else None
+        if scale and kind == "rec":
+            # the strict guard is the recording read's (ROZHODNUTE 6389130309); a VOD above 1080 (yt-dlp's
+            # last fallback) is cut at 1080 too but keeps the old floor: an unscaled VOD read already loses
+            # markers (s2-vod-A paired 79 of 81)
+            scaled.append(name)
+        reads[kind] = f"{AV_READ_HEIGHT}p of {heights[name]}p" if scale else f"{heights[name]}p"
         try:
-            _cut_clip(src, start, dur_s, clip)
+            _cut_clip(src, start, dur_s, clip, scale_to=scale)
             results.append(_avsync(probe_bin, clip, markers_csv, av_run))
         finally:
             if os.path.exists(clip):
                 os.remove(clip)
-    return av_from_outputs(results[0], results[1], dur_s)
+    av = av_from_outputs(results[0], results[1], dur_s, scaled=tuple(scaled), heights=heights)
+    av["rec_read"], av["vod_read"] = reads["rec"], reads["vod"]
+    return av
 
 
 # ---------------------------------------------------------------- verdict
@@ -370,13 +452,34 @@ def cached_ticks(src, cache, workers, runs=()):
         with open(cache) as f:
             if f.readline().strip() == f"# {key}":
                 return load_run_ticks(cache) if runs else load_ticks(cache)
-    if runs:
-        rows = decode_ticks(src, workers, runs=tuple(runs))
-        write_ticks(cache, rows, header=key)
-        return [r[:3] + (r[6],) for r in rows]
-    rows = decode_ticks(src, workers)
+    rows = decode_ticks(src, workers, runs=tuple(runs)) if runs else decode_ticks(src, workers)
     write_ticks(cache, rows, header=key)
-    return [r[:3] for r in rows]
+    _write_reads(src, cache)
+    return [r[:3] + (r[6],) for r in rows] if runs else [r[:3] for r in rows]
+
+
+def _write_reads(src, cache):
+    """The decode's read counters (known-position reads, fallbacks, full detections: youtube_leg_ticks
+    KnownPositionDetector) next to its tick map, `<map>.reads.json`; nothing when none were counted."""
+    reads = LAST_READS.pop(os.path.abspath(str(src)), None)
+    if reads:
+        with open(f"{cache}.reads.json.tmp", "w") as f:
+            json.dump(reads, f)
+        os.replace(f"{cache}.reads.json.tmp", f"{cache}.reads.json")
+
+
+def prime_ticks(src, out, workers):
+    """The early decode of the E2E's YouTube stage (design 6387919956 part b): the recording's tick map
+    into the cache the verdict run reads (`ticks-rec-1.tsv`, keyed like any decode), so the run only
+    decodes the VOD after the VOD wait. Exit 0, or 2 with the error."""
+    os.makedirs(out, exist_ok=True)
+    try:
+        rows = cached_ticks(src, os.path.join(out, "ticks-rec-1.tsv"), workers)
+    except Exception as e:  # the verdict run decodes the recording again (the one retry)
+        print(f"youtube_leg_verdict: the early decode of {src} failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return EXIT_UNKNOWN
+    print(f"youtube_leg_verdict: the early decode of {src} cached {len(rows)} frames")
+    return EXIT_PASS
 
 
 def _cv2_version():
@@ -393,8 +496,9 @@ def _guard(fn, *a, **kw):
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-def measure_window(ctx, name, a, b):
-    """One window's dup/skip, coverage, audio and A/V; errors land in w['errors'] / each block."""
+def measure_window(ctx, name, a, b, av_jobs=None):
+    """One window's dup/skip, coverage, audio and A/V; errors land in w['errors'] / each block. With
+    `av_jobs` (a list) the A/V is not run here: (w, job) is appended for run_av_jobs' pool."""
     rec_rows, vod_rows, t0, starts = ctx["rec_rows"], ctx["vod_rows"], ctx["t0"], ctx["starts"]
     w = {"name": name, "start": fmt_utc(a), "end": fmt_utc(b), "errors": []}
     inside = [p for p in ctx["publishes"] if a < p < b]
@@ -433,8 +537,16 @@ def measure_window(ctx, name, a, b):
     elif markers is None:
         w["av"] = {"error": f"no marker log for run {av_run} (--clip-markers)"}
     else:
-        w["av"] = _guard(av_window, ctx["recs"][k][0], ctx["vod_file"], rec_p - (starts[k] - t0), vod_p,
-                         markers, ctx["probe_bin"], min(AV_CLIP_S, b2 - a2), ctx["out"], av_run)
+        def job(src=ctx["recs"][k][0], rec_s=rec_p - (starts[k] - t0), dur=min(AV_CLIP_S, b2 - a2),
+                markers=markers, av_run=av_run):
+            return av_window(src, ctx["vod_file"], rec_s, vod_p, markers, ctx["probe_bin"], dur, ctx["out"], av_run,
+                             name)
+
+        if av_jobs is None:
+            w["av"] = _guard(av_window, ctx["recs"][k][0], ctx["vod_file"], rec_p - (starts[k] - t0), vod_p,
+                             markers, ctx["probe_bin"], min(AV_CLIP_S, b2 - a2), ctx["out"], av_run)
+        else:
+            av_jobs.append((w, job))
     return w
 
 
@@ -455,7 +567,12 @@ def measure(args):
     ctx["vod_rows"] = cached_ticks(vod_file, os.path.join(args.out, "ticks-vod.tsv"), args.workers, runs)
     ctx["rec_rows"], ctx["t0"], ctx["starts"] = join_part_rows(part_rows, [s for _, s in recs], restarting=runs)
     ctx["vod_audio"] = load_audio(vod_file)
-    windows = [measure_window(ctx, name, a, b) for name, a, b in windows_in]
+    av_jobs = []
+    windows = [measure_window(ctx, name, a, b, av_jobs) for name, a, b in windows_in]
+    pool = av_pool_size(_load(), os.cpu_count(), args.av_pool)
+    print(f"youtube_leg_verdict: the A/V of {len(av_jobs)} window(s) on a pool of {pool}", file=sys.stderr)
+    for (w, _), av in zip(av_jobs, run_av_jobs([job for _, job in av_jobs], pool)):
+        w["av"] = av
     pubs = publish_gaps(ctx["rec_rows"], ctx["vod_rows"], ctx["t0"], publishes)
     v = verdict(windows, pubs)
     for p in pubs:
@@ -474,6 +591,13 @@ def measure(args):
             "reasons": v["reasons"]}
 
 
+def _load():
+    try:
+        return os.getloadavg()[0]
+    except OSError:
+        return None
+
+
 def write_result(out, result):
     os.makedirs(out, exist_ok=True)
     path = os.path.join(out, "youtube-leg-verdict.json")
@@ -486,6 +610,8 @@ def write_result(out, result):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Issue 1404 YouTube-leg verdict (exit 0 PASS, 1 FAIL, 2 UNKNOWN)")
     ap.add_argument("--decode-ticks", help="diagnostic: print this file's tick map and exit")
+    ap.add_argument("--prime-ticks", help="the E2E's early decode: cache this recording's tick map in --out "
+                                          "(ticks-rec-1.tsv) for the verdict run, and exit")
     ap.add_argument("--vod")
     ap.add_argument("--recording", action="append", default=[])
     ap.add_argument("--markers")
@@ -495,12 +621,19 @@ def main(argv=None):
     ap.add_argument("--out")
     ap.add_argument("--probe-bin", default=os.environ.get("RECORDING_VERDICT_BIN", "recording-verdict"))
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--av-pool", type=int, default=AV_POOL_MAX,
+                    help=f"at most this many windows' A/V at once (shrinks under load to {AV_POOL_MIN}, "
+                         "never under it unless asked for fewer)")
     ap.add_argument("--runs", type=int, action="append", default=[], choices=CLIP_RUNS,
                     help="also read this reserved run as a tick (the measurement clip 911016 in the CG segments); "
                          "every window is then judged on its own run segment")
     ap.add_argument("--clip-markers", help="the measurement clip's own marker log (<clip>.markers.csv | http url): "
                                            "the A/V of a window of a --runs run")
     args = ap.parse_args(argv)
+    if args.prime_ticks:
+        if not args.out:
+            ap.error("--prime-ticks needs --out (the verdict run's out dir)")
+        return prime_ticks(args.prime_ticks, args.out, args.workers)
     if args.decode_ticks:
         rows = decode_ticks(args.decode_ticks, args.workers, runs=tuple(args.runs)) if args.runs else \
             decode_ticks(args.decode_ticks, args.workers)

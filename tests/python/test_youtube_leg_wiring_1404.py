@@ -41,6 +41,10 @@ def test_the_stage_stops_right_after_the_stream_stoprecord():
     stop = s.index('youtube_leg_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR"')
     assert stop_rec < stop < s.index('program_audio_continuity_mark stop "$OUTDIR" "$STREAM"')
     assert s.count("youtube_leg_stop ") == 1
+    # design 6387919956 part b: the stop hands the recording's path on, so the early pull + decode
+    # on the measurement host start right away
+    line = s[stop:s.index("\n", stop)]
+    assert 'youtube_leg_stop "$HERE" "$STREAM" "$STREAM_USER" "$STREAM_PW" "$OUTDIR" "${STREAM_HOST_PATH:-}"' in line
 
 
 def test_cleanup_stops_a_live_broadcast_right_after_the_stoprecord_first_block():
@@ -115,7 +119,8 @@ def test_start_runs_the_rig_busy_guard_first_then_goes_live_and_spawns_the_watch
             f'youtube_leg_start "{REPO}/scripts" 1.1.1.1 2.2.2.2 u p "{tmp_path}"\n'
             f'test -s "{tmp_path}/youtube-leg/watch.pid"\n'
             f'youtube_leg_stop "{REPO}/scripts" 2.2.2.2 u p "{tmp_path}"\n'
-            f'test ! -e "{tmp_path}/youtube-leg/watch.pid"\necho END')
+            f'test ! -e "{tmp_path}/youtube-leg/watch.pid"\n'
+            f'test ! -e "{tmp_path}/youtube-leg/prefetch.pid"\necho END')  # no recording path: no prefetch
     r = _bash(body, env)
     assert r.returncode == 0 and r.stdout.endswith("END\n"), r.stdout + r.stderr
     assert order.read_text() == "guard:the YouTube stage StartStream\n"
@@ -124,6 +129,28 @@ def test_start_runs_the_rig_busy_guard_first_then_goes_live_and_spawns_the_watch
     assert "obs.stream-stop" in names and "session.stop" in names
     st = json.loads((tmp_path / "youtube-leg" / "state.json").read_text())
     assert st["phase"] == "stopped"
+
+
+def test_the_stop_with_the_recording_path_runs_the_prefetch_on_the_host(tmp_path):
+    fk = Fakes(tmp_path)
+    fk.script("session", "start", 0, {"ok": True, "session_id": "s1", "broadcast_id": "b1"})
+    fk.script("obs", "stream-start", 0, {"ok": True, "publish_utc": 1.0})
+    fk.script("obs", "record-start", 0, {"ok": True, "record_start_utc": 5.0})
+    fk.script("session", "wait-ready", 0, {"ok": True, "state": "ready"})
+    rec = fk.stream_file("/home/newlevel/2026-10-24 19-27-46.mp4")
+    env = dict(fk.env, E2E_EXECUTE_VERDICT="1", YOUTUBE_LEG_WATCH_POLL_S="0.05")
+    d = tmp_path / "youtube-leg"
+    body = ('stray_session_check_assert() { :; }\n'
+            f'youtube_leg_start "{REPO}/scripts" 1.1.1.1 2.2.2.2 u p "{tmp_path}"\n'
+            'sleep 0.5\n'  # the watch reads the record start
+            f'youtube_leg_stop "{REPO}/scripts" 2.2.2.2 u p "{tmp_path}" "{rec}"\n'
+            # the prefetch removes its own pid file when it ends: wait on its outcome in the state
+            f'for _ in $(seq 1 300); do grep -q decode_rc "{d}/state.json" && break; sleep 0.1; done\necho END')
+    r = _bash(body, env)
+    assert r.returncode == 0 and r.stdout.endswith("END\n"), r.stdout + r.stderr
+    pre = json.loads((d / "state.json").read_text())["prefetch"]
+    assert pre["pulled"] is True and pre["decode_rc"] == 0, pre
+    assert "sshpass" in fk.names() and "prime" in fk.names()
 
 
 def test_a_failed_start_keeps_the_run_going(tmp_path):
@@ -159,6 +186,35 @@ def test_the_rig_busy_gate_recovers_a_leftover_broadcast_only_with_a_marker():
     guard = g.rindex('if [ -f "$YOUTUBE_LEG_MARKER" ]; then', 0, call)
     assert guard < call < g.index("\nfor ((i = 1; i <= MAX_ITERATIONS; i++)); do")
     assert "--with-session" not in g[guard:call + 200]  # the gate has no ssh password: the stream half only
+
+
+def test_the_gate_measures_on_the_host_and_never_pulls_the_recording_to_dev1():
+    lib = LIB.read_text()
+    fn = lib[lib.index("youtube_leg_gate() {"):]
+    fn = fn[:fn.index("\n}\n")]
+    assert "stream_box_download" not in fn and "win-ssh-exec.sh" not in fn
+    assert 'measure --verdict-json "$report" --stream-path "$host_path"' in fn
+    # the measurement host pulls over scp: the stream box's class goes along (a Windows box is refused)
+    assert '--stream-platform "$(_youtube_leg_stream_platform "$stream")"' in fn
+
+
+def test_the_stop_starts_the_prefetch_in_the_background(tmp_path):
+    lib = LIB.read_text()
+    fn = lib[lib.index("youtube_leg_stop() {"):]
+    fn = fn[:fn.index("\n}\n")]
+    pre = fn.index('prefetch --stream-path "$host_path") >>"$d/prefetch.log" 2>&1 &')
+    assert fn.index('stop --record-stopped') < pre < fn.index('echo "$!" >"$d/prefetch.pid"')
+    assert '--stream-platform "$(_youtube_leg_stream_platform "$stream")" prefetch' in fn
+
+
+def test_cleanup_purges_the_measurement_host_in_the_background(tmp_path):
+    lib = LIB.read_text()
+    fn = lib[lib.index("youtube_leg_cleanup_stop() {"):]
+    fn = fn[:fn.index("\n}\n")]
+    purge = fn.index(" purge) >>")
+    bound = fn.rindex("(timeout ", 0, purge)  # the purge is bounded
+    assert fn.index("stop --stream-only") < bound and "\n" not in fn[bound:purge].replace("\\\n", "")
+    assert fn[purge:].lstrip().count("&") >= 1
 
 
 def test_cleanup_stops_the_stream_first_in_the_foreground_then_the_session(tmp_path):

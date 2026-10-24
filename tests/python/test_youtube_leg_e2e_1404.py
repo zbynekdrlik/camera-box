@@ -1,7 +1,8 @@
 """Issue 1404 -- scripts/youtube_leg_e2e.py, the full-path E2E's BLOCKING YouTube stage
-(main design 6383793524). The four outside steps (restreamer's session client, the stream OBS output,
-the program-audio channel guard, the YouTube-leg verdict tool) are fakes; the orchestration, the
-state, the windows and the fold into the verdict JSON are real."""
+(main design 6383793524; the measurement on dev2, design 6387919956). The outside steps (restreamer's
+session client, the stream OBS output, the program-audio channel guard, ssh to the measurement host
+with the verdict tool and the pull on it) are fakes; the orchestration, the state, the windows, the
+remote bash and the fold into the verdict JSON are real."""
 import json
 import os
 import subprocess
@@ -34,6 +35,11 @@ def _state(d):
 
 @pytest.fixture
 def fk(tmp_path):
+    return scripted_fakes(tmp_path)
+
+
+def scripted_fakes(tmp_path):
+    """The fakes with a clean run's answers queued (shared with test_youtube_leg_host_1404.py)."""
     f = Fakes(tmp_path)
     f.script("session", "start", 0, {"ok": True, "session_id": "s1", "broadcast_id": "b1"})
     f.script("obs", "stream-start", 0, {"ok": True, "publish_utc": T0})
@@ -168,9 +174,13 @@ def test_windows_are_the_schedule_segments_trimmed():
     assert yle.window_args(ws)[0] == "w01-CAM5:103.000:128.000"
 
 
-def _measure_inputs(tmp_path, overall=True):
-    rec = tmp_path / "stream-recording.mkv"
-    rec.write_bytes(b"x")
+STREAM_PATH = "/home/newlevel/2026-10-24 19-27-46.mkv"  # a space in it, like OBS names them
+
+
+def _measure_inputs(tmp_path, fk, overall=True):
+    fk.stream_file(STREAM_PATH)
+    probe = tmp_path / "recording-verdict"
+    probe.write_bytes(b"a probe binary")
     markers = tmp_path / "markers.csv"
     markers.write_text("tick,ts\n")
     sched = tmp_path / "schedule.json"
@@ -179,8 +189,8 @@ def _measure_inputs(tmp_path, overall=True):
     verdict = tmp_path / "verdict.json"
     if overall is not None:
         verdict.write_text(json.dumps({"overall_pass": overall}))
-    return ["measure", "--verdict-json", str(verdict), "--recording", str(rec), "--markers", str(markers),
-            "--schedule", str(sched), "--probe-bin", "/x/recording-verdict"], verdict
+    return ["measure", "--verdict-json", str(verdict), "--stream-path", STREAM_PATH, "--markers", str(markers),
+            "--schedule", str(sched), "--probe-bin", str(probe)], verdict
 
 
 def _stopped(fk, tmp_path):
@@ -203,13 +213,17 @@ PASS_RESULT = {"schema": 1, "overall": "PASS", "reasons": [],
 def test_measure_runs_the_tool_on_the_vod_and_folds_a_pass(fk, tmp_path):
     d = _stopped(fk, tmp_path)
     fk.script("verdict", "verdict", 0, PASS_RESULT)
-    args, verdict = _measure_inputs(tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
     r = _run(fk, d, *args)
     assert r.returncode == 0, r.stdout + r.stderr
     call = [c for c in fk.calls() if c[0] == "verdict"][0][1:]
+    stage = f"{fk.home}/youtube-leg-1404/{tmp_path.name}"  # the dev1 run dir's name keys the host stage
+    assert call[0] == f"{stage}/code/youtube_leg_verdict.py"  # the tool runs ON the measurement host
     assert call[call.index("--vod") + 1] == "AbCdEfGhIjK"
-    assert call[call.index("--recording") + 1].endswith(f"stream-recording.mkv@{T0 + 60:.3f}")
-    assert call[call.index("--probe-bin") + 1] == "/x/recording-verdict"
+    assert call[call.index("--recording") + 1] == f"{stage}/stream-recording.mkv@{T0 + 60:.3f}"
+    assert call[call.index("--probe-bin") + 1] == f"{stage}/in/recording-verdict"
+    assert call[call.index("--markers") + 1] == f"{stage}/in/markers.csv"
+    assert call[call.index("--workers") + 1] == "4"
     wins = [call[i + 1] for i, a in enumerate(call) if a == "--windows"]
     assert wins == [f"w01-CAM5:{T0 + 73:.3f}:{T0 + 98:.3f}", f"w02-CAM3:{T0 + 103:.3f}:{T0 + 128:.3f}"]
     assert call[call.index("--publish") + 1] == f"{T0:.3f}"
@@ -224,7 +238,7 @@ def test_measure_runs_the_tool_on_the_vod_and_folds_a_pass(fk, tmp_path):
 def test_a_tool_fail_is_a_red_stage(fk, tmp_path):
     d = _stopped(fk, tmp_path)
     fk.script("verdict", "verdict", 1, dict(PASS_RESULT, overall="FAIL", reasons=["w01-CAM5: 3 downstream dup"]))
-    args, verdict = _measure_inputs(tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
     assert _run(fk, d, *args).returncode == 1
     b = json.loads(verdict.read_text())["youtube_leg"]
     assert b["verdict"] == "FAIL" and b["pass"] is False and "3 downstream dup" in b["reasons"][0]
@@ -233,7 +247,7 @@ def test_a_tool_fail_is_a_red_stage(fk, tmp_path):
 def test_a_tool_that_writes_nothing_or_contradicts_its_exit_is_unknown(fk, tmp_path):
     d = _stopped(fk, tmp_path)
     fk.script("verdict", "verdict", 2, None)
-    args, verdict = _measure_inputs(tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
     assert _run(fk, d, *args).returncode == 1
     assert json.loads(verdict.read_text())["youtube_leg"]["verdict"] == "UNKNOWN"
     (fk.d / "verdict.verdict.q").unlink()
@@ -246,7 +260,7 @@ def test_no_vod_is_a_red_stage_never_a_skip(fk, tmp_path):
     d = _stopped(fk, tmp_path)
     (fk.d / "session.wait-done.q").unlink()
     fk.script("session", "wait-done", 2, {"ok": False, "reason": "the YouTube VOD was not processed within 1800 s"})
-    args, verdict = _measure_inputs(tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
     assert _run(fk, d, *args).returncode == 1
     b = json.loads(verdict.read_text())["youtube_leg"]
     assert b["verdict"] == "UNKNOWN" and "no YouTube VOD" in b["reasons"][0]
@@ -257,14 +271,14 @@ def test_a_failed_start_folds_its_reason(fk, tmp_path):
     fk.script("guard", "guard", 1, None)
     d = tmp_path / "yl"
     _run(fk, d, "start")
-    args, verdict = _measure_inputs(tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
     assert _run(fk, d, *args).returncode == 1
     b = json.loads(verdict.read_text())["youtube_leg"]
     assert b["verdict"] == "UNKNOWN" and "channel guard refused" in b["reasons"][0]
 
 
 def test_a_stage_that_never_started_is_red(fk, tmp_path):
-    args, verdict = _measure_inputs(tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
     assert _run(fk, tmp_path / "never", *args).returncode == 1
     assert "never started" in json.loads(verdict.read_text())["youtube_leg"]["reasons"][0]
 
@@ -272,7 +286,7 @@ def test_a_stage_that_never_started_is_red(fk, tmp_path):
 def test_a_missing_recording_or_record_start_is_red(fk, tmp_path):
     d = _live(fk, tmp_path)
     assert _run(fk, d, "stop").returncode == 0  # no watch ran: no record start
-    args, verdict = _measure_inputs(tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
     assert _run(fk, d, *args).returncode == 1
     assert "start time was never read" in json.loads(verdict.read_text())["youtube_leg"]["reasons"][0]
 
@@ -280,7 +294,7 @@ def test_a_missing_recording_or_record_start_is_red(fk, tmp_path):
 def test_without_a_verdict_json_the_block_is_still_written(fk, tmp_path):
     d = _stopped(fk, tmp_path)
     fk.script("verdict", "verdict", 0, PASS_RESULT)
-    args, verdict = _measure_inputs(tmp_path, overall=None)
+    args, verdict = _measure_inputs(tmp_path, fk, overall=None)
     assert _run(fk, d, *args).returncode == 0
     assert not verdict.exists()
     assert json.loads((d / "youtube-leg-block.json").read_text())["verdict"] == "PASS"
