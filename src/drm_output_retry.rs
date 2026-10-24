@@ -7,10 +7,12 @@
 //! Every function mirrors its C twin line for line; `tests/drm_output_retry_1424.rs` compiles the C
 //! header and requires both to print the same answers over scripted supervisor scenarios.
 
-/// The dormant retry: 2 s for the first [`FAST_TRIES`] failures, then 5 s.
+/// The dormant retry: 2 s for the first [`FAST_TRIES`] failures, 5 s up to [`SLOW_TRIES`], then 30 s.
 pub const FAST_NS: u64 = 2_000_000_000;
 pub const SLOW_NS: u64 = 5_000_000_000;
 pub const FAST_TRIES: u32 = 5;
+pub const SLOW_TRIES: u32 = 20;
+pub const IDLE_NS: u64 = 30_000_000_000;
 /// The dormant retry while X RandR reads the connector disconnected.
 pub const UNPLUGGED_NS: u64 = 30_000_000_000;
 
@@ -39,6 +41,8 @@ pub struct Retry {
     pub state: i32,
     pub fails: u32,
     pub next_ns: u64,
+    /// The last look read the connector disconnected: a connected look tries at once.
+    pub unplugged: bool,
 }
 
 /// `drm_output_retry_delay_ns`: the wait after `fails` failed starts.
@@ -47,9 +51,12 @@ pub fn delay_ns(fails: u32, connected: bool) -> u64 {
         return UNPLUGGED_NS;
     }
     if fails < FAST_TRIES {
-        FAST_NS
-    } else {
+        return FAST_NS;
+    }
+    if fails < SLOW_TRIES {
         SLOW_NS
+    } else {
+        IDLE_NS
     }
 }
 
@@ -59,6 +66,7 @@ pub fn step(r: &mut Retry, started: bool, alive: bool, connected: bool, now_ns: 
     if started && alive {
         r.state = LIVE;
         r.fails = 0;
+        r.unplugged = false;
         return NONE;
     }
     if started {
@@ -68,9 +76,13 @@ pub fn step(r: &mut Retry, started: bool, alive: bool, connected: bool, now_ns: 
         r.state = DORMANT;
         r.fails = 0;
         r.next_ns = now_ns.wrapping_add(delay_ns(0, connected));
+        r.unplugged = !connected;
         return NONE;
     }
-    if connected && r.next_ns > now_ns.wrapping_add(delay_ns(r.fails, true)) {
+    if !connected {
+        r.unplugged = true;
+    } else if r.unplugged {
+        r.unplugged = false;
         r.next_ns = now_ns;
     }
     if now_ns >= r.next_ns {
@@ -85,6 +97,7 @@ pub fn released(r: &mut Retry, connected: bool, now_ns: u64) {
     r.state = DORMANT;
     r.fails = 0;
     r.next_ns = now_ns.wrapping_add(delay_ns(0, connected));
+    r.unplugged = !connected;
 }
 
 /// `drm_output_retry_attempted`: the result of a start attempted at `now_ns`.
@@ -93,11 +106,13 @@ pub fn attempted(r: &mut Retry, ok: bool, connected: bool, now_ns: u64) {
         r.state = LIVE;
         r.fails = 0;
         r.next_ns = 0;
+        r.unplugged = false;
         return;
     }
     // the C twin's `if (fails < UINT32_MAX) fails++`
     r.fails = r.fails.saturating_add(1);
     r.next_ns = now_ns.wrapping_add(delay_ns(r.fails, connected));
+    r.unplugged = !connected;
 }
 
 /// `drm_output_rebuild_next`: after `failed_tries` failed rebuilds, the wait before the next try, or
@@ -155,9 +170,10 @@ mod tests {
             state: DORMANT,
             fails: u32::MAX,
             next_ns: 0,
+            unplugged: false,
         };
         attempted(&mut r, false, true, 0);
         assert_eq!(r.fails, u32::MAX);
-        assert_eq!(r.next_ns, SLOW_NS);
+        assert_eq!(r.next_ns, IDLE_NS);
     }
 }

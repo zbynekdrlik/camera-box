@@ -14,9 +14,11 @@
  *                             another mode size, a wedged queue, or a lone display whose rebuild gave
  *                             up), so the output is stopped and goes back to the retry;
  *        !started          -> DORMANT: a whole start is retried on a bounded schedule -- 2 s for the
- *                             first DRM_OUTPUT_RETRY_FAST_TRIES failures, then 5 s; 30 s while X
- *                             RandR reads the connector disconnected (nothing to drive), and AT ONCE
- *                             when it reads connected again (a monitor plugged in or switched on).
+ *                             first DRM_OUTPUT_RETRY_FAST_TRIES failures, then 5 s, then 30 s from
+ *                             DRM_OUTPUT_RETRY_SLOW_TRIES failures on (a screen connected but off: a
+ *                             fresh Vulkan instance per try); 30 s while X RandR reads the connector
+ *                             disconnected (nothing to drive), and AT ONCE when it reads connected
+ *                             again (a monitor plugged in or switched on: the tracked `unplugged`).
  *   2. the present loop (obs-drm-output-vk.c) on an out-of-date / lost presentation (a monitor
  *      unplugged or switched off): it keeps the display ACQUIRED and rebuilds, 1 s apart for
  *      DRM_OUTPUT_REBUILD_FAST_TRIES tries, then every 5 s for as long as ANOTHER display of the process
@@ -34,6 +36,8 @@
 #define DRM_OUTPUT_RETRY_FAST_NS 2000000000ULL
 #define DRM_OUTPUT_RETRY_SLOW_NS 5000000000ULL
 #define DRM_OUTPUT_RETRY_FAST_TRIES 5U
+#define DRM_OUTPUT_RETRY_SLOW_TRIES 20U
+#define DRM_OUTPUT_RETRY_IDLE_NS 30000000000ULL
 #define DRM_OUTPUT_RETRY_UNPLUGGED_NS 30000000000ULL
 
 #define DRM_OUTPUT_REBUILD_FAST_NS 1000000000ULL
@@ -58,15 +62,18 @@ struct drm_output_retry {
 	int state;        /* DRM_OUTPUT_RETRY_LIVE | _DORMANT; a zeroed struct = LIVE (nothing seen yet) */
 	uint32_t fails;   /* failed starts since it went dormant */
 	uint64_t next_ns; /* the next start (DORMANT) */
+	bool unplugged;   /* the last look read the connector disconnected: a connected look tries at once */
 };
 
 /* The wait after `fails` failed starts: 30 s while the connector reads disconnected, else 2 s for the
- * first DRM_OUTPUT_RETRY_FAST_TRIES failures, then 5 s. */
+ * first DRM_OUTPUT_RETRY_FAST_TRIES failures, 5 s up to DRM_OUTPUT_RETRY_SLOW_TRIES, then 30 s. */
 static inline uint64_t drm_output_retry_delay_ns(uint32_t fails, bool connected)
 {
 	if (!connected)
 		return DRM_OUTPUT_RETRY_UNPLUGGED_NS;
-	return fails < DRM_OUTPUT_RETRY_FAST_TRIES ? DRM_OUTPUT_RETRY_FAST_NS : DRM_OUTPUT_RETRY_SLOW_NS;
+	if (fails < DRM_OUTPUT_RETRY_FAST_TRIES)
+		return DRM_OUTPUT_RETRY_FAST_NS;
+	return fails < DRM_OUTPUT_RETRY_SLOW_TRIES ? DRM_OUTPUT_RETRY_SLOW_NS : DRM_OUTPUT_RETRY_IDLE_NS;
 }
 
 /* One look at an output: `started` = the backend reports it open, `alive` = its present loop runs,
@@ -78,6 +85,7 @@ static inline int drm_output_retry_step(struct drm_output_retry *r, bool started
 	if (started && alive) {
 		r->state = DRM_OUTPUT_RETRY_LIVE;
 		r->fails = 0;
+		r->unplugged = false;
 		return DRM_OUTPUT_RETRY_NONE;
 	}
 	if (started)
@@ -86,11 +94,16 @@ static inline int drm_output_retry_step(struct drm_output_retry *r, bool started
 		r->state = DRM_OUTPUT_RETRY_DORMANT;
 		r->fails = 0;
 		r->next_ns = now_ns + drm_output_retry_delay_ns(0U, connected);
+		r->unplugged = !connected;
 		return DRM_OUTPUT_RETRY_NONE;
 	}
-	/* a connector that comes back (plugged in, switched on) is tried now, not after the unplugged wait */
-	if (connected && r->next_ns > now_ns + drm_output_retry_delay_ns(r->fails, true))
+	/* a connector that comes back (plugged in, switched on) is tried now, not after any wait */
+	if (!connected) {
+		r->unplugged = true;
+	} else if (r->unplugged) {
+		r->unplugged = false;
 		r->next_ns = now_ns;
+	}
 	return now_ns >= r->next_ns ? DRM_OUTPUT_RETRY_START : DRM_OUTPUT_RETRY_NONE;
 }
 
@@ -101,6 +114,7 @@ static inline void drm_output_retry_released(struct drm_output_retry *r, bool co
 	r->state = DRM_OUTPUT_RETRY_DORMANT;
 	r->fails = 0;
 	r->next_ns = now_ns + drm_output_retry_delay_ns(0U, connected);
+	r->unplugged = !connected;
 }
 
 /* The result of a start the supervisor attempted at `now_ns`. */
@@ -110,11 +124,13 @@ static inline void drm_output_retry_attempted(struct drm_output_retry *r, bool o
 		r->state = DRM_OUTPUT_RETRY_LIVE;
 		r->fails = 0;
 		r->next_ns = 0;
+		r->unplugged = false;
 		return;
 	}
 	if (r->fails < UINT32_MAX)
 		r->fails++;
 	r->next_ns = now_ns + drm_output_retry_delay_ns(r->fails, connected);
+	r->unplugged = !connected;
 }
 
 /* The present loop after `failed_tries` failed rebuilds (1 = the first failed): true + the wait before
