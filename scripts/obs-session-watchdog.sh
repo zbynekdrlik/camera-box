@@ -3,16 +3,19 @@
 # timer tick -- same convention as scripts/obs-liveness-watchdog.sh / scripts/imag-obs-alert-
 # watchdog.sh (set -uo pipefail, not -e).
 #
-# scripts/obs-session-watchdog.sh — #979 dev1-side CONTINUOUS obs64/AHK session-visibility
-# watchdog for the WINDOWS genlock OBS boxes, the always-on sibling of #977's per-PR E2E gate
-# preflight.
+# scripts/obs-session-watchdog.sh — #979 dev1-side CONTINUOUS operator-visibility watchdog for
+# the genlock OBS boxes, the always-on sibling of #977's per-PR E2E gate preflight.
 #
-# ROSTER (issue 1317 part 2, M4 cut-over): the boxes come from the ONE fleet list
-# (scripts/lib/obs-fleet.sh, facet `obs-session` = stream + resolume), overridable byte-compatibly via
-# OBS_SESSION_WATCHDOG_BOXES="name|host ...". The session-0 / AHK premise is Windows-only, so each
-# box is ALSO class-gated here (windows-genlock only): the Linux production strih-snv at .202 is never
-# handed the PowerShell probe (the old literal `strih` arm failed there every pass with "no probe
-# output"). The traveling resolume is probed only while home (obs_fleet_poll_now).
+# ROSTER (issue 1317 part 2, M4 cut-over; issue 1474): the boxes come from the ONE fleet list
+# (scripts/lib/obs-fleet.sh, facet `obs-session` = strih-snv + stream-snv + resolume-snv), overridable
+# byte-compatibly via OBS_SESSION_WATCHDOG_BOXES="name|host ...". The probe is picked by fleet CLASS:
+#   * windows-genlock -> the obs64/AHK session-0 PowerShell probe over win_ssh_run (below);
+#   * linux-genlock (issue 1474) -> the recording-e2e [0/8] Linux check, split into its two reads
+#     (scripts/lib/strih-platform.sh): `systemctl --user is-active strih-obs.service` over plain ssh +
+#     a bounded obs-websocket round-trip, graded by strih_linux_visibility_message. A Linux box is
+#     NEVER handed PowerShell, and its recovery line is the unit restart, never the Windows planner;
+#   * any other class (a name with no row) -> skipped and logged.
+# The traveling resolume is probed only while home (obs_fleet_poll_now).
 #
 # WHY (issue 958 + #977): #977's E2E gate only runs on a push -- the rig can degrade BETWEEN CI
 # runs (the real incident: obs64 sat in Windows session 0, invisible to the operator, for ~3.5h
@@ -40,7 +43,7 @@
 # merging this PR.
 #
 # Usage:
-#   scripts/obs-session-watchdog.sh            # one pass: measure -> decide -> alert (each Windows OBS box)
+#   scripts/obs-session-watchdog.sh            # one pass: measure -> decide -> alert (each obs-session box)
 #   scripts/obs-session-watchdog.sh --dry-run  # measure + decide + LOG only; never alert
 #   scripts/obs-session-watchdog.sh --help
 set -uo pipefail
@@ -56,6 +59,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/win-ssh-exec.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
+# shellcheck source=scripts/lib/strih-platform.sh
+. "$HERE/lib/strih-platform.sh"
 # win-ssh-exec.sh runs `set -euo pipefail` at source time; clear the -e it leaves on (a later
 # `set -uo pipefail` would not) so a failing probe or assignment never ends the pass (issue 1386).
 set +e -uo pipefail
@@ -64,7 +69,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help|-h)
-    sed -n '5,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -81,6 +86,10 @@ BOXES="${OBS_SESSION_WATCHDOG_BOXES:-$(obs_fleet_boxes obs-session)}"
 OBS_SESSION_DEFAULT_USER="${OBS_SESSION_DEFAULT_USER:-newlevel}"
 OBS_SESSION_DEFAULT_PW="${OBS_SESSION_DEFAULT_PW:-newlevel}"
 CONFIRM_THRESHOLD="${OBS_SESSION_WATCHDOG_CONFIRM_THRESHOLD:-2}"
+# issue 1474: the Linux probe's ssh bound and the dir holding obs_phase2.py (the obs-websocket
+# round-trip; a test points it at a stub, so no pass ever reaches the rig from a test).
+LINUX_SSH_TIMEOUT="${OBS_SESSION_LINUX_SSH_TIMEOUT:-20}"
+OBS_PHASE2_DIR="${OBS_SESSION_OBS_PHASE2_DIR:-$HERE}"
 ALERT_THROTTLE_PASSES="${OBS_SESSION_WATCHDOG_ALERT_THROTTLE_PASSES:-10}"
 
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
@@ -103,25 +112,37 @@ log() { printf '%s [obs-session-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
 # read_state_field and write_state_field live in scripts/lib/watchdog-common.sh.
 
 # ── process ONE box: measure -> decide -> (maybe) alert ─────────────────────────────────────────
+# HAS_AHK is the target's probe mode (obs_session_targets): `linux` for a linux-genlock box, else the
+# Windows AHK mode (0 / 1 / guard).
 process_box() {
   local box="$1" user="$2" pw="$3" host="$4" has_ahk="$5"
   local probe_out
-  probe_out="$(win_ssh_run "$user" "$pw" "$host" "$(obs_session_visibility_probe_ps "$has_ahk")" 2>/dev/null || true)"
+  if [ "$has_ahk" = "linux" ]; then
+    probe_out="$(strih_linux_visibility_probe "$host" "$user" "$pw" "$LINUX_SSH_TIMEOUT")"
+  else
+    probe_out="$(win_ssh_run "$user" "$pw" "$host" "$(obs_session_visibility_probe_ps "$has_ahk")" 2>/dev/null || true)"
+  fi
   if [ -z "$probe_out" ]; then
     log "$box: ERROR: no probe output (ssh/connectivity failure) -- nothing to decide this pass (the fleet's own reachability preflight is the authority for connectivity, not this watchdog)"
     return 0
   fi
 
   local msg wedged znote
-  msg="$(obs_session_visibility_message "$probe_out" "$has_ahk")"
+  if [ "$has_ahk" = "linux" ]; then
+    msg="$(strih_linux_visibility_message "$probe_out" "$(strih_linux_visibility_ws_ok "$host" "$OBS_PHASE2_DIR")" "$box")"
+  else
+    msg="$(obs_session_visibility_message "$probe_out" "$has_ahk")"
+  fi
   wedged=0
   [ -n "$msg" ] && wedged=1
   log "$box: probe='$probe_out' wedged=$wedged msg='$msg'"
   # #1295: report-only -- surface any DEAD obs64 handle the probe ignored so an operator can reap
   # it, WITHOUT ever treating it as a wedge (a stale zombie handle is not an operator-visibility
   # fault; the one live instance is visible). Never folds into $wedged / the alert path.
-  znote="$(obs_session_visibility_zombie_note "$probe_out")"
-  [ -n "$znote" ] && log "$box: $znote"
+  if [ "$has_ahk" != "linux" ]; then
+    znote="$(obs_session_visibility_zombie_note "$probe_out")"
+    [ -n "$znote" ] && log "$box: $znote"
+  fi
 
   local prev_confirm decision confirm act
   prev_confirm="$(read_state_field "${box}_confirm" 0)"
@@ -160,8 +181,13 @@ process_box() {
 
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for $box"
-    python3 "$NOTIFY" notify --body \
-      "🚨 #979 obs-session-watchdog: **$box** obs64/AHK is INVISIBLE to the operator ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (agent-driven, win-* MCP Shell): \`bash scripts/launch-obs-genlock.sh --box $box --force\`" \
+    local body
+    if [ "$has_ahk" = "linux" ]; then
+      body="🚨 #979 obs-session-watchdog: **$box** OBS is NOT running for the operator ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (plain ssh, issue 1474): \`ssh ${user}@${host} 'systemctl --user restart strih-obs.service'\`"
+    else
+      body="🚨 #979 obs-session-watchdog: **$box** obs64/AHK is INVISIBLE to the operator ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (agent-driven, win-* MCP Shell): \`bash scripts/launch-obs-genlock.sh --box $box --force\`"
+    fi
+    python3 "$NOTIFY" notify --body "$body" \
       --dedup-key "obs-session-$box" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
@@ -185,10 +211,11 @@ obs_session_box_env() {
 }
 
 # obs_session_targets -> one `name host has_ahk` line per box to probe THIS pass, in roster order.
+# HAS_AHK is the probe mode: `linux` for a linux-genlock box (issue 1474: the Linux unit + obs-websocket
+# check over plain ssh, NEVER PowerShell), the Windows AHK mode for a windows-genlock box.
 # A box is probed only when BOTH hold:
-#   * its fleet class is windows-genlock -- the session-0/AHK probe is PowerShell over win_ssh_run,
-#     so a Linux box (strih-snv) or a name the fleet list does not know is SKIPPED (logged), even when
-#     an OBS_SESSION_WATCHDOG_BOXES override names it (defense in depth beyond the facet policy);
+#   * its fleet class is windows-genlock or linux-genlock -- a name the fleet list does not know is
+#     SKIPPED (logged), even when an OBS_SESSION_WATCHDOG_BOXES override names it;
 #   * obs_fleet_poll_now says so -- a traveling box (resolume) only while home, never a false
 #     "invisible" verdict on a box that is simply away.
 # COLLISION RESIDUAL (resolume, the .201 DHCP collision with `bridge` in targets.md): this watchdog
@@ -207,15 +234,22 @@ obs_session_targets() {
     name="${pair%%|*}"
     host="${pair##*|}"
     class="$(obs_fleet_class "$name" 2>/dev/null || true)"
-    if [ "$class" != "windows-genlock" ]; then
-      log "$name: skipped -- fleet class '${class:-unknown}' is not windows-genlock (the session-0/AHK probe is Windows-only; a Linux box is never handed PowerShell)"
-      continue
-    fi
+    case "$class" in
+      windows-genlock | linux-genlock) ;;
+      *)
+        log "$name: skipped -- fleet class '${class:-unknown}' has no visibility probe (windows-genlock: the session-0/AHK PowerShell probe; linux-genlock: the strih-obs.service + obs-websocket check)"
+        continue
+        ;;
+    esac
     if ! obs_fleet_poll_now "$name"; then
       log "$name: skipped -- traveling box is away (obs_fleet_poll_now), nothing to probe this pass"
       continue
     fi
     host="$(obs_session_box_env "$name" HOST "$host")"
+    if [ "$class" = "linux-genlock" ]; then
+      printf '%s %s linux\n' "$name" "$host"
+      continue
+    fi
     # issue 1372 (owner: "ale ahk nespustaj"): an installed AHK watcher is the OWNER's choice to run,
     # so it is graded in `guard` mode (0 or 1 in the active session is healthy, never "want exactly 1").
     local ahk; ahk="$(obs_fleet_has_ahk "$name")"; [ "$ahk" = "1" ] && ahk="guard"

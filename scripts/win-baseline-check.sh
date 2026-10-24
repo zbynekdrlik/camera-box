@@ -3,7 +3,7 @@
 # box (REPORT-ONLY). See the extended header below.
 set -euo pipefail
 #
-# WHAT: for each box of the obs-fleet `win-baseline` facet (stream, resolume), copy the read-only
+# WHAT: for each box of the obs-fleet `win-baseline` facet (its windows-genlock rows; resolume-snv since issue 1474), copy the read-only
 # gather program (scripts/lib/obs-box-baseline-win.sh win_baseline_gather_ps1) to the box with
 # `scp -O`, run it BY PATH (`powershell -NoProfile -ExecutionPolicy Bypass -File ...`, never nested
 # PowerShell over ssh -- .claude/rules/rig-state-inspection.md §2) and grade its output with the ONE

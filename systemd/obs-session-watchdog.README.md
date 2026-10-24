@@ -5,11 +5,15 @@ CONTINUOUS sibling of #977's per-PR E2E gate preflight, and closes issue 958's r
 session-0 `obs64` (launched via ssh+`Invoke-CimMethod`) is fully healthy on OBS WebSocket, NDI, and
 the OBS log — completely invisible to the operator on the console — yet #977's gate only fires on
 a push. The real incident sat like this for **~3.5 hours** before the user found it manually. This
-watchdog polls each Windows genlock OBS box over `win_ssh_run` (issue 1317: the roster is the
-`scripts/lib/obs-fleet.sh` `obs-session` facet = stream 10.77.9.204 + resolume `resolume.lan`
-while home; a Linux box such as strih-snv is class-gated out and never gets the PowerShell probe)
-(`scripts/lib/win-ssh-exec.sh`, #703) on a **dev1 systemd --user timer**, reusing the SAME
-session-visibility probe #977/#978 use (`scripts/lib/obs-session-visibility.sh`) and the SAME
+watchdog polls each Windows genlock OBS box over `win_ssh_run` (`scripts/lib/win-ssh-exec.sh`, #703)
+on a **dev1 systemd --user timer**, reusing the SAME session-visibility probe #977/#978 use
+(`scripts/lib/obs-session-visibility.sh`). The roster is the `scripts/lib/obs-fleet.sh`
+`obs-session` facet = strih-snv 10.77.9.202 + stream-snv 10.77.9.204 + resolume `resolume.lan`
+while home. **Since issue 1474 the probe is picked by fleet class:** a linux-genlock box (strih-snv,
+stream-snv) gets the recording-e2e `[0/8]` Linux check instead -- `systemctl --user is-active
+strih-obs.service` over plain ssh plus a bounded obs-websocket round-trip
+(`scripts/lib/strih-platform.sh`) -- and never the PowerShell probe; its alert carries the plain-ssh
+`systemctl --user restart strih-obs.service` recovery. All boxes share the SAME
 `#391 obs_watchdog_confirm`/`obs_watchdog_alert_throttle` decision logic
 (`scripts/lib/obs-watchdog-decision.sh`) — no second/third mechanism anywhere in this stack.
 
@@ -79,7 +83,9 @@ systemctl --user disable --now obs-session-watchdog.timer
 |---|---|---|
 | `OBS_SESSION_WATCHDOG_CONFIRM_THRESHOLD` | `2` | consecutive invisible readings before alerting |
 | `OBS_SESSION_WATCHDOG_ALERT_THROTTLE_PASSES` | `10` | passes between repeat alerts for the same condition |
-| `OBS_SESSION_WATCHDOG_BOXES` | the obs-fleet `obs-session` facet (`stream\|10.77.9.204 resolume\|resolume.lan`) | roster override (`name\|host` pairs; non-Windows names are skipped) |
+| `OBS_SESSION_WATCHDOG_BOXES` | the obs-fleet `obs-session` facet (`strih-snv\|10.77.9.202 stream-snv\|10.77.9.204 resolume-snv\|resolume.lan`) | roster override (`name\|host` pairs; a name with no windows-genlock / linux-genlock fleet row is skipped) |
+| `OBS_SESSION_LINUX_SSH_TIMEOUT` | `20` | the Linux unit probe's ssh bound (issue 1474) |
+| `OBS_SESSION_OBS_PHASE2_DIR` | the script's own dir | where `obs_phase2.py` (the Linux obs-websocket round-trip) is read from -- a test seam |
 | `<NAME>_HOST` (e.g. `STREAM_SNV_HOST`, `RESOLUME_SNV_HOST`; the names follow the issue-1414 box names) | the roster's host | per-box address override; `<NAME>` = the fleet name upper-cased, every non-alphanumeric turned into `_` |
 | `<NAME>_USER` / `<NAME>_PW` (e.g. `STREAM_SNV_PW`, `RESOLUME_SNV_PW`) | `OBS_SESSION_DEFAULT_USER` / `OBS_SESSION_DEFAULT_PW` | per-box ssh creds (same `<NAME>` rule) |
 | `OBS_SESSION_DEFAULT_USER` / `OBS_SESSION_DEFAULT_PW` | `newlevel` / `newlevel` | fleet-wide ssh login (targets.md) for a box with no per-box override |

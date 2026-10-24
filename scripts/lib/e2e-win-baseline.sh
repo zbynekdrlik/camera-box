@@ -18,7 +18,7 @@
 #
 # Reuses, never re-implements:
 #   * scripts/win-baseline-check.sh -- the gather (scp + `powershell -File` over ssh) and the grade,
-#     over the obs-fleet `win-baseline` facet (stream, resolume); a traveling box that is away
+#     over the obs-fleet `win-baseline` facet (its windows-genlock rows: resolume-snv since the stream box went Linux, issue 1474); a traveling box that is away
 #     (resolume, obs_fleet_poll_now false) is the check's own SKIPPED and leaves no gather file.
 #   * version-integrity-gate.sh `--win-baseline` -- renders the rows (win_baseline_report_rows),
 #     never touches the gate's ok/bad/unknown roll-up, so its exit code cannot change.
@@ -67,7 +67,7 @@ e2e_win_baseline_boxes() {
 #           + OBS_FLEET_RESOLVE_TIMEOUT + OBS_FLEET_STATUS_TIMEOUT (the traveling-box home check,
 #             DNS + the OBS-WS :4455 connect; defaults 2 + 4 s -- charged to every box, conservative)
 #   total   = boxes x per box + 10 s (process start, the gather emit, the grade)
-# Defaults with the two-box facet: 2 x (40 + 6) + 10 = 102 s. A box that answers takes a few
+# Defaults: one box (resolume-snv, issue 1474) = 1 x (40 + 6) + 10 = 56 s; two Windows boxes = 102 s. A box that answers takes a few
 # seconds, so the bound only matters for a hung box. E2E_WIN_BASELINE_TIMEOUT (> 0) overrides it.
 e2e_win_baseline_timeout_s() {
   local override boxes n=0 ssh res stat _b
