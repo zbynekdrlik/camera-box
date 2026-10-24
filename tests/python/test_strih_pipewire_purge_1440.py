@@ -748,3 +748,47 @@ def test_the_stream_port_leaves_browser_audio_alone():
     out, _rep = m.port(coll, m.preset_options("stream-pp"))
     yt = next(s for s in out["sources"] if s["name"] == "YT")
     assert yt["muted"] is False and "reroute_audio" not in yt["settings"]
+
+
+# --- 8. the fixed HDMI output's audio on a box with no sound server (strih-snv's vk-direct HDMI-0) ----------
+# After the purge `wireplumber --version` answers nothing: the issue-1424 WirePlumber deny rule has nothing to
+# deny, and verify item 4c must not FAIL `wp-unknown` on the box the purge made correct.
+
+DRM_AUDIO = SCRIPTS / "lib" / "drm-output-audio.sh"
+NO_SERVER = {"DRM_OUTPUT_AUDIO_SERVER_BINS": "camera-box-no-such-server-1440 camera-box-no-such-pipewire-1440"}
+
+
+def _drm_audio(body, *args, extra=None):
+    e = _plain_env()
+    e.update(extra or {})
+    script = 'set -euo pipefail\n. "%s"\nok() { echo "PASS $1"; }; bad() { echo "FAIL $1"; }; note() { echo "NOTE $1"; }\n%s' % (
+        DRM_AUDIO, body)
+    return subprocess.run(["bash", "-c", script, "harness", *[str(a) for a in args]], capture_output=True,
+                          text=True, env=e, timeout=60)
+
+
+def test_no_sound_server_writes_no_wireplumber_rule(tmp_path):
+    root = tmp_path / "root"
+    r = _drm_audio('drm_output_audio_wp_provision "$1"', root, extra=NO_SERVER)
+    assert r.returncode == 0, r.stderr
+    assert "no sound server" in r.stdout and "WARNING" not in r.stderr, (r.stdout, r.stderr)
+    assert not (root / "etc").exists()
+
+
+def test_no_sound_server_grades_the_hdmi_leg_on_its_own_line(tmp_path):
+    from test_drm_output_audio_1424 import OPEN  # noqa: E402
+    log = tmp_path / "obs.txt"
+    log.write_text(OPEN + "\n")
+    r = _drm_audio('drm_output_audio_verify_report "$1" "$2" "$3" "$4"', tmp_path, ME, log, tmp_path / "root",
+                   extra=NO_SERVER)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("PASS HDMI audio:") and "no sound server" in r.stdout, r.stdout
+    log.write_text("info: drm-output audio: NO AUDIO on 'HDMI-0' -- no ELD\n")
+    r = _drm_audio('drm_output_audio_verify_report "$1" "$2" "$3" "$4"', tmp_path, ME, log, tmp_path / "root",
+                   extra=NO_SERVER)
+    assert r.stdout.startswith("FAIL HDMI audio: the module gave up"), r.stdout
+
+
+def test_the_verdict_takes_none_as_no_rule_needed():
+    r = _drm_audio('rc=0; drm_output_audio_verdict none 0 open || rc=$?; echo " rc=$rc"')
+    assert r.stdout.strip() == "ok rc=0", r.stdout
