@@ -371,7 +371,9 @@ def _fake_bin(tmp_path, xrandr_text):
 
 
 _PROV = ('warn() { echo "WARN $*"; }; fail() { echo "FAIL $*"; exit 1; }\n'
-         'STRIH_LEGACY_PROJ="$1/none.json" strih_drm_output_provision "$1/home" "$(whoami)" "$2" vk-direct "$3"\n')
+         # issue 1424 layer 1: the X config step 6 also writes goes under the scratch dir
+         'STRIH_X_CONF_DIR="$1/xorg.conf.d" STRIH_LEGACY_PROJ="$1/none.json" '
+         'strih_drm_output_provision "$1/home" "$(whoami)" "$2" vk-direct "$3"\n')
 
 
 def test_step6_writes_the_array_for_a_fresh_two_output_box(tmp_path):
@@ -382,6 +384,9 @@ def test_step6_writes_the_array_for_a_fresh_two_output_box(tmp_path):
     conf = tmp_path / "home" / ".camera-box" / "drm-output.json"
     assert conf.read_text() == PP_ARRAY + "\n"
     assert "wrote" in r.stdout and "HDMI outputs HDMI-0:multiview HDMI-1:program" in r.stdout
+    # issue 1424 layer 1: and the X config that keeps both fixed outputs out of X (DP-2 = the operator's)
+    xconf = (tmp_path / "xorg.conf.d" / "15-camera-box-fixed-hdmi.conf").read_text()
+    assert 'Option "MetaModes" "DP-2: nvidia-auto-select"' in xconf, r.stdout
 
 
 def test_step6_writes_the_array_and_warns_when_one_listed_connector_is_unplugged(tmp_path):

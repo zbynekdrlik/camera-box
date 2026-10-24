@@ -249,7 +249,9 @@ def grade_env(tmp_path, bindir, rundir, euid="1000"):
             "STRIH_SESSION_APPS_RUNTIME_DIR": str(rundir), "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc"),
             "STRIH_SESSION_APPS_SATELLITE_BIN": str(tmp_path / "opt" / "companion-satellite" / "companion-satellite"),
             "DANTESYNC_INSTALL_TRAY_BIN": str(tray_bin(tmp_path)), "DANTESYNC_VERSION_PIN": TRAY_PIN,
-            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(tray_record(tmp_path))}
+            "DANTESYNC_INSTALL_TRAY_RELEASE_FILE": str(tray_record(tmp_path)),
+            # issue 1424: the display watch's X config row never reads the real /etc/X11 or Xorg log
+            "STRIH_X_CONF_DIR": str(tmp_path / "xorg.conf.d"), "STRIH_X_XORG_LOG": str(tmp_path / "Xorg.0.log")}
 
 
 def grade(tmp_path, home, bindir, rundir, **fakes):

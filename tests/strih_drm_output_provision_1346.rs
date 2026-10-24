@@ -737,6 +737,11 @@ fn provision_step6_vk_direct_reads_the_x_view_through_the_desktop_user() {
                 "DRM_OUTPUT_AUDIO_WP_ROOT".into(),
                 d.join("wp-root").to_str().unwrap().into(),
             ),
+            // issue 1424 layer 1: and so does the X config that keeps the fixed outputs out of X
+            (
+                "STRIH_X_CONF_DIR".into(),
+                d.join("xorg.conf.d").to_str().unwrap().into(),
+            ),
         ]
     };
     let run_with = |fx: &str| {
@@ -770,9 +775,18 @@ fn provision_step6_vk_direct_reads_the_x_view_through_the_desktop_user() {
         out2.contains("already present"),
         "an existing config is left alone: {out2} (rc {c2})"
     );
+    // issue 1424 layer 1: the ONE X query left is the X config's (it names the NVIDIA outputs X lists)
+    assert_eq!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .matches("sudo -u op env DISPLAY=:0")
+            .count(),
+        1,
+        "review round 1: the drm-output config itself never queries X when it already exists"
+    );
     assert!(
-        !fs::read_to_string(&log).unwrap().contains("xrandr"),
-        "review round 1: no X query when the config already exists"
+        out2.contains("15-camera-box-fixed-hdmi.conf"),
+        "issue 1424: step 6 writes the X config for the armed HDMI-0: {out2}"
     );
 
     // No X answer: a named SKIP, nothing written.

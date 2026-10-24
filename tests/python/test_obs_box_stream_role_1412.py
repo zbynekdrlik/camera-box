@@ -172,7 +172,8 @@ def test_a_stream_box_runs_the_keeper_and_the_dantesync_tray_and_lists_the_pp_bo
     # issue 1424: and the display watch (an operator monitor joins X, the screen stays usable)
     assert a["UNITS"] == ("strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service "
                           "strih-display-watch.service")
-    assert a["ROWS"] == "9", "four unit rows + the keeper's + the display watch's last pass + the monitor's three"
+    assert a["ROWS"] == "10", ("four unit rows + the keeper's + the display watch's last pass + its X config row "
+                               "+ the monitor's three")
     assert a["AUTOSTART"] == "4"
     assert a["PINNED"] == a["RESOLVE"] == "10.77.8.204,10.77.8.202", "fact-file name order (C collation)"
 
@@ -182,13 +183,13 @@ def test_strih_pp_keeps_every_session_app_and_lists_the_pp_boxes(boxes):
     assert a["UNITS"].split() == ["strih-browser-keeper.service", "bkshading-panel-app.service",
                                   "companion-satellite.service", "strih-satellite-watch.timer",
                                   "dantesync-tray.service", "strih-display-watch.service"]
-    assert a["ROWS"] == "10"
+    assert a["ROWS"] == "11"
     assert a["PINNED"] == "10.77.8.204,10.77.8.202"
 
 
 def test_strih_lx_keeps_the_snv_fleet_list(boxes):
     a = _applied(boxes, "strih-snv")
-    assert a["ROWS"] == "10"
+    assert a["ROWS"] == "11"
     assert a["PINNED"] == "10.77.9.202,10.77.9.204"
 
 

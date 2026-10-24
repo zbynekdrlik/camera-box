@@ -257,8 +257,8 @@ def test_the_stream_role_runs_the_monitor_between_the_keeper_and_the_tray(boxes)
     a = _applied(boxes, "stream-pp")
     assert a["UNITS"] == ("strih-browser-keeper.service strih-stream-monitor.service dantesync-tray.service "
                           "strih-display-watch.service")
-    assert a["ROWS"] == "9", ("four unit rows + the keeper's last pass + the display watch's last pass (issue "
-                              "1424) + the monitor's three rows")
+    assert a["ROWS"] == "10", ("four unit rows + the keeper's last pass + the display watch's last pass and "
+                               "X config row (issue 1424) + the monitor's three rows")
     assert "systemctl --user start strih-stream-monitor.service || true" in a["AUTOSTART"]
     assert "vlc" in a["PKGS"].split() and "alsa-utils" in a["PKGS"].split()  # issue 1456: VLC
 
@@ -267,7 +267,7 @@ def test_the_strih_role_never_runs_the_monitor(boxes):
     for box in ("strih-snv", "strih-pp"):
         a = _applied(boxes, box)
         assert "strih-stream-monitor" not in a["UNITS"]
-        assert a["ROWS"] == "10"  # six unit rows + four extra rows (issue 1424: the display watch's pass)
+        assert a["ROWS"] == "11"  # six unit rows + five extra rows (issue 1424: the display watch's pass + X config)
         assert "ffmpeg" not in a["PKGS"].split()
 
 

@@ -52,7 +52,8 @@ UNITS = F.UNITS
 _bash = F.bash
 CLASS = F.PANEL_CLASS
 WIN = F.WIN
-ROWS = len(UNITS) + 4  # + the keeper's pass, the panel window, the Satellite watch's pass, the display watch's pass
+# + the keeper's pass, the panel window, the Satellite watch's pass, the display watch's pass + X config row
+ROWS = len(UNITS) + 5
 
 
 def _install(tmp_path, home, bindir, **fakes):
