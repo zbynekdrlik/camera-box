@@ -163,26 +163,35 @@ strih_x_display_provision() {
 STRIH_DISPLAY_WATCH_ENV_REL=.config/strih-display-watch.env
 
 # strih_display_watch_env_text -> the policy line: `off` when the box's 6-hdmi step applies (a strih-role
-# box with a fixed HDMI output, whose kiosk autostart keeps every HDMI out of X), else `operator`.
+# box with a fixed HDMI output, whose kiosk autostart keeps every HDMI out of X), else `operator`. rc 1,
+# nothing printed, when the role gate (obs-box-role.sh) is not loaded: never a silent `operator`.
 strih_display_watch_env_text() {
   local p=operator
-  if declare -F obs_box_step_applies >/dev/null && obs_box_step_applies 6-hdmi >/dev/null 2>&1; then
+  declare -F obs_box_step_applies >/dev/null || return 1
+  if obs_box_step_applies 6-hdmi >/dev/null 2>&1; then
     p=off
   fi
   printf 'STRIH_DISPLAY_WATCH_HDMI=%s' "$p"
 }
 
-# strih_display_watch_env_put USER_HOME -> write the policy file when it differs; prints `written` /
-# `unchanged`. rc 1 + a stderr line on a failed write.
+# strih_display_watch_env_put USER_HOME [DESKTOP_USER] -> write the policy file when it differs, owned by
+# DESKTOP_USER (it lives in that user's home); prints `written` / `unchanged`. rc 1 + a stderr line on a
+# failed write or a missing role gate.
 strih_display_watch_env_put() {
-  local path="${1:?user home required}/${STRIH_DISPLAY_WATCH_ENV_REL}" text
-  text="$(strih_display_watch_env_text)"
+  local path="${1:?user home required}/${STRIH_DISPLAY_WATCH_ENV_REL}" user="${2-}" text dir
+  text="$(strih_display_watch_env_text)" || { echo "strih-x-display: the role gate obs_box_step_applies is not loaded -- the display watch's HDMI policy cannot be decided" >&2; return 1; }
   if [ -f "$path" ] && [ ! -L "$path" ] && [ "$(cat "$path" 2>/dev/null || true)" = "$text" ]; then
     echo unchanged
     return 0
   fi
-  install -d -m 0755 "$(dirname "$path")" && rm -f "$path" && printf '%s\n' "$text" | install -m 0644 /dev/stdin "$path" \
+  dir="$(dirname "$path")"
+  if [ ! -d "$dir" ]; then
+    install -d -m 0755 "$dir" || { echo "strih-x-display: cannot create ${dir}" >&2; return 1; }
+    [ -z "$user" ] || chown "${user}:" "$dir" || { echo "strih-x-display: cannot chown ${dir} to ${user}" >&2; return 1; }
+  fi
+  rm -f "$path" && printf '%s\n' "$text" | install -m 0644 /dev/stdin "$path" \
     || { echo "strih-x-display: cannot write ${path}" >&2; return 1; }
+  [ -z "$user" ] || chown "${user}:" "$path" || { echo "strih-x-display: cannot chown ${path} to ${user}" >&2; return 1; }
   echo written
 }
 
@@ -196,7 +205,10 @@ strih_x_display_grade_row() {
   conf="${home}/.camera-box/drm-output.json"
   path="$(strih_x_display_conf_path)"
   envp="${home}/${STRIH_DISPLAY_WATCH_ENV_REL}"
-  envw="$(strih_display_watch_env_text)"
+  if ! envw="$(strih_display_watch_env_text)"; then
+    printf 'FAIL|(display-x-config) the role gate obs_box_step_applies is not loaded -- the HDMI policy cannot be graded\n'
+    return 0
+  fi
   if [ "$(cat "$envp" 2>/dev/null || true)" != "$envw" ]; then
     printf 'FAIL|(display-x-config) %s %s, this role wants %s -- re-run setup-strih.sh step 16d (then systemctl --user restart strih-display-watch)\n' \
       "$envp" "$([ -f "$envp" ] && echo "reads $(head -c 80 "$envp" 2>/dev/null | tr '\n' ' ')" || echo "is missing")" "$envw"

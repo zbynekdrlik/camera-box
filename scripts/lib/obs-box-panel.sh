@@ -473,7 +473,8 @@ obs_box_panel_grade_rows() {
     printf 'FAIL|(panel-unit) %s missing or differs from the checkout -- re-run setup-strih.sh step 16h\n' "$unit"
   elif [ "$en" != enabled ] || [ "$act" != active ] || [ "$exe" != "$OBS_BOX_PANEL_BIN" ]; then
     # issue 1424: tint2 starts through the display watch's screen guard (installed by step 16d)
-    guard="$(strih_session_apps_bin_dir)/strih_display_watch.py"
+    guard=/usr/local/bin/strih_display_watch.py
+    ! declare -F strih_session_apps_bin_dir >/dev/null || guard="$(strih_session_apps_bin_dir)/strih_display_watch.py"
     cause=""
     if [ ! -f "$guard" ]; then
       cause="; its screen guard ${guard} is missing -- re-run setup-strih.sh step 16d"

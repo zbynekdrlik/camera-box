@@ -244,12 +244,27 @@ static int drm_output_vk_park_choice(bool acquired, bool leak, int others_open, 
 	return DRM_OUTPUT_VK_CHOICE_RELEASE;
 }
 
-/* A display a teardown parked on this device (dev->lock held): take it back instead of a new acquire. */
+/* A display a teardown parked on this device (dev->lock held): take it back instead of a new acquire. The
+ * handle may differ after a replug or another screen on the connector (not guaranteed stable): an entry of
+ * the SAME connector with another handle is released by name and freed (a new acquire follows; never a
+ * park slot held forever). */
 static bool drm_output_vk_unpark(struct drm_output_vk_disp *d)
 {
 	for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {
-		if (d->dev->parked[i].display == VK_NULL_HANDLE || d->dev->parked[i].display != d->display)
+		if (d->dev->parked[i].display == VK_NULL_HANDLE)
 			continue;
+		if (d->dev->parked[i].display != d->display) {
+			if (strcmp(d->dev->parked[i].output_name, d->output_name) == 0) {
+				VkResult r = d->dev->vk.vkReleaseDisplayEXT(d->dev->pd, d->dev->parked[i].display);
+				blog(LOG_WARNING,
+				     "drm-output: vk-direct: '%s' has a new handle after a replug -- released the one kept "
+				     "since its close (VkResult %d); a new acquire follows",
+				     d->output_name, (int)r);
+				d->dev->parked[i].display = VK_NULL_HANDLE;
+				d->dev->parked[i].output_name[0] = '\0';
+			}
+			continue;
+		}
 		d->dev->parked[i].display = VK_NULL_HANDLE;
 		d->dev->parked[i].output_name[0] = '\0';
 		d->acquired = true;

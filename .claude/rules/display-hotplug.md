@@ -112,7 +112,10 @@ design 6386467303 (Approach 1, three layers); finding 6386340389; validation 638
     look that reads it disconnected marks it, the next connected look pulls the try in -- never read off
     the next-try distance, which the 30 s connected backoff would make ambiguous). X is asked only for a
     dormant output, outside the registry lock (`started` is read under it); every reply's X error is
-    taken and freed (one handed NULL stays in the event queue nobody reads).
+    taken and freed (one handed NULL stays in the event queue nobody reads). A screen that is switched
+    off but keeps its HDMI hot-plug line asserted never reads `disconnected`, so after ~85 s of failures
+    (5 x 2 s + 15 x 5 s) its switch-on is picked up within up to 30 s, not at once (the price of not
+    building a Vulkan instance every 5 s all night; an X RandR change event is the cure if it bites).
 - **A display torn down beside a live one is PARKED, never released (review finding):**
   `drm_output_vk_destroy_display` asks the pure `drm_output_vk_park_choice` (lift-tested in
   `tests/drm_output_vk_park_1424.rs`): while another display is open the acquisition stays on the shared
@@ -120,7 +123,12 @@ design 6386467303 (Approach 1, three layers); finding 6386340389; validation 638
   lookup and before any new acquire (`display re-used`), and the device releases every parked display
   before it destroys the instance (never on a wedged device). So a retried open that acquired and then
   failed a later step (the surface while the monitor wakes, an empty mode list), and a dead present loop
-  the supervisor released, both come back without an OBS restart.
+  the supervisor released, both come back without an OBS restart. The reuse matches the VkDisplayKHR
+  handle; an entry of the SAME connector with another handle (a replug or another screen may hand out a
+  new one) is released by name and freed (`has a new handle after a replug`), a new acquire follows.
+  **UNVERIFIED (supervisor, runbook step 6):** that NVIDIA keeps the handle across a replug and a
+  different screen -- if the log shows `has a new handle`, the reuse never applies there and that
+  re-open meets the released-display -13 until the other output closes.
 - **The present loop** (`drm_output_vk_rebuild_or_give_up`) keeps a display ACQUIRED through an
   out-of-date / lost presentation (a monitor unplugged or switched off): 1 s for 10 tries, then every 5 s
   for as long as another display of the process is open, logging the 10 try lines, ONE `still out of date
@@ -185,13 +193,16 @@ Read the state after each step: `xrandr --current`, `journalctl --user -u strih-
 2. Boot with EVERY monitor off: X up; the watch logs `screen 1920x1080`; the panel unit waits (one
    `waiting for a monitor` line), no tint2 core dumps; OBS up, both outputs `retry: ... dormant -- ...`
    (one line each).
-3. BenQ on: within ~2 s the HDMI-0 retry acquires (`retry: 'HDMI-0' LIVE again`, `multiview bind LIVE`
+3. BenQ on: within ~2 s (up to 30 s when it was off for more than ~85 s while X still read it
+   connected) the HDMI-0 retry acquires (`retry: 'HDMI-0' LIVE again`, `multiview bind LIVE`
    once the frontend re-attaches) -- no OBS restart. If it reads `dormant -- ... -13` until the NEC
    comes on, record it on the ticket: the driver refuses an acquire while X has no other display.
 4. Blackmagic on: `retry: 'HDMI-1' LIVE again`, the Program on the vestibule, the hub's HDMI leg
    re-resolves its ELD by itself.
 5. NEC on: the watch logs `applied: xrandr --output DP-? --auto --primary`; tint2 starts; OBS + the
    panel on the NEC.
-6. Mid-run, switch each monitor off and on (and unplug one): the HDMI outputs log the rebuild tries and
-   `is back after N tries` (or a release + `LIVE again`), never an OBS restart; the NEC stays in the
+6. Mid-run, switch each monitor off and on (and unplug one, and plug a DIFFERENT screen into HDMI-0):
+   the HDMI outputs log the rebuild tries and `is back after N tries` (or a release + `kept acquired` +
+   `display re-used` + `LIVE again`; a `has a new handle after a replug` line = the handle-stability
+   premise failed, record it on the ticket), never an OBS restart; the NEC stays in the
    layout. verify-strih passes item 4c, `(display-watch)`, `(display-watch-pass)`, `(display-x-config)`.
