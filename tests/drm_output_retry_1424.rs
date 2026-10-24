@@ -216,6 +216,42 @@ fn the_supervisor_logs_one_line_per_state_change_and_quiets_the_attempts() {
     }
 }
 
+/// Independent review: the X reads take their errors (an X error a reply call is not handed stays in the
+/// never-read event queue and grows it), and the supervisor reads `started` under the registry lock (the
+/// exported `obs_drm_output_start` writes it under that lock too).
+#[test]
+fn the_supervisor_frees_its_x_errors_and_reads_started_under_the_registry_lock() {
+    let c = file(RETRY_C);
+    let conn = squish(&body_of_c(
+        &c,
+        "static bool drm_output_retry_connected(xcb_connection_t **xc, const char *name)",
+    ));
+    assert!(
+        conn.matches("&err)").count() >= 2 && conn.matches("free(err)").count() >= 2,
+        "issue 1424: both reply calls take and free their X error: {conn}"
+    );
+    let th = squish(&body_of_c(
+        &c,
+        "static void *drm_output_retry_thread(void *arg)",
+    ));
+    let lock = th
+        .find("drm_output_registry_lock();")
+        .expect("the thread takes the registry lock");
+    let read = th
+        .find("const bool started = inst->started;")
+        .expect("the thread reads started into a local");
+    let unlock = th
+        .find("drm_output_registry_unlock();")
+        .expect("the thread releases the registry lock");
+    let x = th
+        .find("drm_output_retry_connected(&xc")
+        .expect("the X read");
+    assert!(
+        lock < read && read < unlock && unlock < x,
+        "issue 1424: `started` is read under the registry lock, the X read runs outside it: {th}"
+    );
+}
+
 #[test]
 fn the_frontend_reattaches_the_multiview_when_an_output_comes_back() {
     let f = squish(&file(FRONTEND));
