@@ -14,6 +14,12 @@ paths:
   - "tests/c/av_sync_dock_demod_bench_1381.cpp"
   - "vendor/av-sync-dock/test/cb-thread-faults.hpp"
   - "vendor/av-sync-dock/src/sync-test-dock.cpp"
+  - "vendor/av-sync-dock/src/sync-test-output-measure.cpp"
+  - "vendor/av-sync-dock/src/camera-box-measure-share.hpp"
+  - "vendor/av-sync-dock/test/measure-share-selftest.cpp"
+  - "tests/av_sync_dock_measure_share_1470.rs"
+  - "tests/av_sync_dock_measure_share_lift_1470.rs"
+  - "tests/c/measure_share_lift_1470_harness.cpp"
 ---
 
 # No analysis on libobs's video-output thread (issue 1367)
@@ -153,8 +159,11 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
 
 ## The rule
 
-- **`raw_audio` runs the gate and a copy, nothing else** (`cb_audio_gate_and_publish`): no decode,
-  no log line, no source lookup, no signal. Its cost is on the diag line as `audio_publish_max_us=`.
+- **The audio thread runs the gate and a copy, nothing else** (`cb_audio_gate_and_publish`): no
+  decode, no log line, no source lookup, no signal. Its cost is on the diag line as
+  `audio_publish_max_us=`. Since issue 1470 the caller is the dock's own mix-tick callback
+  `st_cb_mix_tick` and the block is the measurement source's own share of the mix (next big section);
+  `raw_audio` (the output's whole, re-chunked mix) returns at once in camera-box mode.
 - **The gate** (`cb_audio_decode_gate`, `camera-box-audio-worker.hpp`) opens only while ALL hold:
   - camera-box mode is on (`cb_mode_active`, still the latched "QR seen" flag for the video side);
   - the box has the measurement source `mbc` (`CAMERA_BOX_MEASURE_SOURCE_NAME`, declared once in
@@ -239,6 +248,98 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
   (comments kept). A comment inside `st_raw_audio` or `cb_audio_gate_and_publish` must never spell
   a banned call with its parenthesis (`blog(`, `->push(`, `obs_get_source_by_name(`, ...), and no
   comment may sit between the tokens of a multi-statement needle.
+
+# The decode reads only the measurement source's OWN share of the mix (issue 1470)
+
+Live 24.10.2026 on stream-snv the dock read -900.9 ms while `recording-verdict --av-sync` read the
+stream in sync (+24.5 ms). The program mixed the measurement clip `Merací klip` (run 911016, a
+synthesized copy of the cam2 painter's marker) next to `mbc`. The dock decoded the whole track-1 mix
+and paired every marker with the painter's QR ring, and the clip's digital markers (scatter 0-1 ms,
+~355 readings) out-clustered the room marker (~+50 ms, scatter ~8 ms, ~280 readings). An 8-bit
+marker cannot tell two emitters apart; ROZHODNUTÉ 6381433364 chose to decode only what
+`CAMERA_BOX_MEASURE_SOURCE_NAME` itself puts into the program.
+
+**Why the per-source mix buffer, not the source's capture callback (read in the vendored libobs):**
+- `obs_source_add_audio_capture_callback` fires in `source_output_audio_data` with the packet as it
+  ARRIVED (`source_signal_audio_data(source, data, ...)`); the placement works on a copy (`in`) that
+  gets the timing adjust, the sync offset, the resample offset and the genlock terms. Its stamps are
+  not where the mix puts the samples (the 56 ms `mbc` sync offset alone would move the cluster).
+- `process_audio_source_tick` peeks the source's input into `audio_output_buf` once per tick (routing,
+  volume, mute applied), and `mix_audio` / `scene_audio_render` add exactly that buffer at
+  `audio_ts - ts.start`. Read it with `obs_source_get_audio_mix` + `obs_source_get_audio_timestamp`.
+- **Where to read it:** a callback the dock connects itself, `obs_add_raw_audio_callback(mixer,
+  nullptr, st_cb_mix_tick, st)` on the output's own mixer (`obs_output_get_mixer`).
+  `input_and_output` (media-io/audio-io.c) runs the mix and then every callback of the SAME tick, with
+  the tick's `ts.start`. The output's `raw_audio` is no good here: `default_raw_audio_callback` trims
+  the first block to the video start and re-chunks, so its blocks are not mix ticks.
+- **The trap:** `discard_audio` runs after the mix and sets the source's `audio_ts = ts.end`, also for
+  an inactive or pending source. So at the callback the share's start offset is gone, and the dock
+  can only judge the tick from what libobs left.
+
+**The take rule** (`CbMeasureShareTracker`, `camera-box-measure-share.hpp`, C++11, header-only): take
+the tick's share only when the source is found, `obs_source_active` (in this tick's audio tree), not
+`obs_source_audio_pending` (rendered), its timeline stood EXACTLY at this tick's start (where the
+previous discard left it) and now ends at the dock's floor-computed tick end or 1 ns later (libobs
+counts tick ends from the frame total). The start is exact because `mix_audio` skips a timeline even
+1 ns early while `discard_audio` pops it as aligned. Every other tick is SILENCE, never the mix. A
+source not taken for `CB_SHARE_ABSENT_END_NS` (1 s) and present on the box ends the session with
+`CbAudioGate::NotInProgram` (STALE + `camera-box audio decode OFF -- measurement source not in the
+program mix (issue 1470)`); a source missing from the box keeps `NoMeasurementSource`.
+
+**The wiring** (`vendor/av-sync-dock/src/sync-test-output-measure.cpp`, the fourth output TU; the
+audio TU was at 1023 lines):
+- `cb_refresh_measure_source` (video decode worker) keeps the reference it looks up by name and hands
+  it over with `cb_measure_source_hold`: swap under `cb_measure_src_mutex`, release the old one AFTER
+  the lock (a last release never runs while the audio thread waits on it).
+- `st_cb_mix_tick` (libobs's audio thread): the mode + last QR under `st->mutex`, then under
+  `cb_measure_src_mutex` the four reads, the tracker and `cb_measure_share_fill` into the pre-sized
+  `cb_share_planes`, then `cb_audio_gate_and_publish` (moved here unchanged, its one caller). Its
+  whole cost goes into `audio_publish_max_us=`. It never reads the mix samples.
+- `cb_measure_share_connect` (st_start, after the FIFO started, before data capture) sizes AND writes
+  the share planes (no first touch on the audio thread); `cb_measure_share_disconnect` runs first in
+  `st_start` (a previous start's callback), in `st_stop` (before `obs_output_end_data_capture`) and in
+  `st_destroy`, and when `obs_output_begin_data_capture` fails. libobs calls the callback under the
+  mix's input lock, so none runs once the disconnect returns.
+- `st_stop` releases the held source after both workers are joined and re-arms the lookup;
+  `st_destroy` releases it before `delete st`.
+
+**Known limits** (none lets a foreign emitter in; the dock still reads only `mbc`'s own marker):
+- **The residual:** a producer-side timeline reset (`reset_audio_timing` / `reset_audio_data` on the
+  source's ingest thread) landing between the dock's read after one tick and the next tick's mix makes
+  that one tick taken although it was mixed at an offset (up to 21.3 ms) or not at all. One reading
+  per reset; pinned by the lift test's `reset-race-*` rows.
+- The share carries no scene-item fade, and is also taken when the source is active only through a
+  view whose audio is not mixed, or when a sibling drags its scene's timestamp out of the window.
+- A source that renders its own audio (`info.audio_render`) never reaches the tick-end rule, so it is
+  never taken. The obs-vban `mbc` input is a push source and is taken on every steady tick.
+- The tracker resets on a new source object by pointer; a freed address reused by the next lookup
+  skips that reset for one tick (the start check still holds).
+
+**Verifying (Tier-0):**
+- `g++ -std=c++11 -O2 -Wall -Wextra -Werror vendor/av-sync-dock/test/measure-share-selftest.cpp`:
+  the take rule, `absent_long`, the fill (no page fault on pre-sized planes), and the live two-emitter
+  case END TO END through the dock's own picker, ring pairing and rolling cluster: the whole mix locks
+  on the clip at +900 ms (the bug, kept as the premise), the share at -49.4 ms raw (the room marker,
+  the same offset as the room marker alone in the mix), a clip-only program reads `absent_long` and
+  never locks. 18/18 tracker + fill mutants killed (the two compile-only kills have compiling twins).
+- `tests/av_sync_dock_measure_share_lift_1470.rs` lifts `convert_time_to_frames` + `mix_audio` and
+  `discard_if_stopped` + `discard_audio` VERBATIM into `tests/c/measure_share_lift_1470_harness.cpp`
+  (g++ C++11, `-Wno-register` for upstream's `register`) and drives the REAL tracker: every taken
+  tick is byte-identical to what the mix carried (steady, a mid-tick start, a stall, out of the
+  program, lagging, a growth of the mix's buffering, a restart past the tick end); the residual rows
+  are pinned. Its source is a ROOT node; the nested stream-snv `mbc` goes through
+  `scene_audio_render` (same offset 0 when aligned; its divergences are limit 2). The render model
+  renders every audio source (libobs's catch-all loop) and mixes only an active one. 6/7 mutants die there; "take the first tick" is equivalent there and dies in the self-test.
+- `tests/av_sync_dock_measure_share_1470.rs` (comment-stripped) + the pwsh step "Assert dock measures
+  only the measurement source's share (issue 1470)" in BOTH windows-genlock workflows (comments kept)
+  pin the wiring: 11/11 wiring mutants died in both languages. The 1381 step's `st_raw_audio` needle
+  moved with it (`... } if (cb_active) { return; }`) and its banned list covers `st_cb_mix_tick`.
+- Live acceptance (supervisor, after a FULL-bundle deploy on stream-snv): the OBS log shows `camera-box
+  audio decode reads 'mbc''s own share of mix 0, never the whole mix (issue 1470)`; with the clip AND
+  `mbc` both mixed, the dock's LOCKED/UPDATED `offset=` and LOCK-CORRECT `measured offset=` sit at the
+  `recording-verdict --av-sync` value within its mad (plus the known #952 residual, ~+25 ms) and no
+  `mad=0.0ms` cluster appears; in a clip-only Development the dock goes STALE with the NotInProgram
+  line; `audio_publish_max_us=` stays in the tens of µs.
 
 # No first touch on libobs's threads (issue 1381)
 

@@ -38,6 +38,17 @@ The **strih** box logs `av-sync-dock: ASRC section unavailable -- source 'mbc' n
 and `locked=no` — it never locks in normal operation, so don't hunt for dock LOCKED lines there.
 Use the win-stream-snv / win-strih MCP (agent session), not ssh, for these logs.
 
+## A cluster with a near-zero scatter is a FOREIGN digital emitter (issue 1470)
+
+A real room marker clusters with `mad` around 5-10 ms (the acoustic path). A dock line like
+`LOCKED offset=-967.6ms matched=8 mad=0.0ms`, or two populations in one pool (`UPDATED offset=-567.6ms
+matched=280 mad=0.0ms` next to `UPDATED offset=52.3ms matched=280 mad=8.4ms`, cands=564), means a
+SECOND, digital QPSK emitter in the decoded audio. Its value walks by whole frames (the emitter's clock
+vs the painter's) and jumps at its loop or restart points; it is not an A/V fault. Live 24.10.2026 it
+was the measurement clip mixed next to `mbc`; since issue 1470 the dock decodes only `mbc`'s own
+share, so a near-zero-mad cluster now points at a foreign marker INSIDE `mbc` itself (a CG clip routed
+through the console). Check the per-source `audio-telemetry #800` lines for what was mixed in that span.
+
 ## Quantifying dock-vs-gate residual (#952/#1004)
 The `LOCKED/UPDATED offset=` value is ALREADY #953 sign-corrected (gate convention). Pair it against
 the offline OPTICAL truth `all_cambox_av_sync.<camN>.av_offset_ms` in the verdict JSON
