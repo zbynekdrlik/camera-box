@@ -39,7 +39,7 @@ constants named here. Never present a computed number as measured.
 | Card CAPTURE (the cutters' mics) | The same resampler leg (`JitterBuffer::card_capture`). | DONE (lane 1). Before: no rate handling at all, only a cap trim. |
 | Card PLAYBACK (the cutters' cans, aplay) | `asrc` egress resampler in `pipe_fill::PipeFillControl` + `EgressQueue`: each write renders the hub blocks to the card-clock frame count; the ratio = the inverse 64 s least-squares slope of aplay's consumed frames (written minus the measured fill), +-1000 ppm. | DONE (lane 2). Replaced the issue-1401 single-frame `pipe_drift_servo`. |
 | HDMI PLAYBACK (strih-pp vestibule, aplay) | The same egress resampler. | DONE (lane 2). |
-| `pw-cat` PLAYBACK (strih-pp `program_out` to OBS) | The same egress resampler (pw-cat reads 1024-frame graph quanta). The PipeWire graph is driven by the card or a dummy driver. | DONE (lane 2). |
+| `pw-cat` PLAYBACK (a hub `program_out` to OBS) | The same egress resampler (pw-cat reads 1024-frame graph quanta). The PipeWire graph is driven by the card or a dummy driver. | DONE (lane 2). No deployed box uses it since 24.10.2026: strih-pp's program goes obs-vban (issue 1439). |
 | Phones (Janus) egress | `janus_pacing::PacedRing` = a `NetworkFill` resampler leg (pushes timed before the lock, one 960-frame frame rendered per 20 ms tick). | DONE (lane 2). Replaced the 1 ms splices. |
 | Phones (Janus) ingress | `JitterBuffer::janus_capture`: the same resampler leg as a VBAN leg, the room mix stamped before the jitter lock. | DONE (lane 2). Replaced the trim-only `local_capture` ring. |
 | VBAN egress to the camboxes | No crossing at the hub: one packet per hub block. The cambox's own receive buffer (`src/intercom.rs`) crosses into its headset ADC clock. | Not mapped by this ticket (cambox side). |
@@ -59,7 +59,7 @@ time-weighted fill, plus the queue's 16-frame look-ahead, 0.33 ms):
 | Egress | Setpoint | + reader buffer | Dead band | Source |
 |---|---|---|---|---|
 | aplay card / HDMI pipe | 640 frames = **13.3 ms** | ALSA buffer kept full 1024 (21.3 ms) + the period aplay holds 256 (5.3 ms) | +-480 | `pipe_setpoint_for(256, 256)`, `alsa_card::ALSA_CARD_PERIODS`, `hdmi_audio::ALSA_HDMI_*` |
-| pw-cat pipe (strih-pp `program_out`) | 1792 frames = **37.3 ms** | one graph quantum 1024 (21.3 ms) | +-448 | `pipe_setpoint(256)` |
+| pw-cat pipe (a hub `program_out`; none deployed) | 1792 frames = **37.3 ms** | one graph quantum 1024 (21.3 ms) | +-448 | `pipe_setpoint(256)` |
 | Janus ring (phones egress) | 1920 frames = **40 ms** | the Janus audiobridge's own buffer | +-480 | `janus_pacing::RING_TARGET_FRAMES` |
 
 - A spawn keeps the depth its first read's phase and the walk before its first fit gave it
@@ -106,9 +106,12 @@ between the hub, the cutters' card and OBS can add a buffer or a crossing (`.cla
 
 ## strih-pp (the PP cutting box, `STRIH_ROLE=strih`)
 
+No sound server on this box once setup-strih step 12 runs (issue 1440, by the same derived condition as
+strih-snv since 24.10.2026). lv1 sends two streams: `strih-obs` to OBS on 6981, `strih` to the hub on 6980.
+
 | Path | Source clock -> crossings -> listener | Fixed latency (computed) |
 |---|---|---|
-| Program into the strih OBS | lv1 VBAN `strih` -> hub program leg (resampler) -> `program_out` -> `pw-cat` pipe (egress resampler) -> PipeWire graph (quantum 1024) -> OBS pulse capture | 37.3 ms + pipe 1792 frames (37.3 ms) + look-ahead 0.3 ms + one graph quantum (21.3 ms) = **~96 ms** |
+| Program into the strih OBS | lv1 VBAN `strih-obs` (48 kHz, 103-frame packets, UDP 6981, straight to the rig NIC) -> obs-vban receive timeline (sender rate fitted, fixed R) -> OBS mix (FLEET). No hub, no PipeWire (issue 1439, 24.10.2026; before: hub `program_out` -> pw-cat -> PipeWire, ~96 ms) | R = **40 ms** (`STRIH_PROGRAM_VBAN_RESERVE_MS`) + the OBS genlock audio path |
 | Vestibule TV (HDMI-1 -> SDI) | lv1 -> hub program leg -> mix -> aplay HDMI pipe (egress resampler) | 37.3 ms + 13.3 ms + 0.3 ms + 21.3 ms + 5.3 ms + `hdmi_delay_ms` 0 = **~77.5 ms** + the Blackmagic converter and the TV |
 | Program in the cutters' cans | lv1 -> hub program leg -> mix -> MG-XU playback (aplay, egress resampler) | ~77.5 ms (the same chain as the SNV cans) |
 | Cameramen (cam1/4/6/7) <-> cutters, phones | as on strih-snv | as on strih-snv |

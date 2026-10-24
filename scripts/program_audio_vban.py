@@ -330,7 +330,7 @@ def drop_pulse_capture_inputs(obs, keep=None, sleep=None):
 
 # --- issue 1440: the browser sources' page audio, rerouted into OBS and muted -----------------------------
 # On a box without a sound server (the strih role, issue 1440) a browser source with `reroute_audio` off
-# plays its page sound to the default device (the cutters' cans on strih-snv, the program sink on
+# plays its page sound to the default device (the cutters' cans on strih-snv, the MG-XU cans on
 # strih-pp). With `reroute_audio` on, obs-browser hands that sound to OBS as the source's own audio, and
 # the source muted in the mixer keeps it off every bus. The seed (strih_scenes.py --bootstrap, the strih
 # manifest's `browser_audio: reroute-mute`) sets both, verify-strih reads them back (--browser-audio).

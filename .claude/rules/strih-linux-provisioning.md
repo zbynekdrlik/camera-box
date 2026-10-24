@@ -874,10 +874,10 @@ with an old inline block that ran its tail unconditionally.
 ## Audio — the local PipeWire graph (issue 1344, WIRED)
 
 > **Issue 1440:** on a strih box whose facts need no sound server (strih role + a direct program VBAN +
-> no `pipewire` hub participant: strih-snv) step 12 PURGES PipeWire instead of installing this graph,
+> no `pipewire` hub participant: strih-snv, and strih-pp since 24.10.2026) step 12 PURGES PipeWire instead of installing this graph,
 > behind an apt pin for every architecture, a `Provides: gstreamer1.0-pipewire` shim for RustDesk and an
 > `apt-get -s` read that refuses anything outside the declared list; verify item 9b grades it. The
-> section below stays true for strih-pp. `.claude/rules/strih-pipewire-purge.md`.
+> section below stays true only for a hub-fed strih (none deployed). `.claude/rules/strih-pipewire-purge.md`.
 
 There is NO Dante on the strih PC (owner 15.9.). **Program audio is a NETWORK stream, NOT the
 MiniFuse** (design 20.9., corrected): the OBS program source `ASIO zvuk` = VB-Matrix slot VASIO8,
