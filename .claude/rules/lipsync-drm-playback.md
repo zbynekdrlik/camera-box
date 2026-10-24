@@ -46,9 +46,12 @@ cam2 — the only reliable signal is a CONTENT check on what actually reached th
 playback starts, `cmd_start` runs a speech-arrival VERIFY (issue 1192) before it claims ACTIVE:
 
 - **Probe:** a short throwaway recording on **stream OBS** (`obs_phase2.py record --host "$STREAM"
-  --action start/stop`, ~`LIPSYNC_ARRIVAL_PROBE_S`=15 s), pulled to dev1 via `win_ssh_download`
-  (win-ssh-exec.sh), reusing the audio-presence-preflight record→stop→moov-finalize-retry→delete
-  skeleton (`audio_preflight_delete_ps` cleanup). This needs the stream box (STREAM/STREAM_USER/
+  --action start/stop`, ~`LIPSYNC_ARRIVAL_PROBE_S`=15 s), pulled to dev1 via `stream_box_download`
+  and deleted via `stream_box_exec` with both texts (`audio_preflight_delete_ps` / `_sh`) -- the ONE
+  stream-box transport (issue 1474: plain scp/ssh on the Linux stream-snv, `win_ssh_*` on a Windows
+  box), reusing the audio-presence-preflight record→stop→moov-finalize-retry→delete skeleton. Its
+  two Rust harnesses copy `stream-box.sh`, `shell-quote.sh`, `obs-fleet.sh` too; the Linux path is
+  `tests/python/test_lipsync_arrival_stream_lx_1474.py`. This needs the stream box (STREAM/STREAM_USER/
   STREAM_PW, env-overridable, targets.md) — a cam2-only test with no stream OBS sets
   `LIPSYNC_ARRIVAL_ENABLE=0` to skip it (default 1: the needed check is ON, never a forgettable toggle).
 - **Criterion — envelope correlation, NOT volumedetect.** `scripts/lipsync_envelope_corr.py` decodes

@@ -143,6 +143,10 @@ genlock_build_sha_from_state() {
 # every row follows.
 # shellcheck source=scripts/lib/version-integrity-rows.sh
 . "$HERE/lib/version-integrity-rows.sh"
+# issue 1474: the ONE list of a Linux OBS box's byte-graded bundle files (linux_obs_box_byte_paths),
+# shared with the E2E's gather. A source-only lib of pure functions (no strict mode, no top level).
+# shellcheck source=scripts/lib/manifest-autosource.sh
+. "$HERE/lib/manifest-autosource.sh"
 
 # --- source-guard: when sourced (the unit tests), stop here --------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -171,14 +175,17 @@ fi
 # naming the .so + box; a path absent from the manifest -> UNKNOWN (11, never a false clean). Defined
 # below the source-guard because it calls manifest_sha_for_path (drift-guard) -- tested end-to-end via
 # the gate subprocess (tests/version_integrity_gate.rs), the same path the #770 byte facet uses.
+#
+# issue 1474: an optional 4th argument ROW names the printed row (default `imag_so_bytes`, so imag's
+# output is byte-identical); linux_box_bytes_verdict below reuses this compare as `linux_so_bytes`.
 imag_bytes_verdict() {
-  local label="$1" manifest="$2" csv="$3"
+  local label="$1" manifest="$2" csv="$3" row="${4:-imag_so_bytes}"
   if [ -z "$csv" ] || [ -z "$manifest" ]; then
-    printf '  %-22s UNKNOWN  (%s byte gather/manifest not supplied -- #1100 ENFORCED, every box must report its .so bytes)\n' "imag_so_bytes" "$label"
+    printf '  %-22s UNKNOWN  (%s byte gather/manifest not supplied -- #1100 ENFORCED, every box must report its .so bytes)\n' "$row" "$label"
     return 11
   fi
   if [ ! -f "$manifest" ]; then
-    printf '  %-22s UNKNOWN  (%s manifest %s not readable)\n' "imag_so_bytes" "$label" "$manifest"
+    printf '  %-22s UNKNOWN  (%s manifest %s not readable)\n' "$row" "$label" "$manifest"
     return 11
   fi
   local OLDIFS="$IFS"; IFS=','
@@ -193,22 +200,51 @@ imag_bytes_verdict() {
     total=$((total + 1))
     exp="$(manifest_sha_for_path "$manifest" "$path")"
     if [ -z "$exp" ]; then
-      printf '  %-22s UNKNOWN  (%s: %s not listed in the manifest -- byte parity unverifiable)\n' "imag_so_bytes" "$label" "$path"
+      printf '  %-22s UNKNOWN  (%s: %s not listed in the manifest -- byte parity unverifiable)\n' "$row" "$label" "$path"
       unknown=$((unknown + 1))
     elif [ "$sha" = "$exp" ]; then
-      printf '  %-22s OK       (%s: %s matches the manifest)\n' "imag_so_bytes" "$label" "${path##*/}"
+      printf '  %-22s OK       (%s: %s matches the manifest)\n' "$row" "$label" "${path##*/}"
       ok=$((ok + 1))
     else
-      printf '  %-22s DRIFT    (%s: %s bytes differ -- expected %s, deployed %s)\n' "imag_so_bytes" "$label" "$path" "$exp" "$sha"
+      printf '  %-22s DRIFT    (%s: %s bytes differ -- expected %s, deployed %s)\n' "$row" "$label" "$path" "$exp" "$sha"
       drift=$((drift + 1))
     fi
   done
   if [ "$total" -eq 0 ]; then
-    printf '  %-22s UNKNOWN  (%s byte CSV empty -- #1100 ENFORCED)\n' "imag_so_bytes" "$label"
+    printf '  %-22s UNKNOWN  (%s byte CSV empty -- #1100 ENFORCED)\n' "$row" "$label"
     return 11
   fi
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
+  return 0
+}
+
+# linux_box_bytes_verdict LABEL MANIFEST CSV -> issue 1474: the deployed-library BYTE parity of a Linux
+# OBS box (strih-snv, stream-snv: the `--linux` boxes), the Linux counterpart of the Windows obs.dll /
+# distroav.dll byte rows those boxes SKIP. CSV = the box's `path=sha` gather of
+# linux_obs_box_byte_paths (scripts/lib/manifest-autosource.sh); MANIFEST = the BUNDLE_MANIFEST.json
+# of the linux-genlock artifact the box was deployed from, at the box's own marker sha. The per-file
+# compare is imag_bytes_verdict's (row `linux_so_bytes`); on top of it EVERY listed file must be in
+# the gather, so a file the box could not hash is a named UNKNOWN, never a silently shorter check.
+# FAIL-CLOSED: no CSV / no manifest / an unreadable manifest -> UNKNOWN (11). A drift (20) outranks an
+# UNKNOWN. Codes as imag_bytes_verdict: 0 OK, 20 DRIFT, 11 UNKNOWN.
+linux_box_bytes_verdict() {
+  local label="$1" manifest="$2" csv="$3" p missing=0 rc=0
+  if [ -n "$csv" ] && [ -n "$manifest" ] && [ -f "$manifest" ]; then
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      case ",${csv}," in
+        *",${p}="*) : ;;
+        *) printf '  %-22s UNKNOWN  (%s: %s was not hashed on the box -- byte parity unverifiable)\n' \
+             "linux_so_bytes" "$label" "$p"
+           missing=$((missing + 1)) ;;
+      esac
+    done < <(linux_obs_box_byte_paths)
+  fi
+  imag_bytes_verdict "$label" "$manifest" "$csv" "linux_so_bytes" || rc=$?
+  [ "$rc" -eq 20 ] && return 20
+  [ "$rc" -ne 0 ] && return "$rc"
+  [ "$missing" -gt 0 ] && return 11
   return 0
 }
 
@@ -403,6 +439,13 @@ Options:
                     stream-snv: --linux stream). Every Windows-only facet of NAME is a loud SKIPPED
                     row naming NAME, the platform-agnostic ones are graded. --strih-linux is the
                     alias of --linux strih. A NAME that is no --win-state box is a usage error (1).
+  --linux-manifest NAME=PATH  issue 1474 -- the BUNDLE_MANIFEST.json of the linux-genlock artifact the
+                    --linux box NAME was deployed from (its own marker sha).
+  --linux-bytes NAME=path=sha,...  issue 1474 -- NAME's DEPLOYED bundle-file sha256s (the E2E gathers
+                    them over ssh). Every --linux box gets a `linux_so_bytes` row graded against its
+                    manifest; an absent gather or manifest is UNKNOWN -> the gate refuses (the Linux
+                    counterpart of the Windows obs.dll / distroav.dll byte rows). Either flag for a
+                    NAME that is not a --linux box is a usage error (1).
   --win-baseline N=FILE  issue 1357 -- REPORT-ONLY rows: box N's raw Windows baseline gather
                     (scripts/win-baseline-check.sh --out-dir), graded per item, NEVER counted.
 
@@ -452,6 +495,8 @@ main() {
   # "unread (report-only)" row and still never blocks.
   local -a win_state_report_only=()
   local -a win_baseline=()   # issue 1357 -- report-only Windows baseline gathers (NAME=FILE)
+  # issue 1474 -- per --linux box: its linux bundle manifest (NAME=PATH) + deployed bytes (NAME=CSV)
+  local -a linux_manifests=() linux_bytes=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --readme)             shift; readme="${1:-}" ;;
@@ -471,6 +516,8 @@ main() {
           echo "--linux needs the NAME of a --win-state box (issue 1462)" >&2; usage >&2; exit 1
         fi
         linux_boxes+=("$1") ;;
+      --linux-manifest)     shift; linux_manifests+=("${1:-}") ;;
+      --linux-bytes)        shift; linux_bytes+=("${1:-}") ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)            echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -499,6 +546,14 @@ main() {
     fi
     [ "$lb" = "strih" ] && strih_linux=1
   done
+  # issue 1474: a byte arg for a box that is not Linux-graded would grade nothing -- a usage error.
+  for we in ${linux_manifests[@]+"${linux_manifests[@]}"} ${linux_bytes[@]+"${linux_bytes[@]}"}; do
+    found=0
+    for lb in "${linux_boxes[@]}"; do [ "${we%%=*}" = "$lb" ] && found=1; done
+    if [ "$found" -eq 0 ]; then
+      echo "--linux-manifest/--linux-bytes ${we%%=*}: not a --linux box (issue 1474)" >&2; exit 1
+    fi
+  done
 
   echo "== version-integrity-gate (#123): pre-rig-test — live strih+stream stack MUST match the pinned set =="
   echo "   pins from ${readme}; engine = drift-guard.sh --compare; a drifted/unverified box REFUSES the run"
@@ -521,6 +576,12 @@ main() {
     # output): the drift-guard engine compare, then the issue-826 OBS-identity rows.
     vig_row_box_engine "$name" "$file" "$readme" "$manifest" "$alt_manifest" "$is_strih_linux"
     vig_row_obs_identity "$name" "$file" "$readme" "$is_strih_linux"
+    # issue 1474: a Linux box's deployed bundle bytes vs its linux bundle manifest (fail-closed).
+    if [ "$is_strih_linux" = 1 ]; then
+      vig_row_linux_bytes "$name" \
+        "$(vig_named_value "$name" ${linux_manifests[@]+"${linux_manifests[@]}"})" \
+        "$(vig_named_value "$name" ${linux_bytes[@]+"${linux_bytes[@]}"})"
+    fi
   done
 
   # The fleet rows, in the original order. parity_args (LABEL=SHA per box) is filled by the parity
