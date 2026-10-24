@@ -152,6 +152,7 @@ fn the_mix_tick_takes_only_the_measurement_source_share() {
         tick,
         "st_cb_mix_tick",
         &[
+            "const uint64_t tick_cost_start_ns = os_gettime_ns();",
             "cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } if (!cb_active) return;",
             "tick.tick_start_ns = mix->timestamp;",
             "tick.tick_end_ns = mix->timestamp + util_mul_div64(frames, 1000000000ULL, st->audio_sample_rate);",
@@ -166,10 +167,10 @@ fn the_mix_tick_takes_only_the_measurement_source_share() {
             "if (decision.take) { struct obs_source_audio_mix m; obs_source_get_audio_mix(src, &m);",
             "share[c] = m.output[mix_idx].data[c];",
             "camerabox::cb_measure_share_fill(decision.take, share, nch, frames, out); }",
-            "if (decision.absent_long && st->cb_measure_source_present.load(std::memory_order_relaxed)) { st->cb_audio_fifo.end_session((unsigned)camerabox::CbAudioGate::NotInProgram); return; }",
+            "if (decision.absent_long && st->cb_measure_source_present.load(std::memory_order_relaxed)) { st->cb_audio_fifo.end_session((unsigned)camerabox::CbAudioGate::NotInProgram); camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - tick_cost_start_ns); return; }",
             "share_frames.data[c] = (uint8_t *)out[c];",
             "share_frames.frames = (uint32_t)frames; share_frames.timestamp = mix->timestamp;",
-            "cb_audio_gate_and_publish(st, &share_frames, last_qr_ns);",
+            "cb_audio_gate_and_publish(st, &share_frames, last_qr_ns); camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - tick_cost_start_ns);",
         ],
     );
     for banned in [
@@ -264,7 +265,7 @@ fn the_measurement_source_is_held_and_the_callback_follows_the_output() {
             "st->cb_decode_mailbox.stop();",
             "st->cb_audio_fifo.start(",
             "cb_measure_share_connect(st);",
-            "obs_output_begin_data_capture(",
+            "if (!obs_output_begin_data_capture(st->context, OBS_OUTPUT_VIDEO | OBS_OUTPUT_AUDIO)) { cb_measure_share_disconnect(st);",
         ],
     );
     let stop = unique_body_of(&src, "static void st_stop(void *data, uint64_t)");
@@ -273,6 +274,13 @@ fn the_measurement_source_is_held_and_the_callback_follows_the_output() {
             "cb_measure_share_disconnect(st); obs_output_end_data_capture(st->context); st->cb_decode_mailbox.stop(); st->cb_audio_fifo.stop();"
         ),
         "{DOCK_OUTPUT}: st_stop must remove the mix-tick callback before it stops the FIFO it feeds"
+    );
+    assert!(
+        stop.contains(
+            "st->cb_audio_fifo.stop(); cb_measure_source_hold(st, nullptr); st->cb_measure_source_checked = false;"
+        ),
+        "{DOCK_OUTPUT}: a stopped dock must not keep the measurement source alive, and the next start \
+         must look it up at once (review round 1)"
     );
     let destroy = unique_body_of(&src, "static void st_destroy(void *data)");
     in_order(
