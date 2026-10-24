@@ -82,7 +82,7 @@ import signal
 
 
 def _term(*_):  # the real tool's handler kills its children on SIGTERM: record that it got the TERM
-    open(os.path.join(d, "remote-term"), "a").write(kind + "\\n")
+    open(os.path.join(d, "remote-term"), "a").write(kind + "\n")
     sys.exit(143)
 
 

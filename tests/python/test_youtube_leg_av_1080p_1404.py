@@ -70,7 +70,7 @@ def test_a_4k_recording_window_is_read_at_1080p_and_a_1080p_vod_as_it_is(tmp_pat
 
 def test_a_1080p_read_short_of_markers_is_an_error_never_a_4k_reread(tmp_path, monkeypatch):
     cuts = _fake_reads(monkeypatch, {"rec.mp4": 2160, "vod.mp4": 1080}, matched={"rec": 48})
-    with pytest.raises(ValueError, match="1080p read of the 2160p recording matched 48 markers"):
+    with pytest.raises(ValueError, match="1080p read of the 2160p recording matched 48 of the 50 audio markers"):
         ylv.av_window(tmp_path / "rec.mp4", tmp_path / "vod.mp4", 10.0, 20.0, tmp_path / "m.csv",
                       "probe", 25.0, str(tmp_path))
     assert cuts == [("rec.mp4", 1080), ("vod.mp4", None)]  # no second, 4K cut
