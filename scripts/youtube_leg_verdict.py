@@ -242,12 +242,17 @@ def av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_b
             return av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s, tmp,
                              av_run, tag)
     results, scaled, heights, reads = [], [], {}, {}
+    # the window's name in the clip's (made safe for a file name): windows run at once in one dir and
+    # two recording parts can share an offset
+    tag = re.sub(r"[^A-Za-z0-9._-]", "_", tag or "")
     for kind, name, src, start in (("rec", "recording", rec_file, rec_start_s), ("vod", "VOD", vod_file, vod_start_s)):
-        # the window's name in the clip's: windows run at once in one dir (two parts can share an offset)
         clip = os.path.join(workdir, f"av-{kind}-{tag + '-' if tag else ''}{start:.3f}.mp4")
         heights[name] = video_height(str(src))
         scale = AV_READ_HEIGHT if heights[name] > AV_READ_HEIGHT else None
-        if scale:
+        if scale and kind == "rec":
+            # the strict guard is the recording read's (ROZHODNUTE 6389130309); a VOD above 1080 (yt-dlp's
+            # last fallback) is cut at 1080 too but keeps the old floor: an unscaled VOD read already loses
+            # markers (s2-vod-A paired 79 of 81)
             scaled.append(name)
         reads[kind] = f"{AV_READ_HEIGHT}p of {heights[name]}p" if scale else f"{heights[name]}p"
         try:
