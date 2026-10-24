@@ -269,7 +269,7 @@ strih_box_validate() {
   # Buffer R (ms) and (issue 1462) the name of that OBS input (stream-pp `Zvuk z mixu`, stream-snv `mbc`,
   # strih-snv `ASIO zvuk`). The stream role takes exactly ONE stream (its hub is gone). The strih role
   # (phase 2, addendum 6338457001) declares all four -- one stream on its own port, the hub keeps 6980 --
-  # or all four `none`: a hub-fed strih (strih-pp) until its console sends it a program stream.
+  # or all four `none`: a hub-fed strih (none deployed since strih-pp took lv1's `strih-obs`, 24.10.2026).
   local vs="${f[STRIH_PROGRAM_VBAN_STREAMS]}" vp="${f[STRIH_PROGRAM_VBAN_PORT]}" vr="${f[STRIH_PROGRAM_VBAN_RESERVE_MS]}"
   local ai="${f[STRIH_PROGRAM_AUDIO_INPUT]}"
   if [ "${f[STRIH_ROLE]}" = strih ] && [ "${vs}:${vp}:${vr}:${ai}" = none:none:none:none ]; then
@@ -632,7 +632,7 @@ strih_lx_program_sender() {
 
 # strih_lx_program_vban_streams / _port / _reserve_ms -> issue 1439: the console's program VBAN stream
 # name(s) the box receives straight into its obs-vban source, the UDP port OBS binds and the fixed
-# Receive Buffer R in ms (facts STRIH_PROGRAM_VBAN_*; all `none` on the strih role).
+# Receive Buffer R in ms (facts STRIH_PROGRAM_VBAN_*; all `none` on a hub-fed strih).
 strih_lx_program_vban_streams() { strih_box_fact STRIH_PROGRAM_VBAN_STREAMS; }
 strih_lx_program_vban_port() { strih_box_fact STRIH_PROGRAM_VBAN_PORT; }
 strih_lx_program_vban_reserve_ms() { strih_box_fact STRIH_PROGRAM_VBAN_RESERVE_MS; }
