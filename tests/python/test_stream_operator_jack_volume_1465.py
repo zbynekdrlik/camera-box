@@ -236,7 +236,9 @@ def test_auto_mute_left_disabled_fails(tmp_path):
     (asound_state(automute="Disabled"), "Auto-Mute"),
     (asound_state(headphone="false"), "Headphone"),
     (asound_state(card_id="Other"), "Generic_1"),
-], ids=["speaker-on", "auto-mute-off", "headphone-off", "card-not-stored"])
+    (asound_state(headphone_db=-2000), "Headphone Playback Volume -20.00 dB"),
+    (asound_state(master_db=-2325), "Master Playback Volume -23.25 dB"),
+], ids=["speaker-on", "auto-mute-off", "headphone-off", "card-not-stored", "headphone-level", "master-level"])
 def test_a_stored_state_that_differs_fails_it_would_come_back_after_a_reboot(tmp_path, state, why):
     st, text = _mixer_row(tmp_path, state=state)
     assert st == "FAIL" and why in text and "reboot" in text, text
@@ -275,7 +277,8 @@ def test_the_label_is_plain_slovak():
 
 def test_the_sink_is_found_by_name_on_the_cubic_scale():
     v = _vol()
-    objs = [{"id": 30, "type": "PipeWire:Interface:Node",
+    objs = [{"id": 0, "type": "PipeWire:Interface:Core", "info": {"cookie": 2306208623, "name": "pipewire-0"}},
+            {"id": 30, "type": "PipeWire:Interface:Node",
              "info": {"props": {"node.name": "alsa_output.x", "media.class": "Audio/Sink"},
                       "params": {"Props": [{"channelVolumes": [1.0, 1.0], "mute": False}]}}},
             {"id": 41, "type": "PipeWire:Interface:Node",
@@ -284,6 +287,9 @@ def test_the_sink_is_found_by_name_on_the_cubic_scale():
                                            {"params": []}]}}}]
     s = v.read_sink(objs)
     assert s["id"] == 41 and abs(s["volume"] - 0.7) < 1e-3 and s["mute"] is False, s
+    # review round 1: PipeWire hands node ids out again after a restart; the core cookie (random per daemon
+    # start) + the id name ONE sink of ONE PipeWire run
+    assert s["key"] == "2306208623:41", s
     assert v.read_sink(objs[:1]) is None and v.read_sink(None) is None
 
 
@@ -403,11 +409,91 @@ def test_watch_without_a_kept_level_only_unmutes(tmp_path):
     assert calls == ["set-mute 41 0"] and r.stdout.splitlines() == ["Slúchadlá 80 %"], (calls, r.stdout)
 
 
+def _sink(sid, volume, mute=False, run="c1"):
+    return {"id": sid, "key": "%s:%s" % (run, sid), "volume": volume, "mute": mute}
+
+
+def _watch(tmp_path, seq, kept=None):
+    """A Watcher over SEQ (the scripted looks; a wpctl call changes the current sink and the next look sees it).
+    Returns (watcher, calls, polls(n))."""
+    v = _vol()
+    state = tmp_path / "kept.json"
+    if kept is not None:
+        state.write_text(json.dumps(kept))
+    calls = []
+    reads = iter(seq)
+    box = {"cur": None, "changed": False}
+
+    def read():
+        if box["changed"]:
+            box["changed"] = False
+            return dict(box["cur"])
+        s = next(reads)
+        box["cur"] = None if s is None else dict(s)
+        return None if s is None else dict(s)
+
+    def wpctl(*args):
+        calls.append(" ".join(args))
+        if args[0] == "set-volume":
+            box["cur"]["volume"] = float(args[4])
+        elif args[0] == "set-mute":
+            box["cur"]["mute"] = args[2] == "1"
+        box["changed"] = True
+
+    w = v.Watcher(read, wpctl, str(state))
+    return w, calls, state
+
+
+def test_a_pipewire_restart_that_reuses_the_node_id_still_restores(tmp_path):
+    # review round 1 (the 🔴): the restart finished between two looks and the sink came back under the SAME id
+    # at 100 % -- a new core cookie makes it a new sink: the kept 70 % comes back, the 100 % is never kept
+    w, calls, state = _watch(tmp_path, [_sink(41, 0.7, run="c1"), _sink(41, 1.0, run="c2")])
+    assert w.poll() == "Slúchadlá 70 %"
+    assert w.poll() == "Slúchadlá 70 %" or w.shown == "Slúchadlá 70 %", calls
+    assert "set-volume -l 1.0 41 0.70" in calls, calls
+    assert json.loads(state.read_text())["volume"] == 0.7
+
+
+def test_a_restarted_watcher_adopts_the_sink_and_keeps_the_operators_mute(tmp_path):
+    # review round 1: a panel restart (step 16h) restarts the watcher; the sink it already restored is adopted
+    # as it is -- the operator's mute stays, nothing is set
+    w, calls, _state = _watch(tmp_path, [_sink(41, 0.6, mute=True)], kept={"volume": 0.6, "restored": "c1:41"})
+    assert w.poll() == "Slúchadlá stlmené" and calls == [], calls
+
+
+def test_one_missed_look_neither_flashes_the_label_nor_restores(tmp_path):
+    # review round 1: one slow pw-dump read None; the sink only counts as gone after GONE_AFTER misses in a row
+    w, calls, _state = _watch(tmp_path, [_sink(41, 0.6, mute=True), None, _sink(41, 0.6, mute=True)],
+                              kept={"volume": 0.6, "restored": "c1:41"})
+    assert [w.poll() for _ in range(3)] == ["Slúchadlá stlmené", None, None] and calls == [], calls
+    assert _vol().GONE_AFTER >= 2
+
+
+def test_a_kept_zero_level_is_restored_audible(tmp_path):
+    w, calls, _state = _watch(tmp_path, [_sink(41, 1.0)], kept={"volume": 0.0})
+    w.poll()
+    assert calls[0] == "set-volume -l 1.0 41 0.10", calls
+
+
+def test_a_kept_level_that_is_not_a_number_is_ignored(tmp_path):
+    v = _vol()
+    for bad in (True, "0.5", None):
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps({"volume": bad}))
+        assert v.load_level(str(p)) is None, bad
+
+
+def test_a_failed_wpctl_call_is_a_nonzero_exit(tmp_path):
+    env, _dump, _state = _vol_rig(tmp_path, volume=0.7)
+    (tmp_path / "volbin" / "wpctl").write_text("#!/bin/sh\necho 'Translate ID error' >&2\nexit 1\n")
+    r, _calls = _run_vol(tmp_path, env, "down")
+    assert r.returncode == 1 and "wpctl" in r.stderr, (r.returncode, r.stderr)
+
+
 def test_the_watcher_keeps_a_level_changed_elsewhere_and_restores_after_a_restart(tmp_path):
     v = _vol()
     state = tmp_path / "kept.json"
-    seq = [{"id": 41, "volume": 0.7, "mute": False}, {"id": 41, "volume": 0.55, "mute": False},
-           {"id": 41, "volume": 0.55, "mute": False}, None, {"id": 57, "volume": 1.0, "mute": False}]
+    seq = [_sink(41, 0.7), _sink(41, 0.55), _sink(41, 0.55)] + [None] * v.GONE_AFTER + [_sink(57, 1.0, run="c2")]
     calls = []
     reads = iter(seq)
     box = {"cur": None, "changed": False}
@@ -430,13 +516,13 @@ def test_the_watcher_keeps_a_level_changed_elsewhere_and_restores_after_a_restar
         box["changed"] = True
 
     w = v.Watcher(read, wpctl, str(state))
-    out = [w.poll() for _ in range(5)]
+    out = [w.poll() for _ in range(len(seq))]
     # first sight: nothing kept yet -> only the unmute; then a change made elsewhere (a key press) is kept
     assert out[0] == "Slúchadlá 70 %" and out[1] == "Slúchadlá 55 %" and out[2] is None, out
     assert json.loads(state.read_text())["volume"] == 0.55
-    assert out[3] == "Slúchadlá nedostupné", out
-    # a new sink id (PipeWire restarted): the kept 55 % comes back
-    assert "set-volume -l 1.0 57 0.55" in calls and out[4] == "Slúchadlá 55 %", (calls, out)
+    assert out[2 + v.GONE_AFTER] == "Slúchadlá nedostupné" and set(out[3:2 + v.GONE_AFTER]) == {None}, out
+    # a new sink (PipeWire restarted): the kept 55 % comes back
+    assert "set-volume -l 1.0 57 0.55" in calls and out[-1] == "Slúchadlá 55 %", (calls, out)
 
 
 # --- 5. the panel item + the keys (stream role only) ----------------------------------------------------------------
@@ -509,9 +595,9 @@ def test_the_volume_keys_merge_before_keyboard_close_and_keep_everything_else():
 
 def test_the_brightness_merge_is_the_same_filter():
     k = (SCRIPTS / "lib" / "obs-box-kiosk.sh").read_text()
-    body = k[k.index("obs_box_openbox_rc_with_brightness_keys() {"):]
-    body = body[:body.index("\n}\n")]
-    assert "obs_box_openbox_rc_with_keys obs_box_brightness_keybinds_xml" in body, body
+    line = k[k.index("obs_box_openbox_rc_with_brightness_keys() {"):]
+    line = line[:line.index("\n")]
+    assert line.endswith("{ obs_box_openbox_rc_with_keys obs_box_brightness_keybinds_xml; }"), line
 
 
 # --- 6. setup step 12 + verify item 9b on the stream role ------------------------------------------------------------
@@ -536,6 +622,20 @@ def test_install_applies_the_mixer_installs_the_helper_and_merges_the_keys(tmp_p
 def _installed_home(tmp_path):
     root, _ = snv_asound(tmp_path)
     return root, _installed(tmp_path, root)
+
+
+def test_install_refuses_a_symlinked_rc_xml(tmp_path):
+    # review round 1: root never reads or writes through a link the desktop user placed
+    root, _ = snv_asound(tmp_path)
+    home = tmp_path / "home"
+    (home / ".config" / "openbox").mkdir(parents=True)
+    target = tmp_path / "elsewhere.xml"
+    target.write_text("<keyboard>\n</keyboard>\n")
+    (home / ".config" / "openbox" / "rc.xml").symlink_to(target)
+    env = _lib_env(tmp_path, root, objects=False)
+    r = _bash(tmp_path, 'stream_operator_audio_install "$1" "$2" "$3" || echo RC=$?', env, REPO, home, ME)
+    assert "RC=1" in r.stdout and "symlink" in r.stderr, (r.stdout, r.stderr)
+    assert target.read_text() == "<keyboard>\n</keyboard>\n"
 
 
 def test_verify_grades_ten_rows_with_the_control_row(tmp_path):

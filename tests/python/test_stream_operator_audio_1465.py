@@ -383,12 +383,25 @@ MIX_HEALTHY = {
 }
 
 
-def asound_state(card_id="Generic_1", speaker="false", automute="Enabled", headphone="true"):
+def _stored_level(n, name, db, chans=2):
+    """One stored level control as `alsactl store` writes it (read live on stream-pp 24.10.2026): the raw value
+    and, in the comment, the dB per channel in 0.01 dB (`dbvalue.N`)."""
+    vals = "".join("\t\tvalue.%d 87\n" % i for i in range(chans))
+    dbs = "".join("\t\t\tdbvalue.%d %d\n" % (i, db) for i in range(chans))
+    return ("\tcontrol.%d {\n\t\tiface MIXER\n\t\tname '%s Playback Volume'\n%s\t\tcomment {\n"
+            "\t\t\taccess 'read write'\n\t\t\ttype INTEGER\n\t\t\tcount %d\n\t\t\trange '0 - 87'\n"
+            "\t\t\tdbmin -6525\n\t\t\tdbmax 0\n%s\t\t}\n\t}\n" % (n, name, vals, chans, dbs))
+
+
+def asound_state(card_id="Generic_1", speaker="false", automute="Enabled", headphone="true", headphone_db=0,
+                 master_db=0, pcm_db=0):
     """/var/lib/alsa/asound.state as `alsactl store` writes it (the controls the mixer row reads back); a
     second card's Speaker on first, so the reader must keep to the headphone card's own block."""
     return ("state.Generic {\n\tcontrol.1 {\n\t\tiface MIXER\n\t\tname 'Speaker Playback Switch'\n"
             "\t\tvalue.0 true\n\t\tvalue.1 true\n\t}\n}\n"
-            "state.%s {\n"
+            "state.%s {\n" % card_id
+            + _stored_level(11, "Headphone", headphone_db) + _stored_level(10, "Master", master_db, chans=1)
+            + _stored_level(18, "PCM", pcm_db) + 
             "\tcontrol.12 {\n\t\tiface MIXER\n\t\tname 'Headphone Playback Switch'\n"
             "\t\tvalue.0 %s\n\t\tvalue.1 %s\n\t\tcomment {\n\t\t\taccess 'read write'\n"
             "\t\t\ttype BOOLEAN\n\t\t\tcount 2\n\t\t}\n\t}\n"
@@ -398,7 +411,7 @@ def asound_state(card_id="Generic_1", speaker="false", automute="Enabled", headp
             "\tcontrol.20 {\n\t\tiface MIXER\n\t\tname 'Auto-Mute Mode'\n\t\tvalue %s\n"
             "\t\tcomment {\n\t\t\taccess 'read write'\n\t\t\ttype ENUMERATED\n\t\t\tcount 1\n"
             "\t\t\titem.0 Disabled\n\t\t\titem.1 Enabled\n\t\t}\n\t}\n}\n"
-            % (card_id, headphone, headphone, speaker, speaker, automute))
+            % (headphone, headphone, speaker, speaker, automute))
 
 
 STOCK_RC = """<?xml version="1.0" encoding="UTF-8"?>
