@@ -398,6 +398,7 @@ def test_check_on_the_real_fleet_reads_resolume_only(tmp_path):
     r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
                        env={**env, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "resolume-snv"},
                        timeout=60)
+    assert r.returncode == 20, r.stdout + r.stderr   # the live resolume capture drifts on wer_dontshowui
     assert "box=stream-snv" not in r.stdout, r.stdout
     assert re.search(r"^box=resolume-snv win_baseline=", r.stdout, re.M), r.stdout
 

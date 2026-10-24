@@ -172,7 +172,10 @@ def test_a_healthy_pass_probes_the_linux_boxes_over_plain_ssh_never_powershell(t
     assert _notifies(tmp_path) == []
 
 
-def test_an_inactive_unit_pages_once_confirmed_with_the_linux_recovery(tmp_path):
+def test_obs_running_outside_its_unit_pages_once_confirmed_with_the_linux_recovery(tmp_path):
+    # The one fault no other dev1 watchdog sees: obs-websocket answers (so obs-liveness reads the box
+    # fine) while strih-obs.service is not active -- an OBS started outside its supervisor, not the
+    # operator's kiosk instance (the Linux analogue of the Windows session-0 obs64).
     for _ in range(2):
         r = _run(tmp_path, FAKE_SVC="10.77.9.204=inactive")
         assert r.returncode == 0, r.stderr
@@ -182,17 +185,25 @@ def test_an_inactive_unit_pages_once_confirmed_with_the_linux_recovery(tmp_path)
     body = args[args.index("--body") + 1]
     assert args[args.index("--dedup-key") + 1] == "obs-session-stream-snv"
     assert "**stream-snv**" in body and "systemctl --user is-active -> inactive" in body, body
+    assert "OBS answers on :4455 but is NOT its supervised strih-obs.service" in body, body
+    assert "OBS is NOT running" not in body, body
     assert "ssh newlevel@10.77.9.204 'systemctl --user restart strih-obs.service'" in body, body
     assert "launch-obs-genlock" not in body and "win-*" not in body, body
 
 
-def test_websocket_down_on_an_active_unit_is_a_named_fault(tmp_path):
-    r = _run(tmp_path, ["--dry-run"], FAKE_WS_DOWN="10.77.9.202")
-    assert r.returncode == 0, r.stderr
-    line = next(ln for ln in r.stderr.splitlines() if "strih-snv: probe=" in ln)
-    assert "wedged=1" in line and "obs-websocket on :4455 did not answer" in line, line
-    r2 = _run(tmp_path, ["--dry-run"], FAKE_WS_DOWN="10.77.9.202")
-    assert "[dry-run] WOULD alert: strih-snv CONFIRMED INVISIBLE" in r2.stderr, r2.stderr
+def test_a_dead_websocket_is_left_to_obs_liveness_never_a_second_page(tmp_path):
+    # obs-liveness (ENABLED on dev1, roster strih-snv stream-snv resolume-snv) already pages a dead
+    # obs-websocket with the same unit-restart recovery. This watchdog decides nothing then: no
+    # confirm, no page, whatever the unit reads -- one outage must reach the phone once.
+    for svc in ("", "10.77.9.202=inactive"):
+        state = tmp_path / f"state-{bool(svc)}"
+        for _ in range(3):
+            r = _run(tmp_path, FAKE_WS_DOWN="10.77.9.202", FAKE_SVC=svc,
+                     OBS_SESSION_WATCHDOG_STATE_FILE=str(state))
+            assert r.returncode == 0, r.stderr
+        assert "strih-snv: obs-websocket on :4455 did not answer -- obs-liveness owns that page" in r.stderr, r.stderr
+        assert "strih-snv: confirm=" not in r.stderr, r.stderr
+        assert "stream-snv: confirm=0 -> 0" in r.stderr, r.stderr
     assert _notifies(tmp_path) == []
 
 
@@ -217,3 +228,16 @@ def test_the_windows_box_keeps_its_byte_identical_alert(tmp_path):
     body = sent[0][sent[0].index("--body") + 1]
     assert body.startswith("🚨 #979 obs-session-watchdog: **resolume-snv** obs64/AHK is INVISIBLE to the operator"), body
     assert body.endswith("Recovery (agent-driven, win-* MCP Shell): `bash scripts/launch-obs-genlock.sh --box resolume-snv --force`"), body
+
+
+def test_the_unit_timeout_covers_a_pass_with_both_linux_boxes_hung():
+    # Each Linux box costs up to the ssh bound plus the obs-websocket bound; a systemd kill mid-pass
+    # would skip resolume and lose the later state writes. Sized from the script's own defaults, plus
+    # 60 s for the Windows probe of resolume (ConnectTimeout 10 + the PowerShell probe).
+    import re
+    text = WATCHDOG.read_text()
+    ssh = int(re.search(r'OBS_SESSION_LINUX_SSH_TIMEOUT:-(\d+)', text).group(1))
+    ws = int(re.search(r'STRIH_LX_WS_TIMEOUT:-(\d+)', (SCRIPTS / "lib" / "strih-platform.sh").read_text()).group(1))
+    unit = (REPO / "systemd" / "obs-session-watchdog.service").read_text()
+    timeout = int(re.search(r'^TimeoutStartSec=(\d+)$', unit, re.M).group(1))
+    assert timeout >= 2 * (ssh + ws) + 60, (timeout, ssh, ws)

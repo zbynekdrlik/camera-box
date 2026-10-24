@@ -113,6 +113,7 @@ fn targets(env: &[(&str, &str)]) -> String {
         .arg(". \"$SCRIPT\"\nobs_session_targets")
         .env("SCRIPT", script())
         .env("OBS_SESSION_WATCHDOG_BOXES", WIN_BOXES)
+        .env_remove("STRIH_SNV_HOST")
         .env_remove("STREAM_SNV_HOST")
         .env_remove("RESOLUME_SNV_HOST")
         .env("OBS_FLEET", WIN_FLEET);
