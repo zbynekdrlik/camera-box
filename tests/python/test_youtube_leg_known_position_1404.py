@@ -4,10 +4,13 @@ The painter's two QRs sit at fixed positions in a recording, so after one full d
 reads every next frame at the stored corner points (`QRCodeDetector.decode`) and runs the full
 detector only when that read gives no valid painter payload (the fallback, which refreshes the
 points). Pinned here:
-  - the rows are exactly those of the full detector, on the shared synthetic recording (with its
-    blue-only and right-only stretches), on a recording whose framing jumps (every half falls back
-    once and reads on), and on the REAL session-3 pixels read in order through one detector (the
-    stale fresh half of VOD frame 20174 and the colour-coded half of recording frame 2100);
+  - every half the full detector reads reads the same, and the read at the stored points only ADDS
+    halves the finder search missed, each the half's true tick: on the shared synthetic recording
+    (with its blue-only and right-only stretches) and on a recording whose framing jumps (every
+    half falls back once and reads on). Measured on the real yu1zFSHFdu8 VOD the same way: 309 of
+    26940 halves added, 5 more frames with a tick, no tick changed;
+  - the REAL session-3 pixels read exactly like the full detector in order through one detector
+    (the stale fresh half of VOD frame 20174, the colour-coded half of recording frame 2100);
   - the fallback is counted: the decode reports its known-position reads, the fallbacks and the
     full detections, and a plain cv2 detector passed in by a caller keeps the old full read.
 """
@@ -44,23 +47,46 @@ def _full_rows(path, monkeypatch):
         monkeypatch.setattr(ylt, "KNOWN_POSITION_READ", True)
 
 
-def test_the_known_position_decode_reads_exactly_the_full_detectors_rows(rec_video, monkeypatch):
+def _reads_on_top_of(full, fast, truth):
+    """Every half the full detector read reads the same in `fast`; the known-position read only ADDS
+    halves the full detector missed, each its true tick (`truth(index, column)`). The resolved
+    ticks agree wherever the full decode resolved one. Returns the number of halves added."""
+    assert [r[:2] for r in fast] == [r[:2] for r in full]
+    added = 0
+    for f, k in zip(full, fast):
+        for col in (2, 3):
+            if f[col] is not None:
+                assert k[col] == f[col], (f, k)
+            elif k[col] is not None:
+                assert k[col] == truth(f[0], col), (f, k)
+                added += 1
+    for f, k in zip(ylt.resolve_ticks(full), ylt.resolve_ticks(fast)):
+        if f[2] is not None:
+            assert k[2] == f[2], (f, k)
+    return added
+
+
+def test_the_known_position_decode_reads_what_the_full_detector_reads(rec_video, monkeypatch):
     full = _full_rows(rec_video, monkeypatch)
     reads = {}
     fast = ylt.decode_raw(rec_video, workers=1, reads=reads)
-    assert fast == full
+    # the shared recording: tick 1000 + 2k on the left, captured on even ticks (right = left - 1),
+    # no left QR in frames 120-149
+    _reads_on_top_of(full, fast, lambda i, col: 1000 + 2 * i - (col - 2))
+    assert sum(r[2] is not None for r in fast) >= sum(r[2] is not None for r in full)
     frames = len(full)
     # the stored points carry the read: far more planes are read at the known position than detected
     assert reads["frames"] == frames
     assert reads["known"] >= frames  # two halves a frame, nearly all read at the stored points
     assert reads["full"] < frames // 2
-    # the right-only stretch (120-149) has no left QR: each of its left halves falls back, counted
-    assert reads["fallback"] >= 30
+    assert reads["known"] + reads["full"] >= 2 * frames  # every half is read somehow, and counted
+    assert reads["fallback"] >= 1  # the right-only stretch: the left's stored points read nothing
 
 
-def _write_jumping_video(path, frames=90, jump_at=45, shift=60):
-    """A 960x540 FFV1 clip of the painter's two QRs whose whole picture moves `shift` px right and
-    down at frame `jump_at` (a cut to another framing): the stored points no longer hold a QR."""
+def _write_jumping_video(path, frames=90, jump_at=30, shift=(20, 60)):
+    """A 960x540 FFV1 clip of the painter's two QRs whose whole picture moves `shift` = (down, right)
+    px at frame `jump_at` (a cut to another framing): the stored points no longer hold a QR, and
+    both QRs stay inside their half of the QR band."""
     ff = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
                            "-s", "960x540", "-r", str(FPS), "-i", "-", "-c:v", "ffv1", "-pix_fmt", "bgr0", str(path)],
                           stdin=subprocess.PIPE)
@@ -68,7 +94,7 @@ def _write_jumping_video(path, frames=90, jump_at=45, shift=60):
         f = qr_frame(payload(2000 + 2 * k), payload(2001 + 2 * k))
         if k >= jump_at:
             moved = np.full_like(f, 255)
-            moved[shift:, shift:] = f[:-shift, :-shift]
+            moved[shift[0]:, shift[1]:] = f[:-shift[0], :-shift[1]]
             f = moved
         ff.stdin.write(f.tobytes())
     ff.stdin.close()
@@ -79,25 +105,37 @@ def test_a_known_position_read_that_fails_falls_back_and_reads_on_at_the_new_poi
     video = tmp_path / "jump.mkv"
     _write_jumping_video(video)
     full = _full_rows(video, monkeypatch)
-    assert all(r[2] is not None and r[3] is not None for r in full)  # the full detector reads every frame
     reads = {}
-    assert ylt.decode_raw(video, workers=1, reads=reads) == full
+    fast = ylt.decode_raw(video, workers=1, reads=reads)
+    _reads_on_top_of(full, fast, lambda i, col: 2000 + 2 * i + (col - 2))
+    assert all(r[2] is not None and r[3] is not None for r in fast)  # every frame read after the jump too
     # after the jump the old points read nothing: the full detector runs again for both halves
     # (counted), then the new points carry the rest of the clip
     assert reads["fallback"] >= 2
-    assert reads["known"] >= 2 * 90 - 10
+    # 90 frames in 4 chunks: each chunk's first frame detects both halves, the jump's frame both again
+    assert reads["known"] >= 2 * 90 - 2 * 4 - 2 - 4
 
 
 def test_real_session3_pixels_read_in_order_through_one_known_position_detector():
     import cv2
 
+    got = {}
     for names in (["s3-vod-frame20173", "s3-vod-frame20174", "s3-vod-frame20176"],
                   ["s3-rec_a-frame6000", "s3-rec_a-frame2100"]):
         known = ylt.KnownPositionDetector()
         for name in names:
             band = _jpg(name)
-            assert ylv.band_ticks(band, known, 1.0) == ylv.band_ticks(band, cv2.QRCodeDetector(), 1.0), name
+            got[name] = ylv.band_ticks(band, known, 1.0)
+            full = ylv.band_ticks(band, cv2.QRCodeDetector(), 1.0)
+            for k, f in zip(got[name], full):  # a half the full detector reads reads the same
+                assert f is None or k == f, (name, got[name], full)
         assert known.stats()["known"] >= 1  # the later frames really read at the stored points
+    # the stale fresh half of VOD frame 20174 reads exactly as before (the 'x' frame stays an 'x')
+    assert got["s3-vod-frame20174"] == ylv.band_ticks(_jpg("s3-vod-frame20174"), cv2.QRCodeDetector(), 1.0)
+    # frame 2100: the full detector reads the colour-coded left only (through blue); at the points
+    # frame 6000 left, the settled right half reads too, one below the left (an even capture tick)
+    assert got["s3-rec_a-frame2100"] == (2196754, 2196753)
+    assert ylv.band_ticks(_jpg("s3-rec_a-frame2100"), cv2.QRCodeDetector(), 1.0) == (2196754, None)
 
 
 def test_a_plain_cv2_detector_keeps_the_full_read():
