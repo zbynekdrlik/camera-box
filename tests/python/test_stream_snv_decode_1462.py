@@ -261,6 +261,7 @@ def _run_push(tmp_path, rig, env=None, execute="1"):
 
 def test_the_marker_log_and_schedule_reach_a_linux_stream_box_in_both_modes(tmp_path):
     for execute in ("1", "0"):
+        (tmp_path / execute).mkdir()
         rig = _rig(tmp_path / execute)
         p = _run_push(tmp_path / execute, rig, execute=execute)
         assert p.returncode == 0, p.stdout + p.stderr
