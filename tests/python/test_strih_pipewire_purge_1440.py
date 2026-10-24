@@ -227,8 +227,8 @@ def test_applies_and_the_dropin_mode_follow_the_decision():
         assert "rc=%s" % rc in r.stdout and "mode=%s" % mode in r.stdout, (box, r.stdout)
 
 
-def _toml(tmp_path, text):
-    p = tmp_path / "hub.toml"
+def _toml(tmp_path, text, name="hub.toml"):
+    p = tmp_path / name
     p.write_text(text)
     return p
 
@@ -262,8 +262,8 @@ def test_no_program_vban_keeps_pipewire_without_reading_the_toml(tmp_path):
 @pytest.mark.parametrize("role,streams,toml", [("strih", "strih-obs", "absent"), ("strih", "strih-obs", "broken"),
                                                ("cutter", "strih-obs", "ok"), ("strih", "", "ok")])
 def test_an_unreadable_input_is_unknown_never_a_purge(tmp_path, role, streams, toml):
-    path = {"absent": tmp_path / "absent.toml", "broken": _toml(tmp_path, "[[participant\nname ="),
-            "ok": _toml(tmp_path, '[[participant]]\nname = "a"\nadapter = "alsa"\n')}[toml]
+    path = {"absent": tmp_path / "absent.toml", "broken": _toml(tmp_path, "[[participant\nname =", "broken.toml"),
+            "ok": _toml(tmp_path, '[[participant]]\nname = "a"\nadapter = "alsa"\n', "ok.toml")}[toml]
     out = _decide(tmp_path, role, streams, path)
     assert out.startswith("unknown|") and "rc=2" in out, out
 
