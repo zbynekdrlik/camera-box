@@ -495,7 +495,9 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   with VkResult 0 and exited. After ANY harness run check `pgrep -x vk-rig-harness` is empty (NOT `pgrep -f`, which matches the ssh `bash -c` that carries the name) — a hung
   harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP). The boxes carry no
   dev headers: stage dev1's `/usr/include/{vulkan,vk_video,X11,xcb,EGL,GL,KHR}` as one tarball into a
-  box scratch dir, plus `libobs/util` and the vk files, and link the runtime sonames directly
+  box scratch dir, plus `libobs/util`, the vk files and (issue 1424 hotplug) `obs-drm-output-retry.h` +
+  `obs-drm-output-logcap.h` (the harness's `blog()` becomes `drm_output_blog` through the internal
+  header's macro), and link the runtime sonames directly
   (`-l:libX11.so.6 -l:libX11-xcb.so.1 -l:libxcb.so.1 -l:libxcb-randr.so.0 -l:libEGL.so.1`). Stop OBS only
   for the run (`systemctl --user stop strih-obs.service`, an EXIT trap starts it again) and confirm
   `multiview bind LIVE` afterwards.
@@ -680,10 +682,11 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   `drm_output_vk_first_unsettled`, truth-tabled in `tests/drm_output_vk_two_displays_1424.rs`), then
   acquires. Rejected alternative (review): acquire EVERY display before any presents (no overlap by
   construction) -- it needs a two-phase open across the outputs layer and the vk core API; the settle
-  wait is causal (presents, not a sleep) and also covers a re-mode on the other display. Known limit
-  (review round 2): a REPLUG rebuild of the other display (`drm_output_vk_rebuild_or_give_up`) does not
-  check `dev->acquiring`, so an HDMI replug exactly while an output opens can still fail that open's
-  acquire with -13; opens happen only at OBS startup, so it is left named, not guarded. A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
+  wait is causal (presents, not a sleep) and also covers a re-mode on the other display. A REPLUG rebuild
+  of the other display (`drm_output_vk_rebuild_or_give_up`) defers while `dev->acquiring` is up and,
+  waiting between tries, is skipped by the settle wait (its `rebuilding` flag) -- the issue-1424 hotplug
+  slice closed the old review-round-2 limit, since opens now also happen at run time (the retry
+  supervisor, `display-hotplug.md`). A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
   resets its settle count BEFORE re-checking the flag (both seq-cst), so an open and a re-mode can never
   miss each other. Logs: `waited N ms for the other display to settle before acquiring '<c>'`, or the
   WARNING `'<other>' is still bringing its presentation up after N ms -- acquiring '<c>' anyway`.
@@ -691,9 +694,10 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   canvas mode in mHz, handed over like the OBS frame hook; the run fails unless that mode is on scanout,
   `MODE output=... wanted=yes`) proves both displays on one device, then closes display 0 while display
   1 keeps presenting (its count must advance at ITS OWN refresh, 29.97 Hz after the re-mode), then
-  closes display 1 too and re-opens BOTH on a fresh device. A re-open BESIDE a live display is refused
-  by NVIDIA (the released-display -13 above) -- a known limit OBS never hits: the outputs start once
-  at autostart and stop together at `obs_shutdown`. Live 13.10.2026 on strih-pp: both acquired (waited
+  closes display 1 too and re-opens BOTH on a fresh device. A re-acquire of a display RELEASED beside a
+  live one is refused by NVIDIA (the released-display -13 above); since the issue-1424 hotplug slice a
+  teardown beside a live display PARKS the acquisition instead and a re-open reuses it
+  (`display-hotplug.md`). Live 13.10.2026 on strih-pp: both acquired (waited
   75 ms), HDMI-0 2560x1440@59.951, HDMI-1 re-moded to 1920x1080@29.970 and presenting, rc=0.
 - **Audio + mode per output:** each leg reads its OWN output's view (`const volatile long *view`) and
   present clock, so the Multiview output's leg is muted while the Program output plays (verify grades
