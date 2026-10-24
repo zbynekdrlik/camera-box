@@ -100,12 +100,17 @@ AV_MIN_MARKER_FRACTION = 0.5  # of the clip's expected markers (one per 0.5 s)
 # markers 0.56 ms away in 61 s (run 40110304642, tests/fixtures/youtube_leg_1404/run40110304642-*).
 AV_READ_HEIGHT = 1080
 AV_MARKER_PERIOD_S = 0.5
-# A scaled read must hold every marker its window holds (but one at the clip's edge), else that
-# window's A/V is UNKNOWN: a scale that loses markers is never re-read at 4K silently.
+# A scaled read must pair every audio marker IT decoded (but one at the clip's edge), else that
+# window's A/V is UNKNOWN: a scale only loses VIDEO ticks (the audio is the same track), and it is never
+# re-read at 4K silently. A theoretical count (dur / 0.5) is the wrong bar: markers that straddle the
+# cut are lost at both ends (base-rec-B: 79 decoded, 78 paired, unscaled, 40 s). Without the audio
+# count (an older probe) the bar is the window's markers minus one at each edge.
 AV_SCALED_MARKER_SLACK = 1
 AV_SCALED_OFFSET_TOLERANCE_MS = 2.0  # 1080p vs 4K of the same window: measured <= 0.56 ms (fixtures)
 # The windows' A/V runs on a pool: AV_POOL_MAX at once, fewer when the host is loaded (load > cores),
-# never under AV_POOL_MIN (one at a time cannot fit ten windows in the tool's bound).
+# never under AV_POOL_MIN (one at a time cannot fit ten windows in the tool's bound) unless the caller
+# asks for fewer (--av-pool). Each slot runs an x264 cut + the probe (8 decode workers, no switch), so
+# the size-down by load matters on a shared host.
 AV_POOL_MAX, AV_POOL_MIN = 4, 2
 HEIGHT_TIMEOUT_S = 60
 PUBLISH_GAP_MAX_S = 0.5
@@ -161,10 +166,10 @@ def video_height(path):
 def av_pool_size(load, cores, cap=AV_POOL_MAX):
     """How many windows' A/V run at once: `cap`, scaled down by load / cores when the host is busier
     than its cores, never under AV_POOL_MIN; an unreadable load = `cap`."""
-    cap = max(AV_POOL_MIN, int(cap))
+    cap = max(1, int(cap))
     if load is None or not cores:
         return cap
-    return max(AV_POOL_MIN, min(cap, round(cap * cores / max(load, cores))))
+    return max(min(cap, AV_POOL_MIN), min(cap, round(cap * cores / max(load, cores))))
 
 
 def run_av_jobs(jobs, size):
@@ -203,15 +208,22 @@ def av_from_outputs(rec_j, vod_j, dur_s=AV_CLIP_S, scaled=(), heights=None):
     named in `scaled` ("recording" / "VOD") was cut down to AV_READ_HEIGHT: it must hold every marker
     of its window (AV_SCALED_MARKER_SLACK at the edge), else ValueError (that window's A/V UNKNOWN)."""
     floor = AV_MIN_MARKER_FRACTION * dur_s / AV_MARKER_PERIOD_S
-    holds = int(dur_s / AV_MARKER_PERIOD_S)
     for name, j in (("recording", rec_j), ("VOD", vod_j)):
         if j.get("av_offset_ms") is None:
             raise ValueError(f"{name}: no A/V offset measured")
         matched = j.get("matched") or 0
-        if name in scaled and matched < holds - AV_SCALED_MARKER_SLACK:
+        if name in scaled:
             src = f"{(heights or {}).get(name, '?')}p"
-            raise ValueError(f"the {AV_READ_HEIGHT}p read of the {src} {name} matched {matched} markers, the "
-                             f"window holds {holds} (a scaled read is never re-read at {src}: A/V not measured)")
+            audio = j.get("audio_markers_decoded")
+            if audio is not None and matched < audio - AV_SCALED_MARKER_SLACK:
+                raise ValueError(f"the {AV_READ_HEIGHT}p read of the {src} {name} matched {matched} of the {audio} "
+                                 f"audio markers it decoded (a scaled read is never re-read at {src}: A/V not "
+                                 "measured)")
+            holds = int(dur_s / AV_MARKER_PERIOD_S) - 2 * AV_SCALED_MARKER_SLACK
+            if audio is None and matched < holds:
+                raise ValueError(f"the {AV_READ_HEIGHT}p read of the {src} {name} matched {matched} markers, the "
+                                 f"window holds {holds} (a scaled read is never re-read at {src}: A/V not "
+                                 "measured)")
         if matched < floor:
             raise ValueError(f"{name}: only {j.get('matched')} markers matched (< {floor:.0f})")
     return {"rec_ms": round(rec_j["av_offset_ms"], 1), "vod_ms": round(vod_j["av_offset_ms"], 1),
@@ -221,17 +233,18 @@ def av_from_outputs(rec_j, vod_j, dur_s=AV_CLIP_S, scaled=(), heights=None):
 
 
 def av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s=AV_CLIP_S, workdir=None,
-              av_run=None):
+              av_run=None, tag=""):
     """Cut the same content from both files (tick-matched starts) and measure each clip's A/V. The
     clips are deleted afterwards; each clip's probe output stays next to it as *.avsync.out.
     `av_run`: a CG window's self-marked run (its clips are paired through their own tick + marker)."""
     if workdir is None:
         with tempfile.TemporaryDirectory(prefix="ylv-av-") as tmp:
             return av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s, tmp,
-                             av_run)
+                             av_run, tag)
     results, scaled, heights, reads = [], [], {}, {}
     for kind, name, src, start in (("rec", "recording", rec_file, rec_start_s), ("vod", "VOD", vod_file, vod_start_s)):
-        clip = os.path.join(workdir, f"av-{kind}-{start:.3f}.mp4")
+        # the window's name in the clip's: windows run at once in one dir (two parts can share an offset)
+        clip = os.path.join(workdir, f"av-{kind}-{tag + '-' if tag else ''}{start:.3f}.mp4")
         heights[name] = video_height(str(src))
         scale = AV_READ_HEIGHT if heights[name] > AV_READ_HEIGHT else None
         if scale:
@@ -521,7 +534,8 @@ def measure_window(ctx, name, a, b, av_jobs=None):
     else:
         def job(src=ctx["recs"][k][0], rec_s=rec_p - (starts[k] - t0), dur=min(AV_CLIP_S, b2 - a2),
                 markers=markers, av_run=av_run):
-            return av_window(src, ctx["vod_file"], rec_s, vod_p, markers, ctx["probe_bin"], dur, ctx["out"], av_run)
+            return av_window(src, ctx["vod_file"], rec_s, vod_p, markers, ctx["probe_bin"], dur, ctx["out"], av_run,
+                             name)
 
         if av_jobs is None:
             w["av"] = _guard(av_window, ctx["recs"][k][0], ctx["vod_file"], rec_p - (starts[k] - t0), vod_p,
@@ -603,7 +617,8 @@ def main(argv=None):
     ap.add_argument("--probe-bin", default=os.environ.get("RECORDING_VERDICT_BIN", "recording-verdict"))
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--av-pool", type=int, default=AV_POOL_MAX,
-                    help=f"at most this many windows' A/V at once (shrinks under load, never under {AV_POOL_MIN})")
+                    help=f"at most this many windows' A/V at once (shrinks under load to {AV_POOL_MIN}, "
+                         "never under it unless asked for fewer)")
     ap.add_argument("--runs", type=int, action="append", default=[], choices=CLIP_RUNS,
                     help="also read this reserved run as a tick (the measurement clip 911016 in the CG segments); "
                          "every window is then judged on its own run segment")

@@ -55,6 +55,7 @@ PULL_TIMEOUT_S = 900  # the bound the gate used for the recording's download to 
 KILL_AFTER_S = 30     # `timeout -k`: SIGKILL the group this long after its SIGTERM
 LOCAL_SLACK_S = 60    # the local bound = the remote bound + this (ssh + the kill-after)
 STALE_MIN = 1440      # a stage dir older than a day is a killed run's leftover
+TERM_GRACE_S = 5      # cleanup(): TERM -> this long for the tool's handler -> KILL
 TIMED_OUT = (124, 137)  # `timeout`'s exit after its SIGTERM / its SIGKILL
 FETCHED = re.compile(r"^(youtube-leg-verdict\.json|ticks-[A-Za-z0-9_.-]+\.tsv|[A-Za-z0-9_.-]+\.reads\.json)$")
 
@@ -208,10 +209,14 @@ class Host:
         return sorted(got)
 
     def cleanup(self):
-        """Kill every recorded remote step and delete the stage dir (the videos with it)."""
+        """Stop every recorded remote step and delete the stage dir (the videos with it). TERM first:
+        the tool's own handler then kills its children (yt-dlp, the clip cuts, the probe each run in
+        their own session, out of reach of a group signal), then KILL what is left of the group."""
         if self.root is None:
             self.check()
-        r = self.run('for p in "$R"/*.pid; do [ -f "$p" ] || continue; kill -KILL -- "-$(cat "$p")" 2>/dev/null '
-                     '|| true; done; rm -rf -- "$R"', CLEAN_TIMEOUT_S, "the stage cleanup")
+        r = self.run('pids=""; for p in "$R"/*.pid; do [ -f "$p" ] && pids="$pids $(cat "$p")"; done; '
+                     f'if [ -n "$pids" ]; then for g in $pids; do kill -TERM -- "-$g" 2>/dev/null || true; done; '
+                     f'sleep {TERM_GRACE_S}; for g in $pids; do kill -KILL -- "-$g" 2>/dev/null || true; done; fi; '
+                     'rm -rf -- "$R"', CLEAN_TIMEOUT_S, "the stage cleanup")
         if r.returncode != 0:
             raise HostError(f"the stage cleanup on {self.describe()} failed: {_tail(r.stderr)}")

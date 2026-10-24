@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 _ACTIVE = set()  # process-group ids of the children still running
+_STOPPING = False  # set by the signal handler: no new child starts (a pool thread may still try)
 
 
 def _kill_group(pgid):
@@ -28,9 +29,13 @@ def run_bounded(cmd, timeout, text=False, check=False, input=None):
     command, its exit code and the last 500 characters of its stderr. `input` is written to the
     child's stdin (then closed); without it the child inherits stdin as before."""
     cmd = [str(c) for c in cmd]
+    if _STOPPING:
+        raise RuntimeError(f"{os.path.basename(cmd[0])} not started: the tool is stopping")
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text, start_new_session=True,
                          stdin=subprocess.PIPE if input is not None else None)
     _ACTIVE.add(p.pid)
+    if _STOPPING:  # the handler ran between the check and the start: this child goes too
+        _kill_group(p.pid)
     try:
         out, err = p.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -46,6 +51,8 @@ def run_bounded(cmd, timeout, text=False, check=False, input=None):
 
 
 def _on_signal(signum, _frame):
+    global _STOPPING
+    _STOPPING = True
     for pgid in list(_ACTIVE):
         _kill_group(pgid)
     print(f"youtube_leg: stopped by signal {signum}, child process groups killed", file=sys.stderr)
