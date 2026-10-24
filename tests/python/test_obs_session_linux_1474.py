@@ -187,6 +187,7 @@ def test_obs_running_outside_its_unit_pages_once_confirmed_with_the_linux_recove
     assert "**stream-snv**" in body and "systemctl --user is-active -> inactive" in body, body
     assert "OBS answers on :4455 but is NOT its supervised strih-obs.service" in body, body
     assert "OBS is NOT running" not in body, body
+    assert "ssh newlevel@10.77.9.204 'pgrep -a obs'" in body, body
     assert "ssh newlevel@10.77.9.204 'systemctl --user restart strih-obs.service'" in body, body
     assert "launch-obs-genlock" not in body and "win-*" not in body, body
 
@@ -204,6 +205,18 @@ def test_a_dead_websocket_is_left_to_obs_liveness_never_a_second_page(tmp_path):
         assert "strih-snv: obs-websocket on :4455 did not answer -- obs-liveness owns that page" in r.stderr, r.stderr
         assert "strih-snv: confirm=" not in r.stderr, r.stderr
         assert "stream-snv: confirm=0 -> 0" in r.stderr, r.stderr
+    assert _notifies(tmp_path) == []
+
+
+def test_a_dead_websocket_pass_breaks_the_consecutive_confirm(tmp_path):
+    # "Confirmed over N consecutive passes": a dead-obs-websocket pass between two stray-OBS passes
+    # is not one of them, so the confirm restarts and nothing pages on the second stray pass.
+    for extra in ({"FAKE_SVC": "10.77.9.204=inactive"},
+                  {"FAKE_SVC": "10.77.9.204=inactive", "FAKE_WS_DOWN": "10.77.9.204"},
+                  {"FAKE_SVC": "10.77.9.204=inactive"}):
+        r = _run(tmp_path, **extra)
+        assert r.returncode == 0, r.stderr
+    assert "stream-snv: confirm=0 -> 1" in r.stderr, r.stderr
     assert _notifies(tmp_path) == []
 
 
@@ -233,7 +246,8 @@ def test_the_windows_box_keeps_its_byte_identical_alert(tmp_path):
 def test_the_unit_timeout_covers_a_pass_with_both_linux_boxes_hung():
     # Each Linux box costs up to the ssh bound plus the obs-websocket bound; a systemd kill mid-pass
     # would skip resolume and lose the later state writes. Sized from the script's own defaults, plus
-    # 60 s for the Windows probe of resolume (ConnectTimeout 10 + the PowerShell probe).
+    # 60 s for the Windows probe of resolume -- a SIZING, not a bound: win_ssh_run has only
+    # ConnectTimeout=10 and no total limit (older than issue 1474).
     import re
     text = WATCHDOG.read_text()
     ssh = int(re.search(r'OBS_SESSION_LINUX_SSH_TIMEOUT:-(\d+)', text).group(1))
