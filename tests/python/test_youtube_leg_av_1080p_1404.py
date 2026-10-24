@@ -180,6 +180,27 @@ def test_each_windows_clip_names_carry_the_window(tmp_path, monkeypatch):
     assert cuts.clips == ["av-rec-w03-CAM3-10.000.mp4", "av-vod-w03-CAM3-20.000.mp4"]
 
 
+def test_a_window_name_is_made_safe_for_a_file_name(tmp_path, monkeypatch):
+    cuts = _fake_reads(monkeypatch, {"rec.mp4": 1080, "vod.mp4": 1080})
+    ylv.av_window(tmp_path / "rec.mp4", tmp_path / "vod.mp4", 10.0, 20.0, tmp_path / "m.csv", "probe", 25.0,
+                  str(tmp_path), tag="cg/../w 1")
+    assert cuts.clips == ["av-rec-cg_.._w_1-10.000.mp4", "av-vod-cg_.._w_1-20.000.mp4"]
+
+
+def test_only_the_recording_read_carries_the_strict_scaled_guard(tmp_path, monkeypatch):
+    """A VOD is cut at 1080 too when yt-dlp's last fallback returns more lines, but an unscaled VOD
+    read already loses markers (s2-vod-A paired 79 of 81, base-vod-R 69 of 79): the VOD keeps the old
+    floor (half the window's markers); the ROZHODNUTE guard is on the recording read."""
+    for name in ("s2-vod-A", "base-vod-R"):
+        j = ylv.parse_avsync_output((FIX / f"{name}.avsync.out").read_text())
+        assert j["matched"] < j["audio_markers_decoded"] - 1
+    cuts = _fake_reads(monkeypatch, {"rec.mp4": 2160, "vod.mp4": 1440}, matched={"vod": 40})
+    av = ylv.av_window(tmp_path / "rec.mp4", tmp_path / "vod.mp4", 10.0, 20.0, tmp_path / "m.csv", "probe", 25.0,
+                       str(tmp_path))
+    assert cuts == [("rec.mp4", 1080), ("vod.mp4", 1080)]
+    assert av["markers_vod"] == 40 and av["vod_read"] == "1080p of 1440p"
+
+
 def test_an_explicit_pool_of_one_is_honoured():
     assert ylv.av_pool_size(0.0, 8, 1) == 1 and ylv.av_pool_size(40.0, 8, 1) == 1
     assert ylv.av_pool_size(40.0, 8, 3) == 2
