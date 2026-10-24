@@ -62,7 +62,8 @@ void drm_output_vk_wait_others_settled(struct drm_output_vk_disp *d)
 		unsigned long long need[DRM_OUTPUT_VK_MAX_DISPLAYS];
 		for (int i = 0; i < DRM_OUTPUT_VK_MAX_DISPLAYS; i++) {
 			struct drm_output_vk_disp *o = &g_drm_vk_disp[i];
-			presenting[i] = o->in_use && o->open && os_atomic_load_bool(&o->want_frames);
+			presenting[i] = o->in_use && o->open && os_atomic_load_bool(&o->want_frames) &&
+					!os_atomic_load_bool(&o->rebuilding);
 			since[i] = (unsigned long long)os_atomic_load_long(&o->presents_since_surface);
 			need[i] = drm_output_vk_settle_need(os_atomic_load_long(&o->settle_images));
 		}

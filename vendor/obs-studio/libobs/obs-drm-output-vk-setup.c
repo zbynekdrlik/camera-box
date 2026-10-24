@@ -253,7 +253,6 @@ static bool drm_output_vk_unpark(struct drm_output_vk_disp *d)
 		d->dev->parked[i].display = VK_NULL_HANDLE;
 		d->dev->parked[i].output_name[0] = '\0';
 		d->acquired = true;
-		drm_output_vk_mark_disruption(d->dev);
 		blog(LOG_INFO,
 		     "drm-output: vk-direct display re-used output='%s' (kept acquired since its last close -- no "
 		     "new acquire)",
@@ -297,11 +296,10 @@ static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long ou
 		return false;
 	}
 	d->dev->pd = pd;
-	if (drm_output_vk_unpark(d))
-		return true;
+	const bool reused = drm_output_vk_unpark(d);
 	VkPhysicalDeviceProperties pr;
 	d->dev->vk.vkGetPhysicalDeviceProperties(pd, &pr);
-	VkResult r = d->dev->vk.vkAcquireXlibDisplayEXT(pd, d->dev->dpy, d->display);
+	VkResult r = reused ? VK_SUCCESS : d->dev->vk.vkAcquireXlibDisplayEXT(pd, d->dev->dpy, d->display);
 	if (r != VK_SUCCESS) {
 		blog(LOG_WARNING,
 		     "drm-output: vk-direct: vkAcquireXlibDisplayEXT('%s') FAILED VkResult %d on %s (-13 = NVIDIA "
@@ -312,8 +310,9 @@ static bool drm_output_vk_acquire(struct drm_output_vk_disp *d, unsigned long ou
 	}
 	d->acquired = true;
 	drm_output_vk_mark_disruption(d->dev);
-	blog(LOG_INFO, "drm-output: vk-direct display acquired output='%s' gpu='%s' (off the X desktop)",
-	     d->output_name, pr.deviceName);
+	if (!reused)
+		blog(LOG_INFO, "drm-output: vk-direct display acquired output='%s' gpu='%s' (off the X desktop)",
+		     d->output_name, pr.deviceName);
 	return true;
 }
 

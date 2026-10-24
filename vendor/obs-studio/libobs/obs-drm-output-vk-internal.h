@@ -219,6 +219,11 @@ struct drm_output_vk_disp {
 	bool open;
 	volatile bool running;     /* present-thread run flag (os_atomic) */
 	volatile bool want_frames; /* the frame hook's fast gate (os_atomic) */
+	/* issue 1424 (hotplug): the present thread waits in its rebuild loop (a monitor off or unplugged):
+	 * it presents nothing, so an acquire never waits for it to settle (os_atomic, seq-cst with
+	 * dev->acquiring: the rebuild clears this, then reads acquiring; an open sets acquiring, then reads
+	 * this). */
+	volatile bool rebuilding;
 	bool thread_started;
 	pthread_t thread;
 

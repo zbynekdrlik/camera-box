@@ -321,7 +321,17 @@ static bool drm_output_vk_others_open(const struct drm_output_vk_disp *d)
  * once. The waits are sliced so a halt never waits a whole 5 s step. */
 static bool drm_output_vk_rebuild_or_give_up(struct drm_output_vk_disp *d, VkResult why, unsigned *rebuilds)
 {
+	os_atomic_set_bool(&d->rebuilding, true);
 	while (os_atomic_load_bool(&d->running) && !d->queue_wedged) {
+		/* a new presentation is a mode set: never inside another display's acquire (NVIDIA -13 there).
+		 * Clear the flag, THEN read acquiring (seq-cst both; the open does the mirror pair). */
+		os_atomic_set_bool(&d->rebuilding, false);
+		if (os_atomic_load_bool(&d->dev->acquiring)) {
+			os_atomic_set_bool(&d->rebuilding, true);
+			const struct timespec defer = {0, 5000000L};
+			nanosleep(&defer, NULL);
+			continue;
+		}
 		(*rebuilds)++;
 		const int log_kind = drm_output_rebuild_log_kind(*rebuilds);
 		if (log_kind == DRM_OUTPUT_REBUILD_LOG_TRY)
@@ -341,6 +351,7 @@ static bool drm_output_vk_rebuild_or_give_up(struct drm_output_vk_disp *d, VkRes
 				     d->output_name, *rebuilds);
 			return true;
 		}
+		os_atomic_set_bool(&d->rebuilding, true);
 		uint64_t wait_ns = 0;
 		if (!drm_output_rebuild_next(*rebuilds, drm_output_vk_others_open(d), &wait_ns))
 			break;
@@ -350,6 +361,7 @@ static bool drm_output_vk_rebuild_or_give_up(struct drm_output_vk_disp *d, VkRes
 			nanosleep(&slice, NULL);
 		}
 	}
+	os_atomic_set_bool(&d->rebuilding, false);
 	blog(LOG_WARNING,
 	     "drm-output: vk-direct: presentation could not be rebuilt on '%s' -- giving up (the retry supervisor "
 	     "releases the display and opens it again)",
@@ -577,6 +589,7 @@ struct drm_output_vk_disp *drm_output_vk_open(int slot, const char *output_name,
 	os_atomic_set_long(&d->want_h, 0);
 	os_atomic_set_long(&d->want_mhz, 0);
 	os_atomic_set_bool(&d->remode, false);
+	os_atomic_set_bool(&d->rebuilding, false);
 
 	if (!drm_output_vk_setup(d)) {
 		drm_output_vk_destroy_display(d);
