@@ -4,6 +4,7 @@ paths:
   - "scripts/obs_box_kbd_layout.py"
   - "scripts/obs_box_recordings.py"
   - "scripts/obs_box_power.py"
+  - "scripts/stream_operator_volume.py"
   - "systemd/obs-box-panel.service"
   - "tests/python/test_obs_box_panel_1420.py"
   - "tests/python/test_obs_box_kbd_layout_1441.py"
@@ -83,6 +84,17 @@ Everything lives in `scripts/lib/obs-box-panel.sh`:
   started (RustDesk, Discord, pcmanfm, now Chrome). The fix is a launch through `systemd-run --user
   --scope` for the binary launchers, which needs a live check on a box first (tracked as issue 1465
   item 7, comment 6363702188).
+
+## The headphone volume item (issue 1465 item 3 revision, stream role only)
+
+Owner 24.10.2026 (ROZHODNUTE 6383739315): the stream operator needs an understandable GLOBAL headphone volume.
+`_obs_box_panel_tint2rc_headphones` (rendered only when `strih_box_role` = stream, BEFORE the keyboard item, so
+`panel_items` is `TSEEC` / `LTSEEC` there and `TSEC` / `LTSEC` on the strih role) runs
+`/usr/bin/python3 $OBS_BOX_PANEL_HEADPHONES_HELPER watch` (`/usr/local/bin/obs-box-headphones` =
+`scripts/stream_operator_volume.py`): `Slúchadlá NN %` / `Slúchadlá stlmené`, wheel = +-5 %, left click = mute.
+`obs_box_panel_headphones_keybinds_xml` declares the XF86Audio keys running the same helper. Both the helper and
+the keys are INSTALLED by setup step 12 and graded by verify item 9b's `(operator-audio-control)` row
+(`stream-operator-audio.md`); step 16h only renders the item.
 
 ## The keyboard item (issue 1441)
 

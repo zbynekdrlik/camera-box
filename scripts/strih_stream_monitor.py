@@ -26,16 +26,20 @@ is the ALSA-direct player of issues 1436 / 1456, kept as the rollback of this tr
 WHAT, one supervised --user unit (strih-stream-monitor.service, Restart=always):
   * resolves the headphone card in /proc/asound, never by a card index (both stream-pp cards are called
     `HD-Audio Generic` and the id `Generic_1` is enumeration order), re-read before every VLC start and
-    addressed as plughw:CARD=<id>,DEV=<n>. With no --pcm-match (issue 1465): the playback PCM of the ONE
-    USB audio interface (a card with a `usbid` file: stream-snv's Scarlett Solo 4th Gen, card `Gen`, PCM
-    `USB Audio`); no USB interface = the jack, the PCM NAME ending in ` Analog` (stream-pp's `ALC257
-    Analog`); two or more USB playback PCMs = named once in the log, the jack. An explicit --pcm-match
-    is a regex on the PCM name and nothing else;
+    addressed as plughw:CARD=<id>,DEV=<n>. With no --pcm-match: the notebook's headphone jack, the PCM
+    NAME ending in ` Analog` on a card that is NOT a USB audio interface (stream-snv's `ALC256 Analog` on
+    card `PCH`, stream-pp's `ALC257 Analog`). A USB interface (a card with a `usbid` file, e.g. stream-snv's
+    Scarlett Solo 4th Gen, card `Gen`) is never chosen and is named once in the log (owner 24.10.2026,
+    issue 1465 ROZHODNUTE 6383739315: "isli sluchatka priamo z jack notebooku ako to je aj v stream-pp";
+    it reverses the 23.10.2026 USB-first rule). An explicit --pcm-match is a regex on the PCM name and
+    nothing else, the only way to name a USB interface;
   * when another process holds that PCM (PipeWire, a second player) VLC is not started; it says who;
   * before each VLC start on the jack: the card's Master / Headphone / PCM to 0 dB unmuted (a unity
     baseline, the level is VLC's slider) and Speaker muted (PipeWire's ACP leaves the laptop speaker route
     on, Auto-Mute disabled: the stream must sound in the headphones only). A control the card does not have
-    is named once. A USB headphone box keeps its own mixer (issue 1465): snd-usb-audio names many
+    is named once. On the stream role these are exactly the jack's DECLARED mixer that setup-strih step 12
+    writes and stores (scripts/stream_operator_audio.py MIXER: + Auto-Mute Enabled), so this is a re-assert,
+    never a second opinion. A USB headphone box named by --pcm-match keeps its own mixer: snd-usb-audio names many
     headsets' main output `Speaker`, so that mute would silence the box itself, and a 0 dB write on its own
     volume control is full scale in the headphones;
   * starts VLC on the restreamer's RTMP (default rtmp://127.0.0.1:1234/live/<short hostname>, the key
@@ -168,22 +172,21 @@ def _pcm_names(pcms):
 
 
 def resolve_headphone(pcms, pcm_match=None):
-    """The headphone PCM (issue 1465): (pcm, None, note) or (None, the reason, note). NOTE = a line to log
-    once (two or more USB playback PCMs), else None.
+    """The headphone PCM: (pcm, None, note) or (None, the reason, note). NOTE = a line to log once (a USB
+    audio interface is plugged in and left unused), else None.
       * PCM_MATCH given = the operator's regex on the PCM name, exactly resolve_pcm;
-      * else the ONE USB audio interface's playback PCM when exactly one exists;
-      * else the headphone jack (DEFAULT_PCM_MATCH)."""
+      * else the notebook's headphone jack (DEFAULT_PCM_MATCH) among the playback PCMs of cards that are
+        NOT USB audio interfaces -- never a USB interface, whatever its PCM is called (issue 1465,
+        ROZHODNUTE 6383739315)."""
     if pcm_match is not None:
         pcm, why = resolve_pcm(pcms, pcm_match)
         return pcm, why, None
     usb = [p for p in pcms if p.get("usb")]
-    if len(usb) == 1:
-        return usb[0], None, None
     note = None
     if usb:
-        note = ("%d USB audio playback PCMs (%s) -- ambiguous, playing to the headphone jack instead "
-                "(name one with --pcm-match)" % (len(usb), _pcm_names(usb)))
-    pcm, why = resolve_pcm(pcms, DEFAULT_PCM_MATCH)
+        note = ("USB audio interface playback PCM(s) %s plugged in -- never used for the headphones: they are "
+                "the notebook jack" % _pcm_names(usb))
+    pcm, why = resolve_pcm([p for p in pcms if not p.get("usb")], DEFAULT_PCM_MATCH)
     return pcm, why, note
 
 
@@ -191,8 +194,7 @@ def headphone_rule(pcm_match=None):
     """How the headphone PCM is picked, for the `watching ...` line."""
     if pcm_match is not None:
         return "the playback PCM matching %r (--pcm-match)" % pcm_match
-    return ("the ONE USB audio interface's playback PCM, else the headphone jack matching %r"
-            % DEFAULT_PCM_MATCH)
+    return ("the notebook's headphone jack matching %r, never a USB audio interface" % DEFAULT_PCM_MATCH)
 
 
 def alsa_device(pcm):
@@ -710,8 +712,8 @@ def main(argv=None):
     ap.add_argument("--url", default=None, help="the RTMP stream to play (default %s/<short hostname>)" % DEFAULT_SERVER)
     ap.add_argument("--state-file", default=None)
     ap.add_argument("--pcm-match", default=None,
-                    help="regex on the playback PCM name (default: the ONE USB audio interface, else the "
-                         "headphone jack %r)" % DEFAULT_PCM_MATCH)
+                    help="regex on the playback PCM name (default: the notebook's headphone jack %r, never "
+                         "a USB audio interface)" % DEFAULT_PCM_MATCH)
     ap.add_argument("--obs-process-name", default=DEFAULT_OBS_PROCESS,
                     help="the /proc comm of the publishing OBS (pl_play only while it publishes)")
     ap.add_argument("--output", choices=OUTPUTS, default="alsa",
