@@ -193,7 +193,20 @@ struct drm_output_vk_device {
 	 * presentation (os_gettime_ns, os_atomic). A vblank missed within DRM_OUTPUT_VK_PICK_QUIET_NS of it
 	 * is that bring-up, never the deadline pick's fault, so it never grows a pick margin. */
 	volatile long disrupt_ns;
+	/* issue 1424 (hotplug): displays a teardown kept ACQUIRED because another display was open (NVIDIA
+	 * refuses to re-acquire a display this process released while this instance lives). A re-open of the
+	 * same output reuses its entry; the device releases every entry before it destroys the instance. */
+	struct {
+		VkDisplayKHR display;
+		char output_name[64];
+	} parked[DRM_OUTPUT_VK_MAX_DISPLAYS];
 };
+
+/* issue 1424 (hotplug): what a display's teardown does with its acquisition (drm_output_vk_park_choice). */
+#define DRM_OUTPUT_VK_CHOICE_NONE 0    /* nothing acquired */
+#define DRM_OUTPUT_VK_CHOICE_RELEASE 1 /* the last display (or no park slot): vkReleaseDisplayEXT */
+#define DRM_OUTPUT_VK_CHOICE_PARK 2    /* another display is open: keep it acquired on the device */
+#define DRM_OUTPUT_VK_CHOICE_LEAK 3    /* a wedged teardown: leave it as it is */
 
 /* One display: its X output, VkDisplayKHR, surface, swapchain, shared images, mailbox roles and present
  * thread. The slot array is static; a slot is taken at open and given back at close. */
