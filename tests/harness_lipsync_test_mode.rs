@@ -847,7 +847,7 @@ fn start_verifies_speech_arrival_after_playback_before_active_1192() {
 }
 
 /// The arrival probe must record on the STREAM OBS box (obs_phase2.py record start/stop), pull the
-/// recording (win_ssh_download), and correlate it against the LOCAL asset via
+/// recording (stream_box_download, issue 1474), and correlate it against the LOCAL asset via
 /// lipsync_envelope_corr.py with --probe/--asset and the mbc audio track (--audio-map 0:a:0).
 #[test]
 fn start_arrival_probes_stream_and_correlates_via_helper_1192() {
@@ -860,9 +860,11 @@ fn start_arrival_probes_stream_and_correlates_via_helper_1192() {
         s.contains("obs_phase2.py\" record --host \"$STREAM\" --action stop"),
         "1192: the arrival probe must StopRecord on stream OBS"
     );
+    // issue 1474: pulled through the ONE stream-box transport (plain scp on the Linux stream-snv,
+    // win_ssh_download on a Windows box, by the box's obs-fleet class).
     assert!(
-        s.contains("win_ssh_download"),
-        "1192: the arrival probe recording must be PULLED to dev1 via win_ssh_download"
+        s.contains("stream_box_download \"$3\" \"$4\" \"$5\" \"$6\" \"$6\" \"$7\""),
+        "1192/1474: the arrival probe recording must be PULLED to dev1 via stream_box_download"
     );
     assert!(
         s.contains("lipsync_envelope_corr.py") && s.contains("--probe") && s.contains("--asset"),
