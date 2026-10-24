@@ -14,7 +14,7 @@ sets (`$HOME/.local/bin` first), where two stubs stand in for the host's tools:
     `{"sleep": s}` answer sleeps s seconds first (a decode that runs over its bound);
   - `sshpass` = the pull from the stream box: it copies `fakes.stream/<path>` to the destination,
     logs whether SSHPASS arrived (never the value) and whether the password leaked into its argv;
-    a `pull.fail` file in the fakes dir makes ONE pull fail.
+    `fail_one_pull(rc)` makes ONE pull fail with that exit code (scp's 255 = stream box unreachable).
 `fakes.host_down()` makes ssh exit 255 (the host unreachable). Real timeout/tar/find/nice run.
 """
 import json
@@ -116,9 +116,10 @@ with open(os.path.join(d, "calls.log"), "a") as f:
             + "\n")
 fail = os.path.join(d, "pull.fail")
 if os.path.exists(fail):
+    rc = int(open(fail).read().strip() or 1)
     os.remove(fail)
     print("scp: Connection closed", file=sys.stderr)
-    sys.exit(1)
+    sys.exit(rc)  # scp exits 255 when the stream box cannot be reached
 shutil.copyfile(os.path.join(d, "stream") + src.split(":", 1)[1], dst)
 '''
 
@@ -160,8 +161,8 @@ class Fakes:
     def host_down(self):
         (self.d / "ssh.down").write_text("")
 
-    def fail_one_pull(self):
-        (self.d / "pull.fail").write_text("")
+    def fail_one_pull(self, rc=1):
+        (self.d / "pull.fail").write_text(str(rc))
 
     def host_stage_dirs(self):
         base = self.home / "youtube-leg-1404"

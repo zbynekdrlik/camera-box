@@ -257,3 +257,65 @@ def test_the_stage_key_is_the_run_dir_name_sanitized():
     assert ylh.stage_key("/tmp/recording-e2e-1843801084/youtube-leg") == "recording-e2e-1843801084"
     assert ylh.stage_key("/tmp/a b;$(x)/youtube-leg") == "a_b___x_"
     assert ylh.stage_key("/tmp/../youtube-leg") == "stage"
+
+
+# ------------------------------------------------------------------ review round 1
+
+
+def test_a_stream_box_dev2_cannot_reach_is_never_read_as_dev2_unreachable(fk, tmp_path):
+    d = _stopped(fk, tmp_path)
+    fk.stream_file(STREAM_PATH)
+    fk.fail_one_pull(rc=255)  # scp's own exit when the stream box does not answer
+    assert _run(fk, d, "prefetch", "--stream-path", STREAM_PATH).returncode == 0
+    pre = _state(d)["prefetch"]
+    assert not pre.get("unreachable") and not pre.get("pulled")
+    assert "measurement host newlevel@dev2 is unreachable" not in pre["reason"]
+    assert "stream recording pull" in pre["reason"] and "exit 255" in pre["reason"]
+
+
+def test_a_reused_prefetch_pid_is_never_waited_for_or_signalled(fk, tmp_path):
+    d = _stopped(fk, tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
+    stranger = subprocess.Popen(["sleep", "60"])  # an unrelated process that got the old pid
+    try:
+        (Path(d) / "prefetch.pid").write_text(str(stranger.pid))
+        fk.script("verdict", "verdict", 0, PASS_RESULT)
+        t0 = time.monotonic()
+        assert _run(fk, d, *args).returncode == 0
+        assert time.monotonic() - t0 < 30
+        assert stranger.poll() is None  # never signalled
+        b = json.loads(verdict.read_text())["youtube_leg"]
+        assert not any("waiting for the early decode" in e or "was still running" in e for e in b["events"])
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def test_a_finished_prefetch_removes_its_pid_file(fk, tmp_path):
+    d = _stopped(fk, tmp_path)
+    fk.stream_file(STREAM_PATH)
+    p = _spawn(fk, d, "prefetch", "--stream-path", STREAM_PATH)
+    assert p.wait(timeout=60) == 0
+    assert not (Path(d) / "prefetch.pid").exists()
+
+
+def test_a_windows_class_stream_box_is_refused_by_name(fk, tmp_path):
+    d = _stopped(fk, tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
+    assert _run(fk, d, "--stream-platform", "windows", "prefetch", "--stream-path", STREAM_PATH).returncode == 0
+    assert "Windows-class" in _state(d)["prefetch"]["reason"]
+    assert "sshpass" not in fk.names()
+    assert _run(fk, d, "--stream-platform", "windows", *args).returncode == 1
+    b = json.loads(verdict.read_text())["youtube_leg"]
+    assert b["verdict"] == "UNKNOWN" and "Windows-class" in b["reasons"][0]
+    assert "verdict" not in fk.names()
+
+
+def test_a_tool_killed_before_its_bound_is_named_killed_not_ran_over(fk, tmp_path):
+    d = _stopped(fk, tmp_path)
+    args, verdict = _measure_inputs(tmp_path, fk)
+    fk.script("verdict", "verdict", 137, None)  # SIGKILLed (the OOM killer), well inside the bound
+    assert _run(fk, d, *args).returncode == 1
+    b = json.loads(verdict.read_text())["youtube_leg"]
+    assert b["verdict"] == "UNKNOWN"
+    assert "killed (exit 137)" in b["reasons"][0] and "ran over" not in b["reasons"][0]

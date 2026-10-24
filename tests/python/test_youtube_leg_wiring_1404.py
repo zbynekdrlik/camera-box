@@ -195,6 +195,8 @@ def test_the_gate_measures_on_the_host_and_never_pulls_the_recording_to_dev1():
     fn = fn[:fn.index("\n}\n")]
     assert "stream_box_download" not in fn and "win-ssh-exec.sh" not in fn
     assert 'measure --verdict-json "$report" --stream-path "$host_path"' in fn
+    # the measurement host pulls over scp: the stream box's class goes along (a Windows box is refused)
+    assert '--stream-platform "$(_youtube_leg_stream_platform "$stream")"' in fn
 
 
 def test_the_stop_starts_the_prefetch_in_the_background(tmp_path):
@@ -203,6 +205,7 @@ def test_the_stop_starts_the_prefetch_in_the_background(tmp_path):
     fn = fn[:fn.index("\n}\n")]
     pre = fn.index('prefetch --stream-path "$host_path") >>"$d/prefetch.log" 2>&1 &')
     assert fn.index('stop --record-stopped') < pre < fn.index('echo "$!" >"$d/prefetch.pid"')
+    assert '--stream-platform "$(_youtube_leg_stream_platform "$stream")" prefetch' in fn
 
 
 def test_cleanup_purges_the_measurement_host_in_the_background(tmp_path):

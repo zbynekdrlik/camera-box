@@ -63,6 +63,7 @@ def _reads_on_top_of(full, fast, truth):
     for f, k in zip(ylt.resolve_ticks(full), ylt.resolve_ticks(fast)):
         if f[2] is not None:
             assert k[2] == f[2], (f, k)
+        assert k[3] != "x" or f[3] == "x", (f, k)  # an added half never makes a contradiction frame
     return added
 
 
@@ -81,6 +82,9 @@ def test_the_known_position_decode_reads_what_the_full_detector_reads(rec_video,
     assert reads["full"] < frames // 2
     assert reads["known"] + reads["full"] >= 2 * frames  # every half is read somehow, and counted
     assert reads["fallback"] >= 1  # the right-only stretch: the left's stored points read nothing
+    # a fallback is a half whose stored points read nothing AND that the full detector then read:
+    # never more than the full detections; a point read that missed is counted on its own
+    assert reads["fallback"] <= reads["full"] and reads["misses"] >= reads["fallback"]
 
 
 def _write_jumping_video(path, frames=90, jump_at=30, shift=(20, 60)):
@@ -155,3 +159,27 @@ def test_the_decode_reports_its_reads_on_stderr(rec_video, capsys):
     ylt.decode_raw(rec_video, workers=1)
     err = capsys.readouterr().err
     assert "known-position reads" in err and "full detections" in err and "fallback" in err
+    assert "point reads that missed" in err
+
+
+def test_the_early_decode_primes_the_cache_the_verdict_run_reads(rec_video, tmp_path, monkeypatch):
+    """--prime-ticks (the E2E's early decode) writes the map the verdict run's cached_ticks loads: the
+    same file name, the same key (the recording's absolute path), and its read counters."""
+    out = tmp_path / "verdict"
+    assert ylv.main(["--prime-ticks", str(rec_video), "--out", str(out), "--workers", "1"]) == ylv.EXIT_PASS
+    assert (out / "ticks-rec-1.tsv").exists() and (out / "ticks-rec-1.tsv.reads.json").exists()
+
+    def no_decode(*a, **kw):
+        raise AssertionError("the verdict run decoded the recording again")
+
+    monkeypatch.setattr(ylv, "decode_ticks", no_decode)
+    rows = ylv.cached_ticks(str(rec_video), str(out / "ticks-rec-1.tsv"), 1)
+    assert len(rows) == FPS * 8 and rows[0][2] == 1000
+
+
+def test_a_failed_early_decode_exits_unknown_and_leaves_no_map(tmp_path):
+    bad = tmp_path / "not-a-video.mp4"
+    bad.write_bytes(b"no video here")
+    out = tmp_path / "verdict"
+    assert ylv.main(["--prime-ticks", str(bad), "--out", str(out), "--workers", "1"]) == ylv.EXIT_UNKNOWN
+    assert not (out / "ticks-rec-1.tsv").exists()
