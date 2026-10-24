@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 from test_strih_stream_monitor_1436 import LEAKY, PROVISION, REPO  # noqa: E402
+from strih_pp_hub_fed_1439 import hub_fed_boxes  # noqa: E402
 
 SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "strih-pipewire-purge.sh"
@@ -580,19 +581,7 @@ def test_a_purged_strih_pp_passes_every_row_on_its_mg_xu(tmp_path):
 
 
 def _hub_fed_strih_pp(tmp_path):
-    d = tmp_path / "hubfed"
-    d.mkdir()
-    for f in (REPO / "scripts" / "strih-boxes").glob("*.env"):
-        t = f.read_text()
-        if f.stem == "strih-pp":
-            for old, new in (("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=none\n"),
-                             ("STRIH_PROGRAM_VBAN_PORT=6981\n", "STRIH_PROGRAM_VBAN_PORT=none\n"),
-                             ("STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=none\n"),
-                             ("STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n", "STRIH_PROGRAM_AUDIO_INPUT=none\n")):
-                assert t.count(old) == 1, old
-                t = t.replace(old, new)
-        (d / f.name).write_text(t)
-    return d
+    return hub_fed_boxes(tmp_path / "hubfed")
 
 
 def test_a_hub_fed_strih_gets_one_note_naming_why_plus_the_browser_row(tmp_path):

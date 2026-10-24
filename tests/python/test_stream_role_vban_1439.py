@@ -21,9 +21,13 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strih_pp_hub_fed_1439 import hub_fed_boxes  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
@@ -82,24 +86,9 @@ def _boxes_with(tmp_path, box, old, new):
     return d
 
 
-# issue 1439 on strih-pp (24.10.2026): no deployed strih is hub-fed any more, so the hub-fed shape (all four
-# program facts `none`, which the loader still takes) is strih-pp with its four program facts set to none.
-HUB_FED_PAIRS = [("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=none\n"),
-                 ("STRIH_PROGRAM_VBAN_PORT=6981\n", "STRIH_PROGRAM_VBAN_PORT=none\n"),
-                 ("STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=none\n"),
-                 ("STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n", "STRIH_PROGRAM_AUDIO_INPUT=none\n")]
-
 
 def _hub_fed_boxes(tmp_path):
-    d = tmp_path / "hubfed"
-    shutil.copytree(BOXES, d)
-    f = d / "strih-pp.env"
-    t = f.read_text()
-    for old, new in HUB_FED_PAIRS:
-        assert t.count(old) == 1, old
-        t = t.replace(old, new)
-    f.write_text(t)
-    return d
+    return hub_fed_boxes(tmp_path / "hubfed")
 
 
 # --- the facts ---------------------------------------------------------------------------------------------
@@ -496,15 +485,17 @@ def test_main_hands_the_manifest_vban_to_the_bootstrap():
 
 # --- the collection port ---------------------------------------------------------------------------------
 
-def test_the_stream_pp_preset_is_the_stream_pp_box_facts():
-    r = _bash('strih_box_load stream-pp\nprintf "%s %s %s" "$(strih_lx_program_vban_port)" '
-              '"$(strih_lx_program_vban_streams)" "$(strih_lx_program_vban_reserve_ms)"')
+@pytest.mark.parametrize("box", ["stream-pp", "strih-pp"])
+def test_each_pp_preset_is_its_box_facts(box):
+    # issue 1439: stream-pp takes lv1's `stream`, strih-pp (24.10.2026) lv1's `strih-obs`, both into the
+    # obs-vban source; the port converts the program input exactly as the launch seed does
+    r = _bash('strih_box_load "$1"\nprintf "%s %s %s" "$(strih_lx_program_vban_port)" '
+              '"$(strih_lx_program_vban_streams)" "$(strih_lx_program_vban_reserve_ms)"', box)
     port, stream, ms = r.stdout.split()
-    n = _bash('strih_box_load stream-pp\nprintf "%s" "$(strih_lx_program_audio_input)"')
-    assert n.returncode == 0 and _port().PRESETS["stream-pp"]["program_audio_input"] == n.stdout
-    assert _port().PRESETS["stream-pp"]["program_audio_vban"] == {
+    n = _bash('strih_box_load "$1"\nprintf "%s" "$(strih_lx_program_audio_input)"', box)
+    assert n.returncode == 0 and _port().PRESETS[box]["program_audio_input"] == n.stdout
+    assert _port().PRESETS[box]["program_audio_vban"] == {
         "port": int(port), "stream_name": stream, "receive_buffer_ms": int(ms)}
-    assert "program_audio_vban" not in _port().PRESETS["strih-pp"], "the strih role is not switched (issue 1439)"
 
 
 def _vban_coll(audio_name):
@@ -527,8 +518,7 @@ def test_a_ported_vban_source_other_than_the_program_input_is_dropped(preset, au
     names = {s["name"]: s["id"] for s in out["sources"]}
     assert "Old VBAN" not in names, rep
     assert any(r.startswith('DROP source "Old VBAN"') and "UDP port" in r for r in rep), rep
-    want = VBAN_KIND if preset == "stream-pp" else "pulse_input_capture"
-    assert names[audio] == want, names
+    assert names[audio] == VBAN_KIND, names
 
 
 def test_keep_kind_keeps_a_ported_vban_source():

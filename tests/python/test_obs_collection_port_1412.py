@@ -325,7 +325,10 @@ def test_the_strih_port_keeps_every_scene_and_drops_the_shader_and_the_dead_lua(
     assert [x["name"] for x in _by_name(out, "interkom web")["filters"]] == ["NDI out"]
     assert out["modules"]["scripts-tool"] == []
     assert out["name"] == "strih-pp"
-    assert _by_name(out, "ASIO zvuk")["settings"] == {"device_id": "strih-program-source"}
+    # issue 1439 (24.10.2026): lv1's `strih-obs` straight into the obs-vban source, no PipeWire capture
+    asio = _by_name(out, "ASIO zvuk")
+    assert asio["id"] == m.VBAN_SOURCE_KIND
+    assert asio["settings"] == m.vban_source_settings(6981, "strih-obs", 40)
 
 
 # --- the CLI -------------------------------------------------------------------------------------------

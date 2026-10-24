@@ -26,6 +26,9 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from strih_pp_hub_fed_1439 import HUB_FED_PAIRS  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = REPO / "scripts"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
@@ -85,13 +88,6 @@ def _boxes_with(tmp_path, box, pairs):
     f.write_text(t)
     return d
 
-
-# issue 1439 on strih-pp (24.10.2026): no deployed strih is hub-fed any more, so the hub-fed shape (all four
-# program facts `none`, which the loader still takes) is strih-pp with its four program facts set to none.
-HUB_FED_PAIRS = [("STRIH_PROGRAM_VBAN_STREAMS=strih-obs\n", "STRIH_PROGRAM_VBAN_STREAMS=none\n"),
-                 ("STRIH_PROGRAM_VBAN_PORT=6981\n", "STRIH_PROGRAM_VBAN_PORT=none\n"),
-                 ("STRIH_PROGRAM_VBAN_RESERVE_MS=40\n", "STRIH_PROGRAM_VBAN_RESERVE_MS=none\n"),
-                 ("STRIH_PROGRAM_AUDIO_INPUT=ASIO zvuk\n", "STRIH_PROGRAM_AUDIO_INPUT=none\n")]
 
 
 def _header_define(name):
