@@ -219,13 +219,28 @@ strih_drm_output_verdict() {
 # running, so the HDMI is dead although the log once reached `program scanout LIVE` (review round 1).
 # A clean stop (halt -> exit line -> stopped line) and a log without the loop are not dead. Reads all of
 # stdin (no early exit); always returns 0/1, never aborts a set -e caller.
+# issue 1424 (design 6386467303 layer 3): the retry supervisor RELEASES a dead output with a regular stop
+# right after its `retry: '<c>' lost its present loop` line, so that stop does not clear the death; only
+# `retry: '<c>' LIVE again` does.
 strih_drm_vk_present_dead() {
   local verdict
   verdict="$(LC_ALL=C awk '
     index($0, "drm-output: vk-direct present loop exited") { dead = 1 }
-    index($0, "drm-output: stopped (vk-direct") { dead = 0 }
+    index($0, "drm-output: retry: ") && index($0, " lost its present loop") { dead = 1; lost = 1 }
+    index($0, "drm-output: stopped (vk-direct") && !lost { dead = 0 }
+    index($0, "drm-output: retry: ") && index($0, " LIVE again") { dead = 0; lost = 0 }
     END { print dead ? "dead" : "alive" }' || true)"
   [ "$verdict" = dead ]
+}
+
+# strih_drm_output_retry_state (stdin = one output's drm-output lines) -> `live` / `dormant` from the LAST
+# retry supervisor line (issue 1424: `retry: '<c>' LIVE again` / `... dormant -- ...` / `... lost its
+# present loop`), nothing when the log has none. Reads all of stdin; always rc 0.
+strih_drm_output_retry_state() {
+  LC_ALL=C awk '
+    index($0, "drm-output: retry: ") && index($0, " LIVE again") { s = "live" }
+    index($0, "drm-output: retry: ") && (index($0, " dormant -- ") || index($0, " lost its present loop")) { s = "dormant" }
+    END { if (s != "") print s }' || true
 }
 
 # ---- issue 1424 part 2 (owner 13.10.2026): up to two fixed outputs at once ---------------------------
@@ -339,7 +354,7 @@ strih_drm_outputs_verify_dispatch() {
 # and its own audio leg line. Uses the caller's ok/bad/note. Always returns 0.
 strih_drm_outputs_verify_report() {
   local user_home="$1" scn_bin="$2" conf="$3" log="$4" fact="$5" xr="${6:-}" lines verdict
-  local conn view backend hdmi live mv dead v want got spec olog
+  local conn view backend hdmi live mv dead v want got spec olog rs
   spec="$(strih_lx_hdmi_outputs 2>/dev/null || true)"
   if ! strih_drm_outputs_is_array "$conf"; then
     bad "HDMI outputs: ${conf} drives a single output but the box fact STRIH_HDMI_OUTPUTS lists '${spec}' -- re-run setup-strih.sh step 6"
@@ -380,7 +395,14 @@ strih_drm_outputs_verify_report() {
     grep -aqF 'drm-output: program scanout LIVE' <<<"$olog" && live=1
     grep -aqF 'drm-output: multiview bind LIVE' <<<"$olog" && mv=1
     strih_drm_vk_present_dead <<<"$olog" && dead=1
+    # issue 1424: the retry supervisor's last line wins over an old LIVE line
+    rs="$(strih_drm_output_retry_state <<<"$olog")"
+    [ "$rs" = dormant ] && live=0
     v="$(strih_drm_output_verdict "$hdmi" "$conn" "$view" "$live" "$mv" "$backend" "$fact" "$dead" || true)"
+    if [ "$rs" = dormant ] && { [ "$v" = present-dead ] || [ "$v" = lease-not-live ]; }; then
+      bad "HDMI output ${conn}: dark -- connected in X but its output is dormant and retried by OBS itself (no restart needed once the display answers); last: $(grep -aF 'drm-output: retry: ' <<<"$olog" | tail -n 1 | cut -c1-240)"
+      continue
+    fi
     case "$v" in
       ok)                 ok   "HDMI output ${conn}: live (backend ${backend}), view ${view} (${conf} + its own lines in the newest OBS log)"
                           strih_drm_outputs_audio_grade "$user_home" "$log" "$olog" "$conn" "$view" "${audio:-on}" "$spec" ;;
