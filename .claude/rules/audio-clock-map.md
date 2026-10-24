@@ -35,7 +35,7 @@ constants named here. Never present a computed number as measured.
 
 | Crossing | What does it | Status |
 |---|---|---|
-| VBAN ingress (fohabl, lv1, mbc, cam1-7) | `asrc` resampler in `vban_jitter::NetworkFill`: 32 taps x 128 phases, ratio = the 64 s least-squares rate, +-500 ppm. | DONE (lane 1). Replaced the issue-1401 single-frame servo. |
+| VBAN ingress (fohabl, lv1, mbc, cam1-7) | `asrc` resampler in `vban_jitter::NetworkFill`: 32 taps x 128 phases, ratio = the 64 s least-squares rate, +-1000 ppm (cam1's ADC +540 ppm is inside). | DONE (lane 1). Replaced the issue-1401 single-frame servo. |
 | Card CAPTURE (the cutters' mics) | The same resampler leg (`JitterBuffer::card_capture`). | DONE (lane 1). Before: no rate handling at all, only a cap trim. |
 | Card PLAYBACK (the cutters' cans, aplay) | `pipe_fill` + `pipe_drift_servo`: single-frame drops / repeats. | **lane 2 pending.** Breaks the rule today. |
 | HDMI PLAYBACK (strih-pp vestibule, aplay) | The same `pipe_drift_servo`. | **lane 2 pending.** Breaks the rule today. |
@@ -57,6 +57,14 @@ constants named here. Never present a computed number as measured.
 - The resampler's 16-frame look-ahead comes out of the underrun margin, not on top of the latency.
 - Read at start only. An underrun re-primes to the SAME target. Above the cap one counted resync.
 - A lost hub tick is read past.
+- The card capture's 2048 frames are the issue-1345 ring's two `pw-cat` bursts, kept by lane 1. The
+  deployed `alsa` adapter's `arecord` delivers 256-frame periods, so 3-4 blocks is likely enough
+  there: lower `target_ms` once the live capture jitter is read. That is 26-32 ms less on the
+  cutters -> cameramen path.
+- CPU, measured on dev1 (24.10.2026, `-C opt-level=3`): all 11 strih-snv legs playing, 17 rendered
+  channels (a fanned mono cambox renders once), take 154 us of the 5.33 ms block = 2.9 % of one
+  core. That runs on the hub-mix thread under the jitter lock; every push stamps its arrival
+  before it takes the lock.
 
 ## strih-snv (the SNV cutting box, `STRIH_ROLE=strih`)
 
