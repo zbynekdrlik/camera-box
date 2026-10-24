@@ -144,9 +144,8 @@ def test_the_stop_with_the_recording_path_runs_the_prefetch_on_the_host(tmp_path
             f'youtube_leg_start "{REPO}/scripts" 1.1.1.1 2.2.2.2 u p "{tmp_path}"\n'
             'sleep 0.5\n'  # the watch reads the record start
             f'youtube_leg_stop "{REPO}/scripts" 2.2.2.2 u p "{tmp_path}" "{rec}"\n'
-            f'test -s "{d}/prefetch.pid"\n'
-            f'pid="$(cat "{d}/prefetch.pid")"; for _ in $(seq 1 300); do kill -0 "$pid" 2>/dev/null || break; '
-            'sleep 0.1; done\necho END')
+            # the prefetch removes its own pid file when it ends: wait on its outcome in the state
+            f'for _ in $(seq 1 300); do grep -q decode_rc "{d}/state.json" && break; sleep 0.1; done\necho END')
     r = _bash(body, env)
     assert r.returncode == 0 and r.stdout.endswith("END\n"), r.stdout + r.stderr
     pre = json.loads((d / "state.json").read_text())["prefetch"]

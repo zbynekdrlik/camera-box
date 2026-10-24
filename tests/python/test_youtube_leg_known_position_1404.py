@@ -82,7 +82,7 @@ def test_the_known_position_decode_reads_what_the_full_detector_reads(rec_video,
     assert reads["full"] < frames // 2
     assert reads["known"] + reads["full"] >= 2 * frames  # every half is read somehow, and counted
     assert reads["fallback"] >= 1  # the right-only stretch: the left's stored points read nothing
-    # a fallback is a half whose stored points read nothing AND that the full detector then read:
+    # a fallback is a half whose stored points all read nothing, so the full detector then RAN on it:
     # never more than the full detections; a point read that missed is counted on its own
     assert reads["fallback"] <= reads["full"] and reads["misses"] >= reads["fallback"]
 
