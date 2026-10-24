@@ -12,7 +12,10 @@ on a **dev1 systemd --user timer**, reusing the SAME session-visibility probe #9
 while home. **Since issue 1474 the probe is picked by fleet class:** a linux-genlock box (strih-snv,
 stream-snv) gets the recording-e2e `[0/8]` Linux check instead -- `systemctl --user is-active
 strih-obs.service` over plain ssh plus a bounded obs-websocket round-trip
-(`scripts/lib/strih-platform.sh`) -- and never the PowerShell probe; its alert carries the plain-ssh
+(`scripts/lib/strih-platform.sh`) -- and never the PowerShell probe. A dead obs-websocket is
+`obs-liveness-watchdog.sh`'s page (same boxes, same unit-restart recovery), so this watchdog decides
+nothing then; it pages only OBS answering on :4455 while `strih-obs.service` is not active (an OBS
+outside its supervisor, not the operator's kiosk instance), with the plain-ssh
 `systemctl --user restart strih-obs.service` recovery. All boxes share the SAME
 `#391 obs_watchdog_confirm`/`obs_watchdog_alert_throttle` decision logic
 (`scripts/lib/obs-watchdog-decision.sh`) — no second/third mechanism anywhere in this stack.

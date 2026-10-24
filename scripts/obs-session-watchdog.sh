@@ -12,8 +12,9 @@
 #   * windows-genlock -> the obs64/AHK session-0 PowerShell probe over win_ssh_run (below);
 #   * linux-genlock (issue 1474) -> the recording-e2e [0/8] Linux check, split into its two reads
 #     (scripts/lib/strih-platform.sh): `systemctl --user is-active strih-obs.service` over plain ssh +
-#     a bounded obs-websocket round-trip, graded by strih_linux_visibility_message. A Linux box is
-#     NEVER handed PowerShell, and its recovery line is the unit restart, never the Windows planner;
+#     a bounded obs-websocket round-trip. A dead obs-websocket is obs-liveness's page (same boxes,
+#     same recovery), so here it decides nothing; this watchdog pages only OBS answering while the
+#     unit is not active (an OBS outside its supervisor). Never PowerShell, never the Windows planner;
 #   * any other class (a name with no row) -> skipped and logged.
 # The traveling resolume is probed only while home (obs_fleet_poll_now).
 #
@@ -69,7 +70,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help|-h)
-    sed -n '5,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,49p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -112,15 +113,15 @@ log() { printf '%s [obs-session-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
 # read_state_field and write_state_field live in scripts/lib/watchdog-common.sh.
 
 # ── process ONE box: measure -> decide -> (maybe) alert ─────────────────────────────────────────
-# HAS_AHK is the target's probe mode (obs_session_targets): `linux` for a linux-genlock box, else the
-# Windows AHK mode (0 / 1 / guard).
+# PROBE_MODE is the target's probe mode (obs_session_targets): `linux` for a linux-genlock box, else
+# the Windows AHK mode (0 / 1 / guard).
 process_box() {
-  local box="$1" user="$2" pw="$3" host="$4" has_ahk="$5"
+  local box="$1" user="$2" pw="$3" host="$4" probe_mode="$5"
   local probe_out
-  if [ "$has_ahk" = "linux" ]; then
+  if [ "$probe_mode" = "linux" ]; then
     probe_out="$(strih_linux_visibility_probe "$host" "$user" "$pw" "$LINUX_SSH_TIMEOUT")"
   else
-    probe_out="$(win_ssh_run "$user" "$pw" "$host" "$(obs_session_visibility_probe_ps "$has_ahk")" 2>/dev/null || true)"
+    probe_out="$(win_ssh_run "$user" "$pw" "$host" "$(obs_session_visibility_probe_ps "$probe_mode")" 2>/dev/null || true)"
   fi
   if [ -z "$probe_out" ]; then
     log "$box: ERROR: no probe output (ssh/connectivity failure) -- nothing to decide this pass (the fleet's own reachability preflight is the authority for connectivity, not this watchdog)"
@@ -128,10 +129,16 @@ process_box() {
   fi
 
   local msg wedged znote
-  if [ "$has_ahk" = "linux" ]; then
-    msg="$(strih_linux_visibility_message "$probe_out" "$(strih_linux_visibility_ws_ok "$host" "$OBS_PHASE2_DIR")" "$box")"
+  if [ "$probe_mode" = "linux" ]; then
+    # issue 1474 review: obs-liveness (enabled, same Linux boxes) already pages a dead obs-websocket
+    # with the same unit-restart recovery, so one outage must not page twice -- decide nothing here.
+    if [ "$(strih_linux_visibility_ws_ok "$host" "$OBS_PHASE2_DIR")" != "1" ]; then
+      log "$box: obs-websocket on :4455 did not answer -- obs-liveness owns that page; nothing to decide this pass (probe='$probe_out')"
+      return 0
+    fi
+    msg="$(strih_linux_visibility_message "$probe_out" 1 "$box")"
   else
-    msg="$(obs_session_visibility_message "$probe_out" "$has_ahk")"
+    msg="$(obs_session_visibility_message "$probe_out" "$probe_mode")"
   fi
   wedged=0
   [ -n "$msg" ] && wedged=1
@@ -139,7 +146,7 @@ process_box() {
   # #1295: report-only -- surface any DEAD obs64 handle the probe ignored so an operator can reap
   # it, WITHOUT ever treating it as a wedge (a stale zombie handle is not an operator-visibility
   # fault; the one live instance is visible). Never folds into $wedged / the alert path.
-  if [ "$has_ahk" != "linux" ]; then
+  if [ "$probe_mode" != "linux" ]; then
     znote="$(obs_session_visibility_zombie_note "$probe_out")"
     [ -n "$znote" ] && log "$box: $znote"
   fi
@@ -182,8 +189,8 @@ process_box() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for $box"
     local body
-    if [ "$has_ahk" = "linux" ]; then
-      body="🚨 #979 obs-session-watchdog: **$box** OBS is NOT running for the operator ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (plain ssh, issue 1474): \`ssh ${user}@${host} 'systemctl --user restart strih-obs.service'\`"
+    if [ "$probe_mode" = "linux" ]; then
+      body="🚨 #979 obs-session-watchdog: **$box** OBS answers on :4455 but is NOT its supervised strih-obs.service -- not the operator's kiosk instance ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (plain ssh, issue 1474): stop the stray OBS (\`pgrep -a obs\`), then \`ssh ${user}@${host} 'systemctl --user restart strih-obs.service'\`"
     else
       body="🚨 #979 obs-session-watchdog: **$box** obs64/AHK is INVISIBLE to the operator ($REPO_SLUG). ${msg}. Confirmed over ${CONFIRM_THRESHOLD} consecutive passes. Recovery (agent-driven, win-* MCP Shell): \`bash scripts/launch-obs-genlock.sh --box $box --force\`"
     fi
@@ -210,8 +217,8 @@ obs_session_box_env() {
   printf '%s' "${!var:-$default}"
 }
 
-# obs_session_targets -> one `name host has_ahk` line per box to probe THIS pass, in roster order.
-# HAS_AHK is the probe mode: `linux` for a linux-genlock box (issue 1474: the Linux unit + obs-websocket
+# obs_session_targets -> one `name host probe_mode` line per box to probe THIS pass, in roster order.
+# PROBE_MODE: `linux` for a linux-genlock box (issue 1474: the Linux unit + obs-websocket
 # check over plain ssh, NEVER PowerShell), the Windows AHK mode for a windows-genlock box.
 # A box is probed only when BOTH hold:
 #   * its fleet class is windows-genlock or linux-genlock -- a name the fleet list does not know is
@@ -262,18 +269,18 @@ main() {
   log "pass start (dry_run=$DRY_RUN, threshold=$CONFIRM_THRESHOLD, roster='$BOXES')"
   # The target list is written by a plain redirect (no $(...) fork), so its skip log lines come from
   # this long-lived shell and reliably reach the journal (the #394 subshell-log-loss lesson).
-  local targets_file name host has_ahk user pw
+  local targets_file name host probe_mode user pw
   targets_file="$(mktemp "${TMPDIR:-/tmp}/camera-box-obs-session-targets.XXXXXX")" || {
     log "ERROR: mktemp failed -- nothing probed this pass"
     return 0
   }
   obs_session_targets >"$targets_file"
-  while read -r name host has_ahk; do
+  while read -r name host probe_mode; do
     [ -n "$name" ] || continue
     user="$(obs_session_box_env "$name" USER "$OBS_SESSION_DEFAULT_USER")"
     pw="$(obs_session_box_env "$name" PW "$OBS_SESSION_DEFAULT_PW")"
     # stdin from /dev/null: ssh inside win_ssh_run would otherwise swallow the rest of the list.
-    process_box "$name" "$user" "$pw" "$host" "$has_ahk" </dev/null
+    process_box "$name" "$user" "$pw" "$host" "$probe_mode" </dev/null
   done <"$targets_file"
   rm -f "$targets_file"
   log "pass end"

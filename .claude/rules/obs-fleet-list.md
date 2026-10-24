@@ -193,8 +193,11 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   `scripts/lib/strih-platform.sh` and graded by `strih_linux_visibility_message`) and the Windows AHK
   mode for a windows-genlock one, and skips (and logs) any other class -- an unknown name in an
   override too -- so a Linux box can never be handed PowerShell even if someone widens the facet. An
-  empty Linux probe is connectivity (the watchdog's rule), and its page carries the plain-ssh
-  `systemctl --user restart strih-obs.service` recovery; the Windows alert text is unchanged. Test
+  empty Linux probe is connectivity (the watchdog's rule). **One outage pages once:** a dead
+  obs-websocket is obs-liveness's page (enabled, same boxes, same unit-restart recovery), so the
+  Linux arm decides nothing then and pages only OBS answering while the unit is not active (an OBS
+  outside its supervisor), with the plain-ssh `systemctl --user restart strih-obs.service` recovery;
+  the Windows alert text is unchanged. `TimeoutStartSec=150` (two hung Linux boxes + resolume). Test
   seams: `OBS_SESSION_OBS_PHASE2_DIR` (a stub `obs_phase2.py`), `OBS_SESSION_LINUX_SSH_TIMEOUT`.
   Same shape for any future per-class consumer: facet policy decides membership, the class picks
   (or refuses) the probe. Tests: `tests/python/test_obs_session_linux_1474.py`.

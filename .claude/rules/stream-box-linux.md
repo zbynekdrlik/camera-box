@@ -181,8 +181,10 @@ full E2E, on a Linux stream box exactly as on Windows.
 - **Between E2E runs (issue 1474 item 3):** the obs-session watchdog's facet is strih-snv +
   stream-snv + resolume-snv and it picks the probe by class: a linux-genlock box gets the `[0/8]`
   Linux check (`strih-obs.service` over plain ssh + the bounded obs-websocket round-trip, split into
-  `strih_linux_visibility_probe` / `strih_linux_visibility_ws_ok`), never PowerShell, and pages with
-  the `systemctl --user restart strih-obs.service` recovery (`.claude/rules/obs-fleet-list.md`). The
+  `strih_linux_visibility_probe` / `strih_linux_visibility_ws_ok`), never PowerShell. A dead
+  obs-websocket stays obs-liveness's page (one outage, one page); this watchdog pages only OBS
+  answering while `strih-obs.service` is not active, with the `systemctl --user restart
+  strih-obs.service` recovery (`.claude/rules/obs-fleet-list.md`). The
   `win-baseline` facet keeps only its windows-genlock rows, so stream-snv is out of the Windows
   baseline (`tests/python/test_obs_session_linux_1474.py`).
 - **The Windows planners (issue 1474 item 4):** `launch-obs-genlock.sh`, `obs-self-heal-install.sh`
