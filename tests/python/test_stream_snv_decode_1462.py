@@ -471,7 +471,9 @@ def test_the_stream_recording_pixel_proofs_are_exported_on_the_linux_stream_box(
     assert '"stream": "ok"' in report.read_text()
     sshs = [c for c in calls(rig) if c["tool"] == "ssh"]
     assert sshs and not any(c["remote"].startswith("powershell") for c in sshs)
-    assert all("verdict-out/missing-slot-pixels-stream-77" in c["remote"] for c in sshs), sshs
+    # the STREAM out dir (this test's own box home), never the strih default under /home/newlevel
+    want = str(rig["home"] / "verdict-out" / "missing-slot-pixels-stream-77")
+    assert all(want in c["remote"] for c in sshs), sshs
 
 
 def test_a_windows_stream_box_keeps_the_powershell_pixel_export(tmp_path):

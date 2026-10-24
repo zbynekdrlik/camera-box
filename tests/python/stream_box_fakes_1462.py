@@ -68,7 +68,9 @@ if tool == "scp":
         path = dst.split(":", 1)[1]
         if not os.path.isabs(path):
             path = os.path.join(box_home, path)
-        # the "box" filesystem is this host: never let a test upload land outside its own tmp dir
+        # the "box" filesystem is this host: never let a test upload land outside its own tmp dir.
+        # LIMIT: only uploads are confined; the remote bash text and scp -r downloads run unconfined,
+        # so a test must override EVERY remote path the code under test uses (a tmp dir per test).
         test_root = os.path.dirname(os.path.realpath(box_home))
         if not os.path.realpath(path).startswith(test_root + os.sep):
             sys.stderr.write("fake box: refusing an upload outside the test dir: %s\n" % path)
@@ -157,10 +159,12 @@ def make_rig(tmp_path):
 
 
 def link_box_tools(rig, *names):
-    """Link real host tools into the fake box's PATH (the box PATH holds only the stubs + rm)."""
+    """Link real host tools into the fake box's PATH (the box PATH holds only the stubs + rm). The CI
+    runner installs ffmpeg/ffprobe into /usr/local/bin (ci.yml python-tests), dev1 has them in
+    /usr/bin, so both are searched."""
     import shutil
     for name in names:
-        real = shutil.which(name, path="/usr/bin:/bin")
+        real = shutil.which(name, path="/usr/local/bin:/usr/bin:/bin")
         assert real, name
         link = rig["box"] / name
         if not link.exists():
