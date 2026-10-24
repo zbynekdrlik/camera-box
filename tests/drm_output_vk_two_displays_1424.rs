@@ -230,6 +230,60 @@ fn a_remode_waits_while_another_display_acquires() {
     );
 }
 
+/// Display hotplug (independent review): a display whose monitor is off sits in its rebuild loop and
+/// presents nothing, so the settle wait must not wait on it (each retried open of the other output held
+/// the registry lock 2 s and logged the wrong cause); and a rebuild never starts a new presentation (a
+/// mode set) while another display acquires -- the same seq-cst pair the re-mode uses: the rebuild clears
+/// its `rebuilding` flag, THEN reads `acquiring`; the open raises `acquiring`, THEN reads `rebuilding`.
+#[test]
+fn a_rebuilding_display_never_blocks_an_acquire_nor_rebuilds_inside_one() {
+    let w = squish(&body_of(
+        &file(VK_REMODE_C),
+        "void drm_output_vk_wait_others_settled(struct drm_output_vk_disp *d)",
+    ));
+    assert!(
+        w.contains("!os_atomic_load_bool(&o->rebuilding)"),
+        "issue 1424: a display in its rebuild loop is not presenting for the settle wait: {w}"
+    );
+    let h = squish(&file(VK_INTERNAL_H));
+    assert!(
+        h.contains("volatile bool rebuilding;"),
+        "issue 1424: the display carries its rebuild-loop flag"
+    );
+    let r = squish(&body_of(
+        &file(VK_C),
+        "static bool drm_output_vk_rebuild_or_give_up(",
+    ));
+    let clear = pos(
+        &r,
+        "os_atomic_set_bool(&d->rebuilding, false);",
+        "the rebuild clears its flag before an attempt",
+    );
+    let check = pos(
+        &r,
+        "os_atomic_load_bool(&d->dev->acquiring)",
+        "the rebuild reads the acquire flag",
+    );
+    let attempt = pos(
+        &r,
+        "drm_output_vk_rebuild_presentation(",
+        "the rebuild attempt",
+    );
+    assert!(
+        clear < check && check < attempt,
+        "issue 1424: clear the flag -> read the acquire flag -> attempt (never a mode set inside an acquire): {r}"
+    );
+    let count = pos(&r, "(*rebuilds)++", "the try count");
+    assert!(
+        check < count,
+        "issue 1424: a deferral beside an acquire is not a try: {r}"
+    );
+    assert!(
+        r.matches("os_atomic_set_bool(&d->rebuilding, true)").count() >= 2,
+        "issue 1424: the flag is raised again while it waits (deferred and after a failed try): {r}"
+    );
+}
+
 // ------------------------------------------------------------------------------------------------
 // Facet A -- defect 2: a new surface never coexists with the old one
 // ------------------------------------------------------------------------------------------------
