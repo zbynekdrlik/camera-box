@@ -439,7 +439,7 @@ obs_box_panel_install() {
 # / `NOTE|text`. Read-only; always rc 0.
 obs_box_panel_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local cfg unit pid exe en act wins
+  local cfg unit pid exe en act wins guard cause
   if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_PACKAGE" 2>/dev/null || true)" = "install ok installed" ]; then
     printf 'OK|(panel-pkg) %s installed\n' "$OBS_BOX_PANEL_PACKAGE"
   else
@@ -472,8 +472,18 @@ obs_box_panel_grade_rows() {
   if ! cmp -s "${repo}/systemd/${OBS_BOX_PANEL_UNIT}" "$unit" 2>/dev/null; then
     printf 'FAIL|(panel-unit) %s missing or differs from the checkout -- re-run setup-strih.sh step 16h\n' "$unit"
   elif [ "$en" != enabled ] || [ "$act" != active ] || [ "$exe" != "$OBS_BOX_PANEL_BIN" ]; then
-    printf 'FAIL|(panel-unit) %s enabled=%s active=%s main process=%s (want enabled, active, %s) -- systemctl --user start %s; journalctl --user -u %s\n' \
-      "$OBS_BOX_PANEL_UNIT" "${en:-unknown}" "${act:-unknown}" "${exe:-none}" "$OBS_BOX_PANEL_BIN" "$OBS_BOX_PANEL_UNIT" "$OBS_BOX_PANEL_UNIT"
+    # issue 1424: tint2 starts through the display watch's screen guard (installed by step 16d)
+    guard="$(strih_session_apps_bin_dir)/strih_display_watch.py"
+    cause=""
+    if [ ! -f "$guard" ]; then
+      cause="; its screen guard ${guard} is missing -- re-run setup-strih.sh step 16d"
+    else
+      case "${exe##*/}" in
+        python3*) cause="; the panel waits for a monitor (tint2 starts once X has a screen with one, issue 1424)" ;;
+      esac
+    fi
+    printf 'FAIL|(panel-unit) %s enabled=%s active=%s main process=%s (want enabled, active, %s)%s -- systemctl --user start %s; journalctl --user -u %s\n' \
+      "$OBS_BOX_PANEL_UNIT" "${en:-unknown}" "${act:-unknown}" "${exe:-none}" "$OBS_BOX_PANEL_BIN" "$cause" "$OBS_BOX_PANEL_UNIT" "$OBS_BOX_PANEL_UNIT"
   else
     printf 'OK|(panel-unit) %s enabled + active, main process %s\n' "$OBS_BOX_PANEL_UNIT" "$exe"
   fi

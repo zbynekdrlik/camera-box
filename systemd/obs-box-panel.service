@@ -8,6 +8,9 @@ Description=OBS-box kiosk panel -- tint2 taskbar, tray and clock (issue 1420)
 Documentation=https://github.com/zbynekdrlik/camera-box
 # Never give up: the panel must be there whenever the operator session runs.
 StartLimitIntervalSec=0
+# issue 1424: tint2 runs through the display watch's screen guard, which setup-strih step 16d installs; without
+# it the unit skips cleanly (verify's (panel-unit) row names step 16d) instead of restart-looping python3.
+ConditionPathExists=/usr/local/bin/strih_display_watch.py
 
 [Service]
 Type=simple
