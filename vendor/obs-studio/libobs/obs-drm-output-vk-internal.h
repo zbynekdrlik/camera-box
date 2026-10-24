@@ -28,6 +28,9 @@
 #include "obs-drm-output-vk.h"
 #include "util/platform.h"
 #include "util/threading.h"
+/* issue 1424: the module's ONE log entry -- a retried open's lines are captured (obs-drm-output-logcap.h) */
+#include "obs-drm-output-logcap.h"
+#define blog drm_output_blog
 
 /* -------------------------------------------------------------------------------------------------
  * Vulkan entry points (the loader is dlopen'd; VK_NO_PROTOTYPES).

@@ -31,6 +31,7 @@
 #include <QActionGroup>
 #include <QObject>
 #include <QString>
+#include <QTimer>
 
 namespace {
 
@@ -42,10 +43,16 @@ struct DrmOutputSlot {
 	bool updating = false; /* guarded by the graphics context */
 	QAction *actionProgram = nullptr;
 	QAction *actionMultiview = nullptr;
+	bool lastActive = false; /* issue 1424: the active state the last sync saw */
 };
 
 DrmOutputSlot drmSlots[OBS_DRM_OUTPUT_MAX_OUTPUTS];
 int drmSlotCount = 0;
+/* issue 1424 (design 6386467303 layer 3): libobs retries a dormant vk-direct output and releases one
+ * that lost its scanout, on its own thread. An output that goes LIVE after FINISHED_LOADING needs its
+ * Multiview attached (and its menu enabled), one that went dark needs it detached: a 1 s UI-thread poll
+ * of the lock-free active state, started at FINISHED_LOADING, stopped at EXIT. */
+QTimer *drmActiveTimer = nullptr;
 
 void RenderDrmMultiview(void *param, uint32_t cx, uint32_t cy)
 {
@@ -119,8 +126,38 @@ void SyncDrmMultiview()
 		} else if (!want && slot.multiview) {
 			ClearDrmMultiview(slot);
 		}
+		slot.lastActive = obs_drm_output_active_of(slot.index);
 	}
 	UpdateMenu();
+}
+
+/* issue 1424: re-sync only when an output's active state changed since the last sync. */
+void SyncDrmMultiviewIfChanged()
+{
+	for (int i = 0; i < drmSlotCount; i++) {
+		if (obs_drm_output_active_of(drmSlots[i].index) != drmSlots[i].lastActive) {
+			SyncDrmMultiview();
+			return;
+		}
+	}
+}
+
+void StartDrmActivePoll()
+{
+	if (drmActiveTimer)
+		return;
+	drmActiveTimer = new QTimer();
+	QObject::connect(drmActiveTimer, &QTimer::timeout, drmActiveTimer, [] { SyncDrmMultiviewIfChanged(); });
+	drmActiveTimer->start(1000);
+}
+
+void StopDrmActivePoll()
+{
+	if (!drmActiveTimer)
+		return;
+	drmActiveTimer->stop();
+	delete drmActiveTimer;
+	drmActiveTimer = nullptr;
 }
 
 void SelectView(int idx, enum obs_drm_output_view view)
@@ -139,10 +176,14 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 {
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		SyncDrmMultiview();
+		StartDrmActivePoll(); /* issue 1424 */
+		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
 		SyncDrmMultiview();
 		break;
 	case OBS_FRONTEND_EVENT_EXIT:
+		StopDrmActivePoll(); /* issue 1424: before the Multiviews go, so no poll re-attaches one */
 		ClearAllDrmMultiviews();
 		break;
 	default:
