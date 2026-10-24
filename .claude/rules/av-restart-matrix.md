@@ -7,6 +7,7 @@ paths:
   - "tests/python/test_av_restart_matrix_decision_1367.py"
   - "tests/python/test_av_restart_matrix_orchestrator_1367.py"
   - "tests/python/test_av_soak_lease_inherit_1367.py"
+  - "tests/python/test_av_restart_matrix_stream_lx_1474.py"
 ---
 
 # The restart matrix (issue 1367) -- restart one component, measure the stream output, 3/3
@@ -80,12 +81,26 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
     the old process's last lines (a line every 5 s) and read healthy at once.
   - `dantesync`: `:8898/status` -> `dantesync_clock_decision.py analyze` = OK on the rig
     grandmaster (it must resolve, else `--run` refuses).
-  - `stream-obs`: the WebSocket answers on the `Development` program scene. `--force` kills obs64,
-    which does not save on the way out, so the relaunch restores the last SAVED program scene;
-    another scene FAILS the repeat at once (no settle with it on air, no window) and the supervisor
-    is told to set it back. The matrix never switches a scene.
-- **The stream OBS kind is a SUPERVISOR step** (checked read-only 28.9.2026, win-stream-snv
-  `Get-ScheduledTask`):
+  - `stream-obs`: the WebSocket answers on the `Development` program scene (on both platforms). On
+    Windows `--force` kills obs64, which does not save on the way out, so the relaunch restores the
+    last SAVED program scene; another scene FAILS the repeat at once (no settle with it on air, no
+    window) and the supervisor is told to set it back. The matrix never switches a scene.
+- **The stream OBS kind is picked by the stream box's fleet class** (`av_matrix_stream_obs_mode
+  HOST` -> `restart` | `supervisor`, through `stream_box_platform`; issue 1474, the main's decision
+  recorded on that ticket). `--plan`, `--run` and cleanup all read the one `STREAM_OBS_MODE`.
+- **On the Linux stream-snv it is AUTOMATIC:** `av_matrix_restart_remote_cmd stream-obs` is the
+  SAME `mv_reverify_obs_restart_linux_cmd` text as the strih-obs kind (stream-snv runs the same
+  `strih-obs.service` appliance unit), sent over plain ssh with `STREAM_USER` / `STREAM_PW` and
+  graded with the strih-obs markers (`MV_REVERIFY_NO_UNIT` = not performed). The healthy wait is
+  still the Development program scene, bounded by `--healthy-timeout-secs`. No supervisor step, no
+  confirm file, and no supervisor wait in the lease's hold ceiling. Cleanup runs the unit's
+  `is-active || start` on the stream box, then reads the scene; an OBS that still does not answer
+  prints the Linux restart line (`stream_box_obs_restart_hint`), never the Windows planner, which
+  refuses a Linux box (exit 2). On Linux a unit stop is a SIGTERM, which saves the collection, so
+  the restart keeps the runtime writes.
+- **On a Windows stream box it is a SUPERVISOR step** (the text below is byte-identical; the
+  orchestrator suite pins it under a Windows `OBS_FLEET` override; checked read-only 28.9.2026,
+  win-stream-snv `Get-ScheduledTask`):
   - The canonical launch is `OBS Studio.lnk` -> `obs-guarded-launch.ps1` (the issue-786 gate).
   - Every interactive-token OBS task there (`OBSCorrect`, `Start OBS`, `Start OBS Studio`,
     `StartOBS`, `YTPlayStartOBS`, `OBSStream` = `--startstreaming`!) launches a bare `obs64.exe`.
@@ -117,8 +132,9 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
   - A running window gets SIGTERM and its own cleanup is waited for (it is recorded as
     `window_aborted`; a window that had already ended keeps its real outcome). Any background job a
     signal left untracked is also TERMed and waited for.
-  - Every restarted kind (`<run-dir>/restarted`) is left running: `is-active || start`. The stream
-    OBS is read, and the supervisor relaunch is printed when it does not answer.
+  - Every restarted kind (`<run-dir>/restarted`) is left running: `is-active || start` (the Linux
+    stream box's unit too). The stream OBS is then read, and its restart line is printed when it
+    does not answer (the Linux unit restart, or the Windows supervisor relaunch).
   - Then the report, then the lease is released. It is KEPT while a window's `recording.state`
     still flags a recording: run `--stop-leftovers <run-dir>`, which runs `av-soak.sh
     --stop-leftovers` per such window and then releases the matrix's own lease, holder-checked.
@@ -160,17 +176,17 @@ systemd-run --user --unit=av-restart-matrix --collect -p TimeoutStopSec=20min \
   --working-directory=$HOME/devel/camera-box \
   bash scripts/av-restart-matrix.sh --run --run-dir "$D" \
   --probe-bin-dir "$A/linux" --win-verdict-exe "$A/win/recording-verdict.exe"
-journalctl --user -u av-restart-matrix -f          # SUPERVISOR STEP lines appear for stream-obs
+journalctl --user -u av-restart-matrix -f          # a Windows stream box: SUPERVISOR STEP lines for stream-obs
 cat "$D/report.txt"; bash scripts/av-restart-matrix.sh --report "$D"
 ```
 
 - 1 + kinds x repeats windows (13 by default), each up to the soak's slot (1200 s today) + 600 s,
-  plus healthy + settle per restart and up to 30 min per stream-obs supervisor step: plan for 5-6 h.
-  The plan prints the window bound and the lease's hold ceiling.
-- `--kinds "strih-obs cambox dantesync"` runs only the automatic kinds; `--kinds stream-obs` alone
-  runs the supervisor kind.
-- On a stream-obs `SUPERVISOR STEP`: run the printed program in the win-stream-snv MCP Shell, then
-  `date +%s > $D/confirm-stream-obs-rN`.
+  plus healthy + settle per restart (and, on a Windows stream box only, up to 30 min per stream-obs
+  supervisor step): plan for 5-6 h. The plan prints the window bound and the lease's hold ceiling.
+- On the Linux stream-snv every kind is automatic. `--kinds stream-obs` alone runs only the stream
+  OBS kind.
+- Windows stream box only: on a stream-obs `SUPERVISOR STEP`, run the printed program in the
+  win-stream-snv MCP Shell, then `date +%s > $D/confirm-stream-obs-rN`.
 - Stop: `touch $D/STOP` (ends before the next restart, with the report) or `systemctl --user stop
   av-restart-matrix`.
 - Afterwards `bash scripts/rig-mode.sh test` re-asserts TEST mode, because a restarted OBS may have
@@ -182,8 +198,12 @@ cat "$D/report.txt"; bash scripts/av-restart-matrix.sh --report "$D"
 ## Tier-0 verification (dev1: no cargo)
 
 `python3 -m pytest tests/python/test_av_restart_matrix_decision_1367.py
-tests/python/test_av_restart_matrix_orchestrator_1367.py tests/python/test_av_soak_lease_inherit_1367.py`
+tests/python/test_av_restart_matrix_orchestrator_1367.py tests/python/test_av_soak_lease_inherit_1367.py
+tests/python/test_av_restart_matrix_stream_lx_1474.py`
 plus the soak's own three files and the lease keep-alive's two (`test_rig_lease_refresh_*_1383.py`).
+The orchestrator suite runs on a Windows-stream `OBS_FLEET` override (the supervisor step); the
+`_1474` file drops it (the default fleet's Linux stream-snv: the automatic restart, the cleanup
+start + Linux line, the plan, the hold ceiling without a supervisor wait, the shared hint helper).
 The fakes:
 - the orchestrator test fakes the window (`AV_MATRIX_SOAK`) with a script that writes the soak's
   REAL CSV row via `av_soak_decision.row_from_verdict`, checks the matrix's lease identity (run id

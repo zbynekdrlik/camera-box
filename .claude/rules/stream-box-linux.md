@@ -29,6 +29,7 @@ step that sent PowerShell to it through `win_ssh_run` failed there (rig-mode TES
 | `stream_box_download USER PW HOST WIN_REMOTE LINUX_REMOTE LOCAL` | Linux: `scp`; Windows: `win_ssh_download`. |
 | `stream_box_upload USER PW HOST LOCAL WIN_REMOTE LINUX_REMOTE` | Linux: `scp` to the box; Windows: `win_ssh_upload` (issue 1462 lane 2, the `[8/8b-pre]` pushes). The remote dir must exist. |
 | `stream_box_visibility_gate_linux HOST USER PW TIMEOUT HERE` | the `[0/8]` operator-visibility gate on a Linux stream box = `strih_linux_visibility_check` (the box runs the same `strih-obs.service` as strih-snv), told the box's fleet name, so an unreachable box reads `the stream box stream-snv unreachable`, never strih-snv; ERROR + the `systemctl --user restart strih-obs.service` recovery on stderr, rc 1. |
+| `stream_box_obs_restart_hint USER HOST WIN_HINT` | the operator's OBS restart line (issue 1474): Linux `ssh USER@HOST 'systemctl --user restart strih-obs.service'`, else WIN_HINT verbatim; no trailing newline, rc 0. |
 | `stream_mbc_vban_expect HOST` | Linux: `<stream> <port> <input>` from the box facts (`STRIH_PROGRAM_VBAN_STREAMS` / `_PORT` / `STRIH_PROGRAM_AUDIO_INPUT`, loaded in a SUBSHELL, so the caller never gets a loaded box); the input name may hold spaces (stream-pp `Zvuk z mixu`), so it comes last: `read -r stream port input`. Windows: nothing, rc 0. A Linux box refuses (rc 1) with one of two named messages: no fleet row / the facts did not load (the loader's own line says why), or the facts declare `none`. |
 
 Argument order follows the wrapped function: exec / download take win_ssh_run's (USER PW HOST ...), the
@@ -193,18 +194,25 @@ full E2E, on a Linux stream box exactly as on Windows.
   arm prints no Windows paste-program for a box that took the setup-strih arm. Their suites run the
   Windows programs on a Windows-stream `OBS_FLEET` override
   (`tests/python/test_windows_planners_refuse_linux_1474.py`).
+- **The stream OBS restart hints (issue 1474, the last three):** the Windows relaunch planner refuses
+  stream-snv (exit 2), so no text may tell an operator to run it there. ONE helper picks the line by
+  the box's fleet class: `stream_box_obs_restart_hint USER HOST WIN_HINT` (`stream-box.sh`) prints
+  `ssh USER@HOST 'systemctl --user restart strih-obs.service'` on a linux-genlock box, else WIN_HINT
+  verbatim (so every Windows text stays byte-identical). Its callers:
+  - `rig-mode.sh` `print_genlock_relaunch_note`, the `stream   :` line (`tests/rig_mode.rs`
+    `genlock_relaunch_note_is_env_free_no_mode` pins the Linux line on the default fleet,
+    `genlock_relaunch_note_stream_line_follows_the_fleet_class_1474` the planner line on a Windows
+    `OBS_FLEET` override);
+  - `av-restart-matrix.sh`'s cleanup warning when the stream OBS does not answer; the stream-obs kind
+    itself is AUTOMATIC on a Linux stream box (`.claude/rules/av-restart-matrix.md`);
+  - the `asio-starve` watchdog's default `RECOVERY_PLAN` (`ASIO_STARVE_RECOVERY_PLAN` still wins;
+    the dry-run `WOULD alert` line now carries `recovery=`, `tests/python/test_asio_starve_recovery_class_1474.py`).
 
 ## Still Windows-only (follow-up candidates handed to the supervisor in the LANE-RETURN, not ported)
 
 - `strih_planner_holder_note`'s plan-mode text (it still says the MCP holder runs 8/8b).
 - The opt-in restart / zero-loss modes' stream decode plans; the legacy `VERDICT_ON_STREAM=0`
   `recording-fetch-windows.sh` path.
-- Text that still names the Windows relaunch for the stream box, which now refuses on stream-snv:
-  `rig-mode.sh`'s `print_genlock_relaunch_note` stream line (pinned by `tests/rig_mode.rs`
-  `genlock_relaunch_note_is_env_free_no_mode`), `av-restart-matrix.sh`'s stream-obs SUPERVISOR step
-  and its cleanup warning (on a Linux stream box that kind could restart `strih-obs.service` like
-  the strih-obs kind, a matrix design call), and the `asio-starve` watchdog's default recovery plan
-  (ships disabled; the VB-Matrix ASIO source is Windows-only).
 
 ## Tests (Tier-0, no rig)
 

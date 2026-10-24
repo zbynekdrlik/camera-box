@@ -56,7 +56,10 @@ are the reference. ⇒ **≥2 sources must be listed** (`ASIO_STARVE_SOURCES`, d
   all `asrc:` sources blindly.
 - **Alert-only, OBS-reset cure, ships DISABLED.** The starvation is in the CLOSED VB-Matrix/Dante ASIO
   plugin UPSTREAM of the vendored build (no obs-asio plugin in `vendor/`), so it is not fixable in our
-  code — detect + page (`scripts/launch-obs-genlock.sh --box stream --force`). A dev1 timer has no
+  code — detect + page with the OBS restart line picked by the watched box's fleet class (issue 1474,
+  `stream_box_obs_restart_hint`: the Linux stream-snv's `systemctl --user restart strih-obs.service`
+  over plain ssh, a Windows box's `scripts/launch-obs-genlock.sh --box stream --force`, which refuses
+  a Linux box; `ASIO_STARVE_RECOVERY_PLAN` overrides both). A dev1 timer has no
   session-aware win-* MCP to restart the live stream OBS, so it never auto-restarts (same as
   obs-liveness #391 / obs-session #979).
 - **Notify CLASS = DIAGNOSTIC one-ping (#1308 step-3, owner ruling 14.9.2026 „5 A").** The stream
