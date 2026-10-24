@@ -166,12 +166,16 @@ def test_an_unreachable_measurement_host_is_unknown_by_name_never_a_measurement_
 def test_a_verdict_tool_that_runs_over_its_bound_is_unknown_and_its_stage_is_deleted(fk, tmp_path):
     d = _stopped(fk, tmp_path)
     args, verdict = _measure_inputs(tmp_path, fk)
+    assert _run(fk, d, "prefetch", "--stream-path", STREAM_PATH).returncode == 0
     fk.script("verdict", "verdict", 0, {"sleep": 30})
     t0 = time.monotonic()
     assert _run(fk, d, *args, "--tool-timeout", "2").returncode == 1
     assert time.monotonic() - t0 < 25  # the host's own `timeout` ended it, not the fake's sleep
     b = json.loads(verdict.read_text())["youtube_leg"]
     assert b["verdict"] == "UNKNOWN" and b["reasons"] == ["the YouTube-leg verdict tool ran over 2 s"]
+    # what the run did finish still comes back for the diagnosis (the early tick map + its counters)
+    assert (Path(d) / "verdict" / "ticks-rec-1.tsv").exists()
+    assert b["decode_reads"]["ticks-rec-1.tsv"]["known"] == 1
     assert fk.host_stage_dirs() == []
 
 
