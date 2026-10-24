@@ -140,16 +140,17 @@ fn targets_are_windows_genlock_only_with_per_box_ahk_1317() {
 }
 
 #[test]
-fn targets_on_the_real_fleet_are_resolume_only_1462() {
-    // The real obs-session facet is resolume-snv alone: stream-snv runs the Linux stream role since
-    // issue 1462, and even named in an override the class gate keeps the PowerShell probe off it.
+fn targets_on_the_real_fleet_route_the_linux_boxes_to_the_linux_probe_1474() {
+    // issue 1474: the real obs-session facet is strih-snv + stream-snv (both linux-genlock, the Linux
+    // stream role since issue 1462) + resolume-snv. A linux-genlock box gets the `linux` probe mode
+    // (strih-obs.service + obs-websocket over plain ssh), never the PowerShell one.
     assert_eq!(
         targets(&[
             ("OBS_FLEET_HOME", "stream-snv resolume-snv"),
             ("OBS_FLEET", ""),
             ("OBS_SESSION_WATCHDOG_BOXES", ""),
         ]),
-        "resolume-snv resolume.lan guard"
+        "strih-snv 10.77.9.202 linux\nstream-snv 10.77.9.204 linux\nresolume-snv resolume.lan guard"
     );
 }
 
@@ -163,8 +164,9 @@ fn targets_skip_the_traveling_resolume_while_away_1317() {
 }
 
 #[test]
-fn targets_never_include_a_linux_genlock_box_even_via_override_1317() {
-    // Defense in depth: even an override naming strih-snv never sends the PowerShell probe to it.
+fn targets_give_a_linux_genlock_override_the_linux_probe_never_powershell_1474() {
+    // Defense in depth: an override naming strih-snv still never sends the PowerShell probe to it;
+    // since issue 1474 it gets the Linux probe mode instead of being skipped.
     assert_eq!(
         targets(&[
             (
@@ -173,7 +175,7 @@ fn targets_never_include_a_linux_genlock_box_even_via_override_1317() {
             ),
             ("OBS_FLEET_HOME", "strih-snv stream-snv"),
         ]),
-        "stream-snv 10.77.9.204 0"
+        "strih-snv 10.77.9.202 linux\nstream-snv 10.77.9.204 0"
     );
 }
 
@@ -190,23 +192,29 @@ fn targets_keep_the_per_box_host_env_overrides_1317() {
 }
 
 #[test]
-fn main_never_ssh_probes_the_linux_strih_1317() {
-    // Behavioral: a stub sshpass records every target it is asked to reach. A full pass must reach
-    // stream + the home resolume, and NEVER the Linux strih-snv address.
+fn main_never_sends_powershell_to_a_linux_box_1474() {
+    // Behavioral: a stub sshpass records every call it is asked to make (one per line). A full pass
+    // over the real fleet must reach the home resolume with the PowerShell probe, and the two Linux
+    // boxes (strih-snv .202, stream-snv .204) ONLY with the plain-ssh `systemctl --user` unit probe
+    // (issue 1474) -- never with PowerShell. The obs-websocket round-trip goes to a stub
+    // obs_phase2.py (the OBS_SESSION_OBS_PHASE2_DIR seam), so nothing touches the rig.
     let tmp = tempfile::tempdir().expect("tempdir");
     let calls = tmp.path().join("sshpass-calls.log");
     let sshpass = tmp.path().join("sshpass");
     fs::write(
         &sshpass,
         format!(
-            "#!/bin/sh\necho \"$*\" >> {}\nprintf '%b' '{HEALTHY}'\nexit 0\n",
-            calls.display()
+            "#!/bin/sh\necho \"$*\" | tr '\\n' ' ' >> {log}\necho >> {log}\nprintf '%b' '{HEALTHY}'\nexit 0\n",
+            log = calls.display()
         ),
     )
     .expect("write sshpass stub");
     let mut perm = fs::metadata(&sshpass).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
     fs::set_permissions(&sshpass, perm).unwrap();
+    let p2 = tmp.path().join("p2");
+    fs::create_dir(&p2).unwrap();
+    fs::write(p2.join("obs_phase2.py"), "import sys\nsys.exit(0)\n").unwrap();
     let path = format!(
         "{}:{}",
         tmp.path().display(),
@@ -217,9 +225,12 @@ fn main_never_ssh_probes_the_linux_strih_1317() {
         .arg(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
         .env("SCRIPT", script())
         .env("OBS_SESSION_WATCHDOG_STATE_FILE", tmp.path().join("state"))
+        .env("OBS_SESSION_OBS_PHASE2_DIR", &p2)
         .env("OBS_FLEET_HOME", "stream-snv resolume-snv")
         .env_remove("OBS_FLEET")
         .env_remove("OBS_SESSION_WATCHDOG_BOXES")
+        .env_remove("STRIH_SNV_HOST")
+        .env_remove("STREAM_SNV_HOST")
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
         .env("PATH", path)
         .output()
@@ -228,21 +239,25 @@ fn main_never_ssh_probes_the_linux_strih_1317() {
     assert_eq!(out.status.code(), Some(0), "stderr={err}");
     let log = fs::read_to_string(&calls).unwrap_or_default();
     assert!(
-        !log.contains("10.77.9.204"),
-        "the Linux stream-snv (issue 1462) must NEVER get the Windows PowerShell probe: {log}"
+        log.lines()
+            .any(|l| l.contains("resolume.lan") && l.contains("powershell")),
+        "a home resolume-snv must get the PowerShell probe: {log}"
     );
-    assert!(
-        log.contains("resolume.lan"),
-        "a home resolume-snv must be probed: {log}"
-    );
-    assert!(
-        !log.contains("10.77.9.202"),
-        "the Linux strih-snv must NEVER get the Windows PowerShell probe: {log}"
-    );
-    assert!(
-        !err.contains("strih"),
-        "no strih box may appear in a pass any more: {err}"
-    );
+    for ip in ["10.77.9.202", "10.77.9.204"] {
+        let mine: Vec<&str> = log.lines().filter(|l| l.contains(ip)).collect();
+        assert_eq!(mine.len(), 1, "one probe per pass for {ip}: {log}");
+        assert!(
+            mine[0].contains("systemctl --user is-active strih-obs.service")
+                && !mine[0].contains("powershell"),
+            "the Linux box {ip} must get the unit probe, NEVER PowerShell: {log}"
+        );
+    }
+    for box_name in ["strih-snv", "stream-snv", "resolume-snv"] {
+        assert!(
+            err.contains(&format!("{box_name}: probe=")),
+            "{box_name} must be probed this pass: {err}"
+        );
+    }
 }
 
 // ================================================================================================
