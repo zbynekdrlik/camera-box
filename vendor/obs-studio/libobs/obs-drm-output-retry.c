@@ -23,7 +23,7 @@
  *
  * Logging: one line per state change. A failed attempt's own lines (the open path's acquire / no-device
  * / start FAILED lines, a dozen per attempt) are CAPTURED on this thread (drm_output_blog, the module's
- * one log entry, obs-drm-output-logcap.h): only a change of its last warning (the reason) is logged. A
+ * one log entry, obs-drm-output-logcap.h): only a change of its first warning (the cause) is logged. A
  * successful attempt flushes its captured lines in order, then `retry: '<c>' LIVE again`. The present
  * thread an open starts logs on its own thread, so its first `solid-present #1` line can appear before
  * the flushed open lines.
@@ -67,7 +67,9 @@ struct drm_output_logcap {
 	unsigned dropped;
 	int level[DRM_OUTPUT_LOGCAP_LINES];
 	char line[DRM_OUTPUT_LOGCAP_LINES][DRM_OUTPUT_LOGCAP_LEN];
-	char reason[DRM_OUTPUT_LOGCAP_LEN]; /* the last LOG_WARNING / LOG_ERROR line of the attempt */
+	/* the FIRST LOG_WARNING / LOG_ERROR line of the attempt: the cause (the vk open's own refusal); the
+	 * lines after it are the generic "start FAILED" echoes of each layer */
+	char reason[DRM_OUTPUT_LOGCAP_LEN];
 };
 
 static __thread struct drm_output_logcap *t_logcap; /* set only on the supervisor's thread, per attempt */
@@ -86,7 +88,7 @@ void drm_output_blog(int log_level, const char *format, ...)
 	char buf[DRM_OUTPUT_LOGCAP_LEN];
 	vsnprintf(buf, sizeof(buf), format, ap);
 	va_end(ap);
-	if (log_level <= LOG_WARNING)
+	if (log_level <= LOG_WARNING && c->reason[0] == '\0')
 		snprintf(c->reason, sizeof(c->reason), "%s", buf);
 	if (c->n < DRM_OUTPUT_LOGCAP_LINES) {
 		c->level[c->n] = log_level;
