@@ -127,6 +127,13 @@ open(os.environ["FAKE_LOG"], "a").write("apt-get " + " ".join(sys.argv[1:]) + "\
 if "-s" in sys.argv:
     sys.stdout.write(open(os.environ["FAKE_SIM"]).read())
     sys.exit(int(os.environ.get("FAKE_SIM_RC", "0")))
+if sys.argv[1:3] == ["install", "-y"] and sys.argv[3].endswith(".deb"):
+    ctl = open(sys.argv[3]).read()
+    ver = [l.split(":", 1)[1].strip() for l in ctl.splitlines() if l.startswith("Version:")][0]
+    assert "Provides: gstreamer1.0-pipewire" in ctl and os.path.isabs(sys.argv[3]), (ctl, sys.argv)
+    with open(os.environ["FAKE_PKGS"], "a") as fh:
+        fh.write("camera-box-pipewire-shim\tinstalled\t%s\n" % ver)
+    sys.exit(0)
 if "purge" in sys.argv and "-y" in sys.argv:
     gone = {a.split(":")[0] for a in sys.argv[1:] if not a.startswith("-") and a != "purge"}
     rows = [l for l in open(os.environ["FAKE_PKGS"]) if l.strip()]
@@ -135,7 +142,18 @@ if "purge" in sys.argv and "-y" in sys.argv:
     with open(os.environ["FAKE_PKGS"], "w") as fh:
         fh.writelines(l for l in rows if l.split("\t")[0].split(":")[0] not in gone)
 ''')
-FAKE_APT_MARK = _py_tool('import os, sys\nopen(os.environ["FAKE_LOG"], "a").write("apt-mark " + " ".join(sys.argv[1:]) + "\\n")\n')
+FAKE_APT_MARK = _py_tool(r'''
+import os, sys
+open(os.environ["FAKE_LOG"], "a").write("apt-mark " + " ".join(sys.argv[1:]) + "\n")
+path = os.environ["FAKE_PKGS"] + ".manual"
+have = set(open(path).read().split()) if os.path.exists(path) else set()
+if sys.argv[1] == "manual":
+    have |= {a.split(":")[0] for a in sys.argv[2:]}
+    open(path, "w").write("\n".join(sorted(have)) + "\n")
+elif sys.argv[1] == "showmanual":
+    want = {a.split(":")[0] for a in sys.argv[2:]}
+    sys.stdout.write("".join("%s\n" % n for n in sorted(have) if not want or n in want))
+''')
 FAKE_PGREP = _py_tool(r'''
 import os, sys
 open(os.environ["FAKE_LOG"], "a").write("pgrep " + " ".join(sys.argv[1:]) + "\n")
@@ -335,7 +353,8 @@ def test_the_install_pins_builds_the_shim_reads_then_purges_and_removes_the_drop
     pin = Path(env["STRIH_PW_PURGE_PREF"]).read_text()
     assert "pulseaudio:i386" in pin and "pipewire-pulse:i386" in pin and "Pin-Priority: -1" in pin
     i_deb = next(i for i, ln in enumerate(log) if ln.startswith("dpkg-deb --build --root-owner-group"))
-    i_dpkg = next(i for i, ln in enumerate(log) if ln.startswith("dpkg -i"))
+    i_dpkg = next(i for i, ln in enumerate(log) if ln.startswith("apt-get install -y /") and ln.endswith(".deb"))
+    assert not any(ln.startswith("dpkg -i") for ln in log), "dpkg -i ignores apt's lock wait"
     i_mark = next(i for i, ln in enumerate(log) if ln.startswith("apt-mark manual"))
     i_sim = next(i for i, ln in enumerate(log) if ln.startswith("apt-get -s purge"))
     i_purge = next(i for i, ln in enumerate(log) if ln.startswith("apt-get purge -y"))
@@ -386,7 +405,7 @@ def test_a_rerun_changes_nothing_and_purges_nothing(tmp_path):
     r = _install(tmp_path, env, home)
     assert r.returncode == 0, r.stderr
     log = _log(tmp_path)
-    assert not any(ln.startswith(("apt-get", "dpkg -i", "dpkg-deb")) for ln in log), log
+    assert not any(ln.startswith(("apt-get", "dpkg -i", "dpkg-deb", "apt-mark manual")) for ln in log), log
     assert "unchanged" in r.stdout and "nothing to purge" in r.stdout, r.stdout
 
 
@@ -792,3 +811,36 @@ def test_no_sound_server_grades_the_hdmi_leg_on_its_own_line(tmp_path):
 def test_the_verdict_takes_none_as_no_rule_needed():
     r = _drm_audio('rc=0; drm_output_audio_verdict none 0 open || rc=$?; echo " rc=$rc"')
     assert r.stdout.strip() == "ok rc=0", r.stdout
+
+
+# --- 9. review round 1 --------------------------------------------------------------------------------------
+
+def test_a_server_package_left_in_config_files_state_is_purged_too(tmp_path):
+    env = _fakes(tmp_path, pkgs=LIVE_PKGS + [("pipewire-jack", "config-files", "1.6.2-1ubuntu1.2")])
+    r = _install(tmp_path, env, _home_with_leftovers(tmp_path))
+    assert r.returncode == 0, r.stderr
+    purge = next(ln for ln in _log(tmp_path) if ln.startswith("apt-get purge -y"))
+    assert "pipewire-jack" in purge.split(), purge
+
+
+def _step12(setup_text):
+    s = _section(setup_text, "\nstep 12 \"", "\nstep 13 \"")
+    a = s.index('if ! WHY="$(obs_box_step_applies 12-strih-audio)"')
+    b = s.index("\nelse\n", a)
+    return s[a:b] + "\nelse\n  echo STRIH-GRAPH\nfi\n"
+
+
+@pytest.mark.parametrize("rc,want", [("0", "INSTALL"), ("1", "STRIH-GRAPH"), ("2", "FAILED")])
+def test_setup_step12_refuses_when_the_purge_cannot_be_decided(rc, want):
+    script = ("set -euo pipefail\n"
+              "obs_box_step_applies() { return 0; }\n"
+              "strih_pipewire_purge_applies() { echo 'why it says'; return %s; }\n"
+              "strih_pipewire_purge_install() { echo INSTALL; }\n"
+              "stream_operator_audio_install() { echo STREAM; }\n"
+              "fail() { echo \"FAILED: $*\"; exit 9; }\n"
+              "HERE=. USER_HOME=/h DESKTOP_USER=u\n" % rc) + _step12(SETUP.read_text())
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+    assert want in r.stdout, (r.stdout, r.stderr)
+    if rc == "2":
+        assert r.returncode == 9 and "cannot decide" in r.stdout and "why it says" in r.stdout, r.stdout
+        assert "STRIH-GRAPH" not in r.stdout
