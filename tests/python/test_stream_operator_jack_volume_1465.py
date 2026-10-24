@@ -238,10 +238,22 @@ def test_auto_mute_left_disabled_fails(tmp_path):
     (asound_state(card_id="Other"), "Generic_1"),
     (asound_state(headphone_db=-2000), "Headphone Playback Volume -20.00 dB"),
     (asound_state(master_db=-2325), "Master Playback Volume -23.25 dB"),
-], ids=["speaker-on", "auto-mute-off", "headphone-off", "card-not-stored", "headphone-level", "master-level"])
+    (asound_state(pcm_db=-2000), "PCM Playback Volume -20.00 dB"),
+], ids=["speaker-on", "auto-mute-off", "headphone-off", "card-not-stored", "headphone-level", "master-level",
+        "pcm-level"])
 def test_a_stored_state_that_differs_fails_it_would_come_back_after_a_reboot(tmp_path, state, why):
     st, text = _mixer_row(tmp_path, state=state)
     assert st == "FAIL" and why in text and "reboot" in text, text
+
+
+def test_a_live_pcm_level_below_0_db_fails(tmp_path):
+    # review round 2: apply-mixer writes PCM at 0 dB, so the live row grades it (no switch: only its dB)
+    st, text = _mixer_row(tmp_path, {"PCM": "Simple mixer control 'PCM',0\n  Front Left: Playback 203 [80%] "
+                                            "[-10.20dB]\n  Front Right: Playback 203 [80%] [-10.20dB]\n"})
+    assert st == "FAIL" and "PCM at -10.20 dB" in text, text
+    (tmp_path / "ok").mkdir()
+    st, text = _mixer_row(tmp_path / "ok")
+    assert st == "OK" and "PCM 0 dB" in text, text
 
 
 def test_no_stored_state_fails(tmp_path):
@@ -282,14 +294,17 @@ def test_the_sink_is_found_by_name_on_the_cubic_scale():
              "info": {"props": {"node.name": "alsa_output.x", "media.class": "Audio/Sink"},
                       "params": {"Props": [{"channelVolumes": [1.0, 1.0], "mute": False}]}}},
             {"id": 41, "type": "PipeWire:Interface:Node",
-             "info": {"props": {"node.name": SINK, "media.class": "Audio/Sink"},
+             "info": {"props": {"node.name": SINK, "media.class": "Audio/Sink", "object.serial": 140},
                       "params": {"Props": [{"volume": 1.0, "mute": False, "channelVolumes": [0.343, 0.343]},
                                            {"params": []}]}}}]
     s = v.read_sink(objs)
     assert s["id"] == 41 and abs(s["volume"] - 0.7) < 1e-3 and s["mute"] is False, s
-    # review round 1: PipeWire hands node ids out again after a restart; the core cookie (random per daemon
-    # start) + the id name ONE sink of ONE PipeWire run
-    assert s["key"] == "2306208623:41", s
+    # review rounds 1 + 2: PipeWire hands node ids out again (after a PipeWire restart, and when only
+    # WirePlumber restarts and re-creates the node); the core cookie (random per daemon start) + the node's
+    # object.serial (never handed out twice in one run) name ONE sink
+    assert s["key"] == "2306208623:140", s
+    objs[2]["info"]["props"]["object.serial"] = 175
+    assert v.read_sink(objs)["key"] == "2306208623:175" and v.read_sink(objs)["id"] == 41
     assert v.read_sink(objs[:1]) is None and v.read_sink(None) is None
 
 
@@ -409,13 +424,13 @@ def test_watch_without_a_kept_level_only_unmutes(tmp_path):
     assert calls == ["set-mute 41 0"] and r.stdout.splitlines() == ["Slúchadlá 80 %"], (calls, r.stdout)
 
 
-def _sink(sid, volume, mute=False, run="c1"):
-    return {"id": sid, "key": "%s:%s" % (run, sid), "volume": volume, "mute": mute}
+def _sink(sid, volume, mute=False, run="c1", serial=None):
+    return {"id": sid, "key": "%s:%s" % (run, sid if serial is None else serial), "volume": volume, "mute": mute}
 
 
-def _watch(tmp_path, seq, kept=None):
-    """A Watcher over SEQ (the scripted looks; a wpctl call changes the current sink and the next look sees it).
-    Returns (watcher, calls, polls(n))."""
+def _watch(tmp_path, seq, kept=None, fail_calls=0):
+    """A Watcher over SEQ (the scripted looks; a wpctl call changes the current sink and the next look sees it;
+    the first FAIL_CALLS wpctl calls fail and change nothing). Returns (watcher, calls, state path)."""
     v = _vol()
     state = tmp_path / "kept.json"
     if kept is not None:
@@ -434,11 +449,14 @@ def _watch(tmp_path, seq, kept=None):
 
     def wpctl(*args):
         calls.append(" ".join(args))
+        if len(calls) <= fail_calls:
+            return False
         if args[0] == "set-volume":
             box["cur"]["volume"] = float(args[4])
         elif args[0] == "set-mute":
             box["cur"]["mute"] = args[2] == "1"
         box["changed"] = True
+        return True
 
     w = v.Watcher(read, wpctl, str(state))
     return w, calls, state
@@ -449,9 +467,39 @@ def test_a_pipewire_restart_that_reuses_the_node_id_still_restores(tmp_path):
     # at 100 % -- a new core cookie makes it a new sink: the kept 70 % comes back, the 100 % is never kept
     w, calls, state = _watch(tmp_path, [_sink(41, 0.7, run="c1"), _sink(41, 1.0, run="c2")])
     assert w.poll() == "Slúchadlá 70 %"
-    assert w.poll() == "Slúchadlá 70 %" or w.shown == "Slúchadlá 70 %", calls
-    assert "set-volume -l 1.0 41 0.70" in calls, calls
     assert json.loads(state.read_text())["volume"] == 0.7
+    w.poll()
+    assert w.shown == "Slúchadlá 70 %", calls
+    assert "set-volume -l 1.0 41 0.70" in calls, calls
+    assert json.loads(state.read_text())["volume"] == 0.7, "the 100 % default is never kept"
+
+
+def test_a_wireplumber_only_restart_that_reuses_the_node_id_still_restores(tmp_path):
+    # review round 2: only WirePlumber restarted -- the same PipeWire run (same cookie), the node re-created under
+    # its old id at 100 %; its new object.serial makes it a new sink
+    w, calls, state = _watch(tmp_path, [_sink(41, 0.7, serial=100), _sink(41, 1.0, serial=140)])
+    w.poll()
+    w.poll()
+    assert w.shown == "Slúchadlá 70 %" and "set-volume -l 1.0 41 0.70" in calls, calls
+    assert json.loads(state.read_text())["volume"] == 0.7
+
+
+def test_a_failed_restore_is_retried_never_marked_done(tmp_path):
+    # review round 2: a wpctl that fails at login must not leave the sink at 100 % for the session
+    w, calls, state = _watch(tmp_path, [_sink(41, 1.0), _sink(41, 1.0)], kept={"volume": 0.4}, fail_calls=1)
+    w.poll()
+    assert json.loads(state.read_text()).get("restored") is None, "a failed restore is not recorded"
+    w.poll()
+    assert calls.count("set-volume -l 1.0 41 0.40") == 2 and w.shown == "Slúchadlá 40 %", calls
+    assert json.loads(state.read_text())["restored"] == "c1:41"
+
+
+def test_a_sink_with_no_core_cookie_is_restored_but_never_recorded(tmp_path):
+    # review round 2: with no Core object in pw-dump the key has no run part; restore, but never record it
+    w, calls, state = _watch(tmp_path, [{"id": 41, "key": "?:41", "volume": 1.0, "mute": False}],
+                             kept={"volume": 0.5})
+    w.poll()
+    assert "set-volume -l 1.0 41 0.50" in calls and "restored" not in json.loads(state.read_text()), calls
 
 
 def test_a_restarted_watcher_adopts_the_sink_and_keeps_the_operators_mute(tmp_path):
