@@ -138,8 +138,11 @@ static bool drm_output_retry_connected(xcb_connection_t **xc, const char *name)
 	xcb_screen_iterator_t it = xcb_setup_roots_iterator(setup);
 	if (!it.rem)
 		return true;
+	/* every reply takes its error: one handed NULL lands in the event queue nobody here reads */
+	xcb_generic_error_t *err = NULL;
 	xcb_randr_get_screen_resources_current_reply_t *res = xcb_randr_get_screen_resources_current_reply(
-		*xc, xcb_randr_get_screen_resources_current(*xc, it.data->root), NULL);
+		*xc, xcb_randr_get_screen_resources_current(*xc, it.data->root), &err);
+	free(err);
 	if (!res)
 		return true;
 	bool connected = true;
@@ -147,8 +150,10 @@ static bool drm_output_retry_connected(xcb_connection_t **xc, const char *name)
 	const int n_out = xcb_randr_get_screen_resources_current_outputs_length(res);
 	const size_t name_len = strlen(name);
 	for (int i = 0; i < n_out; i++) {
+		err = NULL;
 		xcb_randr_get_output_info_reply_t *oi = xcb_randr_get_output_info_reply(
-			*xc, xcb_randr_get_output_info(*xc, outputs[i], res->config_timestamp), NULL);
+			*xc, xcb_randr_get_output_info(*xc, outputs[i], res->config_timestamp), &err);
+		free(err);
 		if (!oi)
 			continue;
 		const int nlen = xcb_randr_get_output_info_name_length(oi);
@@ -254,9 +259,12 @@ static void *drm_output_retry_thread(void *arg)
 			struct drm_output_inst *inst = drm_output_inst_at(i);
 			if (!inst || inst->backend != OBS_DRM_OUTPUT_BACKEND_VK_DIRECT || !inst->ops->alive)
 				continue;
-			/* X is asked only for a dormant output (`started` changes only on this thread or
-			 * before it starts / after it is joined); an open one counts as connected */
-			const bool connected = inst->started || drm_output_retry_connected(&xc, inst->connector);
+			/* X is asked only for a dormant output, outside the registry lock (a reply can take a
+			 * moment); an open one counts as connected. `started` is written under that lock. */
+			drm_output_registry_lock();
+			const bool started = inst->started;
+			drm_output_registry_unlock();
+			const bool connected = started || drm_output_retry_connected(&xc, inst->connector);
 			drm_output_registry_lock();
 			if (os_atomic_load_bool(&g_retry_run))
 				drm_output_retry_look(&slots[i], inst, connected);
