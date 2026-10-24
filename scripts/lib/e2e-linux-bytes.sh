@@ -22,7 +22,8 @@
 # gather or manifest for a --linux box as UNKNOWN and refuses the run. Each miss is ONE named line.
 #
 # Test seams (offline): manifest-autosource.sh's MANIFEST_AUTOSOURCE_CMD; E2E_LINUX_BYTES_REMOTE_PREFIX
-# (the remote install prefix, default /usr); E2E_LINUX_BYTES_SSH_TIMEOUT (default 30 s).
+# (the remote install prefix, default /usr); E2E_LINUX_BYTES_SSH_TIMEOUT (default 30 s);
+# E2E_LINUX_BYTES_FETCH_TIMEOUT (the manifest fetch's gh bound, default 900 s, sized below).
 # Tests: tests/python/test_linux_bytes_gate_1474.py.
 
 command -v linux_obs_box_so_gather_cmd >/dev/null 2>&1 \
@@ -54,7 +55,12 @@ e2e_linux_bytes_gather() {
     echo "  ${role} (${host}): no genlock_build_sha in its bundle state -- no manifest to grade against, the gate refuses (issue 1474)"
     return 0
   fi
-  manifest="$(manifest_autosource_fetch "$repo" linux-genlock.yml "$(linux_obs_box_bundle_artifact)" \
+  # GitHub serves an artifact only as one zip, and the strih bundle is ~600 MB (run 40031379800:
+  # 601430199 bytes); the Windows full bundle (270 MB) took 145 s, so this one needs ~320 s on the
+  # first fetch of a build -- over the 300 s default gh bound. 900 s covers it with room; every later
+  # fetch of the same CI run is the per-run cache (3 s), so strih + stream of one build download once.
+  manifest="$(MANIFEST_AUTOSOURCE_TIMEOUT_S="${E2E_LINUX_BYTES_FETCH_TIMEOUT:-900}" \
+    manifest_autosource_fetch "$repo" linux-genlock.yml "$(linux_obs_box_bundle_artifact)" \
     "$sha" "${outdir}/${role}-linux-manifest.json" || true)"
   if [ -n "$manifest" ]; then
     LINUX_BYTES_GATE_ARGS+=(--linux-manifest "${role}=${manifest}")
