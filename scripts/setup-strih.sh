@@ -646,7 +646,7 @@ step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-M
 DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || echo 1000)"
 if ! WHY="$(obs_box_step_applies 12-strih-audio)"; then   # issue 1465 item 3: scripts/lib/stream-operator-audio.sh
   echo "  ${WHY}"; stream_operator_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1465: the locked operator PipeWire (above)"
-elif PW_WHY="$(strih_pipewire_purge_applies)"; then   # issue 1440: the facts need no sound server (scripts/lib/strih-pipewire-purge.sh)
+elif PW_WHY="$(strih_pipewire_purge_applies)" || { [ "$?" != 2 ] || fail "issue 1440: cannot decide whether PipeWire belongs on this strih box -- ${PW_WHY}"; false; }; then   # issue 1440 (scripts/lib/strih-pipewire-purge.sh)
   echo "  ${PW_WHY}"; STRIH_PW_PURGED=1; strih_pipewire_purge_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1440: PipeWire could not be purged from this strih box (above)"
 else
   if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"; else warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"; fi

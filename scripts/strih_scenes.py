@@ -856,7 +856,8 @@ def main():
             and not args.audio_input_kind and not args.audio_monitor_type and not args.pulse_capture_inputs
             and not args.browser_audio):
         ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), "
-                 "--audio-input-kind / --pulse-capture-inputs (read-only), or --projector program|multiview")
+                 "--audio-input-kind / --pulse-capture-inputs / --browser-audio (read-only), "
+                 "or --projector program|multiview")
 
     # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
     # the seed manifest.

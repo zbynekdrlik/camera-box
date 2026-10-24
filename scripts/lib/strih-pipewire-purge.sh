@@ -222,12 +222,24 @@ strih_pipewire_purge_sim_verdict() {
 
 # _strih_pw_purge_installed NAME... -> the installed instances (`name` or `name:arch`, as dpkg prints them),
 # one per line. Any dpkg status but not-installed / config-files counts. Always rc 0.
-_strih_pw_purge_installed() {
-  local out pkg st _v
+_strih_pw_purge_installed() { _strih_pw_purge_status_list installed "$@"; }
+
+# _strih_pw_purge_present NAME... -> as _strih_pw_purge_installed, plus the ones left in config-files state
+# (a purge removes their configuration too: review round 1). Always rc 0.
+_strih_pw_purge_present() { _strih_pw_purge_status_list present "$@"; }
+
+# _strih_pw_purge_status_list installed|present NAME... -> the dpkg instances of NAME... in that class.
+_strih_pw_purge_status_list() {
+  local class="$1" out pkg st _v
+  shift
   out="$(dpkg-query -W -f='${binary:Package}\t${db:Status-Status}\t${Version}\n' "$@" 2>/dev/null)" || true
   while IFS=$'\t' read -r pkg st _v; do
     [ -n "$pkg" ] || continue
-    case "$st" in not-installed | config-files | "") ;; *) printf '%s\n' "$pkg" ;; esac
+    case "$st" in
+      not-installed | "") ;;
+      config-files) [ "$class" = present ] && printf '%s\n' "$pkg" ;;
+      *) printf '%s\n' "$pkg" ;;
+    esac
   done <<<"$out"
   return 0
 }
@@ -236,7 +248,9 @@ _strih_pw_purge_installed() {
 _strih_pw_purge_shim_version() { sed -n '/^Version:/{s/^Version:[[:space:]]*//p;q;}' "${1-}" 2>/dev/null; }
 
 # strih_pipewire_purge_shim_install REPO -> builds + installs the shim when it is not installed at the
-# control file's version. rc 1 + a stderr line on a failure.
+# control file's version. The built file goes in through apt-get (review round 1: a bare `dpkg -i` ignores
+# the DPkg::Lock::Timeout wait obs_box_apt_lock_timeout wrote, and failed at once on a held lock). rc 1 + a
+# stderr line on a failure.
 strih_pipewire_purge_shim_install() {
   local ctl="${1:?repo root required}/scripts/strih-pipewire/${STRIH_PW_PURGE_SHIM}.control" want have dir out
   [ -f "$ctl" ] || { echo "strih-pipewire-purge: ${ctl} not found (stage scripts/ with the setup run)" >&2; return 1; }
@@ -250,7 +264,8 @@ strih_pipewire_purge_shim_install() {
   dir="$(mktemp -d)" || { echo "strih-pipewire-purge: mktemp failed" >&2; return 1; }
   out="${dir}/${STRIH_PW_PURGE_SHIM}_${want}_all.deb"
   if ! { install -d -m 0755 "${dir}/pkg/DEBIAN" && install -m 0644 "$ctl" "${dir}/pkg/DEBIAN/control" \
-      && dpkg-deb --build --root-owner-group "${dir}/pkg" "$out" >/dev/null && dpkg -i "$out" >/dev/null; }; then
+      && dpkg-deb --build --root-owner-group "${dir}/pkg" "$out" >/dev/null \
+      && DEBIAN_FRONTEND=noninteractive apt-get install -y "$out" >/dev/null; }; then
     rm -rf "$dir"
     echo "strih-pipewire-purge: building / installing ${STRIH_PW_PURGE_SHIM} ${want} failed (above)" >&2
     return 1
@@ -262,8 +277,8 @@ strih_pipewire_purge_shim_install() {
 # strih_pipewire_purge_install REPO USER_HOME DESKTOP_USER -> see the header. rc 0 / 1 (+ a stderr line).
 strih_pipewire_purge_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local pref archs sim verdict rel f left kept_before kept_after
-  local -a arch targets keep_inst
+  local pref archs sim verdict rel f left kept_before kept_after manual
+  local -a arch targets keep_inst unmarked=()
   pref="$(_strih_pw_purge_pref)"
   archs="$(strih_pipewire_purge_archs)" || return 1
   mapfile -t arch <<<"$archs"
@@ -275,9 +290,16 @@ strih_pipewire_purge_install() {
   mapfile -t keep_inst < <(_strih_pw_purge_installed "${STRIH_PW_PURGE_KEEP[@]}")
   kept_before="${keep_inst[*]}"
   if [ "${#keep_inst[@]}" -gt 0 ] && [ -n "${keep_inst[0]}" ]; then
-    apt-mark manual "${keep_inst[@]}" >/dev/null || { echo "strih-pipewire-purge: apt-mark manual ${keep_inst[*]} failed" >&2; return 1; }
+    manual="$(apt-mark showmanual "${keep_inst[@]}" 2>/dev/null)" || manual=""
+    for f in "${keep_inst[@]}"; do
+      grep -qxF "${f%%:*}" < <(sed 's/:.*//' <<<"$manual") || unmarked+=("$f")
+    done
+    if [ "${#unmarked[@]}" -gt 0 ]; then
+      apt-mark manual "${unmarked[@]}" >/dev/null || { echo "strih-pipewire-purge: apt-mark manual ${unmarked[*]} failed" >&2; return 1; }
+      echo "  marked manual: ${unmarked[*]} (OBS links them)"
+    fi
   fi
-  mapfile -t targets < <(_strih_pw_purge_installed "${STRIH_PW_PURGE_SERVER_PACKAGES[@]}")
+  mapfile -t targets < <(_strih_pw_purge_present "${STRIH_PW_PURGE_SERVER_PACKAGES[@]}")
   if [ "${#targets[@]}" -eq 0 ] || [ -z "${targets[0]}" ]; then
     echo "  no PipeWire / WirePlumber / pulseaudio server package installed -- nothing to purge"
   else

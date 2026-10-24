@@ -26,8 +26,10 @@ never counts). No new fact, no box name.
 | strih-pp | keep | `STRIH_PROGRAM_VBAN_STREAMS=none`: its program goes hub `program_out` (adapter pipewire) -> pw-cat -> PipeWire -> OBS |
 | stream-pp / stream-snv | keep | the stream role's locked operator PipeWire |
 
-An unreadable TOML, an unknown role or an unread fact = `unknown` (rc 2): setup keeps the old strih
-branch with a WARNING, verify FAILs `(pipewire-purge) cannot decide`. Never a purge.
+An unreadable TOML, an unknown role or an unread fact = `unknown` (rc 2): setup step 12 FAILS by name
+(review round 1: falling into the old branch wrote the five PipeWire drop-ins back onto a purged box, and
+step 13 a hub drop-in naming a `pipewire` group a fresh box does not have), verify FAILs
+`(pipewire-purge) cannot decide`. Never a purge.
 
 ## setup-strih step 12 on a purge box (`strih_pipewire_purge_install REPO USER_HOME DESKTOP_USER`)
 
@@ -44,12 +46,15 @@ The order, each step idempotent:
 2. **The shim** `camera-box-pipewire-shim` (`Provides: gstreamer1.0-pipewire`, Architecture all, no
    Depends): RustDesk 1.4.9 `Depends:` ends with an unversioned `gstreamer1.0-pipewire`. Built ON the box
    from the checked-in `scripts/strih-pipewire/camera-box-pipewire-shim.control` with `dpkg-deb --build
-   --root-owner-group` + `dpkg -i`, only when not installed at the control's Version. **Not equivs:**
+   --root-owner-group`, installed with `apt-get install -y <abs path>.deb` (never a bare `dpkg -i`: dpkg
+   does not read apt's `DPkg::Lock::Timeout`, so a periodic apt run holding the lock failed the step at
+   once, the 24.9.2026 deploy-failure class), only when not installed at the control's Version. **Not equivs:**
    `apt-get -s install equivs` on strih-snv pulls 22 build packages (autoconf, automake, libtool,
    debhelper, gettext, ...) onto a production box; dpkg-deb is already there.
 3. **The kept libraries** `libpulse0` + `libpipewire-0.3-0t64` marked manual (OBS links them; OBS is not
-   a dpkg package, so apt does not know).
-4. **The read** `LC_ALL=C apt-get -s purge <installed server packages>` through
+   a dpkg package, so apt does not know), only the ones `apt-mark showmanual` does not list yet.
+4. **The read** `LC_ALL=C apt-get -s purge <server packages present>` (installed, or left in
+   `config-files` state: a purge removes their configuration too) through
    `strih_pipewire_purge_sim_verdict`: REFUSE on any `E:` line, any `Inst`/`Conf` line, a removal outside
    `SERVER + STRIH_PW_PURGE_COLLATERAL` (gnome-control-center, gnome-initial-setup, gnome-settings-daemon,
    gnome-snapshot, libcanberra-pulse: the 22.10 inventory, nothing runs them), or no removal at all. A
@@ -103,6 +108,16 @@ nor `pipewire` is a command; seam `DRM_OUTPUT_AUDIO_SERVER_BINS`): setup writes 
 `rule=none nodes=0` and the leg on its own OBS log line. A box with PipeWire (imag, strih-pp) is
 unchanged.
 
+**The other apt dry-run guard** (`obs_box_amdgpu_ddx_remove`, obs-box-kiosk.sh) reads only `Remv`
+lines. It was NOT folded into this verdict (review round 1 suggested it): removing
+`xserver-xorg-video-all` may let apt satisfy xserver-xorg's `xorg-driver-video` alternative with an
+`Inst`, which this stricter verdict would refuse, and that removal is live-proven on strih-snv as it is.
+Folding them needs a read-only `apt-get -s remove` on imag-nb and strih-snv first (returned as a
+follow-up candidate, issue 1440 LANE-RETURN).
+
+A WirePlumber HDMI rule written before the purge stays in `/etc/wireplumber/` (dpkg purge leaves files it
+does not own): harmless, nothing reads it.
+
 ## Tests (Tier-0)
 
 `tests/python/test_strih_pipewire_purge_1440.py`: the condition over the four real fact files + TOMLs,
@@ -127,6 +142,8 @@ report / port, the wiring and the line budgets. Seams: `STRIH_PW_PURGE_PREF`, `_
 3. `sudo systemctl restart intercom-hub` (the new drop-in), then start OBS (the seed mutes the browser
    sources: its `browser audio=4 browser source(s) ...` status).
 4. **A host reboot clears the old PipeWire processes: owner approval first** (never reboot unasked).
+   The deploy that first purges ENDS exit 5 (`accept-failed`): its own verify FAILs `(pipewire-process)`
+   while the old PipeWire processes still run. That is expected; the reboot cures it.
 5. `sudo ./scripts/verify-strih.sh --box strih-snv`: item 9b's six rows PASS, item 9 (program-vban) and
    the card-leg rows PASS, item 4c (if the HDMI output is armed) PASS with `no sound server on the box`.
 6. By ear: the cutters' talkback to the cameramen and the program + cameramen in the MiniFuse cans;
