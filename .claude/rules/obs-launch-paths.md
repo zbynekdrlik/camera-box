@@ -13,7 +13,12 @@ paths:
 **Box set (issue 1317 part 3):** the Windows STRIH-SNV PC is RETIRED (M4 cut-over 20.9.2026; its
 address is the Linux strih-snv). `launch-obs-genlock.sh` accepts `stream|resolume` and
 `obs-self-heal-install.sh` accepts `stream`; `--box strih` is REFUSED by name (pointing at the
-strih-snv `strih-obs.service` user unit) and `--box strih-snv` is refused as a non-Windows box. Both read
+strih-snv `strih-obs.service` user unit) and `--box strih-snv` is refused as a non-Windows box. Since
+issue 1474 both (and `avsync-watchdog-install.sh`) refuse any linux-genlock box through the ONE class
+gate `obs_fleet_refuse_linux_target` (exit 2, nothing on stdout): on the real fleet that is the stream
+box too (stream-snv, Linux since issue 1462), and `fleet_box_mcp` names a win-* MCP only for a
+windows-genlock row. Their suites run the Windows programs on a fleet whose stream box is Windows (an
+`OBS_FLEET` override); the refusal is `tests/python/test_windows_planners_refuse_linux_1474.py`. Both read
 the MCP / address / AHK identity from `scripts/lib/genlock-fleet-boxes.sh`; the self-heal builder
 keys its AHK path on `obs_fleet_has_ahk` + that identity, never the literal name. The `strih`
 material below (the `.lnk` params, `scripts/strih/NL_STARTUP.ahk`) is the retired box's history,

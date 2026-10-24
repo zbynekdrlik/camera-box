@@ -156,7 +156,8 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 | vb-matrix | stream | a Windows VB-Audio Matrix process check; strih-snv has none (PipeWire replaced it, issue 1344) |
 | av-step | stream | the av-sync dock is on the stream box only |
 | ndi-portmap | strih-snv | the ONE strih whose NDI sender port map is watched (issue 1363) |
-| obs-session | stream resolume | the #979 obs64/AHK Windows SESSION-0 visibility probe (PowerShell over `win_ssh_run`) — Windows-only, so strih-snv is OUT; the consumer ALSO class-gates (below) |
+| obs-session | strih-snv stream resolume | the #979 operator-visibility watchdog; the consumer picks the probe by CLASS (below): windows-genlock = the obs64/AHK SESSION-0 PowerShell probe over `win_ssh_run`, linux-genlock (issue 1474) = the `[0/8]` Linux check (`strih-obs.service` over plain ssh + the bounded obs-websocket round-trip); the PP boxes stay out |
+| win-baseline | the windows-genlock rows of `stream resolume` (resolume today) | issue 1357/1474: the Windows OBS-box baseline (`win-baseline-check.sh`); `_obs_fleet_windows_rows` keeps only the windows-genlock rows, so stream-snv (Linux since issue 1462) is out and a Windows stream box joins again |
 | burn-reconcile | strih-snv stream | the #1060 fresh-OBS-start burn reconcile — OBS-WS GetStats + `obs_burn_filter` sweeps, neutral; resolume OUT (its cg-OBS burn is the opt-in CG_CHAIN profile) |
 | rig-restore | strih-snv stream | the #281 stranded-rig restore — the E2E harness's two program boxes, `obs_phase2.py` program-scene/teardown over OBS-WS, neutral |
 | build-parity | strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp | issue 1426: ONE OBS genlock build across BOTH venues -- `scripts/fleet-parity-alert-watchdog.sh` reads each box's `:8899` `genlock_build_sha` (an away traveling box = AWAY, never a page), plus `dantesync-version-gate.sh --fleet`, and catches a returning dantesync node up (`dantesync-fleet-upgrade.sh --fleet`) only while the rig lease is free and no home OBS box streams/records; pages a confirmed DRIFT under the stable key `fleet-parity`; ships DISABLED |
@@ -186,11 +187,17 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   page = obs64/AHK in session 0 over ssh). Identity read 23.9.2026: `resolume.lan` → 10.77.9.201 =
   `resolume-snv.lan`, ssh `hostname` = `resolume-snv`, AHK watcher seen in session 1. Re-confirm when
   the event-LAN DHCP lease moves.
-- **A Windows-only probe is CLASS-gated in the consumer, not only by facet policy.**
-  `obs_session_targets` skips (and logs) any roster member whose `obs_fleet_class` is not
-  `windows-genlock` — including an unknown name and an override that names strih-snv — so a Linux box
-  can never be handed PowerShell even if someone widens the facet. Same shape for any future
-  Windows-only consumer: facet policy decides membership, the class gate is the backstop.
+- **The probe is CLASS-picked in the consumer, not only by facet policy (issue 1474).**
+  `obs_session_targets` prints `name host linux` for a linux-genlock member (the `[0/8]` Linux check,
+  split into `strih_linux_visibility_probe` + `strih_linux_visibility_ws_ok` in
+  `scripts/lib/strih-platform.sh` and graded by `strih_linux_visibility_message`) and the Windows AHK
+  mode for a windows-genlock one, and skips (and logs) any other class -- an unknown name in an
+  override too -- so a Linux box can never be handed PowerShell even if someone widens the facet. An
+  empty Linux probe is connectivity (the watchdog's rule), and its page carries the plain-ssh
+  `systemctl --user restart strih-obs.service` recovery; the Windows alert text is unchanged. Test
+  seams: `OBS_SESSION_OBS_PHASE2_DIR` (a stub `obs_phase2.py`), `OBS_SESSION_LINUX_SSH_TIMEOUT`.
+  Same shape for any future per-class consumer: facet policy decides membership, the class picks
+  (or refuses) the probe. Tests: `tests/python/test_obs_session_linux_1474.py`.
 - **`obs_fleet_poll_now <name>` is the traveling/retired gate for a NEW per-box loop** (the three
   issue-1317 part-2 consumers use it; obs-liveness / network-reach predate it and still call
   `obs_fleet_is_home` for resolume themselves). `always` →
