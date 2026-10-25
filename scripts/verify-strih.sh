@@ -733,7 +733,7 @@ else
 fi
 
 # 29) RustDesk remote desktop (issue 1317; issue 1462: not installed / not active / no connect ID / no
-#     permanent password all FAIL -- stream-snv was handed over without it). strih_rustdesk_grade_row reads rustdesk --get-id.
+#     permanent password all FAIL -- stream-snv was handed over without it). The (rustdesk) row: strih_rustdesk_grade_row, reads rustdesk --get-id.
 RD_ROW="$(strih_rustdesk_grade_row "$(hostname -s)")"
 case "$RD_ROW" in OK\|*) ok "${RD_ROW#OK|}" ;; *) bad "${RD_ROW#FAIL|}" ;; esac
 
