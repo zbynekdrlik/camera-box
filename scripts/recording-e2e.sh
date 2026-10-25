@@ -810,6 +810,8 @@ echo "    bkshading-relay pause (cam2/painter, $PAINTER_IP): was-active=$BKSH_PA
 # exit propagates. Absent camera + unpinned baseline = a loud report-only UNVERIFIED (issue 1350).
 # shellcheck source=scripts/lib/camera-test-settings.sh
 . "$HERE/lib/camera-test-settings.sh"
+# shellcheck source=scripts/lib/rig-test-feed.sh
+. "$HERE/lib/rig-test-feed.sh"   # issue 1482: the direct feed has no test camera in the path
 camera_test_settings_enforce "$HERE" "$STRIH" "$STREAM" "$CAM_PW" "$CAMERA_NAME=$CAM1_IP" "cam2=$PAINTER_IP"
 
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
@@ -3029,7 +3031,7 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # (recording-verdict's all_cambox_av_sync). Same collection mechanism the AV_RESTART_GATE mode
 # already uses below (`--audio-marker`/`--marker-log`, #420/#421) — reused, not reinvented. The
 # plain single-camera path (ALL_CAMBOX unset) is UNCHANGED: no marker flags, no self-check.
-AV_SYNC_MARKER_DEVICE="${AV_SYNC_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
+AV_SYNC_MARKER_DEVICE="${AV_SYNC_MARKER_DEVICE:-$(rig_test_feed_marker_device)}"   # issue 1482
 AV_SYNC_MARKER_CADENCE="${AV_SYNC_MARKER_CADENCE:-30}"   # ~0.5 s @ 60 Hz (issue 1318, owner 17.9.2026: keep the mic-chain gate open)
 _cam2_marker_flags=""
 _cam2_marker_check=""
@@ -3899,7 +3901,7 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
       exit 2
       ;;
   esac
-  AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
+  AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-$(rig_test_feed_marker_device)}"   # issue 1482
   AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-30}"   # ~0.5 s @ 60 Hz (issue 1318)
   AV_RESTART_AUDIO_TRACK="${AV_RESTART_AUDIO_TRACK:-0}"
   AV_RESTART_TOLERANCE_MS="${AV_RESTART_TOLERANCE_MS:-50}"

@@ -55,6 +55,23 @@ pub const FALLBACK_MARKER_DEVICE: &str = "hw:CARD=PCH,DEV=3";
 /// Mirrors the existing `colour_scale`/`motion_sweep` `.unwrap_or(paint_only)` default-enable
 /// shape in `src/bin/frame-probe.rs`. A run that is not `--paint-only` (the Phase-1 loopback /
 /// synth-ndi paths) never has real hardware audio to emit, so it stays off regardless.
+/// Issue 1482: the env var a supervised painter (cam2-painter.service) reads the marker device from when
+/// no `--audio-marker-device` flag is given. rig-mode TEST writes it into a `/run` drop-in in the rig's
+/// direct mode (the jack), EVENT removes it.
+pub const MARKER_DEVICE_ENV: &str = "FRAME_PROBE_AUDIO_MARKER_DEVICE";
+
+/// Issue 1482: the explicitly given marker device -- the flag wins, else a non-empty
+/// [`MARKER_DEVICE_ENV`] value (trimmed) -- or `None` (resolve it live from `aplay -l`).
+pub fn explicit_marker_device(flag: Option<&str>, env_value: Option<&str>) -> Option<String> {
+    if let Some(f) = flag {
+        return Some(f.to_string());
+    }
+    match env_value.map(str::trim) {
+        Some(v) if !v.is_empty() => Some(v.to_string()),
+        _ => None,
+    }
+}
+
 pub fn audio_marker_default_enabled(paint_only: bool) -> bool {
     paint_only
 }
@@ -239,6 +256,25 @@ impl AudioMarkerRecovery {
     /// so the retry loop re-opens a fresh emitter exactly as at a failed startup open.
     pub fn mark_degraded(&mut self) {
         self.degraded = true;
+    }
+}
+
+#[cfg(test)]
+mod explicit_device_tests_1482 {
+    use super::*;
+
+    #[test]
+    fn the_flag_wins_then_the_env_then_live_resolution() {
+        assert_eq!(
+            explicit_marker_device(Some("hw:CARD=PCH,DEV=3"), Some("hw:CARD=HID,DEV=0")).as_deref(),
+            Some("hw:CARD=PCH,DEV=3")
+        );
+        assert_eq!(
+            explicit_marker_device(None, Some(" hw:CARD=HID,DEV=0\n")).as_deref(),
+            Some("hw:CARD=HID,DEV=0")
+        );
+        assert_eq!(explicit_marker_device(None, Some("  ")), None);
+        assert_eq!(explicit_marker_device(None, None), None);
     }
 }
 

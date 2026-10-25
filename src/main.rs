@@ -9,7 +9,9 @@ use tracing_subscriber::EnvFilter;
 use camera_box::capture::VideoCapture;
 use camera_box::config::{Config, DisplayConfig};
 use camera_box::intercom;
-use camera_box::intercom_target::{resolve_intercom_target, INTERCOM_TARGET_ENV};
+use camera_box::intercom_target::{
+    intercom_switched_off, resolve_intercom_target, INTERCOM_SWITCH_ENV, INTERCOM_TARGET_ENV,
+};
 use camera_box::ndi::NdiSender;
 use camera_box::ndi_display::{self, NdiDisplayConfig};
 #[cfg(feature = "probe")]
@@ -373,6 +375,20 @@ async fn main() -> Result<()> {
         ic.target_host = target_host;
         ic
     });
+    // Issue 1482: the SNV rig's direct mode gives cam2's USB jack to the QPSK marker; rig-mode TEST
+    // sets CAMERA_BOX_INTERCOM=off in its /run drop-in, EVENT removes it.
+    let intercom_config = if intercom_switched_off(
+        std::env::var(INTERCOM_SWITCH_ENV).ok().as_deref(),
+    ) {
+        if intercom_config.is_some() {
+            tracing::info!(
+                "intercom OFF: {INTERCOM_SWITCH_ENV}=off (the rig's direct mode gives the USB jack to the QPSK marker, issue 1482)"
+            );
+        }
+        None
+    } else {
+        intercom_config
+    };
 
     // Run the capture loop with optional display and intercom
     run_capture_loop(

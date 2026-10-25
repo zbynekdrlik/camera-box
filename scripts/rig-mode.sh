@@ -123,6 +123,10 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # device silently plays into a dead pin after any HDMI renegotiation.
 # shellcheck source=scripts/lib/marker-device-resolve.sh
 . "$RIG_MODE_DIR/lib/marker-device-resolve.sh"
+# issue 1482: the rig's test feed (optical = a camera films cam2's monitor; direct = cam2's HDMI straight into
+# the splitter, the marker on cam2's USB jack, cam2's intercom off in TEST).
+# shellcheck source=scripts/lib/rig-test-feed.sh
+. "$RIG_MODE_DIR/lib/rig-test-feed.sh"
 # #723: SINGLE SOURCE OF TRUTH for the rig-test LEDGER — anything a test/worker starts on the
 # rig registers durably here; EVENT mode cleans BY LEDGER (kill-by-PID, immune to a process
 # rename — the #721 incident's root link: a RENAMED painter that every name-based cleanup
@@ -417,6 +421,7 @@ mkdir -p "$dropin_dir"
   echo '[Service]'
   echo 'Environment=CAMERA_BOX_NO_DISPLAY=1'
 } > "$dropin"
+$(rig_test_feed_intercom_dropin_cmds)
 systemctl daemon-reload
 systemctl restart camera-box
 # (2) wait until /dev/fb0 is actually free (the no-display camera-box released it; teardown is async).
@@ -1319,6 +1324,12 @@ cam_ssh() {
 # was actually used, AFTER launch.
 resolve_marker_device() {
   local aplay_text resolved
+  # issue 1482: in the direct feed the marker plays to cam2's USB jack, never an HDMI monitor
+  if [ "$(rig_test_feed)" = direct ]; then
+    echo "[issue 1482] direct feed: the marker plays to cam2's jack $(rig_test_feed_marker_device)" >&2
+    rig_test_feed_marker_device
+    return 0
+  fi
   aplay_text="$(cam_ssh "$(marker_device_aplay_list_cmds)" 2>/dev/null || true)"
   if resolved="$(marker_device_resolve_from_aplay "$aplay_text")"; then
     echo "[#725] resolved marker device from cam2's live aplay -l: $resolved" >&2
@@ -1337,6 +1348,15 @@ resolve_marker_device() {
 verify_marker_device_monitor() {
   local device="$1" aplay_text
   aplay_text="$(cam_ssh "$(marker_device_aplay_list_cmds)" 2>/dev/null || true)"
+  if [ "$(rig_test_feed)" = direct ]; then
+    if rig_test_feed_jack_present "$aplay_text" "$device"; then
+      echo "PASS: [issue 1482] direct feed: the marker jack $device is present on cam2 (post-launch re-check)"
+      return 0
+    fi
+    echo "FAIL: [issue 1482] direct feed: the marker jack $device is NOT in cam2's aplay -l -- killing the just-launched painter." >&2
+    cam_ssh "PID=\$(cat '$PAINTER_PIDFILE' 2>/dev/null || true); [ -n \"\$PID\" ] && kill \"\$PID\" 2>/dev/null || true" || true
+    return 1
+  fi
   if marker_device_carries_monitor "$aplay_text" "$device"; then
     echo "PASS: [#725] marker device $device confirmed carrying a live monitor (post-launch re-check)"
     return 0
@@ -1397,6 +1417,7 @@ do_test() {
   # strih program (cam1 off) skipped this handoff, the 2 h transient painter expired and the QPSK
   # marker stopped. A failed check still fails the run, but cam2 keeps painting.
   echo "[cam2 ${PAINTER_IP}] #1008/#937 hand STEADY STATE to the PERMANENT supervised cam2-painter.service (durable -- Restart=always, survives crash + reboot -- NOT a disposable 2h nohup):"
+  cam_ssh "$(rig_test_feed_painter_dropin_cmds)"   # issue 1482: the steady painter's marker device for this feed
   cam_ssh "$(cam2_painter_steady_state_handoff_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")"
   echo
   echo "[cam2 ${PAINTER_IP}] #1075 arm the transient cam2-painter dead-man as a standing 'never dark' net for the handed-off permanent painter (symmetric with EVENT mode's disarm; no-ops on every fire while the painter's own frame-probe is alive):"
@@ -1739,6 +1760,7 @@ do_event() {
   # burn-clear, and fail loud at the END (folded into the exit status below) — fail-loud is
   # preserved, statelessness of the rig is no longer sacrificed to it.
   _cam_restore_rc=0
+  cam_ssh "$(rig_test_feed_painter_dropin_clear_cmds)" || _cam_restore_rc=$?   # issue 1482: before the camera-box restart
   cam_ssh "$(painter_stop_remote "$PAINTER_PIDFILE")" || _cam_restore_rc=$?
   if [ "$_cam_restore_rc" -ne 0 ]; then
     echo "WARNING #868: cam-side restore FAILED (rc=$_cam_restore_rc) — continuing to the OBS burn-clear so no burn is stranded ON; EVENT mode will still exit non-zero." >&2

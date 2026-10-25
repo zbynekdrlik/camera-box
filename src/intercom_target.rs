@@ -36,6 +36,44 @@ pub fn resolve_intercom_target(
     }
 }
 
+/// Issue 1482 (owner ROZHODNUTÉ 25.10.2026): in the SNV rig's DIRECT mode (cam2's HDMI straight into
+/// the splitter, no camera) cam2's USB jack carries the QPSK measurement marker, so cam2 runs NO intercom
+/// there. rig-mode TEST writes `CAMERA_BOX_INTERCOM=off` into its `/run` camera-box drop-in; EVENT
+/// removes the drop-in and the intercom comes back from config.toml.
+pub const INTERCOM_SWITCH_ENV: &str = "CAMERA_BOX_INTERCOM";
+
+/// Issue 1482: true when the [`INTERCOM_SWITCH_ENV`] value turns the intercom OFF (`off`, any case,
+/// surrounding whitespace ignored). Any other value, or none, leaves the configured intercom alone.
+pub fn intercom_switched_off(env_value: Option<&str>) -> bool {
+    matches!(env_value, Some(v) if v.trim().eq_ignore_ascii_case("off"))
+}
+
+#[cfg(test)]
+mod switch_tests {
+    use super::*;
+
+    #[test]
+    fn off_in_any_case_switches_the_intercom_off_1482() {
+        for v in ["off", "OFF", " Off\n"] {
+            assert!(intercom_switched_off(Some(v)), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn anything_else_keeps_the_configured_intercom_1482() {
+        for v in [
+            None,
+            Some(""),
+            Some("on"),
+            Some("0"),
+            Some("offline"),
+            Some("no"),
+        ] {
+            assert!(!intercom_switched_off(v), "{v:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
