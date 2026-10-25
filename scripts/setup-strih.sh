@@ -857,26 +857,27 @@ echo "  Companion Satellite v${CS_VER} installed to /opt (run by companion-satel
 else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
-step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, permanent password from a 0600 file"
-# issue 1317: install RustDesk from the PINNED .deb (sha256-verified, fail-loud on mismatch), enable
-# --now the service, and apply the permanent password read INSIDE the emitted block from a 0600 file
-# the SUPERVISOR places (a provisioning input) -- the @JANUS_ROOM_SECRET@ discipline: the password
-# value never appears in git, in an argv here, or in a log. Gated on the password file's presence:
-# without it a permanent password cannot be set, so we SKIP + warn (never invent one, never abort the
-# whole provisioning run for a not-yet-placed supervisor secret). Run in a SUBSHELL (the step-4b/-16
-# pattern): the emitter `exit 1`s on a fetch/sha/install failure, so `( eval "$(...)" ) || fail` fires
-# with the actionable message instead of terminating setup-strih.sh directly.
-RD_VER="$(strih_rustdesk_version)"
-RD_URL="$(strih_rustdesk_deb_url)"
-RD_SHA="$(strih_rustdesk_deb_sha256)"
+step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, the permanent password REQUIRED"
+# issue 1317: RustDesk from the PINNED .deb (sha256-verified, fail-loud on mismatch), enabled --now. Issue 1462:
+# remote access is required on every box -- a box with RustDesk active and its permanent password set is left
+# as it is; a 0600 file at RD_PW_FILE (a provisioning input, never in git) installs + applies it; otherwise the
+# package is installed and setup FAILS naming the dev1 command that applies the password from the credential
+# channel (never a WARN that lets a box be handed over without remote access). Subshells: the emitters exit 1.
+RD_VER="$(strih_rustdesk_version)"; RD_URL="$(strih_rustdesk_deb_url)"; RD_SHA="$(strih_rustdesk_deb_sha256)"
 RD_PW_FILE="${STRIH_LX_RUSTDESK_PW_FILE:-/etc/rustdesk/permanent-password.secret}"
-if [ -s "$RD_PW_FILE" ]; then
+RD_STATE="$(strih_rustdesk_state)"
+if [ "$RD_STATE" = ready ]; then
+  echo "  RustDesk active with its permanent password set; connect ID: $(timeout 10 rustdesk --get-id 2>/dev/null | head -1 || true)"
+elif [ -s "$RD_PW_FILE" ]; then
   ( eval "$(strih_rustdesk_install_cmds "$RD_VER" "$RD_URL" "$RD_SHA" "$RD_PW_FILE")" ) \
     || fail "RustDesk install failed (v${RD_VER}) -- confirm the pinned .deb URL/sha256 and the 0600 password file ${RD_PW_FILE}, then re-run"
-  RD_ID="$(rustdesk --get-id 2>/dev/null | head -1 || true)"
-  echo "  RustDesk v${RD_VER} installed + enabled --now (permanent password applied from ${RD_PW_FILE}); connect ID: ${RD_ID:-<run: rustdesk --get-id>}"
+  echo "  RustDesk v${RD_VER} installed + the permanent password applied from ${RD_PW_FILE} (was: ${RD_STATE})"
 else
-  warn "  RustDesk NOT installed -- place the 0600 permanent-password file at ${RD_PW_FILE} (a provisioning input the supervisor sets; never in git) and re-run this step"
+  if [ "$RD_STATE" != nopw ]; then
+    ( eval "$(strih_rustdesk_package_cmds "$RD_VER" "$RD_URL" "$RD_SHA")" ) \
+      || fail "RustDesk install failed (v${RD_VER}) -- confirm the pinned .deb URL/sha256, then re-run"
+  fi
+  fail "issue 1462: RustDesk v${RD_VER} has no permanent password -- $(strih_rustdesk_apply_hint "$(hostname -s)"), then re-run"
 fi
 
 # ---------------------------------------------------------------------------------------------

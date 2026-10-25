@@ -1155,9 +1155,12 @@ strih_rustdesk_deb_sha256() { printf '7244ba47c40e804172044bfbe659467c54ce46554c
 # fail`. Every URL/SHA/PW_FILE arg is %q-quoted; the final statement ends with `;` so a `$(...)`
 # embedding never glues a following command (the v4l2-neutral.sh _cmd-helper gotcha). VERSION is used
 # only to name the temp file (provenance).
-strih_rustdesk_install_cmds() {
+# strih_rustdesk_package_cmds VERSION URL SHA256 -> the package half of strih_rustdesk_install_cmds alone (issue
+# 1462): download, sha256 verify, apt install, `systemctl enable --now rustdesk`. No password: setup step 16b
+# installs RustDesk even when no permanent password is at hand, then FAILS naming the dev1 apply command.
+strih_rustdesk_package_cmds() {
   local version="${1:?rustdesk version required}" url="${2:?rustdesk .deb url required}"
-  local sha="${3:?rustdesk .deb sha256 required}" pwfile="${4:?rustdesk password-file path required}"
+  local sha="${3:?rustdesk .deb sha256 required}"
   cat <<EOF
 __rd_deb="\$(mktemp "/tmp/rustdesk-${version}.XXXXXX.deb")" || { echo "rustdesk: mktemp failed" >&2; exit 1; };
 curl -fsSL -o "\$__rd_deb" $(printf '%q' "$url") || { echo "rustdesk: download failed ($url)" >&2; rm -f "\$__rd_deb"; exit 1; };
@@ -1166,11 +1169,61 @@ if [ "\$__rd_got" != $(printf '%q' "$sha") ]; then echo "rustdesk: sha256 mismat
 DEBIAN_FRONTEND=noninteractive apt-get install -y "\$__rd_deb" || { echo "rustdesk: apt install failed" >&2; rm -f "\$__rd_deb"; exit 1; };
 rm -f "\$__rd_deb";
 systemctl enable --now rustdesk || { echo "rustdesk: enable --now failed" >&2; exit 1; };
+EOF
+}
+
+strih_rustdesk_install_cmds() {
+  local version="${1:?rustdesk version required}" url="${2:?rustdesk .deb url required}"
+  local sha="${3:?rustdesk .deb sha256 required}" pwfile="${4:?rustdesk password-file path required}"
+  strih_rustdesk_package_cmds "$version" "$url" "$sha"
+  cat <<EOF
 __rd_pw="\$(cat $(printf '%q' "$pwfile"))" || { echo "rustdesk: cannot read password file ${pwfile}" >&2; exit 1; };
 if [ -z "\$__rd_pw" ]; then echo "rustdesk: password file ${pwfile} is empty" >&2; unset __rd_pw; exit 1; fi;
 rustdesk --password "\$__rd_pw" || { echo "rustdesk: setting the permanent password failed" >&2; unset __rd_pw; exit 1; };
 unset __rd_pw;
 EOF
+}
+
+# strih_rustdesk_state -> issue 1462: `absent` (no rustdesk binary), `down` (the service not active), `nopw`
+# (active, but the root config carries no permanent password) or `ready`. The config is root's 0600
+# RustDesk.toml (STRIH_RUSTDESK_CONF, a test seam): read directly as root, else through a non-interactive
+# sudo; an unreadable config reads as `nopw` (never a false ready). Only the key's PRESENCE is read, the
+# (encrypted) value is never printed. Always rc 0.
+strih_rustdesk_state() {
+  local conf="${STRIH_RUSTDESK_CONF:-/root/.config/rustdesk/RustDesk.toml}" text
+  command -v rustdesk >/dev/null 2>&1 || { printf absent; return 0; }
+  [ "$(systemctl is-active rustdesk 2>/dev/null || true)" = active ] || { printf down; return 0; }
+  text="$({ cat "$conf" 2>/dev/null || sudo -n cat "$conf" 2>/dev/null; } || true)"
+  if grep -qE "^password[[:space:]]*=[[:space:]]*'[^']+'" <<<"$text"; then printf ready; else printf nopw; fi
+}
+
+# strih_rustdesk_apply_hint BOX -> the dev1 command that applies the permanent password to BOX from the
+# credential channel (issue 1462: the owner's one RustDesk password on every box, persisted on dev1).
+strih_rustdesk_apply_hint() {
+  printf 'on dev1: python3 ~/devel/airuleset/airuleset.py secret exec --file ~/.secrets/rustdesk-permanent-password --env RUSTDESK_PERMANENT_PASSWORD -- scripts/rustdesk-password-apply.sh %s' "${1:?box required}"
+}
+
+# strih_rustdesk_grade_row BOX -> verify-strih item 29 (issue 1462): one `OK|text` / `FAIL|text` line. RustDesk
+# is the operator's remote access on EVERY Linux workstation box: not installed, not active, no connect ID
+# or no permanent password all FAIL (stream-snv was handed over 22.10.2026 without it and only a NOTE said
+# so). Always rc 0.
+strih_rustdesk_grade_row() {
+  local box="${1:?box required}" st id
+  st="$(strih_rustdesk_state)"
+  case "$st" in
+    absent) printf 'FAIL|(rustdesk) not installed -- re-run setup-strih.sh step 16b (issue 1462)\n' ;;
+    down) printf 'FAIL|(rustdesk) installed but the service is %s -- systemctl enable --now rustdesk; re-run setup-strih.sh step 16b\n' \
+      "$(systemctl is-active rustdesk 2>/dev/null || echo unknown)" ;;
+    nopw) printf 'FAIL|(rustdesk) active but no permanent password is set -- %s\n' "$(strih_rustdesk_apply_hint "$box")" ;;
+    *)
+      id="$(timeout 10 rustdesk --get-id 2>/dev/null | head -1 || true)"
+      if [ -n "$id" ]; then
+        printf 'OK|(rustdesk) service active, permanent password set, connect ID %s\n' "$id"
+      else
+        printf 'FAIL|(rustdesk) active with a password but no connect ID -- systemctl restart rustdesk\n'
+      fi ;;
+  esac
+  return 0
 }
 
 # --- issue 1345 M3a: Janus audiobridge audio edge (enable-only) ------------------------------------
