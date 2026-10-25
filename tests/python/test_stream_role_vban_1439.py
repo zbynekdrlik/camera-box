@@ -44,7 +44,15 @@ VBAN_KIND = "net.nagater.obs-vban.source"
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
          "STRIH_HUB_UNIT_FILE", "STRIH_HUB_DROPIN_DIR", "STRIH_HUB_BIN", "STRIH_HUB_CONFIG_DIR",
-         "STRIH_HUB_ASIDE_DIR", "STRIH_PROGRAM_VBAN_WAIT_S", "STRIH_PROGRAM_VBAN_KIND_FILE")
+         "STRIH_HUB_ASIDE_DIR", "STRIH_PROGRAM_VBAN_WAIT_S", "STRIH_PROGRAM_VBAN_KIND_FILE",
+         "STRIH_PROGRAM_VBAN_CHANNELS_FILE")
+
+
+def _ok_channels(tmp_path):
+    """issue 1439: the per-channel meter read of a healthy stereo program (the grader's seam)."""
+    f = tmp_path / "channels"
+    f.write_text("channel_verdict=ok\nchannel_detail=ch1 -40.0 dB ch2 -41.0 dB\n")
+    return f
 
 
 def _load(name, path):
@@ -707,7 +715,7 @@ def _grade(tmp_path, log_text, kind=VBAN_KIND, append=None, box="stream-pp"):
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
             'strih_box_load "$3"\n' + later + 'strih_program_vban_grade /nonexistent 127.0.0.1 "$1"\nwait')
     r = _bash(body, log, tmp_path / "later.txt", box,
-              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0"})
+              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "1" if append else "0"})
     assert r.returncode == 0, r.stderr
     return r.stdout.splitlines()
 
