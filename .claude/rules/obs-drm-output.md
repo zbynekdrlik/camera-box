@@ -79,7 +79,7 @@ widen `find_package(XCB … RANDR …)`; add the `.c`/`.h` to `target_sources(li
 the `HDMI-1` name), and the DRM connector id is discovered from the LEASED fd
 (`drmModeGetResources(leasefd)->connectors[0]`), never from the config string. So the config
 `connector` value is the **X RandR output name** (`"HDMI-1"`). The pure CRTC-selection
-(`drm_output_pick_free_crtc`, Tier-0 truth-tabled) picks a free candidate CRTC to include in the
+(`drm_output_pick_free_crtc`, truth-tabled) picks a free candidate CRTC to include in the
 lease request; on the leased fd there is then exactly one crtc+connector.
 
 The lease fd IS DRM master of the leased objects — so **no `SET_MASTER` ioctl and no fbcon-detach**
@@ -88,10 +88,9 @@ reference here). Linux/EGL/DRM only — strih+stream are libobs-d3d11 where xcb/
 exist; the whole TU is under `#if defined(__linux__)` and the obs.c call site is `__linux__`-guarded,
 so there is **no `windows-genlock*.yml` pwsh mirror** (nothing to assert on Windows).
 
-## Local verification (CI is the first real type-check, but buy a compile check back)
+## Local verification
 
-- **Anchor + lift-compile gate** `tests/drm_output_lease_1152.rs` (std-only, runs via
-  `CARGO_MANIFEST_DIR=<abs> rustc --test --edition 2021 tests/drm_output_lease_1152.rs -o /tmp/t && /tmp/t`).
+- **Anchor + lift-compile gate** `tests/drm_output_lease_1152.rs` (std-only).
   Facet A source-anchors the mechanism (lease/free_lease/pageflip/`drm-output:`/pick-helper, the
   os-linux.cmake link, the `__linux__`-guarded obs.c autostart + obs_shutdown stop). Facet B lifts
   `drm_output_pick_free_crtc` and cc-compiles it under `-Werror -Wconversion` over a truth table —
@@ -342,7 +341,7 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
     version carried a render across a stop/restart into a tick that did not contain it.
   - The `multiview-render` line carries `self_ns=` (the value the gate last used). On a healthy
     30 fps view it reads about the Multiview cost (~14e6).
-  - Tier-0 mirror: `src/render_budget.rs` (`display_should_skip` + `aux_consumed_ns` +
+  - Pure mirror: `src/render_budget.rs` (`display_should_skip` + `aux_consumed_ns` +
     `aux_sender_should_skip_excluding`). C parity + the live numbers (pre 15 + mv 14 = 30/30, the
     wrapper 15/30, pre 25 + mv 14 = the floor 7/30): `tests/drm_output_view_mv_budget_1346.rs`.
   - Any NEW surface that renders inside the graphics tick and asks this gate must pass its own

@@ -196,7 +196,7 @@ cat "$D/report.txt"; bash scripts/av-restart-matrix.sh --report "$D"
   - the burn-reconcile watchdog sweeps a resurrected burn once the lease is released.
 - Post `$D/report.txt` on issue 1367.
 
-## Tier-0 verification (dev1: no cargo)
+## Verification
 
 `python3 -m pytest tests/python/test_av_restart_matrix_decision_1367.py
 tests/python/test_av_restart_matrix_orchestrator_1367.py tests/python/test_av_soak_lease_inherit_1367.py

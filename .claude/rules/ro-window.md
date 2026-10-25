@@ -327,7 +327,7 @@ stdin-reading work still closes; an unfilled placeholder refuses before any moun
 loud naming the writer; a pasted step never ends the session; the driver prints each step below its
 token.
 
-## Tests (Tier-0, no cargo, no rig)
+## Tests (no rig)
 
 - `tests/python/ro_window_fakes_1407.py`: a stub-only PATH box whose `mount`, `findmnt`, `systemctl`,
   `fuser`, `lsof`, `sync`, `systemd-run` share ONE root state and log `<tool> <args> root=<mode>`.

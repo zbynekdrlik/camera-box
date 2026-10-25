@@ -105,8 +105,7 @@ back**: re-adding the slowest box makes it the anchor again and pushes every oth
 that same constant, so re-activation is never just the one-line `CAMERA_ACTIVE_SET` edit — run
 the calibrator in the same breath. Note that `phase-sync-active-floor-gate` is NOT in the CI
 `probe-tools-linux-amd64` artifact (the harness builds these gate bins itself at
-`recording-e2e.sh`'s own build step); to run the independent check by hand, build just that one
-small default-feature bin: `cargo build --release --bin phase-sync-active-floor-gate  # airuleset:build-ok`.
+`recording-e2e.sh`'s own build step); build it by hand: `cargo build --release --bin phase-sync-active-floor-gate`.
 
 # The `[4h/8]` floor gate now HAS an automatic establisher — `phase_sync_reanchor.py` (#900)
 
@@ -146,7 +145,7 @@ defensive guard rejecting `--out-json == --persisted-json`.
 persisted file, or one that does not cover every active camera, is a genuine "no calibration basis"
 state — `phase_sync_reanchor.py` exits nonzero so `[4h/8]` is never reached behind pins nobody set.
 The pure decision layer (`load_persisted_transits` / `restrict_to_active` coverage-fail /
-`plan_reanchor` no-op-vs-apply / `recover_uniform_margin`) is Tier-0 unit-tested; the harness
+`plan_reanchor` no-op-vs-apply / `recover_uniform_margin`) is unit-tested; the harness
 wiring/ordering/on-by-default/fail-loud is guarded by `tests/harness_phase_sync_reanchor_900.rs`.
 The `main()`/`--apply` tests mock the WS layer and MUST still pin `--persisted-json`/`--out-json` to
 `tmp_path` (the real-home-clobber hazard above applies to `main()` regardless of what it is testing).

@@ -104,7 +104,7 @@ Consequently the `else` branch (BOTH verdicts fail) is no longer just `frame_cou
 `frame_count == 0`, OR `copies`/`gaps` over the tolerance (the dominant real-world cause
 today, since `gates_overall_pass()` is still hardcoded `false`), OR — once issue 905 restores
 `gates_overall_pass()` to `true` — an over-floor `undecodable`. `recording-verdict.rs` derives
-these via the pure, Tier-0-testable seam `crate::window_gate::relaxed_failure_reasons` /
+these via the pure seam `crate::window_gate::relaxed_failure_reasons` /
 `RelaxedFailureReason` (`EmptyWindow` / `OverCopiesGapsTolerance` / `FloorExceededGating` /
 `FloorWithinReportOnly`) rather than re-deriving the conditions inline — a window can carry more
 than one reason at once (e.g. over-tolerance copies/gaps AND a merely-report-only over-floor
@@ -137,21 +137,20 @@ two) reds:
 
 - **`src/optical_floor.rs`** (pure): the constants + `gates_overall_pass()` + its own tests
   (`gates_overall_pass_is_live_gating_again_905`, `run_wide_floor_boundary_*`,
-  `run_wide_floor_recalibrated_to_fifteen_915`). Tier-0-testable — a `rustc --edition 2021 --test`
-  combined replica with `window_gate.rs` proves RED→GREEN locally.
+  `run_wide_floor_recalibrated_to_fifteen_915`).
 - **`src/window_gate.rs`** (pure): `decide_with_tolerance` + `relaxed_failure_reasons` fold on
   `undecodable_ok || !gates_overall_pass()`; tests `undecodable_over_floor_now_fails_both_verdicts_905`,
   `over_floor_fails_overall_pass_term_via_905_floor_regate`, `relaxed_failure_reasons_over_floor_now_gates_905`.
-- **`src/probe/recording_segments.rs`** (probe-gated, NO local compile): the run-wide fold + the
+- **`src/probe/recording_segments.rs`** (probe-gated): the run-wide fold + the
   three tests `single_window_five_undecodable_..._905` / `spread_over_run_wide_floor_fails_overall_pass_915`
   / `undecodable_over_per_window_floor_..._1132`.
-- **`src/bin/recording-verdict.rs`** (probe-gated, NO local compile): the job-log line MUST branch
+- **`src/bin/recording-verdict.rs`** (probe-gated): the job-log line MUST branch
   on `run_wide_undecodable_within_floor` (a loud `✗ #905 FLOOR FAIL` vs an OK line — a single
   unconditional line reads identically for pass/fail, review 🟡1); the JSON emits numeric
   `per_window_undecodable_floor`/`run_undecodable_floor` keys + the `undecodable_floor_gate` prose
   (interpolate the constants, never hardcode "6"); the per-window WARN prints key off the seam
   state; test `all_cambox_continuity_undecodable_over_floor_gates_end_to_end_905`.
-- **`scripts/e2e_discord_report.py`** (Tier-0 pytest): `_report_only_tripped`'s floor branch MUST
+- **`scripts/e2e_discord_report.py`** (pytest): `_report_only_tripped`'s floor branch MUST
   carry the `undecodable_floor_gates_overall_pass is not True` guard (else a post-flip run is
   BOTH blocking AND report-only); `_blocking_failures` block 4 names a floor red for run-wide OR
   per-window over (reads `per_window_undecodable_floor`, falls back to 4 for pre-#905 verdicts);

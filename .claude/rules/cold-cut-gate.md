@@ -86,9 +86,8 @@ transitions):
 | sustained-receive-fps / `ReceiveHealth` (floor `30 − 3` = 27) | steady-state whole-window | green min 29.18 | REPORT-ONLY — double-jeopardy with the LIVE continuity gates (copies/gaps/frozen_leg); no cold-restore-degraded datapoint to calibrate a cold-specific floor. Re-entry: a genuine cold-restore-degraded case the continuity gates miss. |
 
 Fold-replication over all 81 verdicts: **0 runs newly red** (the lone old-glitch run passes under
-the allowance); zero green runs affected — zero-FP. Tier-0 RED→GREEN via a standalone `rustc --test`
-replica of `src/cold_cut.rs` (strip the serde derive) — 4 new-spec tests fail on the old code, 23
-pass on the new; the fold is not unconditional (synthetic clean=pass, late-black=red,
+the allowance); zero green runs affected — zero-FP. RED→GREEN: 4 new-spec tests fail on the old
+code, 23 pass on the new; the fold is not unconditional (synthetic clean=pass, late-black=red,
 early-black=report-only). Consumer sweep: `recording-verdict.rs` gate string report-only → LIVE;
 `scripts/e2e_discord_report.py` cold-cut added to `_blocking_failures` (guarded `gates_overall_pass
 is True`) + its `_report_only_tripped` branch guarded `is not True` so the two historical fixtures
@@ -107,7 +106,7 @@ is True`) + its `_report_only_tripped` branch guarded `is not True` so the two h
    "steady-state receive healthy", the issue #1/#799 class), and use the issue-793 discriminator
    (`onset_miss_attribution`: a miss whose switch is `< SEGFAULT_WINDOW_MAX_SECS` into the run is a
    PossibleSegfaultWindow, not a genuine cold-cut miss) to exclude a startup-segfault confound.
-   All of this is Tier-0 unit-tested in `src/cold_cut.rs`; the flip itself is a one-line change to
+   All of this is unit-tested in `src/cold_cut.rs`; the flip itself is a one-line change to
    `gates_overall_pass()`.
 
 ## Status of the prerequisites (2026-09-01, issue #1086 data-mine)

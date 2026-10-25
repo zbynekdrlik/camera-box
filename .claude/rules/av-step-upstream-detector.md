@@ -82,14 +82,13 @@ POSITIVE step reading AT A TRUSTWORTHY QUALITY, so a dev1-side outage → SKIP �
 reference-anchor needed). Report-only ⚠️ with a stable `--dedup-key av-step-$box` (#1206); recovery
 is machine-channel only. Ships DISABLED (units committed, not enabled).
 
-## Tier-0 verify (no cargo)
+## Verify
 
 `python3 -m pytest tests/python/test_av_step_*.py tests/python/test_notify_dedup_key_sweep_1206.py` +
 the #1226/#1231/server siblings; `bash -n` + `shellcheck -S warning` on the watchdog. The shell state
-machine (STEP → confirm → alert → absorbed-hold → recovery) has no Rust test under Tier-0 — drive it
-with a stubbed `curl` on `$PATH` serving a different crafted bundle-state body per pass (the #836
-executable-fixture pattern) + a persistent `AV_STEP_ALERT_STATE_FILE`, and assert the log lines +
-the `alerted_/alert_base_` state transitions across passes.
+machine (STEP → confirm → alert → absorbed-hold → recovery) has no Rust test — drive it with a stubbed
+`curl` on `$PATH` serving a different crafted bundle-state body per pass (#836 executable fixture) + a
+persistent `AV_STEP_ALERT_STATE_FILE`; assert the log lines + `alerted_/alert_base_` transitions.
 
 ## #1319 — the absolute-BAND arm (owner-facing alarm the STEP term is blind to)
 
@@ -125,7 +124,7 @@ arm, run alongside the step arm per box:
   (non-bucketed) one. New band tunables: `AV_BAND_MS`, `AV_BAND_REFERENCE_MS`, `AV_BAND_REFERENCE_FILE`,
   `AV_BAND_CONFIRM_THRESHOLD`, `REPING_INTERVAL_S`.
 - **Never a false page:** OUT_OF_BAND needs a FETCHED positive reading, so SKIP/STALE/UNKNOWN/REPIN/
-  IN_BAND/IN_BAND_QUIET never page. Tier-0: `tests/python/test_av_band_1319.py` (incl. the realistic
+  IN_BAND/IN_BAND_QUIET never page. Tests: `tests/python/test_av_band_1319.py` (incl. the realistic
   19:40-19:59 fixture) + the sweep + `bash -n`/`shellcheck`; live dry-run against stream `:8899`.
 
 ## #1319 Part 2 — the band arm FALSE-PAGED 78×; fix = measurement-quality gate + dock-native reference
@@ -179,7 +178,7 @@ The fix (all under this watchdog + its facet source):
   mandates). Root-causing the dock bias itself (the cluster lag pick after a pin write) is the
   remaining follow-up this observability enables.
 
-**Tier-0:** `pytest tests/python/test_av_band_quality_1319.py` (+ the extended `test_av_band_1319.py`,
+**Tests:** `pytest tests/python/test_av_band_quality_1319.py` (+ the extended `test_av_band_1319.py`,
 gather + step + notify-dedup siblings) + `bash -n`/`shellcheck` + a functional `curl`-stubbed run of
 `av_sync_persist_dock_reference` (good quality merges the dock keys, bad/absent records nothing);
 the C++ compiles at CI only. The band arm is held OFF via a dev1 `AV_BAND_MS=100000` drop-in until
@@ -225,7 +224,7 @@ quality FLAPS good/bad every pass never reaches the 2-pass confirm and its STEP 
 indefinitely. Acceptable for a report-only early-warning (the E2E A/V gate is the real net), and the
 right trade — pages must come only from a TRUSTWORTHY sustained reading.
 
-**Tier-0:** `pytest tests/python/test_av_step_stepgate_1319.py` (classify/analyze/CLI + sourced-bash
+**Tests:** `pytest tests/python/test_av_step_stepgate_1319.py` (classify/analyze/CLI + sourced-bash
 orchestrator tests that override `fetch_bundle_json` and assert the LOW_QUALITY branch is log-only,
 no notify, confirm reset, AND — while the box is ALERTED — the `alerted_/alert_base_` latch survives
 with no false RECOVERY) + the existing `test_av_step_decision_1267.py` (unchanged, still green).
@@ -257,5 +256,5 @@ The fix threads a FRESHNESS facet through both arms:
   has `recent_mad_ms` PRESENT, so `band_quality_ok` ≠ None and the gate is skipped entirely — the
   drift is judged and still pages. `analyze` / `analyze_band` read the facet from the JSON body (no
   watchdog shell change needed).
-- **Tier-0:** `pytest tests/python/test_av_step_quality_age_1325.py` + `test_bundle_state_server_log.py`
+- **Tests:** `pytest tests/python/test_av_step_quality_age_1325.py` + `test_bundle_state_server_log.py`
   (the facet FLOWS through gather) + the existing #1319/#1267 arms stay green.

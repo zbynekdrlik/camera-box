@@ -36,11 +36,10 @@ decouple into two constants (that reintroduces the drift the design forbids).
 A naive sweep MISSES two sites (both #1120 + the review agent initially missed them):
 
 1. `src/switch_latency.rs` — the const + module doc + const doc + the `#[cfg(test)] mod tests`
-   boundary/constant tests (Tier-0, locally RED→GREEN via compile-then-run-the-binary-directly, #477).
-2. `tests/delivery_spread_gate.rs` — a literal `assert_eq!(DELIVERY_SPREAD_BOUND_MS, N)` pin (Tier-0).
+   boundary/constant tests.
+2. `tests/delivery_spread_gate.rs` — a literal `assert_eq!(DELIVERY_SPREAD_BOUND_MS, N)` pin.
 3. `src/delivery_spread_gate.rs` — the re-export + several "16 ms" doc comments.
-4. `src/bin/recording-verdict.rs` (**probe-gated, CI-only compile — NO local type-check, verify by
-   `cargo fmt --all --check` + hand-audit of the spread arithmetic**): the two log-print sites pass
+4. `src/bin/recording-verdict.rs` (**probe-gated**): the two log-print sites pass
    the const BY REFERENCE (auto-track, no literal), BUT its `#[cfg(test)] mod tests` fixtures pin
    spread VALUES — any fixture injecting a spread in the OLD..NEW band that asserts
    `spread_gate_pass=false`/`overall_pass=false` SILENTLY FLIPS to pass and must be widened. Also

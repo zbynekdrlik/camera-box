@@ -19,7 +19,7 @@ slews `CLOCK_MONOTONIC` too.
 
 `os_gettime_ns()` in `vendor/obs-studio/libobs/util/platform-windows.c` (the
 `camera-box issue 1372 BEGIN … END` block) now integrates QPC deltas at the current system-time
-rate. The Tier-0 authority is `src/os_clock_discipline.rs`.
+rate. The pure authority is `src/os_clock_discipline.rs`.
 
 ## What it follows, and what it does NOT
 
@@ -128,11 +128,7 @@ and compiles them with `cc -Werror -Wconversion -Wformat=2` twice:
    (at least 2 s, at most 10 s), so a slow runner takes longer instead of flaking.
 
 The Rust module is included with `#[path = "../src/os_clock_discipline.rs"]`, so the gate is
-std-only and runs locally:
-
-```bash
-CARGO_MANIFEST_DIR=<wt> rustc --test --edition 2021 tests/os_clock_discipline_parity_1372.rs -o /tmp/t && /tmp/t
-```
+std-only (`cargo test --test os_clock_discipline_parity_1372`).
 
 Gotchas:
 

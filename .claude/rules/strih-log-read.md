@@ -117,7 +117,7 @@ The remaining `APPDATA\obs-studio` hits under `scripts/` are NOT strih log reade
 The MV-fps pair's OWN Linux ssh carries the same `UserKnownHostsFile=/dev/null -o LogLevel=ERROR`
 options as this reader (a strih-snv read through them hits the same stale-key hazard).
 
-## Tier-0 test recipe
+## Test recipe
 
 `tests/harness_strih_log_read_1360.rs`: each case is a bash FILE run as `bash <case.sh> <tmpdir>`
 under `set -euo pipefail`; a PATH-stubbed `sshpass` logs its argv and `exec`s the rest; a PATH-stubbed
@@ -131,6 +131,4 @@ Sourcing a WATCHDOG into such a case: `set --` first (each watchdog parses `$@` 
 rejects the case's own argv), and `set +e` right after the source — the watchdogs run under
 `set -uo pipefail` (NO `-e`), so a probe whose parse pipeline ends in a `grep` no-match (frozen-input
 `probe_received` on an empty read) returns non-zero there by design; under the case's `-e` that
-would abort the case before the sentinel. The whole `tests/*.rs` file runs locally with plain
-`rustc --test` + a stub `tempfile` rlib (ci-testing-gotchas.md) — the stub needs `TempDir::new()`
-too for some sibling files (harness_mv_fps_asio_byte_safety_1262).
+would abort the case before the sentinel.

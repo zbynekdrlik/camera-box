@@ -28,7 +28,7 @@ The Multiview render-cadence stack has THREE layers, don't conflate them:
    papered over now lives in the GATE (layer 2, median window), not in an un-gated area class. The
    `cx=`/`cy=` fields stay on the printed line for observability. Changing the floor is a VENDORED-C
    change (CI-first-compile + lock-step anchors, per `vendored-libobs-change-safety.md`).
-2. **PARSE/GATE (#771; median #1212):** `src/mv_audit.rs` (Tier-0, default features) parses the line
+2. **PARSE/GATE (#771; median #1212):** `src/mv_audit.rs` (default features) parses the line
    + `gate_log`; `src/bin/mv-fps-gate.rs` reads a log on stdin/arg → exit `0`=all-above-floor /
    `1`=below-floor / `2`=no-samples. **#1212: `gate_log` judges the MEDIAN `rendered_fps` over each
    projector's most recent `MV_GATE_MEDIAN_WINDOW` (=12, ~60 s) samples, not one latest sample** — a
@@ -190,13 +190,10 @@ cannot flip a verdict. **Holds** (`burn_hold.rs` MAX_HOLD_FRAMES=4) detect a rep
 repeated frame; strih records 1:1 so per-tick stamping creates no false holds. If you ever change the
 burn cadence again, re-verify these three before assuming green.
 
-**Tier-0 seam + local nets.** The pure prepare-once-per-tick decision is `src/burn_tick_cache.rs`
-(`BurnTickCache`, pure std, RED→GREEN via the `#771`/`#1026` standalone-rustc recipe) mirrored
-byte-identically by the C header, locked by `tests/burn_tick_cache_parity.rs` (compiles the header +
-drives the same event sequences, `render_budget.rs ↔ obs-display-budget.h` pattern). Local proof with
-NO cargo: `rustc --test src/burn_tick_cache.rs` (5/5), `gcc -Wall -Wextra -Wconversion -Wformat=2` the
-header + a truth-table selftest, the parity harness's 7 sequences C-vs-Rust, `cargo fmt --all --check`,
-and the brace-delta-vs-origin structural check. The FULL filter compiles only on CI (`linux-genlock.yml`
+**Pure seam.** The pure prepare-once-per-tick decision is `src/burn_tick_cache.rs`
+(`BurnTickCache`, pure std) mirrored byte-identically by the C header, locked by
+`tests/burn_tick_cache_parity.rs` (compiles the header + drives the same event sequences,
+`render_budget.rs ↔ obs-display-budget.h` pattern). The FULL filter compiles only on CI (`linux-genlock.yml`
 + `windows-genlock*.yml`) — a TYPE error surfaces there. **Still MANDATORY before it reaches the rig:**
 the supervisor's genlock-fleet deploy + rig validation (burns-ON `multiview-audit rendered_fps` back
 ≥ 28 AND a clean E2E recording-verdict burns-ON — proving the cache didn't corrupt the recorded stamp).
@@ -213,7 +210,7 @@ window. `mv_audit.rs` ignores unknown keys so every consumer is unaffected (prov
 `parse_tolerates_appended_1260_budget_fields`). Lock-step anchors updated: `tests/genlock_preload.rs`
 + `tests/mv_audit_emit.rs` + BOTH `windows-genlock*.yml` (the format string) — verify a further field
 add the same way (lift-compile the `blog` under `-Wformat=2`, offline `re.sub`-squish pwsh check,
-`mv_audit_emit.rs` via `rustc --test`, the #1212 substitute-import harness for `mv_audit.rs`).
+`cargo test --test mv_audit_emit` + `--lib mv_audit`).
 
 ### Per-cell MV instrumentation (issue 1260 lever (1), LANDED — CI-compile + supervisor deploy pending)
 
@@ -256,11 +253,10 @@ mv_top1=<sanitized-name>:<ms> mv_top2=<sanitized-name>:<ms>`.
 - **Deferred (not dropped):** a per-cell "had a NEW async frame this tick" count needs a source-
   internal field (`async_update_texture`) exposed via a new accessor; the per-cell CPU sum already
   bounds the upload cost, so it was left as a follow-up candidate.
-- **Verify a further token/field the same way:** the pure parser add is Tier-0 (`src/mv_audit.rs`
-  optional `Option<>` fields, unknown-key tolerant — RED→GREEN via the #1212 substitute-import
-  rustc replica); the FRONTEND↔libobs chain is guarded by `mv_audit_emit.rs`'s
-  `render_display_and_frontend_carry_the_per_cell_instrumentation_1260` test (std-only, runs via the
-  standalone-rustc recipe, reads the vendored source files — it also guards that preview + program
+- **Verify a further token/field the same way:** the pure parser add is in `src/mv_audit.rs`
+  (optional `Option<>` fields, unknown-key tolerant); the FRONTEND↔libobs chain is guarded by
+  `mv_audit_emit.rs`'s `render_display_and_frontend_carry_the_per_cell_instrumentation_1260` test
+  (std-only, reads the vendored source files — it also guards that preview + program
   are timed, per the review fix); the pure name sanitizer (`obs_audit_copy_cell_name`) has a
   COMMITTED lift-test `tests/mv_audit_cell_name_sanitizer_1260.rs` (extracts the real static from
   obs-display.c, `cc -Wall -Wextra -Wconversion -Wformat=2` + a truth table incl. multibyte→`_` and
@@ -396,35 +392,3 @@ streak (`mv_fps_restart_reset` — the #391/#799 "counter reset → never page" 
 confirm at the 5-min cadence is what keeps a fresh OBS start's seconds-long warm-up from false-paging. The
 log id can contain a space (OBS names logs `YYYY-MM-DD HH-MM-SS.txt`); store/compare it as a whole quoted
 string (state `logid_<box>=...` and `mv_fps_restart_reset "$prev" "$curr"` both handle the space).
-
-## GOTCHA — a `cargo build --release` literal in a watchdog script's COMMENT trips the Tier-0 build hook when you `bash scripts/...sh`
-
-`block-tier0-local-build.sh` scans an invoked script for a hidden heavy build and BLOCKS
-`bash scripts/mv-fps-alert-watchdog.sh` if the script's TEXT contains `cargo build --release` — even
-inside a build-HINT comment (`# airuleset:build-ok` is a disabled no-op here, #477). Phrase any build
-hint in these scripts without the literal `cargo build --release` (e.g. "built + uploaded by CI"). To
-smoke-test the watchdog against the live rig, the gate bin from `cargo test --no-run` lands at
-`target/debug/mv-fps-gate` — point `MV_FPS_GATE_BIN` at it and run `--dry-run` (a compiled binary is not
-a build; the block was only ever the comment).
-
-## Verifying `src/mv_audit.rs` locally: it is NO LONGER pure-std — append a `render_budget` stub before `rustc --test` (#1212)
-
-The `vendored-libobs-change-safety.md` recipe calls `src/mv_audit.rs` a pure-std module you can run
-via `rustc --test --edition 2021 src/mv_audit.rs`. That is now STALE: one unit test
-(`floor_tracks_the_effective_target_not_canvas_over_two`) does `use crate::render_budget::effective_render_divisor;`,
-so a bare `rustc --test src/mv_audit.rs` fails (`crate::render_budget` does not exist as its own
-crate). To get the local RED→GREEN (Tier-0 #557 blocks every compiling cargo shape, `--no-run`
-included), APPEND a tiny `render_budget` stub AFTER the module and compile the concatenation:
-
-```bash
-# stub.rs:  pub mod render_budget { pub fn effective_render_divisor(configured_divisor: u32,
-#             frame_interval_ns: u64) -> u32 { /* copied verbatim from src/render_budget.rs */ } }
-cat src/mv_audit.rs stub.rs > /tmp/mv_standalone.rs    # APPEND, never prepend:
-rustc --test --edition 2021 /tmp/mv_standalone.rs -o /tmp/mvtest && /tmp/mvtest
-```
-
-APPEND (module first, stub last), never prepend — the module's `//!` inner doc comments must stay at
-the top of the crate or `rustc` errors `expected outer doc comment`. Copy `effective_render_divisor`
-verbatim from `src/render_budget.rs` (it maps interval→divisor: 33.3ms→1, 16.7ms→2). The C
-`obs_multiview_floor_fps()` half still lift-compiles standalone with `gcc -Wformat=2 -Wconversion`
-exactly as the vendored-libobs rule describes (it takes only `target_fps` since #1212).

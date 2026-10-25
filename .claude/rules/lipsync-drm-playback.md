@@ -70,7 +70,7 @@ playback starts, `cmd_start` runs a speech-arrival VERIFY (issue 1192) before it
   ACTIVE. The whole block stays INSIDE the ERR-trap window (`trap - ERR` is cleared only after a
   successful verify), so BOTH a genuine infra failure AND the exhaustion path fire the existing
   `trap 'bash rig-mode.sh test' ERR` and restore TEST mode.
-- **Pure/testable split (Tier-0):** the correlation math is pure stdlib functions
+- **Pure/testable split:** the correlation math is pure stdlib functions
   (`rectified_envelope`/`pearson`/`best_loop_correlation`), offline-tested with synthetic
   sine-envelope fixtures in `tests/python/test_lipsync_envelope_corr.py` (no ffmpeg/numpy/network);
   the bash side is static-anchor + `lipsync_arrival_corr_meets` (run_sourced) tested in
@@ -83,8 +83,7 @@ playback starts, `cmd_start` runs a speech-arrival VERIFY (issue 1192) before it
   + `win_ssh_run` at once — for `scp` it `touch`es the last arg, for `ssh` it just exits 0), then run
   `bash <copy> start <dummy-asset>` with `LIPSYNC_ARRIVAL_PROBE_S=0`/`_READ_RETRY_SLEEP=0` and a scripted
   `CORR_SEQ`, asserting the four outcomes (pass / recycle-then-pass / exhaustion-fail-loud+ERR-trap-restore
-  / infra-fail+restore) under the script's own `set -euo pipefail`. Prototype the fakes in a local bash
-  replica first (Tier-0 forbids running the Rust test locally; `cargo fmt --all --check` still parses it).
+  / infra-fail+restore) under the script's own `set -euo pipefail`.
 
 ## The `--audio-delay` SIGN is the easy thing to get wrong (silent lipsync break) — default is 0 (#1191)
 
@@ -133,12 +132,12 @@ to an absolute-path fake `exit 0` (present+decodes → PASS), `exit 3` (decode-f
 bogus name that does not exist (missing → FAIL loud). This is the same env-seam-not-PATH pattern the
 repo uses elsewhere for a `command -v X` check.
 
-## Provisioning + Tier-0
+## Provisioning + tests
 
 mpv is installed in `setup-device.sh` STEP 16 (same fail-loud apt line as ffmpeg; mpv Depends on the
 ffmpeg libav* codecs, so `--no-install-recommends mpv` still decodes H.264) and acceptance-checked by
-`verify-device.sh`'s `(x2)` check (inserted BEFORE `(q)`, mirroring the `(x)` ffmpeg check). Tier-0:
-no local cargo — verify the pure `*_cmds`/`lipsync_preflight_cmd` builders by sourcing the script and
+`verify-device.sh`'s `(x2)` check (inserted BEFORE `(q)`, mirroring the `(x)` ffmpeg check). Verify
+the pure `*_cmds`/`lipsync_preflight_cmd` builders by sourcing the script and
 calling them directly (their generated remote-bash text is asserted byte-for-byte by the harness),
 plus `bash -n` / `shellcheck` / `rustfmt --edition 2021 --check`. Live mpv/DRM playback on cam2 is a
 supervisor rig step (the cam2 painter is untouched by code+tests work).
@@ -191,12 +190,11 @@ trap had NO mpv-kill, so the restore landed on a live mpv.
   gets the identical teardown. The trap is `trap 'lipsync_playback_cleanup; bash "$HERE/rig-mode.sh"
   test' ERR` — cleanup FIRST, restore SECOND. This covers BOTH the retries-exhausted fail path and any
   genuine infra failure inside the ERR-trap window (they both reach the trap).
-- **Tier-0 (no local cargo):** the static anchors (helper exists, both sites call it, trap order) plus
+- **Tests:** the static anchors (helper exists, both sites call it, trap order) plus
   a HERMETIC functional replica prove it — a fake `sshpass` on PATH emits an ordering sentinel when the
   ssh it stands in for carries the mpv-kill payload (the #660 `dd if=/dev/zero` fb0-blank signature no
   other `cmd_start` cam_ssh carries), a fake `rig-mode.sh` emits a restore sentinel, and the test
   asserts kill-before-restore on the exhaustion path, the infra-fail path, and `stop`. The replica runs
   the REAL script under its own `set -euo pipefail`+errtrace (a static-anchor-only test is blind to a
-  `set -e`/ordering regression, per `ci-testing-gotchas.md` #1133). Prototype it as a bash replica
-  first; `cargo fmt --all --check` still parses the Rust test. Live cam2 playback stays a supervisor
-  rig step.
+  `set -e`/ordering regression, per `ci-testing-gotchas.md` #1133). Live cam2 playback stays a
+  supervisor rig step.

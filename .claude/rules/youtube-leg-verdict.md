@@ -243,10 +243,9 @@ dev1 and the VOD decode never finished inside the tool's 1500 s.
   `resolve_ticks`).
 - Re-decode from the real files (stream box `C:/Users/newlevel/Documents/_NLMEDIA stream/RECORDINGS`,
   VOD via `yt-dlp -f 137`) with `youtube_leg_verdict.py --decode-ticks`; with the known-position
-  read ~100 frames/s for a 1080p file and ~26-30 frames/s for a 4K file on dev2 with 4 workers (the
-  full-detector decoder: 20-40 min per 20 min file on a loaded dev1). Decode on dev2, never on dev1
-  (rig data stays off dev1). The cache key in the out dir carries the decoder version and
-  the OpenCV version; CI pins `opencv-python-headless==4.13.0.92`, dev1's and dev2's.
+  read ~100 frames/s for a 1080p file and ~26-30 frames/s for a 4K file on dev2 with 4 workers. The
+  cache key in the out dir carries the decoder version and the OpenCV version; CI pins
+  `opencv-python-headless==4.13.0.92`, dev1's and dev2's.
 - **The three VODs are gone** (`EK_cqSvsCKo`, `0q5ZdDMwRwQ`, `bsf_M-HdabY`: "Video unavailable",
   8.10.2026). Only the stream recordings are left, so a VOD fixture can no longer be re-made.
 - **The 5.10 session recordings are burns-OFF**: no node burn on any frame, only the painter run and

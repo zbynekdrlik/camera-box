@@ -17,7 +17,7 @@ dead/stopped painter never masquerades as a live picture on cam2's HDMI monitor.
 ## Who blanks /dev/fb0, and when
 
 - The pure geometry decision — the visible byte range to zero — is `src/fb_blank.rs`
-  (`visible_page_range`), std-only, Tier-0 unit-tested. The actual ioctl-read + zero-write
+  (`visible_page_range`), std-only, unit-tested. The actual ioctl-read + zero-write
   is `src/probe/fb.rs::blank_fbdev(device)` (opens the device fresh, re-reads LIVE
   `FBIOGET_VSCREENINFO` geometry, blanks whichever page is currently visible).
 - **BOTH presenters blank on `Drop`** (each best-effort, log-and-continue, never panic):
@@ -51,11 +51,10 @@ blank-before-release-master ordering can't be guaranteed by an independent threa
 still-page-flipping painter. A flag polled by the loops is the only correct shape.
 `libc::atexit` does NOT work either — it never runs on signal-driven termination.
 
-## Testing (Tier-0, #477/#557: no local cargo compile)
+## Testing
 
 The pure half (`shutdown`'s flag + `painter_should_continue`, and `fb_blank::visible_page_range`)
-is proven RED→GREEN via a `rustc --test --edition 2021` replica (std-only). The `sigaction` glue,
-both `Drop` impls, and the probe-wiring are probe-/hardware-gated — fmt-clean locally, first
-type-checked at CI, blank behavior exercised only on the rig / E2E (mirrors the untested #660
+is unit-tested RED→GREEN. The `sigaction` glue, both `Drop` impls, and the probe-wiring are
+probe-/hardware-gated — blank behavior exercised only on the rig / E2E (mirrors the untested #660
 `KmsPresenter::Drop` precedent). `rustfmt --check` DOES parse probe-gated files, so run it on every
 changed file before pushing.

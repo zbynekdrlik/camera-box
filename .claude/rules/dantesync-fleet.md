@@ -69,7 +69,7 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
       connect, and a PP box that answers :22 but hangs (a dying stick, fork exhaustion) would
       otherwise stall the home E2E while it holds the rig lease. Each away camera costs up to ~4 s
       reach probe plus the read, serially. The frame-probe align stays home-rig only.
-    - Tier-0: `tests/python/test_cambox_deploy_venues_1413.py` (the issue-1407 fake box behind a
+    - Test: `tests/python/test_cambox_deploy_venues_1413.py` (the issue-1407 fake box behind a
       host-logging sshpass, `OBS_FLEET_HOME` deciding reach; run it under `unshare -n`).
   - **The glob must survive a caller's `set -f`:** the version gate builds its `--fleet` specs under
     noglob, and the first cut of issue 1413 silently dropped every camera from the gated set. Both
@@ -191,7 +191,7 @@ all 13 nodes. The provisioning writers (`setup-device.sh`, `setup-imag.sh`) writ
 the same by default and keeps the old phase_slew flip only behind `--legacy-phase-slew` (a
 pre-1.9.0 node).
 
-## Tier-0
+## Tests
 
 `pytest tests/python/test_dantesync_fleet_1372.py tests/python/test_dantesync_fleet_consumers_1372.py
 tests/python/test_dantesync_clock_fleet_1372.py tests/python/test_clock_discipline_1372.py

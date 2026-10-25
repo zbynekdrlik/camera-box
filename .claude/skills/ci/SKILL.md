@@ -96,11 +96,11 @@ Parse in the test harness by splitting on `\x1d` then `\x1e`. See
 `tests/harness_e2e_discord_report_owner_thread_719.rs` for the full pattern (PATH-stub convention,
 same family as `tests/harness_deploy_fleet.rs`'s `sshpass`/`gh` stubs).
 
-## Probe Binary Flow — Run on stream.lan, NOT dev1
+## Probe Binary Flow — Run on stream.lan
 
 OBS records the 0.7–6 GB program file on stream box (10.77.9.204 — strong CPU, fast disks).
 **Decode WHERE THE VIDEO IS** — run `recording-verdict` on stream against the LOCAL recording;
-bring back ONLY the small verdict JSON (+ pixel-proof PNGs). dev1 holds NOTHING big.
+bring back ONLY the small verdict JSON (+ pixel-proof PNGs).
 
 ```bash
 # 1. Download Windows verdict for the commit under test
@@ -134,30 +134,20 @@ with the targets.md creds, and is now what `E2E_EXECUTE_VERDICT=1` uses for real
 itself breaks (see #701) — for anything sizeable, prefer scp directly.
 ffmpeg/ffprobe are already installed on stream.lan (winget; ffmpeg 8.0.1 on PATH).
 
-## Probe is CI-only locally — never compile `--features probe` on dev1 (#185)
+## Probe-gated code (`--features probe`)
 
-The shared dev1 `target/` has no GC (rust-lang/cargo#5026). Compiling the heavy `probe` feature
-locally (qrcode/rqrr/image/drm/lz4_flex + 5 `required-features=["probe"]` bins) across the day's
-workers ballooned it to 18GB and filled the disk. The fix: **local Tier-0 cheap-checks run DEFAULT
-features only** — `cargo clippy --all-targets -- -D warnings` (NO `--all-features`), `cargo test
---no-run`. Probe is compile-checked + built ON CI (`ci.yml` runs `--all-features`; #101 C++ gate +
-#192 probe-tools artifact). See CLAUDE.md "Local Build Policy".
+`src/probe/*` and the `required-features=["probe"]` bins compile only under `--features probe`;
+CI's Lint/Test run `--all-features` (#101 C++ gate + #192 probe-tools artifact).
 
 **Convention when adding an integration test that imports `camera_box::probe::…`:** gate the whole
 file with `#![cfg(feature = "probe")]` (after the `//!` doc block, before the first `use`) — exactly
-like `tests/recording_decode.rs`. An UNGATED probe test forces the local default-feature
-clippy/test --no-run to compile the probe feature and re-balloons `target/`. CI (`--all-features`)
-still runs gated tests. `tests/local_build_policy_bounds_target.rs` enforces both invariants (it
-FAILS if any probe-using test is ungated or if the CLAUDE.md local gate command block uses
+like `tests/recording_decode.rs`. `tests/local_build_policy_bounds_target.rs` FAILS if any
+probe-using test is ungated (and if the CLAUDE.md local gate command block uses
 `--all-features`/`--features probe`).
 
-**Gotcha — a clippy lint inside a probe-gated file (`src/probe/*`) is INVISIBLE to local Tier-0
-clippy and only FAILS on CI's Lint job** (which runs `cargo clippy --all-targets --all-features`).
-Default-feature local clippy never compiles `src/probe/*`, so a lint there passes locally and red-X's
-CI — a wasted CI cycle (#312/#324: a `clippy::doc_lazy_continuation` in `recording_segments.rs`
-module-doc passed Tier-0 but failed CI). When you edit ANY `src/probe/*` file — **especially doc
-comments** — eyeball it for clippy patterns before pushing; you cannot lint-verify it locally (running
-`--all-features` to check is banned — it re-balloons `target/`). Recurring doc trap: a `[label]:`
+**Gotcha — default-feature clippy never compiles `src/probe/*`**, so a lint there passes it and
+fails only under `--all-features` (#312/#324: a `clippy::doc_lazy_continuation` in
+`recording_segments.rs` module-doc). Recurring doc trap: a `[label]:`
 token mid-paragraph (e.g. `` [`crate::x`]: text ``) makes pulldown-cmark parse a link-reference
 definition → the next lines become a `doc_lazy_continuation` lint; reword to drop the `]:` (e.g.
 `` (in [`crate::x`] — text ``) or add a blank line.
@@ -169,14 +159,12 @@ hold a lib-crate struct (e.g. #580 changed `imag_optical_beat` from `Option<bool
 `Option<OpticalBeatVerdict>` so the printers/JSON could report the beat detail), that struct MUST
 ALSO derive `Serialize` — else the whole `--features probe` build breaks with `E0277: the trait
 bound X: serde::Serialize is not satisfied`, red-X'ing Lint + Test + Build + Coverage + Windows
-probe build at once. INVISIBLE to Tier-0: `cargo check`/`clippy` on default features never compiles
-`bin/recording-verdict.rs` (`required-features = ["probe"]`), so it passes locally and only fails on
-CI (one wasted cycle, #580). Before pushing a `NodeVerdict` (or any `#[derive(Serialize)]`
-probe-struct) field-TYPE change, add the matching derive to the new field's type in `lib` (`serde` is
-already a default, non-optional dep, so `#[derive(..., serde::Serialize)]` compiles on default
-features too) — you cannot catch this locally.
+probe build at once (#580; default-feature `cargo check` never compiles `bin/recording-verdict.rs`).
+Before pushing a `NodeVerdict` (or any `#[derive(Serialize)]` probe-struct) field-TYPE change, add
+the matching derive to the new field's type in `lib` (`serde` is already a default, non-optional
+dep, so `#[derive(..., serde::Serialize)]` compiles on default features too).
 
-**Backstop:** `scripts/install-git-hooks.sh` installs a non-blocking pre-push hook running
+**Target purge hook:** `scripts/install-git-hooks.sh` installs a non-blocking pre-push hook running
 `scripts/purge-target.sh` (cargo clean when `target/` > `${THRESHOLD_MB:-4096}`; SKIPS while a live
 E2E has probe binaries running — matched by truncated `/proc` comm, e.g. `recording-verdi`,
 `camera-box-prob`, NOT a `pgrep -f` cmdline substring which false-positives on the script's own args).
@@ -245,7 +233,7 @@ exclude the glue — follow how `kms.rs` / `painter.rs` are already handled (#28
    RUN; the file just doesn't drag the `--fail-under-lines` threshold with untestable glue lines.
 2. **Mutants** (`ci.yml` "Mutation testing", `--in-diff`): add a `--exclude-re '\b<glue_fn>\b'` per
    glue function. KEEP the pure functions mutated — and make them mutation-ROBUST (a surviving mutant
-   in the diff FAILS the job, and you can't run cargo-mutants locally: it needs `--features probe`):
+   in the diff FAILS the job):
    - Drop redundant guards whose mutant is a no-op (e.g. an empty-string `if x.is_empty(){continue}`
      when the downstream `parse` already returns `Err` → the `if false` mutant survives; just remove it).
    - Add edge tests that kill value mutants: a duplicate input (kills `|=`→`^=`/`+=`), an out-of-range

@@ -24,7 +24,7 @@ scene, a leftover `phase2-probe-src`), so a `CAMERA_ACTIVE_SET`-derived burn lis
   any input renders a burn.
 - `obs_burn_filter.py sweep-off --host <ip>` → clears `genlock_burn=false` on every ndi input that
   has it ON (idempotent); exit non-zero if any still renders.
-- Pure `ndi_source_input_names(input_list)` at module scope = the Tier-0-testable core (unit-tested
+- Pure `ndi_source_input_names(input_list)` at module scope = the testable core (unit-tested
   against a multi-input fake WS in `tests/python/test_obs_burn_filter.py`).
 
 Consumers (all ADDITIVE — the pinned per-box PROGRAM-input loops stay as the fast path + safety net,

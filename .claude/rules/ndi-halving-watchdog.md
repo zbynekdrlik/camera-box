@@ -50,10 +50,8 @@ HH:MM:SS.mmm: [distroav] recv-timing #797 '<obs input name>': n=<N> cap_avg=<X>m
 ## Architecture: pure PYTHON decision + bash orchestrator + gated cure
 
 - **Pure decision = `scripts/ndi_halving_decision.py`** (no I/O), tested by
-  `tests/python/test_ndi_halving_decision_1203.py`. Python (the strih-nic-selfheal #1199
-  python-mirror precedent) SPECIFICALLY so the decision matrix RED→GREENs LOCALLY under Tier-0
-  (#557 blocks all cargo, even `--no-run`; the family `tests/harness_*.rs` are CI-only). The bash
-  orchestrator calls `analyze` (parse+measure+classify from the raw log on stdin) once per input per
+  `tests/python/test_ndi_halving_decision_1203.py` (the strih-nic-selfheal #1199 python-mirror
+  precedent). The bash orchestrator calls `analyze` (parse+measure+classify from the raw log on stdin) once per input per
   pass and `cure-decision` (cure vs page, folding the cooldown predicate) when confirmed.
 - **Orchestrator = `scripts/ndi-halving-watchdog.sh`** — REUSES `obs-watchdog-decision.sh`
   `obs_watchdog_confirm` (2-pass) / `obs_watchdog_alert_throttle` (~30 min), the flat ssh OBS-log
@@ -90,14 +88,12 @@ HH:MM:SS.mmm: [distroav] recv-timing #797 '<obs input name>': n=<N> cap_avg=<X>m
   `NDI_HALVING_OBS_PHASE2` seam overrides just the obs_phase2 binary so the internal branch (PREV
   parse / retry / LEFT-IDLED page) is offline-testable.
 
-## Tier-0 verification (#557 — zero cargo)
+## Verification
 
 - Pure decision: `python3 -m pytest tests/python/test_ndi_halving_decision_1203.py -q` (local RED→GREEN).
 - Orchestrator: `bash -n` + `shellcheck -S warning`, and a `--dry-run` end-to-end with
   `NDI_HALVING_PROBE_CMD`/`NDI_HALVING_CURE_CMD`/`NDI_HALVING_NOW` seams (confirm → cure →
-  page-in-cooldown → cure-past-cooldown, SKIP, tap-broken, recovery, borderline). The `.rs` harness
-  can only be `rustfmt --check`ed locally (CI compiles+runs it) — a bash REPLICA of every harness
-  assertion is the local proof.
+  page-in-cooldown → cure-past-cooldown, SKIP, tap-broken, recovery, borderline).
 - **Two test-harness gotchas hit building this (both cost a debug loop):** (1) `--dry-run` SKIPS
   `attempt_reattach`, so the CURE-count is only meaningful in a LIVE (non-dry) pass — the harness's
   cure tests run non-dry with a stubbed `AIRULESET_NOTIFY` (records bodies, no Discord). (2) State

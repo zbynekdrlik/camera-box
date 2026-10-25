@@ -4,7 +4,7 @@ paths:
   - "src/asrc_compensation_quantization.rs"
 ---
 
-# Offline audio-quality (THD+N) measurement -- coherent sampling + CI-only-vendor harness pattern (#929)
+# Offline audio-quality (THD+N) measurement -- coherent sampling + standalone vendor-harness pattern (#929)
 
 ## The window-leakage trap (cost real turns before it was found)
 
@@ -31,12 +31,10 @@ test tone + whole-second analysis window FIRST, before trusting any dB number th
 A -50-something dB floor that shows up identically across configs that should behave very
 differently is the tell that you're measuring your own window, not the signal.
 
-## Standalone-harness-outside-vendor-tree pattern (reusable for any CI-only vendor code)
+## Standalone-harness-outside-vendor-tree pattern (reusable for any vendored C code)
 
-`vendor/obs-studio/libobs` (and the rest of `vendor/**`) has NO local compile path on this box
-(CI-only, project CLAUDE.md "Local Build Policy") -- so a real A/B of vendored libswresample
-behavior could not link the vendor tree directly. Instead: link the box's OWN system
-`libswresample-dev`/`libavutil-dev` (same library family, confirmed same AVOption defaults),
+A real A/B of vendored libswresample behavior does not need to link the vendor tree: link the
+box's OWN system `libswresample-dev`/`libavutil-dev` (same library family, confirmed same AVOption defaults),
 calling the EXACT SAME API sequence the vendor call site uses (same `swr_alloc_set_opts2` args,
 including sample FORMAT -- `AV_SAMPLE_FMT_FLTP`, not `_FLT`; OBS's internal mix format is always
 `AUDIO_FORMAT_FLOAT_PLANAR`, confirmed `obs.c:1626` -> `obs-source.c:4043`; for mono the two
@@ -44,8 +42,7 @@ formats are byte-identical, but match it anyway so the claim of "exact call shap
 true, not just close enough). This is buildable/runnable on dev1 with a plain `gcc` + `pkg-config`
 one-liner, entirely outside Cargo (no new runtime dep on the shipped binary) -- see
 `scripts/asrc-quality-bench/asrc_ab_harness.c`'s header comment and `run_ab.sh` for the working
-pattern. Reusable any time a ticket needs to measure/prove something about vendored C code this
-repo cannot compile locally.
+pattern. Reusable any time a ticket needs to measure/prove something about vendored C code.
 
 **Make every claimed fact reproducible FROM the committed harness, not just an out-of-band probe.**
 A review caught that RESULTS.md's "what the library actually defaults to" table had no

@@ -139,31 +139,17 @@ the new-epoch stamp (`early` <= 1 in the bench), which costs nothing.
 - A frame received after the receiver's step but before the booking leaves
   `genlock_rx_arrival_lag_ns` off by S until the next push (the bench port models it, no cost).
 
-## Verifying (Tier-0, no cargo)
+## Verifying
 
-- Unit tests: a scratch `lib.rs` with `genlock_wall_step` + `genlock_fifo_relabel` as `#[path]`
-  mods, `rustc --edition 2021 --test -D warnings`, then `clippy-driver --test -D warnings`.
-- Benches: symlink `src/genlock_*.rs` into `<scratch>/src`, link `<scratch>/tests` to the repo's
-  `tests/` (the n2 grid tests `include_str!` a fixture), a stub `ndi.rs` (the const + `fn
-  floor_boundary_100ns` awk'd out; the function is `pub(crate)`), `rustc --test -O`.
-- Parity: `extern crate self as camera_box;` + the two modules + the test file as `#[path]` mods,
-  `CARGO_MANIFEST_DIR` and `CARGO_TARGET_TMPDIR` set at COMPILE time. Mutation: point
-  `CARGO_MANIFEST_DIR` at a scratch repo holding the mutated header AND a copy of
+- `cargo test` covers the unit tests, the benches (Linux-gated with `genlock_stamp`), the parity and
+  the wiring (`tests/genlock_fifo_relabel_wiring_1372.rs`).
+- Mutation: point `CARGO_MANIFEST_DIR` at a scratch repo holding the mutated header AND a copy of
   `obs-genlock-wall-step.h`; 27/27 C mutants RED after review round 2 (the window end `>` and the
   equidistant tie needed their own vectors; the stale-booking bounds have nine, incl. one just
   over the apply bound so a larger C bound diverges, and a box 0.1 s after boot).
   The generated C harness zero-fills the header's structs with `memset`, never a positional
   `{0, 0, …}` initializer: a field added to the header later fails the harness compile under
   `-Werror=missing-field-initializers` (review round 1 hit it on `last_mono_ns`).
-- Wiring: std-only, `CARGO_MANIFEST_DIR=<wt> rustc --test tests/genlock_fifo_relabel_wiring_1372.rs`.
-- A new bench case proves itself against the PRE-fix module: copy the replica, replace only
-  `genlock_fifo_relabel.rs` with the RED commit's version (`show <red-sha>:src/…`), run the one test.
-- Capture-phase bench: the `capture-phase-tracker.md` replica (its `ndi.rs` stub needs the
-  `UNITS_PER_SECOND` const).
-- Since the stamp-offset lane the relabel bench also needs `genlock_stamp` (+ `genlock_wall_step`)
-  in the replica's `lib.rs`; `genlock_stamp` reaches `crate::ndi::floor_boundary_100ns`, so the
-  `ndi.rs` stub needs the `UNITS_PER_SECOND` const too. The bench module is Linux-gated with
-  `genlock_stamp`.
 
 ## Live acceptance (supervisor, FULL bundle on every genlock OBS box)
 

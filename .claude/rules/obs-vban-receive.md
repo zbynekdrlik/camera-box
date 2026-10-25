@@ -645,24 +645,21 @@ VLAN 70 tagged, `frame-types=admit-all`; the switch side is the supervisor's, ne
   lacks the off-leg counter, so verify FAILs `(vban-leg) filter` there until then. On stream-snv the
   run touches no NM state; on strih-snv neither (the VLAN exists): no link reset on either.
 
-## Verify locally (Tier-0, no cargo)
+## Verify
 
-- `rustc --test --edition 2021 src/vban_receive_timeline.rs` (unit tests + the bench) and
-  `clippy-driver --edition 2021 --test -D warnings` on the same file. Compile WITHOUT `-O`: CI runs
-  the debug profile, where an unsigned underflow panics; an `-O` build wraps it silently (round 3
-  shipped two GREEN commits that only passed under `-O`). Where the C header wraps, the Rust twin
-  uses `wrapping_sub`, and test arrivals are monotonic like the real receive thread.
-- `CARGO_MANIFEST_DIR=<wt> rustc --test --edition 2021 tests/vban_receive_timeline_parity_1439.rs`
-  (the C-vs-Rust trace, bit-for-bit doubles under `-ffp-contract=off`), the same for
-  `tests/vban_receive_wiring_1439.rs` (the ASRC lift, the source wiring and the workflow pins; split
+- `cargo test --lib vban_receive_timeline` (unit tests + the bench), in the debug profile like CI,
+  where an unsigned underflow panics; an `-O` build wraps it silently (round 3 shipped two GREEN
+  commits that only passed under `-O`). Where the C header wraps, the Rust twin uses `wrapping_sub`,
+  and test arrivals are monotonic like the real receive thread.
+- `tests/vban_receive_timeline_parity_1439.rs` (the C-vs-Rust trace, bit-for-bit doubles under
+  `-ffp-contract=off`), `tests/vban_receive_wiring_1439.rs` (the ASRC lift, the source wiring and the workflow pins; split
   out in review round 1, both share `tests/support/vban_c_1439.rs`) and `tests/vban_source_loss_1439.rs`
   (the SHIPPED `vban-source.c` lifted into a C driver with libobs stubs: loss = silence, contiguous
   stamps, the status line's fields).
 - The plugin sources: `gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wformat=2 -Werror` with a generated
   `plugin-macros.generated.h` + a two-define `obsconfig.h` (the pacing rule's recipe).
-- ROZHODNUTÉ 6352253147: `rustc --test --edition 2021 src/vban_conceal.rs` (the math), the same with
-  `CARGO_MANIFEST_DIR` for `tests/vban_conceal_parity_1439.rs`, `tests/vban_source_reorder_1439.rs`
-  and `tests/vban_source_conceal_1439.rs` (the shipped source through the lift driver, whose `out`
+- ROZHODNUTÉ 6352253147: `src/vban_conceal.rs` (the math), `tests/vban_conceal_parity_1439.rs`,
+  `tests/vban_source_reorder_1439.rs` and `tests/vban_source_conceal_1439.rs` (the shipped source through the lift driver, whose `out`
   line carries each output's `mid=` and `last=` sample and `logs=`, the plugin's log lines written
   before it, atomic: both threads log). The real-thread driver with a reorder and
   short losses in it runs clean under ThreadSanitizer.

@@ -394,12 +394,11 @@ back to the old position verdict — so every pre-existing test AND genuine serv
 (lines cease while NTP continues → gap grows past grace → DEGRADED) are preserved. Env-tunable via
 `PTP_LOCK_SERVO_GRACE_FACTOR`/`PTP_LOCK_SERVO_GRACE_FLOOR_S`.
 
-**Local RED→GREEN for a bash change here does NOT need cargo.** `# airuleset:build-ok` is DISABLED
-for camera-box (heavy builds are CI-only), so `cargo test` cannot run locally. But the Rust tests
-are just `run_sourced` wrappers around bash — SOURCE `clock-offset-guard.sh` in a plain `bash -c`
-and call the function on the fixture directly (that is exactly what the test does). This gives a
-genuine local RED (against the pre-fix script) → GREEN proof with zero compilation, and is the
-verification path to use for any pure bash function in this repo's sourced gates.
+**Local RED→GREEN for a bash change here does NOT need cargo.** The Rust tests are just
+`run_sourced` wrappers around bash — SOURCE `clock-offset-guard.sh` in a plain `bash -c` and call the
+function on the fixture directly (that is exactly what the test does). This gives a genuine RED
+(against the pre-fix script) → GREEN proof with zero compilation, for any pure bash function in this
+repo's sourced gates.
 
 ## Journal path grades MEDIAN + SPREAD too (#837, the twin of the #836 HTTP check)
 `dantesync_offset_verdict JOURNAL FRESHNESS_S BOUND_US [STABILITY_US]` — the OPTIONAL 4th arg is the
@@ -555,10 +554,8 @@ adaptive threshold already bakes in the master excursion it chases.
 **Why NOT a post-step-cluster recency rescue (the #1055 lineage):** cam1's failure is a RISING-EDGE
 straddle — the offset is ramping toward a step NOT YET made at grade time, so there are no post-step
 survivors in the window to grade. A recency-anchored "grade the tight post-step cluster" rescue
-structurally cannot catch a pre-step ramp. Local RED→GREEN with NO cargo: `rustc --edition 2021 --test
-tests/<file>.rs` standalone (provide `CARGO_MANIFEST_DIR=<worktree>`; the harness tests only use std +
-shell out), then run the binary; OR run the pure bash fn under `bash -c 'set -uo pipefail; . scripts/
-clock-offset-guard.sh; ...'` (`cargo test --no-run` is now hook-blocked too, #477 tightening).
+structurally cannot catch a pre-step ramp. Local RED→GREEN: `cargo test --test <file>`, or run the
+pure bash fn under `bash -c 'set -uo pipefail; . scripts/clock-offset-guard.sh; ...'`.
 
 ## phase_slew is now ENFORCED at the fleet [0/8] gate (#1130 — report-first landed, then flipped)
 

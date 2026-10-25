@@ -72,9 +72,8 @@ drop next to a duplicate CAN complete a paired event — #1036 review finding); 
 empirical margin.
 
 ## 6. Gotchas
-- The pure module compiles on DEFAULT features (Tier-0 unit-testable); the probe consumer
-  (`recording-verdict.rs`, `required-features=["probe"]`) is CI-first-compile — hand-type-check the
-  wiring, it never compiles locally.
+- The pure module compiles on DEFAULT features; the probe consumer (`recording-verdict.rs`,
+  `required-features=["probe"]`) compiles only under `--features probe`.
 - A multi-line string inside `serde_json::json!({...})` or `println!` MUST use `\` line-continuation
   escapes, or it embeds literal whitespace runs; `cargo fmt` does not reformat inside string
   literals, so a broken one passes fmt silently.
@@ -129,11 +128,10 @@ doc STATES it must receive the discriminated value. Report BOTH (the discriminat
 raw value, informational) in the JSON. General rule: if you built a veto to exclude a sibling gate's
 domain, feed the gate the post-veto signal or the veto was pointless.
 
-## 9. The additive-separate-pass vs return-type-churn tradeoff for a CI-only probe fn (#1088)
+## 9. The additive-separate-pass vs return-type-churn tradeoff for a probe fn (#1088)
 
-`recording-verdict.rs` + `src/probe/*` have NO local compile path (CI is first compile). When a new
-metric needs data from a widely-called probe fn (`analyze_recording_*` has ~15 callers), threading it
-through that fn's RETURN TYPE churns every caller — all CI-first-compile, high blind-change risk. An
+When a new metric needs data from a widely-called probe fn (`analyze_recording_*` has ~15 callers),
+threading it through that fn's RETURN TYPE churns every caller. An
 ADDITIVE separate pass (a new fn with zero existing-call-site edits) is the lower-risk trade even at
 the cost of an extra offline decode, for a report-only first cut. Note the fold-into-main-pass
 optimization as a follow-up (gated on the metric proving its value), don't do it blind.
@@ -141,7 +139,7 @@ optimization as a follow-up (gated on the metric proving its value), don't do it
 ## 10. Two ZERO-churn plumbing moves for a merge-carried metric (#1112)
 
 §7 says a content/pixel metric must be computed ON the box during `--extract-partial` and CARRIED to
-the dev1 merge. Two techniques land that carry WITHOUT the blind CI-first-compile churn §9 warns
+the dev1 merge. Two techniques land that carry WITHOUT the caller churn §9 warns
 about — both proven wiring the #1088 dup-cadence surface into the production merge gate (#1112):
 
 - **Carry a per-box value via a `RecordingPartial` builder — ZERO caller churn.** `RecordingPartial`
@@ -153,40 +151,22 @@ about — both proven wiring the #1088 dup-cadence surface into the production m
   hardcoded old-version JSON literal — the strict `from_json` check rejects a stale version). The
   struct derives `PartialEq` not `Eq`, so a `Vec`/`f64`-bearing field is fine.
 - **Thread a new value into a many-call-site verdict fn via a same-signature WRAPPER — ZERO
-  call-site churn.** `build_and_print_verdict` has ~37 call sites (mostly probe-gated tests, all
-  CI-first-compile). Adding a param directly = 37 blind edits. Instead: rename the body to
+  call-site churn.** `build_and_print_verdict` has ~37 call sites (mostly probe-gated tests). Adding a
+  param directly = 37 edits. Instead: rename the body to
   `build_and_print_verdict_with_<x>(..., new_param)` and keep a thin `build_and_print_verdict`
   wrapper with the ORIGINAL signature that delegates with the neutral default (`None`). Only the ONE
   new caller (the merge) calls the `_with_<x>` form; every existing caller (tests + the fused main)
   is byte-for-byte unchanged. This is the call-site-churn analogue of §9's return-type-churn trade.
 
-Both keep the risk surface to the FEW lines that genuinely change, which is the whole game on a file
-with no local type check. Verify with `cargo fmt --all --check` (parses the probe files) + a hand
-type-audit of the new arg types and EVERY call site's arity (`grep -n 'build_and_print_verdict'` — a
-stray 8-arg call to the 9-arg fn is a CI-only red).
+Both keep the risk surface to the FEW lines that genuinely change.
 
 ## 11. Flipping a report-only seam BLOCKING, or adding a new blocking gate (#1142 lessons)
 
 Three hard-won patterns from flipping three seams blocking at once (imag leg + cadence uniformity +
 delivery spread):
 
-### RED→GREEN for a PURE crate-root gate module under #557 — `rustc --test` scratch, NEVER cargo
-`#557` (2026-08-18) BANS every compiling cargo shape locally — including `cargo test --no-run`, so
-the "compile with --no-run then run the binary directly" pattern in CLAUDE.md's Local Build Policy is
-STALE. A pure crate-root gate module (`presentation_cadence.rs`, `imag_leg_gate.rs`,
-`delivery_spread_gate.rs`, `partial_schema_gate.rs`) is self-contained enough to compile STANDALONE:
-```bash
-# strip a `serde::Serialize` derive the module carries (serde isn't linkable standalone; the gate
-# tests never serialize), then compile+run as a --test binary:
-sed 's/, serde::Serialize)]/)]/' src/presentation_cadence.rs > /tmp/pc.rs
-rustc --edition 2021 --test /tmp/pc.rs -o /tmp/pc_t && /tmp/pc_t
-```
-For a module with a `crate::` cross-ref (e.g. `delivery_spread_gate` re-exports
-`crate::switch_latency::SPREAD_THRESHOLD_MS`), stub the referenced const in a tiny scratch that
-inlines just the pure fns + the tests. This gives a GENUINE observable RED (seam still false) →
-GREEN (flip) locally, which the probe-gated `recording-verdict.rs` consumer can never (CI-first).
-`cargo fmt --all --check` is still the syntax proof for the probe-gated wiring (it parses cfg-gated
-files); a python replication over `/tmp/recording-e2e-*/verdict-*.json` proves the FOLD flip's real
+### Prove a fold flip's real effect on mined verdicts
+A python replication over `/tmp/recording-e2e-*/verdict-*.json` proves the FOLD flip's real
 effect end-to-end (model each flipped term's pass + whether it now folds; include a synthetic clean
 verdict to prove the gates are not UNCONDITIONALLY red).
 
@@ -198,7 +178,7 @@ strih/stream/cam scenarios) + `merge_gate_exit_code` subprocess controls. Fix: a
 path sets it (`recording-e2e.sh` ALL_CAMBOX `[8/8d]` merge, appended via the #675 `MERGE_ARGS+=(...)`
 pattern — NOT the strih+stream-only zero-loss-restart merge), every unit test defaults off. Verify
 the recording-e2e.sh edit anchor-safe: `bash -n` + `shellcheck` + the OLD-vs-NEW literal
-occurrence-count sweep (`camera-active-set.md`'s Tier-0 net). Pin the flag's A/B with a probe-gated
+occurrence-count sweep (`camera-active-set.md`). Pin the flag's A/B with a probe-gated
 test reusing a KNOWN-clean imag-None fixture (`window_cam2`): off=pass, on=red, on+offline-ack=pass.
 
 ### Gate cadence uniformity on `derived_uniform_fraction`, NOT raw `uniform_fraction`
@@ -343,7 +323,7 @@ whose OWN digital burn was entirely absent from the recording (`full_chain.burn_
 off the `--switch-schedule` DEPLOYED set (`SwitchWindow.cambox`), NOT a mined metric distribution, so
 §1–§3 (calibrate-from-JSONs, tightest-green-ceiling, honest-margin-threshold) DO NOT APPLY — there is
 no threshold, only present-vs-absent. Everything else is identical: a pure crate-root decision (no
-probe deps, std-only, unit-tests Tier-0 on default features — the pure-module + shell-replica pattern
+probe deps, std-only, unit-tested on default features — the pure-module + shell-replica pattern
 below), a thin consumer in `recording-verdict.rs` computing the counts from the same `camN_ids.len()`
 that build `full_chain.burn_ids_present` (so the gate can never disagree with that field), a JSON term
 under `full_chain.own_burn_absent_gate`, and the report-only fold `all_pass &= gate_pass ||

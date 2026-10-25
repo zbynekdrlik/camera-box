@@ -109,7 +109,7 @@ interpolation spans the two frames the worker PROCESSED, not two adjacent frames
 therefore loses timing precision under decode load; the camera-box path is unaffected, because it
 pairs by frame_id, not by crossing time.
 
-## Verifying a change here (Tier-0)
+## Verifying a change here
 
 - **The mailbox policy**: `g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread
   vendor/av-sync-dock/test/decode-mailbox-selftest.cpp`, then run the binary. It covers a 50 ms
@@ -214,7 +214,7 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
   (right after the video mailbox), in `st_destroy`, and in `~sync_test_output` before
   `delete cb_audio_dec`.
 
-## Verifying (Tier-0)
+## Verifying
 
 - `g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread vendor/av-sync-dock/test/audio-worker-selftest.cpp`
   then run it; `-fsanitize=thread` under `setarch -R` for races (clean at issue 1381). Mutants it
@@ -239,7 +239,7 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
   `std::min`, which a stray Windows `min` macro would break there.
 - The bench `tests/c/av_sync_dock_demod_bench_1381.cpp` (`-Ivendor/av-sync-dock/src
   -Ivendor/av-sync-dock/test`, arg: the stereo mbc fixture) measures the worker decode and the
-  audio-thread share in THREAD CPU time (dev1 runs at load ~20; wall time there is scheduler noise)
+  audio-thread share in THREAD CPU time (wall time is scheduler noise)
   and checks the decoder against a frozen copy of the pre-1381 kernel. Measured on the N100 (thread
   CPU): gate + copy <= 0.1 ms per stereo push for every signal (mean ~0.01 ms); worker 0.18-0.24 ms
   (music) / 0.56-0.7 ms (442 Hz tone), against 6.8 / 34.8 ms for the pre-1381 decoder.
@@ -315,7 +315,7 @@ audio TU was at 1023 lines):
 - The tracker resets on a new source object by pointer; a freed address reused by the next lookup
   skips that reset for one tick (the start check still holds).
 
-**Verifying (Tier-0):**
+**Verifying:**
 - `g++ -std=c++11 -O2 -Wall -Wextra -Werror vendor/av-sync-dock/test/measure-share-selftest.cpp`:
   the take rule, `absent_long`, the fill (no page fault on pre-sized planes), and the live two-emitter
   case END TO END through the dock's own picker, ring pairing and rolling cluster: the whole mix locks

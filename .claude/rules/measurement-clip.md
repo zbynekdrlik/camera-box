@@ -132,7 +132,7 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
 - **Level.** The marker plays at the emitter's digital level (the guard reads about -19 dBFS),
   about 16 dB over the camera chain's acoustic -35 dBFS.
 
-## Tests and Tier-0
+## Tests
 
 - `tests/python/test_gen_measurement_clip_1404.py` generates a 10 s clip once (about 16 s) and
   decodes it with the real consumers: the tick decoder with `runs` (and its default decode refusing
@@ -142,7 +142,7 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
   whose output ffprobe cannot count.
 - The parameter pins read the Rust and C++ sources and the shim's compiled-in params; the waveform
   is pinned to `vendor/av-sync-dock/tool/videogen.py` (a smoothing mutant passed every other test).
-- `tests/measurement_clip_decode_1404.rs` is probe-gated and runs in CI only: the flat recording
+- `tests/measurement_clip_decode_1404.rs` is probe-gated: the flat recording
   decode (tick stays None), the echo-gated grouped decode the strih/stream analysis runs, the robust
   optical decode.
 - `recording-verdict.rs` takes every cam2-optical exclusion list from ONE builder pair,
@@ -153,12 +153,6 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
   pytest leaves an orphaned ffmpeg plus a 64 MB `/tmp/measurement-clip-*` dir (the old code had no
   SIGTERM unwind). Leave that test out of a RED run against old code, and after any killed run
   `pgrep -af 'f rawvideo -pix_fmt gray'` and remove the leftover temp dirs.
-- Re-verify the real rqrr on dev1 without cargo: link a small harness against the runner's release
-  `librqrr-*.rlib` (`~/actions-runner-camera-box/_work/camera-box/camera-box/target/release/deps`)
-  with plain `rustc --extern rqrr=<rlib> -L <deps>`. The same deps dir type-checks a probe-gated
-  CLI test without compiling the crate: `clippy-driver --test --cfg 'feature="probe"' --extern
-  serde_json=<rlib> -L <deps>` with a dummy `CARGO_BIN_EXE_recording-verdict` (and checks a clap
-  attribute's behaviour: a 20-line scratch `#[derive(Parser)]` against `libclap-*.rlib`).
 
 ## The 4 s A/V fixture (Task 5 part b)
 
@@ -166,11 +160,10 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
   at 0.5 .. 3.5 s), its `clip-v1-4s.mp4.markers.csv`, and `clip-v1-4s.ticks.tsv` = its run-scoped
   YouTube-leg decode (7 columns; a test pins it to a fresh decode). `git add` of the mp4 trips the
   secret scan (hex runs in the H.264 bitstream): `# airuleset:secret-ok <reason>` on add and commit.
-- `tests/av_run_pairing_clip_1404.rs` (default features, Tier-0 via a plain-rustc replica of the
-  crate-root qpsk modules + `av_window` + `av_run_pairing`): the fixture's tick map + its REAL audio
+- `tests/av_run_pairing_clip_1404.rs` (default features): the fixture's tick map + its REAL audio
   through the probe glue's own crate-root calls read 0 within a frame, +100 / -100 +/- 17 ms with the
   audio shifted by ffmpeg (`atrim=start=0.1,asetpts=PTS-STARTPTS` = audio early = picture lags = +;
-  `adelay=100:all=1` = -). `tests/av_run_recording_1404.rs` (probe, CI) runs the compiled CLI on it.
+  `adelay=100:all=1` = -). `tests/av_run_recording_1404.rs` (probe) runs the compiled CLI on it.
 
 ## The `--av-sync` decode request and the painter head (the 480 s CI timeout)
 
@@ -197,27 +190,6 @@ old tests together, 360 robust frames in 4 vCPU x 522 s, about 13x the local rel
 Estimate before you push: release CPU s x 13, divided over the 4 vCPU the concurrent tests share.
 
 The real YouTube-leg windows: see "The painter path's full-decode request" below.
-
-**Running probe glue locally without cargo:** link a replica crate against the self-hosted runner's
-RELEASE probe rlib (`~/actions-runner-camera-box/_work/camera-box/camera-box/target/release/deps/libcamera_box-*.rlib`;
-pick the one whose `.d` lists `src/probe/`). Its `lib.rs` contains:
-- `extern crate cb_real;`
-- `#[path]` mounts of the EDITED files: the crate-root modules, `probe/av_sync_recording.rs`, and
-  `probe/recording.rs` cut before the pixel-proof code;
-- `pub use cb_real::probe::{qr, payload, recording_decode, ...}` for the untouched decoder;
-- a `recording_latency` shim that re-exports cb_real's and adds any const newer than that build.
-
-Then the probe-gated `tests/*.rs` compile with `--cfg 'feature="probe"' --extern camera_box=<replica>
---extern image=<runner image rlib>` (a 30-line `tempfile` shim when a test needs it), run in release,
-and `clippy-driver -D warnings` lints them. That ran the edited `av_sync_from_recording` end to end on
-the fixture: clean -0.15 ms, audio early +99.87 ms, painter path stops with the head reason.
-
-**Heavy real-clip decodes run on dev2, not dev1** (issue 1404). Build the release replica binary on
-dev1 with plain rustc. It links Rust statically and needs only glibc; dev2 runs the same Ubuntu
-24.04. Copy the binary and the clips to dev2 and run them under `nice` there. Use 8 cores, not dev1's
-4 shared ones; nine 40 s clips decoded old + new took about 20 min. The `pre-deploy-clean-tree`
-hook refuses any scp while the worktree has uncommitted edits, even a scratch copy that is no deploy.
-Add `# airuleset:deploy-dirty-ok <reason>` to that one scp call.
 
 ## The painter path's full-decode request (ROZHODNUTÉ 6051603225)
 
@@ -262,7 +234,7 @@ Re-making the clips:
   frames read from the last `recording analysis complete` line (`this_analysis_fast`).
 - If the pinned ffmpeg or the decoder changes, regenerate the JSON with the OLD request on the same
   clip. Never write it with the new code. No CLI path runs the old request any more, so use a small
-  plain-rustc harness against the runner's release probe rlib (the replica recipe above):
+  harness linked against the probe-feature crate:
   - decode with `analyze_recording_with_grouped_burns_optical(clip, &PAINTER_PATH_NODE_BURNS, &[], None)`
     (= `av_decode_request(None)`);
   - run the rest of `av_sync_from_recording`'s painter path on those frames (first sample per tick,

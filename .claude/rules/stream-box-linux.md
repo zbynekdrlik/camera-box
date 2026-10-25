@@ -214,7 +214,7 @@ full E2E, on a Linux stream box exactly as on Windows.
 - The opt-in restart / zero-loss modes' stream decode plans; the legacy `VERDICT_ON_STREAM=0`
   `recording-fetch-windows.sh` path.
 
-## Tests (Tier-0, no rig)
+## Tests (no rig)
 
 `tests/python/test_stream_box_lib_1462.py` (the lib, the builders RUN on a fake box),
 `test_stream_box_consumers_1462.py` (rig-mode sourced; recording-e2e steps cut between count-1 anchors

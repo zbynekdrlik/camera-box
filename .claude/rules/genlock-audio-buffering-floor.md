@@ -75,7 +75,7 @@ paths:
   ms, release A/V -28 ms). The floor fixed that draw for the absolute target; slices 1-3 removed the
   target, so the draw no longer matters for A/V.
 
-## Tests and Tier-0
+## Tests
 
 - `src/genlock_audio_buffering.rs`: the rounding, the plan and override, the floor rule (on a 4-tick
   floor and on the shipped 0), the freeze; `the_floor_is_zero_ticks_at_both_rates_1425`.
@@ -91,9 +91,7 @@ paths:
   tick`) and runs ONCE per test binary (`OnceLock`).
 - `tests/genlock_audio_slice3_1425.rs` (std-only): the floor define is 0 and the absolute target, its
   fallback and the band are gone from the C and the Rust mirror; the launch-gate wording.
-- Local: the module via a plain-rustc replica + `clippy-driver --test -D warnings`; the parity gate
-  via a stub `camera_box` rlib; the wiring and slice-3 files with plain `rustc --test` and
-  `CARGO_MANIFEST_DIR`; the C files with the `obs-drm-output.md` `-fsyntax-only` recipe.
+- Local: the C files type-check with the `obs-drm-output.md` `-fsyntax-only` recipe.
 
 ## Live acceptance (supervisor, FULL bundle on every OBS box)
 
@@ -193,7 +191,7 @@ call. `cut-in-kept-stamp-limit` pins the limit so a change to it is visible. A l
 shape: a direct source late when it joins (the stream ASIO startup race) is re-anchored once and
 then reaches the same upstream increase as before (`launch-late`: 128 ms).
 
-**Tests and Tier-0** (`tests/genlock_audio_mix_guard_1381.rs`, std-only):
+**Tests** (`tests/genlock_audio_mix_guard_1381.rs`, std-only):
 - Wiring anchors (8, `WIRING`: obs-audio.c, obs-internal.h, obs-genlock-mix-guard.h) + the SAME
   list in a pwsh step of both `windows-genlock*.yml`.
 - A C LIFT of the shipped `audio_callback` path, verbatim: the render-order tail (mark + catch-all
@@ -221,8 +219,7 @@ then reaches the same upstream increase as before (`launch-late`: 128 ms).
   ever sets `pending` on a source that is never mixed); the `continue` after a re-anchor is
   equivalent by construction (the timeline is then 0 or at/after the window start, and upstream's
   maxed branch needs a non-zero stamp before it).
-- Local: `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/genlock_audio_mix_guard_1381.rs`
-  + `clippy-driver ... -D warnings`; the real obs-audio.c type-checks with
+- Local: the real obs-audio.c type-checks with
   `gcc -fsyntax-only -Wall -Wextra -Wformat=2 -Werror` against the real libobs headers plus a
   scratch `obsconfig.h` (the obs-drm-output.md recipe, `-Ivendor/obs-studio/deps/libcaption`); the
   header through a one-line TU under `-Wconversion -Wsign-conversion`.
@@ -297,7 +294,7 @@ so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
   that logged a not-mixed or entered line in the last minute logs its first MIXED_LATE only with the
   next minute's line (`+K since the last line` counts it). The counters and `#800` see it at once.
 
-**Tests and Tier-0.**
+**Tests.**
 - `src/genlock_audio_buffering.rs` unit tests + the 1367 parity gate (the action's `frozen`, the
   decision over its one input).
 - The 1381 lift (`tests/genlock_audio_mix_guard_1381.rs`; the harness stub has an encoder count

@@ -55,7 +55,7 @@ preserve: **no data ⇒ ERROR + a page, never a silent green.**
   `systemctl --user enable --now rig-status-update.timer rig-status-page.service`. Page binds dev1
   TAILSCALE `100.104.8.125:8790` (address-by-tailscale; the rig LAN IP drifts on event travel), never
   localhost/public. version-on-dashboard: DOM-readable `data-version` + visible `v<semver>` + timestamp.
-- **Tier-0 tested via pytest**, not cargo: `tests/python/test_rig_status.py` (CI runs
+- **Tested via pytest**: `tests/python/test_rig_status.py` (CI runs
   `python -m pytest tests/python`, ci.yml). Load the module with `importlib.util.spec_from_file_location`
   (the `rig-health-audit.py` hyphenated-filename pattern) and unit-test the PURE functions — no ssh/WS.
 

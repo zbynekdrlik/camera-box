@@ -12,7 +12,7 @@ paths:
 
 # ASRC bench harness (#804, epic #800 A/V-desync endgame round)
 
-`src/asrc_bench.rs` is a PURE, Tier-0 (default-features) closed-form simulation of two
+`src/asrc_bench.rs` is a PURE (default-features) closed-form simulation of two
 independent free-running clock domains — it does NOT render/decode any audio or video, on
 purpose (see the module's own "Rejected alternative" doc comment and issue #804's design comment,
 `gh issue view 804 --comments`). Read the module doc comment first; this file only adds what a
@@ -61,8 +61,7 @@ module, then temporarily replace only the new implementation's body with a pass-
 `clippy -D warnings` still passes on the RED commit — a genuinely unused field is a hard clippy
 error, not just a lint), run the GREEN-target tests to confirm they fail, commit that as
 `test(#N): [red]`, then restore the real implementation, re-run tests to confirm all pass, and
-commit as `feat(#N): [green]`. Verified locally both times with the `# airuleset:build-ok` bypass
-on `cargo test --lib asrc_bench` (Tier-0 forbids a bare `cargo test`, see project CLAUDE.md).
+commit as `feat(#N): [green]`. Verified both times with `cargo test --lib asrc_bench`.
 
 ## #803's real per-source servo — `RealtimeAsrcCompensator` (extends this file) + the C port
 
@@ -81,9 +80,7 @@ pick `tau` so `(true_ppm) * e^(-t/tau)` clears the ticket's own bound at each na
 **The C mirror lives in `vendor/obs-studio/libobs/media-io/asrc-compensator.{h,c}`** — a
 line-by-line port (same constant names as `ASRC_MAX_PPM`/`ASRC_MAX_SLEW_PPM_PER_S`/
 `ASRC_TIME_CONSTANT_S`/`ASRC_MIN_LOCK_S`, same formula shape). #805/#806 will touch this same
-pair — keep any retuning numerically identical on both sides, and re-run the Rust gate tests
-(the ONLY locally-runnable proof for this math — the vendored C has NO local build path, Tier 0
-forbids it, CI is the first place a C mistake surfaces).
+pair — keep any retuning numerically identical on both sides, and re-run the Rust gate tests.
 
 **Wiring gotchas hit integrating into libobs core (obs-source.c), reusable for #805/#806:**
 
@@ -95,9 +92,8 @@ forbids it, CI is the first place a C mistake surfaces).
   every warning in `cmake/linux/compilerconfig.cmake`'s enabled set (`-Wunused-parameter`,
   `-Wunused-variable`, `-Wparentheses`, `-Wswitch`, `-Wuninitialized`, `-Wformat`, ...) is a hard
   build failure. `-Wno-shadow`/`-Wno-unused-function`/`-Wno-missing-prototypes` etc. ARE disabled
-  though — don't worry about those. Since the vendor tree has no local build (Tier 0), the ONLY
-  way to catch a new warning before CI is careful manual review of every new function's parameters
-  (all used?) and format-string args (types match?).
+  though — don't worry about those. Review every new function's parameters (all used?) and
+  format-string args (types match?).
 - **A function defined LATER in `obs-source.c` needs a forward declaration to be called EARLIER**
   (MSVC treats an implicit extern-int declaration as a hard C4013→C2220 error) — same pattern as
   the pre-existing `genlock_source_drop_cap` forward-decl; #803 added one for
@@ -131,7 +127,7 @@ consume it, folded additively into the existing `target_ppm` calc before the `MA
 
 **The full chain, five pieces, none of them the inner ASRC estimator itself:**
 1. `src/asrc_outer_loop.rs::OuterLoopGuard` — the pure "brain" (3-sample sliding window, 40ms
-   sustained-average threshold, 1ppm/step rate limit, ±10ppm hard clamp). Tier-0 tested.
+   sustained-average threshold, 1ppm/step rate limit, ±10ppm hard clamp). Unit-tested.
 2. `asrc-compensator.{h,c}` — `outer_bias_ppm` field + set/get, same file #803 already ported.
 3. `obs.h`/`obs-source.c` — `obs_source_set/get_asrc_outer_bias_ppm`, a CORE (type-agnostic) export
    forwarding to `source->asrc`. Core, not DistroAV, because #803's own design comment already
@@ -293,7 +289,7 @@ live `mbc` mix buffer (issue 1325). Both are fixed in `obs-source.c asrc_process
   = stretch. The `swr_set_compensation` bullet above documents the wrapper is a one-shot ramp; THIS
   bullet documents its SIGN relative to the compensator.
 
-**The Tier-0 gate that closes the blind spot** is a NEW pure function, NOT a bench change:
+**The gate that closes the blind spot** is a NEW pure function, NOT a bench change:
 `src/asrc_compensation_quantization.rs::servo_applied_ppm_to_sample_delta(applied_ppm, distance_ms,
 output_freq)` = `compensation_sample_delta(-applied_ppm, …)` — the composition of the negation and
 the existing #929/#1016 integer quantization, i.e. the exact end-to-end value swresample receives.
@@ -308,20 +304,6 @@ asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` + byte-identical
 `windows-genlock.yml` and `windows-genlock-fast.yml` (positive: `const uint64_t mixer_now_ns =
 os_gettime_ns();` + the `-applied_ppm` call; negative: the pre-fix non-negated `applied_ppm,` call
 must be ABSENT). The `RealtimeAsrcCompensator` corrected-advance model itself is UNCHANGED by #1325.
-
-## Tier-0 RED→GREEN for a SELF-CONTAINED pure module — plain `rustc --test`, no cargo (#1325)
-
-The `# airuleset:build-ok` bypass is DISABLED (#477) and #557 blocks even `cargo test --no-run`, so
-the old "cargo test --lib asrc_bench" observation path in the sections above is HISTORY. For a
-crate-root pure module that has NO crate-internal deps (`src/asrc_compensation_quantization.rs` —
-only std, no `use crate::`), the working Tier-0 RED→GREEN is a STANDALONE rustc compile of the file
-itself: `rustc --test --edition 2021 src/asrc_compensation_quantization.rs -o /tmp/x && /tmp/x`. No
-`CARGO_MANIFEST_DIR` is needed (that env is only for a `tests/*.rs` file that reads vendored source
-via `env!("CARGO_MANIFEST_DIR")` or `use camera_box::…`, e.g. `genlock_preload.rs`). Used live for
-#1325's sign gate: buggy body → 1 failed, negated body → 11 passed, a genuine local RED→GREEN with
-zero cargo. The precondition is a module with no `use crate::`/`use super::` CODE deps (intra-doc
-`[crate::…]` links in comments are fine — rustc ignores doc content); check with
-`grep -nE '^use (crate|super)::' src/<module>.rs` before trusting the standalone compile.
 
 ## #1335's buffer-LEVEL holding integral — the RATE loop holds tempo, a slow I-term holds the LEVEL
 
@@ -709,12 +691,9 @@ OBS (a real loss: `last_step_ms=-43.7`, `restore=1`, `ts_lag_ms` flat). The foll
   line for line over three scenarios (tick sawtooth 2 h; non-absolute mid-window shift + 40 ms loss
   → restore; absolute 50 ms step re-base + starved window + zero master block). It fails loud when
   `cc` is missing. Two scratch C mutations (EMA back on the raw reading; no window-sum shift)
-  diverge at trace lines 1 and 131. Local Tier-0 run: copy the test, swap the `use camera_box::…`
-  line for a `#[path]` include of `src/asrc_bench.rs`, and `rustc --test` it with
-  `CARGO_MANIFEST_DIR` + `CARGO_TARGET_TMPDIR` set. `clippy-driver --test -D warnings` on the same
-  copy covers the lints. To mutate the C for a bite check, point the copy's `C_SRC` at a scratch
-  `.c` (its own `#include "asrc-compensator.h"` still resolves through `-I` media-io) — never edit
-  `vendor/` in place.
+  diverge at trace lines 1 and 131. To mutate the C for a bite check, point a test copy's `C_SRC`
+  at a scratch `.c` (its own `#include "asrc-compensator.h"` still resolves through `-I` media-io) —
+  never edit `vendor/` in place.
 - **Known, harmless side effect:** the sustained arm now reads the mean, but the restore's per-call
   exit still reads the live reading on the ±10.7 ms tick sawtooth. A steady 12–16 ms error therefore
   arms reliably after 10 windows and the exit ends the burst within about one tick, so the restore
@@ -861,9 +840,6 @@ basis change drops an open candidate; a placement-judged-flag change also flushe
   stamp → timecode → stamp change and a leave of the mode; `str` the ring / even median / packet
   gate; `stx` the edges the first mutation run left alive: a window close inside a candidate, a lost
   capture, a placement, a median inside the band against a paying setpoint, a cap refusal).
-- **Local run (Tier-0):** the parity needs a stub `camera_box` rlib of BOTH `asrc_bench.rs` and
-  `genlock_audio_pairing.rs` now (the timecode module imports `AsrcBasis`); the replica crate the
-  same. Mutation (47/47): the C mutants run against one compiled test set with
-  `CARGO_MANIFEST_DIR` at a scratch tree (the C is read at run time); the Rust mutants recompile the
-  replica and the rlib per mutant (~1.5 min each on dev1).
+- **Mutation (47/47):** the C mutants run against one compiled test set with
+  `CARGO_MANIFEST_DIR` at a scratch tree (the C is read at run time).
 

@@ -107,11 +107,11 @@ deliberately out of #1290's EVENT-mode scope.
   shared-camera-via-splitter topology (or the painter injection leg EVENT disables) must reuse
   `rig-mode-state.sh`; one that pages on a genuine hardware/timing/receiver fault must NOT gate.
 
-## Tier-0
+## Tests
 
 `rig-mode-state.sh` is a pure source-only lib (no `set -e`); verify RED→GREEN by sourcing it and
 calling `rig_mode_from_painter_snapshot` over the five cases, and by the driver end-to-end (source
 the watchdog `--dry-run`, override `probe_box`/`sshpass`/`rig_mode_probe`, run `main` twice). A
-worktree worker may find `bash -c '…source…'` blocked (#1265) — the SUPERVISOR runs the Rust
-harnesses (`tests/harness_rig_mode_state_1290.rs`, `tests/harness_splitter_port_event_gate_1290.rs`)
-at CI; local net is `bash -n` + `shellcheck -S warning` + `cargo fmt --all --check`.
+worktree worker may find `bash -c '…source…'` blocked (#1265); the Rust harnesses
+(`tests/harness_rig_mode_state_1290.rs`, `tests/harness_splitter_port_event_gate_1290.rs`) cover the
+same, plus `bash -n` + `shellcheck -S warning`.

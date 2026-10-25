@@ -139,7 +139,7 @@ Key differences from the camera-box align (do NOT copy them across blindly):
   against). The gate's `frame_probe_pin_gate` is the hard sibling of `frame_probe_pin_report`; the
   full-parity supplement + report-only mode are byte-unchanged.
 
-Same Tier-0 seams idea as camera-box (`.claude/rules/*` + `tests/frame_probe_parity_align_1138.rs`):
+Same seams idea as camera-box (`.claude/rules/*` + `tests/frame_probe_parity_align_1138.rs`):
 `FRAME_PROBE_ALIGN_ARTIFACT_DIR` (pre-fetched dir, skip gh), `FRAME_PROBE_ALIGN_SKIP_VERSION_GUARD`,
 `FRAME_PROBE_GATE_SHA_<NAME>` (deployed-sha read seam, shared with the gate's own report),
 `FRAME_PROBE_ALIGN_DEPLOY_CMD`/`_DEPLOY_FLEET` (deploy override), `FRAME_PROBE_ALIGN_CANDIDATE`/
@@ -153,16 +153,15 @@ decision (`cambox_align_action`) excludes acked boxes AND the orchestrator must 
 building the deploy `names` (`cambox_offline_ack_is_acked "$name" && continue` before `names+=`) —
 mirror the gate.
 
-## Tier-0 verification (zero cargo, #557) — seams make the impure path testable
+## Verification — seams make the impure path testable
 
-The lib is source-only (`# airuleset:script-ok`, no top-level `set -euo pipefail`). Verify without
-cargo: `bash -n` + `shellcheck -S warning`; source the lib under `set -euo pipefail` and drive the
+The lib is source-only (`# airuleset:script-ok`, no top-level `set -euo pipefail`). Verify:
+`bash -n` + `shellcheck -S warning`; source the lib under `set -euo pipefail` and drive the
 decision matrix + the orchestrator + the real deploy path via the seams — `CAMBOX_ALIGN_DEPLOY_CMD`
 (full deploy override), `CAMBOX_ALIGN_CANDIDATE_BIN` (a pre-fetched binary, skips gh),
 `CAMBOX_ALIGN_DEPLOY_FLEET` (a fake deploy-fleet recording its `CAMERA_SET`+`--binary`), and the
 gate's own `CAMERA_BOX_VERSION_GATE_VERSION_<NAME>` read seam (a file of raw `--version` output). A
-green bash-level RED→GREEN predicts the `tests/harness_camera_box_parity_align_1202.rs` pass at CI;
-`cargo fmt --all --check` is the only local Rust parse check (CI is the first type-check).
+green bash-level RED→GREEN predicts the `tests/harness_camera_box_parity_align_1202.rs` pass.
 
 ### A gate function's always-printed BANNER can silently break a `!out.contains(WORD)` negative row-assertion (issue 1235)
 
@@ -171,9 +170,8 @@ to stdout BEFORE the per-node verdict loop. When a subprocess test (`run_gate_en
 case that produces NO verdict row — an acked-offline box, or a dormant/skip path — and asserts the
 ABSENCE of a verdict word (`!out.contains("ALARM") && !out.contains("UNKNOWN")`), that assertion
 matches the BANNER if the banner text happens to contain those bare words, so the test is
-GUARANTEED-RED even though the gate behaved correctly. This is INVISIBLE under Tier-0 (the gate's
-exit code + stdout look right when you run it by hand; only the Rust substring assertion trips, and
-`cargo test` cannot run locally) — it surfaces for the first time on CI. It bit the issue-1235
+GUARANTEED-RED even though the gate behaved correctly. This is INVISIBLE when you run the gate by
+hand (its exit code + stdout look right; only the Rust substring assertion trips). It bit the issue-1235
 hard-gate flip: `frame_probe_pin_gate`'s banner said `fail-closed on UNKNOWN/ALARM`, and the
 acked-offline test's `!out.contains("UNKNOWN")` matched it. **Rule: keep a gate BANNER's wording
 DISTINCT from the exact words a per-node verdict ROW prints** (reworded to `fail-closed on an

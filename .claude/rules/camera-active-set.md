@@ -222,7 +222,7 @@ cam1 + painter + the secondary set) didn't need this treatment because it still 
 (cam1/painter/cam4) after the retirement — check the ACTUAL box count each parallelism test's
 default resolves to, not just whether "some test still covers it".
 
-## The mirror-drift risk is now LOCK-TESTED (#1134), and how to verify recording-e2e.sh edits under Tier-0
+## The mirror-drift risk is now LOCK-TESTED (#1134), and how to verify recording-e2e.sh edits
 
 Two lock-tests now enforce every Python default-mirror matches `camera-set.sh`:
 `tests/harness_rig_ndi_mapping.rs`'s `default_active_set_env_var_matches_camera_set_sh_exactly`
@@ -231,9 +231,9 @@ Two lock-tests now enforce every Python default-mirror matches `camera-set.sh`:
 change the default, these two tests go RED until every mirror is updated — so you can no longer
 silently miss one. Still `grep -rn "<old literal>"` the whole repo first; the lock-tests are the net.
 
-**Editing `recording-e2e.sh` (the static-anchor minefield, see the top-level CLAUDE.md) with cargo
-Tier-0-blocked:** the local proof that no OTHER test's `.find()`/`.split()`/`.contains()` anchor
-broke is a python occurrence-count sweep — `git show HEAD:scripts/recording-e2e.sh` (OLD) vs the
+**Editing `recording-e2e.sh` (the static-anchor minefield, see the top-level CLAUDE.md):** a fast
+check that no OTHER test's `.find()`/`.split()`/`.contains()` anchor broke is a python
+occurrence-count sweep — `git show HEAD:scripts/recording-e2e.sh` (OLD) vs the
 edited file (NEW), extract every string literal from every `tests/*.rs` that references
 `recording-e2e.sh`, and flag any literal whose occurrence count went **1→0** (an anchor you
 removed/renamed that another test needs) or **1→2** (an anchor you duplicated, making a `.find()`
@@ -241,9 +241,7 @@ ambiguous). A count change on a SHORT common fragment (`"strih"`, `"cam1"`) is a
 (it's inside an assertion-MESSAGE string, not an anchor); only a full-literal 1→0 / 1→2 matters.
 Also confirm your edit site is OUTSIDE any region a test slices between two anchors (e.g. the
 `AV_RESTART_GATE:-0`..`[5/8] StartRecord` block, the `# #947` dantesync-secondary region) — an
-inserted line only breaks adjacency if it lands BETWEEN two anchored-adjacent lines. This sweep +
-`cargo fmt --all --check` (rustfmt parses probe-gated code too) + `shellcheck` is the full local
-net when `cargo test` cannot run.
+inserted line only breaks adjacency if it lands BETWEEN two anchored-adjacent lines.
 
 **A WHOLE-FILE occurrence-count sweep is BLIND to a WITHIN-FUNCTION-BODY-SLICE 1→2 (#1171, cost a
 review round-trip).** Several `rig-mode.sh` tests `.find()` a literal SCOPED to a function body they
@@ -252,7 +250,7 @@ on the `do_event()`..`main()` slice and asserts `purge_pos < assert_pos`. A NEW 
 the TOP of `do_event`/`do_test` that merely NAMES a function (`event_mode_assert`, `do_event`, …)
 inserts that literal BEFORE the real call INSIDE the slice — so the scoped `.find` grabs the comment
 and the ordering assertion flips — EVEN THOUGH the whole-file count of that name is high (8→11, not
-1→2) and the sweep never flags it. Tier-0 hides it; it only breaks on CI. Guard: when your edit adds
+1→2) and the sweep never flags it. Guard: when your edit adds
 a comment inside (or just above) a function whose BODY a test slices, grep that test set for
 `body.find("<any function name your comment mentions>")` / `.split("<name>")` and confirm your
 comment does not add the bare name earlier in the sliced region than the real call. Fix is a reword

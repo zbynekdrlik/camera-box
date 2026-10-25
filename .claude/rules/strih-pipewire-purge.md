@@ -124,7 +124,7 @@ does not own): harmless, nothing reads it.
 pass it as `LC_ALL=C apt-get -s -o Dir::Etc::PreferencesParts=<dir> purge ...`, then delete the dir. Nothing
 in `/etc/apt` changes; that is how the arch finding above was read on strih-snv.
 
-## Tests (Tier-0)
+## Tests
 
 `tests/python/test_strih_pipewire_purge_1440.py`: the condition over the four real fact files + TOMLs,
 the pin, the read verdict over the live strih-snv `apt-get -s` text, the install against fake `apt-get`

@@ -285,10 +285,9 @@ provisioning-time override baked into the guard unit's `Environment=` would dive
 dev1 env default and false-FAIL a legitimate step-down. Fix: the guard RECORDS `GUARD_STEPDOWN_W` in
 its state file and verify compares against THAT (env default only as a fallback for an older guard).
 General rule: when two gates must agree on a value, read it from one shared authority (a README pin,
-or the producer's own recorded state) — never let each side default independently. Pure parsers
-(`imag_power_guard_stepped_from_state` / `imag_power_guard_stepdown_w_from_state`) are Tier-0 tested
-by sourcing; use a state-file key (`GUARD_STEPDOWN_W`) distinct from the guard's own live vars
-(`STEPDOWN_W`/`STEPDOWN_UW`) so the guard's `. "$STATE"` source-back never clobbers them.
+or the producer's own recorded state) — never let each side default independently. The pure parsers
+(`imag_power_guard_stepped_from_state` / `imag_power_guard_stepdown_w_from_state`) read a state-file
+key (`GUARD_STEPDOWN_W`) distinct from the guard's live `STEPDOWN_W`/`STEPDOWN_UW` (its `. "$STATE"` never clobbers them).
 
 ## The E2E pre-gate WAIT for a live clamp episode — key on the RAPL long_term, NOT throttle_reason_pl1 (#1268)
 
@@ -350,7 +349,7 @@ sample, so it neither confirms a collapse nor counts toward recovery: exactly wh
 on the same straddling data. Three termination bounds (wall budget, `est = pass*poll` for a wedged
 clock, a hard pass ceiling) + injectable clock/sleep/read seams (`MV_FPS_PREFLIGHT_SETTLE_NOW_CMD` /
 `_SLEEP_CMD` / the existing `MV_FPS_PREFLIGHT_PROBE_CMD`) mirror `scripts/lib/genlock-settle.sh`
-(issue 1221), so the whole thing is Tier-0-testable with zero ssh and zero real waiting
+(issue 1221), so the whole thing is testable with zero ssh and zero real waiting
 (`tests/harness_mv_fps_preflight_settle_1040.rs`). The strih report-only term (issue 1260) keeps its
 own grace re-read path, behaviour untouched — only the STRICT (imag) box routes to the settle. The
 fix lives entirely in the sourced lib; `scripts/recording-e2e.sh` is unchanged (the issue-675

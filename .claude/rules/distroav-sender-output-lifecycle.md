@@ -166,13 +166,12 @@ while libndi's sockets are still open — the dev1 repro used a libndi harness, 
 - NOT covered (a TIME_WAIT can still form; harmful only on a relaunch within 60 s): a connection
   libndi closes by itself DURING the session (not at destroy). A socket already IN TIME_WAIT is past
   reach.
-- Tier-0 verify recipe (no OBS build): the gate test's Facet C compiles the REAL
+- Verify recipe (no OBS build): the gate test's Facet C compiles the REAL
   `ndi-sender-port.cpp` with g++ against a stub `plugin-main.h` + a fake libndi (both C++ sources in
   `tests/fixtures/distroav_sender_port_linger_1363/`, `include_str!`-ed; a real 0.0.0.0 sender-band listener; its destroy does libndi's `shutdown(SHUT_RDWR)`, then the viewer closes on
   EOF, then `close()`). The control reproduces the TIME_WAIT and the abort frees the port. A "race"
   scenario opens a receiver-band listener (:6961 when free) during the create (still identified), and an
-  "ambiguous" one opens two band listeners (PORTID-1363, port 0). Run it with plain
-  `rustc --test` + `clippy-driver --test -D warnings`, no cargo. For the real libndi, compile
+  "ambiguous" one opens two band listeners (PORTID-1363, port 0). For the real libndi, compile
   the same `.cpp` against a stub `plugin-main.h` that includes `Processing.NDI.Lib.h` and dlopens
   `/usr/lib/ndi/libndi.so.6.3.2`, private group `t1363-private`, two processes back to back with a
   receiver connected (the lane's `obs_sim.cpp`): control PGM 5963 / OTHER 5964, fix 5961 / 5962; a

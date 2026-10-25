@@ -26,13 +26,12 @@ it lands** — never a geometry/algorithm tweak justified by math alone. A live 
 that "should" be fixable by tuning parameters is not evidence the parameters are wrong; measure
 first (see #921's finding below — the geometry was innocent, a completely different bug was real).
 
-## How to build such a fixture harness AT TIER-0, without touching the rig or adding an `image`-crate dependency (#921 pattern)
+## How to build such a fixture harness without touching the rig or adding an `image`-crate dependency (#921 pattern)
 
 The existing `tests/fixtures/burn-unreadable/*.png` pattern (`tests/burn_fixture_decode.rs`) needs
 `--features probe` (the `image` crate) — fine for `src/probe/qr.rs` work, but the A/V-sync dock's
 mirror headers (`camera-box-video.hpp`, `camera-box-qr.hpp`) are dependency-free STL-only C++ that
-must stay Tier-0 testable (default features, no CI required). #921 established the Tier-0-native
-version of the same fixture-proof pattern:
+must stay testable under default features — #921's version of the same fixture-proof pattern:
 
 1. **Capture REAL frames via OBS-WS `GetSourceScreenshot`** on the live PROGRAM canvas (e.g. stream
    OBS scene PRO) during an active TEST session — no rig SSH needed, works from any session with
@@ -40,7 +39,7 @@ version of the same fixture-proof pattern:
    dock taps the same raw program output). PNG, RGBA, native resolution.
 2. **Convert to raw 8-bit grayscale luma** with PIL (`Image.open(...).convert('L').tobytes()`) —
    dimensions fixed/known (hardcode `1920x1080` etc. in the harness), no header. This sidesteps
-   needing the `image` crate at Tier-0: the fixture is a tight row-major byte buffer the C++
+   needing the `image` crate: the fixture is a tight row-major byte buffer the C++
    harness `fread()`s directly, byte-for-byte what the OBS pixel-format extraction step would hand
    the decode function on a real frame.
 3. **Commit 2-3 REPRESENTATIVE fixtures**, not the whole capture set — `tests/fixtures/

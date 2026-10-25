@@ -76,7 +76,7 @@ learned wiring it, reusable for ANY new imag OBS-log reader:
 Objective SCANOUT tear-measurement still needs the physical HDMI tap (issue-781, `ops-wait`); the
 reader only proves the mechanism is ENGAGED, never that tearing is gone.
 
-**Anchor tests (Tier-0 vendored-source, `squish()` + `contains()`, no probe/GPU).**
+**Anchor tests (vendored-source, `squish()` + `contains()`, no probe/GPU).**
 `tests/gl_egl_present_vsync_1107.rs` pins the whole EGL vsync chain; the sibling
 `tests/gl_egl_present_vsync_observability_1146.rs` pins the marker AND (belt-and-suspenders) the
 issue-1107 EGL read, so a vendored `git subtree pull` can't silently drop either the fix or its

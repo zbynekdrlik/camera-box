@@ -23,13 +23,8 @@ and MUST NOT claim a frame-loss/latency verdict for a run that produced none.
   "no trustworthy verdict", a downloaded-recordings-but-no-verdict is a decode-stage abort, and
   neither-present is a pre-recording (preflight/deploy/record-setup) abort — none claim a breach.
 
-## Local verification of a shell helper — cargo tests DON'T run locally here
+## Local verification of a shell helper
 
-`cargo test` (even targeted, even with `# airuleset:build-ok`) is BLOCKED in camera-box — the marker
-+ `AIRULESET_ALLOW_LOCAL_BUILD` are DISABLED for this repo (airuleset #477); tests run in CI only.
-Locally you get `cargo check` / `cargo clippy` / `cargo test --no-run` (compile-check) and nothing
-that RUNS a test. To get real RED→GREEN evidence on a pure shell helper, run bash DIRECTLY against
-it — the exact thing the Rust harness does internally:
+Run bash DIRECTLY against a pure shell helper — the exact thing the Rust harness does internally:
 `bash -c '. scripts/lib/<lib>.sh; <fn> <args>'` (and the strict production shape
-`bash -c 'set -euo pipefail; . <lib>; <fn> …'` to prove `set -e` never swallows it). The full
-`cargo test` suite is the supervisor's job at integration.
+`bash -c 'set -euo pipefail; . <lib>; <fn> …'` to prove `set -e` never swallows it).

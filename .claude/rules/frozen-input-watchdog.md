@@ -138,14 +138,14 @@ NOT a duplicate script — set via env:
   (`scripts/lib/mv-reverify-escalate.sh`, #1093) — the flat session-agnostic `sshpass … powershell …
   -Tail` tail — NOT a third ssh-tail. Per-source `received=` reads keep the #1052 `probe_received`
   (already reads the RECEIVER box's log = strih here). Both overridable (`FROZEN_INPUT_ENUMERATE_CMD`
-  / `FROZEN_INPUT_PROBE_CMD`) for the Tier-0 stubbed end-to-end test.
+  / `FROZEN_INPUT_PROBE_CMD`) for the stubbed end-to-end test.
 
 ### The enumeration filter + the fail-loud blind guard
 
 - Pure `frozen_input_cambox_sources [include_regex] [exclude_regex]` in
   `scripts/lib/frozen-input-health.sh` (defaults `cam` / `2me|pgm|pvw|multiview|preview|program`,
   case-insensitive; `|| true` makes "no match" a normal exit-0, not a pipefail failure — callers key
-  on the empty OUTPUT). Tier-0 tested in `tests/harness_frozen_input_enum_1069.rs` (the pure filter +
+  on the empty OUTPUT). Tested in `tests/harness_frozen_input_enum_1069.rs` (the pure filter +
   the whole watchdog ENUMERATE pass end-to-end with stubbed I/O).
 - A failed/empty enumeration is NEVER a silent green (burn-target FAIL-CLOSED + rig-degradation
   rule): `enumerate_and_guard` counts consecutive-ZERO-source passes (only when the receiver is

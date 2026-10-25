@@ -59,7 +59,7 @@ MCP `Snapshot` — the composition monitor shows the CG-bridge output directly (
 click/focus/type in Arena or restart Arena/OBS from a worktree lane — the fix is Arena-side and
 operator-driven.
 
-## Testing is Tier-0 pytest (no cargo, no rig)
+## Testing is pytest (no rig)
 
 The pure verdict + subcommand: native pytest (`test_obs_phase2_republish_black_1006.py`). The bash
 watchdog: a pytest that SHELLS OUT to bash (`test_cg_bridge_alert_watchdog_1006.py`) for the

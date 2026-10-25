@@ -49,7 +49,7 @@ frame once (its node burn: zero loss, max hold 2).
 
 ## Where it lives
 
-- `src/multi_source_window.rs` (pure crate-root, Tier-0) holds the logic:
+- `src/multi_source_window.rs` (pure crate-root) holds the logic:
   - `window_is_multi_source`, `window_check_scope`, `scope_at` (fail-closed);
   - `multi_source_tag` (`None` on single-source, so no new JSON key there);
   - `tag_line`;
@@ -91,22 +91,15 @@ frame once (its node burn: zero loss, max hold 2).
   - its residual-events line appends `, z toho N v multi-source oknách (<tag>)` (events matched by
     cambox + `start_ns <= gen_ts_ns < end_ns`).
 
-## Verifying under Tier-0
+## Verifying
 
 - **Pure module:** the real per-window numbers of both PR-1373 runs are in
-  `tests/fixtures/multi-source-1367/cam_windows.tsv`. The whole integration test + the module's own
-  tests run with no cargo via a standalone replica:
-  - wrap `tear_detect`, `window_gate`, `optical_floor`, `frozen_leg`, `presentation_cadence`
-    (test-stripped, serde derives stripped) and `multi_source_window` as `pub mod` in one file;
-  - append the integration test with `camera_box::` -> `crate::`, rewriting only lines WITHOUT a `"`
-    so the source-anchor strings stay intact;
-  - `rustc --test`, then `clippy-driver --test -D warnings` on the same file.
+  `tests/fixtures/multi-source-1367/cam_windows.tsv`, read by `tests/multi_source_window_1367.rs`.
 - **Probe wiring:** the end-to-end probe-gated differential is
   `multi_source_window_is_judged_by_its_node_burn_1367` in `recording-verdict.rs`:
   - single-source copies FAIL;
   - multi-source passes and is tagged;
   - a multi-source window with a delivered frame missing its cam2 burn FAILS.
-  It compiles first on CI.
 - **Python report fixture:** the REAL run-2059624745 verdict re-folded exactly as the Rust now
   folds it. The committed generator `tests/python/fixtures/e2e_discord_report/regen_multi_source_1367.py
   <real verdict.json> <out.json>` mirrors every key above and reproduces the fixture byte-identically.

@@ -17,7 +17,7 @@ paths:
 ---
 
 # Refactoring the dock-lock decision chain (`sync-test-output-audio.cpp` since issue 1386) breaks stale text-anchor
-# gates in THREE places, not one — and TWO of the three are invisible to local Tier-0 checks (#955)
+# gates in THREE places, not one — and TWO of the three are invisible to default-feature local checks (#955)
 
 **Before restructuring the `if (act.apply && ...) { ... } else if (act.apply) { ... } else if
 (...) { ... } else { ... }`-shaped dock-lock decision chain in
@@ -27,17 +27,16 @@ Rust test file the top-level CLAUDE.md GOTCHA already warns about for `recording
 `rig-mode.sh`:**
 
 1. `tests/genlock_preload.rs::vendored_source::dock_lock_corrector_is_monitor_only_by_build_default_942`
-   — a `#![cfg(feature = "probe")]`-gated Rust test. **Invisible to every local Tier-0 check**
-   (`cargo check`/`clippy`/`test --no-run` on default features never compiles this file at all —
-   confirmed live: `cargo test --lib` shows nothing for it, no error, no warning). Only CI's
-   `ci.yml` `Test` job (which runs `--all-features`) catches a stale anchor here.
+   — a `#![cfg(feature = "probe")]`-gated Rust test. **Invisible to every default-feature check**
+   (`cargo check`/`clippy`/`test` on default features never compiles this file at all — confirmed
+   live: `cargo test --lib` shows nothing for it). Only an `--all-features` run (CI's `Test`) catches it.
 2. **`.github/workflows/windows-genlock-fast.yml`'s own pwsh "Assert dock lock corrector is
    monitor-only by default" step.**
 3. **`.github/workflows/windows-genlock.yml`'s IDENTICAL pwsh step** (the two workflow files
    duplicate this gate verbatim — always update both together).
 
 Steps 2 and 3 are ALSO invisible locally (PowerShell/pwsh gates only run on the Windows CI
-runner) — a session touching only the dock output sources and passing every local Tier-0 check has
+runner) — a session touching only the dock output sources and passing every default-feature check has
 **zero local signal** that any of these three are now stale. Live incident (#955, 2026-08-06):
 extracting the chain into `switch (cb_dock_lock_outcome(...)) { case ...::Write: ... }` passed
 `cargo fmt`/`check`/`clippy`/`test --no-run` and the full local `cargo test` suite (197/197 `ok`)
@@ -78,8 +77,7 @@ around the NEW structure's own literal tokens:
 
 ## Verify offline BEFORE re-pushing — a throwaway Python script, no compiler needed
 
-Since two of the three anchors can't be exercised locally (the probe feature is Tier-0-banned to
-build; the pwsh gate only runs on the Windows CI runner), write a short Python script that
+Since the pwsh gate only runs on the Windows CI runner, write a short Python script that
 replicates the EXACT string algorithm (`" ".join(s.split())` for the Rust `squish()`;
 `re.sub(r'\s+', ' ', s)` for pwsh's `-replace '\s+', ' '`; the line/block-comment stripper for
 `strip_cpp_comments()`) and run your candidate anchor strings against the REAL current
@@ -206,7 +204,7 @@ the self-test).
     then opens the namespace;
   - the pwsh twin's whole `Where-Object { … }` file filter, verbatim, next to the Rust
     `is_output_file` table: a clause changed on one side only fails.
-- **Verify locally (Tier-0)**, since the first compile of this C++ is CI's "Compile-check
+- **Verify locally**, since the first compile of this C++ is CI's "Compile-check
   av-sync-dock":
   - `g++ -std=c++17 -fsyntax-only -Wall -Wextra` each TU with the two stub headers
     (`av-sync-dock-decode-worker.md`);
@@ -220,12 +218,7 @@ the self-test).
     in the scratchpad. The worktree guard refuses a direct `pwsh` call, so drive it from a script
     FILE. Before trusting a green run, run the OLD steps against the OLD tree: that must be green
     too, and the OLD steps against the NEW tree must fail;
-  - compile and run the one or two Rust anchor tests that cover the change with plain `rustc --test`
-    / `clippy-driver -D warnings`, and cover the others with a Python replica of their exact
-    needles (the owner's limit on local test runs). The av_sync_dock tests read
-    `env!("CARGO_PKG_VERSION")` at compile time too: set `CARGO_PKG_VERSION=0.0.0` beside
-    `CARGO_MANIFEST_DIR`. A `fmt --check && rustc …` chain that stops at fmt leaves the OLD binary
-    to run: compile in its own call, to a new output name.
+  - run the Rust anchor tests that cover the change (`cargo test --test <f>`).
   - **Prove a new anchor in BOTH languages without touching `vendor/` (issue 1381).** Copy only
     `vendor/av-sync-dock/{src,test}` into a scratch tree, apply one mutant there (a python script
     with a count-1 `replace`), then run the extracted pwsh step with that tree as cwd

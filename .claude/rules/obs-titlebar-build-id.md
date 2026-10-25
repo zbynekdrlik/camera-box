@@ -76,11 +76,8 @@ the full `windows-genlock.yml` bundle (which builds + uploads obs64.exe) is requ
 also why the deployed obs.dll/SHA can be newer than the running obs64.exe after a fast swap —
 another reason the title must read the SHA file, not the exe's own compile identity.
 
-## No local verification for frontend/vendored code — CI is first compile
+## Frontend/vendored code — the Windows C++ glue's first compile is CI
 
-`src/probe/*` AND `vendor/obs-studio/frontend/*` do not compile under a local Tier-0 cargo
-check (camera-box disables the run-tests bypass entirely, airuleset #477). Get RED→GREEN on
-the PURE header off-rig by compiling the standalone harness with plain `c++` directly (what
-`tests/obs_titlebar_newlevel_sha_parse.rs` does at runtime) — that is not a cargo build and
-is not hook-blocked. `cargo fmt --all --check` still parses the `.rs` harness; the vendored
-C++ glue itself is first type-checked on the 150-min `windows-genlock.yml`.
+Get RED→GREEN on the PURE header off-rig by compiling the standalone harness with plain `c++`
+directly (what `tests/obs_titlebar_newlevel_sha_parse.rs` does at runtime); the vendored C++ glue
+itself is first type-checked on the 150-min `windows-genlock.yml`.

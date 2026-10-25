@@ -174,9 +174,8 @@ per-test temp `SPLITTER_WATCH_STATE_FILE` and assert on stderr (the `log()` stre
 the sibling arithmetic in BOTH directions (a lone colour sibling still pages the grey box; a lone
 grey box with no reachable sibling never pages) and the DEAD_PORT/SOURCE_WIDE/NO_CAPTURE/NODATA
 wiring, none of which the pure-lib test can reach. The pure lib is tested separately by
-`tests/harness_splitter_port_health_739.rs` (source-only, no `main`). Both run under Tier-0 (bash
-sources the scripts at test time; `cargo test --no-run` only compiles the Rust harness — the actual
-RED→GREEN is observed by running the equivalent bash directly, since Tier-0 forbids `cargo test`).
+`tests/harness_splitter_port_health_739.rs` (source-only, no `main`). Both source the scripts in
+bash at test time.
 
 ## Install + verify (dev1) — SHIPS DISABLED
 

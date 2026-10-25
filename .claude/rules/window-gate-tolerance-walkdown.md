@@ -63,7 +63,7 @@ window is within the `<=3` tolerance; segments show `pass=false` report-only via
 `windows_failed_report_only` while `relaxed_pass=true`) BEFORE assuming the fold is strict. In #1243
 the fold was already relaxed, so change 1 was a comment-only walk-back annotation and the only real
 RED→GREEN was a SEPARATE gate — the #1142 uniformity floor (`presentation_cadence::UNIFORM_FRACTION_MIN`,
-a crate-root Tier-0 const, NOT this rule's window_gate seams) walked 0.95 → 0.93 (run 1629895310
+a crate-root const, NOT this rule's window_gate seams) walked 0.95 → 0.93 (run 1629895310
 worst derived 0.9397 was the sole blocking red). The paired RESTORE ticket #1242 therefore restores
 strict `copies==0` by DISARMING seam 2 (`copies_gaps_tolerance_gates_overall_pass() -> false`), never
 by "changing the fold" — the fold already reads relaxed via the seam.
@@ -118,7 +118,7 @@ matching `frozen_leg.stale_replay` (CAM2×1/CAM3×1, the same event surfaced twi
 - `overall_pass_term` absorbs a segment iff `copies <= SEGMENT_SINGLETON_COPIES_ALLOWANCE && gaps <=
   SEGMENT_SINGLETON_GAPS_ALLOWANCE` (both `1`) **while seam 2 is disarmed**; `>=2` of either fails.
 - The pure decision is `window_gate::segment_singleton_allowance_consumed(copies, gaps)` + the note via
-  `segment_singleton_note(copies, gaps)` (both crate-root, Tier-0-testable; `recording_segments` +
+  `segment_singleton_note(copies, gaps)` (both crate-root; `recording_segments` +
   `recording-verdict.rs` only CALL them). JSON self-describes via
   `segment_singleton_allowance_gates_overall_pass` + the two allowance consts + `segment_singleton_gate`.
 - **Re-tighten to absolute zero = flip `segment_singleton_allowance_gates_overall_pass()` to `false`**
@@ -204,11 +204,7 @@ find every site that needs recalibrating.
 ## 5. The walk-down stays on ITS ticket
 If the step does not reach 0, the ticket stays OPEN and carries the remaining steps; the PR must NOT
 close it. Gate the next step on the concrete evidence the running gate produces (N>=2 consecutive
-green post-fix runs at the lower value). `window_gate.rs` is crate-root (default features) —
-**note (#557, 2026-08-18): the `# airuleset:build-ok` local-compile bypass this section used to cite
-is now DISABLED repo-wide** (see the project CLAUDE.md's Local Build Policy) — verify a
-`window_gate.rs` change locally via `cargo fmt --all --check` + hand-derivation only, exactly like
-`recording_segments.rs` (probe-gated, CI-only compile either way).
+green post-fix runs at the lower value).
 
 ## Third walk step (issue 1243, 2026-08-31): `WINDOW_COPIES_GAPS_TOLERANCE` 3 -> 5
 Same doctrine, a DIFFERENT seam than the two `UNIFORM_FRACTION_MIN` steps documented above (that
@@ -351,8 +347,7 @@ cure bundle `02b53180b` OR its descendant `7e8efff6a` = POST) mined the four pos
    CAM1 gap reads exactly this: `windows_over_copies_gaps_tolerance=0` (within the tol-2 lens) yet
    `windows_failed_report_only=1` (strict-failing). Setting the const to 0 would collapse
    `relaxed_pass` into `strict_pass` and destroy that visibility, and would shrink the probe-gated
-   `switch_schedule_continuity.rs` `over_by_one = TOL+1` fixture to the minimal 1-slot edge (Tier-0
-   #557 can't compile-verify it). So "tolerance 0" is honoured for the FOLD (the else arm tolerates
+   `switch_schedule_continuity.rs` `over_by_one = TOL+1` fixture to the minimal 1-slot edge. So "tolerance 0" is honoured for the FOLD (the else arm tolerates
    zero) without the const going to 0. A future re-arm re-calibrates the const from fresh data.
 
 **CAM2 per-cambox override DROPPED (`&[]`).** cam2 became splitter-fed ~16.9 13:00 (the imag-HDMI
@@ -375,9 +370,8 @@ boundary). **Flipping a FOLD SEAM (`copies_gaps_tolerance_gates_overall_pass()` 
 `segment_singleton_allowance_gates_overall_pass()` true<->false) is DIFFERENT and breaks a set the
 const-walk sweep misses:** every probe-gated test that folds `overall_pass` through
 `segment_continuity` -> `decide_with_tolerance(...).overall_pass_term`. These live in
-`src/probe/recording_segments.rs` + `src/bin/recording-verdict.rs`, are `#[cfg(feature="probe")]`
-(CI-only compile, Tier-0 #557 bans compiling them locally), so a change confined to the seam is
-INVISIBLE locally and only reds at CI. Issue 1242's strict-zero restore shipped a first pass that
+`src/probe/recording_segments.rs` + `src/bin/recording-verdict.rs`, are `#[cfg(feature="probe")]`,
+so a default-feature check never compiles them. Issue 1242's strict-zero restore shipped a first pass that
 left ALL of them asserting the OLD absorbing behavior; an adversarial review caught it.
 
 **The exact break-signature detector (run it before pushing any seam flip):** a test asserting
@@ -400,10 +394,6 @@ window is genuinely clean (0/0) vs a nonzero absorbed one.
 - NOT affected: the v4l2 CAPTURE-leg band (`camleg_capture_band` / `v4l2_dropped`, issue 1169) is a
   SEPARATE seam that does not call these two functions — confirm it's independent, don't invert it.
 
-Verify the flip locally with a std-only `rustc --edition 2021 --test` replica of
-`decide_with_tolerance` at armed vs disarmed seams (the fold logic is pure crate-root); CI is the
-first place the probe consumers type-check + run.
-
 ## 16.9.2026 (release PR 1326 E2E attempt 2) — the strict-zero restore REDDED the 3rd splitter-fed run; the guard rail was pulled (full revert to the .632 fold)
 
 Run 35136632198 (RECORDING_E2E_RUN_ID 443513281) failed ONLY on the per-segment fold: CAM2 window 1
@@ -413,9 +403,8 @@ fallback), CAM2 window 2 gaps=1; every other window 0/0, A/V measured on 7 cams,
 Rather than the "re-arm only the tol-2 seam" one-liner, the supervisor `git revert`ed the THREE code
 commits of the restore (`076c56542` probe-fold consumers, `beb2a3254` seam flips + CAM2-override
 drop, `a2f6c72a2` strict pin test) — a MIXED state (tol seam armed, singleton disarmed, CAM2
-override dropped) has no matching probe-gated test expectations anywhere and cannot be compiled
-locally (Tier-0), so the exact .632 fold (CI-green + rig-green) is the only state provable without
-a CI round-trip. The docs/mining-tool commits stay. Issue 1242 stays OPEN: the residual churn is
+override dropped) has no matching probe-gated test expectations anywhere, so the exact .632 fold
+(CI-green + rig-green) was the only proven state. The docs/mining-tool commits stay. Issue 1242 stays OPEN: the residual churn is
 NOT root-caused. Data point from this run's per-box burn logs (mean of the last 20 `Streaming:`
 5 s windows): cam2 captured **299.4** / 300.5 emitted, cam1 299.7 / 300.6, cam3–7 ≥ 300.2 — the
 two under-cadence GRABBERS are the copy/gap sources (emit-fill repeats → a recording copy when it
@@ -428,8 +417,8 @@ strict restore: fix the cam1/cam2 capture cadence first, then ≥ 5 clean runs, 
 The 16.9. supervisor note above (from run 443513281's per-box `Streaming:` means) read the residual
 as GRABBER-owned: cam1/cam2 capture ~0.1–0.2 fps under the 60 Hz emit cadence, so the emit-fill
 repeat → a recording copy. Task 1 mined that hypothesis to the ground with a new pure tool
-(`scripts/residual_churn_attribution.py` + `tests/python/test_residual_churn_attribution_1242.py`,
-Tier-0). It aligns EVERY residual event's `wall_clock_epoch_s` to that cambox's OWN burn log and
+(`scripts/residual_churn_attribution.py` + `tests/python/test_residual_churn_attribution_1242.py`).
+It aligns EVERY residual event's `wall_clock_epoch_s` to that cambox's OWN burn log and
 classifies the SOURCE side (5-s `Streaming:` sent−captured deficit; 1-s `#707 emit-1s/cap-1s`
 deficit; the `(#889) dupe-preferring decimation` line's `late-dupe copies emitted` and `starvation
 last-frame repeats`). Verdict, from 5 post-cure splitter-fed runs (977889848, 2019585820, 443513281,
@@ -510,9 +499,7 @@ non-adjacent-freeze/benign-reorder/mixed-run absorption tests, the boundary diff
 per-cambox override end-to-end test) were re-pinned from the tol-2 absorbing semantics to the
 `<=1/<=1` singleton semantics (singleton note/count now FIRE on a `<=1/<=1` window; 2 copies now RED;
 CAM2 is a normal box). The `tests/verdict_gate_strict_fold_1242.rs` pin file was re-pinned to the new
-state. Verified locally via a std-only `rustc --test` replica of `decide_with_tolerance` at
-armed-vs-disarmed seams + `cargo fmt --all --check` + the doc-list lint grep; the probe consumers
-type-check at CI. **Guard rail (the one-line report-only revert):** if a healthy-chain run ever reds
+state. **Guard rail (the one-line report-only revert):** if a healthy-chain run ever reds
 on ONLY these seams, re-arm `copies_gaps_tolerance_gates_overall_pass() -> true` (back to the tol-2
 fold) — a data-thin false-red safety valve, NEVER a silent widen. Data reproduced by
 `scripts/window_gate_walkdown.py 02b53180b 7e8efff6a`. Issue 1242's walk-back trail closes with this.

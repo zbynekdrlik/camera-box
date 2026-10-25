@@ -44,7 +44,7 @@ storm the rig boxes + mbc already cured by enabling `phase_slew`.
 
 ## Components
 
-- `scripts/dantesync_config_patch.py` — PURE (pytest Tier-0). `patch_config(text, ntp_server=None,
+- `scripts/dantesync_config_patch.py` — PURE (pytest). `patch_config(text, ntp_server=None,
   legacy_phase_slew=False)` sets the clock policy (preserving every other key + order): since
   dantesync 1.9.0 (issue 1372) the default is `system.clock_discipline="ptp_phase_lock"` with
   `system.phase_slew` left untouched (1.9.0 ignores it); `--legacy-phase-slew` keeps the old
@@ -105,13 +105,12 @@ noise (the "Discord objem blízko nuly" rule). This gate ships as a standalone m
 gives the box a phase reference that exists while strih is off — then a strih-off ALARM becomes a
 genuine anomaly, not the expected state.
 
-## Tier-0 verification (this lane)
+## Verification (this lane)
 
 `bash -n` + `shellcheck -S warning` on the `.sh`; source the libs and exercise the pure verdict /
 helpers over fixtures (via a scratch `bash <file>`, never the guarded `bash -c '…source…'` from a
-worktree); `pytest tests/python/test_dantesync_config_patch_1297.py`; `cargo fmt --all --check`. The
-Rust harnesses (`tests/dantesync_maintenance_gate.rs`, the issue-1297 block in
-`tests/dantesync_fleet_upgrade.rs`) compile + run at CI (cargo is Tier-0-blocked locally).
+worktree); `pytest tests/python/test_dantesync_config_patch_1297.py`; `cargo fmt --all --check`; the
+Rust harnesses `tests/dantesync_maintenance_gate.rs` + the issue-1297 block in `tests/dantesync_fleet_upgrade.rs`.
 
 ## Gotcha — `Restart-Service dantesync` on RESOLUME-SNV reports `stop failed` and leaves the service STOPPED
 

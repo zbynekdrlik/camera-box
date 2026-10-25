@@ -94,12 +94,10 @@ cannot see: a clean exit (`Restart=on-failure` ignores exit 0) and a wedged-but-
 - **Separation of concerns / no double-paging:** a fully-unreachable box (ping + `:4455` + `:8899`
   all down) → `bundle_state_classify` returns `BOX_UNREACHABLE` → this watchdog DEFERS to
   `network-reach-alert-watchdog` (#1001); it acts ONLY on "box up, `:8899` down".
-- **Testing the decision composition offline:** the pure lib has a Tier-0 harness
+- **Testing the decision composition offline:** the pure lib has a harness
   (`harness_bundle_state_health_732.rs`); the `handle_box` glue is covered by
   `harness_bundle_state_watchdog_732.rs` via PATH-shimmed `curl`/`ping` + a tempdir state file +
-  `--dry-run` (same fixture pattern as `ci-testing-gotchas.md` #836/#975). `cargo` tests do NOT run
-  locally here (Tier-0, build-ok DISABLED #477) — prove behaviour by running the watchdog directly
-  in bash with the same shims, and rely on CI for the Rust assertions.
+  `--dry-run` (same fixture pattern as `ci-testing-gotchas.md` #836/#975).
 
 ## Ships DISABLED — supervisor installs
 
