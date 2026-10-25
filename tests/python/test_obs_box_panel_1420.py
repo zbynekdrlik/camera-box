@@ -63,7 +63,8 @@ def _apps_home(tmp_path, units=("strih-obs.service", "bkshading-panel-app.servic
         _exec(rd, "#!/bin/sh\n")
     # issue 1464: no Chrome of the test host leaks in (dev1 has google-chrome-stable installed)
     return home, {"OBS_BOX_PANEL_SYS_UNIT_DIR": str(sysd), "OBS_BOX_PANEL_RUSTDESK_BIN": str(rd),
-                  "OBS_BOX_PANEL_CHROME_BIN": str(tmp_path / "no-chrome")}
+                  "OBS_BOX_PANEL_CHROME_BIN": str(tmp_path / "no-chrome"),
+                  "OBS_BOX_PANEL_SHOT_BIN": str(tmp_path / "no-flameshot")}
 
 
 def test_every_app_the_box_has_gets_a_launcher_started_through_its_unit(tmp_path):
@@ -153,6 +154,10 @@ class Box:
         # issue 1441: the keyboard layout helper's installed path + a stand-in for its live `print` on :0
         self.kbd_helper = tmp / "lib" / "camera-box" / "obs_box_kbd_layout.py"
         _exec(self.bin / "kbdpy", '#!/bin/bash\ncat %s/kbd 2>/dev/null\nexit 0\n' % self.state)
+        self.stock_rc = tmp / "stock-rc.xml"
+        self.stock_rc.write_text('<openbox_config>\n<keyboard>\n  <keybind key="Print">\n'
+                                 '    <action name="Execute"><command>scrot</command></action>\n'
+                                 '  </keybind>\n</keyboard>\n</openbox_config>\n')
         self.proc = tmp / "proc"
         (self.proc / "4242").mkdir(parents=True)
         os.symlink("/usr/bin/tint2", self.proc / "4242" / "exe")
@@ -168,7 +173,11 @@ class Box:
                 "OBS_BOX_PANEL_FILES_BIN": str(self.tmp / "no-pcmanfm"),
                 # issue 1464: the power program's installed path (never the real /usr/local/bin); no Chrome
                 "OBS_BOX_PANEL_POWER_HELPER": str(self.power),
-                "OBS_BOX_PANEL_CHROME_BIN": str(self.tmp / "no-chrome")}
+                "OBS_BOX_PANEL_CHROME_BIN": str(self.tmp / "no-chrome"),
+                # issue 1481: no flameshot binary = no screenshot launcher here; the stock openbox rc.xml
+                # the install seeds the user's from (never the test host's /etc/xdg)
+                "OBS_BOX_PANEL_SHOT_BIN": str(self.tmp / "no-flameshot"),
+                "OBS_BOX_PANEL_OPENBOX_RC_SRC": str(self.stock_rc)}
 
     def with_obs(self):
         ud = self.home / ".config" / "systemd" / "user"
@@ -223,13 +232,13 @@ def _healthy(box):
     (box.state / "kbd").write_text("US\n")
 
 
-def test_a_healthy_panel_passes_nine_rows(box):
+def test_a_healthy_panel_passes_ten_rows(box):
     _healthy(box)
     rows = _rows(box)
     # issue 1448: + (panel-discord) on the stream role; issue 1441: + (panel-kbd); issue 1458: + (panel-files);
-    # issue 1464: + (panel-power)
-    assert [st for st, _ in rows] == ["OK"] * 9, rows
-    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "9"
+    # issue 1464: + (panel-power); issue 1481: + (panel-shot)
+    assert [st for st, _ in rows] == ["OK"] * 10, rows
+    assert _bash("printf %s $OBS_BOX_PANEL_ROWS").stdout == "10"
 
 
 def test_install_writes_the_obs_launcher_and_its_icon(box):
@@ -268,7 +277,7 @@ def test_each_broken_piece_fails_its_row(box):
     rows = dict((d.split(")", 1)[0][1:], st) for st, d in _rows(box))
     assert rows == {"panel-pkg": "FAIL", "panel-config": "FAIL", "panel-launchers": "OK", "panel-unit": "FAIL",
                     "panel-discord": "FAIL", "panel-kbd": "FAIL", "panel-files": "FAIL",
-                    "panel-power": "FAIL",
+                    "panel-power": "FAIL", "panel-shot": "FAIL",
                     "panel-window": "FAIL"}   # the stub's dpkg state covers discord and pcmanfm too
 
 
