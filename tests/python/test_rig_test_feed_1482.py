@@ -136,3 +136,20 @@ def test_recording_e2e_follows_the_feed():
     assert s.index('. "$HERE/lib/rig-test-feed.sh"') < s.index("camera_test_settings_enforce ")
     assert 'AV_SYNC_MARKER_DEVICE="${AV_SYNC_MARKER_DEVICE:-$(rig_test_feed_marker_device)}"' in s
     assert 'AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-$(rig_test_feed_marker_device)}"' in s
+
+
+def test_the_burn_unit_gets_the_intercom_off_env_in_the_direct_feed_only():
+    # The E2E's cam2 burn camera-box runs as a transient systemd-run unit, which never reads camera-box.service's
+    # drop-ins: without this env its intercom opens the jack and the QPSK marker fails "Device or resource busy"
+    # (E2E 40222056776 attempt 2, 25.10.2026).
+    assert _lib("rig_test_feed_burn_setenv").stdout == "--setenv=CAMERA_BOX_INTERCOM=off "
+    assert _lib("rig_test_feed_burn_setenv", {"RIG_TEST_FEED": "optical"}).stdout == ""
+    assert _lib("rig_test_feed_burn_setenv", {"RIG_TEST_FEED": "camera"}).returncode == 2
+
+
+def test_recording_e2e_gives_the_cam2_burn_unit_the_intercom_env():
+    s = E2E.read_text()
+    line = [ln for ln in s.splitlines() if ln.strip().startswith('if [ "$_cn" = "cam2" ]; then _cnodisplay_setenv=')]
+    assert len(line) == 1
+    assert "$(rig_test_feed_burn_setenv)" in line[0]
+    assert s.index('. "$HERE/lib/rig-test-feed.sh"') < s.index("$(rig_test_feed_burn_setenv)")
