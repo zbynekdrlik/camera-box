@@ -359,6 +359,7 @@ step "4c" "Downstream Keyer OBS plugin $(obs_dsk_version) (pinned upstream .deb,
 # Idempotent: a plugin that already has the pinned hash downloads nothing. verify-strih item 35 grades it.
 ( eval "$(obs_dsk_install_cmds "$(obs_dsk_version)" "$(obs_dsk_deb_url)" "$(obs_dsk_deb_sha256)" "$(obs_dsk_so_sha256)" /usr/lib/x86_64-linux-gnu /usr/share)" ) \
   || fail "Downstream Keyer install failed (see above) -- check the pinned .deb URL / sha256 in scripts/lib/obs-downstream-keyer.sh and re-run"
+obs_audio_monitor_install /usr/lib/x86_64-linux-gnu /usr/share || fail "issue 1436: the Audio Monitor plugin install failed (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"

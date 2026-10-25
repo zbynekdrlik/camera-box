@@ -919,6 +919,7 @@ if [ "$_dsk_verdict" = ok ]; then
 else
   bad "(downstream-keyer) ${_dsk_verdict#FAIL: } at ${_dsk_so} -- re-run setup-strih.sh step 4c (issue 1361)"
 fi
+obs_audio_monitor_grade_report   # issue 1436: the stream operator's Audio Monitor plugin (stream role)
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
 #     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with --

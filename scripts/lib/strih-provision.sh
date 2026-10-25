@@ -122,6 +122,11 @@ if ! declare -F strih_pipewire_purge_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-pipewire-purge.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-pipewire-purge.sh"
 fi
+# issue 1436: the stream operator's Audio Monitor plugin (setup step 4c, verify item 35, stream role).
+if ! declare -F obs_audio_monitor_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-audio-monitor.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-audio-monitor.sh"
+fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4
