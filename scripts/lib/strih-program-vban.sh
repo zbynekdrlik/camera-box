@@ -68,6 +68,29 @@ strih_program_vban_field() {
   sed -n "/ ${2}=/{s/.* ${2}=\([^ ]*\).*/\1/p;q}" <<<"${1-}"
 }
 
+# strih_program_vban_channels_row WS_HOST NAME -> issue 1439 (owner 25.10.2026, strih-snv's program in one
+# channel only): OBS's own per-channel meter of the program input over 3 s (measurement_audio_meter_probe.py
+# --per-channel; STRIH_PROGRAM_VBAN_CHANNELS_FILE = its output, the test seam). One channel under -90 dBFS while
+# another is over -60 = FAIL naming it; nothing over -60 = NOTE (nothing playing now); no meter = NOTE.
+strih_program_vban_channels_row() {
+  local ws="${1-}" name="${2-}" out verdict detail
+  if [ -n "${STRIH_PROGRAM_VBAN_CHANNELS_FILE:-}" ]; then
+    out="$(cat -- "$STRIH_PROGRAM_VBAN_CHANNELS_FILE" 2>/dev/null || true)"
+  else
+    out="$(timeout 20 python3 "$(dirname "${BASH_SOURCE[0]}")/../measurement_audio_meter_probe.py" "$ws" \
+      --input "$name" --sample-s 3 --per-channel 2>/dev/null || true)"
+  fi
+  verdict="$(sed -n 's/^channel_verdict=//p' <<<"$out" | head -n 1)"
+  detail="$(sed -n 's/^channel_detail=//p' <<<"$out" | head -n 1)"
+  case "$verdict" in
+    ok) ok "(program-vban) both channels carry the program: ${detail}" ;;
+    silent-channel) bad "(program-vban) OBS '${name}': ${detail} -- the sender sends that channel empty (the console's VBAN patch); the receiver plays what arrives (issue 1439)" ;;
+    quiet) note "(program-vban) OBS '${name}' is quiet now (${detail}) -- the per-channel check runs while the program plays" ;;
+    *) note "(program-vban) OBS '${name}': no per-channel meter read over obs-websocket ${ws}:4455${detail:+ (${detail})} -- channels not graded" ;;
+  esac
+  return 0
+}
+
 # strih_program_vban_grade SCN_BIN WS_HOST LOG [NAME] -> the item-9 rows above for the program-audio input
 # NAME (default the loaded box's STRIH_PROGRAM_AUDIO_INPUT: stream-pp `Zvuk z mixu`, stream-snv `mbc`,
 # issue 1462), graded against the loaded box's facts.
@@ -124,6 +147,7 @@ strih_program_vban_grade() {
   else
     note "(program-vban) ${n1:-?} packets received since OBS started, none in the last ${wait} s -- the console is not sending now (graded live while it sends)"
   fi
+  strih_program_vban_channels_row "$ws" "$name"
   lost="$(strih_program_vban_field "${l2:-$l1}" lost)"
   counters="lost=${lost} late=$(strih_program_vban_field "${l2:-$l1}" late) re_anchors=$(strih_program_vban_field "${l2:-$l1}" re_anchors)"
   # ROZHODNUTE 6352253147 (b): how many of the lost slots were concealed, how many went out as silence;

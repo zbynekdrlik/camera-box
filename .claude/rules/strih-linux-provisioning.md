@@ -1470,6 +1470,19 @@ The five hand-patches that survived ONLY on the live box (a re-flash would rever
 
     **GOTCHA 2 — the grant applies at the next REBOOT, not the next login.** OBS runs as the `--user` unit `strih-obs.service`, so it inherits its limits from `user@UID.service`, which LINGERS (step 13 enables linger) and got `pam_limits` (`/usr/lib/pam.d/systemd-user`) when it started at boot. Live 23.9.: grant file present, yet `user@1000` / OBS / `strih-obs.service` all at `Max realtime priority 0`. A logout/login does NOT restart a lingering manager; a reboot (allowed — strih-snv is not a cambox) or a restart of `user@UID` (ends the operator session) does. imag differs: it launches OBS in the autologin graphical session, whose own PAM applies. After the reboot confirm `genlock: render-tick thread set SCHED_FIFO` in the new OBS log (verify item 32 PASSes `ok-sched-fifo`); if it still EPERMs, read `Max realtime priority` in `/proc/<user@UID MainPID>/limits` — 0 there means pam_limits is not applied by the systemd-user PAM stack.
 
+## RustDesk is required (issue 1462, owner 25.10.2026: "preco na stream-snv nebezi rustdesk!!!!")
+
+stream-snv was converted without the 0600 password file, step 16b only WARNed and item 29 only NOTEd, so
+the box was handed over with no remote access. Now `strih_rustdesk_state` (absent / down / nopw / ready:
+the root `RustDesk.toml` `password` key's PRESENCE, never the value) drives both sides:
+- step 16b: ready = untouched; the 0600 file = install + apply; otherwise the package
+  (`strih_rustdesk_package_cmds`, the emitter's package half, split byte-identically) and setup FAILS
+  with `strih_rustdesk_apply_hint` = the dev1 command;
+- item 29 (`strih_rustdesk_grade_row`): absent / down / no password / no connect ID all FAIL;
+- `scripts/rustdesk-password-apply.sh BOX...` (dev1, through `secret exec --file <the persisted dev1
+  credential> --env RUSTDESK_PERMANENT_PASSWORD`) sends the owner's ONE password on ssh stdin to `sudo -n
+  rustdesk --password` and discards its output. Applied 25.10.2026 to stream-snv, strih-snv, stream-pp.
+
 ## Fresh-install gaps — a fresh run reproduces the live box (issue 1361 slice, 25.9.2026)
 
 Four things existed only as hand fixes on strih-snv, so a fresh `setup-strih.sh` (the Poprad strih)

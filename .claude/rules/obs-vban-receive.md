@@ -477,6 +477,11 @@ healthy (the stamp is the packet's START, its arrival its END: -34.7 ms at R 40,
   vban-src-out thread; a status line without the token, from an older build, is not graded on it; the
   counters note says how many of the lost slots were concealed and how many went out as silence, the
   live row names `reordered=`; an older line without those tokens names nothing for them);
+  the per-channel row (issue 1439, 25.10.2026: strih-snv's program had its right channel empty and item 9
+  passed): `strih_program_vban_channels_row` reads OBS's own per-channel meter of the input over 3 s
+  (`measurement_audio_meter_probe.py --per-channel`, pure `channel_balance`): a channel under -90 dBFS
+  while another is over -60 FAILs naming it, a quiet program NOTEs; the grader tests feed it through
+  `STRIH_PROGRAM_VBAN_CHANNELS_FILE`;
   the hub-only rows of item 9 (the program
   rx, the hub's HDMI leg, the MiniFuse talkback) run only in its hub branch.
 - **Windows (review round 1):** both Windows genlock builds compile the same `vban-source.c`, so a

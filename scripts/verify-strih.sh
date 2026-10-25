@@ -732,19 +732,10 @@ else
   note "(collection-hygiene) active collection JSON / python3 absent -- report-only"
 fi
 
-# 29) RustDesk remote desktop (issue 1317, owner request 22.9.): the service is active + a connect ID is readable.
-#     FAIL loud when installed-but-broken; NOTE when not installed (no pw file placed, so step 16b skipped it).
-if command -v rustdesk >/dev/null 2>&1; then
-  RD_ACTIVE="$(systemctl is-active rustdesk 2>/dev/null || true)"
-  RD_ID="$(rustdesk --get-id 2>/dev/null | head -1 || true)"
-  if [ "$RD_ACTIVE" = active ] && [ -n "$RD_ID" ]; then
-    ok "(rustdesk) service active + connect ID present"
-  else
-    bad "(rustdesk) installed but not ready (active='${RD_ACTIVE:-<none>}', id='${RD_ID:-<empty>}') -- systemctl enable --now rustdesk; re-run setup-strih.sh step 16b"
-  fi
-else
-  note "(rustdesk) not installed -- place the 0600 password file + re-run setup-strih.sh step 16b (report-only until installed)"
-fi
+# 29) RustDesk remote desktop (issue 1317; issue 1462: not installed / not active / no connect ID / no
+#     permanent password all FAIL -- stream-snv was handed over without it). strih_rustdesk_grade_row reads rustdesk --get-id.
+RD_ROW="$(strih_rustdesk_grade_row "$(hostname -s)")"
+case "$RD_ROW" in OK\|*) ok "${RD_ROW#OK|}" ;; *) bad "${RD_ROW#FAIL|}" ;; esac
 
 # 6b) dantesync ROLE live check (issue 1317): :8898/status reachable AND mode LOCK/NANO AND -- for the
 #     server role (the post-M4 default: the notebook IS the fleet NTP master) -- an ntp UDP :123

@@ -40,7 +40,15 @@ VBAN_KIND = "net.nagater.obs-vban.source"
 
 LEAKY = ("STRIH_LX_IP", "STRIH_LX_HOST", "STRIH_LX_DANTESYNC_ROLE", "STRIH_LX_NTP_SERVER", "STRIH_NIC_IFACE",
          "STRIH_BOXES_DIR", "OBS_FLEET", "RIG_GRANDMASTER_IP", "GH_TOKEN", "NDI_DISCOVERY_SENDER_HOSTS",
-         "STRIH_PROGRAM_VBAN_WAIT_S", "STRIH_PROGRAM_VBAN_KIND_FILE")
+         "STRIH_PROGRAM_VBAN_WAIT_S", "STRIH_PROGRAM_VBAN_KIND_FILE",
+         "STRIH_PROGRAM_VBAN_CHANNELS_FILE")
+
+
+def _ok_channels(tmp_path):
+    """issue 1439: the per-channel meter read of a healthy stereo program (the grader's seam)."""
+    f = tmp_path / "channels"
+    f.write_text("channel_verdict=ok\nchannel_detail=ch1 -40.0 dB ch2 -41.0 dB\n")
+    return f
 
 
 def _load(name, path):
@@ -264,7 +272,7 @@ def test_item_9_grades_strih_snvs_asio_zvuk_on_the_facts(tmp_path):
             'strih_box_load strih-snv\n( sleep 0.3; cat "$2" >> "$1" ) &\n'
             'strih_program_vban_grade /nonexistent 127.0.0.1 "$1"\nwait')
     r = _bash(body, log, tmp_path / "later.txt",
-              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_WAIT_S": "1"})
+              env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "1"})
     assert r.returncode == 0, r.stderr
     rows = r.stdout.splitlines()
     assert not [x for x in rows if x.startswith(("FAIL", "NOTE"))], rows
@@ -332,7 +340,7 @@ def _grade_once(tmp_path, log_text):
     kf.write_text(VBAN_KIND)
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
             'strih_box_load strih-snv\nstrih_program_vban_grade /nonexistent 127.0.0.1 "$1"')
-    r = _bash(body, log, env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_WAIT_S": "0"})
+    r = _bash(body, log, env={"STRIH_PROGRAM_VBAN_KIND_FILE": str(kf), "STRIH_PROGRAM_VBAN_CHANNELS_FILE": str(_ok_channels(tmp_path)), "STRIH_PROGRAM_VBAN_WAIT_S": "0"})
     assert r.returncode == 0, r.stderr
     return [x for x in r.stdout.splitlines() if x.startswith("FAIL")]
 

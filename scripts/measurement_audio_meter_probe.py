@@ -132,6 +132,74 @@ def sample_peak(ws, input_name, sample_s, db_floor):
     return (_peak_to_db(best_peak, db_floor), True)
 
 
+def _channel_peaks_for_input(event_data, input_name):
+    """issue 1439: the per-CHANNEL max level multiplier of `input_name` in one InputVolumeMeters event (a list,
+    one value per channel, each the max of magnitude/peak/inputPeak), or None when the event lacks it."""
+    for inp in event_data.get("inputs", []):
+        if inp.get("inputName") != input_name:
+            continue
+        out = []
+        for channel in inp.get("inputLevelsMul", []):
+            best = 0.0
+            for v in channel:
+                try:
+                    fv = float(v)
+                except (ValueError, TypeError):
+                    continue
+                best = max(best, fv)
+            out.append(best)
+        return out
+    return None
+
+
+def sample_channel_peaks(ws, input_name, sample_s, db_floor):
+    """Drain InputVolumeMeters events for ~sample_s; return the per-channel peak dBFS over the window (a
+    list), or None when `input_name` never appeared."""
+    best = None
+    deadline = time.monotonic() + sample_s
+    ws.settimeout(0.5)
+    while time.monotonic() < deadline:
+        try:
+            msg = json.loads(ws.recv())
+        except WebSocketTimeoutException:
+            continue
+        except (ValueError, OSError):
+            break
+        d = msg.get("d", {}) if msg.get("op") == 5 else {}
+        if d.get("eventType") != "InputVolumeMeters":
+            continue
+        ch = _channel_peaks_for_input(d.get("eventData", {}), input_name)
+        if ch is None:
+            continue
+        if best is None:
+            best = ch
+        else:
+            best = [max(a, b) for a, b in zip(best, ch)] + (best[len(ch):] or ch[len(best):])
+    return None if best is None else [_peak_to_db(p, db_floor) for p in best]
+
+
+# issue 1439 (owner 25.10.2026: "na strih-snv obs zvuk beha iba v jednom kanaly"): the console sent the
+# strih program VBAN with its RIGHT channel empty (L -45 dBFS, R -112 dBFS) and nothing failed. A channel
+# under SILENT_DB while another is over PRESENT_DB = one silent channel.
+CHANNEL_PRESENT_DB = -60.0
+CHANNEL_SILENT_DB = -90.0
+
+
+def channel_balance(channels_db, present_db=CHANNEL_PRESENT_DB, silent_db=CHANNEL_SILENT_DB):
+    """Pure: per-channel peak dBFS -> (verdict, detail). `unknown` (no meter / no channel), `quiet` (no
+    channel over present_db: nothing playing now, not graded), `silent-channel` (some channel under
+    silent_db while another is over present_db; detail names them, 1-based) or `ok`."""
+    if not channels_db:
+        return "unknown", "no meter for the input"
+    levels = " ".join("ch%d %.1f dB" % (i + 1, v) for i, v in enumerate(channels_db))
+    if max(channels_db) < present_db:
+        return "quiet", levels
+    dead = [i + 1 for i, v in enumerate(channels_db) if v < silent_db]
+    if dead:
+        return "silent-channel", "channel %s silent (%s)" % (",".join(str(c) for c in dead), levels)
+    return "ok", levels
+
+
 def _main(argv):
     ap = argparse.ArgumentParser(description="mbc measurement-audio peak-level probe (#1310)")
     ap.add_argument("host")
@@ -140,6 +208,8 @@ def _main(argv):
     ap.add_argument("--sample-s", type=float, default=DEFAULT_SAMPLE_S)
     ap.add_argument("--connect-timeout-s", type=float, default=DEFAULT_CONNECT_TIMEOUT_S)
     ap.add_argument("--db-floor", type=float, default=DEFAULT_DB_FLOOR)
+    ap.add_argument("--per-channel", action="store_true",
+                    help="issue 1439: print channel_verdict= / channel_detail= (one silent channel)")
     ns = ap.parse_args(argv)
 
     try:
@@ -149,6 +219,11 @@ def _main(argv):
               file=sys.stderr)
         return 1
     try:
+        if ns.per_channel:
+            verdict, detail = channel_balance(sample_channel_peaks(ws, ns.input, ns.sample_s, ns.db_floor))
+            print(f"channel_verdict={verdict}")
+            print(f"channel_detail={detail}")
+            return 0
         peak_db, present = sample_peak(ws, ns.input, ns.sample_s, ns.db_floor)
     finally:
         try:

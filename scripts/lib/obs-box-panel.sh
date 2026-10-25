@@ -37,6 +37,8 @@
 #       (panel-power)  issue 1464: the power program installed = the checkout, and logind answers
 #                      CanPowerOff + CanReboot = yes for the desktop user in the user manager (the
 #                      launcher's own context), so the button powers off without a password;
+#       (panel-shot)   issue 1481: flameshot installed, its ini saves to ~/Pictures/Snimky, and the
+#                      openbox Print / Alt+Print keys run `flameshot gui`;
 #       (panel-window) a tint2 window on :0 (`wmctrl -lx` class tint2.Tint2); NOTE when X has no
 #                      client list to read.
 #     A box the gate leaves out prints ONE note naming why.
@@ -45,7 +47,7 @@ OBS_BOX_PANEL_PACKAGE=tint2
 OBS_BOX_PANEL_UNIT=obs-box-panel.service
 OBS_BOX_PANEL_BIN=/usr/bin/tint2
 OBS_BOX_PANEL_WM_CLASS=tint2.Tint2
-OBS_BOX_PANEL_ROWS=9
+OBS_BOX_PANEL_ROWS=10
 # issue 1441 (owner 18.10.2026: "da sa v liste prepinat??"): the keyboard layout item. tint2 runs the
 # helper as an executor (`watch` prints US / SK on every change, a left click runs `next`); it reads and
 # locks the XKB group through libX11 (Ubuntu 26.04 ships no xkb-switch). The panel always runs it with
@@ -83,6 +85,15 @@ OBS_BOX_PANEL_HEADPHONES_HELPER="${OBS_BOX_PANEL_HEADPHONES_HELPER:-/usr/local/b
 OBS_BOX_PANEL_SYS_UNIT_DIR="${OBS_BOX_PANEL_SYS_UNIT_DIR:-/usr/lib/systemd/user}"
 OBS_BOX_PANEL_RUSTDESK_BIN="${OBS_BOX_PANEL_RUSTDESK_BIN:-/usr/bin/rustdesk}"
 OBS_BOX_PANEL_DISCORD_BIN="${OBS_BOX_PANEL_DISCORD_BIN:-/usr/bin/discord}"
+# issue 1481 (owner 25.10.2026: "ako si spravi scereenshot do schranky/do suboru aby mohol poslat!!! mal by
+# byt v liste nastroj na to podobne ako pod windows mali lightshot"): flameshot on every role. The
+# `Snímka obrazovky` launcher and the openbox Print / Alt+Print keys run `flameshot gui` (drag a region,
+# Ctrl+C = clipboard, Ctrl+S = a file in ~/Pictures/Snimky). The binary path is the launcher's presence
+# seam; the stock openbox rc.xml seeds a user that has none (it binds Print to scrot, which is replaced).
+OBS_BOX_PANEL_SHOT_PACKAGE=flameshot
+OBS_BOX_PANEL_SHOT_BIN="${OBS_BOX_PANEL_SHOT_BIN:-/usr/bin/flameshot}"
+OBS_BOX_PANEL_SHOT_DIR=Pictures/Snimky
+OBS_BOX_PANEL_OPENBOX_RC_SRC="${OBS_BOX_PANEL_OPENBOX_RC_SRC:-/etc/xdg/openbox/rc.xml}"
 # issue 1448 part 2: the stream role installs Discord from the PINNED official .deb (read 17.10.2026);
 # Discord updates its own app host under ~/.config/discord, so the pin only sets the bootstrap.
 OBS_BOX_PANEL_DISCORD_URL="${OBS_BOX_PANEL_DISCORD_URL:-https://stable.dl2.discordapp.net/apps/linux/1.0.162/discord-1.0.162.deb}"
@@ -95,6 +106,7 @@ OBS_BOX_PANEL_DISCORD_SHA256="${OBS_BOX_PANEL_DISCORD_SHA256:-e7f346569784ef47ea
 #   shading    bkshading-panel-app.service in the user's unit dir (the strih role)
 #   restreamer restreamer.service (the restreamer package's --user unit) in the user's or the system unit dir
 #   chrome     Google Chrome, on the stream role only and only where the binary is installed (issue 1464)
+#   screenshot flameshot (`Snímka obrazovky`), on every role where the binary is installed (issue 1481)
 #   rustdesk   the RustDesk binary
 #   discord    the Discord binary (issue 1448)
 # A supervised app starts through its unit, never its binary: the unit runs the box's own wrapper
@@ -117,6 +129,8 @@ obs_box_panel_launchers() {
     # basic password store and never pops "Unlock Login Keyring".
     printf 'chrome|Chrome|%s --password-store=basic|google-chrome\n' "$OBS_BOX_PANEL_CHROME_BIN"
   fi
+  [ -x "$OBS_BOX_PANEL_SHOT_BIN" ] \
+    && printf 'screenshot|Snímka obrazovky|%s gui|org.flameshot.Flameshot\n' "$OBS_BOX_PANEL_SHOT_BIN"
   [ -x "$OBS_BOX_PANEL_RUSTDESK_BIN" ] && printf 'rustdesk|RustDesk|%s|rustdesk\n' "$OBS_BOX_PANEL_RUSTDESK_BIN"
   # issue 1448 (owner 16.10.2026, "ma byt na lavo discord v liste"): Discord where it is installed. It
   # is single-instance, so a click on a running one focuses its window, never a second copy.
@@ -354,6 +368,102 @@ obs_box_panel_discord_row() {
   fi
 }
 
+# obs_box_panel_shot_ini_keys USER_HOME -> the declared flameshot [General] keys, one `key=value` per line:
+# a fixed save folder (Ctrl+S never asks), a dated file name, no tray icon, no startup message.
+obs_box_panel_shot_ini_keys() {
+  local home="${1:?user home required}"
+  printf 'disabledTrayIcon=true\nfilenamePattern=snimka-%%F_%%H-%%M-%%S\n'
+  printf 'savePath=%s/%s\nsavePathFixed=true\nshowStartupLaunchMessage=false\n' "$home" "$OBS_BOX_PANEL_SHOT_DIR"
+}
+
+# obs_box_panel_shot_ini_merge USER_HOME (stdin: the current flameshot.ini, may be empty) -> the same ini with
+# every declared [General] key set to its declared value; every other key and section kept (the operator's
+# own flameshot settings, e.g. the drawing colour). Idempotent.
+obs_box_panel_shot_ini_merge() {
+  local decl
+  decl="$(obs_box_panel_shot_ini_keys "${1:?user home required}")"
+  awk -v decl="$decl" '
+    BEGIN { n = split(decl, d, "\n"); for (i = 1; i <= n; i++) { k = d[i]; sub(/=.*/, "", k); want[k] = d[i]; order[i] = k } }
+    function flush(   i) { for (i = 1; i <= n; i++) if (!(order[i] in done)) print want[order[i]]; flushed = 1 }
+    /^\[/ { if (ingen && !flushed) flush(); ingen = ($0 == "[General]"); if (ingen) seen = 1; print; next }
+    ingen { k = $0; sub(/=.*/, "", k); if (k in want) { print want[k]; done[k] = 1; next } }
+    { print }
+    END { if (ingen && !flushed) flush(); if (!seen) { print "[General]"; flush() } }'
+}
+
+# obs_box_panel_shot_rc (stdin: an openbox rc.xml) -> the same rc.xml with the Print and A-Print keybinds
+# running `flameshot gui`: an existing binding's <command> is replaced (the stock rc.xml runs scrot there),
+# a missing one is added before </keyboard>; everything else kept. Pure filter, idempotent (an rc.xml that
+# already binds both comes back unchanged, which is what the grade row checks). No </keyboard> -> rc 1 and
+# NO output.
+obs_box_panel_shot_rc() {
+  awk -v cmd="${OBS_BOX_PANEL_SHOT_BIN} gui" '
+    { line = $0 }
+    match(line, /<keybind key="(A-)?Print">/) { k = substr(line, RSTART + 14, RLENGTH - 16); kb = k; seen[k] = 1 }
+    kb != "" && line ~ /<command>[^<]*<\/command>/ { sub(/<command>[^<]*<\/command>/, "<command>" cmd "</command>", line) }
+    kb != "" && line ~ /<\/keybind>/ { kb = "" }
+    !found && line ~ /^[[:space:]]*<\/keyboard>/ {
+      found = 1
+      if (!("Print" in seen)) out[++m] = "  <keybind key=\"Print\"><action name=\"Execute\"><command>" cmd "</command></action></keybind>"
+      if (!("A-Print" in seen)) out[++m] = "  <keybind key=\"A-Print\"><action name=\"Execute\"><command>" cmd "</command></action></keybind>"
+    }
+    { out[++m] = line }
+    END { if (!found) exit 1; for (i = 1; i <= m; i++) print out[i] }'
+}
+
+# obs_box_panel_shot_install USER_HOME DESKTOP_USER -> issue 1481, part of step 16h: flameshot (no recommends),
+# ~/Pictures/Snimky, the merged ~/.config/flameshot/flameshot.ini and the Print keys in the user's openbox
+# rc.xml (seeded from the stock one when the user has none; a symlinked file or folder is refused). Every
+# file written only on a difference. rc 1 + a reason on failure.
+obs_box_panel_shot_install() {
+  local home="${1:?user home required}" user="${2:?desktop user required}" ini rc src text w
+  if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_SHOT_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
+    echo "  installing ${OBS_BOX_PANEL_SHOT_PACKAGE}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$OBS_BOX_PANEL_SHOT_PACKAGE" \
+      || { echo "obs-box-panel: apt-get install ${OBS_BOX_PANEL_SHOT_PACKAGE} failed" >&2; return 1; }
+  fi
+  strih_user_home_dir "$home" "$user" "${home}/${OBS_BOX_PANEL_SHOT_DIR}" \
+    || { echo "obs-box-panel: cannot create ${home}/${OBS_BOX_PANEL_SHOT_DIR}" >&2; return 1; }
+  ini="${home}/.config/flameshot/flameshot.ini"
+  strih_user_home_dir "$home" "$user" "$(dirname "$ini")" || { echo "obs-box-panel: cannot create $(dirname "$ini")" >&2; return 1; }
+  text="$(obs_box_panel_shot_ini_merge "$home" < <(cat "$ini" 2>/dev/null || true))"
+  w="$(_obs_box_panel_put_text "$text" "$ini")" || return 1
+  chown "$user:$user" "$ini" 2>/dev/null || true
+  echo "  ${ini} ${w} (screenshots to ~/${OBS_BOX_PANEL_SHOT_DIR})"
+  rc="${home}/.config/openbox/rc.xml"
+  if [ -L "${home}/.config/openbox" ] || [ -L "$rc" ]; then
+    echo "obs-box-panel: ${rc} (or its folder) is a symlink -- refusing to merge the Print keys through it" >&2
+    return 1
+  fi
+  strih_user_home_dir "$home" "$user" "${home}/.config/openbox" || { echo "obs-box-panel: cannot create ${home}/.config/openbox" >&2; return 1; }
+  if [ -f "$rc" ]; then src="$rc"; else src="$OBS_BOX_PANEL_OPENBOX_RC_SRC"; fi
+  [ -f "$src" ] || { echo "obs-box-panel: no openbox rc.xml to bind the Print key in (${src} missing)" >&2; return 1; }
+  text="$(obs_box_panel_shot_rc < "$src")" \
+    || { echo "obs-box-panel: ${src} has no </keyboard> section -- the Print key cannot be bound" >&2; return 1; }
+  w="$(_obs_box_panel_put_text "$text" "$rc")" || return 1
+  chown "$user:$user" "$rc" 2>/dev/null || true
+  echo "  ${rc} ${w} (Print / Alt+Print = flameshot gui; applies at the next login or openbox --reconfigure)"
+}
+
+# obs_box_panel_shot_row USER_HOME -> the (panel-shot) row (issue 1481). Read-only; always rc 0.
+obs_box_panel_shot_row() {
+  local home="$1" ini rc why=""
+  ini="${home}/.config/flameshot/flameshot.ini"
+  rc="${home}/.config/openbox/rc.xml"
+  if [ "$(dpkg-query -W -f='${Status}' "$OBS_BOX_PANEL_SHOT_PACKAGE" 2>/dev/null || true)" != "install ok installed" ]; then
+    why="${OBS_BOX_PANEL_SHOT_PACKAGE} not installed"
+  elif [ ! -f "$ini" ] || [ "$(obs_box_panel_shot_ini_merge "$home" < "$ini")" != "$(cat "$ini")" ]; then
+    why="${ini} missing or not saving to ~/${OBS_BOX_PANEL_SHOT_DIR}"
+  elif [ ! -f "$rc" ] || [ "$(obs_box_panel_shot_rc < "$rc" 2>/dev/null)" != "$(cat "$rc")" ]; then
+    why="${rc} does not bind Print + Alt+Print to flameshot gui"
+  fi
+  if [ -n "$why" ]; then
+    printf 'FAIL|(panel-shot) %s -- re-run setup-strih.sh step 16h (issue 1481)\n' "$why"
+  else
+    printf 'OK|(panel-shot) flameshot installed, saves to ~/%s, Print + Alt+Print bound\n' "$OBS_BOX_PANEL_SHOT_DIR"
+  fi
+}
+
 # obs_box_panel_install REPO USER_HOME DESKTOP_USER -> setup-strih step 16h. rc 1 + a reason on failure.
 obs_box_panel_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
@@ -374,6 +484,7 @@ obs_box_panel_install() {
     || { echo "obs-box-panel: cannot create $(dirname "$cfg")" >&2; return 1; }
   strih_user_home_dir "$home" "$user" "$unitdir" || { echo "obs-box-panel: cannot create ${unitdir}" >&2; return 1; }
   obs_box_panel_discord_install || return 1
+  obs_box_panel_shot_install "$home" "$user" || return 1
   local id name ex icon dst appdir icondir
   appdir="${home}/.local/share/applications"
   icondir="$(dirname "$(obs_box_panel_obs_icon_path "$home")")"
@@ -492,6 +603,7 @@ obs_box_panel_grade_rows() {
   obs_box_panel_kbd_row "$repo" "$home" "$user"
   obs_box_panel_files_row "$repo" "$home"
   obs_box_panel_power_row "$repo" "$user"
+  obs_box_panel_shot_row "$home"
   wins="$(strih_session_apps_wmctrl "$user" "$home")"
   if [ -z "$wins" ]; then
     printf 'NOTE|(panel-window) not graded: wmctrl on :0 answered nothing (X down or no client list)\n'
