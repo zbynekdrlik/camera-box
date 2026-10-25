@@ -153,3 +153,29 @@ def test_recording_e2e_gives_the_cam2_burn_unit_the_intercom_env():
     assert len(line) == 1
     assert "$(rig_test_feed_burn_setenv)" in line[0]
     assert s.index('. "$HERE/lib/rig-test-feed.sh"') < s.index("$(rig_test_feed_burn_setenv)")
+
+
+def test_the_av_gate_expects_the_direct_feeds_own_video_leg():
+    # E2E 40233177561: with no camera in the direct feed's video path every camera read -50.1 / -51.4 / -51.1 ms.
+    assert _lib("rig_test_feed_av_expected_ms").stdout == "-51"
+    assert _lib("rig_test_feed_av_expected_ms", {"RIG_TEST_FEED": "optical"}).stdout == "0"
+
+
+def test_the_production_av_pin_is_never_tuned_from_the_direct_feed():
+    hold = _lib("rig_test_feed_av_apply_hold")
+    assert hold.returncode == 0 and "issue 1482" in hold.stdout and "direct" in hold.stdout
+    assert _lib("rig_test_feed_av_apply_hold", {"RIG_TEST_FEED": "optical"}).stdout == ""
+
+
+def test_recording_e2e_wires_the_av_expectation_and_the_apply_hold():
+    s = E2E.read_text()
+    default = 'AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"'
+    shift = '[ -z "$AV_EXPECTED_MS_FROM_ENV" ] && AV_EXPECTED_MS="$(rig_test_feed_av_expected_ms)"'
+    assert s.count(shift) == 1
+    assert s.index('AV_EXPECTED_MS_FROM_ENV="${AV_EXPECTED_MS+set}"') < s.index(default) < s.index(shift)
+    assert s.index(shift) < s.index('VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")')
+    call = '_avs_feed_hold="$(rig_test_feed_av_apply_hold || true)"'
+    assert s.count(call) == 1
+    guard = s.index('_avs_hold="$(av_sync_apply_guard_decide')
+    apply = s.index('[cleanup] #856: applying')
+    assert s.index('AV_SYNC_PROPOSED_OFFSET_MS="$AV_SYNC_APPLY_OFFSET_MS"') < s.index(call) < guard < apply
