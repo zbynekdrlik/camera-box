@@ -2255,6 +2255,13 @@ fi"
   # #1265: remember the DAMPED proposed offset BEFORE the guard runs, so the end-of-#856 history
   # append can record it even when a HOLD below clears AV_SYNC_APPLY_OFFSET_MS.
   AV_SYNC_PROPOSED_OFFSET_MS="$AV_SYNC_APPLY_OFFSET_MS"
+  # issue 1482: a direct-test-feed run never tunes the production A/V pin (named HOLD, offset cleared).
+  _avs_feed_hold="$(rig_test_feed_av_apply_hold || true)"
+  if [ -n "$_avs_feed_hold" ] && [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
+    echo "[cleanup] HOLD the A/V apply: $_avs_feed_hold -- stream genlock latency left at the just-restored prod value" >&2
+    AV_SYNC_HELD_REASON="$_avs_feed_hold"
+    AV_SYNC_APPLY_OFFSET_MS=""
+  fi
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     _avs_hold="$(av_sync_apply_guard_decide "$REPORT_JSON" "$AV_SYNC_BAND_VERDICT" "$AV_SYNC_APPLY_OFFSET_MS" "$HERE/av_sync_apply_guard.py")"
     if [ -n "$_avs_hold" ]; then
@@ -5344,7 +5351,10 @@ fi
 # tests/harness_av_expected_calibration_parity_1178.rs). Override for an operator-dialed value, or
 # after a rig-verified physical video-chain change re-derives a genuine non-zero leg.
 # Always passed so the gate is explicit in the printed command, not silently implicit.
+AV_EXPECTED_MS_FROM_ENV="${AV_EXPECTED_MS+set}"
 AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
+# issue 1482: the direct test feed has no camera in its video path, so it expects its own measured leg.
+[ -z "$AV_EXPECTED_MS_FROM_ENV" ] && AV_EXPECTED_MS="$(rig_test_feed_av_expected_ms)"
 # #1003: in measurement-eq mode the A/V gate must expect the value the pin+hold DESIGN implies
 # (the profile's coherent av_expected — derived so the equalized-deep pins + rebalanced hold land
 # the common A/V level there), NOT a blindly-inherited 0. With the shipped profile this IS 0, but
