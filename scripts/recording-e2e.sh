@@ -2970,7 +2970,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # rest of the run.
     _cunit="camera-box-burn-${_cn}-${RUN_ID}"
     _cnodisplay_setenv=""
-    if [ "$_cn" = "cam2" ]; then _cnodisplay_setenv="--setenv=CAMERA_BOX_NO_DISPLAY=1 "; fi
+    if [ "$_cn" = "cam2" ]; then _cnodisplay_setenv="--setenv=CAMERA_BOX_NO_DISPLAY=1 $(rig_test_feed_burn_setenv)"; fi
     # #749: same pre-scp stale-binary sweep as cam1's [2/8] site above -- each ALL_CAMBOX box has
     # its own independent 100MB /tmp tmpfs that can fill the same way.
     sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 root@"$_cip" \

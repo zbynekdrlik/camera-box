@@ -57,6 +57,15 @@ rig_test_feed_intercom_dropin_cmds() {
   fi
 }
 
+# rig_test_feed_burn_setenv -> the systemd-run argument the E2E's cam2 burn camera-box needs: a transient unit
+# never reads camera-box.service's drop-ins, so in the direct feed its intercom would open the jack and the QPSK
+# marker fails "Device or resource busy". Empty in the optical feed. Ends in a space (it prefixes the next arg).
+rig_test_feed_burn_setenv() {
+  local f
+  f="$(rig_test_feed)" || return 2
+  if [ "$f" = direct ]; then printf '%s' '--setenv=CAMERA_BOX_INTERCOM=off '; fi
+}
+
 # rig_test_feed_painter_dropin_cmds -> remote bash (run as root on cam2, BEFORE the steady-state handoff): the
 # direct feed writes the cam2-painter.service drop-in naming the jack, the optical feed removes it; then
 # daemon-reload. Fails loud (exit 1) when the jack is not in aplay -l in the direct feed.
