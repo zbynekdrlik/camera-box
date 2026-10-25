@@ -25,11 +25,10 @@ DSCP-in-hardware) prioritise it too.
 - **DSCP class = EF (46) — must match `dantesync/src/dscp.rs`'s own default** so request and reply
   carry the same class end to end. If that default ever changes, change it here too.
 
-## Tier-0 gotcha: nft needs ROOT NETLINK even for `-c`
+## Gotcha: nft needs ROOT NETLINK even for `-c`
 `nft -c -f file` (check mode) AND any `nft list`/`nft -f` fail as non-root with
-`netlink: Error: cache initialization failed: Operation not permitted` — so you canNOT syntax-check
-or render an nftables ruleset in the Tier-0 (no-root, no-cargo) local context. Rootless
-`unshare -rn` is also blocked on dev1 (`write failed /proc/self/uid_map: Operation not permitted`).
+`netlink: Error: cache initialization failed: Operation not permitted`. Rootless `unshare -rn` is
+also blocked on dev1 (`write failed /proc/self/uid_map: Operation not permitted`).
 To render a REAL nft fixture / validate syntax locally without touching dev1's global ruleset:
 ```bash
 sudo -n unshare -n bash -c '/usr/sbin/nft -f file && /usr/sbin/nft list ruleset'

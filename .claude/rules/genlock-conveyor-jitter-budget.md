@@ -32,7 +32,7 @@ per-camera delivery lag until the depth-15 relock).
 The constant lives in exactly TWO arithmetic copies kept byte-parallel (the #1201-style discipline):
 
 - `src/genlock_backlog.rs` — `pub const GENLOCK_N2_JITTER_BUDGET_NS` + the `budget` line in
-  `should_converge_phase` (the Tier-0 authority).
+  `should_converge_phase` (the authority).
 - `vendor/obs-studio/libobs/obs-source.c` — `#define GENLOCK_N2_JITTER_BUDGET_NS 15000000ULL` +
   the `budget` line in `genlock_phase_converge_due`.
 - `src/probe/genlock.rs` `ReleaseCadence::should_converge_phase` is a pure DELEGATOR (no
@@ -52,7 +52,7 @@ covers the C-side lift-and-compile.)
 ## FINDING: SimConveyor1049 CANNOT reproduce the live phase ladder — the arithmetic test is the proof
 
 I extended `SimConveyor1049` with a jittered-second-frame-arrival driver + a `single_mature`
-counter as #1354's design asked, verified it with the rustc-replica pattern, and swept it across
+counter as #1354's design asked, and swept it across
 four faithful model variants (arrival-lateness only; + a 2-frame boundary injection; a sub-frame
 boundary-phase injection; and a keys-on-boundary fixed-advance conveyor). **Every variant produced
 zero single-mature ticks and zero budget-dependent sheds** at every (reserve, skew, lateness,
@@ -70,9 +70,8 @@ semantics, which is larger than a threshold fix.
 **So the FAITHFUL, budget-dependent proof of a shed-threshold change is the DIRECT arithmetic test
 on `should_converge_phase`**, not a SimConveyor scenario: a held age between the old 5 ms margin and
 the new 15 ms budget above `reserve + quantum` stays INSIDE the dead-band (no shed); below 5 ms
-inert; above 15 ms fires; N==1 inert. That flips RED→GREEN cleanly (verify with the rustc replica:
-the module is self-contained, `rustc --edition 2021 --test` a copy with `//!` stripped to `//`, flip
-the constant 5 ms↔15 ms). Do NOT ship a `single_mature == 0` SimConveyor assertion the simulator
+inert; above 15 ms fires; N==1 inert. That flips RED→GREEN cleanly (flip the constant 5 ms↔15 ms).
+Do NOT ship a `single_mature == 0` SimConveyor assertion the simulator
 produces trivially — it is a tautology, not a reproduction.
 
 ## RECIPE: name a conveyor ladder from the genlock-fifo audit counters (scope 3)

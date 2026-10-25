@@ -130,7 +130,7 @@ No archive step, no age-based deletion of production files.
 
 ## The decision (keep newest-N runs UNION younger-than-D-days)
 
-Canonical spec: **`src/recordings_retention.rs`** (pure, Tier-0, `tests/recordings_retention.rs`).
+Canonical spec: **`src/recordings_retention.rs`** (pure, `tests/recordings_retention.rs`).
 `scripts/strih-recordings-retention.ps1` (Windows) and `rr_plan()` in
 `scripts/strih-recordings-retention.sh` (Linux, `--local-sweep`) are FAITHFUL PORTS of it — keep all
 three in sync.
@@ -197,25 +197,12 @@ scripts/strih-recordings-retention.sh --box stream --record-dir 'C:\Users\newlev
 `--host 10.77.9.204 --record-dir 'C:\Users\newlevel\Videos'`. ssh password via `STRIH_SSH_PW`
 (default `newlevel`).
 
-## Tier-0 verification
+## Verification
 
-The pure decision has no local cargo path (#477/#557 block ALL local cargo compilation — `--no-run`
-INCLUDED, contra the top-level CLAUDE.md Local Build Policy which still describes `cargo test
---no-run` as allowed; the live `block-tier0-local-build.sh` hook blocks every compiling cargo shape).
-Verify the module + tests by copying them into a scratch dir as `mod recordings_retention { … }` +
-the test file (strip its leading `//!` header) and compiling standalone with `rustc --edition 2021
---test scratch.rs && ./scratch` — rustc is not cargo, so the hook does not touch it, and it runs the
-pure logic RED→GREEN with zero repo `target/`. Also run `cargo fmt --all --check` (allowed,
-non-compiling — it parses the Rust). The `.ps1`/`.sh` are verified with `bash -n` + `shellcheck` and
-a live DRY-RUN against strih (read-only, deletes nothing).
-
-Faster than the scratch-module copy: build a one-module `camera_box` stub rlib from the REAL
-`src/recordings_retention.rs` (`lib.rs` = `pub mod recordings_retention;`, `rustc --crate-type rlib
---crate-name camera_box`) and compile the REAL `tests/recordings_retention.rs` against it with
-`--extern camera_box=<rlib>` (plain `rustc --test`, and `clippy-driver --test -D warnings` for CI's
-lint verdict) — the `include_str!` of the parity table resolves relative to the test file. The bash
-side is pure pytest (`tests/python/test_strih_lx_recordings_retention_1317.py`, fake `sshpass` on
-PATH for the `--box` legs).
+`cargo test --test recordings_retention` (the `include_str!` of the parity table resolves relative to
+the test file). The `.ps1`/`.sh` are verified with `bash -n` + `shellcheck` and a live DRY-RUN against
+strih (read-only, deletes nothing). The bash side is pure pytest
+(`tests/python/test_strih_lx_recordings_retention_1317.py`, fake `sshpass` on PATH for the `--box` legs).
 
 ## Two gotchas when a `.ps1` mirrors a Rust decision AND travels over scp (both proven live, #1122)
 

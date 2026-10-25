@@ -273,7 +273,7 @@ touches ONLY `/etc/ndi/ndi-config.v1.json` and the camera-box `ndi-discovery.con
     other failure.
 - It removes one or two ~100-byte files in the same rw window setup-device.sh and the dantesync
   upgrader use. That is not a risky write to the stick, and a clean box is never touched.
-- Tier-0 tests, all without a box:
+- Tests, all without a box:
   - `CamboxApply1389` (`tests/python/test_ndi_discovery_1389.py`) runs the real program fed to
     `bash -s`, with `findmnt` / `mount` / `sync` / `systemctl` stubbed.
   - `CamboxVerdict1389` (same file) grades `ndi_discovery_cambox_verdict` directly.

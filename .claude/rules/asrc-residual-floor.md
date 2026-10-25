@@ -113,7 +113,7 @@ input·(1+ppm/1e6)`), so feeding `applied_ppm` un-negated COMPRESSED a slow sour
 buffer; the call now passes `-applied_ppm`. The on-box discriminator that decided it was
 `SetAsrcOuterBiasPpm` +10 (comment 5703688577): the drain tracked `applied` 1:1, `drain ≈ −applied +
 5 ppm`, flat at `applied ≈ +5` (stretch) — so BOTH master-only (compress 5 → drain 10) and sign-only
-(stretch 18 vs a mixer needing 5 → grow 13) are individually wrong; both together flatten it. Tier-0
+(stretch 18 vs a mixer needing 5 → grow 13) are individually wrong; both together flatten it. The
 sign gate: `src/asrc_compensation_quantization.rs::servo_applied_ppm_to_sample_delta` (parity:
 applied<0 ⇒ POSITIVE sample_delta); anchor: `tests/genlock_preload.rs::vendored_source::
 asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` + both `windows-genlock*.yml`.

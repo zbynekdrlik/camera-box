@@ -169,8 +169,7 @@ update that fixture in the same PR, or it goes RED (the clean read now looks lik
 `normalize_spec`/`diff_pin`/`verify_box` tests use their OWN in-test literals (not the file), and
 `test_baseline_file_loads_and_has_the_three_boxes` only checks STRUCTURE — only the drift fixture
 carries the concrete values. When promoting/re-tuning pins, `grep -n "NDI cam1" tests/python/` +
-run `pytest tests/python/test_latency_pins_verify.py` before pushing (Tier-0: pytest runs freely,
-no cargo). #1003's deep promotion changed strih 3/6/20→90/160/184 + stream 915→791 and updated this
+run `pytest tests/python/test_latency_pins_verify.py` before pushing. #1003's deep promotion changed strih 3/6/20→90/160/184 + stream 915→791 and updated this
 fixture; the owner-rework REVERT (`0aaa2fc93`) then changed the baseline VALUES back to 3/6/20 + 915
 but LEFT this fixture (and `test_apply_latency_pins_1003.py`'s reverted-baseline class) asserting the
 deep numbers — a classic incomplete-revert dangling test. Both were re-pointed to the reverted
@@ -186,12 +185,9 @@ literals across the suite are independent test data (NOT the file) and were corr
 Lesson restated: a baseline-VALUES change (any direction) must update the file-reading fixture(s) in
 the SAME change, and ONLY those.
 
-## Local verification of a `vendor/README.md` pin/doc edit — Tier-0 blocks `cargo test`
+## Local verification of a `vendor/README.md` pin/doc edit
 
-camera-box Tier-0 forbids local `cargo test` runs AND disables the `# airuleset:build-ok` bypass
-(#477) — so the drift-guard integration tests (`tests/drift_guard.rs`) cannot be RUN locally; the
-full suite runs at CI/integration. Verify a pin/doc edit locally with the bash script directly
-(runs freely, no cargo build) — it exercises the SAME `validate_nonempty` +
+Verify a pin/doc edit with the bash script directly — it exercises the SAME `validate_nonempty` +
 `validate_source_latency_range` CI runs and echoes each extracted `pinned_setting` value, so you
 can eyeball the exact pin string your `tests/drift_guard.rs` real-manifest assertion will read:
 

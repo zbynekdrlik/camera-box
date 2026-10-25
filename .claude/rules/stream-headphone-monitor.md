@@ -117,7 +117,7 @@ box now does the same, through ALSA, never PipeWire.
 - Seams: `STRIH_STREAM_MONITOR_ASOUND` / `_PROC` (the player), `_HOSTNAME` / `_SCENES` / `_MANIFEST`
   (the rows).
 
-## Tests (Tier-0 pytest)
+## Tests (pytest)
 
 `tests/python/test_strih_stream_monitor_1436.py` runs the REAL loop with fake `ffmpeg` / `aplay`
 executables and a fake `/proc/asound` (stream-pp's two cards), and the rows through the real libs.

@@ -43,7 +43,7 @@ This is why it is a SEPARATE profile, not a floor/margin bolted onto the re-anch
 ## The moving parts (all mutually consistent — never wire one without the others)
 - **Config `scripts/e2e-measurement-pins.json`**: stores MEASURED inputs (per-cam production pin +
   measured delivery p50 + measured A/V offset, production stream hold, common delivery target), NOT
-  the magic outputs. `scripts/e2e_measurement_pins.py` (PURE, Tier-0) DERIVES pins/hold/av-expected
+  the magic outputs. `scripts/e2e_measurement_pins.py` (PURE) DERIVES pins/hold/av-expected
   in TWO steps: (1) equalize `eq_i=target−transport_i`; (2) FRAME-GRID PHASE snap (below). The hold
   then `= prod_hold − (mean_SNAPPED_delivery − mean_audio_ref − av_expected)` (centres the MEAN
   snapped delivery, since the snap leaves deliveries slightly unequal). Coherence check + re-derive
@@ -88,10 +88,9 @@ This is why it is a SEPARATE profile, not a floor/margin bolted onto the re-anch
 - **A JSON `_comment` caveat must not contain a literal `"`** — it closes the string and breaks the
   file (`json.load` "Expecting ',' delimiter"). Verify with `python3 -c 'import json; json.load(...)'`
   after any comment edit.
-- **Tier-0 (worktree): all cargo is blocked (even `--no-run`).** Verify the python side with
-  `pytest tests/python/...`, the bash with `bash -n` + `shellcheck -x`, and the Rust static-anchor
-  tests by REPLICATING their `.find`/`.contains`/byte-window assertions in a `python3` script against
-  the edited `recording-e2e.sh` (the 900/893/paths/691 + report-only-`exit 1`-window tests).
+- **Verify** the python side with `pytest tests/python/...`, the bash with `bash -n` + `shellcheck -x`,
+  and the Rust static-anchor tests (the 900/893/paths/691 + report-only-`exit 1`-window tests) with
+  `cargo test`.
 
 ## Report-only diagnostics on top of the profile (#1124)
 

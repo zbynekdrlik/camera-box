@@ -126,7 +126,7 @@ git, a ticket, a test or a log. Build steps: `tally/esp/README.md`.
 - `avahi-resolve -4 -n atemrpi.local` from another LAN host = the strih's IP only.
 - `sudo ./scripts/verify-strih.sh --box <box>`: item 42 four PASS rows.
 
-## Tests (Tier-0, pytest)
+## Tests (pytest)
 
 - `tests/python/test_strih_tally_decision_1417.py`, `test_strih_tally_service_1417.py` (real
   `websockets` server + clients against a fake OBS; `asyncio.run`, no pytest-asyncio),

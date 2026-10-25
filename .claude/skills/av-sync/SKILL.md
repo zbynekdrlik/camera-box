@@ -400,7 +400,7 @@ before trusting the reproduction.
 
 Two real, shipped findings from that data:
 1. **Same-`frame_id` duplicate detections** (37-84ms apart, present in all 3 runs) were inflating
-   the sample count — fixed via `qpsk_marker::av_offset_candidates_deduped` (Tier-0, TDD).
+   the sample count — fixed via `qpsk_marker::av_offset_candidates_deduped` (TDD).
 2. **The old ±60ms cluster window was wide enough to blend two nearby sub-clusters** — binning one
    run's raw candidates in 10ms bins showed two separate density bumps ~70ms apart that the 120ms
    window swallowed into one noisier blend (that run's outlier `mad_ms=32.7`). A **tight-first

@@ -58,7 +58,7 @@ using the FIFO's OWN signal.
    `set -euo pipefail` and asserts the line AFTER the bare call is reached
    (`runner_never_aborts_the_caller_under_set_euo_pipefail`).
 
-## Tier-0 testing a poll loop with zero ssh + zero real waiting
+## Testing a poll loop with zero ssh + zero real waiting
 
 The runner takes three injectable seams so the whole loop is exercised offline:
 `GENLOCK_SETTLE_READER_CMD` (a command whose stdout is one snapshot — a test scripts a per-pass
@@ -67,8 +67,8 @@ fixture sequence via an idx counter file), `GENLOCK_SETTLE_NOW_CMD` (a fake cloc
 (`genlock_settle_latest_counters` / `_pass_verdict` / `_all_settled`) are split from the ssh runner
 so they unit-test directly. Default reader = the shared platform-resolved `strih_log_tail`
 (`scripts/lib/strih-log-read.sh`, issue 1360 — plain ssh `tail` on the Linux strih-snv, the
--EncodedCommand PowerShell `-Tail` on a Windows strih; see `.claude/rules/strih-log-read.md`). Local net (no cargo, #557): the bash replica sourcing the lib (RED before it exists,
-GREEN after) + `bash -n` + `shellcheck -S warning` + `cargo fmt --all --check` + the anchor sweep.
+-EncodedCommand PowerShell `-Tail` on a Windows strih; see `.claude/rules/strih-log-read.md`). Local net: the bash replica sourcing the lib (RED before it exists,
+GREEN after) + `bash -n` + `shellcheck -S warning` + the anchor sweep.
 
 ## Wiring is anchor-safe (issue 675 pattern)
 

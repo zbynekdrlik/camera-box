@@ -56,16 +56,9 @@ the sick run's mid-window / sustained / frozen fault MUST read `is_transient == 
 excused). NEVER widen a constant so a red simply passes — that is the exact "calibrate on the
 artifact, not the chain health" trap the imag-leg work already burned on.
 
-## Tier-0 — a pure module RED->GREENs via a rustc replica; a small add to a BIG module uses a FOCUSED replica
+## Pure decision at the crate root; RED->GREEN with a stub
 
-The whole `probe` module (and `recording-verdict.rs`) is CI-only, so put the pure decision at the
-crate root and unit-test it locally with `rustc --edition 2021 --test <copy>.rs` (no cargo — Tier-0
-#557 blocks even `cargo test --no-run`). `switch_in_transient.rs` has no deps, so its replica is a
-direct copy. For a SMALL addition to a LARGE existing module (e.g. `summarize_projection_leg` in the
-63 KB `tear_detect.rs`, issue 1144 item 3), do NOT replicate the whole file — assemble a FOCUSED
-replica with ONLY the pieces the new code touches (the consts + `tear_gate_pass` + the enum + a
-minimal struct + the new fn + its tests). The RED->GREEN discipline still applies: commit the tests
-+ a STUB that returns not-transient/not-backed (`[red]`, verify the positive test fails against it),
-then the real impl (`[green]`). The probe-gated WIRING has no local compile — verify it with
-`cargo fmt --all --check` (rustfmt parses cfg-gated files) + a hand type-audit of the field
-accesses; CI is the first type check.
+Put the pure decision at the crate root (`switch_in_transient.rs`, no deps) and unit-test it there,
+not inside the probe-gated `probe` module / `recording-verdict.rs`. The RED->GREEN discipline
+applies: commit the tests + a STUB that returns not-transient/not-backed (`[red]`, verify the
+positive test fails against it), then the real impl (`[green]`).

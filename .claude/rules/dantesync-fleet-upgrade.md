@@ -206,7 +206,7 @@ upgrade script under the ~1000-line budget.
 `--help` prints the whole extended header (`sed -n '2p;4,/^HERE=/…'`); it used to stop at a fixed
 line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its default value.
 
-**Tier-0:** `pytest tests/python/test_dantesync_fleet_upgrade_tray_1372.py`.
+**Tests:** `pytest tests/python/test_dantesync_fleet_upgrade_tray_1372.py`.
 - The emitted program is tested as text: order, SID + settings, `finally`, the step-6 guard, no throw
   after the last catch.
 - The orchestrator runs end to end:
@@ -223,7 +223,6 @@ line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its de
   and never throwing, the in-use branch before (and exclusive of) the restore, and the step-6
   keep-a-running-tray guard before `Register-ScheduledTask`, the hash-proven `$trayUntouched`,
   the new-vs-tried holder split, the 120-char command-line cut and the `kept` note.
-- The Rust file runs locally with a plain `rustc --test`: it is std-only (`ci-testing-gotchas.md`).
 - **Running the emitted PowerShell, not only reading it: `tests/pwsh/run_dantesync_tray_swap_1372.sh`.**
   The pytest reads the program as text. This runner RUNS it. It is not in CI, and it needs pwsh:
   `PWSH=/path/to/pwsh`, else `pwsh` on PATH. It fails with exit 2 without pwsh, never skips.
@@ -317,7 +316,7 @@ after 900 s. It also reports `date_authority_hold_age_s`.
   status with master-looking date fields, and by a synthesized 1.15.0 fixture.
 - Never special-case `holding` into the master branch.
 
-**Tier-0:**
+**Tests:**
 - `pytest tests/python/test_dantesync_date_state_1372.py` (its own file; the `_source` / `_roll`
   helpers it shares with the tray tests live in `tests/python/dantesync_upgrade_harness_1372.py`):
   - the decision table;
@@ -333,9 +332,8 @@ after 900 s. It also reports `date_authority_hold_age_s`.
     upload in order (`upload-N.ps1`).
 - `pytest tests/python/test_clock_discipline_1372.py` covers `holding`.
 
-## Testing (Tier-0)
+## Testing
 
-Heavy `cargo test` is CI-only here (#477) — no `# airuleset:build-ok` bypass. Verify the bash logic
-by SOURCING the script directly in bash (the same thing `tests/dantesync_fleet_upgrade.rs`'s
-`run_sourced` does, minus cargo) and asserting the pure-fn outputs + generated command TEXT; plus
-`shellcheck`, `bash -n`, and `rustfmt --check` on the test. The Rust binary compiles on CI.
+Verify the bash logic by SOURCING the script directly in bash (the same thing
+`tests/dantesync_fleet_upgrade.rs`'s `run_sourced` does) and asserting the pure-fn outputs +
+generated command TEXT; plus `shellcheck`, `bash -n`, and `rustfmt --check` on the test.

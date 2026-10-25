@@ -33,7 +33,7 @@ always: the configured DRM device doesn't exist any more). Cross-check with `ls 
 
 **The fix already shipped (#854): `PresenterKind::Auto`'s `open_presenter` (in
 `src/probe/presenter.rs`) now enumerates `/dev/dri/card*` and tries every candidate — ordered
-ascending by `order_drm_card_candidates` (`src/presenter_kind.rs`, Tier-0 pure + tested) — before
+ascending by `order_drm_card_candidates` (`src/presenter_kind.rs`, pure + tested) — before
 giving up on KMS and falling back to fbdev.** This means a FUTURE renumbering self-heals
 automatically; you should not need to hand-fix `--drm-device` again for THIS failure mode. If you
 ever see the fallback WARN log (`"configured DRM device ... unavailable, found a working KMS
@@ -54,9 +54,3 @@ dual-QR/Vernier payload logic again: the settled side's payload must be byte-ide
 tick-to-tick — write a real encode→render→decode round-trip test (see
 `settled_left_half_payload_is_byte_identical_across_the_next_tick` in `src/probe/painter.rs`) to
 prove it, not just a geometry-level assertion.**
-
-**Both changes are in `src/probe/**`, which never compiles under this repo's default
-(Tier-0-restricted) local build — CI's `--features probe` build is the FIRST place either change
-actually compiles or runs.** Review such changes extra carefully by hand (types, control flow,
-the exact contract of the function you're changing) before pushing; do not expect a local RED/
-GREEN cycle to catch a mistake here.

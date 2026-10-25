@@ -135,13 +135,12 @@ to read) — a session-agnostic file read, so it is allowed even in an agent ses
 
 ## Testing a frontend fix — same std-only Facet A + Facet B, but NO pwsh mirror
 
-The vendored frontend `.cpp` compiles ONLY on CI (`# airuleset:build-ok` disabled). Reuse the
+The vendored frontend `.cpp` compiles ONLY on CI. Reuse the
 `vendored-libobs-change-safety.md` #793/#1026 pattern exactly (see `tests/video_io_null_guard.rs` /
 `tests/prop_dialog_checksettings_null_guard_773.rs`):
 
 - **Facet A** — std-only `fs::read_to_string` source anchors (helper present, guard-before-deref,
-  old unguarded form absent), runnable offline via `CARGO_MANIFEST_DIR=<worktree> rustc --test
-  --edition 2021 tests/<file>.rs -o /tmp/x && /tmp/x`.
+  old unguarded form absent), run with `cargo test --test <file>`.
 - **Facet B** — lift the pure helper VERBATIM by signature → first `\n}\n` and `cc -Werror
   -Wconversion -Wformat=2` compile it over a truth table. A frontend `static int helper(const char
   *, const char *)` is valid C, so `cc` compiles it fine even though it lives in a `.cpp`; call it

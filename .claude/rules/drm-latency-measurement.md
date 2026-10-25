@@ -85,14 +85,14 @@ excludes a None-ts frame in lock-step.
   class). Both the remote ffmpeg and the local ssh are `timeout`-bounded (a wedged V4L2 read must not
   hang the campaign with cam2's production service stopped).
 
-## Decode reuse + Tier-0
+## Decode reuse + tests
 
 - REUSE `mv_skew_snapshot.parse_payload` / `tick_map` / `RESERVED_RUN_IDS` and
   `qr_screenshot_check.decode_qr_codes_from_image_bytes` — never a second copy. Exclude
   `RESERVED_RUN_IDS` (esp. `AUX_TICK_RUN_ID` 911013, whose `gen_ts_ns` is always 0).
 - The PURE core (build_records / pair_latencies / percentile[nearest-rank] / summarize /
   run_summary / delta_table / select_run_id / format_*) imports stdlib only — heavy imports
-  (cv2, mv_skew_snapshot) are LOCAL inside the impure functions. Tier-0 tests the pure core with
+  (cv2, mv_skew_snapshot) are LOCAL inside the impure functions. Tests cover the pure core with
   synthetic records; the impure ffmpeg/cv2 glue has NO local test path (the two 🔴s the review caught
   both lived there) — pin it with static-text anchors + extra manual rigor, and expect the first rig
   campaign to be its first real exercise. `run --records <json>` (produced by `--out-records`) replays

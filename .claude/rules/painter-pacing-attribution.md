@@ -26,7 +26,7 @@ The painter logs `tick,gen_ts_ns,flip_ts_ns` (one row/painted-frame) to `painter
 run dir (`/tmp/recording-e2e-*/`). `flip_ts_ns` = page-flip-COMPLETE = on-screen instant.
 (dev1 keeps only the newest 9 run dirs since issue 1395; to mine more, see the
 `scripts/lib/e2e-rundir-retention.sh` header.)
-`src/painter_pacing.rs::analyze_csv(text)` computes, purely + Tier-0 tested:
+`src/painter_pacing.rs::analyze_csv(text)` computes, purely + unit-tested:
 - painted-tick **duplicates / skips / non-monotonic** (the painter emitting a bad logical sequence);
 - **missed DRM-vsync deadlines**: an inter-flip interval `>= 1.5x` the run's OWN median (nominal)
   interval — integer-safe `iv*2 >= nominal*3`; `>= 2x` = a "duplicate-class stall" long enough to

@@ -20,7 +20,7 @@ alert blames the right link:
   the whole-recording preamble-onset count — `== 0` means the demod saw no preamble energy
   (no/near-silent signal). Measured from the ACTUAL recorded audio, so it also catches a chain that
   went silent MID-record (the pre-record `[4b2/8]` audio preflight only guards the START).
-- **Pure decision (Tier-0):** `av_window::classify_av_audio_state(judged_cameras,
+- **Pure decision:** `av_window::classify_av_audio_state(judged_cameras,
   all_judged_candidates_zero, preamble_screens_passed) -> AvAudioState {Measured|Silent|
   PresentUndecoded}` + `av_audio_silent_flag() -> Option<bool>`. Fails closed: `judged==0` (vacuous
   all-zero) → `Measured`. Reuse this — never re-derive the classification.
@@ -38,7 +38,7 @@ alert blames the right link:
   the loud "MERACÍ ZVUK TICHÝ / check mbc mute" default. Keep BOTH the summary line and the
   per-camera reason consistent (do not let the per-camera line say "tichá stopa" when audio is present).
 
-## Gotcha — adding a field to `AvMarkerInputs` (probe-gated, no local compile, #477)
+## Gotcha — adding a field to `AvMarkerInputs` (probe-gated)
 
 `AvMarkerInputs` has NO `Default` derive, so a new field must be added to EVERY struct-literal site
 (there were 13: 9 in `recording-verdict.rs` tests, 3 in `tests/recording_verdict_merge_gate_exit_code.rs`,
@@ -49,7 +49,6 @@ compile. (Issue 1367 added `audio_channels` to all of them as `Default::default(
 audio_markers.len() as u64` BEFORE the `audio_markers` move (struct fields evaluate in source order,
 so the `.len()` borrow is released before the move — no use-after-move). `AvMarkerInputs` derives only
 `PartialEq`, not `Eq`, so a future `f64` field is safe (the #726 Eq-derive trap does not bite here).
-Verify locally with `cargo fmt --all --check` (rustfmt parses cfg-gated files); CI is the first type check.
 
 
 ## In-preflight AUDIO-ONLY decodability probe + the `[4b3/8]` gate (#1324)
@@ -59,7 +58,7 @@ an undecodable mbc chain never burns ~40 min: `recording-verdict --qpsk-probe <w
 SAME `qpsk_marker::decode_markers_with_stats` demod on a short AUDIO-ONLY capture (no emit-log / video
 pairing) and prints ONE JSON line `{preamble_screens,candidates,cluster_samples,crc_ok,crc_fail,
 peak_dbfs,verdict}` (verdict ∈ OK/UNDECODED/SILENT/POLLUTED), exit 0 (a pure reporter). The pure
-decision is `src/qpsk_probe_decision.rs` (crate-root, default-feature, Tier-0): `consistency_cluster_size`,
+decision is `src/qpsk_probe_decision.rs` (crate-root, default-feature): `consistency_cluster_size`,
 `peak_dbfs`, `classify`, `build_report`, `report_json`.
 
 - **Why a SELF-CONSISTENCY cluster, not `crc_ok`:** on a drowned chain the demod fires MORE CRC-valid
@@ -82,10 +81,10 @@ decision is `src/qpsk_probe_decision.rs` (crate-root, default-feature, Tier-0): 
   the probe from `$PROBE_BIN_DIR`, abort (`exit 1`) naming the class on any non-OK verdict. SKIP only
   when the probe binary is absent (a loud UNVERIFIED, never a silent pass). Every knob env-overridable
   (`AUDIO_DECODABILITY_*`); the −60/−20 bars are READ from `audio-presence-preflight.sh`, never retyped.
-- **Tier-0:** the pure decision + demod are default-feature, so the full synthesized-audio → demod →
-  decision path (incl. loud+decodable=OK) is verifiable via a rustc `--test` replica; the bash lib +
-  `[4b3/8]` wiring via `tests/python/test_marker_decodability_preflight_1324.py`. The probe-gated
-  `--qpsk-probe` ffmpeg glue in `recording-verdict.rs` is CI-only.
+- **Tests:** the pure decision + demod are default-feature, so the full synthesized-audio → demod →
+  decision path (incl. loud+decodable=OK) is a plain `cargo test`; the bash lib + `[4b3/8]` wiring via
+  `tests/python/test_marker_decodability_preflight_1324.py`. The `--qpsk-probe` ffmpeg glue in
+  `recording-verdict.rs` is probe-gated.
 - **TRAP — do NOT "fix" `consistency_cluster_size`'s strict-consecutive run with a gap-budget.** The
   chain resets on ANY interspersed off-cadence pair BY DESIGN. A reviewer will suggest tolerating K
   intervening non-matching pairs (to survive a false decode mid-sequence); it was TESTED against the

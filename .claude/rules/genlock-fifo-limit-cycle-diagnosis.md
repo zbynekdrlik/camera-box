@@ -70,10 +70,10 @@ the cycle is structurally impossible on the skew axis too (the #998 "upper-bound
 state" lesson, applied to skew instead of frac).
 
 **How it was caught — and how it was ALMOST missed: the test skew ENVELOPE was too narrow.** The
-committed Tier-0 conveyor sim (`SimConveyor1049`) used a single 8 ms skew and passed while
+committed default-feature conveyor sim (`SimConveyor1049`) used a single 8 ms skew and passed while
 limit-cycling at 15-30 ms; the existing probe cadence sims that WOULD have caught it
 (`cadence_survives_deep_arrival_skew` at skew 20, `cadence_releases_every_frame_once_at_grid_aligned_reserve`)
-are CI-only. An adversarial review + a default-feature replica (per
+are probe-gated. An adversarial review + a default-feature replica (per
 `probe-mirror-replica-testing.md`) SWEEPING skew 8/15/20/30/59 ms across reserves 3/8/20/26/36
 exposed 19-22 spurious drops. **Rule: any no-limit-cycle test for a genlock target MUST sweep BOTH
 the reserve AND the transport-skew axes — a single skew value is exactly the hole that hides this.**
@@ -252,9 +252,7 @@ its first latch) is judged by the configured pick. An absorbing `base + 2` conve
 gap of 3 and resets. Any test of this rule must use a `(base + 1) × interval` / D anchor with a
 non-zero late-tick ε; a fixture 1.05 frames apart proves nothing.
 
-**Verification recipe (Tier-0):** a `#[path]` harness `lib.rs` of genlock_grid + genlock_backlog +
-genlock_n1_depth + `probe { genlock }` under `clippy-driver --test -D warnings` runs the authority,
-the sims and the probe mirror. The integration parity files build against a stub `camera_box` rlib
-of the first three modules. The C mutation proof points `CARGO_MANIFEST_DIR` at a scratch tree
+**Verification:** `cargo test --features probe` runs the authority, the sims and the probe mirror.
+The C mutation proof points `CARGO_MANIFEST_DIR` at a scratch tree
 holding only the mutated `obs-source.c`, and the test must be recompiled per mutation because `env!`
 is resolved at compile time.

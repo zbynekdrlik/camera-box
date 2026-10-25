@@ -58,7 +58,7 @@ A NEW facet adds its row as a `vig_row_*` function in its lib plus ONE call line
 vendor-pin range helpers are wrappers over the ONE shared `scripts/lib/vendor-range.sh`, which
 drift-guard.sh's `imag_genlock_*` wrap too (`.claude/rules/early-gate-pin-doctrine.md`).
 
-**Proving such a move is behaviour-neutral with zero cargo (Tier-0).**
+**Proving such a move is behaviour-neutral.**
 - Export the pre-change `scripts/` + `vendor/README.md` (`git archive HEAD scripts vendor/README.md`)
   into a scratch tree.
 - Source old and new under the tests' `set -uo pipefail; . gate; set +e` shape and diff `declare -f`
@@ -82,9 +82,7 @@ drift-guard.sh's `imag_genlock_*` wrap too (`.claude/rules/early-gate-pin-doctri
   two-branch repo and the real history) was byte-identical. The one caveat: a deliberately MISUSED
   one-argument helper call prints bash's own `$2: unbound variable` with the function's LINE number,
   which moves with the code, so normalize `line N:` for that stream only.
-- The two covering Rust files, `tests/version_integrity_gate.rs` and `tests/drift_guard.rs`, run
-  locally with plain `rustc --test` + a ~50-line `tempfile` stand-in rlib (`TempDir` / `tempdir()` /
-  `NamedTempFile`), one compile at a time. Recipe: `.claude/rules/ci-testing-gotchas.md`.
+- The two covering Rust files: `cargo test --test version_integrity_gate --test drift_guard`.
 
 ## Two-step facet rollout: opt-in (#756-shape) → ENFORCED (#758-shape)
 
@@ -143,16 +141,11 @@ installs as DRIFT ("renaming aside is not removing"), and `ahk_dead_config_prese
 strip the dead `app1_binarypath`/`app2_*` block from `NL_STARTUP.ahk`) — a rig + destructive action,
 not fixable in the gate code. They go live under the opt-in code the moment the server serves the key.
 
-## GOTCHA — Tier-0 for these tests: no `# airuleset:build-ok` bypass, cold builds are contended
+## Bundle-state server Python tests
 
-The `# airuleset:build-ok` bypass is DISABLED for camera-box, so `cargo test` (RUN) cannot execute
-locally at all — only `cargo test --no-run` (compile). In a fresh WORKTREE the cold `--no-run` build
-(criterion/proptest/etc.) exceeds the ~10-min Bash foreground cap and is heavily CPU-contended by
-sibling fleet-worker builds; treat the SUPERVISOR's integration as the authoritative compile+test.
-Local Tier-0 you CAN do here: `cargo fmt --all --check`, `bash -n` + `shellcheck` on the `.sh`, and
-the Python tests (`python3 -m pytest tests/python/test_bundle_state_*.py` — these DO run locally and
-gave a real RED→GREEN for the `log()` dead-stdout fix). `log()` legitimately swallows the dead-stdout
-`OSError` (stdout is the broken resource, cannot log it) — bypass-marked `# airuleset:script-ok`.
+`python3 -m pytest tests/python/test_bundle_state_*.py` gave a real RED→GREEN for the `log()`
+dead-stdout fix. `log()` legitimately swallows the dead-stdout `OSError` (stdout is the broken
+resource, cannot log it) — bypass-marked `# airuleset:script-ok`.
 
 ## #770 — byte-derived DistroAV/libobs parity: gather the DEPLOYED bytes, opt-in
 
@@ -220,18 +213,6 @@ When hand-writing a manifest fixture (in a Rust test's `write_manifest`, a pytho
 by hand), emit ONE `files[]` entry per line — never a compact single-line JSON. `tests/version_integrity_gate.rs::write_manifest`
 does this correctly (`\n    { … },\n    { … }\n`).
 
-## Offline-proving the byte-vs-manifest gate without cargo (Tier-0)
-
-`tests/version_integrity_gate.rs` invokes the gate as a SUBPROCESS, so its assertions can be verified
-WITHOUT `cargo test` (banned locally) by driving the real bash gate directly: build strih+stream
-state JSONs carrying the byte-facet keys (`obs_dll_sha256`, `distroav_dll_sha256`, `genlock_capability`
-— a `manifest=` ALWAYS also activates the capability check) + the enforced parity/obs-identity keys
-(`with_sha`/`with_obs_identity_ok` equivalents), a multi-line manifest, then run
-`bash scripts/version-integrity-gate.sh --manifest <m> --win-state strih=<s> --win-state stream=<t>
---genlock-sha imag=<sha>` from the repo root and assert exit 20 (byte drift → REFUSE, names the
-drifted component + box) / exit 0 (bytes match → GATE PASS). This is the genuine offline verification
-for the Rust fixtures (which only compile+run at CI/integration).
-
 ## #1100 — imag byte facet ENFORCED; Windows half STAGED (the bundle-state-server can be STALE)
 
 `version-integrity-gate.sh`'s imag `.so` byte facet is now ENFORCED (the #758-shape flip of #1082's
@@ -290,7 +271,7 @@ exported + unit-tested); only its USE as the opt-in guard is removed.
   at a path that does NOT exist under `C:\Program Files\obs-studio`. Filed as #1115 — widening Windows
   distroav byte enforcement to the FULL bundle manifest needs that reconciled first (the "separate
   decision" the design deferred).
-- **TEST (Tier-0-only):** new `tests/harness_windows_manifest_enforce_1100.rs` — a static-text guard on
+- **TEST:** new `tests/harness_windows_manifest_enforce_1100.rs` — a static-text guard on
   recording-e2e.sh (RED asserts the enforce = no `manifest_autosource_state_has_key` gate, GREEN after
   removal; a regression guard that the `manifest_autosource_fetch … windows-genlock-fast.yml
   obs-genlock-fast-dll` auto-source still runs). Its own body must NEVER contain the literal
@@ -369,8 +350,6 @@ change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release 
   file names are prefixed `bundle_1346_` per the write_state-clobber GOTCHA below),
   `tests/harness_manifest_autosource_1082.rs` (the seam records workflow + artifact + sha), and
   `tests/harness_windows_manifest_enforce_1100.rs` (the static recording-e2e.sh wiring, count 2).
-- Tier-0 local proof without cargo: a python replica drives the real `drift-guard.sh` /
-  `version-integrity-gate.sh` / sourced lib with the same fixtures and assertions as the Rust tests.
 
 ## #1164 — `--imag-acked-offline REASON`: an operator-acked absent imag must NOT UNKNOWN-refuse
 
@@ -399,11 +378,6 @@ inventory (`imag-offline-ack.md`) had missed.
   `$IMAG_IP`), and branches the gate invocation (acked → `--imag-acked-offline`; else byte-for-byte
   the pre-#1164 call). The non-acked `else` branch and the SHA-read `else` are left un-re-indented
   (bash-legal, smallest diff — the anchor tests match substrings).
-- **Tier-0 proof (no cargo):** build clean strih+stream state fixtures (`with_obs_identity_ok` +
-  `with_sha`), run `bash scripts/version-integrity-gate.sh --win-state strih=… --win-state
-  stream=… --genlock-sha imag= --imag-acked-offline "<reason>"` → exit 0 + `GATE PASS` +
-  `imag_so_bytes SKIPPED`; drop the flag → exit 11. This is the same offline gate-subprocess path
-  the byte-facet tests use.
 
 ## #1351 — `--strih-linux`: mirroring `--imag-acked-offline` sometimes means editing `drift-guard.sh` too, not just `version-integrity-gate.sh`
 

@@ -53,7 +53,7 @@ safe only because both 888 forbidden regions slice forward from lines AFTER it. 
 word to a banner, ALSO grep every recording-e2e-reading test for negated
 `.contains(...)`/`!window.contains(...)`/`!s.contains(...)` assertions and confirm the region each
 forbids starts AFTER (or is otherwise disjoint from) your edit** — the positive occurrence-count
-sweep alone cannot prove this, and a full `cargo test` is CI-only under Tier-0. (The sibling
+sweep alone cannot prove this. (The sibling
 report-only decoupling seam that added the `[4d1/8]` word is `scripts/lib/mv-fps-preflight.sh`'s
 `mv_fps_preflight_term_is_report_only` per-box term predicate — strih report-only while issue 1260
 open, imag strict, flipped back to strict in the PR closing issue 1260.)
@@ -63,8 +63,8 @@ open, imag strict, flipped back to strict in the PR closing issue 1260.)
 (`tests/rig_mode.rs` `painter_launch()`), not on `rig-mode.sh` itself. Removing backticks from a
 comment in an unquoted `<<REMOTE` heredoc changed no literal count in the source, yet the emitted
 script gained text that a negated `!p.contains(...)` on the output could have caught. When you change
-a heredoc builder, also grep the tests that call it for negated output assertions. Run the one or two
-real test files that drive it with plain rustc (the stub-rlib recipe below).
+a heredoc builder, also grep the tests that call it for negated output assertions, and run the test
+files that drive it.
 
 **A new line in an EMBEDDED builder can steal a `.find()` anchor whose count only goes N→N+1**
 (issue 1405). The persist emitter's ro-verify FAIL line read `systemctl is-active
@@ -87,7 +87,7 @@ merge call (`"$VERDICT_BIN" "${MERGE_ARGS[@]}" || GATE=$?`) and asserts `exit "$
 it (`&s[exec_merge_block..(exec_merge_block + 9600).min(s.len())]`). Any NEW step you insert between
 the merge call and that exit grows the DISTANCE, which is not a literal-count change at all — so the
 occurrence-count anchor sweep (old-vs-new literal counts) passes completely clean while the 703
-window silently goes RED at CI (cargo blocked → Tier-0-invisible). #1265's `[8/8g]` loop-gain damp
+window silently goes RED at CI. #1265's `[8/8g]` loop-gain damp
 block pushed the distance 8949 → 10106 > the then-current 9600 window; the count sweep flagged
 nothing, a fresh-context reviewer caught it. **So when you add/remove ANY step in the
 `recording-e2e.sh` region between the `[8/8]` merge call and `exit "$GATE"` (a report step, a
@@ -689,14 +689,12 @@ leaking harnesses were converted; the shapes, for the next one:
 - An inline site holds `let scratch = tempfile::tempdir().unwrap(); let dir = scratch.path();`;
   a later `remove_dir_all(&dir)` on that `&Path` trips clippy `needless_borrows_for_generic_args`,
   so drop it (the TempDir already removes the dir).
-- Verify locally with the stand-in rlib (the issue-1367 entry below; it needs `Builder` and
-  `NamedTempFile` too), run each file, then `clippy-driver -D warnings` on it.
 
 **A std-only lift-and-compile gate must not compile to a FIXED temp path either (issue 1367).** Six
 replay tests each compiled the same C harness to `<temp>/…/sequence.c/.bin`; under a parallel runner
 one test ran the binary while another rewrote it ("Text file busy", ETXTBSY). Measured: 9 of 10
 default-thread runs failed, while every local run used `--test-threads 1` and stayed green, and CI's
-nextest is parallel. Fix without giving up the plain-rustc path (`tempfile` is not std): name each
+nextest is parallel. Fix: name each
 compile `{tag}-{pid}-{counter}` with a `static AtomicUsize` counter. The counter separates threads of
 one process (unlike a clock), the pid separates nextest's per-test processes. Remove the call's own
 files after the run (`tests/support/ndi_source_lift_1367.rs`). Run every new lift gate at least once
@@ -871,8 +869,7 @@ recovery; that is separate, pre-existing, accepted scope.
 
 ## Generating a `.rs` test file's contents via a Python script: a plain `'\t'`/`'\n'` inside a Python (non-raw) triple-quoted string silently becomes a REAL tab/newline BYTE in the written Rust source (#1216 completion)
 
-Since Tier-0 blocks all local cargo compilation, editing a large `tests/*.rs` file in this repo
-often goes through a small `python3 <script>.py` that does a string `.replace()` on the file's
+Editing a large `tests/*.rs` file in this repo often goes through a small `python3 <script>.py` that does a string `.replace()` on the file's
 text (the pattern this whole CLAUDE.md/rules-file family already recommends for surgical,
 `old.count(...) == 1`-verified edits). When the NEW Rust text you're inserting itself contains a
 Rust string literal meant to hold `\t`/`\n` (e.g. a `printf 'ACTIVE\t%s\n'` line inside an `r#"..."#`
@@ -884,8 +881,7 @@ the `.rs` file — not the two-character sequence `\` + `t` the Rust source is s
 Two different failure shapes result, and only ONE of them is caught by `cargo fmt --all --check`:
 
 1. **Inside a Rust CHAR LITERAL** (`'\t'`) — a real tab byte breaks Rust syntax outright
-   (`character constant must be escaped: \`\t\``), so `cargo fmt --all --check` (the Tier-0-legal
-   syntax-check net this repo relies on when `cargo build`/`test` are blocked) DOES catch it —
+   (`character constant must be escaped: \`\t\``), so `cargo fmt --all --check` DOES catch it —
    but only because char literals are strict; this is the lucky case.
 2. **Inside an `r#"..."#` RAW STRING** (e.g. a bash heredoc's own `printf 'FOO\t%s\n' "$VAR"`
    line) — a raw string accepts ANY byte including a literal tab/newline, so `cargo fmt` reports
@@ -965,11 +961,10 @@ REFUSED by the worktree-isolation guard the moment ANY argument (an output path,
 `-c` script's file) is a RUNTIME-COMPUTED shell variable inside a construct it deems "too complex to
 verify it stays inside the worktree" — the guard cannot prove the variable's expansion isn't a git
 op. It is NOT about git; it is about the variable. Also trips on trailing `| tail`/`echo
-"exit=${PIPESTATUS[0]}"` pipelines. The fix (used repeatedly this session for the genlock_lock_state
-RED→GREEN, the C-vs-Rust parity replica, and the g++ header/widget-snippet checks): write scratch
-files with the `Write` tool (never a Bash heredoc — also avoids the Tier-0 heredoc-prose false-block),
-INLINE the absolute scratchpad path as a literal in the `rustc`/`g++`/`python3` command (no `$VAR`),
-and run the command as its OWN plain Bash call with no pipe/`&&`/`PIPESTATUS`. A `python3 - <<'PY'`
+"exit=${PIPESTATUS[0]}"` pipelines. The fix (used repeatedly for the g++ header/widget-snippet
+checks): write scratch files with the `Write` tool (never a Bash heredoc), INLINE the absolute
+scratchpad path as a literal in the `rustc`/`g++`/`python3` command (no `$VAR`), and run the
+command as its OWN plain Bash call with no pipe/`&&`/`PIPESTATUS`. A `python3 - <<'PY'`
 heredoc block IS allowed (the guard permits `python3 -` / `python3 -c`), so classifier/anchor
 simulations run fine that way — only the runtime-variable-in-the-command shape is the blocker.
 
@@ -982,32 +977,29 @@ with the `Write` tool and run `python3 /abs/script.py` as a plain call.
 
 The worktree-isolation guard refuses `bash -c '…source lib…'`, `ENV=x bash <script>`, and any
 `PATH=<stub> … | grep` pipeline ("what it reads/is handed as shell text cannot be shown not to run
-git"). So the two established local Tier-0 recipes for this repo's `scripts/lib/*.sh` + watchdogs —
+git"). So the two established local recipes for this repo's `scripts/lib/*.sh` + watchdogs —
 (a) sourcing a lib under `set -euo pipefail` and calling its functions, and (b) the manual
 stubbed-`curl` `--dry-run` of a `*-alert-watchdog.sh` — are BOTH unrunnable from a worktree worker
 (they DO run for the SUPERVISOR / a non-isolated session). What a worktree worker CAN still do
 locally, and should rely on instead: (1) run the load-bearing python one-liners STANDALONE via
 `python3 -c '…' <args>` (the guard allows `python3 -c`, only not `bash -c`), proving the real logic;
 (2) `python3` a `.find`/`.split`/window SIMULATION of each Rust static-anchor assertion against the
-edited script (reproduce the harness's exact slice logic — this is the authoritative anchor-safety
-proof when `cargo test` is Tier-0-blocked); (3) `bash -n` + `shellcheck -S warning` on the `.sh`;
-(4) `cargo fmt --all --check` (parses the `.rs`); (5) the notify-dedup sweep pytest. The Rust
+edited script (reproduce the harness's exact slice logic); (3) `bash -n` + `shellcheck -S warning`
+on the `.sh`; (4) `cargo fmt --all --check` (parses the `.rs`); (5) the notify-dedup sweep pytest. The Rust
 harness (`run_under_set_e` sourcing the lib) then runs at CI / for the supervisor. Note this in the
 evidence block so the supervisor runs the sourced-lib harness + any stubbed dry-run at integration.
 
-## Clippy `doc_lazy_continuation` is a CI-only failure under Tier-0 — a doc line starting with `+ ` (or `- `/`* `/`1. `) is a Markdown LIST ITEM (issue 1196 integration, 2026-09-02)
+## Clippy `doc_lazy_continuation` — a doc line starting with `+ ` (or `- `/`* `/`1. `) is a Markdown LIST ITEM (issue 1196 integration, 2026-09-02)
 
-`cargo clippy -D warnings` cannot run locally (Tier-0 #557), `cargo fmt --check` does not lint doc
-prose, so this class surfaces only in CI's Lint job — and it blocked the whole release PR's E2E
-(the E2E fetches the CI artifacts and fails closed when `ci.yml` is red). The trap: a `//!`/`///`
+`cargo fmt --check` does not lint doc prose, only clippy does — this class blocked the whole
+release PR's E2E (the E2E fetches the CI artifacts and fails closed when `ci.yml` is red). The trap: a `//!`/`///`
 paragraph that WRAPS so a line begins with `+ exactly ONE aux mark …` — clippy reads `+ ` as a
 Markdown bullet and every following unindented line as a "list item without indentation". Fix by
 rewording (`plus …`), never by indenting prose that is not a list. Pre-push local net (cheap,
 run over every touched `.rs`): `grep -nE '^\s*//[/!]\s*([-+*>]|[0-9]+\.) ' <files>` and check that
 each hit is a REAL list item whose continuation lines are indented by 2+ spaces. A wrapped line
 that starts with `>` (e.g. `(lag` / `>= 1)`) is a Markdown BLOCKQUOTE and trips the same lint on the
-next line (issue 1367 D2 caught it before push); reword (`one or more`). The plain-rustc replica +
-`clippy-driver --test -D warnings` of a pure crate-root module runs these doc lints locally.
+next line (issue 1367 D2 caught it before push); reword (`one or more`).
 
 ## Inserting a NEW line right after an existing `# shellcheck disable=SC2XXX` directive silently REBINDS it to the wrong statement (issue 1260)
 
@@ -1103,26 +1095,6 @@ never assert a count/SHA you haven't seen printed. (And never add `--first-paren
 to a `git log` call whose whole point is this collapse — either flag reintroduces the exact false
 positive the collapse exists to avoid.)
 
-## Standalone-rustc verification of a pure crate-root module: APPEND `main` to a COPY, never `include!` it (issue 1303 part 4)
-
-The repo's Tier-0 pattern for a pure crate-root module (`genlock_lock_state.rs`, `resolume_playback.rs`,
-`genlock_forced_table_audit.rs`, ...) is to verify it with standalone `rustc` since cargo compile is
-blocked (#557): `rustc --test --edition 2021 -A dead_code <copy>.rs -o t && ./t` runs its
-`#[cfg(test)] mod tests` with no cargo. To ALSO produce a data dump for a Rust↔bash parity diff (feed
-the same vectors to both and `diff`), you need a `fn main()` calling the module's public fns. The trap:
-`include!("…/module.rs")` into a tiny driver file FAILS with `error[E0753]: inner doc comments like
-this (starting with //! …) can only appear before items` — because `include!` inlines the module's
-text (which OPENS with a `//!` module-doc block) at the macro's position, i.e. mid-file, where `//!`
-is illegal. Fix: `cp module.rs parity.rs` and APPEND the `fn main()` + helper fns to the COPY — the
-module's own `//!` stays at file start (legal), and `rustc --edition 2021 -A dead_code parity.rs`
-compiles it as an ordinary program whose `main` can call the module's items directly. (The
-`--test`-run and the append-`main` build are two separate standalone-rustc invocations of the same
-copied source; neither needs cargo.) This is the Rust analogue of the vendored-C lift-and-compile
-recipe and pairs with a bash-replica `diff` to prove the two implementations agree exhaustively.
-A module split into a directory (`genlock_lock_state` since issue 1302: `#[path]` submodules under
-`src/genlock_lock_state/`) needs that directory copied next to the copy, or mount the original
-with `#[path]` in a scratch lib.rs instead of copying it.
-
 ## A delegation-parity pytest that loads BOTH modules via `spec_from_file_location` CANNOT assert `is`-identity across them (#1308)
 
 The repo's pure-module tests load a `scripts/*.py` via `importlib.util.spec_from_file_location(...)` +
@@ -1172,7 +1144,7 @@ successful ci.yml run found for commit … after the poll budget`). So ANY red c
 one-line clippy lint in a brand-new TEST file — costs: the 20-min poll (holding the rig LEASE the
 whole time), a wasted E2E slot, and a full re-push cycle. Release PR 1348 lost three E2E attempts to
 exactly this: `trim_split_whitespace` (`tests/harness_qr_align_reinit_1349.rs`), then `useless_vec`
-(`intercom/hub/tests/mulaw_g711.rs`) — both in test files that no Tier-0 local step compiles.
+(`intercom/hub/tests/mulaw_g711.rs`) — both in test files.
 
 **Before pushing a head that will trigger the E2E, hand-audit every NEW/edited `.rs` test file for
 the clippy TEST lints CI denies** (`-D warnings` under `--all-targets`): `useless_vec` (`vec![…]`
@@ -1192,7 +1164,7 @@ new `if [ platform = X ]; then … else … fi` wrapper INLINE around the existi
 window's used bytes — every anchor further into the window (a second box's probe call, a recovery
 message) shifts forward, and a naive inline branch can silently push a later anchor PAST the fixed
 budget (confirmed live: a first draft pushed `win-stream-snv MCP Shell` from offset 2319 to beyond
-2500, which would have gone CI-red with no local signal — Tier-0 bans running the actual test).
+2500, which would have gone CI-red).
 **Before inlining a new branch into an anchored region: measure the anchor's used bytes with a
 one-line python `find()` sweep (see the `#1265` entry above's recipe, adapted to a fixed window
 instead of a fixed distance) BEFORE writing the branch, and again AFTER, to confirm every anchor
@@ -1216,7 +1188,7 @@ local sha fails safe to upload / differing sha re-uploads / identical sha skips)
 `recording-verdict-on-strih-snv.sh` (issue 1351) copied everything EXCEPT the sha gate — a mere
 `[ -x "$REMOTE_BIN" ]` presence check, which silently reuses a schema-drifted binary exactly the way
 imag-nb's pre-1118 bug did. A fresh-context review agent caught it on the FIRST pass; it would not
-have been caught by any local Tier-0 check (bash -n/shellcheck/fmt are all blind to "missing a
+have been caught by any local static check (bash -n/shellcheck/fmt are all blind to "missing a
 correctness check", they only catch syntax). **When copying the imag-nb template for a new Linux
 sibling, port the sha256 gate in the SAME commit as the rest of the script — it is not an optional
 follow-up, it is part of the template.**
@@ -1263,7 +1235,7 @@ FULL bounded call (`timeout "${STRIH_LX_WS_TIMEOUT:-20}" python3 "$here/obs_phas
 bare `obs_phase2.py` literal that also appears in the lib's own doc comments (the #832 self-collision).
 
 The SSoT lib is `scripts/lib/strih-snv-preflight.sh` (`strih_lx_gate_prefix` / `strih_lx_preflight_timeout_banner`).
-Verify locally under Tier-0 with a `bash <file>` sourced-lib harness (the gm_enforce slice shape with
+Verify locally with a `bash <file>` sourced-lib harness (the gm_enforce slice shape with
 a fake gate + a real `timeout 2` hang→124→banner path) + the python occurrence-count sweep — a
 worktree worker's `bash -c` is refused, but `bash <written-file>` runs (see the #1265/#1308 refinement).
 
@@ -1329,62 +1301,7 @@ bash returns `E2BIG` ("Argument list too long") and the test dies before the scr
 ~260 KB fixture hit it on the first local replica run. Write the fixture to a
 `tempfile::tempdir()` file and redirect it (`fn < "$LOGFILE"`); keep env vars for small values.
 The existing >1 MB drain-safety tests already stream their input from inside the shell
-(`head -c … /dev/zero | tr`) for the same reason. A local python/bash replica of the Rust harness
-catches this before CI (`subprocess.run` raises `OSError: [Errno 7]` on the same limit).
-
-## A whole `tests/*.rs` integration file RUNS locally with plain `rustc --test` + a stub `tempfile` rlib — no cargo (issue 1357)
-
-> **LIMIT (owner order 23.9.2026 — dev1 is Tier-0, 7.5 GB RAM):** use this for the ONE or TWO test files
-> that directly cover your change, one compile at a time — NEVER "every test file that reads the
-> touched script" and never in several lanes at once. The same day a lane's
-> `shellcheck -S warning -x scripts/recording-e2e.sh` reached 2.9 GB RSS and, with parallel lanes'
-> rustc/g++ lifts, swapped dev1 to a halt (load 33). Never `shellcheck -x` on recording-e2e.sh /
-> rig-mode.sh locally — CI's Shellcheck job runs it; the push → CI run is the full proof.
-
-The script-reading harnesses (`setup_imag_guards.rs`, `strih_provision_pure_functions.rs`,
-`verify_imag_pure_functions.rs`, `drift_guard.rs`, ~40 more) use only `std` plus `tempfile`, so the
-REAL test file (not a replica) compiles and runs under Tier-0 without any cargo shape:
-
-1. Write a ~60-line stand-in `tempfile.rs` (`TempDir` with `path()`/`into_path()`/Drop, `tempdir()`,
-   `NamedTempFile::new()/path()`) and build it once: `rustc --edition 2021 --crate-type rlib
-   --crate-name tempfile tempfile.rs -o <scratch>/libtempfile.rlib`.
-2. Per test file: `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test -A warnings tests/<f>.rs
-   --extern tempfile=<scratch>/libtempfile.rlib -L <scratch> -o <scratch>/bin/<f>`, then run the binary
-   from the worktree root. `env!("CARGO_MANIFEST_DIR")` is read at COMPILE time, so set it on rustc.
-3. RED proof against the pre-fix scripts: export HEAD's `scripts/` + `systemd/` into a scratch tree
-   (the version-control `archive -o head.tar HEAD scripts systemd` subcommand), copy the NEW test files
-   in, and compile with `CARGO_MANIFEST_DIR=<that tree>`.
-
-Two extensions that widen this net (issue 1317 part 3):
-- **A file using `env!("CARGO_BIN_EXE_<bin>")`** (the `harness_*_gate.rs` family) fails to compile
-  with "not defined at compile time". Pass a dummy at compile time — the name has hyphens, so go
-  through `env`: `env CARGO_MANIFEST_DIR=<wt> "CARGO_BIN_EXE_<bin>=/nonexistent" rustc … --test …`.
-  Every static-anchor test then runs for real; only the `gate_binary_*` tests that exec the binary
-  fail (expected — they stay CI-only). Grep the names with `grep -oE 'CARGO_BIN_EXE_[A-Za-z0-9_-]+'`.
-- **A file that `use camera_box::<module>::…` only for PURE std-only items** (e.g.
-  `tests/obs_self_heal_install.rs` → `obs_self_heal::DEFAULT_*`): build a one-module stub crate
-  from the REAL source — copy `src/<module>.rs`, write `lib.rs` = `pub mod <module>;`,
-  `rustc --crate-type rlib --crate-name camera_box lib.rs -o libcamera_box.rlib`, then
-  `--extern camera_box=<that rlib>`. It only works while the module has no `crate::`/dep imports.
-
-Put the loop in a script FILE and `bash` it (the worktree guard refuses `$VAR`-computed paths in a
-direct rustc call). A file needing another crate (serde, the camera_box lib) fails to compile this
-way and stays CI-only. This catches borrow/type errors (an E0716 was caught this way) and failing
-asserts before CI; it does NOT run clippy, so the test-lint hand sweep is still needed.
-
-## `clippy-driver` gives CI's `clippy -D warnings` verdict locally with NO cargo (issue 1242)
-
-Tier-0 bans every compiling cargo shape, so clippy used to be "CI-only". It is not: `clippy-driver`
-is a rustc wrapper, and `clippy-driver --edition 2021 --test -D warnings <copy.rs> -o <out>` (or
-`--crate-type lib`) lints a std-only file with the default clippy lint set. That covers a copy of a
-pure crate-root module, a std-only `tests/*.rs` harness (set `CARGO_MANIFEST_DIR=<worktree>` so
-`env!` resolves; put the call in a script FILE in a worktree), or a small two-module replica of a
-cross-module `const _: () = assert!(...)`. It caught a `double_comparisons` error
-(`a <= b && a >= b` -> write `a == b`) in a lib.rs const pin that plain `rustc -D warnings` passed.
-Files that need the camera_box crate or serde stay CI-only.
-It also catches the truth-table shape std-only vendored-C gates love: a row slice typed
-`&[((i32, i32, i32, i32), i32)]` is a `clippy::type_complexity` error under `-D warnings` (issue
-1363 — plain `rustc -D warnings` passed it). Name the row type (`type FourIntVector = …;`).
+(`head -c … /dev/zero | tr`) for the same reason.
 
 ## Pinning a PRINTED shell command: parse it with BASH, never python `shlex` (issue 1317 part 4)
 
@@ -1424,15 +1341,6 @@ home, so a module installed with `pip --user` (python3-websocket on dev1, which 
 imports at module load) raises `ModuleNotFoundError` before the code under test runs. Pin the real
 user base alongside the fake home: `env = dict(os.environ, HOME=str(tmp),
 PYTHONUSERBASE=site.getuserbase())`.
-
-## Running a std-only test that needs `tempfile` locally (Tier-0, issue 1367)
-
-`tests/deploy_genlock_fleet.rs` / `tests/obs_box_baseline_1357.rs` are otherwise std-only but call
-`tempfile::tempdir()`, so a plain `rustc --test` fails E0433. Build a ~30-line shim crate (a
-`TempDir(PathBuf)` with `path()` / `into_path()` + remove-on-drop, and `tempdir()` under
-`std::env::temp_dir()`) as `rustc --crate-type rlib --crate-name tempfile shim.rs`, then
-`CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/<file>.rs --extern tempfile=<shim.rlib>
--L <dir>` and run the binary from the worktree root. The real crate still runs on CI.
 
 ## A fake `sshpass` that PATTERN-MATCHES the remote command and fakes its result tests nothing — make it RUN the text (issue 1371)
 
@@ -1508,42 +1416,8 @@ any template placeholder filled from a variable.
   read their `Cargo.toml` version, then delete those temporary refs (`git update-ref --stdin` with
   `delete` lines) so the shared `.git` is left clean.
 
-## A plain-rustc replica can run SEVERAL real crate-root modules AND the real `tests/*.rs` files (issue 1367)
+## Patch scripts and the `Edit` tool: trailing spaces get dropped (issues 1367, 1382)
 
-Extends the stub-rlib recipe above for a change spread over a few crate-root modules that reference
-each other with `crate::`. Write one scratch `lib.rs`:
-- `extern crate self as camera_box;` at the top, so a real test file's `use camera_box::…` resolves
-  to this crate.
-- `#[path = "<worktree>/src/<m>.rs"] pub mod <m>;` for each real module.
-- `#[cfg(test)] #[path = "<worktree>/tests/<f>.rs"] mod <f>;` for each real test file.
-
-Then `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test lib.rs` (the env var serves a test's
-`env!` fixture path) and `clippy-driver --edition 2021 --test -D warnings lib.rs`.
-- **Splitting a crate-root module into a directory breaks this mount unless the submodules carry
-  explicit paths** (issue 1302). rustc treats a `#[path]`-mounted file like a `mod.rs`, so a bare
-  `mod decision;` inside `src/foo.rs` is looked up at `src/decision.rs` (E0583), while the real crate
-  finds `src/foo/decision.rs`. Write `#[path = "foo/decision.rs"] mod decision;`: a path attribute is
-  relative to the file's directory in both cases. A test inside a submodule that needs a sibling
-  imports it through `super::super::`, never `crate::foo::`, so the module also compiles when a
-  replica copies it in as the crate root. Prove all three mounts (`src/genlock_lock_state.rs` is the
-  worked example).
-- A module that derives `serde::{Serialize, Deserialize}` has no serde crate here. Include a COPY with
-  the `use serde::…` line and the `, Serialize, Deserialize` derive entries sed-stripped. The derive
-  is attribute-only, so the behaviour under test is unchanged.
-- The module's own `#[cfg(test)] mod tests` runs too.
-- Worked example: the issue-1367 `qpsk_marker` + `qpsk_probe_decision` + `qpsk_channel_select`
-  replica with `tests/qpsk_channel_select_fixture_1367.rs` and `tests/harness_qpsk_probe_decision_1324.rs`.
-- The same modules plus a small std-only `main` can also run the real ffprobe/ffmpeg argument
-  builders on real clips, which checks the probe-gated glue shape without cargo.
-- Two test files that both `#[path = "support/…"] mod x;` the same helper become ONE crate in the
-  replica, and clippy reports `clippy::duplicate_mod`. That lint cannot fire in the real layout
-  (each `tests/*.rs` is its own crate), so pass `-A clippy::duplicate_mod` to the replica's
-  clippy-driver only, and lint each std-only test file as its own crate too
-  (`clippy-driver --edition 2021 --test -D warnings tests/<f>.rs`) — that run catches a helper one
-  including crate leaves unused (dead_code), which the merged replica hides.
-- Worked example with a C++ mirror: the issue-1367 dock channel pick
-  (`src/av_sync_dock_channels.rs` + `tests/qpsk_channel_pick_parity_1367.rs`, which compiles
-  `vendor/av-sync-dock/test/channel-pick-parity.cpp` with g++ at test time).
 - Patch scripts: write them to a file (Write tool) and run them in their own Bash call. A python
   heredoc that edits files in the same call as other commands is often refused by the worktree
   guard as "too complex to verify", and a Write-tool file loses trailing spaces at line ends, so a
@@ -1640,10 +1514,8 @@ stderr has no "unbound variable", and initialise every local a lib function test
 
 When a refactor moves the last caller of a shared test helper (`run_block` in
 `tests/strih_provision_pure_functions.rs`) into another test file, the helper becomes dead code.
-`cargo clippy --all-targets -D warnings` on CI rejects it, and no Tier-0 step catches it (a plain
-standalone `rustc --test -A warnings` run hides it too). Run
-`clippy-driver --edition 2021 --test -D warnings <file>` (with the tempfile shim for files that need it)
-on every std-only test file you edit, and delete a helper whose last caller went away.
+`cargo clippy --all-targets -D warnings` on CI rejects it (a `rustc -A warnings` run hides it).
+Delete a helper whose last caller went away.
 
 ## A pytest must not catch an exception CLASS from a module another test file may swap in `sys.modules` (issue 1380)
 
@@ -1708,15 +1580,6 @@ script (dev1-local, not committed): `~/.claude/work-products/issue-1381-vban-pac
   few hours back passes today and fails tomorrow. Stamp it at test time
   (`time.gmtime(time.time() - age_s)`), as `tests/python/test_av_soak_lease_inherit_1367.py` does.
 
-## On a loaded dev1 the Tier-0 hook blocks a plain python call that merely NAMES a `.sh` file (issue 1302)
-
-The Tier-0 build hook scans every Bash command that mentions a `.sh` path with a small python
-extractor (bounded at 10 s) to see whether the script it runs hides a compile. With dev1 at load
-~13 the extractor timed out, and the hook fails CLOSED: "classifier unavailable ... blocking rather
-than silently allowing". The blocked command was a harmless `python3 sweep.py old.sh new.sh`
-anchor sweep. Keep `.sh` paths out of such commands: hard-code them inside the script (written with
-the Write tool) and run `python3 /abs/sweep.py` with no arguments.
-
 ## Running ONE loop cut out of a rig-mode.sh function, for real (issue 1302)
 
 A static anchor proves a loop's text, not what it does on a failed or hung row. To run the loop
@@ -1728,9 +1591,6 @@ stubs on PATH and define the loop's input functions (`obs_burn_targets`) in the 
 - the loop builds its JSON with plain `jq`, which prints it over many lines. Print it with
   `jq -c .` before a test parses one `BURN=` line.
 Worked example: `_contract_sweep` in `tests/python/test_cg_chain_measure_1302.py`.
-
-On a loaded dev1, one pytest run over every file that reads rig-mode.sh / the cg-chain libs took
-more than the 600 s Bash cap. Split it into chunks (`files[n::4]`, one script run per chunk).
 
 ## A test fixture holding a real 40-hex commit sha is blocked as a "secret" at `git add` AND `git commit` (#1394)
 
@@ -1953,20 +1813,6 @@ Write the escape with an escaped backslash in a normal Rust string (`"\"r\\u0074
 it survives: `assert!(frame.contains("r\\u0074p"))`. Then a decoded write fails loudly. The same holds
 for any fixture whose point is an escape sequence (`\t`, `\n`, `\u`): check it with `grep -n 'u0074'`
 after writing, never trust the patch script.
-
-## A pure hub module that uses serde_json runs under plain rustc: build serde_json from the registry (issue 1453)
-
-`intercom/hub/src/janus_ws_guard.rs` needs only serde_json, so its real test file runs locally with
-no cargo. serde_json 1.0.15x depends on `serde_core`, `itoa`, `memchr` and `zmij`, and both
-`serde_core` and `serde_json` (and `zmij`) have build scripts. Per crate: compile its `build.rs` with
-rustc, run it with `OUT_DIR`, `CARGO_PKG_VERSION_PATCH`, `TARGET`, `RUSTC`, `CARGO_CFG_TARGET_ARCH`,
-`CARGO_CFG_TARGET_POINTER_WIDTH` and `CARGO_MANIFEST_DIR` set, turn its `cargo:rustc-cfg=` lines into
-`--cfg` args, and build the lib as an rlib with `OUT_DIR` still set (serde_core `include!`s a
-generated `private.rs`). Features: `std` + `result` + `alloc` on serde_core, `std` on serde_json and
-memchr. Then a root with `extern crate self as intercom_hub;` + `#[path]` the module and the test
-file, `rustc --test --extern serde_json=...` and `clippy-driver --test -D warnings` on it. Keep the
-builder in a script FILE (the worktree guard refuses the inline shape).
-
 
 ## A git ownership check in a root-run script is testable as non-root: `GIT_TEST_ASSUME_DIFFERENT_OWNER=1` (issue 1467)
 

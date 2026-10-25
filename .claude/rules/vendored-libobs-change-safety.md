@@ -37,9 +37,8 @@ paths:
 
 # Changing the genlock C in `libobs` — CI is its first compile, so buy verification back (#1003)
 
-The project CLAUDE.md is blunt about the constraint: a change confined to the vendored tree has
-"zero local verification path — not even a compile check", and CI is the first place a mistake
-surfaces. That is true of the *whole* file. It is NOT true of the pieces you actually add, and
+The vendored C compiles only on CI, so CI is the first place a mistake surfaces. That is true of
+the *whole* file. It is NOT true of the pieces you actually add, and
 treating it as if it were is how a type error or a `printf` mismatch burns a CI cycle.
 
 ## Lift the new helpers into a standalone harness and really compile them
@@ -99,7 +98,7 @@ The shipped bytes compile unchanged. Two traps:
 
 ## Promote the harness to a committed gate when it checks a MIRROR
 
-`src/genlock_backlog.rs` is the Tier-0 authority and the C is the port; they are required to be
+`src/genlock_backlog.rs` is the Rust authority and the C is the port; they are required to be
 numerically identical, and every other guard in this repo asserts that only by static text
 anchor — which proves the C still *says* the right thing, never that it *computes* it.
 `tests/genlock_relock_selection_parity.rs` closes that: it lifts the helpers by name, compiles
@@ -113,8 +112,7 @@ Two properties to preserve if you touch it: the helpers it lifts must stay **con
 ### When the lifted helper has NO Rust consumer — make the gate STD-ONLY so it runs offline (issue 767)
 
 `genlock_relock_selection_parity.rs` compares the C to a `use camera_box::...` Rust authority, so it
-needs the crate + `CARGO_TARGET_TMPDIR` and runs ONLY under `cargo test` (CI — camera-box's
-`# airuleset:build-ok` is disabled, so you can't `cargo test` it locally at all). A vendored-C
+needs the crate + `CARGO_TARGET_TMPDIR` and runs ONLY under `cargo test`. A vendored-C
 DECISION helper that NOTHING in the Rust appliance calls (e.g. `genlock_reconnect_decision` in
 `vendor/distroav/src/ndi-source.cpp`, a DistroAV-receiver-loop-only choice) has no such authority to
 compare against — so DON'T invent a crate-root module just to have one. Instead make the whole gate
@@ -122,10 +120,9 @@ compare against — so DON'T invent a crate-root module just to have one. Instea
 vendored file, lifts the `static inline` helper by signature → first `\n}\n`, compiles it with `cc`
 against a tiny `<stdint.h>`/`<stdbool.h>` stub + a `main()` driving a hand-written **truth table**,
 and asserts each hardcoded expected bool. The truth table IS the spec (no Rust reference needed), so
-this runs BOTH under `cargo test` AND standalone via the issue-1026 recipe
-(`CARGO_MANIFEST_DIR=<abs> rustc --test --edition 2021 tests/<file>.rs -o /tmp/x && /tmp/x`) — a real
-local RED→GREEN with no cargo/OOM contention, and the `cc` invocation still `-Werror -Wconversion
--Wformat=2` compile-checks the shipped bytes and panics loud (never skips) when no compiler.
+this runs BOTH under `cargo test` AND standalone via the issue-1026 recipe below, and the `cc`
+invocation still `-Werror -Wconversion -Wformat=2` compile-checks the shipped bytes and panics loud
+(never skips) when no compiler.
 
 Two gotchas proven live here: (1) put ONE hand-picked vector at EVERY guard boundary
 (exact-threshold, just-under, each early-return guard) AND at least one vector with a DIFFERENT
@@ -293,7 +290,7 @@ interval is the SMALLEST gap; a duplicate or a dropped/decimated frame only ever
 Taking the first increasing pair let a pair that straddled a dropped frame read 2 source intervals
 (33.3 ms → n=1 on a 60fps source), collapsing `genlock_backlog_relock_qdepth()`'s threshold below
 the source's real held depth and firing the backlog branch spuriously (~1/sec — the #796
-health-signal complaint). The min-delta authority is the pure Tier-0 seam
+health-signal complaint). The min-delta authority is the pure seam
 `src/genlock_backlog.rs::source_interval_from_stamps`; the probe `measure_source_multiple` calls
 it and the C `genlock_measure_source_multiple` mirrors the same min-loop. **If you touch this
 derivation: min-delta is byte-identical to first-pair on any clean grid-stamped window, so a
@@ -319,7 +316,7 @@ the newest `%APPDATA%\obs-studio\logs\*.txt`).
 
 `ready_async_frame()` grew to ~832 lines; the issue-401 cadence was lifted into
 `static bool genlock_release_tick(...)`. A pure "cut, dedent, wrap, call" move, but two traps cost
-real time — both invisible to local Tier-0 (the file compiles only on CI):
+real time (the file compiles only on CI):
 
 - **A function that is ALSO forward-declared has TWO matching lines.** `ready_async_frame` has a
   forward declaration (`...sys_time);`) near the top of the file AND its definition (`...sys_time)`
@@ -385,12 +382,8 @@ Program priority stays STRUCTURAL (different source type, never routed through t
   INSIDE the tick whose total the gate reads back (the DRM-output HDMI Multiview view,
   `.claude/rules/obs-drm-output.md`). Anchors for the EXPORT, the saturating subtraction and the
   wrapper delegation are in `genlock_preload.rs` and in both windows-genlock ymls.
-- **Running a camera_box-dependent lift test locally (Tier-0):** build a one-module stub crate
-  from the real `src/render_budget.rs` (`lib.rs` = `#[path = "<abs>/src/render_budget.rs"] pub mod
-  render_budget;`, `rustc --crate-type rlib --crate-name camera_box`), then `rustc --test --extern
-  camera_box=<rlib>`. For a mutation proof, copy `obs.c` + `obs-display-budget.h` into a scratch
-  `vendor/obs-studio/libobs/`, mutate the copy, and compile the test with `CARGO_MANIFEST_DIR`
-  pointing at the scratch tree. Issue 1346 killed five mutants this way. A mutant that leaves a
+- **Mutation proof for these lift tests:** mutate `obs.c` / `obs-display-budget.h` one change at a
+  time and confirm the test fails; issue 1346 killed five mutants this way. A mutant that leaves a
   parameter unused dies on the harness's `-Werror`, which also counts as RED.
 - **Audio is a separate filter callback:** gate ONLY `ndi_filter_render_video`; leave
   `ndi_filter_asyncaudio` untouched so interkom talkback audio stays full-rate.
@@ -421,59 +414,12 @@ display->render_divisor;`. When you leave a second inline copy of a derivation, 
 (`genlock_preload.rs` now pins the obs-display.c `derived = ...` line) so the two cannot silently
 diverge.
 
-## Observing RED→GREEN on a source-anchor test when the vendored change can't run cargo (#1026)
+## Observing RED→GREEN on a source-anchor test (#1026)
 
-The `# airuleset:build-ok` bypass is DISABLED for camera-box (CLAUDE.md Local Build Policy), so you
-CANNOT `cargo test` a source-anchor guard locally at all, and the vendored C compiles only on CI.
-But a `tests/*.rs` guard that only reads a vendored file's TEXT (`fs::read_to_string` +
-`.contains()`/`.find()` anchors — the whole class this rule's committed-gate section produces) uses
-NOTHING but `std`, so you can compile AND run it standalone with plain rustc, no cargo, no crate,
-no OOM contention with sibling workers' `cargo` builds on the shared box:
-
-```bash
-CARGO_MANIFEST_DIR=<worktree-abs-path> rustc --test --edition 2021 tests/<file>.rs -o /tmp/anchortest
-/tmp/anchortest        # runs the #[test] fns; exit 101 = RED, 0 = GREEN
-```
-
-`env!("CARGO_MANIFEST_DIR")` (used by the `repo()` path helper) must be set on the compile command;
-the test re-reads the vendored file at RUNTIME, so after applying the fix you re-run the SAME binary
-(or recompile) to watch RED→GREEN for real — a genuine observed transition, not just "committed a
-[red] then a [green]". This is the Rust-anchor-test counterpart to the C lift-and-compile harness
-above; use both on a vendored change (harness proves the C compiles, standalone rustc proves the
-guard bites). Confirmed live #1026 (obs-canvas.c UAF fix): 2 failed → 2 passed via `rustc --test`.
-
-### The SAME standalone-rustc recipe runs a PURE-STD crate-root `src/<mod>.rs` too — the Tier-0 mirror's own RED→GREEN, no cargo (#771)
-
-The `# airuleset:build-ok` bypass is genuinely DISABLED for camera-box (the tier0 hook blocks
-`cargo test --lib <mod> # airuleset:build-ok` outright — do NOT trust any older rule note, e.g.
-`jitter-audit-parser.md`, that claims it works here; it does not). So a vendored change's Tier-0
-MIRROR (`src/render_budget.rs`, `src/mv_audit.rs`, `src/genlock_backlog.rs`, `src/jitter_audit.rs`
-…) can't be `cargo test`-run locally either. But if that module uses ONLY `std` (no `use
-camera_box::…`, no external crate), `rustc --test` compiles it AS ITS OWN crate and runs its
-`#[cfg(test)] mod tests` — the identical #1026 recipe, just pointed at a `src/` file instead of a
-`tests/` one:
-
-```bash
-rustc --test --edition 2021 src/<mod>.rs -o /tmp/modtest && /tmp/modtest   # exit 101 = RED, 0 = GREEN
-```
-
-No `CARGO_MANIFEST_DIR` is needed (a pure-std module doesn't call the `env!` path helper). Confirmed
-live #771: `src/mv_audit.rs`'s 7 unit tests (floor/parse/classify/gate) ran GREEN this way while
-`cargo test` was Tier-0-banned. Pair it with the `tests/<file>.rs` anchor recipe above: the anchor
-proves the vendored C still carries the change, the pure-std module proves the mirror LOGIC is
-right — both with plain rustc, zero cargo/OOM contention with sibling workers.
-
-**STALE-CLAIM CORRECTION (#1110, 2026-08-27): `src/mv_audit.rs` is NO LONGER purely std** — its
-`floor_tracks_the_effective_target_not_canvas_over_two` test gained a `use
-crate::render_budget::effective_render_divisor;` import, so a plain `rustc --test src/mv_audit.rs`
-now FAILS with `unresolved import crate::render_budget` (that module doesn't exist in a single-file
-compile). To still get the local RED→GREEN, run a HARNESS that substitutes a byte-identical LOCAL
-copy of the one imported fn for the `use crate::…` line before compiling (a ~15-line python/sed
-splice, then `rustc --test` the result) — this verifies the mirror LOGIC while CI compiles the real
-file. `tests/mv_audit_emit.rs` (the vendored-source ANCHOR guard) stays genuinely std-only and runs
-via the plain recipe above unchanged. General rule: before trusting "run `src/<mod>.rs` standalone",
-grep the module for any `use crate::` (incl. inside `#[cfg(test)] mod tests`) — one such import in a
-test makes the plain recipe fail, and the substitute-the-import harness is the fix.
+A `tests/*.rs` guard that only reads a vendored file's TEXT re-reads it at RUNTIME, so
+`cargo test --test <file>` before and after the fix shows a real RED→GREEN transition — the
+Rust-anchor counterpart to the C lift-and-compile harness above (harness proves the C compiles, the
+anchor test proves the guard bites). Confirmed live #1026 (obs-canvas.c UAF fix): 2 failed → 2 passed.
 
 ### Adding a NEW observability audit line to the render loop (#771)
 
@@ -482,9 +428,9 @@ OBS log (the drift-guard / rig-health-audit / E2E-preflight facet — same three
 `genlock-fifo audit` lines): (1) emit a `blog(LOG_INFO, "<marker>: k=v k=v …")` from the render
 loop with a MUTUALLY-NON-SUBSTRING marker (so the `jitter_audit`-family parsers stay independent);
 (2) any threshold/floor is a pure `static inline` helper in `obs-display-budget.h`, MIRRORED
-byte-identically in a pure-std `src/<mod>.rs` (Tier-0, run it via the recipe above); (3) a
+byte-identically in a pure-std `src/<mod>.rs`; (3) a
 `key=value` token-scan parser + a `*-gate` bin as the consumer; (4) lock-step anchors in
-`tests/genlock_preload.rs` (probe-gated, CI-only) AND BOTH `windows-genlock*.yml` pwsh steps —
+`tests/genlock_preload.rs` (probe-gated) AND BOTH `windows-genlock*.yml` pwsh steps —
 verify every pwsh anchor OFFLINE against the real `re.sub(r'\s+',' ',text)`-squished file with a
 throwaway python script (or run the lines with the portable pwsh), plus a std-only `tests/<mod>_emit.rs` anchor for
 local RED→GREEN. Lift-compile the new `blog()` format string into a `printf` harness under
@@ -521,7 +467,7 @@ needs two non-obvious facts about the DistroAV `ndi_filter` (interkom / MULTIVIE
   calls `video_output_close(f->video_output)` (stops + JOINs the raw_video send worker) BEFORE
   `ndi_sender_destroy(f)`, which holds BOTH `ndi_sender_video_mutex` + `ndi_sender_audio_mutex`
   before `send_destroy` — so no synchronous `send_send_video_v2` is in flight under the mutex when
-  the sender is destroyed. `tests/aux_sender_teardown_ordering_877.rs` is a Tier-0 static gate that
+  the sender is destroyed. `tests/aux_sender_teardown_ordering_877.rs` is a std-only static gate that
   locks both orderings (with a baked-in mutation proof: reordered + missing-lock fixtures must be
   rejected). Sig anchors match the DEFINITION line `...)\n{` to dodge the forward-decl trap
   (`ndi_sender_destroy` has a `;`-terminated forward decl at the top of the file).
@@ -577,15 +523,13 @@ blocking vsync present on the program couples the genlock render thread to the p
 stays 60.00fps / 0 renderSkip / 0 lagged_frames growth; fallback is a +50–100 ppm-fast HDMI-1
 modeline.
 
-**Testing + deploy:** a `tests/*.rs` text-anchor guard (pure std, the #756 gl-x11-egl precedent,
-run via the #1026 standalone-rustc recipe) goes RED if the patch regresses — the vendored C
+**Testing + deploy:** a `tests/*.rs` text-anchor guard (pure std, the #756 gl-x11-egl precedent)
+goes RED if the patch regresses — the vendored C
 compiles only on `linux-genlock.yml`, and this change spans the FRONTEND (obs binary) too, so the
 imag deploy is FULL-BUNDLE (frontend + libobs + libobs-opengl.so via setup-imag.sh), never a
 libobs-opengl-only hot-swap.
 
 ## The WHOLE `obs-source.c` type-checks locally, and every std-only test reading it runs locally (issue 1367)
-
-"Zero local verification path" is no longer true for `obs-source.c` as a whole:
 
 - **Type-check the real file.** Run `gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wformat=2
   -I<wt>/vendor/obs-studio/libobs -I<wt>/vendor/obs-studio/deps
@@ -597,13 +541,8 @@ libobs-opengl-only hot-swap.
   - `blog()` has a printf format attribute, so it also checks every audit-line specifier against its
     argument.
   - Only the pre-existing `-Wcomment` warning at the fps-seqlock comment prints.
-- **Run every std-only test that reads the file.** Classify each file from
-  `grep -l obs-source.c tests/*.rs`:
-  - a file with no `camera_box::`, `tempfile`, `CARGO_BIN_EXE` or probe gate compiles as
-    `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/<f>.rs`;
-  - today that is `genlock_release_cadence`, `genlock_lock_indicator_guards`,
-    `genlock_wall_qpc_emit` and `genlock_audio_timecode_placement_1367`;
-  - run all of them, not only the file you wrote.
+- **Run every test that reads the file** (`grep -l obs-source.c tests/*.rs`), not only the file
+  you wrote.
 - **Live miss (issue 1367):** a new third `genlock_n1_tick_wall_now(wall_now)` reader broke
   `genlock_release_cadence`'s count-2 anchor and the matching `Count -ne 2` in both pwsh gates. The
   lane's own local run covered only its new files and reported green; a fresh-context review caught
@@ -707,7 +646,7 @@ and drives it tick by tick. Lessons from its two review rounds:
   - Review round 2 (a move under one packet inside a pending folds like the skew hold's): 34/34,
     the two new mutants (the sub-packet arm dropped; `>` for `>=`) killed by the pending parity
     script's late step packet and its duplicated slot inside a pending. The Rust authority's own
-    19 mutants (the unit tests and benches through the plain-rustc stub crate) are all killed.
+    19 mutants are all killed by its unit tests and benches.
   - Keeping that flag also silently weakened older tests. Every assertion that read the flag as
     "still pending" passed after a release too, and a Rust mutant that resolves a pending without
     an offset step survived behind it. When a flag starts to outlive its event, grep every test

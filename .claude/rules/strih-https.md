@@ -268,9 +268,8 @@ the room to a host it names. The same plugin, with no `admin_key` configured, al
 - **The relay is capped:** at most `MAX_CONCURRENT_RELAYS` (64) at once; a phone over the cap gets 503
   before the hub opens anything towards Janus (the path is public, and each relay holds two sockets in
   the audio daemon). Frames are capped at 256 KiB (message and frame size).
-- **Tests:** `intercom/hub/tests/janus_ws_guard_1453.rs` (the pure policy; runs in a plain-rustc
-  replica with serde_json rlibs built from the registry), `intercom/hub/tests/janus_relay_1453.rs` (the
-  real router against a fake Janus WebSocket, CI first compile), the jcfg / site / item-45 rows in
+- **Tests:** `intercom/hub/tests/janus_ws_guard_1453.rs` (the pure policy), `janus_relay_1453.rs` (the
+  real router against a fake Janus WebSocket), the jcfg / site / item-45 rows in
   `tests/strih_provision_pure_functions.rs`, `tests/strih_box_facts_1361.rs` (golden),
   `tests/python/test_strih_https_1399.py`, `tests/python/test_shading_https_install_808.py`.
 
@@ -279,7 +278,7 @@ a 12-mutant pass over the lib + the jcfg tool kills all), `intercom/hub/tests/tu
 Cloudflare that answers 403 without a User-Agent), `intercom/tests/e2e/ice.spec.js` (the page's
 RTCPeerConnection really gets the servers; off / garbage / a hung `/api/ice` join with the default).
 
-## Tests (Tier-0)
+## Tests
 
 `tests/python/test_strih_https_1399.py` runs the real lib under `set -euo pipefail` with fake
 `apt-get` / `dpkg-query` / `systemctl` / `nginx` / `certbot` / `openssl` / `curl` / `ss` on PATH.

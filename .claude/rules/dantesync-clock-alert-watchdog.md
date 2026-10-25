@@ -16,7 +16,7 @@ production-critical watchdog class (umbrella **#1308**).
 
 ## Architecture (mirrors the fleet-watchdog family — #1299/#1226/#1001)
 
-- `scripts/dantesync_clock_decision.py` — the PURE kernel (no I/O, pytest Tier-0, the #1199
+- `scripts/dantesync_clock_decision.py` — the PURE kernel (no I/O, pytest, the #1199
   python-mirror pattern). `analyze(status_json, box_reachable, grandmaster_ip)` →
   OK / NO_CLOCK / SKIP(unreachable) / UNKNOWN(unparseable); `dedup_key(base, now, interval)` → the
   time-bucketed key; `grandmaster_change(prev, cur)` → GM move detection. Everything the shell needs
@@ -81,7 +81,7 @@ production-critical watchdog class (umbrella **#1308**).
   roll both skipped dev1), its own journal shouting `[CLOCK-ALARM] NO DANTE CLOCK` every minute, and
   the dev1 watchdog that would have paged it runs ON dev1 and never looked at `127.0.0.1:8898`. Caught
   only because the E2E `[0/8]` version-parity gate lists dev1. The `local` arm closes it:
-  - **`DANTE_CLOCK_LOCAL_NODES="dev1"`** (+ `DANTE_CLOCK_LOCAL_IP`, the loopback, Tier-0-overridable)
+  - **`DANTE_CLOCK_LOCAL_NODES="dev1"`** (+ `DANTE_CLOCK_LOCAL_IP`, the loopback, test-overridable)
     builds a `dev1|127.0.0.1|local` roster triple, probed at `127.0.0.1:8898` with **NO ssh / TCP
     reach probe** — the box is UP by definition (the watchdog runs ON it).
   - Graded by the SAME verdicts via a pure **`analyze_local()`** (the ONE tested local-node policy
@@ -126,14 +126,13 @@ production-critical watchdog class (umbrella **#1308**).
   early-gate-pin-doctrine / dantesync-version-reading.md single pin). A mismatch surfaces as
   `version=<x> (pin <y>)` appended to the OK-log / NO_CLOCK-alert text; it NEVER changes the verdict
   and NEVER pages on its own (a stale-but-locked node still has the clock). An ABSENT `version` field,
-  or an unresolvable pin, is SILENT. Seams: `DANTE_CLOCK_VERSION_PIN` (Tier-0 pin override),
-  `DANTE_CLOCK_BOX_UP_CMD` (Tier-0 box-up probe stub, mirrors `DANTE_CLOCK_FETCH_CMD`),
+  or an unresolvable pin, is SILENT. Seams: `DANTE_CLOCK_VERSION_PIN` (test pin override),
+  `DANTE_CLOCK_BOX_UP_CMD` (test box-up probe stub, mirrors `DANTE_CLOCK_FETCH_CMD`),
   `DANTE_CLOCK_TCP_TIMEOUT`.
 - **Ships DISABLED.** The supervisor installs + live-verifies + enables the timer on dev1; this repo
-  makes no box-side change. Tier-0: pytest on the pure module + a stubbed `--dry-run` (fetch seam);
-  no cargo (#557).
+  makes no box-side change.
 
-## Tier-0 verification (worktree lane)
+## Verification (worktree lane)
 
 `python3 -m pytest tests/python/test_dantesync_clock_decision_1307.py
 tests/python/test_dantesync_clock_dev1_local_1313.py`; `bash -n` +

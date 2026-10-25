@@ -8,7 +8,7 @@ paths:
 
 # Inter-PC VBAN rate + loss — by FRAME COUNTER, never by packet count (issue 1372 part C)
 
-## The measurement (`scripts/vban_rate.py`, pure, pytest Tier-0)
+## The measurement (`scripts/vban_rate.py`, pure, pytest)
 
 - **Rate = the VBAN frame counter**, never the packet count. Each header carries `nuFrame` (u32 LE at
   byte 24); a packet's sample index is `nuFrame x (nbs+1)`; the stream clock is the least-squares

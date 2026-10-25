@@ -99,9 +99,7 @@ is not a complete bump:
    version-matched-base — must equal the PPA base for the target series) AND setup-imag's
    `LastVersion` first-run-wizard sentinel (`(major<<24)|(minor<<16)|patch`). Method that CANNOT
    over/under-reach: bump README + workflows + the imag defaults FIRST, then run the affected
-   std-only tests via the #1026 rustc recipe (`CARGO_MANIFEST_DIR=<wt> rustc --test --edition 2021
-   tests/<f>.rs -o /tmp/x && CARGO_MANIFEST_DIR=<wt> /tmp/x`) and fix ONLY the assertions that go
-   RED. Self-consistent FIXTURES (a fake README, an OBS-log parse fixture, a drift/logic-input
+   tests (`cargo test --test <f>`) and fix ONLY the assertions that go RED. Self-consistent FIXTURES (a fake README, an OBS-log parse fixture, a drift/logic-input
    example, the `av_stack_update.rs` version-compare) stay at the old version — they are green and
    deliberate. Completeness gate: `grep -rn 32.1.2` outside `vendor/` + worktrees returns only
    comments/parse-doc/historical, never a functional pin.
@@ -126,9 +124,7 @@ is not a complete bump:
    test is the completeness proof the guards survived.
 
 7. **The genlock C auto-merges clean on a minor bump** (its regions don't overlap upstream's
-   additive delta) — but PROVE no patch was lost: run every std-only genlock/distroav anchor test
-   via the rustc recipe (genlock_release_cadence, gl_pbo_orphan, distroav_*, aux_sender_teardown,
+   additive delta) — but PROVE no patch was lost: run every genlock/distroav anchor test
+   (genlock_release_cadence, gl_pbo_orphan, distroav_*, aux_sender_teardown,
    obs_updater_disabled, linux_genlock_workflow_gate, windows_manifest_gate) + grep the markers in
-   obs-source.c / gl-texture2d.c / distroav/src. `cargo test --no-run` builds a ~4.5 GB `target/`
-   — skip it when the shared disk is tight + sibling worktree workers are active (the rustc recipe
-   compiles each test standalone to /tmp instead).
+   obs-source.c / gl-texture2d.c / distroav/src.

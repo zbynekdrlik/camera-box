@@ -217,7 +217,7 @@ up: old pipe form → 141 every run, here-string → 0. Two gotchas learned buil
 ## Editing these scripts: the anchor-collision rule applies here too
 
 `tests/setup_imag_guards.rs` pins ~113 literal strings and adjacencies in `setup-imag.sh`. After ANY
-edit run the **full** `cargo test` (`# airuleset:build-ok`), not just the file you added — a failure
+edit run the **full** `cargo test`, not just the file you added — a failure
 elsewhere right after touching this script is far more likely a textual collision than a real
 regression. Same trap as `scripts/recording-e2e.sh` (see the project CLAUDE.md GOTCHA).
 
@@ -227,10 +227,9 @@ actual-step-count` invariant) AND independently in `tests/setup_imag_obs_watchdo
 (`body.contains("TOTAL_STEPS=25")`) AND `tests/setup_imag_remoteos_mcp_858.rs` (same literal) —
 those two hardcode the count to prove THEIR OWN step is still counted. Bumping only the guards test
 leaves the other two RED, and because they read the script text they surface only at RUN time (not
-`cargo test --no-run`), so a Tier-0 worker sees them only when running each compiled binary. Grep
-`grep -rn 'TOTAL_STEPS=' tests/` before finishing and bump every literal in lock-step. #791 added
-step 26 (imag-maxperf max-performance persistence) and hit exactly this — two GREEN-phase failures
-after the guards test was already updated.
+`cargo test --no-run`). Grep `grep -rn 'TOTAL_STEPS=' tests/` before finishing and bump every literal
+in lock-step. #791 added step 26 (imag-maxperf max-performance persistence) and hit exactly this — two
+GREEN-phase failures after the guards test was already updated.
 
 **The `imag-maxperf` trio (`imag-maxperf.service` + `/usr/local/sbin/imag-maxperf.sh` +
 `99-imag-maxperf-pm.rules`, issue 756) IS now provisioned by `setup-imag.sh` step 26 (#791).** It
@@ -245,15 +244,14 @@ live box and is reproduced for parity, NOT a defect to "fix" (consolidation woul
 box-touching refactor).
 
 **A NEGATIVE anchor (`!body.contains(...)` / "must NOT") is tripped by ADDING a matching string, not
-by duplicating one — and a Tier-0 worker who cannot run the full suite MUST grep for it explicitly
-(#779, 2026-08-17).** The usual anchor sweep (grep your new literal + the `.find()`/`.split()`
-anchors for a POSITIVE collision) does not catch this. Live incident: adding a new provisioning step
+by duplicating one — grep for it explicitly (#779, 2026-08-17).** The usual anchor sweep (grep your
+new literal + the `.find()`/`.split()` anchors for a POSITIVE collision) does not catch this. Live incident: adding a new provisioning step
 that does `cat > /etc/X11/xorg.conf.d/30-touchpad-tap.conf` (the #779 touchpad-input config) flipped
 `setup_imag_does_not_ship_the_dead_tearfree_option_841` in `tests/harness_imag_intel_display_841.rs`
 to FAIL — it asserts `!body.contains("cat > /etc/X11/xorg.conf.d/")`, an over-broad ban of ANY
 xorg.conf.d WRITE whose real intent is only the dead `Option "TearFree"` DISPLAY snippet. It is
 **invisible to `cargo test --no-run`** (which only compiles; a `!contains` assertion fails at RUN
-time), so it surfaces only on CI's real `cargo test`. **Before adding ANY new `cat > <path>` /
+time). **Before adding ANY new `cat > <path>` /
 `install <path>` / new content block to `setup-imag.sh` or `verify-imag.sh`, ALSO grep the tests for
 a NEGATIVE assertion your addition would newly match** — e.g.
 `grep -rn 'contains\|must NOT\|assert!(!' tests/ | grep -iE '<the path or token you are adding>'`.
@@ -842,25 +840,6 @@ SKIPped it every pass (`:8899 not fetchable`) and an imag genlock LOCK loss was 
   script (`TOTAL_STEPS` 27→28, bumped in the three pinning test literals in lock-step — never
   renumber, per the anchor-collision rule above).
 
-## Tier-0 local run of the setup-imag / verify-imag anchor tests: `rustc --test` needs `CARGO_MANIFEST_DIR`
-
-`tests/setup_imag_guards.rs`, `tests/setup_imag_remoteos_mcp_858.rs`,
-`tests/setup_imag_obs_watchdog_764.rs`, and `tests/verify_imag_pure_functions.rs` are SELF-CONTAINED
-(std only, no `camera_box` crate dep) — they just `read()` a script and assert. Tier-0 (#557) blocks
-every `cargo` compile, but a direct `rustc --test <file>` is not a `cargo` invocation and is the
-sanctioned Tier-0 path (the #1299/Part-1 precedent). Two gotchas make it work:
-
-- They use `env!("CARGO_MANIFEST_DIR")` to locate the repo, resolved AT COMPILE TIME, so you must
-  pass it: `CARGO_MANIFEST_DIR="$PWD" rustc --edition 2021 --test tests/<file>.rs -o /tmp/x.bin`.
-- The compiled binary reads the script by a path relative to the manifest dir, so run it from the
-  worktree/repo root: `/tmp/x.bin`.
-
-This is how a worktree worker verifies a `TOTAL_STEPS` bump + the ~113 `setup_imag_guards` anchors +
-a new `verify-imag.sh` check locally BEFORE CI — the anchor-collision class (`## Editing these
-scripts` above) surfaces only at RUN time (not `--no-run`, which Tier-0 also blocks now), and this is
-the one way to run it without cargo. (Confirmed live #1299 Part 2: guards 140/140, remoteos 5/5,
-obs-watchdog 3/3, verify_imag_pure_functions 81/81.)
-
 ## Running a repo pure fn INSIDE the chroot: `declare -f` serialization + the comment-in-heredoc negative-anchor trap (issue 1317)
 
 `install-imag-nb.sh` derives the kernel meta package from the target's OWN release
@@ -903,10 +882,3 @@ apt-touching step — removes every `*.sources` whose `URIs:` line points at `fi
 archive sources byte-identical. It is idempotent (exit 0 when nothing matched) and fails loud only on
 a missing dir; the anchor-test's call string must appear exactly once and must sit BEFORE the apt
 update in `declare -f configure_in_chroot`.
-
-**Tier-0 for these self-contained anchor tests** (`tests/install_imag_nb_pure_functions.rs`,
-`tests/strih_provision_pure_functions.rs`, `tests/linux_genlock_workflow_gate.rs` — std-only, no
-crate dep): the sanctioned worktree-worker path is a standalone
-`CARGO_MANIFEST_DIR="<repo>" rustc --edition 2021 --test tests/<f>.rs -o /tmp/x && /tmp/x`
-(same recipe as the setup-imag guards above) — it genuinely RUNS the RED→GREEN, unlike a grep
-simulation, and unlike a sourced-bash harness it is NOT refused by the worktree-isolation guard.

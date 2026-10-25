@@ -408,7 +408,7 @@ present in the served payload — don't assume "the repo has it" means "the boxe
 
 ## Device Deployment
 
-Camera devices (CAM1-4) run x86_64 Ubuntu. Build in CI (never locally); download artifact, deploy over SSH.
+Camera devices (CAM1-4) run x86_64 Ubuntu. Build in CI; download artifact, deploy over SSH.
 
 ```bash
 # 1. Download the CI-built binary for the commit to deploy
@@ -829,8 +829,7 @@ and `fn reannounce_dance<O: NdiSendOps>(ops, &mut sender, settings, &mut trigger
 destroy-first logic that `reannounce_now` delegates to. `mod ffi_seam_tests` drives the dance with a
 `FakeNdi` that records `[Op::Destroy(ptr)|Op::Create]` order AND models the SDK one-live-sender-per-name
 rule (create while a same-name handle is live → null). To unit-test ANY other NDI FFI ordering, add the
-method to `NdiSendOps` + `FakeNdi`, never construct a real `NdiLib`. Run cheap: `cargo test --lib
-ffi_seam_tests` (append `# airuleset:build-ok` — the Tier-0 hook blocks `cargo test` otherwise).
+method to `NdiSendOps` + `FakeNdi`, never construct a real `NdiLib`. Run: `cargo test --lib ffi_seam_tests`.
 
 **SCOPE LIMIT (do NOT overstate):** re-announce fixes the **boot-race / late-DHCP / link-flap**
 cases. It does **NOT** fix a STABLE box whose mDNS registration was simply lost/missed by OBS
@@ -1041,7 +1040,7 @@ neither substitutes for the other.
 pattern as `systemd/rig-restore-watchdog.{service,timer}` (#281 Fix#3). Enable manually on dev1 when
 ready: `systemctl --user enable --now cam-disk-guard.timer`. Checks CAM1/CAM2/CAM4 only (cam3 excluded,
 #301). Alert threshold: `CAM_DISK_ALERT_THRESHOLD=80` (env-overridable; pure function in
-`scripts/lib/disk-guard-thresholds.sh` makes it Tier-0 unit-testable without SSH).
+`scripts/lib/disk-guard-thresholds.sh` makes it unit-testable without SSH).
 
 ## #449 — one canonical live-install builder (`scripts/create-usb-linux.sh`)
 

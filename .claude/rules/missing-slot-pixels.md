@@ -66,11 +66,10 @@ NodeSpec `source`. The cap (`MISSING_SLOT_PIXELS_CAP`, default 12) counts SLOTS,
 - Each box's ssh export is bounded by `MISSING_SLOT_PIXELS_TIMEOUT` (600 s) — `timeout` wraps
   `sshpass` directly (never a shell function).
 
-## Tier-0
+## Tests
 
-`tests/harness_missing_slot_pixels_1367.rs` runs locally with plain `rustc --test` + a `tempfile`
-stub rlib (`CARGO_MANIFEST_DIR` set): the pure builders, the VFR index pin, the Windows program text,
-the whole runner against a fake `sshpass` first on PATH (ssh = run the remote command with local
-bash, scp = local `cp -r`; a `powershell` command fails, which exercises the best-effort failure
-path), and the recording-e2e.sh order (merge < this step < the Discord report < the cleanup plan).
+`tests/harness_missing_slot_pixels_1367.rs` covers the pure builders, the VFR index pin, the Windows
+program text, the whole runner against a fake `sshpass` first on PATH (ssh = run the remote command
+with local bash, scp = local `cp -r`; a `powershell` command fails, which exercises the best-effort
+failure path), and the recording-e2e.sh order (merge < this step < the Discord report < the cleanup plan).
 The report side is `tests/python/test_e2e_discord_report_missing_slot_pixels_1367.py`.

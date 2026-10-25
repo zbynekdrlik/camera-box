@@ -318,7 +318,7 @@ per-camera A/V offsets. On 2026-09-01 the stream box's reference source `mbc` ts
 (small-spread) shape — so the combiner's only guards (<2-measured-cams / >100 ms-spread) both passed
 and the controller walked the pin 926→976 toward noise. The #1265 STABILITY GUARD holds it instead:
 
-- **Pure decision `scripts/av_sync_apply_guard.py`** (`hold_reason(...)`, pytest Tier-0) HOLDs on ANY
+- **Pure decision `scripts/av_sync_apply_guard.py`** (`hold_reason(...)`, pytest) HOLDs on ANY
   of: (1) the run's stream `mbc` ts_lag band is DRIFTING
   (`.claude/rules/audio-lag-watchdog.md` band arm, gathered at `[8/8g]`) — a supplementary
   "defer tuning while the timeline is unstable" hold, NOT the residual explanation; (2)
@@ -344,11 +344,9 @@ and the controller walked the pin 926→976 toward noise. The #1265 STABILITY GU
   dev1 reference (preserving `applied_latency_ms` — a live data contract, not a rewritten
   offset-only schema) for the next run's jump baseline. When the guard says proceed, #856 is
   byte-identical.
-- **Tier-0:** `pytest tests/python/test_av_sync_apply_guard_1265.py` (the predicate) +
+- **Tests:** `pytest tests/python/test_av_sync_apply_guard_1265.py` (the predicate) +
   `tests/harness_av_sync_apply_guard_1265.rs` / `tests/harness_recording_e2e_av_sync_guard_1265.rs`
-  (the sourced lib + the wiring; CI-run, cross-checked locally by running the python one-liners
-  standalone + a `.find`/window simulation, since a worktree worker cannot `bash -c`-source the lib
-  under the isolation guard and cannot run cargo).
+  (the sourced lib + the wiring).
 
 ## The #856 controller has a FIXED LOOP GAIN 0.4 — the plant gain is ~2.31, so gain 1 diverges (#1265)
 
@@ -371,7 +369,7 @@ known to stabilize the loop, only bounded away from 1.
 
 - **The fix (Prístup 1):** a FIXED loop gain (default **0.4**, env `AV_SYNC_LOOP_GAIN`, a value in
   (0, 1]; non-numeric / ≤0 / >1 → default 0.4 with a loud log line). The combined offset is DAMPED
-  `combined × gain` at `[8/8g]` (pure `scripts/av_sync_loop_gain.py::damped_offset`, pytest Tier-0,
+  `combined × gain` at `[8/8g]` (pure `scripts/av_sync_loop_gain.py::damped_offset`, pytest,
   via the `av_sync_apply_loop_gain` sourced helper) — BEFORE the #1265 guard sees `proposed_offset`
   AND before the ±50/run clamp — so the effective loop gain is 0.4×2.31 = **0.92 < 1** and the loop
   converges (error ×0.076/run: 913 + 0.4×61.4 = **938 ≈ the predicted null 940**; even if the plant
@@ -396,17 +394,16 @@ known to stabilize the loop, only bounded away from 1.
   `[av-sync] SET '…' genlock_latency_ms_src: A -> B` line other consumers grep stays byte-identical.
 - **History corpus (Prístup 2 prep, REJECTED for now):** the adaptive slope estimator needs ≥ 5
   points; this lane STARTS collecting them into the append-only `~/.camera-box/av-sync-history.jsonl`
-  (`scripts/av_sync_history.py`, pytest Tier-0; via the `av_sync_append_history` sourced helper,
+  (`scripts/av_sync_history.py`, pytest; via the `av_sync_append_history` sourced helper,
   written LAST in the #856 `cleanup()` block after the applied-offset persist): one JSON object per
   run — run_id, ts, pin_at_measure, residual_median_ms, residual_spread_ms, proposed_offset_ms,
   loop_gain, combined_offset_ms_raw, and EITHER applied_pin (a proceed) OR held+hold_reason. It is a
   no-op when a run produced no measurement (residual-last is a prior run's), append-only, never
   truncating, dir/file-tolerant.
-- **Tier-0:** `pytest tests/python/test_av_sync_loop_gain.py` (gain math + validation + the
+- **Tests:** `pytest tests/python/test_av_sync_loop_gain.py` (gain math + validation + the
   pin-913→938 scenario) + `test_av_sync_history.py` (the append) + the loop-gain/persist/log-line
   additions in `test_av_sync_calibrate.py`; `tests/harness_recording_e2e_av_sync_loop_gain_1265.rs`
-  guards the wiring at CI (cross-checked locally by a `.find`/window python simulation + a real
-  `bash` run of the sourced-lib helpers under `set -euo pipefail`).
+  guards the wiring.
 
 # Stream-box measurement RETIRED → dev2 GPU measurer (#1331)
 
@@ -558,18 +555,16 @@ pass — no unit change needed. Acceptance is the next live (the ticket stays `o
 SyncNet clips (the cross-check evidence) for free, and the per-day TSV on dev2 is the durable record
 the E2E / av-step watchdogs can correlate against.
 
-### GOTCHA (issue 1331) — removing a bash function from a watchdog ORPHANS its Rust harness tests + helpers → dead_code under CI clippy `-D warnings`, invisible to Tier-0
+### GOTCHA (issue 1331) — removing a bash function from a watchdog ORPHANS its Rust harness tests + helpers → dead_code under CI clippy `-D warnings`
 
 Deleting `maybe_forward_verdict` from `scripts/avsync-heartbeat-alert-watchdog.sh` (its Rust tests
 in `tests/harness_avsync_heartbeat_alert_watchdog.rs` source the script and call the function
 directly) means those tests must go too — and their removal cascades: any harness helper/const/
 struct-field used ONLY by the deleted tests (`MEASURED_ZNIZ_BODY`, `run_main_with_fake_curl`,
 `discord_last_call`) becomes `dead_code`, which CI's `cargo clippy --all-targets -D warnings` fails.
-Tier-0 blocks `cargo clippy`/`build`/`test` locally, so this is INVISIBLE until CI. The net that
-catches it WITHOUT compiling: after the deletions, for EVERY remaining `fn`/`const`/struct-field in
-the harness `grep -cE '\bNAME\b' <file>` must be ≥ 2 (definition + ≥ 1 use); a helper left at 1 is
-dead. `cargo fmt --all --check` proves the file still PARSES but does NOT catch dead_code — the grep
-audit is the substitute. Keep a helper only if a SURVIVING test uses it (`discord_call_count` stayed
+The net that catches it WITHOUT compiling: after the deletions, for EVERY remaining `fn`/`const`/
+struct-field in the harness `grep -cE '\bNAME\b' <file>` must be ≥ 2 (definition + ≥ 1 use); a
+helper left at 1 is dead. Keep a helper only if a SURVIVING test uses it (`discord_call_count` stayed
 — `dry_run_never_calls_notify` still asserts it; `discord_last_call` went — nothing did).
 
 ### GOTCHA (issue 1331) — a new `report` pass makes the EXISTING behavioral harness tests invoke the fake `python3`/`ssh` stubs, inflating `notify_call_count`

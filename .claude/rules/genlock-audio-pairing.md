@@ -73,7 +73,7 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
 
 ## The pure decision + parity discipline
 
-`src/genlock_audio_pairing.rs` is the Tier-0 authority: the video-delay tracker
+`src/genlock_audio_pairing.rs` is the authority: the video-delay tracker
 (`video_delay_sample_ns` / `_smooth_ns` / `_round_ms` / `_moved` / `video_delay_track`), the hold
 (`audio_hold_mode` / `audio_hold_ms` / `AudioHoldMode::token`), the placement
 (`audio_wall_to_mono_ns` / `audio_place_term_ns`; the level shift of a placement is
@@ -92,22 +92,14 @@ complement u64/i64) on both sides.
 
 **Lock-step anchors** (the #269 3-copy discipline): `tests/genlock_preload.rs`
 (`audio_genlock_parity_present_1303` + the #1355 hold-change shift anchor), the std-only
-`tests/genlock_audio_timecode_placement_1367.rs` (every wiring seam, runs locally), and the pwsh gate
+`tests/genlock_audio_timecode_placement_1367.rs` (every wiring seam), and the pwsh gate
 in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml`. A change to the wiring / the helper
 signatures / the audit tokens must update all of them.
 
-## Tier-0 (worktree worker: no cargo, no local sourced-lib)
+## Verification
 
-- Pure module + the two-clock bench RED→GREEN: `rustc --test --edition 2021
-  src/genlock_audio_pairing.rs -o <scratch>/t && <scratch>/t` (the bench is a `#[cfg(test)]`
-  `#[path]` child, so this runs it too). `clippy-driver --edition 2021 --test -D warnings` on the
-  same file gives CI's lint verdict.
-- Parity gate LOCALLY: build a stub `camera_box` rlib from the one module (`lib.rs` =
-  `#[path = "<wt>/src/genlock_audio_pairing.rs"] pub mod genlock_audio_pairing;`,
-  `rustc --crate-type rlib --crate-name camera_box`), then `CARGO_MANIFEST_DIR=<wt>
-  CARGO_TARGET_TMPDIR=<scratch> rustc --test tests/genlock_audio_pairing_parity.rs --extern
-  camera_box=<rlib> -L <dir>`. Mutation-proof by pointing `CARGO_MANIFEST_DIR` at a scratch repo
-  holding a mutated `obs-source.c`.
+- Pure module + the two-clock bench (a `#[cfg(test)]` `#[path]` child): `cargo test --lib
+  genlock_audio_pairing`; the parity gate: `cargo test --test genlock_audio_pairing_parity`.
 - The whole `obs-source.c` TYPE-CHECKS locally: `gcc -std=gnu11 -fsyntax-only -Wall -Wextra
   -Wformat=2 -I<wt>/vendor/obs-studio/libobs -I<wt>/vendor/obs-studio/deps
   -I<wt>/vendor/obs-studio/deps/libcaption -I<gen> -DHAVE_OBSCONFIG_H obs-source.c` with a
@@ -115,10 +107,7 @@ signatures / the audit tokens must update all of them.
   `OBS_INSTALL_PREFIX` string defines). `blog()` carries a printf format attribute, so this also
   checks every audit-line specifier against its argument. Only the pre-existing `-Wcomment` at the
   fps-seqlock comment prints.
-- `jitter_audit.rs` uses `serde_json` (not pure-std) — a plain `rustc --test` fails E0463; strip
-  the `summaries_to_json` fn + its tests into a copy, or point rustc at a sibling worktree's
-  `libserde_json-*.rlib`.
-- `tests/genlock_preload.rs` is probe-gated and runs on CI only.
+- `tests/genlock_preload.rs` is probe-gated.
 
 ## Issue 1367 (Option 3) — the audio follows the video's MEASURED delay
 
@@ -319,7 +308,7 @@ The fields stay at the END of the line, the free-text name last, so `scripts/bun
 keeps parsing it (`tests/python/test_audio_stall_out_parse_1381.py` renders the real C format).
 The stall line lives in `audio_stall_dump`, not inline in the #800 block:
 `tests/audio_telemetry_800.rs` reads the per-source walk's lock within 2500 bytes of the #800
-header, and the inline line pushed it past. Tier-0: `tests/audio_stall_out_1381.rs` compiles the
+header, and the inline line pushed it past. Test: `tests/audio_stall_out_1381.rs` compiles the
 REAL audio-io.c into `tests/c/audio_stall_out_1381_harness.c` (fake clock: a sleep overshoot, ticks
 that start behind, scripted input-mutex waits, a profiler tail, scripted callback durations, a
 callback that disconnects itself) and lifts the dump's name resolver and its `blog()` verbatim;
@@ -482,7 +471,7 @@ over a minute.
   is two events: the early placement, then the jump booked and paid at 1000 ppm, about S seconds for
   S ms. A catch-up sender keeps one event. The bench pins this bound
   (`heavy_arrival_jitter_bounds_a_small_step_to_two_events_1381`).
-- **Tier-0 proof:** `tests/genlock_audio_step_hold_parity_1381.rs` drives the verbatim C and the
+- **Proof:** `tests/genlock_audio_step_hold_parity_1381.rs` drives the verbatim C and the
   Rust authority through one packet script. The script covers the exact 10 s edge (20 ms packets),
   the exact 2 ms jump (1 ms packets), sub-threshold stamp jitter inside a hold, a 4x catch-up burst,
   both sender-first shapes, the nominal warm-up (steps inside it too), the slow track (both signs),

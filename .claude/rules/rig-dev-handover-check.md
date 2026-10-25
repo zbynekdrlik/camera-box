@@ -26,11 +26,11 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
   to `OK` / `FORGOT-BY-OWNER` / `SUPERVISOR` / `FIXED-BY-ME` / `UNKNOWN` + a Slovak line, and decides
   the exit code (0 all-OK; 1 any FORGOT **or SUPERVISOR**; 2 UNKNOWN-only). `SUPERVISOR` (issue 1319)
   is a problem the SUPERVISOR must fix — the owner SEES it but is never blamed (`nezapnutý watchdog:
-  …`, not `zabudol si: …`). **ALL logic + ALL tests live here** — Tier-0 #557:
-  no cargo, `tests/python/test_rig_dev_handover_1312.py` feeds captured dry-run fixtures to the
-  pure functions. Verify a change with `python3 -m pytest tests/python/test_rig_dev_handover_1312.py`;
-  verify the bash with `bash -n` + `shellcheck -S warning` (the orchestrator has no cargo/live
-  path in a worktree — it runs at CI / on the live rig).
+  …`, not `zabudol si: …`). **ALL logic + ALL tests live here** —
+  `tests/python/test_rig_dev_handover_1312.py` feeds captured dry-run fixtures to the pure functions.
+  Verify a change with `python3 -m pytest tests/python/test_rig_dev_handover_1312.py`; verify the bash
+  with `bash -n` + `shellcheck -S warning` (the orchestrator has no live path in a worktree — it runs
+  at CI / on the live rig).
 
 ## Items and the probe each one REUSES (never re-derive a probe)
 

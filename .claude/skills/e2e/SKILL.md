@@ -33,7 +33,7 @@ Past claims of "everything works, zero loss, low latency" were untrustworthy/fal
    span `optical_undecodable==0` and the burn window is trivially contiguous, so `is_zero()` ALONE
    vacuously PASSES (a fake green — live repro: `nodes.strih.analyzed_secs=0.0`, `overall_pass=true`).
    The floor rejects ONLY the collapsed read; it never fails a genuine `>=min_secs` run. The PASS/FAIL
-   decision is the pure Tier-0 `recording_span_gate` module (`span_secs` + `analyzed_span_long_enough`);
+   decision is the pure `recording_span_gate` module (`span_secs` + `analyzed_span_long_enough`);
    `is_zero()` itself is UNCHANGED (still the per-node delivery gate — the duration floor is a
    run-level headline term). Per-node JSON carries `analyzed_secs`/`span_ok`/`min_secs`.
 4. Every undecodable/anomaly frame must be **extracted as real pixels and shown** — black = real
@@ -385,7 +385,7 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
   canvas_w/2; each QR centered in its half; top-anchored at `top_margin` over `qr_size` tall) by the
   `dual_qr_gap()` helper, so painter and gate compute IDENTICAL rects. At default 1920×1080 / qr 700
   / tm 24 the column is x∈[840,1080), y∈[24,724). The gate iterates the SAME table:
-  - `src/colour_verify.rs` (Tier-0, default features — the JUDGEMENT, mutation-tested): sampler +
+  - `src/colour_verify.rs` (default features — the JUDGEMENT, mutation-tested): sampler +
     `classify_patch` (chromatic: Grayscale if chroma<`GRAYSCALE_CHROMA_MIN` / HueShift if hue
     err>30° / else Pass — neutral: NeutralTint if chroma>`NEUTRAL_CHROMA_MAX` / else Pass) +
     `summarize_node_colour` (strict-majority vote over sampled frames). A burn-covered patch is
@@ -402,7 +402,7 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
     hue/chroma. Locked by `real_rig_dim_capture_passes_while_grayscale_and_dead_channel_fail`
     (2026-06-30 fixture) and `splitter_and_disk_incident_dim_capture_passes_post_recalibration_740`
     (2026-07-14 fixture, current rig baseline) with genuine sampled values.
-  - `src/probe/colour_sample.rs` (probe, CI-only — the I/O glue): `node_burn_exclusions` +
+  - `src/probe/colour_sample.rs` (probe — the I/O glue): `node_burn_exclusions` +
     `extract_recording_colour_summary` (ffmpeg input-seek, N evenly-spaced RGB frames).
 - **#364 rig finding — why the column moved to the central gap:** the original BOTTOM-band scale
   (y=960..1080) was CROPPED off the bottom by the camera's framing of the cam2 monitor — it never
@@ -412,8 +412,7 @@ gates `is_zero()` alongside contiguity + `optical_undecodable`.
   (cam1 `qr::cam1_burn_origin` top row ~736; strih/stream `burn_geom::corner_placement` top row ~738
   — side `0.28·h`≈302, margin `40/1080·h`≈40), so the burns no longer overlap any patch at all —
   `node_burn_exclusions` is now belt-and-braces (no patch loses pixels). If you change `qr_size`,
-  `top_margin`, the gap, or a burn, re-confirm the Tier-0 tests (`cargo test --lib colour
-  # airuleset:build-ok`) still show no patch intersecting a QR half or burn.
+  `top_margin`, the gap, or a burn, re-confirm the tests (`cargo test --lib colour`) still show no patch intersecting a QR half or burn.
 - **Run it:** add `--colour-gate` (off by default → delivery-only runs unchanged; rig TEST mode
   paints the scale so enable it there). `--colour-samples N` (default 12) bounds cost. Fused /
   on-host only — in `--merge-partials` mode the recording is not on the host so it ERRORS LOUDLY
@@ -821,20 +820,18 @@ obs-ops skill's existing "a force-kill relaunch restores a STALE saved config" g
 of bug, worth checking `wmctrl -l` (window COUNT, not just presence) after ANY manual imag-nb OBS
 restart, not just after a genlock hot-swap.
 
-## Local test verification gotchas (Tier-0)
+## Local test verification gotchas
 
 - **Python harness tests:** run with `python3 -m pytest tests/python/ -p no:html` — the repo's
   `pytest_html` plugin pulls `jinja2` which isn't installed locally and errors collection without
   `-p no:html`.
-- **Rust harness tests are pure static reads** (no probe, default features) — to verify RED→GREEN
-  locally without the CI-only `cargo test` (run), `cargo test --no-run --test <name>` (Tier-0
-  allowed) then EXECUTE the produced `target/debug/deps/<name>-<hash>` binary directly.
+- **Rust harness tests are pure static reads** (no probe, default features): `cargo test --test <name>`.
 - **`bin/recording-verdict` is `required-features=["probe"]` → NOT compiled on default features.**
-  So `cargo check` / `cargo clippy --all-targets` (default) SKIP it entirely — local cheap checks do
-  NOT compile-verify ANY edit to that binary; CI (`--all-features`) is the only compile gate.
+  So `cargo check` / `cargo clippy --all-targets` (default) SKIP it entirely — default-feature checks
+  do NOT compile-verify ANY edit to that binary (CI builds `--all-features`).
   Consequences: (1) put the GATE DECISION in a pure crate-root module (e.g. `recording_span_gate`
   #373, `colour_verify` #364, `reannounce` #297) so RED→GREEN is observable on default features via
-  `cargo test --lib <mod> # airuleset:build-ok`; the probe-gated binary just calls it. (2) A
+  `cargo test --lib <mod>`; the probe-gated binary just calls it. (2) A
   test-ONLY free function at the binary's MODULE scope triggers `dead_code` in the NON-test bin build
   (CI `-D warnings`) — keep test helpers INSIDE `mod tests` (a `fn` in `mod tests` calling
   `super::…`), never a module-level wrapper used only by tests (#374: the `node_verdict` test helper
@@ -1126,9 +1123,7 @@ reproduces the exact same proof the built-in mode's internal helper would produc
   same binary as `camera-box-probe` instead, so overriding the var produces
   `scp: stat local ".../camera-box": No such file or directory` and an early, silent-looking abort
   (cleanup trap fires, log ends after ~2 minutes with no obvious error unless you scroll up). Just
-  leave `PROBE_BIN_DIR` at its default — the local probe-featured build here is the SANCTIONED
-  exception to the Tier-0 no-local-`--features probe` policy (this script IS the E2E gate; CI runs
-  the identical build step on the same self-hosted box).
+  leave `PROBE_BIN_DIR` at its default (CI runs the identical build step on the same self-hosted box).
 - **Set `COLOUR_GATE=0` for any manual painter launch that doesn't pass `--colour-scale`.** A
   plain `frame-probe --paint-only --dual-qr` (no colour band painted) makes `--colour-gate`
   abort BOTH `--extract-partial` (`could not localize the dual-QR colour scale in ANY of N sampled
@@ -1337,7 +1332,7 @@ The recording-verdict has TWO independent layers; know which you are touching:
 
 **The safe seam:** re-classifying an id `RealDrop`↔`BurnUnreadable` in `classified` changes the HEADLINE COUNT but NEVER `is_zero()` (a BURN-UNREADABLE id is still in `missing_ids` → still non-contiguous → still FAILs). So an over-count fix that ONLY edits `classified[].kind` and NEVER touches `missing_ids` **cannot create a false ZERO**. This is how #356 was made strict-safe. If you ever need to make a node PASS, you must change `missing_ids` — that is the dangerous path, gate it hard.
 
-**#356 cross-recording reconciliation** (`src/burn_reconcile.rs`, pure Tier-0 kernel): in the shared verdict loop, for the cam1 node only and only when `strih_data.is_some()`, a cam1 id classified `RealDrop` from the clean upstream STRIH recording that IS decoded in the DOWNSTREAM stream recording (`burn_ids_in(stream_frames, burn_cam1_run_id)`) was proven delivered → downgrade to `BurnUnreadable`. SAFETY: an id absent from the stream recording (genuine loss OR 30fps-decimated) is NEVER downgraded — stays `RealDrop`. Gate on `strih_data.is_some()` is load-bearing: without it cam1 falls back to reading the stream recording itself and every id is vacuously "present" → mass false downgrade.
+**#356 cross-recording reconciliation** (`src/burn_reconcile.rs`, pure kernel): in the shared verdict loop, for the cam1 node only and only when `strih_data.is_some()`, a cam1 id classified `RealDrop` from the clean upstream STRIH recording that IS decoded in the DOWNSTREAM stream recording (`burn_ids_in(stream_frames, burn_cam1_run_id)`) was proven delivered → downgrade to `BurnUnreadable`. SAFETY: an id absent from the stream recording (genuine loss OR 30fps-decimated) is NEVER downgraded — stays `RealDrop`. Gate on `strih_data.is_some()` is load-bearing: without it cam1 falls back to reading the stream recording itself and every id is vacuously "present" → mass false downgrade.
 
 **Any change in `build_and_print_verdict` applies to BOTH fused and merge** — `merge_of_partials_reproduces_the_fused_verdict` asserts the two JSONs are byte-identical. So (a) never make the merge path diverge from fused, and (b) that test's synthetic `window(n, with_stream, cam1_gap_at)` data must stay self-consistent: a cam1 gap that is present downstream is NOT a real drop under #356, so to test a GENUINE real drop inject the gap into BOTH the strih and stream `window()` calls (`Some(g)` on both).
 
@@ -1416,8 +1411,8 @@ NDI cam7` (the raw strih inputs; #753 fleet growth 6→7 extended this).
 (e.g. sensor temporarily settling). Fail-closed: < 2 successful samples also = FROZEN.
 
 **Components:**
-- `src/frozen_camera.rs` — pure Tier-0 Rust decision (`frozen_cameras(&timelines, threshold)`),
-  unit-tested with `cargo test --lib frozen_camera # airuleset:build-ok`.
+- `src/frozen_camera.rs` — pure Rust decision (`frozen_cameras(&timelines, threshold)`),
+  unit-tested with `cargo test --lib frozen_camera`.
 - `src/bin/frozen-camera-gate.rs` — thin CLI binary (default features, no probe deps): reads
   per-camera hash timeline as JSON from stdin, exits 0 (PASS) or 1 (FROZEN + names).
 - `scripts/frozen-camera-gate.py` — Python OBS-WS harness: connects to strih, captures
@@ -1796,7 +1791,7 @@ delivery contiguity, restart-survival, phase-sync, …) runs automatically vs ne
 E2E dispatch, read `docs/strict-gate-coverage.md` — it is a verified-against-a-real-CI-log table of
 every gate kernel, its unit tests, its CI job, and its rig wiring. Re-deriving this from scratch
 duplicates a full audit that has already been done. The short version: every kernel's DECISION
-LOGIC is Tier-0 unit-tested and runs on every push (Tier A) — but `full-path-e2e.yml` (the real
+LOGIC is unit-tested and runs on every push (Tier A) — but `full-path-e2e.yml` (the real
 full-flow rig gate that exercises the ACTUAL system, not just the decision logic) is
 `workflow_dispatch`-only, so a regression in the system itself (not the gate logic) is only caught
 by a manual dispatch. That remaining automation gap is infra/operator-scheduling work, not a code
@@ -2087,7 +2082,7 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
      is a product decision raised to the user on #707's own thread, not decided here.
    - **USER DECISION (2026-07-13): NO tolerance — every residual deviation gets its own documented
      reason instead. #707 EVENT-FORENSICS tooling built + fixture-tested the same day** (live
-     harvesting resumes once cam2's disk is fixed, #737): `src/residual_events.rs` (Tier-0 pure
+     harvesting resumes once cam2's disk is fixed, #737): `src/residual_events.rs` (pure
      module) locates a `Copy` event on every recorded-order adjacent tick repeat and a `Gap` event
      on a backward jump or a forward jump beyond `|Δ|>10` (this section's own outlier threshold,
      reused as the discriminator) — reported as `residual_events[]` on `CamboxSegment` /

@@ -99,10 +99,10 @@ test harness also drops `OBS_PASSWORD`, because the guard passes it as an argv t
   the #252 `for _hbs` count, the `for _cn_ip_burn` count) — a guard adds no loop, so those counts
   must stay unchanged.
 
-## Tier-0 verification (cargo blocked locally)
+## Verification
 
 The lib is behavior-testable WITHOUT the harness: source it under real `set -euo pipefail` with a
 fake `$HERE/obs_phase2.py` answering `rig-busy-check`+`stream-detail` (a plain `bash run.sh`, NOT
 `bash -c` — the worktree guard refuses `bash -c` sourcing, #1265) and drive FAKE_BUSY through
 idle/recording/streaming/partial/unreachable. The pure `redact_stream_server` + `rig_busy_check`
-error path are pytest-covered. The Rust static-anchor + behavioral tests type-check + run only at CI.
+error path are pytest-covered.

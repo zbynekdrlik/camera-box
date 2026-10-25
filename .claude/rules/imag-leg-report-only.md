@@ -116,7 +116,7 @@ So `imag_burn_ok=False` (missing-frac ~0.17, stride-6 share 0.88–1.00, `imag_b
 `burn_unreadable=0`) is DEFINITIVELY a burn-ID-cadence metric artifact (~3 burn-IDs/frame), not
 content loss — flipping `content_gates_overall_pass()` today reds all 3 green runs. The re-entry
 condition is UNCHANGED: precondition (2) = make burn-contiguity cadence-aware for the ~3/frame box
-(a probe-gated `recording-verdict.rs` metric fix, CI-first compile) + characterize the healthy
+(a probe-gated `recording-verdict.rs` metric fix) + characterize the healthy
 burn/beat baseline; precondition (3) = a deliberately-misconfigured (1/60-shutter) discrimination
 run. Both are rig-ops/probe scope, not a data-first batch flip. (The 3 SIBLING #1142 flips — imag
 PRESENCE, `presentation_cadence` uniformity floor 0.90, delivery-spread bound 24 ms — are all LIVE
@@ -128,7 +128,7 @@ RED 4th run correctly reds on the uniformity floor at beat-corrected 0.8901 < 0.
 Two of the flip prerequisites are now IMPLEMENTED, both REPORT-ONLY (the content seam
 `content_gates_overall_pass()` STAYS `false` — none of this reds a run):
 
-- **(0) switch-in transient classifier** — `src/switch_in_transient.rs` (pure, Tier-0). The imag
+- **(0) switch-in transient classifier** — `src/switch_in_transient.rs` (pure). The imag
   per-segment sweep classifies each window; a window whose failure is a switch-in transient (an imag
   NDI-receiver spin-up burst right after the program cut: a SUBSTANTIAL + BOUNDED + DENSE leading
   burn-loss burst that RECOVERS, with the optical stuck explained by the burn transient) is
@@ -180,7 +180,7 @@ plan was already made topology-agnostic for this same swap (`imag_cpu_isolation_
 but the DECODE pin in recording-verdict-on-imag.sh was a SEPARATE hardcoded core reference the swap
 sweep missed.
 
-Fixed (1094): `onimag_decode_core_range <ncpus>` (pure, Tier-0-tested) → top min(4,ncpus) cores
+Fixed (1094): `onimag_decode_core_range <ncpus>` (pure, tested) → top min(4,ncpus) cores
 (8-11 here, 12-15 on the old box); `main()` resolves it from the LIVE box (nproc over ssh + a
 `taskset` probe) and FAILS OPEN (empty range → decode runs unpinned, nice 19 only), so a pin error
 can never again silently zero the imag leg. The stale on-box binary is NOT a factor — it supports
@@ -200,7 +200,7 @@ the on-imag binary only when it was absent/non-executable (`[ -x ]`, no version 
 its stale v3-emitting binary. The fresh dev1 merge then HARD-DIED — `RecordingPartial::load(path)?`
 propagated `recording partial schema_version 3 is not supported` before any verdict JSON was written,
 so the fail-closed E2E guard reds a run a strih+stream-only merge scores `overall_pass=true`. Two
-fixes landed (both crate-root-pure so they Tier-0-test despite the probe gate on recording-verdict):
+fixes landed (both crate-root-pure, default-feature):
 
 1. **STEP 1 version-gate** (`onimag_upload_decision`, pure/sourced): STEP 1 now sha256-compares the
    on-imag binary against the local one and re-uploads on a mismatch (identical sha keeps the fast

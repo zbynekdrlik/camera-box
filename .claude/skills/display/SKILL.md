@@ -48,8 +48,7 @@ any enabled+connected, `Some(false)` if connectors readable but none qualifies (
 `None` on unknown layout → render anyway (never silently go dark).
 
 **Read sysfs as a PLAIN FILE — do NOT pull the `drm` crate.** `--display` is a
-DEFAULT-FEATURE runtime mode; the `drm` crate is `probe`-feature-only and pulling it into
-default features would balloon the shared dev1 `target/` (the #185 disk-fill). A
+DEFAULT-FEATURE runtime mode; the `drm` crate is `probe`-feature-only. A
 `std::fs::read_to_string` of the status file is all that's needed.
 
 ## Never software-upscale beyond source (#135)

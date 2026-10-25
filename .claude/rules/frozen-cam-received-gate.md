@@ -67,11 +67,10 @@ re-add a plain (non-`LC_ALL=C`) grep/sed on the raw tail anywhere in this lib.
   (`FROZEN_CAM_RECEIVED_TAIL` default 800, set in a subshell so it never leaks into a later
   mv-reverify call) shrinks the stale-line scroll-out window.
 
-## Tier-0 testing (no cargo — #557)
+## Testing
 
-Pure fns are testable by direct sourcing over fixture raw-log text (`tests/harness_frozen_cam_
-received_1233.rs` mirrors the pattern; a bash driver replicates each Rust body). Verify the I/O
-wrapper under FULL `set -euo pipefail` (the caller invokes it inside a `$(...)` assignment in
-recording-e2e.sh's strict-mode body) via a stateful fake reader on `FROZEN_CAM_RECEIVED_CMD` +
-`FROZEN_CAM_RECEIVED_GAP_S=0` — grep-no-match extracts are `|| true`-guarded so no expected empty
-read aborts the run.
+Pure fns are testable by direct sourcing over fixture raw-log text
+(`tests/harness_frozen_cam_received_1233.rs`). Verify the I/O wrapper under FULL `set -euo pipefail`
+(the caller invokes it inside a `$(...)` assignment in recording-e2e.sh's strict-mode body) via a
+stateful fake reader on `FROZEN_CAM_RECEIVED_CMD` + `FROZEN_CAM_RECEIVED_GAP_S=0` — grep-no-match
+extracts are `|| true`-guarded so no expected empty read aborts the run.

@@ -157,10 +157,9 @@ owner sets it. That is an expected report-only row, not a bug.
 
 ## Verify without touching a setting
 
-- **Tier-0 net:** the pytest file (plus the no-network run from `ci-testing-gotchas.md`),
-  `bash -n` + `shellcheck -S warning -x` on the touched scripts, and the std-only Rust files through
-  `rustc --test` with the tempfile stub (`deploy_genlock_fleet`, `version_integrity_gate`,
-  `harness_obs_fleet_list_1296`).
+- **Tests:** the pytest file (plus the no-network run from `ci-testing-gotchas.md`), `bash -n` +
+  `shellcheck -S warning -x` on the touched scripts, and the Rust tests `deploy_genlock_fleet`,
+  `version_integrity_gate`, `harness_obs_fleet_list_1296`.
 - **Live, read-only:** paste the gather body (without its final `exit 0`) into the box's win-* MCP
   Shell and grade the output. The real resolume output is the fixture
   `resolume_gather_program_live_2026-09-27.txt`.

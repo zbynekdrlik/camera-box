@@ -21,8 +21,8 @@ production-critical dev1 watchdog class (umbrella **#1308**).
 
 ## Architecture (mirrors the fleet-watchdog family — #1307/#1226/#1290)
 
-- `scripts/measurement_audio_decision.py` — the PURE kernel (no I/O, pytest Tier-0, the #1199
-  python-mirror pattern). `classify(peak_db, box_reachable, meter_present, threshold_db)` →
+- `scripts/measurement_audio_decision.py` — the PURE kernel (no I/O, pytest, the #1199 python-mirror
+  pattern). `classify(peak_db, box_reachable, meter_present, threshold_db)` →
   `SILENT` / `PRESENT` / `SKIP` / `UNKNOWN`; `analyze(probe_text, box_reachable, threshold_db)` reads
   the probe's `key=value` stdout. Everything the shell needs to DECIDE lives here.
 - `scripts/measurement_audio_meter_probe.py` — the I/O half: connect stream OBS WS, subscribe the
@@ -93,13 +93,12 @@ production-critical dev1 watchdog class (umbrella **#1308**).
 - **Ships DISABLED.** The supervisor installs + live-verifies (mute mbc over WS → page → unmute →
   recovery) + enables the timer on dev1; this repo makes no box-side change.
 
-## Tier-0 verification (worktree lane)
+## Verification (worktree lane)
 
 `python3 -m pytest tests/python/test_measurement_audio_decision_1310.py` (the pure decision + CLI) +
 `tests/python/test_notify_dedup_key_sweep_1206.py` (the allowlist + bucketed-key sweep); `bash -n` +
-`shellcheck -S warning scripts/measurement-audio-alert-watchdog.sh`; `cargo fmt --all --check` (the
-`audio_preflight_default_threshold_db` harness test). A worktree-isolated lane may be blocked from a
-`bash -c '…source…'` / PATH-stub dry-run (#1265) — the SUPERVISOR runs the sourced-lib dry-run driver
-+ the `tests/harness_audio_presence_preflight.rs` getter test at integration/CI. The meter probe's
-WS read has no local test path (needs a live OBS) — the supervisor's live-verify (mute → page →
-unmute) covers it.
+`shellcheck -S warning scripts/measurement-audio-alert-watchdog.sh`; `cargo fmt --all --check`. A
+worktree-isolated lane may be blocked from a `bash -c '…source…'` / PATH-stub dry-run (#1265) — the
+SUPERVISOR runs the sourced-lib dry-run driver + the `tests/harness_audio_presence_preflight.rs`
+getter test at integration/CI. The meter probe's WS read has no local test path (needs a live OBS) —
+the supervisor's live-verify (mute → page → unmute) covers it.

@@ -134,7 +134,7 @@ Full-path E2E at the `genlock_parity` preflight (the recurring #923/#932 pain).
   MCP Shell. **imag and strih-snv are Linux** (file copy + CLI = Context B), so execute mode actually
   ssh-deploys them (strih-snv: `scripts/lib/strih-snv-deploy.sh`, issue 1317 part 6 — below).
 - `--plan --run-id <id> --sha <headSha> --stage <dir> [--full|--fast] [--boxes …]` prints the whole
-  plan offline (no network) — this is the Tier-0-tested surface. Execute mode (`--run-id …`) resolves
+  plan offline (no network) — this is the tested surface. Execute mode (`--run-id …`) resolves
   + downloads + deploys live (supervisor-driven; the download/scp/ssh glue is untestable offline).
 
 ## The strih is strih-snv; the Windows `strih` arm is RETIRED (issue 1317 part 3, M4 cut-over 20.9.2026)
@@ -526,11 +526,10 @@ whole `/usr/lib/x86_64-linux-gnu` (thousands of unrelated distro files).
 never stamps the containing dir); its only `cp -a` uses are single-FILE backup copies (no `src/.`
 operand). Any FUTURE per-file `install` → `cp -a src/.` change there would reintroduce the class.
 
-**Tier-0 note:** `tests/deploy_genlock_fleet.rs` asserts the EMITTED-program TEXT
-(`build_imag_deploy_program`), so prove RED→GREEN locally by sourcing the script, calling the builder,
-and grepping the emitted text (no cargo). The emitted program uses an UNQUOTED `cat <<EOS` heredoc —
-escape every emitted `$` as `\$` and use NO backticks/`$(...)` in comments (they substitute at emit
-time); `\0` in `-printf '%P\0'` passes through untouched. Verify the EMITTED program with `bash -n`.
+**Test note:** `tests/deploy_genlock_fleet.rs` asserts the EMITTED-program TEXT (`build_imag_deploy_program`), so
+prove RED→GREEN by sourcing the script and grepping the builder's emitted text. The emitted program uses an
+UNQUOTED `cat <<EOS` heredoc — escape every emitted `$` as `\$` and use NO backticks/`$(...)` in comments (they
+substitute at emit time); `\0` in `-printf '%P\0'` passes through untouched. Verify the EMITTED program with `bash -n`.
 
 ## Report-only per-box forced-table AUDIO/yuv audit preflight (#1303 part 4)
 

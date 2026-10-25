@@ -159,7 +159,7 @@ and in Studio Mode the program renders a private duplicate. A scene that is neve
 nothing, and a second call was a no-op (`removed` was already set). Live 24.10.2026: `pulse capture=remove
 FAILED: 'Zvuk z mixu'`. Any other OBS-WS removal of an input that scenes may reference needs the same order.
 
-## Tests (Tier-0)
+## Tests
 
 `tests/python/test_stream_operator_audio_1465.py` (fake udevadm / pw-dump / pw-metadata, the real lib under
 `set -euo pipefail`) and `tests/python/test_stream_operator_monitor_seed_1465.py` (the monitor through the
@@ -186,9 +186,8 @@ Item 3 (23.10.2026):
 - that WirePlumber 0.5.13 publishes the four restore keys in `sm-settings`;
 - on stream-pp, the jack's Speaker mute holds from the monitor's first VLC start after login (the monitor
   starts VLC at once, idle until OBS publishes); the `(operator-audio-mixer)` row reads it.
-Each of them shows as a FAIL row of item 9b, never a silent pass. The Tier-0 tests prove the rendered text and
-the rule order, not how WirePlumber reads it (dev1 has no PipeWire): the live read-back is the gate before the
-25.10.2026 event.
+Each of them shows as a FAIL row of item 9b, never a silent pass. The tests prove the rendered text and the rule
+order, not how WirePlumber reads it (dev1 has no PipeWire): the live read-back is the gate before the 25.10.2026 event.
 
 ## Live apply (supervisor; stream-snv and stream-pp; nothing here restarts OBS)
 

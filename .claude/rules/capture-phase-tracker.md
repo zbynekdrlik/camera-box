@@ -235,29 +235,17 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   - At the design's 0.3 ms i.i.d. Gaussian timestamp jitter the tracker still gives exactly 1 per
     crossing (2 crossings, 0 receiver flips, 0 re-seeds).
 
-## Verifying a change (Tier-0)
+## Verifying a change
 
-- The pure modules + the bench compile standalone: a scratch crate whose `lib.rs` declares
-  `genlock_grid`, `genlock_pacing`, `genlock_stamp`, `dupe_decimation`, `capture_phase` and
-  `capture_phase_bench` as plain `mod` items with the source files SYMLINKED in (so the child
-  modules `capture_phase/tests.rs` and `dupe_decimation/stamp/tests.rs` resolve normally), plus
-  `genlock_wall_step` since issue 1372 (`genlock_stamp` uses its bracket and threshold). Add a
-  stub `ndi.rs` holding the real `floor_boundary_100ns` (awk it out of `src/ndi.rs`) and copy the
-  `lib.rs` const-assert. Then `rustc --edition 2021 --test -D warnings lib.rs` and run it, and
-  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 175 tests in
-  ~1 s. Put the steps in a script file: the worktree guard refuses variable-driven one-liners.
-- `tests/harness_send_stagger_1242.rs` reads main.rs text only: build it with plain `rustc
-  --test` and run it from the worktree root with `CARGO_MANIFEST_DIR` set (again from a script).
 - A module moved between files loses the intra-doc links its old glob import resolved. Adding a
   `use super::*` to keep them trips `unused_imports` (doc links do not count as uses; checked with
   rustc 1.97). Add link reference definitions instead (`/// [`X`]: crate::path::X`), as
   `dupe_decimation/shed_log.rs` does.
 - **A NEW test against the OLD code** (proving a test would have caught a bug after the fix already
-  landed): never check out another commit in the worktree. Copy the current `src/` pieces into a
-  scratch tree, overwrite only the files under test with `git -C <worktree> show <old-sha>:<path>`
-  (plus the old `lib.rs`, whose const-assert names the old constants), and point the replica
-  script at that tree. Round 3 proved the clock-step-inside-the-hysteresis test this way.
-- A debug replica (`rustc --test`, no `-O`) has overflow checks on, so an `i128` product that
+  landed): never check out another commit in the worktree; overwrite only the files under test in a
+  scratch copy with `git -C <worktree> show <old-sha>:<path>` (plus the old `lib.rs`, whose
+  const-assert names the old constants). Round 3 proved the clock-step-inside-the-hysteresis test this way.
+- A debug build (`cargo test`, no `--release`) has overflow checks on, so an `i128` product that
   would wrap silently in the release binary panics there: build the worst-case window in a test
   (`a_slow_stream_with_outlier_runs_never_overflows_the_fit`) instead of trusting a bound comment.
 - **A bench clock step applies at the instant the code READS the clock** (issue 1372 review round 1):
@@ -265,7 +253,6 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   just before a step and dequeued after it already reads the stepped wall. Keying the step on the
   capture time made the bench's "exactly as main.rs" read unfaithful and hid that early frame. Step
   every modelled read (the per-frame bracket and the poll) at its own instant.
-- `main.rs` compiles first on CI.
 
 ## Live acceptance (supervisor)
 

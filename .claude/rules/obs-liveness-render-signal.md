@@ -40,9 +40,8 @@ A new WS-derived signal must be threaded through THREE places or it silently doe
    `None`, backward-compatible JSON — never make it required) + update the doc-comment example JSON.
 3. `src/obs_watchdog.rs` — add the `ObsHealthSample` field + the `classify()` branch. Every FULL
    struct literal in the tests needs the field (the `..healthy_ws_only(...)` / `..Default::default()`
-   spreads inherit it automatically). `classify()` is Tier-0 unit-tested; the probe pure helpers are
-   pytest-tested (`tests/python/test_obs_liveness_probe.py`) — pytest runs locally, cargo tests do
-   NOT (camera-box Tier-0 bans `# airuleset:build-ok`).
+   spreads inherit it automatically). `classify()` is unit-tested; the probe pure helpers are
+   pytest-tested (`tests/python/test_obs_liveness_probe.py`).
 
 Reuse the existing `FpsZero` verdict for a render stall — its meaning is already "render loop stalled
 while WS alive"; do NOT add a new verdict (every consumer — `obs-liveness-watchdog.sh`,

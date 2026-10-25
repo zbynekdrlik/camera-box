@@ -354,7 +354,7 @@ render tick, the audio thread and the NDI receive threads. The governor/EPP pins
     `tests/obs_box_cpu_latency_1357.rs` rewrites the path to a fixture tree and swaps the sleep
     for a counter write, so it never races the gather's timing.
 
-## Tests + the Tier-0 equivalence net
+## Tests + the equivalence net
 
 The imag content guards (`setup_imag_guards.rs`, `setup_imag_maxperf_791.rs`, ...) read
 setup-imag.sh PLUS the baseline libs; box-literal anchors are the `${BOX}` forms plus an anchor that

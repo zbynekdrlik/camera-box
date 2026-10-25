@@ -7,7 +7,7 @@ paths:
 
 # genlock audit-log parser (`src/jitter_audit.rs` + `genlock-jitter-report`)
 
-`src/jitter_audit.rs` is the pure Tier-0 parser that turns captured OBS log text into
+`src/jitter_audit.rs` is the pure parser that turns captured OBS log text into
 per-source/per-sender counter-delta summaries. It now carries **two independent parser
 families** over the SAME log — extend the matching one, never cross-wire them:
 
@@ -32,23 +32,9 @@ families** over the SAME log — extend the matching one, never cross-wire them:
    `line[mark_at..].split_whitespace()`; unrecognized tokens (the `'%s':` fragment, an
    emitted-but-derivable field like `dropped=`, the `(#N)` decoration) contain no matching
    `=` and are skipped. Never hand-model the decoration syntax.
-3. **Tier-0 RED→GREEN in this module** — it compiles on default features (no probe/OBS/rig).
-   NOTE (#771): `# airuleset:build-ok` is DISABLED in camera-box, so `cargo test --lib jitter_audit
-   # airuleset:build-ok` is BLOCKED — it does NOT give a local run. Get the observable red→green with
-   standalone rustc instead (the #1026 recipe, see `.claude/rules/vendored-libobs-change-safety.md`).
-   **CORRECTION (#800): this module is NOT pure-`std` — `summaries_to_json` uses `serde_json`, so a
-   bare `rustc --test src/jitter_audit.rs` FAILS with `can't find crate for serde_json` (E0463).**
-   Point rustc at a prebuilt rlib from any sibling worktree's `target/debug/deps` (they carry
-   `libserde_json-*.rlib` + its deps):
-   ```bash
-   DEPS=/home/newlevel/devel/camera-box/.claude/worktrees/<any-built-sibling>/target/debug/deps
-   SJ=$(ls "$DEPS"/libserde_json-*.rlib | head -1)
-   rustc --test --edition 2021 src/jitter_audit.rs -L dependency="$DEPS" --extern serde_json="$SJ" \
-     -o /tmp/t && /tmp/t          # exit 101 = RED, 0 = GREEN
-   ```
-   (`-L dependency=` lets rustc resolve serde_json's own transitive deps sitting in the same dir.)
-   The emitting C++ under `vendor/distroav/**` is CI-only (windows-genlock*/linux-genlock) and is NOT
-   what you touch here — this module is read-only log tooling.
+3. **RED→GREEN in this module** — it compiles on default features (no probe/OBS/rig):
+   `cargo test --lib jitter_audit`. The emitting C++ under `vendor/distroav/**` is CI-only
+   (windows-genlock*/linux-genlock) and is NOT what you touch here — this is read-only log tooling.
 
 ## `genlock-jitter-report` CLI landmine — the `--json` #757 contract
 
@@ -86,8 +72,7 @@ NDI feed plays frame-loss-free on strih/stream after a dantesync roll (#811). La
   parenthetical is skipped on purpose). Verify a shallow input with that tool, not with
   `--verdict-source`. Porting the rule here means new `AuditSample` fields kept OUT of `--json`.
 - **The verdict lives in a crate-root PURE module** (`src/resolume_playback.rs`, self-contained std,
-  no `use crate::…`) so it is standalone-rustc Tier-0 testable (`rustc --test src/resolume_playback.rs`),
-  same recipe as `jitter_audit.rs`. The bin maps `AuditSummary → PlaybackWindow` (a trivial field
+  no `use crate::…`). The bin maps `AuditSummary → PlaybackWindow` (a trivial field
   copy — cover it through the real bin path, `tests/*` re-implementing its own copy of the mapping
   does NOT catch a field-swap in the bin's copy; #811 review 🔵-1).
 - **This is a STANDALONE maintenance verify, NOT an E2E `[0/8]` precondition.** resolume is not a
@@ -105,10 +90,7 @@ A new counter on the EXISTING input line is not a new line kind: add the `AuditS
 key is mutually non-substring with every key the parser already matches. Never add it to
 `summaries_to_json` (#757). Two construction sites outside the module build `AuditSummary` by
 struct literal (`src/bin/genlock-jitter-report.rs` tests) — grep `AuditSummary {` and add the new
-delta fields there, or the bin stops compiling (CI-only, invisible to a module-only replica run).
-Local run without serde: a replica of `jitter_audit.rs` with `summaries_to_json` and its two tests
-dropped compiles with plain `rustc --test` (script in the #1355 lane notes, `drop_fn` by brace
-matching).
+delta fields there, or the bin stops compiling.
 
 Keys added this way so far: `stamp_dup` / `stamp_gap` (#1355), `n1_grows` and `n2_early` (issue
 1367), `relabelled` (issue 1372 part B, the receive-FIFO date-step relabel, right after
@@ -122,8 +104,7 @@ A THIRD parser family over the same log, beside INPUT (`genlock-fifo audit`) and
 + `summarize_relock_bursts` / `RelockBurstSummary` for the per-EVENT
 `genlock-relock '<source>':` line (`vendor/obs-studio/libobs/obs-source.c`). Marker
 `genlock-relock '` is mutually non-substring with all existing markers (asserted both
-directions). It is pure `std` (no serde), so it Tier-0 standalone-rustc tests without the
-serde rlib recipe the input/send families need.
+directions). It is pure `std` (no serde).
 
 Why a NEW family and not the existing `delta_relocks`: the periodic audit line's `relocks=`
 is a CUMULATIVE counter, so a relock STORM (e.g. issue 1318's 462 relocks in 17 s) freezes

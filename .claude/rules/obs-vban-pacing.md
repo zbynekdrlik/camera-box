@@ -144,7 +144,7 @@ A buffering hole brings no backlog and `t0` never moves.
 
 - `vendor/obs-vban/src/vban-pacing.h`: the pure C decision. It is header-only and has no OBS
   dependency.
-- `src/vban_pacing.rs`: the Tier-0 Rust authority. `src/vban_pacing_bench.rs` is its test-only
+- `src/vban_pacing.rs`: the Rust authority. `src/vban_pacing_bench.rs` is its test-only
   `#[path]` child, and it replays the logged callback pattern.
   - The bench adds stalls, buffering holes and the measured 0–30 ms wake lateness.
   - It checks conservation, the frame counter and the latency before and after.
@@ -203,18 +203,15 @@ sleeps without spinning. While a slot waits for its audio the thread waits on th
 10 ms per wait); with the default 15.6 ms Windows timer resolution that wait can run late, which
 only delays the grace check, never loses audio.
 
-## Verify locally (Tier-0, no cargo)
+## Verify
 
 ```bash
-CARGO_MANIFEST_DIR=$PWD rustc --test --edition 2021 tests/vban_pacing_parity_1372.rs -o <scratch>/t
-<scratch>/t          # unit tests + the bench + the C parity + the wiring pin
-<scratch>/t the_1381_scenario_table --nocapture   # the scenario table
+cargo test --test vban_pacing_parity_1372   # unit tests + the bench + the C parity + the wiring pin
+cargo test --test vban_pacing_parity_1372 the_1381_scenario_table -- --nocapture   # the scenario table
 ```
 
-`clippy-driver --edition 2021 --test -D warnings` on the same file gives CI's lint verdict (it
-caught a `type_complexity` in the bench). The plugin sources only compile on Windows CI. The Linux
-net for them is `gcc -fsyntax-only -Wall -Wextra -Wformat=2 -Werror -std=gnu11`, run with these
-include paths:
+The plugin sources only compile on Windows CI. The Linux net for them is
+`gcc -fsyntax-only -Wall -Wextra -Wformat=2 -Werror -std=gnu11`, run with these include paths:
 
 - `vendor/obs-studio/libobs`
 - `vendor/obs-vban/vban`

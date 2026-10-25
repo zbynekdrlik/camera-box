@@ -112,7 +112,7 @@ verdict reads STALE and resets the confirm: the arm is blind, silently.
   MISMATCH. The zone offset cancels in the difference, so any offset is caught. A frozen log's daily
   date wrap (a huge negative change) is OK; passes closer than 60 s or further than 600 s apart are
   UNKNOWN. The orchestrator keeps the previous head age + pass epoch per box in its state file
-  (`AUDIO_MIXER_NOW_EPOCH` is the Tier-0 seam for the pass time).
+  (`AUDIO_MIXER_NOW_EPOCH` is the test seam for the pass time).
 - **The observer effect (review round 3).** Every `:8899` request opens a local OBS WebSocket
   connection AFTER the log read (`gather_ndi_inputs`), and obs-websocket logs it at INFO. So a hung
   OBS whose render and audio threads are stuck but whose WebSocket thread runs reads about one pass
@@ -226,7 +226,7 @@ nominal. The lasting, audible effect is the buffering, so this third arm pages i
 - **Deploy:** the facet is new on the `:8899` gather, so the bundle-state server tree must be
   redeployed on stream-snv, strih-snv and resolume (supervisor step, every file of
   `scripts/lib/bundle-state-files.txt`). Until then the facet is absent and the arm reads UNKNOWN.
-- Tier-0: `tests/python/test_audio_mixer_buffering_1381.py` -- the parser over the real 15.10 lines
+- Test: `tests/python/test_audio_mixer_buffering_1381.py` -- the parser over the real 15.10 lines
   (the `#800` line rendered from the C format string), the truth table, and the real bash watchdog
   through `AUDIO_MIXER_FETCH_CMD` (RAISED twice -> one page, HEALTHY -> one RECOVERY line, the
   time-bucketed key read from a fake notify).
@@ -346,12 +346,11 @@ strih-snv's current log (196 dumps, review round 1) read ticks=2813 with ticks_o
   `systemd/audio-mixer-alert-watchdog.README.md` (deploy the new bundle-state server files to the
   boxes FIRST — the watchdog reads UNKNOWN until the facets are served).
 
-## Tier-0 verify
+## Verify
 
 `python3 -m pytest tests/python/test_audio_mixer_*_1381.py tests/python/test_audio_mixer_*_1385.py tests/python/test_notify_dedup_key_sweep_1206.py`
 (gather, decision, replay incl. the bash dry-run, fleet wiring) + `bash -n` / `shellcheck -S warning`
-on the watchdog. No cargo involved. The obs-fleet Rust harness is std-only and runs with plain
-`rustc --test` (`tests/harness_obs_fleet_list_1296.rs`).
+on the watchdog, and `cargo test --test harness_obs_fleet_list_1296`.
 
 ## File size
 

@@ -53,11 +53,10 @@ done | awk '{n++; if($1>mx)mx=$1} END{print "n="n" worst="mx}'
 Set the bound with honest margin above the WORST green value (issue 1035: worst p99 240.7 → 400 ms
 = 1.66x). A bound that would have failed a recent green run is a bug, not a gate.
 
-## Mirror the crate-root `gates_overall_pass()` seam (Tier-0 testable, one-line-restorable)
+## Mirror the crate-root `gates_overall_pass()` seam (unit-testable, one-line-restorable)
 
-`src/bin/recording-verdict.rs` is `required-features=["probe"]` — ZERO local compile path. Put the
-PURE gate logic + calibrated constant + `gates_overall_pass()->bool` seam in a **crate-root** module
-(`src/e2e_latency_gate.rs`, mirroring `src/optical_floor.rs` / `src/self_heal_attribution.rs`) so it
-unit-tests Tier-0 (RED→GREEN locally). The verdict body only CALLS it: `all_pass &= pass ||
-!gates_overall_pass()`. Relax/re-tighten is then a one-line flip. Make a necessary gate DEFAULT-ON
-(CLI default = the constant, hard-locked) — not a forgettable flag a script must remember to pass.
+Put the PURE gate logic + calibrated constant + `gates_overall_pass()->bool` seam in a **crate-root**
+module (`src/e2e_latency_gate.rs`, mirroring `src/optical_floor.rs` / `src/self_heal_attribution.rs`)
+so it unit-tests on default features. The probe-gated verdict body only CALLS it: `all_pass &= pass ||
+!gates_overall_pass()`. Relax/re-tighten is then a one-line flip. Make a necessary gate DEFAULT-ON (CLI
+default = the constant, hard-locked) — not a forgettable flag a script must remember to pass.

@@ -113,8 +113,7 @@ switch to skip it in that mode. A refused delivery, a guard refusal, no VOD or a
   pre-record slack (`PAINTER_PRE_RECORD_SLACK_SECS`) grew 1200 -> 1800 for the ready wait. A run that
   still hits the job timeout leaves no block: the per-point page reads the stage dir (`--stage-dir`)
   and shows that as RED ("no verdict was folded"), never as "not measured".
-- **Where the measurement runs: dev2** (design 6387919956 part c; the owner's no-rig-data-on-dev1
-  rule). dev1 orchestrates and folds the block; everything else is the next section.
+- **Where the measurement runs: dev2** (design 6387919956 part c, next section); dev1 orchestrates + folds.
 - The 703 byte window (merge -> `exit "$GATE"`): 12373 of 13000 bytes after this stage. The next step
   added there must widen it.
 
@@ -246,7 +245,7 @@ window from record start + 5 s to the recording's stop - 3 s (`stop --record-sto
   the stream row's audio cell says "prijímač (počítadlá); vzorková kontrola nahrávky zatiaľ nie".
 - The monitor cross-check rows (the stream av-sync dock LOCKED offset, dev2 SyncNet vs the gate).
 
-## Tests (Tier-0)
+## Tests
 
 `test_av_gate_session_1404.py` (a fake `sshpass` RUNS the remote bash with real curl against a fake
 API on 127.0.0.1: header delivered, token never in argv/output, every refusal), `test_youtube_leg_e2e_1404.py`

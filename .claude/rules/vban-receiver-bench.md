@@ -45,8 +45,7 @@ designs 6338127636 and 6338457001.
   - the rig is not PROVABLY idle (`av_soak_rig_busy_settled`, busy=false);
   - the OBS preflight refuses;
   - the UDP port is bound on strih-snv;
-  - strih-snv has no ffmpeg (only the test track is ever pulled to dev1, never the program
-    recording: no rig data on dev1);
+  - strih-snv has no ffmpeg (only the test track is pulled to dev1, never the program recording);
   - the record volume is under `RECORDINGS_FREE_MIN_GB` (the soak's `av_soak_free_space_verdict`;
     unreadable = one WARNING, the run goes on);
   - a credential is missing, or the strih is not the Linux strih-snv.
@@ -69,9 +68,9 @@ designs 6338127636 and 6338457001.
   flagged recording is stopped only when `av_soak_rig_state.py leftovers` proves it is the bench's
   (its `recordTimecode` age against the flag time in `recording.state`), the stop is verified by a
   status read, and the lease is released only when nothing is left.
-- **The emulator's own send lateness is graded.** dev1 runs other projects' CI; a sender wake late
-  by more than `--emulator-late-bound-ms` (5 ms) changes the profile's shape, so that profile is
-  `INVALID` (bench.tsv column `emulator_late_ms`), never blamed on the receiver and never a PASS.
+- **The emulator's own send lateness is graded.** A sender wake late by more than
+  `--emulator-late-bound-ms` (5 ms) changes the profile's shape, so that profile is `INVALID`
+  (bench.tsv column `emulator_late_ms`), never blamed on the receiver and never a PASS.
 - **The test input is removed on every exit**, also during a broadcast: a silent input on a
   non-program track is safe to remove. `teardown` removes only an input whose kind, port and stream
   name are the bench's, and restores RecTracks only while it still holds the value setup wrote.
@@ -178,7 +177,7 @@ cat "$D/bench.tsv"                 # one row per profile: sine, log, verdict, re
 - Default profiles `clean lv1 stress:+50 stress:-50`, about 50 min, exit 0 only when every
   profile ran and its analysis AND log grade pass (and the emulator was on time).
 - bench.tsv columns: `profile ppm sine log emulator_late_ms verdict recording`, the verdict
-  `PASS` / `FAIL` / `INVALID` (the emulator was late: rerun when dev1 is quieter).
+  `PASS` / `FAIL` / `INVALID` (the emulator was late).
 - Add `--extra-setting <key>=<value>` for a setting the issue-1439 receiver adds (its fixed reserve
   R), once its key name is final.
 - Per profile the run dir holds `pN-schedule.json`, `pN-audio.mkv`, `pN-analysis.json`,
@@ -196,7 +195,7 @@ cat "$D/bench.tsv"                 # one row per profile: sine, log, verdict, re
 The E2E wiring calls this bench from `recording-e2e.sh` through a SOURCED helper lib (the issue-675
 pattern), never an inline edit of that file's pinned anchors.
 
-## Tier-0 verification (dev1: no cargo)
+## Verification
 
 `python3 -m pytest tests/python/test_vban_emulator_plan_1460.py tests/python/test_vban_sine_continuity_1460.py tests/python/test_vban_bench_obs_1460.py tests/python/test_vban_receiver_bench_1460.py`
 plus `bash -n` and `shellcheck -S warning scripts/vban-receiver-bench.sh` (never `-x`).

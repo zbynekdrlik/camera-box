@@ -140,7 +140,7 @@ out of #1308's delivery-layer scope.
 
 ## Enforcement
 
-`tests/python/test_notify_dedup_key_sweep_1206.py` is a Tier-0 static sweep that auto-discovers
+`tests/python/test_notify_dedup_key_sweep_1206.py` is a static sweep that auto-discovers
 every `scripts/**` file emitting `notify --body` (and rig-status.py's `subprocess.run` list form)
 and asserts (A) every surviving emit carries `--dedup-key`, (B) no emit body contains ✅. A new
 watchdog that adds a keyless notify, or phone-pings a ✅ recovery, fails this test in CI. It joins

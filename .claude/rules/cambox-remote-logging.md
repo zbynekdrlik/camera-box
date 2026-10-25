@@ -58,9 +58,8 @@ is ONE copy). Its consumers can never drift (the dscp-nft.sh / mgmt-liveness.sh 
 
 Until 9.10.2026 the sink was dev1, hard-coded as `10.77.9.200` — a DHCP pool address leased to a
 phone (8.10), so systemd-journal-upload failed on all seven boxes, netconsole could not arm, and
-`(ak)` passed anyway because it graded against the same constant. The owner ruled: no rig service
-and no rig data on dev1 ("strih nb, which has the performance and the disk"), no router change for
-dev1.
+`(ak)` passed anyway because it graded against the same constant. The owner ruled the sink onto the
+venue strih, with no router change for dev1.
 
 - `remote_log_sink_ip CAMERA` = the `STRIH_IP` of the ONE strih-ROLE fact file
   (`scripts/strih-boxes/*.env`) whose `STRIH_CAMERAS` lists the camera, parsed through
@@ -191,22 +190,15 @@ awk -v cutoff="$(date -d '5 minutes ago' '+%Y-%m-%dT%H:%M:%S')" '$1 >= cutoff' /
 journalctl --file /var/log/journal/remote/*<host>*.journal --since '5 minutes ago'
 ```
 
-## Tier-0 verification
+## Verification
 
 pytest (all run from a worktree): `tests/python/test_remote_log_sink_1394.py` (the resolver over the
 real and synthetic fact files, the generators, the verdict, the consumers' wiring, no dev1 left),
 `tests/python/test_cambox_log_sink_repoint_1394.py` (the re-point on the issue-1407 fake box + the
 CLI), `tests/python/test_strih_cambox_log_sink_1394.py` (the receiver lib: renderers,
 `systemd-analyze verify` of the units, the install against fake systemctl/dpkg-query/apt-get, the
-grader, the wiring and budgets).
-
-### The Rust harness
-
-`tests/harness_remote_logging_1311.rs` sources the lib + static-anchors the provisioners. It is
-std-only, so it runs locally with no cargo (issue 1394): `CARGO_MANIFEST_DIR=<worktree> rustc
---edition 2021 --test tests/harness_remote_logging_1311.rs -o <scratch>/t && <scratch>/t`, from a
-script FILE in a worktree lane (the isolation guard refuses an inline `$VAR` path), plus
-`clippy-driver --edition 2021 --test -D warnings` the same way and `rustfmt --check` on the file.
+grader, the wiring and budgets). The Rust harness `tests/harness_remote_logging_1311.rs` sources the
+lib + static-anchors the provisioners.
 
 ## GOTCHA — network-online.target is INSTANT on a cambox (wait-online is masked), so every network-dependent unit must RETRY or order on systemd-networkd.service (#1311, live on cam2 15.9.2026)
 
@@ -234,7 +226,7 @@ the peer answers. The netconsole unit keeps its `network-online.target` lines as
 (and `harness_remote_logging_1311.rs` pins them), but the retry loop + `systemd-networkd.service`
 ordering are what actually make it survive a clean boot.
 
-Tier-0 boot-order coverage: `tests/python/test_remote_logging_boot_order_1311.py` (a fake `ip` whose
+Boot-order coverage: `tests/python/test_remote_logging_boot_order_1311.py` (a fake `ip` whose
 `route get` misses the first N calls proves the retry arm; unit/drop-in text asserts). Make
 `REMOTE_LOG_NC_CONFIGFS` env-overridable for that arm test.
 

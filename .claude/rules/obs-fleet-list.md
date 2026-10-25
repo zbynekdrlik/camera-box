@@ -84,9 +84,8 @@ tests/ops). Three helpers consume it:
   node tolerates a false reachable; confirm box IDENTITY (`getent hosts resolume.lan` + its OBS
   profile, `.claude/rules/rig-state-inspection.md` §2) before relying on it as a paging node.
 - **The lib is source-only (no `set -euo pipefail`, the `# airuleset:script-ok` convention)** — it
-  runs in the caller's shell. `obs_fleet_is_home`'s probes are overridable seams
-  (`obs_fleet_resolve_host` / `obs_fleet_status_probe`) + the `OBS_FLEET_HOME` force-list, so the
-  whole thing is Tier-0 testable offline.
+  runs in the caller's shell. `obs_fleet_is_home`'s probes are overridable seams (`obs_fleet_resolve_host`
+  / `obs_fleet_status_probe`) + the `OBS_FLEET_HOME` force-list, so the whole thing is testable offline.
 
 ## Box names carry the venue: `<role>-<venue>` (issue 1414, owner 12.10.2026)
 

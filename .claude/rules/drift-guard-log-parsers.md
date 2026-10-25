@@ -45,7 +45,7 @@ bounded-read discipline generalised):**
    (exit 1) never trips its own `set -euo pipefail`.
 5. **Put the remote command in a pure snippet function** (`drift_guard_imag_obs_log_gather_snippet`,
    mirroring `scripts/lib/obs-projector-vsync.sh`'s `projector_vsync_gather_remote_snippet`) so the
-   marker anchors live in ONE place and are Tier-0-testable without ssh — a big-log fixture (≥ 300 k
+   marker anchors live in ONE place and are testable without ssh — a big-log fixture (≥ 300 k
    lines) with the decisive line in the MIDDLE (a naive head+tail of the RAW file would miss it; the
    union grep must not) and later lines that a first-match parser must still resolve correctly. See
    `tests/python/test_drift_guard_imag_obs_log_bounded_gather_1151.py` +
@@ -73,7 +73,7 @@ This class has recurred twice: issue 514 hardened most parsers with `grep | head
 parser, end its pipeline with `|| true` from the start** — do not rely on the input being
 small; a `--check-imag` log is large.
 
-## Tier-0 test pattern for a SIGPIPE-under-`set -e` fix (no cargo compile here)
+## Test pattern for a SIGPIPE-under-`set -e` fix
 
 - The bug only manifests under the caller's real `set -euo pipefail` context. `tests/drift_guard.rs`'s
   default `run_sourced` helper is **structurally blind** to a `set -e` abort in the SAME way the
@@ -85,8 +85,7 @@ small; a `--check-imag` log is large.
   pipe buffer when the consumer exits). Feed it via a temp FILE `cat` inside the bash body — NOT an
   env var (a 1 MB env value blows ARG_MAX at spawn; a shell-function arg has no such limit). See
   `fps_and_version_parsers_survive_a_large_log_without_sigpipe_141_1189` in `tests/drift_guard.rs`.
-- Tier-0 local verification (camera-box #477/#557: NO local cargo compile — the Rust test runs on CI
-  only): `bash -n scripts/drift-guard.sh`; `shellcheck -S warning scripts/drift-guard.sh` (no NEW
+- Local verification: `bash -n scripts/drift-guard.sh`; `shellcheck -S warning scripts/drift-guard.sh` (no NEW
   findings); source the script under `bash -c 'set -euo pipefail; . …; v="$(fps_from_log "$(cat big)")"; echo SENTINEL'`
   and confirm **141-before / 0-after** for each parser; `cargo fmt --all --check` proves the `.rs`
   parses + is formatted.

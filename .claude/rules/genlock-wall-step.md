@@ -89,7 +89,7 @@ sender) is the supervisor's rig investigation, not this code.
   (`genlock_audio_slew_remaining_ns != 0`), obs-source.c holds the payment
   (`asrc_compensator_set_step_recover_hold`); the owed amount waits, it is never dropped.
 
-## Gates and the Tier-0 recipe
+## Gates
 
 - `tests/genlock_wall_step_parity_1372.rs`: `#include`s the real header, compiles it under
   `-Wall -Wextra -Wconversion -Wformat=2 -Werror`, byte-compares every read sequence and deadline with
@@ -117,12 +117,8 @@ sender) is the supervisor's rig investigation, not this code.
   costs ≤ 5 visible events per step and never more than the legacy slew, 0 relocks, 0 underruns; the
   deep FIFO pays strictly less than on the legacy slew. On the shallow 3 ms feed the receiver's own
   re-grid tick costs one held frame the legacy slew spreads out; the sender side pays that back.
-- Local, no cargo: a scratch lib.rs with `#[path]` includes of `asrc_bench`, `genlock_grid`,
-  `genlock_lock_state`, `genlock_wall_step` (+ the bench under `#[cfg(test)]`), `rustc --test -O`; for
-  the parity files a stub `camera_box` rlib of the same modules (+ `genlock_forced_table_audit`) and
-  `CARGO_MANIFEST_DIR` + `CARGO_TARGET_TMPDIR` set at COMPILE time; `clippy-driver --test -D warnings`
-  on the same inputs. Six scratch C mutants (regrid ignored, `>=` threshold, bracket midpoint, half
-  payment, no setpoint move, no book limit) each diverged.
+- Six scratch C mutants (regrid ignored, `>=` threshold, bracket midpoint, half payment, no setpoint
+  move, no book limit) each diverged.
 
 ## Live acceptance (supervisor, FULL bundle: libobs + frontend)
 

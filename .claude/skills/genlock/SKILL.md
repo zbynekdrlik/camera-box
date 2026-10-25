@@ -181,7 +181,7 @@ was empirically validated at zero-loss (#184/PR #224), not picked arbitrarily; t
 by core pinning).
 
 **New tooling to analyze a `genlock-fifo audit` log window (any future latency investigation,
-not just #272):** `camera_box::jitter_audit` (Tier-0 pure, `src/jitter_audit.rs`) parses the
+not just #272):** `camera_box::jitter_audit` (pure, `src/jitter_audit.rs`) parses the
 periodic audit line into an `AuditSample`, groups by source, and `summarize`s a captured window
 into DELTA loss counters (`underruns`/`holds`/`dropped_due`/`late_holds`/...) + the
 `ts_head_skew_ms` jitter distribution. Thin CLI: `genlock-jitter-report --file <obs.log>` (or
@@ -231,7 +231,7 @@ permanently. Symptoms, all on the deep source only:
 Since #859 the threshold is `genlock_backlog_relock_qdepth()` = the depth that source's own
 configured latency implies (using the SOURCE rate — a 60-into-30 input queues two entries per canvas
 interval) **plus the unchanged margin 6**. Sub-half-frame sources (the 3 ms global default, the 3 ms
-imag contract) are byte-identical to before. The decision is Tier-0 unit-tested in
+imag contract) are byte-identical to before. The decision is unit-tested in
 `src/genlock_backlog.rs`; the C and `src/probe/genlock.rs` both derive from it and
 `tests/genlock_release_cadence.rs` asserts the C actually CALLS it and that the margin stays 6.
 
@@ -471,8 +471,7 @@ risk; note `<sstream>` is `#ifdef _WIN32` in OBSBasic.cpp but the genlock build 
 Windows-only; prefer `__DATE__`
 over CMake/config-header date plumbing since the full frontend build is 150-min and not
 locally compilable). Guard = `tests/obs_titlebar_newlevel.rs` (NON-probe, default-feature
-Linux test → runs Tier-0; RED→GREEN provable locally by running the built
-`target/debug/deps/obs_titlebar_newlevel-*` against the source) + the lock-step pwsh
+Linux test) + the lock-step pwsh
 source-anchor gate in BOTH `windows-genlock{,-fast}.yml` (the FAST path doesn't build the
 frontend but still source-text-gates the token, same as the #276/#278 OBSProjector gate).
 
@@ -492,8 +491,7 @@ C++ bug is therefore INVISIBLE to PR CI until the supervisor's full rebuild. Ext
 non-trivial frontend logic into a pure header and behaviorally unit-test it off-rig with the #293
 harness pattern — **which now covers C++ too**: `tests/obs_titlebar_newlevel_parse.rs`
 compiles+runs `NewlevelBuildDate.hpp` via `c++ -std=c++17` (the `obs_display_budget.rs` twin uses
-`cc -std=c11`). Run it Tier-0 with `cargo test --no-run --test obs_titlebar_newlevel_parse` then
-execute the built `target/debug/deps/obs_titlebar_newlevel_parse-*` directly (no probe, no bypass).
+`cc -std=c11`). Run it with `cargo test --test obs_titlebar_newlevel_parse` (no probe).
 
 Two LAYERS guard "the deployed stack is the build we think it is":
 
@@ -528,9 +526,8 @@ Two LAYERS guard "the deployed stack is the build we think it is":
   FIFO can be cut short on git-bash; materialise the list into a var + iterate with `<<<`,
   and `assert_manifest_complete EXPECTED ACTUAL` (exit **22**, distinct from --check's 21)
   fails LOUD at generation if intended-count ≠ written-count so a partial manifest never
-  reaches --check. RED→GREEN must be proven at the SHELL level (Tier-0 blocks the Rust test
-  runner); the Windows-specific fix is ONLY verifiable by dispatching `windows-genlock.yml`
-  on your HEAD — the broken step never ran green on a real Windows bundle before.
+  reaches --check. RED→GREEN is proven at the SHELL level; the Windows-specific fix is ONLY
+  verifiable by dispatching `windows-genlock.yml` on your HEAD — the broken step never ran green on a real Windows bundle before.
 - **per-component BUILD SHA + capability (#122, DONE)** — drift-guard `--compare` now
   CONSUMES `BUNDLE_MANIFEST.json`: supply `manifest=<path>` and it ALSO checks the live
   rig's `obs.dll`/`distroav.dll` Get-FileHash SHA256 vs the manifest's `files[]` entry
@@ -650,24 +647,18 @@ gate was added in #249 (the slow one in #248). `tests/genlock_preload.rs` has a
 `windows_genlock[_fast]_workflow_gates_on_the_per_source_latency` guard per workflow — add
 the matching guard when you add a new token gate.
 
-GOTCHA (Tier-0 local test verification): the probe-gated test files
+GOTCHA (probe-gated tests): the probe-gated test files
 (`#![cfg(feature="probe")]`, e.g. `genlock_preload.rs`) AND the whole `src/probe/genlock.rs`
-Rust mirror are NOT seen by the default-feature gate (`cargo check/clippy/test --no-run`
-compile them to nothing) — so the default gate green proves NOTHING about a genlock C/mirror
-change. Grep-level verification of the vendored-source guard strings is the cheap default.
-BUT: when a change is a bug-fix needing RED→GREEN proof (regression-test-first — grep alone
-can't show a guard test actually FAILS then PASSES), OR to avoid burning the ~150-min
-windows-genlock CI on a probe compile/lint/logic error, run the probe-gated genlock tests
-locally ONCE via the documented `# airuleset:build-ok` bypass — TARGETED so it's cheap:
-`cargo test --features probe --test genlock_preload <name>  # airuleset:build-ok`,
-`cargo test --features probe --lib genlock  # airuleset:build-ok`,
-`cargo clippy --features probe --all-targets -- -D warnings  # airuleset:build-ok`.
-This pulls the probe deps (image/qrcode/rqrr/drm/lz4) → `target/` jumps to ~3.5–4 GB; the
-pre-push hook (`scripts/purge-target.sh`) trims it. The C (`obs.dll`) still builds on the
-windows-genlock CI only — local can't compile it; eyeball the C diff for correctness.
-The NON-probe test files (`drift_guard.rs`, `harness_recording_e2e_paths.rs`) CAN run
-fully Tier-0: `cargo test --no-run` to compile, then run the built
-`target/debug/deps/<name>-*` binary DIRECTLY (no rebuild, no violation) to prove GREEN.
+Rust mirror are NOT seen by the default-feature gate (`cargo check/clippy/test` compile them to
+nothing) — so the default gate green proves NOTHING about a genlock C/mirror change. Grep-level
+verification of the vendored-source guard strings is the cheap default; for RED→GREEN proof
+(grep alone can't show a guard test FAILS then PASSES), or to avoid burning the ~150-min
+windows-genlock CI on a probe compile/lint/logic error, run the probe-gated tests TARGETED:
+`cargo test --features probe --test genlock_preload <name>`,
+`cargo test --features probe --lib genlock`,
+`cargo clippy --features probe --all-targets -- -D warnings`.
+The C (`obs.dll`) still builds on the windows-genlock CI only — local can't compile it; eyeball
+the C diff for correctness.
 
 **Reading genlock state — from the OBS LOG, never an env (no genlock env exists post-#257):**
 render tick + ts-align are build defaults, so there is nothing to read in env. The running genlock
@@ -989,8 +980,8 @@ budget on EVERY tick → skipped forever → the strih Multiview FROZE solid for
 - **TESTABILITY PATTERN (reusable for ANY vendored-C decision):** extract the decision into a pure
   header (only `<stdbool.h>`/`<stdint.h>`, a `static inline`) and unit-test it from a DEFAULT-features
   Rust integration test that compiles+runs a tiny `cc -std=c11` harness over the real header
-  (`tests/obs_display_budget.rs`). This sidesteps BOTH the probe-local-build ban AND "Linux can't
-  build libobs" — the test exercises the EXACT production code, RED→GREEN verifiable locally, no probe.
+  (`tests/obs_display_budget.rs`). This sidesteps "Linux can't build libobs" — the test
+  exercises the EXACT production code, no probe.
 - **Pinned source anchors changed (the #269 lock-step — update ALL of `tests/genlock_preload.rs`
   (probe-gated) + BOTH `windows-genlock{,-fast}.yml` pwsh gates together):** the OLD
   `if (elapsed + ewma > budget) return;` anchor is REPLACED by
@@ -1115,7 +1106,7 @@ fixed (a boundary impossibly far in the future re-latches).
   flap around the margin neither enters nor exits), SELF-HEAL on regime end
   (`genlock_backward_regime_end` zeroes the locked boundary → re-ACQUIRE the configured hold),
   bounded-cadence regime WARNs, and senders stamp the FLOOR boundary (never future-dated).
-  Tier-0 authority: `src/genlock_backlog.rs BackwardStepGuard`; diagnosis rule:
+  Authority: `src/genlock_backlog.rs BackwardStepGuard`; diagnosis rule:
   `.claude/rules/genlock-hold-collapse-diagnosis.md`.
 - **Audit signal:** the `genlock-fifo audit` line prints `backward_steps=%llu` (one per real step
   EVENT) and, since #1009, `backward_regime_ticks=%llu` (one per re-anchored TICK — a healthy
@@ -1149,7 +1140,7 @@ Use with `GetSourceFilterList` / `SetSourceFilterEnabled`.
 **CI delivery gate — `_latency_delivery_ok(set_ms, delivered_ms, tolerance_ms=100):`**
 In `scripts/obs_phase2.py`. Returns `delivered_ms >= set_ms - tolerance_ms`.
 The #292 bug force-drained the FIFO to ~3-50ms even at 1000ms setting → threshold 1000-100=900ms
-clearly catches it. This pure function is Tier-0 testable (no OBS calls).
+clearly catches it. This pure function is unit-testable (no OBS calls).
 CI proves the code; the SUPERVISOR runs the live rig verify (set 1000ms on prod `NDI 2ME PGM`,
 measure actual delivery, restore the LAST-CALIBRATED A/V-align value — post-#390 this is whatever
 `av-sync-last.json`'s `applied_latency_ms` says, NOT a fixed constant; re-run
@@ -1197,7 +1188,7 @@ unaffected; imag-nb is the only Linux OBS box):
 - **rtprio grant dependency**: OBS runs as the unprivileged desktop user, so the SCHED_FIFO call
   needs `setup-imag.sh`'s `/etc/security/limits.d/95-imag-genlock-rtprio.conf` (`${DESKTOP_USER} -
   rtprio 20`, applied by PAM at next login). Without it the pin warn-degrades to SCHED_OTHER.
-- Guards: `tests/genlock_rt_pin.rs` (Tier-0 vendored-source, RED→GREEN locally) +
+- Guards: `tests/genlock_rt_pin.rs` (vendored-source) +
   `tests/setup_imag_guards.rs` (rtprio drop-in). The C build proof is `linux-genlock.yml` SUCCESS.
 - **Live cyclictest/chrt verification (rig redeploy + before/after jitter, with rollback) is the
   SUPERVISOR's post-merge step** — never rig-verified from the worker (a misbehaving SCHED_FIFO
@@ -1223,7 +1214,7 @@ cam4 ~56ms, a 15.78ms spread) then leaks straight into the stamp. A genlock rece
 FIFO release on stamp-time cannot equalize that real hardware skew — cutting between cameras
 visibly shifts perceived video timing (the root cause behind repeated A/V-cut complaints).
 
-**Fix (`src/genlock_stamp.rs`, pure Tier-0):** `capture_realtime_100ns(capture_monotonic_100ns,
+**Fix (`src/genlock_stamp.rs`, pure):** `capture_realtime_100ns(capture_monotonic_100ns,
 mono_to_real_offset_100ns)` converts the V4L2 buffer's OWN kernel `CLOCK_MONOTONIC` timestamp
 (`metadata.timestamp`, assumed `TIMESTAMP_MONOTONIC` per the V4L2 default — not runtime-verified
 against `metadata.flags`, a known non-blocking gap) to wall-clock via a periodically-resampled

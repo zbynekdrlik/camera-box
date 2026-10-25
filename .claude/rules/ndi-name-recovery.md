@@ -65,12 +65,12 @@ it. On exit 0 (healed ≥1) the loop re-samples after the settle; otherwise the 
 proceeds (the `#1158` log lines already surfaced the reason). Keep it in an `if`, never a bare
 statement or a `|| true` tail that discards the "did it heal?" branch.
 
-## Testing (all Tier-0, no cargo compile)
+## Testing
 
 The python pieces (`reenforce_ndi_name`, `heal_active_mapping`, `_heal_exit_code`,
 `baseline_sender_for`, reattach's vanished-branch) run under `pytest` locally with fake-WS/fake-op
 stand-ins — a genuine RED→GREEN. The sourced lib's env-seam (`NDI_NAME_SELFHEAL_CMD`) + its #1133
-`set -e` safety are a `tests/harness_ndi_name_selfheal_1158.rs` (CI) mirrored by a direct
+`set -e` safety are a `tests/harness_ndi_name_selfheal_1158.rs` mirrored by a direct
 `bash -c 'set -euo pipefail; . lib; if ndi_name_selfheal_run …'` locally. The default heal path
 (`python3 set-ndi-mapping.py --heal` against live OBS) is not offline-testable; the seam is.
 
@@ -92,7 +92,7 @@ because a sender is ALWAYS absent from the finder during its own `[2/8]`/`[2b/8]
   RETURN there — do NOT then blind-set the known-absent original over it (a pointless #795 mangle).
 - **The RECOVERY primitive for a COLD finder is a bounded discovery-WAIT, not a one-shot heal:**
   `set-ndi-mapping.py --heal-wait <s>` (`heal_wait_active_mapping` — pure, injected now()/sleep(),
-  Tier-0 pytest-able) polls the finder for each active input's #399 baseline to become discoverable,
+  pytest-able) polls the finder for each active input's #399 baseline to become discoverable,
   then re-enforces via the SAME `reenforce_ndi_name` policy (never blind-sets an absent name). It is
   wall-clock-bounded and early-exits on a warm finder (~one WS round-trip). Wired via the WARN-only
   `mv_reverify_finder_heal_wait` runner (`scripts/lib/mv-reverify-escalate.sh`, seam
@@ -148,7 +148,7 @@ receiver-policy layer.)
   step). The immediate consumer is the supervisor's live adversarial verify. If wiring it later,
   add it via the `scripts/lib/ndi-name-selfheal.sh` sourced lib (#675-safe, invisible to
   recording-e2e.sh's static anchors), never an inline edit to the anchored file.
-- **Tier-0:** `classify_receiver_liveness` + `sample_receiver_liveness` (injected `sleep`, fake
+- **Tests:** `classify_receiver_liveness` + `sample_receiver_liveness` (injected `sleep`, fake
   `_rpc`) and `verify_live_mapping` + `_verify_live_exit_code` (injected op/ws/sampler) are pure/
   DI, pytest-able with zero WS/rig — `tests/python/test_obs_phase2_receiver_liveness_1180.py`,
   `tests/python/test_ndi_mapping_verify_live_1180.py`. The live wrong-camera/frozen cure is not

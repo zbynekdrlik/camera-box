@@ -347,12 +347,11 @@ threads it too (None for the strih box, which extracts without --cam2-run-id).
 
 **RED→GREEN re-merge recipe (verify a verdict-WINDOW fix against an existing run, no rig):** the
 per-box partials preserve full per-frame `payloads` (incl. the foreign paint), so re-run the merge
-locally with `# airuleset:build-ok` + `AIRULESET_ALLOW_LOCAL_BUILD=1 cargo build --features probe
---bin recording-verdict`, then `./target/debug/recording-verdict --merge-partials strih=… stream=…
+with `cargo build --features probe --bin recording-verdict`, then
+`./target/debug/recording-verdict --merge-partials strih=… stream=…
 --cam2-run-id <pin> --burn-*-run-id … --json out.json --cam1-capture-stats …` (exact flags in the
 run's `harness.log`). Compare `overall_pass` + `.full_chain.loss.cam1.{first_id,last_id,missing_ids}`
-vs the on-disk RED `verdict-<run>.json`. The probe path compiles ON CI ONLY — this build is the
-sanctioned RED→GREEN exception, `cargo clean`/purge after.
+vs the on-disk RED `verdict-<run>.json`.
 
 ## GOTCHA — pre-push Gate-1 false-positives on inline Rust tests
 
@@ -415,33 +414,22 @@ which returned `BurnHopVerdict`. A symbol is only dead if its WHOLE cluster is d
 4. **rustdoc intra-doc links:** strip/rewrite any surviving `[`removed_item`]` doc-link (module
    `//!`, and docs on kept items). CI does NOT run `cargo doc -D warnings`, so it won't hard-fail,
    but it's real bit-rot — fix it.
-5. Verify locally **DEFAULT FEATURES ONLY** (Tier-0 — NEVER `--features probe`/`--all-features`
-   locally; that pulls qrcode/rqrr/image/drm/lz4 + the 5 probe bins into the shared dev1 `target/`
-   and balloons it, the #185 disk-fill): `cargo fmt --all --check` + `cargo check` + `cargo clippy
-   --all-targets -- -D warnings` + `cargo test --no-run`. The probe code (recording-verdict.rs +
-   its tests, recording_partial, burn_contiguity, the contiguity #216/#226 + verdict tests) does
-   NOT compile under default features — it is compiled + run ON CI (the "Build" / "Windows probe
-   build" / "Test" jobs). CI is the only compiler for the probe path; trust it, don't compile probe
-   locally. shellcheck any touched scripts; the harness structural tests (`harness_recording_e2e_paths`)
-   ARE default-feature and run locally + CI.
+5. Verify: `cargo fmt --all --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test`,
+   plus `--features probe` for the probe code (recording-verdict.rs + its tests, recording_partial,
+   burn_contiguity, the contiguity #216/#226 + verdict tests), which does NOT compile under default
+   features. shellcheck any touched scripts.
 
-### Observing RED→GREEN locally for a bug tied to the bin's own CLI struct (#24 cam3 burn-id fix)
+### RED→GREEN for a bug tied to the bin's own CLI struct (#24 cam3 burn-id fix)
 
-Some regression tests genuinely can't be extracted into a Tier-0 pure module (the
-`src/reannounce.rs`/`src/colour_scale.rs` pattern) — e.g. a test asserting a `#[arg(long,
-default_value_t = …)]` CLI default on `recording-verdict.rs`'s `Args` struct itself is inherently
-probe-gated (the whole bin requires `--features probe`; `clap::Parser::parse_from` on `super::Args`
-only compiles there). For exactly this one-off case (verifying the RED test fails, then the fix
-makes it pass — NOT a routine workflow), the documented bypass extends naturally to a `--bin`
-target: `cargo test --bin recording-verdict --features probe <test_name> # airuleset:build-ok`.
-Confirmed live on the #24 fix (`BURN_RUN_ID_IMAG`/`BURN_RUN_ID_CAM3` collision, PR #566): RED
-against the pre-fix default, GREEN after reserving a fresh id — then re-ran the WHOLE bin's test
-module (`cargo test --bin recording-verdict --features probe`, still bypass-marked) plus the probe
-lib (`cargo test --features probe --lib`) and the burn-decode integration suites to catch fallout
-(a stale test fixture elsewhere in the same file hardcoded the OLD numeric value and needed
-updating to track the intentional constant rename — grep the WHOLE repo for the literal old value,
-not just the constant name, before assuming a rename is fully propagated). This is still a one-off
-verification during the fix — CI remains the authoritative, routine compiler for the probe path.
+A test asserting a `#[arg(long, default_value_t = …)]` CLI default on `recording-verdict.rs`'s
+`Args` struct is inherently probe-gated (`clap::Parser::parse_from` on `super::Args` only compiles
+under `--features probe`): `cargo test --bin recording-verdict --features probe <test_name>`.
+Confirmed on the #24 fix (`BURN_RUN_ID_IMAG`/`BURN_RUN_ID_CAM3` collision, PR #566): RED against
+the pre-fix default, GREEN after reserving a fresh id — then re-ran the WHOLE bin's test module plus
+the probe lib (`cargo test --features probe --lib`) and the burn-decode integration suites to catch
+fallout (a stale test fixture elsewhere in the same file hardcoded the OLD numeric value — grep the
+WHOLE repo for the literal old value, not just the constant name, before assuming a rename is fully
+propagated).
 
 ### Pre-push hook on a pure-deletion / cleanup commit
 
@@ -596,7 +584,7 @@ optical read.**
 - **cam1 (PerEmittedFrame) KEEPS `is_optical || has_cam1_burn`** — its burn is genuine per-emit delivery proof, so dropping it would orphan the cam1 id and manufacture a PHANTOM forward-gap REAL DROP (the #204 fix). The membership is rate-gated: `is_optical(f) || (matches!(rate, PerEmittedFrame) && has_node_burn(f))`.
 - **An in-span frame whose cam2 optical QR did NOT decode is a DISTINCT `optical_undecodable` hard-fail** — never a phantom chain drop (pre-#360), never a pass (#360). Computed by `optical_undecodable_in_span()` over the optically-anchored span (`optical_span()` = first..=last `is_optical`). cam1 still reports NO phantom drop on such a frame (its burn keeps the id present); the run nonetheless FAILS via `optical_undecodable`.
 - Removing the strih/stream burn fallback does NOT re-introduce a phantom drop: PerRenderTick uses gap-ignore (step=1, see above), so forward gaps between the surviving optical frames are ignored. The pre-#360 phantom came from the now-dead step-2 math, not from optical-only membership.
-- **HARD means hard:** no flag / env / threshold / "tolerance" / "allow N undecodable" — ever. A fake green is worse than honest red. RED→GREEN lock (probe-gated, CI-only): `node_verdict_optical_undecodable_is_a_hard_fail_363`, `node_verdict_fails_when_cam2_optical_mostly_undecodable_363`, `strih_burn_on_a_non_optical_frame_inside_span_is_excluded_and_undecodable_363`, and the updated `cam1_burn_on_an_optical_blurred_frame_is_not_a_phantom_drop` (run FAILS on optical, cam1 still no phantom).
+- **HARD means hard:** no flag / env / threshold / "tolerance" / "allow N undecodable" — ever. A fake green is worse than honest red. RED→GREEN lock (probe-gated): `node_verdict_optical_undecodable_is_a_hard_fail_363`, `node_verdict_fails_when_cam2_optical_mostly_undecodable_363`, `strih_burn_on_a_non_optical_frame_inside_span_is_excluded_and_undecodable_363`, and the updated `cam1_burn_on_an_optical_blurred_frame_is_not_a_phantom_drop` (run FAILS on optical, cam1 still no phantom).
 
 ## #363 — optical-robustness half: `decode_qr_luma_all` must merge plain ∪ Otsu (the Otsu-gating bug)
 
@@ -645,7 +633,7 @@ encoder-degraded 4K pixels). So:
   `full_frame_otsu_union_recovers_a_softened_burn_bare_rqrr_misses` (bare single rqrr misses →
   the Otsu union recovers).
 
-RED→GREEN lock (probe-gated, CI-only, in `src/probe/qr_tests.rs` since issue 1374):
+RED→GREEN lock (probe-gated, in `src/probe/qr_tests.rs` since issue 1374):
 `optical_soft_dual_qr_recovered_on_real_stream_frames` (fixtures `tests/fixtures/optical-soft-f5.png`
 / `optical-soft-f150.png`, run 354003): the plain pass returns NO run_id 354003; `decode_qr_luma_all`
 returns BOTH optical halves; the recording per-frame path surfaces it too. Reverting to the
@@ -711,9 +699,8 @@ DIFFERENT from every other node's (burn id vs optical tick):
 
 1. Write the ALGORITHM as a brand-new pure module OUTSIDE `probe::` (`src/imag_tick_gate.rs`),
    even though it duplicates `probe::burn_contiguity::burn_contiguity`'s exact first..=last logic.
-   The whole `probe` module is `#[cfg(feature = "probe")]` (CI-only) — a pure decision that lives
-   there can never be RED→GREEN-verified locally, so the duplication buys real Tier-0
-   testability, not laziness.
+   The whole `probe` module is `#[cfg(feature = "probe")]`, so the duplication buys
+   default-feature testability, not laziness.
 2. In the probe-gated glue (`node_verdict_for_imag`), construct `NodeContiguity` DIRECTLY from
    your own computed values (`first_id`/`last_id`/`missing_ids`/`present_count`/`expected_count`
    — the struct's fields are `pub`) instead of calling `burn_contiguity()`. Since `NodeContiguity`
@@ -743,13 +730,13 @@ catch:
 1. **`vendor/distroav/src/burn-geom.hpp`** (C++, the ACTUAL render geometry) — `Corner` enum +
    `corner_placement()`'s per-corner `if`/`else` branch. This is ground truth; everything else
    below is a MIRROR of it.
-2. **`src/burn_regions.rs::slot_rect`** (Rust, Tier-0; issue 1370) — the ONE Rust copy of the
+2. **`src/burn_regions.rs::slot_rect`** (Rust, default-feature; issue 1370) — the ONE Rust copy of the
    formula (margin/side/band_x + the band_cy rounding + every fallback tier).
    `colour_sample::node_burn_exclusions` (the colour gate's dodge rects) pads these slots, and the
    decode's burn-isolated recovery crops them. A new corner or tier goes HERE; the default-feature
    `tests/burn_regions_cpp_parity_1370.rs` compiles step 1 and fails on any drift.
-3. **`src/colour_scale.rs` test module** (Rust, Tier-0) — a THIRD hand-written mirror of the same
-   formula, as `const` test fixtures, used to prove (locally, RED→GREEN, no `--features probe`
+3. **`src/colour_scale.rs` test module** (Rust, default-feature) — a THIRD hand-written mirror of the same
+   formula, as `const` test fixtures, used to prove (RED→GREEN, no `--features probe`
    needed) that the new corner doesn't collide with any colour patch or any other burn.
 4. **`tests/burn_payload_parity.rs`** (Rust, probe-gated, but embeds a C++ harness that calls the
    REAL `burn_geom::corner_placement` from step 1 directly) — extend `four_qr_rects`-style helpers
@@ -760,7 +747,7 @@ catch:
 previous burn's trailing edge") and paste the SAME numbers into all four — do not let each mirror
 independently "derive" a slightly different formula. Cross-check by computing the expected
 `band_x` for the production canvas (1920×1080) and asserting the SAME number shows up in the C++
-compile-check, the Rust Tier-0 test, and the probe-gated exclusion rects.
+compile-check, the Rust default-feature test, and the probe-gated exclusion rects.
 
 **When the formula gets a FALLBACK tier (a narrow-canvas clamp), the fallback is part of the
 formula too — sync it across all four, not just the happy-path number.** #463's initial
@@ -787,7 +774,7 @@ g++ -std=c++17 -O2 -Wall -Wextra -Werror /tmp/check.cpp -o /tmp/check && /tmp/ch
 This gave REAL RED→GREEN evidence for the C++ corner-placement change in this ticket (a
 deliberately-wrong `band_x` failed an assertion, then the correct formula passed) even though the
 actual `tests/burn_payload_parity.rs` harness that also exercises this header requires
-`--features probe` (CI-only, banned locally per this repo's Tier-0 policy). Do this for ANY
+`--features probe`. Do this for ANY
 freestanding vendored header (`burn-geom.hpp`, `burn-payload.hpp`, `burn-clock.hpp`, `burn-qr.hpp`
 all qualify — none pull OBS SDK headers) before trusting a C++ logic change to CI alone.
 
@@ -805,7 +792,7 @@ later:
    generic. Call them again with the new node's OWN frames + its OWN anchor burn run_id (falling
    back to the cam2-optical anchor exactly like strih/stream already do) + the SAME schedule.
 2. **The by-design decimation step is rate-derived per node**, never assumed. Extracted into
-   `src/recording_span_gate.rs::painted_tick_step(refresh_hz, capture_fps)` — a Tier-0 pure
+   `src/recording_span_gate.rs::painted_tick_step(refresh_hz, capture_fps)` — a pure
    function (was previously computed INLINE in the probe-gated binary and thus untestable). Reuse
    it for every new node at ITS OWN native capture rate (imag: 60Hz/60fps = step 1; stream:
    60Hz/30fps = step 2).
@@ -822,12 +809,11 @@ later:
    capture into a local `Option<Vec<RecordingFrame>>` ONCE up front and borrow it (`&imag_frames_opt`)
    at BOTH call sites instead of moving it — `if let Some(x) = &opt` twice, never `if let Some(x) = param`.
 5. **Testing:** the wiring itself only compiles under `--features probe` (recording-verdict.rs is
-   `required-features=["probe"]`), so its RED→GREEN can't be observed locally — write the
+   `required-features=["probe"]`) — write the
    integration test (mirroring `merge_path_computes_all_cambox_continuity_like_the_fused_path`'s
    shape: synthetic schedule + synthetic stream frames + synthetic new-node frames, asserting on
-   `v["all_cambox_continuity"]["<node>"]["overall_pass"]`) and trust CI to compile+run it. Pull the
-   genuinely NEW, rate-derived arithmetic (the step formula) out to a crate-root Tier-0 module
-   (mirrors `imag_tick_gate.rs`) so AT LEAST that piece is locally RED→GREEN-observable.
+   `v["all_cambox_continuity"]["<node>"]["overall_pass"]`). Pull the genuinely NEW, rate-derived
+   arithmetic (the step formula) out to a crate-root pure module (mirrors `imag_tick_gate.rs`).
 
 ## #583 — a node whose PRIMARY gate is the optical BEAT must NOT reuse the strict `window_segment` per segment
 
@@ -845,11 +831,11 @@ while the headline PASSED the whole recording — the two paths disagreed (#583,
 **The fix — route BOTH imag paths through ONE shared decision, never a second copy** (a divergent
 copy WAS the bug):
 
-1. **Pure Tier-0 combinator `imag_tick_gate::imag_zero_loss` / `ImagZeroLoss::is_zero_loss`** composes
+1. **Pure combinator `imag_tick_gate::imag_zero_loss` / `ImagZeroLoss::is_zero_loss`** composes
    the SAME #580v2 functions (`optical_beat_net_zero`/`is_live_no_copy`, `calibrate_burn_step`,
    `burn_step_contiguity`, `burn_present_ok`) and ANDs them IDENTICALLY to `NodeVerdict::is_zero` for
    imag (optical live-no-copy + #376 undecodable rate floor + burn present-floor/step-contiguity;
-   colour is not wired for imag). RED→GREEN observable locally on default features.
+   colour is not wired for imag). RED→GREEN observable on default features.
 2. **`recording-verdict.rs`: `partition_frames_by_window`** slices imag's `RecordingFrame`s into the
    SAME schedule windows via the SINGLE-SOURCE `recording_segments::place_frame_in_window` /
    `WindowPlacement` (now also used by `segment_continuity` — so the imag path and the strict stream
@@ -868,7 +854,7 @@ copy WAS the bug):
    floor is `reference_frames * 0.5` (frame-scale, scales with the window). Also do NOT re-apply the
    #575 whole-recording boundary trim per window — the 1s transition guard already trims each
    window's edges; re-trimming 3 more per short window distorts the beat.
-4. **PARITY lock (probe-gated, CI-only):** assert `full_chain.loss.imag.zero_loss ==
+4. **PARITY lock (probe-gated):** assert `full_chain.loss.imag.zero_loss ==
    all_cambox_continuity.imag.overall_pass` on ONE `build_and_print_verdict` call over the SAME
    synthetic imag sequence (a single window == the whole recording, guard 0) — benign beat both
    PASS, copy-freeze both FAIL. This closes the #583 copy/gap false-fail (proven on this sequence) —
@@ -890,8 +876,7 @@ alike. This is production-faithful (`RecordingFrame::tick`'s real doc says the s
 **any fixture that pairs a cam2 tick with a burn id MUST keep the burn id strictly BELOW the cam2
 id for the ENTIRE window**, or `.tick` silently resolves to the burn's id instead of cam2's,
 corrupting the optical contiguity check with no compile error and no obviously-wrong assertion —
-just a mysteriously-failing `nv.is_zero()` deep in CI (only observable there; this file requires
-`--features probe`, banned locally per Tier-0).
+just a mysteriously-failing `nv.is_zero()` (this file requires `--features probe`).
 
 **Live incident:** a #576 test used `cam2 = 100+i` alongside a NEW step-3 burn `= 10+3*i` over a
 60-frame window. `imag_window_with_burn`'s EXISTING doc comment already documents this exact trap
@@ -910,7 +895,7 @@ fixture using ONLY cam2 payloads (no burn at all) never has this risk.
 ## #575/#576 — imag's zero-loss gate is now a THREE-STAGE pure pipeline, all in `node_verdict_for_imag`
 
 Both landed together (PR #578, from the #572 live-rig investigation, run 554307): trim boundary
-→ calibrate step → check contiguity, each its own Tier-0 pure module/function so each stage is
+→ calibrate step → check contiguity, each its own pure module/function so each stage is
 independently unit-tested on default features:
 
 1. **`src/recording_boundary_trim.rs::trim_boundary_samples`** (#575) — excludes samples whose
@@ -962,9 +947,9 @@ burn-isolated recovery never looks for it): reserving a fresh `BURN_RUN_ID_*` co
 `recording_latency.rs` is NOT enough by itself — also (1) add it to `NODE_BURN_RUN_IDS` in
 `src/probe/recording.rs` (this file, the tick-exclusion list), (2) add it to `CAMERA_UNDER_TEST_NODES`
 in THREE separate places if it's a camera-under-test node (`recording-verdict.rs`,
-`recording_span_gate.rs`'s own Tier-0 copy, and check whether `switch_latency.rs`'s
+`recording_span_gate.rs`'s own default-feature copy, and check whether `switch_latency.rs`'s
 `OPTICAL_INJECTION_NODES` should include it too — these three have NO shared import by design,
-Tier-0 vs probe-gated split, so nothing forces them to stay in sync except review), (3) add a
+default-feature vs probe-gated split, so nothing forces them to stay in sync except review), (3) add a
 `--burn-camN-run-id` CLI flag + NodeSpec entry in `recording-verdict.rs`, (4) add it to EVERY
 `all_burns`/`latency_all_burns`-style exclusion array in `recording-verdict.rs` (there are
 multiple, in different code sections — `#186` contiguity, `#312` Phase-1 per-segment, `#624`

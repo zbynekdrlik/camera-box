@@ -19,7 +19,7 @@ section; THIS file is the implementation gotchas for the three scripts.
 
 Same shape as `scripts/netcfg-audit.sh` + `scripts/netcfg-drift-alert-watchdog.sh` +
 `scripts/lib/netcfg-audit.sh`:
-- `scripts/lib/ndi-portmap-health.sh` — PURE map-diff (no I/O), source-only, Tier-0-testable.
+- `scripts/lib/ndi-portmap-health.sh` — PURE map-diff (no I/O), source-only, testable.
 - `scripts/ndi-portmap-audit.sh` — the avahi read + OBS-instance isolation + baseline JSON;
   `--capture`/`--check`/`--json`; exit **0=STABLE / 3=CHANGED (a moved port) / 2=gather error / 4=baseline captured on another strih
   box**.
@@ -50,11 +50,10 @@ Same shape as `scripts/netcfg-audit.sh` + `scripts/netcfg-drift-alert-watchdog.s
   to `OBS_FRONTEND_EVENT_FINISHED_LOADING` via `Qt::QueuedConnection` — AFTER the scene-collection
   `ndi_filter` republishes — so filters win the low ports (libndi assigns 5961+ in creation order).
 
-## Tier-0 verify (#557 — no local cargo)
+## Verify
 
 `bash -n` + `shellcheck -S warning` all three scripts; the map-diff + audit + watchdog are proven by
-`tests/python/test_ndi_portmap_watchdog_1181.py`, which SHELLS OUT to bash (no cargo, no rig, no
-avahi). Offline: set `NDI_PORTMAP_AVAHI_FIXTURE=<file>` on the audit to feed captured `avahi-browse
+`tests/python/test_ndi_portmap_watchdog_1181.py`, which SHELLS OUT to bash (no rig, no avahi). Offline: set `NDI_PORTMAP_AVAHI_FIXTURE=<file>` on the audit to feed captured `avahi-browse
 -rtp _ndi._tcp` output instead of running avahi. Re-capture the checked-in baseline from a LIVE read
 only (`scripts/ndi-portmap-audit.sh --capture`), never hand-type it.
 

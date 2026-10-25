@@ -90,15 +90,12 @@ Plus the 1 µs pin tolerance (a whole-frame pin like 1000 ms must not count one 
   That is a skip plus a duplicate per such tick (bench: 5–7 drains/h at a 60 ms late-tick tail,
   none at 45 ms or at the live 10–30 ms tail).
 
-## Verification recipe (Tier-0, no cargo compile)
+## Verification recipe
 
-- Bench + authority: one `lib.rs` with `#[path]` mods for `genlock_grid`, `genlock_backlog`,
-  `genlock_n1_depth`, `genlock_grid_bench`; `clippy-driver --edition 2021 --test -D warnings`, run.
-- Probe mirror: the same plus `pub mod probe { #[path] pub mod genlock; }` (its N==1 tests live in
-  `src/probe/genlock_n1_tests.rs`, a `#[path]` child of `genlock`).
-- Parity gate: build a stub `camera_box` rlib from those three modules, compile
-  `tests/genlock_relock_selection_parity.rs` with `--extern camera_box=…`, `CARGO_MANIFEST_DIR` +
-  `CARGO_TARGET_TMPDIR` set. Mutation-proof it by pointing `CARGO_MANIFEST_DIR` at a scratch repo
+- Bench + authority: the `genlock_grid` / `genlock_backlog` / `genlock_n1_depth` /
+  `genlock_grid_bench` unit tests; the probe mirror's N==1 tests live in
+  `src/probe/genlock_n1_tests.rs` (a `#[path]` child of `genlock`, `--features probe`).
+- Parity gate: `tests/genlock_relock_selection_parity.rs`. Mutation-proof it by pointing `CARGO_MANIFEST_DIR` at a scratch repo
   with a mutated obs-source.c AND a copy of `obs-genlock-grid.h` (the on-grid case `#include`s it via `CARGO_MANIFEST_DIR`; without it every mutation reads RED for the wrong reason) (17 mutations, all RED at landing). The source-side
   `genlock_n1_tick_is_on_grid` has its own parity case against the REAL `obs-genlock-grid.h`.
 - The C wrappers (`genlock_n1_tick_wall_now`, `genlock_n1_tick_is_on_grid`, the routing, the hold
@@ -259,11 +256,10 @@ lock (a clamp under a slow arrival), a decided extension of "never exceeds".
 `shallow_depth ≤ base + 3` (≤ 4 at pin 3), `relocks=` flat, no `genlock-shallow-remeasure
 reason=unreachable|relocks` in steady state, and the songplayer gate ±40 ms with 0 dropouts.
 
-**Verification (Tier-0).** Authority + the grid-bench port + the two-clock A/V bench: one harness
-`lib.rs` with `#[path]` mods for `genlock_grid`, `genlock_backlog`, `genlock_n1_depth`,
-`genlock_grid_bench`, `genlock_audio_pairing` (the shallow bench is a `#[path]` child of the audio
-pairing bench, which is a child of `genlock_audio_pairing`); `rustc --test` + `clippy-driver --test
--D warnings`. The parity gate `c_n1_shallow_depth_matches_the_rust_authority_1367` (its own file
+**Verification.** Authority + the grid-bench port + the two-clock A/V bench: the `genlock_grid`,
+`genlock_backlog`, `genlock_n1_depth`, `genlock_grid_bench`, `genlock_audio_pairing` unit tests (the
+shallow bench is a `#[path]` child of the audio pairing bench, a child of `genlock_audio_pairing`).
+The parity gate `c_n1_shallow_depth_matches_the_rust_authority_1367` (its own file
 `tests/genlock_shallow_depth_parity_1367.rs` since review round 2 — the relock parity file was past
 the 1000-line budget) lifts the new helpers with the rest of the N==1 block through the shared
 directory module `tests/genlock_n1_lift/mod.rs` (`lift_converge_helper` / `converge_defines` /

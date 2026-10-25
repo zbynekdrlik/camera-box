@@ -93,10 +93,6 @@ described here. Now:
   random sample). Log lines, counters, and the #707/#1131/#1145/#1167 semantics are byte-identical;
   only the grid they count on moved. The stamp of a starvation REPEAT (`base − k · (10⁷ / fps)`)
   stays at most `k` × 100 ns above its slot's point — inside the slot, left as is.
-- **Tier-0 verify recipe used:** one standalone crate `lib.rs` with `#[path]` mods for
-  `genlock_grid` + `genlock_pacing` + `dupe_decimation/mod.rs` (no other `crate::` deps), built with
-  plain `rustc --test` and again with `clippy-driver --test -D warnings`; the old-code check =
-  archive the RED commit's `src/` files into a scratch tree with the new `tests.rs` copied in.
 - **Deploy (supervisor):** camera-box binary only (cambox fleet), no OBS change. Every camera's
   emitted frames move onto the stamp grid — a one-time phase shift of the emit instants (≤ the
   day's offset, 8.3 ms at 60 fps on 24.9.), absorbed by the strih/stream genlock FIFO. Watch each

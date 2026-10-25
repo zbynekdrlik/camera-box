@@ -135,14 +135,11 @@ test" section already documents that `bash -c '…source lib…'` is refused ins
 **What that section does NOT call out: running the script FILE DIRECTLY as an executable — `bash
 scripts/launch-obs-genlock.sh --box strih --force` (or `scripts/obs-self-heal-install.sh --box
 strih`) — is NOT refused**, and both scripts have a real CLI `main()` that prints their FULL emitted
-plan/program to stdout (they need no rig, no MCP, no network — pure string builders). This is a much
-stronger local verification path than the `python3 -c` fallbacks the ci-testing-gotchas.md section
-lists: capture the plan to a file, then Python-simulate every `.find()`/`.rfind()`/`.count()`
-assertion in the corresponding `tests/*.rs` file against the REAL emitted text (extract the raw
-program block between the plan's own two `# ----...` delimiter lines to get exactly what
-`run_sourced("build_launch_program ...")` would return). This proved BOTH a genuine pre-fix RED
-(exact byte offsets showing the bug) and a genuine post-fix GREEN for issue 1272 without any cargo
-compile, and caught the `.find()`-anchor-ambiguity gotcha above before it ever reached CI. Also
+plan/program to stdout (they need no rig, no MCP, no network — pure string builders). Capture the
+plan to a file and read the `tests/*.rs` anchors against the REAL emitted text (the raw program block
+between the plan's own two `# ----...` delimiter lines is exactly what
+`run_sourced("build_launch_program ...")` returns); for issue 1272 this showed the bug's exact byte
+offsets and caught the `.find()`-anchor-ambiguity gotcha above before it ever reached CI. Also
 works to diff an OLD committed version against the new one: `git show <sha>:scripts/foo.sh >
 /tmp/old.sh && bash /tmp/old.sh --box strih` runs the historical version standalone (if it sources
 a sibling lib via a `HERE`-relative path, recreate that relative layout under `/tmp` first — copy

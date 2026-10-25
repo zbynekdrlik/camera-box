@@ -24,7 +24,7 @@ back when the rig leaves development (the EVENT switch), see "The production exp
 
 | Part | Role |
 |---|---|
-| `scripts/camera_test_settings.py` | PURE decisions (pytest Tier-0): keys, baseline load/validate, parse the multi `--get-config` output, plan the sets, grade the read-back, the presence/ack/pinned matrix |
+| `scripts/camera_test_settings.py` | PURE decisions (pytest): keys, baseline load/validate, parse the multi `--get-config` output, plan the sets, grade the read-back, the presence/ack/pinned matrix |
 | `scripts/lib/camera-test-settings.sh` | THIN transport: sysfs presence probe, ssh + gphoto2 get/set, the issue-1271 guard before a set |
 | `scripts/camera-test-baseline.json` | the ONE baseline, raw gphoto2 values |
 | `scripts/recording-e2e.sh` | ONE bare call after the issue-808 relay pause + its temporary restore handler, before the reachability banner |
@@ -237,7 +237,7 @@ camera already at the baseline (no set, no snapshot); then put a hand-made snaps
 `rig-mode.sh event`: the camera must read the snapshot values back and the file must move aside;
 `rig-mode.sh test` + the next E2E re-apply the baseline and take a fresh snapshot.
 
-## Tier-0 verification
+## Verification
 
 `python3 -m pytest tests/python/test_camera_test_settings_1371.py` covers the whole step with no
 camera and no rig. The bash lib is driven end to end under the caller's `set -euo pipefail` with
@@ -250,8 +250,7 @@ reads or writes the real dev1 snapshot. The fake `systemctl` also answers `stop`
 relay stop), and the fake `gphoto2` records whether the snapshot was already on disk at the moment
 of the set. The snapshot/restore tests live in `tests/python/test_camera_prod_exposure_restore_1371.py`
 (they import this file's harness; keep each file under ~1000 lines). They drive
-`camera_test_settings_restore` under the caller's
-`set -euo pipefail` and assert the script continues after every failure. `rig-mode.sh` itself is
+`camera_test_settings_restore` under the caller's `set -euo pipefail` and assert the script continues after every failure. `rig-mode.sh` itself is
 checked statically (the call sits before the relay start, the note between the EVENT contract and
 the Discord send) and by sourcing it (the helpers are defined above its source-guard). The EVENT
 path cannot be run in a test; after editing it, run the old-vs-new literal-count anchor sweep over

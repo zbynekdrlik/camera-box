@@ -506,7 +506,7 @@ consumer still dials the IP — the obs-fleet row is `strih-snv|10.77.9.202|linu
 - **`scripts/lib/strih-provision.sh`** — the ONE place the strih-snv role FACTS + pure decisions live
   (the `obs-fleet.sh` / `camera-set.sh` source-only convention: `# airuleset:script-ok`, no
   top-level statements, no `set -euo pipefail` leak). Sourced by `setup-strih.sh`, `verify-strih.sh`
-  AND `tests/strih_provision_pure_functions.rs` (rustc-free Tier-0). Pure fns: the 10 NDI inputs,
+  AND `tests/strih_provision_pure_functions.rs`. Pure fns: the 10 NDI inputs,
   the namespaced outputs/republishes, the floor-3 latency, the strih CI artifact name, the
   dantesync-client args + client-not-master check, the profile facts, the MiniFuse-4/PipeWire audio
   route + fail-loud TODO predicate, the output-name + no-2nd-STRIH-SNV guards, and the verify
@@ -566,7 +566,7 @@ importing imag's 70 KB DRM-lease/encoder/picom machinery that strih-snv does not
 - **SCOPE: the 10 NDI INPUTS + one per-input scene + Studio Mode**, read from
   `/opt/camera-box/strih-seed.json` (setup-strih.sh step 6). The **5 STRIH-SNV NDI OUTPUTS are a
   SEPARATE ticket** — the seeder never touches `outputs`.
-- **Pure helpers (Tier-0 testable, no rig):** `parse_seed_manifest(text) → (inputs, outputs, latency)`;
+- **Pure helpers (testable, no rig):** `parse_seed_manifest(text) → (inputs, outputs, latency)`;
   `certified_genlock_settings(latency)` = the locked baseline `{ndi_bw_mode:0, genlock_fifo:True,
   ndi_sync:2, latency:<floor>}` (latency rides the manifest floor **3**, NOT obs_phase2's probe
   default 0); `seed_inputs(inputs, latency)` → one `{scene, input, ndi_source_name, settings}` per
@@ -602,8 +602,7 @@ importing imag's 70 KB DRM-lease/encoder/picom machinery that strih-snv does not
   /usr/local/bin/strih_scenes.py` (fail-loud if absent next to the script), alongside the manifest +
   `obs_phase2.py`. `strih-obs-start.sh` preflights `import strih_scenes` BEFORE launch and runs
   `--bootstrap` AFTER the `:4455` wait. Tests: `tests/python/test_strih_scenes_1317.py` (pure helpers +
-  the two static-anchor asserts on the launcher/setup wiring — a python assert over the script text,
-  so it runs in Tier-0 with no cargo).
+  the two static-anchor asserts on the launcher/setup wiring — a python assert over the script text).
 
 ## 2ME feedback inputs are NOT genlocked — per-input settings class (issue 1317, DONE)
 
@@ -734,7 +733,7 @@ to `/opt/obs-genlock` (on no loader path) and installed NO runtime packages, so 
   sorted-unique package list to `RUNTIME_PACKAGES.txt`. It **fails loud on any `=> not found`**. The
   runner that BUILT the binary is the only authority on what it links (a hand-curated 26.04 list rots
   on every soname bump). Its pure half `runtime_packages_from_ldd STAGE` is sourceable + guarded for
-  Tier-0 testing with fake `ldd`/`dpkg` on PATH. BOTH Linux jobs' Stage steps run it BEFORE
+  testing with fake `ldd`/`dpkg` on PATH. BOTH Linux jobs' Stage steps run it BEFORE
   `genlock-manifest.sh --stage` (a `Record runtime packages (#1317)` step) so `RUNTIME_PACKAGES.txt`
   is in the bundle manifest; it travels in BOTH bundles (a re-provisioned imag-nb hits the same gap).
 - **setup-strih.sh step 4 installs the packages, then the bundle into its /usr prefix.**
@@ -1197,7 +1196,7 @@ kernel scheduler still floats OBS threads onto whichever core the softirq is sta
 provisioning, fact-resolved (never a hard-coded IRQ number, which would break after a kernel/
 firmware change or a different USB port):
 
-- **`scripts/lib/strih-provision.sh`** pure resolvers, all Tier-0 testable over `/proc`-shaped
+- **`scripts/lib/strih-provision.sh`** pure resolvers, all testable over `/proc`-shaped
   fixtures (`SYS_ROOT` / `PROC_INTERRUPTS` / `CPU_ATOM_FILE` seams): `strih_nic_xhci_pci_function`
   (walk `readlink -f /sys/class/net/<iface>/device` up to the `usbN` root → the parent PCI
   function), `strih_nic_xhci_irqs` (the `/proc/interrupts` rows naming BOTH `xhci_hcd` AND that PCI
@@ -1349,7 +1348,7 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   change old 0 new 10000` then `old 10000 new 0` within a second, every ~14 s, and NM `Activation:
   starting connection` between them; `ethtool -s ... advertise` changes seem not to stick (each reset
   undoes them). Remove it: `nmcli connection modify <name> ethtool.ring-rx ""` + `nmcli con up`.
-- **Tests** (`tests/python/test_strih_nic_driver_1391.py`, Tier-0 pytest): the vendored tree, the facts,
+- **Tests** (`tests/python/test_strih_nic_driver_1391.py`, pytest): the vendored tree, the facts,
   the planner table over both `dkms status` shapes, the apply run through the path seams
   (`STRIH_NIC_DRV_KERNEL` / `_MODULES_ROOT` / `_SRC_ROOT` / `_UDEV_DIR` / `_BACKUP_DIR` / `_SYSROOT`) with a
   fake `dkms` state machine on PATH and a `modprobe`/`rmmod` that log FORBIDDEN, and item 36 over a fake

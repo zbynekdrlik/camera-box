@@ -48,8 +48,8 @@ waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_141
   must be used before the next `find_get_current_sources` / `find_destroy`.
 - `run_display_loop` (`src/ndi_display.rs`) logs a resolution only when it is FINAL (a pick, or
   the end of the window) and differs from the last one logged (`last_resolution` persists across
-  reconnects). The decision is the pure `preview_log_level`, so it is Tier-0-tested. Keep any
-  new log decision in the pure module, never inline in the CI-only closure.
+  reconnects). The decision is the pure `preview_log_level`, so it is unit-tested. Keep any
+  new log decision in the pure module, never inline in the closure.
 - The preferred name is matched EXACTLY, a change from the old receiver's substring match. A
   partial `--display "STRIH-SNV"` value no longer matches directly: it reaches the strih fallback
   only after the 30 s window, and a partial non-strih value never matches. Journal lines: `NDI display: preview source resolved to '<name>' (#1362)` (INFO),
@@ -57,14 +57,9 @@ waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_141
 - `DEFAULT_DISPLAY_SOURCE` in `src/main.rs` is sourced from the pure constant. Change the
   preferred strih ONLY there, in `preview_source::DEFAULT_PREVIEW_SOURCE`.
 
-## Verify (Tier-0; main.rs/ndi.rs/ndi_display.rs are CI-only compiles)
+## Verify
 
-- `rustc --edition 2021 --test src/preview_source.rs -o <scratch>/ps && <scratch>/ps`, plus
-  `clippy-driver --edition 2021 --test -D warnings src/preview_source.rs -o <scratch>/psc`.
-- The closure / borrow shape of the display-loop wiring can be checked with a small standalone
-  replica: `#[path]`-include the real `preview_source.rs` and pair it with a mock `connect_with`
-  of the same signature, then run it through `clippy-driver -D warnings`. That catches FnMut
-  capture / borrowck mistakes that CI would otherwise find first.
+- `cargo test --lib preview_source` + `cargo clippy --all-targets -- -D warnings`.
 - Live acceptance (supervisor, after the fleet deploy): read the journal on a cambox with a
   monitor (`journalctl -u camera-box | grep 'NDI display'`) for `preview source resolved to
   'STRIH-SNV (interkom)'` + `connected to 'STRIH-SNV (interkom)'`. The deploy's own service

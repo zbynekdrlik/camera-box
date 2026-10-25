@@ -42,8 +42,7 @@ in `av_sync_measure.py` is opt-in and a no-op without the flag (zero change to t
 `ffmpeg … -f mpegts "srt://0.0.0.0:PORT?mode=listener"` with NO player, `sleep 2`, assert the pid
 is still alive (a listener output blocks waiting for a caller — it does NOT fail on the missing
 peer). Gate it on `ffmpeg -protocols | grep -qw srt` (SKIP where the local ffmpeg lacks libsrt;
-run it on the bench OBS box). Everything is pure-stdlib / pytest, Tier-0 (`python -m pytest
-tests/python/test_srt_tap.py`) — no rig.
+run it on the bench OBS box). All pure-stdlib / pytest (`python -m pytest tests/python/test_srt_tap.py`), no rig.
 
 ## The vendored-C ff_data leak is FIXED (issue 1104, v1.7.0-dev.473)
 
@@ -61,11 +60,11 @@ repro of the ORIGINAL live crash remains the separate, un-done item the ticket d
 **Reusable pattern — asserting a leak-free on a vendored-C ORCHESTRATOR's early-returns.** A function
 like `ffmpeg_mpegts_finalize` calls ~8 helpers + macros, so it can't be feasibly lift-compiled (a
 partial lift is a retyped fragment, which `vendored-libobs-change-safety.md` cautions against). The
-Tier-0 proof is a static anchor gate (`tests/mpegts_finalize_frees_ff_data_1104.rs`, the
+proof is a static anchor gate (`tests/mpegts_finalize_frees_ff_data_1104.rs`, the
 `aux_sender_teardown_ordering_877` idiom): slice the function body (sig → first column-0 `}`), and for
 each failure-branch anchor assert the window [anchor → its FIRST `return false;`] contains the cleanup
 call — window-to-first-return scoping stops a LATER branch's free from satisfying an EARLIER branch.
 Bake in a mutation proof (the SAME predicate over a synthetic no-free fixture that MUST fail + a
-with-free one that MUST pass) and watch RED→GREEN via the #1026 `rustc --test` recipe. NB: this rule's
+with-free one that MUST pass) and watch RED→GREEN (#1026). NB: this rule's
 own `paths:` do NOT cover `vendor/obs-studio/plugins/obs-ffmpeg/**`, so it won't auto-load when editing
 that plugin — the mpegts output is the same vendored-C / CI-first-compile / anchor-gate class as libobs.
