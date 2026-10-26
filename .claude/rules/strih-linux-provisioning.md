@@ -71,7 +71,8 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   `STRIH_CAMERAS` (space-separated numbers = the cameras the VENUE has, issue 1413: strih-snv `2 3 5`,
   strih-pp `1 4 6 7`), `STRIH_CAMERA_DEV1_NET` (issue 1413: how dev1 dials the venue's camboxes for
   the dantesync fleet's camera rows -- `direct`, a `A.B.C` /24 prefix (strih-pp `10.76.9`, through
-  companion-pp), or `none` exactly when `STRIH_CAMERAS` is `none`). **Run-time facts stay derived on
+  companion-pp), or `none` exactly when `STRIH_CAMERAS` is `none`), `STRIH_BKSHADING_RELAYS` (issue
+  808: the shading panel's per-cambox relay overrides, `none` on the stream role; `.claude/rules/bkshading.md`). **Run-time facts stay derived on
   the box** — PL1 watts, the CPU plan, the NIC interface name.
 - **Changing strih-snv's `STRIH_CAMERAS` is a fact change with four test consumers** (issue 1413):
   regenerate the 1361 golden from the new facts (`render.sh`), and update the default-box tests that
