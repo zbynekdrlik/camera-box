@@ -29,6 +29,24 @@ concluding a letter is free or a check is missing; (2) when you find a gap like 
 your OWN new check, backfilling the missing older entry is optional polish, not required scope —
 note it (as this entry does) rather than silently expanding your diff to fix unrelated drift.
 
+## A provisioning fix is done only when the FLEET read-back passes (issue 1394)
+
+A closed ticket whose fix is provisioning (`setup-device.sh`, `create-usb-linux.sh`, a cambox lib a
+provisioner writes through) stays INCOMPLETE until every live cambox of BOTH venues carries it. On
+30.9.2026 three closed P0/P1 fixes (issue 1309's persistent journal + ssh self-heal, issue 1311's
+off-box logging, the issue-899 defect 2) were missing on cam5-cam7, and verify-device FAILed 5 of 7
+boxes: setup-device had them, the fleet never got them.
+- **The read-back:** `scripts/verify-fleet.sh` (SNV, `CAMERA_ACTIVE_SET` at the camera_resolve
+  addresses) AND `scripts/verify-fleet.sh --venue pp` (the Poprad cameras at their 10.76.9.x venue
+  address through companion-pp; verify-device.sh gets it in `VERIFY_DEVICE_IP`). Both must read
+  `FLEET CONVERGED`; an offline box is SKIPPED, not passed.
+- **Record the per-box result on the ticket** (PASS / FAIL with the failing check letters / SKIPPED)
+  before it closes. A box that needs a physical step (a reflash for a partition, an UEFI entry) is
+  listed per box as that step, never folded into a PASS.
+- **Getting a live box there:** the in-place apply programs (`cambox-ro-units-apply.sh`,
+  `cambox_zram_apply_program`, `cambox_hk_apply_program`, `ndi-discovery.sh --cambox-apply`) or a
+  setup-device re-run, never a remote reboot (enable-only parts take effect at the next physical one).
+
 ## `setup-device.sh` never starts/restarts services live — it only writes files + `enable`s
 
 Every STEP that touches a systemd unit (camera-box.service at STEP 7, cam2-painter.service at
