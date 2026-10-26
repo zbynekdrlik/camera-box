@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck extended-analysis=false
-# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 #
 # verify-imag.sh -- POST-PROVISION runtime acceptance gate for the imag notebook (#821), the imag
 # twin of scripts/verify-device.sh (#454) for the cam1-6 fleet. See the extended header comment

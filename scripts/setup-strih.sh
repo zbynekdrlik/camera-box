@@ -1,8 +1,6 @@
 #!/bin/bash
-# shellcheck extended-analysis=false
-# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
-# strih-snv One-Shot Setup (issue 1317) -- see the extended header below the strict-mode line.
-# Provisions a Linux notebook as the strih cutter/mix box; runs ON the box as root, idempotent.
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
+# strih-snv One-Shot Setup (issue 1317): provisions a Linux notebook as the strih cutter/mix box;
 set -euo pipefail
 # Pin a 022 umask: a caller running this under 077 (the 24.9.2026 deploy) made every directory it
 # created root-only, and the intercom-hub (User=newlevel) could not read its own config.

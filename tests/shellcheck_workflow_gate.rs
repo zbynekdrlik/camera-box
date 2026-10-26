@@ -173,7 +173,7 @@ fn shellcheck_pin_is_a_sha256_checked_release_new_enough_for_the_directive_1395(
 }
 
 /// Issue 1395: the dataflow-off directive stays exactly where the measurement put it. Each use is
-/// the second line of its file (file-scoped), carries its reason on the next line, and the set of
+/// the second line of its file (file-scoped), carries its reason on that line, and the set of
 /// files is the measured list: a new file needs a measurement, never a copy-paste.
 #[test]
 fn extended_analysis_off_only_in_the_measured_entry_scripts_with_a_reason_1395() {
@@ -195,15 +195,12 @@ fn extended_analysis_off_only_in_the_measured_entry_scripts_with_a_reason_1395()
         if !text.contains("shellcheck extended-analysis=") {
             continue;
         }
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(
-            lines.get(1).copied(),
-            Some("# shellcheck extended-analysis=false"),
-            "1395: {rel}: the directive must be line 2 (file-scoped, right after the shebang)"
-        );
+        // One line, so no line-budgeted script grows by more than one line.
+        let line2 = text.lines().nth(1).unwrap_or_default();
         assert!(
-            lines.get(2).is_some_and(|l| l.contains("issue 1395")),
-            "1395: {rel}: the directive's reason line must follow it"
+            line2.starts_with("# shellcheck extended-analysis=false # issue 1395: "),
+            "1395: {rel}: the directive must be line 2 (file-scoped, right after the shebang) \
+             with its reason on the same line, got {line2:?}"
         );
         assert_eq!(
             text.matches("shellcheck extended-analysis=").count(),

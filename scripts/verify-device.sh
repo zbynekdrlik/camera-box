@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck extended-analysis=false
-# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 #
 # verify-device.sh -- POST-REBOOT runtime acceptance gate for a freshly-provisioned camera-box
 # appliance (#454). This is the fourth and final phase of the unified provisioning method:

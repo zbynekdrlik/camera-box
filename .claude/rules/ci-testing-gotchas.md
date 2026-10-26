@@ -1846,8 +1846,10 @@ The CI lint `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` froze dev1 twi
   are 9+ GB; 120 small libs together stay at 120 MB.
 - **The fix:** CI installs the pinned release from `scripts/lib/shellcheck-pin.sh` (0.11.0,
   sha256-checked). The 11 entry scripts whose closure passed 1 GB carry a file-scoped
-  `extended-analysis=false` directive on line 2 with its reason on line 3. The full run now peaks
-  at 984 MB, rc 0, in ~3.5 min. 0.9.0 does not know the directive (SC1107) and still blows up, so
+  `extended-analysis=false` directive on line 2, its reason as a trailing `# issue 1395: ...` on
+  the SAME line: several of these scripts sit at a pytest line budget (setup-strih.sh at exactly
+  1000), and a two-line form broke 18 budget tests. The full run now peaks at 984 MB, rc 0, in
+  ~3.5 min. 0.9.0 does not know the directive (SC1107) and still blows up, so
   never lint with the distro binary.
 - **The set is pinned** by `tests/shellcheck_workflow_gate.rs`. A new heavy entry script gets the
   directive only after a measurement: per-file `-x` peak under the pinned binary, see below.

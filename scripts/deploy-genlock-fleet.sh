@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# shellcheck extended-analysis=false
-# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
+# shellcheck extended-analysis=false # issue 1395: dataflow over this file's sourced closure passed 1 GB RSS, see scripts/lib/shellcheck-pin.sh
 # scripts/deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across the whole rig.
 # See the extended header below for the full contract.
 set -euo pipefail
