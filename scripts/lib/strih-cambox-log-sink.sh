@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false
+# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
 # airuleset:script-ok source-only lib (defines the cambox log sink constants, renderers, the setup-strih
 # step 16k install and the verify-strih item 46 grader; no top-level statements besides constants and
 # lazy sources) -- the sibling scripts/lib/*.sh convention of NOT setting `set -euo pipefail` here:

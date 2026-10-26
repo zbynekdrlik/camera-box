@@ -800,14 +800,21 @@ jobs:
     # camera-box-grow-root.sh (first-boot growpart/resize2fs) that NO top-level script sources,
     # so the non-recursive glob would otherwise leave them uncovered. Gate at `-S warning`
     # (errors + warnings fail the build); the many style/info-level findings are a DELIBERATE
-    # floor, not weakening -- advisory-only, no CI block. GitHub's
-    # ubuntu-latest ships shellcheck preinstalled, so no separate install step is needed; the
-    # apt-get fallback below is a cheap belt-and-suspenders in case that ever changes upstream.
+    # floor, not weakening -- advisory-only, no CI block. Issue 1395: the job runs the PINNED
+    # shellcheck from scripts/lib/shellcheck-pin.sh (sha256-verified release, first on PATH), never
+    # the runner's preinstalled 0.9.0: the heaviest entry scripts carry a file-scoped
+    # `extended-analysis=false` directive that 0.9.0 does not know (SC1107), and without it the
+    # dataflow over their sourced closures passed 12 GB RSS.
     steps:
       - uses: actions/checkout@v4
 
-      - name: Ensure shellcheck is installed
-        run: command -v shellcheck >/dev/null || (sudo apt-get update && sudo apt-get install -y shellcheck)
+      - name: Install the pinned shellcheck (issue 1395)
+        run: |
+          set -euo pipefail
+          . scripts/lib/shellcheck-pin.sh
+          bin="$(shellcheck_pin_install "$RUNNER_TEMP/shellcheck-pin")"
+          dirname "$bin" >> "$GITHUB_PATH"
+          "$bin" --version
 
       - name: Shellcheck (warning severity, binary gate)
         run: shellcheck -S warning scripts/*.sh scripts/lib/*.sh

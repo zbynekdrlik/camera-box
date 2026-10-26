@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false
+# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
 # airuleset:script-ok source-only lib (function definitions + constants and the per-box maps, nothing executed) --
 # the scripts/lib/*.sh convention of NOT setting `set -euo pipefail` here: sourcing executes it in
 # the CALLER's shell (deploy-genlock-fleet.sh sets its own strict mode). Every step below checks its

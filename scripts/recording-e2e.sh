@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false
+# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
 # Recording-based full-path E2E (#105 / #7 / #179), dev1-orchestrated — TRUE STREAM-ONLY.
 #
 # The loss verdict + per-hop latency come ONLY from the strih/stream OBS PROGRAM

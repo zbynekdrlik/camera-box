@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false
+# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
 # rig-mode.sh — the DETERMINISTIC rig TEST-mode / EVENT-mode switch (#247).
 #
 # WHY (#247, the #246 live-event disaster): switching the rig between TEST mode (QR/E2E measurement)

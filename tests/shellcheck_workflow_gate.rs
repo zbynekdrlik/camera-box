@@ -78,3 +78,144 @@ fn shellcheck_wired_into_the_failure_notification_fanin() {
          run posts the same Discord alert as every other gate job. Got: {needs_line}"
     );
 }
+
+fn read_repo_file(rel: &str) -> String {
+    let path = format!("{}/{rel}", env!("CARGO_MANIFEST_DIR"));
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+}
+
+/// Every `scripts/*.sh` + `scripts/lib/*.sh` file, the exact set the CI job lints.
+fn linted_scripts() -> Vec<(String, String)> {
+    let root = env!("CARGO_MANIFEST_DIR");
+    let mut out = Vec::new();
+    for dir in ["scripts", "scripts/lib"] {
+        let entries = fs::read_dir(format!("{root}/{dir}")).expect("read scripts dir");
+        for e in entries {
+            let p = e.expect("dir entry").path();
+            if p.extension().and_then(|x| x.to_str()) == Some("sh") {
+                let rel = format!("{dir}/{}", p.file_name().unwrap().to_string_lossy());
+                let text = fs::read_to_string(&p).unwrap_or_default();
+                out.push((rel, text));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Issue 1395: the job lints with the PINNED shellcheck from scripts/lib/shellcheck-pin.sh, put
+/// first on PATH before the lint step, never the runner's preinstalled 0.9.0 (which does not know
+/// the `extended-analysis` directive the heavy entry scripts carry and passes 12 GB RSS without it).
+#[test]
+fn shellcheck_job_installs_the_pinned_release_before_the_lint_1395() {
+    let wf = read_ci_workflow();
+    let job_start = wf.find("  shellcheck:\n").expect("shellcheck: job header");
+    let job_end = wf[job_start..]
+        .find("\n  deploy-fleet:")
+        .map(|i| job_start + i)
+        .unwrap_or(wf.len());
+    let job = &wf[job_start..job_end];
+    let install = job
+        .find(". scripts/lib/shellcheck-pin.sh")
+        .expect("1395: the shellcheck job must source scripts/lib/shellcheck-pin.sh");
+    let path = job
+        .find(">> \"$GITHUB_PATH\"")
+        .expect("1395: the pinned binary's directory must go on GITHUB_PATH");
+    let lint = job
+        .find("shellcheck -S warning scripts/*.sh scripts/lib/*.sh")
+        .expect("lint step");
+    assert!(
+        install < path && path < lint,
+        "1395: install, then PATH, then the lint step"
+    );
+    assert!(
+        job.contains("shellcheck_pin_install \"$RUNNER_TEMP/shellcheck-pin\""),
+        "1395: the job must install through the one pin function"
+    );
+    assert!(
+        !job.contains("apt-get install -y shellcheck"),
+        "1395: no fallback to the distro shellcheck (0.9.0 reports the directive as SC1107)"
+    );
+}
+
+/// Issue 1395: the pin is a real, sha256-checked release, at least 0.10.0 (the first release that
+/// knows `extended-analysis`).
+#[test]
+fn shellcheck_pin_is_a_sha256_checked_release_new_enough_for_the_directive_1395() {
+    let lib = read_repo_file("scripts/lib/shellcheck-pin.sh");
+    let value = |key: &str| -> String {
+        let prefix = format!("{key}=\"");
+        let line = lib
+            .lines()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("1395: {key} missing"));
+        line[prefix.len()..].trim_end_matches('"').to_string()
+    };
+    let ver = value("SHELLCHECK_PIN_VERSION");
+    let parts: Vec<u32> = ver
+        .split('.')
+        .map(|p| p.parse().expect("numeric version"))
+        .collect();
+    assert_eq!(parts.len(), 3, "1395: a full x.y.z pin, got {ver}");
+    assert!(
+        (parts[0], parts[1]) >= (0, 10),
+        "1395: extended-analysis needs shellcheck >= 0.10.0, pinned {ver}"
+    );
+    let sha = value("SHELLCHECK_PIN_SHA256");
+    assert!(
+        sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit()),
+        "1395: the pin carries a 64-hex sha256, got {sha}"
+    );
+    assert!(
+        lib.contains("sha256sum -c"),
+        "1395: the download is checked against the pin"
+    );
+}
+
+/// Issue 1395: the dataflow-off directive stays exactly where the measurement put it. Each use is
+/// the second line of its file (file-scoped), carries its reason on the next line, and the set of
+/// files is the measured list: a new file needs a measurement, never a copy-paste.
+#[test]
+fn extended_analysis_off_only_in_the_measured_entry_scripts_with_a_reason_1395() {
+    const MEASURED: [&str; 11] = [
+        "scripts/deploy-genlock-fleet.sh",
+        "scripts/lib/strih-cambox-log-sink.sh",
+        "scripts/lib/strih-provision.sh",
+        "scripts/lib/strih-snv-deploy.sh",
+        "scripts/recording-e2e.sh",
+        "scripts/rig-mode.sh",
+        "scripts/setup-device.sh",
+        "scripts/setup-strih.sh",
+        "scripts/verify-device.sh",
+        "scripts/verify-imag.sh",
+        "scripts/verify-strih.sh",
+    ];
+    let mut found = Vec::new();
+    for (rel, text) in linted_scripts() {
+        if !text.contains("shellcheck extended-analysis=") {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines.get(1).copied(),
+            Some("# shellcheck extended-analysis=false"),
+            "1395: {rel}: the directive must be line 2 (file-scoped, right after the shebang)"
+        );
+        assert!(
+            lines.get(2).is_some_and(|l| l.contains("issue 1395")),
+            "1395: {rel}: the directive's reason line must follow it"
+        );
+        assert_eq!(
+            text.matches("shellcheck extended-analysis=").count(),
+            1,
+            "1395: {rel}: one directive per file"
+        );
+        found.push(rel);
+    }
+    let mut measured: Vec<String> = MEASURED.iter().map(|s| s.to_string()).collect();
+    measured.sort();
+    assert_eq!(
+        found, measured,
+        "1395: the directive set is the measured set"
+    );
+}

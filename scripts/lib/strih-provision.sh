@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# shellcheck extended-analysis=false
+# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
 # airuleset:script-ok source-only lib (defines the strih role FACTS + pure decision helpers; its
 # only top-level statement sources the equally source-only fact loader) -- matches the sibling
 # scripts/lib/*.sh convention (obs-fleet.sh, camera-set.sh, genlock-markers.sh) of deliberately NOT setting `set -euo pipefail` here: sourcing

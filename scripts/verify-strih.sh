@@ -1,4 +1,6 @@
 #!/bin/bash
+# shellcheck extended-analysis=false
+# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
 # verify-strih.sh (issue 1317) -- see the extended header below the strict-mode line.
 # strih-snv acceptance gate: RUN ON the box, read-only, fail loud on any missing item.
 set -euo pipefail

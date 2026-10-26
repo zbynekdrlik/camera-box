@@ -1,4 +1,6 @@
 #!/bin/bash
+# shellcheck extended-analysis=false
+# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
 # strih-snv One-Shot Setup (issue 1317) -- see the extended header below the strict-mode line.
 # Provisions a Linux notebook as the strih cutter/mix box; runs ON the box as root, idempotent.
 set -euo pipefail

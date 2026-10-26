@@ -1,4 +1,6 @@
 #!/bin/bash
+# shellcheck extended-analysis=false
+# (issue 1395: shellcheck dataflow over this file + its sourced closure passed 1 GB RSS; see scripts/lib/shellcheck-pin.sh)
 #
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance

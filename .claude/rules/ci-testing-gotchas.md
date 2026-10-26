@@ -14,6 +14,7 @@ paths:
   - "scripts/*-alert-watchdog.sh"
   - "scripts/lib/rig-lease.sh"
   - "scripts/lib/rig-lease.sh"
+  - "scripts/lib/shellcheck-pin.sh"
 ---
 
 # CI + bash-test-harness gotchas (#826)
@@ -1833,3 +1834,32 @@ variables verify-strih sets at its top are unset there, so an argument like `"${
 slice with "unbound variable" before any stub runs. Let the lib derive what it needs (a checkout root
 from `${BASH_SOURCE[0]}`, the box from `strih_box_loaded_name`) and add the new grader to the
 harness's stub list next to its siblings.
+
+## NEVER run the full shellcheck locally without `MemoryMax`, and only with the pinned binary (issue 1395)
+
+The CI lint `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` froze dev1 twice (2.35 GB, then
+2.9 GB RSS, the box swapping). Measured 26.10.2026: with the distro 0.9.0 the full run passed 12 GB.
+- **The culprit is not one construct.** A multi-file run follows every `# shellcheck source=`
+  whose target is also an input file, even without `-x`. So each entry script is analysed with its
+  whole sourced closure, and the dataflow (CFG) analysis grows superlinearly with that program.
+  recording-e2e.sh alone (no following) is 1.83 GB; setup-strih / verify-strih with their closure
+  are 9+ GB; 120 small libs together stay at 120 MB.
+- **The fix:** CI installs the pinned release from `scripts/lib/shellcheck-pin.sh` (0.11.0,
+  sha256-checked). The 11 entry scripts whose closure passed 1 GB carry a file-scoped
+  `extended-analysis=false` directive on line 2 with its reason on line 3. The full run now peaks
+  at 984 MB, rc 0, in ~3.5 min. 0.9.0 does not know the directive (SC1107) and still blows up, so
+  never lint with the distro binary.
+- **The set is pinned** by `tests/shellcheck_workflow_gate.rs`. A new heavy entry script gets the
+  directive only after a measurement: per-file `-x` peak under the pinned binary, see below.
+- **Local full run** (one Bash call per line in a worktree lane, or from a script file):
+  ```bash
+  . scripts/lib/shellcheck-pin.sh
+  sc="$(shellcheck_pin_install "$HOME/.cache/shellcheck-pin")"
+  systemd-run --user --scope -p MemoryMax=2G -p MemorySwapMax=0 "$sc" -S warning scripts/*.sh scripts/lib/*.sh
+  ```
+  A killed run (exit 137 / signal 9) means a script's closure grew past the bound. Find it per file:
+  `systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 "$sc" -x -S warning <file>`
+  under `/usr/bin/time -f %M`; the file over 1 GB needs the directive.
+- **A comment line that starts with the word `shellcheck`** (`# shellcheck 0.10.0+ knows`,
+  `#   shellcheck_pin_install DIR`) is parsed as a directive and fails SC1073 (an error). Reflow the
+  comment so the word never starts it.
