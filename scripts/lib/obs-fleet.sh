@@ -309,6 +309,11 @@ obs_fleet_boxes() {
 obs_fleet_resolve_host() {
   # issue 1317 part 4 review: time-bounded -- strih_platform / the class gate now resolve an unknown
   # NAME through this seam, so a stalled DNS resolver must never stall every caller.
+  # issue 1426: OBS_FLEET_RESOLVE_CMD <host> -> the address, a test seam like OBS_FLEET_IDENTITY_CMD.
+  if [ -n "${OBS_FLEET_RESOLVE_CMD:-}" ]; then
+    "$OBS_FLEET_RESOLVE_CMD" "${1:-}" 2>/dev/null | head -n 1 || true
+    return 0
+  fi
   timeout "${OBS_FLEET_RESOLVE_TIMEOUT:-2}" getent ahosts "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
 }
 
@@ -323,6 +328,11 @@ obs_fleet_resolve_host_v4() {
 # subshell + timeout bounds a hung connect. Override in a test to stub the probe.
 obs_fleet_status_probe() {
   local host="${1:-}" port="${2:-}"
+  # issue 1426: OBS_FLEET_STATUS_PROBE_CMD <host> <port> -> exit 0 = the port answers (a test seam).
+  if [ -n "${OBS_FLEET_STATUS_PROBE_CMD:-}" ]; then
+    if "$OBS_FLEET_STATUS_PROBE_CMD" "$host" "$port" >/dev/null 2>&1; then printf '1'; else printf '0'; fi
+    return 0
+  fi
   if timeout "${OBS_FLEET_STATUS_TIMEOUT:-4}" bash -c "exec 3<>/dev/tcp/${host}/${port}" 2>/dev/null; then
     printf '1'
   else
