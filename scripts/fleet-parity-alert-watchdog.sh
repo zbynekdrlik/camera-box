@@ -9,9 +9,11 @@ set -euo pipefail
 # nothing compared the two venues, so nothing paged.
 #
 # ONE pass (a dev1 timer, every 30 min; dev1 is the only machine that reaches both venues):
-#   1. OBS genlock build: every box of the obs-fleet `build-parity` facet (strih/stream/resolume of
-#      SNV and PP). An away traveling box (PP powered off, a traveling resolume) is AWAY -- normal,
-#      never a page. A home box: `:8899` `genlock_build_sha`. The pure decision
+#   1. OBS genlock build: every box of the obs-fleet `build-parity` facet (strih + stream of SNV and
+#      PP; the cg OBS resolume boxes are out, owner 16.10.2026). An away traveling box (PP powered
+#      off) is AWAY -- normal, never a page. A box is home when its OBS-WS :4455 OR its :8899
+#      answers (an idle box with OBS stopped still serves its installed build). A home box:
+#      `:8899` `genlock_build_sha`. The pure decision
 #      scripts/fleet_build_parity_decision.py grades the set (OK / DRIFT / INCOMPLETE / UNKNOWN).
 #   2. dantesync: scripts/dantesync-version-gate.sh --fleet (it skips an away reach / traveling node
 #      by itself). Exit 20 = a present node is not on DANTESYNC_VERSION_PIN.
@@ -73,8 +75,15 @@ log() { printf '%s [fleet-parity-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:
 
 # box_entry NAME HOST -> one JSON object for the decision module (stdout).
 box_entry() {
-  local box="$1" host="$2" body sha
-  if ! obs_fleet_poll_now "$box"; then
+  local box="$1" host="$2" body sha rc=0
+  # The build is a fact of the installed bundle, not of a running OBS: an idle box whose OBS is
+  # stopped (OBS-WS :4455 refused) is still home when its BundleStateServer :8899 answers.
+  obs_fleet_poll_now "$box" || rc=$?
+  if [ "$rc" -eq 1 ]; then
+    rc=0
+    OBS_FLEET_HOME_PORT=8899 obs_fleet_poll_now "$box" || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
     printf '{"box": "%s", "state": "away"}' "$box"
     return 0
   fi

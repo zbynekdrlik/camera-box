@@ -271,7 +271,7 @@ obs_fleet_facet_members() {
     win-baseline)  _obs_fleet_windows_rows 'stream-snv resolume-snv' ;;   # issue 1357/1474: the Windows OBS-box baseline, Windows rows only
     audio-mixer)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1381: mixer real time + VBAN pacer loss
     obs-handles)   printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp' ;;   # issue 1406: the OBS process handle / fd count
-    build-parity)  printf 'strih-snv stream-snv resolume-snv strih-pp stream-pp resolume-pp' ;;   # issue 1426: one OBS genlock build across both venues
+    build-parity)  printf 'strih-snv stream-snv strih-pp stream-pp' ;;   # issue 1426: one OBS genlock build across both venues; the cg OBS resolume boxes are out (owner 16.10.2026: minimal priority)
     *)
       echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles build-parity)" >&2
       return 1
