@@ -237,7 +237,8 @@ def test_netconsole_unit_is_a_valid_oneshot_for_systemd(tmp_path):
 
 _AK_GREEN = ("NC_SVC_ENABLED=enabled\nNC_SVC_ACTIVE=active\nNC_SVC_RESULT=success\nNC_SCRIPT_X=yes\n"
              "NC_ENABLED=1\nNC_REMOTE_IP=10.77.9.202\nNC_REMOTE_PORT=514\nJU_SVC_ENABLED=enabled\n"
-             "JU_URL=http://10.77.9.202:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state")
+             "JU_URL=http://10.77.9.202:19532\nJU_STATE_SAVE=--save-state=/run/systemd/journal-upload/state\n"
+             "CONSOLE_LOGLEVEL=7\nKMSG_REDIRECT=12")
 
 
 def test_ak_gathers_and_names_a_failed_netconsole_result():
