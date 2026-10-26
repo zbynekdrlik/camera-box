@@ -2870,11 +2870,12 @@ fn committed_bkshading_unit_matches_the_printer() {
     );
 }
 
-/// The config seed carries the operator bind + the cam1..cam7 panel (owner ruling 5977504457: one
-/// block per cambox, a handheld is never its own panel) and is valid TOML; the bind defaults to :8770
-/// and an arg overrides it. The per-box relay overrides: tests/python/test_bkshading_relays_fact_808.py.
+/// The config seed carries the operator bind + the box's OWN venue cameras (owner 26.10.2026: strih-snv
+/// 2 3 5, strih-pp 1 4 6 7; owner ruling 5977504457: one block per cambox, a handheld is never its own
+/// panel) and is valid TOML; the bind defaults to :8770 and an arg overrides it. The per-box relay
+/// overrides: tests/python/test_bkshading_relays_fact_808.py.
 #[test]
-fn bkshading_config_text_seeds_cam1_to_cam7_and_is_valid_toml() {
+fn bkshading_config_text_seeds_the_venue_cameras_and_is_valid_toml() {
     let (code, cfg, _e) = run_sourced(&[], "strih_bkshading_config_text");
     assert_eq!(code, 0);
     assert!(
@@ -2882,23 +2883,19 @@ fn bkshading_config_text_seeds_cam1_to_cam7_and_is_valid_toml() {
         "default operator bind :8770: {cfg}"
     );
     assert!(
-        cfg.contains("id = \"cam1\""),
-        "must carry the cam1 camera: {cfg}"
+        cfg.contains("id = \"cam2\""),
+        "must carry the cam2 camera: {cfg}"
     );
     assert!(
-        cfg.contains("transport = \"cambox-relay\""),
-        "cam1 is reached through the cambox relay: {cfg}"
+        cfg.contains("address = \"cam2.lan:8771\""),
+        "cam2 relay address (host-independent of the service): {cfg}"
     );
     assert!(
-        cfg.contains("address = \"cam1.lan:8771\""),
-        "cam1 relay address (host-independent of the service): {cfg}"
+        cfg.contains("ndi_preview = \"CAM2 (usb)\""),
+        "cam2 NDI preview name: {cfg}"
     );
-    assert!(
-        cfg.contains("ndi_preview = \"CAM1 (usb)\""),
-        "cam1 NDI preview name: {cfg}"
-    );
-    assert!(cfg.contains("grab_fps = 60"), "cam1 grab fps: {cfg}");
-    for n in 1..=7 {
+    assert!(cfg.contains("grab_fps = 60"), "cam2 grab fps: {cfg}");
+    for n in [2, 3, 5] {
         assert_eq!(
             cfg.matches(&format!("id = \"cam{n}\"\n")).count(),
             1,
@@ -2907,8 +2904,8 @@ fn bkshading_config_text_seeds_cam1_to_cam7_and_is_valid_toml() {
     }
     assert_eq!(
         cfg.matches("[[camera]]").count(),
-        7,
-        "cam1..cam7 only: {cfg}"
+        3,
+        "strih-snv's venue cameras only (2 3 5): {cfg}"
     );
     assert!(
         !cfg.contains("id = \"handheld"),
