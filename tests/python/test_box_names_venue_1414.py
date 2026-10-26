@@ -231,7 +231,9 @@ def test_the_dantesync_fleet_names_follow_the_obs_fleet():
         assert old not in names, names
     rows = {line.split("|")[0]: line for line in r.stdout.splitlines() if line.strip()}
     assert rows["strih-snv"].startswith("strih-snv|obs:strih-snv|linux|ntp-master|")
-    assert rows["stream-snv"].startswith("stream-snv|obs:stream-snv|windows|video|")
+    # issue 1462: stream-snv is Linux since 22.10.2026; a windows row sends the dantesync roll down the
+    # Windows ssh path (26.10.2026: --fleet read stream-snv as <unread> / UNKNOWN).
+    assert rows["stream-snv"].startswith("stream-snv|obs:stream-snv|linux|video|")
     assert rows["resolume-snv"].startswith("resolume-snv|obs:resolume-snv|windows|video|obsfleet|")
 
 
