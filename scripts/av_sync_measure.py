@@ -4,9 +4,9 @@
 Wraps syncnet_python (pretrained SyncNet + S3FD): measures the audio-visual offset of a clip
 of the PROGRAM output and maps it onto the one knob the operator actually turns — the venue's
 PROGRAM AUDIO sync offset (issue 1459: `--knob-input`, the stream box fact STRIH_PROGRAM_AUDIO_INPUT,
-stream-snv `mbc`, stream-pp `Zvuk z mixu`; without it the old 'NDI 2ME PGM' latency text). Confidence gating makes it self-managing: windows without a
-usable face/lip correlation (band wide shots, graphics) report as unmeasurable and are simply
-skipped — nobody has to tell it "now there is speech".
+stream-snv `mbc`, stream-pp `Zvuk z mixu`; without it the old 'NDI 2ME PGM' latency text).
+Confidence gating makes it self-managing: windows without a usable face/lip correlation (band wide
+shots, graphics) report as unmeasurable and are simply skipped — nobody has to tell it "now there is speech".
 
 Sign convention (VALIDATED 2026-07-19 on synthetic shifts, exact to the frame):
   SyncNet offset +N frames  = audio LEADS video by N*40 ms (video late)

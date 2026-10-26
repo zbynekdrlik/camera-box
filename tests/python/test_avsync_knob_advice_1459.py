@@ -260,7 +260,7 @@ def test_measurer_resolves_the_knob_input_from_the_venue(tmp_path):
 # ── the dev1 report pass hands the venue's knob input to the decider ─────────────────────────────
 
 
-def test_watchdog_report_pass_passes_the_venue_knob_input(tmp_path):
+def _watchdog_report_argv(tmp_path, extra=None):
     fake = tmp_path / "fake_report.py"
     fake.write_text("import sys\nprint('ARGV ' + ' | '.join(sys.argv[1:]))\n")
     env = {
@@ -275,8 +275,28 @@ def test_watchdog_report_pass_passes_the_venue_knob_input(tmp_path):
         # pp forced AWAY (no live probe): the report pass still runs for an away venue.
         "OBS_FLEET_HOME": "stream-snv",
     }
+    env.update(extra or {})
     proc = subprocess.run(
         ["bash", str(_WATCHDOG), "--dry-run"], env=env, capture_output=True, text=True
     )
     assert proc.returncode == 0, proc.stderr
-    assert "--knob-input | Zvuk z mixu" in proc.stderr, proc.stderr
+    argv = [ln for ln in proc.stderr.splitlines() if "WOULD post report message" in ln]
+    assert len(argv) == 1, proc.stderr
+    return argv[0]
+
+
+def test_watchdog_report_pass_passes_the_venue_knob_input(tmp_path):
+    assert "--knob-input | Zvuk z mixu" in _watchdog_report_argv(tmp_path)
+
+
+def test_watchdog_report_pass_without_a_knob_input_passes_no_flag(tmp_path):
+    # A venue whose stream box has no fact file (a declared Windows row): no --knob-input, the report
+    # still runs under the watchdog's `set -u` with an empty argument array.
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    line = _watchdog_report_argv(tmp_path, {
+        "STRIH_BOXES_DIR": str(facts),
+        "AVSYNC_DECLARED_STREAM_VENUES": "pp|stream-pp|stream-pp",
+    })
+    assert "--knob-input" not in line, line
+    assert "--state" in line and "--rows" in line, line

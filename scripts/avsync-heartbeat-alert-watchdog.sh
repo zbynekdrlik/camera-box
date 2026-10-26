@@ -274,8 +274,9 @@ run_report_pass() {
     cp -f "$seed_state" "$work_state" 2>/dev/null || true
   fi
   # issue 1459: the NESEDÍ advice names the venue's program audio sync offset (the stream box fact);
-  # none known (a box with no fact file) = the decider keeps its old 2ME PGM wording.
-  knob="$(avsync_venue_audio_input "$VENUE" 2>/dev/null || true)"
+  # none known (a box with no fact file) = the decider keeps its old 2ME PGM wording. A fact file
+  # that does not parse names itself on stderr (the timer journal), never silently.
+  knob="$(avsync_venue_audio_input "$VENUE" || true)"
   knob_args=()
   [ -n "$knob" ] && knob_args=(--knob-input "$knob")
   msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$work_state" --rows "$rows_file" \
