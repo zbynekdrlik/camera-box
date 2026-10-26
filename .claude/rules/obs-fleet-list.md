@@ -200,6 +200,19 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   seams: `OBS_SESSION_OBS_PHASE2_DIR` (a stub `obs_phase2.py`), `OBS_SESSION_LINUX_SSH_TIMEOUT`.
   Same shape for any future per-class consumer: facet policy decides membership, the class picks
   (or refuses) the probe. Tests: `tests/python/test_obs_session_linux_1474.py`.
+- **`obs_fleet_poll_now` checks WHICH machine answers (issue 1357, closes the .201 collision
+  residual in code).** A `traveling` box that is home is also identity-checked: the computer name that
+  answers at the row host (`hostname` over ssh, seam `OBS_FLEET_IDENTITY_CMD` = `<cmd> <name> <host>`)
+  must equal, case-insensitively, the ONE declaration `OBS_FLEET_IDENTITY` in the lib
+  (`resolume-snv=RESOLUME-SNV strih-pp=strih-pp stream-pp=stream-pp`; resolume-pp undeclared until its
+  name is read live; fixed-IP rows carry none). A mismatch or no readable name = **rc 2** with
+  `OBS_FLEET_IDENTITY_REASON` naming the machine that answered + one stderr line: win-baseline-check
+  grades the box UNKNOWN and never copies its gather, obs-session and obs-liveness log UNKNOWN and
+  never probe it (obs-liveness now gates resolume through `obs_fleet_poll_now`, not `obs_fleet_is_home`);
+  every other reader's `if ! obs_fleet_poll_now` skips it like an away box. `OBS_FLEET_HOME` set
+  without the identity seam is still the authoritative forced state (no read), so offline suites stay
+  offline. Tests: `tests/python/test_obs_fleet_identity_1357.py`. A new DHCP-named row adds its name
+  to `OBS_FLEET_IDENTITY` at go-live.
 - **`obs_fleet_poll_now <name>` is the traveling/retired gate for a NEW per-box loop** (the three
   issue-1317 part-2 consumers use it; obs-liveness / network-reach predate it and still call
   `obs_fleet_is_home` for resolume themselves). `always` →

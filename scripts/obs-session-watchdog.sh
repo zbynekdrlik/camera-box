@@ -235,6 +235,8 @@ obs_session_box_env() {
 # `resolume-snv`, and the probe sees its AHK watcher in session 1 -- so today the address IS
 # RESOLUME-SNV. Narrow (needs a foreign Windows OBS at the address AND a session-0 fault), same
 # residual obs-liveness documents; confirm identity again if the event-LAN DHCP lease moves.
+# CLOSED IN CODE (issue 1357): obs_fleet_poll_now reads the computer name that answers and returns 2
+# (UNKNOWN, never probed) unless it is the OBS_FLEET_IDENTITY name of the row.
 # <NAME>_HOST (STREAM_SNV_HOST, RESOLUME_SNV_HOST, ...) repoints a box; otherwise the roster's host is
 # dialled. has_ahk is the shared obs-fleet fact (obs_fleet_has_ahk), never a per-script table.
 obs_session_targets() {
@@ -250,7 +252,12 @@ obs_session_targets() {
         continue
         ;;
     esac
-    if ! obs_fleet_poll_now "$name"; then
+    local poll_rc=0
+    obs_fleet_poll_now "$name" 2>/dev/null || poll_rc=$?
+    if [ "$poll_rc" = 2 ]; then
+      log "$name: UNKNOWN -- identity check failed ($OBS_FLEET_IDENTITY_REASON), not probed, no page (issue 1357)"
+      continue
+    elif [ "$poll_rc" != 0 ]; then
       log "$name: skipped -- traveling box is away (obs_fleet_poll_now), nothing to probe this pass"
       continue
     fi

@@ -15,6 +15,8 @@ set -euo pipefail
 # file it copies is the box's only trace (overwritten on every run).
 #
 # A traveling box that is away (obs_fleet_poll_now false -- resolume while not home) is SKIPPED.
+# A box where ANOTHER machine answers (or none says its name; obs_fleet_poll_now rc 2, the issue-1357
+# identity check against the obs-fleet OBS_FLEET_IDENTITY name) is UNKNOWN naming it -- nothing copied.
 #
 # Output, per box:  box=<b> item=<i> verdict=<V> detail=<text>   (one line per item)
 #                   box=<b> win_baseline=<OK|DRIFT|UNKNOWN|SKIPPED ...>[ drift=<items>][ unknown=<items>]
@@ -85,7 +87,15 @@ for box in $BOXES; do
     UNKNOWNS="${UNKNOWNS:+$UNKNOWNS }$box"
     continue
   fi
-  if ! obs_fleet_poll_now "$box"; then
+  poll_rc=0
+  obs_fleet_poll_now "$box" 2>/dev/null || poll_rc=$?
+  if [ "$poll_rc" = 2 ]; then
+    # issue 1357: another machine answers at the box's address (or none says its name) -- UNKNOWN,
+    # and the gather program is never copied onto it.
+    echo "box=$box win_baseline=UNKNOWN (identity: $OBS_FLEET_IDENTITY_REASON at $host -- nothing copied)"
+    UNKNOWNS="${UNKNOWNS:+$UNKNOWNS }$box"
+    continue
+  elif [ "$poll_rc" != 0 ]; then
     echo "box=$box win_baseline=SKIPPED (traveling box away -- obs_fleet_is_home false)"
     continue
   fi

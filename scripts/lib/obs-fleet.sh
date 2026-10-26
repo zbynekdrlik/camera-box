@@ -436,13 +436,91 @@ obs_fleet_refuse_linux_target() {
 # `retired` box never. A name with NO row (an ops `<X>_BOXES` override naming a box the table does
 # not know yet) is polled as given -- the override is authoritative, exactly as it already bypasses
 # the facet derivation.
+#
+# issue 1357 (follow-up 5866910703): a traveling box that is home is ALSO identity-checked before rc
+# 0 -- the computer name that answers at its host must be the one OBS_FLEET_IDENTITY declares
+# (resolume.lan resolves to 10.77.9.201, an address the `bridge` PC has also held). A different or
+# unreadable name returns 2 (UNKNOWN: never poll, never copy) with OBS_FLEET_IDENTITY_REASON naming
+# the machine that answered, plus one stderr line, so every reader is guarded; a reader that only
+# tests `if ! obs_fleet_poll_now` skips it like an away box. rc: 0 poll / 1 away / 2 identity UNKNOWN.
 obs_fleet_poll_now() {
-  local name="${1:-}" check
+  local name="${1:-}" check host
+  OBS_FLEET_IDENTITY_REASON=""
   check="$(obs_fleet_home_check "$name")" || return 0
   case "$check" in
     always) return 0 ;;
-    *) obs_fleet_is_home "$name" ;;
   esac
+  obs_fleet_is_home "$name" || return 1
+  host="$(obs_fleet_host "$name")" || return 0
+  obs_fleet_identity_check "$name" "$host" && return 0
+  echo "obs-fleet: $name UNKNOWN -- $OBS_FLEET_IDENTITY_REASON at $host (issue 1357 identity check): not polled, nothing copied" >&2
+  return 2
+}
+
+# OBS_FLEET_IDENTITY -- issue 1357: the expected COMPUTER NAME of each row whose host is a DHCP NAME,
+# as space-separated `name=EXPECTED` pairs. The ONE declaration every reader of obs_fleet_poll_now
+# checks against (never hand-typed per script). Compared case-insensitively (Windows `hostname`
+# prints RESOLUME-SNV, a Linux box its lower-case name). The fixed-IP `always` rows carry none: their
+# address is pinned, and obs_fleet_poll_now does no live I/O for them. resolume-pp is not declared
+# until its computer name is read live (an undeclared row is polled as before).
+OBS_FLEET_IDENTITY="${OBS_FLEET_IDENTITY-resolume-snv=RESOLUME-SNV strih-pp=strih-pp stream-pp=stream-pp}"
+
+# obs_fleet_expected_identity <name> -> the declared expected computer name of NAME (stdout, rc 0),
+# or rc 1 when none is declared. A transition alias (issue 1414) finds its renamed row's name. Pure.
+obs_fleet_expected_identity() {
+  local want pair IFS=$' \t\n'
+  want="$(obs_fleet_canonical_name "${1:-}")"
+  [ -n "$want" ] || return 1
+  for pair in $OBS_FLEET_IDENTITY; do
+    [ "${pair%%=*}" = "$want" ] || continue
+    [ -n "${pair#*=}" ] || return 1
+    printf '%s' "${pair#*=}"
+    return 0
+  done
+  return 1
+}
+
+# obs_fleet_identity_read <name> <host> -> the computer name that answers at HOST (stdout; empty when
+# unreadable). Seam: OBS_FLEET_IDENTITY_CMD, invoked as `<cmd> <name> <host>`. Default: `hostname`
+# over ssh with the fleet credential (OBS_FLEET_SSH_USER / OBS_FLEET_SSH_PASS, default the
+# targets.md newlevel login every fleet reader uses), bounded by OBS_FLEET_IDENTITY_TIMEOUT (s,
+# default 10). sshpass stays the OUTER command, so a test's sshpass function stub still intercepts it.
+obs_fleet_identity_read() {
+  local name="${1:-}" host="${2:-}" out
+  if [ -n "${OBS_FLEET_IDENTITY_CMD:-}" ]; then
+    out="$("$OBS_FLEET_IDENTITY_CMD" "$name" "$host" 2>/dev/null)" || out=""
+  else
+    out="$(sshpass -p "${OBS_FLEET_SSH_PASS:-newlevel}" timeout "${OBS_FLEET_IDENTITY_TIMEOUT:-10}" \
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+      -o ConnectTimeout=5 "${OBS_FLEET_SSH_USER:-newlevel}@${host}" hostname 2>/dev/null)" || out=""
+  fi
+  out="${out%%$'\n'*}"
+  out="${out//$'\r'/}"
+  out="${out//[[:space:]]/}"
+  printf '%s' "$out"
+}
+
+# obs_fleet_identity_check <name> <host> -> rc 0 when NAME declares no expected computer name or the
+# one answering at HOST matches it; rc 1 otherwise, with OBS_FLEET_IDENTITY_REASON set to
+# `answered as <GOT>, expected <EXP>` or `identity unreadable (expected <EXP>)`. OBS_FLEET_HOME set
+# without OBS_FLEET_IDENTITY_CMD = a forced test/ops state: authoritative, nothing is read.
+obs_fleet_identity_check() {
+  local name="${1:-}" host="${2:-}" want got
+  OBS_FLEET_IDENTITY_REASON=""
+  want="$(obs_fleet_expected_identity "$name")" || return 0
+  if [ -n "${OBS_FLEET_HOME:-}" ] && [ -z "${OBS_FLEET_IDENTITY_CMD:-}" ]; then
+    return 0
+  fi
+  got="$(obs_fleet_identity_read "$name" "$host")"
+  if [ -z "$got" ]; then
+    OBS_FLEET_IDENTITY_REASON="identity unreadable (expected $want)"
+    return 1
+  fi
+  if [ "${got,,}" != "${want,,}" ]; then
+    OBS_FLEET_IDENTITY_REASON="answered as $got, expected $want"
+    return 1
+  fi
+  return 0
 }
 
 # obs_fleet_is_home <name> -> returns 0 iff NAME is currently "home" (reachable + serving), 1 if away
