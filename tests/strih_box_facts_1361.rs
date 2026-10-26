@@ -140,6 +140,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_HTTPS_PUBLIC",
     // issue 1462: the stream box's Development design (nested-pro | clip | none).
     "STRIH_STREAM_DEV_SCENE",
+    // issue 808 (owner ruling 5977504457): the per-cambox shading relay overrides of the cam1..cam7 panel.
+    "STRIH_BKSHADING_RELAYS",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -209,6 +211,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_HTTPS_PUBLIC=yes",
         // issue 1462: the strih role has no stream Development scene.
         "STRIH_STREAM_DEV_SCENE=none",
+        // issue 808: cam3's camera is the handheld with the Teradek, controlled by the handheld-1 SBC.
+        "STRIH_BKSHADING_RELAYS=3=sbc-relay@handheld-1.lan:8771",
         "LOADED=strih-snv",
     ] {
         assert!(

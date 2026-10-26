@@ -2870,10 +2870,11 @@ fn committed_bkshading_unit_matches_the_printer() {
     );
 }
 
-/// The config seed carries the operator bind + the cam1 cambox-relay camera (development = one camera
-/// on cam1) and is valid TOML; the bind defaults to :8770 and an arg overrides it.
+/// The config seed carries the operator bind + the cam1..cam7 panel (owner ruling 5977504457: one
+/// block per cambox, a handheld is never its own panel) and is valid TOML; the bind defaults to :8770
+/// and an arg overrides it. The per-box relay overrides: tests/python/test_bkshading_relays_fact_808.py.
 #[test]
-fn bkshading_config_text_seeds_cam1_and_is_valid_toml() {
+fn bkshading_config_text_seeds_cam1_to_cam7_and_is_valid_toml() {
     let (code, cfg, _e) = run_sourced(&[], "strih_bkshading_config_text");
     assert_eq!(code, 0);
     assert!(
@@ -2897,6 +2898,18 @@ fn bkshading_config_text_seeds_cam1_and_is_valid_toml() {
         "cam1 NDI preview name: {cfg}"
     );
     assert!(cfg.contains("grab_fps = 60"), "cam1 grab fps: {cfg}");
+    for n in 1..=7 {
+        assert_eq!(
+            cfg.matches(&format!("id = \"cam{n}\"\n")).count(),
+            1,
+            "the panel carries exactly one cam{n} block: {cfg}"
+        );
+    }
+    assert_eq!(cfg.matches("[[camera]]").count(), 7, "cam1..cam7 only: {cfg}");
+    assert!(
+        !cfg.contains("id = \"handheld"),
+        "a handheld is never its own panel (owner ruling 5977504457): {cfg}"
+    );
     let (jc, _o, je) = run_sourced(
         &[],
         "strih_bkshading_config_text | python3 -c 'import tomllib,sys; tomllib.load(sys.stdin.buffer)'",
