@@ -84,7 +84,6 @@ production without, invisible without a page:
 | `avsync-heartbeat-alert-watchdog.sh` | #812 | A/V-sync heartbeat stale |
 | `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
 | `measurement-audio-alert-watchdog.sh` | #1310 | mbc measurement-audio chain digital-silent (TEST-gated) |
-| `vban-rate-alert-watchdog.sh` | issue 1372 | a VBAN stream at strih-snv off its nominal rate or losing packets (on-air audio) |
 | `audio-mixer-alert-watchdog.sh` | issue 1381 | an OBS audio mixer off real time (BEHIND / OVERLOADED), an obs-vban sender losing audio (VBAN_LOSS) or the mix buffering ratcheted above its start (RAISED) -- audible on air |
 | `obs-handles-alert-watchdog.sh` | issue 1406 | an OBS process leaking handles (GROWING over 3 passes / over the CEILING) -- it freezes at the per-process cap mid-production |
 

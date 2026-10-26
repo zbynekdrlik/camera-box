@@ -27,7 +27,7 @@ packet loss) into one number. This module separates them:
 
 The capture's timestamps must come from a DISCIPLINED clock for the rate to mean "vs the Dante
 tick": strih-snv (Linux, adjtimex slews CLOCK_REALTIME and CLOCK_MONOTONIC) is the reference
-receiver the dev1 watchdog captures on. A capture needs snaplen >= 96 so the 28-byte VBAN header
+receiver for a manual capture (the dev1 watchdog was retired 26.10.2026). A capture needs snaplen >= 96 so the 28-byte VBAN header
 survives the link + IPv4 + UDP headers.
 
 Formats: classic pcap (either byte order, usec or nsec) with linktype LINUX_SLL2 276 (`tcpdump -i
@@ -657,7 +657,7 @@ def render_json(res: CaptureResult, grades: list, g: Grading) -> str:
 
 
 def render_tsv(res: CaptureResult, grades: list) -> str:
-    """The shell-facing form (the dev1 watchdog): `overall<TAB><verdict>` then one line per stream:
+    """The shell-facing form (for scripts): `overall<TAB><verdict>` then one line per stream:
     `stream<TAB>key<TAB>name<TAB>src<TAB>verdict<TAB>rate_ppm<TAB>lost<TAB>loss_ratio<TAB>why`.
     Tabs/newlines never occur inside a field (a VBAN name is <= 16 printable bytes)."""
     def clean(v):
@@ -682,7 +682,7 @@ def main(argv=None) -> int:
     a.add_argument("--dst", action="append", default=[],
                    help="keep only streams arriving at this IPv4 (repeatable; default: all)")
     a.add_argument("--json", action="store_true")
-    a.add_argument("--tsv", action="store_true", help="tab-separated lines for the dev1 watchdog")
+    a.add_argument("--tsv", action="store_true", help="tab-separated lines for scripts")
     ns = ap.parse_args(argv)
     g = Grading(ppm_bound=ns.ppm_bound, loss_ceiling=ns.loss_ceiling, min_span_s=ns.min_span_s)
     try:
