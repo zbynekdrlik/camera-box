@@ -719,6 +719,11 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
         "strih-snv",
         &[
             ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 5"),
+            // issue 808 (owner 26.10.2026): a relay override must name one of the box's cameras.
+            (
+                "STRIH_BKSHADING_RELAYS=3=sbc-relay@handheld-1.lan:8771",
+                "STRIH_BKSHADING_RELAYS=none",
+            ),
             (
                 "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=none",
