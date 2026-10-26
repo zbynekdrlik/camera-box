@@ -233,7 +233,8 @@ remote_log_console_level_decision() {
 # remote_log_kmsg_redirect_perl -> the perl program the setup script runs as `perl -e PROG VT`: open
 # /dev/ttyVT without taking it as the controlling tty (the oneshot is a session leader; opening the VT
 # also allocates it, which TIOCL_SETKMSGREDIRECT needs), set the kernel message redirect to VT
-# (TIOCLINUX subcode 11), read it back (subcode 17, the ioctl's return value) and print it. perl-base
+# (TIOCLINUX subcode 11), read it back (subcode 17: the kernel returns 0 and put_user()s the VT into
+# byte 0 of the argument, so the VT is read from the buffer, never the return value) and print it. perl-base
 # is Essential on Ubuntu, so it is on every cambox; no single quote in the text (it is embedded in one).
 remote_log_kmsg_redirect_perl() {
   cat <<'PERL'
@@ -243,10 +244,8 @@ sysopen(my $t, "/dev/tty$vt", O_RDONLY | O_NOCTTY) or die "open /dev/tty$vt: $!\
 my $s = pack("CC", 11, $vt);
 defined(ioctl($t, 0x541C, $s)) or die "TIOCL_SETKMSGREDIRECT: $!\n";
 my $g = pack("C", 17);
-my $r = ioctl($t, 0x541C, $g);
-defined($r) or die "TIOCL_GETKMSGREDIRECT: $!\n";
-$r = 0 if $r eq "0 but true";
-print "$r\n";
+defined(ioctl($t, 0x541C, $g)) or die "TIOCL_GETKMSGREDIRECT: $!\n";
+print unpack("C", $g), "\n";
 PERL
 }
 
@@ -484,7 +483,7 @@ echo "JU_SVC_ENABLED=$(systemctl is-enabled systemd-journal-upload 2>/dev/null)"
 echo "JU_URL=$(grep -E '^URL=' /etc/systemd/journal-upload.conf 2>/dev/null | head -1 | sed 's/^URL=//')"
 echo "JU_STATE_SAVE=$(grep -hE '^ExecStart=.*[-][-]save-state=' /etc/systemd/system/systemd-journal-upload.service.d/*.conf 2>/dev/null | grep -oE '[-][-]save-state=[^ ]+' | tail -1)"
 echo "CONSOLE_LOGLEVEL=$(awk '{print $1}' /proc/sys/kernel/printk 2>/dev/null)"
-echo "KMSG_REDIRECT=$(LC_ALL=C perl -e 'use Fcntl; sysopen(my $t, "/dev/tty0", O_RDONLY | O_NOCTTY) or exit 1; my $g = pack("C", 17); my $r = ioctl($t, 0x541C, $g); defined($r) or exit 1; $r = 0 if $r eq "0 but true"; print $r;' 2>/dev/null)"
+echo "KMSG_REDIRECT=$(LC_ALL=C perl -e 'use Fcntl; sysopen(my $t, "/dev/tty0", O_RDONLY | O_NOCTTY) or exit 1; my $g = pack("C", 17); defined(ioctl($t, 0x541C, $g)) or exit 1; print unpack("C", $g);' 2>/dev/null)"
 REMOTE
 }
 

@@ -106,6 +106,15 @@ info lines in 34 h, mostly boot) never left the box.
   the other three printk fields. The VT layer draws a VT only while it is in the foreground; logind
   spawns gettys on 1-6 only, so VT 12 never is. The tty1 login at the rig still works, and Alt+F12
   there shows the kernel log.
+- **The read-back is the BUFFER, never the ioctl return value.** `TIOCL_GETKMSGREDIRECT` returns 0
+  and `put_user()`s the VT into byte 0 of the argument (drivers/tty/vt/vt.c), so both perl programs
+  `unpack("C", $g)` after the ioctl. The first cut read the return value: on cam2/3/5 (26.10.2026,
+  kernel 7.0) the redirect worked (an err line landed in `/dev/vcs12`, not `/dev/vcs1`) but read back
+  0, so the level stayed 4. A fake `perl` binary cannot see this:
+  `tests/python/test_kmsg_redirect_readback_1394.py` runs the REAL programs with
+  `CORE::GLOBAL::sysopen` / `ioctl` replaced by a module that models the kernel code. To prove a
+  redirect on a box without trusting the read-back: write `<3>probe` to `/dev/kmsg` and look for it in
+  `/dev/vcs12` vs `/dev/vcs1`.
 - **A redirect that does not read back keeps the level** and prints a WARNING; the arm stays a
   success (netconsole keeps err and above). Never raise the level any other way: a sysctl.d drop-in
   would apply at boot before any redirect.
