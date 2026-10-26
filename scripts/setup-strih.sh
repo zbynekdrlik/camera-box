@@ -918,7 +918,7 @@ install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then
   strih_bkshading_config_text > /etc/bkshading/bkshading.toml \
     || fail "could not seed /etc/bkshading/bkshading.toml"
-  echo "  seeded /etc/bkshading/bkshading.toml (cam1 + handhelds; edit for the live camera set)"
+  echo "  seeded /etc/bkshading/bkshading.toml (cam1..cam7 + the box's STRIH_BKSHADING_RELAYS; edit for the live camera set)"
 else
   echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"
 fi

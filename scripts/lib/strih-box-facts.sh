@@ -44,7 +44,8 @@ strih_box_fact_keys() {
     STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC \
-    STRIH_STREAM_DEV_SCENE
+    STRIH_STREAM_DEV_SCENE \
+    STRIH_BKSHADING_RELAYS
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -416,6 +417,13 @@ strih_box_validate() {
     nested-pro:strih|clip:strih) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE '${f[STRIH_STREAM_DEV_SCENE]}' on the strih role -- it has no stream Development (none)" >&2; bad=1 ;;
     *) echo "strih-box ${name}: STRIH_STREAM_DEV_SCENE '${f[STRIH_STREAM_DEV_SCENE]}' must be one of nested-pro, clip, none" >&2; bad=1 ;;
   esac
+  # issue 808 (owner ruling 5977504457): the shading panel's per-cambox relay overrides. The stream role
+  # runs no shading service (setup step 16c skips it), so it declares none.
+  if [ "${f[STRIH_ROLE]}" = stream ] && [ "${f[STRIH_BKSHADING_RELAYS]}" != none ]; then
+    echo "strih-box ${name}: STRIH_BKSHADING_RELAYS '${f[STRIH_BKSHADING_RELAYS]}' must be none on the stream role (it runs no shading service)" >&2; bad=1
+  else
+    strih_box_bkshading_relays_ok "${f[STRIH_BKSHADING_RELAYS]}" "strih-box ${name}: " || bad=1
+  fi
   [ "$bad" = 0 ]
 }
 
@@ -659,6 +667,48 @@ strih_lx_https_public() { strih_box_fact STRIH_HTTPS_PUBLIC; }
 # strih_lx_stream_dev_scene -> the stream Development design: nested-pro | clip | none (fact
 # STRIH_STREAM_DEV_SCENE, issue 1462).
 strih_lx_stream_dev_scene() { strih_box_fact STRIH_STREAM_DEV_SCENE; }
+
+# strih_lx_bkshading_relays -> the shading panel's per-cambox relay overrides (fact STRIH_BKSHADING_RELAYS:
+# none | `N=<transport>@<host>:<port>` ...; issue 808, the seed strih_bkshading_config_text).
+strih_lx_bkshading_relays() { strih_box_fact STRIH_BKSHADING_RELAYS; }
+
+# strih_box_bkshading_relays_ok VALUE [PREFIX] -> 0 iff VALUE is `none` or space-separated
+# `N=<transport>@<host>:<port>` entries: N one of 1..7 (the panel is cam1..cam7, owner ruling 5977504457),
+# no N twice, transport cambox-relay | sbc-relay | ethernet-rest (bkshading/service/src/config.rs; never
+# Bluetooth), host a host name / address that starts with a letter or digit, port 1..65535. Each problem is
+# one stderr line starting with PREFIX. The ONE grammar of the fact: the loader and the seed both call it.
+strih_box_bkshading_relays_ok() {
+  local v="${1-}" p="${2-}" e n rest transport hp host port bad=0 seen=" "
+  [ "$v" = none ] && return 0
+  if [ -z "$v" ]; then
+    echo "${p}STRIH_BKSHADING_RELAYS is empty -- none, or N=transport@host:port entries" >&2; return 1
+  fi
+  for e in $v; do
+    if [[ ! "$e" =~ ^([1234567])=([abcdefghijklmnopqrstuvwxyz-]+)@(.+)$ ]]; then
+      if [[ "$e" =~ ^([0123456789]+)= ]]; then
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': the camera number must be one of 1..7 (the panel is cam1..cam7)" >&2
+      else
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}' is not N=transport@host:port (or the whole value none)" >&2
+      fi
+      bad=1; continue
+    fi
+    n="${BASH_REMATCH[1]}"; transport="${BASH_REMATCH[2]}"; hp="${BASH_REMATCH[3]}"
+    case "$transport" in
+      cambox-relay|sbc-relay|ethernet-rest) ;;
+      *) echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': transport '${transport}' must be cambox-relay, sbc-relay or ethernet-rest" >&2; bad=1 ;;
+    esac
+    host="${hp%:*}"; port="${hp##*:}"; rest="$hp"
+    if [ "$host" = "$rest" ] || ! _strih_box_host "$host" || [[ ! "$port" =~ ^[123456789][0123456789]{0,4}$ ]] \
+       || [ "$port" -gt 65535 ]; then
+      echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': '${hp}' is not host:port (port 1..65535)" >&2; bad=1
+    fi
+    case "$seen" in *" ${n} "*)
+      echo "${p}STRIH_BKSHADING_RELAYS: camera ${n} is declared twice" >&2; bad=1 ;;
+    esac
+    seen="${seen}${n} "
+  done
+  [ "$bad" = 0 ]
+}
 
 # strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
 # item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).

@@ -1543,21 +1543,29 @@ WantedBy=multi-user.target
 EOF
 }
 
-# strih_bkshading_config_text [BIND] -> the operator config seed for /etc/bkshading/bkshading.toml.
+# strih_bkshading_config_text [BIND] [RELAYS] -> the operator config seed for /etc/bkshading/bkshading.toml.
 # BIND defaults to the service's own default_bind (bkshading/service/src/config.rs "0.0.0.0:8770").
-# The camera/relay/preview DATA is pinned from the canonical bkshading/service/bkshading.example.toml
-# (the SAME schema the Windows install was seeded from -- the live Windows C:\bkshading\bkshading.toml
-# was unreadable, the PC being off). Development = one camera on cam1; the handheld blocks are the
-# params-only placeholders for the issue-808 SBC milestone. Relay addresses are host-independent
-# (<cambox>.lan:8771 -- the service connects OUT to each cambox relay, so no cambox repoint is needed).
+# The panel is cam1..cam7, one block per cambox (owner ruling 5977504457 on issue 808): a handheld SBC is
+# the CONTROL of the cambox its video reaches, never its own panel, so every block keeps its cambox's NDI
+# preview `CAMN (usb)` + grab_fps 60. RELAYS (default: the loaded box's fact STRIH_BKSHADING_RELAYS) is
+# `none` or `N=<transport>@<host>:<port>` overrides of the default cambox-relay at camN.lan:8771 (the
+# service connects OUT to each relay). A wrong RELAYS prints nothing and returns 1, never a partial config.
 # Seeded ONLY IF absent (setup-strih step 16c [ ! -f ] guard) so the operator's live edits are kept.
 strih_bkshading_config_text() {
-  local bind="${1:-0.0.0.0:8770}"
+  local bind="${1:-0.0.0.0:8770}" relays n e transport address
+  if [ "$#" -ge 2 ]; then relays="$2"; else relays="$(strih_lx_bkshading_relays)" || return 1; fi
+  strih_box_bkshading_relays_ok "$relays" "strih_bkshading_config_text: " || return 1
+  local -A tr=() ad=()
+  if [ "$relays" != none ]; then
+    for e in $relays; do
+      n="${e%%=*}"; e="${e#*=}"
+      tr[$n]="${e%%@*}"; ad[$n]="${e#*@}"
+    done
+  fi
   cat <<EOF
-# bkshading service config -- strih-snv (issue 1353). Seeded from the canonical
-# bkshading/service/bkshading.example.toml (the schema the Windows install used); edit the live
-# camera/relay set on the box. Development = one camera on cam1; the handheld blocks are the
-# params-only placeholders for the issue-808 SBC milestone.
+# bkshading service config (issue 808 / issue 1353), seeded by setup-strih step 16c. The panel is
+# cam1..cam7, one block per cambox; a handheld SBC relay controls the block of the cambox its video
+# reaches (owner ruling 5977504457). Edit the live camera/relay set on the box.
 
 # Web panel bind address (the operator opens http://strih.lan:8770/).
 bind = "${bind}"
@@ -1568,36 +1576,17 @@ fps = 3.0
 jpeg_quality = 55
 capture_timeout_ms = 1000
 reconnect_backoff_ms = 2000
-
-# cam1: camera USB -> cambox cam1, controlled by bkshading-relay on cam1.
-[[camera]]
-id = "cam1"
-label = "Cam 1"
-transport = "cambox-relay"
-address = "cam1.lan:8771"
-ndi_preview = "CAM1 (usb)"
-grab_fps = 60
-
-# Handheld cameras (x3) on a separately powered arm64 SBC running the SAME relay -- no video feed,
-# so a params-only block (no ndi_preview, no grab_fps). Placeholders for the issue-808 SBC milestone.
-[[camera]]
-id = "handheld-1"
-label = "Handheld 1"
-transport = "sbc-relay"
-address = "handheld-1.lan:8771"
-
-[[camera]]
-id = "handheld-2"
-label = "Handheld 2"
-transport = "sbc-relay"
-address = "handheld-2.lan:8771"
-
-[[camera]]
-id = "handheld-3"
-label = "Handheld 3"
-transport = "sbc-relay"
-address = "handheld-3.lan:8771"
 EOF
+  for n in 1 2 3 4 5 6 7; do
+    transport="${tr[$n]:-cambox-relay}"
+    address="${ad[$n]:-cam${n}.lan:8771}"
+    printf '\n[[camera]]\nid = "cam%s"\nlabel = "Cam %s"\n' "$n" "$n"
+    if [ "$transport" = sbc-relay ]; then
+      printf "# a handheld SBC relay controls this cambox's camera (owner ruling 5977504457)\n"
+    fi
+    printf 'transport = "%s"\naddress = "%s"\nndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' \
+      "$transport" "$address" "$n"
+  done
 }
 
 # strih_bkshading_listener_owner reads `ss -tlnp` output on stdin and prints the process NAME that
