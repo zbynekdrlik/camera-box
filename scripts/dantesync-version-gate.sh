@@ -116,7 +116,7 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Bumped 2026-10-07: v1.16.0 (dantesync PR 128, a991f13 -- the daily-mode nightly date step is rounded
 # to a 200 ms quantum (`date_daily_step_quantum_ms`), a whole number of frames at 25/30/50/60 fps, so
 # the 02:00 UTC step no longer shifts any genlock grid's phase; camera-box issue 1372 part A).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.18.0}"
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.19.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
