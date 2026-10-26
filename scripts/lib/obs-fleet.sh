@@ -463,7 +463,7 @@ obs_fleet_poll_now() {
 # prints RESOLUME-SNV, a Linux box its lower-case name). The fixed-IP `always` rows carry none: their
 # address is pinned, and obs_fleet_poll_now does no live I/O for them. resolume-pp is not declared
 # until its computer name is read live (an undeclared row is polled as before).
-OBS_FLEET_IDENTITY="${OBS_FLEET_IDENTITY-resolume-snv=RESOLUME-SNV strih-pp=strih-pp stream-pp=stream-pp}"
+OBS_FLEET_IDENTITY="${OBS_FLEET_IDENTITY-resolume-snv=RESOLUME-SNV strih-pp=strih-pp stream-pp=stream-pp resolume-pp=resolume-pp}"
 
 # obs_fleet_expected_identity <name> -> the declared expected computer name of NAME (stdout, rc 0),
 # or rc 1 when none is declared. A transition alias (issue 1414) finds its renamed row's name. Pure.
