@@ -422,7 +422,7 @@ strih_box_validate() {
   if [ "${f[STRIH_ROLE]}" = stream ] && [ "${f[STRIH_BKSHADING_RELAYS]}" != none ]; then
     echo "strih-box ${name}: STRIH_BKSHADING_RELAYS '${f[STRIH_BKSHADING_RELAYS]}' must be none on the stream role (it runs no shading service)" >&2; bad=1
   else
-    strih_box_bkshading_relays_ok "${f[STRIH_BKSHADING_RELAYS]}" "strih-box ${name}: " || bad=1
+    strih_box_bkshading_relays_ok "${f[STRIH_BKSHADING_RELAYS]}" "strih-box ${name}: " "${f[STRIH_CAMERAS]}" || bad=1
   fi
   [ "$bad" = 0 ]
 }
@@ -673,12 +673,12 @@ strih_lx_stream_dev_scene() { strih_box_fact STRIH_STREAM_DEV_SCENE; }
 strih_lx_bkshading_relays() { strih_box_fact STRIH_BKSHADING_RELAYS; }
 
 # strih_box_bkshading_relays_ok VALUE [PREFIX] -> 0 iff VALUE is `none` or space-separated
-# `N=<transport>@<host>:<port>` entries: N one of 1..7 (the panel is cam1..cam7, owner ruling 5977504457),
+# `N=<transport>@<host>:<port>` entries: N one of 1..7 and of the box's STRIH_CAMERAS (owner ruling 5977504457 + owner 26.10.2026),
 # no N twice, transport cambox-relay | sbc-relay | ethernet-rest (bkshading/service/src/config.rs; never
 # Bluetooth), host a host name / address that starts with a letter or digit, port 1..65535. Each problem is
 # one stderr line starting with PREFIX. The ONE grammar of the fact: the loader and the seed both call it.
 strih_box_bkshading_relays_ok() {
-  local v="${1-}" p="${2-}" e n rest transport hp host port bad=0 seen=" "
+  local v="${1-}" p="${2-}" cams="${3-}" e n rest transport hp host port bad=0 seen=" "
   [ "$v" = none ] && return 0
   if [ -z "$v" ]; then
     echo "${p}STRIH_BKSHADING_RELAYS is empty -- none, or N=transport@host:port entries" >&2; return 1
@@ -686,7 +686,7 @@ strih_box_bkshading_relays_ok() {
   for e in $v; do
     if [[ ! "$e" =~ ^([1234567])=([abcdefghijklmnopqrstuvwxyz-]+)@(.+)$ ]]; then
       if [[ "$e" =~ ^([0123456789]+)= ]]; then
-        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': the camera number must be one of 1..7 (the panel is cam1..cam7)" >&2
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': the camera number must be one of 1..7" >&2
       else
         echo "${p}STRIH_BKSHADING_RELAYS entry '${e}' is not N=transport@host:port (or the whole value none)" >&2
       fi
@@ -701,6 +701,10 @@ strih_box_bkshading_relays_ok() {
     if [ "$host" = "$rest" ] || ! _strih_box_host "$host" || [[ ! "$port" =~ ^[123456789][0123456789]{0,4}$ ]] \
        || [ "$port" -gt 65535 ]; then
       echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': '${hp}' is not host:port (port 1..65535)" >&2; bad=1
+    fi
+    # owner 26.10.2026: a panel lists ITS venue's cameras only (STRIH_CAMERAS, the 3rd argument when given).
+    if [ -n "$cams" ] && [[ " ${cams} " != *" ${n} "* ]]; then
+      echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': camera ${n} is not one of this box's STRIH_CAMERAS (${cams})" >&2; bad=1
     fi
     case "$seen" in *" ${n} "*)
       echo "${p}STRIH_BKSHADING_RELAYS: camera ${n} is declared twice" >&2; bad=1 ;;

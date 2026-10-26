@@ -1543,18 +1543,23 @@ WantedBy=multi-user.target
 EOF
 }
 
-# strih_bkshading_config_text [BIND] [RELAYS] -> the operator config seed for /etc/bkshading/bkshading.toml.
-# BIND defaults to the service's own default_bind (bkshading/service/src/config.rs "0.0.0.0:8770").
-# The panel is cam1..cam7, one block per cambox (owner ruling 5977504457 on issue 808): a handheld SBC is
-# the CONTROL of the cambox its video reaches, never its own panel, so every block keeps its cambox's NDI
-# preview `CAMN (usb)` + grab_fps 60. RELAYS (default: the loaded box's fact STRIH_BKSHADING_RELAYS) is
+# strih_bkshading_config_text [BIND] [RELAYS] [CAMERAS] -> the operator config seed for
+# /etc/bkshading/bkshading.toml. BIND defaults to the service's own default_bind (bkshading/service/src/config.rs
+# "0.0.0.0:8770"). One block per camera of the box's OWN venue (CAMERAS, default the loaded fact STRIH_CAMERAS;
+# owner 26.10.2026: strih-snv 2 3 5, strih-pp 1 4 6 7, all seven only at a joint event), and a handheld SBC is
+# the CONTROL of the cambox its video reaches, never its own panel (owner ruling 5977504457 on issue 808), so
+# every block keeps its cambox's NDI preview `CAMN (usb)` + grab_fps 60. RELAYS (default: the loaded box's fact STRIH_BKSHADING_RELAYS) is
 # `none` or `N=<transport>@<host>:<port>` overrides of the default cambox-relay at camN.lan:8771 (the
 # service connects OUT to each relay). A wrong RELAYS prints nothing and returns 1, never a partial config.
 # Seeded ONLY IF absent (setup-strih step 16c [ ! -f ] guard) so the operator's live edits are kept.
 strih_bkshading_config_text() {
-  local bind="${1:-0.0.0.0:8770}" relays n e transport address
+  local bind="${1:-0.0.0.0:8770}" relays cams n e transport address
   if [ "$#" -ge 2 ]; then relays="$2"; else relays="$(strih_lx_bkshading_relays)" || return 1; fi
-  strih_box_bkshading_relays_ok "$relays" "strih_bkshading_config_text: " || return 1
+  if [ "$#" -ge 3 ]; then cams="$3"; else cams="$(strih_box_fact STRIH_CAMERAS)" || return 1; fi
+  if [[ ! "$cams" =~ ^[1234567]( [1234567])*$ ]]; then
+    echo "strih_bkshading_config_text: no venue cameras to list ('${cams}')" >&2; return 1
+  fi
+  strih_box_bkshading_relays_ok "$relays" "strih_bkshading_config_text: " "$cams" || return 1
   local -A tr=() ad=()
   if [ "$relays" != none ]; then
     for e in $relays; do
@@ -1563,9 +1568,9 @@ strih_bkshading_config_text() {
     done
   fi
   cat <<EOF
-# bkshading service config (issue 808 / issue 1353), seeded by setup-strih step 16c. The panel is
-# cam1..cam7, one block per cambox; a handheld SBC relay controls the block of the cambox its video
-# reaches (owner ruling 5977504457). Edit the live camera/relay set on the box.
+# bkshading service config (issue 808 / issue 1353), seeded by setup-strih step 16c. The panel lists
+# this venue's cameras (STRIH_CAMERAS: ${cams}), one block per cambox; a handheld SBC relay controls the
+# block of the cambox its video reaches (owner ruling 5977504457). Edit the live camera/relay set on the box.
 
 # Web panel bind address (the operator opens http://strih.lan:8770/).
 bind = "${bind}"
@@ -1577,7 +1582,7 @@ jpeg_quality = 55
 capture_timeout_ms = 1000
 reconnect_backoff_ms = 2000
 EOF
-  for n in 1 2 3 4 5 6 7; do
+  for n in $cams; do
     transport="${tr[$n]:-cambox-relay}"
     address="${ad[$n]:-cam${n}.lan:8771}"
     printf '\n[[camera]]\nid = "cam%s"\nlabel = "Cam %s"\n' "$n" "$n"
