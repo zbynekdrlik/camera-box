@@ -27,7 +27,7 @@ MODULE = os.path.join(REPO, "scripts", "camera_test_settings.py")
 LIB = os.path.join(REPO, "scripts", "lib", "camera-test-settings.sh")
 BASELINE = os.path.join(REPO, "scripts", "camera-test-baseline.json")
 E2E = os.path.join(REPO, "scripts", "recording-e2e.sh")
-TRANSPORT_RS = os.path.join(REPO, "bkshading", "relay", "src", "transport.rs")
+TRANSPORT_RS = os.path.join(REPO, "bkshading", "relay", "src", "transport", "reads.rs")  # issue 808: split out of transport.rs
 READ_RS = os.path.join(REPO, "bkshading", "proto", "src", "read.rs")
 
 _spec = importlib.util.spec_from_file_location("camera_test_settings", MODULE)
@@ -68,7 +68,7 @@ def _blocks(values):
 def test_every_read_key_is_one_of_the_relay_core_config_keys():
     src = open(TRANSPORT_RS, encoding="utf-8").read()
     m = re.search(r"pub const CORE_CONFIG_KEYS: \[&str; \d+\] = \[([^\]]*)\]", src)
-    assert m, "CORE_CONFIG_KEYS not found in bkshading/relay/src/transport.rs"
+    assert m, "CORE_CONFIG_KEYS not found in bkshading/relay/src/transport/reads.rs"
     relay_keys = re.findall(r'"([^"]+)"', m.group(1))
     for k in cts.READ_KEYS:
         assert k in relay_keys, "key %r is not one of the relay's CORE_CONFIG_KEYS %s" % (k, relay_keys)
