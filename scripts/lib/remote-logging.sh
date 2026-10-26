@@ -80,6 +80,21 @@ REMOTE_LOG_NC_MAC_RETRY_SLEEP_S="${REMOTE_LOG_NC_MAC_RETRY_SLEEP_S:-2}"
 REMOTE_LOG_NC_ROUTE_RETRIES="${REMOTE_LOG_NC_ROUTE_RETRIES:-30}"
 REMOTE_LOG_NC_ROUTE_RETRY_SLEEP_S="${REMOTE_LOG_NC_ROUTE_RETRY_SLEEP_S:-2}"
 
+# The kernel console LEVEL (issue 1394, 26.10.2026). console_loglevel is ONE level for every console,
+# and Ubuntu's /etc/sysctl.d/10-console-messages.conf pins it at 4, so netconsole shipped only
+# emerg..err: the info lines issue 1311 exists for (`usb 4-1: USB disconnect`, link changes, ext4
+# remounts) never left the box. Kernel 7.0 has no netconsole- or console-specific level (the configfs
+# target has no loglevel attribute, struct console no level field). The other console, tty0, is drawn
+# by fbcon on the very framebuffer camera-box writes the cameraman preview to, so a bare level 7 would
+# print every info line over the picture. So the setup script first routes the VT console's kernel
+# messages to a BACKGROUND VT (TIOCL_SETKMSGREDIRECT: the VT layer draws a VT only while it is in the
+# foreground; logind spawns gettys on 1-6 only, so 12 never is; Alt+F12 at the rig shows the kernel
+# log), reads the redirect back, and only then raises the level to 7 (emerg..info; debug stays local).
+REMOTE_LOG_KMSG_VT=12
+REMOTE_LOG_CONSOLE_LOGLEVEL=7
+# Overridable so a Tier-0 test can point the level write at a temp file (production never sets it).
+REMOTE_LOG_PRINTK_PATH="${REMOTE_LOG_PRINTK_PATH:-/proc/sys/kernel/printk}"
+
 # systemd-journal-upload (rich journal path)
 REMOTE_LOG_JU_SERVICE_NAME="systemd-journal-upload"
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + create-usb-linux.sh (base image)
@@ -201,6 +216,40 @@ remote_log_mac_from_neigh() {
   printf '%s' "$mac"
 }
 
+# remote_log_console_level_decision READBACK VT -> "raise" iff the kernel message redirect READ BACK
+# exactly VT (a positive whole number), else "keep". Pure (issue 1394): the setup script raises
+# console_loglevel only when the VT console's kernel messages provably go to the background VT, so a
+# failed or unread redirect never prints info lines over the cameraman preview. Embedded into the
+# on-box script via `declare -f`. The digit set is spelled out (a bracket RANGE follows the locale).
+remote_log_console_level_decision() {
+  local readback="${1-}" vt="${2-}"
+  if [[ "$vt" =~ ^[123456789][0123456789]*$ ]] && [ "$readback" = "$vt" ]; then
+    printf 'raise\n'
+  else
+    printf 'keep\n'
+  fi
+}
+
+# remote_log_kmsg_redirect_perl -> the perl program the setup script runs as `perl -e PROG VT`: open
+# /dev/ttyVT without taking it as the controlling tty (the oneshot is a session leader; opening the VT
+# also allocates it, which TIOCL_SETKMSGREDIRECT needs), set the kernel message redirect to VT
+# (TIOCLINUX subcode 11), read it back (subcode 17, the ioctl's return value) and print it. perl-base
+# is Essential on Ubuntu, so it is on every cambox; no single quote in the text (it is embedded in one).
+remote_log_kmsg_redirect_perl() {
+  cat <<'PERL'
+use Fcntl;
+my $vt = $ARGV[0];
+sysopen(my $t, "/dev/tty$vt", O_RDONLY | O_NOCTTY) or die "open /dev/tty$vt: $!\n";
+my $s = pack("CC", 11, $vt);
+defined(ioctl($t, 0x541C, $s)) or die "TIOCL_SETKMSGREDIRECT: $!\n";
+my $g = pack("C", 17);
+my $r = ioctl($t, 0x541C, $g);
+defined($r) or die "TIOCL_GETKMSGREDIRECT: $!\n";
+$r = 0 if $r eq "0 but true";
+print "$r\n";
+PERL
+}
+
 # remote_log_netconsole_setup_script_content SINK_IP -> the full on-box setup script written to
 # ${REMOTE_LOG_NC_SCRIPT_PATH} and run by the boot oneshot, with SINK_IP (the venue strih,
 # remote_log_sink_ip) baked in. rc 1 + a stderr line, no output, for a non-IPv4 SINK_IP. It EMBEDS
@@ -230,9 +279,13 @@ RETRIES="${REMOTE_LOG_NC_MAC_RETRIES}"
 RETRY_SLEEP="${REMOTE_LOG_NC_MAC_RETRY_SLEEP_S}"
 ROUTE_RETRIES="${REMOTE_LOG_NC_ROUTE_RETRIES}"
 ROUTE_RETRY_SLEEP="${REMOTE_LOG_NC_ROUTE_RETRY_SLEEP_S}"
+KMSG_VT="${REMOTE_LOG_KMSG_VT}"
+CONSOLE_LEVEL="${REMOTE_LOG_CONSOLE_LOGLEVEL}"
+PRINTK="${REMOTE_LOG_PRINTK_PATH}"
+KMSG_REDIRECT_PERL='$(remote_log_kmsg_redirect_perl)'
 
 SCRIPT_HEAD
-  declare -f remote_log_mac_from_neigh
+  declare -f remote_log_mac_from_neigh remote_log_console_level_decision
   cat <<'SCRIPT_BODY'
 
 # Ensure configfs is mounted (systemd's sys-kernel-config.mount usually does this) and the
@@ -297,6 +350,23 @@ if [ "$(cat "$CFG/enabled" 2>/dev/null)" != "1" ]; then
   exit 1
 fi
 echo "cambox-netconsole: armed -> ${SINK_IP}:${PORT} via ${DEV} (sink mac ${MAC})"
+
+# Issue 1394: ship warning/info too, never on the cameraman preview. console_loglevel is one level for
+# every console, and tty0 is drawn on the HDMI framebuffer, so FIRST route the VT console's kernel
+# messages to the background VT and read the redirect back, THEN raise the level. A redirect that does
+# not read back leaves the level as it is (netconsole keeps err and above) and says so; the arm above
+# stays a success either way, and verify-device (ak) grades both facts.
+KMSG_READBACK="$(LC_ALL=C perl -e "$KMSG_REDIRECT_PERL" "$KMSG_VT" 2>&1)" || true
+if [ "$(remote_log_console_level_decision "$KMSG_READBACK" "$KMSG_VT")" = raise ]; then
+  read -r _ PRINTK_DEF PRINTK_MIN PRINTK_BOOT _ < "$PRINTK" || true
+  if printf '%s %s %s %s\n' "$CONSOLE_LEVEL" "${PRINTK_DEF:-4}" "${PRINTK_MIN:-1}" "${PRINTK_BOOT:-7}" > "$PRINTK"; then
+    echo "cambox-netconsole: kernel messages redirected to VT ${KMSG_VT}; console_loglevel ${CONSOLE_LEVEL} (warning/info now reach the sink, issue 1394)"
+  else
+    echo "cambox-netconsole: WARNING: could not write console_loglevel ${CONSOLE_LEVEL} to ${PRINTK} -- netconsole ships err and above only (issue 1394)" >&2
+  fi
+else
+  echo "cambox-netconsole: WARNING: the kernel message redirect to VT ${KMSG_VT} did not read back (${KMSG_READBACK:-<no output>}) -- console_loglevel left as is, netconsole ships err and above only (issue 1394)" >&2
+fi
 SCRIPT_BODY
 }
 
@@ -413,6 +483,8 @@ fi
 echo "JU_SVC_ENABLED=$(systemctl is-enabled systemd-journal-upload 2>/dev/null)"
 echo "JU_URL=$(grep -E '^URL=' /etc/systemd/journal-upload.conf 2>/dev/null | head -1 | sed 's/^URL=//')"
 echo "JU_STATE_SAVE=$(grep -hE '^ExecStart=.*[-][-]save-state=' /etc/systemd/system/systemd-journal-upload.service.d/*.conf 2>/dev/null | grep -oE '[-][-]save-state=[^ ]+' | tail -1)"
+echo "CONSOLE_LOGLEVEL=$(awk '{print $1}' /proc/sys/kernel/printk 2>/dev/null)"
+echo "KMSG_REDIRECT=$(LC_ALL=C perl -e 'use Fcntl; sysopen(my $t, "/dev/tty0", O_RDONLY | O_NOCTTY) or exit 1; my $g = pack("C", 17); my $r = ioctl($t, 0x541C, $g); defined($r) or exit 1; $r = 0 if $r eq "0 but true"; print $r;' 2>/dev/null)"
 REMOTE
 }
 
@@ -438,7 +510,7 @@ remote_log_verdict() {
   local block="$1" sink="${2-}" url="" fails="" nl
   nl=$'\n'
   local nc_enabled_svc nc_active nc_result nc_script_x nc_target nc_ip nc_port
-  local ju_enabled ju_url ju_state
+  local ju_enabled ju_url ju_state cl kr
   if remote_log_ipv4_ok "$sink"; then
     url="$(remote_log_journal_url "$sink")"
   else
@@ -454,6 +526,8 @@ remote_log_verdict() {
   ju_enabled="$(printf '%s\n' "$block" | sed -n 's/^JU_SVC_ENABLED=//p' | tr -d '[:space:]')"
   ju_url="$(printf '%s\n' "$block" | sed -n 's/^JU_URL=//p' | tr -d '[:space:]')"
   ju_state="$(printf '%s\n' "$block" | sed -n 's/^JU_STATE_SAVE=//p' | tr -d '[:space:]')"
+  cl="$(printf '%s\n' "$block" | sed -n 's/^CONSOLE_LOGLEVEL=//p' | tr -d '[:space:]')"
+  kr="$(printf '%s\n' "$block" | sed -n 's/^KMSG_REDIRECT=//p' | tr -d '[:space:]')"
 
   [ "$nc_enabled_svc" = "enabled" ] || fails="${fails:+$fails$nl}FAIL: ${REMOTE_LOG_NC_SERVICE_NAME}.service is not enabled (state=${nc_enabled_svc:-<none>}) -- netconsole will not survive a reboot (#1311)"
   # Issue 1394: a `failed` unit is named with its systemd Result (exit-code, timeout, ...), so the
@@ -478,6 +552,15 @@ remote_log_verdict() {
     *--save-state=/run/*) : ;;
     *) fails="${fails:+$fails$nl}FAIL: journal-upload --save-state is not redirected to /run (got '${ju_state:-<none>}') -- the cursor would be unwritable on the ro root (#1311)" ;;
   esac
+
+  # Issue 1394: the console level netconsole obeys, and the redirect that keeps it off the preview.
+  if ! [[ "$cl" =~ ^[0123456789]+$ ]]; then
+    fails="${fails:+$fails$nl}FAIL: the kernel console_loglevel is unread (got '${cl:-<none>}') -- cannot tell which levels netconsole ships (issue 1394)"
+  elif [ "$((10#$cl))" -lt "$REMOTE_LOG_CONSOLE_LOGLEVEL" ]; then
+    fails="${fails:+$fails$nl}FAIL: the kernel console_loglevel=${cl} < ${REMOTE_LOG_CONSOLE_LOGLEVEL} -- netconsole ships only the levels below it, so warning/info (a USB disconnect) never leave the box; re-point with scripts/cambox-ro-units-apply.sh (issue 1394)"
+  elif [ "$kr" != "$REMOTE_LOG_KMSG_VT" ]; then
+    fails="${fails:+$fails$nl}FAIL: console_loglevel=${cl} while kernel messages are not redirected to VT ${REMOTE_LOG_KMSG_VT} (redirect=${kr:-<unread>}) -- every warning/info line is drawn on the cameraman HDMI preview; re-point with scripts/cambox-ro-units-apply.sh (issue 1394)"
+  fi
 
   if [ -n "$fails" ]; then
     printf '%s\n' "$fails"

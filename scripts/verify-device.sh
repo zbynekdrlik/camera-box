@@ -36,6 +36,8 @@
 #                      setup-device.sh; override via env for a box with a different password)
 #   SSH_TIMEOUT       SSH connect timeout in seconds (default: 10)
 #   CLOCK_GUARD_BOUND_US  dantesync clock-offset bound in microseconds (default: 2000, #8)
+#   VERIFY_DEVICE_IP  dial the box at this IPv4 address instead of camera_resolve's (issue 1394:
+#                      the Poprad camboxes, set by verify-fleet.sh --venue); the NAME drives every fact
 #
 # Checks (all must pass):
 #   (a) camera-box --version is a valid, well-formed fleet version string
@@ -979,6 +981,7 @@ Checks:
       scripts/rt-kernel-upgrade.sh --box <ip> (reboot-class, owner-approved), never setup-device.sh
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
+     VERIFY_DEVICE_IP (dial this IPv4 address, e.g. a Poprad box at 10.76.9.x, issue 1394),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
      DANTESYNC_JOURNAL_MAX_AGE_S (max age of the newest dantesync journal line vs the box
@@ -1004,6 +1007,13 @@ LC_NAME="$(printf '%s' "$DEVICE_ARG" | tr '[:upper:]' '[:lower:]')"
 camera_resolve "$LC_NAME" || exit 1
 NAME_UPPER="$(printf '%s' "$CAMERA_NAME" | tr '[:lower:]' '[:upper:]')"
 IP="$CAMERA_IP"
+# Issue 1394: VERIFY_DEVICE_IP dials the box at another address (the Poprad camboxes answer at
+# 10.76.9.x through companion-pp, verify-fleet.sh --venue sets it); the NAME still drives every fact.
+if [ -n "${VERIFY_DEVICE_IP+set}" ]; then
+  remote_log_ipv4_ok "$VERIFY_DEVICE_IP" \
+    || { echo -e "${RED}ERROR: VERIFY_DEVICE_IP='${VERIFY_DEVICE_IP}' is not an IPv4 address (issue 1394)${NC}" >&2; exit 1; }
+  IP="$VERIFY_DEVICE_IP"
+fi
 EXPECT_FPS="$CAMERA_GENLOCK_FPS"
 
 command -v sshpass >/dev/null 2>&1 || { echo -e "${RED}ERROR: sshpass is required${NC}" >&2; exit 1; }
