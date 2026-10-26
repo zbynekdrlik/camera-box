@@ -2905,7 +2905,11 @@ fn bkshading_config_text_seeds_cam1_to_cam7_and_is_valid_toml() {
             "the panel carries exactly one cam{n} block: {cfg}"
         );
     }
-    assert_eq!(cfg.matches("[[camera]]").count(), 7, "cam1..cam7 only: {cfg}");
+    assert_eq!(
+        cfg.matches("[[camera]]").count(),
+        7,
+        "cam1..cam7 only: {cfg}"
+    );
     assert!(
         !cfg.contains("id = \"handheld"),
         "a handheld is never its own panel (owner ruling 5977504457): {cfg}"
