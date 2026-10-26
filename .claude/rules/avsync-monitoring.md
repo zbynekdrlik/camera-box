@@ -721,3 +721,6 @@ knob of the SNV Windows era; the operator aligns A/V on the program audio input.
   measurer, `av_sync_measure.py`, the libs and the fact files; the template unit needs no change).
   Until then dev2 prints the old text; the dev1 report already names the new knob after the merge.
 - Tests: `tests/python/test_avsync_knob_advice_1459.py`.
+- **Sourcing the measurer in a test:** `avsync-measure-dev2.sh` parses its own argv even when sourced,
+  so a `bash -c 'script' harness A B` that passes values as positional args must take them first and
+  `set --` before the `.` line (else `unknown arg`, exit 2).
