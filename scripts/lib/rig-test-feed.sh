@@ -66,6 +66,18 @@ rig_test_feed_burn_setenv() {
   if [ "$f" = direct ]; then printf '%s' '--setenv=CAMERA_BOX_INTERCOM=off '; fi
 }
 
+# rig_test_feed_av_apply_hold -> a HOLD reason (non-empty) when this feed must never tune the production A/V pin, else
+# nothing. The E2E's cleanup #856 apply moves the stream 'NDI 2ME PGM' pin + the mbc sync offset; only the optical feed
+# has a camera in its video path like production (direct-feed runs read -51 / -3 / -52 ms where optical runs read
+# within +-18 ms), so a direct-feed measurement would detune production.
+rig_test_feed_av_apply_hold() {
+  local f
+  f="$(rig_test_feed)" || return 2
+  if [ "$f" = direct ]; then
+    printf '%s' 'issue 1482: the direct test feed has no camera in its video path, so its A/V offset never tunes the production stream pin'
+  fi
+}
+
 # rig_test_feed_painter_dropin_cmds -> remote bash (run as root on cam2, BEFORE the steady-state handoff): the
 # direct feed writes the cam2-painter.service drop-in naming the jack, the optical feed removes it; then
 # daemon-reload. Fails loud (exit 1) when the jack is not in aplay -l in the direct feed.

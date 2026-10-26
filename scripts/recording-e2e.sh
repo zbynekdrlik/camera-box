@@ -2255,6 +2255,13 @@ fi"
   # #1265: remember the DAMPED proposed offset BEFORE the guard runs, so the end-of-#856 history
   # append can record it even when a HOLD below clears AV_SYNC_APPLY_OFFSET_MS.
   AV_SYNC_PROPOSED_OFFSET_MS="$AV_SYNC_APPLY_OFFSET_MS"
+  # issue 1482: a direct-test-feed run never tunes the production A/V pin (named HOLD, offset cleared).
+  _avs_feed_hold="$(rig_test_feed_av_apply_hold || true)"
+  if [ -n "$_avs_feed_hold" ] && [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
+    echo "[cleanup] HOLD the A/V apply: $_avs_feed_hold -- stream genlock latency left at the just-restored prod value" >&2
+    AV_SYNC_HELD_REASON="$_avs_feed_hold"
+    AV_SYNC_APPLY_OFFSET_MS=""
+  fi
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     _avs_hold="$(av_sync_apply_guard_decide "$REPORT_JSON" "$AV_SYNC_BAND_VERDICT" "$AV_SYNC_APPLY_OFFSET_MS" "$HERE/av_sync_apply_guard.py")"
     if [ -n "$_avs_hold" ]; then
