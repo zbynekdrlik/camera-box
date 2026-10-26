@@ -251,7 +251,8 @@ report_fetch_rows() {
 # the rollout): it seeds the work copy while the per-venue file does not exist yet, and is removed
 # only after the per-venue file was committed (never by --dry-run).
 run_report_pass() {
-  local rows rows_file work_state msgs line all_ok=1 state_file seed_state="" committed=0
+  local rows rows_file work_state msgs line all_ok=1 state_file seed_state="" committed=0 knob
+  local -a knob_args
   state_file="$(report_state_path "$VENUE")"
   if [ ! -f "$state_file" ] && [ "$VENUE" = "$AVSYNC_LEGACY_HEARTBEAT_VENUE" ] \
       && [ -f "$REPORT_STATE_FILE" ] && [ "$REPORT_STATE_FILE" != "$state_file" ]; then
@@ -272,8 +273,13 @@ run_report_pass() {
   elif [ -n "$seed_state" ]; then
     cp -f "$seed_state" "$work_state" 2>/dev/null || true
   fi
+  # issue 1459: the NESEDÍ advice names the venue's program audio sync offset (the stream box fact);
+  # none known (a box with no fact file) = the decider keeps its old 2ME PGM wording.
+  knob="$(avsync_venue_audio_input "$VENUE" 2>/dev/null || true)"
+  knob_args=()
+  [ -n "$knob" ] && knob_args=(--knob-input "$knob")
   msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$work_state" --rows "$rows_file" \
-    2>/dev/null || true)"
+    "${knob_args[@]}" 2>/dev/null || true)"
   rm -f "$rows_file"
   if [ -z "$msgs" ]; then
     # No messages to deliver -> committing the advanced session-tracking is safe (nothing to lose),

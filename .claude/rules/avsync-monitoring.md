@@ -261,7 +261,7 @@ are byte-identical (unchanged `fire_notify`, stable keys); only the new arm was 
 **What PAGES (🚨):** the stream is LIVE (`outputActive` true) **and** the heartbeat is FRESH +
 measured + non-wedged **and** the SyncNet confidence is `>= OFFSET_CONF_FLOOR` (4.0, the quality
 gate) **and** `|offset_ms| >= OFFSET_ALARM_MS` (30, owner ruling 17.9.2026 / issue 1333). The alert text carries offset + conf + the
-`ZNIZ/ZVYS '2ME PGM'` knob advice already in the verdict.
+knob advice already in the verdict (since issue 1459 the venue's program audio sync offset, below).
 
 **What is SUPPRESSED (never a false page):** stream off / unreadable (`not-live`), stale heartbeat
 (`stale`, owned by the liveness arm), no-signal / TIMEOUT (`not-measured`), an UNMEASURABLE
@@ -515,8 +515,8 @@ from `avsync_lineup.py` (single source of truth, never retyped). A SESSION start
 clip is CONFIDENT when its status parses `AV offset ±N fr (±X ms) conf C` with `C ≥ floor` (a
 `conf 3.2` clip is "nemerateľné", a `conf 5.4` clip is a verdict); the WINDOW verdict = the median
 offset of the confident clips in the last 1200 s, needing ≥ 3 clips, SEDÍ when `|median| ≤ 30 ms`
-else NESEDÍ with the `ZNIZ/ZVYS '2ME PGM' latency o |median|` advice (byte-parity with
-`av_sync_measure.py`). `decide` is IDEMPOTENT — a re-run with the same rows emits nothing new (the
+else NESEDÍ with the knob advice (`knob_advice`, byte-identical with `av_sync_measure.py`; since
+issue 1459 `ZVYS/ZNIZ '<program audio input>' sync offset o |median|`, below). `decide` is IDEMPOTENT — a re-run with the same rows emits nothing new (the
 persisted state dedups). Times are Europe/Bratislava local.
 
 **The four message kinds (Slovak, phone-readable, each `📐 A/V …`):**
@@ -524,7 +524,7 @@ persisted state dedups). Times are Europe/Bratislava local.
   `📐 A/V overené HH:MM (začiatok vysielania): 1. meranie +X ms conf C — verdikt po ≥ 3 meraniach`.
 - **PERIODIC** — every 20 min while the session is live:
   `📐 A/V overené HH:MM: za 20 min N meraní (K nemerateľných), medián +X ms (p10 … p90) → SEDÍ`
-  (or `… → NESEDÍ o X ms → ZNIZ '2ME PGM' latency o X`).
+  (or `… → NESEDÍ o X ms → ZVYS 'mbc' sync offset o X`).
 - **CHANGE** — the window verdict flips SEDÍ↔NESEDÍ between two evaluations → posted at once.
 - **END** — at session end:
   `📐 A/V počas vysielania HH:MM–HH:MM: N meraní (K nemerateľných), medián +X ms, p10 … p90 → SEDÍ/NESEDÍ`.
@@ -591,7 +591,8 @@ venue's stream, SNV and PP today, from ONE table.
 
 - One row per venue, `venue|box|host|key`. Accessors: `avsync_venue_rtmp_url`, `avsync_venue_ws_host`,
   `avsync_venue_box`, `avsync_venue_label` (`SNV`/`PP`), `avsync_venue_heartbeat_file`,
-  `avsync_selected_venues` (`AVSYNC_VENUES` narrows), `avsync_watchdog_venues HOST`.
+  `avsync_venue_audio_input` (issue 1459, below), `avsync_selected_venues` (`AVSYNC_VENUES`
+  narrows), `avsync_watchdog_venues HOST`.
 - **Derived, never typed.** A Linux stream box = a fact file `scripts/strih-boxes/<box>.env` with
   `STRIH_ROLE=stream` (venue = `STRIH_VENUE`, stream key = the box name, the issue-1436 convention). It
   is parsed with the loader's own `strih_box_parse_file`, never sourced. The hand-built Windows
@@ -696,3 +697,27 @@ measurer per venue, the symlink, the flock, the template, the installer),
 `test_avsync_watchdogs_venues_1441.py` (both watchdogs, a fake dev2 `ssh` answering per venue from the
 remote command, `OBS_FLEET_HOME` pinning which traveling box is home). The Rust behavioral harnesses
 pin `AVSYNC_HEARTBEAT_HOST=stream` (legacy venue only) or the PP box away, so they stay off the network.
+
+# The advice names the venue's PROGRAM AUDIO sync offset (issue 1459)
+
+The SyncNet advice used to say `ZNIZ/ZVYS '2ME PGM' latency` at every venue. That is the video
+knob of the SNV Windows era; the operator aligns A/V on the program audio input. One PP/SNV design:
+
+- **The knob** = the venue stream box's fact `STRIH_PROGRAM_AUDIO_INPUT` (stream-snv `mbc`, stream-pp
+  `Zvuk z mixu`), read by `avsync_venue_audio_input VENUE` from `scripts/strih-boxes/<box>.env` with
+  the loader's own `strih_box_parse_file`. Empty (rc 0) for a box with no fact file (a declared
+  Windows row), a `none` fact or an unparseable file; rc 1 for a venue with no row.
+- **The text** (`knob_advice(offset_ms, knob_input)`, byte-identical in `av_sync_measure.py` and
+  `avsync_report.py`, pinned by `inspect.getsource` equality): SyncNet + (audio LEADS video) ->
+  `ZVYS '<input>' sync offset o N` (more audio delay); SyncNet - -> `ZNIZ '<input>' sync offset o N`;
+  0 -> `A/V sync OK`. Note the sign is the OPPOSITE of the old video knob (more latency fixed video
+  leading). No input -> the old `2ME PGM` latency text, so an un-upgraded caller keeps working.
+- **The plumbing:** `avsync-measure-dev2.sh` `resolve_venue_config` derives `KNOB_INPUT` (env
+  `AVSYNC_MEASURE_KNOB_INPUT` wins) and `run_measure` passes `--knob-input` to `av_sync_measure.py`
+  only when it is set; the dev1 `run_report_pass` passes the same accessor's value to
+  `avsync_report.py --knob-input`. The lineup offset alarm forwards the verdict text verbatim
+  (`offset_advice_from_status`), so it names the new knob with no change.
+- **Rollout:** re-run `scripts/avsync-dev2-install.sh --install` from the merged checkout (it ships the
+  measurer, `av_sync_measure.py`, the libs and the fact files; the template unit needs no change).
+  Until then dev2 prints the old text; the dev1 report already names the new knob after the merge.
+- Tests: `tests/python/test_avsync_knob_advice_1459.py`.

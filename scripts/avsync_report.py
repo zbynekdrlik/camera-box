@@ -24,7 +24,7 @@ Vocabulary (from avsync-watchdog.ps1 / av_sync_measure.py, verified in avsync_li
   a CONFIDENT clip parses "AV offset ±N fr (±X ms) conf C" with C >= OFFSET_CONF_FLOOR (4.0);
   everything else in a session (UNMEASURABLE band/graphics windows, low-conf clips) is "nemerateľné".
 
-CLI: avsync_report.py --state <json file> --rows <tsv file> [--now EPOCH]
+CLI: avsync_report.py --state <json file> --rows <tsv file> [--now EPOCH] [--knob-input NAME]
   Reads the rows TSV + the JSON state, prints one message per line (UTF-8), REWRITES the state file
   in place, exits 0. A missing/garbled state file starts fresh; a missing rows file = no rows.
 """
@@ -109,17 +109,25 @@ def _median(vals):
     return _percentile(sorted(vals), 50)
 
 
-def _advice(median_ms):
-    """PURE: the operator knob advice, byte-parity with av_sync_measure.py's own verdict text --
-    audio ahead (median > 0) -> "ZNIZ '2ME PGM' latency o <median>"; video ahead (median < 0) ->
-    "ZVYS '2ME PGM' latency o <|median|>". No diacritics -- matches av_sync_measure.py exactly so a
-    ZNIZ/ZVYS grep and the operator's muscle memory read the same string everywhere."""
-    m = int(round(median_ms))
-    if m > 0:
-        return "ZNIZ '2ME PGM' latency o {}".format(m)
-    if m < 0:
-        return "ZVYS '2ME PGM' latency o {}".format(abs(m))
-    return "A/V sync OK"
+def knob_advice(offset_ms, knob_input=None):
+    """PURE (issue 1459): the operator knob advice for an A/V offset in ms (SyncNet sign: + = audio
+    leads video). With the venue's program audio input it names that input's sync offset, and more
+    audio delay fixes audio leading: + -> "ZVYS '<input>' sync offset o N", - -> "ZNIZ ...". Without
+    one (a caller not upgraded yet) it keeps the old 2ME PGM latency text. 0 -> "A/V sync OK".
+    Byte-identical in av_sync_measure.py and avsync_report.py (tests/python/
+    test_avsync_knob_advice_1459.py); no diacritics, so a ZNIZ/ZVYS grep reads it everywhere."""
+    m = int(round(offset_ms))
+    if m == 0:
+        return "A/V sync OK"
+    if knob_input:
+        return "{} '{}' sync offset o {}".format("ZVYS" if m > 0 else "ZNIZ", knob_input, abs(m))
+    return "{} '2ME PGM' latency o {}".format("ZNIZ" if m > 0 else "ZVYS", abs(m))
+
+
+def _advice(median_ms, knob_input=None):
+    """PURE: the operator knob advice for a window median, byte-parity with av_sync_measure.py's
+    own verdict text (one shared knob_advice shape)."""
+    return knob_advice(median_ms, knob_input)
 
 
 class _Row:
@@ -183,11 +191,11 @@ def _window_verdict(offsets):
     return ("SEDI" if abs(med) <= OFFSET_ALARM_MS_DEFAULT else "NESEDI"), med
 
 
-def _verdict_tail(verdict, median):
+def _verdict_tail(verdict, median, knob_input=None):
     """PURE: the ' -> SEDÍ' / ' -> NESEDÍ o X ms -> <advice>' suffix for a definite verdict."""
     if verdict == "SEDI":
         return " → SEDÍ"
-    return " → NESEDÍ o {} ms → {}".format(abs(int(round(median))), _advice(median))
+    return " → NESEDÍ o {} ms → {}".format(abs(int(round(median))), _advice(median, knob_input))
 
 
 def _median_paren(offsets):
@@ -201,7 +209,7 @@ def _median_paren(offsets):
     )
 
 
-def _end_message(session_rows):
+def _end_message(session_rows, knob_input=None):
     """PURE: the end-of-broadcast summary line for a whole session."""
     ss = session_rows[0].epoch
     se = session_rows[-1].epoch
@@ -216,13 +224,15 @@ def _end_message(session_rows):
     if verdict is None:
         # < 3 confident over the WHOLE session -- report the median but no SEDÍ/NESEDÍ verdict.
         return head + body + " — < 3 spoľahlivé, bez verdiktu"
-    return head + body + _verdict_tail(verdict, median)
+    return head + body + _verdict_tail(verdict, median, knob_input)
 
 
-def decide(rows, state, now_epoch):
+def decide(rows, state, now_epoch, knob_input=None):
     """PURE: given the fetched rows [(epoch, status)...], the previous report state (a dict), and the
     evaluation time now_epoch, return (messages, new_state). IDEMPOTENT: a second call with the same
-    rows and the returned state emits nothing new. See the module docstring for the message kinds."""
+    rows and the returned state emits nothing new. See the module docstring for the message kinds.
+    knob_input (issue 1459) = the venue's program audio input the NESEDÍ advice names (None = the
+    old 2ME PGM latency text)."""
     st = dict(DEFAULT_STATE)
     if state:
         st.update({k: state.get(k, DEFAULT_STATE[k]) for k in DEFAULT_STATE})
@@ -246,7 +256,7 @@ def decide(rows, state, now_epoch):
     if st["session_start"] is not None and not st["end_posted"] and st["session_start"] != ss:
         prev = next((s for s in sessions if s[0].epoch == st["session_start"]), None)
         if prev is not None:
-            messages.append(_end_message(prev))
+            messages.append(_end_message(prev, knob_input))
         st["end_posted"] = True
 
     # (2) Enter/refresh the current session's tracking on a session switch.
@@ -272,7 +282,7 @@ def decide(rows, state, now_epoch):
     if not live:
         # (4a) Session ended -> END (once). No further periodic/change for a finished broadcast.
         if not st["end_posted"]:
-            messages.append(_end_message(last_session))
+            messages.append(_end_message(last_session, knob_input))
             st["end_posted"] = True
         return messages, st
 
@@ -282,7 +292,7 @@ def decide(rows, state, now_epoch):
     verdict, median = _window_verdict(w_conf)
 
     if verdict is not None and st["last_verdict"] is not None and verdict != st["last_verdict"]:
-        tail = _verdict_tail(verdict, median)
+        tail = _verdict_tail(verdict, median, knob_input)
         messages.append(
             "📐 A/V overené {}: verdikt sa zmenil{} (medián {:+d} ms, {} spoľahlivých)".format(
                 _hm(now), tail, int(round(median)), len(w_conf)
@@ -299,7 +309,7 @@ def decide(rows, state, now_epoch):
         if verdict is None:
             messages.append(head + " — zatiaľ < 3 spoľahlivé, bez verdiktu")
         else:
-            messages.append(head + ", " + _median_paren(w_conf) + _verdict_tail(verdict, median))
+            messages.append(head + ", " + _median_paren(w_conf) + _verdict_tail(verdict, median, knob_input))
         # Advance past every missed tick (dev1 down / gaps) so a backlog posts ONE summary, not many.
         missed = (now - st["last_periodic_epoch"]) // WINDOW_S
         st["last_periodic_epoch"] = st["last_periodic_epoch"] + missed * WINDOW_S
@@ -352,12 +362,15 @@ def main(argv=None):
     ap.add_argument("--state", required=True, help="path to the JSON report-state file (rewritten)")
     ap.add_argument("--rows", required=True, help="path to the TSV rows file (<epoch>\\t<status>)")
     ap.add_argument("--now", type=int, default=None, help="evaluation epoch (default: time.time())")
+    ap.add_argument("--knob-input", default=None,
+                    help="issue 1459: the venue's program audio input the advice names "
+                         "(absent = the old 2ME PGM latency text)")
     args = ap.parse_args(argv)
 
     now = args.now if args.now is not None else int(time.time())
     rows = _read_rows(args.rows)
     state = _read_state(args.state)
-    messages, new_state = decide(rows, state, now)
+    messages, new_state = decide(rows, state, now, knob_input=args.knob_input)
     for m in messages:
         sys.stdout.write(m + "\n")
     _write_state(args.state, new_state)
