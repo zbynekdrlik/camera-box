@@ -166,9 +166,10 @@ def test_version_gate_arms(tmp_path):
     # issue 1413: the SNV cameras at their rig address, the Poprad ones at the dev1-side 10.76.9.x
     assert out["L"].split() == [f"cam{n}=root@{'10.77.9' if n in (2, 3, 5) else '10.76.9'}.6{n}"
                                 for n in range(1, 8)] + [
-        "strih-snv=op@10.77.9.202", "companion-snv=op@companion-snv.lan", "strih-pp=op@strih-pp.lan",
-        "stream-pp=op@stream-pp.lan"]
-    assert out["W"].split() == ["stream-snv=op@10.77.9.204", "resolume-snv=op@resolume.lan",
+        "strih-snv=op@10.77.9.202", "stream-snv=op@10.77.9.204", "companion-snv=op@companion-snv.lan",
+        "strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
+    # issue 1462: stream-snv is a Linux box since 22.10.2026
+    assert out["W"].split() == ["resolume-snv=op@resolume.lan",
                                 "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30", "iem-snv=op@iem-snv.lan",
                                 "resolume-pp=op@resolume-pp.lan", "alex-nb=alexnb@10.77.7.109"]
     assert out["D"] == "dev1"
@@ -178,7 +179,9 @@ def test_present_drops_an_away_traveling_box(tmp_path):
     # OBS_FLEET_HOME pins who is home (the obs-fleet test seam): resolume away
     r = _bash(tmp_path, 'dantesync_fleet_spec win op --present', OBS_FLEET_HOME="strih-snv stream-snv")
     assert "resolume-snv" not in r.stdout
-    assert "mbc=op@10.77.7.232" in r.stdout and "stream-snv=op@10.77.9.204" in r.stdout
+    assert "mbc=op@10.77.7.232" in r.stdout
+    r = _bash(tmp_path, 'dantesync_fleet_spec linux op --present', OBS_FLEET_HOME="strih-snv stream-snv")
+    assert "stream-snv=op@10.77.9.204" in r.stdout
 
 
 def test_credential_is_referenced_by_name_never_a_literal(tmp_path):
