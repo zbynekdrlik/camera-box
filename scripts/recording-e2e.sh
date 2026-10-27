@@ -5352,7 +5352,10 @@ fi
 # tests/harness_av_expected_calibration_parity_1178.rs). Override for an operator-dialed value, or
 # after a rig-verified physical video-chain change re-derives a genuine non-zero leg.
 # Always passed so the gate is explicit in the printed command, not silently implicit.
+AV_EXPECTED_MS_FROM_ENV="${AV_EXPECTED_MS+set}"
 AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"
+# issue 1482: the direct test feed expects its own measured A/V leg (an explicit AV_EXPECTED_MS wins).
+[ -z "$AV_EXPECTED_MS_FROM_ENV" ] && AV_EXPECTED_MS="$(rig_test_feed_av_expected_ms)"
 # #1003: in measurement-eq mode the A/V gate must expect the value the pin+hold DESIGN implies
 # (the profile's coherent av_expected — derived so the equalized-deep pins + rebalanced hold land
 # the common A/V level there), NOT a blindly-inherited 0. With the shipped profile this IS 0, but

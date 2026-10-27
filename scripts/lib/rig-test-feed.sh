@@ -66,6 +66,19 @@ rig_test_feed_burn_setenv() {
   if [ "$f" = direct ]; then printf '%s' '--setenv=CAMERA_BOX_INTERCOM=off '; fi
 }
 
+# The A/V offset every camera measures in the direct feed. Every direct-feed reading since the jack switch
+# (25.-27.10.2026, E2E runs + soak windows): -38..-52 ms, uniform over the cameras, median -46.5 (the ROZHODNUTE on
+# the ticket). The direct feed has no camera filming cam2's monitor and takes its marker from the jack, not a mic,
+# so its leg differs from the camera+monitor feed and from production. A property of the test feed only.
+RIG_DIRECT_AV_EXPECTED_MS="${RIG_DIRECT_AV_EXPECTED_MS:--45}"
+
+# rig_test_feed_av_expected_ms -> the A/V gate's expected offset for this feed (0 camera+monitor, the direct leg).
+rig_test_feed_av_expected_ms() {
+  local f
+  f="$(rig_test_feed)" || return 2
+  if [ "$f" = direct ]; then printf '%s' "$RIG_DIRECT_AV_EXPECTED_MS"; else printf '0'; fi
+}
+
 # rig_test_feed_av_apply_hold -> a HOLD reason (non-empty) when this feed must never tune the production A/V pin, else
 # nothing. The E2E's cleanup #856 apply moves the stream 'NDI 2ME PGM' pin + the mbc sync offset; only the optical feed
 # has a camera in its video path like production (direct-feed runs read -51 / -3 / -52 ms where optical runs read
