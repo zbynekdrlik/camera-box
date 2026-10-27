@@ -9,14 +9,12 @@
 //! symbols and assert that every unregister runs inside the graphics context and that a failing
 //! unregister is reported through the plugin's own `cuda_error_check`.
 //!
-//! Std-only: runs under `cargo test` and standalone with
-//! `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/nvenc_opengl_free_1462.rs`.
+//! Runs under `cargo test` (scratch dir via the `tempfile` dev-dependency, issue 1409).
 //! Fails loudly when no C compiler is present.
 
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const NVENC_OPENGL: &str = "vendor/obs-studio/plugins/obs-nvenc/nvenc-opengl.c";
 const FREE_SIG: &str = "void cuda_opengl_free(struct nvenc_data *enc)";
@@ -122,17 +120,12 @@ int main(void)
 "#;
 
 fn run_harness() -> Vec<String> {
-    static N: AtomicUsize = AtomicUsize::new(0);
     let src =
         fs::read_to_string(repo().join(NVENC_OPENGL)).expect("issue 1462: read nvenc-opengl.c");
     let body = lift_fn(&src, FREE_SIG);
     let program = format!("{HARNESS_HEAD}\n{body}\n{HARNESS_MAIN}");
-    let dir = std::env::temp_dir().join(format!(
-        "nvenc-opengl-free-1462-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst)
-    ));
-    fs::create_dir_all(&dir).expect("issue 1462: scratch dir");
+    let scratch = tempfile::tempdir().expect("issue 1462: scratch dir");
+    let dir = scratch.path();
     let c = dir.join("harness.c");
     let bin = dir.join("harness");
     fs::write(&c, program).expect("issue 1462: write harness");
@@ -157,7 +150,6 @@ fn run_harness() -> Vec<String> {
     let run = Command::new(&bin)
         .output()
         .expect("issue 1462: run the harness");
-    let _ = fs::remove_dir_all(&dir);
     assert!(run.status.success(), "issue 1462: the harness failed");
     String::from_utf8_lossy(&run.stdout)
         .lines()
