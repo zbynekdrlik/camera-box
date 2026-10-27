@@ -5266,6 +5266,14 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     cbox_burn_log_persist "$CAM_PW" "$_bl_ip" "$_bl_cn" "$RUN_ID" "$OUTDIR"
   done
 fi
+# issue 1482: the sidecar counts the burn instance's whole life; keep only the drops inside the
+# recording window, read from the persisted burn log (an unprovable window keeps the whole count).
+if [ -f "$CAM1_CAPTURE_STATS" ]; then
+  python3 "$HERE/capture_drop_window.py" --sidecar "$CAM1_CAPTURE_STATS" \
+    --burn-log "$OUTDIR/$(cbox_burn_log_dest_name cam1 "$RUN_ID")" \
+    --start "$CAPTURE_RATE_WINDOW_START_EPOCH" --end "$CAPTURE_RATE_WINDOW_END_EPOCH" \
+    || echo "WARNING issue 1482: capture-drop window scope failed; whole-run count kept" >&2
+fi
 # #193: by DEFAULT decode ON stream.lan where the video lives — do NOT download the multi-GB
 # recordings to slow dev1 (the root of the download + #187 OOM + disk drain). When
 # VERDICT_ON_STREAM=1 (the default), the harness SKIPS the dev1 fetch entirely and the verdict
