@@ -75,7 +75,7 @@ impl Rng {
 }
 
 /// One simulated camera run.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Scenario {
     /// Camera frame-rate offset (positive = faster than the grid).
     ppm: f64,
@@ -98,6 +98,9 @@ struct Scenario {
     hidden_skip: Option<(f64, f64)>,
     /// An i.i.d. Gaussian V4L2 timestamp jitter (ns) instead of the measured model.
     ts_sigma_ns: Option<f64>,
+    /// Issue 1482: a capture card that re-times the frames on its own clock — `(second, step ns)`
+    /// catch-up phase steps, every frame captured at or after `second` moved by `step` (summed).
+    card_steps: Vec<(f64, f64)>,
     seed: u64,
 }
 
@@ -113,6 +116,7 @@ impl Scenario {
             reopen: None,
             hidden_skip: None,
             ts_sigma_ns: None,
+            card_steps: Vec::new(),
             seed: 0x1367_d2be,
         }
     }
@@ -145,6 +149,8 @@ fn frames(sc: &Scenario) -> Vec<Frame> {
     let mut hidden = 0u64;
     for k in 0..n {
         let mut truth_rel = sc.start_phase_ns + k as f64 * period + extra_ns;
+        // The card's catch-up steps so far (issue 1482), on the card's own (stepped) timeline.
+        truth_rel += card_step_sum(sc, truth_rel);
         if let Some((at, gap, shift)) = sc.reopen {
             if !reopened && truth_rel >= at * 1e9 {
                 // The device goes away for `gap` seconds and comes back on a new phase.
@@ -222,6 +228,7 @@ struct Run {
     stamp_resyncs: u64,
     crossings: u64,
     reseeds: u64,
+    phase_steps: u64,
 }
 
 fn run(sc: &Scenario, tracked: bool) -> Run {
@@ -282,6 +289,7 @@ fn run(sc: &Scenario, tracked: bool) -> Run {
     }
     r.crossings = phase.crossings();
     r.reseeds = phase.reseeds();
+    r.phase_steps = phase.phase_steps();
     r
 }
 
@@ -646,4 +654,106 @@ fn a_preempted_clock_read_never_moves_the_stamps_1372() {
         );
         assert_eq!((t.crossings, t.reseeds, t.sheds, t.repeats), (0, 0, 0, 0));
     }
+}
+
+/// The summed card catch-up steps (ns) in effect at relative time `rel_ns` (issue 1482).
+fn card_step_sum(sc: &Scenario, rel_ns: f64) -> f64 {
+    sc.card_steps
+        .iter()
+        .filter(|&&(at, _)| rel_ns >= at * 1e9)
+        .map(|&(_, step)| step)
+        .sum()
+}
+
+/// Issue 1482 — cam2's re-timing Cam Link (live 27.10.2026): the SAME splitter signal reads +18 ppm
+/// on cam3/cam5, whose cards pass the frames through, but +45 ppm on cam2, whose card re-times them
+/// on its own clock and catches up to the source in constant phase steps: mostly +1.8..+2.6 ms,
+/// once -6.3 ms, at random 2..75 s intervals. The steps are the seeded schedule below; between
+/// them the frames run on the card's +45 ppm clock.
+fn retiming_card_steps(secs: f64, seed: u64) -> Vec<(f64, f64)> {
+    let mut rng = Rng(seed);
+    let mut out = Vec::new();
+    let mut at = 10.0;
+    while at < secs - 5.0 {
+        let step = if out.len() == 7 {
+            -6_300_000.0
+        } else {
+            1_800_000.0 + 800_000.0 * rng.unit()
+        };
+        out.push((at, step));
+        at += 2.0 + 73.0 * rng.unit();
+    }
+    out
+}
+
+/// The slot-edge crossings of the card's TRUE (stepped) capture instant in a run.
+fn true_card_crossings(sc: &Scenario) -> usize {
+    let period = NOMINAL_60 / (1.0 + sc.ppm * 1e-6);
+    let n = (sc.secs * FPS as f64) as u64;
+    let base = SEC_2309 * NS_PER_SECOND;
+    let slot_of = |k: u64| {
+        let rel = sc.start_phase_ns + k as f64 * period;
+        let stepped = rel + card_step_sum(sc, rel);
+        crate::genlock_grid::grid_floor_ns(base + stepped.round() as u64, I60)
+    };
+    (1..n)
+        .filter(|&k| crate::genlock_grid::grid_steps_between(slot_of(k - 1), slot_of(k), I60) != 1)
+        .count()
+}
+
+/// Issue 1482 (ROZHODNUTÉ 6445636799: no capture card is genlocked, the cambox absorbs its clock).
+/// 30 min of cam2's re-timing card through the REAL capture-loop pieces. Every catch-up step is
+/// absorbed as a phase step with the lock kept: 0 re-seeds, at most ONE duplicate or missing slot
+/// per slot-edge crossing (a step that moves the phase over an edge, or the card's own drift), and
+/// the receiver sees a continuous stamp sequence.
+///
+/// Before the fix (measured on the RED commit, same seed): every one of the 48 steps re-seeded the
+/// fit (48 re-seeds), each putting ~2 s of the stream on the raw stamp + poll-time gate: 3 receiver
+/// `stamp_gap` and 3 `#707 SKIPPED` events. The raw path alone (no tracker) reads 109 sheds +
+/// 110 repeats on the cambox and 48 dup + 101 gap at the receiver.
+#[test]
+fn a_retiming_capture_card_never_reseeds_and_costs_one_slot_per_crossing_1482() {
+    let mut sc = Scenario::new(45.0, 1_800.0);
+    sc.card_steps = retiming_card_steps(sc.secs, 0x1482_ca2d);
+    let steps = sc.card_steps.len() as u64;
+    let true_edges = true_card_crossings(&sc);
+    let raw = run(&sc, false);
+    let t = run(&sc, true);
+    eprintln!(
+        "re-timing card, {steps} steps in {} s, {true_edges} true edge crossings: RAW cambox {} \
+         sheds + {} repeats, strih dup {} gap {}; TRACKED cambox {} sheds + {} repeats, strih dup \
+         {} gap {}, crossings {} reseeds {} phase_steps {} skips {}",
+        sc.secs,
+        raw.sheds,
+        raw.repeats,
+        raw.rx.dups,
+        raw.rx.gaps,
+        t.sheds,
+        t.repeats,
+        t.rx.dups,
+        t.rx.gaps,
+        t.crossings,
+        t.reseeds,
+        t.phase_steps,
+        t.skip_events
+    );
+    assert!(steps >= 30, "the schedule holds cam2's step rate: {steps}");
+    assert_eq!(t.reseeds, 0, "a card re-timing step is never a re-seed");
+    assert_eq!(t.phase_steps, steps, "every catch-up step absorbed once");
+    assert!(
+        t.crossings as usize <= true_edges,
+        "crossings {} vs true edge crossings {true_edges}",
+        t.crossings
+    );
+    assert_eq!(
+        t.sheds + t.repeats,
+        t.crossings,
+        "at most one duplicate or missing slot per crossing"
+    );
+    assert_eq!(
+        (t.rx.dups, t.rx.gaps),
+        (0, 0),
+        "the receiver's StampTrack never flips"
+    );
+    assert_eq!(t.skip_events, 0);
 }

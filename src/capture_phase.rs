@@ -241,6 +241,11 @@ pub enum PhaseNote {
     OutlierRun { resid_ns: Vec<i64> },
     /// A sample a whole number of periods late, re-indexed as `frames` the device skipped.
     HiddenDrop { frames: u32, resid_ns: i64 },
+    /// Issue 1482: [`RESEED_CONSECUTIVE_OUTLIERS`] samples in a row off the fit by one CONSTANT
+    /// offset (a capture card that re-times frames on its own clock and catches up in a step): the
+    /// fit was moved by the run's median residual `step_ns` (positive = later), the period and the
+    /// lock kept. Never a re-seed.
+    PhaseStep { step_ns: i64 },
 }
 
 impl PhaseNote {
@@ -279,7 +284,20 @@ impl PhaseNote {
             PhaseNote::HiddenDrop { frames, resid_ns } => {
                 format!("hidden drop: frames={frames} resid_us={}", us(*resid_ns))
             }
+            PhaseNote::PhaseStep { step_ns } => {
+                format!("step: {} us (card re-timing), lock kept", us(*step_ns))
+            }
         }
+    }
+
+    /// The whole log line the capture loop writes for this note: `#1482 capture phase step: ...`
+    /// for an absorbed card re-timing step, `#1371 capture phase <describe>` for the rest.
+    pub fn log_line(&self) -> String {
+        let issue = match self {
+            PhaseNote::PhaseStep { .. } => "#1482",
+            _ => "#1371",
+        };
+        format!("{issue} capture phase {}", self.describe())
     }
 }
 
@@ -301,6 +319,8 @@ pub struct CapturePhaseTracker {
     white_check_countdown: u32,
     reseeds: u64,
     hidden_drops: u64,
+    /// Constant-offset outlier runs absorbed as a phase step (issue 1482), never a re-seed.
+    phase_steps: u64,
     /// The residuals of the current outlier run, oldest first (issue 1371, for its note).
     outlier_resid: Vec<i64>,
     /// The note of the most recent observed frame, if it re-seeded or re-indexed (issue 1371).
@@ -447,6 +467,11 @@ impl CapturePhaseTracker {
     /// Frames the device skipped that the sequence did not show (re-indexed, not re-seeded).
     pub fn hidden_drops(&self) -> u64 {
         self.hidden_drops
+    }
+
+    /// Card re-timing phase steps absorbed with the lock kept (issue 1482).
+    pub fn phase_steps(&self) -> u64 {
+        self.phase_steps
     }
 
     fn seed(&mut self, seq: u32, t: u64) {
@@ -771,6 +796,11 @@ impl CapturePhase {
         self.tracker.hidden_drops()
     }
 
+    /// Card re-timing phase steps absorbed with the lock kept, since the start (issue 1482).
+    pub fn phase_steps(&self) -> u64 {
+        self.tracker.phase_steps()
+    }
+
     /// Why the most recent frame re-seeded the fit or was re-indexed (issue 1371), else `None`.
     pub fn note(&self) -> Option<&PhaseNote> {
         self.tracker.note()
@@ -787,11 +817,12 @@ impl CapturePhase {
             .map_or_else(|| "na".to_string(), |v| format!("{v:.0}"));
         format!(
             " phase_lock={} phase_ppm={ppm} jitter_us={jitter} crossings={} reseeds={} \
-             hidden_drops={}",
+             hidden_drops={} phase_steps={}",
             self.mode.token(),
             self.crossings,
             self.reseeds(),
-            self.hidden_drops()
+            self.hidden_drops(),
+            self.phase_steps()
         )
     }
 }
