@@ -65,11 +65,21 @@ static int gfx_depth;
 static int ctx_depth;
 static int fail_unregister_of = -1; /* index of the resource whose unregister fails */
 
-static void obs_enter_graphics(void) { gfx_depth++; }
-static void obs_leave_graphics(void) { gfx_depth--; }
+static int fail_push;
 
-static CUresult stub_push(CUcontext c) { (void)c; ctx_depth++; return CUDA_SUCCESS; }
-static CUresult stub_pop(CUcontext *c) { (void)c; ctx_depth--; return CUDA_SUCCESS; }
+static void obs_enter_graphics(void) { printf("SEQ enter\n"); gfx_depth++; }
+static void obs_leave_graphics(void) { printf("SEQ leave\n"); gfx_depth--; }
+
+static CUresult stub_push(CUcontext c)
+{
+	(void)c;
+	printf("SEQ push\n");
+	if (fail_push)
+		return 201;
+	ctx_depth++;
+	return CUDA_SUCCESS;
+}
+static CUresult stub_pop(CUcontext *c) { (void)c; printf("SEQ pop\n"); ctx_depth--; return CUDA_SUCCESS; }
 static CUresult stub_unregister(CUgraphicsResource r)
 {
 	int idx = (int)(size_t)r;
@@ -109,6 +119,13 @@ int main(void)
 	fail_unregister_of = 3;
 	cuda_opengl_free(&enc);
 	printf("DEPTH gfx=%d ctx=%d\n", gfx_depth, ctx_depth);
+
+	printf("CASE pushfail\n");
+	fail_unregister_of = -1;
+	fail_push = 1;
+	cuda_opengl_free(&enc);
+	printf("DEPTH gfx=%d ctx=%d\n", gfx_depth, ctx_depth);
+	fail_push = 0;
 
 	printf("CASE noctx\n");
 	struct nvenc_data none = {NULL, {texs, 2}};
@@ -224,4 +241,41 @@ fn no_cuda_context_touches_nothing_1462() {
     let noctx = case(&lines, "noctx");
     assert!(noctx.iter().all(|l| !l.starts_with("UNREG ")));
     assert!(noctx.contains(&"NOCTX gfx_touched=0".to_string()));
+}
+
+/// The CUDA context is pushed before the graphics context is entered and popped after it is left,
+/// the same order as `cuda_opengl_encode`, so the two threads never take them in opposite order.
+#[test]
+fn the_cuda_context_wraps_the_graphics_context_like_the_encoder_1462() {
+    let lines = run_harness();
+    let ok = case(&lines, "ok");
+    let seq: Vec<&str> = ok.iter().filter_map(|l| l.strip_prefix("SEQ ")).collect();
+    assert_eq!(
+        seq,
+        ["push", "enter", "leave", "pop"],
+        "issue 1462: lock order must match cuda_opengl_encode: {ok:?}"
+    );
+}
+
+/// A failing push is reported and nothing runs in the wrong context; graphics stays balanced.
+#[test]
+fn a_failing_context_push_is_reported_and_unregisters_nothing_1462() {
+    let lines = run_harness();
+    let pf = case(&lines, "pushfail");
+    assert!(
+        pf.iter().all(|l| !l.starts_with("UNREG ")),
+        "issue 1462: no unregister without the CUDA context: {pf:?}"
+    );
+    let errors: Vec<&String> = pf.iter().filter(|l| l.starts_with("ERROR ")).collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "issue 1462: the failed push is logged once: {pf:?}"
+    );
+    assert!(
+        errors[0].contains("cuCtxPushCurrent") && errors[0].contains("res=201"),
+        "issue 1462: the error names the push: {}",
+        errors[0]
+    );
+    assert!(pf.contains(&"DEPTH gfx=0 ctx=0".to_string()), "{pf:?}");
 }

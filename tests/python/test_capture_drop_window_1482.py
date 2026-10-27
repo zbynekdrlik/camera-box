@@ -146,3 +146,43 @@ def test_recording_e2e_scopes_the_sidecar_after_persisting_the_burn_log_1482():
     assert "cbox_burn_log_dest_name cam1" in block
     # the verdict reads the scoped sidecar: the scope step runs before VERDICT_ARGS takes it
     assert pos < s.find("VERDICT_ARGS+=(--cam1-capture-stats")
+
+
+def test_a_second_scope_run_keeps_the_window_count_without_a_warning_1482(tmp_path):
+    """Scoping is idempotent: a rerun reads the whole-run count it kept, not its own window count."""
+    sidecar = tmp_path / "s.txt"
+    sidecar.write_text("v4l2_dropped=4\nframes_captured=32926\n")
+    log = tmp_path / "b.log"
+    log.write_text(OUTSIDE_ONLY)
+    args = [sys.executable, SCRIPT, "--sidecar", str(sidecar), "--burn-log", str(log),
+            "--start", str(START), "--end", str(END)]
+    subprocess.run(args, capture_output=True, text=True, check=True)
+    rc = subprocess.run(args, capture_output=True, text=True)
+    assert rc.returncode == 0
+    assert "WARNING" not in rc.stderr, rc.stderr
+    kv = dict(l.split("=", 1) for l in sidecar.read_text().split())
+    assert kv["v4l2_dropped"] == "0"
+    assert kv["v4l2_dropped_whole_run"] == "4"
+
+
+def test_the_sidecar_is_replaced_atomically_1482(tmp_path, monkeypatch):
+    """The rewrite goes through a temp file + os.replace, so a failed write never truncates it."""
+    m = _load()
+    sidecar = tmp_path / "s.txt"
+    original = "v4l2_dropped=4\nframes_captured=32926\n"
+    sidecar.write_text(original)
+    log = tmp_path / "b.log"
+    log.write_text(OUTSIDE_ONLY)
+    calls = []
+    real_replace = os.replace
+
+    def boom(src, dst):
+        calls.append((src, dst))
+        raise OSError("ENOSPC")
+
+    monkeypatch.setattr(m.os, "replace", boom)
+    with pytest.raises(OSError):
+        m.scope(str(sidecar), str(log), START, END)
+    monkeypatch.setattr(m.os, "replace", real_replace)
+    assert calls and calls[0][1] == str(sidecar)
+    assert sidecar.read_text() == original
