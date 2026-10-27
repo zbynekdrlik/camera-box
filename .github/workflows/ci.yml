@@ -20,11 +20,14 @@ env:
 # re-push doesn't leave the old run burning a runner. Keyed by workflow + ref so
 # dev, main, and a manual dispatch each get their own independent group.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
   # Issue 1476: a main run is never cancelled. Every main run tags + publishes a release (and
   # deploys the fleet); a second merge right behind it used to cancel it after the tag was pushed,
-  # leaving a tag with no GitHub Release (a cancelled job never trips notify-on-failure). Main runs
-  # queue instead; dev and manual runs still cancel a superseded run.
+  # leaving a tag with no GitHub Release (a cancelled job never trips notify-on-failure). So each
+  # main run gets its OWN group (the run id appended): GitHub keeps only one PENDING run per group
+  # even without cancel-in-progress, so a shared main group would still drop the middle one of
+  # three quick merges. The fleet deploy keeps its own hardware queue (deploy-fleet's job group).
+  # dev and manual runs still cancel a superseded run.
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:

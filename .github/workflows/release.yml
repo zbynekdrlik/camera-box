@@ -35,10 +35,17 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      # The build needs the -dev headers; the call path only runs --version (libasound).
       - name: Install dependencies
+        env:
+          CALL_TAG: ${{ inputs.tag }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          if [ -n "${CALL_TAG}" ]; then
+            sudo apt-get install -y libasound2
+          else
+            sudo apt-get install -y libv4l-dev libasound2-dev
+          fi
 
       # workflow_call (ci.yml's release job): the caller run's gated + deployed build.
       - name: Download the caller run's camera-box build
