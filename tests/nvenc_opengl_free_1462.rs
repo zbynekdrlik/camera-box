@@ -127,6 +127,11 @@ int main(void)
 	printf("DEPTH gfx=%d ctx=%d\n", gfx_depth, ctx_depth);
 	fail_push = 0;
 
+	printf("CASE notex\n");
+	struct nvenc_data empty = {(void *)0x10, {texs, 0}};
+	cuda_opengl_free(&empty);
+	printf("DEPTH gfx=%d ctx=%d\n", gfx_depth, ctx_depth);
+
 	printf("CASE noctx\n");
 	struct nvenc_data none = {NULL, {texs, 2}};
 	int before = gfx_depth;
@@ -278,4 +283,16 @@ fn a_failing_context_push_is_reported_and_unregisters_nothing_1462() {
         errors[0]
     );
     assert!(pf.contains(&"DEPTH gfx=0 ctx=0".to_string()), "{pf:?}");
+}
+
+/// An encoder with no registered texture (the CUDA-upload path, a failed create) takes neither
+/// context: destroy never waits for the graphics lock for nothing.
+#[test]
+fn no_registered_texture_takes_no_context_1462() {
+    let lines = run_harness();
+    let notex = case(&lines, "notex");
+    assert!(
+        notex.iter().all(|l| !l.starts_with("SEQ ")),
+        "issue 1462: nothing to unregister must take no context: {notex:?}"
+    );
 }
