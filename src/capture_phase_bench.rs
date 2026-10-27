@@ -732,8 +732,11 @@ fn true_card_crossings(sc: &Scenario) -> usize {
 /// `stamp_gap` and 3 `#707 SKIPPED` events. The raw path alone (no tracker) reads 109 sheds +
 /// 110 repeats on the cambox and 48 dup + 101 gap at the receiver.
 ///
-/// With the fix: all 48 steps absorbed (`phase_steps` 48), 0 re-seeds, 5 crossings for the 5
-/// true edge crossings = 2 blind sheds + 3 starvation repeats, 0 receiver dup/gap, 0 SKIPs.
+/// With step 1 (the absorb): all 48 steps absorbed (`phase_steps` 48), 0 re-seeds, 5 crossings for
+/// the 5 edge crossings of the card's stepped instants = 2 blind sheds + 3 starvation repeats, 0
+/// receiver dup/gap, 0 SKIPs. With step 2 (the stamp from the source fit) the slot follows the
+/// SOURCE phase, which this schedule's steps (~+54 ppm) put at ~-9 ppm: 1 crossing (1 starvation
+/// repeat), the rest unchanged. `a_sawtooth_card_stamps_the_source_phase_1482` is step 2's bench.
 #[test]
 fn a_retiming_capture_card_never_reseeds_and_costs_one_slot_per_crossing_1482() {
     let mut sc = Scenario::new(45.0, 1_800.0);
