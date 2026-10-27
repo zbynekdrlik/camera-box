@@ -37,12 +37,15 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
 | the pure parse (1..3 ASCII numerals + an optional newline, 0..960), the plan (`make_plan_box` / `plan_box`: floor = the value, `box_fixed`) and the freeze (`frozen_plan`: a fixed plan is frozen on every tick) | `obs-genlock-audio-buffering.h` <-> `src/genlock_audio_buffering.rs`, parity gate `tests/genlock_audio_buffering_parity_1367.rs` |
 | the per-tick freeze takes `audio->genlock_buffering_box_fixed` | obs-audio.c `genlock_buffering_frozen_now(..., box_fixed)`, the call anchor in `tests/genlock_audio_buffering_freeze_wiring_1425.rs` + both windows-genlock pwsh steps |
 
-- **Behaviour under a FIXED plan:** the floor (the declared ticks) is raised on the first tick, BEFORE
-  its mix; `genlock_audio_buffering_action` is never DYNAMIC; a mixed member that falls behind goes to the
-  existing 1381 guard as `GENLOCK_MIX_GUARD_MIXED_LATE` (re-anchored, counted), with or without an audio
-  encoder, inside the launch settle window or not. The settle-window growth line never fires. On the
-  first tick the floor is raised AFTER the render loop, so a member already later than the un-raised
-  window is re-anchored once at launch (`box-fixed-85`: `mbc` 2.7 ms, one `entered the mix late` line).
+- **Behaviour under a FIXED plan:** the floor (the declared ticks) is raised on the first tick right
+  after the freeze decision, BEFORE that tick's render loop, the mix guard and the `#800` telemetry (an
+  extra `set_floor_audio_buffering` call in `audio_callback`, inside the 1381 lift's first block; the
+  tick action's FLOOR arm alone would raise it only after the first tick had judged every member against
+  the un-raised window and logged `total_buffering=0`, review round 1). So the first `#800` line already
+  reads the declared total. `genlock_audio_buffering_action` is never DYNAMIC; a mixed member that falls
+  behind goes to the existing 1381 guard as `GENLOCK_MIX_GUARD_MIXED_LATE` (re-anchored, counted), with or
+  without an audio encoder, inside the launch settle window or not. The settle-window growth line never
+  fires. A frontend low-latency request on a FIXED box logs its OVERRIDDEN line with the fixed value.
 - **The log:** ONE `LOG_INFO` per audio reset `genlock-audio-buffering: FIXED <ms> ms (<ticks> ticks) from
   ~/.camera-box/genlock-audio-buffering-ms (issue 1425)`; an absent / invalid file keeps the slice-3 plan
   byte for byte plus ONE `LOG_WARNING` `genlock-audio-buffering: NOT deterministic on this box -- no|an
@@ -53,12 +56,18 @@ DECLARES its buffering, and libobs holds the mix at it from the first tick.
   byte-identical too (`bundle_state_audio.py` keys its session start on it).
 - **The ONE grade** (`obs_audio_buffering_verdict`, pure): the fact is valid; the marker equals it; the
   LAST `genlock-audio-buffering:` line of the newest OBS log is FIXED at the fact; after it no `ABOVE the
-  floor` line and every `audio-telemetry #800: total_buffering=` reads the FIXED line's TICK count (a fact
-  that is not a whole number of 21.3 ms ticks is rounded up: 50 -> 3 ticks = 64 ms). Used by
-  verify-strih item 48 (`obs_audio_buffering_verify_row`, one line after item 36) and by the BLOCKING
-  recording-e2e `[0/8]` row (`obs_audio_buffering_e2e_gate_all`, one call after the session-visibility
-  gate): each linux-genlock box (strih, stream) read over plain ssh (sshpass outermost, the ssh bounded,
-  ONE grep of the newest log, never the whole log); an unreadable box FAILS; a non-linux box is one NOTE.
+  floor` line, every `audio-telemetry #800: total_buffering=` reads the FIXED line's TICK count (a fact
+  that is not a whole number of 21.3 ms ticks is rounded up: 50 -> 3 ticks = 64 ms), every `#800 mix:`
+  line reads `frozen=1`, and `mixed_late` never rises by `OBS_AUDIO_BUFFERING_MUTED_EVENTS` (100) or more
+  between two `#800 mix:` lines (a member re-anchored on most ticks of a minute = muted, the known limit
+  below); the last count is reported on the ok line. The marker is compared as a number (`00` = 0, what
+  libobs reads). Used by verify-strih item 48 (`obs_audio_buffering_verify_row`, one line after item 36)
+  and by the BLOCKING recording-e2e `[0/8]` row (`obs_audio_buffering_e2e_gate_all`, one call after the
+  session-visibility gate): each linux-genlock box (strih, stream) read through the ONE Linux OBS-box
+  transport `stream_box_exec` (`scripts/lib/stream-box.sh`), bounded by `timeout` around a child that
+  re-sources it, ONE grep of the newest log (the FIXED line sits at the log head and the telemetry runs
+  through the whole session, so no `strih-log-read.sh` tail op fits); an unreadable box FAILS, a host no
+  obs-fleet row classifies FAILS, a windows-genlock box is one NOTE.
 - **The known limit (the design's trade-off):** under a FIXED plan a member that KEEPS its stamp and stays
   later than the fixed window is re-anchored on every tick, i.e. never heard (the slice-2b limit, now from
   the first tick and without an encoder). The 1381 lift's `box-fixed-0` pins it: a mic 1.3 ms late at a

@@ -1696,7 +1696,13 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	     "\tmax buffering:   %d milliseconds\n"
 	     "\tbuffering type:  dynamically increasing from %d ms (genlock floor, issue 1425)",
 	     (int)ai.samples_per_sec, (int)ai.speakers, max_buffering_ms, genlock_floor_ms);
-	if (genlock_buf.overridden)
+	if (genlock_buf.overridden && genlock_buf.box_fixed)
+		blog(LOG_WARNING,
+		     "genlock audio buffering (issue 1425): the requested %s audio buffering (max %u ms) is OVERRIDDEN -- "
+		     "this box's buffering is FIXED at %" PRIu32 " ms (max %d ms)",
+		     oai->fixed_buffering ? "fixed (low-latency)" : "dynamic", oai->max_buffering_ms, genlock_box_ms,
+		     max_buffering_ms);
+	else if (genlock_buf.overridden)
 		blog(LOG_WARNING,
 		     "genlock audio buffering (issue 1367): the requested %s audio buffering (max %u ms) is "
 		     "OVERRIDDEN -- every launch starts at %d ms and increases dynamically above it (max %d ms)",

@@ -935,6 +935,14 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	 * every tick. */
 	audio->genlock_buffering_frozen = genlock_buffering_frozen_now(
 		start_ts_in, obs_output_genlock_audio_encoder_outputs() > 0, audio->genlock_buffering_box_fixed);
+	/* camera-box issue 1425 (design 6443440513): a box-FIXED plan raises its floor HERE, before this tick's
+	 * render loop, the mix guard and the #800 telemetry. The floor action after calc_min_ts would raise it
+	 * only after the first tick had already judged every member against the un-raised window (re-anchoring
+	 * one the declared buffering would absorb) and logged total_buffering=0. */
+	if (audio->genlock_buffering_box_fixed && audio->total_buffering_ticks < audio->floor_buffering_ticks) {
+		set_floor_audio_buffering(audio, sample_rate, &ts);
+		min_ts = ts.start;
+	}
 
 	pthread_mutex_lock(&data->audio_sources_mutex);
 

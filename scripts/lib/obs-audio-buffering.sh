@@ -24,16 +24,22 @@
 #
 # The grade (verify-strih item 48 and the E2E [0/8] row share it): the fact is valid; the marker file
 # equals the fact; the RUNNING OBS log (the newest log) carries the FIXED line with that value; after
-# it no `ABOVE the floor` growth line and every `audio-telemetry #800: total_buffering=` reads the FIXED
-# line's tick count. Ticks, not ms: a fact that is not a whole number of 21.3 ms ticks is rounded UP to
-# whole ticks, and the telemetry prints the rounded ms (85 -> 4 ticks = 85 ms, 50 -> 3 ticks = 64 ms).
+# it no `ABOVE the floor` growth line, every `audio-telemetry #800: total_buffering=` reads the FIXED
+# line's tick count, every `#800 mix:` line reads frozen=1, and its mixed_late count did not rise by
+# OBS_AUDIO_BUFFERING_MUTED_EVENTS or more between two lines (a minute): a member re-anchored on most
+# ticks is later than the fixed window, i.e. muted for good (the design's known limit). Ticks, not ms: a
+# fact that is not a whole number of 21.3 ms ticks is rounded UP to whole ticks, and the telemetry
+# prints the rounded ms (85 -> 4 ticks = 85 ms, 50 -> 3 ticks = 64 ms).
 
 OBS_AUDIO_BUFFERING_MARKER_REL=".camera-box/genlock-audio-buffering-ms"
 OBS_AUDIO_BUFFERING_MAX_MS=960
 # The token a reader prints for a marker file that does not exist.
 OBS_AUDIO_BUFFERING_ABSENT="__ABSENT__"
 # The OBS log lines the grade reads (one grep, never the whole log over ssh).
-OBS_AUDIO_BUFFERING_LOG_ERE='genlock-audio-buffering: |ABOVE the floor|audio-telemetry #800: total_buffering='
+OBS_AUDIO_BUFFERING_LOG_ERE='genlock-audio-buffering: |ABOVE the floor|audio-telemetry #800: total_buffering=|audio-telemetry #800 mix: '
+# MIXED_LATE re-anchors between two `#800 mix:` lines (60 s = ~2812 ticks at 48 kHz) that read as a member
+# muted for good rather than a one-off late packet (one event).
+OBS_AUDIO_BUFFERING_MUTED_EVENTS=100
 
 # obs_audio_buffering_ms_ok VALUE -> 0 iff VALUE is 1..3 ASCII digits whose value is 0..960. The digit
 # set is spelled out: a bracket RANGE follows the locale (ci-testing-gotchas.md, issue 1302).
@@ -90,11 +96,13 @@ obs_audio_buffering_install() {
 # OBS log's lines (all of them, or only those OBS_AUDIO_BUFFERING_LOG_ERE matches; empty = no log).
 # Prints ONE line and returns 0 (`ok ...`) or 1 (`FAIL: ...`). Pure: no file or network access.
 obs_audio_buffering_verdict() {
-  local fact="${1-}" marker="${2-}" log="${3-}" line fixed_re tel_re above_re
+  local fact="${1-}" marker="${2-}" log="${3-}" line fixed_re tel_re above_re mix_re
   local fixed_ms="" fixed_ticks="" seen=0 tel_n=0 tel_bad="" above="" warn=""
+  local unfrozen=0 ml_last="" ml_jump=0 ml d
   fixed_re='genlock-audio-buffering: FIXED ([0123456789]+) ms \(([0123456789]+) ticks\)'
   tel_re='audio-telemetry #800: total_buffering=([0123456789]+) ms \(ticks=([0123456789]+)/'
   above_re='total audio buffering is now ([0123456789]+) milliseconds'
+  mix_re='audio-telemetry #800 mix: frozen=([0123456789]) mixed_late=([0123456789]+)'
   if ! obs_audio_buffering_ms_ok "$fact"; then
     echo "FAIL: the box fact STRIH_AUDIO_BUFFERING_MS '${fact}' is not an integer 0..${OBS_AUDIO_BUFFERING_MAX_MS} ms"
     return 1
@@ -104,7 +112,7 @@ obs_audio_buffering_verdict() {
     echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} is missing (the fact is ${fact} ms) -- re-run setup-strih step 5, then restart strih-obs.service"
     return 1
   fi
-  if [ "$marker" != "$fact" ]; then
+  if ! obs_audio_buffering_ms_ok "$marker" || [ "$((10#$marker))" != "$fact" ]; then
     echo "FAIL: ~/${OBS_AUDIO_BUFFERING_MARKER_REL} reads '${marker}', the box fact STRIH_AUDIO_BUFFERING_MS is ${fact} ms -- re-run setup-strih step 5, then restart strih-obs.service"
     return 1
   fi
@@ -115,7 +123,7 @@ obs_audio_buffering_verdict() {
   # The LAST genlock-audio-buffering line is the running OBS's latest audio reset; grade what follows it.
   while IFS= read -r line; do
     if [[ "$line" == *"genlock-audio-buffering: "* ]]; then
-      seen=1 tel_n=0 tel_bad="" above="" warn=""
+      seen=1 tel_n=0 tel_bad="" above="" warn="" unfrozen=0 ml_last="" ml_jump=0
       if [[ "$line" =~ $fixed_re ]]; then
         fixed_ms="${BASH_REMATCH[1]}" fixed_ticks="${BASH_REMATCH[2]}"
       else
@@ -126,6 +134,15 @@ obs_audio_buffering_verdict() {
     elif [ "$seen" = 1 ] && [[ "$line" =~ $tel_re ]]; then
       tel_n=$((tel_n + 1))
       [ -n "$fixed_ticks" ] && [ "${BASH_REMATCH[2]}" != "$fixed_ticks" ] && tel_bad="${BASH_REMATCH[1]} ms (${BASH_REMATCH[2]} ticks)"
+    elif [ "$seen" = 1 ] && [[ "$line" =~ $mix_re ]]; then
+      [ "${BASH_REMATCH[1]}" = 1 ] || unfrozen=$((unfrozen + 1))
+      ml="${BASH_REMATCH[2]}"
+      if [ -n "$ml_last" ]; then
+        # an audio reset zeroes the mix-wide count: a fall restarts it from 0
+        if [ "$ml" -ge "$ml_last" ]; then d=$((ml - ml_last)); else d="$ml"; fi
+        [ "$d" -gt "$ml_jump" ] && ml_jump="$d"
+      fi
+      ml_last="$ml"
     fi
   done <<< "$log"
   if [ "$seen" = 0 ]; then
@@ -148,7 +165,15 @@ obs_audio_buffering_verdict() {
     echo "FAIL: audio-telemetry #800 read total_buffering=${tel_bad}, the FIXED line is ${fixed_ticks} ticks"
     return 1
   fi
-  echo "ok FIXED ${fact} ms (${fixed_ticks} ticks) in the running OBS log, the marker equals the fact, ${tel_n} telemetry read(s) at ${fixed_ticks} ticks, no growth"
+  if [ "$unfrozen" != 0 ]; then
+    echo "FAIL: audio-telemetry #800 mix read frozen=0 ${unfrozen} time(s) under the FIXED ${fact} ms plan (a FIXED mix is frozen on every tick)"
+    return 1
+  fi
+  if [ "$ml_jump" -ge "$OBS_AUDIO_BUFFERING_MUTED_EVENTS" ]; then
+    echo "FAIL: a mixed source was re-anchored ${ml_jump} times between two #800 mix lines -- it is later than the FIXED ${fact} ms window and muted (raise STRIH_AUDIO_BUFFERING_MS)"
+    return 1
+  fi
+  echo "ok FIXED ${fact} ms (${fixed_ticks} ticks) in the running OBS log, the marker equals the fact, ${tel_n} telemetry read(s) at ${fixed_ticks} ticks, no growth, mixed_late=${ml_last:-unread}"
 }
 
 # _obs_audio_buffering_read_marker FILE -> the marker's content without its trailing newline(s), or
@@ -208,25 +233,37 @@ obs_audio_buffering_box_fact() {
   printf '%s\n' "$out"
 }
 
-# obs_audio_buffering_e2e_gate HOST USER PW -> the [0/8] grade of ONE OBS box. A box whose obs-fleet
-# class is not linux-genlock has no box fact: one NOTE, rc 0. Otherwise the fact (dev1's checkout), the
-# box's marker + newest OBS log over plain ssh (sshpass outermost, the ssh bounded by
-# OBS_AUDIO_BUFFERING_SSH_TIMEOUT, default 20 s), and the verdict: `ok` line rc 0, or an ERROR line rc 1.
-# An unreadable box is a FAIL (fail closed), never a pass.
+# obs_audio_buffering_e2e_gate HOST USER PW -> the [0/8] grade of ONE OBS box. A windows-genlock box has
+# no box fact: one NOTE, rc 0. A host no obs-fleet row classifies is an ERROR (fail closed: the row is
+# BLOCKING). Otherwise the fact (dev1's checkout), the box's marker + newest OBS log through the ONE Linux
+# OBS-box transport (`stream_box_exec`, scripts/lib/stream-box.sh: plain ssh, the box's text as one remote
+# argument), bounded by OBS_AUDIO_BUFFERING_SSH_TIMEOUT (default 20 s; anything but a positive whole number
+# reads 20), and the verdict: `ok` line rc 0, or an ERROR line rc 1. An unreadable box FAILS, never passes.
 obs_audio_buffering_e2e_gate() {
-  local host="${1-}" user="${2-}" pw="${3-}" name fact raw marker="" log="" have_log="" line v
+  local host="${1-}" user="${2-}" pw="${3-}" dir="${BASH_SOURCE[0]%/*}" name class fact raw tmo
+  local marker="" log="" have_log="" line v
   name="$(obs_fleet_name_for_host "$host" 2>/dev/null)" || name="$host"
-  if [ "$(obs_fleet_class_for_host "$host" 2>/dev/null || true)" != "linux-genlock" ]; then
-    echo "    NOTE: ${name}: not a linux-genlock box -- no box fact STRIH_AUDIO_BUFFERING_MS, audio buffering not graded (issue 1425)"
-    return 0
-  fi
+  class="$(obs_fleet_class_for_host "$host" 2>/dev/null)" || class=""
+  case "$class" in
+    linux-genlock) ;;
+    windows-genlock)
+      echo "    NOTE: ${name}: a windows-genlock box -- no box fact STRIH_AUDIO_BUFFERING_MS, audio buffering not graded (issue 1425)"
+      return 0
+      ;;
+    *)
+      echo "ERROR: [0/8] ${host}: no obs-fleet row classifies this OBS box -- its audio buffering cannot be graded, refusing (issue 1425)" >&2
+      return 1
+      ;;
+  esac
   if ! fact="$(obs_audio_buffering_box_fact "$host")"; then
     echo "ERROR: [0/8] ${name}: the audio buffering cannot be graded -- its box fact did not load (issue 1425)" >&2
     return 1
   fi
-  raw="$(sshpass -p "$pw" timeout "${OBS_AUDIO_BUFFERING_SSH_TIMEOUT:-20}" ssh -n -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 \
-    "${user}@${host}" "$(obs_audio_buffering_remote_cmd)" 2>/dev/null)" || raw=""
+  tmo="${OBS_AUDIO_BUFFERING_SSH_TIMEOUT:-20}"
+  [[ "$tmo" =~ ^[123456789][0123456789]{0,3}$ ]] || tmo=20
+  # timeout cannot exec a function: a bounded child re-sources the transport lib (the stream-box.sh rule).
+  raw="$(timeout "$tmo" bash -c '. "$1"; stream_box_exec "$2" "$3" "$4" "" "$5"' obs-audio-buffering \
+    "${dir}/stream-box.sh" "$user" "$pw" "$host" "$(obs_audio_buffering_remote_cmd)" 2>/dev/null)" || raw=""
   while IFS= read -r line; do
     case "$line" in
       MARKER=*) [ -z "$have_log" ] && marker="${line#MARKER=}" ;;
