@@ -320,6 +320,12 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
 
 ## Verifying a change
 
+- **A bench must FAIL on the old code, and one seed may not show it** (issue 1482 step 2): the
+  live-shaped sawtooth (-59 ppm source) separated step 1 from step 2 on only 1 of 3 seeds (6/6/10
+  vs 6/6/6); a SLOW source (+18 ppm, the line lingers at an edge) separated it on 2 of 3 (2/6/8 vs
+  2/2/2). Sweep the rate and a few seeds against the OLD tree before picking the bench case (a
+  throwaway exploration test appended to the bench, removed before commit), and record the old
+  numbers in the test doc.
 - A module moved between files loses the intra-doc links its old glob import resolved. Adding a
   `use super::*` to keep them trips `unused_imports` (doc links do not count as uses; checked with
   rustc 1.97). Add link reference definitions instead (`/// [`X`]: crate::path::X`), as
