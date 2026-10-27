@@ -60,6 +60,11 @@ use crate::genlock_grid::{
 };
 use std::collections::VecDeque;
 
+mod source_phase;
+pub use source_phase::{
+    SourcePhase, SOURCE_DECIMATION_FRAMES, SOURCE_FIT_MIN_SECONDS, SOURCE_FIT_SECONDS,
+};
+
 /// Frames in the least-squares window: ~4.3 s at 60 fps. The prediction error at the newest frame
 /// is `2 * sigma / sqrt(n)`, 1/8 of the raw timestamp jitter at a full window.
 pub const FIT_WINDOW_FRAMES: usize = 256;
@@ -353,6 +358,8 @@ pub struct CapturePhaseTracker {
     outlier_samples: Vec<(i64, u64)>,
     /// The note of the most recent observed frame, if it re-seeded or re-indexed (issue 1371).
     note: Option<PhaseNote>,
+    /// Issue 1482 step 2: the long-horizon SOURCE phase fit, fed every sample this fit folds.
+    source: SourcePhase,
 }
 
 impl CapturePhaseTracker {
@@ -526,6 +533,9 @@ impl CapturePhaseTracker {
         self.outlier_samples.clear();
         self.locked = false;
         self.white_check_countdown = 0;
+        // Issue 1482 step 2: every seed and re-seed is a real discontinuity, so the source fit
+        // starts over too (an absorbed step never comes through here).
+        self.source.reset();
         self.last_seq = Some(seq);
         self.last_x = 0;
         self.last_t = t;
@@ -564,6 +574,9 @@ impl CapturePhaseTracker {
     }
 
     fn push(&mut self, x: i64, t: u64) {
+        // Issue 1482 step 2: the source fit sees every sample this fit folds, raw (a card's
+        // re-timing steps are NOT removed: they are what the long fit averages).
+        self.source.offer(x, t);
         let (x0, t0) = self.window.front().copied().unwrap_or((x, t));
         self.window.push_back((x, t));
         self.sums.add(
@@ -865,6 +878,12 @@ impl CapturePhase {
     /// Card re-timing phase steps absorbed with the lock kept, since the start (issue 1482).
     pub fn phase_steps(&self) -> u64 {
         self.tracker.phase_steps()
+    }
+
+    /// The SOURCE frame rate offset from the emit rate in ppm (issue 1482 step 2), from the
+    /// long-horizon source fit, same sign as [`Self::rate_ppm`].
+    pub fn source_rate_ppm(&self, _interval_ns: u64) -> Option<f64> {
+        None
     }
 
     /// Why the most recent frame re-seeded the fit or was re-indexed (issue 1371), else `None`.

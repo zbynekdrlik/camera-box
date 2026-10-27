@@ -500,8 +500,8 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
     let mut p = CapturePhase::new();
     assert_eq!(
         p.status_tokens(I60),
-        " phase_lock=seed phase_ppm=na jitter_us=na crossings=0 reseeds=0 hidden_drops=0 \
-         phase_steps=0"
+        " phase_lock=seed phase_ppm=na src_ppm=na jitter_us=na crossings=0 reseeds=0 \
+         hidden_drops=0 phase_steps=0"
     );
     for f in &frames {
         p.stamp_frame(f.seq, f.ts, offset, I60);
@@ -514,6 +514,7 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
         [
             "phase_lock=",
             "phase_ppm=",
+            "src_ppm=",
             "jitter_us=",
             "crossings=",
             "reseeds=",
@@ -524,14 +525,16 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
     assert_eq!(pairs[0].1, "stamp");
     let ppm: f64 = pairs[1].1.parse().expect("phase_ppm is a signed number");
     assert!((ppm - 15.9).abs() < 12.0, "{emitted}");
-    let jitter: f64 = pairs[2].1.parse().expect("jitter_us is a number");
+    // 300 frames (5 s): the source fit is not ready yet (issue 1482 step 2).
+    assert_eq!(pairs[2].1, "na", "{emitted}");
+    let jitter: f64 = pairs[3].1.parse().expect("jitter_us is a number");
     assert!((40.0..80.0).contains(&jitter), "{emitted}");
     assert_eq!(
         (
-            pairs[3].1.as_str(),
             pairs[4].1.as_str(),
             pairs[5].1.as_str(),
-            pairs[6].1.as_str()
+            pairs[6].1.as_str(),
+            pairs[7].1.as_str()
         ),
         ("0", "0", "0", "0")
     );
@@ -1084,3 +1087,4 @@ fn describe_reads_each_reason_1371() {
 }
 
 mod issue_1482;
+mod issue_1482_source;
