@@ -21,6 +21,7 @@ gate decision stays with recording-verdict.
 
 import argparse
 import datetime
+import os
 import re
 import sys
 
@@ -63,7 +64,8 @@ def scope(sidecar, burn_log, start, end):
     if end < start:
         raise ValueError(f"the recording window {start}..{end} is reversed")
     kv = _read_sidecar(sidecar)
-    whole = int(kv["v4l2_dropped"])
+    # A rerun reads the whole-run count the first run kept, never its own window count.
+    whole = int(kv.get("v4l2_dropped_whole_run", kv["v4l2_dropped"]))
     try:
         with open(burn_log, encoding="utf-8", errors="replace") as f:
             text = f.read()
@@ -77,9 +79,12 @@ def scope(sidecar, burn_log, start, end):
     kv["v4l2_dropped"] = str(inside)
     kv["v4l2_dropped_whole_run"] = str(whole)
     kv["v4l2_drop_window"] = f"{start}..{end}"
-    with open(sidecar, "w", encoding="utf-8") as f:
+    # temp file + rename: a failed write leaves the original sidecar, never a truncated one
+    tmp = f"{sidecar}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         for k, v in kv.items():
             f.write(f"{k}={v}\n")
+    os.replace(tmp, sidecar)
     return (
         f"capture drops scoped to the recording window {start}..{end}: {inside} counted, "
         f"{whole - inside} of them outside the recording window (issue 1482)"
