@@ -292,8 +292,10 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   - **Re-timing card (issue 1482)**, cam2's live numbers: a +45 ppm card clock, 48 seeded catch-up
     steps of +1.8..+2.6 ms (the 8th -6.3 ms) at random 2..75 s intervals (the design's band, one
     per ~38 s on average, half the live rate) over 30 min, seed
-    `0x1482_ca2d`. With the fix: 48 `phase_steps`, 0 re-seeds, 5 crossings for the 5 true edge
-    crossings = 2 blind sheds + 3 starvation repeats, 0 receiver dup/gap, 0 SKIPs. Before it (the
+    `0x1482_ca2d`. With step 1: 48 `phase_steps`, 0 re-seeds, 5 crossings for the 5 edge crossings
+    of the card's stepped instants = 2 blind sheds + 3 starvation repeats, 0 receiver dup/gap, 0
+    SKIPs. With step 2 the slot follows this schedule's source line (~-9 ppm): 1 crossing, 1
+    starvation repeat, pinned. Before it (the
     RED commit): 48 re-seeds, 3 receiver gaps, 3 SKIPs; the raw path alone 109 sheds + 110 repeats
     and 48 dup + 101 gap at the receiver.
 
@@ -310,8 +312,11 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
     sheds + 8 repeats (a tooth crossing an edge back and forth); raw path 35-46 sheds + 41-52
     repeats, 68-77 dup + 90-105 gap at the receiver. With step 2: 6 / 6 / 6, every one a
     starvation repeat (the source is slower than the grid), 0 receiver dup/gap, 0 re-seeds, 0 SKIPs.
-    The earlier step-1 bench (`..._costs_one_slot_per_crossing_1482`) now reads 1 crossing: its
-    schedule's source runs ~-9 ppm.
+    The same card over a SLOW source, +18 ppm as cam3/cam5 read live
+    (`a_sawtooth_card_over_a_slow_source_stamps_the_source_phase_1482`, ~+27 ppm of steps): the
+    source line lingers near each edge for minutes. Step 1 only: 2 / 6 / 8 tracked crossings for 2
+    source edges (blind sheds AND repeats: back and forth). With step 2: 2 / 2 / 2, each one blind
+    shed (the source is faster), 0 receiver dup/gap, 0 re-seeds.
 
 ## Verifying a change
 
@@ -356,7 +361,17 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   event.
 - A seeding or re-seeding stream (2 s after a start or a re-open) runs today's path.
 - Issue 1482 step 2: the source fit needs 60 s after every start or real re-seed; until then a
-  re-timing card stamps from the short fit and may flip at an edge. A card whose source rate
+  re-timing card stamps from the short fit and may flip at an edge. The switch itself moves the
+  smoothed instant from the short fit's tooth onto the source line (up to about half a tooth), so
+  near an edge it can make one slot event, like a tooth return.
+- A LONE absorbed step (live once: -6.3 ms among cam2's catch-ups, or a constant delivery delay
+  absorbed and later reversed) is NOT reset away: the source line walks onto the new phase over the
+  180 s window, its least-squares end value overshooting by up to a third of the step. Pinned by
+  `a_lone_absorbed_step_walks_the_source_onto_the_new_phase_in_one_crossing_1482`: a -6.3 ms step
+  that moves the camera one slot = exactly one crossing, the estimate at most the step after the
+  capture (6.3 ms, inside the ~11 ms capture-to-send margin) and 2.1 ms before it. A guard (reset
+  the source fit on a step beyond the sawtooth band) was not added: the design keeps every absorbed
+  step in the fit. A card whose source rate
   itself changes within 180 s (not seen live) would be followed with the window's lag.
 - Issue 1482's constant-offset test has a floor of 0.5 ms around the run's median, so a run whose
   residuals span 1 ms or less is absorbed as ONE step even when it is a slow ramp (the next run of

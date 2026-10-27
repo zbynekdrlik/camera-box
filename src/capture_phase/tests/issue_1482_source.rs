@@ -225,3 +225,48 @@ fn a_real_discontinuity_resets_the_source_fit_and_an_absorbed_step_does_not_1482
     assert_eq!(t.reseeds(), 2);
     assert!(t.source.span_ns() < 21 * NS_PER_SECOND);
 }
+
+/// Review round 1: a LONE absorbed step (live once: a -6.3 ms re-lock among the sawtooth's
+/// catch-ups) is not reset away; the source line walks onto the new phase over the window, the
+/// least-squares end value overshooting it by up to a third of the step. Pinned bounds: the step
+/// moves the camera one slot earlier here, and the stamp makes exactly ONE crossing for it (no
+/// back-and-forth), the source estimate never more than the step + 0.3 ms after the capture (the
+/// sender contract's stamp-before-send margin is the ~11 ms capture-to-send latency), never more
+/// than a third of the step + 0.3 ms before it, and no re-seed.
+#[test]
+fn a_lone_absorbed_step_walks_the_source_onto_the_new_phase_in_one_crossing_1482() {
+    let step_ns: i64 = -6_300_000;
+    let mut frames = camera(60 * 420, 0.0, 30_000.0, 3_000_000.0, 0x1482_5a05);
+    for f in frames.iter_mut().skip(60 * 120) {
+        f.ts = (f.ts as i64 + step_ns) as u64;
+        f.truth += step_ns as f64;
+    }
+    let offset = (SEC_2309 * NS_PER_SECOND - MONO0) as i64;
+    let mut p = CapturePhase::new();
+    let (mut late, mut early) = (0.0f64, 0.0f64);
+    for (k, f) in frames.iter().enumerate() {
+        p.stamp_frame(f.seq, f.ts, offset, I60);
+        if k > after_switch(1) {
+            let est = p.tracker.source_prediction_ns().expect("ready") as f64;
+            late = late.max(est - f.truth);
+            early = early.max(f.truth - est);
+        }
+    }
+    eprintln!(
+        "lone step {step_ns}: crossings {} phase_steps {} reseeds {} late {:.0} us early {:.0} us",
+        p.crossings(),
+        p.phase_steps(),
+        p.reseeds(),
+        late / 1000.0,
+        early / 1000.0
+    );
+    assert_eq!((p.phase_steps(), p.reseeds()), (1, 0));
+    assert_eq!(p.crossings(), 1, "one slot move, one crossing");
+    let s = step_ns.unsigned_abs() as f64;
+    assert!(late <= s + 300_000.0, "late {:.0} us", late / 1000.0);
+    assert!(
+        early <= s / 3.0 + 300_000.0,
+        "overshoot {:.0} us",
+        early / 1000.0
+    );
+}

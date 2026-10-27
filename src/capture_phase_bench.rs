@@ -771,6 +771,12 @@ fn a_retiming_capture_card_never_reseeds_and_costs_one_slot_per_crossing_1482() 
         "crossings {} vs true edge crossings {true_edges}",
         t.crossings
     );
+    // Step 2 (review round 1): the slot follows this schedule's SOURCE line (~-9 ppm), which
+    // crosses one edge in the 30 min, never the card's stepped instants.
+    assert_eq!(
+        t.crossings, 1,
+        "one crossing for the source line's one edge"
+    );
     assert_eq!(
         t.sheds + t.repeats,
         t.crossings,
@@ -912,6 +918,49 @@ fn a_sawtooth_card_stamps_the_source_phase_1482() {
             (0, 0),
             "{seed:#x}: the receiver never flips"
         );
+        assert_eq!(t.skip_events, 0);
+    }
+}
+
+/// Issue 1482 step 2, review round 1 — the same card over a source that drifts SLOWLY past the
+/// grid: +18 ppm, what cam3 and cam5 read on the same splitter signal live. The card's +45 ppm clock
+/// then needs only ~+27 ppm of steps, and the source line lingers near each edge for minutes, so a
+/// stamp that follows the teeth crosses back and forth. Step 1 only (measured on the RED tree,
+/// same seeds): 2 / 6 / 8 tracked crossings for 2 source edges each. With step 2: 2 / 2 / 2, each
+/// one blind shed (the source is faster than the grid), 0 receiver dup/gap, 0 re-seeds.
+#[test]
+fn a_sawtooth_card_over_a_slow_source_stamps_the_source_phase_1482() {
+    for seed in [0x1482_5a7e_u64, 0x1482_0001, 0x1482_0002] {
+        let mut sc = Scenario::new(18.0, 1_800.0);
+        sc.sawtooth = Some(Sawtooth {
+            card_ppm: 45.0,
+            step_min_ns: 1_000_000.0,
+            step_max_ns: 2_900_000.0,
+            seed,
+        });
+        let edges = true_source_crossings(&sc);
+        let card_edges = true_card_crossings_of_sawtooth(&sc);
+        let t = run(&sc, true);
+        eprintln!(
+            "slow source {seed:#x}: {edges} source edges, {card_edges} tooth edges: TRACKED {} \
+             sheds + {} repeats, strih dup {} gap {}, crossings {} reseeds {} phase_steps {}",
+            t.sheds, t.repeats, t.rx.dups, t.rx.gaps, t.crossings, t.reseeds, t.phase_steps
+        );
+        assert!(
+            card_edges > edges,
+            "the teeth cross more edges than the source"
+        );
+        assert_eq!(t.reseeds, 0, "{seed:#x}");
+        assert_eq!(
+            t.crossings as usize, edges,
+            "{seed:#x}: one per SOURCE edge"
+        );
+        assert_eq!(
+            (t.sheds, t.repeats),
+            (t.crossings, 0),
+            "{seed:#x}: every crossing of a faster source is one duplicate slot"
+        );
+        assert_eq!((t.rx.dups, t.rx.gaps), (0, 0), "{seed:#x}");
         assert_eq!(t.skip_events, 0);
     }
 }
