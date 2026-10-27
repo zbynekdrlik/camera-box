@@ -15,9 +15,68 @@ paths:
   - "scripts/obs-guarded-launch.ps1"
   - "scripts/rig-health-audit.py"
   - "scripts/launch-obs-genlock.sh"
+  - "scripts/lib/obs-audio-buffering.sh"
+  - "tests/genlock_audio_buffering_box_1425.rs"
+  - "tests/python/test_obs_audio_buffering_1425.py"
 ---
 
-# The genlock audio buffering: no floor (issue 1425 slice 3), the 1381 guard, the 1425 freeze
+# The genlock audio buffering: the per-box FIXED value (issue 1425), no floor (slice 3), the 1381 guard, the 1425 freeze
+
+## The per-box FIXED buffering (issue 1425, design 6443440513, ROZHODNUTÉ 6436368009 item 1)
+
+The owner's rule: OBS never picks a random buffer. Slice 3 left the launch's own startup race to draw the
+buffering, and a box with no audio encoder keeps stock growth for good. strih-snv and stream-snv drew 0 ms
+on their last 10 launches (27.10.2026), but by luck: nothing guaranteed it and no gate read it. So a box
+DECLARES its buffering, and libobs holds the mix at it from the first tick.
+
+| Piece | Where |
+|---|---|
+| the box fact `STRIH_AUDIO_BUFFERING_MS` (0..960 ms, the ASCII digit set spelled out; a missing or bad value refuses by name) | `scripts/strih-boxes/<box>.env` (0 on all four boxes), `scripts/lib/strih-box-facts.sh`, accessor `strih_lx_audio_buffering_ms` |
+| the marker `~/.camera-box/genlock-audio-buffering-ms` of the OBS user (`<ms>` + newline, 0644, compare-then-write, never through a symlink, the dir via `strih_user_home_dir`) | setup-strih step 5 (one line), `obs_audio_buffering_install` in `scripts/lib/obs-audio-buffering.sh`; it never restarts OBS |
+| the read, once per audio reset (the genlock-min-latency marker pattern): ABSENT / INVALID / FIXED | obs.c `genlock_audio_buffering_read_box_ms`, BEFORE the plan block |
+| the pure parse (1..3 ASCII numerals + an optional newline, 0..960), the plan (`make_plan_box` / `plan_box`: floor = the value, `box_fixed`) and the freeze (`frozen_plan`: a fixed plan is frozen on every tick) | `obs-genlock-audio-buffering.h` <-> `src/genlock_audio_buffering.rs`, parity gate `tests/genlock_audio_buffering_parity_1367.rs` |
+| the per-tick freeze takes `audio->genlock_buffering_box_fixed` | obs-audio.c `genlock_buffering_frozen_now(..., box_fixed)`, the call anchor in `tests/genlock_audio_buffering_freeze_wiring_1425.rs` + both windows-genlock pwsh steps |
+
+- **Behaviour under a FIXED plan:** the floor (the declared ticks) is raised on the first tick, BEFORE
+  its mix; `genlock_audio_buffering_action` is never DYNAMIC; a mixed member that falls behind goes to the
+  existing 1381 guard as `GENLOCK_MIX_GUARD_MIXED_LATE` (re-anchored, counted), with or without an audio
+  encoder, inside the launch settle window or not. The settle-window growth line never fires. On the
+  first tick the floor is raised AFTER the render loop, so a member already later than the un-raised
+  window is re-anchored once at launch (`box-fixed-85`: `mbc` 2.7 ms, one `entered the mix late` line).
+- **The log:** ONE `LOG_INFO` per audio reset `genlock-audio-buffering: FIXED <ms> ms (<ticks> ticks) from
+  ~/.camera-box/genlock-audio-buffering-ms (issue 1425)`; an absent / invalid file keeps the slice-3 plan
+  byte for byte plus ONE `LOG_WARNING` `genlock-audio-buffering: NOT deterministic on this box -- no|an
+  invalid ~/.camera-box/... (an integer 0..960 ms), ...`. A non-zero value also prints the old floor line
+  (`... total audio buffering is now N milliseconds from the first audio tick, dynamically increasing
+  above`): its wording is pinned by the #786 gates and the audio-mixer watchdog's session marker, so it was
+  left; the FIXED line is the authority. The reset block's `dynamically increasing from N ms` line stays
+  byte-identical too (`bundle_state_audio.py` keys its session start on it).
+- **The ONE grade** (`obs_audio_buffering_verdict`, pure): the fact is valid; the marker equals it; the
+  LAST `genlock-audio-buffering:` line of the newest OBS log is FIXED at the fact; after it no `ABOVE the
+  floor` line and every `audio-telemetry #800: total_buffering=` reads the FIXED line's TICK count (a fact
+  that is not a whole number of 21.3 ms ticks is rounded up: 50 -> 3 ticks = 64 ms). Used by
+  verify-strih item 48 (`obs_audio_buffering_verify_row`, one line after item 36) and by the BLOCKING
+  recording-e2e `[0/8]` row (`obs_audio_buffering_e2e_gate_all`, one call after the session-visibility
+  gate): each linux-genlock box (strih, stream) read over plain ssh (sshpass outermost, the ssh bounded,
+  ONE grep of the newest log, never the whole log); an unreadable box FAILS; a non-linux box is one NOTE.
+- **The known limit (the design's trade-off):** under a FIXED plan a member that KEEPS its stamp and stays
+  later than the fixed window is re-anchored on every tick, i.e. never heard (the slice-2b limit, now from
+  the first tick and without an encoder). The 1381 lift's `box-fixed-0` pins it: a mic 1.3 ms late at a
+  0 ms box is never mixed (`mic_missed=300`). Live, a growing `#800 mix: mixed_late=` is that case; the
+  cure is a larger box value, never growth.
+- **Tests:** the parity gate (`planb` / `frozenp` / `parse` lines + `a_fixed_plan_never_grows_from_its_first_tick_1425`);
+  `tests/genlock_audio_buffering_box_1425.rs` (the reader lifted verbatim, run against a tempfile HOME, +
+  the wiring); the 1381 lift's `box-fixed-0` / `box-fixed-85` scenarios
+  (`a_box_fixed_plan_never_grows_the_mix_1425`); `tests/python/test_obs_audio_buffering_1425.py` (the
+  grade over log lines rendered from the shipped C format strings, the install, item 48, the fact, the E2E
+  row against a fake sshpass that RUNS the remote text on a fake box home).
+- **Live acceptance (supervisor):** FULL-bundle deploy (libobs), re-run setup-strih (step 5 writes the
+  marker), restart strih-obs.service, then 5 OBS restarts per box (strih-snv, stream-snv): every launch logs
+  `genlock-audio-buffering: FIXED 0 ms (0 ticks)`, `#800 total_buffering=0 ms (ticks=0/45)` throughout,
+  no `ABOVE the floor` line, `#800 mix: frozen=1`, `mixed_late=` flat; verify-strih item 48 PASS and the
+  E2E `[0/8]` row ok on both boxes. Watch `mixed_late=` on the first restarts: a rising count means a
+  member is later than 0 ms on that box (the known limit) and the fact needs a larger value.
+
 
 ## The floor is 0 (issue 1425 E2 slice 3, design 6220191978)
 
