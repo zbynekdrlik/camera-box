@@ -74,6 +74,12 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   companion-pp), or `none` exactly when `STRIH_CAMERAS` is `none`), `STRIH_BKSHADING_RELAYS` (issue
   808: the shading panel's per-cambox relay overrides, `none` on the stream role; `.claude/rules/bkshading.md`). **Run-time facts stay derived on
   the box** — PL1 watts, the CPU plan, the NIC interface name.
+- **Adding a NEW required fact has exactly three test consumers** (issue 1425 added
+  `STRIH_AUDIO_BUFFERING_MS`): append the key at the END of `strih_box_fact_keys`, then update
+  `tests/strih_box_facts_1361.rs` (`FACT_KEYS` + the strih-snv `KEY=value` list),
+  `tests/python/test_strih_https_1399.py` and `tests/python/test_obs_box_stream_role_1412.py` (both pin
+  the tail of the key list). Every other fixture copies the real `scripts/strih-boxes/*.env`, so the four
+  fact files carrying the key is enough; the 1361 golden renders no raw fact.
 - **Changing strih-snv's `STRIH_CAMERAS` is a fact change with four test consumers** (issue 1413):
   regenerate the 1361 golden from the new facts (`render.sh`), and update the default-box tests that
   read the live list -- `tests/strih_provision_pure_functions.rs` (`strih_lx_ndi_inputs` count, the
