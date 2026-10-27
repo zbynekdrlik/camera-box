@@ -12,6 +12,16 @@ paths:
 
 # camera-box version-parity treadmill + the pre-[0/8] auto-align (issue 1202)
 
+## The version scheme since issue 1476
+
+Every camera-box version is a clean `X.Y.Z`; dev = main + one patch; every merge to main is tagged
+`vX.Y.Z` with a GitHub Release (CLAUDE.md "Versions and releases"). The gate, the align and
+verify-device read both `X.Y.Z` and a historical `1.7.0-dev.N`; the order rule is ONE lib,
+`scripts/lib/release-version.sh` (a `1.7.0-dev.N` is OLDER than every `1.8.x`), and the gate's
+PIN-DRIFT row names the direction. The align decision itself stays an equality check: a uniform
+fleet on any version other than the candidate is aligned. The `dev.481`-style numbers below are
+history.
+
 ## The treadmill (why the [0/8] camera-box gate refuses "for no reason")
 
 `camera-box-version-gate.sh` (#875/#1136) reads each active box's `/usr/local/bin/camera-box

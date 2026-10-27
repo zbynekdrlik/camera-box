@@ -168,17 +168,29 @@ fn the_tag_decision_creates_a_missing_tag_and_accepts_its_own_re_run() {
 fn the_tag_decision_never_moves_a_release_to_another_commit() {
     let out = decide("1.8.0", "1.8.0", "bbbb", "aaaa");
     assert!(out.starts_with("rc=1 FAIL:"), "{out}");
-    assert!(out.contains("bbbb") && out.contains("aaaa") && out.contains("next patch"), "{out}");
+    assert!(
+        out.contains("bbbb") && out.contains("aaaa") && out.contains("next patch"),
+        "{out}"
+    );
 }
 
 #[test]
 fn the_tag_decision_refuses_a_pre_release_or_a_mismatched_binary() {
     let out = decide("1.7.0-dev.830", "1.7.0-dev.830", "", "aaaa");
-    assert!(out.starts_with("rc=1 FAIL:") && out.contains("1.7.0-dev.830"), "{out}");
+    assert!(
+        out.starts_with("rc=1 FAIL:") && out.contains("1.7.0-dev.830"),
+        "{out}"
+    );
     let out = decide("1.8.0", "1.7.0-dev.830", "", "aaaa");
-    assert!(out.starts_with("rc=1 FAIL:") && out.contains("reports 1.7.0-dev.830"), "{out}");
+    assert!(
+        out.starts_with("rc=1 FAIL:") && out.contains("reports 1.7.0-dev.830"),
+        "{out}"
+    );
     let out = decide("1.8.0", "", "", "aaaa");
-    assert!(out.starts_with("rc=1 FAIL:") && out.contains("<unreadable>"), "{out}");
+    assert!(
+        out.starts_with("rc=1 FAIL:") && out.contains("<unreadable>"),
+        "{out}"
+    );
     let out = decide("", "1.8.0", "", "aaaa");
     assert!(out.starts_with("rc=1 FAIL:"), "{out}");
     let out = decide("1.8.0", "1.8.0", "", "");
@@ -244,7 +256,10 @@ fn the_gate_pin_drift_row_names_older_or_newer_than_main() {
         "{out}"
     );
     assert_eq!(lines[3], "RC=20");
-    assert!(lines[4].contains("OK") && !lines[4].contains("PIN-DRIFT"), "{out}");
+    assert!(
+        lines[4].contains("OK") && !lines[4].contains("PIN-DRIFT"),
+        "{out}"
+    );
     assert_eq!(lines[5], "RC=0");
 }
 
@@ -271,7 +286,10 @@ fn verify_device_accepts_both_forms() {
            done"#,
         &[],
     );
-    assert_eq!(out, "YES 1.8.0\nYES 1.8.12\nYES 1.7.0-dev.830\nNO 1.8.0-dev\n");
+    assert_eq!(
+        out,
+        "YES 1.8.0\nYES 1.8.12\nYES 1.7.0-dev.830\nNO 1.8.0-dev\n"
+    );
 }
 
 // --- CI wiring --------------------------------------------------------------------------------
@@ -343,10 +361,19 @@ fn release_yml_runs_on_a_tag_push_and_as_a_reusable_workflow() {
     assert!(rel.contains("workflow_call:"), "{rel}");
     assert!(rel.contains("inputs.tag"), "{rel}");
     // the release is built from the tag itself and its binary must report the tag's version
-    assert!(rel.contains("ref: ${{ inputs.tag || github.ref }}"), "{rel}");
+    assert!(
+        rel.contains("ref: ${{ inputs.tag || github.ref }}"),
+        "{rel}"
+    );
     assert!(rel.contains("target/release/camera-box --version"), "{rel}");
-    assert!(rel.contains("tag_name: ${{ inputs.tag || github.ref_name }}"), "{rel}");
-    assert!(rel.contains("camera-box-linux-amd64.tar.gz.sha256"), "{rel}");
+    assert!(
+        rel.contains("tag_name: ${{ inputs.tag || github.ref_name }}"),
+        "{rel}"
+    );
+    assert!(
+        rel.contains("camera-box-linux-amd64.tar.gz.sha256"),
+        "{rel}"
+    );
     assert!(rel.contains("softprops/action-gh-release@v2"), "{rel}");
     assert!(rel.contains("make_latest: true"), "{rel}");
 }

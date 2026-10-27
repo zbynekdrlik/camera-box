@@ -85,7 +85,7 @@ wrong one silently weakens the gate:
   engine) — for a component whose "correct" value changes on every build (a commit SHA) and so
   has no fixed value to pin against; the only checkable invariant is that every box agrees.
 
-The camera-box BINARY's own version (`1.7.0-dev.NNN`, continuously deployed) is the SECOND
+The camera-box BINARY's own version (`X.Y.Z` since issue 1476, `1.7.0-dev.NNN` before; continuously deployed) is the SECOND
 shape — IMPLEMENTED in `scripts/camera-box-version-gate.sh` (#875), a deliberate follow-up split
 from `#862` (dantesync) because the two signals need different comparison models, not just a
 different data source. That gate mirrors this file's STRUCTURE (a pure parse fn + per-box verdict +

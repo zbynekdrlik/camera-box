@@ -939,6 +939,84 @@ jobs:
           done
           exit "$rc"
 
+  release-tag:
+    name: Tag the release vX.Y.Z (post-merge, main only)
+    # Issue 1476: every dev->main merge is a real release. Cargo.toml's [workspace.package] version
+    # is a clean X.Y.Z (dev bumps it to the next patch after every release), the binary THIS run's
+    # build job produced must report the same version, and the merge commit gets the tag vX.Y.Z.
+    # Idempotent: a re-run whose tag already names this commit is OK (EXISTS); a tag on ANOTHER
+    # commit FAILS loudly (dev was not bumped before the release, a release is never moved). The
+    # decision is scripts/lib/release-version.sh's release_tag_decision (tests/release_versions_1476.rs).
+    # Gated on the same binary gates as deploy-fleet, never on deploy-fleet itself: a rig that is
+    # away or busy does not withhold the release of a green build.
+    needs: [lint, test, build, security, shellcheck]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download camera-box binary (this run's build job)
+        uses: actions/download-artifact@v4
+        with:
+          name: camera-box-linux-amd64
+          path: dist
+
+      - name: Runtime library the binary links (libasound)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2
+
+      - name: Tag the merge commit
+        id: tag
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/release-version.sh
+          . scripts/lib/release-version.sh
+          ver="$(grep -m1 -oE '^version = "[^"]+"' Cargo.toml | sed -E 's/^version = "([^"]+)"$/\1/' || true)"
+          chmod +x dist/camera-box
+          bin="$(dist/camera-box --version 2>/dev/null | awk '{print $NF}' || true)"
+          # An annotated tag lists its commit under ^{}; a lightweight tag only under its own name.
+          tag_sha="$(git ls-remote origin "refs/tags/v${ver}^{}" | awk '{print $1}')"
+          [ -n "$tag_sha" ] || tag_sha="$(git ls-remote origin "refs/tags/v${ver}" | awk '{print $1}')"
+          echo "Cargo.toml ${ver:-<unreadable>}, camera-box --version ${bin:-<unreadable>}, tag v${ver} -> ${tag_sha:-<none>}, merge ${GITHUB_SHA}"
+          decision="$(release_tag_decision "$ver" "$bin" "$tag_sha" "$GITHUB_SHA")" || {
+            echo "::error::release tag refused: ${decision}"
+            exit 1
+          }
+          case "$decision" in
+            CREATE)
+              git tag "v${ver}" "$GITHUB_SHA"
+              git push origin "refs/tags/v${ver}"
+              echo "pushed tag v${ver} on ${GITHUB_SHA}"
+              ;;
+            EXISTS)
+              echo "tag v${ver} already names ${GITHUB_SHA} (a re-run) -- publishing again"
+              ;;
+            *)
+              echo "::error::unexpected release_tag_decision output: ${decision}"
+              exit 1
+              ;;
+          esac
+          echo "tag=v${ver}" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish the GitHub Release (post-merge, main only)
+    # Issue 1476: a tag pushed with the default GITHUB_TOKEN starts NO other workflow (GitHub's
+    # anti-recursion rule), so release.yml's own `push: tags` trigger never fires for the tag the
+    # job above pushed. release.yml is called here as a reusable workflow instead, in this same
+    # run, with the tag; it builds the binary from the tag, checks its --version against it and
+    # publishes the release (binary tarball + sha256).
+    needs: [release-tag]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-tag.outputs.tag }}
+
   notify-on-failure:
     name: Notify on red
     # Fires only when a gate above goes RED — replaces silent-red eyeballing
@@ -949,7 +1027,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e, release-tag, release]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

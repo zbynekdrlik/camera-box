@@ -1,9 +1,24 @@
 name: Release
 
+# Publishes the GitHub Release vX.Y.Z with the camera-box binary + sha256 (issue 1476).
+#
+# Two ways in:
+#   * workflow_call from ci.yml's `release` job, right after its `release-tag` job pushed vX.Y.Z on
+#     the dev->main merge commit. This is the normal path: a tag pushed with the default
+#     GITHUB_TOKEN never starts another workflow run (GitHub's anti-recursion rule), so a plain
+#     `push: tags` trigger would never fire for it.
+#   * push of a v* tag by a person (a manual or re-issued release).
+# Either way the release is built from the TAG itself, and its binary must report the tag's version.
 on:
   push:
     tags:
       - 'v*'
+  workflow_call:
+    inputs:
+      tag:
+        description: "The release tag to publish (vX.Y.Z), already pushed"
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +29,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -25,6 +42,18 @@ jobs:
 
       - name: Build release
         run: cargo build --release
+
+      - name: The binary reports the tag's version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          got="$(target/release/camera-box --version | awk '{print $NF}')"
+          echo "tag ${TAG}, camera-box --version ${got}"
+          if [ "v${got}" != "${TAG}" ]; then
+            echo "::error::the binary built from ${TAG} reports ${got} -- refusing to publish it under ${TAG}"
+            exit 1
+          fi
 
       - name: Create tarball
         run: |
@@ -52,6 +81,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Download binary
         uses: actions/download-artifact@v4
@@ -64,9 +95,13 @@ jobs:
           cp scripts/install.sh ./artifacts/
           cp scripts/install-binary.sh ./artifacts/
 
+      # Re-running on an existing release updates its assets (the ci.yml tag step accepts its own
+      # re-run as EXISTS), so a cancelled or failed publish is finished by a plain re-run.
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          make_latest: true
           files: |
             artifacts/camera-box-linux-amd64.tar.gz
             artifacts/camera-box-linux-amd64.tar.gz.sha256
