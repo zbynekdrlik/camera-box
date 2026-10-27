@@ -173,3 +173,19 @@ def test_recording_e2e_holds_the_av_apply_in_the_direct_feed():
     assert s.index('AV_SYNC_PROPOSED_OFFSET_MS="$AV_SYNC_APPLY_OFFSET_MS"') < s.index(call) < guard < apply
     block = s[s.index(call):guard]
     assert 'AV_SYNC_APPLY_OFFSET_MS=""' in block and "AV_SYNC_HELD_REASON=" in block
+
+
+def test_the_av_gate_expects_the_direct_feeds_own_offset():
+    # Every direct-feed measurement since the jack switch (8 E2E + soak windows, 25.-27.10.2026): -38..-52 ms,
+    # median -46.5, uniform over the cameras (ROZHODNUTE on the ticket, 27.10.2026). The camera+monitor feed keeps 0.
+    assert _lib("rig_test_feed_av_expected_ms").stdout == "-45"
+    assert _lib("rig_test_feed_av_expected_ms", {"RIG_TEST_FEED": "optical"}).stdout == "0"
+
+
+def test_recording_e2e_expects_the_feeds_av_offset_unless_given():
+    s = E2E.read_text()
+    default = 'AV_EXPECTED_MS="${AV_EXPECTED_MS:-0}"'
+    shift = '[ -z "$AV_EXPECTED_MS_FROM_ENV" ] && AV_EXPECTED_MS="$(rig_test_feed_av_expected_ms)"'
+    assert s.count(shift) == 1
+    assert s.index('AV_EXPECTED_MS_FROM_ENV="${AV_EXPECTED_MS+set}"') < s.index(default) < s.index(shift)
+    assert s.index(shift) < s.index('VERDICT_ARGS+=(--av-expected-ms "$AV_EXPECTED_MS")')
