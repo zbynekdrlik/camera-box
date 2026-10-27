@@ -786,6 +786,8 @@ stale/superseded run" IDEA the `linux-genlock.yml` GOTCHA above documents for a 
   fleet on anything other than the candidate (a historical build included) is aligned.
 - **dev > main is checked before the merge:** ci.yml's `version-check` (dev pushes) fails a dev
   version that is not a clean X.Y.Z strictly above main's and names the bump to make.
+- Mechanics + traps (GITHUB_TOKEN tag pushes start no workflow, one pending run per concurrency
+  group) → `.claude/rules/release-versions.md` (auto-loads on its `paths:`).
 
 ## Local Build Policy
 
