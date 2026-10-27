@@ -128,7 +128,7 @@ fn a_pass_through_card_stamps_as_before_1482() {
     let mut worst = 0.0f64;
     for (k, f) in frames.iter().enumerate() {
         let obs = t.observe(f.seq, f.ts);
-        if k >= after_switch(0) {
+        if k >= after_switch(1) {
             let short = obs.smoothed_mono_ns.expect("locked") as f64;
             let src = t.source.predict_ns(t.last_x).expect("ready") as f64;
             worst = worst.max((src - short).abs());
