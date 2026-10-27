@@ -140,7 +140,7 @@ def test_a_tick_rounded_fact_is_graded_on_its_ticks():
     # 85 ms = 4 ticks at 48 kHz, raised before the first tick's telemetry (obs-audio.c), which prints the
     # rounded total; the floor line's own "total audio buffering is now" is no growth.
     line, rc = verdict("85", "85", [fixed(85, 4), floor(85), tel(85, 4), mix(1, 1), tel(85, 4), mix(1, 1)])
-    assert rc == 0 and "mixed_late=1" in line, line
+    assert rc == 0 and "mixed_late=1 (max +1 between two #800 mix lines)" in line, line
 
 
 def test_the_marker_is_compared_as_a_number():
@@ -154,9 +154,13 @@ def test_a_fixed_mix_must_read_frozen_and_never_mute_a_member():
     # a member re-anchored on most ticks of a minute: later than the fixed window, muted for good
     line, rc = verdict("0", "0", [fixed(0, 0), mix(1, 2), mix(1, 2812)])
     assert rc == 1 and "re-anchored 2810 times" in line and "raise STRIH_AUDIO_BUFFERING_MS" in line, line
-    # a few one-off late packets are reported, not failed; an audio reset restarts the count
+    # a few one-off late packets are reported (with the largest rise), not failed; an audio reset
+    # restarts the count
     line, rc = verdict("0", "0", [fixed(0, 0), mix(1, 2), mix(1, 40), mix(1, 3)])
-    assert rc == 0 and "mixed_late=3" in line, line
+    assert rc == 0 and "mixed_late=3 (max +38 between two #800 mix lines)" in line, line
+    # the FIXED line is an audio reset: the first #800 mix line after it counts from 0
+    line, rc = verdict("0", "0", [notdet(), mix(1, 5), fixed(0, 0), mix(1, 150)])
+    assert rc == 1 and "re-anchored 150 times" in line, line
 
 
 @pytest.mark.parametrize("fact,marker,lines,why", [
