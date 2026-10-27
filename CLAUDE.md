@@ -781,8 +781,11 @@ stale/superseded run" IDEA the `linux-genlock.yml` GOTCHA above documents for a 
   `.github/workflows/release.yml` as a reusable workflow (a GITHUB_TOKEN tag push starts no
   workflow), which publishes the GitHub Release (tarball + sha256).
 - **Order rule:** `scripts/lib/release-version.sh` (`release_version_cmp`, semver with
-  pre-release): a historical `1.7.0-dev.N` on a box orders OLDER than every `1.8.x`, so the [0/8]
-  auto-align upgrades it; the gate's PIN-DRIFT row says OLDER/NEWER than main.
+  pre-release): a historical `1.7.0-dev.N` on a box orders OLDER than every `1.8.x`, and the gate's
+  PIN-DRIFT row says OLDER/NEWER than main. The [0/8] auto-align decides by equality: a uniform
+  fleet on anything other than the candidate (a historical build included) is aligned.
+- **dev > main is checked before the merge:** ci.yml's `version-check` (dev pushes) fails a dev
+  version that is not a clean X.Y.Z strictly above main's and names the bump to make.
 
 ## Local Build Policy
 

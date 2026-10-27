@@ -21,7 +21,11 @@ env:
 # dev, main, and a manual dispatch each get their own independent group.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Issue 1476: a main run is never cancelled. Every main run tags + publishes a release (and
+  # deploys the fleet); a second merge right behind it used to cancel it after the tag was pushed,
+  # leaving a tag with no GitHub Release (a cancelled job never trips notify-on-failure). Main runs
+  # queue instead; dev and manual runs still cancel a superseded run.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -939,6 +943,32 @@ jobs:
           done
           exit "$rc"
 
+  version-check:
+    name: Version is above main (dev only)
+    # Issue 1476 + the version-bumping rule: dev must carry a clean X.Y.Z strictly above main's
+    # version BEFORE the merge, so a missed bump fails here in seconds instead of reaching main,
+    # where the release tag would refuse it after the code already shipped. The decision is
+    # scripts/lib/release-version.sh's release_version_dev_check (tests/release_versions_1476.rs).
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dev version > main version
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/release-version.sh
+          . scripts/lib/release-version.sh
+          git fetch --depth=1 origin main
+          dev="$(grep -m1 -oE '^version = "[^"]+"' Cargo.toml | sed -E 's/^version = "([^"]+)"$/\1/' || true)"
+          main="$(git show FETCH_HEAD:Cargo.toml | grep -m1 -oE '^version = "[^"]+"' | sed -E 's/^version = "([^"]+)"$/\1/' || true)"
+          echo "dev ${dev:-<unreadable>}, main ${main:-<unreadable>}"
+          verdict="$(release_version_dev_check "$dev" "$main")" || {
+            echo "::error::${verdict}"
+            exit 1
+          }
+          echo "$verdict"
+
   release-tag:
     name: Tag the release vX.Y.Z (post-merge, main only)
     # Issue 1476: every dev->main merge is a real release. Cargo.toml's [workspace.package] version
@@ -1027,7 +1057,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e, release-tag, release]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e, version-check, release-tag, release]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

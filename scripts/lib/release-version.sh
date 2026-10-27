@@ -16,8 +16,15 @@
 #                                      prints nothing, rc 2, when either side is not a version
 #   release_version_order_word A B  -> OLDER / SAME / NEWER / UNKNOWN (never fails, rc 0)
 #   release_version_next_patch V    -> X.Y.(Z+1) for a plain V, rc 0; nothing + rc 2 otherwise
+#   release_version_dev_check DEV_VERSION MAIN_VERSION
+#                                   -> OK (rc 0) or FAIL: <reason + the bump to make> (rc 1): dev
+#                                      must carry a clean X.Y.Z strictly above main's version
 #   release_tag_decision CARGO_VERSION BINARY_VERSION TAG_SHA HEAD_SHA
 #                                   -> prints CREATE / EXISTS (rc 0) or FAIL: <reason> (rc 1)
+#
+# The intercom hub's verify grade (scripts/lib/strih-intercom-hub-unit.sh, its python `key()`)
+# orders the same workspace version for the hub binary with the same semver rule; a change to the
+# rule here is mirrored there.
 
 # The sets are spelled out, never a bracket range: a range follows the locale under bash (an
 # en_US.UTF-8 `[0-9]` also matches non-ASCII digits), see .claude/rules/ci-testing-gotchas.md.
@@ -29,9 +36,12 @@ _RELEASE_VERSION_UPPER='ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 # empty for a release); rc 0 on a semver X.Y.Z[-PRE], rc 1 otherwise. A numeric part with a
 # leading zero is refused (semver), except a plain 0.
 _release_version_parse() {
-  local LC_ALL=C v="${1-}" d="$_RELEASE_VERSION_DIGIT" num pre_re
+  local LC_ALL=C v="${1-}" d="$_RELEASE_VERSION_DIGIT" num ident pre_re
   num="(0|[123456789][${d}]*)"
-  pre_re="[${d}${_RELEASE_VERSION_LOWER}${_RELEASE_VERSION_UPPER}.-]+"
+  # dot-separated NON-EMPTY identifiers (semver); a numeric identifier with a leading zero is
+  # accepted (looser than semver, harmless: no producer writes one)
+  ident="[${d}${_RELEASE_VERSION_LOWER}${_RELEASE_VERSION_UPPER}-]+"
+  pre_re="${ident}([.]${ident})*"
   _RV_MAJ="" _RV_MIN="" _RV_PAT="" _RV_PRE=""
   if [[ $v =~ ^${num}\.${num}\.${num}(-(${pre_re}))?$ ]]; then
     _RV_MAJ="${BASH_REMATCH[1]}"
@@ -157,4 +167,28 @@ release_tag_decision() {
   fi
   printf 'FAIL: tag v%s already names commit %s, not this merge %s -- dev was not bumped to the next patch before the release\n' "$ver" "$tag_sha" "$head"
   return 1
+}
+
+# release_version_dev_check DEV_VERSION MAIN_VERSION -> the dev-push gate of the version-bumping
+# rule: dev strictly above main BEFORE the merge, so a missed bump never reaches main (where the
+# release tag would refuse it after the fact). MAIN_VERSION may still be a historical pre-release
+# (1.7.0-dev.830 until the first 1.8.x release merges); DEV_VERSION must be a clean X.Y.Z.
+release_version_dev_check() {
+  local dev="${1-}" main="${2-}" c want
+  if ! release_version_is_plain "$dev"; then
+    printf 'FAIL: dev carries %s, not a clean X.Y.Z release version (issue 1476)\n' "${dev:-<unreadable>}"
+    return 1
+  fi
+  c="$(release_version_cmp "$dev" "$main")" || {
+    printf 'FAIL: the main version %s is unreadable -- cannot prove dev %s is ahead of it\n' "${main:-<empty>}" "$dev"
+    return 1
+  }
+  if [ "$c" != 1 ]; then
+    want="$dev"
+    if release_version_is_plain "$main"; then want="$(release_version_next_patch "$main")"; fi
+    printf 'FAIL: dev %s is not above main %s -- bump [workspace.package] version in Cargo.toml to %s first\n' "$dev" "$main" "$want"
+    return 1
+  fi
+  printf 'OK\n'
+  return 0
 }

@@ -8,7 +8,10 @@ name: Release
 #     GITHUB_TOKEN never starts another workflow run (GitHub's anti-recursion rule), so a plain
 #     `push: tags` trigger would never fire for it.
 #   * push of a v* tag by a person (a manual or re-issued release).
-# Either way the release is built from the TAG itself, and its binary must report the tag's version.
+# On the workflow_call path the release carries the EXACT binary the caller run built, gated and
+# deployed (its `camera-box-linux-amd64` artifact: a called workflow shares the caller's run, so
+# its artifacts are downloadable here), never a second build with another sha256. Only a manual
+# tag push builds from the tag. Either way the binary must report the tag's version.
 on:
   push:
     tags:
@@ -32,15 +35,26 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libv4l-dev libasound2-dev
 
+      # workflow_call (ci.yml's release job): the caller run's gated + deployed build.
+      - name: Download the caller run's camera-box build
+        if: inputs.tag != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: camera-box-linux-amd64
+          path: target/release
+
+      # A manual tag push: build from the tag.
+      - name: Install Rust
+        if: inputs.tag == ''
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Build release
+        if: inputs.tag == ''
         run: cargo build --release
 
       - name: The binary reports the tag's version
@@ -48,6 +62,7 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
+          chmod +x target/release/camera-box
           got="$(target/release/camera-box --version | awk '{print $NF}')"
           echo "tag ${TAG}, camera-box --version ${got}"
           if [ "v${got}" != "${TAG}" ]; then
@@ -101,7 +116,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
-          make_latest: true
+          # Only the per-merge release becomes Latest; a re-issued older tag pushed by hand never
+          # takes Latest from the newest release.
+          make_latest: ${{ inputs.tag != '' }}
           files: |
             artifacts/camera-box-linux-amd64.tar.gz
             artifacts/camera-box-linux-amd64.tar.gz.sha256
