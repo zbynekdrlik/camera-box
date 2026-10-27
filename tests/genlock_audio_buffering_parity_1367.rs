@@ -133,7 +133,17 @@ fn frozen_vectors() -> Vec<(bool, bool)> {
 /// (None = no valid marker, today's plan) at both production rates and the edges.
 fn plan_box_vectors() -> Vec<(Option<u32>, u32, bool, u32)> {
     let mut v = Vec::new();
-    for ms in [None, Some(0), Some(1), Some(21), Some(22), Some(64), Some(85), Some(959), Some(960)] {
+    for ms in [
+        None,
+        Some(0),
+        Some(1),
+        Some(21),
+        Some(22),
+        Some(64),
+        Some(85),
+        Some(959),
+        Some(960),
+    ] {
         for (max, fixed) in [(0_u32, false), (20, true), (50, false), (500, false)] {
             for rate in [44_100_u32, 48_000] {
                 v.push((ms, max, fixed, rate));
@@ -351,10 +361,7 @@ fn c_harness() -> String {
     }
     for b in BOX_MS_BYTES {
         let lit: String = b.iter().map(|x| format!("\\x{x:02x}")).collect();
-        body.push_str(&format!(
-            "\tparse_line(\"{lit}\", {}u);\n",
-            b.len()
-        ));
+        body.push_str(&format!("\tparse_line(\"{lit}\", {}u);\n", b.len()));
     }
     format!(
         r#"#include <inttypes.h>
@@ -603,15 +610,12 @@ fn a_fixed_plan_never_grows_from_its_first_tick_1425() {
             for enc in [false, true] {
                 for settled in [false, true] {
                     let fr = frozen_plan(true, enc, settled);
-                    assert!(fr, "a fixed plan must be frozen (enc={enc} settled={settled})");
+                    assert!(
+                        fr,
+                        "a fixed plan must be frozen (enc={enc} settled={settled})"
+                    );
                     for total in 0..=p.max_ticks as i32 {
-                        let a = action(
-                            total,
-                            p.floor_ticks as i32,
-                            p.max_ticks as i32,
-                            true,
-                            fr,
-                        );
+                        let a = action(total, p.floor_ticks as i32, p.max_ticks as i32, true, fr);
                         assert_ne!(a, BufferingAction::Dynamic, "ms={ms} total={total}");
                         if total < p.floor_ticks as i32 {
                             assert_eq!(a, BufferingAction::Floor);
@@ -625,7 +629,10 @@ fn a_fixed_plan_never_grows_from_its_first_tick_1425() {
     for (max, fixed) in [(0_u32, false), (20, true)] {
         let mut want = plan(max, fixed, 48_000, AUDIO_OUTPUT_FRAMES);
         want.box_fixed = false;
-        assert_eq!(plan_box(None, max, fixed, 48_000, AUDIO_OUTPUT_FRAMES), want);
+        assert_eq!(
+            plan_box(None, max, fixed, 48_000, AUDIO_OUTPUT_FRAMES),
+            want
+        );
     }
     assert!(!frozen_plan(false, false, true));
     assert!(!frozen_plan(false, true, false));

@@ -1017,9 +1017,7 @@ fn a_box_fixed_plan_never_grows_the_mix_1425() {
     );
     // The known consequence (the design's trade-off, reported to the supervisor): a member that keeps
     // its stamp and stays later than the fixed window is re-anchored on every tick -- never mixed.
-    assert!(trace
-        .iter()
-        .any(|l| l == "box-fixed-0 unfrozen_ticks=0"));
+    assert!(trace.iter().any(|l| l == "box-fixed-0 unfrozen_ticks=0"));
     assert!(freeze(trace, "box-fixed-0").contains(" frozen=1 encoders=0 'mbc' mixed_late=299 "));
     assert_eq!(
         summary(trace, "box-fixed-85"),

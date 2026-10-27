@@ -215,7 +215,9 @@ fn obs_reset_audio2_reads_the_marker_and_fixes_the_plan_1425() {
         );
     }
     // The read comes before the plan; the box flag is stored after the plan.
-    let read_at = c.find("genlock_audio_buffering_read_box_ms(&genlock_box_ms)").unwrap();
+    let read_at = c
+        .find("genlock_audio_buffering_read_box_ms(&genlock_box_ms)")
+        .unwrap();
     let plan_at = c.find("genlock_audio_buffering_make_plan_box(").unwrap();
     let store_at = c.find("audio->genlock_buffering_box_fixed = ").unwrap();
     assert!(read_at < plan_at && plan_at < store_at);
