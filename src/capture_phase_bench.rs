@@ -101,6 +101,22 @@ struct Scenario {
     /// Issue 1482: a capture card that re-times the frames on its own clock — `(second, step ns)`
     /// catch-up phase steps, every frame captured at or after `second` moved by `step` (summed).
     card_steps: Vec<(f64, f64)>,
+    /// Issue 1482 step 2: a re-timing card whose own clock runs at its local rate while `ppm` is
+    /// the SOURCE rate, catching up in a sawtooth (see [`sawtooth_offsets`]).
+    sawtooth: Option<Sawtooth>,
+    seed: u64,
+}
+
+/// Issue 1482 step 2 — a re-timing card's sawtooth: its clock runs `card_ppm` fast, so its offset
+/// to the source drifts by the rate difference every frame, and each time the offset falls to 0
+/// the card catches up LATER by a step drawn from `step_min_ns..step_max_ns`. The sawtooth is
+/// bounded by construction, so the card's long-term timestamp rate is the source rate
+/// (`Scenario::ppm`): the local rate minus the step contribution.
+#[derive(Clone, Copy)]
+struct Sawtooth {
+    card_ppm: f64,
+    step_min_ns: f64,
+    step_max_ns: f64,
     seed: u64,
 }
 
@@ -117,6 +133,7 @@ impl Scenario {
             hidden_skip: None,
             ts_sigma_ns: None,
             card_steps: Vec::new(),
+            sawtooth: None,
             seed: 0x1367_d2be,
         }
     }
@@ -147,8 +164,11 @@ fn frames(sc: &Scenario) -> Vec<Frame> {
     let mut reopen_k = 0u64;
     let mut extra_ns = 0.0;
     let mut hidden = 0u64;
+    let saw = sawtooth_offsets(sc).0;
     for k in 0..n {
         let mut truth_rel = sc.start_phase_ns + k as f64 * period + extra_ns;
+        // A re-timing card's sawtooth around the source phase (issue 1482 step 2).
+        truth_rel += saw.get(k as usize).copied().unwrap_or(0.0);
         // The card's catch-up steps so far (issue 1482), on the card's own (stepped) timeline.
         truth_rel += card_step_sum(sc, truth_rel);
         if let Some((at, gap, shift)) = sc.reopen {
@@ -712,8 +732,11 @@ fn true_card_crossings(sc: &Scenario) -> usize {
 /// `stamp_gap` and 3 `#707 SKIPPED` events. The raw path alone (no tracker) reads 109 sheds +
 /// 110 repeats on the cambox and 48 dup + 101 gap at the receiver.
 ///
-/// With the fix: all 48 steps absorbed (`phase_steps` 48), 0 re-seeds, 5 crossings for the 5
-/// true edge crossings = 2 blind sheds + 3 starvation repeats, 0 receiver dup/gap, 0 SKIPs.
+/// With step 1 (the absorb): all 48 steps absorbed (`phase_steps` 48), 0 re-seeds, 5 crossings for
+/// the 5 edge crossings of the card's stepped instants = 2 blind sheds + 3 starvation repeats, 0
+/// receiver dup/gap, 0 SKIPs. With step 2 (the stamp from the source fit) the slot follows the
+/// SOURCE phase, which this schedule's steps (~+54 ppm) put at ~-9 ppm: 1 crossing (1 starvation
+/// repeat), the rest unchanged. `a_sawtooth_card_stamps_the_source_phase_1482` is step 2's bench.
 #[test]
 fn a_retiming_capture_card_never_reseeds_and_costs_one_slot_per_crossing_1482() {
     let mut sc = Scenario::new(45.0, 1_800.0);
@@ -748,6 +771,12 @@ fn a_retiming_capture_card_never_reseeds_and_costs_one_slot_per_crossing_1482() 
         "crossings {} vs true edge crossings {true_edges}",
         t.crossings
     );
+    // Step 2 (review round 1): the slot follows this schedule's SOURCE line (~-9 ppm), which
+    // crosses one edge in the 30 min, never the card's stepped instants.
+    assert_eq!(
+        t.crossings, 1,
+        "one crossing for the source line's one edge"
+    );
     assert_eq!(
         t.sheds + t.repeats,
         t.crossings,
@@ -759,4 +788,179 @@ fn a_retiming_capture_card_never_reseeds_and_costs_one_slot_per_crossing_1482() 
         "the receiver's StampTrack never flips"
     );
     assert_eq!(t.skip_events, 0);
+}
+
+/// Issue 1482 step 2 — the card offsets of a [`Sawtooth`] scenario, one per frame index, plus the
+/// number of catch-up steps and their sum (ns). Empty without a sawtooth.
+fn sawtooth_offsets(sc: &Scenario) -> (Vec<f64>, usize, f64) {
+    let Some(st) = sc.sawtooth else {
+        return (Vec::new(), 0, 0.0);
+    };
+    let n = (sc.secs * FPS as f64) as usize;
+    let p_src = NOMINAL_60 / (1.0 + sc.ppm * 1e-6);
+    let p_card = NOMINAL_60 / (1.0 + st.card_ppm * 1e-6);
+    let mut rng = Rng(st.seed);
+    let mut draw = || st.step_min_ns + (st.step_max_ns - st.step_min_ns) * rng.unit();
+    let mut offset = draw();
+    let (mut steps, mut sum) = (0usize, 0.0f64);
+    let mut out = Vec::with_capacity(n);
+    for k in 0..n {
+        if k > 0 {
+            // The card's clock is faster: its offset to the source shrinks every frame.
+            offset += p_card - p_src;
+            if offset < 0.0 {
+                let step = draw();
+                offset += step;
+                steps += 1;
+                sum += step;
+            }
+        }
+        out.push(offset);
+    }
+    (out, steps, sum)
+}
+
+/// The slot-edge crossings of the SOURCE phase of a [`Sawtooth`] scenario: the source line moved
+/// by the sawtooth's mean offset (the card's mean re-timing delay, a constant latency).
+fn true_source_crossings(sc: &Scenario) -> usize {
+    let (saw, _, _) = sawtooth_offsets(sc);
+    let mean = saw.iter().sum::<f64>() / saw.len().max(1) as f64;
+    let mut line = sc.clone();
+    line.sawtooth = None;
+    line.start_phase_ns += mean;
+    true_crossings(&line)
+}
+
+/// The slot-edge crossings of the card's own (sawtooth) capture instants: what a stamp that
+/// follows every tooth would cross.
+fn true_card_crossings_of_sawtooth(sc: &Scenario) -> usize {
+    let (saw, _, _) = sawtooth_offsets(sc);
+    let period = NOMINAL_60 / (1.0 + sc.ppm * 1e-6);
+    let base = SEC_2309 * NS_PER_SECOND;
+    let slot_of = |k: usize| {
+        let rel = sc.start_phase_ns + k as f64 * period + saw[k];
+        crate::genlock_grid::grid_floor_ns(base + rel.round() as u64, I60)
+    };
+    (1..saw.len())
+        .filter(|&k| crate::genlock_grid::grid_steps_between(slot_of(k - 1), slot_of(k), I60) != 1)
+        .count()
+}
+
+/// Issue 1482 step 2 (design 6449255649) — cam2's live sawtooth (27.10.2026): between steps the
+/// card runs +45 ppm, and it catches up LATER in ALL-positive steps of +1.0..+2.9 ms, ~1 per 20 s,
+/// +104 ppm in total. The model is self-consistent: the source runs at the local rate minus the
+/// step contribution, 45 - 104 = -59 ppm, and the card steps whenever its offset to the source
+/// reaches 0, so the step contribution is exactly the rate difference and the sawtooth stays
+/// bounded (0..2.9 ms). 30 min through the REAL `DecimationGate`, three step schedules.
+///
+/// The stamp must follow the SOURCE phase: crossings equal to the source line's edge crossings,
+/// each one missing slot (the source is slower than the grid, so never a duplicate), 0 receiver
+/// dup/gap, 0 re-seeds.
+///
+/// Step 1 only (the short fit follows each tooth; measured on the RED commit, same seeds): 6, 6
+/// and 10 crossings for 6 source edges each; the third schedule's 10 = 2 blind sheds + 8 repeats,
+/// a tooth crossing an edge back and forth. With step 2: 6 / 6 / 6, all starvation repeats.
+#[test]
+fn a_sawtooth_card_stamps_the_source_phase_1482() {
+    for seed in [0x1482_5a7e_u64, 0x1482_0001, 0x1482_0002] {
+        let mut sc = Scenario::new(-59.0, 1_800.0);
+        sc.sawtooth = Some(Sawtooth {
+            card_ppm: 45.0,
+            step_min_ns: 1_000_000.0,
+            step_max_ns: 2_900_000.0,
+            seed,
+        });
+        let (_, steps, sum) = sawtooth_offsets(&sc);
+        let step_ppm = sum / (sc.secs * 1e9) * 1e6;
+        let edges = true_source_crossings(&sc);
+        let card_edges = true_card_crossings_of_sawtooth(&sc);
+        let raw = run(&sc, false);
+        let t = run(&sc, true);
+        eprintln!(
+            "sawtooth card {seed:#x}: {steps} steps (+{step_ppm:.1} ppm) in {} s, {edges} source \
+             edge crossings, {card_edges} card (tooth) edge crossings: RAW cambox {} sheds + {} \
+             repeats, strih dup {} gap {}; TRACKED cambox {} sheds + {} repeats, strih dup {} gap \
+             {}, crossings {} reseeds {} phase_steps {} skips {}",
+            sc.secs,
+            raw.sheds,
+            raw.repeats,
+            raw.rx.dups,
+            raw.rx.gaps,
+            t.sheds,
+            t.repeats,
+            t.rx.dups,
+            t.rx.gaps,
+            t.crossings,
+            t.reseeds,
+            t.phase_steps,
+            t.skip_events
+        );
+        assert!(
+            (95.0..115.0).contains(&step_ppm) && (70..=120).contains(&steps),
+            "the model holds cam2's step rate: {steps} steps, +{step_ppm:.1} ppm"
+        );
+        assert!(
+            card_edges > edges,
+            "the teeth cross more edges than the source"
+        );
+        assert_eq!(t.reseeds, 0, "{seed:#x}: a sawtooth never re-seeds");
+        assert_eq!(
+            t.crossings as usize, edges,
+            "{seed:#x}: one crossing per SOURCE edge, never per tooth"
+        );
+        assert_eq!(
+            (t.sheds, t.repeats),
+            (0, t.crossings),
+            "{seed:#x}: every crossing of a slower source is one missing slot, never a tooth back"
+        );
+        assert_eq!(
+            (t.rx.dups, t.rx.gaps),
+            (0, 0),
+            "{seed:#x}: the receiver never flips"
+        );
+        assert_eq!(t.skip_events, 0);
+    }
+}
+
+/// Issue 1482 step 2, review round 1 — the same card over a source that drifts SLOWLY past the
+/// grid: +18 ppm, what cam3 and cam5 read on the same splitter signal live. The card's +45 ppm clock
+/// then needs only ~+27 ppm of steps, and the source line lingers near each edge for minutes, so a
+/// stamp that follows the teeth crosses back and forth. Step 1 only (measured on the RED tree,
+/// same seeds): 2 / 6 / 8 tracked crossings for 2 source edges each. With step 2: 2 / 2 / 2, each
+/// one blind shed (the source is faster than the grid), 0 receiver dup/gap, 0 re-seeds.
+#[test]
+fn a_sawtooth_card_over_a_slow_source_stamps_the_source_phase_1482() {
+    for seed in [0x1482_5a7e_u64, 0x1482_0001, 0x1482_0002] {
+        let mut sc = Scenario::new(18.0, 1_800.0);
+        sc.sawtooth = Some(Sawtooth {
+            card_ppm: 45.0,
+            step_min_ns: 1_000_000.0,
+            step_max_ns: 2_900_000.0,
+            seed,
+        });
+        let edges = true_source_crossings(&sc);
+        let card_edges = true_card_crossings_of_sawtooth(&sc);
+        let t = run(&sc, true);
+        eprintln!(
+            "slow source {seed:#x}: {edges} source edges, {card_edges} tooth edges: TRACKED {} \
+             sheds + {} repeats, strih dup {} gap {}, crossings {} reseeds {} phase_steps {}",
+            t.sheds, t.repeats, t.rx.dups, t.rx.gaps, t.crossings, t.reseeds, t.phase_steps
+        );
+        assert!(
+            card_edges > edges,
+            "the teeth cross more edges than the source"
+        );
+        assert_eq!(t.reseeds, 0, "{seed:#x}");
+        assert_eq!(
+            t.crossings as usize, edges,
+            "{seed:#x}: one per SOURCE edge"
+        );
+        assert_eq!(
+            (t.sheds, t.repeats),
+            (t.crossings, 0),
+            "{seed:#x}: every crossing of a faster source is one duplicate slot"
+        );
+        assert_eq!((t.rx.dups, t.rx.gaps), (0, 0), "{seed:#x}");
+        assert_eq!(t.skip_events, 0);
+    }
 }

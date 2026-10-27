@@ -60,6 +60,11 @@ use crate::genlock_grid::{
 };
 use std::collections::VecDeque;
 
+mod source_phase;
+pub use source_phase::{
+    SourcePhase, SOURCE_DECIMATION_FRAMES, SOURCE_FIT_MIN_SECONDS, SOURCE_FIT_SECONDS,
+};
+
 /// Frames in the least-squares window: ~4.3 s at 60 fps. The prediction error at the newest frame
 /// is `2 * sigma / sqrt(n)`, 1/8 of the raw timestamp jitter at a full window.
 pub const FIT_WINDOW_FRAMES: usize = 256;
@@ -353,6 +358,8 @@ pub struct CapturePhaseTracker {
     outlier_samples: Vec<(i64, u64)>,
     /// The note of the most recent observed frame, if it re-seeded or re-indexed (issue 1371).
     note: Option<PhaseNote>,
+    /// Issue 1482 step 2: the long-horizon SOURCE phase fit, fed every sample this fit folds.
+    source: SourcePhase,
 }
 
 impl CapturePhaseTracker {
@@ -526,6 +533,9 @@ impl CapturePhaseTracker {
         self.outlier_samples.clear();
         self.locked = false;
         self.white_check_countdown = 0;
+        // Issue 1482 step 2: every seed and re-seed is a real discontinuity, so the source fit
+        // starts over too (an absorbed step never comes through here).
+        self.source.reset();
         self.last_seq = Some(seq);
         self.last_x = 0;
         self.last_t = t;
@@ -535,6 +545,17 @@ impl CapturePhaseTracker {
     /// The note of the most recent observed frame (issue 1371), cleared by the next frame.
     pub fn note(&self) -> Option<&PhaseNote> {
         self.note.as_ref()
+    }
+
+    /// Issue 1482 step 2: the SOURCE fit's capture time at the most recent observed frame's
+    /// sequence position, once that fit is ready ([`SourcePhase::ready`]); else `None`.
+    pub fn source_prediction_ns(&self) -> Option<u64> {
+        self.source.predict_ns(self.last_x)
+    }
+
+    /// Issue 1482 step 2: the long-horizon source fit.
+    pub fn source(&self) -> &SourcePhase {
+        &self.source
     }
 
     /// Issue 1482: move the whole fit by `step_ns` (every window sample's time), then fold the
@@ -564,6 +585,9 @@ impl CapturePhaseTracker {
     }
 
     fn push(&mut self, x: i64, t: u64) {
+        // Issue 1482 step 2: the source fit sees every sample this fit folds, raw (a card's
+        // re-timing steps are NOT removed: they are what the long fit averages).
+        self.source.offer(x, t);
         let (x0, t0) = self.window.front().copied().unwrap_or((x, t));
         self.window.push_back((x, t));
         self.sums.add(
@@ -641,17 +665,23 @@ impl CapturePhaseTracker {
 
     /// The fitted capture time at sequence position `x` (the caller guarantees `d() > 0`).
     fn predict_ns(&self, x: i64) -> u64 {
-        let s = &self.sums;
-        let (x0, t0) = self.window.front().copied().unwrap_or((x, 0));
-        let d = s.d();
-        if d <= 0 {
-            return t0;
-        }
-        let dx = i128::from(x) - i128::from(x0);
-        let num = s.sy * d + s.nb() * (s.n * dx - s.sx);
-        let dy = div_round(num, s.n * d);
-        (i128::from(t0) + dy).clamp(0, i128::from(u64::MAX)) as u64
+        line_predict_ns(&self.sums, self.window.front().copied(), x)
     }
+}
+
+/// The least-squares line's time at sequence position `x`, for sums relative to `origin` (the
+/// window's oldest sample). The origin's own time when the line is not defined yet (`d() <= 0`).
+/// Shared by the short fit and the source fit (issue 1482 step 2).
+fn line_predict_ns(s: &FitSums, origin: Option<(i64, u64)>, x: i64) -> u64 {
+    let (x0, t0) = origin.unwrap_or((x, 0));
+    let d = s.d();
+    if d <= 0 {
+        return t0;
+    }
+    let dx = i128::from(x) - i128::from(x0);
+    let num = s.sy * d + s.nb() * (s.n * dx - s.sx);
+    let dy = div_round(num, s.n * d);
+    (i128::from(t0) + dy).clamp(0, i128::from(u64::MAX)) as u64
 }
 
 /// How [`SlotHysteresis::choose`] placed a frame.
@@ -780,7 +810,10 @@ impl CapturePhase {
     ) -> Option<u64> {
         let obs = self.tracker.observe(seq, capture_mono_ns);
         let smoothed = match obs.smoothed_mono_ns {
-            Some(t) if interval_ns > 0 => t,
+            // Issue 1482 step 2: while the short fit is locked, the long-horizon SOURCE fit places
+            // the slot once it spans a minute (a re-timing card's sawtooth averaged out); before
+            // that, the short fit's prediction, as before.
+            Some(t) if interval_ns > 0 => self.tracker.source_prediction_ns().unwrap_or(t),
             _ => {
                 self.mode = if interval_ns == 0 {
                     PhaseMode::Off
@@ -867,6 +900,15 @@ impl CapturePhase {
         self.tracker.phase_steps()
     }
 
+    /// The SOURCE frame rate offset from the emit rate in ppm (issue 1482 step 2), from the
+    /// long-horizon source fit, same sign as [`Self::rate_ppm`].
+    pub fn source_rate_ppm(&self, interval_ns: u64) -> Option<f64> {
+        // Only once the fit spans its minute: a shorter slope is the sawtooth, not the source.
+        let source = self.tracker.source();
+        let p = source.period_ns().filter(|_| source.ready())?;
+        (interval_ns > 0 && p > 0.0).then(|| (nominal_period_ns(interval_ns) / p - 1.0) * 1e6)
+    }
+
     /// Why the most recent frame re-seeded the fit or was re-indexed (issue 1371), else `None`.
     pub fn note(&self) -> Option<&PhaseNote> {
         self.tracker.note()
@@ -878,12 +920,15 @@ impl CapturePhase {
         let ppm = self
             .rate_ppm(interval_ns)
             .map_or_else(|| "na".to_string(), |v| format!("{v:+.1}"));
+        let src_ppm = self
+            .source_rate_ppm(interval_ns)
+            .map_or_else(|| "na".to_string(), |v| format!("{v:+.1}"));
         let jitter = self
             .jitter_rms_us()
             .map_or_else(|| "na".to_string(), |v| format!("{v:.0}"));
         format!(
-            " phase_lock={} phase_ppm={ppm} jitter_us={jitter} crossings={} reseeds={} \
-             hidden_drops={} phase_steps={}",
+            " phase_lock={} phase_ppm={ppm} src_ppm={src_ppm} jitter_us={jitter} crossings={} \
+             reseeds={} hidden_drops={} phase_steps={}",
             self.mode.token(),
             self.crossings,
             self.reseeds(),
