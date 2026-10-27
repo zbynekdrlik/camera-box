@@ -475,8 +475,12 @@ fn release_yml_runs_on_a_tag_push_and_as_a_reusable_workflow() {
 #[test]
 fn a_main_run_is_never_cancelled_by_the_next_merge() {
     let ci = read(".github/workflows/ci.yml");
+    // each main run its own group: GitHub keeps only ONE pending run per group even without
+    // cancel-in-progress, so a shared main group drops the middle one of three quick merges
     assert!(
-        ci.contains("\nconcurrency:\n  group: ci-${{ github.workflow }}-${{ github.ref }}\n"),
+        ci.contains(
+            "\n  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.ref == 'refs/heads/main' && format('-{0}', github.run_id) || '' }}\n"
+        ),
         "{ci}"
     );
     assert!(
