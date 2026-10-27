@@ -72,7 +72,8 @@ ONE missing frame per crossing.
   - **Why (the owner's ruling):** no capture card, camera, monitor or HDMI source is ever assumed
     to run on the genlock clock, and no fix asks for replacement hardware. cam2's Cam Link reads
     +45 ppm against the SAME splitter signal cam3/cam5 read at +18 ppm: it re-times the frames on
-    its own clock and catches up in constant +1.8..+2.6 ms steps (once -6.3 ms) every ~20 s (live
+    its own clock and catches up in constant +1.8..+2.6 ms steps (once -6.3 ms) at 1.4..75 s intervals, one per
+    ~20 s on average (live
     27.10.2026: 2329 re-seeds on cam2 vs 10 on cam3/cam5). The cambox absorbs it, so the card's
     clock never travels further than the cambox.
   - A backward/stalled sequence (a device re-open), a step above `MAX_SEQ_ADVANCE` (8, hidden
@@ -212,8 +213,8 @@ phase_steps=0`:
   frames the device skipped without a sequence step (each costs one starvation repeat), so a lone
   repeat with no `crossings` increase is attributable.
 - `phase_steps`: cumulative card re-timing steps absorbed with the lock kept (issue 1482). A
-  re-timing card (cam2) grows it ~2-3/min while `reseeds=` stays flat; a pass-through card stays
-  at 0.
+  re-timing card (cam2, one step per ~20 s live) grows it ~3/min while `reseeds=` stays flat; a
+  pass-through card stays at 0.
 
 Every absorbed card step logs ONE `#1482 capture phase step: <+us> us (card re-timing), lock kept`
 line (`PhaseNote::log_line()`, the whole line main.rs writes). Every re-seed and every hidden drop
@@ -261,7 +262,8 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   - At the design's 0.3 ms i.i.d. Gaussian timestamp jitter the tracker still gives exactly 1 per
     crossing (2 crossings, 0 receiver flips, 0 re-seeds).
   - **Re-timing card (issue 1482)**, cam2's live numbers: a +45 ppm card clock, 48 seeded catch-up
-    steps of +1.8..+2.6 ms (the 8th -6.3 ms) at random 2..75 s intervals over 30 min, seed
+    steps of +1.8..+2.6 ms (the 8th -6.3 ms) at random 2..75 s intervals (the design's band, one
+    per ~38 s on average, half the live rate) over 30 min, seed
     `0x1482_ca2d`. With the fix: 48 `phase_steps`, 0 re-seeds, 5 crossings for the 5 true edge
     crossings = 2 blind sheds + 3 starvation repeats, 0 receiver dup/gap, 0 SKIPs. Before it (the
     RED commit): 48 re-seeds, 3 receiver gaps, 3 SKIPs; the raw path alone 109 sheds + 110 repeats
@@ -306,3 +308,12 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
 - The one-frame wrap every ~17 min is physics for a free-running camera; D2 makes it one clean
   event.
 - A seeding or re-seeding stream (2 s after a start or a re-open) runs today's path.
+- Issue 1482's constant-offset test has a floor of 0.5 ms around the run's median, so a run whose
+  residuals span 1 ms or less is absorbed as ONE step even when it is a slow ramp (the next run of
+  the ramp is absorbed again, step-wise); only a wider ramp re-seeds. Pinned by
+  `the_constant_offset_tolerance_edges_1482`.
+- A delivery delay that stays CONSTANT for 30 frames or more is now absorbed as a step, and the
+  return to the true phase as a second step of the opposite sign. Each direction costs ~0.5 s of
+  stamps on the stale phase and, near an edge, one dup or one gap that `crossings=` counts like
+  camera drift. Read a `phase_steps=` pair of opposite sign close together as a delivery delay,
+  not as card behaviour (a re-timing card steps one way, the other only rarely).

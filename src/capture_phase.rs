@@ -28,8 +28,8 @@
 //!   under half a period it is stamped from the prediction, and [`RESEED_CONSECUTIVE_OUTLIERS`] of
 //!   them in a row re-seed, UNLESS the whole run sits on one constant offset (issue 1482: a capture
 //!   card re-timing the frames on its own clock catches up in a step), which moves the fit by the
-//!   run's median and keeps the period and the lock; half a period or more re-seeds at once (a real discontinuity, never a
-//!   stamp from the old phase). A backward or huge sequence step (a device re-open), a timestamp
+//!   run's median and keeps the period and the lock; half a period or more re-seeds at once (a
+//!   real discontinuity, never a stamp from the old phase). A backward or huge sequence step (a device re-open), a timestamp
 //!   that does not advance, or a gap longer than (sequence step + 1) x [`MAX_FRAME_PERIOD_NS`]
 //!   re-seed too; the last one also bounds the window's time span. The fit is LOCKED once it holds
 //!   [`LOCK_MIN_FRAMES`] samples, its RMS residual is at most [`LOCK_MAX_JITTER_NS`] and its
@@ -542,8 +542,13 @@ impl CapturePhaseTracker {
     /// with the rest, so every `FitSums` term stays exactly what it was: only the intercept moves,
     /// the slope (the card's rate), the jitter and the lock are kept.
     fn absorb_step(&mut self, step_ns: i64, samples: &[(i64, u64)]) {
-        let shift =
-            |t: u64| (i128::from(t) + i128::from(step_ns)).clamp(0, i128::from(u64::MAX)) as u64;
+        let shift = |t: u64| {
+            let moved = i128::from(t) + i128::from(step_ns);
+            // A monotonic capture time is seconds past boot and a step under half a period: a
+            // clamp here would break the exact-sums claim, so it must never bite.
+            debug_assert!((0..=i128::from(u64::MAX)).contains(&moved));
+            moved.clamp(0, i128::from(u64::MAX)) as u64
+        };
         for sample in self.window.iter_mut() {
             sample.1 = shift(sample.1);
         }
