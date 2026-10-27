@@ -30,12 +30,22 @@
  *   of a launch (--startstreaming, Companion, an operator) never mutes a member that is a few ms
  *   late; it gets that launch's growth instead, logged once.
  *
- * Pure: stdint/stdbool only, no libobs types -- tests/genlock_audio_buffering_parity_1367.rs
+ * - Issue 1425 (design 6443440513, ROZHODNUTE 6436368009): the per-box FIXED buffering. A box that
+ *   declares its buffering (setup-strih writes ~/.camera-box/genlock-audio-buffering-ms from the box
+ *   fact STRIH_AUDIO_BUFFERING_MS; obs.c reads it once per audio reset, this header only PARSES the
+ *   bytes) gets a plan whose floor is that value (genlock_audio_buffering_make_plan_box), raised before
+ *   the first mix, and a freeze that holds from the first tick whatever the encoders and the launch
+ *   settle window say (genlock_audio_buffering_frozen_plan): the action is never DYNAMIC, a late mixed
+ *   member is re-anchored (MIXED_LATE) and counted. Every launch of that box then has exactly the
+ *   box's audio latency. A box with no valid file keeps the plan above unchanged.
+ *
+ * Pure: stdint/stdbool/stddef only, no libobs types -- tests/genlock_audio_buffering_parity_1367.rs
  * compiles this header as-is and requires byte-identical results from the Tier-0 Rust authority
  * src/genlock_audio_buffering.rs. Keep both in lock-step. */
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* The floor, ms, before tick rounding: 0 since issue 1425 E2 slice 3 (it was 85 = 4 ticks for the
@@ -48,6 +58,14 @@
  * first audio tick, during which a running encoder does not freeze the buffering (the startup race
  * draws it). Mirror of src/genlock_audio_buffering.rs LAUNCH_SETTLE_NS. */
 #define GENLOCK_AUDIO_BUFFERING_LAUNCH_SETTLE_NS 30000000000ULL
+
+/* issue 1425: the largest per-box fixed buffering, ms = OBS's own default maximum (45 ticks at 48 kHz).
+ * Mirror of src/genlock_audio_buffering.rs BOX_MAX_MS. */
+#define GENLOCK_AUDIO_BUFFERING_BOX_MAX_MS 960u
+/* issue 1425: what obs.c found in the per-box marker file (genlock_audio_buffering_read_box_ms). */
+#define GENLOCK_AUDIO_BUFFERING_BOX_ABSENT 0
+#define GENLOCK_AUDIO_BUFFERING_BOX_INVALID 1
+#define GENLOCK_AUDIO_BUFFERING_BOX_FIXED 2
 
 /* genlock_audio_buffering_action() results. Mirror of src/genlock_audio_buffering.rs BufferingAction. */
 #define GENLOCK_AUDIO_BUFFERING_ACTION_NONE 0
@@ -62,6 +80,8 @@ struct genlock_audio_buffering_plan {
 	 * obs-audio.c keeps the upstream fixed branch byte-identical for rebases; it is unreachable. */
 	bool fixed;
 	bool overridden;
+	/* issue 1425: the floor is this box's declared FIXED buffering; the mix never grows dynamically. */
+	bool box_fixed;
 };
 
 /* Ticks for `ms` of buffering, rounded up: obs_reset_audio2's own uint32_t formula. 0 for
@@ -99,6 +119,7 @@ genlock_audio_buffering_make_plan_floor(uint32_t floor_ms, uint32_t req_max_ms, 
 	if (p.max_ticks < p.floor_ticks)
 		p.max_ticks = p.floor_ticks;
 	p.fixed = false;
+	p.box_fixed = false;
 	return p;
 }
 
@@ -108,6 +129,43 @@ static inline struct genlock_audio_buffering_plan genlock_audio_buffering_make_p
 {
 	return genlock_audio_buffering_make_plan_floor(GENLOCK_AUDIO_BUFFERING_FLOOR_MS, req_max_ms, req_fixed, rate,
 						       frames);
+}
+
+/* issue 1425: the plan of an audio reset. box_fixed = a valid per-box marker was read and box_ms is its
+ * value: the floor is box_ms (rounded up to whole ticks like every floor) and the plan is marked FIXED;
+ * otherwise the plan at the shipped floor, unchanged. Mirror of plan_box. */
+static inline struct genlock_audio_buffering_plan genlock_audio_buffering_make_plan_box(bool box_fixed, uint32_t box_ms,
+											 uint32_t req_max_ms, bool req_fixed,
+											 uint32_t rate, uint32_t frames)
+{
+	if (!box_fixed)
+		return genlock_audio_buffering_make_plan(req_max_ms, req_fixed, rate, frames);
+	struct genlock_audio_buffering_plan p =
+		genlock_audio_buffering_make_plan_floor(box_ms, req_max_ms, req_fixed, rate, frames);
+	p.box_fixed = true;
+	return p;
+}
+
+/* issue 1425: the per-box marker's bytes -> ms. Valid = 1..3 ASCII digits, then nothing or exactly one
+ * '\n', value 0..GENLOCK_AUDIO_BUFFERING_BOX_MAX_MS. Anything else (empty, a sign, a space, a CR, a
+ * fourth digit, a non-ASCII byte) is invalid and *ms is left untouched. Mirror of parse_box_ms. */
+static inline bool genlock_audio_buffering_parse_box_ms(const char *buf, size_t len, uint32_t *ms)
+{
+	if (len > 0 && buf[len - 1] == '\n')
+		len--;
+	if (len == 0 || len > 3)
+		return false;
+	uint32_t v = 0;
+	for (size_t i = 0; i < len; i++) {
+		const unsigned char c = (unsigned char)buf[i];
+		if (c < '0' || c > '9')
+			return false;
+		v = v * 10u + (uint32_t)(c - '0');
+	}
+	if (v > GENLOCK_AUDIO_BUFFERING_BOX_MAX_MS)
+		return false;
+	*ms = v;
+	return true;
 }
 
 /* The floor-then-dynamic rule for one mixer tick; source_behind = obs-audio.c `min_ts < ts.start`,
@@ -141,4 +199,13 @@ static inline bool genlock_audio_buffering_launch_settled(uint64_t first_tick_ns
 static inline bool genlock_audio_buffering_frozen(bool encoder_active, bool settled)
 {
 	return encoder_active && settled;
+}
+
+/* issue 1425 (design 6443440513): the freeze under the audio reset's plan. A box-FIXED plan is frozen
+ * on every tick from the first one, encoder or not, inside the launch settle window or not: its mix
+ * never grows, a late member is re-anchored. Any other plan freezes as genlock_audio_buffering_frozen.
+ * Mirror of frozen_plan. */
+static inline bool genlock_audio_buffering_frozen_plan(bool box_fixed, bool encoder_active, bool settled)
+{
+	return box_fixed || genlock_audio_buffering_frozen(encoder_active, settled);
 }

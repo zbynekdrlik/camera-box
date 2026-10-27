@@ -1618,6 +1618,31 @@ int obs_reset_video(struct obs_video_info *ovi)
 #define SEC_TO_MSEC 1000
 #endif
 
+/* camera-box issue 1425 (design 6443440513, ROZHODNUTE 6436368009): the per-box FIXED audio buffering.
+ * setup-strih writes the box fact STRIH_AUDIO_BUFFERING_MS to ~/.camera-box/genlock-audio-buffering-ms of
+ * the OBS user (the issue-1367 genlock-min-latency marker pattern, obs-source.c). Read once per audio
+ * reset: GENLOCK_AUDIO_BUFFERING_BOX_ABSENT (no HOME / no file), _INVALID (present but not an integer
+ * 0..960 with at most one trailing newline, decided by the pure genlock_audio_buffering_parse_box_ms) or
+ * _FIXED with *ms_out set. Lifted verbatim and run by tests/genlock_audio_buffering_box_1425.rs. */
+static int genlock_audio_buffering_read_box_ms(uint32_t *ms_out)
+{
+	const char *home = getenv("HOME");
+	char path[1024];
+	char buf[8];
+	if (!home || home[0] == '\0')
+		return GENLOCK_AUDIO_BUFFERING_BOX_ABSENT;
+	const int n = snprintf(path, sizeof(path), "%s/.camera-box/genlock-audio-buffering-ms", home);
+	if (n <= 0 || (size_t)n >= sizeof(path))
+		return GENLOCK_AUDIO_BUFFERING_BOX_ABSENT;
+	FILE *f = os_fopen(path, "rb");
+	if (!f)
+		return GENLOCK_AUDIO_BUFFERING_BOX_ABSENT;
+	const size_t len = fread(buf, 1, sizeof(buf), f);
+	fclose(f);
+	return genlock_audio_buffering_parse_box_ms(buf, len, ms_out) ? GENLOCK_AUDIO_BUFFERING_BOX_FIXED
+								       : GENLOCK_AUDIO_BUFFERING_BOX_INVALID;
+}
+
 bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 {
 	struct obs_core_audio *audio = &obs->audio;
@@ -1638,12 +1663,18 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	 * an audio encoder runs -- so a launch starts at 0 like stock OBS. Fixed buffering is never used:
 	 * the frontend low-latency toggle is overridden and logged. The decision is the pure
 	 * genlock_audio_buffering_make_plan() (obs-genlock-audio-buffering.h <->
-	 * src/genlock_audio_buffering.rs). */
-	const struct genlock_audio_buffering_plan genlock_buf = genlock_audio_buffering_make_plan(
-		oai->max_buffering_ms, oai->fixed_buffering, oai->samples_per_sec, AUDIO_OUTPUT_FRAMES);
+	 * src/genlock_audio_buffering.rs). Issue 1425 (design 6443440513): a box that declares its buffering
+	 * (~/.camera-box/genlock-audio-buffering-ms) gets a FIXED plan instead -- the floor is that value,
+	 * raised before the first mix, and the mix never grows (genlock_audio_buffering_frozen_plan). */
+	uint32_t genlock_box_ms = 0;
+	const int genlock_box = genlock_audio_buffering_read_box_ms(&genlock_box_ms);
+	const struct genlock_audio_buffering_plan genlock_buf = genlock_audio_buffering_make_plan_box(
+		genlock_box == GENLOCK_AUDIO_BUFFERING_BOX_FIXED, genlock_box_ms, oai->max_buffering_ms,
+		oai->fixed_buffering, oai->samples_per_sec, AUDIO_OUTPUT_FRAMES);
 	audio->max_buffering_ticks = (int)genlock_buf.max_ticks;
 	audio->floor_buffering_ticks = (int)genlock_buf.floor_ticks;
 	audio->fixed_buffer = genlock_buf.fixed;
+	audio->genlock_buffering_box_fixed = genlock_buf.box_fixed;
 
 	int max_buffering_ms =
 		audio->max_buffering_ticks * AUDIO_OUTPUT_FRAMES * SEC_TO_MSEC / (int)oai->samples_per_sec;
@@ -1671,6 +1702,17 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 		     "OVERRIDDEN -- every launch starts at %d ms and increases dynamically above it (max %d ms)",
 		     oai->fixed_buffering ? "fixed (low-latency)" : "dynamic", oai->max_buffering_ms, genlock_floor_ms,
 		     max_buffering_ms);
+	/* issue 1425: ONE line per audio reset (= per launch) naming whether this box's buffering is fixed. */
+	if (genlock_buf.box_fixed)
+		blog(LOG_INFO,
+		     "genlock-audio-buffering: FIXED %" PRIu32 " ms (%" PRIu32
+		     " ticks) from ~/.camera-box/genlock-audio-buffering-ms (issue 1425)",
+		     genlock_box_ms, genlock_buf.floor_ticks);
+	else
+		blog(LOG_WARNING,
+		     "genlock-audio-buffering: NOT deterministic on this box -- %s ~/.camera-box/genlock-audio-buffering-ms "
+		     "(an integer 0..960 ms), so the launch's startup race draws the audio buffering (issue 1425)",
+		     genlock_box == GENLOCK_AUDIO_BUFFERING_BOX_INVALID ? "an invalid" : "no");
 
 	return obs_init_audio(&ai);
 }
