@@ -224,6 +224,12 @@ fn obs_reset_audio2_reads_the_marker_and_fixes_the_plan_1425() {
     // The FIXED line is INFO, the not-deterministic line a WARNING.
     assert!(c.contains("blog(LOG_INFO, \"genlock-audio-buffering: FIXED"));
     assert!(c.contains("blog(LOG_WARNING, \"genlock-audio-buffering: NOT deterministic"));
+    // A low-latency request on a FIXED box names the fixed value, never "increases dynamically".
+    assert_eq!(
+        c.matches("this box's buffering is FIXED at %\" PRIu32 \" ms (max %d ms)\"")
+            .count(),
+        1
+    );
     // The shipped-floor plan call is gone from the reset (the box plan wraps it).
     assert!(!c.contains("genlock_buf = genlock_audio_buffering_make_plan("));
 }
@@ -236,6 +242,7 @@ fn the_tick_freeze_takes_the_plans_box_flag_1425() {
         "static inline bool genlock_buffering_frozen_now(uint64_t tick_start_ns, bool encoder_active, bool box_fixed)",
         "genlock_launch_encoder_unsettled = !box_fixed && encoder_active && !settled;",
         "return genlock_audio_buffering_frozen_plan(box_fixed, encoder_active, settled);",
+        "if (audio->genlock_buffering_box_fixed && audio->total_buffering_ticks < audio->floor_buffering_ticks) { set_floor_audio_buffering(audio, sample_rate, &ts); min_ts = ts.start; }",
     ] {
         assert_eq!(
             a.matches(needle).count(),
@@ -243,6 +250,17 @@ fn the_tick_freeze_takes_the_plans_box_flag_1425() {
             "issue 1425: {OBS_AUDIO} must carry `{needle}` exactly once"
         );
     }
+    // The FIXED floor is raised right after the freeze decision, before the catch-all render-order loop
+    // (so before the render loop, the guard and the #800 telemetry) -- inside the 1381 lift's first block.
+    let decide = a
+        .find("audio->genlock_buffering_frozen = genlock_buffering_frozen_now(")
+        .unwrap();
+    let raise = a
+        .find("if (audio->genlock_buffering_box_fixed && audio->total_buffering_ticks")
+        .unwrap();
+    let render = a.find("/* render audio data */").unwrap();
+    let telemetry = a.find("audio-telemetry #800: total_buffering=").unwrap();
+    assert!(decide < raise && raise < render && render < telemetry);
     let i = squish(&read(OBS_INTERNAL));
     assert!(
         i.contains("bool genlock_buffering_box_fixed;"),

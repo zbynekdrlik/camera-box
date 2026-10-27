@@ -71,6 +71,8 @@ FIXED_FMT = _c_literal(OBS_C, '"genlock-audio-buffering: FIXED')
 NOTDET_FMT = _c_literal(OBS_C, '"genlock-audio-buffering: NOT deterministic')
 TEL_FMT = _c_literal(OBS_AUDIO, '"audio-telemetry #800: total_buffering=')
 ABOVE_FMT = _c_literal(OBS_AUDIO, '"genlock audio buffering ABOVE the floor')
+FLOOR_FMT = _c_literal(OBS_AUDIO, '"genlock audio buffering floor (issue 1367)')
+MIX_FMT = _c_literal(OBS_AUDIO, '"audio-telemetry #800 mix: frozen=')
 
 
 def fixed(ms, ticks):
@@ -89,12 +91,22 @@ def above(add, total):
     return "10:00:05.000: " + ABOVE_FMT % (add, total, "mbc")
 
 
+def floor(total):
+    return "10:00:00.120: " + FLOOR_FMT % total
+
+
+def mix(frozen, mixed_late):
+    return "10:01:00.000: " + MIX_FMT % (frozen, mixed_late)
+
+
 def test_the_fixtures_follow_the_shipped_format_strings():
     assert fixed(0, 0) == ("10:00:00.100: genlock-audio-buffering: FIXED 0 ms (0 ticks) from "
                            "~/.camera-box/genlock-audio-buffering-ms (issue 1425)")
     assert tel(0, 0).endswith("audio-telemetry #800: total_buffering=0 ms (ticks=0/45) buffering_source=-")
     assert "total audio buffering is now 64 milliseconds" in above(64, 64)
     assert "NOT deterministic on this box -- no ~/.camera-box/genlock-audio-buffering-ms" in notdet()
+    assert mix(1, 3).endswith("audio-telemetry #800 mix: frozen=1 mixed_late=3")
+    assert "total audio buffering is now 85 milliseconds from the first audio tick" in floor(85)
 
 
 # --- the value grammar ------------------------------------------------------------------------------------------
@@ -125,8 +137,26 @@ def test_a_launch_held_at_its_fact_passes():
 
 
 def test_a_tick_rounded_fact_is_graded_on_its_ticks():
-    # 85 ms = 4 ticks at 48 kHz, the telemetry prints the rounded total.
-    assert verdict("85", "85", [fixed(85, 4), tel(85, 4)])[1] == 0
+    # 85 ms = 4 ticks at 48 kHz, raised before the first tick's telemetry (obs-audio.c), which prints the
+    # rounded total; the floor line's own "total audio buffering is now" is no growth.
+    line, rc = verdict("85", "85", [fixed(85, 4), floor(85), tel(85, 4), mix(1, 1), tel(85, 4), mix(1, 1)])
+    assert rc == 0 and "mixed_late=1" in line, line
+
+
+def test_the_marker_is_compared_as_a_number():
+    assert verdict("0", "00", [fixed(0, 0)])[1] == 0
+    assert verdict("85", "085", [fixed(85, 4)])[1] == 0
+
+
+def test_a_fixed_mix_must_read_frozen_and_never_mute_a_member():
+    line, rc = verdict("0", "0", [fixed(0, 0), mix(1, 0), mix(0, 0)])
+    assert rc == 1 and "frozen=0 1 time(s)" in line, line
+    # a member re-anchored on most ticks of a minute: later than the fixed window, muted for good
+    line, rc = verdict("0", "0", [fixed(0, 0), mix(1, 2), mix(1, 2812)])
+    assert rc == 1 and "re-anchored 2810 times" in line and "raise STRIH_AUDIO_BUFFERING_MS" in line, line
+    # a few one-off late packets are reported, not failed; an audio reset restarts the count
+    line, rc = verdict("0", "0", [fixed(0, 0), mix(1, 2), mix(1, 40), mix(1, 3)])
+    assert rc == 0 and "mixed_late=3" in line, line
 
 
 @pytest.mark.parametrize("fact,marker,lines,why", [
@@ -323,8 +353,8 @@ def test_the_e2e_row_passes_both_boxes_held_at_their_fact(rig):
     assert r.stdout.strip().endswith("rc=0"), r.stdout + r.stderr
     assert "ok: strih-snv audio buffering FIXED 0 ms" in r.stdout
     assert "ok: stream-snv audio buffering FIXED 0 ms" in r.stdout
-    # sshpass is the OUTERMOST command (a stubbed sshpass is never bypassed), the ssh bounded inside it.
-    assert all(ln.startswith("-p pw timeout") for ln in rig["log"].read_text().splitlines())
+    # the ONE Linux OBS-box transport (stream_box_exec): sshpass outermost, the whole read bounded outside it
+    assert all(ln.startswith("-p pw ssh") for ln in rig["log"].read_text().splitlines())
 
 
 def test_the_e2e_row_blocks_on_either_box_and_names_it(rig):
@@ -350,13 +380,27 @@ def test_a_box_with_no_obs_log_fails(rig):
     assert r.stdout.strip().endswith("rc=1") and "no OBS log" in r.stderr
 
 
-def test_a_non_linux_box_is_named_not_graded(rig):
+def test_a_windows_box_is_named_not_graded(rig):
     env = _env(PATH=f"{rig['bin']}:{os.environ['PATH']}", FAKE_BOXES=str(rig["boxes"]),
-               FAKE_SSH_LOG=str(rig["log"]))
+               FAKE_SSH_LOG=str(rig["log"]), OBS_FLEET="win-box|192.0.2.9|windows-genlock|always")
     r = _bash('obs_audio_buffering_e2e_gate 192.0.2.9 u pw', env=env,
               sources=(SCRIPTS / "lib" / "obs-fleet.sh", LIB))
-    assert r.returncode == 0 and "not a linux-genlock box" in r.stdout
+    assert r.returncode == 0 and "a windows-genlock box" in r.stdout
     assert not rig["log"].exists()
+
+
+def test_an_unknown_box_fails_closed(rig):
+    env = _env(PATH=f"{rig['bin']}:{os.environ['PATH']}", FAKE_BOXES=str(rig["boxes"]),
+               FAKE_SSH_LOG=str(rig["log"]))
+    r = _bash('rc=0; obs_audio_buffering_e2e_gate 192.0.2.9 u pw || rc=$?; echo "rc=$rc"', env=env,
+              sources=(SCRIPTS / "lib" / "obs-fleet.sh", LIB))
+    assert r.stdout.strip().endswith("rc=1") and "no obs-fleet row classifies" in r.stderr
+    assert not rig["log"].exists()
+
+
+def test_a_bad_ssh_timeout_reads_the_default(rig):
+    r = _gate(rig, OBS_AUDIO_BUFFERING_SSH_TIMEOUT="0")
+    assert r.stdout.strip().endswith("rc=0"), r.stdout + r.stderr
 
 
 def test_recording_e2e_runs_the_row_blocking_in_0_8():
