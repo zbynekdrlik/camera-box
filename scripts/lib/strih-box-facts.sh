@@ -45,7 +45,8 @@ strih_box_fact_keys() {
     STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST \
     STRIH_HDMI_OUTPUTS STRIH_HTTPS_PUBLIC \
     STRIH_STREAM_DEV_SCENE \
-    STRIH_BKSHADING_RELAYS
+    STRIH_BKSHADING_RELAYS \
+    STRIH_AUDIO_BUFFERING_MS
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -424,6 +425,12 @@ strih_box_validate() {
   else
     strih_box_bkshading_relays_ok "${f[STRIH_BKSHADING_RELAYS]}" "strih-box ${name}: " "${f[STRIH_CAMERAS]}" || bad=1
   fi
+  # issue 1425 (design 6443440513): the box's FIXED OBS audio buffering, ms (0..960, OBS's own maximum):
+  # setup-strih step 5 writes it to ~/.camera-box/genlock-audio-buffering-ms, libobs holds the mix at it.
+  # The digit set is spelled out (a bracket range follows the locale).
+  if [[ ! "${f[STRIH_AUDIO_BUFFERING_MS]}" =~ ^[0123456789]{1,3}$ ]] || [ "$((10#${f[STRIH_AUDIO_BUFFERING_MS]}))" -gt 960 ]; then
+    echo "strih-box ${name}: STRIH_AUDIO_BUFFERING_MS '${f[STRIH_AUDIO_BUFFERING_MS]}' must be the box's fixed OBS audio buffering in ms (an integer 0..960)" >&2; bad=1
+  fi
   [ "$bad" = 0 ]
 }
 
@@ -671,6 +678,10 @@ strih_lx_stream_dev_scene() { strih_box_fact STRIH_STREAM_DEV_SCENE; }
 # strih_lx_bkshading_relays -> the shading panel's per-cambox relay overrides (fact STRIH_BKSHADING_RELAYS:
 # none | `N=<transport>@<host>:<port>` ...; issue 808, the seed strih_bkshading_config_text).
 strih_lx_bkshading_relays() { strih_box_fact STRIH_BKSHADING_RELAYS; }
+
+# strih_lx_audio_buffering_ms -> the box's FIXED OBS audio buffering in ms (fact STRIH_AUDIO_BUFFERING_MS,
+# issue 1425; setup-strih step 5 writes it for libobs, verify-strih item 48 + the E2E [0/8] row grade it).
+strih_lx_audio_buffering_ms() { strih_box_fact STRIH_AUDIO_BUFFERING_MS; }
 
 # strih_box_bkshading_relays_ok VALUE [PREFIX] -> 0 iff VALUE is `none` or space-separated
 # `N=<transport>@<host>:<port>` entries: N one of 1..7 and of the box's STRIH_CAMERAS (owner ruling 5977504457 + owner 26.10.2026),

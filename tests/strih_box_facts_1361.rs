@@ -142,6 +142,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_STREAM_DEV_SCENE",
     // issue 808 (owner ruling 5977504457): the per-cambox shading relay overrides of the cam1..cam7 panel.
     "STRIH_BKSHADING_RELAYS",
+    // issue 1425 (design 6443440513): the box's FIXED OBS audio buffering, ms (0..960).
+    "STRIH_AUDIO_BUFFERING_MS",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -213,6 +215,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_STREAM_DEV_SCENE=none",
         // issue 808: cam3's camera is the handheld with the Teradek, controlled by the handheld-1 SBC.
         "STRIH_BKSHADING_RELAYS=3=sbc-relay@handheld-1.lan:8771",
+        // issue 1425: strih-snv drew 0 ms on its last 10 launches; the fact fixes it there.
+        "STRIH_AUDIO_BUFFERING_MS=0",
         "LOADED=strih-snv",
     ] {
         assert!(

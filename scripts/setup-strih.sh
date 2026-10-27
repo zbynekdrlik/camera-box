@@ -363,9 +363,9 @@ obs_audio_monitor_install /usr/lib/x86_64-linux-gnu /usr/share || fail "issue 14
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"
-# issue 1317: create ~/.config/obs-studio owned by the DESKTOP user (this script runs under sudo, so a
-# bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
+# issue 1317: ~/.config/obs-studio owned by the DESKTOP user (under sudo a bare `mkdir` roots it: `Permission denied`).
 strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$OBS_CFG" || fail "cannot create ${OBS_CFG} as ${DESKTOP_USER} (above)"
+obs_audio_buffering_install "$USER_HOME" "$DESKTOP_USER" "$(strih_lx_audio_buffering_ms)" || fail "issue 1425: the fixed OBS audio buffering marker could not be written (above)"
 strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-profile-facts.txt" | sed 's/^/  /'
 rm -f "$GENLOCK_DIR/strih-lx-profile-facts.txt"   # issue 1414: the pre-rename name of the role file
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true

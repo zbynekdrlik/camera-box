@@ -151,6 +151,7 @@ struct obs_core_audio {
 	/* issue 1425 */
 	bool genlock_buffering_frozen;
 	uint64_t genlock_mixed_late_events;
+	bool genlock_buffering_box_fixed;
 };
 struct obs_core_data {
 	pthread_mutex_t audio_sources_mutex;
@@ -331,13 +332,18 @@ static void h_burst(obs_source_t *s, uint64_t now, uint64_t backlog_ns)
 
 /* obs_free_audio + obs_init_audio + obs_reset_audio2: the core audio state starts over (a fresh
  * launch, or an audio reset of a running OBS -- the sources and the time go on). */
+/* issue 1425: the per-box marker this launch reads (-1 = none), as obs_reset_audio2 builds the plan. */
+static int h_box_ms = -1;
+
 static void h_audio_reset(void)
 {
-	const struct genlock_audio_buffering_plan p = genlock_audio_buffering_make_plan(0, false, H_RATE, AUDIO_OUTPUT_FRAMES);
+	const struct genlock_audio_buffering_plan p = genlock_audio_buffering_make_plan_box(
+		h_box_ms >= 0, h_box_ms >= 0 ? (uint32_t)h_box_ms : 0u, 0, false, H_RATE, AUDIO_OUTPUT_FRAMES);
 	memset(&h_obs.audio, 0, sizeof(h_obs.audio));
 	h_obs.audio.max_buffering_ticks = (int)p.max_ticks;
 	h_obs.audio.floor_buffering_ticks = (int)p.floor_ticks;
 	h_obs.audio.fixed_buffer = p.fixed;
+	h_obs.audio.genlock_buffering_box_fixed = p.box_fixed;
 }
 
 static void h_launch(void)
@@ -823,6 +829,41 @@ int main(void)
 	}
 	h_summary("encoder-at-launch-deep-race");
 	h_freeze_summary("encoder-at-launch-deep-race");
+
+	/* (o) issue 1425 (design 6443440513): a box that declares a FIXED 0 ms buffering. The same `mbc`
+	 * 2.7 ms late from the first tick, NO encoder (the case slice 3 left to stock growth): the mix is
+	 * frozen from the first tick, never grows, and `mbc` is re-anchored (MIXED_LATE) instead; a 50 ms
+	 * late step at 4 s is re-anchored too. Every launch of this box draws exactly 0 ms. */
+	h_box_ms = 0;
+	h_begin("box-fixed-0", "mbc", true, 2700000, true);
+	{
+		int unfrozen_ticks = 0;
+		for (int i = 0; i < 300; i++) {
+			if (i == 200)
+				h_other.h_lag_ns = 52700000;
+			h_step(true);
+			if (!h_obs.audio.genlock_buffering_frozen)
+				unfrozen_ticks++;
+		}
+		printf("box-fixed-0 unfrozen_ticks=%d\n", unfrozen_ticks);
+	}
+	h_summary("box-fixed-0");
+	h_freeze_summary("box-fixed-0");
+
+	/* (p) a box that declares 85 ms (4 ticks): raised before the first mix, so `mbc` 2.7 ms late plays
+	 * inside the window; going 100 ms late at 4 s, with an encoder from the first tick (inside the
+	 * launch settle window, where slice 3 would grow), it is re-anchored and the mix stays at 85 ms. */
+	h_box_ms = 85;
+	h_begin("box-fixed-85", "mbc", true, 2700000, true);
+	h_encoders = 1;
+	for (int i = 0; i < 300; i++) {
+		if (i == 200)
+			h_other.h_lag_ns = 100000000;
+		h_step(true);
+	}
+	h_summary("box-fixed-85");
+	h_freeze_summary("box-fixed-85");
+	h_box_ms = -1;
 
 	/* The guard's exact-sample edges and its locked re-check, called directly. */
 	printf("== probes\n");

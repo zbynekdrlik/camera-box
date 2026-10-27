@@ -90,8 +90,10 @@ def test_the_program_sender_and_venue_close_the_fact_list():
     keys = r.stdout.split()
     i = keys.index("STRIH_PROGRAM_SENDER")
     assert keys[i:i + 3] == ["STRIH_PROGRAM_SENDER", "STRIH_VENUE", "STRIH_CAMERA_DEV1_NET"]
+    # issue 1425 appended the fixed OBS audio buffering.
     assert keys[i + 3:] == ["STRIH_HTTPS_INTERKOM_HOSTS", "STRIH_HTTPS_SHADING_HOST", "STRIH_HDMI_OUTPUTS",
-                            "STRIH_HTTPS_PUBLIC", "STRIH_STREAM_DEV_SCENE", "STRIH_BKSHADING_RELAYS"]
+                            "STRIH_HTTPS_PUBLIC", "STRIH_STREAM_DEV_SCENE", "STRIH_BKSHADING_RELAYS",
+                            "STRIH_AUDIO_BUFFERING_MS"]
 
 
 def test_stream_pp_loads_as_the_stream_role(boxes):

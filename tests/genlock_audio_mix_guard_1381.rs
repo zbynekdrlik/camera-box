@@ -560,6 +560,17 @@ const EXPECTED_TRACE: &[&str] = &[
     "encoder-at-launch-deep-race frozen_ticks=0",
     "encoder-at-launch-deep-race: waits=6 total_ms=128 mic_missed=2 'ASIO' events=1 dropped_ms=20.0 mixed=292 stale=0 guard_lines=1 above_lines=1 restart_lines=0",
     "encoder-at-launch-deep-race freeze: frozen=0 encoders=1 'ASIO' mixed_late=0 mixed_late_dropped_ms=0.0 mix_mixed_late=0",
+    "== box-fixed-0",
+    "L200 buffering-guard: 'mbc' entered the mix late: its audio ran 2.7 ms behind the mix window; re-anchored (dropped 2.7 ms) instead of adding 21 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=2.7 ms)",
+    "L200 buffering-guard: 'Mic/Aux' fell behind the mix (frozen at 0 ms): its audio ran 1.3 ms behind the mix window; re-anchored (dropped 1.3 ms) instead of adding 21 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=1.3 ms)",
+    "box-fixed-0 unfrozen_ticks=0",
+    "box-fixed-0: waits=0 total_ms=0 mic_missed=300 'mbc' events=300 dropped_ms=3725.0 mixed=0 stale=0 guard_lines=2 above_lines=0 restart_lines=0",
+    "box-fixed-0 freeze: frozen=1 encoders=0 'mbc' mixed_late=299 mixed_late_dropped_ms=3722.3 mix_mixed_late=598",
+    "== box-fixed-85",
+    "L300 genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds from the first audio tick, dynamically increasing above",
+    "L200 buffering-guard: 'mbc' fell behind the mix (frozen at 85 ms): its audio ran 21.3 ms behind the mix window; re-anchored (dropped 20.0 ms, timeline restarted) instead of adding 21 ms to the whole mix's 85 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=20.0 ms)",
+    "box-fixed-85: waits=4 total_ms=85 mic_missed=0 'mbc' events=100 dropped_ms=1933.3 mixed=196 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
+    "box-fixed-85 freeze: frozen=1 encoders=1 'mbc' mixed_late=100 mixed_late_dropped_ms=1933.3 mix_mixed_late=100",
     "== probes",
     "probe 1ns-behind-is-rounding: reason=0 in_sync=-1 ts=start-1ns left=960 pending=0 timing_set=1 events=0 ignore_audio=n/a",
     "L200 buffering-guard: 'probe' is not mixed: its audio ran 0.0 ms behind the mix window; re-anchored (dropped 0.0 ms) instead of adding 0 ms to the whole mix's 0 ms of audio buffering (issue 1381; events=1, +1 since the last line, dropped_total=0.0 ms)",
@@ -990,4 +1001,38 @@ fn the_shipped_c_matches_the_truth_table_1381() {
         EXPECTED_TRACE.len(),
         trace.join("\n")
     );
+}
+
+#[test]
+fn a_box_fixed_plan_never_grows_the_mix_1425() {
+    // Issue 1425 (design 6443440513): a box that declares its buffering is frozen from the first tick,
+    // with or without an encoder: no ABOVE line ever, the total is the declared value, and a late member
+    // is re-anchored (MIXED_LATE) and counted instead.
+    let trace = c_trace();
+    assert_eq!(
+        summary(trace, "box-fixed-0"),
+        "box-fixed-0: waits=0 total_ms=0 mic_missed=300 'mbc' events=300 dropped_ms=3725.0 mixed=0 stale=0 guard_lines=2 above_lines=0 restart_lines=0",
+        "issue 1425: a FIXED 0 ms box must never grow its mix, encoder or not:\n{}",
+        section(trace, "box-fixed-0").join("\n")
+    );
+    // The known consequence (the design's trade-off, reported to the supervisor): a member that keeps
+    // its stamp and stays later than the fixed window is re-anchored on every tick -- never mixed.
+    assert!(trace.iter().any(|l| l == "box-fixed-0 unfrozen_ticks=0"));
+    assert!(freeze(trace, "box-fixed-0").contains(" frozen=1 encoders=0 'mbc' mixed_late=299 "));
+    assert_eq!(
+        summary(trace, "box-fixed-85"),
+        "box-fixed-85: waits=4 total_ms=85 mic_missed=0 'mbc' events=100 dropped_ms=1933.3 mixed=196 stale=0 guard_lines=1 above_lines=0 restart_lines=0",
+        "issue 1425: a FIXED 85 ms box raises its 4 ticks on the first tick and never grows:\n{}",
+        section(trace, "box-fixed-85").join("\n")
+    );
+    assert!(freeze(trace, "box-fixed-85").contains(" frozen=1 encoders=1 'mbc' mixed_late=100 "));
+    // The declared floor is raised BEFORE the first tick's render loop and guard (obs-audio.c): `mbc`
+    // 2.7 ms late at launch is absorbed by the 85 ms, never re-anchored against the un-raised window.
+    let s85 = section(trace, "box-fixed-85");
+    assert!(
+        !s85.iter().any(|l| l.contains("entered the mix late")),
+        "issue 1425: the fixed floor must be raised before the first tick's guard:\n{}",
+        s85.join("\n")
+    );
+    assert!(s85[0].contains("total audio buffering is now 85 milliseconds"));
 }

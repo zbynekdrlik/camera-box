@@ -128,6 +128,11 @@ if ! declare -F obs_audio_monitor_install >/dev/null; then
   # shellcheck source=scripts/lib/obs-audio-monitor.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-audio-monitor.sh"
 fi
+# issue 1425: the box's FIXED OBS audio buffering (setup step 5 writes the marker, verify item 48 grades it).
+if ! declare -F obs_audio_buffering_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-audio-buffering.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-audio-buffering.sh"
+fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4

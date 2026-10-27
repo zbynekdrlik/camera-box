@@ -133,6 +133,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # issue 1462: the [8/8b] file moves to/from the Linux stream box around its on-box stream decode.
 # shellcheck source=scripts/lib/stream-lx-verdict.sh
 . "$HERE/lib/stream-lx-verdict.sh"
+# issue 1425: the BLOCKING row grading each OBS box's FIXED audio buffering against its box fact.
+# shellcheck source=scripts/lib/obs-audio-buffering.sh
+. "$HERE/lib/obs-audio-buffering.sh"
 # #977/#978/#979: obs64/AHK Windows-session-visibility probe + pure message parser (issue 958) --
 # shared with the #979 dev1 watchdog, never a second detector for the same signal.
 # shellcheck source=scripts/lib/obs-session-visibility.sh
@@ -937,6 +940,7 @@ _svg_strih_znote="$(obs_session_visibility_zombie_note "$_svg_strih_out")"
 [ -n "$_svg_strih_znote" ] && echo "    strih $_svg_strih_znote"
 _svg_stream_znote="$(obs_session_visibility_zombie_note "$_svg_stream_out")"
 [ -n "$_svg_stream_znote" ] && echo "    stream $_svg_stream_znote"
+obs_audio_buffering_e2e_gate_all "$STRIH" "$STRIH_USER" "$STRIH_PW" "$STREAM" "$STREAM_USER" "$STREAM_PW" || exit 1
 
 # Disk preflight (#179): the 7.3GB cam1 grab is GONE — only the two downloaded OBS program
 # recordings land on dev1 (~3 MB/s each, strih .mkv + stream .mp4). FAIL EARLY if $OUTDIR's

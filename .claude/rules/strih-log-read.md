@@ -132,3 +132,11 @@ rejects the case's own argv), and `set +e` right after the source — the watchd
 `set -uo pipefail` (NO `-e`), so a probe whose parse pipeline ends in a `grep` no-match (frozen-input
 `probe_received` on an empty read) returns non-zero there by design; under the case's `-e` that
 would abort the case before the sentinel.
+
+## The one whole-log reader outside this lib: the issue-1425 audio-buffering grade
+
+`scripts/lib/obs-audio-buffering.sh` (the recording-e2e `[0/8]` row) needs the `genlock-audio-buffering:`
+line at the HEAD of the newest log AND every `#800` line of the whole session, which none of the
+count / since / tail / headtail ops returns. It runs ONE `grep -a -E` of the newest log on the box through
+`stream_box_exec` (Linux boxes only, the shared transport), never a second Windows reader. A further
+whole-log consumer should add a `grep` op here instead of a third copy.

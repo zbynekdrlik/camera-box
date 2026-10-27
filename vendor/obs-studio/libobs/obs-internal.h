@@ -580,6 +580,9 @@ struct obs_core_audio {
 	 * re-anchors for the #800 line. */
 	bool genlock_buffering_frozen;
 	uint64_t genlock_mixed_late_events;
+	/* camera-box issue 1425: the audio reset's plan is this box's FIXED buffering (frozen from the first
+	 * tick, obs-genlock-audio-buffering.h genlock_audio_buffering_frozen_plan). */
+	bool genlock_buffering_box_fixed;
 
 	pthread_mutex_t monitoring_mutex;
 	DARRAY(struct audio_monitor *) monitors;
