@@ -125,7 +125,8 @@ obs_audio_buffering_verdict() {
     if [[ "$line" == *"genlock-audio-buffering: "* ]]; then
       seen=1 tel_n=0 tel_bad="" above="" warn="" unfrozen=0 ml_last="" ml_jump=0
       if [[ "$line" =~ $fixed_re ]]; then
-        fixed_ms="${BASH_REMATCH[1]}" fixed_ticks="${BASH_REMATCH[2]}"
+        # the audio reset that logged this line zeroed the mix-wide mixed_late count
+        fixed_ms="${BASH_REMATCH[1]}" fixed_ticks="${BASH_REMATCH[2]}" ml_last=0
       else
         fixed_ms="" fixed_ticks="" warn="${line#*genlock-audio-buffering: }"
       fi
@@ -173,7 +174,7 @@ obs_audio_buffering_verdict() {
     echo "FAIL: a mixed source was re-anchored ${ml_jump} times between two #800 mix lines -- it is later than the FIXED ${fact} ms window and muted (raise STRIH_AUDIO_BUFFERING_MS)"
     return 1
   fi
-  echo "ok FIXED ${fact} ms (${fixed_ticks} ticks) in the running OBS log, the marker equals the fact, ${tel_n} telemetry read(s) at ${fixed_ticks} ticks, no growth, mixed_late=${ml_last:-unread}"
+  echo "ok FIXED ${fact} ms (${fixed_ticks} ticks) in the running OBS log, the marker equals the fact, ${tel_n} telemetry read(s) at ${fixed_ticks} ticks, no growth, mixed_late=${ml_last} (max +${ml_jump} between two #800 mix lines)"
 }
 
 # _obs_audio_buffering_read_marker FILE -> the marker's content without its trailing newline(s), or
@@ -262,7 +263,8 @@ obs_audio_buffering_e2e_gate() {
   tmo="${OBS_AUDIO_BUFFERING_SSH_TIMEOUT:-20}"
   [[ "$tmo" =~ ^[123456789][0123456789]{0,3}$ ]] || tmo=20
   # timeout cannot exec a function: a bounded child re-sources the transport lib (the stream-box.sh rule).
-  raw="$(timeout "$tmo" bash -c '. "$1"; stream_box_exec "$2" "$3" "$4" "" "$5"' obs-audio-buffering \
+  # OBS_FLEET is handed to it, so the child classifies the host with the parent's table.
+  raw="$(OBS_FLEET="${OBS_FLEET:-}" timeout "$tmo" bash -c '. "$1"; stream_box_exec "$2" "$3" "$4" "" "$5"' obs-audio-buffering \
     "${dir}/stream-box.sh" "$user" "$pw" "$host" "$(obs_audio_buffering_remote_cmd)" 2>/dev/null)" || raw=""
   while IFS= read -r line; do
     case "$line" in
