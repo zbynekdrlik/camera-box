@@ -218,15 +218,33 @@ fn a_delivery_delay_burst_keeps_the_lock_and_the_phase_1371() {
     assert!(t.locked());
 }
 
+/// A persistent move of the phase whose outlier run is NOT one constant offset (here it settles:
+/// the run alternates +2.4 / +3.6 ms before it sits at +3 ms) is a real discontinuity: issue
+/// 1482 absorbs only a constant-offset run, so this one re-seeds.
+fn settling_step(frames: &mut [Frame], from: usize) {
+    for (i, f) in frames.iter_mut().skip(from).enumerate() {
+        let d = if i < RESEED_CONSECUTIVE_OUTLIERS as usize {
+            if i % 2 == 0 {
+                2_400_000
+            } else {
+                3_600_000
+            }
+        } else {
+            3_000_000
+        };
+        f.ts += d;
+        f.truth += d as f64;
+    }
+}
+
 #[test]
 fn a_persistent_phase_step_reseeds_after_its_outlier_run_1371() {
-    // A REAL phase step (a grabber re-lock) persists. It is held for RESEED_CONSECUTIVE_OUTLIERS - 1
-    // frames, then re-seeds once; after the re-seed the fit relocks on the new phase.
+    // A REAL phase move that is not one constant offset persists. It is held for
+    // RESEED_CONSECUTIVE_OUTLIERS - 1 frames, then re-seeds once; after the re-seed the fit
+    // relocks on the new phase. (Issue 1482: a constant offset is absorbed instead, see
+    // `a_card_retiming_step_is_absorbed_with_the_lock_kept_1482`.)
     let mut frames = camera(900, 15.9, 60_000.0, 7_000_000.0, 0x1367_d206);
-    for f in frames.iter_mut().skip(300) {
-        f.ts += 3_000_000;
-        f.truth += 3_000_000.0;
-    }
+    settling_step(&mut frames, 300);
     let mut t = CapturePhaseTracker::new();
     let reseed_at = 300 + RESEED_CONSECUTIVE_OUTLIERS as usize - 1;
     for (k, f) in frames.iter().enumerate() {
@@ -242,6 +260,7 @@ fn a_persistent_phase_step_reseeds_after_its_outlier_run_1371() {
         }
     }
     assert_eq!(t.reseeds(), 1, "one persistent step = one re-seed");
+    assert_eq!(t.phase_steps(), 0, "a settling run is never absorbed");
     assert!(t.locked(), "relocked on the new phase");
 }
 
@@ -481,7 +500,8 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
     let mut p = CapturePhase::new();
     assert_eq!(
         p.status_tokens(I60),
-        " phase_lock=seed phase_ppm=na jitter_us=na crossings=0 reseeds=0 hidden_drops=0"
+        " phase_lock=seed phase_ppm=na jitter_us=na crossings=0 reseeds=0 hidden_drops=0 \
+         phase_steps=0"
     );
     for f in &frames {
         p.stamp_frame(f.seq, f.ts, offset, I60);
@@ -497,7 +517,8 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
             "jitter_us=",
             "crossings=",
             "reseeds=",
-            "hidden_drops="
+            "hidden_drops=",
+            "phase_steps="
         ]
     );
     assert_eq!(pairs[0].1, "stamp");
@@ -509,9 +530,10 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
         (
             pairs[3].1.as_str(),
             pairs[4].1.as_str(),
-            pairs[5].1.as_str()
+            pairs[5].1.as_str(),
+            pairs[6].1.as_str()
         ),
-        ("0", "0", "0")
+        ("0", "0", "0", "0")
     );
     // The emitted keys and the line's existing ones are mutually non-substring.
     let mut all: Vec<&str> = vec!["emit-1s:", "cap-1s:"];
@@ -946,9 +968,7 @@ fn notes(t: &mut CapturePhaseTracker, frames: &[Frame]) -> Vec<Option<PhaseNote>
 #[test]
 fn a_persistent_step_notes_one_outlier_run_with_its_residuals_1371() {
     let mut frames = camera(600, 15.9, 60_000.0, 7_000_000.0, 0x1371_0001);
-    for f in frames.iter_mut().skip(300) {
-        f.ts += 3_000_000;
-    }
+    settling_step(&mut frames, 300);
     let mut t = CapturePhaseTracker::new();
     let got = notes(&mut t, &frames);
     let noted: Vec<(usize, &PhaseNote)> = got
@@ -965,8 +985,8 @@ fn a_persistent_step_notes_one_outlier_run_with_its_residuals_1371() {
     assert_eq!(resid_ns.len(), RESEED_CONSECUTIVE_OUTLIERS as usize);
     for r in resid_ns {
         assert!(
-            (2_700_000..3_300_000).contains(r),
-            "each residual ~ +3 ms: {r}"
+            (2_100_000..3_900_000).contains(r),
+            "each residual ~ +2.4 / +3.6 ms: {r}"
         );
     }
     assert!(note
@@ -1062,3 +1082,5 @@ fn describe_reads_each_reason_1371() {
         "hidden drop: frames=2 resid_us=+33400"
     );
 }
+
+mod issue_1482;

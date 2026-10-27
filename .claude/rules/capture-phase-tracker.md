@@ -55,6 +55,27 @@ ONE missing frame per crossing.
     the stream ~2 s on the raw path = the 1/1 residual. Never move the fit onto a delivery delay.
     The re-seed logs `#1371 capture phase re-seed: reason=outlier-run resid_us=[..]` with the
     whole run.
+  - **A constant-offset run is a card re-timing STEP, absorbed, never a re-seed (issue 1482,
+    ROZHODNUTÉ 6445636799).** When the run reaches its 30 frames AND every residual lies within
+    `max(4 x fit RMS, RESEED_FLOOR_NS / 2)` (500 us on a clean stream) of the run's median
+    (`constant_step_ns`), the tracker moves every window sample's time by that median
+    (`absorb_step`) and folds the run's 30 samples on the new phase. The `FitSums` are relative to
+    the oldest sample, which moves with the rest, so every sum stays exactly what it was: only the
+    intercept moves; the slope (the card's rate), the jitter and the lock are kept. One
+    `PhaseNote::PhaseStep` and one line `#1482 capture phase step: <+us> us (card re-timing), lock
+    kept`; `phase_steps=` counts them. Still a re-seed: a ramp or scattered run, a half-period
+    step, a sequence back/jump, a time stall, a gap. Runs shorter than 30 still HOLD (the
+    issue-1371 delivery-delay rule is untouched). The cost of a step: during its 30 held frames
+    (~0.5 s) the stamps still come from the old phase, then the step reaches the stamps in one
+    move; the slot chooser keeps the slot when the moved instant stays inside the 500 us
+    hysteresis and makes exactly one duplicate or one missing slot when it crosses an edge.
+  - **Why (the owner's ruling):** no capture card, camera, monitor or HDMI source is ever assumed
+    to run on the genlock clock, and no fix asks for replacement hardware. cam2's Cam Link reads
+    +45 ppm against the SAME splitter signal cam3/cam5 read at +18 ppm: it re-times the frames on
+    its own clock and catches up in constant +1.8..+2.6 ms steps (once -6.3 ms) at 1.4..75 s intervals, one per
+    ~20 s on average (live
+    27.10.2026: 2329 re-seeds on cam2 vs 10 on cam3/cam5). The cambox absorbs it, so the card's
+    clock never travels further than the cambox.
   - A backward/stalled sequence (a device re-open), a step above `MAX_SEQ_ADVANCE` (8, hidden
     frames included), a timestamp that does not advance, or a gap longer than
     (sequence step + 1) x `MAX_FRAME_PERIOD_NS` (100 ms) re-seeds at any sample count (the `+ 1`
@@ -178,7 +199,8 @@ over-rate.
 ## Observability
 
 The 5 s `#707 emit-1s: [..] cap-1s: [..] (1-second buckets, oldest first)` line appends
-` phase_lock=seed|band|stamp phase_ppm=+15.9 jitter_us=41 crossings=2 reseeds=0 hidden_drops=0`:
+` phase_lock=seed|band|stamp phase_ppm=+15.9 jitter_us=41 crossings=2 reseeds=0 hidden_drops=0
+phase_steps=0`:
 
 - `phase_lock`: `seed` = seeding (raw path), `band` = locked but outside the 1:1 band (raw path),
   `stamp` = stamp-driven, `off` = genlock off (no emit grid).
@@ -190,8 +212,13 @@ The 5 s `#707 emit-1s: [..] cap-1s: [..] (1-second buckets, oldest first)` line 
   camera-edge crossings only (a realtime clock step re-anchors, uncounted); `hidden_drops` counts
   frames the device skipped without a sequence step (each costs one starvation repeat), so a lone
   repeat with no `crossings` increase is attributable.
+- `phase_steps`: cumulative card re-timing steps absorbed with the lock kept (issue 1482). A
+  re-timing card (cam2, one step per ~20 s live) grows it ~3/min while `reseeds=` stays flat; a
+  pass-through card stays at 0.
 
-Every re-seed and every hidden drop also logs ONE line with what caused it (issue 1371),
+Every absorbed card step logs ONE `#1482 capture phase step: <+us> us (card re-timing), lock kept`
+line (`PhaseNote::log_line()`, the whole line main.rs writes). Every re-seed and every hidden drop
+also logs ONE line with what caused it (issue 1371),
 `#1371 capture phase re-seed: reason=<r> ...` or `#1371 capture phase hidden drop: frames=<k>
 resid_us=<+n>`. Reasons: `outlier-run resid_us=[a,b,c]` (the 3 residuals, oldest first),
 `half-period resid_us=<n>`, and `sequence-back` / `sequence-jump` / `time-stall` / `gap` with
@@ -234,6 +261,13 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
     give the same stamps.
   - At the design's 0.3 ms i.i.d. Gaussian timestamp jitter the tracker still gives exactly 1 per
     crossing (2 crossings, 0 receiver flips, 0 re-seeds).
+  - **Re-timing card (issue 1482)**, cam2's live numbers: a +45 ppm card clock, 48 seeded catch-up
+    steps of +1.8..+2.6 ms (the 8th -6.3 ms) at random 2..75 s intervals (the design's band, one
+    per ~38 s on average, half the live rate) over 30 min, seed
+    `0x1482_ca2d`. With the fix: 48 `phase_steps`, 0 re-seeds, 5 crossings for the 5 true edge
+    crossings = 2 blind sheds + 3 starvation repeats, 0 receiver dup/gap, 0 SKIPs. Before it (the
+    RED commit): 48 re-seeds, 3 receiver gaps, 3 SKIPs; the raw path alone 109 sheds + 110 repeats
+    and 48 dup + 101 gap at the receiver.
 
 ## Verifying a change
 
@@ -274,3 +308,12 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
 - The one-frame wrap every ~17 min is physics for a free-running camera; D2 makes it one clean
   event.
 - A seeding or re-seeding stream (2 s after a start or a re-open) runs today's path.
+- Issue 1482's constant-offset test has a floor of 0.5 ms around the run's median, so a run whose
+  residuals span 1 ms or less is absorbed as ONE step even when it is a slow ramp (the next run of
+  the ramp is absorbed again, step-wise); only a wider ramp re-seeds. Pinned by
+  `the_constant_offset_tolerance_edges_1482`.
+- A delivery delay that stays CONSTANT for 30 frames or more is now absorbed as a step, and the
+  return to the true phase as a second step of the opposite sign. Each direction costs ~0.5 s of
+  stamps on the stale phase and, near an edge, one dup or one gap that `crossings=` counts like
+  camera drift. Read a `phase_steps=` pair of opposite sign close together as a delivery delay,
+  not as card behaviour (a re-timing card steps one way, the other only rarely).

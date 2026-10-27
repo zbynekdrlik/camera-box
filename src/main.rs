@@ -1125,7 +1125,7 @@ async fn run_capture_loop(
                 );
                 // Issue 1371 — one line per re-seed / hidden drop, with the residuals behind it.
                 if let Some(note) = capture_phase.note() {
-                    tracing::info!("#1371 capture phase {}", note.describe());
+                    tracing::info!("{}", note.log_line());
                 }
 
                 // #299 — chroma sample: every CHROMA_SAMPLE_FRAMES captured frames

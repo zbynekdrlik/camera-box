@@ -26,8 +26,10 @@
 //!   frames. From [`OUTLIER_MIN_FRAMES`] samples on, a sample farther than
 //!   [`RESEED_JITTER_MULTIPLE`] x the fit's own jitter (at least [`RESEED_FLOOR_NS`]) is not folded:
 //!   under half a period it is stamped from the prediction, and [`RESEED_CONSECUTIVE_OUTLIERS`] of
-//!   them in a row re-seed; half a period or more re-seeds at once (a real discontinuity, never a
-//!   stamp from the old phase). A backward or huge sequence step (a device re-open), a timestamp
+//!   them in a row re-seed, UNLESS the whole run sits on one constant offset (issue 1482: a capture
+//!   card re-timing the frames on its own clock catches up in a step), which moves the fit by the
+//!   run's median and keeps the period and the lock; half a period or more re-seeds at once (a
+//!   real discontinuity, never a stamp from the old phase). A backward or huge sequence step (a device re-open), a timestamp
 //!   that does not advance, or a gap longer than (sequence step + 1) x [`MAX_FRAME_PERIOD_NS`]
 //!   re-seed too; the last one also bounds the window's time span. The fit is LOCKED once it holds
 //!   [`LOCK_MIN_FRAMES`] samples, its RMS residual is at most [`LOCK_MAX_JITTER_NS`] and its
@@ -85,7 +87,8 @@ pub const RESEED_JITTER_MULTIPLE: u64 = 8;
 /// sub-millisecond interrupt hiccup.
 pub const RESEED_FLOOR_NS: u64 = 1_000_000;
 
-/// This many outliers in a row is a real phase step (a grabber re-lock): re-seed. Shorter runs
+/// This many outliers in a row is a real phase step (a grabber re-lock): absorbed as a phase step
+/// when the run is one constant offset (issue 1482), else a re-seed. Shorter runs
 /// are delivery delays (issue 1371: a Cam Link on a busy USB port delivers frames +1..+7 ms late
 /// for a few frames while the sensor keeps its phase), held on the prediction and never followed.
 /// About half a second at 60 fps.
@@ -215,6 +218,28 @@ fn resid_i64(resid: i128) -> i64 {
     resid.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
+/// Issue 1482: the run's median residual when the whole run sits on ONE constant offset (every
+/// residual within `max(4 x the fit RMS, RESEED_FLOOR_NS / 2)` of the median): a capture card's
+/// re-timing step. `None` for a ramp or scatter, which stays a re-seed.
+fn constant_step_ns(run: &[i64], rms_ns: f64) -> Option<i64> {
+    if run.is_empty() {
+        return None;
+    }
+    let mut sorted = run.to_vec();
+    sorted.sort_unstable();
+    let mid = sorted.len() / 2;
+    let median = if sorted.len().is_multiple_of(2) {
+        // Both middle residuals are under half a period: their sum cannot overflow.
+        (sorted[mid - 1] + sorted[mid]) / 2
+    } else {
+        sorted[mid]
+    };
+    let tol = (4.0 * rms_ns).max(RESEED_FLOOR_NS as f64 / 2.0);
+    run.iter()
+        .all(|&r| ((r - median) as f64).abs() <= tol)
+        .then_some(median)
+}
+
 /// One observed frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseObservation {
@@ -241,6 +266,11 @@ pub enum PhaseNote {
     OutlierRun { resid_ns: Vec<i64> },
     /// A sample a whole number of periods late, re-indexed as `frames` the device skipped.
     HiddenDrop { frames: u32, resid_ns: i64 },
+    /// Issue 1482: [`RESEED_CONSECUTIVE_OUTLIERS`] samples in a row off the fit by one CONSTANT
+    /// offset (a capture card that re-times frames on its own clock and catches up in a step): the
+    /// fit was moved by the run's median residual `step_ns` (positive = later), the period and the
+    /// lock kept. Never a re-seed.
+    PhaseStep { step_ns: i64 },
 }
 
 impl PhaseNote {
@@ -279,7 +309,20 @@ impl PhaseNote {
             PhaseNote::HiddenDrop { frames, resid_ns } => {
                 format!("hidden drop: frames={frames} resid_us={}", us(*resid_ns))
             }
+            PhaseNote::PhaseStep { step_ns } => {
+                format!("step: {} us (card re-timing), lock kept", us(*step_ns))
+            }
         }
+    }
+
+    /// The whole log line the capture loop writes for this note: `#1482 capture phase step: ...`
+    /// for an absorbed card re-timing step, `#1371 capture phase <describe>` for the rest.
+    pub fn log_line(&self) -> String {
+        let issue = match self {
+            PhaseNote::PhaseStep { .. } => "#1482",
+            _ => "#1371",
+        };
+        format!("{issue} capture phase {}", self.describe())
     }
 }
 
@@ -301,8 +344,13 @@ pub struct CapturePhaseTracker {
     white_check_countdown: u32,
     reseeds: u64,
     hidden_drops: u64,
+    /// Constant-offset outlier runs absorbed as a phase step (issue 1482), never a re-seed.
+    phase_steps: u64,
     /// The residuals of the current outlier run, oldest first (issue 1371, for its note).
     outlier_resid: Vec<i64>,
+    /// The `(x, t)` samples of the current outlier run, oldest first: folded on the new phase when
+    /// the run is absorbed as a card re-timing step (issue 1482).
+    outlier_samples: Vec<(i64, u64)>,
     /// The note of the most recent observed frame, if it re-seeded or re-indexed (issue 1371).
     note: Option<PhaseNote>,
 }
@@ -384,10 +432,25 @@ impl CapturePhaseTracker {
                         self.last_x = x;
                         self.outlier_run += 1;
                         self.outlier_resid.push(resid_i64(resid));
+                        self.outlier_samples.push((x, capture_mono_ns));
                         if self.outlier_run >= RESEED_CONSECUTIVE_OUTLIERS {
                             // Issue 1371: only a run this long is a real phase step. A shorter one
                             // is a delivery delay (the camera's phase never moved), held below.
                             let run = std::mem::take(&mut self.outlier_resid);
+                            let samples = std::mem::take(&mut self.outlier_samples);
+                            self.outlier_run = 0;
+                            if let Some(step_ns) = constant_step_ns(&run, rms) {
+                                // Issue 1482: one constant offset over the whole run is a capture
+                                // card re-timing the frames on its own clock (its catch-up step):
+                                // move the fit onto the new phase, keep the period and the lock.
+                                self.absorb_step(step_ns, &samples);
+                                self.phase_steps += 1;
+                                self.note = Some(PhaseNote::PhaseStep { step_ns });
+                                return PhaseObservation {
+                                    smoothed_mono_ns: self.locked.then(|| self.predict_ns(x)),
+                                    seq_advance,
+                                };
+                            }
                             self.reseed(seq, capture_mono_ns);
                             self.note = Some(PhaseNote::OutlierRun { resid_ns: run });
                             return none(0);
@@ -405,6 +468,7 @@ impl CapturePhaseTracker {
         self.last_x = x;
         self.outlier_run = 0;
         self.outlier_resid.clear();
+        self.outlier_samples.clear();
         self.push(x, capture_mono_ns);
         self.update_lock();
         PhaseObservation {
@@ -449,11 +513,17 @@ impl CapturePhaseTracker {
         self.hidden_drops
     }
 
+    /// Card re-timing phase steps absorbed with the lock kept (issue 1482).
+    pub fn phase_steps(&self) -> u64 {
+        self.phase_steps
+    }
+
     fn seed(&mut self, seq: u32, t: u64) {
         self.window.clear();
         self.sums = FitSums::default();
         self.outlier_run = 0;
         self.outlier_resid.clear();
+        self.outlier_samples.clear();
         self.locked = false;
         self.white_check_countdown = 0;
         self.last_seq = Some(seq);
@@ -465,6 +535,27 @@ impl CapturePhaseTracker {
     /// The note of the most recent observed frame (issue 1371), cleared by the next frame.
     pub fn note(&self) -> Option<&PhaseNote> {
         self.note.as_ref()
+    }
+
+    /// Issue 1482: move the whole fit by `step_ns` (every window sample's time), then fold the
+    /// run's `samples` on the new phase. The sums are relative to the oldest sample, which moves
+    /// with the rest, so every `FitSums` term stays exactly what it was: only the intercept moves,
+    /// the slope (the card's rate), the jitter and the lock are kept.
+    fn absorb_step(&mut self, step_ns: i64, samples: &[(i64, u64)]) {
+        let shift = |t: u64| {
+            let moved = i128::from(t) + i128::from(step_ns);
+            // A monotonic capture time is seconds past boot and a step under half a period: a
+            // clamp here would break the exact-sums claim, so it must never bite.
+            debug_assert!((0..=i128::from(u64::MAX)).contains(&moved));
+            moved.clamp(0, i128::from(u64::MAX)) as u64
+        };
+        for sample in self.window.iter_mut() {
+            sample.1 = shift(sample.1);
+        }
+        for &(x, t) in samples {
+            self.push(x, t);
+        }
+        self.update_lock();
     }
 
     fn reseed(&mut self, seq: u32, t: u64) {
@@ -771,6 +862,11 @@ impl CapturePhase {
         self.tracker.hidden_drops()
     }
 
+    /// Card re-timing phase steps absorbed with the lock kept, since the start (issue 1482).
+    pub fn phase_steps(&self) -> u64 {
+        self.tracker.phase_steps()
+    }
+
     /// Why the most recent frame re-seeded the fit or was re-indexed (issue 1371), else `None`.
     pub fn note(&self) -> Option<&PhaseNote> {
         self.tracker.note()
@@ -787,11 +883,12 @@ impl CapturePhase {
             .map_or_else(|| "na".to_string(), |v| format!("{v:.0}"));
         format!(
             " phase_lock={} phase_ppm={ppm} jitter_us={jitter} crossings={} reseeds={} \
-             hidden_drops={}",
+             hidden_drops={} phase_steps={}",
             self.mode.token(),
             self.crossings,
             self.reseeds(),
-            self.hidden_drops()
+            self.hidden_drops(),
+            self.phase_steps()
         )
     }
 }
