@@ -186,3 +186,80 @@ def test_the_sidecar_is_replaced_atomically_1482(tmp_path, monkeypatch):
     monkeypatch.setattr(m.os, "replace", real_replace)
     assert calls and calls[0][1] == str(sidecar)
     assert sidecar.read_text() == original
+
+
+# The real run 869228708 switch schedule span: 02:16:13.320810Z .. 02:21:14.294417Z (10 windows).
+SCHED_START_NS = 1793067373320809940
+SCHED_END_NS = 1793067674294416522
+
+
+def _schedule(tmp_path):
+    p = tmp_path / "switch-schedule.json"
+    p.write_text(
+        '[{"cambox": "CAM5", "start_ns": %d, "end_ns": 1793067403425993199},'
+        ' {"cambox": "CAM3", "start_ns": 1793067644180000000, "end_ns": %d}]'
+        % (SCHED_START_NS, SCHED_END_NS)
+    )
+    return p
+
+
+# The painter-teardown burst of run 869228708 (7 frames, 02:21:26.6-27.3), after the real schedule.
+TEARDOWN = _log(
+    [
+        _drop("2026-10-27T02:12:40.747503Z", 1, 1),
+        _drop("2026-10-27T02:16:12.100000Z", 1, 2),  # 1.2 s before the first window: outside
+        _drop("2026-10-27T02:16:12.500000Z", 1, 3),  # 0.8 s before it: inside the 1 s margin
+        _drop("2026-10-27T02:21:15.200000Z", 1, 4),  # 0.9 s after the last window: inside
+        _drop("2026-10-27T02:21:26.646763Z", 4, 8),
+        _drop("2026-10-27T02:21:27.300000Z", 3, 11),
+    ]
+)
+
+
+def test_the_analysed_schedule_span_bounds_the_count_not_the_stop_epoch_1482(tmp_path):
+    """The window is the switch schedule the verdict analyses, +-1 s, at sub-second precision.
+
+    An END epoch taken after StopRecord can reach the painter teardown burst 1-2 s later; the
+    schedule span cannot."""
+    sidecar = tmp_path / "s.txt"
+    sidecar.write_text("v4l2_dropped=11\nframes_captured=32926\n")
+    log = tmp_path / "b.log"
+    log.write_text(TEARDOWN)
+    late_end = 1793067687  # 02:21:27, an END that reaches the teardown burst
+    rc = subprocess.run(
+        [sys.executable, SCRIPT, "--sidecar", str(sidecar), "--burn-log", str(log),
+         "--start", str(START), "--end", str(late_end),
+         "--switch-schedule", str(_schedule(tmp_path))],
+        capture_output=True, text=True,
+    )
+    assert rc.returncode == 0, rc.stderr
+    assert "WARNING" not in rc.stderr, rc.stderr
+    kv = dict(l.split("=", 1) for l in sidecar.read_text().split())
+    assert kv["v4l2_dropped"] == "2"
+    assert kv["v4l2_dropped_whole_run"] == "11"
+    assert kv["v4l2_drop_window"] == "1793067372.320810..1793067675.294417"
+
+
+def test_an_unreadable_schedule_falls_back_to_the_start_end_epochs_1482(tmp_path):
+    sidecar = tmp_path / "s.txt"
+    sidecar.write_text("v4l2_dropped=4\nframes_captured=32926\n")
+    log = tmp_path / "b.log"
+    log.write_text(OUTSIDE_ONLY)
+    rc = subprocess.run(
+        [sys.executable, SCRIPT, "--sidecar", str(sidecar), "--burn-log", str(log),
+         "--start", str(START), "--end", str(END),
+         "--switch-schedule", str(tmp_path / "missing.json")],
+        capture_output=True, text=True,
+    )
+    assert rc.returncode == 0, rc.stderr
+    kv = dict(l.split("=", 1) for l in sidecar.read_text().split())
+    assert kv["v4l2_dropped"] == "0"
+    assert kv["v4l2_drop_window"] == f"{START}..{END}"
+    assert "switch schedule" in rc.stderr
+
+
+def test_recording_e2e_passes_the_switch_schedule_to_the_scope_step_1482():
+    s = open(E2E, encoding="utf-8").read()
+    pos = s.find('python3 "$HERE/capture_drop_window.py"')
+    block = s[pos : pos + 700]
+    assert '--switch-schedule "$SWITCH_SCHEDULE_JSON"' in block
