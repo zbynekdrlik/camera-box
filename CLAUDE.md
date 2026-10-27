@@ -768,6 +768,27 @@ the old advice; do not restore the `gh workflow run` snippet here). Same "manual
 stale/superseded run" IDEA the `linux-genlock.yml` GOTCHA above documents for a cancelled run — but
 `gh workflow run` is the WRONG mechanism for this specific workflow; `gh run rerun` is correct.
 
+## Versions and releases (issue 1476)
+
+- **Every version is a clean semver `X.Y.Z`**, never a `-dev.N` suffix. The ONE version file is
+  `[workspace.package] version` in the root `Cargo.toml` (every member is `version.workspace = true`).
+- **A dev bump = the next patch** (`1.8.0` -> `1.8.1`), made as the first commit after each
+  dev->main merge, so dev is always one patch above main and the next release ships exactly it.
+  Several lanes in one round share that one bump (the supervisor bumps once per release).
+- **Every merge to main is a release:** ci.yml's `release-tag` job cross-checks Cargo.toml against
+  the build's `camera-box --version` and pushes `vX.Y.Z` on the merge commit (re-run = OK, a tag on
+  another commit = loud FAIL: dev was not bumped), then its `release` job calls
+  `.github/workflows/release.yml` as a reusable workflow (a GITHUB_TOKEN tag push starts no
+  workflow), which publishes the GitHub Release (tarball + sha256).
+- **Order rule:** `scripts/lib/release-version.sh` (`release_version_cmp`, semver with
+  pre-release): a historical `1.7.0-dev.N` on a box orders OLDER than every `1.8.x`, and the gate's
+  PIN-DRIFT row says OLDER/NEWER than main. The [0/8] auto-align decides by equality: a uniform
+  fleet on anything other than the candidate (a historical build included) is aligned.
+- **dev > main is checked before the merge:** ci.yml's `version-check` (dev pushes) fails a dev
+  version that is not a clean X.Y.Z strictly above main's and names the bump to make.
+- Mechanics + traps (GITHUB_TOKEN tag pushes start no workflow, one pending run per concurrency
+  group) → `.claude/rules/release-versions.md` (auto-loads on its `paths:`).
+
 ## Local Build Policy
 
 CI (GitHub runners) builds the deployable `camera-box` release binary AND the probe/verdict

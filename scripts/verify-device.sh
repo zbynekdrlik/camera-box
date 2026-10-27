@@ -368,8 +368,8 @@ EXPECT_KERNEL="${KERNEL_PIN:-}"                 # optional: also require running
 
 # --- (a) version -------------------------------------------------------------------------------
 
-# version_is_valid_format V -> 0 iff V matches the fleet's vMAJOR.MINOR.PATCH[-dev.N] shape (the
-# CI dev-channel form, e.g. "1.7.0-dev.244", or a plain release "1.7.0").
+# version_is_valid_format V -> 0 iff V matches the fleet's MAJOR.MINOR.PATCH[-dev.N] shape: a
+# release "1.8.0" (every version since issue 1476) or a historical dev build "1.7.0-dev.244".
 version_is_valid_format() {
   grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$' <<<"$1"
 }

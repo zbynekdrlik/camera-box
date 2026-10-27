@@ -682,7 +682,8 @@ echo "  Static IP configured: $DEVICE_IP"
 # =============================================================================
 echo ""
 echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
-# The binary is ALWAYS a CI artifact (a `-dev.N` build), never a GitHub release -- installing from
+# The binary is ALWAYS a CI artifact, never a GitHub release (issue 1476 publishes one per merge,
+# but releases/latest is not the fleet's pin) -- installing from
 # releases/latest silently version-drifted a fresh box from the fleet (cam6, #457). #1066: the
 # fleet's production truth is MAIN's pinned release (early-gate PIN doctrine, issue 1136), so the
 # DEFAULT source is the latest successful ci.yml run on `main` -- the SAME source deploy-fleet.sh
