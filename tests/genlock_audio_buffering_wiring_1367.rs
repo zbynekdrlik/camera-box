@@ -316,6 +316,10 @@ static void reset(uint32_t rate, uint32_t max_ms, bool fixed)
 	const struct obs_audio_info2 oai_v = {{rate, 2, max_ms, fixed}};
 	const struct obs_audio_info2 *oai = &oai_v;
 	memset(audio, 0, sizeof(*audio));
+	/* issue 1425: obs_reset_audio2 reads the per-box marker just before the lifted block; no marker here
+	 * (the box-fixed plan is driven by tests/genlock_audio_mix_guard_1381.rs and the parity gate). */
+	const uint32_t genlock_box_ms = 0u;
+	const int genlock_box = GENLOCK_AUDIO_BUFFERING_BOX_ABSENT;
 /* ---- lifted verbatim from obs.c obs_reset_audio2 ---- */
 {reset}
 /* ---- end lift ---- */

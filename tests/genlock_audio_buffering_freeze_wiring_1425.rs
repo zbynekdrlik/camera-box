@@ -41,7 +41,7 @@ const MIX_GUARD_H: &str = "vendor/obs-studio/libobs/obs-genlock-mix-guard.h";
 
 /// `(file, squished needle)`, each required exactly once.
 const FREEZE_WIRING: [(&str, &str); 24] = [
-    (OBS_AUDIO, "audio->genlock_buffering_frozen = genlock_buffering_frozen_now(start_ts_in, obs_output_genlock_audio_encoder_outputs() > 0);"),
+    (OBS_AUDIO, "audio->genlock_buffering_frozen = genlock_buffering_frozen_now( start_ts_in, obs_output_genlock_audio_encoder_outputs() > 0, audio->genlock_buffering_box_fixed);"),
     (OBS_AUDIO, "static uint64_t genlock_launch_first_tick_ns = 0;"),
     (OBS_AUDIO, "if (!genlock_launch_first_tick_ns) genlock_launch_first_tick_ns = tick_start_ns;"),
     (OBS_AUDIO, "blog(LOG_WARNING, \"genlock audio buffering: grew %d ms while an encoder ran inside the launch settle window\", (int)ms);"),
