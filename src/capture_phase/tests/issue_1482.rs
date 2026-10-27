@@ -193,3 +193,131 @@ fn the_constant_offset_tolerance_edges_1482() {
     );
     assert_eq!(constant_step_ns(&[], 3_000.0), None);
 }
+
+/// Design step 3 (comment 6452540834): a locked camera whose card catches up in a STAIRCASE —
+/// every `(frame, step_ns)` moves that frame and all later ones (summed). Returns the tracker
+/// and every note it wrote, with the frame index.
+fn run_staircase(
+    steps: &[(usize, i64)],
+    n: usize,
+    seed: u64,
+) -> (
+    CapturePhaseTracker,
+    Vec<(usize, PhaseNote)>,
+    Option<(f64, f64)>,
+) {
+    let mut frames = camera(n, 45.0, 3_000.0, 7_000_000.0, seed);
+    for &(from, step_ns) in steps {
+        for f in frames.iter_mut().skip(from) {
+            f.ts = (f.ts as i64 + step_ns) as u64;
+            f.truth += step_ns as f64;
+        }
+    }
+    let mut t = CapturePhaseTracker::new();
+    let mut noted = Vec::new();
+    let mut last = None;
+    for (k, f) in frames.iter().enumerate() {
+        let obs = t.observe(f.seq, f.ts);
+        if let Some(note) = t.note() {
+            noted.push((k, note.clone()));
+        }
+        last = obs.smoothed_mono_ns.map(|e| (e as f64, f.truth));
+        if k >= 200 && t.reseeds() == 0 {
+            assert!(
+                obs.smoothed_mono_ns.is_some(),
+                "frame {k}: the lock is kept through the staircase"
+            );
+        }
+    }
+    (t, noted, last)
+}
+
+/// The staircase is absorbed as ONE step to its last plateau: no re-seed, the lock kept, the
+/// window's sums exact and the prediction on the final phase.
+fn assert_staircase_absorbed(steps: &[(usize, i64)], seed: u64) {
+    let total: i64 = steps.iter().map(|s| s.1).sum();
+    let (t, noted, last) = run_staircase(steps, 900, seed);
+    assert_eq!(
+        t.reseeds(),
+        0,
+        "{steps:?}: a staircase is not a re-seed ({noted:?})"
+    );
+    assert_eq!(
+        t.phase_steps(),
+        1,
+        "{steps:?}: one step absorbed ({noted:?})"
+    );
+    assert!(t.locked());
+    assert_eq!(t.sums, fresh_sums(&t), "the moved window's sums stay exact");
+    let got: Vec<i64> = noted
+        .iter()
+        .filter_map(|(_, n)| match n {
+            PhaseNote::PhaseStep { step_ns } => Some(*step_ns),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(got.len(), 1, "{noted:?}");
+    assert!(
+        (got[0] - total).abs() < 60_000,
+        "the step absorbed is the LAST plateau: {} vs {total}",
+        got[0]
+    );
+    let (est, truth) = last.expect("locked on the last frame");
+    assert!(
+        (est - truth).abs() < 60_000.0,
+        "the prediction sits on the final phase ({:.0} us off)",
+        (est - truth) / 1000.0
+    );
+}
+
+#[test]
+fn a_double_card_step_inside_one_run_is_absorbed_to_its_last_plateau_1482() {
+    // cam2 live 27.10.2026: +1414 us x19, then +3244 us x11 in one 30-frame run.
+    assert_staircase_absorbed(&[(300, 1_414_000), (319, 1_830_000)], 0x1482_d001);
+    // +2623 us x21, then +5227 us x9.
+    assert_staircase_absorbed(&[(300, 2_623_000), (321, 2_604_000)], 0x1482_d002);
+    // The second step only 9 frames in: +1858 us x9, then +3663 us x21.
+    assert_staircase_absorbed(&[(300, 1_858_000), (309, 1_805_000)], 0x1482_d003);
+}
+
+#[test]
+fn the_live_triple_plateau_run_is_absorbed_1482() {
+    // cam2 live: +2325 us x16, +2386 us x8 (inside the tolerance: the same plateau), +4688 us x6.
+    assert_staircase_absorbed(
+        &[(300, 2_325_000), (316, 61_000), (324, 2_302_000)],
+        0x1482_d004,
+    );
+}
+
+#[test]
+fn a_last_plateau_too_short_is_held_then_absorbed_1482() {
+    // The second step lands on the run's 29th frame: a 2-frame plateau is not yet a phase. The
+    // run is held (lock kept, never folded) until the plateau is long enough, then absorbed.
+    assert_staircase_absorbed(&[(300, 1_600_000), (328, 1_700_000)], 0x1482_d005);
+}
+
+#[test]
+fn four_plateaus_still_reseed_1482() {
+    let (t, _, _) = run_staircase(
+        &[
+            (300, 1_200_000),
+            (307, 1_200_000),
+            (314, 1_200_000),
+            (321, 1_200_000),
+        ],
+        700,
+        0x1482_d006,
+    );
+    assert_eq!(
+        (t.reseeds(), t.phase_steps()),
+        (1, 0),
+        "4 plateaus are not a card step"
+    );
+}
+
+#[test]
+fn an_up_then_down_staircase_still_reseeds_1482() {
+    // A card only catches up one way: +3 ms, then back to +1.5 ms is not a stack of steps.
+    let (t, _, _) = run_staircase(&[(300, 3_000_000), (315, -1_500_000)], 700, 0x1482_d007);
+    assert_eq!((t.reseeds(), t.phase_steps()), (1, 0));
+}

@@ -117,6 +117,10 @@ struct Sawtooth {
     card_ppm: f64,
     step_min_ns: f64,
     step_max_ns: f64,
+    /// Design step 3 (comment 6452540834): `(share, min frames, max frames)` — that share of the
+    /// catch-ups lands as TWO steps (split 30..70 %) the given number of frames apart, the
+    /// staircase cam2's card showed live. `None` = every catch-up is one step.
+    split: Option<(f64, usize, usize)>,
     seed: u64,
 }
 
@@ -804,15 +808,37 @@ fn sawtooth_offsets(sc: &Scenario) -> (Vec<f64>, usize, f64) {
     let mut offset = draw();
     let (mut steps, mut sum) = (0usize, 0.0f64);
     let mut out = Vec::with_capacity(n);
+    // A split catch-up's second half: (frame it lands on, ns). Its own RNG so a scenario without
+    // a split draws exactly the steps it always drew.
+    let mut pending: Option<(usize, f64)> = None;
+    let mut split_rng = Rng(st.seed ^ 0x5911_7000);
     for k in 0..n {
         if k > 0 {
             // The card's clock is faster: its offset to the source shrinks every frame.
             offset += p_card - p_src;
-            if offset < 0.0 {
+            if let Some((at, rest)) = pending {
+                if k >= at {
+                    offset += rest;
+                    sum += rest;
+                    pending = None;
+                }
+            }
+            if offset < 0.0 && pending.is_none() {
                 let step = draw();
-                offset += step;
                 steps += 1;
-                sum += step;
+                match st.split {
+                    Some((share, lo, hi)) if split_rng.unit() < share => {
+                        let first = step * (0.3 + 0.4 * split_rng.unit());
+                        let gap = lo + ((hi - lo + 1) as f64 * split_rng.unit()) as usize;
+                        offset += first;
+                        sum += first;
+                        pending = Some((k + gap.min(hi), step - first));
+                    }
+                    _ => {
+                        offset += step;
+                        sum += step;
+                    }
+                }
             }
         }
         out.push(offset);
@@ -868,6 +894,7 @@ fn a_sawtooth_card_stamps_the_source_phase_1482() {
             card_ppm: 45.0,
             step_min_ns: 1_000_000.0,
             step_max_ns: 2_900_000.0,
+            split: None,
             seed,
         });
         let (_, steps, sum) = sawtooth_offsets(&sc);
@@ -936,6 +963,7 @@ fn a_sawtooth_card_over_a_slow_source_stamps_the_source_phase_1482() {
             card_ppm: 45.0,
             step_min_ns: 1_000_000.0,
             step_max_ns: 2_900_000.0,
+            split: None,
             seed,
         });
         let edges = true_source_crossings(&sc);
@@ -960,6 +988,39 @@ fn a_sawtooth_card_over_a_slow_source_stamps_the_source_phase_1482() {
             (t.crossings, 0),
             "{seed:#x}: every crossing of a faster source is one duplicate slot"
         );
+        assert_eq!((t.rx.dups, t.rx.gaps), (0, 0), "{seed:#x}");
+        assert_eq!(t.skip_events, 0);
+    }
+}
+
+/// Design step 3 (comment 6452540834) — cam2 live on 1.8.1 (27.10.2026): the card sometimes
+/// catches up in TWO steps 5..29 frames apart, inside one outlier run, and each such run re-seeded
+/// (8 in 30 min), which also reset the source fit (`src_ppm=na`). The slow-source sawtooth with
+/// 15 % of its catch-ups split: 0 re-seeds, one crossing per source edge, 0 receiver dup/gap.
+#[test]
+fn a_sawtooth_card_with_split_steps_never_reseeds_1482() {
+    for seed in [0x1482_5a7e_u64, 0x1482_0001, 0x1482_0002] {
+        let mut sc = Scenario::new(18.0, 1_800.0);
+        sc.sawtooth = Some(Sawtooth {
+            card_ppm: 45.0,
+            step_min_ns: 1_000_000.0,
+            step_max_ns: 2_900_000.0,
+            split: Some((0.15, 5, 29)),
+            seed,
+        });
+        let edges = true_source_crossings(&sc);
+        let t = run(&sc, true);
+        eprintln!(
+            "split steps {seed:#x}: {edges} source edges: TRACKED {} sheds + {} repeats, strih \
+             dup {} gap {}, crossings {} reseeds {} phase_steps {}",
+            t.sheds, t.repeats, t.rx.dups, t.rx.gaps, t.crossings, t.reseeds, t.phase_steps
+        );
+        assert_eq!(t.reseeds, 0, "{seed:#x}: a split catch-up never re-seeds");
+        assert_eq!(
+            t.crossings as usize, edges,
+            "{seed:#x}: one per SOURCE edge"
+        );
+        assert_eq!((t.sheds, t.repeats), (t.crossings, 0), "{seed:#x}");
         assert_eq!((t.rx.dups, t.rx.gaps), (0, 0), "{seed:#x}");
         assert_eq!(t.skip_events, 0);
     }
