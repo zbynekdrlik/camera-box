@@ -711,6 +711,9 @@ fn true_card_crossings(sc: &Scenario) -> usize {
 /// fit (48 re-seeds), each putting ~2 s of the stream on the raw stamp + poll-time gate: 3 receiver
 /// `stamp_gap` and 3 `#707 SKIPPED` events. The raw path alone (no tracker) reads 109 sheds +
 /// 110 repeats on the cambox and 48 dup + 101 gap at the receiver.
+///
+/// With the fix: all 48 steps absorbed (`phase_steps` 48), 0 re-seeds, 5 crossings for the 5
+/// true edge crossings = 2 blind sheds + 3 starvation repeats, 0 receiver dup/gap, 0 SKIPs.
 #[test]
 fn a_retiming_capture_card_never_reseeds_and_costs_one_slot_per_crossing_1482() {
     let mut sc = Scenario::new(45.0, 1_800.0);
