@@ -263,3 +263,33 @@ def test_recording_e2e_passes_the_switch_schedule_to_the_scope_step_1482():
     pos = s.find('python3 "$HERE/capture_drop_window.py"')
     block = s[pos : pos + 700]
     assert '--switch-schedule "$SWITCH_SCHEDULE_JSON"' in block
+
+
+def _streaming(ts, captured):
+    return (
+        f"\x1b[2m{ts}\x1b[0m \x1b[32m INFO\x1b[0m camera_box: Streaming: 60.0 fps emitted / "
+        f"60.0 fps captured ({captured} sent, {captured} captured, 0 capture-dropped, 0 corrupted)\n"
+    )
+
+
+def test_frames_captured_is_scoped_to_the_same_window_as_the_drops_1482(tmp_path):
+    """The verdict prints dropped/(captured+dropped): both terms must cover the same window."""
+    sidecar = tmp_path / "s.txt"
+    sidecar.write_text("v4l2_dropped=4\nframes_captured=32926\n")
+    log = tmp_path / "b.log"
+    log.write_text(
+        OUTSIDE_ONLY
+        + _streaming("2026-10-27T02:15:55.000000Z", 300)  # before the window
+        + _streaming("2026-10-27T02:16:05.000000Z", 301)
+        + _streaming("2026-10-27T02:16:10.000000Z", 299)
+        + _streaming("2026-10-27T02:21:25.000000Z", 300)  # after the window
+    )
+    rc = subprocess.run(
+        [sys.executable, SCRIPT, "--sidecar", str(sidecar), "--burn-log", str(log),
+         "--start", str(START), "--end", str(END)],
+        capture_output=True, text=True,
+    )
+    assert rc.returncode == 0, rc.stderr
+    kv = dict(l.split("=", 1) for l in sidecar.read_text().split())
+    assert kv["frames_captured"] == "600"
+    assert kv["frames_captured_whole_run"] == "32926"
