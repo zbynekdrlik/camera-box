@@ -7,7 +7,7 @@
 
 void cuda_opengl_free(struct nvenc_data *enc)
 {
-	if (!enc->cu_ctx)
+	if (!enc->cu_ctx || !enc->input_textures.num)
 		return;
 
 	/* issue 1462: the textures were registered inside obs_enter_graphics()

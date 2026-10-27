@@ -5272,6 +5272,7 @@ if [ -f "$CAM1_CAPTURE_STATS" ]; then
   python3 "$HERE/capture_drop_window.py" --sidecar "$CAM1_CAPTURE_STATS" \
     --burn-log "$OUTDIR/$(cbox_burn_log_dest_name cam1 "$RUN_ID")" \
     --start "$CAPTURE_RATE_WINDOW_START_EPOCH" --end "$CAPTURE_RATE_WINDOW_END_EPOCH" \
+    --switch-schedule "$SWITCH_SCHEDULE_JSON" \
     || echo "WARNING issue 1482: capture-drop window scope failed; whole-run count kept" >&2
 fi
 # #193: by DEFAULT decode ON stream.lan where the video lives — do NOT download the multi-GB
