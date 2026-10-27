@@ -194,18 +194,18 @@ fn the_constant_offset_tolerance_edges_1482() {
     assert_eq!(constant_step_ns(&[], 3_000.0), None);
 }
 
-/// Design step 3 (comment 6452540834): a locked camera whose card catches up in a STAIRCASE —
-/// every `(frame, step_ns)` moves that frame and all later ones (summed). Returns the tracker
-/// and every note it wrote, with the frame index.
-fn run_staircase(
-    steps: &[(usize, i64)],
-    n: usize,
-    seed: u64,
-) -> (
+/// What [`run_staircase`] read: the tracker, every note with its frame, and the last frame's
+/// (estimate, truth) while locked.
+type StaircaseRun = (
     CapturePhaseTracker,
     Vec<(usize, PhaseNote)>,
     Option<(f64, f64)>,
-) {
+);
+
+/// Design step 3 (comment 6452540834): a locked camera whose card catches up in a STAIRCASE —
+/// every `(frame, step_ns)` moves that frame and all later ones (summed). Returns the tracker
+/// and every note it wrote, with the frame index.
+fn run_staircase(steps: &[(usize, i64)], n: usize, seed: u64) -> StaircaseRun {
     let mut frames = camera(n, 45.0, 3_000.0, 7_000_000.0, seed);
     for &(from, step_ns) in steps {
         for f in frames.iter_mut().skip(from) {

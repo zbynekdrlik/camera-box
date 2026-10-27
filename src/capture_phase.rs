@@ -99,6 +99,17 @@ pub const RESEED_FLOOR_NS: u64 = 1_000_000;
 /// About half a second at 60 fps.
 pub const RESEED_CONSECUTIVE_OUTLIERS: u32 = 30;
 
+/// Issue 1482 design step 3: a card that catches up twice (or three times) inside one outlier
+/// run leaves a STAIRCASE of constant plateaus; at most this many is still one card step.
+pub const MAX_STACKED_STEPS: usize = 3;
+
+/// A staircase's LAST plateau must hold this many frames before its median is taken as the new
+/// phase; a shorter one keeps the run held.
+pub const STEP_MIN_PLATEAU_FRAMES: usize = 4;
+
+/// The longest a staircase run is held while its last plateau forms; past it, it re-seeds.
+pub const MAX_STAIRCASE_RUN: u32 = 2 * RESEED_CONSECUTIVE_OUTLIERS;
+
 /// A forward sequence step above this (more than 8 frames lost at once) re-seeds: that is a device
 /// hiccup, not a dropped frame. It also bounds the window's sequence span, which keeps every `i128`
 /// sum far inside its range. A frame the device skipped counts toward it too.
@@ -243,6 +254,58 @@ fn constant_step_ns(run: &[i64], rms_ns: f64) -> Option<i64> {
     run.iter()
         .all(|&r| ((r - median) as f64).abs() <= tol)
         .then_some(median)
+}
+
+/// What an outlier run of at least [`RESEED_CONSECUTIVE_OUTLIERS`] samples is (issue 1482).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunShape {
+    /// A card re-timing step: one constant offset, or a one-way staircase of at most
+    /// [`MAX_STACKED_STEPS`] constant plateaus whose last one is long enough. `step_ns` is the
+    /// last plateau's median; `last_from` the run index where that plateau starts.
+    Step { step_ns: i64, last_from: usize },
+    /// A one-way staircase whose last plateau is shorter than [`STEP_MIN_PLATEAU_FRAMES`]: not yet
+    /// a phase.
+    Forming,
+    /// A ramp, a scatter, a settling run, an up-then-down run or too many plateaus: a re-seed.
+    Other,
+}
+
+/// Issue 1482 design step 3 (comment 6452540834): split the run into contiguous plateaus (a new
+/// one wherever a residual leaves the current plateau's first residual by more than the
+/// [`constant_step_ns`] tolerance), each constant by that rule, and classify it.
+fn run_shape(run: &[i64], rms_ns: f64) -> RunShape {
+    let tol = (4.0 * rms_ns).max(RESEED_FLOOR_NS as f64 / 2.0);
+    let mut starts = vec![0usize];
+    for (i, &r) in run.iter().enumerate().skip(1) {
+        let anchor = run[*starts.last().unwrap_or(&0)];
+        if ((r - anchor) as f64).abs() > tol {
+            if starts.len() == MAX_STACKED_STEPS {
+                return RunShape::Other;
+            }
+            starts.push(i);
+        }
+    }
+    let mut medians = Vec::with_capacity(starts.len());
+    for (j, &from) in starts.iter().enumerate() {
+        let to = starts.get(j + 1).copied().unwrap_or(run.len());
+        match constant_step_ns(&run[from..to], rms_ns) {
+            Some(m) => medians.push(m),
+            None => return RunShape::Other,
+        }
+    }
+    // A card only catches up one way: every increment has the first plateau's sign.
+    let sign = medians.first().map_or(0, |m| m.signum());
+    if sign == 0 || medians.windows(2).any(|w| (w[1] - w[0]).signum() != sign) {
+        return RunShape::Other;
+    }
+    let last_from = *starts.last().unwrap_or(&0);
+    if run.len() - last_from < STEP_MIN_PLATEAU_FRAMES {
+        return RunShape::Forming;
+    }
+    RunShape::Step {
+        step_ns: *medians.last().unwrap_or(&0),
+        last_from,
+    }
 }
 
 /// One observed frame.
@@ -443,14 +506,25 @@ impl CapturePhaseTracker {
                         if self.outlier_run >= RESEED_CONSECUTIVE_OUTLIERS {
                             // Issue 1371: only a run this long is a real phase step. A shorter one
                             // is a delivery delay (the camera's phase never moved), held below.
+                            let shape = run_shape(&self.outlier_resid, rms);
+                            if shape == RunShape::Forming && self.outlier_run < MAX_STAIRCASE_RUN {
+                                // Issue 1482 step 3: the card stepped again near the run's end;
+                                // hold until its last plateau is a phase.
+                                return PhaseObservation {
+                                    smoothed_mono_ns: self.locked.then_some(pred),
+                                    seq_advance,
+                                };
+                            }
                             let run = std::mem::take(&mut self.outlier_resid);
                             let samples = std::mem::take(&mut self.outlier_samples);
                             self.outlier_run = 0;
-                            if let Some(step_ns) = constant_step_ns(&run, rms) {
-                                // Issue 1482: one constant offset over the whole run is a capture
-                                // card re-timing the frames on its own clock (its catch-up step):
-                                // move the fit onto the new phase, keep the period and the lock.
-                                self.absorb_step(step_ns, &samples);
+                            if let RunShape::Step { step_ns, last_from } = shape {
+                                // Issue 1482: one constant offset, or a one-way staircase of
+                                // stacked catch-ups, is a capture card re-timing the frames on its
+                                // own clock: move the fit onto the LAST plateau's phase and fold
+                                // only that plateau (the earlier ones sit on an intermediate
+                                // phase), keep the period and the lock.
+                                self.absorb_step(step_ns, &samples[last_from..]);
                                 self.phase_steps += 1;
                                 self.note = Some(PhaseNote::PhaseStep { step_ns });
                                 return PhaseObservation {

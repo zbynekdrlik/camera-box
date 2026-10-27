@@ -65,7 +65,20 @@ ONE missing frame per crossing.
     `PhaseNote::PhaseStep` and one line `#1482 capture phase step: <+us> us (card re-timing), lock
     kept`; `phase_steps=` counts them. Still a re-seed: a ramp or scattered run, a half-period
     step, a sequence back/jump, a time stall, a gap. Runs shorter than 30 still HOLD (the
-    issue-1371 delivery-delay rule is untouched). The cost of a step: during its 30 held frames
+    issue-1371 delivery-delay rule is untouched).
+  - **A STAIRCASE of stacked catch-ups is ONE step too (issue 1482 design step 3, comment
+    6452540834).** cam2's card sometimes catches up twice within one 30-frame run (live:
+    `+1414 x19, +3244 x11`, `+2325 x16, +2386 x8, +4688 x6`); with only the one-offset rule each
+    such run re-seeded (8 in 30 min on 1.8.1) and every re-seed reset the source fit
+    (`src_ppm=na`). `run_shape` splits the run into contiguous plateaus (a new one where a
+    residual leaves the plateau's FIRST residual by more than the same tolerance), each constant
+    by `constant_step_ns`: at most `MAX_STACKED_STEPS` (3), every increment with the first
+    plateau's sign (a card catches up one way) = a step to the LAST plateau's median, folding only
+    that plateau's samples (the earlier ones sit on an intermediate phase). A last plateau under
+    `STEP_MIN_PLATEAU_FRAMES` (4) is `Forming`: the run is held up to `MAX_STAIRCASE_RUN` (60
+    frames), then re-seeds. Ramp, scatter, settling, up-then-down and 4+ plateaus still re-seed.
+    Known limit: a lone late frame inside a step's run splits it into extra plateaus and
+    re-seeds as before. The cost of a step: during its 30 held frames
     (~0.5 s) the stamps still come from the old phase, then the step reaches the stamps in one
     move; the slot chooser keeps the slot when the moved instant stays inside the 500 us
     hysteresis and makes exactly one duplicate or one missing slot when it crosses an edge.
@@ -317,6 +330,9 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
     source line lingers near each edge for minutes. Step 1 only: 2 / 6 / 8 tracked crossings for 2
     source edges (blind sheds AND repeats: back and forth). With step 2: 2 / 2 / 2, each one blind
     shed (the source is faster), 0 receiver dup/gap, 0 re-seeds.
+    The same slow source with 15 % of its catch-ups SPLIT in two 5-29 frames apart
+    (`a_sawtooth_card_with_split_steps_never_reseeds_1482`, design step 3): 3 re-seeds on step 2
+    (seed `0x1482_5a7e`), 0 / 0 / 0 with the staircase rule, 2 / 2 / 2 crossings, 0 dup/gap.
 
 ## Verifying a change
 
