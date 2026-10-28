@@ -412,6 +412,12 @@ main() {
   local pair box ip
   for pair in $BOXES; do
     box="${pair%%|*}"; ip="${pair##*|}"
+    # issue 1460: a traveling box (the PP strih/stream) is read only while it is home, like the
+    # audio-mixer watchdog; away is never a fetch and never a page.
+    if ! obs_fleet_poll_now "$box"; then
+      log "$box ($ip): away / retired -- not polled this pass (no fetch, no page)"
+      continue
+    fi
     handle_box "$box" "$ip"
     # #1265 — the BAND arm (self-contained, disjoint state; runs regardless of the lag arm's verdict).
     handle_box_band "$box" "$ip"

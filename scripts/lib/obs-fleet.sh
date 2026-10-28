@@ -35,8 +35,9 @@
 #   RETIRED and its row is gone, see the table below). strih-snv joins every facet whose premise is a
 #   PLATFORM-NEUTRAL read (ping / OBS-WS :4455 / the box's own :8899 bundle-state JSON / dantesync
 #   :8898), and stays OUT of the Windows-only ones:
-#   audio-lag     = strih-snv stream   (the vendored OBS `audio-telemetry #800` lines, read off each box's
-#                   own :8899 -- identical on Linux; resolume EXCLUDED: no program-audio chain on the CG box)
+#   audio-lag     = strih-snv stream strih-pp stream-pp   (the vendored OBS `audio-telemetry #800` lines,
+#                   read off each box's own :8899 -- identical on Linux; resolume EXCLUDED: no program-audio
+#                   chain on the CG box; issue 1460: the traveling PP boxes are polled only while home)
 #   av-step       = stream            (the av-sync dock lives on the stream box only, #1267)
 #   vb-matrix     = stream            (a Windows VB-Audio Matrix process check; strih-snv has NO VB-Matrix --
 #                   PipeWire replaced it, issue 1344 -- and resolume has no install either)
@@ -255,7 +256,7 @@ _obs_fleet_windows_rows() {
 obs_fleet_facet_members() {
   local facet="${1:-}"
   case "$facet" in
-    audio-lag)     printf 'strih-snv stream-snv' ;;
+    audio-lag)     printf 'strih-snv stream-snv strih-pp stream-pp' ;;   # issue 1460: + the PP Linux boxes, polled only while home
     av-step)       printf 'stream-snv' ;;
     vb-matrix)     printf 'stream-snv' ;;
     bundle-state)  printf 'strih-snv stream-snv resolume-snv' ;;

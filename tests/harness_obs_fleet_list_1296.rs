@@ -140,9 +140,10 @@ fn fleet_boxes_reproduces_the_legacy_byte_exact_defaults_1296() {
     // issue 1317: audio-lag watches the PRODUCTION strih (now the Linux strih-snv at .202 -- its
     // vendored OBS emits the same `audio-telemetry #800` lines) + stream. vb-matrix is WINDOWS-only
     // (PipeWire replaced VB-Matrix on strih-snv), so it is stream alone.
+    // issue 1460: + the PP Linux boxes (traveling, read only while home).
     assert_eq!(
         boxes("audio-lag"),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
     assert_eq!(boxes("vb-matrix"), "stream-snv|10.77.9.204");
     // av-step: stream only (the av-sync dock box, #1267).
@@ -541,7 +542,7 @@ fn sourced_boxes_default_is_byte_exact_for_the_legacy_facets_1296() {
     // The three pre-#1296 facets reproduce their exact legacy literal when sourced with no override.
     assert_eq!(
         watchdog_var("audio-lag-alert-watchdog.sh", "BOXES", &[]),
-        "strih-snv|10.77.9.202 stream-snv|10.77.9.204"
+        "strih-snv|10.77.9.202 stream-snv|10.77.9.204 strih-pp|strih-pp.lan stream-pp|stream-pp.lan"
     );
     assert_eq!(
         watchdog_var("av-step-alert-watchdog.sh", "BOXES", &[]),
