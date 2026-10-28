@@ -162,6 +162,9 @@ STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-snv)}"
 STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream-snv)}"
 POLL_S="${VBAN_BENCH_POLL_S:-20}"
 OBS_TIMEOUT_S="${VBAN_BENCH_OBS_TIMEOUT_S:-30}"
+# The post-StopRecord settle poll (live 28.10.2026: OBS reads active while it finishes the file).
+STOP_POLL_S="${VBAN_BENCH_STOP_POLL_S:-1}"
+STOP_SETTLE_READS="${VBAN_BENCH_STOP_SETTLE_READS:-20}"
 SSH_TIMEOUT_S="${VBAN_BENCH_SSH_TIMEOUT_S:-60}"
 BROADCAST_READS="${AV_SOAK_BROADCAST_READS:-3}"
 BROADCAST_RETRY_S="${AV_SOAK_BROADCAST_RETRY_S:-20}"
@@ -295,11 +298,16 @@ stop_recording_if_idle() {  # -> 0 stopped and verified, 1 kept (named in the lo
     return 1
   fi
   record stop >> "$RUN_DIR/recordings.txt" 2>> "$RUN_DIR/bench.log" || true
-  st="$(record status 2>/dev/null || true)"
-  case "$st" in
-    active=False*) write_recording_state 0; return 0 ;;
-  esac
-  log "the strih recording still reads '${st:-unreadable}' after StopRecord"
+  # OBS reads active for a moment while it finishes the file (live 28.10.2026): a bounded poll.
+  local i
+  for ((i = 0; i < STOP_SETTLE_READS; i++)); do
+    st="$(record status 2>/dev/null || true)"
+    case "$st" in
+      active=False*) write_recording_state 0; return 0 ;;
+    esac
+    sleep "$STOP_POLL_S"
+  done
+  log "the strih recording still reads '${st:-unreadable}' ${STOP_SETTLE_READS} reads after StopRecord"
   return 1
 }
 
