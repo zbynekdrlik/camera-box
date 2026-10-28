@@ -11,6 +11,7 @@ siblings). Ships in the :8899 server tree declared in `scripts/lib/bundle-state-
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 
@@ -64,6 +65,31 @@ AUDIO_TS_LAG_STALE_AFTER_S = 180  # ~3x the 60 s emit period: a source silent th
 # and, for the named reference source, computes the band SHAPE at tens-of-ms resolution; the dev1
 # `classify_band` decision thresholds it, ships DISABLED like every sibling watchdog.
 AUDIO_REF_BAND_DEFAULT_SRC = "mbc"     # the stream A/V-gate audio reference (cam2 HDMI -> hand1 mic)
+# issue 1460 -- the box's own seed manifest (setup-strih writes it, strih_scenes.py reads it). On a
+# STREAM-role box (the manifest carries `dev_scene`, written for the stream role only) its
+# `program_audio_input` IS the A/V reference: stream-snv `mbc`, stream-pp `Zvuk z mixu`.
+SEED_MANIFEST_PATH = "/opt/camera-box/strih-seed.json"
+
+
+def audio_ref_band_src(env, manifest_path=SEED_MANIFEST_PATH):
+    """issue 1460: the reference source whose ts_lag band + buffered_ms are watched on this box.
+
+    `AUDIO_REF_BAND_SRC` in `env` wins; else a stream-role seed manifest's `program_audio_input`;
+    else `mbc`. An absent, unreadable or non-stream manifest falls back, never raises (the server
+    must keep serving)."""
+    named = env.get("AUDIO_REF_BAND_SRC")
+    if named:
+        return named
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError):
+        return AUDIO_REF_BAND_DEFAULT_SRC
+    if isinstance(manifest, dict) and "dev_scene" in manifest:
+        src = manifest.get("program_audio_input")
+        if isinstance(src, str) and src.strip() and src != "none":
+            return src
+    return AUDIO_REF_BAND_DEFAULT_SRC
 AUDIO_REF_BAND_DUTY_MARGIN_MS = 20     # a tail reading > baseline + this counts as "high mode"
 AUDIO_REF_BAND_WINDOW_CAP = 120        # bound the tail-window readings considered (recent state)
 

@@ -445,10 +445,9 @@ def gather_bundle_state(
     # (`obs_log_head_age_s`) proves the log is being written now; never re-read later in the gather.
     log_read_tod = bsg.local_seconds_of_day()
 
-    # #1265 — the reference source whose ts_lag BAND is watched (mbc on stream; env-overridable so a
-    # future box with a different A/V reference can set it). A box that has no such source (strih)
-    # simply reports the band facets empty -> omitted, never a false band.
-    ref_band_src = os.environ.get("AUDIO_REF_BAND_SRC", bsg.AUDIO_REF_BAND_DEFAULT_SRC)
+    # #1265 — the reference source whose ts_lag BAND is watched (env > the stream box's seed manifest
+    # > mbc). A box that has no such source (strih) reports the band facets empty -> omitted.
+    ref_band_src = bsg.audio_ref_band_src(os.environ)  # issue 1460: the stream box's own program audio
 
     log_facets, genlock_lock = _timed(
         timings, "obs_log_parse", _parse_log_facets, log_text, log_read_tod, ref_band_src
