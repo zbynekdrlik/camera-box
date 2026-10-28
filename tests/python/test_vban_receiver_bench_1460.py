@@ -454,6 +454,7 @@ def test_the_sine_grade_gets_the_receivers_own_hold(rig):
                          "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT])
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads((rig.run_dir / "p1-analysis.json").read_text())["hold_frames"] == 200
+    assert "the receiver held 200 frames" in r.stdout + r.stderr
 
 
 def test_without_the_emitting_line_the_measured_hold_is_used(rig):
@@ -461,6 +462,8 @@ def test_without_the_emitting_line_the_measured_hold_is_used(rig):
                          "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT])
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads((rig.run_dir / "p1-analysis.json").read_text())["hold_frames"] == 187
+    # a fallback is named, so a renamed log line never goes unnoticed
+    assert "with the default hold of 187 frames" in r.stdout + r.stderr
 
 
 def test_a_buffering_guard_on_the_test_input_fails_the_profile(rig):

@@ -318,6 +318,7 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
         "active_start_s": active_start / fs, "active_s": (active_end - active_start) / fs,
         "pilot_dbfs": 20.0 * math.log10(ref * math.sqrt(2.0)),
         "blocks": int(starts.size), "usable_blocks": int(good.size),
+        # excluded windows count as unused: a few concealed losses cost < 0.1 % of a profile
         "coverage": float(good.size * block / max(1, active_end - active_start)),
         "silence_slots": [{"sample": s, "length": n, "time_s": s / fs} for s, n in slots],
         "events": events,

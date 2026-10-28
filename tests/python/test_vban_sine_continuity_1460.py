@@ -259,6 +259,21 @@ def test_the_step_detector_alone_cannot_judge_a_concealed_loss():
     assert a["steps"], "the repeat's phase no longer reads as a step; the exclusion may be unneeded"
 
 
+def test_the_windows_follow_the_senders_rate():
+    # a +50 ppm sender: sender sample s plays at recording sample r0 + s / (1 + ppm). Late in a
+    # 10-minute run the wrong direction (s x (1 + ppm)) is ~1000 samples off, more than the pad.
+    onset, hold, s = 400000, 187, 20_000_000
+    a = {"active_start": onset, "rate_ppm": 50.0, "silence_slots": []}
+    sched = dict(schedule([(s // 256, 1)], duration_s=600.0, ppm=50.0))
+    (lo, hi, i), = vs.conceal_windows(a, sched, hold)
+    ratio = 1.0 + 50e-6
+    right = onset - hold * 256 / ratio + s / ratio
+    wrong = onset - hold * 256 * ratio + s * ratio
+    assert i == 0 and lo < right < right + 256 / ratio < hi
+    assert not lo < wrong < hi
+    assert hi - lo == pytest.approx(256 / ratio + 2 * vs.CONCEAL_PAD, abs=2)
+
+
 def test_a_concealed_loss_that_moved_the_timeline_fails():
     # concealment is still a loss: the timeline must not move across it
     p1 = 8 * FS // 256

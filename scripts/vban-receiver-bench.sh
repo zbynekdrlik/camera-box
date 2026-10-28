@@ -517,9 +517,9 @@ teardown_input() {  # -> the input removed + RecTracks restored, else abort (the
   obs_tool teardown >> "$RUN_DIR/bench.log" 2>&1 || refuse "the teardown left something on strih-snv OBS (see $RUN_DIR/bench.log)"
   rm -f "$RUN_DIR/obs-state.json"
 }
-hold_frames_of() {  # OBS_LOG -> the frames the receiver held before it played (the LAST `receive
-  # emitting: source '<input>' frame=N` line of the test input; another source's line never counts),
-  # DEFAULT_HOLD_FRAMES when the line is absent or the log unreadable
+hold_frames_of() {  # OBS_LOG -> "N log" (the frames the receiver held before it played: the LAST
+  # `receive emitting: source '<input>' frame=N` line of the test input; another source's line never
+  # counts), else "DEFAULT_HOLD_FRAMES default" (the line absent, renamed, or the log unreadable)
   local n
   n="$(python3 -c 'import re, sys
 pat = re.compile(r"receive emitting: source \x27" + re.escape(sys.argv[2]) + r"\x27 frame=([0123456789]+)\b")
@@ -529,7 +529,7 @@ try:
 except OSError:
     hits = []
 print(hits[-1] if hits else "")' "$1" "$INPUT_NAME" 2>/dev/null || true)"
-  if is_uint "$n"; then printf '%s' "$n"; else printf '%s' "$DEFAULT_HOLD_FRAMES"; fi
+  if is_uint "$n"; then printf '%s log' "$n"; else printf '%s default' "$DEFAULT_HOLD_FRAMES"; fi
 }
 pull_audio() {  # PATH OUT -> the test track only (an on-box stream copy); 0 when OUT is non-empty
   local path="$1" out="$2" q i
@@ -594,8 +594,12 @@ for _p in $PROFILES; do
     log "profile $_p: the recording could not be pulled from strih-snv (path '${_rec}')"
   else
     _arc=0
-    _hold="$(hold_frames_of "$RUN_DIR/p$_i-obs.log")"
-    log "profile $_p: the receiver held ${_hold} frames before it played"
+    read -r _hold _hold_src <<< "$(hold_frames_of "$RUN_DIR/p$_i-obs.log")"
+    if [ "$_hold_src" = log ]; then
+      log "profile $_p: the receiver held ${_hold} frames before it played"
+    else
+      log "profile $_p: no 'receive emitting' line for '${INPUT_NAME}' in the profile's OBS log -- the losses are placed with the default hold of ${_hold} frames"
+    fi
     python3 "$ANALYZE" "$RUN_DIR/p$_i-audio.mkv" --schedule "$RUN_DIR/p$_i-schedule.json" --stream 0 \
       --lead-s "$ANALYSIS_LEAD_S" --ppm-bound "$PPM_BOUND" --hold-frames "$_hold" --json \
       > "$RUN_DIR/p$_i-analysis.json" || _arc=$?
