@@ -31,7 +31,9 @@ set -euo pipefail
 #   - per profile (`clean`, `lv1`, `stress:+50`, `stress:-50` by default): mark the OBS log,
 #     StartRecord, LEAD_S of silence, the emulator for --minutes, TAIL_S, StopRecord on a PROVEN idle
 #     rig, the log rows since the mark, the test track pulled from strih-snv (ffmpeg stream copy on
-#     the box), the sine analysis + the log grade + the emulator's own send lateness -> one bench.tsv
+#     the box), the sine analysis (given the receiver's held first-second frames, read from the
+#     profile's `receive emitting: source '<input>' frame=N` log line, 187 when absent, so it can place
+#     the losses the receiver concealed) + the log grade + the emulator's own send lateness -> one bench.tsv
 #     row (a sender wake later than --emulator-late-bound-ms = INVALID, never blamed on the receiver);
 #   - cleanup on EVERY exit (signals ignored): the emulator stopped, a recording the bench started
 #     stopped only on a proven idle rig (else KEPT, exit 5, the lease kept for --cleanup), the test
@@ -174,6 +176,7 @@ BUNDLE_STATE_PORT="${WIN_BUNDLE_STATE_PORT:-8899}"
 LEAD_S=3
 TAIL_S=2
 ANALYSIS_LEAD_S=2
+DEFAULT_HOLD_FRAMES=187   # the receiver's measured first-second hold (vban_sine_continuity.py's own default)
 LEASE_REPO="camera-box-vban-bench"
 LEASE_RESOURCES="strih-snv"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -262,7 +265,7 @@ if [ "$MODE" = plan ]; then
     echo "     (every ${POLL_S} s: the lease kept alive, a live broadcast aborts); ${TAIL_S} s tail; a proven idle"
     echo "     rig; StopRecord (verified); teardown (input removed, RecTracks restored); the log since the mark;"
     echo "     the test track pulled to $RUN_DIR/p${_i}-audio.mkv; then"
-    echo "     $(printf '%q ' python3 "$ANALYZE" "$RUN_DIR/p${_i}-audio.mkv" --schedule "$RUN_DIR/p${_i}-schedule.json" --lead-s "$ANALYSIS_LEAD_S" --ppm-bound "$PPM_BOUND" --json)"
+    echo "     $(printf '%q ' python3 "$ANALYZE" "$RUN_DIR/p${_i}-audio.mkv" --schedule "$RUN_DIR/p${_i}-schedule.json" --lead-s "$ANALYSIS_LEAD_S" --ppm-bound "$PPM_BOUND" --hold-frames "<N of the receive emitting line, else ${DEFAULT_HOLD_FRAMES}>" --json)"
     echo "     $(printf '%q ' python3 "$LOG_GRADE" --log "$RUN_DIR/p${_i}-obs.log" --input-name "$INPUT_NAME" --ppm-bound "$PPM_BOUND" --json)"
     echo "     the emulator's max send lateness <= ${EMU_LATE_BOUND_MS} ms (else the profile is INVALID)"
   done
@@ -514,6 +517,20 @@ teardown_input() {  # -> the input removed + RecTracks restored, else abort (the
   obs_tool teardown >> "$RUN_DIR/bench.log" 2>&1 || refuse "the teardown left something on strih-snv OBS (see $RUN_DIR/bench.log)"
   rm -f "$RUN_DIR/obs-state.json"
 }
+hold_frames_of() {  # OBS_LOG -> the frames the receiver held before it played (the LAST `receive
+  # emitting: source '<input>' frame=N` line of the test input; another source's line never counts),
+  # DEFAULT_HOLD_FRAMES when the line is absent or the log unreadable
+  local n
+  n="$(python3 -c 'import re, sys
+pat = re.compile(r"receive emitting: source \x27" + re.escape(sys.argv[2]) + r"\x27 frame=([0123456789]+)\b")
+try:
+    with open(sys.argv[1], errors="replace") as f:
+        hits = [m.group(1) for m in map(pat.search, f) if m]
+except OSError:
+    hits = []
+print(hits[-1] if hits else "")' "$1" "$INPUT_NAME" 2>/dev/null || true)"
+  if is_uint "$n"; then printf '%s' "$n"; else printf '%s' "$DEFAULT_HOLD_FRAMES"; fi
+}
 pull_audio() {  # PATH OUT -> the test track only (an on-box stream copy); 0 when OUT is non-empty
   local path="$1" out="$2" q i
   q="'${path//\'/\'\\\'\'}'"
@@ -577,8 +594,11 @@ for _p in $PROFILES; do
     log "profile $_p: the recording could not be pulled from strih-snv (path '${_rec}')"
   else
     _arc=0
+    _hold="$(hold_frames_of "$RUN_DIR/p$_i-obs.log")"
+    log "profile $_p: the receiver held ${_hold} frames before it played"
     python3 "$ANALYZE" "$RUN_DIR/p$_i-audio.mkv" --schedule "$RUN_DIR/p$_i-schedule.json" --stream 0 \
-      --lead-s "$ANALYSIS_LEAD_S" --ppm-bound "$PPM_BOUND" --json > "$RUN_DIR/p$_i-analysis.json" || _arc=$?
+      --lead-s "$ANALYSIS_LEAD_S" --ppm-bound "$PPM_BOUND" --hold-frames "$_hold" --json \
+      > "$RUN_DIR/p$_i-analysis.json" || _arc=$?
     if [ "$_arc" = 0 ]; then _sine=PASS; fi
   fi
   _lost="$(python3 -c 'import json,sys; print(sum(l["count"] for l in json.load(open(sys.argv[1]))["losses"]))' "$RUN_DIR/p$_i-schedule.json" 2>/dev/null || echo 0)"

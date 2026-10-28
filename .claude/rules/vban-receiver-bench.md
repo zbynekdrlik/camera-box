@@ -122,6 +122,27 @@ designs 6338127636 and 6338457001.
   within ±20 ms of the aligned slot, length within 64 samples); the pilot rate equal to the
   injected ppm within the bound; the lead (before the pilot) silent; the track otherwise clean
   (residual p99 under -30 dB).
+- **A CONCEALED loss is graded by the timeline across it, never by silence.** The issue-1439
+  receiver repeats the previous packet (crossfaded) for a run of at most
+  `VBAN_RECV_CONCEAL_MAX_SLOTS` (3) lost slots between two received packets. `CONCEAL_MAX_SLOTS`
+  in the script is pinned to that `#define` by a test.
+  - The step detector cannot judge it: a repeat with the timeline intact reads +2..+6 samples of
+    "step" inside one run of blocks (live lv1 29.10.2026: -1.3 / -1.7). So `analyze_scheduled`
+    runs two passes: analyze, map every loss of <= 3 packets onto the recording, analyze again
+    with those windows EXCLUDED (`analyze(exclude=[(lo, hi, loss index)])`, each widened by
+    `CONCEAL_PAD`, 2 blocks). The run splits there and the existing slope-projection bridge
+    measures the timeline across the window; the bridge names the loss in `conceal_windows`.
+  - The mapping: r0 = the pilot onset - the frames the receiver held (its `receive emitting:
+    source '<input>' frame=N` line, the first second it never plays), then refined by any silence
+    slots the analysis found (the same fit the grade uses). The orchestrator reads N from the
+    profile's own OBS log (`hold_frames_of`, the test input's line only) and passes
+    `--hold-frames N`; absent = 187, the value every bench run logged.
+  - Per loss of <= 3 packets with no silence slot: `concealed` when the bridge held (under
+    `MIN_JUMP_SAMPLES`), else `timeline moved` (FAIL: a concealed loss is still a loss, the
+    timeline must hold). A silence slot at such a loss is still acceptable (`ok`, the receiver
+    decides at the deadline from what it stored). A loss over 3 packets without silence stays
+    `no silence slot`. A bridge step at a concealed window is that loss's reason, never a second
+    "phase step".
 
 ## The OBS log rows (`vban_bench_log.py`, the issue-1439 acceptance of designs 6338127636 + 6338457001)
 
