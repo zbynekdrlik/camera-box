@@ -259,6 +259,49 @@ def test_watchdog_a_lower_count_rebaselines_without_a_page(tmp_path):
     assert "mix_late=HEALTHY" in log and not _pages(log), log
 
 
+def _alerts_now(log):
+    return [ln for ln in _pages(log) if "alert_now=1" in ln]
+
+
+def test_watchdog_a_new_session_with_holes_pages_them_from_zero(tmp_path):
+    state = tmp_path / "state"
+    _run_watchdog(tmp_path, _body(9), state)
+    log = _run_watchdog(tmp_path, _body(2), state)
+    assert "mix_late=BASELINE" in log and not _pages(log), log
+    assert _stored(state) == "0"
+    log = _run_watchdog(tmp_path, _body(2), state)
+    assert "mix_late=LATE" in log and not _pages(log), log
+    log = _run_watchdog(tmp_path, _body(2), state)
+    assert len(_alerts_now(log)) == 1 and "z 0 na **2** (+2)" in log, log
+
+
+def test_watchdog_a_restart_during_the_confirm_still_pages_the_new_sessions_holes(tmp_path):
+    state = tmp_path / "state"
+    _run_watchdog(tmp_path, _body(3), state)
+    log = _run_watchdog(tmp_path, _body(5), state)       # LATE, confirm 1
+    assert not _pages(log), log
+    log = _run_watchdog(tmp_path, _body(2), state)       # OBS restarted: BASELINE, confirm kept
+    assert "mix_late=BASELINE" in log and not _pages(log), log
+    log = _run_watchdog(tmp_path, _body(2), state)       # LATE against 0, confirm 2: the page
+    assert len(_alerts_now(log)) == 1, log
+
+
+def test_watchdog_a_count_rising_every_pass_is_one_throttled_incident(tmp_path):
+    state = tmp_path / "state"
+    logs = [_run_watchdog(tmp_path, _body(late), state) for late in (3, 4, 5, 6, 7, 8)]
+    assert sum(len(_alerts_now(log)) for log in logs) == 1, logs
+    assert all("mix_late=LATE" in log for log in logs[1:]), logs
+    assert _stored(state) == "8"
+
+
+def test_watchdog_each_separate_episode_pages_again(tmp_path):
+    state = tmp_path / "state"
+    seq = (3, 4, 4, 4, 5, 5)     # baseline, rise (held), page, quiet (recovery), rise, page
+    logs = [_run_watchdog(tmp_path, _body(late), state) for late in seq]
+    assert [len(_alerts_now(log)) for log in logs] == [0, 0, 1, 0, 0, 1], logs
+    assert [ln for ln in logs[3].splitlines() if "RECOVERY:" in ln and "audio-mix-late" in ln], logs[3]
+
+
 def test_watchdog_stale_between_two_rises_resets_the_confirm_and_keeps_the_count(tmp_path):
     state = tmp_path / "state"
     _run_watchdog(tmp_path, _body(3), state)

@@ -53,8 +53,9 @@ MIX-LATE arm (classify_mix_late, issue 1460) -- the mix-wide `audio-telemetry #8
 mixed_late=` count, cumulative since the audio reset: every rise is a mix member that fell behind the
 frozen mix window and was re-anchored (an audible hole). The watchdog keeps the previous pass's count:
   SKIP / UNKNOWN (no `#800 mix:` line) as above; STALE when that line is older than the mixer's stale
-  bound (log-only); BASELINE with no previous count, or a count LOWER than it (a new audio session
-  zeroed it) -- the watchdog stores it, never a page; LATE when the count rose; HEALTHY when equal.
+  bound (log-only); BASELINE with no previous count (stored, never a page), or a count LOWER than
+  it (a new audio session zeroed it: the watchdog then compares from 0, so that session's holes
+  page on the next passes); LATE when the count rose; HEALTHY when equal.
 
 No I/O -- pytest Tier-0 (the render_freeze_decision.py / issue 1199 python-mirror precedent).
 """

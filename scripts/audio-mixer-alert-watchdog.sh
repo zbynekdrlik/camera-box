@@ -313,8 +313,11 @@ handle_box() {
 # (independent, disjoint state, prefix `audio-mix-late`). The stored count `<box>_mix_late_prev` is
 # what LATE is measured against. A rise is a one-pass edge, so on a LATE pass the stored count stays
 # at its pre-rise value until the 2-pass confirm has paged: the second pass still reads LATE, and
-# one real MIXED_LATE event pages. HEALTHY / BASELINE / a confirmed page store the current count;
-# SKIP / UNKNOWN / STALE leave it alone. Recovery is a machine-channel line only (issue 1206).
+# one real MIXED_LATE event pages. HEALTHY / a first BASELINE / a confirmed page store the current
+# count; SKIP / UNKNOWN / STALE leave it alone. A BASELINE on a LOWER count is a new audio session,
+# whose count started at 0: the stored count becomes 0 and the confirm is left as it is, so the
+# holes of the new session page (review round 1). An unchanged pass after a page is HEALTHY: one
+# machine-channel RECOVERY line (issue 1206), and the next separate rise is a new page.
 handle_mix_late() {
   local box="$1" ip="$2" verdict="$3" now="$4" prev="$5" age="$6" confirm
   case "$verdict" in
@@ -323,9 +326,15 @@ handle_mix_late() {
     STALE)   log "$box mix_late: STALE -- newest #800 mix line ${age}s behind the log head -- machine channel only, no page"
              reset_arm_confirm "$box" "audio-mix-late" ;;
     BASELINE)
-      log "$box mix_late: BASELINE -- count ${now} (stored ${prev:-none}: first pass or a new audio session) -- stored, no page"
-      handle_healthy_arm "$box" "audio-mix-late"
-      write_state_field "${box}_mix_late_prev" "$now" ;;
+      if [ -n "$prev" ]; then
+        # a lower count: the audio reset zeroed it, every one of the ${now} events is new
+        log "$box mix_late: BASELINE -- count ${now} below the stored ${prev}: a new audio session -- compared from 0 on the next pass, no page now"
+        write_state_field "${box}_mix_late_prev" 0
+      else
+        log "$box mix_late: BASELINE -- count ${now} (no stored count: first pass) -- stored, no page"
+        handle_healthy_arm "$box" "audio-mix-late"
+        write_state_field "${box}_mix_late_prev" "$now"
+      fi ;;
     HEALTHY)
       handle_healthy_arm "$box" "audio-mix-late"
       write_state_field "${box}_mix_late_prev" "$now" ;;
