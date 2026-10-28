@@ -159,7 +159,9 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     # no time bucket). They are DELIBERATELY absent from this allowlist so a re-added bucket in either
     # FAILS test_only_allowlisted_watchdogs_time_bucket_their_key.
     "ndi-portmap-alert-watchdog.sh",       # #1181 -- NDI sender port-map moved
-    "avsync-heartbeat-alert-watchdog.sh",  # #812  -- A/V-sync heartbeat stale
+    # issue 1441 (owner 28.10.2026, "len podstatne hlasky"): avsync-heartbeat-alert-watchdog.sh
+    # (#812) left this class -- a dead A/V measurement pages only during a production, ONCE per
+    # incident (a stable key), so a re-added bucket there FAILS the sweep below.
     "imag-obs-alert-watchdog.sh",          # #882  -- imag OBS down / latency-drift / restart-storm
     "measurement-audio-alert-watchdog.sh", # #1310 -- mbc measurement-audio chain reads digital silence
     "render-freeze-alert-watchdog.sh",     # #1320 -- PROGRAM render freeze / receiver relock storm

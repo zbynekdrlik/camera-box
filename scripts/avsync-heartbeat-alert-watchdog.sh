@@ -35,6 +35,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/avsync-heartbeat.sh"
 # shellcheck source=scripts/lib/avsync-venues.sh
 . "$HERE/lib/avsync-venues.sh"
+# shellcheck source=scripts/lib/rig-mode-state.sh
+. "$HERE/lib/rig-mode-state.sh"
+# shellcheck source=scripts/lib/avsync-production.sh
+. "$HERE/lib/avsync-production.sh"
 # avsync-heartbeat.sh sets `-e` for ITS OWN sourcing safety; re-assert this script's own intended
 # options afterward so a stray non-zero return from a plain assignment never aborts a pass early
 # (this watchdog must survive a bad pass and keep polling on the next timer tick, see the header).
@@ -95,6 +99,9 @@ STATE_FILE="${AVSYNC_HEARTBEAT_STATE_FILE:-$STATE_DIR/camera-box-avsync-heartbea
 # the new report state. AVSYNC_REPORT_FETCH_CMD is the row-fetch seam the dry-run tests stub.
 REPORT_SCRIPT="${AVSYNC_REPORT_SCRIPT:-$HERE/avsync_report.py}"
 REPORT_PYTHON="${AVSYNC_REPORT_PYTHON:-python3}"
+# issue 1441: only a PRODUCTION posts the A/V report and pages a dead measurement
+# (scripts/lib/avsync-production.sh). The cam2 password for the rig-mode read.
+CAM_PW="${CAM_PW:-newlevel}"
 REPORT_STATE_FILE="${AVSYNC_REPORT_STATE_FILE:-$STATE_DIR/avsync-report-state.json}"
 
 # issue 1441: the venue this pass is working on (set by main's venue loop; read by measure / the legs /
@@ -250,8 +257,15 @@ report_fetch_rows() {
 # issue 1441: the legacy venue adopts the pre-issue-1441 single state file once (no START re-post on
 # the rollout): it seeds the work copy while the per-venue file does not exist yet, and is removed
 # only after the per-venue file was committed (never by --dry-run).
+# report_production -> stdout: yes | no | unknown for $VENUE. A venue other than the rig venue
+# measures only while its stream box streams, so its fetched rows already mean "streaming".
+report_production() {
+  avsync_venue_production "$VENUE" true
+}
+
 run_report_pass() {
   local rows rows_file work_state msgs line all_ok=1 state_file seed_state="" committed=0 knob
+  local production
   local -a knob_args
   state_file="$(report_state_path "$VENUE")"
   if [ ! -f "$state_file" ] && [ "$VENUE" = "$AVSYNC_LEGACY_HEARTBEAT_VENUE" ] \
@@ -279,8 +293,10 @@ run_report_pass() {
   knob="$(avsync_venue_audio_input "$VENUE" || true)"
   knob_args=()
   [ -n "$knob" ] && knob_args=(--knob-input "$knob")
+  production="$(report_production)"
+  log "$VENUE report: production=$production"
   msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$work_state" --rows "$rows_file" \
-    "${knob_args[@]}" 2>/dev/null || true)"
+    --production "$production" "${knob_args[@]}" 2>/dev/null || true)"
   rm -f "$rows_file"
   if [ -z "$msgs" ]; then
     # No messages to deliver -> committing the advanced session-tracking is safe (nothing to lose),
@@ -321,7 +337,8 @@ run_report_pass() {
 }
 
 # ── one leg's confirm/throttle/alert pass -- reused for BOTH "watchdog" and "vlc" ───────────────
-# issue 1441: per VENUE -- state keys `<venue>_<leg>_*`, dedup key `avsync-<venue>-heartbeat-<leg>`.
+# issue 1441: per VENUE -- state keys `<venue>_<leg>_*`, dedup key `avsync-<venue>-heartbeat-<leg>`,
+# STABLE (owner 28.10.2026: one page per incident, no re-ping; recovery stays log-only).
 process_leg() {
   local leg="$1" epoch="$2" now epoch_display wedged prev_confirm decision confirm act key
   key="${VENUE}_${leg}"
@@ -345,6 +362,16 @@ process_leg() {
   fi
   [ "${act:-0}" = "1" ] || return 0
 
+  # issue 1441: a dead measurement pages only during a production (SNV EVENT mode, PP streaming).
+  local production
+  production="$(avsync_venue_production_live "$VENUE" "$(avsync_venue_ws_host "$VENUE" || true)")"
+  if [ "$production" = "no" ]; then
+    log "$VENUE $leg: heartbeat CONFIRMED stale, but no production (development) -- never a page"
+    write_state_field "${key}_alert_sig" ""
+    write_state_field "${key}_alert_passes" 0
+    return 0
+  fi
+
   local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
   current_sig="${leg}:stale"
   prior_sig="$(read_state_field "${key}_alert_sig" "")"
@@ -365,7 +392,7 @@ process_leg() {
     log "ALERT: firing Discord notification for $VENUE $leg"
     python3 "$NOTIFY" notify --body \
       "🚨 A/V-sync monitor [${VENUE_LABEL}] ($REPO_SLUG): heartbeat vetvy $leg merania streamu ${VENUE_LABEL} (${VENUE_BOX}) je STARÝ (naposledy=${epoch_display}, limit=${STALE_S}s) — meranie A/V-sync pre ${VENUE_LABEL} zrejme spadlo. Rieši Claude automaticky, ty nemusíš nič robiť." \
-      --dedup-key "$(watchdog_notify_key "avsync-${VENUE}-heartbeat-$leg" "$(date +%s)")" \
+      --dedup-key "avsync-${VENUE}-heartbeat-$leg" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else
     log "ALERT: suppressed by throttle for $VENUE $leg (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"

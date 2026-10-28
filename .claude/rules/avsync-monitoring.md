@@ -519,15 +519,28 @@ else NESEDÍ with the knob advice (`knob_advice`, byte-identical with `av_sync_m
 issue 1459 `ZVYS/ZNIZ '<program audio input>' sync offset o |median|`, below). `decide` is IDEMPOTENT — a re-run with the same rows emits nothing new (the
 persisted state dedups). Times are Europe/Bratislava local.
 
-**The four message kinds (Slovak, phone-readable, each `📐 A/V …`):**
-- **START** — on the first confident clip of a session:
-  `📐 A/V overené HH:MM (začiatok vysielania): 1. meranie +X ms conf C — verdikt po ≥ 3 meraniach`.
-- **PERIODIC** — every 20 min while the session is live:
-  `📐 A/V overené HH:MM: za 20 min N meraní (K nemerateľných), medián +X ms (p10 … p90) → SEDÍ`
+**The message kinds (Slovak, phone-readable, each `📐 A/V …`), since issue 1441 (owner 28.10.2026:
+"nech to nebol spam ale len podstatne hlasky ktore niecomu pomahaju"):**
+- **FIRST VERDICT** — once, the first time the 20-min window holds ≥ 3 confident clips:
+  `📐 A/V overené HH:MM (vysielanie): za 20 min N meraní (K nemerateľných), medián +X ms (p10 … p90) → SEDÍ`
   (or `… → NESEDÍ o X ms → ZVYS 'mbc' sync offset o X`).
-- **CHANGE** — the window verdict flips SEDÍ↔NESEDÍ between two evaluations → posted at once.
-- **END** — at session end:
+- **CHANGE** — each SEDÍ↔NESEDÍ flip after that, once.
+- **END** — at session end, only when the session posted a verdict or ran at least one window
+  (a few-minute blip before the real broadcast has none):
   `📐 A/V počas vysielania HH:MM–HH:MM: N meraní (K nemerateľných), medián +X ms, p10 … p90 → SEDÍ/NESEDÍ`.
+- The 1st-clip START and the 20-min PERIODIC are gone (they were 52 of the 62 posts in 48 h).
+
+**Only a production posts (issue 1441).** `scripts/lib/avsync-production.sh` decides per venue:
+the rig venue (`AVSYNC_RIG_MODE_VENUE`, snv) by the cam2 painter rig mode (EVENT = yes, TEST = no),
+every other venue (and snv when cam2 is unreadable) by its stream box streaming; `AVSYNC_PRODUCTION`
+overrides (tests). The report passes `--production` to the decider, which latches a session as a
+production once any pass inside it read yes/unknown (unknown never silences a broadcast); a session
+read only as `no` posts nothing, not even its END. The same reading gates the heartbeat legs (a
+confirmed stale leg in development logs `never a page`) and the lineup liveness + offset alarms
+(an ALARM in development is downgraded to SUPPRESSED). The heartbeat page key is STABLE
+(`avsync-<venue>-heartbeat-<leg>`, one page per incident). Replay of the real 26.–28.10. rows
+(`tests/fixtures/avsync_report_1441/`): the PP event = 3 posts (NESEDÍ 40 ms, the change to SEDÍ
+after the 140→100 ms fix, the END), the SNV TEST streams = 0 (57 before).
 
 Low-confidence / UNMEASURABLE / no-signal rows are never verdicts, only counted (K nemerateľných).
 

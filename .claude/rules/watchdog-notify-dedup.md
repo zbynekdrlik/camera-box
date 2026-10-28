@@ -81,7 +81,6 @@ production without, invisible without a page:
 | `obs-liveness-watchdog.sh` | #391 | broadcast-OBS render wedge |
 | `audio-lag-alert-watchdog.sh` | #1226 | OBS audio-timeline lag / band drift |
 | `ndi-portmap-alert-watchdog.sh` | #1181 | NDI sender port-map moved |
-| `avsync-heartbeat-alert-watchdog.sh` | #812 | A/V-sync heartbeat stale |
 | `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
 | `measurement-audio-alert-watchdog.sh` | #1310 | mbc measurement-audio chain digital-silent (TEST-gated) |
 | `audio-mixer-alert-watchdog.sh` | issue 1381 | an OBS audio mixer off real time (BEHIND / OVERLOADED), an obs-vban sender losing audio (VBAN_LOSS) or the mix buffering ratcheted above its start (RAISED) -- audible on air |
@@ -91,6 +90,12 @@ production without, invisible without a page:
 — the QPSK marker only sounds in TEST — but its FAULT is production-critical: a silent measurement
 instrument means the next production's A/V-sync can't be verified. The rig-mode gate and the
 fault-criticality axis are ORTHOGONAL — this one is TEST-gated AND time-bucketed.)
+
+**`avsync-heartbeat-alert-watchdog.sh` (#812) LEFT the class (issue 1441, owner 28.10.2026: "len
+podstatne hlasky"):** a dead A/V measurement pages only during a production (SNV rig EVENT mode, PP
+streaming, `scripts/lib/avsync-production.sh`) and once per incident, with the STABLE key
+`avsync-<venue>-heartbeat-<leg>`. The lineup file's liveness + offset arms are production-gated the
+same way; its offset arm keeps its bucket.
 
 The DIAGNOSTIC / TEST-mode watchdogs stay one-ping-per-incident (a stable key, NO bucket): cadence
 (#794), frozen-input (#1052), splitter-port (#739), grabber-stuck (#1128), imag-power (#1040),

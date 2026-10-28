@@ -77,6 +77,16 @@ class Rig:
             f"#!/bin/sh\necho CURL >> '{self.curl_log}'\nprintf '%s\\n%s' '{{\"id\":\"1\"}}' \"${{FAKE_CURL_HTTP_CODE:-200}}\"\n",
         )
         _exe(self.stub / "systemctl", "#!/bin/sh\nexit 0\n")
+        # issue 1441: the rig-mode read (cam2 painter) -- never the live rig. FAKE_RIG_MODE picks
+        # the snapshot: EVENT (default, a production), TEST (development) or an empty answer.
+        _exe(
+            self.stub / "sshpass",
+            "#!/bin/sh\n"
+            'case "${FAKE_RIG_MODE:-EVENT}" in\n'
+            "  EVENT) printf 'RIG_MODE_PROBE_OK\\nPID_PRESENT|0\\nPID_ALIVE|0\\nSVC_ENABLED|0\\nSVC_ACTIVE|0\\n' ;;\n"
+            "  TEST) printf 'RIG_MODE_PROBE_OK\\nPID_PRESENT|1\\nPID_ALIVE|1\\nSVC_ENABLED|1\\nSVC_ACTIVE|1\\n' ;;\n"
+            "esac\n",
+        )
         self.discord_env = tmp_path / "discord.env"
         self.discord_env.write_text("DISCORD_BOT_TOKEN=fake-token\n")
 
@@ -93,6 +103,7 @@ class Rig:
             "AVSYNC_REPORT_FETCH_CMD": "true",
             "AVSYNC_LINEUP_STATE_FILE": str(self.state),
             "AVSYNC_LINEUP_OBS_PHASE2": str(self.obs_phase2),
+            "AVSYNC_OBS_PHASE2": str(self.obs_phase2),
             "AVSYNC_LINEUP_SYSTEMCTL": str(self.stub / "systemctl"),
         }
         if extra:
@@ -131,7 +142,8 @@ def test_heartbeat_watchdog_pages_the_stale_venue_only_and_names_it(tmp_path):
     calls = rig.lines(rig.notify_log)
     assert len(calls) == 1, calls
     assert "[PP]" in calls[0] and "stream-pp" in calls[0]
-    assert "--dedup-key avsync-pp-heartbeat-watchdog-" in calls[0]
+    # issue 1441: one page per incident -- a STABLE key, no time bucket.
+    assert calls[0].endswith("--dedup-key avsync-pp-heartbeat-watchdog"), calls[0]
     fields = rig.state_fields()
     assert fields.get("pp_watchdog_confirm") == "1"
     assert fields.get("snv_watchdog_confirm") == "0"
@@ -142,7 +154,7 @@ def test_heartbeat_watchdog_snv_page_carries_the_snv_key(tmp_path):
     rig.run(_HB_WATCHDOG)
     calls = rig.lines(rig.notify_log)
     assert len(calls) == 1 and "[SNV]" in calls[0]
-    assert "--dedup-key avsync-snv-heartbeat-watchdog-" in calls[0]
+    assert calls[0].endswith("--dedup-key avsync-snv-heartbeat-watchdog"), calls[0]
 
 
 def test_heartbeat_watchdog_away_venue_is_never_read_nor_paged(tmp_path):
@@ -158,27 +170,27 @@ def test_heartbeat_watchdog_report_pass_runs_per_venue_and_names_it(tmp_path):
     rig = Rig(tmp_path)
     # the fetch seam gets the venue as $1: only PP has a confident clip right now
     fetch = (
-        'if [ "$1" = pp ]; then printf "%s\\t%s\\n" "$(date +%s)" '
-        '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"; fi'
+        'if [ "$1" = pp ]; then n=$(date +%s); for d in 180 90 0; do printf "%s\\t%s\\n" "$((n - d))" '
+        '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"; done; fi'
     )
     p = rig.run(_HB_WATCHDOG, ["--dry-run"], extra={"AVSYNC_REPORT_FETCH_CMD": fetch})
     assert p.returncode == 0, p.stderr
     posts = [l for l in p.stderr.splitlines() if "WOULD post report message" in l]
     assert len(posts) == 1, p.stderr
-    assert "[PP] 📐 A/V overené" in posts[0]
+    assert "[PP] 📐 A/V overené" in posts[0] and "(vysielanie)" in posts[0]
 
 
 def test_heartbeat_watchdog_report_state_is_per_venue(tmp_path):
     rig = Rig(tmp_path)
     fetch = (
-        'printf "%s\\t%s\\n" "$(date +%s)" '
-        '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"'
+        'n=$(date +%s); for d in 180 90 0; do printf "%s\\t%s\\n" "$((n - d))" '
+        '"measured: db=-5.0 [x] AV offset +0 fr (+0 ms) conf 6.0 :: A/V sync OK (offset 0 ms)"; done'
     )
     p = rig.run(_HB_WATCHDOG, extra={"AVSYNC_REPORT_FETCH_CMD": fetch})
     assert p.returncode == 0, p.stderr
     assert (tmp_path / "report-state-snv.json").exists()
     assert (tmp_path / "report-state-pp.json").exists()
-    assert len(rig.lines(rig.curl_log)) == 2, "one START post per venue"
+    assert len(rig.lines(rig.curl_log)) == 2, "one first-verdict post per venue"
 
 
 def test_heartbeat_watchdog_default_fetch_reads_the_venue_day_logs(tmp_path):
@@ -265,3 +277,51 @@ def test_avsync_venues_narrows_both_watchdogs(tmp_path):
     p = rig.run(_LINEUP_WATCHDOG, ["--dry-run"], extra={"AVSYNC_VENUES": "pp"})
     assert p.returncode == 0, p.stderr
     assert rig.lines(rig.obs_log) == ["stream-pp.lan"]
+
+
+# ── issue 1441: development never pages ──────────────────────────────────────────────────────────
+
+
+def test_heartbeat_watchdog_stale_snv_in_test_mode_never_pages(tmp_path):
+    rig = Rig(tmp_path, snv=STALE, pp=FRESH_OK)
+    p = rig.run(_HB_WATCHDOG, extra={"FAKE_RIG_MODE": "TEST"})
+    assert p.returncode == 0, p.stderr
+    assert rig.lines(rig.notify_log) == []
+    assert "snv watchdog: heartbeat CONFIRMED stale, but no production (development)" in p.stderr
+
+
+def test_heartbeat_watchdog_stale_pp_while_it_does_not_stream_never_pages(tmp_path):
+    rig = Rig(tmp_path, snv=FRESH_OK, pp=STALE)
+    p = rig.run(_HB_WATCHDOG, extra={"FAKE_STREAM_ACTIVE": "False"})
+    assert p.returncode == 0, p.stderr
+    assert rig.lines(rig.notify_log) == []
+    assert any("stream-pp" in h for h in rig.lines(rig.obs_log)), rig.lines(rig.obs_log)
+
+
+def test_heartbeat_watchdog_unreadable_rig_mode_still_pages_a_streaming_snv(tmp_path):
+    rig = Rig(tmp_path, snv=STALE, pp=FRESH_OK)
+    rig.run(_HB_WATCHDOG, extra={"FAKE_RIG_MODE": "NONE"})
+    calls = rig.lines(rig.notify_log)
+    assert len(calls) == 1 and "[SNV]" in calls[0]
+
+
+def test_lineup_watchdog_silent_snv_line_in_test_mode_never_pages(tmp_path):
+    rig = Rig(tmp_path, snv=FRESH_SILENT, pp=FRESH_OK)
+    p = rig.run(_LINEUP_WATCHDOG, extra={"FAKE_RIG_MODE": "TEST"})
+    assert p.returncode == 0, p.stderr
+    assert not any("[SNV]" in c for c in rig.lines(rig.notify_log)), rig.lines(rig.notify_log)
+    assert "snv: ALARM (no-audio) during development (no production) -- never a page" in p.stderr
+
+
+def test_lineup_watchdog_offset_in_test_mode_never_pages(tmp_path):
+    rig = Rig(tmp_path, snv=FRESH_OFFSET, pp=FRESH_OK)
+    p = rig.run(_LINEUP_WATCHDOG, extra={"FAKE_RIG_MODE": "TEST"})
+    assert p.returncode == 0, p.stderr
+    assert not any("[SNV]" in c for c in rig.lines(rig.notify_log))
+    assert "snv offset: ALARM" in p.stderr and "never a page" in p.stderr
+
+
+def test_lineup_watchdog_silent_snv_line_in_event_mode_pages(tmp_path):
+    rig = Rig(tmp_path, snv=FRESH_SILENT, pp=FRESH_OK)
+    rig.run(_LINEUP_WATCHDOG, extra={"FAKE_RIG_MODE": "EVENT"})
+    assert any("[SNV]" in c for c in rig.lines(rig.notify_log))
