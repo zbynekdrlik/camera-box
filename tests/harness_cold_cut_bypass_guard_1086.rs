@@ -319,7 +319,10 @@ fn arm_check_step_runs_before_recording_and_calls_the_guard() {
     // The guard needs ALL_CAMBOX (the SAME ternary the recording step uses) to tell an ARMED sweep
     // run from an INERT single-camera / workflow_dispatch run — so the honest banner is possible.
     assert!(
-        step_block.contains("ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}"),
+        // issue 1404: a measuring dispatch (inputs.measure) runs the sweep too.
+        step_block.contains(
+            "ALL_CAMBOX: ${{ (github.event_name == 'pull_request' || inputs.measure) && '1' || '0' }}"
+        ),
         "#1086: the arm-check step's env: block must carry ALL_CAMBOX (same ternary as the \
          recording step) so the guard can tell an armed sweep run from an inert one. \
          step_block:\n{step_block}"

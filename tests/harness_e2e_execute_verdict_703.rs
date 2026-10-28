@@ -658,9 +658,12 @@ fn workflow_fetches_the_matching_windows_verdict_artifact_for_pull_request() {
 fn workflow_sets_e2e_execute_verdict_for_pull_request_runs_only() {
     let s = read_workflow();
     assert!(
-        s.contains("E2E_EXECUTE_VERDICT: ${{ github.event_name == 'pull_request' && '1' || '0' }}"),
+        s.contains(
+            "E2E_EXECUTE_VERDICT: ${{ (github.event_name == 'pull_request' || inputs.measure) && '1' || '0' }}"
+        ),
         "#703: the recording step must set E2E_EXECUTE_VERDICT=1 ONLY for pull_request-triggered \
-         runs (the required merge gate) — workflow_dispatch (manual soak) must stay 0"
+         runs (the required merge gate) and a measuring dispatch (issue 1404, `measure: true`) — a \
+         plain workflow_dispatch (manual soak) must stay 0"
     );
     // Must be in the SAME step's env block as ALL_CAMBOX/DURATION (mirrors the existing
     // full_path_e2e_yml_all_cambox_is_in_the_recording_steps_env_block test's technique).

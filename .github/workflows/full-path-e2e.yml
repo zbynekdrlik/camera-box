@@ -82,6 +82,19 @@ on:
         description: "Disable the camera-box main-pin gate (pre-merge soak of a manually-deployed build)"
         type: boolean
         default: false
+      measure:
+        # issue 1404: a MEASURING dispatch -- the same fused ALL_CAMBOX sweep + real verdict + YouTube
+        # stage the pull_request gate runs (E2E_EXECUTE_VERDICT=1), for a release gate that dispatches
+        # this workflow at a ref (restreamer's release gate dispatches at main). The verdict binary is
+        # fetched from the ci.yml run of the dispatched commit. Default false = the operator soak.
+        description: "Measure for real (fused sweep + verdict + YouTube), like the PR gate"
+        type: boolean
+        default: false
+      caller:
+        # issue 1404: who dispatched a measuring run (e.g. restreamer@1.4.2); shown in the log and the
+        # job summary so a run is traceable to the release that asked for it.
+        description: "Caller of a measuring dispatch (e.g. restreamer@<version>)"
+        default: ""
   # #406/#312 item5: the automatic BLOCKING merge gate. Fires on every dev->main PR
   # open/update — the busy-gate step protects the live rig, so this can safely run
   # unattended (never on every push to dev — only when a PR targeting main exists/changes).
@@ -209,7 +222,7 @@ jobs:
           # guard needs the SAME value the recording step computes to tell an ARMED sweep run from an
           # INERT single-camera / workflow_dispatch run (and only reject an invalid target on the
           # former). Same ternary as the recording step's ALL_CAMBOX.
-          ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+          ALL_CAMBOX: ${{ (github.event_name == 'pull_request' || inputs.measure) && '1' || '0' }}
         run: |
           . scripts/lib/cold-cut-bypass-guard.sh
           cold_cut_bypass_arm_check
@@ -254,12 +267,12 @@ jobs:
         # runner (no Windows cross-compile). workflow_dispatch (manual operator soak) does NOT
         # need this — it stays in plan-print mode (E2E_EXECUTE_VERDICT stays 0), so this step is
         # scoped to `pull_request` only (same docs-only skip as the sibling steps).
-        if: github.event_name == 'pull_request' && steps.docs-only.outputs.docs_only != 'true'
+        if: (github.event_name == 'pull_request' || inputs.measure) && steps.docs-only.outputs.docs_only != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          SHA="${{ github.event.pull_request.head.sha }}"
+          SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           echo "Waiting for ci.yml's windows-probe artifact for commit $SHA ..."
           FOUND_RUN_ID=""
           for i in $(seq 1 60); do
@@ -326,12 +339,12 @@ jobs:
           # no other env var is required. Scoped to `pull_request` ONLY: a manual
           # `workflow_dispatch` operator soak keeps its existing single-camera behavior (never
           # silently widened by this flip; a future ticket can add an explicit input for it).
-          ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+          ALL_CAMBOX: ${{ (github.event_name == 'pull_request' || inputs.measure) && '1' || '0' }}
           # #703: the required pull_request gate must ACTUALLY EXECUTE the zero-loss/A/V verdict
           # (the fix this PR delivers), never just print a plan nobody runs. WIN_VERDICT_EXE_LOCAL
           # is set by the fetch step immediately above (pull_request only). workflow_dispatch
           # (manual operator soak) is UNCHANGED — stays in plan-print mode for the MCP holder.
-          E2E_EXECUTE_VERDICT: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+          E2E_EXECUTE_VERDICT: ${{ (github.event_name == 'pull_request' || inputs.measure) && '1' || '0' }}
           # #1302: the opt-in CG chain profile (SongPlayer -> cg OBS -> strih -> stream,
           # scripts/lib/cg-chain-e2e.sh) is armed by the repo variable CG_CHAIN=1, the same
           # operator-variable pattern as COLD_CUT_BYPASS_*. Unset = byte-inert. pull_request only,
@@ -407,7 +420,7 @@ jobs:
         # `pull_request` only — E2E_EXECUTE_VERDICT is 0 for workflow_dispatch (manual operator
         # soak), which legitimately never produces this file automatically (the MCP holder runs
         # the merge afterward, outside this job) — this guard would wrongly red-X that flow.
-        if: always() && github.event_name == 'pull_request' && steps.docs-only.outputs.docs_only != 'true'
+        if: always() && (github.event_name == 'pull_request' || inputs.measure) && steps.docs-only.outputs.docs_only != 'true'
         run: |
           set -euo pipefail
           RUN_ID="${RECORDING_E2E_RUN_ID:-}"
@@ -433,10 +446,11 @@ jobs:
         # on Discord, and it states the END POINT of the measurement: cam -> strih -> stream recording ->
         # YouTube, video / audio / A/V per point; never "full path" until the YouTube stage passed.
         # A missing verdict JSON still posts a page saying nothing was verified.
-        if: always() && github.event_name == 'pull_request' && steps.docs-only.outputs.docs_only != 'true'
+        if: always() && (github.event_name == 'pull_request' || inputs.measure) && steps.docs-only.outputs.docs_only != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          E2E_CALLER: ${{ inputs.caller }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -444,8 +458,14 @@ jobs:
           POINTS_MD="$(mktemp)"
           python3 scripts/e2e_report_youtube.py --verdict "/tmp/recording-e2e-${RUN_ID}/verdict-${RUN_ID}.json" \
             --run-url "$RUN_URL" --stage-dir "/tmp/recording-e2e-${RUN_ID}/youtube-leg" --out "$POINTS_MD"
+          if [ -n "${E2E_CALLER:-}" ]; then
+            printf 'Measuring dispatch by `%s`\n\n' "$E2E_CALLER" >> "$GITHUB_STEP_SUMMARY"
+          fi
           cat "$POINTS_MD" >> "$GITHUB_STEP_SUMMARY"
-          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$POINTS_MD"
+          # A measuring dispatch has no PR: the summary is its report (issue 1404).
+          if [ -n "$PR_NUMBER" ]; then
+            gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$POINTS_MD"
+          fi
           rm -f "$POINTS_MD"
 
       - name: Upload verdict JSON + report PNG + pixel proof

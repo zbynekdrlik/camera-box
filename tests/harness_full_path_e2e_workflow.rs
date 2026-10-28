@@ -214,11 +214,13 @@ fn full_path_e2e_yml_duration_defaults_to_300_for_pr_triggered_runs() {
 fn full_path_e2e_yml_sets_all_cambox_for_pull_request_triggered_runs() {
     let s = read_workflow();
     assert!(
-        s.contains("ALL_CAMBOX: ${{ github.event_name == 'pull_request' && '1' || '0' }}"),
+        s.contains(
+            "ALL_CAMBOX: ${{ (github.event_name == 'pull_request' || inputs.measure) && '1' || '0' }}"
+        ),
         "#406: the required pull_request job must set ALL_CAMBOX=1 so the automatic merge gate \
          runs the FUSED multi-camera sweep (cross-camera spread + #641 A/V-offset gate) — not \
-         just the single-camera path. Must be scoped to pull_request (leaving workflow_dispatch's \
-         manual-soak behavior unchanged)."
+         just the single-camera path. Scoped to pull_request and a measuring dispatch (issue \
+         1404); a plain workflow_dispatch keeps its manual-soak behavior."
     );
 }
 

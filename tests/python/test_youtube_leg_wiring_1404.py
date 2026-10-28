@@ -82,7 +82,7 @@ def test_the_workflow_posts_the_per_point_report_and_has_the_time():
     w = WF.read_text()
     step = w[w.index("- name: Per-point E2E report"):]
     step = step[:step.index("\n      - name:")]
-    assert "if: always() && github.event_name == 'pull_request'" in step
+    assert "if: always() && (github.event_name == 'pull_request' || inputs.measure)" in step
     assert 'scripts/e2e_report_youtube.py --verdict "/tmp/recording-e2e-${RUN_ID}/verdict-${RUN_ID}.json"' in step
     assert '>> "$GITHUB_STEP_SUMMARY"' in step and 'gh pr comment "$PR_NUMBER"' in step
     perms = w[w.index("permissions:"):w.index("\njobs:")]
