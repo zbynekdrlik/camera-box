@@ -1114,6 +1114,7 @@ synthetic OBS log for the issue 1386 golden (every bundle_state_gather line fami
 00:23:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=64 pending=0 timing_adjust_ms=0
 00:23:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
 00:23:00.885: audio-telemetry #800: total_buffering=85 ms
+00:23:00.886: audio-telemetry #800 mix: frozen=1 mixed_late=1
 00:23:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
 00:23:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
 00:23:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
@@ -1126,6 +1127,7 @@ synthetic OBS log for the issue 1386 golden (every bundle_state_gather line fami
 00:24:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=62 pending=0 timing_adjust_ms=0
 00:24:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
 00:24:00.885: audio-telemetry #800: total_buffering=85 ms
+00:24:00.886: audio-telemetry #800 mix: frozen=1 mixed_late=2
 00:24:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-52.0ms) [monitor-only, no write]
 00:24:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
 00:24:16.000: av-sync-dock: UPDATED offset=-52.0ms source=cluster matched=40 mad=12.5ms

@@ -147,6 +147,8 @@ def _facets(text):
     out["timestamped_tail_lines"] = [len(stamped), head, _sha(stamped)]
     out["audio_mixer_from_log[tail]"] = bsg.audio_mixer_from_log(text, tail=(stamped, head))
     out["vban_pacer_loss_from_log[tail]"] = bsg.vban_pacer_loss_from_log(text, tail=(stamped, head))
+    # issue 1460 -- the mix-wide MIXED_LATE facet (a key added to the golden, never a changed one)
+    out["audio_mix_late_from_log[tail]"] = bsg.audio_mix_late_from_log(text, tail=(stamped, head))
     for now in _NOW_TOD:
         out[f"obs_log_head_age_s_from_log[{now}]"] = bsg.obs_log_head_age_s_from_log(text, now)
     out["text_sha256"] = hashlib.sha256(text.encode("utf-8")).hexdigest()

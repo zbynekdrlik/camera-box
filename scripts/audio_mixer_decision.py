@@ -49,6 +49,12 @@ VBAN arm (classify_vban) -- the per-destination loss-counter increase inside the
   SKIP / UNKNOWN (no VBAN output on this box) as above; VBAN_LOSS when any loss counter moved
   (events > 0 or loss ms > 0, decided before staleness: loss in the window is real even if the
   output then stopped); STALE when the newest status line is old (log-only); HEALTHY otherwise.
+MIX-LATE arm (classify_mix_late, issue 1460) -- the mix-wide `audio-telemetry #800 mix:
+mixed_late=` count, cumulative since the audio reset: every rise is a mix member that fell behind the
+frozen mix window and was re-anchored (an audible hole). The watchdog keeps the previous pass's count:
+  SKIP / UNKNOWN (no `#800 mix:` line) as above; STALE when that line is older than the mixer's stale
+  bound (log-only); BASELINE with no previous count, or a count LOWER than it (a new audio session
+  zeroed it) -- the watchdog stores it, never a page; LATE when the count rose; HEALTHY when equal.
 
 No I/O -- pytest Tier-0 (the render_freeze_decision.py / issue 1199 python-mirror precedent).
 """
@@ -198,6 +204,20 @@ def _near_zone_step(age_s, near_s=DEFAULT_LOG_LIVE_S, step_s=LOG_CLOCK_ZONE_STEP
     return min(r, step_s - r) <= near_s
 
 
+def classify_mix_late(now, prev, age_s, box_reachable, stale_s=DEFAULT_STALE_AFTER_S):
+    """issue 1460 -- one box's MIX-LATE verdict (see the module doc): `now` the newest cumulative
+    mixed_late, `prev` the count the watchdog stored on an earlier pass (None = none)."""
+    if box_reachable != 1:
+        return "SKIP"
+    if now is None:
+        return "UNKNOWN"
+    if age_s is not None and age_s > stale_s:
+        return "STALE"
+    if prev is None or now < prev:
+        return "BASELINE"
+    return "LATE" if now > prev else "HEALTHY"
+
+
 def classify_vban(events, loss_ms, age_s, box_reachable,
                   stale_after_s=DEFAULT_VBAN_STALE_AFTER_S):
     """One box's VBAN verdict (see the module doc)."""
@@ -236,7 +256,7 @@ def _num(obj, key, cast):
 def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
             over_max=DEFAULT_OVER_MAX, stale_after_s=DEFAULT_STALE_AFTER_S,
             vban_stale_after_s=DEFAULT_VBAN_STALE_AFTER_S, log_live_s=DEFAULT_LOG_LIVE_S,
-            prev_log_head_age_s=None, pass_gap_s=None):
+            prev_log_head_age_s=None, pass_gap_s=None, prev_mix_late=None):
     """Fetch result -> both arms' verdicts + the readings. Unreachable -> SKIP without parsing."""
     obj = _loads_obj(bundle_json_text) if box_reachable == 1 else None
     ticks = _num(obj, "audio_mixer_ticks", int)
@@ -257,6 +277,8 @@ def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
     buffering = classify_buffering(buf_now, buf_start, buf_age, box_reachable, tick_ms,
                                    stale_after_s, log_head_age_s=head_age)
     buf_src = obj.get("audio_buffering_source") if isinstance(obj, dict) else None
+    mix_late = _num(obj, "audio_mix_mixed_late", int)
+    mix_age = _num(obj, "audio_mix_age_s", int)
     return {
         "mixer_verdict": mixer["verdict"], "ticks": ticks, "ticks_over": over,
         "window_ms": window_ms, "tick_ms": tick_ms, "age_s": age_s, "log_head_age_s": head_age,
@@ -274,6 +296,10 @@ def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
         "buffering_raised_ticks": buffering["raised_ticks"],
         "buffering_source": buf_src if isinstance(buf_src, str) and buf_src.strip() else None,
         "buffering_age_s": buf_age,
+        "mix_late_verdict": classify_mix_late(mix_late, prev_mix_late, mix_age, box_reachable,
+                                              stale_after_s),
+        "mix_late": mix_late, "mix_late_prev": prev_mix_late,
+        "mix_frozen": _num(obj, "audio_mix_frozen", int), "mix_late_age_s": mix_age,
     }
 
 
@@ -288,7 +314,7 @@ def _fmt(key, v):
 
 
 def _main(argv):
-    ap = argparse.ArgumentParser(description="pure audio-mixer decisions (issue 1381)")
+    ap = argparse.ArgumentParser(description="pure audio-mixer decisions (issue 1381, 1460)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("analyze", help="read /bundle-state.json on stdin -> every arm's verdict")
     a.add_argument("--box-reachable", type=int, required=True)
@@ -299,18 +325,21 @@ def _main(argv):
     a.add_argument("--log-live-s", type=int, default=DEFAULT_LOG_LIVE_S)
     a.add_argument("--prev-log-head-age-s", type=int, default=None)
     a.add_argument("--pass-gap-s", type=int, default=None)
+    a.add_argument("--prev-mix-late", type=int, default=None)
     ns = ap.parse_args(argv)
     # Tolerant read (the ndi_halving precedent): a strict read that raised would be swallowed by the
     # caller's 2>/dev/null and read as SKIP forever. box_reachable=0 needs no stdin.
     text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
     res = analyze(text, ns.box_reachable, ns.tolerance, ns.over_max, ns.stale_after_s,
-                  ns.vban_stale_after_s, ns.log_live_s, ns.prev_log_head_age_s, ns.pass_gap_s)
+                  ns.vban_stale_after_s, ns.log_live_s, ns.prev_log_head_age_s, ns.pass_gap_s,
+                  ns.prev_mix_late)
     for k in ("mixer_verdict", "ticks", "ticks_over", "window_ms", "tick_ms", "age_s",
               "log_head_age_s", "log_clock",
               "rate_per_min", "expected_per_min", "deviation_per_min", "over_per_min",
               "vban_verdict", "vban_events", "vban_loss_ms", "vban_dest", "vban_age_s",
               "buffering_verdict", "buffering_ms", "buffering_start_ms", "buffering_delta_ms",
-              "buffering_raised_ticks", "buffering_source", "buffering_age_s"):
+              "buffering_raised_ticks", "buffering_source", "buffering_age_s",
+              "mix_late_verdict", "mix_late", "mix_late_prev", "mix_frozen", "mix_late_age_s"):
         print(f"{k}={_fmt(k, res[k])}")
     return 0
 
