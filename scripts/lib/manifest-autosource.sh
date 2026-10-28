@@ -177,7 +177,13 @@ manifest_autosource_fetch() {
   fi
   local tmp=""
   tmp="$(mktemp -d 2>/dev/null)" || return 0
-  if ! timeout "${MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S:-$tmo}" gh run download "$run_id" --repo "$repo" -n "$artifact" --dir "$tmp" >/dev/null 2>&1; then
+  # Issue 1474: a failed download is logged with gh's own error text (stderr only; stdout stays the
+  # path-or-nothing contract), so a refused [0/8] says why the manifest is missing.
+  local dl_err="" dl_rc=0
+  dl_err="$(timeout "${MANIFEST_AUTOSOURCE_DOWNLOAD_TIMEOUT_S:-$tmo}" gh run download "$run_id" --repo "$repo" -n "$artifact" --dir "$tmp" 2>&1 >/dev/null)" || dl_rc=$?
+  if [ "$dl_rc" -ne 0 ]; then
+    printf 'manifest-autosource: gh run download %s -n %s failed (rc %s): %s\n' \
+      "$run_id" "$artifact" "$dl_rc" "$(printf '%s' "$dl_err" | tail -n 3 | tr '\n' ' ')" >&2
     rm -rf "$tmp" 2>/dev/null
     return 0
   fi
