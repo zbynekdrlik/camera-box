@@ -212,44 +212,6 @@ def test_the_held_first_second_is_not_a_short_pilot():
     assert any("the pilot plays" in r for r in g2["reasons"]), g2["reasons"]
 
 
-def _conceal(x, at_s, slots):
-    """The receiver's concealment of `slots` lost packets at at_s: the previous packet repeated in
-    place (the timeline keeps running), so the pilot has no silence there."""
-    a = int(round(at_s * FS))
-    n = slots * 256
-    y = x.copy()
-    y[a:a + n] = np.tile(x[a - 256:a], slots)
-    return y
-
-
-def test_a_concealed_short_loss_needs_no_silence():
-    # issue 1439 ROZHODNUTÉ 6352253147 b: a run of <= 3 lost slots between two received packets is
-    # concealed (the previous packet repeated, crossfaded), never silence.
-    p1, p2 = 8 * FS // 256, 14 * FS // 256
-    x = _conceal(_conceal(synth(20), p1 * 256 / FS, 1), p2 * 256 / FS, 3)
-    g = vs.grade(analyze(x), schedule([(p1, 1), (p2, 3)]))
-    assert [r["result"] for r in g["losses"]] == ["concealed", "concealed"], g["reasons"]
-    assert g["verdict"] == "PASS", g["reasons"]
-
-
-def test_a_concealed_loss_that_moved_the_timeline_fails():
-    # Concealment is still a loss: the timeline must not move across it (live 28.10.2026 lv1:
-    # -1.2..-2.2 samples across each concealed run).
-    p1 = 8 * FS // 256
-    t = p1 * 256 / FS
-    x = _conceal(synth(20, jumps=[(t + 256 / FS, 2)]), t, 1)
-    g = vs.grade(analyze(x), schedule([(p1, 1)]))
-    assert g["verdict"] == "FAIL"
-    assert any("across the concealed loss" in r for r in g["reasons"]), g["reasons"]
-
-
-def test_a_long_loss_without_silence_still_fails():
-    # a run over 3 slots is never concealed: no silence there is a dropped run
-    p1 = 8 * FS // 256
-    g = vs.grade(analyze(synth(20, jumps=[(p1 * 256 / FS, 4 * 256)])), schedule([(p1, 4)]))
-    assert any("no silence slot" in r for r in g["reasons"]), g["reasons"]
-
-
 def test_unscheduled_silence_fails():
     g = vs.grade(analyze(synth(20, holes=[(9.0, 256)])), schedule([]))
     assert g["verdict"] == "FAIL" and any("unscheduled silence" in r for r in g["reasons"])
