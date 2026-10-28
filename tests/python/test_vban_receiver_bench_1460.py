@@ -442,6 +442,27 @@ def test_a_clean_profile_passes_end_to_end(rig):
             assert CAM_PW not in line and STRIH_PW not in line, line
 
 
+EMITTING_LINE = ("13:01:01.000: [obs-vban] obs-vban receive emitting: source '%s' frame=%d margin_ms=34.6 "
+                 "after the first second's hold -- every slot goes out by 2 ms before its stamp\n")
+
+
+def test_the_sine_grade_gets_the_receivers_own_hold(rig):
+    # the concealed losses are placed on the recording from the frames the receiver held, read from
+    # the profile's own OBS log -- never another source's line (the strih program receiver logs too)
+    r = _clean_run(rig, [EMITTING_LINE % ("ASIO zvuk", 999), EMITTING_LINE % (INPUT, 200),
+                         ASRC_LINE % (INPUT, "0.12ppm"),
+                         "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads((rig.run_dir / "p1-analysis.json").read_text())["hold_frames"] == 200
+
+
+def test_without_the_emitting_line_the_measured_hold_is_used(rig):
+    r = _clean_run(rig, [ASRC_LINE % (INPUT, "0.12ppm"),
+                         "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads((rig.run_dir / "p1-analysis.json").read_text())["hold_frames"] == 187
+
+
 def test_a_buffering_guard_on_the_test_input_fails_the_profile(rig):
     r = _clean_run(rig, [ASRC_LINE % (INPUT, "0.12ppm"),
                          "13:02:00.000: buffering-guard: '%s' mixed late: its audio ran 40.0 ms behind\n" % INPUT])
