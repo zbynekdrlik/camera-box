@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The OBS audio facet parsers of the bundle-state gather: the `audio-telemetry #800` lag +
 freshness (#1226 / #1231), the reference-source ts_lag band (#1265), the buffered_ms drift/step
-shape (#1325), the audio MIXER real-time facet (issue 1381 / 1385) and the mix BUFFERING
-ratchet facet (issue 1381). The obs-vban pacer
+shape (#1325), the audio MIXER real-time facet (issue 1381 / 1385), the mix BUFFERING
+ratchet facet (issue 1381) and the mix-wide MIXED_LATE count (issue 1460). The obs-vban pacer
 loss facet read beside the mixer lives in `bundle_state_vban`.
 
 Part of the bundle-state gather split (issue 1386): a PURE facet family re-exported by
@@ -387,6 +387,31 @@ def audio_mixer_from_log(text, tail=None):
         return ("", "", "", "", "")
     return (last[1], last[2], str(round((last[0] - prev[0]) * 1000.0)), last[3],
             str(round(head - last[0])))
+
+
+# issue 1460 -- the mix-wide MIXED_LATE count. libobs logs `audio-telemetry #800 mix: frozen=<0|1>
+# mixed_late=<N>` once a minute (obs-audio.c, the same 60 s block as the `#800` summary); N counts
+# since the audio reset every mix member that fell behind the frozen mix window and was re-anchored
+# (an audible hole). Cumulative, so the dev1 audio-mixer watchdog pages a RISE between two passes.
+_AUDIO_MIX_LATE_RE = re.compile(r"audio-telemetry #800 mix: frozen=(\d) mixed_late=(\d+)")
+
+
+def audio_mix_late_from_log(text, tail=None):
+    """issue 1460 -- `(mixed_late, frozen, age_s)` of the NEWEST `#800 mix:` line in the tail, all
+    strings, or three `""` when the tail holds none (absent -> UNKNOWN downstream, never a fake 0).
+    `age_s` is that line's in-log age behind the log head (the audio-mixer recency convention).
+    `tail` = a precomputed `timestamped_tail_lines(text)`."""
+    stamped, head = tail if tail is not None else timestamped_tail_lines(text)
+    newest = None
+    for pos, line in stamped:
+        if "#800 mix:" not in line:
+            continue
+        m = _AUDIO_MIX_LATE_RE.search(line)
+        if m:
+            newest = (pos, m.group(2), m.group(1))
+    if newest is None:
+        return ("", "", "")
+    return (newest[1], newest[2], str(round(head - newest[0])))
 
 
 def _audio_stall_dump_in_head(text):

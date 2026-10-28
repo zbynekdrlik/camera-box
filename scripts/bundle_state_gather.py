@@ -67,6 +67,7 @@ from bundle_state_audio import (  # noqa: E402 -- after the sibling path setup a
     AUDIO_TS_LAG_STALE_AFTER_S,
     BUFFERED_MS_DEFAULT_SRC,
     audio_buffering_from_log,
+    audio_mix_late_from_log,
     audio_mixer_from_log,
     audio_ref_band_from_log,
     audio_ref_band_src,
@@ -150,6 +151,7 @@ from bundle_state_vban import (  # noqa: E402 -- after the sibling path setup ab
 
 __all__ = [
     # this module
+    "AUDIO_MIX_LATE_KEYS",
     "BUNDLE_STATE_KEYS",
     "build_bundle_state",
     # bundle_state_audio
@@ -160,6 +162,7 @@ __all__ = [
     "AUDIO_TS_LAG_STALE_AFTER_S",
     "BUFFERED_MS_DEFAULT_SRC",
     "audio_buffering_from_log",
+    "audio_mix_late_from_log",
     "audio_mixer_from_log",
     "audio_ref_band_from_log",
     "audio_ref_band_src",
@@ -357,6 +360,12 @@ BUNDLE_STATE_KEYS = (
     "audio_buffering_start_ms",
     "audio_buffering_source",
     "audio_buffering_age_s",
+    # issue 1460 -- the mix-wide MIXED_LATE count (`audio_mix_late_from_log`): the newest
+    # `#800 mix:` line's cumulative mixed_late + frozen flag + in-log age. The dev1 audio-mixer
+    # watchdog pages a rise between two passes. Omit-when-empty: "0" is KEPT, no line -> UNKNOWN.
+    "audio_mix_mixed_late",
+    "audio_mix_frozen",
+    "audio_mix_age_s",
     "vban_pacer_loss_events",
     "vban_pacer_loss_ms",
     "vban_pacer_loss_dest",
@@ -377,6 +386,8 @@ BUNDLE_STATE_KEYS = (
     "obs_handles_limit",
 )
 _BUNDLE_STATE_KEY_SET = frozenset(BUNDLE_STATE_KEYS)
+# issue 1460 -- the served names of `audio_mix_late_from_log`'s tuple, in its order.
+AUDIO_MIX_LATE_KEYS = ("audio_mix_mixed_late", "audio_mix_frozen", "audio_mix_age_s")
 
 
 def build_bundle_state(**facets):

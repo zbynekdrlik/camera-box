@@ -21,6 +21,10 @@
 #     BUFFERING arm pages RAISED (issue 1381) when it
 #     sits at least one mixer tick above the start: a stall of the audio callback ratcheted it, and
 #     the whole output stays that much later until an OBS restart (15.10.2026: 85 -> 170 ms).
+#   * audio_mix_* -- the mix-wide `audio-telemetry #800 mix: mixed_late=` count (issue 1460),
+#     cumulative since the audio reset. The MIX-LATE arm stores the previous pass's count per box
+#     and pages LATE when it rose: a mix member fell behind the frozen mix window and was
+#     re-anchored, an audible hole on air. A lower count (new audio session) only re-baselines.
 # The MIXER arm also pages STALLED (issue 1385): the newest dump is > 180 s behind the log head
 # while the log head itself is live on the box's own clock (`obs_log_head_age_s` <= 60 s) -- the
 # audio thread stopped while OBS keeps logging, silence on air on a box without VBAN outputs.
@@ -57,7 +61,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,48p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -213,6 +217,8 @@ handle_box() {
   local -a clock_args=()
   local vverdict events loss_ms dest vage loss_txt
   local bverdict bnow bstart bdelta bticks bsrc bage src_txt
+  local mlverdict mlnow mlprev mlage
+  local -a mix_args=()
 
   if body="$(fetch_bundle_json "$ip" AUDIO_MIXER_FETCH_CMD)"; then reachable=1; else reachable=0; body=""; fi
   # issue 1385: the previous pass's log head age feeds the log-clock check (AUDIO_MIXER_NOW_EPOCH is
@@ -223,10 +229,16 @@ handle_box() {
   if [ -n "$prev_head" ] && [ -n "$prev_epoch" ]; then
     clock_args=(--prev-log-head-age-s "$prev_head" --pass-gap-s "$(( now_epoch - prev_epoch ))")
   fi
+  # issue 1460: the MIX-LATE arm compares against the count this watchdog stored on an earlier pass.
+  mlprev="$(read_state_field "${box}_mix_late_prev" "")"
+  case "$mlprev" in
+    '' | *[!0123456789]*) mlprev="" ;;
+    *) mix_args=(--prev-mix-late "$mlprev") ;;
+  esac
   out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
     --tolerance "$TOLERANCE" --over-max "$OVER_MAX" --stale-after-s "$STALE_AFTER_S" \
     --vban-stale-after-s "$VBAN_STALE_AFTER_S" --log-live-s "$LOG_LIVE_S" \
-    ${clock_args[@]+"${clock_args[@]}"} 2>/dev/null)"
+    ${clock_args[@]+"${clock_args[@]}"} ${mix_args[@]+"${mix_args[@]}"} 2>/dev/null)"
   mverdict="$(field "$out" mixer_verdict)"; ticks="$(field "$out" ticks)"
   over="$(field "$out" ticks_over)"; tick_ms="$(field "$out" tick_ms)"; age="$(field "$out" age_s)"
   head_age="$(field "$out" log_head_age_s)"
@@ -242,7 +254,9 @@ handle_box() {
   bstart="$(field "$out" buffering_start_ms)"; bdelta="$(field "$out" buffering_delta_ms)"
   bticks="$(field "$out" buffering_raised_ticks)"; bsrc="$(field "$out" buffering_source)"
   bage="$(field "$out" buffering_age_s)"
-  log "$box ($ip): reachable=$reachable mixer=${mverdict:-<none>} ticks=${ticks} over=${over} tick_ms=${tick_ms} window_ms=${window} age=${age} log_head_age=${head_age} dev=${dev} | vban=${vverdict:-<none>} events=${events} loss_ms=${loss_ms} dest=${dest} age=${vage} | buffering=${bverdict:-<none>} now_ms=${bnow} start_ms=${bstart} delta_ms=${bdelta} ticks=${bticks} source=${bsrc} age=${bage}"
+  mlverdict="$(field "$out" mix_late_verdict)"; mlnow="$(field "$out" mix_late)"
+  mlage="$(field "$out" mix_late_age_s)"
+  log "$box ($ip): reachable=$reachable mixer=${mverdict:-<none>} ticks=${ticks} over=${over} tick_ms=${tick_ms} window_ms=${window} age=${age} log_head_age=${head_age} dev=${dev} | vban=${vverdict:-<none>} events=${events} loss_ms=${loss_ms} dest=${dest} age=${vage} | buffering=${bverdict:-<none>} now_ms=${bnow} start_ms=${bstart} delta_ms=${bdelta} ticks=${bticks} source=${bsrc} age=${bage} | mix_late=${mlverdict:-<none>} now=${mlnow} prev=${mlprev} age=${mlage}"
 
   # MIXER arm
   case "$mverdict" in
@@ -290,6 +304,49 @@ handle_box() {
       handle_arm "$box" "RAISED" "audio-buffering" "audio-buffering" \
         "🚨 Oneskorenie zvuku ($REPO_SLUG): **$box** ($ip) — OBS zvýšil zvukové oneskorenie mixu z ${bstart} ms na **${bnow} ms** (+${bdelta} ms, ${src_txt}). Celý zvukový výstup tohto OBS je teraz o ${bdelta} ms neskôr a ostane tak až do reštartu OBS. Príčinou býva zaseknutie zvukového vlákna (15.10.: 432 ms → +85 ms). Treba rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
     *)       log "$box buffering: unexpected verdict '${bverdict:-<empty>}' -- holding, no page" ;;
+  esac
+
+  handle_mix_late "$box" "$ip" "${mlverdict:-}" "$mlnow" "$mlprev" "$mlage"
+}
+
+# handle_mix_late <box> <ip> <verdict> <now> <prev> <age> -- issue 1460, the MIX-LATE arm
+# (independent, disjoint state, prefix `audio-mix-late`). The stored count `<box>_mix_late_prev` is
+# what LATE is measured against. A rise is a one-pass edge, so on a LATE pass the stored count stays
+# at its pre-rise value until the 2-pass confirm has paged: the second pass still reads LATE, and
+# one real MIXED_LATE event pages. HEALTHY / a first BASELINE / a confirmed page store the current
+# count; SKIP / UNKNOWN / STALE leave it alone. A BASELINE on a LOWER count is a new audio session,
+# whose count started at 0: the stored count becomes 0 and the confirm is left as it is, so the
+# holes of the new session page (review round 1). An unchanged pass after a page is HEALTHY: one
+# machine-channel RECOVERY line (issue 1206), and the next separate rise is a new page.
+handle_mix_late() {
+  local box="$1" ip="$2" verdict="$3" now="$4" prev="$5" age="$6" confirm
+  case "$verdict" in
+    SKIP)    : ;;   # already logged for the mixer arm (same fetch)
+    UNKNOWN) log "$box mix_late: no audio-telemetry #800 mix line (fresh OBS start / older build or gather) -- holding, no page" ;;
+    STALE)   log "$box mix_late: STALE -- newest #800 mix line ${age}s behind the log head -- machine channel only, no page"
+             reset_arm_confirm "$box" "audio-mix-late" ;;
+    BASELINE)
+      if [ -n "$prev" ]; then
+        # a lower count: the audio reset zeroed it, every one of the ${now} events is new
+        log "$box mix_late: BASELINE -- count ${now} below the stored ${prev}: a new audio session -- compared from 0 on the next pass, no page now"
+        write_state_field "${box}_mix_late_prev" 0
+      else
+        log "$box mix_late: BASELINE -- count ${now} (no stored count: first pass) -- stored, no page"
+        handle_healthy_arm "$box" "audio-mix-late"
+        write_state_field "${box}_mix_late_prev" "$now"
+      fi ;;
+    HEALTHY)
+      handle_healthy_arm "$box" "audio-mix-late"
+      write_state_field "${box}_mix_late_prev" "$now" ;;
+    LATE)
+      handle_arm "$box" "LATE" "audio-mix-late" "audio-mixer-mixlate" \
+        "🚨 Zvukový mix ($REPO_SLUG): **$box** ($ip) — člen zvukového mixu OBS nestihol okno mixu a bol znovu zarovnaný (MIXED_LATE): počet stúpol z ${prev} na **${now}** (+$(( now - prev ))). Každé také zarovnanie je počuteľná diera vo zvuku z tohto OBS. Treba zistiť, ktorý zdroj mešká (OBS log: buffering-guard / MIXED_LATE). Potvrdené počas ${CONFIRM_THRESHOLD} kontrol."
+      confirm="$(read_state_field "audio-mix-late_confirm_${box}" 0)"
+      case "$confirm" in '' | *[!0123456789]*) confirm=0 ;; esac
+      if [ "$confirm" -ge "$CONFIRM_THRESHOLD" ]; then
+        write_state_field "${box}_mix_late_prev" "$now"
+      fi ;;
+    *)       log "$box mix_late: unexpected verdict '${verdict:-<empty>}' -- holding, no page" ;;
   esac
 }
 

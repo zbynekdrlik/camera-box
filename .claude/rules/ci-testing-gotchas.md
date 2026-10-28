@@ -1329,6 +1329,9 @@ loops on `[ "$(date +%s)" -lt "$end" ]`, parses ONLY the last JSONL line of the 
 **Also require `message.stop_reason == "end_turn"`** (issue 1346): the reviewer emits intermediate
 text-only assistant lines between tool rounds, so an `assistant ['text']` last line alone fired
 "DONE" while the review was still running.
+**Bound each wait call under 180 s** (issue 1460): the harness moves a foreground Bash call to the
+background after 180 s whatever its `timeout`, and a worker that then ends its turn dies. Loop the
+waiter for ~170 s and call it again while the review still runs.
 **A re-review sent with `SendMessage` to the same (finished) reviewer appends to the SAME output
 file** (issue 1372), whose last line is still the previous round's `end_turn`, so the waiter
 returns at once. Record `wc -l` of the file right after the send and only accept an `end_turn`

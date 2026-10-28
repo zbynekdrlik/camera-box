@@ -112,6 +112,14 @@ goldens. Refresh them only after stubbing the new leaf in each harness:
   keys only gain the new `_timed` name. The windows golden should change only in its
   `gather timing:` lines.
 
+**A new LOG facet the recorded logs never print (issue 1460):** add its line(s) to the synthetic
+`fixtures/bundle_state_split_1386/all_families.txt` at an existing timestamp gap (never as the newest
+line, which would move every head-age facet), add the parser to `_facets` as a NEW key, refresh both
+goldens and diff old vs new. Expect `text_sha256` / `timestamped_tail_lines` to change for the cases
+holding that text, and the inserted bytes to move the `bounded:concat` head/tail cut: an age-only
+facet there can shift by a second (issue 1460: `audio_mixer_age_s` 646 -> 645). Name every such
+input-caused change on the ticket; any other value change is a behaviour change.
+
 The strih/stream `:8899` server (`scripts/bundle-state-server.py` + pure parsers/builders behind
 `scripts/bundle_state_gather.py`) feeds `recording-e2e.sh`'s `[0/8]` version-integrity gate via
 `curl --max-time 30`. Two facets grow expensive with real-world session length and had to be

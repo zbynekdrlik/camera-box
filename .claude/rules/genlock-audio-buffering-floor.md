@@ -354,10 +354,9 @@ so that arm was dropped: a box with no audio encoder keeps stock growth exactly.
   late) is re-anchored on every tick: its audio is dropped, the mix never grows (pinned by
   `late-start-kept-stamp-encoder`: a clip 128 ms late started in place is never mixed; and the frozen
   span of `encoder-on-off`: 700 events, one line). Delaying that one source instead is slice 2b,
-  built only if a `mixed_late` storm is seen live (the owner decides delay vs drop). Nothing pages on
-  it yet: the audio-mixer watchdog does not read `mixed_late`, and the per-source meters read the
-  source before the mix. Paging on a growing `#800 mix: mixed_late=` was reported to the supervisor
-  as a follow-up candidate in the slice-2 lane return.
+  built only if a `mixed_late` storm is seen live (the owner decides delay vs drop). Since issue 1460 the
+  audio-mixer watchdog's MIX-LATE arm pages a rise of `#800 mix: mixed_late=` between two passes
+  (`audio-mixer-watchdog.md`); the per-source meters still read the source before the mix.
 - **Log cadence.** The guard's "first event logs at once" flag is shared across reasons: a source
   that logged a not-mixed or entered line in the last minute logs its first MIXED_LATE only with the
   next minute's line (`+K since the last line` counts it). The counters and `#800` see it at once.
