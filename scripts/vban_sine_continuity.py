@@ -82,7 +82,10 @@ MIN_RATE_BLOCKS = 100
 # grading defaults
 PPM_BOUND = 5.0
 LEN_TOL = 64
-ALIGN_SEARCH = 9600
+# The receiver holds its first second (it plays from ~frame 187, issue 1439 ROZHODNUTÉ 6345255813),
+# so the pilot onset sits up to ~1 s of sender time after the schedule's start: search 1.25 s.
+ALIGN_SEARCH = 60000
+RECEIVER_HOLD_S = 1.0   # the same first-second hold: never played, never a short pilot
 ALIGN_TOL = 960
 MIN_COVERAGE = 0.9
 DIRTY_DB = -30.0
@@ -344,7 +347,7 @@ def grade(analysis, schedule=None, ppm_bound=PPM_BOUND, expect_ppm=None, len_tol
     dur = schedule.get("duration_s")
     if dur:
         want = dur / ratio
-        if analysis["active_s"] < want - 1.0:
+        if analysis["active_s"] < want - 1.0 - RECEIVER_HOLD_S:
             reasons.append("the pilot plays %.1f s of the %.1f s the emulator sent" % (analysis["active_s"], want))
     if analysis["residual_db_p99"] > dirty_db:
         reasons.append("the track is not clean: fit residual p99 %.1f dB relative to the pilot (> %.0f dB) "
