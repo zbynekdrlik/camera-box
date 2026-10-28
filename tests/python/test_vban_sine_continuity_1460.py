@@ -206,7 +206,7 @@ def test_the_receivers_first_second_hold_does_not_hide_the_losses():
 def test_the_held_first_second_is_not_a_short_pilot():
     # Live 28.10.2026 (stress -50): "the pilot plays 599.0 s of the 600.0 s the emulator sent" --
     # the second the receiver holds at the start is never played, by design.
-    g = vs.grade(analyze(synth(19.0)), schedule([], duration_s=20.0))
+    g = vs.grade(analyze(synth(18.5)), schedule([], duration_s=20.0))
     assert not any("the pilot plays" in r for r in g["reasons"]), g["reasons"]
     g2 = vs.grade(analyze(synth(17.5)), schedule([], duration_s=20.0))
     assert any("the pilot plays" in r for r in g2["reasons"]), g2["reasons"]
