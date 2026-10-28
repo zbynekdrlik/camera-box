@@ -130,9 +130,19 @@ elif sub == "record":
         if not os.environ.get("FAKE_STOP_FAILS"):
             if os.path.exists(rec):
                 os.remove(rec)
+            if os.environ.get("FAKE_STOP_LAG"):
+                open(os.path.join(d, "stop-lag"), "w").write(os.environ["FAKE_STOP_LAG"])
         print(os.environ.get("FAKE_REC_PATH", "/srv/_REC/2026-10-22 10-00-00.mkv"))
     elif action == "status":
-        print("active=%s path=" % os.path.exists(rec))
+        # FAKE_STOP_LAG: OBS still finishing the file for the first N status reads after a stop
+        # (live strih-snv 28.10.2026).
+        lag = os.path.join(d, "stop-lag")
+        n = int(open(lag).read()) if os.path.exists(lag) else 0
+        if n > 0:
+            open(lag, "w").write(str(n - 1))
+            print("active=True path=")
+        else:
+            print("active=%s path=" % os.path.exists(rec))
 """
 
 FAKE_BENCH_OBS = r"""#!@PY@
@@ -394,6 +404,17 @@ def _clean_run(rig, log_lines, **extra):
     _synth_recording(rig.fake_dir / "audio.wav", 120.0)
     (rig.fake_dir / "obs.log").write_text("".join(log_lines))
     return rig.run("--run", "--profiles", "clean", "--minutes", "2", "--run-dir", str(rig.run_dir), **extra)
+
+
+def test_a_recording_that_reads_active_for_a_moment_after_stoprecord_still_passes(rig):
+    # Live 28.10.2026: one status read right after StopRecord said active=True while OBS finished
+    # the file, and the bench aborted (exit 5) on a healthy rig.
+    r = _clean_run(rig, [ASRC_LINE % (INPUT, "0.12ppm"),
+                         "13:01:10.000: vban-source '%s': received=22500 lost=0 late=0 reanchors=0\n" % INPUT],
+                   FAKE_STOP_LAG="2", VBAN_BENCH_STOP_POLL_S="0.05")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "still reads" not in out
 
 
 def test_a_clean_profile_passes_end_to_end(rig):
