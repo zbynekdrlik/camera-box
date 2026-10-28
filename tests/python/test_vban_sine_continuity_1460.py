@@ -191,6 +191,18 @@ def test_a_loss_that_moved_the_timeline_fails_once():
     assert not [r for r in g["reasons"] if "phase step" in r]
 
 
+def test_the_receivers_first_second_hold_does_not_hide_the_losses():
+    # Live 28.10.2026 (stress +50): the receiver holds its first second (`emitting ... frame=187`),
+    # so the pilot starts ~1 s of SENDER time late and every loss sits ~1 s before where the grade
+    # looked (a +-0.2 s search): the 4- and 8-packet silences read as "unscheduled".
+    hold = 187 * 256                     # the sender samples the receiver never played
+    p1, p2 = 8 * FS // 256, 14 * FS // 256
+    x = synth(20, holes=[((p1 * 256 - hold) / FS, 1024), ((p2 * 256 - hold) / FS, 2048)])
+    g = vs.grade(analyze(x), schedule([(p1, 4), (p2, 8)]))
+    assert [r["result"] for r in g["losses"]] == ["ok", "ok"], g["reasons"]
+    assert not any("unscheduled" in r for r in g["reasons"]), g["reasons"]
+
+
 def test_unscheduled_silence_fails():
     g = vs.grade(analyze(synth(20, holes=[(9.0, 256)])), schedule([]))
     assert g["verdict"] == "FAIL" and any("unscheduled silence" in r for r in g["reasons"])

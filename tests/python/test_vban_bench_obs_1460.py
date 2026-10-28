@@ -552,6 +552,20 @@ def test_a_late_slot_on_an_earlier_status_row_fails():
     assert any("late=1" in x for x in g["reasons"])
 
 
+def test_the_end_of_stream_fill_is_not_a_lost_packet():
+    # Live 28.10.2026: when the emulator stops, the receiver fills the slots up to its stretch end
+    # (`missing 181 packet(s) before the stretch ended`). That is the sender stopping, never a loss
+    # inside the run: the bench read it as "logged 181 missing packet(s), the emulator dropped 0".
+    lines = [ASRC_OK, "13:03:00.000: source '%s': missing 1 packet(s) before frame 22503 -- concealed: "
+             "the previous packet repeated, crossfaded" % NAME,
+             "13:12:00.000: source '%s': missing 181 packet(s) before the stretch ended -- silence for "
+             "those slots" % NAME]
+    r = vl.rows(lines, NAME)
+    assert r["missing_packets_total"] == 1 and r["missing_packets_events"] == 1, r
+    g = vl.grade(r, expected_lost=1)
+    assert not any("missing packet(s)" in x for x in g["reasons"]), g["reasons"]
+
+
 def test_the_log_cli(tmp_path):
     log = tmp_path / "obs.log"
     log.write_text(ASRC_OK + "\n")
