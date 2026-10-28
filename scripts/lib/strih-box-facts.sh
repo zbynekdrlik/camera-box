@@ -688,6 +688,13 @@ strih_lx_audio_buffering_ms() { strih_box_fact STRIH_AUDIO_BUFFERING_MS; }
 # no N twice, transport cambox-relay | sbc-relay | ethernet-rest (bkshading/service/src/config.rs; never
 # Bluetooth), host a host name / address that starts with a letter or digit, port 1..65535. Each problem is
 # one stderr line starting with PREFIX. The ONE grammar of the fact: the loader and the seed both call it.
+# _strih_box_relay_id ID -> 0 when ID is a relay registration id: 1-64 of [A-Za-z0-9._-] (the set the
+# bkshading service accepts, bkshading/service/src/registry.rs valid_relay_id). Spelled out, never a range.
+_strih_box_relay_id() {
+  local LC_ALL=C lower='abcdefghijklmnopqrstuvwxyz' upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ' digit='0123456789'
+  [ "${#1}" -ge 1 ] && [ "${#1}" -le 64 ] && [[ "$1" =~ ^[${lower}${upper}${digit}._-]+$ ]]
+}
+
 strih_box_bkshading_relays_ok() {
   local v="${1-}" p="${2-}" cams="${3-}" e n rest transport hp host port bad=0 seen=" "
   [ "$v" = none ] && return 0
@@ -708,10 +715,18 @@ strih_box_bkshading_relays_ok() {
       cambox-relay|sbc-relay|ethernet-rest) ;;
       *) echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': transport '${transport}' must be cambox-relay, sbc-relay or ethernet-rest" >&2; bad=1 ;;
     esac
-    host="${hp%:*}"; port="${hp##*:}"; rest="$hp"
-    if [ "$host" = "$rest" ] || ! _strih_box_host "$host" || [[ ! "$port" =~ ^[123456789][0123456789]{0,4}$ ]] \
-       || [ "$port" -gt 65535 ]; then
-      echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': '${hp}' is not host:port (port 1..65535)" >&2; bad=1
+    # issue 808 (owner 28.10.2026): a handheld SBC is named by the id it registers with
+    # (`register:<id>`), never by its DHCP address; only an sbc-relay may be.
+    if [[ "$hp" == register:* ]]; then
+      if [ "$transport" != sbc-relay ] || ! _strih_box_relay_id "${hp#register:}"; then
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': register:<id> is only for an sbc-relay, id 1-64 of [A-Za-z0-9._-]" >&2; bad=1
+      fi
+    else
+      host="${hp%:*}"; port="${hp##*:}"; rest="$hp"
+      if [ "$host" = "$rest" ] || ! _strih_box_host "$host" || [[ ! "$port" =~ ^[123456789][0123456789]{0,4}$ ]] \
+         || [ "$port" -gt 65535 ]; then
+        echo "${p}STRIH_BKSHADING_RELAYS entry '${e}': '${hp}' is not host:port (port 1..65535)" >&2; bad=1
+      fi
     fi
     # owner 26.10.2026: a panel lists ITS venue's cameras only (STRIH_CAMERAS, the 3rd argument when given).
     if [ -n "$cams" ] && [[ " ${cams} " != *" ${n} "* ]]; then
