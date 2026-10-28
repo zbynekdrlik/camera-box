@@ -11,6 +11,7 @@ Tier-0: numpy + ffmpeg (the CI python job installs it), no rig, no cargo.
 """
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -212,6 +213,127 @@ def test_the_held_first_second_is_not_a_short_pilot():
     assert any("the pilot plays" in r for r in g2["reasons"]), g2["reasons"]
 
 
+def _conceal(x, at_s, slots):
+    """The issue-1439 receiver's concealment of `slots` lost packets at at_s: the previous packet
+    repeated in place (the timeline keeps running), so the pilot has no silence there."""
+    a = int(round(at_s * FS))
+    n = slots * 256
+    y = x.copy()
+    y[a:a + n] = np.tile(x[a - 256:a], slots)
+    return y
+
+
+def scheduled(x, sched, hold_frames=0, **kw):
+    kw.setdefault("settle_s", 1.0)
+    return vs.analyze_scheduled(x, sched, hold_frames, pilot_hz=F, **kw)
+
+
+def test_the_conceal_bound_is_the_receivers_own():
+    # the grade's bound must be the one the receiver conceals with, never a second copy of the rule
+    header = (SCRIPTS.parent / "vendor/obs-vban/src/vban-receive-timeline.h").read_text()
+    m = re.search(r"^#define VBAN_RECV_CONCEAL_MAX_SLOTS (\d+)u?$", header, re.M)
+    assert m, "the receiver's conceal bound moved"
+    assert vs.CONCEAL_MAX_SLOTS == int(m.group(1))
+
+
+@pytest.mark.parametrize("slots", [1, 2, 3])
+def test_a_concealed_short_loss_is_graded_by_the_timeline_across_it(slots):
+    # issue 1439 ROZHODNUTÉ 6352253147 b: a run of <= 3 lost slots between two received packets is
+    # concealed (the previous packet repeated), never silence. Live 29.10.2026 (lv1): the grade asked
+    # for silence and read the repeat's phase as -1.3 / -1.7 sample steps.
+    p1, p2 = 8 * FS // 256, 14 * FS // 256
+    x = _conceal(_conceal(synth(20), p1 * 256 / FS, slots), p2 * 256 / FS, 1)
+    sched = schedule([(p1, slots), (p2, 1)])
+    a = scheduled(x, sched)
+    assert len(a["excluded"]) == 2
+    g = vs.grade(a, sched)
+    assert [r["result"] for r in g["losses"]] == ["concealed", "concealed"], g["reasons"]
+    assert all(abs(r["bridge_samples"]) < 0.1 for r in g["losses"])
+    assert g["verdict"] == "PASS", g["reasons"]
+
+
+def test_the_step_detector_alone_cannot_judge_a_concealed_loss():
+    # why the bridge is needed: the same intact-timeline repeat read inside one run of blocks
+    p1 = 8 * FS // 256
+    a = analyze(_conceal(synth(20), p1 * 256 / FS, 3))
+    assert a["steps"], "the repeat's phase no longer reads as a step; the exclusion may be unneeded"
+
+
+def test_the_windows_follow_the_senders_rate():
+    # a +50 ppm sender: sender sample s plays at recording sample r0 + s / (1 + ppm). Late in a
+    # 10-minute run the wrong direction (s x (1 + ppm)) is ~1000 samples off, more than the pad.
+    onset, hold, s = 400000, 187, 20_000_000
+    a = {"active_start": onset, "rate_ppm": 50.0, "silence_slots": []}
+    sched = dict(schedule([(s // 256, 1)], duration_s=600.0, ppm=50.0))
+    (lo, hi, i), = vs.conceal_windows(a, sched, hold)
+    ratio = 1.0 + 50e-6
+    right = onset - hold * 256 / ratio + s / ratio
+    wrong = onset - hold * 256 * ratio + s * ratio
+    assert i == 0 and lo < right < right + 256 / ratio < hi
+    assert not lo < wrong < hi
+    assert hi - lo == pytest.approx(256 / ratio + 2 * vs.CONCEAL_PAD, abs=2)
+
+
+def test_a_concealed_loss_that_moved_the_timeline_fails():
+    # concealment is still a loss: the timeline must not move across it
+    p1 = 8 * FS // 256
+    t = p1 * 256 / FS
+    x = _conceal(synth(20, jumps=[(t + 256 / FS, 2)]), t, 1)
+    sched = schedule([(p1, 1)])
+    g = vs.grade(scheduled(x, sched), sched)
+    assert g["verdict"] == "FAIL"
+    assert [r["result"] for r in g["losses"]] == ["timeline moved"]
+    assert any("across the concealed loss" in r and "+2.00" in r for r in g["reasons"]), g["reasons"]
+    assert not any("phase step" in r for r in g["reasons"]), g["reasons"]
+
+
+def test_a_dropped_short_loss_is_a_timeline_move():
+    # a receiver that dropped the slot (no silence, no repeat) moved the timeline by one packet
+    p1 = 8 * FS // 256
+    sched = schedule([(p1, 1)])
+    g = vs.grade(scheduled(synth(20, jumps=[(p1 * 256 / FS, 256)]), sched), sched)
+    assert [r["result"] for r in g["losses"]] == ["timeline moved"], g["reasons"]
+    assert g["losses"][0]["bridge_samples"] == pytest.approx(mod_period(256), abs=0.1)
+
+
+def test_a_long_loss_without_silence_still_fails():
+    # a run over CONCEAL_MAX_SLOTS is never concealed: no silence there is a dropped run
+    p1 = 8 * FS // 256
+    n = vs.CONCEAL_MAX_SLOTS + 1
+    sched = schedule([(p1, n)])
+    a = scheduled(synth(20, jumps=[(p1 * 256 / FS, n * 256)]), sched)
+    assert a["excluded"] == []
+    g = vs.grade(a, sched)
+    assert any("no silence slot" in r for r in g["reasons"]), g["reasons"]
+
+
+def test_a_short_loss_played_as_silence_is_still_ok():
+    # the receiver decides at the deadline from what it stored: silence at a short loss is allowed
+    p1 = 8 * FS // 256
+    sched = schedule([(p1, 2)])
+    g = vs.grade(scheduled(synth(20, holes=[(p1 * 256 / FS, 512)]), sched), sched)
+    assert [r["result"] for r in g["losses"]] == ["ok"], g["reasons"]
+    assert g["verdict"] == "PASS", g["reasons"]
+
+
+def test_the_receivers_held_frames_place_the_conceal_windows():
+    # the recording starts at the receiver's first played frame (frame=187): sender sample s sits
+    # at onset + s - 187 x 256, with no silence slot to fit the offset from
+    hold = 187
+    p1 = 2000
+    x = _conceal(synth(20), (p1 - hold) * 256 / FS, 2)
+    sched = schedule([(p1, 2)])
+    a = scheduled(x, sched, hold_frames=hold)
+    w = a["excluded"][0]
+    assert w["from_sample"] < (p1 - hold) * 256 < w["to_sample"]
+    g = vs.grade(a, sched)
+    assert [r["result"] for r in g["losses"]] == ["concealed"], g["reasons"]
+    assert g["verdict"] == "PASS", g["reasons"]
+    # the wrong hold puts the window 1 s off: the repeat is then read as steps again
+    g0 = vs.grade(scheduled(x, sched, hold_frames=0), sched)
+    assert g0["verdict"] == "FAIL"
+
+
 def test_unscheduled_silence_fails():
     g = vs.grade(analyze(synth(20, holes=[(9.0, 256)])), schedule([]))
     assert g["verdict"] == "FAIL" and any("unscheduled silence" in r for r in g["reasons"])
@@ -280,6 +402,39 @@ def test_an_aac_recording_keeps_the_silence_and_the_step(tmp_path):
     assert a["residual_db_p99"] < vs.DIRTY_DB
     g = vs.grade(a, schedule([(p1, 1)]))
     assert g["reasons"] == ["phase step of +1.00 samples at %.3f s" % a["steps"][0]["time_s"]]
+
+
+def test_an_aac_recording_of_a_concealed_loss_is_graded_concealed(tmp_path):
+    # the live acceptance shape: the receiver held 187 frames, then concealed 1 / 2 / 3 packets,
+    # through OBS's recording codec, graded by the CLI with --hold-frames
+    hold = 187
+    losses = [(1800, 1), (2600, 2), (3400, 3)]
+    x = synth(20)
+    for p, c in losses:
+        x = _conceal(x, (p - hold) * 256 / FS, c)
+    wav, mkv = tmp_path / "in.wav", tmp_path / "out.mkv"
+    _write_wav(wav, x)
+    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(wav), "-c:a", "aac", "-b:a", "160k",
+                    str(mkv)], check=True)
+    sched = tmp_path / "s.json"
+    sched.write_text(json.dumps(schedule(losses)))
+    cmd = [sys.executable, str(SCRIPTS / "vban_sine_continuity.py"), str(mkv), "--schedule", str(sched),
+           "--settle-s", "1", "--hold-frames", str(hold), "--json"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    doc = json.loads(r.stdout)
+    assert [row["result"] for row in doc["grade"]["losses"]] == ["concealed"] * 3, doc["grade"]["reasons"]
+    assert r.returncode == 0 and doc["verdict"] == "PASS", doc["grade"]["reasons"]
+    assert doc["hold_frames"] == hold
+    r2 = subprocess.run(cmd[:-1], capture_output=True, text=True)
+    assert r2.returncode == 0 and r2.stdout.count("was concealed, the timeline held") == 3, r2.stdout
+
+
+def test_the_cli_refuses_a_negative_hold(tmp_path):
+    wav = tmp_path / "rec.wav"
+    _write_wav(wav, synth(5))
+    r = subprocess.run([sys.executable, str(SCRIPTS / "vban_sine_continuity.py"), str(wav), "--hold-frames", "-1"],
+                       capture_output=True, text=True)
+    assert r.returncode == 3 and "--hold-frames" in r.stderr
 
 
 def test_the_cli_grades_a_file_against_its_schedule(tmp_path):
