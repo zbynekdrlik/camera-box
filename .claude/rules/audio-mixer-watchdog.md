@@ -257,8 +257,12 @@ Before this arm only the E2E (`program_audio_continuity.py`) and verify item 48 
 - **A lower count = a new audio session (review round 1).** Its count started at 0 at the reset, so
   every one of its events is a hole nobody was paged about: the watchdog stores 0 (not the new count)
   and leaves the confirm as it is, so the next pass reads LATE against 0 and pages. A count that
-  reset to exactly 0 reads HEALTHY next. A rise seen only before the reset is not paged separately
-  when the new session is clean (the stated residual).
+  reset to exactly 0 reads HEALTHY next. Stated residuals (review round 2): a rise seen only before
+  the reset is not paged when the new session is clean; the arm has no session identity, so a new
+  session whose count is already EQUAL to the stored one reads HEALTHY (its holes missed) and a
+  higher one pages with an under-stated delta (closing it needs a session marker, e.g. the age of
+  the reset block's `buffering type:` line); a storm that survives an OBS restart while the arm is
+  throttled stays one incident (up to the 12-pass window).
 - **Paging cadence.** A count that rises on CONSECUTIVE passes is one incident under the arm + box
   throttle (12 passes). The first UNCHANGED pass after a page is HEALTHY: one machine-channel
   RECOVERY line and the throttle cleared, so the next separate rise pages again (two passes later,
