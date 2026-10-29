@@ -1551,12 +1551,17 @@ EOF
 
 # strih_bkshading_config_text [BIND] [RELAYS] [CAMERAS] -> the operator config seed for
 # /etc/bkshading/bkshading.toml. BIND defaults to the service's own default_bind (bkshading/service/src/config.rs
-# "0.0.0.0:8770"). One block per camera of the box's OWN venue (CAMERAS, default the loaded fact STRIH_CAMERAS;
-# owner 26.10.2026: strih-snv 2 3 5, strih-pp 1 4 6 7, all seven only at a joint event), and a handheld SBC is
-# the CONTROL of the cambox its video reaches, never its own panel (owner ruling 5977504457 on issue 808), so
-# every block keeps its cambox's NDI preview `CAMN (usb)` + grab_fps 60. RELAYS (default: the loaded box's fact STRIH_BKSHADING_RELAYS) is
-# `none` or `N=<transport>@<host>:<port>` overrides of the default cambox-relay at camN.lan:8771 (the
-# service connects OUT to each relay). A wrong RELAYS prints nothing and returns 1, never a partial config.
+# "0.0.0.0:8770"). The box's OWN venue cameras first (CAMERAS, default the loaded fact STRIH_CAMERAS;
+# owner 26.10.2026: strih-snv 2 3 5, strih-pp 1 4 6 7), then every other camera as a `visiting` block: issue 1431
+# makes strih.lan the ONE switch, every cambox relay registers itself as camN with the strih behind it, and the
+# service's camera list is static, so both strih boxes declare all seven. A visiting block is listed only once
+# its relay registered, so a normal event still shows only the venue's cameras (the 26.10. ruling). A venue
+# cambox block is `register:camN` with its literal relay as `fallback_address` (a relay that never registers,
+# an older binary). A handheld SBC is the CONTROL of the cambox its video reaches, never its own panel (owner
+# ruling 5977504457 on issue 808), so every block keeps its cambox's NDI preview `CAMN (usb)` + grab_fps 60.
+# RELAYS (default: the loaded box's fact STRIH_BKSHADING_RELAYS) is `none` or `N=<transport>@<host>:<port>`
+# overrides of the default cambox-relay at camN.lan:8771; an sbc-relay override is written as it is. A wrong
+# RELAYS prints nothing and returns 1, never a partial config.
 # Seeded ONLY IF absent (setup-strih step 16c [ ! -f ] guard) so the operator's live edits are kept.
 strih_bkshading_config_text() {
   local bind="${1:-0.0.0.0:8770}" relays cams n e transport address
@@ -1577,6 +1582,9 @@ strih_bkshading_config_text() {
 # bkshading service config (issue 808 / issue 1353), seeded by setup-strih step 16c. The panel lists
 # this venue's cameras (STRIH_CAMERAS: ${cams}), one block per cambox; a handheld SBC relay controls the
 # block of the cambox its video reaches (owner ruling 5977504457). Edit the live camera/relay set on the box.
+# Issue 1431: every cambox relay registers itself as camN with the strih behind strih.lan. A venue camera is
+# reached through that registration, else its fallback_address; a visiting camera (the other venue's) is
+# listed only once its relay registered here, at a joint event.
 
 # Web panel bind address (the operator opens http://strih.lan:8770/).
 bind = "${bind}"
@@ -1594,9 +1602,19 @@ EOF
     printf '\n[[camera]]\nid = "cam%s"\nlabel = "Cam %s"\n' "$n" "$n"
     if [ "$transport" = sbc-relay ]; then
       printf "# a handheld SBC relay controls this cambox's camera (owner ruling 5977504457)\n"
+      printf 'transport = "%s"\naddress = "%s"\n' "$transport" "$address"
+    else
+      printf 'transport = "%s"\naddress = "register:cam%s"\nfallback_address = "%s"\n' \
+        "$transport" "$n" "$address"
     fi
-    printf 'transport = "%s"\naddress = "%s"\nndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' \
-      "$transport" "$address" "$n"
+    printf 'ndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' "$n"
+  done
+  for n in 1 2 3 4 5 6 7; do
+    case " $cams " in *" $n "*) continue ;; esac
+    printf '\n[[camera]]\nid = "cam%s"\nlabel = "Cam %s"\n' "$n" "$n"
+    printf '# the other venue'"'"'s camera: listed once its relay registers here (issue 1431, a joint event)\n'
+    printf 'transport = "cambox-relay"\naddress = "register:cam%s"\nvisiting = true\n' "$n"
+    printf 'ndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' "$n"
   done
 }
 
