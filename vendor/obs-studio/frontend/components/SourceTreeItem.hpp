@@ -51,6 +51,8 @@ private:
 	QCheckBox *lock = nullptr;
 	QHBoxLayout *boxLayout = nullptr;
 	OBSSourceLabel *label = nullptr;
+	/* camera-box issue 1387: the transport tag (NDI / JPEG XS) after the name, by source kind */
+	QLabel *transportLabel = nullptr;
 
 	QLineEdit *editor = nullptr;
 

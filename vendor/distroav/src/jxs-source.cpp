@@ -36,6 +36,7 @@
 #include "plugin-support.h"
 #include "camera_box_jxs.h"
 #include "jxs-source-decide.h"
+#include "jxs-state-table.h"
 
 #define JXS_SOURCE_ID "camera_box_jxs_source"
 
@@ -146,7 +147,17 @@ static void jxs_output_frame(jxs_source *s, const cbjxs_frame &f)
 	obs_source_output_video(s->source, &frame);
 }
 
-/* The 5 s status line: this window's deltas of the receiver counters. */
+/* This source's row in the JPEG XS state table (the frontend indicator, issue 1387): its name
+ * (refreshed: a rename) and what it listens on. */
+static void jxs_state_entry(jxs_source *s, const cb_jxs_config &cfg)
+{
+	char detail[96];
+	snprintf(detail, sizeof detail, "UDP %u, camera %u", (unsigned)cfg.port, (unsigned)cfg.camera);
+	cb_jxs_state().set_entry(s, CB_JXS_STATE_INPUT, obs_source_get_name(s->source), detail);
+}
+
+/* The 5 s status line: this window's deltas of the receiver counters (also the window the state
+ * table publishes). */
 static void jxs_log_status(jxs_source *s, const cbjxs_stats &now, const cbjxs_stats &prev, double window_s,
 			   uint32_t width, uint32_t height, uint64_t reopens)
 {
@@ -163,6 +174,10 @@ static void jxs_log_status(jxs_source *s, const cbjxs_stats &now, const cbjxs_st
 		reopens, now.header_changes - prev.header_changes, bpp_x100 / 100u, bpp_x100 % 100u,
 		now.reports_sent - prev.reports_sent, now.report_errors - prev.report_errors,
 		now.dropped_unread - prev.dropped_unread, now.foreign - prev.foreign, (unsigned)now.camera_id);
+	const double fps = window_s > 0.0 ? (double)frames / window_s : 0.0;
+	cb_jxs_state().publish_window(s, (uint32_t)(fps * 100.0 + 0.5), bpp_x100, now.lost_slices - prev.lost_slices,
+				      undecodable, now.dropped_unread - prev.dropped_unread,
+				      now.report_errors - prev.report_errors, -1);
 }
 
 /* Sleep up to `ns` in 50 ms steps, returning early when the source stops. */
@@ -176,6 +191,11 @@ static void jxs_sleep(jxs_source *s, uint64_t ns)
 static void jxs_thread(jxs_source *s)
 {
 	os_set_thread_name("jxs-source");
+	{
+		/* in the table from the start: a source no sender reaches reads DOWN, not absent */
+		uint64_t gen0 = 0;
+		jxs_state_entry(s, jxs_read_config(s, &gen0));
+	}
 	cbjxs_receiver *rx = nullptr;
 	uint64_t open_gen = 0;
 	cb_jxs_config open_cfg = {};
@@ -234,6 +254,7 @@ static void jxs_thread(jxs_source *s)
 			}
 			open_failure_logged = false;
 			open_cfg = cfg;
+			jxs_state_entry(s, cfg);
 			if (opens++ > 0)
 				reopens_window++;
 			cbjxs_get_stats(rx, &prev);
@@ -252,6 +273,7 @@ static void jxs_thread(jxs_source *s)
 			width = f.width;
 			height = f.height;
 			last_frame_ns = now;
+			cb_jxs_state().note_frame(s, now);
 		} else if (r < 0) {
 			char e[256] = "";
 			cbjxs_take_error(rx, e, sizeof e);
@@ -267,6 +289,7 @@ static void jxs_thread(jxs_source *s)
 		if (now - last_status_ns >= CB_JXS_STATUS_PERIOD_NS) {
 			cbjxs_stats st = {};
 			cbjxs_get_stats(rx, &st);
+			jxs_state_entry(s, open_cfg);
 			jxs_log_status(s, st, prev, (double)(now - last_status_ns) / 1e9, width, height, reopens_window);
 			char e[256] = "";
 			if (cbjxs_take_error(rx, e, sizeof e) > 0)
@@ -280,6 +303,7 @@ static void jxs_thread(jxs_source *s)
 	if (rx)
 		cbjxs_close(rx);
 	jxs_set_connected(s, false);
+	cb_jxs_state().remove(s);
 }
 
 static const char *jxs_source_getname(void *)
@@ -362,4 +386,22 @@ struct obs_source_info create_jxs_source_info()
 	info.destroy = jxs_source_destroy;
 	info.icon_type = OBS_ICON_TYPE_CAMERA;
 	return info;
+}
+
+/* camera-box issue 1387: the JPEG XS state table, read by the frontend's JPEG XS indicator once a
+ * second. A libobs proc handler on the global handler (no new link between the plugin and the
+ * frontend); a build without this plugin part (the Windows bundle) has no such procedure, and the
+ * frontend reads that as OFF. The returned JSON is a copy: nothing outside the table's mutex is
+ * shared. */
+static void jxs_state_proc(void *, calldata_t *cd)
+{
+	const std::string json = cb_jxs_state().json(os_gettime_ns());
+	calldata_set_string(cd, "json", json.c_str());
+}
+
+void camera_box_jxs_state_register()
+{
+	proc_handler_add(obs_get_proc_handler(), "void camera_box_jxs_state(out string json)", jxs_state_proc,
+			 nullptr);
+	obs_log(LOG_INFO, "jxs-state-proc: camera_box_jxs_state registered on the global proc handler (issue 1387)");
 }
