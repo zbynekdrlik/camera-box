@@ -107,6 +107,13 @@ pub fn p216_line_stride_bytes(width: usize) -> usize {
     width * 2
 }
 
+/// What `NdiSender` hands the SDK for a converted P216 frame: the FourCC and
+/// `line_stride_in_bytes`. One place, so the send wiring is pinned by a test.
+pub fn p216_send_params(width: usize) -> (u32, usize) {
+    let _ = width;
+    (0, 0)
+}
+
 /// Why a frame could not be converted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum P216Error {
@@ -363,10 +370,13 @@ mod tests {
 
     #[test]
     fn the_avx2_kernel_itself_is_bit_exact_with_scalar_1387() {
-        // Directly against the AVX2 kernel (the dispatcher may fall back on a CPU without it).
-        if !avx2_available() {
-            return;
-        }
+        // Directly against the AVX2 kernel (the dispatcher would fall back on a CPU without
+        // it, so a missing AVX2 must FAIL here, never pass silently).
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            avx2_available(),
+            "AVX2 is required to verify the AVX2 kernel"
+        );
         #[cfg(target_arch = "x86_64")]
         for &w in &[16usize, 18, 32, 46, 1920] {
             let src = pattern(w, 2, w * 2, 11);
@@ -482,6 +492,25 @@ mod tests {
             assert!(line.contains(fourcc) && line.contains("UYVY"), "{line}");
             assert!(line.contains("issue 1387"), "{line}");
         }
+    }
+
+    #[test]
+    fn the_send_params_are_the_p216_fourcc_and_the_luma_stride_1387() {
+        assert_eq!(p216_send_params(1920), (NDI_FOURCC_P216, 3840));
+        assert_eq!(p216_send_params(2), (NDI_FOURCC_P216, 4));
+        // A padded V4L2 source stride never leaks into the P216 stride: it depends on width only.
+        assert_eq!(p216_send_params(1280).1, p216_line_stride_bytes(1280));
+    }
+
+    #[test]
+    fn the_avx2_dispatch_is_really_exercised_on_x86_64_1387() {
+        // The bit-exact tests compare ConvertPath::Avx2 against Scalar; on x86_64 the AVX2
+        // path must really run, or they would compare scalar with itself.
+        #[cfg(target_arch = "x86_64")]
+        assert!(
+            avx2_available(),
+            "AVX2 is required on x86_64 for the bit-exact tests"
+        );
     }
 
     #[test]
