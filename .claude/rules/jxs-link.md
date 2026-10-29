@@ -179,12 +179,21 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     current bpp steps straight to it (clamped to the floor).
   - UP one step after 10 clean seconds in a row: frames sent, encode p99 < 60 % of the budget,
     nothing dropped, no encode error, a FRESH (<= 3 s) clean report about the current bpp. Never
-    above `max` or the receiver's cap. One unclean second restarts the count.
+    above `max` or the receiver's cap. One unclean second, or a second whose report is not yet
+    about the current bpp, restarts the count. One report counts for ONE clean second (its seq
+    must move on; a receiver reporting slower than the tick is not credited twice).
+  - A report of a receiver that finished NO frame but lost slices (everything is being lost)
+    counts as a loss at the current bpp.
   - NO report for 3 s: hold, both ways (never climb blind; a silent receiver also never steps
     the sender down).
   - Back-off: every step down from level L doubles the clean run needed to climb back to L
     (10, 20, 40 ... capped at 300 s); 30 min clean below it halves it again. A refused session at
-    a level counts as a failure of it.
+    a level counts as a failure of it. A receiver CAP adds no back-off (it is the receiver's
+    policy, not a failure of the levels above it). `jxs_auto_bpp::LEVELS` (33) bounds the tracked
+    levels; `MAX_BPP` (12) is const-asserted below it.
+  - Reading the reports consumes the ICMP "port unreachable" a dead receiver queues on the
+    connected socket; `JxsSocket::take_read_errors` adds those to `send_errors=`, so a receiver
+    that is not listening still shows there.
   - While a step is being applied nothing else is decided (`Hold::Pending`).
 - **How a step reaches the encoder: a NEW session, swapped at a frame boundary.** SVT-JPEG-XS has
   no call that changes the bpp of a live session (`svt_jpeg_xs_encoder_init` reads it once). The
@@ -230,11 +239,15 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
   = 50 is the suggested value, below the capture's 90). The feeder raises itself with
   `affinity::set_current_thread_fifo_inherited` (FIFO WITHOUT reset-on-fork) right before it opens
   a session, so the library's worker threads (created inside the open) inherit it: the ONE
-  deliberate exception to the reset-on-fork rule, documented in affinity.rs. Why opt-in: (1) the
-  measured gain on an idle pair is ~0.8 ms at p99 and the budget has 2x headroom; (2) it would
-  put 5 more SCHED_FIFO threads into camera-box, over verify-device `(ah)`'s ceiling of 4, so
-  making it the default needs `(ah)` to count the `jxs-feed`-named threads apart (they carry the
-  feeder's name, inherited) -- a live A/B with the HDMI preview running decides it first.
+  deliberate exception to the reset-on-fork rule, documented in affinity.rs. `jxs-send` takes the
+  same priority (`raise_fifo`): a FIFO encoder beside a SCHED_OTHER packet thread on the same
+  cores would delay the previous frame's slices. Why opt-in: (1) the measured gain on an idle
+  pair is ~0.8 ms at p99 and the budget has 2x headroom; (2) it puts 6 more SCHED_FIFO threads
+  into camera-box (`jxs-feed`, `jxs-send`, 2 slice + init + final), and while a prepared session
+  waits for its swap its 4 workers double that, all over verify-device `(ah)`'s ceiling of 4, so
+  making it the default needs `(ah)` to count the `jxs-feed`/`jxs-send`-named threads apart (the
+  workers carry the feeder's name, inherited) -- a live A/B with the HDMI preview running decides
+  it first.
 - **The HDMI preview cannot move off the encoder cores without touching capture:** on the 4-core
   cambox core 3 is capture, core 2 the reserved capture-IRQ core that must stay quiet (issues
   1198 / 1367 measured drops with the preview there); 0-1 are the only general cores. Read live

@@ -241,7 +241,7 @@ impl AutoBpp {
         let from = self.current;
         // every level from `to + 1` up to `from` proved too much -- except under a receiver's
         // cap, which is the receiver's policy, not a failure of those levels
-        if to < from {
+        if to < from && reason != StepReason::ReceiverCap {
             for l in to + 1..=from {
                 self.penalize(l);
             }
@@ -276,7 +276,8 @@ impl AutoBpp {
         // finished NO frame at all but lost slices (everything is being lost) is about now.
         let about_current = |r: &ReceiverReport| {
             self.current_since_tc.is_some_and(|since| {
-                r.frames > 0 && r.last_timecode_100ns >= since
+                (r.frames > 0 && r.last_timecode_100ns >= since)
+                    || (r.frames == 0 && r.lost_slices > 0)
             })
         };
         if let Some(r) = fresh {
@@ -313,6 +314,8 @@ impl AutoBpp {
             return Decision::Hold(Hold::NoHeadroom);
         }
         if !about_current(&r) {
+            // no evidence about the current bpp: the run of clean seconds is broken
+            self.streak = 0;
             return Decision::Hold(Hold::ReportNotYetCurrent);
         }
         if r.lost_slices > 0 || r.late_frames > 0 {
@@ -321,7 +324,7 @@ impl AutoBpp {
             return Decision::Hold(Hold::NoHeadroom);
         }
         let needed = self.needed_for(self.current + 1);
-        if self.counted_seq == Some(r.seq) && false {
+        if self.counted_seq == Some(r.seq) {
             // one report counts for one clean second: a receiver reporting slower than the tick
             // is not credited twice (neither clean nor broken: wait for its next report)
             return Decision::Hold(Hold::Counting {

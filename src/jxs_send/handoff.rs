@@ -234,6 +234,23 @@ pub(super) fn spawn(
         .then_some(h)
 }
 
+/// The opt-in SCHED_FIFO (`CAMERA_BOX_JXS_FIFO_PRIO`) for the calling sender thread. Both sender
+/// threads take it: an encoder at FIFO beside a SCHED_OTHER packet thread on the same cores would
+/// delay the slices of the frame before it.
+fn raise_fifo(label: &str, fifo: Option<i32>) {
+    let Some(prio) = fifo else { return };
+    if crate::affinity::set_current_thread_fifo_inherited(prio) {
+        tracing::info!(
+            "jxs send: {label} SCHED_FIFO {prio} (below the capture's {}) (issue 1387)",
+            crate::affinity::CAPTURE_FIFO_PRIORITY
+        );
+    } else {
+        tracing::warn!(
+            "jxs send: {label}: SCHED_FIFO {prio} refused (needs CAP_SYS_NICE) -- SCHED_OTHER (issue 1387)"
+        );
+    }
+}
+
 fn pin(label: &str, cores: &[usize]) {
     #[cfg(target_os = "linux")]
     if !crate::affinity::pin_current_thread_to(cores) {
@@ -385,6 +402,8 @@ impl Sessions {
             }
             Err(_) => {
                 self.refused_geometry = Some((w, h));
+                // a step the controller waits on is not coming (else it holds Pending for good)
+                job_tx.send(Job::Refused { bpp: want }).map_err(|_| ())?;
                 Ok(false)
             }
         }
@@ -432,20 +451,9 @@ fn feed(
     fifo: Option<i32>,
 ) {
     pin("jxs-feed", &cores);
-    if let Some(prio) = fifo {
-        // inherited by the library's worker threads (created inside the session open), the
-        // one deliberate exception to the reset-on-fork rule (affinity.rs)
-        if crate::affinity::set_current_thread_fifo_inherited(prio) {
-            tracing::info!(
-                "jxs send: encoder threads SCHED_FIFO {prio} (below the capture's {}) (issue 1387)",
-                crate::affinity::CAPTURE_FIFO_PRIORITY
-            );
-        } else {
-            tracing::warn!(
-                "jxs send: SCHED_FIFO {prio} refused (needs CAP_SYS_NICE) -- the encoder stays SCHED_OTHER (issue 1387)"
-            );
-        }
-    }
+    // inherited by the library's worker threads (created inside the session open), the one
+    // deliberate exception to the reset-on-fork rule (affinity.rs)
+    raise_fifo("jxs-feed and the encoder threads", fifo);
     let mut s = Sessions {
         threads: slice_threads_for(&cores),
         cores,
@@ -659,6 +667,7 @@ fn send(
     want: Arc<AtomicU32>,
 ) {
     pin("jxs-send", &cores);
+    raise_fifo("jxs-send", opts.fifo);
     let mut output: Option<EncoderOutput> = None;
     let mut window = SendWindow::default();
     let mut bpp = BppControl::new(opts, want);
@@ -778,7 +787,7 @@ fn send(
                 }
             }
         }
-        window.send_errors += errors;
+        window.send_errors += errors + socket.take_read_errors();
     }
 }
 

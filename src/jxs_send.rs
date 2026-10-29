@@ -58,6 +58,9 @@ pub struct JxsSocket {
     gso: AtomicBool,
     /// `None` = the kernel accepted [`JXS_SOCKET_MARK`]; else the errno it answered.
     mark_error: Option<i32>,
+    /// Socket errors (a receiver that is not listening: ECONNREFUSED) [`Self::take_report`]
+    /// consumed instead of the next send.
+    read_errors: AtomicU64,
 }
 
 impl JxsSocket {
@@ -99,7 +102,15 @@ impl JxsSocket {
             sock,
             gso: AtomicBool::new(gso),
             mark_error,
+            read_errors: AtomicU64::new(0),
         })
+    }
+
+    /// The socket errors [`Self::take_report`] consumed since the last call (they belong in
+    /// `send_errors`: on a connected UDP socket an ICMP "port unreachable" from a receiver that
+    /// is not listening is reported by whichever call comes first, a send or this read).
+    pub fn take_read_errors(&self) -> u64 {
+        self.read_errors.swap(0, Ordering::Relaxed)
     }
 
     /// Whether the kernel accepted [`JXS_SOCKET_MARK`] (`SO_MARK`), i.e. the egress pacing's fw
@@ -145,7 +156,9 @@ impl JxsSocket {
                 if errno == Some(libc::EAGAIN) || errno == Some(libc::EWOULDBLOCK) {
                     break;
                 }
-                // ECONNREFUSED & co: a queued ICMP error is consumed; read on
+                // ECONNREFUSED & co: the queued ICMP error a send would have reported is consumed
+                // here, so it is counted for the status line's send_errors ([`Self::take_read_errors`])
+                self.read_errors.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             if let Ok(r) = jxs_link::ReceiverReport::decode(&buf[..n as usize]) {
@@ -242,153 +255,6 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 pub const CORES_ENV: &str = "CAMERA_BOX_JXS_CORES";
 /// The most slice-pack threads the encoder runs (a 1080p frame has 68 slices).
 pub const MAX_SLICE_THREADS: usize = 4;
-/// The environment variable that sets the encoder's bits per pixel (owner decision 29.10.2026).
-pub const BPP_ENV: &str = "CAMERA_BOX_JXS_BPP";
-/// The default bits per pixel (comment 6489868243: ~250 Mb/s at 30 fps).
-pub const DEFAULT_BPP: u32 = 4;
-/// The highest bpp the wire format carries: a 16-line 1080p slice at 12 bpp is ~46 KB, under the
-/// 64 KB slice length field.
-pub const MAX_BPP: u32 = 12;
-
-/// The encoder's bits per pixel from [`BPP_ENV`]: unset or blank = [`DEFAULT_BPP`]; a whole
-/// number 1..=[`MAX_BPP`] is taken; anything else is refused (`Err`, the caller logs it and keeps
-/// the default).
-pub fn parse_bpp(value: Option<&str>) -> Result<u32, String> {
-    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Ok(DEFAULT_BPP);
-    };
-    match v.parse::<u32>() {
-        Ok(b) if (1..=MAX_BPP).contains(&b) => Ok(b),
-        _ => Err(format!(
-            "{BPP_ENV}='{v}' is not a whole number 1..={MAX_BPP}"
-        )),
-    }
-}
-
-/// The automatic bpp's floor and ceiling (issue 1387 auto bpp). Used only when [`BPP_ENV`] is
-/// NOT set: a set `CAMERA_BOX_JXS_BPP` pins a fixed bpp and turns the automatic one off.
-pub const BPP_MIN_ENV: &str = "CAMERA_BOX_JXS_BPP_MIN";
-pub const BPP_MAX_ENV: &str = "CAMERA_BOX_JXS_BPP_MAX";
-/// The automatic bpp's defaults: start (and floor) at the measured 4, climb to 8 (~500 Mb/s at
-/// 30 fps, the owner's budget on the 1 GbE cambox link).
-pub const DEFAULT_AUTO_MIN_BPP: u32 = 4;
-pub const DEFAULT_AUTO_MAX_BPP: u32 = 8;
-/// Opt-in SCHED_FIFO priority for the encoder threads (unset = SCHED_OTHER, like every other
-/// auxiliary thread). Must stay below the capture's [`crate::affinity::CAPTURE_FIFO_PRIORITY`].
-pub const FIFO_ENV: &str = "CAMERA_BOX_JXS_FIFO_PRIO";
-
-/// How the sender picks its bpp.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BppMode {
-    /// `CAMERA_BOX_JXS_BPP` is set: this bpp, always.
-    Fixed(u32),
-    /// The automatic controller (`crate::jxs_auto_bpp`) between these bounds, starting at `min`.
-    Auto { min: u32, max: u32 },
-}
-
-impl BppMode {
-    /// The bpp the first session opens at.
-    pub fn start(&self) -> u32 {
-        match *self {
-            Self::Fixed(b) => b,
-            Self::Auto { min, .. } => min,
-        }
-    }
-}
-
-/// The bpp mode from [`BPP_ENV`] / [`BPP_MIN_ENV`] / [`BPP_MAX_ENV`], plus a warning per value it
-/// refused (the caller logs them). `CAMERA_BOX_JXS_BPP` alone pins a fixed bpp (a refused value
-/// keeps [`DEFAULT_BPP`], fixed, as before); otherwise the automatic mode between the floor and
-/// the ceiling (each refused value keeps its default; a floor above the ceiling keeps both
-/// defaults).
-pub fn parse_bpp_mode(
-    bpp: Option<&str>,
-    min: Option<&str>,
-    max: Option<&str>,
-) -> (BppMode, Vec<String>) {
-    fn set(v: Option<&str>) -> Option<&str> {
-        v.map(str::trim).filter(|v| !v.is_empty())
-    }
-    let mut warnings = Vec::new();
-    if set(bpp).is_some() {
-        let b = parse_bpp(bpp).unwrap_or_else(|e| {
-            warnings.push(format!("{e} -- using {DEFAULT_BPP} bpp"));
-            DEFAULT_BPP
-        });
-        if set(min).is_some() || set(max).is_some() {
-            warnings.push(format!(
-                "{BPP_ENV} pins a fixed bpp: {BPP_MIN_ENV} / {BPP_MAX_ENV} are ignored (the automatic bpp is off)"
-            ));
-        }
-        return (BppMode::Fixed(b), warnings);
-    }
-    let mut bound = |name: &str, v: Option<&str>, default: u32| match set(v) {
-        None => default,
-        Some(_) => parse_bpp(v).unwrap_or_else(|e| {
-            warnings.push(format!(
-                "{} -- using {default} as {name}",
-                e.replace(BPP_ENV, name)
-            ));
-            default
-        }),
-    };
-    let lo = bound(BPP_MIN_ENV, min, DEFAULT_AUTO_MIN_BPP);
-    let hi = bound(BPP_MAX_ENV, max, DEFAULT_AUTO_MAX_BPP);
-    if lo > hi {
-        warnings.push(format!(
-            "{BPP_MIN_ENV}={lo} is above {BPP_MAX_ENV}={hi} -- using {DEFAULT_AUTO_MIN_BPP}..={DEFAULT_AUTO_MAX_BPP}"
-        ));
-        return (
-            BppMode::Auto {
-                min: DEFAULT_AUTO_MIN_BPP,
-                max: DEFAULT_AUTO_MAX_BPP,
-            },
-            warnings,
-        );
-    }
-    (BppMode::Auto { min: lo, max: hi }, warnings)
-}
-
-/// The encoder's SCHED_FIFO priority from [`FIFO_ENV`]: unset / blank / `0` / `off` = `None`
-/// (SCHED_OTHER); a whole number 1 .. capture priority - 1 is taken; anything else is refused.
-pub fn parse_fifo_prio(value: Option<&str>) -> Result<Option<i32>, String> {
-    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Ok(None);
-    };
-    if v == "0" || v.eq_ignore_ascii_case("off") {
-        return Ok(None);
-    }
-    let top = crate::affinity::CAPTURE_FIFO_PRIORITY - 1;
-    match v.parse::<i32>() {
-        Ok(p) if (1..=top).contains(&p) => Ok(Some(p)),
-        _ => Err(format!(
-            "{FIFO_ENV}='{v}' is not 1..={top} (below the capture's SCHED_FIFO {})",
-            crate::affinity::CAPTURE_FIFO_PRIORITY
-        )),
-    }
-}
-
-/// What the sender runs with besides its target.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SenderOptions {
-    pub bpp: BppMode,
-    /// The encoder threads' SCHED_FIFO priority (`None` = SCHED_OTHER).
-    pub fifo: Option<i32>,
-    /// The automatic bpp's tuning (`None` = `AutoBppConfig::new(min, max)`, the sender's
-    /// setting; tests shorten the clean run).
-    pub auto_config: Option<crate::jxs_auto_bpp::AutoBppConfig>,
-}
-
-impl SenderOptions {
-    pub fn new(bpp: BppMode, fifo: Option<i32>) -> Self {
-        Self {
-            bpp,
-            fifo,
-            auto_config: None,
-        }
-    }
-}
-
 /// The encoder's core set: [`CORES_ENV`] when it is set and inside `allowed` (the off-capture
 /// cores), else `allowed`. `Err` names why an override was refused (the caller logs it and uses
 /// `allowed`).
@@ -647,18 +513,14 @@ fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<Jx
     handoff::spawn(socket, camera_id, cores, opts)
 }
 
-/// The "link ON" line's bpp words.
-pub fn bpp_mode_text(m: BppMode) -> String {
-    match m {
-        BppMode::Fixed(b) => format!("{b} bpp (fixed by {BPP_ENV}, auto off)"),
-        BppMode::Auto { min, max } => format!(
-            "auto bpp {min}..={max} (starts at {min}, climbs only on the receiver's reports)"
-        ),
-    }
-}
-
 #[cfg(feature = "jxs")]
 mod handoff;
+
+mod options;
+pub use options::*;
+
+#[cfg(test)]
+mod auto_tests;
 
 #[cfg(test)]
 mod tests {
@@ -973,233 +835,6 @@ mod tests {
     #[test]
     fn a_build_without_the_codec_stays_off_even_with_a_target() {
         assert!(JxsSender::start(Some("127.0.0.1:9"), "CAM5").is_none());
-    }
-
-    #[test]
-    fn the_bpp_is_fixed_when_pinned_else_automatic_between_the_bounds() {
-        let auto = |lo, hi| BppMode::Auto { min: lo, max: hi };
-        assert_eq!(parse_bpp_mode(None, None, None), (auto(4, 8), vec![]));
-        assert_eq!(parse_bpp_mode(Some(" "), None, None).0, auto(4, 8));
-        assert_eq!(
-            parse_bpp_mode(None, Some("5"), Some("10")),
-            (auto(5, 10), vec![])
-        );
-        assert_eq!(parse_bpp_mode(None, Some("6"), Some("6")).0, auto(6, 6));
-        // BPP alone pins it: auto off
-        assert_eq!(
-            parse_bpp_mode(Some("6"), None, None),
-            (BppMode::Fixed(6), vec![])
-        );
-        let (m, w) = parse_bpp_mode(Some("6"), Some("4"), None);
-        assert_eq!(m, BppMode::Fixed(6));
-        assert!(w[0].contains("ignored"), "{w:?}");
-        // a refused pinned value keeps the old default, still fixed
-        let (m, w) = parse_bpp_mode(Some("x"), None, None);
-        assert_eq!(m, BppMode::Fixed(DEFAULT_BPP));
-        assert_eq!(w.len(), 1);
-        // a refused bound keeps its default and names its own variable
-        let (m, w) = parse_bpp_mode(None, Some("0"), Some("99"));
-        assert_eq!(m, auto(4, 8));
-        assert!(
-            w[0].contains(BPP_MIN_ENV) && w[1].contains(BPP_MAX_ENV),
-            "{w:?}"
-        );
-        // a floor above the ceiling keeps both defaults
-        let (m, w) = parse_bpp_mode(None, Some("9"), Some("5"));
-        assert_eq!(m, auto(4, 8));
-        assert!(w[0].contains("above"), "{w:?}");
-        assert_eq!(auto(5, 9).start(), 5);
-        assert_eq!(BppMode::Fixed(7).start(), 7);
-        assert!(bpp_mode_text(auto(4, 8)).contains("auto bpp 4..=8"));
-        assert!(bpp_mode_text(BppMode::Fixed(6)).contains("6 bpp (fixed"));
-    }
-
-    #[test]
-    fn the_encoder_fifo_is_opt_in_and_stays_below_the_capture() {
-        assert_eq!(parse_fifo_prio(None), Ok(None));
-        assert_eq!(parse_fifo_prio(Some("")), Ok(None));
-        assert_eq!(parse_fifo_prio(Some("0")), Ok(None));
-        assert_eq!(parse_fifo_prio(Some("OFF")), Ok(None));
-        assert_eq!(parse_fifo_prio(Some(" 50\n")), Ok(Some(50)));
-        assert_eq!(parse_fifo_prio(Some("89")), Ok(Some(89)));
-        for bad in ["90", "99", "-1", "x", "5.5"] {
-            let e = parse_fifo_prio(Some(bad)).unwrap_err();
-            assert!(e.contains(FIFO_ENV), "{bad}: {e}");
-        }
-        // (JXS_ENCODER_FIFO_PRIORITY < CAPTURE_FIFO_PRIORITY is a const assert in affinity.rs)
-        assert_eq!(
-            parse_fifo_prio(Some(
-                &crate::affinity::JXS_ENCODER_FIFO_PRIORITY.to_string()
-            )),
-            Ok(Some(crate::affinity::JXS_ENCODER_FIFO_PRIORITY))
-        );
-    }
-
-    /// The receiver answers to the address the slices came from, from its listening socket; the
-    /// sender's connected socket takes it, ignores other cameras and garbage, and never blocks.
-    #[test]
-    fn a_receiver_report_reaches_the_sender_through_its_connected_socket() {
-        let mut rx = crate::jxs_recv::JxsRecvSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        rx.set_timeout(Some(std::time::Duration::from_millis(500)))
-            .unwrap();
-        let port = rx.local_addr().unwrap().port();
-        let tx = JxsSocket::connect(&format!("127.0.0.1:{port}")).unwrap();
-        assert_eq!(
-            tx.take_report(5),
-            None,
-            "nothing waiting: no block, no report"
-        );
-        tx.sock.send(&[0x4A; 20]).unwrap();
-        let mut from = None;
-        rx.recv_batch_from(|_, _, f| from = f).unwrap();
-        let from = from.expect("the kernel names the source");
-        assert_eq!(from, tx.sock.local_addr().unwrap());
-        let report = |cam, seq| jxs_link::ReceiverReport {
-            camera_id: cam,
-            max_bpp: 0,
-            seq,
-            frames: 30,
-            lost_slices: 0,
-            late_frames: 0,
-            decode_p99_us: 2_000,
-            last_timecode_100ns: 42,
-        };
-        rx.send_report(from, &report(5, 1)).unwrap();
-        rx.send_report(from, &report(9, 2)).unwrap(); // another camera
-        rx.send_report(from, &report(5, 3)).unwrap();
-        // the reports are on loopback already; read until the newest is in (bounded)
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        let mut got = None;
-        while got.is_none() && std::time::Instant::now() < deadline {
-            got = tx.take_report(5);
-        }
-        assert_eq!(got, Some(report(5, 3)), "the newest one of this camera");
-        assert_eq!(tx.take_report(5), None, "drained");
-        // a stranger cannot reach the connected socket
-        let stranger = UdpSocket::bind("127.0.0.1:0").unwrap();
-        stranger
-            .send_to(&report(5, 4).encode().unwrap(), from)
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert_eq!(tx.take_report(5), None);
-    }
-
-    /// The whole auto-bpp loop through the real encoder: a receiver that reports clean seconds
-    /// makes the sender climb from 4 to 5 bpp, a receiver loss brings it back to 4; every frame
-    /// handed over arrives whole, so no bpp change costs a frame.
-    #[cfg(feature = "jxs")]
-    #[test]
-    fn the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_frame() {
-        use std::collections::BTreeMap;
-        use std::time::{Duration, Instant};
-        let mut rx = crate::jxs_recv::JxsRecvSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        rx.set_timeout(Some(Duration::from_millis(10))).unwrap();
-        let port = rx.local_addr().unwrap().port();
-        let (mut h, ready_rx) = JxsHandoff::unstarted();
-        let socket = JxsSocket::connect(&format!("127.0.0.1:{port}")).unwrap();
-        let mut cfg = crate::jxs_auto_bpp::AutoBppConfig::new(4, 5);
-        cfg.up_after_s = 1;
-        // a debug build: the encode-time rule is not what this test drives
-        cfg.up_headroom = 100.0;
-        cfg.down_fraction = 100.0;
-        let opts = SenderOptions {
-            auto_config: Some(cfg),
-            ..SenderOptions::new(BppMode::Auto { min: 4, max: 5 }, None)
-        };
-        assert!(h.start_threads(ready_rx, socket, 5, vec![0, 1], opts));
-        let (w, ht) = (256u32, 64u32);
-        let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i * 7 % 251) as u8).collect();
-        let packets = jxs_link::packets_per_frame(ht);
-        // per frame timecode: (datagrams, codestream bytes)
-        let mut frames: BTreeMap<u64, (u32, usize)> = BTreeMap::new();
-        let mut handed = Vec::new();
-        let start = Instant::now();
-        let mut next_frame = start;
-        let mut last_report = start;
-        let mut seq = 0u32;
-        let mut lossy_from: Option<Instant> = None;
-        let mut sender: Option<std::net::SocketAddr> = None;
-        let t0 = 1_761_730_000i64 * 10_000_000;
-        let mut k = 0i64;
-        while start.elapsed() < Duration::from_secs(8) {
-            if Instant::now() >= next_frame {
-                let tc = t0 + k * 10_000_000 / 30;
-                h.offer(&JxsFrame {
-                    data: &frame,
-                    width: w,
-                    height: ht,
-                    stride: w * 2,
-                    yuyv: true,
-                    timecode_100ns: tc,
-                    emit_fps: 30,
-                });
-                handed.push(tc as u64);
-                k += 1;
-                next_frame += Duration::from_millis(33);
-            }
-            rx.recv_batch_from(|d, _, from| {
-                let hd = jxs_link::PacketHeader::decode(d).unwrap();
-                sender = from;
-                let e = frames.entry(hd.timecode_100ns).or_insert((0, 0));
-                e.0 += 1;
-                e.1 += d.len() - jxs_link::HEADER_LEN;
-            })
-            .unwrap();
-            // the first time a frame of 5 bpp is seen, start reporting a loss
-            let at5 = frames.values().any(|&(_, b)| b > 9_000);
-            if at5 && lossy_from.is_none() {
-                lossy_from = Some(Instant::now() + Duration::from_millis(1500));
-            }
-            if last_report.elapsed() >= Duration::from_millis(200) {
-                if let Some(to) = sender {
-                    let lost = lossy_from.is_some_and(|t| Instant::now() >= t);
-                    let r = jxs_link::ReceiverReport {
-                        camera_id: 5,
-                        max_bpp: 0,
-                        seq,
-                        frames: 6,
-                        lost_slices: lost as u32,
-                        late_frames: 0,
-                        decode_p99_us: 500,
-                        last_timecode_100ns: frames.keys().next_back().copied().unwrap_or(0),
-                    };
-                    rx.send_report(to, &r).unwrap();
-                    seq += 1;
-                }
-                last_report = Instant::now();
-            }
-        }
-        drop(h);
-        // drain what is still on the wire
-        for _ in 0..20 {
-            rx.recv_batch_from(|d, _, _| {
-                let hd = jxs_link::PacketHeader::decode(d).unwrap();
-                let e = frames.entry(hd.timecode_100ns).or_insert((0, 0));
-                e.0 += 1;
-                e.1 += d.len() - jxs_link::HEADER_LEN;
-            })
-            .unwrap();
-        }
-        // 4 bpp of 256x64 = 8192 bytes, 5 bpp = 10240 (constant bit rate)
-        let sizes: Vec<usize> = frames.values().map(|&(_, b)| b).collect();
-        let first5 = sizes
-            .iter()
-            .position(|&b| b > 9_000)
-            .expect("climbed to 5 bpp");
-        assert!(sizes[..first5].iter().all(|&b| b < 9_000), "4 bpp first");
-        let back4 = sizes[first5..]
-            .iter()
-            .position(|&b| b < 9_000)
-            .expect("fell back to 4 bpp on the loss");
-        assert!(back4 > 0);
-        // every frame handed over arrived, whole (no frame lost at either swap)
-        assert_eq!(
-            frames.keys().copied().collect::<Vec<_>>(),
-            handed,
-            "every frame on the wire"
-        );
-        let datagrams_ok = frames.values().all(|&(n, _)| n >= packets);
-        assert!(datagrams_ok, "every frame whole");
     }
 
     #[test]
