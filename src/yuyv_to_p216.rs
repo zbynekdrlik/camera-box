@@ -51,14 +51,23 @@ impl NdiSendFormat {
 /// Parse the `CAMERA_BOX_NDI_FORMAT` value. Unset or empty = `Uyvy`. Case and surrounding
 /// whitespace are ignored. An unknown value returns `Uyvy` plus the one warning to log.
 pub fn parse_send_format(value: Option<&str>) -> (NdiSendFormat, Option<String>) {
-    let _ = value;
-    (NdiSendFormat::Uyvy, None)
+    let raw = value.unwrap_or("");
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "uyvy" => (NdiSendFormat::Uyvy, None),
+        "p216" => (NdiSendFormat::P216, None),
+        _ => (
+            NdiSendFormat::Uyvy,
+            Some(format!(
+                "ndi send format: unknown {NDI_FORMAT_ENV} value '{raw}' (expected uyvy or p216), \
+                 sending uyvy (issue 1387)"
+            )),
+        ),
+    }
 }
 
 /// The one start line logged at sender creation.
 pub fn send_format_start_line(format: NdiSendFormat) -> String {
-    let _ = format;
-    String::new()
+    format!("ndi send format: {} (issue 1387)", format.name())
 }
 
 /// Which conversion one frame takes on its way to the NDI SDK.
@@ -73,27 +82,29 @@ pub enum SendPath {
 /// Decide the send path for a frame of V4L2 FourCC `input_fourcc` under `format`.
 /// Only a `YUYV` input has a P216 conversion; anything else keeps UYVY.
 pub fn select_send_path(format: NdiSendFormat, input_fourcc: &str) -> SendPath {
-    let _ = (format, input_fourcc);
-    SendPath::Uyvy
+    match (format, input_fourcc) {
+        (NdiSendFormat::P216, "YUYV") => SendPath::P216,
+        _ => SendPath::Uyvy,
+    }
 }
 
 /// The WARN logged once when P216 is configured but the input has no P216 conversion.
 pub fn p216_fallback_line(input_fourcc: &str) -> String {
-    let _ = input_fourcc;
-    String::new()
+    format!(
+        "ndi send format: p216 requested, but the capture delivers {input_fourcc} and only a \
+         YUYV capture has a P216 conversion; sending UYVY (issue 1387)"
+    )
 }
 
 /// Number of `u16` samples in one P216 frame: the luma plane plus the CbCr plane.
 pub fn p216_samples(width: usize, height: usize) -> usize {
-    let _ = (width, height);
-    0
+    width * height * 2
 }
 
 /// The NDI `line_stride_in_bytes` of a P216 frame (the luma plane stride; the CbCr plane has
 /// the same one).
 pub fn p216_line_stride_bytes(width: usize) -> usize {
-    let _ = width;
-    0
+    width * 2
 }
 
 /// Why a frame could not be converted.
@@ -157,8 +168,102 @@ pub fn convert_yuyv_to_p216(
     out: &mut Vec<u16>,
     path: ConvertPath,
 ) -> Result<(), P216Error> {
-    let _ = (yuyv, width, height, src_stride, out, path);
+    if width == 0 || !width.is_multiple_of(2) {
+        return Err(P216Error::BadWidth(width));
+    }
+    let row_bytes = width * 2;
+    if src_stride < row_bytes {
+        return Err(P216Error::StrideTooShort {
+            stride: src_stride,
+            row_bytes,
+        });
+    }
+    // The last row only needs its own `width * 2` bytes, not a full padded stride.
+    let needed = if height == 0 {
+        0
+    } else {
+        src_stride * (height - 1) + row_bytes
+    };
+    if yuyv.len() < needed {
+        return Err(P216Error::SourceTooShort {
+            len: yuyv.len(),
+            needed,
+        });
+    }
+
+    let samples = p216_samples(width, height);
+    if out.len() != samples {
+        // Only on the first frame or a resolution change: every sample is overwritten below.
+        out.resize(samples, 0);
+    }
+    let (luma, chroma) = out.split_at_mut(width * height);
+    let use_avx2 = path == ConvertPath::Avx2 && avx2_available();
+
+    for r in 0..height {
+        let row = &yuyv[r * src_stride..r * src_stride + row_bytes];
+        let y = &mut luma[r * width..(r + 1) * width];
+        let c = &mut chroma[r * width..(r + 1) * width];
+        #[cfg(target_arch = "x86_64")]
+        if use_avx2 {
+            // SAFETY: `avx2_available()` confirmed AVX2; the slice lengths are checked inside.
+            unsafe { avx2_row(row, y, c) };
+            continue;
+        }
+        let _ = use_avx2;
+        scalar_row(row, y, c);
+    }
     Ok(())
+}
+
+/// One YUYV row (`Y0 U0 Y1 V0 ...`, `2 * y.len()` bytes) into its luma row and CbCr row.
+///
+/// Read as little-endian `u16` lanes, a YUYV row is `Y | C << 8` per lane, where C walks
+/// `U0 V0 U1 V1 ...`, exactly the P216 CbCr order. So lane `i` gives luma `i` and chroma `i`.
+#[inline]
+pub fn scalar_row(row: &[u8], y: &mut [u16], c: &mut [u16]) {
+    let n = y.len().min(c.len()).min(row.len() / 2);
+    for i in 0..n {
+        let luma = u16::from(row[2 * i]);
+        let cbcr = u16::from(row[2 * i + 1]);
+        y[i] = (luma << 8) | luma;
+        c[i] = (cbcr << 8) | cbcr;
+    }
+}
+
+/// AVX2 row kernel, bit-exact with [`scalar_row`]: 16 lanes (32 YUYV bytes) per step,
+/// `y = (lane & 0xFF) * 257`, `c = (lane >> 8) * 257`, no shuffle (the order is already right),
+/// and the tail through [`scalar_row`].
+///
+/// # Safety
+/// The CPU must support AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub unsafe fn avx2_row(row: &[u8], y: &mut [u16], c: &mut [u16]) {
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi16,
+        _mm256_slli_epi16, _mm256_srli_epi16, _mm256_storeu_si256,
+    };
+    let n = y.len().min(c.len()).min(row.len() / 2);
+    let blocks = n / 16;
+    let low = _mm256_set1_epi16(0x00FF);
+    let src = row.as_ptr();
+    let yd = y.as_mut_ptr();
+    let cd = c.as_mut_ptr();
+    for b in 0..blocks {
+        // SAFETY: lane block `b` covers bytes [32b, 32b + 32) of `row` and samples
+        // [16b, 16b + 16) of `y` and `c`, all inside `n` (checked above); unaligned load/store.
+        unsafe {
+            let lanes = _mm256_loadu_si256(src.add(b * 32) as *const __m256i);
+            let yl = _mm256_and_si256(lanes, low);
+            let cl = _mm256_srli_epi16(lanes, 8);
+            let y16 = _mm256_or_si256(yl, _mm256_slli_epi16(yl, 8));
+            let c16 = _mm256_or_si256(cl, _mm256_slli_epi16(cl, 8));
+            _mm256_storeu_si256(yd.add(b * 16) as *mut __m256i, y16);
+            _mm256_storeu_si256(cd.add(b * 16) as *mut __m256i, c16);
+        }
+    }
+    let done = blocks * 16;
+    scalar_row(&row[done * 2..n * 2], &mut y[done..n], &mut c[done..n]);
 }
 
 #[cfg(test)]
@@ -389,14 +494,4 @@ mod tests {
             | (u32::from(b'6') << 24);
         assert_eq!(NDI_FOURCC_P216, sdk);
     }
-}
-
-/// AVX2 row kernel (stub in the RED commit).
-///
-/// # Safety
-/// The CPU must support AVX2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-pub unsafe fn avx2_row(row: &[u8], y: &mut [u16], c: &mut [u16]) {
-    let _ = (row, y, c);
 }

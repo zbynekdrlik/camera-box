@@ -10,6 +10,7 @@ use camera_box::ndi::{convert_bgra_to_uyvy, convert_nv12_to_uyvy, convert_yuyv_t
 
 #[cfg(target_arch = "x86_64")]
 use camera_box::ndi::{convert_yuyv_to_uyvy_avx2, has_avx2};
+use camera_box::yuyv_to_p216::{avx2_available, convert_yuyv_to_p216, ConvertPath};
 
 fn bench_yuyv_to_uyvy(c: &mut Criterion) {
     let frame_1080p = vec![128u8; 1920 * 1080 * 2]; // YUYV is 2 bytes/pixel
@@ -25,6 +26,50 @@ fn bench_yuyv_to_uyvy(c: &mut Criterion) {
     if has_avx2() {
         group.bench_function("avx2_1080p", |b| {
             b.iter(|| unsafe { convert_yuyv_to_uyvy_avx2(black_box(&frame_1080p)) })
+        });
+    }
+
+    group.finish();
+}
+
+/// Issue 1387 — the per-frame cost of the P216 send conversion at 1080p, reusing ONE output
+/// buffer exactly as `NdiSender` does (no allocation inside the timed loop). The source is a
+/// varied byte pattern so neither path benefits from a constant frame.
+fn bench_yuyv_to_p216(c: &mut Criterion) {
+    let (w, h) = (1920usize, 1080usize);
+    let frame_1080p: Vec<u8> = (0..w * h * 2).map(|i| (i * 7 % 251) as u8).collect();
+    let mut out: Vec<u16> = Vec::new();
+
+    let mut group = c.benchmark_group("yuyv_to_p216");
+    group.throughput(Throughput::Bytes(frame_1080p.len() as u64));
+
+    group.bench_function("scalar_1080p", |b| {
+        b.iter(|| {
+            convert_yuyv_to_p216(
+                black_box(&frame_1080p),
+                w,
+                h,
+                w * 2,
+                &mut out,
+                ConvertPath::Scalar,
+            )
+            .unwrap()
+        })
+    });
+
+    if avx2_available() {
+        group.bench_function("avx2_1080p", |b| {
+            b.iter(|| {
+                convert_yuyv_to_p216(
+                    black_box(&frame_1080p),
+                    w,
+                    h,
+                    w * 2,
+                    &mut out,
+                    ConvertPath::Avx2,
+                )
+                .unwrap()
+            })
         });
     }
 
@@ -109,6 +154,7 @@ fn bench_scale_nearest(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_yuyv_to_uyvy,
+    bench_yuyv_to_p216,
     bench_uyvy_to_bgra,
     bench_bgra_to_uyvy,
     bench_nv12_to_uyvy,
