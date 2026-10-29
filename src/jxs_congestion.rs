@@ -60,15 +60,28 @@ impl PathDelay {
     /// One report: the receiver's delay p50 and spread, the sender's own p50 (all us). Returns the
     /// queuing delay in us (`None` right after a big clock step).
     pub fn update(&mut self, rx_p50_us: i64, rx_spread_us: u32, own_p50_us: i64) -> Option<u32> {
-        let _ = (
-            rx_spread_us,
-            &self.history,
-            self.last,
-            STEP_JUMP_US,
-            STEP_SPREAD_US,
-            STEP_RESET_US,
-        );
-        Some((rx_p50_us - own_p50_us).clamp(0, u32::MAX as i64 - 1) as u32)
+        let path = rx_p50_us - own_p50_us;
+        if let Some(last) = self.last {
+            let jump = path - last;
+            if jump.abs() > STEP_JUMP_US && rx_spread_us < STEP_SPREAD_US {
+                // every frame moved alike: a clock step, the base moves with it
+                for h in self.history.iter_mut() {
+                    *h += jump;
+                }
+            }
+        }
+        self.last = Some(path);
+        let base = self.history.iter().copied().fold(path, i64::min);
+        if path - base > STEP_RESET_US {
+            self.history.clear();
+            self.history.push_back(path);
+            return None;
+        }
+        self.history.push_back(path);
+        while self.history.len() > BASE_REPORTS {
+            self.history.pop_front();
+        }
+        Some((path - base).clamp(0, u32::MAX as i64 - 1) as u32)
     }
 }
 

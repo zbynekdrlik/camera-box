@@ -103,7 +103,7 @@ impl PaceControl {
             (pace_auto::frame_wire_bytes(self.width, self.height, self.bpp) * 8 / m as u64) as u32
         });
         let send_span_us = (!spans.is_empty())
-            .then(|| spans[(spans.len() - 1) / 2].max(wire_floor_us.map_or(0, |_| 0)));
+            .then(|| spans[(spans.len() - 1) / 2].max(wire_floor_us.unwrap_or(0)));
         let before = self.congestion.state();
         let step = self.congestion.on_report(
             &PathReport {
