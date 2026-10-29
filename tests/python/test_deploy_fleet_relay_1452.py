@@ -450,5 +450,5 @@ def test_main_version_is_read_from_the_workspace_package_line():
 def test_the_handover_probe_reads_state_and_versions_in_one_ssh_call_and_passes_mains_release():
     s = HANDOVER.read_text()
     body = s[s.index("probe_shading() {"):s.index("\n}\n", s.index("probe_shading() {"))]
-    assert body.count("sshpass") == 1, "one connect per box: a down box costs one ConnectTimeout"
+    assert body.count("sshpass -p") == 1, "one connect per box: a down box costs one ConnectTimeout"
     assert "origin/main:Cargo.toml" in body and '"$main")' in body, body
