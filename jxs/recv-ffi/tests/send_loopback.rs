@@ -70,6 +70,9 @@ fn open_sender(port: u16) -> *mut CbjxsSender {
         bpp_min: 0,
         bpp_max: 0,
         reserved: 0,
+        // the strih output's default: the loopback must still deliver every slice when paced
+        pace_mbps: 900,
+        reserved2: 0,
     };
     let mut err = [0 as c_char; 160];
     let tx = unsafe { cbjxs_send_open(&cfg, err.as_mut_ptr(), err.len()) };
@@ -200,6 +203,10 @@ fn program_pictures_in_420_cross_both_c_abis_with_their_timecode_and_nothing_los
             sent += st.frames;
             assert_eq!(st.auto_bpp, 1);
             assert_eq!((st.dropped_busy, st.encode_errors), (0, 0), "{st:?}");
+            assert_eq!(st.pace_mbps, 900, "the window names its pace: {st:?}");
+            if st.frames > 0 {
+                assert!(st.wire_ms_max >= st.wire_ms_avg, "{st:?}");
+            }
         }
     }
     assert!(

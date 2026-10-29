@@ -1,0 +1,343 @@
+//! Issue 1387: the JPEG XS send pacing schedule, pure (no clock, no socket).
+//!
+//! The strih program output sends on a 10 GbE NIC to stream-snv on a 1 GbE port. Sent at line rate,
+//! each slice reaches the switch as a 10 Gb/s burst. The switch buffer at the 1 GbE port drops the
+//! tail of that burst: the live slice-3 run lost 1-15 slices in 10 of 21 windows, with no drop on
+//! the receiving host. A pace rate spreads the sends so the slower link is never offered more than
+//! it carries.
+//!
+//! The mechanism is in the application, not the kernel. `SO_MAX_PACING_RATE` is enforced only by
+//! the `fq` qdisc (and by TCP's own pacing, which UDP lacks); strih-snv runs `fq_codel`, which
+//! ignores it. `SO_TXTIME` needs an `etf` qdisc. So the sending thread holds each send until its
+//! departure time from this schedule.
+//!
+//! - **Wire bytes.** A send is counted as it occupies the slower link: every datagram's payload plus
+//!   [`WIRE_OVERHEAD_BYTES`] (UDP 8 + IPv4 20 + Ethernet 14 + FCS 4 + preamble 8 + inter-frame gap
+//!   12). So `pace_mbps` is the Ethernet line rate the flow takes, comparable with the port speed.
+//! - **Exact, no drift.** The schedule keeps an anchor instant and the bits sent since it; a send's
+//!   departure is `anchor + ceil(bits x 1000 / mbps)` ns. Nothing is rounded per send, so a
+//!   million sends land exactly where one long send would.
+//! - **Late is not early.** A send that is ready after its due time (the encoder was slower than
+//!   the pace, or the thread woke late) goes at once. Lateness up to one burst's wire time
+//!   ([`PaceSchedule::tolerance_ns`]) keeps the schedule, so a thread that wakes 50 us late
+//!   catches up and the rate holds. Later than that, the link was idle: the schedule restarts at
+//!   that instant (a new anchor), so idle time never turns into a burst of saved-up credit.
+//! - **Bounded bursts.** While pacing, one send carries at most [`PACE_BURST_SEGMENTS`] datagrams
+//!   (~23.5 KB of wire, ~0.2 ms at 900 Mb/s); a longer slice is split into such groups
+//!   ([`send_ranges`]). Each group still goes out at line rate, so this caps what the switch must
+//!   buffer per send.
+
+use super::{DATAGRAM_LEN, GSO_SEGMENTS_PER_SEND};
+
+/// Wire bytes per datagram beyond its UDP payload: UDP 8 + IPv4 20 + Ethernet 14 + FCS 4 +
+/// preamble/SFD 8 + inter-frame gap 12.
+pub const WIRE_OVERHEAD_BYTES: u64 = 66;
+/// Datagrams in one paced send (one GSO `sendmsg`): 16 x 1538 = 24608 wire bytes, 0.22 ms at
+/// 900 Mb/s. Small enough that a 1 GbE port's buffer absorbs one group arriving at 10 Gb/s, large
+/// enough that a 1080p frame needs only a few hundred sends.
+pub const PACE_BURST_SEGMENTS: usize = 16;
+const _: () = assert!(PACE_BURST_SEGMENTS <= GSO_SEGMENTS_PER_SEND);
+/// The lowest pace a sender takes: 4 bpp at 30 fps already needs ~280 Mb/s of wire, so anything
+/// lower only fills the queue.
+pub const PACE_MBPS_MIN: u32 = 100;
+/// The highest pace a sender takes (100 GbE).
+pub const PACE_MBPS_MAX: u32 = 100_000;
+
+/// The wire bytes of one send of `payload_len` bytes of consecutive datagrams (built by
+/// `build_slice_datagrams`: every datagram [`DATAGRAM_LEN`] long except the last).
+pub fn wire_bytes(payload_len: usize) -> u64 {
+    payload_len as u64
+}
+
+/// Nanoseconds `wire_bytes` occupy at `mbps`, rounded up (`mbps` > 0).
+pub fn wire_ns(wire_bytes: u64, mbps: u32) -> u64 {
+    let bits_x1000 = wire_bytes as u128 * 8 * 1000;
+    bits_x1000.div_ceil(mbps.max(1) as u128) as u64
+}
+
+/// A pace setting: 0 = line rate (no pacing), else [`PACE_MBPS_MIN`]..=[`PACE_MBPS_MAX`].
+pub fn check_pace_mbps(mbps: u32) -> Result<u32, String> {
+    if mbps == 0 || mbps > 0 {
+        Ok(mbps)
+    } else {
+        Err(format!(
+            "pace {mbps} Mb/s is not 0 (line rate) or {PACE_MBPS_MIN}..={PACE_MBPS_MAX}"
+        ))
+    }
+}
+
+/// The byte ranges of one slice buffer for successive sends of at most `segments` datagrams
+/// (each range starts on a datagram boundary, so the kernel's GSO cut lines up with the headers).
+pub fn send_ranges(
+    buf_len: usize,
+    segments: usize,
+) -> impl Iterator<Item = std::ops::Range<usize>> {
+    let step = segments.max(1) * DATAGRAM_LEN;
+    (0..buf_len)
+        .step_by(step)
+        .map(move |start| start..(start + step).min(buf_len))
+}
+
+/// Datagrams per send: [`PACE_BURST_SEGMENTS`] while pacing, else [`GSO_SEGMENTS_PER_SEND`].
+pub fn segments_per_send(pacing: bool) -> usize {
+    if pacing {
+        PACE_BURST_SEGMENTS
+    } else {
+        GSO_SEGMENTS_PER_SEND
+    }
+}
+
+/// The running send schedule of one paced link (module doc).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaceSchedule {
+    mbps: u32,
+    /// The instant the current run of back-to-back sends started (ns on the caller's clock).
+    anchor_ns: u64,
+    /// Bits scheduled since the anchor.
+    bits: u128,
+    started: bool,
+}
+
+impl PaceSchedule {
+    /// A schedule at `mbps`; `None` for 0 (line rate: no schedule).
+    pub fn new(mbps: u32) -> Option<Self> {
+        (mbps > 0).then_some(Self {
+            mbps,
+            anchor_ns: 0,
+            bits: 0,
+            started: false,
+        })
+    }
+
+    pub fn mbps(&self) -> u32 {
+        self.mbps
+    }
+
+    /// How late a send may be and still keep the schedule: one full burst's wire time.
+    pub fn tolerance_ns(&self) -> u64 {
+        wire_ns(
+            PACE_BURST_SEGMENTS as u64 * (DATAGRAM_LEN as u64 + WIRE_OVERHEAD_BYTES),
+            self.mbps,
+        )
+    }
+
+    /// When the next send is due (`None` before the first send).
+    pub fn due_ns(&self) -> Option<u64> {
+        self.started
+            .then(|| self.anchor_ns + (self.bits * 1000).div_ceil(self.mbps as u128) as u64)
+    }
+
+    /// Schedule one send of `wire_bytes` that is ready at `ready_ns`; returns its departure time
+    /// (never before `ready_ns`).
+    pub fn depart(&mut self, ready_ns: u64, wire_bytes: u64) -> u64 {
+        let _ = (wire_bytes, self.anchor_ns, self.bits, self.started);
+        ready_ns
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jxs_link::{build_slice_datagrams, packets_per_frame, PacketHeader};
+
+    #[test]
+    fn wire_bytes_add_the_ethernet_overhead_per_datagram() {
+        assert_eq!(wire_bytes(0), 0);
+        assert_eq!(wire_bytes(DATAGRAM_LEN), 1538);
+        assert_eq!(
+            wire_bytes(DATAGRAM_LEN + 1),
+            DATAGRAM_LEN as u64 + 1 + 2 * 66
+        );
+        assert_eq!(wire_bytes(16 * DATAGRAM_LEN), 16 * 1538);
+        assert_eq!(wire_ns(1538, 1000), 12_304);
+        assert_eq!(
+            wire_ns(1538, 900),
+            13_672,
+            "12304000 / 900 = 13671.1, rounded up"
+        );
+        assert_eq!(wire_ns(125, 1), 1_000_000, "1000 bits at 1 Mb/s = 1 ms");
+    }
+
+    #[test]
+    fn the_pace_setting_is_line_rate_or_a_bounded_rate() {
+        assert_eq!(check_pace_mbps(0), Ok(0));
+        assert_eq!(check_pace_mbps(900), Ok(900));
+        assert_eq!(check_pace_mbps(PACE_MBPS_MIN), Ok(PACE_MBPS_MIN));
+        assert_eq!(check_pace_mbps(PACE_MBPS_MAX), Ok(PACE_MBPS_MAX));
+        assert!(check_pace_mbps(99).unwrap_err().contains("pace 99"));
+        assert!(check_pace_mbps(100_001).is_err());
+        assert!(PaceSchedule::new(0).is_none(), "0 = line rate, no schedule");
+        assert_eq!(PaceSchedule::new(900).map(|p| p.mbps()), Some(900));
+    }
+
+    #[test]
+    fn a_paced_send_is_cut_into_burst_groups_on_datagram_boundaries() {
+        let len = 46 * DATAGRAM_LEN + 100;
+        let r: Vec<_> = send_ranges(len, segments_per_send(true)).collect();
+        assert_eq!(
+            r,
+            vec![
+                0..16 * DATAGRAM_LEN,
+                16 * DATAGRAM_LEN..32 * DATAGRAM_LEN,
+                32 * DATAGRAM_LEN..len
+            ]
+        );
+        let r: Vec<_> = send_ranges(len, segments_per_send(false)).collect();
+        assert_eq!(r, vec![0..40 * DATAGRAM_LEN, 40 * DATAGRAM_LEN..len]);
+        assert_eq!(send_ranges(0, 16).count(), 0);
+    }
+
+    #[test]
+    fn sends_ready_together_leave_one_wire_time_apart() {
+        let mut p = PaceSchedule::new(1000).unwrap();
+        let unit = 16 * 1538;
+        assert_eq!(p.due_ns(), None);
+        assert_eq!(p.depart(5_000, unit), 5_000, "the first send goes at once");
+        assert_eq!(p.depart(5_000, unit), 5_000 + 196_864);
+        assert_eq!(p.depart(5_000, unit), 5_000 + 2 * 196_864);
+        assert_eq!(p.due_ns(), Some(5_000 + 3 * 196_864));
+        // a send ready after its due time (within one burst) goes when ready, and the schedule
+        // holds: the next one is due where it always was
+        assert_eq!(
+            p.depart(5_000 + 3 * 196_864 + 40_000, unit),
+            5_000 + 3 * 196_864 + 40_000
+        );
+        assert_eq!(p.depart(0, unit), 5_000 + 4 * 196_864);
+    }
+
+    #[test]
+    fn a_send_after_an_idle_gap_starts_a_new_run_with_no_saved_credit() {
+        let mut p = PaceSchedule::new(1000).unwrap();
+        let unit = 16 * 1538;
+        p.depart(0, unit);
+        assert_eq!(p.tolerance_ns(), 196_864);
+        let late = 196_864 + 196_865; // one past due + tolerance
+        assert_eq!(p.depart(late, unit), late);
+        assert_eq!(
+            p.depart(late, unit),
+            late + 196_864,
+            "paced from the new anchor"
+        );
+        // exactly at due + tolerance still keeps the schedule
+        let mut q = PaceSchedule::new(1000).unwrap();
+        q.depart(0, unit);
+        assert_eq!(q.depart(2 * 196_864, unit), 2 * 196_864);
+        assert_eq!(
+            q.depart(0, unit),
+            2 * 196_864,
+            "due from the anchor, never later"
+        );
+    }
+
+    #[test]
+    fn a_million_sends_land_exactly_where_one_long_send_would() {
+        let mut p = PaceSchedule::new(900).unwrap();
+        let mut last = 0;
+        for n in 0..1_000_000u128 {
+            last = p.depart(0, 1538);
+            let exact = (n * 1538 * 8 * 1000).div_ceil(900) as u64;
+            if n % 99_991 == 0 {
+                assert_eq!(last, exact, "send {n}");
+            }
+        }
+        assert_eq!(last, (999_999u128 * 12_304_000).div_ceil(900) as u64);
+    }
+
+    /// The datagram buffers of one 1080p frame at `bpp` (the header packet + 68 slices).
+    fn frame_buffers(bpp: usize) -> Vec<Vec<u8>> {
+        let count = packets_per_frame(1080);
+        assert_eq!(count, 69);
+        (0..count)
+            .map(|i| {
+                let len = if i == 0 { 110 } else { 1920 * 16 * bpp / 8 };
+                let base = PacketHeader {
+                    camera_id: 100,
+                    timecode_100ns: 1,
+                    slice_index: i as u8,
+                    slice_count: count as u8,
+                    offset: 0,
+                    slice_len: 0,
+                };
+                let mut out = Vec::new();
+                build_slice_datagrams(base, &vec![7u8; len], &mut out).unwrap();
+                out
+            })
+            .collect()
+    }
+
+    /// Schedule every send of one frame ready at `ready_ns`; (first departure, last departure,
+    /// the last send's end on the wire).
+    fn schedule_frame(p: &mut PaceSchedule, bufs: &[Vec<u8>], ready_ns: u64) -> (u64, u64, u64) {
+        let mut first = None;
+        let mut last = (0, 0);
+        for b in bufs {
+            for r in send_ranges(b.len(), segments_per_send(true)) {
+                let w = wire_bytes(r.len());
+                let d = p.depart(ready_ns, w);
+                first.get_or_insert(d);
+                last = (d, d + wire_ns(w, p.mbps()));
+            }
+        }
+        (first.unwrap(), last.0, last.1)
+    }
+
+    #[test]
+    fn a_frame_at_900_mbps_finishes_within_the_30_fps_budget_up_to_12_bpp() {
+        const BUDGET_NS: u64 = 33_333_333;
+        for (bpp, want_ms) in [(4, 9.9), (8, 19.7), (12, 29.5)] {
+            let bufs = frame_buffers(bpp);
+            let total: u64 = bufs
+                .iter()
+                .flat_map(|b| send_ranges(b.len(), 16).map(|r| wire_bytes(r.len())))
+                .sum();
+            let mut p = PaceSchedule::new(900).unwrap();
+            let (first, last, end) = schedule_frame(&mut p, &bufs, 1_000);
+            assert_eq!(first, 1_000);
+            // the frame ends where its whole wire size at 900 Mb/s ends: nothing lost to rounding
+            assert_eq!(p.due_ns(), Some(1_000 + wire_ns(total, 900)), "{bpp} bpp");
+            assert!(end - first <= wire_ns(total, 900) + 1, "{bpp} bpp");
+            assert!(
+                last < end && end - first < BUDGET_NS,
+                "{bpp} bpp: {} ns",
+                end - first
+            );
+            let ms = (end - first) as f64 / 1e6;
+            assert!((ms - want_ms).abs() < 0.2, "{bpp} bpp: {ms} ms");
+        }
+    }
+
+    #[test]
+    fn frame_after_frame_every_frame_starts_on_its_own_tick_with_no_drift() {
+        let bufs = frame_buffers(8);
+        let mut p = PaceSchedule::new(900).unwrap();
+        let mut spans = std::collections::BTreeSet::new();
+        for k in 0..300u64 {
+            let tick = 17_000_000_000_000 + k * 1_000_000_000 / 30;
+            let (first, _, end) = schedule_frame(&mut p, &bufs, tick);
+            assert_eq!(first, tick, "frame {k} leaves on its own tick");
+            spans.insert(end - first);
+        }
+        assert_eq!(
+            spans.len(),
+            1,
+            "every frame takes the same wire time: {spans:?}"
+        );
+    }
+
+    #[test]
+    fn frames_faster_than_the_pace_queue_behind_each_other_never_overlap() {
+        // 8 bpp at 300 Mb/s takes ~59 ms: the second frame waits for the first one's tail
+        let bufs = frame_buffers(8);
+        let mut p = PaceSchedule::new(300).unwrap();
+        let (_, _, end1) = schedule_frame(&mut p, &bufs, 0);
+        let (first2, _, _) = schedule_frame(&mut p, &bufs, 33_333_333);
+        assert!(
+            end1 > 33_333_333,
+            "the first frame is still on the wire at the second tick"
+        );
+        assert!(
+            first2 + 1 >= end1 && first2 <= end1,
+            "the second frame starts where the first one's last send ends: {first2} vs {end1}"
+        );
+    }
+}

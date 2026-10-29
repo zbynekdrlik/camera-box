@@ -59,7 +59,9 @@ fn pins() -> Vec<(String, usize)> {
         stream_id,
         bpp_min,
         bpp_max,
-        reserved
+        reserved,
+        pace_mbps,
+        reserved2
     );
     off!(
         "cbjxs_send_picture",
@@ -92,7 +94,15 @@ fn pins() -> Vec<(String, usize)> {
         report_age_s,
         bpp,
         auto_bpp,
-        reserved
+        reserved,
+        pace_mbps,
+        reserved2,
+        wire_ms_avg,
+        wire_ms_max
+    );
+    assert_eq!(
+        CBJXS_SEND_ABI_VERSION, 2,
+        "ABI 2: the pace + wire-time fields"
     );
     v
 }

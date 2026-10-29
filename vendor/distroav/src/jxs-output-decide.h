@@ -28,6 +28,23 @@ static inline uint8_t cb_jxs_out_bpp(long long v)
 	return (v >= 0 && v <= CB_JXS_OUT_MAX_BPP) ? (uint8_t)v : 0;
 }
 
+/* The send pacing default, Mb/s of Ethernet wire: strih-snv sends on 10 GbE and its one target,
+ * stream-snv, receives on a 1 GbE port, whose switch buffer drops the tail of a line-rate slice
+ * burst (the slice-3 live run lost slices in 10 of 21 windows). 900 leaves NDI's own share of the
+ * port aside from it and still carries a 12 bpp frame in ~29.5 ms, under the 33.3 ms of 30 fps. */
+#define CB_JXS_OUT_PACE_MBPS_DEFAULT 900
+/* The sender's bounds (camera_box::jxs_link::pace::PACE_MBPS_MIN / _MAX); 0 = line rate. */
+#define CB_JXS_OUT_PACE_MBPS_MIN 100
+#define CB_JXS_OUT_PACE_MBPS_MAX 100000
+
+/* The pace setting: 0 (or below) = line rate, else clamped into the sender's bounds, so a setting
+ * never makes the start fail. */
+static inline uint32_t cb_jxs_out_pace_mbps(long long v)
+{
+	(void)v;
+	return 0;
+}
+
 /* The canvas frame rate the sender is told (it sends every frame at 30 or below, the 30 fps grid
  * frames above), rounded; a non-positive or absurd rate is 0 (the open refuses nothing for it,
  * the sender then sends every frame). */

@@ -25,7 +25,7 @@ extern "C" {
 #endif
 
 /* Bumped on any change of a struct or a signature below. */
-#define CBJXS_SEND_ABI_VERSION 1u
+#define CBJXS_SEND_ABI_VERSION 2u /* 2: cbjxs_send_config.pace_mbps, the stats' pace + wire time */
 
 /* cbjxs_send_picture.format: the picture's memory layout. JPEG XS codes 4:2:0, 4:2:2 and 4:4:4 as
  * they are; NV12 is 4:2:0 with U and V interleaved in plane 1 (split on the copy). */
@@ -50,6 +50,11 @@ typedef struct cbjxs_send_config {
 	uint8_t bpp_min;    /* the automatic bpp's floor, 0 = 4 */
 	uint8_t bpp_max;    /* its ceiling, 0 = 8, at most 12; min == max = that bpp, fixed (auto off) */
 	uint8_t reserved;
+	/* The send pacing in Mb/s of Ethernet wire (payload + 66 bytes per datagram): 0 = line rate,
+	 * else 100..100000; each slice is spread at this rate, at most 16 datagrams per send, for a
+	 * receiver whose link is slower than the sender's (a 10 GbE sender to a 1 GbE port). */
+	uint32_t pace_mbps;
+	uint32_t reserved2;
 } cbjxs_send_config;
 
 typedef struct cbjxs_send_picture {
@@ -86,6 +91,10 @@ typedef struct cbjxs_send_stats {
 	uint32_t bpp;        /* the bpp of the frames that went out last */
 	uint8_t auto_bpp;    /* 1 = automatic */
 	uint8_t reserved[3];
+	uint32_t pace_mbps; /* the pacing the window sent at, 0 = line rate */
+	uint32_t reserved2;
+	double wire_ms_avg; /* a whole frame's first send -> its last send returned */
+	double wire_ms_max;
 } cbjxs_send_stats;
 
 typedef void (*cbjxs_send_log_fn)(int level, const char *message);
