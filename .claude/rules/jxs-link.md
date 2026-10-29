@@ -298,6 +298,18 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
 - A worktree lane cannot type a path containing the word `Source` into a Bash command (the
   isolation guard reads it as `source`): copy/list vendor files from a python script file.
 
+## Testing gotchas (auto bpp)
+
+- **A new `JxsFrame` field goes AFTER `emit_fps` in main.rs's hand-off literal.**
+  `tests/jxs_wiring_1387.rs` reads only the 400 bytes after `jxs.offer(` for the timecode and
+  `emit_fps: send_fps`; a field inserted before them pushed `emit_fps` out of the window.
+- **main.rs's `capture_realtime_100ns` is not the capture instant while `phase_lock=stamp`**: it
+  is the phase tracker's slot middle (`capture_phase::stamp_instant_100ns`). Anything that needs
+  the real capture time builds it from `info.capture_monotonic_100ns` with
+  `genlock_stamp::capture_realtime_100ns` (the round-3 review 🔴 of `capture_age_ms`).
+- **The live `encode_ms` includes the send.** A paced or full socket shows up there as "encode
+  time"; measure the codec alone with `jxs-encode-bench` before calling a bpp a CPU limit.
+
 ## Testing gotchas (slice 1b)
 
 - **A debug test races a RELEASE-built codec.** `build.rs` always builds SVT-JPEG-XS Release, while
