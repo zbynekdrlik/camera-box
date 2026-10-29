@@ -319,6 +319,12 @@ pub struct SendWindow {
     /// The window's length in seconds (the `fps=` divisor) and the encoder's bits per pixel.
     pub window_s: f64,
     pub bpp: u32,
+    /// The automatic bpp is on (issue 1387; off = `CAMERA_BOX_JXS_BPP` pins it).
+    pub auto: bool,
+    /// Why the bpp last changed (`None` = it never changed).
+    pub bpp_reason: Option<crate::jxs_auto_bpp::StepReason>,
+    /// Seconds since the last receiver report (`None` = never one).
+    pub report_age_s: Option<f64>,
 }
 
 fn avg(sum: f64, n: u64) -> f64 {
@@ -340,18 +346,22 @@ impl SendWindow {
         self.encode_ms_max = self.encode_ms_max.max(encode_ms);
     }
 
-    /// The 5 s status line: `jxs send: fps= bpp= frames= slices= bytes= dropped_busy= in_flight=max/cap
-    /// convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
-    /// encode_errors= (issue 1387)`. `bytes` counts the codestream, not the headers.
+    /// The 5 s status line: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
+    /// dropped_busy= in_flight=max/cap convert_ms_avg/max= first_slice_ms_avg/max=
+    /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= (issue 1387)`. `bytes`
+    /// counts the codestream, not the headers; `bpp_reason` / `report_age_s` read `-` when there
+    /// is none.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: fps={:.1} bpp={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} (issue 1387)",
             if self.window_s > 0.0 {
                 self.frames as f64 / self.window_s
             } else {
                 0.0
             },
             self.bpp,
+            if self.auto { "on" } else { "off" },
+            self.bpp_reason.map_or("-".to_string(), |r| r.to_string()),
             self.frames,
             self.slices,
             self.bytes,
@@ -365,7 +375,9 @@ impl SendWindow {
             avg(self.encode_ms_sum, self.frames),
             self.encode_ms_max,
             self.send_errors,
-            self.encode_errors
+            self.encode_errors,
+            self.report_age_s
+                .map_or("-".to_string(), |a| format!("{a:.1}")),
         )
     }
 }
@@ -618,9 +630,12 @@ mod tests {
         w.convert_ms_max = 0.75;
         w.window_s = 0.5;
         w.bpp = 6;
+        w.auto = true;
+        w.bpp_reason = Some(crate::jxs_auto_bpp::StepReason::Clean { needed_s: 10 });
+        w.report_age_s = Some(0.43);
         assert_eq!(
             w.status_line(),
-            "jxs send: fps=4.0 bpp=6 frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 (issue 1387)"
+            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 (issue 1387)"
         );
         let empty = SendWindow::default().status_line();
         assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
@@ -643,7 +658,14 @@ mod tests {
             "encode_ms_avg/max=",
             "send_errors=",
             "encode_errors=",
+            "auto=",
+            "bpp_reason=",
+            "report_age_s=",
         ];
+        assert!(
+            empty.contains(" auto=off bpp_reason=- ") && empty.contains(" report_age_s=- "),
+            "{empty}"
+        );
         for a in keys {
             assert_eq!(empty.matches(a).count(), 1, "{a}");
             for b in keys {

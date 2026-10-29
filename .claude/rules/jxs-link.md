@@ -6,6 +6,9 @@ paths:
   - "src/jxs_send/**"
   - "src/jxs_recv.rs"
   - "src/bin/jxs-recv-probe.rs"
+  - "src/bin/jxs-encode-bench.rs"
+  - "src/jxs_auto_bpp.rs"
+  - "src/jxs_bench.rs"
   - "jxs/**"
   - "vendor/svt-jpeg-xs/**"
   - "tests/jxs_loopback_1387.rs"
@@ -28,8 +31,10 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
 - No hardware change: the camboxes stay on 1 GbE.
 - **30 fps, the strih grid** (owner decision 29.10.2026, slice 1b): only the frames on the strih
   30 fps grid go over JPEG XS; NDI stays at 60 fps, unchanged. The encode budget is 33.3 ms.
-- **bpp is a setting:** `CAMERA_BOX_JXS_BPP`, default 4; the owner's budget allows ~500 Mb/s,
-  i.e. ~8 bpp at 30 fps.
+- **bpp is automatic** (owner decision 6495938345: the highest quality the box encodes in time
+  AND the strih takes, low overhead): `CAMERA_BOX_JXS_BPP_MIN` / `_MAX` (default 4..=8, ~500 Mb/s
+  at 30 fps = the owner's 1 GbE budget); `CAMERA_BOX_JXS_BPP` set alone pins a fixed bpp (auto
+  off). See "The automatic bpp" below.
 
 ## Where things are
 
@@ -48,8 +53,11 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
   (`session.rs`, below).
 - **Sender: `src/jxs_send.rs` + `src/jxs_send/handoff.rs` (slice 1b).**
   - `JxsSender::start_from_env` reads `CAMERA_BOX_JXS_TARGET`; unset = `None`, nothing exists.
-    `CAMERA_BOX_JXS_BPP` (`parse_bpp`: a whole number 1..=12, default 4; anything else WARNs and
-    keeps 4; 12 is the most a 16-line 1080p slice fits in the 16-bit slice length).
+    The bpp mode comes from `parse_bpp_mode` (`CAMERA_BOX_JXS_BPP` = fixed, a whole number
+    1..=12, a refused value keeps a FIXED 4; else auto between `_MIN`/`_MAX`, each refused bound
+    keeps its default, a floor above the ceiling keeps 4..=8; every refusal WARNs). 12 is the most
+    a 16-line 1080p slice fits in the 16-bit slice length. `CAMERA_BOX_JXS_FIFO_PRIO`
+    (`parse_fifo_prio`, 1..=89, unset/0/off = SCHED_OTHER) is the opt-in encoder SCHED_FIFO.
   - **Which frames:** `jxs_link::on_jxs_grid(timecode, emit_fps)` floors the frame's genlock
     timecode on the per-second emit grid (`genlock_grid::per_second_floor`) and keeps it only when
     that stamp is also a point of the 30 fps grid: the EVEN 60 fps slots (`floor(2j/60 s)` ==
@@ -88,11 +96,15 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     **`threads_num` 0 meant ONE slice-pack thread**
     (latency profile: `pack_stage_threads_num = MAX(1, threads_num - 2)`): slice 1 packed all 68
     slices of a frame serially, the 16.9 ms live encode. `with_slice_threads(n)` sets n + 2.
-  - The status line every 5 s: `jxs send: fps= bpp= frames= slices= bytes= dropped_busy=
-    in_flight=max/cap convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
-    encode_errors= (issue 1387)`. `in_flight` counts a frame from its submit to its last packet;
-    `first_slice_ms` = the converted frame queued -> its first packet sent; `encode_ms` = submit ->
-    last packet sent.
+  - The status line every 5 s: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
+    dropped_busy= in_flight=max/cap convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max=
+    send_errors= encode_errors= report_age_s= (issue 1387)`. `bpp` = the bpp of the session whose
+    frames went out last; `bpp_reason` the last change's reason (`-` = none yet);
+    `report_age_s` seconds since the last receiver report (`-` = never one: the auto bpp holds).
+    `in_flight` counts a frame from its submit to its last packet; `first_slice_ms` = the converted
+    frame queued -> its first packet sent; `encode_ms` = submit -> last packet SENT, so it
+    INCLUDES a send that blocks on a full socket/qdisc (the 29.10 8 bpp "55.8 ms" was that, not
+    the codec: see "Encoder cost" below).
   - **Wedge alarm:** the status line lives on `jxs-send`, the thread a hung `get_packet` would
     stop. So `jxs-send` stamps a progress clock every loop turn and every packet, and `jxs-feed`
     checks it every 500 ms: a frame in flight with no packet for 2 s (`encoder_wedged`,
@@ -145,6 +157,92 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
   refuses a declared picture over 7680x4320 (the size comes from the network).
 - **Probe: `jxs-recv-probe`** (`--features jxs`, CI uploads it in `probe-tools-linux-amd64`).
 
+## The automatic bpp (issue 1387, owner decision 6495938345)
+
+- **The back channel: ONE 32-byte receiver report per second** (`jxs_link::ReceiverReport`,
+  layout in the `src/jxs_link.rs` module doc next to the slice datagram: magic `'R'`, version 1,
+  camera id, max bpp, seq, frames, lost slices, late frames, decode p99 us, last timecode). The
+  receiver sends it from its LISTENING socket to the address the slices came from
+  (`JxsRecvSocket::recv_batch_from` names it, `send_report` sends it); the sender's socket is
+  connected, so only that receiver reaches it (`JxsSocket::take_report`: non-blocking, newest of
+  this camera, garbage and queued ICMP errors skipped, at most 64 datagrams per call).
+  `jxs-recv-probe` sends it (`--max-bpp`, `--late-ms` default 100, `--no-report`; `reports=` on its
+  status line). The slice-2 OBS source must send the same report, or the auto bpp holds at its floor.
+- **The controller is pure: `src/jxs_auto_bpp.rs` `AutoBpp`** (crate root, default features,
+  every rule unit-tested), ticked once per second on `jxs-send` (`handoff.rs` `BppControl`) with
+  the second's frames, encode p99 (submit -> last packet sent), `dropped_busy` (a separate
+  per-tick counter, `Stats::dropped_tick`) and encode errors. `AutoBppConfig::new(min, max)`:
+  - DOWN one step AT ONCE: a dropped frame, encode p99 > 90 % of 33.3 ms, or a report of lost
+    slices / late frames about the CURRENT bpp. "About the current bpp" = the report's newest
+    timecode >= the timecode of the first frame sent at it (`applied`), so a report about frames
+    of a bpp already left steps nothing; one report acts once (its seq). A receiver cap below the
+    current bpp steps straight to it (clamped to the floor).
+  - UP one step after 10 clean seconds in a row: frames sent, encode p99 < 60 % of the budget,
+    nothing dropped, no encode error, a FRESH (<= 3 s) clean report about the current bpp. Never
+    above `max` or the receiver's cap. One unclean second restarts the count.
+  - NO report for 3 s: hold, both ways (never climb blind; a silent receiver also never steps
+    the sender down).
+  - Back-off: every step down from level L doubles the clean run needed to climb back to L
+    (10, 20, 40 ... capped at 300 s); 30 min clean below it halves it again. A refused session at
+    a level counts as a failure of it.
+  - While a step is being applied nothing else is decided (`Hold::Pending`).
+- **How a step reaches the encoder: a NEW session, swapped at a frame boundary.** SVT-JPEG-XS has
+  no call that changes the bpp of a live session (`svt_jpeg_xs_encoder_init` reads it once). The
+  packet thread writes the wanted bpp into an `AtomicU32`; the feeder (`Sessions::prepare`) opens
+  a session at it BETWEEN two frames (after a submit, or on its 500 ms idle turn), and
+  `Sessions::ensure` swaps it in before the next submit: a `Job::Session { output, bpp }` goes
+  into the ordered job queue, so every frame of the old session is sent before the packet thread
+  switches, and the old session closes then. Measured on cam5: open 0.2-0.7 ms, close 0.1 ms.
+  A refused open sends `Job::Refused`, the controller stays and backs off. Pinned end to end by
+  `the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_frame` (the real
+  encoder, a fake receiver: 4 -> 5 on clean reports, back to 4 on a loss, every handed-over frame
+  arrives whole).
+- Each change logs ONE INFO line: `jxs send: bpp 6 -> 7 (clean-10s; second: frames=30
+  encode_p99_ms=14.80 dropped_busy=0 encode_errors=0) (issue 1387)`. The "link ON" line names the
+  mode (`auto bpp 4..=8 (starts at 4, ...)` or `6 bpp (fixed by CAMERA_BOX_JXS_BPP, auto off)`).
+
+## Encoder cost on the N150 (29.10.2026, comment 6496253608)
+
+`jxs-encode-bench` (`--features jxs`, `src/bin/jxs-encode-bench.rs`) runs the sender's own
+pipelined session with NO socket, paced at 30 fps or saturated, and prints encode p50/p99/max per
+bpp plus the session open/close cost. It touches no device; on a cambox run it from /dev/shm next
+to the running camera-box (never stop camera-box for it). Its content is synthetic: `noise`
+(every pixel detailed, the entropy coder's worst case) or `smooth`, or `--yuv422p FILE`.
+
+| cam5 N150, cores 0-1, 2 slice threads | 4 bpp | 6 | 8 | 10 | 12 |
+|---|---|---|---|---|---|
+| noise, 30 fps, p50/p99 ms | 11.5/12.3 | 13.0/14.0 | 13.8/14.8 | 13.4/14.4 | 13.1/13.9 |
+| smooth, 30 fps, p50/p99 ms | 9.9/10.4 | 10.2/11.0 | 10.1/10.8 | 10.2/11.2 | 10.1/10.9 |
+| noise, saturated fps | 80.8 | 72.8 | 69.5 | - | 71.0 |
+
+- 8 bpp on ONE core: 24.2/25.3 ms. So bpp is NOT the N150's CPU limit up to 12; the 1 GbE wire
+  is (8 bpp = ~500 Mb/s, 12 = ~750 Mb/s plus NDI).
+- **The 29.10 live "8 bpp = 55.8 ms, 23 fps" was the 400 Mb/s egress pacing**: the live wire read
+  381 Mb/s = 23 x 2.07 MB x 8, the send blocked on the paced queue and `encode_ms` includes the
+  send. The `SO_MARK 0x1387` exemption removes it.
+- The library's knobs (`EncoderTuning`, `None` = its default; the shim passes them through and
+  `the_coding_knobs_reach_the_library` proves a bad value is refused by the library): rate
+  control 0/2/3, vertical prediction 1/2 and uniform quantization each cost 0.3-1.3 ms more;
+  sign handling fast/full doubles the cost; significance coding off saves ~1 ms but codes less
+  efficiently. The defaults (rc 1, signs 0, sigf 1, vpred 0, deadzone) stay.
+- SCHED_FIFO 50 on an idle core pair: 13.5/14.0 ms vs 13.8/14.8 SCHED_OTHER.
+- **The encoder SCHED_FIFO is OPT-IN** (`CAMERA_BOX_JXS_FIFO_PRIO`, `affinity::JXS_ENCODER_FIFO_PRIORITY`
+  = 50 is the suggested value, below the capture's 90). The feeder raises itself with
+  `affinity::set_current_thread_fifo_inherited` (FIFO WITHOUT reset-on-fork) right before it opens
+  a session, so the library's worker threads (created inside the open) inherit it: the ONE
+  deliberate exception to the reset-on-fork rule, documented in affinity.rs. Why opt-in: (1) the
+  measured gain on an idle pair is ~0.8 ms at p99 and the budget has 2x headroom; (2) it would
+  put 5 more SCHED_FIFO threads into camera-box, over verify-device `(ah)`'s ceiling of 4, so
+  making it the default needs `(ah)` to count the `jxs-feed`-named threads apart (they carry the
+  feeder's name, inherited) -- a live A/B with the HDMI preview running decides it first.
+- **The HDMI preview cannot move off the encoder cores without touching capture:** on the 4-core
+  cambox core 3 is capture, core 2 the reserved capture-IRQ core that must stay quiet (issues
+  1198 / 1367 measured drops with the preview there); 0-1 are the only general cores. Read live
+  on cam5 (JXS off, no monitor): capture + every `ndis:*` NDI send thread run on core 3, only four
+  light camera-box threads on 0-1, and the preview skips rendering without a monitor. With a
+  monitor plugged in, its NDI receive + scale share 0-1 with the encoder; the FIFO opt-in is the
+  lever, measured live.
+
 ## Build gotchas
 
 - The `jxs` feature needs cmake >= 3.10 and **nasm >= 2.14**. CI installs nasm in lint, test,
@@ -193,19 +291,26 @@ its two cores against the 33.3 ms budget. The first `offer` allocates the pictur
 1. On strih-snv (or dev1): `jxs-recv-probe --listen 0.0.0.0:7000 --window-s 5`.
 2. On the cambox: a RUNTIME drop-in (gone at reboot), then the deploy's restart:
    `systemctl edit --runtime camera-box` -> `[Service]` `Environment=CAMERA_BOX_JXS_TARGET=<strih ip>:7000`.
-   Optional in the same drop-in: `Environment=CAMERA_BOX_JXS_BPP=8` (default 4) and
-   `Environment=CAMERA_BOX_JXS_CORES=0-1` (must lie inside the off-capture cores).
+   Optional in the same drop-in: `Environment=CAMERA_BOX_JXS_BPP=8` (pins 8, auto off) OR
+   `Environment=CAMERA_BOX_JXS_BPP_MAX=10` (auto, default 4..=8), `Environment=CAMERA_BOX_JXS_FIFO_PRIO=50`
+   (the encoder FIFO A/B) and `Environment=CAMERA_BOX_JXS_CORES=0-1` (must lie inside the
+   off-capture cores).
    Journal: `jxs send: link ON to ... (UDP GSO on, egress mark 0x1387: line rate past the NDI
-   pacing, ...) -- JPEG XS <bpp> bpp at 30 fps ...,
-   encoder on cores [0, 1] with 2 slice threads (capture core Some(3), capture-IRQ core Some(2)
-   untouched)`, `encoder open 1920x1080, <bpp> bpp, ...`, then every 5 s the status line above.
+   pacing, ...) -- JPEG XS auto bpp 4..=8 (starts at 4, ...) at 30 fps ...,
+   encoder on cores [0, 1] with 2 slice threads (SCHED_OTHER) (capture core Some(3), capture-IRQ
+   core Some(2) untouched)`, `encoder open 1920x1080, <bpp> bpp, ..., opened in X ms`, then every
+   5 s the status line above, and one `jxs send: bpp A -> B (<reason>; ...)` line per change.
+   The auto bpp climbs one step per 10 clean s only while the probe reports (`report_age_s` < 3).
 3. Grade: the `Streaming:` line still 60.0 sent with no capture drop; `fps=30.0`, `frames` ~150
    per 5 s, `dropped_busy=0`, `in_flight` max 1-2 of 2, `encode_ms_avg` well under 33.3,
    `first_slice_ms_avg` under ~1 ms; `send_errors=0`; ~250 Mb/s at 4 bpp (~500 at 8) on the
    wire; camera-box CPU; the #1242 stagger line (`max per-frame work` now includes the
    conversion); the probe's `fps=30.00 lost_slices=0` over 10 min, `latency_ms_p50/p99/max`
    (target: near the encode time, slice 1 was 50 ms), `spread_ms`; `--dump-png 3 --dump-skip 300`
-   vs the same frame over NDI (detail metric + a crop). Repeat at 6 and 8 bpp.
+   vs the same frame over NDI (detail metric + a crop). Repeat at 6 and 8 bpp. Auto: start the
+   probe, read the `bpp A -> B` lines climb 4 -> 8 within ~1 min, then `bpp=8 auto=on`, `fps=30.0`,
+   `dropped_busy=0`; `--no-report` on the probe must leave it holding; `--max-bpp 6` must step it
+   down to 6 at once (`receiver-cap`).
 4. Remove the drop-in and restart: the link is off, the NDI path is byte-identical.
 
 **Before the issue-1387 egress rerun:** the cambox must carry the classful egress tree. Bring it there
