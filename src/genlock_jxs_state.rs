@@ -75,6 +75,9 @@ pub enum JxsReason {
     OutputDegraded = 5,
     /// An input lost slices / frames or ran short.
     InputDegraded = 6,
+    /// The procedure answered but its table did not parse: never [`decide`]'s outcome, the
+    /// widget's own (DEGRADED, so a broken indicator never reads as OFF).
+    TableUnreadable = 7,
 }
 
 /// One row of the table, scalarised (the JSON row the proc handler returns).
@@ -199,6 +202,7 @@ pub fn reason_key(r: JxsReason) -> &'static str {
         JxsReason::InputDown => "input_down",
         JxsReason::OutputDegraded => "output_degraded",
         JxsReason::InputDegraded => "input_degraded",
+        JxsReason::TableUnreadable => "table_unreadable",
     }
 }
 

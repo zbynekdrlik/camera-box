@@ -198,7 +198,7 @@ jobs:
             @('vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp', '#include "GenlockJxsWidget.hpp"'),
             @('vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp', 'jxsWidget = new GenlockJxsWidget(this); addPermanentWidget(jxsWidget, 0);'),
             @('vendor/obs-studio/frontend/widgets/GenlockJxsWidget.cpp', 'proc_handler_call(obs_get_proc_handler(), "camera_box_jxs_state", &cd);'),
-            @('vendor/obs-studio/frontend/widgets/GenlockJxsWidget.cpp', 'const GenlockJxsReport rep = genlock_jxs_report(rows);'),
+            @('vendor/obs-studio/frontend/widgets/GenlockJxsWidget.cpp', 'const GenlockJxsReport rep = genlock_jxs_report(rows, read == GenlockJxsRead::Unreadable);'),
             @('vendor/obs-studio/frontend/widgets/GenlockJxsWidget.cpp', 'blog(LOG_INFO, "%s", rep.log_line.c_str());'),
             @('vendor/obs-studio/frontend/widgets/GenlockJxsReport.cpp', 'const genlock_jxs_state_t state = genlock_jxs_decide(&c, &reason);'),
             @('vendor/obs-studio/frontend/widgets/GenlockJxsReport.cpp', '"jxs-state: state=%s reason=%s inputs=%d down=%d degraded=%d outputs=%d down=%d degraded=%d entry="'),

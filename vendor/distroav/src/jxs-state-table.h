@@ -41,11 +41,54 @@ struct cb_jxs_state_row {
 	int64_t report_age_ms = -1; /* the output's last receiver report, -1 = never */
 };
 
+/* The length of the well-formed UTF-8 sequence at s[i] (RFC 3629: no overlong form, no surrogate,
+ * nothing above U+10FFFF), 0 = not one. */
+static inline size_t cb_jxs_state_utf8_len(const std::string &s, size_t i)
+{
+	const unsigned char c = (unsigned char)s[i];
+	size_t n = 0;
+	unsigned char lo = 0x80, hi = 0xBF; /* the bounds of the second byte */
+	if (c >= 0xC2 && c <= 0xDF) {
+		n = 2;
+	} else if (c >= 0xE0 && c <= 0xEF) {
+		n = 3;
+		lo = c == 0xE0 ? 0xA0 : 0x80;
+		hi = c == 0xED ? 0x9F : 0xBF;
+	} else if (c >= 0xF0 && c <= 0xF4) {
+		n = 4;
+		lo = c == 0xF0 ? 0x90 : 0x80;
+		hi = c == 0xF4 ? 0x8F : 0xBF;
+	} else {
+		return 0;
+	}
+	if (i + n > s.size())
+		return 0;
+	for (size_t k = 1; k < n; k++) {
+		const unsigned char b = (unsigned char)s[i + k];
+		if (b < (k == 1 ? lo : 0x80) || b > (k == 1 ? hi : 0xBF))
+			return 0;
+	}
+	return n;
+}
+
 /* A JSON string body: quote, backslash and control characters escaped (source names are free
- * text). Bytes >= 0x80 pass through, so UTF-8 names stay UTF-8. */
+ * text); well-formed UTF-8 passes through, every byte that is not part of one becomes '?', so the
+ * snapshot is always JSON the frontend's parser (jansson, strict UTF-8) takes. */
 static inline void cb_jxs_state_json_escape(std::string &out, const std::string &s)
 {
-	for (unsigned char c : s) {
+	for (size_t i = 0; i < s.size();) {
+		const unsigned char c = (unsigned char)s[i];
+		if (c >= 0x80) {
+			const size_t n = cb_jxs_state_utf8_len(s, i);
+			if (n == 0) {
+				out += '?';
+				i++;
+			} else {
+				out.append(s, i, n);
+				i += n;
+			}
+			continue;
+		}
 		if (c == '"' || c == '\\') {
 			out += '\\';
 			out += (char)c;
@@ -56,7 +99,15 @@ static inline void cb_jxs_state_json_escape(std::string &out, const std::string 
 		} else {
 			out += (char)c;
 		}
+		i++;
 	}
+}
+
+/* A counter as JSON reads it: jansson holds integers as int64, so anything above INT64_MAX (a
+ * window delta that wrapped) is clamped, never printed as a number the parser rejects. */
+static inline uint64_t cb_jxs_state_json_u64(uint64_t v)
+{
+	return v > (uint64_t)INT64_MAX ? (uint64_t)INT64_MAX : v;
 }
 
 class cb_jxs_state_table {
@@ -130,8 +181,9 @@ public:
 				 ",\"age_ms\":%" PRId64 ",\"window\":%s,\"fps_x100\":%u,\"bpp_x100\":%u,\"lost\":%" PRIu64
 				 ",\"undecodable\":%" PRIu64 ",\"dropped\":%" PRIu64 ",\"errors\":%" PRIu64
 				 ",\"report_age_ms\":%" PRId64 "}",
-				 age_ms, r.window ? "true" : "false", (unsigned)r.fps_x100, (unsigned)r.bpp_x100, r.lost,
-				 r.undecodable, r.dropped, r.errors, r.report_age_ms);
+				 age_ms, r.window ? "true" : "false", (unsigned)r.fps_x100, (unsigned)r.bpp_x100,
+				 cb_jxs_state_json_u64(r.lost), cb_jxs_state_json_u64(r.undecodable),
+				 cb_jxs_state_json_u64(r.dropped), cb_jxs_state_json_u64(r.errors), r.report_age_ms);
 			if (!first)
 				j += ',';
 			first = false;

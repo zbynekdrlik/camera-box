@@ -8,9 +8,9 @@
  * line on every change. No procedure (a build without the JPEG XS source, the Windows bundle) =
  * OFF. No meta-object macro: the timer connects to a lambda, so the class needs no moc. */
 
-#include <QLabel>
+#include "GenlockJxsReport.hpp"
 
-#include <string>
+#include <QLabel>
 
 class QTimer;
 
@@ -23,7 +23,5 @@ private:
 
 	QTimer *timer = nullptr;
 	/* the jxs-state: line's change key (state, reason, offender) */
-	int lastState = -1;
-	int lastReason = -1;
-	std::string lastOffender;
+	GenlockJxsLogKey logKey;
 };

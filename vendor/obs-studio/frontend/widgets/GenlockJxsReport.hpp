@@ -40,4 +40,17 @@ struct GenlockJxsReport {
 	std::string log_line; /* the jxs-state: line (the widget logs it on a change) */
 };
 
-GenlockJxsReport genlock_jxs_report(const std::vector<GenlockJxsRow> &rows);
+/* `unreadable`: the proc handler answered but its table did not parse -- DEGRADED
+ * (table_unreadable), never the grey OFF a box without JPEG XS shows. */
+GenlockJxsReport genlock_jxs_report(const std::vector<GenlockJxsRow> &rows, bool unreadable = false);
+
+/* The jxs-state: line's change key: the widget logs a report only when its state, reason or the
+ * row behind it differs from the last one logged. */
+struct GenlockJxsLogKey {
+	int state = -1;
+	int reason = -1;
+	std::string offender;
+};
+
+/* True (and the key moves to this report) when the report must be logged. */
+bool genlock_jxs_log_due(GenlockJxsLogKey &key, const GenlockJxsReport &rep);

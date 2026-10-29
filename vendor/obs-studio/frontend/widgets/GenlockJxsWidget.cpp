@@ -13,10 +13,17 @@
 
 namespace {
 
-/* The rows of DistroAV's JPEG XS state table, read through its proc handler. False = there is no
+enum class GenlockJxsRead { None, Rows, Unreadable };
+
+/* The rows of DistroAV's JPEG XS state table, read through its proc handler. None = there is no
  * such procedure (a build without the JPEG XS source): the indicator then reads OFF, never an error.
- * The JSON is the plugin's own copy (calldata owns it until calldata_free). */
-bool genlock_jxs_read_rows(std::vector<GenlockJxsRow> &rows)
+ * Unreadable = the procedure answered but the JSON did not parse (obs_data_create_from_json then
+ * hands back an EMPTY object, never NULL): that must not read as OFF. The JSON is the plugin's own
+ * copy (calldata owns it until calldata_free).
+ * obs_get_proc_handler() dereferences the libobs core without a check: safe here because the status
+ * bar exists only between OBSApp's StartupOBS and obs_shutdown (which runs with no event loop, so no
+ * tick follows it). Keep that order. */
+GenlockJxsRead genlock_jxs_read_rows(std::vector<GenlockJxsRow> &rows)
 {
 	calldata_t cd;
 	calldata_init(&cd);
@@ -25,7 +32,12 @@ bool genlock_jxs_read_rows(std::vector<GenlockJxsRow> &rows)
 	obs_data_t *table = json && *json ? obs_data_create_from_json(json) : nullptr;
 	calldata_free(&cd);
 	if (!table)
-		return have;
+		return have ? GenlockJxsRead::Unreadable : GenlockJxsRead::None;
+	/* the schema version marks a table that parsed (a failed parse is an empty object) */
+	if (!obs_data_has_user_value(table, "v")) {
+		obs_data_release(table);
+		return GenlockJxsRead::Unreadable;
+	}
 	obs_data_array_t *entries = obs_data_get_array(table, "entries");
 	const size_t n = entries ? obs_data_array_count(entries) : 0;
 	for (size_t i = 0; i < n; i++) {
@@ -53,7 +65,7 @@ bool genlock_jxs_read_rows(std::vector<GenlockJxsRow> &rows)
 	}
 	obs_data_array_release(entries);
 	obs_data_release(table);
-	return have;
+	return GenlockJxsRead::Rows;
 }
 
 } // namespace
@@ -71,18 +83,14 @@ GenlockJxsWidget::GenlockJxsWidget(QWidget *parent) : QLabel(parent)
 void GenlockJxsWidget::Tick()
 {
 	std::vector<GenlockJxsRow> rows;
-	genlock_jxs_read_rows(rows);
-	const GenlockJxsReport rep = genlock_jxs_report(rows);
+	const GenlockJxsRead read = genlock_jxs_read_rows(rows);
+	const GenlockJxsReport rep = genlock_jxs_report(rows, read == GenlockJxsRead::Unreadable);
 
 	setText(QString::fromStdString(rep.label));
 	setStyleSheet(QString("QLabel { color: %1; padding: 0 6px; }").arg(QString::fromStdString(rep.colour)));
 	setToolTip(QString::fromStdString(rep.tooltip));
 
 	/* one jxs-state: line per change of state, reason or the row behind it */
-	if (rep.state != lastState || rep.reason != lastReason || rep.offender != lastOffender) {
-		lastState = rep.state;
-		lastReason = rep.reason;
-		lastOffender = rep.offender;
+	if (genlock_jxs_log_due(logKey, rep))
 		blog(LOG_INFO, "%s", rep.log_line.c_str());
-	}
 }

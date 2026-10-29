@@ -43,6 +43,8 @@ typedef enum genlock_jxs_reason {
 	GENLOCK_JXS_REASON_INPUT_DOWN = 4,
 	GENLOCK_JXS_REASON_OUTPUT_DEGRADED = 5,
 	GENLOCK_JXS_REASON_INPUT_DEGRADED = 6,
+	/* the procedure answered but its table did not parse: the widget's own, never decide()'s */
+	GENLOCK_JXS_REASON_TABLE_UNREADABLE = 7,
 } genlock_jxs_reason_t;
 
 /* One table row, scalarised (age_ms / report_age_ms negative = none yet). */
@@ -161,6 +163,8 @@ static inline const char *genlock_jxs_reason_key(genlock_jxs_reason_t r)
 		return "output_degraded";
 	case GENLOCK_JXS_REASON_INPUT_DEGRADED:
 		return "input_degraded";
+	case GENLOCK_JXS_REASON_TABLE_UNREADABLE:
+		return "table_unreadable";
 	}
 	return "?";
 }

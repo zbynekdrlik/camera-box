@@ -253,8 +253,9 @@ static void jxs_output_log_status(jxs_output *o, const cbjxs_send_stats &st)
 		st.encode_ms_max, st.first_slice_ms_avg, st.copy_ms_avg, st.copy_ms_max, st.bpp,
 		st.auto_bpp ? "on" : "off", st.reports, st.report_age_s, st.send_errors, st.encode_errors);
 	const double fps = st.window_s > 0.0 ? (double)st.frames / st.window_s : 0.0;
+	/* the indicator's errors: encode_errors already counts a refused picture (send-ffi header) */
 	cb_jxs_state().publish_window(o, (uint32_t)(fps * 100.0 + 0.5), st.bpp * 100u, 0, 0, st.dropped_busy,
-				      st.send_errors + st.encode_errors + o->refused,
+				      st.send_errors + st.encode_errors,
 				      st.report_age_s < 0.0 ? -1 : (int64_t)(st.report_age_s * 1000.0));
 	o->offered = o->taken = o->not_taken = o->refused = o->stamp_dup = 0;
 }

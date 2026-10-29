@@ -51,6 +51,8 @@ const char *genlock_jxs_reason_text(genlock_jxs_reason_t r)
 		return "program output losing";
 	case GENLOCK_JXS_REASON_INPUT_DEGRADED:
 		return "input losing";
+	case GENLOCK_JXS_REASON_TABLE_UNREADABLE:
+		return "table unreadable (see the OBS log)";
 	case GENLOCK_JXS_REASON_NONE:
 	case GENLOCK_JXS_REASON_NO_JXS:
 		break;
@@ -116,7 +118,7 @@ std::string genlock_jxs_tooltip_row(const GenlockJxsRow &r, genlock_jxs_health_t
 
 } // namespace
 
-GenlockJxsReport genlock_jxs_report(const std::vector<GenlockJxsRow> &rows)
+GenlockJxsReport genlock_jxs_report(const std::vector<GenlockJxsRow> &rows, bool unreadable)
 {
 	GenlockJxsReport rep;
 	std::vector<genlock_jxs_health_t> health;
@@ -138,7 +140,11 @@ GenlockJxsReport genlock_jxs_report(const std::vector<GenlockJxsRow> &rows)
 	}
 	genlock_jxs_reason_t reason = GENLOCK_JXS_REASON_NONE;
 	const genlock_jxs_state_t state = genlock_jxs_decide(&c, &reason);
-	rep.state = (int)state;
+	/* the procedure answered but its table did not parse: amber, never the grey OFF */
+	const genlock_jxs_state_t shown = unreadable ? GENLOCK_JXS_DEGRADED : state;
+	if (unreadable)
+		reason = GENLOCK_JXS_REASON_TABLE_UNREADABLE;
+	rep.state = (int)shown;
 	rep.reason = (int)reason;
 	rep.n_inputs = c.n_inputs;
 	rep.n_inputs_down = c.n_inputs_down;
@@ -170,6 +176,7 @@ GenlockJxsReport genlock_jxs_report(const std::vector<GenlockJxsRow> &rows)
 		break;
 	case GENLOCK_JXS_REASON_NONE:
 	case GENLOCK_JXS_REASON_NO_JXS:
+	case GENLOCK_JXS_REASON_TABLE_UNREADABLE:
 		break;
 	}
 	for (size_t i = 0; want_kind >= 0 && i < rows.size(); i++) {
@@ -180,22 +187,24 @@ GenlockJxsReport genlock_jxs_report(const std::vector<GenlockJxsRow> &rows)
 	}
 
 	const std::string counts = std::to_string(c.n_inputs) + " in / " + std::to_string(c.n_outputs) + " out";
-	if (state == GENLOCK_JXS_OFF) {
+	if (shown == GENLOCK_JXS_OFF) {
 		rep.label = "JPEG XS: off";
 		rep.colour = "#95a5a6"; /* grey */
-	} else if (state == GENLOCK_JXS_OK) {
+	} else if (shown == GENLOCK_JXS_OK) {
 		const std::string bpp = genlock_jxs_bpp_text(rows);
 		rep.label = "JPEG XS: " + counts + (bpp.empty() ? "" : ", " + bpp);
 		rep.colour = "#2ecc71"; /* green, the LOCK widget's */
 	} else {
-		rep.label = std::string("JPEG XS: ") + genlock_jxs_state_name(state) + " " +
+		rep.label = std::string("JPEG XS: ") + genlock_jxs_state_name(shown) + " " +
 			    genlock_jxs_reason_text(reason) + (rep.offender.empty() ? "" : ": " + rep.offender) +
 			    " (" + counts + ")";
-		rep.colour = state == GENLOCK_JXS_DOWN ? "#e74c3c" /* red */ : "#f1c40f" /* amber */;
+		rep.colour = shown == GENLOCK_JXS_DOWN ? "#e74c3c" /* red */ : "#f1c40f" /* amber */;
 	}
 
-	rep.tooltip = std::string("JPEG XS: ") + genlock_jxs_state_name(state);
-	if (rows.empty())
+	rep.tooltip = std::string("JPEG XS: ") + genlock_jxs_state_name(shown);
+	if (unreadable)
+		rep.tooltip += "\nthe camera_box_jxs_state table did not parse (the OBS log names the error)";
+	else if (rows.empty())
 		rep.tooltip += "\nno JPEG XS source and no running JPEG XS output";
 	for (size_t i = 0; i < rows.size(); i++)
 		rep.tooltip += "\n  " + genlock_jxs_tooltip_row(rows[i], health[i]);
@@ -203,10 +212,20 @@ GenlockJxsReport genlock_jxs_report(const std::vector<GenlockJxsRow> &rows)
 	char line[256];
 	snprintf(line, sizeof line,
 		 "jxs-state: state=%s reason=%s inputs=%d down=%d degraded=%d outputs=%d down=%d degraded=%d entry=",
-		 genlock_jxs_state_name(state), genlock_jxs_reason_key(reason), c.n_inputs, c.n_inputs_down,
+		 genlock_jxs_state_name(shown), genlock_jxs_reason_key(reason), c.n_inputs, c.n_inputs_down,
 		 c.n_inputs_degraded, c.n_outputs, c.n_outputs_down, c.n_outputs_degraded);
 	rep.log_line = line;
 	rep.log_line += rep.offender.empty() ? "-" : "'" + rep.offender + "'";
 	rep.log_line += " (issue 1387)";
 	return rep;
+}
+
+bool genlock_jxs_log_due(GenlockJxsLogKey &key, const GenlockJxsReport &rep)
+{
+	if (rep.state == key.state && rep.reason == key.reason && rep.offender == key.offender)
+		return false;
+	key.state = rep.state;
+	key.reason = rep.reason;
+	key.offender = rep.offender;
+	return true;
 }

@@ -192,7 +192,7 @@ fn driver() -> String {
          \tprintf(\"T %s\\n\", genlock_jxs_transport_tag(NULL) ? \"?\" : \"-\");\n\
          \tfor (i = 0; i < 4; i++)\n\
          \t\tprintf(\"S %s\\n\", genlock_jxs_state_name((genlock_jxs_state_t)i));\n\
-         \tfor (i = 0; i < 7; i++)\n\
+         \tfor (i = 0; i < 8; i++)\n\
          \t\tprintf(\"R %s\\n\", genlock_jxs_reason_key((genlock_jxs_reason_t)i));\n\
          \tprintf(\"K %lld %u %lld\\n\", (long long)GENLOCK_JXS_DOWN_AGE_MS, (unsigned)GENLOCK_JXS_MIN_FPS_X100, (long long)GENLOCK_JXS_REPORT_MAX_AGE_MS);\n\
          \treturn 0;\n}\n",
@@ -230,6 +230,7 @@ fn expected() -> Vec<String> {
         JxsReason::InputDown,
         JxsReason::OutputDegraded,
         JxsReason::InputDegraded,
+        JxsReason::TableUnreadable,
     ] {
         out.push(format!("R {}", reason_key(r)));
     }

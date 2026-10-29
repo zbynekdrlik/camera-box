@@ -585,7 +585,9 @@ is on, and per source whether it comes over NDI or JPEG XS.
   `json(now)`. One mutex; `json` copies the rows under it, then sorts (kind, then name) and builds
   `{"v":1,"entries":[{"kind":"input"|"output","name","detail","age_ms","window","fps_x100",
   "bpp_x100","lost","undecodable","dropped","errors","report_age_ms"}]}` (age_ms -1 = no frame yet,
-  0 when the clock reads before the frame; names are JSON-escaped).
+  0 when the clock reads before the frame; names are JSON-escaped, every byte that is not part of
+  well-formed UTF-8 becomes `?`, and a counter above INT64_MAX (a wrapped window delta) is clamped:
+  the frontend parses with jansson, which rejects both).
 - **The accessor is `inline`, never `static inline`** (`cb_jxs_state()`, a function-local static): a
   `static` one gives jxs-source.cpp and jxs-output.cpp a table EACH and the indicator would see only
   half of the rows. The gate links two translation units and checks they share it.
@@ -595,7 +597,7 @@ is on, and per source whether it comes over NDI or JPEG XS.
   report_errors) and removes the row when its thread ends. The output creates its row at a
   successful start (`to <target>`), notes each frame the sender TOOK (under `tx_mutex`, then the
   table mutex; the reader takes only the table mutex), publishes each window (dropped_busy, send +
-  encode errors + refused, the receiver report age) and removes the row at stop. An output that
+  encode errors -- `encode_errors` already counts a refused picture --, the receiver report age) and removes the row at stop. An output that
   exists but is not running is not in the table.
 - `camera_box_jxs_state_register()` (jxs-source.cpp, called from `obs_module_load` under the same
   `#ifdef CAMERA_BOX_JXS_SOURCE`): `proc_handler_add(obs_get_proc_handler(), "void
@@ -607,8 +609,8 @@ is on, and per source whether it comes over NDI or JPEG XS.
 ### The decision and the widget (frontend, every build)
 
 - **Authority** `src/genlock_jxs_state.rs`; **C port** `vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp`
-  (pure C, compiled whole as C11 AND C++17 by `tests/genlock_jxs_state_parity_1387.rs` over ~6000 row
-  vectors and ~2000 count vectors, plus the names, the tags and the constants).
+  (pure C, compiled whole as C11 AND C++17 by `tests/genlock_jxs_state_parity_1387.rs` over 8192 row
+  vectors and 2025 count vectors, plus the names, the tags and the constants).
 - A row: DOWN with no frame for `JXS_DOWN_AGE_MS` (3000, the source's own not-connected bound) or none
   yet; DEGRADED when its last window ran below `JXS_MIN_FPS_X100` (2700 = 90 % of the 30 fps link),
   lost / undecodable / dropped / errors > 0, or (the output) its receiver report is missing or older
@@ -632,6 +634,11 @@ is on, and per source whether it comes over NDI or JPEG XS.
   down=N degraded=N entry='<row>'|- (issue 1387)` line on a change of state, reason or row. The
   `jxs-state:` / `jxs-state-proc:` markers collide with no other log family (pinned).
 - The JSON keys the widget reads are pinned equal to the keys the table writes.
+- **A table that answered but did not parse reads amber, never OFF** (`table_unreadable`, label
+  `JPEG XS: DEGRADED table unreadable (see the OBS log)`): `obs_data_create_from_json` returns an
+  EMPTY object on a parse error, never NULL, so the widget checks the schema key `v`.
+- The change key of the `jxs-state:` line is `genlock_jxs_log_due` in the report (tested), not in
+  the Qt file.
 
 ### The per-source transport tag (Sources dock)
 
@@ -661,7 +668,8 @@ is on, and per source whether it comes over NDI or JPEG XS.
   Live check after it: strih-snv's status bar reads `JPEG XS: ...` right of the LOCK label, the log
   carries `jxs-state-proc: ... registered` and a `jxs-state:` line; the `NDI` / `JPEG XS` tags show
   in the Sources dock; a Windows box (stream on Windows, resolume) reads `JPEG XS: off`.
-- Known limits: a source created but never reached reads DOWN (red) until a sender reaches it or it
+- Known limits: `JXS_MIN_FPS_X100` is absolute (27 fps), so it assumes the 30 fps link the owner
+  fixed: a 25 fps canvas would read DEGRADED for good; a source created but never reached reads DOWN (red) until a sender reaches it or it
   is removed; the window counters hold for 5 s, so a single lossy window reads DEGRADED for one window;
   the proc handler is registered once at module load and never removed (libobs has no removal), safe
   because the frontend's status bar is gone before modules unload.

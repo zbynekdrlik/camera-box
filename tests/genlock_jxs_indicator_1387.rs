@@ -154,6 +154,13 @@ int main()
 	t.set_entry(&c, CB_JXS_STATE_INPUT, std::string("ctl\x01" "x"), "");
 	printf("%s\n", t.json(2500000000ULL).c_str());
 	printf("size %zu\n", t.size());
+	/* a name that is not UTF-8 (a lone lead byte, an overlong form, a surrogate) next to a real
+	 * UTF-8 one, and a window delta that wrapped: the snapshot must stay JSON jansson takes */
+	cb_jxs_state_table v;
+	v.set_entry(&a, CB_JXS_STATE_INPUT, std::string("bad\xff" "x\xc0\xaf" "y\xed\xa0\x80" "z\xc4"), "kamera \xc4\x8d");
+	v.note_frame(&a, 1ULL);
+	v.publish_window(&a, 3000, 800, ~0ULL, 0, 0, 0, -1);
+	printf("%s\n", v.json(1ULL).c_str());
 	/* concurrent writers + a reader: every snapshot must stay whole JSON */
 	cb_jxs_state_table u;
 	std::vector<std::thread> th;
@@ -253,6 +260,12 @@ fn the_state_table_publishes_rows_and_snapshots_them_as_json() {
     assert_eq!(e[1]["name"], "ctl\u{1}x");
     assert!(lines[4].contains("ctl\\u0001x"), "{}", lines[4]);
     assert_eq!(lines[5], "size 2");
+    // bytes that are not UTF-8 become '?', real UTF-8 stays; a wrapped counter is clamped to the
+    // int64 a JSON parser holds (the frontend's jansson rejects both otherwise)
+    let j = json(&lines[6]);
+    assert_eq!(j["entries"][0]["name"], "bad?x??y???z?");
+    assert_eq!(j["entries"][0]["detail"], "kamera \u{10d}");
+    assert_eq!(j["entries"][0]["lost"].as_i64(), Some(i64::MAX));
 }
 
 #[test]
@@ -464,8 +477,45 @@ fn report_driver() -> String {
         }
         writeln!(d, "\t\tshow({}, rows);\n\t}}", cpp_str(tag)).unwrap();
     }
+    // a table that answered but did not parse
+    d.push_str(
+        "\t{\n\t\tconst GenlockJxsReport r = genlock_jxs_report(std::vector<GenlockJxsRow>(), true);\n\
+         \t\tstd::string tip = r.tooltip;\n\t\tfor (char &ch : tip)\n\t\t\tif (ch == '\\n')\n\t\t\t\tch = '|';\n\
+         \t\tprintf(\"unreadable\\tSTATE %d %d\\nunreadable\\tLABEL %s\\nunreadable\\tCOLOUR %s\\nunreadable\\tLOG %s\\nunreadable\\tTIP %s\\n\",\n\
+         \t\t       r.state, r.reason, r.label.c_str(), r.colour.c_str(), r.log_line.c_str(), tip.c_str());\n\t}\n",
+    );
+    // the log change key over a sequence: off, off, ok, ok, input b down, input a down, a down again
+    d.push_str(
+        "\t{\n\t\tGenlockJxsLogKey key;\n\t\tstd::vector<GenlockJxsRow> ok = {mk(0, \"a\", \"\", 10, true, 3000u, 800u, 0, 0, 0, 0, -1)};\n\
+         \t\tstd::vector<GenlockJxsRow> bdown = {mk(0, \"a\", \"\", 10, true, 3000u, 800u, 0, 0, 0, 0, -1), mk(0, \"b\", \"\", -1, false, 0u, 0u, 0, 0, 0, 0, -1)};\n\
+         \t\tstd::vector<GenlockJxsRow> adown = {mk(0, \"a\", \"\", -1, false, 0u, 0u, 0, 0, 0, 0, -1), mk(0, \"b\", \"\", 10, true, 3000u, 800u, 0, 0, 0, 0, -1)};\n\
+         \t\tconst std::vector<GenlockJxsRow> none;\n\
+         \t\tint seq[7] = {genlock_jxs_log_due(key, genlock_jxs_report(none)), genlock_jxs_log_due(key, genlock_jxs_report(none)),\n\
+         \t\t\tgenlock_jxs_log_due(key, genlock_jxs_report(ok)), genlock_jxs_log_due(key, genlock_jxs_report(ok)),\n\
+         \t\t\tgenlock_jxs_log_due(key, genlock_jxs_report(bdown)), genlock_jxs_log_due(key, genlock_jxs_report(adown)),\n\
+         \t\t\tgenlock_jxs_log_due(key, genlock_jxs_report(adown))};\n\
+         \t\tprintf(\"logkey\\tDUE %d %d %d %d %d %d %d\\n\", seq[0], seq[1], seq[2], seq[3], seq[4], seq[5], seq[6]);\n\t}\n",
+    );
     d.push_str("\treturn 0;\n}\n");
     d
+}
+
+#[test]
+fn an_unreadable_table_reads_amber_never_off_and_the_log_key_logs_each_change_once() {
+    let l = report_lines();
+    let f = |tag: &str, key: &str| field(&l, tag, key);
+    assert_eq!(f("unreadable", "STATE"), "2 7");
+    assert_eq!(
+        f("unreadable", "LABEL"),
+        "JPEG XS: DEGRADED table unreadable (see the OBS log) (0 in / 0 out)"
+    );
+    assert_eq!(f("unreadable", "COLOUR"), "#f1c40f");
+    assert!(
+        f("unreadable", "LOG").starts_with("jxs-state: state=DEGRADED reason=table_unreadable ")
+    );
+    assert!(f("unreadable", "TIP").contains("did not parse"));
+    // a change of state, of reason or of the row behind it logs once; a repeat never does
+    assert_eq!(f("logkey", "DUE"), "1 0 1 0 1 1 0");
 }
 
 fn report_lines() -> Vec<(String, String, String)> {
@@ -643,7 +693,7 @@ fn the_plugin_fills_the_table_from_the_source_and_the_output() {
         "#include \"jxs-state-table.h\"",
         "obs_output_set_genlock_wall_stamping(o->output, true); /* the JPEG XS indicator's row (issue 1387): published only while the output runs */ cb_jxs_state().set_entry(o, CB_JXS_STATE_OUTPUT, name, \"to \" + target);",
         "o->taken++; cb_jxs_state().note_frame(o, os_gettime_ns());",
-        "cb_jxs_state().publish_window(o, (uint32_t)(fps * 100.0 + 0.5), st.bpp * 100u, 0, 0, st.dropped_busy, st.send_errors + st.encode_errors + o->refused, st.report_age_s < 0.0 ? -1 : (int64_t)(st.report_age_s * 1000.0));",
+        "cb_jxs_state().publish_window(o, (uint32_t)(fps * 100.0 + 0.5), st.bpp * 100u, 0, 0, st.dropped_busy, st.send_errors + st.encode_errors, st.report_age_s < 0.0 ? -1 : (int64_t)(st.report_age_s * 1000.0));",
         "cbjxs_send_close(tx); cb_jxs_state().remove(o);",
     ] {
         assert!(out.contains(needle), "jxs-output.cpp lacks `{needle}`");
@@ -701,14 +751,13 @@ fn the_status_bar_shows_the_widget_beside_the_lock_label() {
     assert_in(WIDGET, "calldata_free(&cd);");
     // one jxs-state: line per change, never per tick
     let w = squish(&read(WIDGET));
-    let change = w
-        .find("if (rep.state != lastState || rep.reason != lastReason || rep.offender != lastOffender) {")
-        .unwrap();
-    let log = w
-        .find("blog(LOG_INFO, \"%s\", rep.log_line.c_str());")
-        .unwrap();
-    assert!(change < log);
+    assert!(w.contains(
+        "if (genlock_jxs_log_due(logKey, rep)) blog(LOG_INFO, \"%s\", rep.log_line.c_str());"
+    ));
     assert_eq!(w.matches("blog(").count(), 1);
+    // a table that answered but did not parse is never OFF (a failed parse is an EMPTY object)
+    assert!(w.contains("if (!obs_data_has_user_value(table, \"v\")) {"));
+    assert!(w.contains("return have ? GenlockJxsRead::Unreadable : GenlockJxsRead::None;"));
 }
 
 /// The JSON keys of `src` a given pattern names: `prefix"KEY"`.
@@ -838,7 +887,7 @@ const PWSH_ANCHORS: &[(&str, &str)] = &[
     ("widgets/OBSBasicStatusBar.cpp", "#include \"GenlockJxsWidget.hpp\""),
     ("widgets/OBSBasicStatusBar.cpp", "jxsWidget = new GenlockJxsWidget(this); addPermanentWidget(jxsWidget, 0);"),
     ("widgets/GenlockJxsWidget.cpp", "proc_handler_call(obs_get_proc_handler(), \"camera_box_jxs_state\", &cd);"),
-    ("widgets/GenlockJxsWidget.cpp", "const GenlockJxsReport rep = genlock_jxs_report(rows);"),
+    ("widgets/GenlockJxsWidget.cpp", "const GenlockJxsReport rep = genlock_jxs_report(rows, read == GenlockJxsRead::Unreadable);"),
     ("widgets/GenlockJxsWidget.cpp", "blog(LOG_INFO, \"%s\", rep.log_line.c_str());"),
     ("widgets/GenlockJxsReport.cpp", "const genlock_jxs_state_t state = genlock_jxs_decide(&c, &reason);"),
     ("widgets/GenlockJxsReport.cpp", "\"jxs-state: state=%s reason=%s inputs=%d down=%d degraded=%d outputs=%d down=%d degraded=%d entry=\""),
