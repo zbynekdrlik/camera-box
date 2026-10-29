@@ -53,6 +53,7 @@ pub(super) fn tighten_timer_slack() {
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::jxs_link::DATAGRAM_LEN;
     use std::net::UdpSocket;
     use std::os::fd::AsRawFd;
 

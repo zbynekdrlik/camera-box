@@ -2,6 +2,7 @@
 //! encoder (split out of the parent module's tests to keep it under its size budget).
 
 use super::*;
+use std::net::UdpSocket;
 
 /// The status line's `handoff_age_ms` is the frame timecode's age on the wall clock when the
 /// capture thread hands the frame over, for every grid frame (a busy-dropped one too), and the
