@@ -32,15 +32,42 @@
 //!
 //! Every packet of a frame (header and slices) is a "slice" on the wire; the receiver feeds them
 //! to the decoder in index order.
+//!
+//! # The receiver report (the back channel for the automatic bpp, `crate::jxs_auto_bpp`)
+//!
+//! Once per second ([`REPORT_PERIOD_MS`]) the receiver sends ONE 32-byte datagram back to the
+//! address the slices came from (the sender's connected socket, so nothing else reaches it).
+//! Little-endian:
+//!
+//! | bytes | field | meaning |
+//! |---|---|---|
+//! | 0 | magic | `0x52` (`'R'`), never a slice datagram's `0x4A` |
+//! | 1 | version | [`REPORT_VERSION`] (1) |
+//! | 2 | camera id | the camera the report is about |
+//! | 3 | max bpp | the highest bpp the receiver takes, 0 = no limit |
+//! | 4..8 | seq | +1 per report |
+//! | 8..12 | frames | frames finished in the period (decoded or concealed) |
+//! | 12..16 | lost slices | slices concealed or missing in the period |
+//! | 16..20 | late frames | frames decoded later than the receiver's deadline after their timecode |
+//! | 20..24 | decode p99 | last datagram in -> frame decoded, microseconds (`u32::MAX` = none) |
+//! | 24..32 | last timecode | the newest frame timecode of the period (100 ns, 0 = no frame) |
+//!
+//! The last timecode tells the sender WHICH bpp the report describes: a report whose newest frame
+//! predates the sender's last bpp change is about the old bpp and steps nothing down.
 
 pub mod assembler;
 pub mod planar;
 pub mod png;
 pub mod recv_stats;
+pub mod report;
 
 pub use assembler::{FrameAssembler, FrameReport, PushOutcome, SliceSink};
 pub use planar::{planar422_to_rgb, psnr, yuyv_to_planar422};
 pub use recv_stats::RecvWindow;
+pub use report::{
+    ReceiverReport, ReportError, ReportWindow, NO_DECODE_TIME, REPORT_LEN, REPORT_PERIOD_MS,
+    REPORT_VERSION,
+};
 
 /// Datagram magic byte (`'J'`).
 pub const MAGIC: u8 = 0x4A;
