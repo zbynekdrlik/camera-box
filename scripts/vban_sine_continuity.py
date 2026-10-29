@@ -27,7 +27,8 @@ THE MEASUREMENT (`analyze`, pure, numpy):
      a SLEW (a resampler's correction spread over many blocks, reported, not a fault) otherwise.
   4. Bridges: across every gap between two runs (a silence slot, a damaged block, an excluded
      window) the phase is projected from both sides with the local slope; a mismatch over
-     `min_jump` is a step. So a loss handled right reads 0 across its silence, a loss whose slot was
+     `min_jump` is a step. Each bridge reads the two runs' OWN phases (never the chained one), so
+     a move is reported once, at its own gap. So a loss handled right reads 0 across its silence, a loss whose slot was
      DROPPED or padded reads its size. A CONCEALED loss (the issue-1439 receiver repeats the previous
      packet for a run of <= CONCEAL_MAX_SLOTS lost slots) has no silence, and the step detector
      cannot judge it (a repeat with the timeline intact reads +2..+6 samples inside it), so
@@ -268,14 +269,21 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
             corr[starts[idx] >= ev["sample"]] -= ev["size_samples"] * omega
         slope = float(np.median(d_slope)) if d_slope.size else 0.0
         if prev is not None:
-            p_idx, p_corr, p_slope = prev
+            p_idx, p_corr, p_slope, p_psi = prev
             gap_blocks_mid = (idx[0] + p_idx[-1]) / 2.0
             s_mid = (p_slope + slope) / 2.0 if p_idx.size > 1 and idx.size > 1 else (slope if idx.size > 1 else p_slope)
             w = min(STEP_WINDOW, p_idx.size)
-            left = np.mean(p_corr[-w:] + s_mid * (gap_blocks_mid - p_idx[-w:]))
             w2 = min(STEP_WINDOW, idx.size)
-            right = np.mean(corr[:w2] - s_mid * (idx[:w2] - gap_blocks_mid))
-            dev = float(_wrap(right - left))
+
+            def across(before, after):
+                # the phase after the gap minus the phase before it, both projected to the gap's middle
+                left = np.mean(before[-w:] + s_mid * (gap_blocks_mid - p_idx[-w:]))
+                return np.mean(after[:w2] - s_mid * (idx[:w2] - gap_blocks_mid)) - left
+
+            # issue 1460: the bridge reads the two runs' OWN phases. The chained phase already carries
+            # every earlier step (a bridge, an in-run event), so measured on it each earlier move came
+            # back at every later gap (live p4: the 81 s placement read -13.5 at all four losses).
+            dev = float(_wrap(across(p_psi, psi)))
             gap_lo, gap_hi = int(starts[p_idx[-1]] + block), int(starts[idx[0]])
             inside = [s for s, n in slots if s >= gap_lo - GUARD_SAMPLES and s < gap_hi + GUARD_SAMPLES]
             concealed = [tag for lo, hi, tag in windows if lo < gap_hi and hi > gap_lo]
@@ -286,9 +294,9 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
                                "where": "bridge", "silence_slots": inside, "conceal_windows": concealed})
             # chain the run onto the previous one with the mismatch (and any 2 pi of the separate
             # unwrap) removed, so the rate line sees one continuous phase
-            corr = corr - (right - left)
+            corr = corr - across(p_corr, corr)
         pieces.append((starts[idx], corr))
-        prev = (idx, corr, slope)
+        prev = (idx, corr, slope, psi)
     # the rate line over the continuous phase after the settle
     all_s = np.concatenate([p[0] for p in pieces]).astype(np.float64)
     all_psi = np.concatenate([p[1] for p in pieces])
