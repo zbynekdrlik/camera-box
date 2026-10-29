@@ -559,7 +559,8 @@ def test_the_pp_matrix_satisfies_the_hub_load_rules():
     assert not any(p["role"] == "program_out" or p["name"] == "program_out" for p in parts)
     assert not any(pt["src"] == "program_out" or pt["dst"] == "program_out" for pt in m["point"])
     assert not any(p["adapter"] == "pipewire" for p in parts), "nothing on strih-pp needs PipeWire (issue 1440)"
-    assert len(parts) == 8 and len(m["point"]) == 74, (len(parts), len(m["point"]))
+    # issue 1431: cam1-7, so a joint event's SNV cameras are served here too
+    assert len(parts) == 11 and len(m["point"]) == 164, (len(parts), len(m["point"]))
     # lv1's `strih` still feeds the vestibule at unity and the cutters' cans 8 dB down
     assert sorted((pt["dst"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0)) for pt in m["point"]
                   if pt["src"] == "lv1") == [("cutters", 1, 1, -8.0), ("cutters", 2, 2, -8.0),
@@ -568,7 +569,8 @@ def test_the_pp_matrix_satisfies_the_hub_load_rules():
     assert (src["role"], src["host"], src["in_channels"], src["in_stream"]) == ("program_ref", "lv1.lan", 2, "strih")
 
 
-PP_CAMS = {"cam1": "10.77.9.61", "cam4": "10.77.9.64", "cam6": "10.77.9.66", "cam7": "10.77.9.67"}
+# issue 1431: every camera, each at its fixed 10.77.9.6N (the same address at both venues)
+PP_CAMS = {f"cam{n}": f"10.77.9.6{n}" for n in range(1, 8)}
 
 
 def test_the_pp_matrix_carries_the_camera_intercom():
