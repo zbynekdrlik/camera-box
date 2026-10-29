@@ -236,7 +236,7 @@ pub use receiver::{DecodedFrame, JxsReceiver, ReceiverConfig, ReceiverTotals, MA
 mod decode {
     use crate::jxs_link::{FrameReport, SliceSink};
     use std::time::Duration;
-    use svt_jpegxs_sys::{Decoder, Fed, Yuv422Planes};
+    use svt_jpegxs_sys::{Decoder, Fed, YuvPlanes};
 
     /// How long the last packet's decode may take before the frame counts as failed (the N100
     /// measured 0.15 ms after the last slice; a frame the library still waits on never ends).
@@ -250,7 +250,7 @@ mod decode {
     /// which must never be fed further: every further packet would queue another failed frame
     /// until its pools run dry and `send_packet` blocks for good), or still wants more after the
     /// last packet. No path ever waits on the library without a bound.
-    pub struct DecodeSink<F: FnMut(&FrameReport, Option<&Yuv422Planes>)> {
+    pub struct DecodeSink<F: FnMut(&FrameReport, Option<&YuvPlanes>)> {
         dec: Option<Decoder>,
         /// The last good bytes of every packet index (the concealment source), reused.
         prev: Vec<Vec<u8>>,
@@ -274,7 +274,7 @@ mod decode {
         pub header_changes: u64,
     }
 
-    impl<F: FnMut(&FrameReport, Option<&Yuv422Planes>)> DecodeSink<F> {
+    impl<F: FnMut(&FrameReport, Option<&YuvPlanes>)> DecodeSink<F> {
         pub fn new(on_frame: F) -> Self {
             Self {
                 dec: None,
@@ -382,7 +382,7 @@ mod decode {
         }
     }
 
-    impl<F: FnMut(&FrameReport, Option<&Yuv422Planes>)> SliceSink for DecodeSink<F> {
+    impl<F: FnMut(&FrameReport, Option<&YuvPlanes>)> SliceSink for DecodeSink<F> {
         fn packet(&mut self, _tc: u64, index: u8, count: u8, bytes: Option<&[u8]>) {
             let index = index as usize;
             if index == 0 {

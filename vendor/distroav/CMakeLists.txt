@@ -118,18 +118,27 @@ if(CAMERA_BOX_JXS_SOURCE)
   set(CAMERA_BOX_JXS_FFI_LIB "" CACHE FILEPATH "libjxs_recv_ffi.a (issue 1387)")
   set(CAMERA_BOX_JXS_FFI_INCLUDE "" CACHE PATH "jxs/recv-ffi/include (issue 1387)")
   set(CAMERA_BOX_JXS_FFI_NATIVE_LIBS "" CACHE STRING "rustc --print native-static-libs (issue 1387)")
+  # issue 1387 slice 3: the JPEG XS program output's header (jxs/send-ffi/include). Its C ABI is
+  # carried INSIDE CAMERA_BOX_JXS_FFI_LIB (one Rust archive: two would each carry std, camera-box
+  # and a second SVT-JPEG-XS), so there is no second library to link.
+  set(CAMERA_BOX_JXS_SEND_FFI_INCLUDE "" CACHE PATH "jxs/send-ffi/include (issue 1387 slice 3)")
   if(NOT EXISTS "${CAMERA_BOX_JXS_FFI_LIB}")
     message(FATAL_ERROR "CAMERA_BOX_JXS_FFI_LIB not found: '${CAMERA_BOX_JXS_FFI_LIB}' (issue 1387)")
   endif()
   if(NOT EXISTS "${CAMERA_BOX_JXS_FFI_INCLUDE}/camera_box_jxs.h")
     message(FATAL_ERROR "camera_box_jxs.h not in CAMERA_BOX_JXS_FFI_INCLUDE '${CAMERA_BOX_JXS_FFI_INCLUDE}' (issue 1387)")
   endif()
+  if(NOT EXISTS "${CAMERA_BOX_JXS_SEND_FFI_INCLUDE}/camera_box_jxs_send.h")
+    message(FATAL_ERROR "camera_box_jxs_send.h not in CAMERA_BOX_JXS_SEND_FFI_INCLUDE '${CAMERA_BOX_JXS_SEND_FFI_INCLUDE}' (issue 1387)")
+  endif()
   if(CAMERA_BOX_JXS_FFI_NATIVE_LIBS STREQUAL "")
     message(FATAL_ERROR "CAMERA_BOX_JXS_FFI_NATIVE_LIBS is empty (issue 1387)")
   endif()
-  target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/jxs-source.cpp src/jxs-source-decide.h)
+  target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/jxs-source.cpp src/jxs-source-decide.h
+                 src/jxs-output.cpp src/jxs-output-decide.h src/genlock-emit-timecode.h)
   target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CAMERA_BOX_JXS_SOURCE=1)
-  target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CAMERA_BOX_JXS_FFI_INCLUDE}")
+  target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CAMERA_BOX_JXS_FFI_INCLUDE}"
+                             "${CAMERA_BOX_JXS_SEND_FFI_INCLUDE}")
   separate_arguments(_camera_box_jxs_native UNIX_COMMAND "${CAMERA_BOX_JXS_FFI_NATIVE_LIBS}")
   target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE "${CAMERA_BOX_JXS_FFI_LIB}" ${_camera_box_jxs_native})
   # -z noexecstack: SVT-JPEG-XS's nasm objects carry no .note.GNU-stack, which would mark the whole

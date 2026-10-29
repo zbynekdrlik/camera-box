@@ -11,13 +11,13 @@ use jxs_recv_ffi::*;
 use std::net::UdpSocket;
 use std::ptr;
 use std::time::{Duration, Instant};
-use svt_jpegxs_sys::{Encoder, EncoderSettings, Yuv422Planes};
+use svt_jpegxs_sys::{Encoder, EncoderSettings, YuvPlanes};
 
 const W: u32 = 640;
 const H: u32 = 128;
 
-fn picture(phase: u32) -> Yuv422Planes {
-    let mut p = Yuv422Planes::new(W, H);
+fn picture(phase: u32) -> YuvPlanes {
+    let mut p = YuvPlanes::new(W, H);
     let (y, u, v) = p.planes_mut();
     for (i, px) in y.iter_mut().enumerate() {
         *px = (40 + ((i as u32 % W + phase) % W) * 150 / W) as u8;
@@ -29,7 +29,7 @@ fn picture(phase: u32) -> Yuv422Planes {
     p
 }
 
-fn send_frame(enc: &mut Encoder, tx: &UdpSocket, port: u16, timecode: u64, p: &Yuv422Planes) {
+fn send_frame(enc: &mut Encoder, tx: &UdpSocket, port: u16, timecode: u64, p: &YuvPlanes) {
     let (y, u, v) = enc.planes_mut().planes_mut();
     y.copy_from_slice(p.y());
     u.copy_from_slice(p.u());
@@ -96,6 +96,7 @@ fn a_frame_sent_like_the_cambox_comes_out_of_the_c_abi_with_its_timecode_and_the
         if r == 1 {
             assert_eq!((f.width, f.height), (W, H));
             assert_eq!((f.y_stride, f.uv_stride), (W, W / 2));
+            assert_eq!(f.chroma, CBJXS_CHROMA_422, "a cambox frame is 4:2:2");
             let n = (W * H) as usize;
             let (y, u) = unsafe {
                 (

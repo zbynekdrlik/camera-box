@@ -191,6 +191,60 @@ pub fn yuyv_to_planar422_scalar(
     true
 }
 
+/// Whether a strided source plane holds `rows` rows of `row_len` bytes.
+fn strided_fits(src: &[u8], stride: usize, row_len: usize, rows: usize) -> bool {
+    stride >= row_len && (rows == 0 || src.len() >= stride * (rows - 1) + row_len)
+}
+
+/// Copy `rows` rows of `row_len` bytes from a plane whose rows are `stride` bytes apart into a
+/// packed plane (issue 1387 slice 3: an OBS output frame -> the encoder's picture). Returns
+/// `false` (and writes nothing) when a buffer is too short.
+pub fn copy_plane(src: &[u8], stride: usize, row_len: usize, rows: usize, dst: &mut [u8]) -> bool {
+    if !strided_fits(src, stride, row_len, rows) || dst.len() < row_len * rows {
+        return false;
+    }
+    if stride == row_len {
+        dst[..row_len * rows].copy_from_slice(&src[..row_len * rows]);
+        return true;
+    }
+    for row in 0..rows {
+        dst[row * row_len..(row + 1) * row_len]
+            .copy_from_slice(&src[row * stride..row * stride + row_len]);
+    }
+    true
+}
+
+/// Split an interleaved chroma plane (NV12's `U V U V ...`, `pairs` pairs per row, rows `stride`
+/// bytes apart) into packed U and V planes of `pairs x rows`. Returns `false` (and writes
+/// nothing) when a buffer is too short.
+pub fn split_interleaved(
+    src: &[u8],
+    stride: usize,
+    pairs: usize,
+    rows: usize,
+    u: &mut [u8],
+    v: &mut [u8],
+) -> bool {
+    if !strided_fits(src, stride, pairs * 2, rows)
+        || u.len() < pairs * rows
+        || v.len() < pairs * rows
+    {
+        return false;
+    }
+    for row in 0..rows {
+        let s = &src[row * stride..row * stride + pairs * 2];
+        let (du, dv) = (
+            &mut u[row * pairs..(row + 1) * pairs],
+            &mut v[row * pairs..(row + 1) * pairs],
+        );
+        for i in 0..pairs {
+            du[i] = s[2 * i];
+            dv[i] = s[2 * i + 1];
+        }
+    }
+    true
+}
+
 /// PSNR in dB between two equal-length 8-bit planes (`f64::INFINITY` when identical).
 pub fn psnr(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len(), "psnr over planes of different size");
@@ -409,5 +463,39 @@ mod tests {
         assert_eq!(rgb, [255, 255, 255, 0, 0, 0]);
         planar422_to_rgb(&[126, 126], &[128], &[128], 2, 1, &mut rgb);
         assert!(rgb.iter().all(|c| (127..=129).contains(c)), "{rgb:?}");
+    }
+
+    /// Issue 1387 slice 3: a strided OBS plane is copied row by row (the padding never), and a
+    /// short buffer is refused before anything is written.
+    #[test]
+    fn a_strided_plane_is_copied_without_its_padding() {
+        // 3 rows of 4 bytes, rows 6 apart (2 bytes of padding, the last row unpadded)
+        let src = [1, 2, 3, 4, 9, 9, 5, 6, 7, 8, 9, 9, 10, 11, 12, 13];
+        let mut dst = [0u8; 12];
+        assert!(copy_plane(&src, 6, 4, 3, &mut dst));
+        assert_eq!(dst, [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13]);
+        // packed source: one copy
+        let mut dst2 = [0u8; 4];
+        assert!(copy_plane(&[7, 7, 8, 8], 2, 2, 2, &mut dst2));
+        assert_eq!(dst2, [7, 7, 8, 8]);
+        // too short: the source misses its last row, the stride is below the row, dst short
+        let mut untouched = [42u8; 12];
+        assert!(!copy_plane(&src[..15], 6, 4, 3, &mut untouched));
+        assert!(!copy_plane(&src, 3, 4, 3, &mut untouched));
+        assert!(!copy_plane(&src, 6, 4, 3, &mut untouched[..11]));
+        assert_eq!(untouched, [42u8; 12], "nothing written");
+    }
+
+    #[test]
+    fn an_interleaved_chroma_plane_splits_into_u_and_v() {
+        // NV12 chroma: 2 pairs per row, 2 rows, stride 5
+        let src = [10, 20, 11, 21, 0, 12, 22, 13, 23];
+        let (mut u, mut v) = ([0u8; 4], [0u8; 4]);
+        assert!(split_interleaved(&src, 5, 2, 2, &mut u, &mut v));
+        assert_eq!((u, v), ([10, 11, 12, 13], [20, 21, 22, 23]));
+        let (mut u2, mut v2) = ([7u8; 4], [7u8; 4]);
+        assert!(!split_interleaved(&src[..8], 5, 2, 2, &mut u2, &mut v2));
+        assert!(!split_interleaved(&src, 5, 2, 2, &mut u2[..3], &mut v2));
+        assert_eq!((u2, v2), ([7u8; 4], [7u8; 4]), "nothing written");
     }
 }

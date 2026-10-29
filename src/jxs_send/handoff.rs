@@ -3,16 +3,23 @@
 
 use super::{
     encoder_wedged, jxs_link, monotonic_ms, slice_threads_for, BppMode, JxsFrame, JxsSocket,
-    SenderOptions, Stats, FRAMES_IN_FLIGHT, STATUS_PERIOD, WEDGE_CHECK_PERIOD,
+    Offered, SenderOptions, Stats, FRAMES_IN_FLIGHT, STATUS_PERIOD, WEDGE_CHECK_PERIOD,
 };
 use crate::jxs_auto_bpp::{AutoBpp, AutoBppConfig, Decision, Second};
 use crate::jxs_link::{PacketHeader, SendWindow};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use svt_jpegxs_sys::{open_pipelined, EncoderInput, EncoderOutput, EncoderSettings, Picture};
+use svt_jpegxs_sys::{
+    open_pipelined, ChromaFormat, EncoderInput, EncoderOutput, EncoderSettings, Picture,
+};
+
+/// The last finished status window and its sequence number (0 = none yet), published by the
+/// packet thread every [`STATUS_PERIOD`] for a caller that has no log of its own to read (issue
+/// 1387 slice 3: the strih OBS output reads it through `jxs/send-ffi`).
+pub(super) type Published = Arc<Mutex<(u64, SendWindow)>>;
 
 /// A converted frame on its way to the encoder.
 pub(super) struct Ready {
@@ -42,12 +49,15 @@ enum Job {
 /// The capture thread's handle. Dropping it stops and joins both sender threads.
 pub struct JxsHandoff {
     /// Free pictures (the capture thread converts into one).
-    free_rx: Receiver<Picture>,
+    pub(super) free_rx: Receiver<Picture>,
     /// Puts a picture back when the hand-off cannot take it.
     pub(super) free_tx: SyncSender<Picture>,
     ready_tx: Option<SyncSender<Ready>>,
     pub(super) stats: Arc<Stats>,
     workers: Vec<JoinHandle<()>>,
+    pub(super) published: Published,
+    /// The sequence of the window `take_window` last handed out.
+    pub(super) taken_window: std::sync::atomic::AtomicU64,
 }
 
 impl JxsHandoff {
@@ -108,19 +118,27 @@ impl JxsHandoff {
             let _ = self.free_tx.try_send(pic);
             return;
         }
-        let ready = Ready {
+        self.queue(Ready {
             pic,
             timecode_100ns,
             handed_off,
+        });
+    }
+
+    /// Queue a converted picture for the feeder (never blocks).
+    pub(super) fn queue(&self, ready: Ready) -> Offered {
+        let Some(tx) = &self.ready_tx else {
+            let _ = self.free_tx.try_send(ready.pic);
+            return Offered::Busy;
         };
-        let Some(tx) = &self.ready_tx else { return };
         match tx.try_send(ready) {
-            Ok(()) => {}
+            Ok(()) => Offered::Taken,
             // the queue holds every picture there is, so it is never full; with the feeder gone
             // (its thread ended) the picture goes back to the pool and the frame is a drop
             Err(TrySendError::Full(r)) | Err(TrySendError::Disconnected(r)) => {
                 self.stats.note_dropped();
                 let _ = self.free_tx.try_send(r.pic);
+                Offered::Busy
             }
         }
     }
@@ -145,6 +163,8 @@ impl JxsHandoff {
                 ready_tx: Some(ready_tx),
                 stats: Arc::new(Stats::default()),
                 workers: Vec::new(),
+                published: Arc::new(Mutex::new((0, SendWindow::default()))),
+                taken_window: std::sync::atomic::AtomicU64::new(0),
             },
             ready_rx,
         )
@@ -186,11 +206,12 @@ impl JxsHandoff {
             }
         }
         let (send_stats, send_free) = (Arc::clone(&self.stats), self.free_tx.clone());
+        let published = Arc::clone(&self.published);
         let sender = std::thread::Builder::new()
             .name("jxs-send".into())
             .spawn(move || {
                 send(
-                    job_rx, socket, camera_id, send_free, send_stats, cores, opts, want,
+                    job_rx, socket, camera_id, send_free, send_stats, cores, opts, want, published,
                 )
             });
         match sender {
@@ -332,29 +353,43 @@ impl WedgeAlarm {
 
 /// Open a session for `w` x `h` at `bpp` (logged either way); the caller announces it.
 fn open_session(
-    w: u32,
-    h: u32,
+    g: Geometry,
     threads: u32,
     bpp: u32,
     cores: &[usize],
 ) -> Result<(EncoderInput, EncoderOutput), svt_jpegxs_sys::JxsError> {
-    let mut settings = EncoderSettings::issue_1387(w, h).with_slice_threads(threads);
+    let (w, h, chroma) = g;
+    let mut settings = EncoderSettings::issue_1387(w, h)
+        .with_slice_threads(threads)
+        .with_chroma(chroma);
     settings.bpp_numerator = bpp;
     let started = Instant::now();
     match open_pipelined(settings) {
         Ok((i, o)) => {
             tracing::info!(
-                "jxs send: encoder open {w}x{h}, {bpp} bpp, {} bytes per frame, {threads} slice threads on cores {cores:?}, opened in {:.2} ms (issue 1387)",
+                "jxs send: encoder open {w}x{h} {}, {bpp} bpp, {} bytes per frame, {threads} slice threads on cores {cores:?}, opened in {:.2} ms (issue 1387)",
+                chroma.label(),
                 i.bytes_per_frame(),
                 started.elapsed().as_secs_f64() * 1e3
             );
             Ok((i, o))
         }
         Err(e) => {
-            tracing::error!("jxs send: {e} -- {w}x{h} at {bpp} bpp is not sent (issue 1387)");
+            tracing::error!(
+                "jxs send: {e} -- {w}x{h} {} at {bpp} bpp is not sent (issue 1387)",
+                chroma.label()
+            );
             Err(e)
         }
     }
+}
+
+/// A frame geometry: width, height, chroma sampling.
+type Geometry = (u32, u32, ChromaFormat);
+
+/// The geometry a session takes.
+fn geometry_of(i: &EncoderInput) -> Geometry {
+    (i.width(), i.height(), i.chroma())
 }
 
 /// The feeder's encoder sessions: the one frames go to, and one prepared at another bpp that
@@ -373,16 +408,16 @@ struct Sessions {
     refused_bpp: Option<u32>,
     /// A geometry + bpp the encoder refused: never re-opened (and re-logged) per frame; another
     /// bpp (an auto step) tries that geometry again.
-    refused_geometry: Option<(u32, u32, u32)>,
+    refused_geometry: Option<(Geometry, u32)>,
 }
 
 impl Sessions {
     /// Make `input` a session for `w` x `h`, announcing it to the packet thread: the prepared
     /// one when it fits, else a new one at `want`. `Ok(false)` = refused (logged), `Err(())` =
     /// the packet thread is gone.
-    fn ensure(&mut self, w: u32, h: u32, want: u32, job_tx: &SyncSender<Job>) -> Result<bool, ()> {
+    fn ensure(&mut self, g: Geometry, want: u32, job_tx: &SyncSender<Job>) -> Result<bool, ()> {
         if let Some((ni, no, nb)) = self.next.take() {
-            if (ni.width(), ni.height()) == (w, h) {
+            if geometry_of(&ni) == g {
                 // the frame boundary: frames from here on go to the new session
                 job_tx
                     .send(Job::Session {
@@ -394,18 +429,14 @@ impl Sessions {
                 self.bpp = nb;
             }
         }
-        if self
-            .input
-            .as_ref()
-            .is_some_and(|i| (i.width(), i.height()) == (w, h))
-        {
+        if self.input.as_ref().is_some_and(|i| geometry_of(i) == g) {
             return Ok(true);
         }
         self.input = None;
-        if self.refused_geometry == Some((w, h, want)) {
+        if self.refused_geometry == Some((g, want)) {
             return Ok(false);
         }
-        match open_session(w, h, self.threads, want, &self.cores) {
+        match open_session(g, self.threads, want, &self.cores) {
             Ok((i, o)) => {
                 job_tx
                     .send(Job::Session {
@@ -418,7 +449,7 @@ impl Sessions {
                 Ok(true)
             }
             Err(_) => {
-                self.refused_geometry = Some((w, h, want));
+                self.refused_geometry = Some((g, want));
                 // a step the controller waits on is not coming (else it holds Pending for good)
                 job_tx
                     .send(Job::Refused {
@@ -441,13 +472,13 @@ impl Sessions {
             // the controller changed its mind before the swap
             self.next = None;
         }
-        let Some((w, h)) = self.input.as_ref().map(|i| (i.width(), i.height())) else {
+        let Some(g) = self.input.as_ref().map(geometry_of) else {
             return Ok(());
         };
         if want == self.bpp || self.next.is_some() || self.refused_bpp == Some(want) {
             return Ok(());
         }
-        match open_session(w, h, self.threads, want, &self.cores) {
+        match open_session(g, self.threads, want, &self.cores) {
             Ok((i, o)) => self.next = Some((i, o, want)),
             Err(_) => {
                 self.refused_bpp = Some(want);
@@ -505,12 +536,13 @@ fn feed(
             Err(RecvTimeoutError::Disconnected) => return,
         };
         alarm.check(&stats);
-        let (w, h) = (r.pic.planes().width(), r.pic.planes().height());
+        let p = r.pic.planes();
+        let g = (p.width(), p.height(), p.chroma());
         let mut pic = r.pic;
         // two tries: a session the packet thread abandoned after a codec error re-opens once
         // and takes this same picture
         for attempt in 0..2 {
-            match s.ensure(w, h, want.load(Ordering::Relaxed), &job_tx) {
+            match s.ensure(g, want.load(Ordering::Relaxed), &job_tx) {
                 Ok(true) => {}
                 Ok(false) => {
                     stats.convert_errors.fetch_add(1, Ordering::Relaxed);
@@ -574,6 +606,8 @@ struct BppControl {
     sec_encode_ms: Vec<f64>,
     sec_errors: u64,
     last_report_at: Option<Instant>,
+    /// Receiver reports read since the last status line.
+    reports: u64,
 }
 
 impl BppControl {
@@ -597,6 +631,7 @@ impl BppControl {
             sec_encode_ms: Vec::with_capacity(64),
             sec_errors: 0,
             last_report_at: None,
+            reports: 0,
         }
     }
 
@@ -646,6 +681,7 @@ impl BppControl {
         if let Some(r) = socket.take_report(camera_id) {
             let now = Instant::now();
             self.last_report_at = Some(now);
+            self.reports += 1;
             if let Some(c) = self.ctl.as_mut() {
                 c.note_report(r, now.duration_since(self.origin).as_secs_f64());
             }
@@ -677,8 +713,9 @@ impl BppControl {
         }
     }
 
-    /// The status line's bpp fields.
-    fn fill(&self, w: &mut SendWindow) {
+    /// The status line's bpp fields (and the window's report count, restarted).
+    fn fill(&mut self, w: &mut SendWindow) {
+        w.reports = std::mem::take(&mut self.reports);
         w.bpp = self.session_bpp;
         w.auto = self.ctl.is_some();
         w.bpp_reason = self.ctl.as_ref().and_then(|c| c.last_reason());
@@ -700,6 +737,7 @@ fn send(
     cores: Vec<usize>,
     opts: SenderOptions,
     want: Arc<AtomicU32>,
+    published: Published,
 ) {
     pin("jxs-send", &cores);
     raise_fifo("jxs-send", opts.fifo, false);
@@ -722,6 +760,10 @@ fn send(
                 warned_format = true;
             }
             tracing::info!("{}", window.status_line());
+            {
+                let mut p = published.lock().unwrap_or_else(|e| e.into_inner());
+                *p = (p.0 + 1, window);
+            }
             window = SendWindow::default();
             last_status = Instant::now();
         }
@@ -846,7 +888,8 @@ mod tests {
             refused_geometry: None,
         };
         // an odd width: refused before the library sees it
-        assert_eq!(s.ensure(255, 64, 5, &job_tx), Ok(false));
+        let g = |w, h| (w, h, ChromaFormat::Yuv422);
+        assert_eq!(s.ensure(g(255, 64), 5, &job_tx), Ok(false));
         assert!(matches!(
             job_rx.try_recv(),
             Ok(Job::Refused {
@@ -855,15 +898,21 @@ mod tests {
             })
         ));
         // the same geometry again is not re-opened, not re-announced
-        assert_eq!(s.ensure(255, 64, 5, &job_tx), Ok(false));
+        assert_eq!(s.ensure(g(255, 64), 5, &job_tx), Ok(false));
         assert!(job_rx.try_recv().is_err());
         // a geometry refused at ONE bpp (0) opens at another (4): never blocked for good
-        assert_eq!(s.ensure(64, 32, 0, &job_tx), Ok(false));
+        assert_eq!(s.ensure(g(64, 32), 0, &job_tx), Ok(false));
         assert!(matches!(job_rx.try_recv(), Ok(Job::Refused { bpp: 0, .. })));
-        assert_eq!(s.ensure(64, 32, 4, &job_tx), Ok(true));
+        assert_eq!(s.ensure(g(64, 32), 4, &job_tx), Ok(true));
+        assert!(matches!(job_rx.try_recv(), Ok(Job::Session { bpp: 4, .. })));
+        // the same size in another chroma sampling is another session (issue 1387 slice 3)
+        assert_eq!(
+            s.ensure((64, 32, ChromaFormat::Yuv420), 4, &job_tx),
+            Ok(true)
+        );
         assert!(matches!(job_rx.try_recv(), Ok(Job::Session { bpp: 4, .. })));
         // a bpp the library refuses for a good geometry (0 bpp): a refusal of that level
-        assert_eq!(s.ensure(64, 16, 4, &job_tx), Ok(true));
+        assert_eq!(s.ensure(g(64, 16), 4, &job_tx), Ok(true));
         assert!(matches!(job_rx.try_recv(), Ok(Job::Session { bpp: 4, .. })));
         assert_eq!(s.prepare(0, &job_tx), Ok(()));
         assert!(matches!(

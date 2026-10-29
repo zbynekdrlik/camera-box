@@ -17,11 +17,31 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::Duration;
 
 use camera_box::jxs_recv::{JxsReceiver, ReceiverConfig};
+use svt_jpegxs_sys::ChromaFormat;
+
+/// Issue 1387 slice 3: the SENDER's C ABI (`cbjxs_send_*`, `jxs/send-ffi`) is linked into this
+/// crate's static library, so DistroAV links ONE Rust archive carrying both.
+pub use jxs_send_ffi;
 
 /// `CBJXS_ABI_VERSION` of `include/camera_box_jxs.h`.
-pub const CBJXS_ABI_VERSION: u32 = 1;
+pub const CBJXS_ABI_VERSION: u32 = 2;
 
-/// `cbjxs_frame`: one decoded frame, planar 4:2:2 8 bit, the planes valid until the next
+/// `cbjxs_frame.chroma` (`CBJXS_CHROMA_*`; the same numbers as the sender's `CBJXS_SEND_I420` /
+/// `_I422` / `_I444`).
+pub const CBJXS_CHROMA_420: u8 = 1;
+pub const CBJXS_CHROMA_422: u8 = 2;
+pub const CBJXS_CHROMA_444: u8 = 3;
+
+/// The `CBJXS_CHROMA_*` code of a decoded frame.
+pub fn chroma_code(c: ChromaFormat) -> u8 {
+    match c {
+        ChromaFormat::Yuv420 => CBJXS_CHROMA_420,
+        ChromaFormat::Yuv422 => CBJXS_CHROMA_422,
+        ChromaFormat::Yuv444 => CBJXS_CHROMA_444,
+    }
+}
+
+/// `cbjxs_frame`: one decoded frame, planar 8 bit of `chroma`, the planes valid until the next
 /// `cbjxs_next_frame` / `cbjxs_close` on the receiver.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -39,7 +59,9 @@ pub struct CbjxsFrame {
     pub decoded_at_100ns: i64,
     pub lost_slices: u32,
     pub camera_id: u8,
-    pub reserved: [u8; 3],
+    /// `CBJXS_CHROMA_*` (ABI 2).
+    pub chroma: u8,
+    pub reserved: [u8; 2],
 }
 
 impl Default for CbjxsFrame {
@@ -58,7 +80,8 @@ impl Default for CbjxsFrame {
             decoded_at_100ns: 0,
             lost_slices: 0,
             camera_id: 0,
-            reserved: [0; 3],
+            chroma: 0,
+            reserved: [0; 2],
         }
     }
 }
@@ -193,7 +216,8 @@ pub unsafe extern "C" fn cbjxs_next_frame(
                     decoded_at_100ns: f.decoded_at_100ns,
                     lost_slices: f.lost_slices,
                     camera_id: f.camera_id,
-                    reserved: [0; 3],
+                    chroma: chroma_code(p.chroma()),
+                    reserved: [0; 2],
                 };
                 Ok(1)
             }

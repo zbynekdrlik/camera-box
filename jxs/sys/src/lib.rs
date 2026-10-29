@@ -45,6 +45,7 @@ struct EncSettings {
     coding_significance: u32,
     coding_vertical_prediction: u32,
     quantization: u32,
+    chroma: u32,
 }
 
 /// `CBJXS_DEFAULT` in the shim: keep the library's default for that knob.
@@ -68,6 +69,7 @@ impl EncSettings {
             coding_significance: k(s.tuning.coding_significance),
             coding_vertical_prediction: k(s.tuning.coding_vertical_prediction),
             quantization: k(s.tuning.quantization),
+            chroma: s.chroma.code(),
         }
     }
 }
@@ -126,7 +128,7 @@ extern "C" {
     ) -> i32;
     fn cbjxs_dec_get_frame(d: *mut CDec, blocking: u8) -> i32;
     fn cbjxs_dec_close(d: *mut CDec);
-    fn cbjxs_format_yuv422() -> u32;
+    fn cbjxs_chroma_of_format(format: u32) -> i32;
 }
 
 /// An SVT-JPEG-XS error code (`SvtJxsErrorType_t`), printed in hex like the library's header.
@@ -148,6 +150,12 @@ impl std::fmt::Display for JxsError {
 
 impl std::error::Error for JxsError {}
 
+/// An encoder geometry the chroma sampling cannot take (refused before the library sees it).
+pub(crate) const GEOMETRY_ERROR: JxsError = JxsError {
+    code: i32::MIN,
+    during: "open (the width and height must be non-zero and divisible by the chroma subsampling)",
+};
+
 fn check(code: i32, during: &'static str) -> Result<(), JxsError> {
     if code == OK {
         Ok(())
@@ -156,28 +164,106 @@ fn check(code: i32, during: &'static str) -> Result<(), JxsError> {
     }
 }
 
-/// One planar 8-bit YUV 4:2:2 picture: Y is `width x height`, U and V `width/2 x height`.
-/// The fields are private: the plane lengths always match the geometry (the C side reads and
-/// writes by that geometry).
+/// The chroma sampling of a planar picture (issue 1387 slice 3: the cambox capture is 4:2:2, the
+/// strih program canvas 4:2:0 (NV12/I420) or 4:4:4). JPEG XS codes each as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChromaFormat {
+    /// U and V are `width/2 x height/2`.
+    Yuv420,
+    /// U and V are `width/2 x height` (the cambox capture).
+    Yuv422,
+    /// U and V are `width x height`.
+    Yuv444,
+}
+
+impl ChromaFormat {
+    /// The `CBJXS_CHROMA_*` code the shim takes and returns.
+    fn code(self) -> u32 {
+        match self {
+            Self::Yuv420 => 0,
+            Self::Yuv422 => 1,
+            Self::Yuv444 => 2,
+        }
+    }
+
+    fn from_code(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Yuv420),
+            1 => Some(Self::Yuv422),
+            2 => Some(Self::Yuv444),
+            _ => None,
+        }
+    }
+
+    /// Chroma samples per row of a `width`-wide picture.
+    pub fn chroma_width(self, width: u32) -> u32 {
+        match self {
+            Self::Yuv420 | Self::Yuv422 => width / 2,
+            Self::Yuv444 => width,
+        }
+    }
+
+    /// Chroma rows of a `height`-tall picture.
+    pub fn chroma_height(self, height: u32) -> u32 {
+        match self {
+            Self::Yuv420 => height / 2,
+            Self::Yuv422 | Self::Yuv444 => height,
+        }
+    }
+
+    /// Whether `width x height` subsamples without a remainder: non-zero, an even width for
+    /// 4:2:0 and 4:2:2, an even height for 4:2:0.
+    pub fn fits(self, width: u32, height: u32) -> bool {
+        width != 0
+            && height != 0
+            && match self {
+                Self::Yuv420 => width.is_multiple_of(2) && height.is_multiple_of(2),
+                Self::Yuv422 => width.is_multiple_of(2),
+                Self::Yuv444 => true,
+            }
+    }
+
+    /// `4:2:0` / `4:2:2` / `4:4:4` (the log lines).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Yuv420 => "4:2:0",
+            Self::Yuv422 => "4:2:2",
+            Self::Yuv444 => "4:4:4",
+        }
+    }
+}
+
+/// One planar 8-bit YUV picture of a [`ChromaFormat`]: Y is `width x height`, U and V
+/// `chroma_width x chroma_height`. The fields are private: the plane lengths always match the
+/// geometry (the C side reads and writes by that geometry).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Yuv422Planes {
+pub struct YuvPlanes {
     width: u32,
     height: u32,
+    chroma: ChromaFormat,
     y: Vec<u8>,
     u: Vec<u8>,
     v: Vec<u8>,
 }
 
-impl Yuv422Planes {
-    /// Zero-filled planes. `width` must be even (4:2:2).
+impl YuvPlanes {
+    /// Zero-filled 4:2:2 planes (the cambox capture's format). `width` must be even.
     pub fn new(width: u32, height: u32) -> Self {
+        Self::with_chroma(width, height, ChromaFormat::Yuv422)
+    }
+
+    /// Zero-filled planes of `chroma` (a geometry that does not [`ChromaFormat::fits`] is
+    /// refused by every encoder and never decoded into).
+    pub fn with_chroma(width: u32, height: u32, chroma: ChromaFormat) -> Self {
         let (w, h) = (width as usize, height as usize);
+        let c = chroma.chroma_width(width) as usize * chroma.chroma_height(height) as usize;
         Self {
             width,
             height,
+            chroma,
             y: vec![0; w * h],
-            u: vec![0; w / 2 * h],
-            v: vec![0; w / 2 * h],
+            u: vec![0; c],
+            v: vec![0; c],
         }
     }
 
@@ -189,9 +275,18 @@ impl Yuv422Planes {
         self.height
     }
 
-    /// The chroma plane width in samples.
+    pub fn chroma(&self) -> ChromaFormat {
+        self.chroma
+    }
+
+    /// The chroma plane width in samples (= its row stride).
     pub fn chroma_width(&self) -> u32 {
-        self.width / 2
+        self.chroma.chroma_width(self.width)
+    }
+
+    /// The chroma plane height in rows.
+    pub fn chroma_height(&self) -> u32 {
+        self.chroma.chroma_height(self.height)
     }
 
     pub fn y(&self) -> &[u8] {
@@ -211,15 +306,17 @@ impl Yuv422Planes {
         (&mut self.y, &mut self.u, &mut self.v)
     }
 
-    /// Whether the plane lengths match `width x height` (always true unless a caller replaced the
-    /// whole value with one of another geometry).
-    fn matches(&self, width: u32, height: u32) -> bool {
+    /// Whether the planes are `width x height` of `chroma` with matching lengths (always true
+    /// unless a caller replaced the whole value with one of another geometry).
+    fn matches(&self, width: u32, height: u32, chroma: ChromaFormat) -> bool {
         let (w, h) = (width as usize, height as usize);
+        let c = chroma.chroma_width(width) as usize * chroma.chroma_height(height) as usize;
         self.width == width
             && self.height == height
+            && self.chroma == chroma
             && self.y.len() == w * h
-            && self.u.len() == w / 2 * h
-            && self.v.len() == w / 2 * h
+            && self.u.len() == c
+            && self.v.len() == c
     }
 }
 
@@ -243,6 +340,8 @@ pub struct EncoderSettings {
     pub threads_num: u32,
     /// `true` = the library's low-latency profile (cpu_profile 0).
     pub latency_profile: bool,
+    /// The input's chroma sampling ([`Self::issue_1387`]: 4:2:2, the cambox capture).
+    pub chroma: ChromaFormat,
     /// The library's coding knobs; `None` keeps its default (the measured cambox setting).
     pub tuning: EncoderTuning,
 }
@@ -273,8 +372,20 @@ impl EncoderSettings {
             ndecomp_v: 2,
             threads_num: 0,
             latency_profile: true,
+            chroma: ChromaFormat::Yuv422,
             tuning: EncoderTuning::default(),
         }
+    }
+
+    /// The same setting for a picture of `chroma` (issue 1387 slice 3: the strih program canvas).
+    pub fn with_chroma(mut self, chroma: ChromaFormat) -> Self {
+        self.chroma = chroma;
+        self
+    }
+
+    /// Whether the geometry fits the chroma sampling (checked before the library sees it).
+    pub(crate) fn geometry_ok(&self) -> bool {
+        self.chroma.fits(self.width, self.height)
     }
 
     /// Run `n` slice-pack threads (latency profile: `threads_num` = n + 2, the init and final
@@ -295,7 +406,8 @@ pub struct Encoder {
     raw: *mut CEnc,
     width: u32,
     height: u32,
-    planes: Yuv422Planes,
+    chroma: ChromaFormat,
+    planes: YuvPlanes,
     bitstream: Vec<u8>,
 }
 
@@ -306,11 +418,8 @@ unsafe impl Send for Encoder {}
 impl Encoder {
     /// Open the encoder (it starts its worker threads on the calling thread's CPU set).
     pub fn open(s: EncoderSettings) -> Result<Self, JxsError> {
-        if s.width == 0 || s.height == 0 || !s.width.is_multiple_of(2) {
-            return Err(JxsError {
-                code: i32::MIN,
-                during: "open (width must be even and non-zero)",
-            });
+        if !s.geometry_ok() {
+            return Err(GEOMETRY_ERROR);
         }
         let c = EncSettings::from_settings(&s);
         let mut raw = std::ptr::null_mut();
@@ -324,7 +433,8 @@ impl Encoder {
             raw,
             width: s.width,
             height: s.height,
-            planes: Yuv422Planes::new(s.width, s.height),
+            chroma: s.chroma,
+            planes: YuvPlanes::with_chroma(s.width, s.height, s.chroma),
             bitstream: vec![0; bytes_per_frame as usize],
         })
     }
@@ -335,7 +445,7 @@ impl Encoder {
     }
 
     /// The input planes, to be filled before [`Self::encode_frame`].
-    pub fn planes_mut(&mut self) -> &mut Yuv422Planes {
+    pub fn planes_mut(&mut self) -> &mut YuvPlanes {
         &mut self.planes
     }
 
@@ -346,7 +456,7 @@ impl Encoder {
         &mut self,
         mut on_packet: impl FnMut(u32, &[u8], bool),
     ) -> Result<u32, JxsError> {
-        if !self.planes.matches(self.width, self.height) {
+        if !self.planes.matches(self.width, self.height, self.chroma) {
             return Err(JxsError {
                 code: i32::MIN,
                 during: "send picture (the planes do not match the opened geometry)",
@@ -407,7 +517,7 @@ impl Drop for Encoder {
 /// A packet-mode decoder that owns its output planes.
 pub struct Decoder {
     raw: *mut CDec,
-    planes: Yuv422Planes,
+    planes: YuvPlanes,
 }
 
 unsafe impl Send for Decoder {}
@@ -434,26 +544,21 @@ impl Decoder {
             },
             "decoder open",
         )?;
-        // SAFETY: a plain getter.
-        let yuv422 = unsafe { cbjxs_format_yuv422() };
-        if fmt != yuv422
-            || depth != 8
-            || w == 0
-            || h == 0
-            || !w.is_multiple_of(2)
-            || w > MAX_DECODE_WIDTH
-            || h > MAX_DECODE_HEIGHT
-        {
+        // SAFETY: a pure mapping of a value.
+        let chroma = ChromaFormat::from_code(unsafe { cbjxs_chroma_of_format(fmt) });
+        let Some(chroma) = chroma.filter(|c| {
+            depth == 8 && c.fits(w, h) && w <= MAX_DECODE_WIDTH && h <= MAX_DECODE_HEIGHT
+        }) else {
             // SAFETY: `raw` was just opened and is closed once.
             unsafe { cbjxs_dec_close(raw) };
             return Err(JxsError {
                 code: c_int::MIN,
-                during: "decoder open (stream is not 8-bit planar 4:2:2 up to 7680x4320)",
+                during: "decoder open (stream is not 8-bit planar 4:2:0, 4:2:2 or 4:4:4 up to 7680x4320)",
             });
-        }
+        };
         Ok(Self {
             raw,
-            planes: Yuv422Planes::new(w, h),
+            planes: YuvPlanes::with_chroma(w, h, chroma),
         })
     }
 
@@ -465,11 +570,16 @@ impl Decoder {
         self.planes.height
     }
 
+    /// The stream's chroma sampling.
+    pub fn chroma(&self) -> ChromaFormat {
+        self.planes.chroma
+    }
+
     /// Feed one packet (header or slice, in order) of the current frame.
     pub fn send_packet(&mut self, packet: &[u8]) -> Result<Fed, JxsError> {
         let p = &mut self.planes;
         let (sy, sc) = (p.y.len() as u32, p.u.len() as u32);
-        let (wy, wc) = (p.width, p.width / 2);
+        let (wy, wc) = (p.width, p.chroma_width());
         // SAFETY: the packet is valid for its length; the planes are owned by `self`, sized for
         // the decoded geometry, and only written by the decoder between this call and
         // `finish_frame`.
@@ -506,10 +616,7 @@ impl Decoder {
 
     /// Wait at most `timeout` for the frame whose packets were all fed, and return it. Never
     /// blocks forever: a frame the library still waits on (a corrupt last packet) is an error.
-    pub fn finish_frame(
-        &mut self,
-        timeout: std::time::Duration,
-    ) -> Result<&Yuv422Planes, JxsError> {
+    pub fn finish_frame(&mut self, timeout: std::time::Duration) -> Result<&YuvPlanes, JxsError> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
             if self.poll_frame()? {
@@ -542,7 +649,7 @@ mod tests {
     const W: u32 = 256;
     const H: u32 = 64;
 
-    fn gradient(p: &mut Yuv422Planes, phase: usize) {
+    fn gradient(p: &mut YuvPlanes, phase: usize) {
         let w = p.width() as usize;
         let (y, u, v) = p.planes_mut();
         for (i, b) in y.iter_mut().enumerate() {
@@ -556,7 +663,7 @@ mod tests {
         }
     }
 
-    fn encode(enc: &mut Encoder, phase: usize) -> (Yuv422Planes, Vec<Vec<u8>>) {
+    fn encode(enc: &mut Encoder, phase: usize) -> (YuvPlanes, Vec<Vec<u8>>) {
         gradient(enc.planes_mut(), phase);
         let original = enc.planes_mut().clone();
         let mut packets: Vec<Vec<u8>> = Vec::new();
@@ -658,13 +765,75 @@ mod tests {
         assert!(Encoder::open(EncoderSettings::issue_1387(255, 64)).is_err());
     }
 
+    /// Fill planes of any chroma sampling: a luma ramp and distinct, smooth U/V fields.
+    fn ramp(p: &mut YuvPlanes, phase: usize) {
+        let (w, cw) = (p.width() as usize, p.chroma_width() as usize);
+        let (y, u, v) = p.planes_mut();
+        for (i, b) in y.iter_mut().enumerate() {
+            *b = (((i % w) + phase) * 200 / (w + phase) + 16) as u8;
+        }
+        for (i, b) in u.iter_mut().enumerate() {
+            *b = (60 + (i / cw) % 120) as u8;
+        }
+        for (i, b) in v.iter_mut().enumerate() {
+            *b = (90 + (i % cw) * 60 / cw) as u8;
+        }
+    }
+
+    /// Issue 1387 slice 3: the strih program canvas is 4:2:0 (NV12) and JPEG XS codes it as it is,
+    /// as it does 4:4:4: each encodes to the same header + one packet per 16-line slice, the
+    /// decoder opens it as that sampling, and the picture comes back.
+    #[test]
+    fn a_420_or_444_picture_encodes_and_decodes_as_itself() {
+        for chroma in [ChromaFormat::Yuv420, ChromaFormat::Yuv444] {
+            let mut enc =
+                Encoder::open(EncoderSettings::issue_1387(W, H).with_chroma(chroma)).expect("open");
+            assert_eq!(enc.planes_mut().chroma(), chroma);
+            assert_eq!(
+                enc.planes_mut().u().len(),
+                (chroma.chroma_width(W) * chroma.chroma_height(H)) as usize
+            );
+            ramp(enc.planes_mut(), 3);
+            let original = enc.planes_mut().clone();
+            let mut packets: Vec<Vec<u8>> = Vec::new();
+            enc.encode_frame(|_, b, _| packets.push(b.to_vec()))
+                .expect("encode");
+            assert_eq!(
+                packets.len(),
+                5,
+                "{chroma:?}: the header + 4 slices of 16 lines"
+            );
+            let mut dec = Decoder::open(&packets.concat()).expect("decoder open");
+            assert_eq!(dec.chroma(), chroma, "the decoder reads the sampling");
+            feed(&mut dec, &packets);
+            let out = dec.finish_frame(Duration::from_secs(5)).expect("decode");
+            assert_eq!(out.chroma(), chroma);
+            assert!(max_err(original.y(), out.y()) <= 8, "{chroma:?} luma");
+            assert!(max_err(original.u(), out.u()) <= 8, "{chroma:?} U");
+            assert!(max_err(original.v(), out.v()) <= 8, "{chroma:?} V");
+        }
+    }
+
+    #[test]
+    fn a_geometry_the_sampling_cannot_take_is_refused_before_the_library_sees_it() {
+        // 4:2:0 needs an even height, 4:4:4 takes an odd width
+        let odd_h = EncoderSettings::issue_1387(W, 63).with_chroma(ChromaFormat::Yuv420);
+        assert!(Encoder::open(odd_h).is_err());
+        assert!(crate::open_pipelined(odd_h).is_err());
+        assert!(ChromaFormat::Yuv444.fits(255, 63));
+        assert!(!ChromaFormat::Yuv422.fits(255, 64));
+        assert!(!ChromaFormat::Yuv420.fits(0, 64));
+        assert_eq!(ChromaFormat::Yuv420.chroma_height(1080), 540);
+        assert_eq!(ChromaFormat::Yuv444.chroma_width(1920), 1920);
+    }
+
     #[test]
     fn planes_of_another_geometry_are_refused_before_the_library_reads_them() {
         let mut enc = Encoder::open(EncoderSettings::issue_1387(W, H)).expect("open");
-        *enc.planes_mut() = Yuv422Planes::new(W / 2, H);
+        *enc.planes_mut() = YuvPlanes::new(W / 2, H);
         assert!(enc.encode_frame(|_, _, _| {}).is_err());
         // and the encoder still works once the planes match again
-        *enc.planes_mut() = Yuv422Planes::new(W, H);
+        *enc.planes_mut() = YuvPlanes::new(W, H);
         assert!(enc.encode_frame(|_, _, _| {}).is_ok());
     }
 

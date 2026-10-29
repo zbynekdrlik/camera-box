@@ -1,0 +1,23 @@
+[package]
+name = "jxs-send-ffi"
+version.workspace = true
+edition = "2021"
+description = "Issue 1387 slice 3: a C ABI over camera-box's JPEG XS sender (jxs_send::JxsHandoff), carried into the strih DistroAV build inside the jxs-recv-ffi static library"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+# rlib only: DistroAV links ONE Rust static library (jxs-recv-ffi), which pulls this crate in.
+# Two Rust static libraries in one shared object would each carry std, the camera-box crate and
+# a second SVT-JPEG-XS (duplicate symbols, two codec init states).
+crate-type = ["rlib"]
+
+# Linux only, like the sender it wraps (UDP GSO, SO_MARK).
+[target.'cfg(target_os = "linux")'.dependencies]
+camera-box = { path = "../..", features = ["jxs"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tempfile = "3.9"

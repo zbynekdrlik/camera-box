@@ -34,11 +34,40 @@ static void cbjxs_install_quiet_log(void) {
     svt_jpeg_xs_set_log_callback(cbjxs_quiet_log, NULL);
 }
 
-uint32_t cbjxs_format_yuv422(void) { return (uint32_t)COLOUR_FORMAT_PLANAR_YUV422; }
+int32_t cbjxs_chroma_of_format(uint32_t format) {
+    switch (format) {
+    case COLOUR_FORMAT_PLANAR_YUV420:
+        return (int32_t)CBJXS_CHROMA_420;
+    case COLOUR_FORMAT_PLANAR_YUV422:
+        return (int32_t)CBJXS_CHROMA_422;
+    case COLOUR_FORMAT_PLANAR_YUV444:
+        return (int32_t)CBJXS_CHROMA_444;
+    default:
+        return -1;
+    }
+}
+
+static int cbjxs_colour_format(uint32_t chroma, ColourFormat_t* out) {
+    switch (chroma) {
+    case CBJXS_CHROMA_420:
+        *out = COLOUR_FORMAT_PLANAR_YUV420;
+        return 1;
+    case CBJXS_CHROMA_422:
+        *out = COLOUR_FORMAT_PLANAR_YUV422;
+        return 1;
+    case CBJXS_CHROMA_444:
+        *out = COLOUR_FORMAT_PLANAR_YUV444;
+        return 1;
+    default:
+        return 0;
+    }
+}
 
 int32_t cbjxs_enc_open(const cbjxs_enc_settings* s, cbjxs_enc** out, uint32_t* bytes_per_frame) {
     if (!s || !out || !bytes_per_frame) return (int32_t)SvtJxsErrorBadParameter;
     *out = NULL;
+    ColourFormat_t colour;
+    if (!cbjxs_colour_format(s->chroma, &colour)) return (int32_t)SvtJxsErrorBadParameter;
     cbjxs_install_quiet_log();
     cbjxs_enc* e = (cbjxs_enc*)calloc(1, sizeof(*e));
     if (!e) return (int32_t)SvtJxsErrorInsufficientResources;
@@ -51,7 +80,7 @@ int32_t cbjxs_enc_open(const cbjxs_enc_settings* s, cbjxs_enc** out, uint32_t* b
     e->api.source_width = s->width;
     e->api.source_height = s->height;
     e->api.input_bit_depth = 8;
-    e->api.colour_format = COLOUR_FORMAT_PLANAR_YUV422;
+    e->api.colour_format = colour;
     e->api.bpp_numerator = s->bpp_numerator;
     e->api.bpp_denominator = s->bpp_denominator;
     e->api.ndecomp_v = s->ndecomp_v;
@@ -94,6 +123,8 @@ int32_t cbjxs_enc_send(cbjxs_enc* e, const uint8_t* y, const uint8_t* u, const u
     svt_jpeg_xs_frame_t in;
     memset(&in, 0, sizeof(in));
     uint32_t h = e->api.source_height;
+    /* 4:2:0 halves the chroma rows (the Rust side checked the planes against this geometry). */
+    uint32_t ch = e->api.colour_format == COLOUR_FORMAT_PLANAR_YUV420 ? h / 2 : h;
     in.image.data_yuv[0] = (void*)y;
     in.image.data_yuv[1] = (void*)u;
     in.image.data_yuv[2] = (void*)v;
@@ -101,8 +132,8 @@ int32_t cbjxs_enc_send(cbjxs_enc* e, const uint8_t* y, const uint8_t* u, const u
     in.image.stride[1] = stride_c;
     in.image.stride[2] = stride_c;
     in.image.alloc_size[0] = stride_y * h;
-    in.image.alloc_size[1] = stride_c * h;
-    in.image.alloc_size[2] = stride_c * h;
+    in.image.alloc_size[1] = stride_c * ch;
+    in.image.alloc_size[2] = stride_c * ch;
     in.bitstream.buffer = bitstream;
     in.bitstream.allocation_size = bitstream_size;
     return (int32_t)svt_jpeg_xs_encoder_send_picture(&e->api, &in, 1);

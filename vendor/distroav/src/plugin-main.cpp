@@ -74,6 +74,12 @@ struct obs_source_info ndi_burn_filter_info;
 // static library), built only by the strih Linux variant (CMake option CAMERA_BOX_JXS_SOURCE).
 extern struct obs_source_info create_jxs_source_info();
 struct obs_source_info jxs_source_info;
+// issue 1387 slice 3: the JPEG XS PROGRAM output (jxs-output.cpp, the jxs-send-ffi ABI carried in
+// the same static library), created from its settings file at FINISHED_LOADING.
+extern struct obs_output_info create_jxs_output_info();
+struct obs_output_info jxs_output_info;
+void camera_box_jxs_output_init();
+void camera_box_jxs_output_deinit();
 #endif
 
 const NDIlib_v6 *load_ndilib();
@@ -310,6 +316,9 @@ static void register_plugin_features()
 	jxs_source_info = create_jxs_source_info();
 	obs_register_source(&jxs_source_info);
 	obs_log(LOG_INFO, "Plugin features registered: camera-box JPEG XS source (issue 1387)");
+	jxs_output_info = create_jxs_output_info();
+	obs_register_output(&jxs_output_info);
+	obs_log(LOG_INFO, "Plugin features registered: camera-box JPEG XS program output (issue 1387)");
 #endif
 
 	plugin_features_registered = true;
@@ -512,19 +521,32 @@ bool obs_module_load(void)
 						[] {
 							main_output_init();
 							preview_output_init();
+#ifdef CAMERA_BOX_JXS_SOURCE
+							camera_box_jxs_output_init();
+#endif
 						},
 						Qt::QueuedConnection);
 				} else if (event == OBS_FRONTEND_EVENT_EXIT) {
 					// Unknown why putting this in obs_module_unload causes a crash when closing OBS
 					main_output_deinit();
 					preview_output_deinit();
+#ifdef CAMERA_BOX_JXS_SOURCE
+					camera_box_jxs_output_deinit();
+#endif
 				} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGING) {
 					main_output_deinit();
 					preview_output_deinit();
+#ifdef CAMERA_BOX_JXS_SOURCE
+					// a video reset refuses active outputs (the profile's canvas may change)
+					camera_box_jxs_output_deinit();
+#endif
 				} else if (event == OBS_FRONTEND_EVENT_PROFILE_CHANGED) {
 					if (plugin_features_registered) {
 						main_output_init();
 						preview_output_init();
+#ifdef CAMERA_BOX_JXS_SOURCE
+						camera_box_jxs_output_init();
+#endif
 					}
 				}
 			},

@@ -49,6 +49,11 @@ on:
       - 'src/jxs_recv/**'
       - 'src/jxs_link.rs'
       - 'src/jxs_link/**'
+      # issue 1387 slice 3: the same archive carries the SENDER (jxs/send-ffi over the camera-box
+      # sender) for DistroAV's JPEG XS program output.
+      - 'src/jxs_send.rs'
+      - 'src/jxs_send/**'
+      - 'src/affinity.rs'
       # the static library links the whole camera-box crate: a dependency or module change can move
       # its native-library list or break the strih link.
       - 'Cargo.toml'
@@ -373,6 +378,14 @@ jobs:
           libs="$(sed -n 's/^note: native-static-libs: //p' jxs-ffi-build.log | tail -1)"
           if [ -z "$libs" ]; then echo "ERROR: rustc printed no native-static-libs line (issue 1387)"; exit 1; fi
           if [ ! -f target/release/libjxs_recv_ffi.a ]; then echo "ERROR: target/release/libjxs_recv_ffi.a not built (issue 1387)"; exit 1; fi
+          # issue 1387 slice 3: the ONE archive must carry the sender's C ABI too (jxs-recv-ffi pulls
+          # jxs-send-ffi in), or the JPEG XS program output cannot link.
+          # (nm exits non-zero on the archive's lib.rmeta member, which has no symbols: its stderr is
+          # kept and shown when a symbol is missing)
+          nm -g --defined-only target/release/libjxs_recv_ffi.a 2> jxs-ffi-nm.err > jxs-ffi-symbols.txt || true
+          for sym in cbjxs_open cbjxs_send_open cbjxs_send_frame cbjxs_send_set_log; do
+            if ! grep -qw "$sym" jxs-ffi-symbols.txt; then cat jxs-ffi-nm.err; echo "ERROR: libjxs_recv_ffi.a does not define $sym (issue 1387)"; exit 1; fi
+          done
           echo "JXS_FFI_NATIVE_LIBS=$libs" >> "$GITHUB_ENV"
           echo "jxs-recv-ffi: $(stat -c%s target/release/libjxs_recv_ffi.a) bytes, native libs: $libs"
 
@@ -440,6 +453,7 @@ jobs:
           -DCAMERA_BOX_JXS_SOURCE=ON
           -DCAMERA_BOX_JXS_FFI_LIB="$GITHUB_WORKSPACE/target/release/libjxs_recv_ffi.a"
           -DCAMERA_BOX_JXS_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/recv-ffi/include"
+          -DCAMERA_BOX_JXS_SEND_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/send-ffi/include"
           -DCAMERA_BOX_JXS_FFI_NATIVE_LIBS="$JXS_FFI_NATIVE_LIBS"
 
       - name: Build DistroAV
@@ -504,6 +518,8 @@ jobs:
           # executable (SVT's nasm objects would mark it so without -z noexecstack, and glibc 2.41+
           # on the 26.04 box then refuses to load the plugin).
           if ! grep -aq 'camera_box_jxs_source' "$distroav_so"; then echo "ERROR: $distroav_so has no camera_box_jxs_source (issue 1387)"; exit 1; fi
+          # issue 1387 slice 3: and the JPEG XS program output
+          if ! grep -aq 'camera_box_jxs_output' "$distroav_so"; then echo "ERROR: $distroav_so has no camera_box_jxs_output (issue 1387)"; exit 1; fi
           stack="$(readelf -lW "$distroav_so" | awk '$1 == "GNU_STACK" {print $7}')"
           if [ "$stack" != "RW" ]; then echo "ERROR: $distroav_so GNU_STACK flags '$stack', want RW (issue 1387)"; exit 1; fi
           echo "distroav.so carries the JPEG XS source, GNU_STACK $stack (issue 1387)"

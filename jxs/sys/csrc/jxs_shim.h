@@ -40,12 +40,20 @@ typedef struct cbjxs_enc_settings {
     uint32_t coding_significance;        /* 0 / 1 */
     uint32_t coding_vertical_prediction; /* 0..2 */
     uint32_t quantization;               /* 0 deadzone, 1 uniform */
+    /* The input's chroma sampling (issue 1387 slice 3): CBJXS_CHROMA_420 / _422 / _444. */
+    uint32_t chroma;
 } cbjxs_enc_settings;
+
+/* Chroma sampling codes shared with the Rust side (`ChromaFormat`), independent of the library's
+ * own ColourFormat values. */
+#define CBJXS_CHROMA_420 0u
+#define CBJXS_CHROMA_422 1u
+#define CBJXS_CHROMA_444 2u
 
 /* "Keep the library's default" for a tuning knob. */
 #define CBJXS_DEFAULT 0xFFFFFFFFu
 
-/* Open a planar YUV 4:2:2 8-bit encoder. *bytes_per_frame = the bitstream buffer size the
+/* Open a planar YUV 8-bit encoder of the settings' chroma sampling. *bytes_per_frame = the bitstream buffer size the
  * encoder requires per frame. */
 int32_t cbjxs_enc_open(const cbjxs_enc_settings* s, cbjxs_enc** out, uint32_t* bytes_per_frame);
 
@@ -76,8 +84,9 @@ int32_t cbjxs_dec_get_frame(cbjxs_dec* d, uint8_t blocking);
 
 void cbjxs_dec_close(cbjxs_dec* d);
 
-/* The colour format value of planar YUV 4:2:2 in this library build (for the Rust check). */
-uint32_t cbjxs_format_yuv422(void);
+/* The CBJXS_CHROMA_* code of a decoded stream's colour format (cbjxs_dec_open's *format), or -1
+ * for a format the camera-box link does not carry (RGB, 4:0:0, 4 components). */
+int32_t cbjxs_chroma_of_format(uint32_t format);
 
 #ifdef __cplusplus
 }

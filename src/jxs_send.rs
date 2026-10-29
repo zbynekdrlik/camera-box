@@ -56,16 +56,26 @@ pub const UDP_GRO: libc::c_int = 104;
 pub struct JxsSocket {
     sock: UdpSocket,
     gso: AtomicBool,
-    /// `None` = the kernel accepted [`JXS_SOCKET_MARK`]; else the errno it answered.
+    /// `None` = the kernel accepted [`JXS_SOCKET_MARK`] (or it was not asked for: `mark_asked`);
+    /// else the errno it answered.
     mark_error: Option<i32>,
+    /// Whether the mark was set at all ([`Self::connect_with`]: the strih OBS output, a box with
+    /// no cambox egress pacing, never asks).
+    mark_asked: bool,
     /// Socket errors (a receiver that is not listening: ECONNREFUSED) [`Self::take_report`]
     /// consumed instead of the next send.
     read_errors: AtomicU64,
 }
 
 impl JxsSocket {
-    /// Connect to `target` (`host:port`, resolved once now).
+    /// Connect to `target` (`host:port`, resolved once now), with the egress mark (the cambox).
     pub fn connect(target: &str) -> std::io::Result<Self> {
+        Self::connect_with(target, true)
+    }
+
+    /// [`Self::connect`]; `egress_mark` = set [`JXS_SOCKET_MARK`] (only a cambox has the egress
+    /// pacing it exempts the flow from).
+    pub fn connect_with(target: &str, egress_mark: bool) -> std::io::Result<Self> {
         let addr: SocketAddr = target.to_socket_addrs()?.next().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -88,12 +98,13 @@ impl JxsSocket {
         // SO_MARK needs CAP_NET_ADMIN or CAP_NET_RAW (camera-box.service runs as root). Without it
         // the flow is still sent, only paced with NDI: `marked()` reports it, the start WARNs with
         // the errno and the "link ON" line names it.
-        let mark_error = if set_int_opt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_MARK,
-            JXS_SOCKET_MARK as libc::c_int,
-        ) {
+        let mark_error = if !egress_mark
+            || set_int_opt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                JXS_SOCKET_MARK as libc::c_int,
+            ) {
             None
         } else {
             Some(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
@@ -102,6 +113,7 @@ impl JxsSocket {
             sock,
             gso: AtomicBool::new(gso),
             mark_error,
+            mark_asked: egress_mark,
             read_errors: AtomicU64::new(0),
         })
     }
@@ -116,7 +128,19 @@ impl JxsSocket {
     /// Whether the kernel accepted [`JXS_SOCKET_MARK`] (`SO_MARK`), i.e. the egress pacing's fw
     /// filter sends this flow at line rate.
     pub fn marked(&self) -> bool {
-        self.mark_error.is_none()
+        self.mark_asked && self.mark_error.is_none()
+    }
+
+    /// The "link ON" line's egress words.
+    #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
+    fn egress_text(&self) -> String {
+        if self.marked() {
+            format!("{JXS_SOCKET_MARK:#x}: line rate past the NDI pacing")
+        } else if self.mark_asked {
+            "NONE: paced with NDI".to_string()
+        } else {
+            "not used (no cambox egress pacing here)".to_string()
+        }
     }
 
     /// Whether GSO is in use (the kernel accepted `UDP_SEGMENT`, and no GSO send has failed with
@@ -392,6 +416,14 @@ impl JxsHandoff {
     pub fn dropped_busy(&self) -> u64 {
         match self.never {}
     }
+
+    pub fn offer_raw(&self, _frame: &RawFrame<'_>) -> Offered {
+        match self.never {}
+    }
+
+    pub fn take_window(&self) -> Option<(u64, jxs_link::SendWindow)> {
+        match self.never {}
+    }
 }
 
 /// One emitted frame as the capture loop hands it over.
@@ -518,11 +550,7 @@ fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<Jx
             .map(|a| a.to_string())
             .unwrap_or_else(|_| target.clone()),
         if socket.gso() { "on" } else { "OFF: one send per datagram" },
-        if socket.marked() {
-            format!("{JXS_SOCKET_MARK:#x}: line rate past the NDI pacing")
-        } else {
-            "NONE: paced with NDI".to_string()
-        },
+        socket.egress_text(),
         socket.send_buffer(),
         bpp_mode_text(opts.bpp),
         jxs_link::JXS_FPS,
@@ -540,9 +568,17 @@ fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<Jx
 
 #[cfg(feature = "jxs")]
 mod handoff;
+#[cfg(feature = "jxs")]
+mod raw_intake;
 
 mod options;
 pub use options::*;
+
+mod raw;
+pub use raw::{Offered, RawFrame, RawLayout};
+
+mod link;
+pub use link::LinkConfig;
 
 #[cfg(test)]
 mod auto_tests;

@@ -10,13 +10,13 @@ use camera_box::jxs_link::{
 use camera_box::jxs_recv::{JxsReceiver, ReceiverConfig};
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
-use svt_jpegxs_sys::{Encoder, EncoderSettings, Yuv422Planes};
+use svt_jpegxs_sys::{Encoder, EncoderSettings, YuvPlanes};
 
 const W: u32 = 640;
 const H: u32 = 128;
 
-fn picture(phase: u32) -> Yuv422Planes {
-    let mut p = Yuv422Planes::new(W, H);
+fn picture(phase: u32) -> YuvPlanes {
+    let mut p = YuvPlanes::new(W, H);
     let (y, u, v) = p.planes_mut();
     for (i, px) in y.iter_mut().enumerate() {
         *px = (40 + ((i as u32 % W + phase) % W) * 150 / W) as u8;
@@ -33,7 +33,7 @@ fn send_frame(
     to: std::net::SocketAddr,
     camera: u8,
     timecode: u64,
-    p: &Yuv422Planes,
+    p: &YuvPlanes,
 ) {
     let (y, u, v) = enc.planes_mut().planes_mut();
     y.copy_from_slice(p.y());

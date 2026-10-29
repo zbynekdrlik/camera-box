@@ -23,7 +23,7 @@ use super::{realtime_100ns, DecodeSink, JxsRecvSocket};
 use crate::jxs_link::{
     self, FrameAssembler, FrameReport, PacketHeader, PushOutcome, RecvWindow, ReportWindow,
 };
-use svt_jpegxs_sys::Yuv422Planes;
+use svt_jpegxs_sys::{ChromaFormat, YuvPlanes};
 
 /// Decoded frames held for a caller that has not polled yet; older ones are dropped.
 pub const MAX_READY_FRAMES: usize = 3;
@@ -74,7 +74,7 @@ pub struct DecodedFrame {
     pub first_arrival_100ns: i64,
     pub last_arrival_100ns: i64,
     pub decoded_at_100ns: i64,
-    pub planes: Yuv422Planes,
+    pub planes: YuvPlanes,
 }
 
 /// Cumulative counters since the receiver opened (the current window included).
@@ -126,22 +126,22 @@ struct Outbox {
     events: Vec<(FrameReport, i64, bool)>,
     ready: VecDeque<DecodedFrame>,
     /// Plane buffers to reuse.
-    pool: Vec<Yuv422Planes>,
+    pool: Vec<YuvPlanes>,
     dropped_unread: u64,
 }
 
 impl Outbox {
-    fn take_planes(&mut self, w: u32, h: u32) -> Yuv422Planes {
+    fn take_planes(&mut self, w: u32, h: u32, chroma: ChromaFormat) -> YuvPlanes {
         while let Some(p) = self.pool.pop() {
-            if p.width() == w && p.height() == h {
+            if p.width() == w && p.height() == h && p.chroma() == chroma {
                 return p;
             }
         }
-        Yuv422Planes::new(w, h)
+        YuvPlanes::with_chroma(w, h, chroma)
     }
 
-    fn decoded(&mut self, r: &FrameReport, at: i64, p: &Yuv422Planes) {
-        let mut planes = self.take_planes(p.width(), p.height());
+    fn decoded(&mut self, r: &FrameReport, at: i64, p: &YuvPlanes) {
+        let mut planes = self.take_planes(p.width(), p.height(), p.chroma());
         let (y, u, v) = planes.planes_mut();
         y.copy_from_slice(p.y());
         u.copy_from_slice(p.u());
@@ -164,7 +164,7 @@ impl Outbox {
     }
 }
 
-type Callback = Box<dyn FnMut(&FrameReport, Option<&Yuv422Planes>) + Send>;
+type Callback = Box<dyn FnMut(&FrameReport, Option<&YuvPlanes>) + Send>;
 
 /// One camera's JPEG XS receiver (see the module doc).
 pub struct JxsReceiver {
@@ -446,8 +446,8 @@ mod tests {
         }
     }
 
-    fn planes(fill: u8) -> Yuv422Planes {
-        let mut p = Yuv422Planes::new(64, 16);
+    fn planes(fill: u8) -> YuvPlanes {
+        let mut p = YuvPlanes::new(64, 16);
         let (y, u, v) = p.planes_mut();
         y.fill(fill);
         u.fill(fill);
@@ -473,9 +473,21 @@ mod tests {
     #[test]
     fn a_pooled_buffer_of_another_geometry_is_never_reused() {
         let mut o = Outbox::default();
-        o.pool.push(Yuv422Planes::new(32, 16));
-        let p = o.take_planes(64, 16);
+        o.pool.push(YuvPlanes::new(32, 16));
+        let p = o.take_planes(64, 16, ChromaFormat::Yuv422);
         assert_eq!((p.width(), p.height()), (64, 16));
         assert!(o.pool.is_empty(), "the stale buffer is dropped");
+    }
+
+    /// Issue 1387 slice 3: a 4:2:0 frame never lands in a pooled 4:2:2 buffer of the same size
+    /// (its chroma planes are half as long).
+    #[test]
+    fn a_pooled_buffer_of_another_chroma_sampling_is_never_reused() {
+        let mut o = Outbox::default();
+        o.pool.push(YuvPlanes::new(64, 16));
+        let p = o.take_planes(64, 16, ChromaFormat::Yuv420);
+        assert_eq!(p.chroma(), ChromaFormat::Yuv420);
+        assert_eq!(p.u().len(), 32 * 8);
+        assert!(o.pool.is_empty());
     }
 }

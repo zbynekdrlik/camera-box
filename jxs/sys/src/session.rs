@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     cbjxs_enc_close, cbjxs_enc_get_packet, cbjxs_enc_open, cbjxs_enc_send, check, CEnc,
-    EncSettings, EncoderSettings, JxsError, Yuv422Planes,
+    ChromaFormat, EncSettings, EncoderSettings, JxsError, YuvPlanes, GEOMETRY_ERROR,
 };
 
 /// The most pictures a session holds at once. `submit` calls the library's BLOCKING
@@ -39,24 +39,29 @@ const SESSION_CODE: i32 = i32::MIN + 1;
 /// (the planes are boxed), so a refused submit hands it back cheaply.
 #[derive(Debug)]
 pub struct Picture {
-    planes: Box<Yuv422Planes>,
+    planes: Box<YuvPlanes>,
     bitstream: Vec<u8>,
 }
 
 impl Picture {
-    /// Zero-filled planes; the bitstream buffer is sized by the session at the first submit.
+    /// Zero-filled 4:2:2 planes; the bitstream buffer is sized by the session at the first submit.
     pub fn new(width: u32, height: u32) -> Self {
+        Self::with_chroma(width, height, ChromaFormat::Yuv422)
+    }
+
+    /// Zero-filled planes of `chroma` (issue 1387 slice 3: the strih program canvas).
+    pub fn with_chroma(width: u32, height: u32, chroma: ChromaFormat) -> Self {
         Self {
-            planes: Box::new(Yuv422Planes::new(width, height)),
+            planes: Box::new(YuvPlanes::with_chroma(width, height, chroma)),
             bitstream: Vec::new(),
         }
     }
 
-    pub fn planes(&self) -> &Yuv422Planes {
+    pub fn planes(&self) -> &YuvPlanes {
         &self.planes
     }
 
-    pub fn planes_mut(&mut self) -> &mut Yuv422Planes {
+    pub fn planes_mut(&mut self) -> &mut YuvPlanes {
         &mut self.planes
     }
 }
@@ -75,6 +80,7 @@ unsafe impl Send for State {}
 struct Session {
     width: u32,
     height: u32,
+    chroma: ChromaFormat,
     bytes_per_frame: usize,
     state: Mutex<State>,
 }
@@ -141,11 +147,8 @@ fn session_error(during: &'static str) -> JxsError {
 /// Open a pipelined session. The library's worker threads start on the calling thread's CPU set
 /// (`threads_num` = 2 + the slice threads, [`EncoderSettings::with_slice_threads`]).
 pub fn open_pipelined(s: EncoderSettings) -> Result<(EncoderInput, EncoderOutput), JxsError> {
-    if s.width == 0 || s.height == 0 || !s.width.is_multiple_of(2) {
-        return Err(JxsError {
-            code: i32::MIN,
-            during: "open (width must be even and non-zero)",
-        });
+    if !s.geometry_ok() {
+        return Err(GEOMETRY_ERROR);
     }
     let c = EncSettings::from_settings(&s);
     let mut raw = std::ptr::null_mut();
@@ -158,6 +161,7 @@ pub fn open_pipelined(s: EncoderSettings) -> Result<(EncoderInput, EncoderOutput
     let s = Arc::new(Session {
         width: s.width,
         height: s.height,
+        chroma: s.chroma,
         bytes_per_frame: bytes_per_frame as usize,
         state: Mutex::new(State {
             raw,
@@ -182,6 +186,11 @@ impl EncoderInput {
         self.s.height
     }
 
+    /// The chroma sampling the session encodes.
+    pub fn chroma(&self) -> ChromaFormat {
+        self.s.chroma
+    }
+
     /// The bitstream budget of one frame in bytes.
     pub fn bytes_per_frame(&self) -> usize {
         self.s.bytes_per_frame
@@ -192,7 +201,10 @@ impl EncoderInput {
     /// geometry, a closed session, [`MAX_IN_FLIGHT`] reached, a library error) it comes back
     /// untouched. Allocates only the first time a picture meets this session (its bitstream).
     pub fn submit(&self, mut pic: Picture) -> Result<(), (Picture, JxsError)> {
-        if !pic.planes.matches(self.s.width, self.s.height) {
+        if !pic
+            .planes
+            .matches(self.s.width, self.s.height, self.s.chroma)
+        {
             return Err((
                 pic,
                 session_error("submit (the picture does not match the session's geometry)"),
@@ -345,7 +357,7 @@ mod tests {
         p
     }
 
-    fn decode(packets: &[Vec<u8>]) -> Yuv422Planes {
+    fn decode(packets: &[Vec<u8>]) -> YuvPlanes {
         let mut dec = Decoder::open(&packets.concat()).expect("decoder open");
         for (i, p) in packets.iter().enumerate() {
             let fed = dec.send_packet(p).expect("send packet");
@@ -369,6 +381,43 @@ mod tests {
             .map(|(x, y)| (*x as i32 - *y as i32).abs())
             .max()
             .unwrap()
+    }
+
+    /// Issue 1387 slice 3: a 4:2:0 session takes only 4:2:0 pictures and codes them as they are.
+    #[test]
+    fn a_420_session_encodes_420_pictures_and_refuses_another_sampling() {
+        let s = settings().with_chroma(ChromaFormat::Yuv420);
+        let (input, output) = open_pipelined(s).expect("open");
+        assert_eq!(input.chroma(), ChromaFormat::Yuv420);
+        let refused = input
+            .submit(Picture::new(W, H))
+            .expect_err("a 4:2:2 picture of the same size is refused");
+        assert!(refused.1.is_session_state());
+        let mut pic = Picture::with_chroma(W, H, ChromaFormat::Yuv420);
+        {
+            let (y, u, v) = pic.planes_mut().planes_mut();
+            assert_eq!(
+                (u.len(), v.len()),
+                ((W / 2 * H / 2) as usize, (W / 2 * H / 2) as usize)
+            );
+            for (i, b) in y.iter_mut().enumerate() {
+                *b = (i % 200) as u8 + 20;
+            }
+            u.fill(100);
+            v.fill(150);
+        }
+        let original = pic.planes().clone();
+        input.submit(pic).map_err(|(_, e)| e).expect("submit");
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        let (back, n) = output
+            .recv_frame(|_, b, _| packets.push(b.to_vec()))
+            .expect("receive");
+        assert_eq!(n, 5);
+        assert_eq!(back.planes(), &original, "the picture comes back untouched");
+        let out = decode(&packets);
+        assert_eq!(out.chroma(), ChromaFormat::Yuv420);
+        assert!(max_err(original.u(), out.u()) <= 8);
+        assert!(max_err(original.v(), out.v()) <= 8);
     }
 
     #[test]

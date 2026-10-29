@@ -182,18 +182,20 @@ fn function_body<'a>(src: &'a str, signature: &str) -> &'a str {
 }
 
 #[test]
-fn the_frame_reaches_libobs_as_i422_stamped_with_the_genlock_timecode_like_an_ndi_frame() {
+fn the_frame_reaches_libobs_in_its_sampling_stamped_with_the_genlock_timecode_like_an_ndi_frame() {
     let s = read(SOURCE);
     assert!(s.contains("#define JXS_SOURCE_ID \"camera_box_jxs_source\""));
     let out = function_body(&s, "static void jxs_output_frame(");
+    // issue 1387 slice 3: a cambox frame is I422, the strih program I420
+    // (tests/distroav_jxs_output_1387.rs pins the mapping)
     for needle in [
-        "frame.format = VIDEO_FORMAT_I422;",
+        "frame.format = format;",
         "frame.data[0] = const_cast<uint8_t *>(f.y);",
         "frame.data[1] = const_cast<uint8_t *>(f.u);",
         "frame.data[2] = const_cast<uint8_t *>(f.v);",
         "frame.linesize[1] = f.uv_stride;",
         "frame.timestamp = cb_jxs_timestamp_ns(f.timecode_100ns);",
-        "VIDEO_CS_709, VIDEO_RANGE_PARTIAL, VIDEO_FORMAT_I422",
+        "VIDEO_CS_709, VIDEO_RANGE_PARTIAL, format,",
         "obs_source_output_video(s->source, &frame);",
     ] {
         assert!(out.contains(needle), "jxs_output_frame lacks `{needle}`");

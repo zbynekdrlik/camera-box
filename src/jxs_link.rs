@@ -62,7 +62,7 @@ pub mod recv_stats;
 pub mod report;
 
 pub use assembler::{FrameAssembler, FrameReport, PushOutcome, SliceSink};
-pub use planar::{planar422_to_rgb, psnr, yuyv_to_planar422};
+pub use planar::{copy_plane, planar422_to_rgb, psnr, split_interleaved, yuyv_to_planar422};
 pub use recv_stats::RecvWindow;
 pub use report::{
     ReceiverReport, ReportError, ReportWindow, NO_DECODE_TIME, REPORT_LEN, REPORT_PERIOD_MS,
@@ -325,6 +325,9 @@ pub struct SendWindow {
     pub bpp_reason: Option<crate::jxs_auto_bpp::StepReason>,
     /// Seconds since the last receiver report (`None` = never one).
     pub report_age_s: Option<f64>,
+    /// Receiver reports read in this window (one a second from a live receiver; issue 1387
+    /// slice 3).
+    pub reports: u64,
     /// The frame's genlock timecode -> the wall clock when the capture thread hands it to the
     /// JPEG XS thread ([`HandoffAge`]).
     pub handoff_age: HandoffAge,
@@ -410,12 +413,12 @@ impl SendWindow {
     /// The 5 s status line: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
     /// dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
     /// capture_age_ms_avg/min/max= first_slice_ms_avg/max=
-    /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= (issue 1387)`. `bytes`
+    /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= reports= (issue 1387)`. `bytes`
     /// counts the codestream, not the headers; `bpp_reason` / `report_age_s` / the two ages read `-` when
     /// there is none.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} (issue 1387)",
             if self.window_s > 0.0 {
                 self.frames as f64 / self.window_s
             } else {
@@ -442,6 +445,7 @@ impl SendWindow {
             self.encode_errors,
             self.report_age_s
                 .map_or("-".to_string(), |a| format!("{a:.1}")),
+            self.reports,
         )
     }
 }
@@ -697,11 +701,12 @@ mod tests {
         w.auto = true;
         w.bpp_reason = Some(crate::jxs_auto_bpp::StepReason::Clean { needed_s: 10 });
         w.report_age_s = Some(0.43);
+        w.reports = 5;
         w.handoff_age.note(210_000);
         w.handoff_age.note(290_000);
         assert_eq!(
             w.status_line(),
-            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 (issue 1387)"
+            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 (issue 1387)"
         );
         let empty = SendWindow::default().status_line();
         assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
@@ -727,6 +732,7 @@ mod tests {
             "auto=",
             "bpp_reason=",
             "report_age_s=",
+            "reports=",
             "handoff_age_ms_avg/min/max=",
             "capture_age_ms_avg/min/max=",
         ];
