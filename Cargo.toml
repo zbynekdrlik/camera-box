@@ -24,7 +24,7 @@ repository = "https://github.com/zbynekdrlik/camera-box"
 # WITHOUT --workspace, so they never build the hub. `intercom-vban` IS a path dependency of the
 # appliance (below), so the root build compiles it — that is intended (it carries the codec now).
 [workspace]
-members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "intercom/vban", "intercom/hub", "jxs/sys"]
+members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "intercom/vban", "intercom/hub", "jxs/sys", "jxs/recv-ffi"]
 resolver = "2"
 
 # Single source of truth for the version across the appliance + the three bkshading
