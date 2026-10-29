@@ -50,6 +50,9 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
   per datagram for good, logged once. IPv4 only: the 1472-byte datagram is the IPv4 budget of a
   1500 MTU (an IPv6 target is refused at start). `encode_ms` = picture handed to the encoder ->
   its last packet sent (the slice sends happen inside it); the YUYV conversion is not in it.
+  The GSO fallback also clears `UDP_SEGMENT` on the socket (the kernel checks the segment size
+  and checksum offload whenever it is set). `encode_errors=` counts frames not encoded or not
+  sent whole; a geometry the encoder refuses is logged once and never re-opened per frame.
 - **Receive: `src/jxs_recv.rs` + `src/jxs_link/assembler.rs`.** `recvmmsg` + `UDP_GRO` +
   `SO_TIMESTAMPNS`. The assembler hands each packet on as soon as everything before it in its
   frame is complete; it finalizes a frame (missing packets = lost) when the NEXT frame is complete
@@ -64,12 +67,18 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
 - **Never wait on the SVT decoder without a bound.** In packet mode the library answers a corrupt
   slice by emitting an (error) frame at once and returning OK; every further packet of that frame
   queues another one until its pools (3 decoder instances) run dry and `send_packet` blocks for
-  good. So `DecodeSink` polls `poll_frame()` after every non-last packet: anything out early =
-  the frame failed, stop feeding it, reopen the decoder from the next whole frame. The last packet
-  must answer `Fed::Taken` (`NeedMore` there = a corrupt frame), and `finish_frame` takes a
-  timeout (200 ms). Pinned by `a_garbled_slice_is_seen_before_the_frame_ends_and_never_blocks`
+  good. The deterministic signal: before the last packet the library answers `Fed::NeedMore`,
+  so `Fed::Taken` there means it gave the frame up; `DecodeSink` fails the frame on it at once,
+  then also polls `poll_frame()` (anything out early = failed). A failed frame is never fed
+  further, its packets are never a concealment source, and the decoder reopens from the next
+  whole frame (a lost packet of that frame is concealed when the previous one is known). The last
+  packet must answer `Fed::Taken` (`NeedMore` there = a corrupt frame), and `finish_frame` takes a
+  timeout (200 ms, sleeping 100 us per look). Pinned by `a_garbled_slice_is_seen_before_the_frame_ends_and_never_blocks`
   (jxs/sys) and `a_garbled_slice_costs_that_frame_and_the_next_one_decodes` (loopback), both run on
   a thread with a deadline so a regression fails instead of wedging the suite.
+- **Every SVT init is serialized** (a mutex in the shim): the library fills its run-time CPU
+  dispatch tables at the first init through a plain static flag, and two inits at once race on it
+  (stdout `Error: ... Pointer "..." is set before!`, seen with parallel tests).
 - `Yuv422Planes` fields are private and `Encoder::encode_frame` re-checks the planes against the
   opened geometry before the FFI call (the C side reads by that geometry). `Decoder::open`
   refuses a declared picture over 7680x4320 (the size comes from the network).

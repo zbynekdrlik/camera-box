@@ -183,6 +183,16 @@ impl FrameAssembler {
             }
         }
 
+        // One sender per assembler: a datagram of another camera never claims a slot (which
+        // could give up this sender's oldest frame) nor joins a frame.
+        if self
+            .slots
+            .iter()
+            .any(|s| s.active && s.camera_id != h.camera_id)
+        {
+            return PushOutcome::Malformed;
+        }
+
         let slot_ix = match self.find(h.timecode_100ns) {
             Some(i) => i,
             None => match self.claim_for(h, arrival, sink) {
@@ -519,6 +529,13 @@ mod tests {
         let mut other = mine[1][0].clone();
         other[2] = 7; // camera id byte
         assert_eq!(push(&mut a, &other, 0, &mut r), PushOutcome::Malformed);
+        // nor can another camera's NEW timecode claim a slot and give this frame up
+        let mut third = frame(9000, &[20, 100])[0][0].clone();
+        third[2] = 7;
+        assert_eq!(push(&mut a, &third, 0, &mut r), PushOutcome::Malformed);
+        let mut fourth = frame(9167, &[20, 100])[0][0].clone();
+        fourth[2] = 7;
+        assert_eq!(push(&mut a, &fourth, 0, &mut r), PushOutcome::Malformed);
         assert!(r.done.is_empty());
         push(&mut a, &mine[1][0], 0, &mut r);
         assert_eq!(r.done.len(), 1);

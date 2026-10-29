@@ -98,12 +98,15 @@ impl JxsRecvSocket {
         // writes only within the given lengths.
         let mut iov: [libc::iovec; RECV_BATCH] = unsafe { std::mem::zeroed() };
         let mut msgs: [libc::mmsghdr; RECV_BATCH] = unsafe { std::mem::zeroed() };
+        // One base pointer per buffer, offsets with `add`: no re-borrow of the Vec per entry.
+        let bufs = self.bufs.as_mut_ptr();
+        let ctrl = self.ctrl.as_mut_ptr();
         for i in 0..RECV_BATCH {
-            iov[i].iov_base = self.bufs[i * RECV_BUF_LEN..].as_mut_ptr().cast();
+            iov[i].iov_base = unsafe { bufs.add(i * RECV_BUF_LEN) }.cast();
             iov[i].iov_len = RECV_BUF_LEN;
             msgs[i].msg_hdr.msg_iov = &mut iov[i];
             msgs[i].msg_hdr.msg_iovlen = 1;
-            msgs[i].msg_hdr.msg_control = self.ctrl[i * CTRL_LEN..].as_mut_ptr().cast();
+            msgs[i].msg_hdr.msg_control = unsafe { ctrl.add(i * CTRL_LEN) }.cast();
             msgs[i].msg_hdr.msg_controllen = CTRL_LEN as _;
         }
         let n = unsafe {
@@ -243,6 +246,9 @@ mod decode {
             match dec.send_packet(bytes) {
                 Err(e) => self.fail(e),
                 Ok(Fed::NeedMore) if last => self.fail("the last packet left the frame incomplete"),
+                // Before the last packet the library answers NeedMore; OK there means it gave
+                // the frame up (a corrupt slice). Deterministic, before the race-prone poll.
+                Ok(Fed::Taken) if !last => self.fail("the frame ended before its last packet"),
                 Ok(_) if !last => match dec.poll_frame() {
                     Ok(false) => {}
                     Ok(true) => self.fail("a frame came out before its last packet"),
@@ -262,6 +268,7 @@ mod decode {
 
         fn open_from_pending(&mut self, report: &FrameReport) {
             if !self.pending_ok {
+                self.errors += 1;
                 (self.on_frame)(report, None);
                 return;
             }
@@ -333,6 +340,13 @@ mod decode {
                         self.pending[index].clear();
                         self.pending[index].extend_from_slice(b);
                     }
+                    // A lost packet of a frame the decoder opens from: conceal it from
+                    // the previous frame when that is known (the same packet count).
+                    None if self.has_prev.get(index).copied().unwrap_or(false) => {
+                        let (prev, pending) = (&self.prev[index], &mut self.pending[index]);
+                        pending.clear();
+                        pending.extend_from_slice(prev);
+                    }
                     None => self.pending_ok = false,
                 }
                 return;
@@ -342,7 +356,11 @@ mod decode {
                     if !self.frame_failed {
                         self.feed(index, b);
                     }
-                    self.remember(index, b);
+                    // Only a packet the decoder took cleanly is a concealment source (the slice
+                    // that broke a frame must never be replayed for a later loss).
+                    if !self.frame_failed {
+                        self.remember(index, b);
+                    }
                 }
                 None if self.frame_failed => {}
                 None if self.has_prev.get(index).copied().unwrap_or(false) => {

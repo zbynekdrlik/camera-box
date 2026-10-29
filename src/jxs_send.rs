@@ -16,7 +16,7 @@
 //! moment the encoder produces it: one `send` per slice of consecutive datagrams with
 //! `UDP_SEGMENT` set on the socket (UDP GSO), so the kernel cuts the slice into MTU datagrams
 //! (wire format: `crate::jxs_link`). Every 5 s it logs `jxs send: frames= slices= bytes=
-//! dropped_busy= encode_ms_avg/max= send_errors= (issue 1387)`.
+//! dropped_busy= encode_ms_avg/max= send_errors= encode_errors= (issue 1387)`.
 //!
 //! The codec needs the `jxs` cargo feature (CI's deployed `camera-box-linux-amd64` carries it).
 //! A build without it logs one ERROR when the target is set and stays off.
@@ -103,6 +103,9 @@ impl JxsSocket {
                     // (EINVAL): fall back to one send per datagram for good, said once.
                     Err(e) if matches!(e.raw_os_error(), Some(libc::EIO) | Some(libc::EINVAL)) => {
                         self.gso.store(false, Ordering::Relaxed);
+                        // The kernel checks the segment size and checksum offload whenever the
+                        // socket option is set, whatever the send's length: clear it.
+                        set_int_opt(self.sock.as_raw_fd(), libc::SOL_UDP, UDP_SEGMENT, 0);
                         tracing::warn!(
                             "jxs send: a GSO send failed ({e}) -- one send per datagram from now on (issue 1387)"
                         );
@@ -335,6 +338,8 @@ mod worker {
         let mut datagrams: Vec<u8> = Vec::with_capacity(70_000);
         let mut warned_format = false;
         let mut warned_encode = false;
+        // A geometry the encoder refused: never re-opened (and re-logged) on every frame.
+        let mut refused: Option<(u32, u32)> = None;
         loop {
             if !shared.busy.load(Ordering::Acquire) {
                 std::thread::park_timeout(Duration::from_millis(100));
@@ -368,7 +373,7 @@ mod worker {
                     let p = e.planes_mut();
                     p.width() != slot.width || p.height() != slot.height
                 });
-                if geometry_changed {
+                if geometry_changed && refused != Some((slot.width, slot.height)) {
                     enc = match Encoder::open(EncoderSettings::issue_1387(slot.width, slot.height))
                     {
                         Ok(e) => {
@@ -381,12 +386,18 @@ mod worker {
                             Some(e)
                         }
                         Err(e) => {
-                            tracing::error!("jxs send: {e} (issue 1387)");
+                            tracing::error!(
+                                "jxs send: {e} -- {}x{} frames are not sent (issue 1387)",
+                                slot.width,
+                                slot.height
+                            );
+                            refused = Some((slot.width, slot.height));
                             None
                         }
                     };
                 }
                 let Some(e) = enc.as_mut() else {
+                    window.encode_errors += 1;
                     drop(slot);
                     shared.busy.store(false, Ordering::Release);
                     continue;
@@ -397,6 +408,7 @@ mod worker {
                 let ok =
                     jxs_link::yuyv_to_planar422(&slot.raw, slot.stride as usize, w, h, y, u, v);
                 if !ok {
+                    window.encode_errors += 1;
                     drop(slot);
                     shared.busy.store(false, Ordering::Release);
                     continue;
@@ -408,6 +420,7 @@ mod worker {
             let mut slices = 0u64;
             let mut bytes = 0u64;
             let mut errors = 0u64;
+            let mut packet_errors = 0u64;
             // encode_ms = the picture handed to the encoder -> its last packet sent.
             let started = Instant::now();
             let result = enc_ref.encode_frame(|index, packet, _last| {
@@ -420,7 +433,7 @@ mod worker {
                     slice_len: 0,
                 };
                 if index >= count || count > 255 {
-                    errors += 1;
+                    packet_errors += 1;
                     return;
                 }
                 match jxs_link::build_slice_datagrams(base, packet, &mut datagrams) {
@@ -429,7 +442,7 @@ mod worker {
                         slices += 1;
                         bytes += packet.len() as u64;
                     }
-                    Err(_) => errors += 1,
+                    Err(_) => packet_errors += 1,
                 }
             });
             match result {
@@ -437,6 +450,7 @@ mod worker {
                     window.note_frame(slices, bytes, started.elapsed().as_secs_f64() * 1000.0);
                 }
                 Ok(n) => {
+                    window.encode_errors += 1;
                     if !warned_encode {
                         tracing::error!(
                             "jxs send: the encoder made {n} packets, the wire format expects {count} (issue 1387)"
@@ -445,6 +459,7 @@ mod worker {
                     }
                 }
                 Err(e) => {
+                    window.encode_errors += 1;
                     if !warned_encode {
                         tracing::error!("jxs send: {e} -- re-opening the encoder (issue 1387)");
                         warned_encode = true;
@@ -453,6 +468,7 @@ mod worker {
                 }
             }
             window.send_errors += errors;
+            window.encode_errors += packet_errors;
             shared.busy.store(false, Ordering::Release);
         }
     }

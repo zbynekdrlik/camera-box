@@ -469,7 +469,8 @@ impl Decoder {
                     during: "get frame (no decoded frame within the timeout)",
                 });
             }
-            std::thread::yield_now();
+            // The last slice's decode takes ~0.15 ms: wake often, never spin a core.
+            std::thread::sleep(std::time::Duration::from_micros(100));
         }
     }
 }
@@ -624,6 +625,10 @@ mod tests {
                 match dec.send_packet(p) {
                     Err(_) => return "failed on send",
                     Ok(Fed::NeedMore) if last => return "failed: incomplete",
+                    Ok(Fed::Taken) if !last && i == 2 => {
+                        return "failed: Taken before the last packet at 2"
+                    }
+                    Ok(Fed::Taken) if !last => return "failed: Taken before the last packet",
                     Ok(_) if !last && !matches!(dec.poll_frame(), Ok(false)) => {
                         return "failed: a frame came out early"
                     }
@@ -641,7 +646,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         let outcome = worker.join().expect("no panic");
-        // The library answers a corrupt slice with an early (error) frame: seen before the end.
-        assert!(outcome.starts_with("failed"), "{outcome}");
+        // The library gives the frame up on the garbled packet itself: it answers Taken there
+        // (a frame needing more would answer NeedMore), before any further packet is fed.
+        assert_eq!(outcome, "failed: Taken before the last packet at 2");
     }
 }

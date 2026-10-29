@@ -3,8 +3,14 @@
 
 #include <SvtJpegxsDec.h>
 #include <SvtJpegxsEnc.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The library's per-process setup (its run-time CPU dispatch tables, filled by the first
+ * encoder/decoder init through a plain static "first call" flag) is not thread-safe: two inits
+ * at once race on it (seen as "Pointer ... is set before!" on stdout). Serialize every init. */
+static pthread_mutex_t cbjxs_init_lock = PTHREAD_MUTEX_INITIALIZER;
 
 struct cbjxs_enc {
     svt_jpeg_xs_encoder_api_t api;
@@ -64,7 +70,9 @@ int32_t cbjxs_enc_open(const cbjxs_enc_settings* s, cbjxs_enc** out, uint32_t* b
         free(e);
         return (int32_t)err;
     }
+    pthread_mutex_lock(&cbjxs_init_lock);
     err = svt_jpeg_xs_encoder_init(SVT_JPEGXS_API_VER_MAJOR, SVT_JPEGXS_API_VER_MINOR, &e->api);
+    pthread_mutex_unlock(&cbjxs_init_lock);
     if (err != SvtJxsErrorNone) {
         free(e);
         return (int32_t)err;
@@ -124,8 +132,10 @@ int32_t cbjxs_dec_open(const uint8_t* codestream, size_t len, cbjxs_dec** out, u
     d->api.proxy_mode = proxy_mode_full;
     svt_jpeg_xs_image_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
+    pthread_mutex_lock(&cbjxs_init_lock);
     SvtJxsErrorType_t err =
         svt_jpeg_xs_decoder_init(SVT_JPEGXS_API_VER_MAJOR, SVT_JPEGXS_API_VER_MINOR, &d->api, codestream, len, &cfg);
+    pthread_mutex_unlock(&cbjxs_init_lock);
     if (err != SvtJxsErrorNone) {
         free(d);
         return (int32_t)err;

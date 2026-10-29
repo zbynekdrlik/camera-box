@@ -240,6 +240,9 @@ pub struct SendWindow {
     pub bytes: u64,
     pub dropped_busy: u64,
     pub send_errors: u64,
+    /// Frames not encoded or not sent whole (refused geometry, conversion, codec error, a packet
+    /// the wire format cannot carry).
+    pub encode_errors: u64,
     pub encode_ms_sum: f64,
     pub encode_ms_max: f64,
 }
@@ -256,7 +259,8 @@ impl SendWindow {
     }
 
     /// The 5 s status line: `jxs send: frames= slices= bytes= dropped_busy= encode_ms_avg/max=
-    /// send_errors= (issue 1387)`. `bytes` counts the codestream, not the headers.
+    /// send_errors= encode_errors= (issue 1387)`. `bytes` counts the codestream, not the
+    /// headers.
     pub fn status_line(&self) -> String {
         let avg = if self.frames > 0 {
             self.encode_ms_sum / self.frames as f64
@@ -264,14 +268,15 @@ impl SendWindow {
             0.0
         };
         format!(
-            "jxs send: frames={} slices={} bytes={} dropped_busy={} encode_ms_avg/max={:.2}/{:.2} send_errors={} (issue 1387)",
+            "jxs send: frames={} slices={} bytes={} dropped_busy={} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
             self.frames,
             self.slices,
             self.bytes,
             self.dropped_busy,
             avg,
             self.encode_ms_max,
-            self.send_errors
+            self.send_errors,
+            self.encode_errors
         )
     }
 }
@@ -440,7 +445,7 @@ mod tests {
         w.dropped_busy = 3;
         assert_eq!(
             w.status_line(),
-            "jxs send: frames=2 slices=138 bytes=2000000 dropped_busy=3 encode_ms_avg/max=15.00/16.00 send_errors=0 (issue 1387)"
+            "jxs send: frames=2 slices=138 bytes=2000000 dropped_busy=3 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 (issue 1387)"
         );
         assert!(SendWindow::default()
             .status_line()
