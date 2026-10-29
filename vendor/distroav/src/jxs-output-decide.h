@@ -33,7 +33,7 @@ static inline uint8_t cb_jxs_out_bpp(long long v)
  * from its report when that link is slower than strih's own (stream-snv's 1 GbE port -> 900, the
  * value the 23:35 live run proved with 0 lost slices; a 2.5 GbE PP receiver -> 2250), at line rate
  * when it is as fast. A value above 0 is a fixed override. */
-#define CB_JXS_OUT_PACE_MBPS_DEFAULT 900
+#define CB_JXS_OUT_PACE_MBPS_DEFAULT 0
 /* The sender's bounds (camera_box::jxs_link::pace::PACE_MBPS_MIN / _MAX); 0 = automatic. */
 #define CB_JXS_OUT_PACE_MBPS_MIN 100
 #define CB_JXS_OUT_PACE_MBPS_MAX 100000

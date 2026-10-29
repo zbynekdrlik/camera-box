@@ -441,7 +441,7 @@ impl JxsReceiver {
         let mut r = self
             .report
             .take(self.camera.unwrap_or(0), self.cfg.max_bpp as u32);
-        let _ = &mut r;
+        r.link_mbps = self.link_mbps.unwrap_or(0);
         if let (true, Some(to), Some(_)) = (self.cfg.send_reports, self.sender, self.camera) {
             match self.sock.send_report(to, &r) {
                 Ok(()) => self.window.reports_sent += 1,

@@ -56,7 +56,7 @@ impl JxsSocket {
         let gso = set_int_opt(fd, libc::SOL_UDP, UDP_SEGMENT, DATAGRAM_LEN as libc::c_int);
         // DSCP AF41 on every datagram (issue 1387, `JXS_IP_TOS`); an unprivileged socket may set
         // it, a refusal leaves the default (best effort) and `tos()` shows it
-        let _ = JXS_IP_TOS;
+        set_int_opt(fd, libc::IPPROTO_IP, libc::IP_TOS, JXS_IP_TOS);
         // SO_MARK needs CAP_NET_ADMIN or CAP_NET_RAW (camera-box.service runs as root). Without it
         // the flow is still sent, only paced with NDI: `marked()` reports it, the start WARNs with
         // the errno and the "link ON" line names it.

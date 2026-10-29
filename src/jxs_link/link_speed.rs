@@ -24,8 +24,8 @@ pub const MAX_LINK_MBPS: u32 = 1_600_000;
 /// A sysfs `speed` file's text as Mb/s: a positive whole number up to [`MAX_LINK_MBPS`];
 /// `-1`, `0`, blank or anything else = unknown.
 pub fn parse_speed_mbps(text: &str) -> Option<u32> {
-    let _ = text;
-    None
+    let v: u64 = text.trim().parse().ok()?;
+    (v > 0 && v <= MAX_LINK_MBPS as u64).then_some(v as u32)
 }
 
 /// Whether `name` can be a single directory entry under [`SYS_CLASS_NET`] (never a path).
@@ -40,8 +40,27 @@ pub fn link_speed_mbps_in(root: &Path, iface: &str) -> Option<u32> {
 }
 
 fn speed_at(root: &Path, iface: &str, depth: u32) -> Option<u32> {
-    let _ = (root, iface, depth, MAX_LOWER_DEPTH, plain_name("x"));
-    None
+    if !plain_name(iface) || depth > MAX_LOWER_DEPTH {
+        return None;
+    }
+    let dir = root.join(iface);
+    if let Some(s) = std::fs::read_to_string(dir.join("speed"))
+        .ok()
+        .and_then(|t| parse_speed_mbps(&t))
+    {
+        return Some(s);
+    }
+    let entries = std::fs::read_dir(&dir).ok()?;
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(|n| n.strip_prefix("lower_"))
+                .map(str::to_string)
+        })
+        .filter_map(|lower| speed_at(root, &lower, depth + 1))
+        .min()
 }
 
 /// [`link_speed_mbps_in`] on the live [`SYS_CLASS_NET`].
@@ -51,15 +70,54 @@ pub fn link_speed_mbps(iface: &str) -> Option<u32> {
 
 /// The name of interface number `ifindex` (`if_indextoname`), `None` when there is none.
 pub fn iface_name(ifindex: u32) -> Option<String> {
-    let _ = ifindex;
-    None
+    if ifindex == 0 {
+        return None;
+    }
+    let mut buf = [0 as libc::c_char; libc::IF_NAMESIZE];
+    // SAFETY: `buf` holds IF_NAMESIZE bytes, the size the call writes at most (NUL included).
+    let p = unsafe { libc::if_indextoname(ifindex, buf.as_mut_ptr()) };
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: on success the call wrote a NUL-terminated name into `buf`.
+    let name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    name.to_str().ok().map(str::to_string)
 }
 
 /// The interface that carries the local IPv4 address `ip` (`getifaddrs`), `None` when none does
 /// (an unspecified address, or one no interface holds).
 pub fn iface_of_local_ipv4(ip: std::net::Ipv4Addr) -> Option<String> {
-    let _ = ip;
-    None
+    if ip.is_unspecified() {
+        return None;
+    }
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `list` with a linked list freed below with freeifaddrs.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return None;
+    }
+    let mut found = None;
+    let mut cur = list;
+    while !cur.is_null() {
+        // SAFETY: `cur` walks the list getifaddrs returned; each node and its fields stay valid
+        // until freeifaddrs.
+        let ifa = unsafe { &*cur };
+        let addr = ifa.ifa_addr;
+        // SAFETY: a non-null ifa_addr points to a sockaddr whose family says its real type.
+        if !addr.is_null() && unsafe { (*addr).sa_family } as libc::c_int == libc::AF_INET {
+            // SAFETY: AF_INET = a sockaddr_in.
+            let sin = unsafe { &*addr.cast::<libc::sockaddr_in>() };
+            if std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)) == ip {
+                // SAFETY: ifa_name is a NUL-terminated string owned by the list.
+                let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) };
+                found = name.to_str().ok().map(str::to_string);
+                break;
+            }
+        }
+        cur = ifa.ifa_next;
+    }
+    // SAFETY: `list` came from getifaddrs and is freed once.
+    unsafe { libc::freeifaddrs(list) };
+    found
 }
 
 #[cfg(test)]

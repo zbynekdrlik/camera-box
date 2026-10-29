@@ -84,28 +84,47 @@ fn clamp(mbps: u64) -> u32 {
 /// bytes, what SVT-JPEG-XS's rate control codes every frame to) cut into datagrams of
 /// [`SEGMENT_DATA_LEN`] + the 16-byte header, plus the Ethernet overhead of each.
 pub fn frame_wire_bytes(width: u32, height: u32, bpp: u32) -> u64 {
-    let _ = (
-        width,
-        height,
-        bpp,
-        HEADER_LEN,
-        SEGMENT_DATA_LEN,
-        wire_bytes(0),
-    );
-    0
+    let code = width as u64 * height as u64 * bpp as u64 / 8;
+    let datagrams = code.div_ceil(SEGMENT_DATA_LEN as u64);
+    let payload = code + datagrams * HEADER_LEN as u64;
+    wire_bytes(payload as usize)
 }
 
 /// The rate that spreads `frame_wire_bytes` over 1 / [`START_SPREAD_DIVISOR`] of the interval of
 /// `fps` (Mb/s, rounded up; 0 for an empty frame or no rate).
 pub fn frame_spread_mbps(frame_wire_bytes: u64, fps: u32) -> u64 {
-    let _ = (frame_wire_bytes, fps);
-    0
+    (frame_wire_bytes * 8 * fps as u64 * START_SPREAD_DIVISOR).div_ceil(1_000_000)
 }
 
 /// The decision (module doc).
 pub fn decide(i: &PaceInputs) -> PaceDecision {
-    let _ = (i, clamp(0));
-    PaceDecision::default()
+    let line = PaceDecision {
+        mbps: 0,
+        source: PaceSource::LineRate,
+    };
+    if i.setting_mbps > 0 {
+        return PaceDecision {
+            mbps: clamp(i.setting_mbps as u64),
+            source: PaceSource::Fixed,
+        };
+    }
+    if let Some(rx) = i.receiver_link_mbps {
+        if i.own_link_mbps.is_some_and(|own| own <= rx) {
+            return line;
+        }
+        return PaceDecision {
+            mbps: clamp(rx as u64 * LINK_PACE_PERCENT / 100),
+            source: PaceSource::ReceiverLink,
+        };
+    }
+    let spread = frame_spread_mbps(i.frame_wire_bytes, i.fps);
+    if spread == 0 || i.own_link_mbps.is_some_and(|own| spread >= own as u64) {
+        return line;
+    }
+    PaceDecision {
+        mbps: clamp(spread),
+        source: PaceSource::StartSpread,
+    }
 }
 
 #[cfg(test)]

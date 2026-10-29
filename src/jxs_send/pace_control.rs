@@ -60,7 +60,7 @@ impl PaceControl {
     /// A receiver report: a version-2 report names its link (0 = it does not know it: the safe
     /// start again); a version-1 report never does.
     pub fn on_report(&mut self, r: &ReceiverReport) {
-        let _ = r;
+        self.receiver_link_mbps = (r.link_mbps > 0).then_some(r.link_mbps);
     }
 
     /// The frames now being sent.

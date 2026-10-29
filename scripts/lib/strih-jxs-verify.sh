@@ -28,10 +28,63 @@ STRIH_JXS_RUNNING_S=30
 # strih_jxs_lost_summary [WINDOWS [RUNNING_S]] -> reads an OBS log on stdin (module doc). A line's time is
 # its leading HH:MM:SS(.mmm); an age crossing midnight wraps (the log's newest line is "now").
 strih_jxs_lost_summary() {
-  return 0
+  local windows="${1:-$STRIH_JXS_WINDOWS}" running_s="${2:-$STRIH_JXS_RUNNING_S}"
+  awk -v W="$windows" -v R="$running_s" '
+    function tod(s,   a) {
+      if (s !~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]/) return -1
+      split(substr(s, 1, 8), a, ":")
+      return a[1] * 3600 + a[2] * 60 + a[3]
+    }
+    {
+      t = tod($0)
+      if (t >= 0) last = t
+      i = index($0, "jxs-source '\''")
+      if (i == 0) next
+      rest = substr($0, i + 12)
+      j = index(rest, "'\'': fps=")
+      if (j == 0) next
+      name = substr(rest, 1, j - 1)
+      if (match(rest, / lost_slices=[0-9]+/) == 0) next
+      lost = substr(rest, RSTART + 13, RLENGTH - 13) + 0
+      if (!(name in n)) { order[++k] = name; n[name] = 0 }
+      n[name]++
+      ring[name, n[name] % W] = lost
+      seen[name] = t
+    }
+    END {
+      for (q = 1; q <= k; q++) {
+        name = order[q]
+        c = n[name] < W ? n[name] : W
+        sum = 0
+        for (r = 0; r < c; r++) sum += ring[name, (n[name] - r) % W]
+        age = last - seen[name]
+        if (seen[name] < 0 || last < 0) age = 0
+        if (age < 0) age += 86400
+        printf "%s|%s|%d|%d\n", (age <= R ? "running" : "stopped"), name, c, sum
+      }
+    }'
 }
 
 # strih_jxs_verify_row LOGFILE -> verify-strih item 49: one row per JPEG XS source (or one NOTE).
 strih_jxs_verify_row() {
+  local log="${1-}" state name windows lost any=0
+  if [ -z "$log" ] || [ ! -r "$log" ]; then
+    note "(jxs) no OBS log to read the JPEG XS sources from (issue 1387)"
+    return 0
+  fi
+  while IFS='|' read -r state name windows lost; do
+    [ -n "$name" ] || continue
+    any=1
+    if [ "$state" != running ]; then
+      note "(jxs) '${name}': no window line in the last ${STRIH_JXS_RUNNING_S} s of the OBS log -- the source is not running (issue 1387)"
+    elif [ "$lost" -gt 0 ]; then
+      bad "(jxs) '${name}': lost_slices=${lost} in its last ${windows} window(s) -- the JPEG XS link loses datagrams (concealed on screen); read the sender's pace_src / rx_link_mbps and the source's link_mbps, then the switch port (issue 1387)"
+    else
+      ok "(jxs) '${name}': lost_slices=0 in its last ${windows} window(s)"
+    fi
+  done < <(strih_jxs_lost_summary < "$log" || true)
+  if [ "$any" = 0 ]; then
+    note "(jxs) no JPEG XS source (camera_box_jxs_source) in the running OBS log -- nothing to grade (issue 1387)"
+  fi
   return 0
 }

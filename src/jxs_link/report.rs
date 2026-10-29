@@ -74,7 +74,10 @@ impl ReceiverReport {
         b[16..20].copy_from_slice(&self.late_frames.to_le_bytes());
         b[20..24].copy_from_slice(&self.decode_p99_us.to_le_bytes());
         b[24..32].copy_from_slice(&self.last_timecode_100ns.to_le_bytes());
-        let _ = opt_us;
+        b[32..36].copy_from_slice(&self.link_mbps.to_le_bytes());
+        b[36..40].copy_from_slice(&opt_us(self.queue_delay_us).to_le_bytes());
+        b[40..44].copy_from_slice(&opt_us(self.span_p50_us).to_le_bytes());
+        b[44..48].copy_from_slice(&self.fec_repaired.to_le_bytes());
         Ok(b)
     }
 
@@ -105,7 +108,12 @@ impl ReceiverReport {
             last_timecode_100ns: u64::from_le_bytes(tc),
             ..Self::default()
         };
-        let _ = measured;
+        if b.len() == REPORT_LEN {
+            r.link_mbps = u32_at(32);
+            r.queue_delay_us = measured(u32_at(36));
+            r.span_p50_us = measured(u32_at(40));
+            r.fec_repaired = u32_at(44);
+        }
         Ok(r)
     }
 }

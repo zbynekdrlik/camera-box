@@ -49,7 +49,14 @@ impl JxsRecvSocket {
         let timestamps = set_int_opt(fd, libc::SOL_SOCKET, libc::SO_TIMESTAMPNS, 1);
         // the receiving interface of every datagram: its link speed goes into the report (the
         // sender's pace, issue 1387); refused = the report says "unknown"
+        set_int_opt(fd, libc::IPPROTO_IP, libc::IP_PKTINFO, 1);
         // the reports carry the link's DSCP too (issue 1387)
+        set_int_opt(
+            fd,
+            libc::IPPROTO_IP,
+            libc::IP_TOS,
+            crate::jxs_send::JXS_IP_TOS,
+        );
         Ok(Self {
             sock,
             bufs: vec![0; RECV_BATCH * RECV_BUF_LEN],

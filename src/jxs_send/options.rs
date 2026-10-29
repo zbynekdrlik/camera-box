@@ -152,7 +152,10 @@ pub fn parse_pace_mbps(value: Option<&str>) -> Result<u32, String> {
 /// The "link ON" line's pacing words.
 pub fn pace_text(mbps: u32) -> String {
     if mbps == 0 {
-        "line rate (no pacing)".to_string()
+        format!(
+            "paced automatically ({}% of the receiver's link when it is slower than this one, else line rate; the frame spread until its first report)",
+            crate::jxs_link::pace_auto::LINK_PACE_PERCENT
+        )
     } else {
         format!(
             "paced at {mbps} Mb/s of wire, at most {} datagrams per send",
