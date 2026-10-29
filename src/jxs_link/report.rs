@@ -3,17 +3,22 @@
 
 /// Report magic byte (`'R'`).
 pub const REPORT_MAGIC: u8 = 0x52;
-/// Report format version.
-pub const REPORT_VERSION: u8 = 1;
-/// A report is exactly this long.
-pub const REPORT_LEN: usize = 32;
+/// The report format version a receiver sends (2: the link speed and the congestion / FEC
+/// fields after the version-1 bytes).
+pub const REPORT_VERSION: u8 = 2;
+/// A version-2 report is exactly this long.
+pub const REPORT_LEN: usize = 48;
+/// The version-1 report (32 bytes, no link speed): still read, from a receiver not yet upgraded.
+pub const REPORT_V1_LEN: usize = 32;
 /// `decode_p99_us` when the window decoded no frame.
 pub const NO_DECODE_TIME: u32 = u32::MAX;
+/// A version-2 delay field that was not measured.
+pub const NOT_MEASURED: u32 = u32::MAX;
 /// How often the receiver reports.
 pub const REPORT_PERIOD_MS: u64 = 1000;
 
 /// One receiver report: what the receiver saw of ONE camera in the last report period.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ReceiverReport {
     pub camera_id: u8,
     /// The highest bpp the receiver takes (0 = no limit).
@@ -29,6 +34,15 @@ pub struct ReceiverReport {
     pub decode_p99_us: u32,
     /// The newest frame timecode the period covers (0 = no frame).
     pub last_timecode_100ns: u64,
+    /// Version 2: the speed of the link the slices arrive on, Mb/s (0 = unknown, and always 0
+    /// from a version-1 receiver).
+    pub link_mbps: u32,
+    /// Version 2: the queuing delay (`None` = not measured; module doc of `super`).
+    pub queue_delay_us: Option<u32>,
+    /// Version 2: the p50 first -> last datagram arrival span of a whole frame (`None` = none).
+    pub span_p50_us: Option<u32>,
+    /// Version 2: datagrams the forward error correction rebuilt in the period.
+    pub fec_repaired: u32,
 }
 
 /// Why a datagram is not a report.
@@ -41,7 +55,12 @@ pub enum ReportError {
     BadBpp,
 }
 
+fn opt_us(v: Option<u32>) -> u32 {
+    v.map_or(NOT_MEASURED, |x| x.min(NOT_MEASURED - 1))
+}
+
 impl ReceiverReport {
+    /// The version-2 datagram ([`REPORT_LEN`] bytes).
     pub fn encode(&self) -> Result<[u8; REPORT_LEN], ReportError> {
         let max_bpp = u8::try_from(self.max_bpp).map_err(|_| ReportError::BadBpp)?;
         let mut b = [0u8; REPORT_LEN];
@@ -55,23 +74,27 @@ impl ReceiverReport {
         b[16..20].copy_from_slice(&self.late_frames.to_le_bytes());
         b[20..24].copy_from_slice(&self.decode_p99_us.to_le_bytes());
         b[24..32].copy_from_slice(&self.last_timecode_100ns.to_le_bytes());
+        let _ = opt_us;
         Ok(b)
     }
 
+    /// A version-2 report, or a version-1 one (its version-2 fields unknown / not measured).
     pub fn decode(b: &[u8]) -> Result<Self, ReportError> {
-        if b.len() != REPORT_LEN {
+        if b.len() != REPORT_LEN && b.len() != REPORT_V1_LEN {
             return Err(ReportError::WrongLength(b.len()));
         }
         if b[0] != REPORT_MAGIC {
             return Err(ReportError::BadMagic);
         }
-        if b[1] != REPORT_VERSION {
+        let want = if b.len() == REPORT_LEN { 2 } else { 1 };
+        if b[1] != want {
             return Err(ReportError::BadVersion(b[1]));
         }
         let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        let measured = |v: u32| (v != NOT_MEASURED).then_some(v);
         let mut tc = [0u8; 8];
         tc.copy_from_slice(&b[24..32]);
-        Ok(Self {
+        let mut r = Self {
             camera_id: b[2],
             max_bpp: b[3] as u32,
             seq: u32_at(4),
@@ -80,7 +103,10 @@ impl ReceiverReport {
             late_frames: u32_at(16),
             decode_p99_us: u32_at(20),
             last_timecode_100ns: u64::from_le_bytes(tc),
-        })
+            ..Self::default()
+        };
+        let _ = measured;
+        Ok(r)
     }
 }
 
@@ -133,6 +159,7 @@ impl ReportWindow {
             late_frames: self.late_frames,
             decode_p99_us: p99,
             last_timecode_100ns: self.last_tc,
+            ..ReceiverReport::default()
         };
         self.seq = self.seq.wrapping_add(1);
         self.frames = 0;
@@ -158,6 +185,10 @@ mod tests {
             late_frames: 1,
             decode_p99_us: 4_321,
             last_timecode_100ns: 17_617_300_123_456_789,
+            link_mbps: 2500,
+            queue_delay_us: Some(1_234),
+            span_p50_us: Some(18_000),
+            fec_repaired: 7,
         }
     }
 
@@ -166,10 +197,52 @@ mod tests {
         let r = sample();
         let b = r.encode().unwrap();
         assert_eq!(b.len(), REPORT_LEN);
-        assert_eq!(&b[..8], &[0x52, 1, 5, 8, 0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(&b[..8], &[0x52, 2, 5, 8, 0x04, 0x03, 0x02, 0x01]);
         assert_eq!(&b[8..12], &30u32.to_le_bytes());
         assert_eq!(&b[24..32], &17_617_300_123_456_789u64.to_le_bytes());
+        assert_eq!(&b[32..36], &2500u32.to_le_bytes());
+        assert_eq!(&b[36..40], &1_234u32.to_le_bytes());
+        assert_eq!(&b[40..44], &18_000u32.to_le_bytes());
+        assert_eq!(&b[44..48], &7u32.to_le_bytes());
         assert_eq!(ReceiverReport::decode(&b), Ok(r));
+        // not measured = u32::MAX on the wire
+        let n = ReceiverReport {
+            queue_delay_us: None,
+            span_p50_us: None,
+            ..r
+        }
+        .encode()
+        .unwrap();
+        assert_eq!(&n[36..44], &[0xFF; 8]);
+        assert_eq!(ReceiverReport::decode(&n).unwrap().queue_delay_us, None);
+    }
+
+    /// A receiver not yet upgraded sends the 32-byte version 1: still read, its version-2 fields
+    /// unknown (no link speed = the sender's safe start). The first 32 bytes of a version 2 are
+    /// version 1's bytes with the version byte 2.
+    #[test]
+    fn a_version_1_report_is_still_read_with_no_link_speed() {
+        let r = sample();
+        let mut v1 = [0u8; REPORT_V1_LEN];
+        v1.copy_from_slice(&r.encode().unwrap()[..REPORT_V1_LEN]);
+        v1[1] = 1;
+        let got = ReceiverReport::decode(&v1).unwrap();
+        assert_eq!(
+            got,
+            ReceiverReport {
+                link_mbps: 0,
+                queue_delay_us: None,
+                span_p50_us: None,
+                fec_repaired: 0,
+                ..r
+            }
+        );
+        // the length names the version: a 48-byte version 1 or a 32-byte version 2 is refused
+        let mut x = r.encode().unwrap();
+        x[1] = 1;
+        assert_eq!(ReceiverReport::decode(&x), Err(ReportError::BadVersion(1)));
+        v1[1] = 2;
+        assert_eq!(ReceiverReport::decode(&v1), Err(ReportError::BadVersion(2)));
     }
 
     #[test]
@@ -179,12 +252,16 @@ mod tests {
             ReceiverReport::decode(&b[..31]),
             Err(ReportError::WrongLength(31))
         );
+        assert_eq!(
+            ReceiverReport::decode(&b[..47]),
+            Err(ReportError::WrongLength(47))
+        );
         let mut x = b;
         x[0] = 0x4A; // a JPEG XS slice datagram's magic
         assert_eq!(ReceiverReport::decode(&x), Err(ReportError::BadMagic));
         let mut x = b;
-        x[1] = 2;
-        assert_eq!(ReceiverReport::decode(&x), Err(ReportError::BadVersion(2)));
+        x[1] = 3;
+        assert_eq!(ReceiverReport::decode(&x), Err(ReportError::BadVersion(3)));
         let big = ReceiverReport {
             max_bpp: 300,
             ..sample()

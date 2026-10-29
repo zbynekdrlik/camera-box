@@ -28,18 +28,17 @@ static inline uint8_t cb_jxs_out_bpp(long long v)
 	return (v >= 0 && v <= CB_JXS_OUT_MAX_BPP) ? (uint8_t)v : 0;
 }
 
-/* The send pacing default, Mb/s of Ethernet wire: strih-snv sends on 10 GbE and its one target,
- * stream-snv, receives on a 1 GbE port, whose switch buffer drops the tail of a line-rate slice
- * burst (the slice-3 live run lost slices in 10 of 21 windows). 900 carries a 12 bpp frame in
- * ~29.5 ms, under the 33.3 ms of 30 fps. The port's other traffic (NDI, 108 Mb/s average,
- * 29.10.2026) arrives in per-frame bursts that queue while a JPEG XS frame is on the wire; only the
- * live lost_slices=0 proves 900, else 800 / 700 (.claude/rules/jxs-link.md). */
+/* The send pacing default: 0 = AUTOMATIC (send ABI 3, issue 1387, owner 29.10.2026: no number
+ * that a network reconfiguration silently breaks). The sender paces to 90 % of the receiver's link
+ * from its report when that link is slower than strih's own (stream-snv's 1 GbE port -> 900, the
+ * value the 23:35 live run proved with 0 lost slices; a 2.5 GbE PP receiver -> 2250), at line rate
+ * when it is as fast. A value above 0 is a fixed override. */
 #define CB_JXS_OUT_PACE_MBPS_DEFAULT 900
-/* The sender's bounds (camera_box::jxs_link::pace::PACE_MBPS_MIN / _MAX); 0 = line rate. */
+/* The sender's bounds (camera_box::jxs_link::pace::PACE_MBPS_MIN / _MAX); 0 = automatic. */
 #define CB_JXS_OUT_PACE_MBPS_MIN 100
 #define CB_JXS_OUT_PACE_MBPS_MAX 100000
 
-/* The pace setting: 0 (or below) = line rate, else clamped into the sender's bounds, so a setting
+/* The pace setting: 0 (or below) = automatic, else clamped into the sender's bounds, so a setting
  * never makes the start fail. */
 static inline uint32_t cb_jxs_out_pace_mbps(long long v)
 {
@@ -50,6 +49,24 @@ static inline uint32_t cb_jxs_out_pace_mbps(long long v)
 	if (v > CB_JXS_OUT_PACE_MBPS_MAX)
 		return CB_JXS_OUT_PACE_MBPS_MAX;
 	return (uint32_t)v;
+}
+
+/* The status line's word for cbjxs_send_stats.pace_source (CBJXS_SEND_PACE_*; the Rust
+ * PaceSource tokens). */
+static inline const char *cb_jxs_out_pace_source(uint32_t code)
+{
+	switch (code) {
+	case 0:
+		return "line-rate";
+	case 1:
+		return "fixed";
+	case 2:
+		return "receiver-link";
+	case 3:
+		return "start-spread";
+	default:
+		return "unknown";
+	}
 }
 
 /* The canvas frame rate the sender is told (it sends every frame at 30 or below, the 30 fps grid

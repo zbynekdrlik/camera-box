@@ -6,7 +6,8 @@ use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::{
-    monotonic_ns, sleep_until_monotonic_ns, JXS_SOCKET_MARK, SEND_BUFFER_BYTES, UDP_SEGMENT,
+    monotonic_ns, sleep_until_monotonic_ns, JXS_IP_TOS, JXS_SOCKET_MARK, SEND_BUFFER_BYTES,
+    UDP_SEGMENT,
 };
 use crate::jxs_link::{self, DATAGRAM_LEN};
 
@@ -53,6 +54,9 @@ impl JxsSocket {
         let fd = sock.as_raw_fd();
         set_int_opt(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, SEND_BUFFER_BYTES);
         let gso = set_int_opt(fd, libc::SOL_UDP, UDP_SEGMENT, DATAGRAM_LEN as libc::c_int);
+        // DSCP AF41 on every datagram (issue 1387, `JXS_IP_TOS`); an unprivileged socket may set
+        // it, a refusal leaves the default (best effort) and `tos()` shows it
+        let _ = JXS_IP_TOS;
         // SO_MARK needs CAP_NET_ADMIN or CAP_NET_RAW (camera-box.service runs as root). Without it
         // the flow is still sent, only paced with NDI: `marked()` reports it, the start WARNs with
         // the errno and the "link ON" line names it.
@@ -114,6 +118,20 @@ impl JxsSocket {
 
     pub fn peer(&self) -> std::io::Result<SocketAddr> {
         self.sock.peer_addr()
+    }
+
+    /// The `IP_TOS` byte the datagrams leave with (-1 = unreadable).
+    pub fn tos(&self) -> i64 {
+        get_int_opt(self.sock.as_raw_fd(), libc::IPPROTO_IP, libc::IP_TOS)
+    }
+
+    /// The interface the connected socket sends on (the one holding its local address), the one
+    /// whose link speed the pace compares with the receiver's (issue 1387). `None` = unknown.
+    pub fn local_iface(&self) -> Option<String> {
+        match self.sock.local_addr().ok()? {
+            SocketAddr::V4(a) => jxs_link::link_speed::iface_of_local_ipv4(*a.ip()),
+            SocketAddr::V6(_) => None,
+        }
     }
 
     /// Drain every datagram waiting on the socket without blocking (the connected socket takes

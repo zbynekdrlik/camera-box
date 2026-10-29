@@ -133,6 +133,11 @@ if ! declare -F obs_audio_buffering_install >/dev/null; then
   # shellcheck source=scripts/lib/obs-audio-buffering.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-audio-buffering.sh"
 fi
+# issue 1387: verify item 49 grades every running JPEG XS source's lost slices.
+if ! declare -F strih_jxs_verify_row >/dev/null; then
+  # shellcheck source=scripts/lib/strih-jxs-verify.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-jxs-verify.sh"
+fi
 
 # strih_lx_ndi_inputs -> the NDI input names the strih role receives, one per line (issue 1317 spec):
 # the venue's cameras, the 2ME feedback pair = the box's OWN `<PREFIX> (2ME PGM|PVW)` outputs (the M4

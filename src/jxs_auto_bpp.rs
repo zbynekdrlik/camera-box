@@ -418,6 +418,7 @@ mod tests {
             late_frames: 0,
             decode_p99_us: 3_000,
             last_timecode_100ns: tc,
+            ..ReceiverReport::default()
         }
     }
 

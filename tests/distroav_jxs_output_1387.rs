@@ -69,6 +69,7 @@ fn function_body<'a>(src: &'a str, signature: &str) -> &'a str {
 
 const TRUTH_TABLE: &str = r#"
 #include <stdio.h>
+#include <string.h>
 #include "@DECIDE@"
 static int fails = 0;
 #define EXPECT(c) do { if (!(c)) { printf("FAIL line %d: %s\n", __LINE__, #c); fails++; } } while (0)
@@ -88,9 +89,14 @@ int main(void)
 	EXPECT(cb_jxs_out_bpp(12) == 12u);
 	EXPECT(cb_jxs_out_bpp(13) == 0u);
 	EXPECT(cb_jxs_out_bpp(-3) == 0u);
-	/* the send pacing: 900 by default (strih's 10 GbE to stream's 1 GbE port), 0 = line rate,
-	 * anything else clamped into the sender's 100..100000 */
-	EXPECT(CB_JXS_OUT_PACE_MBPS_DEFAULT == 900);
+	/* the send pacing: 0 = automatic by default (the receiver's link, issue 1387), anything else
+	 * clamped into the sender's 100..100000 */
+	EXPECT(CB_JXS_OUT_PACE_MBPS_DEFAULT == 0);
+	EXPECT(strcmp(cb_jxs_out_pace_source(0), "line-rate") == 0);
+	EXPECT(strcmp(cb_jxs_out_pace_source(1), "fixed") == 0);
+	EXPECT(strcmp(cb_jxs_out_pace_source(2), "receiver-link") == 0);
+	EXPECT(strcmp(cb_jxs_out_pace_source(3), "start-spread") == 0);
+	EXPECT(strcmp(cb_jxs_out_pace_source(4), "unknown") == 0);
 	EXPECT(cb_jxs_out_pace_mbps(900) == 900u);
 	EXPECT(cb_jxs_out_pace_mbps(0) == 0u);
 	EXPECT(cb_jxs_out_pace_mbps(-1) == 0u);
@@ -294,11 +300,12 @@ fn the_program_pixel_format_maps_onto_the_sender_formats_and_nothing_else_starts
     assert!(out.contains("#define JXS_OUTPUT_ID \"camera_box_jxs_output\""));
 }
 
-/// Issue 1387: the send pacing reaches the sender. `jxs_pace_mbps` defaults to 900 (strih-snv's
-/// 10 GbE into stream-snv's 1 GbE port), is read through the clamp, and is handed over in the open
-/// config; the clamp's bounds are the sender's own.
+/// Issue 1387: the send pacing reaches the sender. `jxs_pace_mbps` defaults to 0 = AUTOMATIC (the
+/// receiver's link, owner 29.10.2026: no hand-set number), is read through the clamp, and is
+/// handed over in the open config; the clamp's bounds are the sender's own, and the source words
+/// are the Rust `PaceSource` tokens.
 #[test]
-fn the_pace_setting_defaults_to_900_and_reaches_the_sender_config() {
+fn the_pace_setting_defaults_to_automatic_and_reaches_the_sender_config() {
     let out = read(OUTPUT);
     let decide = read(DECIDE);
     assert!(out.contains("#define PROP_JXS_PACE_MBPS \"jxs_pace_mbps\""));
@@ -306,7 +313,20 @@ fn the_pace_setting_defaults_to_900_and_reaches_the_sender_config() {
     assert!(defaults.contains(
         "obs_data_set_default_int(settings, PROP_JXS_PACE_MBPS, CB_JXS_OUT_PACE_MBPS_DEFAULT);"
     ));
-    assert!(decide.contains("#define CB_JXS_OUT_PACE_MBPS_DEFAULT 900\n"));
+    assert!(decide.contains("#define CB_JXS_OUT_PACE_MBPS_DEFAULT 0\n"));
+    use camera_box::jxs_link::pace_auto::PaceSource;
+    // CBJXS_SEND_PACE_* (jxs/send-ffi pins its own mapping to these numbers)
+    for (code, src) in [
+        (0, PaceSource::LineRate),
+        (1, PaceSource::Fixed),
+        (2, PaceSource::ReceiverLink),
+        (3, PaceSource::StartSpread),
+    ] {
+        assert!(
+            decide.contains(&format!("case {code}:\n\t\treturn \"{src}\";")),
+            "{code} -> {src}"
+        );
+    }
     let update = function_body(&out, "static void jxs_output_update(");
     assert!(update.contains(
         "o->pace_mbps = cb_jxs_out_pace_mbps(obs_data_get_int(settings, PROP_JXS_PACE_MBPS));"
@@ -344,6 +364,8 @@ fn the_output_logs_a_start_line_a_status_line_and_the_senders_own_lines() {
         "pace_mbps=%u",
         "wire_ms_avg/max=%.2f/%.2f",
         "st.pace_mbps, st.wire_ms_avg, st.wire_ms_max",
+        "pace_src=%s rx_link_mbps=%u tx_link_mbps=%u",
+        "cb_jxs_out_pace_source(st.pace_source)",
     ] {
         assert!(status.contains(field), "status line lacks {field}");
     }

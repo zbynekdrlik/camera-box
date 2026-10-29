@@ -1,7 +1,7 @@
 //! Issue 1387: the packet thread's control of the link (the auto bpp's side on `jxs-send`; the
 //! parent module doc). Built only with the `jxs` feature.
 
-use super::{jxs_link, BppMode, JxsSocket, SenderOptions, Stats};
+use super::{jxs_link, BppMode, JxsSocket, PaceControl, SenderOptions, Stats};
 use crate::jxs_auto_bpp::{AutoBpp, AutoBppConfig, Decision, Second};
 use crate::jxs_link::SendWindow;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,10 +25,16 @@ pub(super) struct BppControl {
     last_report_at: Option<Instant>,
     /// Receiver reports read since the last status line.
     reports: u64,
+    /// The automatic pace (issue 1387): fed the receiver's link from every report.
+    pub(super) pace: PaceControl,
 }
 
 impl BppControl {
-    pub(super) fn new(opts: SenderOptions, want: Arc<AtomicU32>) -> Self {
+    pub(super) fn new(
+        opts: SenderOptions,
+        want: Arc<AtomicU32>,
+        own_iface: Option<String>,
+    ) -> Self {
         let mode = opts.bpp;
         let ctl = match mode {
             BppMode::Fixed(_) => None,
@@ -49,7 +55,13 @@ impl BppControl {
             sec_errors: 0,
             last_report_at: None,
             reports: 0,
+            pace: PaceControl::new(opts.pace_mbps, own_iface),
         }
+    }
+
+    /// The bpp of the session whose frames are being sent.
+    pub(super) fn session_bpp(&self) -> u32 {
+        self.session_bpp
     }
 
     pub(super) fn on_session(&mut self, bpp: u32) {
@@ -99,6 +111,7 @@ impl BppControl {
             let now = Instant::now();
             self.last_report_at = Some(now);
             self.reports += 1;
+            self.pace.on_report(&r);
             if let Some(c) = self.ctl.as_mut() {
                 c.note_report(r, now.duration_since(self.origin).as_secs_f64());
             }
@@ -107,6 +120,7 @@ impl BppControl {
             return;
         }
         self.last_tick = Instant::now();
+        self.pace.refresh_own_link();
         let dropped = stats.dropped_tick.swap(0, Ordering::Relaxed);
         let (_, p99, _) = crate::jxs_bench::p50_p99_max(&mut self.sec_encode_ms);
         let second = Second {
@@ -137,5 +151,6 @@ impl BppControl {
         w.auto = self.ctl.is_some();
         w.bpp_reason = self.ctl.as_ref().and_then(|c| c.last_reason());
         w.report_age_s = self.last_report_at.map(|t| t.elapsed().as_secs_f64());
+        self.pace.fill(w);
     }
 }

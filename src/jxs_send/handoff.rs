@@ -611,22 +611,21 @@ fn send(
     raise_fifo("jxs-send", opts.fifo, false);
     let mut output: Option<EncoderOutput> = None;
     let mut window = SendWindow::default();
-    let mut bpp = BppControl::new(opts, want);
+    let mut bpp = BppControl::new(opts, want, socket.local_iface());
     let mut last_status = Instant::now();
     let mut datagrams: Vec<u8> = Vec::with_capacity(70_000);
     let mut warned_format = false;
     let mut warned_encode = false;
     // the send pacing (issue 1387): this thread waits for each send's departure time, never the
-    // encoder (its packets are already coded into the frame's own bitstream) nor the caller
-    let mut pace = jxs_link::pace::PaceSchedule::new(opts.pace_mbps);
-    if pace.is_some() {
-        super::tighten_timer_slack();
-    }
+    // encoder (its packets are already coded into the frame's own bitstream) nor the caller. The
+    // rate is decided per frame from the receiver's link (`PaceControl`), a change takes effect
+    // at the next frame boundary.
+    let mut pace: Option<jxs_link::pace::PaceSchedule> = None;
+    let mut slack_tightened = false;
     loop {
         if last_status.elapsed() >= STATUS_PERIOD {
             stats.drain_into(&mut window);
             window.window_s = last_status.elapsed().as_secs_f64();
-            window.pace_mbps = opts.pace_mbps;
             bpp.fill(&mut window);
             if stats.not_yuyv.load(Ordering::Relaxed) && !warned_format {
                 tracing::warn!(
@@ -672,6 +671,14 @@ fn send(
             continue;
         };
         bpp.on_frame(timecode);
+        bpp.pace
+            .on_frames(out.width(), out.height(), bpp.session_bpp());
+        if let Some(d) = bpp.pace.changed() {
+            pace = jxs_link::pace::PaceSchedule::new(d.mbps);
+            if pace.is_some() && !std::mem::replace(&mut slack_tightened, true) {
+                super::tighten_timer_slack();
+            }
+        }
         let count = jxs_link::packets_per_frame(out.height());
         let mut slices = 0u64;
         let mut bytes = 0u64;

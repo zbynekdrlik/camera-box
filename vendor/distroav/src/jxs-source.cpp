@@ -168,12 +168,13 @@ static void jxs_log_status(jxs_source *s, const cbjxs_stats &now, const cbjxs_st
 		"jxs-source '%s': fps=%.2f frames=%" PRIu64 " lost_slices=%" PRIu64 " concealed=%" PRIu64
 		" undecodable=%" PRIu64 " reopens=%" PRIu64 " decoder_reopens=%" PRIu64 " bpp=%u.%02u"
 		" reports=%" PRIu64 " report_errors=%" PRIu64 " dropped_unread=%" PRIu64 " foreign=%" PRIu64
-		" camera=%u (issue 1387)",
+		" camera=%u link_mbps=%u (issue 1387)",
 		obs_source_get_name(s->source), window_s > 0.0 ? (double)frames / window_s : 0.0, frames,
 		now.lost_slices - prev.lost_slices, now.concealed_frames - prev.concealed_frames, undecodable,
 		reopens, now.header_changes - prev.header_changes, bpp_x100 / 100u, bpp_x100 % 100u,
 		now.reports_sent - prev.reports_sent, now.report_errors - prev.report_errors,
-		now.dropped_unread - prev.dropped_unread, now.foreign - prev.foreign, (unsigned)now.camera_id);
+		now.dropped_unread - prev.dropped_unread, now.foreign - prev.foreign, (unsigned)now.camera_id,
+		(unsigned)now.link_mbps);
 	const double fps = window_s > 0.0 ? (double)frames / window_s : 0.0;
 	cb_jxs_state().publish_window(s, (uint32_t)(fps * 100.0 + 0.5), bpp_x100, now.lost_slices - prev.lost_slices,
 				      undecodable, now.dropped_unread - prev.dropped_unread,

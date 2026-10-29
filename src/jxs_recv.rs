@@ -34,6 +34,8 @@ pub struct JxsRecvSocket {
     ctrl: Vec<u8>,
     gro: bool,
     timestamps: bool,
+    /// The interface the newest datagram arrived on (`IP_PKTINFO`), 0 = none yet / unknown.
+    last_ifindex: u32,
 }
 
 const CTRL_LEN: usize = 128;
@@ -45,13 +47,28 @@ impl JxsRecvSocket {
         set_int_opt(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, RECV_BUFFER_BYTES);
         let gro = set_int_opt(fd, libc::SOL_UDP, UDP_GRO, 1);
         let timestamps = set_int_opt(fd, libc::SOL_SOCKET, libc::SO_TIMESTAMPNS, 1);
+        // the receiving interface of every datagram: its link speed goes into the report (the
+        // sender's pace, issue 1387); refused = the report says "unknown"
+        // the reports carry the link's DSCP too (issue 1387)
         Ok(Self {
             sock,
             bufs: vec![0; RECV_BATCH * RECV_BUF_LEN],
             ctrl: vec![0; RECV_BATCH * CTRL_LEN],
             gro,
             timestamps,
+            last_ifindex: 0,
         })
+    }
+
+    /// The interface index the newest datagram arrived on (`None` before the first datagram or
+    /// when the kernel named none).
+    pub fn last_ifindex(&self) -> Option<u32> {
+        (self.last_ifindex > 0).then_some(self.last_ifindex)
+    }
+
+    /// The `IP_TOS` byte the report datagrams leave with.
+    pub fn tos(&self) -> i64 {
+        crate::jxs_send::get_int_opt(self.sock.as_raw_fd(), libc::IPPROTO_IP, libc::IP_TOS)
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -142,8 +159,11 @@ impl JxsRecvSocket {
         }
         let mut count = 0;
         for (i, m) in msgs.iter().enumerate().take(n as usize) {
-            let (gso, ts) = unsafe { parse_cmsgs(&m.msg_hdr) };
-            let arrival = ts.unwrap_or(returned);
+            let c = unsafe { parse_cmsgs(&m.msg_hdr) };
+            let (gso, arrival) = (c.gso, c.ts.unwrap_or(returned));
+            if let Some(i) = c.ifindex {
+                self.last_ifindex = i;
+            }
             let len = m.msg_len as usize;
             let buf = &self.bufs[i * RECV_BUF_LEN..i * RECV_BUF_LEN + len];
             let from = sockaddr_to_std(&names[i], m.msg_hdr.msg_namelen);
@@ -196,14 +216,24 @@ fn sockaddr_to_std(ss: &libc::sockaddr_storage, len: libc::socklen_t) -> Option<
     }
 }
 
-/// Read the GRO segment size and the SO_TIMESTAMPNS time out of a received message's control
-/// data.
+/// What a received message's control data said.
+#[derive(Debug, Default)]
+struct Cmsgs {
+    /// The GRO segment size.
+    gso: Option<usize>,
+    /// The SO_TIMESTAMPNS time (100 ns, CLOCK_REALTIME).
+    ts: Option<i64>,
+    /// The `IP_PKTINFO` receiving interface.
+    ifindex: Option<u32>,
+}
+
+/// Read the GRO segment size, the SO_TIMESTAMPNS time and the receiving interface out of a
+/// received message's control data.
 ///
 /// # Safety
 /// `h` must be a msghdr the kernel just filled (its control pointer and length valid).
-unsafe fn parse_cmsgs(h: &libc::msghdr) -> (Option<usize>, Option<i64>) {
-    let mut gso = None;
-    let mut ts = None;
+unsafe fn parse_cmsgs(h: &libc::msghdr) -> Cmsgs {
+    let mut out = Cmsgs::default();
     let mut c = libc::CMSG_FIRSTHDR(h);
     while !c.is_null() {
         let level = (*c).cmsg_level;
@@ -212,15 +242,20 @@ unsafe fn parse_cmsgs(h: &libc::msghdr) -> (Option<usize>, Option<i64>) {
         if level == libc::SOL_UDP && kind == UDP_GRO {
             let v = std::ptr::read_unaligned(data.cast::<libc::c_int>());
             if v > 0 {
-                gso = Some(v as usize);
+                out.gso = Some(v as usize);
             }
         } else if level == libc::SOL_SOCKET && kind == libc::SCM_TIMESTAMPNS {
             let t = std::ptr::read_unaligned(data.cast::<libc::timespec>());
-            ts = Some(t.tv_sec * 10_000_000 + t.tv_nsec / 100);
+            out.ts = Some(t.tv_sec * 10_000_000 + t.tv_nsec / 100);
+        } else if level == libc::IPPROTO_IP && kind == libc::IP_PKTINFO {
+            let p = std::ptr::read_unaligned(data.cast::<libc::in_pktinfo>());
+            if p.ipi_ifindex > 0 {
+                out.ifindex = Some(p.ipi_ifindex as u32);
+            }
         }
         c = libc::CMSG_NXTHDR(h, c);
     }
-    (gso, ts)
+    out
 }
 
 #[cfg(feature = "jxs")]
@@ -520,5 +555,15 @@ mod tests {
         }
         assert_eq!(got, n);
         assert_eq!(rebuilt, slice);
+        // the receiving interface is named (issue 1387: its link speed goes into the report)
+        assert_eq!(
+            rx.last_ifindex(),
+            Some(1),
+            "127.0.0.1 arrives on the loopback, ifindex 1"
+        );
+        // the reports leave with the link's DSCP (AF41)
+        assert_eq!(rx.tos(), crate::jxs_send::JXS_IP_TOS as i64);
+        // and so do the slices
+        assert_eq!(tx.tos(), crate::jxs_send::JXS_IP_TOS as i64);
     }
 }

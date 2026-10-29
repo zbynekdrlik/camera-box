@@ -185,6 +185,10 @@ pub struct JxsReceiver {
     current: Option<DecodedFrame>,
     /// The newest failed report send, handed out once by [`Self::take_last_error`].
     report_error: Option<String>,
+    /// The interface the slices arrive on (its index and name) and its speed, read once per
+    /// report (issue 1387: the report carries it, the sender paces to it).
+    link_iface: Option<(u32, String)>,
+    link_mbps: Option<u32>,
 }
 
 // The strih OBS source opens the receiver on one thread and polls it on another (jxs/recv-ffi's
@@ -231,6 +235,8 @@ impl JxsReceiver {
             timeout: None,
             current: None,
             report_error: None,
+            link_iface: None,
+            link_mbps: None,
         })
     }
 
@@ -251,6 +257,32 @@ impl JxsReceiver {
     /// steps at once (a receiver cap) without a reopen.
     pub fn set_max_bpp(&mut self, max_bpp: u8) {
         self.cfg.max_bpp = max_bpp;
+    }
+
+    /// The speed of the link the slices arrive on (Mb/s), as the last report carried it (`None` =
+    /// unknown: no datagram yet, or a device with no speed and no lower device that has one).
+    pub fn link_mbps(&self) -> Option<u32> {
+        self.link_mbps
+    }
+
+    /// The name of the interface the slices arrive on (`None` = none yet).
+    pub fn link_iface(&self) -> Option<&str> {
+        self.link_iface.as_ref().map(|(_, n)| n.as_str())
+    }
+
+    /// Re-read the receiving interface's speed (its name is looked up again only when the slices
+    /// start arriving on another interface).
+    fn refresh_link(&mut self) {
+        let Some(idx) = self.sock.last_ifindex() else {
+            return;
+        };
+        if self.link_iface.as_ref().map(|(i, _)| *i) != Some(idx) {
+            self.link_iface = jxs_link::link_speed::iface_name(idx).map(|n| (idx, n));
+        }
+        self.link_mbps = self
+            .link_iface
+            .as_ref()
+            .and_then(|(_, n)| jxs_link::link_speed::link_speed_mbps(n));
     }
 
     /// The camera id being taken (`None` until the first datagram when none was configured).
@@ -405,9 +437,11 @@ impl JxsReceiver {
             return;
         }
         self.last_report = Instant::now();
-        let r = self
+        self.refresh_link();
+        let mut r = self
             .report
             .take(self.camera.unwrap_or(0), self.cfg.max_bpp as u32);
+        let _ = &mut r;
         if let (true, Some(to), Some(_)) = (self.cfg.send_reports, self.sender, self.camera) {
             match self.sock.send_report(to, &r) {
                 Ok(()) => self.window.reports_sent += 1,

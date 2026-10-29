@@ -50,7 +50,7 @@ const FRAME_FIELDS: [&str; 15] = [
     "reserved",
 ];
 
-const STATS_FIELDS: [&str; 17] = [
+const STATS_FIELDS: [&str; 19] = [
     "frames",
     "concealed_frames",
     "lost_slices",
@@ -68,6 +68,8 @@ const STATS_FIELDS: [&str; 17] = [
     "dropped_unread",
     "camera_id",
     "reserved",
+    "link_mbps",
+    "reserved2",
 ];
 
 fn rust_frame_offset(f: &str) -> usize {
@@ -110,6 +112,8 @@ fn rust_stats_offset(f: &str) -> usize {
         "dropped_unread" => offset_of!(CbjxsStats, dropped_unread),
         "camera_id" => offset_of!(CbjxsStats, camera_id),
         "reserved" => offset_of!(CbjxsStats, reserved),
+        "link_mbps" => offset_of!(CbjxsStats, link_mbps),
+        "reserved2" => offset_of!(CbjxsStats, reserved2),
         other => panic!("unknown stats field {other}"),
     }
 }

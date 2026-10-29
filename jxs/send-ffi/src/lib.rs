@@ -27,7 +27,24 @@ use camera_box::jxs_send::{
 };
 
 /// `CBJXS_SEND_ABI_VERSION` of `include/camera_box_jxs_send.h`.
-pub const CBJXS_SEND_ABI_VERSION: u32 = 2;
+pub const CBJXS_SEND_ABI_VERSION: u32 = 3;
+
+/// `cbjxs_send_stats.pace_source` (`CBJXS_SEND_PACE_*`).
+pub const CBJXS_SEND_PACE_LINE_RATE: u32 = 0;
+pub const CBJXS_SEND_PACE_FIXED: u32 = 1;
+pub const CBJXS_SEND_PACE_RECEIVER_LINK: u32 = 2;
+pub const CBJXS_SEND_PACE_START_SPREAD: u32 = 3;
+
+/// The C code of a pace source.
+pub fn pace_source_code(s: camera_box::jxs_link::pace_auto::PaceSource) -> u32 {
+    use camera_box::jxs_link::pace_auto::PaceSource as P;
+    match s {
+        P::LineRate => CBJXS_SEND_PACE_LINE_RATE,
+        P::Fixed => CBJXS_SEND_PACE_FIXED,
+        P::ReceiverLink => CBJXS_SEND_PACE_RECEIVER_LINK,
+        P::StartSpread => CBJXS_SEND_PACE_START_SPREAD,
+    }
+}
 
 /// `cbjxs_send_picture.format` (`RawLayout::from_code`).
 pub const CBJXS_SEND_I420: u32 = 1;
@@ -46,7 +63,7 @@ pub struct CbjxsSendConfig {
     pub bpp_min: u8,
     pub bpp_max: u8,
     pub reserved: u8,
-    /// ABI 2: the send pacing in Mb/s of wire, 0 = line rate.
+    /// ABI 2: the send pacing in Mb/s of wire; ABI 3: 0 = automatic (from the receiver's link).
     pub pace_mbps: u32,
     pub reserved2: u32,
 }
@@ -89,9 +106,13 @@ pub struct CbjxsSendStats {
     /// ABI 2: the pacing the window sent at (0 = line rate) and each whole frame's time on the
     /// wire, first send -> last send returned.
     pub pace_mbps: u32,
-    pub reserved2: u32,
+    /// ABI 3: `CBJXS_SEND_PACE_*` (was `reserved2`).
+    pub pace_source: u32,
     pub wire_ms_avg: f64,
     pub wire_ms_max: f64,
+    /// ABI 3: the receiver's link from its last report and the sender's own, Mb/s (0 = unknown).
+    pub rx_link_mbps: u32,
+    pub own_link_mbps: u32,
 }
 
 fn avg(sum: f64, n: u64) -> f64 {
@@ -124,9 +145,11 @@ impl CbjxsSendStats {
             auto_bpp: w.auto as u8,
             reserved: [0; 3],
             pace_mbps: w.pace_mbps,
-            reserved2: 0,
+            pace_source: pace_source_code(w.pace_source),
             wire_ms_avg: avg(w.wire_ms_sum, w.wire_frames),
             wire_ms_max: w.wire_ms_max,
+            rx_link_mbps: w.rx_link_mbps,
+            own_link_mbps: w.own_link_mbps,
         }
     }
 }
@@ -610,7 +633,7 @@ mod tests {
         let l = unsafe { link_config(&cfg_with_pace(900)) }.unwrap();
         assert_eq!(l.opts.pace_mbps, 900);
         let l = unsafe { link_config(&cfg_with_pace(0)) }.unwrap();
-        assert_eq!(l.opts.pace_mbps, 0, "0 = line rate");
+        assert_eq!(l.opts.pace_mbps, 0, "0 = automatic");
         let e = unsafe { link_config(&cfg_with_pace(100_001)) }.unwrap_err();
         assert!(e.contains("pace 100001"), "{e}");
     }
@@ -629,6 +652,9 @@ mod tests {
             reports: 5,
             window_s: 5.0,
             pace_mbps: 900,
+            pace_source: camera_box::jxs_link::pace_auto::PaceSource::ReceiverLink,
+            rx_link_mbps: 1000,
+            own_link_mbps: 10_000,
             // 4 frames, 2 of them with a wire time: the average divides by 2, not 4
             wire_frames: 2,
             wire_ms_sum: 40.0,
@@ -639,6 +665,16 @@ mod tests {
         assert_eq!(
             (s.pace_mbps, s.wire_ms_avg, s.wire_ms_max),
             (900, 20.0, 21.5)
+        );
+        assert_eq!(
+            (s.pace_source, s.rx_link_mbps, s.own_link_mbps),
+            (CBJXS_SEND_PACE_RECEIVER_LINK, 1000, 10_000)
+        );
+        // the C codes (the DistroAV output's cb_jxs_out_pace_source reads these numbers)
+        use camera_box::jxs_link::pace_auto::PaceSource as P;
+        assert_eq!(
+            [P::LineRate, P::Fixed, P::ReceiverLink, P::StartSpread].map(pace_source_code),
+            [0, 1, 2, 3]
         );
         assert_eq!(
             (s.seq, s.frames, s.bpp, s.auto_bpp, s.reports),

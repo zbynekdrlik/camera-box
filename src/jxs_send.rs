@@ -47,6 +47,17 @@ pub const SEND_BUFFER_BYTES: i32 = 4 * 1024 * 1024;
 /// `scripts/lib/cambox-egress-pacing.sh`; a pytest pins this value equal to it.
 pub const JXS_SOCKET_MARK: u32 = 0x1387;
 
+/// The `IP_TOS` byte of every JPEG XS datagram (and of the receiver reports): DSCP AF41 (34, the
+/// byte 34 x 4 = 0x88, ECN bits 0), the interactive-video class of RFC 4594 and RFC 8837 (WebRTC
+/// video). Not EF (46): that is the voice class, and a switch serving EF from a strict-priority
+/// queue would starve every other flow under a 500 Mb/s video stream. A marking only: a switch
+/// that trusts DSCP queues the link apart from bulk traffic, one that does not ignores it
+/// (issue 1387; beside `SO_MARK` [`JXS_SOCKET_MARK`], which never leaves the host).
+pub const JXS_IP_TOS: libc::c_int = 0x88;
+/// The DSCP code point inside [`JXS_IP_TOS`] (its upper six bits).
+pub const JXS_DSCP: u8 = 34;
+const _: () = assert!(JXS_IP_TOS == JXS_DSCP as libc::c_int * 4);
+
 /// `UDP_SEGMENT` / `UDP_GRO` (linux/udp.h; spelled here so an older `libc` cannot lack them).
 pub const UDP_SEGMENT: libc::c_int = 103;
 pub const UDP_GRO: libc::c_int = 104;
@@ -372,8 +383,11 @@ mod link;
 pub use link::LinkConfig;
 
 mod socket;
-pub(crate) use socket::set_int_opt;
+pub(crate) use socket::{get_int_opt, set_int_opt};
 pub use socket::{JxsSocket, SliceSent};
+
+mod pace_control;
+pub use pace_control::PaceControl;
 
 mod pacing;
 #[cfg(feature = "jxs")]

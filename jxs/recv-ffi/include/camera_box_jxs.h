@@ -21,7 +21,7 @@ extern "C" {
 #endif
 
 /* Bumped on any change of a struct or a signature below. */
-#define CBJXS_ABI_VERSION 2u
+#define CBJXS_ABI_VERSION 3u /* 3: cbjxs_stats.link_mbps (issue 1387, the pace from the receiver's link) */
 
 /* cbjxs_frame.chroma (ABI 2, issue 1387 slice 3: the strih program reaches the stream as 4:2:0).
  * The same numbers as the sender's CBJXS_SEND_I420 / _I422 / _I444. */
@@ -73,6 +73,10 @@ typedef struct cbjxs_stats {
 	uint64_t dropped_unread; /* decoded frames the caller did not take in time */
 	uint8_t camera_id;       /* the camera being taken, 0 = none heard yet */
 	uint8_t reserved[7];
+	/* ABI 3: the speed of the link the slices arrive on (Mb/s, 0 = unknown), sent to the sender
+	 * in every report so it paces to it (issue 1387). */
+	uint32_t link_mbps;
+	uint32_t reserved2;
 } cbjxs_stats;
 
 /* CBJXS_ABI_VERSION of the linked library. */

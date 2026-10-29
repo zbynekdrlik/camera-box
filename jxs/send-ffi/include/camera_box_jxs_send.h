@@ -25,7 +25,15 @@ extern "C" {
 #endif
 
 /* Bumped on any change of a struct or a signature below. */
-#define CBJXS_SEND_ABI_VERSION 2u /* 2: cbjxs_send_config.pace_mbps, the stats' pace + wire time */
+#define CBJXS_SEND_ABI_VERSION 3u /* 2: cbjxs_send_config.pace_mbps, the stats' pace + wire time;
+                                   * 3: pace_mbps 0 = AUTOMATIC from the receiver's link, the stats'
+                                   * pace_source + both links */
+
+/* cbjxs_send_stats.pace_source: where the window's pace came from (issue 1387). */
+#define CBJXS_SEND_PACE_LINE_RATE 0u     /* the receiver's link is as fast as the sender's */
+#define CBJXS_SEND_PACE_FIXED 1u         /* cbjxs_send_config.pace_mbps above 0 */
+#define CBJXS_SEND_PACE_RECEIVER_LINK 2u /* 90 % of the receiver's slower link (its report) */
+#define CBJXS_SEND_PACE_START_SPREAD 3u  /* no receiver link known yet: the frame spread */
 
 /* cbjxs_send_picture.format: the picture's memory layout. JPEG XS codes 4:2:0, 4:2:2 and 4:4:4 as
  * they are; NV12 is 4:2:0 with U and V interleaved in plane 1 (split on the copy). */
@@ -50,9 +58,10 @@ typedef struct cbjxs_send_config {
 	uint8_t bpp_min;    /* the automatic bpp's floor, 0 = 4 */
 	uint8_t bpp_max;    /* its ceiling, 0 = 8, at most 12; min == max = that bpp, fixed (auto off) */
 	uint8_t reserved;
-	/* The send pacing in Mb/s of Ethernet wire (payload + 66 bytes per datagram): 0 = line rate,
-	 * else 100..100000; each slice is spread at this rate, at most 16 datagrams per send, for a
-	 * receiver whose link is slower than the sender's (a 10 GbE sender to a 1 GbE port). */
+	/* The send pacing in Mb/s of Ethernet wire (payload + 66 bytes per datagram). 0 = AUTOMATIC
+	 * (ABI 3): 90 % of the receiver's link (its report) when that is slower than the sender's own
+	 * link, else line rate; the frame spread until the first report names a link. 100..100000 =
+	 * that rate, fixed (an override). Paced slices go at most 16 datagrams per send. */
 	uint32_t pace_mbps;
 	uint32_t reserved2;
 } cbjxs_send_config;
@@ -91,10 +100,12 @@ typedef struct cbjxs_send_stats {
 	uint32_t bpp;        /* the bpp of the frames that went out last */
 	uint8_t auto_bpp;    /* 1 = automatic */
 	uint8_t reserved[3];
-	uint32_t pace_mbps; /* the pacing the window sent at, 0 = line rate */
-	uint32_t reserved2;
+	uint32_t pace_mbps;   /* the pacing the window ended at, 0 = line rate */
+	uint32_t pace_source; /* CBJXS_SEND_PACE_* (ABI 3; was reserved) */
 	double wire_ms_avg; /* a whole frame's first send -> its last send returned */
 	double wire_ms_max;
+	uint32_t rx_link_mbps;  /* ABI 3: the receiver's link from its last report, 0 = unknown */
+	uint32_t own_link_mbps; /* ABI 3: the sender's own link, 0 = unknown */
 } cbjxs_send_stats;
 
 typedef void (*cbjxs_send_log_fn)(int level, const char *message);
