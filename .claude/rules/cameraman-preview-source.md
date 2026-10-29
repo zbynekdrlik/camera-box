@@ -13,6 +13,15 @@ Every cambox shows the strih box's `interkom` NDI output on its HDMI monitor. Th
 fleet-wide unconditional preview from the #528 ruling: no per-box config, no env knob. The source
 is RESOLVED on every (re)connect by the pure `src/preview_source.rs`:
 
+0. **The strih behind `strih.lan` (issue 1431, joint events).** The `STRIH-<box> (interkom)`
+   output whose NDI address (the finder's `p_url_address`, `ip:port`) is the IP `strih.lan`
+   resolves to wins **on sight**, ahead of the preferred name. `strih.lan` is re-resolved on every
+   (re)connect (`resolve_strih_lan` in `src/ndi_display.rs`, first IPv4), so one router record
+   moves the preview with the intercom, the shading registration and the clock. Only a strih
+   interkom output counts (never the PGM or a camera at that IP); two at the same IP = the first by
+   name. A `strih.lan` that does not resolve, or an IP no strih interkom output is published from,
+   leaves rules 1-4 unchanged. Journal: `NDI display: strih.lan resolves to <ip> ...` once per
+   change, then `preview source resolved to '<name>', the strih behind strih.lan (<ip>) (#1431)`.
 1. The **preferred** name (`DEFAULT_PREVIEW_SOURCE` = `STRIH-SNV (interkom)`, or an explicit
    `--display` / `[display]` source) wins **the moment it is announced**, matched by exact name.
 2. Otherwise the **ONE** discovered `STRIH-<box> (interkom)` output is used. The match is exact
@@ -40,7 +49,8 @@ waits the 30 s window (`the_old_named_strih_is_still_picked_after_the_window_141
 ## Wiring (where the pieces live)
 
 - `NdiReceiver::connect_with(timeout, label, pick)` (`src/ndi.rs`) runs the ONE finder loop. On
-  every ~1 s pass it hands the discovered names to `pick(names, window_elapsed)` and connects to
+  every ~1 s pass it hands the discovered sources (`DiscoveredSource`: name + `p_url_address`,
+  issue 1431) to `pick(sources, window_elapsed)` and connects to
   the EXACT name returned. A final pass with `window_elapsed == true` is guaranteed before it
   gives up. `NdiReceiver::connect(name)` is a thin wrapper that keeps the old SUBSTRING semantics
   for the probe callers (`probe::reader`, `probe::multi_reader`, `ndi-recv-probe`). Never build a

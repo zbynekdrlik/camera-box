@@ -1882,7 +1882,8 @@ else
 fi
 # The unit + env + gphoto2 go in even when the binary could not be fetched (the recorded problem
 # still refuses Setup Complete); the lib warns loudly about the missing binary.
-if bkshading_relay_provision_install "$RELAY_ENABLE_STATE" "$RELAY_BIN_SRC"; then
+# issue 1431: the relay registers with the strih behind strih.lan as this box's camN.
+if bkshading_relay_provision_install "$RELAY_ENABLE_STATE" "$RELAY_BIN_SRC" "$(bkshading_relay_id_for_device "$DEVICE_NAME" || true)"; then
     echo "  issue 808: bkshading relay provisioned -- unit ${RELAY_ENABLE_STATE} (rig mode ${RIG_MODE_ARG}), never started here; verify-device.sh (ao) grades it after the reboot"
 else
     RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }the relay install (gphoto2/unit/env/enable-state) failed -- see the lines above"

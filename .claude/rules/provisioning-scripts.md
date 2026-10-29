@@ -193,7 +193,10 @@ cpus) sits after `(ak)`, before `(at)` (`test_cambox_zram_1428.py` takes `(at)..
 (`tests/python/test_display_gpu_1446.py` executes the `(av)..(au)` block). `(aw)` (issue 1446, the
 fleet kernel line) sits after `(ak)`, before `(av)` (`tests/python/test_kernel_line_1446.py`
 executes `(aw)` up to the next `\n# (` marker, and `(ak)`'s own pytest slice still ends at the next
-marker, now `(aw)`); the next free letter is `(ax)`.
+marker, now `(aw)`). `(ax)` (issue 1431, which strih the cambox follows: `strih.lan` resolved on the
+box must be a strih-role fact file's STRIH_IP, `scripts/lib/strih-follow.sh`) sits after `(ak)`, before
+`(aw)` (`tests/python/test_strih_follow_1431.py` executes `(ax)` up to the next `\n# (` marker, so no
+comment line inside a check block may START with a check marker); the next free letter is `(ay)`.
 
 ## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
 

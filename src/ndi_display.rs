@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crate::display::{any_connector_connected, FramebufferDisplay};
 use crate::ndi::NdiReceiver;
 use crate::preview_source::{
-    pick_preview_source, preview_log_level, preview_log_line, resolve_preview_source,
-    PreviewLogLevel, PreviewResolution,
+    pick_preview_source, preview_log_level, preview_log_line, resolve_followed_preview_source,
+    strih_lan_log_line, PreviewLogLevel, PreviewResolution, STRIH_DNS_NAME,
 };
 
 /// DRM sysfs class dir whose connector `status` files report monitor presence (#135).
@@ -116,6 +116,21 @@ pub fn should_pull_ndi(connector_present: bool) -> bool {
     connector_present
 }
 
+/// Resolve `strih.lan` with the system resolver (issue 1431): its first IPv4 address, else its
+/// first address, else `None` (the preview then keeps the issue-1362 name rules).
+fn resolve_strih_lan() -> Option<std::net::IpAddr> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<std::net::IpAddr> = (STRIH_DNS_NAME, 0)
+        .to_socket_addrs()
+        .map(|it| it.map(|a| a.ip()).collect())
+        .unwrap_or_default();
+    addrs
+        .iter()
+        .copied()
+        .find(std::net::IpAddr::is_ipv4)
+        .or_else(|| addrs.first().copied())
+}
+
 /// Run the NDI display loop with automatic reconnection
 /// This should be called from a low-priority thread
 pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> Result<()> {
@@ -167,6 +182,8 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
     // #1362: the last preview-source resolution LOGGED — persists across reconnects so the
     // "resolved to" / ambiguity line is logged once per change, not once per retry.
     let mut last_resolution: Option<PreviewResolution> = None;
+    // issue 1431: the last strih.lan resolution LOGGED (same once-per-change rule).
+    let mut last_strih_lan: Option<Option<std::net::IpAddr>> = None;
 
     // Outer reconnection loop - keeps trying to connect/reconnect
     while running.load(Ordering::Relaxed) {
@@ -190,16 +207,26 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
         // whole find window), never a pick between two strih boxes. A strih swap/rename is
         // therefore picked up on the next reconnect without a new binary.
         let preferred = config.source_name.as_str();
+        // issue 1431: re-resolve strih.lan on EVERY connect, so a changed router record moves the
+        // preview with the intercom, the shading and the clock at the next reconnect.
+        let strih_ip = resolve_strih_lan();
+        if let Some(line) = strih_lan_log_line(last_strih_lan.as_ref(), strih_ip) {
+            tracing::info!("{}", line);
+            last_strih_lan = Some(strih_ip);
+        }
         tracing::info!(
             "NDI display: connecting to preview source (preferred '{}')...",
             preferred
         );
-        let search_label = format!("{preferred} or the one STRIH-<box> (interkom) output");
+        let search_label = format!(
+            "the strih interkom output behind {STRIH_DNS_NAME}, {preferred} or the one \
+             STRIH-<box> (interkom) output"
+        );
         let mut receiver = match NdiReceiver::connect_with(
             config.find_timeout_secs,
             &search_label,
-            |names, window_elapsed| {
-                let resolution = resolve_preview_source(names, preferred);
+            |sources, window_elapsed| {
+                let resolution = resolve_followed_preview_source(sources, preferred, strih_ip);
                 let pick = pick_preview_source(&resolution, window_elapsed);
                 // Log only a FINAL decision (a pick, or the end of the find window), and only
                 // when it differs from the last one logged — never once per 1 s finder pass.

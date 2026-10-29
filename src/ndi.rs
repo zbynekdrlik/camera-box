@@ -1207,23 +1207,24 @@ impl NdiReceiver {
     /// Find and connect to an NDI source by name (the first discovered name CONTAINING
     /// `source_name`). Blocks until the source is found (with timeout).
     pub fn connect(source_name: &str, timeout_secs: u32) -> Result<Self> {
-        Self::connect_with(timeout_secs, source_name, |names, _window_elapsed| {
-            names
+        Self::connect_with(timeout_secs, source_name, |sources, _window_elapsed| {
+            sources
                 .iter()
+                .map(|s| &s.name)
                 .find(|name| name.contains(source_name))
                 .cloned()
         })
     }
 
     /// Run the NDI finder for up to `timeout_secs`, and on every ~1 s pass hand the currently
-    /// discovered source names to `pick(names, window_elapsed)`; connect to the EXACT name it
-    /// returns. `window_elapsed` is `true` on the final pass (the whole find window has run),
+    /// discovered sources (name + the finder's `p_url_address`, issue 1431) to
+    /// `pick(sources, window_elapsed)`; connect to the EXACT name it returns. `window_elapsed` is `true` on the final pass (the whole find window has run),
     /// which is guaranteed to happen once before giving up — so a caller can defer a fallback
     /// choice until discovery had its full window (#1362 cameraman preview resolution).
     /// `label` names what is being searched for in the log/error lines.
     pub fn connect_with<F>(timeout_secs: u32, label: &str, mut pick: F) -> Result<Self>
     where
-        F: FnMut(&[String], bool) -> Option<String>,
+        F: FnMut(&[crate::preview_source::DiscoveredSource], bool) -> Option<String>,
     {
         let lib = Arc::new(NdiLib::load()?);
 
@@ -1271,8 +1272,21 @@ impl NdiReceiver {
                 }
             }
 
-            let names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
-            if let Some(target) = pick(&names, window_elapsed) {
+            // issue 1431: the address the finder reports for each source (`ip:port`), so the
+            // preview can follow the strih behind strih.lan. Read before the next
+            // get_current_sources call, like the name.
+            let listed: Vec<crate::preview_source::DiscoveredSource> = discovered
+                .iter()
+                .map(|(name, source)| crate::preview_source::DiscoveredSource {
+                    name: name.clone(),
+                    address: (!source.p_url_address.is_null()).then(|| {
+                        unsafe { CStr::from_ptr(source.p_url_address) }
+                            .to_string_lossy()
+                            .to_string()
+                    }),
+                })
+                .collect();
+            if let Some(target) = pick(&listed, window_elapsed) {
                 // Connect to the EXACT picked name (never a substring of it).
                 found = discovered.into_iter().find(|(name, _)| *name == target);
                 if let Some((name, _)) = &found {

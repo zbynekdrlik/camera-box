@@ -675,6 +675,32 @@ strih_lx_https_public() { strih_box_fact STRIH_HTTPS_PUBLIC; }
 # STRIH_STREAM_DEV_SCENE, issue 1462).
 strih_lx_stream_dev_scene() { strih_box_fact STRIH_STREAM_DEV_SCENE; }
 
+# strih_box_fleet_cameras -> the cameras of every strih venue (issue 1431): the union of STRIH_CAMERAS over
+# the fact files whose STRIH_ROLE is `strih` (parsed, never sourced), ascending, space-separated. rc 1 + one
+# stderr line naming a fact file that does not parse (never a partial list). Runs in a subshell.
+strih_box_fleet_cameras() {
+  (
+    set +f
+    shopt -u nullglob failglob nocaseglob nocasematch 2>/dev/null || true
+    dir="$(strih_box_dir)" all=""
+    for f in "$dir"/*.env; do
+      [ -f "$f" ] || continue
+      parsed="$(strih_box_parse_file "$f" 2>/dev/null)" \
+        || { echo "strih-box: ${f##*/} does not parse -- the venue camera list is unreadable (issue 1431)" >&2; exit 1; }
+      role="" cams=""
+      while IFS= read -r line; do
+        case "$line" in
+          STRIH_ROLE=*) role="${line#*=}" ;;
+          STRIH_CAMERAS=*) cams="${line#*=}" ;;
+        esac
+      done <<<"$parsed"
+      [ "$role" = strih ] && [ "$cams" != none ] || continue
+      all="${all} ${cams}"
+    done
+    printf '%s\n' $all | sort -n -u | tr '\n' ' ' | sed 's/ $//'
+  )
+}
+
 # strih_lx_bkshading_relays -> the shading panel's per-cambox relay overrides (fact STRIH_BKSHADING_RELAYS:
 # none | `N=<transport>@<host>:<port>` ...; issue 808, the seed strih_bkshading_config_text).
 strih_lx_bkshading_relays() { strih_box_fact STRIH_BKSHADING_RELAYS; }
