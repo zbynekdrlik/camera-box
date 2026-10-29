@@ -283,7 +283,7 @@ mod tests {
     use super::*;
 
     fn dup(v: u8) -> u16 {
-        (u16::from(v) << 8) | u16::from(v)
+        u16::from(v) << 8
     }
 
     /// A YUYV frame whose bytes walk every value 0..=255 (offset per frame so rows differ).
@@ -313,16 +313,17 @@ mod tests {
     }
 
     #[test]
-    fn sample_expansion_maps_full_scale_to_full_scale_1387() {
+    fn sample_expansion_scales_the_8_bit_code_by_256_1387() {
         // A 2x1 frame: Y0=0, U=128, Y1=255, V=16.
         let mut out = Vec::new();
         convert_yuyv_to_p216(&[0, 128, 255, 16], 2, 1, 4, &mut out, ConvertPath::Scalar).unwrap();
-        assert_eq!(out, vec![0x0000, 0xFFFF, 0x8080, 0x1010]);
+        assert_eq!(out, vec![0x0000, 0xFF00, 0x8000, 0x1000]);
     }
 
     #[test]
-    fn every_byte_value_expands_to_v_times_257_1387() {
-        // 256 byte values as one row of 128 pixels: each value lands in its plane as v*257.
+    fn every_byte_value_expands_to_v_shifted_by_8_1387() {
+        // 256 byte values as one row of 128 pixels: each value lands in its plane as v << 8, the
+        // bit-depth scaling of a limited-range code (235 -> 60160, 940 in 10 bits).
         let row: Vec<u8> = (0..=255u8).collect();
         for path in [ConvertPath::Scalar, ConvertPath::Avx2] {
             let mut out = Vec::new();
@@ -333,7 +334,7 @@ mod tests {
                 } else {
                     out[128 + j / 2]
                 };
-                assert_eq!(sample, u16::from(v) * 257, "{path:?} byte {j}");
+                assert_eq!(sample, u16::from(v) << 8, "{path:?} byte {j}");
             }
         }
     }
