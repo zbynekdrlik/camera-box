@@ -15,6 +15,13 @@ in the strih OBS picture and its black rose from 0 to 8, so it was rolled back a
 `GetSourceScreenshot` of the input (a legal white renders at ~253 with today's passthrough), never
 the raw luma percentiles alone.
 
+## Issue 1387 (29.10.2026) — the standard NDI SDK has NO quality lever; P216 changes nothing
+
+Sending P216 (16-bit 4:2:2) instead of UYVY from cam5 left the SpeedHQ bitrate at 277 Mb/s to
+the Mb/s and the strih picture detail within 0.1 %, for +6 % cambox CPU; the switch was removed
+(dev 748b632c5d). Higher camera quality goes through the owner-decided own JPEG XS link beside
+NDI (issue 1387 comments 6487982922 / 6488036928), never another NDI format experiment.
+
 ## #745 (2026-07-14, CURRENT policy) — zero-touch RETIRED: range-aware neutral enforced at every open, for EVERY model
 
 **camera-box now enforces the certified COLOUR set (`color_production_controls()` — `RangeScaled
