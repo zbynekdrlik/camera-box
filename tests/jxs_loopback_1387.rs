@@ -372,6 +372,51 @@ fn a_clock_step_back_mid_frame_ends_that_frame_and_the_stream_goes_on() {
     );
 }
 
+/// Issue 1387 (live 29.10.2026, cam5 -> strih-snv): the auto bpp tried 4 -> 5 and the receiver
+/// logged `undecodable` + "the frame ended before its last packet", so the sender stepped straight
+/// back. A bpp change keeps the geometry and the packet count; only the codestream size moves.
+/// Every frame across 4 -> 5 -> 8 -> 6 -> 4 must decode, with no loss counted.
+#[test]
+fn a_bpp_change_mid_stream_decodes_every_frame_with_no_loss() {
+    let (seen, errors, last_error) = within(60, || {
+        let mut frames: Vec<Vec<Vec<u8>>> = Vec::new();
+        let mut phase = 0u8;
+        for bpp in [4u32, 5, 8, 6, 4] {
+            let mut s = EncoderSettings::issue_1387(320, 1080);
+            s.bpp_numerator = bpp;
+            let mut enc = Encoder::open(s).unwrap();
+            for _ in 0..3 {
+                frames.push(encode(&mut enc, &tall(phase)));
+                phase = phase.wrapping_add(17);
+            }
+        }
+        let mut seen: Vec<(u64, u32, bool)> = Vec::new();
+        let (errors, last_error) = {
+            let mut a = FrameAssembler::new();
+            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+                seen.push((r.timecode, r.lost_slices, p.is_some()));
+            });
+            let t0 = 100_000_000u64;
+            for (k, f) in frames.iter().enumerate() {
+                push_frame(&mut a, &mut sink, t0 + k as u64 * 333_333, f, None);
+            }
+            // one more frame finalizes the last one of the run
+            push_frame(&mut a, &mut sink, t0 + 15 * 333_333, &frames[0], None);
+            (sink.errors, sink.last_error.clone())
+        };
+        (seen, errors, last_error)
+    });
+    assert!(seen.len() >= 15, "every frame is reported: {seen:?}");
+    for (k, (tc, lost, decoded)) in seen.iter().take(15).enumerate() {
+        assert_eq!(*lost, 0, "frame {k} (tc {tc}) counts no loss");
+        assert!(
+            *decoded,
+            "frame {k} decodes: {seen:?}, last error {last_error:?}"
+        );
+    }
+    assert_eq!(errors, 0, "undecodable == 0, last error {last_error:?}");
+}
+
 /// Push only the first `n` packets of a frame.
 fn push_frame_prefix(
     a: &mut FrameAssembler,
