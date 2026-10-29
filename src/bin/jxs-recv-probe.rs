@@ -29,10 +29,8 @@
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
-    use camera_box::jxs_link::{
-        self, FrameAssembler, PacketHeader, PushOutcome, RecvWindow, ReportWindow,
-    };
-    use camera_box::jxs_recv::{realtime_100ns, DecodeSink, JxsRecvSocket};
+    use camera_box::jxs_link;
+    use camera_box::jxs_recv::{JxsReceiver, ReceiverConfig};
     use clap::Parser;
     use std::time::{Duration, Instant};
 
@@ -74,8 +72,16 @@ fn main() -> anyhow::Result<()> {
         "--max-bpp {} does not fit the report's byte",
         args.max_bpp
     );
-    let mut sock = JxsRecvSocket::bind(args.listen)?;
-    sock.set_timeout(Some(Duration::from_millis(200)))?;
+    // Issue 1387 slice 2: the receive loop is the library's `JxsReceiver`, the same code the
+    // strih OBS source runs through jxs/recv-ffi.
+    let mut cfg = ReceiverConfig::new(args.listen);
+    cfg.camera = args.camera;
+    cfg.max_bpp = args.max_bpp as u8;
+    cfg.late_ms = args.late_ms;
+    cfg.send_reports = !args.no_report;
+    cfg.window = Duration::from_secs_f64(args.window_s.max(0.001));
+    let mut rx = JxsReceiver::bind(cfg)?;
+    let sock = rx.socket();
     let (gro, ts) = sock.features();
     println!(
         "jxs recv: listening on {} (GRO {}, kernel timestamps {}, receive buffer {} bytes) (issue 1387)",
@@ -88,32 +94,24 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(&args.dump_dir)?;
     }
 
-    let mut window = RecvWindow::default();
-    let mut assembler = FrameAssembler::new();
     let mut decoded_total: u64 = 0;
     let mut dumped: u32 = 0;
     let mut rgb: Vec<u8> = Vec::new();
-    let dump_dir = args.dump_dir.clone();
-    let (dump_png, dump_skip) = (args.dump_png, args.dump_skip);
-    // Filled by the decoder sink, drained by the loop (both on this thread).
-    let frame_events: std::cell::RefCell<Vec<(jxs_link::FrameReport, i64, bool)>> =
-        std::cell::RefCell::new(Vec::with_capacity(16));
-    let mut sink = DecodeSink::new(|report, planes| {
-        let decoded_at = realtime_100ns();
-        frame_events
-            .borrow_mut()
-            .push((*report, decoded_at, planes.is_some()));
-        if let Some(p) = planes {
+    let mut announced = args.camera;
+    let mut header_changes_seen = 0u64;
+    let started = Instant::now();
+    loop {
+        if let Some(f) = rx.poll(Duration::from_millis(200))? {
             decoded_total += 1;
-            if dumped < dump_png && decoded_total > dump_skip {
+            if dumped < args.dump_png && decoded_total > args.dump_skip {
+                let p = &f.planes;
                 let (w, h) = (p.width() as usize, p.height() as usize);
                 rgb.resize(w * h * 3, 0);
                 jxs_link::planar422_to_rgb(p.y(), p.u(), p.v(), w, h, &mut rgb);
                 let png = jxs_link::png::encode_rgb8(&rgb, p.width(), p.height());
-                let path = dump_dir.join(format!(
-                    "jxs-cam{}-{}.png",
-                    report.camera_id, report.timecode
-                ));
+                let path = args
+                    .dump_dir
+                    .join(format!("jxs-cam{}-{}.png", f.camera_id, f.timecode_100ns));
                 match std::fs::write(&path, png) {
                     Ok(()) => println!("jxs recv: wrote {}", path.display()),
                     Err(e) => eprintln!("jxs recv: {}: {e}", path.display()),
@@ -121,99 +119,26 @@ fn main() -> anyhow::Result<()> {
                 dumped += 1;
             }
         }
-    });
-
-    // One assembler serves one sender: every camera stamps the same genlock grid.
-    let mut camera = args.camera;
-    let started = Instant::now();
-    let mut window_start = Instant::now();
-    // the automatic bpp's back channel: one report per period to the taken camera's sender
-    let mut report = ReportWindow::default();
-    let mut last_report = Instant::now();
-    let mut sender: Option<std::net::SocketAddr> = None;
-    let mut header_changes_seen = 0u64;
-    let period = Duration::from_millis(jxs_link::REPORT_PERIOD_MS);
-    loop {
-        sock.recv_batch_from(|d, arrival, from| {
-            window.datagrams += 1;
-            let Ok(h) = PacketHeader::decode(d) else {
-                window.malformed += 1;
-                return;
-            };
-            match camera {
-                None => {
-                    camera = Some(h.camera_id);
-                    println!("jxs recv: taking camera id {} (issue 1387)", h.camera_id);
-                }
-                Some(c) if c != h.camera_id => {
-                    window.foreign += 1;
-                    return;
-                }
-                Some(_) => {}
-            }
-            if from.is_some() {
-                sender = from;
-            }
-            window.bytes += (d.len() - jxs_link::HEADER_LEN) as u64;
-            match assembler.push(&h, &d[jxs_link::HEADER_LEN..], arrival, &mut sink) {
-                PushOutcome::Accepted => {}
-                PushOutcome::Duplicate => window.duplicate += 1,
-                PushOutcome::Stale => window.stale += 1,
-                PushOutcome::Malformed => window.malformed += 1,
-                PushOutcome::Resync => window.resyncs += 1,
-            }
-        })?;
-        for (r, decoded_at, ok) in frame_events.borrow_mut().drain(..) {
-            let ms = |t: i64| t as f64 / 10_000.0;
-            let tc = r.timecode as i64;
-            if ok {
-                let latency_ms = ms(decoded_at - tc);
-                window.note_frame(
-                    latency_ms,
-                    ms(r.first_arrival - tc),
-                    ms(r.last_arrival - r.first_arrival),
-                    r.lost_slices,
-                );
-                let decode_us = ((decoded_at - r.last_arrival).max(0) / 10) as u32;
-                report.note_frame(
-                    r.lost_slices,
-                    r.timecode,
-                    latency_ms > args.late_ms,
-                    Some(decode_us),
-                );
-            } else {
-                window.undecodable_frames += 1;
-                window.lost_slices += r.lost_slices as u64;
-                // a frame the decoder gave up on reached the screen as nothing: a loss
-                report.note_frame(r.lost_slices.max(1), r.timecode, false, None);
+        if announced.is_none() {
+            if let Some(c) = rx.camera() {
+                announced = Some(c);
+                println!("jxs recv: taking camera id {c} (issue 1387)");
             }
         }
-        if last_report.elapsed() >= period {
-            last_report = Instant::now();
-            let r = report.take(camera.unwrap_or(0), args.max_bpp);
-            if let (false, Some(to), Some(_)) = (args.no_report, sender, camera) {
-                match sock.send_report(to, &r) {
-                    Ok(()) => window.reports_sent += 1,
-                    Err(e) => eprintln!("jxs recv: report to {to}: {e} (issue 1387)"),
-                }
-            }
-        }
-        let el = window_start.elapsed().as_secs_f64();
-        if el >= args.window_s {
-            println!("{}", window.status_line(el));
-            if let Some(e) = sink.last_error.take() {
+        if let Some(line) = rx.take_window_line() {
+            println!("{line}");
+            if let Some(e) = rx.take_last_error() {
                 println!("jxs recv: last decoder error: {e} (issue 1387)");
             }
-            if sink.header_changes > header_changes_seen {
+            let changes = rx.totals().header_changes;
+            if changes > header_changes_seen {
                 println!(
                     "jxs recv: decoder reopened at {} new picture header(s) (a sender bpp change), {} in total (issue 1387)",
-                    sink.header_changes - header_changes_seen,
-                    sink.header_changes
+                    changes - header_changes_seen,
+                    changes
                 );
-                header_changes_seen = sink.header_changes;
+                header_changes_seen = changes;
             }
-            window.reset();
-            window_start = Instant::now();
         }
         if args.seconds > 0 && started.elapsed().as_secs() >= args.seconds {
             return Ok(());
