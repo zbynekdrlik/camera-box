@@ -501,6 +501,20 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
 - **The live `encode_ms` includes the send.** A paced or full socket shows up there as "encode
   time"; measure the codec alone with `jxs-encode-bench` before calling a bpp a CPU limit.
 
+## Testing gotchas (slice 2)
+
+- **A test build never uplifts the static library.** `cargo test -p jxs-recv-ffi` leaves it at
+  `target/<profile>/deps/libjxs_recv_ffi-<hash>.a`, not `target/<profile>/libjxs_recv_ffi.a`;
+  `tests/abi.rs` takes the newest `deps/libjxs_recv_ffi-*.a` next to its own binary.
+  `cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs` (the
+  strih job's command) does write `target/release/libjxs_recv_ffi.a` and prints the native libs.
+- **The DistroAV source gates read the source files at RUN time.** Editing `jxs-source.cpp` or
+  `jxs-source-decide.h` while a full `cargo test` is still running fails those tests for the wrong
+  reason. Re-run the full suite after the edits.
+- The g++ `-fsyntax-only` of `jxs-source.cpp` needs only a two-define stub `obsconfig.h` plus the
+  vendored libobs, `vendor/distroav/src` and `jxs/recv-ffi/include` (it uses `plugin-support.h`'s
+  `obs_log`, never the generated `.c`), so it runs in `cargo test` on every push.
+
 ## Testing gotchas (slice 1b)
 
 - **A debug test races a RELEASE-built codec.** `build.rs` always builds SVT-JPEG-XS Release, while
