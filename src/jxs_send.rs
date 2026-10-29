@@ -499,9 +499,9 @@ mod handoff {
             self.stats.dropped_busy.load(Ordering::Relaxed)
         }
 
-        /// A hand-off with no sender threads (tests): offers fill the pictures, nobody drains.
-        #[cfg(test)]
-        pub(super) fn detached() -> (Self, Receiver<Ready>) {
+        /// A hand-off with its pool of pictures and no threads yet: offers fill the pictures
+        /// into the returned ready queue, nobody drains it until [`Self::start_threads`].
+        pub(super) fn unstarted() -> (Self, Receiver<Ready>) {
             let (free_tx, free_rx) = mpsc::sync_channel(FRAMES_IN_FLIGHT);
             for _ in 0..FRAMES_IN_FLIGHT {
                 free_tx.try_send(Picture::new(0, 0)).expect("room");
@@ -517,6 +517,46 @@ mod handoff {
                 },
                 ready_rx,
             )
+        }
+
+        /// Start `jxs-feed` on `ready_rx` and `jxs-send`; `false` (logged) when a thread could
+        /// not be spawned.
+        pub(super) fn start_threads(
+            &mut self,
+            ready_rx: Receiver<Ready>,
+            socket: JxsSocket,
+            camera_id: u8,
+            cores: Vec<usize>,
+            bpp: u32,
+        ) -> bool {
+            // a session change + every frame in flight, with room to spare
+            let (job_tx, job_rx) = mpsc::sync_channel::<Job>(FRAMES_IN_FLIGHT * 4);
+            let (feed_stats, feed_free, feed_cores) =
+                (Arc::clone(&self.stats), self.free_tx.clone(), cores.clone());
+            let feeder = std::thread::Builder::new()
+                .name("jxs-feed".into())
+                .spawn(move || feed(ready_rx, job_tx, feed_free, feed_stats, feed_cores, bpp));
+            match feeder {
+                Ok(h) => self.workers.push(h),
+                Err(e) => {
+                    tracing::error!("jxs send: thread spawn failed: {e} (issue 1387)");
+                    return false;
+                }
+            }
+            let (send_stats, send_free) = (Arc::clone(&self.stats), self.free_tx.clone());
+            let sender = std::thread::Builder::new()
+                .name("jxs-send".into())
+                .spawn(move || send(job_rx, socket, camera_id, send_free, send_stats, cores, bpp));
+            match sender {
+                Ok(h) => {
+                    self.workers.push(h);
+                    true
+                }
+                Err(e) => {
+                    tracing::error!("jxs send: thread spawn failed: {e} (issue 1387)");
+                    false
+                }
+            }
         }
     }
 
@@ -537,57 +577,10 @@ mod handoff {
         cores: Vec<usize>,
         bpp: u32,
     ) -> Option<JxsHandoff> {
-        let stats = Arc::new(Stats::default());
-        let (free_tx, free_rx) = mpsc::sync_channel(FRAMES_IN_FLIGHT);
-        for _ in 0..FRAMES_IN_FLIGHT {
-            free_tx.try_send(Picture::new(0, 0)).expect("room");
-        }
-        let (ready_tx, ready_rx) = mpsc::sync_channel::<Ready>(FRAMES_IN_FLIGHT);
-        // a session change + every frame in flight, with room to spare
-        let (job_tx, job_rx) = mpsc::sync_channel::<Job>(FRAMES_IN_FLIGHT * 4);
-        let mut workers = Vec::new();
-        {
-            let (feed_stats, feed_free, feed_cores) =
-                (Arc::clone(&stats), free_tx.clone(), cores.clone());
-            match std::thread::Builder::new()
-                .name("jxs-feed".into())
-                .spawn(move || feed(ready_rx, job_tx, feed_free, feed_stats, feed_cores, bpp))
-            {
-                Ok(h) => workers.push(h),
-                Err(e) => {
-                    tracing::error!("jxs send: thread spawn failed: {e} (issue 1387)");
-                    return None;
-                }
-            }
-        }
-        {
-            let (send_stats, send_free) = (Arc::clone(&stats), free_tx.clone());
-            match std::thread::Builder::new()
-                .name("jxs-send".into())
-                .spawn(move || send(job_rx, socket, camera_id, send_free, send_stats, cores, bpp))
-            {
-                Ok(h) => workers.push(h),
-                Err(e) => {
-                    tracing::error!("jxs send: thread spawn failed: {e} (issue 1387)");
-                    // the feeder ends once the hand-off below is dropped
-                    drop(JxsHandoff {
-                        free_rx,
-                        free_tx,
-                        ready_tx: Some(ready_tx),
-                        stats,
-                        workers,
-                    });
-                    return None;
-                }
-            }
-        }
-        Some(JxsHandoff {
-            free_rx,
-            free_tx,
-            ready_tx: Some(ready_tx),
-            stats,
-            workers,
-        })
+        let (mut h, ready_rx) = JxsHandoff::unstarted();
+        // a failed start drops `h`: the closed ready queue ends a feeder already started
+        h.start_threads(ready_rx, socket, camera_id, cores, bpp)
+            .then_some(h)
     }
 
     fn pin(label: &str, cores: &[usize]) {
@@ -730,7 +723,9 @@ mod handoff {
                 } => (timecode_100ns, handed_off, submitted),
             };
             stats.in_flight.fetch_sub(1, Ordering::Relaxed);
-            let Some(out) = output.as_ref() else { continue };
+            let Some(out) = output.as_ref() else {
+                continue;
+            };
             let count = jxs_link::packets_per_frame(out.height());
             let mut slices = 0u64;
             let mut bytes = 0u64;
@@ -916,7 +911,7 @@ mod tests {
     #[cfg(feature = "jxs")]
     #[test]
     fn only_the_frames_on_the_strih_30_fps_grid_are_taken() {
-        let (h, ready) = JxsHandoff::detached();
+        let (h, ready) = JxsHandoff::unstarted();
         let frame = vec![1u8; 64 * 8 * 2];
         for k in [1, 3] {
             h.offer(&jf(&frame, 64, 8, tc(k), true));
@@ -935,7 +930,7 @@ mod tests {
     #[cfg(feature = "jxs")]
     #[test]
     fn two_frames_are_taken_and_the_third_is_dropped_without_waiting() {
-        let (h, ready) = JxsHandoff::detached();
+        let (h, ready) = JxsHandoff::unstarted();
         let (w, ht) = (64u32, 8u32);
         let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i % 251) as u8).collect();
         let t = std::time::Instant::now();
@@ -967,7 +962,7 @@ mod tests {
     #[cfg(feature = "jxs")]
     #[test]
     fn a_returned_picture_is_reused_without_reallocating() {
-        let (h, ready) = JxsHandoff::detached();
+        let (h, ready) = JxsHandoff::unstarted();
         let frame = vec![1u8; 64 * 8 * 2];
         h.offer(&jf(&frame, 64, 8, tc(0), true));
         let first = ready.try_recv().unwrap();
@@ -996,18 +991,36 @@ mod tests {
         let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
         rx.set_read_timeout(Some(std::time::Duration::from_millis(20)))
             .unwrap();
+        // room for both frames' bursts on loopback (the kernel caps it at net.core.rmem_max)
+        set_int_opt(rx.as_raw_fd(), libc::SOL_SOCKET, libc::SO_RCVBUF, 4 << 20);
         let port = rx.local_addr().unwrap().port();
-        let h = JxsSender::start(Some(&format!("127.0.0.1:{port}")), "CAM5").expect("link on");
-        let (w, ht) = (1920u32, 1080u32);
+        // both frames are converted and queued BEFORE the threads start, so the feeder hands
+        // the second over microseconds after the first, whatever a debug build's conversion costs
+        let (mut h, ready_rx) = JxsHandoff::unstarted();
+        let (w, ht) = (1920u32, 544u32);
         let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i % 249) as u8).collect();
         h.offer(&jf(&frame, w, ht, tc(0), true));
         h.offer(&jf(&frame, w, ht, tc(2), true));
         assert_eq!(h.dropped_busy(), 0);
+        let socket = JxsSocket::connect(&format!("127.0.0.1:{port}")).unwrap();
+        assert!(h.start_threads(ready_rx, socket, 5, vec![0, 1], DEFAULT_BPP));
+        // wait for both frames' last slice on the wire
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut b = [0u8; 2048];
+        let mut done = std::collections::BTreeSet::new();
+        while done.len() < 2 && std::time::Instant::now() < deadline {
+            if let Ok(n) = rx.recv(&mut b) {
+                let p = jxs_link::PacketHeader::decode(&b[..n]).unwrap();
+                if p.slice_index + 1 == p.slice_count {
+                    done.insert(p.timecode_100ns);
+                }
+            }
+        }
+        assert_eq!(done.len(), 2, "both frames sent");
+        // the packet thread counts a frame out right after its last send
         while h.stats.in_flight.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < deadline
         {
-            let _ = rx.recv(&mut b);
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert_eq!(
             h.stats.in_flight.load(Ordering::Relaxed),
@@ -1024,7 +1037,7 @@ mod tests {
     #[cfg(feature = "jxs")]
     #[test]
     fn a_frame_that_is_not_yuyv_or_does_not_fit_never_holds_a_picture() {
-        let (h, ready) = JxsHandoff::detached();
+        let (h, ready) = JxsHandoff::unstarted();
         let frame = vec![1u8; 64 * 8 * 2];
         h.offer(&jf(&frame, 64, 8, tc(0), false));
         h.offer(&jf(&frame[..100], 64, 8, tc(2), true));
