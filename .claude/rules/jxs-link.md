@@ -818,6 +818,21 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
   vendored libobs, `vendor/distroav/src` and `jxs/recv-ffi/include` (it uses `plugin-support.h`'s
   `obs_log`, never the generated `.c`), so it runs in `cargo test` on every push.
 
+## Testing gotchas (the indicator)
+
+- **A squished anchor that spans a wrapped C comment breaks on the comment's ` * ` continuation.**
+  `squish()` keeps the `*` that starts a `/* ... */` continuation line, so a needle copied across
+  the line break never matches. Anchor on the code around a comment (`*/ jxsWidget = new ...`), or
+  on code only.
+- **A test that bans a word in a header also reads its comments.** `!hpp.contains("Q_OBJECT")`
+  failed on the header's own "No Q_OBJECT" explanation; write such comments without the banned word.
+- **`obs_data_create_from_json` never returns NULL for bad JSON**: it returns an empty object and
+  logs LOG_ERROR (obs-data.c). A reader that must tell "no table" from "broken table" checks a key
+  it always writes (`v` here).
+- **A header-only accessor with a function-local static must be `inline`, not `static inline`**,
+  or every translation unit gets its own instance. Prove it by linking two TUs that each return
+  the address (`tests/genlock_jxs_indicator_1387.rs`).
+
 ## Testing gotchas (slice 1b)
 
 - **A debug test races a RELEASE-built codec.** `build.rs` always builds SVT-JPEG-XS Release, while
