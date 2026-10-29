@@ -97,8 +97,18 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     (latency profile: `pack_stage_threads_num = MAX(1, threads_num - 2)`): slice 1 packed all 68
     slices of a frame serially, the 16.9 ms live encode. `with_slice_threads(n)` sets n + 2.
   - The status line every 5 s: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
-    dropped_busy= in_flight=max/cap convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max=
-    send_errors= encode_errors= report_age_s= (issue 1387)`. `bpp` = the bpp of the session whose
+    dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
+    first_slice_ms_avg/max= encode_ms_avg/max= send_errors= encode_errors= report_age_s=
+    (issue 1387)`. `handoff_age_ms` (coordinator request 29.10, the cam5 sawtooth: the receiver's
+    first arrival after the timecode wandered 21-39 ms, ~+3.5 ms per 5 s then a reset, while the
+    capture phase tracker was locked at +18 ppm) = the wall clock (`CLOCK_REALTIME`, the
+    dantesync-disciplined clock the genlock timecode is stamped on, read with
+    `jxs_recv::realtime_100ns`) minus the frame's timecode at the moment the capture thread
+    hands a grid frame to `JxsHandoff::offer` (a busy-dropped one too), avg/min/max per window,
+    `-/-/-` with none. Pure stat `jxs_link::HandoffAge` + `handoff_age_100ns`; the capture thread
+    only `try_lock`s it (a sample is skipped, never waited for; no allocation). It splits the
+    wander: if it sawtooths here, it sits on the cambox before the hand-off (V4L2 queue
+    residence, the emit gate); if it stays flat, it is after (encode, send, network, receiver). `bpp` = the bpp of the session whose
     frames went out last; `bpp_reason` the last change's reason (`-` = none yet);
     `report_age_s` seconds since the last receiver report (`-` = never one: the auto bpp holds).
     `in_flight` counts a frame from its submit to its last packet; `first_slice_ms` = the converted

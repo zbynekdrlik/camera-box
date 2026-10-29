@@ -325,6 +325,9 @@ struct Stats {
     progress_ms: AtomicU64,
     /// Frames dropped busy since the automatic bpp's last one-second tick (issue 1387).
     dropped_tick: AtomicU64,
+    /// Timecode -> hand-off ages of this status window. The capture thread only `try_lock`s it
+    /// (a sample is skipped rather than ever waiting); the status line holds it for a copy.
+    handoff_age: std::sync::Mutex<jxs_link::HandoffAge>,
 }
 
 #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
@@ -333,6 +336,14 @@ impl Stats {
     fn note_dropped(&self) {
         self.dropped_busy.fetch_add(1, Ordering::Relaxed);
         self.dropped_tick.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The frame stamped `timecode_100ns` is handed over at wall clock `now_100ns` (the capture
+    /// thread; never blocks, never allocates).
+    fn note_handoff(&self, timecode_100ns: i64, now_100ns: i64) {
+        if let Ok(mut a) = self.handoff_age.try_lock() {
+            a.note(jxs_link::handoff_age_100ns(timecode_100ns, now_100ns));
+        }
     }
 
     fn note_convert(&self, ns: u64) {
@@ -351,6 +362,9 @@ impl Stats {
         let now = self.in_flight.load(Ordering::Relaxed);
         w.in_flight_max = self.in_flight_max.swap(now, Ordering::Relaxed) as u64;
         w.in_flight_cap = FRAMES_IN_FLIGHT as u64;
+        if let Ok(mut a) = self.handoff_age.lock() {
+            w.handoff_age = std::mem::take(&mut *a);
+        }
     }
 }
 

@@ -3,6 +3,45 @@
 
 use super::*;
 
+/// The status line's `handoff_age_ms` is the frame timecode's age on the wall clock when the
+/// capture thread hands the frame over, for every grid frame (a busy-dropped one too), and the
+/// window starts over after each status line.
+#[cfg(feature = "jxs")]
+#[test]
+fn the_handoff_age_is_measured_on_the_wall_clock_at_the_hand_off() {
+    let (h, _ready) = JxsHandoff::unstarted();
+    let frame = vec![1u8; 64 * 8 * 2];
+    let now = crate::jxs_recv::realtime_100ns();
+    // on the 30 fps grid (emit 30), 20 ms and 40 ms old
+    for age_ms in [20i64, 40, 30] {
+        h.offer(&JxsFrame {
+            data: &frame,
+            width: 64,
+            height: 8,
+            stride: 128,
+            yuyv: true,
+            timecode_100ns: now - age_ms * 10_000,
+            emit_fps: 30,
+        });
+    }
+    assert_eq!(h.dropped_busy(), 1, "the third frame found no free picture");
+    let mut w = jxs_link::SendWindow::default();
+    h.stats.drain_into(&mut w);
+    let (avg, lo, hi) = w.handoff_age.avg_min_max_ms().expect("three samples");
+    assert_eq!(
+        w.handoff_age.count, 3,
+        "the busy-dropped frame is measured too"
+    );
+    // the offers ran within a few ms of `now`
+    assert!((20.0..25.0).contains(&lo), "{lo}");
+    assert!((40.0..45.0).contains(&hi), "{hi}");
+    assert!((30.0..35.0).contains(&avg), "{avg}");
+    assert!(w.status_line().contains(" handoff_age_ms_avg/min/max="));
+    let mut again = jxs_link::SendWindow::default();
+    h.stats.drain_into(&mut again);
+    assert_eq!(again.handoff_age.count, 0, "a fresh window");
+}
+
 /// The receiver answers to the address the slices came from, from its listening socket; the
 /// sender's connected socket takes it, ignores other cameras and garbage, and never blocks.
 #[test]

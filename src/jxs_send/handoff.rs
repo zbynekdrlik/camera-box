@@ -66,6 +66,10 @@ impl JxsHandoff {
         if !jxs_link::on_jxs_grid(timecode_100ns, emit_fps) {
             return;
         }
+        // the stamp's age at the hand-off, read on the clock the timecode is stamped on (every
+        // grid frame, a busy-dropped one too: the diagnostic is about the time BEFORE this point)
+        self.stats
+            .note_handoff(timecode_100ns, crate::jxs_recv::realtime_100ns());
         if !yuyv {
             self.stats.not_yuyv.store(true, Ordering::Relaxed);
             return;
