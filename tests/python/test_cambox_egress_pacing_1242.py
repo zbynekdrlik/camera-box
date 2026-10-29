@@ -61,6 +61,35 @@ MQ_DEFAULT = (
 )
 ROUTE_ENP2 = "default via 10.77.8.1 dev enp2s0 proto static \n"
 
+# Issue 1387: the JPEG XS flow is exempt from the per-flow cap. The tree the lib's apply command
+# builds, rendered by the REAL kernel (7.0, the camboxes' series) in a throwaway netns on dev1:
+#   sudo -n unshare -n bash -c 'ip link add d0 type dummy; ip link set d0 up; ip route add default dev d0;
+#     <the cambox_egress_pacing_apply_cmd text>; tc qdisc show dev d0; tc filter show dev d0'
+# (29.10.2026; re-capture it the same way when the declaration changes). The old root fq above is
+# the pre-issue-1387 tree: NDI paced, but the JPEG XS flow capped with it.
+TREE_QDISC = (
+    "qdisc prio 1: root refcnt 2 bands 2 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"
+    "qdisc fq 10: parent 1:1 limit 20000p flow_limit 2000p buckets 1024 orphan_mask 1023 "
+    "quantum 3028b initial_quantum 15140b maxrate 400Mbit low_rate_threshold 550Kbit "
+    "refill_delay 40ms timer_slack 10us horizon 10s horizon_drop \n"
+    "qdisc pfifo 20: parent 1:2 limit 4000p"
+)
+TREE_FILTER = (
+    "filter parent 1: protocol all pref 1 fw chain 0 \n"
+    "filter parent 1: protocol all pref 1 fw chain 0 handle 0x1387 classid 1:2 "
+)
+TREE_APPLY_ARGV = [
+    "qdisc replace dev enp2s0 root handle 1: prio bands 2 priomap 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+    "qdisc replace dev enp2s0 parent 1:1 handle 10: fq maxrate 400mbit flow_limit 2000 limit 20000",
+    "qdisc replace dev enp2s0 parent 1:2 handle 20: pfifo limit 4000",
+    "filter replace dev enp2s0 parent 1: protocol all prio 1 handle 0x1387 fw classid 1:2",
+]
+
+
+def _flat(text):
+    """The gather's `|`-flattened form of a tc output."""
+    return text.replace("\n", "|") + "|"
+
 
 def _read(path):
     return pathlib.Path(path).read_text()
@@ -96,6 +125,9 @@ def _fakes(tmp_path):
         '#!/usr/bin/env bash\n'
         'echo "$*" >>"$FAKE_DIR/tc.argv"\n'
         'if [ "$1 $2" = "qdisc show" ]; then printf "%s\\n" "${FAKE_TC_SHOW:-}"; exit 0; fi\n'
+        'if [ "$1 $2" = "filter show" ]; then printf "%s\\n" "${FAKE_TC_FILTER:-}"; exit 0; fi\n'
+        # FAKE_TC_FAIL_ON: the tc call whose argv contains this text fails (one step of the tree).
+        'case "$*" in *"${FAKE_TC_FAIL_ON:-@none@}"*) exit 2 ;; esac\n'
         'exit "${FAKE_TC_RC:-0}"\n')
     (bindir / "systemctl").write_text(
         '#!/usr/bin/env bash\n'
@@ -133,6 +165,22 @@ def test_the_lib_is_the_one_declaration_of_rate_and_limits():
              '$CAMBOX_EGRESS_PACING_LIMIT"')
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["400mbit", "2000", "20000"]
+
+
+def test_the_lib_declares_the_jpeg_xs_class_1387():
+    # Issue 1387: the JPEG XS flow leaves the paced fq through a socket mark + fw filter. The mark
+    # is this lib's one declaration; src/jxs_send.rs JXS_SOCKET_MARK is pinned equal to it.
+    r = _lib('echo "$CAMBOX_EGRESS_PACING_JXS_MARK $CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT"')
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["0x1387", "4000"]
+
+
+def test_the_rust_sender_marks_its_socket_with_the_declared_mark_1387():
+    lib = _lib('echo "$CAMBOX_EGRESS_PACING_JXS_MARK"').stdout.strip()
+    src = (REPO / "src" / "jxs_send.rs").read_text()
+    m = re.search(r"pub const JXS_SOCKET_MARK: u32 = (0x[0-9A-Fa-f_]+);", src)
+    assert m, "src/jxs_send.rs declares JXS_SOCKET_MARK"
+    assert int(m.group(1).replace("_", ""), 16) == int(lib, 16)
 
 
 def test_nothing_else_in_scripts_or_systemd_spells_the_pacing_rate():
@@ -176,10 +224,21 @@ def _apply(tmp_path, env):
 def test_apply_paces_the_default_route_interface(tmp_path):
     r = _apply(tmp_path, {"FAKE_IP_ROUTE": ROUTE_ENP2})
     assert "RC=0" in r.stdout, r.stdout + r.stderr
-    assert _argv(tmp_path, "tc") == [
-        "qdisc replace dev enp2s0 root fq maxrate 400mbit flow_limit 2000 limit 20000"]
+    assert _argv(tmp_path, "tc") == TREE_APPLY_ARGV
     assert "enp2s0" in r.stdout and "applied" in r.stdout
     assert _argv(tmp_path, "ip") == ["route show default"]
+
+
+def test_apply_stops_at_the_first_failed_step_and_fails_loud_1387(tmp_path):
+    # A half-built tree is never reported applied: the boot script's retry runs the whole chain again.
+    for i, step in enumerate(TREE_APPLY_ARGV):
+        sub = tmp_path / f"s{i}"
+        sub.mkdir()
+        fail_on = step.split(" dev enp2s0 ", 1)[1]
+        r = _apply(sub, {"FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_FAIL_ON": fail_on})
+        assert "RC=1" in r.stdout, (step, r.stdout + r.stderr)
+        assert _argv(sub, "tc") == TREE_APPLY_ARGV[:i + 1], step
+        assert "FAILED" in r.stderr and "applied" not in r.stdout, step
 
 
 def test_apply_takes_the_first_default_route_the_lowest_metric_one(tmp_path):
@@ -187,14 +246,13 @@ def test_apply_takes_the_first_default_route_the_lowest_metric_one(tmp_path):
               "default via 169.254.0.1 dev enx0011223344 proto static metric 200 \n")
     r = _apply(tmp_path, {"FAKE_IP_ROUTE": routes})
     assert "RC=0" in r.stdout, r.stdout + r.stderr
-    assert _argv(tmp_path, "tc") == [
-        "qdisc replace dev enp3s0 root fq maxrate 400mbit flow_limit 2000 limit 20000"]
+    assert _argv(tmp_path, "tc") == [a.replace("enp2s0", "enp3s0") for a in TREE_APPLY_ARGV]
 
 
 def test_apply_follows_a_renamed_interface(tmp_path):
     r = _apply(tmp_path, {"FAKE_IP_ROUTE": "default via 10.77.8.1 dev enx5c857e3a01 \n"})
     assert "RC=0" in r.stdout, r.stdout + r.stderr
-    assert _argv(tmp_path, "tc")[0].startswith("qdisc replace dev enx5c857e3a01 root fq ")
+    assert _argv(tmp_path, "tc")[0].startswith("qdisc replace dev enx5c857e3a01 root handle 1: prio ")
 
 
 def test_apply_without_a_default_route_fails_loud_and_touches_nothing(tmp_path):
@@ -211,40 +269,49 @@ def test_apply_reports_a_failed_tc(tmp_path):
 
 
 # =================================================================================================
-# The verdict: `tc qdisc show dev <if>` -> OK / DRIFT / UNKNOWN
+# The verdict: `tc qdisc show dev <if>` + `tc filter show dev <if>` -> OK / DRIFT / UNKNOWN
 # =================================================================================================
 
-def _verdict(text, pre=""):
-    r = _lib(f'{pre}\ncambox_egress_pacing_verdict "$T"; echo "RC=$?"', env={"T": text})
+def _verdict(text, pre="", filt=TREE_FILTER):
+    r = _lib(f'{pre}\ncambox_egress_pacing_verdict "$T" "$F"; echo "RC=$?"', env={"T": text, "F": filt})
     assert r.returncode == 0 and "RC=0" in r.stdout, r.stdout + r.stderr
     return r.stdout.splitlines()[0]
 
 
-def test_verdict_ok_on_the_real_cam7_paced_root():
-    v = _verdict(CAM7_PACED)
+def test_verdict_ok_on_the_real_kernel_tree_1387():
+    v = _verdict(TREE_QDISC)
     assert v.startswith("OK "), v
-    assert "400Mbit" in v
+    assert "400Mbit" in v and "0x1387" in v, v
 
 
 def test_verdict_ok_on_the_pipe_flattened_gather_form():
-    assert _verdict(CAM7_PACED + "|").startswith("OK "), "the gather flattens newlines to |"
+    assert _verdict(_flat(TREE_QDISC), filt=_flat(TREE_FILTER)).startswith("OK "), \
+        "the gather flattens newlines to |"
+
+
+def test_verdict_drift_on_the_pre_1387_root_fq_names_the_missing_jpeg_xs_class():
+    # The real cam7 root of 30.9.2026: NDI paced, but no JPEG XS class -- the flow is capped too.
+    for filt in (TREE_FILTER, ""):
+        v = _verdict(CAM7_PACED, filt=filt)
+        assert v.startswith("DRIFT ") and "JPEG XS" in v, v
 
 
 def test_verdict_drift_on_the_real_unpaced_default():
     v = _verdict(CAM7_UNPACED)
     assert v.startswith("DRIFT "), v
-    assert "pfifo_fast" in v
+    assert "pfifo_fast" in v and "UNPACED" in v
 
 
 def test_verdict_drift_on_fq_without_maxrate():
-    v = _verdict(FQ_NO_MAXRATE)
-    assert v.startswith("DRIFT ") and "maxrate" in v, v
+    v = _verdict(TREE_QDISC.replace(" maxrate 400Mbit", ""))
+    assert v.startswith("DRIFT ") and "maxrate" in v and "UNPACED" in v, v
 
 
 def test_verdict_drift_on_a_wrong_rate_or_limits():
-    for text, word in ((CAM7_PACED.replace("400Mbit", "300Mbit"), "maxrate"),
-                       (CAM7_PACED.replace("flow_limit 2000p", "flow_limit 100p"), "flow_limit"),
-                       (CAM7_PACED.replace("limit 20000p", "limit 10000p"), "limit 10000")):
+    for text, word in ((TREE_QDISC.replace("400Mbit", "300Mbit"), "maxrate"),
+                       (TREE_QDISC.replace("flow_limit 2000p", "flow_limit 100p"), "flow_limit"),
+                       (TREE_QDISC.replace("limit 20000p", "limit 10000p"), "limit 10000"),
+                       (TREE_QDISC.replace("limit 4000p", "limit 100p"), "limit 100")):
         v = _verdict(text)
         assert v.startswith("DRIFT ") and word in v, (text, v)
 
@@ -252,6 +319,55 @@ def test_verdict_drift_on_a_wrong_rate_or_limits():
 def test_verdict_drift_on_a_multiqueue_default_root():
     v = _verdict(MQ_DEFAULT)
     assert v.startswith("DRIFT ") and "mq" in v, v
+
+
+def test_verdict_drift_when_the_paced_band_is_not_the_fq_1387():
+    lines = TREE_QDISC.splitlines()
+    no_fq = "\n".join([lines[0], lines[2]])
+    v = _verdict(no_fq)
+    assert v.startswith("DRIFT ") and "UNPACED" in v, v
+    # A default pfifo the kernel puts under a class without a child qdisc.
+    v = _verdict(no_fq + "\nqdisc pfifo 8002: parent 1:1 limit 1000p")
+    assert v.startswith("DRIFT ") and "UNPACED" in v, v
+    # The two children swapped: the paced band is a pfifo, the fq sits under the JPEG XS class.
+    swapped = (lines[0] + "\n" + lines[1].replace("parent 1:1", "parent 1:2") + "\n"
+               + lines[2].replace("parent 1:2", "parent 1:1"))
+    v = _verdict(swapped)
+    assert v.startswith("DRIFT ") and "UNPACED" in v, v
+
+
+def test_verdict_drift_when_a_priority_maps_to_the_unpaced_band_1387():
+    # Any skb priority mapped to band 1 sends that traffic past the fq: NDI could go unpaced.
+    v = _verdict(TREE_QDISC.replace("priomap 0 0 0 0 0 0 0 0", "priomap 1 2 2 2 1 2 0 0"))
+    assert v.startswith("DRIFT ") and "priomap" in v and "UNPACED" in v, v
+    v = _verdict(TREE_QDISC.replace("bands 2 ", "bands 3 "))
+    assert v.startswith("DRIFT ") and "bands" in v, v
+    v = _verdict(TREE_QDISC.replace("qdisc prio 1: root", "qdisc prio 2: root"))
+    assert v.startswith("DRIFT ") and "handle" in v, v
+
+
+def test_verdict_drift_when_the_jpeg_xs_class_or_its_filter_is_missing_1387():
+    lines = TREE_QDISC.splitlines()
+    v = _verdict("\n".join(lines[:2]))
+    assert v.startswith("DRIFT ") and "JPEG XS" in v and "1:2" in v, v
+    v = _verdict("\n".join(lines[:2] + ["qdisc fq_codel 20: parent 1:2 limit 10240p"]))
+    assert v.startswith("DRIFT ") and "JPEG XS" in v, v
+    for filt in ("", "filter parent 1: protocol all pref 1 fw chain 0 ",
+                 TREE_FILTER.replace("0x1387", "0x1388"),
+                 TREE_FILTER.replace("classid 1:2", "classid 1:1"),
+                 TREE_FILTER.replace(" fw ", " u32 ")):
+        v = _verdict(TREE_QDISC, filt=filt)
+        assert v.startswith("DRIFT ") and "JPEG XS" in v and "filter" in v, (filt, v)
+
+
+def test_verdict_compares_the_mark_as_a_number_1387():
+    assert _verdict(TREE_QDISC, filt=TREE_FILTER.replace("0x1387", "0x00001387")).startswith("OK ")
+    assert _verdict(TREE_QDISC, filt=TREE_FILTER.replace("0x1387", "4999")).startswith("OK ")
+
+
+def test_verdict_names_both_faults_at_once_1387():
+    v = _verdict(TREE_QDISC.replace("400Mbit", "300Mbit"), filt="")
+    assert v.startswith("DRIFT ") and "maxrate" in v and "JPEG XS" in v, v
 
 
 def test_verdict_unknown_when_unreadable():
@@ -262,7 +378,7 @@ def test_verdict_unknown_when_unreadable():
 
 def test_verdict_compares_the_rate_in_bits_per_second():
     # tc renders the rate with its own unit: a 1gbit declaration reads back as 1Gbit.
-    v = _verdict(CAM7_PACED.replace("400Mbit", "1Gbit"), pre="CAMBOX_EGRESS_PACING_RATE=1gbit")
+    v = _verdict(TREE_QDISC.replace("400Mbit", "1Gbit"), pre="CAMBOX_EGRESS_PACING_RATE=1gbit")
     assert v.startswith("OK "), v
     r = _lib('for x in 400mbit 400Mbit 1Gbit 550Kbit 50mbps nonsense; do '
              'printf "%s=%s\\n" "$x" "$(cambox_egress_pacing_rate_bps "$x")"; done')
@@ -271,6 +387,7 @@ def test_verdict_compares_the_rate_in_bits_per_second():
 
 
 # =================================================================================================
+
 # The gather snippet + the provisioning verdict (verify-device (ap), the E2E row)
 # =================================================================================================
 
@@ -280,19 +397,23 @@ def _gather(tmp_path, env):
 
 
 def test_gather_reads_the_default_route_qdisc_and_the_unit_state(tmp_path):
-    r = _gather(tmp_path, {"FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": CAM7_PACED,
+    r = _gather(tmp_path, {"FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": TREE_QDISC,
+                           "FAKE_TC_FILTER": TREE_FILTER,
                            "FAKE_ENABLED": "enabled", "FAKE_ACTIVE": "inactive"})
     assert r.returncode == 0, r.stderr
     lines = r.stdout.splitlines()
     assert "PACING_IFACE=enp2s0" in lines
-    assert f"PACING_QDISC={CAM7_PACED}|" in lines
+    assert f"PACING_QDISC={_flat(TREE_QDISC)}" in lines
+    assert f"PACING_FILTER={_flat(TREE_FILTER)}" in lines
     assert "PACING_SVC_ENABLED=enabled" in lines and "PACING_SVC_ACTIVE=inactive" in lines
-    assert _argv(tmp_path, "tc") == ["qdisc show dev enp2s0"], "read-only: never a replace"
+    assert _argv(tmp_path, "tc") == ["qdisc show dev enp2s0", "filter show dev enp2s0"], \
+        "read-only: never a replace"
 
 
 def test_gather_names_a_missing_default_route(tmp_path):
     r = _gather(tmp_path, {"FAKE_IP_ROUTE": ""})
     assert "PACING_QDISC=__NO_DEFAULT_ROUTE__" in r.stdout.splitlines(), r.stdout
+    assert "PACING_FILTER=" in r.stdout.splitlines(), r.stdout
     assert _argv(tmp_path, "tc") == []
 
 
@@ -307,7 +428,8 @@ def test_gather_reads_the_installed_script_and_unit(tmp_path):
     unit.write_text("[Service]\nType=oneshot\n")
     pre = (f'CAMBOX_EGRESS_PACING_SCRIPT_PATH="{script}"\n'
            f'CAMBOX_EGRESS_PACING_SERVICE_PATH="{unit}"\n')
-    env = {**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": CAM7_PACED, "FAKE_RESTARTS": "3"}
+    env = {**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": TREE_QDISC,
+           "FAKE_TC_FILTER": TREE_FILTER, "FAKE_RESTARTS": "3"}
     lines = _lib(pre + 'bash -c "$(cambox_egress_pacing_gather_remote_snippet)"', env=env).stdout.splitlines()
     assert "PACING_SCRIPT_EXEC=yes" in lines, lines
     assert f"PACING_SCRIPT_SHA={_functional_sha(script.read_text())}" in lines, lines
@@ -343,12 +465,13 @@ def _expected():
     return _EXPECTED
 
 
-def _block(qdisc=CAM7_PACED + "|", enabled="enabled", active="active", iface="enp3s0",
-           script_exec="yes", script_sha=None, unit_sha=None, restarts="0"):
+def _block(qdisc=_flat(TREE_QDISC), enabled="enabled", active="active", iface="enp3s0",
+           script_exec="yes", script_sha=None, unit_sha=None, restarts="0",
+           filt=_flat(TREE_FILTER)):
     e = _expected()
     script_sha = e["script"] if script_sha is None else script_sha
     unit_sha = e["unit"] if unit_sha is None else unit_sha
-    return (f"PACING_IFACE={iface}\nPACING_QDISC={qdisc}\n"
+    return (f"PACING_IFACE={iface}\nPACING_QDISC={qdisc}\nPACING_FILTER={filt}\n"
             f"PACING_SVC_ENABLED={enabled}\nPACING_SVC_ACTIVE={active}\n"
             f"PACING_SVC_RESTARTS={restarts}\n"
             f"PACING_SCRIPT_EXEC={script_exec}\nPACING_SCRIPT_SHA={script_sha}\n"
@@ -371,7 +494,8 @@ def test_a_comment_only_edit_keeps_every_box_current(tmp_path):
     boot = _lib("cambox_egress_pacing_boot_script").stdout
     pre = (f'CAMBOX_EGRESS_PACING_SCRIPT_PATH="{script}"\n'
            f'CAMBOX_EGRESS_PACING_SERVICE_PATH="{unit}"\n')
-    env = {**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": CAM7_PACED}
+    env = {**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": TREE_QDISC,
+           "FAKE_TC_FILTER": TREE_FILTER}
 
     def grade(unit_text, script_text):
         unit.write_text(unit_text)
@@ -384,6 +508,7 @@ def test_a_comment_only_edit_keeps_every_box_current(tmp_path):
     assert grade("# a new comment\n\n" + _read(UNIT), boot.replace("\nset -euo", "\n# note\n\nset -euo")) == "ok"
     assert "differs" in grade(_read(UNIT).replace("RestartSec=30", "RestartSec=31"), boot)
     assert "stale" in grade(_read(UNIT), boot.replace("maxrate 400mbit", "maxrate 300mbit"))
+    assert "stale" in grade(_read(UNIT), boot.replace("handle 0x1387", "handle 0x1388"))
 
 
 def _prov(block):
@@ -445,6 +570,20 @@ def test_provision_verdict_gives_the_fix_that_matches_the_state():
     assert "iproute2" in _prov(_block(qdisc="__TC_ABSENT__"))
 
 
+def test_provision_verdict_on_a_box_still_on_the_pre_1387_tree_1387():
+    # Every box provisioned before issue 1387: its boot script is stale and its live root is the old
+    # fq (the unit ran it: `active`). Both are named; the fix is a re-provision, then a RESTART (a
+    # `start` of an active RemainAfterExit unit does nothing).
+    v = _prov(_block(qdisc=_flat(CAM7_PACED), filt="", script_sha="0" * 64, active="active"))
+    assert "stale" in v and "setup-device" in v, v
+    assert "JPEG XS" in v and "systemctl restart cambox-egress-pacing" in v, v
+    assert "systemctl start" not in v, v
+    # Re-provisioned (install current), the unit still `active` from the old boot: restart it.
+    v = _prov(_block(qdisc=_flat(CAM7_PACED), filt="", active="active"))
+    assert "JPEG XS" in v and "systemctl restart cambox-egress-pacing" in v, v
+    assert "setup-device" not in v, v
+
+
 def test_provision_verdict_reads_a_retrying_unit_right():
     # Review round 2: with Restart=on-failure forever a unit whose tc keeps failing (a kernel without
     # sch_fq) sits in `activating`, never `failed`. A DRIFT read already proves a default route
@@ -498,7 +637,7 @@ def test_boot_script_applies_once_and_exits_zero(tmp_path):
     fk = _fakes(tmp_path)
     r = _run(f'"{p}"', env={**fk, "FAKE_IP_ROUTE": ROUTE_ENP2})
     assert r.returncode == 0, r.stderr
-    assert len(_argv(tmp_path, "tc")) == 1
+    assert _argv(tmp_path, "tc") == TREE_APPLY_ARGV
 
 
 def test_boot_script_waits_for_a_late_default_route(tmp_path):
@@ -508,8 +647,7 @@ def test_boot_script_waits_for_a_late_default_route(tmp_path):
                             "CAMBOX_EGRESS_PACING_RETRY_SLEEP_S": "0"})
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "ip.calls").read_text().strip() == "4"
-    assert _argv(tmp_path, "tc") == [
-        "qdisc replace dev enp2s0 root fq maxrate 400mbit flow_limit 2000 limit 20000"]
+    assert _argv(tmp_path, "tc") == TREE_APPLY_ARGV
 
 
 def test_boot_script_gives_up_loud_after_the_bounded_retry(tmp_path):
@@ -658,6 +796,13 @@ def test_verify_device_ap_runs(tmp_path):
     assert r.stdout.startswith("FAIL ") and "not enabled" in r.stdout, r.stdout
     r = _run_ap(tmp_path, "", ssh_rc=255)
     assert r.stdout.startswith("FAIL ") and "rc=255" in r.stdout, r.stdout
+
+
+def test_verify_device_ap_fails_a_box_without_the_jpeg_xs_class_1387(tmp_path):
+    r = _run_ap(tmp_path, _block(qdisc=_flat(CAM7_PACED), filt=""))
+    assert r.stdout.startswith("FAIL ") and "JPEG XS" in r.stdout, r.stdout
+    r = _run_ap(tmp_path, _block())
+    assert r.stdout.startswith("OK ") and "0x1387" in r.stdout and "400Mbit" in r.stdout, r.stdout
 
 
 def test_verify_device_ap_names_the_fix_for_a_box_that_only_needs_a_start(tmp_path):
