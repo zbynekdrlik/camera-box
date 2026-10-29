@@ -13,7 +13,7 @@
 //! - `first_arrival_ms`: the timecode to the frame's first datagram on this host's wire (kernel
 //!   receive timestamp), `spread_ms`: the frame's first to last datagram.
 //!
-//! Usage: `jxs-recv-probe [--listen 0.0.0.0:7000] [--seconds 0] [--window-s 5]
+//! Usage: `jxs-recv-probe [--listen 0.0.0.0:7000] [--camera N] [--seconds 0] [--window-s 5]
 //!         [--dump-png N --dump-dir DIR [--dump-skip S]]`
 //!
 //! `--dump-png` writes N decoded frames (after skipping S) as `<dir>/jxs-<camera>-<timecode>.png`
@@ -36,6 +36,9 @@ fn main() -> anyhow::Result<()> {
         seconds: u64,
         #[arg(long, default_value_t = 5.0)]
         window_s: f64,
+        /// Take only this camera id (the sender's CAM<N>); default = the first one heard.
+        #[arg(long)]
+        camera: Option<u8>,
         /// Write this many decoded frames as PNG.
         #[arg(long, default_value_t = 0)]
         dump_png: u32,
@@ -79,10 +82,10 @@ fn main() -> anyhow::Result<()> {
         if let Some(p) = planes {
             decoded_total += 1;
             if dumped < dump_png && decoded_total > dump_skip {
-                let (w, h) = (p.width as usize, p.height as usize);
+                let (w, h) = (p.width() as usize, p.height() as usize);
                 rgb.resize(w * h * 3, 0);
-                jxs_link::planar422_to_rgb(&p.y, &p.u, &p.v, w, h, &mut rgb);
-                let png = jxs_link::png::encode_rgb8(&rgb, p.width, p.height);
+                jxs_link::planar422_to_rgb(p.y(), p.u(), p.v(), w, h, &mut rgb);
+                let png = jxs_link::png::encode_rgb8(&rgb, p.width(), p.height());
                 let path = dump_dir.join(format!(
                     "jxs-cam{}-{}.png",
                     report.camera_id, report.timecode
@@ -96,6 +99,8 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    // One assembler serves one sender: every camera stamps the same genlock grid.
+    let mut camera = args.camera;
     let started = Instant::now();
     let mut window_start = Instant::now();
     loop {
@@ -105,6 +110,17 @@ fn main() -> anyhow::Result<()> {
                 window.malformed += 1;
                 return;
             };
+            match camera {
+                None => {
+                    camera = Some(h.camera_id);
+                    println!("jxs recv: taking camera id {} (issue 1387)", h.camera_id);
+                }
+                Some(c) if c != h.camera_id => {
+                    window.foreign += 1;
+                    return;
+                }
+                Some(_) => {}
+            }
             window.bytes += (d.len() - jxs_link::HEADER_LEN) as u64;
             match assembler.push(&h, &d[jxs_link::HEADER_LEN..], arrival, &mut sink) {
                 PushOutcome::Accepted => {}

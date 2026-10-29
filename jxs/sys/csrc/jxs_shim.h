@@ -55,12 +55,14 @@ void cbjxs_enc_close(cbjxs_enc* e);
 int32_t cbjxs_dec_open(const uint8_t* codestream, size_t len, cbjxs_dec** out, uint32_t* width,
                        uint32_t* height, uint32_t* format, uint32_t* bit_depth);
 
-/* Feed one packet (header or slice) of the frame whose planes are given. */
+/* Feed one packet (header or slice) of the frame whose planes are given. Returns
+ * SvtJxsErrorDecoderBitstreamTooShort while the frame still needs packets. */
 int32_t cbjxs_dec_send_packet(cbjxs_dec* d, const uint8_t* packet, uint32_t len, uint8_t* y, uint8_t* u, uint8_t* v,
                               uint32_t stride_y, uint32_t stride_c, uint32_t size_y, uint32_t size_c);
 
-/* Block until the frame fed so far is decoded. */
-int32_t cbjxs_dec_get_frame(cbjxs_dec* d);
+/* Take a decoded frame. blocking = 0 returns SvtJxsErrorNoErrorEmptyQueue when none is ready.
+ * A frame the library gave up on (a corrupt slice) comes out with an error code. */
+int32_t cbjxs_dec_get_frame(cbjxs_dec* d, uint8_t blocking);
 
 void cbjxs_dec_close(cbjxs_dec* d);
 

@@ -10,15 +10,19 @@
 //!
 //! So a lost slice costs at most about one frame of delay for that frame, never a stall.
 //! Datagrams of a frame may arrive in any order (UDP over one LAN hop does not reorder in
-//! practice, the assembler still does not rely on it).
+//! practice, the assembler still does not rely on it). One assembler serves ONE sender: a
+//! datagram whose camera id differs from its frame's is refused (the receiver filters senders).
 //!
 //! Allocation-free once warm: two frame slots, their slice buffers reused by capacity.
 
 use super::{PacketHeader, SEGMENT_DATA_LEN};
 
-/// A timecode this far BEHIND the last finished frame is a clock step back (a dantesync date
-/// step, a sender restart on another clock), never a late datagram: start over.
-pub const RESYNC_BACKWARD_100NS: u64 = 10_000_000;
+/// A timecode this far BEHIND the last finished frame is a clock step back (the nightly
+/// dantesync date step is ~200 ms, a sender restart on another clock), never a late datagram:
+/// start over at once instead of dropping every frame as stale until the clock catches up. A
+/// genuinely late datagram is at most about one frame old (the assembler holds two frames), and
+/// 50 ms is three frames at 60 fps, 1.5 at 30.
+pub const RESYNC_BACKWARD_100NS: u64 = 500_000;
 
 /// What the receiver does with the reassembled stream.
 pub trait SliceSink {
@@ -132,11 +136,15 @@ impl FrameAssembler {
         Self::default()
     }
 
-    /// Forget every open frame (a resync).
-    pub fn reset(&mut self) {
+    /// Finish every open frame (its missing packets as lost, so a sink that already took part of
+    /// it sees the frame end) and forget the timecode history (a resync).
+    pub fn flush(&mut self, sink: &mut impl SliceSink) {
         for s in &mut self.slots {
-            s.active = false;
+            if s.active {
+                s.finalized = true;
+            }
         }
+        self.deliver(sink);
         self.last_done = None;
     }
 
@@ -167,7 +175,7 @@ impl FrameAssembler {
         if let Some(done) = self.last_done {
             if h.timecode_100ns <= done {
                 if done - h.timecode_100ns > RESYNC_BACKWARD_100NS {
-                    self.reset();
+                    self.flush(sink);
                     outcome = PushOutcome::Resync;
                 } else {
                     return PushOutcome::Stale;
@@ -183,7 +191,9 @@ impl FrameAssembler {
             },
         };
         let slot = &mut self.slots[slot_ix];
-        if h.slice_count as usize != slot.count {
+        // Every camera stamps the same genlock grid: a datagram of another sender with the same
+        // timecode must never complete this frame.
+        if h.slice_count as usize != slot.count || h.camera_id != slot.camera_id {
             return PushOutcome::Malformed;
         }
         let s = &mut slot.slices[h.slice_index as usize];
@@ -472,6 +482,46 @@ mod tests {
         let back = frame(100_000_000 - RESYNC_BACKWARD_100NS - 1, &[20]);
         assert_eq!(push(&mut a, &back[0][0], 0, &mut r), PushOutcome::Resync);
         assert_eq!(r.done.len(), 2);
+    }
+
+    #[test]
+    fn a_resync_finishes_a_partly_handed_on_frame_first() {
+        let (mut a, mut r) = (FrameAssembler::new(), Rec::default());
+        let f = frame(100_000_000, &[20]);
+        push(&mut a, &f[0][0], 0, &mut r);
+        let open = frame(100_000_000 + 166_667, &[20, 100, 100]);
+        push(&mut a, &open[0][0], 0, &mut r);
+        assert_eq!(r.events.len(), 2, "the open frame's header went on");
+        // a 200 ms step back (the nightly dantesync date step)
+        let back = frame(100_000_000 - 2_000_000, &[20]);
+        assert_eq!(push(&mut a, &back[0][0], 0, &mut r), PushOutcome::Resync);
+        // the open frame was ended (its slices as lost) before the new epoch's frame
+        assert_eq!(r.done.len(), 3);
+        assert_eq!(r.done[1].timecode, 100_000_000 + 166_667);
+        assert_eq!(r.done[1].lost_slices, 2);
+        assert_eq!(r.done[2].timecode, 100_000_000 - 2_000_000);
+    }
+
+    #[test]
+    fn a_step_back_inside_the_late_window_is_stale_not_a_resync() {
+        let (mut a, mut r) = (FrameAssembler::new(), Rec::default());
+        push(&mut a, &frame(100_000_000, &[20])[0][0], 0, &mut r);
+        let late = frame(100_000_000 - RESYNC_BACKWARD_100NS, &[20]);
+        assert_eq!(push(&mut a, &late[0][0], 0, &mut r), PushOutcome::Stale);
+        assert_eq!(r.done.len(), 1);
+    }
+
+    #[test]
+    fn another_camera_on_the_same_timecode_never_completes_the_frame() {
+        let (mut a, mut r) = (FrameAssembler::new(), Rec::default());
+        let mine = frame(5000, &[20, 100]);
+        push(&mut a, &mine[0][0], 0, &mut r);
+        let mut other = mine[1][0].clone();
+        other[2] = 7; // camera id byte
+        assert_eq!(push(&mut a, &other, 0, &mut r), PushOutcome::Malformed);
+        assert!(r.done.is_empty());
+        push(&mut a, &mine[1][0], 0, &mut r);
+        assert_eq!(r.done.len(), 1);
     }
 
     #[test]

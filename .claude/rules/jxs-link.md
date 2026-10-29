@@ -46,19 +46,40 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
   counted `dropped_busy` while the encoder is busy. The `jxs-send` thread pins itself with
   `pin_off_capture_core` BEFORE it opens the encoder, so SVT's threads inherit the display cores.
   `UDP_SEGMENT` (GSO) is a socket option: one `send` per slice (up to 40 datagrams per send).
+  A GSO send that fails with EIO (no checksum offload) or EINVAL switches the socket to one send
+  per datagram for good, logged once. IPv4 only: the 1472-byte datagram is the IPv4 budget of a
+  1500 MTU (an IPv6 target is refused at start). `encode_ms` = picture handed to the encoder ->
+  its last packet sent (the slice sends happen inside it); the YUYV conversion is not in it.
 - **Receive: `src/jxs_recv.rs` + `src/jxs_link/assembler.rs`.** `recvmmsg` + `UDP_GRO` +
   `SO_TIMESTAMPNS`. The assembler hands each packet on as soon as everything before it in its
   frame is complete; it finalizes a frame (missing packets = lost) when the NEXT frame is complete
   or a third frame arrives. `DecodeSink` replaces a lost packet with the SAME index of the
   previous frame (JPEG XS slices are independently coded), so loss costs a stale stripe, never a
   stall. SVT's decoder init needs one WHOLE frame (the header packet alone is "too short"), so the
-  decoder opens on the first complete frame.
+  decoder opens on the first complete frame. A timecode more than 50 ms behind the last finished
+  frame is a clock step (the nightly dantesync date step is ~200 ms): the open frames are ended
+  (missing packets as lost) and the stream starts over. One assembler = one sender: a datagram
+  whose camera id differs from its frame's is refused, and the probe takes one camera
+  (`--camera N`, else the first heard; the rest count as `foreign=`).
+- **Never wait on the SVT decoder without a bound.** In packet mode the library answers a corrupt
+  slice by emitting an (error) frame at once and returning OK; every further packet of that frame
+  queues another one until its pools (3 decoder instances) run dry and `send_packet` blocks for
+  good. So `DecodeSink` polls `poll_frame()` after every non-last packet: anything out early =
+  the frame failed, stop feeding it, reopen the decoder from the next whole frame. The last packet
+  must answer `Fed::Taken` (`NeedMore` there = a corrupt frame), and `finish_frame` takes a
+  timeout (200 ms). Pinned by `a_garbled_slice_is_seen_before_the_frame_ends_and_never_blocks`
+  (jxs/sys) and `a_garbled_slice_costs_that_frame_and_the_next_one_decodes` (loopback), both run on
+  a thread with a deadline so a regression fails instead of wedging the suite.
+- `Yuv422Planes` fields are private and `Encoder::encode_frame` re-checks the planes against the
+  opened geometry before the FFI call (the C side reads by that geometry). `Decoder::open`
+  refuses a declared picture over 7680x4320 (the size comes from the network).
 - **Probe: `jxs-recv-probe`** (`--features jxs`, CI uploads it in `probe-tools-linux-amd64`).
 
 ## Build gotchas
 
 - The `jxs` feature needs cmake >= 3.10 and **nasm >= 2.14**. CI installs nasm in lint, test,
-  coverage and build (`tests/jxs_wiring_1387.rs` pins it). dev1 has no system nasm: point
+  coverage, build and the on-demand mutants job, which builds `--features probe,jxs`
+  (`tests/jxs_wiring_1387.rs` pins it). dev1 has no system nasm: point
   `ASM_NASM` at one (an extracted `nasm_*.deb` works) for any `--all-features` / `--features jxs`
   cargo run. A default `cargo build` needs neither.
 - The deployed `camera-box-linux-amd64` is built `--features jxs` (ci.yml `build`, release.yml).
@@ -88,3 +109,10 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
 - One frame in flight: a frame whose encode passes ~16.7 ms makes the next one `dropped_busy`.
 - One receiver per cambox; only YUYV captures are sent (another format logs one WARN).
 - A frame whose slice count differs from the previous one restarts the decoder (a geometry change).
+- In TEST mode with the cam1 QR burn active, NDI carries the burned frame and JPEG XS the
+  unburned capture: a pixel comparison of the two during an E2E differs by the burn.
+- `SO_SNDBUF` asks for 4 MB; the kernel caps it at `net.core.wmem_max` (the "link ON" line logs
+  what was granted). A frame is ~1.04 MB, so a small grant makes `send` block the `jxs-send`
+  thread (never the capture thread) until the NIC drains it.
+- The PNG dump is a stored-deflate writer in `src/jxs_link/png.rs` (no compression, no
+  dependency): the probe needs only the `jxs` feature, not the probe feature's `image` crate.

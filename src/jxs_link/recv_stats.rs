@@ -22,6 +22,8 @@ pub struct RecvWindow {
     pub stale: u64,
     pub malformed: u64,
     pub resyncs: u64,
+    /// Datagrams of another camera id than the one taken.
+    pub foreign: u64,
     /// Sender timecode -> frame decoded here, ms (both on the dantesync wall clock).
     latency_ms: Vec<f64>,
     /// Sender timecode -> first datagram on the wire here, ms.
@@ -87,7 +89,7 @@ impl RecvWindow {
         format!(
             "jxs recv: fps={fps:.2} frames={} concealed={} lost_slices={} undecodable={} datagrams={} mbps={mbps:.1} \
              latency_ms_p50/p99/max={}/{}/{} first_arrival_ms_p50/max={}/{} spread_ms_p50/max={}/{} \
-             dup={} stale={} malformed={} resyncs={} (issue 1387)",
+             dup={} stale={} malformed={} resyncs={} foreign={} (issue 1387)",
             self.frames,
             self.concealed_frames,
             self.lost_slices,
@@ -104,6 +106,7 @@ impl RecvWindow {
             self.stale,
             self.malformed,
             self.resyncs,
+            self.foreign,
         )
     }
 }

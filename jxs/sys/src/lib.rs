@@ -16,6 +16,14 @@ pub const SLICE_HEIGHT_LINES: u32 = 16;
 
 /// `SvtJxsErrorNone`.
 const OK: i32 = 0;
+/// `SvtJxsErrorNoErrorEmptyQueue` (no output ready, non-blocking call).
+const EMPTY_QUEUE: i32 = 0x8000_2033_u32 as i32;
+/// `SvtJxsErrorDecoderBitstreamTooShort` (the frame needs more packets).
+const TOO_SHORT: i32 = 0x8000_3003_u32 as i32;
+/// The largest picture a decoder opens (8K UHD): the size comes from the received stream, so a
+/// garbled header must never allocate gigabytes.
+pub const MAX_DECODE_WIDTH: u32 = 7680;
+pub const MAX_DECODE_HEIGHT: u32 = 4320;
 
 #[repr(C)]
 struct EncSettings {
@@ -82,7 +90,7 @@ extern "C" {
         size_y: u32,
         size_c: u32,
     ) -> i32;
-    fn cbjxs_dec_get_frame(d: *mut CDec) -> i32;
+    fn cbjxs_dec_get_frame(d: *mut CDec, blocking: u8) -> i32;
     fn cbjxs_dec_close(d: *mut CDec);
     fn cbjxs_format_yuv422() -> u32;
 }
@@ -115,13 +123,15 @@ fn check(code: i32, during: &'static str) -> Result<(), JxsError> {
 }
 
 /// One planar 8-bit YUV 4:2:2 picture: Y is `width x height`, U and V `width/2 x height`.
+/// The fields are private: the plane lengths always match the geometry (the C side reads and
+/// writes by that geometry).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Yuv422Planes {
-    pub width: u32,
-    pub height: u32,
-    pub y: Vec<u8>,
-    pub u: Vec<u8>,
-    pub v: Vec<u8>,
+    width: u32,
+    height: u32,
+    y: Vec<u8>,
+    u: Vec<u8>,
+    v: Vec<u8>,
 }
 
 impl Yuv422Planes {
@@ -137,10 +147,55 @@ impl Yuv422Planes {
         }
     }
 
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
     /// The chroma plane width in samples.
     pub fn chroma_width(&self) -> u32 {
         self.width / 2
     }
+
+    pub fn y(&self) -> &[u8] {
+        &self.y
+    }
+
+    pub fn u(&self) -> &[u8] {
+        &self.u
+    }
+
+    pub fn v(&self) -> &[u8] {
+        &self.v
+    }
+
+    /// The three planes for writing (their lengths cannot change through a slice).
+    pub fn planes_mut(&mut self) -> (&mut [u8], &mut [u8], &mut [u8]) {
+        (&mut self.y, &mut self.u, &mut self.v)
+    }
+
+    /// Whether the plane lengths match `width x height` (always true unless a caller replaced the
+    /// whole value with one of another geometry).
+    fn matches(&self, width: u32, height: u32) -> bool {
+        let (w, h) = (width as usize, height as usize);
+        self.width == width
+            && self.height == height
+            && self.y.len() == w * h
+            && self.u.len() == w / 2 * h
+            && self.v.len() == w / 2 * h
+    }
+}
+
+/// What a fed packet did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fed {
+    /// The frame needs more packets (normal before the frame's last packet).
+    NeedMore,
+    /// The packet was taken and the frame is complete (normal for the last packet).
+    Taken,
 }
 
 /// Encoder settings. [`EncoderSettings::issue_1387`] is the measured cambox setting.
@@ -176,6 +231,8 @@ impl EncoderSettings {
 /// A slice-packetized encoder that owns its input planes and its bitstream buffer.
 pub struct Encoder {
     raw: *mut CEnc,
+    width: u32,
+    height: u32,
     planes: Yuv422Planes,
     bitstream: Vec<u8>,
 }
@@ -213,6 +270,8 @@ impl Encoder {
         )?;
         Ok(Self {
             raw,
+            width: s.width,
+            height: s.height,
             planes: Yuv422Planes::new(s.width, s.height),
             bitstream: vec![0; bytes_per_frame as usize],
         })
@@ -235,10 +294,16 @@ impl Encoder {
         &mut self,
         mut on_packet: impl FnMut(u32, &[u8], bool),
     ) -> Result<u32, JxsError> {
+        if !self.planes.matches(self.width, self.height) {
+            return Err(JxsError {
+                code: i32::MIN,
+                during: "send picture (the planes do not match the opened geometry)",
+            });
+        }
         let p = &self.planes;
-        // SAFETY: the planes and the bitstream buffer are owned by `self`, sized at open for this
-        // geometry, and stay untouched until this function returns, which is after the frame's
-        // last packet (the library's release point for both buffers).
+        // SAFETY: the planes (checked above against the opened geometry the C side reads by) and
+        // the bitstream buffer are owned by `self` and stay untouched until this function
+        // returns, which is after the frame's last packet (the library's release point for both).
         check(
             unsafe {
                 cbjxs_enc_send(
@@ -319,12 +384,19 @@ impl Decoder {
         )?;
         // SAFETY: a plain getter.
         let yuv422 = unsafe { cbjxs_format_yuv422() };
-        if fmt != yuv422 || depth != 8 || !w.is_multiple_of(2) {
+        if fmt != yuv422
+            || depth != 8
+            || w == 0
+            || h == 0
+            || !w.is_multiple_of(2)
+            || w > MAX_DECODE_WIDTH
+            || h > MAX_DECODE_HEIGHT
+        {
             // SAFETY: `raw` was just opened and is closed once.
             unsafe { cbjxs_dec_close(raw) };
             return Err(JxsError {
                 code: c_int::MIN,
-                during: "decoder open (stream is not 8-bit planar 4:2:2)",
+                during: "decoder open (stream is not 8-bit planar 4:2:2 up to 7680x4320)",
             });
         }
         Ok(Self {
@@ -342,38 +414,63 @@ impl Decoder {
     }
 
     /// Feed one packet (header or slice, in order) of the current frame.
-    pub fn send_packet(&mut self, packet: &[u8]) -> Result<(), JxsError> {
+    pub fn send_packet(&mut self, packet: &[u8]) -> Result<Fed, JxsError> {
         let p = &mut self.planes;
         let (sy, sc) = (p.y.len() as u32, p.u.len() as u32);
         let (wy, wc) = (p.width, p.width / 2);
         // SAFETY: the packet is valid for its length; the planes are owned by `self`, sized for
         // the decoded geometry, and only written by the decoder between this call and
         // `finish_frame`.
-        check(
-            unsafe {
-                cbjxs_dec_send_packet(
-                    self.raw,
-                    packet.as_ptr(),
-                    packet.len() as u32,
-                    p.y.as_mut_ptr(),
-                    p.u.as_mut_ptr(),
-                    p.v.as_mut_ptr(),
-                    wy,
-                    wc,
-                    sy,
-                    sc,
-                )
-            },
-            "send packet",
-        )
+        let code = unsafe {
+            cbjxs_dec_send_packet(
+                self.raw,
+                packet.as_ptr(),
+                packet.len() as u32,
+                p.y.as_mut_ptr(),
+                p.u.as_mut_ptr(),
+                p.v.as_mut_ptr(),
+                wy,
+                wc,
+                sy,
+                sc,
+            )
+        };
+        match code {
+            TOO_SHORT => Ok(Fed::NeedMore),
+            _ => check(code, "send packet").map(|()| Fed::Taken),
+        }
     }
 
-    /// Block until the frame whose packets were all fed is decoded, and return it.
-    /// Never call it before every packet of the frame was fed: the library would wait forever.
-    pub fn finish_frame(&mut self) -> Result<&Yuv422Planes, JxsError> {
-        // SAFETY: a valid handle.
-        check(unsafe { cbjxs_dec_get_frame(self.raw) }, "get frame")?;
-        Ok(&self.planes)
+    /// Non-blocking: has a frame come out? `Ok(true)` = a decoded frame, `Ok(false)` = none yet,
+    /// `Err` = the library gave a frame up (a corrupt slice). A frame that comes out before its
+    /// last packet was fed is a failed frame too: the caller must stop feeding it.
+    pub fn poll_frame(&mut self) -> Result<bool, JxsError> {
+        // SAFETY: a valid handle; non-blocking.
+        match unsafe { cbjxs_dec_get_frame(self.raw, 0) } {
+            EMPTY_QUEUE => Ok(false),
+            code => check(code, "get frame").map(|()| true),
+        }
+    }
+
+    /// Wait at most `timeout` for the frame whose packets were all fed, and return it. Never
+    /// blocks forever: a frame the library still waits on (a corrupt last packet) is an error.
+    pub fn finish_frame(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<&Yuv422Planes, JxsError> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if self.poll_frame()? {
+                return Ok(&self.planes);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(JxsError {
+                    code: EMPTY_QUEUE,
+                    during: "get frame (no decoded frame within the timeout)",
+                });
+            }
+            std::thread::yield_now();
+        }
     }
 }
 
@@ -387,60 +484,164 @@ impl Drop for Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
-    fn gradient(p: &mut Yuv422Planes) {
-        let w = p.width as usize;
-        for (i, b) in p.y.iter_mut().enumerate() {
-            *b = ((i % w) * 255 / w) as u8;
+    const W: u32 = 256;
+    const H: u32 = 64;
+
+    fn gradient(p: &mut Yuv422Planes, phase: usize) {
+        let w = p.width() as usize;
+        let (y, u, v) = p.planes_mut();
+        for (i, b) in y.iter_mut().enumerate() {
+            *b = (((i + phase) % w) * 255 / w) as u8;
         }
-        for (i, b) in p.u.iter_mut().enumerate() {
+        for (i, b) in u.iter_mut().enumerate() {
             *b = (64 + (i / (w / 2)) % 128) as u8;
         }
-        for b in p.v.iter_mut() {
+        for b in v.iter_mut() {
             *b = 160;
+        }
+    }
+
+    fn encode(enc: &mut Encoder, phase: usize) -> (Yuv422Planes, Vec<Vec<u8>>) {
+        gradient(enc.planes_mut(), phase);
+        let original = enc.planes_mut().clone();
+        let mut packets: Vec<Vec<u8>> = Vec::new();
+        enc.encode_frame(|i, b, _| {
+            assert_eq!(i as usize, packets.len());
+            packets.push(b.to_vec());
+        })
+        .expect("encode");
+        (original, packets)
+    }
+
+    fn max_err(a: &[u8], b: &[u8]) -> i32 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (*x as i32 - *y as i32).abs())
+            .max()
+            .unwrap()
+    }
+
+    /// Feed every packet: NeedMore before the last, Taken on the last, nothing out early.
+    fn feed(dec: &mut Decoder, packets: &[Vec<u8>]) {
+        for (i, p) in packets.iter().enumerate() {
+            let fed = dec.send_packet(p).expect("send packet");
+            let last = i + 1 == packets.len();
+            assert_eq!(
+                fed,
+                if last { Fed::Taken } else { Fed::NeedMore },
+                "packet {i}"
+            );
+            if !last {
+                assert_eq!(
+                    dec.poll_frame(),
+                    Ok(false),
+                    "nothing out before the last packet"
+                );
+            }
         }
     }
 
     #[test]
     fn a_frame_encodes_to_a_header_and_slices_and_decodes_back() {
-        let (w, h) = (256u32, 64u32);
-        let mut enc = Encoder::open(EncoderSettings::issue_1387(w, h)).expect("open");
-        gradient(enc.planes_mut());
-        let original = enc.planes_mut().clone();
-        let mut packets: Vec<Vec<u8>> = Vec::new();
-        let n = enc
-            .encode_frame(|i, b, _| {
-                assert_eq!(i as usize, packets.len());
-                packets.push(b.to_vec());
-            })
-            .expect("encode");
-        // 64 lines at the default 16-line slice height: the header + 4 slices.
-        assert_eq!(n, 5, "packet count");
+        let mut enc = Encoder::open(EncoderSettings::issue_1387(W, H)).expect("open");
+        let (original, packets) = encode(&mut enc, 0);
+        // 64 lines at the 16-line slice height: the header + 4 slices.
+        assert_eq!(packets.len(), 5, "packet count");
         assert!(packets.iter().all(|p| !p.is_empty()));
         let total: usize = packets.iter().map(Vec::len).sum();
         assert!(total <= enc.bytes_per_frame(), "{total} > budget");
 
         // The header packet alone is too short for the library's init: it reads a whole frame.
         assert!(Decoder::open(&packets[0]).is_err());
-        let whole: Vec<u8> = packets.concat();
-        let mut dec = Decoder::open(&whole).expect("decoder open");
-        assert_eq!((dec.width(), dec.height()), (w, h));
-        for p in &packets {
-            dec.send_packet(p).expect("send packet");
-        }
-        let out = dec.finish_frame().expect("decode").clone();
-        let max_err = original
-            .y
-            .iter()
-            .zip(&out.y)
-            .map(|(a, b)| (*a as i32 - *b as i32).abs())
-            .max()
-            .unwrap();
-        assert!(max_err <= 8, "luma max error {max_err}");
+        let mut dec = Decoder::open(&packets.concat()).expect("decoder open");
+        assert_eq!((dec.width(), dec.height()), (W, H));
+        feed(&mut dec, &packets);
+        let out = dec.finish_frame(Duration::from_secs(5)).expect("decode");
+        assert!(max_err(original.y(), out.y()) <= 8, "luma");
+        assert!(max_err(original.u(), out.u()) <= 8, "chroma");
     }
 
     #[test]
     fn an_odd_width_is_refused_before_the_library_sees_it() {
         assert!(Encoder::open(EncoderSettings::issue_1387(255, 64)).is_err());
+    }
+
+    #[test]
+    fn planes_of_another_geometry_are_refused_before_the_library_reads_them() {
+        let mut enc = Encoder::open(EncoderSettings::issue_1387(W, H)).expect("open");
+        *enc.planes_mut() = Yuv422Planes::new(W / 2, H);
+        assert!(enc.encode_frame(|_, _, _| {}).is_err());
+        // and the encoder still works once the planes match again
+        *enc.planes_mut() = Yuv422Planes::new(W, H);
+        assert!(enc.encode_frame(|_, _, _| {}).is_ok());
+    }
+
+    #[test]
+    fn a_truncated_last_slice_never_reads_as_a_complete_frame() {
+        let mut enc = Encoder::open(EncoderSettings::issue_1387(W, H)).expect("open");
+        let (_, good) = encode(&mut enc, 0);
+        let (_, mut bad) = encode(&mut enc, 30);
+        let last = bad.len() - 1;
+        let half = bad[last].len() / 2;
+        bad[last].truncate(half);
+        let mut dec = Decoder::open(&good.concat()).expect("open");
+        feed(&mut dec, &good);
+        dec.finish_frame(Duration::from_secs(5))
+            .expect("good frame");
+        let mut fed_last = None;
+        for p in &bad {
+            fed_last = Some(dec.send_packet(p));
+        }
+        // the receiver's rule: the last packet must be Taken, else the frame failed
+        assert!(
+            !matches!(fed_last, Some(Ok(Fed::Taken))),
+            "a half last slice must not read as a complete frame: {fed_last:?}"
+        );
+    }
+
+    #[test]
+    fn a_garbled_slice_is_seen_before_the_frame_ends_and_never_blocks() {
+        // 1080 lines = 69 packets: enough slices to exhaust the library's frame pools if a
+        // failed frame were fed to the end (the hang this guards against).
+        let (w, h) = (320u32, 1080u32);
+        let mut enc = Encoder::open(EncoderSettings::issue_1387(w, h)).expect("open");
+        let (_, good) = encode(&mut enc, 0);
+        let (_, mut bad) = encode(&mut enc, 30);
+        assert_eq!(bad.len(), 69);
+        for b in bad[2].iter_mut().skip(2) {
+            *b ^= 0xA5;
+        }
+        let worker = std::thread::spawn(move || {
+            let mut dec = Decoder::open(&good.concat()).expect("open");
+            feed(&mut dec, &good);
+            dec.finish_frame(Duration::from_secs(5))
+                .expect("good frame");
+            // feed the garbled frame, stopping at the first sign of failure (the receiver's rule)
+            for (i, p) in bad.iter().enumerate() {
+                let last = i + 1 == bad.len();
+                match dec.send_packet(p) {
+                    Err(_) => return "failed on send",
+                    Ok(Fed::NeedMore) if last => return "failed: incomplete",
+                    Ok(_) if !last && !matches!(dec.poll_frame(), Ok(false)) => {
+                        return "failed: a frame came out early"
+                    }
+                    Ok(_) => {}
+                }
+            }
+            match dec.finish_frame(Duration::from_millis(500)) {
+                Ok(_) => "decoded (a garble the entropy decoder tolerated)",
+                Err(_) => "failed at the end",
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !worker.is_finished() {
+            assert!(std::time::Instant::now() < deadline, "the decoder blocked");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let outcome = worker.join().expect("no panic");
+        // The library answers a corrupt slice with an early (error) frame: seen before the end.
+        assert!(outcome.starts_with("failed"), "{outcome}");
     }
 }

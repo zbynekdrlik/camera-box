@@ -43,7 +43,7 @@ pub const UDP_GRO: libc::c_int = 104;
 /// A connected UDP socket that sends whole slices with GSO.
 pub struct JxsSocket {
     sock: UdpSocket,
-    gso: bool,
+    gso: AtomicBool,
 }
 
 impl JxsSocket {
@@ -55,22 +55,34 @@ impl JxsSocket {
                 format!("{target}: no address"),
             )
         })?;
-        let bind: SocketAddr = if addr.is_ipv4() {
-            "0.0.0.0:0".parse().expect("literal")
-        } else {
-            "[::]:0".parse().expect("literal")
-        };
-        let sock = UdpSocket::bind(bind)?;
+        // The 1472-byte datagram is the IPv4 budget of a 1500-byte MTU; over IPv6 it would be
+        // fragmented (and GSO refuses it), so the link is IPv4 only.
+        if !addr.is_ipv4() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("{target} resolves to {addr}: the JPEG XS link is IPv4 only"),
+            ));
+        }
+        let sock = UdpSocket::bind("0.0.0.0:0")?;
         sock.connect(addr)?;
         let fd = sock.as_raw_fd();
         set_int_opt(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, SEND_BUFFER_BYTES);
         let gso = set_int_opt(fd, libc::SOL_UDP, UDP_SEGMENT, DATAGRAM_LEN as libc::c_int);
-        Ok(Self { sock, gso })
+        Ok(Self {
+            sock,
+            gso: AtomicBool::new(gso),
+        })
     }
 
-    /// Whether the kernel accepted `UDP_SEGMENT` (else every datagram is its own send).
+    /// Whether GSO is in use (the kernel accepted `UDP_SEGMENT`, and no GSO send has failed with
+    /// EIO/EINVAL since; else every datagram is its own send).
     pub fn gso(&self) -> bool {
-        self.gso
+        self.gso.load(Ordering::Relaxed)
+    }
+
+    /// The socket send buffer the kernel granted (it caps the request at `net.core.wmem_max`).
+    pub fn send_buffer(&self) -> i64 {
+        get_int_opt(self.sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF)
     }
 
     pub fn peer(&self) -> std::io::Result<SocketAddr> {
@@ -82,14 +94,26 @@ impl JxsSocket {
     /// send reports as `ECONNREFUSED`; the link never waits for it).
     pub fn send_slice(&self, datagrams: &[u8]) -> u64 {
         let mut errors = 0;
-        if self.gso {
-            for r in jxs_link::gso_send_ranges(datagrams.len()) {
-                if self.sock.send(&datagrams[r]).is_err() {
-                    errors += 1;
+        for r in jxs_link::gso_send_ranges(datagrams.len()) {
+            let batch = &datagrams[r];
+            if self.gso() {
+                match self.sock.send(batch) {
+                    Ok(_) => continue,
+                    // A NIC without checksum offload (EIO) or a path the kernel cannot segment
+                    // (EINVAL): fall back to one send per datagram for good, said once.
+                    Err(e) if matches!(e.raw_os_error(), Some(libc::EIO) | Some(libc::EINVAL)) => {
+                        self.gso.store(false, Ordering::Relaxed);
+                        tracing::warn!(
+                            "jxs send: a GSO send failed ({e}) -- one send per datagram from now on (issue 1387)"
+                        );
+                    }
+                    Err(_) => {
+                        errors += 1;
+                        continue;
+                    }
                 }
             }
-        } else {
-            for d in datagrams.chunks(DATAGRAM_LEN) {
+            for d in batch.chunks(DATAGRAM_LEN) {
                 if self.sock.send(d).is_err() {
                     errors += 1;
                 }
@@ -115,6 +139,27 @@ pub(crate) fn set_int_opt(
             (&value as *const libc::c_int).cast(),
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         ) == 0
+    }
+}
+
+/// Read an int socket option (-1 on failure).
+pub(crate) fn get_int_opt(fd: libc::c_int, level: libc::c_int, name: libc::c_int) -> i64 {
+    let mut v: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    // SAFETY: valid out-pointers sized for a c_int; the fd is an open socket.
+    let ok = unsafe {
+        libc::getsockopt(
+            fd,
+            level,
+            name,
+            (&mut v as *mut libc::c_int).cast(),
+            &mut len,
+        )
+    };
+    if ok == 0 {
+        v as i64
+    } else {
+        -1
     }
 }
 
@@ -183,6 +228,15 @@ impl JxsHandoff {
     pub fn dropped_busy(&self) -> u64 {
         self.shared.dropped_busy.load(Ordering::Relaxed)
     }
+
+    /// A hand-off with no sender thread: every offer after the first finds it busy (tests).
+    #[cfg(test)]
+    fn detached() -> Self {
+        Self {
+            shared: Arc::new(Shared::default()),
+            worker: None,
+        }
+    }
 }
 
 impl Drop for JxsHandoff {
@@ -241,12 +295,13 @@ fn start_worker(target: String, camera_id: u8) -> Option<JxsHandoff> {
         }
     };
     tracing::info!(
-        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}) -- JPEG XS 4 bpp, latency profile, beside NDI (issue 1387)",
+        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, send buffer {} bytes) -- JPEG XS 4 bpp, latency profile, beside NDI (issue 1387)",
         socket
             .peer()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| target.clone()),
-        if socket.gso() { "on" } else { "OFF: one send per datagram" }
+        if socket.gso() { "on" } else { "OFF: one send per datagram" },
+        socket.send_buffer()
     );
     let shared = Arc::new(Shared::default());
     let worker_shared = Arc::clone(&shared);
@@ -296,7 +351,6 @@ mod worker {
             if !shared.busy.load(Ordering::Acquire) {
                 continue;
             }
-            let started = Instant::now();
             let timecode = {
                 let slot = shared.slot.lock().unwrap_or_else(|e| e.into_inner());
                 if !slot.yuyv {
@@ -312,7 +366,7 @@ mod worker {
                 }
                 let geometry_changed = enc.as_mut().is_none_or(|e| {
                     let p = e.planes_mut();
-                    p.width != slot.width || p.height != slot.height
+                    p.width() != slot.width || p.height() != slot.height
                 });
                 if geometry_changed {
                     enc = match Encoder::open(EncoderSettings::issue_1387(slot.width, slot.height))
@@ -338,16 +392,10 @@ mod worker {
                     continue;
                 };
                 let p = e.planes_mut();
-                let (w, h) = (p.width as usize, p.height as usize);
-                let ok = jxs_link::yuyv_to_planar422(
-                    &slot.raw,
-                    slot.stride as usize,
-                    w,
-                    h,
-                    &mut p.y,
-                    &mut p.u,
-                    &mut p.v,
-                );
+                let (w, h) = (p.width() as usize, p.height() as usize);
+                let (y, u, v) = p.planes_mut();
+                let ok =
+                    jxs_link::yuyv_to_planar422(&slot.raw, slot.stride as usize, w, h, y, u, v);
                 if !ok {
                     drop(slot);
                     shared.busy.store(false, Ordering::Release);
@@ -356,10 +404,12 @@ mod worker {
                 slot.timecode_100ns
             };
             let enc_ref = enc.as_mut().expect("opened above");
-            let count = jxs_link::packets_per_frame(enc_ref.planes_mut().height);
+            let count = jxs_link::packets_per_frame(enc_ref.planes_mut().height());
             let mut slices = 0u64;
             let mut bytes = 0u64;
             let mut errors = 0u64;
+            // encode_ms = the picture handed to the encoder -> its last packet sent.
+            let started = Instant::now();
             let result = enc_ref.encode_frame(|index, packet, _last| {
                 let base = PacketHeader {
                     camera_id,
@@ -422,8 +472,41 @@ mod tests {
     }
 
     #[test]
-    fn the_env_entry_point_reads_the_documented_variable() {
-        assert_eq!(TARGET_ENV, "CAMERA_BOX_JXS_TARGET");
+    fn a_busy_sender_drops_and_counts_the_next_frame_without_waiting() {
+        let h = JxsHandoff::detached();
+        let frame = vec![7u8; 1920 * 1080 * 2];
+        h.offer(&frame, 1920, 1080, 3840, true, 1);
+        assert_eq!(h.dropped_busy(), 0, "the first frame is taken");
+        let t = std::time::Instant::now();
+        h.offer(&frame, 1920, 1080, 3840, true, 2);
+        h.offer(&frame, 1920, 1080, 3840, true, 3);
+        assert_eq!(h.dropped_busy(), 2, "a busy sender drops and counts");
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(5),
+            "no wait, no copy"
+        );
+        // the taken frame is the first one, untouched by the dropped offers
+        let slot = h.shared.slot.lock().unwrap();
+        assert_eq!(slot.timecode_100ns, 1);
+        assert_eq!(slot.raw.len(), frame.len());
+    }
+
+    #[test]
+    fn the_handoff_buffer_is_reused_between_frames() {
+        let h = JxsHandoff::detached();
+        let frame = vec![1u8; 64 * 8 * 2];
+        h.offer(&frame, 64, 8, 128, true, 1);
+        let cap = h.shared.slot.lock().unwrap().raw.capacity();
+        h.shared.busy.store(false, Ordering::Release);
+        h.offer(&frame, 64, 8, 128, true, 2);
+        let slot = h.shared.slot.lock().unwrap();
+        assert_eq!(slot.raw.capacity(), cap);
+        assert_eq!(slot.timecode_100ns, 2);
+    }
+
+    #[test]
+    fn an_ipv6_target_is_refused() {
+        assert!(JxsSocket::connect("[::1]:7000").is_err());
     }
 
     #[cfg(not(feature = "jxs"))]

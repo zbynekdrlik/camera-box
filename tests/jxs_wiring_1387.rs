@@ -66,7 +66,13 @@ fn next_job_offset(rest: &str) -> usize {
 #[test]
 fn every_ci_job_that_builds_all_features_installs_nasm() {
     let ci = read(".github/workflows/ci.yml");
-    for job in ["  lint:\n", "  test:\n", "  coverage:\n", "  build:\n"] {
+    for job in [
+        "  lint:\n",
+        "  test:\n",
+        "  coverage:\n",
+        "  mutants:\n",
+        "  build:\n",
+    ] {
         let start = ci.find(job).unwrap_or_else(|| panic!("job {job:?}"));
         let rest = &ci[start + job.len()..];
         let body = &rest[..next_job_offset(rest)];
@@ -83,6 +89,8 @@ fn the_codec_crate_is_linted_and_tested_on_its_own() {
     let ci = read(".github/workflows/ci.yml");
     assert!(ci.contains("run: cargo clippy -p svt-jpegxs-sys --all-targets -- -D warnings"));
     assert!(ci.contains("run: cargo nextest run -p svt-jpegxs-sys"));
+    // the on-demand mutation run builds the codec paths it mutates
+    assert!(ci.contains("cargo mutants --in-diff pr.diff --features probe,jxs \\"));
 }
 
 #[test]

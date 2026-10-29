@@ -156,17 +156,17 @@ int32_t cbjxs_dec_send_packet(cbjxs_dec* d, const uint8_t* packet, uint32_t len,
     in.bitstream.used_size = len;
     in.bitstream.allocation_size = len;
     uint32_t used = 0;
-    SvtJxsErrorType_t err = svt_jpeg_xs_decoder_send_packet(&d->api, &in, &used);
-    /* "Too short" is the packet-mode answer for a frame that still needs its next packet. */
-    if (err == SvtJxsErrorDecoderBitstreamTooShort) return (int32_t)SvtJxsErrorNone;
-    return (int32_t)err;
+    /* SvtJxsErrorDecoderBitstreamTooShort is returned as is: the caller tells "the frame needs
+     * its next packet" (normal before the last packet) from "the last packet left the frame
+     * incomplete" (a corrupt frame that must never be waited for). */
+    return (int32_t)svt_jpeg_xs_decoder_send_packet(&d->api, &in, &used);
 }
 
-int32_t cbjxs_dec_get_frame(cbjxs_dec* d) {
+int32_t cbjxs_dec_get_frame(cbjxs_dec* d, uint8_t blocking) {
     if (!d) return (int32_t)SvtJxsErrorBadParameter;
     svt_jpeg_xs_frame_t o;
     memset(&o, 0, sizeof(o));
-    return (int32_t)svt_jpeg_xs_decoder_get_frame(&d->api, &o, 1);
+    return (int32_t)svt_jpeg_xs_decoder_get_frame(&d->api, &o, blocking);
 }
 
 void cbjxs_dec_close(cbjxs_dec* d) {

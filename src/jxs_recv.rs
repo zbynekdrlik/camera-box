@@ -167,15 +167,26 @@ unsafe fn parse_cmsgs(h: &libc::msghdr) -> (Option<usize>, Option<i64>) {
 }
 
 #[cfg(feature = "jxs")]
-pub use decode::DecodeSink;
+pub use decode::{DecodeSink, FINISH_TIMEOUT};
 
 #[cfg(feature = "jxs")]
 mod decode {
     use crate::jxs_link::{FrameReport, SliceSink};
-    use svt_jpegxs_sys::{Decoder, Yuv422Planes};
+    use std::time::Duration;
+    use svt_jpegxs_sys::{Decoder, Fed, Yuv422Planes};
+
+    /// How long the last packet's decode may take before the frame counts as failed (the N100
+    /// measured 0.15 ms after the last slice; a frame the library still waits on never ends).
+    pub const FINISH_TIMEOUT: Duration = Duration::from_millis(200);
 
     /// The receiver's [`SliceSink`]: decodes packet by packet, conceals lost packets from the
-    /// previous frame, and reports every decoded frame to `on_frame`.
+    /// previous frame, and reports every frame to `on_frame` (`None` planes = not decoded).
+    ///
+    /// A frame FAILS (and the decoder is reopened from the next whole frame) when the library
+    /// refuses a packet, lets a frame out before its last packet (its answer to a corrupt slice,
+    /// which must never be fed further: every further packet would queue another failed frame
+    /// until its pools run dry and `send_packet` blocks for good), or still wants more after the
+    /// last packet. No path ever waits on the library without a bound.
     pub struct DecodeSink<F: FnMut(&FrameReport, Option<&Yuv422Planes>)> {
         dec: Option<Decoder>,
         /// The last good bytes of every packet index (the concealment source), reused.
@@ -188,13 +199,12 @@ mod decode {
         count: usize,
         frame_failed: bool,
         on_frame: F,
-        /// Decoder errors (a frame that could not be decoded).
+        /// Frames that could not be decoded.
         pub errors: u64,
         pub last_error: Option<String>,
     }
 
     impl<F: FnMut(&FrameReport, Option<&Yuv422Planes>)> DecodeSink<F> {
-        /// `on_frame(report, planes)`: `planes` is `None` for a frame that could not be decoded.
         pub fn new(on_frame: F) -> Self {
             Self {
                 dec: None,
@@ -225,6 +235,75 @@ mod decode {
             self.frame_failed = true;
             self.last_error = Some(e.to_string());
         }
+
+        /// Feed one packet of an open decoder; marks the frame failed on any sign of trouble.
+        fn feed(&mut self, index: usize, bytes: &[u8]) {
+            let last = index + 1 == self.count;
+            let dec = self.dec.as_mut().expect("open");
+            match dec.send_packet(bytes) {
+                Err(e) => self.fail(e),
+                Ok(Fed::NeedMore) if last => self.fail("the last packet left the frame incomplete"),
+                Ok(_) if !last => match dec.poll_frame() {
+                    Ok(false) => {}
+                    Ok(true) => self.fail("a frame came out before its last packet"),
+                    Err(e) => self.fail(e),
+                },
+                Ok(_) => {}
+            }
+        }
+
+        /// Report a frame that could not be decoded and drop the decoder (it reopens from the
+        /// next whole frame; a failed frame may have left it mid-frame).
+        fn give_up(&mut self, report: &FrameReport) {
+            self.errors += 1;
+            self.dec = None;
+            (self.on_frame)(report, None);
+        }
+
+        fn open_from_pending(&mut self, report: &FrameReport) {
+            if !self.pending_ok {
+                (self.on_frame)(report, None);
+                return;
+            }
+            self.whole.clear();
+            for p in &self.pending[..self.count] {
+                self.whole.extend_from_slice(p);
+            }
+            match Decoder::open(&self.whole) {
+                Ok(d) => self.dec = Some(d),
+                Err(e) => {
+                    self.last_error = Some(e.to_string());
+                    self.errors += 1;
+                    (self.on_frame)(report, None);
+                    return;
+                }
+            }
+            self.frame_failed = false;
+            for i in 0..self.count {
+                let p = std::mem::take(&mut self.pending[i]);
+                if !self.frame_failed {
+                    self.feed(i, &p);
+                }
+                self.remember(i, &p);
+                self.pending[i] = p;
+            }
+            self.finish(report);
+        }
+
+        fn finish(&mut self, report: &FrameReport) {
+            if self.frame_failed {
+                self.give_up(report);
+                return;
+            }
+            let dec = self.dec.as_mut().expect("open");
+            match dec.finish_frame(FINISH_TIMEOUT) {
+                Ok(planes) => (self.on_frame)(report, Some(planes)),
+                Err(e) => {
+                    self.last_error = Some(e.to_string());
+                    self.give_up(report);
+                }
+            }
+        }
     }
 
     impl<F: FnMut(&FrameReport, Option<&Yuv422Planes>)> SliceSink for DecodeSink<F> {
@@ -243,111 +322,44 @@ mod decode {
                     self.pending_ok = true;
                 }
             }
+            if index >= self.count {
+                self.frame_failed = true;
+                return;
+            }
             if self.dec.is_none() {
                 // Collect the whole first frame for the decoder's init.
                 match bytes {
-                    Some(b) if index < self.pending.len() => {
+                    Some(b) => {
                         self.pending[index].clear();
                         self.pending[index].extend_from_slice(b);
                     }
-                    _ => self.pending_ok = false,
+                    None => self.pending_ok = false,
                 }
                 return;
             }
-            if self.frame_failed {
-                if let Some(b) = bytes {
+            match bytes {
+                Some(b) => {
+                    if !self.frame_failed {
+                        self.feed(index, b);
+                    }
                     self.remember(index, b);
                 }
-                return;
-            }
-            let concealed;
-            let data: &[u8] = match bytes {
-                Some(b) => b,
+                None if self.frame_failed => {}
                 None if self.has_prev.get(index).copied().unwrap_or(false) => {
-                    concealed = std::mem::take(&mut self.prev[index]);
-                    let r = self.dec.as_mut().expect("open").send_packet(&concealed);
+                    // Conceal: the same packet of the previous frame.
+                    let concealed = std::mem::take(&mut self.prev[index]);
+                    self.feed(index, &concealed);
                     self.prev[index] = concealed;
-                    if let Err(e) = r {
-                        self.fail(e);
-                    }
-                    return;
                 }
-                None => {
-                    self.fail("a lost packet with no previous frame to conceal it from");
-                    return;
-                }
-            };
-            let r = self.dec.as_mut().expect("open").send_packet(data);
-            if let Err(e) = r {
-                self.fail(e);
+                None => self.fail("a lost packet with no previous frame to conceal it from"),
             }
-            self.remember(index, data);
         }
 
         fn frame_done(&mut self, report: &FrameReport) {
             if self.dec.is_none() {
-                if !self.pending_ok {
-                    (self.on_frame)(report, None);
-                    return;
-                }
-                self.whole.clear();
-                for p in &self.pending[..self.count] {
-                    self.whole.extend_from_slice(p);
-                }
-                match Decoder::open(&self.whole) {
-                    Ok(mut d) => {
-                        let mut ok = true;
-                        for p in &self.pending[..self.count] {
-                            if let Err(e) = d.send_packet(p) {
-                                self.last_error = Some(e.to_string());
-                                ok = false;
-                                break;
-                            }
-                        }
-                        for i in 0..self.count {
-                            let p = std::mem::take(&mut self.pending[i]);
-                            self.remember(i, &p);
-                            self.pending[i] = p;
-                        }
-                        if ok {
-                            match d.finish_frame() {
-                                Ok(planes) => (self.on_frame)(report, Some(planes)),
-                                Err(e) => {
-                                    self.errors += 1;
-                                    self.last_error = Some(e.to_string());
-                                    (self.on_frame)(report, None);
-                                }
-                            }
-                            self.dec = Some(d);
-                        } else {
-                            self.errors += 1;
-                            (self.on_frame)(report, None);
-                        }
-                    }
-                    Err(e) => {
-                        self.errors += 1;
-                        self.last_error = Some(e.to_string());
-                        (self.on_frame)(report, None);
-                    }
-                }
-                return;
-            }
-            if self.frame_failed {
-                // The decoder is mid-frame in an unknown state: open it again from the next
-                // whole frame.
-                self.errors += 1;
-                self.dec = None;
-                (self.on_frame)(report, None);
-                return;
-            }
-            match self.dec.as_mut().expect("open").finish_frame() {
-                Ok(planes) => (self.on_frame)(report, Some(planes)),
-                Err(e) => {
-                    self.errors += 1;
-                    self.last_error = Some(e.to_string());
-                    self.dec = None;
-                    (self.on_frame)(report, None);
-                }
+                self.open_from_pending(report);
+            } else {
+                self.finish(report);
             }
         }
     }

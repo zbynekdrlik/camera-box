@@ -228,7 +228,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       - name: Install cargo-mutants
         uses: taiki-e/install-action@cargo-mutants
@@ -244,8 +244,9 @@ jobs:
       - name: Mutation testing (PR diff only)
         # cargo-mutants runs a full unmutated baseline build+test first; skip it
         # entirely when the PR touches no Rust, so doc/CI-only PRs stay fast.
-        # --features probe: the probe modules are feature-gated, so mutants must
-        #   be built+tested with the feature or they all "survive" vacuously.
+        # --features probe,jxs: the probe modules and the issue-1387 JPEG XS link's codec
+        #   paths are feature-gated, so mutants must be built+tested with both features or
+        #   they all "survive" vacuously (jxs needs nasm, installed above).
         # -e <glue>: painter/reader/run/fb/bin drive /dev/fb0 + NDI and are
         #   verified by the on-device loopback E2E, not unit tests — exclude them
         #   (same rationale as the coverage exclusion).
@@ -300,7 +301,7 @@ jobs:
         # (classify_patch / summarize_node_colour) and NodeVerdict::is_zero's colour_fail term.
         run: |
           if git diff --name-only origin/main...HEAD | grep -q '\.rs$'; then
-            cargo mutants --in-diff pr.diff --features probe \
+            cargo mutants --in-diff pr.diff --features probe,jxs \
               -e 'src/probe/painter.rs' \
               -e 'src/probe/reader.rs' \
               -e 'src/probe/run.rs' \
@@ -308,6 +309,7 @@ jobs:
               -e 'src/probe/multi_reader.rs' \
               -e 'src/probe/colour_sample.rs' \
               -e 'src/bin/frame-probe.rs' \
+              -e 'src/bin/jxs-recv-probe.rs' \
               --exclude-re 'NdiSender::send_frame_data' \
               --exclude-re 'NdiSender::set_external_pacing' \
               --exclude-re '\bwall_clock_ns\b' \
