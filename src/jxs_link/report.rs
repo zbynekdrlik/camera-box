@@ -43,12 +43,44 @@ pub enum ReportError {
 
 impl ReceiverReport {
     pub fn encode(&self) -> Result<[u8; REPORT_LEN], ReportError> {
-        let _ = self;
-        Err(ReportError::BadBpp) // RED stub (issue 1387)
+        let max_bpp = u8::try_from(self.max_bpp).map_err(|_| ReportError::BadBpp)?;
+        let mut b = [0u8; REPORT_LEN];
+        b[0] = REPORT_MAGIC;
+        b[1] = REPORT_VERSION;
+        b[2] = self.camera_id;
+        b[3] = max_bpp;
+        b[4..8].copy_from_slice(&self.seq.to_le_bytes());
+        b[8..12].copy_from_slice(&self.frames.to_le_bytes());
+        b[12..16].copy_from_slice(&self.lost_slices.to_le_bytes());
+        b[16..20].copy_from_slice(&self.late_frames.to_le_bytes());
+        b[20..24].copy_from_slice(&self.decode_p99_us.to_le_bytes());
+        b[24..32].copy_from_slice(&self.last_timecode_100ns.to_le_bytes());
+        Ok(b)
     }
 
     pub fn decode(b: &[u8]) -> Result<Self, ReportError> {
-        Err(ReportError::WrongLength(b.len())) // RED stub (issue 1387)
+        if b.len() != REPORT_LEN {
+            return Err(ReportError::WrongLength(b.len()));
+        }
+        if b[0] != REPORT_MAGIC {
+            return Err(ReportError::BadMagic);
+        }
+        if b[1] != REPORT_VERSION {
+            return Err(ReportError::BadVersion(b[1]));
+        }
+        let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        let mut tc = [0u8; 8];
+        tc.copy_from_slice(&b[24..32]);
+        Ok(Self {
+            camera_id: b[2],
+            max_bpp: b[3] as u32,
+            seq: u32_at(4),
+            frames: u32_at(8),
+            lost_slices: u32_at(12),
+            late_frames: u32_at(16),
+            decode_p99_us: u32_at(20),
+            last_timecode_100ns: u64::from_le_bytes(tc),
+        })
     }
 }
 

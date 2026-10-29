@@ -247,10 +247,96 @@ impl AutoBpp {
     }
 
     /// One second at `now_s`.
-    pub fn tick(&mut self, _s: &Second, _now_s: f64) -> Decision {
-        // RED stub (issue 1387): the controller decides nothing yet
-        let _ = (Self::step, Self::penalize);
-        Decision::Hold(Hold::SilentReceiver)
+    pub fn tick(&mut self, s: &Second, now_s: f64) -> Decision {
+        if self.pending.is_some() {
+            return Decision::Hold(Hold::Pending);
+        }
+        let floor = self.cfg.min;
+        let down = self.current.saturating_sub(1).max(floor);
+        // the sender's own trouble: at once
+        if self.current > floor && s.dropped_busy > 0 {
+            return self.step(down, StepReason::DroppedFrame);
+        }
+        if self.current > floor
+            && s.frames > 0
+            && s.encode_p99_ms > self.cfg.down_fraction * self.cfg.budget_ms
+        {
+            return self.step(down, StepReason::EncodeSlow);
+        }
+        let fresh = self
+            .report
+            .filter(|(_, at)| now_s - at <= self.cfg.silent_after_s)
+            .map(|(r, _)| r);
+        let about_current = |r: &ReceiverReport| {
+            self.current_since_tc
+                .is_some_and(|since| r.frames > 0 && r.last_timecode_100ns >= since)
+        };
+        if let Some(r) = fresh {
+            // the receiver's cap applies whatever frames it describes
+            if r.max_bpp > 0 && self.current > r.max_bpp.max(floor) {
+                let to = r.max_bpp.max(floor);
+                return self.step(to, StepReason::ReceiverCap);
+            }
+            if about_current(&r) && self.acted_seq != Some(r.seq) && self.current > floor {
+                if r.lost_slices > 0 {
+                    self.acted_seq = Some(r.seq);
+                    return self.step(down, StepReason::ReceiverLoss);
+                }
+                if r.late_frames > 0 {
+                    self.acted_seq = Some(r.seq);
+                    return self.step(down, StepReason::ReceiverLate);
+                }
+            }
+        }
+        // is this second clean?
+        let Some(r) = fresh else {
+            self.streak = 0;
+            return Decision::Hold(Hold::SilentReceiver);
+        };
+        if s.frames == 0 {
+            self.streak = 0;
+            return Decision::Hold(Hold::NoFrames);
+        }
+        if s.dropped_busy > 0
+            || s.encode_errors > 0
+            || s.encode_p99_ms >= self.cfg.up_headroom * self.cfg.budget_ms
+        {
+            self.streak = 0;
+            return Decision::Hold(Hold::NoHeadroom);
+        }
+        if !about_current(&r) {
+            return Decision::Hold(Hold::ReportNotYetCurrent);
+        }
+        if r.lost_slices > 0 || r.late_frames > 0 {
+            // at the floor: nothing lower to go to, and not clean
+            self.streak = 0;
+            return Decision::Hold(Hold::NoHeadroom);
+        }
+        self.streak = self.streak.saturating_add(1);
+        self.clean_at_level = self.clean_at_level.saturating_add(1);
+        let next = self.current + 1;
+        if self.clean_at_level >= self.cfg.decay_after_s {
+            self.clean_at_level = 0;
+            if let Some(f) = self.failed.get_mut(next as usize) {
+                *f = f.saturating_sub(1);
+            }
+        }
+        let ceiling = if r.max_bpp > 0 {
+            self.cfg.max.min(r.max_bpp)
+        } else {
+            self.cfg.max
+        };
+        if next > ceiling {
+            return Decision::Hold(Hold::AtCeiling);
+        }
+        let needed = self.needed_for(next);
+        if self.streak >= needed {
+            return self.step(next, StepReason::Clean { needed_s: needed });
+        }
+        Decision::Hold(Hold::Counting {
+            streak: self.streak,
+            needed,
+        })
     }
 }
 
