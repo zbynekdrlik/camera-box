@@ -70,10 +70,34 @@ impl CongestionMeter {
 
     /// The period just ended (module doc), then a fresh period.
     pub fn take(&mut self) -> CongestionSample {
-        let _ = (p50(&mut []), to_us(0), &self.minima, STEP_RESET_100NS);
+        let span = p50(&mut self.spans).map(to_us);
+        let mut queue = None;
+        if let Some(mid) = p50(&mut self.delays) {
+            let min = *self.delays.first().expect("sorted, not empty");
+            let base = self
+                .minima
+                .iter()
+                .copied()
+                .chain([min])
+                .min()
+                .unwrap_or(min);
+            if mid - base > STEP_RESET_100NS {
+                // a clock step: start the base over from this period
+                self.minima.clear();
+            } else {
+                queue = Some(to_us(mid - base));
+            }
+            self.minima.push_back(min);
+            while self.minima.len() > BASE_PERIODS {
+                self.minima.pop_front();
+            }
+        }
         self.delays.clear();
         self.spans.clear();
-        CongestionSample::default()
+        CongestionSample {
+            queue_delay_us: queue,
+            span_p50_us: span,
+        }
     }
 }
 

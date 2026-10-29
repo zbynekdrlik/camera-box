@@ -174,15 +174,68 @@ impl Congestion {
 
     /// Judge `r` at `now_s` (the caller's seconds). A report already judged (the same seq) holds.
     pub fn on_report(&mut self, r: &PathReport, now_s: f64) -> CongestionStep {
-        let _ = (
-            r,
-            now_s,
-            self.over_streak,
-            self.clean_streak,
-            self.last_seq,
-            self.last_bpp_down_s,
-        );
-        self.hold()
+        if self.last_seq == Some(r.seq) {
+            return self.hold();
+        }
+        self.last_seq = Some(r.seq);
+        let c = self.cfg;
+        let stretch_over = match (r.recv_span_us, r.send_span_us) {
+            (Some(rx), Some(tx)) => {
+                let bound = (c.stretch_overuse_us as f64).max(c.stretch_overuse_frac * tx as f64);
+                rx as f64 - tx as f64 > bound
+            }
+            _ => false,
+        };
+        let queue_over = r.queue_delay_us.is_some_and(|q| q > c.queue_overuse_us);
+        let delay_over = queue_over || stretch_over;
+        let before = self.factor;
+        if delay_over || r.lost_slices > 0 {
+            self.state = PathState::Overuse;
+            self.clean_streak = 0;
+            self.factor = (self.factor * c.decrease).max(c.min_factor);
+            let mut bpp_down = false;
+            if delay_over {
+                self.over_streak += 1;
+                let settled = self
+                    .last_bpp_down_s
+                    .is_none_or(|t| now_s - t >= c.bpp_settle_s);
+                if self.over_streak >= c.bpp_after_overuse && settled {
+                    bpp_down = true;
+                    self.last_bpp_down_s = Some(now_s);
+                }
+            } else {
+                self.over_streak = 0;
+            }
+            return CongestionStep {
+                factor: self.factor,
+                bpp_down,
+                state: self.state,
+                changed: self.factor != before,
+            };
+        }
+        self.over_streak = 0;
+        let measured = r.queue_delay_us.is_some() || r.recv_span_us.is_some();
+        let clean = measured && r.queue_delay_us.is_none_or(|q| q < c.queue_clear_us);
+        if clean {
+            self.state = PathState::Clean;
+            self.clean_streak += 1;
+            if self.clean_streak >= c.clean_before_increase {
+                self.factor = (self.factor + c.increase_step).min(1.0);
+            }
+        } else {
+            self.state = if measured {
+                PathState::Hold
+            } else {
+                PathState::Unknown
+            };
+            self.clean_streak = 0;
+        }
+        CongestionStep {
+            factor: self.factor,
+            bpp_down: false,
+            state: self.state,
+            changed: self.factor != before,
+        }
     }
 }
 

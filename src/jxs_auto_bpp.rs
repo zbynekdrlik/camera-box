@@ -301,6 +301,10 @@ impl AutoBpp {
         {
             return self.step(down, StepReason::EncodeSlow);
         }
+        // the path's queue grew before any loss: one step, the controller rate-limits its asks
+        if self.current > floor && s.congested {
+            return self.step(down, StepReason::Congestion);
+        }
         let fresh = self
             .report
             .filter(|(_, at)| now_s - at <= self.cfg.silent_after_s)
@@ -339,6 +343,7 @@ impl AutoBpp {
         }
         if s.dropped_busy > 0
             || s.encode_errors > 0
+            || s.congested
             || s.encode_p99_ms >= self.cfg.up_headroom * self.cfg.budget_ms
         {
             self.streak = 0;

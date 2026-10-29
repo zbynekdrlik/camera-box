@@ -115,8 +115,27 @@ pub fn frame_need_mbps(frame_wire_bytes: u64, fps: u32) -> u64 {
 
 /// The decision (module doc).
 pub fn decide(i: &PaceInputs) -> PaceDecision {
-    let _ = frame_need_mbps(0, 0);
-    decide_links(i)
+    let d = decide_links(i);
+    let pct = i.congestion_pct as u64;
+    if d.source == PaceSource::Fixed || pct == 0 || pct >= 100 {
+        return d;
+    }
+    let base = match d.mbps {
+        0 => match i.own_link_mbps.or(i.receiver_link_mbps) {
+            Some(l) => l as u64,
+            None => return d,
+        },
+        m => m as u64,
+    };
+    let lowered = clamp((base * pct / 100).max(frame_need_mbps(i.frame_wire_bytes, i.fps)));
+    if (lowered as u64) < base {
+        PaceDecision {
+            mbps: lowered,
+            source: PaceSource::Congestion,
+        }
+    } else {
+        d
+    }
 }
 
 /// Rules 1-3 (module doc): the pace from the two links alone.
