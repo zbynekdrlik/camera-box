@@ -14,8 +14,13 @@
 //!
 //! The frame is ONE contiguous `u16` buffer: `width * height` luma samples, then
 //! `width * height` interleaved chroma samples (Cb0 Cr0 Cb1 Cr1 ...). Each 8-bit sample `v`
-//! becomes `v << 8 | v` (`v * 257`), so 0 maps to 0 and 255 to 65535. The capture's
-//! limited-range signal stays where it is: the conversion re-scales nothing (issue 1430).
+//! becomes `v << 8 | v` (`v * 257`, bit replication, the design's choice), so 0 maps to 0 and
+//! 255 to 65535. This is NOT a range conversion: the limited-range signal (issue 1430) keeps its
+//! levels. Against a plain `v << 8` it adds a gain of 1/256 (8-bit white 235 becomes 60395, not
+//! 60160; a 10-bit reader sees 943 instead of 940); an 8-bit reader (`>> 8`) gets `v` back exactly.
+//!
+//! Each `NdiSender` reads the switch and logs its start line on its own, so a process with a
+//! second sender (the cam1-burn path) logs it once per sender.
 //!
 //! The default send stays `UYVY`, byte-identical to before: the switch `CAMERA_BOX_NDI_FORMAT`
 //! is read once at sender creation ([`parse_send_format`]), and only a `YUYV` capture (the
@@ -110,8 +115,7 @@ pub fn p216_line_stride_bytes(width: usize) -> usize {
 /// What `NdiSender` hands the SDK for a converted P216 frame: the FourCC and
 /// `line_stride_in_bytes`. One place, so the send wiring is pinned by a test.
 pub fn p216_send_params(width: usize) -> (u32, usize) {
-    let _ = width;
-    (0, 0)
+    (NDI_FOURCC_P216, p216_line_stride_bytes(width))
 }
 
 /// Why a frame could not be converted.
@@ -216,7 +220,8 @@ pub fn convert_yuyv_to_p216(
             unsafe { avx2_row(row, y, c) };
             continue;
         }
-        let _ = use_avx2;
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = use_avx2; // only the x86_64 build has an AVX2 kernel
         scalar_row(row, y, c);
     }
     Ok(())

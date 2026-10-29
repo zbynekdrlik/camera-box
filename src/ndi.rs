@@ -643,9 +643,9 @@ impl NdiSender {
         // Detect AVX2 support for SIMD optimization
         let has_avx2 = Self::detect_avx2();
         if has_avx2 {
-            tracing::info!("NDI sender: AVX2 SIMD enabled for YUYV→UYVY conversion");
+            tracing::info!("NDI sender: AVX2 SIMD enabled for YUYV→UYVY and YUYV→P216 conversion");
         } else {
-            tracing::info!("NDI sender: Using scalar YUYV→UYVY conversion");
+            tracing::info!("NDI sender: Using scalar YUYV→UYVY and YUYV→P216 conversion");
         }
 
         tracing::info!(
@@ -1084,11 +1084,11 @@ impl NdiSender {
             // Processing.NDI.structs.h:237-239: line_stride_in_bytes is the inter-line stride in
             // bytes; for P216 that is the luma plane's `width * 2`, and the CbCr plane that
             // immediately follows it (structs.h:70-75) has the same stride.
-            let stride_bytes = crate::yuyv_to_p216::p216_line_stride_bytes(width as usize);
+            let (p216_fourcc, stride_bytes) = crate::yuyv_to_p216::p216_send_params(width as usize);
             return self.send_converted(
                 width,
                 height,
-                crate::yuyv_to_p216::NDI_FOURCC_P216,
+                p216_fourcc,
                 self.p216_buffer.as_ptr() as *const u8,
                 stride_bytes as u32,
                 timecode_100ns,
