@@ -125,7 +125,7 @@ impl CbjxsSendStats {
             reserved: [0; 3],
             pace_mbps: w.pace_mbps,
             reserved2: 0,
-            wire_ms_avg: avg(w.wire_ms_sum, w.frames),
+            wire_ms_avg: avg(w.wire_ms_sum, w.wire_frames),
             wire_ms_max: w.wire_ms_max,
         }
     }

@@ -95,8 +95,7 @@ pub fn segments_per_send(pacing: bool) -> usize {
 /// 800 Mb/s 7 bpp alone is ~19 ms of wire). A pace too slow for the frame rate shows as
 /// `dropped_busy`, which steps the bpp down by itself.
 pub fn codec_ms(encode_ms: f64, paced_ns: u64) -> f64 {
-    let _ = paced_ns;
-    encode_ms
+    (encode_ms - paced_ns as f64 / 1e6).max(0.0)
 }
 
 /// The running send schedule of one paced link (module doc).
@@ -149,7 +148,7 @@ impl PaceSchedule {
                 // late by `lag`: keep at most half a burst of it as credit, so the sends that
                 // follow catch up by no more than half a burst back to back
                 let lag = ready_ns - due;
-                let _ = lag;
+                self.anchor_ns += lag.saturating_sub(tolerance / 2);
                 ready_ns
             }
             _ => {

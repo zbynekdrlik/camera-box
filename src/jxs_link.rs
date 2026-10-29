@@ -462,7 +462,7 @@ impl SendWindow {
                 .map_or("-".to_string(), |a| format!("{a:.1}")),
             self.reports,
             self.pace_mbps,
-            avg(self.wire_ms_sum, self.frames),
+            avg(self.wire_ms_sum, self.wire_frames),
             self.wire_ms_max,
         )
     }

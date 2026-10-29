@@ -41,7 +41,9 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   500 Mb/s measured ~24.5 ms vs 15.6 ms at line rate: never pace a CAMBOX (1 GbE into the strih's
   10 GbE, no port steps the burst down; `CAMERA_BOX_JXS_PACE_MBPS` defaults to 0). The ONE
   exception is a link that steps DOWN on the way: the strih program output (10 GbE) to stream-snv
-  (1 GbE) loses slices at line rate, so it paces (section "Send pacing" below).
+  (1 GbE) loses slices at line rate, so it paces (section "Send pacing" below; decided by the
+  main session in the slice-3 fix item of comment 6507194583 and its lane brief, 29.10.2026; the
+  cambox default stays line rate, so the owner's choice above is unchanged for the cameras).
 - No hardware change: the camboxes stay on 1 GbE.
 - **30 fps, the strih grid** (owner decision 29.10.2026, slice 1b): only the frames on the strih
   30 fps grid go over JPEG XS; NDI stays at 60 fps, unchanged. The encode budget is 33.3 ms.
@@ -179,18 +181,26 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   - **The schedule (`PaceSchedule`):** counted in WIRE bytes, each datagram's payload + 66
     (UDP/IPv4/Ethernet/FCS/preamble/IFG), so `pace_mbps` compares with the port speed. Exact:
     `anchor + ceil(bits x 1000 / mbps)`, nothing rounded per send, so no drift over a frame or
-    a day. A send ready later than due by up to one burst's wire time keeps the schedule (a late
-    wake catches up); later than that the link was idle and the schedule restarts at that instant
-    (no saved-up credit, no burst).
+    a day. A send ready later than due keeps at most HALF a burst of its lateness as credit (a
+    50 us late wake catches up fully, pinned by `a_thread_that_wakes_late_every_time_keeps_the_rate`);
+    more than half a burst moves the schedule later; more than one burst (`tolerance_ns`) = the
+    link was idle and the schedule restarts at that instant.
   - **Bounded bursts:** while pacing one GSO send carries at most `PACE_BURST_SEGMENTS` (16)
     datagrams (24608 wire bytes, ~0.22 ms at 900 Mb/s); a longer slice is split into such
-    groups (`send_ranges`). Line rate keeps the 40-datagram sends.
+    groups (`send_ranges`). With the credit, at most 1.5 groups (~37 KB) ever reach the switch
+    faster than the pace (`after_a_late_send_at_most_half_a_burst_follows_back_to_back`; review
+    round 1: a full-tolerance credit let two whole groups go back to back). Line rate keeps the
+    40-datagram sends.
   - **Budget:** a 1080p frame at 900 Mb/s takes 9.8 ms at 4 bpp, 19.7 at 8, 29.4 at 12 (pinned
     by `a_frame_at_900_mbps_finishes_within_the_30_fps_budget_up_to_12_bpp`), under 33.3 ms.
-  - **`encode_ms` now includes the paced wire time** (it always included the send). At 900 Mb/s
-    8 bpp ~19.7 ms stays under the auto bpp's climb bound (60 % of 33.3 = 20 ms) and far under
-    its step-down bound (90 %); a lower pace makes the auto bpp settle lower, which is right (the
-    wire carries less). `wire_ms_avg/max` on the status line separates the wire from the codec.
+  - **The status line's `encode_ms` includes the paced wire time** (it always included the
+    send), but the AUTO BPP does not see it: `send_slice_paced` reports the time the schedule held
+    the sends back (`SliceSent::paced_ns`) and the controller gets `pace::codec_ms` = encode minus
+    that. Otherwise the climb rule (p99 < 60 % of 33.3 ms, judged at the level BELOW the step)
+    would cap the bpp by the pace: at 800 Mb/s 7 bpp alone is ~19 ms of wire (review round 1). A
+    pace too slow for the frames backs them up into `dropped_busy`, which steps the bpp down on its
+    own. `wire_ms_avg/max` = first send -> last send returned per whole frame (`wire_frames`
+    divides); at line rate it is the encoder's slice span, not the wire.
   - Settings: the cambox `CAMERA_BOX_JXS_PACE_MBPS` (default 0, a refused value WARNs and keeps
     line rate), the C ABI's `cbjxs_send_config.pace_mbps`, the strih output's `jxs_pace_mbps`
     (default 900, below). The "link ON" line names it (`send line rate (no pacing)` / `send paced
@@ -501,7 +511,10 @@ wire.
   range), `jxs_pace_mbps` (**default 900**: strih-snv sends on 10 GbE and stream-snv, the only
   target today, receives on a 1 GbE port whose switch buffer dropped the tail of every line-rate
   slice burst, `lost_slices` 1-15 in 10 of 21 windows of the slice-3 run, so the auto bpp held at
-  4; 900 leaves room on that port for NDI and carries even 12 bpp in time; 0 = line rate, the
+  4; 900 carries even 12 bpp in time (29.4 ms); the port's other traffic, `NDI 2ME PGM` and the
+  rest, read 108 Mb/s on stream-snv's enp56s0 (rx_bytes over 10 s, 29.10.2026, JPEG XS off), so
+  while a frame is on the wire the port is offered ~1008 Mb/s: ~8 Mb/s over for ~20 ms at 8 bpp,
+  a ~20 KB queue the switch absorbs; if `lost_slices` stays > 0, 850 or 800 is the next step; 0 = line rate, the
   `cb_jxs_out_pace_mbps` clamp keeps any other value inside 100..100000, so a start never fails on
   it; a 10 GbE receiver can take 0 or a higher pace), `jxs_bpp_min` / `jxs_bpp_max` (0 = 4 / 8;
   equal = fixed), `jxs_cores` (a cpulist, empty =
