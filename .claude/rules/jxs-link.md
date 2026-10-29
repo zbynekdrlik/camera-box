@@ -80,7 +80,12 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     moves a picture INTO the session (the library reads its planes, writes its bitstream);
     `EncoderOutput::recv_frame` returns it after its last packet. The library allows it: a 10-deep
     input FIFO, the final stage re-orders output by frame number. `abandon` closes after a codec
-    error and returns every held picture. **`threads_num` 0 meant ONE slice-pack thread**
+    error and returns every held picture; the feeder re-opens and resubmits that frame once.
+    `EncoderOutput` is `Send` but NOT `Sync` (a compile-time proof in session.rs): only one
+    thread reads packets and may close the handle. `MAX_IN_FLIGHT` (8) stays below the library's
+    10-deep input FIFO (const-asserted): `submit` holds the session lock across the BLOCKING
+    `send_picture`, so a full FIFO would deadlock against `recv_frame`.
+    **`threads_num` 0 meant ONE slice-pack thread**
     (latency profile: `pack_stage_threads_num = MAX(1, threads_num - 2)`): slice 1 packed all 68
     slices of a frame serially, the 16.9 ms live encode. `with_slice_threads(n)` sets n + 2.
   - The status line every 5 s: `jxs send: fps= bpp= frames= slices= bytes= dropped_busy=
@@ -88,6 +93,12 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     encode_errors= (issue 1387)`. `in_flight` counts a frame from its submit to its last packet;
     `first_slice_ms` = the converted frame queued -> its first packet sent; `encode_ms` = submit ->
     last packet sent.
+  - **Wedge alarm:** the status line lives on `jxs-send`, the thread a hung `get_packet` would
+    stop. So `jxs-send` stamps a progress clock every loop turn and every packet, and `jxs-feed`
+    checks it every 500 ms: a frame in flight with no packet for 2 s (`encoder_wedged`,
+    `WEDGE_MS`) logs ONE `CRITICAL jxs send: encoder wedged -- N frame(s) in flight, no packet for
+    X ms` line (and one when packets flow again). Alert-only, never an exit: NDI is untouched.
+    Dropping the hand-off waits at most 2 s for its threads, then leaves them detached.
   - `UDP_SEGMENT` (GSO) is a socket option: one `send` per slice (up to 40 datagrams per send).
     A GSO send that fails with EIO (no checksum offload) or EINVAL switches the socket to one send
     per datagram for good (and clears the option), logged once. IPv4 only: the 1472-byte datagram
