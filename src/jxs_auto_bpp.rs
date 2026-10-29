@@ -199,7 +199,7 @@ impl AutoBpp {
     pub fn note_report(&mut self, r: ReceiverReport, now_s: f64) {
         if let Some((old, _)) = self.report {
             if r.seq < old.seq {
-                if old.seq - r.seq <= REORDER_WINDOW && false {
+                if old.seq - r.seq <= REORDER_WINDOW {
                     // a datagram that arrived late (UDP reorders): older than what is known
                     return;
                 }

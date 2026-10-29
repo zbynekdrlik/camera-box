@@ -1461,7 +1461,12 @@ async fn run_capture_loop(
                         yuyv: info.fourcc.str().map(|f| f == "YUYV").unwrap_or(false),
                         timecode_100ns: capture_timecode_100ns,
                         emit_fps: send_fps,
-                        capture_realtime_100ns,
+                        // the RAW capture instant (never the tracker's slot middle the timecode
+                        // is floored from while locked), for the handoff diagnostics' split
+                        capture_realtime_100ns: camera_box::genlock_stamp::capture_realtime_100ns(
+                            info.capture_monotonic_100ns,
+                            mono_to_real_offset_100ns,
+                        ),
                     });
                 }
                 // #1242 — the per-camera NDI send stagger, ONCE per emitted iteration: after the

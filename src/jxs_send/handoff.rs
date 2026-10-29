@@ -402,7 +402,7 @@ impl Sessions {
             return Ok(true);
         }
         self.input = None;
-        if self.refused_geometry.is_some_and(|g| (g.0, g.1) == (w, h)) {
+        if self.refused_geometry == Some((w, h, want)) {
             return Ok(false);
         }
         match open_session(w, h, self.threads, want, &self.cores) {
