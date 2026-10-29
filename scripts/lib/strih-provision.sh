@@ -1564,13 +1564,15 @@ EOF
 # RELAYS prints nothing and returns 1, never a partial config.
 # Seeded ONLY IF absent (setup-strih step 16c [ ! -f ] guard) so the operator's live edits are kept.
 strih_bkshading_config_text() {
-  local bind="${1:-0.0.0.0:8770}" relays cams n e transport address
+  local bind="${1:-0.0.0.0:8770}" relays cams fleet n e transport address
   if [ "$#" -ge 2 ]; then relays="$2"; else relays="$(strih_lx_bkshading_relays)" || return 1; fi
   if [ "$#" -ge 3 ]; then cams="$3"; else cams="$(strih_box_fact STRIH_CAMERAS)" || return 1; fi
   if [[ ! "$cams" =~ ^[1234567]( [1234567])*$ ]]; then
     echo "strih_bkshading_config_text: no venue cameras to list ('${cams}')" >&2; return 1
   fi
   strih_box_bkshading_relays_ok "$relays" "strih_bkshading_config_text: " "$cams" || return 1
+  # issue 1431: the visiting blocks are every other venue's cameras, read from the strih fact files.
+  fleet="$(strih_box_fleet_cameras)" || return 1
   local -A tr=() ad=()
   if [ "$relays" != none ]; then
     for e in $relays; do
@@ -1609,7 +1611,7 @@ EOF
     fi
     printf 'ndi_preview = "CAM%s (usb)"\ngrab_fps = 60\n' "$n"
   done
-  for n in 1 2 3 4 5 6 7; do
+  for n in $fleet; do
     case " $cams " in *" $n "*) continue ;; esac
     printf '\n[[camera]]\nid = "cam%s"\nlabel = "Cam %s"\n' "$n" "$n"
     printf '# the other venue'"'"'s camera: listed once its relay registers here (issue 1431, a joint event)\n'

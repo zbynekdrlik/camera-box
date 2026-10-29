@@ -143,8 +143,8 @@ pub fn strih_lan_log_line(
     }
     Some(match now {
         Some(ip) => format!(
-            "NDI display: {STRIH_DNS_NAME} resolves to {ip} -- the preview follows the strih \
-             interkom output published from it (#1431)"
+            "NDI display: {STRIH_DNS_NAME} resolves to {ip} -- the preview prefers the strih \
+             interkom output published from it, else the strih name rules (#1431)"
         ),
         None => format!(
             "NDI display: {STRIH_DNS_NAME} does not resolve -- the preview keeps the strih name \
@@ -647,16 +647,16 @@ mod tests {
         assert_eq!(
             strih_lan_log_line(None, snv).as_deref(),
             Some(
-                "NDI display: strih.lan resolves to 10.77.9.202 -- the preview follows the strih \
-                 interkom output published from it (#1431)"
+                "NDI display: strih.lan resolves to 10.77.9.202 -- the preview prefers the strih \
+                 interkom output published from it, else the strih name rules (#1431)"
             )
         );
         assert_eq!(strih_lan_log_line(Some(&snv), snv), None);
         assert_eq!(
             strih_lan_log_line(Some(&snv), pp).as_deref(),
             Some(
-                "NDI display: strih.lan resolves to 10.77.8.202 -- the preview follows the strih \
-                 interkom output published from it (#1431)"
+                "NDI display: strih.lan resolves to 10.77.8.202 -- the preview prefers the strih \
+                 interkom output published from it, else the strih name rules (#1431)"
             )
         );
         assert_eq!(

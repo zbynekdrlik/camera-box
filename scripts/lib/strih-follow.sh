@@ -54,12 +54,15 @@ strih_follow_strih_rows() {
 # one "FAIL: <reason>" line naming the address and the known strih addresses. Always rc 0 (the caller grades
 # the text, so a bare-statement call under set -e never aborts).
 strih_follow_verdict() {
-  local ip="${1:-}" rows known="" box addr name
+  local ip="${1:-}" rows known="" box addr name err
   name="$(strih_follow_dns_name)"
-  if ! rows="$(strih_follow_strih_rows 2>&1)"; then
-    printf 'FAIL: %s\n' "${rows##*$'\n'}"
+  err="$(mktemp)" || { printf 'FAIL: could not create a temp file to read the strih list (issue 1431)\n'; return 0; }
+  if ! rows="$(strih_follow_strih_rows 2>"$err")"; then
+    printf 'FAIL: %s\n' "$(tail -n 1 "$err")"
+    rm -f "$err"
     return 0
   fi
+  rm -f "$err"
   while IFS=$'\t' read -r box addr; do
     [ -n "$box" ] || continue
     known="${known:+${known}, }${box} ${addr}"
