@@ -419,6 +419,12 @@ impl Sessions {
             Err(_) => {
                 self.refused_geometry = Some((w, h));
                 // a step the controller waits on is not coming (else it holds Pending for good)
+                job_tx
+                    .send(Job::Refused {
+                        bpp: want,
+                        penalize: false,
+                    })
+                    .map_err(|_| ())?;
                 Ok(false)
             }
         }

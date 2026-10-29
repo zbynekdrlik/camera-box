@@ -98,17 +98,25 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     slices of a frame serially, the 16.9 ms live encode. `with_slice_threads(n)` sets n + 2.
   - The status line every 5 s: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
     dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
-    first_slice_ms_avg/max= encode_ms_avg/max= send_errors= encode_errors= report_age_s=
-    (issue 1387)`. `handoff_age_ms` (coordinator request 29.10, the cam5 sawtooth: the receiver's
-    first arrival after the timecode wandered 21-39 ms, ~+3.5 ms per 5 s then a reset, while the
-    capture phase tracker was locked at +18 ppm) = the wall clock (`CLOCK_REALTIME`, the
+    capture_age_ms_avg/min/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
+    encode_errors= report_age_s= (issue 1387)`.
+  - **`handoff_age_ms` / `capture_age_ms`** (coordinator request 29.10, the cam5 sawtooth: the
+    receiver's first arrival after the timecode wandered 21-39 ms, ~+3.5 ms per 5 s then a reset,
+    while the capture phase tracker was locked at +18 ppm): the wall clock (`CLOCK_REALTIME`, the
     dantesync-disciplined clock the genlock timecode is stamped on, read with
-    `jxs_recv::realtime_100ns`) minus the frame's timecode at the moment the capture thread
-    hands a grid frame to `JxsHandoff::offer` (a busy-dropped one too), avg/min/max per window,
-    `-/-/-` with none. Pure stat `jxs_link::HandoffAge` + `handoff_age_100ns`; the capture thread
-    only `try_lock`s it (a sample is skipped, never waited for; no allocation). It splits the
-    wander: if it sawtooths here, it sits on the cambox before the hand-off (V4L2 queue
-    residence, the emit gate); if it stays flat, it is after (encode, send, network, receiver). `bpp` = the bpp of the session whose
+    `jxs_recv::realtime_100ns`) minus the frame's TIMECODE / minus its CAPTURE instant
+    (`JxsFrame::capture_realtime_100ns`, main.rs's `capture_realtime_100ns`, 0 = unknown = no
+    capture sample), at the moment the capture thread hands a grid frame to `JxsHandoff::offer`
+    (a busy-dropped one too), avg/min/max per window, `-/-/-` with none. The timecode is the
+    emit-grid boundary AT OR BEFORE the capture (`genlock_emit_timecode_100ns` floors), so
+    `handoff_age` = the capture's phase inside its slot (0..16.7 ms at 60 fps) + `capture_age`,
+    and `capture_age` alone = capture -> hand-off (V4L2 queue residence, the emit gate). An
+    18 ms sawtooth in `handoff_age` with a flat `capture_age` is the slot phase sliding; one in
+    `capture_age` sits in the queue/gate; both flat = after the hand-off (encode, send, network,
+    receiver). Pure stat `jxs_link::HandoffAge` + `handoff_age_100ns`; the capture thread only
+    `try_lock`s the one `Mutex<[HandoffAge; 2]>` (a sample is skipped, never waited for; no
+    allocation).
+  - `bpp` = the bpp of the session whose
     frames went out last; `bpp_reason` the last change's reason (`-` = none yet);
     `report_age_s` seconds since the last receiver report (`-` = never one: the auto bpp holds).
     `in_flight` counts a frame from its submit to its last packet; `first_slice_ms` = the converted
@@ -192,13 +200,17 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     above `max` or the receiver's cap. One unclean second, or a second whose report is not yet
     about the current bpp, restarts the count. One report counts for ONE clean second (its seq
     must move on; a receiver reporting slower than the tick is not credited twice).
-  - A report of a receiver that finished NO frame but lost slices (everything is being lost)
-    counts as a loss at the current bpp.
+  - A report with no frame says nothing about the bpp (no timecode to tie a loss to): the
+    receiver counts an undecodable frame as a frame with its timecode and its loss, so a link
+    losing whole frames still steps down. A report whose seq goes BACKWARD (a restarted
+    receiver) clears the acted/counted seqs.
   - NO report for 3 s: hold, both ways (never climb blind; a silent receiver also never steps
     the sender down).
   - Back-off: every step down from level L doubles the clean run needed to climb back to L
-    (10, 20, 40 ... capped at 300 s); 30 min clean below it halves it again. A refused session at
-    a level counts as a failure of it. A receiver CAP adds no back-off (it is the receiver's
+    (10, 20, 40 ... capped at 300 s); 1800 clean REPORTS below it (30 min from a receiver
+    reporting every second) halve it again. A session refused AT that bpp counts as a failure of
+    it (`Job::Refused { penalize: true }`); a refused frame geometry only cancels the pending
+    step (`penalize: false`, `AutoBpp::cancelled`). A receiver CAP adds no back-off (it is the receiver's
     policy, not a failure of the levels above it). `jxs_auto_bpp::LEVELS` (33) bounds the tracked
     levels; `MAX_BPP` (12) is const-asserted below it.
   - Reading the reports consumes the ICMP "port unreachable" a dead receiver queues on the
@@ -250,7 +262,8 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
   `affinity::set_current_thread_fifo_inherited` (FIFO WITHOUT reset-on-fork) right before it opens
   a session, so the library's worker threads (created inside the open) inherit it: the ONE
   deliberate exception to the reset-on-fork rule, documented in affinity.rs. `jxs-send` takes the
-  same priority (`raise_fifo`): a FIFO encoder beside a SCHED_OTHER packet thread on the same
+  same priority (`raise_fifo`) WITH reset-on-fork (`affinity::set_current_thread_fifo_reset_on_fork`,
+  it spawns nothing to pass it to): a FIFO encoder beside a SCHED_OTHER packet thread on the same
   cores would delay the previous frame's slices. Why opt-in: (1) the measured gain on an idle
   pair is ~0.8 ms at p99 and the budget has 2x headroom; (2) it puts 6 more SCHED_FIFO threads
   into camera-box (`jxs-feed`, `jxs-send`, 2 slice + init + final), and while a prepared session

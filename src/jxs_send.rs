@@ -110,10 +110,7 @@ impl JxsSocket {
     /// `send_errors`: on a connected UDP socket an ICMP "port unreachable" from a receiver that
     /// is not listening is reported by whichever call comes first, a send or this read).
     pub fn take_read_errors(&self) -> u64 {
-        {
-            let _ = &self.read_errors;
-            0
-        }
+        self.read_errors.swap(0, Ordering::Relaxed)
     }
 
     /// Whether the kernel accepted [`JXS_SOCKET_MARK`] (`SO_MARK`), i.e. the egress pacing's fw
