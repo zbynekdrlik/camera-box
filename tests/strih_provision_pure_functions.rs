@@ -2887,15 +2887,19 @@ fn bkshading_config_text_seeds_the_venue_cameras_and_is_valid_toml() {
         "must carry the cam2 camera: {cfg}"
     );
     assert!(
-        cfg.contains("address = \"cam2.lan:8771\""),
-        "cam2 relay address (host-independent of the service): {cfg}"
+        cfg.contains("address = \"register:cam2\""),
+        "issue 1431: cam2 is reached first through its relay's registration: {cfg}"
+    );
+    assert!(
+        cfg.contains("fallback_address = \"cam2.lan:8771\""),
+        "cam2 literal relay address as the fallback (host-independent of the service): {cfg}"
     );
     assert!(
         cfg.contains("ndi_preview = \"CAM2 (usb)\""),
         "cam2 NDI preview name: {cfg}"
     );
     assert!(cfg.contains("grab_fps = 60"), "cam2 grab fps: {cfg}");
-    for n in [2, 3, 5] {
+    for n in 1..=7 {
         assert_eq!(
             cfg.matches(&format!("id = \"cam{n}\"\n")).count(),
             1,
@@ -2904,8 +2908,13 @@ fn bkshading_config_text_seeds_the_venue_cameras_and_is_valid_toml() {
     }
     assert_eq!(
         cfg.matches("[[camera]]").count(),
-        3,
-        "strih-snv's venue cameras only (2 3 5): {cfg}"
+        7,
+        "issue 1431: all seven cameras declared (strih.lan picks the strih at a joint event): {cfg}"
+    );
+    assert_eq!(
+        cfg.matches("visiting = true").count(),
+        4,
+        "strih-snv's venue cameras (2 3 5) are listed always, the other four only once registered: {cfg}"
     );
     assert!(
         !cfg.contains("id = \"handheld"),
