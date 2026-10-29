@@ -66,6 +66,10 @@ jobs:
       - name: Clippy (svt-jpegxs-sys)
         run: cargo clippy -p svt-jpegxs-sys --all-targets -- -D warnings
 
+      # Issue 1387 slice 2: the C ABI static library the strih DistroAV build links.
+      - name: Clippy (jxs-recv-ffi)
+        run: cargo clippy -p jxs-recv-ffi --all-targets -- -D warnings
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -140,6 +144,11 @@ jobs:
       # link through camera-box's `jxs` feature).
       - name: Run tests (svt-jpegxs-sys)
         run: cargo nextest run -p svt-jpegxs-sys
+
+      # Issue 1387 slice 2: the C ABI pinned against its header by the C compiler, the static
+      # library linked into a -z defs shared object, and the real-codec loopback through it.
+      - name: Run tests (jxs-recv-ffi)
+        run: cargo nextest run -p jxs-recv-ffi
 
       - name: Build benchmarks (compile check only)
         run: cargo bench --no-run

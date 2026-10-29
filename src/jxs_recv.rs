@@ -226,6 +226,12 @@ unsafe fn parse_cmsgs(h: &libc::msghdr) -> (Option<usize>, Option<i64>) {
 #[cfg(feature = "jxs")]
 pub use decode::{DecodeSink, FINISH_TIMEOUT};
 
+// Issue 1387 slice 2: the one receive loop the probe and the strih OBS source (jxs/recv-ffi) run.
+#[cfg(feature = "jxs")]
+mod receiver;
+#[cfg(feature = "jxs")]
+pub use receiver::{DecodedFrame, JxsReceiver, ReceiverConfig, ReceiverTotals, MAX_READY_FRAMES};
+
 #[cfg(feature = "jxs")]
 mod decode {
     use crate::jxs_link::{FrameReport, SliceSink};
