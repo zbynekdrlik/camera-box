@@ -38,6 +38,20 @@ fn step<'a>(job: &'a str, name: &str) -> &'a str {
 
 const WF: &str = ".github/workflows/linux-genlock.yml";
 
+/// CI's first strih build (run 40909341652) printed the native-libs note in colour
+/// (`ESC[1mESC[92mnote ESC[0mESC[1m: native-static-libs: ...`), so the `^note:` sed matched
+/// nothing and the step refused a perfectly good library. The step must turn colour off.
+#[test]
+fn the_static_library_step_prints_the_native_libs_note_without_colour() {
+    let wf = read(WF);
+    let strih = job(&wf, "linux-genlock-build-strih");
+    let ffi = step(strih, "Build the jxs-recv-ffi static library (issue 1387)");
+    assert!(
+        ffi.contains("CARGO_TERM_COLOR: never"),
+        "the FFI build step must set CARGO_TERM_COLOR: never so the native-libs note is plain text: {ffi}"
+    );
+}
+
 #[test]
 fn the_strih_build_makes_the_static_library_and_hands_it_to_distroav() {
     let wf = read(WF);
