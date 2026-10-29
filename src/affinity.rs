@@ -366,6 +366,11 @@ fn env_capture_core() -> Option<usize> {
 
 /// Online cores from `/sys/devices/system/cpu/online`; falls back to
 /// `sysconf(_SC_NPROCESSORS_ONLN)` if the file can't be read.
+/// Every online core (issue 1387 slice 3: the strih OBS JPEG XS output's default encoder set).
+pub fn online_cores() -> Vec<usize> {
+    read_online_cores()
+}
+
 fn read_online_cores() -> Vec<usize> {
     match std::fs::read_to_string("/sys/devices/system/cpu/online") {
         Ok(s) => parse_cpulist(&s),

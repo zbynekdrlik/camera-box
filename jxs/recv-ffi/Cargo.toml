@@ -15,7 +15,10 @@ crate-type = ["staticlib", "rlib"]
 # Linux only, like the receiver it wraps (recvmmsg, UDP_GRO, SO_TIMESTAMPNS).
 [target.'cfg(target_os = "linux")'.dependencies]
 camera-box = { path = "../..", features = ["jxs"] }
+# Issue 1387 slice 3: the sender's C ABI rides in this crate's static library (the ONE Rust
+# archive DistroAV links; src/lib.rs pulls it in).
+jxs-send-ffi = { path = "../send-ffi" }
+svt-jpegxs-sys = { path = "../sys" }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-svt-jpegxs-sys = { path = "../sys" }
 tempfile = "3.9"

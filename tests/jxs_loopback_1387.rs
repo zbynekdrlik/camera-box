@@ -16,14 +16,14 @@ use camera_box::jxs_recv::{DecodeSink, JxsRecvSocket};
 use camera_box::jxs_send::{JxsFrame, JxsSender};
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
-use svt_jpegxs_sys::{Encoder, EncoderSettings, Yuv422Planes};
+use svt_jpegxs_sys::{Encoder, EncoderSettings, YuvPlanes};
 
 const W: usize = 640;
 const H: usize = 128;
 
 /// A smooth synthetic picture (gradients + a soft circle), shifted by `phase`.
-fn planar(phase: usize) -> Yuv422Planes {
-    let mut p = Yuv422Planes::new(W as u32, H as u32);
+fn planar(phase: usize) -> YuvPlanes {
+    let mut p = YuvPlanes::new(W as u32, H as u32);
     let (py, pu, pv) = p.planes_mut();
     for y in 0..H {
         for x in 0..W {
@@ -44,7 +44,7 @@ fn planar(phase: usize) -> Yuv422Planes {
     p
 }
 
-fn to_yuyv(p: &Yuv422Planes) -> Vec<u8> {
+fn to_yuyv(p: &YuvPlanes) -> Vec<u8> {
     let mut out = Vec::with_capacity(W * H * 2);
     for y in 0..H {
         for x in 0..W / 2 {
@@ -88,8 +88,8 @@ fn a_frame_crosses_loopback_and_decodes_back_within_the_psnr_bound() {
     });
 
     let mut assembler = FrameAssembler::new();
-    let got: RefCell<Option<(FrameReport, Yuv422Planes)>> = RefCell::new(None);
-    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+    let got: RefCell<Option<(FrameReport, YuvPlanes)>> = RefCell::new(None);
+    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
         *got.borrow_mut() = Some((*r, p.expect("decoded").clone()));
     });
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -133,11 +133,11 @@ fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
     let port = rx.local_addr().unwrap().port();
     let tx = JxsSender::start(Some(&format!("127.0.0.1:{port}")), "CAM5").expect("link on");
     const N: usize = 12;
-    let pictures: Vec<Yuv422Planes> = (0..N).map(|k| planar(k * 13)).collect();
+    let pictures: Vec<YuvPlanes> = (0..N).map(|k| planar(k * 13)).collect();
     let base: i64 = 17_618_456_000_000_000;
-    let got: RefCell<Vec<(u64, Yuv422Planes)>> = RefCell::new(Vec::new());
+    let got: RefCell<Vec<(u64, YuvPlanes)>> = RefCell::new(Vec::new());
     let mut assembler = FrameAssembler::new();
-    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
         if let Some(p) = p {
             got.borrow_mut().push((r.timecode, p.clone()));
         }
@@ -206,7 +206,7 @@ fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
 }
 
 /// Encode one picture into its packets.
-fn encode(enc: &mut Encoder, p: &Yuv422Planes) -> Vec<Vec<u8>> {
+fn encode(enc: &mut Encoder, p: &YuvPlanes) -> Vec<Vec<u8>> {
     let (y, u, v) = enc.planes_mut().planes_mut();
     y.copy_from_slice(p.y());
     u.copy_from_slice(p.u());
@@ -255,10 +255,10 @@ fn a_lost_slice_is_concealed_from_the_previous_frame_and_counted() {
     let kc = encode(&mut enc, &pa);
     let lost = 3; // packet 3 = slice 3 = luma rows 32..48
 
-    let mut out: Vec<(FrameReport, Yuv422Planes)> = Vec::new();
+    let mut out: Vec<(FrameReport, YuvPlanes)> = Vec::new();
     {
         let mut a = FrameAssembler::new();
-        let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+        let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
             out.push((*r, p.expect("decoded").clone()));
         });
         push_frame(&mut a, &mut sink, 1000, &ka, None);
@@ -273,7 +273,7 @@ fn a_lost_slice_is_concealed_from_the_previous_frame_and_counted() {
     assert_eq!(out[2].0.lost_slices, 0);
 
     let (a_dec, b_dec) = (&out[0].1, &out[1].1);
-    let rows = |p: &Yuv422Planes, r0: usize, r1: usize| p.y()[r0 * W..r1 * W].to_vec();
+    let rows = |p: &YuvPlanes, r0: usize, r1: usize| p.y()[r0 * W..r1 * W].to_vec();
     let s0 = (lost - 1) * 16;
     // inside the concealed slice (away from its edges) the picture is frame A's
     let conceal_vs_a = psnr(&rows(b_dec, s0 + 4, s0 + 12), &rows(a_dec, s0 + 4, s0 + 12));
@@ -302,8 +302,8 @@ fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) 
 
 /// A 1080-line picture: 69 packets, enough slices to exhaust the decoder's frame pools if a
 /// failed frame were fed to its end.
-fn tall(phase: u8) -> Yuv422Planes {
-    let mut p = Yuv422Planes::new(320, 1080);
+fn tall(phase: u8) -> YuvPlanes {
+    let mut p = YuvPlanes::new(320, 1080);
     let (y, u, v) = p.planes_mut();
     for (i, b) in y.iter_mut().enumerate() {
         *b = ((i % 320) as u8 / 2).wrapping_add(phase);
@@ -326,7 +326,7 @@ fn a_garbled_slice_costs_that_frame_and_the_next_one_decodes() {
         }
         let mut seen = Vec::new();
         let mut a = FrameAssembler::new();
-        let mut sink = DecodeSink::new(|_: &FrameReport, p: Option<&Yuv422Planes>| {
+        let mut sink = DecodeSink::new(|_: &FrameReport, p: Option<&YuvPlanes>| {
             seen.push(p.is_some());
         });
         push_frame(&mut a, &mut sink, 1000, &fa, None);
@@ -351,7 +351,7 @@ fn a_clock_step_back_mid_frame_ends_that_frame_and_the_stream_goes_on() {
         let fb = encode(&mut enc, &planar(50));
         let mut out = Vec::new();
         let mut a = FrameAssembler::new();
-        let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+        let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
             out.push((r.timecode, r.lost_slices, p.is_some()));
         });
         let t0 = 100_000_000u64;
@@ -393,7 +393,7 @@ fn a_bpp_change_mid_stream_decodes_every_frame_with_no_loss() {
         let mut seen: Vec<(u64, u32, bool)> = Vec::new();
         let (errors, last_error) = {
             let mut a = FrameAssembler::new();
-            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
                 seen.push((r.timecode, r.lost_slices, p.is_some()));
             });
             let t0 = 100_000_000u64;
@@ -424,7 +424,7 @@ fn a_bpp_change_mid_stream_decodes_every_frame_with_no_loss() {
 #[test]
 fn after_a_bpp_change_every_picture_is_its_own_and_a_loss_is_concealed_from_the_new_bpp() {
     let (out, header_changes, errors) = within(60, || {
-        let mut frames: Vec<(Yuv422Planes, Vec<Vec<u8>>)> = Vec::new();
+        let mut frames: Vec<(YuvPlanes, Vec<Vec<u8>>)> = Vec::new();
         let mut phase = 0u8;
         for (bpp, n) in [(4u32, 3), (8, 3)] {
             let mut s = EncoderSettings::issue_1387(320, 1080);
@@ -437,10 +437,10 @@ fn after_a_bpp_change_every_picture_is_its_own_and_a_loss_is_concealed_from_the_
                 phase = phase.wrapping_add(53);
             }
         }
-        let mut out: Vec<(u32, Option<Yuv422Planes>)> = Vec::new();
+        let mut out: Vec<(u32, Option<YuvPlanes>)> = Vec::new();
         let (header_changes, errors) = {
             let mut a = FrameAssembler::new();
-            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
                 out.push((r.lost_slices, p.cloned()));
             });
             let t0 = 100_000_000u64;
@@ -481,7 +481,7 @@ fn after_a_bpp_change_every_picture_is_its_own_and_a_loss_is_concealed_from_the_
     }
     // inside the hole (packet 5 = luma rows 64..80) frame 4 shows frame 3's decode, the new bpp's
     let w = 320;
-    let rows = |p: &Yuv422Planes| p.y()[68 * w..76 * w].to_vec();
+    let rows = |p: &YuvPlanes| p.y()[68 * w..76 * w].to_vec();
     let (f3, f4) = (out[3].1.as_ref().unwrap(), out[4].1.as_ref().unwrap());
     let hole_vs_3 = psnr(&rows(f4), &rows(f3));
     let hole_vs_4 = psnr(&rows(f4), &rows(&frames_src(4)));
@@ -492,12 +492,12 @@ fn after_a_bpp_change_every_picture_is_its_own_and_a_loss_is_concealed_from_the_
 }
 
 /// The source picture of frame `k` of the bpp-change test above (the same phase sequence).
-fn frames_src(k: usize) -> Yuv422Planes {
+fn frames_src(k: usize) -> YuvPlanes {
     tall((k as u8).wrapping_mul(53))
 }
 
 /// Encode `n` frames of `tall(phase0 + 53 j)` at `bpp`.
-fn tall_frames_at(bpp: u32, phase0: u8, n: usize) -> Vec<(Yuv422Planes, Vec<Vec<u8>>)> {
+fn tall_frames_at(bpp: u32, phase0: u8, n: usize) -> Vec<(YuvPlanes, Vec<Vec<u8>>)> {
     let mut s = EncoderSettings::issue_1387(320, 1080);
     s.bpp_numerator = bpp;
     let mut enc = Encoder::open(s).unwrap();
@@ -514,12 +514,12 @@ fn tall_frames_at(bpp: u32, phase0: u8, n: usize) -> Vec<(Yuv422Planes, Vec<Vec<
 /// frame's (lost slices, decoded picture), the undecodable count and the header changes.
 fn receive(
     frames: Vec<(Vec<Vec<u8>>, Option<usize>)>,
-) -> (Vec<(u32, Option<Yuv422Planes>)>, u64, u64) {
+) -> (Vec<(u32, Option<YuvPlanes>)>, u64, u64) {
     within(60, move || {
-        let mut out: Vec<(u32, Option<Yuv422Planes>)> = Vec::new();
+        let mut out: Vec<(u32, Option<YuvPlanes>)> = Vec::new();
         let (errors, changes) = {
             let mut a = FrameAssembler::new();
-            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&YuvPlanes>| {
                 out.push((r.lost_slices, p.cloned()));
             });
             let t0 = 100_000_000u64;

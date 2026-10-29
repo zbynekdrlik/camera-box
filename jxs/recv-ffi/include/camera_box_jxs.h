@@ -21,11 +21,17 @@ extern "C" {
 #endif
 
 /* Bumped on any change of a struct or a signature below. */
-#define CBJXS_ABI_VERSION 1u
+#define CBJXS_ABI_VERSION 2u
+
+/* cbjxs_frame.chroma (ABI 2, issue 1387 slice 3: the strih program reaches the stream as 4:2:0).
+ * The same numbers as the sender's CBJXS_SEND_I420 / _I422 / _I444. */
+#define CBJXS_CHROMA_420 1u /* U and V: (width / 2) x (height / 2) */
+#define CBJXS_CHROMA_422 2u /* U and V: (width / 2) x height (a cambox) */
+#define CBJXS_CHROMA_444 3u /* U and V: width x height */
 
 typedef struct cbjxs_receiver cbjxs_receiver;
 
-/* One decoded frame: planar 4:2:2, 8 bit, BT.709 limited range (the cambox capture's format).
+/* One decoded frame: planar 8 bit of `chroma`, BT.709 limited range.
  * The plane pointers stay valid until the next cbjxs_next_frame or cbjxs_close on the receiver. */
 typedef struct cbjxs_frame {
 	uint32_t width;
@@ -34,7 +40,7 @@ typedef struct cbjxs_frame {
 	const uint8_t *u;
 	const uint8_t *v;
 	uint32_t y_stride;  /* bytes per luma row (= width) */
-	uint32_t uv_stride; /* bytes per chroma row (= width / 2) */
+	uint32_t uv_stride; /* bytes per chroma row (width / 2, or width at 4:4:4) */
 	/* The sender's genlock timecode: 100 ns since the Unix epoch (the same stamp its NDI frame
 	 * carries). x 100 = the wall-clock epoch nanoseconds libobs' genlock FIFO expects. */
 	int64_t timecode_100ns;
@@ -44,7 +50,8 @@ typedef struct cbjxs_frame {
 	int64_t decoded_at_100ns;
 	uint32_t lost_slices; /* slices concealed from the previous frame */
 	uint8_t camera_id;
-	uint8_t reserved[3];
+	uint8_t chroma; /* CBJXS_CHROMA_* */
+	uint8_t reserved[2];
 } cbjxs_frame;
 
 /* Counters since the receiver opened. */
