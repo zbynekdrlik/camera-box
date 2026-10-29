@@ -23,9 +23,15 @@ paths:
   - "vendor/distroav/src/jxs-output-decide.h"
   - "vendor/distroav/src/genlock-emit-timecode.h"
   - "tests/distroav_jxs_output_1387.rs"
+  - "vendor/distroav/src/jxs-state-table.h"
+  - "src/genlock_jxs_state.rs"
+  - "vendor/obs-studio/frontend/widgets/GenlockJxs*"
+  - "vendor/obs-studio/frontend/components/SourceTreeItem.*"
+  - "tests/genlock_jxs_state_parity_1387.rs"
+  - "tests/genlock_jxs_indicator_1387.rs"
 ---
 
-# The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3)
+# The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3, and the in-OBS indicator)
 
 A higher-quality camera picture than NDI's SpeedHQ, BESIDE NDI (never instead of it, owner
 decision 6488036928). Slice 1 = the cambox sender + a receive/measure tool; slice 2 = the strih OBS
@@ -565,6 +571,100 @@ wire.
   re-creates the output).
 - `jxs-encode-bench` codes 4:2:2 only; the strih cost of 4:2:0 is read from the live status line.
 - One output, one target. A second receiver needs a second output (not built).
+
+## The in-OBS JPEG XS indicator + the per-source transport tag (design 6506884476)
+
+Owner request 29.10.2026: an indicator in the OBS status bar "like genlock" that says JPEG XS mode
+is on, and per source whether it comes over NDI or JPEG XS.
+
+### The state table and its proc handler (DistroAV, strih Linux build only)
+
+- `vendor/distroav/src/jxs-state-table.h` (C++17, std only): ONE process-wide table, one row per
+  publisher keyed on its own pointer -- `set_entry` (kind, name, detail), `note_frame(now)`,
+  `publish_window(fps x100, bpp x100, lost, undecodable, dropped, errors, report age ms)`, `remove`,
+  `json(now)`. One mutex; `json` copies the rows under it, then sorts (kind, then name) and builds
+  `{"v":1,"entries":[{"kind":"input"|"output","name","detail","age_ms","window","fps_x100",
+  "bpp_x100","lost","undecodable","dropped","errors","report_age_ms"}]}` (age_ms -1 = no frame yet,
+  0 when the clock reads before the frame; names are JSON-escaped).
+- **The accessor is `inline`, never `static inline`** (`cb_jxs_state()`, a function-local static): a
+  `static` one gives jxs-source.cpp and jxs-output.cpp a table EACH and the indicator would see only
+  half of the rows. The gate links two translation units and checks they share it.
+- Fill points: the source creates its row at the thread start (so a source no sender reaches reads
+  DOWN, not absent), refreshes name + `UDP <port>, camera <id>` at every open and window, notes each
+  frame handed to libobs, publishes each 5 s window (lost slices, undecodable, dropped_unread,
+  report_errors) and removes the row when its thread ends. The output creates its row at a
+  successful start (`to <target>`), notes each frame the sender TOOK (under `tx_mutex`, then the
+  table mutex; the reader takes only the table mutex), publishes each window (dropped_busy, send +
+  encode errors + refused, the receiver report age) and removes the row at stop. An output that
+  exists but is not running is not in the table.
+- `camera_box_jxs_state_register()` (jxs-source.cpp, called from `obs_module_load` under the same
+  `#ifdef CAMERA_BOX_JXS_SOURCE`): `proc_handler_add(obs_get_proc_handler(), "void
+  camera_box_jxs_state(out string json)", ...)`, one log line `jxs-state-proc: camera_box_jxs_state
+  registered on the global proc handler`. libobs' proc handler is the existing plugin-to-frontend
+  channel: no new link, and a build without the source (the Windows bundle, imag) simply has no such
+  procedure; `proc_handler_call` then returns false silently and the indicator reads OFF.
+
+### The decision and the widget (frontend, every build)
+
+- **Authority** `src/genlock_jxs_state.rs`; **C port** `vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp`
+  (pure C, compiled whole as C11 AND C++17 by `tests/genlock_jxs_state_parity_1387.rs` over ~6000 row
+  vectors and ~2000 count vectors, plus the names, the tags and the constants).
+- A row: DOWN with no frame for `JXS_DOWN_AGE_MS` (3000, the source's own not-connected bound) or none
+  yet; DEGRADED when its last window ran below `JXS_MIN_FPS_X100` (2700 = 90 % of the 30 fps link),
+  lost / undecodable / dropped / errors > 0, or (the output) its receiver report is missing or older
+  than `JXS_REPORT_MAX_AGE_MS` (3000, the auto bpp's hold bound); before the first window only the age
+  counts.
+- The box: OFF with no row; DOWN = an output down > every input down; DEGRADED = some input down >
+  an output degraded > an input degraded; else OK.
+- `widgets/GenlockJxsReport.{hpp,cpp}` (plain std C++, compiled and replayed as shipped by
+  `tests/genlock_jxs_indicator_1387.rs`): rows in, the label, colour, tooltip, the row behind the
+  reason (the first in table order) and the `jxs-state:` line out. Labels: `JPEG XS: off` (grey
+  `#95a5a6`), `JPEG XS: 1 in / 1 out, 8 bpp` (green; `6-8 bpp` for a spread, no bpp before a
+  window), `JPEG XS: DEGRADED input losing: <row> (2 in / 0 out)` (amber), `JPEG XS: DOWN program
+  output sends nothing: <row> (...)` (red) -- the LOCK widget's colours. The tooltip lists every row:
+  last frame age, fps, bpp, lost slices / undecodable (input), dropped, errors, the receiver report
+  age (output), its health.
+- `widgets/GenlockJxsWidget.{hpp,cpp}`: a QLabel with its own always-on 1 Hz QTimer (a lambda
+  connect, no meta-object macro, no moc), added by `OBSBasicStatusBar`'s constructor right after the
+  LOCK label (`addPermanentWidget(jxsWidget, 0)`); `OBSBasicStatusBar.cpp` (already ~1600 lines) only
+  creates it. It reads the table with `proc_handler_call` + `obs_data_create_from_json`, shows the
+  report, and logs ONE `jxs-state: state=<S> reason=<key> inputs=N down=N degraded=N outputs=N
+  down=N degraded=N entry='<row>'|- (issue 1387)` line on a change of state, reason or row. The
+  `jxs-state:` / `jxs-state-proc:` markers collide with no other log family (pinned).
+- The JSON keys the widget reads are pinned equal to the keys the table writes.
+
+### The per-source transport tag (Sources dock)
+
+- `components/SourceTreeItem.cpp`: a small separate QLabel AFTER the name, `NDI` (grey) for
+  `ndi_source`, `JPEG XS` (blue) for `camera_box_jxs_source`, chosen by the source's UNVERSIONED ID
+  through `genlock_jxs_transport_tag` (the parity-gated header), never by name. Dimmed with the name
+  when the item is hidden.
+- Why this surface: the name label's text is what the rename editor starts from
+  (`new QLineEdit(label->text())`), so a suffix there would be written into the name on rename; a
+  per-type icon is a libobs `OBS_ICON_TYPE_*` + theme-asset change and shows only with the dock's
+  icons on. The tag needs neither and shows icons on or off.
+
+### Tests, mirrors, deploy
+
+- `tests/genlock_jxs_state_parity_1387.rs` (C11 + C++17 vs Rust), `tests/genlock_jxs_indicator_1387.rs`
+  (the table driver incl. concurrent writers and the two-TU share, the report replay graded by the
+  Rust authority, the anchors, the JSON keys, the log family, the pwsh steps). The existing
+  `tests/distroav_jxs_output_1387.rs` g++ `-fsyntax-only` of jxs-source.cpp / jxs-output.cpp covers
+  the proc handler and the fill points against the real libobs headers.
+- Both `windows-genlock{,-fast}.yml` carry `Assert the JPEG XS indicator + per-source transport tag
+  present (issue 1387)`: one `(file, squished needle)` table; the Rust test pins every row of it.
+  Run locally with the portable pwsh (`~/.local/pwsh74/pwsh -File` on the step text from a script).
+- The Qt TUs (`GenlockJxsWidget.cpp`, `OBSBasicStatusBar.cpp`, `SourceTreeItem.cpp`) compile first on
+  CI; locally they pass `g++ -fsyntax-only` with the four-stub recipe of
+  `vendored-obs-frontend-crash-safety.md` (not in `cargo test`: the runners have no Qt 6 headers).
+- **Deploy: the FULL bundle** (a frontend change, `obs64` / `obs` + `distroav.so`), SNV first.
+  Live check after it: strih-snv's status bar reads `JPEG XS: ...` right of the LOCK label, the log
+  carries `jxs-state-proc: ... registered` and a `jxs-state:` line; the `NDI` / `JPEG XS` tags show
+  in the Sources dock; a Windows box (stream on Windows, resolume) reads `JPEG XS: off`.
+- Known limits: a source created but never reached reads DOWN (red) until a sender reaches it or it
+  is removed; the window counters hold for 5 s, so a single lossy window reads DEGRADED for one window;
+  the proc handler is registered once at module load and never removed (libobs has no removal), safe
+  because the frontend's status bar is gone before modules unload.
 
 ## The automatic bpp (issue 1387, owner decision 6495938345)
 
