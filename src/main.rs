@@ -624,6 +624,12 @@ async fn run_capture_loop(
     if genlock_fps.is_some() {
         sender.set_external_pacing(true);
     }
+    // Issue 1430 -- a full-range grabber (the Cam Link 4K) is scaled to the limited range NDI
+    // UYVY means; `CAMERA_BOX_CAPTURE_RANGE=full|limited` overrides the card decision. The
+    // `capture luma:` / `capture chroma:` lines keep reading the RAW capture buffer.
+    sender.set_capture_range(camera_box::capture_range::resolve_and_log(
+        detected_card.as_deref(),
+    ));
     tracing::info!("NDI sender ready, streaming as '{}'", ndi_name);
     tracing::info!("ZERO-COPY mode: AVX2 SIMD + sync send for lowest latency");
 
