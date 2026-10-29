@@ -1,5 +1,5 @@
 //! Issue 1387 -- the JPEG XS link's wiring (std-only, every build): the capture loop calls the
-//! sender only through its off-by-default entry point, after the NDI send; the deployed artifact
+//! sender only through its off-by-default entry point, before the NDI send (slice 1b); the deployed artifact
 //! is built with the codec; every CI job that compiles `--all-features` installs nasm; the
 //! vendored library is built out of tree.
 
@@ -10,8 +10,11 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
+/// Slice 1b (deliberate change of the slice-1 order): the hand-off sits right after the genlock
+/// timecode is fixed and BEFORE the #1242 stagger sleep and the NDI send, so the JPEG XS path
+/// never waits for the NDI send call; it passes the very timecode variable the NDI frame carries.
 #[test]
-fn the_capture_loop_starts_the_link_only_from_the_env_and_offers_after_the_ndi_send() {
+fn the_capture_loop_starts_the_link_only_from_the_env_and_offers_before_the_ndi_send() {
     let m = read("src/main.rs");
     assert_eq!(
         m.matches("JxsSender::start_from_env(").count(),
@@ -20,19 +23,45 @@ fn the_capture_loop_starts_the_link_only_from_the_env_and_offers_after_the_ndi_s
     );
     assert_eq!(m.matches("jxs.offer(").count(), 1, "one hand-off");
     let start = m.find("JxsSender::start_from_env(").unwrap();
-    let send = m.find("emit_one(capture_timecode_100ns);").unwrap();
-    let offer = m.find("jxs.offer(").unwrap();
-    assert!(start < send, "the sender exists before the capture loop");
-    assert!(
-        send < offer,
-        "the NDI send goes first, its timing untouched"
-    );
-    // the hand-off is guarded by the Option the env entry point returns (None = link off)
+    let timecode = m
+        .find(
+            "let capture_timecode_100ns = camera_box::genlock_stamp::genlock_emit_timecode_100ns(",
+        )
+        .unwrap();
+    let noted = m
+        .find(".note_emitted_stamp_100ns(capture_timecode_100ns, out_interval_ns);")
+        .unwrap();
     let guard = m.find("if let Some(jxs) = jxs_sender.as_ref() {").unwrap();
-    assert!(send < guard && guard < offer);
-    // and it passes the same timecode the NDI frame carries
+    let offer = m.find("jxs.offer(").unwrap();
+    let stagger = m.find("camera_box::send_stagger::should_sleep(").unwrap();
+    let repeats = m
+        .find("let starvation_repeats = decimation_gate.last_poll_starvation_repeats();")
+        .unwrap();
+    let send = m.find("emit_one(capture_timecode_100ns);").unwrap();
+    assert!(
+        start < timecode,
+        "the sender exists before the capture loop"
+    );
+    assert!(
+        timecode < noted && noted < guard,
+        "the timecode is fixed first"
+    );
+    assert!(
+        guard < offer,
+        "the hand-off is guarded by the Option the env entry point returns"
+    );
+    assert!(
+        offer < stagger,
+        "the hand-off comes before the stagger sleep"
+    );
+    assert!(
+        offer < repeats && offer < send,
+        "and before every NDI send of the iteration"
+    );
+    // it passes the same timecode the NDI frame carries
     let region = &m[offer..offer + 400];
     assert!(region.contains("capture_timecode_100ns"), "{region}");
+    assert!(!region.contains("starvation_repeat_timecode"), "{region}");
 }
 
 #[test]

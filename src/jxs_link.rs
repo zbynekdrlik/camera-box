@@ -243,37 +243,51 @@ pub struct SendWindow {
     /// Frames not encoded or not sent whole (refused geometry, conversion, codec error, a packet
     /// the wire format cannot carry).
     pub encode_errors: u64,
+    /// The most frames the encoder held at once in this window, and how many it may hold.
+    pub in_flight_max: u64,
+    pub in_flight_cap: u64,
+    /// YUYV -> planar conversions on the capture thread (the hand-off's own cost).
+    pub convert_count: u64,
+    pub convert_ms_sum: f64,
+    pub convert_ms_max: f64,
+    /// Hand-off (the converted frame is ready) -> its first packet sent.
+    pub first_slice_ms_sum: f64,
+    pub first_slice_ms_max: f64,
+    /// Picture handed to the encoder -> its last packet sent.
     pub encode_ms_sum: f64,
     pub encode_ms_max: f64,
 }
 
+fn avg(sum: f64, n: u64) -> f64 {
+    if n > 0 {
+        sum / n as f64
+    } else {
+        0.0
+    }
+}
+
 impl SendWindow {
-    pub fn note_frame(&mut self, slices: u64, bytes: u64, encode_ms: f64) {
+    pub fn note_frame(&mut self, slices: u64, bytes: u64, first_slice_ms: f64, encode_ms: f64) {
         self.frames += 1;
         self.slices += slices;
         self.bytes += bytes;
+        self.first_slice_ms_sum += first_slice_ms;
+        self.first_slice_ms_max = self.first_slice_ms_max.max(first_slice_ms);
         self.encode_ms_sum += encode_ms;
-        if encode_ms > self.encode_ms_max {
-            self.encode_ms_max = encode_ms;
-        }
+        self.encode_ms_max = self.encode_ms_max.max(encode_ms);
     }
 
-    /// The 5 s status line: `jxs send: frames= slices= bytes= dropped_busy= encode_ms_avg/max=
-    /// send_errors= encode_errors= (issue 1387)`. `bytes` counts the codestream, not the
-    /// headers.
+    /// The 5 s status line: `jxs send: frames= slices= bytes= dropped_busy= in_flight=max/cap
+    /// convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
+    /// encode_errors= (issue 1387)`. `bytes` counts the codestream, not the headers.
     pub fn status_line(&self) -> String {
-        let avg = if self.frames > 0 {
-            self.encode_ms_sum / self.frames as f64
-        } else {
-            0.0
-        };
         format!(
             "jxs send: frames={} slices={} bytes={} dropped_busy={} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
             self.frames,
             self.slices,
             self.bytes,
             self.dropped_busy,
-            avg,
+            avg(self.encode_ms_sum, self.frames),
             self.encode_ms_max,
             self.send_errors,
             self.encode_errors
@@ -440,15 +454,42 @@ mod tests {
     #[test]
     fn the_status_line_names_every_counter() {
         let mut w = SendWindow::default();
-        w.note_frame(69, 1_000_000, 14.0);
-        w.note_frame(69, 1_000_000, 16.0);
+        w.note_frame(69, 1_000_000, 0.4, 14.0);
+        w.note_frame(69, 1_000_000, 0.6, 16.0);
         w.dropped_busy = 3;
+        w.in_flight_max = 2;
+        w.in_flight_cap = 2;
+        w.convert_count = 4;
+        w.convert_ms_sum = 2.0;
+        w.convert_ms_max = 0.75;
         assert_eq!(
             w.status_line(),
-            "jxs send: frames=2 slices=138 bytes=2000000 dropped_busy=3 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 (issue 1387)"
+            "jxs send: frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 (issue 1387)"
         );
-        assert!(SendWindow::default()
-            .status_line()
-            .contains("encode_ms_avg/max=0.00/0.00"));
+        let empty = SendWindow::default().status_line();
+        assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
+        assert!(
+            empty.contains("first_slice_ms_avg/max=0.00/0.00"),
+            "{empty}"
+        );
+        // no key contains another: a grep for one never matches another
+        let keys = [
+            "frames=",
+            "slices=",
+            "bytes=",
+            "dropped_busy=",
+            "in_flight=",
+            "convert_ms_avg/max=",
+            "first_slice_ms_avg/max=",
+            "encode_ms_avg/max=",
+            "send_errors=",
+            "encode_errors=",
+        ];
+        for a in keys {
+            assert_eq!(empty.matches(a).count(), 1, "{a}");
+            for b in keys {
+                assert!(a == b || !b.contains(a), "{a} in {b}");
+            }
+        }
     }
 }

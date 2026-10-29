@@ -442,9 +442,9 @@ pub fn pin_capture_thread() {
     }
 }
 
-/// Pin the calling thread (a painter / `--display` render / intercom auxiliary
-/// thread, `label` for the log) OFF the capture core, onto the general cores.
-pub fn pin_off_capture_core(label: &str) {
+/// The off-capture core split of this box (issue 1198): the general cores an
+/// auxiliary thread may run on, the capture core and the reserved capture-IRQ core.
+pub fn off_capture_split() -> (Vec<usize>, Option<usize>, Option<usize>) {
     let online = read_online_cores();
     let isolated = read_isolated_cores();
     let capture = select_capture_core(env_capture_core(), &isolated, &online);
@@ -456,7 +456,23 @@ pub fn pin_off_capture_core(label: &str) {
         Some(cc) if !read_kernel_is_preempt_rt() => select_irq_reserved_core(cc, &online),
         _ => None,
     };
-    let cores = select_painter_cores(capture, reserved, &online);
+    (
+        select_painter_cores(capture, reserved, &online),
+        capture,
+        reserved,
+    )
+}
+
+/// Pin the calling thread to exactly `cores` (a subset of [`off_capture_split`]'s
+/// general cores chosen by the caller); `false` when the syscall failed.
+pub fn pin_current_thread_to(cores: &[usize]) -> bool {
+    pin_current_thread(cores)
+}
+
+/// Pin the calling thread (a painter / `--display` render / intercom auxiliary
+/// thread, `label` for the log) OFF the capture core, onto the general cores.
+pub fn pin_off_capture_core(label: &str) {
+    let (cores, capture, reserved) = off_capture_split();
     if pin_current_thread(&cores) {
         tracing::info!(
             "#289/1198 {label} thread pinned OFF the capture core to {cores:?} (capture core={capture:?}, reserved capture-IRQ core={reserved:?})"

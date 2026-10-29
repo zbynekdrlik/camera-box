@@ -114,6 +114,74 @@ fn a_frame_crosses_loopback_and_decodes_back_within_the_psnr_bound() {
     assert_eq!(tx.dropped_busy(), 0);
 }
 
+/// Slice 1b: frames offered faster than one encode lasts are all taken (two in flight), every
+/// one decodes to its own picture with its own timecode, in order, and the ones dropped are
+/// counted, never lost silently.
+#[test]
+fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
+    let mut rx = JxsRecvSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    rx.set_timeout(Some(Duration::from_millis(100))).unwrap();
+    let port = rx.local_addr().unwrap().port();
+    let tx = JxsSender::start(Some(&format!("127.0.0.1:{port}")), "CAM5").expect("link on");
+    const N: usize = 12;
+    let pictures: Vec<Yuv422Planes> = (0..N).map(|k| planar(k * 13)).collect();
+    let base: i64 = 17_618_456_000_000_000;
+    let got: RefCell<Vec<(u64, Yuv422Planes)>> = RefCell::new(Vec::new());
+    let mut assembler = FrameAssembler::new();
+    let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+        if let Some(p) = p {
+            got.borrow_mut().push((r.timecode, p.clone()));
+        }
+    });
+    // two offers back to back, then a pause: the second one must not be dropped
+    for pair in 0..N / 2 {
+        for k in [2 * pair, 2 * pair + 1] {
+            let yuyv = to_yuyv(&pictures[k]);
+            tx.offer(
+                &yuyv,
+                W as u32,
+                H as u32,
+                (W * 2) as u32,
+                true,
+                base + k as i64 * 166_667,
+            );
+        }
+        let until = Instant::now() + Duration::from_millis(150);
+        while Instant::now() < until {
+            rx.recv_batch(|d, at| {
+                let h = PacketHeader::decode(d).expect("header");
+                assembler.push(&h, &d[HEADER_LEN..], at, &mut sink);
+            })
+            .unwrap();
+        }
+    }
+    assert!(sink.last_error.is_none(), "{:?}", sink.last_error);
+    drop(sink);
+    assert_eq!(
+        tx.dropped_busy(),
+        0,
+        "two frames back to back are both taken"
+    );
+    let got = got.into_inner();
+    // the assembler finishes a frame when the next one completes: the last may still be open
+    assert!(got.len() >= N - 1, "{} of {N} frames decoded", got.len());
+    for (k, (tc, p)) in got.iter().enumerate() {
+        assert_eq!(
+            *tc,
+            (base + k as i64 * 166_667) as u64,
+            "frame {k} in order"
+        );
+        let py = psnr(pictures[k].y(), p.y());
+        assert!(py >= 40.0, "frame {k} luma PSNR {py:.2} dB");
+        if k > 0 {
+            assert!(
+                psnr(pictures[k - 1].y(), p.y()) < py,
+                "frame {k} is its own picture"
+            );
+        }
+    }
+}
+
 /// Encode one picture into its packets.
 fn encode(enc: &mut Encoder, p: &Yuv422Planes) -> Vec<Vec<u8>> {
     let (y, u, v) = enc.planes_mut().planes_mut();

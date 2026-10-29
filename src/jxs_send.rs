@@ -1,31 +1,35 @@
-//! Issue 1387 -- the cambox JPEG XS sender (slice 1: one configured receiver, no OBS side yet).
+//! Issue 1387 -- the cambox JPEG XS sender (slice 1: one configured receiver, no OBS side yet;
+//! slice 1b: two frames in flight, the hand-off before the NDI send, AVX2 conversion).
 //!
 //! OFF by default: unless `CAMERA_BOX_JXS_TARGET=host:port` is set, [`JxsSender::start_from_env`]
 //! returns `None`, no thread, socket or encoder exists, and the capture loop's NDI path is
 //! byte-identical (its only new statement is an `if let Some(..)` on that `None`).
 //!
-//! When set, a dedicated `jxs-send` thread, pinned OFF the capture core onto the display cores
-//! (`affinity::pin_off_capture_core`, the #1198 split), owns the SVT-JPEG-XS encoder (its worker
-//! threads inherit that CPU set) and the UDP socket. The capture thread hands it the SAME frame
-//! and genlock timecode the emit gate sends to NDI through [`JxsHandoff::offer`]: one memcpy into
-//! the one reusable frame buffer, never a wait. If the encoder still works on the previous frame,
-//! the frame is dropped and counted (`dropped_busy`); one frame in flight, never a queue.
+//! When set, the capture thread hands each emitted frame over through [`JxsHandoff::offer`] right
+//! after its genlock timecode is fixed and BEFORE the NDI send: it converts the YUYV frame
+//! straight into one of [`FRAMES_IN_FLIGHT`] reusable planar pictures (AVX2, no separate copy) and
+//! queues it, never waiting. With both pictures in use the frame is dropped and counted
+//! (`dropped_busy`). The timecode is the SAME value the NDI frame carries.
 //!
-//! The worker converts YUYV to planar 4:2:2 and encodes with slice packetization (latency
-//! profile, decomp_v 2, 4 bpp: issue comment 6489868243). Every packet goes on the wire the
-//! moment the encoder produces it: one `send` per slice of consecutive datagrams with
-//! `UDP_SEGMENT` set on the socket (UDP GSO), so the kernel cuts the slice into MTU datagrams
-//! (wire format: `crate::jxs_link`). Every 5 s it logs `jxs send: frames= slices= bytes=
-//! dropped_busy= encode_ms_avg/max= send_errors= encode_errors= (issue 1387)`.
+//! Two threads, pinned to the encoder's explicit core set (the off-capture cores of the #1198
+//! split, or [`CORES_ENV`] inside them; the capture core and its IRQ core are never used):
+//! - `jxs-feed` opens the SVT-JPEG-XS encoder (latency profile, decomp_v 2, 4 bpp: issue comment
+//!   6489868243; one slice-pack thread per core, its threads inherit the core set) and submits
+//!   each converted picture at once, so frame N+1 is encoding while frame N's last slices go out;
+//! - `jxs-send` reads each frame's packets the moment the encoder produces them and sends every
+//!   slice as one `send` with `UDP_SEGMENT` (UDP GSO; wire format: `crate::jxs_link`), then gives
+//!   the picture back.
+//!
+//! Every 5 s it logs `jxs send: frames= slices= bytes= dropped_busy= in_flight=max/cap
+//! convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors= encode_errors=
+//! (issue 1387)`.
 //!
 //! The codec needs the `jxs` cargo feature (CI's deployed `camera-box-linux-amd64` carries it).
 //! A build without it logs one ERROR when the target is set and stays off.
 
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::os::fd::AsRawFd;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::jxs_link::{self, DATAGRAM_LEN};
 
@@ -166,89 +170,105 @@ pub(crate) fn get_int_opt(fd: libc::c_int, level: libc::c_int, name: libc::c_int
     }
 }
 
-/// The one frame handed from the capture thread to the sender thread.
-#[derive(Debug, Default)]
-struct Slot {
-    raw: Vec<u8>,
-    width: u32,
-    height: u32,
-    stride: u32,
-    yuyv: bool,
-    timecode_100ns: i64,
+/// Frames the sender holds at once (slice 1b): one whose slices are coming out, one the encoder
+/// already started. A third frame while both are busy is `dropped_busy`.
+pub const FRAMES_IN_FLIGHT: usize = 2;
+/// The environment variable that names the encoder's cores explicitly (a cpulist, `0-1`); it must
+/// lie inside the off-capture cores (issue 1198 split), else it is ignored with a WARN.
+pub const CORES_ENV: &str = "CAMERA_BOX_JXS_CORES";
+/// The most slice-pack threads the encoder runs (a 1080p frame has 68 slices).
+pub const MAX_SLICE_THREADS: usize = 4;
+
+/// The encoder's core set: [`CORES_ENV`] when it is set and inside `allowed` (the off-capture
+/// cores), else `allowed`. `Err` names why an override was refused (the caller logs it and uses
+/// `allowed`).
+pub fn select_encoder_cores(
+    override_list: Option<&str>,
+    allowed: &[usize],
+) -> Result<Vec<usize>, String> {
+    let Some(raw) = override_list.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(allowed.to_vec());
+    };
+    let cores = crate::affinity::parse_cpulist(raw);
+    if cores.is_empty() {
+        return Err(format!("{CORES_ENV}='{raw}' is not a cpulist"));
+    }
+    if let Some(c) = cores.iter().find(|c| !allowed.contains(c)) {
+        return Err(format!(
+            "{CORES_ENV}='{raw}' names core {c}, outside the off-capture cores {allowed:?} (the capture core and its IRQ core stay untouched)"
+        ));
+    }
+    Ok(cores)
 }
 
+/// The slice-pack threads for a core set: one per core, at least 1, at most
+/// [`MAX_SLICE_THREADS`].
+pub fn slice_threads_for(cores: &[usize]) -> u32 {
+    cores.len().clamp(1, MAX_SLICE_THREADS) as u32
+}
+
+/// Counters the capture thread and the two sender threads share (read and reset by the status
+/// line).
 #[derive(Debug, Default)]
-struct Shared {
-    /// The worker owns the slot (a frame is waiting or being encoded).
-    busy: AtomicBool,
-    stop: AtomicBool,
+#[cfg_attr(not(feature = "jxs"), allow(dead_code))]
+struct Stats {
     dropped_busy: AtomicU64,
-    slot: Mutex<Slot>,
+    not_yuyv: AtomicBool,
+    convert_errors: AtomicU64,
+    convert_count: AtomicU64,
+    convert_ns_sum: AtomicU64,
+    convert_ns_max: AtomicU64,
+    /// Frames submitted to the encoder and not yet received back.
+    in_flight: AtomicUsize,
+    in_flight_max: AtomicUsize,
 }
 
-/// The capture thread's handle. Dropping it stops and joins the sender thread.
+#[cfg_attr(not(feature = "jxs"), allow(dead_code))]
+impl Stats {
+    fn note_convert(&self, ns: u64) {
+        self.convert_count.fetch_add(1, Ordering::Relaxed);
+        self.convert_ns_sum.fetch_add(ns, Ordering::Relaxed);
+        self.convert_ns_max.fetch_max(ns, Ordering::Relaxed);
+    }
+
+    /// Move the shared counters into `w` and reset them (the in-flight max restarts from now).
+    fn drain_into(&self, w: &mut jxs_link::SendWindow) {
+        w.dropped_busy = self.dropped_busy.swap(0, Ordering::Relaxed);
+        w.encode_errors += self.convert_errors.swap(0, Ordering::Relaxed);
+        w.convert_count = self.convert_count.swap(0, Ordering::Relaxed);
+        w.convert_ms_sum = self.convert_ns_sum.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        w.convert_ms_max = self.convert_ns_max.swap(0, Ordering::Relaxed) as f64 / 1e6;
+        let now = self.in_flight.load(Ordering::Relaxed);
+        w.in_flight_max = self.in_flight_max.swap(now, Ordering::Relaxed) as u64;
+        w.in_flight_cap = FRAMES_IN_FLIGHT as u64;
+    }
+}
+
+#[cfg(feature = "jxs")]
+pub use handoff::JxsHandoff;
+
+/// The capture thread's handle without the codec: never constructed (the link stays off).
+#[cfg(not(feature = "jxs"))]
 pub struct JxsHandoff {
-    shared: Arc<Shared>,
-    worker: Option<JoinHandle<()>>,
+    never: std::convert::Infallible,
 }
 
+#[cfg(not(feature = "jxs"))]
 impl JxsHandoff {
-    /// Hand one emitted frame over. Never blocks: a busy sender drops it and counts it.
-    /// Allocation-free once the buffer has grown to the frame size.
     pub fn offer(
         &self,
-        data: &[u8],
-        width: u32,
-        height: u32,
-        stride: u32,
-        yuyv: bool,
-        timecode_100ns: i64,
+        _data: &[u8],
+        _width: u32,
+        _height: u32,
+        _stride: u32,
+        _yuyv: bool,
+        _timecode_100ns: i64,
     ) {
-        if self.shared.busy.load(Ordering::Acquire) {
-            self.shared.dropped_busy.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        // Not busy = the worker does not hold the lock; try_lock keeps the never-wait promise.
-        let Ok(mut slot) = self.shared.slot.try_lock() else {
-            self.shared.dropped_busy.fetch_add(1, Ordering::Relaxed);
-            return;
-        };
-        slot.raw.clear();
-        slot.raw.extend_from_slice(data);
-        slot.width = width;
-        slot.height = height;
-        slot.stride = stride;
-        slot.yuyv = yuyv;
-        slot.timecode_100ns = timecode_100ns;
-        drop(slot);
-        self.shared.busy.store(true, Ordering::Release);
-        if let Some(w) = &self.worker {
-            w.thread().unpark();
-        }
+        match self.never {}
     }
 
-    /// Frames dropped because the sender was busy, since the last status line.
     pub fn dropped_busy(&self) -> u64 {
-        self.shared.dropped_busy.load(Ordering::Relaxed)
-    }
-
-    /// A hand-off with no sender thread: every offer after the first finds it busy (tests).
-    #[cfg(test)]
-    fn detached() -> Self {
-        Self {
-            shared: Arc::new(Shared::default()),
-            worker: None,
-        }
-    }
-}
-
-impl Drop for JxsHandoff {
-    fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Release);
-        if let Some(w) = self.worker.take() {
-            w.thread().unpark();
-            let _ = w.join();
-        }
+        match self.never {}
     }
 }
 
@@ -257,7 +277,7 @@ pub struct JxsSender;
 
 impl JxsSender {
     /// Read [`TARGET_ENV`]: unset/blank = `None` (nothing created). Set = start the sender
-    /// thread; any failure is logged and the link stays off (`None`), never the capture loop.
+    /// threads; any failure is logged and the link stays off (`None`), never the capture loop.
     pub fn start_from_env(hostname: &str) -> Option<JxsHandoff> {
         let value = std::env::var(TARGET_ENV).ok();
         Self::start(value.as_deref(), hostname)
@@ -297,148 +317,384 @@ fn start_worker(target: String, camera_id: u8) -> Option<JxsHandoff> {
             return None;
         }
     };
+    let (allowed, capture, reserved) = crate::affinity::off_capture_split();
+    let env_cores = std::env::var(CORES_ENV).ok();
+    let cores = match select_encoder_cores(env_cores.as_deref(), &allowed) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("jxs send: {e} -- using {allowed:?} (issue 1387)");
+            allowed.clone()
+        }
+    };
     tracing::info!(
-        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, send buffer {} bytes) -- JPEG XS 4 bpp, latency profile, beside NDI (issue 1387)",
+        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, send buffer {} bytes) -- JPEG XS 4 bpp, latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), beside NDI (issue 1387)",
         socket
             .peer()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| target.clone()),
         if socket.gso() { "on" } else { "OFF: one send per datagram" },
-        socket.send_buffer()
+        socket.send_buffer(),
+        FRAMES_IN_FLIGHT,
+        slice_threads_for(&cores),
     );
-    let shared = Arc::new(Shared::default());
-    let worker_shared = Arc::clone(&shared);
-    let worker = std::thread::Builder::new()
-        .name("jxs-send".into())
-        .spawn(move || worker::run(worker_shared, socket, camera_id))
-        .map_err(|e| tracing::error!("jxs send: thread spawn failed: {e} (issue 1387)"))
-        .ok()?;
-    Some(JxsHandoff {
-        shared,
-        worker: Some(worker),
-    })
+    handoff::spawn(socket, camera_id, cores)
 }
 
 #[cfg(feature = "jxs")]
-mod worker {
-    use super::{JxsSocket, Shared, STATUS_PERIOD};
-    use crate::jxs_link::{self, PacketHeader, SendWindow};
+mod handoff {
+    use super::{jxs_link, slice_threads_for, JxsSocket, Stats, FRAMES_IN_FLIGHT, STATUS_PERIOD};
+    use crate::jxs_link::{PacketHeader, SendWindow};
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
     use std::sync::Arc;
+    use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
-    use svt_jpegxs_sys::{Encoder, EncoderSettings};
+    use svt_jpegxs_sys::{open_pipelined, EncoderInput, EncoderOutput, EncoderSettings, Picture};
 
-    pub(super) fn run(shared: Arc<Shared>, socket: JxsSocket, camera_id: u8) {
-        // Before the encoder exists: its worker threads inherit this CPU set.
+    /// A converted frame on its way to the encoder.
+    pub(super) struct Ready {
+        pub(super) pic: Picture,
+        pub(super) timecode_100ns: i64,
+        /// The hand-off instant: the frame is converted and queued for the encoder.
+        pub(super) handed_off: Instant,
+    }
+
+    /// What the feeder tells the packet thread, in submit order.
+    enum Job {
+        /// The frames that follow belong to this (new) session.
+        Session(EncoderOutput),
+        /// One submitted frame: read its packets.
+        Frame {
+            timecode_100ns: i64,
+            handed_off: Instant,
+            submitted: Instant,
+        },
+    }
+
+    /// The capture thread's handle. Dropping it stops and joins both sender threads.
+    pub struct JxsHandoff {
+        /// Free pictures (the capture thread converts into one).
+        free_rx: Receiver<Picture>,
+        /// Puts a picture back when the hand-off cannot take it.
+        pub(super) free_tx: SyncSender<Picture>,
+        ready_tx: Option<SyncSender<Ready>>,
+        pub(super) stats: Arc<Stats>,
+        workers: Vec<JoinHandle<()>>,
+    }
+
+    impl JxsHandoff {
+        /// Hand one emitted frame over: the capture thread converts it straight into a free
+        /// picture (no separate copy) and queues it. Never blocks: with every picture in use the
+        /// frame is dropped and counted (`dropped_busy`). Allocation-free once each picture has
+        /// grown to the frame size.
+        pub fn offer(
+            &self,
+            data: &[u8],
+            width: u32,
+            height: u32,
+            stride: u32,
+            yuyv: bool,
+            timecode_100ns: i64,
+        ) {
+            if !yuyv {
+                self.stats.not_yuyv.store(true, Ordering::Relaxed);
+                return;
+            }
+            let Ok(mut pic) = self.free_rx.try_recv() else {
+                self.stats.dropped_busy.fetch_add(1, Ordering::Relaxed);
+                return;
+            };
+            let started = Instant::now();
+            if pic.planes().width() != width || pic.planes().height() != height {
+                pic = Picture::new(width, height);
+            }
+            let ok = {
+                let (y, u, v) = pic.planes_mut().planes_mut();
+                jxs_link::yuyv_to_planar422(
+                    data,
+                    stride as usize,
+                    width as usize,
+                    height as usize,
+                    y,
+                    u,
+                    v,
+                )
+            };
+            let handed_off = Instant::now();
+            self.stats
+                .note_convert(handed_off.duration_since(started).as_nanos() as u64);
+            if !ok {
+                self.stats.convert_errors.fetch_add(1, Ordering::Relaxed);
+                let _ = self.free_tx.try_send(pic);
+                return;
+            }
+            let ready = Ready {
+                pic,
+                timecode_100ns,
+                handed_off,
+            };
+            let Some(tx) = &self.ready_tx else { return };
+            match tx.try_send(ready) {
+                Ok(()) => {}
+                // the queue holds every picture there is, so it is never full; a gone feeder
+                // (the thread died) just keeps the picture out of the pool: the link goes quiet
+                Err(TrySendError::Full(r)) | Err(TrySendError::Disconnected(r)) => {
+                    self.stats.dropped_busy.fetch_add(1, Ordering::Relaxed);
+                    let _ = self.free_tx.try_send(r.pic);
+                }
+            }
+        }
+
+        /// Frames dropped because both pictures were in use, since the last status line.
+        pub fn dropped_busy(&self) -> u64 {
+            self.stats.dropped_busy.load(Ordering::Relaxed)
+        }
+
+        /// A hand-off with no sender threads (tests): offers fill the pictures, nobody drains.
+        #[cfg(test)]
+        pub(super) fn detached() -> (Self, Receiver<Ready>) {
+            let (free_tx, free_rx) = mpsc::sync_channel(FRAMES_IN_FLIGHT);
+            for _ in 0..FRAMES_IN_FLIGHT {
+                free_tx.try_send(Picture::new(0, 0)).expect("room");
+            }
+            let (ready_tx, ready_rx) = mpsc::sync_channel(FRAMES_IN_FLIGHT);
+            (
+                Self {
+                    free_rx,
+                    free_tx,
+                    ready_tx: Some(ready_tx),
+                    stats: Arc::new(Stats::default()),
+                    workers: Vec::new(),
+                },
+                ready_rx,
+            )
+        }
+    }
+
+    impl Drop for JxsHandoff {
+        fn drop(&mut self) {
+            // closing the ready queue ends the feeder, which closes the job queue and ends the
+            // packet thread after the frames it still holds
+            self.ready_tx = None;
+            for w in self.workers.drain(..) {
+                let _ = w.join();
+            }
+        }
+    }
+
+    pub(super) fn spawn(socket: JxsSocket, camera_id: u8, cores: Vec<usize>) -> Option<JxsHandoff> {
+        let stats = Arc::new(Stats::default());
+        let (free_tx, free_rx) = mpsc::sync_channel(FRAMES_IN_FLIGHT);
+        for _ in 0..FRAMES_IN_FLIGHT {
+            free_tx.try_send(Picture::new(0, 0)).expect("room");
+        }
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Ready>(FRAMES_IN_FLIGHT);
+        // a session change + every frame in flight, with room to spare
+        let (job_tx, job_rx) = mpsc::sync_channel::<Job>(FRAMES_IN_FLIGHT * 4);
+        let mut workers = Vec::new();
+        {
+            let (feed_stats, feed_free, feed_cores) =
+                (Arc::clone(&stats), free_tx.clone(), cores.clone());
+            match std::thread::Builder::new()
+                .name("jxs-feed".into())
+                .spawn(move || feed(ready_rx, job_tx, feed_free, feed_stats, feed_cores))
+            {
+                Ok(h) => workers.push(h),
+                Err(e) => {
+                    tracing::error!("jxs send: thread spawn failed: {e} (issue 1387)");
+                    return None;
+                }
+            }
+        }
+        {
+            let (send_stats, send_free) = (Arc::clone(&stats), free_tx.clone());
+            match std::thread::Builder::new()
+                .name("jxs-send".into())
+                .spawn(move || send(job_rx, socket, camera_id, send_free, send_stats, cores))
+            {
+                Ok(h) => workers.push(h),
+                Err(e) => {
+                    tracing::error!("jxs send: thread spawn failed: {e} (issue 1387)");
+                    // the feeder ends once the hand-off below is dropped
+                    drop(JxsHandoff {
+                        free_rx,
+                        free_tx,
+                        ready_tx: Some(ready_tx),
+                        stats,
+                        workers,
+                    });
+                    return None;
+                }
+            }
+        }
+        Some(JxsHandoff {
+            free_rx,
+            free_tx,
+            ready_tx: Some(ready_tx),
+            stats,
+            workers,
+        })
+    }
+
+    fn pin(label: &str, cores: &[usize]) {
         #[cfg(target_os = "linux")]
-        crate::affinity::pin_off_capture_core("jxs-send");
-        let mut enc: Option<Encoder> = None;
+        if !crate::affinity::pin_current_thread_to(cores) {
+            tracing::warn!("jxs send: {label} could not be pinned to {cores:?} (issue 1387)");
+        }
+    }
+
+    /// `jxs-feed`: opens the encoder (its threads inherit this thread's cores) and hands every
+    /// converted picture to it the moment it is ready, so the next frame starts while the
+    /// previous one's slices still go out.
+    fn feed(
+        ready_rx: Receiver<Ready>,
+        job_tx: SyncSender<Job>,
+        free_tx: SyncSender<Picture>,
+        stats: Arc<Stats>,
+        cores: Vec<usize>,
+    ) {
+        pin("jxs-feed", &cores);
+        let threads = slice_threads_for(&cores);
+        let mut input: Option<EncoderInput> = None;
+        // a geometry the encoder refused: never re-opened (and re-logged) per frame
+        let mut refused: Option<(u32, u32)> = None;
+        let mut warned_submit = false;
+        while let Ok(r) = ready_rx.recv() {
+            let (w, h) = (r.pic.planes().width(), r.pic.planes().height());
+            if input
+                .as_ref()
+                .is_none_or(|i| (i.width(), i.height()) != (w, h))
+            {
+                input = None;
+                if refused == Some((w, h)) {
+                    stats.convert_errors.fetch_add(1, Ordering::Relaxed);
+                    let _ = free_tx.try_send(r.pic);
+                    continue;
+                }
+                match open_pipelined(EncoderSettings::issue_1387(w, h).with_slice_threads(threads))
+                {
+                    Ok((i, o)) => {
+                        tracing::info!(
+                            "jxs send: encoder open {w}x{h}, {} bytes per frame, {threads} slice threads on cores {cores:?} (issue 1387)",
+                            i.bytes_per_frame()
+                        );
+                        if job_tx.send(Job::Session(o)).is_err() {
+                            return;
+                        }
+                        input = Some(i);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "jxs send: {e} -- {w}x{h} frames are not sent (issue 1387)"
+                        );
+                        refused = Some((w, h));
+                        stats.convert_errors.fetch_add(1, Ordering::Relaxed);
+                        let _ = free_tx.try_send(r.pic);
+                        continue;
+                    }
+                }
+            }
+            let i = input.as_ref().expect("opened above");
+            let submitted = Instant::now();
+            match i.submit(r.pic) {
+                Ok(()) => {
+                    let now = stats.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                    stats.in_flight_max.fetch_max(now, Ordering::Relaxed);
+                    let job = Job::Frame {
+                        timecode_100ns: r.timecode_100ns,
+                        handed_off: r.handed_off,
+                        submitted,
+                    };
+                    if job_tx.send(job).is_err() {
+                        return;
+                    }
+                }
+                Err((pic, e)) => {
+                    stats.convert_errors.fetch_add(1, Ordering::Relaxed);
+                    let _ = free_tx.try_send(pic);
+                    if !warned_submit {
+                        tracing::error!("jxs send: {e} -- re-opening the encoder (issue 1387)");
+                        warned_submit = true;
+                    }
+                    // a closed session (the packet thread abandoned it) re-opens on the next frame
+                    input = None;
+                }
+            }
+        }
+    }
+
+    /// `jxs-send`: reads each submitted frame's packets as the encoder produces them and puts
+    /// every slice on the wire at once; gives the picture back after the last one; logs the
+    /// status line every [`STATUS_PERIOD`].
+    fn send(
+        job_rx: Receiver<Job>,
+        socket: JxsSocket,
+        camera_id: u8,
+        free_tx: SyncSender<Picture>,
+        stats: Arc<Stats>,
+        cores: Vec<usize>,
+    ) {
+        pin("jxs-send", &cores);
+        let mut output: Option<EncoderOutput> = None;
         let mut window = SendWindow::default();
         let mut last_status = Instant::now();
         let mut datagrams: Vec<u8> = Vec::with_capacity(70_000);
         let mut warned_format = false;
         let mut warned_encode = false;
-        // A geometry the encoder refused: never re-opened (and re-logged) on every frame.
-        let mut refused: Option<(u32, u32)> = None;
         loop {
-            if !shared.busy.load(Ordering::Acquire) {
-                std::thread::park_timeout(Duration::from_millis(100));
-            }
-            if shared.stop.load(Ordering::Acquire) {
-                return;
-            }
             if last_status.elapsed() >= STATUS_PERIOD {
-                window.dropped_busy = shared.dropped_busy.swap(0, Ordering::Relaxed);
+                stats.drain_into(&mut window);
+                if stats.not_yuyv.load(Ordering::Relaxed) && !warned_format {
+                    tracing::warn!(
+                        "jxs send: the capture is not YUYV -- frames are not sent (issue 1387)"
+                    );
+                    warned_format = true;
+                }
                 tracing::info!("{}", window.status_line());
                 window = SendWindow::default();
                 last_status = Instant::now();
             }
-            if !shared.busy.load(Ordering::Acquire) {
-                continue;
-            }
-            let timecode = {
-                let slot = shared.slot.lock().unwrap_or_else(|e| e.into_inner());
-                if !slot.yuyv {
-                    if !warned_format {
-                        tracing::warn!(
-                            "jxs send: the capture is not YUYV -- frames are not sent (issue 1387)"
-                        );
-                        warned_format = true;
-                    }
-                    drop(slot);
-                    shared.busy.store(false, Ordering::Release);
-                    continue;
-                }
-                let geometry_changed = enc.as_mut().is_none_or(|e| {
-                    let p = e.planes_mut();
-                    p.width() != slot.width || p.height() != slot.height
-                });
-                if geometry_changed && refused != Some((slot.width, slot.height)) {
-                    enc = match Encoder::open(EncoderSettings::issue_1387(slot.width, slot.height))
-                    {
-                        Ok(e) => {
-                            tracing::info!(
-                                "jxs send: encoder open {}x{}, {} bytes per frame (issue 1387)",
-                                slot.width,
-                                slot.height,
-                                e.bytes_per_frame()
-                            );
-                            Some(e)
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "jxs send: {e} -- {}x{} frames are not sent (issue 1387)",
-                                slot.width,
-                                slot.height
-                            );
-                            refused = Some((slot.width, slot.height));
-                            None
-                        }
-                    };
-                }
-                let Some(e) = enc.as_mut() else {
-                    window.encode_errors += 1;
-                    drop(slot);
-                    shared.busy.store(false, Ordering::Release);
-                    continue;
-                };
-                let p = e.planes_mut();
-                let (w, h) = (p.width() as usize, p.height() as usize);
-                let (y, u, v) = p.planes_mut();
-                let ok =
-                    jxs_link::yuyv_to_planar422(&slot.raw, slot.stride as usize, w, h, y, u, v);
-                if !ok {
-                    window.encode_errors += 1;
-                    drop(slot);
-                    shared.busy.store(false, Ordering::Release);
-                    continue;
-                }
-                slot.timecode_100ns
+            let job = match job_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(j) => j,
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return,
             };
-            let enc_ref = enc.as_mut().expect("opened above");
-            let count = jxs_link::packets_per_frame(enc_ref.planes_mut().height());
+            let (timecode, handed_off, submitted) = match job {
+                Job::Session(o) => {
+                    output = Some(o);
+                    continue;
+                }
+                Job::Frame {
+                    timecode_100ns,
+                    handed_off,
+                    submitted,
+                } => (timecode_100ns, handed_off, submitted),
+            };
+            stats.in_flight.fetch_sub(1, Ordering::Relaxed);
+            let Some(out) = output.as_ref() else { continue };
+            let count = jxs_link::packets_per_frame(out.height());
             let mut slices = 0u64;
             let mut bytes = 0u64;
             let mut errors = 0u64;
             let mut packet_errors = 0u64;
-            // encode_ms = the picture handed to the encoder -> its last packet sent.
-            let started = Instant::now();
-            let result = enc_ref.encode_frame(|index, packet, _last| {
-                let base = PacketHeader {
-                    camera_id,
-                    timecode_100ns: timecode.max(0) as u64,
-                    slice_index: index.min(255) as u8,
-                    slice_count: count.min(255) as u8,
-                    offset: 0,
-                    slice_len: 0,
-                };
+            let mut first_sent: Option<Instant> = None;
+            let result = out.recv_frame(|index, packet, _last| {
                 if index >= count || count > 255 {
                     packet_errors += 1;
                     return;
                 }
+                let base = PacketHeader {
+                    camera_id,
+                    timecode_100ns: timecode.max(0) as u64,
+                    slice_index: index as u8,
+                    slice_count: count as u8,
+                    offset: 0,
+                    slice_len: 0,
+                };
                 match jxs_link::build_slice_datagrams(base, packet, &mut datagrams) {
                     Ok(_) => {
                         errors += socket.send_slice(&datagrams);
+                        first_sent.get_or_insert_with(Instant::now);
                         slices += 1;
                         bytes += packet.len() as u64;
                     }
@@ -446,30 +702,42 @@ mod worker {
                 }
             });
             match result {
-                Ok(n) if n == count => {
-                    window.note_frame(slices, bytes, started.elapsed().as_secs_f64() * 1000.0);
-                }
-                Ok(n) => {
-                    window.encode_errors += 1;
-                    if !warned_encode {
-                        tracing::error!(
-                            "jxs send: the encoder made {n} packets, the wire format expects {count} (issue 1387)"
+                Ok((pic, n)) => {
+                    let _ = free_tx.try_send(pic);
+                    if n == count && packet_errors == 0 {
+                        let first = first_sent
+                            .map(|t| t.duration_since(handed_off).as_secs_f64() * 1000.0)
+                            .unwrap_or(0.0);
+                        window.note_frame(
+                            slices,
+                            bytes,
+                            first,
+                            submitted.elapsed().as_secs_f64() * 1000.0,
                         );
-                        warned_encode = true;
+                    } else {
+                        window.encode_errors += 1;
+                        if !warned_encode {
+                            tracing::error!(
+                                "jxs send: the encoder made {n} packets, the wire format expects {count} (issue 1387)"
+                            );
+                            warned_encode = true;
+                        }
                     }
                 }
+                // a frame of a session already abandoned: its picture came back with it
+                Err(e) if e.is_session_state() => {}
                 Err(e) => {
                     window.encode_errors += 1;
                     if !warned_encode {
                         tracing::error!("jxs send: {e} -- re-opening the encoder (issue 1387)");
                         warned_encode = true;
                     }
-                    enc = None;
+                    for pic in out.abandon() {
+                        let _ = free_tx.try_send(pic);
+                    }
                 }
             }
             window.send_errors += errors;
-            window.encode_errors += packet_errors;
-            shared.busy.store(false, Ordering::Release);
         }
     }
 }
@@ -488,36 +756,134 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_sender_drops_and_counts_the_next_frame_without_waiting() {
-        let h = JxsHandoff::detached();
-        let frame = vec![7u8; 1920 * 1080 * 2];
-        h.offer(&frame, 1920, 1080, 3840, true, 1);
-        assert_eq!(h.dropped_busy(), 0, "the first frame is taken");
-        let t = std::time::Instant::now();
-        h.offer(&frame, 1920, 1080, 3840, true, 2);
-        h.offer(&frame, 1920, 1080, 3840, true, 3);
-        assert_eq!(h.dropped_busy(), 2, "a busy sender drops and counts");
-        assert!(
-            t.elapsed() < std::time::Duration::from_millis(5),
-            "no wait, no copy"
+    fn the_encoder_cores_are_the_off_capture_cores_unless_named_inside_them() {
+        // a cambox: capture 3, capture-IRQ 2, the display cores 0-1
+        let allowed = [0usize, 1];
+        assert_eq!(select_encoder_cores(None, &allowed), Ok(vec![0, 1]));
+        assert_eq!(select_encoder_cores(Some(" "), &allowed), Ok(vec![0, 1]));
+        assert_eq!(select_encoder_cores(Some("1"), &allowed), Ok(vec![1]));
+        assert_eq!(
+            select_encoder_cores(Some("0-1\n"), &allowed),
+            Ok(vec![0, 1])
         );
-        // the taken frame is the first one, untouched by the dropped offers
-        let slot = h.shared.slot.lock().unwrap();
-        assert_eq!(slot.timecode_100ns, 1);
-        assert_eq!(slot.raw.len(), frame.len());
+        // the capture core and its IRQ core are refused, naming the core
+        let e = select_encoder_cores(Some("1-2"), &allowed).unwrap_err();
+        assert!(e.contains("core 2"), "{e}");
+        let e = select_encoder_cores(Some("3"), &allowed).unwrap_err();
+        assert!(e.contains("core 3"), "{e}");
+        assert!(select_encoder_cores(Some("x"), &allowed).is_err());
     }
 
     #[test]
-    fn the_handoff_buffer_is_reused_between_frames() {
-        let h = JxsHandoff::detached();
+    fn one_slice_thread_per_encoder_core_within_bounds() {
+        assert_eq!(
+            slice_threads_for(&[0, 1]),
+            2,
+            "the N150: 2 cores, 2 slice threads"
+        );
+        assert_eq!(slice_threads_for(&[]), 1);
+        assert_eq!(
+            slice_threads_for(&[0, 1, 2, 3, 4, 5, 6, 7]),
+            MAX_SLICE_THREADS as u32
+        );
+    }
+
+    #[test]
+    fn the_status_counters_drain_into_the_window_and_reset() {
+        let s = Stats::default();
+        s.dropped_busy.store(3, Ordering::Relaxed);
+        s.note_convert(400_000);
+        s.note_convert(600_000);
+        s.in_flight.store(1, Ordering::Relaxed);
+        s.in_flight_max.store(2, Ordering::Relaxed);
+        let mut w = jxs_link::SendWindow::default();
+        s.drain_into(&mut w);
+        assert_eq!(w.dropped_busy, 3);
+        assert_eq!((w.convert_count, w.convert_ms_max), (2, 0.6));
+        assert!((w.convert_ms_sum - 1.0).abs() < 1e-9);
+        assert_eq!(
+            (w.in_flight_max, w.in_flight_cap),
+            (2, FRAMES_IN_FLIGHT as u64)
+        );
+        let mut again = jxs_link::SendWindow::default();
+        s.drain_into(&mut again);
+        assert_eq!(again.dropped_busy, 0);
+        assert_eq!(again.convert_count, 0);
+        assert_eq!(
+            again.in_flight_max, 1,
+            "the next window starts from what is in flight now"
+        );
+    }
+
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn two_frames_are_taken_and_the_third_is_dropped_without_waiting() {
+        let (h, ready) = JxsHandoff::detached();
+        let (w, ht) = (64u32, 8u32);
+        let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i % 251) as u8).collect();
+        let t = std::time::Instant::now();
+        for tc in 1..=3 {
+            h.offer(&frame, w, ht, w * 2, true, tc);
+        }
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(50),
+            "never waits"
+        );
+        assert_eq!(
+            h.dropped_busy(),
+            1,
+            "two pictures in flight, the third frame dropped"
+        );
+        let a = ready.try_recv().expect("first");
+        let b = ready.try_recv().expect("second");
+        assert_eq!((a.timecode_100ns, b.timecode_100ns), (1, 2));
+        // converted on hand-off: planar Y is every other source byte
+        assert_eq!(
+            a.pic.planes().y()[..4],
+            [frame[0], frame[2], frame[4], frame[6]]
+        );
+        assert_eq!(a.pic.planes().u()[0], frame[1]);
+        assert_eq!(a.pic.planes().v()[0], frame[3]);
+        assert!(b.handed_off >= a.handed_off);
+    }
+
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn a_returned_picture_is_reused_without_reallocating() {
+        let (h, ready) = JxsHandoff::detached();
         let frame = vec![1u8; 64 * 8 * 2];
         h.offer(&frame, 64, 8, 128, true, 1);
-        let cap = h.shared.slot.lock().unwrap().raw.capacity();
-        h.shared.busy.store(false, Ordering::Release);
+        let first = ready.try_recv().unwrap();
+        let ptr = first.pic.planes().y().as_ptr();
+        h.free_tx.try_send(first.pic).unwrap();
+        // the other picture is taken first (FIFO), then the returned one
         h.offer(&frame, 64, 8, 128, true, 2);
-        let slot = h.shared.slot.lock().unwrap();
-        assert_eq!(slot.raw.capacity(), cap);
-        assert_eq!(slot.timecode_100ns, 2);
+        h.offer(&frame, 64, 8, 128, true, 3);
+        let _second = ready.try_recv().unwrap();
+        let third = ready.try_recv().unwrap();
+        assert_eq!(third.timecode_100ns, 3);
+        assert_eq!(
+            third.pic.planes().y().as_ptr(),
+            ptr,
+            "same buffer, no new allocation"
+        );
+        assert_eq!(h.dropped_busy(), 0);
+    }
+
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn a_frame_that_is_not_yuyv_or_does_not_fit_never_holds_a_picture() {
+        let (h, ready) = JxsHandoff::detached();
+        let frame = vec![1u8; 64 * 8 * 2];
+        h.offer(&frame, 64, 8, 128, false, 1);
+        h.offer(&frame[..100], 64, 8, 128, true, 2);
+        assert!(ready.try_recv().is_err());
+        assert!(h.stats.not_yuyv.load(Ordering::Relaxed));
+        assert_eq!(h.stats.convert_errors.load(Ordering::Relaxed), 1);
+        // both pictures are still free
+        h.offer(&frame, 64, 8, 128, true, 3);
+        h.offer(&frame, 64, 8, 128, true, 4);
+        assert_eq!(h.dropped_busy(), 0);
     }
 
     #[test]
