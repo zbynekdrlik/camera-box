@@ -285,8 +285,8 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
   connected, also while the port stays taken or the socket fails). The thread starts from `true`
   (libobs' default), so a source no sender has reached is pushed to "not connected" at once.
 - `update()` runs on the GRAPHICS thread (an async video source, the issue-1320 lesson): it only
-  stores the settings and bumps a generation counter; a changed port / camera / max bpp reopens the
-  receiver on its own thread. `destroy()` stops and joins the thread (at most one poll + one decode).
+  stores the settings and bumps a generation counter; a changed port / camera reopens the receiver
+  on its own thread, a changed max bpp goes into the next report (`cbjxs_set_max_bpp`). `destroy()` stops and joins the thread (at most one poll + one decode).
   A failed open (port taken) logs once and retries every second; a socket error reopens.
 - Logs (`[distroav] ` prefixed):
   - `jxs-source '<name>': listening on UDP P (camera C, 0 = the first heard; max bpp M, 0 = no limit; receive buffer B bytes) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI 1) (issue 1387)`
