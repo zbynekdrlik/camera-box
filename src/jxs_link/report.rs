@@ -115,11 +115,6 @@ impl ReportWindow {
         }
     }
 
-    /// Slices lost outside a finished frame (a frame ended by a resync) count too.
-    pub fn note_lost(&mut self, lost: u32) {
-        self.lost_slices = self.lost_slices.saturating_add(lost);
-    }
-
     /// The report for the period just ended, then a fresh period (the sequence number moves on).
     pub fn take(&mut self, camera_id: u8, max_bpp: u32) -> ReceiverReport {
         self.decode_us.sort_unstable();
@@ -212,11 +207,10 @@ mod tests {
                 Some(1_000 + i * 10),
             );
         }
-        w.note_lost(2);
         let r = w.take(4, 0);
         assert_eq!(
             (r.camera_id, r.seq, r.frames, r.lost_slices, r.late_frames),
-            (4, 0, 100, 5, 1)
+            (4, 0, 100, 3, 1)
         );
         assert_eq!(r.decode_p99_us, 1_980, "nearest-rank p99 of 1000..1990");
         assert_eq!(r.last_timecode_100ns, 1_099);

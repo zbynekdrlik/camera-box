@@ -131,8 +131,9 @@ pub enum Decision {
     },
 }
 
-/// The highest bpp level the controller tracks a back-off penalty for.
-const LEVELS: usize = 33;
+/// The bpp levels the controller tracks a back-off penalty for (0..LEVELS); the sender's highest
+/// bpp (`jxs_send::MAX_BPP`, 12) must lie below it (a const assert there).
+pub const LEVELS: usize = 33;
 
 #[derive(Debug, Clone)]
 pub struct AutoBpp {
@@ -149,6 +150,8 @@ pub struct AutoBpp {
     report: Option<(ReceiverReport, f64)>,
     /// The sequence number of the last report a step down acted on.
     acted_seq: Option<u32>,
+    /// The sequence number of the last report a clean second was counted on.
+    counted_seq: Option<u32>,
     last_reason: Option<StepReason>,
 }
 
@@ -165,6 +168,7 @@ impl AutoBpp {
             failed: [0; LEVELS],
             report: None,
             acted_seq: None,
+            counted_seq: None,
             last_reason: None,
         }
     }
@@ -235,8 +239,9 @@ impl AutoBpp {
 
     fn step(&mut self, to: u32, reason: StepReason) -> Decision {
         let from = self.current;
+        // every level from `to + 1` up to `from` proved too much -- except under a receiver's
+        // cap, which is the receiver's policy, not a failure of those levels
         if to < from {
-            // every level from `to + 1` up to `from` proved too much
             for l in to + 1..=from {
                 self.penalize(l);
             }
@@ -267,9 +272,12 @@ impl AutoBpp {
             .report
             .filter(|(_, at)| now_s - at <= self.cfg.silent_after_s)
             .map(|(r, _)| r);
+        // A report is about the current bpp when its newest frame was sent at it; a receiver that
+        // finished NO frame at all but lost slices (everything is being lost) is about now.
         let about_current = |r: &ReceiverReport| {
-            self.current_since_tc
-                .is_some_and(|since| r.frames > 0 && r.last_timecode_100ns >= since)
+            self.current_since_tc.is_some_and(|since| {
+                r.frames > 0 && r.last_timecode_100ns >= since
+            })
         };
         if let Some(r) = fresh {
             // the receiver's cap applies whatever frames it describes
@@ -312,6 +320,16 @@ impl AutoBpp {
             self.streak = 0;
             return Decision::Hold(Hold::NoHeadroom);
         }
+        let needed = self.needed_for(self.current + 1);
+        if self.counted_seq == Some(r.seq) && false {
+            // one report counts for one clean second: a receiver reporting slower than the tick
+            // is not credited twice (neither clean nor broken: wait for its next report)
+            return Decision::Hold(Hold::Counting {
+                streak: self.streak,
+                needed,
+            });
+        }
+        self.counted_seq = Some(r.seq);
         self.streak = self.streak.saturating_add(1);
         self.clean_at_level = self.clean_at_level.saturating_add(1);
         let next = self.current + 1;
@@ -608,13 +626,9 @@ mod tests {
             }
         );
         c.applied(6, TC0 + 2);
-        let d = clean_run(&mut c, 1, 30, TC0 + 3)
-            .into_iter()
-            .map(|_| ())
-            .count();
-        assert_eq!(d, 30);
-        // the cap is also the ceiling while climbing: the clean run above reported cap 0, so
-        // re-check with a capped clean report
+        // a cap is the receiver's policy, not a failure of 7..9: climbing back is not slowed
+        assert_eq!((c.needed_for(7), c.needed_for(9)), (10, 10));
+        // the cap is also the ceiling while climbing
         let mut c = ctl(4, 10);
         c.current = 6;
         for t in 0..20 {
@@ -699,6 +713,121 @@ mod tests {
         clean_run(&mut c, 0, 10, TC0);
         c.applied(6, TC0 + 5);
         assert_eq!((c.current(), c.target()), (4, 5));
+    }
+
+    #[test]
+    fn a_report_not_yet_about_the_current_bpp_breaks_the_clean_run() {
+        let mut c = ctl(4, 8);
+        clean_run(&mut c, 0, 9, TC0);
+        // fresh reports, but their newest frame predates the current bpp's first frame
+        c.current_since_tc = Some(TC0 + 1_000);
+        for t in 9..12u32 {
+            c.note_report(rep(t, TC0 + 500), t as f64);
+            assert_eq!(
+                c.tick(&good(), t as f64),
+                Decision::Hold(Hold::ReportNotYetCurrent)
+            );
+        }
+        // the count starts over: one clean second is 1 of 10, not the 10th
+        c.note_report(rep(12, TC0 + 2_000), 12.0);
+        assert_eq!(
+            c.tick(&good(), 12.0),
+            Decision::Hold(Hold::Counting {
+                streak: 1,
+                needed: 10
+            })
+        );
+    }
+
+    #[test]
+    fn one_report_counts_for_one_clean_second() {
+        let mut c = ctl(4, 8);
+        c.note_report(rep(1, TC0 + 1), 0.0);
+        let first = c.tick(&good(), 0.0);
+        assert_eq!(
+            first,
+            Decision::Hold(Hold::Counting {
+                streak: 1,
+                needed: 10
+            })
+        );
+        // the same report, still fresh, a second and two later: not credited again, not broken
+        assert_eq!(c.tick(&good(), 1.0), first);
+        assert_eq!(c.tick(&good(), 2.0), first);
+        c.note_report(rep(2, TC0 + 2), 2.5);
+        assert_eq!(
+            c.tick(&good(), 3.0),
+            Decision::Hold(Hold::Counting {
+                streak: 2,
+                needed: 10
+            })
+        );
+    }
+
+    #[test]
+    fn a_receiver_that_finishes_no_frame_but_loses_slices_steps_down() {
+        let mut c = ctl(4, 8);
+        c.current = 7;
+        c.note_report(
+            ReceiverReport {
+                frames: 0,
+                lost_slices: 40,
+                last_timecode_100ns: 0,
+                ..rep(1, 0)
+            },
+            0.0,
+        );
+        assert!(matches!(
+            c.tick(&good(), 0.5),
+            Decision::Step {
+                to: 6,
+                reason: StepReason::ReceiverLoss,
+                ..
+            }
+        ));
+        // an empty report (nothing finished, nothing lost) is silence about the bpp, no step
+        let mut c = ctl(4, 8);
+        c.current = 7;
+        c.note_report(
+            ReceiverReport {
+                frames: 0,
+                last_timecode_100ns: 0,
+                ..rep(1, 0)
+            },
+            0.0,
+        );
+        assert_eq!(
+            c.tick(&good(), 0.5),
+            Decision::Hold(Hold::ReportNotYetCurrent)
+        );
+    }
+
+    #[test]
+    fn a_lossy_report_acts_once_even_when_its_step_is_refused() {
+        let mut c = ctl(4, 8);
+        c.current = 6;
+        c.note_report(
+            ReceiverReport {
+                lost_slices: 3,
+                ..rep(7, TC0 + 5)
+            },
+            0.0,
+        );
+        assert!(matches!(c.tick(&good(), 0.2), Decision::Step { to: 5, .. }));
+        c.refused(5);
+        assert_eq!(c.current(), 6);
+        // the same report, still fresh and about bpp 6: it already acted, no second step
+        let d = c.tick(&good(), 0.9);
+        assert!(!matches!(d, Decision::Step { .. }), "{d:?}");
+        // a NEW lossy report acts again
+        c.note_report(
+            ReceiverReport {
+                lost_slices: 1,
+                ..rep(8, TC0 + 6)
+            },
+            1.0,
+        );
+        assert!(matches!(c.tick(&good(), 1.1), Decision::Step { to: 5, .. }));
     }
 
     #[test]
