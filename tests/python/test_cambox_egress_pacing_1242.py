@@ -241,7 +241,9 @@ def test_apply_stops_at_the_first_failed_step_and_fails_loud_1387(tmp_path):
         sub.mkdir()
         fail_on = step.split(" dev enp2s0 ", 1)[1]
         r = _apply(sub, {"FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_FAIL_ON": fail_on})
-        assert "RC=1" in r.stdout, (step, r.stdout + r.stderr)
+        # Review round 2: 2 = the chain failed and the root fq fallback is in place (deterministic,
+        # never retried), 1 stays "no default route yet" (the only failure a retry can cure).
+        assert "RC=2" in r.stdout, (step, r.stdout + r.stderr)
         assert _argv(sub, "tc") == TREE_APPLY_ARGV[:i + 1] + [OLD_ROOT_FQ_ARGV], step
         assert "FAILED" in r.stderr and "applied" not in r.stdout, step
         assert "fell back to the root fq" in r.stderr, (step, r.stderr)
@@ -249,7 +251,7 @@ def test_apply_stops_at_the_first_failed_step_and_fails_loud_1387(tmp_path):
 
 def test_apply_says_when_the_fallback_fails_too_1387(tmp_path):
     r = _apply(tmp_path, {"FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_RC": "2"})
-    assert "RC=1" in r.stdout
+    assert "RC=3" in r.stdout, r.stdout + r.stderr
     assert "fallback" in r.stderr and "FAILED" in r.stderr and "UNPACED" in r.stderr, r.stderr
 
 
@@ -276,7 +278,7 @@ def test_apply_without_a_default_route_fails_loud_and_touches_nothing(tmp_path):
 
 def test_apply_reports_a_failed_tc(tmp_path):
     r = _apply(tmp_path, {"FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_RC": "2"})
-    assert "RC=1" in r.stdout, r.stdout + r.stderr
+    assert "RC=3" in r.stdout, r.stdout + r.stderr
     assert "FAILED" in r.stderr
 
 
@@ -389,8 +391,15 @@ EXTRA_MATCHALL = (TREE_FILTER + "\n"
                   "  not_in_hw")
 
 
+# Review round 2: a classic-bpf classifier picks its class from its return value and prints no
+# classid / flowid at all (real kernel 7.0 output, dev1 netns: bytecode returning 0x10002 = 1:2).
+EXTRA_BPF = (TREE_FILTER + "\n"
+             "filter parent 1: protocol all pref 2 bpf chain 0 \n"
+             "filter parent 1: protocol all pref 2 bpf chain 0 handle 0x1 not_in_hw bytecode '1,6 0 0 65538'")
+
+
 def test_verdict_drift_on_any_other_classifying_filter_1387():
-    for filt in (EXTRA_U32, EXTRA_FW, EXTRA_MATCHALL):
+    for filt in (EXTRA_U32, EXTRA_FW, EXTRA_MATCHALL, EXTRA_BPF):
         for form in (filt, _flat(filt)):
             v = _verdict(TREE_QDISC, filt=form)
             assert v.startswith("DRIFT ") and "past the fq" in v, (form, v)
@@ -684,6 +693,34 @@ def test_boot_script_waits_for_a_late_default_route(tmp_path):
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "ip.calls").read_text().strip() == "4"
     assert _argv(tmp_path, "tc") == TREE_APPLY_ARGV
+
+
+def test_boot_script_never_retries_a_failed_chain_and_stays_on_the_fallback_1387(tmp_path):
+    # Review round 2: a chain that fails with a route present fails the same way every time; each
+    # retry would replace the root twice (the tree, then the fallback), dropping what the old root had
+    # queued -- NDI packets lost every 2 s, forever. One attempt; the root fq fallback stays; exit 0
+    # (no unit restart loop); the reason reaches the journal even from a middle attempt.
+    p, _ = _boot_script(tmp_path)
+    fk = _fakes(tmp_path)
+    r = _run(f'"{p}"', env={**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_IP_EMPTY_FIRST": "3",
+                            "FAKE_TC_FAIL_ON": "fw classid 1:2",
+                            "CAMBOX_EGRESS_PACING_RETRY_SLEEP_S": "0"})
+    assert r.returncode == 0, r.stderr
+    argv = _argv(tmp_path, "tc")
+    assert argv == TREE_APPLY_ARGV + [OLD_ROOT_FQ_ARGV], argv
+    assert (tmp_path / "ip.calls").read_text().strip() == "4", "the 4th attempt had the route"
+    assert "fell back to the root fq" in r.stderr, r.stderr
+    assert "not retried" in r.stderr, r.stderr
+
+
+def test_boot_script_stops_the_round_when_the_fallback_fails_too_1387(tmp_path):
+    p, _ = _boot_script(tmp_path)
+    fk = _fakes(tmp_path)
+    r = _run(f'"{p}"', env={**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_RC": "2",
+                            "CAMBOX_EGRESS_PACING_RETRY_SLEEP_S": "0"})
+    assert r.returncode == 1, r.stderr
+    assert (tmp_path / "ip.calls").read_text().strip() == "1", "one attempt, never the whole round"
+    assert "UNPACED" in r.stderr and "not retried" in r.stderr, r.stderr
 
 
 def test_boot_script_gives_up_loud_after_the_bounded_retry(tmp_path):
