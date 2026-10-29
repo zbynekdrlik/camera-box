@@ -866,7 +866,8 @@ jobs:
     # deploy-set.sh / camera-set.sh — a shell bug here can brick a box). A RED in any of these must
     # NOT auto-deploy to prod cameras. (coverage/mutants/python-tests/windows-probe/drift-guard are
     # deliberately excluded — they don't bear on the Linux binary or the deploy shell.)
-    needs: [lint, test, build, security, shellcheck]
+    # issue 1452: + bkshading -- the same run's bkshading relay is deployed with camera-box.
+    needs: [lint, test, build, security, shellcheck, bkshading]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: [self-hosted, linux, camera-lan]
     # Share the E2E hardware-serialization slot (loopback-e2e.yml / full-path-e2e.yml's group) so a
@@ -891,6 +892,15 @@ jobs:
         with:
           name: probe-tools-linux-amd64
           path: dist-probe
+
+      # issue 1452: the bkshading RELAY of this SAME run. deploy-fleet.sh brings every cambox that has
+      # a relay to it (through bkshading-deploy-relay.sh) and names each box's camera-box + relay
+      # version; before this the fleet deploy left every relay on an old build (28.10.2026 event).
+      - name: Download the bkshading relay (this run's bkshading job, issue 1452)
+        uses: actions/download-artifact@v4
+        with:
+          name: bkshading-linux-amd64
+          path: dist-relay
 
       # issue 1432: the deploy restarts camera-box on every active cambox, so it takes the shared rig
       # lease first through the SAME gate the full-path E2E uses: it waits for a live holder
@@ -928,7 +938,7 @@ jobs:
             exit 1
           fi
           echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
-          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe
+          CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe --relay-binary dist-relay/bkshading-relay
 
       # issue 1432: release the SNV rig lease right after the SNV deploy (also on a failure or a
       # cancellation); the other venues' deploy below is a different rig the lease does not cover.
@@ -959,7 +969,7 @@ jobs:
           for v in $venues; do
             echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to venue $v"
             v_rc=0
-            scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v" || v_rc=$?
+            scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v" --relay-binary dist-relay/bkshading-relay || v_rc=$?
             if [ "$v_rc" -ne 0 ]; then
               echo "::error::deploy-fleet.sh --venue $v exited $v_rc (its lines above name the cause)"
               rc=1

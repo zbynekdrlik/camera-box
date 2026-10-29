@@ -197,6 +197,35 @@ except Exception:
 ' "$path" 2>/dev/null || printf '\t\n'
 }
 
+# rig_lease_held_by <repo> <run_id> -> exit 0 when holder.json names exactly this repo AND run id
+# (issue 1452: a step of the run that holds the lease -- the post-merge deploy job took it through
+# rig-busy-gate.sh -- may touch the camboxes it owns). An empty argument, an absent or corrupt
+# holder.json never matches. One atomic read (rig_lease_read_holder_repo_run_id).
+rig_lease_held_by() {
+  local want_repo="${1:-}" want_run="${2:-}" pair
+  [ -n "$want_repo" ] && [ -n "$want_run" ] || return 1
+  pair="$(rig_lease_read_holder_repo_run_id)"
+  [ "${pair%%$'\t'*}" = "$want_repo" ] && [ "${pair#*$'\t'}" = "$want_run" ]
+}
+
+# rig_lease_holder_covers <atom> -> exit 0 when the live holder's declared `resources` (issue 1450)
+# include ATOM, or declare none (a holder without `resources` holds the WHOLE rig), or holder.json is
+# unreadable (fail-closed: covered). Exit 1 only for a readable list that does not name ATOM.
+rig_lease_holder_covers() {
+  python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+except Exception:
+    sys.exit(0)
+r = d.get("resources") if isinstance(d, dict) else None
+if not isinstance(r, list):
+    sys.exit(0)
+sys.exit(0 if sys.argv[2] in r else 1)
+' "$(rig_lease_holder_path)" "${1:-}" 2>/dev/null || return $?
+}
+
 # rig_lease_holder_run_status <repo> <run_id> -> echo "in_progress" or "not_in_progress".
 # Pluggable via RIG_LEASE_RUN_STATUS_CMD (see header); defaults to "in_progress" (assume alive --
 # an unknown/unreachable status checker must never itself cause a reclaim; only a confirmed-dead

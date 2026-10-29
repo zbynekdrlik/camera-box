@@ -103,7 +103,7 @@ Three dev1-side pure parsers:
 | dantesync upgrade (`dantesync_linux_upgrade_cmd`) | backup, `systemctl stop dantesync`, install | `systemctl restart dantesync` |
 | dantesync rollback | stop, `.bak` restore, the master's date-state delete | restart |
 | `bkshading-relay-mode.sh` stop / start | `disable` / `enable` | (start only) `systemctl start` |
-| `bkshading-deploy-relay.sh` (`remount_ro_checked`) | relay stop, scp + rename | the relay restore (`start` if it ran) |
+| `bkshading-deploy-relay.sh` (`remount_ro_checked`; also run per box by `deploy-fleet.sh`'s relay phase, issue 1452) | relay stop, scp + rename | the relay restore (`start` if it ran) |
 | `cam2-painter-ro-persist.sh` (issue 1405) | `enable` / `disable` | (enable-now) `systemctl start` |
 | `ndi-discovery.sh --cambox-apply` | the config/drop-in removal | `systemctl daemon-reload` |
 | `rt-kernel-plan.sh` printed runbook (print-only) | the step's apt / grub work, its rc kept | (nothing started) the work's own FAIL / OK line |
