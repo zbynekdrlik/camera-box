@@ -192,3 +192,41 @@ fn every_call_accepts_null() {
         cbjxs_close(ptr::null_mut());
     }
 }
+
+#[test]
+fn a_zero_timeout_poll_still_receives_and_a_new_max_bpp_reaches_the_report_without_a_reopen() {
+    let rx = open(5, 0);
+    let port = unsafe { cbjxs_local_port(rx) };
+    assert!(unsafe { cbjxs_recv_buffer_bytes(rx) } > 0);
+    let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    tx.set_nonblocking(true).unwrap();
+    let mut enc = Encoder::open(EncoderSettings::issue_1387(W, H)).unwrap();
+    send_frame(&mut enc, &tx, port, 17_618_456_000_000_000, &picture(0));
+    // a non-blocking caller: timeout 0, never a sleep of its own beyond 1 ms
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got = false;
+    while !got && Instant::now() < deadline {
+        let mut f = CbjxsFrame::default();
+        got = unsafe { cbjxs_next_frame(rx, 0, &mut f) } == 1;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(got, "a zero-timeout poll decoded the frame");
+
+    assert_eq!(unsafe { cbjxs_set_max_bpp(rx, 6) }, 0);
+    assert_eq!(unsafe { cbjxs_set_max_bpp(ptr::null_mut(), 6) }, -1);
+    let mut cap = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while cap != Some(6) && Instant::now() < deadline {
+        let mut f = CbjxsFrame::default();
+        assert!(unsafe { cbjxs_next_frame(rx, 100, &mut f) } >= 0);
+        let mut b = [0u8; 64];
+        while let Ok(n) = tx.recv(&mut b) {
+            if let Ok(r) = ReceiverReport::decode(&b[..n]) {
+                cap = Some(r.max_bpp);
+            }
+        }
+    }
+    assert_eq!(cap, Some(6), "the next report carries the new cap");
+    assert_eq!(unsafe { cbjxs_local_port(rx) }, port, "the same socket");
+    unsafe { cbjxs_close(rx) };
+}

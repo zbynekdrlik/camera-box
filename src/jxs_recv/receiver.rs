@@ -8,7 +8,9 @@
 //! [`JxsReceiver::poll`] blocks up to a timeout and returns the next decoded frame, borrowed
 //! until the next call. Frames decoded faster than the caller polls queue up to
 //! [`MAX_READY_FRAMES`]; past that the OLDEST is dropped and counted (`dropped_unread`), so a slow
-//! caller always gets the newest pictures and the receive socket is never left unread. A frame
+//! caller always gets the newest pictures. The socket is read only inside `poll`, so between two
+//! polls the kernel receive buffer (`SO_RCVBUF`, capped by `net.core.rmem_max`) holds what
+//! arrives; a caller that polls again within a frame never comes near it. A frame
 //! the decoder gave up on never reaches the caller: it is counted (`undecodable_frames`) and
 //! reported to the sender as a loss, exactly as the probe always did.
 
@@ -181,7 +183,16 @@ pub struct JxsReceiver {
     totals: ReceiverTotals,
     timeout: Option<Duration>,
     current: Option<DecodedFrame>,
+    /// The newest failed report send, handed out once by [`Self::take_last_error`].
+    report_error: Option<String>,
 }
+
+// The strih OBS source opens the receiver on one thread and polls it on another (jxs/recv-ffi's
+// threading contract): it must stay `Send`.
+const _: fn() = || {
+    fn is_send<T: Send>() {}
+    is_send::<JxsReceiver>();
+};
 
 fn lock(m: &Mutex<Outbox>) -> std::sync::MutexGuard<'_, Outbox> {
     // A panic while holding the lock leaves plain counters and buffers: keep using them.
@@ -219,6 +230,7 @@ impl JxsReceiver {
             totals: ReceiverTotals::default(),
             timeout: None,
             current: None,
+            report_error: None,
         })
     }
 
@@ -232,6 +244,13 @@ impl JxsReceiver {
 
     pub fn config(&self) -> &ReceiverConfig {
         &self.cfg
+    }
+
+    /// Change the highest bpp this receiver takes (0 = no limit): the next report carries it. The
+    /// socket, the decoder and the report sequence stay as they are, so the sender's auto bpp
+    /// steps at once (a receiver cap) without a reopen.
+    pub fn set_max_bpp(&mut self, max_bpp: u8) {
+        self.cfg.max_bpp = max_bpp;
     }
 
     /// The camera id being taken (`None` until the first datagram when none was configured).
@@ -253,9 +272,14 @@ impl JxsReceiver {
         t
     }
 
-    /// The last decoder error, once.
+    /// The newest decoder error and the newest failed report send, each once.
     pub fn take_last_error(&mut self) -> Option<String> {
-        self.sink.last_error.take()
+        let decoder = self.sink.last_error.take().map(|e| format!("decoder: {e}"));
+        let report = self.report_error.take();
+        match (decoder, report) {
+            (Some(d), Some(r)) => Some(format!("{d}; {r}")),
+            (d, r) => d.or(r),
+        }
     }
 
     /// The status line of the last finished window (`jxs recv: fps= ...`), once.
@@ -271,6 +295,8 @@ impl JxsReceiver {
             lock(&self.out).pool.push(done.planes);
         }
         let deadline = Instant::now() + timeout;
+        // A zero timeout still receives once (a non-blocking caller must never starve).
+        let mut received = false;
         loop {
             let next = lock(&self.out).ready.pop_front();
             if let Some(f) = next {
@@ -278,10 +304,11 @@ impl JxsReceiver {
                 return Ok(self.current.as_ref());
             }
             let now = Instant::now();
-            if now >= deadline {
+            if now >= deadline && received {
                 return Ok(None);
             }
-            let slice = (deadline - now)
+            let slice = deadline
+                .saturating_duration_since(now)
                 .min(RECV_SLICE)
                 .max(Duration::from_millis(1));
             if self.timeout != Some(slice) {
@@ -289,6 +316,7 @@ impl JxsReceiver {
                 self.timeout = Some(slice);
             }
             self.receive_once()?;
+            received = true;
         }
     }
 
@@ -385,7 +413,7 @@ impl JxsReceiver {
                 Ok(()) => self.window.reports_sent += 1,
                 Err(e) => {
                     self.totals.report_errors += 1;
-                    tracing::warn!("jxs recv: report to {to}: {e} (issue 1387)");
+                    self.report_error = Some(format!("report to {to}: {e}"));
                 }
             }
         }

@@ -85,6 +85,15 @@ uint16_t cbjxs_local_port(const cbjxs_receiver *rx);
  * is unusable from then on; close it). */
 int cbjxs_next_frame(cbjxs_receiver *rx, uint32_t timeout_ms, cbjxs_frame *out);
 
+/* Change the highest bpp this receiver takes (0 = no limit). The next report carries it; the
+ * socket, the decoder and the report sequence stay, so the sender steps at once (a receiver cap).
+ * 0 = done, -1 = NULL. */
+int cbjxs_set_max_bpp(cbjxs_receiver *rx, uint8_t max_bpp);
+
+/* The kernel's effective receive buffer of the socket in bytes (SO_RCVBUF as the kernel reports
+ * it, capped by net.core.rmem_max); -1 for NULL or an unreadable value. */
+int64_t cbjxs_recv_buffer_bytes(const cbjxs_receiver *rx);
+
 /* 0 = *out filled, -1 = a NULL argument. */
 int cbjxs_get_stats(const cbjxs_receiver *rx, cbjxs_stats *out);
 

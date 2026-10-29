@@ -226,12 +226,20 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
 - socket -> assembler -> `DecodeSink` -> decoded frames, the per-window statistics, and the receiver
   report sent once a second to the address the slices came from. `jxs-recv-probe` and the OBS source
   both run it, so the probe's numbers describe what OBS receives.
-- `poll(timeout)` returns the next decoded frame, borrowed until the next call. Frames queue up to
-  `MAX_READY_FRAMES` (3); past that the OLDEST is dropped and counted (`dropped_unread`), so a slow
-  caller gets the newest pictures and the socket is never left unread. A frame the decoder gave up
-  on never reaches the caller: it is counted and reported to the sender as a loss.
+- `poll(timeout)` returns the next decoded frame, borrowed until the next call; a zero timeout
+  still receives once. Frames queue up to `MAX_READY_FRAMES` (3); past that the OLDEST is dropped and
+  counted (`dropped_unread`), so a slow caller gets the newest pictures. The socket is read only
+  inside `poll`: between two polls the kernel buffer holds what arrives (the OBS source logs the
+  granted size). A frame the decoder gave up on never reaches the caller: it is counted and reported
+  to the sender as a loss.
+- `set_max_bpp` changes only the report's cap. A reopen would drop the decoder AND restart the
+  report `seq` at 0, which the sender's `AutoBpp` reads as reordered reports for up to
+  `REORDER_WINDOW` of them (review round 1 of slice 2).
+- `take_last_error` hands out the newest decoder error and the newest failed report send (`report
+  to <addr>: ...`), each once; the probe prints it with its window line (`jxs recv: last error:`).
 - The decoder callback writes into an `Arc<Mutex<Outbox>>` (uncontended, one thread) only so the
-  receiver is `Send`: the OBS source may open it on one thread and poll on another.
+  receiver is `Send` (a compile-time assertion in receiver.rs): the OBS source may open it on one
+  thread and poll on another.
 
 ### The C ABI: `jxs/recv-ffi` (workspace member, `staticlib` + `rlib`)
 
@@ -240,7 +248,8 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
   exactly the functions `src/lib.rs` exports (each `#[no_mangle]`).
 - Calls: `cbjxs_open(port, camera, max_bpp, err, err_len)` (0.0.0.0; camera 0 = the first heard;
   max_bpp 0 = no limit, sent in every report), `cbjxs_next_frame(rx, timeout_ms, &frame)` (1 / 0 /
-  -1 socket error / -2 NULL or a panic), `cbjxs_get_stats`, `cbjxs_take_error`, `cbjxs_local_port`,
+  -1 socket error / -2 NULL or a panic), `cbjxs_set_max_bpp` (the report's cap, no reopen),
+  `cbjxs_recv_buffer_bytes`, `cbjxs_get_stats`, `cbjxs_take_error`, `cbjxs_local_port`,
   `cbjxs_abi_version` (`CBJXS_ABI_VERSION` 1, bump it on any struct or signature change), and
   `cbjxs_close`. The stats call is `cbjxs_get_stats`: C cannot have a function named like the
   `cbjxs_stats` typedef. The frame's planes stay valid until the next `next_frame` / `close`.
@@ -264,23 +273,31 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
   `genlock_is_wallclock_ts` engages the genlock FIFO and the per-second grid, and libobs writes the
   input's own `genlock-fifo audit '<name>'` line (the existing `jitter_audit` parser reads it, pinned).
 - Settings: `jxs_port` (default 7000), `jxs_camera` (0 = the first heard), `jxs_max_bpp` (0 = no
-  limit, max 12), and the genlock whitelist keys of ndi-source that apply: `genlock_fifo` (default
-  ON), `genlock_latency_ms_src` (3..2000, default 3), `genlock_burn`. They reach libobs through the
-  same runtime-resolved exports (`obs_source_set_genlock_fifo` / `_latency_ms` / `_burn`), and
-  `obs_source_set_genlock_connected` follows the frames (no frame for 3 s = not connected). None of
-  the NDI-only forced keys (`ndi_sync`, `ndi_bw_mode`, ...) exist here.
+  limit, max 12; a change only moves the report's cap), and the genlock whitelist keys of ndi-source
+  that apply: `genlock_fifo` (default ON), `genlock_latency_ms_src` (3..2000, default 3). They reach
+  libobs through the same runtime-resolved exports (`obs_source_set_genlock_fifo` / `_latency_ms`).
+  None of the NDI-only forced keys (`ndi_sync`, `ndi_bw_mode`, ...) exist here.
+- **No `genlock_burn` on this source** (review round 1): the burn sweeps (`obs_burn_filter.py`
+  sweep-check / sweep-off, the EVENT contract, the leak guards) enumerate `ndi_source` inputs only,
+  so a burn left on here would escape all of them and burn on the strih program. A measurement burn
+  on the JPEG XS input needs the sweeps extended first.
+- `obs_source_set_genlock_connected` follows the frames on EVERY path (no frame for 3 s = not
+  connected, also while the port stays taken or the socket fails). The thread starts from `true`
+  (libobs' default), so a source no sender has reached is pushed to "not connected" at once.
 - `update()` runs on the GRAPHICS thread (an async video source, the issue-1320 lesson): it only
   stores the settings and bumps a generation counter; a changed port / camera / max bpp reopens the
   receiver on its own thread. `destroy()` stops and joins the thread (at most one poll + one decode).
   A failed open (port taken) logs once and retries every second; a socket error reopens.
 - Logs (`[distroav] ` prefixed):
-  - `jxs-source '<name>': listening on UDP P (camera C, 0 = the first heard; max bpp M, 0 = no limit) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI 1) (issue 1387)`
+  - `jxs-source '<name>': listening on UDP P (camera C, 0 = the first heard; max bpp M, 0 = no limit; receive buffer B bytes) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI 1) (issue 1387)`
+    (B below ~4 MB on strih-snv = raise `net.core.rmem_max`: a 1080p frame is ~2 MB at 8 bpp)
   - every 5 s: `jxs-source '<name>': fps= frames= lost_slices= concealed= undecodable= reopens=
     decoder_reopens= bpp= reports= report_errors= dropped_unread= foreign= camera= (issue 1387)`
     (`bpp` = the window's payload bits per pixel, the bpp the camera sends; `reopens` = socket
     reopens; `decoder_reopens` = picture-header changes, one per sender bpp step)
-  - `frames arriving` / `no frame for 3 s -- the sender is gone`, `cannot listen on UDP P: ...`,
-    `receiver failed (rc): ... -- reopening`, `last error: ...`.
+  - `frames arriving` / `not connected -- no frame for 3 s (or none yet)`, `max bpp A -> B (0 = no
+    limit), sent in the next report`, `cannot listen on UDP P: ...`, `receiver failed (rc): ... --
+    reopening`, `last error: ...`.
   The marker `jxs-source '` is not a substring of any `genlock-` line (pinned: the parser reads None).
 - **Built ONLY by the strih Linux variant** (`linux-genlock.yml` `linux-genlock-build-strih`): CMake
   option `CAMERA_BOX_JXS_SOURCE` (OFF by default) + `CAMERA_BOX_JXS_FFI_LIB` / `_INCLUDE` /
@@ -290,8 +307,12 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
   installs `nasm libclang-dev` + `dtolnay/rust-toolchain@stable`, runs
   `cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs`, hands
   the list to CMake through `$GITHUB_ENV`, and refuses a `distroav.so` without `camera_box_jxs_source`
-  or with GNU_STACK other than `RW`. A change to `jxs/**`, `vendor/svt-jpeg-xs/**`, `src/jxs_recv*`
-  or `src/jxs_link*` re-runs the strih build. ci.yml lints and tests `jxs-recv-ffi`.
+  or with GNU_STACK other than `RW`. A change to `jxs/**`, `vendor/svt-jpeg-xs/**`, `src/jxs_recv*`,
+  `src/jxs_link*`, `Cargo.toml` or `src/lib.rs` re-runs the strih build. ci.yml lints and tests
+  `jxs-recv-ffi`.
+- `jxs_resolve` repeats ndi-source.cpp's `resolve_obs_export` (dlsym) on purpose: that one is
+  `static` in ndi-source.cpp, carries the `_WIN32` branch and sits under the windows-genlock*.yml
+  pwsh anchors; sharing it would touch the Windows builds for a Linux-only source.
 - Tests: `tests/jxs_receiver_1387.rs` (the receiver over real UDP), `jxs/recv-ffi/tests/{abi,loopback}.rs`
   (the ABI pins; the real encoder -> the C ABI, timecode + PSNR + the report reaching the sender),
   `tests/distroav_jxs_source_1387.rs` (the decide header's truth table compiled as shipped, a g++

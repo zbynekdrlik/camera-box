@@ -128,7 +128,7 @@ fn main() -> anyhow::Result<()> {
         if let Some(line) = rx.take_window_line() {
             println!("{line}");
             if let Some(e) = rx.take_last_error() {
-                println!("jxs recv: last decoder error: {e} (issue 1387)");
+                println!("jxs recv: last error: {e} (issue 1387)");
             }
             let changes = rx.totals().header_changes;
             if changes > header_changes_seen {

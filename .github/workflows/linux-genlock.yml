@@ -49,6 +49,10 @@ on:
       - 'src/jxs_recv/**'
       - 'src/jxs_link.rs'
       - 'src/jxs_link/**'
+      # the static library links the whole camera-box crate: a dependency or module change can move
+      # its native-library list or break the strih link.
+      - 'Cargo.toml'
+      - 'src/lib.rs'
       - '.github/workflows/linux-genlock.yml'
 
 permissions:

@@ -110,6 +110,8 @@ fn a_receiver_change_reruns_the_strih_build() {
         "'src/jxs_recv/**'",
         "'src/jxs_link.rs'",
         "'src/jxs_link/**'",
+        "'Cargo.toml'",
+        "'src/lib.rs'",
     ] {
         assert!(paths.contains(p), "trigger path {p}");
     }

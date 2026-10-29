@@ -42,10 +42,11 @@
 #define PROP_JXS_PORT "jxs_port"
 #define PROP_JXS_CAMERA "jxs_camera"
 #define PROP_JXS_MAX_BPP "jxs_max_bpp"
-/* the genlock whitelist keys of ndi-source.cpp that apply to this source */
+/* the genlock whitelist keys of ndi-source.cpp that apply to this source. NOT genlock_burn: the
+ * burn sweeps (obs_burn_filter.py, the EVENT contract, the leak guards) enumerate ndi_source inputs
+ * only, so a burn left on here would escape them and burn on the strih program. */
 #define PROP_GENLOCK_FIFO "genlock_fifo"
 #define PROP_GENLOCK_LATENCY_MS_SRC "genlock_latency_ms_src"
-#define PROP_BURN "genlock_burn"
 
 /* How long one receiver poll waits (bounds the stop latency). */
 #define JXS_POLL_MS 100u
@@ -69,7 +70,6 @@ typedef void (*jxs_set_u32_fn)(obs_source_t *, uint32_t);
 struct jxs_genlock_api {
 	jxs_set_bool_fn set_fifo;
 	jxs_set_u32_fn set_latency_ms;
-	jxs_set_bool_fn set_burn;
 	jxs_set_bool_fn set_connected;
 };
 
@@ -78,7 +78,6 @@ static const jxs_genlock_api &jxs_genlock()
 	static const jxs_genlock_api api = {
 		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_fifo"),
 		(jxs_set_u32_fn)jxs_resolve("obs_source_set_genlock_latency_ms"),
-		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_burn"),
 		(jxs_set_bool_fn)jxs_resolve("obs_source_set_genlock_connected"),
 	};
 	return api;
@@ -163,12 +162,25 @@ static void jxs_thread(jxs_source *s)
 	cbjxs_stats prev = {};
 	uint64_t last_status_ns = 0;
 	uint64_t last_frame_ns = 0;
-	bool connected = false;
+	/* libobs starts every source as connected (obs_source_init), so start from true: the first
+	 * evaluation then pushes "not connected" for a source no sender has reached yet. */
+	bool connected = true;
 	bool open_failure_logged = false;
 	uint64_t reopens_window = 0;
 	uint64_t opens = 0;
 	uint32_t width = 0, height = 0;
 	char err[256];
+	/* The LOCK indicator's connected flag follows the frames, on every path (a port that stays
+	 * taken, a failing socket) -- never only on the frame path. */
+	auto note_connected = [&](uint64_t now) {
+		const bool c = cb_jxs_connected(now, last_frame_ns);
+		if (c == connected)
+			return;
+		connected = c;
+		jxs_set_connected(s, c);
+		obs_log(LOG_INFO, "jxs-source '%s': %s (issue 1387)", obs_source_get_name(s->source),
+			c ? "frames arriving" : "not connected -- no frame for 3 s (or none yet)");
+	};
 
 	while (s->running.load()) {
 		uint64_t gen = 0;
@@ -180,6 +192,13 @@ static void jxs_thread(jxs_source *s)
 			rx = nullptr;
 		}
 		open_gen = gen;
+		if (rx && cfg.max_bpp != open_cfg.max_bpp) {
+			/* only the report's cap changes: the socket, the decoder and the report sequence stay */
+			cbjxs_set_max_bpp(rx, cfg.max_bpp);
+			obs_log(LOG_INFO, "jxs-source '%s': max bpp %u -> %u (0 = no limit), sent in the next report (issue 1387)",
+				obs_source_get_name(s->source), (unsigned)open_cfg.max_bpp, (unsigned)cfg.max_bpp);
+			open_cfg.max_bpp = cfg.max_bpp;
+		}
 		if (!rx) {
 			err[0] = '\0';
 			rx = cbjxs_open(cfg.port, cfg.camera, cfg.max_bpp, err, sizeof err);
@@ -189,6 +208,7 @@ static void jxs_thread(jxs_source *s)
 						"jxs-source '%s': cannot listen on UDP %u: %s -- retrying every second (issue 1387)",
 						obs_source_get_name(s->source), (unsigned)cfg.port, err);
 				open_failure_logged = true;
+				note_connected(os_gettime_ns());
 				jxs_sleep(s, JXS_REOPEN_DELAY_NS);
 				continue;
 			}
@@ -199,9 +219,9 @@ static void jxs_thread(jxs_source *s)
 			cbjxs_get_stats(rx, &prev);
 			last_status_ns = os_gettime_ns();
 			obs_log(LOG_INFO,
-				"jxs-source '%s': listening on UDP %u (camera %u, 0 = the first heard; max bpp %u, 0 = no limit) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI %u) (issue 1387)",
+				"jxs-source '%s': listening on UDP %u (camera %u, 0 = the first heard; max bpp %u, 0 = no limit; receive buffer %" PRId64 " bytes) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI %u) (issue 1387)",
 				obs_source_get_name(s->source), (unsigned)cbjxs_local_port(rx), (unsigned)cfg.camera,
-				(unsigned)cfg.max_bpp, cbjxs_abi_version());
+				(unsigned)cfg.max_bpp, cbjxs_recv_buffer_bytes(rx), cbjxs_abi_version());
 		}
 
 		cbjxs_frame f = {};
@@ -219,16 +239,11 @@ static void jxs_thread(jxs_source *s)
 				obs_source_get_name(s->source), r, e);
 			cbjxs_close(rx);
 			rx = nullptr;
+			note_connected(now);
 			jxs_sleep(s, JXS_REOPEN_DELAY_NS);
 			continue;
 		}
-		const bool c = cb_jxs_connected(now, last_frame_ns);
-		if (c != connected) {
-			connected = c;
-			jxs_set_connected(s, c);
-			obs_log(LOG_INFO, "jxs-source '%s': %s (issue 1387)", obs_source_get_name(s->source),
-				c ? "frames arriving" : "no frame for 3 s -- the sender is gone");
-		}
+		note_connected(now);
 		if (now - last_status_ns >= CB_JXS_STATUS_PERIOD_NS) {
 			cbjxs_stats st = {};
 			cbjxs_get_stats(rx, &st);
@@ -259,7 +274,6 @@ static void jxs_source_getdefaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, PROP_JXS_MAX_BPP, 0);
 	obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);
 	obs_data_set_default_int(settings, PROP_GENLOCK_LATENCY_MS_SRC, CB_JXS_LATENCY_MS_MIN);
-	obs_data_set_default_bool(settings, PROP_BURN, false);
 }
 
 static obs_properties_t *jxs_source_getproperties(void *)
@@ -272,7 +286,6 @@ static obs_properties_t *jxs_source_getproperties(void *)
 	obs_properties_add_bool(props, PROP_GENLOCK_FIFO, "Genlock");
 	obs_properties_add_int(props, PROP_GENLOCK_LATENCY_MS_SRC, "Genlock latency (ms)", CB_JXS_LATENCY_MS_MIN,
 			       CB_JXS_LATENCY_MS_MAX, 1);
-	obs_properties_add_bool(props, PROP_BURN, "Measurement burn (test only)");
 	return props;
 }
 
@@ -294,8 +307,6 @@ static void jxs_source_update(void *data, obs_data_t *settings)
 	if (g.set_latency_ms)
 		g.set_latency_ms(s->source,
 				 cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC)));
-	if (g.set_burn)
-		g.set_burn(s->source, obs_data_get_bool(settings, PROP_BURN));
 }
 
 static void *jxs_source_create(obs_data_t *settings, obs_source_t *source)

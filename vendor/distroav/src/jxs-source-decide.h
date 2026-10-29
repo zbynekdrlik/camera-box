@@ -56,7 +56,9 @@ static inline uint8_t cb_jxs_max_bpp(long long v)
 	return (v >= 0 && v <= CB_JXS_MAX_BPP_LIMIT) ? (uint8_t)v : 0;
 }
 
-/* The receiver settings; a change reopens the receiver (a new socket), nothing else does. */
+/* The receiver settings. A new port or camera reopens the receiver (a new socket); a new max bpp
+ * only changes the report's cap (cbjxs_set_max_bpp), never a reopen: a reopen drops the decoder and
+ * restarts the report sequence, which the sender's auto bpp would read as reordered reports. */
 struct cb_jxs_config {
 	uint16_t port;
 	uint8_t camera;
@@ -65,7 +67,7 @@ struct cb_jxs_config {
 
 static inline bool cb_jxs_reopen_needed(struct cb_jxs_config a, struct cb_jxs_config b)
 {
-	return a.port != b.port || a.camera != b.camera || a.max_bpp != b.max_bpp;
+	return a.port != b.port || a.camera != b.camera;
 }
 
 /* The average coded bits per pixel over a status window: payload bytes x 8 / (frames x pixels),

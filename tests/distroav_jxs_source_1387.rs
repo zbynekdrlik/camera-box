@@ -95,7 +95,7 @@ int main(void)
 	b = a; b.camera = 3;
 	EXPECT(cb_jxs_reopen_needed(a, b));
 	b = a; b.max_bpp = 6;
-	EXPECT(cb_jxs_reopen_needed(a, b));
+	EXPECT(!cb_jxs_reopen_needed(a, b)); /* the cap goes into the next report, no reopen */
 	/* bits per pixel x 100 from the window's payload: 1080p at 8 bpp = 2073600 bytes a frame */
 	EXPECT(cb_jxs_bpp_x100(30ull * 2073600u, 30, 1920, 1080) == 800u);
 	EXPECT(cb_jxs_bpp_x100(30ull * 1036800u, 30, 1920, 1080) == 400u);
@@ -214,20 +214,18 @@ fn the_genlock_whitelist_keys_apply_through_the_runtime_resolved_exports() {
     for export in [
         "\"obs_source_set_genlock_fifo\"",
         "\"obs_source_set_genlock_latency_ms\"",
-        "\"obs_source_set_genlock_burn\"",
         "\"obs_source_set_genlock_connected\"",
     ] {
         assert!(s.contains(export), "{export} not resolved");
     }
     // the same keys as ndi-source.cpp's whitelist, so OBS-WS tooling pins them the same way
     let ndi = read("vendor/distroav/src/ndi-source.cpp");
-    for key in [
-        "\"genlock_fifo\"",
-        "\"genlock_latency_ms_src\"",
-        "\"genlock_burn\"",
-    ] {
+    for key in ["\"genlock_fifo\"", "\"genlock_latency_ms_src\""] {
         assert!(s.contains(key) && ndi.contains(key), "{key}");
     }
+    // no burn on this source: the burn sweeps enumerate ndi_source inputs only, a burn left on here
+    // would escape every leak guard
+    assert!(!s.contains("\"genlock_burn\"") && !s.contains("set_genlock_burn"));
     let defaults = function_body(&s, "static void jxs_source_getdefaults(");
     assert!(defaults.contains("obs_data_set_default_bool(settings, PROP_GENLOCK_FIFO, true);"));
     assert!(defaults.contains(
@@ -240,7 +238,6 @@ fn the_genlock_whitelist_keys_apply_through_the_runtime_resolved_exports() {
     assert!(update.contains(
         "cb_jxs_clamp_latency_ms(obs_data_get_int(settings, PROP_GENLOCK_LATENCY_MS_SRC))"
     ));
-    assert!(update.contains("g.set_burn(s->source, obs_data_get_bool(settings, PROP_BURN));"));
     // update runs on the graphics thread: it stores and returns (the issue 1320 render freeze)
     for banned in ["join", "cbjxs_", "sleep", "std::thread"] {
         assert!(!update.contains(banned), "update() must never `{banned}`");
@@ -315,4 +312,36 @@ fn the_audit_line_of_a_jpeg_xs_input_parses_and_the_status_line_is_not_one() {
     let status = "info: [distroav] jxs-source 'JXS cam5': fps=30.00 frames=150 lost_slices=0 \
                   concealed=0 undecodable=0 reopens=0 decoder_reopens=0 bpp=8.00 reports=5";
     assert!(camera_box::jitter_audit::parse_audit_line(status).is_none());
+}
+
+#[test]
+fn the_connected_flag_follows_the_frames_on_every_path_and_max_bpp_never_reopens() {
+    let s = read(SOURCE);
+    let thread = function_body(&s, "static void jxs_thread(");
+    // libobs starts a source connected: start from true so the first evaluation pushes "not
+    // connected" for a source no sender has reached
+    assert!(thread.contains("bool connected = true;"));
+    assert!(!thread.contains("bool connected = false;"));
+    // every path that loops evaluates it: the failed open, the failed socket and the poll
+    assert!(thread.contains("auto note_connected = [&](uint64_t now) {"));
+    assert_eq!(
+        thread.matches("note_connected(").count(),
+        3,
+        "three calls of the lambda"
+    );
+    for path in [
+        "open_failure_logged = true;\n\t\t\t\tnote_connected(os_gettime_ns());",
+        "rx = nullptr;\n\t\t\tnote_connected(now);\n\t\t\tjxs_sleep(",
+    ] {
+        assert!(
+            thread.contains(path),
+            "a failure path lacks the connected update: {path}"
+        );
+    }
+    // a new max bpp goes through the report, never a reopen
+    assert!(thread.contains("cbjxs_set_max_bpp(rx, cfg.max_bpp);"));
+    assert!(
+        thread.contains("cbjxs_recv_buffer_bytes(rx)"),
+        "the start line names the buffer"
+    );
 }

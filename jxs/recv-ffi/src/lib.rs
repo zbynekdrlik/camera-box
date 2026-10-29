@@ -103,7 +103,11 @@ unsafe fn write_c(buf: *mut c_char, len: usize, msg: &str) -> usize {
     if buf.is_null() || len == 0 {
         return 0;
     }
-    let n = msg.len().min(len - 1);
+    let mut n = msg.len().min(len - 1);
+    // never cut a UTF-8 character in two
+    while !msg.is_char_boundary(n) {
+        n -= 1;
+    }
     std::ptr::copy_nonoverlapping(msg.as_ptr().cast::<c_char>(), buf, n);
     *buf.add(n) = 0;
     n
@@ -200,7 +204,7 @@ pub unsafe extern "C" fn cbjxs_next_frame(
     match polled {
         Ok(Ok(n)) => {
             if let Some(e) = r.rx.take_last_error() {
-                r.error = Some(format!("decoder: {e}"));
+                r.error = Some(e);
             }
             n
         }
@@ -214,6 +218,26 @@ pub unsafe extern "C" fn cbjxs_next_frame(
             -2
         }
     }
+}
+
+/// # Safety
+/// `rx` is NULL or a live receiver from `cbjxs_open`.
+#[no_mangle]
+pub unsafe extern "C" fn cbjxs_set_max_bpp(rx: *mut CbjxsReceiver, max_bpp: u8) -> i32 {
+    match rx.as_mut() {
+        Some(r) => {
+            r.rx.set_max_bpp(max_bpp);
+            0
+        }
+        None => -1,
+    }
+}
+
+/// # Safety
+/// `rx` is NULL or a live receiver from `cbjxs_open`.
+#[no_mangle]
+pub unsafe extern "C" fn cbjxs_recv_buffer_bytes(rx: *const CbjxsReceiver) -> i64 {
+    rx.as_ref().map_or(-1, |r| r.rx.socket().recv_buffer())
 }
 
 /// # Safety
@@ -279,6 +303,14 @@ pub unsafe extern "C" fn cbjxs_close(rx: *mut CbjxsReceiver) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_c_string_never_cuts_a_utf8_character() {
+        // "ab" + a 2-byte character: a 4-byte buffer holds 3 bytes, the character does not fit
+        let mut b = [1 as c_char; 4];
+        assert_eq!(unsafe { write_c(b.as_mut_ptr(), b.len(), "ab\u{e9}x") }, 2);
+        assert_eq!(b[2], 0);
+    }
 
     #[test]
     fn a_c_string_is_truncated_and_always_terminated() {
