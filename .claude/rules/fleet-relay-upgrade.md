@@ -26,16 +26,20 @@ values. Now ONE fleet upgrade brings camera-box AND the relay to the same CI run
   stop + previous-state restore, the staged copy + atomic rename, the byte-verify and the verified ro
   close (`ro-window.md`).
 - **The relay phase runs after the camera-box loop (and the painter), over every box that answered**
-  (`REACHED`). One ssh read per box gives both versions (`bkshading_relay_versions_cmd`):
+  (`REACHED`). One ssh read per box gives both versions and the root's mount options
+  (`bkshading_relay_versions_cmd`):
   - `relay=absent` (no binary, no unit file) = "not installed": reported in the summary, never a
     failure, nothing is installed there (setup-device / `bkshading-provision-relay.sh` own that);
-  - a box with a `<cam>(root-…)` FAILED entry (its camera-box close left the root unverified) gets
-    no relay deploy: nothing more is written to a writable root;
+  - a box whose root does not READ `ro` now (`ro_root_mount_mode`) gets no relay deploy and a
+    FAILED `camN-relay(not deployed: the root is not verified read-only)`: nothing more is written
+    to a writable root. It is read, never inferred from a FAILED label (review round 1: the cam2
+    painter's failed close is recorded as `cam2-painter(root-…)`, which a `cam2(root-` match missed);
   - `--binary` without `--relay-binary` on a box WITH a relay = FAILED
     `camN-relay(no relay binary: …)`, never a silently old relay;
   - a relay failure is a FAILED entry, the next box still runs, the exit folds it (the issue-868
     pattern): `camN-relay(rig lease held by another run: not upgraded)` (rc 6),
     `camN-relay(deploy-failed rc N)`, `camN-relay(version=X)` (read back after the deploy).
+- `--binary` together with `--run` still fetches that run's relay (a temp dir is made for it).
 - **The final summary line names every box:** `FLEET ALIGNED: … ; versions: cam2 camera-box=1.8.2
   relay=1.8.2, cam3 camera-box=1.8.2 relay=not installed` (also on NOT FULLY ALIGNED and `--venue`).
 - **`--no-relay`** = camera-box only, the versions still read. Its one caller is the E2E `[0/8]`
@@ -53,10 +57,13 @@ against `RIG_LEASE_REPO`/`RIG_LEASE_RUN_ID`, else `GITHUB_REPOSITORY`/`GITHUB_RU
 defaults rig-busy-gate.sh writes). An operator shell has neither, so a foreign holder still refuses.
 `--force-live` still never bypasses a lease.
 
-Known limit: the relay deploy's rig-busy guard reads the SNV strih/stream (`STRIH_HOST`/
-`STREAM_HOST` defaults) also for an away-venue (`--venue pp`) relay, so a broadcast at SNV refuses a
-PP relay deploy (named FAILED, the CI venue step goes red). Set those two env vars for a manual PP
-run.
+**An away venue (`--venue pp`) is judged on its own boxes** (review round 1). The relay deploy gets
+`STRIH_HOST`/`STREAM_HOST` = `obs_fleet_host strih-<venue>` / `stream-<venue>` (a PP broadcast
+refuses a PP relay; an SNV one does not), and `BKSHADING_DEPLOY_LEASE_RESOURCE=<venue>-cams`: a live
+holder whose declared issue-1450 `resources` do not name it (restreamer on `snv-cams`) does not
+block, one that names it or declares none (the whole rig) still refuses (`rig_lease_holder_covers`,
+unreadable holder.json = covered, fail-closed). The post-merge job releases the SNV lease before the
+venue step, so without this an SNV holder taking the lease in that gap turned the job red.
 
 ## Scope: camboxes only
 
@@ -67,7 +74,11 @@ The handheld SBC (arm64, registered via `register:<id>`) is not a cambox: it is 
 ## The readiness row (rig-dev-handover-check item 15, shading)
 
 `probe_shading` prints a SECOND line per box: `camN (ip): camera-box=X relay=Y ->
-verdict=RELAY-…` from `bkshading_relay_version_verdict` (graded against THAT box's camera-box):
+verdict=RELAY-…` from `bkshading_relay_version_verdict`, read in the SAME ssh call as the unit state
+(a down box costs one ConnectTimeout). Graded against THAT box's camera-box OR origin/main's release
+(`bkshading_relay_main_version_from_cargo` of `git show origin/main:Cargo.toml`): the [0/8] align
+puts a dev candidate camera-box (main + one patch) on the boxes with `--no-relay`, and a relay on
+main's release next to it is not forgotten (review round 1: it read RELAY-STALE after every dev E2E):
 - `RELAY-STALE` (versions differ) and `RELAY-MISSING` (unit without binary) are FORGOT, even while
   the relay is off in TEST mode: an old relay must show before an event;
 - `RELAY-CURRENT`, `RELAY-NONE`, `RELAY-UNKNOWN` are neutral, so a TEST-mode all-off fleet stays
@@ -75,6 +86,9 @@ verdict=RELAY-…` from `bkshading_relay_version_verdict` (graded against THAT b
 The `shading` item's `forgot_token_msgs` names the fix per forgot token (deploy-fleet for a stale
 relay, the issue-1309 restart for SHADING-DEAD). Chosen over the version-integrity gate: that gate
 grades the OBS boxes, while this probe already ssh's every active cambox for its relay.
+
+Accepted cost: the ci.yml `deploy-fleet` job now `needs: bkshading` (the relay artifact), so that
+job's panel Playwright E2E sits in front of every post-merge camera-box deploy.
 
 Tests: `tests/python/test_deploy_fleet_relay_1452.py` (deploy-fleet run whole on the issue-1407 fake
 box with a fake `sshpass`; plant an old relay at `fs/usr/local/bin/bkshading-relay`, an active one

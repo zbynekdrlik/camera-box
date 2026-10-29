@@ -274,12 +274,14 @@ run_probe avlatency bash "$AVLATENCY_PROBE"
 #   SHADING-UNREACHABLE ssh/curl failed / no /api/state    (neutral -> UNKNOWN, never a false page)
 # The per-box detail lives in the capture; a DOWN box fails safe to SHADING-UNREACHABLE (never OK).
 # issue 1452: a SECOND line per box grades the relay VERSION against that box's camera-box version
-# (scripts/lib/bkshading-relay-version.sh, one ssh read of both): RELAY-STALE / RELAY-MISSING are
+# or origin/main's release (scripts/lib/bkshading-relay-version.sh; read in the same ssh call as the
+# unit state, so a down box costs no second connect): RELAY-STALE / RELAY-MISSING are
 # forgot (an old relay before an event, the 28.10.2026 class), RELAY-CURRENT / RELAY-NONE /
 # RELAY-UNKNOWN neutral. Read even while the relay is off: TEST mode is exactly when to catch it.
 probe_shading() {
   local spec="$1" pw="$2" tok label ip en act online verdict body port="${SHADING_RELAY_PORT:-8771}"
-  local versions cbv rlv
+  local versions cbv rlv main
+  main="$(bkshading_relay_main_version_from_cargo "$(git -C "$HERE/.." show origin/main:Cargo.toml 2>/dev/null || true)")"
   # Bounds are PER BOX (timeout 8 ssh / 6 curl below), not the whole-item RDH_*_TIMEOUT budget --
   # a per-box bound keeps the worst case linear in the small cambox count and never hangs the run.
   [ -n "$spec" ] || { printf 'roster empty -- no camboxes to probe\n'; return 0; }
@@ -289,8 +291,9 @@ probe_shading() {
     en=""; act=""; online=""
     en="$(timeout 8 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -o ConnectTimeout=5 "root@$ip" \
-      'systemctl is-enabled bkshading-relay 2>/dev/null; echo ---; systemctl is-active bkshading-relay 2>/dev/null' \
+      "systemctl is-enabled bkshading-relay 2>/dev/null; echo ---; systemctl is-active bkshading-relay 2>/dev/null; echo ---; $(bkshading_relay_versions_cmd)" \
       2>/dev/null || true)"
+    versions="$en"
     act="$(printf '%s\n' "$en" | sed -n '/^---$/,$p' | sed '1d' | head -1)"
     en="$(printf '%s\n' "$en" | sed -n '1p')"
     body="$(timeout 6 curl -fsS "http://$ip:$port/api/state" 2>/dev/null || true)"
@@ -307,12 +310,10 @@ probe_shading() {
     esac
     printf '%s (%s): enabled=%s active=%s online=%s -> verdict=%s\n' \
       "$label" "$ip" "${en:-?}" "${act:-?}" "${online:-?}" "$verdict"
-    versions="$(timeout 8 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o ConnectTimeout=5 "root@$ip" "$(bkshading_relay_versions_cmd)" 2>/dev/null || true)"
     cbv="$(bkshading_relay_versions_field "$versions" camera-box)"
     rlv="$(bkshading_relay_versions_field "$versions" relay)"
     printf '%s (%s): camera-box=%s relay=%s -> verdict=%s\n' \
-      "$label" "$ip" "${cbv:-?}" "${rlv:-?}" "$(bkshading_relay_version_verdict "$cbv" "$rlv")"
+      "$label" "$ip" "${cbv:-?}" "${rlv:-?}" "$(bkshading_relay_version_verdict "$cbv" "$rlv" "$main")"
   done
   return 0
 }

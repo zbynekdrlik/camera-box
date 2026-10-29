@@ -78,11 +78,11 @@ USER_CAMERA_SET="${CAMERA_SET:-}"
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"  # cam2_painter_deadman_arm_cmds() — the #1351 re-arm of the TRANSIENT deadman timer (a stopped systemd-run unit is GC'd, so `systemctl start` cannot revive it)
 # shellcheck source=scripts/lib/ro-window.sh
-. "$HERE/lib/ro-window.sh"
+. "$HERE/lib/ro-window.sh"  # ro_window_close_cmds / ro_window_holders — the ONE verified ro close of every rw window (issue 1407)
 # shellcheck source=scripts/lib/bkshading-relay-version.sh
 . "$HERE/lib/bkshading-relay-version.sh"  # issue 1452: the box's camera-box + relay versions, read in one ssh call
 # shellcheck source=scripts/lib/bkshading-deploy-runtime.sh
-. "$HERE/lib/bkshading-deploy-runtime.sh"  # issue 1452: the relay artifact + binary names (one source of truth)  # ro_window_close_cmds / ro_window_holders — the ONE verified ro close of every rw window (issue 1407)
+. "$HERE/lib/bkshading-deploy-runtime.sh"  # issue 1452: the relay artifact + binary names (one source of truth)
 # The deadman re-fire window used when RESTORING a prior-armed deadman after the swap (#1351). The
 # canonical value is 5 min (#1072); overridable, matching cam2-painter-deadman.sh's own convention.
 CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-5}"
@@ -369,7 +369,7 @@ deploy_frame_probe_to_painter() {
 # there); a box whose own camera-box close left the root unverified gets no relay deploy (nothing more
 # is written to a writable root). Every path adds one VERSION_ROWS row.
 relay_step() {  # $1=cam $2=ip
-  local cam="$1" ip="$2" out rc=0 cbv rlv f
+  local cam="$1" ip="$2" out rc=0 cbv rlv
   out="$(ssh_box "$ip" "$(bkshading_relay_versions_cmd)" 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     err "[$cam] could not read the camera-box + relay versions (ssh rc $rc)"
@@ -381,13 +381,14 @@ relay_step() {  # $1=cam $2=ip
     info "[$cam] bkshading relay not installed on this box -- nothing to upgrade"
     VERSION_ROWS+=("$cam camera-box=$cbv relay=not installed"); return 0
   fi
-  for f in "${FAILED[@]}"; do
-    case "$f" in
-      "$cam(root-"*)
-        warn "[$cam] relay not deployed: the root is not verified read-only (see $f)"
-        VERSION_ROWS+=("$cam camera-box=$cbv relay=$rlv (relay not deployed: the root is not verified read-only)"); return 0 ;;
-    esac
-  done
+  # The box's root, READ now (never inferred from a FAILED label: the camera-box close and the cam2
+  # painter close both record theirs, under different labels). A cambox runs read-only; anything
+  # else (a close that failed, an unreadable root) gets no relay write.
+  if [ "$(ro_root_mount_mode "$(bkshading_relay_versions_field "$out" root)")" != ro ]; then
+    warn "[$cam] relay not deployed: the root is not verified read-only (it reads '$(bkshading_relay_versions_field "$out" root)')"
+    FAILED+=("$cam-relay(not deployed: the root is not verified read-only)")
+    VERSION_ROWS+=("$cam camera-box=$cbv relay=$rlv (relay not deployed: the root is not verified read-only)"); return 0
+  fi
   if [ "$NO_RELAY" = 1 ]; then
     VERSION_ROWS+=("$cam camera-box=$cbv relay=$rlv (not deployed: --no-relay)"); return 0
   fi
@@ -398,7 +399,16 @@ relay_step() {  # $1=cam $2=ip
   fi
   info "[$cam] bkshading relay $rlv -> $RELAY_VER (scripts/bkshading-deploy-relay.sh)"
   rc=0
-  SSH_PASS="$SSH_PASS" "$HERE/bkshading-deploy-relay.sh" --host "$ip" --binary "$RELAY_BIN" || rc=$?
+  if [ -n "$VENUE" ]; then
+    # An away venue: its OWN strih/stream feed the relay deploy's rig-busy guard (a PP broadcast
+    # refuses a PP relay, an SNV one does not), and the lease is judged for its own cameras
+    # (the issue-1450 resource `<venue>-cams`): an SNV holder never blocks a PP relay.
+    STRIH_HOST="$(obs_fleet_host "strih-$VENUE")" STREAM_HOST="$(obs_fleet_host "stream-$VENUE")" \
+      BKSHADING_DEPLOY_LEASE_RESOURCE="$VENUE-cams" SSH_PASS="$SSH_PASS" \
+      "$HERE/bkshading-deploy-relay.sh" --host "$ip" --binary "$RELAY_BIN" || rc=$?
+  else
+    SSH_PASS="$SSH_PASS" "$HERE/bkshading-deploy-relay.sh" --host "$ip" --binary "$RELAY_BIN" || rc=$?
+  fi
   case "$rc" in
     0) : ;;
     6) err "[$cam] relay deploy refused: the rig lease is held by another run"
@@ -537,6 +547,7 @@ if [ "$NO_RELAY" = 0 ]; then
   if [ -z "$RELAY_BIN" ] && [ -n "$RUN_ID" ]; then
     relay_artifact="$(bkshading_deploy_artifact_name)"
     info "Downloading the relay artifact '$relay_artifact' from the same run $RUN_ID..."
+    [ -n "$DIST" ] || DIST="$(mktemp -d)"  # --binary together with --run downloaded no camera-box
     if ! gh run download "$RUN_ID" --repo "$REPO" -n "$relay_artifact" --dir "$DIST/relay"; then
       err "run $RUN_ID carries no '$relay_artifact' -- nothing deployed (pass --no-relay to deploy camera-box alone)"
       exit 1
