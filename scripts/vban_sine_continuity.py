@@ -270,7 +270,6 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
         slope = float(np.median(d_slope)) if d_slope.size else 0.0
         # the run's own phase with its events removed, referred to its LAST level (each event added
         # back), so an event near either edge never leaks into the bridge's averaging window
-        own = corr
         own_end = corr + sum(ev["size_samples"] for ev in evs) * omega
         if prev is not None:
             p_idx, p_corr, p_slope, p_end = prev
@@ -288,7 +287,7 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
             # every earlier step (a bridge, an in-run event), so measured on it each earlier move came
             # back at every later gap (live p4: the 81 s placement read -13.5 at all four losses).
             # The previous run is read at its last level, this one at its first level.
-            dev = float(_wrap(across(p_end, own)))
+            dev = float(_wrap(across(p_end, corr)))
             gap_lo, gap_hi = int(starts[p_idx[-1]] + block), int(starts[idx[0]])
             inside = [s for s, n in slots if s >= gap_lo - GUARD_SAMPLES and s < gap_hi + GUARD_SAMPLES]
             concealed = [tag for lo, hi, tag in windows if lo < gap_hi and hi > gap_lo]
