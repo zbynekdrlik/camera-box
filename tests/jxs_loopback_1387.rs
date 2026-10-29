@@ -13,7 +13,7 @@ use camera_box::jxs_link::{
     DATAGRAM_LEN, HEADER_LEN,
 };
 use camera_box::jxs_recv::{DecodeSink, JxsRecvSocket};
-use camera_box::jxs_send::JxsSender;
+use camera_box::jxs_send::{JxsFrame, JxsSender};
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 use svt_jpegxs_sys::{Encoder, EncoderSettings, Yuv422Planes};
@@ -76,7 +76,15 @@ fn a_frame_crosses_loopback_and_decodes_back_within_the_psnr_bound() {
     let original = planar(0);
     let yuyv = to_yuyv(&original);
     let timecode: i64 = 17_618_456_000_000_000;
-    tx.offer(&yuyv, W as u32, H as u32, (W * 2) as u32, true, timecode);
+    tx.offer(&JxsFrame {
+        data: &yuyv,
+        width: W as u32,
+        height: H as u32,
+        stride: (W * 2) as u32,
+        yuyv: true,
+        timecode_100ns: timecode,
+        emit_fps: 60,
+    });
 
     let mut assembler = FrameAssembler::new();
     let got: RefCell<Option<(FrameReport, Yuv422Planes)>> = RefCell::new(None);
@@ -137,14 +145,26 @@ fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
     for pair in 0..N / 2 {
         for k in [2 * pair, 2 * pair + 1] {
             let yuyv = to_yuyv(&pictures[k]);
-            tx.offer(
-                &yuyv,
-                W as u32,
-                H as u32,
-                (W * 2) as u32,
-                true,
-                base + k as i64 * 166_667,
-            );
+            // the even slots of the 60 fps emit grid: the frames JPEG XS takes
+            tx.offer(&JxsFrame {
+                data: &yuyv,
+                width: W as u32,
+                height: H as u32,
+                stride: (W * 2) as u32,
+                yuyv: true,
+                timecode_100ns: base + 2 * k as i64 * 10_000_000 / 60,
+                emit_fps: 60,
+            });
+            // the odd slot after it never goes (and is no drop)
+            tx.offer(&JxsFrame {
+                data: &yuyv,
+                width: W as u32,
+                height: H as u32,
+                stride: (W * 2) as u32,
+                yuyv: true,
+                timecode_100ns: base + (2 * k as i64 + 1) * 10_000_000 / 60,
+                emit_fps: 60,
+            });
         }
         let until = Instant::now() + Duration::from_millis(150);
         while Instant::now() < until {
@@ -168,8 +188,8 @@ fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
     for (k, (tc, p)) in got.iter().enumerate() {
         assert_eq!(
             *tc,
-            (base + k as i64 * 166_667) as u64,
-            "frame {k} in order"
+            (base + 2 * k as i64 * 10_000_000 / 60) as u64,
+            "frame {k} in order, only the even slots"
         );
         let py = psnr(pictures[k].y(), p.y());
         assert!(py >= 40.0, "frame {k} luma PSNR {py:.2} dB");

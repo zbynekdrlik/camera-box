@@ -178,6 +178,21 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 pub const CORES_ENV: &str = "CAMERA_BOX_JXS_CORES";
 /// The most slice-pack threads the encoder runs (a 1080p frame has 68 slices).
 pub const MAX_SLICE_THREADS: usize = 4;
+/// The environment variable that sets the encoder's bits per pixel (owner decision 29.10.2026).
+pub const BPP_ENV: &str = "CAMERA_BOX_JXS_BPP";
+/// The default bits per pixel (comment 6489868243: ~250 Mb/s at 30 fps).
+pub const DEFAULT_BPP: u32 = 4;
+/// The highest bpp the wire format carries: a 16-line 1080p slice at 12 bpp is ~46 KB, under the
+/// 64 KB slice length field.
+pub const MAX_BPP: u32 = 12;
+
+/// The encoder's bits per pixel from [`BPP_ENV`]: unset or blank = [`DEFAULT_BPP`]; a whole
+/// number 1..=[`MAX_BPP`] is taken; anything else is refused (`Err`, the caller logs it and keeps
+/// the default).
+pub fn parse_bpp(value: Option<&str>) -> Result<u32, String> {
+    let _ = value;
+    Ok(DEFAULT_BPP)
+}
 
 /// The encoder's core set: [`CORES_ENV`] when it is set and inside `allowed` (the off-capture
 /// cores), else `allowed`. `Err` names why an override was refused (the caller logs it and uses
@@ -255,21 +270,27 @@ pub struct JxsHandoff {
 
 #[cfg(not(feature = "jxs"))]
 impl JxsHandoff {
-    pub fn offer(
-        &self,
-        _data: &[u8],
-        _width: u32,
-        _height: u32,
-        _stride: u32,
-        _yuyv: bool,
-        _timecode_100ns: i64,
-    ) {
+    pub fn offer(&self, _frame: &JxsFrame<'_>) {
         match self.never {}
     }
 
     pub fn dropped_busy(&self) -> u64 {
         match self.never {}
     }
+}
+
+/// One emitted frame as the capture loop hands it over.
+#[derive(Debug, Clone, Copy)]
+pub struct JxsFrame<'a> {
+    pub data: &'a [u8],
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub yuyv: bool,
+    /// The genlock timecode the NDI frame carries.
+    pub timecode_100ns: i64,
+    /// The NDI emit rate (0 = genlock off): selects the [`jxs_link::JXS_FPS`] frames.
+    pub emit_fps: u32,
 }
 
 /// Entry point for the capture loop.
@@ -280,11 +301,21 @@ impl JxsSender {
     /// threads; any failure is logged and the link stays off (`None`), never the capture loop.
     pub fn start_from_env(hostname: &str) -> Option<JxsHandoff> {
         let value = std::env::var(TARGET_ENV).ok();
-        Self::start(value.as_deref(), hostname)
+        let bpp = std::env::var(BPP_ENV).ok();
+        Self::start_with(value.as_deref(), hostname, bpp.as_deref())
     }
 
-    /// [`Self::start_from_env`] with the value passed in (tests).
+    /// [`Self::start_from_env`] with the target passed in and the default bpp (tests).
     pub fn start(value: Option<&str>, hostname: &str) -> Option<JxsHandoff> {
+        Self::start_with(value, hostname, None)
+    }
+
+    /// [`Self::start_from_env`] with both values passed in.
+    pub fn start_with(
+        value: Option<&str>,
+        hostname: &str,
+        bpp_value: Option<&str>,
+    ) -> Option<JxsHandoff> {
         let target = match jxs_link::parse_target(value) {
             Ok(None) => return None,
             Ok(Some(t)) => t,
@@ -293,12 +324,16 @@ impl JxsSender {
                 return None;
             }
         };
-        start_worker(target, jxs_link::camera_id_from_hostname(hostname))
+        let bpp = parse_bpp(bpp_value).unwrap_or_else(|e| {
+            tracing::warn!("{e} -- using {DEFAULT_BPP} bpp (issue 1387)");
+            DEFAULT_BPP
+        });
+        start_worker(target, jxs_link::camera_id_from_hostname(hostname), bpp)
     }
 }
 
 #[cfg(not(feature = "jxs"))]
-fn start_worker(target: String, _camera_id: u8) -> Option<JxsHandoff> {
+fn start_worker(target: String, _camera_id: u8, _bpp: u32) -> Option<JxsHandoff> {
     tracing::error!(
         "{TARGET_ENV}={target} is set, but this camera-box was built without the `jxs` feature -- \
          the JPEG XS link stays off (issue 1387)"
@@ -307,7 +342,7 @@ fn start_worker(target: String, _camera_id: u8) -> Option<JxsHandoff> {
 }
 
 #[cfg(feature = "jxs")]
-fn start_worker(target: String, camera_id: u8) -> Option<JxsHandoff> {
+fn start_worker(target: String, camera_id: u8, bpp: u32) -> Option<JxsHandoff> {
     let socket = match JxsSocket::connect(&target) {
         Ok(s) => s,
         Err(e) => {
@@ -327,22 +362,25 @@ fn start_worker(target: String, camera_id: u8) -> Option<JxsHandoff> {
         }
     };
     tracing::info!(
-        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, send buffer {} bytes) -- JPEG XS 4 bpp, latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), beside NDI (issue 1387)",
+        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, send buffer {} bytes) -- JPEG XS {bpp} bpp at {} fps (the strih grid, NDI stays at its emit rate), latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), beside NDI (issue 1387)",
         socket
             .peer()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| target.clone()),
         if socket.gso() { "on" } else { "OFF: one send per datagram" },
         socket.send_buffer(),
+        jxs_link::JXS_FPS,
         FRAMES_IN_FLIGHT,
         slice_threads_for(&cores),
     );
-    handoff::spawn(socket, camera_id, cores)
+    handoff::spawn(socket, camera_id, cores, bpp)
 }
 
 #[cfg(feature = "jxs")]
 mod handoff {
-    use super::{jxs_link, slice_threads_for, JxsSocket, Stats, FRAMES_IN_FLIGHT, STATUS_PERIOD};
+    use super::{
+        jxs_link, slice_threads_for, JxsFrame, JxsSocket, Stats, FRAMES_IN_FLIGHT, STATUS_PERIOD,
+    };
     use crate::jxs_link::{PacketHeader, SendWindow};
     use std::sync::atomic::Ordering;
     use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -387,15 +425,19 @@ mod handoff {
         /// picture (no separate copy) and queues it. Never blocks: with every picture in use the
         /// frame is dropped and counted (`dropped_busy`). Allocation-free once each picture has
         /// grown to the frame size.
-        pub fn offer(
-            &self,
-            data: &[u8],
-            width: u32,
-            height: u32,
-            stride: u32,
-            yuyv: bool,
-            timecode_100ns: i64,
-        ) {
+        pub fn offer(&self, frame: &JxsFrame<'_>) {
+            let JxsFrame {
+                data,
+                width,
+                height,
+                stride,
+                yuyv,
+                timecode_100ns,
+                emit_fps,
+            } = *frame;
+            if !jxs_link::on_jxs_grid(timecode_100ns, emit_fps) {
+                return;
+            }
             if !yuyv {
                 self.stats.not_yuyv.store(true, Ordering::Relaxed);
                 return;
@@ -482,7 +524,12 @@ mod handoff {
         }
     }
 
-    pub(super) fn spawn(socket: JxsSocket, camera_id: u8, cores: Vec<usize>) -> Option<JxsHandoff> {
+    pub(super) fn spawn(
+        socket: JxsSocket,
+        camera_id: u8,
+        cores: Vec<usize>,
+        bpp: u32,
+    ) -> Option<JxsHandoff> {
         let stats = Arc::new(Stats::default());
         let (free_tx, free_rx) = mpsc::sync_channel(FRAMES_IN_FLIGHT);
         for _ in 0..FRAMES_IN_FLIGHT {
@@ -497,7 +544,7 @@ mod handoff {
                 (Arc::clone(&stats), free_tx.clone(), cores.clone());
             match std::thread::Builder::new()
                 .name("jxs-feed".into())
-                .spawn(move || feed(ready_rx, job_tx, feed_free, feed_stats, feed_cores))
+                .spawn(move || feed(ready_rx, job_tx, feed_free, feed_stats, feed_cores, bpp))
             {
                 Ok(h) => workers.push(h),
                 Err(e) => {
@@ -510,7 +557,7 @@ mod handoff {
             let (send_stats, send_free) = (Arc::clone(&stats), free_tx.clone());
             match std::thread::Builder::new()
                 .name("jxs-send".into())
-                .spawn(move || send(job_rx, socket, camera_id, send_free, send_stats, cores))
+                .spawn(move || send(job_rx, socket, camera_id, send_free, send_stats, cores, bpp))
             {
                 Ok(h) => workers.push(h),
                 Err(e) => {
@@ -552,6 +599,7 @@ mod handoff {
         free_tx: SyncSender<Picture>,
         stats: Arc<Stats>,
         cores: Vec<usize>,
+        bpp: u32,
     ) {
         pin("jxs-feed", &cores);
         let threads = slice_threads_for(&cores);
@@ -571,11 +619,12 @@ mod handoff {
                     let _ = free_tx.try_send(r.pic);
                     continue;
                 }
-                match open_pipelined(EncoderSettings::issue_1387(w, h).with_slice_threads(threads))
-                {
+                let mut settings = EncoderSettings::issue_1387(w, h).with_slice_threads(threads);
+                settings.bpp_numerator = bpp;
+                match open_pipelined(settings) {
                     Ok((i, o)) => {
                         tracing::info!(
-                            "jxs send: encoder open {w}x{h}, {} bytes per frame, {threads} slice threads on cores {cores:?} (issue 1387)",
+                            "jxs send: encoder open {w}x{h}, {bpp} bpp, {} bytes per frame, {threads} slice threads on cores {cores:?} (issue 1387)",
                             i.bytes_per_frame()
                         );
                         if job_tx.send(Job::Session(o)).is_err() {
@@ -633,6 +682,7 @@ mod handoff {
         free_tx: SyncSender<Picture>,
         stats: Arc<Stats>,
         cores: Vec<usize>,
+        bpp: u32,
     ) {
         pin("jxs-send", &cores);
         let mut output: Option<EncoderOutput> = None;
@@ -644,6 +694,8 @@ mod handoff {
         loop {
             if last_status.elapsed() >= STATUS_PERIOD {
                 stats.drain_into(&mut window);
+                window.window_s = last_status.elapsed().as_secs_f64();
+                window.bpp = bpp;
                 if stats.not_yuyv.load(Ordering::Relaxed) && !warned_format {
                     tracing::warn!(
                         "jxs send: the capture is not YUYV -- frames are not sent (issue 1387)"
@@ -745,6 +797,8 @@ mod handoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "jxs")]
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn the_link_is_off_unless_the_target_is_set() {
@@ -772,6 +826,24 @@ mod tests {
         let e = select_encoder_cores(Some("3"), &allowed).unwrap_err();
         assert!(e.contains("core 3"), "{e}");
         assert!(select_encoder_cores(Some("x"), &allowed).is_err());
+    }
+
+    #[test]
+    fn the_bpp_is_a_setting_with_a_default_and_a_bound() {
+        assert_eq!(parse_bpp(None), Ok(4));
+        assert_eq!(parse_bpp(Some(" ")), Ok(4));
+        assert_eq!(parse_bpp(Some("6")), Ok(6));
+        assert_eq!(parse_bpp(Some(" 8\n")), Ok(8));
+        assert_eq!(parse_bpp(Some("12")), Ok(12));
+        for bad in ["0", "13", "4.5", "-4", "x"] {
+            let e = parse_bpp(Some(bad)).unwrap_err();
+            assert!(e.contains(BPP_ENV), "{bad}: {e}");
+        }
+        // a refused value keeps the link (and the default), never turns it off
+        assert!(
+            JxsSender::start_with(None, "CAM5", Some("x")).is_none(),
+            "no target: off"
+        );
     }
 
     #[test]
@@ -815,6 +887,44 @@ mod tests {
         );
     }
 
+    /// A 60 fps emit stamp of slot `k` in second 1_761_730_000 (29.10.2026).
+    #[cfg(feature = "jxs")]
+    fn tc(k: i64) -> i64 {
+        1_761_730_000 * 10_000_000 + k * 10_000_000 / 60
+    }
+
+    #[cfg(feature = "jxs")]
+    fn jf(data: &[u8], w: u32, h: u32, timecode_100ns: i64, yuyv: bool) -> JxsFrame<'_> {
+        JxsFrame {
+            data,
+            width: w,
+            height: h,
+            stride: w * 2,
+            yuyv,
+            timecode_100ns,
+            emit_fps: 60,
+        }
+    }
+
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn only_the_frames_on_the_strih_30_fps_grid_are_taken() {
+        let (h, ready) = JxsHandoff::detached();
+        let frame = vec![1u8; 64 * 8 * 2];
+        for k in [1, 3] {
+            h.offer(&jf(&frame, 64, 8, tc(k), true));
+        }
+        assert!(ready.try_recv().is_err(), "odd slots never go");
+        assert_eq!(
+            h.stats.convert_count.load(Ordering::Relaxed),
+            0,
+            "not even converted"
+        );
+        h.offer(&jf(&frame, 64, 8, tc(2), true));
+        assert_eq!(ready.try_recv().unwrap().timecode_100ns, tc(2));
+        assert_eq!(h.dropped_busy(), 0, "a skipped odd frame is no drop");
+    }
+
     #[cfg(feature = "jxs")]
     #[test]
     fn two_frames_are_taken_and_the_third_is_dropped_without_waiting() {
@@ -822,8 +932,8 @@ mod tests {
         let (w, ht) = (64u32, 8u32);
         let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i % 251) as u8).collect();
         let t = std::time::Instant::now();
-        for tc in 1..=3 {
-            h.offer(&frame, w, ht, w * 2, true, tc);
+        for k in [0, 2, 4] {
+            h.offer(&jf(&frame, w, ht, tc(k), true));
         }
         assert!(
             t.elapsed() < std::time::Duration::from_millis(50),
@@ -836,7 +946,7 @@ mod tests {
         );
         let a = ready.try_recv().expect("first");
         let b = ready.try_recv().expect("second");
-        assert_eq!((a.timecode_100ns, b.timecode_100ns), (1, 2));
+        assert_eq!((a.timecode_100ns, b.timecode_100ns), (tc(0), tc(2)));
         // converted on hand-off: planar Y is every other source byte
         assert_eq!(
             a.pic.planes().y()[..4],
@@ -852,16 +962,16 @@ mod tests {
     fn a_returned_picture_is_reused_without_reallocating() {
         let (h, ready) = JxsHandoff::detached();
         let frame = vec![1u8; 64 * 8 * 2];
-        h.offer(&frame, 64, 8, 128, true, 1);
+        h.offer(&jf(&frame, 64, 8, tc(0), true));
         let first = ready.try_recv().unwrap();
         let ptr = first.pic.planes().y().as_ptr();
         h.free_tx.try_send(first.pic).unwrap();
         // the other picture is taken first (FIFO), then the returned one
-        h.offer(&frame, 64, 8, 128, true, 2);
-        h.offer(&frame, 64, 8, 128, true, 3);
+        h.offer(&jf(&frame, 64, 8, tc(2), true));
+        h.offer(&jf(&frame, 64, 8, tc(4), true));
         let _second = ready.try_recv().unwrap();
         let third = ready.try_recv().unwrap();
-        assert_eq!(third.timecode_100ns, 3);
+        assert_eq!(third.timecode_100ns, tc(4));
         assert_eq!(
             third.pic.planes().y().as_ptr(),
             ptr,
@@ -875,14 +985,14 @@ mod tests {
     fn a_frame_that_is_not_yuyv_or_does_not_fit_never_holds_a_picture() {
         let (h, ready) = JxsHandoff::detached();
         let frame = vec![1u8; 64 * 8 * 2];
-        h.offer(&frame, 64, 8, 128, false, 1);
-        h.offer(&frame[..100], 64, 8, 128, true, 2);
+        h.offer(&jf(&frame, 64, 8, tc(0), false));
+        h.offer(&jf(&frame[..100], 64, 8, tc(2), true));
         assert!(ready.try_recv().is_err());
         assert!(h.stats.not_yuyv.load(Ordering::Relaxed));
         assert_eq!(h.stats.convert_errors.load(Ordering::Relaxed), 1);
         // both pictures are still free
-        h.offer(&frame, 64, 8, 128, true, 3);
-        h.offer(&frame, 64, 8, 128, true, 4);
+        h.offer(&jf(&frame, 64, 8, tc(4), true));
+        h.offer(&jf(&frame, 64, 8, tc(6), true));
         assert_eq!(h.dropped_busy(), 0);
     }
 

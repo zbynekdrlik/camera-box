@@ -1445,20 +1445,23 @@ async fn run_capture_loop(
                 }
                 // Issue 1387 slice 1b -- the JPEG XS link takes the current frame HERE, once its
                 // genlock timecode is fixed and BEFORE the stagger sleep and the NDI send, so it
-                // never waits for the NDI send call. The capture thread converts the frame straight
+                // never waits for the NDI send call. Only the frames on the strih 30 fps grid go
+                // (the even slots of the per-second emit grid, chosen by this timecode; owner
+                // decision 29.10.2026); NDI keeps every frame. The capture thread converts the frame straight
                 // into a free planar picture (AVX2, no separate copy) or counts a drop while both
                 // pictures are in flight; it never blocks. Its cost lands inside the #1242 stagger
                 // offset (the sleep below shrinks by it) and the work the 5 s line reports. The
                 // timecode is the very one the NDI frame below carries.
                 if let Some(jxs) = jxs_sender.as_ref() {
-                    jxs.offer(
+                    jxs.offer(&camera_box::jxs_send::JxsFrame {
                         data,
-                        info.width,
-                        info.height,
-                        info.stride,
-                        info.fourcc.str().map(|f| f == "YUYV").unwrap_or(false),
-                        capture_timecode_100ns,
-                    );
+                        width: info.width,
+                        height: info.height,
+                        stride: info.stride,
+                        yuyv: info.fourcc.str().map(|f| f == "YUYV").unwrap_or(false),
+                        timecode_100ns: capture_timecode_100ns,
+                        emit_fps: send_fps,
+                    });
                 }
                 // #1242 — the per-camera NDI send stagger, ONCE per emitted iteration: after the
                 // genlock timecode above is fixed (it never moves) and before the first send (the

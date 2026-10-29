@@ -62,6 +62,8 @@ fn the_capture_loop_starts_the_link_only_from_the_env_and_offers_before_the_ndi_
     let region = &m[offer..offer + 400];
     assert!(region.contains("capture_timecode_100ns"), "{region}");
     assert!(!region.contains("starvation_repeat_timecode"), "{region}");
+    // the 30 fps selection reads the NDI emit rate (the frame's own grid), never a counter
+    assert!(region.contains("emit_fps: send_fps"), "{region}");
 }
 
 #[test]
