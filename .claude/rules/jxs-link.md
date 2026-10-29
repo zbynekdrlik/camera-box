@@ -334,11 +334,11 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
    import sys; sys.path.insert(0, "scripts"); import obs_phase2 as o
    ws = o._conn("10.77.9.202")
    o._rpc(ws, "CreateScene", {"sceneName": "JXS cam5"})
-   o._rpc(ws, "CreateInput", {"sceneName": "JXS cam5", "inputName": "JXS cam5",
+   o._rpc(ws, "CreateInput", {"sceneName": "JXS cam5", "inputName": "JXS cam5 src",
           "inputKind": "camera_box_jxs_source",
           "inputSettings": {"jxs_port": 7000, "jxs_camera": 5, "jxs_max_bpp": 0,
                             "genlock_fifo": True, "genlock_latency_ms_src": 3}})
-   o._rpc(ws, "GetInputSettings", {"inputName": "JXS cam5"})   # read the keys back
+   o._rpc(ws, "GetInputSettings", {"inputName": "JXS cam5 src"})   # read the keys back (an input cannot share its scene's name: code 601)
    ```
    The OBS log shows the `listening on UDP 7000` line.
 4. On cam5, the slice-1 runtime drop-in with `CAMERA_BOX_JXS_TARGET=10.77.9.202:7000` (rule section
@@ -346,8 +346,8 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
 5. Program: in Studio Mode put `JXS cam5` on the preview, then cut it to the strih program (never
    the stream box, never `PRO`). The OBS log must show `frames arriving`.
 6. Grade:
-   - `jxs-source 'JXS cam5': fps=30.00` every 5 s, `lost_slices=0 undecodable=0 dropped_unread=0`;
-   - `genlock-fifo audit 'JXS cam5'` clean for 10 min: no `underruns` / `relocks` / `late_holds` /
+   - `jxs-source 'JXS cam5 src': fps=30.00` every 5 s, `lost_slices=0 undecodable=0 dropped_unread=0`;
+   - `genlock-fifo audit 'JXS cam5 src'` clean for 10 min: no `underruns` / `relocks` / `late_holds` /
      `backward_steps` growth (`genlock-jitter-report` reads the log). The JPEG XS input is a 30 fps
      source on the 30 fps strih canvas, so it should take the N==1 pin-derived-depth path (unverified until this run)
      (`genlock-n1-pin-derived-depth.md`), not the N>=2 grid conveyor the 60 fps NDI camera inputs
@@ -355,7 +355,7 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
    - the cambox's `jxs send: bpp A -> B` lines climb 4 -> 8 within ~1 min while the source reports
      (`reports=5` per window on the source, `report_age_s` < 3 on the sender), and the source's
      `bpp=` reads 8.00; then `jxs_max_bpp` 6 over WS must step the sender down to 6 (`receiver-cap`);
-   - a strih screenshot (`GetSourceScreenshot` of `JXS cam5` and of `NDI cam5`, same moment, PNG)
+   - a strih screenshot (`GetSourceScreenshot` of `JXS cam5 src` and of `NDI cam5`, same moment, PNG)
      compared with the detail metric + a crop for the owner (the slice-0 comparison method).
 7. Leave nothing behind unasked: the `JXS cam5` scene stays only if the owner wants it on the
    program; remove the cambox drop-in (step 4 of the slice-1 runbook) when the run is over.
