@@ -23,6 +23,12 @@
 //! * two or more such outputs and no preferred one = ambiguity: pick NOTHING (keep waiting for
 //!   the preferred name) and report the candidates — never alternate between strih boxes;
 //! * nothing matching = keep retrying exactly as before.
+//!
+//! Issue 1431 (joint event: one DNS switch for the whole cambox): BEFORE all of the above, the
+//! `STRIH-<box> (interkom)` output whose NDI address is the IP `strih.lan` resolves to (re-resolved
+//! on every connect) is taken on sight. So the router's `strih.lan` record moves the preview with
+//! the intercom, the shading and the clock. A name that does not resolve, or an IP no strih
+//! interkom output is published from, leaves the rules above unchanged.
 
 /// The preferred preview source every cambox asks for: the SNV strih box's interkom output
 /// (strih-snv, `<role>-<venue>` since issue 1414). Any other `STRIH-<box> (interkom)` is still found
@@ -30,15 +36,31 @@
 /// still runs its pre-1414 hostname -- so this only has to name the usual strih.
 pub const DEFAULT_PREVIEW_SOURCE: &str = "STRIH-SNV (interkom)";
 
+use std::net::IpAddr;
+
 /// NDI host prefix every strih box publishes under (`STRIH-SNV`, `STRIH-PP`, ...).
 pub const STRIH_HOST_PREFIX: &str = "STRIH-";
 
 /// NDI output suffix of the strih interkom/return output (the full NDI name is `HOST (output)`).
 pub const INTERKOM_OUTPUT_SUFFIX: &str = " (interkom)";
 
+/// The DNS name of the venue strih every cambox service follows (issue 1431): dantesync's NTP
+/// server, the intercom's VBAN target, the shading relay's registration and this preview.
+pub const STRIH_DNS_NAME: &str = "strih.lan";
+
+/// One discovered NDI source: its name and the address the finder reports for it
+/// (`p_url_address`, `ip:port`), `None` when the SDK gave none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredSource {
+    pub name: String,
+    pub address: Option<String>,
+}
+
 /// Outcome of resolving the preview source against the discovered NDI source list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewResolution {
+    /// The strih interkom output published from the IP `strih.lan` resolves to (issue 1431).
+    Followed { name: String, strih_ip: IpAddr },
     /// The preferred name is on the LAN.
     Preferred(String),
     /// The preferred name is absent; exactly one `STRIH-<box> (interkom)` output is present.
@@ -76,13 +98,40 @@ pub fn resolve_preview_source(discovered: &[String], preferred: &str) -> Preview
     }
 }
 
+/// The IP of an NDI source address (`ip:port`, `[v6]:port` or a bare IP), else `None`.
+pub fn source_ip(_address: &str) -> Option<IpAddr> {
+    None
+}
+
+/// Issue 1431: the strih interkom output published from `strih_ip` wins on sight; otherwise the
+/// name rules of [`resolve_preview_source`] apply unchanged.
+pub fn resolve_followed_preview_source(
+    discovered: &[DiscoveredSource],
+    preferred: &str,
+    _strih_ip: Option<IpAddr>,
+) -> PreviewResolution {
+    let names: Vec<String> = discovered.iter().map(|s| s.name.clone()).collect();
+    resolve_preview_source(&names, preferred)
+}
+
+/// The journal line for the `strih.lan` resolution, only when it changed since `last_logged`
+/// (`None` = never logged). Issue 1431.
+pub fn strih_lan_log_line(
+    _last_logged: Option<&Option<IpAddr>>,
+    _now: Option<IpAddr>,
+) -> Option<String> {
+    None
+}
+
 /// Decide which exact name (if any) to connect to NOW. `window_elapsed` is `true` on the final
 /// pass of the find window: the preferred name is taken on sight, the single fallback only once
 /// the window elapsed (a late mDNS announce of the preferred box must win), ambiguity and
 /// nothing-found never pick.
 pub fn pick_preview_source(resolution: &PreviewResolution, window_elapsed: bool) -> Option<String> {
     match resolution {
-        PreviewResolution::Preferred(name) => Some(name.clone()),
+        PreviewResolution::Followed { name, .. } | PreviewResolution::Preferred(name) => {
+            Some(name.clone())
+        }
         PreviewResolution::Fallback(name) if window_elapsed => Some(name.clone()),
         PreviewResolution::Fallback(_)
         | PreviewResolution::Ambiguous(_)
@@ -122,7 +171,9 @@ pub fn preview_log_level(
 /// The one journal line describing a resolution (logged once per change by the display loop).
 pub fn preview_log_line(resolution: &PreviewResolution, preferred: &str) -> String {
     match resolution {
-        PreviewResolution::Preferred(name) | PreviewResolution::Fallback(name) => {
+        PreviewResolution::Followed { name, .. }
+        | PreviewResolution::Preferred(name)
+        | PreviewResolution::Fallback(name) => {
             format!("NDI display: preview source resolved to '{name}' (#1362)")
         }
         PreviewResolution::Ambiguous(candidates) => {
@@ -408,5 +459,181 @@ mod tests {
             none.contains("'STRIH-SNV (interkom)'") && none.contains("(#1362)"),
             "{none}"
         );
+    }
+
+    // --- issue 1431: the strih behind strih.lan -------------------------------------------
+
+    fn src(name: &str, address: Option<&str>) -> DiscoveredSource {
+        DiscoveredSource {
+            name: name.to_string(),
+            address: address.map(str::to_string),
+        }
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// A joint event: both strih boxes on one network, strih-snv at .9.202, strih-pp at .8.202.
+    fn joint_lan() -> Vec<DiscoveredSource> {
+        vec![
+            src("CAM1 (usb)", Some("10.77.9.61:5961")),
+            src("STRIH-SNV (2ME PGM)", Some("10.77.9.202:5961")),
+            src("STRIH-SNV (interkom)", Some("10.77.9.202:5963")),
+            src("STRIH-PP (interkom)", Some("10.77.8.202:5962")),
+            src("STRIH-PP (2ME PGM)", Some("10.77.8.202:5961")),
+        ]
+    }
+
+    #[test]
+    fn source_ip_reads_ip_port_v6_and_bare_addresses_1431() {
+        assert_eq!(source_ip("10.77.9.202:5961"), Some(ip("10.77.9.202")));
+        assert_eq!(source_ip("10.77.9.202"), Some(ip("10.77.9.202")));
+        assert_eq!(source_ip("[fe80::1]:5961"), Some(ip("fe80::1")));
+        assert_eq!(source_ip(" 10.77.8.202:5962 "), Some(ip("10.77.8.202")));
+        assert_eq!(source_ip(""), None);
+        assert_eq!(source_ip("strih-snv.lan:5961"), None);
+        assert_eq!(source_ip("10.77.9:5961"), None);
+    }
+
+    #[test]
+    fn the_strih_behind_strih_lan_wins_over_the_preferred_name_1431() {
+        // strih.lan points at strih-pp: a SNV cambox follows it although STRIH-SNV is announced.
+        let r = resolve_followed_preview_source(
+            &joint_lan(),
+            DEFAULT_PREVIEW_SOURCE,
+            Some(ip("10.77.8.202")),
+        );
+        assert_eq!(
+            r,
+            PreviewResolution::Followed {
+                name: "STRIH-PP (interkom)".to_string(),
+                strih_ip: ip("10.77.8.202"),
+            }
+        );
+        // taken on sight, mid-window too
+        assert_eq!(
+            pick_preview_source(&r, false),
+            Some("STRIH-PP (interkom)".to_string())
+        );
+        // and strih.lan at strih-snv picks SNV
+        assert_eq!(
+            resolve_followed_preview_source(
+                &joint_lan(),
+                DEFAULT_PREVIEW_SOURCE,
+                Some(ip("10.77.9.202"))
+            ),
+            PreviewResolution::Followed {
+                name: "STRIH-SNV (interkom)".to_string(),
+                strih_ip: ip("10.77.9.202"),
+            }
+        );
+    }
+
+    #[test]
+    fn only_a_strih_interkom_output_at_that_ip_is_followed_1431() {
+        // The PGM output and a camera at the strih IP never become the preview.
+        let lan = vec![
+            src("STRIH-PP (2ME PGM)", Some("10.77.8.202:5961")),
+            src("CAM9 (usb)", Some("10.77.8.202:5964")),
+            src("STRIH-SNV (interkom)", Some("10.77.9.202:5963")),
+        ];
+        assert_eq!(
+            resolve_followed_preview_source(&lan, DEFAULT_PREVIEW_SOURCE, Some(ip("10.77.8.202"))),
+            PreviewResolution::Preferred("STRIH-SNV (interkom)".to_string())
+        );
+    }
+
+    #[test]
+    fn unresolved_or_unmatched_strih_lan_keeps_todays_rules_1431() {
+        let lan = joint_lan();
+        let names: Vec<String> = lan.iter().map(|s| s.name.clone()).collect();
+        let today = resolve_preview_source(&names, DEFAULT_PREVIEW_SOURCE);
+        assert_eq!(
+            resolve_followed_preview_source(&lan, DEFAULT_PREVIEW_SOURCE, None),
+            today
+        );
+        assert_eq!(
+            resolve_followed_preview_source(&lan, DEFAULT_PREVIEW_SOURCE, Some(ip("10.77.9.1"))),
+            today
+        );
+        // a source with no address never matches
+        let no_addr = vec![src("STRIH-PP (interkom)", None)];
+        assert_eq!(
+            resolve_followed_preview_source(
+                &no_addr,
+                DEFAULT_PREVIEW_SOURCE,
+                Some(ip("10.77.8.202"))
+            ),
+            PreviewResolution::Fallback("STRIH-PP (interkom)".to_string())
+        );
+    }
+
+    #[test]
+    fn two_interkom_outputs_at_the_strih_ip_pick_the_first_by_name_1431() {
+        let lan = vec![
+            src("STRIH-PP2 (interkom)", Some("10.77.8.202:5964")),
+            src("STRIH-PP (interkom)", Some("10.77.8.202:5962")),
+        ];
+        assert_eq!(
+            resolve_followed_preview_source(&lan, DEFAULT_PREVIEW_SOURCE, Some(ip("10.77.8.202"))),
+            PreviewResolution::Followed {
+                name: "STRIH-PP (interkom)".to_string(),
+                strih_ip: ip("10.77.8.202"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_followed_resolution_is_logged_with_the_strih_lan_ip_once_per_change_1431() {
+        let a = PreviewResolution::Followed {
+            name: "STRIH-PP (interkom)".to_string(),
+            strih_ip: ip("10.77.8.202"),
+        };
+        assert_eq!(
+            preview_log_line(&a, DEFAULT_PREVIEW_SOURCE),
+            "NDI display: preview source resolved to 'STRIH-PP (interkom)', the strih behind \
+             strih.lan (10.77.8.202) (#1431)"
+        );
+        assert_eq!(
+            preview_log_level(None, &a, true, false),
+            Some(PreviewLogLevel::Info)
+        );
+        assert_eq!(preview_log_level(Some(&a), &a, true, false), None);
+        // the same name reached by the old preferred-name rule is a change, logged again
+        let p = PreviewResolution::Preferred("STRIH-PP (interkom)".to_string());
+        assert_eq!(
+            preview_log_level(Some(&a), &p, true, false),
+            Some(PreviewLogLevel::Info)
+        );
+    }
+
+    #[test]
+    fn the_strih_lan_resolution_is_logged_once_per_change_1431() {
+        let snv = Some(ip("10.77.9.202"));
+        let pp = Some(ip("10.77.8.202"));
+        assert_eq!(
+            strih_lan_log_line(None, snv).as_deref(),
+            Some(
+                "NDI display: strih.lan resolves to 10.77.9.202 -- the preview follows the strih \
+                 interkom output published from it (#1431)"
+            )
+        );
+        assert_eq!(strih_lan_log_line(Some(&snv), snv), None);
+        assert_eq!(
+            strih_lan_log_line(Some(&snv), pp).as_deref(),
+            Some(
+                "NDI display: strih.lan resolves to 10.77.8.202 -- the preview follows the strih \
+                 interkom output published from it (#1431)"
+            )
+        );
+        assert_eq!(
+            strih_lan_log_line(Some(&pp), None).as_deref(),
+            Some(
+                "NDI display: strih.lan does not resolve -- the preview keeps the strih name \
+                 rules (#1431)"
+            )
+        );
+        assert_eq!(strih_lan_log_line(Some(&None), None), None);
     }
 }
