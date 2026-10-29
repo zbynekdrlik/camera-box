@@ -137,5 +137,6 @@ fn ci_lints_and_tests_the_ffi_crate() {
     assert!(ci.contains("run: cargo clippy -p jxs-recv-ffi --all-targets -- -D warnings"));
     assert!(ci.contains("run: cargo nextest run -p jxs-recv-ffi"));
     let root = read("Cargo.toml");
-    assert!(root.contains("\"jxs/sys\", \"jxs/recv-ffi\"]"));
+    // issue 1387 slice 3: the sender's C ABI crate is a member too (carried in the one archive)
+    assert!(root.contains("\"jxs/sys\", \"jxs/recv-ffi\", \"jxs/send-ffi\"]"));
 }
