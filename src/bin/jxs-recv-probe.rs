@@ -131,6 +131,7 @@ fn main() -> anyhow::Result<()> {
     let mut report = ReportWindow::default();
     let mut last_report = Instant::now();
     let mut sender: Option<std::net::SocketAddr> = None;
+    let mut header_changes_seen = 0u64;
     let period = Duration::from_millis(jxs_link::REPORT_PERIOD_MS);
     loop {
         sock.recv_batch_from(|d, arrival, from| {
@@ -202,6 +203,14 @@ fn main() -> anyhow::Result<()> {
             println!("{}", window.status_line(el));
             if let Some(e) = sink.last_error.take() {
                 println!("jxs recv: last decoder error: {e} (issue 1387)");
+            }
+            if sink.header_changes > header_changes_seen {
+                println!(
+                    "jxs recv: decoder reopened at {} new picture header(s) (a sender bpp change), {} in total (issue 1387)",
+                    sink.header_changes - header_changes_seen,
+                    sink.header_changes
+                );
+                header_changes_seen = sink.header_changes;
             }
             window.reset();
             window_start = Instant::now();

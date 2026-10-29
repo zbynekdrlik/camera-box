@@ -254,11 +254,17 @@ mod decode {
         pending_ok: bool,
         whole: Vec<u8>,
         count: usize,
+        /// The picture header packet (index 0) of the frame the decoder was opened from. A frame
+        /// whose header differs (a bpp change: the header carries the codestream length `Lcod`)
+        /// reopens the decoder from that frame (issue 1387).
+        opened_header: Vec<u8>,
         frame_failed: bool,
         on_frame: F,
         /// Frames that could not be decoded.
         pub errors: u64,
         pub last_error: Option<String>,
+        /// Decoder reopens at a changed picture header (each one a sender bpp change).
+        pub header_changes: u64,
     }
 
     impl<F: FnMut(&FrameReport, Option<&Yuv422Planes>)> DecodeSink<F> {
@@ -271,10 +277,12 @@ mod decode {
                 pending_ok: true,
                 whole: Vec::new(),
                 count: 0,
+                opened_header: Vec::new(),
                 frame_failed: false,
                 on_frame,
                 errors: 0,
                 last_error: None,
+                header_changes: 0,
             }
         }
 
@@ -331,7 +339,11 @@ mod decode {
                 self.whole.extend_from_slice(p);
             }
             match Decoder::open(&self.whole) {
-                Ok(d) => self.dec = Some(d),
+                Ok(d) => {
+                    self.dec = Some(d);
+                    self.opened_header.clear();
+                    self.opened_header.extend_from_slice(&self.pending[0]);
+                }
                 Err(e) => {
                     self.last_error = Some(e.to_string());
                     self.errors += 1;
@@ -377,6 +389,17 @@ mod decode {
                     self.count = count as usize;
                     self.dec = None;
                     self.has_prev.iter_mut().for_each(|h| *h = false);
+                } else if let (Some(_), Some(b)) = (&self.dec, bytes) {
+                    if b != self.opened_header.as_slice() {
+                        // A new picture header with the same packet count: the sender changed
+                        // its bpp (issue 1387). The open decoder sized its frame from the old
+                        // header's codestream length and would end this frame early (or wait
+                        // past it), so start over from this whole frame like a new geometry.
+                        // The previous frame's slices have another size: no concealment source.
+                        self.dec = None;
+                        self.header_changes += 1;
+                        self.has_prev.iter_mut().for_each(|h| *h = false);
+                    }
                 }
                 if self.dec.is_none() {
                     self.pending.resize_with(self.count, Vec::new);
