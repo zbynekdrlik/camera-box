@@ -99,16 +99,23 @@ pub struct FecRepair {
 }
 
 impl FecRepair {
-    fn note_frame(&mut self, tc: u64) {
+    /// Whether groups of frame `tc` may be kept: a frame older than every one kept (a late
+    /// datagram of a frame already forgotten) never evicts a current one.
+    fn note_frame(&mut self, tc: u64) -> bool {
         if self.frames.contains(&tc) {
-            return;
+            return true;
+        }
+        if self.frames.len() == KEEP_FRAMES && self.frames.iter().all(|f| *f > tc) {
+            return false;
         }
         self.frames.push_back(tc);
         while self.frames.len() > KEEP_FRAMES {
-            if let Some(old) = self.frames.pop_front() {
+            if let Some(old) = self.frames.iter().copied().min() {
+                self.frames.retain(|f| *f != old);
                 self.groups.retain(|k, _| k.0 != old);
             }
         }
+        true
     }
 
     fn group(&mut self, h: &PacketHeader) -> Option<&mut Group> {
@@ -120,7 +127,9 @@ impl FecRepair {
         }
         let g = index / FEC_GROUP;
         let expected = (total - g * FEC_GROUP).min(FEC_GROUP);
-        self.note_frame(h.timecode_100ns);
+        if !self.note_frame(h.timecode_100ns) {
+            return None;
+        }
         let key = (h.timecode_100ns, h.slice_index, g as u16);
         let group = self.groups.entry(key).or_insert_with(|| Group {
             header: PacketHeader {

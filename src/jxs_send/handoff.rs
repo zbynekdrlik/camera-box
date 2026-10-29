@@ -623,6 +623,9 @@ fn send(
     // rate is decided per frame from the receiver's link (`PaceControl`), a change takes effect
     // at the next frame boundary.
     let mut pace: Option<jxs_link::pace::PaceSchedule> = None;
+    // this sender's own first-send delay is read on the wall clock minus its steps, like the
+    // receiver's arrivals (the congestion control's delay signal, issue 1387 item 2)
+    let wall_steps = jxs_link::congestion_meter::WallSteps::default();
     let mut slack_tightened = false;
     loop {
         if last_status.elapsed() >= STATUS_PERIOD {
@@ -687,6 +690,7 @@ fn send(
         let mut errors = 0u64;
         let mut packet_errors = 0u64;
         let mut first_sent: Option<Instant> = None;
+        let mut first_wall: Option<i64> = None;
         let mut last_sent: Option<Instant> = None;
         let mut paced_ns = 0u64;
         let result = out.recv_frame(|index, packet, _last| {
@@ -715,6 +719,9 @@ fn send(
                     window.fec_sent += groups as u64;
                     if let Some(t) = sent.first {
                         first_sent.get_or_insert(t);
+                        first_wall.get_or_insert_with(|| {
+                            crate::jxs_recv::realtime_100ns() - wall_steps.steps_100ns()
+                        });
                     }
                     last_sent = Some(Instant::now());
                     slices += 1;
@@ -738,6 +745,9 @@ fn send(
                         let wire_ms = b.saturating_duration_since(a).as_secs_f64() * 1000.0;
                         window.note_wire(wire_ms);
                         bpp.pace.on_wire(wire_ms);
+                    }
+                    if let Some(w) = first_wall {
+                        bpp.pace.on_first_send(timecode.max(0) as u64, w);
                     }
                     // the auto bpp judges the codec, not the paced wire: a pace too slow for
                     // the frames shows as dropped_busy, which steps it down on its own

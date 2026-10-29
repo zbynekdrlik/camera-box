@@ -7,13 +7,15 @@ pub const REPORT_MAGIC: u8 = 0x52;
 /// fields after the version-1 bytes).
 pub const REPORT_VERSION: u8 = 2;
 /// A version-2 report is exactly this long.
-pub const REPORT_LEN: usize = 48;
+pub const REPORT_LEN: usize = 56;
 /// The version-1 report (32 bytes, no link speed): still read, from a receiver not yet upgraded.
 pub const REPORT_V1_LEN: usize = 32;
 /// `decode_p99_us` when the window decoded no frame.
 pub const NO_DECODE_TIME: u32 = u32::MAX;
-/// A version-2 delay field that was not measured.
+/// A version-2 unsigned field that was not measured.
 pub const NOT_MEASURED: u32 = u32::MAX;
+/// A version-2 signed delay that was not measured.
+pub const NOT_MEASURED_I32: i32 = i32::MIN;
 /// How often the receiver reports.
 pub const REPORT_PERIOD_MS: u64 = 1000;
 
@@ -37,8 +39,13 @@ pub struct ReceiverReport {
     /// Version 2: the speed of the link the slices arrive on, Mb/s (0 = unknown, and always 0
     /// from a version-1 receiver).
     pub link_mbps: u32,
-    /// Version 2: the queuing delay (`None` = not measured; module doc of `super`).
-    pub queue_delay_us: Option<u32>,
+    /// Version 2: the p50 of (first datagram arrival - frame timecode) over the period's frames,
+    /// microseconds on the two boxes' wall clocks (`None` = no frame). The SENDER subtracts its own
+    /// first-send delay of the same frames and keeps the base (`crate::jxs_congestion::PathDelay`).
+    pub delay_p50_us: Option<i32>,
+    /// Version 2: p90 - p10 of those delays (us): a clock step moves every frame alike (a small
+    /// spread), a queue does not.
+    pub delay_spread_us: Option<u32>,
     /// Version 2: the p50 first -> last datagram arrival span of a whole frame (`None` = none).
     pub span_p50_us: Option<u32>,
     /// Version 2: datagrams the forward error correction rebuilt in the period.
@@ -75,9 +82,13 @@ impl ReceiverReport {
         b[20..24].copy_from_slice(&self.decode_p99_us.to_le_bytes());
         b[24..32].copy_from_slice(&self.last_timecode_100ns.to_le_bytes());
         b[32..36].copy_from_slice(&self.link_mbps.to_le_bytes());
-        b[36..40].copy_from_slice(&opt_us(self.queue_delay_us).to_le_bytes());
-        b[40..44].copy_from_slice(&opt_us(self.span_p50_us).to_le_bytes());
-        b[44..48].copy_from_slice(&self.fec_repaired.to_le_bytes());
+        let delay = self
+            .delay_p50_us
+            .map_or(NOT_MEASURED_I32, |d| d.max(NOT_MEASURED_I32 + 1));
+        b[36..40].copy_from_slice(&delay.to_le_bytes());
+        b[40..44].copy_from_slice(&opt_us(self.delay_spread_us).to_le_bytes());
+        b[44..48].copy_from_slice(&opt_us(self.span_p50_us).to_le_bytes());
+        b[48..52].copy_from_slice(&self.fec_repaired.to_le_bytes());
         Ok(b)
     }
 
@@ -110,9 +121,11 @@ impl ReceiverReport {
         };
         if b.len() == REPORT_LEN {
             r.link_mbps = u32_at(32);
-            r.queue_delay_us = measured(u32_at(36));
-            r.span_p50_us = measured(u32_at(40));
-            r.fec_repaired = u32_at(44);
+            let d = u32_at(36) as i32;
+            r.delay_p50_us = (d != NOT_MEASURED_I32).then_some(d);
+            r.delay_spread_us = measured(u32_at(40));
+            r.span_p50_us = measured(u32_at(44));
+            r.fec_repaired = u32_at(48);
         }
         Ok(r)
     }
@@ -202,7 +215,8 @@ mod tests {
             decode_p99_us: 4_321,
             last_timecode_100ns: 17_617_300_123_456_789,
             link_mbps: 2500,
-            queue_delay_us: Some(1_234),
+            delay_p50_us: Some(-1_234),
+            delay_spread_us: Some(900),
             span_p50_us: Some(18_000),
             fec_repaired: 7,
         }
@@ -217,20 +231,25 @@ mod tests {
         assert_eq!(&b[8..12], &30u32.to_le_bytes());
         assert_eq!(&b[24..32], &17_617_300_123_456_789u64.to_le_bytes());
         assert_eq!(&b[32..36], &2500u32.to_le_bytes());
-        assert_eq!(&b[36..40], &1_234u32.to_le_bytes());
-        assert_eq!(&b[40..44], &18_000u32.to_le_bytes());
-        assert_eq!(&b[44..48], &7u32.to_le_bytes());
+        assert_eq!(&b[36..40], &(-1_234i32).to_le_bytes());
+        assert_eq!(&b[40..44], &900u32.to_le_bytes());
+        assert_eq!(&b[44..48], &18_000u32.to_le_bytes());
+        assert_eq!(&b[48..52], &7u32.to_le_bytes());
+        assert_eq!(&b[52..56], &[0; 4], "reserved");
         assert_eq!(ReceiverReport::decode(&b), Ok(r));
         // not measured = u32::MAX on the wire
         let n = ReceiverReport {
-            queue_delay_us: None,
+            delay_p50_us: None,
+            delay_spread_us: None,
             span_p50_us: None,
             ..r
         }
         .encode()
         .unwrap();
-        assert_eq!(&n[36..44], &[0xFF; 8]);
-        assert_eq!(ReceiverReport::decode(&n).unwrap().queue_delay_us, None);
+        assert_eq!(&n[36..40], &i32::MIN.to_le_bytes());
+        assert_eq!(&n[40..48], &[0xFF; 8]);
+        let back = ReceiverReport::decode(&n).unwrap();
+        assert_eq!((back.delay_p50_us, back.delay_spread_us), (None, None));
     }
 
     /// A receiver not yet upgraded sends the 32-byte version 1: still read, its version-2 fields
@@ -247,13 +266,14 @@ mod tests {
             got,
             ReceiverReport {
                 link_mbps: 0,
-                queue_delay_us: None,
+                delay_p50_us: None,
+                delay_spread_us: None,
                 span_p50_us: None,
                 fec_repaired: 0,
                 ..r
             }
         );
-        // the length names the version: a 48-byte version 1 or a 32-byte version 2 is refused
+        // the length names the version: a 56-byte version 1 or a 32-byte version 2 is refused
         let mut x = r.encode().unwrap();
         x[1] = 1;
         assert_eq!(ReceiverReport::decode(&x), Err(ReportError::BadVersion(1)));
@@ -269,8 +289,8 @@ mod tests {
             Err(ReportError::WrongLength(31))
         );
         assert_eq!(
-            ReceiverReport::decode(&b[..47]),
-            Err(ReportError::WrongLength(47))
+            ReceiverReport::decode(&b[..55]),
+            Err(ReportError::WrongLength(55))
         );
         let mut x = b;
         x[0] = 0x4A; // a JPEG XS slice datagram's magic

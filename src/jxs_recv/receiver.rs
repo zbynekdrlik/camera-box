@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{realtime_100ns, DecodeSink, JxsRecvSocket};
-use crate::jxs_link::congestion_meter::CongestionMeter;
+use crate::jxs_link::congestion_meter::{CongestionMeter, WallSteps};
 use crate::jxs_link::fec::{FecRepair, FEC_MAGIC};
 use crate::jxs_link::{
     self, FrameAssembler, FrameReport, PacketHeader, PushOutcome, RecvWindow, ReportWindow,
@@ -194,8 +194,10 @@ pub struct JxsReceiver {
     /// report (issue 1387: the report carries it, the sender paces to it).
     link_iface: Option<(u32, String)>,
     link_mbps: Option<u32>,
-    /// The early congestion signal of each report period (issue 1387 item 2).
+    /// The early congestion signal of each report period (issue 1387 item 2), on the wall clock
+    /// minus its steps.
     meter: CongestionMeter,
+    wall_steps: WallSteps,
     /// The FEC repair state and its rebuilt-datagram buffer (issue 1387 item 3).
     fec: FecRepair,
     rebuilt: Vec<u8>,
@@ -266,6 +268,7 @@ impl JxsReceiver {
             link_iface: None,
             link_mbps: None,
             meter: CongestionMeter::default(),
+            wall_steps: WallSteps::default(),
             fec: FecRepair::default(),
             rebuilt: Vec::with_capacity(jxs_link::DATAGRAM_LEN),
         })
@@ -453,10 +456,15 @@ impl JxsReceiver {
     fn note_frames(&mut self) {
         let events = std::mem::take(&mut lock(&self.out).events);
         let ms = |t: i64| t as f64 / 10_000.0;
+        let steps = self.wall_steps.steps_100ns();
         for (r, decoded_at, ok) in &events {
             let tc = r.timecode as i64;
-            self.meter
-                .note_frame(r.timecode, r.first_arrival, r.last_arrival, r.lost_slices);
+            self.meter.note_frame(
+                r.timecode,
+                r.first_arrival - steps,
+                r.last_arrival - steps,
+                r.lost_slices,
+            );
             if *ok {
                 let latency_ms = ms(decoded_at - tc);
                 self.window.note_frame(
@@ -500,7 +508,8 @@ impl JxsReceiver {
             .take(self.camera.unwrap_or(0), self.cfg.max_bpp as u32);
         r.link_mbps = self.link_mbps.unwrap_or(0);
         let c = self.meter.take();
-        r.queue_delay_us = c.queue_delay_us;
+        r.delay_p50_us = c.delay_p50_us;
+        r.delay_spread_us = c.delay_spread_us;
         r.span_p50_us = c.span_p50_us;
         if let (true, Some(to), Some(_)) = (self.cfg.send_reports, self.sender, self.camera) {
             match self.sock.send_report(to, &r) {

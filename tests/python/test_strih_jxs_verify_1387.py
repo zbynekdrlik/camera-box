@@ -38,7 +38,7 @@ def _status_format():
 
 def window(t, name, lost, link=1000):
     """One window line as libobs + DistroAV write it (`HH:MM:SS.mmm: [distroav] <message>`)."""
-    vals = [name, 30.0, 150, lost, 1 if lost else 0, 0, 0, 0, 8, 0, 5, 0, 0, 0, 100, link]
+    vals = [name, 30.0, 150, lost, 1 if lost else 0, 0, 0, 0, 8, 0, 5, 0, 0, 0, 100, link, 0]
     text = _status_format().replace("%.2f", "{:.2f}").replace("%llu", "{}").replace("%u", "{}").replace(
         "%s", "{}").replace("%02u", "{:02d}")
     return f"{t}: [distroav] " + text.format(*vals)
@@ -69,7 +69,7 @@ def ts(sec):
 def test_the_rendered_line_is_the_shipped_shape():
     line = window("10:00:00.000", "JXS PGM src", 3)
     assert "jxs-source 'JXS PGM src': fps=30.00 frames=150 lost_slices=3 " in line
-    assert line.endswith(" link_mbps=1000 (issue 1387)"), line
+    assert line.endswith(" link_mbps=1000 fec_repaired=0 (issue 1387)"), line
 
 
 def test_a_running_source_sums_its_last_windows_only():

@@ -1,56 +1,84 @@
-//! Issue 1387 (owner 29.10.2026: "nech aj nieco znesie a vie sa obnovit"): the RECEIVER's early
-//! congestion signal, pure. Fed every finished frame, drained once per report period into the two
-//! version-2 report fields the sender's controller (`crate::jxs_congestion`) reads BEFORE any loss:
+//! Issue 1387 (owner 29.10.2026: "nech aj nieco znesie a vie sa obnovit"): the RECEIVER's half of
+//! the early congestion signal, pure. Fed every finished frame, drained once per report period
+//! into the version-2 report fields the sender's controller (`crate::jxs_congestion`) reads BEFORE
+//! any loss:
 //!
-//! - **The queuing delay.** Per frame `d` = the first datagram's arrival (receiver clock) minus the
-//!   frame's genlock timecode (sender clock). `d` = the sender's encode-to-first-slice time + the
-//!   path delay + the clock offset of the two boxes. Only the path's QUEUE moves it: the offset is
-//!   constant (both boxes run the dantesync-disciplined clock) and cancels against its own minimum.
-//!   So the report carries the period's p50 of `d` minus the minimum over the last
-//!   [`BASE_PERIODS`] periods: a growing switch queue reads as a growing delay, the WebRTC GCC /
-//!   L4S principle (delay before loss), with no extra datagram and no send timestamp on the wire.
+//! - **The delay p50.** Per frame `d` = the first datagram's arrival (receiver clock) minus the
+//!   frame's genlock timecode (sender clock); the period's p50 in microseconds. `d` holds the
+//!   sender's own delay before its first send (on a cambox the capture's PHASE in its emit slot,
+//!   0..16.7 ms and drifting, plus the encode), the path delay, and the two clocks' offset. Only the
+//!   SENDER knows its own part, so the sender subtracts it and keeps the "no queue" base
+//!   (`crate::jxs_congestion::PathDelay`); the receiver only measures.
+//! - **The delay spread.** p90 - p10 of the same `d`: a clock step (a dantesync correction on one
+//!   box) moves every frame alike and leaves it small, a filling queue does not.
 //! - **The arrival span.** The p50 of last-minus-first arrival over the period's WHOLE frames (no
-//!   lost slice): a bottleneck that delivers slower than the sender sends stretches it; the sender
-//!   compares it with its own send span of the same frames.
+//!   lost slice): a bottleneck that delivers slower than the sender sends stretches it.
 //!
-//! A period whose p50 lies more than [`STEP_RESET_100NS`] above the base is a clock step (the
-//! nightly dantesync date step is ~200 ms; a real switch buffer at 1 GbE holds tens of ms): the base
-//! restarts from that period and the delay is not reported for it. A period with no frame reports
-//! neither field.
+//! A period with no frame reports none of them.
+//!
+//! **Wall steps never read as delay.** dantesync STEPS a box's wall clock now and then (a
+//! correction, the nightly date step). Both ends measure on the wall clock minus its own steps
+//! ([`WallSteps`]: `CLOCK_REALTIME - CLOCK_MONOTONIC` moves only on a step, both share every rate
+//! adjustment), so a step on the receiver leaves the arrival times continuous, and a step on the
+//! sender shifts its timecodes and its own first-send delay alike (cancelled by the subtraction).
 
-/// Periods the minimum (the "no queue" base) is taken over: 30 s at one report a second. Longer
-/// than any adaptation (the sender reacts within ~2 s), so a queue that persists while the sender
-/// still adapts never becomes the base.
-pub const BASE_PERIODS: usize = 30;
-/// A p50 this far above the base is a clock step, not a queue (100 ms in 100 ns units).
-pub const STEP_RESET_100NS: i64 = 1_000_000;
+/// The wall clock's steps since this was made (module doc), 100 ns.
+#[derive(Debug, Clone, Copy)]
+pub struct WallSteps {
+    offset0: i64,
+}
+
+fn realtime_minus_monotonic_100ns() -> i64 {
+    let read = |id| {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `t` is a valid out-pointer; both clock ids exist on every Linux.
+        unsafe { libc::clock_gettime(id, &mut t) };
+        t.tv_sec * 10_000_000 + t.tv_nsec / 100
+    };
+    read(libc::CLOCK_REALTIME) - read(libc::CLOCK_MONOTONIC)
+}
+
+impl Default for WallSteps {
+    fn default() -> Self {
+        Self {
+            offset0: realtime_minus_monotonic_100ns(),
+        }
+    }
+}
+
+impl WallSteps {
+    /// The wall clock's net step since [`Self::default`] (100 ns, signed).
+    pub fn steps_100ns(&self) -> i64 {
+        realtime_minus_monotonic_100ns() - self.offset0
+    }
+}
 
 /// The meter (one camera).
 #[derive(Debug, Default, Clone)]
 pub struct CongestionMeter {
-    /// This period's `d` values (100 ns) and whole-frame spans (100 ns).
+    /// This period's `d` values and whole-frame spans (100 ns).
     delays: Vec<i64>,
     spans: Vec<i64>,
-    /// The per-period minima of `d`, newest last, at most [`BASE_PERIODS`].
-    minima: std::collections::VecDeque<i64>,
 }
 
-/// One period's two report fields (microseconds).
+/// One period's report fields (microseconds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CongestionSample {
-    pub queue_delay_us: Option<u32>,
+    pub delay_p50_us: Option<i32>,
+    pub delay_spread_us: Option<u32>,
     pub span_p50_us: Option<u32>,
 }
 
-fn p50(v: &mut [i64]) -> Option<i64> {
-    if v.is_empty() {
-        return None;
-    }
-    v.sort_unstable();
-    Some(v[(v.len() - 1) / 2])
+/// Nearest-rank percentile of a sorted, non-empty slice.
+fn rank(sorted: &[i64], p: usize) -> i64 {
+    let n = sorted.len();
+    sorted[((n * p).div_ceil(100)).clamp(1, n) - 1]
 }
 
-fn to_us(v_100ns: i64) -> u32 {
+fn to_u32_us(v_100ns: i64) -> u32 {
     (v_100ns.max(0) / 10).min(u32::MAX as i64 - 1) as u32
 }
 
@@ -70,34 +98,20 @@ impl CongestionMeter {
 
     /// The period just ended (module doc), then a fresh period.
     pub fn take(&mut self) -> CongestionSample {
-        let span = p50(&mut self.spans).map(to_us);
-        let mut queue = None;
-        if let Some(mid) = p50(&mut self.delays) {
-            let min = *self.delays.first().expect("sorted, not empty");
-            let base = self
-                .minima
-                .iter()
-                .copied()
-                .chain([min])
-                .min()
-                .unwrap_or(min);
-            if mid - base > STEP_RESET_100NS {
-                // a clock step: start the base over from this period
-                self.minima.clear();
-            } else {
-                queue = Some(to_us(mid - base));
-            }
-            self.minima.push_back(min);
-            while self.minima.len() > BASE_PERIODS {
-                self.minima.pop_front();
-            }
+        let mut out = CongestionSample::default();
+        if !self.spans.is_empty() {
+            self.spans.sort_unstable();
+            out.span_p50_us = Some(to_u32_us(rank(&self.spans, 50)));
+        }
+        if !self.delays.is_empty() {
+            self.delays.sort_unstable();
+            let p50 = rank(&self.delays, 50) / 10;
+            out.delay_p50_us = Some(p50.clamp(i32::MIN as i64 + 1, i32::MAX as i64) as i32);
+            out.delay_spread_us = Some(to_u32_us(rank(&self.delays, 90) - rank(&self.delays, 10)));
         }
         self.delays.clear();
         self.spans.clear();
-        CongestionSample {
-            queue_delay_us: queue,
-            span_p50_us: span,
-        }
+        out
     }
 }
 
@@ -106,77 +120,45 @@ mod tests {
     use super::*;
 
     const TC0: u64 = 17_617_300_000_000_000;
-    /// The receiver clock 3 s ahead of the sender's: the offset must cancel.
-    const OFFSET: i64 = 30_000_000;
 
-    fn period(m: &mut CongestionMeter, k0: u64, extra_100ns: i64, span: i64) -> CongestionSample {
+    #[test]
+    fn a_period_reports_its_delay_p50_spread_and_whole_frame_span() {
+        let mut m = CongestionMeter::default();
+        // the receiver clock 3 s ahead: the delay carries the offset, the sender removes it
         for k in 0..30u64 {
-            let tc = TC0 + (k0 + k) * 333_333;
-            let first = tc as i64 + OFFSET + 40_000 + extra_100ns + (k as i64 % 3) * 1_000;
-            m.note_frame(tc, first, first + span, 0);
+            let tc = TC0 + k * 333_333;
+            let first = tc as i64 + 30_000_000 + 40_000 + (k as i64 % 10) * 1_000;
+            m.note_frame(tc, first, first + 180_000, 0);
         }
-        m.take()
+        let s = m.take();
+        assert_eq!(s.span_p50_us, Some(18_000));
+        // delays 40.0..40.9 ms above the offset: p50 = 3_004_400 us, p10..p90 = 0.8 ms
+        assert_eq!(s.delay_p50_us, Some(3_004_400));
+        assert_eq!(s.delay_spread_us, Some(800));
+        assert_eq!(m.take(), CongestionSample::default(), "a fresh period");
     }
 
     #[test]
-    fn a_steady_path_reads_no_queue_whatever_the_clock_offset() {
-        let mut m = CongestionMeter::default();
-        for p in 0..5 {
-            let s = period(&mut m, p * 30, 0, 180_000);
-            assert_eq!(s.span_p50_us, Some(18_000));
-            assert!(s.queue_delay_us.unwrap() <= 100, "{s:?}");
-        }
-    }
-
-    #[test]
-    fn a_growing_queue_reads_as_delay_above_the_old_minimum() {
-        let mut m = CongestionMeter::default();
-        for p in 0..5 {
-            period(&mut m, p * 30, 0, 180_000);
-        }
-        // the switch queue holds 6 ms more: the report says ~6 ms before anything is lost
-        let s = period(&mut m, 150, 60_000, 230_000);
-        assert_eq!(s.queue_delay_us, Some(6_100));
-        assert_eq!(s.span_p50_us, Some(23_000));
-        // it stays measured against the quiet minimum while the queue persists
-        let s = period(&mut m, 180, 60_000, 230_000);
-        assert_eq!(s.queue_delay_us, Some(6_100));
-    }
-
-    #[test]
-    fn a_queue_older_than_the_base_window_becomes_the_new_base() {
-        let mut m = CongestionMeter::default();
-        period(&mut m, 0, 0, 180_000);
-        for p in 1..=BASE_PERIODS as u64 + 1 {
-            period(&mut m, p * 30, 50_000, 180_000);
-        }
-        let s = period(&mut m, 40 * 30, 50_000, 180_000);
-        assert!(s.queue_delay_us.unwrap() <= 100, "{s:?}");
-    }
-
-    #[test]
-    fn a_clock_step_restarts_the_base_and_is_never_a_queue() {
-        let mut m = CongestionMeter::default();
-        period(&mut m, 0, 0, 180_000);
-        // the nightly date step: +200 ms on the receiver's reading
-        let s = period(&mut m, 30, 2_000_000, 180_000);
-        assert_eq!(s.queue_delay_us, None, "a step, not a queue");
-        let s = period(&mut m, 60, 2_000_000, 180_000);
-        assert!(s.queue_delay_us.unwrap() <= 100, "the new base: {s:?}");
-        // a step back reads as no queue at once (a new minimum)
-        let s = period(&mut m, 90, 0, 180_000);
-        assert!(s.queue_delay_us.unwrap() <= 100, "{s:?}");
-    }
-
-    #[test]
-    fn lossy_frames_count_for_the_delay_not_the_span_and_an_empty_period_reports_nothing() {
+    fn lossy_frames_count_for_the_delay_not_the_span_and_no_arrival_says_nothing() {
         let mut m = CongestionMeter::default();
         m.note_frame(TC0, TC0 as i64 + 40_000, TC0 as i64 + 90_000, 2);
         let s = m.take();
         assert_eq!(s.span_p50_us, None);
-        assert_eq!(s.queue_delay_us, Some(0));
-        assert_eq!(m.take(), CongestionSample::default());
+        assert_eq!((s.delay_p50_us, s.delay_spread_us), (Some(4_000), Some(0)));
         m.note_frame(TC0, 0, 0, 69);
-        assert_eq!(m.take(), CongestionSample::default(), "no arrival, no data");
+        assert_eq!(m.take(), CongestionSample::default());
+    }
+
+    #[test]
+    fn the_wall_has_not_stepped_since_it_was_read() {
+        let w = WallSteps::default();
+        assert!(w.steps_100ns().abs() < 10_000, "{}", w.steps_100ns());
+    }
+
+    #[test]
+    fn a_receiver_clock_behind_the_sender_gives_a_negative_delay() {
+        let mut m = CongestionMeter::default();
+        m.note_frame(TC0, TC0 as i64 - 20_000, TC0 as i64, 0);
+        assert_eq!(m.take().delay_p50_us, Some(-2_000));
     }
 }

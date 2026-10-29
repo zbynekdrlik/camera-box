@@ -8,12 +8,14 @@
 //! re-read from sysfs once a second ([`PaceControl::refresh_own_link`]), so a port renegotiated to
 //! another speed, or a cable moved to another NIC, takes effect within a second with no setting.
 
-use crate::jxs_congestion::{Congestion, PathReport, PathState};
+use crate::jxs_congestion::{Congestion, PathDelay, PathReport, PathState};
 use crate::jxs_link::pace_auto::{self, PaceDecision, PaceInputs};
 use crate::jxs_link::ReceiverReport;
 
 /// Send spans kept for the path report (one second of frames at 30 fps).
 const SEND_SPANS: usize = 30;
+/// Own first-send delays kept (three seconds of frames): a report covers the second before it.
+const OWN_DELAYS: usize = 90;
 
 /// The pace the sending thread runs, and why.
 #[derive(Debug, Clone)]
@@ -35,8 +37,11 @@ pub struct PaceControl {
     /// The delay-based congestion control and what it is fed.
     congestion: Congestion,
     send_spans_us: std::collections::VecDeque<u32>,
-    /// The newest queuing delay the receiver reported (us).
+    /// The newest queuing delay (us): the receiver's delay minus this sender's own ([`PathDelay`]).
     queue_delay_us: Option<u32>,
+    path_delay: PathDelay,
+    /// Per frame: its timecode and this sender's own delay, first send - timecode (both 100 ns).
+    own_delays: std::collections::VecDeque<(u64, i64)>,
     /// The controller asked for a bpp step down not yet handed to the auto bpp.
     bpp_down: bool,
 }
@@ -59,6 +64,8 @@ impl PaceControl {
             congestion: Congestion::default(),
             send_spans_us: std::collections::VecDeque::with_capacity(SEND_SPANS),
             queue_delay_us: None,
+            path_delay: PathDelay::default(),
+            own_delays: std::collections::VecDeque::with_capacity(OWN_DELAYS),
             bpp_down: false,
         };
         p.refresh_own_link();
@@ -83,15 +90,25 @@ impl PaceControl {
     /// signal, which the congestion control judges against this sender's recent send spans.
     pub fn on_report(&mut self, r: &ReceiverReport, now_s: f64) {
         self.receiver_link_mbps = (r.link_mbps > 0).then_some(r.link_mbps);
-        self.queue_delay_us = r.queue_delay_us;
+        self.queue_delay_us = match (r.delay_p50_us, r.delay_spread_us, self.own_delay_p50_us(r)) {
+            (Some(rx), Some(spread), Some(own)) => self.path_delay.update(rx as i64, spread, own),
+            _ => None,
+        };
         let mut spans: Vec<u32> = self.send_spans_us.iter().copied().collect();
         spans.sort_unstable();
-        let send_span_us = (!spans.is_empty()).then(|| spans[(spans.len() - 1) / 2]);
+        // the send span is when send() returned; the wire may be slower: a sender on its own
+        // slower NIC (a 1 GbE cambox at 8 bpp: ~18 ms of wire for a ~14 ms encode) is never read as
+        // a stretched path (review round 1)
+        let wire_floor_us = self.own_link_mbps.filter(|m| *m > 0).map(|m| {
+            (pace_auto::frame_wire_bytes(self.width, self.height, self.bpp) * 8 / m as u64) as u32
+        });
+        let send_span_us = (!spans.is_empty())
+            .then(|| spans[(spans.len() - 1) / 2].max(wire_floor_us.map_or(0, |_| 0)));
         let before = self.congestion.state();
         let step = self.congestion.on_report(
             &PathReport {
                 seq: r.seq,
-                queue_delay_us: r.queue_delay_us,
+                queue_delay_us: self.queue_delay_us,
                 recv_span_us: r.span_p50_us,
                 send_span_us,
                 lost_slices: r.lost_slices,
@@ -104,7 +121,7 @@ impl PaceControl {
             tracing::info!(
                 "jxs send: path {} (queue_ms={} span_rx/tx_ms={}/{} lost_slices={}) -- pace factor {} %{} (issue 1387)",
                 step.state,
-                r.queue_delay_us.map_or("-".to_string(), |q| format!("{:.1}", q as f64 / 1000.0)),
+                self.queue_delay_us.map_or("-".to_string(), |q| format!("{:.1}", q as f64 / 1000.0)),
                 r.span_p50_us.map_or("-".to_string(), |q| format!("{:.1}", q as f64 / 1000.0)),
                 send_span_us.map_or("-".to_string(), |q| format!("{:.1}", q as f64 / 1000.0)),
                 r.lost_slices,
@@ -112,6 +129,38 @@ impl PaceControl {
                 if step.bpp_down { ", asks the auto bpp for a step down" } else { "" },
             );
         }
+    }
+
+    /// This sender's own p50 delay (us) over the frames the report's second covers: timecodes in
+    /// (newest - 1 s, newest]. `None` = none of them known.
+    fn own_delay_p50_us(&self, r: &ReceiverReport) -> Option<i64> {
+        let newest = r.last_timecode_100ns;
+        let mut v: Vec<i64> = self
+            .own_delays
+            .iter()
+            .filter(|(tc, _)| *tc <= newest && *tc + 10_000_000 > newest)
+            .map(|(_, d)| *d)
+            .collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_unstable();
+        let n = v.len();
+        Some(v[(n * 50).div_ceil(100).clamp(1, n) - 1] / 10)
+    }
+
+    /// A frame's first send: its timecode and the wall clock (`CLOCK_REALTIME`, 100 ns) then.
+    pub fn on_first_send(&mut self, timecode_100ns: u64, wall_100ns: i64) {
+        if timecode_100ns == 0 {
+            return;
+        }
+        if self.own_delays.len() == OWN_DELAYS {
+            self.own_delays.pop_front();
+        }
+        self.own_delays.push_back((
+            timecode_100ns,
+            wall_100ns - timecode_100ns.min(i64::MAX as u64) as i64,
+        ));
     }
 
     /// One whole frame's send span (first send -> last send, ms).
@@ -222,7 +271,7 @@ mod tests {
         p.on_frames(1920, 1080, 4);
         let start = p.changed().expect("the first decision");
         assert_eq!(start.source, PaceSource::StartSpread);
-        assert_eq!(start.mbps, 526);
+        assert_eq!(start.mbps, 579);
         assert_eq!(p.changed(), None, "nothing new: the schedule stays");
         p.on_report_t(&report(1000));
         assert_eq!(
@@ -240,7 +289,7 @@ mod tests {
         p.on_report_t(&report(0));
         let back = p.changed().unwrap();
         assert_eq!(back.source, PaceSource::StartSpread);
-        assert_eq!(back.mbps, 1052, "8 bpp spread over half the frame");
+        assert_eq!(back.mbps, 1153, "8 bpp spread over half the frame");
         let mut w = crate::jxs_link::SendWindow::default();
         p.on_report_t(&report(2500));
         p.changed();
@@ -299,19 +348,33 @@ mod tests {
         for _ in 0..30 {
             p.on_wire(19.7);
         }
-        let quiet = |seq| ReceiverReport {
+        const TC: u64 = 17_617_300_000_000_000;
+        // this sender's own delay: 2 ms after each timecode; the receiver's clock 1 s ahead
+        let feed = |p: &mut PaceControl, seq: u32| {
+            for k in 0..30u64 {
+                let tc = TC + (seq as u64 * 30 + k) * 333_333;
+                p.on_first_send(tc, tc as i64 + 20_000);
+            }
+            TC + (seq as u64 * 30 + 29) * 333_333
+        };
+        let quiet_at = |seq, newest| ReceiverReport {
             seq,
             camera_id: 100,
             frames: 30,
             link_mbps: 1000,
-            queue_delay_us: Some(300),
+            last_timecode_100ns: newest,
+            delay_p50_us: Some(1_000_000 + 2_000 + 300),
+            delay_spread_us: Some(500),
             span_p50_us: Some(19_900),
             ..ReceiverReport::default()
         };
+        let newest = feed(&mut p, 0);
+        let quiet = |seq| quiet_at(seq, newest);
         p.on_report(&quiet(1), 1.0);
         assert_eq!(p.changed().map(|d| d.mbps), Some(900));
         let queued = |seq| ReceiverReport {
-            queue_delay_us: Some(7_000),
+            delay_p50_us: Some(1_000_000 + 2_000 + 7_300),
+            delay_spread_us: Some(5_000),
             ..quiet(seq)
         };
         p.on_report(&queued(2), 2.0);
@@ -324,7 +387,7 @@ mod tests {
             p.changed().map(|d| (d.mbps, d.source)),
             Some((765, pace_auto::PaceSource::Congestion))
         );
-        p.on_report(&queued(3), 3.0);
+        p.on_report(&queued(3), 2.5);
         assert!(!p.take_bpp_down(), "not again within the settle time");
         let mut w = crate::jxs_link::SendWindow::default();
         p.fill(&mut w);
@@ -350,5 +413,53 @@ mod tests {
         let mut w = crate::jxs_link::SendWindow::default();
         p.fill(&mut w);
         assert_eq!(w.path_state, PathState::Overuse);
+    }
+
+    /// Review round 1: a 1 GbE cambox at line rate whose NIC needs longer than its encoder (8 bpp:
+    /// ~18 ms of wire for a ~14 ms encode) is not a stretched path, and its capture phase sawtooth
+    /// (the sender's own delay wandering and jumping a slot) is not a queue: it stays clean, at line
+    /// rate, at 8 bpp.
+    #[test]
+    fn a_line_rate_cambox_with_a_phase_sawtooth_stays_clean() {
+        let mut p = PaceControl::new(0, None);
+        p.set_own_link(Some(1000));
+        p.on_frames(1920, 1080, 8);
+        const TC: u64 = 17_617_300_000_000_000;
+        for seq in 0..60u32 {
+            let mut newest = 0;
+            for k in 0..30u64 {
+                let tc = TC + (seq as u64 * 30 + k) * 333_333;
+                // the phase in the 60 fps slot: +1.2 ms a second, back a slot at the edge
+                let phase = ((seq as i64 * 12_000) + k as i64 * 400) % 166_667;
+                p.on_first_send(tc, tc as i64 + phase + 20_000);
+                p.on_wire(13.8);
+                newest = tc;
+            }
+            let own_p50 = ((seq as i64 * 12_000) + 14 * 400) % 166_667 + 20_000;
+            p.on_report(
+                &ReceiverReport {
+                    seq,
+                    camera_id: 5,
+                    frames: 30,
+                    link_mbps: 10_000,
+                    last_timecode_100ns: newest,
+                    delay_p50_us: Some(((own_p50 + 3_000) / 10) as i32),
+                    delay_spread_us: Some(1_200),
+                    // the receiver sees the wire span: 18 ms
+                    span_p50_us: Some(18_100),
+                    ..ReceiverReport::default()
+                },
+                seq as f64,
+            );
+            assert!(!p.take_bpp_down(), "report {seq}: never a congestion step");
+            let mut w = crate::jxs_link::SendWindow::default();
+            p.changed();
+            p.fill(&mut w);
+            assert_ne!(w.path_state, PathState::Overuse, "report {seq}");
+            assert_eq!(
+                (w.pace_mbps, w.pace_source),
+                (0, pace_auto::PaceSource::LineRate)
+            );
+        }
     }
 }

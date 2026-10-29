@@ -400,7 +400,9 @@ mod auto_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "jxs")]
     use std::net::UdpSocket;
+    #[cfg(feature = "jxs")]
     use std::os::fd::AsRawFd;
     #[cfg(feature = "jxs")]
     use std::sync::atomic::Ordering;

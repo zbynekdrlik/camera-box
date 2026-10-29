@@ -23,13 +23,54 @@
 //! The defaults are tuned on the bottleneck bench (`crate::jxs_congestion_bench`, a 1 GbE port
 //! with a 1 MB buffer and a download ramping to 60 % of it in 5 s): at 25 % stretch and two
 //! reports before the bpp ask, the first datagram was lost a second BEFORE the first step; at
-//! 15 % and one report, the step comes 1.8 s before the first loss and the whole download costs 8
-//! lossy frames instead of 87.
+//! 15 % and one report with a 2 s settle (FEC overhead in the model) the download cost 49 lossy
+//! frames; with a 1 s settle the step comes 2 s before the first loss and the whole download costs
+//! ONE lossy frame instead of 87 (review round 1).
+//!
 //! - **Clean** = queuing delay under `queue_clear_us`, no stretch, no loss. After
 //!   `clean_before_increase` clean reports in a row the factor climbs back `increase_step` per
 //!   clean report, up to 1. The bpp climbs back through the auto bpp's own clean-seconds rule.
 //! - Between the two (a queue that neither grows past the overuse bound nor clears): hold.
 //! - No report, or a report whose delay fields were not measured (a version-1 receiver): hold.
+
+/// Reports the path's "no queue" base is taken over (30 s at one a second): longer than any
+/// adaptation, so a queue that persists while the sender still adapts never becomes the base.
+pub const BASE_REPORTS: usize = 30;
+/// A path delay that jumps by more than this between two reports while the receiver's per-frame
+/// delays stay tight ([`STEP_SPREAD_US`]) is a CLOCK step on one box (a dantesync correction), not a
+/// queue: every frame moved alike. The base moves with it.
+pub const STEP_JUMP_US: i64 = 3_000;
+pub const STEP_SPREAD_US: u32 = 2_000;
+/// A path delay this far above the base is a big clock step (the nightly date step): start over.
+pub const STEP_RESET_US: i64 = 100_000;
+
+/// The sender's half of the queuing-delay signal (pure): the receiver's p50 of (first arrival -
+/// timecode) minus the SENDER's own p50 of (first send - timecode) of the same frames = the path
+/// delay plus the clocks' offset, constant on a quiet path. The queue = the path delay above its
+/// minimum over the last [`BASE_REPORTS`]. The sender's part (on a cambox: the capture's phase in
+/// its 60 fps emit slot, a sawtooth that wanders 0..16.7 ms and jumps a slot at an edge, plus the
+/// encode) cancels; the receiver alone cannot remove it (review round 1 of item 2).
+#[derive(Debug, Default, Clone)]
+pub struct PathDelay {
+    history: std::collections::VecDeque<i64>,
+    last: Option<i64>,
+}
+
+impl PathDelay {
+    /// One report: the receiver's delay p50 and spread, the sender's own p50 (all us). Returns the
+    /// queuing delay in us (`None` right after a big clock step).
+    pub fn update(&mut self, rx_p50_us: i64, rx_spread_us: u32, own_p50_us: i64) -> Option<u32> {
+        let _ = (
+            rx_spread_us,
+            &self.history,
+            self.last,
+            STEP_JUMP_US,
+            STEP_SPREAD_US,
+            STEP_RESET_US,
+        );
+        Some((rx_p50_us - own_p50_us).clamp(0, u32::MAX as i64 - 1) as u32)
+    }
+}
 
 /// The controller's tuning; [`CongestionConfig::default`] is the sender's setting.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -69,7 +110,7 @@ impl Default for CongestionConfig {
             increase_step: 0.05,
             clean_before_increase: 5,
             bpp_after_overuse: 1,
-            bpp_settle_s: 2.0,
+            bpp_settle_s: 1.0,
         }
     }
 }
@@ -263,9 +304,9 @@ mod tests {
         );
         assert!((s.factor - 0.85).abs() < 1e-9);
         // the next ask waits for the settle time (the queue drains first)
-        assert!(!c.on_report(&rep(2, 6_000, 20_000, 20_000), 2.0).bpp_down);
-        assert!(!c.on_report(&rep(3, 6_000, 20_000, 20_000), 2.9).bpp_down);
-        assert!(c.on_report(&rep(4, 6_000, 20_000, 20_000), 3.0).bpp_down);
+        assert!(!c.on_report(&rep(2, 6_000, 20_000, 20_000), 1.5).bpp_down);
+        assert!(!c.on_report(&rep(3, 6_000, 20_000, 20_000), 1.9).bpp_down);
+        assert!(c.on_report(&rep(4, 6_000, 20_000, 20_000), 2.0).bpp_down);
         // a tuned bpp_after_overuse of 2 waits for a second report in a row
         let mut two = Congestion::new(CongestionConfig {
             bpp_after_overuse: 2,
@@ -375,5 +416,63 @@ mod tests {
         assert_eq!(PathState::Clean.to_string(), "clean");
         assert_eq!(PathState::Hold.to_string(), "hold");
         assert_eq!(PathState::Unknown.to_string(), "unknown");
+    }
+
+    /// The queue is the path delay above its quiet minimum: the clock offset and the sender's own
+    /// delay (the capture phase sawtooth and its slot jumps) cancel.
+    #[test]
+    fn the_path_delay_cancels_the_senders_own_part_and_measures_the_queue() {
+        let mut p = PathDelay::default();
+        // a cambox phase sawtooth: the sender's own delay wanders 21..39 ms and jumps a slot back
+        for k in 0..60i64 {
+            let own = 21_000 + (k * 1_500) % 18_000;
+            let rx = 3_000_000 + own + 400; // the receiver clock 3 s ahead, 0.4 ms of path
+            assert!(p.update(rx, 1_500, own).unwrap() <= 50, "report {k}");
+        }
+        // a queue of 6 ms builds (with the spread a queue brings)
+        assert_eq!(
+            p.update(3_000_000 + 30_000 + 6_400, 5_000, 30_000),
+            Some(6_000)
+        );
+        assert_eq!(
+            p.update(3_000_000 + 25_000 + 8_400, 6_000, 25_000),
+            Some(8_000)
+        );
+    }
+
+    /// Review round 1: a +-5 ms wall step on one box moves every frame alike (a tight spread): the
+    /// base moves with it, the path reads no queue.
+    #[test]
+    fn a_small_clock_step_moves_the_base_and_is_never_a_queue() {
+        let mut p = PathDelay::default();
+        for _ in 0..10 {
+            p.update(3_040_000, 900, 40_000);
+        }
+        assert_eq!(
+            p.update(3_045_000, 900, 40_000),
+            Some(0),
+            "+5 ms on the receiver"
+        );
+        assert_eq!(p.update(3_045_000, 900, 40_000), Some(0));
+        assert_eq!(p.update(3_040_000, 900, 40_000), Some(0), "and back -5 ms");
+        assert_eq!(p.update(3_035_000, 900, 40_000), Some(0), "-5 ms more");
+        // the same jump WITH a spread is a queue
+        assert_eq!(p.update(3_040_000, 4_000, 40_000), Some(5_000));
+    }
+
+    #[test]
+    fn a_big_clock_step_starts_over_and_the_old_base_ages_out() {
+        let mut p = PathDelay::default();
+        p.update(3_040_000, 900, 40_000);
+        // the nightly date step (+200 ms) with a spread that hides it: start over
+        assert_eq!(p.update(3_240_000, 5_000, 40_000), None);
+        assert_eq!(p.update(3_240_000, 900, 40_000), Some(0));
+        // a raised floor older than the window becomes the new base
+        let mut p = PathDelay::default();
+        p.update(3_040_000, 900, 40_000);
+        for _ in 0..BASE_REPORTS {
+            p.update(3_045_000, 4_000, 40_000);
+        }
+        assert_eq!(p.update(3_045_000, 4_000, 40_000), Some(0));
     }
 }

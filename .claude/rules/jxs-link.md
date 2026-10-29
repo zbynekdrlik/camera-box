@@ -237,13 +237,14 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     1 GbE -> 900, the rate the 29.10.2026 23:35 live run carried at 8 bpp with 0 lost slices over
     112 windows; 2.5 GbE -> 2250); as fast or faster = line rate; no receiver link yet (no report,
     or a version-1 receiver) = the SAFE START, the frame spread: the frame's own wire bits over half
-    the frame interval (~526 Mb/s at 4 bpp 1080p30, from the frame, never a guessed link), never
+    the frame interval (~579 Mb/s at 4 bpp 1080p30, FEC included; from the frame, never a guessed
+    link), never
     above the own link (then line rate). Then the congestion factor (below), never on a fixed pace.
   - **Every change is ONE log line** `jxs send: pace A -> B Mb/s of wire (<source>; receiver link X
     Mb/s, own link Y Mb/s on <if>; ...)` and takes effect at the next frame boundary (a new
     `PaceSchedule`). The status lines carry `pace_src=` (`fixed` | `receiver-link` | `line-rate` |
     `start-spread` | `congestion`) `rx_link_mbps=` `tx_link_mbps=`.
-  - A 1 GbE cambox paces its FIRST second at the frame spread (~526 Mb/s at 4 bpp), then the
+  - A 1 GbE cambox paces its FIRST second at the frame spread (~579 Mb/s at 4 bpp), then the
     strih's first report (10 GbE) puts it at line rate. A v1 receiver (not upgraded) leaves the
     sender at the frame spread for good.
 - **DSCP (issue 1387 item 4):** every JPEG XS datagram and every receiver report leaves with
@@ -797,10 +798,10 @@ is on, and per source whether it comes over NDI or JPEG XS.
 
 ## The automatic bpp (issue 1387, owner decision 6495938345)
 
-- **The back channel: ONE 48-byte receiver report per second** (`jxs_link::ReceiverReport`,
+- **The back channel: ONE 56-byte receiver report per second** (`jxs_link::ReceiverReport`,
   layout in the `src/jxs_link.rs` module doc next to the slice datagram: magic `'R'`, version 2,
   camera id, max bpp, seq, frames, lost slices, late frames, decode p99 us, last timecode, then
-  link speed, queuing delay, arrival span p50, FEC repaired). A 32-byte version 1 (slices 1-3) is
+  link speed, delay p50 (i32), delay spread, arrival span p50, FEC repaired, 4 reserved bytes). A 32-byte version 1 (slices 1-3) is
   still read, its version-2 fields unknown. **Cutover:** an OLD sender drops a v2 report as
   `BadVersion`, so a new receiver (the OBS bundle) with an old cambox holds that cambox's auto bpp
   at its floor until camera-box is upgraded too; deploy the camboxes with the same release. The
@@ -870,37 +871,53 @@ react to a GROWING QUEUE, before the switch buffer overflows.
 
 - **The receiver's signal (`src/jxs_link/congestion_meter.rs`, pure),** per report period, into
   report v2:
-  - `queue_delay_us`: per frame `d` = first datagram arrival (receiver clock) - genlock timecode
-    (sender clock); the period's p50 of `d` minus the minimum over the last 30 periods. The clock
-    offset of the two boxes is constant and cancels; only a queue on the path moves it. A p50 more
-    than 100 ms above the base is a clock step (the nightly date step): the base restarts, nothing
-    is reported for that period. `u32::MAX` = not measured.
-  - `span_p50_us`: p50 of last - first arrival over the period's WHOLE frames.
+  - `delay_p50_us` (i32): per frame `d` = first datagram arrival - genlock timecode, the period's
+    p50; `delay_spread_us`: its p90 - p10; `span_p50_us`: p50 of last - first arrival over the
+    period's WHOLE frames. The arrivals are on the wall clock MINUS its own steps (`WallSteps`:
+    `CLOCK_REALTIME - CLOCK_MONOTONIC` moves only on a dantesync step), so a step on the receiver
+    never reads as delay.
+  - `d` also holds the SENDER's own delay before its first send: on a cambox the capture's phase
+    in its 60 fps emit slot (the timecode is the slot boundary), a sawtooth that wanders 0..16.7 ms
+    and jumps a slot at an edge (the live cam5 `handoff_age` 21-39 ms). The receiver cannot remove
+    it (review round 1 of item 2), so:
+- **The sender's half (`PathDelay` in `src/jxs_congestion.rs`):** its own first-send delay per
+  frame (`PaceControl::on_first_send`, wall minus steps, its own `WallSteps`) over the timecodes
+  the report's second covers; path = the receiver's p50 - its own p50 = the path delay + the clock
+  offset, constant on a quiet path; the queue = the path above its minimum over the last 30
+  reports. A jump over 3 ms while the receiver's spread stays under 2 ms is a clock step neither
+  `WallSteps` caught (every frame moved alike): the base moves with it. A path 100 ms above the
+  base starts over (nothing reported for that report).
 - **The sender's controller (`src/jxs_congestion.rs`, pure, crate root like `jxs_auto_bpp.rs`),**
   owned by `PaceControl`, one decision per new report seq:
-  - **overuse** = queue > 4 ms, or the arrival span longer than this sender's own send span
-    (`wire_ms` p50 over its last 30 frames) by more than max(1.5 ms, 15 %), or a lost slice: the pace
+  - **overuse** = queue > 4 ms, or the arrival span longer than this sender's own send span by
+    more than max(1.5 ms, 15 %) -- the send span = max(`wire_ms` p50 over its last 30 frames, the
+    frame's wire bytes over its OWN link: a 1 GbE cambox's NIC needs ~19 ms for an 8 bpp frame its
+    encoder hands over in ~14 ms, never a stretched path) -- or a lost slice: the pace
     factor x0.85 at once (floor 50 %, and `pace_auto` never paces below a frame's own need: its rate
     + 10 %), and a DELAY overuse asks the auto bpp for one step (`StepReason::Congestion`), at most
-    once per 2 s. A loss alone never asks (the auto bpp steps on the loss report itself);
+    once per 1 s. A loss alone never asks (the auto bpp steps on the loss report itself);
   - **clean** = queue < 1.5 ms, no stretch, no loss: after 5 clean reports the factor climbs 5 %
     per clean report back to 100 %; the bpp climbs back through the auto bpp's own clean seconds;
   - between them: hold. A version-1 receiver (no delay fields): unknown, hold.
-  - The factor applies to the AUTOMATIC pace (of the own link when it ran at line rate), never to
-    a fixed `pace_mbps`.
+  - The factor applies to a PACED automatic pace only: never to a line-rate sender (a cambox into
+    the faster strih: the owner's "never pace a cambox" holds, the congestion acts through the bpp
+    alone) and never to a fixed `pace_mbps` (review round 1).
   - One log line per factor change or new overuse: `jxs send: path overuse (queue_ms=6.1
     span_rx/tx_ms=26.0/20.0 lost_slices=0) -- pace factor 85 %, asks the auto bpp for a step down
     (issue 1387)`. Status lines: `path=` (`unknown` | `clean` | `hold` | `overuse`) `cong_pct=`
     `queue_ms=`; the C ABI 3 stats carry `path_state` / `congestion_pct` / `queue_delay_us`.
 - **The bench (`src/jxs_congestion_bench.rs`, test only)** runs the real meter, report window,
-  `PaceControl` and `AutoBpp` over a modelled path: a 10 GbE sender, the receiver's 1 GbE drop-tail
-  port with a 1 MB buffer, the receiver's clock 3 s ahead and 20 ppm fast, and a download that
-  ramps 0 -> 600 Mb/s at 60..65 s, holds to 120 s and stops (unresponsive: harsher than TCP). With
-  the delay signal: the first step at 63.0 s, the first lost datagram at 64.8 s, 8 lossy frames in
-  the whole download, none after 70 s, worst frame 7.7 % of its datagrams, the bpp down to 4,
-  back to 8 bpp and the 900 receiver-link pace afterwards. Without it (a v1 receiver): 87 lossy
-  frames, still losing after 70 s, never back to 8 in the run. The defaults were tuned on it: at
-  25 % stretch and two reports before the bpp ask, the loss came first.
+  `PaceControl` and `AutoBpp` over a modelled path (FEC parity included): a 10 GbE sender, the
+  receiver's 1 GbE drop-tail port with a 1 MB buffer, the receiver's clock 3 s ahead and 20 ppm
+  fast, and a download that ramps 0 -> 600 Mb/s at 60..65 s, holds to 120 s and stops
+  (unresponsive: harsher than TCP). With the delay signal: the first step at 63.0 s, the first
+  lost datagram at 65.0 s, ONE lossy frame in the whole download (4.8 % of its datagrams), the
+  bpp down to 4, back to 8 bpp and the 900 receiver-link pace afterwards. Without it (a v1
+  receiver): 87 lossy frames, still losing after 70 s, at 6 bpp when the 130 s run ends. A third
+  scenario runs a 1 GbE cambox at line rate into the 10 GbE strih with the phase sawtooth and
+  +-5 ms receiver steps: 0 congestion steps, 8 bpp, never paced. The defaults were tuned on it: at
+  25 % stretch and two reports before the bpp ask the loss came first; with a 2 s settle between
+  asks it cost 49 lossy frames.
 - **Known limits:** the signal is one report a second, so a queue that fills in under a second
   (a burst far larger than the port buffer) still costs a loss first (the FEC below repairs an
   isolated one); the queuing delay uses the FIRST datagram of a frame, which a queue that drains

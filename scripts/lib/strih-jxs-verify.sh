@@ -44,6 +44,7 @@ strih_jxs_lost_summary() {
       j = index(rest, "'\'': fps=")
       if (j == 0) next
       name = substr(rest, 1, j - 1)
+      gsub(/\|/, "/", name)
       if (match(rest, / lost_slices=[0-9]+/) == 0) next
       lost = substr(rest, RSTART + 13, RLENGTH - 13) + 0
       if (!(name in n)) { order[++k] = name; n[name] = 0 }

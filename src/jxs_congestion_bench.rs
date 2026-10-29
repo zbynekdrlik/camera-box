@@ -5,19 +5,23 @@
 //! gracefully and climb back afterwards.
 //!
 //! The bench runs the REAL decision code on both ends -- the receiver's `CongestionMeter` +
-//! `ReportWindow`, the sender's `PaceControl` (link pace + `Congestion`) and `AutoBpp` -- over a
-//! modelled path:
+//! `ReportWindow`, the sender's `PaceControl` (link pace + `PathDelay` + `Congestion`) and
+//! `AutoBpp` -- over a modelled path:
 //! - **Two clocks.** The receiver's clock runs 3 s ahead of the sender's and 20 ppm fast; the
-//!   genlock timecode is the sender's.
-//! - **The sender** (10 GbE) encodes a 1080p frame every 1/30 s at the auto bpp, its packets
-//!   leaving over 10 ms of encode, each send held to the pace the controller decides.
-//! - **The bottleneck** is the receiver's 1 GbE switch port: a drop-tail FIFO of 1 MB served at
-//!   1000 Mb/s, shared with CROSS traffic (the download) that ramps from 0 to 600 Mb/s at
-//!   60..65 s, holds to 120 s and stops. Packets are modelled in groups of 8 datagrams.
+//!   genlock timecode is the sender's. A receiver wall STEP is modelled on the arrivals as they
+//!   reach the meter, i.e. as if `WallSteps` (which removes a real step first) had missed it: the
+//!   sender's `PathDelay` must rebase it on its own (a step at a report-period boundary).
+//! - **The sender** encodes a 1080p frame every 1/30 s at the auto bpp; its packets come out of the
+//!   encoder over the encode span (FEC parity included), `send()` returns at once at line rate or
+//!   at the pace, and its own NIC serializes them at its link speed.
+//! - **The path** ends in the receiver's switch port: a drop-tail FIFO served at the port rate,
+//!   shared with CROSS traffic. Packets are modelled in groups of 8 datagrams.
 //!
-//! What must hold: the first congestion step is taken BEFORE the first JPEG XS datagram is
-//! dropped, no frame loses its picture while the download runs, the losses stop within seconds of
-//! the saturation, and the link climbs back to 8 bpp and the full pace after the download.
+//! Scenarios: (1) strih's 10 GbE sender into stream's 1 GbE port (1 MB buffer) with a download that
+//! ramps 0 -> 600 Mb/s at 60..65 s, holds to 120 s and stops (unresponsive: harsher than TCP),
+//! with and without the delay signal; (2) a 1 GbE cambox at line rate into the 10 GbE strih with
+//! the capture-phase sawtooth of its timecodes and +-5 ms wall steps on the receiver (review round
+//! 1): it must never read congestion.
 
 use crate::jxs_auto_bpp::{AutoBpp, AutoBppConfig, Decision, Second, StepReason};
 use crate::jxs_link::congestion_meter::CongestionMeter;
@@ -30,14 +34,30 @@ const GROUP: usize = 8;
 /// A full datagram on the wire (payload + headers + Ethernet), bytes.
 const DGRAM_WIRE: f64 = 1538.0;
 const FRAME_US: f64 = 1_000_000.0 / 30.0;
-const PORT_BYTES_PER_US: f64 = 1000.0 / 8.0;
-const PORT_BUFFER_BYTES: f64 = 1_000_000.0;
-const SENDER_LINK_MBPS: f64 = 10_000.0;
 const RX_OFFSET_US: f64 = 3_000_000.0;
 const RX_PPM: f64 = 20e-6;
 const TC0_100NS: u64 = 17_617_300_000_000_000;
 
-fn cross_mbps(t_s: f64) -> f64 {
+#[derive(Clone, Copy)]
+struct Scenario {
+    sender_link_mbps: f64,
+    port_mbps: f64,
+    port_buffer_bytes: f64,
+    /// The receiver's link as its report names it.
+    rx_link_mbps: u32,
+    /// The cross traffic at the port (Mb/s) at a time (s).
+    cross: fn(f64) -> f64,
+    /// The encoder's span over a frame's packets (us).
+    encode_us: f64,
+    /// The cambox capture phase in its 60 fps slot drifts 1.2 ms a second (the timecode is the slot).
+    phase_sawtooth: bool,
+    /// Receiver wall steps: (at s, by us).
+    rx_steps: &'static [(f64, f64)],
+    delay_signal: bool,
+    end_s: f64,
+}
+
+fn download(t_s: f64) -> f64 {
     match t_s {
         t if t < 60.0 => 0.0,
         t if t < 65.0 => 600.0 * (t - 60.0) / 5.0,
@@ -46,24 +66,30 @@ fn cross_mbps(t_s: f64) -> f64 {
     }
 }
 
+fn quiet(_: f64) -> f64 {
+    0.0
+}
+
 /// The drop-tail port: a fluid backlog in bytes.
 struct Port {
     backlog: f64,
     at_us: f64,
+    bytes_per_us: f64,
+    buffer: f64,
 }
 
 impl Port {
     /// A send of `bytes` arriving at `t`; `None` = dropped, else the time its last byte left.
     fn push(&mut self, t: f64, bytes: f64) -> Option<f64> {
         if t > self.at_us {
-            self.backlog = (self.backlog - (t - self.at_us) * PORT_BYTES_PER_US).max(0.0);
+            self.backlog = (self.backlog - (t - self.at_us) * self.bytes_per_us).max(0.0);
             self.at_us = t;
         }
-        if self.backlog + bytes > PORT_BUFFER_BYTES {
+        if self.backlog + bytes > self.buffer {
             return None;
         }
         self.backlog += bytes;
-        Some(self.at_us + self.backlog / PORT_BYTES_PER_US)
+        Some(self.at_us + self.backlog / self.bytes_per_us)
     }
 }
 
@@ -71,10 +97,12 @@ impl Port {
 struct Outcome {
     bpp_at_60s: u32,
     first_congestion_step_s: Option<f64>,
+    congestion_steps: u32,
     first_jxs_drop_s: Option<f64>,
     /// Frames with any lost datagram while the download ran (60..120 s) and after 70 s.
     lossy_frames_download: u32,
     lossy_frames_after_70s: u32,
+    lossy_frames: u32,
     /// The largest share of one frame's datagrams lost.
     worst_frame_loss: f64,
     min_bpp_download: u32,
@@ -83,26 +111,29 @@ struct Outcome {
     cross_dropped_bytes: f64,
 }
 
-fn run(congestion_control: bool, end_s: f64) -> Outcome {
+fn run(sc: Scenario) -> Outcome {
     let mut out = Outcome {
         min_bpp_download: u32::MAX,
         ..Outcome::default()
     };
     let mut auto = AutoBpp::new(AutoBppConfig::new(4, 8));
     let mut pace = PaceControl::new(0, None);
-    pace.set_own_link(Some(SENDER_LINK_MBPS as u32));
+    pace.set_own_link(Some(sc.sender_link_mbps as u32));
     let mut bpp = 4u32;
     auto.applied(bpp, TC0_100NS);
     let mut pace_mbps = 0u32;
     let mut port = Port {
         backlog: 0.0,
         at_us: 0.0,
+        bytes_per_us: sc.port_mbps / 8.0,
+        buffer: sc.port_buffer_bytes,
     };
     let mut meter = CongestionMeter::default();
     let mut window = ReportWindow::default();
     let mut next_cross_us = 0.0f64;
-    let mut sender_free_us = 0.0f64;
-    let frames = (end_s * 30.0) as u64;
+    let mut pace_free_us = 0.0f64;
+    let mut nic_free_us = 0.0f64;
+    let frames = (sc.end_s * 30.0) as u64;
     for k in 0..frames {
         let t0 = k as f64 * FRAME_US;
         let t_s = t0 / 1e6;
@@ -115,29 +146,37 @@ fn run(congestion_control: bool, end_s: f64) -> Outcome {
         if let Some(d) = pace.changed() {
             pace_mbps = d.mbps;
         }
-        let rate = if pace_mbps > 0 {
-            pace_mbps as f64
-        } else {
-            SENDER_LINK_MBPS
-        };
         let code = 1920.0 * 1080.0 * bpp as f64 / 8.0;
+        // the data datagrams plus one FEC parity per 12 (per slice: ~1 in 11)
         let dgrams = (code / SEGMENT_DATA_LEN as f64).ceil() as usize;
+        let dgrams = dgrams + dgrams.div_ceil(11);
         let groups = dgrams.div_ceil(GROUP);
+        let phase = if sc.phase_sawtooth {
+            (t_s * 1_200.0) % 16_667.0
+        } else {
+            0.0
+        };
         // our sends, then the cross traffic of the same span, through the port in time order
         let mut events: Vec<(f64, bool)> = Vec::with_capacity(groups + 64);
-        let mut first_send = None;
-        let mut last_send = 0.0;
+        let (mut first_send, mut last_send) = (None::<f64>, 0.0f64);
         for g in 0..groups {
-            let produced = t0 + 2_000.0 + g as f64 * 10_000.0 / groups as f64;
-            let at = produced.max(sender_free_us);
-            sender_free_us = at + (GROUP as f64 * DGRAM_WIRE * 8.0) / rate;
-            first_send.get_or_insert(at);
-            last_send = at;
-            events.push((at, true));
+            let produced = t0 + phase + 2_000.0 + g as f64 * sc.encode_us / groups as f64;
+            let sent_at = if pace_mbps > 0 {
+                let at = produced.max(pace_free_us);
+                pace_free_us = at + (GROUP as f64 * DGRAM_WIRE * 8.0) / pace_mbps as f64;
+                at
+            } else {
+                produced
+            };
+            let nic = sent_at.max(nic_free_us);
+            nic_free_us = nic + (GROUP as f64 * DGRAM_WIRE * 8.0) / sc.sender_link_mbps;
+            first_send.get_or_insert(sent_at);
+            last_send = sent_at;
+            events.push((nic_free_us, true));
         }
         let span_end = t0 + FRAME_US;
         while next_cross_us < span_end {
-            let c = cross_mbps(next_cross_us / 1e6);
+            let c = (sc.cross)(next_cross_us / 1e6);
             if c < 1.0 {
                 // (under 1 Mb/s the next packet would land seconds away: none this frame)
                 next_cross_us = span_end;
@@ -147,11 +186,17 @@ fn run(congestion_control: bool, end_s: f64) -> Outcome {
             next_cross_us += (GROUP as f64 * DGRAM_WIRE * 8.0) / c;
         }
         events.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let rx_step: f64 = sc
+            .rx_steps
+            .iter()
+            .filter(|(at, _)| t_s >= *at)
+            .map(|(_, by)| by)
+            .sum();
         let (mut first_rx, mut last_rx, mut got) = (None::<f64>, 0.0f64, 0usize);
         for (at, ours) in events {
             match port.push(at, GROUP as f64 * DGRAM_WIRE) {
                 Some(left) if ours => {
-                    let rx = (left + 50.0) * (1.0 + RX_PPM) + RX_OFFSET_US;
+                    let rx = (left + 50.0) * (1.0 + RX_PPM) + RX_OFFSET_US + rx_step;
                     first_rx.get_or_insert(rx);
                     last_rx = rx;
                     got += GROUP;
@@ -163,10 +208,12 @@ fn run(congestion_control: bool, end_s: f64) -> Outcome {
                 None => out.cross_dropped_bytes += GROUP as f64 * DGRAM_WIRE,
             }
         }
-        pace.on_wire((last_send - first_send.unwrap_or(last_send)) / 1000.0);
+        let first_send = first_send.unwrap_or(last_send);
+        pace.on_wire((last_send - first_send) / 1000.0);
+        pace.on_first_send(tc, (first_send * 10.0) as i64 + TC0_100NS as i64);
         let sent = groups * GROUP;
         let lost = sent.saturating_sub(got);
-        let to_100ns = |us: f64| (us * 10.0) as i64;
+        let to_100ns = |us: f64| (us * 10.0) as i64 + TC0_100NS as i64;
         meter.note_frame(
             tc,
             first_rx.map(to_100ns).unwrap_or(0),
@@ -180,8 +227,11 @@ fn run(congestion_control: bool, end_s: f64) -> Outcome {
                 out.lossy_frames_download += 1;
             }
         }
-        if t_s >= 70.0 && lost > 0 {
-            out.lossy_frames_after_70s += 1;
+        if lost > 0 {
+            out.lossy_frames += 1;
+            if t_s >= 70.0 {
+                out.lossy_frames_after_70s += 1;
+            }
         }
         out.worst_frame_loss = out.worst_frame_loss.max(lost as f64 / sent as f64);
         if k == 60 * 30 {
@@ -191,10 +241,11 @@ fn run(congestion_control: bool, end_s: f64) -> Outcome {
         if k % 30 == 29 {
             let now_s = (t0 + FRAME_US) / 1e6;
             let mut r = window.take(100, 0);
-            r.link_mbps = 1000;
-            if congestion_control {
-                let c = meter.take();
-                r.queue_delay_us = c.queue_delay_us;
+            r.link_mbps = sc.rx_link_mbps;
+            let c = meter.take();
+            if sc.delay_signal {
+                r.delay_p50_us = c.delay_p50_us;
+                r.delay_spread_us = c.delay_spread_us;
                 r.span_p50_us = c.span_p50_us;
             }
             pace.on_report(&r, now_s);
@@ -208,6 +259,7 @@ fn run(congestion_control: bool, end_s: f64) -> Outcome {
             };
             if let Decision::Step { to, reason, .. } = auto.tick(&second, now_s) {
                 if reason == StepReason::Congestion && to < bpp {
+                    out.congestion_steps += 1;
                     out.first_congestion_step_s.get_or_insert(now_s);
                 }
             }
@@ -219,9 +271,22 @@ fn run(congestion_control: bool, end_s: f64) -> Outcome {
     out
 }
 
+const STRIH_TO_STREAM: Scenario = Scenario {
+    sender_link_mbps: 10_000.0,
+    port_mbps: 1_000.0,
+    port_buffer_bytes: 1_000_000.0,
+    rx_link_mbps: 1000,
+    cross: download,
+    encode_us: 10_000.0,
+    phase_sawtooth: false,
+    rx_steps: &[],
+    delay_signal: true,
+    end_s: 420.0,
+};
+
 #[test]
 fn the_link_survives_a_saturating_download_and_climbs_back() {
-    let o = run(true, 420.0);
+    let o = run(STRIH_TO_STREAM);
     eprintln!("{o:?}");
     assert_eq!(o.bpp_at_60s, 8, "the quiet link climbs to 8 bpp first");
     assert!(
@@ -265,7 +330,11 @@ fn the_link_survives_a_saturating_download_and_climbs_back() {
 /// version-1 receiver) leaves only the loss reports, and the link loses datagrams first.
 #[test]
 fn without_the_delay_signal_the_same_download_costs_lost_datagrams_first() {
-    let o = run(false, 130.0);
+    let o = run(Scenario {
+        delay_signal: false,
+        end_s: 130.0,
+        ..STRIH_TO_STREAM
+    });
     eprintln!("{o:?}");
     assert!(o.first_congestion_step_s.is_none());
     assert!(o.first_jxs_drop_s.is_some(), "loss is the only signal left");
@@ -273,5 +342,34 @@ fn without_the_delay_signal_the_same_download_costs_lost_datagrams_first() {
         o.lossy_frames_download >= 50,
         "loss-driven alone loses far more: {}",
         o.lossy_frames_download
+    );
+}
+
+/// Review round 1: a 1 GbE cambox at line rate into the 10 GbE strih. Its NIC needs ~19 ms of
+/// wire for an 8 bpp frame its encoder hands over in ~14 ms, its timecodes carry the capture
+/// phase sawtooth, and the receiver's wall clock steps +5 ms then -5 ms: none of it is congestion.
+#[test]
+fn a_line_rate_cambox_with_a_phase_sawtooth_and_clock_steps_never_reads_congestion() {
+    let o = run(Scenario {
+        sender_link_mbps: 1_000.0,
+        port_mbps: 10_000.0,
+        port_buffer_bytes: 4_000_000.0,
+        rx_link_mbps: 10_000,
+        cross: quiet,
+        encode_us: 13_800.0,
+        phase_sawtooth: true,
+        rx_steps: &[(70.0, 5_000.0), (90.0, -5_000.0)],
+        delay_signal: true,
+        end_s: 120.0,
+    });
+    eprintln!("{o:?}");
+    assert_eq!(o.congestion_steps, 0, "never a congestion step");
+    assert_eq!(o.lossy_frames, 0);
+    assert_eq!(o.bpp_at_60s, 8);
+    assert_eq!(o.bpp_at_end, 8, "it stays at 8 bpp");
+    assert_eq!(
+        o.pace_at_end,
+        (0, Some(PaceSource::LineRate)),
+        "a cambox is never paced"
     );
 }

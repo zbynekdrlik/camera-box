@@ -19,14 +19,16 @@
 //!    twice its average. Never above the sender's own link (that is line rate anyway).
 //!
 //! 4. **Congestion** (`crate::jxs_congestion`, the receiver's delay signal): a factor under 100 %
-//!    lowers the automatic pace to that share of it (of the sender's own link when it ran at line
-//!    rate), but never below what one frame needs in its interval plus a tenth
-//!    ([`frame_need_mbps`]): slower than that, frames back up and drop at the sender. An explicit
-//!    setting is never lowered (an override is the operator's).
+//!    lowers a PACED automatic pace to that share of it, but never below what one frame needs in
+//!    its interval plus a tenth ([`frame_need_mbps`]): slower than that, frames back up and drop at
+//!    the sender. A line-rate sender (a cambox into the faster strih: the owner's "never pace a
+//!    cambox") and an explicit setting are never paced by it; there the congestion control acts
+//!    through the bpp alone (review round 1).
 //!
 //! Every paced value is clamped into the schedule's bounds (`PACE_MBPS_MIN..=PACE_MBPS_MAX`).
 
-use super::pace::{wire_bytes, PACE_MBPS_MAX, PACE_MBPS_MIN};
+use super::fec::FEC_GROUP;
+use super::pace::{PACE_MBPS_MAX, PACE_MBPS_MIN, WIRE_OVERHEAD_BYTES};
 use super::{HEADER_LEN, SEGMENT_DATA_LEN};
 
 /// The share of the receiver's link the JPEG XS flow is paced to; the rest is headroom for the
@@ -92,13 +94,22 @@ fn clamp(mbps: u64) -> u32 {
 }
 
 /// The wire bytes of one frame of `width` x `height` at `bpp`: the codestream (`w x h x bpp / 8`
-/// bytes, what SVT-JPEG-XS's rate control codes every frame to) cut into datagrams of
-/// [`SEGMENT_DATA_LEN`] + the 16-byte header, plus the Ethernet overhead of each.
+/// bytes, what SVT-JPEG-XS's rate control codes every frame to) cut per 16-line slice into
+/// datagrams of [`SEGMENT_DATA_LEN`], plus the header packet, the FEC parity datagrams (one per
+/// [`FEC_GROUP`] of a slice, `super::fec`, each a full payload), the 16-byte header and the
+/// Ethernet overhead of every datagram. An estimate from the geometry (slices of equal size).
 pub fn frame_wire_bytes(width: u32, height: u32, bpp: u32) -> u64 {
     let code = width as u64 * height as u64 * bpp as u64 / 8;
-    let datagrams = code.div_ceil(SEGMENT_DATA_LEN as u64);
-    let payload = code + datagrams * HEADER_LEN as u64;
-    wire_bytes(payload as usize)
+    if code == 0 {
+        return 0;
+    }
+    let slices = (height as u64).div_ceil(super::SLICE_HEIGHT_LINES as u64);
+    let per_slice = code.div_ceil(slices);
+    let datagrams = per_slice.div_ceil(SEGMENT_DATA_LEN as u64).max(1);
+    let data = slices * datagrams + 1;
+    let parity = slices * datagrams.div_ceil(FEC_GROUP as u64) + 1;
+    code + parity * SEGMENT_DATA_LEN as u64
+        + (data + parity) * (HEADER_LEN as u64 + WIRE_OVERHEAD_BYTES)
 }
 
 /// The rate that spreads `frame_wire_bytes` over 1 / [`START_SPREAD_DIVISOR`] of the interval of
@@ -117,16 +128,10 @@ pub fn frame_need_mbps(frame_wire_bytes: u64, fps: u32) -> u64 {
 pub fn decide(i: &PaceInputs) -> PaceDecision {
     let d = decide_links(i);
     let pct = i.congestion_pct as u64;
-    if d.source == PaceSource::Fixed || pct == 0 || pct >= 100 {
+    if d.mbps == 0 || d.source == PaceSource::Fixed || pct == 0 || pct >= 100 {
         return d;
     }
-    let base = match d.mbps {
-        0 => match i.own_link_mbps.or(i.receiver_link_mbps) {
-            Some(l) => l as u64,
-            None => return d,
-        },
-        m => m as u64,
-    };
+    let base = d.mbps as u64;
     let lowered = clamp((base * pct / 100).max(frame_need_mbps(i.frame_wire_bytes, i.fps)));
     if (lowered as u64) < base {
         PaceDecision {
@@ -190,17 +195,19 @@ mod tests {
 
     #[test]
     fn a_frame_on_the_wire_is_the_codestream_plus_its_headers_and_ethernet() {
-        // 1920 x 1080 x 4 / 8 = 1036800 bytes = 713 datagrams of 1456 (the last one shorter)
+        // 4 bpp: 1036800 bytes in 68 slices of 15248 = 11 datagrams each + the header packet,
+        // 1 parity per slice + 1: 749 data + 69 parity datagrams of 82 header + Ethernet bytes
         let w = frame_wire_bytes(1920, 1080, 4);
-        assert_eq!(w, 1_036_800 + 713 * 16 + 713 * 66);
-        assert_eq!(frame_wire_bytes(1920, 1080, 8), {
-            let code = 2_073_600u64;
-            let n = code.div_ceil(1456);
-            code + n * (16 + 66)
-        });
+        assert_eq!(w, 1_036_800 + 69 * 1456 + (749 + 69) * 82);
+        assert_eq!(w, 1_204_340);
+        // 8 bpp: 21 datagrams per slice, 2 parities each
+        assert_eq!(
+            frame_wire_bytes(1920, 1080, 8),
+            2_073_600 + 137 * 1456 + (1429 + 137) * 82
+        );
         assert_eq!(frame_wire_bytes(0, 1080, 4), 0);
-        // the spread rate: 1095266 bytes x 8 x 30 x 2 = 525.7 Mb/s
-        assert_eq!(frame_spread_mbps(w, 30), 526);
+        // the spread rate: 1204340 bytes x 8 x 30 x 2 = 578.1 Mb/s
+        assert_eq!(frame_spread_mbps(w, 30), 579);
         assert_eq!(frame_spread_mbps(w, 0), 0);
     }
 
@@ -239,8 +246,8 @@ mod tests {
 
     #[test]
     fn no_receiver_link_yet_starts_with_the_frame_spread_never_above_the_own_link() {
-        assert_eq!(at(Some(10_000), None), paced(526, PaceSource::StartSpread));
-        assert_eq!(at(None, None), paced(526, PaceSource::StartSpread));
+        assert_eq!(at(Some(10_000), None), paced(579, PaceSource::StartSpread));
+        assert_eq!(at(None, None), paced(579, PaceSource::StartSpread));
         // the spread is not below the own link: that IS line rate
         assert_eq!(at(Some(500), None), paced(0, PaceSource::LineRate));
         // nothing to spread yet (no frame size, no rate): line rate
@@ -311,16 +318,16 @@ mod tests {
             congested(Some(10_000), Some(1000), 8, 85),
             paced(765, PaceSource::Congestion)
         );
-        // 8 bpp needs 2190450 x 8 x 30 x 1.1 = 578.3 -> 579 Mb/s: 50 % of 900 stops there
-        assert_eq!(frame_need_mbps(frame_wire_bytes(1920, 1080, 8), 30), 579);
+        // 8 bpp (FEC included) needs 2401484 x 8 x 30 x 1.1 = 634 Mb/s: 50 % of 900 stops there
+        assert_eq!(frame_need_mbps(frame_wire_bytes(1920, 1080, 8), 30), 634);
         assert_eq!(
             congested(Some(10_000), Some(1000), 8, 50),
-            paced(579, PaceSource::Congestion)
+            paced(634, PaceSource::Congestion)
         );
-        // a 1 GbE cambox at line rate to the 10 GbE strih: 85 % of its own link
+        // a 1 GbE cambox at line rate to the 10 GbE strih: never paced (the bpp acts alone)
         assert_eq!(
-            congested(Some(1000), Some(10_000), 4, 85),
-            paced(850, PaceSource::Congestion)
+            congested(Some(1000), Some(10_000), 4, 50),
+            paced(0, PaceSource::LineRate)
         );
         // no factor, or a factor that would not lower anything: the link decision as before
         assert_eq!(
@@ -331,16 +338,11 @@ mod tests {
             congested(Some(10_000), Some(1000), 8, 0),
             paced(900, PaceSource::ReceiverLink)
         );
-        // 12 bpp needs 868 Mb/s: 60 % of 900 stops there
+        // 12 bpp needs 952 Mb/s, more than the 900 pace: nothing lower is possible
+        assert_eq!(frame_need_mbps(frame_wire_bytes(1920, 1080, 12), 30), 952);
         assert_eq!(
             congested(Some(10_000), Some(1000), 12, 60),
-            paced(868, PaceSource::Congestion)
-        );
-        // a factor that would land at or above the link pace changes nothing
-        assert_eq!(
-            congested(Some(800), Some(1000), 12, 99),
-            paced(0, PaceSource::LineRate),
-            "792 < 868 needed, 868 >= the own 800: line rate stays"
+            paced(900, PaceSource::ReceiverLink)
         );
         // nothing known about either link at line rate: nothing to lower from
         assert_eq!(

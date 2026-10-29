@@ -39,7 +39,7 @@
 //! # The receiver report (the back channel for the automatic bpp, `crate::jxs_auto_bpp`, and the
 //! pace, `pace_auto`)
 //!
-//! Once per second ([`REPORT_PERIOD_MS`]) the receiver sends ONE 48-byte datagram back to the
+//! Once per second ([`REPORT_PERIOD_MS`]) the receiver sends ONE 56-byte datagram back to the
 //! address the slices came from (the sender's connected socket, so nothing else reaches it).
 //! Little-endian:
 //!
@@ -56,9 +56,15 @@
 //! | 20..24 | decode p99 | last datagram in -> frame decoded, microseconds (`u32::MAX` = none) |
 //! | 24..32 | last timecode | the newest frame timecode of the period (100 ns, 0 = no frame) |
 //! | 32..36 | link speed | Mb/s of the interface the slices arrive on (`link_speed`), 0 = unknown |
-//! | 36..40 | queuing delay | microseconds, `u32::MAX` = not measured (`crate::jxs_congestion`) |
-//! | 40..44 | arrival span p50 | first -> last datagram of a whole frame, us, `u32::MAX` = none |
-//! | 44..48 | FEC repaired | datagrams rebuilt by the forward error correction in the period |
+//! | 36..40 | delay p50 | i32 us: p50 of (first arrival - timecode) over the period, `i32::MIN` = none |
+//! | 40..44 | delay spread | u32 us: p90 - p10 of those delays, `u32::MAX` = none |
+//! | 44..48 | arrival span p50 | first -> last datagram of a whole frame, us, `u32::MAX` = none |
+//! | 48..52 | FEC repaired | datagrams rebuilt by the forward error correction in the period |
+//! | 52..56 | reserved | 0 |
+//!
+//! The delay fields feed the sender's delay-based congestion control (`crate::jxs_congestion`):
+//! the SENDER subtracts its own first-send delay of the same frames (on a cambox that holds the
+//! capture's phase in its emit slot) and keeps the "no queue" base itself.
 //!
 //! Version 1 (issue 1387 slices 1-3) was the first 32 bytes alone, with version byte 1. A sender
 //! still reads it (no link speed: its safe start); an OLD sender drops a version-2 report as
