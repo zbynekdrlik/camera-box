@@ -192,7 +192,9 @@
 #        (setup-device.sh STEP 7 and `ndi-discovery.sh --cambox-apply` remove both).
 #   (ao) bkshading relay provisioned (issue 808) -- HARD FAIL: the relay binary is executable, the
 #        installed bkshading-relay.service BYTE-matches the repo unit, /etc/bkshading/relay.env carries
-#        CAMERA_BOX_CAPTURE_FPS=<int>, gphoto2 is installed, AND the unit's enable-state matches the rig
+#        CAMERA_BOX_CAPTURE_FPS=<int> + the issue-1431 registration (BKSHADING_REGISTER_URL =
+#        http://strih.lan:8770/api/relays/register, BKSHADING_RELAY_ID = this camN), gphoto2 is installed,
+#        AND the unit's enable-state matches the rig
 #        mode (TEST: the relay roster -- the source box + cam2 -- disabled, every other box enabled;
 #        EVENT: enabled). Mode = CAMERA_BOX_RIG_MODE=test|event, else read from cam2's painter state (a roster box
 #        whose mode is unreadable FAILs). setup-device.sh's [bkshading-relay] sub-step provisions it;
@@ -959,7 +961,8 @@ Checks:
   (an) NDI discovery receiver config (issues 1342, 1389): a cambox carries NO networks.ips (mDNS
       only) -- /etc/ndi/ndi-config.v1.json lists no IP and no networks.discovery, and a camera-box
       NDI_CONFIG_DIR drop-in, if left, points at /etc/ndi
-  (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env + gphoto2, and the
+  (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env (registers as camN
+      at strih.lan, issue 1431) + gphoto2, and the
       unit enable-state matches the rig mode (TEST: source box + cam2 disabled; CAMERA_BOX_RIG_MODE=test|event,
       else read from cam2's painter state)
   (aq) no GRUB menu and no countdown (#1394): the generated /boot/grub/grub.cfg hides the menu with
@@ -2146,11 +2149,12 @@ case "$RELAY_MODE" in
     ;;
 esac
 RELAY_EXPECTED="$(bkshading_relay_expected_enable_state "$CAMERA_NAME" "$RELAY_MODE" "$RELAY_SRC_BOX" "$RELAY_PAINTER_BOX")"
-RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED")"
+RELAY_ID_WANT="$(bkshading_relay_id_for_device "$CAMERA_NAME" || true)"
+RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED" "$RELAY_ID_WANT")"
 if [ "$aorc" -ne 0 ]; then
   fail "could not read the bkshading relay provisioning state over SSH (rc=$aorc, issue 808)"
 elif [ "$RELAY_PROV_VERDICT" = ok ]; then
-  ok "bkshading relay provisioned: binary + unit (byte-matches the repo) + env + gphoto2, unit ${RELAY_EXPECTED} as rig mode '${RELAY_MODE}' (${RELAY_MODE_SRC}) wants -- issue 808"
+  ok "bkshading relay provisioned: binary + unit (byte-matches the repo) + env (registers as ${RELAY_ID_WANT} at strih.lan, issue 1431) + gphoto2, unit ${RELAY_EXPECTED} as rig mode '${RELAY_MODE}' (${RELAY_MODE_SRC}) wants -- issue 808"
 else
   while IFS= read -r _reason; do
     [ -n "$_reason" ] && fail "bkshading relay: ${_reason#FAIL: } (rig mode '${RELAY_MODE}' from ${RELAY_MODE_SRC}, source box '${RELAY_SRC_BOX:-?}')"
