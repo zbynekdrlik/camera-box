@@ -149,6 +149,20 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
 - A worktree lane cannot type a path containing the word `Source` into a Bash command (the
   isolation guard reads it as `source`): copy/list vendor files from a python script file.
 
+## Testing gotchas (slice 1b)
+
+- **A debug test races a RELEASE-built codec.** `build.rs` always builds SVT-JPEG-XS Release, while
+  the Rust side (the AVX2 conversion included) runs unoptimised under `cargo test`. A 1080p frame
+  can then finish encoding before the next one is converted, so "two frames in flight" never
+  happens. The in-flight test converts both frames into an `unstarted()` hand-off FIRST, then calls
+  `start_threads`: the feeder submits them microseconds apart whatever the build.
+- **A loopback receiver drops a whole-frame burst** with the default receive buffer (two 1080p
+  frames are ~2 MB). Set `SO_RCVBUF` to 4 MB (dev1's `net.core.rmem_max`) or use smaller frames.
+- **Benching:** a throwaway `examples/` file in the worktree, run as
+  `cargo build --release --features jxs --example <name>` with `CAMERA_BOX_JXS_CORES=0-1` so the
+  encoder gets the cambox's two cores; delete it before committing and before clippy
+  `--all-targets`.
+
 ## The dev1 budget (slice 1b, 29.10.2026, Ryzen 7 5800X, encoder pinned to cores 0-1)
 
 A throwaway release bench drove the real `JxsSender` to a loopback receiver with 1080p frames.
