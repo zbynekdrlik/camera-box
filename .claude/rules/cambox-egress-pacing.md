@@ -48,13 +48,17 @@ tc filter replace dev <if> parent 1: protocol all prio 1 handle 0x1387 fw classi
   the SAME fq as before.
 - **The JPEG XS socket carries `SO_MARK 0x1387`.** camera-box sets it in `JxsSocket::connect`
   (`src/jxs_send.rs` `JXS_SOCKET_MARK`, pinned equal to `CAMBOX_EGRESS_PACING_JXS_MARK` by pytest).
-  It needs CAP_NET_ADMIN; camera-box.service runs as root. A refused mark logs one WARN, and the
-  "link ON" line says `egress mark NONE: paced with NDI`.
+  It needs CAP_NET_ADMIN or CAP_NET_RAW; camera-box.service runs as root. A refused mark logs one
+  WARN with the errno, and the "link ON" line says `egress mark NONE: paced with NDI`.
 - **A mark, not a port.** The boot script cannot know the runtime `CAMERA_BOX_JXS_TARGET` port, and
   the camboxes have no `ip rule` with a fwmark (read on cam3).
-- **Strict priority, band 0 first.** A ready NDI or PTP packet always goes before JPEG XS. While fq
-  holds a paced packet back, its dequeue returns nothing, so prio sends JPEG XS: it fills the idle
-  wire and never delays a paced packet beyond the one skb already in the NIC.
+- **Strict priority, band 0 first.** A ready NDI or PTP packet always leaves the QDISC before JPEG
+  XS. While fq holds a paced packet back, its dequeue returns nothing, so prio sends JPEG XS and it
+  fills the idle wire.
+  - **The residual is the driver's TX ring, not the qdisc.** The qdisc hands packets to the ring up
+    to the BQL limit. One JPEG XS GSO skb is up to ~59 KB, ~0.5 ms at 1 GbE. So an NDI or PTP packet
+    can wait behind up to a BQL's worth of JPEG XS bytes. A PTP request is software-timestamped
+    before that wait. The live acceptance below measures it.
   - The rejected opposite, a JPEG XS band ABOVE the fq, would put PTP behind a whole 8-12 ms JPEG XS
     burst.
 - **The pfifo limit 4000** is above the ~1800 datagrams a 4 MB socket send buffer holds in the
@@ -68,6 +72,16 @@ tc filter replace dev <if> parent 1: protocol all prio 1 handle 0x1387 fw classi
   - the generated boot script turns the old root fq into the tree, a re-run changes nothing, and
     the verdict grades that output OK;
   - a root `JxsSocket` carries the mark.
+- **Exactly one classifying filter on the root** (review round 1): the verdict lists every filter
+  entry on parent `1:` that carries a `classid` / `flowid` (u32 prints `*flowid`) and allows only
+  the fw one on the mark to `1:2`. Any other (an extra u32 / matchall, a second fw handle) moves
+  traffic past the fq: DRIFT `... moves traffic past the fq -- that traffic is UNPACED`. The fixtures
+  are real kernel output. A packet whose skb priority is a class id of `1:` itself (the prio direct
+  path) cannot be seen from tc output; nothing on a cambox sets one.
+- **A failed chain falls back to the old root fq** (review round 1): a half-built tree (prio over
+  default pfifos) would leave NDI unpaced while the boot retries run. The apply command puts
+  `root fq maxrate ...` back at once, then still exits 1 (the retry rebuilds the tree). A failed
+  fallback is its own named line: `the NDI egress may be UNPACED`.
 - **Rejected alternatives:** a u32 filter on the UDP destination port (a second declaration the boot
   script cannot see) and `SO_PRIORITY` through the priomap alone (implicit: any socket that sets that
   priority goes unpaced, and the tree does not show it).
@@ -178,7 +192,7 @@ Run it when no E2E / soak holds the rig lease (`curl -s http://127.0.0.1:8890/ri
 4. **Issue 1387: bring every provisioned box to the classful tree, without a setup-device re-run.**
    The boot script changed, so until then `(ap)` FAILs every box: `the boot script ... is stale` and
    `root qdisc is fq, the pre-issue-1387 tree -- JPEG XS class 1:2 missing`. Run it when no E2E /
-   soak holds the rig lease, one box at a time:
+   soak holds the rig lease (the no-cambox-touch-while-lease rule), one box at a time:
    - on dev1, generate the one program for every box:
      `apply="$(mktemp)"; bash -c '. scripts/lib/cambox-egress-pacing.sh; cambox_egress_pacing_apply_program' > "$apply"`;
    - per box: `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
@@ -202,6 +216,18 @@ Run it when no E2E / soak holds the rig lease (`curl -s http://127.0.0.1:8890/ri
      classid 1:2`);
    - then the JPEG XS rerun at 4 and 6 bpp (`.claude/rules/jxs-link.md`): the receiver's `spread_ms`
      should drop from 23 / 33 ms to ~8-12 ms, `first_arrival` stop wandering;
+   - **live acceptance that NDI and the clock are unchanged** (the netns run proves the tc
+     semantics, not the rig; JPEG XS at line rate is a new burst source into strih-snv). Read each
+     twice on the box under test, ~10 min with the JPEG XS link OFF and ~10 min with it ON:
+     - dantesync `curl -s http://<box>:8898/status`: the offset and jitter must not grow with the link
+       ON (the ring-wait residual above);
+     - the NDI receive side on strih-snv: the `genlock-fifo audit` line for that camera's input (the
+       `received=` rate, `relock` / `underrun` deltas) and the strih NIC PAUSE / receive-gap counters,
+       compared OFF vs ON;
+     - the box's `Streaming:` line stays 60.0 sent with no capture drop;
+     - then one release E2E: its continuity read (copies / gaps per window) must stay clean.
+     Record the numbers on the ticket. The fleet rollout counts as done only when every box passes
+     `(ap)` (`verify-fleet.sh` + `--venue pp`) and this acceptance is clean on the first box.
    - rollback of this step only: put the previous lib's boot script back the same way (a
      re-provision from the previous commit), or by hand `tc qdisc replace dev <if> root fq maxrate
      400mbit flow_limit 2000 limit 20000` (that runtime state lasts until the unit runs again).

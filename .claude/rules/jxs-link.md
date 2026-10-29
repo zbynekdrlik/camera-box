@@ -104,8 +104,10 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     29.10: a 23 ms slice spread at 4 bpp, 33 ms at 6 bpp, a 162 ms backlog at 8 bpp). The pacing's
     root is now a `prio` whose `fw` filter on this mark sends the flow to an unpaced class at line
     rate (`.claude/rules/cambox-egress-pacing.md`). The mark is set in `JxsSocket::connect`, so it
-    exists only while the link is on. It needs CAP_NET_ADMIN (camera-box.service runs as root); a
-    refused mark logs one WARN and the "link ON" line reads `egress mark NONE: paced with NDI`.
+    exists only while the link is on. It needs CAP_NET_ADMIN or CAP_NET_RAW (camera-box.service
+    runs as root); a refused mark logs one WARN with the errno, and the "link ON" line reads
+    `egress mark NONE: paced with NDI`. The unit test reads the capability from `CapEff`, and an
+    unprivileged run must see EPERM (proof the setsockopt was attempted).
   - `UDP_SEGMENT` (GSO) is a socket option: one `send` per slice (up to 40 datagrams per send).
     A GSO send that fails with EIO (no checksum offload) or EINVAL switches the socket to one send
     per datagram for good (and clears the option), logged once. IPv4 only: the 1472-byte datagram
