@@ -229,16 +229,28 @@ def test_apply_paces_the_default_route_interface(tmp_path):
     assert _argv(tmp_path, "ip") == ["route show default"]
 
 
+OLD_ROOT_FQ_ARGV = "qdisc replace dev enp2s0 root fq maxrate 400mbit flow_limit 2000 limit 20000"
+
+
 def test_apply_stops_at_the_first_failed_step_and_fails_loud_1387(tmp_path):
     # A half-built tree is never reported applied: the boot script's retry runs the whole chain again.
+    # Review round 1: a failed chain falls back to the old root fq at once, so a half-built tree (a
+    # prio root over default pfifos) never leaves NDI unpaced while the retries run.
     for i, step in enumerate(TREE_APPLY_ARGV):
         sub = tmp_path / f"s{i}"
         sub.mkdir()
         fail_on = step.split(" dev enp2s0 ", 1)[1]
         r = _apply(sub, {"FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_FAIL_ON": fail_on})
         assert "RC=1" in r.stdout, (step, r.stdout + r.stderr)
-        assert _argv(sub, "tc") == TREE_APPLY_ARGV[:i + 1], step
+        assert _argv(sub, "tc") == TREE_APPLY_ARGV[:i + 1] + [OLD_ROOT_FQ_ARGV], step
         assert "FAILED" in r.stderr and "applied" not in r.stdout, step
+        assert "fell back to the root fq" in r.stderr, (step, r.stderr)
+
+
+def test_apply_says_when_the_fallback_fails_too_1387(tmp_path):
+    r = _apply(tmp_path, {"FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_RC": "2"})
+    assert "RC=1" in r.stdout
+    assert "fallback" in r.stderr and "FAILED" in r.stderr and "UNPACED" in r.stderr, r.stderr
 
 
 def test_apply_takes_the_first_default_route_the_lowest_metric_one(tmp_path):
@@ -358,6 +370,30 @@ def test_verdict_drift_when_the_jpeg_xs_class_or_its_filter_is_missing_1387():
                  TREE_FILTER.replace(" fw ", " u32 ")):
         v = _verdict(TREE_QDISC, filt=filt)
         assert v.startswith("DRIFT ") and "JPEG XS" in v and "filter" in v, (filt, v)
+
+
+# Review round 1: any OTHER classifying filter on the root moves traffic past the fq. Real kernel 7.0
+# `tc filter show` output (dev1 netns, 29.10.2026) of the tree plus one extra filter each.
+EXTRA_U32 = (TREE_FILTER + "\n"
+             "filter parent 1: protocol ip pref 2 u32 chain 0 \n"
+             "filter parent 1: protocol ip pref 2 u32 chain 0 fh 800: ht divisor 1 \n"
+             "filter parent 1: protocol ip pref 2 u32 chain 0 fh 800::800 order 2048 key ht 800 bkt 0 "
+             "*flowid 1:2 not_in_hw \n"
+             "  match 00000000/00000000 at 0")
+EXTRA_FW = ("filter parent 1: protocol all pref 1 fw chain 0 \n"
+            "filter parent 1: protocol all pref 1 fw chain 0 handle 0x42 classid 1:2 \n"
+            "filter parent 1: protocol all pref 1 fw chain 0 handle 0x1387 classid 1:2 ")
+EXTRA_MATCHALL = (TREE_FILTER + "\n"
+                  "filter parent 1: protocol all pref 3 matchall chain 0 \n"
+                  "filter parent 1: protocol all pref 3 matchall chain 0 handle 0x1 flowid 1:2 \n"
+                  "  not_in_hw")
+
+
+def test_verdict_drift_on_any_other_classifying_filter_1387():
+    for filt in (EXTRA_U32, EXTRA_FW, EXTRA_MATCHALL):
+        for form in (filt, _flat(filt)):
+            v = _verdict(TREE_QDISC, filt=form)
+            assert v.startswith("DRIFT ") and "past the fq" in v, (form, v)
 
 
 def test_verdict_compares_the_mark_as_a_number_1387():
