@@ -798,6 +798,13 @@ pub mod lipsync_cross_check;
 // the limited 16-235 range), logged as `capture luma:` beside the `capture chroma:` line so a
 // full-range grabber read as limited range shows in the journal. Std-only.
 pub mod luma_levels;
+// Issue 1430 -- the capture card's video range (a full-range Cam Link 4K is scaled to the limited
+// range NDI UYVY means): the pure decision from the card name + `CAMERA_BOX_CAPTURE_RANGE`, and
+// the scalar reference mapping. Std-only, every OS.
+pub mod capture_range;
+// Issue 1430 -- the YUYV to UYVY send-path conversion (scalar + AVX2) with the full-to-limited
+// scaling fused in; `ndi::NdiSender` calls it. Std-only, every OS, so it unit-tests Tier-0.
+pub mod yuyv_to_uyvy;
 
 // #893 (2026-07-30) — the "at least one ACTIVE camera sits at the phase-sync floor" gate term.
 // No probe deps, so it unit-tests Tier-0; the `phase-sync-active-floor-gate` CLI binary
