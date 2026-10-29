@@ -235,13 +235,14 @@ pub fn slice_threads_for(cores: &[usize]) -> u32 {
 /// 30 fps; one frame's budget is 33.3 ms). Alert-only: the link cannot recover a hung library
 /// call, the capture loop and NDI are never touched.
 pub const WEDGE_MS: u64 = 2_000;
+// far above one frame's 33.3 ms budget: a slow frame is never an alarm
+const _: () = assert!(WEDGE_MS > 30 * 34);
 /// How often the feeder looks at the packet thread's progress.
 pub const WEDGE_CHECK_PERIOD: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Whether the encoder is wedged: a frame in flight and no packet progress for [`WEDGE_MS`].
 pub fn encoder_wedged(in_flight: usize, ms_since_progress: u64) -> bool {
-    let _ = (in_flight, ms_since_progress);
-    false
+    in_flight > 0 && ms_since_progress >= WEDGE_MS
 }
 
 /// Milliseconds since the first call in this process (the progress clock).
@@ -474,8 +475,6 @@ mod tests {
         assert!(!encoder_wedged(1, WEDGE_MS - 1));
         assert!(encoder_wedged(1, WEDGE_MS));
         assert!(encoder_wedged(2, 10 * WEDGE_MS));
-        // the budget of one frame is far below the alarm
-        assert!(WEDGE_MS > 30 * 33);
     }
 
     #[test]

@@ -24,9 +24,13 @@ use crate::{
     EncSettings, EncoderSettings, JxsError, Yuv422Planes, SLICE_HEIGHT_LINES,
 };
 
-/// The most pictures a session holds at once (the library's input FIFO is 10 deep, so a submit
-/// never blocks on it).
+/// The most pictures a session holds at once. `submit` calls the library's BLOCKING
+/// `send_picture` with the session lock held; it never blocks only while this stays below the
+/// input FIFO and picture pool (10 each, `EncHandle.c` `input_buffer_fifo_count`), else a full
+/// FIFO would hold the lock that `recv_frame` needs to hand a picture back: a deadlock.
 pub const MAX_IN_FLIGHT: usize = 8;
+const LIBRARY_INPUT_FIFO: usize = 10;
+const _: () = assert!(MAX_IN_FLIGHT < LIBRARY_INPUT_FIFO);
 
 /// The error code of a session that is closed or holds no picture (never a library code).
 const SESSION_CODE: i32 = i32::MIN + 1;
@@ -98,10 +102,26 @@ pub struct EncoderInput {
     s: Arc<Session>,
 }
 
-/// The receiving half of a session.
+/// The receiving half of a session. `Send` but NOT `Sync`: only ONE thread may read packets
+/// and close the session (`recv_frame` calls `get_packet` on the handle outside the lock, so an
+/// `abandon` from another thread could close it under that call).
 pub struct EncoderOutput {
     s: Arc<Session>,
+    _not_sync: std::marker::PhantomData<std::cell::Cell<()>>,
 }
+
+/// Compile-time proof that [`EncoderOutput`] is not `Sync` (and stays `Send`): with a `Sync`
+/// type both impls below apply and the inferred `_` is ambiguous, so the build fails.
+const _: () = {
+    trait AmbiguousIfSync<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+    impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+    fn assert_send<T: Send>() {}
+    let _ = <EncoderOutput as AmbiguousIfSync<_>>::check;
+    let _ = assert_send::<EncoderOutput>;
+};
 
 impl JxsError {
     /// The session was closed (by [`EncoderOutput::abandon`]) or held no picture to receive:
@@ -154,7 +174,13 @@ pub fn open_pipelined(s: EncoderSettings) -> Result<(EncoderInput, EncoderOutput
             in_flight: VecDeque::with_capacity(MAX_IN_FLIGHT),
         }),
     });
-    Ok((EncoderInput { s: Arc::clone(&s) }, EncoderOutput { s }))
+    Ok((
+        EncoderInput { s: Arc::clone(&s) },
+        EncoderOutput {
+            s,
+            _not_sync: std::marker::PhantomData,
+        },
+    ))
 }
 
 impl EncoderInput {

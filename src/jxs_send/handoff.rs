@@ -2,7 +2,8 @@
 //! `jxs-send`); see the parent module doc. Built only with the `jxs` feature.
 
 use super::{
-    jxs_link, slice_threads_for, JxsFrame, JxsSocket, Stats, FRAMES_IN_FLIGHT, STATUS_PERIOD,
+    encoder_wedged, jxs_link, monotonic_ms, slice_threads_for, JxsFrame, JxsSocket, Stats,
+    FRAMES_IN_FLIGHT, STATUS_PERIOD, WEDGE_CHECK_PERIOD,
 };
 use crate::jxs_link::{PacketHeader, SendWindow};
 use std::sync::atomic::Ordering;
@@ -101,8 +102,8 @@ impl JxsHandoff {
         let Some(tx) = &self.ready_tx else { return };
         match tx.try_send(ready) {
             Ok(()) => {}
-            // the queue holds every picture there is, so it is never full; a gone feeder
-            // (the thread died) just keeps the picture out of the pool: the link goes quiet
+            // the queue holds every picture there is, so it is never full; with the feeder gone
+            // (its thread ended) the picture goes back to the pool and the frame is a drop
             Err(TrySendError::Full(r)) | Err(TrySendError::Disconnected(r)) => {
                 self.stats.dropped_busy.fetch_add(1, Ordering::Relaxed);
                 let _ = self.free_tx.try_send(r.pic);
@@ -176,13 +177,28 @@ impl JxsHandoff {
     }
 }
 
+/// How long dropping the hand-off waits for its threads before it leaves them detached (a
+/// wedged library call never returns; the capture loop's shutdown must not hang on it).
+const JOIN_BOUND: Duration = Duration::from_secs(2);
+
 impl Drop for JxsHandoff {
     fn drop(&mut self) {
         // closing the ready queue ends the feeder, which closes the job queue and ends the
         // packet thread after the frames it still holds
         self.ready_tx = None;
+        let deadline = Instant::now() + JOIN_BOUND;
         for w in self.workers.drain(..) {
-            let _ = w.join();
+            while !w.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if w.is_finished() {
+                let _ = w.join();
+            } else {
+                tracing::warn!(
+                    "jxs send: thread {:?} still runs after {JOIN_BOUND:?} -- left detached (issue 1387)",
+                    w.thread().name()
+                );
+            }
         }
     }
 }
@@ -206,9 +222,63 @@ fn pin(label: &str, cores: &[usize]) {
     }
 }
 
+/// The feeder's watch on the packet thread: one CRITICAL line when a frame has been in flight
+/// with no packet for [`super::WEDGE_MS`], one line when packets flow again.
+#[derive(Debug, Default)]
+struct WedgeAlarm {
+    raised: bool,
+}
+
+impl WedgeAlarm {
+    fn check(&mut self, stats: &Stats) {
+        let in_flight = stats.in_flight.load(Ordering::Relaxed);
+        let since = monotonic_ms().saturating_sub(stats.progress_ms.load(Ordering::Relaxed));
+        let wedged = encoder_wedged(in_flight, since);
+        if wedged && !self.raised {
+            tracing::error!(
+                "CRITICAL jxs send: encoder wedged -- {in_flight} frame(s) in flight, no packet for {since} ms; every new frame is dropped_busy (this window: {}) (issue 1387)",
+                stats.dropped_busy.load(Ordering::Relaxed)
+            );
+        } else if !wedged && self.raised {
+            tracing::warn!("jxs send: the encoder delivers packets again (issue 1387)");
+        }
+        self.raised = wedged;
+    }
+}
+
+/// Open a session for `w` x `h` and announce it to the packet thread. `Ok(None)` = refused
+/// (logged), `Err(())` = the packet thread is gone.
+#[allow(clippy::result_unit_err)]
+fn open_session(
+    w: u32,
+    h: u32,
+    threads: u32,
+    bpp: u32,
+    cores: &[usize],
+    job_tx: &SyncSender<Job>,
+) -> Result<Option<EncoderInput>, ()> {
+    let mut settings = EncoderSettings::issue_1387(w, h).with_slice_threads(threads);
+    settings.bpp_numerator = bpp;
+    match open_pipelined(settings) {
+        Ok((i, o)) => {
+            tracing::info!(
+                "jxs send: encoder open {w}x{h}, {bpp} bpp, {} bytes per frame, {threads} slice threads on cores {cores:?} (issue 1387)",
+                i.bytes_per_frame()
+            );
+            job_tx.send(Job::Session(o)).map_err(|_| ())?;
+            Ok(Some(i))
+        }
+        Err(e) => {
+            tracing::error!("jxs send: {e} -- {w}x{h} frames are not sent (issue 1387)");
+            Ok(None)
+        }
+    }
+}
+
 /// `jxs-feed`: opens the encoder (its threads inherit this thread's cores) and hands every
 /// converted picture to it the moment it is ready, so the next frame starts while the
-/// previous one's slices still go out.
+/// previous one's slices still go out. Between frames it watches the packet thread
+/// ([`WedgeAlarm`]).
 fn feed(
     ready_rx: Receiver<Ready>,
     job_tx: SyncSender<Job>,
@@ -223,64 +293,74 @@ fn feed(
     // a geometry the encoder refused: never re-opened (and re-logged) per frame
     let mut refused: Option<(u32, u32)> = None;
     let mut warned_submit = false;
-    while let Ok(r) = ready_rx.recv() {
-        let (w, h) = (r.pic.planes().width(), r.pic.planes().height());
-        if input
-            .as_ref()
-            .is_none_or(|i| (i.width(), i.height()) != (w, h))
-        {
-            input = None;
-            if refused == Some((w, h)) {
-                stats.convert_errors.fetch_add(1, Ordering::Relaxed);
-                let _ = free_tx.try_send(r.pic);
+    let mut alarm = WedgeAlarm::default();
+    loop {
+        let r = match ready_rx.recv_timeout(WEDGE_CHECK_PERIOD) {
+            Ok(r) => r,
+            Err(RecvTimeoutError::Timeout) => {
+                alarm.check(&stats);
                 continue;
             }
-            let mut settings = EncoderSettings::issue_1387(w, h).with_slice_threads(threads);
-            settings.bpp_numerator = bpp;
-            match open_pipelined(settings) {
-                Ok((i, o)) => {
-                    tracing::info!(
-                        "jxs send: encoder open {w}x{h}, {bpp} bpp, {} bytes per frame, {threads} slice threads on cores {cores:?} (issue 1387)",
-                        i.bytes_per_frame()
-                    );
-                    if job_tx.send(Job::Session(o)).is_err() {
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
+        alarm.check(&stats);
+        let (w, h) = (r.pic.planes().width(), r.pic.planes().height());
+        let mut pic = r.pic;
+        // two tries: a session the packet thread abandoned after a codec error re-opens once
+        // and takes this same picture
+        for attempt in 0..2 {
+            if input
+                .as_ref()
+                .is_none_or(|i| (i.width(), i.height()) != (w, h))
+            {
+                input = None;
+                if refused == Some((w, h)) {
+                    stats.convert_errors.fetch_add(1, Ordering::Relaxed);
+                    let _ = free_tx.try_send(pic);
+                    break;
+                }
+                match open_session(w, h, threads, bpp, &cores, &job_tx) {
+                    Ok(Some(i)) => input = Some(i),
+                    Ok(None) => {
+                        refused = Some((w, h));
+                        stats.convert_errors.fetch_add(1, Ordering::Relaxed);
+                        let _ = free_tx.try_send(pic);
+                        break;
+                    }
+                    Err(()) => return,
+                }
+            }
+            let i = input.as_ref().expect("opened above");
+            let submitted = Instant::now();
+            match i.submit(pic) {
+                Ok(()) => {
+                    let now = stats.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                    stats.in_flight_max.fetch_max(now, Ordering::Relaxed);
+                    let job = Job::Frame {
+                        timecode_100ns: r.timecode_100ns,
+                        handed_off: r.handed_off,
+                        submitted,
+                    };
+                    if job_tx.send(job).is_err() {
                         return;
                     }
-                    input = Some(i);
+                    break;
                 }
-                Err(e) => {
-                    tracing::error!("jxs send: {e} -- {w}x{h} frames are not sent (issue 1387)");
-                    refused = Some((w, h));
+                Err((back, e)) => {
+                    input = None;
+                    if e.is_session_state() && attempt == 0 {
+                        // closed by the packet thread: re-open, same picture
+                        pic = back;
+                        continue;
+                    }
                     stats.convert_errors.fetch_add(1, Ordering::Relaxed);
-                    let _ = free_tx.try_send(r.pic);
-                    continue;
+                    let _ = free_tx.try_send(back);
+                    if !warned_submit {
+                        tracing::error!("jxs send: {e} -- re-opening the encoder (issue 1387)");
+                        warned_submit = true;
+                    }
+                    break;
                 }
-            }
-        }
-        let i = input.as_ref().expect("opened above");
-        let submitted = Instant::now();
-        match i.submit(r.pic) {
-            Ok(()) => {
-                let now = stats.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
-                stats.in_flight_max.fetch_max(now, Ordering::Relaxed);
-                let job = Job::Frame {
-                    timecode_100ns: r.timecode_100ns,
-                    handed_off: r.handed_off,
-                    submitted,
-                };
-                if job_tx.send(job).is_err() {
-                    return;
-                }
-            }
-            Err((pic, e)) => {
-                stats.convert_errors.fetch_add(1, Ordering::Relaxed);
-                let _ = free_tx.try_send(pic);
-                if !warned_submit {
-                    tracing::error!("jxs send: {e} -- re-opening the encoder (issue 1387)");
-                    warned_submit = true;
-                }
-                // a closed session (the packet thread abandoned it) re-opens on the next frame
-                input = None;
             }
         }
     }
@@ -320,6 +400,7 @@ fn send(
             window = SendWindow::default();
             last_status = Instant::now();
         }
+        stats.progress_ms.store(monotonic_ms(), Ordering::Relaxed);
         let job = match job_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(j) => j,
             Err(RecvTimeoutError::Timeout) => continue,
@@ -347,6 +428,7 @@ fn send(
         let mut packet_errors = 0u64;
         let mut first_sent: Option<Instant> = None;
         let result = out.recv_frame(|index, packet, _last| {
+            stats.progress_ms.store(monotonic_ms(), Ordering::Relaxed);
             if index >= count || count > 255 {
                 packet_errors += 1;
                 return;
