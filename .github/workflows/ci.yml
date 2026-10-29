@@ -48,7 +48,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature builds the vendored SVT-JPEG-XS (jxs/sys/build.rs)
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -60,6 +60,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      # Issue 1387: the JPEG XS codec crate is a workspace member the root clippy above only
+      # compiles as a dependency; lint its own code and tests too.
+      - name: Clippy (svt-jpegxs-sys)
+        run: cargo clippy -p svt-jpegxs-sys --all-targets -- -D warnings
 
   test:
     name: Test
@@ -86,7 +91,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson; libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424, tests/drm_output_outputs_1424.rs links the lifted config grammar against jansson; libsimde-dev: issue 1439, the obs-vban source lift includes libobs's util/sse-intrin.h
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@cargo-nextest
@@ -131,6 +136,11 @@ jobs:
       - name: Run tests (nextest)
         run: cargo nextest run --all-features
 
+      # Issue 1387: the codec crate's own encode -> decode tests (the root run above covers the
+      # link through camera-box's `jxs` feature).
+      - name: Run tests (svt-jpegxs-sys)
+        run: cargo nextest run -p svt-jpegxs-sys
+
       - name: Build benchmarks (compile check only)
         run: cargo bench --no-run
 
@@ -152,7 +162,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev  # libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
+          sudo apt-get install -y libv4l-dev libasound2-dev libjansson-dev libsimde-dev nasm  # nasm: issue 1387 (the jxs feature's vendored SVT-JPEG-XS); libjansson-dev: issue 1424 (tests/drm_output_outputs_1424.rs); libsimde-dev: issue 1439 (the obs-vban source lift)
 
       # ffmpeg/ffprobe for the #106 recorded-file analysis path covered by the
       # recording_decode integration test (run under llvm-cov here too).
@@ -195,7 +205,9 @@ jobs:
         # mutation-tested, but its sched_setaffinity / /proc-irq / /sys IO glue cannot
         # be — so the file follows the same whole-file exclusion as kms.rs (glue
         # excluded from coverage, pure functions still mutated in the mutants job).
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader|colour_sample)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict)\.rs|src/affinity\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
+        # src/bin/jxs-recv-probe.rs (issue 1387): the probe's CLI + print loop; the pieces it runs
+        # (jxs_link, jxs_recv) are library code covered by tests/jxs_loopback_1387.rs.
+        run: cargo llvm-cov --all-features --lcov --output-path lcov.info --ignore-filename-regex 'src/probe/(painter|reader|run|fb|kms|multi_reader|colour_sample)\.rs|src/bin/(frame-probe|recording-probe|recording-verdict|jxs-recv-probe)\.rs|src/affinity\.rs' --fail-under-lines ${{ vars.COVERAGE_THRESHOLD || '47' }}
 
   mutants:
     name: Mutation Testing
@@ -651,15 +663,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libv4l-dev libasound2-dev
+          sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature builds the vendored SVT-JPEG-XS (jxs/sys/build.rs)
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: build
 
+      # Issue 1387: the deployed appliance carries the JPEG XS link (`jxs` feature, OFF at run time
+      # unless CAMERA_BOX_JXS_TARGET is set on the box).
       - name: Build release
-        run: cargo build --release
+        run: cargo build --release --features jxs
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
@@ -686,9 +700,13 @@ jobs:
       #                             instead of reimplementing compute_phase_sync_offsets.
       - name: Build probe tools (verdict + frame-probe + probe camera-box)
         run: |
-          cargo build --release --features probe \
+          cargo build --release --features probe,jxs \
             --bin recording-verdict --bin frame-probe --bin camera-box
           cp target/release/camera-box target/release/camera-box-probe
+
+      # Issue 1387: the JPEG XS link's receive/measure tool (runs on strih/dev1, `jxs` feature).
+      - name: Build jxs-recv-probe (issue 1387)
+        run: cargo build --release --features jxs --bin jxs-recv-probe
 
       - name: Build default-feature gate bins (frozen-camera-gate #365, render-budget-gate #405, obs-watchdog-gate #391, av-restart-sync-gate #137, zero-loss-restart-gate #109, phase-sync-gate #438, mv-fps-gate #771)
         run: cargo build --release --bin frozen-camera-gate --bin render-budget-gate --bin obs-watchdog-gate --bin av-restart-sync-gate --bin zero-loss-restart-gate --bin phase-sync-gate --bin mv-fps-gate
@@ -708,6 +726,7 @@ jobs:
             target/release/zero-loss-restart-gate
             target/release/phase-sync-gate
             target/release/mv-fps-gate
+            target/release/jxs-recv-probe
 
   windows-probe:
     name: Windows probe build (recording-verdict.exe + obs-watchdog-gate.exe + obs-self-heal-gate.exe)
