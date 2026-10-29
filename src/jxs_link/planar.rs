@@ -15,26 +15,155 @@ pub fn yuyv_to_planar422(
     u: &mut [u8],
     v: &mut [u8],
 ) -> bool {
-    yuyv_to_planar422_scalar(src, stride, width, height, y, u, v)
+    match yuyv_to_planar422_avx2(src, stride, width, height, y, u, v) {
+        Some(ok) => ok,
+        None => yuyv_to_planar422_scalar(src, stride, width, height, y, u, v),
+    }
 }
 
-/// Whether [`yuyv_to_planar422`] takes the AVX2 path on this CPU.
+/// Whether [`yuyv_to_planar422`] takes the AVX2 path on this CPU (std caches the CPUID read).
 pub fn yuyv_avx2_available() -> bool {
-    false
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// Whether the buffers fit the geometry (the one check both paths make before writing).
+fn yuyv_geometry_ok(
+    src: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+) -> bool {
+    let cw = width / 2;
+    width != 0
+        && width.is_multiple_of(2)
+        && stride >= width * 2
+        && src.len() >= stride * (height.saturating_sub(1)) + width * 2
+        && y.len() >= width * height
+        && u.len() >= cw * height
+        && v.len() >= cw * height
 }
 
 /// The AVX2 conversion. `None` when the CPU has no AVX2 (or the target is not x86_64), else
 /// what [`yuyv_to_planar422_scalar`] returns, with the same bytes written.
 pub fn yuyv_to_planar422_avx2(
-    _src: &[u8],
-    _stride: usize,
-    _width: usize,
-    _height: usize,
-    _y: &mut [u8],
-    _u: &mut [u8],
-    _v: &mut [u8],
+    src: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
 ) -> Option<bool> {
-    Some(false)
+    if !yuyv_avx2_available() {
+        return None;
+    }
+    if !yuyv_geometry_ok(src, stride, width, height, y, u, v) {
+        return Some(false);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let cw = width / 2;
+        for row in 0..height {
+            let s = &src[row * stride..row * stride + width * 2];
+            let yr = &mut y[row * width..(row + 1) * width];
+            let ur = &mut u[row * cw..(row + 1) * cw];
+            let vr = &mut v[row * cw..(row + 1) * cw];
+            // SAFETY: AVX2 was detected above; the row slices have exactly the lengths
+            // `avx2::row` requires (s = 2 x width, yr = width, ur = vr = width / 2).
+            unsafe { avx2::row(s, yr, ur, vr) };
+        }
+    }
+    Some(true)
+}
+
+#[cfg(target_arch = "x86_64")]
+mod avx2 {
+    use std::arch::x86_64::*;
+
+    /// Pixels per AVX2 block: 128 source bytes -> 64 Y, 32 U, 32 V.
+    const BLOCK_PX: usize = 64;
+
+    /// One row: `s` = `2 * n` YUYV bytes, `y` = `n`, `u` = `v` = `n / 2` (n even).
+    ///
+    /// Per block, four 32-byte loads `a b c d` are read as 16-bit words `[Yk | C << 8]`:
+    /// - Y: the low bytes, `packus(a & 0xFF, b & 0xFF)` (packus works per 128-bit lane, so
+    ///   `permute4x64(0, 2, 1, 3)` puts the four 8-byte quarters back in order);
+    /// - chroma: the high bytes the same way gives `U0 V0 U1 V1 ...`, which splits once more into
+    ///   its low bytes (U) and high bytes (V).
+    ///
+    /// The tail (fewer than 64 pixels) is the scalar loop.
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn row(s: &[u8], y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
+        let n = y.len();
+        debug_assert!(s.len() == 2 * n && u.len() == n / 2 && v.len() == n / 2);
+        let blocks = n / BLOCK_PX;
+        let mask = _mm256_set1_epi16(0x00FF);
+        // packus leaves lane order [a.lo, b.lo, a.hi, b.hi]: quarters 0 2 1 3
+        const ORDER: i32 = 0b11_01_10_00;
+        for b in 0..blocks {
+            let sp = s.as_ptr().add(b * 128) as *const __m256i;
+            let a = _mm256_loadu_si256(sp);
+            let bb = _mm256_loadu_si256(sp.add(1));
+            let c = _mm256_loadu_si256(sp.add(2));
+            let d = _mm256_loadu_si256(sp.add(3));
+            let y0 = _mm256_permute4x64_epi64::<ORDER>(_mm256_packus_epi16(
+                _mm256_and_si256(a, mask),
+                _mm256_and_si256(bb, mask),
+            ));
+            let y1 = _mm256_permute4x64_epi64::<ORDER>(_mm256_packus_epi16(
+                _mm256_and_si256(c, mask),
+                _mm256_and_si256(d, mask),
+            ));
+            let c0 = _mm256_permute4x64_epi64::<ORDER>(_mm256_packus_epi16(
+                _mm256_srli_epi16::<8>(a),
+                _mm256_srli_epi16::<8>(bb),
+            ));
+            let c1 = _mm256_permute4x64_epi64::<ORDER>(_mm256_packus_epi16(
+                _mm256_srli_epi16::<8>(c),
+                _mm256_srli_epi16::<8>(d),
+            ));
+            let uu = _mm256_permute4x64_epi64::<ORDER>(_mm256_packus_epi16(
+                _mm256_and_si256(c0, mask),
+                _mm256_and_si256(c1, mask),
+            ));
+            let vv = _mm256_permute4x64_epi64::<ORDER>(_mm256_packus_epi16(
+                _mm256_srli_epi16::<8>(c0),
+                _mm256_srli_epi16::<8>(c1),
+            ));
+            let yp = y.as_mut_ptr().add(b * BLOCK_PX) as *mut __m256i;
+            _mm256_storeu_si256(yp, y0);
+            _mm256_storeu_si256(yp.add(1), y1);
+            _mm256_storeu_si256(u.as_mut_ptr().add(b * BLOCK_PX / 2) as *mut __m256i, uu);
+            _mm256_storeu_si256(v.as_mut_ptr().add(b * BLOCK_PX / 2) as *mut __m256i, vv);
+        }
+        let done = blocks * BLOCK_PX;
+        super::scalar_row(
+            &s[done * 2..],
+            &mut y[done..],
+            &mut u[done / 2..],
+            &mut v[done / 2..],
+        );
+    }
+}
+
+/// One scalar row (the reference): `s` = `2 * n` YUYV bytes into `y` (n), `u`/`v` (n / 2).
+fn scalar_row(s: &[u8], y: &mut [u8], u: &mut [u8], v: &mut [u8]) {
+    for (i, px) in s.as_chunks::<4>().0.iter().enumerate() {
+        y[2 * i] = px[0];
+        u[i] = px[1];
+        y[2 * i + 1] = px[2];
+        v[i] = px[3];
+    }
 }
 
 /// The scalar reference conversion.
@@ -47,28 +176,17 @@ pub fn yuyv_to_planar422_scalar(
     u: &mut [u8],
     v: &mut [u8],
 ) -> bool {
-    let cw = width / 2;
-    if width == 0
-        || !width.is_multiple_of(2)
-        || stride < width * 2
-        || src.len() < stride * (height.saturating_sub(1)) + width * 2
-        || y.len() < width * height
-        || u.len() < cw * height
-        || v.len() < cw * height
-    {
+    if !yuyv_geometry_ok(src, stride, width, height, y, u, v) {
         return false;
     }
+    let cw = width / 2;
     for row in 0..height {
-        let s = &src[row * stride..row * stride + width * 2];
-        let yr = &mut y[row * width..(row + 1) * width];
-        let ur = &mut u[row * cw..(row + 1) * cw];
-        let vr = &mut v[row * cw..(row + 1) * cw];
-        for (i, px) in s.as_chunks::<4>().0.iter().enumerate() {
-            yr[2 * i] = px[0];
-            ur[i] = px[1];
-            yr[2 * i + 1] = px[2];
-            vr[i] = px[3];
-        }
+        scalar_row(
+            &src[row * stride..row * stride + width * 2],
+            &mut y[row * width..(row + 1) * width],
+            &mut u[row * cw..(row + 1) * cw],
+            &mut v[row * cw..(row + 1) * cw],
+        );
     }
     true
 }
