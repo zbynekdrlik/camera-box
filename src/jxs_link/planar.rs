@@ -28,7 +28,7 @@ pub fn yuyv_to_planar422(
         let yr = &mut y[row * width..(row + 1) * width];
         let ur = &mut u[row * cw..(row + 1) * cw];
         let vr = &mut v[row * cw..(row + 1) * cw];
-        for (i, px) in s.chunks_exact(4).enumerate() {
+        for (i, px) in s.as_chunks::<4>().0.iter().enumerate() {
             yr[2 * i] = px[0];
             ur[i] = px[1];
             yr[2 * i + 1] = px[2];
