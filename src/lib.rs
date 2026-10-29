@@ -619,6 +619,11 @@ pub mod send_stall;
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
 pub mod send_stagger;
+
+// Issue 1387 — the NDI P216 send format (16-bit semi-planar 4:2:2): the env switch, the per-input
+// send-path decision and the YUYV -> P216 conversion (scalar + bit-exact AVX2). Pure + std-only,
+// so it unit-tests Tier-0; `ndi::NdiSender` reads the switch once and sends through it.
+pub mod yuyv_to_p216;
 // The send-stagger clamp must stay strictly below the buffered-dequeue fraction its idle-wait
 // add-back relies on (a genuinely buffered frame must still read as buffered after the sleep is
 // added back) — checked here against the REAL constant, so changing either one breaks the build.
