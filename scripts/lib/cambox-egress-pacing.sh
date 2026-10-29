@@ -106,7 +106,13 @@ cambox_egress_pacing_apply_cmd() {
     tc filter replace dev "\$_cep_if" parent 1: protocol all prio 1 handle ${CAMBOX_EGRESS_PACING_JXS_MARK} fw classid 1:2; then
     echo "cambox-egress-pacing: dev \$_cep_if NDI paced (fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT} under prio 1:1), JPEG XS mark ${CAMBOX_EGRESS_PACING_JXS_MARK} at line rate (1:2) applied (issues 1242, 1387)"
   else
-    echo "cambox-egress-pacing: building the egress tree on \$_cep_if FAILED (issues 1242, 1387)" >&2
+    # A half-built tree (a prio root over default pfifos) would leave NDI unpaced while the retries
+    # run: put the pre-issue-1387 root fq back at once (NDI paced, JPEG XS paced with it).
+    if tc qdisc replace dev "\$_cep_if" root fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT}; then
+      echo "cambox-egress-pacing: building the egress tree on \$_cep_if FAILED -- fell back to the root fq (NDI paced, JPEG XS paced with it) (issues 1242, 1387)" >&2
+    else
+      echo "cambox-egress-pacing: building the egress tree on \$_cep_if FAILED, and the root fq fallback FAILED too -- the NDI egress may be UNPACED (issues 1242, 1387)" >&2
+    fi
     false
   fi
 }
@@ -194,6 +200,19 @@ cambox_egress_pacing_token() {
   return 0
 }
 
+# cambox_egress_pacing_number TEXT -> TEXT as a decimal number when it is hex (0x...) or decimal, else
+# nothing (a tc handle; compared as a number). The digit sets are spelled out: a bracket range
+# follows the locale (ci-testing-gotchas, issue 1302). Always returns 0.
+cambox_egress_pacing_number() {
+  local t="${1:-}"
+  if [[ $t =~ ^0[xX][0123456789abcdefABCDEF]{1,8}$ ]]; then
+    echo "$((t))"
+  elif [[ $t =~ ^[0123456789]{1,10}$ ]]; then
+    echo "$((10#$t))"
+  fi
+  return 0
+}
+
 # cambox_egress_pacing_verdict QDISC_TEXT [FILTER_TEXT] -> ONE line `OK <detail>` / `DRIFT <detail>` /
 # `UNKNOWN <detail>` for `tc qdisc show dev <if>` and `tc filter show dev <if>` (raw lines, or the
 # `|`-flattened form the gather emits). OK = the whole issue-1387 tree:
@@ -201,13 +220,15 @@ cambox_egress_pacing_token() {
 #     band 1 would send that traffic past the fq: the NDI egress could go unpaced);
 #   under 1:1 an `fq` whose maxrate (compared in bit/s), flow_limit and limit equal the declaration;
 #   under 1:2 a `pfifo` with the declared limit, the JPEG XS class;
-#   a `fw` filter on parent 1: whose handle (compared as a number) is the declared mark, to 1:2.
+#   a `fw` filter on parent 1: whose handle (compared as a number) is the declared mark, to 1:2,
+#     and NO other classifying filter on the root (one would move traffic past the fq).
 # DRIFT names every fault at once: the NDI side (`the NDI egress is UNPACED`, or a wrong value) and
 # the JPEG XS side (`JPEG XS ...`: the flow is paced with NDI, or not classified). The pre-issue-1387
 # root fq is DRIFT (NDI paced, the JPEG XS class missing). UNKNOWN = nothing gradable (tc absent, no
 # default route, no root line). Always returns 0.
 cambox_egress_pacing_verdict() {
-  local text="${1:-}" filters="${2:-}" root kind handle bands priomap fq child mark_line got_mark want_mark
+  local text="${1:-}" filters="${2:-}" root kind handle bands priomap fq child want_mark found
+  local f_kind f_handle f_target
   local maxrate flow_limit limit got_bps want_bps fifo_limit ndi="" jxs="" detail
   case "$text" in
     *__TC_ABSENT__*)
@@ -281,27 +302,31 @@ cambox_egress_pacing_verdict() {
       jxs="JPEG XS pfifo limit ${fifo_limit:-?} (want $CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT)"
     fi
   fi
+  # Every CLASSIFYING filter entry on the root (one carrying a classid / flowid; tc prints u32's as
+  # `*flowid`, and a bare `filter ... fw chain 0` header line carries none) as `KIND HANDLE TARGET`.
+  # Exactly one may exist: fw, the declared mark, to 1:2. Any other moves traffic past the fq.
   want_mark="$((CAMBOX_EGRESS_PACING_JXS_MARK))"
-  got_mark=""
-  mark_line="$(printf '%s\n' "$filters" | tr '|' '\n' | awk '
-    $1 == "filter" && $2 == "parent" && $3 == "1:" && m == "" {
-      fw = 0; cls = ""; h = ""
+  found=0
+  while read -r f_kind f_handle f_target; do
+    [ -n "${f_kind:-}" ] || continue
+    if [ "$f_kind" = fw ] && [ "$f_target" = "1:2" ] && [ "$(cambox_egress_pacing_number "$f_handle")" = "$want_mark" ]; then
+      found=$((found + 1))
+    else
+      ndi="${ndi:+$ndi, }filter $f_kind $f_handle to $f_target on the root moves traffic past the fq -- that traffic is UNPACED"
+    fi
+  done <<FILTERS
+$(printf '%s\n' "$filters" | tr '|' '\n' | awk '
+    $1 == "filter" && $2 == "parent" && $3 == "1:" {
+      k = "?"; h = "-"; t = ""
       for (i = 4; i <= NF; i++) {
-        if ($i == "fw") fw = 1
-        if ($i == "handle" && i < NF) h = $(i + 1)
-        if ($i == "classid" && i < NF) cls = $(i + 1)
+        if ($i == "pref" && i + 2 <= NF) k = $(i + 2)
+        if (($i == "handle" || $i == "fh") && i < NF) h = $(i + 1)
+        if (($i == "classid" || $i == "flowid" || $i == "*flowid") && i < NF) t = $(i + 1)
       }
-      if (fw && h != "" && cls == "1:2") m = h
-    }
-    END { if (m != "") print m }' || true)"
-  # A handle is hex (0x...) or decimal, compared as a number; anything else is no match. The digit
-  # sets are spelled out: a bracket range follows the locale (ci-testing-gotchas, issue 1302).
-  if [[ $mark_line =~ ^0[xX][0123456789abcdefABCDEF]{1,8}$ ]]; then
-    got_mark="$((mark_line))"
-  elif [[ $mark_line =~ ^[0123456789]{1,10}$ ]]; then
-    got_mark="$((10#$mark_line))"
-  fi
-  if [ "$got_mark" != "$want_mark" ]; then
+      if (t != "") print k, h, t
+    }' || true)
+FILTERS
+  if [ "$found" -eq 0 ]; then
     jxs="${jxs:+$jxs, }no fw filter for mark $CAMBOX_EGRESS_PACING_JXS_MARK to 1:2 -- the JPEG XS flow is paced with NDI"
   fi
 
@@ -593,7 +618,7 @@ PROG
     printf '%s=%q\n' "$v" "${!v}"
   done
   printf '%s\n' "$(declare -f ro_root_mount_mode cambox_egress_pacing_rate_bps cambox_egress_pacing_qdisc_line \
-    cambox_egress_pacing_token cambox_egress_pacing_verdict)"
+    cambox_egress_pacing_token cambox_egress_pacing_number cambox_egress_pacing_verdict)"
   cat <<'PROG'
 _cep_box="$(hostname 2>/dev/null || echo this cambox)"
 _cep_sha() { if [ -e "$1" ]; then _cep_s="$(sha256sum <"$1")"; echo "${_cep_s%% *}"; else echo __ABSENT__; fi; }

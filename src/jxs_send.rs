@@ -56,7 +56,8 @@ pub const UDP_GRO: libc::c_int = 104;
 pub struct JxsSocket {
     sock: UdpSocket,
     gso: AtomicBool,
-    marked: bool,
+    /// `None` = the kernel accepted [`JXS_SOCKET_MARK`]; else the errno it answered.
+    mark_error: Option<i32>,
 }
 
 impl JxsSocket {
@@ -81,25 +82,30 @@ impl JxsSocket {
         let fd = sock.as_raw_fd();
         set_int_opt(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, SEND_BUFFER_BYTES);
         let gso = set_int_opt(fd, libc::SOL_UDP, UDP_SEGMENT, DATAGRAM_LEN as libc::c_int);
-        // SO_MARK needs CAP_NET_ADMIN (camera-box.service runs as root). Without it the flow is
-        // still sent, only paced with NDI: `marked()` reports it and the "link ON" line names it.
-        let marked = set_int_opt(
+        // SO_MARK needs CAP_NET_ADMIN or CAP_NET_RAW (camera-box.service runs as root). Without it
+        // the flow is still sent, only paced with NDI: `marked()` reports it, the start WARNs with
+        // the errno and the "link ON" line names it.
+        let mark_error = if set_int_opt(
             fd,
             libc::SOL_SOCKET,
             libc::SO_MARK,
             JXS_SOCKET_MARK as libc::c_int,
-        );
+        ) {
+            None
+        } else {
+            Some(std::io::Error::last_os_error().raw_os_error().unwrap_or(0))
+        };
         Ok(Self {
             sock,
             gso: AtomicBool::new(gso),
-            marked,
+            mark_error,
         })
     }
 
     /// Whether the kernel accepted [`JXS_SOCKET_MARK`] (`SO_MARK`), i.e. the egress pacing's fw
     /// filter sends this flow at line rate.
     pub fn marked(&self) -> bool {
-        self.marked
+        self.mark_error.is_none()
     }
 
     /// Whether GSO is in use (the kernel accepted `UDP_SEGMENT`, and no GSO send has failed with
@@ -418,9 +424,10 @@ fn start_worker(target: String, camera_id: u8, bpp: u32) -> Option<JxsHandoff> {
             allowed.clone()
         }
     };
-    if !socket.marked() {
+    if let Some(errno) = socket.mark_error {
         tracing::warn!(
-            "jxs send: SO_MARK {JXS_SOCKET_MARK:#x} refused (no CAP_NET_ADMIN?) -- the cambox egress pacing paces this JPEG XS flow at 400 Mb/s with NDI instead of line rate (issue 1387)"
+            "jxs send: SO_MARK {JXS_SOCKET_MARK:#x} refused ({}; needs CAP_NET_ADMIN or CAP_NET_RAW) -- the cambox egress pacing paces this JPEG XS flow at 400 Mb/s with NDI instead of line rate (issue 1387)",
+            std::io::Error::from_raw_os_error(errno)
         );
     }
     tracing::info!(
@@ -707,6 +714,19 @@ mod tests {
         assert_eq!(h.dropped_busy(), 0);
     }
 
+    /// Whether this process may set SO_MARK: CAP_NET_ADMIN (bit 12) or CAP_NET_RAW (bit 13) in its
+    /// effective set, read from /proc/self/status (the kernel's own check, never the euid).
+    fn may_set_socket_mark() -> bool {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let hex = status
+            .lines()
+            .find_map(|l| l.strip_prefix("CapEff:"))
+            .expect("CapEff line")
+            .trim();
+        let caps = u64::from_str_radix(hex, 16).unwrap();
+        caps & ((1 << 12) | (1 << 13)) != 0
+    }
+
     #[test]
     fn the_socket_carries_the_egress_mark_whenever_the_kernel_allows_it_1387() {
         let tx = JxsSocket::connect("127.0.0.1:9").unwrap();
@@ -717,12 +737,17 @@ mod tests {
             got == JXS_SOCKET_MARK as i64,
             "SO_MARK read {got}"
         );
-        // root (camera-box.service) holds CAP_NET_ADMIN: there the mark is never missing.
-        // SAFETY: geteuid has no preconditions.
-        if unsafe { libc::geteuid() } == 0 {
-            assert!(tx.marked(), "a root socket carries the mark");
+        if may_set_socket_mark() {
+            // camera-box.service (root) holds the capability: the mark is never missing there.
+            assert!(tx.marked(), "a capable socket carries the mark");
         } else {
-            assert!(!tx.marked(), "an unprivileged socket cannot set SO_MARK");
+            // The setsockopt WAS attempted and the kernel refused it: a connect that never tried
+            // the mark would leave no error here (review round 1: the unprivileged CI runner).
+            assert_eq!(
+                tx.mark_error,
+                Some(libc::EPERM),
+                "SO_MARK attempted and refused"
+            );
         }
     }
 
