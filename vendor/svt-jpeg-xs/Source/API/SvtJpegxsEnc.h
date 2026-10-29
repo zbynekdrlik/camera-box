@@ -1,0 +1,254 @@
+/*
+* Copyright(c) 2024 Intel Corporation
+* SPDX - License - Identifier: BSD - 2 - Clause - Patent
+*/
+
+#ifndef _SVT_JPEG_XS_API_ENC_H_
+#define _SVT_JPEG_XS_API_ENC_H_
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+#include "SvtJpegxs.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+typedef struct svt_jpeg_xs_encoder_api {
+    // Input Info
+    uint32_t source_width;        /* Mandatory, The width of input source in units of picture luma pixels.*/
+    uint32_t source_height;       /* Mandatory, The height of input source in units of picture luma pixels. */
+    uint8_t input_bit_depth;      /* Mandatory, Specifies the bit depth of input video, 8 to 14 bit. */
+    ColourFormat_t colour_format; /* Mandatory, Specifies the chroma sub-sampling format of input video. */
+    uint32_t bpp_numerator;       /* Mandatory, Specifies the bits per pixel. BPP value is fraction: */
+    uint32_t bpp_denominator;     /* Optional, default 1, BPP = bpp_numerator / bpp_denominator; */
+    uint32_t ndecomp_v;           /* Optional, default 2, Specifies decomp_v depth. 0 is rejected for 4:2:0. */
+    uint32_t ndecomp_h;           /* Optional, default 5, Specifies decomp_h depth.*/
+    uint32_t quantization;        /* Optional, default 0, Specifies quantization method: 0 = deadzone, 1 = uniform.*/
+    /* Optional, default 16, The height of each slice in units of picture luma pixels.
+     * Values >= source_height are clamped to source_height and written back into this struct by
+     * svt_jpeg_xs_encoder_init(); smaller values must be a multiple of 2^ndecomp_v. */
+    uint32_t slice_height;
+    CPU_FLAGS
+    use_cpu_flags; /* Optional, default CPU_FLAGS_ALL, CPU FLAGS to limit assembly instruction set used by encoder. Max: CPU_FLAGS_ALL
+                    * svt_jpeg_xs_encoder_init() masks it in this struct with the flags detected on the CPU. */
+    uint32_t threads_num;      /* Optional, default 0, The number of logical processor which encoder threads run on. */
+    uint8_t cpu_profile;       /* Optional, default 0, CPU profile optimizations 0 = Low latency, 1 = Low CPU usage
+                                * With ndecomp_v == 0, 1 is silently replaced by 0. */
+    uint32_t print_bands_info; /* Optional, default 0, Print Band info in initialization. */
+
+    uint32_t coding_signs_handling; /* Optional, default 0, Enable Signs handling strategy full: 2, fast: 1, disable: 0*/
+    uint32_t coding_significance;   /* Optional, default 1, Enable Significance coding method flag. */
+    /* Rate Control mode
+     * CBR budget per precinct = 0,
+     * CBR budget per precinct with padding movement = 1,
+     * CBR budget per slice = 2,
+     * CBR budget per slice with max rate size = 3
+     * Optional, default 1, */
+    uint32_t rate_control_mode;
+
+    /* Vertical Prediction Coding method:
+    * 0 = Disable Vertical Prediction Coding method
+    * 1 = Enable Vertical Prediction Coding method, runs indicate zero prediction residuals
+    * 2 = Enable Vertical Prediction Coding method, runs indicate zero coefficients
+    * Optional, default 0 */
+    uint32_t coding_vertical_prediction_mode;
+
+    uint32_t verbose; //VerboseMessages
+
+    /* Callback: Call when available place in queue to send data.
+     * Called only once, when the encoder init thread starts; not called again per frame.
+     * Only one callback will be triggered at a time. Always from that same thread.
+     * No synchronization required.
+     * encoder_handle - Pointer passed on initialization,
+     * Optional, default NULL */
+    void (*callback_send_data_available)(struct svt_jpeg_xs_encoder_api* encoder, void* context);
+    void* callback_send_data_available_context;
+
+    /* Callback: Call when new frame is ready to get.
+     * Only one callback will be triggered at a time.
+     * No synchronization required.
+     * encoder_handle - Pointer passed on initialization,
+     * Optional, default NULL */
+    void (*callback_get_data_available)(struct svt_jpeg_xs_encoder_api* encoder, void* context);
+    void* callback_get_data_available_context;
+
+    /* Packetization mode:
+    * Please refer to https://datatracker.ietf.org/doc/html/rfc9134 for details
+    * 0 = Codestream packetization mode -> packetization unit SHALL be the entire JPEG XS picture segment
+    * 1 = Slice packetization mode -> packetization unit SHALL be the slice, The first packetization unit SHALL
+    *     be made of the JPEG XS header segment... This first unit is then followed by successive units, each
+    *     containing one and only one slice. The packetization unit containing the last slice of a JPEG XS codestream
+    *     SHALL also contain the EOC marker immediately following this last slice
+    * Optional, default 0  */
+    uint8_t slice_packetization_mode;
+
+    void* private_ptr; /*Private encoder pointer, do not touch!!! */
+
+    /* Disable packet-based raw-mode coding.
+     * 0 = raw-mode enabled (default, current behavior): picture header Rl=1, raw packet packing allowed,
+     *     and the raw-mode capability bit is signalled in the CAP marker.
+     * 1 = raw-mode disabled: picture header Rl=0, raw packet packing never selected,
+     *     and the raw-mode capability bit is cleared.
+     * Optional, default 0 */
+    uint8_t coding_raw_disable;
+
+    /* Legacy decoder capabilities-marker compatibility.
+     * 0 = full CAP marker (default, current behavior).
+     * 1 = emit an empty CAP marker (Lcap=2) when no capability bit is set. Some legacy/strict decoders
+     *     reject a non-empty CAP marker; an empty CAP is accepted by those decoders.
+     *     Note: when the stream genuinely requires a capability bit (e.g. 4:2:0 sub-sampling), a full CAP
+     *     marker is still written to remain conformant.
+     *     The raw-mode capability bit is set whenever Rl=1 (coding_raw_disable=0, default), so 1 has an
+     *     effect only with coding_raw_disable=1, non-4:2:0 input and lossless_enable=0.
+     * Optional, default 0 */
+    uint8_t cap_compat;
+
+    /* Stream profile (Ppih) override.
+     * 0 = auto-derive (default): Ppih is computed from colour_format/input_bit_depth, matching the
+     *     closest ISO/IEC 21122-2 Annex A "Main" family profile (Main 420.12, Main 422.10, Main 444.12
+     *     or Main 4444.12). This is always a validly-defined profile codeword. 0x0000 is never a valid
+     *     Ppih value in the standard, so it safely doubles as the "auto-derive" sentinel here.
+     * Any other value = use verbatim instead of auto-deriving. Use this to declare a Light or High
+     *     family profile, or any other Annex A profile codeword, when the caller knows the encoder
+     *     configuration and downstream decoder both satisfy that profile's constraints.
+     * Optional, default 0 (auto-derive) */
+    uint16_t profile_ppih_override;
+
+    /* Stream level (Plev) override.
+     * 0xFFFF = auto-derive (default): Plev is computed from source_width/source_height/bpp_numerator/
+     *     bpp_denominator, picking the tightest ISO/IEC 21122-2 Annex A level/sublevel that is
+     *     guaranteed to bound the actual stream (falls back to the always-valid "Unrestricted"
+     *     level/sublevel when the resolution or bpp exceeds every defined bucket).
+     *     0xFFFF is used as the sentinel (instead of 0x0000) because Plev=0x0000 is itself a valid,
+     *     meaningful value (Unrestricted level/sublevel/FBB); 0xFFFF's top 6 bits do not correspond to
+     *     any level defined by the standard, so it can never be a real value.
+     * Any other value = use verbatim instead of auto-deriving.
+     * Optional, default 0xFFFF (auto-derive) */
+    uint16_t level_plev_override;
+
+    /* Non-standard, host-side buffer layout convention only - not signalled in the bitstream.
+     * Both encoder and decoder must be configured consistently by the caller.
+     * 0 = LSB-aligned (default, current behavior): 10/12-bit samples occupy the low bits of each
+     *     16-bit input word (value `v`), high bits are don't-care/masked off.
+     * 1 = MSB-aligned: 10/12-bit samples occupy the high bits of each 16-bit input word
+     *     (value `v << (16 - input_bit_depth)`), low bits must be zero. Only affects input_bit_depth > 8.
+     * Optional, default 0 */
+    uint8_t input_bit_depth_msb_aligned;
+
+    /* Enable the ISO/IEC 21122-1 Table F.2 reversible colour transformation (RCT) between
+     * R, G, B source samples and YCbCr-like decorrelated components, signalled in the picture
+     * header as Cpih=1. Decoders treat Cpih=1 output as R, G, B.
+     * Requires colour_format == COLOUR_FORMAT_PLANAR_RGB (components 0, 1, 2 = R, G, B) and
+     * cpu_profile == 0 (Low latency); rejected otherwise at svt_jpeg_xs_encoder_init()
+     * time. YUV 4:4:4 input (COLOUR_FORMAT_PLANAR_YUV444) is rejected: it is already
+     * decorrelated, and the stream would be decoded as RGB.
+     * 0 = disabled (default, current behavior): Cpih=0, no colour transform, input samples
+     *     are coded as-is.
+     * 1 = enabled: forward RCT is applied before the wavelet transform; the decoder inverts
+     *     it whenever Cpih=1 is signalled (already implemented, no decoder changes needed).
+     * Optional, default 0 */
+    uint8_t enable_color_transform;
+
+    /* Enable true lossless coding: picture header Fq=0, Bw=input_bit_depth (ISO/IEC 21122-1
+     * Table A.8 "lossless coding" row). Output size is data-dependent (shrinks with compressible
+     * content) instead of the usual fixed CBR size.
+     * Mutually orthogonal to rate_control_mode/quantization/bpp_numerator/bpp_denominator: all are
+     * ignored when this is set (quantization selects a truncation method that becomes a no-op once
+     * truncation is forced to zero; bpp_* no longer drives a hard byte target; rate_control_mode is
+     * forced internally).
+     * All components always share input_bit_depth, as lossless coding requires.
+     * Rejected at svt_jpeg_xs_encoder_init() time together with input_bit_depth_msb_aligned=1,
+     * slice_packetization_mode=1, or enable_color_transform=1 at input_bit_depth 13/14.
+     * svt_jpeg_xs_encoder_get_image_config() reports a worst-case bytes_per_frame for output buffer
+     * allocation; each encoded frame is compacted to its real size.
+     * When profile_ppih_override/level_plev_override are left at auto, the stream is declared as
+     * MLS.12 (Ppih=0x6EC0, ISO/IEC 21122-2 Table A.4) with an unrestricted sublevel. MLS.12 requires
+     * Rl=0, so also set coding_raw_disable=1 for a strictly conformant stream. MLS.12 covers 8/10/12-bit
+     * input only; 13/14-bit input is still coded losslessly but a warning is printed (verbose >= VERBOSE_WARNINGS).
+     * 0 = disabled (default, current behavior): lossy CBR coding as today.
+     * 1 = enabled: true lossless coding.
+     * Optional, default 0 */
+    uint8_t lossless_enable;
+
+    /* This padding is used to avoid changing the size of the public configuration struct
+     * when new parameters are added in the future please follow these steps:
+     * 1. Insert the new parameter as a member of this structure before the padding array.
+     * 2. Decrease the size of the padding array by the size of the new parameter to keep the struct size unchanged.
+     */
+    uint8_t padding[55];
+} svt_jpeg_xs_encoder_api_t;
+
+/* STEP 0: Set default encoder parameters.
+ * Effectively required: the "default" values listed above are only set by this call. A zeroed struct
+ * is rejected by svt_jpeg_xs_encoder_init() (slice_height, bpp_denominator, ndecomp_v/ndecomp_h = 0),
+ * and level_plev_override = 0 means Unrestricted, not auto-derive.
+ * Parameter:
+ * @ version_api_major - Use version of API Major number (SVT_JPEGXS_API_VER_MAJOR)
+   @ version_api_minor - Use version of API Minor number (SVT_JPEGXS_API_VER_MINOR)
+ * @ *enc_api          - Encoder handle with configuration to set*/
+PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_encoder_load_default_parameters(uint64_t version_api_major, uint64_t version_api_minor,
+                                                                         svt_jpeg_xs_encoder_api_t* enc_api);
+
+/* STEP x: Get image config info from encoder parameters. No need to init encoder.
+ * Parameter:
+ * @ version_api_major - Use version of API Major number (SVT_JPEGXS_API_VER_MAJOR)
+   @ version_api_minor - Use version of API Minor number (SVT_JPEGXS_API_VER_MINOR)
+ * @ *enc_api          - Encoder handle with configuration*/
+PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_encoder_get_image_config(uint64_t version_api_major, uint64_t version_api_minor,
+                                                                  svt_jpeg_xs_encoder_api_t* enc_api,
+                                                                  svt_jpeg_xs_image_config_t* out_image_config,
+                                                                  uint32_t* out_bytes_per_frame);
+
+/* STEP 1: Initialize encoder Handle and allocates memory to necessary buffers.
+ * Parameter:
+ * @ version_api_major - Use version of API Major number (SVT_JPEGXS_API_VER_MAJOR)
+   @ version_api_minor - Use version of API Minor number (SVT_JPEGXS_API_VER_MINOR)
+ * @ *enc_api          - Encoder handle with configuration*/
+PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_encoder_init(uint64_t version_api_major, uint64_t version_api_minor,
+                                                      svt_jpeg_xs_encoder_api_t* enc_api);
+
+/* STEP 4: */
+PREFIX_API void svt_jpeg_xs_encoder_close(svt_jpeg_xs_encoder_api_t* enc_api);
+
+/* STEP 2: Send the picture.
+ *
+ * Parameter:
+ * @ *enc_api            Encoder handler.
+ * @ *enc_input          Structure with frame info: pointers on yuv and bitstream, frame context. Structure will be copy internal.
+ *                       Image and bitstream buffers must stay valid until returned by svt_jpeg_xs_encoder_get_packet()
+ *                       with ready_to_release = 1.
+ * @ blocking_flag       If set to 1, then function is blocked until frame is sent to encoder,
+ *                       otherwise SvtJxsErrorNoErrorEmptyQueue is returned when the input queue is full.
+ * Return:
+ *  SvtJxsErrorNone - on success,
+ *  SvtJxsErrorNoErrorEmptyQueue - (warning), input queue full, try again later (blocking_flag == 0 only),
+ *  SvtJxsErrorBadParameter - NULL handle/enc_input, bitstream.buffer NULL, bitstream.allocation_size smaller
+ *                            than bytes_per_frame from svt_jpeg_xs_encoder_get_image_config(),
+ *                            or image.data_yuv[c] NULL or image.alloc_size[c] too small for stride and height */
+PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_encoder_send_picture(svt_jpeg_xs_encoder_api_t* enc_api, svt_jpeg_xs_frame_t* enc_input,
+                                                              uint8_t blocking_flag);
+
+/* STEP 3: Receive packet.
+ * Parameter:
+ * @ *enc_api            Encoder handler.
+ * @ *enc_output         Fill output structure with encoder results
+ * @ blocking_flag       If set to 1, then function is blocked until a packet is available,
+ *                       otherwise SvtJxsErrorNoErrorEmptyQueue is returned when no packet is ready.
+ * Return:
+ *  SvtJxsErrorNone - on success,
+ *  SvtJxsErrorNoErrorEmptyQueue - (warning), no packet available; only in this case enc_output.user_prv_ctx_ptr is set to NULL,
+ *  SvtJxsErrorEncodeFrameError - encode error; enc_output is still filled with the frame buffers, which must be released,
+ *  SvtJxsErrorBadParameter - NULL handle or enc_output.
+ * With slice_packetization_mode = 1 each frame is returned as slice_num + 1 packets (picture header, then one per slice),
+ * callback_get_data_available is called per packet, and only the last packet has ready_to_release = 1
+ * (bitstream.buffer points into the frame buffer; release with bitstream.release_ctx_ptr). */
+PREFIX_API SvtJxsErrorType_t svt_jpeg_xs_encoder_get_packet(svt_jpeg_xs_encoder_api_t* enc_api, svt_jpeg_xs_frame_t* enc_output,
+                                                            uint8_t blocking_flag);
+
+#ifdef __cplusplus
+}
+#endif // __cplusplus
+
+#endif /*_SVT_JPEG_XS_API_ENC_H_*/
