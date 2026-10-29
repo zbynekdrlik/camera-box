@@ -722,8 +722,8 @@ mod handoff {
                     submitted,
                 } => (timecode_100ns, handed_off, submitted),
             };
-            stats.in_flight.fetch_sub(1, Ordering::Relaxed);
             let Some(out) = output.as_ref() else {
+                stats.in_flight.fetch_sub(1, Ordering::Relaxed);
                 continue;
             };
             let count = jxs_link::packets_per_frame(out.height());
@@ -755,6 +755,8 @@ mod handoff {
                     Err(_) => packet_errors += 1,
                 }
             });
+            // in flight from its submit to its last packet (or its failure)
+            stats.in_flight.fetch_sub(1, Ordering::Relaxed);
             match result {
                 Ok((pic, n)) => {
                     let _ = free_tx.try_send(pic);
