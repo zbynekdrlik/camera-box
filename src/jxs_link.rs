@@ -66,6 +66,7 @@
 //! predates the sender's last bpp change is about the old bpp and steps nothing down.
 
 pub mod assembler;
+pub mod congestion_meter;
 pub mod link_speed;
 pub mod pace;
 pub mod pace_auto;
@@ -352,6 +353,11 @@ pub struct SendWindow {
     /// The receiver's link from its last report and this sender's own link, Mb/s (0 = unknown).
     pub rx_link_mbps: u32,
     pub own_link_mbps: u32,
+    /// The path as the congestion control last judged it, its pace factor (percent; 0 = never
+    /// set) and the receiver's newest queuing delay (`crate::jxs_congestion`).
+    pub path_state: crate::jxs_congestion::PathState,
+    pub congestion_pct: u32,
+    pub queue_delay_us: Option<u32>,
     /// Per whole frame: its first send -> its last send returned (the frame's time on the wire,
     /// paced or not; at line rate it follows the encoder's slice span); the average divides by
     /// `wire_frames` (a frame with no send has no wire time).
@@ -445,12 +451,13 @@ impl SendWindow {
     /// dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
     /// capture_age_ms_avg/min/max= first_slice_ms_avg/max=
     /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= reports= pace_mbps=
-    /// wire_ms_avg/max= pace_src= rx_link_mbps= tx_link_mbps= (issue 1387)`. `bytes`
+    /// wire_ms_avg/max= pace_src= rx_link_mbps= tx_link_mbps= path= cong_pct= queue_ms= (issue
+    /// 1387)`. `bytes`
     /// counts the codestream, not the headers; `bpp_reason` / `report_age_s` / the two ages read `-` when
     /// there is none.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} pace_mbps={} wire_ms_avg/max={:.2}/{:.2} pace_src={} rx_link_mbps={} tx_link_mbps={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} pace_mbps={} wire_ms_avg/max={:.2}/{:.2} pace_src={} rx_link_mbps={} tx_link_mbps={} path={} cong_pct={} queue_ms={} (issue 1387)",
             if self.window_s > 0.0 {
                 self.frames as f64 / self.window_s
             } else {
@@ -484,6 +491,10 @@ impl SendWindow {
             self.pace_source,
             self.rx_link_mbps,
             self.own_link_mbps,
+            self.path_state,
+            self.congestion_pct,
+            self.queue_delay_us
+                .map_or("-".to_string(), |q| format!("{:.1}", q as f64 / 1000.0)),
         )
     }
 }
@@ -746,11 +757,14 @@ mod tests {
         w.pace_source = pace_auto::PaceSource::ReceiverLink;
         w.rx_link_mbps = 1000;
         w.own_link_mbps = 10_000;
+        w.path_state = crate::jxs_congestion::PathState::Clean;
+        w.congestion_pct = 100;
+        w.queue_delay_us = Some(460);
         w.note_wire(19.5);
         w.note_wire(20.1);
         assert_eq!(
             w.status_line(),
-            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 pace_mbps=900 wire_ms_avg/max=19.80/20.10 pace_src=receiver-link rx_link_mbps=1000 tx_link_mbps=10000 (issue 1387)"
+            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 pace_mbps=900 wire_ms_avg/max=19.80/20.10 pace_src=receiver-link rx_link_mbps=1000 tx_link_mbps=10000 path=clean cong_pct=100 queue_ms=0.5 (issue 1387)"
         );
         let empty = SendWindow::default().status_line();
         assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
@@ -784,10 +798,13 @@ mod tests {
             "pace_src=",
             "rx_link_mbps=",
             "tx_link_mbps=",
+            "path=",
+            "cong_pct=",
+            "queue_ms=",
         ];
         assert!(
             empty.contains(
-                " pace_mbps=0 wire_ms_avg/max=0.00/0.00 pace_src=line-rate rx_link_mbps=0 tx_link_mbps=0 "
+                " pace_mbps=0 wire_ms_avg/max=0.00/0.00 pace_src=line-rate rx_link_mbps=0 tx_link_mbps=0 path=unknown cong_pct=0 queue_ms=- "
             ),
             "line rate reads 0: {empty}"
         );

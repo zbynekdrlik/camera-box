@@ -96,7 +96,13 @@ int main(void)
 	EXPECT(strcmp(cb_jxs_out_pace_source(1), "fixed") == 0);
 	EXPECT(strcmp(cb_jxs_out_pace_source(2), "receiver-link") == 0);
 	EXPECT(strcmp(cb_jxs_out_pace_source(3), "start-spread") == 0);
-	EXPECT(strcmp(cb_jxs_out_pace_source(4), "unknown") == 0);
+	EXPECT(strcmp(cb_jxs_out_pace_source(4), "congestion") == 0);
+	EXPECT(strcmp(cb_jxs_out_pace_source(5), "unknown") == 0);
+	EXPECT(strcmp(cb_jxs_out_path_state(0), "unknown") == 0);
+	EXPECT(strcmp(cb_jxs_out_path_state(1), "clean") == 0);
+	EXPECT(strcmp(cb_jxs_out_path_state(2), "hold") == 0);
+	EXPECT(strcmp(cb_jxs_out_path_state(3), "overuse") == 0);
+	EXPECT(strcmp(cb_jxs_out_path_state(4), "?") == 0);
 	EXPECT(cb_jxs_out_pace_mbps(900) == 900u);
 	EXPECT(cb_jxs_out_pace_mbps(0) == 0u);
 	EXPECT(cb_jxs_out_pace_mbps(-1) == 0u);
@@ -321,6 +327,7 @@ fn the_pace_setting_defaults_to_automatic_and_reaches_the_sender_config() {
         (1, PaceSource::Fixed),
         (2, PaceSource::ReceiverLink),
         (3, PaceSource::StartSpread),
+        (4, PaceSource::Congestion),
     ] {
         assert!(
             decide.contains(&format!("case {code}:\n\t\treturn \"{src}\";")),
@@ -366,6 +373,8 @@ fn the_output_logs_a_start_line_a_status_line_and_the_senders_own_lines() {
         "st.pace_mbps, st.wire_ms_avg, st.wire_ms_max",
         "pace_src=%s rx_link_mbps=%u tx_link_mbps=%u",
         "cb_jxs_out_pace_source(st.pace_source)",
+        " path=%s cong_pct=%u queue_ms=%.1f (issue 1387)",
+        "cb_jxs_out_path_state(st.path_state), st.congestion_pct,",
     ] {
         assert!(status.contains(field), "status line lacks {field}");
     }

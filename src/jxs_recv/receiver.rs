@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{realtime_100ns, DecodeSink, JxsRecvSocket};
+use crate::jxs_link::congestion_meter::CongestionMeter;
 use crate::jxs_link::{
     self, FrameAssembler, FrameReport, PacketHeader, PushOutcome, RecvWindow, ReportWindow,
 };
@@ -189,6 +190,8 @@ pub struct JxsReceiver {
     /// report (issue 1387: the report carries it, the sender paces to it).
     link_iface: Option<(u32, String)>,
     link_mbps: Option<u32>,
+    /// The early congestion signal of each report period (issue 1387 item 2).
+    meter: CongestionMeter,
 }
 
 // The strih OBS source opens the receiver on one thread and polls it on another (jxs/recv-ffi's
@@ -237,6 +240,7 @@ impl JxsReceiver {
             report_error: None,
             link_iface: None,
             link_mbps: None,
+            meter: CongestionMeter::default(),
         })
     }
 
@@ -400,6 +404,8 @@ impl JxsReceiver {
         let ms = |t: i64| t as f64 / 10_000.0;
         for (r, decoded_at, ok) in &events {
             let tc = r.timecode as i64;
+            self.meter
+                .note_frame(r.timecode, r.first_arrival, r.last_arrival, r.lost_slices);
             if *ok {
                 let latency_ms = ms(decoded_at - tc);
                 self.window.note_frame(
@@ -442,6 +448,9 @@ impl JxsReceiver {
             .report
             .take(self.camera.unwrap_or(0), self.cfg.max_bpp as u32);
         r.link_mbps = self.link_mbps.unwrap_or(0);
+        let c = self.meter.take();
+        r.queue_delay_us = c.queue_delay_us;
+        r.span_p50_us = c.span_p50_us;
         if let (true, Some(to), Some(_)) = (self.cfg.send_reports, self.sender, self.camera) {
             match self.sock.send_report(to, &r) {
                 Ok(()) => self.window.reports_sent += 1,

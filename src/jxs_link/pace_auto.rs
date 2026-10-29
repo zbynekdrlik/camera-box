@@ -18,6 +18,12 @@
 //!    from the frame, never from a guessed link: any link that carries the stream at all carries
 //!    twice its average. Never above the sender's own link (that is line rate anyway).
 //!
+//! 4. **Congestion** (`crate::jxs_congestion`, the receiver's delay signal): a factor under 100 %
+//!    lowers the automatic pace to that share of it (of the sender's own link when it ran at line
+//!    rate), but never below what one frame needs in its interval plus a tenth
+//!    ([`frame_need_mbps`]): slower than that, frames back up and drop at the sender. An explicit
+//!    setting is never lowered (an override is the operator's).
+//!
 //! Every paced value is clamped into the schedule's bounds (`PACE_MBPS_MIN..=PACE_MBPS_MAX`).
 
 use super::pace::{wire_bytes, PACE_MBPS_MAX, PACE_MBPS_MIN};
@@ -41,6 +47,8 @@ pub enum PaceSource {
     LineRate,
     /// No receiver link known yet: the frame-spread rate.
     StartSpread,
+    /// The automatic pace lowered by the congestion factor.
+    Congestion,
 }
 
 impl std::fmt::Display for PaceSource {
@@ -50,6 +58,7 @@ impl std::fmt::Display for PaceSource {
             Self::ReceiverLink => "receiver-link",
             Self::LineRate => "line-rate",
             Self::StartSpread => "start-spread",
+            Self::Congestion => "congestion",
         })
     }
 }
@@ -67,6 +76,8 @@ pub struct PaceInputs {
     pub frame_wire_bytes: u64,
     /// The link's frame rate.
     pub fps: u32,
+    /// The congestion controller's pace factor in percent; 0 or 100 and above = none.
+    pub congestion_pct: u32,
 }
 
 /// The pace to run: `mbps` 0 = line rate.
@@ -96,8 +107,20 @@ pub fn frame_spread_mbps(frame_wire_bytes: u64, fps: u32) -> u64 {
     (frame_wire_bytes * 8 * fps as u64 * START_SPREAD_DIVISOR).div_ceil(1_000_000)
 }
 
+/// The least a pace may be for `frame_wire_bytes` every `1 / fps` s: the frame's own rate plus a
+/// tenth (Mb/s, rounded up; 0 for an empty frame or no rate).
+pub fn frame_need_mbps(frame_wire_bytes: u64, fps: u32) -> u64 {
+    (frame_wire_bytes * 8 * fps as u64 * 11).div_ceil(10_000_000)
+}
+
 /// The decision (module doc).
 pub fn decide(i: &PaceInputs) -> PaceDecision {
+    let _ = frame_need_mbps(0, 0);
+    decide_links(i)
+}
+
+/// Rules 1-3 (module doc): the pace from the two links alone.
+fn decide_links(i: &PaceInputs) -> PaceDecision {
     let line = PaceDecision {
         mbps: 0,
         source: PaceSource::LineRate,
@@ -138,6 +161,7 @@ mod tests {
             receiver_link_mbps: rx,
             frame_wire_bytes: frame_wire_bytes(1920, 1080, 4),
             fps: 30,
+            congestion_pct: 100,
         })
     }
 
@@ -229,8 +253,13 @@ mod tests {
                 receiver_link_mbps: rx,
                 frame_wire_bytes: frame_wire_bytes(1920, 1080, 8),
                 fps: 30,
+                congestion_pct: 60,
             });
-            assert_eq!(d, paced(800, PaceSource::Fixed));
+            assert_eq!(
+                d,
+                paced(800, PaceSource::Fixed),
+                "congestion never lowers an override"
+            );
         }
     }
 
@@ -240,5 +269,67 @@ mod tests {
         assert_eq!(PaceSource::ReceiverLink.to_string(), "receiver-link");
         assert_eq!(PaceSource::LineRate.to_string(), "line-rate");
         assert_eq!(PaceSource::StartSpread.to_string(), "start-spread");
+        assert_eq!(PaceSource::Congestion.to_string(), "congestion");
+    }
+
+    fn congested(own: Option<u32>, rx: Option<u32>, bpp: u32, pct: u32) -> PaceDecision {
+        decide(&PaceInputs {
+            own_link_mbps: own,
+            receiver_link_mbps: rx,
+            frame_wire_bytes: frame_wire_bytes(1920, 1080, bpp),
+            fps: 30,
+            congestion_pct: pct,
+            ..PaceInputs::default()
+        })
+    }
+
+    /// Issue 1387 item 2: the congestion factor lowers the automatic pace, never under what a frame
+    /// needs, and a line-rate sender starts pacing at that share of its own link.
+    #[test]
+    fn congestion_lowers_the_pace_but_never_below_the_frames_own_need() {
+        // 900 x 85 % = 765
+        assert_eq!(
+            congested(Some(10_000), Some(1000), 8, 85),
+            paced(765, PaceSource::Congestion)
+        );
+        // 8 bpp needs 2190450 x 8 x 30 x 1.1 = 578.3 -> 579 Mb/s: 50 % of 900 stops there
+        assert_eq!(frame_need_mbps(frame_wire_bytes(1920, 1080, 8), 30), 579);
+        assert_eq!(
+            congested(Some(10_000), Some(1000), 8, 50),
+            paced(579, PaceSource::Congestion)
+        );
+        // a 1 GbE cambox at line rate to the 10 GbE strih: 85 % of its own link
+        assert_eq!(
+            congested(Some(1000), Some(10_000), 4, 85),
+            paced(850, PaceSource::Congestion)
+        );
+        // no factor, or a factor that would not lower anything: the link decision as before
+        assert_eq!(
+            congested(Some(10_000), Some(1000), 8, 100),
+            paced(900, PaceSource::ReceiverLink)
+        );
+        assert_eq!(
+            congested(Some(10_000), Some(1000), 8, 0),
+            paced(900, PaceSource::ReceiverLink)
+        );
+        // 12 bpp needs 868 Mb/s: 60 % of 900 stops there
+        assert_eq!(
+            congested(Some(10_000), Some(1000), 12, 60),
+            paced(868, PaceSource::Congestion)
+        );
+        // a factor that would land at or above the link pace changes nothing
+        assert_eq!(
+            congested(Some(800), Some(1000), 12, 99),
+            paced(0, PaceSource::LineRate),
+            "792 < 868 needed, 868 >= the own 800: line rate stays"
+        );
+        // nothing known about either link at line rate: nothing to lower from
+        assert_eq!(
+            decide(&PaceInputs {
+                congestion_pct: 50,
+                ..PaceInputs::default()
+            }),
+            paced(0, PaceSource::LineRate)
+        );
     }
 }

@@ -728,7 +728,9 @@ fn send(
                     let encode_ms = submitted.elapsed().as_secs_f64() * 1000.0;
                     window.note_frame(slices, bytes, first, encode_ms);
                     if let (Some(a), Some(b)) = (first_sent, last_sent) {
-                        window.note_wire(b.saturating_duration_since(a).as_secs_f64() * 1000.0);
+                        let wire_ms = b.saturating_duration_since(a).as_secs_f64() * 1000.0;
+                        window.note_wire(wire_ms);
+                        bpp.pace.on_wire(wire_ms);
                     }
                     // the auto bpp judges the codec, not the paced wire: a pace too slow for
                     // the frames shows as dropped_busy, which steps it down on its own

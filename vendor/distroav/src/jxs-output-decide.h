@@ -64,8 +64,28 @@ static inline const char *cb_jxs_out_pace_source(uint32_t code)
 		return "receiver-link";
 	case 3:
 		return "start-spread";
+	case 4:
+		return "congestion";
 	default:
 		return "unknown";
+	}
+}
+
+/* The status line's word for cbjxs_send_stats.path_state (CBJXS_SEND_PATH_*; the Rust PathState
+ * tokens). */
+static inline const char *cb_jxs_out_path_state(uint32_t code)
+{
+	switch (code) {
+	case 0:
+		return "unknown";
+	case 1:
+		return "clean";
+	case 2:
+		return "hold";
+	case 3:
+		return "overuse";
+	default:
+		return "?";
 	}
 }
 

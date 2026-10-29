@@ -49,6 +49,23 @@ fn pins() -> Vec<(String, usize)> {
             CBJXS_SEND_PACE_START_SPREAD as usize,
         ),
         (
+            "CBJXS_SEND_PACE_CONGESTION".into(),
+            CBJXS_SEND_PACE_CONGESTION as usize,
+        ),
+        (
+            "CBJXS_SEND_PATH_UNKNOWN".into(),
+            CBJXS_SEND_PATH_UNKNOWN as usize,
+        ),
+        (
+            "CBJXS_SEND_PATH_CLEAN".into(),
+            CBJXS_SEND_PATH_CLEAN as usize,
+        ),
+        ("CBJXS_SEND_PATH_HOLD".into(), CBJXS_SEND_PATH_HOLD as usize),
+        (
+            "CBJXS_SEND_PATH_OVERUSE".into(),
+            CBJXS_SEND_PATH_OVERUSE as usize,
+        ),
+        (
             "sizeof(cbjxs_send_config)".into(),
             size_of::<CbjxsSendConfig>(),
         ),
@@ -116,7 +133,11 @@ fn pins() -> Vec<(String, usize)> {
         wire_ms_avg,
         wire_ms_max,
         rx_link_mbps,
-        own_link_mbps
+        own_link_mbps,
+        path_state,
+        congestion_pct,
+        queue_delay_us,
+        reserved3
     );
     assert_eq!(
         CBJXS_SEND_ABI_VERSION, 3,

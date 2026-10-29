@@ -34,6 +34,13 @@ extern "C" {
 #define CBJXS_SEND_PACE_FIXED 1u         /* cbjxs_send_config.pace_mbps above 0 */
 #define CBJXS_SEND_PACE_RECEIVER_LINK 2u /* 90 % of the receiver's slower link (its report) */
 #define CBJXS_SEND_PACE_START_SPREAD 3u  /* no receiver link known yet: the frame spread */
+#define CBJXS_SEND_PACE_CONGESTION 4u    /* the automatic pace lowered by the path's congestion */
+
+/* cbjxs_send_stats.path_state: the path as the delay-based congestion control judged it last. */
+#define CBJXS_SEND_PATH_UNKNOWN 0u
+#define CBJXS_SEND_PATH_CLEAN 1u
+#define CBJXS_SEND_PATH_HOLD 2u
+#define CBJXS_SEND_PATH_OVERUSE 3u
 
 /* cbjxs_send_picture.format: the picture's memory layout. JPEG XS codes 4:2:0, 4:2:2 and 4:4:4 as
  * they are; NV12 is 4:2:0 with U and V interleaved in plane 1 (split on the copy). */
@@ -106,6 +113,10 @@ typedef struct cbjxs_send_stats {
 	double wire_ms_max;
 	uint32_t rx_link_mbps;  /* ABI 3: the receiver's link from its last report, 0 = unknown */
 	uint32_t own_link_mbps; /* ABI 3: the sender's own link, 0 = unknown */
+	uint32_t path_state;     /* ABI 3: CBJXS_SEND_PATH_* */
+	uint32_t congestion_pct; /* ABI 3: the congestion control's pace factor, percent (0 = none yet) */
+	uint32_t queue_delay_us; /* ABI 3: the receiver's newest queuing delay, UINT32_MAX = none */
+	uint32_t reserved3;
 } cbjxs_send_stats;
 
 typedef void (*cbjxs_send_log_fn)(int level, const char *message);

@@ -34,6 +34,24 @@ pub const CBJXS_SEND_PACE_LINE_RATE: u32 = 0;
 pub const CBJXS_SEND_PACE_FIXED: u32 = 1;
 pub const CBJXS_SEND_PACE_RECEIVER_LINK: u32 = 2;
 pub const CBJXS_SEND_PACE_START_SPREAD: u32 = 3;
+pub const CBJXS_SEND_PACE_CONGESTION: u32 = 4;
+
+/// `cbjxs_send_stats.path_state` (`CBJXS_SEND_PATH_*`).
+pub const CBJXS_SEND_PATH_UNKNOWN: u32 = 0;
+pub const CBJXS_SEND_PATH_CLEAN: u32 = 1;
+pub const CBJXS_SEND_PATH_HOLD: u32 = 2;
+pub const CBJXS_SEND_PATH_OVERUSE: u32 = 3;
+
+/// The C code of a path state.
+pub fn path_state_code(s: camera_box::jxs_congestion::PathState) -> u32 {
+    use camera_box::jxs_congestion::PathState as S;
+    match s {
+        S::Unknown => CBJXS_SEND_PATH_UNKNOWN,
+        S::Clean => CBJXS_SEND_PATH_CLEAN,
+        S::Hold => CBJXS_SEND_PATH_HOLD,
+        S::Overuse => CBJXS_SEND_PATH_OVERUSE,
+    }
+}
 
 /// The C code of a pace source.
 pub fn pace_source_code(s: camera_box::jxs_link::pace_auto::PaceSource) -> u32 {
@@ -43,6 +61,7 @@ pub fn pace_source_code(s: camera_box::jxs_link::pace_auto::PaceSource) -> u32 {
         P::Fixed => CBJXS_SEND_PACE_FIXED,
         P::ReceiverLink => CBJXS_SEND_PACE_RECEIVER_LINK,
         P::StartSpread => CBJXS_SEND_PACE_START_SPREAD,
+        P::Congestion => CBJXS_SEND_PACE_CONGESTION,
     }
 }
 
@@ -113,6 +132,12 @@ pub struct CbjxsSendStats {
     /// ABI 3: the receiver's link from its last report and the sender's own, Mb/s (0 = unknown).
     pub rx_link_mbps: u32,
     pub own_link_mbps: u32,
+    /// ABI 3: the congestion control (`CBJXS_SEND_PATH_*`, the factor in percent, the receiver's
+    /// newest queuing delay in us, `u32::MAX` = none).
+    pub path_state: u32,
+    pub congestion_pct: u32,
+    pub queue_delay_us: u32,
+    pub reserved3: u32,
 }
 
 fn avg(sum: f64, n: u64) -> f64 {
@@ -150,6 +175,10 @@ impl CbjxsSendStats {
             wire_ms_max: w.wire_ms_max,
             rx_link_mbps: w.rx_link_mbps,
             own_link_mbps: w.own_link_mbps,
+            path_state: path_state_code(w.path_state),
+            congestion_pct: w.congestion_pct,
+            queue_delay_us: w.queue_delay_us.unwrap_or(u32::MAX),
+            reserved3: 0,
         }
     }
 }
@@ -655,6 +684,9 @@ mod tests {
             pace_source: camera_box::jxs_link::pace_auto::PaceSource::ReceiverLink,
             rx_link_mbps: 1000,
             own_link_mbps: 10_000,
+            path_state: camera_box::jxs_congestion::PathState::Overuse,
+            congestion_pct: 85,
+            queue_delay_us: Some(6_100),
             // 4 frames, 2 of them with a wire time: the average divides by 2, not 4
             wire_frames: 2,
             wire_ms_sum: 40.0,
@@ -673,8 +705,29 @@ mod tests {
         // the C codes (the DistroAV output's cb_jxs_out_pace_source reads these numbers)
         use camera_box::jxs_link::pace_auto::PaceSource as P;
         assert_eq!(
-            [P::LineRate, P::Fixed, P::ReceiverLink, P::StartSpread].map(pace_source_code),
+            [
+                P::LineRate,
+                P::Fixed,
+                P::ReceiverLink,
+                P::StartSpread,
+                P::Congestion
+            ]
+            .map(pace_source_code),
+            [0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            (s.path_state, s.congestion_pct, s.queue_delay_us),
+            (CBJXS_SEND_PATH_OVERUSE, 85, 6_100)
+        );
+        use camera_box::jxs_congestion::PathState as S;
+        assert_eq!(
+            [S::Unknown, S::Clean, S::Hold, S::Overuse].map(path_state_code),
             [0, 1, 2, 3]
+        );
+        assert_eq!(
+            CbjxsSendStats::from_window(1, &SendWindow::default()).queue_delay_us,
+            u32::MAX,
+            "none measured"
         );
         assert_eq!(
             (s.seq, s.frames, s.bpp, s.auto_bpp, s.reports),

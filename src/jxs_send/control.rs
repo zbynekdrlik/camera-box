@@ -111,9 +111,10 @@ impl BppControl {
             let now = Instant::now();
             self.last_report_at = Some(now);
             self.reports += 1;
-            self.pace.on_report(&r);
+            let now_s = now.duration_since(self.origin).as_secs_f64();
+            self.pace.on_report(&r, now_s);
             if let Some(c) = self.ctl.as_mut() {
-                c.note_report(r, now.duration_since(self.origin).as_secs_f64());
+                c.note_report(r, now_s);
             }
         }
         if self.last_tick.elapsed() < Duration::from_millis(jxs_link::REPORT_PERIOD_MS) {
@@ -128,6 +129,7 @@ impl BppControl {
             encode_p99_ms: p99,
             dropped_busy: dropped,
             encode_errors: std::mem::take(&mut self.sec_errors),
+            congested: self.pace.take_bpp_down(),
         };
         self.sec_encode_ms.clear();
         let Some(c) = self.ctl.as_mut() else { return };
@@ -135,11 +137,12 @@ impl BppControl {
         if let Decision::Step { from, to, reason } = c.tick(&second, now_s) {
             self.want.store(to, Ordering::Relaxed);
             tracing::info!(
-                "jxs send: bpp {from} -> {to} ({reason}; second: frames={} encode_p99_ms={:.2} dropped_busy={} encode_errors={}) (issue 1387)",
+                "jxs send: bpp {from} -> {to} ({reason}; second: frames={} encode_p99_ms={:.2} dropped_busy={} encode_errors={} congested={}) (issue 1387)",
                 second.frames,
                 second.encode_p99_ms,
                 second.dropped_busy,
-                second.encode_errors
+                second.encode_errors,
+                second.congested
             );
         }
     }
