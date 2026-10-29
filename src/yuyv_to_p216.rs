@@ -14,10 +14,10 @@
 //!
 //! The frame is ONE contiguous `u16` buffer: `width * height` luma samples, then
 //! `width * height` interleaved chroma samples (Cb0 Cr0 Cb1 Cr1 ...). Each 8-bit sample `v`
-//! becomes `v << 8 | v` (`v * 257`, bit replication, the design's choice), so 0 maps to 0 and
-//! 255 to 65535. This is NOT a range conversion: the limited-range signal (issue 1430) keeps its
-//! levels. Against a plain `v << 8` it adds a gain of 1/256 (8-bit white 235 becomes 60395, not
-//! 60160; a 10-bit reader sees 943 instead of 940); an 8-bit reader (`>> 8`) gets `v` back exactly.
+//! becomes `v << 8`, the bit-depth scaling of a limited-range code: the capture is limited range
+//! (issue 1430), so 8-bit black 16 / white 235 reach a 10-bit reader as 64 / 940 and a 16-bit one
+//! as 4096 / 60160. Bit replication (`v * 257`) was rejected: it adds a 1/256 gain (235 -> 943 in
+//! 10 bits). An 8-bit reader (`>> 8`) gets `v` back exactly.
 //!
 //! Each `NdiSender` reads the switch and logs its start line on its own, so a process with a
 //! second sender (the cam1-burn path) logs it once per sender.
@@ -237,13 +237,13 @@ pub fn scalar_row(row: &[u8], y: &mut [u16], c: &mut [u16]) {
     for i in 0..n {
         let luma = u16::from(row[2 * i]);
         let cbcr = u16::from(row[2 * i + 1]);
-        y[i] = (luma << 8) | luma;
-        c[i] = (cbcr << 8) | cbcr;
+        y[i] = luma << 8;
+        c[i] = cbcr << 8;
     }
 }
 
 /// AVX2 row kernel, bit-exact with [`scalar_row`]: 16 lanes (32 YUYV bytes) per step,
-/// `y = (lane & 0xFF) * 257`, `c = (lane >> 8) * 257`, no shuffle (the order is already right),
+/// `y = (lane & 0xFF) << 8`, `c = lane & 0xFF00`, no shuffle (the order is already right),
 /// and the tail through [`scalar_row`].
 ///
 /// # Safety
@@ -252,8 +252,8 @@ pub fn scalar_row(row: &[u8], y: &mut [u16], c: &mut [u16]) {
 #[target_feature(enable = "avx2")]
 pub unsafe fn avx2_row(row: &[u8], y: &mut [u16], c: &mut [u16]) {
     use std::arch::x86_64::{
-        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi16,
-        _mm256_slli_epi16, _mm256_srli_epi16, _mm256_storeu_si256,
+        __m256i, _mm256_andnot_si256, _mm256_loadu_si256, _mm256_set1_epi16, _mm256_slli_epi16,
+        _mm256_storeu_si256,
     };
     let n = y.len().min(c.len()).min(row.len() / 2);
     let blocks = n / 16;
@@ -266,10 +266,8 @@ pub unsafe fn avx2_row(row: &[u8], y: &mut [u16], c: &mut [u16]) {
         // [16b, 16b + 16) of `y` and `c`, all inside `n` (checked above); unaligned load/store.
         unsafe {
             let lanes = _mm256_loadu_si256(src.add(b * 32) as *const __m256i);
-            let yl = _mm256_and_si256(lanes, low);
-            let cl = _mm256_srli_epi16(lanes, 8);
-            let y16 = _mm256_or_si256(yl, _mm256_slli_epi16(yl, 8));
-            let c16 = _mm256_or_si256(cl, _mm256_slli_epi16(cl, 8));
+            let y16 = _mm256_slli_epi16(lanes, 8);
+            let c16 = _mm256_andnot_si256(low, lanes);
             _mm256_storeu_si256(yd.add(b * 16) as *mut __m256i, y16);
             _mm256_storeu_si256(cd.add(b * 16) as *mut __m256i, c16);
         }

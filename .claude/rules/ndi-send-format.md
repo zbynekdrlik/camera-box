@@ -19,11 +19,12 @@ paths:
   (`:237-239`) is the luma stride `width * 2`; the CbCr plane has the same stride. A padded V4L2
   `bytesperline` is the SOURCE stride only, never the P216 stride (`p216_send_params`).
 - Read as little-endian u16 lanes a YUYV row is `Y | C << 8` with C already in Cb,Cr order, so the
-  AVX2 kernel is mask / shift / or, no shuffle. Keep it bit-exact with `scalar_row`; the tests
+  AVX2 kernel is one shift (luma) and one and-not (chroma), no shuffle. Keep it bit-exact with `scalar_row`; the tests
   assert AVX2 is present on x86_64 (a missing AVX2 fails, never skips).
-- `v << 8 | v` (`v * 257`) is the design's choice: bit replication, NOT a range conversion, but a
-  1/256 gain over `v << 8` (8-bit white 235 -> 60395, a 10-bit reader sees 943 not 940). An 8-bit
-  reader gets `v` back exactly. Changing it to `v << 8` is a main/owner decision, not a lane's.
+- Each 8-bit code becomes `v << 8` (main decision 29.10.2026): the capture is limited range
+  (issue 1430), so black 16 / white 235 reach a 10-bit reader as 64 / 940. Bit replication
+  (`v * 257`, the first cut) was dropped: it adds a 1/256 gain (235 -> 943 in 10 bits). An 8-bit
+  reader gets `v` back exactly either way.
 - Cost (dev1 Ryzen 7 5800X, `cargo bench --bench format_conversions -- yuyv_to_p216`, reused
   buffer): AVX2 ~137 us / 1080p frame, scalar ~1.05 ms. The N100/N150 camboxes are slower; the
   real budget is read on the box (camera-box CPU from `/proc/<pid>/stat`, tx from
