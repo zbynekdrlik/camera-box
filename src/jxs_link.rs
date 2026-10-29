@@ -534,10 +534,7 @@ mod tests {
             .copied()
             .filter(|&(s, k)| on_jxs_grid(stamp60(s, k), 60))
             .collect();
-        assert_eq!(
-            picked,
-            vec![(sec, 56), (sec, 58), (sec + 1, 0), (sec + 1, 2)]
-        );
+        assert_eq!(picked, [(sec, 56), (sec, 58), (sec + 1, 0), (sec + 1, 2)]);
         // a dropped capture (slot 58 never emitted) costs that one JPEG XS frame only: the next
         // picked frame is still slot 0 of the next second, not the odd slot 59
         let without_58: Vec<(i64, i64)> = run
@@ -546,7 +543,7 @@ mod tests {
             .filter(|&(s, k)| !(s == sec && k == 58))
             .filter(|&(s, k)| on_jxs_grid(stamp60(s, k), 60))
             .collect();
-        assert_eq!(without_58, vec![(sec, 56), (sec + 1, 0), (sec + 1, 2)]);
+        assert_eq!(without_58, [(sec, 56), (sec + 1, 0), (sec + 1, 2)]);
         // and an odd stamp never goes, whatever came before it
         assert!(!on_jxs_grid(stamp60(sec, 59), 60));
     }
