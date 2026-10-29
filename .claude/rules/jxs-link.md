@@ -770,6 +770,18 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
 - **The live `encode_ms` includes the send.** A paced or full socket shows up there as "encode
   time"; measure the codec alone with `jxs-encode-bench` before calling a bpp a CPU limit.
 
+## Testing gotchas (send pacing)
+
+- **Time a paced send on the SENDING side, with the schedule's own clock.** A reader thread's
+  `recv()` return time is late whenever it is descheduled, so a receive-side spread can read
+  shorter than the schedule and fail a correct pacer. `monotonic_ns()` before the first send and
+  after the last bounds `t1 - t0 >= last departure` exactly (`src/jxs_send/pacing.rs`).
+- **A test of the WIRING must fail without it.** Run the pacing through the real packet thread
+  (`jxs/recv-ffi/tests/send_loopback.rs` at 300 Mb/s, the sender's own `wire_ms_avg`) and mutate the
+  call site to `None` once: the wire time must drop below the bound (it read 1.96 vs 26.39 ms).
+- **Leave a paced frame headroom against the test's frame spacing** (70 ms for ~29 ms of wire): a
+  loaded runner wakes each send late, and two frames backed up read as `dropped_busy`.
+
 ## Testing gotchas (slice 2)
 
 - **A test build never uplifts the static library.** `cargo test -p jxs-recv-ffi` leaves it at
