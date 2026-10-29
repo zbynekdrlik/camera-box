@@ -41,6 +41,14 @@ on:
       - 'tests/qt/**'
       - 'tests/python/fixtures/obs_dock_state_1470/**'
       - 'scripts/genlock-manifest.sh'
+      # issue 1387 slice 2: the strih variant links the JPEG XS receiver (jxs/recv-ffi over the
+      # camera-box receive code + the vendored SVT-JPEG-XS) into DistroAV's JPEG XS source.
+      - 'jxs/**'
+      - 'vendor/svt-jpeg-xs/**'
+      - 'src/jxs_recv.rs'
+      - 'src/jxs_recv/**'
+      - 'src/jxs_link.rs'
+      - 'src/jxs_link/**'
       - '.github/workflows/linux-genlock.yml'
 
 permissions:
@@ -337,7 +345,28 @@ jobs:
       - name: Install build dependencies (apt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }}
+          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }} nasm libclang-dev  # issue 1387: nasm for SVT-JPEG-XS, libclang for the v4l2 sys crate's bindgen (the jxs-recv-ffi build below)
+
+      # issue 1387 slice 2: DistroAV's JPEG XS source links the jxs-recv-ffi static library (a C ABI
+      # over camera-box's receive loop, the code jxs-recv-probe runs). rustc names the native
+      # libraries a static library needs only when it builds one; the step hands that list to
+      # DistroAV's CMake, so a new Rust dependency can never leave the plugin with an undefined symbol.
+      - name: Install the Rust toolchain (issue 1387)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the jxs-recv-ffi static library (issue 1387)
+        run: |
+          set -euo pipefail
+          if ! cargo rustc --release -p jxs-recv-ffi --crate-type staticlib -- --print native-static-libs 2> jxs-ffi-build.log; then
+            cat jxs-ffi-build.log
+            exit 1
+          fi
+          cat jxs-ffi-build.log
+          libs="$(sed -n 's/^note: native-static-libs: //p' jxs-ffi-build.log | tail -1)"
+          if [ -z "$libs" ]; then echo "ERROR: rustc printed no native-static-libs line (issue 1387)"; exit 1; fi
+          if [ ! -f target/release/libjxs_recv_ffi.a ]; then echo "ERROR: target/release/libjxs_recv_ffi.a not built (issue 1387)"; exit 1; fi
+          echo "JXS_FFI_NATIVE_LIBS=$libs" >> "$GITHUB_ENV"
+          echo "jxs-recv-ffi: $(stat -c%s target/release/libjxs_recv_ffi.a) bytes, native libs: $libs"
 
       # issue 1317: fetch the EXACT obs-deps CEF the vendored OBS pins so obs-browser links against
       # it. The vendored ubuntu-ci preset does NOT auto-fetch CEF on Linux (no cmake/linux/
@@ -400,6 +429,10 @@ jobs:
         run: >
           cmake --preset ubuntu-ci-x86_64
           -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+          -DCAMERA_BOX_JXS_SOURCE=ON
+          -DCAMERA_BOX_JXS_FFI_LIB="$GITHUB_WORKSPACE/target/release/libjxs_recv_ffi.a"
+          -DCAMERA_BOX_JXS_FFI_INCLUDE="$GITHUB_WORKSPACE/jxs/recv-ffi/include"
+          -DCAMERA_BOX_JXS_FFI_NATIVE_LIBS="$JXS_FFI_NATIVE_LIBS"
 
       - name: Build DistroAV
         working-directory: vendor/distroav
@@ -458,6 +491,14 @@ jobs:
 
           distroav_so=$(find vendor/distroav -name 'distroav.so' -not -path '*/CMakeFiles/*' | head -1)
           if [ -z "$distroav_so" ]; then echo "distroav.so not found after the DistroAV build"; exit 1; fi
+
+          # issue 1387 slice 2: the strih distroav.so carries the JPEG XS source, and its stack is not
+          # executable (SVT's nasm objects would mark it so without -z noexecstack, and glibc 2.41+
+          # on the 26.04 box then refuses to load the plugin).
+          if ! grep -aq 'camera_box_jxs_source' "$distroav_so"; then echo "ERROR: $distroav_so has no camera_box_jxs_source (issue 1387)"; exit 1; fi
+          stack="$(readelf -lW "$distroav_so" | awk '$1 == "GNU_STACK" {print $7}')"
+          if [ "$stack" != "RW" ]; then echo "ERROR: $distroav_so GNU_STACK flags '$stack', want RW (issue 1387)"; exit 1; fi
+          echo "distroav.so carries the JPEG XS source, GNU_STACK $stack (issue 1387)"
 
           plugin_lib_dir=$(find stage -type d -path '*/obs-plugins' -not -path '*/share/*' | head -1)
           if [ -z "$plugin_lib_dir" ]; then

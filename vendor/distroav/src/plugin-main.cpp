@@ -69,6 +69,13 @@ struct obs_source_info alpha_filter_info;
 extern struct obs_source_info create_ndi_burn_filter_info();
 struct obs_source_info ndi_burn_filter_info;
 
+#ifdef CAMERA_BOX_JXS_SOURCE
+// camera-box issue 1387 slice 2: the JPEG XS receiving source (jxs-source.cpp + the jxs-recv-ffi
+// static library), built only by the strih Linux variant (CMake option CAMERA_BOX_JXS_SOURCE).
+extern struct obs_source_info create_jxs_source_info();
+struct obs_source_info jxs_source_info;
+#endif
+
 const NDIlib_v6 *load_ndilib();
 
 // camera-box #1185: reserve the program's NDI send instance at module post-load
@@ -296,6 +303,14 @@ static void register_plugin_features()
 	obs_register_source(&ndi_burn_filter_info);
 
 	obs_log(LOG_DEBUG, "Plugin features registered: QR burn filter (#111)");
+
+#ifdef CAMERA_BOX_JXS_SOURCE
+	// camera-box issue 1387 slice 2: the JPEG XS source needs no NDI; it sits beside the camera's
+	// NDI input and gets nothing until a cambox's CAMERA_BOX_JXS_TARGET points at its UDP port.
+	jxs_source_info = create_jxs_source_info();
+	obs_register_source(&jxs_source_info);
+	obs_log(LOG_INFO, "Plugin features registered: camera-box JPEG XS source (issue 1387)");
+#endif
 
 	plugin_features_registered = true;
 	obs_log(LOG_INFO, "register_plugin_features: NDI plugin features registered");
