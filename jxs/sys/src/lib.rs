@@ -233,13 +233,14 @@ impl EncoderSettings {
 
     /// Run `n` slice-pack threads (latency profile: `threads_num` = n + 2, the init and final
     /// stage threads; n = 0 counts as 1, the library's minimum).
-    pub fn with_slice_threads(self, _n: u32) -> Self {
+    pub fn with_slice_threads(mut self, n: u32) -> Self {
+        self.threads_num = n.max(1) + 2;
         self
     }
 
     /// The slice-pack threads this setting runs.
     pub fn slice_threads(&self) -> u32 {
-        0
+        self.threads_num.saturating_sub(2).max(1)
     }
 }
 

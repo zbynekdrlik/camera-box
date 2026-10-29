@@ -589,8 +589,9 @@ async fn run_capture_loop(
     let send_stagger_offset = send_stagger.offset;
 
     // Issue 1387 -- the JPEG XS link beside NDI. OFF unless CAMERA_BOX_JXS_TARGET=host:port is
-    // set: then a `jxs-send` thread on the display cores encodes the SAME emitted frame + genlock
-    // timecode and sends it slice by slice to that one receiver. Unset = `None`, nothing created.
+    // set: then the `jxs-feed` + `jxs-send` threads on the off-capture cores encode the SAME
+    // emitted frame + genlock timecode (two frames in flight) and send it slice by slice to that
+    // one receiver. Unset = `None`, nothing created.
     let jxs_sender = camera_box::jxs_send::JxsSender::start_from_env(&resolved_hostname);
 
     // #174 cam1-capture render-time QR burn — TEST MODE ONLY. Gated behind
@@ -1442,6 +1443,23 @@ async fn run_capture_loop(
                     decimation_gate
                         .note_emitted_stamp_100ns(capture_timecode_100ns, out_interval_ns);
                 }
+                // Issue 1387 slice 1b -- the JPEG XS link takes the current frame HERE, once its
+                // genlock timecode is fixed and BEFORE the stagger sleep and the NDI send, so it
+                // never waits for the NDI send call. The capture thread converts the frame straight
+                // into a free planar picture (AVX2, no separate copy) or counts a drop while both
+                // pictures are in flight; it never blocks. Its cost lands inside the #1242 stagger
+                // offset (the sleep below shrinks by it) and the work the 5 s line reports. The
+                // timecode is the very one the NDI frame below carries.
+                if let Some(jxs) = jxs_sender.as_ref() {
+                    jxs.offer(
+                        data,
+                        info.width,
+                        info.height,
+                        info.stride,
+                        info.fourcc.str().map(|f| f == "YUYV").unwrap_or(false),
+                        capture_timecode_100ns,
+                    );
+                }
                 // #1242 — the per-camera NDI send stagger, ONCE per emitted iteration: after the
                 // genlock timecode above is fixed (it never moves) and before the first send (the
                 // starvation repeats and the current frame leave back-to-back behind one delay).
@@ -1488,19 +1506,6 @@ async fn run_capture_loop(
                     ));
                 }
                 emit_one(capture_timecode_100ns);
-                // Issue 1387 -- the JPEG XS link takes the current frame AFTER its NDI send, so the
-                // NDI timing is untouched: one memcpy into the sender's buffer, or a counted drop
-                // while it still encodes the previous frame. Never blocks.
-                if let Some(jxs) = jxs_sender.as_ref() {
-                    jxs.offer(
-                        data,
-                        info.width,
-                        info.height,
-                        info.stride,
-                        info.fourcc.str().map(|f| f == "YUYV").unwrap_or(false),
-                        capture_timecode_100ns,
-                    );
-                }
                 // #1242 — this emitted iteration's work (everything in the callback except the
                 // stagger sleep): the capture-loop margin the 5 s summary reports per box.
                 if !send_stagger_offset.is_zero() {

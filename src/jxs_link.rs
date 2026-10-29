@@ -282,11 +282,17 @@ impl SendWindow {
     /// encode_errors= (issue 1387)`. `bytes` counts the codestream, not the headers.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: frames={} slices={} bytes={} dropped_busy={} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
+            "jxs send: frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
             self.frames,
             self.slices,
             self.bytes,
             self.dropped_busy,
+            self.in_flight_max,
+            self.in_flight_cap,
+            avg(self.convert_ms_sum, self.convert_count),
+            self.convert_ms_max,
+            avg(self.first_slice_ms_sum, self.frames),
+            self.first_slice_ms_max,
             avg(self.encode_ms_sum, self.frames),
             self.encode_ms_max,
             self.send_errors,
