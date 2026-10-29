@@ -45,9 +45,32 @@ pub fn datagrams_of(slice_len: usize) -> usize {
 /// how many. Every parity is [`DATAGRAM_LEN`] long but possibly the last, so `out` goes out as one
 /// GSO send.
 pub fn build_parity(data: &[u8], out: &mut Vec<u8>) -> usize {
-    let _ = data;
     out.clear();
-    0
+    let datagrams: Vec<&[u8]> = data.chunks(DATAGRAM_LEN).collect();
+    let mut n = 0;
+    for group in datagrams.chunks(FEC_GROUP) {
+        let Some(first) = group.first() else { continue };
+        if first.len() < HEADER_LEN {
+            continue;
+        }
+        let len = group
+            .iter()
+            .map(|d| d.len().saturating_sub(HEADER_LEN))
+            .max()
+            .unwrap_or(0);
+        let at = out.len();
+        out.extend_from_slice(&first[..HEADER_LEN]);
+        out[at] = FEC_MAGIC;
+        out.resize(at + HEADER_LEN + len, 0);
+        for d in group {
+            let payload = &d[HEADER_LEN.min(d.len())..];
+            for (o, b) in out[at + HEADER_LEN..].iter_mut().zip(payload) {
+                *o ^= b;
+            }
+        }
+        n += 1;
+    }
+    n
 }
 
 /// A datagram with the parity magic that is not a valid parity datagram.
@@ -119,14 +142,49 @@ impl FecRepair {
     /// One received data datagram (its decoded header + payload). `out` = the rebuilt datagram
     /// when this one completed a repair.
     pub fn on_data(&mut self, h: &PacketHeader, payload: &[u8], out: &mut Vec<u8>) -> bool {
-        let _ = (h, payload, out);
-        false
+        let pos = (h.offset as usize / SEGMENT_DATA_LEN) % FEC_GROUP;
+        let Some(g) = self.group(h) else {
+            return false;
+        };
+        if g.have & (1 << pos) != 0 || g.done {
+            return false;
+        }
+        g.have |= 1 << pos;
+        for (x, b) in g.xor.iter_mut().zip(payload) {
+            *x ^= b;
+        }
+        self.try_repair(h, out)
     }
 
     /// One parity datagram (whole, header included). `Err` = not a valid parity datagram.
     pub fn on_parity(&mut self, datagram: &[u8], out: &mut Vec<u8>) -> Result<bool, BadParity> {
-        let _ = (datagram, out, KEEP_FRAMES);
-        Ok(false)
+        if datagram.len() < HEADER_LEN || datagram[0] != FEC_MAGIC {
+            return Err(BadParity);
+        }
+        let mut copy = [0u8; HEADER_LEN];
+        copy.copy_from_slice(&datagram[..HEADER_LEN]);
+        copy[0] = super::MAGIC;
+        let h = PacketHeader::decode(&copy).map_err(|_| BadParity)?;
+        let index = h.offset as usize / SEGMENT_DATA_LEN;
+        if !(h.offset as usize).is_multiple_of(SEGMENT_DATA_LEN) || !index.is_multiple_of(FEC_GROUP)
+        {
+            return Err(BadParity);
+        }
+        let payload = &datagram[HEADER_LEN..];
+        if payload.len() > SEGMENT_DATA_LEN {
+            return Err(BadParity);
+        }
+        let Some(g) = self.group(&h) else {
+            return Err(BadParity);
+        };
+        if g.parity || g.done {
+            return Ok(false);
+        }
+        g.parity = true;
+        for (x, b) in g.xor.iter_mut().zip(payload) {
+            *x ^= b;
+        }
+        Ok(self.try_repair(&h, out))
     }
 
     fn try_repair(&mut self, h: &PacketHeader, out: &mut Vec<u8>) -> bool {
