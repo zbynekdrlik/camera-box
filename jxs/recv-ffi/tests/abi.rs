@@ -8,7 +8,9 @@
 //!    complete list (the strih build reads rustc's own list instead, linux-genlock.yml).
 #![cfg(target_os = "linux")]
 
-use jxs_recv_ffi::{CbjxsFrame, CbjxsStats, CBJXS_ABI_VERSION};
+use jxs_recv_ffi::{
+    CbjxsFrame, CbjxsStats, CBJXS_ABI_VERSION, CBJXS_CHROMA_420, CBJXS_CHROMA_422, CBJXS_CHROMA_444,
+};
 use std::mem::{offset_of, size_of};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,7 +32,7 @@ fn cc(args: &[&str]) {
     );
 }
 
-const FRAME_FIELDS: [&str; 14] = [
+const FRAME_FIELDS: [&str; 15] = [
     "width",
     "height",
     "y",
@@ -44,6 +46,7 @@ const FRAME_FIELDS: [&str; 14] = [
     "decoded_at_100ns",
     "lost_slices",
     "camera_id",
+    "chroma",
     "reserved",
 ];
 
@@ -82,6 +85,7 @@ fn rust_frame_offset(f: &str) -> usize {
         "decoded_at_100ns" => offset_of!(CbjxsFrame, decoded_at_100ns),
         "lost_slices" => offset_of!(CbjxsFrame, lost_slices),
         "camera_id" => offset_of!(CbjxsFrame, camera_id),
+        "chroma" => offset_of!(CbjxsFrame, chroma),
         "reserved" => offset_of!(CbjxsFrame, reserved),
         other => panic!("unknown frame field {other}"),
     }
@@ -115,6 +119,9 @@ fn every_size_and_offset_of_the_header_matches_the_rust_structs() {
     let dir = tempfile::tempdir().unwrap();
     let mut c = String::from("#include <stdio.h>\n#include <stddef.h>\n#include \"camera_box_jxs.h\"\nint main(void) {\n");
     c.push_str("printf(\"abi %u\\n\", CBJXS_ABI_VERSION);\n");
+    c.push_str(
+        "printf(\"chroma %u %u %u\\n\", CBJXS_CHROMA_420, CBJXS_CHROMA_422, CBJXS_CHROMA_444);\n",
+    );
     c.push_str("printf(\"frame.size %zu\\n\", sizeof(cbjxs_frame));\n");
     for f in FRAME_FIELDS {
         c.push_str(&format!(
@@ -151,6 +158,15 @@ fn every_size_and_offset_of_the_header_matches_the_rust_structs() {
             .unwrap()
     };
     assert_eq!(got("abi") as u32, CBJXS_ABI_VERSION);
+    let chroma = text
+        .lines()
+        .find_map(|l| l.strip_prefix("chroma "))
+        .expect("chroma line");
+    assert_eq!(
+        chroma,
+        format!("{CBJXS_CHROMA_420} {CBJXS_CHROMA_422} {CBJXS_CHROMA_444}"),
+        "the header's CBJXS_CHROMA_* are the library's"
+    );
     assert_eq!(got("frame.size"), size_of::<CbjxsFrame>());
     for f in FRAME_FIELDS {
         assert_eq!(
@@ -257,6 +273,7 @@ fn link_into_shared_object(dir: &Path, flags: &[&str]) -> PathBuf {
     std::fs::write(
         &src,
         "#include \"camera_box_jxs.h\"\n\
+         #include \"camera_box_jxs_send.h\"\n\
          int cb_use(void) {\n\
            char err[64];\n\
            cbjxs_receiver *rx = cbjxs_open(0, 0, 0, err, sizeof err);\n\
@@ -265,6 +282,12 @@ fn link_into_shared_object(dir: &Path, flags: &[&str]) -> PathBuf {
                    + (int)cbjxs_local_port(rx) + (int)cbjxs_abi_version()\n\
                    + cbjxs_set_max_bpp(rx, 6) + (int)cbjxs_recv_buffer_bytes(rx);\n\
            cbjxs_close(rx);\n\
+           /* issue 1387 slice 3: the sender's ABI rides in the same archive */\n\
+           cbjxs_send_config c = {0}; cbjxs_send_picture p = {0}; cbjxs_send_stats st;\n\
+           cbjxs_sender *tx = cbjxs_send_open(&c, err, sizeof err);\n\
+           r += cbjxs_send_frame(tx, &p) + cbjxs_send_get_stats(tx, &st) + (int)cbjxs_send_abi_version()\n\
+                + cbjxs_send_set_log(0) + (int)cbjxs_send_take_error(tx, e, sizeof e);\n\
+           cbjxs_send_close(tx);\n\
            return r;\n\
          }\n",
     )
@@ -272,9 +295,10 @@ fn link_into_shared_object(dir: &Path, flags: &[&str]) -> PathBuf {
     let so = dir.join("libuse.so");
     let a = staticlib();
     let inc = format!("-I{}", crate_dir().join("include").display());
+    let send_inc = format!("-I{}", crate_dir().join("../send-ffi/include").display());
     let mut args: Vec<&str> = vec!["-shared", "-fPIC", "-Wl,-z,defs"];
     args.extend_from_slice(flags);
-    args.extend_from_slice(&[&inc, src.to_str().unwrap(), a.to_str().unwrap()]);
+    args.extend_from_slice(&[&inc, &send_inc, src.to_str().unwrap(), a.to_str().unwrap()]);
     // the list `rustc --print native-static-libs` prints for this crate
     args.extend_from_slice(&[
         "-lpthread",
