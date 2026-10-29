@@ -370,6 +370,25 @@ def test_a_step_inside_a_run_is_never_measured_again_at_the_next_bridge():
     assert [r["result"] for r in g["losses"]] == ["ok"], g["reasons"]
 
 
+@pytest.mark.parametrize("blocks", [-3, -1, 2])
+def test_a_step_next_to_a_gap_is_reported_once_and_never_leaks_into_its_bridge(blocks):
+    # review round 1: an in-run step inside the bridge's averaging window (the last / first
+    # STEP_WINDOW blocks of a run) leaked part of itself into the bridge (1.5 / 2.25 of a 3.0 step)
+    p1 = 14 * FS // 256
+    a0, n = p1 * 256, 2048
+    at = a0 - vs.GUARD_SAMPLES + blocks * vs.BLOCK if blocks < 0 else a0 + n + vs.GUARD_SAMPLES + blocks * vs.BLOCK
+    x = synth(22, ppm=53.4, jumps=[(at / FS, 3.0)], holes=[(a0 / FS, n)])
+    sched = schedule([(p1, 8)], duration_s=22.0, ppm=53.4)
+    a = scheduled(x, sched)
+    # a step this close to a run edge reads 2.8..3.0 (the two-sided window is cut by the edge)
+    assert [e["size_samples"] for e in a["steps"] if e["where"] == "run"] == [pytest.approx(3.0, abs=0.25)]
+    (bridge,) = a["bridges"]
+    assert abs(bridge["size_samples"]) < 0.1, bridge
+    g = vs.grade(a, sched)
+    assert [r["result"] for r in g["losses"]] == ["ok"], g["reasons"]
+    assert sum("phase step" in r for r in g["reasons"]) == 1, g["reasons"]
+
+
 def test_unscheduled_silence_fails():
     g = vs.grade(analyze(synth(20, holes=[(9.0, 256)])), schedule([]))
     assert g["verdict"] == "FAIL" and any("unscheduled silence" in r for r in g["reasons"])
