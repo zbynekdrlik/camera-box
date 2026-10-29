@@ -439,7 +439,8 @@ wire.
 
 - `raw_video` on libobs' video output thread, the program canvas in its own format (NV12 / I420 /
   I422 / I444; another canvas format refuses to start, named), and only a BT.709 limited-range
-  canvas (what the receiving source shows; `cb_jxs_out_colour_ok`, refused by name otherwise).
+  canvas (what the receiving source shows; an sRGB canvas counts, libobs converts it with the 709
+  matrix; `cb_jxs_out_colour_ok`, refused by name otherwise).
 - **The stamp:** each frame gets `genlock_emit_timecode_100ns(o->framerate)`, the NDI output's ONE
   stamp FUNCTION (it lost its `static` in ndi-output.cpp and is declared in
   `genlock-emit-timecode.h`; the #78 / #1009 anchored lines stay byte-identical, and the genlock-grid
@@ -448,7 +449,8 @@ wire.
   edge the JPEG XS copy can carry the next slot's stamp: the same function, not always the same
   value as `NDI 2ME PGM`'s frame. Two callbacks inside one slot (libobs catching up after a lag)
   would carry the same stamp, which the receiver drops as a duplicate unseen; the output skips the
-  second and counts it (`stamp_dup=`, `cb_jxs_out_stamp_fresh`). A stamp BEHIND the last one (a
+  second and counts it (`stamp_dup=`, `cb_jxs_out_stamp_fresh`). Only a frame the sender TOOK claims
+  its slot, so after a busy drop the slot's next frame may still go. A stamp BEHIND the last one (a
   wall-clock step back, the nightly date step) still goes: the receiver resyncs on it.
 - It hands the frame to `cbjxs_send_frame` (one copy, never a wait); with both pictures in use the
   frame is dropped and counted.

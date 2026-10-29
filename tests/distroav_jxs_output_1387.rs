@@ -213,6 +213,12 @@ fn every_frame_carries_the_one_genlock_emit_stamp_the_ndi_output_uses() {
     ] {
         assert!(raw.contains(needle), "jxs_output_rawvideo lacks `{needle}`");
     }
+    // only a frame the sender took claims its slot (a busy drop leaves the slot open)
+    let taken = raw.find("if (r == 1) {").unwrap();
+    let claim = raw
+        .find("o->last_stamp_100ns = pic.timecode_100ns;")
+        .unwrap();
+    assert!(taken < claim && claim < raw.find("o->taken++;").unwrap());
     // the duplicate guard runs before the frame is handed over
     assert!(
         raw.find("cb_jxs_out_stamp_fresh(").unwrap()

@@ -171,7 +171,8 @@ static bool jxs_output_start(void *data)
 		return false;
 	}
 	const struct video_output_info *vinfo = video_output_get_info(video);
-	const bool cs_709 = vinfo && vinfo->colorspace == VIDEO_CS_709;
+	/* an sRGB canvas is converted to YUV with the same BT.709 matrix */
+	const bool cs_709 = vinfo && (vinfo->colorspace == VIDEO_CS_709 || vinfo->colorspace == VIDEO_CS_SRGB);
 	const bool range_partial = vinfo && vinfo->range != VIDEO_RANGE_FULL;
 	if (!cb_jxs_out_colour_ok(cs_709, range_partial)) {
 		obs_log(LOG_ERROR,
@@ -278,9 +279,11 @@ static void jxs_output_rawvideo(void *data, struct video_data *frame)
 		o->stamp_dup++;
 		return;
 	}
-	o->last_stamp_100ns = pic.timecode_100ns;
 	const int r = cbjxs_send_frame(o->tx, &pic);
 	if (r == 1) {
+		/* only a frame really handed over claims its slot: after a busy drop the slot's next
+		 * frame may still go */
+		o->last_stamp_100ns = pic.timecode_100ns;
 		o->taken++;
 	} else if (r == 0) {
 		o->not_taken++;

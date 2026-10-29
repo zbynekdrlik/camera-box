@@ -52,7 +52,8 @@ static inline bool cb_jxs_out_stamp_fresh(int64_t last_sent_100ns, int64_t stamp
 
 /* The receiving source shows the program as BT.709 limited range (jxs-source.cpp): the output
  * starts only on a canvas that is that (the strih profile pins 709 / Partial). `cs_709` /
- * `range_partial` are the caller's reads of the canvas (a default range counts as partial). */
+ * `range_partial` are the caller's reads of the canvas (an sRGB canvas counts as 709, its YUV
+ * conversion uses the 709 matrix; a default range counts as partial). */
 static inline bool cb_jxs_out_colour_ok(bool cs_709, bool range_partial)
 {
 	return cs_709 && range_partial;
