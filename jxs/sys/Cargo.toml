@@ -1,0 +1,15 @@
+[package]
+name = "svt-jpegxs-sys"
+version.workspace = true
+edition = "2021"
+description = "Issue 1387: the vendored SVT-JPEG-XS codec (static, built from vendor/svt-jpeg-xs) behind a thin C shim, with a small safe Rust wrapper"
+license = "MIT"
+publish = false
+# One static copy of the C library per link.
+links = "SvtJpegxs"
+
+[lib]
+path = "src/lib.rs"
+
+[build-dependencies]
+cmake = "0.1"

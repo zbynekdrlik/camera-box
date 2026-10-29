@@ -24,7 +24,7 @@ repository = "https://github.com/zbynekdrlik/camera-box"
 # WITHOUT --workspace, so they never build the hub. `intercom-vban` IS a path dependency of the
 # appliance (below), so the root build compiles it — that is intended (it carries the codec now).
 [workspace]
-members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "intercom/vban", "intercom/hub"]
+members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "intercom/vban", "intercom/hub", "jxs/sys"]
 resolver = "2"
 
 # Single source of truth for the version across the appliance + the three bkshading
@@ -102,6 +102,10 @@ alsa = "0.9"
 evdev = "0.12"
 # DRM/KMS page-flip presenter for the tear-free 1:1 painter (#79, Linux-only, probe).
 drm = { version = "0.15", optional = true }
+# Issue 1387: the JPEG XS link's codec (SVT-JPEG-XS, vendored under vendor/svt-jpeg-xs and built
+# statically by jxs/sys/build.rs: cmake + nasm). Behind the `jxs` feature so a default build needs
+# neither; CI's deployed camera-box-linux-amd64 is built WITH it (ci.yml `build`).
+svt-jpegxs-sys = { path = "jxs/sys", optional = true }
 
 [dev-dependencies]
 # Property-based testing for format conversions
@@ -121,6 +125,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # so the probe feature still activates the cross-platform crates (image/rqrr/…) while
 # the KMS/fb modules that need drm are cfg(target_os="linux")-gated out.
 probe = ["dep:crc", "dep:qrcode", "dep:rqrr", "dep:image", "dep:drm", "dep:lz4_flex"]
+# Issue 1387: the JPEG XS link's encoder/decoder (the cambox sender + the jxs-recv-probe bin).
+# Linux-only dependency, like drm above: on another target the feature enables nothing.
+jxs = ["dep:svt-jpegxs-sys"]
 
 [[bin]]
 name = "ndi-recv-probe"
@@ -165,6 +172,11 @@ path = "src/bin/phase-sync-active-floor-gate.rs"
 [[bin]]
 name = "genlock-jitter-report"
 path = "src/bin/genlock-jitter-report.rs"
+
+[[bin]]
+name = "jxs-recv-probe"
+path = "src/bin/jxs-recv-probe.rs"
+required-features = ["jxs"]
 
 [[bin]]
 name = "frame-probe"
