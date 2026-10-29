@@ -238,6 +238,11 @@
 #        decision create-usb-linux.sh installs). A box off the line is moved by
 #        scripts/rt-kernel-upgrade.sh --box <ip> (reboot-class, owner-approved per box), never by
 #        setup-device.sh. A cut or unreadable read FAILs.
+#   (ax) which strih this cambox follows (issue 1431) -- HARD FAIL: strih.lan, resolved ON the box
+#        (getent ahostsv4, what the intercom, dantesync, the shading relay registration and the preview
+#        use), is the STRIH_IP of a strih-role fact file (scripts/strih-boxes/*.env); the OK line names
+#        the box. No answer, a stream box or any other address FAILs naming it (the router record decides
+#        the venue at a joint event, scripts/lib/strih-follow.sh).
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -296,6 +301,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/cambox-egress-pacing.sh"  # cambox_egress_pacing_gather_remote_snippet /
                                        # _provision_verdict -- the (ap) NDI egress pacing check
                                        # (issue 1242; SAME lib setup-device.sh installs it from)
+# shellcheck source=scripts/lib/remote-logging.sh
+# shellcheck source=scripts/lib/strih-follow.sh
+. "$HERE/lib/strih-follow.sh"  # strih_follow_gather_remote_snippet/strih_follow_verdict -- the (ax) check (issue 1431)
 # shellcheck source=scripts/lib/remote-logging.sh
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
@@ -979,6 +987,8 @@ Checks:
   (av) display GPU driven (issue 1446): every PCI display controller has a kernel driver bound (an
       N150 8086:46d4 on 6.8.0-142 has none: the HDMI preview then lights only when a monitor was on
       at power-on); the remedy is the HWE kernel via scripts/rt-kernel-upgrade.sh
+  (ax) which strih this cambox follows (issue 1431): strih.lan resolved on the box is a strih
+      box's STRIH_IP (scripts/strih-boxes/*.env), named in the OK line
   (aw) fleet kernel line (issue 1446): linux-lowlatency-hwe-24.04 installed (held reads installed),
       the running kernel booted with preempt=full, and uname -r = the image the installed
       linux-image-generic-hwe-24.04 meta depends on; a box off the line is moved by
@@ -1870,6 +1880,27 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> ${REMOTELOG_SINK}:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> $(remote_log_journal_url "$REMOTELOG_SINK") (this box's venue strih; the next #1309 stick death ships its kernel+journal off-box, #1311, issue 1394)"
+fi
+
+# (ax) which strih this cambox follows (issue 1431) -- HARD FAIL -------------------------------------
+# strih.lan is the ONE switch at a joint event: the intercom target, the dantesync NTP server, the bkshading
+# relay registration and the cameraman preview all follow what it resolves to ON this box. One read-only ssh
+# gather (getent ahostsv4), graded on dev1 against the strih-role fact files. Inserted after the (ak)
+# check and before the (aw) one: outside the slices other tests EXECUTE, and before the .bak cruft check,
+# which stays last. No comment line here may start with a check marker (the slice tests cut at one).
+axrc=0
+STRIH_FOLLOW_IP="$(ssh_box "$(strih_follow_gather_remote_snippet)")" || axrc=$?
+STRIH_FOLLOW_IP="$(printf '%s' "$STRIH_FOLLOW_IP" | tr -d '[:space:]')"
+STRIH_FOLLOW_VERDICT="$(strih_follow_verdict "$STRIH_FOLLOW_IP")"
+if [ "$axrc" -ne 0 ]; then
+  fail "could not read which strih this box follows over ssh (rc=$axrc, issue 1431)"
+else
+  case "$STRIH_FOLLOW_VERDICT" in
+    ok*)
+      IFS=$'\t' read -r _ STRIH_FOLLOW_BOX _ <<<"$STRIH_FOLLOW_VERDICT"
+      ok "this cambox follows ${STRIH_FOLLOW_BOX}: strih.lan resolves to ${STRIH_FOLLOW_IP} on the box (intercom, shading, preview, clock -- issue 1431)" ;;
+    *) fail "which strih this box follows: ${STRIH_FOLLOW_VERDICT#FAIL: } (issue 1431)" ;;
+  esac
 fi
 
 # (aw) fleet kernel line (issue 1446) -- HARD FAIL -------------------------------------------------
