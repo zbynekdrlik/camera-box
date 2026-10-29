@@ -200,7 +200,10 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     would cap the bpp by the pace: at 800 Mb/s 7 bpp alone is ~19 ms of wire (review round 1). A
     pace too slow for the frames backs them up into `dropped_busy`, which steps the bpp down on its
     own. `wire_ms_avg/max` = first send -> last send returned per whole frame (`wire_frames`
-    divides); at line rate it is the encoder's slice span, not the wire.
+    divides); at line rate it is the encoder's slice span, not the wire. Known limit: when frame
+    N+1 is submitted while the sending thread still paces frame N (libobs catching up after a
+    lag, or ~12 bpp at 900 Mb/s), N's tail lands in N+1's `encode_ms` but not in its paced wait,
+    so the auto bpp sees that one frame as slower than its codec; rare at the default 8 bpp max.
   - Settings: the cambox `CAMERA_BOX_JXS_PACE_MBPS` (default 0, a refused value WARNs and keeps
     line rate), the C ABI's `cbjxs_send_config.pace_mbps`, the strih output's `jxs_pace_mbps`
     (default 900, below). The "link ON" line names it (`send line rate (no pacing)` / `send paced
@@ -512,9 +515,14 @@ wire.
   target today, receives on a 1 GbE port whose switch buffer dropped the tail of every line-rate
   slice burst, `lost_slices` 1-15 in 10 of 21 windows of the slice-3 run, so the auto bpp held at
   4; 900 carries even 12 bpp in time (29.4 ms); the port's other traffic, `NDI 2ME PGM` and the
-  rest, read 108 Mb/s on stream-snv's enp56s0 (rx_bytes over 10 s, 29.10.2026, JPEG XS off), so
-  while a frame is on the wire the port is offered ~1008 Mb/s: ~8 Mb/s over for ~20 ms at 8 bpp,
-  a ~20 KB queue the switch absorbs; if `lost_slices` stays > 0, 850 or 800 is the next step; 0 = line rate, the
+  rest, read 108 Mb/s on stream-snv's enp56s0 (rx_bytes over 10 s, 29.10.2026, JPEG XS off). That
+  is an average: NDI leaves strih's 10 GbE NIC frame by frame, so each NDI frame reaches the 1 GbE
+  port as a ~100-200 KB burst, and while a JPEG XS frame is on the wire at 900 Mb/s only ~100 Mb/s
+  drains it, so a ~100-200 KB queue can sit at that port for ~15-18 ms of each frame (review
+  round 2; a smooth 108 Mb/s would have been ~20 KB). Whether the switch holds that is NOT known
+  from any average: only the live run's `lost_slices=0` in every window over 10 min proves 900;
+  else 800, then 700 (the switch's tx-drop counter on stream's port, read during that run, names
+  the cause); 0 = line rate, the
   `cb_jxs_out_pace_mbps` clamp keeps any other value inside 100..100000, so a start never fails on
   it; a 10 GbE receiver can take 0 or a higher pace), `jxs_bpp_min` / `jxs_bpp_max` (0 = 4 / 8;
   equal = fixed), `jxs_cores` (a cpulist, empty =

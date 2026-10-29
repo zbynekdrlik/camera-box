@@ -71,8 +71,8 @@ fn open_sender(port: u16) -> *mut CbjxsSender {
         bpp_max: 0,
         reserved: 0,
         // paced well below line rate: every slice must still arrive, and the sender's own window
-        // must show each frame spread over its wire time (a 4 bpp 1080p frame ~1 MB ~ 28 ms at
-        // 300 Mb/s, still under the test's 40 ms frame spacing), far above the encode span an
+        // must show each frame spread over its wire time (a 4 bpp 1080p frame ~1 MB ~ 29 ms at
+        // 300 Mb/s, well under the test's 70 ms frame spacing), far above the encode span an
         // unpaced send would show
         pace_mbps: 300,
         reserved2: 0,
@@ -139,7 +139,9 @@ fn program_pictures_in_420_cross_both_c_abis_with_their_timecode_and_nothing_los
                 k += 1;
                 // the planes were copied: the caller's buffers may go at once
                 drop((y, uv));
-                next_send = Instant::now() + Duration::from_millis(40);
+                // 70 ms: a paced 300 Mb/s frame is ~29 ms of wire, so a loaded runner that wakes
+                // every send late still never backs two frames up into dropped_busy
+                next_send = Instant::now() + Duration::from_millis(70);
             } else {
                 assert_eq!(r, 0, "frame {k}: only a busy hand-off may refuse");
                 next_send = Instant::now() + Duration::from_millis(5);
