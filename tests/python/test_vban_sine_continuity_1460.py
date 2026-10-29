@@ -334,6 +334,61 @@ def test_the_receivers_held_frames_place_the_conceal_windows():
     assert g0["verdict"] == "FAIL"
 
 
+def test_a_move_across_one_gap_is_never_measured_again_at_a_later_loss():
+    # Live 28.10.2026 (stress -50, p4): the ASRC's lock placement moved the timeline once, across an
+    # unscheduled silence at 81 s; the grade then read the same ~-13.5 samples across EVERY later
+    # loss (1, 2, 4 and 8 packets), while the recording is continuous there (0.00 by line fits).
+    # Each bridge must measure its own gap only.
+    p1, p2, p3 = 9 * FS // 256, 13 * FS // 256, 17 * FS // 256
+    move = -13.5
+    x = synth(22, ppm=-53.4, holes=[(5.0, 1008)], jumps=[(5.0 + 1008 / FS, move)])
+    x = _conceal(_conceal(x, p1 * 256 / FS, 1), p2 * 256 / FS, 2)
+    x[p3 * 256:p3 * 256 + 1024] = 0.0
+    sched = schedule([(p1, 1), (p2, 2), (p3, 4)], duration_s=22.0, ppm=-53.4)
+    a = scheduled(x, sched)
+    first = [b for b in a["bridges"] if b["from_sample"] < 5 * FS < b["to_sample"]]
+    assert len(first) == 1 and first[0]["size_samples"] == pytest.approx(move, abs=0.1)
+    later = [b for b in a["bridges"] if b["from_sample"] > 6 * FS]
+    assert len(later) == 3
+    assert all(abs(b["size_samples"]) < 0.1 for b in later), [b["size_samples"] for b in later]
+    g = vs.grade(a, sched)
+    assert [r["result"] for r in g["losses"]] == ["concealed", "concealed", "ok"], g["reasons"]
+    assert sum("phase step" in r for r in g["reasons"]) == 1, g["reasons"]
+
+
+def test_a_step_inside_a_run_is_never_measured_again_at_the_next_bridge():
+    # Live 28.10.2026 (stress +50, p3): a concealed repeat inside a run read as a +5.87 step at
+    # 450 s, and the 8-packet silence's bridge 37 s later read +5.95 although the timeline held there.
+    p1 = 14 * FS // 256
+    x = synth(22, ppm=53.4, jumps=[(7.0, 3.0)], holes=[(p1 * 256 / FS, 2048)])
+    sched = schedule([(p1, 8)], duration_s=22.0, ppm=53.4)
+    a = scheduled(x, sched)
+    assert [round(e["size_samples"], 1) for e in a["steps"] if e["where"] == "run"] == [3.0]
+    (bridge,) = a["bridges"]
+    assert abs(bridge["size_samples"]) < 0.1, bridge
+    g = vs.grade(a, sched)
+    assert [r["result"] for r in g["losses"]] == ["ok"], g["reasons"]
+
+
+@pytest.mark.parametrize("blocks", [-3, -1, 2])
+def test_a_step_next_to_a_gap_is_reported_once_and_never_leaks_into_its_bridge(blocks):
+    # review round 1: an in-run step inside the bridge's averaging window (the last / first
+    # STEP_WINDOW blocks of a run) leaked part of itself into the bridge (1.5 / 2.25 of a 3.0 step)
+    p1 = 14 * FS // 256
+    a0, n = p1 * 256, 2048
+    at = a0 - vs.GUARD_SAMPLES + blocks * vs.BLOCK if blocks < 0 else a0 + n + vs.GUARD_SAMPLES + blocks * vs.BLOCK
+    x = synth(22, ppm=53.4, jumps=[(at / FS, 3.0)], holes=[(a0 / FS, n)])
+    sched = schedule([(p1, 8)], duration_s=22.0, ppm=53.4)
+    a = scheduled(x, sched)
+    # a step this close to a run edge reads 2.8..3.0 (the two-sided window is cut by the edge)
+    assert [e["size_samples"] for e in a["steps"] if e["where"] == "run"] == [pytest.approx(3.0, abs=0.25)]
+    (bridge,) = a["bridges"]
+    assert abs(bridge["size_samples"]) < 0.1, bridge
+    g = vs.grade(a, sched)
+    assert [r["result"] for r in g["losses"]] == ["ok"], g["reasons"]
+    assert sum("phase step" in r for r in g["reasons"]) == 1, g["reasons"]
+
+
 def test_unscheduled_silence_fails():
     g = vs.grade(analyze(synth(20, holes=[(9.0, 256)])), schedule([]))
     assert g["verdict"] == "FAIL" and any("unscheduled silence" in r for r in g["reasons"])
