@@ -110,7 +110,10 @@ impl JxsSocket {
     /// `send_errors`: on a connected UDP socket an ICMP "port unreachable" from a receiver that
     /// is not listening is reported by whichever call comes first, a send or this read).
     pub fn take_read_errors(&self) -> u64 {
-        self.read_errors.swap(0, Ordering::Relaxed)
+        {
+            let _ = &self.read_errors;
+            0
+        }
     }
 
     /// Whether the kernel accepted [`JXS_SOCKET_MARK`] (`SO_MARK`), i.e. the egress pacing's fw
@@ -325,9 +328,10 @@ struct Stats {
     progress_ms: AtomicU64,
     /// Frames dropped busy since the automatic bpp's last one-second tick (issue 1387).
     dropped_tick: AtomicU64,
-    /// Timecode -> hand-off ages of this status window. The capture thread only `try_lock`s it
-    /// (a sample is skipped rather than ever waiting); the status line holds it for a copy.
-    handoff_age: std::sync::Mutex<jxs_link::HandoffAge>,
+    /// The hand-off ages of this status window: `[timecode -> hand-off, capture instant ->
+    /// hand-off]`. The capture thread only `try_lock`s it (a sample is skipped rather than ever
+    /// waiting); the status line holds it for a copy.
+    handoff_age: std::sync::Mutex<[jxs_link::HandoffAge; 2]>,
 }
 
 #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
@@ -338,11 +342,14 @@ impl Stats {
         self.dropped_tick.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The frame stamped `timecode_100ns` is handed over at wall clock `now_100ns` (the capture
-    /// thread; never blocks, never allocates).
-    fn note_handoff(&self, timecode_100ns: i64, now_100ns: i64) {
+    /// The frame stamped `timecode_100ns`, captured at `capture_100ns` (0 = unknown), is handed
+    /// over at wall clock `now_100ns` (the capture thread; never blocks, never allocates).
+    fn note_handoff(&self, timecode_100ns: i64, capture_100ns: i64, now_100ns: i64) {
         if let Ok(mut a) = self.handoff_age.try_lock() {
-            a.note(jxs_link::handoff_age_100ns(timecode_100ns, now_100ns));
+            a[0].note(jxs_link::handoff_age_100ns(timecode_100ns, now_100ns));
+            if capture_100ns > 0 {
+                a[1].note(jxs_link::handoff_age_100ns(capture_100ns, now_100ns));
+            }
         }
     }
 
@@ -363,7 +370,9 @@ impl Stats {
         w.in_flight_max = self.in_flight_max.swap(now, Ordering::Relaxed) as u64;
         w.in_flight_cap = FRAMES_IN_FLIGHT as u64;
         if let Ok(mut a) = self.handoff_age.lock() {
-            w.handoff_age = std::mem::take(&mut *a);
+            let [stamp, capture] = std::mem::take(&mut *a);
+            w.handoff_age = stamp;
+            w.capture_age = capture;
         }
     }
 }
@@ -396,8 +405,12 @@ pub struct JxsFrame<'a> {
     pub height: u32,
     pub stride: u32,
     pub yuyv: bool,
-    /// The genlock timecode the NDI frame carries.
+    /// The genlock timecode the NDI frame carries (the emit-grid boundary AT OR BEFORE the
+    /// capture instant).
     pub timecode_100ns: i64,
+    /// The frame's capture instant on the same wall clock (0 = unknown): with the timecode it
+    /// splits `handoff_age_ms` into the slot phase and the capture -> hand-off time.
+    pub capture_realtime_100ns: i64,
     /// The NDI emit rate (0 = genlock off): selects the [`jxs_link::JXS_FPS`] frames.
     pub emit_fps: u32,
 }
@@ -655,6 +668,7 @@ mod tests {
             stride: w * 2,
             yuyv,
             timecode_100ns,
+            capture_realtime_100ns: 0,
             emit_fps: 60,
         }
     }

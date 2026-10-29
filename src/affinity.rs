@@ -546,6 +546,23 @@ pub fn set_current_thread_fifo_inherited(prio: i32) -> bool {
     }
 }
 
+/// Raise the CURRENT thread to SCHED_FIFO `prio` WITH `SCHED_RESET_ON_FORK` (the
+/// [`capture_emit_sched_policy_word`] rule: nothing it spawns inherits it). For a JPEG XS
+/// sender thread that spawns no library threads (issue 1387 `jxs-send`). `false` when refused
+/// or `prio` is out of 1..=99.
+pub fn set_current_thread_fifo_reset_on_fork(prio: i32) -> bool {
+    if !(1..=99).contains(&prio) {
+        return false;
+    }
+    // SAFETY: sched_setscheduler(0, ...) targets the current thread; `param` is a plain value.
+    unsafe {
+        let param = libc::sched_param {
+            sched_priority: prio,
+        };
+        libc::sched_setscheduler(0, capture_emit_sched_policy_word(), &param) == 0
+    }
+}
+
 /// Route the USB / uvcvideo capture-controller IRQ(s) onto the isolated capture
 /// core via `/proc/irq/<n>/smp_affinity`, so URB delivery runs on the quiet core
 /// next to the consumer instead of contending on the loaded general cores.

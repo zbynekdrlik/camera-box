@@ -1460,6 +1460,7 @@ async fn run_capture_loop(
                         stride: info.stride,
                         yuyv: info.fourcc.str().map(|f| f == "YUYV").unwrap_or(false),
                         timecode_100ns: capture_timecode_100ns,
+                        capture_realtime_100ns,
                         emit_fps: send_fps,
                     });
                 }

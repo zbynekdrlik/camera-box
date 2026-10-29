@@ -328,12 +328,18 @@ pub struct SendWindow {
     /// The frame's genlock timecode -> the wall clock when the capture thread hands it to the
     /// JPEG XS thread ([`HandoffAge`]).
     pub handoff_age: HandoffAge,
+    /// The frame's capture instant -> the same hand-off. `handoff_age - capture_age` = where the
+    /// capture sits inside its emit slot (the timecode is the slot boundary at or before it).
+    pub capture_age: HandoffAge,
 }
 
-/// The age of a frame's genlock timecode at the hand-off to the JPEG XS thread: the wall clock
-/// (`CLOCK_REALTIME`, the dantesync-disciplined clock the timecode is stamped on) minus the
-/// timecode, in 100 ns. Positive = the stamp lies in the past. A diagnostic of the cambox side of
-/// the link: the V4L2 queue residence + the emit gate's wait, before any JPEG XS work.
+/// The age of an instant (a frame's genlock timecode, or its capture instant) at the hand-off to
+/// the JPEG XS thread: the wall clock (`CLOCK_REALTIME`, the dantesync-disciplined clock both are
+/// on) minus it, in 100 ns. Positive = it lies in the past. A diagnostic of the cambox side of
+/// the link, before any JPEG XS work. The timecode is the emit-grid boundary AT OR BEFORE the
+/// capture (`genlock_stamp::genlock_emit_timecode_100ns`), so its age = the capture's phase inside
+/// its slot (0 .. one emit interval, 16.7 ms at 60) + the capture -> hand-off time (V4L2 queue
+/// residence, the emit gate); the capture instant's age is the second term alone.
 pub fn handoff_age_100ns(timecode_100ns: i64, now_100ns: i64) -> i64 {
     now_100ns.saturating_sub(timecode_100ns)
 }
@@ -400,13 +406,14 @@ impl SendWindow {
     }
 
     /// The 5 s status line: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
-    /// dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max= first_slice_ms_avg/max=
+    /// dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
+    /// capture_age_ms_avg/min/max= first_slice_ms_avg/max=
     /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= (issue 1387)`. `bytes`
-    /// counts the codestream, not the headers; `bpp_reason` / `report_age_s` / `handoff_age_ms` read `-` when
+    /// counts the codestream, not the headers; `bpp_reason` / `report_age_s` / the two ages read `-` when
     /// there is none.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} (issue 1387)",
             if self.window_s > 0.0 {
                 self.frames as f64 / self.window_s
             } else {
@@ -424,6 +431,7 @@ impl SendWindow {
             avg(self.convert_ms_sum, self.convert_count),
             self.convert_ms_max,
             self.handoff_age.text(),
+            self.capture_age.text(),
             avg(self.first_slice_ms_sum, self.frames),
             self.first_slice_ms_max,
             avg(self.encode_ms_sum, self.frames),
@@ -691,7 +699,7 @@ mod tests {
         w.handoff_age.note(290_000);
         assert_eq!(
             w.status_line(),
-            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 (issue 1387)"
+            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 (issue 1387)"
         );
         let empty = SendWindow::default().status_line();
         assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
@@ -718,6 +726,7 @@ mod tests {
             "bpp_reason=",
             "report_age_s=",
             "handoff_age_ms_avg/min/max=",
+            "capture_age_ms_avg/min/max=",
         ];
         assert!(
             empty.contains(" auto=off bpp_reason=- ")

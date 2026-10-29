@@ -83,6 +83,7 @@ fn a_frame_crosses_loopback_and_decodes_back_within_the_psnr_bound() {
         stride: (W * 2) as u32,
         yuyv: true,
         timecode_100ns: timecode,
+        capture_realtime_100ns: 0,
         emit_fps: 60,
     });
 
@@ -153,6 +154,7 @@ fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
                 stride: (W * 2) as u32,
                 yuyv: true,
                 timecode_100ns: base + 2 * k as i64 * 10_000_000 / 60,
+                capture_realtime_100ns: 0,
                 emit_fps: 60,
             });
             // the odd slot after it never goes (and is no drop)
@@ -163,6 +165,7 @@ fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
                 stride: (W * 2) as u32,
                 yuyv: true,
                 timecode_100ns: base + (2 * k as i64 + 1) * 10_000_000 / 60,
+                capture_realtime_100ns: 0,
                 emit_fps: 60,
             });
         }

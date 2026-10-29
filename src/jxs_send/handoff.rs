@@ -28,7 +28,9 @@ enum Job {
     /// session's frames all came before it in the queue, so it is done when this arrives.
     Session { output: EncoderOutput, bpp: u32 },
     /// A session at this bpp could not be opened: the current one stays (the auto bpp backs off).
-    Refused { bpp: u32 },
+    /// `penalize` = the level itself failed (a session at that bpp was refused); `false` = the
+    /// frame geometry was refused, not the bpp's fault.
+    Refused { bpp: u32, penalize: bool },
     /// One submitted frame: read its packets.
     Frame {
         timecode_100ns: i64,
@@ -61,6 +63,7 @@ impl JxsHandoff {
             stride,
             yuyv,
             timecode_100ns,
+            capture_realtime_100ns,
             emit_fps,
         } = *frame;
         if !jxs_link::on_jxs_grid(timecode_100ns, emit_fps) {
@@ -68,8 +71,11 @@ impl JxsHandoff {
         }
         // the stamp's age at the hand-off, read on the clock the timecode is stamped on (every
         // grid frame, a busy-dropped one too: the diagnostic is about the time BEFORE this point)
-        self.stats
-            .note_handoff(timecode_100ns, crate::jxs_recv::realtime_100ns());
+        self.stats.note_handoff(
+            timecode_100ns,
+            capture_realtime_100ns,
+            crate::jxs_recv::realtime_100ns(),
+        );
         if !yuyv {
             self.stats.not_yuyv.store(true, Ordering::Relaxed);
             return;
@@ -240,10 +246,16 @@ pub(super) fn spawn(
 
 /// The opt-in SCHED_FIFO (`CAMERA_BOX_JXS_FIFO_PRIO`) for the calling sender thread. Both sender
 /// threads take it: an encoder at FIFO beside a SCHED_OTHER packet thread on the same cores would
-/// delay the slices of the frame before it.
-fn raise_fifo(label: &str, fifo: Option<i32>) {
+/// delay the slices of the frame before it. `inherited`: only the feeder, whose session open
+/// creates the library threads, passes FIFO on to its children; `jxs-send` uses reset-on-fork.
+fn raise_fifo(label: &str, fifo: Option<i32>, inherited: bool) {
     let Some(prio) = fifo else { return };
-    if crate::affinity::set_current_thread_fifo_inherited(prio) {
+    let ok = if inherited {
+        crate::affinity::set_current_thread_fifo_inherited(prio)
+    } else {
+        crate::affinity::set_current_thread_fifo_reset_on_fork(prio)
+    };
+    if ok {
         tracing::info!(
             "jxs send: {label} SCHED_FIFO {prio} (below the capture's {}) (issue 1387)",
             crate::affinity::CAPTURE_FIFO_PRIORITY
@@ -407,7 +419,6 @@ impl Sessions {
             Err(_) => {
                 self.refused_geometry = Some((w, h));
                 // a step the controller waits on is not coming (else it holds Pending for good)
-                job_tx.send(Job::Refused { bpp: want }).map_err(|_| ())?;
                 Ok(false)
             }
         }
@@ -433,7 +444,12 @@ impl Sessions {
             Ok((i, o)) => self.next = Some((i, o, want)),
             Err(_) => {
                 self.refused_bpp = Some(want);
-                job_tx.send(Job::Refused { bpp: want }).map_err(|_| ())?;
+                job_tx
+                    .send(Job::Refused {
+                        bpp: want,
+                        penalize: true,
+                    })
+                    .map_err(|_| ())?;
             }
         }
         Ok(())
@@ -457,7 +473,7 @@ fn feed(
     pin("jxs-feed", &cores);
     // inherited by the library's worker threads (created inside the session open), the one
     // deliberate exception to the reset-on-fork rule (affinity.rs)
-    raise_fifo("jxs-feed and the encoder threads", fifo);
+    raise_fifo("jxs-feed and the encoder threads", fifo, true);
     let mut s = Sessions {
         threads: slice_threads_for(&cores),
         cores,
@@ -599,15 +615,23 @@ impl BppControl {
         self.sec_errors += 1;
     }
 
-    fn on_refused(&mut self, bpp: u32) {
-        if let Some(c) = self.ctl.as_mut() {
-            c.refused(bpp);
-            self.want.store(c.target(), Ordering::Relaxed);
-            tracing::warn!(
-                "jxs send: no session at {bpp} bpp -- staying at {} (issue 1387)",
-                c.current()
-            );
+    fn on_refused(&mut self, bpp: u32, penalize: bool) {
+        let Some(c) = self.ctl.as_mut() else { return };
+        // only a step the controller waits on is answered (a geometry refusal at the bpp it
+        // already runs is the feeder's own ERROR line, nothing to do here)
+        if c.target() != bpp || c.current() == bpp {
+            return;
         }
+        if penalize {
+            c.refused(bpp);
+        } else {
+            c.cancelled(bpp);
+        }
+        self.want.store(c.target(), Ordering::Relaxed);
+        tracing::warn!(
+            "jxs send: no session at {bpp} bpp -- staying at {} (issue 1387)",
+            c.current()
+        );
     }
 
     /// Every loop turn: read the receiver's reports; once a second, tick the controller.
@@ -671,7 +695,7 @@ fn send(
     want: Arc<AtomicU32>,
 ) {
     pin("jxs-send", &cores);
-    raise_fifo("jxs-send", opts.fifo);
+    raise_fifo("jxs-send", opts.fifo, false);
     let mut output: Option<EncoderOutput> = None;
     let mut window = SendWindow::default();
     let mut bpp = BppControl::new(opts, want);
@@ -709,8 +733,8 @@ fn send(
                 bpp.on_session(b);
                 continue;
             }
-            Job::Refused { bpp: b } => {
-                bpp.on_refused(b);
+            Job::Refused { bpp: b, penalize } => {
+                bpp.on_refused(b, penalize);
                 continue;
             }
             Job::Frame {
@@ -798,6 +822,47 @@ fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A frame geometry the encoder refuses tells the packet thread (else a controller waiting on
+    /// a step at that moment holds Pending for good), without blaming the bpp; a refused bpp
+    /// does blame it (review round 1).
+    #[test]
+    fn a_refused_geometry_or_bpp_tells_the_packet_thread() {
+        let (job_tx, job_rx) = mpsc::sync_channel::<Job>(8);
+        let mut s = Sessions {
+            threads: 1,
+            cores: vec![0],
+            input: None,
+            bpp: 4,
+            next: None,
+            refused_bpp: None,
+            refused_geometry: None,
+        };
+        // an odd width: refused before the library sees it
+        assert_eq!(s.ensure(255, 64, 5, &job_tx), Ok(false));
+        assert!(matches!(
+            job_rx.try_recv(),
+            Ok(Job::Refused {
+                bpp: 5,
+                penalize: false
+            })
+        ));
+        // the same geometry again is not re-opened, not re-announced
+        assert_eq!(s.ensure(255, 64, 5, &job_tx), Ok(false));
+        assert!(job_rx.try_recv().is_err());
+        // a bpp the library refuses for a good geometry (0 bpp): a refusal of that level
+        assert_eq!(s.ensure(64, 16, 4, &job_tx), Ok(true));
+        assert!(matches!(job_rx.try_recv(), Ok(Job::Session { bpp: 4, .. })));
+        assert_eq!(s.prepare(0, &job_tx), Ok(()));
+        assert!(matches!(
+            job_rx.try_recv(),
+            Ok(Job::Refused {
+                bpp: 0,
+                penalize: true
+            })
+        ));
+        assert!(s.next.is_none());
+    }
 
     fn stats(in_flight: usize, progress_ms: u64) -> Stats {
         let s = Stats::default();

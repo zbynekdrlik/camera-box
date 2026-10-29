@@ -21,6 +21,7 @@ fn the_handoff_age_is_measured_on_the_wall_clock_at_the_hand_off() {
             stride: 128,
             yuyv: true,
             timecode_100ns: now - age_ms * 10_000,
+            capture_realtime_100ns: now - (age_ms - 5) * 10_000,
             emit_fps: 30,
         });
     }
@@ -32,14 +33,59 @@ fn the_handoff_age_is_measured_on_the_wall_clock_at_the_hand_off() {
         w.handoff_age.count, 3,
         "the busy-dropped frame is measured too"
     );
-    // the offers ran within a few ms of `now`
-    assert!((20.0..25.0).contains(&lo), "{lo}");
-    assert!((40.0..45.0).contains(&hi), "{hi}");
-    assert!((30.0..35.0).contains(&avg), "{avg}");
-    assert!(w.status_line().contains(" handoff_age_ms_avg/min/max="));
+    // the offers ran after `now` (a loaded runner may add tens of ms: a loose upper bound)
+    assert!((20.0..70.0).contains(&lo), "{lo}");
+    assert!((40.0..90.0).contains(&hi), "{hi}");
+    assert!((30.0..80.0).contains(&avg), "{avg}");
+    // each capture instant lies 5 ms after its timecode and both ages read the same clock
+    // sample: the difference is exact, whatever the runner's load
+    let (cavg, clo, chi) = w.capture_age.avg_min_max_ms().expect("three samples");
+    assert_eq!(w.capture_age.count, 3);
+    assert!((avg - cavg - 5.0).abs() < 1e-6, "{avg} vs {cavg}");
+    assert!((lo - clo - 5.0).abs() < 1e-6 && (hi - chi - 5.0).abs() < 1e-6);
+    let line = w.status_line();
+    assert!(line.contains(" handoff_age_ms_avg/min/max="), "{line}");
+    assert!(line.contains(" capture_age_ms_avg/min/max="), "{line}");
     let mut again = jxs_link::SendWindow::default();
     h.stats.drain_into(&mut again);
-    assert_eq!(again.handoff_age.count, 0, "a fresh window");
+    assert_eq!(
+        (again.handoff_age.count, again.capture_age.count),
+        (0, 0),
+        "a fresh window"
+    );
+    // an unknown capture instant (0) adds no capture sample
+    h.offer(&JxsFrame {
+        data: &frame,
+        width: 64,
+        height: 8,
+        stride: 128,
+        yuyv: true,
+        timecode_100ns: now,
+        capture_realtime_100ns: 0,
+        emit_fps: 30,
+    });
+    h.stats.drain_into(&mut again);
+    assert_eq!((again.handoff_age.count, again.capture_age.count), (1, 0));
+}
+
+/// A receiver that is not listening answers with ICMP "port unreachable", which the connected
+/// socket reports to whichever call comes first. When the report reader consumes it, it still
+/// reaches `send_errors` through `take_read_errors` (review round 1).
+#[test]
+fn a_dead_receivers_refusal_consumed_by_the_report_reader_is_still_a_send_error() {
+    let gone = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = gone.local_addr().unwrap().port();
+    drop(gone);
+    let tx = JxsSocket::connect(&format!("127.0.0.1:{port}")).unwrap();
+    assert_eq!(tx.send_slice(&[0x4A; 64]), 0, "the first send goes out");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut errors = 0;
+    while errors == 0 && std::time::Instant::now() < deadline {
+        assert_eq!(tx.take_report(5), None);
+        errors = tx.take_read_errors();
+    }
+    assert!(errors >= 1, "the queued refusal was counted");
+    assert_eq!(tx.take_read_errors(), 0, "and handed over once");
 }
 
 /// The receiver answers to the address the slices came from, from its listening socket; the
@@ -138,6 +184,7 @@ fn the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_fra
                 stride: w * 2,
                 yuyv: true,
                 timecode_100ns: tc,
+                capture_realtime_100ns: 0,
                 emit_fps: 30,
             });
             handed.push(tc as u64);

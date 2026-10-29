@@ -192,6 +192,11 @@ impl AutoBpp {
 
     /// A receiver report arrived at `now_s` (the caller's monotonic seconds).
     pub fn note_report(&mut self, r: ReceiverReport, now_s: f64) {
+        if self.report.is_some_and(|(old, _)| r.seq < old.seq) {
+            // the receiver restarted (its seq starts over): an old seq says nothing about it
+            self.acted_seq = None;
+            self.counted_seq = None;
+        }
         self.report = Some((r, now_s));
     }
 
@@ -218,6 +223,15 @@ impl AutoBpp {
         if self.pending.map(|(to, _)| to) == Some(bpp) {
             self.pending = None;
             self.penalize(bpp);
+            self.streak = 0;
+        }
+    }
+
+    /// The pending step was not applied for a reason that is not the level's (the frame
+    /// geometry was refused): stay where we are, no back-off.
+    pub fn cancelled(&mut self, bpp: u32) {
+        if self.pending.map(|(to, _)| to) == Some(bpp) {
+            self.pending = None;
             self.streak = 0;
         }
     }
@@ -272,13 +286,11 @@ impl AutoBpp {
             .report
             .filter(|(_, at)| now_s - at <= self.cfg.silent_after_s)
             .map(|(r, _)| r);
-        // A report is about the current bpp when its newest frame was sent at it; a receiver that
-        // finished NO frame at all but lost slices (everything is being lost) is about now.
+        // A report is about the current bpp when its newest frame was sent at it. (A frame the
+        // receiver could not decode still counts as a frame with its timecode and its loss.)
         let about_current = |r: &ReceiverReport| {
-            self.current_since_tc.is_some_and(|since| {
-                (r.frames > 0 && r.last_timecode_100ns >= since)
-                    || (r.frames == 0 && r.lost_slices > 0)
-            })
+            self.current_since_tc
+                .is_some_and(|since| r.frames > 0 && r.last_timecode_100ns >= since)
         };
         if let Some(r) = fresh {
             // the receiver's cap applies whatever frames it describes
@@ -323,30 +335,33 @@ impl AutoBpp {
             self.streak = 0;
             return Decision::Hold(Hold::NoHeadroom);
         }
-        let needed = self.needed_for(self.current + 1);
+        let next = self.current + 1;
+        let ceiling = if r.max_bpp > 0 {
+            self.cfg.max.min(r.max_bpp)
+        } else {
+            self.cfg.max
+        };
         if self.counted_seq == Some(r.seq) {
             // one report counts for one clean second: a receiver reporting slower than the tick
             // is not credited twice (neither clean nor broken: wait for its next report)
+            if next > ceiling {
+                return Decision::Hold(Hold::AtCeiling);
+            }
             return Decision::Hold(Hold::Counting {
                 streak: self.streak,
-                needed,
+                needed: self.needed_for(next),
             });
         }
         self.counted_seq = Some(r.seq);
         self.streak = self.streak.saturating_add(1);
+        // the decay clock counts clean REPORTS (one per second from a healthy receiver)
         self.clean_at_level = self.clean_at_level.saturating_add(1);
-        let next = self.current + 1;
         if self.clean_at_level >= self.cfg.decay_after_s {
             self.clean_at_level = 0;
             if let Some(f) = self.failed.get_mut(next as usize) {
                 *f = f.saturating_sub(1);
             }
         }
-        let ceiling = if r.max_bpp > 0 {
-            self.cfg.max.min(r.max_bpp)
-        } else {
-            self.cfg.max
-        };
         if next > ceiling {
             return Decision::Hold(Hold::AtCeiling);
         }
@@ -768,40 +783,68 @@ mod tests {
     }
 
     #[test]
-    fn a_receiver_that_finishes_no_frame_but_loses_slices_steps_down() {
+    fn a_report_without_a_frame_says_nothing_about_the_bpp() {
+        // the receiver counts an undecodable frame as a frame (its timecode + its loss), so a
+        // report without any frame carries no timecode to tie a loss to a bpp: no step
+        for lost in [0, 40] {
+            let mut c = ctl(4, 8);
+            c.current = 7;
+            c.note_report(
+                ReceiverReport {
+                    frames: 0,
+                    lost_slices: lost,
+                    last_timecode_100ns: 0,
+                    ..rep(1, 0)
+                },
+                0.0,
+            );
+            assert_eq!(
+                c.tick(&good(), 0.5),
+                Decision::Hold(Hold::ReportNotYetCurrent),
+                "lost {lost}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cancelled_step_adds_no_back_off_and_a_repeated_report_at_the_ceiling_says_so() {
         let mut c = ctl(4, 8);
-        c.current = 7;
+        clean_run(&mut c, 0, 10, TC0);
+        assert_eq!(c.target(), 5);
+        c.cancelled(5);
+        assert_eq!((c.current(), c.target(), c.needed_for(5)), (4, 4, 10));
+        // at the ceiling, a report counted already reads AtCeiling, not Counting
+        let mut c = ctl(4, 4);
+        c.note_report(rep(1, TC0 + 1), 0.0);
+        assert_eq!(c.tick(&good(), 0.0), Decision::Hold(Hold::AtCeiling));
+        assert_eq!(c.tick(&good(), 1.0), Decision::Hold(Hold::AtCeiling));
+    }
+
+    #[test]
+    fn a_restarted_receiver_whose_seq_starts_over_is_heard_again() {
+        let mut c = ctl(4, 8);
+        c.current = 6;
         c.note_report(
             ReceiverReport {
-                frames: 0,
-                lost_slices: 40,
-                last_timecode_100ns: 0,
-                ..rep(1, 0)
+                lost_slices: 1,
+                ..rep(3, TC0 + 5)
             },
             0.0,
         );
-        assert!(matches!(
-            c.tick(&good(), 0.5),
-            Decision::Step {
-                to: 6,
-                reason: StepReason::ReceiverLoss,
-                ..
-            }
-        ));
-        // an empty report (nothing finished, nothing lost) is silence about the bpp, no step
-        let mut c = ctl(4, 8);
-        c.current = 7;
+        assert!(matches!(c.tick(&good(), 0.1), Decision::Step { to: 5, .. }));
+        c.refused(5);
+        // the receiver restarts: its seq starts over and reaches 3 again with a new loss
+        c.note_report(rep(0, TC0 + 6), 1.0);
         c.note_report(
             ReceiverReport {
-                frames: 0,
-                last_timecode_100ns: 0,
-                ..rep(1, 0)
+                lost_slices: 2,
+                ..rep(3, TC0 + 7)
             },
-            0.0,
+            2.0,
         );
-        assert_eq!(
-            c.tick(&good(), 0.5),
-            Decision::Hold(Hold::ReportNotYetCurrent)
+        assert!(
+            matches!(c.tick(&good(), 2.1), Decision::Step { to: 5, .. }),
+            "the stale acted seq 3 no longer hides the new report 3"
         );
     }
 
