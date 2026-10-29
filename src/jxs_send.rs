@@ -190,8 +190,15 @@ pub const MAX_BPP: u32 = 12;
 /// number 1..=[`MAX_BPP`] is taken; anything else is refused (`Err`, the caller logs it and keeps
 /// the default).
 pub fn parse_bpp(value: Option<&str>) -> Result<u32, String> {
-    let _ = value;
-    Ok(DEFAULT_BPP)
+    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(DEFAULT_BPP);
+    };
+    match v.parse::<u32>() {
+        Ok(b) if (1..=MAX_BPP).contains(&b) => Ok(b),
+        _ => Err(format!(
+            "{BPP_ENV}='{v}' is not a whole number 1..={MAX_BPP}"
+        )),
+    }
 }
 
 /// The encoder's core set: [`CORES_ENV`] when it is set and inside `allowed` (the off-capture

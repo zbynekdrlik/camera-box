@@ -80,8 +80,23 @@ pub const JXS_ASSUMED_EMIT_FPS: u64 = 60;
 /// never a frame counter: a dropped capture or a second boundary cannot shift the parity.
 /// `emit_fps` is the NDI emit rate (0 = genlock off: [`JXS_ASSUMED_EMIT_FPS`]); an emit rate at
 /// or below [`JXS_FPS`] sends every frame.
-pub fn on_jxs_grid(_timecode_100ns: i64, _emit_fps: u32) -> bool {
-    true
+pub fn on_jxs_grid(timecode_100ns: i64, emit_fps: u32) -> bool {
+    use crate::genlock_grid::{per_second_floor, UNITS_100NS_PER_SECOND as U};
+    if timecode_100ns < 0 {
+        return false;
+    }
+    let emit = match emit_fps as u64 {
+        0 => JXS_ASSUMED_EMIT_FPS,
+        f => f,
+    };
+    if emit <= JXS_FPS {
+        return true;
+    }
+    // the emit-grid stamp of this frame, then: is it a point of the 30 fps grid too? An even
+    // 60 fps slot 2j is floor(2j * 1 s / 60) = floor(j * 1 s / 30), the same integer; an odd
+    // one lies strictly between two 30 fps points.
+    let stamp = per_second_floor(timecode_100ns as u64, emit, U);
+    per_second_floor(stamp, JXS_FPS, U) == stamp
 }
 
 /// One datagram's header.
@@ -301,7 +316,13 @@ impl SendWindow {
     /// encode_errors= (issue 1387)`. `bytes` counts the codestream, not the headers.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
+            if self.window_s > 0.0 {
+                self.frames as f64 / self.window_s
+            } else {
+                0.0
+            },
+            self.bpp,
             self.frames,
             self.slices,
             self.bytes,
