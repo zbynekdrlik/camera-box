@@ -271,7 +271,7 @@ mod tests {
             unsafe { avx2_row(&src[..w * 2], &mut y, &mut c) };
             let r = reference(&src, w, 1, w * 2);
             assert_eq!(&y[..], &r[..w], "luma w={w}");
-            assert_eq!(&c[..], &r[w * 2..w * 3], "chroma w={w}");
+            assert_eq!(&c[..], &r[w..w * 2], "chroma w={w}");
         }
     }
 
