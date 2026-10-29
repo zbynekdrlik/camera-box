@@ -40,6 +40,7 @@
 #include "camera_box_jxs_send.h"
 #include "genlock-emit-timecode.h"
 #include "jxs-output-decide.h"
+#include "jxs-state-table.h"
 
 #define JXS_OUTPUT_ID "camera_box_jxs_output"
 #define JXS_OUTPUT_NAME "camera-box JPEG XS program"
@@ -225,6 +226,8 @@ static bool jxs_output_start(void *data)
 	}
 	/* every frame carries the genlock wall stamp: the LOCK indicator counts it as a sender */
 	obs_output_set_genlock_wall_stamping(o->output, true);
+	/* the JPEG XS indicator's row (issue 1387): published only while the output runs */
+	cb_jxs_state().set_entry(o, CB_JXS_STATE_OUTPUT, name, "to " + target);
 	obs_log(LOG_INFO,
 		"jxs-output '%s': started -- the program %ux%u %s at %.2f fps to %s (stream id %u, bpp %u..%u, 0 = the sender's default; cores '%s', empty = all), each frame stamped with the genlock emit timecode of the NDI output, send ABI %u (issue 1387)",
 		name, video_output_get_width(video), video_output_get_height(video),
@@ -249,6 +252,10 @@ static void jxs_output_log_status(jxs_output *o, const cbjxs_send_stats &st)
 		st.encode_ms_avg,
 		st.encode_ms_max, st.first_slice_ms_avg, st.copy_ms_avg, st.copy_ms_max, st.bpp,
 		st.auto_bpp ? "on" : "off", st.reports, st.report_age_s, st.send_errors, st.encode_errors);
+	const double fps = st.window_s > 0.0 ? (double)st.frames / st.window_s : 0.0;
+	cb_jxs_state().publish_window(o, (uint32_t)(fps * 100.0 + 0.5), st.bpp * 100u, 0, 0, st.dropped_busy,
+				      st.send_errors + st.encode_errors + o->refused,
+				      st.report_age_s < 0.0 ? -1 : (int64_t)(st.report_age_s * 1000.0));
 	o->offered = o->taken = o->not_taken = o->refused = o->stamp_dup = 0;
 }
 
@@ -285,6 +292,7 @@ static void jxs_output_rawvideo(void *data, struct video_data *frame)
 		 * frame may still go */
 		o->last_stamp_100ns = pic.timecode_100ns;
 		o->taken++;
+		cb_jxs_state().note_frame(o, os_gettime_ns());
 	} else if (r == 0) {
 		o->not_taken++;
 	} else {
@@ -317,6 +325,7 @@ static void jxs_output_stop(void *data, uint64_t)
 	}
 	/* bounded: the sender's threads stop within ~2 s even with a wedged codec call */
 	cbjxs_send_close(tx);
+	cb_jxs_state().remove(o);
 	obs_log(LOG_INFO, "jxs-output '%s': stopped (issue 1387)", obs_output_get_name(o->output));
 }
 

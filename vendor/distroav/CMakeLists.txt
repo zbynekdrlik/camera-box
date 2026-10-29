@@ -135,7 +135,8 @@ if(CAMERA_BOX_JXS_SOURCE)
     message(FATAL_ERROR "CAMERA_BOX_JXS_FFI_NATIVE_LIBS is empty (issue 1387)")
   endif()
   target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/jxs-source.cpp src/jxs-source-decide.h
-                 src/jxs-output.cpp src/jxs-output-decide.h src/genlock-emit-timecode.h)
+                 src/jxs-output.cpp src/jxs-output-decide.h src/genlock-emit-timecode.h
+                 src/jxs-state-table.h)
   target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE CAMERA_BOX_JXS_SOURCE=1)
   target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CAMERA_BOX_JXS_FFI_INCLUDE}"
                              "${CAMERA_BOX_JXS_SEND_FFI_INCLUDE}")

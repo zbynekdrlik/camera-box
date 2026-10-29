@@ -2,6 +2,7 @@
 
 #include <components/OBSSourceLabel.hpp>
 #include <widgets/OBSBasic.hpp>
+#include <widgets/GenlockJxsState.hpp>
 
 #include <qt-wrappers.hpp>
 
@@ -102,6 +103,21 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tre
 		break;
 	}
 
+	/* camera-box issue 1387: how the source arrives -- NDI or JPEG XS -- as a tag of its own after the
+	 * name, chosen by the source KIND (never the name, so it shows whatever the operator calls it).
+	 * Not in the name label: the rename editor starts from that label's text. Not a source icon:
+	 * the icons are libobs' icon types + theme assets and show only with the dock's icons on. */
+	if (const char *transport = genlock_jxs_transport_tag(sourceId)) {
+		transportLabel = new QLabel(transport);
+		transportLabel->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+		transportLabel->setAttribute(Qt::WA_TranslucentBackground);
+		transportLabel->setEnabled(sourceVisible);
+		transportLabel->setStyleSheet(
+			QString("QLabel { color: %1; background: none; padding: 0 4px; font-size: 9pt; }")
+				.arg(strcmp(transport, "NDI") == 0 ? "#95a5a6" : "#3498db"));
+		transportLabel->setToolTip(QString("Transport: %1").arg(transport));
+	}
+
 #ifdef __APPLE__
 	vis->setAttribute(Qt::WA_LayoutUsesWidgetRect);
 	lock->setAttribute(Qt::WA_LayoutUsesWidgetRect);
@@ -116,6 +132,8 @@ SourceTreeItem::SourceTreeItem(SourceTree *tree_, OBSSceneItem sceneitem_) : tre
 		boxLayout->addSpacing(2);
 	}
 	boxLayout->addWidget(label);
+	if (transportLabel)
+		boxLayout->addWidget(transportLabel);
 	boxLayout->addWidget(vis);
 	boxLayout->addWidget(lock);
 
@@ -474,6 +492,8 @@ void SourceTreeItem::VisibilityChanged(bool visible)
 		iconLabel->setEnabled(visible);
 	}
 	label->setEnabled(visible);
+	if (transportLabel)
+		transportLabel->setEnabled(visible);
 	vis->setChecked(visible);
 }
 

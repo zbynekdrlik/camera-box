@@ -277,6 +277,38 @@ jobs:
           if ($internal -notmatch [regex]::Escape('struct genlock_fifo_relabel_state genlock_relabel;')) { Write-Error "obs-internal.h: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1 }
           Write-Output "issue 1372 receive-FIFO date-step relabel present — OK"
 
+      # issue 1387: the in-OBS JPEG XS indicator (a status-bar label beside the LOCK widget, fed by
+      # DistroAV's camera_box_jxs_state proc handler; OFF on this Windows build, which has no JPEG XS
+      # source) and the per-source NDI / JPEG XS tag in the Sources dock. A subtree pull that drops
+      # them still compiles, so the source text is gated in BOTH windows-genlock ymls, mirroring
+      # tests/genlock_jxs_indicator_1387.rs (keep the three in lock-step). Pure source-text guard.
+      - name: Assert the JPEG XS indicator + per-source transport tag present (issue 1387)
+        shell: pwsh
+        run: |
+          $checks = @(
+            @('vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp', '#include "GenlockJxsWidget.hpp"'),
+            @('vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp', 'jxsWidget = new GenlockJxsWidget(this); addPermanentWidget(jxsWidget, 0);'),
+            @('vendor/obs-studio/frontend/widgets/GenlockJxsWidget.cpp', 'proc_handler_call(obs_get_proc_handler(), "camera_box_jxs_state", &cd);'),
+            @('vendor/obs-studio/frontend/widgets/GenlockJxsWidget.cpp', 'const GenlockJxsReport rep = genlock_jxs_report(rows);'),
+            @('vendor/obs-studio/frontend/widgets/GenlockJxsWidget.cpp', 'blog(LOG_INFO, "%s", rep.log_line.c_str());'),
+            @('vendor/obs-studio/frontend/widgets/GenlockJxsReport.cpp', 'const genlock_jxs_state_t state = genlock_jxs_decide(&c, &reason);'),
+            @('vendor/obs-studio/frontend/widgets/GenlockJxsReport.cpp', '"jxs-state: state=%s reason=%s inputs=%d down=%d degraded=%d outputs=%d down=%d degraded=%d entry="'),
+            @('vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp', 'static inline genlock_jxs_state_t genlock_jxs_decide(const genlock_jxs_counts_t *c, genlock_jxs_reason_t *reason)'),
+            @('vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp', 'static inline const char *genlock_jxs_transport_tag(const char *unversioned_id)'),
+            @('vendor/obs-studio/frontend/cmake/ui-widgets.cmake', 'widgets/GenlockJxsReport.cpp widgets/GenlockJxsReport.hpp widgets/GenlockJxsWidget.cpp widgets/GenlockJxsWidget.hpp'),
+            @('vendor/obs-studio/frontend/components/SourceTreeItem.cpp', '#include <widgets/GenlockJxsState.hpp>'),
+            @('vendor/obs-studio/frontend/components/SourceTreeItem.cpp', 'if (const char *transport = genlock_jxs_transport_tag(sourceId)) {'),
+            @('vendor/obs-studio/frontend/components/SourceTreeItem.cpp', 'boxLayout->addWidget(label); if (transportLabel) boxLayout->addWidget(transportLabel);'),
+            @('vendor/distroav/src/jxs-source.cpp', 'proc_handler_add(obs_get_proc_handler(), "void camera_box_jxs_state(out string json)", jxs_state_proc, nullptr);')
+          )
+          foreach ($c in $checks) {
+            $text = (Get-Content $c[0] -Raw) -replace '\s+', ' '
+            if ($text -notmatch [regex]::Escape($c[1])) {
+              Write-Error "$($c[0]): the issue-1387 JPEG XS indicator / transport tag anchor [$($c[1])] is gone -- re-apply"; exit 1
+            }
+          }
+          Write-Output "issue 1387 JPEG XS indicator + per-source transport tag present -- OK"
+
       # #1298: the fast path builds obs.dll + the frontend from the real vendored source, so a
       # `git subtree pull` (#44) that reverts the in-OBS genlock LOCK indicator would hot-swap a
       # bundle with no lock UI un-gated. Mirror the slow windows-genlock.yml #1298 gate + the

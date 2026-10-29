@@ -80,6 +80,8 @@ extern struct obs_output_info create_jxs_output_info();
 struct obs_output_info jxs_output_info;
 void camera_box_jxs_output_init();
 void camera_box_jxs_output_deinit();
+// issue 1387: the JPEG XS state table's proc handler, read by the frontend's JPEG XS indicator.
+void camera_box_jxs_state_register();
 #endif
 
 const NDIlib_v6 *load_ndilib();
@@ -319,6 +321,7 @@ static void register_plugin_features()
 	jxs_output_info = create_jxs_output_info();
 	obs_register_output(&jxs_output_info);
 	obs_log(LOG_INFO, "Plugin features registered: camera-box JPEG XS program output (issue 1387)");
+	camera_box_jxs_state_register();
 #endif
 
 	plugin_features_registered = true;

@@ -558,6 +558,10 @@ pub mod vban_conceal;
 // committed parity gate `tests/genlock_lock_state_parity.rs`. Split by concern into
 // `src/genlock_lock_state/` (issue 1302); every item is re-exported at this path.
 pub mod genlock_lock_state;
+// Issue 1387: the in-OBS JPEG XS indicator decision (OFF / OK / DEGRADED / DOWN) + the Sources-dock
+// transport tag. The C port is vendor/obs-studio/frontend/widgets/GenlockJxsState.hpp, parity-gated
+// by tests/genlock_jxs_state_parity_1387.rs.
+pub mod genlock_jxs_state;
 
 // #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (issue 1367: audio placed at
 // its NDI timecode + the video's MEASURED stamp→present delay through the live wall→mono offset;
