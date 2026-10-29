@@ -479,11 +479,121 @@ fn after_a_bpp_change_every_picture_is_its_own_and_a_loss_is_concealed_from_the_
             }
         }
     }
+    // inside the hole (packet 5 = luma rows 64..80) frame 4 shows frame 3's decode, the new bpp's
+    let w = 320;
+    let rows = |p: &Yuv422Planes| p.y()[68 * w..76 * w].to_vec();
+    let (f3, f4) = (out[3].1.as_ref().unwrap(), out[4].1.as_ref().unwrap());
+    let hole_vs_3 = psnr(&rows(f4), &rows(f3));
+    let hole_vs_4 = psnr(&rows(f4), &rows(&frames_src(4)));
+    assert!(
+        hole_vs_3 > 35.0 && hole_vs_3 > hole_vs_4 + 5.0,
+        "concealed rows: vs frame 3 {hole_vs_3:.1} dB, vs frame 4 {hole_vs_4:.1} dB"
+    );
 }
 
 /// The source picture of frame `k` of the bpp-change test above (the same phase sequence).
 fn frames_src(k: usize) -> Yuv422Planes {
     tall((k as u8).wrapping_mul(53))
+}
+
+/// Encode `n` frames of `tall(phase0 + 53 j)` at `bpp`.
+fn tall_frames_at(bpp: u32, phase0: u8, n: usize) -> Vec<(Yuv422Planes, Vec<Vec<u8>>)> {
+    let mut s = EncoderSettings::issue_1387(320, 1080);
+    s.bpp_numerator = bpp;
+    let mut enc = Encoder::open(s).unwrap();
+    (0..n)
+        .map(|j| {
+            let p = tall(phase0.wrapping_add((j as u8).wrapping_mul(53)));
+            let k = encode(&mut enc, &p);
+            (p, k)
+        })
+        .collect()
+}
+
+/// Run `frames` (with an optional dropped packet per frame) through the receiver; returns each
+/// frame's (lost slices, decoded picture), the undecodable count and the header changes.
+fn receive(
+    frames: Vec<(Vec<Vec<u8>>, Option<usize>)>,
+) -> (Vec<(u32, Option<Yuv422Planes>)>, u64, u64) {
+    within(60, move || {
+        let mut out: Vec<(u32, Option<Yuv422Planes>)> = Vec::new();
+        let (errors, changes) = {
+            let mut a = FrameAssembler::new();
+            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+                out.push((r.lost_slices, p.cloned()));
+            });
+            let t0 = 100_000_000u64;
+            for (k, (f, drop)) in frames.iter().enumerate() {
+                push_frame(&mut a, &mut sink, t0 + k as u64 * 333_333, f, *drop);
+            }
+            let last = &frames[frames.len() - 1].0;
+            push_frame(
+                &mut a,
+                &mut sink,
+                t0 + frames.len() as u64 * 333_333,
+                last,
+                None,
+            );
+            (sink.errors, sink.header_changes)
+        };
+        (out, errors, changes)
+    })
+}
+
+/// Issue 1387 review: a slice lost in the FIRST frame at a new bpp has no concealment source
+/// (the old bpp's slices have other sizes): that frame is reported undecodable, never decoded
+/// from a mix of two bpps, and the next frame decodes as its own picture.
+#[test]
+fn a_loss_in_the_first_frame_at_a_new_bpp_is_never_concealed_from_the_old_bpp() {
+    let at4 = tall_frames_at(4, 0, 2);
+    let at5 = tall_frames_at(5, 111, 2);
+    let src5 = at5[1].0.clone();
+    let frames = vec![
+        (at4[0].1.clone(), None),
+        (at4[1].1.clone(), None),
+        (at5[0].1.clone(), Some(7)),
+        (at5[1].1.clone(), None),
+    ];
+    let (out, errors, changes) = receive(frames);
+    assert!(out.len() >= 4, "every frame is reported");
+    assert!(out[0].1.is_some() && out[1].1.is_some(), "4 bpp decodes");
+    assert_eq!(out[2].0, 1, "the hole is counted");
+    assert!(out[2].1.is_none(), "never decoded from a mix of two bpps");
+    assert_eq!(errors, 1, "exactly the frame with the hole is undecodable");
+    assert_eq!(changes, 1);
+    let p3 = out[3].1.as_ref().expect("the next frame decodes");
+    assert!(psnr(p3.y(), src5.y()) >= 35.0);
+}
+
+/// Issue 1387 review: a bpp change right after a frame the decoder gave up on (the decoder is
+/// closed when the new header arrives) still forgets the old bpp's concealment source: a lost
+/// slice in that first new-bpp frame makes it undecodable, never a decode from two bpps.
+#[test]
+fn a_bpp_change_after_a_failed_frame_never_conceals_from_the_old_bpp() {
+    let at4 = tall_frames_at(4, 0, 2);
+    let at5 = tall_frames_at(5, 111, 2);
+    let src5 = at5[1].0.clone();
+    let mut garbled = at4[1].1.clone();
+    for b in garbled[2].iter_mut().skip(2) {
+        *b ^= 0xA5;
+    }
+    let frames = vec![
+        (at4[0].1.clone(), None),
+        (garbled, None),
+        (at5[0].1.clone(), Some(7)),
+        (at5[1].1.clone(), None),
+    ];
+    let (out, _errors, changes) = receive(frames);
+    assert!(out.len() >= 4, "every frame is reported");
+    assert!(out[0].1.is_some());
+    assert_eq!(out[2].0, 1, "the hole is counted");
+    assert!(
+        out[2].1.is_none(),
+        "the first 5 bpp frame with a hole is never decoded from 4 bpp slices"
+    );
+    assert_eq!(changes, 1, "the change is seen with the decoder closed");
+    let p3 = out[3].1.as_ref().expect("the next frame decodes");
+    assert!(psnr(p3.y(), src5.y()) >= 35.0);
 }
 
 /// Push only the first `n` packets of a frame.
