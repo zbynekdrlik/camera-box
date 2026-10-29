@@ -64,6 +64,15 @@ fn the_capture_loop_starts_the_link_only_from_the_env_and_offers_before_the_ndi_
     assert!(!region.contains("starvation_repeat_timecode"), "{region}");
     // the 30 fps selection reads the NDI emit rate (the frame's own grid), never a counter
     assert!(region.contains("emit_fps: send_fps"), "{region}");
+    // the handoff diagnostics' capture instant is the RAW V4L2 one, never the main loop's
+    // `capture_realtime_100ns` variable (the phase tracker's slot middle while locked)
+    let lit = &m[offer..offer + m[offer..].find("});").unwrap()];
+    assert!(
+        lit.contains(
+            "capture_realtime_100ns: camera_box::genlock_stamp::capture_realtime_100ns(\n                            info.capture_monotonic_100ns,"
+        ),
+        "{lit}"
+    );
 }
 
 #[test]

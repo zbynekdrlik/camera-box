@@ -33,7 +33,17 @@ typedef struct cbjxs_enc_settings {
     uint32_t slice_height;    /* luma lines per slice (16 = the library default, set explicitly) */
     uint8_t cpu_profile;      /* 0 = low latency (the measured setting), 1 = low CPU */
     uint8_t slice_packets;    /* 1 = one packet per slice (+ the picture header first) */
+    /* Library tuning knobs (issue 1387 encoder optimisation). CBJXS_DEFAULT keeps the value
+     * svt_jpeg_xs_encoder_load_default_parameters() set; anything else is written verbatim. */
+    uint32_t rate_control_mode;          /* 0..3, see SvtJpegxsEnc.h */
+    uint32_t coding_signs_handling;      /* 0 off, 1 fast, 2 full */
+    uint32_t coding_significance;        /* 0 / 1 */
+    uint32_t coding_vertical_prediction; /* 0..2 */
+    uint32_t quantization;               /* 0 deadzone, 1 uniform */
 } cbjxs_enc_settings;
+
+/* "Keep the library's default" for a tuning knob. */
+#define CBJXS_DEFAULT 0xFFFFFFFFu
 
 /* Open a planar YUV 4:2:2 8-bit encoder. *bytes_per_frame = the bitstream buffer size the
  * encoder requires per frame. */

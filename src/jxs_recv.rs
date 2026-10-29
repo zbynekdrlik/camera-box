@@ -93,11 +93,21 @@ impl JxsRecvSocket {
     /// kernel receive time (CLOCK_REALTIME) when timestamps are on, else the time the call
     /// returned. Returns the number of datagrams; a timeout returns 0.
     pub fn recv_batch(&mut self, mut f: impl FnMut(&[u8], i64)) -> std::io::Result<usize> {
+        self.recv_batch_from(|d, at, _| f(d, at))
+    }
+
+    /// [`Self::recv_batch`] that also names each datagram's source address (`None` when the
+    /// kernel gave none this can read): the receiver reports back to it (issue 1387 auto bpp).
+    pub fn recv_batch_from(
+        &mut self,
+        mut f: impl FnMut(&[u8], i64, Option<SocketAddr>),
+    ) -> std::io::Result<usize> {
         // SAFETY (whole block): every iovec/msghdr points into `self.bufs` / `self.ctrl`, which
         // live for the call and are sized RECV_BATCH x RECV_BUF_LEN / CTRL_LEN; the kernel
         // writes only within the given lengths.
         let mut iov: [libc::iovec; RECV_BATCH] = unsafe { std::mem::zeroed() };
         let mut msgs: [libc::mmsghdr; RECV_BATCH] = unsafe { std::mem::zeroed() };
+        let mut names: [libc::sockaddr_storage; RECV_BATCH] = unsafe { std::mem::zeroed() };
         // One base pointer per buffer, offsets with `add`: no re-borrow of the Vec per entry.
         let bufs = self.bufs.as_mut_ptr();
         let ctrl = self.ctrl.as_mut_ptr();
@@ -108,6 +118,9 @@ impl JxsRecvSocket {
             msgs[i].msg_hdr.msg_iovlen = 1;
             msgs[i].msg_hdr.msg_control = unsafe { ctrl.add(i * CTRL_LEN) }.cast();
             msgs[i].msg_hdr.msg_controllen = CTRL_LEN as _;
+            msgs[i].msg_hdr.msg_name = (&mut names[i] as *mut libc::sockaddr_storage).cast();
+            msgs[i].msg_hdr.msg_namelen =
+                std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
         }
         let n = unsafe {
             libc::recvmmsg(
@@ -133,12 +146,53 @@ impl JxsRecvSocket {
             let arrival = ts.unwrap_or(returned);
             let len = m.msg_len as usize;
             let buf = &self.bufs[i * RECV_BUF_LEN..i * RECV_BUF_LEN + len];
+            let from = sockaddr_to_std(&names[i], m.msg_hdr.msg_namelen);
             for d in crate::jxs_link::split_gro(buf, gso) {
-                f(d, arrival);
+                f(d, arrival, from);
                 count += 1;
             }
         }
         Ok(count)
+    }
+
+    /// Send one receiver report (issue 1387) from the listening socket to `to`, the address the
+    /// slices came from: the sender's connected socket takes datagrams only from its peer, which
+    /// is this socket.
+    pub fn send_report(
+        &self,
+        to: SocketAddr,
+        report: &crate::jxs_link::ReceiverReport,
+    ) -> std::io::Result<()> {
+        let b = report
+            .encode()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{e:?}")))?;
+        self.sock.send_to(&b, to).map(|_| ())
+    }
+}
+
+/// A kernel-filled source address as a `SocketAddr` (IPv4 / IPv6; anything else `None`).
+fn sockaddr_to_std(ss: &libc::sockaddr_storage, len: libc::socklen_t) -> Option<SocketAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+    match ss.ss_family as libc::c_int {
+        libc::AF_INET if len as usize >= std::mem::size_of::<libc::sockaddr_in>() => {
+            // SAFETY: the family says the storage holds a sockaddr_in, and it is that large.
+            let a = unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
+            Some(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)),
+                u16::from_be(a.sin_port),
+            )))
+        }
+        libc::AF_INET6 if len as usize >= std::mem::size_of::<libc::sockaddr_in6>() => {
+            // SAFETY: as above, for sockaddr_in6.
+            let a = unsafe { &*(ss as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>() };
+            Some(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(a.sin6_addr.s6_addr),
+                u16::from_be(a.sin6_port),
+                a.sin6_flowinfo,
+                a.sin6_scope_id,
+            )))
+        }
+        _ => None,
     }
 }
 

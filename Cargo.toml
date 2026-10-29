@@ -179,6 +179,11 @@ path = "src/bin/jxs-recv-probe.rs"
 required-features = ["jxs"]
 
 [[bin]]
+name = "jxs-encode-bench"
+path = "src/bin/jxs-encode-bench.rs"
+required-features = ["jxs"]
+
+[[bin]]
 name = "frame-probe"
 path = "src/bin/frame-probe.rs"
 required-features = ["probe"]

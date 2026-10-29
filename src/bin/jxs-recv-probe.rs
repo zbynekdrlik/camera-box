@@ -18,10 +18,20 @@
 //!
 //! `--dump-png` writes N decoded frames (after skipping S) as `<dir>/jxs-<camera>-<timecode>.png`
 //! (BT.709 limited range -> RGB), for the pixel comparison with the same frame over NDI.
+//!
+//! **The receiver report (the automatic bpp's back channel):** once a second the probe sends ONE
+//! 32-byte report (`camera_box::jxs_link`, "The receiver report") back to the address the taken
+//! camera's slices came from: its lost slices, its late frames (decoded more than `--late-ms`
+//! after their timecode, default 100), its decode-time p99 (last datagram in -> decoded) and
+//! `--max-bpp` (0 = no limit). A sender in auto mode climbs only on these reports.
+//! `--no-report` sends none (the sender then holds its bpp). The status line counts the reports
+//! sent (`reports=`).
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
-    use camera_box::jxs_link::{self, FrameAssembler, PacketHeader, PushOutcome, RecvWindow};
+    use camera_box::jxs_link::{
+        self, FrameAssembler, PacketHeader, PushOutcome, RecvWindow, ReportWindow,
+    };
     use camera_box::jxs_recv::{realtime_100ns, DecodeSink, JxsRecvSocket};
     use clap::Parser;
     use std::time::{Duration, Instant};
@@ -47,9 +57,23 @@ fn main() -> anyhow::Result<()> {
         /// Decoded frames to skip before the first PNG.
         #[arg(long, default_value_t = 0)]
         dump_skip: u64,
+        /// The highest bpp this receiver takes (0 = no limit), sent in every report.
+        #[arg(long, default_value_t = 0)]
+        max_bpp: u32,
+        /// A frame decoded more than this long after its timecode counts as late in the report.
+        #[arg(long, default_value_t = 100.0)]
+        late_ms: f64,
+        /// Send no receiver report (the sender's automatic bpp then holds).
+        #[arg(long)]
+        no_report: bool,
     }
 
     let args = Args::parse();
+    anyhow::ensure!(
+        args.max_bpp <= u8::MAX as u32,
+        "--max-bpp {} does not fit the report's byte",
+        args.max_bpp
+    );
     let mut sock = JxsRecvSocket::bind(args.listen)?;
     sock.set_timeout(Some(Duration::from_millis(200)))?;
     let (gro, ts) = sock.features();
@@ -103,8 +127,13 @@ fn main() -> anyhow::Result<()> {
     let mut camera = args.camera;
     let started = Instant::now();
     let mut window_start = Instant::now();
+    // the automatic bpp's back channel: one report per period to the taken camera's sender
+    let mut report = ReportWindow::default();
+    let mut last_report = Instant::now();
+    let mut sender: Option<std::net::SocketAddr> = None;
+    let period = Duration::from_millis(jxs_link::REPORT_PERIOD_MS);
     loop {
-        sock.recv_batch(|d, arrival| {
+        sock.recv_batch_from(|d, arrival, from| {
             window.datagrams += 1;
             let Ok(h) = PacketHeader::decode(d) else {
                 window.malformed += 1;
@@ -121,6 +150,9 @@ fn main() -> anyhow::Result<()> {
                 }
                 Some(_) => {}
             }
+            if from.is_some() {
+                sender = from;
+            }
             window.bytes += (d.len() - jxs_link::HEADER_LEN) as u64;
             match assembler.push(&h, &d[jxs_link::HEADER_LEN..], arrival, &mut sink) {
                 PushOutcome::Accepted => {}
@@ -131,18 +163,38 @@ fn main() -> anyhow::Result<()> {
             }
         })?;
         for (r, decoded_at, ok) in frame_events.borrow_mut().drain(..) {
+            let ms = |t: i64| t as f64 / 10_000.0;
+            let tc = r.timecode as i64;
             if ok {
-                let ms = |t: i64| t as f64 / 10_000.0;
-                let tc = r.timecode as i64;
+                let latency_ms = ms(decoded_at - tc);
                 window.note_frame(
-                    ms(decoded_at - tc),
+                    latency_ms,
                     ms(r.first_arrival - tc),
                     ms(r.last_arrival - r.first_arrival),
                     r.lost_slices,
                 );
+                let decode_us = ((decoded_at - r.last_arrival).max(0) / 10) as u32;
+                report.note_frame(
+                    r.lost_slices,
+                    r.timecode,
+                    latency_ms > args.late_ms,
+                    Some(decode_us),
+                );
             } else {
                 window.undecodable_frames += 1;
                 window.lost_slices += r.lost_slices as u64;
+                // a frame the decoder gave up on reached the screen as nothing: a loss
+                report.note_frame(r.lost_slices.max(1), r.timecode, false, None);
+            }
+        }
+        if last_report.elapsed() >= period {
+            last_report = Instant::now();
+            let r = report.take(camera.unwrap_or(0), args.max_bpp);
+            if let (false, Some(to), Some(_)) = (args.no_report, sender, camera) {
+                match sock.send_report(to, &r) {
+                    Ok(()) => window.reports_sent += 1,
+                    Err(e) => eprintln!("jxs recv: report to {to}: {e} (issue 1387)"),
+                }
             }
         }
         let el = window_start.elapsed().as_secs_f64();

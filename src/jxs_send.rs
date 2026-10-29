@@ -58,6 +58,9 @@ pub struct JxsSocket {
     gso: AtomicBool,
     /// `None` = the kernel accepted [`JXS_SOCKET_MARK`]; else the errno it answered.
     mark_error: Option<i32>,
+    /// Socket errors (a receiver that is not listening: ECONNREFUSED) [`Self::take_report`]
+    /// consumed instead of the next send.
+    read_errors: AtomicU64,
 }
 
 impl JxsSocket {
@@ -99,7 +102,15 @@ impl JxsSocket {
             sock,
             gso: AtomicBool::new(gso),
             mark_error,
+            read_errors: AtomicU64::new(0),
         })
+    }
+
+    /// The socket errors [`Self::take_report`] consumed since the last call (they belong in
+    /// `send_errors`: on a connected UDP socket an ICMP "port unreachable" from a receiver that
+    /// is not listening is reported by whichever call comes first, a send or this read).
+    pub fn take_read_errors(&self) -> u64 {
+        self.read_errors.swap(0, Ordering::Relaxed)
     }
 
     /// Whether the kernel accepted [`JXS_SOCKET_MARK`] (`SO_MARK`), i.e. the egress pacing's fw
@@ -121,6 +132,42 @@ impl JxsSocket {
 
     pub fn peer(&self) -> std::io::Result<SocketAddr> {
         self.sock.peer_addr()
+    }
+
+    /// Drain every datagram waiting on the socket without blocking (the connected socket takes
+    /// only the receiver's) and return the newest valid receiver report about `camera_id`
+    /// (issue 1387 auto bpp); anything else (a garbled datagram, a pending ICMP error) is
+    /// skipped. Bounded: at most 64 datagrams per call.
+    pub fn take_report(&self, camera_id: u8) -> Option<jxs_link::ReceiverReport> {
+        let mut buf = [0u8; 64];
+        let mut newest: Option<jxs_link::ReceiverReport> = None;
+        for _ in 0..64 {
+            // SAFETY: `buf` is valid for its length; MSG_DONTWAIT never blocks.
+            let n = unsafe {
+                libc::recv(
+                    self.sock.as_raw_fd(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if n < 0 {
+                let errno = std::io::Error::last_os_error().raw_os_error();
+                if errno == Some(libc::EAGAIN) || errno == Some(libc::EWOULDBLOCK) {
+                    break;
+                }
+                // ECONNREFUSED & co: the queued ICMP error a send would have reported is consumed
+                // here, so it is counted for the status line's send_errors ([`Self::take_read_errors`])
+                self.read_errors.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            if let Ok(r) = jxs_link::ReceiverReport::decode(&buf[..n as usize]) {
+                if r.camera_id == camera_id {
+                    newest = Some(r);
+                }
+            }
+        }
+        newest
     }
 
     /// Send one slice built by `jxs_link::build_slice_datagrams`. Returns the number of send
@@ -208,29 +255,6 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 pub const CORES_ENV: &str = "CAMERA_BOX_JXS_CORES";
 /// The most slice-pack threads the encoder runs (a 1080p frame has 68 slices).
 pub const MAX_SLICE_THREADS: usize = 4;
-/// The environment variable that sets the encoder's bits per pixel (owner decision 29.10.2026).
-pub const BPP_ENV: &str = "CAMERA_BOX_JXS_BPP";
-/// The default bits per pixel (comment 6489868243: ~250 Mb/s at 30 fps).
-pub const DEFAULT_BPP: u32 = 4;
-/// The highest bpp the wire format carries: a 16-line 1080p slice at 12 bpp is ~46 KB, under the
-/// 64 KB slice length field.
-pub const MAX_BPP: u32 = 12;
-
-/// The encoder's bits per pixel from [`BPP_ENV`]: unset or blank = [`DEFAULT_BPP`]; a whole
-/// number 1..=[`MAX_BPP`] is taken; anything else is refused (`Err`, the caller logs it and keeps
-/// the default).
-pub fn parse_bpp(value: Option<&str>) -> Result<u32, String> {
-    let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Ok(DEFAULT_BPP);
-    };
-    match v.parse::<u32>() {
-        Ok(b) if (1..=MAX_BPP).contains(&b) => Ok(b),
-        _ => Err(format!(
-            "{BPP_ENV}='{v}' is not a whole number 1..={MAX_BPP}"
-        )),
-    }
-}
-
 /// The encoder's core set: [`CORES_ENV`] when it is set and inside `allowed` (the off-capture
 /// cores), else `allowed`. `Err` names why an override was refused (the caller logs it and uses
 /// `allowed`).
@@ -299,10 +323,33 @@ struct Stats {
     in_flight_max: AtomicUsize,
     /// [`monotonic_ms`] of the packet thread's last sign of life (a loop turn or a packet).
     progress_ms: AtomicU64,
+    /// Frames dropped busy since the automatic bpp's last one-second tick (issue 1387).
+    dropped_tick: AtomicU64,
+    /// The hand-off ages of this status window: `[timecode -> hand-off, capture instant ->
+    /// hand-off]`. The capture thread only `try_lock`s it (a sample is skipped rather than ever
+    /// waiting); the status line holds it for a copy.
+    handoff_age: std::sync::Mutex<[jxs_link::HandoffAge; 2]>,
 }
 
 #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
 impl Stats {
+    /// A frame dropped because every picture was busy (the status line and the auto bpp).
+    fn note_dropped(&self) {
+        self.dropped_busy.fetch_add(1, Ordering::Relaxed);
+        self.dropped_tick.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The frame stamped `timecode_100ns`, captured at `capture_100ns` (0 = unknown), is handed
+    /// over at wall clock `now_100ns` (the capture thread; never blocks, never allocates).
+    fn note_handoff(&self, timecode_100ns: i64, capture_100ns: i64, now_100ns: i64) {
+        if let Ok(mut a) = self.handoff_age.try_lock() {
+            a[0].note(jxs_link::handoff_age_100ns(timecode_100ns, now_100ns));
+            if capture_100ns > 0 {
+                a[1].note(jxs_link::handoff_age_100ns(capture_100ns, now_100ns));
+            }
+        }
+    }
+
     fn note_convert(&self, ns: u64) {
         self.convert_count.fetch_add(1, Ordering::Relaxed);
         self.convert_ns_sum.fetch_add(ns, Ordering::Relaxed);
@@ -319,6 +366,11 @@ impl Stats {
         let now = self.in_flight.load(Ordering::Relaxed);
         w.in_flight_max = self.in_flight_max.swap(now, Ordering::Relaxed) as u64;
         w.in_flight_cap = FRAMES_IN_FLIGHT as u64;
+        if let Ok(mut a) = self.handoff_age.lock() {
+            let [stamp, capture] = std::mem::take(&mut *a);
+            w.handoff_age = stamp;
+            w.capture_age = capture;
+        }
     }
 }
 
@@ -350,8 +402,13 @@ pub struct JxsFrame<'a> {
     pub height: u32,
     pub stride: u32,
     pub yuyv: bool,
-    /// The genlock timecode the NDI frame carries.
+    /// The genlock timecode the NDI frame carries (the emit-grid boundary AT OR BEFORE the
+    /// capture instant).
     pub timecode_100ns: i64,
+    /// The frame's RAW capture instant (its V4L2 stamp mapped to the same wall clock, never the
+    /// phase tracker's slot middle; 0 = unknown): with the timecode it splits `handoff_age_ms`
+    /// into where the capture sits against its stamped slot and the capture -> hand-off time.
+    pub capture_realtime_100ns: i64,
     /// The NDI emit rate (0 = genlock off): selects the [`jxs_link::JXS_FPS`] frames.
     pub emit_fps: u32,
 }
@@ -363,9 +420,24 @@ impl JxsSender {
     /// Read [`TARGET_ENV`]: unset/blank = `None` (nothing created). Set = start the sender
     /// threads; any failure is logged and the link stays off (`None`), never the capture loop.
     pub fn start_from_env(hostname: &str) -> Option<JxsHandoff> {
-        let value = std::env::var(TARGET_ENV).ok();
-        let bpp = std::env::var(BPP_ENV).ok();
-        Self::start_with(value.as_deref(), hostname, bpp.as_deref())
+        let env = |k: &str| std::env::var(k).ok();
+        let value = env(TARGET_ENV);
+        if jxs_link::parse_target(value.as_deref()) == Ok(None) {
+            return None;
+        }
+        let (bpp, warnings) = parse_bpp_mode(
+            env(BPP_ENV).as_deref(),
+            env(BPP_MIN_ENV).as_deref(),
+            env(BPP_MAX_ENV).as_deref(),
+        );
+        for w in warnings {
+            tracing::warn!("jxs send: {w} (issue 1387)");
+        }
+        let fifo = parse_fifo_prio(env(FIFO_ENV).as_deref()).unwrap_or_else(|e| {
+            tracing::warn!("jxs send: {e} -- the encoder stays SCHED_OTHER (issue 1387)");
+            None
+        });
+        Self::start_with_options(value.as_deref(), hostname, SenderOptions::new(bpp, fifo))
     }
 
     /// [`Self::start_from_env`] with the target passed in and the default bpp (tests).
@@ -373,11 +445,24 @@ impl JxsSender {
         Self::start_with(value, hostname, None)
     }
 
-    /// [`Self::start_from_env`] with both values passed in.
+    /// The target and [`BPP_ENV`] passed in (automatic bpp when it is `None`), SCHED_OTHER.
     pub fn start_with(
         value: Option<&str>,
         hostname: &str,
         bpp_value: Option<&str>,
+    ) -> Option<JxsHandoff> {
+        let (bpp, warnings) = parse_bpp_mode(bpp_value, None, None);
+        for w in warnings {
+            tracing::warn!("jxs send: {w} (issue 1387)");
+        }
+        Self::start_with_options(value, hostname, SenderOptions::new(bpp, None))
+    }
+
+    /// The target and the options passed in.
+    pub fn start_with_options(
+        value: Option<&str>,
+        hostname: &str,
+        opts: SenderOptions,
     ) -> Option<JxsHandoff> {
         let target = match jxs_link::parse_target(value) {
             Ok(None) => return None,
@@ -387,16 +472,12 @@ impl JxsSender {
                 return None;
             }
         };
-        let bpp = parse_bpp(bpp_value).unwrap_or_else(|e| {
-            tracing::warn!("{e} -- using {DEFAULT_BPP} bpp (issue 1387)");
-            DEFAULT_BPP
-        });
-        start_worker(target, jxs_link::camera_id_from_hostname(hostname), bpp)
+        start_worker(target, jxs_link::camera_id_from_hostname(hostname), opts)
     }
 }
 
 #[cfg(not(feature = "jxs"))]
-fn start_worker(target: String, _camera_id: u8, _bpp: u32) -> Option<JxsHandoff> {
+fn start_worker(target: String, _camera_id: u8, _opts: SenderOptions) -> Option<JxsHandoff> {
     tracing::error!(
         "{TARGET_ENV}={target} is set, but this camera-box was built without the `jxs` feature -- \
          the JPEG XS link stays off (issue 1387)"
@@ -405,7 +486,7 @@ fn start_worker(target: String, _camera_id: u8, _bpp: u32) -> Option<JxsHandoff>
 }
 
 #[cfg(feature = "jxs")]
-fn start_worker(target: String, camera_id: u8, bpp: u32) -> Option<JxsHandoff> {
+fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<JxsHandoff> {
     let socket = match JxsSocket::connect(&target) {
         Ok(s) => s,
         Err(e) => {
@@ -431,7 +512,7 @@ fn start_worker(target: String, camera_id: u8, bpp: u32) -> Option<JxsHandoff> {
         );
     }
     tracing::info!(
-        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, egress mark {}, send buffer {} bytes) -- JPEG XS {bpp} bpp at {} fps (the strih grid, NDI stays at its emit rate), latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), beside NDI (issue 1387)",
+        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, egress mark {}, send buffer {} bytes) -- JPEG XS {} at {} fps (the strih grid, NDI stays at its emit rate), latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads ({}) (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), beside NDI (issue 1387)",
         socket
             .peer()
             .map(|a| a.to_string())
@@ -443,15 +524,28 @@ fn start_worker(target: String, camera_id: u8, bpp: u32) -> Option<JxsHandoff> {
             "NONE: paced with NDI".to_string()
         },
         socket.send_buffer(),
+        bpp_mode_text(opts.bpp),
         jxs_link::JXS_FPS,
         FRAMES_IN_FLIGHT,
         slice_threads_for(&cores),
+        opts.fifo
+            .map(|p| format!(
+                "SCHED_FIFO {p}, below the capture's {}",
+                crate::affinity::CAPTURE_FIFO_PRIORITY
+            ))
+            .unwrap_or_else(|| "SCHED_OTHER".to_string()),
     );
-    handoff::spawn(socket, camera_id, cores, bpp)
+    handoff::spawn(socket, camera_id, cores, opts)
 }
 
 #[cfg(feature = "jxs")]
 mod handoff;
+
+mod options;
+pub use options::*;
+
+#[cfg(test)]
+mod auto_tests;
 
 #[cfg(test)]
 mod tests {
@@ -572,6 +666,7 @@ mod tests {
             stride: w * 2,
             yuyv,
             timecode_100ns,
+            capture_realtime_100ns: 0,
             emit_fps: 60,
         }
     }
@@ -667,7 +762,13 @@ mod tests {
         h.offer(&jf(&frame, w, ht, tc(2), true));
         assert_eq!(h.dropped_busy(), 0);
         let socket = JxsSocket::connect(&format!("127.0.0.1:{port}")).unwrap();
-        assert!(h.start_threads(ready_rx, socket, 5, vec![0, 1], DEFAULT_BPP));
+        assert!(h.start_threads(
+            ready_rx,
+            socket,
+            5,
+            vec![0, 1],
+            SenderOptions::new(BppMode::Fixed(DEFAULT_BPP), None)
+        ));
         // wait for both frames' last slice on the wire
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut b = [0u8; 2048];

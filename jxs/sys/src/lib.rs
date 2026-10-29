@@ -40,6 +40,36 @@ struct EncSettings {
     slice_height: u32,
     cpu_profile: u8,
     slice_packets: u8,
+    rate_control_mode: u32,
+    coding_signs_handling: u32,
+    coding_significance: u32,
+    coding_vertical_prediction: u32,
+    quantization: u32,
+}
+
+/// `CBJXS_DEFAULT` in the shim: keep the library's default for that knob.
+const KEEP_DEFAULT: u32 = u32::MAX;
+
+impl EncSettings {
+    fn from_settings(s: &EncoderSettings) -> Self {
+        let k = |v: Option<u32>| v.unwrap_or(KEEP_DEFAULT);
+        Self {
+            width: s.width,
+            height: s.height,
+            bpp_numerator: s.bpp_numerator,
+            bpp_denominator: s.bpp_denominator,
+            ndecomp_v: s.ndecomp_v,
+            threads_num: s.threads_num,
+            slice_height: SLICE_HEIGHT_LINES,
+            cpu_profile: if s.latency_profile { 0 } else { 1 },
+            slice_packets: 1,
+            rate_control_mode: k(s.tuning.rate_control_mode),
+            coding_signs_handling: k(s.tuning.coding_signs_handling),
+            coding_significance: k(s.tuning.coding_significance),
+            coding_vertical_prediction: k(s.tuning.coding_vertical_prediction),
+            quantization: k(s.tuning.quantization),
+        }
+    }
 }
 
 #[repr(C)]
@@ -213,6 +243,21 @@ pub struct EncoderSettings {
     pub threads_num: u32,
     /// `true` = the library's low-latency profile (cpu_profile 0).
     pub latency_profile: bool,
+    /// The library's coding knobs; `None` keeps its default (the measured cambox setting).
+    pub tuning: EncoderTuning,
+}
+
+/// SVT-JPEG-XS coding knobs (`SvtJpegxsEnc.h`), each `None` = the library's default
+/// (rate control 1, signs 0, significance 1, vertical prediction 0, deadzone quantization).
+/// Issue 1387: the encoder-cost bench (`jxs-encode-bench`) sweeps them; the sender keeps the
+/// defaults.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EncoderTuning {
+    pub rate_control_mode: Option<u32>,
+    pub coding_signs_handling: Option<u32>,
+    pub coding_significance: Option<u32>,
+    pub coding_vertical_prediction: Option<u32>,
+    pub quantization: Option<u32>,
 }
 
 impl EncoderSettings {
@@ -228,6 +273,7 @@ impl EncoderSettings {
             ndecomp_v: 2,
             threads_num: 0,
             latency_profile: true,
+            tuning: EncoderTuning::default(),
         }
     }
 
@@ -266,17 +312,7 @@ impl Encoder {
                 during: "open (width must be even and non-zero)",
             });
         }
-        let c = EncSettings {
-            width: s.width,
-            height: s.height,
-            bpp_numerator: s.bpp_numerator,
-            bpp_denominator: s.bpp_denominator,
-            ndecomp_v: s.ndecomp_v,
-            threads_num: s.threads_num,
-            slice_height: SLICE_HEIGHT_LINES,
-            cpu_profile: if s.latency_profile { 0 } else { 1 },
-            slice_packets: 1,
-        };
+        let c = EncSettings::from_settings(&s);
         let mut raw = std::ptr::null_mut();
         let mut bytes_per_frame = 0u32;
         // SAFETY: `c` and both out-pointers are valid for the call; the shim only reads `c`.
@@ -578,6 +614,43 @@ mod tests {
         let out = dec.finish_frame(Duration::from_secs(5)).expect("decode");
         assert!(max_err(original.y(), out.y()) <= 8, "luma");
         assert!(max_err(original.u(), out.u()) <= 8, "chroma");
+    }
+
+    /// The tuning knobs reach the library: a valid value encodes, a value outside the library's
+    /// range is refused by its init (so the knob was really written, not dropped by the shim).
+    #[test]
+    fn the_coding_knobs_reach_the_library() {
+        let knobs = |t: EncoderTuning| {
+            let mut s = EncoderSettings::issue_1387(W, H);
+            s.tuning = t;
+            s
+        };
+        let mut enc = Encoder::open(knobs(EncoderTuning {
+            rate_control_mode: Some(2),
+            coding_signs_handling: Some(1),
+            coding_significance: Some(0),
+            coding_vertical_prediction: Some(1),
+            quantization: Some(1),
+        }))
+        .expect("valid knobs open");
+        let (_, packets) = encode(&mut enc, 0);
+        assert!(packets.len() > 1, "and encode");
+        for bad in [
+            EncoderTuning {
+                rate_control_mode: Some(9),
+                ..Default::default()
+            },
+            EncoderTuning {
+                coding_signs_handling: Some(7),
+                ..Default::default()
+            },
+            EncoderTuning {
+                coding_vertical_prediction: Some(5),
+                ..Default::default()
+            },
+        ] {
+            assert!(Encoder::open(knobs(bad)).is_err(), "{bad:?} refused");
+        }
     }
 
     #[test]

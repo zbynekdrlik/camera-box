@@ -60,6 +60,12 @@ int32_t cbjxs_enc_open(const cbjxs_enc_settings* s, cbjxs_enc** out, uint32_t* b
     e->api.cpu_profile = s->cpu_profile;
     e->api.slice_packetization_mode = s->slice_packets;
     e->api.verbose = VERBOSE_NONE;
+    if (s->rate_control_mode != CBJXS_DEFAULT) e->api.rate_control_mode = s->rate_control_mode;
+    if (s->coding_signs_handling != CBJXS_DEFAULT) e->api.coding_signs_handling = s->coding_signs_handling;
+    if (s->coding_significance != CBJXS_DEFAULT) e->api.coding_significance = s->coding_significance;
+    if (s->coding_vertical_prediction != CBJXS_DEFAULT)
+        e->api.coding_vertical_prediction_mode = s->coding_vertical_prediction;
+    if (s->quantization != CBJXS_DEFAULT) e->api.quantization = s->quantization;
 
     svt_jpeg_xs_image_config_t cfg;
     memset(&cfg, 0, sizeof(cfg));
