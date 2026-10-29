@@ -27,7 +27,7 @@ use camera_box::jxs_send::{
 };
 
 /// `CBJXS_SEND_ABI_VERSION` of `include/camera_box_jxs_send.h`.
-pub const CBJXS_SEND_ABI_VERSION: u32 = 1;
+pub const CBJXS_SEND_ABI_VERSION: u32 = 2;
 
 /// `cbjxs_send_picture.format` (`RawLayout::from_code`).
 pub const CBJXS_SEND_I420: u32 = 1;
@@ -46,6 +46,9 @@ pub struct CbjxsSendConfig {
     pub bpp_min: u8,
     pub bpp_max: u8,
     pub reserved: u8,
+    /// ABI 2: the send pacing in Mb/s of wire, 0 = line rate.
+    pub pace_mbps: u32,
+    pub reserved2: u32,
 }
 
 /// `cbjxs_send_picture`.
@@ -83,6 +86,12 @@ pub struct CbjxsSendStats {
     pub bpp: u32,
     pub auto_bpp: u8,
     pub reserved: [u8; 3],
+    /// ABI 2: the pacing the window sent at (0 = line rate) and each whole frame's time on the
+    /// wire, first send -> last send returned.
+    pub pace_mbps: u32,
+    pub reserved2: u32,
+    pub wire_ms_avg: f64,
+    pub wire_ms_max: f64,
 }
 
 fn avg(sum: f64, n: u64) -> f64 {
@@ -114,6 +123,10 @@ impl CbjxsSendStats {
             bpp: w.bpp,
             auto_bpp: w.auto as u8,
             reserved: [0; 3],
+            pace_mbps: w.pace_mbps,
+            reserved2: 0,
+            wire_ms_avg: avg(w.wire_ms_sum, w.wire_frames),
+            wire_ms_max: w.wire_ms_max,
         }
     }
 }
@@ -195,7 +208,8 @@ unsafe fn link_config(c: &CbjxsSendConfig) -> Result<LinkConfig, String> {
         target: target.trim().to_string(),
         camera_id: c.stream_id,
         cores,
-        opts: SenderOptions::new(bpp_mode(c.bpp_min, c.bpp_max)?, None),
+        opts: SenderOptions::new(bpp_mode(c.bpp_min, c.bpp_max)?, None)
+            .with_pace(camera_box::jxs_link::pace::check_pace_mbps(c.pace_mbps)?),
         egress_mark: false,
     })
 }
@@ -550,7 +564,7 @@ mod tests {
 
     #[test]
     fn a_bad_config_names_its_problem_and_starts_nothing() {
-        let open = |target: &CStr, cores: Option<&CStr>, min, max| {
+        let open = |target: &CStr, cores: Option<&CStr>, min, max, pace_mbps| {
             let c = CbjxsSendConfig {
                 target: target.as_ptr(),
                 cores: cores.map_or(std::ptr::null(), CStr::as_ptr),
@@ -559,6 +573,8 @@ mod tests {
                 bpp_min: min,
                 bpp_max: max,
                 reserved: 0,
+                pace_mbps,
+                reserved2: 0,
             };
             let mut err = [0 as c_char; 128];
             let tx = unsafe { cbjxs_send_open(&c, err.as_mut_ptr(), err.len()) };
@@ -567,11 +583,36 @@ mod tests {
                 .to_string_lossy()
                 .into_owned()
         };
-        assert!(open(c"", None, 0, 0).contains("no target"));
-        assert!(open(c"10.0.0.1", None, 0, 0).contains("port"));
-        assert!(open(c"127.0.0.1:9", Some(c"x"), 0, 0).contains("cpulist"));
-        assert!(open(c"127.0.0.1:9", None, 9, 4).contains("bpp"));
+        assert!(open(c"", None, 0, 0, 0).contains("no target"));
+        assert!(open(c"10.0.0.1", None, 0, 0, 0).contains("port"));
+        assert!(open(c"127.0.0.1:9", Some(c"x"), 0, 0, 0).contains("cpulist"));
+        assert!(open(c"127.0.0.1:9", None, 9, 4, 0).contains("bpp"));
+        assert!(open(c"127.0.0.1:9", None, 0, 0, 50).contains("pace 50"));
         assert!(unsafe { cbjxs_send_open(std::ptr::null(), std::ptr::null_mut(), 0) }.is_null());
+    }
+
+    fn cfg_with_pace(pace_mbps: u32) -> CbjxsSendConfig {
+        CbjxsSendConfig {
+            target: c"127.0.0.1:9".as_ptr(),
+            cores: std::ptr::null(),
+            emit_fps: 30,
+            stream_id: 100,
+            bpp_min: 0,
+            bpp_max: 0,
+            reserved: 0,
+            pace_mbps,
+            reserved2: 0,
+        }
+    }
+
+    #[test]
+    fn the_config_pace_reaches_the_sender_options() {
+        let l = unsafe { link_config(&cfg_with_pace(900)) }.unwrap();
+        assert_eq!(l.opts.pace_mbps, 900);
+        let l = unsafe { link_config(&cfg_with_pace(0)) }.unwrap();
+        assert_eq!(l.opts.pace_mbps, 0, "0 = line rate");
+        let e = unsafe { link_config(&cfg_with_pace(100_001)) }.unwrap_err();
+        assert!(e.contains("pace 100001"), "{e}");
     }
 
     #[test]
@@ -587,9 +628,18 @@ mod tests {
             auto: true,
             reports: 5,
             window_s: 5.0,
+            pace_mbps: 900,
+            // 4 frames, 2 of them with a wire time: the average divides by 2, not 4
+            wire_frames: 2,
+            wire_ms_sum: 40.0,
+            wire_ms_max: 21.5,
             ..SendWindow::default()
         };
         let s = CbjxsSendStats::from_window(3, &w);
+        assert_eq!(
+            (s.pace_mbps, s.wire_ms_avg, s.wire_ms_max),
+            (900, 20.0, 21.5)
+        );
         assert_eq!(
             (s.seq, s.frames, s.bpp, s.auto_bpp, s.reports),
             (3, 4, 7, 1, 5)

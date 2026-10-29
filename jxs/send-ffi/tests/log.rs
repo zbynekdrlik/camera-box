@@ -33,6 +33,8 @@ fn the_sender_log_lines_reach_the_callback_and_null_stops_them() {
         bpp_min: 6,
         bpp_max: 6,
         reserved: 0,
+        pace_mbps: 0,
+        reserved2: 0,
     };
     let tx = unsafe { cbjxs_send_open(&cfg, std::ptr::null_mut(), 0) };
     assert!(!tx.is_null());

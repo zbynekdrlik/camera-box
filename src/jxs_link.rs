@@ -56,6 +56,7 @@
 //! predates the sender's last bpp change is about the old bpp and steps nothing down.
 
 pub mod assembler;
+pub mod pace;
 pub mod planar;
 pub mod png;
 pub mod recv_stats;
@@ -248,11 +249,9 @@ pub fn build_slice_datagrams(
 /// The byte ranges of `buf` (built by [`build_slice_datagrams`]) for successive GSO sends of at
 /// most [`GSO_SEGMENTS_PER_SEND`] datagrams each. Each range starts on a datagram boundary, so the
 /// kernel's `gso_size` cut lines up with the headers.
+/// The line-rate case of [`pace::send_ranges`] (one cut, one implementation).
 pub fn gso_send_ranges(buf_len: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
-    let step = GSO_SEGMENTS_PER_SEND * DATAGRAM_LEN;
-    (0..buf_len)
-        .step_by(step.max(1))
-        .map(move |start| start..(start + step).min(buf_len))
+    pace::send_ranges(buf_len, GSO_SEGMENTS_PER_SEND)
 }
 
 /// Split one received buffer into datagrams. With UDP GRO the kernel hands several datagrams of
@@ -334,6 +333,14 @@ pub struct SendWindow {
     /// The frame's capture instant -> the same hand-off. `handoff_age - capture_age` = where the
     /// capture sits inside its emit slot (the timecode is the slot boundary at or before it).
     pub capture_age: HandoffAge,
+    /// The send pacing in Mb/s of wire (issue 1387, `pace`), 0 = line rate.
+    pub pace_mbps: u32,
+    /// Per whole frame: its first send -> its last send returned (the frame's time on the wire,
+    /// paced or not; at line rate it follows the encoder's slice span); the average divides by
+    /// `wire_frames` (a frame with no send has no wire time).
+    pub wire_frames: u64,
+    pub wire_ms_sum: f64,
+    pub wire_ms_max: f64,
 }
 
 /// The age of an instant (a frame's genlock timecode, or its capture instant) at the hand-off to
@@ -410,15 +417,23 @@ impl SendWindow {
         self.encode_ms_max = self.encode_ms_max.max(encode_ms);
     }
 
+    /// One whole frame's time on the wire (first send -> last send returned).
+    pub fn note_wire(&mut self, wire_ms: f64) {
+        self.wire_frames += 1;
+        self.wire_ms_sum += wire_ms;
+        self.wire_ms_max = self.wire_ms_max.max(wire_ms);
+    }
+
     /// The 5 s status line: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
     /// dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
     /// capture_age_ms_avg/min/max= first_slice_ms_avg/max=
-    /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= reports= (issue 1387)`. `bytes`
+    /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= reports= pace_mbps=
+    /// wire_ms_avg/max= (issue 1387)`. `bytes`
     /// counts the codestream, not the headers; `bpp_reason` / `report_age_s` / the two ages read `-` when
     /// there is none.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} pace_mbps={} wire_ms_avg/max={:.2}/{:.2} (issue 1387)",
             if self.window_s > 0.0 {
                 self.frames as f64 / self.window_s
             } else {
@@ -446,6 +461,9 @@ impl SendWindow {
             self.report_age_s
                 .map_or("-".to_string(), |a| format!("{a:.1}")),
             self.reports,
+            self.pace_mbps,
+            avg(self.wire_ms_sum, self.wire_frames),
+            self.wire_ms_max,
         )
     }
 }
@@ -704,9 +722,12 @@ mod tests {
         w.reports = 5;
         w.handoff_age.note(210_000);
         w.handoff_age.note(290_000);
+        w.pace_mbps = 900;
+        w.note_wire(19.5);
+        w.note_wire(20.1);
         assert_eq!(
             w.status_line(),
-            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 (issue 1387)"
+            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 pace_mbps=900 wire_ms_avg/max=19.80/20.10 (issue 1387)"
         );
         let empty = SendWindow::default().status_line();
         assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
@@ -735,7 +756,13 @@ mod tests {
             "reports=",
             "handoff_age_ms_avg/min/max=",
             "capture_age_ms_avg/min/max=",
+            "pace_mbps=",
+            "wire_ms_avg/max=",
         ];
+        assert!(
+            empty.contains(" pace_mbps=0 wire_ms_avg/max=0.00/0.00 "),
+            "line rate reads 0: {empty}"
+        );
         assert!(
             empty.contains(" auto=off bpp_reason=- ")
                 && empty.contains(" report_age_s=- ")

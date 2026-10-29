@@ -18,11 +18,12 @@
 //!   each converted picture at once, so frame N+1 is encoding while frame N's last slices go out;
 //! - `jxs-send` reads each frame's packets the moment the encoder produces them and sends every
 //!   slice as one `send` with `UDP_SEGMENT` (UDP GSO; wire format: `crate::jxs_link`), then gives
-//!   the picture back.
+//!   the picture back. With a pace rate (`SenderOptions::pace_mbps`, [`PACE_ENV`] on a cambox,
+//!   default 0 = line rate) it holds each send until its departure on the pace schedule
+//!   (`crate::jxs_link::pace`): the waiting happens on this thread only.
 //!
-//! Every 5 s it logs `jxs send: fps= bpp= frames= slices= bytes= dropped_busy= in_flight=max/cap
-//! convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors= encode_errors=
-//! (issue 1387)`. A frame in flight with no packet for [`WEDGE_MS`] logs one
+//! Every 5 s it logs the `jxs send: fps= ...` status line (its fields:
+//! `jxs_link::SendWindow::status_line`). A frame in flight with no packet for [`WEDGE_MS`] logs one
 //! `CRITICAL jxs send: encoder wedged` line from the feeder (the status line lives on the packet
 //! thread, which is the one stuck).
 //!
@@ -198,8 +199,28 @@ impl JxsSocket {
     /// calls that failed (a receiver that is not listening answers with ICMP, which the next
     /// send reports as `ECONNREFUSED`; the link never waits for it).
     pub fn send_slice(&self, datagrams: &[u8]) -> u64 {
-        let mut errors = 0;
-        for r in jxs_link::gso_send_ranges(datagrams.len()) {
+        self.send_slice_paced(datagrams, None).errors
+    }
+
+    /// [`Self::send_slice`] on a pace schedule (issue 1387, `jxs_link::pace`): `None` = line rate
+    /// (up to 40 datagrams per send, at once); `Some` = at most `PACE_BURST_SEGMENTS` datagrams per
+    /// send, each send held on THIS thread until its departure time (an absolute
+    /// `clock_nanosleep` on `CLOCK_MONOTONIC`).
+    pub fn send_slice_paced(
+        &self,
+        datagrams: &[u8],
+        mut pace: Option<&mut jxs_link::pace::PaceSchedule>,
+    ) -> SliceSent {
+        let mut out = SliceSent::default();
+        let segments = jxs_link::pace::segments_per_send(pace.is_some());
+        for r in jxs_link::pace::send_ranges(datagrams.len(), segments) {
+            if let Some(p) = pace.as_deref_mut() {
+                let now = monotonic_ns();
+                let at = p.depart(now, jxs_link::pace::wire_bytes(r.len()));
+                out.paced_ns += at.saturating_sub(now);
+                sleep_until_monotonic_ns(at);
+            }
+            out.first.get_or_insert_with(std::time::Instant::now);
             let batch = &datagrams[r];
             if self.gso() {
                 match self.sock.send(batch) {
@@ -216,19 +237,31 @@ impl JxsSocket {
                         );
                     }
                     Err(_) => {
-                        errors += 1;
+                        out.errors += 1;
                         continue;
                     }
                 }
             }
             for d in batch.chunks(DATAGRAM_LEN) {
                 if self.sock.send(d).is_err() {
-                    errors += 1;
+                    out.errors += 1;
                 }
             }
         }
-        errors
+        out
     }
+}
+
+/// What [`JxsSocket::send_slice_paced`] did with one slice.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SliceSent {
+    /// Send calls that failed.
+    pub errors: u64,
+    /// When the first send went, after its wait (`None` = an empty buffer).
+    pub first: Option<std::time::Instant>,
+    /// Nanoseconds the schedule held the sends back (0 at line rate): the auto bpp leaves this
+    /// out of its encode time, the wire time is not a cost of the codec.
+    pub paced_ns: u64,
 }
 
 /// Set an int socket option; `true` on success.
@@ -469,7 +502,15 @@ impl JxsSender {
             tracing::warn!("jxs send: {e} -- the encoder stays SCHED_OTHER (issue 1387)");
             None
         });
-        Self::start_with_options(value.as_deref(), hostname, SenderOptions::new(bpp, fifo))
+        let pace = parse_pace_mbps(env(PACE_ENV).as_deref()).unwrap_or_else(|e| {
+            tracing::warn!("jxs send: {e} -- sending at line rate (issue 1387)");
+            0
+        });
+        Self::start_with_options(
+            value.as_deref(),
+            hostname,
+            SenderOptions::new(bpp, fifo).with_pace(pace),
+        )
     }
 
     /// [`Self::start_from_env`] with the target passed in and the default bpp (tests).
@@ -544,7 +585,7 @@ fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<Jx
         );
     }
     tracing::info!(
-        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, egress mark {}, send buffer {} bytes) -- JPEG XS {} at {} fps (the strih grid, NDI stays at its emit rate), latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads ({}) (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), beside NDI (issue 1387)",
+        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, egress mark {}, send buffer {} bytes) -- JPEG XS {} at {} fps (the strih grid, NDI stays at its emit rate), latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads ({}) (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), send {}, beside NDI (issue 1387)",
         socket
             .peer()
             .map(|a| a.to_string())
@@ -562,6 +603,7 @@ fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<Jx
                 crate::affinity::CAPTURE_FIFO_PRIORITY
             ))
             .unwrap_or_else(|| "SCHED_OTHER".to_string()),
+        pace_text(opts.pace_mbps),
     );
     handoff::spawn(socket, camera_id, cores, opts)
 }
@@ -579,6 +621,11 @@ pub use raw::{Offered, RawFrame, RawLayout};
 
 mod link;
 pub use link::LinkConfig;
+
+mod pacing;
+#[cfg(feature = "jxs")]
+use pacing::tighten_timer_slack;
+pub use pacing::{monotonic_ns, sleep_until_monotonic_ns};
 
 #[cfg(test)]
 mod auto_tests;

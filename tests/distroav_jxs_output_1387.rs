@@ -88,6 +88,17 @@ int main(void)
 	EXPECT(cb_jxs_out_bpp(12) == 12u);
 	EXPECT(cb_jxs_out_bpp(13) == 0u);
 	EXPECT(cb_jxs_out_bpp(-3) == 0u);
+	/* the send pacing: 900 by default (strih's 10 GbE to stream's 1 GbE port), 0 = line rate,
+	 * anything else clamped into the sender's 100..100000 */
+	EXPECT(CB_JXS_OUT_PACE_MBPS_DEFAULT == 900);
+	EXPECT(cb_jxs_out_pace_mbps(900) == 900u);
+	EXPECT(cb_jxs_out_pace_mbps(0) == 0u);
+	EXPECT(cb_jxs_out_pace_mbps(-1) == 0u);
+	EXPECT(cb_jxs_out_pace_mbps(50) == 100u);
+	EXPECT(cb_jxs_out_pace_mbps(100) == 100u);
+	EXPECT(cb_jxs_out_pace_mbps(100000) == 100000u);
+	EXPECT(cb_jxs_out_pace_mbps(100001) == 100000u);
+	EXPECT(cb_jxs_out_pace_mbps(1LL << 40) == 100000u);
 	/* the canvas frame rate, rounded; a broken one is 0 */
 	EXPECT(cb_jxs_out_fps(30.0) == 30u);
 	EXPECT(cb_jxs_out_fps(29.97) == 30u);
@@ -283,6 +294,39 @@ fn the_program_pixel_format_maps_onto_the_sender_formats_and_nothing_else_starts
     assert!(out.contains("#define JXS_OUTPUT_ID \"camera_box_jxs_output\""));
 }
 
+/// Issue 1387: the send pacing reaches the sender. `jxs_pace_mbps` defaults to 900 (strih-snv's
+/// 10 GbE into stream-snv's 1 GbE port), is read through the clamp, and is handed over in the open
+/// config; the clamp's bounds are the sender's own.
+#[test]
+fn the_pace_setting_defaults_to_900_and_reaches_the_sender_config() {
+    let out = read(OUTPUT);
+    let decide = read(DECIDE);
+    assert!(out.contains("#define PROP_JXS_PACE_MBPS \"jxs_pace_mbps\""));
+    let defaults = function_body(&out, "static void jxs_output_getdefaults(");
+    assert!(defaults.contains(
+        "obs_data_set_default_int(settings, PROP_JXS_PACE_MBPS, CB_JXS_OUT_PACE_MBPS_DEFAULT);"
+    ));
+    assert!(decide.contains("#define CB_JXS_OUT_PACE_MBPS_DEFAULT 900\n"));
+    let update = function_body(&out, "static void jxs_output_update(");
+    assert!(update.contains(
+        "o->pace_mbps = cb_jxs_out_pace_mbps(obs_data_get_int(settings, PROP_JXS_PACE_MBPS));"
+    ));
+    let start = function_body(&out, "static bool jxs_output_start(");
+    let set = start
+        .find("cfg.pace_mbps = o->pace_mbps;")
+        .expect("the pace goes into the open config");
+    let open = start.find("cbjxs_send_open(&cfg").unwrap();
+    assert!(set < open, "set before the open");
+    // the C clamp keeps every setting inside what the sender accepts: a start never fails on it
+    use camera_box::jxs_link::pace::{PACE_MBPS_MAX, PACE_MBPS_MIN};
+    assert!(decide.contains(&format!(
+        "#define CB_JXS_OUT_PACE_MBPS_MIN {PACE_MBPS_MIN}\n"
+    )));
+    assert!(decide.contains(&format!(
+        "#define CB_JXS_OUT_PACE_MBPS_MAX {PACE_MBPS_MAX}\n"
+    )));
+}
+
 #[test]
 fn the_output_logs_a_start_line_a_status_line_and_the_senders_own_lines() {
     let out = read(OUTPUT);
@@ -297,6 +341,9 @@ fn the_output_logs_a_start_line_a_status_line_and_the_senders_own_lines() {
         "reports=",
         "copy_ms_avg/max",
         "report_age_s",
+        "pace_mbps=%u",
+        "wire_ms_avg/max=%.2f/%.2f",
+        "st.pace_mbps, st.wire_ms_avg, st.wire_ms_max",
     ] {
         assert!(status.contains(field), "status line lacks {field}");
     }
