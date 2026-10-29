@@ -99,8 +99,12 @@ pub fn resolve_preview_source(discovered: &[String], preferred: &str) -> Preview
 }
 
 /// The IP of an NDI source address (`ip:port`, `[v6]:port` or a bare IP), else `None`.
-pub fn source_ip(_address: &str) -> Option<IpAddr> {
-    None
+pub fn source_ip(address: &str) -> Option<IpAddr> {
+    let a = address.trim();
+    if let Ok(sock) = a.parse::<std::net::SocketAddr>() {
+        return Some(sock.ip());
+    }
+    a.parse::<IpAddr>().ok()
 }
 
 /// Issue 1431: the strih interkom output published from `strih_ip` wins on sight; otherwise the
@@ -108,8 +112,22 @@ pub fn source_ip(_address: &str) -> Option<IpAddr> {
 pub fn resolve_followed_preview_source(
     discovered: &[DiscoveredSource],
     preferred: &str,
-    _strih_ip: Option<IpAddr>,
+    strih_ip: Option<IpAddr>,
 ) -> PreviewResolution {
+    if let Some(strih_ip) = strih_ip {
+        let followed = discovered
+            .iter()
+            .filter(|s| is_strih_interkom(&s.name))
+            .filter(|s| s.address.as_deref().and_then(source_ip) == Some(strih_ip))
+            .map(|s| s.name.as_str())
+            .min();
+        if let Some(name) = followed {
+            return PreviewResolution::Followed {
+                name: name.to_string(),
+                strih_ip,
+            };
+        }
+    }
     let names: Vec<String> = discovered.iter().map(|s| s.name.clone()).collect();
     resolve_preview_source(&names, preferred)
 }
@@ -117,10 +135,22 @@ pub fn resolve_followed_preview_source(
 /// The journal line for the `strih.lan` resolution, only when it changed since `last_logged`
 /// (`None` = never logged). Issue 1431.
 pub fn strih_lan_log_line(
-    _last_logged: Option<&Option<IpAddr>>,
-    _now: Option<IpAddr>,
+    last_logged: Option<&Option<IpAddr>>,
+    now: Option<IpAddr>,
 ) -> Option<String> {
-    None
+    if last_logged == Some(&now) {
+        return None;
+    }
+    Some(match now {
+        Some(ip) => format!(
+            "NDI display: {STRIH_DNS_NAME} resolves to {ip} -- the preview follows the strih \
+             interkom output published from it (#1431)"
+        ),
+        None => format!(
+            "NDI display: {STRIH_DNS_NAME} does not resolve -- the preview keeps the strih name \
+             rules (#1431)"
+        ),
+    })
 }
 
 /// Decide which exact name (if any) to connect to NOW. `window_elapsed` is `true` on the final
@@ -171,9 +201,11 @@ pub fn preview_log_level(
 /// The one journal line describing a resolution (logged once per change by the display loop).
 pub fn preview_log_line(resolution: &PreviewResolution, preferred: &str) -> String {
     match resolution {
-        PreviewResolution::Followed { name, .. }
-        | PreviewResolution::Preferred(name)
-        | PreviewResolution::Fallback(name) => {
+        PreviewResolution::Followed { name, strih_ip } => format!(
+            "NDI display: preview source resolved to '{name}', the strih behind \
+             {STRIH_DNS_NAME} ({strih_ip}) (#1431)"
+        ),
+        PreviewResolution::Preferred(name) | PreviewResolution::Fallback(name) => {
             format!("NDI display: preview source resolved to '{name}' (#1362)")
         }
         PreviewResolution::Ambiguous(candidates) => {
