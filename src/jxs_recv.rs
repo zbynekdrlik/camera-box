@@ -254,11 +254,18 @@ mod decode {
         pending_ok: bool,
         whole: Vec<u8>,
         count: usize,
+        /// The last picture header packet (index 0) that arrived, decoder open or not. A frame
+        /// whose header differs (a bpp change: the header carries the codestream length `Lcod`)
+        /// forgets the concealment source and reopens an open decoder from that frame (issue
+        /// 1387).
+        last_header: Vec<u8>,
         frame_failed: bool,
         on_frame: F,
         /// Frames that could not be decoded.
         pub errors: u64,
         pub last_error: Option<String>,
+        /// Picture header changes seen (each one a sender bpp change).
+        pub header_changes: u64,
     }
 
     impl<F: FnMut(&FrameReport, Option<&Yuv422Planes>)> DecodeSink<F> {
@@ -271,10 +278,12 @@ mod decode {
                 pending_ok: true,
                 whole: Vec::new(),
                 count: 0,
+                last_header: Vec::new(),
                 frame_failed: false,
                 on_frame,
                 errors: 0,
                 last_error: None,
+                header_changes: 0,
             }
         }
 
@@ -377,6 +386,24 @@ mod decode {
                     self.count = count as usize;
                     self.dec = None;
                     self.has_prev.iter_mut().for_each(|h| *h = false);
+                }
+                if let Some(b) = bytes {
+                    if b != self.last_header.as_slice() {
+                        if !self.last_header.is_empty() {
+                            // A new picture header: the sender changed its bpp (issue 1387;
+                            // the packet count stays). An open decoder sized its frame from the
+                            // old header's codestream length and would end this frame early (or
+                            // wait past it): start over from this whole frame like a new
+                            // geometry. Checked whether a decoder is open or not (one may have
+                            // been given up just before), the old bpp's slices have other sizes
+                            // and are never a concealment source for the new one.
+                            self.header_changes += 1;
+                            self.dec = None;
+                            self.has_prev.iter_mut().for_each(|h| *h = false);
+                        }
+                        self.last_header.clear();
+                        self.last_header.extend_from_slice(b);
+                    }
                 }
                 if self.dec.is_none() {
                     self.pending.resize_with(self.count, Vec::new);

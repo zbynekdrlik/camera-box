@@ -172,6 +172,38 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
   timeout (200 ms, sleeping 100 us per look). Pinned by `a_garbled_slice_is_seen_before_the_frame_ends_and_never_blocks`
   (jxs/sys) and `a_garbled_slice_costs_that_frame_and_the_next_one_decodes` (loopback), both run on
   a thread with a deadline so a regression fails instead of wedging the suite.
+- **A bpp change reopens the decoder at the changed picture header** (live 29.10.2026: every auto
+  step 4 -> 5 cost an undecodable frame, `the frame ended before its last packet`, the receiver
+  reported it as a loss about the new bpp and the controller stepped straight back, so auto bpp
+  never climbed). A bpp change keeps the geometry and the packet count (69 at 1080p at EVERY
+  bpp), so a count-only restart never fires. The header packet (index 0, 110 bytes) carries the
+  codestream length `Lcod` (bytes 12..16: 172800 at 4 bpp, 216000 at 5, 345600 at 8 for
+  320x1080); SVT's packet-mode decoder sizes its frame from the header it was opened with, so a
+  frame of another size ends early (up) or waits past its end (down). `DecodeSink` keeps the
+  LAST header packet that arrived (`last_header`) and compares every arriving one with it,
+  whether a decoder is open or not (review round 1: checked only while open, a bpp change right
+  after a frame the decoder gave up on went unseen, and a lost slice in the first new-bpp frame
+  was concealed with an old-bpp slice: that frame DECODED from a mix of two bpps, a garbled
+  picture reported as good). A changed header drops an open decoder AND the concealment source
+  (the old bpp's slices have other sizes); the decoder opens from that whole frame, the same
+  bounded path as the first frame (that one frame decodes after its last packet instead of
+  slice by slice). `header_changes` counts every header change; `jxs-recv-probe` prints
+  `decoder reopened at N new picture header(s) (a sender bpp change)` once per window.
+  A slice lost in the FIRST frame at a new bpp has no concealment source: that frame is
+  undecodable and reported (a real loss). A header packet lost in exactly that frame is concealed
+  with the old header and the frame fails (counted); the next header resets.
+  **"A steady stream never reopens" rests on a constant header per bpp:** the default rate
+  control (1) codes every frame to exactly `Lcod`, so the header packet is byte-identical frame to
+  frame (dumped from the real encoder, ramp content). A codec setting that let `Lcod` vary per
+  frame would reopen EVERY frame (decode after the last packet, no concealment); the probe's
+  reopen line would show it climbing with the frame count. Pinned by
+  `a_bpp_change_mid_stream_decodes_every_frame_with_no_loss` (4 -> 5 -> 8 -> 6 -> 4, every frame
+  decodes, 0 lost, 0 undecodable),
+  `after_a_bpp_change_every_picture_is_its_own_and_a_loss_is_concealed_from_the_new_bpp` (one
+  reopen, every picture its own, the hole in the 2nd new-bpp frame shows the 1st one's decode),
+  `a_loss_in_the_first_frame_at_a_new_bpp_is_never_concealed_from_the_old_bpp` and
+  `a_bpp_change_after_a_failed_frame_never_conceals_from_the_old_bpp`; mutating out the
+  concealment reset or the decoder drop fails two of them each.
 - **Every SVT init is serialized** (a mutex in the shim): the library fills its run-time CPU
   dispatch tables at the first init through a plain static flag, and two inits at once race on it
   (stdout `Error: ... Pointer "..." is set before!`, seen with parallel tests).
@@ -392,7 +424,8 @@ line-rate ~8-12 ms. `first_arrival_ms` should stop wandering. The latency p50 sh
 - The first frame after a geometry change allocates its pictures on the capture thread (~2 ms,
   once).
 - One receiver per cambox; only YUYV captures are sent (another format logs one WARN).
-- A frame whose slice count differs from the previous one restarts the decoder (a geometry change).
+- A frame whose slice count (a geometry change) or picture header packet (a bpp change) differs
+  from the decoder's restarts it; that frame decodes after its last packet, not slice by slice.
 - In TEST mode with the cam1 QR burn active, NDI carries the burned frame and JPEG XS the
   unburned capture: a pixel comparison of the two during an E2E differs by the burn.
 - `SO_SNDBUF` asks for 4 MB; the kernel caps it at `net.core.wmem_max` (the "link ON" line logs
