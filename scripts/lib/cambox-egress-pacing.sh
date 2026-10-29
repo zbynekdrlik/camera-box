@@ -549,3 +549,131 @@ cambox_egress_pacing_e2e_report() {
   echo "    egress pacing: $n_ok ok, $n_warn warning (report-only, issue 1242)"
   return 0
 }
+
+# cambox_egress_pacing_apply_program -> the REMOTE program (root, `ssh ... bash -s`) that brings a live,
+# already-provisioned cambox to this lib's tree WITHOUT a setup-device re-run (issue 1387: every box
+# provisioned before it carries the old root-fq boot script, which (ap) names as stale). Everything
+# runs inside ONE function called with </dev/null (the program arrives on bash's stdin; the ro-window
+# rule's stdin finding). Non-zero (nothing printed) when the checked-in unit cannot be read here.
+#   1. read (nothing written): the root mode, whether the boot script and the unit equal what
+#      setup-device installs (sha256 of the whole file), whether the unit is enabled;
+#   2. the rw window, when something needs a write OR the root does not read `ro` (a cambox runs
+#      read-only, so a writable root is the stuck state, put back by the verified close before
+#      anything starts): the boot script (0755) and the unit (0644), each a temp file + rename, and
+#      `systemctl enable` -- then the ONE verified close (scripts/lib/ro-window.sh, issue 1407). A
+#      failure inside reaches the EXIT trap, which runs the same close;
+#   3. after the close: daemon-reload, `systemctl restart` of the unit (it runs the boot script: the
+#      `tc ... replace` chain, idempotent; replacing the root drops what the OLD root qdisc still had
+#      queued, once), then the read-back: `tc qdisc show` + `tc filter show` on the default-route
+#      interface graded by THIS lib's verdict (embedded with `declare -f`). Exit 0 only on `OK`.
+cambox_egress_pacing_apply_program() {
+  local unit
+  if ! command -v ro_window_close_cmds >/dev/null 2>&1; then
+    # shellcheck source=scripts/lib/ro-window.sh
+    . "${BASH_SOURCE[0]%/*}/ro-window.sh"
+  fi
+  if [ ! -r "$CAMBOX_EGRESS_PACING_UNIT_SRC" ]; then
+    echo "FAIL: [issue 1387] cannot read the checked-in unit $CAMBOX_EGRESS_PACING_UNIT_SRC -- run from a checkout with systemd/ next to scripts/" >&2
+    return 1
+  fi
+  unit="$(cat "$CAMBOX_EGRESS_PACING_UNIT_SRC")"
+  cat <<'PROG'
+# scripts/lib/cambox-egress-pacing.sh (issues 1242, 1387): the egress tree of this cambox.
+_cep_main() {
+set -eu
+PROG
+  printf '_cep_svc=%q\n' "$CAMBOX_EGRESS_PACING_SERVICE_NAME"
+  printf '_cep_sp=%q\n' "$CAMBOX_EGRESS_PACING_SCRIPT_PATH"
+  printf '_cep_up=%q\n' "$CAMBOX_EGRESS_PACING_SERVICE_PATH"
+  printf '_cep_script=%q\n' "$(cambox_egress_pacing_boot_script)"
+  printf '_cep_unit=%q\n' "$unit"
+  local v
+  for v in CAMBOX_EGRESS_PACING_RATE CAMBOX_EGRESS_PACING_FLOW_LIMIT CAMBOX_EGRESS_PACING_LIMIT \
+    CAMBOX_EGRESS_PACING_JXS_MARK CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT CAMBOX_EGRESS_PACING_PRIOMAP; do
+    printf '%s=%q\n' "$v" "${!v}"
+  done
+  printf '%s\n' "$(declare -f ro_root_mount_mode cambox_egress_pacing_rate_bps cambox_egress_pacing_qdisc_line \
+    cambox_egress_pacing_token cambox_egress_pacing_verdict)"
+  cat <<'PROG'
+_cep_box="$(hostname 2>/dev/null || echo this cambox)"
+_cep_sha() { if [ -e "$1" ]; then _cep_s="$(sha256sum <"$1")"; echo "${_cep_s%% *}"; else echo __ABSENT__; fi; }
+_cep_want() { _cep_s="$(printf '%s\n' "$1" | sha256sum)"; echo "${_cep_s%% *}"; }
+_cep_put() {  # PATH MODE CONTENT: a temp file + rename
+  mkdir -p "${1%/*}" && printf '%s\n' "$3" >"$1.new" && chmod "$2" "$1.new" && mv -f "$1.new" "$1"
+}
+# --- 1. what this box needs (read before anything is written) ---
+_cep_mode="$(ro_root_mount_mode "$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)")"
+_cep_do_s=0
+[ "$(_cep_sha "$_cep_sp")" = "$(_cep_want "$_cep_script")" ] || _cep_do_s=1
+_cep_do_u=0
+[ "$(_cep_sha "$_cep_up")" = "$(_cep_want "$_cep_unit")" ] || _cep_do_u=1
+_cep_do_e=0
+[ "$(systemctl is-enabled "$_cep_svc" 2>/dev/null || true)" = enabled ] || _cep_do_e=1
+echo "PLAN ($_cep_box): root $_cep_mode; boot script $([ "$_cep_do_s" = 1 ] && echo write || echo in-place); unit $([ "$_cep_do_u" = 1 ] && echo write || echo in-place); $([ "$_cep_do_e" = 1 ] && echo enable || echo enabled)"
+_cep_rc=0
+# --- 2. the rw window, closed by the ONE verified close ---
+_cep_open=0
+_cep_close() {
+  [ "$_cep_open" = 1 ] || return 0
+  _cep_open=0
+PROG
+  ro_window_close_cmds "issue 1387" "\$_cep_box" \
+    "The new boot script is on disk, but the root stays read-WRITE, so the egress tree is not applied." \
+    "stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run the cambox egress pacing apply for this box (never reboot a cambox remotely)."
+  cat <<'PROG'
+}
+trap '_cep_close' EXIT
+if [ "$_cep_do_s" = 1 ] || [ "$_cep_do_u" = 1 ] || [ "$_cep_do_e" = 1 ] || [ "$_cep_mode" != ro ]; then
+  if ! mount -o remount,rw /; then
+    echo "FAIL: [issue 1387] could not remount / read-write on $_cep_box -- nothing was written" >&2
+    exit 1
+  fi
+  _cep_open=1
+  if [ "$_cep_do_s" = 1 ] && ! _cep_put "$_cep_sp" 0755 "$_cep_script"; then
+    rm -f "$_cep_sp.new"
+    echo "FAIL: [issue 1387] could not write $_cep_sp on $_cep_box -- the window is closed again by the verified close" >&2
+    exit 1
+  fi
+  if [ "$_cep_do_u" = 1 ] && ! _cep_put "$_cep_up" 0644 "$_cep_unit"; then
+    rm -f "$_cep_up.new"
+    echo "FAIL: [issue 1387] could not write $_cep_up on $_cep_box -- the window is closed again by the verified close" >&2
+    exit 1
+  fi
+  if [ "$_cep_do_e" = 1 ] && ! systemctl enable "$_cep_svc"; then
+    echo "FAIL: [issue 1387] systemctl enable $_cep_svc failed on $_cep_box -- the window is closed again by the verified close" >&2
+    exit 1
+  fi
+fi
+_cep_close
+trap - EXIT
+# --- 3. after the verified close: reload, apply, read back ---
+if ! systemctl daemon-reload; then
+  echo "FAIL: [issue 1387] systemctl daemon-reload failed on $_cep_box" >&2
+  _cep_rc=1
+fi
+if ! systemctl restart "$_cep_svc"; then
+  echo "FAIL: [issue 1387] $_cep_svc did not apply the tree on $_cep_box -- read: journalctl -u $_cep_svc -n 20" >&2
+  _cep_rc=1
+fi
+_cep_if="$(ip route show default 2>/dev/null | awk '!d { for (i = 1; i < NF; i++) if ($i == "dev") { d = $(i + 1); break } } END { if (d != "") print d }')"
+if [ -z "$_cep_if" ]; then
+  echo "FAIL: [issue 1387] no default route on $_cep_box -- the egress tree cannot be read back" >&2
+  return 1
+fi
+_cep_q="$(tc qdisc show dev "$_cep_if" 2>&1 || true)"
+_cep_f="$(tc filter show dev "$_cep_if" 2>&1 || true)"
+echo "TREE ($_cep_box, $_cep_if):"
+printf '%s\n%s\n' "$_cep_q" "$_cep_f"
+_cep_v="$(cambox_egress_pacing_verdict "$_cep_q" "$_cep_f")"
+case "$_cep_v" in
+  OK*) echo "READBACK ($_cep_box): $_cep_v" ;;
+  *)
+    echo "FAIL: [issue 1387] READBACK ($_cep_box): $_cep_v" >&2
+    _cep_rc=1
+    ;;
+esac
+return "$_cep_rc"
+}
+_cep_main </dev/null
+PROG
+}
