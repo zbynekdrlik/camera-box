@@ -405,8 +405,9 @@ pub struct JxsFrame<'a> {
     /// The genlock timecode the NDI frame carries (the emit-grid boundary AT OR BEFORE the
     /// capture instant).
     pub timecode_100ns: i64,
-    /// The frame's capture instant on the same wall clock (0 = unknown): with the timecode it
-    /// splits `handoff_age_ms` into the slot phase and the capture -> hand-off time.
+    /// The frame's RAW capture instant (its V4L2 stamp mapped to the same wall clock, never the
+    /// phase tracker's slot middle; 0 = unknown): with the timecode it splits `handoff_age_ms`
+    /// into where the capture sits against its stamped slot and the capture -> hand-off time.
     pub capture_realtime_100ns: i64,
     /// The NDI emit rate (0 = genlock off): selects the [`jxs_link::JXS_FPS`] frames.
     pub emit_fps: u32,

@@ -337,9 +337,11 @@ pub struct SendWindow {
 /// the JPEG XS thread: the wall clock (`CLOCK_REALTIME`, the dantesync-disciplined clock both are
 /// on) minus it, in 100 ns. Positive = it lies in the past. A diagnostic of the cambox side of
 /// the link, before any JPEG XS work. The timecode is the emit-grid boundary AT OR BEFORE the
-/// capture (`genlock_stamp::genlock_emit_timecode_100ns`), so its age = the capture's phase inside
-/// its slot (0 .. one emit interval, 16.7 ms at 60) + the capture -> hand-off time (V4L2 queue
-/// residence, the emit gate); the capture instant's age is the second term alone.
+/// stamp instant (`genlock_stamp::genlock_emit_timecode_100ns`): the raw capture instant on the
+/// raw path, the phase tracker's slot middle while it drives the stamps (`phase_lock=stamp`). So
+/// the timecode's age = (raw capture - its stamped slot start: the capture's phase in its slot, a
+/// little outside 0..interval near an edge under the tracker's hysteresis) + the RAW capture's
+/// age (capture -> hand-off: V4L2 queue residence, the emit gate).
 pub fn handoff_age_100ns(timecode_100ns: i64, now_100ns: i64) -> i64 {
     now_100ns.saturating_sub(timecode_100ns)
 }

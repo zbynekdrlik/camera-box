@@ -78,11 +78,19 @@ fn a_dead_receivers_refusal_consumed_by_the_report_reader_is_still_a_send_error(
     drop(gone);
     let tx = JxsSocket::connect(&format!("127.0.0.1:{port}")).unwrap();
     assert_eq!(tx.send_slice(&[0x4A; 64]), 0, "the first send goes out");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let start = std::time::Instant::now();
     let mut errors = 0;
-    while errors == 0 && std::time::Instant::now() < deadline {
+    let mut resent = 0;
+    while errors == 0 && start.elapsed() < std::time::Duration::from_secs(3) {
         assert_eq!(tx.take_report(5), None);
         errors = tx.take_read_errors();
+        // the kernel rate-limits ICMP (parallel tests hit dead ports too): send again now and
+        // then for a fresh refusal; only the READ path is counted here
+        if errors == 0 && start.elapsed() > std::time::Duration::from_millis(500 * (resent + 1)) {
+            let _ = tx.send_slice(&[0x4A; 64]);
+            resent += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(errors >= 1, "the queued refusal was counted");
     assert_eq!(tx.take_read_errors(), 0, "and handed over once");

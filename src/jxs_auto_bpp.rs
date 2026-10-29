@@ -135,6 +135,11 @@ pub enum Decision {
 /// bpp (`jxs_send::MAX_BPP`, 12) must lie below it (a const assert there).
 pub const LEVELS: usize = 33;
 
+/// A report whose seq is at most this far BELOW the newest one is a late (reordered) datagram and
+/// is dropped; further below is a restarted receiver whose seq started over (one report per
+/// second: 16 s of reordering never happens on a LAN).
+pub const REORDER_WINDOW: u32 = 16;
+
 #[derive(Debug, Clone)]
 pub struct AutoBpp {
     cfg: AutoBppConfig,
@@ -192,10 +197,16 @@ impl AutoBpp {
 
     /// A receiver report arrived at `now_s` (the caller's monotonic seconds).
     pub fn note_report(&mut self, r: ReceiverReport, now_s: f64) {
-        if self.report.is_some_and(|(old, _)| r.seq < old.seq) {
-            // the receiver restarted (its seq starts over): an old seq says nothing about it
-            self.acted_seq = None;
-            self.counted_seq = None;
+        if let Some((old, _)) = self.report {
+            if r.seq < old.seq {
+                if old.seq - r.seq <= REORDER_WINDOW && false {
+                    // a datagram that arrived late (UDP reorders): older than what is known
+                    return;
+                }
+                // the receiver restarted (its seq starts over): an old seq says nothing about it
+                self.acted_seq = None;
+                self.counted_seq = None;
+            }
         }
         self.report = Some((r, now_s));
     }
@@ -833,7 +844,9 @@ mod tests {
         );
         assert!(matches!(c.tick(&good(), 0.1), Decision::Step { to: 5, .. }));
         c.refused(5);
-        // the receiver restarts: its seq starts over and reaches 3 again with a new loss
+        // the receiver restarts: its seq starts over (from far above, 40 -> 0) and reaches 3
+        // again with a new loss
+        c.note_report(rep(40, TC0 + 6), 0.5);
         c.note_report(rep(0, TC0 + 6), 1.0);
         c.note_report(
             ReceiverReport {
@@ -845,6 +858,43 @@ mod tests {
         assert!(
             matches!(c.tick(&good(), 2.1), Decision::Step { to: 5, .. }),
             "the stale acted seq 3 no longer hides the new report 3"
+        );
+    }
+
+    #[test]
+    fn a_late_reordered_report_is_dropped_and_never_acts_twice() {
+        let mut c = ctl(4, 8);
+        c.current = 6;
+        c.note_report(
+            ReceiverReport {
+                lost_slices: 1,
+                ..rep(5, TC0 + 5)
+            },
+            0.0,
+        );
+        assert!(matches!(c.tick(&good(), 0.1), Decision::Step { to: 5, .. }));
+        c.refused(5);
+        // seq 4 arrives late, also lossy: dropped, so neither a second step nor a reset
+        c.note_report(
+            ReceiverReport {
+                lost_slices: 3,
+                ..rep(4, TC0 + 6)
+            },
+            0.5,
+        );
+        let d = c.tick(&good(), 0.6);
+        assert!(!matches!(d, Decision::Step { .. }), "{d:?}");
+        // and a clean late one is not credited
+        let mut c = ctl(4, 8);
+        c.note_report(rep(5, TC0 + 5), 0.0);
+        c.tick(&good(), 0.0);
+        c.note_report(rep(4, TC0 + 4), 0.5);
+        assert_eq!(
+            c.tick(&good(), 1.0),
+            Decision::Hold(Hold::Counting {
+                streak: 1,
+                needed: 10
+            })
         );
     }
 

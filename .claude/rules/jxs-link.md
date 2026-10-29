@@ -104,14 +104,17 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     receiver's first arrival after the timecode wandered 21-39 ms, ~+3.5 ms per 5 s then a reset,
     while the capture phase tracker was locked at +18 ppm): the wall clock (`CLOCK_REALTIME`, the
     dantesync-disciplined clock the genlock timecode is stamped on, read with
-    `jxs_recv::realtime_100ns`) minus the frame's TIMECODE / minus its CAPTURE instant
-    (`JxsFrame::capture_realtime_100ns`, main.rs's `capture_realtime_100ns`, 0 = unknown = no
-    capture sample), at the moment the capture thread hands a grid frame to `JxsHandoff::offer`
-    (a busy-dropped one too), avg/min/max per window, `-/-/-` with none. The timecode is the
-    emit-grid boundary AT OR BEFORE the capture (`genlock_emit_timecode_100ns` floors), so
-    `handoff_age` = the capture's phase inside its slot (0..16.7 ms at 60 fps) + `capture_age`,
-    and `capture_age` alone = capture -> hand-off (V4L2 queue residence, the emit gate). An
-    18 ms sawtooth in `handoff_age` with a flat `capture_age` is the slot phase sliding; one in
+    `jxs_recv::realtime_100ns`) minus the frame's TIMECODE / minus its RAW capture instant
+    (`JxsFrame::capture_realtime_100ns` = `genlock_stamp::capture_realtime_100ns(V4L2 stamp,
+    offset)`, built in the hand-off literal; NOT main.rs's `capture_realtime_100ns` variable,
+    which is the phase tracker's SLOT MIDDLE while `phase_lock=stamp`; 0 = unknown = no capture
+    sample), at the moment the capture thread hands a grid frame to `JxsHandoff::offer` (a
+    busy-dropped one too), avg/min/max per window, `-/-/-` with none. The timecode is the
+    emit-grid boundary AT OR BEFORE the stamp instant (`genlock_emit_timecode_100ns` floors), so
+    `handoff_age - capture_age` = the raw capture's phase against its stamped slot (0..16.7 ms at
+    60 fps; a little outside it near an edge under the tracker's 500 us hysteresis), and
+    `capture_age` alone = capture -> hand-off (V4L2 queue residence, the emit gate). An 18 ms
+    sawtooth in `handoff_age` with a flat `capture_age` is the slot phase sliding; one in
     `capture_age` sits in the queue/gate; both flat = after the hand-off (encode, send, network,
     receiver). Pure stat `jxs_link::HandoffAge` + `handoff_age_100ns`; the capture thread only
     `try_lock`s the one `Mutex<[HandoffAge; 2]>` (a sample is skipped, never waited for; no
@@ -142,8 +145,10 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     A GSO send that fails with EIO (no checksum offload) or EINVAL switches the socket to one send
     per datagram for good (and clears the option), logged once. IPv4 only: the 1472-byte datagram
     is the IPv4 budget of a 1500 MTU (an IPv6 target is refused at start). `encode_errors=` counts
-    frames not encoded or not sent whole; a geometry the encoder refuses is logged once and never
-    re-opened per frame.
+    frames not encoded or not sent whole; a geometry the encoder refuses at a bpp is logged once
+    and never re-opened per frame at that bpp (another bpp tries it again); the packet thread is
+    told only when a step was pending (it cancels the step, no back-off), else the feeder's
+    ERROR line is the whole report.
 - **Receive: `src/jxs_recv.rs` + `src/jxs_link/assembler.rs`.** `recvmmsg` + `UDP_GRO` +
   `SO_TIMESTAMPNS`. The assembler hands each packet on as soon as everything before it in its
   frame is complete; it finalizes a frame (missing packets = lost) when the NEXT frame is complete
@@ -202,8 +207,9 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     must move on; a receiver reporting slower than the tick is not credited twice).
   - A report with no frame says nothing about the bpp (no timecode to tie a loss to): the
     receiver counts an undecodable frame as a frame with its timecode and its loss, so a link
-    losing whole frames still steps down. A report whose seq goes BACKWARD (a restarted
-    receiver) clears the acted/counted seqs.
+    losing whole frames still steps down. A report whose seq is at most `REORDER_WINDOW` (16)
+    below the newest is a late (reordered) datagram and is dropped; further below = a restarted
+    receiver, which clears the acted/counted seqs.
   - NO report for 3 s: hold, both ways (never climb blind; a silent receiver also never steps
     the sender down).
   - Back-off: every step down from level L doubles the clean run needed to climb back to L

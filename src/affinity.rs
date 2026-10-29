@@ -534,6 +534,12 @@ const _: () = assert!(JXS_ENCODER_FIFO_PRIORITY < CAPTURE_FIFO_PRIORITY);
 /// no hook to reach them otherwise) are exactly the threads that must run FIFO. The feeder spawns
 /// nothing else. `false` when refused (no CAP_SYS_NICE) or `prio` is out of 1..=99.
 pub fn set_current_thread_fifo_inherited(prio: i32) -> bool {
+    set_current_thread_fifo(prio, SCHED_FIFO_POLICY)
+}
+
+/// SCHED_FIFO `prio` for the CURRENT thread under the policy word `policy` (with or without
+/// reset-on-fork); `false` when refused or `prio` is out of 1..=99.
+fn set_current_thread_fifo(prio: i32, policy: i32) -> bool {
     if !(1..=99).contains(&prio) {
         return false;
     }
@@ -542,7 +548,7 @@ pub fn set_current_thread_fifo_inherited(prio: i32) -> bool {
         let param = libc::sched_param {
             sched_priority: prio,
         };
-        libc::sched_setscheduler(0, SCHED_FIFO_POLICY, &param) == 0
+        libc::sched_setscheduler(0, policy, &param) == 0
     }
 }
 
@@ -551,16 +557,7 @@ pub fn set_current_thread_fifo_inherited(prio: i32) -> bool {
 /// sender thread that spawns no library threads (issue 1387 `jxs-send`). `false` when refused
 /// or `prio` is out of 1..=99.
 pub fn set_current_thread_fifo_reset_on_fork(prio: i32) -> bool {
-    if !(1..=99).contains(&prio) {
-        return false;
-    }
-    // SAFETY: sched_setscheduler(0, ...) targets the current thread; `param` is a plain value.
-    unsafe {
-        let param = libc::sched_param {
-            sched_priority: prio,
-        };
-        libc::sched_setscheduler(0, capture_emit_sched_policy_word(), &param) == 0
-    }
+    set_current_thread_fifo(prio, capture_emit_sched_policy_word())
 }
 
 /// Route the USB / uvcvideo capture-controller IRQ(s) onto the isolated capture

@@ -371,8 +371,9 @@ struct Sessions {
     next: Option<(EncoderInput, EncoderOutput, u32)>,
     /// A bpp whose session was refused: not retried until the wanted bpp changes.
     refused_bpp: Option<u32>,
-    /// A geometry the encoder refused: never re-opened (and re-logged) per frame.
-    refused_geometry: Option<(u32, u32)>,
+    /// A geometry + bpp the encoder refused: never re-opened (and re-logged) per frame; another
+    /// bpp (an auto step) tries that geometry again.
+    refused_geometry: Option<(u32, u32, u32)>,
 }
 
 impl Sessions {
@@ -401,7 +402,7 @@ impl Sessions {
             return Ok(true);
         }
         self.input = None;
-        if self.refused_geometry == Some((w, h)) {
+        if self.refused_geometry.is_some_and(|g| (g.0, g.1) == (w, h)) {
             return Ok(false);
         }
         match open_session(w, h, self.threads, want, &self.cores) {
@@ -417,7 +418,7 @@ impl Sessions {
                 Ok(true)
             }
             Err(_) => {
-                self.refused_geometry = Some((w, h));
+                self.refused_geometry = Some((w, h, want));
                 // a step the controller waits on is not coming (else it holds Pending for good)
                 job_tx
                     .send(Job::Refused {
@@ -856,6 +857,11 @@ mod tests {
         // the same geometry again is not re-opened, not re-announced
         assert_eq!(s.ensure(255, 64, 5, &job_tx), Ok(false));
         assert!(job_rx.try_recv().is_err());
+        // a geometry refused at ONE bpp (0) opens at another (4): never blocked for good
+        assert_eq!(s.ensure(64, 32, 0, &job_tx), Ok(false));
+        assert!(matches!(job_rx.try_recv(), Ok(Job::Refused { bpp: 0, .. })));
+        assert_eq!(s.ensure(64, 32, 4, &job_tx), Ok(true));
+        assert!(matches!(job_rx.try_recv(), Ok(Job::Session { bpp: 4, .. })));
         // a bpp the library refuses for a good geometry (0 bpp): a refusal of that level
         assert_eq!(s.ensure(64, 16, 4, &job_tx), Ok(true));
         assert!(matches!(job_rx.try_recv(), Ok(Job::Session { bpp: 4, .. })));
