@@ -605,12 +605,6 @@ pub struct NdiSender {
     uyvy_buffer: Vec<u8>,
     // AVX2 support flag
     has_avx2: bool,
-    // Issue 1387 — the pixel format sent to the SDK (`CAMERA_BOX_NDI_FORMAT`, read once in
-    // `new`), the reused P216 frame buffer (allocated on the first P216 frame, never per frame)
-    // and whether the one "this input has no P216 path" WARN was already logged.
-    send_format: crate::yuyv_to_p216::NdiSendFormat,
-    p216_buffer: Vec<u16>,
-    p216_fallback_logged: bool,
     // Genlock #11: when true, the caller paces the sends (decimating the capture
     // to the target rate on wall-clock boundaries), so send_frame stamps the
     // boundary timecode WITHOUT the internal blocking wait — blocking here would
@@ -643,26 +637,14 @@ impl NdiSender {
         // Detect AVX2 support for SIMD optimization
         let has_avx2 = Self::detect_avx2();
         if has_avx2 {
-            tracing::info!("NDI sender: AVX2 SIMD enabled for YUYV→UYVY and YUYV→P216 conversion");
+            tracing::info!("NDI sender: AVX2 SIMD enabled for YUYV→UYVY conversion");
         } else {
-            tracing::info!("NDI sender: Using scalar YUYV→UYVY and YUYV→P216 conversion");
+            tracing::info!("NDI sender: Using scalar YUYV→UYVY conversion");
         }
 
         tracing::info!(
             "NDI sender created: {} (sync mode, clock_video=false)",
             name
-        );
-
-        // Issue 1387 — the send format is read ONCE here; a re-announce keeps it.
-        let env_value = std::env::var(crate::yuyv_to_p216::NDI_FORMAT_ENV).ok();
-        let (send_format, format_warning) =
-            crate::yuyv_to_p216::parse_send_format(env_value.as_deref());
-        if let Some(warning) = format_warning {
-            tracing::warn!("{warning}");
-        }
-        tracing::info!(
-            "{}",
-            crate::yuyv_to_p216::send_format_start_line(send_format)
         );
 
         Ok(Self {
@@ -680,9 +662,6 @@ impl NdiSender {
             last_reannounce_check: std::time::Instant::now(),
             uyvy_buffer: Vec::with_capacity(1920 * 1080 * 2), // Pre-allocate for 1080p
             has_avx2,
-            send_format,
-            p216_buffer: Vec::new(),
-            p216_fallback_logged: false,
             external_pacing: false,
         })
     }
@@ -1056,45 +1035,6 @@ impl NdiSender {
         }
         let fourcc_str = fourcc.str()?;
 
-        // Issue 1387 — with `CAMERA_BOX_NDI_FORMAT=p216`, a YUYV capture is sent as P216 (the
-        // SDK's 16 bpp semi-planar 4:2:2); every other input, and the default, keeps the UYVY
-        // path below byte-identical.
-        let send_path = crate::yuyv_to_p216::select_send_path(self.send_format, fourcc_str);
-        if self.send_format == crate::yuyv_to_p216::NdiSendFormat::P216
-            && send_path == crate::yuyv_to_p216::SendPath::Uyvy
-            && !self.p216_fallback_logged
-        {
-            self.p216_fallback_logged = true;
-            tracing::warn!("{}", crate::yuyv_to_p216::p216_fallback_line(fourcc_str));
-        }
-        if send_path == crate::yuyv_to_p216::SendPath::P216 {
-            let path = if self.has_avx2 {
-                crate::yuyv_to_p216::ConvertPath::Avx2
-            } else {
-                crate::yuyv_to_p216::ConvertPath::Scalar
-            };
-            crate::yuyv_to_p216::convert_yuyv_to_p216(
-                data,
-                width as usize,
-                height as usize,
-                stride as usize,
-                &mut self.p216_buffer,
-                path,
-            )?;
-            // Processing.NDI.structs.h:237-239: line_stride_in_bytes is the inter-line stride in
-            // bytes; for P216 that is the luma plane's `width * 2`, and the CbCr plane that
-            // immediately follows it (structs.h:70-75) has the same stride.
-            let (p216_fourcc, stride_bytes) = crate::yuyv_to_p216::p216_send_params(width as usize);
-            return self.send_converted(
-                width,
-                height,
-                p216_fourcc,
-                self.p216_buffer.as_ptr() as *const u8,
-                stride_bytes as u32,
-                timecode_100ns,
-            );
-        }
-
         // Convert to UYVY, get stride
         let (uyvy_ptr, uyvy_stride) = match fourcc_str {
             "UYVY" => {
@@ -1124,34 +1064,11 @@ impl NdiSender {
                 );
             }
         };
-        self.send_converted(
-            width,
-            height,
-            NDILIBD_FOURCC_UYVY,
-            uyvy_ptr,
-            uyvy_stride,
-            timecode_100ns,
-        )
-    }
 
-    /// Hand one already-converted frame (`ndi_fourcc` at `p_data`, `line_stride` bytes per row)
-    /// to the SDK with the caller's timecode, timed for the #707 send-stall diagnostic. Shared by
-    /// the UYVY path and the issue-1387 P216 path. `p_data` must stay valid for the call (the
-    /// SDK copies synchronously).
-    #[inline]
-    fn send_converted(
-        &mut self,
-        width: u32,
-        height: u32,
-        ndi_fourcc: u32,
-        p_data: *const u8,
-        line_stride: u32,
-        timecode_100ns: i64,
-    ) -> Result<()> {
         let video_frame = NDIlib_video_frame_v2_t {
             xres: width as c_int,
             yres: height as c_int,
-            fourcc: ndi_fourcc,
+            fourcc: NDILIBD_FOURCC_UYVY,
             frame_rate_n: self.frame_rate.numerator as c_int,
             frame_rate_d: self.frame_rate.denominator as c_int,
             picture_aspect_ratio: 0.0, // Use default
@@ -1160,8 +1077,8 @@ impl NdiSender {
             // wrapper above) — stamped verbatim so the async cam1-burn (#275b) preserves the
             // EMITTED frame's gate timecode.
             timecode: timecode_100ns,
-            p_data,
-            line_stride_in_bytes: line_stride as c_int,
+            p_data: uyvy_ptr,
+            line_stride_in_bytes: uyvy_stride as c_int,
             p_metadata: ptr::null(),
             timestamp: 0,
         };
