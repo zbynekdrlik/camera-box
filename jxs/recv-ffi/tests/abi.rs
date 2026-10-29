@@ -245,10 +245,13 @@ fn staticlib() -> PathBuf {
     a
 }
 
-#[test]
-fn the_static_library_links_into_a_shared_object_with_no_undefined_symbol() {
-    let dir = tempfile::tempdir().unwrap();
-    let src = dir.path().join("use.c");
+/// The link flags the strih DistroAV build uses for this library (`vendor/distroav/CMakeLists.txt`):
+/// `-z noexecstack` because SVT's nasm objects carry no `.note.GNU-stack`, which otherwise marks
+/// the whole shared object as needing an EXECUTABLE stack -- glibc 2.41+ (the Ubuntu 26.04 strih
+/// box) then refuses to dlopen it; `--exclude-libs` keeps every Rust and SVT symbol out of the
+/// plugin's dynamic symbol table.
+fn link_into_shared_object(dir: &Path, flags: &[&str]) -> PathBuf {
+    let src = dir.join("use.c");
     std::fs::write(
         &src,
         "#include \"camera_box_jxs.h\"\n\
@@ -263,26 +266,57 @@ fn the_static_library_links_into_a_shared_object_with_no_undefined_symbol() {
          }\n",
     )
     .unwrap();
-    let so = dir.path().join("libuse.so");
+    let so = dir.join("libuse.so");
     let a = staticlib();
     let inc = format!("-I{}", crate_dir().join("include").display());
-    cc(&[
-        "-shared",
-        "-fPIC",
-        "-Wl,-z,defs",
-        &inc,
-        src.to_str().unwrap(),
-        a.to_str().unwrap(),
-        "-lgcc_s",
-        "-lutil",
-        "-lrt",
+    let mut args: Vec<&str> = vec!["-shared", "-fPIC", "-Wl,-z,defs"];
+    args.extend_from_slice(flags);
+    args.extend_from_slice(&[&inc, src.to_str().unwrap(), a.to_str().unwrap()]);
+    // the list `rustc --print native-static-libs` prints for this crate
+    args.extend_from_slice(&[
         "-lpthread",
         "-lm",
         "-ldl",
-        "-lc",
         "-lasound",
-        "-o",
-        so.to_str().unwrap(),
+        "-lgcc_s",
+        "-lutil",
+        "-lrt",
+        "-lc",
     ]);
-    assert!(so.is_file());
+    args.extend_from_slice(&["-o", so.to_str().unwrap()]);
+    cc(&args);
+    so
+}
+
+fn tool(cmd: &str, args: &[&str]) -> String {
+    let out = Command::new(cmd).args(args).output().expect(cmd);
+    assert!(out.status.success(), "{cmd} {args:?}");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn gnu_stack_flags(so: &Path) -> String {
+    let ph = tool("readelf", &["-lW", so.to_str().unwrap()]);
+    let line = ph
+        .lines()
+        .find(|l| l.trim_start().starts_with("GNU_STACK"))
+        .unwrap_or_else(|| panic!("no GNU_STACK header:\n{ph}"));
+    line.split_whitespace().nth(6).unwrap().to_string()
+}
+
+#[test]
+fn the_static_library_links_into_a_shared_object_with_no_undefined_symbol() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = staticlib();
+    let exclude = format!(
+        "-Wl,--exclude-libs,{}",
+        a.file_name().unwrap().to_str().unwrap()
+    );
+    let so = link_into_shared_object(dir.path(), &["-Wl,-z,noexecstack", &exclude]);
+    assert_eq!(gnu_stack_flags(&so), "RW", "a non-executable stack");
+    let exported = tool("nm", &["-D", "--defined-only", so.to_str().unwrap()]);
+    let names: Vec<&str> = exported
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(2))
+        .collect();
+    assert_eq!(names, ["cb_use"], "no library symbol leaks into the plugin");
 }
