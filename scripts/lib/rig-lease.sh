@@ -197,6 +197,17 @@ except Exception:
 ' "$path" 2>/dev/null || printf '\t\n'
 }
 
+# rig_lease_held_by <repo> <run_id> -> exit 0 when holder.json names exactly this repo AND run id
+# (issue 1452: a step of the run that holds the lease -- the post-merge deploy job took it through
+# rig-busy-gate.sh -- may touch the camboxes it owns). An empty argument, an absent or corrupt
+# holder.json never matches. One atomic read (rig_lease_read_holder_repo_run_id).
+rig_lease_held_by() {
+  local want_repo="${1:-}" want_run="${2:-}" pair
+  [ -n "$want_repo" ] && [ -n "$want_run" ] || return 1
+  pair="$(rig_lease_read_holder_repo_run_id)"
+  [ "${pair%%$'\t'*}" = "$want_repo" ] && [ "${pair#*$'\t'}" = "$want_run" ]
+}
+
 # rig_lease_holder_run_status <repo> <run_id> -> echo "in_progress" or "not_in_progress".
 # Pluggable via RIG_LEASE_RUN_STATUS_CMD (see header); defaults to "in_progress" (assume alive --
 # an unknown/unreachable status checker must never itself cause a reclaim; only a confirmed-dead

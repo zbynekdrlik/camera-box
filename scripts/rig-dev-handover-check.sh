@@ -118,6 +118,8 @@ DECIDE="${RDH_DECIDE:-$HERE/rig_dev_handover_decision.py}"
 
 # shellcheck source=scripts/lib/unit-env.sh
 . "$HERE/lib/unit-env.sh"
+# shellcheck source=scripts/lib/bkshading-relay-version.sh
+. "$HERE/lib/bkshading-relay-version.sh"  # issue 1452: item 15's relay-vs-camera-box version row
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rig-dev-handover.XXXXXX")"
 cleanup() { [ "$KEEP" -eq 1 ] || rm -rf "$WORKDIR"; }
@@ -271,8 +273,13 @@ run_probe avlatency bash "$AVLATENCY_PROBE"
 #   SHADING-NO-CAMERA relay active but online:false       (neutral)
 #   SHADING-UNREACHABLE ssh/curl failed / no /api/state    (neutral -> UNKNOWN, never a false page)
 # The per-box detail lives in the capture; a DOWN box fails safe to SHADING-UNREACHABLE (never OK).
+# issue 1452: a SECOND line per box grades the relay VERSION against that box's camera-box version
+# (scripts/lib/bkshading-relay-version.sh, one ssh read of both): RELAY-STALE / RELAY-MISSING are
+# forgot (an old relay before an event, the 28.10.2026 class), RELAY-CURRENT / RELAY-NONE /
+# RELAY-UNKNOWN neutral. Read even while the relay is off: TEST mode is exactly when to catch it.
 probe_shading() {
   local spec="$1" pw="$2" tok label ip en act online verdict body port="${SHADING_RELAY_PORT:-8771}"
+  local versions cbv rlv
   # Bounds are PER BOX (timeout 8 ssh / 6 curl below), not the whole-item RDH_*_TIMEOUT budget --
   # a per-box bound keeps the worst case linear in the small cambox count and never hangs the run.
   [ -n "$spec" ] || { printf 'roster empty -- no camboxes to probe\n'; return 0; }
@@ -300,6 +307,12 @@ probe_shading() {
     esac
     printf '%s (%s): enabled=%s active=%s online=%s -> verdict=%s\n' \
       "$label" "$ip" "${en:-?}" "${act:-?}" "${online:-?}" "$verdict"
+    versions="$(timeout 8 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=5 "root@$ip" "$(bkshading_relay_versions_cmd)" 2>/dev/null || true)"
+    cbv="$(bkshading_relay_versions_field "$versions" camera-box)"
+    rlv="$(bkshading_relay_versions_field "$versions" relay)"
+    printf '%s (%s): camera-box=%s relay=%s -> verdict=%s\n' \
+      "$label" "$ip" "${cbv:-?}" "${rlv:-?}" "$(bkshading_relay_version_verdict "$cbv" "$rlv")"
   done
   return 0
 }

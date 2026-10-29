@@ -264,8 +264,11 @@ cambox_align_deploy() {
     return 1
   fi
   local rc=0
+  # issue 1452: camera-box ONLY (--no-relay). This align runs inside an E2E that holds the rig lease
+  # and is about to pause the relay on the measurement boxes; its one job is the camera-box parity the
+  # gate below grades. The relay rides the post-merge fleet deploy (deploy-fleet.sh's default).
   CAMERA_SET="$names" SSH_PASS="${CAM_PW:-newlevel}" \
-    "$deploy_fleet" --binary "$bin" || rc=$?
+    "$deploy_fleet" --binary "$bin" --no-relay || rc=$?
   [ -n "$dist" ] && rm -rf "$dist"
   return "$rc"
 }

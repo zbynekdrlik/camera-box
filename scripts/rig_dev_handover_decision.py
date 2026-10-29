@@ -250,7 +250,8 @@ class Item(object):
 
     def __init__(self, key, label, captures, kind, ok_msg, forgot_msg, unknown_msg,
                  good=None, forgot=None, good_prefixes=(), forgot_prefixes=(),
-                 ok_codes=None, forgot_codes=None, capture_kinds=None, forgot_msgs=None):
+                 ok_codes=None, forgot_codes=None, capture_kinds=None, forgot_msgs=None,
+                 forgot_token_msgs=None):
         self.key = key
         self.label = label
         self.captures = captures
@@ -270,6 +271,10 @@ class Item(object):
         # capture order), falling back to `forgot_msg`.
         self.capture_kinds = dict(capture_kinds or {})
         self.forgot_msgs = dict(forgot_msgs or {})
+        # issue 1452: one capture may carry two different FORGOT tokens (the shading probe's crashed
+        # relay SHADING-DEAD and its old relay RELAY-STALE). `forgot_token_msgs` names the owner's
+        # fix per forgot TOKEN seen (joined in first-seen order), falling back to `forgot_msg`.
+        self.forgot_token_msgs = dict(forgot_token_msgs or {})
 
     def _status_for_capture(self, text, rc, kind=None):
         """Status contribution of ONE captured (text, rc) pair, per this item's (or the capture's)
@@ -329,6 +334,14 @@ class Item(object):
         msg = {OK: self.ok_msg, FORGOT: self.forgot_msg, UNKNOWN: self.unknown_msg}[status]
         if status == FORGOT and self.forgot_msgs:
             msg = "; ".join(self.forgot_msgs.get(n, self.forgot_msg) for n in forgot_names)
+        elif status == FORGOT and self.forgot_token_msgs:
+            seen = []
+            for n in forgot_names:
+                for t in verdict_tokens(captures_data.get(n, ("", RC_MISSING))[0]):
+                    m = self.forgot_token_msgs.get(t)
+                    if m and m not in seen:
+                        seen.append(m)
+            msg = "; ".join(seen) or self.forgot_msg
         return {"key": self.key, "label": self.label, "status": status, "message": msg}
 
 
@@ -450,13 +463,28 @@ ITEMS = [
     # forgot (in development the relay is legitimately disabled per bkshading.md, so an all-off
     # fleet reads UNKNOWN + the per-box detail in the capture, not a page). The `mode` item already
     # catches a whole rig left in EVENT.
+    # issue 1452: the same probe also prints one `verdict=RELAY-*` line per box, the relay version
+    # graded against that box's camera-box version (scripts/lib/bkshading-relay-version.sh). An OLD
+    # relay (RELAY-STALE) or a relay unit without its binary (RELAY-MISSING) is FORGOT even while the
+    # relay is off in TEST mode: the 28.10.2026 event ran on old relays because nothing showed it.
+    # RELAY-CURRENT / RELAY-NONE / RELAY-UNKNOWN are neutral, so they never turn a TEST-mode UNKNOWN
+    # into a false OK.
     Item("shading", "bkshading (clona) relay na camboxoch", ["shading"], "verdict",
          ok_msg="shading relay beží a kamera je online aspoň na jednom camboxe",
          forgot_msg="bkshading relay je zapnutý ale spadol na niektorom camboxe (SHADING-DEAD) — "
                     "reštartuj / preprovizuj relay (issue 1309)",
          unknown_msg="shading relay je vypnutý / bez kamery / nedostupný na camboxoch — v TEST "
                      "režime je to správne; pozri capture pre stav per box (issue 1309)",
-         good={"SHADING-ON"}, forgot={"SHADING-DEAD"}),
+         good={"SHADING-ON"}, forgot={"SHADING-DEAD", "RELAY-STALE", "RELAY-MISSING"},
+         forgot_token_msgs={
+             "SHADING-DEAD": "bkshading relay je zapnutý ale spadol na niektorom camboxe (SHADING-DEAD) — "
+                             "reštartuj / preprovizuj relay (issue 1309)",
+             "RELAY-STALE": "shading relay na niektorom camboxe má inú (starú) verziu ako camera-box "
+                            "(RELAY-STALE) — nasaď celú flotilu jedným príkazom scripts/deploy-fleet.sh, "
+                            "ten upgraduje aj relay (issue 1452)",
+             "RELAY-MISSING": "shading relay je na niektorom camboxe nainštalovaný bez binárky "
+                              "(RELAY-MISSING) — scripts/deploy-fleet.sh ju doplní (issue 1452)",
+         }),
     Item("avlatency", "meracia zvuková cesta: latencia oproti baseline", ["avlatency"], "verdict",
          ok_msg="meracia zvuková cesta má latenciu v norme oproti baseline (rozdiel do 90 ms)",
          forgot_msg="meracia zvuková cesta (mbc/Ableton reťazec) má posunutú latenciu oproti baseline "

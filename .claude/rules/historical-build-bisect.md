@@ -27,6 +27,10 @@ resolve via the artifact's `head_sha`, or ancestry-check the green commit agains
 (stop → remount,rw → scp → the verified ro close (`.claude/rules/ro-window.md`) → start → sha256
 byte-verify → version read-back → genlock-emit check). Restrict the boxes with `CAMERA_SET="cam1 cam2"` (default is `$CAMERA_ACTIVE_SET`). For an
 EXPIRED artifact, `--run` fails — rebuild the SHA on CI and use `deploy-fleet.sh --binary <camera-box>`.
+Since issue 1452 the deploy also brings each box's bkshading relay to that run's
+`bkshading-linux-amd64`; an old run without it (or a bisect that must not touch the relay) needs
+`--no-relay`, and `--binary` needs `--relay-binary` or `--no-relay` on a box with a relay
+(`.claude/rules/fleet-relay-upgrade.md`).
 
 ## 3. The version-parity gate REFUSES a mixed fleet — neutralize it deliberately
 `recording-e2e.sh` `[0/8] camera-box version-parity gate` (`scripts/camera-box-version-gate.sh`)
