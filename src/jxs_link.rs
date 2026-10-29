@@ -432,7 +432,7 @@ impl SendWindow {
     /// there is none.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} pace_mbps={} wire_ms_avg/max={:.2}/{:.2} (issue 1387)",
             if self.window_s > 0.0 {
                 self.frames as f64 / self.window_s
             } else {
@@ -460,6 +460,9 @@ impl SendWindow {
             self.report_age_s
                 .map_or("-".to_string(), |a| format!("{a:.1}")),
             self.reports,
+            self.pace_mbps,
+            avg(self.wire_ms_sum, self.frames),
+            self.wire_ms_max,
         )
     }
 }

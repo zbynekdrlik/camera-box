@@ -46,7 +46,7 @@ pub const PACE_MBPS_MAX: u32 = 100_000;
 /// The wire bytes of one send of `payload_len` bytes of consecutive datagrams (built by
 /// `build_slice_datagrams`: every datagram [`DATAGRAM_LEN`] long except the last).
 pub fn wire_bytes(payload_len: usize) -> u64 {
-    payload_len as u64
+    payload_len as u64 + payload_len.div_ceil(DATAGRAM_LEN) as u64 * WIRE_OVERHEAD_BYTES
 }
 
 /// Nanoseconds `wire_bytes` occupy at `mbps`, rounded up (`mbps` > 0).
@@ -57,7 +57,7 @@ pub fn wire_ns(wire_bytes: u64, mbps: u32) -> u64 {
 
 /// A pace setting: 0 = line rate (no pacing), else [`PACE_MBPS_MIN`]..=[`PACE_MBPS_MAX`].
 pub fn check_pace_mbps(mbps: u32) -> Result<u32, String> {
-    if mbps == 0 || mbps > 0 {
+    if mbps == 0 || (PACE_MBPS_MIN..=PACE_MBPS_MAX).contains(&mbps) {
         Ok(mbps)
     } else {
         Err(format!(
@@ -130,8 +130,18 @@ impl PaceSchedule {
     /// Schedule one send of `wire_bytes` that is ready at `ready_ns`; returns its departure time
     /// (never before `ready_ns`).
     pub fn depart(&mut self, ready_ns: u64, wire_bytes: u64) -> u64 {
-        let _ = (wire_bytes, self.anchor_ns, self.bits, self.started);
-        ready_ns
+        let depart = match self.due_ns() {
+            Some(due) if ready_ns <= due.saturating_add(self.tolerance_ns()) => due.max(ready_ns),
+            _ => {
+                // the first send, or the link was idle: a new run starts now
+                self.anchor_ns = ready_ns;
+                self.bits = 0;
+                self.started = true;
+                ready_ns
+            }
+        };
+        self.bits += wire_bytes as u128 * 8;
+        depart
     }
 }
 

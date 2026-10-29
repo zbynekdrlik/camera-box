@@ -748,10 +748,17 @@ fn send(
     let mut datagrams: Vec<u8> = Vec::with_capacity(70_000);
     let mut warned_format = false;
     let mut warned_encode = false;
+    // the send pacing (issue 1387): this thread waits for each send's departure time, never the
+    // encoder (its packets are already coded into the frame's own bitstream) nor the caller
+    let mut pace = jxs_link::pace::PaceSchedule::new(opts.pace_mbps);
+    if pace.is_some() {
+        super::tighten_timer_slack();
+    }
     loop {
         if last_status.elapsed() >= STATUS_PERIOD {
             stats.drain_into(&mut window);
             window.window_s = last_status.elapsed().as_secs_f64();
+            window.pace_mbps = opts.pace_mbps;
             bpp.fill(&mut window);
             if stats.not_yuyv.load(Ordering::Relaxed) && !warned_format {
                 tracing::warn!(
@@ -803,6 +810,7 @@ fn send(
         let mut errors = 0u64;
         let mut packet_errors = 0u64;
         let mut first_sent: Option<Instant> = None;
+        let mut last_sent: Option<Instant> = None;
         let result = out.recv_frame(|index, packet, _last| {
             stats.progress_ms.store(monotonic_ms(), Ordering::Relaxed);
             if index >= count || count > 255 {
@@ -819,8 +827,12 @@ fn send(
             };
             match jxs_link::build_slice_datagrams(base, packet, &mut datagrams) {
                 Ok(_) => {
-                    errors += socket.send_slice(&datagrams);
-                    first_sent.get_or_insert_with(Instant::now);
+                    let (e, went) = socket.send_slice_paced(&datagrams, pace.as_mut());
+                    errors += e;
+                    if let Some(t) = went {
+                        first_sent.get_or_insert(t);
+                    }
+                    last_sent = Some(Instant::now());
                     slices += 1;
                     bytes += packet.len() as u64;
                 }
@@ -838,6 +850,9 @@ fn send(
                         .unwrap_or(0.0);
                     let encode_ms = submitted.elapsed().as_secs_f64() * 1000.0;
                     window.note_frame(slices, bytes, first, encode_ms);
+                    if let (Some(a), Some(b)) = (first_sent, last_sent) {
+                        window.note_wire(b.saturating_duration_since(a).as_secs_f64() * 1000.0);
+                    }
                     bpp.on_frame_sent(encode_ms);
                 } else {
                     window.encode_errors += 1;

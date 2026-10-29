@@ -123,10 +123,10 @@ impl CbjxsSendStats {
             bpp: w.bpp,
             auto_bpp: w.auto as u8,
             reserved: [0; 3],
-            pace_mbps: 0,
+            pace_mbps: w.pace_mbps,
             reserved2: 0,
-            wire_ms_avg: 0.0,
-            wire_ms_max: 0.0,
+            wire_ms_avg: avg(w.wire_ms_sum, w.frames),
+            wire_ms_max: w.wire_ms_max,
         }
     }
 }
@@ -208,7 +208,8 @@ unsafe fn link_config(c: &CbjxsSendConfig) -> Result<LinkConfig, String> {
         target: target.trim().to_string(),
         camera_id: c.stream_id,
         cores,
-        opts: SenderOptions::new(bpp_mode(c.bpp_min, c.bpp_max)?, None),
+        opts: SenderOptions::new(bpp_mode(c.bpp_min, c.bpp_max)?, None)
+            .with_pace(camera_box::jxs_link::pace::check_pace_mbps(c.pace_mbps)?),
         egress_mark: false,
     })
 }

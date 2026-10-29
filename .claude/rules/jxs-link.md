@@ -38,7 +38,10 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   (measured on the N100: comments 6489509200, 6489539657; approved 6489868243).
 - Transport (6489239017): our own UDP, 16-byte header, NO RTP, no retransmission, no jitter
   buffer, each slice on the wire the moment it is encoded, at line rate, UDP GSO. Pacing at
-  500 Mb/s measured ~24.5 ms vs 15.6 ms at line rate: never pace.
+  500 Mb/s measured ~24.5 ms vs 15.6 ms at line rate: never pace a CAMBOX (1 GbE into the strih's
+  10 GbE, no port steps the burst down; `CAMERA_BOX_JXS_PACE_MBPS` defaults to 0). The ONE
+  exception is a link that steps DOWN on the way: the strih program output (10 GbE) to stream-snv
+  (1 GbE) loses slices at line rate, so it paces (section "Send pacing" below).
 - No hardware change: the camboxes stay on 1 GbE.
 - **30 fps, the strih grid** (owner decision 29.10.2026, slice 1b): only the frames on the strih
   30 fps grid go over JPEG XS; NDI stays at 60 fps, unchanged. The encode budget is 33.3 ms.
@@ -110,7 +113,9 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   - The status line every 5 s: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
     dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
     capture_age_ms_avg/min/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
-    encode_errors= report_age_s= (issue 1387)`.
+    encode_errors= report_age_s= reports= pace_mbps= wire_ms_avg/max= (issue 1387)`
+    (`pace_mbps` 0 = line rate; `wire_ms` = a whole frame's first send -> its last send returned,
+    see "Send pacing").
   - **`handoff_age_ms` / `capture_age_ms`** (coordinator request 29.10, the cam5 sawtooth: the
     receiver's first arrival after the timecode wandered 21-39 ms, ~+3.5 ms per 5 s then a reset,
     while the capture phase tracker was locked at +18 ppm): the wall clock (`CLOCK_REALTIME`, the
@@ -160,6 +165,36 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     and never re-opened per frame at that bpp (another bpp tries it again); the packet thread is
     told only when a step was pending (it cancels the step, no back-off), else the feeder's
     ERROR line is the whole report.
+- **Send pacing (`src/jxs_link/pace.rs` pure schedule, `src/jxs_send/pacing.rs` clock;
+  slice-3 live finding, comment 6507194583).** `SenderOptions::pace_mbps` (0 = line rate,
+  today's behaviour), else 100..=100000 Mb/s (`check_pace_mbps`).
+  - **Why app-level:** `SO_MAX_PACING_RATE` is enforced only by the `fq` qdisc (and TCP's own
+    pacing, which UDP lacks); strih-snv's root qdisc is `fq_codel`, which ignores it. `SO_TXTIME`
+    needs an `etf` qdisc. So `JxsSocket::send_slice_paced` asks the schedule for each send's
+    departure and waits for it with an absolute `clock_nanosleep(CLOCK_MONOTONIC)`, on the
+    `jxs-send` thread only. The encoder never waits (its packets are already coded into the
+    frame's own bitstream), nor does the caller (`offer` / `cbjxs_send_frame` copy and return; a
+    pace too low for the frame rate shows as `dropped_busy`). The thread's timer slack goes to
+    1 ns while it paces (`PR_SET_TIMERSLACK`; the default 50 us is a quarter of one send).
+  - **The schedule (`PaceSchedule`):** counted in WIRE bytes, each datagram's payload + 66
+    (UDP/IPv4/Ethernet/FCS/preamble/IFG), so `pace_mbps` compares with the port speed. Exact:
+    `anchor + ceil(bits x 1000 / mbps)`, nothing rounded per send, so no drift over a frame or
+    a day. A send ready later than due by up to one burst's wire time keeps the schedule (a late
+    wake catches up); later than that the link was idle and the schedule restarts at that instant
+    (no saved-up credit, no burst).
+  - **Bounded bursts:** while pacing one GSO send carries at most `PACE_BURST_SEGMENTS` (16)
+    datagrams (24608 wire bytes, ~0.22 ms at 900 Mb/s); a longer slice is split into such
+    groups (`send_ranges`). Line rate keeps the 40-datagram sends.
+  - **Budget:** a 1080p frame at 900 Mb/s takes 9.8 ms at 4 bpp, 19.7 at 8, 29.4 at 12 (pinned
+    by `a_frame_at_900_mbps_finishes_within_the_30_fps_budget_up_to_12_bpp`), under 33.3 ms.
+  - **`encode_ms` now includes the paced wire time** (it always included the send). At 900 Mb/s
+    8 bpp ~19.7 ms stays under the auto bpp's climb bound (60 % of 33.3 = 20 ms) and far under
+    its step-down bound (90 %); a lower pace makes the auto bpp settle lower, which is right (the
+    wire carries less). `wire_ms_avg/max` on the status line separates the wire from the codec.
+  - Settings: the cambox `CAMERA_BOX_JXS_PACE_MBPS` (default 0, a refused value WARNs and keeps
+    line rate), the C ABI's `cbjxs_send_config.pace_mbps`, the strih output's `jxs_pace_mbps`
+    (default 900, below). The "link ON" line names it (`send line rate (no pacing)` / `send paced
+    at 900 Mb/s of wire, at most 16 datagrams per send`).
 - **Receive: `src/jxs_recv.rs` + `src/jxs_link/assembler.rs`.** `recvmmsg` + `UDP_GRO` +
   `SO_TIMESTAMPNS`. The assembler hands each packet on as soon as everything before it in its
   frame is complete; it finalizes a frame (missing packets = lost) when the NEXT frame is complete
@@ -416,9 +451,11 @@ wire.
 
 - `include/camera_box_jxs_send.h` (by hand; `tests/abi.rs` pins every size, offset, constant and
   exported name): `cbjxs_send_open(cfg)` (target, cores, emit_fps, stream_id, bpp_min/max: 0 = the
-  sender's 4 / 8, min == max = fixed), `cbjxs_send_frame` (1 taken / 0 busy or off-grid / -1 refused
+  sender's 4 / 8, min == max = fixed; ABI 2: `pace_mbps`, 0 = line rate, a value outside
+  100..=100000 refuses the open by name), `cbjxs_send_frame` (1 taken / 0 busy or off-grid / -1 refused
   / -2 NULL or a panic), `cbjxs_send_get_stats` (1 = a window not handed out before),
-  `cbjxs_send_take_error`, `cbjxs_send_close` (bounded ~2 s), `cbjxs_send_abi_version` (1),
+  `cbjxs_send_take_error`, `cbjxs_send_close` (bounded ~2 s), `cbjxs_send_abi_version` (2 since the send pacing: the
+  config's `pace_mbps` + `reserved2`, the stats' `pace_mbps`, `wire_ms_avg`, `wire_ms_max`),
   `cbjxs_send_set_log` (the sender's tracing lines, INFO and above, one line per call, into the
   caller's log; a process-global subscriber, installed once).
 - **ONE Rust archive in DistroAV.** `jxs-recv-ffi` depends on `jxs-send-ffi` (`pub use
@@ -461,7 +498,13 @@ wire.
   returns: `tx_mutex` + `tx = nullptr` are what keep it off a closed sender (keep both); destroy is
   safe because `obs_output_destroy` joins that thread.
 - Settings: `jxs_target` (host:port, IPv4), `jxs_stream_id` (1..255, default 100: outside the CAM
-  range), `jxs_bpp_min` / `jxs_bpp_max` (0 = 4 / 8; equal = fixed), `jxs_cores` (a cpulist, empty =
+  range), `jxs_pace_mbps` (**default 900**: strih-snv sends on 10 GbE and stream-snv, the only
+  target today, receives on a 1 GbE port whose switch buffer dropped the tail of every line-rate
+  slice burst, `lost_slices` 1-15 in 10 of 21 windows of the slice-3 run, so the auto bpp held at
+  4; 900 leaves room on that port for NDI and carries even 12 bpp in time; 0 = line rate, the
+  `cb_jxs_out_pace_mbps` clamp keeps any other value inside 100..100000, so a start never fails on
+  it; a 10 GbE receiver can take 0 or a higher pace), `jxs_bpp_min` / `jxs_bpp_max` (0 = 4 / 8;
+  equal = fixed), `jxs_cores` (a cpulist, empty =
   every core). They apply at the next start.
 - **Started from a settings file, driven over obs-websocket.** obs-websocket 5 can `StartOutput` /
   `StopOutput` / `SetOutputSettings` / `GetOutputStatus` an EXISTING output, but has no request
@@ -477,7 +520,8 @@ wire.
   - `jxs-output 'camera-box JPEG XS program': started -- the program WxH NV12 at 30.00 fps to <target> (stream id 100, bpp 0..0, ...)`
   - every 5 s: `jxs-output '<name>': fps= frames= dropped_busy= offered= taken= not_taken= refused=
     stamp_dup= encode_ms_avg/max= first_slice_ms_avg= copy_ms_avg/max= bpp= auto= reports=
-    report_age_s= send_errors= encode_errors= (issue 1387)` (`copy_ms` = the copy on libobs' video
+    report_age_s= send_errors= encode_errors= pace_mbps= wire_ms_avg/max= (issue 1387)` (`copy_ms` =
+    the copy on libobs' video
     thread; `report_age_s` -1.0 = never a report; the window's raw_video counters reset when the
     sender publishes one)
   - the sender's own lines prefixed `jxs-output: ` (`jxs send: link ON ...`, `encoder open 1920x1080
@@ -516,7 +560,7 @@ wire.
    WS without an OBS restart:
    ```bash
    ssh newlevel@10.77.9.202 'mkdir -p ~/.config/obs-studio/plugin_config/distroav && cat > ~/.config/obs-studio/plugin_config/distroav/jxs-output.json' <<'JSON'
-   {"enabled": true, "jxs_target": "10.77.9.204:7100", "jxs_stream_id": 100, "jxs_bpp_min": 0, "jxs_bpp_max": 0, "jxs_cores": ""}
+   {"enabled": true, "jxs_target": "10.77.9.204:7100", "jxs_stream_id": 100, "jxs_bpp_min": 0, "jxs_bpp_max": 0, "jxs_cores": "", "jxs_pace_mbps": 900}
    JSON
    ```
    ```python
@@ -526,6 +570,12 @@ wire.
    o._rpc(ws, "StartOutput", {"outputName": "camera-box JPEG XS program"})
    o._rpc(ws, "GetOutputStatus", {"outputName": "camera-box JPEG XS program"})   # outputActive: true
    ```
+   **`jxs_pace_mbps`:** 900 for stream-snv's 1 GbE port (a file without the key gets the same
+   default). Change it in the file AND with `SetOutputSettings {"jxs_pace_mbps": N}`, then
+   `StopOutput` + `StartOutput` (settings apply at the next start). The started line and the sender's
+   `link ON` line name the pace; every status line carries `pace_mbps=900 wire_ms_avg/max=`. If
+   stream still shows `lost_slices` > 0 at 900, step down (800, 700) before suspecting anything
+   else; `wire_ms_max` must stay under ~30 ms at the bpp the link climbs to.
    The file makes it start by itself at every later OBS start; `"enabled": false` (or deleting the
    file) and `StopOutput` turn it off. **The file is the only persistent store:** the plugin
    re-creates the output from it at every OBS start and every profile change, so a setting changed
@@ -540,6 +590,9 @@ wire.
      strih-snv CPU (`top -H -p <obs pid>` for the `jxs-feed` / `jxs-send` / SVT worker threads, and
      the box total) before and after the start; the `genlock-ndi-output audit` lines of the NDI
      outputs unchanged (`dropped=0`, `max_send_wait_ms` as before);
+   - the pacing: strih `pace_mbps=900`, `wire_ms_avg` ~10 ms at 4 bpp / ~20 ms at 8 bpp; on stream
+     `lost_slices=0` in EVERY window (the slice-3 line-rate run: 10 of 21 windows lost 1-15) and the
+     auto bpp climbing to 8;
    - stream: `jxs-source 'JXS PGM src': fps=30.00`, `lost_slices=0 undecodable=0 dropped_unread=0`,
      `bpp=8.00` once the auto bpp has climbed, `decoder_reopens` = one per sender bpp step;
    - `genlock-fifo audit 'JXS PGM src'` clean for 10 min (no `underruns` / `relocks` /

@@ -49,6 +49,7 @@
 #define PROP_JXS_BPP_MIN "jxs_bpp_min"
 #define PROP_JXS_BPP_MAX "jxs_bpp_max"
 #define PROP_JXS_CORES "jxs_cores"
+#define PROP_JXS_PACE_MBPS "jxs_pace_mbps"
 
 struct jxs_output {
 	obs_output_t *output = nullptr;
@@ -59,6 +60,7 @@ struct jxs_output {
 	uint8_t stream_id = CB_JXS_OUT_STREAM_ID_DEFAULT;
 	uint8_t bpp_min = 0;
 	uint8_t bpp_max = 0;
+	uint32_t pace_mbps = CB_JXS_OUT_PACE_MBPS_DEFAULT;
 	/* running state */
 	std::mutex tx_mutex;
 	cbjxs_sender *tx = nullptr;
@@ -116,6 +118,7 @@ static void jxs_output_getdefaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, PROP_JXS_BPP_MIN, 0);
 	obs_data_set_default_int(settings, PROP_JXS_BPP_MAX, 0);
 	obs_data_set_default_string(settings, PROP_JXS_CORES, "");
+	obs_data_set_default_int(settings, PROP_JXS_PACE_MBPS, CB_JXS_OUT_PACE_MBPS_DEFAULT);
 }
 
 static obs_properties_t *jxs_output_getproperties(void *)
@@ -127,6 +130,8 @@ static obs_properties_t *jxs_output_getproperties(void *)
 	obs_properties_add_int(props, PROP_JXS_BPP_MAX, "Highest bpp (0 = 8; = lowest: fixed)", 0,
 			       CB_JXS_OUT_MAX_BPP, 1);
 	obs_properties_add_text(props, PROP_JXS_CORES, "Encoder cores (cpulist, empty = all)", OBS_TEXT_DEFAULT);
+	obs_properties_add_int(props, PROP_JXS_PACE_MBPS, "Send pace, Mb/s of wire (0 = line rate)", 0,
+			       CB_JXS_OUT_PACE_MBPS_MAX, 50);
 	return props;
 }
 
@@ -140,6 +145,7 @@ static void jxs_output_update(void *data, obs_data_t *settings)
 	o->stream_id = cb_jxs_out_stream_id(obs_data_get_int(settings, PROP_JXS_STREAM_ID));
 	o->bpp_min = cb_jxs_out_bpp(obs_data_get_int(settings, PROP_JXS_BPP_MIN));
 	o->bpp_max = cb_jxs_out_bpp(obs_data_get_int(settings, PROP_JXS_BPP_MAX));
+	o->pace_mbps = cb_jxs_out_pace_mbps(obs_data_get_int(settings, PROP_JXS_PACE_MBPS));
 }
 
 static void *jxs_output_create(obs_data_t *settings, obs_output_t *output)
@@ -191,6 +197,7 @@ static bool jxs_output_start(void *data)
 		cfg.stream_id = o->stream_id;
 		cfg.bpp_min = o->bpp_min;
 		cfg.bpp_max = o->bpp_max;
+		cfg.pace_mbps = o->pace_mbps;
 	}
 	cfg.target = target.c_str();
 	cfg.cores = cores.c_str();
@@ -226,10 +233,11 @@ static bool jxs_output_start(void *data)
 	/* every frame carries the genlock wall stamp: the LOCK indicator counts it as a sender */
 	obs_output_set_genlock_wall_stamping(o->output, true);
 	obs_log(LOG_INFO,
-		"jxs-output '%s': started -- the program %ux%u %s at %.2f fps to %s (stream id %u, bpp %u..%u, 0 = the sender's default; cores '%s', empty = all), each frame stamped with the genlock emit timecode of the NDI output, send ABI %u (issue 1387)",
+		"jxs-output '%s': started -- the program %ux%u %s at %.2f fps to %s (stream id %u, bpp %u..%u, 0 = the sender's default; cores '%s', empty = all; pace %u Mb/s, 0 = line rate), each frame stamped with the genlock emit timecode of the NDI output, send ABI %u (issue 1387)",
 		name, video_output_get_width(video), video_output_get_height(video),
 		get_video_format_name(video_output_get_format(video)), framerate, target.c_str(),
 		(unsigned)cfg.stream_id, (unsigned)cfg.bpp_min, (unsigned)cfg.bpp_max, cores.c_str(),
+		(unsigned)cfg.pace_mbps,
 		cbjxs_send_abi_version());
 	return true;
 }
@@ -243,12 +251,13 @@ static void jxs_output_log_status(jxs_output *o, const cbjxs_send_stats &st)
 		" stamp_dup=%" PRIu64
 		" encode_ms_avg/max=%.2f/%.2f first_slice_ms_avg=%.2f copy_ms_avg/max=%.2f/%.2f bpp=%u auto=%s"
 		" reports=%" PRIu64 " report_age_s=%.1f send_errors=%" PRIu64 " encode_errors=%" PRIu64
-		" (issue 1387)",
+		" pace_mbps=%u wire_ms_avg/max=%.2f/%.2f (issue 1387)",
 		obs_output_get_name(o->output), st.window_s > 0.0 ? (double)st.frames / st.window_s : 0.0,
 		st.frames, st.dropped_busy, o->offered, o->taken, o->not_taken, o->refused, o->stamp_dup,
 		st.encode_ms_avg,
 		st.encode_ms_max, st.first_slice_ms_avg, st.copy_ms_avg, st.copy_ms_max, st.bpp,
-		st.auto_bpp ? "on" : "off", st.reports, st.report_age_s, st.send_errors, st.encode_errors);
+		st.auto_bpp ? "on" : "off", st.reports, st.report_age_s, st.send_errors, st.encode_errors,
+		st.pace_mbps, st.wire_ms_avg, st.wire_ms_max);
 	o->offered = o->taken = o->not_taken = o->refused = o->stamp_dup = 0;
 }
 

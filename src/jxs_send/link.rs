@@ -49,7 +49,7 @@ fn start_link_worker(target: String, cfg: LinkConfig) -> Result<JxsHandoff, Stri
         cfg.cores
     };
     tracing::info!(
-        "jxs send: link ON to {} (stream id {}, UDP GSO {}, egress mark {}, send buffer {} bytes) -- JPEG XS {} at up to {} fps, latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads (issue 1387)",
+        "jxs send: link ON to {} (stream id {}, UDP GSO {}, egress mark {}, send buffer {} bytes) -- JPEG XS {} at up to {} fps, latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads, send {} (issue 1387)",
         socket
             .peer()
             .map(|a| a.to_string())
@@ -62,6 +62,7 @@ fn start_link_worker(target: String, cfg: LinkConfig) -> Result<JxsHandoff, Stri
         jxs_link::JXS_FPS,
         FRAMES_IN_FLIGHT,
         slice_threads_for(&cores),
+        super::pace_text(cfg.opts.pace_mbps),
     );
     handoff::spawn(socket, cfg.camera_id, cores, cfg.opts)
         .ok_or_else(|| "the sender threads could not be spawned".to_string())

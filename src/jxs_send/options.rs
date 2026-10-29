@@ -141,12 +141,6 @@ pub fn parse_pace_mbps(value: Option<&str>) -> Result<u32, String> {
     let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
         return Ok(0);
     };
-    let _ = v;
-    Ok(0)
-}
-
-#[allow(dead_code)]
-fn unused_parse(v: &str) -> Result<u32, String> {
     v.parse::<u32>()
         .map_err(|_| format!("{PACE_ENV}='{v}' is not a whole number"))
         .and_then(|m| {

@@ -41,8 +41,13 @@ static inline uint8_t cb_jxs_out_bpp(long long v)
  * never makes the start fail. */
 static inline uint32_t cb_jxs_out_pace_mbps(long long v)
 {
-	(void)v;
-	return 0;
+	if (v <= 0)
+		return 0;
+	if (v < CB_JXS_OUT_PACE_MBPS_MIN)
+		return CB_JXS_OUT_PACE_MBPS_MIN;
+	if (v > CB_JXS_OUT_PACE_MBPS_MAX)
+		return CB_JXS_OUT_PACE_MBPS_MAX;
+	return (uint32_t)v;
 }
 
 /* The canvas frame rate the sender is told (it sends every frame at 30 or below, the 30 fps grid
