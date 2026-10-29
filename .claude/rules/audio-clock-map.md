@@ -114,7 +114,7 @@ strih-snv since 24.10.2026). lv1 sends two streams: `strih-obs` to OBS on 6981, 
 | Program into the strih OBS | lv1 VBAN `strih-obs` (48 kHz, 103-frame packets, UDP 6981, straight to the rig NIC) -> obs-vban receive timeline (sender rate fitted, fixed R) -> OBS mix (FLEET). No hub, no PipeWire (issue 1439, 24.10.2026; before: hub `program_out` -> pw-cat -> PipeWire, ~96 ms) | R = **40 ms** (`STRIH_PROGRAM_VBAN_RESERVE_MS`) + the OBS genlock audio path |
 | Vestibule TV (HDMI-1 -> SDI) | lv1 -> hub program leg -> mix -> aplay HDMI pipe (egress resampler) | 37.3 ms + 13.3 ms + 0.3 ms + 21.3 ms + 5.3 ms + `hdmi_delay_ms` 0 = **~77.5 ms** + the Blackmagic converter and the TV |
 | Program in the cutters' cans | lv1 -> hub program leg -> mix -> MG-XU playback (aplay, egress resampler) | ~77.5 ms (the same chain as the SNV cans) |
-| Cameramen (cam1/4/6/7) <-> cutters, phones | as on strih-snv | as on strih-snv |
+| Cameramen (cam1-7, issue 1431) <-> cutters, phones | as on strih-snv | as on strih-snv |
 
 ## stream-snv / stream-pp (`STRIH_ROLE=stream`: YouTube + the recordings)
 
