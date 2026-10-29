@@ -42,6 +42,12 @@ pub const STATUS_PERIOD: std::time::Duration = std::time::Duration::from_secs(5)
 /// Socket send buffer: a whole 1080p frame at 4 bpp (~1.04 MB) plus headers, twice.
 pub const SEND_BUFFER_BYTES: i32 = 4 * 1024 * 1024;
 
+/// The `SO_MARK` the JPEG XS socket carries: the cambox egress pacing (issue 1242) paces every
+/// flow at 400 Mb/s in an `fq`, and its `fw` filter on this mark sends the JPEG XS flow past that
+/// fq at line rate (issue 1387). The ONE declaration is `CAMBOX_EGRESS_PACING_JXS_MARK` in
+/// `scripts/lib/cambox-egress-pacing.sh`; a pytest pins this value equal to it.
+pub const JXS_SOCKET_MARK: u32 = 0x1387;
+
 /// `UDP_SEGMENT` / `UDP_GRO` (linux/udp.h; spelled here so an older `libc` cannot lack them).
 pub const UDP_SEGMENT: libc::c_int = 103;
 pub const UDP_GRO: libc::c_int = 104;
@@ -50,6 +56,7 @@ pub const UDP_GRO: libc::c_int = 104;
 pub struct JxsSocket {
     sock: UdpSocket,
     gso: AtomicBool,
+    marked: bool,
 }
 
 impl JxsSocket {
@@ -74,10 +81,25 @@ impl JxsSocket {
         let fd = sock.as_raw_fd();
         set_int_opt(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, SEND_BUFFER_BYTES);
         let gso = set_int_opt(fd, libc::SOL_UDP, UDP_SEGMENT, DATAGRAM_LEN as libc::c_int);
+        // SO_MARK needs CAP_NET_ADMIN (camera-box.service runs as root). Without it the flow is
+        // still sent, only paced with NDI: `marked()` reports it and the "link ON" line names it.
+        let marked = set_int_opt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_MARK,
+            JXS_SOCKET_MARK as libc::c_int,
+        );
         Ok(Self {
             sock,
             gso: AtomicBool::new(gso),
+            marked,
         })
+    }
+
+    /// Whether the kernel accepted [`JXS_SOCKET_MARK`] (`SO_MARK`), i.e. the egress pacing's fw
+    /// filter sends this flow at line rate.
+    pub fn marked(&self) -> bool {
+        self.marked
     }
 
     /// Whether GSO is in use (the kernel accepted `UDP_SEGMENT`, and no GSO send has failed with
@@ -396,13 +418,23 @@ fn start_worker(target: String, camera_id: u8, bpp: u32) -> Option<JxsHandoff> {
             allowed.clone()
         }
     };
+    if !socket.marked() {
+        tracing::warn!(
+            "jxs send: SO_MARK {JXS_SOCKET_MARK:#x} refused (no CAP_NET_ADMIN?) -- the cambox egress pacing paces this JPEG XS flow at 400 Mb/s with NDI instead of line rate (issue 1387)"
+        );
+    }
     tracing::info!(
-        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, send buffer {} bytes) -- JPEG XS {bpp} bpp at {} fps (the strih grid, NDI stays at its emit rate), latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), beside NDI (issue 1387)",
+        "jxs send: link ON to {} (camera id {camera_id}, UDP GSO {}, egress mark {}, send buffer {} bytes) -- JPEG XS {bpp} bpp at {} fps (the strih grid, NDI stays at its emit rate), latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads (capture core {capture:?}, capture-IRQ core {reserved:?} untouched), beside NDI (issue 1387)",
         socket
             .peer()
             .map(|a| a.to_string())
             .unwrap_or_else(|_| target.clone()),
         if socket.gso() { "on" } else { "OFF: one send per datagram" },
+        if socket.marked() {
+            format!("{JXS_SOCKET_MARK:#x}: line rate past the NDI pacing")
+        } else {
+            "NONE: paced with NDI".to_string()
+        },
         socket.send_buffer(),
         jxs_link::JXS_FPS,
         FRAMES_IN_FLIGHT,
@@ -673,6 +705,25 @@ mod tests {
         h.offer(&jf(&frame, 64, 8, tc(4), true));
         h.offer(&jf(&frame, 64, 8, tc(6), true));
         assert_eq!(h.dropped_busy(), 0);
+    }
+
+    #[test]
+    fn the_socket_carries_the_egress_mark_whenever_the_kernel_allows_it_1387() {
+        let tx = JxsSocket::connect("127.0.0.1:9").unwrap();
+        let got = get_int_opt(tx.sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_MARK);
+        // The report matches the socket either way: marked == the mark is really on it.
+        assert_eq!(
+            tx.marked(),
+            got == JXS_SOCKET_MARK as i64,
+            "SO_MARK read {got}"
+        );
+        // root (camera-box.service) holds CAP_NET_ADMIN: there the mark is never missing.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            assert!(tx.marked(), "a root socket carries the mark");
+        } else {
+            assert!(!tx.marked(), "an unprivileged socket cannot set SO_MARK");
+        }
     }
 
     #[test]

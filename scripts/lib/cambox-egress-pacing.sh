@@ -20,6 +20,20 @@
 # receive-gap storms from ~1 per 5 min to ~1 per 30 min, the first release E2E with clean
 # continuity. It helps but is not the full cure; 10 GbE through a PCIe NIC (issue 1387) is.
 #
+# Issue 1387: the JPEG XS link must go out at LINE rate (its slices leave the encoder as they are
+# coded; the 400 Mb/s cap spread a frame over 23-33 ms and built a backlog). No socket option can lift
+# fq's per-flow cap (fq takes the SMALLER of the socket pacing rate and maxrate), so the root is now
+# classful, measured on a real 7.0 kernel in a netns:
+#   root `prio 1:` bands 2, EVERY skb priority mapped to band 0 (the classic priomap would split
+#     ordinary traffic across bands; this one leaves only the filter to move a packet);
+#   band 0 = class 1:1 -> the SAME fq maxrate/flow_limit/limit as before: NDI, PTP/NTP, intercom;
+#   band 1 = class 1:2 -> a `pfifo` (CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT), no pacing;
+#   `fw` filter: skb mark CAMBOX_EGRESS_PACING_JXS_MARK -> 1:2. camera-box sets that mark
+#     (SO_MARK) on its JPEG XS socket only (src/jxs_send.rs JXS_SOCKET_MARK, pinned equal by pytest).
+# prio serves band 0 first: a ready NDI/PTP packet always goes before JPEG XS, and while fq holds a
+# paced packet back its dequeue returns nothing, so JPEG XS fills the idle wire. A mark, not a port:
+# the boot script cannot know the runtime CAMERA_BOX_JXS_TARGET port.
+#
 # Until this lib it lived only as a runtime qdisc applied by hand, dropped silently by a reboot, a
 # re-provision or a new stick. Now (main design 5905959484, Approach 1):
 #   * THIS lib is the ONE declaration of the rate and the limits + the pure builders/verdicts;
@@ -41,6 +55,13 @@
 CAMBOX_EGRESS_PACING_RATE="400mbit"
 CAMBOX_EGRESS_PACING_FLOW_LIMIT="2000"
 CAMBOX_EGRESS_PACING_LIMIT="20000"
+# Issue 1387: the JPEG XS class. The mark camera-box sets with SO_MARK on its JPEG XS socket (the
+# `fw` filter's handle), and the unpaced FIFO's packet limit: above the ~1800 datagrams a 4 MB socket
+# send buffer can hold in the one-send-per-datagram fallback, so the socket buffer, never the FIFO,
+# bounds the queue. The tree's handles are fixed: root 1:, paced band 1:1 (fq 10:), JPEG XS 1:2 (pfifo 20:).
+CAMBOX_EGRESS_PACING_JXS_MARK="0x1387"
+CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT="4000"
+CAMBOX_EGRESS_PACING_PRIOMAP="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
 
 CAMBOX_EGRESS_PACING_SERVICE_NAME="cambox-egress-pacing"
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (the [egress-pacing] install)
@@ -65,11 +86,13 @@ ip route show default 2>/dev/null | awk '!d { for (i = 1; i < NF; i++) if ($i ==
 EOF
 }
 
-# cambox_egress_pacing_apply_cmd -> shell TEXT: ONE attempt to pace the default-route interface
-# (`tc qdisc replace ... root fq maxrate ... flow_limit ... limit ...`, idempotent). A brace group
-# whose status is the attempt's result: 0 = applied (one line on stdout), 1 = no default route yet
-# or tc failed (one named line on stderr, tc never run without a route). The boot script wraps it in
-# its bounded retry; nothing else applies it (setup-device is enable-only).
+# cambox_egress_pacing_apply_cmd -> shell TEXT: ONE attempt to build the tree on the default-route
+# interface: the prio root, the paced fq under 1:1, the JPEG XS FIFO under 1:2, the fw filter (each a
+# `replace`, idempotent; issue 1387). A brace group whose status is the attempt's result: 0 = all four
+# applied (one line on stdout), 1 = no default route yet or a tc step failed (one named line on
+# stderr; the chain stops at the failed step and is never reported applied, tc never run without a
+# route). The boot script wraps it in its bounded retry; nothing else applies it (setup-device is
+# enable-only).
 cambox_egress_pacing_apply_cmd() {
   cat <<EOF
 {
@@ -77,10 +100,13 @@ cambox_egress_pacing_apply_cmd() {
   if [ -z "\$_cep_if" ]; then
     echo "cambox-egress-pacing: no default route yet -- no egress interface to pace (issue 1242)" >&2
     false
-  elif tc qdisc replace dev "\$_cep_if" root fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT}; then
-    echo "cambox-egress-pacing: dev \$_cep_if root fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT} applied (issue 1242)"
+  elif tc qdisc replace dev "\$_cep_if" root handle 1: prio bands 2 priomap ${CAMBOX_EGRESS_PACING_PRIOMAP} &&
+    tc qdisc replace dev "\$_cep_if" parent 1:1 handle 10: fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT} &&
+    tc qdisc replace dev "\$_cep_if" parent 1:2 handle 20: pfifo limit ${CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT} &&
+    tc filter replace dev "\$_cep_if" parent 1: protocol all prio 1 handle ${CAMBOX_EGRESS_PACING_JXS_MARK} fw classid 1:2; then
+    echo "cambox-egress-pacing: dev \$_cep_if NDI paced (fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT} under prio 1:1), JPEG XS mark ${CAMBOX_EGRESS_PACING_JXS_MARK} at line rate (1:2) applied (issues 1242, 1387)"
   else
-    echo "cambox-egress-pacing: tc qdisc replace on \$_cep_if FAILED (issue 1242)" >&2
+    echo "cambox-egress-pacing: building the egress tree on \$_cep_if FAILED (issues 1242, 1387)" >&2
     false
   fi
 }
@@ -99,8 +125,9 @@ cambox_egress_pacing_boot_script() {
 # ${CAMBOX_EGRESS_PACING_SERVICE_NAME} boot script -- GENERATED by scripts/lib/cambox-egress-pacing.sh
 # (camera-box issue 1242) and written by setup-device.sh; do not edit it on the box, re-run setup-device.sh.
 # Run at boot by ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service: paces this box's NDI egress with an fq
-# root qdisc (maxrate ${CAMBOX_EGRESS_PACING_RATE} per flow) on the default-route interface, so the
-# seven cameras' per-tick frame bursts reach strih-snv spread in time.
+# (maxrate ${CAMBOX_EGRESS_PACING_RATE} per flow) on the default-route interface, so the seven
+# cameras' per-tick frame bursts reach strih-snv spread in time; the JPEG XS flow (mark
+# ${CAMBOX_EGRESS_PACING_JXS_MARK}) goes past it at line rate (issue 1387).
 set -euo pipefail
 PATH="\$PATH:/usr/sbin:/sbin"
 cep_attempts=${CAMBOX_EGRESS_PACING_RETRY_ATTEMPTS}
@@ -143,14 +170,45 @@ cambox_egress_pacing_rate_bps() {
   return 0
 }
 
-# cambox_egress_pacing_verdict QDISC_TEXT -> ONE line `OK <detail>` / `DRIFT <detail>` /
-# `UNKNOWN <detail>` for a `tc qdisc show dev <if>` output (raw lines, or the `|`-flattened form the
-# gather snippet emits). Only the ROOT qdisc is graded (a child `parent :N` line never is). OK = an fq
-# root whose maxrate (compared in bit/s), flow_limit and limit all equal the declaration. DRIFT = a
-# readable root that is not that (pfifo_fast / mq / fq_codel, fq without maxrate, a wrong value).
-# UNKNOWN = nothing gradable (tc absent, no default route, no root line). Always returns 0.
+# cambox_egress_pacing_qdisc_line TEXT SELECTOR -> the FIRST `qdisc` line of TEXT (raw lines or the
+# `|`-flattened gather form) whose position is SELECTOR: `root`, or a class id such as `1:1` (the
+# line's `parent <id>`). Empty when there is none. Always returns 0.
+cambox_egress_pacing_qdisc_line() {
+  printf '%s\n' "${1:-}" | tr '|' '\n' | awk -v want="${2:-}" '
+    $1 == "qdisc" && r == "" {
+      pos = ""
+      for (i = 3; i <= NF; i++) {
+        if ($i == "root") { pos = "root"; break }
+        if ($i == "parent" && i < NF) { pos = $(i + 1); break }
+      }
+      if (pos == want) r = $0
+    }
+    END { if (r != "") print r }' || true
+  return 0
+}
+
+# cambox_egress_pacing_token LINE WORD -> the value after the first exact WORD token of LINE, with a
+# `p` packet suffix stripped (tc prints `limit 20000p`). Empty when absent. Always returns 0.
+cambox_egress_pacing_token() {
+  printf '%s\n' "${1:-}" | awk -v w="${2:-}" '{ for (i = 1; i < NF; i++) if ($i == w) { v = $(i + 1); sub(/p$/, "", v); print v; break } }' || true
+  return 0
+}
+
+# cambox_egress_pacing_verdict QDISC_TEXT [FILTER_TEXT] -> ONE line `OK <detail>` / `DRIFT <detail>` /
+# `UNKNOWN <detail>` for `tc qdisc show dev <if>` and `tc filter show dev <if>` (raw lines, or the
+# `|`-flattened form the gather emits). OK = the whole issue-1387 tree:
+#   root `prio` with handle 1:, 2 bands and every priority mapped to band 0 (a priority mapped to
+#     band 1 would send that traffic past the fq: the NDI egress could go unpaced);
+#   under 1:1 an `fq` whose maxrate (compared in bit/s), flow_limit and limit equal the declaration;
+#   under 1:2 a `pfifo` with the declared limit, the JPEG XS class;
+#   a `fw` filter on parent 1: whose handle (compared as a number) is the declared mark, to 1:2.
+# DRIFT names every fault at once: the NDI side (`the NDI egress is UNPACED`, or a wrong value) and
+# the JPEG XS side (`JPEG XS ...`: the flow is paced with NDI, or not classified). The pre-issue-1387
+# root fq is DRIFT (NDI paced, the JPEG XS class missing). UNKNOWN = nothing gradable (tc absent, no
+# default route, no root line). Always returns 0.
 cambox_egress_pacing_verdict() {
-  local text="${1:-}" root kind maxrate flow_limit limit got_bps want_bps drift=""
+  local text="${1:-}" filters="${2:-}" root kind handle bands priomap fq child mark_line got_mark want_mark
+  local maxrate flow_limit limit got_bps want_bps fifo_limit ndi="" jxs="" detail
   case "$text" in
     *__TC_ABSENT__*)
       echo "UNKNOWN tc (iproute2) is not installed -- the egress qdisc cannot be read"
@@ -159,46 +217,99 @@ cambox_egress_pacing_verdict() {
       echo "UNKNOWN no default route -- no egress interface to read"
       return 0 ;;
   esac
-  root="$(printf '%s\n' "$text" | tr '|' '\n' | awk '
-    $1 == "qdisc" && r == "" {
-      for (i = 3; i <= NF; i++) {
-        if ($i == "parent") break
-        if ($i == "root") { r = $0; break }
-      }
-    }
-    END { if (r != "") print r }' || true)"
+  root="$(cambox_egress_pacing_qdisc_line "$text" root)"
   if [ -z "$root" ]; then
     echo "UNKNOWN no root qdisc in the tc output"
     return 0
   fi
   kind="$(printf '%s\n' "$root" | awk '{ print $2 }' || true)"
-  if [ "$kind" != "fq" ]; then
-    echo "DRIFT root qdisc is ${kind:-?}, not fq -- the NDI egress is UNPACED"
+  if [ "$kind" = "fq" ]; then
+    echo "DRIFT root qdisc is fq, the pre-issue-1387 tree -- JPEG XS class 1:2 missing, the JPEG XS flow is paced with NDI"
     return 0
   fi
-  # Exact tokens: `limit` and `flow_limit` are distinct words, and the `p` packet suffix is stripped.
-  maxrate="$(printf '%s\n' "$root" | awk '{ for (i = 1; i < NF; i++) if ($i == "maxrate") { print $(i + 1); break } }' || true)"
-  flow_limit="$(printf '%s\n' "$root" | awk '{ for (i = 1; i < NF; i++) if ($i == "flow_limit") { v = $(i + 1); sub(/p$/, "", v); print v; break } }' || true)"
-  limit="$(printf '%s\n' "$root" | awk '{ for (i = 1; i < NF; i++) if ($i == "limit") { v = $(i + 1); sub(/p$/, "", v); print v; break } }' || true)"
-  if [ -z "$maxrate" ]; then
-    echo "DRIFT fq root without maxrate -- the NDI egress is UNPACED"
+  if [ "$kind" != "prio" ]; then
+    echo "DRIFT root qdisc is ${kind:-?}, not prio -- the NDI egress is UNPACED and the JPEG XS class 1:2 is missing"
     return 0
   fi
-  got_bps="$(cambox_egress_pacing_rate_bps "$maxrate")"
-  want_bps="$(cambox_egress_pacing_rate_bps "$CAMBOX_EGRESS_PACING_RATE")"
-  if [ -z "$got_bps" ] || [ "$got_bps" != "$want_bps" ]; then
-    drift="maxrate $maxrate (want $CAMBOX_EGRESS_PACING_RATE)"
+  handle="$(printf '%s\n' "$root" | awk '{ print $3 }' || true)"
+  bands="$(cambox_egress_pacing_token "$root" bands)"
+  priomap="$(printf '%s\n' "$root" | awk '{ for (i = 1; i <= NF; i++) if ($i == "priomap") { s = ""; for (j = i + 1; j <= NF; j++) s = s (s == "" ? "" : " ") $j; print s; break } }' || true)"
+  if [ "$handle" != "1:" ]; then
+    ndi="prio root handle ${handle:-?} (want 1:) -- its classes are not the tree's"
   fi
-  if [ "$flow_limit" != "$CAMBOX_EGRESS_PACING_FLOW_LIMIT" ]; then
-    drift="${drift:+$drift, }flow_limit ${flow_limit:-?} (want $CAMBOX_EGRESS_PACING_FLOW_LIMIT)"
+  if [ "$bands" != "2" ]; then
+    ndi="${ndi:+$ndi, }prio bands ${bands:-?} (want 2)"
   fi
-  if [ "$limit" != "$CAMBOX_EGRESS_PACING_LIMIT" ]; then
-    drift="${drift:+$drift, }limit ${limit:-?} (want $CAMBOX_EGRESS_PACING_LIMIT)"
+  if [ "$priomap" != "$CAMBOX_EGRESS_PACING_PRIOMAP" ]; then
+    ndi="${ndi:+$ndi, }priomap '${priomap:-?}' maps a priority past band 0 -- that traffic is UNPACED"
   fi
-  if [ -n "$drift" ]; then
-    echo "DRIFT fq root with $drift"
+
+  # The paced band: fq under 1:1 with the declared values.
+  fq="$(cambox_egress_pacing_qdisc_line "$text" 1:1)"
+  child="$(printf '%s\n' "$fq" | awk '{ print $2 }' || true)"
+  if [ "$child" != "fq" ]; then
+    ndi="${ndi:+$ndi, }no fq under 1:1 (${child:-nothing} there) -- the NDI egress is UNPACED"
   else
-    echo "OK fq maxrate $maxrate flow_limit ${flow_limit}p limit ${limit}p"
+    maxrate="$(cambox_egress_pacing_token "$fq" maxrate)"
+    flow_limit="$(cambox_egress_pacing_token "$fq" flow_limit)"
+    limit="$(cambox_egress_pacing_token "$fq" limit)"
+    if [ -z "$maxrate" ]; then
+      ndi="${ndi:+$ndi, }fq under 1:1 without maxrate -- the NDI egress is UNPACED"
+    else
+      got_bps="$(cambox_egress_pacing_rate_bps "$maxrate")"
+      want_bps="$(cambox_egress_pacing_rate_bps "$CAMBOX_EGRESS_PACING_RATE")"
+      if [ -z "$got_bps" ] || [ "$got_bps" != "$want_bps" ]; then
+        ndi="${ndi:+$ndi, }fq maxrate $maxrate (want $CAMBOX_EGRESS_PACING_RATE)"
+      fi
+    fi
+    if [ "$flow_limit" != "$CAMBOX_EGRESS_PACING_FLOW_LIMIT" ]; then
+      ndi="${ndi:+$ndi, }fq flow_limit ${flow_limit:-?} (want $CAMBOX_EGRESS_PACING_FLOW_LIMIT)"
+    fi
+    if [ "$limit" != "$CAMBOX_EGRESS_PACING_LIMIT" ]; then
+      ndi="${ndi:+$ndi, }fq limit ${limit:-?} (want $CAMBOX_EGRESS_PACING_LIMIT)"
+    fi
+  fi
+
+  # The JPEG XS class: pfifo under 1:2 + the fw filter on the declared mark.
+  child="$(cambox_egress_pacing_qdisc_line "$text" 1:2)"
+  if [ "$(printf '%s\n' "$child" | awk '{ print $2 }' || true)" != "pfifo" ]; then
+    jxs="JPEG XS class 1:2 has no pfifo ($(printf '%s\n' "$child" | awk '{ print $2 }' || true))"
+    jxs="${jxs% ()}"
+  else
+    fifo_limit="$(cambox_egress_pacing_token "$child" limit)"
+    if [ "$fifo_limit" != "$CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT" ]; then
+      jxs="JPEG XS pfifo limit ${fifo_limit:-?} (want $CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT)"
+    fi
+  fi
+  want_mark="$((CAMBOX_EGRESS_PACING_JXS_MARK))"
+  got_mark=""
+  mark_line="$(printf '%s\n' "$filters" | tr '|' '\n' | awk '
+    $1 == "filter" && $2 == "parent" && $3 == "1:" && m == "" {
+      fw = 0; cls = ""; h = ""
+      for (i = 4; i <= NF; i++) {
+        if ($i == "fw") fw = 1
+        if ($i == "handle" && i < NF) h = $(i + 1)
+        if ($i == "classid" && i < NF) cls = $(i + 1)
+      }
+      if (fw && h != "" && cls == "1:2") m = h
+    }
+    END { if (m != "") print m }' || true)"
+  # A handle is hex (0x...) or decimal, compared as a number; anything else is no match. The digit
+  # sets are spelled out: a bracket range follows the locale (ci-testing-gotchas, issue 1302).
+  if [[ $mark_line =~ ^0[xX][0123456789abcdefABCDEF]{1,8}$ ]]; then
+    got_mark="$((mark_line))"
+  elif [[ $mark_line =~ ^[0123456789]{1,10}$ ]]; then
+    got_mark="$((10#$mark_line))"
+  fi
+  if [ "$got_mark" != "$want_mark" ]; then
+    jxs="${jxs:+$jxs, }no fw filter for mark $CAMBOX_EGRESS_PACING_JXS_MARK to 1:2 -- the JPEG XS flow is paced with NDI"
+  fi
+
+  detail="${ndi}${ndi:+${jxs:+; }}${jxs}"
+  if [ -n "$detail" ]; then
+    echo "DRIFT $detail"
+  else
+    echo "OK prio 1: -> 1:1 fq maxrate $maxrate flow_limit ${flow_limit}p limit ${limit}p (NDI paced) + 1:2 pfifo limit ${fifo_limit}p via fw mark $CAMBOX_EGRESS_PACING_JXS_MARK (JPEG XS at line rate)"
   fi
   return 0
 }
@@ -214,11 +325,12 @@ cambox_egress_pacing_functional_lines() {
 
 # cambox_egress_pacing_gather_remote_snippet -> READ-ONLY remote bash (verify-device (ap) and the E2E
 # row run it over ssh) printing one KEY=VALUE line per fact: the default-route interface, its qdisc
-# (`|`-flattened, or __TC_ABSENT__ / __NO_DEFAULT_ROUTE__), the unit's is-enabled / is-active /
+# (`|`-flattened, or __TC_ABSENT__ / __NO_DEFAULT_ROUTE__) and its filters (`|`-flattened, the
+# issue-1387 JPEG XS fw filter), the unit's is-enabled / is-active /
 # restart count, and what setup-device installed -- the boot script is executable and starts with
 # its `#!/bin/bash` line, and the functional-line sha256 of the script and of the unit (empty when
 # absent) -- so the verdict can prove the unit will actually run at the next boot. It never changes
-# anything (only `tc qdisc show` and reads). sbin is appended to PATH because a non-login ssh PATH
+# anything (only `tc qdisc show` / `tc filter show` and reads). sbin is appended to PATH because a non-login ssh PATH
 # may omit it; a caller's own PATH entries still come first.
 cambox_egress_pacing_gather_remote_snippet() {
   cat <<EOF
@@ -232,6 +344,11 @@ elif [ -z "\$_cep_if" ]; then
   echo "PACING_QDISC=__NO_DEFAULT_ROUTE__"
 else
   echo "PACING_QDISC=\$(tc qdisc show dev "\$_cep_if" 2>/dev/null | tr '\n' '|')"
+fi
+if command -v tc >/dev/null 2>&1 && [ -n "\$_cep_if" ]; then
+  echo "PACING_FILTER=\$(tc filter show dev "\$_cep_if" 2>/dev/null | tr '\n' '|')"
+else
+  echo "PACING_FILTER="
 fi
 echo "PACING_SVC_ENABLED=\$(systemctl is-enabled ${CAMBOX_EGRESS_PACING_SERVICE_NAME} 2>/dev/null)"
 echo "PACING_SVC_ACTIVE=\$(systemctl is-active ${CAMBOX_EGRESS_PACING_SERVICE_NAME} 2>/dev/null)"
@@ -290,7 +407,7 @@ cambox_egress_pacing_block_field() {
 #   issue 1242 fixes).
 # RUNTIME facets (the fix matches the state, never a blanket re-provision):
 #   the unit is not `failed` (its retry gave up: read its journal);
-#   the live root qdisc grades OK. When it does not, the hint follows the state: no default route =
+#   the live tree (qdisc + filter) grades OK. When it does not, the hint follows the state: no default route =
 #   a network problem; tc missing = iproute2; the install fine and the unit `inactive` = it never ran
 #   since the install (`systemctl start` or the next reboot); `active` = the qdisc changed after it
 #   ran (`systemctl restart`); `activating` = it is still retrying.
@@ -298,13 +415,14 @@ cambox_egress_pacing_block_field() {
 # freshly provisioned box stays `inactive` until a physical reboot while its runtime qdisc is live.
 # Fail-closed on an unreadable block or an unreadable expected value. Always returns 0.
 cambox_egress_pacing_provision_verdict() {
-  local block="${1:-}" want_script want_unit iface qdisc enabled active script_exec script_sha unit_sha
+  local block="${1:-}" want_script want_unit iface qdisc filter enabled active script_exec script_sha unit_sha
   local restarts rounds="" v hint install_ok=1 fails="" nl=$'\n' svc="${CAMBOX_EGRESS_PACING_SERVICE_NAME}"
   local reprov="re-run setup-device.sh (its [egress-pacing] sub-step)"
   if [ "$#" -ge 2 ]; then want_script="$2"; else want_script="$(cambox_egress_pacing_expected_script_sha)"; fi
   if [ "$#" -ge 3 ]; then want_unit="$3"; else want_unit="$(cambox_egress_pacing_expected_unit_sha)"; fi
   iface="$(cambox_egress_pacing_block_field "$block" PACING_IFACE)"
   qdisc="$(cambox_egress_pacing_block_field "$block" PACING_QDISC)"
+  filter="$(cambox_egress_pacing_block_field "$block" PACING_FILTER)"
   enabled="$(cambox_egress_pacing_block_field "$block" PACING_SVC_ENABLED | tr -d '[:space:]')"
   active="$(cambox_egress_pacing_block_field "$block" PACING_SVC_ACTIVE | tr -d '[:space:]')"
   script_exec="$(cambox_egress_pacing_block_field "$block" PACING_SCRIPT_EXEC | tr -d '[:space:]')"
@@ -344,7 +462,7 @@ cambox_egress_pacing_provision_verdict() {
   if [ "$active" = "failed" ]; then
     fails="${fails:+$fails$nl}FAIL: ${svc}.service failed -- an apply round failed${rounds}; read journalctl -u ${svc}"
   fi
-  v="$(cambox_egress_pacing_verdict "$qdisc")"
+  v="$(cambox_egress_pacing_verdict "$qdisc" "$filter")"
   case "$v" in
     OK*) hint="" ;;
     *"no default route"*) hint="a network problem, not provisioning: the box has no default route" ;;
@@ -352,7 +470,8 @@ cambox_egress_pacing_provision_verdict() {
     UNKNOWN*) hint="the qdisc could not be graded" ;;
     *)
       if [ "$install_ok" = 0 ]; then
-        hint="fix the install facets, then systemctl start ${svc}"
+        # restart, never start: a `start` of an `active` RemainAfterExit unit re-applies nothing.
+        hint="fix the install facets, then systemctl restart ${svc}"
       else
         case "$active" in
           inactive) hint="the unit is installed + enabled but has not run since: systemctl start ${svc} (or the next reboot) applies it" ;;
@@ -395,7 +514,7 @@ cambox_egress_pacing_verdict_oneline() {
 cambox_egress_pacing_e2e_report() {
   local targets="${1:-}" pass="${2:-}" user="${3:-root}" pair box ip block v n_ok=0 n_warn=0
   local bound="${CAMBOX_EGRESS_PACING_E2E_TIMEOUT_S:-20}" want_script want_unit
-  echo "[0/8] cambox NDI egress pacing -- report-only (issue 1242): fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT} on each vetted cambox"
+  echo "[0/8] cambox NDI egress pacing -- report-only (issue 1242): fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT} + the JPEG XS line-rate class (issue 1387) on each vetted cambox"
   if [ -z "$targets" ]; then
     echo "    NOTE: no cambox targets -- egress pacing not read (report-only)"
     return 0
@@ -420,7 +539,7 @@ cambox_egress_pacing_e2e_report() {
     fi
     v="$(cambox_egress_pacing_provision_verdict "$block" "$want_script" "$want_unit")"
     if [ "$v" = "ok" ]; then
-      echo "    ok: $box ($ip) -- $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$block" PACING_QDISC)" | sed 's/^OK //') on $(cambox_egress_pacing_block_field "$block" PACING_IFACE), ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service installed + enabled"
+      echo "    ok: $box ($ip) -- $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$block" PACING_QDISC)" "$(cambox_egress_pacing_block_field "$block" PACING_FILTER)" | sed 's/^OK //') on $(cambox_egress_pacing_block_field "$block" PACING_IFACE), ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service installed + enabled"
       n_ok=$((n_ok + 1))
     else
       echo "    WARNING: $box ($ip) egress pacing: $(cambox_egress_pacing_verdict_oneline "$v") -- report-only, the run continues (issue 1242)"

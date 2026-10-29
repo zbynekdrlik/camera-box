@@ -128,9 +128,12 @@
 #       active. dantesync's rsntp Linux client cannot setsockopt(IP_TOS) on its own request socket,
 #       so this provisioning rule is the ONLY thing marking the request direction; a box missing
 #       nftables, the rule, or the oneshot FAILs (never a silent pass).
-#   (ap) NDI egress pacing (issue 1242) -- HARD FAIL: the default-route interface's ROOT qdisc is
-#       `fq` with maxrate / flow_limit / limit equal to scripts/lib/cambox-egress-pacing.sh's one
-#       declaration (400mbit / 2000 / 20000), AND what setup-device installed will run at the next
+#   (ap) NDI egress pacing (issue 1242) -- HARD FAIL: the default-route interface carries the
+#       issue-1387 tree: a `prio` root sending every priority to class 1:1, an `fq` under 1:1 with
+#       maxrate / flow_limit / limit equal to scripts/lib/cambox-egress-pacing.sh's one declaration
+#       (400mbit / 2000 / 20000), the JPEG XS class 1:2 (a pfifo) and the fw filter on its socket
+#       mark (0x1387) -- the NDI flows paced, the JPEG XS flow at line rate; a pre-1387 root fq
+#       FAILs -- AND what setup-device installed will run at the next
 #       boot: the boot script is executable, starts with #!/bin/bash and equals what the lib
 #       generates, the unit equals the checked-in systemd/ one (both compared on their functional
 #       lines, comments and blank lines ignored), enabled (reboot survival) and not failed. A
@@ -936,8 +939,9 @@ Checks:
       \`table ip dantesync_dscp\` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
       DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
       setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
-  (ap) NDI egress pacing (issue 1242): the default-route interface's root qdisc is fq with the
-      declared maxrate/flow_limit/limit (scripts/lib/cambox-egress-pacing.sh), the installed boot
+  (ap) NDI egress pacing (issue 1242): the default-route interface carries a prio root with the
+      declared fq (maxrate/flow_limit/limit) under 1:1 for NDI and the JPEG XS line-rate class 1:2
+      + its fw filter (issue 1387, scripts/lib/cambox-egress-pacing.sh), the installed boot
       script + unit match what setup-device installs, and cambox-egress-pacing.service is enabled
       and not failed -- a hand-applied qdisc alone FAILs
   (af) v4l2-ctl (v4l-utils) installed and runnable (\`v4l2-ctl --version\`) -- already listed in
@@ -1699,7 +1703,8 @@ fi
 # reach strih-snv together (its USB NIC answers with PAUSE storms). setup-device.sh's
 # [egress-pacing] sub-step installs cambox-egress-pacing.service, which paces the default-route
 # interface at boot with the ONE declaration in scripts/lib/cambox-egress-pacing.sh. This reads
-# the live root qdisc, the unit state and what setup-device installed (the boot script's
+# the live qdisc tree + its filters (issue 1387: NDI paced under 1:1, the JPEG XS class 1:2 and its
+# fw filter), the unit state and what setup-device installed (the boot script's
 # executable bit + shebang, the functional-line sha256 of the script and of the unit) in one
 # read-only ssh round trip. It FAILs a
 # missing/drifted qdisc, a missing / non-executable / stale boot script, a unit that differs from
@@ -1715,7 +1720,7 @@ if [ "$aprc" -ne 0 ]; then
 elif [ "$PACING_VERDICT" != "ok" ]; then
   fail "NDI egress pacing: $(cambox_egress_pacing_verdict_oneline "$PACING_VERDICT") (issue 1242)"
 else
-  ok "NDI egress pacing live: $(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_IFACE) root $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_QDISC)" | sed 's/^OK //') + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service installed + enabled (issue 1242)"
+  ok "NDI egress pacing live: $(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_IFACE) $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_QDISC)" "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_FILTER)" | sed 's/^OK //') + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service installed + enabled (issues 1242, 1387)"
 fi
 
 # (af) v4l2-ctl installed AND runnable (v4l-utils runtime dependency, issue 1213) ------------------
