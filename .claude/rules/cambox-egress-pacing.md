@@ -115,7 +115,8 @@ tc filter replace dev <if> parent 1: protocol all prio 1 handle 0x1387 fw classi
   - The retry is 30 attempts x 2 s for a late default route. It is an attempt COUNT, never a
     wall-clock deadline: the rig's dantesync date master can step the date while a box boots.
   - After the last attempt the script prints a loud `FAILED ... UNPACED` line and exits 1. Only the
-    first and the last attempt of a round log their reason (`no default route yet`, a tc failure),
+    first and the last attempt of a round log a missing route (`no default route yet`; a tc failure is
+    always logged and never retried, see the fallback bullet above),
     so a route-less box does not flood the journal.
   - `Restart=on-failure` + `RestartSec=30` + `StartLimitIntervalSec=0` then start a new round every
     ~90 s, forever. A box that boots before its switch port has carrier (a rig cold start, a box
@@ -161,11 +162,16 @@ tc filter replace dev <if> parent 1: protocol all prio 1 handle 0x1387 fw classi
     - tc missing: iproute2;
     - install fine + unit `inactive`: it never ran since the install, `systemctl start` (or the next
       reboot);
-    - install fine + unit `active`: the qdisc changed after it ran, `systemctl restart`;
+    - install fine + unit `active`: the qdisc changed after it ran, `systemctl restart`. On the old
+      root fq the hint names two causes and the unit journal: a `fell back to the root fq` line
+      (a tc step failed; a restart only repeats it), or the unit last ran the previous boot script
+      (restart it);
     - install stale: re-provision, then `systemctl restart` (never `start`: a `start` of an `active`
       RemainAfterExit oneshot re-applies nothing);
     - unit `activating`: a DRIFT read proves a default route exists, so the unit is failing to apply
-      the qdisc (tc refusing it, e.g. a kernel without `sch_fq`) or is between rounds; the hint
+      the qdisc (tc refusing it AND the root-fq fallback failing, status 3, e.g. a kernel without
+      `sch_fq`; a tc refusal whose fallback works gives `active` + `DRIFT root qdisc is fq, the
+      pre-issue-1387 tree`, whose hint names both causes) or is between rounds; the hint
       names the failed-round count (`NRestarts`) and the unit journal. With restart-forever the unit
       is `activating`, not `failed`, while this goes on.
   - `active` is NOT required. setup-device is enable-only and a cambox is never rebooted remotely,

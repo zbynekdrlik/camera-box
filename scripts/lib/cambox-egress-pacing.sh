@@ -111,8 +111,8 @@ cambox_egress_pacing_apply_cmd() {
     tc filter replace dev "\$_cep_if" parent 1: protocol all prio 1 handle ${CAMBOX_EGRESS_PACING_JXS_MARK} fw classid 1:2; then
     echo "cambox-egress-pacing: dev \$_cep_if NDI paced (fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT} under prio 1:1), JPEG XS mark ${CAMBOX_EGRESS_PACING_JXS_MARK} at line rate (1:2) applied (issues 1242, 1387)"
   else
-    # A half-built tree (a prio root over default pfifos) would leave NDI unpaced while the retries
-    # run: put the pre-issue-1387 root fq back at once (NDI paced, JPEG XS paced with it).
+    # A half-built tree (a prio root over default pfifos) would leave NDI unpaced: put the
+    # pre-issue-1387 root fq back at once (NDI paced, JPEG XS paced with it).
     if tc qdisc replace dev "\$_cep_if" root fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT}; then
       echo "cambox-egress-pacing: building the egress tree on \$_cep_if FAILED -- fell back to the root fq (NDI paced, JPEG XS paced with it) (issues 1242, 1387)" >&2
       _cep_st=2
@@ -350,7 +350,17 @@ $(printf '%s\n' "$filters" | tr '|' '\n' | awk '
         if (($i == "classid" || $i == "flowid" || $i == "*flowid") && i < NF) t = $(i + 1)
       }
       if (k == "fw") { if (t != "") print k, h, t }
-      else if (!seen[p SUBSEP k]++) print k, "pref-" p, (t == "" ? "its-own-class" : t)
+      else {
+        key = p SUBSEP k
+        if (!(key in tgt)) { order[++n] = key; kind[key] = k; prf[key] = p; tgt[key] = "" }
+        if (t != "" && tgt[key] == "") tgt[key] = t
+      }
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        key = order[i]
+        print kind[key], "pref-" prf[key], (tgt[key] == "" ? "its-own-class" : tgt[key])
+      }
     }' || true)
 FILTERS
   if [ "$found" -eq 0 ]; then
@@ -527,7 +537,14 @@ cambox_egress_pacing_provision_verdict() {
       else
         case "$active" in
           inactive) hint="the unit is installed + enabled but has not run since: systemctl start ${svc} (or the next reboot) applies it" ;;
-          active) hint="the qdisc changed after the unit applied it: systemctl restart ${svc} re-applies it" ;;
+          active)
+            case "$v" in
+              # The same state has two causes (review round 3): the unit last ran the previous boot
+              # script, or the new one fell back after a failed tc step (exit 0, never retried).
+              *pre-issue-1387*) hint="the unit is active on the old root fq: read journalctl -u ${svc} -n 20 -- a 'fell back to the root fq' line means a tc step failed at its last run (fix that step; a restart only repeats it); without one the unit last ran the previous boot script: systemctl restart ${svc} applies the new one" ;;
+              *) hint="the qdisc changed after the unit applied it: systemctl restart ${svc} re-applies it" ;;
+            esac
+            ;;
           # A DRIFT read proves the default route exists, so a unit still restarting is failing to
           # apply the qdisc (tc refusing it, e.g. a kernel without sch_fq) or is between rounds.
           activating) hint="a default route exists but the unit has not applied the qdisc${rounds}: tc keeps failing, or it is between rounds (up to 30 s); read journalctl -u ${svc}" ;;
@@ -720,7 +737,8 @@ _cep_v="$(cambox_egress_pacing_verdict "$_cep_q" "$_cep_f")"
 case "$_cep_v" in
   OK*) echo "READBACK ($_cep_box): $_cep_v" ;;
   *)
-    echo "FAIL: [issue 1387] READBACK ($_cep_box): $_cep_v" >&2
+    # The restart exits 0 on a fallback (a failed tc step is never retried), so point at the step.
+    echo "FAIL: [issue 1387] READBACK ($_cep_box): $_cep_v -- read journalctl -u $_cep_svc -n 20 for the step that failed" >&2
     _cep_rc=1
     ;;
 esac
