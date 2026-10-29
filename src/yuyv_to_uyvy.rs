@@ -88,8 +88,10 @@ pub fn convert_scalar_into(yuyv: &[u8], dst: &mut Vec<u8>, range: CaptureRange) 
 pub unsafe fn convert_avx2_into(yuyv: &[u8], dst: &mut Vec<u8>, range: CaptureRange) {
     let total = yuyv.len() - yuyv.len() % 4;
     let simd = (total / 64) * 64;
+    // Every byte of `[0, total)` is written below, so the buffer is not zero-filled first (the
+    // pre-1430 kernel paid a 4 MB memset per 1080p frame for it); its length is set at the end.
     dst.clear();
-    dst.resize(total, 0);
+    dst.reserve(total);
     let src = yuyv.as_ptr();
     let out = dst.as_mut_ptr();
 
@@ -152,6 +154,8 @@ pub unsafe fn convert_avx2_into(yuyv: &[u8], dst: &mut Vec<u8>, range: CaptureRa
         std::ptr::copy_nonoverlapping(px.as_ptr(), out.add(i), 4);
         i += 4;
     }
+    // SAFETY: the capacity is at least `total` and the loops above wrote every byte below it.
+    dst.set_len(total);
 }
 
 /// The constant vectors of the full-to-limited scale.
@@ -292,6 +296,7 @@ mod tests {
     #[test]
     fn avx2_full_range_hits_the_endpoints() {
         if !has_avx2() {
+            eprintln!("AVX2 not available on this CPU: the scalar path is the only path");
             return;
         }
         let mut input = Vec::new();

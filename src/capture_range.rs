@@ -9,7 +9,7 @@
 //!
 //! This module is the pure decision (range from the detected V4L2 card name, plus the
 //! `CAMERA_BOX_CAPTURE_RANGE=full|limited` override) and the scalar reference mapping the SIMD
-//! kernel must match bit for bit. Std-only, every OS, so it unit-tests on default features.
+//! kernel must match bit for bit. No probe deps, every OS, so it unit-tests on default features.
 
 use crate::capture_rate_health::{grabber_model_from_card_name, GrabberModel};
 
@@ -96,6 +96,21 @@ pub fn resolve_capture_range(
     }
 }
 
+/// Resolve from the process environment (`CAMERA_BOX_CAPTURE_RANGE`) and the detected card, and
+/// log the outcome: one WARN for an unrecognised override value, then the one INFO
+/// `capture range:` line. `main.rs` hands the result to `NdiSender::set_capture_range`.
+pub fn resolve_and_log(card: Option<&str>) -> CaptureRange {
+    let override_value = std::env::var(CAPTURE_RANGE_ENV).ok();
+    let decision = resolve_capture_range(card, override_value.as_deref());
+    if let Some(bad) = &decision.invalid_override {
+        tracing::warn!(
+            "{CAPTURE_RANGE_ENV}={bad:?} is not `full` or `limited` -- ignored, the card decides (issue 1430)"
+        );
+    }
+    tracing::info!("{}", decision.log_line(card));
+    decision.range
+}
+
 impl CaptureRangeDecision {
     /// The one start-up journal line: `capture range: <full->limited|limited passthrough>
     /// (issue 1430)`, then where the decision came from.
@@ -107,7 +122,10 @@ impl CaptureRangeDecision {
         let why = match self.source {
             RangeSource::Override => format!("{CAPTURE_RANGE_ENV} override"),
             RangeSource::Card => format!("card {card:?}"),
-            RangeSource::Default => format!("card {card:?} not a known full-range grabber"),
+            RangeSource::Default => match card {
+                Some(c) => format!("card {c:?} not a known full-range grabber"),
+                None => "card query failed, no override".to_string(),
+            },
         };
         format!("capture range: {what} (issue 1430) source={why}")
     }
@@ -227,5 +245,6 @@ mod tests {
             line.starts_with("capture range: limited passthrough (issue 1430)"),
             "{line}"
         );
+        assert!(line.contains("card query failed"), "{line}");
     }
 }
