@@ -614,6 +614,8 @@ fn send(
     let mut bpp = BppControl::new(opts, want, socket.local_iface());
     let mut last_status = Instant::now();
     let mut datagrams: Vec<u8> = Vec::with_capacity(70_000);
+    // the FEC parity of each slice (issue 1387 item 3), sent right after it
+    let mut parity: Vec<u8> = Vec::with_capacity(8 * jxs_link::DATAGRAM_LEN);
     let mut warned_format = false;
     let mut warned_encode = false;
     // the send pacing (issue 1387): this thread waits for each send's departure time, never the
@@ -706,6 +708,11 @@ fn send(
                     let sent = socket.send_slice_paced(&datagrams, pace.as_mut());
                     errors += sent.errors;
                     paced_ns += sent.paced_ns;
+                    let groups = jxs_link::fec::build_parity(&datagrams, &mut parity);
+                    let fec = socket.send_slice_paced(&parity, pace.as_mut());
+                    errors += fec.errors;
+                    paced_ns += fec.paced_ns;
+                    window.fec_sent += groups as u64;
                     if let Some(t) = sent.first {
                         first_sent.get_or_insert(t);
                     }

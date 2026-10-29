@@ -373,7 +373,8 @@ fn the_output_logs_a_start_line_a_status_line_and_the_senders_own_lines() {
         "st.pace_mbps, st.wire_ms_avg, st.wire_ms_max",
         "pace_src=%s rx_link_mbps=%u tx_link_mbps=%u",
         "cb_jxs_out_pace_source(st.pace_source)",
-        " path=%s cong_pct=%u queue_ms=%.1f (issue 1387)",
+        " path=%s cong_pct=%u queue_ms=%.1f fec_sent=%",
+        "st.fec_sent, st.fec_repaired",
         "cb_jxs_out_path_state(st.path_state), st.congestion_pct,",
     ] {
         assert!(status.contains(field), "status line lacks {field}");

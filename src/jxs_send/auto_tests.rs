@@ -202,6 +202,9 @@ fn the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_fra
             next_frame += Duration::from_millis(33);
         }
         rx.recv_batch_from(|d, _, from| {
+            if d[0] == jxs_link::fec::FEC_MAGIC {
+                return;
+            }
             let hd = jxs_link::PacketHeader::decode(d).unwrap();
             sender = from;
             let e = frames.entry(hd.timecode_100ns).or_insert((0, 0));
@@ -238,6 +241,9 @@ fn the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_fra
     // drain what is still on the wire
     for _ in 0..20 {
         rx.recv_batch_from(|d, _, _| {
+            if d[0] == jxs_link::fec::FEC_MAGIC {
+                return;
+            }
             let hd = jxs_link::PacketHeader::decode(d).unwrap();
             let e = frames.entry(hd.timecode_100ns).or_insert((0, 0));
             e.0 += 1;

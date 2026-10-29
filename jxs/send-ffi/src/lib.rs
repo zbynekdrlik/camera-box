@@ -138,6 +138,9 @@ pub struct CbjxsSendStats {
     pub congestion_pct: u32,
     pub queue_delay_us: u32,
     pub reserved3: u32,
+    /// ABI 3: FEC parity datagrams sent, datagrams the receiver rebuilt (its reports).
+    pub fec_sent: u64,
+    pub fec_repaired: u64,
 }
 
 fn avg(sum: f64, n: u64) -> f64 {
@@ -179,6 +182,8 @@ impl CbjxsSendStats {
             congestion_pct: w.congestion_pct,
             queue_delay_us: w.queue_delay_us.unwrap_or(u32::MAX),
             reserved3: 0,
+            fec_sent: w.fec_sent,
+            fec_repaired: w.fec_repaired,
         }
     }
 }
@@ -687,6 +692,8 @@ mod tests {
             path_state: camera_box::jxs_congestion::PathState::Overuse,
             congestion_pct: 85,
             queue_delay_us: Some(6_100),
+            fec_sent: 600,
+            fec_repaired: 3,
             // 4 frames, 2 of them with a wire time: the average divides by 2, not 4
             wire_frames: 2,
             wire_ms_sum: 40.0,
@@ -719,6 +726,7 @@ mod tests {
             (s.path_state, s.congestion_pct, s.queue_delay_us),
             (CBJXS_SEND_PATH_OVERUSE, 85, 6_100)
         );
+        assert_eq!((s.fec_sent, s.fec_repaired), (600, 3));
         use camera_box::jxs_congestion::PathState as S;
         assert_eq!(
             [S::Unknown, S::Clean, S::Hold, S::Overuse].map(path_state_code),

@@ -137,7 +137,9 @@ fn pins() -> Vec<(String, usize)> {
         path_state,
         congestion_pct,
         queue_delay_us,
-        reserved3
+        reserved3,
+        fec_sent,
+        fec_repaired
     );
     assert_eq!(
         CBJXS_SEND_ABI_VERSION, 3,

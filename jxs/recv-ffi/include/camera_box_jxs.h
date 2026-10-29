@@ -21,7 +21,7 @@ extern "C" {
 #endif
 
 /* Bumped on any change of a struct or a signature below. */
-#define CBJXS_ABI_VERSION 3u /* 3: cbjxs_stats.link_mbps (issue 1387, the pace from the receiver's link) */
+#define CBJXS_ABI_VERSION 3u /* 3: cbjxs_stats.link_mbps + fec_repaired (issue 1387) */
 
 /* cbjxs_frame.chroma (ABI 2, issue 1387 slice 3: the strih program reaches the stream as 4:2:0).
  * The same numbers as the sender's CBJXS_SEND_I420 / _I422 / _I444. */
@@ -77,6 +77,7 @@ typedef struct cbjxs_stats {
 	 * in every report so it paces to it (issue 1387). */
 	uint32_t link_mbps;
 	uint32_t reserved2;
+	uint64_t fec_repaired; /* ABI 3: datagrams the FEC parity rebuilt (issue 1387) */
 } cbjxs_stats;
 
 /* CBJXS_ABI_VERSION of the linked library. */

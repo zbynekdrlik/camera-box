@@ -25,6 +25,8 @@ pub(super) struct BppControl {
     last_report_at: Option<Instant>,
     /// Receiver reports read since the last status line.
     reports: u64,
+    /// Datagrams the receiver's reports say its FEC rebuilt, since the last status line.
+    fec_repaired: u64,
     /// The automatic pace (issue 1387): fed the receiver's link from every report.
     pub(super) pace: PaceControl,
 }
@@ -55,6 +57,7 @@ impl BppControl {
             sec_errors: 0,
             last_report_at: None,
             reports: 0,
+            fec_repaired: 0,
             pace: PaceControl::new(opts.pace_mbps, own_iface),
         }
     }
@@ -111,6 +114,7 @@ impl BppControl {
             let now = Instant::now();
             self.last_report_at = Some(now);
             self.reports += 1;
+            self.fec_repaired += r.fec_repaired as u64;
             let now_s = now.duration_since(self.origin).as_secs_f64();
             self.pace.on_report(&r, now_s);
             if let Some(c) = self.ctl.as_mut() {
@@ -150,6 +154,7 @@ impl BppControl {
     /// The status line's bpp fields (and the window's report count, restarted).
     pub(super) fn fill(&mut self, w: &mut SendWindow) {
         w.reports = std::mem::take(&mut self.reports);
+        w.fec_repaired = std::mem::take(&mut self.fec_repaired);
         w.bpp = self.session_bpp;
         w.auto = self.ctl.is_some();
         w.bpp_reason = self.ctl.as_ref().and_then(|c| c.last_reason());

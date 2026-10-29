@@ -128,6 +128,7 @@ pub struct ReportWindow {
     late_frames: u32,
     last_tc: u64,
     decode_us: Vec<u32>,
+    fec_repaired: u32,
 }
 
 impl ReportWindow {
@@ -149,6 +150,11 @@ impl ReportWindow {
         }
     }
 
+    /// A datagram the FEC rebuilt in this period (issue 1387 item 3).
+    pub fn note_fec_repaired(&mut self) {
+        self.fec_repaired = self.fec_repaired.saturating_add(1);
+    }
+
     /// The report for the period just ended, then a fresh period (the sequence number moves on).
     pub fn take(&mut self, camera_id: u8, max_bpp: u32) -> ReceiverReport {
         self.decode_us.sort_unstable();
@@ -167,8 +173,10 @@ impl ReportWindow {
             late_frames: self.late_frames,
             decode_p99_us: p99,
             last_timecode_100ns: self.last_tc,
+            fec_repaired: self.fec_repaired,
             ..ReceiverReport::default()
         };
+        self.fec_repaired = 0;
         self.seq = self.seq.wrapping_add(1);
         self.frames = 0;
         self.lost_slices = 0;
@@ -306,6 +314,11 @@ mod tests {
         );
         assert_eq!(empty.decode_p99_us, NO_DECODE_TIME);
         assert_eq!(empty.last_timecode_100ns, 0);
+        // the FEC repairs of a period, then none
+        w.note_fec_repaired();
+        w.note_fec_repaired();
+        assert_eq!(w.take(4, 0).fec_repaired, 2);
+        assert_eq!(w.take(4, 0).fec_repaired, 0);
         // a frame that was not decoded has no decode time but still counts
         w.note_frame(1, 5, false, None);
         assert_eq!(w.take(4, 0).decode_p99_us, NO_DECODE_TIME);

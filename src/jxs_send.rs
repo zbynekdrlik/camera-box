@@ -627,6 +627,9 @@ mod tests {
         let mut done = std::collections::BTreeSet::new();
         while done.len() < 2 && std::time::Instant::now() < deadline {
             if let Ok(n) = rx.recv(&mut b) {
+                if b[0] == jxs_link::fec::FEC_MAGIC {
+                    continue;
+                }
                 let p = jxs_link::PacketHeader::decode(&b[..n]).unwrap();
                 if p.slice_index + 1 == p.slice_count {
                     done.insert(p.timecode_100ns);

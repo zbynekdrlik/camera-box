@@ -117,6 +117,8 @@ typedef struct cbjxs_send_stats {
 	uint32_t congestion_pct; /* ABI 3: the congestion control's pace factor, percent (0 = none yet) */
 	uint32_t queue_delay_us; /* ABI 3: the receiver's newest queuing delay, UINT32_MAX = none */
 	uint32_t reserved3;
+	uint64_t fec_sent;     /* ABI 3: FEC parity datagrams sent (one per 12 of a slice) */
+	uint64_t fec_repaired; /* ABI 3: datagrams the receiver's reports say its FEC rebuilt */
 } cbjxs_send_stats;
 
 typedef void (*cbjxs_send_log_fn)(int level, const char *message);

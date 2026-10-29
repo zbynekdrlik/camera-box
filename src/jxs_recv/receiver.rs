@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use super::{realtime_100ns, DecodeSink, JxsRecvSocket};
 use crate::jxs_link::congestion_meter::CongestionMeter;
+use crate::jxs_link::fec::{FecRepair, FEC_MAGIC};
 use crate::jxs_link::{
     self, FrameAssembler, FrameReport, PacketHeader, PushOutcome, RecvWindow, ReportWindow,
 };
@@ -100,6 +101,8 @@ pub struct ReceiverTotals {
     pub header_changes: u64,
     /// Decoded frames dropped because the caller did not poll in time.
     pub dropped_unread: u64,
+    /// Datagrams the FEC rebuilt (issue 1387 item 3).
+    pub fec_repaired: u64,
 }
 
 impl ReceiverTotals {
@@ -116,6 +119,7 @@ impl ReceiverTotals {
         self.resyncs += w.resyncs;
         self.foreign += w.foreign;
         self.reports_sent += w.reports_sent;
+        self.fec_repaired += w.fec_repaired;
     }
 }
 
@@ -192,6 +196,9 @@ pub struct JxsReceiver {
     link_mbps: Option<u32>,
     /// The early congestion signal of each report period (issue 1387 item 2).
     meter: CongestionMeter,
+    /// The FEC repair state and its rebuilt-datagram buffer (issue 1387 item 3).
+    fec: FecRepair,
+    rebuilt: Vec<u8>,
 }
 
 // The strih OBS source opens the receiver on one thread and polls it on another (jxs/recv-ffi's
@@ -204,6 +211,24 @@ const _: fn() = || {
 fn lock(m: &Mutex<Outbox>) -> std::sync::MutexGuard<'_, Outbox> {
     // A panic while holding the lock leaves plain counters and buffers: keep using them.
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Hand one datagram (received or rebuilt by the FEC) to the assembler and count its outcome.
+fn push_one(
+    assembler: &mut FrameAssembler,
+    sink: &mut DecodeSink<Callback>,
+    window: &mut RecvWindow,
+    h: &PacketHeader,
+    datagram: &[u8],
+    arrival: i64,
+) {
+    match assembler.push(h, &datagram[jxs_link::HEADER_LEN..], arrival, sink) {
+        PushOutcome::Accepted => {}
+        PushOutcome::Duplicate => window.duplicate += 1,
+        PushOutcome::Stale => window.stale += 1,
+        PushOutcome::Malformed => window.malformed += 1,
+        PushOutcome::Resync => window.resyncs += 1,
+    }
 }
 
 impl JxsReceiver {
@@ -241,6 +266,8 @@ impl JxsReceiver {
             link_iface: None,
             link_mbps: None,
             meter: CongestionMeter::default(),
+            fec: FecRepair::default(),
+            rebuilt: Vec::with_capacity(jxs_link::DATAGRAM_LEN),
         })
     }
 
@@ -365,10 +392,32 @@ impl JxsReceiver {
             camera,
             sender,
             window,
+            fec,
+            rebuilt,
+            report,
             ..
         } = self;
         sock.recv_batch_from(|d, arrival, from| {
             window.datagrams += 1;
+            if d.first() == Some(&FEC_MAGIC) {
+                // a parity datagram of the taken camera: it may rebuild one lost datagram
+                if d.get(2).is_some_and(|c| camera.is_some_and(|k| k != *c)) {
+                    window.foreign += 1;
+                    return;
+                }
+                match fec.on_parity(d, rebuilt) {
+                    Err(_) => window.fec_malformed += 1,
+                    Ok(false) => {}
+                    Ok(true) => {
+                        if let Ok(h) = PacketHeader::decode(rebuilt) {
+                            window.fec_repaired += 1;
+                            report.note_fec_repaired();
+                            push_one(assembler, sink, window, &h, rebuilt, arrival);
+                        }
+                    }
+                }
+                return;
+            }
             let Ok(h) = PacketHeader::decode(d) else {
                 window.malformed += 1;
                 return;
@@ -385,12 +434,14 @@ impl JxsReceiver {
                 *sender = from;
             }
             window.bytes += (d.len() - jxs_link::HEADER_LEN) as u64;
-            match assembler.push(&h, &d[jxs_link::HEADER_LEN..], arrival, sink) {
-                PushOutcome::Accepted => {}
-                PushOutcome::Duplicate => window.duplicate += 1,
-                PushOutcome::Stale => window.stale += 1,
-                PushOutcome::Malformed => window.malformed += 1,
-                PushOutcome::Resync => window.resyncs += 1,
+            push_one(assembler, sink, window, &h, d, arrival);
+            // the parity may already be in: this datagram may complete a repair
+            if fec.on_data(&h, &d[jxs_link::HEADER_LEN..], rebuilt) {
+                if let Ok(rh) = PacketHeader::decode(rebuilt) {
+                    window.fec_repaired += 1;
+                    report.note_fec_repaired();
+                    push_one(assembler, sink, window, &rh, rebuilt, arrival);
+                }
             }
         })?;
         self.note_frames();

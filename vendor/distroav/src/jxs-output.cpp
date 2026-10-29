@@ -255,7 +255,7 @@ static void jxs_output_log_status(jxs_output *o, const cbjxs_send_stats &st)
 		" encode_ms_avg/max=%.2f/%.2f first_slice_ms_avg=%.2f copy_ms_avg/max=%.2f/%.2f bpp=%u auto=%s"
 		" reports=%" PRIu64 " report_age_s=%.1f send_errors=%" PRIu64 " encode_errors=%" PRIu64
 		" pace_mbps=%u wire_ms_avg/max=%.2f/%.2f pace_src=%s rx_link_mbps=%u tx_link_mbps=%u"
-		" path=%s cong_pct=%u queue_ms=%.1f (issue 1387)",
+		" path=%s cong_pct=%u queue_ms=%.1f fec_sent=%" PRIu64 " fec_repaired=%" PRIu64 " (issue 1387)",
 		obs_output_get_name(o->output), st.window_s > 0.0 ? (double)st.frames / st.window_s : 0.0,
 		st.frames, st.dropped_busy, o->offered, o->taken, o->not_taken, o->refused, o->stamp_dup,
 		st.encode_ms_avg,
@@ -263,7 +263,7 @@ static void jxs_output_log_status(jxs_output *o, const cbjxs_send_stats &st)
 		st.auto_bpp ? "on" : "off", st.reports, st.report_age_s, st.send_errors, st.encode_errors,
 		st.pace_mbps, st.wire_ms_avg, st.wire_ms_max, cb_jxs_out_pace_source(st.pace_source), st.rx_link_mbps,
 		st.own_link_mbps, cb_jxs_out_path_state(st.path_state), st.congestion_pct,
-		st.queue_delay_us == UINT32_MAX ? -1.0 : st.queue_delay_us / 1000.0);
+		st.queue_delay_us == UINT32_MAX ? -1.0 : st.queue_delay_us / 1000.0, st.fec_sent, st.fec_repaired);
 	const double fps = st.window_s > 0.0 ? (double)st.frames / st.window_s : 0.0;
 	/* the indicator's errors: encode_errors already counts a refused picture (send-ffi header) */
 	cb_jxs_state().publish_window(o, (uint32_t)(fps * 100.0 + 0.5), st.bpp * 100u, 0, 0, st.dropped_busy,
