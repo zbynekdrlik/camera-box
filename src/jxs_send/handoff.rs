@@ -3,8 +3,7 @@
 
 use super::{
     encoder_wedged, jxs_link, monotonic_ms, slice_threads_for, BppMode, JxsFrame, JxsSocket,
-    Offered, RawFrame, RawLayout, SenderOptions, Stats, FRAMES_IN_FLIGHT, STATUS_PERIOD,
-    WEDGE_CHECK_PERIOD,
+    Offered, SenderOptions, Stats, FRAMES_IN_FLIGHT, STATUS_PERIOD, WEDGE_CHECK_PERIOD,
 };
 use crate::jxs_auto_bpp::{AutoBpp, AutoBppConfig, Decision, Second};
 use crate::jxs_link::{PacketHeader, SendWindow};
@@ -20,16 +19,7 @@ use svt_jpegxs_sys::{
 /// The last finished status window and its sequence number (0 = none yet), published by the
 /// packet thread every [`STATUS_PERIOD`] for a caller that has no log of its own to read (issue
 /// 1387 slice 3: the strih OBS output reads it through `jxs/send-ffi`).
-type Published = Arc<Mutex<(u64, SendWindow)>>;
-
-/// The encoder's chroma sampling for a raw layout (NV12 is 4:2:0 split on the copy).
-fn chroma_of(layout: RawLayout) -> ChromaFormat {
-    match layout {
-        RawLayout::I420 | RawLayout::Nv12 => ChromaFormat::Yuv420,
-        RawLayout::I422 => ChromaFormat::Yuv422,
-        RawLayout::I444 => ChromaFormat::Yuv444,
-    }
-}
+pub(super) type Published = Arc<Mutex<(u64, SendWindow)>>;
 
 /// A converted frame on its way to the encoder.
 pub(super) struct Ready {
@@ -59,15 +49,15 @@ enum Job {
 /// The capture thread's handle. Dropping it stops and joins both sender threads.
 pub struct JxsHandoff {
     /// Free pictures (the capture thread converts into one).
-    free_rx: Receiver<Picture>,
+    pub(super) free_rx: Receiver<Picture>,
     /// Puts a picture back when the hand-off cannot take it.
     pub(super) free_tx: SyncSender<Picture>,
     ready_tx: Option<SyncSender<Ready>>,
     pub(super) stats: Arc<Stats>,
     workers: Vec<JoinHandle<()>>,
-    published: Published,
-    /// The sequence of the window [`Self::take_window`] last handed out.
-    taken_window: std::sync::atomic::AtomicU64,
+    pub(super) published: Published,
+    /// The sequence of the window `take_window` last handed out.
+    pub(super) taken_window: std::sync::atomic::AtomicU64,
 }
 
 impl JxsHandoff {
@@ -135,64 +125,8 @@ impl JxsHandoff {
         });
     }
 
-    /// Hand one raw planar picture over (issue 1387 slice 3: the strih OBS program output): the
-    /// caller's thread copies it straight into a free picture of its chroma sampling (NV12's
-    /// interleaved chroma split on the way) and queues it. Never blocks: with every picture in
-    /// use the frame is [`Offered::Busy`] (`dropped_busy`). A geometry or plane that does not fit
-    /// is [`Offered::Refused`] (`encode_errors`). The planes are not read after it returns.
-    pub fn offer_raw(&self, frame: &RawFrame<'_>) -> Offered {
-        if !jxs_link::on_jxs_grid(frame.timecode_100ns, frame.emit_fps) {
-            return Offered::OffGrid;
-        }
-        self.stats
-            .note_handoff(frame.timecode_100ns, 0, crate::jxs_recv::realtime_100ns());
-        let (w, h, layout) = (frame.width, frame.height, frame.layout);
-        if !layout.fits(w, h) {
-            self.stats.convert_errors.fetch_add(1, Ordering::Relaxed);
-            return Offered::Refused;
-        }
-        let Ok(mut pic) = self.free_rx.try_recv() else {
-            self.stats.note_dropped();
-            return Offered::Busy;
-        };
-        let started = Instant::now();
-        let chroma = chroma_of(layout);
-        let p = pic.planes();
-        if (p.width(), p.height(), p.chroma()) != (w, h, chroma) {
-            pic = Picture::with_chroma(w, h, chroma);
-        }
-        let (cw, ch) = layout.chroma_dims(w, h);
-        let (w, h, cw, ch) = (w as usize, h as usize, cw as usize, ch as usize);
-        let [py, pu, pv] = frame.planes;
-        let [sy, su, sv] = frame.strides;
-        let ok = {
-            let (y, u, v) = pic.planes_mut().planes_mut();
-            jxs_link::copy_plane(py, sy, w, h, y)
-                && match layout {
-                    RawLayout::Nv12 => jxs_link::split_interleaved(pu, su, cw, ch, u, v),
-                    _ => {
-                        jxs_link::copy_plane(pu, su, cw, ch, u)
-                            && jxs_link::copy_plane(pv, sv, cw, ch, v)
-                    }
-                }
-        };
-        let handed_off = Instant::now();
-        self.stats
-            .note_convert(handed_off.duration_since(started).as_nanos() as u64);
-        if !ok {
-            self.stats.convert_errors.fetch_add(1, Ordering::Relaxed);
-            let _ = self.free_tx.try_send(pic);
-            return Offered::Refused;
-        }
-        self.queue(Ready {
-            pic,
-            timecode_100ns: frame.timecode_100ns,
-            handed_off,
-        })
-    }
-
     /// Queue a converted picture for the feeder (never blocks).
-    fn queue(&self, ready: Ready) -> Offered {
+    pub(super) fn queue(&self, ready: Ready) -> Offered {
         let Some(tx) = &self.ready_tx else {
             let _ = self.free_tx.try_send(ready.pic);
             return Offered::Busy;
@@ -207,15 +141,6 @@ impl JxsHandoff {
                 Offered::Busy
             }
         }
-    }
-
-    /// The last finished status window with its sequence number, once per window (`None` = no
-    /// new one since the last call). The cambox logs the same window itself; this is for a
-    /// caller with its own log (issue 1387 slice 3).
-    pub fn take_window(&self) -> Option<(u64, SendWindow)> {
-        let (seq, w) = *self.published.lock().unwrap_or_else(|e| e.into_inner());
-        let last = self.taken_window.swap(seq, Ordering::Relaxed);
-        (seq != 0 && seq != last).then_some((seq, w))
     }
 
     /// Frames dropped because both pictures were in use, since the last status line.

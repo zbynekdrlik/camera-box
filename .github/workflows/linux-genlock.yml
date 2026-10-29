@@ -380,9 +380,11 @@ jobs:
           if [ ! -f target/release/libjxs_recv_ffi.a ]; then echo "ERROR: target/release/libjxs_recv_ffi.a not built (issue 1387)"; exit 1; fi
           # issue 1387 slice 3: the ONE archive must carry the sender's C ABI too (jxs-recv-ffi pulls
           # jxs-send-ffi in), or the JPEG XS program output cannot link.
-          nm -g --defined-only target/release/libjxs_recv_ffi.a 2>/dev/null > jxs-ffi-symbols.txt || true
+          # (nm exits non-zero on the archive's lib.rmeta member, which has no symbols: its stderr is
+          # kept and shown when a symbol is missing)
+          nm -g --defined-only target/release/libjxs_recv_ffi.a 2> jxs-ffi-nm.err > jxs-ffi-symbols.txt || true
           for sym in cbjxs_open cbjxs_send_open cbjxs_send_frame cbjxs_send_set_log; do
-            if ! grep -qw "$sym" jxs-ffi-symbols.txt; then echo "ERROR: libjxs_recv_ffi.a does not define $sym (issue 1387)"; exit 1; fi
+            if ! grep -qw "$sym" jxs-ffi-symbols.txt; then cat jxs-ffi-nm.err; echo "ERROR: libjxs_recv_ffi.a does not define $sym (issue 1387)"; exit 1; fi
           done
           echo "JXS_FFI_NATIVE_LIBS=$libs" >> "$GITHUB_ENV"
           echo "jxs-recv-ffi: $(stat -c%s target/release/libjxs_recv_ffi.a) bytes, native libs: $libs"

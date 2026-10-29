@@ -70,6 +70,9 @@ struct jxs_output {
 	uint64_t taken = 0;
 	uint64_t not_taken = 0;
 	uint64_t refused = 0;
+	uint64_t stamp_dup = 0;
+	/* the last stamp handed to the sender (0 = none), the duplicate guard */
+	int64_t last_stamp_100ns = 0;
 };
 
 /* The sender's own lines (link ON, encoder open, every bpp step, the wedge alarm) into the OBS
@@ -167,6 +170,16 @@ static bool jxs_output_start(void *data)
 		obs_output_set_last_error(o->output, "the canvas pixel format is not NV12/I420/I422/I444");
 		return false;
 	}
+	const struct video_output_info *vinfo = video_output_get_info(video);
+	const bool cs_709 = vinfo && vinfo->colorspace == VIDEO_CS_709;
+	const bool range_partial = vinfo && vinfo->range != VIDEO_RANGE_FULL;
+	if (!cb_jxs_out_colour_ok(cs_709, range_partial)) {
+		obs_log(LOG_ERROR,
+			"jxs-output '%s': the canvas is colour space %d range %d, the receiving source shows BT.709 limited range -- not started (issue 1387)",
+			name, vinfo ? (int)vinfo->colorspace : -1, vinfo ? (int)vinfo->range : -1);
+		obs_output_set_last_error(o->output, "the canvas is not BT.709 limited range");
+		return false;
+	}
 	const double framerate = video_output_get_frame_rate(video);
 	std::string target, cores;
 	cbjxs_send_config cfg = {};
@@ -194,7 +207,8 @@ static bool jxs_output_start(void *data)
 		o->tx = tx;
 		o->send_format = send_format;
 		o->framerate = framerate;
-		o->offered = o->taken = o->not_taken = o->refused = 0;
+		o->offered = o->taken = o->not_taken = o->refused = o->stamp_dup = 0;
+		o->last_stamp_100ns = 0;
 	}
 	o->started = true;
 	if (!obs_output_begin_data_capture(o->output, 0)) {
@@ -225,14 +239,16 @@ static void jxs_output_log_status(jxs_output *o, const cbjxs_send_stats &st)
 	obs_log(LOG_INFO,
 		"jxs-output '%s': fps=%.2f frames=%" PRIu64 " dropped_busy=%" PRIu64
 		" offered=%" PRIu64 " taken=%" PRIu64 " not_taken=%" PRIu64 " refused=%" PRIu64
+		" stamp_dup=%" PRIu64
 		" encode_ms_avg/max=%.2f/%.2f first_slice_ms_avg=%.2f copy_ms_avg/max=%.2f/%.2f bpp=%u auto=%s"
 		" reports=%" PRIu64 " report_age_s=%.1f send_errors=%" PRIu64 " encode_errors=%" PRIu64
 		" (issue 1387)",
 		obs_output_get_name(o->output), st.window_s > 0.0 ? (double)st.frames / st.window_s : 0.0,
-		st.frames, st.dropped_busy, o->offered, o->taken, o->not_taken, o->refused, st.encode_ms_avg,
+		st.frames, st.dropped_busy, o->offered, o->taken, o->not_taken, o->refused, o->stamp_dup,
+		st.encode_ms_avg,
 		st.encode_ms_max, st.first_slice_ms_avg, st.copy_ms_avg, st.copy_ms_max, st.bpp,
 		st.auto_bpp ? "on" : "off", st.reports, st.report_age_s, st.send_errors, st.encode_errors);
-	o->offered = o->taken = o->not_taken = o->refused = 0;
+	o->offered = o->taken = o->not_taken = o->refused = o->stamp_dup = 0;
 }
 
 /* libobs' video output thread: one copy into the sender, never a wait. */
@@ -253,9 +269,16 @@ static void jxs_output_rawvideo(void *data, struct video_data *frame)
 		pic.planes[i] = frame->data[i];
 		pic.strides[i] = frame->linesize[i];
 	}
-	/* the NDI output's own stamp for this frame (the boundary at or before now) */
+	/* the NDI output's stamp function, read at this callback (it runs after the NDI output's on
+	 * the same thread, so near a slot edge it can be the next slot) */
 	pic.timecode_100ns = genlock_emit_timecode_100ns(o->framerate);
 	o->offered++;
+	if (!cb_jxs_out_stamp_fresh(o->last_stamp_100ns, pic.timecode_100ns)) {
+		/* a second frame in one slot: the receiver would drop it unseen, count it here */
+		o->stamp_dup++;
+		return;
+	}
+	o->last_stamp_100ns = pic.timecode_100ns;
 	const int r = cbjxs_send_frame(o->tx, &pic);
 	if (r == 1) {
 		o->taken++;
@@ -280,7 +303,8 @@ static void jxs_output_stop(void *data, uint64_t)
 	if (!o->started.exchange(false))
 		return;
 	obs_output_set_genlock_wall_stamping(o->output, false);
-	/* no raw_video runs past this */
+	/* libobs ends the capture on its own thread, so a raw_video can still run after this returns:
+	 * tx_mutex + tx = nullptr below is what keeps it off a closed sender (keep both) */
 	obs_output_end_data_capture(o->output);
 	cbjxs_sender *tx = nullptr;
 	{

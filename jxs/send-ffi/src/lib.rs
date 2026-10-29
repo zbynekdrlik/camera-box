@@ -18,7 +18,7 @@
 
 use std::ffi::{c_char, c_int, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::RwLock;
 
 use camera_box::jxs_link::SendWindow;
 use camera_box::jxs_send::{
@@ -205,8 +205,11 @@ pub extern "C" fn cbjxs_send_abi_version() -> u32 {
     CBJXS_SEND_ABI_VERSION
 }
 
-/// The log callback (`cbjxs_send_log_fn` as an address; 0 = none).
-static LOG_FN: AtomicUsize = AtomicUsize::new(0);
+/// The log callback (`None` = nothing forwarded). Read once per line (a few lines a minute).
+/// A sender thread left detached after the bounded close (a wedged codec call) may still call it
+/// later, also during OBS shutdown: the callback must stay callable for the process's life
+/// (`obs_log` is).
+static LOG_FN: RwLock<Option<LogFn>> = RwLock::new(None);
 /// Whether this library's subscriber is the process's global one.
 static LOG_INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -231,10 +234,9 @@ impl std::io::Write for LineWriter {
 
 impl Drop for LineWriter {
     fn drop(&mut self) {
-        let f = LOG_FN.load(Ordering::Acquire);
-        if f == 0 {
+        let Some(f) = *LOG_FN.read().unwrap_or_else(|e| e.into_inner()) else {
             return;
-        }
+        };
         while self.buf.last().is_some_and(|b| *b == b'\n' || *b == b' ') {
             self.buf.pop();
         }
@@ -243,12 +245,9 @@ impl Drop for LineWriter {
             return;
         }
         self.buf.push(0);
-        // SAFETY: `f` was stored from a `LogFn` by `cbjxs_send_set_log`; the line is
-        // NUL-terminated and lives for the call.
-        unsafe {
-            let f: LogFn = std::mem::transmute::<usize, LogFn>(f);
-            f(self.level, self.buf.as_ptr().cast());
-        }
+        // SAFETY: `f` is the caller's `cbjxs_send_log_fn`; the line is NUL-terminated and lives
+        // for the call.
+        unsafe { f(self.level, self.buf.as_ptr().cast()) }
     }
 }
 
@@ -295,7 +294,7 @@ pub extern "C" fn cbjxs_send_set_log(f: Option<LogFn>) -> c_int {
         })
     })
     .unwrap_or(false);
-    LOG_FN.store(f.map_or(0, |f| f as usize), Ordering::Release);
+    *LOG_FN.write().unwrap_or_else(|e| e.into_inner()) = f;
     installed as c_int
 }
 

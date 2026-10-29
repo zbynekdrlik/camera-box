@@ -255,7 +255,8 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   max_bpp 0 = no limit, sent in every report), `cbjxs_next_frame(rx, timeout_ms, &frame)` (1 / 0 /
   -1 socket error / -2 NULL or a panic), `cbjxs_set_max_bpp` (the report's cap, no reopen),
   `cbjxs_recv_buffer_bytes`, `cbjxs_get_stats`, `cbjxs_take_error`, `cbjxs_local_port`,
-  `cbjxs_abi_version` (`CBJXS_ABI_VERSION` 1, bump it on any struct or signature change), and
+  `cbjxs_abi_version` (`CBJXS_ABI_VERSION` 2 since slice 3's `cbjxs_frame.chroma`; bump it on any
+  struct or signature change), and
   `cbjxs_close`. The stats call is `cbjxs_get_stats`: C cannot have a function named like the
   `cbjxs_stats` typedef. The frame's planes stay valid until the next `next_frame` / `close`.
 - No panic crosses into C (`catch_unwind`). A panic poisons the receiver: `-2` from then on, close it.
@@ -294,7 +295,7 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   on its own thread, a changed max bpp goes into the next report (`cbjxs_set_max_bpp`). `destroy()` stops and joins the thread (at most one poll + one decode).
   A failed open (port taken) logs once and retries every second; a socket error reopens.
 - Logs (`[distroav] ` prefixed):
-  - `jxs-source '<name>': listening on UDP P (camera C, 0 = the first heard; max bpp M, 0 = no limit; receive buffer B bytes) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI 1) (issue 1387)`
+  - `jxs-source '<name>': listening on UDP P (camera C, 0 = the first heard; max bpp M, 0 = no limit; receive buffer B bytes) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI 2) (issue 1387)`
     (B below ~4 MB on strih-snv = raise `net.core.rmem_max`: a 1080p frame is ~2 MB at 8 bpp)
   - every 5 s: `jxs-source '<name>': fps= frames= lost_slices= concealed= undecodable= reopens=
     decoder_reopens= bpp= reports= report_errors= dropped_unread= foreign= camera= (issue 1387)`
@@ -437,15 +438,26 @@ wire.
 ### The DistroAV output: `vendor/distroav/src/jxs-output.cpp`, kind `camera_box_jxs_output`
 
 - `raw_video` on libobs' video output thread, the program canvas in its own format (NV12 / I420 /
-  I422 / I444; another canvas format refuses to start, named). It stamps each frame with
-  `genlock_emit_timecode_100ns(o->framerate)`, the ONE stamp the NDI output puts on the same frame:
-  the function lost its `static` in ndi-output.cpp and is declared in `genlock-emit-timecode.h`. The
-  #78 / #1009 anchored lines stay byte-identical, and the genlock-grid parity gate still lifts
-  `genlock_floor_boundary_100ns` from ndi-output.cpp. It hands the frame to `cbjxs_send_frame`
-  (one copy, never a wait); with both pictures in use the frame is dropped and counted.
+  I422 / I444; another canvas format refuses to start, named), and only a BT.709 limited-range
+  canvas (what the receiving source shows; `cb_jxs_out_colour_ok`, refused by name otherwise).
+- **The stamp:** each frame gets `genlock_emit_timecode_100ns(o->framerate)`, the NDI output's ONE
+  stamp FUNCTION (it lost its `static` in ndi-output.cpp and is declared in
+  `genlock-emit-timecode.h`; the #78 / #1009 anchored lines stay byte-identical, and the genlock-grid
+  parity gate still lifts `genlock_floor_boundary_100ns` from ndi-output.cpp). It is read at this
+  output's callback, which libobs runs after the NDI output's on the same thread, so near a slot
+  edge the JPEG XS copy can carry the next slot's stamp: the same function, not always the same
+  value as `NDI 2ME PGM`'s frame. Two callbacks inside one slot (libobs catching up after a lag)
+  would carry the same stamp, which the receiver drops as a duplicate unseen; the output skips the
+  second and counts it (`stamp_dup=`, `cb_jxs_out_stamp_fresh`). A stamp BEHIND the last one (a
+  wall-clock step back, the nightly date step) still goes: the receiver resyncs on it.
+- It hands the frame to `cbjxs_send_frame` (one copy, never a wait); with both pictures in use the
+  frame is dropped and counted.
 - It registers as a wall-stamping genlock sender (`obs_output_set_genlock_wall_stamping`) while it
   runs. A failed capture start closes the sender (the #1185 leak class). `stop` ends the data
-  capture BEFORE it closes the sender, so no `raw_video` runs on a closed one.
+  capture, then closes the sender. libobs ends the capture on ITS OWN thread
+  (`end_data_capture_thread`), so a `raw_video` can still run after `obs_output_end_data_capture`
+  returns: `tx_mutex` + `tx = nullptr` are what keep it off a closed sender (keep both); destroy is
+  safe because `obs_output_destroy` joins that thread.
 - Settings: `jxs_target` (host:port, IPv4), `jxs_stream_id` (1..255, default 100: outside the CAM
   range), `jxs_bpp_min` / `jxs_bpp_max` (0 = 4 / 8; equal = fixed), `jxs_cores` (a cpulist, empty =
   every core). They apply at the next start.
@@ -462,9 +474,10 @@ wire.
   - `jxs-output: 'camera-box JPEG XS program' created from <path> (read|absent: defaults; enabled=, target '...')`
   - `jxs-output 'camera-box JPEG XS program': started -- the program WxH NV12 at 30.00 fps to <target> (stream id 100, bpp 0..0, ...)`
   - every 5 s: `jxs-output '<name>': fps= frames= dropped_busy= offered= taken= not_taken= refused=
-    encode_ms_avg/max= first_slice_ms_avg= copy_ms_avg/max= bpp= auto= reports= report_age_s=
-    send_errors= encode_errors= (issue 1387)` (`copy_ms` = the copy on libobs' video thread;
-    `report_age_s` -1.0 = never a report)
+    stamp_dup= encode_ms_avg/max= first_slice_ms_avg= copy_ms_avg/max= bpp= auto= reports=
+    report_age_s= send_errors= encode_errors= (issue 1387)` (`copy_ms` = the copy on libobs' video
+    thread; `report_age_s` -1.0 = never a report; the window's raw_video counters reset when the
+    sender publishes one)
   - the sender's own lines prefixed `jxs-output: ` (`jxs send: link ON ...`, `encoder open 1920x1080
     4:2:0, ...`, every `bpp A -> B`, the wedge CRITICAL); its own 5 s `jxs send: fps=` line is NOT
     forwarded (`cb_jxs_out_forward_line`), the output's line replaces it.
@@ -512,7 +525,9 @@ wire.
    o._rpc(ws, "GetOutputStatus", {"outputName": "camera-box JPEG XS program"})   # outputActive: true
    ```
    The file makes it start by itself at every later OBS start; `"enabled": false` (or deleting the
-   file) and `StopOutput` turn it off. strih's log: `started -- the program 1920x1080 NV12 at 30.00
+   file) and `StopOutput` turn it off. **The file is the only persistent store:** the plugin
+   re-creates the output from it at every OBS start and every profile change, so a setting changed
+   only over WS (`SetOutputSettings`) is lost then. Write the file first, then the WS call. strih's log: `started -- the program 1920x1080 NV12 at 30.00
    fps to 10.77.9.204:7100`, then `jxs-output: jxs send: link ON ...` and `encoder open 1920x1080 4:2:0`.
 5. Put `JXS PGM` on stream's PREVIEW (Studio Mode) and read it; never cut it to the stream program
    unasked.
@@ -540,8 +555,12 @@ wire.
   starts it, the strih encode cost, and the whole live acceptance above.
 - The copy into the picture runs on libobs' video output thread (one 1080p NV12 frame: ~3 MB read,
   the chroma split), like the NDI output's own work there; `copy_ms` on the status line measures it.
-- The stamp is taken when libobs hands the frame to the output (the NDI output's instant too), not
-  at the render tick: both copies of the program carry the same kind of stamp.
+- The stamp is taken when libobs hands the frame to the output, like the NDI output's, not at the
+  render tick: near a slot edge the two copies of one program frame can carry stamps one slot apart
+  (above). Stamping from the frame's own render time (`video_data.timestamp` mapped to the wall
+  clock) would make them equal; it would also stop sharing the NDI output's stamp function.
+- The colour space is checked at start only (a canvas change needs a profile change, which
+  re-creates the output).
 - `jxs-encode-bench` codes 4:2:2 only; the strih cost of 4:2:0 is read from the live status line.
 - One output, one target. A second receiver needs a second output (not built).
 

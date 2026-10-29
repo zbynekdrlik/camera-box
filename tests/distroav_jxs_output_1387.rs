@@ -101,6 +101,15 @@ int main(void)
 	EXPECT(cb_jxs_out_forward_line("jxs send: bpp 4 -> 5 (clean-10s; ...)"));
 	EXPECT(!cb_jxs_out_forward_line("jxs send: fps=30.0 bpp=5 auto=on"));
 	EXPECT(!cb_jxs_out_forward_line(0));
+	/* never the stamp just sent; a clock step back still goes (the receiver resyncs) */
+	EXPECT(cb_jxs_out_stamp_fresh(0, 17617300000000000LL));
+	EXPECT(cb_jxs_out_stamp_fresh(17617300000000000LL, 17617300000333333LL));
+	EXPECT(!cb_jxs_out_stamp_fresh(17617300000333333LL, 17617300000333333LL));
+	EXPECT(cb_jxs_out_stamp_fresh(17617300000333333LL, 17617298000000000LL));
+	/* the canvas the receiving source shows: BT.709 limited range only */
+	EXPECT(cb_jxs_out_colour_ok(true, true));
+	EXPECT(!cb_jxs_out_colour_ok(false, true));
+	EXPECT(!cb_jxs_out_colour_ok(true, false));
 	printf("checked, %d failure(s)\n", fails);
 	return fails ? 1 : 0;
 }
@@ -200,9 +209,15 @@ fn every_frame_carries_the_one_genlock_emit_stamp_the_ndi_output_uses() {
         "pic.strides[i] = frame->linesize[i];",
         "cbjxs_send_frame(o->tx, &pic)",
         "std::lock_guard<std::mutex> lock(o->tx_mutex);",
+        "if (!cb_jxs_out_stamp_fresh(o->last_stamp_100ns, pic.timecode_100ns)) {",
     ] {
         assert!(raw.contains(needle), "jxs_output_rawvideo lacks `{needle}`");
     }
+    // the duplicate guard runs before the frame is handed over
+    assert!(
+        raw.find("cb_jxs_out_stamp_fresh(").unwrap()
+            < raw.find("cbjxs_send_frame(o->tx, &pic)").unwrap()
+    );
     // the copy is all it does on libobs' video thread: no wait, no sleep
     for banned in ["sleep", "join", "cbjxs_send_open", "cbjxs_send_close"] {
         assert!(!raw.contains(banned), "raw_video must never `{banned}`");
@@ -232,9 +247,12 @@ fn the_program_pixel_format_maps_onto_the_sender_formats_and_nothing_else_starts
         "obs_output_begin_data_capture(o->output, 0)",
         "obs_output_set_genlock_wall_stamping(o->output, true);",
         "obs_output_set_last_error(o->output,",
+        "if (!cb_jxs_out_colour_ok(cs_709, range_partial)) {",
     ] {
         assert!(start.contains(needle), "start lacks `{needle}`");
     }
+    // the colour check refuses before any sender exists
+    assert!(start.find("cb_jxs_out_colour_ok(").unwrap() < start.find("cbjxs_send_open(").unwrap());
     // a failed capture start leaves no sender behind (the #1185 leak class)
     let fail = &start[start.find("if (!obs_output_begin_data_capture").unwrap()..];
     assert!(fail[..fail.find("return false;").unwrap()].contains("cbjxs_send_close(tx);"));

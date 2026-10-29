@@ -445,22 +445,6 @@ pub struct JxsFrame<'a> {
     pub emit_fps: u32,
 }
 
-/// A link started by a caller that is not the cambox capture loop (issue 1387 slice 3: the strih
-/// OBS program output through `jxs/send-ffi`): the id, the cores and the egress mark are given,
-/// not derived from the cambox's hostname and capture split.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LinkConfig {
-    /// `host:port` (IPv4).
-    pub target: String,
-    /// The wire's camera id (a stream id outside the CAM range, e.g. 100, for the program).
-    pub camera_id: u8,
-    /// The encoder's cores (empty = every online core).
-    pub cores: Vec<usize>,
-    pub opts: SenderOptions,
-    /// Set [`JXS_SOCKET_MARK`] (a cambox's egress pacing exemption; off elsewhere).
-    pub egress_mark: bool,
-}
-
 /// Entry point for the capture loop.
 pub struct JxsSender;
 
@@ -524,51 +508,6 @@ impl JxsSender {
     }
 }
 
-impl JxsSender {
-    /// Start a link for [`LinkConfig`]; `Err` names why it could not (no thread exists then).
-    pub fn start_link(cfg: LinkConfig) -> Result<JxsHandoff, String> {
-        let target = match jxs_link::parse_target(Some(&cfg.target)) {
-            Ok(Some(t)) => t,
-            Ok(None) => return Err("no target".to_string()),
-            Err(e) => return Err(e),
-        };
-        start_link_worker(target, cfg)
-    }
-}
-
-#[cfg(not(feature = "jxs"))]
-fn start_link_worker(_target: String, _cfg: LinkConfig) -> Result<JxsHandoff, String> {
-    Err("camera-box was built without the `jxs` feature".to_string())
-}
-
-#[cfg(feature = "jxs")]
-fn start_link_worker(target: String, cfg: LinkConfig) -> Result<JxsHandoff, String> {
-    let socket =
-        JxsSocket::connect_with(&target, cfg.egress_mark).map_err(|e| format!("{target}: {e}"))?;
-    let cores = if cfg.cores.is_empty() {
-        crate::affinity::online_cores()
-    } else {
-        cfg.cores
-    };
-    tracing::info!(
-        "jxs send: link ON to {} (stream id {}, UDP GSO {}, egress mark {}, send buffer {} bytes) -- JPEG XS {} at up to {} fps, latency profile, {} frames in flight, encoder on cores {cores:?} with {} slice threads (issue 1387)",
-        socket
-            .peer()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|_| target.clone()),
-        cfg.camera_id,
-        if socket.gso() { "on" } else { "OFF: one send per datagram" },
-        socket.egress_text(),
-        socket.send_buffer(),
-        bpp_mode_text(cfg.opts.bpp),
-        jxs_link::JXS_FPS,
-        FRAMES_IN_FLIGHT,
-        slice_threads_for(&cores),
-    );
-    handoff::spawn(socket, cfg.camera_id, cores, cfg.opts)
-        .ok_or_else(|| "the sender threads could not be spawned".to_string())
-}
-
 #[cfg(not(feature = "jxs"))]
 fn start_worker(target: String, _camera_id: u8, _opts: SenderOptions) -> Option<JxsHandoff> {
     tracing::error!(
@@ -629,12 +568,17 @@ fn start_worker(target: String, camera_id: u8, opts: SenderOptions) -> Option<Jx
 
 #[cfg(feature = "jxs")]
 mod handoff;
+#[cfg(feature = "jxs")]
+mod raw_intake;
 
 mod options;
 pub use options::*;
 
 mod raw;
 pub use raw::{Offered, RawFrame, RawLayout};
+
+mod link;
+pub use link::LinkConfig;
 
 #[cfg(test)]
 mod auto_tests;
@@ -808,65 +752,6 @@ mod tests {
         assert_eq!(a.pic.planes().u()[0], frame[1]);
         assert_eq!(a.pic.planes().v()[0], frame[3]);
         assert!(b.handed_off >= a.handed_off);
-    }
-
-    /// Issue 1387 slice 3: a raw NV12 picture (the OBS canvas) is copied into a 4:2:0 picture
-    /// (its chroma de-interleaved, its row padding dropped); a third one while both pictures are
-    /// queued is Busy, a frame off the 30 fps grid of a 60 fps caller never goes, a geometry the
-    /// layout cannot take is Refused before a picture is taken.
-    #[cfg(feature = "jxs")]
-    #[test]
-    fn a_raw_nv12_picture_is_copied_into_a_420_picture_and_queued() {
-        let (h, ready) = JxsHandoff::unstarted();
-        let (w, ht, stride) = (8u32, 4u32, 10usize);
-        let y: Vec<u8> = (0..stride * 4).map(|i| i as u8).collect();
-        let uv: Vec<u8> = (0..stride * 2).map(|i| 100 + i as u8).collect();
-        let raw = |timecode_100ns, emit_fps| RawFrame {
-            layout: RawLayout::Nv12,
-            width: w,
-            height: ht,
-            planes: [&y, &uv, &[]],
-            strides: [stride, stride, 0],
-            timecode_100ns,
-            emit_fps,
-        };
-        assert_eq!(h.offer_raw(&raw(tc(1), 60)), Offered::OffGrid);
-        assert_eq!(h.offer_raw(&raw(tc(0), 30)), Offered::Taken);
-        assert_eq!(
-            h.offer_raw(&raw(tc(1), 30)),
-            Offered::Taken,
-            "30 fps: every frame"
-        );
-        assert_eq!(h.offer_raw(&raw(tc(2), 30)), Offered::Busy);
-        assert_eq!(h.dropped_busy(), 1);
-        let a = ready.try_recv().unwrap();
-        let p = a.pic.planes();
-        assert_eq!(p.chroma(), svt_jpegxs_sys::ChromaFormat::Yuv420);
-        assert_eq!(&p.y()[..8], &y[..8]);
-        assert_eq!(&p.y()[8..16], &y[10..18], "the row padding is dropped");
-        assert_eq!(p.u(), &[100, 102, 104, 106, 110, 112, 114, 116]);
-        assert_eq!(p.v(), &[101, 103, 105, 107, 111, 113, 115, 117]);
-        h.free_tx.try_send(a.pic).unwrap();
-        let odd = RawFrame {
-            height: 3,
-            ..raw(tc(4), 30)
-        };
-        assert_eq!(h.offer_raw(&odd), Offered::Refused);
-        let short = RawFrame {
-            strides: [stride, 7, 0],
-            ..raw(tc(4), 30)
-        };
-        assert_eq!(
-            h.offer_raw(&short),
-            Offered::Refused,
-            "a UV row shorter than 8 bytes"
-        );
-        assert_eq!(h.stats.convert_errors.load(Ordering::Relaxed), 2);
-        assert_eq!(
-            h.offer_raw(&raw(tc(4), 30)),
-            Offered::Taken,
-            "the picture came back"
-        );
     }
 
     #[cfg(feature = "jxs")]
