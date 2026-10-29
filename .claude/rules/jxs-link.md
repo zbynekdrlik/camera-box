@@ -19,13 +19,18 @@ paths:
   - "vendor/svt-jpeg-xs/**"
   - "tests/jxs_loopback_1387.rs"
   - "tests/jxs_wiring_1387.rs"
+  - "vendor/distroav/src/jxs-output.cpp"
+  - "vendor/distroav/src/jxs-output-decide.h"
+  - "vendor/distroav/src/genlock-emit-timecode.h"
+  - "tests/distroav_jxs_output_1387.rs"
 ---
 
-# The cambox JPEG XS link (issue 1387, slices 1, 1b + 2)
+# The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3)
 
 A higher-quality camera picture than NDI's SpeedHQ, BESIDE NDI (never instead of it, owner
 decision 6488036928). Slice 1 = the cambox sender + a receive/measure tool; slice 2 = the strih OBS
-source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is slice 3. imag stays on NDI.
+source `camera_box_jxs_source` (section "Slice 2" below); slice 3 = the strih PROGRAM to stream-snv
+through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). imag stays on NDI.
 
 ## The owner's binding choices (do not re-open them)
 
@@ -370,6 +375,175 @@ source `camera_box_jxs_source` (section "Slice 2" below); strih -> stream is sli
   connection count.
 - One source = one camera = one UDP port. A second camera needs a second source on another port and
   that camera's `CAMERA_BOX_JXS_TARGET` pointing at it.
+
+## Slice 3: the strih program -> stream over JPEG XS (design 6504997031)
+
+The strih PROGRAM goes to stream-snv at JPEG XS quality BESIDE `NDI 2ME PGM` (owner decision 5:
+NDI stays). One sender, one receiver: the cambox sender and the slice-2 source, nothing new on the
+wire.
+
+### The codec takes 4:2:0 and 4:4:4 (shared code, not a copy)
+
+- `jxs/sys`: `ChromaFormat` (`Yuv420` / `Yuv422` / `Yuv444`); `Yuv422Planes` became `YuvPlanes`
+  (`new` = 4:2:2, `with_chroma`). The shim's `cbjxs_enc_settings.chroma` (`CBJXS_CHROMA_*`, the
+  shim's own codes, never the library's enum values) picks the SVT colour format; the encoder's
+  chroma rows halve at 4:2:0; `cbjxs_chroma_of_format` maps a decoded stream's format, and the
+  decoder opens 4:2:0 / 4:2:2 / 4:4:4 (anything else is refused). `EncoderSettings::with_chroma`;
+  a geometry the sampling cannot take (odd height at 4:2:0) is refused before the library sees it.
+- **The packet count does not change:** a 4:2:0 frame is the header + one packet per 16 LUMA lines
+  too (69 at 1080p), measured with the real encoder (`a_420_or_444_picture_encodes_and_decodes_as_itself`,
+  the 1080p loopback).
+- The receiver's plane pool is chroma-aware (a 4:2:0 frame never lands in a pooled 4:2:2 buffer).
+
+### The sender: a raw planar intake beside the YUYV one (`src/jxs_send/raw.rs` + `handoff.rs`)
+
+- `JxsHandoff::offer_raw(&RawFrame)`: `RawLayout` I420 / I422 / I444 / NV12 (NV12 = 4:2:0 with U V
+  interleaved, split on the copy). The caller's thread copies the planes into a free picture
+  (`jxs_link::copy_plane` / `split_interleaved`, row padding dropped) and queues it. Never blocks:
+  `Offered::Busy` (dropped_busy), `OffGrid` (the 30 fps grid of a faster caller), `Refused` (a
+  geometry or stride that does not fit, `encode_errors`). The YUYV `offer` is unchanged.
+- The feeder's sessions are keyed on (width, height, chroma): a new sampling opens a new session.
+- `JxsSender::start_link(LinkConfig)`: a link with a given stream id, cores (empty = every online
+  core, `affinity::online_cores`) and NO egress mark (`JxsSocket::connect_with(_, false)`: only a
+  cambox has the issue-1242 egress pacing it exempts the flow from; the "link ON" line says
+  `egress mark not used`).
+- The status line gained `reports=` (receiver reports read in the window, at the end before
+  `(issue 1387)`); the packet thread also publishes each finished window (`take_window`, once per
+  window) for a caller with its own log.
+
+### The C ABI: `jxs/send-ffi` (an rlib, carried INSIDE `libjxs_recv_ffi.a`)
+
+- `include/camera_box_jxs_send.h` (by hand; `tests/abi.rs` pins every size, offset, constant and
+  exported name): `cbjxs_send_open(cfg)` (target, cores, emit_fps, stream_id, bpp_min/max: 0 = the
+  sender's 4 / 8, min == max = fixed), `cbjxs_send_frame` (1 taken / 0 busy or off-grid / -1 refused
+  / -2 NULL or a panic), `cbjxs_send_get_stats` (1 = a window not handed out before),
+  `cbjxs_send_take_error`, `cbjxs_send_close` (bounded ~2 s), `cbjxs_send_abi_version` (1),
+  `cbjxs_send_set_log` (the sender's tracing lines, INFO and above, one line per call, into the
+  caller's log; a process-global subscriber, installed once).
+- **ONE Rust archive in DistroAV.** `jxs-recv-ffi` depends on `jxs-send-ffi` (`pub use
+  jxs_send_ffi;`), so `libjxs_recv_ffi.a` defines both ABIs. Two Rust static libraries in one
+  shared object would each carry std, the camera-box crate and a second SVT-JPEG-XS (duplicate
+  symbols, two codec init states). The recv-ffi `tests/abi.rs` links a `-z defs` shared object that
+  calls every `cbjxs_send_*` from that one archive; the strih CI job `nm`s the archive for
+  `cbjxs_send_open` & co. before CMake runs.
+- The receive ABI went to 2: `cbjxs_frame.chroma` (`CBJXS_CHROMA_420` 1 / `_422` 2 / `_444` 3, the
+  same numbers as `CBJXS_SEND_I420` / `_I422` / `_I444`; the byte came from `reserved`, the layout is
+  unchanged). The source maps it to `VIDEO_FORMAT_I420` / `I422` / `I444` and never hands libobs an
+  unknown sampling (`jxs_video_format`).
+- Tests: `jxs/send-ffi/tests/{abi,log}.rs`, `jxs/recv-ffi/tests/send_loopback.rs` (1080p NV12 + I420
+  through BOTH C ABIs and the real encoder: every frame arrives as 4:2:0, timecode carried, 0 lost
+  slices, PSNR >= 40 dB per plane, the receiver's reports counted in the sender's window).
+
+### The DistroAV output: `vendor/distroav/src/jxs-output.cpp`, kind `camera_box_jxs_output`
+
+- `raw_video` on libobs' video output thread, the program canvas in its own format (NV12 / I420 /
+  I422 / I444; another canvas format refuses to start, named). It stamps each frame with
+  `genlock_emit_timecode_100ns(o->framerate)`, the ONE stamp the NDI output puts on the same frame:
+  the function lost its `static` in ndi-output.cpp and is declared in `genlock-emit-timecode.h`. The
+  #78 / #1009 anchored lines stay byte-identical, and the genlock-grid parity gate still lifts
+  `genlock_floor_boundary_100ns` from ndi-output.cpp. It hands the frame to `cbjxs_send_frame`
+  (one copy, never a wait); with both pictures in use the frame is dropped and counted.
+- It registers as a wall-stamping genlock sender (`obs_output_set_genlock_wall_stamping`) while it
+  runs. A failed capture start closes the sender (the #1185 leak class). `stop` ends the data
+  capture BEFORE it closes the sender, so no `raw_video` runs on a closed one.
+- Settings: `jxs_target` (host:port, IPv4), `jxs_stream_id` (1..255, default 100: outside the CAM
+  range), `jxs_bpp_min` / `jxs_bpp_max` (0 = 4 / 8; equal = fixed), `jxs_cores` (a cpulist, empty =
+  every core). They apply at the next start.
+- **Started from a settings file, driven over obs-websocket.** obs-websocket 5 can `StartOutput` /
+  `StopOutput` / `SetOutputSettings` / `GetOutputStatus` an EXISTING output, but has no request
+  that creates one. So the plugin creates the named output `camera-box JPEG XS program` at
+  FINISHED_LOADING (after the NDI outputs) from `<module config>/jxs-output.json` =
+  `~/.config/obs-studio/plugin_config/distroav/jxs-output.json`, and starts it only when that file
+  says `"enabled": true` (no file = created with defaults, not started). It is stopped and released
+  at OBS_FRONTEND_EVENT_EXIT and PROFILE_CHANGING (a video reset refuses active outputs), and
+  re-created at PROFILE_CHANGED. Only the strih Linux build has it (`#ifdef CAMERA_BOX_JXS_SOURCE`,
+  the same CMake option as the source, plus `CAMERA_BOX_JXS_SEND_FFI_INCLUDE`).
+- Logs (`[distroav] ` prefixed):
+  - `jxs-output: 'camera-box JPEG XS program' created from <path> (read|absent: defaults; enabled=, target '...')`
+  - `jxs-output 'camera-box JPEG XS program': started -- the program WxH NV12 at 30.00 fps to <target> (stream id 100, bpp 0..0, ...)`
+  - every 5 s: `jxs-output '<name>': fps= frames= dropped_busy= offered= taken= not_taken= refused=
+    encode_ms_avg/max= first_slice_ms_avg= copy_ms_avg/max= bpp= auto= reports= report_age_s=
+    send_errors= encode_errors= (issue 1387)` (`copy_ms` = the copy on libobs' video thread;
+    `report_age_s` -1.0 = never a report)
+  - the sender's own lines prefixed `jxs-output: ` (`jxs send: link ON ...`, `encoder open 1920x1080
+    4:2:0, ...`, every `bpp A -> B`, the wedge CRITICAL); its own 5 s `jxs send: fps=` line is NOT
+    forwarded (`cb_jxs_out_forward_line`), the output's line replaces it.
+- Tests: `tests/distroav_jxs_output_1387.rs` (the decide header's truth table, a g++
+  `-fsyntax-only -Werror` of the output AND the source against the vendored libobs + both FFI
+  headers, the anchors: the one stamp, the format map, start / stop order, the settings-file start,
+  the frontend lifecycle, the CMake block, the CI wiring, the source's format map).
+
+### Live acceptance (supervisor runbook; strih-snv -> stream-snv, rig TEST mode)
+
+1. CI green, then the FULL strih bundle deploy on BOTH Linux OBS boxes (strih-snv and stream-snv run
+   the same bundle). Each OBS log must show `Plugin features registered: camera-box JPEG XS program
+   output (issue 1387)` and the `jxs-output: '...' created from ...` line.
+2. **Measure strih's encode cost first** (the design's precondition): on strih-snv, from /dev/shm,
+   `jxs-encode-bench` at 1080p 30 fps on the cores the output will use (it cannot take NV12; its
+   4:2:2 figure is an upper bound of the 4:2:0 one), next to the running OBS. Pick `jxs_cores` from
+   it only if the default (every core) shows contention with OBS's render/encode threads.
+3. **The receiver on stream-snv** (over OBS-WS from dev1 with the repo's client, never a scene the
+   stream program shows; Studio Mode, never `PRO` on program):
+   ```python
+   import sys; sys.path.insert(0, "scripts"); import obs_phase2 as o
+   ws = o._conn("10.77.9.204")
+   o._rpc(ws, "CreateScene", {"sceneName": "JXS PGM"})
+   o._rpc(ws, "CreateInput", {"sceneName": "JXS PGM", "inputName": "JXS PGM src",
+          "inputKind": "camera_box_jxs_source",
+          "inputSettings": {"jxs_port": 7100, "jxs_camera": 100, "jxs_max_bpp": 0,
+                            "genlock_fifo": True, "genlock_latency_ms_src": <the NDI 2ME PGM pin>}})
+   ```
+   Its log: `jxs-source 'JXS PGM src': listening on UDP 7100 (camera 100, ...; receive buffer B bytes)`
+   (B is 128 MiB on a box with the OBS baseline's `net.core.rmem_max`). The genlock latency: start
+   from the `NDI 2ME PGM` input's `genlock_latency_ms_src` (read it with `GetInputSettings`), so both
+   copies of the program sit at the same depth.
+4. **The output on strih-snv:** write the settings file (ssh, as the OBS user), then start it over
+   WS without an OBS restart:
+   ```bash
+   ssh newlevel@10.77.9.202 'mkdir -p ~/.config/obs-studio/plugin_config/distroav && cat > ~/.config/obs-studio/plugin_config/distroav/jxs-output.json' <<'JSON'
+   {"enabled": true, "jxs_target": "10.77.9.204:7100", "jxs_stream_id": 100, "jxs_bpp_min": 0, "jxs_bpp_max": 0, "jxs_cores": ""}
+   JSON
+   ```
+   ```python
+   ws = o._conn("10.77.9.202")
+   o._rpc(ws, "SetOutputSettings", {"outputName": "camera-box JPEG XS program",
+          "outputSettings": {"jxs_target": "10.77.9.204:7100", "jxs_stream_id": 100}})
+   o._rpc(ws, "StartOutput", {"outputName": "camera-box JPEG XS program"})
+   o._rpc(ws, "GetOutputStatus", {"outputName": "camera-box JPEG XS program"})   # outputActive: true
+   ```
+   The file makes it start by itself at every later OBS start; `"enabled": false` (or deleting the
+   file) and `StopOutput` turn it off. strih's log: `started -- the program 1920x1080 NV12 at 30.00
+   fps to 10.77.9.204:7100`, then `jxs-output: jxs send: link ON ...` and `encoder open 1920x1080 4:2:0`.
+5. Put `JXS PGM` on stream's PREVIEW (Studio Mode) and read it; never cut it to the stream program
+   unasked.
+6. **Grade** (10 min):
+   - strih: `jxs-output '...': fps=30.00` every 5 s, `dropped_busy=0`, `refused=0`, `encode_ms_avg`
+     well under 33.3, `copy_ms_avg/max` (the cost on libobs' video thread: well under 1 ms at 1080p
+     NV12), `reports=5` per window, `report_age_s` < 3; the `jxs send: bpp A -> B` lines climb 4 -> 8;
+     strih-snv CPU (`top -H -p <obs pid>` for the `jxs-feed` / `jxs-send` / SVT worker threads, and
+     the box total) before and after the start; the `genlock-ndi-output audit` lines of the NDI
+     outputs unchanged (`dropped=0`, `max_send_wait_ms` as before);
+   - stream: `jxs-source 'JXS PGM src': fps=30.00`, `lost_slices=0 undecodable=0 dropped_unread=0`,
+     `bpp=8.00` once the auto bpp has climbed, `decoder_reopens` = one per sender bpp step;
+   - `genlock-fifo audit 'JXS PGM src'` clean for 10 min (no `underruns` / `relocks` /
+     `late_holds` / `backward_steps` growth, `genlock-jitter-report`), and its `ts_head_skew_ms`
+     close to `NDI 2ME PGM`'s;
+   - a `GetSourceScreenshot` of `JXS PGM src` and of `NDI 2ME PGM` at the same moment (PNG), the
+     detail metric + a crop for the owner (the slice-0 comparison method).
+7. Leave nothing behind unasked: `StopOutput` + `"enabled": false` in the file, and remove the `JXS
+   PGM` scene on stream, unless the owner wants the link to stay up.
+
+### Slice 3 known limits
+
+- **Not proven before the strih build ran:** the DistroAV link of the output (the archive's sender
+  symbols are checked by `nm` in CI and by the recv-ffi shared-object test), that OBS creates and
+  starts it, the strih encode cost, and the whole live acceptance above.
+- The copy into the picture runs on libobs' video output thread (one 1080p NV12 frame: ~3 MB read,
+  the chroma split), like the NDI output's own work there; `copy_ms` on the status line measures it.
+- The stamp is taken when libobs hands the frame to the output (the NDI output's instant too), not
+  at the render tick: both copies of the program carry the same kind of stamp.
+- `jxs-encode-bench` codes 4:2:2 only; the strih cost of 4:2:0 is read from the live status line.
+- One output, one target. A second receiver needs a second output (not built).
 
 ## The automatic bpp (issue 1387, owner decision 6495938345)
 

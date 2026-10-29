@@ -331,8 +331,18 @@ fn the_output_is_registered_and_wired_into_the_frontend_lifecycle_only_in_the_st
     guarded("obs_register_output(&jxs_output_info);");
     // created after the NDI outputs at load, stopped before a video reset and at exit, re-created
     // after a profile change
-    assert_eq!(main.matches("camera_box_jxs_output_init();").count(), 2);
-    assert_eq!(main.matches("camera_box_jxs_output_deinit();").count(), 2);
+    assert_eq!(
+        main.matches("camera_box_jxs_output_init();").count()
+            - main.matches("void camera_box_jxs_output_init();").count(),
+        2,
+        "two calls besides the declaration"
+    );
+    assert_eq!(
+        main.matches("camera_box_jxs_output_deinit();").count()
+            - main.matches("void camera_box_jxs_output_deinit();").count(),
+        2,
+        "two calls besides the declaration"
+    );
     let lambda = &main[main.find("OBS_FRONTEND_EVENT_FINISHED_LOADING) {").unwrap()..];
     let exit = lambda.find("OBS_FRONTEND_EVENT_EXIT").unwrap();
     let changing = lambda.find("OBS_FRONTEND_EVENT_PROFILE_CHANGING").unwrap();

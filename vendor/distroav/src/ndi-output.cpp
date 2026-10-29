@@ -16,6 +16,7 @@
 ******************************************************************************/
 
 #include "plugin-main.h"
+#include "genlock-emit-timecode.h"
 #include <util/threading.h>
 #include <chrono>
 #include <cmath>
@@ -101,7 +102,8 @@ static int64_t genlock_floor_boundary_100ns(int64_t now_100ns, int64_t fps)
 
 // Boundary-aligned real wall-clock emit timecode for a frame at `framerate` fps.
 // camera-box #1009: the boundary at-or-before the emit instant (floor).
-static int64_t genlock_emit_timecode_100ns(double framerate)
+// Issue 1387 slice 3: shared (genlock-emit-timecode.h), the JPEG XS program output stamps with it.
+int64_t genlock_emit_timecode_100ns(double framerate)
 {
 	int64_t fps = (int64_t)llround(framerate);
 	return genlock_floor_boundary_100ns(genlock_wall_now_100ns(), fps);

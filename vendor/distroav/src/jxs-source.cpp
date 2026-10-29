@@ -105,12 +105,32 @@ static void jxs_set_connected(jxs_source *s, bool connected)
 		fn(s->source, connected);
 }
 
-/* Hand one decoded frame to libobs: planar 4:2:2 (I422), BT.709 limited range, stamped with the
- * sender's genlock timecode in epoch nanoseconds. libobs copies the planes before it returns. */
+/* The libobs format of a decoded frame's sampling (ABI 2): a cambox sends 4:2:2, the strih
+ * program 4:2:0 (issue 1387 slice 3); anything else is never handed to libobs. */
+static enum video_format jxs_video_format(uint8_t chroma)
+{
+	switch (chroma) {
+	case CBJXS_CHROMA_420:
+		return VIDEO_FORMAT_I420;
+	case CBJXS_CHROMA_422:
+		return VIDEO_FORMAT_I422;
+	case CBJXS_CHROMA_444:
+		return VIDEO_FORMAT_I444;
+	default:
+		return VIDEO_FORMAT_NONE;
+	}
+}
+
+/* Hand one decoded frame to libobs: planar in its own sampling (I420 / I422 / I444), BT.709
+ * limited range, stamped with the sender's genlock timecode in epoch nanoseconds. libobs copies
+ * the planes before it returns. */
 static void jxs_output_frame(jxs_source *s, const cbjxs_frame &f)
 {
+	const enum video_format format = jxs_video_format(f.chroma);
+	if (format == VIDEO_FORMAT_NONE)
+		return;
 	obs_source_frame frame = {};
-	frame.format = VIDEO_FORMAT_I422;
+	frame.format = format;
 	frame.width = f.width;
 	frame.height = f.height;
 	frame.data[0] = const_cast<uint8_t *>(f.y);
@@ -121,7 +141,7 @@ static void jxs_output_frame(jxs_source *s, const cbjxs_frame &f)
 	frame.linesize[2] = f.uv_stride;
 	frame.timestamp = cb_jxs_timestamp_ns(f.timecode_100ns);
 	frame.full_range = false;
-	video_format_get_parameters_for_format(VIDEO_CS_709, VIDEO_RANGE_PARTIAL, VIDEO_FORMAT_I422,
+	video_format_get_parameters_for_format(VIDEO_CS_709, VIDEO_RANGE_PARTIAL, format,
 					       frame.color_matrix, frame.color_range_min, frame.color_range_max);
 	obs_source_output_video(s->source, &frame);
 }

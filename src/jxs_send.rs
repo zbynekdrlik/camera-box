@@ -132,6 +132,7 @@ impl JxsSocket {
     }
 
     /// The "link ON" line's egress words.
+    #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
     fn egress_text(&self) -> String {
         if self.marked() {
             format!("{JXS_SOCKET_MARK:#x}: line rate past the NDI pacing")
