@@ -249,11 +249,9 @@ pub fn build_slice_datagrams(
 /// The byte ranges of `buf` (built by [`build_slice_datagrams`]) for successive GSO sends of at
 /// most [`GSO_SEGMENTS_PER_SEND`] datagrams each. Each range starts on a datagram boundary, so the
 /// kernel's `gso_size` cut lines up with the headers.
+/// The line-rate case of [`pace::send_ranges`] (one cut, one implementation).
 pub fn gso_send_ranges(buf_len: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
-    let step = GSO_SEGMENTS_PER_SEND * DATAGRAM_LEN;
-    (0..buf_len)
-        .step_by(step.max(1))
-        .map(move |start| start..(start + step).min(buf_len))
+    pace::send_ranges(buf_len, GSO_SEGMENTS_PER_SEND)
 }
 
 /// Split one received buffer into datagrams. With UDP GRO the kernel hands several datagrams of
@@ -338,7 +336,9 @@ pub struct SendWindow {
     /// The send pacing in Mb/s of wire (issue 1387, `pace`), 0 = line rate.
     pub pace_mbps: u32,
     /// Per whole frame: its first send -> its last send returned (the frame's time on the wire,
-    /// paced or not); the average divides by `frames`.
+    /// paced or not; at line rate it follows the encoder's slice span); the average divides by
+    /// `wire_frames` (a frame with no send has no wire time).
+    pub wire_frames: u64,
     pub wire_ms_sum: f64,
     pub wire_ms_max: f64,
 }
@@ -419,6 +419,7 @@ impl SendWindow {
 
     /// One whole frame's time on the wire (first send -> last send returned).
     pub fn note_wire(&mut self, wire_ms: f64) {
+        self.wire_frames += 1;
         self.wire_ms_sum += wire_ms;
         self.wire_ms_max = self.wire_ms_max.max(wire_ms);
     }

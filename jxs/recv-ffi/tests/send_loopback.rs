@@ -70,8 +70,11 @@ fn open_sender(port: u16) -> *mut CbjxsSender {
         bpp_min: 0,
         bpp_max: 0,
         reserved: 0,
-        // the strih output's default: the loopback must still deliver every slice when paced
-        pace_mbps: 900,
+        // paced well below line rate: every slice must still arrive, and the sender's own window
+        // must show each frame spread over its wire time (a 4 bpp 1080p frame ~1 MB ~ 28 ms at
+        // 300 Mb/s, still under the test's 40 ms frame spacing), far above the encode span an
+        // unpaced send would show
+        pace_mbps: 300,
         reserved2: 0,
     };
     let mut err = [0 as c_char; 160];
@@ -203,9 +206,18 @@ fn program_pictures_in_420_cross_both_c_abis_with_their_timecode_and_nothing_los
             sent += st.frames;
             assert_eq!(st.auto_bpp, 1);
             assert_eq!((st.dropped_busy, st.encode_errors), (0, 0), "{st:?}");
-            assert_eq!(st.pace_mbps, 900, "the window names its pace: {st:?}");
+            assert_eq!(st.pace_mbps, 300, "the window names its pace: {st:?}");
             if st.frames > 0 {
-                assert!(st.wire_ms_max >= st.wire_ms_avg, "{st:?}");
+                // the codestream bytes alone at 300 Mb/s, less two 16-datagram groups: the last
+                // send's own wire time is not inside first send -> last send, and a late send
+                // keeps at most half a group as credit
+                let bytes_per_frame = st.bytes as f64 / st.frames as f64;
+                let min_ms = (bytes_per_frame - 32.0 * 1472.0) * 8.0 / 300e6 * 1e3;
+                assert!(
+                    st.wire_ms_avg >= min_ms && st.wire_ms_max >= st.wire_ms_avg,
+                    "the sending thread paced each frame: wire {:.2} ms < {min_ms:.2}: {st:?}",
+                    st.wire_ms_avg
+                );
             }
         }
     }

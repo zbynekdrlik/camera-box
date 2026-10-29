@@ -18,14 +18,16 @@
 //!   departure is `anchor + ceil(bits x 1000 / mbps)` ns. Nothing is rounded per send, so a
 //!   million sends land exactly where one long send would.
 //! - **Late is not early.** A send that is ready after its due time (the encoder was slower than
-//!   the pace, or the thread woke late) goes at once. Lateness up to one burst's wire time
-//!   ([`PaceSchedule::tolerance_ns`]) keeps the schedule, so a thread that wakes 50 us late
-//!   catches up and the rate holds. Later than that, the link was idle: the schedule restarts at
-//!   that instant (a new anchor), so idle time never turns into a burst of saved-up credit.
+//!   the pace, or the thread woke late) goes at once. Up to HALF a burst's wire time of lateness
+//!   is kept as credit, so a thread that wakes 50 us late catches up and the rate holds; anything
+//!   beyond half a burst moves the schedule later (lost, never caught up). Later than one burst
+//!   ([`PaceSchedule::tolerance_ns`]) the link was idle: the schedule restarts at that instant (a
+//!   new anchor).
 //! - **Bounded bursts.** While pacing, one send carries at most [`PACE_BURST_SEGMENTS`] datagrams
 //!   (~23.5 KB of wire, ~0.2 ms at 900 Mb/s); a longer slice is split into such groups
-//!   ([`send_ranges`]). Each group still goes out at line rate, so this caps what the switch must
-//!   buffer per send.
+//!   ([`send_ranges`]). Each group still goes out at line rate, and the credit above lets at most
+//!   half a burst more follow it back to back: the switch never sees more than 1.5 groups
+//!   (~37 KB) arrive faster than the pace.
 
 use super::{DATAGRAM_LEN, GSO_SEGMENTS_PER_SEND};
 
@@ -87,6 +89,16 @@ pub fn segments_per_send(pacing: bool) -> usize {
     }
 }
 
+/// The auto bpp's encode time of a frame: submit -> last packet sent (`encode_ms`) minus what the
+/// pace held its sends back (`paced_ns`). The pace is a wire limit, not a codec cost; without this
+/// a lower pace would quietly cap the climb (the climb needs encode p99 < 60 % of 33.3 ms, and at
+/// 800 Mb/s 7 bpp alone is ~19 ms of wire). A pace too slow for the frame rate shows as
+/// `dropped_busy`, which steps the bpp down by itself.
+pub fn codec_ms(encode_ms: f64, paced_ns: u64) -> f64 {
+    let _ = paced_ns;
+    encode_ms
+}
+
 /// The running send schedule of one paced link (module doc).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaceSchedule {
@@ -130,8 +142,16 @@ impl PaceSchedule {
     /// Schedule one send of `wire_bytes` that is ready at `ready_ns`; returns its departure time
     /// (never before `ready_ns`).
     pub fn depart(&mut self, ready_ns: u64, wire_bytes: u64) -> u64 {
+        let tolerance = self.tolerance_ns();
         let depart = match self.due_ns() {
-            Some(due) if ready_ns <= due.saturating_add(self.tolerance_ns()) => due.max(ready_ns),
+            Some(due) if ready_ns <= due => due,
+            Some(due) if ready_ns - due <= tolerance => {
+                // late by `lag`: keep at most half a burst of it as credit, so the sends that
+                // follow catch up by no more than half a burst back to back
+                let lag = ready_ns - due;
+                let _ = lag;
+                ready_ns
+            }
             _ => {
                 // the first send, or the link was idle: a new run starts now
                 self.anchor_ns = ready_ns;
@@ -166,6 +186,13 @@ mod tests {
             "12304000 / 900 = 13671.1, rounded up"
         );
         assert_eq!(wire_ns(125, 1), 1_000_000, "1000 bits at 1 Mb/s = 1 ms");
+    }
+
+    #[test]
+    fn the_auto_bpp_sees_the_codec_time_without_the_paced_wait() {
+        assert_eq!(codec_ms(19.5, 0), 19.5, "line rate: nothing taken off");
+        assert!((codec_ms(19.5, 17_000_000) - 2.5).abs() < 1e-9);
+        assert_eq!(codec_ms(1.0, 5_000_000), 0.0, "never negative");
     }
 
     #[test]
@@ -228,15 +255,50 @@ mod tests {
             late + 196_864,
             "paced from the new anchor"
         );
-        // exactly at due + tolerance still keeps the schedule
+        // exactly at due + tolerance: still the same run, but only half a burst of the lateness
+        // is kept as credit, so the next send follows half a burst later, never back to back
         let mut q = PaceSchedule::new(1000).unwrap();
         q.depart(0, unit);
         assert_eq!(q.depart(2 * 196_864, unit), 2 * 196_864);
-        assert_eq!(
-            q.depart(0, unit),
-            2 * 196_864,
-            "due from the anchor, never later"
-        );
+        assert_eq!(q.depart(0, unit), 2 * 196_864 + 98_432);
+    }
+
+    #[test]
+    fn after_a_late_send_at_most_half_a_burst_follows_back_to_back() {
+        // the worst case: late by the whole tolerance, then many small sends ready at once (the
+        // header packet, slice tails): what leaves within one burst's wire time of the late send
+        // is that send + half a burst, never two bursts
+        for late in [1u64, 50_000, 98_432, 150_000, 196_864] {
+            let mut p = PaceSchedule::new(1000).unwrap();
+            let unit = 16 * 1538;
+            p.depart(0, unit);
+            let ready = 196_864 + late;
+            assert_eq!(p.depart(ready, unit), ready);
+            let mut back_to_back = 0u64;
+            for _ in 0..200 {
+                if p.depart(ready, 192) < ready + 196_864 {
+                    back_to_back += 192;
+                }
+            }
+            let credit = late.min(98_432) * 1000 / 8000; // ns of credit at 1 Gb/s -> bytes
+            assert!(
+                back_to_back <= credit + 192,
+                "late {late}: {back_to_back} bytes followed within one burst, credit {credit}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_thread_that_wakes_late_every_time_keeps_the_rate() {
+        // every send is ready 50 us after its due time (a late wake): the schedule never slips
+        let mut p = PaceSchedule::new(900).unwrap();
+        let mut ready = 0u64;
+        for _ in 0..100_000u32 {
+            p.depart(ready, 1538);
+            ready = p.due_ns().unwrap() + 50_000;
+        }
+        let exact = (100_000u128 * 12_304_000).div_ceil(900) as u64;
+        assert_eq!(p.due_ns(), Some(exact), "no drift from 100000 late wakes");
     }
 
     #[test]

@@ -42,7 +42,12 @@ pub fn sleep_until_monotonic_ns(at_ns: u64) {
 #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
 pub(super) fn tighten_timer_slack() {
     // SAFETY: PR_SET_TIMERSLACK takes a plain integer and touches only this thread.
-    unsafe { libc::prctl(libc::PR_SET_TIMERSLACK, 1 as libc::c_ulong) };
+    if unsafe { libc::prctl(libc::PR_SET_TIMERSLACK, 1 as libc::c_ulong) } != 0 {
+        tracing::warn!(
+            "jxs send: the pacing thread's timer slack stays at its default ({}) -- each paced send may wake up to ~50 us late, the schedule catches it up (issue 1387)",
+            std::io::Error::last_os_error()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -51,9 +56,10 @@ mod tests {
     use std::net::UdpSocket;
     use std::os::fd::AsRawFd;
 
-    /// Issue 1387: a paced frame over loopback. The lower bound is the schedule's own span (a send
-    /// never leaves before its departure, so the last datagram cannot arrive earlier than that
-    /// after the first); the upper bound is generous (a loaded runner only adds lateness).
+    /// Issue 1387: a paced frame over loopback. Timed on the SENDING side with the schedule's own
+    /// clock: the schedule anchors at or after `t0` and the last send waits for its departure, so
+    /// `t1 - t0 >= last_departure` holds exactly, whatever the runner's load (a descheduled thread
+    /// only adds time). The upper bound is generous; the receiver proves every datagram arrived.
     #[test]
     fn a_paced_frame_is_spread_over_its_schedule_and_arrives_whole() {
         use jxs_link::pace::{segments_per_send, send_ranges, wire_bytes, PaceSchedule};
@@ -96,30 +102,39 @@ mod tests {
         );
         let reader = std::thread::spawn(move || {
             let mut d = [0u8; 2048];
-            let mut times = Vec::new();
-            while times.len() < datagrams {
-                match rx.recv(&mut d) {
-                    Ok(_) => times.push(std::time::Instant::now()),
-                    Err(_) => break,
-                }
+            let mut n = 0usize;
+            while n < datagrams && rx.recv(&mut d).is_ok() {
+                n += 1;
             }
-            times
+            n
         });
         let mut pace = PaceSchedule::new(500).unwrap();
+        let mut paced_ns = 0;
+        let t0 = monotonic_ns();
         for b in &bufs {
-            assert_eq!(tx.send_slice_paced(b, Some(&mut pace)).0, 0);
+            let sent = tx.send_slice_paced(b, Some(&mut pace));
+            assert_eq!(sent.errors, 0);
+            paced_ns += sent.paced_ns;
         }
-        let times = reader.join().unwrap();
-        assert_eq!(times.len(), datagrams, "every datagram arrived");
-        let spread = times[times.len() - 1].duration_since(times[0]);
-        // the first datagram arrives within loopback time of its send; allow 1 ms of it
+        let t1 = monotonic_ns();
+        assert_eq!(reader.join().unwrap(), datagrams, "every datagram arrived");
         assert!(
-            spread.as_nanos() as u64 + 1_000_000 >= last_departure,
-            "spread {spread:?} < the schedule's {last_departure} ns: sent faster than the pace"
+            t1 - t0 >= last_departure,
+            "{} ns < the schedule's {last_departure} ns: sent faster than the pace",
+            t1 - t0
         );
+        assert!(t1 - t0 < 500_000_000, "{} ns", t1 - t0);
+        // the waits it reports are what held the sends back: at most the whole span
         assert!(
-            spread < std::time::Duration::from_millis(500),
-            "spread {spread:?}"
+            paced_ns > 0 && paced_ns <= t1 - t0,
+            "{paced_ns} of {}",
+            t1 - t0
         );
+        // line rate: the same frame, no waits, every send at once
+        let line = bufs
+            .iter()
+            .map(|b| tx.send_slice_paced(b, None).paced_ns)
+            .sum::<u64>();
+        assert_eq!(line, 0);
     }
 }

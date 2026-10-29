@@ -22,9 +22,8 @@
 //!   default 0 = line rate) it holds each send until its departure on the pace schedule
 //!   (`crate::jxs_link::pace`): the waiting happens on this thread only.
 //!
-//! Every 5 s it logs `jxs send: fps= bpp= frames= slices= bytes= dropped_busy= in_flight=max/cap
-//! convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors= encode_errors=
-//! (issue 1387)`. A frame in flight with no packet for [`WEDGE_MS`] logs one
+//! Every 5 s it logs the `jxs send: fps= ...` status line (its fields:
+//! `jxs_link::SendWindow::status_line`). A frame in flight with no packet for [`WEDGE_MS`] logs one
 //! `CRITICAL jxs send: encoder wedged` line from the feeder (the status line lives on the packet
 //! thread, which is the one stuck).
 //!
@@ -200,28 +199,28 @@ impl JxsSocket {
     /// calls that failed (a receiver that is not listening answers with ICMP, which the next
     /// send reports as `ECONNREFUSED`; the link never waits for it).
     pub fn send_slice(&self, datagrams: &[u8]) -> u64 {
-        self.send_slice_paced(datagrams, None).0
+        self.send_slice_paced(datagrams, None).errors
     }
 
     /// [`Self::send_slice`] on a pace schedule (issue 1387, `jxs_link::pace`): `None` = line rate
     /// (up to 40 datagrams per send, at once); `Some` = at most `PACE_BURST_SEGMENTS` datagrams per
     /// send, each send held on THIS thread until its departure time (an absolute
-    /// `clock_nanosleep` on `CLOCK_MONOTONIC`). Returns the failed sends and when the first send
-    /// went (after its wait; `None` = an empty buffer).
+    /// `clock_nanosleep` on `CLOCK_MONOTONIC`).
     pub fn send_slice_paced(
         &self,
         datagrams: &[u8],
         mut pace: Option<&mut jxs_link::pace::PaceSchedule>,
-    ) -> (u64, Option<std::time::Instant>) {
-        let mut errors = 0;
-        let mut first: Option<std::time::Instant> = None;
+    ) -> SliceSent {
+        let mut out = SliceSent::default();
         let segments = jxs_link::pace::segments_per_send(pace.is_some());
         for r in jxs_link::pace::send_ranges(datagrams.len(), segments) {
             if let Some(p) = pace.as_deref_mut() {
-                let at = p.depart(monotonic_ns(), jxs_link::pace::wire_bytes(r.len()));
+                let now = monotonic_ns();
+                let at = p.depart(now, jxs_link::pace::wire_bytes(r.len()));
+                out.paced_ns += at.saturating_sub(now);
                 sleep_until_monotonic_ns(at);
             }
-            first.get_or_insert_with(std::time::Instant::now);
+            out.first.get_or_insert_with(std::time::Instant::now);
             let batch = &datagrams[r];
             if self.gso() {
                 match self.sock.send(batch) {
@@ -238,19 +237,31 @@ impl JxsSocket {
                         );
                     }
                     Err(_) => {
-                        errors += 1;
+                        out.errors += 1;
                         continue;
                     }
                 }
             }
             for d in batch.chunks(DATAGRAM_LEN) {
                 if self.sock.send(d).is_err() {
-                    errors += 1;
+                    out.errors += 1;
                 }
             }
         }
-        (errors, first)
+        out
     }
+}
+
+/// What [`JxsSocket::send_slice_paced`] did with one slice.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SliceSent {
+    /// Send calls that failed.
+    pub errors: u64,
+    /// When the first send went, after its wait (`None` = an empty buffer).
+    pub first: Option<std::time::Instant>,
+    /// Nanoseconds the schedule held the sends back (0 at line rate): the auto bpp leaves this
+    /// out of its encode time, the wire time is not a cost of the codec.
+    pub paced_ns: u64,
 }
 
 /// Set an int socket option; `true` on success.

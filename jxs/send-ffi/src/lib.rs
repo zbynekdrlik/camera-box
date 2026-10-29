@@ -629,7 +629,9 @@ mod tests {
             reports: 5,
             window_s: 5.0,
             pace_mbps: 900,
-            wire_ms_sum: 80.0,
+            // 4 frames, 2 of them with a wire time: the average divides by 2, not 4
+            wire_frames: 2,
+            wire_ms_sum: 40.0,
             wire_ms_max: 21.5,
             ..SendWindow::default()
         };

@@ -811,6 +811,7 @@ fn send(
         let mut packet_errors = 0u64;
         let mut first_sent: Option<Instant> = None;
         let mut last_sent: Option<Instant> = None;
+        let mut paced_ns = 0u64;
         let result = out.recv_frame(|index, packet, _last| {
             stats.progress_ms.store(monotonic_ms(), Ordering::Relaxed);
             if index >= count || count > 255 {
@@ -827,9 +828,10 @@ fn send(
             };
             match jxs_link::build_slice_datagrams(base, packet, &mut datagrams) {
                 Ok(_) => {
-                    let (e, went) = socket.send_slice_paced(&datagrams, pace.as_mut());
-                    errors += e;
-                    if let Some(t) = went {
+                    let sent = socket.send_slice_paced(&datagrams, pace.as_mut());
+                    errors += sent.errors;
+                    paced_ns += sent.paced_ns;
+                    if let Some(t) = sent.first {
                         first_sent.get_or_insert(t);
                     }
                     last_sent = Some(Instant::now());
@@ -853,7 +855,9 @@ fn send(
                     if let (Some(a), Some(b)) = (first_sent, last_sent) {
                         window.note_wire(b.saturating_duration_since(a).as_secs_f64() * 1000.0);
                     }
-                    bpp.on_frame_sent(encode_ms);
+                    // the auto bpp judges the codec, not the paced wire: a pace too slow for
+                    // the frames shows as dropped_busy, which steps it down on its own
+                    bpp.on_frame_sent(jxs_link::pace::codec_ms(encode_ms, paced_ns));
                 } else {
                     window.encode_errors += 1;
                     bpp.on_frame_error();
