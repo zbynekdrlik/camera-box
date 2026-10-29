@@ -88,18 +88,23 @@ EOF
 
 # cambox_egress_pacing_apply_cmd -> shell TEXT: ONE attempt to build the tree on the default-route
 # interface: the prio root, the paced fq under 1:1, the JPEG XS FIFO under 1:2, the fw filter (each a
-# `replace`, idempotent; issue 1387). A brace group whose status is the attempt's result: 0 = all four
-# applied (one line on stdout), 1 = no default route yet or a tc step failed (one named line on
-# stderr; the chain stops at the failed step and is never reported applied, tc never run without a
-# route). The boot script wraps it in its bounded retry; nothing else applies it (setup-device is
-# enable-only).
+# `replace`, idempotent; issue 1387). A brace group whose status is the attempt's result, one named
+# line each (stdout for 0, stderr else); tc never runs without a route, a half-built tree is never
+# reported applied:
+#   0 = all four applied;
+#   1 = no default route yet -- the only failure a retry can cure;
+#   2 = a tc step failed and the pre-issue-1387 root fq was put back (NDI paced, JPEG XS with it);
+#   3 = a tc step failed and that fallback failed too (the NDI egress may be UNPACED).
+# A failed step fails the same way on every retry, and each retry would replace the root twice (the
+# tree, then the fallback), dropping what the old root had queued (review round 2), so the boot
+# script never retries 2 or 3. Nothing else applies it (setup-device is enable-only).
 cambox_egress_pacing_apply_cmd() {
   cat <<EOF
 {
   _cep_if="\$($(cambox_egress_pacing_iface_cmd))"
   if [ -z "\$_cep_if" ]; then
     echo "cambox-egress-pacing: no default route yet -- no egress interface to pace (issue 1242)" >&2
-    false
+    (exit 1)
   elif tc qdisc replace dev "\$_cep_if" root handle 1: prio bands 2 priomap ${CAMBOX_EGRESS_PACING_PRIOMAP} &&
     tc qdisc replace dev "\$_cep_if" parent 1:1 handle 10: fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT} &&
     tc qdisc replace dev "\$_cep_if" parent 1:2 handle 20: pfifo limit ${CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT} &&
@@ -110,20 +115,25 @@ cambox_egress_pacing_apply_cmd() {
     # run: put the pre-issue-1387 root fq back at once (NDI paced, JPEG XS paced with it).
     if tc qdisc replace dev "\$_cep_if" root fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT}; then
       echo "cambox-egress-pacing: building the egress tree on \$_cep_if FAILED -- fell back to the root fq (NDI paced, JPEG XS paced with it) (issues 1242, 1387)" >&2
+      _cep_st=2
     else
       echo "cambox-egress-pacing: building the egress tree on \$_cep_if FAILED, and the root fq fallback FAILED too -- the NDI egress may be UNPACED (issues 1242, 1387)" >&2
+      _cep_st=3
     fi
-    false
+    (exit "\$_cep_st")
   fi
 }
 EOF
 }
 
 # cambox_egress_pacing_boot_script -> the full content of ${CAMBOX_EGRESS_PACING_SCRIPT_PATH}: the
-# apply command above (verbatim, the one source) inside a bounded retry. Exit 0 once applied; after
-# the last attempt a loud FAILED line on stderr (the journal) and exit 1, and the unit restarts for
-# the next round -- never a silent unpaced box. Only the first and the last attempt of a round log
-# their reason, so a route-less box does not flood the journal.
+# apply command above (verbatim, the one source) inside a bounded retry for a late default route.
+# Exit 0 once applied; after the last route-less attempt a loud FAILED line on stderr (the journal)
+# and exit 1, and the unit restarts for the next round -- never a silent unpaced box. Only the first
+# and the last attempt of a round log a missing route, so a route-less box does not flood the
+# journal. A failed tc step (status 2 / 3) is never retried (issue 1387 review round 2): its reason
+# always reaches the journal, then 2 = exit 0 on the root fq fallback (the unit stays active, no
+# restart loop; verify-device (ap) reads it as DRIFT) and 3 = exit 1 at once.
 # CAMBOX_EGRESS_PACING_RETRY_SLEEP_S in the unit's environment overrides the sleep (tests only).
 cambox_egress_pacing_boot_script() {
   cat <<EOF
@@ -143,13 +153,27 @@ $(cambox_egress_pacing_apply_cmd)
 cep_n=0
 while [ "\$cep_n" -lt "\$cep_attempts" ]; do
   cep_n=\$((cep_n + 1))
-  if [ "\$cep_n" -eq 1 ] || [ "\$cep_n" -eq "\$cep_attempts" ]; then
-    if cep_apply; then
+  cep_rc=0
+  # stderr captured (stdout passes through fd 3), so the reason can be shown or kept quiet below.
+  { cep_err="\$(cep_apply 2>&1 1>&3)" || cep_rc=\$?; } 3>&1
+  case "\$cep_rc" in
+    0)
       exit 0
-    fi
-  elif cep_apply 2>/dev/null; then
-    # The middle attempts of a round stay quiet: a route-less box retries forever (the unit restarts).
-    exit 0
+      ;;
+    2)
+      printf '%s\n' "\$cep_err" >&2
+      echo "cambox-egress-pacing: not retried (a failed tc step fails the same way again, and each retry would replace the root twice) -- staying on the root fq fallback; read the step above (issue 1387)" >&2
+      exit 0
+      ;;
+    3)
+      printf '%s\n' "\$cep_err" >&2
+      echo "cambox-egress-pacing: not retried this round -- the NDI egress may be UNPACED; read the step above (issue 1387)" >&2
+      exit 1
+      ;;
+  esac
+  # A missing route: the middle attempts of a round stay quiet (a route-less box retries forever).
+  if [ "\$cep_n" -eq 1 ] || [ "\$cep_n" -eq "\$cep_attempts" ]; then
+    printf '%s\n' "\$cep_err" >&2
   fi
   if [ "\$cep_n" -lt "\$cep_attempts" ]; then
     sleep "\$cep_sleep"
@@ -302,9 +326,11 @@ cambox_egress_pacing_verdict() {
       jxs="JPEG XS pfifo limit ${fifo_limit:-?} (want $CAMBOX_EGRESS_PACING_JXS_FIFO_LIMIT)"
     fi
   fi
-  # Every CLASSIFYING filter entry on the root (one carrying a classid / flowid; tc prints u32's as
-  # `*flowid`, and a bare `filter ... fw chain 0` header line carries none) as `KIND HANDLE TARGET`.
-  # Exactly one may exist: fw, the declared mark, to 1:2. Any other moves traffic past the fq.
+  # Every filter on the root as `KIND HANDLE TARGET`: each fw ENTRY (one carrying a classid; a bare
+  # `filter ... fw chain 0` header line carries none), and each other classifier once per pref,
+  # whatever it prints (u32 `*flowid`, matchall `flowid`, and a classic bpf or a cgroup classifier
+  # that picks its class itself and prints none -- review round 2). Exactly one may exist: fw, the
+  # declared mark, to 1:2. Any other moves traffic past the fq.
   want_mark="$((CAMBOX_EGRESS_PACING_JXS_MARK))"
   found=0
   while read -r f_kind f_handle f_target; do
@@ -317,13 +343,14 @@ cambox_egress_pacing_verdict() {
   done <<FILTERS
 $(printf '%s\n' "$filters" | tr '|' '\n' | awk '
     $1 == "filter" && $2 == "parent" && $3 == "1:" {
-      k = "?"; h = "-"; t = ""
+      k = "?"; p = "?"; h = "-"; t = ""
       for (i = 4; i <= NF; i++) {
-        if ($i == "pref" && i + 2 <= NF) k = $(i + 2)
+        if ($i == "pref" && i + 2 <= NF) { p = $(i + 1); k = $(i + 2) }
         if (($i == "handle" || $i == "fh") && i < NF) h = $(i + 1)
         if (($i == "classid" || $i == "flowid" || $i == "*flowid") && i < NF) t = $(i + 1)
       }
-      if (t != "") print k, h, t
+      if (k == "fw") { if (t != "") print k, h, t }
+      else if (!seen[p SUBSEP k]++) print k, "pref-" p, (t == "" ? "its-own-class" : t)
     }' || true)
 FILTERS
   if [ "$found" -eq 0 ]; then

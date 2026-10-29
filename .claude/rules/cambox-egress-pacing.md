@@ -78,10 +78,21 @@ tc filter replace dev <if> parent 1: protocol all prio 1 handle 0x1387 fw classi
   traffic past the fq: DRIFT `... moves traffic past the fq -- that traffic is UNPACED`. The fixtures
   are real kernel output. A packet whose skb priority is a class id of `1:` itself (the prio direct
   path) cannot be seen from tc output; nothing on a cambox sets one.
-- **A failed chain falls back to the old root fq** (review round 1): a half-built tree (prio over
-  default pfifos) would leave NDI unpaced while the boot retries run. The apply command puts
-  `root fq maxrate ...` back at once, then still exits 1 (the retry rebuilds the tree). A failed
-  fallback is its own named line: `the NDI egress may be UNPACED`.
+- **A failed chain falls back to the old root fq, and is never retried** (review rounds 1-2). A
+  half-built tree (prio over default pfifos) would leave NDI unpaced, so the apply command puts
+  `root fq maxrate ...` back at once. Its status says what happened:
+  - 1 = no default route yet, the only failure a retry can cure;
+  - 2 = a tc step failed, and the root-fq fallback is in place;
+  - 3 = the fallback failed too: `the NDI egress may be UNPACED`.
+  A failed tc step fails the same way every time. Each retry would replace the root twice (the
+  tree, then the fallback), dropping what the old root had queued, every 2 s, forever. So the boot
+  script makes ONE attempt for 2 / 3 and always puts that step's line in the journal:
+  - 2: exit 0, staying on the fallback (the unit stays `active`, no restart loop; `(ap)` reads
+    `DRIFT root qdisc is fq, the pre-issue-1387 tree`);
+  - 3: exit 1 at once.
+- **Every non-fw classifier on the root is DRIFT**, once per pref, whatever it prints (review round
+  2): a classic bpf or a cgroup classifier picks its class itself and prints no classid
+  (real-kernel fixture `EXTRA_BPF`).
 - **Rejected alternatives:** a u32 filter on the UDP destination port (a second declaration the boot
   script cannot see) and `SO_PRIORITY` through the priomap alone (implicit: any socket that sets that
   priority goes unpaced, and the tree does not show it).
