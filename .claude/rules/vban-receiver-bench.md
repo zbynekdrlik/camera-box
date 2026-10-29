@@ -147,12 +147,14 @@ designs 6338127636 and 6338457001.
 - **A bridge measures its own gap only (issue 1460, bench 20261028T2054Z).** The rate line chains
   every run onto the previous one, so the chained phase carries every earlier move. The first
   grader measured each bridge against that chained phase: the -50 ppm profile's one real move (the
-  ASRC's 21.2 ms lock placement at 81 s) read about -13.5 samples across every later loss, and the
+  ASRC's lock placement at 81 s: a 1008-sample silence whose timeline residue modulo one pilot period
+  reads -13.1 samples) read about -13.5 samples across every later loss, and the
   +50 profile's in-run step came back at the next silence. The recording was continuous at every
-  scheduled loss. Each bridge now reads the two runs' own phases.
+  scheduled loss. Each bridge now reads the two runs' own phases, each with its in-run events
+  removed (the previous run at its last level), so a step next to a gap is not read twice either.
   - **Before blaming the receiver or the ASRC for a grade's move, check the recording directly**:
     fit a line to the pilot phase on each side of the event (0.3-15 s windows, the event excluded)
-    and compare both at the event. A synthetic 13.5 sample step reads -13.50 that way.
+    and compare both at the event. A synthetic -13.5 sample step reads -13.50 that way.
   - **A ±50 ppm sender always shows the stamp-basis ASRC's lock transient**: nothing applied for
     the first 60 s, one placement at the lock (an unscheduled silence + a timeline move), then a
     1000 ppm recovery slew for about 20 s. The measured rate averages that transient in (p4: -42.3

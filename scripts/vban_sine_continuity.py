@@ -268,8 +268,12 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
         for ev in evs:
             corr[starts[idx] >= ev["sample"]] -= ev["size_samples"] * omega
         slope = float(np.median(d_slope)) if d_slope.size else 0.0
+        # the run's own phase with its events removed, referred to its LAST level (each event added
+        # back), so an event near either edge never leaks into the bridge's averaging window
+        own = corr
+        own_end = corr + sum(ev["size_samples"] for ev in evs) * omega
         if prev is not None:
-            p_idx, p_corr, p_slope, p_psi = prev
+            p_idx, p_corr, p_slope, p_end = prev
             gap_blocks_mid = (idx[0] + p_idx[-1]) / 2.0
             s_mid = (p_slope + slope) / 2.0 if p_idx.size > 1 and idx.size > 1 else (slope if idx.size > 1 else p_slope)
             w = min(STEP_WINDOW, p_idx.size)
@@ -283,7 +287,8 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
             # issue 1460: the bridge reads the two runs' OWN phases. The chained phase already carries
             # every earlier step (a bridge, an in-run event), so measured on it each earlier move came
             # back at every later gap (live p4: the 81 s placement read -13.5 at all four losses).
-            dev = float(_wrap(across(p_psi, psi)))
+            # The previous run is read at its last level, this one at its first level.
+            dev = float(_wrap(across(p_end, own)))
             gap_lo, gap_hi = int(starts[p_idx[-1]] + block), int(starts[idx[0]])
             inside = [s for s, n in slots if s >= gap_lo - GUARD_SAMPLES and s < gap_hi + GUARD_SAMPLES]
             concealed = [tag for lo, hi, tag in windows if lo < gap_hi and hi > gap_lo]
@@ -296,7 +301,7 @@ def analyze(x, fs=FS, pilot_hz=997.0, block=BLOCK, min_jump=MIN_JUMP_SAMPLES, si
             # unwrap) removed, so the rate line sees one continuous phase
             corr = corr - across(p_corr, corr)
         pieces.append((starts[idx], corr))
-        prev = (idx, corr, slope, psi)
+        prev = (idx, corr, slope, own_end)
     # the rate line over the continuous phase after the settle
     all_s = np.concatenate([p[0] for p in pieces]).astype(np.float64)
     all_psi = np.concatenate([p[1] for p in pieces])
