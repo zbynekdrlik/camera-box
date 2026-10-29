@@ -5,6 +5,9 @@ use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 use crate::capture::{Frame, FrameRate};
 
 /// 100-nanosecond units per second (genlock boundary math base).
@@ -602,8 +605,6 @@ pub struct NdiSender {
     uyvy_buffer: Vec<u8>,
     // AVX2 support flag
     has_avx2: bool,
-    // Issue 1430 -- the capture card's video range (full range is scaled to limited on send).
-    capture_range: crate::capture_range::CaptureRange,
     // Genlock #11: when true, the caller paces the sends (decimating the capture
     // to the target rate on wall-clock boundaries), so send_frame stamps the
     // boundary timecode WITHOUT the internal blocking wait — blocking here would
@@ -661,7 +662,6 @@ impl NdiSender {
             last_reannounce_check: std::time::Instant::now(),
             uyvy_buffer: Vec::with_capacity(1920 * 1080 * 2), // Pre-allocate for 1080p
             has_avx2,
-            capture_range: crate::capture_range::CaptureRange::Limited,
             external_pacing: false,
         })
     }
@@ -769,28 +769,96 @@ impl NdiSender {
     }
 
     /// Detect AVX2 CPU support
+    #[cfg(target_arch = "x86_64")]
     fn detect_avx2() -> bool {
-        crate::yuyv_to_uyvy::has_avx2()
+        is_x86_feature_detected!("avx2")
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn detect_avx2() -> bool {
+        false
     }
 
     // --- Format conversion functions ---
 
-    /// Issue 1430 -- set the capture card's video range. A full-range capture
-    /// (`CaptureRange::Full`, the Cam Link 4K) is scaled to the limited range NDI UYVY means
-    /// inside the YUYV to UYVY conversion; `Limited` (the default) only reorders the bytes.
-    pub fn set_capture_range(&mut self, range: crate::capture_range::CaptureRange) {
-        self.capture_range = range;
+    /// Convert YUYV to UYVY - uses AVX2 SIMD when available
+    fn convert_yuyv_to_uyvy(&mut self, yuyv: &[u8]) {
+        self.uyvy_buffer.clear();
+        self.uyvy_buffer.reserve(yuyv.len());
+
+        #[cfg(target_arch = "x86_64")]
+        if self.has_avx2 {
+            // SAFETY: We checked for AVX2 support
+            unsafe { self.convert_yuyv_to_uyvy_avx2(yuyv) };
+            return;
+        }
+
+        // Scalar fallback
+        self.convert_yuyv_to_uyvy_scalar(yuyv);
     }
 
-    /// Convert YUYV to UYVY into the reused buffer (AVX2 when available), scaling a full-range
-    /// capture to limited range (issue 1430, `crate::yuyv_to_uyvy`).
-    fn convert_yuyv_to_uyvy(&mut self, yuyv: &[u8]) {
-        crate::yuyv_to_uyvy::convert_into(
-            yuyv,
-            &mut self.uyvy_buffer,
-            self.capture_range,
-            self.has_avx2,
+    /// Scalar YUYV to UYVY conversion (fallback)
+    #[inline]
+    fn convert_yuyv_to_uyvy_scalar(&mut self, yuyv: &[u8]) {
+        // YUYV: Y0 U0 Y1 V0 -> UYVY: U0 Y0 V0 Y1
+        for chunk in yuyv.as_chunks::<4>().0 {
+            self.uyvy_buffer.push(chunk[1]); // U0
+            self.uyvy_buffer.push(chunk[0]); // Y0
+            self.uyvy_buffer.push(chunk[3]); // V0
+            self.uyvy_buffer.push(chunk[2]); // Y1
+        }
+    }
+
+    /// AVX2 SIMD YUYV to UYVY conversion - processes 32 pixels (64 bytes) per iteration
+    /// This is ~16x faster than scalar for 1080p frames
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn convert_yuyv_to_uyvy_avx2(&mut self, yuyv: &[u8]) {
+        let total_bytes = yuyv.len();
+        let avx_bytes = (total_bytes / 64) * 64;
+
+        // Pre-size buffer
+        self.uyvy_buffer.resize(total_bytes, 0);
+        let dst = self.uyvy_buffer.as_mut_ptr();
+
+        // Shuffle mask to convert YUYV to UYVY
+        // YUYV: Y0 U0 Y1 V0 (indices 0,1,2,3) -> UYVY: U0 Y0 V0 Y1 (indices 1,0,3,2)
+        let shuffle_mask = _mm256_setr_epi8(
+            1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11,
+            10, 13, 12, 15, 14,
         );
+
+        let mut i = 0;
+        while i < avx_bytes {
+            // Load 64 bytes (32 pixels in YUYV format)
+            let data0 = _mm256_loadu_si256(yuyv.as_ptr().add(i) as *const __m256i);
+            let data1 = _mm256_loadu_si256(yuyv.as_ptr().add(i + 32) as *const __m256i);
+
+            // Shuffle to convert YUYV to UYVY
+            let result0 = _mm256_shuffle_epi8(data0, shuffle_mask);
+            let result1 = _mm256_shuffle_epi8(data1, shuffle_mask);
+
+            // Store results
+            _mm256_storeu_si256(dst.add(i) as *mut __m256i, result0);
+            _mm256_storeu_si256(dst.add(i + 32) as *mut __m256i, result1);
+
+            i += 64;
+        }
+
+        // Handle remaining bytes with scalar code
+        while i < total_bytes {
+            let y0 = *yuyv.get_unchecked(i);
+            let u = *yuyv.get_unchecked(i + 1);
+            let y1 = *yuyv.get_unchecked(i + 2);
+            let v = *yuyv.get_unchecked(i + 3);
+
+            *dst.add(i) = u;
+            *dst.add(i + 1) = y0;
+            *dst.add(i + 2) = v;
+            *dst.add(i + 3) = y1;
+
+            i += 4;
+        }
     }
 
     fn convert_nv12_to_uyvy(&mut self, nv12: &[u8], width: usize, height: usize) {
@@ -1346,19 +1414,20 @@ impl Drop for NdiReceiver {
 // Standalone conversion functions for testing (without NDI library dependency)
 // ============================================================================
 
-/// Convert YUYV to UYVY using scalar method (standalone for testing), limited passthrough.
+/// Convert YUYV to UYVY using scalar method (standalone for testing)
 /// YUYV: Y0 U0 Y1 V0 -> UYVY: U0 Y0 V0 Y1
 pub fn convert_yuyv_to_uyvy_scalar(yuyv: &[u8]) -> Vec<u8> {
     let mut uyvy = Vec::with_capacity(yuyv.len());
-    crate::yuyv_to_uyvy::convert_scalar_into(
-        yuyv,
-        &mut uyvy,
-        crate::capture_range::CaptureRange::Limited,
-    );
+    for chunk in yuyv.as_chunks::<4>().0 {
+        uyvy.push(chunk[1]); // U0
+        uyvy.push(chunk[0]); // Y0
+        uyvy.push(chunk[3]); // V0
+        uyvy.push(chunk[2]); // Y1
+    }
     uyvy
 }
 
-/// Convert YUYV to UYVY using AVX2 SIMD (standalone for testing), limited passthrough.
+/// Convert YUYV to UYVY using AVX2 SIMD (standalone for testing)
 ///
 /// # Safety
 /// This function requires AVX2 CPU support. The caller must verify AVX2 is available
@@ -1366,12 +1435,47 @@ pub fn convert_yuyv_to_uyvy_scalar(yuyv: &[u8]) -> Vec<u8> {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 pub unsafe fn convert_yuyv_to_uyvy_avx2(yuyv: &[u8]) -> Vec<u8> {
-    let mut uyvy = Vec::with_capacity(yuyv.len());
-    crate::yuyv_to_uyvy::convert_avx2_into(
-        yuyv,
-        &mut uyvy,
-        crate::capture_range::CaptureRange::Limited,
+    let total_bytes = yuyv.len();
+    let avx_bytes = (total_bytes / 64) * 64;
+
+    let mut uyvy = vec![0u8; total_bytes];
+    let dst = uyvy.as_mut_ptr();
+
+    // Shuffle mask to convert YUYV to UYVY
+    let shuffle_mask = _mm256_setr_epi8(
+        1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14, 1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10,
+        13, 12, 15, 14,
     );
+
+    let mut i = 0;
+    while i < avx_bytes {
+        let data0 = _mm256_loadu_si256(yuyv.as_ptr().add(i) as *const __m256i);
+        let data1 = _mm256_loadu_si256(yuyv.as_ptr().add(i + 32) as *const __m256i);
+
+        let result0 = _mm256_shuffle_epi8(data0, shuffle_mask);
+        let result1 = _mm256_shuffle_epi8(data1, shuffle_mask);
+
+        _mm256_storeu_si256(dst.add(i) as *mut __m256i, result0);
+        _mm256_storeu_si256(dst.add(i + 32) as *mut __m256i, result1);
+
+        i += 64;
+    }
+
+    // Handle remaining bytes with scalar code
+    while i < total_bytes {
+        let y0 = *yuyv.get_unchecked(i);
+        let u = *yuyv.get_unchecked(i + 1);
+        let y1 = *yuyv.get_unchecked(i + 2);
+        let v = *yuyv.get_unchecked(i + 3);
+
+        *dst.add(i) = u;
+        *dst.add(i + 1) = y0;
+        *dst.add(i + 2) = v;
+        *dst.add(i + 3) = y1;
+
+        i += 4;
+    }
+
     uyvy
 }
 
@@ -1446,8 +1550,14 @@ pub fn convert_bgra_to_uyvy(bgra: &[u8], width: usize, height: usize) -> Vec<u8>
 }
 
 /// Check if AVX2 is available (for testing)
+#[cfg(target_arch = "x86_64")]
 pub fn has_avx2() -> bool {
-    crate::yuyv_to_uyvy::has_avx2()
+    is_x86_feature_detected!("avx2")
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+pub fn has_avx2() -> bool {
+    false
 }
 
 #[cfg(test)]

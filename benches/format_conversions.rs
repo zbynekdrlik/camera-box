@@ -28,30 +28,6 @@ fn bench_yuyv_to_uyvy(c: &mut Criterion) {
         });
     }
 
-    // Issue 1430 -- the production send path's shape: one reused buffer, limited passthrough vs
-    // the fused full-to-limited scaling, on a varied (not constant) frame.
-    let varied: Vec<u8> = (0..frame_1080p.len())
-        .map(|i| (i * 7 % 256) as u8)
-        .collect();
-    let mut out = Vec::with_capacity(varied.len());
-    let avx2 = camera_box::yuyv_to_uyvy::has_avx2();
-    for (name, range) in [
-        (
-            "into_limited_1080p",
-            camera_box::capture_range::CaptureRange::Limited,
-        ),
-        (
-            "into_full_to_limited_1080p",
-            camera_box::capture_range::CaptureRange::Full,
-        ),
-    ] {
-        group.bench_function(name, |b| {
-            b.iter(|| {
-                camera_box::yuyv_to_uyvy::convert_into(black_box(&varied), &mut out, range, avx2)
-            })
-        });
-    }
-
     group.finish();
 }
 
