@@ -987,6 +987,40 @@ mod tests {
         assert_eq!(h.dropped_busy(), 0);
     }
 
+    /// `in_flight` counts a frame from its submit to its LAST packet (the slice-1b dev1 flood
+    /// bench read `in_flight=1/2` while two frames were encoding: the count dropped when the
+    /// packet thread picked the frame up, not when it was done).
+    #[cfg(feature = "jxs")]
+    #[test]
+    fn two_frames_handed_over_back_to_back_are_both_in_flight() {
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(std::time::Duration::from_millis(20)))
+            .unwrap();
+        let port = rx.local_addr().unwrap().port();
+        let h = JxsSender::start(Some(&format!("127.0.0.1:{port}")), "CAM5").expect("link on");
+        let (w, ht) = (1920u32, 1080u32);
+        let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i % 249) as u8).collect();
+        h.offer(&jf(&frame, w, ht, tc(0), true));
+        h.offer(&jf(&frame, w, ht, tc(2), true));
+        assert_eq!(h.dropped_busy(), 0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut b = [0u8; 2048];
+        while h.stats.in_flight.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < deadline
+        {
+            let _ = rx.recv(&mut b);
+        }
+        assert_eq!(
+            h.stats.in_flight.load(Ordering::Relaxed),
+            0,
+            "both frames finished"
+        );
+        assert_eq!(
+            h.stats.in_flight_max.load(Ordering::Relaxed),
+            2,
+            "the second frame was submitted while the first one's slices were still going out"
+        );
+    }
+
     #[cfg(feature = "jxs")]
     #[test]
     fn a_frame_that_is_not_yuyv_or_does_not_fit_never_holds_a_picture() {
