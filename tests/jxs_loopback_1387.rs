@@ -417,6 +417,75 @@ fn a_bpp_change_mid_stream_decodes_every_frame_with_no_loss() {
     assert_eq!(errors, 0, "undecodable == 0, last error {last_error:?}");
 }
 
+/// Issue 1387: across a bpp change every decoded picture is its OWN frame (never a stale one),
+/// the decoder reopens exactly once per change and never in a steady stream, and a slice lost in
+/// the second frame at the new bpp is concealed from the first one (the concealment source is the
+/// new bpp's, the old bpp's slices are never replayed).
+#[test]
+fn after_a_bpp_change_every_picture_is_its_own_and_a_loss_is_concealed_from_the_new_bpp() {
+    let (out, header_changes, errors) = within(60, || {
+        let mut frames: Vec<(Yuv422Planes, Vec<Vec<u8>>)> = Vec::new();
+        let mut phase = 0u8;
+        for (bpp, n) in [(4u32, 3), (8, 3)] {
+            let mut s = EncoderSettings::issue_1387(320, 1080);
+            s.bpp_numerator = bpp;
+            let mut enc = Encoder::open(s).unwrap();
+            for _ in 0..n {
+                let p = tall(phase);
+                let k = encode(&mut enc, &p);
+                frames.push((p, k));
+                phase = phase.wrapping_add(53);
+            }
+        }
+        let mut out: Vec<(u32, Option<Yuv422Planes>)> = Vec::new();
+        let (header_changes, errors) = {
+            let mut a = FrameAssembler::new();
+            let mut sink = DecodeSink::new(|r: &FrameReport, p: Option<&Yuv422Planes>| {
+                out.push((r.lost_slices, p.cloned()));
+            });
+            let t0 = 100_000_000u64;
+            for (k, (_, f)) in frames.iter().enumerate() {
+                // the second frame at 8 bpp loses packet 5
+                let drop = (k == 4).then_some(5);
+                push_frame(&mut a, &mut sink, t0 + k as u64 * 333_333, f, drop);
+            }
+            push_frame(&mut a, &mut sink, t0 + 6 * 333_333, &frames[5].1, None);
+            (sink.header_changes, sink.errors)
+        };
+        (out, header_changes, errors)
+    });
+    assert_eq!(errors, 0);
+    assert_eq!(header_changes, 1, "one reopen for the one bpp change");
+    assert!(out.len() >= 6);
+    for (k, (lost, planes)) in out.iter().take(6).enumerate() {
+        let planes = planes
+            .as_ref()
+            .unwrap_or_else(|| panic!("frame {k} decodes"));
+        assert_eq!(*lost, u32::from(k == 4), "frame {k} loss count");
+        let own = psnr(planes.y(), frames_src(k).y());
+        let prev = psnr(planes.y(), frames_src(k.max(1) - 1).y());
+        if k == 4 {
+            // outside the concealed slice the picture is frame 4's
+            let w = 320;
+            let far = psnr(&planes.y()[200 * w..], &frames_src(4).y()[200 * w..]);
+            assert!(far >= 35.0, "frame 4 away from the hole: {far:.1} dB");
+        } else {
+            assert!(own >= 35.0, "frame {k} is its own picture: {own:.1} dB");
+            if k > 0 {
+                assert!(
+                    own > prev + 5.0,
+                    "frame {k} is not stale: own {own:.1} prev {prev:.1}"
+                );
+            }
+        }
+    }
+}
+
+/// The source picture of frame `k` of the bpp-change test above (the same phase sequence).
+fn frames_src(k: usize) -> Yuv422Planes {
+    tall((k as u8).wrapping_mul(53))
+}
+
 /// Push only the first `n` packets of a frame.
 fn push_frame_prefix(
     a: &mut FrameAssembler,
