@@ -621,6 +621,8 @@ pub mod send_stall;
 pub mod send_stagger;
 // Issue 1387: the JPEG XS link's wire format + reassembly + pixel helpers (pure, every platform).
 pub mod jxs_link;
+// Issue 1387: the pure helpers of the jxs-encode-bench bin (synthetic content, percentiles).
+pub mod jxs_bench;
 // Issue 1387: the cambox JPEG XS sender (off unless CAMERA_BOX_JXS_TARGET is set) and the receive
 // side the jxs-recv-probe bin and the loopback tests use. The codec itself needs the `jxs` feature.
 #[cfg(target_os = "linux")]

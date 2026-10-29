@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     cbjxs_enc_close, cbjxs_enc_get_packet, cbjxs_enc_open, cbjxs_enc_send, check, CEnc,
-    EncSettings, EncoderSettings, JxsError, Yuv422Planes, SLICE_HEIGHT_LINES,
+    EncSettings, EncoderSettings, JxsError, Yuv422Planes,
 };
 
 /// The most pictures a session holds at once. `submit` calls the library's BLOCKING
@@ -147,17 +147,7 @@ pub fn open_pipelined(s: EncoderSettings) -> Result<(EncoderInput, EncoderOutput
             during: "open (width must be even and non-zero)",
         });
     }
-    let c = EncSettings {
-        width: s.width,
-        height: s.height,
-        bpp_numerator: s.bpp_numerator,
-        bpp_denominator: s.bpp_denominator,
-        ndecomp_v: s.ndecomp_v,
-        threads_num: s.threads_num,
-        slice_height: SLICE_HEIGHT_LINES,
-        cpu_profile: if s.latency_profile { 0 } else { 1 },
-        slice_packets: 1,
-    };
+    let c = EncSettings::from_settings(&s);
     let mut raw = std::ptr::null_mut();
     let mut bytes_per_frame = 0u32;
     // SAFETY: `c` and both out-pointers are valid for the call; the shim only reads `c`.
