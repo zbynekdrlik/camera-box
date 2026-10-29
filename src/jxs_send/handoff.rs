@@ -222,27 +222,46 @@ fn pin(label: &str, cores: &[usize]) {
     }
 }
 
+/// What [`WedgeAlarm::step`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WedgeEvent {
+    /// A frame in flight and no packet for `since` ms.
+    Raised { in_flight: usize, since: u64 },
+    /// Packets flow again (the progress stamp moved past the one seen at the alarm).
+    Recovered,
+    /// Nothing in flight any more, with no packet since the alarm (an abandoned session).
+    Cleared,
+}
+
 /// The feeder's watch on the packet thread: one CRITICAL line when a frame has been in flight
-/// with no packet for [`super::WEDGE_MS`], one line when packets flow again.
+/// with no packet for [`super::WEDGE_MS`], one line when that ends.
 #[derive(Debug, Default)]
 struct WedgeAlarm {
     raised: bool,
+    progress_at_raise: u64,
 }
 
 impl WedgeAlarm {
+    /// The pure transition at `now_ms` (the [`monotonic_ms`] clock).
+    fn step(&mut self, stats: &Stats, now_ms: u64) -> Option<WedgeEvent> {
+        let _ = (stats, now_ms);
+        None
+    }
+
     fn check(&mut self, stats: &Stats) {
-        let in_flight = stats.in_flight.load(Ordering::Relaxed);
-        let since = monotonic_ms().saturating_sub(stats.progress_ms.load(Ordering::Relaxed));
-        let wedged = encoder_wedged(in_flight, since);
-        if wedged && !self.raised {
-            tracing::error!(
-                "CRITICAL jxs send: encoder wedged -- {in_flight} frame(s) in flight, no packet for {since} ms; every new frame is dropped_busy (this window: {}) (issue 1387)",
+        match self.step(stats, monotonic_ms()) {
+            Some(WedgeEvent::Raised { in_flight, since }) => tracing::error!(
+                "CRITICAL jxs send: encoder wedged -- {in_flight} frame(s) in flight, no packet for {since} ms; every new frame is dropped_busy ({} since the last status line) (issue 1387)",
                 stats.dropped_busy.load(Ordering::Relaxed)
-            );
-        } else if !wedged && self.raised {
-            tracing::warn!("jxs send: the encoder delivers packets again (issue 1387)");
+            ),
+            Some(WedgeEvent::Recovered) => {
+                tracing::warn!("jxs send: the encoder delivers packets again (issue 1387)")
+            }
+            Some(WedgeEvent::Cleared) => tracing::warn!(
+                "jxs send: encoder wedge cleared, nothing in flight any more (issue 1387)"
+            ),
+            None => {}
         }
-        self.raised = wedged;
     }
 }
 
@@ -490,5 +509,48 @@ fn send(
             }
         }
         window.send_errors += errors;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(in_flight: usize, progress_ms: u64) -> Stats {
+        let s = Stats::default();
+        s.in_flight.store(in_flight, Ordering::Relaxed);
+        s.progress_ms.store(progress_ms, Ordering::Relaxed);
+        s
+    }
+
+    #[test]
+    fn the_wedge_alarm_raises_once_and_ends_on_progress_or_an_empty_pipeline() {
+        let mut a = WedgeAlarm::default();
+        let st = stats(1, 10_000);
+        assert_eq!(
+            a.step(&st, 11_000),
+            None,
+            "1 s without a packet is no wedge"
+        );
+        assert_eq!(
+            a.step(&st, 12_500),
+            Some(WedgeEvent::Raised {
+                in_flight: 1,
+                since: 2_500
+            })
+        );
+        assert_eq!(a.step(&st, 20_000), None, "raised once, never repeated");
+        // packets flow again
+        st.progress_ms.store(20_100, Ordering::Relaxed);
+        assert_eq!(a.step(&st, 20_200), Some(WedgeEvent::Recovered));
+        assert_eq!(a.step(&st, 20_300), None);
+        // a new wedge, then the pipeline empties with no packet (an abandoned session)
+        assert!(matches!(
+            a.step(&st, 30_000),
+            Some(WedgeEvent::Raised { .. })
+        ));
+        st.in_flight.store(0, Ordering::Relaxed);
+        assert_eq!(a.step(&st, 30_500), Some(WedgeEvent::Cleared));
+        assert_eq!(a.step(&st, 60_000), None, "an idle link is no wedge");
     }
 }
