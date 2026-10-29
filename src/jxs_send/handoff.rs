@@ -244,8 +244,21 @@ struct WedgeAlarm {
 impl WedgeAlarm {
     /// The pure transition at `now_ms` (the [`monotonic_ms`] clock).
     fn step(&mut self, stats: &Stats, now_ms: u64) -> Option<WedgeEvent> {
-        let _ = (stats, now_ms);
-        None
+        let in_flight = stats.in_flight.load(Ordering::Relaxed);
+        let progress = stats.progress_ms.load(Ordering::Relaxed);
+        let since = now_ms.saturating_sub(progress);
+        let wedged = encoder_wedged(in_flight, since);
+        let event = match (self.raised, wedged) {
+            (false, true) => {
+                self.progress_at_raise = progress;
+                Some(WedgeEvent::Raised { in_flight, since })
+            }
+            (true, false) if progress > self.progress_at_raise => Some(WedgeEvent::Recovered),
+            (true, false) => Some(WedgeEvent::Cleared),
+            _ => None,
+        };
+        self.raised = wedged;
+        event
     }
 
     fn check(&mut self, stats: &Stats) {
