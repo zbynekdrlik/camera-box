@@ -403,6 +403,9 @@ def test_verdict_drift_on_any_other_classifying_filter_1387():
         for form in (filt, _flat(filt)):
             v = _verdict(TREE_QDISC, filt=form)
             assert v.startswith("DRIFT ") and "past the fq" in v, (form, v)
+    # Review round 3: the u32 entry's real target is named, not its header line's "its-own-class".
+    v = _verdict(TREE_QDISC, filt=EXTRA_U32)
+    assert "filter u32 pref-2 to 1:2" in v, v
 
 
 def test_verdict_compares_the_mark_as_a_number_1387():
@@ -627,6 +630,10 @@ def test_provision_verdict_on_a_box_still_on_the_pre_1387_tree_1387():
     v = _prov(_block(qdisc=_flat(CAM7_PACED), filt="", active="active"))
     assert "JPEG XS" in v and "systemctl restart cambox-egress-pacing" in v, v
     assert "setup-device" not in v, v
+    # Review round 3: the same state is also what a NEW boot script leaves when a tc step failed
+    # and it fell back (exit 0, never retried). The hint must say a restart then only repeats it.
+    assert "fell back to the root fq" in v and "journalctl -u cambox-egress-pacing" in v, v
+    assert "repeats" in v, v
 
 
 def test_provision_verdict_reads_a_retrying_unit_right():

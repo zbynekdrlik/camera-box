@@ -152,6 +152,8 @@ def test_apply_whose_unit_leaves_the_old_tree_fails_the_readback(tmp_path):
     assert proc.returncode != 0
     assert "FAIL: [issue 1387] READBACK (CAM5): DRIFT" in proc.stderr, proc.stderr
     assert "JPEG XS" in proc.stderr
+    # Review round 3: the restart "succeeded" (a fallback exits 0), so the line points at the step.
+    assert "journalctl -u cambox-egress-pacing" in proc.stderr, proc.stderr
     assert root(box) == "ro"
 
 
