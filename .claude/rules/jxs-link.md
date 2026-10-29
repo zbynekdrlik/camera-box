@@ -99,6 +99,13 @@ slice 2, strih -> stream slice 3. imag stays on NDI.
     `WEDGE_MS`) logs ONE `CRITICAL jxs send: encoder wedged -- N frame(s) in flight, no packet for
     X ms` line (and one when packets flow again). Alert-only, never an exit: NDI is untouched.
     Dropping the hand-off waits at most 2 s for its threads, then leaves them detached.
+  - **`SO_MARK 0x1387` (`JXS_SOCKET_MARK`, issue 1387, the egress-pacing exemption):** the cambox
+    egress pacing (issue 1242) caps every flow at 400 Mb/s in an `fq`. That capped this link too (live
+    29.10: a 23 ms slice spread at 4 bpp, 33 ms at 6 bpp, a 162 ms backlog at 8 bpp). The pacing's
+    root is now a `prio` whose `fw` filter on this mark sends the flow to an unpaced class at line
+    rate (`.claude/rules/cambox-egress-pacing.md`). The mark is set in `JxsSocket::connect`, so it
+    exists only while the link is on. It needs CAP_NET_ADMIN (camera-box.service runs as root); a
+    refused mark logs one WARN and the "link ON" line reads `egress mark NONE: paced with NDI`.
   - `UDP_SEGMENT` (GSO) is a socket option: one `send` per slice (up to 40 datagrams per send).
     A GSO send that fails with EIO (no checksum offload) or EINVAL switches the socket to one send
     per datagram for good (and clears the option), logged once. IPv4 only: the 1472-byte datagram
@@ -186,7 +193,8 @@ its two cores against the 33.3 ms budget. The first `offer` allocates the pictur
    `systemctl edit --runtime camera-box` -> `[Service]` `Environment=CAMERA_BOX_JXS_TARGET=<strih ip>:7000`.
    Optional in the same drop-in: `Environment=CAMERA_BOX_JXS_BPP=8` (default 4) and
    `Environment=CAMERA_BOX_JXS_CORES=0-1` (must lie inside the off-capture cores).
-   Journal: `jxs send: link ON to ... (UDP GSO on, ...) -- JPEG XS <bpp> bpp at 30 fps ...,
+   Journal: `jxs send: link ON to ... (UDP GSO on, egress mark 0x1387: line rate past the NDI
+   pacing, ...) -- JPEG XS <bpp> bpp at 30 fps ...,
    encoder on cores [0, 1] with 2 slice threads (capture core Some(3), capture-IRQ core Some(2)
    untouched)`, `encoder open 1920x1080, <bpp> bpp, ...`, then every 5 s the status line above.
 3. Grade: the `Streaming:` line still 60.0 sent with no capture drop; `fps=30.0`, `frames` ~150
@@ -197,6 +205,20 @@ its two cores against the 33.3 ms budget. The first `offer` allocates the pictur
    (target: near the encode time, slice 1 was 50 ms), `spread_ms`; `--dump-png 3 --dump-skip 300`
    vs the same frame over NDI (detail metric + a crop). Repeat at 6 and 8 bpp.
 4. Remove the drop-in and restart: the link is off, the NDI path is byte-identical.
+
+**Before the issue-1387 egress rerun:** the cambox must carry the classful egress tree. Bring it there
+with the live apply program in `.claude/rules/cambox-egress-pacing.md` (runbook step 4: one rw window
+closed by the verified ro close, then the unit restart and a graded read-back). Read it back on the
+box while the link runs:
+- `tc filter show dev <if>` -> `... fw ... handle 0x1387 classid 1:2`;
+- `tc -s qdisc show dev <if>` -> the `pfifo 20: parent 1:2` `Sent` bytes grow ~250 Mb/s at 4 bpp,
+  while the `fq 10: parent 1:1` still counts `throttled` (NDI paced as before);
+- the journal's "link ON" line says `egress mark 0x1387`.
+
+Grade the rerun at 4 and 6 bpp. The probe's `spread_ms_p50` should drop from 23 / 33 ms to the
+line-rate ~8-12 ms. `first_arrival_ms` should stop wandering. The latency p50 should approach
+~15-20 ms. If the spread stays at the paced value, the mark is missing: check the WARN line, then the
+`1:2` counters.
 
 ## Known limits (slices 1 + 1b)
 
