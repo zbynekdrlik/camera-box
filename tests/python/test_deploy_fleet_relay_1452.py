@@ -54,7 +54,9 @@ def _obs_idle(tmp_path):
     d = tmp_path / "obs-phase2"
     d.mkdir()
     (d / "obs_phase2.py").write_text(
-        "import json, sys\n"
+        "import json, os, sys\n"
+        "open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'args.log'), 'a')"
+        ".write(' '.join(sys.argv[1:]) + '\\n')\n"
         "if len(sys.argv) > 1 and sys.argv[1] == 'rig-busy-check':\n"
         "    print(json.dumps({'busy': False, 'diagnostics': []}))\n")
     return d
@@ -71,7 +73,8 @@ def _live(box, name):
     return box["state"] / "fs" / "usr" / "local" / "bin" / name
 
 
-def _deploy_with_relay(tmp_path, args, relay_live=_OLD_RELAY, relay_active=False, gh_dir=None, **extra):
+def _deploy_with_relay(tmp_path, args, relay_live=_OLD_RELAY, relay_active=False, gh_dir=None,
+                       camera_set="cam2", **extra):
     """Run the REAL deploy-fleet.sh over CAMERA_SET=cam2 against the issue-1407 fake box (the
     _deploy harness of test_ro_window_sites_1407.py), with an old camera-box and, unless relay_live
     is None, an old relay already on the box. GH_DIR goes first on PATH (a fake gh)."""
@@ -92,8 +95,10 @@ def _deploy_with_relay(tmp_path, args, relay_live=_OLD_RELAY, relay_active=False
     if gh_dir is not None:
         path = f"{gh_dir}:{path}"
     env = {"PATH": path, "FAKE_STATE": str(st), "FAKE_BOX_PATH": str(box["stub"]),
-           "CAMERA_SET": "cam2", "SSH_PASS": "x", "GENLOCK_WAIT_TRIES": "1", "GENLOCK_WAIT_SECS": "0",
+           "SSH_PASS": "x", "GENLOCK_WAIT_TRIES": "1", "GENLOCK_WAIT_SECS": "0",
            "HOME": str(tmp_path)}
+    if camera_set is not None:
+        env["CAMERA_SET"] = camera_set
     env.update(_relay_env(tmp_path))
     env.update({k: v for k, v in extra.items() if v is not None})
     proc = subprocess.run(["bash", str(_DEPLOY), *args], env=env, capture_output=True, text=True, timeout=180)
@@ -184,12 +189,14 @@ def test_a_relay_binary_of_another_version_is_refused_before_any_box_is_touched(
     assert log(box) == [], "nothing may touch a box: " + "\n".join(log(box))
 
 
-def _write_lease(lease_dir, repo, run_id):
+def _write_lease(lease_dir, repo, run_id, resources=None):
     lease_dir.mkdir()
-    (lease_dir / "holder.json").write_text(json.dumps({
-        "repo": repo, "run_id": run_id, "run_url": "", "job": "e2e",
-        "acquired_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "expected_release_at": ""}))
+    holder = {"repo": repo, "run_id": run_id, "run_url": "", "job": "e2e",
+              "acquired_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "expected_release_at": ""}
+    if resources is not None:
+        holder["resources"] = resources
+    (lease_dir / "holder.json").write_text(json.dumps(holder))
     (lease_dir / "heartbeat").write_text("")
 
 
@@ -229,6 +236,7 @@ def test_a_box_whose_camera_box_close_left_the_root_writable_gets_no_relay_deplo
     assert "[bkshading-deploy-relay]" not in out, out
     assert _live(box, "bkshading-relay").read_bytes() == _OLD_RELAY
     assert "relay not deployed: the root is not verified read-only" in out, out
+    assert "cam2-relay(not deployed: the root is not verified read-only)" in out, out
 
 
 def _fake_gh(tmp_path, cb, rl):
@@ -372,3 +380,75 @@ def test_the_e2e_parity_align_deploys_camera_box_only():
 def test_deploy_relay_accepts_only_the_callers_own_lease():
     s = DEPLOY_RELAY.read_text()
     assert "rig_lease_held_by" in s, "the lease preflight lets the holder's own run through"
+
+
+# ---- review round 1 ------------------------------------------------------------------------------ #
+
+
+def test_an_away_venue_relay_is_gated_on_its_own_obs_boxes_and_its_own_cameras_lease(tmp_path):
+    # restreamer holds the SNV cameras (issue-1450 resources) while the post-merge job deploys PP:
+    # the PP relay goes through, and the busy guard reads the PP strih/stream, never SNV's
+    lease = tmp_path / "lease"
+    _write_lease(lease, "zbynekdrlik/restreamer", "4242", resources=["snv-cams", "stream-snv"])
+    rl = _relay_artifact(tmp_path)
+    proc, box = _deploy_with_relay(
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp", "--relay-binary", str(rl)],
+        camera_set=None, OBS_FLEET_HOME="cam7", RIG_LEASE_DIR=str(lease),
+        GITHUB_REPOSITORY="", GITHUB_RUN_ID="", RIG_LEASE_REPO="", RIG_LEASE_RUN_ID="")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert _live(box, "bkshading-relay").read_bytes() == rl.read_bytes(), out
+    assert "for other resources, not pp-cams" in out, out
+    args = (tmp_path / "obs-phase2" / "args.log").read_text()
+    assert "--strih-host strih-pp.lan" in args and "--stream-host stream-pp.lan" in args, args
+    assert "VENUE pp ALIGNED" in _summary(proc) and "cam7 camera-box=9.9.9-test relay=9.9.9-test" in _summary(proc)
+
+
+def test_an_away_venue_relay_is_refused_by_a_lease_that_holds_its_cameras(tmp_path):
+    lease = tmp_path / "lease"
+    _write_lease(lease, "zbynekdrlik/restreamer", "4242", resources=["pp-cams"])
+    proc, box = _deploy_with_relay(
+        tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp",
+                   "--relay-binary", str(_relay_artifact(tmp_path))],
+        camera_set=None, OBS_FLEET_HOME="cam7", RIG_LEASE_DIR=str(lease),
+        GITHUB_REPOSITORY="", GITHUB_RUN_ID="", RIG_LEASE_REPO="", RIG_LEASE_RUN_ID="")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    assert "cam7-relay(rig lease held" in out, out
+    assert _live(box, "bkshading-relay").read_bytes() == _OLD_RELAY
+
+
+def test_binary_together_with_run_still_fetches_the_relay_of_that_run(tmp_path):
+    cb = _camera_box_artifact(tmp_path)
+    rl = _relay_artifact(tmp_path)
+    ghdir, logf = _fake_gh(tmp_path, cb, rl)
+    proc, box = _deploy_with_relay(tmp_path, ["--binary", str(cb), "--run", "5555"], gh_dir=ghdir)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert any("bkshading-linux-amd64" in d for d in logf.read_text().splitlines()), out
+    assert _live(box, "bkshading-relay").read_bytes() == rl.read_bytes()
+
+
+def test_a_relay_on_mains_release_next_to_a_dev_candidate_camera_box_is_not_forgotten():
+    # the E2E [0/8] align puts the dev candidate (main + one patch) on the boxes with --no-relay
+    r = _lib('bkshading_relay_version_verdict "$1" "$2" "$3"', "1.8.2", "1.8.1", "1.8.1")
+    assert r.stdout.strip() == "RELAY-CURRENT", r.stdout + r.stderr
+    r = _lib('bkshading_relay_version_verdict "$1" "$2" "$3"', "1.8.2", "1.7.0-dev.810", "1.8.1")
+    assert r.stdout.strip() == "RELAY-STALE", r.stdout + r.stderr
+    r = _lib('bkshading_relay_version_verdict "$1" "$2" ""', "1.8.2", "1.8.1")
+    assert r.stdout.strip() == "RELAY-STALE", "no main pin read: graded against camera-box alone"
+
+
+def test_main_version_is_read_from_the_workspace_package_line():
+    cargo = '[workspace]\nmembers = ["a"]\n\n[workspace.package]\nversion = "1.8.1"\n\n[dependencies]\nx = { version = "2" }\n'
+    r = _lib('bkshading_relay_main_version_from_cargo "$1"', cargo)
+    assert r.returncode == 0 and r.stdout.strip() == "1.8.1", r.stdout + r.stderr
+    r = _lib('bkshading_relay_main_version_from_cargo ""')
+    assert r.returncode == 0 and r.stdout.strip() == "", r.stdout
+
+
+def test_the_handover_probe_reads_state_and_versions_in_one_ssh_call_and_passes_mains_release():
+    s = HANDOVER.read_text()
+    body = s[s.index("probe_shading() {"):s.index("\n}\n", s.index("probe_shading() {"))]
+    assert body.count("sshpass") == 1, "one connect per box: a down box costs one ConnectTimeout"
+    assert "origin/main:Cargo.toml" in body and '"$main")' in body, body
