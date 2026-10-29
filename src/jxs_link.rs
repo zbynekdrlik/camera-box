@@ -79,7 +79,9 @@ pub const JXS_ASSUMED_EMIT_FPS: u64 = 60;
 /// strih N==2 conveyor presents at the production pin. Decided from the genlock timecode alone,
 /// never a frame counter: a dropped capture or a second boundary cannot shift the parity.
 /// `emit_fps` is the NDI emit rate (0 = genlock off: [`JXS_ASSUMED_EMIT_FPS`]); an emit rate at
-/// or below [`JXS_FPS`] sends every frame.
+/// or below [`JXS_FPS`] sends every frame. The supported emit rates above it are whole multiples
+/// of 30 (the rig emits 60): any other rate keeps only the stamps that happen to fall on the
+/// 30 fps grid (50 fps: every 5th, 10 fps).
 pub fn on_jxs_grid(timecode_100ns: i64, emit_fps: u32) -> bool {
     use crate::genlock_grid::{per_second_floor, UNITS_100NS_PER_SECOND as U};
     if timecode_100ns < 0 {
@@ -546,6 +548,23 @@ mod tests {
         assert_eq!(without_58, [(sec, 56), (sec + 1, 0), (sec + 1, 2)]);
         // and an odd stamp never goes, whatever came before it
         assert!(!on_jxs_grid(stamp60(sec, 59), 60));
+    }
+
+    #[test]
+    fn a_50_fps_emit_keeps_only_its_stamps_on_the_30_fps_grid() {
+        let sec: i64 = 1_761_730_000;
+        let kept = (0..50)
+            .filter(|&k| on_jxs_grid(sec * 10_000_000 + k * 10_000_000 / 50, 50))
+            .count();
+        assert_eq!(
+            kept, 10,
+            "a rate that is no multiple of 30 runs the link at 10 fps"
+        );
+        // a 120 fps emit keeps every 4th stamp: 30 a second
+        let kept = (0..120)
+            .filter(|&k| on_jxs_grid(sec * 10_000_000 + k * 10_000_000 / 120, 120))
+            .count();
+        assert_eq!(kept, 30);
     }
 
     #[test]

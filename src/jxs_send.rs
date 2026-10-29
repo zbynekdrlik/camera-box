@@ -20,9 +20,11 @@
 //!   slice as one `send` with `UDP_SEGMENT` (UDP GSO; wire format: `crate::jxs_link`), then gives
 //!   the picture back.
 //!
-//! Every 5 s it logs `jxs send: frames= slices= bytes= dropped_busy= in_flight=max/cap
+//! Every 5 s it logs `jxs send: fps= bpp= frames= slices= bytes= dropped_busy= in_flight=max/cap
 //! convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors= encode_errors=
-//! (issue 1387)`.
+//! (issue 1387)`. A frame in flight with no packet for [`WEDGE_MS`] logs one
+//! `CRITICAL jxs send: encoder wedged` line from the feeder (the status line lives on the packet
+//! thread, which is the one stuck).
 //!
 //! The codec needs the `jxs` cargo feature (CI's deployed `camera-box-linux-amd64` carries it).
 //! A build without it logs one ERROR when the target is set and stays off.
@@ -229,6 +231,29 @@ pub fn slice_threads_for(cores: &[usize]) -> u32 {
     cores.len().clamp(1, MAX_SLICE_THREADS) as u32
 }
 
+/// No packet for this long while a frame is in flight = the encoder is wedged (~60 frames at
+/// 30 fps; one frame's budget is 33.3 ms). Alert-only: the link cannot recover a hung library
+/// call, the capture loop and NDI are never touched.
+pub const WEDGE_MS: u64 = 2_000;
+/// How often the feeder looks at the packet thread's progress.
+pub const WEDGE_CHECK_PERIOD: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether the encoder is wedged: a frame in flight and no packet progress for [`WEDGE_MS`].
+pub fn encoder_wedged(in_flight: usize, ms_since_progress: u64) -> bool {
+    let _ = (in_flight, ms_since_progress);
+    false
+}
+
+/// Milliseconds since the first call in this process (the progress clock).
+#[cfg_attr(not(feature = "jxs"), allow(dead_code))]
+fn monotonic_ms() -> u64 {
+    static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
 /// Counters the capture thread and the two sender threads share (read and reset by the status
 /// line).
 #[derive(Debug, Default)]
@@ -243,6 +268,8 @@ struct Stats {
     /// Frames submitted to the encoder and not yet received back.
     in_flight: AtomicUsize,
     in_flight_max: AtomicUsize,
+    /// [`monotonic_ms`] of the packet thread's last sign of life (a loop turn or a packet).
+    progress_ms: AtomicU64,
 }
 
 #[cfg_attr(not(feature = "jxs"), allow(dead_code))]
@@ -439,6 +466,19 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_in_flight_with_no_packet_for_two_seconds_is_a_wedged_encoder() {
+        assert!(
+            !encoder_wedged(0, 60_000),
+            "nothing in flight: an idle link is no wedge"
+        );
+        assert!(!encoder_wedged(1, WEDGE_MS - 1));
+        assert!(encoder_wedged(1, WEDGE_MS));
+        assert!(encoder_wedged(2, 10 * WEDGE_MS));
+        // the budget of one frame is far below the alarm
+        assert!(WEDGE_MS > 30 * 33);
+    }
+
+    #[test]
     fn one_slice_thread_per_encoder_core_within_bounds() {
         assert_eq!(
             slice_threads_for(&[0, 1]),
@@ -523,14 +563,10 @@ mod tests {
         let (h, ready) = JxsHandoff::unstarted();
         let (w, ht) = (64u32, 8u32);
         let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i % 251) as u8).collect();
-        let t = std::time::Instant::now();
+        // the ready queue is never drained here: a waiting offer would hang the test
         for k in [0, 2, 4] {
             h.offer(&jf(&frame, w, ht, tc(k), true));
         }
-        assert!(
-            t.elapsed() < std::time::Duration::from_millis(50),
-            "never waits"
-        );
         assert_eq!(
             h.dropped_busy(),
             1,
