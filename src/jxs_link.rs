@@ -68,6 +68,39 @@ const _: () = assert!(GSO_SEGMENTS_PER_SEND * DATAGRAM_LEN <= 65507);
 /// The encoder's slice height in luma lines (the SVT-JPEG-XS default, set explicitly).
 pub const SLICE_HEIGHT_LINES: u32 = 16;
 
+/// The JPEG XS link's frame rate: the strih canvas (owner decision 29.10.2026, issue 1387). NDI
+/// stays at the emit rate (60).
+pub const JXS_FPS: u64 = 30;
+/// The emit rate assumed when genlock is off (no emit grid): the cameras' capture rate.
+pub const JXS_ASSUMED_EMIT_FPS: u64 = 60;
+
+/// Whether the frame stamped `timecode_100ns` goes over JPEG XS: the frame on the [`JXS_FPS`]
+/// grid, i.e. the EVEN slot of the per-second emit grid (`crate::genlock_grid`), the frame the
+/// strih N==2 conveyor presents at the production pin. Decided from the genlock timecode alone,
+/// never a frame counter: a dropped capture or a second boundary cannot shift the parity.
+/// `emit_fps` is the NDI emit rate (0 = genlock off: [`JXS_ASSUMED_EMIT_FPS`]); an emit rate at
+/// or below [`JXS_FPS`] sends every frame. The supported emit rates above it are whole multiples
+/// of 30 (the rig emits 60): any other rate keeps only the stamps that happen to fall on the
+/// 30 fps grid (50 fps: every 5th, 10 fps).
+pub fn on_jxs_grid(timecode_100ns: i64, emit_fps: u32) -> bool {
+    use crate::genlock_grid::{per_second_floor, UNITS_100NS_PER_SECOND as U};
+    if timecode_100ns < 0 {
+        return false;
+    }
+    let emit = match emit_fps as u64 {
+        0 => JXS_ASSUMED_EMIT_FPS,
+        f => f,
+    };
+    if emit <= JXS_FPS {
+        return true;
+    }
+    // the emit-grid stamp of this frame, then: is it a point of the 30 fps grid too? An even
+    // 60 fps slot 2j is floor(2j * 1 s / 60) = floor(j * 1 s / 30), the same integer; an odd
+    // one lies strictly between two 30 fps points.
+    let stamp = per_second_floor(timecode_100ns as u64, emit, U);
+    per_second_floor(stamp, JXS_FPS, U) == stamp
+}
+
 /// One datagram's header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PacketHeader {
@@ -243,37 +276,66 @@ pub struct SendWindow {
     /// Frames not encoded or not sent whole (refused geometry, conversion, codec error, a packet
     /// the wire format cannot carry).
     pub encode_errors: u64,
+    /// The most frames the encoder held at once in this window, and how many it may hold.
+    pub in_flight_max: u64,
+    pub in_flight_cap: u64,
+    /// YUYV -> planar conversions on the capture thread (the hand-off's own cost).
+    pub convert_count: u64,
+    pub convert_ms_sum: f64,
+    pub convert_ms_max: f64,
+    /// Hand-off (the converted frame is ready) -> its first packet sent.
+    pub first_slice_ms_sum: f64,
+    pub first_slice_ms_max: f64,
+    /// Picture handed to the encoder -> its last packet sent.
     pub encode_ms_sum: f64,
     pub encode_ms_max: f64,
+    /// The window's length in seconds (the `fps=` divisor) and the encoder's bits per pixel.
+    pub window_s: f64,
+    pub bpp: u32,
+}
+
+fn avg(sum: f64, n: u64) -> f64 {
+    if n > 0 {
+        sum / n as f64
+    } else {
+        0.0
+    }
 }
 
 impl SendWindow {
-    pub fn note_frame(&mut self, slices: u64, bytes: u64, encode_ms: f64) {
+    pub fn note_frame(&mut self, slices: u64, bytes: u64, first_slice_ms: f64, encode_ms: f64) {
         self.frames += 1;
         self.slices += slices;
         self.bytes += bytes;
+        self.first_slice_ms_sum += first_slice_ms;
+        self.first_slice_ms_max = self.first_slice_ms_max.max(first_slice_ms);
         self.encode_ms_sum += encode_ms;
-        if encode_ms > self.encode_ms_max {
-            self.encode_ms_max = encode_ms;
-        }
+        self.encode_ms_max = self.encode_ms_max.max(encode_ms);
     }
 
-    /// The 5 s status line: `jxs send: frames= slices= bytes= dropped_busy= encode_ms_avg/max=
-    /// send_errors= encode_errors= (issue 1387)`. `bytes` counts the codestream, not the
-    /// headers.
+    /// The 5 s status line: `jxs send: fps= bpp= frames= slices= bytes= dropped_busy= in_flight=max/cap
+    /// convert_ms_avg/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
+    /// encode_errors= (issue 1387)`. `bytes` counts the codestream, not the headers.
     pub fn status_line(&self) -> String {
-        let avg = if self.frames > 0 {
-            self.encode_ms_sum / self.frames as f64
-        } else {
-            0.0
-        };
         format!(
-            "jxs send: frames={} slices={} bytes={} dropped_busy={} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} (issue 1387)",
+            if self.window_s > 0.0 {
+                self.frames as f64 / self.window_s
+            } else {
+                0.0
+            },
+            self.bpp,
             self.frames,
             self.slices,
             self.bytes,
             self.dropped_busy,
-            avg,
+            self.in_flight_max,
+            self.in_flight_cap,
+            avg(self.convert_ms_sum, self.convert_count),
+            self.convert_ms_max,
+            avg(self.first_slice_ms_sum, self.frames),
+            self.first_slice_ms_max,
+            avg(self.encode_ms_sum, self.frames),
             self.encode_ms_max,
             self.send_errors,
             self.encode_errors
@@ -437,18 +499,129 @@ mod tests {
         assert_eq!(camera_id_from_hostname("dev1"), 0);
     }
 
+    /// A 60 fps emit stamp on the per-second grid (`floor_boundary_100ns`), slot `k` of second
+    /// `sec`.
+    fn stamp60(sec: i64, k: i64) -> i64 {
+        sec * 10_000_000 + k * 10_000_000 / 60
+    }
+
+    #[test]
+    fn jpeg_xs_takes_the_even_slots_of_the_per_second_grid() {
+        let sec = 1_761_730_000; // 29.10.2026
+        let picked: Vec<i64> = (0..60)
+            .filter(|&k| on_jxs_grid(stamp60(sec, k), 60))
+            .collect();
+        assert_eq!(
+            picked,
+            (0..60).step_by(2).collect::<Vec<_>>(),
+            "the even slots, 30 a second"
+        );
+        // the strih 30 fps grid points ARE the even 60 fps stamps
+        for j in 0..30 {
+            assert_eq!(stamp60(sec, 2 * j), sec * 10_000_000 + j * 10_000_000 / 30);
+        }
+    }
+
+    #[test]
+    fn the_parity_holds_across_a_second_boundary_and_a_dropped_capture() {
+        let sec = 1_761_730_000;
+        // slots 56..59 of one second, 0..3 of the next: 56, 58, 0, 2 go (never two in a row,
+        // never a gap of 4 at the boundary)
+        let run: Vec<(i64, i64)> = (56..60)
+            .map(|k| (sec, k))
+            .chain((0..4).map(|k| (sec + 1, k)))
+            .collect();
+        let picked: Vec<(i64, i64)> = run
+            .iter()
+            .copied()
+            .filter(|&(s, k)| on_jxs_grid(stamp60(s, k), 60))
+            .collect();
+        assert_eq!(picked, [(sec, 56), (sec, 58), (sec + 1, 0), (sec + 1, 2)]);
+        // a dropped capture (slot 58 never emitted) costs that one JPEG XS frame only: the next
+        // picked frame is still slot 0 of the next second, not the odd slot 59
+        let without_58: Vec<(i64, i64)> = run
+            .iter()
+            .copied()
+            .filter(|&(s, k)| !(s == sec && k == 58))
+            .filter(|&(s, k)| on_jxs_grid(stamp60(s, k), 60))
+            .collect();
+        assert_eq!(without_58, [(sec, 56), (sec + 1, 0), (sec + 1, 2)]);
+        // and an odd stamp never goes, whatever came before it
+        assert!(!on_jxs_grid(stamp60(sec, 59), 60));
+    }
+
+    #[test]
+    fn a_50_fps_emit_keeps_only_its_stamps_on_the_30_fps_grid() {
+        let sec: i64 = 1_761_730_000;
+        let kept = (0..50)
+            .filter(|&k| on_jxs_grid(sec * 10_000_000 + k * 10_000_000 / 50, 50))
+            .count();
+        assert_eq!(
+            kept, 10,
+            "a rate that is no multiple of 30 runs the link at 10 fps"
+        );
+        // a 120 fps emit keeps every 4th stamp: 30 a second
+        let kept = (0..120)
+            .filter(|&k| on_jxs_grid(sec * 10_000_000 + k * 10_000_000 / 120, 120))
+            .count();
+        assert_eq!(kept, 30);
+    }
+
+    #[test]
+    fn a_30_fps_emit_or_genlock_off_follows_the_emit_rate() {
+        let sec = 1_761_730_000;
+        // a 30 fps emit: every frame is on the 30 fps grid
+        assert!((0..30).all(|j| on_jxs_grid(sec * 10_000_000 + j * 10_000_000 / 30, 30)));
+        // genlock off (emit 0): a raw capture instant is floored on the assumed 60 fps grid
+        assert!(on_jxs_grid(stamp60(sec, 4) + 1234, 0));
+        assert!(!on_jxs_grid(stamp60(sec, 5) + 1234, 0));
+        assert!(!on_jxs_grid(-1, 60), "a negative timecode is never sent");
+    }
+
     #[test]
     fn the_status_line_names_every_counter() {
         let mut w = SendWindow::default();
-        w.note_frame(69, 1_000_000, 14.0);
-        w.note_frame(69, 1_000_000, 16.0);
+        w.note_frame(69, 1_000_000, 0.4, 14.0);
+        w.note_frame(69, 1_000_000, 0.6, 16.0);
         w.dropped_busy = 3;
+        w.in_flight_max = 2;
+        w.in_flight_cap = 2;
+        w.convert_count = 4;
+        w.convert_ms_sum = 2.0;
+        w.convert_ms_max = 0.75;
+        w.window_s = 0.5;
+        w.bpp = 6;
         assert_eq!(
             w.status_line(),
-            "jxs send: frames=2 slices=138 bytes=2000000 dropped_busy=3 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 (issue 1387)"
+            "jxs send: fps=4.0 bpp=6 frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 (issue 1387)"
         );
-        assert!(SendWindow::default()
-            .status_line()
-            .contains("encode_ms_avg/max=0.00/0.00"));
+        let empty = SendWindow::default().status_line();
+        assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
+        assert!(
+            empty.contains("first_slice_ms_avg/max=0.00/0.00"),
+            "{empty}"
+        );
+        // no key contains another: a grep for one never matches another
+        assert!(empty.contains("fps=0.0 bpp=0 "), "{empty}");
+        let keys = [
+            "fps=",
+            "bpp=",
+            "frames=",
+            "slices=",
+            "bytes=",
+            "dropped_busy=",
+            "in_flight=",
+            "convert_ms_avg/max=",
+            "first_slice_ms_avg/max=",
+            "encode_ms_avg/max=",
+            "send_errors=",
+            "encode_errors=",
+        ];
+        for a in keys {
+            assert_eq!(empty.matches(a).count(), 1, "{a}");
+            for b in keys {
+                assert!(a == b || !b.contains(a), "{a} in {b}");
+            }
+        }
     }
 }

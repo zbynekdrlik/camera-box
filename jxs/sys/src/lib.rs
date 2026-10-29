@@ -4,11 +4,15 @@
 //! The Rust side never re-declares an SVT struct: the shim includes the real headers and passes
 //! only scalars and plain pointers, so a library update cannot silently change a layout here.
 //!
-//! The encoder runs ONE frame at a time ([`Encoder::encode_frame`] returns only after the frame's
-//! last packet), which is the camera-box sender's "one frame in flight" rule (a busy encoder drops
-//! the next frame, it never queues it). Every buffer is allocated once at open and reused.
+//! [`Encoder`] runs ONE frame at a time ([`Encoder::encode_frame`] returns only after the frame's
+//! last packet): the tests and the receive probe use it. The camera-box sender uses the PIPELINED
+//! session ([`open_pipelined`], `session.rs`, issue 1387 slice 1b): the next picture is handed
+//! over while the previous one's slices still come out. Every buffer is allocated once and reused.
 
 use std::os::raw::c_int;
+
+mod session;
+pub use session::{open_pipelined, EncoderInput, EncoderOutput, Picture, MAX_IN_FLIGHT};
 
 /// Luma lines per slice. The camera-box wire format derives a frame's packet count from it
 /// (`crate::jxs_link::packets_per_frame` in camera-box: the header + one packet per slice).
@@ -225,6 +229,18 @@ impl EncoderSettings {
             threads_num: 0,
             latency_profile: true,
         }
+    }
+
+    /// Run `n` slice-pack threads (latency profile: `threads_num` = n + 2, the init and final
+    /// stage threads; n = 0 counts as 1, the library's minimum).
+    pub fn with_slice_threads(mut self, n: u32) -> Self {
+        self.threads_num = n.max(1) + 2;
+        self
+    }
+
+    /// The slice-pack threads this setting runs.
+    pub fn slice_threads(&self) -> u32 {
+        self.threads_num.saturating_sub(2).max(1)
     }
 }
 
