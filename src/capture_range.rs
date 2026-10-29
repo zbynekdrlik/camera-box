@@ -59,9 +59,10 @@ pub fn parse_range_override(value: &str) -> Option<CaptureRange> {
 /// range returns `Full`; anything else (unknown, absent) keeps the limited passthrough, so an
 /// unrecognised grabber is never rescaled on a guess.
 pub fn range_from_card(card: Option<&str>) -> CaptureRange {
-    // RED stub (issue 1430): every card stays limited.
-    let _ = card.map(grabber_model_from_card_name) == Some(GrabberModel::CamLink4k);
-    CaptureRange::Limited
+    match card.map(grabber_model_from_card_name) {
+        Some(GrabberModel::CamLink4k) => CaptureRange::Full,
+        _ => CaptureRange::Limited,
+    }
 }
 
 /// Resolve the capture range: a valid override wins, else the detected card decides.
@@ -116,16 +117,14 @@ impl CaptureRangeDecision {
 /// As one non-negative integer: `(219 Y + 16 * 255 + 127) / 255` (no ties exist: 255 is odd).
 #[inline]
 pub fn full_to_limited_luma(y: u8) -> u8 {
-    // RED stub (issue 1430): no scaling yet.
-    y
+    ((219 * y as u32 + LUMA_OFFSET) / 255) as u8
 }
 
 /// Full-range chroma to limited range: `C' = 128 + (C - 128) * 224 / 255`, rounded to nearest.
 /// As one non-negative integer: `(224 C + 128 * 31 + 127) / 255` (no ties).
 #[inline]
 pub fn full_to_limited_chroma(c: u8) -> u8 {
-    // RED stub (issue 1430): no scaling yet.
-    c
+    ((224 * c as u32 + CHROMA_OFFSET) / 255) as u8
 }
 
 /// `16 * 255 + 127`: the limited black level plus the round-to-nearest half divisor.

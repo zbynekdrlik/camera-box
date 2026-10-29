@@ -116,13 +116,17 @@ pub unsafe fn convert_avx2_into(yuyv: &[u8], dst: &mut Vec<u8>, range: CaptureRa
         CaptureRange::Full => {
             let k = FullRangeConsts::new();
             while i < simd {
-                let a = _mm256_shuffle_epi8(_mm256_loadu_si256(src.add(i) as *const __m256i), shuffle);
+                let a =
+                    _mm256_shuffle_epi8(_mm256_loadu_si256(src.add(i) as *const __m256i), shuffle);
                 let b = _mm256_shuffle_epi8(
                     _mm256_loadu_si256(src.add(i + 32) as *const __m256i),
                     shuffle,
                 );
                 _mm256_storeu_si256(out.add(i) as *mut __m256i, scale_full_to_limited(a, &k));
-                _mm256_storeu_si256(out.add(i + 32) as *mut __m256i, scale_full_to_limited(b, &k));
+                _mm256_storeu_si256(
+                    out.add(i + 32) as *mut __m256i,
+                    scale_full_to_limited(b, &k),
+                );
                 i += 64;
             }
         }
@@ -130,7 +134,12 @@ pub unsafe fn convert_avx2_into(yuyv: &[u8], dst: &mut Vec<u8>, range: CaptureRa
 
     // Tail: the scalar mapping, pair by pair.
     while i < total {
-        let (y0, u, y1, v) = (*src.add(i), *src.add(i + 1), *src.add(i + 2), *src.add(i + 3));
+        let (y0, u, y1, v) = (
+            *src.add(i),
+            *src.add(i + 1),
+            *src.add(i + 2),
+            *src.add(i + 3),
+        );
         let px = match range {
             CaptureRange::Limited => [u, y0, v, y1],
             CaptureRange::Full => [
@@ -173,12 +182,6 @@ impl FullRangeConsts {
 #[target_feature(enable = "avx2")]
 #[inline]
 fn scale_full_to_limited(v: __m256i, k: &FullRangeConsts) -> __m256i {
-    // RED stub (issue 1430): no scaling yet.
-    let _ = k;
-    v
-}
-#[cfg(any())]
-fn _red_unused(v: __m256i, k: &FullRangeConsts) -> __m256i {
     let zero = _mm256_setzero_si256();
     let lo = _mm256_unpacklo_epi8(v, zero);
     let hi = _mm256_unpackhi_epi8(v, zero);
@@ -220,11 +223,19 @@ mod tests {
     #[test]
     fn full_range_scales_every_byte_by_its_channel() {
         // Y0=0 U=0 Y1=255 V=255 -> U'=16 Y0'=16 V'=240 Y1'=235
-        assert_eq!(scalar(&[0, 0, 255, 255], CaptureRange::Full), vec![16, 16, 240, 235]);
+        assert_eq!(
+            scalar(&[0, 0, 255, 255], CaptureRange::Full),
+            vec![16, 16, 240, 235]
+        );
         // neutral chroma stays neutral, mid luma moves
         assert_eq!(
             scalar(&[128, 128, 128, 128], CaptureRange::Full),
-            vec![128, full_to_limited_luma(128), 128, full_to_limited_luma(128)]
+            vec![
+                128,
+                full_to_limited_luma(128),
+                128,
+                full_to_limited_luma(128)
+            ]
         );
     }
 
@@ -234,14 +245,20 @@ mod tests {
         let out = scalar(&input, CaptureRange::Full);
         for v in 0..=255usize {
             let px = &out[v * 4..v * 4 + 4];
-            let (c, y) = (full_to_limited_chroma(v as u8), full_to_limited_luma(v as u8));
+            let (c, y) = (
+                full_to_limited_chroma(v as u8),
+                full_to_limited_luma(v as u8),
+            );
             assert_eq!(px, &[c, y, c, y], "value {v}");
         }
     }
 
     #[test]
     fn a_trailing_partial_pair_is_dropped() {
-        assert_eq!(scalar(&[1, 2, 3, 4, 5, 6], CaptureRange::Limited), vec![2, 1, 4, 3]);
+        assert_eq!(
+            scalar(&[1, 2, 3, 4, 5, 6], CaptureRange::Limited),
+            vec![2, 1, 4, 3]
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
