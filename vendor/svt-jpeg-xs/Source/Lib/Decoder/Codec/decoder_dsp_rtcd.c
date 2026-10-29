@@ -1,0 +1,179 @@
+/*
+* Copyright(c) 2024 Intel Corporation
+* SPDX - License - Identifier: BSD - 2 - Clause - Patent
+*/
+
+#define DECODER_RTCD_C
+#include "decoder_dsp_rtcd.h"
+#include "Dequant.h"
+#include "Idwt.h"
+#include "Mct.h"
+#include "NltDec.h"
+#include "Precinct.h"
+#include "Packing.h"
+
+#ifdef ARCH_X86_64
+#include "Mct_avx2.h"
+#include "Mct_avx512.h"
+#include "Dwt53Decoder_AVX2.h"
+#include "Dequant_SSE4.h"
+#include "NltDec_AVX2.h"
+#include "UnPack_avx2.h"
+#include "UnPack_avx512.h"
+#include "idwt-avx512.h"
+#include "NltDec_avx512.h"
+#include "Dequant_avx512.h"
+#endif /* ARCH_X86_64 */
+
+#ifdef ARCH_AARCH64
+#include "Dequant_neon.h"
+#include "UnPack_neon.h"
+#include "Idwt_neon.h"
+#endif /* ARCH_AARCH64 */
+
+/**************************************
+ * Instruction Set Support
+ **************************************/
+
+#ifdef ARCH_X86_64
+#define SET_FUNCTIONS_X86(ptr, c, mmx, sse, sse2, sse3, ssse3, sse4_1, sse4_2, avx, avx2, avx512) \
+    if (((uintptr_t)NULL != (uintptr_t)mmx) && (flags & CPU_FLAGS_MMX))                           \
+        ptr = mmx;                                                                                \
+    if (((uintptr_t)NULL != (uintptr_t)sse) && (flags & CPU_FLAGS_SSE))                           \
+        ptr = sse;                                                                                \
+    if (((uintptr_t)NULL != (uintptr_t)sse2) && (flags & CPU_FLAGS_SSE2))                         \
+        ptr = sse2;                                                                               \
+    if (((uintptr_t)NULL != (uintptr_t)sse3) && (flags & CPU_FLAGS_SSE3))                         \
+        ptr = sse3;                                                                               \
+    if (((uintptr_t)NULL != (uintptr_t)ssse3) && (flags & CPU_FLAGS_SSSE3))                       \
+        ptr = ssse3;                                                                              \
+    if (((uintptr_t)NULL != (uintptr_t)sse4_1) && (flags & CPU_FLAGS_SSE4_1))                     \
+        ptr = sse4_1;                                                                             \
+    if (((uintptr_t)NULL != (uintptr_t)sse4_2) && (flags & CPU_FLAGS_SSE4_2))                     \
+        ptr = sse4_2;                                                                             \
+    if (((uintptr_t)NULL != (uintptr_t)avx) && (flags & CPU_FLAGS_AVX))                           \
+        ptr = avx;                                                                                \
+    if (((uintptr_t)NULL != (uintptr_t)avx2) && (flags & CPU_FLAGS_AVX2))                         \
+        ptr = avx2;                                                                               \
+    if (((uintptr_t)NULL != (uintptr_t)avx512) && (flags & CPU_FLAGS_AVX512F))                    \
+        ptr = avx512;
+#else /* ARCH_X86_64 */
+#define SET_FUNCTIONS_X86(ptr, c, mmx, sse, sse2, sse3, ssse3, sse4_1, sse4_2, avx, avx2, avx512)
+#endif /* ARCH_X86_64 */
+
+#define SET_FUNCTIONS(ptr, c, mmx, sse, sse2, sse3, ssse3, sse4_1, sse4_2, avx, avx2, avx512)     \
+    do {                                                                                          \
+        if (check_pointer_was_set && ptr != 0) {                                                  \
+            printf("Error: %s:%i: Pointer \"%s\" is set before!\n", __FILE__, __LINE__, #ptr);    \
+            assert(0);                                                                            \
+        }                                                                                         \
+        if ((uintptr_t)NULL == (uintptr_t)c) {                                                    \
+            printf("Error: %s:%i: Pointer \"%s\" on C is NULL!\n", __FILE__, __LINE__, #ptr);     \
+            assert(0);                                                                            \
+        }                                                                                         \
+        ptr = c;                                                                                  \
+        SET_FUNCTIONS_X86(ptr, c, mmx, sse, sse2, sse3, ssse3, sse4_1, sse4_2, avx, avx2, avx512) \
+    } while (0)
+
+/* Macros SET_* use local variable CPU_FLAGS flags and Bool
+ * check_pointer_was_set */
+#define SET_ONLY_C(ptr, c)                                  SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+#define SET_SSE2(ptr, c, sse2)                              SET_FUNCTIONS(ptr, c, 0, 0, sse2, 0, 0, 0, 0, 0, 0, 0)
+#define SET_SSE2_AVX2(ptr, c, sse2, avx2)                   SET_FUNCTIONS(ptr, c, 0, 0, sse2, 0, 0, 0, 0, 0, avx2, 0)
+#define SET_SSE2_AVX512(ptr, c, sse2, avx512)               SET_FUNCTIONS(ptr, c, 0, 0, sse2, 0, 0, 0, 0, 0, 0, avx512)
+#define SET_SSSE3(ptr, c, ssse3)                            SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, ssse3, 0, 0, 0, 0, 0)
+#define SET_SSSE3_AVX2(ptr, c, ssse3, avx2)                 SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, ssse3, 0, 0, 0, avx2, 0)
+#define SET_SSE41(ptr, c, sse4_1)                           SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, 0, sse4_1, 0, 0, 0, 0)
+#define SET_SSE41_AVX2(ptr, c, sse4_1, avx2)                SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, 0, sse4_1, 0, 0, avx2, 0)
+#define SET_SSE41_AVX2_AVX512(ptr, c, sse4_1, avx2, avx512) SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, 0, sse4_1, 0, 0, avx2, avx512)
+#define SET_AVX2(ptr, c, avx2)                              SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, 0, 0, 0, 0, avx2, 0)
+#define SET_AVX2_AVX512(ptr, c, avx2, avx512)               SET_FUNCTIONS(ptr, c, 0, 0, 0, 0, 0, 0, 0, 0, avx2, avx512)
+
+/* Narrows a pointer already set by one of the macros above to its AArch64
+ * implementation. Written as a separate line rather than as another column of
+ * SET_FUNCTIONS because the two architectures are mutually exclusive: on x86
+ * this expands to nothing, and on AArch64 the SET_* line above it has left the
+ * pointer on the C implementation. */
+#ifdef ARCH_AARCH64
+#define SET_NEON(ptr, neon)                                               \
+    if (((uintptr_t)NULL != (uintptr_t)neon) && (flags & CPU_FLAGS_NEON)) \
+        ptr = neon;
+#else /* ARCH_AARCH64 */
+#define SET_NEON(ptr, neon)
+#endif /* ARCH_AARCH64 */
+
+void setup_decoder_rtcd_internal(CPU_FLAGS flags) {
+    /* Avoid check that pointer is set double, after first  setup. */
+    static uint8_t first_call_setup = 1;
+    uint8_t check_pointer_was_set = first_call_setup;
+    first_call_setup = 0;
+    /** Should be done during library initialization,
+      but for safe limiting cpu flags again. */
+    const CPU_FLAGS host_flags = get_cpu_flags();
+    flags &= host_flags;
+#ifdef ARCH_X86_64
+    /* The AVX-512 kernels are built with -mbmi2 for the whole directory, so
+     * the compiler is free to emit those instructions anywhere in them, not
+     * only where an intrinsic asks for them. Without a processor to back
+     * them the whole tier has to stay unused.
+     *
+     * The test is on the host, not on the caller's request: a caller built
+     * against an older header passes a mask with these bits clear, and it must
+     * not lose AVX-512 on hardware that supports it. */
+    if (!(host_flags & CPU_FLAGS_BMI2)) {
+        flags &= ~(CPU_FLAGS)CPU_FLAGS_AVX512F;
+    }
+#endif
+    // to use C: flags=0
+    /* A build for a processor with no SIMD tree of its own has no setter left
+     * to read the mask. */
+    (void)flags;
+
+    SET_SSE41_AVX2_AVX512(dequant, dequant_c, dequant_sse4_1, NULL, dequant_avx512);
+    SET_NEON(dequant, dequant_neon);
+    SET_AVX2(linear_output_scaling_8bit, linear_output_scaling_8bit_c, linear_output_scaling_8bit_avx2);
+    SET_AVX2_AVX512(linear_output_scaling_8bit_line,
+                    linear_output_scaling_8bit_line_c,
+                    linear_output_scaling_8bit_line_avx2,
+                    linear_output_scaling_8bit_line_avx512);
+    SET_AVX2(linear_output_scaling_16bit, linear_output_scaling_16bit_c, linear_output_scaling_16bit_avx2);
+    SET_AVX2_AVX512(linear_output_scaling_16bit_line,
+                    linear_output_scaling_16bit_line_c,
+                    linear_output_scaling_16bit_line_avx2,
+                    linear_output_scaling_16bit_line_avx512);
+    SET_AVX2_AVX512(linear_output_scaling_16bit_line_msb,
+                    linear_output_scaling_16bit_line_msb_c,
+                    linear_output_scaling_16bit_line_msb_avx2,
+                    linear_output_scaling_16bit_line_msb_avx512);
+
+    SET_AVX2(inv_sign, inv_sign_c, inv_sign_avx2);
+    SET_AVX2_AVX512(inverse_rct, inverse_rct_c, inverse_rct_avx2, inverse_rct_avx512);
+    SET_AVX2_AVX512(unpack_data, unpack_data_c, unpack_data_avx2, unpack_data_avx512);
+#ifdef ARCH_X86_64
+    /* unpack_data_avx2 spreads a group's planes with a nibble-split-and-movemask sequence;
+     * PEXT does the same spread in four instructions (see unpack_common.h), but needs BMI2.
+     * It is microcoded and slow on some older CPUs, so this only overrides the AVX2 pick -
+     * never AVX-512, which already uses PEXT - and only when the host (not just the requested
+     * tier) actually has BMI2. */
+    if ((flags & CPU_FLAGS_AVX2) && !(flags & CPU_FLAGS_AVX512F) && (host_flags & CPU_FLAGS_BMI2)) {
+        unpack_data = unpack_data_avx2_bmi2;
+    }
+#endif /* ARCH_X86_64 */
+    SET_NEON(unpack_data, unpack_data_neon);
+    SET_AVX2_AVX512(unpack_gclis_unary_run, unpack_gclis_unary_run_c, NULL, unpack_gclis_unary_run_avx512);
+    SET_AVX2_AVX512(idwt_horizontal_line_lf16_hf16,
+                    idwt_horizontal_line_lf16_hf16_c,
+                    idwt_horizontal_line_lf16_hf16_avx2,
+                    idwt_horizontal_line_lf16_hf16_avx512);
+    SET_NEON(idwt_horizontal_line_lf16_hf16, idwt_horizontal_line_lf16_hf16_neon);
+    SET_AVX2_AVX512(idwt_horizontal_line_lf32_hf16,
+                    idwt_horizontal_line_lf32_hf16_c,
+                    idwt_horizontal_line_lf32_hf16_avx2,
+                    idwt_horizontal_line_lf32_hf16_avx512);
+    SET_NEON(idwt_horizontal_line_lf32_hf16, idwt_horizontal_line_lf32_hf16_neon);
+    SET_AVX2_AVX512(idwt_vertical_line, idwt_vertical_line_c, idwt_vertical_line_avx2, idwt_vertical_line_avx512);
+    SET_NEON(idwt_vertical_line, idwt_vertical_line_neon);
+    SET_AVX2_AVX512(
+        idwt_vertical_line_recalc, idwt_vertical_line_recalc_c, idwt_vertical_line_recalc_avx2, idwt_vertical_line_recalc_avx512);
+    SET_NEON(idwt_vertical_line_recalc, idwt_vertical_line_recalc_neon);
+}

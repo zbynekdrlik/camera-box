@@ -44,7 +44,7 @@ jobs:
           if [ -n "${CALL_TAG}" ]; then
             sudo apt-get install -y libasound2
           else
-            sudo apt-get install -y libv4l-dev libasound2-dev
+            sudo apt-get install -y libv4l-dev libasound2-dev nasm  # nasm: issue 1387, the jxs feature
           fi
 
       # workflow_call (ci.yml's release job): the caller run's gated + deployed build.
@@ -62,7 +62,7 @@ jobs:
 
       - name: Build release
         if: inputs.tag == ''
-        run: cargo build --release
+        run: cargo build --release --features jxs
 
       - name: The binary reports the tag's version
         env:

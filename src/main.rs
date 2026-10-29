@@ -588,6 +588,11 @@ async fn run_capture_loop(
     }
     let send_stagger_offset = send_stagger.offset;
 
+    // Issue 1387 -- the JPEG XS link beside NDI. OFF unless CAMERA_BOX_JXS_TARGET=host:port is
+    // set: then a `jxs-send` thread on the display cores encodes the SAME emitted frame + genlock
+    // timecode and sends it slice by slice to that one receiver. Unset = `None`, nothing created.
+    let jxs_sender = camera_box::jxs_send::JxsSender::start_from_env(&resolved_hostname);
+
     // #174 cam1-capture render-time QR burn — TEST MODE ONLY. Gated behind
     // CAMERA_BOX_BURN_RUN_ID (mirrors the strih/stream DistroAV burn run_id env): when
     // UNSET the burn is OFF and the live NDI feed stays completely CLEAN (zero-copy send
@@ -1483,6 +1488,19 @@ async fn run_capture_loop(
                     ));
                 }
                 emit_one(capture_timecode_100ns);
+                // Issue 1387 -- the JPEG XS link takes the current frame AFTER its NDI send, so the
+                // NDI timing is untouched: one memcpy into the sender's buffer, or a counted drop
+                // while it still encodes the previous frame. Never blocks.
+                if let Some(jxs) = jxs_sender.as_ref() {
+                    jxs.offer(
+                        data,
+                        info.width,
+                        info.height,
+                        info.stride,
+                        info.fourcc.str().map(|f| f == "YUYV").unwrap_or(false),
+                        capture_timecode_100ns,
+                    );
+                }
                 // #1242 — this emitted iteration's work (everything in the callback except the
                 // stagger sleep): the capture-loop margin the 5 s summary reports per box.
                 if !send_stagger_offset.is_zero() {

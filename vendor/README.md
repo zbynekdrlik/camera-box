@@ -12,6 +12,7 @@ an unpinned/stock build.
 | `vendor/av-sync-dock` | github.com/norihiro/obs-audio-video-sync-dock | **0.1.4** | vendored files (#188 A/V-sync dock) |
 | `vendor/av-sync-dock/deps/quirc` | github.com/dlbeer/quirc | commit `927d680904dc95fdff4cd9d022eb374b438ff8f2` | vendored `lib/` sources (pin in `deps/quirc/QUIRC_PINNED_SHA.txt`) |
 | `vendor/obs-vban` | github.com/norihiro/obs-vban | **0.3.1** (commit `58edc8ab4`) | vendored files + the camera-box send-pacing patch (issue 1372, `vendor/obs-vban/CAMERA-BOX-VENDOR.md`) |
+| `vendor/svt-jpeg-xs` | github.com/OpenVisualCloud/SVT-JPEG-XS | **0.10.0** (commit `01bc7cc71`) | vendored `Source/API` + `Source/Lib` + `third_party/cpuinfo` (the issue-1387 JPEG XS link, `vendor/svt-jpeg-xs/CAMERA-BOX-VENDOR.md`) |
 | NDI SDK headers | shipped inside DistroAV (`vendor/distroav/lib/ndi/`) | SDK v6 (plugin requires **NDI ≥ 6.3.0**) | part of the DistroAV tree |
 
 The NDI **runtime** (`libndi.so` / `Processing.NDI.Lib.x64.dll`) is NOT committed —

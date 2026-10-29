@@ -619,6 +619,14 @@ pub mod send_stall;
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
 pub mod send_stagger;
+// Issue 1387: the JPEG XS link's wire format + reassembly + pixel helpers (pure, every platform).
+pub mod jxs_link;
+// Issue 1387: the cambox JPEG XS sender (off unless CAMERA_BOX_JXS_TARGET is set) and the receive
+// side the jxs-recv-probe bin and the loopback tests use. The codec itself needs the `jxs` feature.
+#[cfg(target_os = "linux")]
+pub mod jxs_recv;
+#[cfg(target_os = "linux")]
+pub mod jxs_send;
 // The send-stagger clamp must stay strictly below the buffered-dequeue fraction its idle-wait
 // add-back relies on (a genuinely buffered frame must still read as buffered after the sleep is
 // added back) — checked here against the REAL constant, so changing either one breaks the build.
