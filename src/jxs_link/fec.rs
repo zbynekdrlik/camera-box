@@ -111,7 +111,10 @@ impl FecRepair {
         if let Some(oldest) = self.frames.iter().copied().min() {
             if tc + BACKWARD_STEP_100NS < oldest {
                 // the wall stepped back (the nightly date step): the kept frames are of the old
-                // timeline, forget them all (the assembler's own clock-step rule)
+                // timeline, forget them all (the assembler's own clock-step bound). Known limit: the
+                // assembler measures from its last FINISHED frame, this from the oldest KEPT one, so
+                // a straggler ~50-67 ms old can clear the repair of the open frames once while the
+                // assembler only drops it as stale (rare: costs one frame's repair, never a frame)
                 self.frames.clear();
                 self.groups.clear();
             } else if self.frames.len() == KEEP_FRAMES && self.frames.iter().all(|f| *f > tc) {

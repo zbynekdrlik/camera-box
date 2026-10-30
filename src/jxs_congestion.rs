@@ -36,11 +36,12 @@
 /// Reports the path's "no queue" base is taken over (30 s at one a second): longer than any
 /// adaptation, so a queue that persists while the sender still adapts never becomes the base.
 pub const BASE_REPORTS: usize = 30;
-/// A path delay this far above the base is a big clock step that neither end's `WallSteps` saw
-/// (the nightly date step): start over. Both ends measure on the wall minus its own steps, so a
-/// small step never reaches here; a downward one needs nothing (the minimum takes it). An earlier
-/// rule that moved the base on a "tight" jump invented a queue after a real one drained at once
-/// (review round 2 of item 2), and is gone.
+/// A path delay this far above the base: start over (a BACKSTOP). A clock step should never get
+/// here: the receiver removes its own steps (`WallSteps`), a sender step cancels per frame (its
+/// timecode and its own delay move together) and the report windows around it are not judged
+/// (`PaceControl`'s step epochs, review round 3); a downward jump needs nothing (the minimum takes
+/// it). An earlier rule that moved the base on a "tight" jump invented a queue after a real one
+/// drained at once (review round 2 of item 2), and is gone.
 pub const STEP_RESET_US: i64 = 100_000;
 
 /// The sender's half of the queuing-delay signal (pure): the receiver's MEAN of (first arrival -

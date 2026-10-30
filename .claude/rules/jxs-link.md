@@ -876,7 +876,7 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   - `delay_mean_us` (i32): per frame `d` = first datagram arrival - genlock timecode, the
     period's MEAN (review round 2: a p50 of a sawtooth jumps by the whole slot when the sets of the
     two ends differ by one frame, a mean by that one frame over 30); `delay_spread_us`: its p90 -
-    p10; `span_p50_us`: p50 of last - first arrival over the
+    p10, DIAGNOSTIC only (no decision reads it); `span_p50_us`: p50 of last - first arrival over the
     period's WHOLE frames. The arrivals are on the wall clock MINUS its own steps (`WallSteps`:
     `CLOCK_REALTIME - CLOCK_MONOTONIC` moves only on a dantesync step), so a step on the receiver
     never reads as delay.
@@ -888,8 +888,15 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   frame (`PaceControl::on_first_send`, wall minus steps, its own `WallSteps`) over the timecodes
   the report's second covers; path = the receiver's mean - its own mean = the path delay + the
   clock offset, constant on a quiet path; the queue = the path above its minimum over the last 30
-  reports. A path 100 ms above the base is a step neither end's `WallSteps` saw (the nightly date
-  step) and starts over (nothing reported for that report). Review round 2 REMOVED a rule that
+  reports. **A sender wall step** (the nightly fleet date step) moves the timecode and not the own
+  delay, so it cancels per frame, but around it the receiver's frames of a period and the sender's
+  timecode window (newest - 1 s, newest] are not the same frames, and the means disagree by up to
+  the step (review round 3: 2 false congestion steps a night in the bench). So each own delay
+  carries a step EPOCH (bumped when it moves > 50 ms from the previous frame's, more than the
+  16.7 ms sawtooth), and a report is judged only when its window is one epoch AND the same epoch as
+  the previous report's window: the step report and the one after it read unknown (hold), and the
+  very first report after a start is never judged. A path 100 ms above the base starts over, a
+  BACKSTOP only. Review round 2 REMOVED a rule that
   moved the base on a "tight" jump over 3 ms: a real queue that drains at once (the download
   stops) then left a phantom queue as big as the drain, and a queue that appears at once was
   hidden. Small steps never reach `PathDelay` (both ends subtract `WallSteps`).
@@ -924,7 +931,8 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   receiver): 87 lossy frames, still losing after 70 s, at 6 bpp when the 130 s run ends. A third
   scenario runs a 1 GbE cambox at line rate into the 10 GbE strih with the phase sawtooth and
   +-5 ms receiver steps (removed by the meter's `WallSteps` except in the one frame that arrives
-  across the step): 0 congestion steps, 8 bpp, never paced. The defaults were tuned on it: at
+  across the step): 0 congestion steps, 8 bpp, never paced. A fourth runs the quiet paced strih
+  path with SENDER date steps of +200 ms and -200 ms mid-report: 0 congestion steps, 8 bpp, 900. The defaults were tuned on it: at
   25 % stretch and two reports before the bpp ask the loss came first; with a 2 s settle between
   asks it cost 49 lossy frames.
 - **Known limits:** the signal is one report a second, so a queue that fills in under a second

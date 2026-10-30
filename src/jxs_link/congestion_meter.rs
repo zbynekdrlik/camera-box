@@ -10,8 +10,8 @@
 //!   0..16.7 ms and drifting, plus the encode), the path delay, and the two clocks' offset. Only the
 //!   SENDER knows its own part, so the sender subtracts it and keeps the "no queue" base
 //!   (`crate::jxs_congestion::PathDelay`); the receiver only measures.
-//! - **The delay spread.** p90 - p10 of the same `d`: a clock step (a dantesync correction on one
-//!   box) moves every frame alike and leaves it small, a filling queue does not.
+//! - **The delay spread.** p90 - p10 of the same `d`, DIAGNOSTIC only (no decision reads it since
+//!   review round 2; it stays on the wire, the version-2 layout is frozen).
 //! - **The arrival span.** The p50 of last-minus-first arrival over the period's WHOLE frames (no
 //!   lost slice): a bottleneck that delivers slower than the sender sends stretches it.
 //!

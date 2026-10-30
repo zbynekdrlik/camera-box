@@ -16,6 +16,11 @@ use crate::jxs_link::ReceiverReport;
 const SEND_SPANS: usize = 30;
 /// Own first-send delays kept (three seconds of frames): a report covers the second before it.
 const OWN_DELAYS: usize = 90;
+/// An own delay this far from the previous frame's is the sender's wall stepping under its
+/// timecode (the nightly fleet date step: the genlock timecode follows the stepped wall, the own
+/// delay is read on the wall minus its own steps). The capture phase sawtooth moves at most one
+/// 60 fps slot (16.7 ms) between two frames. 100 ns.
+const OWN_STEP_100NS: i64 = 500_000;
 
 /// The pace the sending thread runs, and why.
 #[derive(Debug, Clone)]
@@ -40,8 +45,13 @@ pub struct PaceControl {
     /// The newest queuing delay (us): the receiver's delay minus this sender's own ([`PathDelay`]).
     queue_delay_us: Option<u32>,
     path_delay: PathDelay,
-    /// Per frame: its timecode and this sender's own delay, first send - timecode (both 100 ns).
-    own_delays: std::collections::VecDeque<(u64, i64)>,
+    /// Per frame: its timecode, this sender's own delay (first send - timecode, both 100 ns) and
+    /// the step epoch it was sent in.
+    own_delays: std::collections::VecDeque<(u64, i64, u64)>,
+    /// Bumped at every own step ([`OWN_STEP_100NS`]).
+    epoch: u64,
+    /// The epoch of the previous report's own window (`None` = it was not one epoch).
+    last_report_epoch: Option<u64>,
     /// The controller asked for a bpp step down not yet handed to the auto bpp.
     bpp_down: bool,
 }
@@ -66,6 +76,8 @@ impl PaceControl {
             queue_delay_us: None,
             path_delay: PathDelay::default(),
             own_delays: std::collections::VecDeque::with_capacity(OWN_DELAYS),
+            epoch: 0,
+            last_report_epoch: None,
             bpp_down: false,
         };
         p.refresh_own_link();
@@ -136,30 +148,48 @@ impl PaceControl {
     }
 
     /// This sender's own MEAN delay (us) over the frames the report's second covers: timecodes in
-    /// (newest - 1 s, newest]. `None` = none of them known. The receiver's set can differ by about
-    /// a frame (it finalizes a frame one frame late); a mean moves by a fraction of that one frame.
-    fn own_delay_mean_us(&self, r: &ReceiverReport) -> Option<i64> {
+    /// (newest - 1 s, newest] (about 30 frames, the receiver's set of the period give or take a
+    /// frame: it finalizes a frame one frame late, which moves a mean by that frame over 30).
+    /// `None` = none of them known, or the window is not the SAME step epoch as the previous
+    /// report's (review round 3): across a sender wall step the two ends' frame sets differ by up
+    /// to the step's worth of frames, each of them carrying the step, so the means disagree by up
+    /// to the step; that report and the next one are not judged (the queue reads unknown, the
+    /// path delay's history is not touched).
+    fn own_delay_mean_us(&mut self, r: &ReceiverReport) -> Option<i64> {
         let newest = r.last_timecode_100ns;
-        let (sum, n) = self
-            .own_delays
-            .iter()
-            .filter(|(tc, _)| *tc <= newest && *tc + 10_000_000 > newest)
-            .fold((0i128, 0i128), |(s, n), (_, d)| (s + *d as i128, n + 1));
+        let window = || {
+            self.own_delays
+                .iter()
+                .filter(move |(tc, _, _)| *tc <= newest && *tc + 10_000_000 > newest)
+        };
+        let first = window().next().map(|(_, _, e)| *e);
+        let one_epoch = first.filter(|e| window().all(|(_, _, x)| x == e));
+        let judged = one_epoch.is_some() && one_epoch == self.last_report_epoch;
+        self.last_report_epoch = one_epoch;
+        if !judged {
+            return None;
+        }
+        let (sum, n) = window().fold((0i128, 0i128), |(s, n), (_, d, _)| (s + *d as i128, n + 1));
         (n > 0).then(|| (sum / n / 10) as i64)
     }
 
-    /// A frame's first send: its timecode and the wall clock (`CLOCK_REALTIME`, 100 ns) then.
+    /// A frame's first send: its timecode and the wall clock minus its own steps (100 ns, the
+    /// caller's `realtime_100ns() - WallSteps::steps_100ns()`) then.
     pub fn on_first_send(&mut self, timecode_100ns: u64, wall_100ns: i64) {
         if timecode_100ns == 0 {
             return;
         }
+        let delay = wall_100ns - timecode_100ns.min(i64::MAX as u64) as i64;
+        if let Some((_, prev, _)) = self.own_delays.back() {
+            if (delay - prev).abs() > OWN_STEP_100NS {
+                self.epoch += 1;
+            }
+        }
         if self.own_delays.len() == OWN_DELAYS {
             self.own_delays.pop_front();
         }
-        self.own_delays.push_back((
-            timecode_100ns,
-            wall_100ns - timecode_100ns.min(i64::MAX as u64) as i64,
-        ));
+        self.own_delays
+            .push_back((timecode_100ns, delay, self.epoch));
     }
 
     /// One whole frame's send span (first send -> last send, ms).
@@ -369,6 +399,9 @@ mod tests {
         };
         let newest = feed(&mut p, 0);
         let quiet = |seq| quiet_at(seq, newest);
+        // the first report only notes the window's step epoch (review round 3): not judged
+        p.on_report(&quiet(0), 0.5);
+        assert_eq!(p.queue_delay_us, None);
         p.on_report(&quiet(1), 1.0);
         assert_eq!(p.changed().map(|d| d.mbps), Some(900));
         let queued = |seq| ReceiverReport {

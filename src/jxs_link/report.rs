@@ -44,8 +44,8 @@ pub struct ReceiverReport {
     /// microseconds on the two boxes' wall clocks (`None` = no frame). The SENDER subtracts its own
     /// first-send delay of the same frames and keeps the base (`crate::jxs_congestion::PathDelay`).
     pub delay_mean_us: Option<i32>,
-    /// Version 2: p90 - p10 of those delays (us): a clock step moves every frame alike (a small
-    /// spread), a queue does not.
+    /// Version 2: p90 - p10 of those delays (us). DIAGNOSTIC only: no decision reads it since
+    /// review round 2 (the bytes stay, the version-2 layout is frozen).
     pub delay_spread_us: Option<u32>,
     /// Version 2: the p50 first -> last datagram arrival span of a whole frame (`None` = none).
     pub span_p50_us: Option<u32>,
