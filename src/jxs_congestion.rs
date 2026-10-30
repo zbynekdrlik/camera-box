@@ -536,4 +536,29 @@ mod tests {
             "the last judged clean report completes the run"
         );
     }
+
+    /// Review round 4 (a nit): an unjudged report in the middle of a real delay overuse run leaves
+    /// the over-use streak where it was, so a `bpp_after_overuse` of 2 still asks at the next
+    /// over-used report.
+    #[test]
+    fn an_unjudged_report_keeps_the_overuse_streak() {
+        let mut c = Congestion::new(CongestionConfig {
+            bpp_after_overuse: 2,
+            ..CongestionConfig::default()
+        });
+        assert!(!c.on_report(&rep(1, 6_000, 20_000, 20_000), 1.0).bpp_down);
+        let s = c.on_report(
+            &PathReport {
+                queue_delay_us: None,
+                delay_unjudged: true,
+                ..rep(2, 0, 20_000, 20_000)
+            },
+            2.0,
+        );
+        assert_eq!(s.state, PathState::Hold);
+        assert!(
+            c.on_report(&rep(3, 6_000, 20_000, 20_000), 3.0).bpp_down,
+            "the second over-used report in the run asks"
+        );
+    }
 }
