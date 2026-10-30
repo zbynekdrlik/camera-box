@@ -1034,6 +1034,12 @@ source line). Then:
    port like a download on the stream PC: `iperf3 -c 10.77.9.204 -p 5299 -t 60 -b 400M`, then
    (restart the server) the same without `-b` for 60 s (TCP saturates the port). A UDP flood
    (`-u -b 700M`) is the harsh, unresponsive case of the bench.
+   iperf3 is NOT installed on strih-snv / stream-snv (30.10.2026) and the appliance gets no extra
+   package for a test: run a one-shot python TCP sink on stream-snv instead (`socket` bind :5299,
+   accept one client, `recv(1 << 20)` until EOF, print bytes/s; started with `nohup` in the MCP
+   shell, exits after the client) and a python `sendall` loop of 1 MiB buffers for 60 s on dev1.
+   The 30.10.2026 run measured 365 Mb/s alongside the ~600 Mb/s link: one concealed slice at the
+   onset, then bpp 8 -> 6 with no further loss, back to 8 about 70 s after the end.
 3. Watch, each 5 s window:
    - strih `jxs-output` line: `path=overuse` lines appear and the `jxs send: path overuse ...`
      log line, `cong_pct` drops, `jxs send: bpp 8 -> 7 (congestion; ...)` steps BEFORE any
