@@ -543,7 +543,9 @@ def test_one_window_end_to_end(rig):
     merge = _calls(p["log"], "verdict")[0]
     assert "--merge-partials" in merge and "--switch-schedule" in merge
     assert merge[merge.index("--cam2-run-id") + 1] == "4242"
-    assert "--av-expected-ms" not in merge, "the verdict's own default is the single source"
+    # issue 1482: the soak centres the A/V gate on the test feed's own leg, the same expected offset the
+    # E2E passes (the rig's default feed is direct: -45 ms), never the verdict's camera+monitor default.
+    assert merge[merge.index("--av-expected-ms") + 1] == "-45"
     assert not any(a.startswith("--burn-") for a in merge)
 
     _assert_rig_restored(p)
