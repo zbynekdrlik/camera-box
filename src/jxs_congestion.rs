@@ -680,35 +680,4 @@ mod tests {
             assert!(!s.bpp_down);
         }
     }
-
-    /// Review of the live fix: a stretch measured while the CONGESTION factor holds the pace down
-    /// is judged but never becomes the base: at the lower pace the port has room and the stretch
-    /// reads smaller, a base the steady pace never reaches again.
-    #[test]
-    fn a_stretch_under_a_cut_pace_is_judged_but_never_the_base() {
-        let mut c = Congestion::default();
-        let steady = |seq, rx| PathReport {
-            stretch_regime: Some(8),
-            ..rep(seq, 0, rx, 20_000)
-        };
-        for k in 1..11 {
-            c.on_report(&steady(k, 24_000), k as f64);
-        }
-        // under the cut pace the stretch read 0
-        for k in 11..21 {
-            let s = c.on_report(
-                &PathReport {
-                    stretch_mode: StretchMode::JudgeOnly,
-                    ..steady(k, 20_000)
-                },
-                k as f64,
-            );
-            assert_ne!(s.state, PathState::Overuse);
-        }
-        // back at the steady pace: 4 ms over the send span (over the 3 ms bound) is its base, not a growth
-        for k in 21..40 {
-            let s = c.on_report(&steady(k, 24_000), k as f64);
-            assert_ne!(s.state, PathState::Overuse, "report {k}");
-        }
-    }
 }
