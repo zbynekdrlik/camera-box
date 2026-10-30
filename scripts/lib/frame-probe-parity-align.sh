@@ -34,6 +34,8 @@
 _FPPA_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$_FPPA_HERE/cambox-offline-ack.sh"
+# shellcheck source=scripts/lib/ci-build-job-run.sh
+. "$_FPPA_HERE/ci-build-job-run.sh"
 
 # --- PURE decision (no network, no SSH -- unit-tested by sourcing this file) -------------------
 
@@ -237,9 +239,9 @@ frame_probe_align_resolve_ci_bin() {
       return 0
     fi
     local run_id
-    run_id="$(gh run list --repo "$repo" --commit "$sha" --workflow ci.yml --status success --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null || true)"
+    run_id="$(ci_build_job_run_id "$repo" "$sha")"
     if [ -z "$run_id" ]; then
-      echo "[0/8] frame-probe parity auto-align (#1138): no successful ci.yml run for commit ${sha:0:12} to source probe-tools-linux-amd64 (self-heals once ci.yml publishes it, issue 1245); the [1/8] hard pin below REFUSES the run (fail-closed, issue 1235)." >&2
+      echo "[0/8] frame-probe parity auto-align (#1138): the Build job of the ci.yml run for commit ${sha:0:12} has not succeeded (no probe-tools-linux-amd64 yet; self-heals once it does, issues 1245 + 1387); the [1/8] hard pin below REFUSES the run (fail-closed, issue 1235)." >&2
       printf ''
       return 0
     fi

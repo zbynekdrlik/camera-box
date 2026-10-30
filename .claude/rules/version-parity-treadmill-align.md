@@ -217,3 +217,13 @@ push/workflow_dispatch runs resolve the seam's ternary to plain `github.sha` the
 workflow always SETS the seam — never literally unset — but that resolves to the same value
 `GITHUB_SHA` would, since both are the real head on those events).
 `FRAME_PROBE_ALIGN_CI_BRANCH` (the old branch-selection seam) is REMOVED — nothing else consumed it.
+
+## The run may still be RUNNING: accept it once its `Build` job succeeded (issue 1387, 30.10.2026)
+
+Both aligns resolve the commit's ci.yml run through ONE helper, `ci_build_job_run_id REPO SHA`
+(`scripts/lib/ci-build-job-run.sh`): the run in ANY state, accepted once its `Build` job (the one
+that uploads `camera-box-linux-amd64` + `probe-tools-linux-amd64`) completed with success; empty
+while it runs or after it failed. Never `--status success` on the whole run: the Python harness
+tests make the run take 30+ minutes, while the E2E's own fetch now waits only for the windows-probe
+job, so the harness reaches `[0/8]` long before the run concludes (E2E run 41001425945: the
+frame-probe align found nothing). A red ci.yml still blocks the merge by itself.
