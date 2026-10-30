@@ -57,13 +57,13 @@ pub fn wire_ns(wire_bytes: u64, mbps: u32) -> u64 {
     bits_x1000.div_ceil(mbps.max(1) as u128) as u64
 }
 
-/// A pace setting: 0 = line rate (no pacing), else [`PACE_MBPS_MIN`]..=[`PACE_MBPS_MAX`].
+/// A pace setting: 0 = automatic (`super::pace_auto`), else [`PACE_MBPS_MIN`]..=[`PACE_MBPS_MAX`].
 pub fn check_pace_mbps(mbps: u32) -> Result<u32, String> {
     if mbps == 0 || (PACE_MBPS_MIN..=PACE_MBPS_MAX).contains(&mbps) {
         Ok(mbps)
     } else {
         Err(format!(
-            "pace {mbps} Mb/s is not 0 (line rate) or {PACE_MBPS_MIN}..={PACE_MBPS_MAX}"
+            "pace {mbps} Mb/s is not 0 (automatic) or {PACE_MBPS_MIN}..={PACE_MBPS_MAX}"
         ))
     }
 }

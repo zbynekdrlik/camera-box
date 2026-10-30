@@ -131,7 +131,7 @@ static obs_properties_t *jxs_output_getproperties(void *)
 	obs_properties_add_int(props, PROP_JXS_BPP_MAX, "Highest bpp (0 = 8; = lowest: fixed)", 0,
 			       CB_JXS_OUT_MAX_BPP, 1);
 	obs_properties_add_text(props, PROP_JXS_CORES, "Encoder cores (cpulist, empty = all)", OBS_TEXT_DEFAULT);
-	obs_properties_add_int(props, PROP_JXS_PACE_MBPS, "Send pace, Mb/s of wire (0 = line rate)", 0,
+	obs_properties_add_int(props, PROP_JXS_PACE_MBPS, "Send pace, Mb/s of wire (0 = automatic from the receiver's link)", 0,
 			       CB_JXS_OUT_PACE_MBPS_MAX, 50);
 	return props;
 }
@@ -236,7 +236,7 @@ static bool jxs_output_start(void *data)
 	/* the JPEG XS indicator's row (issue 1387): published only while the output runs */
 	cb_jxs_state().set_entry(o, CB_JXS_STATE_OUTPUT, name, "to " + target);
 	obs_log(LOG_INFO,
-		"jxs-output '%s': started -- the program %ux%u %s at %.2f fps to %s (stream id %u, bpp %u..%u, 0 = the sender's default; cores '%s', empty = all; pace %u Mb/s, 0 = line rate), each frame stamped with the genlock emit timecode of the NDI output, send ABI %u (issue 1387)",
+		"jxs-output '%s': started -- the program %ux%u %s at %.2f fps to %s (stream id %u, bpp %u..%u, 0 = the sender's default; cores '%s', empty = all; pace %u Mb/s, 0 = automatic from the receiver's link), each frame stamped with the genlock emit timecode of the NDI output, send ABI %u (issue 1387)",
 		name, video_output_get_width(video), video_output_get_height(video),
 		get_video_format_name(video_output_get_format(video)), framerate, target.c_str(),
 		(unsigned)cfg.stream_id, (unsigned)cfg.bpp_min, (unsigned)cfg.bpp_max, cores.c_str(),
@@ -254,13 +254,16 @@ static void jxs_output_log_status(jxs_output *o, const cbjxs_send_stats &st)
 		" stamp_dup=%" PRIu64
 		" encode_ms_avg/max=%.2f/%.2f first_slice_ms_avg=%.2f copy_ms_avg/max=%.2f/%.2f bpp=%u auto=%s"
 		" reports=%" PRIu64 " report_age_s=%.1f send_errors=%" PRIu64 " encode_errors=%" PRIu64
-		" pace_mbps=%u wire_ms_avg/max=%.2f/%.2f (issue 1387)",
+		" pace_mbps=%u wire_ms_avg/max=%.2f/%.2f pace_src=%s rx_link_mbps=%u tx_link_mbps=%u"
+		" path=%s cong_pct=%u queue_ms=%.1f fec_sent=%" PRIu64 " fec_repaired=%" PRIu64 " (issue 1387)",
 		obs_output_get_name(o->output), st.window_s > 0.0 ? (double)st.frames / st.window_s : 0.0,
 		st.frames, st.dropped_busy, o->offered, o->taken, o->not_taken, o->refused, o->stamp_dup,
 		st.encode_ms_avg,
 		st.encode_ms_max, st.first_slice_ms_avg, st.copy_ms_avg, st.copy_ms_max, st.bpp,
 		st.auto_bpp ? "on" : "off", st.reports, st.report_age_s, st.send_errors, st.encode_errors,
-		st.pace_mbps, st.wire_ms_avg, st.wire_ms_max);
+		st.pace_mbps, st.wire_ms_avg, st.wire_ms_max, cb_jxs_out_pace_source(st.pace_source), st.rx_link_mbps,
+		st.own_link_mbps, cb_jxs_out_path_state(st.path_state), st.congestion_pct,
+		st.queue_delay_us == UINT32_MAX ? -1.0 : st.queue_delay_us / 1000.0, st.fec_sent, st.fec_repaired);
 	const double fps = st.window_s > 0.0 ? (double)st.frames / st.window_s : 0.0;
 	/* the indicator's errors: encode_errors already counts a refused picture (send-ffi header) */
 	cb_jxs_state().publish_window(o, (uint32_t)(fps * 100.0 + 0.5), st.bpp * 100u, 0, 0, st.dropped_busy,

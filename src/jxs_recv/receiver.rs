@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::{realtime_100ns, DecodeSink, JxsRecvSocket};
+use crate::jxs_link::congestion_meter::{CongestionMeter, WallSteps};
+use crate::jxs_link::fec::{FecRepair, FEC_MAGIC};
 use crate::jxs_link::{
     self, FrameAssembler, FrameReport, PacketHeader, PushOutcome, RecvWindow, ReportWindow,
 };
@@ -99,6 +101,8 @@ pub struct ReceiverTotals {
     pub header_changes: u64,
     /// Decoded frames dropped because the caller did not poll in time.
     pub dropped_unread: u64,
+    /// Datagrams the FEC rebuilt (issue 1387 item 3).
+    pub fec_repaired: u64,
 }
 
 impl ReceiverTotals {
@@ -115,6 +119,7 @@ impl ReceiverTotals {
         self.resyncs += w.resyncs;
         self.foreign += w.foreign;
         self.reports_sent += w.reports_sent;
+        self.fec_repaired += w.fec_repaired;
     }
 }
 
@@ -185,6 +190,17 @@ pub struct JxsReceiver {
     current: Option<DecodedFrame>,
     /// The newest failed report send, handed out once by [`Self::take_last_error`].
     report_error: Option<String>,
+    /// The interface the slices arrive on (its index and name) and its speed, read once per
+    /// report (issue 1387: the report carries it, the sender paces to it).
+    link_iface: Option<(u32, String)>,
+    link_mbps: Option<u32>,
+    /// The early congestion signal of each report period (issue 1387 item 2), on the wall clock
+    /// minus its steps.
+    meter: CongestionMeter,
+    wall_steps: WallSteps,
+    /// The FEC repair state and its rebuilt-datagram buffer (issue 1387 item 3).
+    fec: FecRepair,
+    rebuilt: Vec<u8>,
 }
 
 // The strih OBS source opens the receiver on one thread and polls it on another (jxs/recv-ffi's
@@ -197,6 +213,24 @@ const _: fn() = || {
 fn lock(m: &Mutex<Outbox>) -> std::sync::MutexGuard<'_, Outbox> {
     // A panic while holding the lock leaves plain counters and buffers: keep using them.
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Hand one datagram (received or rebuilt by the FEC) to the assembler and count its outcome.
+fn push_one(
+    assembler: &mut FrameAssembler,
+    sink: &mut DecodeSink<Callback>,
+    window: &mut RecvWindow,
+    h: &PacketHeader,
+    datagram: &[u8],
+    arrival: i64,
+) {
+    match assembler.push(h, &datagram[jxs_link::HEADER_LEN..], arrival, sink) {
+        PushOutcome::Accepted => {}
+        PushOutcome::Duplicate => window.duplicate += 1,
+        PushOutcome::Stale => window.stale += 1,
+        PushOutcome::Malformed => window.malformed += 1,
+        PushOutcome::Resync => window.resyncs += 1,
+    }
 }
 
 impl JxsReceiver {
@@ -231,6 +265,12 @@ impl JxsReceiver {
             timeout: None,
             current: None,
             report_error: None,
+            link_iface: None,
+            link_mbps: None,
+            meter: CongestionMeter::default(),
+            wall_steps: WallSteps::default(),
+            fec: FecRepair::default(),
+            rebuilt: Vec::with_capacity(jxs_link::DATAGRAM_LEN),
         })
     }
 
@@ -251,6 +291,32 @@ impl JxsReceiver {
     /// steps at once (a receiver cap) without a reopen.
     pub fn set_max_bpp(&mut self, max_bpp: u8) {
         self.cfg.max_bpp = max_bpp;
+    }
+
+    /// The speed of the link the slices arrive on (Mb/s), as the last report carried it (`None` =
+    /// unknown: no datagram yet, or a device with no speed and no lower device that has one).
+    pub fn link_mbps(&self) -> Option<u32> {
+        self.link_mbps
+    }
+
+    /// The name of the interface the slices arrive on (`None` = none yet).
+    pub fn link_iface(&self) -> Option<&str> {
+        self.link_iface.as_ref().map(|(_, n)| n.as_str())
+    }
+
+    /// Re-read the receiving interface's speed (its name is looked up again only when the slices
+    /// start arriving on another interface).
+    fn refresh_link(&mut self) {
+        let Some(idx) = self.sock.last_ifindex() else {
+            return;
+        };
+        if self.link_iface.as_ref().map(|(i, _)| *i) != Some(idx) {
+            self.link_iface = jxs_link::link_speed::iface_name(idx).map(|n| (idx, n));
+        }
+        self.link_mbps = self
+            .link_iface
+            .as_ref()
+            .and_then(|(_, n)| jxs_link::link_speed::link_speed_mbps(n));
     }
 
     /// The camera id being taken (`None` until the first datagram when none was configured).
@@ -329,10 +395,32 @@ impl JxsReceiver {
             camera,
             sender,
             window,
+            fec,
+            rebuilt,
+            report,
             ..
         } = self;
         sock.recv_batch_from(|d, arrival, from| {
             window.datagrams += 1;
+            if d.first() == Some(&FEC_MAGIC) {
+                // a parity datagram of the taken camera: it may rebuild one lost datagram
+                if d.get(2).is_some_and(|c| camera.is_some_and(|k| k != *c)) {
+                    window.foreign += 1;
+                    return;
+                }
+                match fec.on_parity(d, rebuilt) {
+                    Err(_) => window.fec_malformed += 1,
+                    Ok(false) => {}
+                    Ok(true) => {
+                        if let Ok(h) = PacketHeader::decode(rebuilt) {
+                            window.fec_repaired += 1;
+                            report.note_fec_repaired();
+                            push_one(assembler, sink, window, &h, rebuilt, arrival);
+                        }
+                    }
+                }
+                return;
+            }
             let Ok(h) = PacketHeader::decode(d) else {
                 window.malformed += 1;
                 return;
@@ -349,12 +437,14 @@ impl JxsReceiver {
                 *sender = from;
             }
             window.bytes += (d.len() - jxs_link::HEADER_LEN) as u64;
-            match assembler.push(&h, &d[jxs_link::HEADER_LEN..], arrival, sink) {
-                PushOutcome::Accepted => {}
-                PushOutcome::Duplicate => window.duplicate += 1,
-                PushOutcome::Stale => window.stale += 1,
-                PushOutcome::Malformed => window.malformed += 1,
-                PushOutcome::Resync => window.resyncs += 1,
+            push_one(assembler, sink, window, &h, d, arrival);
+            // the parity may already be in: this datagram may complete a repair
+            if fec.on_data(&h, &d[jxs_link::HEADER_LEN..], rebuilt) {
+                if let Ok(rh) = PacketHeader::decode(rebuilt) {
+                    window.fec_repaired += 1;
+                    report.note_fec_repaired();
+                    push_one(assembler, sink, window, &rh, rebuilt, arrival);
+                }
             }
         })?;
         self.note_frames();
@@ -366,8 +456,15 @@ impl JxsReceiver {
     fn note_frames(&mut self) {
         let events = std::mem::take(&mut lock(&self.out).events);
         let ms = |t: i64| t as f64 / 10_000.0;
+        let steps = self.wall_steps.steps_100ns();
         for (r, decoded_at, ok) in &events {
             let tc = r.timecode as i64;
+            self.meter.note_frame(
+                r.timecode,
+                r.first_arrival - steps,
+                r.last_arrival - steps,
+                r.lost_slices,
+            );
             if *ok {
                 let latency_ms = ms(decoded_at - tc);
                 self.window.note_frame(
@@ -405,9 +502,15 @@ impl JxsReceiver {
             return;
         }
         self.last_report = Instant::now();
-        let r = self
+        self.refresh_link();
+        let mut r = self
             .report
             .take(self.camera.unwrap_or(0), self.cfg.max_bpp as u32);
+        r.link_mbps = self.link_mbps.unwrap_or(0);
+        let c = self.meter.take();
+        r.delay_mean_us = c.delay_mean_us;
+        r.delay_spread_us = c.delay_spread_us;
+        r.span_p50_us = c.span_p50_us;
         if let (true, Some(to), Some(_)) = (self.cfg.send_reports, self.sender, self.camera) {
             match self.sock.send_report(to, &r) {
                 Ok(()) => self.window.reports_sent += 1,

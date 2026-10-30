@@ -2,6 +2,7 @@
 //! encoder (split out of the parent module's tests to keep it under its size budget).
 
 use super::*;
+use std::net::UdpSocket;
 
 /// The status line's `handoff_age_ms` is the frame timecode's age on the wall clock when the
 /// capture thread hands the frame over, for every grid frame (a busy-dropped one too), and the
@@ -124,6 +125,7 @@ fn a_receiver_report_reaches_the_sender_through_its_connected_socket() {
         late_frames: 0,
         decode_p99_us: 2_000,
         last_timecode_100ns: 42,
+        ..Default::default()
     };
     rx.send_report(from, &report(5, 1)).unwrap();
     rx.send_report(from, &report(9, 2)).unwrap(); // another camera
@@ -200,6 +202,9 @@ fn the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_fra
             next_frame += Duration::from_millis(33);
         }
         rx.recv_batch_from(|d, _, from| {
+            if d[0] == jxs_link::fec::FEC_MAGIC {
+                return;
+            }
             let hd = jxs_link::PacketHeader::decode(d).unwrap();
             sender = from;
             let e = frames.entry(hd.timecode_100ns).or_insert((0, 0));
@@ -224,6 +229,7 @@ fn the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_fra
                     late_frames: 0,
                     decode_p99_us: 500,
                     last_timecode_100ns: frames.keys().next_back().copied().unwrap_or(0),
+                    ..Default::default()
                 };
                 rx.send_report(to, &r).unwrap();
                 seq += 1;
@@ -235,6 +241,9 @@ fn the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_fra
     // drain what is still on the wire
     for _ in 0..20 {
         rx.recv_batch_from(|d, _, _| {
+            if d[0] == jxs_link::fec::FEC_MAGIC {
+                return;
+            }
             let hd = jxs_link::PacketHeader::decode(d).unwrap();
             let e = frames.entry(hd.timecode_100ns).or_insert((0, 0));
             e.0 += 1;
@@ -262,4 +271,72 @@ fn the_auto_bpp_climbs_on_clean_reports_and_falls_on_a_loss_without_losing_a_fra
     );
     let datagrams_ok = frames.values().all(|&(n, _)| n >= packets);
     assert!(datagrams_ok, "every frame whole");
+}
+
+/// Issue 1387 (owner 29.10.2026, no hand-set pace): the sender paces to 90 % of the link the
+/// receiver names in its report, through the real packet thread. The loopback has no link speed
+/// (the sender's own link is unknown), so a 1000 Mb/s receiver link paces at 900; the status window
+/// names the source and both links.
+#[cfg(feature = "jxs")]
+#[test]
+fn the_sender_paces_to_the_link_the_receivers_report_names() {
+    use std::time::{Duration, Instant};
+    let mut rx = crate::jxs_recv::JxsRecvSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    rx.set_timeout(Some(Duration::from_millis(10))).unwrap();
+    let port = rx.local_addr().unwrap().port();
+    let (mut h, ready_rx) = JxsHandoff::unstarted();
+    let socket = JxsSocket::connect(&format!("127.0.0.1:{port}")).unwrap();
+    let opts = SenderOptions::new(BppMode::Fixed(4), None);
+    assert!(h.start_threads(ready_rx, socket, 5, vec![0, 1], opts));
+    let (w, ht) = (256u32, 64u32);
+    let frame: Vec<u8> = (0..w * ht * 2).map(|i| (i * 7 % 251) as u8).collect();
+    let start = Instant::now();
+    let mut next_frame = start;
+    let mut last_report = start;
+    let mut seq = 0u32;
+    let mut sender: Option<std::net::SocketAddr> = None;
+    let t0 = 1_761_730_000i64 * 10_000_000;
+    let mut k = 0i64;
+    let mut window = None;
+    while start.elapsed() < Duration::from_secs(12) && window.is_none() {
+        if Instant::now() >= next_frame {
+            h.offer(&JxsFrame {
+                data: &frame,
+                width: w,
+                height: ht,
+                stride: w * 2,
+                yuyv: true,
+                timecode_100ns: t0 + k * 10_000_000 / 30,
+                capture_realtime_100ns: 0,
+                emit_fps: 30,
+            });
+            k += 1;
+            next_frame += Duration::from_millis(33);
+        }
+        rx.recv_batch_from(|_, _, from| sender = from).unwrap();
+        if last_report.elapsed() >= Duration::from_millis(200) {
+            if let Some(to) = sender {
+                let r = jxs_link::ReceiverReport {
+                    camera_id: 5,
+                    seq,
+                    frames: 6,
+                    last_timecode_100ns: (t0 + k * 10_000_000 / 30) as u64,
+                    link_mbps: 1000,
+                    ..Default::default()
+                };
+                rx.send_report(to, &r).unwrap();
+                seq += 1;
+            }
+            last_report = Instant::now();
+        }
+        window = h.take_window().map(|(_, w)| w);
+    }
+    let w = window.expect("a status window within 12 s");
+    assert_eq!(
+        (w.pace_mbps, w.pace_source, w.rx_link_mbps, w.own_link_mbps),
+        (900, jxs_link::pace_auto::PaceSource::ReceiverLink, 1000, 0),
+        "{}",
+        w.status_line()
+    );
+    assert!(w.frames > 0, "{}", w.status_line());
 }

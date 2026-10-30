@@ -29,6 +29,10 @@ paths:
   - "vendor/obs-studio/frontend/components/SourceTreeItem.*"
   - "tests/genlock_jxs_state_parity_1387.rs"
   - "tests/genlock_jxs_indicator_1387.rs"
+  - "src/jxs_congestion.rs"
+  - "src/jxs_congestion_bench.rs"
+  - "scripts/lib/strih-jxs-verify.sh"
+  - "tests/python/test_strih_jxs_verify_1387.py"
 ---
 
 # The cambox JPEG XS link (issue 1387, slices 1, 1b, 2 + 3, and the in-OBS indicator)
@@ -45,11 +49,12 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
 - Transport (6489239017): our own UDP, 16-byte header, NO RTP, no retransmission, no jitter
   buffer, each slice on the wire the moment it is encoded, at line rate, UDP GSO. Pacing at
   500 Mb/s measured ~24.5 ms vs 15.6 ms at line rate: never pace a CAMBOX (1 GbE into the strih's
-  10 GbE, no port steps the burst down; `CAMERA_BOX_JXS_PACE_MBPS` defaults to 0). The ONE
-  exception is a link that steps DOWN on the way: the strih program output (10 GbE) to stream-snv
-  (1 GbE) loses slices at line rate, so it paces (section "Send pacing" below; decided by the
-  main session in the slice-3 fix item of comment 6507194583 and its lane brief, 29.10.2026; the
-  cambox default stays line rate, so the owner's choice above is unchanged for the cameras).
+  10 GbE, no port steps the burst down). The ONE exception is a link that steps DOWN on the way:
+  the strih program output (10 GbE) to stream-snv (1 GbE) loses slices at line rate, so it paces.
+  **Since 29.10.2026 (owner, ROZHODNUTÉ 6509641172 + 6510039271) the pace is AUTOMATIC, from the
+  receiver's link speed, never a hand-set number** (section "The automatic pace" below): a
+  receiver as fast as the sender (a cambox to strih) keeps line rate, so the owner's camera choice
+  holds by construction; `CAMERA_BOX_JXS_PACE_MBPS` / `jxs_pace_mbps` > 0 is only an override.
 - No hardware change: the camboxes stay on 1 GbE.
 - **30 fps, the strih grid** (owner decision 29.10.2026, slice 1b): only the frames on the strih
   30 fps grid go over JPEG XS; NDI stays at 60 fps, unchanged. The encode budget is 33.3 ms.
@@ -121,9 +126,10 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   - The status line every 5 s: `jxs send: fps= bpp= auto= bpp_reason= frames= slices= bytes=
     dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
     capture_age_ms_avg/min/max= first_slice_ms_avg/max= encode_ms_avg/max= send_errors=
-    encode_errors= report_age_s= reports= pace_mbps= wire_ms_avg/max= (issue 1387)`
+    encode_errors= report_age_s= reports= pace_mbps= wire_ms_avg/max= pace_src= rx_link_mbps=
+    tx_link_mbps= path= cong_pct= queue_ms= fec_sent= fec_repaired= (issue 1387)`
     (`pace_mbps` 0 = line rate; `wire_ms` = a whole frame's first send -> its last send returned,
-    see "Send pacing").
+    see "Send pacing"; the rest: "The automatic pace", "Early congestion control", "FEC").
   - **`handoff_age_ms` / `capture_age_ms`** (coordinator request 29.10, the cam5 sawtooth: the
     receiver's first arrival after the timecode wandered 21-39 ms, ~+3.5 ms per 5 s then a reset,
     while the capture phase tracker was locked at +18 ppm): the wall clock (`CLOCK_REALTIME`, the
@@ -210,12 +216,46 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
     N+1 is submitted while the sending thread still paces frame N (libobs catching up after a
     lag, or ~12 bpp at 900 Mb/s), N's tail lands in N+1's `encode_ms` but not in its paced wait,
     so the auto bpp sees that one frame as slower than its codec; rare at the default 8 bpp max.
-  - Settings: the cambox `CAMERA_BOX_JXS_PACE_MBPS` (default 0, a refused value WARNs and keeps
-    line rate), the C ABI's `cbjxs_send_config.pace_mbps`, the strih output's `jxs_pace_mbps`
-    (default 900, below). The "link ON" line names it (`send line rate (no pacing)` / `send paced
-    at 900 Mb/s of wire, at most 16 datagrams per send`).
+  - Settings: the cambox `CAMERA_BOX_JXS_PACE_MBPS`, the C ABI's `cbjxs_send_config.pace_mbps`,
+    the strih output's `jxs_pace_mbps`: **0 (the default everywhere) = automatic** (below), a
+    value 100..=100000 = that rate, fixed (a refused env value WARNs and keeps automatic). The
+    "link ON" line names it (`send paced automatically (90% of the receiver's link ...)` / `send
+    paced at 800 Mb/s of wire, at most 16 datagrams per send`).
+- **The automatic pace (`src/jxs_link/pace_auto.rs` pure, `src/jxs_send/pace_control.rs` on the
+  packet thread; owner 29.10.2026: "nesmie to stáť na sieťovom tuningu", "aby zmeny co urobis pre
+  snv fungovali aj v pp ak tam maju ine sietovky").**
+  - **Where the speeds come from (`src/jxs_link/link_speed.rs`).** The RECEIVER names the
+    interface each datagram arrives on (`IP_PKTINFO` on its socket -> `ipi_ifindex` ->
+    `if_indextoname`) and reads `/sys/class/net/<if>/speed` once per report; `-1` / `EINVAL` (down,
+    Wi-Fi, a tunnel, loopback) = unknown, and a virtual device (VLAN, bond, bridge, macvlan) with
+    no speed of its own takes the slowest known `lower_*` device (depth <= 4, a loop ends unknown).
+    It sends the speed in report v2 (`link_mbps`, 0 = unknown). The SENDER reads its own the same
+    way from the interface that holds its connected socket's local address (`getifaddrs`), re-read
+    once a second.
+  - **The decision (`pace_auto::decide`), in order:** an explicit setting wins; a receiver link
+    SLOWER than the sender's own (or the own unknown) = pace at 90 % of it (`LINK_PACE_PERCENT`;
+    1 GbE -> 900, the rate the 29.10.2026 23:35 live run carried at 8 bpp with 0 lost slices over
+    112 windows; 2.5 GbE -> 2250); as fast or faster = line rate; no receiver link yet (no report,
+    or a version-1 receiver) = the SAFE START, the frame spread: the frame's own wire bits over half
+    the frame interval (~579 Mb/s at 4 bpp 1080p30, FEC included; from the frame, never a guessed
+    link), never
+    above the own link (then line rate). Then the congestion factor (below), never on a fixed pace.
+  - **Every change is ONE log line** `jxs send: pace A -> B Mb/s of wire (<source>; receiver link X
+    Mb/s, own link Y Mb/s on <if>; ...)` and takes effect at the next frame boundary (a new
+    `PaceSchedule`). The status lines carry `pace_src=` (`fixed` | `receiver-link` | `line-rate` |
+    `start-spread` | `congestion`) `rx_link_mbps=` `tx_link_mbps=`.
+  - A 1 GbE cambox paces its FIRST second at the frame spread (~579 Mb/s at 4 bpp), then the
+    strih's first report (10 GbE) puts it at line rate. A v1 receiver (not upgraded) leaves the
+    sender at the frame spread for good.
+- **DSCP (issue 1387 item 4):** every JPEG XS datagram and every receiver report leaves with
+  `IP_TOS` 0x88 = DSCP AF41 (34, `JXS_IP_TOS` / `JXS_DSCP`, RFC 4594 / RFC 8837 interactive video),
+  set on both sockets beside `SO_MARK 0x1387`. Not EF: the voice class, which a strict-priority
+  switch queue would serve at the cost of every other flow under 500 Mb/s of video. A marking only:
+  a switch that trusts DSCP queues the link apart, one that does not ignores it (the MikroTik chain's
+  trust is not configured by this repo). Read back on a box: `ss -tuie` does not show it; a capture
+  (`tcpdump -v -c1 udp port 7100`) prints `tos 0x88`.
 - **Receive: `src/jxs_recv.rs` + `src/jxs_link/assembler.rs`.** `recvmmsg` + `UDP_GRO` +
-  `SO_TIMESTAMPNS`. The assembler hands each packet on as soon as everything before it in its
+  `SO_TIMESTAMPNS` + `IP_PKTINFO` (the arriving interface, `last_ifindex`). The assembler hands each packet on as soon as everything before it in its
   frame is complete; it finalizes a frame (missing packets = lost) when the NEXT frame is complete
   or a third frame arrives. `DecodeSink` replaces a lost packet with the SAME index of the
   previous frame (JPEG XS slices are independently coded), so loss costs a stale stripe, never a
@@ -309,8 +349,8 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   max_bpp 0 = no limit, sent in every report), `cbjxs_next_frame(rx, timeout_ms, &frame)` (1 / 0 /
   -1 socket error / -2 NULL or a panic), `cbjxs_set_max_bpp` (the report's cap, no reopen),
   `cbjxs_recv_buffer_bytes`, `cbjxs_get_stats`, `cbjxs_take_error`, `cbjxs_local_port`,
-  `cbjxs_abi_version` (`CBJXS_ABI_VERSION` 2 since slice 3's `cbjxs_frame.chroma`; bump it on any
-  struct or signature change), and
+  `cbjxs_abi_version` (`CBJXS_ABI_VERSION` 2 since slice 3's `cbjxs_frame.chroma`, 3 since
+  `cbjxs_stats.link_mbps` + `fec_repaired`; bump it on any struct or signature change), and
   `cbjxs_close`. The stats call is `cbjxs_get_stats`: C cannot have a function named like the
   `cbjxs_stats` typedef. The frame's planes stay valid until the next `next_frame` / `close`.
 - No panic crosses into C (`catch_unwind`). A panic poisons the receiver: `-2` from then on, close it.
@@ -352,7 +392,8 @@ through the DistroAV output `camera_box_jxs_output` (section "Slice 3" below). i
   - `jxs-source '<name>': listening on UDP P (camera C, 0 = the first heard; max bpp M, 0 = no limit; receive buffer B bytes) -- JPEG XS on the genlock FIFO, the receiver report back to the sender (ABI 2) (issue 1387)`
     (B below ~4 MB on strih-snv = raise `net.core.rmem_max`: a 1080p frame is ~2 MB at 8 bpp)
   - every 5 s: `jxs-source '<name>': fps= frames= lost_slices= concealed= undecodable= reopens=
-    decoder_reopens= bpp= reports= report_errors= dropped_unread= foreign= camera= (issue 1387)`
+    decoder_reopens= bpp= reports= report_errors= dropped_unread= foreign= camera= link_mbps=
+    fec_repaired= (issue 1387)` (`link_mbps` = the receiving interface's speed the report carries)
     (`bpp` = the window's payload bits per pixel, the bpp the camera sends; `reopens` = socket
     reopens; `decoder_reopens` = picture-header changes, one per sender bpp step)
   - `frames arriving` / `not connected -- no frame for 3 s (or none yet)`, `max bpp A -> B (0 = no
@@ -474,7 +515,10 @@ wire.
   100..=100000 refuses the open by name), `cbjxs_send_frame` (1 taken / 0 busy or off-grid / -1 refused
   / -2 NULL or a panic), `cbjxs_send_get_stats` (1 = a window not handed out before),
   `cbjxs_send_take_error`, `cbjxs_send_close` (bounded ~2 s), `cbjxs_send_abi_version` (2 since the send pacing: the
-  config's `pace_mbps` + `reserved2`, the stats' `pace_mbps`, `wire_ms_avg`, `wire_ms_max`),
+  config's `pace_mbps` + `reserved2`, the stats' `pace_mbps`, `wire_ms_avg`, `wire_ms_max`; **3**
+  since 29.10.2026: `pace_mbps` 0 = automatic, the stats' `pace_source` (`CBJXS_SEND_PACE_*`, was
+  `reserved2`), `rx_link_mbps`, `own_link_mbps`, `path_state` (`CBJXS_SEND_PATH_*`),
+  `congestion_pct`, `queue_delay_us`, `fec_sent`, `fec_repaired`),
   `cbjxs_send_set_log` (the sender's tracing lines, INFO and above, one line per call, into the
   caller's log; a process-global subscriber, installed once).
 - **ONE Rust archive in DistroAV.** `jxs-recv-ffi` depends on `jxs-send-ffi` (`pub use
@@ -517,7 +561,8 @@ wire.
   returns: `tx_mutex` + `tx = nullptr` are what keep it off a closed sender (keep both); destroy is
   safe because `obs_output_destroy` joins that thread.
 - Settings: `jxs_target` (host:port, IPv4), `jxs_stream_id` (1..255, default 100: outside the CAM
-  range), `jxs_pace_mbps` (**default 900**: strih-snv sends on 10 GbE and stream-snv, the only
+  range), `jxs_pace_mbps` (**default 0 = automatic since 29.10.2026**, see "The automatic pace";
+  the history of the 900 default follows: strih-snv sends on 10 GbE and stream-snv, the only
   target today, receives on a 1 GbE port whose switch buffer dropped the tail of every line-rate
   slice burst, `lost_slices` 1-15 in 10 of 21 windows of the slice-3 run, so the auto bpp held at
   4; 900 carries even 12 bpp in time (29.4 ms); the port's other traffic, `NDI 2ME PGM` and the
@@ -547,7 +592,8 @@ wire.
   - `jxs-output 'camera-box JPEG XS program': started -- the program WxH NV12 at 30.00 fps to <target> (stream id 100, bpp 0..0, ...)`
   - every 5 s: `jxs-output '<name>': fps= frames= dropped_busy= offered= taken= not_taken= refused=
     stamp_dup= encode_ms_avg/max= first_slice_ms_avg= copy_ms_avg/max= bpp= auto= reports=
-    report_age_s= send_errors= encode_errors= pace_mbps= wire_ms_avg/max= (issue 1387)` (`copy_ms` =
+    report_age_s= send_errors= encode_errors= pace_mbps= wire_ms_avg/max= pace_src= rx_link_mbps=
+    tx_link_mbps= path= cong_pct= queue_ms= fec_sent= fec_repaired= (issue 1387)` (`copy_ms` =
     the copy on libobs' video
     thread; `report_age_s` -1.0 = never a report; the window's raw_video counters reset when the
     sender publishes one)
@@ -587,7 +633,7 @@ wire.
    WS without an OBS restart:
    ```bash
    ssh newlevel@10.77.9.202 'mkdir -p ~/.config/obs-studio/plugin_config/distroav && cat > ~/.config/obs-studio/plugin_config/distroav/jxs-output.json' <<'JSON'
-   {"enabled": true, "jxs_target": "10.77.9.204:7100", "jxs_stream_id": 100, "jxs_bpp_min": 0, "jxs_bpp_max": 0, "jxs_cores": "", "jxs_pace_mbps": 900}
+   {"enabled": true, "jxs_target": "10.77.9.204:7100", "jxs_stream_id": 100, "jxs_bpp_min": 0, "jxs_bpp_max": 0, "jxs_cores": "", "jxs_pace_mbps": 0}
    JSON
    ```
    ```python
@@ -597,8 +643,10 @@ wire.
    o._rpc(ws, "StartOutput", {"outputName": "camera-box JPEG XS program"})
    o._rpc(ws, "GetOutputStatus", {"outputName": "camera-box JPEG XS program"})   # outputActive: true
    ```
-   **`jxs_pace_mbps`:** 900 for stream-snv's 1 GbE port (a file without the key gets the same
-   default). Change it in the file AND with `SetOutputSettings {"jxs_pace_mbps": N}`, then
+   **`jxs_pace_mbps`:** 0 = automatic (a file without the key gets the same default): the
+   output paces to 90 % of the link stream-snv reports (`pace_src=receiver-link rx_link_mbps=1000
+   pace_mbps=900`). A file still carrying the old `900` runs a FIXED 900 (`pace_src=fixed`):
+   set it to 0. Change it in the file AND with `SetOutputSettings {"jxs_pace_mbps": N}`, then
    `StopOutput` + `StartOutput` (settings apply at the next start). The started line and the sender's
    `link ON` line name the pace; every status line carries `pace_mbps=900 wire_ms_avg/max=`. If
    stream still shows `lost_slices` > 0 at 900, step down (800, 700) before suspecting anything
@@ -750,9 +798,15 @@ is on, and per source whether it comes over NDI or JPEG XS.
 
 ## The automatic bpp (issue 1387, owner decision 6495938345)
 
-- **The back channel: ONE 32-byte receiver report per second** (`jxs_link::ReceiverReport`,
-  layout in the `src/jxs_link.rs` module doc next to the slice datagram: magic `'R'`, version 1,
-  camera id, max bpp, seq, frames, lost slices, late frames, decode p99 us, last timecode). The
+- **The back channel: ONE 56-byte receiver report per second** (`jxs_link::ReceiverReport`,
+  layout in the `src/jxs_link.rs` module doc next to the slice datagram: magic `'R'`, version 2,
+  camera id, max bpp, seq, frames, lost slices, late frames, decode p99 us, last timecode, then
+  link speed, delay MEAN (i32), delay spread, arrival span p50, FEC repaired, 4 reserved bytes;
+  version 2 was 48 bytes for a few never-deployed commits of this lane, the version byte did not
+  move). A 32-byte version 1 (slices 1-3) is
+  still read, its version-2 fields unknown. **Cutover:** an OLD sender drops a v2 report as
+  `BadVersion`, so a new receiver (the OBS bundle) with an old cambox holds that cambox's auto bpp
+  at its floor until camera-box is upgraded too; deploy the camboxes with the same release. The
   receiver sends it from its LISTENING socket to the address the slices came from
   (`JxsRecvSocket::recv_batch_from` names it, `send_report` sends it); the sender's socket is
   connected, so only that receiver reaches it (`JxsSocket::take_report`: non-blocking, newest of
@@ -791,6 +845,10 @@ is on, and per source whether it comes over NDI or JPEG XS.
     connected socket; `JxsSocket::take_read_errors` adds those to `send_errors=`, so a receiver
     that is not listening still shows there.
   - While a step is being applied nothing else is decided (`Hold::Pending`).
+  - **DOWN one step at once on the congestion controller's ask** (`Second::congested`,
+    `StepReason::Congestion`, `congestion` in the bpp line): the receiver's queue grew before any
+    loss (section "Early congestion control" below). It counts against the level like a loss, and
+    such a second is never clean.
 - **How a step reaches the encoder: a NEW session, swapped at a frame boundary.** SVT-JPEG-XS has
   no call that changes the bpp of a live session (`svt_jpeg_xs_encoder_init` reads it once). The
   packet thread writes the wanted bpp into an `AtomicU32`; the feeder (`Sessions::prepare`) opens
@@ -805,6 +863,156 @@ is on, and per source whether it comes over NDI or JPEG XS.
 - Each change logs ONE INFO line: `jxs send: bpp 6 -> 7 (clean-10s; second: frames=30
   encode_p99_ms=14.80 dropped_busy=0 encode_errors=0) (issue 1387)`. The "link ON" line names the
   mode (`auto bpp 4..=8 (starts at 4, ...)` or `6 bpp (fixed by CAMERA_BOX_JXS_BPP, auto off)`).
+
+## Early congestion control: delay before loss (issue 1387 item 2, owner 29.10.2026)
+
+Owner (comment 6509906102): "nech je teda nase riesenie sota a nech aj nieco znesie a vie sa
+nejako obnovit rozchodit. Aby sa mi nestalo ze ... otvori nejake video na stream pc a sa mu
+saturne prijem a zacne padat video spoj/kvalita zo strih pc." The WebRTC GCC / L4S principle:
+react to a GROWING QUEUE, before the switch buffer overflows.
+
+- **The receiver's signal (`src/jxs_link/congestion_meter.rs`, pure),** per report period, into
+  report v2:
+  - `delay_mean_us` (i32): per frame `d` = first datagram arrival - genlock timecode, the
+    period's MEAN (review round 2: a p50 of a sawtooth jumps by the whole slot when the sets of the
+    two ends differ by one frame, a mean by that one frame over 30); `delay_spread_us`: its p90 -
+    p10, DIAGNOSTIC only (no decision reads it); `span_p50_us`: p50 of last - first arrival over the
+    period's WHOLE frames. The arrivals are on the wall clock MINUS its own steps (`WallSteps`:
+    `CLOCK_REALTIME - CLOCK_MONOTONIC` moves only on a dantesync step), so a step on the receiver
+    never reads as delay.
+  - `d` also holds the SENDER's own delay before its first send: on a cambox the capture's phase
+    in its 60 fps emit slot (the timecode is the slot boundary), a sawtooth that wanders 0..16.7 ms
+    and jumps a slot at an edge (the live cam5 `handoff_age` 21-39 ms). The receiver cannot remove
+    it (review round 1 of item 2), so:
+- **The sender's half (`PathDelay` in `src/jxs_congestion.rs`):** its own first-send delay per
+  frame (`PaceControl::on_first_send`, wall minus steps, its own `WallSteps`) over the timecodes
+  the report's second covers; path = the receiver's mean - its own mean = the path delay + the
+  clock offset, constant on a quiet path; the queue = the path above its minimum over the last 30
+  reports. **A sender wall step** (the nightly fleet date step) moves the timecode and not the own
+  delay, so it cancels per frame, but around it the receiver's frames of a period and the sender's
+  timecode window (newest - 1 s, newest] are not the same frames, and the means disagree by up to
+  the step (review round 3: 2 false congestion steps a night in the bench). So each own delay
+  carries a step EPOCH, bumped when the sender's OWN `WallSteps` value (read with each first send,
+  `on_first_send(tc, wall - steps, steps)`) moves more than 1 ms between two frames -- every
+  dantesync step, however small, never an encoder stall (a first version inferred it from a 50 ms
+  jump of the own delay: it missed a 25-50 ms step, a 5-10 ms false queue, and fired on stalls) --
+  and a report is judged only when its window is one epoch AND the same epoch as the previous
+  report's window: the step report and the one after it (about three after a backward step, while
+  the window still reaches pre-step frames) are UNJUDGED, and the very first report after a start
+  too. An unjudged report HOLDS the congestion control (`PathReport::delay_unjudged`: state hold,
+  the clean run neither grows nor restarts; counted as clean it would raise the pace during a real
+  queue). A duplicated report datagram is handled once. A path 100 ms above the base starts over,
+  a BACKSTOP only. Review round 2 REMOVED a rule that
+  moved the base on a "tight" jump over 3 ms: a real queue that drains at once (the download
+  stops) then left a phantom queue as big as the drain, and a queue that appears at once was
+  hidden. Small steps never reach `PathDelay` (both ends subtract `WallSteps`).
+- **The sender's controller (`src/jxs_congestion.rs`, pure, crate root like `jxs_auto_bpp.rs`),**
+  owned by `PaceControl`, one decision per new report seq:
+  - **overuse** = queue > 4 ms, or (only while PACED: at line rate the sender's own NIC is the
+    bottleneck by construction, and on a cambox NDI leaves ahead of JPEG XS in the egress priority
+    band, review round 2) the arrival span longer than this sender's own send span by
+    more than max(1.5 ms, 15 %) -- the send span = max(`wire_ms` p50 over its last 30 frames, the
+    frame's wire bytes over its OWN link: a 1 GbE cambox's NIC needs ~19 ms for an 8 bpp frame its
+    encoder hands over in ~14 ms, never a stretched path) -- or a lost slice: the pace
+    factor x0.85 at once (floor 50 %, and `pace_auto` never paces below a frame's own need: its rate
+    + 10 %), and a DELAY overuse asks the auto bpp for one step (`StepReason::Congestion`), at most
+    once per 1 s. A loss alone never asks (the auto bpp steps on the loss report itself);
+  - **clean** = queue < 1.5 ms, no stretch, no loss: after 5 clean reports the factor climbs 5 %
+    per clean report back to 100 %; the bpp climbs back through the auto bpp's own clean seconds;
+  - between them: hold. A version-1 receiver (no delay fields): unknown, hold.
+  - The factor applies to a PACED automatic pace only: never to a line-rate sender (a cambox into
+    the faster strih: the owner's "never pace a cambox" holds, the congestion acts through the bpp
+    alone) and never to a fixed `pace_mbps` (review round 1).
+  - One log line per factor change or new overuse: `jxs send: path overuse (queue_ms=6.1
+    span_rx/tx_ms=26.0/20.0 lost_slices=0) -- pace factor 85 %, asks the auto bpp for a step down
+    (issue 1387)`. Status lines: `path=` (`unknown` | `clean` | `hold` | `overuse`) `cong_pct=`
+    `queue_ms=`; the C ABI 3 stats carry `path_state` / `congestion_pct` / `queue_delay_us`.
+- **The bench (`src/jxs_congestion_bench.rs`, test only)** runs the real meter, report window,
+  `PaceControl` and `AutoBpp` over a modelled path (FEC parity included): a 10 GbE sender, the
+  receiver's 1 GbE drop-tail port with a 1 MB buffer, the receiver's clock 3 s ahead and 20 ppm
+  fast, and a download that ramps 0 -> 600 Mb/s at 60..65 s, holds to 120 s and stops
+  (unresponsive: harsher than TCP). With the delay signal: the first step at 63.0 s, the first
+  lost datagram at 65.0 s, ONE lossy frame in the whole download (4.8 % of its datagrams), the
+  bpp down to 4, back to 8 bpp and the 900 receiver-link pace afterwards. Without it (a v1
+  receiver): 87 lossy frames, still losing after 70 s, at 6 bpp when the 130 s run ends. A third
+  scenario runs a 1 GbE cambox at line rate into the 10 GbE strih with the phase sawtooth and
+  +-5 ms receiver steps (removed by the meter's `WallSteps` except in the one frame that arrives
+  across the step): 0 congestion steps, 8 bpp, never paced. A fourth runs the quiet paced strih
+  path with SENDER date steps of +200 ms and -200 ms mid-report: 0 congestion steps, 8 bpp, 900. The defaults were tuned on it: at
+  25 % stretch and two reports before the bpp ask the loss came first; with a 2 s settle between
+  asks it cost 49 lossy frames.
+- **Known limits:** the signal is one report a second, so a queue that fills in under a second
+  (a burst far larger than the port buffer) still costs a loss first (the FEC below repairs an
+  isolated one); the queuing delay uses the FIRST datagram of a frame, which a queue that drains
+  between frames does not delay (the span stretch catches that case); the bench's cross traffic
+  does not back off as TCP does, so live adaptation should be gentler than the bench.
+
+## FEC with no added latency (issue 1387 item 3, `src/jxs_link/fec.rs`)
+
+- **One XOR parity datagram per group of up to 12 datagrams of a slice** (`FEC_GROUP`): ~9-10 %
+  more wire (9.1 % at 4 bpp 1080p, 9.5 % at 8, 9.4 % at 12). The parity datagram is the slice
+  header with magic `0x46` (`'F'`), `offset` = the group's first datagram's byte offset, the slice's
+  `slice_len`; its payload = the XOR of the group's payloads, zero-padded to the longest. Every
+  parity of a slice is 1472 bytes but the last, so a slice's parities are ONE GSO send.
+- **The sender** (`handoff.rs`) sends the parities right after each slice through the same paced
+  send (`build_parity` + `send_slice_paced`), counted as `fec_sent=`.
+- **The receiver** (`FecRepair` in `JxsReceiver::receive_once`) XORs every datagram of the taken
+  camera into its group (a duplicate never twice) and, the moment a group with its parity misses
+  exactly ONE datagram, rebuilds it whole (header from the slice's own fields, payload length from
+  `slice_len`) and hands it to the assembler like a received one, before the assembler gives the
+  frame up (it waits for the next frame): no added latency, no retransmission. Two losses in one
+  group stay lost and are concealed as before. Groups of the 3 newest timecodes are kept; a
+  timecode more than 50 ms behind every kept one (the assembler's `RESYNC_BACKWARD_100NS`, the
+  nightly date step) clears them and starts over, so the repair never stops for a clock step back
+  (review round 2).
+  `fec_repaired=` on the `jxs recv:` line, the OBS source's 5 s line, report v2 bytes 44..48, the
+  sender's `fec_repaired=` (from the reports) and both C ABI 3 stats; a datagram with the parity
+  magic that is not a valid parity counts as `fec_malformed=`.
+- **Compatibility:** an old receiver drops a parity as bad magic (its `malformed=` grows, nothing
+  else changes); an old sender sends none. A test or tool that reads the sender's raw datagrams with
+  `PacketHeader::decode` must skip `d[0] == FEC_MAGIC` (the loopback tests do).
+- Tests: `fec.rs` (every single loss in every position of slices 0..30 KB, parity before or after,
+  two losses, duplicates, bad parities, eviction), `tests/jxs_receiver_1387.rs`
+  `a_lost_datagram_is_rebuilt_from_the_fec_parity_and_the_frame_decodes_whole` (the real receiver
+  over UDP, the real codec, one datagram dropped per frame: 0 lost slices, PSNR untouched).
+
+## verify-strih item 49: a running JPEG XS source loses nothing (issue 1387 item 5)
+
+`scripts/lib/strih-jxs-verify.sh` (sourced through `strih-provision.sh`; verify-strih gained ONE
+line, `strih_jxs_verify_row "$LOG"`). It reads the running OBS log's `jxs-source '<name>': fps=...
+lost_slices=N ...` window lines. A source whose newest line is at most 30 s older than the log's
+newest timestamped line is RUNNING: any `lost_slices` > 0 summed over its last 12 windows (1 min)
+FAILs naming it; a clean one PASSes; a source that stopped writing and no source at all are NOTEs.
+The OBS indicator reads DEGRADED from the same counters. Pytest:
+`tests/python/test_strih_jxs_verify_1387.py` (the lines rendered from the SHIPPED C format string).
+
+## Supervisor runbook: the saturation test (owner scenario, strih-snv -> stream-snv)
+
+Prerequisite: the FULL strih bundle on strih-snv AND stream-snv from the same CI run (send + receive
+ABI 3, report v2), the link up per the slice-3 runbook with `"jxs_pace_mbps": 0` (or the key absent)
+in `jxs-output.json`, and the auto bpp settled at 8 (`bpp=8`, `path=clean`, `cong_pct=100`,
+`pace_src=receiver-link rx_link_mbps=1000 pace_mbps=900` on strih; `link_mbps=1000` on the stream
+source line). Then:
+
+1. On stream-snv start an iperf3 server: `iperf3 -s -1 -p 5299` (one client, then it exits).
+2. From dev1 (another port of the rig switch) send INTO stream-snv, which fills stream's receive
+   port like a download on the stream PC: `iperf3 -c 10.77.9.204 -p 5299 -t 60 -b 400M`, then
+   (restart the server) the same without `-b` for 60 s (TCP saturates the port). A UDP flood
+   (`-u -b 700M`) is the harsh, unresponsive case of the bench.
+3. Watch, each 5 s window:
+   - strih `jxs-output` line: `path=overuse` lines appear and the `jxs send: path overuse ...`
+     log line, `cong_pct` drops, `jxs send: bpp 8 -> 7 (congestion; ...)` steps BEFORE any
+     `lost_slices` on stream; `fec_repaired` counts the isolated losses it rebuilt;
+   - stream `jxs-source 'JXS PGM src'` line: `fps=30.00` the whole time (the picture never goes
+     black or freezes), `lost_slices` 0 or a few early windows only, `fec_repaired=`;
+   - the stream OBS status bar may read `JPEG XS: DEGRADED` in a lossy window.
+4. Stop iperf3. Within ~1-3 min: `path=clean`, `cong_pct=100`, `pace_mbps=900`, and the bpp lines
+   climb back to 8 (`clean-20s` steps: each congestion step doubled that level's clean run).
+5. `sudo ./scripts/verify-strih.sh --box stream-snv` item 49: `(jxs) 'JXS PGM src': lost_slices=0`
+   once a clean minute has passed.
+6. Record on the ticket: the iperf3 rate, the first `path overuse` time vs the first `lost_slices`,
+   the lowest bpp, fps through the run, and the recovery time. A PP test (strih-pp 2.5 GbE ->
+   stream-pp) reads `rx_link_mbps` from its own receiver: no setting to change.
 
 ## Encoder cost on the N150 (29.10.2026, comment 6496253608)
 
@@ -877,6 +1085,19 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
   `genlock_stamp::capture_realtime_100ns` (the round-3 review 🔴 of `capture_age_ms`).
 - **The live `encode_ms` includes the send.** A paced or full socket shows up there as "encode
   time"; measure the codec alone with `jxs-encode-bench` before calling a bpp a CPU limit.
+
+## Testing gotchas (congestion control, four review rounds)
+
+- **Every congestion-signal test feeds the two ends DIFFERENT frame sets.** The receiver's report
+  covers the frames that arrived in its period, the sender's own window is a timecode interval
+  around the newest one; they are never the same frames. A test with aligned sets passed the
+  p50 (round 2), the jump rebase (round 2) and the date step (round 3) and hid each bug: offset
+  the receiver's set by one frame and put the event (a slot crossing, a step) inside a report.
+- **Model a clock step where the code reads it:** the receiver's step goes through its
+  `WallSteps` (only the frame that arrives across it keeps it), the SENDER's step moves the
+  timecode and the own `WallSteps` value, never the own delay (`tx_steps` in the bench).
+- **A withheld signal is not a clean one.** Anything the sender declines to judge must HOLD the
+  controller (both streaks untouched), never feed its "clean" path.
 
 ## Testing gotchas (send pacing)
 

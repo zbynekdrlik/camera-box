@@ -95,6 +95,10 @@ fn a_frame_crosses_loopback_and_decodes_back_within_the_psnr_bound() {
     let deadline = Instant::now() + Duration::from_secs(10);
     while got.borrow().is_none() && Instant::now() < deadline {
         rx.recv_batch(|d, at| {
+            // the FEC parity datagrams (issue 1387 item 3) are not slices
+            if d[0] == camera_box::jxs_link::fec::FEC_MAGIC {
+                return;
+            }
             let h = PacketHeader::decode(d).expect("header");
             assembler.push(&h, &d[HEADER_LEN..], at, &mut sink);
         })
@@ -172,6 +176,10 @@ fn a_stream_of_frames_keeps_two_in_flight_and_every_frame_decodes_in_order() {
         let until = Instant::now() + Duration::from_millis(150);
         while Instant::now() < until {
             rx.recv_batch(|d, at| {
+                // the FEC parity datagrams (issue 1387 item 3) are not slices
+                if d[0] == camera_box::jxs_link::fec::FEC_MAGIC {
+                    return;
+                }
                 let h = PacketHeader::decode(d).expect("header");
                 assembler.push(&h, &d[HEADER_LEN..], at, &mut sink);
             })

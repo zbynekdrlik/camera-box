@@ -627,6 +627,10 @@ pub mod send_stagger;
 pub mod jxs_link;
 // Issue 1387: the sender's automatic bpp controller (pure state machine, every platform).
 pub mod jxs_auto_bpp;
+// Issue 1387 item 2: the sender's delay-based congestion control (pure) and its bottleneck bench.
+pub mod jxs_congestion;
+#[cfg(test)]
+mod jxs_congestion_bench;
 // Issue 1387: the pure helpers of the jxs-encode-bench bin (synthetic content, percentiles).
 pub mod jxs_bench;
 // Issue 1387: the cambox JPEG XS sender (off unless CAMERA_BOX_JXS_TARGET is set) and the receive

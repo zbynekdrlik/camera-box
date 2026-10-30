@@ -33,6 +33,39 @@ fn pins() -> Vec<(String, usize)> {
         ("CBJXS_SEND_LOG_WARN".into(), 2),
         ("CBJXS_SEND_LOG_INFO".into(), 3),
         (
+            "CBJXS_SEND_PACE_LINE_RATE".into(),
+            CBJXS_SEND_PACE_LINE_RATE as usize,
+        ),
+        (
+            "CBJXS_SEND_PACE_FIXED".into(),
+            CBJXS_SEND_PACE_FIXED as usize,
+        ),
+        (
+            "CBJXS_SEND_PACE_RECEIVER_LINK".into(),
+            CBJXS_SEND_PACE_RECEIVER_LINK as usize,
+        ),
+        (
+            "CBJXS_SEND_PACE_START_SPREAD".into(),
+            CBJXS_SEND_PACE_START_SPREAD as usize,
+        ),
+        (
+            "CBJXS_SEND_PACE_CONGESTION".into(),
+            CBJXS_SEND_PACE_CONGESTION as usize,
+        ),
+        (
+            "CBJXS_SEND_PATH_UNKNOWN".into(),
+            CBJXS_SEND_PATH_UNKNOWN as usize,
+        ),
+        (
+            "CBJXS_SEND_PATH_CLEAN".into(),
+            CBJXS_SEND_PATH_CLEAN as usize,
+        ),
+        ("CBJXS_SEND_PATH_HOLD".into(), CBJXS_SEND_PATH_HOLD as usize),
+        (
+            "CBJXS_SEND_PATH_OVERUSE".into(),
+            CBJXS_SEND_PATH_OVERUSE as usize,
+        ),
+        (
             "sizeof(cbjxs_send_config)".into(),
             size_of::<CbjxsSendConfig>(),
         ),
@@ -96,13 +129,21 @@ fn pins() -> Vec<(String, usize)> {
         auto_bpp,
         reserved,
         pace_mbps,
-        reserved2,
+        pace_source,
         wire_ms_avg,
-        wire_ms_max
+        wire_ms_max,
+        rx_link_mbps,
+        own_link_mbps,
+        path_state,
+        congestion_pct,
+        queue_delay_us,
+        reserved3,
+        fec_sent,
+        fec_repaired
     );
     assert_eq!(
-        CBJXS_SEND_ABI_VERSION, 2,
-        "ABI 2: the pace + wire-time fields"
+        CBJXS_SEND_ABI_VERSION, 3,
+        "ABI 3: the automatic pace, its source and both links"
     );
     v
 }

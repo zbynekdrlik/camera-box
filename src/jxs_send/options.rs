@@ -129,14 +129,15 @@ pub fn parse_fifo_prio(value: Option<&str>) -> Result<Option<i32>, String> {
     }
 }
 
-/// The cambox's send pacing (issue 1387): unset / blank / `0` = line rate, the default (a cambox
-/// sends from 1 GbE into the strih's 10 GbE, so no switch port steps the burst down); else a rate
+/// The cambox's send pacing override (issue 1387): unset / blank / `0` = AUTOMATIC, the default
+/// (`jxs_link::pace_auto`: paced to 90 % of the receiver's link when it is slower than this one,
+/// else line rate -- a 1 GbE cambox into the strih's 10 GbE stays at line rate); else a fixed rate
 /// in Mb/s of Ethernet wire, `jxs_link::pace::PACE_MBPS_MIN..=PACE_MBPS_MAX`.
 pub const PACE_ENV: &str = "CAMERA_BOX_JXS_PACE_MBPS";
 
-/// The send pacing from [`PACE_ENV`]: unset / blank = 0 (line rate); a whole number 0 or
+/// The send pacing from [`PACE_ENV`]: unset / blank = 0 (automatic); a whole number 0 or
 /// `PACE_MBPS_MIN..=PACE_MBPS_MAX` is taken; anything else is refused (the caller logs it and
-/// keeps line rate).
+/// keeps the automatic pace).
 pub fn parse_pace_mbps(value: Option<&str>) -> Result<u32, String> {
     let Some(v) = value.map(str::trim).filter(|v| !v.is_empty()) else {
         return Ok(0);
@@ -151,7 +152,10 @@ pub fn parse_pace_mbps(value: Option<&str>) -> Result<u32, String> {
 /// The "link ON" line's pacing words.
 pub fn pace_text(mbps: u32) -> String {
     if mbps == 0 {
-        "line rate (no pacing)".to_string()
+        format!(
+            "paced automatically ({}% of the receiver's link when it is slower than this one, else line rate; the frame spread until its first report)",
+            crate::jxs_link::pace_auto::LINK_PACE_PERCENT
+        )
     } else {
         format!(
             "paced at {mbps} Mb/s of wire, at most {} datagrams per send",
@@ -166,7 +170,8 @@ pub struct SenderOptions {
     pub bpp: BppMode,
     /// The encoder threads' SCHED_FIFO priority (`None` = SCHED_OTHER).
     pub fifo: Option<i32>,
-    /// The send pacing in Mb/s of Ethernet wire, 0 = line rate (`crate::jxs_link::pace`).
+    /// The send pacing override in Mb/s of Ethernet wire, 0 = automatic
+    /// (`crate::jxs_link::pace_auto`).
     pub pace_mbps: u32,
     /// The automatic bpp's tuning (`None` = `AutoBppConfig::new(min, max)`, the sender's
     /// setting; tests shorten the clean run).
@@ -183,7 +188,7 @@ impl SenderOptions {
         }
     }
 
-    /// The same options sending at `pace_mbps` (0 = line rate).
+    /// The same options sending at `pace_mbps` (0 = automatic).
     pub fn with_pace(self, pace_mbps: u32) -> Self {
         Self { pace_mbps, ..self }
     }
@@ -243,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn the_cambox_pace_is_line_rate_unless_set_to_a_bounded_rate() {
+    fn the_cambox_pace_is_automatic_unless_set_to_a_bounded_rate() {
         assert_eq!(parse_pace_mbps(None), Ok(0));
         assert_eq!(parse_pace_mbps(Some(" ")), Ok(0));
         assert_eq!(parse_pace_mbps(Some("0")), Ok(0));
@@ -254,10 +259,10 @@ mod tests {
             assert!(e.contains(PACE_ENV), "{bad}: {e}");
         }
         let opts = SenderOptions::new(BppMode::Fixed(4), None);
-        assert_eq!(opts.pace_mbps, 0, "line rate unless asked");
+        assert_eq!(opts.pace_mbps, 0, "automatic unless asked");
         assert_eq!(opts.with_pace(900).pace_mbps, 900);
         assert_eq!(opts.with_pace(900).bpp, BppMode::Fixed(4));
-        assert!(pace_text(0).contains("line rate"));
+        assert!(pace_text(0).contains("paced automatically (90% of the receiver's link"));
         assert!(
             pace_text(900).contains("paced at 900 Mb/s"),
             "{}",

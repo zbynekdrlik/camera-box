@@ -26,6 +26,9 @@ pub struct RecvWindow {
     pub foreign: u64,
     /// Receiver reports sent back to the sender (the automatic bpp's back channel).
     pub reports_sent: u64,
+    /// Datagrams the FEC rebuilt (issue 1387 item 3), FEC datagrams that were not valid.
+    pub fec_repaired: u64,
+    pub fec_malformed: u64,
     /// Sender timecode -> frame decoded here, ms (both on the dantesync wall clock).
     latency_ms: Vec<f64>,
     /// Sender timecode -> first datagram on the wire here, ms.
@@ -91,7 +94,8 @@ impl RecvWindow {
         format!(
             "jxs recv: fps={fps:.2} frames={} concealed={} lost_slices={} undecodable={} datagrams={} mbps={mbps:.1} \
              latency_ms_p50/p99/max={}/{}/{} first_arrival_ms_p50/max={}/{} spread_ms_p50/max={}/{} \
-             dup={} stale={} malformed={} resyncs={} foreign={} reports={} (issue 1387)",
+             dup={} stale={} malformed={} resyncs={} foreign={} reports={} fec_repaired={} fec_malformed={} \
+             (issue 1387)",
             self.frames,
             self.concealed_frames,
             self.lost_slices,
@@ -110,6 +114,8 @@ impl RecvWindow {
             self.resyncs,
             self.foreign,
             self.reports_sent,
+            self.fec_repaired,
+            self.fec_malformed,
         )
     }
 }
@@ -146,7 +152,10 @@ mod tests {
             line.contains("latency_ms_p50/p99/max=15.29/15.59/15.59"),
             "{line}"
         );
-        assert!(line.ends_with(" reports=0 (issue 1387)"), "{line}");
+        assert!(
+            line.ends_with(" reports=0 fec_repaired=0 fec_malformed=0 (issue 1387)"),
+            "{line}"
+        );
         let cap = w.latency_ms.capacity();
         w.reset();
         assert_eq!(w.frames, 0);

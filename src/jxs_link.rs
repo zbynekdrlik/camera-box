@@ -33,16 +33,20 @@
 //! Every packet of a frame (header and slices) is a "slice" on the wire; the receiver feeds them
 //! to the decoder in index order.
 //!
-//! # The receiver report (the back channel for the automatic bpp, `crate::jxs_auto_bpp`)
+//! **FEC parity datagrams** (issue 1387 item 3) share this header with the magic `0x46` (`'F'`);
+//! their layout and rule are in [`fec`]. One follows every 12 datagrams of a slice.
 //!
-//! Once per second ([`REPORT_PERIOD_MS`]) the receiver sends ONE 32-byte datagram back to the
+//! # The receiver report (the back channel for the automatic bpp, `crate::jxs_auto_bpp`, and the
+//! pace, `pace_auto`)
+//!
+//! Once per second ([`REPORT_PERIOD_MS`]) the receiver sends ONE 56-byte datagram back to the
 //! address the slices came from (the sender's connected socket, so nothing else reaches it).
 //! Little-endian:
 //!
 //! | bytes | field | meaning |
 //! |---|---|---|
 //! | 0 | magic | `0x52` (`'R'`), never a slice datagram's `0x4A` |
-//! | 1 | version | [`REPORT_VERSION`] (1) |
+//! | 1 | version | [`REPORT_VERSION`] (2) |
 //! | 2 | camera id | the camera the report is about |
 //! | 3 | max bpp | the highest bpp the receiver takes, 0 = no limit |
 //! | 4..8 | seq | +1 per report |
@@ -51,12 +55,31 @@
 //! | 16..20 | late frames | frames decoded later than the receiver's deadline after their timecode |
 //! | 20..24 | decode p99 | last datagram in -> frame decoded, microseconds (`u32::MAX` = none) |
 //! | 24..32 | last timecode | the newest frame timecode of the period (100 ns, 0 = no frame) |
+//! | 32..36 | link speed | Mb/s of the interface the slices arrive on (`link_speed`), 0 = unknown |
+//! | 36..40 | delay mean | i32 us: mean of (first arrival - timecode) over the period, `i32::MIN` = none |
+//! | 40..44 | delay spread | u32 us: p90 - p10 of those delays (diagnostic), `u32::MAX` = none |
+//! | 44..48 | arrival span p50 | first -> last datagram of a whole frame, us, `u32::MAX` = none |
+//! | 48..52 | FEC repaired | datagrams rebuilt by the forward error correction in the period |
+//! | 52..56 | reserved | 0 |
+//!
+//! The delay fields feed the sender's delay-based congestion control (`crate::jxs_congestion`):
+//! the SENDER subtracts its own first-send delay of the same frames (on a cambox that holds the
+//! capture's phase in its emit slot) and keeps the "no queue" base itself.
+//!
+//! Version 1 (issue 1387 slices 1-3) was the first 32 bytes alone, with version byte 1. A sender
+//! still reads it (no link speed: its safe start); an OLD sender drops a version-2 report as
+//! `BadVersion`, so a new receiver + an old sender holds the auto bpp at its floor until the
+//! sender is upgraded (the cutover, `.claude/rules/jxs-link.md`).
 //!
 //! The last timecode tells the sender WHICH bpp the report describes: a report whose newest frame
 //! predates the sender's last bpp change is about the old bpp and steps nothing down.
 
 pub mod assembler;
+pub mod congestion_meter;
+pub mod fec;
+pub mod link_speed;
 pub mod pace;
+pub mod pace_auto;
 pub mod planar;
 pub mod png;
 pub mod recv_stats;
@@ -66,8 +89,8 @@ pub use assembler::{FrameAssembler, FrameReport, PushOutcome, SliceSink};
 pub use planar::{copy_plane, planar422_to_rgb, psnr, split_interleaved, yuyv_to_planar422};
 pub use recv_stats::RecvWindow;
 pub use report::{
-    ReceiverReport, ReportError, ReportWindow, NO_DECODE_TIME, REPORT_LEN, REPORT_PERIOD_MS,
-    REPORT_VERSION,
+    ReceiverReport, ReportError, ReportWindow, NOT_MEASURED, NO_DECODE_TIME, REPORT_LEN,
+    REPORT_PERIOD_MS, REPORT_V1_LEN, REPORT_VERSION,
 };
 
 /// Datagram magic byte (`'J'`).
@@ -333,8 +356,21 @@ pub struct SendWindow {
     /// The frame's capture instant -> the same hand-off. `handoff_age - capture_age` = where the
     /// capture sits inside its emit slot (the timecode is the slot boundary at or before it).
     pub capture_age: HandoffAge,
-    /// The send pacing in Mb/s of wire (issue 1387, `pace`), 0 = line rate.
+    /// The send pacing in Mb/s of wire the window ended at (issue 1387, `pace`), 0 = line rate.
     pub pace_mbps: u32,
+    /// Where that pace came from (`pace_auto`).
+    pub pace_source: pace_auto::PaceSource,
+    /// The receiver's link from its last report and this sender's own link, Mb/s (0 = unknown).
+    pub rx_link_mbps: u32,
+    pub own_link_mbps: u32,
+    /// The path as the congestion control last judged it, its pace factor (percent; 0 = never
+    /// set) and the receiver's newest queuing delay (`crate::jxs_congestion`).
+    pub path_state: crate::jxs_congestion::PathState,
+    pub congestion_pct: u32,
+    pub queue_delay_us: Option<u32>,
+    /// FEC parity datagrams sent, and the datagrams the receiver's reports say it rebuilt.
+    pub fec_sent: u64,
+    pub fec_repaired: u64,
     /// Per whole frame: its first send -> its last send returned (the frame's time on the wire,
     /// paced or not; at line rate it follows the encoder's slice span); the average divides by
     /// `wire_frames` (a frame with no send has no wire time).
@@ -428,12 +464,13 @@ impl SendWindow {
     /// dropped_busy= in_flight=max/cap convert_ms_avg/max= handoff_age_ms_avg/min/max=
     /// capture_age_ms_avg/min/max= first_slice_ms_avg/max=
     /// encode_ms_avg/max= send_errors= encode_errors= report_age_s= reports= pace_mbps=
-    /// wire_ms_avg/max= (issue 1387)`. `bytes`
+    /// wire_ms_avg/max= pace_src= rx_link_mbps= tx_link_mbps= path= cong_pct= queue_ms=
+    /// fec_sent= fec_repaired= (issue 1387)`. `bytes`
     /// counts the codestream, not the headers; `bpp_reason` / `report_age_s` / the two ages read `-` when
     /// there is none.
     pub fn status_line(&self) -> String {
         format!(
-            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} pace_mbps={} wire_ms_avg/max={:.2}/{:.2} (issue 1387)",
+            "jxs send: fps={:.1} bpp={} auto={} bpp_reason={} frames={} slices={} bytes={} dropped_busy={} in_flight={}/{} convert_ms_avg/max={:.2}/{:.2} handoff_age_ms_avg/min/max={} capture_age_ms_avg/min/max={} first_slice_ms_avg/max={:.2}/{:.2} encode_ms_avg/max={:.2}/{:.2} send_errors={} encode_errors={} report_age_s={} reports={} pace_mbps={} wire_ms_avg/max={:.2}/{:.2} pace_src={} rx_link_mbps={} tx_link_mbps={} path={} cong_pct={} queue_ms={} fec_sent={} fec_repaired={} (issue 1387)",
             if self.window_s > 0.0 {
                 self.frames as f64 / self.window_s
             } else {
@@ -464,6 +501,15 @@ impl SendWindow {
             self.pace_mbps,
             avg(self.wire_ms_sum, self.wire_frames),
             self.wire_ms_max,
+            self.pace_source,
+            self.rx_link_mbps,
+            self.own_link_mbps,
+            self.path_state,
+            self.congestion_pct,
+            self.queue_delay_us
+                .map_or("-".to_string(), |q| format!("{:.1}", q as f64 / 1000.0)),
+            self.fec_sent,
+            self.fec_repaired,
         )
     }
 }
@@ -723,11 +769,19 @@ mod tests {
         w.handoff_age.note(210_000);
         w.handoff_age.note(290_000);
         w.pace_mbps = 900;
+        w.pace_source = pace_auto::PaceSource::ReceiverLink;
+        w.rx_link_mbps = 1000;
+        w.own_link_mbps = 10_000;
+        w.path_state = crate::jxs_congestion::PathState::Clean;
+        w.congestion_pct = 100;
+        w.queue_delay_us = Some(460);
+        w.fec_sent = 300;
+        w.fec_repaired = 2;
         w.note_wire(19.5);
         w.note_wire(20.1);
         assert_eq!(
             w.status_line(),
-            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 pace_mbps=900 wire_ms_avg/max=19.80/20.10 (issue 1387)"
+            "jxs send: fps=4.0 bpp=6 auto=on bpp_reason=clean-10s frames=2 slices=138 bytes=2000000 dropped_busy=3 in_flight=2/2 convert_ms_avg/max=0.50/0.75 handoff_age_ms_avg/min/max=25.00/21.00/29.00 capture_age_ms_avg/min/max=-/-/- first_slice_ms_avg/max=0.50/0.60 encode_ms_avg/max=15.00/16.00 send_errors=0 encode_errors=0 report_age_s=0.4 reports=5 pace_mbps=900 wire_ms_avg/max=19.80/20.10 pace_src=receiver-link rx_link_mbps=1000 tx_link_mbps=10000 path=clean cong_pct=100 queue_ms=0.5 fec_sent=300 fec_repaired=2 (issue 1387)"
         );
         let empty = SendWindow::default().status_line();
         assert!(empty.contains("convert_ms_avg/max=0.00/0.00"), "{empty}");
@@ -758,9 +812,19 @@ mod tests {
             "capture_age_ms_avg/min/max=",
             "pace_mbps=",
             "wire_ms_avg/max=",
+            "pace_src=",
+            "rx_link_mbps=",
+            "tx_link_mbps=",
+            "path=",
+            "cong_pct=",
+            "queue_ms=",
+            "fec_sent=",
+            "fec_repaired=",
         ];
         assert!(
-            empty.contains(" pace_mbps=0 wire_ms_avg/max=0.00/0.00 "),
+            empty.contains(
+                " pace_mbps=0 wire_ms_avg/max=0.00/0.00 pace_src=line-rate rx_link_mbps=0 tx_link_mbps=0 path=unknown cong_pct=0 queue_ms=- fec_sent=0 fec_repaired=0 "
+            ),
             "line rate reads 0: {empty}"
         );
         assert!(

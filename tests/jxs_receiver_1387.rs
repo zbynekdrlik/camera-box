@@ -150,3 +150,87 @@ fn a_poll_with_nothing_to_receive_returns_none_within_its_timeout() {
         "{took:?}"
     );
 }
+
+/// Issue 1387 item 3: every slice goes with its FEC parity, and one datagram of every frame is
+/// lost on the way. The receiver rebuilds it from the parity before the assembler gives the frame
+/// up: every frame decodes whole (no concealed slice), the repairs are counted, and the report
+/// carries them back to the sender.
+#[test]
+fn a_lost_datagram_is_rebuilt_from_the_fec_parity_and_the_frame_decodes_whole() {
+    use camera_box::jxs_link::fec::build_parity;
+    let mut rx = receiver();
+    let to = rx.local_addr().unwrap();
+    let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+    tx.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut enc = Encoder::open(EncoderSettings::issue_1387(W, H)).unwrap();
+    let base: u64 = 17_618_456_000_000_000;
+    let mut got = Vec::new();
+    let mut report: Option<ReceiverReport> = None;
+    let mut dropped = 0u64;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut sent = 0u64;
+    while (got.len() < 4 || report.is_none_or(|r| r.fec_repaired == 0)) && Instant::now() < deadline
+    {
+        if sent < 5 {
+            let p = picture(sent as u32 * 7);
+            let (y, u, v) = enc.planes_mut().planes_mut();
+            y.copy_from_slice(p.y());
+            u.copy_from_slice(p.u());
+            v.copy_from_slice(p.v());
+            let mut packets: Vec<Vec<u8>> = Vec::new();
+            enc.encode_frame(|_, b, _| packets.push(b.to_vec()))
+                .unwrap();
+            let count = packets.len() as u8;
+            for (i, pk) in packets.iter().enumerate() {
+                let hdr = PacketHeader {
+                    camera_id: 5,
+                    timecode_100ns: base + sent * 333_333,
+                    slice_index: i as u8,
+                    slice_count: count,
+                    offset: 0,
+                    slice_len: 0,
+                };
+                let mut buf = Vec::new();
+                build_slice_datagrams(hdr, pk, &mut buf).unwrap();
+                let mut parity = Vec::new();
+                build_parity(&buf, &mut parity);
+                for (k, d) in split_gro(&buf, Some(DATAGRAM_LEN)).enumerate() {
+                    // the second datagram of slice 3 never arrives
+                    if i == 3 && k == 1 {
+                        dropped += 1;
+                        continue;
+                    }
+                    tx.send_to(d, to).unwrap();
+                }
+                for d in split_gro(&parity, Some(DATAGRAM_LEN)) {
+                    tx.send_to(d, to).unwrap();
+                }
+            }
+            sent += 1;
+        }
+        if let Some(f) = rx.poll(Duration::from_millis(300)).unwrap() {
+            got.push((f.timecode_100ns, f.lost_slices));
+        }
+        let mut b = [0u8; 64];
+        if let Ok(n) = tx.recv(&mut b) {
+            if n == REPORT_LEN {
+                report = ReceiverReport::decode(&b[..n]).ok();
+            }
+        }
+    }
+    assert!(dropped >= 4, "the slice really has a second datagram");
+    assert!(got.len() >= 4, "{got:?}");
+    assert!(
+        got.iter().all(|(_, lost)| *lost == 0),
+        "no slice concealed: {got:?}"
+    );
+    let t = rx.totals();
+    assert_eq!(t.lost_slices, 0, "{t:?}");
+    assert_eq!(t.undecodable_frames, 0);
+    assert!(t.fec_repaired >= 4, "{t:?}");
+    assert!(
+        report.is_some_and(|r| r.fec_repaired > 0),
+        "the report carries the repairs: {report:?}"
+    );
+}

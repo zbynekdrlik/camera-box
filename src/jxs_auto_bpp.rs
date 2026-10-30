@@ -9,6 +9,8 @@
 //! [`AutoBpp::applied`] with the timecode of the first frame encoded at it.
 //!
 //! The rules:
+//! - **Step DOWN at once** on the congestion controller's request (`Second::congested`,
+//!   `crate::jxs_congestion`: the receiver's queuing delay grew BEFORE any loss).
 //! - **Step DOWN at once** (one step, never below `min`) on a dropped frame (`dropped_busy`), an
 //!   encode p99 over `down_fraction` of the frame budget, or a receiver report of lost slices or
 //!   late frames about a frame encoded at the CURRENT bpp (a report about older frames describes a
@@ -70,6 +72,9 @@ pub struct Second {
     pub encode_p99_ms: f64,
     pub dropped_busy: u64,
     pub encode_errors: u64,
+    /// The congestion controller asks for one step down (issue 1387 item 2). Such a second is
+    /// never clean either.
+    pub congested: bool,
 }
 
 /// The receiver's one-per-second report (wire format: `crate::jxs_link::ReceiverReport`).
@@ -87,6 +92,8 @@ pub enum StepReason {
     ReceiverLoss,
     ReceiverLate,
     ReceiverCap,
+    /// The receiver's delay signal: the path's queue grew (`crate::jxs_congestion`).
+    Congestion,
 }
 
 impl std::fmt::Display for StepReason {
@@ -98,6 +105,7 @@ impl std::fmt::Display for StepReason {
             Self::ReceiverLoss => write!(f, "receiver-loss"),
             Self::ReceiverLate => write!(f, "receiver-late"),
             Self::ReceiverCap => write!(f, "receiver-cap"),
+            Self::Congestion => write!(f, "congestion"),
         }
     }
 }
@@ -293,6 +301,10 @@ impl AutoBpp {
         {
             return self.step(down, StepReason::EncodeSlow);
         }
+        // the path's queue grew before any loss: one step, the controller rate-limits its asks
+        if self.current > floor && s.congested {
+            return self.step(down, StepReason::Congestion);
+        }
         let fresh = self
             .report
             .filter(|(_, at)| now_s - at <= self.cfg.silent_after_s)
@@ -331,6 +343,7 @@ impl AutoBpp {
         }
         if s.dropped_busy > 0
             || s.encode_errors > 0
+            || s.congested
             || s.encode_p99_ms >= self.cfg.up_headroom * self.cfg.budget_ms
         {
             self.streak = 0;
@@ -405,6 +418,7 @@ mod tests {
             encode_p99_ms: 10.0,
             dropped_busy: 0,
             encode_errors: 0,
+            congested: false,
         }
     }
 
@@ -418,6 +432,7 @@ mod tests {
             late_frames: 0,
             decode_p99_us: 3_000,
             last_timecode_100ns: tc,
+            ..ReceiverReport::default()
         }
     }
 
@@ -931,5 +946,42 @@ mod tests {
         assert_eq!(StepReason::Clean { needed_s: 10 }.to_string(), "clean-10s");
         assert_eq!(StepReason::DroppedFrame.to_string(), "dropped-frame");
         assert_eq!(StepReason::ReceiverCap.to_string(), "receiver-cap");
+        assert_eq!(StepReason::Congestion.to_string(), "congestion");
+    }
+
+    /// Issue 1387 item 2: the congestion controller's ask steps down at once (and counts against
+    /// the level like a loss), never below the floor, and such a second is never clean.
+    #[test]
+    fn a_congestion_ask_steps_down_at_once_and_breaks_the_clean_run() {
+        let mut c = ctl(4, 8);
+        c.current = 7;
+        c.current_since_tc = Some(TC0);
+        let congested = Second {
+            congested: true,
+            ..good()
+        };
+        assert_eq!(
+            c.tick(&congested, 0.0),
+            Decision::Step {
+                from: 7,
+                to: 6,
+                reason: StepReason::Congestion
+            }
+        );
+        assert_eq!(c.needed_for(7), 20, "the level it left is penalized");
+        let mut c = ctl(4, 8);
+        assert_eq!(
+            c.tick(&congested, 0.0),
+            Decision::Hold(Hold::SilentReceiver)
+        );
+        c.applied(4, TC0);
+        clean_run(&mut c, 0, 5, TC0);
+        c.note_report(rep(5, TC0 + 50), 5.0);
+        assert_eq!(c.tick(&congested, 5.0), Decision::Hold(Hold::NoHeadroom));
+        let d = clean_run(&mut c, 6, 9, TC0 + 60);
+        assert!(
+            d.iter().all(|x| matches!(x, Decision::Hold(_))),
+            "the clean run started over: {d:?}"
+        );
     }
 }
