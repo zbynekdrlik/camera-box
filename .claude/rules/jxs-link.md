@@ -892,11 +892,17 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   delay, so it cancels per frame, but around it the receiver's frames of a period and the sender's
   timecode window (newest - 1 s, newest] are not the same frames, and the means disagree by up to
   the step (review round 3: 2 false congestion steps a night in the bench). So each own delay
-  carries a step EPOCH (bumped when it moves > 50 ms from the previous frame's, more than the
-  16.7 ms sawtooth), and a report is judged only when its window is one epoch AND the same epoch as
-  the previous report's window: the step report and the one after it read unknown (hold), and the
-  very first report after a start is never judged. A path 100 ms above the base starts over, a
-  BACKSTOP only. Review round 2 REMOVED a rule that
+  carries a step EPOCH, bumped when the sender's OWN `WallSteps` value (read with each first send,
+  `on_first_send(tc, wall - steps, steps)`) moves more than 1 ms between two frames -- every
+  dantesync step, however small, never an encoder stall (a first version inferred it from a 50 ms
+  jump of the own delay: it missed a 25-50 ms step, a 5-10 ms false queue, and fired on stalls) --
+  and a report is judged only when its window is one epoch AND the same epoch as the previous
+  report's window: the step report and the one after it (about three after a backward step, while
+  the window still reaches pre-step frames) are UNJUDGED, and the very first report after a start
+  too. An unjudged report HOLDS the congestion control (`PathReport::delay_unjudged`: state hold,
+  the clean run neither grows nor restarts; counted as clean it would raise the pace during a real
+  queue). A duplicated report datagram is handled once. A path 100 ms above the base starts over,
+  a BACKSTOP only. Review round 2 REMOVED a rule that
   moved the base on a "tight" jump over 3 ms: a real queue that drains at once (the download
   stops) then left a phantom queue as big as the drain, and a queue that appears at once was
   hidden. Small steps never reach `PathDelay` (both ends subtract `WallSteps`).

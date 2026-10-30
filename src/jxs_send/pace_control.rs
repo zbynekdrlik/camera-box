@@ -118,7 +118,7 @@ impl PaceControl {
     /// it does not know it: the safe start again; a version-1 report never does) and its delay
     /// signal, which the congestion control judges against this sender's recent send spans.
     pub fn on_report(&mut self, r: &ReceiverReport, now_s: f64) {
-        if self.last_report_seq == Some(r.seq) && false {
+        if self.last_report_seq == Some(r.seq) {
             // a duplicated datagram: judged once (review round 3)
             return;
         }
@@ -208,9 +208,8 @@ impl PaceControl {
             return;
         }
         let delay = wall_100ns - timecode_100ns.min(i64::MAX as u64) as i64;
-        let _ = (OWN_STEP_100NS, self.last_steps_100ns);
-        if let Some((_, prev, _)) = self.own_delays.back() {
-            if (delay - prev).abs() > 500_000 {
+        if let Some(prev) = self.last_steps_100ns {
+            if (steps_100ns - prev).abs() > OWN_STEP_100NS {
                 self.epoch += 1;
             }
         }
