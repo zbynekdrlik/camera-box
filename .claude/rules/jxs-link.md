@@ -1086,6 +1086,19 @@ to the running camera-box (never stop camera-box for it). Its content is synthet
 - **The live `encode_ms` includes the send.** A paced or full socket shows up there as "encode
   time"; measure the codec alone with `jxs-encode-bench` before calling a bpp a CPU limit.
 
+## Testing gotchas (congestion control, four review rounds)
+
+- **Every congestion-signal test feeds the two ends DIFFERENT frame sets.** The receiver's report
+  covers the frames that arrived in its period, the sender's own window is a timecode interval
+  around the newest one; they are never the same frames. A test with aligned sets passed the
+  p50 (round 2), the jump rebase (round 2) and the date step (round 3) and hid each bug: offset
+  the receiver's set by one frame and put the event (a slot crossing, a step) inside a report.
+- **Model a clock step where the code reads it:** the receiver's step goes through its
+  `WallSteps` (only the frame that arrives across it keeps it), the SENDER's step moves the
+  timecode and the own `WallSteps` value, never the own delay (`tx_steps` in the bench).
+- **A withheld signal is not a clean one.** Anything the sender declines to judge must HOLD the
+  controller (both streaks untouched), never feed its "clean" path.
+
 ## Testing gotchas (send pacing)
 
 - **Time a paced send on the SENDING side, with the schedule's own clock.** A reader thread's
