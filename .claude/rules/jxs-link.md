@@ -912,9 +912,16 @@ react to a GROWING QUEUE, before the switch buffer overflows.
     bottleneck by construction, and on a cambox NDI leaves ahead of JPEG XS in the egress priority
     band, review round 2) the STRETCH (arrival span - send span) GROWN over its own quiet base by
     more than max(1.5 ms, 15 % of the send span). **The base** = the stretch's minimum over that
-    bpp's last 30 reports (kept PER BPP, a level's entries age only with its own reports, so a step
-    back during congestion judges against the base the level learnt while quiet; the safe start's
-    frame-spread reports are neither judged nor recorded). Live 30.10.2026 (the coordinator's run
+    bpp's reports of the last 30 STEADY seconds (`STRETCH_BASE_S`; kept per bpp, since the offset
+    depends on the frame against the encoder's span; steady time = the time since the first report
+    minus the time after an overuse, so a persistent bottleneck never ages its own evidence out
+    while a level left in quiet times re-learns its base, that first report recorded, not judged).
+    The safe start's frame-spread reports are neither judged nor recorded (`StretchMode::Skip`: its
+    stretch is a base the receiver-link pace never reaches again; mutating it to `Base` fails the
+    live-pattern bench). Reports under the congestion factor's cut pace ARE recorded: the base is a
+    minimum, so their smaller stretch keeps the judgement sensitive while a download lasts (not
+    recording them cost the download bench 30 lossy frames instead of 1, 29 after 70 s), and no
+    sawtooth follows the recovery (no pace change after 200 s). Live 30.10.2026 (the coordinator's run
     of the merged lane, strih-snv -> stream-snv, auto pace): the two spans were measured at
     different points -- an encoder-bound send (~11.5-12.2 ms) and the program's NDI frame sharing
     stream's 1 GbE port once a frame -- and read 1.6-2.0 ms apart report after report with the
@@ -953,8 +960,12 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   sawtooth; now 8 bpp within the first minute, 900, no pace change after 30 s, 0 congestion
   steps). A sixth adds the download to it: the burst holds a quarter of the 1 MB buffer each frame,
   so the path overflows within ~1 s of the ramp whatever the controller does (a version-1 receiver:
-  134 lossy frames, still losing after 70 s); with the signal the first step comes before the
-  first loss, 55 lossy frames, none after 70 s, back to 8 bpp and 900. In the download the
+  134 lossy frames, still losing after 70 s, pinned by its own test); with the signal the first
+  step comes before the first loss, 55 lossy frames, none after 70 s, back to 8 bpp and 900, no
+  pace change after 200 s. The trade-off, stated: the OLD raw rule lost none there, because its
+  false overuse had held the link at 4 bpp with a permanent sawtooth all along. A seventh grows
+  the burst 50 -> 250 KB at 90 s (the program from black to cameras): no congestion step, 8 bpp,
+  900, settled. In the download the
   first datagram's queue barely moves (0.60 -> 0.62 ms) while the stretch grows 1.6 -> 4.3 ms: the
   GROWN stretch is the early signal, so it still asks the auto bpp; only a stretch at its base
   never does. The defaults were tuned on it: at

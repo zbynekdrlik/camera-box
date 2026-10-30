@@ -21,11 +21,21 @@
 //!   once a frame) and read 1.5-2.5 ms apart report after report with the queue at 0 and nothing
 //!   lost; judged raw, that constant offset read "overuse" every ~8 s, sawed the pace 900 -> 738
 //!   and pinned the auto bpp at 4.
-//! - **A QUEUE overuse** (for `bpp_after_overuse` reports in a row: 1 = at once) ALSO asks the
-//!   auto bpp for ONE step down (`crate::jxs_auto_bpp::StepReason::Congestion`), at most once per
-//!   `bpp_settle_s`: the queue needs a moment to drain before the next step is judged. A stretch
-//!   alone only thins the pace (a burst spread with no queue is no reason for less quality), and a
-//!   loss alone never asks: the auto bpp already steps on a loss report (`receiver-loss`).
+//!   The base is kept per send regime (the bpp) and ages by STEADY time ([`STRETCH_BASE_S`]: the
+//!   time since the first report minus the time after an overuse, so a persistent bottleneck never
+//!   ages its own evidence out, while a level left in quiet times re-learns its base, that report
+//!   recorded, not judged). The safe start's reports are neither judged nor recorded
+//!   ([`StretchMode::Skip`]). Reports under the congestion factor's cut pace ARE recorded: the base
+//!   is a minimum, so their smaller stretch only keeps the judgement sensitive while a download
+//!   lasts (not recording them cost the bench's download 30 lossy frames instead of 1), and they
+//!   age out 30 steady seconds after it.
+//! - **A DELAY overuse** -- a queue, or a stretch GROWN over its base (for `bpp_after_overuse`
+//!   reports in a row: 1 = at once) -- ALSO asks the auto bpp for ONE step down
+//!   (`crate::jxs_auto_bpp::StepReason::Congestion`), at most once per `bpp_settle_s`: the queue
+//!   needs a moment to drain before the next step is judged. A burst spread AT its base never asks
+//!   (it is no overuse at all); a grown one does, because in a saturating download the first
+//!   datagram's queue barely moves while the stretch grows a second before the overflow. A loss
+//!   alone never asks: the auto bpp already steps on a loss report (`receiver-loss`).
 //!
 //! The defaults are tuned on the bottleneck bench (`crate::jxs_congestion_bench`, a 1 GbE port
 //! with a 1 MB buffer and a download ramping to 60 % of it in 5 s): at 25 % stretch and two
@@ -43,6 +53,8 @@
 /// Reports the path's "no queue" base is taken over (30 s at one a second): longer than any
 /// adaptation, so a queue that persists while the sender still adapts never becomes the base.
 pub const BASE_REPORTS: usize = 30;
+/// The span stretch's base is the minimum over this many seconds of its level's reports.
+pub const STRETCH_BASE_S: f64 = 30.0;
 /// A path delay this far above the base: start over (a BACKSTOP). A clock step should never get
 /// here: the receiver removes its own steps (`WallSteps`), a sender step cancels per frame (its
 /// timecode and its own delay move together) and the report windows around it are not judged
@@ -154,9 +166,6 @@ pub enum StretchMode {
     /// Judged against the base and recorded into it (the steady pace).
     #[default]
     Base,
-    /// Judged, never recorded (the congestion factor holds the pace down: the port has room and
-    /// the stretch reads smaller than the steady pace's).
-    JudgeOnly,
     /// Neither (the safe start before the first receiver link).
     Skip,
 }
@@ -208,7 +217,12 @@ pub struct Congestion {
     /// us): their minimum is the quiet base the stretch is judged against. A regime's entries age
     /// only with that regime's own reports, so a step back to a bpp left a minute ago judges
     /// against the base it learnt then (before the congestion), never a new one.
-    stretch_history: std::collections::BTreeMap<Option<u32>, std::collections::VecDeque<i64>>,
+    stretch_history:
+        std::collections::BTreeMap<Option<u32>, std::collections::VecDeque<(f64, i64)>>,
+    /// The caller's time of the previous judged report, and the seconds spent after an overuse
+    /// since the first one: the steady clock the stretch base ages on is `now - congested_s`.
+    last_report_s: Option<f64>,
+    congested_s: f64,
 }
 
 impl Default for Congestion {
@@ -228,6 +242,8 @@ impl Congestion {
             last_bpp_down_s: None,
             state: PathState::Unknown,
             stretch_history: std::collections::BTreeMap::new(),
+            last_report_s: None,
+            congested_s: 0.0,
         }
     }
 
@@ -260,17 +276,34 @@ impl Congestion {
         }
         self.last_seq = Some(r.seq);
         let c = self.cfg;
+        // the time since the previous report counts as congested when that report read overuse
+        if let Some(last) = self.last_report_s {
+            if self.state == PathState::Overuse {
+                self.congested_s += (now_s - last).max(0.0);
+            }
+        }
+        self.last_report_s = Some(now_s);
         let stretch_over = match (r.recv_span_us, r.send_span_us) {
             (Some(rx), Some(tx)) if r.stretch_mode != StretchMode::Skip => {
                 let stretch = rx as i64 - tx as i64;
+                let steady_now = now_s - self.congested_s;
                 let history = self.stretch_history.entry(r.stretch_regime).or_default();
-                let base = history.iter().copied().fold(stretch, i64::min);
-                history.push_back(stretch);
+                // the base ages by steady time: a level left longer than the window learns it
+                // anew, a congested stretch of time never ages it
+                while history
+                    .front()
+                    .is_some_and(|(t, _)| steady_now - t > STRETCH_BASE_S)
+                {
+                    history.pop_front();
+                }
+                let base = history.iter().map(|(_, s)| *s).min();
+                history.push_back((steady_now, stretch));
                 while history.len() > BASE_REPORTS {
                     history.pop_front();
                 }
                 let bound = (c.stretch_overuse_us as f64).max(c.stretch_overuse_frac * tx as f64);
-                (stretch - base) as f64 > bound
+                // no base yet (a new or re-learnt level): recorded, not judged
+                base.is_some_and(|b| (stretch - b) as f64 > bound)
             }
             _ => false,
         };
@@ -678,6 +711,28 @@ mod tests {
             let s = c.on_report(&at(200 + k, 12_500, 10_000), 200.0 + k as f64);
             assert_ne!(s.state, PathState::Overuse, "report at {} s", 200 + k);
             assert!(!s.bpp_down);
+        }
+    }
+
+    /// The base is kept per regime (bpp): at 4 bpp an encoder-bound send arrives as sent, at 8 bpp
+    /// a wire-bound one arrives 3.5 ms later (the per-frame burst lands inside it). Alternating
+    /// between the two levels is never overuse; one shared base (the 4-bpp minimum) would read
+    /// every 8-bpp report as a 3.5 ms growth.
+    #[test]
+    fn each_bpp_level_keeps_its_own_stretch_base() {
+        let mut c = Congestion::default();
+        let at = |seq: u32, bpp: u32, rx, tx| PathReport {
+            stretch_regime: Some(bpp),
+            ..rep(seq, 0, rx, tx)
+        };
+        for k in 1..40u32 {
+            let r = if k % 10 < 5 {
+                at(k, 4, 11_800, 11_800)
+            } else {
+                at(k, 8, 24_500, 21_000)
+            };
+            let s = c.on_report(&r, k as f64);
+            assert_ne!(s.state, PathState::Overuse, "report {k}");
         }
     }
 }

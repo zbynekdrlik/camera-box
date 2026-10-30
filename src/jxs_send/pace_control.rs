@@ -157,13 +157,9 @@ impl PaceControl {
                 // steady regime (live 30.10.2026: its spans set a base the receiver-link pace
                 // never reaches again)
                 stretch_regime: Some(self.bpp),
-                stretch_mode: if self
-                    .current
-                    .is_none_or(|d| d.source == pace_auto::PaceSource::StartSpread)
-                {
-                    StretchMode::Skip
-                } else {
-                    StretchMode::Base
+                stretch_mode: match self.current.map(|d| d.source) {
+                    None | Some(pace_auto::PaceSource::StartSpread) => StretchMode::Skip,
+                    Some(_) => StretchMode::Base,
                 },
             },
             now_s,
