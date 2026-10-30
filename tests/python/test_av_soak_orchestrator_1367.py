@@ -1342,3 +1342,36 @@ def test_lib_probe_and_snapshot_commands_are_read_only(tmp_path):
     for banned in ("systemctl stop", "systemctl start", "systemctl restart", "rm ", "kill", ">", "tee"):
         assert banned not in body, banned
     assert out.rstrip().endswith(";")
+
+
+# --- issue 1482: the soak grades A/V against the SAME expected offset as the E2E -----------------------------
+def _merge_line(out):
+    lines = [ln for ln in out.splitlines() if "recording-verdict" in ln and "merge" in ln]
+    assert lines, out
+    return lines[-1]
+
+
+def test_the_direct_feed_soak_centres_the_av_gate_on_the_direct_leg_1482(rig):
+    # 30.10.2026 the 1 h soak graded -27..-42 ms against 0 and FAILED while the E2E, on the same
+    # rig the same hour, graded the same offsets against the direct feed's -45 and PASSED.
+    env, _ = rig
+    env = dict(env, RIG_TEST_FEED="direct")
+    env.pop("AV_EXPECTED_MS", None)
+    out = _soak(env, "--plan").stdout
+    assert "--av-expected-ms -45" in _merge_line(out)
+
+
+def test_the_optical_feed_soak_keeps_the_zero_centre_1482(rig):
+    env, _ = rig
+    env = dict(env, RIG_TEST_FEED="optical")
+    env.pop("AV_EXPECTED_MS", None)
+    out = _soak(env, "--plan").stdout
+    assert "--av-expected-ms 0" in _merge_line(out)
+
+
+def test_an_explicit_av_expected_ms_wins_over_the_feed_1482(rig):
+    env, _ = rig
+    env = dict(env, RIG_TEST_FEED="direct", AV_EXPECTED_MS="-12")
+    out = _soak(env, "--plan").stdout
+    line = _merge_line(out)
+    assert "--av-expected-ms -12" in line and "-45" not in line
