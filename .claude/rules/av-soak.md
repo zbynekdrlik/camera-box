@@ -157,7 +157,10 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   4 before `--run` starts). The slope bound 2 ms/h (`SLOPE_BOUND_MS_PER_H`) is the issue's
   acceptance, defined once in the decision module.
 - **The verdict's own defaults are single sources too:** the soak never passes `--burn-*-run-id`
-  (it deploys no burn) nor `--av-expected-ms` (unless `AV_EXPECTED_MS` is set explicitly).
+  (it deploys no burn). `--av-expected-ms` is the TEST FEED's leg, the same one the E2E passes
+  (issue 1482: `rig_test_feed_av_expected_ms`, -45 ms on the direct feed, 0 optical; an explicit
+  `AV_EXPECTED_MS` wins). The 30.10.2026 1 h run graded the direct feed's -27..-42 ms against 0 and
+  read FAIL while the E2E on the same rig passed; re-graded against -45 every sample was in bound.
 
 ## What a window measures (and what it cannot, passively)
 
