@@ -153,6 +153,13 @@ impl PaceControl {
                 send_span_us,
                 lost_slices: r.lost_slices,
                 delay_unjudged,
+                // the stretch's base per bpp; the safe start's frame-spread pace is not the
+                // steady regime (live 30.10.2026: its spans set a base the receiver-link pace
+                // never reaches again)
+                stretch_regime: Some(self.bpp),
+                stretch_unjudged: self
+                    .current
+                    .is_none_or(|d| d.source == pace_auto::PaceSource::StartSpread),
             },
             now_s,
         );

@@ -10,15 +10,22 @@
 //! BEFORE its buffer overflows -- the WebRTC GCC / L4S principle, delay before loss.
 //!
 //! The rules, one decision per NEW report (its seq):
-//! - **Overuse** = queuing delay over [`CongestionConfig::queue_overuse_us`], or the arrival span
-//!   longer than the send span by more than `max(stretch_overuse_us, stretch_overuse_frac x send
-//!   span)`, or a lost slice. Then the PACE factor drops x`decrease` at once (never below
-//!   `min_factor`; the sender also never paces below what a frame needs in its interval,
-//!   `crate::jxs_link::pace_auto`): the frame is spread thinner, its burst queues less.
-//! - **A delay overuse** (for `bpp_after_overuse` reports in a row: 1 = at once) ALSO asks the
+//! - **Overuse** = queuing delay over [`CongestionConfig::queue_overuse_us`], or the arrival span's
+//!   STRETCH (arrival span - send span) GROWN over its own quiet base (its minimum over the last
+//!   [`BASE_REPORTS`] reports, like the queue's) by more than `max(stretch_overuse_us,
+//!   stretch_overuse_frac x send span)`, or a lost slice. Then the PACE factor drops x`decrease` at
+//!   once (never below `min_factor`; the sender also never paces below what a frame needs in its
+//!   interval, `crate::jxs_link::pace_auto`): the frame is spread thinner, its burst queues less.
+//!   The base matters (live 30.10.2026, strih-snv -> stream-snv): the two spans are measured at
+//!   different points (an encoder-bound send, the program's NDI frame sharing the receiver's port
+//!   once a frame) and read 1.5-2.5 ms apart report after report with the queue at 0 and nothing
+//!   lost; judged raw, that constant offset read "overuse" every ~8 s, sawed the pace 900 -> 738
+//!   and pinned the auto bpp at 4.
+//! - **A QUEUE overuse** (for `bpp_after_overuse` reports in a row: 1 = at once) ALSO asks the
 //!   auto bpp for ONE step down (`crate::jxs_auto_bpp::StepReason::Congestion`), at most once per
-//!   `bpp_settle_s`: the queue needs a moment to drain before the next step is judged. A loss
-//!   alone never asks: the auto bpp already steps on a loss report (`receiver-loss`).
+//!   `bpp_settle_s`: the queue needs a moment to drain before the next step is judged. A stretch
+//!   alone only thins the pace (a burst spread with no queue is no reason for less quality), and a
+//!   loss alone never asks: the auto bpp already steps on a loss report (`receiver-loss`).
 //!
 //! The defaults are tuned on the bottleneck bench (`crate::jxs_congestion_bench`, a 1 GbE port
 //! with a 1 MB buffer and a download ramping to 60 % of it in 5 s): at 25 % stretch and two
@@ -133,6 +140,13 @@ pub struct PathReport {
     /// The sender withheld this report's queuing delay (a window across its own wall step, review
     /// round 3): the report holds the clean count where it is, never counts as clean.
     pub delay_unjudged: bool,
+    /// The send regime the spans were measured in (the sender's bpp): the stretch's quiet base is
+    /// kept per regime, because the two spans' offset depends on the frame's size against the
+    /// encoder's span and the pace (`None` = one shared regime).
+    pub stretch_regime: Option<u32>,
+    /// The spans were measured while the sender's pace was not yet the steady one (the safe start
+    /// before the first receiver link): not judged and not recorded as a base.
+    pub stretch_unjudged: bool,
 }
 
 /// The path's state as last judged.
@@ -178,6 +192,11 @@ pub struct Congestion {
     last_seq: Option<u32>,
     last_bpp_down_s: Option<f64>,
     state: PathState,
+    /// Per send regime, its last [`BASE_REPORTS`] measured stretches (arrival span - send span,
+    /// us): their minimum is the quiet base the stretch is judged against. A regime's entries age
+    /// only with that regime's own reports, so a step back to a bpp left a minute ago judges
+    /// against the base it learnt then (before the congestion), never a new one.
+    stretch_history: std::collections::BTreeMap<Option<u32>, std::collections::VecDeque<i64>>,
 }
 
 impl Default for Congestion {
@@ -196,6 +215,7 @@ impl Congestion {
             last_seq: None,
             last_bpp_down_s: None,
             state: PathState::Unknown,
+            stretch_history: std::collections::BTreeMap::new(),
         }
     }
 
@@ -229,9 +249,16 @@ impl Congestion {
         self.last_seq = Some(r.seq);
         let c = self.cfg;
         let stretch_over = match (r.recv_span_us, r.send_span_us) {
-            (Some(rx), Some(tx)) => {
+            (Some(rx), Some(tx)) if !r.stretch_unjudged => {
+                let stretch = rx as i64 - tx as i64;
+                let history = self.stretch_history.entry(r.stretch_regime).or_default();
+                let base = history.iter().copied().fold(stretch, i64::min);
+                history.push_back(stretch);
+                while history.len() > BASE_REPORTS {
+                    history.pop_front();
+                }
                 let bound = (c.stretch_overuse_us as f64).max(c.stretch_overuse_frac * tx as f64);
-                rx as f64 - tx as f64 > bound
+                (stretch - base) as f64 > bound
             }
             _ => false,
         };
@@ -306,6 +333,7 @@ mod tests {
             send_span_us: Some(tx),
             lost_slices: 0,
             delay_unjudged: false,
+            ..PathReport::default()
         }
     }
 

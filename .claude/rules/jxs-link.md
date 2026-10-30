@@ -910,10 +910,19 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   owned by `PaceControl`, one decision per new report seq:
   - **overuse** = queue > 4 ms, or (only while PACED: at line rate the sender's own NIC is the
     bottleneck by construction, and on a cambox NDI leaves ahead of JPEG XS in the egress priority
-    band, review round 2) the arrival span longer than this sender's own send span by
-    more than max(1.5 ms, 15 %) -- the send span = max(`wire_ms` p50 over its last 30 frames, the
+    band, review round 2) the STRETCH (arrival span - send span) GROWN over its own quiet base by
+    more than max(1.5 ms, 15 % of the send span). **The base** = the stretch's minimum over that
+    bpp's last 30 reports (kept PER BPP, a level's entries age only with its own reports, so a step
+    back during congestion judges against the base the level learnt while quiet; the safe start's
+    frame-spread reports are neither judged nor recorded). Live 30.10.2026 (the coordinator's run
+    of the merged lane, strih-snv -> stream-snv, auto pace): the two spans were measured at
+    different points -- an encoder-bound send (~11.5-12.2 ms) and the program's NDI frame sharing
+    stream's 1 GbE port once a frame -- and read 1.6-2.0 ms apart report after report with the
+    queue at 0.0-0.1 ms and nothing lost; judged raw against the 1.75 ms bound it read "overuse"
+    every ~8 s, sawed the pace 900 -> 738 and asked the auto bpp down each time: the bpp stayed at 4.
+    The send span = max(`wire_ms` p50 over its last 30 frames, the
     frame's wire bytes over its OWN link: a 1 GbE cambox's NIC needs ~19 ms for an 8 bpp frame its
-    encoder hands over in ~14 ms, never a stretched path) -- or a lost slice: the pace
+    encoder hands over in ~14 ms, never a stretched path). Or a lost slice. Then the pace
     factor x0.85 at once (floor 50 %, and `pace_auto` never paces below a frame's own need: its rate
     + 10 %), and a DELAY overuse asks the auto bpp for one step (`StepReason::Congestion`), at most
     once per 1 s. A loss alone never asks (the auto bpp steps on the loss report itself);
@@ -938,7 +947,17 @@ react to a GROWING QUEUE, before the switch buffer overflows.
   scenario runs a 1 GbE cambox at line rate into the 10 GbE strih with the phase sawtooth and
   +-5 ms receiver steps (removed by the meter's `WallSteps` except in the one frame that arrives
   across the step): 0 congestion steps, 8 bpp, never paced. A fourth runs the quiet paced strih
-  path with SENDER date steps of +200 ms and -200 ms mid-report: 0 congestion steps, 8 bpp, 900. The defaults were tuned on it: at
+  path with SENDER date steps of +200 ms and -200 ms mid-report: 0 congestion steps, 8 bpp, 900.
+  A fifth is the live 30.10.2026 pattern: an 11.8 ms encoder-bound send and a 250 KB NDI burst at
+  stream's port near each frame's end (the old raw rule there: bpp 4 all run, a 72-change pace
+  sawtooth; now 8 bpp within the first minute, 900, no pace change after 30 s, 0 congestion
+  steps). A sixth adds the download to it: the burst holds a quarter of the 1 MB buffer each frame,
+  so the path overflows within ~1 s of the ramp whatever the controller does (a version-1 receiver:
+  134 lossy frames, still losing after 70 s); with the signal the first step comes before the
+  first loss, 55 lossy frames, none after 70 s, back to 8 bpp and 900. In the download the
+  first datagram's queue barely moves (0.60 -> 0.62 ms) while the stretch grows 1.6 -> 4.3 ms: the
+  GROWN stretch is the early signal, so it still asks the auto bpp; only a stretch at its base
+  never does. The defaults were tuned on it: at
   25 % stretch and two reports before the bpp ask the loss came first; with a 2 s settle between
   asks it cost 49 lossy frames.
 - **Known limits:** the signal is one report a second, so a queue that fills in under a second
