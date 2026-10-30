@@ -144,9 +144,21 @@ pub struct PathReport {
     /// kept per regime, because the two spans' offset depends on the frame's size against the
     /// encoder's span and the pace (`None` = one shared regime).
     pub stretch_regime: Option<u32>,
-    /// The spans were measured while the sender's pace was not yet the steady one (the safe start
-    /// before the first receiver link): not judged and not recorded as a base.
-    pub stretch_unjudged: bool,
+    /// How this report's stretch is used ([`StretchMode`]).
+    pub stretch_mode: StretchMode,
+}
+
+/// How a report's stretch (arrival span - send span) is used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StretchMode {
+    /// Judged against the base and recorded into it (the steady pace).
+    #[default]
+    Base,
+    /// Judged, never recorded (the congestion factor holds the pace down: the port has room and
+    /// the stretch reads smaller than the steady pace's).
+    JudgeOnly,
+    /// Neither (the safe start before the first receiver link).
+    Skip,
 }
 
 /// The path's state as last judged.
@@ -249,7 +261,7 @@ impl Congestion {
         self.last_seq = Some(r.seq);
         let c = self.cfg;
         let stretch_over = match (r.recv_span_us, r.send_span_us) {
-            (Some(rx), Some(tx)) if !r.stretch_unjudged => {
+            (Some(rx), Some(tx)) if r.stretch_mode != StretchMode::Skip => {
                 let stretch = rx as i64 - tx as i64;
                 let history = self.stretch_history.entry(r.stretch_regime).or_default();
                 let base = history.iter().copied().fold(stretch, i64::min);
@@ -368,31 +380,33 @@ mod tests {
 
     #[test]
     fn a_stretch_that_grows_over_its_quiet_base_is_over_use_and_a_small_one_is_not() {
-        // the quiet base: arrival = send span
+        // the quiet base: arrival = send span + 4 ms (above the raw 3 ms bound: a rule that judged
+        // the raw stretch fails every quiet report here, review of the live fix)
         let quiet = |c: &mut Congestion, from: u32, tx: u32| {
             for k in from..from + 5 {
-                c.on_report(&rep(k, 0, tx, tx), k as f64);
+                let s = c.on_report(&rep(k, 0, tx + 4_000, tx), k as f64);
+                assert_ne!(s.state, PathState::Overuse, "quiet report {k}");
             }
         };
         let mut c = Congestion::default();
         quiet(&mut c, 1, 20_000);
-        // 20 ms sent, 23.5 ms arrived: 3.5 ms > max(1.5 ms, 15 % = 3 ms)
+        // 20 ms sent, 27.5 ms arrived: 3.5 ms over the base > max(1.5 ms, 15 % = 3 ms)
         assert_eq!(
-            c.on_report(&rep(10, 0, 23_500, 20_000), 10.0).state,
+            c.on_report(&rep(10, 0, 27_500, 20_000), 10.0).state,
             PathState::Overuse
         );
         let mut c = Congestion::default();
         quiet(&mut c, 1, 20_000);
-        // 20 ms sent, 22.5 ms arrived: 2.5 ms <= 3 ms
+        // 20 ms sent, 26.5 ms arrived: 2.5 ms over the base <= 3 ms
         assert_eq!(
-            c.on_report(&rep(10, 0, 22_500, 20_000), 10.0).state,
+            c.on_report(&rep(10, 0, 26_500, 20_000), 10.0).state,
             PathState::Clean
         );
-        // a short send span takes the 1.5 ms floor: 4 ms sent, 6.5 ms arrived
+        // a short send span takes the 1.5 ms floor: 4 ms sent, 10.5 ms arrived (2.5 over the base)
         let mut c = Congestion::default();
         quiet(&mut c, 1, 4_000);
         assert_eq!(
-            c.on_report(&rep(10, 0, 6_500, 4_000), 10.0).state,
+            c.on_report(&rep(10, 0, 10_500, 4_000), 10.0).state,
             PathState::Overuse
         );
     }
@@ -432,10 +446,11 @@ mod tests {
     fn a_stretch_at_its_base_never_asks_for_a_bpp_step_and_a_grown_one_does() {
         let mut c = Congestion::default();
         for k in 1..20 {
-            let s = c.on_report(&rep(k, 0, 22_000, 20_000), k as f64);
+            // 4 ms over the send span: above the raw 3 ms bound, at its own base
+            let s = c.on_report(&rep(k, 0, 24_000, 20_000), k as f64);
             assert!(!s.bpp_down, "report {k}: an offset at its base never asks");
         }
-        let s = c.on_report(&rep(20, 0, 26_000, 20_000), 20.0);
+        let s = c.on_report(&rep(20, 0, 28_000, 20_000), 20.0);
         assert_eq!(s.state, PathState::Overuse);
         assert!(s.bpp_down, "a grown stretch asks, with no queue");
     }
@@ -641,5 +656,59 @@ mod tests {
             c.on_report(&rep(3, 6_000, 20_000, 20_000), 3.0).bpp_down,
             "the second over-used report in the run asks"
         );
+    }
+
+    /// Review of the live fix: the base ages by TIME. A level left for a while comes back to a
+    /// base it learnt then; when the offset has since stepped up (the program's NDI frame grows
+    /// from black to cameras), a count-aged base, refreshed only by that level's own rare visits,
+    /// reads overuse at every return for hours. After 30 s without a report at a level its base
+    /// is learnt anew (that report recorded, not judged).
+    #[test]
+    fn a_base_older_than_its_window_is_learnt_anew() {
+        let mut c = Congestion::default();
+        let at = |seq, rx, tx| PathReport {
+            stretch_regime: Some(4),
+            ..rep(seq, 0, rx, tx)
+        };
+        for k in 1..31 {
+            c.on_report(&at(k, 10_000, 10_000), k as f64);
+        }
+        // the sender left 4 bpp at 31 s and returns at 200 s: the offset is now 2.5 ms
+        for k in 0..30u32 {
+            let s = c.on_report(&at(200 + k, 12_500, 10_000), 200.0 + k as f64);
+            assert_ne!(s.state, PathState::Overuse, "report at {} s", 200 + k);
+            assert!(!s.bpp_down);
+        }
+    }
+
+    /// Review of the live fix: a stretch measured while the CONGESTION factor holds the pace down
+    /// is judged but never becomes the base: at the lower pace the port has room and the stretch
+    /// reads smaller, a base the steady pace never reaches again.
+    #[test]
+    fn a_stretch_under_a_cut_pace_is_judged_but_never_the_base() {
+        let mut c = Congestion::default();
+        let steady = |seq, rx| PathReport {
+            stretch_regime: Some(8),
+            ..rep(seq, 0, rx, 20_000)
+        };
+        for k in 1..11 {
+            c.on_report(&steady(k, 24_000), k as f64);
+        }
+        // under the cut pace the stretch read 0
+        for k in 11..21 {
+            let s = c.on_report(
+                &PathReport {
+                    stretch_mode: StretchMode::JudgeOnly,
+                    ..steady(k, 20_000)
+                },
+                k as f64,
+            );
+            assert_ne!(s.state, PathState::Overuse);
+        }
+        // back at the steady pace: 4 ms over the send span (over the 3 ms bound) is its base, not a growth
+        for k in 21..40 {
+            let s = c.on_report(&steady(k, 24_000), k as f64);
+            assert_ne!(s.state, PathState::Overuse, "report {k}");
+        }
     }
 }

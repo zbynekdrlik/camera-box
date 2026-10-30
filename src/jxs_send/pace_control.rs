@@ -8,7 +8,7 @@
 //! re-read from sysfs once a second ([`PaceControl::refresh_own_link`]), so a port renegotiated to
 //! another speed, or a cable moved to another NIC, takes effect within a second with no setting.
 
-use crate::jxs_congestion::{Congestion, PathDelay, PathReport, PathState};
+use crate::jxs_congestion::{Congestion, PathDelay, PathReport, PathState, StretchMode};
 use crate::jxs_link::pace_auto::{self, PaceDecision, PaceInputs};
 use crate::jxs_link::ReceiverReport;
 
@@ -157,9 +157,14 @@ impl PaceControl {
                 // steady regime (live 30.10.2026: its spans set a base the receiver-link pace
                 // never reaches again)
                 stretch_regime: Some(self.bpp),
-                stretch_unjudged: self
+                stretch_mode: if self
                     .current
-                    .is_none_or(|d| d.source == pace_auto::PaceSource::StartSpread),
+                    .is_none_or(|d| d.source == pace_auto::PaceSource::StartSpread)
+                {
+                    StretchMode::Skip
+                } else {
+                    StretchMode::Base
+                },
             },
             now_s,
         );

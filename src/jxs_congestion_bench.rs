@@ -62,6 +62,9 @@ struct Scenario {
     /// timecode). The strih program's NDI frame leaves strih's 10 GbE NIC as one burst and shares
     /// stream-snv's 1 GbE port with the JPEG XS frame (live 30.10.2026).
     cross_burst: Option<(f64, f64)>,
+    /// From this time on (s) the burst carries these bytes (the program goes from black to
+    /// cameras and its NDI frame grows).
+    cross_burst_grows: Option<(f64, f64)>,
     delay_signal: bool,
     end_s: f64,
 }
@@ -109,6 +112,8 @@ struct Outcome {
     congestion_steps: u32,
     /// Pace changes after the first 30 s (a settled link has none: no sawtooth).
     pace_changes_after_30s: u32,
+    /// Pace changes after 200 s (long after the download: the recovered link must settle).
+    pace_changes_after_200s: u32,
     first_jxs_drop_s: Option<f64>,
     /// Frames with any lost datagram while the download ran (60..120 s) and after 70 s.
     lossy_frames_download: u32,
@@ -165,6 +170,9 @@ fn run(sc: Scenario) -> Outcome {
             if t_s >= 30.0 {
                 out.pace_changes_after_30s += 1;
             }
+            if t_s >= 200.0 {
+                out.pace_changes_after_200s += 1;
+            }
         }
         let code = 1920.0 * 1080.0 * bpp as f64 / 8.0;
         // the data datagrams plus one FEC parity per 12 (per slice: ~1 in 11)
@@ -195,7 +203,10 @@ fn run(sc: Scenario) -> Outcome {
             events.push((nic_free_us, true));
         }
         let span_end = t0 + FRAME_US;
-        if let Some((bytes, at)) = sc.cross_burst {
+        if let Some((bytes, at)) = sc.cross_burst.map(|(b, at)| match sc.cross_burst_grows {
+            Some((from_s, grown)) if t_s >= from_s => (grown, at),
+            _ => (b, at),
+        }) {
             for g in 0..(bytes / (GROUP as f64 * DGRAM_WIRE)).ceil() as usize {
                 // the burst leaves strih's 10 GbE NIC at line rate
                 events.push((
@@ -319,6 +330,7 @@ const STRIH_TO_STREAM: Scenario = Scenario {
     rx_steps: &[],
     tx_steps: &[],
     cross_burst: None,
+    cross_burst_grows: None,
     delay_signal: true,
     end_s: 420.0,
 };
@@ -400,6 +412,7 @@ fn a_line_rate_cambox_with_a_phase_sawtooth_and_clock_steps_never_reads_congesti
         rx_steps: &[(70.0, 5_000.0), (90.0, -5_000.0)],
         tx_steps: &[],
         cross_burst: None,
+        cross_burst_grows: None,
         delay_signal: true,
         end_s: 120.0,
     });
@@ -461,10 +474,10 @@ fn the_programs_ndi_burst_sharing_the_port_is_not_congestion() {
 
 /// The same NDI burst plus the owner's saturating download: the link still backs off before the
 /// buffer overflows and climbs back afterwards (the burst must not blind the real signal). The
-/// burst takes a quarter of the 1 MB port buffer every frame at 8 bpp, so this path overflows
-/// within ~1 s of the download's ramp whatever the controller does: the measure is against the
-/// same path without the delay signal (a version-1 receiver: 134 lossy frames, still losing after
-/// 70 s, the pace left at 634 under congestion when the run ends).
+/// trade-off, stated: at 8 bpp the burst holds a quarter of the 1 MB port buffer each frame, and
+/// the ~6 s around the download's onset cost ~55 lossy frames. The OLD raw rule lost none here --
+/// because its false overuse had held the link at 4 bpp, with a permanent pace sawtooth, all the
+/// time before. The version-1 receiver on the same path (no delay signal) is pinned below.
 #[test]
 fn with_the_ndi_burst_a_saturating_download_still_backs_off_and_recovers() {
     let o = run(Scenario {
@@ -487,4 +500,49 @@ fn with_the_ndi_burst_a_saturating_download_still_backs_off_and_recovers() {
     assert_eq!(o.lossy_frames_after_70s, 0);
     assert_eq!(o.bpp_at_end, 8, "back to 8 bpp");
     assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
+    assert_eq!(
+        o.pace_changes_after_200s, 0,
+        "the recovered link settles: no sawtooth from a base learnt under the cut pace"
+    );
+}
+
+/// The version-1 receiver (no delay signal) on the download + NDI burst path: the comparison the
+/// bound above relies on, measured.
+#[test]
+fn without_the_delay_signal_the_ndi_burst_download_loses_far_more() {
+    let o = run(Scenario {
+        cross_burst: Some((250_000.0, 13_000.0)),
+        encode_us: 11_800.0,
+        delay_signal: false,
+        end_s: 130.0,
+        ..STRIH_TO_STREAM
+    });
+    eprintln!("{o:?}");
+    assert!(
+        o.lossy_frames_download >= 100,
+        "{}",
+        o.lossy_frames_download
+    );
+    assert!(o.lossy_frames_after_70s > 0, "still losing after 70 s");
+}
+
+/// Review of the live fix: the program goes from black (a 50 KB NDI frame) to cameras (250 KB) at
+/// 90 s, long after the link settled at 8 bpp. The offset steps up and stays: at most one step,
+/// back at 8 bpp and 900 well before the end, and no pace change in the last 100 s.
+#[test]
+fn the_ndi_burst_growing_later_never_saws_the_link() {
+    let o = run(Scenario {
+        cross: quiet,
+        encode_us: 11_800.0,
+        cross_burst: Some((50_000.0, 13_000.0)),
+        cross_burst_grows: Some((90.0, 250_000.0)),
+        end_s: 300.0,
+        ..STRIH_TO_STREAM
+    });
+    eprintln!("{o:?}");
+    assert!(o.congestion_steps <= 1, "{}", o.congestion_steps);
+    assert_eq!(o.lossy_frames, 0);
+    assert_eq!(o.bpp_at_end, 8);
+    assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
+    assert_eq!(o.pace_changes_after_200s, 0, "settled");
 }
