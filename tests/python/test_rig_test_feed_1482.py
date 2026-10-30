@@ -6,8 +6,13 @@ runs no intercom (its USB jack is the intercom headset device and now carries th
 These tests run the lib's emitted remote text against a temp root and pin the rig-mode / recording-e2e wiring.
 """
 import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ro_window_fakes_1407 import make_box  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "scripts" / "lib" / "rig-test-feed.sh"
@@ -46,14 +51,18 @@ def test_the_jack_check_reads_aplay():
 
 
 def _run_remote(tmp_path, text, aplay=APLAY):
-    b = tmp_path / "bin"
-    b.mkdir(exist_ok=True)
-    (b / "aplay").write_text("#!/bin/sh\ncat <<'X'\n%sX\n" % aplay)
-    (b / "systemctl").write_text('#!/bin/sh\necho "systemctl $*" >> %s/calls\n' % tmp_path)
-    for f in ("aplay", "systemctl"):
-        (b / f).chmod(0o755)
+    # the issue-1407 fake read-only-root box: the drop-ins are written through a verified rw window since
+    # the reboot-survival fix (test_rig_test_feed_persist_1482.py), so mount/findmnt/sync must be the fakes
+    box = tmp_path / "bin"
+    if not box.exists():
+        make_box(tmp_path, root="ro")
+        for tool in ("mkdir", "rmdir"):
+            (box / tool).symlink_to(shutil.which(tool, path="/usr/bin:/bin"))
+    (box / "aplay").unlink(missing_ok=True)
+    (box / "aplay").write_text("#!/bin/sh\ncat <<'X'\n%sX\n" % aplay)
+    (box / "aplay").chmod(0o755)
     return subprocess.run(["bash", "-c", "set -e\n" + text], capture_output=True, text=True, timeout=30,
-                          env={"PATH": "%s:/usr/bin:/bin" % b})
+                          env={"PATH": str(box), "FAKE_STATE": str(tmp_path / "state"), "HOME": str(tmp_path)})
 
 
 def _env(tmp_path, feed="direct"):
@@ -71,7 +80,7 @@ def test_test_mode_writes_both_drop_ins_and_event_removes_them(tmp_path):
     intercom = Path(env["RIG_TEST_FEED_INTERCOM_DROPIN"]).read_text()
     assert painter == "[Service]\nEnvironment=FRAME_PROBE_AUDIO_MARKER_DEVICE=hw:CARD=HID,DEV=0\n"
     assert intercom == "[Service]\nEnvironment=CAMERA_BOX_INTERCOM=off\n"
-    assert "systemctl daemon-reload" in (tmp_path / "calls").read_text()
+    assert "systemctl daemon-reload" in (tmp_path / "state" / "log").read_text()
     r = _run_remote(tmp_path, _lib("rig_test_feed_painter_dropin_clear_cmds", env).stdout)
     assert r.returncode == 0, r.stderr
     assert not Path(env["RIG_TEST_FEED_PAINTER_DROPIN"]).exists()
