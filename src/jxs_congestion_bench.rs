@@ -114,6 +114,8 @@ struct Outcome {
     pace_changes_after_30s: u32,
     /// Pace changes after 200 s (long after the download: the recovered link must settle).
     pace_changes_after_200s: u32,
+    /// Pace changes after 300 s.
+    pace_changes_after_300s: u32,
     first_jxs_drop_s: Option<f64>,
     /// Frames with any lost datagram while the download ran (60..120 s) and after 70 s.
     lossy_frames_download: u32,
@@ -202,6 +204,9 @@ fn run(sc: Scenario) -> Outcome {
             }
             if t_s >= 200.0 {
                 out.pace_changes_after_200s += 1;
+            }
+            if t_s >= 300.0 {
+                out.pace_changes_after_300s += 1;
             }
         }
         let code = 1920.0 * 1080.0 * bpp as f64 / 8.0;
@@ -553,4 +558,27 @@ fn the_ndi_burst_growing_later_never_saws_the_link() {
     assert_eq!(o.bpp_at_end, 8);
     assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
     assert_eq!(o.pace_changes_after_200s, 0, "settled");
+}
+
+/// Review of the live fix: a growth ABOVE the stretch bound (the program's NDI frame 50 -> 600 KB
+/// at 90 s, ~4.4 ms more at the port against a ~3.2 ms bound at 8 bpp). It reads overuse and
+/// steps down, then the 8-bpp base re-learns after 30 steady seconds and the link settles back at
+/// 8 bpp and 900. A base aged by count (refreshed only by that level's own rare visits) never lets
+/// it settle.
+#[test]
+fn the_ndi_burst_growing_past_the_bound_relearns_and_settles() {
+    let o = run(Scenario {
+        cross: quiet,
+        encode_us: 11_800.0,
+        cross_burst: Some((50_000.0, 13_000.0)),
+        cross_burst_grows: Some((90.0, 600_000.0)),
+        end_s: 400.0,
+        ..STRIH_TO_STREAM
+    });
+    eprintln!("{o:?}");
+    assert!(o.first_congestion_step_s.is_some(), "the growth is seen");
+    assert!(o.congestion_steps <= 3, "{}", o.congestion_steps);
+    assert_eq!(o.bpp_at_end, 8);
+    assert_eq!(o.pace_at_end, (900, Some(PaceSource::ReceiverLink)));
+    assert_eq!(o.pace_changes_after_300s, 0, "settled");
 }
