@@ -6,7 +6,8 @@ pub const REPORT_MAGIC: u8 = 0x52;
 /// The report format version a receiver sends (2: the link speed and the congestion / FEC
 /// fields after the version-1 bytes).
 pub const REPORT_VERSION: u8 = 2;
-/// A version-2 report is exactly this long.
+/// A version-2 report is exactly this long. (Version 2 was 48 bytes for a few unreleased commits of
+/// issue 1387; nothing of that was ever deployed, the version byte did not move.)
 pub const REPORT_LEN: usize = 56;
 /// The version-1 report (32 bytes, no link speed): still read, from a receiver not yet upgraded.
 pub const REPORT_V1_LEN: usize = 32;
@@ -39,10 +40,10 @@ pub struct ReceiverReport {
     /// Version 2: the speed of the link the slices arrive on, Mb/s (0 = unknown, and always 0
     /// from a version-1 receiver).
     pub link_mbps: u32,
-    /// Version 2: the p50 of (first datagram arrival - frame timecode) over the period's frames,
+    /// Version 2: the MEAN of (first datagram arrival - frame timecode) over the period's frames,
     /// microseconds on the two boxes' wall clocks (`None` = no frame). The SENDER subtracts its own
     /// first-send delay of the same frames and keeps the base (`crate::jxs_congestion::PathDelay`).
-    pub delay_p50_us: Option<i32>,
+    pub delay_mean_us: Option<i32>,
     /// Version 2: p90 - p10 of those delays (us): a clock step moves every frame alike (a small
     /// spread), a queue does not.
     pub delay_spread_us: Option<u32>,
@@ -83,7 +84,7 @@ impl ReceiverReport {
         b[24..32].copy_from_slice(&self.last_timecode_100ns.to_le_bytes());
         b[32..36].copy_from_slice(&self.link_mbps.to_le_bytes());
         let delay = self
-            .delay_p50_us
+            .delay_mean_us
             .map_or(NOT_MEASURED_I32, |d| d.max(NOT_MEASURED_I32 + 1));
         b[36..40].copy_from_slice(&delay.to_le_bytes());
         b[40..44].copy_from_slice(&opt_us(self.delay_spread_us).to_le_bytes());
@@ -122,7 +123,7 @@ impl ReceiverReport {
         if b.len() == REPORT_LEN {
             r.link_mbps = u32_at(32);
             let d = u32_at(36) as i32;
-            r.delay_p50_us = (d != NOT_MEASURED_I32).then_some(d);
+            r.delay_mean_us = (d != NOT_MEASURED_I32).then_some(d);
             r.delay_spread_us = measured(u32_at(40));
             r.span_p50_us = measured(u32_at(44));
             r.fec_repaired = u32_at(48);
@@ -215,7 +216,7 @@ mod tests {
             decode_p99_us: 4_321,
             last_timecode_100ns: 17_617_300_123_456_789,
             link_mbps: 2500,
-            delay_p50_us: Some(-1_234),
+            delay_mean_us: Some(-1_234),
             delay_spread_us: Some(900),
             span_p50_us: Some(18_000),
             fec_repaired: 7,
@@ -239,7 +240,7 @@ mod tests {
         assert_eq!(ReceiverReport::decode(&b), Ok(r));
         // not measured = u32::MAX on the wire
         let n = ReceiverReport {
-            delay_p50_us: None,
+            delay_mean_us: None,
             delay_spread_us: None,
             span_p50_us: None,
             ..r
@@ -249,7 +250,7 @@ mod tests {
         assert_eq!(&n[36..40], &i32::MIN.to_le_bytes());
         assert_eq!(&n[40..48], &[0xFF; 8]);
         let back = ReceiverReport::decode(&n).unwrap();
-        assert_eq!((back.delay_p50_us, back.delay_spread_us), (None, None));
+        assert_eq!((back.delay_mean_us, back.delay_spread_us), (None, None));
     }
 
     /// A receiver not yet upgraded sends the 32-byte version 1: still read, its version-2 fields
@@ -266,7 +267,7 @@ mod tests {
             got,
             ReceiverReport {
                 link_mbps: 0,
-                delay_p50_us: None,
+                delay_mean_us: None,
                 delay_spread_us: None,
                 span_p50_us: None,
                 fec_repaired: 0,

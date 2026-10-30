@@ -3,8 +3,9 @@
 //! into the version-2 report fields the sender's controller (`crate::jxs_congestion`) reads BEFORE
 //! any loss:
 //!
-//! - **The delay p50.** Per frame `d` = the first datagram's arrival (receiver clock) minus the
-//!   frame's genlock timecode (sender clock); the period's p50 in microseconds. `d` holds the
+//! - **The delay mean.** Per frame `d` = the first datagram's arrival (receiver clock) minus the
+//!   frame's genlock timecode (sender clock); the period's MEAN in microseconds (a mean, so a set one
+//!   frame off the sender's moves it by a fraction of a slot, never a whole one: review round 2). `d` holds the
 //!   sender's own delay before its first send (on a cambox the capture's PHASE in its emit slot,
 //!   0..16.7 ms and drifting, plus the encode), the path delay, and the two clocks' offset. Only the
 //!   SENDER knows its own part, so the sender subtracts it and keeps the "no queue" base
@@ -67,7 +68,7 @@ pub struct CongestionMeter {
 /// One period's report fields (microseconds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CongestionSample {
-    pub delay_p50_us: Option<i32>,
+    pub delay_mean_us: Option<i32>,
     pub delay_spread_us: Option<u32>,
     pub span_p50_us: Option<u32>,
 }
@@ -105,8 +106,9 @@ impl CongestionMeter {
         }
         if !self.delays.is_empty() {
             self.delays.sort_unstable();
-            let p50 = rank(&self.delays, 50) / 10;
-            out.delay_p50_us = Some(p50.clamp(i32::MIN as i64 + 1, i32::MAX as i64) as i32);
+            let sum: i128 = self.delays.iter().map(|d| *d as i128).sum();
+            let mean = (sum / self.delays.len() as i128 / 10) as i64;
+            out.delay_mean_us = Some(mean.clamp(i32::MIN as i64 + 1, i32::MAX as i64) as i32);
             out.delay_spread_us = Some(to_u32_us(rank(&self.delays, 90) - rank(&self.delays, 10)));
         }
         self.delays.clear();
@@ -122,7 +124,7 @@ mod tests {
     const TC0: u64 = 17_617_300_000_000_000;
 
     #[test]
-    fn a_period_reports_its_delay_p50_spread_and_whole_frame_span() {
+    fn a_period_reports_its_delay_mean_spread_and_whole_frame_span() {
         let mut m = CongestionMeter::default();
         // the receiver clock 3 s ahead: the delay carries the offset, the sender removes it
         for k in 0..30u64 {
@@ -132,8 +134,8 @@ mod tests {
         }
         let s = m.take();
         assert_eq!(s.span_p50_us, Some(18_000));
-        // delays 40.0..40.9 ms above the offset: p50 = 3_004_400 us, p10..p90 = 0.8 ms
-        assert_eq!(s.delay_p50_us, Some(3_004_400));
+        // delays 4.0..4.9 ms above the offset: mean = 3_004_450 us, p10..p90 = 0.8 ms
+        assert_eq!(s.delay_mean_us, Some(3_004_450));
         assert_eq!(s.delay_spread_us, Some(800));
         assert_eq!(m.take(), CongestionSample::default(), "a fresh period");
     }
@@ -144,7 +146,7 @@ mod tests {
         m.note_frame(TC0, TC0 as i64 + 40_000, TC0 as i64 + 90_000, 2);
         let s = m.take();
         assert_eq!(s.span_p50_us, None);
-        assert_eq!((s.delay_p50_us, s.delay_spread_us), (Some(4_000), Some(0)));
+        assert_eq!((s.delay_mean_us, s.delay_spread_us), (Some(4_000), Some(0)));
         m.note_frame(TC0, 0, 0, 69);
         assert_eq!(m.take(), CongestionSample::default());
     }
@@ -159,6 +161,6 @@ mod tests {
     fn a_receiver_clock_behind_the_sender_gives_a_negative_delay() {
         let mut m = CongestionMeter::default();
         m.note_frame(TC0, TC0 as i64 - 20_000, TC0 as i64, 0);
-        assert_eq!(m.take().delay_p50_us, Some(-2_000));
+        assert_eq!(m.take().delay_mean_us, Some(-2_000));
     }
 }

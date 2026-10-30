@@ -90,8 +90,8 @@ impl PaceControl {
     /// signal, which the congestion control judges against this sender's recent send spans.
     pub fn on_report(&mut self, r: &ReceiverReport, now_s: f64) {
         self.receiver_link_mbps = (r.link_mbps > 0).then_some(r.link_mbps);
-        self.queue_delay_us = match (r.delay_p50_us, r.delay_spread_us, self.own_delay_p50_us(r)) {
-            (Some(rx), Some(spread), Some(own)) => self.path_delay.update(rx as i64, spread, own),
+        self.queue_delay_us = match (r.delay_mean_us, self.own_delay_mean_us(r)) {
+            (Some(rx), Some(own)) => self.path_delay.update(rx as i64, own),
             _ => None,
         };
         let mut spans: Vec<u32> = self.send_spans_us.iter().copied().collect();
@@ -102,7 +102,11 @@ impl PaceControl {
         let wire_floor_us = self.own_link_mbps.filter(|m| *m > 0).map(|m| {
             (pace_auto::frame_wire_bytes(self.width, self.height, self.bpp) * 8 / m as u64) as u32
         });
-        let send_span_us = (!spans.is_empty())
+        // a sender at LINE RATE has its own NIC as the bottleneck by construction (and on a cambox
+        // NDI goes out ahead of JPEG XS in the egress tree's priority band): no stretch is judged
+        // there, the queuing delay still covers the path (review round 2)
+        let line_rate = self.current.is_some_and(|d| d.mbps == 0);
+        let send_span_us = (!spans.is_empty() && !line_rate)
             .then(|| spans[(spans.len() - 1) / 2].max(wire_floor_us.unwrap_or(0)));
         let before = self.congestion.state();
         let step = self.congestion.on_report(
@@ -131,9 +135,10 @@ impl PaceControl {
         }
     }
 
-    /// This sender's own p50 delay (us) over the frames the report's second covers: timecodes in
-    /// (newest - 1 s, newest]. `None` = none of them known.
-    fn own_delay_p50_us(&self, r: &ReceiverReport) -> Option<i64> {
+    /// This sender's own MEAN delay (us) over the frames the report's second covers: timecodes in
+    /// (newest - 1 s, newest]. `None` = none of them known. The receiver's set can differ by about
+    /// a frame (it finalizes a frame one frame late); a mean moves by a fraction of that one frame.
+    fn own_delay_mean_us(&self, r: &ReceiverReport) -> Option<i64> {
         let newest = r.last_timecode_100ns;
         let mut v: Vec<i64> = self
             .own_delays
@@ -141,12 +146,8 @@ impl PaceControl {
             .filter(|(tc, _)| *tc <= newest && *tc + 10_000_000 > newest)
             .map(|(_, d)| *d)
             .collect();
-        if v.is_empty() {
-            return None;
-        }
         v.sort_unstable();
-        let n = v.len();
-        Some(v[(n * 50).div_ceil(100).clamp(1, n) - 1] / 10)
+        (!v.is_empty()).then(|| v[(v.len() - 1) / 2] / 10)
     }
 
     /// A frame's first send: its timecode and the wall clock (`CLOCK_REALTIME`, 100 ns) then.
@@ -363,7 +364,7 @@ mod tests {
             frames: 30,
             link_mbps: 1000,
             last_timecode_100ns: newest,
-            delay_p50_us: Some(1_000_000 + 2_000 + 300),
+            delay_mean_us: Some(1_000_000 + 2_000 + 300),
             delay_spread_us: Some(500),
             span_p50_us: Some(19_900),
             ..ReceiverReport::default()
@@ -373,7 +374,7 @@ mod tests {
         p.on_report(&quiet(1), 1.0);
         assert_eq!(p.changed().map(|d| d.mbps), Some(900));
         let queued = |seq| ReceiverReport {
-            delay_p50_us: Some(1_000_000 + 2_000 + 7_300),
+            delay_mean_us: Some(1_000_000 + 2_000 + 7_300),
             delay_spread_us: Some(5_000),
             ..quiet(seq)
         };
@@ -418,32 +419,39 @@ mod tests {
     /// Review round 1: a 1 GbE cambox at line rate whose NIC needs longer than its encoder (8 bpp:
     /// ~18 ms of wire for a ~14 ms encode) is not a stretched path, and its capture phase sawtooth
     /// (the sender's own delay wandering and jumping a slot) is not a queue: it stays clean, at line
-    /// rate, at 8 bpp.
+    /// rate, at 8 bpp. Review round 2: the receiver's frame set is one frame off the sender's (it
+    /// finalizes a frame one frame late) and the slot crossing lands at frame 15 of a report: a
+    /// MEAN moves by one frame's difference over 30, a p50 would have moved by the whole slot.
     #[test]
     fn a_line_rate_cambox_with_a_phase_sawtooth_stays_clean() {
         let mut p = PaceControl::new(0, None);
         p.set_own_link(Some(1000));
         p.on_frames(1920, 1080, 8);
         const TC: u64 = 17_617_300_000_000_000;
+        const FRAME: u64 = 333_333;
+        // the capture phase in its 60 fps slot (100 ns): +40 us a frame, back a slot when it
+        // crosses the edge -- at frame 15 of report 3 (j = 105), and again 416 frames later
+        let phase = |j: i64| (((j - 105) * 400).rem_euclid(166_667)) + 20_000;
+        let tc = |j: i64| TC + j as u64 * FRAME;
+        let mut j = 0i64;
         for seq in 0..60u32 {
-            let mut newest = 0;
-            for k in 0..30u64 {
-                let tc = TC + (seq as u64 * 30 + k) * 333_333;
-                // the phase in the 60 fps slot: +1.2 ms a second, back a slot at the edge
-                let phase = ((seq as i64 * 12_000) + k as i64 * 400) % 166_667;
-                p.on_first_send(tc, tc as i64 + phase + 20_000);
+            let last = (seq as i64) * 30 + 29;
+            while j <= last {
+                p.on_first_send(tc(j), tc(j) as i64 + phase(j));
                 p.on_wire(13.8);
-                newest = tc;
+                j += 1;
             }
-            let own_p50 = ((seq as i64 * 12_000) + 14 * 400) % 166_667 + 20_000;
+            // the receiver's set: frames last-30 ..= last-1 (it heard `last` but finalizes it next
+            // period), each 3 ms of path later than the sender's own delay
+            let rx_sum: i64 = (last - 30..last).map(|k| phase(k) + 30_000).sum();
             p.on_report(
                 &ReceiverReport {
                     seq,
                     camera_id: 5,
                     frames: 30,
                     link_mbps: 10_000,
-                    last_timecode_100ns: newest,
-                    delay_p50_us: Some(((own_p50 + 3_000) / 10) as i32),
+                    last_timecode_100ns: tc(last),
+                    delay_mean_us: Some((rx_sum / 30 / 10) as i32),
                     delay_spread_us: Some(1_200),
                     // the receiver sees the wire span: 18 ms
                     span_p50_us: Some(18_100),
@@ -456,6 +464,11 @@ mod tests {
             p.changed();
             p.fill(&mut w);
             assert_ne!(w.path_state, PathState::Overuse, "report {seq}");
+            assert!(
+                w.queue_delay_us.unwrap_or(0) < 1_000,
+                "report {seq}: queue {:?}",
+                w.queue_delay_us
+            );
             assert_eq!(
                 (w.pace_mbps, w.pace_source),
                 (0, pace_auto::PaceSource::LineRate)

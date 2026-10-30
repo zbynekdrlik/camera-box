@@ -56,7 +56,7 @@
 //! | 20..24 | decode p99 | last datagram in -> frame decoded, microseconds (`u32::MAX` = none) |
 //! | 24..32 | last timecode | the newest frame timecode of the period (100 ns, 0 = no frame) |
 //! | 32..36 | link speed | Mb/s of the interface the slices arrive on (`link_speed`), 0 = unknown |
-//! | 36..40 | delay p50 | i32 us: p50 of (first arrival - timecode) over the period, `i32::MIN` = none |
+//! | 36..40 | delay mean | i32 us: mean of (first arrival - timecode) over the period, `i32::MIN` = none |
 //! | 40..44 | delay spread | u32 us: p90 - p10 of those delays, `u32::MAX` = none |
 //! | 44..48 | arrival span p50 | first -> last datagram of a whole frame, us, `u32::MAX` = none |
 //! | 48..52 | FEC repaired | datagrams rebuilt by the forward error correction in the period |

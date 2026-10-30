@@ -36,41 +36,39 @@
 /// Reports the path's "no queue" base is taken over (30 s at one a second): longer than any
 /// adaptation, so a queue that persists while the sender still adapts never becomes the base.
 pub const BASE_REPORTS: usize = 30;
-/// A path delay that jumps by more than this between two reports while the receiver's per-frame
-/// delays stay tight ([`STEP_SPREAD_US`]) is a CLOCK step on one box (a dantesync correction), not a
-/// queue: every frame moved alike. The base moves with it.
-pub const STEP_JUMP_US: i64 = 3_000;
-pub const STEP_SPREAD_US: u32 = 2_000;
-/// A path delay this far above the base is a big clock step (the nightly date step): start over.
+/// A path delay this far above the base is a big clock step that neither end's `WallSteps` saw
+/// (the nightly date step): start over. Both ends measure on the wall minus its own steps, so a
+/// small step never reaches here; a downward one needs nothing (the minimum takes it). An earlier
+/// rule that moved the base on a "tight" jump invented a queue after a real one drained at once
+/// (review round 2 of item 2), and is gone.
 pub const STEP_RESET_US: i64 = 100_000;
 
-/// The sender's half of the queuing-delay signal (pure): the receiver's p50 of (first arrival -
-/// timecode) minus the SENDER's own p50 of (first send - timecode) of the same frames = the path
+/// The sender's half of the queuing-delay signal (pure): the receiver's MEAN of (first arrival -
+/// timecode) minus the SENDER's own mean of (first send - timecode) of the same frames = the path
 /// delay plus the clocks' offset, constant on a quiet path. The queue = the path delay above its
 /// minimum over the last [`BASE_REPORTS`]. The sender's part (on a cambox: the capture's phase in
 /// its 60 fps emit slot, a sawtooth that wanders 0..16.7 ms and jumps a slot at an edge, plus the
-/// encode) cancels; the receiver alone cannot remove it (review round 1 of item 2).
+/// encode) cancels; the receiver alone cannot remove it (review round 1 of item 2). MEANS, not
+/// medians: the two ends' frame sets can differ by a frame, and at a slot-edge crossing the delays
+/// are two groups 16.7 ms apart, where a one-frame shift flips a median by a whole slot but moves
+/// a mean by 16.7 / 30 = 0.56 ms (review round 2).
 #[derive(Debug, Default, Clone)]
 pub struct PathDelay {
     history: std::collections::VecDeque<i64>,
-    last: Option<i64>,
 }
 
 impl PathDelay {
-    /// One report: the receiver's delay p50 and spread, the sender's own p50 (all us). Returns the
-    /// queuing delay in us (`None` right after a big clock step).
-    pub fn update(&mut self, rx_p50_us: i64, rx_spread_us: u32, own_p50_us: i64) -> Option<u32> {
-        let path = rx_p50_us - own_p50_us;
-        if let Some(last) = self.last {
-            let jump = path - last;
-            if jump.abs() > STEP_JUMP_US && rx_spread_us < STEP_SPREAD_US {
-                // every frame moved alike: a clock step, the base moves with it
+    /// One report: the receiver's delay mean and the sender's own mean (us). Returns the queuing
+    /// delay in us (`None` right after a big clock step).
+    pub fn update(&mut self, rx_mean_us: i64, own_mean_us: i64) -> Option<u32> {
+        let path = rx_mean_us - own_mean_us;
+        if let Some(prev) = self.history.back().copied() {
+            if (path - prev).abs() > 3_000 {
                 for h in self.history.iter_mut() {
-                    *h += jump;
+                    *h += path - prev;
                 }
             }
         }
-        self.last = Some(path);
         let base = self.history.iter().copied().fold(path, i64::min);
         if path - base > STEP_RESET_US {
             self.history.clear();
@@ -440,52 +438,55 @@ mod tests {
         for k in 0..60i64 {
             let own = 21_000 + (k * 1_500) % 18_000;
             let rx = 3_000_000 + own + 400; // the receiver clock 3 s ahead, 0.4 ms of path
-            assert!(p.update(rx, 1_500, own).unwrap() <= 50, "report {k}");
+            assert!(p.update(rx, own).unwrap() <= 50, "report {k}");
         }
-        // a queue of 6 ms builds (with the spread a queue brings)
-        assert_eq!(
-            p.update(3_000_000 + 30_000 + 6_400, 5_000, 30_000),
-            Some(6_000)
-        );
-        assert_eq!(
-            p.update(3_000_000 + 25_000 + 8_400, 6_000, 25_000),
-            Some(8_000)
-        );
+        assert_eq!(p.update(3_000_000 + 30_000 + 6_400, 30_000), Some(6_000));
+        assert_eq!(p.update(3_000_000 + 25_000 + 8_400, 25_000), Some(8_000));
     }
 
-    /// Review round 1: a +-5 ms wall step on one box moves every frame alike (a tight spread): the
-    /// base moves with it, the path reads no queue.
+    /// Review round 2: a standing queue that drains at once (the download stops) reads 0 in the
+    /// very next report, and one that appears at once reads in full at once.
     #[test]
-    fn a_small_clock_step_moves_the_base_and_is_never_a_queue() {
+    fn a_standing_queue_that_drains_at_once_reads_no_queue_in_the_next_report() {
         let mut p = PathDelay::default();
         for _ in 0..10 {
-            p.update(3_040_000, 900, 40_000);
+            p.update(3_040_000, 40_000);
+        }
+        for k in 1..=8 {
+            assert_eq!(
+                p.update(3_040_000 + k * 1_000, 40_000),
+                Some(k as u32 * 1_000)
+            );
+        }
+        for _ in 0..10 {
+            assert_eq!(p.update(3_048_000, 40_000), Some(8_000));
         }
         assert_eq!(
-            p.update(3_045_000, 900, 40_000),
+            p.update(3_040_000, 40_000),
             Some(0),
-            "+5 ms on the receiver"
+            "drained: no phantom queue"
         );
-        assert_eq!(p.update(3_045_000, 900, 40_000), Some(0));
-        assert_eq!(p.update(3_040_000, 900, 40_000), Some(0), "and back -5 ms");
-        assert_eq!(p.update(3_035_000, 900, 40_000), Some(0), "-5 ms more");
-        // the same jump WITH a spread is a queue
-        assert_eq!(p.update(3_040_000, 4_000, 40_000), Some(5_000));
+        assert_eq!(p.update(3_040_000, 40_000), Some(0));
+        assert_eq!(
+            p.update(3_047_000, 40_000),
+            Some(7_000),
+            "an abrupt onset is not hidden"
+        );
     }
 
     #[test]
     fn a_big_clock_step_starts_over_and_the_old_base_ages_out() {
         let mut p = PathDelay::default();
-        p.update(3_040_000, 900, 40_000);
-        // the nightly date step (+200 ms) with a spread that hides it: start over
-        assert_eq!(p.update(3_240_000, 5_000, 40_000), None);
-        assert_eq!(p.update(3_240_000, 900, 40_000), Some(0));
+        p.update(3_040_000, 40_000);
+        // the nightly date step (+200 ms) no WallSteps saw: start over
+        assert_eq!(p.update(3_240_000, 40_000), None);
+        assert_eq!(p.update(3_240_000, 40_000), Some(0));
         // a raised floor older than the window becomes the new base
         let mut p = PathDelay::default();
-        p.update(3_040_000, 900, 40_000);
+        p.update(3_040_000, 40_000);
         for _ in 0..BASE_REPORTS {
-            p.update(3_045_000, 4_000, 40_000);
+            p.update(3_045_000, 40_000);
         }
-        assert_eq!(p.update(3_045_000, 4_000, 40_000), Some(0));
+        assert_eq!(p.update(3_045_000, 40_000), Some(0));
     }
 }

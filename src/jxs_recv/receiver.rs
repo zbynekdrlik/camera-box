@@ -508,7 +508,7 @@ impl JxsReceiver {
             .take(self.camera.unwrap_or(0), self.cfg.max_bpp as u32);
         r.link_mbps = self.link_mbps.unwrap_or(0);
         let c = self.meter.take();
-        r.delay_p50_us = c.delay_p50_us;
+        r.delay_mean_us = c.delay_mean_us;
         r.delay_spread_us = c.delay_spread_us;
         r.span_p50_us = c.span_p50_us;
         if let (true, Some(to), Some(_)) = (self.cfg.send_reports, self.sender, self.camera) {

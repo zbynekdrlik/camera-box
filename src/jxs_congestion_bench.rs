@@ -8,9 +8,10 @@
 //! `ReportWindow`, the sender's `PaceControl` (link pace + `PathDelay` + `Congestion`) and
 //! `AutoBpp` -- over a modelled path:
 //! - **Two clocks.** The receiver's clock runs 3 s ahead of the sender's and 20 ppm fast; the
-//!   genlock timecode is the sender's. A receiver wall STEP is modelled on the arrivals as they
-//!   reach the meter, i.e. as if `WallSteps` (which removes a real step first) had missed it: the
-//!   sender's `PathDelay` must rebase it on its own (a step at a report-period boundary).
+//!   genlock timecode is the sender's. A receiver wall STEP is removed by the meter's `WallSteps`
+//!   (review round 2: the arrival is read on the wall, the step correction when the frame is
+//!   processed), so only the frame whose datagrams arrive across the step keeps it, uncorrected: a
+//!   frame of residue, never a moved base.
 //! - **The sender** encodes a 1080p frame every 1/30 s at the auto bpp; its packets come out of the
 //!   encoder over the encode span (FEC parity included), `send()` returns at once at line rate or
 //!   at the pace, and its own NIC serializes them at its link speed.
@@ -186,10 +187,12 @@ fn run(sc: Scenario) -> Outcome {
             next_cross_us += (GROUP as f64 * DGRAM_WIRE * 8.0) / c;
         }
         events.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // `WallSteps` removes a step from every frame processed after it; the frame that arrived
+        // across it (its first datagram before, its processing after) keeps it once
         let rx_step: f64 = sc
             .rx_steps
             .iter()
-            .filter(|(at, _)| t_s >= *at)
+            .filter(|(at, _)| t_s >= *at && t_s < *at + FRAME_US / 1e6)
             .map(|(_, by)| by)
             .sum();
         let (mut first_rx, mut last_rx, mut got) = (None::<f64>, 0.0f64, 0usize);
@@ -244,7 +247,7 @@ fn run(sc: Scenario) -> Outcome {
             r.link_mbps = sc.rx_link_mbps;
             let c = meter.take();
             if sc.delay_signal {
-                r.delay_p50_us = c.delay_p50_us;
+                r.delay_mean_us = c.delay_mean_us;
                 r.delay_spread_us = c.delay_spread_us;
                 r.span_p50_us = c.span_p50_us;
             }

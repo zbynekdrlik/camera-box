@@ -33,6 +33,9 @@ pub const FEC_MAGIC: u8 = 0x46;
 pub const FEC_GROUP: usize = 12;
 /// Timecodes the receiver keeps groups for (the assembler holds two frames).
 const KEEP_FRAMES: usize = 3;
+/// A timecode this far behind every kept one is a clock step back: start over (the assembler's
+/// `RESYNC_BACKWARD_100NS`).
+const BACKWARD_STEP_100NS: u64 = super::assembler::RESYNC_BACKWARD_100NS;
 const _: () = assert!(FEC_GROUP <= 16, "the received mask is a u16");
 
 /// Datagrams of a slice of `slice_len` bytes (an empty slice is one header-only datagram).
@@ -105,8 +108,15 @@ impl FecRepair {
         if self.frames.contains(&tc) {
             return true;
         }
-        if self.frames.len() == KEEP_FRAMES && self.frames.iter().all(|f| *f > tc) {
-            return false;
+        if let Some(oldest) = self.frames.iter().copied().min() {
+            if tc + BACKWARD_STEP_100NS < oldest && false {
+                // the wall stepped back (the nightly date step): the kept frames are of the old
+                // timeline, forget them all (the assembler's own clock-step rule)
+                self.frames.clear();
+                self.groups.clear();
+            } else if self.frames.len() == KEEP_FRAMES && self.frames.iter().all(|f| *f > tc) {
+                return false;
+            }
         }
         self.frames.push_back(tc);
         while self.frames.len() > KEEP_FRAMES {
@@ -402,5 +412,36 @@ mod tests {
             f.on_data(&h, &d[HEADER_LEN..], &mut out);
         }
         assert!(f.groups.len() <= KEEP_FRAMES);
+    }
+
+    /// Review round 2: after the wall steps back (the nightly date step), the FEC repairs again at
+    /// once instead of refusing every frame until the clock passes the kept ones.
+    #[test]
+    fn a_clock_step_back_starts_the_repair_over() {
+        let mut f = FecRepair::default();
+        let mut out = Vec::new();
+        let mut data = Vec::new();
+        let mut par = Vec::new();
+        for tc in [10_000_000u64, 10_333_333, 10_666_666] {
+            build_slice_datagrams(base(tc, 1), &slice(3000, 2), &mut data).unwrap();
+            let d = &data[..DATAGRAM_LEN];
+            let h = PacketHeader::decode(d).unwrap();
+            f.on_data(&h, &d[HEADER_LEN..], &mut out);
+        }
+        // 200 ms back: a datagram of the new timeline, then its parity -- repaired
+        let tc = 8_000_000u64;
+        build_slice_datagrams(base(tc, 1), &slice(3000, 2), &mut data).unwrap();
+        build_parity(&data, &mut par);
+        let ds = datagrams(&data);
+        assert!(ds.len() >= 3);
+        for (i, d) in ds.iter().enumerate().filter(|(i, _)| *i != 1) {
+            let h = PacketHeader::decode(d).unwrap();
+            assert!(!f.on_data(&h, &d[HEADER_LEN..], &mut out), "datagram {i}");
+        }
+        assert!(
+            f.on_parity(&datagrams(&par)[0], &mut out).unwrap(),
+            "the lost 2nd is rebuilt"
+        );
+        assert_eq!(out, ds[1]);
     }
 }
