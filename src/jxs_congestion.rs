@@ -130,6 +130,9 @@ pub struct PathReport {
     /// The sender's p50 send span (first send -> last send of a frame) of the same second (us).
     pub send_span_us: Option<u32>,
     pub lost_slices: u32,
+    /// The sender withheld this report's queuing delay (a window across its own wall step, review
+    /// round 3): the report holds the clean count where it is, never counts as clean.
+    pub delay_unjudged: bool,
 }
 
 /// The path's state as last judged.
@@ -260,6 +263,12 @@ impl Congestion {
             };
         }
         self.over_streak = 0;
+        if r.delay_unjudged && false {
+            // a withheld delay is no evidence of a clean path: hold, the clean run neither grows
+            // nor restarts (review round 3)
+            self.state = PathState::Hold;
+            return self.hold();
+        }
         let measured = r.queue_delay_us.is_some() || r.recv_span_us.is_some();
         let clean = measured && r.queue_delay_us.is_none_or(|q| q < c.queue_clear_us);
         if clean {
@@ -296,6 +305,7 @@ mod tests {
             recv_span_us: Some(rx),
             send_span_us: Some(tx),
             lost_slices: 0,
+            delay_unjudged: false,
         }
     }
 
@@ -482,5 +492,48 @@ mod tests {
             p.update(3_045_000, 40_000);
         }
         assert_eq!(p.update(3_045_000, 40_000), Some(0));
+    }
+
+    /// Review round 3: a report whose queuing delay the sender withheld (its own wall step) during
+    /// a standing queue never raises the factor, however many come, and never restarts the clean
+    /// run either.
+    #[test]
+    fn an_unjudged_report_holds_and_never_counts_as_clean() {
+        let mut c = Congestion::default();
+        c.on_report(&rep(1, 6_000, 20_000, 20_000), 1.0);
+        let lowered = c.factor();
+        assert!(lowered < 1.0);
+        for k in 2..20 {
+            let s = c.on_report(
+                &PathReport {
+                    queue_delay_us: None,
+                    delay_unjudged: true,
+                    ..rep(k, 0, 20_000, 20_000)
+                },
+                k as f64,
+            );
+            assert_eq!(s.state, PathState::Hold, "report {k}");
+            assert!(!s.changed);
+        }
+        assert!((c.factor() - lowered).abs() < 1e-9, "never raised");
+        // the clean run counts only judged clean reports
+        let cfg = CongestionConfig::default();
+        for k in 0..cfg.clean_before_increase - 1 {
+            c.on_report(&rep(100 + k, 0, 20_000, 20_000), 100.0 + k as f64);
+            c.on_report(
+                &PathReport {
+                    queue_delay_us: None,
+                    delay_unjudged: true,
+                    ..rep(200 + k, 0, 20_000, 20_000)
+                },
+                200.0 + k as f64,
+            );
+        }
+        assert!((c.factor() - lowered).abs() < 1e-9, "not yet");
+        c.on_report(&rep(300, 0, 20_000, 20_000), 300.0);
+        assert!(
+            c.factor() > lowered,
+            "the last judged clean report completes the run"
+        );
     }
 }

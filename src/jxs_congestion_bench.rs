@@ -223,8 +223,13 @@ fn run(sc: Scenario) -> Outcome {
         }
         let first_send = first_send.unwrap_or(last_send);
         pace.on_wire((last_send - first_send) / 1000.0);
-        // the sender's wall minus its own steps: the step is in the timecode only
-        pace.on_first_send(tc, (first_send * 10.0) as i64 + TC0_100NS as i64);
+        // the sender's wall minus its own steps: the step is in the timecode only, and the
+        // sender's `WallSteps` reads it
+        pace.on_first_send(
+            tc,
+            (first_send * 10.0) as i64 + TC0_100NS as i64,
+            (tx_step * 10.0) as i64,
+        );
         let sent = groups * GROUP;
         let lost = sent.saturating_sub(got);
         let to_100ns = |us: f64| (us * 10.0) as i64 + TC0_100NS as i64;
@@ -398,7 +403,7 @@ fn a_line_rate_cambox_with_a_phase_sawtooth_and_clock_steps_never_reads_congesti
 fn a_sender_date_step_never_reads_as_a_queue() {
     let o = run(Scenario {
         cross: quiet,
-        tx_steps: &[(70.5, 200_000.0), (100.4, -200_000.0)],
+        tx_steps: &[(70.5, 200_000.0), (85.3, 30_000.0), (100.4, -200_000.0)],
         end_s: 130.0,
         ..STRIH_TO_STREAM
     });

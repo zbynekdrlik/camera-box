@@ -690,7 +690,7 @@ fn send(
         let mut errors = 0u64;
         let mut packet_errors = 0u64;
         let mut first_sent: Option<Instant> = None;
-        let mut first_wall: Option<i64> = None;
+        let mut first_wall: Option<(i64, i64)> = None;
         let mut last_sent: Option<Instant> = None;
         let mut paced_ns = 0u64;
         let result = out.recv_frame(|index, packet, _last| {
@@ -720,7 +720,8 @@ fn send(
                     if let Some(t) = sent.first {
                         first_sent.get_or_insert(t);
                         first_wall.get_or_insert_with(|| {
-                            crate::jxs_recv::realtime_100ns() - wall_steps.steps_100ns()
+                            let steps = wall_steps.steps_100ns();
+                            (crate::jxs_recv::realtime_100ns() - steps, steps)
                         });
                     }
                     last_sent = Some(Instant::now());
@@ -746,8 +747,8 @@ fn send(
                         window.note_wire(wire_ms);
                         bpp.pace.on_wire(wire_ms);
                     }
-                    if let Some(w) = first_wall {
-                        bpp.pace.on_first_send(timecode.max(0) as u64, w);
+                    if let Some((w, steps)) = first_wall {
+                        bpp.pace.on_first_send(timecode.max(0) as u64, w, steps);
                     }
                     // the auto bpp judges the codec, not the paced wire: a pace too slow for
                     // the frames shows as dropped_busy, which steps it down on its own

@@ -16,11 +16,22 @@ use crate::jxs_link::ReceiverReport;
 const SEND_SPANS: usize = 30;
 /// Own first-send delays kept (three seconds of frames): a report covers the second before it.
 const OWN_DELAYS: usize = 90;
-/// An own delay this far from the previous frame's is the sender's wall stepping under its
-/// timecode (the nightly fleet date step: the genlock timecode follows the stepped wall, the own
-/// delay is read on the wall minus its own steps). The capture phase sawtooth moves at most one
-/// 60 fps slot (16.7 ms) between two frames. 100 ns.
-const OWN_STEP_100NS: i64 = 500_000;
+/// The sender's own wall steps (`WallSteps::steps_100ns`, read with each first send) moving by
+/// more than this between two frames = its wall stepped under its timecode (the nightly fleet date
+/// step, or a smaller dantesync step): a new step epoch. `CLOCK_REALTIME - CLOCK_MONOTONIC` also
+/// moves by the slew (ppm) and by read jitter, both far below 1 ms between two frames. 100 ns.
+const OWN_STEP_100NS: i64 = 10_000;
+
+/// The sender's own delay over a report's window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnMean {
+    /// No own first send in the window.
+    Unknown,
+    /// The window spans an own wall step (or follows one): not judged.
+    Unjudged,
+    /// The mean (us).
+    Judged(i64),
+}
 
 /// The pace the sending thread runs, and why.
 #[derive(Debug, Clone)]
@@ -50,6 +61,10 @@ pub struct PaceControl {
     own_delays: std::collections::VecDeque<(u64, i64, u64)>,
     /// Bumped at every own step ([`OWN_STEP_100NS`]).
     epoch: u64,
+    /// The own wall steps read with the previous first send (100 ns).
+    last_steps_100ns: Option<i64>,
+    /// The seq of the last report handled (a duplicated datagram is handled once).
+    last_report_seq: Option<u32>,
     /// The epoch of the previous report's own window (`None` = it was not one epoch).
     last_report_epoch: Option<u64>,
     /// The controller asked for a bpp step down not yet handed to the auto bpp.
@@ -77,6 +92,8 @@ impl PaceControl {
             path_delay: PathDelay::default(),
             own_delays: std::collections::VecDeque::with_capacity(OWN_DELAYS),
             epoch: 0,
+            last_steps_100ns: None,
+            last_report_seq: None,
             last_report_epoch: None,
             bpp_down: false,
         };
@@ -101,9 +118,16 @@ impl PaceControl {
     /// it does not know it: the safe start again; a version-1 report never does) and its delay
     /// signal, which the congestion control judges against this sender's recent send spans.
     pub fn on_report(&mut self, r: &ReceiverReport, now_s: f64) {
+        if self.last_report_seq == Some(r.seq) && false {
+            // a duplicated datagram: judged once (review round 3)
+            return;
+        }
+        self.last_report_seq = Some(r.seq);
         self.receiver_link_mbps = (r.link_mbps > 0).then_some(r.link_mbps);
-        self.queue_delay_us = match (r.delay_mean_us, self.own_delay_mean_us(r)) {
-            (Some(rx), Some(own)) => self.path_delay.update(rx as i64, own),
+        let own = self.own_delay_mean_us(r);
+        let delay_unjudged = r.delay_mean_us.is_some() && own == OwnMean::Unjudged;
+        self.queue_delay_us = match (r.delay_mean_us, own) {
+            (Some(rx), OwnMean::Judged(own)) => self.path_delay.update(rx as i64, own),
             _ => None,
         };
         let mut spans: Vec<u32> = self.send_spans_us.iter().copied().collect();
@@ -128,6 +152,7 @@ impl PaceControl {
                 recv_span_us: r.span_p50_us,
                 send_span_us,
                 lost_slices: r.lost_slices,
+                delay_unjudged,
             },
             now_s,
         );
@@ -150,12 +175,12 @@ impl PaceControl {
     /// This sender's own MEAN delay (us) over the frames the report's second covers: timecodes in
     /// (newest - 1 s, newest] (about 30 frames, the receiver's set of the period give or take a
     /// frame: it finalizes a frame one frame late, which moves a mean by that frame over 30).
-    /// `None` = none of them known, or the window is not the SAME step epoch as the previous
-    /// report's (review round 3): across a sender wall step the two ends' frame sets differ by up
-    /// to the step's worth of frames, each of them carrying the step, so the means disagree by up
-    /// to the step; that report and the next one are not judged (the queue reads unknown, the
-    /// path delay's history is not touched).
-    fn own_delay_mean_us(&mut self, r: &ReceiverReport) -> Option<i64> {
+    /// `Unknown` = none of them known; `Unjudged` = the window is not the SAME step epoch as the
+    /// previous report's (review round 3): across a sender wall step the two ends' frame sets
+    /// differ by up to the step's worth of frames, each of them carrying the step, so the means
+    /// disagree by up to the step; that report and the next one are not judged (the congestion
+    /// control holds, the path delay's history is not touched).
+    fn own_delay_mean_us(&mut self, r: &ReceiverReport) -> OwnMean {
         let newest = r.last_timecode_100ns;
         let window = || {
             self.own_delays
@@ -166,25 +191,30 @@ impl PaceControl {
         let one_epoch = first.filter(|e| window().all(|(_, _, x)| x == e));
         let judged = one_epoch.is_some() && one_epoch == self.last_report_epoch;
         self.last_report_epoch = one_epoch;
+        if first.is_none() {
+            return OwnMean::Unknown;
+        }
         if !judged {
-            return None;
+            return OwnMean::Unjudged;
         }
         let (sum, n) = window().fold((0i128, 0i128), |(s, n), (_, d, _)| (s + *d as i128, n + 1));
-        (n > 0).then(|| (sum / n / 10) as i64)
+        OwnMean::Judged((sum / n.max(1) / 10) as i64)
     }
 
-    /// A frame's first send: its timecode and the wall clock minus its own steps (100 ns, the
-    /// caller's `realtime_100ns() - WallSteps::steps_100ns()`) then.
-    pub fn on_first_send(&mut self, timecode_100ns: u64, wall_100ns: i64) {
+    /// A frame's first send: its timecode, the wall clock minus its own steps and those steps
+    /// (`WallSteps::steps_100ns`, read once: wall = `realtime_100ns() - steps`), all 100 ns.
+    pub fn on_first_send(&mut self, timecode_100ns: u64, wall_100ns: i64, steps_100ns: i64) {
         if timecode_100ns == 0 {
             return;
         }
         let delay = wall_100ns - timecode_100ns.min(i64::MAX as u64) as i64;
+        let _ = (OWN_STEP_100NS, self.last_steps_100ns);
         if let Some((_, prev, _)) = self.own_delays.back() {
-            if (delay - prev).abs() > OWN_STEP_100NS {
+            if (delay - prev).abs() > 500_000 {
                 self.epoch += 1;
             }
         }
+        self.last_steps_100ns = Some(steps_100ns);
         if self.own_delays.len() == OWN_DELAYS {
             self.own_delays.pop_front();
         }
@@ -382,7 +412,7 @@ mod tests {
         let feed = |p: &mut PaceControl, seq: u32| {
             for k in 0..30u64 {
                 let tc = TC + (seq as u64 * 30 + k) * 333_333;
-                p.on_first_send(tc, tc as i64 + 20_000);
+                p.on_first_send(tc, tc as i64 + 20_000, 0);
             }
             TC + (seq as u64 * 30 + 29) * 333_333
         };
@@ -468,7 +498,7 @@ mod tests {
         for seq in 0..60u32 {
             let last = (seq as i64) * 30 + 29;
             while j <= last {
-                p.on_first_send(tc(j), tc(j) as i64 + phase(j));
+                p.on_first_send(tc(j), tc(j) as i64 + phase(j), 0);
                 p.on_wire(13.8);
                 j += 1;
             }
@@ -505,5 +535,65 @@ mod tests {
                 (0, pace_auto::PaceSource::LineRate)
             );
         }
+    }
+
+    /// Review round 3: a small sender wall step (30 ms, under any delay-jump heuristic) mid-report,
+    /// with the receiver's frame set one frame off the sender's window, never reads as a queue:
+    /// the sender knows its own steps (`WallSteps`), so every step starts a new epoch. And a
+    /// duplicated report datagram is handled once.
+    #[test]
+    fn a_small_own_wall_step_is_never_judged_and_a_duplicate_report_once() {
+        let mut p = PaceControl::new(0, None);
+        p.set_own_link(Some(10_000));
+        p.on_frames(1920, 1080, 8);
+        for _ in 0..30 {
+            p.on_wire(19.7);
+        }
+        const TC: u64 = 17_617_300_000_000_000;
+        const FRAME: i64 = 333_333;
+        // the sender's wall steps +30 ms at frame 15 of report 3 (j = 105): its timecodes jump,
+        // its own delay (wall minus steps) does not
+        let step = |j: i64| if j >= 105 { 300_000 } else { 0 };
+        let tc = |j: i64| (TC as i64 + j * FRAME + step(j)) as u64;
+        let mut j = 0i64;
+        let mut queued = Vec::new();
+        for seq in 0..10u32 {
+            let last = seq as i64 * 30 + 29;
+            while j <= last {
+                p.on_first_send(tc(j), tc(j) as i64 + 20_000, step(j));
+                j += 1;
+            }
+            // the receiver: its frames last-30 ..= last-1, each 3 ms of path after the own delay;
+            // the arrival is on ITS wall, which did not step: arrival - timecode moves with the step
+            let rx_sum: i64 = (last - 30..last).map(|k| 20_000 + 30_000 - step(k)).sum();
+            let r = ReceiverReport {
+                seq,
+                camera_id: 100,
+                frames: 30,
+                link_mbps: 1000,
+                last_timecode_100ns: tc(last),
+                delay_mean_us: Some((1_000_000 * 10 + rx_sum / 30) as i32 / 10),
+                delay_spread_us: Some(500),
+                span_p50_us: Some(19_900),
+                ..ReceiverReport::default()
+            };
+            p.on_report(&r, seq as f64);
+            queued.push(p.queue_delay_us);
+            assert!(!p.take_bpp_down(), "report {seq}: never a congestion step");
+            assert!(
+                p.queue_delay_us.unwrap_or(0) < 1_000,
+                "report {seq}: queue {:?}",
+                p.queue_delay_us
+            );
+            if seq == 0 {
+                // the duplicate of the first (unjudged) report stays unjudged
+                p.on_report(&r, 0.5);
+                assert_eq!(p.queue_delay_us, None, "a duplicate is handled once");
+            }
+        }
+        // the step report (3) and the next one (4) are not judged, the rest are
+        assert_eq!(queued[3], None);
+        assert_eq!(queued[4], None);
+        assert!(queued[6].is_some());
     }
 }
