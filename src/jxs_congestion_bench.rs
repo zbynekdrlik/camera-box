@@ -127,6 +127,36 @@ struct Outcome {
     cross_dropped_bytes: f64,
 }
 
+/// The other traffic at the receiver's port during the frame starting at `t0` (us): the
+/// per-frame burst, then the continuous cross traffic (its next packet carried across frames in
+/// `next_cross_us`). Each event is one group of datagrams, `false` = not ours.
+fn cross_events(sc: &Scenario, t0: f64, next_cross_us: &mut f64, events: &mut Vec<(f64, bool)>) {
+    let t_s = t0 / 1e6;
+    let span_end = t0 + FRAME_US;
+    if let Some((bytes, at)) = sc.cross_burst.map(|(b, at)| match sc.cross_burst_grows {
+        Some((from_s, grown)) if t_s >= from_s => (grown, at),
+        _ => (b, at),
+    }) {
+        for g in 0..(bytes / (GROUP as f64 * DGRAM_WIRE)).ceil() as usize {
+            // the burst leaves strih's 10 GbE NIC at line rate
+            events.push((
+                t0 + at + g as f64 * GROUP as f64 * DGRAM_WIRE * 8.0 / 10_000.0,
+                false,
+            ));
+        }
+    }
+    while *next_cross_us < span_end {
+        let c = (sc.cross)(*next_cross_us / 1e6);
+        if c < 1.0 {
+            // (under 1 Mb/s the next packet would land seconds away: none this frame)
+            *next_cross_us = span_end;
+            break;
+        }
+        events.push((*next_cross_us, false));
+        *next_cross_us += (GROUP as f64 * DGRAM_WIRE * 8.0) / c;
+    }
+}
+
 fn run(sc: Scenario) -> Outcome {
     let mut out = Outcome {
         min_bpp_download: u32::MAX,
@@ -202,29 +232,7 @@ fn run(sc: Scenario) -> Outcome {
             last_send = sent_at;
             events.push((nic_free_us, true));
         }
-        let span_end = t0 + FRAME_US;
-        if let Some((bytes, at)) = sc.cross_burst.map(|(b, at)| match sc.cross_burst_grows {
-            Some((from_s, grown)) if t_s >= from_s => (grown, at),
-            _ => (b, at),
-        }) {
-            for g in 0..(bytes / (GROUP as f64 * DGRAM_WIRE)).ceil() as usize {
-                // the burst leaves strih's 10 GbE NIC at line rate
-                events.push((
-                    t0 + at + g as f64 * GROUP as f64 * DGRAM_WIRE * 8.0 / 10_000.0,
-                    false,
-                ));
-            }
-        }
-        while next_cross_us < span_end {
-            let c = (sc.cross)(next_cross_us / 1e6);
-            if c < 1.0 {
-                // (under 1 Mb/s the next packet would land seconds away: none this frame)
-                next_cross_us = span_end;
-                break;
-            }
-            events.push((next_cross_us, false));
-            next_cross_us += (GROUP as f64 * DGRAM_WIRE * 8.0) / c;
-        }
+        cross_events(&sc, t0, &mut next_cross_us, &mut events);
         events.sort_by(|a, b| a.0.total_cmp(&b.0));
         // `WallSteps` removes a step from every frame processed after it; the frame that arrived
         // across it (its first datagram before, its processing after) keeps it once
