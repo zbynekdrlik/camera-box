@@ -395,23 +395,21 @@ mod tests {
         );
     }
 
-    /// A stretch with no queue (the arrival span grows, the first datagram's delay does not) may
-    /// thin the pace, but never asks the auto bpp for a step: only a growing QUEUE does
-    /// (coordinator 30.10.2026: "a burst-spread overuse with no queue must never step the bpp
-    /// down").
+    /// A burst spread that stays at its base (the live 30.10.2026 offset) never asks the auto bpp
+    /// for a step (coordinator: "a burst-spread overuse with no queue must never step the bpp
+    /// down"); a stretch that GROWS over its base does, queue or not: in the saturating-download
+    /// bench the first datagram's queue barely moves (0.60 -> 0.62 ms) while the stretch grows
+    /// 1.6 -> 4.3 ms a second before the buffer overflows, so the grown stretch is the early signal.
     #[test]
-    fn a_stretch_alone_never_asks_for_a_bpp_step() {
+    fn a_stretch_at_its_base_never_asks_for_a_bpp_step_and_a_grown_one_does() {
         let mut c = Congestion::default();
-        for k in 1..6 {
-            c.on_report(&rep(k, 0, 20_000, 20_000), k as f64);
+        for k in 1..20 {
+            let s = c.on_report(&rep(k, 0, 22_000, 20_000), k as f64);
+            assert!(!s.bpp_down, "report {k}: an offset at its base never asks");
         }
-        for k in 6..20 {
-            let s = c.on_report(&rep(k, 0, 26_000, 20_000), k as f64);
-            assert_eq!(s.state, PathState::Overuse, "report {k}");
-            assert!(!s.bpp_down, "report {k}: a stretch alone never asks");
-        }
-        assert!(c.factor() < 1.0, "the pace thins");
-        assert!(c.on_report(&rep(30, 6_000, 26_000, 20_000), 30.0).bpp_down);
+        let s = c.on_report(&rep(20, 0, 26_000, 20_000), 20.0);
+        assert_eq!(s.state, PathState::Overuse);
+        assert!(s.bpp_down, "a grown stretch asks, with no queue");
     }
 
     #[test]
