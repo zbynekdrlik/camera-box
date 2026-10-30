@@ -23,15 +23,18 @@
 //! adjustment), so a step on the receiver leaves the arrival times continuous, and a step on the
 //! sender shifts its timecodes and its own first-send delay alike (cancelled by the subtraction).
 
+#[cfg(target_os = "linux")] // libc clocks; the senders and receivers that read it are Linux only
 /// The wall clock's steps since this was made (module doc), 100 ns.
 #[derive(Debug, Clone, Copy)]
 pub struct WallSteps {
     offset0: i64,
 }
 
+#[cfg(target_os = "linux")]
 /// Two monotonic reads further apart than this bracket a preemption: read again.
 const BRACKET_MAX_100NS: i64 = 500;
 
+#[cfg(target_os = "linux")]
 fn realtime_minus_monotonic_100ns() -> i64 {
     let read = |id| {
         let mut t = libc::timespec {
@@ -62,6 +65,7 @@ fn realtime_minus_monotonic_100ns() -> i64 {
     best.map_or(0, |(_, v)| v)
 }
 
+#[cfg(target_os = "linux")]
 impl Default for WallSteps {
     fn default() -> Self {
         Self {
@@ -70,6 +74,7 @@ impl Default for WallSteps {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl WallSteps {
     /// The wall clock's net step since [`Self::default`] (100 ns, signed).
     pub fn steps_100ns(&self) -> i64 {
@@ -171,6 +176,7 @@ mod tests {
         assert_eq!(m.take(), CongestionSample::default());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_wall_has_not_stepped_since_it_was_read() {
         let w = WallSteps::default();

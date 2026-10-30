@@ -69,6 +69,7 @@ pub fn link_speed_mbps(iface: &str) -> Option<u32> {
 }
 
 /// The name of interface number `ifindex` (`if_indextoname`), `None` when there is none.
+#[cfg(target_os = "linux")]
 pub fn iface_name(ifindex: u32) -> Option<String> {
     if ifindex == 0 {
         return None;
@@ -86,6 +87,7 @@ pub fn iface_name(ifindex: u32) -> Option<String> {
 
 /// The interface that carries the local IPv4 address `ip` (`getifaddrs`), `None` when none does
 /// (an unspecified address, or one no interface holds).
+#[cfg(target_os = "linux")]
 pub fn iface_of_local_ipv4(ip: std::net::Ipv4Addr) -> Option<String> {
     if ip.is_unspecified() {
         return None;
@@ -193,6 +195,7 @@ mod tests {
         assert_eq!(link_speed_mbps_in(d.path(), "a"), None);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_loopback_interface_is_named_and_found_by_its_address() {
         // ifindex 1 is the loopback on Linux; 127.0.0.1 is on it
