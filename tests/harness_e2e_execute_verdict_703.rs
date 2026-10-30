@@ -746,3 +746,42 @@ fn workflow_artifact_upload_is_scoped_to_this_runs_run_id() {
          runner's /tmp, not just this run's own evidence"
     );
 }
+
+/// Issue 1387 (30.10.2026): the fetch step needs ONE artifact, built by ci.yml's `windows-probe`
+/// job in about two minutes, but it waited for the WHOLE ci.yml run to conclude `success`. The
+/// Python harness tests made that run take 32-38 minutes, so three E2E runs in a row (40981980718,
+/// 40985842645, 40996184539) ran out of the 20-minute poll before the rig was touched. The step
+/// must wait on the windows-probe JOB of the commit's ci.yml run (any run status), stop at once
+/// when that job fails, and download the artifact from the run while it may still be running.
+#[test]
+fn the_fetch_step_waits_on_the_windows_probe_job_not_the_whole_ci_run_1387() {
+    let s = read_workflow();
+    let start = s
+        .find("Fetch the matching Windows recording-verdict.exe")
+        .expect("the fetch step must exist");
+    let end = s[start..]
+        .find("- name: Recording-based 4-node cam2")
+        .map(|p| p + start)
+        .expect("the recording step follows the fetch step");
+    let step = &s[start..end];
+    assert!(
+        !step.contains(".conclusion==\\\"success\\\""),
+        "the fetch step must not wait for the whole ci.yml run to conclude success: {step}"
+    );
+    assert!(
+        step.contains("/jobs"),
+        "the fetch step must read the ci.yml run's jobs: {step}"
+    );
+    assert!(
+        step.contains("Windows probe build"),
+        "the fetch step must pick the windows-probe job by its name: {step}"
+    );
+    assert!(
+        step.contains("windows-probe job") && step.contains("exit 1"),
+        "a failed windows-probe job must fail the step at once, naming the job: {step}"
+    );
+    assert!(
+        step.contains("gh run download") && step.contains("probe-tools-windows-amd64"),
+        "the artifact is still downloaded from that run: {step}"
+    );
+}
