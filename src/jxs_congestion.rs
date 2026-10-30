@@ -262,13 +262,13 @@ impl Congestion {
                 changed: self.factor != before,
             };
         }
-        self.over_streak = 0;
         if r.delay_unjudged {
-            // a withheld delay is no evidence of a clean path: hold, the clean run neither grows
-            // nor restarts (review round 3)
+            // a withheld delay is no evidence either way: hold, the clean run and the over-use
+            // streak neither grow nor restart (review rounds 3 and 4)
             self.state = PathState::Hold;
             return self.hold();
         }
+        self.over_streak = 0;
         let measured = r.queue_delay_us.is_some() || r.recv_span_us.is_some();
         let clean = measured && r.queue_delay_us.is_none_or(|q| q < c.queue_clear_us);
         if clean {

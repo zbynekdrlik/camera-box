@@ -29,6 +29,9 @@ pub struct WallSteps {
     offset0: i64,
 }
 
+/// Two monotonic reads further apart than this bracket a preemption: read again.
+const BRACKET_MAX_100NS: i64 = 500;
+
 fn realtime_minus_monotonic_100ns() -> i64 {
     let read = |id| {
         let mut t = libc::timespec {
@@ -39,7 +42,24 @@ fn realtime_minus_monotonic_100ns() -> i64 {
         unsafe { libc::clock_gettime(id, &mut t) };
         t.tv_sec * 10_000_000 + t.tv_nsec / 100
     };
-    read(libc::CLOCK_REALTIME) - read(libc::CLOCK_MONOTONIC)
+    // REALTIME bracketed by two MONOTONIC reads, against their midpoint: a thread preempted
+    // between two plain reads would read a "step" as long as the preemption (review round 4: the
+    // sender's step epoch moves on 1 ms). A few tries, then the tightest bracket seen.
+    let mut best: Option<(i64, i64)> = None;
+    for _ in 0..4 {
+        let m0 = read(libc::CLOCK_MONOTONIC);
+        let r = read(libc::CLOCK_REALTIME);
+        let m1 = read(libc::CLOCK_MONOTONIC);
+        let width = m1 - m0;
+        let value = r - (m0 + width / 2);
+        if best.is_none_or(|(w, _)| width < w) {
+            best = Some((width, value));
+        }
+        if width <= BRACKET_MAX_100NS {
+            break;
+        }
+    }
+    best.map_or(0, |(_, v)| v)
 }
 
 impl Default for WallSteps {
