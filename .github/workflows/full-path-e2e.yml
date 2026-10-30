@@ -274,23 +274,36 @@ jobs:
           set -euo pipefail
           SHA="${{ github.event.pull_request.head.sha || github.sha }}"
           echo "Waiting for ci.yml's windows-probe artifact for commit $SHA ..."
+          # Issue 1387: wait on the windows-probe JOB, never the whole ci.yml run. The artifact is
+          # ready about two minutes in, while the run as a whole takes 30+ minutes (the Python
+          # harness tests), which used up this poll three times in a row before the rig was
+          # touched. A red ci.yml still blocks the merge by itself; this step needs only the exe.
           FOUND_RUN_ID=""
           for i in $(seq 1 60); do
-            FOUND_RUN_ID="$(gh run list --workflow ci.yml --json databaseId,headSha,status,conclusion \
-              --jq ".[] | select(.headSha==\"$SHA\" and .status==\"completed\" and .conclusion==\"success\") | .databaseId" \
-              | head -1)"
-            if [ -n "$FOUND_RUN_ID" ]; then
-              echo "Found successful ci.yml run $FOUND_RUN_ID for $SHA"
-              break
+            RUN_ID_CAND="$(gh run list --workflow ci.yml --json databaseId,headSha \
+              --jq ".[] | select(.headSha==\"$SHA\") | .databaseId" | head -1)"
+            JOB_STATE=""
+            if [ -n "$RUN_ID_CAND" ]; then
+              JOB_STATE="$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID_CAND/jobs?per_page=100" \
+                --jq '.jobs[] | select(.name | startswith("Windows probe build")) | "\(.status) \(.conclusion)"' \
+                | head -1)"
             fi
-            # Report any run for this SHA that IS visible (queued/in_progress/failed) so a stuck
-            # wait is diagnosable from the log, not silent polling.
-            gh run list --workflow ci.yml --json databaseId,headSha,status,conclusion \
-              --jq ".[] | select(.headSha==\"$SHA\") | \"  run \\(.databaseId): status=\\(.status) conclusion=\\(.conclusion)\"" || true
+            echo "  ci.yml run ${RUN_ID_CAND:-none}: windows-probe job ${JOB_STATE:-not started}"
+            case "$JOB_STATE" in
+              "completed success")
+                FOUND_RUN_ID="$RUN_ID_CAND"
+                echo "windows-probe job of ci.yml run $FOUND_RUN_ID succeeded for $SHA"
+                break
+                ;;
+              completed\ *)
+                echo "::error::#703 the windows-probe job of ci.yml run $RUN_ID_CAND for commit $SHA ended '$JOB_STATE' -- no recording-verdict.exe for this commit."
+                exit 1
+                ;;
+            esac
             sleep 20
           done
           if [ -z "$FOUND_RUN_ID" ]; then
-            echo "::error::#703 no successful ci.yml run found for commit $SHA after the poll budget (20 min) — cannot fetch the Windows recording-verdict.exe for this commit."
+            echo "::error::#703 the windows-probe job of ci.yml for commit $SHA did not succeed within the poll budget (20 min) — cannot fetch the Windows recording-verdict.exe for this commit."
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/win-probe-tools"
