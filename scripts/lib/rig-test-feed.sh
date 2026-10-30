@@ -41,7 +41,9 @@ command -v ro_window_close_cmds >/dev/null 2>&1 \
 # exact content; an empty WANT = the file must not exist) on cam2's READ-ONLY root. The remount-rw window opens
 # only when a FILE differs, holds only the writes (mkdir, a temp file + rename, rm, rmdir), and closes through
 # ro_window_close_cmds. A refused rw remount, a failed write or a root left writable fails loud (exit 1); nothing
-# is started or reloaded here. Every statement ends with `;` (the `$(...)` trailing-newline gotcha).
+# is started or reloaded here. Every statement ends with `;` (the `$(...)` trailing-newline gotcha). The text needs
+# bash on the box (`printf %q` renders a multi-line WANT as $'...'); root's shell on every cambox is bash.
+# A failed window exits 1 BEFORE the caller's daemon-reload; the CONSEQUENCE below names what stays in force.
 _rig_test_feed_persist_cmds() {
   local label="$1" i f q w d n
   shift
@@ -74,7 +76,7 @@ _rig_test_feed_persist_cmds() {
     fi
   done
   ro_window_close_cmds "issue 1482" "cam2" \
-    "A cambox must never run on a writable root; the direct-feed drop-ins may not be in their wanted state." \
+    "A cambox must never run on a writable root, and the direct-feed drop-ins may not be in their wanted state: a left intercom-off drop-in keeps cam2's intercom OFF, a left marker drop-in keeps the painter on the jack, until this is cleared." \
     "stop that holder on cam2, run 'mount -o remount,ro /' there until 'findmnt -no OPTIONS /' reads ro, then re-run rig-mode.sh (never reboot a cambox remotely)."
   printf '  if [ "$_rtf_rc" -ne 0 ]; then echo "FAIL: [issue 1482] could not %s (rc=$_rtf_rc) even inside the remount-rw window (the root is back read-only)" >&2; exit 1; fi;\n' "$label"
   printf '  echo "[issue 1482] %s: persisted in /etc, survives a cam2 reboot (root back read-only: $_row_opts)";\n' "$label"

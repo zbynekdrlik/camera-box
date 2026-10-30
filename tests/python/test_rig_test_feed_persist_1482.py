@@ -25,7 +25,10 @@ APLAY = ("card 0: C4K [CAM LINK 4K], device 0: USB Audio [USB Audio]\n"
 PAINTER_WANT = "[Service]\nEnvironment=FRAME_PROBE_AUDIO_MARKER_DEVICE=hw:CARD=HID,DEV=0\n"
 INTERCOM_WANT = "[Service]\nEnvironment=CAMERA_BOX_INTERCOM=off\n"
 
-# A write tool that refuses (and logs) any write under the fake box's /etc while its root reads ro.
+# A write tool that refuses (and logs) any write under the fake box's /etc while its root reads ro. The `printf >
+# X.new` redirect is a shell builtin and is not intercepted; the drop-in itself only appears through the guarded
+# `mv`, which is the proof point that the write happened inside the window. FAKE_MV_FAIL=1 makes the rename into
+# /etc fail even on a writable root (a failed write inside the window).
 _GUARD = r'''
 import os, sys
 st = os.environ["FAKE_STATE"]
@@ -37,6 +40,9 @@ with open(os.path.join(st, "log"), "a") as f:
     f.write(f"{tool} {' '.join(sys.argv[1:])} root={mode}\n")
 if touch and mode != "rw":
     sys.stderr.write(f"{tool}: Read-only file system: {touch[0]}\n")
+    sys.exit(1)
+if tool == "mv" and touch and os.environ.get("FAKE_MV_FAIL") == "1":
+    sys.stderr.write(f"mv: cannot move: Input/output error\n")
     sys.exit(1)
 os.execv("/bin/" + tool if os.path.exists("/bin/" + tool) else "/usr/bin/" + tool, [tool] + sys.argv[1:])
 '''
@@ -72,9 +78,9 @@ def _emit(fn, env):
     return r.stdout
 
 
-def _run(box, tmp_path, fn, feed="direct", **fake):
+def _run(box, tmp_path, fn, feed="direct", strict="set -e", **fake):
     env = dict(_paths(tmp_path), RIG_TEST_FEED=feed)
-    return run_text(box, _emit(fn, env), strict="set -e", FAKE_ETC=str(tmp_path / "etc"), **fake)
+    return run_text(box, _emit(fn, env), strict=strict, FAKE_ETC=str(tmp_path / "etc"), **fake)
 
 
 def _plant_legacy(tmp_path):
@@ -182,3 +188,32 @@ def test_a_refused_rw_remount_fails_loud_and_writes_nothing(tmp_path):
     assert r.returncode == 1
     assert "could not remount / read-write" in r.stderr
     assert not os.path.exists(p["RIG_TEST_FEED_INTERCOM_DROPIN"])
+
+
+def test_a_failed_write_inside_the_window_closes_it_cleans_up_and_fails_loud(tmp_path):
+    box, p = _box(tmp_path), _paths(tmp_path)
+    r = _run(box, tmp_path, "rig_test_feed_painter_dropin_cmds", FAKE_MV_FAIL="1")
+    assert r.returncode == 1
+    assert "even inside the remount-rw window" in r.stderr
+    assert root(box) == "ro"
+    assert not os.path.exists(p["RIG_TEST_FEED_PAINTER_DROPIN"])
+    assert not os.path.exists(p["RIG_TEST_FEED_PAINTER_DROPIN"] + ".new")
+    assert not [ln for ln in log(box) if ln.startswith("systemctl daemon-reload")]
+
+
+def test_the_text_holds_under_the_strict_caller_too(tmp_path):
+    box, p = _box(tmp_path), _paths(tmp_path)
+    for fn in ("rig_test_feed_intercom_dropin_cmds", "rig_test_feed_painter_dropin_cmds",
+               "rig_test_feed_painter_dropin_clear_cmds"):
+        r = _run(box, tmp_path, fn, strict="set -euo pipefail")
+        assert r.returncode == 0 and "unbound variable" not in r.stderr, r.stdout + r.stderr
+    assert not os.path.exists(p["RIG_TEST_FEED_PAINTER_DROPIN"])
+    assert root(box) == "ro"
+
+
+def test_a_failed_event_window_names_what_stays_in_force(tmp_path):
+    box = _box(tmp_path)
+    assert _run(box, tmp_path, "rig_test_feed_intercom_dropin_cmds").returncode == 0
+    r = _run(box, tmp_path, "rig_test_feed_painter_dropin_clear_cmds", FAKE_RO_FAIL="1")
+    assert r.returncode == 1
+    assert "keeps cam2's intercom OFF" in r.stderr
